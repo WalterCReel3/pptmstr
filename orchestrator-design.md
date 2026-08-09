@@ -380,12 +380,23 @@ bottleneck" is a constant failure, not an edge case. Walking away for coffee wou
 corrupt a run.
 
 So: **set `timeout` explicitly and set it large** (order of hours — it is a
-backstop against a wedged UI, not a review deadline). Then verify empirically at
-build step 4 that a hook awaiting past the deadline actually survives, because
-"the number is plumbed through" and "an unbounded await is honoured end to end"
-are different claims and only the first is proven by reading the source. If the CLI
-turns out to clamp it, the fallback is `permissionDecision: "defer"` (below), and
-I8 gets rewritten rather than quietly missed.
+backstop against a wedged UI, not a review deadline).
+
+> **Verified empirically at step 3, ahead of schedule** — `scripts/verify_hook_timeout.py`,
+> three real sessions against the live CLI. This needed a run rather than a source
+> read: "the number is plumbed through" and "an unbounded await is honoured end to
+> end" are different claims and only the first is provable by reading.
+>
+> | case | hook blocks | `timeout` | outcome |
+> |---|---|---|---|
+> | `exceeds-short` | 6s | 2s | **aborted at exactly 2.0s.** The hook coroutine is *cancelled*, so `asyncio.CancelledError` lands inside the gate. `ResultMessage.is_error` true. |
+> | `long-timeout` | 75s | 6h | **completed.** Tool ran, `terminal_reason: "completed"`, no error. |
+>
+> **I8 holds as designed. The gate can await the operator directly** and does not
+> need `defer`. Two details worth keeping: the abort arrives as a cancellation of
+> our own coroutine, which means the gate can catch it and resolve the pending
+> approval rather than leaking a future nobody completes; and the timeout is
+> honoured to the second, so it is a real backstop rather than a hint.
 
 **Why not build on `defer` in the first place?** `"defer"` is a real decision value,
 and `ResultMessage` carries a `DeferredToolUse` describing what was parked. But per
@@ -569,7 +580,14 @@ that persists across frames — set it once on theme change, never per frame.
 
 ## 9. Open decisions
 
-- **Persistence.** The SDK already writes JSONL transcripts per session and supports `resume` and `fork_session`. Cheapest path: store session IDs and lean on the SDK's own files rather than duplicating a log. Decide before step 3 — retrofitting is worse than building it in.
+- ~~**Persistence.**~~ **Settled in rev. 3, before step 3 as required.** Lean on the SDK's own JSONL entirely; do not duplicate a log.
+
+  The consequence worth stating: **`Transcript` is a view, not the record.** It is an in-memory render buffer for the pane, and it does not need to survive a restart — the SDK writes the authoritative per-session JSONL and hands us its `transcript_path` on every hook input. Persisting our own copy would create a second system of record that can disagree with the first.
+
+  What we persist is therefore just **session IDs**. Two things fall out of that:
+
+  - **We mint the session ID rather than learning it.** `ClaudeAgentOptions.session_id` accepts a caller-supplied UUID. This matters more than it looks: without it, `AgentSpawned` would have to invent a placeholder `NodeId` and re-key once the first message arrived — and since `NodeId` is the widget-key basis (I6), that re-key lands precisely when the agent starts streaming, scrambling hover and scroll at the worst moment. Minting it up front makes identity known before the first byte.
+  - **"Retire this session" becomes a real action, not advice.** §2.4 says the answer to a compacted session is to start a fresh one. `resume=<id>` with `fork_session=True` is exactly that, and it is only available because we kept the ID.
 - **Cancellation semantics.** Does cancelling a parent kill its subagents? The subprocess model gives a natural boundary. Rev. 3 adds a second, softer lever: `ClaudeSDKClient.interrupt()` stops work without tearing down the session, and `stop_task(task_id)` targets one task. So the choice is now three-way — interrupt (recoverable), disconnect (session ends), or kill — and "cancel" in the UI should say which one it means.
 - ~~**Context-budget policy.**~~ **Settled in rev. 3 (§2.4):** context is a session-health signal, not a budget. Advisory only, surfaced as `ContextPressure` plus an observed compaction count, with "fork this session" as the offered action. Money is a separate axis with its own hard stop (`max_budget_usd`).
 - **Whether spawning a subagent is itself approval-gated.** Probably yes given your stated preferences — the `Agent` tool call is visible to `PreToolUse` like any other.
@@ -629,8 +647,13 @@ that persists across frames — set it once on theme change, never per frame.
 - `ThinkingBlock` is a real exported type, so `REASONING` segments have a concrete source (§2.5).
 - Subagent attribution: `agent_id`/`agent_type` arrive on tool-lifecycle hook inputs, and the SDK's own comment says parallel subagents interleave over one control channel and `agent_id` is "the only reliable way to attribute each one" — direct confirmation of I6 and of `NodeId`. There are also `SubagentStart`/`SubagentStop` hooks carrying `agent_id`, which is a cleaner tree source than reconstructing from `parent_tool_use_id`.
 
+**Also closed at step 3, by running it:**
+- Hook timeout semantics end to end (§5.2.1). I8 holds; the gate awaits directly.
+- `ThinkingBlock(thinking, signature)` is a real content block, and `thinking_delta` arrives as a `content_block_delta` on `StreamEvent`, so reasoning streams token by token.
+- `ClaudeAgentOptions.session_id` accepts a caller-minted UUID, which is what makes `NodeId` stable from spawn (§9).
+
 **Still unverified — close before relying on:**
-- Whether an unbounded hook await survives end to end (§5.2.1). Source says the number is plumbed through; only a run proves the CLI honours it.
-- Whether subagent activity streams as `StreamEvent` or only as complete messages (§2.5).
+- Whether subagent activity streams as `StreamEvent` or only as complete messages (§2.5). Not reachable until step 6 spawns one.
+- Whether `ResultMessage.total_cost_usd` is per-turn or cumulative across turns on one client. The driver deltas against the last seen value, which is correct either way, but the ambiguity is real and unresolved.
 - Model ID strings (§7, trap 9).
 - hello_imgui "cannot run GUI from separate Python thread" issue — title seen, thread not read. I5 holds regardless.
