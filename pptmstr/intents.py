@@ -30,6 +30,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from .model import AgentState, ContextSnapshot, NodeId, PendingApproval, UsageRollup
+from .transcript import Transcript
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +44,11 @@ class AgentSpawned:
     started_at: float
     agent_type: str | None = None
     topic: str = "starting"
+    # Supplied by the spawner rather than created by the store. The driver writes
+    # into it directly from the asyncio thread (I7), so both sides must hold the
+    # same object -- letting the store build its own would give the UI an empty
+    # buffer while the driver filled an orphan.
+    transcript: Transcript | None = None
 
 
 @dataclass(frozen=True, slots=True)

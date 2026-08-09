@@ -38,6 +38,7 @@ from .intents import (
     UsageAccrued,
 )
 from .model import AgentRecord, AgentState, NodeId, PendingApproval, Snapshot
+from .transcript import Transcript
 
 
 class Store:
@@ -103,6 +104,7 @@ def _apply(snap: Snapshot, intent: Intent) -> Snapshot:
                 model=intent.model,
                 agent_type=intent.agent_type,
                 started_at=intent.started_at,
+                transcript=intent.transcript or Transcript(),
             )
             reorder = True
 

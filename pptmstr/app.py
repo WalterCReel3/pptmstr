@@ -18,6 +18,7 @@ from imgui_bundle import hello_imgui, imgui, immapp
 from . import settings as settings_mod
 from . import theme
 from .bridge import Bridge
+from .driver import AgentSession
 from .fake_driver import FakeDriver
 from .log import LOG
 from .model import Snapshot
@@ -47,6 +48,7 @@ class AppState:
     frame_snap: Snapshot | None = None
     frame_now: float = 0.0
     driver: FakeDriver | None = None
+    sessions: list[AgentSession] = field(default_factory=list)
 
 
 def begin_frame(state: AppState) -> None:
@@ -196,6 +198,8 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="pptmstr - multi-agent orchestrator")
     ap.add_argument("--theme", default=None, help="override the persisted theme")
     ap.add_argument("--fake", action="store_true", help="run the fake driver (no SDK, no cost)")
+    ap.add_argument("--task", default=None, help="run one real agent on this task")
+    ap.add_argument("--model", default=None, help="model for --task")
     ap.add_argument("--fps-idle", type=float, default=None)
     args = ap.parse_args(argv)
 
@@ -250,6 +254,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.fake:
         state.driver = FakeDriver(state.bridge)
         state.bridge.submit(state.driver.run())
+    if args.task:
+        # Step 3: one real session, read-only tools auto-allowed and everything else
+        # denied. The operator-in-the-loop half arrives with the gate in step 4.
+        session = AgentSession(state.bridge, args.task, model=args.model)
+        state.sessions.append(session)
+        state.bridge.submit(session.run())
+        LOG.info("app", f"session {session.session_id[:8]} - {args.task[:60]}")
 
     try:
         immapp.run(runner)

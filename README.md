@@ -39,9 +39,9 @@ Early. Following the build order in [orchestrator-design.md](orchestrator-design
 | Step | | |
 |---|---|---|
 | 1 | Store, snapshot, intents, Bridge | **done, tested** |
-| 2 | Theme layer + agent tree pane against a fake driver | next |
-| 3 | One real agent over the SDK | |
-| 4 | The approval gate | |
+| 2 | Theme layer + agent tree pane against a fake driver | **done, tested** |
+| 3 | One real agent over the SDK | **done, tested** |
+| 4 | The approval gate | next |
 | 5 | Idling | |
 | 6 | Concurrency, sub-agent tree, review queue, batching | |
 | 7 | Transcript pane | |
@@ -52,7 +52,14 @@ Early. Following the build order in [orchestrator-design.md](orchestrator-design
 ./bootstrap.sh          # probe -> venv -> install -> window smoke test
 make check              # lint + typecheck + tests
 make run                # launch
+
+.venv/bin/python -m pptmstr --fake              # UI only, no SDK, no cost
+.venv/bin/python -m pptmstr --task "..."        # one real agent
 ```
+
+Until the approval gate lands (step 4) the driver auto-allows read-only tools and
+**denies everything else**, with a reason the model sees. It is safe to point at a
+real repository: nothing it does can write.
 
 `bootstrap.sh` never installs system packages. If something system-level is
 missing it prints the exact command and stops.
@@ -109,7 +116,11 @@ Read [orchestrator-design.md](orchestrator-design.md) §1 (invariants) and §3
 | [pptmstr/intents.py](pptmstr/intents.py) | Every way the world can change, as values |
 | [pptmstr/bridge.py](pptmstr/bridge.py) | The only place threads and asyncio meet |
 | [pptmstr/transcript.py](pptmstr/transcript.py) | Append-only per-agent output buffer |
+| [pptmstr/theme.py](pptmstr/theme.py) | Semantic colour roles; light, dark and high-contrast |
+| [pptmstr/driver.py](pptmstr/driver.py) | One `ClaudeSDKClient` per session, translated into intents |
+| [pptmstr/app.py](pptmstr/app.py) | Runner, docking layout, and the frame loop |
 | [scripts/probe.py](scripts/probe.py) | Environment diagnosis; never installs anything |
+| [scripts/screenshot.py](scripts/screenshot.py) | Renders the UI headlessly to a PNG |
 
 ## Development
 
