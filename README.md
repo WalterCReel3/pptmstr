@@ -42,8 +42,8 @@ Early. Following the build order in [orchestrator-design.md](orchestrator-design
 | 2 | Theme layer + agent tree pane against a fake driver | **done, tested** |
 | 3 | One real agent over the SDK | **done, tested** |
 | 4 | The approval gate | **done, tested** |
-| 5 | Idling | next |
-| 6 | Concurrency, sub-agent tree, review queue, batching | |
+| 5 | Idling | **done, measured** |
+| 6 | Concurrency, sub-agent tree, review queue, batching | next |
 | 7 | Transcript pane | |
 
 ## Getting started
@@ -132,7 +132,14 @@ Read [orchestrator-design.md](orchestrator-design.md) §1 (invariants) and §3
 make check      # lint + typecheck + test — what a CI gate would run
 make format     # black, in place
 make test
+make bench      # idling CPU and cross-thread wake latency
+make shot       # render the UI to a PNG
 ```
+
+`make bench` on a Debian 12 / XWayland / Radeon box: idle costs **1.8% CPU against
+10.5–13.5% at full speed**, and an agent going active takes the app back to 60fps —
+which is what proves `any_active` drives idling rather than the app simply idling
+all the time. Cross-thread wake latency is 69ms.
 
 Formatting is `black`; `ruff` is lint-only here, so the two can never disagree
 about the same file. `mypy` runs `strict` against the 3.11 floor rather than the

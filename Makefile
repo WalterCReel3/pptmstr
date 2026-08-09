@@ -53,6 +53,12 @@ smoke: venv-check gui-check   ## post-install probe: imports + a real window
 run: venv-check gui-check     ## launch the orchestrator
 	$(GUI) $(PY) -m pptmstr
 
+bench: venv-check gui-check   ## measure idling CPU and cross-thread wake latency
+	$(GUI) $(PY) scripts/bench_idle.py
+
+shot: venv-check gui-check    ## render the UI to shot.png
+	$(GUI) $(PY) scripts/screenshot.py --argv --fake
+
 test: venv-check   ## pytest
 	$(PY) -m pytest -q
 

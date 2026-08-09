@@ -332,6 +332,47 @@ Full speed while anything is `THINKING`/`CALLING_TOOL`/`RUNNING_TOOL`; ~9fps whe
 
 **Cross-thread wake:** when the asyncio thread pushes an intent while the UI is asleep in a wait-with-timeout, the UI won't notice until the timeout expires (≤111ms at 9fps). Acceptable. If it feels laggy, raise `fps_idle` before reaching for a custom wake.
 
+### 4.3 Measured (rev. 3, step 5)
+
+`scripts/bench_idle.py`, three phases in one process and one GL context so the
+comparison is not across runs. Debian 12 / XWayland / Radeon, `fps_idle = 9`:
+
+| phase | fps | CPU % |
+|---|---|---|
+| full-speed — idling forced off | 60.7–60.8 | 10.5–13.5 |
+| idle — nothing active | 9.0 | 1.8 |
+| active — one agent `THINKING` | 59.7 | 12.7–13.6 |
+
+Four runs. **Idle costs 1.8% CPU against 10.5–13.5% at full speed** — call it a 6–7×
+reduction. The absolute idle figure is the stable one; the *ratio* moves between 14%
+and 21% purely because the full-speed baseline is noisy, so quote the absolute.
+Full speed is vsync-bound at ~60fps, so ~12% is the floor for a continuously
+redrawing window rather than anything this app is doing wrong.
+
+One run out of four showed the idle phase at 13.6fps/2.8% instead of 9.0/1.8. That
+is the benchmark perturbing what it measures: the wake probe emits an intent
+mid-phase, which wakes the UI and buys hello_imgui's full-speed-after-input window.
+Worth knowing rather than averaging away — the honest reading is "9fps except when
+something wakes it, which is the design working."
+
+The third row is the point of the experiment. The first two only show that idling
+*works*; an app that idles all the time would score beautifully on them and be
+useless. Row three is what proves `any_active` is the thing driving it — the
+predicate returns to full speed through its real input path (an `AgentSpawned` +
+`StateChanged` pair from the asyncio thread), not by being poked directly.
+
+**Cross-thread wake latency: 69ms**, against the ≤111ms §4.2 predicted. That is the
+"an agent finished while you were reading something else" case, and it is also the
+lower bound on how fast an approval can visibly resolve while the app is resting.
+
+**Not measured: keystroke-to-frame latency.** No input-injection tooling on this box
+(`xdotool` absent), so this stays reasoned rather than verified. The mechanism is
+that `glfwWaitEventsTimeout` returns on any event, so `fps_idle` bounds the idle
+*timeout* and not input latency, and hello_imgui additionally holds full speed for a
+few frames after input — meaning typing a rejection reason should run at full rate
+rather than at 9fps. Worth confirming on a box with `xdotool` before treating it as
+settled, because it lands on the interaction that matters most (§5.3's reason field).
+
 ---
 
 ## 5. The approval gate
