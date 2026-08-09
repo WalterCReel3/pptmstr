@@ -30,6 +30,7 @@ from .intents import (
     TopicChanged,
 )
 from .model import AgentState, ContextSnapshot, NodeId, PendingApproval
+from .transcript import SegmentKind, Transcript
 
 _MODELS = ("claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001")
 _TOPICS = (
@@ -60,6 +61,15 @@ _TOOLS = (
     ),
 )
 
+_FRAGMENTS = (
+    "checking the call sites ",
+    "that looks right.\n",
+    "hmm, the offsets do not line up ",
+    "-> 3 matches\n",
+    "re-reading the store to be sure ",
+    "done.\n",
+)
+
 _ids = itertools.count(1)
 
 
@@ -86,6 +96,7 @@ class FakeDriver:
         self.bridge = bridge
         self.rng = random.Random(seed)
         self.nodes: list[NodeId] = []
+        self.transcripts: dict[NodeId, Transcript] = {}
         self._stopping = False
 
     async def run(self) -> None:
@@ -136,6 +147,14 @@ class FakeDriver:
     def _spawn(self, parent: NodeId | None, agent_type: str | None) -> NodeId:
         n = next(_ids)
         node: NodeId = (f"sess-{n}", None) if parent is None else (parent[0], f"agent-{n}")
+        # The transcript travels with the spawn, exactly as the real driver does it:
+        # both sides must hold the same object or the pane reads an empty buffer.
+        transcript = Transcript()
+        self.transcripts[node] = transcript
+        transcript.append(SegmentKind.REASONING, "Working out where to start.\n")
+        transcript.append(SegmentKind.OUTPUT, "Right, here is the plan.\n")
+        transcript.append(SegmentKind.TOOL_CALL, "Read(file_path=pptmstr/store.py)\n")
+        transcript.append(SegmentKind.TOOL_RESULT, "268 lines\n")
         self.bridge.emit(
             AgentSpawned(
                 node_id=node,
@@ -145,6 +164,7 @@ class FakeDriver:
                 started_at=time.monotonic(),
                 agent_type=agent_type,
                 topic="starting",
+                transcript=transcript,
             )
         )
         self.nodes.append(node)
@@ -170,6 +190,14 @@ class FakeDriver:
         if not self.nodes:
             return
         node = self.rng.choice(self.nodes)
+        # Stream a few characters at a time, the way real output arrives -- that is
+        # what exercises the pane's incremental line cache rather than a bulk write.
+        transcript = self.transcripts.get(node)
+        if transcript is not None:
+            kind = self.rng.choice(
+                (SegmentKind.REASONING, SegmentKind.OUTPUT, SegmentKind.TOOL_RESULT)
+            )
+            transcript.append(kind, self.rng.choice(_FRAGMENTS))
         roll = self.rng.random()
         if roll < 0.45:
             self.bridge.emit(

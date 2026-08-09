@@ -25,7 +25,7 @@ from .model import Snapshot
 from .pool import SessionPool
 from .store import Store
 from .theme import REQUIRED_THEMES, THEMES, P
-from .ui import review, tree
+from .ui import review, transcript_pane, tree
 
 
 @dataclass
@@ -40,6 +40,9 @@ class AppState:
     settings: settings_mod.Settings
     view: tree.ViewState = field(default_factory=tree.ViewState)
     review: review.ReviewState = field(default_factory=review.ReviewState)
+    transcripts: transcript_pane.TranscriptState = field(
+        default_factory=transcript_pane.TranscriptState
+    )
     frame: int = 0
     # Set when the palette changes; consumed at the top of the next frame. See
     # _apply_theme_if_dirty for why this cannot simply happen in post_init.
@@ -69,6 +72,8 @@ def begin_frame(state: AppState) -> None:
     state.store.apply_all(state.bridge.drain())
     state.frame_snap = state.store.snapshot()
     state.view.prune(state.frame)
+    state.view.ensure_selection(state.frame_snap)
+    state.transcripts.prune(state.frame)
     # Shortcuts are handled once per frame, before any panel draws, so they behave
     # the same whichever pane happens to have focus.
     review.handle_keys(state.frame_snap, state.review, state.bridge)
@@ -197,10 +202,15 @@ def _docking_params(state: AppState) -> hello_imgui.DockingParams:
         if state.frame_snap is not None:
             review.draw_detail(state.frame_snap, state.review, state.bridge)
 
+    def draw_transcript() -> None:
+        if state.frame_snap is not None:
+            transcript_pane.draw(state.frame_snap, state.transcripts, state.view.selected)
+
     params.dockable_windows = [
         window("AGENTS", "MainDockSpace", draw_agents),
         window("REVIEW", "BottomSpace", draw_queue),
         window("DETAIL", "RightSpace", draw_review_detail),
+        window("TRANSCRIPT", "RightSpace", draw_transcript),
         window("LOG", "BottomSpace", _log_panel),
     ]
     return params

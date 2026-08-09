@@ -62,6 +62,18 @@ class ViewState:
         state.last_frame_touched = self.frame
         return state
 
+    def ensure_selection(self, snap: Snapshot) -> None:
+        """
+        Keep something selected whenever there is anything to select.
+
+        Without this the detail and transcript panes sit empty until the operator
+        clicks a row, which reads as the panes being broken rather than idle. Also
+        recovers when the selected agent is removed.
+        """
+        if self.selected is not None and self.selected in snap.nodes:
+            return
+        self.selected = snap.order[0] if snap.order else None
+
     def prune(self, frame: int) -> None:
         """Drop view state for nodes that were not touched this frame."""
         self.frame = frame

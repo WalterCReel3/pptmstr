@@ -44,7 +44,7 @@ Early. Following the build order in [orchestrator-design.md](orchestrator-design
 | 4 | The approval gate | **done, tested** |
 | 5 | Idling | **done, measured** |
 | 6 | Concurrency, sub-agent tree, review queue, batching | **done, tested** |
-| 7 | Transcript pane | next |
+| 7 | Transcript pane | **done, tested** |
 
 ## Getting started
 
@@ -68,6 +68,12 @@ reason the agent sees, `e` edit the arguments and approve the corrected call,
 `Shift+A` approve everything from the selected agent. Approving the whole queue
 across every agent exists but costs a second click that states the count — it is
 the one action here that can write something nobody read.
+
+The transcript pane styles output by kind — reasoning, output, tool calls, results,
+errors, compaction boundaries — with toggles for reasoning, wrapping and follow-tail,
+plus a filter. Reasoning streams token by token at the root; sub-agent output does
+not stream at all, and the pane says so rather than letting a quiet row read as a
+stuck one.
 
 Sub-agents appear as children in the tree, and a tool call made *inside* a
 sub-agent parks against that sub-agent's row rather than its parent's. Concurrency
@@ -129,6 +135,9 @@ Read [orchestrator-design.md](orchestrator-design.md) §1 (invariants) and §3
 | [pptmstr/intents.py](pptmstr/intents.py) | Every way the world can change, as values |
 | [pptmstr/bridge.py](pptmstr/bridge.py) | The only place threads and asyncio meet |
 | [pptmstr/transcript.py](pptmstr/transcript.py) | Append-only per-agent output buffer |
+| [pptmstr/pool.py](pptmstr/pool.py) | Bounded concurrency; over-cap sessions queue |
+| [pptmstr/approval.py](pptmstr/approval.py) | Classification, summaries and diffs for the gate |
+| [pptmstr/ui/](pptmstr/ui/) | Tree, review queue, transcript pane, shared widgets |
 | [pptmstr/theme.py](pptmstr/theme.py) | Semantic colour roles; light, dark and high-contrast |
 | [pptmstr/driver.py](pptmstr/driver.py) | One `ClaudeSDKClient` per session, translated into intents |
 | [pptmstr/app.py](pptmstr/app.py) | Runner, docking layout, and the frame loop |
