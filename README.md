@@ -41,8 +41,8 @@ Early. Following the build order in [orchestrator-design.md](orchestrator-design
 | 1 | Store, snapshot, intents, Bridge | **done, tested** |
 | 2 | Theme layer + agent tree pane against a fake driver | **done, tested** |
 | 3 | One real agent over the SDK | **done, tested** |
-| 4 | The approval gate | next |
-| 5 | Idling | |
+| 4 | The approval gate | **done, tested** |
+| 5 | Idling | next |
 | 6 | Concurrency, sub-agent tree, review queue, batching | |
 | 7 | Transcript pane | |
 
@@ -57,9 +57,13 @@ make run                # launch
 .venv/bin/python -m pptmstr --task "..."        # one real agent
 ```
 
-Until the approval gate lands (step 4) the driver auto-allows read-only tools and
-**denies everything else**, with a reason the model sees. It is safe to point at a
-real repository: nothing it does can write.
+Reads auto-approve. Everything that writes, runs a shell, reaches the network or
+spawns a sub-agent parks in the review queue until you answer it — as does any tool
+this build has never heard of. With no operator attached the gate denies rather than
+hanging.
+
+The review loop is keyboard-driven: `j`/`k` to move, `a` approve, `r` reject with a
+reason the agent sees, `e` edit the arguments and approve the corrected call.
 
 `bootstrap.sh` never installs system packages. If something system-level is
 missing it prints the exact command and stops.

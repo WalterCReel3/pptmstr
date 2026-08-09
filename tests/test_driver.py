@@ -22,7 +22,7 @@ from claude_agent_sdk import (
     UserMessage,
 )
 
-from pptmstr.driver import Translator, _tool_topic, classify_read_only
+from pptmstr.driver import Translator, _tool_topic
 from pptmstr.intents import (
     AgentFinished,
     CompactionObserved,
@@ -52,29 +52,6 @@ def result(**kwargs: object) -> ResultMessage:
     }
     base.update(kwargs)
     return ResultMessage(**base)  # type: ignore[arg-type]
-
-
-# -- classification ------------------------------------------------------------
-
-
-def test_read_only_tools_are_allowed() -> None:
-    assert classify_read_only("Read", {})
-    assert classify_read_only("Grep", {})
-
-
-def test_mutating_tools_are_not() -> None:
-    for name in ("Write", "Edit", "Bash", "NotebookEdit"):
-        assert not classify_read_only(name, {})
-
-
-def test_unknown_tools_fail_closed() -> None:
-    """
-    An allowlist that defaults open stops being an allowlist the first time the SDK
-    adds a tool -- and the tool nobody has heard of is exactly the wrong one to run
-    unreviewed.
-    """
-    assert not classify_read_only("SomeFutureTool", {})
-    assert not classify_read_only("", {})
 
 
 # -- topics --------------------------------------------------------------------

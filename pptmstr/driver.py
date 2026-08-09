@@ -9,17 +9,17 @@ driver used, which is what made building the pane against a fake worth doing.
 ``get_context_usage``, ``interrupt`` or ``set_permission_mode``, and this
 orchestrator needs all three (design §3.1).
 
-**Scope note.** This is build step 3, so the gate here classifies and *denies*
-rather than parking. Step 4 replaces ``_decide`` with an await on the operator.
-Denying unrecognised tools rather than allowing them means the step-3 driver is
-safe to point at a real repository: nothing it does can write.
+The approval gate lives here (design §5). A tool call that needs a human parks on
+an ``asyncio.Future`` held by the Bridge; the await blocks that agent's task and
+nothing else, which is I8 satisfied structurally rather than by convention.
 """
 
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -44,10 +44,13 @@ from claude_agent_sdk import (
     UserMessage,
 )
 
+from .approval import Disposition, classify, render_diff, summarize
 from .bridge import Bridge
 from .intents import (
     AgentFinished,
     AgentSpawned,
+    ApprovalRequested,
+    ApprovalResolved,
     CompactionObserved,
     ContextPolled,
     Intent,
@@ -56,7 +59,7 @@ from .intents import (
     UsageAccrued,
 )
 from .log import LOG
-from .model import AgentState, ContextSnapshot, NodeId, UsageRollup
+from .model import AgentState, ContextSnapshot, NodeId, PendingApproval, UsageRollup
 from .transcript import SegmentKind, Transcript
 
 # Hours, not minutes. HookMatcher.timeout defaults to 60s and the CLI enforces it
@@ -68,22 +71,6 @@ APPROVAL_TIMEOUT_S = 6 * 60 * 60
 # Slow on purpose: get_context_usage is a control request, not a push, and the
 # number it returns moves on the scale of turns rather than frames.
 CONTEXT_POLL_S = 20.0
-
-# Read-only tools. Everything else is denied until step 4 puts a human behind it.
-_READ_ONLY = frozenset(
-    {"Read", "Glob", "Grep", "NotebookRead", "TodoWrite", "WebFetch", "WebSearch", "Task"}
-)
-
-
-def classify_read_only(tool_name: str, _tool_input: dict[str, Any]) -> bool:
-    """
-    Whether a tool may run without a human.
-
-    Fails closed: an unrecognised tool is denied. A tool this orchestrator has never
-    heard of is exactly the one that should not run unreviewed, and an allowlist that
-    defaults open stops being an allowlist the first time the SDK adds a tool.
-    """
-    return tool_name in _READ_ONLY
 
 
 def _hook_output(decision: str, reason: str | None = None) -> HookJSONOutput:
@@ -101,6 +88,14 @@ def _hook_output(decision: str, reason: str | None = None) -> HookJSONOutput:
     specific: dict[str, Any] = {"hookEventName": "PreToolUse", "permissionDecision": decision}
     if reason is not None:
         specific["permissionDecisionReason"] = reason
+    return cast(HookJSONOutput, {"hookSpecificOutput": specific})
+
+
+def _allow_with(edited_args: Mapping[str, Any] | None) -> HookJSONOutput:
+    """Allow, optionally replacing the arguments the agent asked for (§5.3)."""
+    specific: dict[str, Any] = {"hookEventName": "PreToolUse", "permissionDecision": "allow"}
+    if edited_args is not None:
+        specific["updatedInput"] = dict(edited_args)
     return cast(HookJSONOutput, {"hookSpecificOutput": specific})
 
 
@@ -342,7 +337,7 @@ class AgentSession:
         *,
         model: str | None = None,
         cwd: str | None = None,
-        decide: Callable[[str, dict[str, Any], NodeId], Awaitable[bool]] | None = None,
+        interactive: bool = True,
     ) -> None:
         self.bridge = bridge
         self.task = task
@@ -351,7 +346,9 @@ class AgentSession:
         self.transcript = Transcript()
         self.model = model or "claude-sonnet-5"
         self.cwd = cwd
-        self._decide = decide
+        # Whether an operator is attached to answer. False means headless, where a
+        # tool needing approval is denied rather than left to hit the timeout.
+        self.interactive = interactive
         self._client: ClaudeSDKClient | None = None
         self.transcript_path: str | None = None
 
@@ -369,17 +366,71 @@ class AgentSession:
         # Recorded because it is the authoritative session log; ours is a view (§9).
         self.transcript_path = data.get("transcript_path") or self.transcript_path
 
-        if classify_read_only(tool_name, tool_input):
+        disposition = classify(tool_name, tool_input)
+        if disposition is Disposition.AUTO_APPROVE:
             return _hook_output("allow")
-        if self._decide is None:
-            reason = (
-                f"{tool_name} requires operator approval, which is not wired up yet "
-                "(build step 4). Denied rather than allowed."
+        if disposition is Disposition.DENY:
+            return _hook_output("deny", f"{tool_name} is not permitted by policy")
+        if not self.interactive:
+            # Headless: nothing can approve, so deny rather than hang until the
+            # timeout. A run with no operator must fail closed and say why.
+            return _hook_output("deny", f"{tool_name} needs approval and no operator is attached")
+
+        return await self._park(tool_name, tool_input, str(data.get("tool_use_id", "")))
+
+    async def _park(
+        self, tool_name: str, tool_input: dict[str, Any], tool_use_id: str
+    ) -> HookJSONOutput:
+        """
+        Block this agent until the operator decides. I8, structurally.
+
+        The await parks only this task, so other agents keep running and the app
+        stays idle-able while it waits. The Bridge holds the future; the store only
+        learns that something is pending.
+        """
+        pending = PendingApproval(
+            id=f"{self.session_id[:8]}-{tool_use_id or uuid.uuid4().hex[:8]}",
+            node=self.node_id,
+            tool_name=tool_name,
+            tool_use_id=tool_use_id,
+            raw_args=dict(tool_input),
+            summary=summarize(tool_name, tool_input),
+            requested_at=time.time(),
+            diff=render_diff(tool_name, tool_input),
+        )
+        future = self.bridge.park(pending.id)
+        self.bridge.emit(ApprovalRequested(self.node_id, pending))
+
+        try:
+            decision = await future
+        except asyncio.CancelledError:
+            # Reachable two ways: the CLI's per-hook timeout fires (verified to
+            # arrive as a cancellation of this coroutine, §5.2.1), or the session is
+            # torn down. Either way the store still has the pending row, and leaving
+            # it there would show an approval that can never be answered.
+            self.bridge.emit(
+                ApprovalResolved(self.node_id, pending.id, approved=False, reason="cancelled")
             )
-            LOG.warn("gate", f"denied {tool_name}")
-            return _hook_output("deny", reason)
-        approved = await self._decide(tool_name, tool_input, self.node_id)
-        return _hook_output("allow") if approved else _hook_output("deny", "rejected by operator")
+            raise
+
+        self.bridge.emit(
+            ApprovalResolved(
+                self.node_id,
+                pending.id,
+                approved=decision.approved,
+                reason=decision.reason,
+                edited_args=decision.edited_args,
+            )
+        )
+        if decision.approved:
+            LOG.info("gate", f"approved {pending.summary}")
+            # updatedInput is why edit-then-approve exists: a wrong path or a
+            # too-broad command can be corrected and run, rather than rejected and
+            # waited on (§5.3).
+            return _allow_with(decision.edited_args)
+        reason = decision.reason or "Rejected by operator"
+        LOG.warn("gate", f"rejected {pending.summary}")
+        return _hook_output("deny", reason)
 
     async def _pre_compact(
         self, hook_input: HookInput, _tool_use_id: str | None, _context: HookContext
@@ -411,8 +462,14 @@ class AgentSession:
 
     # -- lifecycle ---------------------------------------------------------------
 
-    async def run(self) -> None:
-        """Connect, send the task, pump messages until the turn ends."""
+    def announce(self) -> None:
+        """
+        Put this session in the tree before it connects.
+
+        Separate from run() so the row exists from the moment the operator asked for
+        it -- a session that takes a second to spawn a subprocess should not be
+        invisible while it does, or the UI looks like it dropped the request.
+        """
         self.bridge.emit(
             AgentSpawned(
                 node_id=self.node_id,
@@ -424,6 +481,10 @@ class AgentSession:
                 transcript=self.transcript,
             )
         )
+
+    async def run(self) -> None:
+        """Connect, send the task, pump messages until the turn ends."""
+        self.announce()
         translator = Translator(self.node_id, self.transcript)
 
         try:

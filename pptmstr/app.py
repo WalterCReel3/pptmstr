@@ -24,7 +24,7 @@ from .log import LOG
 from .model import Snapshot
 from .store import Store
 from .theme import REQUIRED_THEMES, THEMES, P
-from .ui import tree
+from .ui import review, tree
 
 
 @dataclass
@@ -38,6 +38,7 @@ class AppState:
     bridge: Bridge
     settings: settings_mod.Settings
     view: tree.ViewState = field(default_factory=tree.ViewState)
+    review: review.ReviewState = field(default_factory=review.ReviewState)
     frame: int = 0
     # Set when the palette changes; consumed at the top of the next frame. See
     # _apply_theme_if_dirty for why this cannot simply happen in post_init.
@@ -67,6 +68,9 @@ def begin_frame(state: AppState) -> None:
     state.store.apply_all(state.bridge.drain())
     state.frame_snap = state.store.snapshot()
     state.view.prune(state.frame)
+    # Shortcuts are handled once per frame, before any panel draws, so they behave
+    # the same whichever pane happens to have focus.
+    review.handle_keys(state.frame_snap, state.review, state.bridge)
 
 
 def _apply_theme_if_dirty(state: AppState) -> None:
@@ -157,7 +161,8 @@ def _docking_params(state: AppState) -> hello_imgui.DockingParams:
 
     d = imgui.Dir
     params.docking_splits = [
-        split("MainDockSpace", "BottomSpace", d.down, 0.32),
+        split("MainDockSpace", "RightSpace", d.right, 0.36),
+        split("MainDockSpace", "BottomSpace", d.down, 0.34),
     ]
 
     def window(label: str, dock: str, fn: Callable[[], None]) -> hello_imgui.DockableWindow:
@@ -174,8 +179,18 @@ def _docking_params(state: AppState) -> hello_imgui.DockingParams:
         if state.frame_snap is not None:
             tree.draw(state.frame_snap, state.view, state.frame_now)
 
+    def draw_queue() -> None:
+        if state.frame_snap is not None:
+            review.draw_queue(state.frame_snap, state.review)
+
+    def draw_review_detail() -> None:
+        if state.frame_snap is not None:
+            review.draw_detail(state.frame_snap, state.review, state.bridge)
+
     params.dockable_windows = [
         window("AGENTS", "MainDockSpace", draw_agents),
+        window("REVIEW", "BottomSpace", draw_queue),
+        window("DETAIL", "RightSpace", draw_review_detail),
         window("LOG", "BottomSpace", _log_panel),
     ]
     return params

@@ -48,9 +48,16 @@ _TASKS = (
 )
 _TOOLS = (
     ("Read", {"file_path": "/home/wreel/Source/pptmstr/pptmstr/store.py"}),
-    ("Write", {"file_path": "/tmp/out.txt", "content": "hello"}),
+    ("Write", {"file_path": "/tmp/pptmstr-demo.txt", "content": "hello\nworld\n"}),
     ("Bash", {"command": "pytest -q"}),
-    ("Edit", {"file_path": "pptmstr/app.py", "old_string": "a", "new_string": "b"}),
+    (
+        "Edit",
+        {
+            "file_path": "pptmstr/theme.py",
+            "old_string": "DARK = Palette(",
+            "new_string": "DARK = Palette(  # tweaked",
+        },
+    ),
 )
 
 _ids = itertools.count(1)
@@ -139,14 +146,17 @@ class FakeDriver:
 
     def _pending(self, node: NodeId, prefer: str | None = None) -> PendingApproval:
         name, args = next((t for t in _TOOLS if t[0] == prefer), self.rng.choice(_TOOLS))
+        from .approval import render_diff, summarize
+
         return PendingApproval(
             id=f"pending-{next(_ids)}",
             node=node,
             tool_name=name,
             tool_use_id=f"tu-{next(_ids)}",
             raw_args=args,
-            summary=f"{name} {list(args.values())[0]}",
+            summary=summarize(name, args),
             requested_at=time.time(),
+            diff=render_diff(name, args),
         )
 
     def _tick(self) -> None:

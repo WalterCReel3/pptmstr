@@ -20,13 +20,16 @@ from .widgets import context_cell, elapsed_cell, short_model, state_cell
 # Fixed widths, never auto-fit. An auto-sized column re-fits over three frames every
 # time rows change (AutoFitQueue = (1 << 3) - 1), and these rows change constantly,
 # so the table would be in permanent re-fit and the columns visibly breathe.
+# The widths sum to what the pane gets when the review panes are docked beside it.
+# Overshooting that is not cosmetic: the last columns -- context and elapsed, the
+# two that say whether an agent is healthy -- are the ones that get clipped away.
 _COLUMNS: tuple[tuple[str, float], ...] = (
-    ("agent", 240.0),
-    ("state", 120.0),
-    ("topic", 260.0),
-    ("model", 130.0),
-    ("context", 110.0),
-    ("elapsed", 70.0),
+    ("agent", 190.0),
+    ("state", 105.0),
+    ("topic", 200.0),
+    ("model", 115.0),
+    ("context", 95.0),
+    ("elapsed", 60.0),
 )
 
 
