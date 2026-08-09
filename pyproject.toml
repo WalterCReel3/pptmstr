@@ -1,0 +1,94 @@
+[project]
+name = "pptmstr"
+version = "0.1.0"
+description = "Puppet Master — a multi-agent LLM orchestrator with an immediate-mode UI"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "Walter Reel" }]
+license = "MIT"
+license-files = ["LICENSE"]
+dependencies = [
+    # imgui-bundle wheels ship their own GLFW3 + OpenGL3 backend, so no system
+    # GLFW is required. On Linux the vendored libglfw.so is an X11-only build,
+    # so it still needs the system's X client libraries (libX11, libXrandr,
+    # libXinerama, libXcursor, libXi) and a GLX-capable libGL at *runtime*.
+    # Those are not Python packages and cannot be declared here;
+    # scripts/probe.py checks for them by soname and prints the install line.
+    #
+    # The floor is 1.92, not the 1.6 that would satisfy a naive import test:
+    # style.set_color_(), imgui.SortDirection, imgui.Col_.nav_cursor and the
+    # ImPlot Spec API all postdate 1.6, and a too-low floor turns a clear
+    # install-time failure into an AttributeError on the first theme switch.
+    "imgui-bundle>=1.92",
+    # Bundles its own Claude Code CLI binary, which is why there is no Node
+    # dependency here -- see check_agent_cli() in scripts/probe.py.
+    "claude-agent-sdk>=0.2.134",
+]
+
+[project.optional-dependencies]
+# The ruff floor is deliberately recent: `make lint` runs `ruff format --check`,
+# and the formatter's output shifts between minor versions, so an older ruff
+# reports diffs on code that is correctly formatted for a newer one. An
+# unpinned formatter behind a --check gate is a latent failure with a timer on it.
+dev = [
+    "ruff>=0.16",
+    "mypy>=1.11",
+    "black>=24.1",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+pptmstr = "pptmstr.app:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["pptmstr"]
+
+# Listed explicitly rather than inferred: hatchling falls back to parsing
+# .gitignore when not told otherwise, which silently couples what ships to what
+# is ignored.
+[tool.hatch.build.targets.sdist]
+include = [
+    "/pptmstr", "/scripts", "/tests", "/planning", "/LICENSE", "/README.md",
+    "/CLAUDE.md", "/orchestrator-design.md", "/Makefile", "/bootstrap.sh",
+    "/pyproject.toml",
+]
+exclude = ["**/__pycache__", "**/*.pyc"]
+
+# black owns formatting (CLAUDE.md); ruff is lint-only here, so its formatter is
+# never invoked and the two cannot disagree about the same file.
+[tool.black]
+line-length = 100
+target-version = ["py311"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.mypy]
+# The floor from `requires-python`, not whatever the local venv happens to be.
+# Typechecking against the oldest supported version is what catches a 3.12-only
+# idiom before it reaches a Debian 12 box, whose system Python is 3.11.
+python_version = "3.11"
+strict = true
+warn_unused_ignores = false
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+# imgui_bundle's stubs type draw-list point arguments as invariant containers,
+# so a correct list[ImVec2] is rejected. Confined to the UI layer rather than
+# relaxed globally.
+module = "pptmstr.ui.*"
+warn_unused_ignores = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+filterwarnings = ["error"]

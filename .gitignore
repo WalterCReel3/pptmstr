@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+dist/
+# hello_imgui slugifies a window title into an ini filename and writes it to the
+# working directory unless ini_folder_type says otherwise. Ignored as a backstop;
+# the fix is to set ini_folder_type at every runner construction site.
+*.ini
+
+# Session-local harness permissions, not shared project config.
+.claude/settings.local.json
