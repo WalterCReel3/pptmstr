@@ -247,6 +247,11 @@ class AgentRecord:
     pending: PendingApproval | None = None
 
     transcript: Transcript = field(default_factory=Transcript)
+    # Both are time.monotonic(), never time.time(). These exist to be subtracted from
+    # each other, and monotonic is the only clock that survives an NTP step or a
+    # daylight-saving jump without producing a negative or wildly large duration.
+    # Mixing the two clocks yields an elapsed time in the hundreds of thousands of
+    # hours, which is at least loud; mixing them the other way is silently wrong.
     started_at: float = 0.0
     ended_at: float | None = None
     error: str | None = None
