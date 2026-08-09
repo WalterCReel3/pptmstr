@@ -1,6 +1,6 @@
 # Step 2 — theme layer + agent tree pane
 
-**Dated:** 2026-08-09 · **Status:** not started · **Follows:** design §8 step 2, §6.1
+**Dated:** 2026-08-09 · **Status:** decisions settled, not yet started · **Follows:** design §8 step 2, §6.1
 
 Step 1 (store, snapshot, intents, Bridge) is done and tested. This is the next
 increment: the first pixels, driven by a fake driver rather than the SDK.
@@ -38,19 +38,56 @@ literal and a role look identical until something switches.
 - Fixed-width table columns, not auto-fit: auto-fit re-fits over three frames
   every time rows change, and these rows change constantly. Trap 1.
 
-## Open questions for this step
+## Settled 2026-08-09
 
-- **Where theme preference persists.** It must survive restart, so not
-  `NodeViewState`. Proposal: a small settings file under `XDG_CONFIG_HOME`,
-  written on change. Orbital's lesson is to use XDG from day one rather than
-  repo-root-relative paths, which break silently once installed as a wheel.
-- **Whether the context column is a bar or a number.** §2.4 says the actionable
-  value is distance to compaction, not percent — a bar implies a budget being
-  spent, which is the framing that section explicitly rejects. Leaning toward
-  a number plus a pressure-coloured dot.
-- **Fake driver fidelity.** Enough to exercise nesting and approval parking;
-  not a simulator. It exists to make the pane's states reachable without burning
-  tokens, and it should be deleted once step 3 lands rather than maintained.
+**Theme preference persists under `XDG_CONFIG_HOME`**, in our own settings file
+rather than piggybacking hello_imgui's ini. That ini is hello_imgui's format for
+hello_imgui's concerns (docking layout, window geometry), and theme will not be
+the only thing needing persistence — the concurrency cap and per-node trust lists
+land in the same file later. Repo-relative paths are the thing being avoided:
+they break silently once installed as a wheel and stay invisible for as long as
+every launch happens from the source tree.
+
+**The context column is plain text, read as a compaction countdown without
+labelling it as one.** A bar implies a budget being spent, which §2.4 rejects.
+The number is small and falling; the label is not spent on saying so. Discovery
+goes in a hover tooltip, not the column.
+
+**Shorthand, where width is tight: a ring throbber** — a grey ring that fills as
+headroom is consumed, colour tracking blue → orange → red.
+
+This already satisfies §6.1's "never hue alone": the fill fraction is a second,
+independent channel, which matters most for the orange/red pair since that is the
+distinction that collapses under red-deficiency. Do not add a variant where the
+ring is a fixed-size coloured dot — that drops the redundant channel and is
+exactly the failure §6.1 exists to prevent.
+
+### Two states the ring must not misreport
+
+Both come out of `ContextSnapshot`, and both would otherwise render as a
+confident, wrong number.
+
+1. **No threshold to count down to.** `tokens_until_compaction` returns `None`
+   when autocompact is off or the CLI reported no threshold, and `model.py`
+   already forbids falling back to `max_tokens` — that silently answers a
+   different question. So the column needs a defined alternate state, not a
+   default: show occupancy explicitly marked as such (a hollow ring, not a
+   partly-filled one), so it can never be misread as headroom.
+
+2. **After compaction the countdown resets, but the damage does not.** A freshly
+   compacted session has a nearly empty window, so the ring would fill green-blue
+   and read as healthy at the exact moment `ContextPressure` is stickily
+   `COMPACTED`. Ring fill and pressure colour are measuring different things and
+   will contradict each other here.
+
+   Resolution: the ring reports current headroom honestly, and compaction count
+   rides alongside it as a persistent mark (`×2`). Both facts stay visible and
+   neither is overwritten. Per §2.4 the count is the stronger retire signal, so it
+   is the one that must not be erased by a healthy-looking ring.
+
+**Fake driver fidelity** — enough to exercise nesting and approval parking; not a
+simulator. It exists to make the pane's states reachable without burning tokens,
+and it gets deleted when step 3 lands rather than maintained.
 
 ## Verification
 
