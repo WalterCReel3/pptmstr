@@ -43,8 +43,8 @@ Early. Following the build order in [orchestrator-design.md](orchestrator-design
 | 3 | One real agent over the SDK | **done, tested** |
 | 4 | The approval gate | **done, tested** |
 | 5 | Idling | **done, measured** |
-| 6 | Concurrency, sub-agent tree, review queue, batching | next |
-| 7 | Transcript pane | |
+| 6 | Concurrency, sub-agent tree, review queue, batching | **done, tested** |
+| 7 | Transcript pane | next |
 
 ## Getting started
 
@@ -55,6 +55,7 @@ make run                # launch
 
 .venv/bin/python -m pptmstr --fake              # UI only, no SDK, no cost
 .venv/bin/python -m pptmstr --task "..."        # one real agent
+.venv/bin/python -m pptmstr --task a --task b --cap 2   # concurrent, bounded
 ```
 
 Reads auto-approve. Everything that writes, runs a shell, reaches the network or
@@ -63,7 +64,15 @@ this build has never heard of. With no operator attached the gate denies rather 
 hanging.
 
 The review loop is keyboard-driven: `j`/`k` to move, `a` approve, `r` reject with a
-reason the agent sees, `e` edit the arguments and approve the corrected call.
+reason the agent sees, `e` edit the arguments and approve the corrected call,
+`Shift+A` approve everything from the selected agent. Approving the whole queue
+across every agent exists but costs a second click that states the count — it is
+the one action here that can write something nobody read.
+
+Sub-agents appear as children in the tree, and a tool call made *inside* a
+sub-agent parks against that sub-agent's row rather than its parent's. Concurrency
+is bounded by `concurrency_cap`; over-cap sessions queue rather than being refused,
+and the pool is shown in the status bar.
 
 `bootstrap.sh` never installs system packages. If something system-level is
 missing it prints the exact command and stops.

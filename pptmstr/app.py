@@ -22,6 +22,7 @@ from .driver import AgentSession
 from .fake_driver import FakeDriver
 from .log import LOG
 from .model import Snapshot
+from .pool import SessionPool
 from .store import Store
 from .theme import REQUIRED_THEMES, THEMES, P
 from .ui import review, tree
@@ -49,7 +50,7 @@ class AppState:
     frame_snap: Snapshot | None = None
     frame_now: float = 0.0
     driver: FakeDriver | None = None
-    sessions: list[AgentSession] = field(default_factory=list)
+    pool: SessionPool | None = None
 
 
 def begin_frame(state: AppState) -> None:
@@ -139,6 +140,15 @@ def _status_bar(state: AppState) -> None:
     imgui.text_disabled("|")
     imgui.same_line()
     imgui.text_disabled("running" if active else f"idle @ {state.settings.fps_idle:g}fps")
+    if state.pool is not None:
+        imgui.same_line()
+        imgui.text_disabled("|")
+        imgui.same_line()
+        queued = state.pool.queued_count
+        text = f"{state.pool.running_count}/{state.pool.cap} sessions"
+        if queued:
+            text += f", {queued} queued"
+        imgui.text_disabled(text)
 
 
 def _docking_params(state: AppState) -> hello_imgui.DockingParams:
@@ -181,7 +191,7 @@ def _docking_params(state: AppState) -> hello_imgui.DockingParams:
 
     def draw_queue() -> None:
         if state.frame_snap is not None:
-            review.draw_queue(state.frame_snap, state.review)
+            review.draw_queue(state.frame_snap, state.review, state.bridge)
 
     def draw_review_detail() -> None:
         if state.frame_snap is not None:
@@ -213,8 +223,14 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="pptmstr - multi-agent orchestrator")
     ap.add_argument("--theme", default=None, help="override the persisted theme")
     ap.add_argument("--fake", action="store_true", help="run the fake driver (no SDK, no cost)")
-    ap.add_argument("--task", default=None, help="run one real agent on this task")
+    ap.add_argument(
+        "--task",
+        action="append",
+        default=None,
+        help="run a real agent on this task; repeat for concurrent sessions",
+    )
     ap.add_argument("--model", default=None, help="model for --task")
+    ap.add_argument("--cap", type=int, default=None, help="max concurrent sessions")
     ap.add_argument("--fps-idle", type=float, default=None)
     args = ap.parse_args(argv)
 
@@ -223,6 +239,8 @@ def main(argv: list[str] | None = None) -> int:
         loaded = loaded.merged(theme=args.theme)
     if args.fps_idle is not None:
         loaded = loaded.merged(fps_idle=args.fps_idle)
+    if args.cap is not None:
+        loaded = loaded.merged(concurrency_cap=args.cap)
     theme.set_theme(loaded.theme)
 
     state = AppState(store=Store(), bridge=Bridge(), settings=loaded)
@@ -270,18 +288,27 @@ def main(argv: list[str] | None = None) -> int:
         state.driver = FakeDriver(state.bridge)
         state.bridge.submit(state.driver.run())
     if args.task:
-        # Step 3: one real session, read-only tools auto-allowed and everything else
-        # denied. The operator-in-the-loop half arrives with the gate in step 4.
-        session = AgentSession(state.bridge, args.task, model=args.model)
-        state.sessions.append(session)
-        state.bridge.submit(session.run())
-        LOG.info("app", f"session {session.session_id[:8]} - {args.task[:60]}")
+        pool = SessionPool(state.bridge, cap=state.settings.concurrency_cap)
+        state.pool = pool
+
+        async def launch() -> None:
+            # Submitting from the loop thread keeps every mutation of the pool on
+            # one thread, so it needs no lock of its own.
+            for task_text in args.task:
+                pool.submit(AgentSession(state.bridge, task_text, model=args.model))
+
+        state.bridge.submit(launch())
+        LOG.info("app", f"{len(args.task)} task(s), cap {state.settings.concurrency_cap}")
 
     try:
         immapp.run(runner)
     finally:
         if state.driver is not None:
             state.driver.stop()
+        if state.pool is not None:
+            # Cancel sessions before the loop dies, so no CLI subprocess outlives
+            # the window that was supervising it.
+            state.bridge.submit(state.pool.shutdown()).result(timeout=10)
         state.bridge.stop()
     return 0
 

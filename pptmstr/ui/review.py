@@ -25,7 +25,7 @@ from imgui_bundle import imgui
 
 from ..approval import diff_line_kind
 from ..bridge import Bridge, Decision
-from ..model import PendingApproval, Snapshot
+from ..model import NodeId, PendingApproval, Snapshot
 from ..theme import P
 
 # Keys that act on the selected item. Kept in one place because the help line and
@@ -35,7 +35,8 @@ SHORTCUTS: tuple[tuple[str, str], ...] = (
     ("a", "approve"),
     ("r", "reject"),
     ("e", "edit arguments"),
-    ("esc", "cancel edit"),
+    ("A", "approve all from this agent"),
+    ("esc", "cancel edit / confirm"),
 )
 
 
@@ -56,6 +57,11 @@ class ReviewState:
     editing: str | None = None
     edit_error: str | None = None
     focus_reason: bool = False
+    # Set when a global approve-all has been asked for but not yet confirmed.
+    # Approving everything across every agent is the one action here that can
+    # write things the operator never looked at, so it does not happen on one
+    # keystroke -- see confirm_global_approve.
+    confirming_global: bool = False
 
     def prune(self, live_ids: set[str]) -> None:
         for stale in [k for k in self.reasons if k not in live_ids]:
@@ -87,6 +93,40 @@ class ReviewState:
 
 def _selected(snap: Snapshot, state: ReviewState) -> PendingApproval | None:
     return next((p for p in snap.review_queue if p.id == state.selected), None)
+
+
+def approve_all_for_node(bridge: Bridge, snap: Snapshot, state: ReviewState, node: NodeId) -> int:
+    """
+    Approve every pending call from one agent.
+
+    Scoped batching is defensible in a way the global form is not: one agent's
+    queue is usually one coherent piece of work, and the operator has just been
+    reading its diffs. Returns how many were sent.
+    """
+    sent = 0
+    for pending in snap.review_queue:
+        if pending.node == node:
+            resolve(bridge, state, pending, approved=True)
+            sent += 1
+    return sent
+
+
+def approve_everything(bridge: Bridge, snap: Snapshot, state: ReviewState) -> int:
+    """
+    Approve the entire queue across every agent. Only reachable after a confirm.
+
+    This is in genuine tension with the premise -- "nothing is written until a human
+    approves it" and "approve twelve things with one key" do not fully coexist. It
+    exists because being the bottleneck for a fleet defeats the tool, and it is
+    gated behind an explicit confirmation showing the count because the failure mode
+    is silent and unrecoverable.
+    """
+    sent = 0
+    for pending in snap.review_queue:
+        resolve(bridge, state, pending, approved=True)
+        sent += 1
+    state.confirming_global = False
+    return sent
 
 
 def resolve(
@@ -143,7 +183,13 @@ def handle_keys(snap: Snapshot, state: ReviewState, bridge: Bridge) -> None:
     if pending is None:
         return
     if imgui.is_key_pressed(imgui.Key.a):
-        resolve(bridge, state, pending, approved=True)
+        # Shift+A is the batch form, scoped to the selected agent. Tested as one
+        # branch rather than two ifs: an unguarded pair fires both, so Shift+A
+        # would approve the selection *and* everything beside it.
+        if imgui.get_io().key_shift:
+            approve_all_for_node(bridge, snap, state, pending.node)
+        else:
+            resolve(bridge, state, pending, approved=True)
     if imgui.is_key_pressed(imgui.Key.r):
         state.focus_reason = True
     if imgui.is_key_pressed(imgui.Key.e):
@@ -151,6 +197,7 @@ def handle_keys(snap: Snapshot, state: ReviewState, bridge: Bridge) -> None:
         state.edits.setdefault(pending.id, _pretty_args(pending))
     if imgui.is_key_pressed(imgui.Key.escape):
         state.editing = None
+        state.confirming_global = False
         state.edits.pop(pending.id, None)
         state.edit_error = None
 
@@ -161,7 +208,9 @@ def _pretty_args(pending: PendingApproval) -> str:
     return json.dumps(dict(pending.raw_args), indent=2, sort_keys=True)
 
 
-def draw_queue(snap: Snapshot, state: ReviewState, now: float | None = None) -> None:
+def draw_queue(
+    snap: Snapshot, state: ReviewState, bridge: Bridge, now: float | None = None
+) -> None:
     """The work list. Compact by design: this is scanned, not read."""
     now = time.time() if now is None else now
     state.prune({p.id for p in snap.review_queue})
@@ -179,7 +228,10 @@ def draw_queue(snap: Snapshot, state: ReviewState, now: float | None = None) -> 
     imgui.separator()
 
     flags = imgui.TableFlags_.row_bg | imgui.TableFlags_.scroll_y
-    if not imgui.begin_table("##queue", 3, flags):
+    # Reserve the footer's height. A scrolling table otherwise claims the whole
+    # remaining pane and pushes the batch controls below the fold, where an action
+    # that needs deliberate discovery becomes one that cannot be found at all.
+    if not imgui.begin_table("##queue", 3, flags, imgui.ImVec2(0, -32)):
         return
     imgui.table_setup_column("agent", imgui.TableColumnFlags_.width_fixed, 130.0)
     imgui.table_setup_column("waiting", imgui.TableColumnFlags_.width_fixed, 70.0)
@@ -212,6 +264,37 @@ def draw_queue(snap: Snapshot, state: ReviewState, now: float | None = None) -> 
         imgui.pop_id()
 
     imgui.end_table()
+    _draw_batch_controls(snap, state, bridge)
+
+
+def _draw_batch_controls(snap: Snapshot, state: ReviewState, bridge: Bridge) -> None:
+    """
+    Batch actions, with the global one behind a confirm.
+
+    The scoped button is safe enough to be one click. The global one is not: it can
+    write things the operator never looked at, and that failure is silent and
+    unrecoverable, so it costs a second click that states the count.
+    """
+    selected = _selected(snap, state)
+    if selected is not None:
+        record = snap.nodes.get(selected.node)
+        label = (record.agent_type if record else None) or "this agent"
+        count = sum(1 for p in snap.review_queue if p.node == selected.node)
+        if imgui.button(f"approve all {count} from {label}"):
+            approve_all_for_node(bridge, snap, state, selected.node)
+        imgui.same_line()
+
+    total = len(snap.review_queue)
+    if state.confirming_global:
+        imgui.text_colored(P.danger.vec4, f"approve all {total} without reading them?")
+        imgui.same_line()
+        if imgui.button("yes, approve all"):
+            approve_everything(bridge, snap, state)
+        imgui.same_line()
+        if imgui.button("cancel"):
+            state.confirming_global = False
+    elif imgui.button(f"approve all {total}..."):
+        state.confirming_global = True
 
 
 def _waited(requested_at: float, now: float) -> str:

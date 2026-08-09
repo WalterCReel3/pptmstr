@@ -373,3 +373,60 @@ def test_partial_tool_json_is_not_written() -> None:
     tr, transcript = make()
     tr.handle(delta("input_json_delta", partial_json='{"file_pa'))
     assert transcript.text() == ""
+
+
+# -- sub-agent attribution -----------------------------------------------------
+
+SUB: NodeId = ("sess-1", "agent-a")
+
+
+def test_subagent_messages_attribute_to_the_subagent_node() -> None:
+    """
+    Without this the parent row narrates work it is not doing -- a live run showed
+    a session whose topic was its sub-agent's shell command.
+    """
+    tr, _ = make()
+    tr.subagent_by_tool_use = {"toolu_agent": SUB}
+    intents = tr.handle(
+        AssistantMessage(
+            content=[ToolUseBlock(id="t1", name="Bash", input={"command": "wc -l x"})],
+            model="m",
+            parent_tool_use_id="toolu_agent",
+        )
+    )
+    state = next(i for i in intents if isinstance(i, StateChanged))
+    assert state.node_id == SUB
+
+
+def test_root_messages_still_attribute_to_the_root() -> None:
+    tr, _ = make()
+    tr.subagent_by_tool_use = {"toolu_agent": SUB}
+    intents = tr.handle(AssistantMessage(content=[TextBlock(text="hi")], model="m"))
+    assert next(i for i in intents if isinstance(i, StateChanged)).node_id == NODE
+
+
+def test_unjoined_parent_falls_back_to_the_root() -> None:
+    """
+    The tool_use_id -> agent_id join is by adjacency and can miss under parallel
+    spawns. Falling back to the root keeps the activity visible rather than routing
+    it to a node that does not exist.
+    """
+    tr, _ = make()
+    intents = tr.handle(
+        AssistantMessage(content=[TextBlock(text="hi")], model="m", parent_tool_use_id="unknown")
+    )
+    assert next(i for i in intents if isinstance(i, StateChanged)).node_id == NODE
+
+
+def test_subagent_usage_is_billed_to_the_subagent() -> None:
+    tr, _ = make()
+    tr.subagent_by_tool_use = {"toolu_agent": SUB}
+    intents = tr.handle(
+        AssistantMessage(
+            content=[TextBlock(text="hi")],
+            model="m",
+            parent_tool_use_id="toolu_agent",
+            usage={"input_tokens": 5},
+        )
+    )
+    assert next(i for i in intents if isinstance(i, UsageAccrued)).node_id == SUB

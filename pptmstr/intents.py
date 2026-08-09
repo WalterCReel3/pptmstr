@@ -136,6 +136,19 @@ class AgentFinished:
 
 
 @dataclass(frozen=True, slots=True)
+class SubagentProgress:
+    """
+    A background sub-agent reported what it is doing.
+
+    Carried separately from TopicChanged because it arrives keyed by the spawning
+    tool_use_id rather than by agent_id, and the driver resolves that to a node.
+    """
+
+    node_id: NodeId
+    description: str
+
+
+@dataclass(frozen=True, slots=True)
 class AgentRemoved:
     """Dropped from the tree entirely. Descendants go with it."""
 
@@ -155,5 +168,6 @@ Intent = (
     | ApprovalRequested
     | ApprovalResolved
     | AgentFinished
+    | SubagentProgress
     | AgentRemoved
 )

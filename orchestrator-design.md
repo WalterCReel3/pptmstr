@@ -215,7 +215,57 @@ Feed it from `StreamEvent.event`:
 - `content_block_delta` / `input_json_delta` → append to `TOOL_CALL` (partial tool args)
 - `content_block_start` / `_stop` → open and close segments
 
-> **Two verification gaps to close during step 3 of §8.** (a) The exact event/type names for **extended-thinking / reasoning** deltas were not confirmed — check the `ContentBlock` union and `ThinkingBlock` in the Python SDK reference before building `REASONING` segment handling. (b) **Subagent streaming is reportedly not exposed as raw `StreamEvent`s** — only complete messages, with `StreamEvent.parent_tool_use_id` always null. If that holds, subagent transcripts arrive in turn-sized chunks, not token-by-token. Confirm early: it materially affects goal #3 for anything below the root.
+> ~~**Two verification gaps to close during step 3.**~~ **Both closed by running it** —
+> `scripts/verify_subagents.py`, live sub-agent spawns against the real CLI.
+>
+> **(a) Reasoning streams.** `ThinkingBlock(thinking, signature)` is real, and
+> `thinking_delta` arrives as a `content_block_delta`. Goal #3 holds at the root.
+>
+> **(b) Sub-agent output does *not* stream. The rev. 2 worry was correct.** Across
+> runs, **zero** `StreamEvent`s carried `parent_tool_use_id`. Sub-agent content
+> arrives only as complete `AssistantMessage`s. **Goal #3 does not hold below the
+> root, and the pane must say so rather than implying live output.**
+
+### 2.5.1 How sub-agents actually arrive (rev. 3, measured)
+
+Enough of this is surprising that it is worth stating flatly.
+
+**The spawn tool is called `Agent` at the hook, while the tool list advertises
+`Task`.** Both names must be classified or the gate has a hole exactly where it
+matters most. Confirmed: `PreToolUse tool_name=Agent`.
+
+**Sub-agents run as background tasks that outlive the turn that spawned them.**
+`receive_response()` returns at the *parent's* `ResultMessage`, which is before the
+sub-agent finishes — a consumer that stops there reports "no sub-agent activity"
+when the truth is that it stopped listening too early. That was the first run's
+false negative. Alongside this come `TaskStartedMessage` / `TaskProgressMessage` /
+`TaskUpdatedMessage` / `TaskNotificationMessage`.
+
+**There are two identifiers for one sub-agent, and no direct join:**
+
+| carries | identifier |
+|---|---|
+| `SubagentStart` / `SubagentStop`, and `PreToolUse` *inside* the sub-agent | `agent_id` |
+| `AssistantMessage`, `StreamEvent` | `parent_tool_use_id` (the `Agent` call's id) |
+| `TaskStarted` / `TaskProgress` / `TaskNotification` | `task_id` **and** `tool_use_id` |
+
+`SubagentStart` gives no `tool_use_id`; the `Agent` `PreToolUse` gives no `agent_id`.
+
+**So `NodeId` for a sub-agent is `(session_id, agent_id)`.** That is the identifier
+the *approval* path carries, and approvals are the product's premise — a hook firing
+inside a sub-agent reports `agent_id`, so a parked write is always attributed to the
+right node. The other identifier is joined by adjacency (`PreToolUse[Agent]` is
+immediately followed by `SubagentStart`), and that join is used **only for
+enrichment** — routing a progress description or output text. If it mis-pairs under
+parallel spawns from one parent, the cost is a topic under the wrong sibling, never
+a misattributed approval.
+
+**Two gifts worth taking.** `TaskProgressMessage.description` is a
+ready-made thinking topic for the sub-agent node ("Reading pptmstr/log.py") — free,
+current, and exactly what §2.6 asks for. And `SubagentStop` carries
+`last_assistant_message` plus `agent_transcript_path`, so the sub-agent's result and
+its full history are available without reconstructing either — consistent with §9,
+where the SDK's own JSONL is the record and ours is a view.
 
 ### 2.6 Thinking topic
 

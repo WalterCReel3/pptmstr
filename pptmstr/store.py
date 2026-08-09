@@ -34,6 +34,7 @@ from .intents import (
     ContextPolled,
     Intent,
     StateChanged,
+    SubagentProgress,
     TopicChanged,
     UsageAccrued,
 )
@@ -116,6 +117,16 @@ def _apply(snap: Snapshot, intent: Intent) -> Snapshot:
             if intent.topic is not None:
                 changes["topic"] = intent.topic
             nodes[intent.node_id] = rec.with_(**changes)
+
+        case SubagentProgress():
+            rec = nodes.get(intent.node_id)
+            if rec is None:
+                return snap
+            # Progress implies the sub-agent is working, which is the only signal
+            # there is: sub-agent content does not stream (§2.5.1), so without this
+            # the row would sit at SPAWNING until it finished.
+            state = rec.state if rec.state.is_terminal else AgentState.RUNNING_TOOL
+            nodes[intent.node_id] = rec.with_(topic=intent.description, state=state)
 
         case TopicChanged():
             rec = nodes.get(intent.node_id)

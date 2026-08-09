@@ -36,6 +36,8 @@ from claude_agent_sdk import (
     RateLimitEvent,
     ResultMessage,
     StreamEvent,
+    SubagentStartHookInput,
+    SubagentStopHookInput,
     SystemMessage,
     TextBlock,
     ThinkingBlock,
@@ -55,6 +57,7 @@ from .intents import (
     ContextPolled,
     Intent,
     StateChanged,
+    SubagentProgress,
     TopicChanged,
     UsageAccrued,
 )
@@ -71,6 +74,10 @@ APPROVAL_TIMEOUT_S = 6 * 60 * 60
 # Slow on purpose: get_context_usage is a control request, not a push, and the
 # number it returns moves on the scale of turns rather than frames.
 CONTEXT_POLL_S = 20.0
+
+# How long to keep reading after the stream goes quiet. Only reached when a
+# sub-agent is still outstanding; the loop otherwise exits on the parent result.
+SUBAGENT_GRACE_S = 120.0
 
 
 def _hook_output(decision: str, reason: str | None = None) -> HookJSONOutput:
@@ -139,6 +146,23 @@ class Translator:
     # Whether deltas have already written the current message's content. Set by
     # _stream, consumed and cleared by _assistant.
     _streamed_content: bool = False
+    # tool_use_id of an Agent call -> the sub-agent NodeId it became. Populated by
+    # the session once SubagentStart has been joined; used to route Task* progress,
+    # which is keyed by tool_use_id rather than agent_id (§2.5.1).
+    subagent_by_tool_use: dict[str, NodeId] = field(default_factory=dict)
+
+    def _node_of(self, message: object) -> NodeId:
+        """
+        Which node a message describes.
+
+        Sub-agent messages carry parent_tool_use_id -- the id of the Agent call that
+        spawned them -- so without this every sub-agent's activity is attributed to
+        its parent, and the parent row narrates work it is not doing.
+        """
+        parent = getattr(message, "parent_tool_use_id", None)
+        if parent:
+            return self.subagent_by_tool_use.get(parent, self.node_id)
+        return self.node_id
 
     def handle(self, message: object) -> list[Intent]:
         if isinstance(message, AssistantMessage):
@@ -160,6 +184,7 @@ class Translator:
     def _assistant(self, msg: AssistantMessage) -> list[Intent]:
         out: list[Intent] = []
         topic: str | None = None
+        node = self._node_of(msg)
 
         # With include_partial_messages on, every text and thinking block has already
         # arrived delta by delta, and the complete message repeats it in full. Writing
@@ -187,10 +212,10 @@ class Translator:
                 topic = _tool_topic(block.name, block.input)
 
         if msg.usage:
-            out.append(UsageAccrued(self.node_id, _usage_from(msg.usage)))
+            out.append(UsageAccrued(node, _usage_from(msg.usage)))
         out.append(
             StateChanged(
-                self.node_id,
+                node,
                 AgentState.CALLING_TOOL if topic else AgentState.THINKING,
                 topic=topic,
             )
@@ -209,7 +234,7 @@ class Translator:
                 name = self._tool_names.get(block.tool_use_id, "tool")
                 kind = SegmentKind.ERROR if block.is_error else SegmentKind.TOOL_RESULT
                 self.transcript.append(kind, f"{name} -> {_compact_result(block.content)}\n")
-        return [StateChanged(self.node_id, AgentState.THINKING)]
+        return [StateChanged(self._node_of(msg), AgentState.THINKING)]
 
     def _result(self, msg: ResultMessage) -> list[Intent]:
         out: list[Intent] = []
@@ -253,6 +278,18 @@ class Translator:
         return []
 
     def _system(self, msg: SystemMessage) -> list[Intent]:
+        if msg.subtype in ("task_started", "task_progress"):
+            # The one live signal a background sub-agent gives: a human-readable
+            # description of what it is doing. Free and current -- exactly what a
+            # thinking topic is supposed to be (§2.6), and the only thing standing
+            # in for the stream sub-agents do not produce.
+            data = msg.data
+            tool_use_id = str(data.get("tool_use_id", ""))
+            description = str(data.get("description", "") or "")
+            node = self.subagent_by_tool_use.get(tool_use_id)
+            if node is not None and description:
+                return [SubagentProgress(node, description)]
+            return []
         if msg.subtype == "compact_boundary":
             self.transcript.append(
                 SegmentKind.COMPACTION, "\n--- context compacted; earlier reasoning discarded ---\n"
@@ -349,10 +386,63 @@ class AgentSession:
         # Whether an operator is attached to answer. False means headless, where a
         # tool needing approval is denied rather than left to hit the timeout.
         self.interactive = interactive
+        # agent_id -> the Agent call's tool_use_id, joined by adjacency: an
+        # Agent PreToolUse is immediately followed by SubagentStart. Used only to
+        # route progress descriptions and output (§2.5.1); approvals never depend
+        # on it, because a hook inside a sub-agent reports agent_id directly.
+        self._spawn_tool_use: dict[str, str] = {}
+        self._last_spawn_tool_use_id: str | None = None
+        self._subagents: set[str] = set()
         self._client: ClaudeSDKClient | None = None
         self.transcript_path: str | None = None
 
     # -- hooks -------------------------------------------------------------------
+
+    def _node_for(self, agent_id: str | None) -> NodeId:
+        """The node a hook belongs to: the root session, or one of its sub-agents."""
+        return (self.session_id, agent_id) if agent_id else self.node_id
+
+    async def _subagent_start(
+        self, hook_input: HookInput, _tool_use_id: str | None, _context: HookContext
+    ) -> HookJSONOutput:
+        data = cast(SubagentStartHookInput, hook_input)
+        agent_id = str(data.get("agent_id", ""))
+        agent_type = str(data.get("agent_type", "") or "agent")
+        if not agent_id:
+            return {}
+        self._subagents.add(agent_id)
+        if self._last_spawn_tool_use_id:
+            self._spawn_tool_use[agent_id] = self._last_spawn_tool_use_id
+            self._last_spawn_tool_use_id = None
+        self.bridge.emit(
+            AgentSpawned(
+                node_id=(self.session_id, agent_id),
+                parent=self.node_id,
+                task=agent_type,
+                model=self.model,
+                started_at=time.monotonic(),
+                agent_type=agent_type,
+                topic="starting",
+            )
+        )
+        return {}
+
+    async def _subagent_stop(
+        self, hook_input: HookInput, _tool_use_id: str | None, _context: HookContext
+    ) -> HookJSONOutput:
+        data = cast(SubagentStopHookInput, hook_input)
+        agent_id = str(data.get("agent_id", ""))
+        if not agent_id:
+            return {}
+        node = (self.session_id, agent_id)
+        # last_assistant_message is the sub-agent's answer, handed over without
+        # having to reconstruct it from a stream that never arrives (§2.5.1).
+        summary = str(data.get("last_assistant_message", "") or "")
+        if summary:
+            self.bridge.emit(SubagentProgress(node, summary.splitlines()[0][:80]))
+        self.bridge.emit(AgentFinished(node, AgentState.DONE, time.monotonic()))
+        self._subagents.discard(agent_id)
+        return {}
 
     async def _pre_tool_use(
         self, hook_input: HookInput, _tool_use_id: str | None, _context: HookContext
@@ -366,6 +456,15 @@ class AgentSession:
         # Recorded because it is the authoritative session log; ours is a view (§9).
         self.transcript_path = data.get("transcript_path") or self.transcript_path
 
+        # agent_id is present only when the call comes from inside a sub-agent, and
+        # it is the only reliable attribution when several run in parallel.
+        agent_id = data.get("agent_id")
+        node = self._node_for(agent_id)
+        # The hook-visible name is "Agent" even though the tool list says "Task"
+        # (§2.5.1). Remember the id so the SubagentStart that follows can be joined.
+        if tool_name in ("Agent", "Task") and not agent_id:
+            self._last_spawn_tool_use_id = str(data.get("tool_use_id", "")) or None
+
         disposition = classify(tool_name, tool_input)
         if disposition is Disposition.AUTO_APPROVE:
             return _hook_output("allow")
@@ -376,10 +475,10 @@ class AgentSession:
             # timeout. A run with no operator must fail closed and say why.
             return _hook_output("deny", f"{tool_name} needs approval and no operator is attached")
 
-        return await self._park(tool_name, tool_input, str(data.get("tool_use_id", "")))
+        return await self._park(tool_name, tool_input, str(data.get("tool_use_id", "")), node)
 
     async def _park(
-        self, tool_name: str, tool_input: dict[str, Any], tool_use_id: str
+        self, tool_name: str, tool_input: dict[str, Any], tool_use_id: str, node: NodeId
     ) -> HookJSONOutput:
         """
         Block this agent until the operator decides. I8, structurally.
@@ -390,7 +489,7 @@ class AgentSession:
         """
         pending = PendingApproval(
             id=f"{self.session_id[:8]}-{tool_use_id or uuid.uuid4().hex[:8]}",
-            node=self.node_id,
+            node=node,
             tool_name=tool_name,
             tool_use_id=tool_use_id,
             raw_args=dict(tool_input),
@@ -399,7 +498,7 @@ class AgentSession:
             diff=render_diff(tool_name, tool_input),
         )
         future = self.bridge.park(pending.id)
-        self.bridge.emit(ApprovalRequested(self.node_id, pending))
+        self.bridge.emit(ApprovalRequested(node, pending))
 
         try:
             decision = await future
@@ -408,14 +507,12 @@ class AgentSession:
             # arrive as a cancellation of this coroutine, §5.2.1), or the session is
             # torn down. Either way the store still has the pending row, and leaving
             # it there would show an approval that can never be answered.
-            self.bridge.emit(
-                ApprovalResolved(self.node_id, pending.id, approved=False, reason="cancelled")
-            )
+            self.bridge.emit(ApprovalResolved(node, pending.id, approved=False, reason="cancelled"))
             raise
 
         self.bridge.emit(
             ApprovalResolved(
-                self.node_id,
+                node,
                 pending.id,
                 approved=decision.approved,
                 reason=decision.reason,
@@ -457,6 +554,8 @@ class AgentSession:
             hooks={
                 "PreToolUse": [HookMatcher(hooks=[self._pre_tool_use], timeout=APPROVAL_TIMEOUT_S)],
                 "PreCompact": [HookMatcher(hooks=[self._pre_compact])],
+                "SubagentStart": [HookMatcher(hooks=[self._subagent_start])],
+                "SubagentStop": [HookMatcher(hooks=[self._subagent_stop])],
             },
         )
 
@@ -495,9 +594,23 @@ class AgentSession:
                 await self._poll_context()
 
                 last_poll = time.monotonic()
-                async for message in client.receive_response():
+                # receive_messages, not receive_response. A sub-agent launched by
+                # the Agent tool is a background task that outlives the parent's
+                # ResultMessage (§2.5.1); stopping at the result would drop its
+                # completion and leave its row running forever.
+                #
+                # Read with no timeout. The stream legitimately goes silent for as
+                # long as the operator takes to answer an approval -- a blanket read
+                # deadline here would tear down a session that is correctly parked,
+                # which is I8 broken by the plumbing rather than by the design.
+                async for message in client.receive_messages():
+                    self._sync_subagent_map(translator)
                     for intent in translator.handle(message):
                         self.bridge.emit(intent)
+                    if isinstance(message, ResultMessage):
+                        if self._subagents:
+                            await self._await_subagents(client, translator)
+                        break
                     if time.monotonic() - last_poll > CONTEXT_POLL_S:
                         await self._poll_context()
                         last_poll = time.monotonic()
@@ -518,6 +631,34 @@ class AgentSession:
             )
         finally:
             self._client = None
+
+    def _sync_subagent_map(self, translator: Translator) -> None:
+        """Republish the tool_use_id -> node join the translator needs for progress."""
+        translator.subagent_by_tool_use = {
+            tool_use_id: (self.session_id, agent_id)
+            for agent_id, tool_use_id in self._spawn_tool_use.items()
+        }
+
+    async def _await_subagents(self, client: ClaudeSDKClient, translator: Translator) -> None:
+        """
+        Keep reading after the parent's result while sub-agents are still running.
+
+        Bounded, unlike the main loop. Here the stream really may just go quiet: the
+        parent is finished, so nothing will produce another message if a background
+        task ends without reporting. The bound therefore only ever cuts short a
+        sub-agent that has stopped talking -- never an agent parked on the operator,
+        which is why the main loop reads with no deadline at all.
+        """
+        stream = client.receive_messages()
+        while self._subagents:
+            try:
+                message = await asyncio.wait_for(stream.__anext__(), timeout=SUBAGENT_GRACE_S)
+            except (TimeoutError, StopAsyncIteration):
+                LOG.warn("agent", f"{len(self._subagents)} sub-agent(s) stopped reporting")
+                return
+            self._sync_subagent_map(translator)
+            for intent in translator.handle(message):
+                self.bridge.emit(intent)
 
     async def _poll_context(self) -> None:
         """

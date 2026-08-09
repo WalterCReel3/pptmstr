@@ -105,7 +105,9 @@ class FakeDriver:
         for _ in range(2):
             self._spawn(parent=root, agent_type=self.rng.choice(("Explore", "code-reviewer")))
         second = self._spawn(parent=None, agent_type=None)
-        self._spawn(parent=second, agent_type="general-purpose")
+        third = self._spawn(parent=second, agent_type="general-purpose")
+        # A grandchild, so the pane's depth handling is exercised rather than assumed.
+        self._spawn(parent=third, agent_type="Explore")
 
         # One of each interesting terminal/edge state, so the pane's less common
         # branches are visible on launch rather than only after a long wait.
@@ -117,6 +119,10 @@ class FakeDriver:
         self.bridge.emit(ContextPolled(second, _context(8_000)))
 
         self.bridge.emit(ApprovalRequested(self.nodes[1], self._pending(self.nodes[1], "Write")))
+        # Two more, on different nodes, so the queue is genuinely cross-agent and
+        # the scoped batch button has something to act on.
+        self.bridge.emit(ApprovalRequested(self.nodes[2], self._pending(self.nodes[2], "Edit")))
+        self.bridge.emit(ApprovalRequested(self.nodes[3], self._pending(self.nodes[3], "Bash")))
         self.bridge.emit(
             AgentFinished(
                 self.nodes[4],
