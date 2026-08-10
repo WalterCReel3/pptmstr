@@ -93,6 +93,28 @@ class SessionPool:
         self.cap = max(1, cap)
         self._drain()
 
+    async def send(self, node_id: NodeId, text: str) -> None:
+        """Send another prompt to a live session."""
+        session = self.session_for(node_id)
+        if session is not None:
+            await session.send(text)
+
+    async def close(self, node_id: NodeId) -> None:
+        """
+        End a session and free its slot.
+
+        Sessions no longer end by themselves -- a finished turn leaves the client
+        connected so the conversation can continue -- so closing is the only way a
+        subprocess is reclaimed. That makes the cap a limit on *live* sessions
+        rather than on concurrent work, and makes this a first-class action rather
+        than a tidy-up.
+        """
+        task = self._running.pop(node_id, None)
+        if task is not None:
+            task.cancel()
+        self.sessions.pop(node_id, None)
+        self._drain()
+
     async def interrupt(self, node_id: NodeId) -> None:
         """
         Stop a session's current work without ending the session.

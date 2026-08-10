@@ -582,15 +582,24 @@ class AgentSession:
         )
 
     async def run(self) -> None:
-        """Connect, send the task, pump messages until the turn ends."""
+        """
+        Connect, send the opening task, then stay connected for further turns.
+
+        The session does **not** end when a turn does. A turn ending means the agent
+        stopped talking, which happens both when it has finished the job and when it
+        has asked a question -- and those are not the same thing. Disconnecting at
+        the first ResultMessage made them indistinguishable and made replying
+        impossible in principle rather than merely unimplemented.
+
+        The loop therefore runs until the session is closed, which cancels this task.
+        """
         self.announce()
         translator = Translator(self.node_id, self.transcript)
 
         try:
             async with ClaudeSDKClient(options=self._options()) as client:
                 self._client = client
-                self.bridge.emit(StateChanged(self.node_id, AgentState.THINKING, topic="starting"))
-                await client.query(self.task)
+                await self.send(self.task)
                 await self._poll_context()
 
                 last_poll = time.monotonic()
@@ -600,9 +609,10 @@ class AgentSession:
                 # completion and leave its row running forever.
                 #
                 # Read with no timeout. The stream legitimately goes silent for as
-                # long as the operator takes to answer an approval -- a blanket read
-                # deadline here would tear down a session that is correctly parked,
-                # which is I8 broken by the plumbing rather than by the design.
+                # long as the operator takes to answer an approval or to type the
+                # next prompt -- a blanket read deadline here would tear down a
+                # session that is correctly waiting, which is I8 broken by the
+                # plumbing rather than by the design.
                 async for message in client.receive_messages():
                     self._sync_subagent_map(translator)
                     for intent in translator.handle(message):
@@ -610,12 +620,26 @@ class AgentSession:
                     if isinstance(message, ResultMessage):
                         if self._subagents:
                             await self._await_subagents(client, translator)
-                        break
+                        await self._poll_context()
+                        # Ready for another prompt rather than finished. Idle, so a
+                        # conversation paused on the operator still costs nothing.
+                        self.bridge.emit(
+                            StateChanged(
+                                self.node_id,
+                                AgentState.AWAITING_INPUT,
+                                topic="waiting for you",
+                            )
+                        )
                     if time.monotonic() - last_poll > CONTEXT_POLL_S:
                         await self._poll_context()
                         last_poll = time.monotonic()
 
-                await self._poll_context()
+                # Only reached if the CLI closed the stream on us.
+                self.bridge.emit(AgentFinished(self.node_id, AgentState.DONE, time.monotonic()))
+        except asyncio.CancelledError:
+            # The normal way a session ends: the operator closed it.
+            self.bridge.emit(AgentFinished(self.node_id, AgentState.DONE, time.monotonic()))
+            raise
         except Exception as exc:
             # The session dying must not take the asyncio thread with it: other
             # agents keep running and the UI has to be told why this one stopped.
@@ -631,6 +655,25 @@ class AgentSession:
             )
         finally:
             self._client = None
+
+    async def send(self, text: str) -> None:
+        """
+        Send a prompt on the live session. The opening task uses this too.
+
+        Safe to call while the message loop is iterating: query() writes to the
+        subprocess's stdin while the loop reads its stdout, so the two do not
+        contend. This is the whole point of holding a connected client rather than
+        a one-shot query.
+        """
+        client = self._client
+        if client is None:
+            LOG.warn("agent", "cannot send: session is not connected")
+            return
+        self.transcript.append(SegmentKind.SYSTEM, f"\n> {text}\n")
+        self.bridge.emit(
+            StateChanged(self.node_id, AgentState.THINKING, topic="reading your message")
+        )
+        await client.query(text)
 
     def _sync_subagent_map(self, translator: Translator) -> None:
         """Republish the tool_use_id -> node join the translator needs for progress."""

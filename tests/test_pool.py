@@ -30,6 +30,7 @@ class StubSession:
         self.started = False
         self.finished = False
         self.interrupted = False
+        self.sent: list[str] = []
         self._hold = hold
 
     def announce(self) -> None:
@@ -45,6 +46,9 @@ class StubSession:
 
     async def interrupt(self) -> None:
         self.interrupted = True
+
+    async def send(self, text: str) -> None:
+        self.sent.append(text)
 
 
 @pytest.fixture()
@@ -227,3 +231,61 @@ def test_shutdown_cancels_everything(bridge: Bridge) -> None:
     run_on(bridge, pool.shutdown())
     assert pool.running_count == 0
     assert pool.queued_count == 0
+
+
+# -- conversational sessions ---------------------------------------------------
+
+
+def test_close_ends_a_session_and_frees_its_slot(bridge: Bridge) -> None:
+    """
+    Sessions no longer end by themselves, so closing is the only way a subprocess
+    is reclaimed. That makes the cap a limit on live sessions rather than on
+    concurrent work, and makes close a first-class action.
+    """
+    pool = SessionPool(bridge, cap=1)
+    hold = asyncio.Event()
+    first = StubSession("first", hold)
+    second = StubSession("second", asyncio.Event())
+
+    async def submit() -> None:
+        pool.submit(first)  # type: ignore[arg-type]
+        pool.submit(second)  # type: ignore[arg-type]
+
+    run_on(bridge, submit())
+    wait_until(lambda: first.started)
+    assert not second.started
+
+    run_on(bridge, pool.close(first.node_id))
+    wait_until(lambda: second.started)
+    assert first.node_id not in pool.sessions
+
+
+def test_closing_an_unknown_node_is_harmless(bridge: Bridge) -> None:
+    """The UI can ask twice, or ask about a node that just went away."""
+    pool = SessionPool(bridge, cap=2)
+    run_on(bridge, pool.close(("nope", None)))
+
+
+def test_send_reaches_the_owning_session(bridge: Bridge) -> None:
+    pool = SessionPool(bridge, cap=2)
+    session = StubSession("sess-1", asyncio.Event())
+
+    async def submit() -> None:
+        pool.submit(session)  # type: ignore[arg-type]
+
+    run_on(bridge, submit())
+    run_on(bridge, pool.send(("sess-1", None), "another turn"))
+    assert session.sent == ["another turn"]
+
+
+def test_send_from_a_subagent_node_reaches_the_root_session(bridge: Bridge) -> None:
+    """Sub-agents have no input channel; a message routes to the owning session."""
+    pool = SessionPool(bridge, cap=2)
+    session = StubSession("sess-1", asyncio.Event())
+
+    async def submit() -> None:
+        pool.submit(session)  # type: ignore[arg-type]
+
+    run_on(bridge, submit())
+    run_on(bridge, pool.send(("sess-1", "agent-a"), "hello"))
+    assert session.sent == ["hello"]

@@ -53,15 +53,25 @@ Early. Following the build order in [orchestrator-design.md](orchestrator-design
 make check              # lint + typecheck + tests
 make run                # launch
 
-.venv/bin/python -m pptmstr --fake              # UI only, no SDK, no cost
-.venv/bin/python -m pptmstr --task "..."        # one real agent
+.venv/bin/python -m pptmstr                     # start empty, launch from the UI
+.venv/bin/python -m pptmstr --task "..." --cwd ~/some/project
 .venv/bin/python -m pptmstr --task a --task b --cap 2   # concurrent, bounded
+.venv/bin/python -m pptmstr --fake              # UI only, no SDK, no cost
 ```
 
 Reads auto-approve. Everything that writes, runs a shell, reaches the network or
 spawns a sub-agent parks in the review queue until you answer it — as does any tool
 this build has never heard of. With no operator attached the gate denies rather than
 hanging.
+
+Sessions are **conversations, not one-shot runs**. A finished turn leaves the
+session connected and marks it `YOUR TURN` — send another prompt, interrupt the
+current turn, or close the session to reclaim its subprocess. An agent that asks a
+question is therefore something you can answer rather than something that looks
+finished.
+
+Start sessions from the **LAUNCH** pane, each with its own working directory and
+model, so one window can drive work across several projects.
 
 The review loop is keyboard-driven: `j`/`k` to move, `a` approve, `r` reject with a
 reason the agent sees, `e` edit the arguments and approve the corrected call,

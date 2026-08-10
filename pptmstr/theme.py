@@ -104,6 +104,7 @@ class Palette:
     state_calling_tool: Color
     state_awaiting: Color
     state_running: Color
+    state_awaiting_input: Color
     state_done: Color
     state_failed: Color
     state_cancelled: Color
@@ -133,6 +134,7 @@ _STATE_ROLE: dict[AgentState, str] = {
     AgentState.CALLING_TOOL: "state_calling_tool",
     AgentState.AWAITING_APPROVAL: "state_awaiting",
     AgentState.RUNNING_TOOL: "state_running",
+    AgentState.AWAITING_INPUT: "state_awaiting_input",
     AgentState.DONE: "state_done",
     AgentState.FAILED: "state_failed",
     AgentState.CANCELLED: "state_cancelled",
@@ -154,6 +156,7 @@ STATE_GLYPH: dict[AgentState, str] = {
     AgentState.CALLING_TOOL: fa.ICON_FA_ARROW_RIGHT_LONG,
     AgentState.AWAITING_APPROVAL: fa.ICON_FA_HAND,
     AgentState.RUNNING_TOOL: fa.ICON_FA_GEARS,
+    AgentState.AWAITING_INPUT: fa.ICON_FA_COMMENT_DOTS,
     AgentState.DONE: fa.ICON_FA_CHECK,
     AgentState.FAILED: fa.ICON_FA_TRIANGLE_EXCLAMATION,
     AgentState.CANCELLED: fa.ICON_FA_BAN,
@@ -166,6 +169,7 @@ STATE_LABEL: dict[AgentState, str] = {
     AgentState.CALLING_TOOL: "calling",
     AgentState.AWAITING_APPROVAL: "REVIEW",
     AgentState.RUNNING_TOOL: "running",
+    AgentState.AWAITING_INPUT: "YOUR TURN",
     AgentState.DONE: "done",
     AgentState.FAILED: "failed",
     AgentState.CANCELLED: "cancelled",
@@ -195,6 +199,7 @@ DARK = Palette(
     state_calling_tool=col(0x8AB4F8),
     state_awaiting=col(0xE8B339),
     state_running=col(0x4EC97E),
+    state_awaiting_input=col(0x8AB4F8),
     state_done=col(0x6E7688),
     state_failed=col(0xE5484D),
     state_cancelled=col(0x6E7688),
@@ -230,6 +235,7 @@ LIGHT = Palette(
     state_calling_tool=col(0x2A4FA8),
     state_awaiting=col(0x8A5A00),
     state_running=col(0x1A6E3C),
+    state_awaiting_input=col(0x2A4FA8),
     state_done=col(0x6B7280),
     state_failed=col(0xB3211F),
     state_cancelled=col(0x6B7280),
@@ -269,6 +275,7 @@ HIGH_CONTRAST = Palette(
     state_calling_tool=col(0x8FB8FF),
     state_awaiting=col(0xFFD400),
     state_running=col(0x4CFF88),
+    state_awaiting_input=col(0x8FB8FF),
     state_done=col(0xC0C0C0),
     state_failed=col(0xFF6B6B),
     state_cancelled=col(0xC0C0C0),
@@ -307,6 +314,7 @@ GHOST = Palette(
     state_calling_tool=col(0x4FD6FF),
     state_awaiting=col(0xE8C547),
     state_running=col(0x5BE8A0),
+    state_awaiting_input=col(0x4FD6FF),
     state_done=col(0x4A6B66),
     state_failed=col(0xFF5470),
     state_cancelled=col(0x4A6B66),

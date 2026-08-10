@@ -37,7 +37,10 @@ class AgentState(enum.Enum):
 
     SPAWNING -> THINKING <-> CALLING_TOOL -> AWAITING_APPROVAL -> RUNNING_TOOL
                                           \\-> (auto-approved) -/
+      -> AWAITING_INPUT  (turn over, session live, operator may send another)
       -> DONE | FAILED | CANCELLED | RATE_LIMITED
+
+    DONE means the operator closed the session, not that a turn ended.
     """
 
     SPAWNING = "spawning"
@@ -45,6 +48,12 @@ class AgentState(enum.Enum):
     CALLING_TOOL = "calling_tool"
     AWAITING_APPROVAL = "awaiting_approval"
     RUNNING_TOOL = "running_tool"
+    # Turn finished, session still connected, ready for another prompt. Idle, like
+    # AWAITING_APPROVAL: a conversation paused on the operator must cost nothing.
+    # This is what DONE used to be mistaken for -- an agent that has asked a
+    # question and one that has finished the job are not the same thing, and
+    # rendering both as DONE is what made a waiting agent look complete.
+    AWAITING_INPUT = "awaiting_input"
     DONE = "done"
     FAILED = "failed"
     CANCELLED = "cancelled"

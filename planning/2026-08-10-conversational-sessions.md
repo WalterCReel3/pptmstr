@@ -1,6 +1,6 @@
 # Sessions are one-shot, and questions fall through the gap
 
-**Dated:** 2026-08-10 · **Status:** proposed, not started · **Found by:** dogfooding
+**Dated:** 2026-08-10 · **Status:** built 2026-08-10 · **Found by:** dogfooding
 
 ## What was observed
 

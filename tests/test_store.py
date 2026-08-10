@@ -458,3 +458,17 @@ def test_finishing_a_parked_node_still_works() -> None:
     rec = store.snapshot().nodes[ROOT]
     assert rec.state is AgentState.CANCELLED
     assert rec.pending is None
+
+
+def test_awaiting_input_is_idle_not_terminal() -> None:
+    """
+    A conversation paused on the operator must cost nothing (the I8 argument),
+    and must not be mistaken for a finished session -- which is the confusion
+    that made an agent asking a question look like one that had finished.
+    """
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(StateChanged(ROOT, AgentState.AWAITING_INPUT))
+    assert store.snapshot().any_active is False
+    assert AgentState.AWAITING_INPUT.is_terminal is False
+    assert AgentState.DONE.is_terminal is True

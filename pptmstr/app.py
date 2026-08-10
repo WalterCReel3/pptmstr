@@ -26,7 +26,7 @@ from .model import Snapshot
 from .pool import SessionPool
 from .store import Store
 from .theme import REQUIRED_THEMES, THEMES, P
-from .ui import review, transcript_pane, tree
+from .ui import compose, review, transcript_pane, tree
 
 
 @dataclass
@@ -41,6 +41,7 @@ class AppState:
     settings: settings_mod.Settings
     view: tree.ViewState = field(default_factory=tree.ViewState)
     review: review.ReviewState = field(default_factory=review.ReviewState)
+    compose: compose.ComposeState = field(default_factory=compose.ComposeState)
     transcripts: transcript_pane.TranscriptState = field(
         default_factory=transcript_pane.TranscriptState
     )
@@ -192,6 +193,27 @@ def _apply_theme_if_dirty(state: AppState) -> None:
     state.theme_dirty = False
 
 
+def _launch(state: AppState, task: str, model: str, cwd: str) -> None:
+    """Start a session. Safe from the UI thread; the pool is touched on the loop."""
+    pool = state.pool
+    if pool is None:
+        return
+
+    async def go() -> None:
+        pool.submit(AgentSession(state.bridge, task, model=model, cwd=cwd))
+
+    state.bridge.submit(go())
+    LOG.info("app", f"launched in {cwd}: {task[:60]}")
+
+
+def _session_action(state: AppState, coro_factory: Callable[[SessionPool], object]) -> None:
+    """Run a pool operation on the asyncio thread."""
+    pool = state.pool
+    if pool is None:
+        return
+    state.bridge.submit(coro_factory(pool))  # type: ignore[arg-type]
+
+
 def _menus(state: AppState) -> None:
     if imgui.begin_menu("Theme"):
         for name, palette in THEMES.items():
@@ -304,12 +326,39 @@ def _docking_params(state: AppState) -> hello_imgui.DockingParams:
         if state.frame_snap is not None:
             transcript_pane.draw(state.frame_snap, state.transcripts, state.view.selected)
 
+    def draw_launcher() -> None:
+        pool = state.pool
+        if state.frame_snap is None or pool is None:
+            return
+        compose.draw_launcher(
+            state.compose,
+            state.frame_snap,
+            running=pool.running_count,
+            queued=pool.queued_count,
+            cap=pool.cap,
+            launch=lambda task, model, cwd: _launch(state, task, model, cwd),
+        )
+
+    def draw_conversation() -> None:
+        if state.frame_snap is None:
+            return
+        compose.draw_conversation(
+            state.frame_snap,
+            state.compose,
+            state.view.selected,
+            send=lambda node, text: _session_action(state, lambda p: p.send(node, text)),
+            interrupt=lambda node: _session_action(state, lambda p: p.interrupt(node)),
+            close=lambda node: _session_action(state, lambda p: p.close(node)),
+        )
+
     params.dockable_windows = [
         window("AGENTS", "MainDockSpace", guarded("AGENTS", draw_agents)),
         window("REVIEW", "BottomSpace", guarded("REVIEW", draw_queue)),
         window("DETAIL", "RightSpace", guarded("DETAIL", draw_review_detail)),
         window("TRANSCRIPT", "RightSpace", guarded("TRANSCRIPT", draw_transcript)),
         window("LOG", "BottomSpace", guarded("LOG", _log_panel)),
+        window("LAUNCH", "BottomSpace", guarded("LAUNCH", draw_launcher)),
+        window("TALK", "RightSpace", guarded("TALK", draw_conversation)),
     ]
     return params
 
@@ -339,6 +388,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--model", default=None, help="model for --task")
     ap.add_argument("--cap", type=int, default=None, help="max concurrent sessions")
+    ap.add_argument("--cwd", default=".", help="working directory for --task sessions")
     ap.add_argument("--fps-idle", type=float, default=None)
     args = ap.parse_args(argv)
 
@@ -352,6 +402,7 @@ def main(argv: list[str] | None = None) -> int:
     theme.set_theme(loaded.theme)
 
     state = AppState(store=Store(), bridge=Bridge(), settings=loaded)
+    state.pool = SessionPool(state.bridge, cap=state.settings.concurrency_cap)
 
     runner = hello_imgui.RunnerParams()
     runner.app_window_params.window_title = "pptmstr"
@@ -406,16 +457,14 @@ def main(argv: list[str] | None = None) -> int:
         state.driver = FakeDriver(state.bridge)
         state.bridge.submit(state.driver.run())
     if args.task:
-        pool = SessionPool(state.bridge, cap=state.settings.concurrency_cap)
-        state.pool = pool
 
-        async def launch() -> None:
+        async def launch_initial() -> None:
             # Submitting from the loop thread keeps every mutation of the pool on
             # one thread, so it needs no lock of its own.
             for task_text in args.task:
-                pool.submit(AgentSession(state.bridge, task_text, model=args.model))
+                _launch(state, task_text, args.model or compose.MODELS[0], args.cwd)
 
-        state.bridge.submit(launch())
+        state.bridge.submit(launch_initial())
         LOG.info("app", f"{len(args.task)} task(s), cap {state.settings.concurrency_cap}")
 
     try:
