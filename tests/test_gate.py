@@ -112,7 +112,7 @@ def test_write_parks_the_agent_and_reaches_the_store(bridge: Bridge) -> None:
     assert decision_of(out) == "allow"
 
     pump(store, bridge, lambda: not store.snapshot().review_queue)
-    assert store.snapshot().nodes[session.node_id].pending is None
+    assert store.snapshot().nodes[session.node_id].pending == ()
 
 
 def test_rejection_carries_the_reason_to_the_model(bridge: Bridge) -> None:
@@ -206,7 +206,7 @@ def test_cancellation_clears_the_pending_row(bridge: Bridge) -> None:
 
     task.cancel()
     pump(store, bridge, lambda: not store.snapshot().review_queue)
-    assert store.snapshot().nodes[session.node_id].pending is None
+    assert store.snapshot().nodes[session.node_id].pending == ()
 
 
 def test_shutdown_releases_a_parked_gate() -> None:

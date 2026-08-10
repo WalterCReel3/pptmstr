@@ -263,7 +263,7 @@ def test_approval_request_parks_the_agent() -> None:
     store.apply(ApprovalRequested(ROOT, pending(ROOT)))
     rec = store.snapshot().nodes[ROOT]
     assert rec.state is AgentState.AWAITING_APPROVAL
-    assert rec.pending is not None and rec.pending.id == "p1"
+    assert [p.id for p in rec.pending] == ["p1"]
 
 
 def test_resolution_clears_pending() -> None:
@@ -272,7 +272,7 @@ def test_resolution_clears_pending() -> None:
     store.apply(ApprovalRequested(ROOT, pending(ROOT)))
     store.apply(ApprovalResolved(ROOT, "p1", approved=True))
     rec = store.snapshot().nodes[ROOT]
-    assert rec.pending is None
+    assert rec.pending == ()
     assert rec.state is AgentState.RUNNING_TOOL
     assert store.snapshot().review_queue == ()
 
@@ -288,7 +288,7 @@ def test_stale_resolution_is_ignored() -> None:
     store.apply(ApprovalRequested(ROOT, pending(ROOT, "p1")))
     store.apply(ApprovalResolved(ROOT, "p-stale", approved=True))
     rec = store.snapshot().nodes[ROOT]
-    assert rec.pending is not None and rec.pending.id == "p1"
+    assert [p.id for p in rec.pending] == ["p1"]
     assert rec.state is AgentState.AWAITING_APPROVAL
 
 
@@ -308,7 +308,7 @@ def test_finishing_clears_a_parked_approval() -> None:
     store.apply(ApprovalRequested(ROOT, pending(ROOT)))
     store.apply(AgentFinished(ROOT, AgentState.CANCELLED, ended_at=5.0))
     snap = store.snapshot()
-    assert snap.nodes[ROOT].pending is None
+    assert snap.nodes[ROOT].pending == ()
     assert snap.review_queue == ()
 
 
@@ -409,7 +409,7 @@ def test_late_state_change_cannot_unpark_a_node() -> None:
 
     rec = store.snapshot().nodes[ROOT]
     assert rec.state is AgentState.AWAITING_APPROVAL
-    assert rec.pending is not None
+    assert rec.pending
     # The topic still updates: naming the call under review is useful, not a lie.
     assert rec.topic == "bash pwd"
 
@@ -457,7 +457,7 @@ def test_finishing_a_parked_node_still_works() -> None:
     store.apply(AgentFinished(ROOT, AgentState.CANCELLED, ended_at=1.0))
     rec = store.snapshot().nodes[ROOT]
     assert rec.state is AgentState.CANCELLED
-    assert rec.pending is None
+    assert rec.pending == ()
 
 
 def test_awaiting_input_is_idle_not_terminal() -> None:
@@ -472,3 +472,87 @@ def test_awaiting_input_is_idle_not_terminal() -> None:
     assert store.snapshot().any_active is False
     assert AgentState.AWAITING_INPUT.is_terminal is False
     assert AgentState.DONE.is_terminal is True
+
+
+# -- several approvals at once from one node -----------------------------------
+
+
+def test_a_node_can_hold_several_pending_approvals() -> None:
+    """
+    The defect the tuple exists to fix, and the reason the model was wrong. An
+    assistant turn can contain several tool calls; the CLI dispatches PreToolUse
+    for all of them concurrently and the gate parks a future for each. Three at
+    once was measured against a live agent. A single slot kept the last and
+    silently discarded the rest, leaving their agents blocked on futures nobody
+    could reach.
+    """
+    store = Store()
+    store.apply(spawn(ROOT))
+    for pid in ("p1", "p2", "p3"):
+        store.apply(ApprovalRequested(ROOT, pending(ROOT, pid, at=float(pid[1]))))
+
+    snap = store.snapshot()
+    assert [p.id for p in snap.nodes[ROOT].pending] == ["p1", "p2", "p3"]
+    assert [p.id for p in snap.review_queue] == ["p1", "p2", "p3"]
+
+
+def test_every_parked_approval_is_visible_in_the_queue() -> None:
+    """
+    The invariant the watchdog checks, at the store level: what the gate parked and
+    what the operator can answer must be the same set.
+    """
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(spawn(OTHER))
+    parked = {"a1", "a2", "b1"}
+    store.apply(ApprovalRequested(ROOT, pending(ROOT, "a1", at=1.0)))
+    store.apply(ApprovalRequested(ROOT, pending(ROOT, "a2", at=2.0)))
+    store.apply(ApprovalRequested(OTHER, pending(OTHER, "b1", at=3.0)))
+    assert {p.id for p in store.snapshot().review_queue} == parked
+
+
+def test_resolving_one_leaves_the_others_parked() -> None:
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(ApprovalRequested(ROOT, pending(ROOT, "p1", at=1.0)))
+    store.apply(ApprovalRequested(ROOT, pending(ROOT, "p2", at=2.0)))
+    store.apply(ApprovalResolved(ROOT, "p1", approved=True))
+
+    rec = store.snapshot().nodes[ROOT]
+    assert [p.id for p in rec.pending] == ["p2"]
+    # Still parked: moving to RUNNING_TOOL here would hide the outstanding one and
+    # recreate the same bug a layer up.
+    assert rec.state is AgentState.AWAITING_APPROVAL
+    assert store.snapshot().any_active is False
+
+
+def test_state_advances_only_when_the_last_one_is_resolved() -> None:
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(ApprovalRequested(ROOT, pending(ROOT, "p1", at=1.0)))
+    store.apply(ApprovalRequested(ROOT, pending(ROOT, "p2", at=2.0)))
+    store.apply(ApprovalResolved(ROOT, "p1", approved=True))
+    store.apply(ApprovalResolved(ROOT, "p2", approved=True))
+
+    rec = store.snapshot().nodes[ROOT]
+    assert rec.pending == ()
+    assert rec.state is AgentState.RUNNING_TOOL
+
+
+def test_the_same_approval_twice_is_not_duplicated() -> None:
+    """A re-emitted intent must not create a second row for one parked future."""
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(ApprovalRequested(ROOT, pending(ROOT, "p1")))
+    store.apply(ApprovalRequested(ROOT, pending(ROOT, "p1")))
+    assert len(store.snapshot().review_queue) == 1
+
+
+def test_finishing_clears_every_pending_approval() -> None:
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(ApprovalRequested(ROOT, pending(ROOT, "p1", at=1.0)))
+    store.apply(ApprovalRequested(ROOT, pending(ROOT, "p2", at=2.0)))
+    store.apply(AgentFinished(ROOT, AgentState.CANCELLED, ended_at=9.0))
+    assert store.snapshot().nodes[ROOT].pending == ()
+    assert store.snapshot().review_queue == ()

@@ -63,6 +63,29 @@ rationalised into a feature request.
 
 | 2026-08-10 | An agent asked clarifying questions and the session just went DONE. The question was never surfaced as something to answer. | A planning session lost; looked like the agent had finished when it was waiting. | Structural, not cosmetic: sessions are one-shot and there is no reply channel. See planning/2026-08-10-conversational-sessions.md |
 
+| 2026-08-10 | Three "blocked on approval that is not in the queue" warnings in one session. Agent management felt unreliable. | Agents wedged mid-session; the watchdog was the only reason it was noticed at all. | Root cause: the store held one pending approval per node, the gate parks one per tool call, and a turn can contain several. Fixed by making it a collection. |
+
+### The pattern behind three separate bugs
+
+All three losses of sync had the same shape: **two sides of a boundary modelled the
+same fact with different cardinality or different authority, and nothing compared
+them.**
+
+- The gate parked N futures per node; the store had one slot. Last write won,
+  the rest were orphaned. (2026-08-10)
+- The store said a node was `CALLING_TOOL`; the gate said it was parked. Whichever
+  intent arrived last was believed. (2026-08-09)
+- The gate parked a future for a node the store had never heard of, and the store
+  dropped the intent as noise. (2026-08-09)
+
+The lesson is not "be more careful with state". It is that **a blocking action has
+two representations -- the thing that is blocked, and the thing the operator can
+act on -- and they must be reconciled rather than kept in step by hand.** The
+watchdog comparing `Bridge.parked_count` to `len(review_queue)` is what turned the
+third instance from a silent hang into a report, and it is what caught this one.
+Where an invariant spans a boundary, check it at runtime; do not assume the code
+on both sides agrees.
+
 ### Why that one was invisible
 
 The CLI dispatches the `PreToolUse` hook *before* it delivers the

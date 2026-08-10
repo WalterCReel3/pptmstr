@@ -128,7 +128,7 @@ def _apply(snap: Snapshot, intent: Intent) -> Snapshot:
             # `pending` is the authority: while it is set, any other state is a lie.
             # The topic still updates, because naming the call being reviewed is
             # useful and not misleading.
-            if rec.pending is not None:
+            if rec.pending:
                 changes["state"] = AgentState.AWAITING_APPROVAL
             nodes[intent.node_id] = rec.with_(**changes)
 
@@ -143,7 +143,7 @@ def _apply(snap: Snapshot, intent: Intent) -> Snapshot:
             # Same rule as StateChanged: a parked node stays parked, or a progress
             # report arriving while the sub-agent waits on the operator would hide
             # the fact that it is waiting.
-            if rec.pending is not None:
+            if rec.pending:
                 state = AgentState.AWAITING_APPROVAL
             elif rec.state.is_terminal:
                 state = rec.state
@@ -211,27 +211,34 @@ def _apply(snap: Snapshot, intent: Intent) -> Snapshot:
                     topic="awaiting approval",
                     task="(recovered from an approval for an unannounced agent)",
                     model="unknown",
-                    pending=intent.pending,
+                    pending=(intent.pending,),
                     started_at=intent.pending.requested_at,
                 )
                 reorder = True
             else:
-                nodes[intent.node_id] = rec.with_(
-                    pending=intent.pending, state=AgentState.AWAITING_APPROVAL
-                )
+                # Appended, never replaced. Replacing is what orphaned the
+                # earlier approval's future and hung its agent invisibly.
+                if rec.pending_by_id(intent.pending.id) is None:
+                    nodes[intent.node_id] = rec.with_(
+                        pending=rec.pending + (intent.pending,),
+                        state=AgentState.AWAITING_APPROVAL,
+                    )
 
         case ApprovalResolved():
             rec = nodes.get(intent.node_id)
-            if rec is None or rec.pending is None:
+            if rec is None or rec.pending_by_id(intent.pending_id) is None:
+                # Unknown or already settled: a double click, or a decision for an
+                # approval that has since been cancelled. Both are normal.
                 return snap
-            # Guard against a stale resolution: two approve clicks in the same frame,
-            # or a decision arriving for an approval that has already been superseded.
-            if rec.pending.id != intent.pending_id:
-                return snap
-            nodes[intent.node_id] = rec.with_(
-                pending=None,
-                state=AgentState.RUNNING_TOOL if intent.approved else AgentState.THINKING,
-            )
+            remaining = tuple(p for p in rec.pending if p.id != intent.pending_id)
+            # Still parked if other calls from the same turn are outstanding. Moving
+            # to RUNNING_TOOL here would hide them and re-create the bug this tuple
+            # exists to fix, one layer up.
+            if remaining:
+                state = AgentState.AWAITING_APPROVAL
+            else:
+                state = AgentState.RUNNING_TOOL if intent.approved else AgentState.THINKING
+            nodes[intent.node_id] = rec.with_(pending=remaining, state=state)
 
         case AgentFinished():
             rec = nodes.get(intent.node_id)
@@ -241,7 +248,7 @@ def _apply(snap: Snapshot, intent: Intent) -> Snapshot:
                 state=intent.state,
                 ended_at=intent.ended_at,
                 error=intent.error,
-                pending=None,
+                pending=(),
             )
 
         case AgentRemoved():
@@ -323,5 +330,5 @@ def _review_queue(
     list -- the operator works the backlog, and the agent that has been blocked
     longest is the one costing the most.
     """
-    pend = [nodes[nid].pending for nid in order if nid in nodes and nodes[nid].pending]
-    return tuple(sorted((p for p in pend if p is not None), key=lambda p: p.requested_at))
+    pend = [p for nid in order if nid in nodes for p in nodes[nid].pending]
+    return tuple(sorted(pend, key=lambda p: p.requested_at))

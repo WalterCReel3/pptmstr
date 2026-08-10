@@ -253,7 +253,14 @@ class AgentRecord:
     agent_type: str | None = None
     usage: UsageRollup = field(default_factory=UsageRollup)
     context: ContextSnapshot | None = None
-    pending: PendingApproval | None = None
+    # A tuple, not one slot. An assistant turn can contain several tool calls, the
+    # CLI dispatches PreToolUse for all of them concurrently, and the gate parks a
+    # future for each -- three at once, measured. A single slot silently discarded
+    # every approval but the last while their agents stayed blocked forever.
+    pending: tuple[PendingApproval, ...] = ()
+
+    def pending_by_id(self, pending_id: str) -> PendingApproval | None:
+        return next((p for p in self.pending if p.id == pending_id), None)
 
     transcript: Transcript = field(default_factory=Transcript)
     # Both are time.monotonic(), never time.time(). These exist to be subtracted from
