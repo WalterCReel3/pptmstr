@@ -59,7 +59,29 @@ rationalised into a feature request.
 
 | date | what happened | what it cost | guess at the fix |
 |---|---|---|---|
-| | | | |
+| 2026-08-09 | Session appeared stuck at "thinking" with no indication it wanted anything. It was parked on a Bash approval the whole time. | A real session abandoned as hung. First bug dogfooding found, and it made the product's central feature invisible. | Fixed: a node with a pending approval can no longer be moved out of AWAITING_APPROVAL by a late StateChanged. See below. |
+
+### Why that one was invisible
+
+The CLI dispatches the `PreToolUse` hook *before* it delivers the
+`AssistantMessage` carrying the `ToolUseBlock`. So the gate parked the node
+correctly, and a `StateChanged(CALLING_TOOL)` for the very same tool call landed
+immediately afterwards and overwrote `AWAITING_APPROVAL`.
+
+Two consequences, and the second is why it read as a hang rather than a glitch:
+
+- The tree row said "thinking"/"calling" instead of REVIEW, so the one thing the
+  operator needed to know was the one thing not shown.
+- Those are *active* states, so `any_active` stayed true, the app never idled, and
+  the status bar said "running". Every signal agreed on the wrong story.
+
+The review queue did still list the item — so the information existed, just not
+anywhere the eye was drawn. Worth remembering when judging where signals belong.
+
+Fix: `pending` is the authority. While it is set, the state is AWAITING_APPROVAL
+and nothing else can say otherwise; topics still update, since naming the call
+under review is useful rather than misleading. The same guard covers
+`SubagentProgress`, which had the identical hazard for parked sub-agents.
 
 ## Debt to clear regardless of what dogfooding says
 

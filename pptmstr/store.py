@@ -116,6 +116,20 @@ def _apply(snap: Snapshot, intent: Intent) -> Snapshot:
             changes: dict[str, object] = {"state": intent.state}
             if intent.topic is not None:
                 changes["topic"] = intent.topic
+            # A parked node stays parked. The CLI dispatches the PreToolUse hook
+            # *before* it delivers the AssistantMessage carrying the ToolUseBlock,
+            # so the gate parks the node and a StateChanged for the same tool call
+            # arrives immediately afterwards. Letting it through overwrote
+            # AWAITING_APPROVAL with CALLING_TOOL while the approval was still
+            # pending and the agent still blocked -- the row read "thinking", the
+            # state counted as active so the app never idled, and the whole thing
+            # looked like a hang rather than a request for review.
+            #
+            # `pending` is the authority: while it is set, any other state is a lie.
+            # The topic still updates, because naming the call being reviewed is
+            # useful and not misleading.
+            if rec.pending is not None:
+                changes["state"] = AgentState.AWAITING_APPROVAL
             nodes[intent.node_id] = rec.with_(**changes)
 
         case SubagentProgress():
@@ -125,7 +139,16 @@ def _apply(snap: Snapshot, intent: Intent) -> Snapshot:
             # Progress implies the sub-agent is working, which is the only signal
             # there is: sub-agent content does not stream (§2.5.1), so without this
             # the row would sit at SPAWNING until it finished.
-            state = rec.state if rec.state.is_terminal else AgentState.RUNNING_TOOL
+            #
+            # Same rule as StateChanged: a parked node stays parked, or a progress
+            # report arriving while the sub-agent waits on the operator would hide
+            # the fact that it is waiting.
+            if rec.pending is not None:
+                state = AgentState.AWAITING_APPROVAL
+            elif rec.state.is_terminal:
+                state = rec.state
+            else:
+                state = AgentState.RUNNING_TOOL
             nodes[intent.node_id] = rec.with_(topic=intent.description, state=state)
 
         case TopicChanged():

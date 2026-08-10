@@ -19,6 +19,7 @@ from pptmstr.intents import (
     CompactionObserved,
     ContextPolled,
     StateChanged,
+    SubagentProgress,
     TopicChanged,
     UsageAccrued,
 )
@@ -387,3 +388,73 @@ def test_usage_accrues() -> None:
     usage = store.snapshot().nodes[ROOT].usage
     assert usage.input_tokens == 15
     assert usage.total_cost_usd == pytest.approx(0.03)
+
+
+# -- a parked node stays parked ------------------------------------------------
+
+
+def test_late_state_change_cannot_unpark_a_node() -> None:
+    """
+    Regression, found by dogfooding. The CLI dispatches PreToolUse *before* it
+    delivers the AssistantMessage carrying the ToolUseBlock, so the gate parks the
+    node and a StateChanged for the very same tool call lands immediately after.
+    Letting it through overwrote AWAITING_APPROVAL with CALLING_TOOL while the
+    agent was still blocked: the row read "thinking", the state counted as active
+    so the app never idled, and it looked like a hang instead of a review request.
+    """
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(ApprovalRequested(ROOT, pending(ROOT)))
+    store.apply(StateChanged(ROOT, AgentState.CALLING_TOOL, topic="bash pwd"))
+
+    rec = store.snapshot().nodes[ROOT]
+    assert rec.state is AgentState.AWAITING_APPROVAL
+    assert rec.pending is not None
+    # The topic still updates: naming the call under review is useful, not a lie.
+    assert rec.topic == "bash pwd"
+
+
+def test_a_parked_node_keeps_the_app_idle_despite_a_late_state_change() -> None:
+    """
+    The observable half of the same bug. CALLING_TOOL is an active state, so the
+    clobber also pinned the render loop at full speed for as long as the operator
+    took to answer -- I8 defeated by an ordering accident.
+    """
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(ApprovalRequested(ROOT, pending(ROOT)))
+    store.apply(StateChanged(ROOT, AgentState.THINKING))
+    assert store.snapshot().any_active is False
+
+
+def test_unparking_restores_normal_state_transitions() -> None:
+    """The guard must not outlive the approval it protects."""
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(ApprovalRequested(ROOT, pending(ROOT, "p1")))
+    store.apply(ApprovalResolved(ROOT, "p1", approved=True))
+    store.apply(StateChanged(ROOT, AgentState.THINKING))
+    assert store.snapshot().nodes[ROOT].state is AgentState.THINKING
+
+
+def test_subagent_progress_cannot_unpark_either() -> None:
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(spawn(CHILD, ROOT))
+    store.apply(ApprovalRequested(CHILD, pending(CHILD)))
+    store.apply(SubagentProgress(CHILD, "Reading log.py"))
+
+    rec = store.snapshot().nodes[CHILD]
+    assert rec.state is AgentState.AWAITING_APPROVAL
+    assert rec.topic == "Reading log.py"
+
+
+def test_finishing_a_parked_node_still_works() -> None:
+    """Cancellation and failure must outrank the parked guard, or a dead agent hangs."""
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(ApprovalRequested(ROOT, pending(ROOT)))
+    store.apply(AgentFinished(ROOT, AgentState.CANCELLED, ended_at=1.0))
+    rec = store.snapshot().nodes[ROOT]
+    assert rec.state is AgentState.CANCELLED
+    assert rec.pending is None
