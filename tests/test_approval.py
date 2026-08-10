@@ -227,3 +227,19 @@ def test_relative_paths_keep_the_git_style_prefix() -> None:
     diff = render_diff("Edit", {"file_path": "src/x.py", "old_string": "a", "new_string": "b"})
     assert diff is not None
     assert "b/src/x.py" in diff
+
+
+# -- diff line caching ---------------------------------------------------------
+
+
+def test_a_whole_file_write_produces_a_large_diff(tmp_path: Path) -> None:
+    """
+    Motivates the per-item line cache and the clipper in the review pane: the diffs
+    an operator spends longest reading are exactly the ones that would cost most to
+    re-split and re-emit every frame.
+    """
+    target = tmp_path / "big.py"
+    target.write_text("".join(f"old {i}\n" for i in range(2000)))
+    diff = render_diff("Write", {"file_path": str(target), "content": "new\n"})
+    assert diff is not None
+    assert len(diff.splitlines()) > 1000

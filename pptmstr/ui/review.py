@@ -54,6 +54,8 @@ class ReviewState:
     selected: str | None = None
     reasons: dict[str, str] = field(default_factory=dict)
     edits: dict[str, str] = field(default_factory=dict)
+    # Diff text split into lines, cached per pending id. Pruned with the rest.
+    diff_lines: dict[str, list[str]] = field(default_factory=dict)
     editing: str | None = None
     edit_error: str | None = None
     focus_reason: bool = False
@@ -68,6 +70,8 @@ class ReviewState:
             del self.reasons[stale]
         for stale in [k for k in self.edits if k not in live_ids]:
             del self.edits[stale]
+        for stale in [k for k in self.diff_lines if k not in live_ids]:
+            del self.diff_lines[stale]
         if self.editing is not None and self.editing not in live_ids:
             self.editing = None
             self.edit_error = None
@@ -326,7 +330,7 @@ def draw_detail(snap: Snapshot, state: ReviewState, bridge: Bridge) -> None:
     if state.editing == pending.id:
         _draw_editor(state, pending)
     elif pending.diff:
-        _draw_diff(pending.diff)
+        _draw_diff(state, pending, pending.diff)
     else:
         # No diff is a real answer, not a gap: a Bash command has nothing
         # diff-shaped to show, and inventing one would be worse than the arguments.
@@ -339,22 +343,38 @@ def draw_detail(snap: Snapshot, state: ReviewState, bridge: Bridge) -> None:
     _draw_actions(state, pending, bridge)
 
 
-def _draw_diff(diff: str) -> None:
+def _draw_diff(state: ReviewState, pending: PendingApproval, diff: str) -> None:
+    # Split once per pending item, not once per frame. A whole-file Write produces
+    # a diff as long as the file, and re-splitting it sixty times a second is work
+    # proportional to the change being reviewed -- exactly backwards, since the
+    # large diffs are the ones the operator spends longest looking at.
+    lines = state.diff_lines.get(pending.id)
+    if lines is None:
+        lines = diff.splitlines() or [""]
+        state.diff_lines[pending.id] = lines
+
     if not imgui.begin_child("##diff", imgui.ImVec2(0, -110)):
         imgui.end_child()
         return
-    for line in diff.splitlines():
-        kind = diff_line_kind(line)
-        colour = {
-            "add": P.diff_add,
-            "remove": P.diff_remove,
-            "meta": P.accent,
-            "context": P.diff_context,
-        }[kind]
-        # The +/- gutter stays in the text regardless of colour. That is the
-        # non-hue channel, and it is what keeps a diff readable in high contrast
-        # and to a colour-deficient operator (§6.1).
-        imgui.text_colored(colour.vec4, line if line else " ")
+
+    colours = {
+        "add": P.diff_add,
+        "remove": P.diff_remove,
+        "meta": P.accent,
+        "context": P.diff_context,
+    }
+    # Rows are uniform height here (no wrapping), which is what lets the clipper
+    # work -- so only the visible slice of a thousand-line diff is emitted.
+    clipper = imgui.ListClipper()
+    clipper.begin(len(lines))
+    while clipper.step():
+        for index in range(clipper.display_start, clipper.display_end):
+            line = lines[index]
+            # The +/- gutter stays in the text regardless of colour. That is the
+            # non-hue channel, and it is what keeps a diff readable in high
+            # contrast and to a colour-deficient operator (§6.1).
+            imgui.text_colored(colours[diff_line_kind(line)].vec4, line if line else " ")
+    clipper.end()
     imgui.end_child()
 
 

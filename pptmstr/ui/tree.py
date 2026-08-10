@@ -111,7 +111,12 @@ def draw(snap: Snapshot, view: ViewState, now: float | None = None) -> None:
     if not snap.order:
         imgui.text_disabled("no agents")
         imgui.spacing()
-        imgui.text_disabled("nothing is running, and nothing is waiting on you.")
+        # An empty pane that only says it is empty reads as broken. There is
+        # currently no way to start an agent from the UI, so the next step has to
+        # be spelled out rather than implied by an absent button.
+        imgui.text_disabled("agents cannot yet be started from here.")
+        imgui.text_disabled('launch with:  python -m pptmstr --task "..."')
+        imgui.text_disabled("or explore the interface with:  --fake")
         return
 
     flags = (

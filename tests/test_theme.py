@@ -199,3 +199,17 @@ def test_short_model_leaves_other_ids_alone() -> None:
     assert short_model("claude-sonnet-5") == "claude-sonnet-5"
     assert short_model("some-model-1234") == "some-model-1234"
     assert short_model("nodashes") == "nodashes"
+
+
+def test_review_state_prunes_its_diff_cache() -> None:
+    """
+    Split diff lines are cached per pending id; without pruning they outlive the
+    approvals they belong to and the largest ones never get released.
+    """
+    from pptmstr.ui.review import ReviewState
+
+    state = ReviewState()
+    state.diff_lines["gone"] = ["a", "b"]
+    state.diff_lines["live"] = ["c"]
+    state.prune({"live"})
+    assert set(state.diff_lines) == {"live"}

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import time
+import traceback
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
@@ -77,6 +78,43 @@ def begin_frame(state: AppState) -> None:
     # Shortcuts are handled once per frame, before any panel draws, so they behave
     # the same whichever pane happens to have focus.
     review.handle_keys(state.frame_snap, state.review, state.bridge)
+
+
+# Last error each panel reported, so a panel failing every frame logs once rather
+# than 60 times a second and flushes the ring buffer of everything useful.
+_PANEL_ERRORS: dict[str, str] = {}
+
+
+def guarded(name: str, draw: Callable[[], None]) -> Callable[[], None]:
+    """
+    Wrap a panel so a bug in it cannot take the application down with it.
+
+    This matters more here than in most UIs. The window owns every live agent
+    session and every parked approval, so an unhandled exception in one panel's
+    draw code destroys work that is not recoverable -- an operator loses running
+    agents to a rendering bug in a pane they were not even looking at.
+
+    Safe only because ImGui error recovery is enabled in post_init. Catching
+    mid-draw leaves the ImGui stack unbalanced (a begin_child with no end_child),
+    and with recovery asserts on that aborts the process -- trading one crash for
+    another. With recovery on, ImGui unwinds the stack itself and logs what was
+    left open. Verified before relying on it.
+    """
+
+    def wrapper() -> None:
+        try:
+            draw()
+        except Exception as exc:
+            detail = f"{type(exc).__name__}: {exc}"
+            if _PANEL_ERRORS.get(name) != detail:
+                _PANEL_ERRORS[name] = detail
+                LOG.error("ui", f"{name}: {detail}")
+                LOG.debug("ui", traceback.format_exc())
+            imgui.text_colored(P.danger.vec4, f"{name} failed to draw")
+            imgui.text_wrapped(detail)
+            imgui.text_disabled("the rest of the app, and every running agent, is unaffected")
+
+    return wrapper
 
 
 def _apply_theme_if_dirty(state: AppState) -> None:
@@ -207,11 +245,11 @@ def _docking_params(state: AppState) -> hello_imgui.DockingParams:
             transcript_pane.draw(state.frame_snap, state.transcripts, state.view.selected)
 
     params.dockable_windows = [
-        window("AGENTS", "MainDockSpace", draw_agents),
-        window("REVIEW", "BottomSpace", draw_queue),
-        window("DETAIL", "RightSpace", draw_review_detail),
-        window("TRANSCRIPT", "RightSpace", draw_transcript),
-        window("LOG", "BottomSpace", _log_panel),
+        window("AGENTS", "MainDockSpace", guarded("AGENTS", draw_agents)),
+        window("REVIEW", "BottomSpace", guarded("REVIEW", draw_queue)),
+        window("DETAIL", "RightSpace", guarded("DETAIL", draw_review_detail)),
+        window("TRANSCRIPT", "RightSpace", guarded("TRANSCRIPT", draw_transcript)),
+        window("LOG", "BottomSpace", guarded("LOG", _log_panel)),
     ]
     return params
 
@@ -277,6 +315,14 @@ def main(argv: list[str] | None = None) -> int:
     runner.fps_idling.fps_idle = state.settings.fps_idle
 
     def post_init() -> None:
+        # Recover from an unbalanced ImGui stack instead of aborting the process.
+        # This is what makes `guarded` safe: a panel that raises mid-draw leaves a
+        # child or table open, and the default behaviour is to assert and die.
+        io = imgui.get_io()
+        io.config_error_recovery = True
+        io.config_error_recovery_enable_assert = False
+        io.config_error_recovery_enable_debug_log = True
+        io.config_error_recovery_enable_tooltip = False
         LOG.info("app", f"theme {state.settings.theme}")
 
     def pre_frame() -> None:
@@ -289,9 +335,11 @@ def main(argv: list[str] | None = None) -> int:
 
     runner.callbacks.load_additional_fonts = theme.load_fonts
     runner.callbacks.post_init = post_init
-    runner.callbacks.pre_new_frame = pre_frame
-    runner.callbacks.show_menus = lambda: _menus(state)
-    runner.callbacks.show_status = lambda: _status_bar(state)
+    # Guarded too: an exception here would stop intents being applied, which is
+    # bad, but killing the window loses every session, which is worse.
+    runner.callbacks.pre_new_frame = guarded("frame", pre_frame)
+    runner.callbacks.show_menus = guarded("menu", lambda: _menus(state))
+    runner.callbacks.show_status = guarded("status bar", lambda: _status_bar(state))
 
     state.bridge.start()
     if args.fake:
