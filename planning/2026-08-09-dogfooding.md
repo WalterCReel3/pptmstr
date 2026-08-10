@@ -61,6 +61,8 @@ rationalised into a feature request.
 |---|---|---|---|
 | 2026-08-09 | Session appeared stuck at "thinking" with no indication it wanted anything. It was parked on a Bash approval the whole time. | A real session abandoned as hung. First bug dogfooding found, and it made the product's central feature invisible. | Fixed: a node with a pending approval can no longer be moved out of AWAITING_APPROVAL by a late StateChanged. See below. |
 
+| 2026-08-10 | An agent asked clarifying questions and the session just went DONE. The question was never surfaced as something to answer. | A planning session lost; looked like the agent had finished when it was waiting. | Structural, not cosmetic: sessions are one-shot and there is no reply channel. See planning/2026-08-10-conversational-sessions.md |
+
 ### Why that one was invisible
 
 The CLI dispatches the `PreToolUse` hook *before* it delivers the
