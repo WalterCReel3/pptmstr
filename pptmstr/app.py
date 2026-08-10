@@ -53,6 +53,10 @@ class AppState:
     # and handed to every panel, so two panels can never disagree about the world.
     frame_snap: Snapshot | None = None
     frame_now: float = 0.0
+    # When the parked-future count first exceeded what the queue is showing.
+    # None while they agree. See _check_for_lost_approvals.
+    lost_since: float | None = None
+    lost_reported: bool = False
     driver: FakeDriver | None = None
     pool: SessionPool | None = None
 
@@ -78,6 +82,7 @@ def begin_frame(state: AppState) -> None:
     # Shortcuts are handled once per frame, before any panel draws, so they behave
     # the same whichever pane happens to have focus.
     review.handle_keys(state.frame_snap, state.review, state.bridge)
+    _check_for_lost_approvals(state)
 
 
 # Last error each panel reported, so a panel failing every frame logs once rather
@@ -115,6 +120,53 @@ def guarded(name: str, draw: Callable[[], None]) -> Callable[[], None]:
             imgui.text_disabled("the rest of the app, and every running agent, is unaffected")
 
     return wrapper
+
+
+# How long the counts may disagree before it is treated as a lost approval rather
+# than the ordinary lag between a gate parking and the UI applying its intent.
+_LOST_APPROVAL_GRACE_S = 3.0
+
+
+def _check_for_lost_approvals(state: AppState) -> None:
+    """
+    Every parked agent must be visible as something the operator can answer.
+
+    The Bridge knows how many agents are blocked on a future; the store knows how
+    many approvals are on screen. They should agree. When the Bridge is holding
+    more than the queue shows, an agent is blocked behind an approval nobody can
+    reach -- which is a permanent hang that looks like the agent simply stopped.
+
+    Worth checking rather than trusting, because every way this can happen is a
+    silent one: an intent for a node the store never learned about, a dropped
+    emit, an ordering assumption that does not hold. The failure has no natural
+    symptom, so it needs an unnatural one.
+
+    Debounced: parking registers the future before the intent reaches the store,
+    so the counts legitimately disagree for a frame or two.
+    """
+    snap = state.frame_snap
+    if snap is None:
+        return
+    parked = state.bridge.parked_count
+    visible = len(snap.review_queue)
+
+    if parked <= visible:
+        state.lost_since = None
+        state.lost_reported = False
+        return
+
+    if state.lost_since is None:
+        state.lost_since = state.frame_now
+        return
+    if state.frame_now - state.lost_since < _LOST_APPROVAL_GRACE_S:
+        return
+    if not state.lost_reported:
+        state.lost_reported = True
+        LOG.error(
+            "gate",
+            f"{parked - visible} agent(s) blocked on an approval that is not in the "
+            "queue - they cannot be answered and will hang until the hook times out",
+        )
 
 
 def _apply_theme_if_dirty(state: AppState) -> None:
@@ -183,6 +235,14 @@ def _status_bar(state: AppState) -> None:
     imgui.text_disabled("|")
     imgui.same_line()
     imgui.text_disabled("running" if active else f"idle @ {state.settings.fps_idle:g}fps")
+    if state.lost_reported:
+        # Loud on purpose: this means an agent is stuck somewhere the operator
+        # cannot reach it, and the whole point is that it has no other symptom.
+        imgui.same_line()
+        imgui.text_colored(
+            P.danger.vec4,
+            f"| {state.bridge.parked_count - len(snap.review_queue)} blocked, not in queue",
+        )
     if state.pool is not None:
         imgui.same_line()
         imgui.text_disabled("|")

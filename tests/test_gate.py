@@ -231,3 +231,69 @@ def test_shutdown_releases_a_parked_gate() -> None:
     b.stop()
     assert done.wait(TIMEOUT)
     assert outcome == ["deny"]
+
+
+# -- an approval must never be lost --------------------------------------------
+
+
+def test_approval_for_an_unannounced_node_is_recovered(bridge: Bridge) -> None:
+    """
+    A dropped ApprovalRequested is a permanent hang: the agent blocks on a future
+    only the operator can complete, and nothing appears in the queue to explain
+    why. A sub-agent whose SubagentStart did not fire is how this happens.
+
+    Every other intent for an unknown node is a no-op -- deliberately. This one
+    cannot be, so it recovers a placeholder row instead.
+    """
+    from pptmstr.intents import ApprovalRequested
+    from pptmstr.model import PendingApproval
+
+    store = Store()
+    ghost = ("sess-x", "agent-never-announced")
+    store.apply(
+        ApprovalRequested(
+            ghost,
+            PendingApproval(
+                id="p1",
+                node=ghost,
+                tool_name="Write",
+                tool_use_id="tu",
+                raw_args={"file_path": "/tmp/x"},
+                summary="Write /tmp/x",
+                requested_at=1.0,
+            ),
+        )
+    )
+    snap = store.snapshot()
+    assert len(snap.review_queue) == 1
+    assert snap.review_queue[0].id == "p1"
+    assert snap.nodes[ghost].state is AgentState.AWAITING_APPROVAL
+
+
+def test_a_recovered_approval_can_be_resolved_normally(bridge: Bridge) -> None:
+    """Recovery is worthless if the placeholder cannot then be answered."""
+    store = Store()
+    session = AgentSession(bridge, "task")
+    # Deliberately no announce(): the node is unknown to the store.
+    task = bridge.submit(
+        session._pre_tool_use(hook_input("Write", file_path="/x", content="y"), None, {})
+    )
+    pump(store, bridge, lambda: bool(store.snapshot().review_queue))
+
+    pending = store.snapshot().review_queue[0]
+    assert bridge.resolve(pending.id, Decision(approved=True))
+    assert decision_of(task.result(timeout=TIMEOUT)) == "allow"
+
+
+def test_parked_futures_and_visible_queue_agree(bridge: Bridge) -> None:
+    """
+    The invariant the watchdog checks. Bridge.parked_count is how many agents are
+    blocked; review_queue is how many the operator can answer. A gap means a
+    permanent hang with no other symptom.
+    """
+    store = Store()
+    session = AgentSession(bridge, "task")
+    session.announce()
+    bridge.submit(session._pre_tool_use(hook_input("Bash", command="ls"), None, {}))
+    pump(store, bridge, lambda: bool(store.snapshot().review_queue))
+    assert bridge.parked_count == len(store.snapshot().review_queue)

@@ -192,10 +192,33 @@ def _apply(snap: Snapshot, intent: Intent) -> Snapshot:
         case ApprovalRequested():
             rec = nodes.get(intent.node_id)
             if rec is None:
-                return snap
-            nodes[intent.node_id] = rec.with_(
-                pending=intent.pending, state=AgentState.AWAITING_APPROVAL
-            )
+                # An approval must never be dropped. Every other intent for an
+                # unknown node is a no-op, because a late status update about
+                # something that does not exist is noise -- but this one has an
+                # agent blocked behind it on a future only the operator can
+                # complete. Dropping it hangs that agent permanently, with nothing
+                # in the queue to explain why. A sub-agent whose SubagentStart hook
+                # did not fire is the way this happens in practice.
+                #
+                # So a placeholder row is created instead. It is uglier than a
+                # properly spawned node and infinitely better than a silent hang.
+                parent = (intent.node_id[0], None)
+                nodes[intent.node_id] = AgentRecord(
+                    node_id=intent.node_id,
+                    parent=parent if parent != intent.node_id and parent in nodes else None,
+                    depth=1 if parent in nodes and parent != intent.node_id else 0,
+                    state=AgentState.AWAITING_APPROVAL,
+                    topic="awaiting approval",
+                    task="(recovered from an approval for an unannounced agent)",
+                    model="unknown",
+                    pending=intent.pending,
+                    started_at=intent.pending.requested_at,
+                )
+                reorder = True
+            else:
+                nodes[intent.node_id] = rec.with_(
+                    pending=intent.pending, state=AgentState.AWAITING_APPROVAL
+                )
 
         case ApprovalResolved():
             rec = nodes.get(intent.node_id)
