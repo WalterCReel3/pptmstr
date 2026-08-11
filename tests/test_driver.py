@@ -72,6 +72,134 @@ def test_topic_falls_back_to_the_tool_name() -> None:
     assert _tool_topic("MysteryTool", {}) == "mysterytool"
 
 
+def test_topic_prefers_the_subject_over_the_longer_description() -> None:
+    """TaskCreate carries both; the subject is the one written to be read."""
+    topic = _tool_topic(
+        "TaskCreate",
+        {
+            "subject": "Add subtract function to calc.py",
+            "description": "Add a subtract(a, b) function matching the style of add.",
+        },
+    )
+    assert topic == "taskcreate Add subtract function to calc.py"
+
+
+# -- the agent's own task list -------------------------------------------------
+
+
+def create_task(tr: Translator, tool_use_id: str, task_id: str, subject: str) -> None:
+    """
+    The two halves of a TaskCreate.
+
+    The call carries the subject and no id; the result carries the id the CLI
+    assigned. Neither alone is enough to name a later status change.
+    """
+    tr.handle(
+        AssistantMessage(
+            content=[ToolUseBlock(id=tool_use_id, name="TaskCreate", input={"subject": subject})],
+            model="m",
+        )
+    )
+    tr.handle(
+        UserMessage(
+            content=[
+                ToolResultBlock(
+                    tool_use_id=tool_use_id,
+                    content=f"Task #{task_id} created successfully: {subject}",
+                )
+            ]
+        )
+    )
+
+
+def update_task(tr: Translator, **args: object) -> str:
+    intents = tr.handle(
+        AssistantMessage(
+            content=[ToolUseBlock(id="u", name="TaskUpdate", input=dict(args))], model="m"
+        )
+    )
+    state = next(i for i in intents if isinstance(i, StateChanged))
+    return state.topic or ""
+
+
+def test_task_update_names_the_work_rather_than_the_mechanism() -> None:
+    """
+    The whole point: "taskupdate" describes the call, not what the agent is doing.
+
+    A status change is the one moment the agent states its intent outright, so it
+    must not be the least informative topic in the stream.
+    """
+    tr, _ = make()
+    create_task(tr, "t1", "1", "Add subtract function to calc.py")
+    assert update_task(tr, taskId="1", status="in_progress") == "Add subtract function to calc.py"
+
+
+def test_a_finished_item_does_not_read_as_work_in_progress() -> None:
+    tr, _ = make()
+    create_task(tr, "t1", "3", "Write test file for calc.py")
+    assert update_task(tr, taskId="3", status="completed") == (
+        "completed: Write test file for calc.py"
+    )
+
+
+def test_the_right_subject_is_picked_out_of_several() -> None:
+    tr, _ = make()
+    create_task(tr, "t1", "1", "Add subtract function")
+    create_task(tr, "t2", "2", "Add multiply function")
+    create_task(tr, "t3", "3", "Write the tests")
+    assert update_task(tr, taskId="2", status="in_progress") == "Add multiply function"
+
+
+def test_an_update_may_rename_the_item_it_moves() -> None:
+    tr, _ = make()
+    create_task(tr, "t1", "1", "Write the tests")
+    assert update_task(tr, taskId="1", subject="Write the tests and run them") == (
+        "Write the tests and run them"
+    )
+    # The rename sticks: a later status-only update uses the newer subject.
+    assert update_task(tr, taskId="1", status="completed") == (
+        "completed: Write the tests and run them"
+    )
+
+
+def test_an_id_from_before_we_attached_still_says_something() -> None:
+    """A resumed session has tasks this translator never saw created."""
+    tr, _ = make()
+    assert update_task(tr, taskId="7", status="in_progress") == "task 7"
+
+
+def test_a_failed_create_binds_nothing() -> None:
+    """Binding an id to a task that was never created would misname a later update."""
+    tr, _ = make()
+    tr.handle(
+        AssistantMessage(
+            content=[ToolUseBlock(id="t1", name="TaskCreate", input={"subject": "Never happened"})],
+            model="m",
+        )
+    )
+    tr.handle(
+        UserMessage(
+            content=[ToolResultBlock(tool_use_id="t1", content="Task #1 failed", is_error=True)]
+        )
+    )
+    assert update_task(tr, taskId="1", status="in_progress") == "task 1"
+
+
+def test_a_numeric_task_id_joins_the_same_way() -> None:
+    """The tool schema is the CLI's to change; an integer id must not break the join."""
+    tr, _ = make()
+    create_task(tr, "t1", "4", "Run tests to verify")
+    assert update_task(tr, taskId=4, status="in_progress") == "Run tests to verify"
+
+
+def test_a_long_subject_is_clipped_to_the_column() -> None:
+    tr, _ = make()
+    create_task(tr, "t1", "1", "x" * 200)
+    topic = update_task(tr, taskId="1", status="completed")
+    assert len(topic) <= 55
+    assert topic.endswith("...")
+
+
 # -- assistant messages --------------------------------------------------------
 
 

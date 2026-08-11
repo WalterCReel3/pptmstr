@@ -17,6 +17,7 @@ nothing else, which is I8 satisfied structurally rather than by convention.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 import uuid
 from collections.abc import Mapping
@@ -106,18 +107,47 @@ def _allow_with(edited_args: Mapping[str, Any] | None) -> HookJSONOutput:
     return cast(HookJSONOutput, {"hookSpecificOutput": specific})
 
 
+# TaskCreate does not choose its own id: the call carries a subject, and the id the
+# CLI assigned appears only in the result text -- "Task #3 created successfully: ...".
+_TASK_CREATED = re.compile(r"[Tt]ask #(\d+)")
+
+# The topic column's budget. Enforced on the composed string rather than on the
+# argument alone, so a prefix cannot push the result past it.
+_TOPIC_LIMIT = 55
+
+
+def _clip(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 3] + "..."
+
+
+def _text_arg(args: Mapping[str, Any], key: str) -> str:
+    """
+    A tool argument as display text, or "" when it is absent or unusable.
+
+    ``taskId`` has been observed as a string, but the tool schema is the CLI's to
+    change and an integer id would read identically -- so accept both rather than
+    silently losing the join if it ever arrives as a number.
+    """
+    value = args.get(key)
+    if isinstance(value, bool) or not isinstance(value, str | int):
+        return ""
+    return str(value).strip()
+
+
 def _tool_topic(tool_name: str, tool_input: dict[str, Any]) -> str:
     """
     A thinking topic derived mechanically from the tool call.
 
     Free and always current, which is the requirement -- this field is visible every
     frame, so it must never be produced by a summarisation call.
+
+    ``subject`` leads because TaskCreate carries both it and a longer ``description``
+    of the same item: the subject is the one-line form written to be read.
     """
-    for key in ("file_path", "path", "pattern", "command", "url", "description"):
-        value = tool_input.get(key)
-        if isinstance(value, str) and value:
-            trimmed = value if len(value) <= 48 else value[:45] + "..."
-            return f"{tool_name.lower()} {trimmed}"
+    for key in ("subject", "file_path", "path", "pattern", "command", "url", "description"):
+        value = _text_arg(tool_input, key)
+        if value:
+            return _clip(f"{tool_name.lower()} {value}", _TOPIC_LIMIT)
     return tool_name.lower()
 
 
@@ -146,6 +176,13 @@ class Translator:
     # Whether deltas have already written the current message's content. Set by
     # _stream, consumed and cleared by _assistant.
     _streamed_content: bool = False
+    # taskId -> subject, so a TaskUpdate carrying nothing but an id and a status can
+    # still say which piece of work it is about. This is the agent's own statement of
+    # what it is driving towards, which no amount of deriving from file paths reaches.
+    _task_subjects: dict[str, str] = field(default_factory=dict)
+    # tool_use_id -> subject, for TaskCreate calls whose result has not arrived yet
+    # and whose id is therefore not known.
+    _pending_task_subjects: dict[str, str] = field(default_factory=dict)
     # tool_use_id of an Agent call -> the sub-agent NodeId it became. Populated by
     # the session once SubagentStart has been joined; used to route Task* progress,
     # which is keyed by tool_use_id rather than agent_id (§2.5.1).
@@ -204,12 +241,13 @@ class Translator:
                     self.transcript.append(SegmentKind.OUTPUT, block.text)
             elif isinstance(block, ToolUseBlock):
                 self._tool_names[block.id] = block.name
+                self._note_task(block)
                 self.transcript.append(
                     SegmentKind.TOOL_CALL,
                     f"\n{block.name}({_compact_args(block.input)})\n",
                     meta=(("tool", block.name), ("tool_use_id", block.id)),
                 )
-                topic = _tool_topic(block.name, block.input)
+                topic = self._topic_for(block)
 
         if msg.usage:
             out.append(UsageAccrued(node, _usage_from(msg.usage)))
@@ -222,6 +260,67 @@ class Translator:
         )
         return out
 
+    # -- the agent's own task list -----------------------------------------------
+
+    def _note_task(self, block: ToolUseBlock) -> None:
+        """Record what a task-list call says, so a later status change can be named."""
+        if block.name == "TaskCreate":
+            subject = _text_arg(block.input, "subject")
+            if subject:
+                self._pending_task_subjects[block.id] = subject
+        elif block.name == "TaskUpdate":
+            # An update may rename an item as well as move it; when it carries a
+            # subject, that is the newer truth and replaces what create recorded.
+            task_id = _text_arg(block.input, "taskId")
+            subject = _text_arg(block.input, "subject")
+            if task_id and subject:
+                self._task_subjects[task_id] = subject
+
+    def _bind_task_id(self, block: ToolResultBlock) -> None:
+        """
+        Join the id the CLI assigned to the subject the call asked for.
+
+        The two halves arrive in different messages -- subject in the call, id in the
+        result -- so this is the only point at which they can be put together. The
+        subject is taken from the call rather than parsed back out of the result
+        text, because the call is what the agent actually wrote.
+        """
+        subject = self._pending_task_subjects.pop(block.tool_use_id, None)
+        if subject is None or block.is_error:
+            return
+        content = block.content if isinstance(block.content, str) else repr(block.content)
+        found = _TASK_CREATED.search(content)
+        if found:
+            self._task_subjects[found.group(1)] = subject
+
+    def _topic_for(self, block: ToolUseBlock) -> str:
+        if block.name == "TaskUpdate":
+            return self._task_update_topic(block.input)
+        return _tool_topic(block.name, block.input)
+
+    def _task_update_topic(self, args: dict[str, Any]) -> str:
+        """
+        A status change named by the work it refers to.
+
+        Deliberately not prefixed with the tool name the way every other topic is:
+        "taskupdate write the tests" describes the mechanism, and the point of this
+        row is the goal. An in-progress item is simply the topic; any other status is
+        prefixed with itself, because "the agent is working on X" and "the agent has
+        finished X" must not read identically.
+        """
+        task_id = _text_arg(args, "taskId")
+        status = _text_arg(args, "status").replace("_", " ")
+        subject = _text_arg(args, "subject") or self._task_subjects.get(task_id, "")
+        # An id we never saw created belongs to a session that predates this
+        # translator -- a resumed conversation. "task 3" is thin, but it is true, and
+        # it is more than the bare tool name.
+        label = subject or (f"task {task_id}" if task_id else "task")
+        if status and status != "in progress":
+            label = f"{status}: {label}"
+        return _clip(label, _TOPIC_LIMIT)
+
+    # -- tool results ------------------------------------------------------------
+
     def _user(self, msg: UserMessage) -> list[Intent]:
         """
         Tool results arrive as user messages -- that is how the protocol carries them
@@ -231,6 +330,7 @@ class Translator:
             return []
         for block in msg.content:
             if isinstance(block, ToolResultBlock):
+                self._bind_task_id(block)
                 name = self._tool_names.get(block.tool_use_id, "tool")
                 kind = SegmentKind.ERROR if block.is_error else SegmentKind.TOOL_RESULT
                 self.transcript.append(kind, f"{name} -> {_compact_result(block.content)}\n")
