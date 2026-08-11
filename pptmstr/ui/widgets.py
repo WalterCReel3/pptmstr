@@ -16,6 +16,35 @@ from ..model import AgentState, ContextSnapshot
 from ..theme import STATE_GLYPH, STATE_LABEL, P
 
 
+def multiline_input(
+    label: str,
+    value: str,
+    size: imgui.ImVec2,
+    *,
+    wrap: bool,
+    flags: int = 0,
+) -> tuple[bool, str]:
+    """
+    The one place a composer is drawn, so wrapping is decided once.
+
+    Every multi-line field in the app goes through here. The alternative -- each
+    pane passing its own flags -- is how the reply box and the argument editor end
+    up disagreeing about whether long lines wrap, which reads as a bug in whichever
+    one the operator noticed second.
+
+    ``wrap`` is threaded in rather than read from a module global because this
+    module owns no state; it is ``settings.wrap_inputs``, carried down from the menu.
+
+    Single-line fields cannot participate. ``word_wrap`` is asserted by ImGui to be
+    multi-line only (``IM_ASSERT`` in ``InputTextEx``), so it is not merely ignored
+    on an ``InputText`` -- it aborts. Wrapping a single-line field means making it
+    multi-line first, which is a layout decision, not a flag.
+    """
+    if wrap:
+        flags |= int(imgui.InputTextFlags_.word_wrap)
+    return imgui.input_text_multiline(label, value, size, flags)
+
+
 def state_cell(state: AgentState) -> None:
     """
     Draw an agent state as glyph + label, both tinted.
@@ -182,9 +211,57 @@ def context_cell(ctx: ContextSnapshot | None) -> None:
     imgui.text_colored(colour, label)
 
 
+def ellipsis(text: str, width_px: float) -> str:
+    """
+    Clip ``text`` to ``width_px``, marking the cut with an ellipsis.
+
+    Table cells clip mid-glyph and give the reader nothing to tell a clipped string
+    from a short one. That matters most for the field this is mostly used on -- the
+    task, which is the only string that distinguishes one session from another.
+
+    Binary search rather than shrinking a character at a time. This runs per row per
+    frame, and a linear walk costs one ``calc_text_size`` per character trimmed: a
+    200-character task on twenty rows is four thousand text measurements a frame for
+    a string that has not changed. Valid because glyph advances are non-negative, so
+    width is monotonic in prefix length.
+    """
+    if width_px <= 0.0:
+        return ""
+    if imgui.calc_text_size(text).x <= width_px:
+        return text
+    lo, hi = 0, len(text)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if imgui.calc_text_size(text[:mid] + "…").x <= width_px:
+            lo = mid
+        else:
+            hi = mid - 1
+    return text[:lo] + "…"
+
+
+def format_elapsed(seconds: float) -> str:
+    """
+    A duration in whichever unit keeps it to a few characters.
+
+    Every field truncates rather than rounding. Formatting the minutes as
+    ``seconds / 60`` with ``:.0f`` rounds to nearest, which renders 3m40s as
+    "4m40s" -- the leading field then disagrees with the one beside it, and always
+    in the direction that overstates the duration.
+
+    Separate from ``elapsed_cell`` so the arithmetic can be tested without an
+    ImGui context.
+    """
+    total = int(max(0.0, seconds))
+    if total < 60:
+        return f"{total}s"
+    if total < 3600:
+        return f"{total // 60}m{total % 60:02d}s"
+    return f"{total // 3600}h{(total // 60) % 60:02d}m"
+
+
 def elapsed_cell(started_at: float, ended_at: float | None, now: float) -> None:
     """
-    Elapsed time, in whichever unit keeps it to a few characters.
+    Elapsed time for one agent row, dimmed once the agent has ended.
 
     All three arguments must come from ``time.monotonic()``. Deliberately not
     sanity-clamped: mixing in a ``time.time()`` value renders as a duration in the
@@ -194,13 +271,7 @@ def elapsed_cell(started_at: float, ended_at: float | None, now: float) -> None:
     if started_at <= 0.0:
         imgui.text_disabled("--")
         return
-    seconds = max(0.0, (ended_at if ended_at is not None else now) - started_at)
-    if seconds < 60:
-        text = f"{seconds:.0f}s"
-    elif seconds < 3600:
-        text = f"{seconds / 60:.0f}m{int(seconds) % 60:02d}s"
-    else:
-        text = f"{seconds / 3600:.0f}h{int(seconds / 60) % 60:02d}m"
+    text = format_elapsed((ended_at if ended_at is not None else now) - started_at)
     if ended_at is not None:
         imgui.text_disabled(text)
     else:
