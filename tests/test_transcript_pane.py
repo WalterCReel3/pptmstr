@@ -10,7 +10,7 @@ from __future__ import annotations
 import time
 
 from pptmstr.transcript import SegmentKind, Transcript
-from pptmstr.ui.transcript_pane import NodeTranscript, TranscriptState, _visible
+from pptmstr.ui.transcript_pane import NodeTranscript, TranscriptState, _visible, copy_text
 
 
 def sync(cache: NodeTranscript, transcript: Transcript) -> None:
@@ -168,6 +168,98 @@ def test_search_and_reasoning_filter_compose() -> None:
 def test_empty_search_matches_everything() -> None:
     cache = build((SegmentKind.OUTPUT, "a\nb\nc"))
     assert len(_visible(TranscriptState(search=""), cache)) == 3
+
+
+# -- runs and copying ----------------------------------------------------------
+
+
+def test_a_kind_change_starts_a_new_run() -> None:
+    cache = build(
+        (SegmentKind.REASONING, "pondering\nstill pondering\n"),
+        (SegmentKind.OUTPUT, "the answer\n"),
+    )
+    assert [line.run for line in cache.lines] == [0, 0, 1]
+
+
+def test_streamed_tokens_stay_in_one_run() -> None:
+    """
+    The unit of a copy is what the agent said, not what a socket happened to
+    deliver. A run that fragmented per delta would make copy useless on live output.
+    """
+    t = Transcript()
+    cache = NodeTranscript()
+    for token in ("Right, ", "here is ", "the plan.\nStep one"):
+        t.append(SegmentKind.OUTPUT, token)
+        sync(cache, t)
+    assert {line.run for line in cache.lines} == {0}
+
+
+def test_run_text_round_trips_the_lines() -> None:
+    cache = build((SegmentKind.TOOL_RESULT, '{\n  "ok": true\n}\n'))
+    assert cache.run_text(0) == '{\n  "ok": true\n}'
+
+
+def test_run_text_keeps_blank_lines() -> None:
+    """A paragraph break is structure. Dropping it reflows the paste."""
+    cache = build((SegmentKind.OUTPUT, "first\n\nsecond\n"))
+    assert cache.run_text(0) == "first\n\nsecond"
+
+
+def test_run_bounds_are_contiguous_and_cover_every_line() -> None:
+    cache = build(
+        (SegmentKind.OUTPUT, "a\nb\n"),
+        (SegmentKind.TOOL_CALL, "Bash(ls)\n"),
+        (SegmentKind.TOOL_RESULT, "one\ntwo\nthree\n"),
+    )
+    covered = [cache.run_bounds(run) for run in range(len(cache.run_starts))]
+    assert covered == [(0, 2), (2, 3), (3, 6)]
+
+
+def test_run_text_ignores_the_filters() -> None:
+    """
+    Copying a run yields what the agent emitted, not the subset a search is
+    showing. A paste that silently dropped the non-matching lines would be worse
+    than no copy at all -- it looks complete.
+    """
+    cache = build((SegmentKind.OUTPUT, "alpha\nbeta\ngamma\n"))
+    state = TranscriptState(search="beta")
+    assert [line.text for line in _visible(state, cache)] == ["beta"]
+    assert cache.run_text(0) == "alpha\nbeta\ngamma"
+
+
+def test_copy_visible_follows_the_filters() -> None:
+    """The other half of the trade: the button next to the filters obeys them."""
+    cache = build((SegmentKind.REASONING, "pondering\n"), (SegmentKind.OUTPUT, "answer\n"))
+    state = TranscriptState(show_reasoning=False)
+    assert copy_text(_visible(state, cache)) == "answer"
+
+
+def test_an_unknown_run_is_empty_rather_than_an_error() -> None:
+    """
+    The context menu latches a run index and can outlive it -- the operator can
+    switch node between the right-click and the menu item. Empty beats a traceback
+    on the frame path.
+    """
+    cache = build((SegmentKind.OUTPUT, "a\n"))
+    assert cache.run_text(7) == ""
+    assert cache.run_bounds(-1) == (0, 0)
+
+
+def test_a_run_survives_a_segment_split_mid_line() -> None:
+    """
+    close_segment() can split two same-kind segments in the middle of a line, and
+    sync() extends one Line across the split. A run is therefore a maximal same-kind
+    span, not a segment -- pinned here because it is the one case where the two
+    definitions disagree.
+    """
+    t = Transcript()
+    t.append(SegmentKind.OUTPUT, "half a ")
+    t.close_segment()
+    t.append(SegmentKind.OUTPUT, "line\n")
+    cache = NodeTranscript()
+    sync(cache, t)
+    assert texts(cache) == ["half a line"]
+    assert cache.run_starts == [0]
 
 
 # -- cache lifetime ------------------------------------------------------------
