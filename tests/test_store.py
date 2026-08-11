@@ -274,7 +274,7 @@ def test_resolution_clears_pending() -> None:
     rec = store.snapshot().nodes[ROOT]
     assert rec.pending == ()
     assert rec.state is AgentState.RUNNING_TOOL
-    assert store.snapshot().review_queue == ()
+    assert store.snapshot().approvals == ()
 
 
 def test_stale_resolution_is_ignored() -> None:
@@ -298,7 +298,7 @@ def test_review_queue_spans_agents_oldest_first() -> None:
     store.apply(spawn(OTHER))
     store.apply(ApprovalRequested(OTHER, pending(OTHER, "late", at=99.0)))
     store.apply(ApprovalRequested(ROOT, pending(ROOT, "early", at=1.0)))
-    assert [p.id for p in store.snapshot().review_queue] == ["early", "late"]
+    assert [p.id for p in store.snapshot().approvals] == ["early", "late"]
 
 
 def test_finishing_clears_a_parked_approval() -> None:
@@ -309,7 +309,7 @@ def test_finishing_clears_a_parked_approval() -> None:
     store.apply(AgentFinished(ROOT, AgentState.CANCELLED, ended_at=5.0))
     snap = store.snapshot()
     assert snap.nodes[ROOT].pending == ()
-    assert snap.review_queue == ()
+    assert snap.approvals == ()
 
 
 # -- context as a health signal ------------------------------------------------
@@ -493,7 +493,7 @@ def test_a_node_can_hold_several_pending_approvals() -> None:
 
     snap = store.snapshot()
     assert [p.id for p in snap.nodes[ROOT].pending] == ["p1", "p2", "p3"]
-    assert [p.id for p in snap.review_queue] == ["p1", "p2", "p3"]
+    assert [p.id for p in snap.approvals] == ["p1", "p2", "p3"]
 
 
 def test_every_parked_approval_is_visible_in_the_queue() -> None:
@@ -508,7 +508,7 @@ def test_every_parked_approval_is_visible_in_the_queue() -> None:
     store.apply(ApprovalRequested(ROOT, pending(ROOT, "a1", at=1.0)))
     store.apply(ApprovalRequested(ROOT, pending(ROOT, "a2", at=2.0)))
     store.apply(ApprovalRequested(OTHER, pending(OTHER, "b1", at=3.0)))
-    assert {p.id for p in store.snapshot().review_queue} == parked
+    assert {p.id for p in store.snapshot().approvals} == parked
 
 
 def test_resolving_one_leaves_the_others_parked() -> None:
@@ -545,7 +545,7 @@ def test_the_same_approval_twice_is_not_duplicated() -> None:
     store.apply(spawn(ROOT))
     store.apply(ApprovalRequested(ROOT, pending(ROOT, "p1")))
     store.apply(ApprovalRequested(ROOT, pending(ROOT, "p1")))
-    assert len(store.snapshot().review_queue) == 1
+    assert len(store.snapshot().approvals) == 1
 
 
 def test_finishing_clears_every_pending_approval() -> None:
@@ -555,4 +555,4 @@ def test_finishing_clears_every_pending_approval() -> None:
     store.apply(ApprovalRequested(ROOT, pending(ROOT, "p2", at=2.0)))
     store.apply(AgentFinished(ROOT, AgentState.CANCELLED, ended_at=9.0))
     assert store.snapshot().nodes[ROOT].pending == ()
-    assert store.snapshot().review_queue == ()
+    assert store.snapshot().approvals == ()

@@ -1,20 +1,13 @@
 """
-Composing work: starting sessions, and talking to the ones that are running.
+Talking to sessions that are already running.
 
-Until this existed the application could only be driven from the command line and
-could only be talked to in one direction. An agent that asked a question ended its
-turn and there was nowhere to answer it, which made the thing unusable for the
-interactive work it was built for.
+Until this existed the application could only be talked to in one direction. An
+agent that asked a question ended its turn and there was nowhere to answer it,
+which made the thing unusable for the interactive work it was built for.
 
-Two surfaces:
-
-* **Launch** — a new session, with the directory and model chosen per session
-  rather than per process. Working directory is the interesting one: an
-  orchestrator whose agents all share the launching shell's cwd cannot run work
-  across projects, which is most of the point.
-
-* **Conversation** — send another prompt to a live session, interrupt it, or close
-  it. ``AWAITING_INPUT`` is the state this pane exists to answer.
+Send another prompt to a live session, interrupt it, or close it.
+``AWAITING_INPUT`` is the state this pane exists to answer. Starting a session is
+``ui/launcher.py`` -- a different act on a session that does not exist yet.
 
 Everything leaves through ``Bridge.submit`` onto the asyncio thread. Nothing here
 touches a session object directly, so the pool stays single-threaded.
@@ -29,24 +22,13 @@ from imgui_bundle import imgui
 
 from ..model import AgentState, NodeId, Snapshot
 from ..theme import P
-
-# Verified against the model-config docs at build time (design §7, trap 9). Listed
-# rather than free-text so a typo cannot become a session that fails on first turn.
-MODELS: tuple[str, ...] = (
-    "claude-sonnet-5",
-    "claude-opus-5",
-    "claude-haiku-4-5-20251001",
-    "claude-fable-5",
-)
+from . import widgets
 
 
 @dataclass
 class ComposeState:
-    """Draft text for the launcher and per-session reply boxes."""
+    """Draft reply text, per session."""
 
-    task: str = ""
-    cwd: str = "."
-    model_index: int = 0
     # Reply drafts, keyed by node. Kept per node so switching selection mid-sentence
     # does not silently discard what was being typed to a different agent.
     replies: dict[NodeId, str] = field(default_factory=dict)
@@ -57,50 +39,6 @@ class ComposeState:
             del self.replies[node]
 
 
-def draw_launcher(
-    state: ComposeState,
-    snap: Snapshot,
-    *,
-    running: int,
-    queued: int,
-    cap: int,
-    launch: Callable[[str, str, str], None],
-) -> None:
-    """The new-session form."""
-    imgui.text_disabled("start a session")
-    imgui.spacing()
-
-    imgui.text("task")
-    changed, state.task = imgui.input_text_multiline(
-        "##task", state.task, imgui.ImVec2(-1, 90), imgui.InputTextFlags_.allow_tab_input
-    )
-
-    imgui.set_next_item_width(220 * imgui.get_font_size() / 16.0)
-    _, state.model_index = imgui.combo("model", state.model_index, list(MODELS))
-
-    imgui.set_next_item_width(-1)
-    _, state.cwd = imgui.input_text_with_hint(
-        "##cwd", "working directory (agents run here)", state.cwd
-    )
-
-    ready = bool(state.task.strip())
-    if not ready:
-        imgui.begin_disabled()
-    if imgui.button("launch"):
-        launch(state.task.strip(), MODELS[state.model_index], state.cwd.strip() or ".")
-        state.task = ""
-    if not ready:
-        imgui.end_disabled()
-
-    imgui.same_line()
-    if running >= cap:
-        # Not a refusal -- the pool queues -- but worth saying, because a session
-        # that sits in SPAWNING while others work otherwise looks broken.
-        imgui.text_colored(P.warn.vec4, f"{running}/{cap} live; this one will queue")
-    else:
-        imgui.text_disabled(f"{running}/{cap} live" + (f", {queued} queued" if queued else ""))
-
-
 def draw_conversation(
     snap: Snapshot,
     state: ComposeState,
@@ -109,6 +47,7 @@ def draw_conversation(
     send: Callable[[NodeId, str], None],
     interrupt: Callable[[NodeId], None],
     close: Callable[[NodeId], None],
+    wrap: bool = True,
 ) -> None:
     """Reply to, interrupt, or close the selected session."""
     state.prune(snap)
@@ -141,8 +80,12 @@ def draw_conversation(
     disabled = record.state.is_terminal
     if disabled:
         imgui.begin_disabled()
-    changed, draft = imgui.input_text_multiline(
-        "##reply", draft, imgui.ImVec2(-1, 80), imgui.InputTextFlags_.allow_tab_input
+    changed, draft = widgets.multiline_input(
+        "##reply",
+        draft,
+        imgui.ImVec2(-1, 80),
+        wrap=wrap,
+        flags=int(imgui.InputTextFlags_.allow_tab_input),
     )
     if changed:
         state.replies[selected] = draft

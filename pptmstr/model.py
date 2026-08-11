@@ -18,7 +18,7 @@ import enum
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Any
+from typing import Any, ClassVar
 
 from .transcript import Transcript
 
@@ -234,6 +234,105 @@ class PendingApproval:
     diff: str | None = None
 
 
+class ObligationKind(enum.Enum):
+    """
+    The three ways an agent can be waiting on its operator.
+
+    Named as a closed set on purpose. The whole defect this exists to fix is that
+    "waiting on you" had two unrelated implementations and one of them had no
+    surface at all, so the count in the status bar was true about approvals and
+    silently wrong about everything else.
+    """
+
+    APPROVAL = "approval"
+    QUESTION = "question"
+    FAILURE = "failure"
+
+
+def _node_key(kind: ObligationKind, node: NodeId) -> str:
+    return f"{kind.value}:{node[0]}:{node[1] or ''}"
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovalNeeded:
+    """A tool call parked in front of the operator."""
+
+    node: NodeId
+    since: float
+    summary: str
+    approval: PendingApproval
+
+    kind: ClassVar[ObligationKind] = ObligationKind.APPROVAL
+
+    @property
+    def key(self) -> str:
+        """
+        Stable identity for the cursor and for ImGui widget keys.
+
+        Never a position in ``needs_you``. That list is sorted by age and reorders
+        whenever anything arrives or is answered, so an index-derived identity
+        silently retargets the cursor -- and this is the cursor that decides which
+        agent an ``approve`` applies to (I6).
+
+        Keyed on the approval rather than the node, because one node can have
+        several calls parked at once.
+        """
+        return f"{self.kind.value}:{self.approval.id}"
+
+
+@dataclass(frozen=True, slots=True)
+class QuestionPending:
+    """
+    A turn ended with the session still live, so the agent is waiting to be told
+    something.
+
+    Carries no guess at *what* was asked. A turn that ends is either a finished job
+    or a question, and the two are indistinguishable from the outside -- inferring
+    which from a trailing question mark was considered and rejected when sessions
+    became conversational, and re-introducing that guess here to make a prettier row
+    summary would be the same mistake at a different layer. The transcript holds
+    what was actually said; the inbox row's job is to say that someone is waiting.
+    """
+
+    node: NodeId
+    since: float
+    summary: str
+
+    kind: ClassVar[ObligationKind] = ObligationKind.QUESTION
+
+    @property
+    def key(self) -> str:
+        """A session has at most one unanswered turn, so the node identifies it."""
+        return _node_key(self.kind, self.node)
+
+
+@dataclass(frozen=True, slots=True)
+class SessionFailed:
+    """
+    A session died. Listed as an obligation because a crashed session is work that
+    has stopped and only the operator can decide what happens next -- and because
+    the surface that showed it before this existed was nothing at all.
+    """
+
+    node: NodeId
+    since: float
+    summary: str
+    error: str | None = None
+
+    kind: ClassVar[ObligationKind] = ObligationKind.FAILURE
+
+    @property
+    def key(self) -> str:
+        return _node_key(self.kind, self.node)
+
+
+# A tagged union, not a base class with three subclasses: the inbox renders one row
+# shape for all three (glyph, identity, wait, summary) and three different bodies
+# when a row expands, and `match` over a union is what makes the store's own
+# exhaustiveness trick available to that second half.
+Obligation = ApprovalNeeded | QuestionPending | SessionFailed
+
+
 @dataclass(frozen=True, slots=True)
 class AgentRecord:
     """One node in the agent tree."""
@@ -251,6 +350,15 @@ class AgentRecord:
     model: str
 
     agent_type: str | None = None
+    # The directory this agent runs in, inherited from the parent for sub-agents.
+    # Chosen at launch and then, until this field existed, gone -- which left the
+    # one axis the tool is sold on (work across several projects) unrenderable:
+    # twelve sessions over three repos were twelve indistinguishable rows.
+    #
+    # The *fact*, not a project name. Grouping cwds into projects is a presentation
+    # decision and is made in the UI (see ui/projects.py); putting the derived name
+    # here would freeze one grouping rule into the store.
+    cwd: str | None = None
     usage: UsageRollup = field(default_factory=UsageRollup)
     context: ContextSnapshot | None = None
     # A tuple, not one slot. An assistant turn can contain several tool calls, the
@@ -270,7 +378,21 @@ class AgentRecord:
     # hours, which is at least loud; mixing them the other way is silently wrong.
     started_at: float = 0.0
     ended_at: float | None = None
+    # When this node entered the state it is in now. Stamped by the store from the
+    # frame clock, so it lags the emitting thread by at most one frame -- irrelevant
+    # against waits measured in seconds, and the alternative was a required
+    # timestamp on four intents that twelve call sites would have to remember.
+    #
+    # Exists because "how long has this been waiting on me?" had no answer for two
+    # of the three obligation kinds. An approval carries requested_at and a failure
+    # carries ended_at; a session that ended its turn with a question carried
+    # nothing, so the one obligation most likely to be forgotten was also the one
+    # that could not be sorted by age.
+    state_since: float = 0.0
     error: str | None = None
+    # Set once the operator has cleared this session's failure from the inbox. Only
+    # meaningful while state is FAILED.
+    acknowledged: bool = False
 
     def with_(self, **changes: Any) -> AgentRecord:
         """Copy with fields replaced."""
@@ -294,10 +416,18 @@ class Snapshot:
     # renders this list directly and indents by record.depth, so it never walks the
     # tree itself.
     order: tuple[NodeId, ...]
-    # Every pending approval across every node, oldest first. The review queue (§5.4)
-    # is a projection over all agents, not a per-node list -- approving one write at
-    # a time per agent is the bottleneck the batching exists to remove.
-    review_queue: tuple[PendingApproval, ...]
+    # Everything waiting on the operator, across every agent, oldest first.
+    #
+    # One projection over all three obligation kinds, not three lists that agree by
+    # convention. This replaced a queue of approvals alone, which is why the status
+    # bar could read "nothing awaiting review" while a session sat on an unanswered
+    # question and another had crashed -- two of the three things the operator owed
+    # attention to were modelled by a different mechanism and counted by nothing.
+    #
+    # Everything that counts or badges an obligation reads this. Nothing re-derives
+    # from `pending`: that habit is what produced the original defect, and it
+    # reproduced itself once already inside the mock built to fix it.
+    needs_you: tuple[Obligation, ...]
     any_active: bool
 
     @staticmethod
@@ -306,9 +436,21 @@ class Snapshot:
             seq=0,
             nodes=MappingProxyType({}),
             order=(),
-            review_queue=(),
+            needs_you=(),
             any_active=False,
         )
+
+    @property
+    def approvals(self) -> tuple[PendingApproval, ...]:
+        """
+        The approval subset, for the one caller that legitimately needs it: the
+        watchdog comparing parked futures to what the operator can reach.
+
+        Filtered out of ``needs_you`` rather than re-walked from ``pending`` so
+        there is still exactly one list. A watchdog that built its own view of the
+        world would be checking an invariant against itself.
+        """
+        return tuple(o.approval for o in self.needs_you if isinstance(o, ApprovalNeeded))
 
     def get(self, node_id: NodeId) -> AgentRecord | None:
         return self.nodes.get(node_id)

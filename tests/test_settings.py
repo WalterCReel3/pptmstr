@@ -59,6 +59,23 @@ def test_wrong_types_fall_back_per_field(tmp_path: Path) -> None:
     assert got.fps_idle == Settings().fps_idle
 
 
+def test_wrap_inputs_round_trips(tmp_path: Path) -> None:
+    path = tmp_path / "settings.json"
+    save(Settings(wrap_inputs=False), path)
+    assert load(path).wrap_inputs is False
+
+
+def test_wrap_inputs_rejects_non_bool(tmp_path: Path) -> None:
+    """
+    ``bool`` is an ``int``, so the bool guard has to be tried before the numeric one
+    or a JSON ``1`` would load as True and a ``2`` would load as an int in a field
+    the UI passes straight into a flag mask.
+    """
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"wrap_inputs": 1}))
+    assert load(path).wrap_inputs is Settings().wrap_inputs
+
+
 def test_save_is_atomic_and_leaves_no_temp_files(tmp_path: Path) -> None:
     """
     Written to a temp file in the same directory and renamed, so an interrupted

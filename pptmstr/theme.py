@@ -31,7 +31,7 @@ from typing import cast
 from imgui_bundle import icons_fontawesome_6 as fa
 from imgui_bundle import imgui
 
-from .model import AgentState, ContextPressure
+from .model import AgentState, ContextPressure, ObligationKind
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +129,9 @@ class Palette:
     def pressure(self, pressure: ContextPressure) -> Color:
         return cast(Color, getattr(self, _PRESSURE_ROLE[pressure]))
 
+    def obligation(self, kind: ObligationKind) -> Color:
+        return cast(Color, getattr(self, _OBLIGATION_ROLE[kind]))
+
 
 _STATE_ROLE: dict[AgentState, str] = {
     AgentState.SPAWNING: "state_spawning",
@@ -163,6 +166,21 @@ STATE_GLYPH: dict[AgentState, str] = {
     AgentState.FAILED: fa.ICON_FA_TRIANGLE_EXCLAMATION,
     AgentState.CANCELLED: fa.ICON_FA_BAN,
     AgentState.RATE_LIMITED: fa.ICON_FA_CLOCK,
+}
+
+# Obligations borrow the glyph and hue of the state that produces them, so an
+# inbox row and the card it came from read as the same thing rather than as two
+# separate vocabularies the operator has to learn twice.
+OBLIGATION_GLYPH: dict[ObligationKind, str] = {
+    ObligationKind.APPROVAL: STATE_GLYPH[AgentState.AWAITING_APPROVAL],
+    ObligationKind.QUESTION: STATE_GLYPH[AgentState.AWAITING_INPUT],
+    ObligationKind.FAILURE: STATE_GLYPH[AgentState.FAILED],
+}
+
+_OBLIGATION_ROLE: dict[ObligationKind, str] = {
+    ObligationKind.APPROVAL: "state_awaiting",
+    ObligationKind.QUESTION: "state_awaiting_input",
+    ObligationKind.FAILURE: "state_failed",
 }
 
 STATE_LABEL: dict[AgentState, str] = {
@@ -445,6 +463,15 @@ def apply_style() -> None:
     s(c.window_bg, P.bg.vec4)
     s(c.child_bg, P.panel.vec4)
     s(c.popup_bg, P.panel_alt.vec4)
+    # A modal blocks every pane behind it, so it has to look like it does: a window
+    # that swallows clicks while looking like an ordinary floating one reads as the
+    # application having locked up.
+    #
+    # Black rather than a palette role, and the one colour here that is not. A dim
+    # has to darken in every theme, and any role taken from the palette is the page
+    # colour -- which on `light` and `high_contrast` would wash the background out
+    # instead of pushing it back.
+    s(c.modal_window_dim_bg, imgui.ImVec4(0, 0, 0, 0.45))
     s(c.border, P.border.vec4)
     s(c.border_shadow, imgui.ImVec4(0, 0, 0, 0))
     s(c.frame_bg, P.panel_alt.vec4)

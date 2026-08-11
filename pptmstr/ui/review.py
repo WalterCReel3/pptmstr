@@ -1,11 +1,11 @@
 """
-The review queue: the surface where approvals are actually worked.
+Approval decisions: the draft state behind a review, and the way one leaves.
 
-Split in two on purpose. The **list** is a cross-agent work queue ordered by how
-long each item has been blocked -- the tree tells you *that* something needs you,
-this tells you *what*, and approving one agent at a time through the tree is the
-bottleneck §5.4 exists to remove. The **detail** pane shows one item in full,
-which is the only way a diff gets the width and height to be readable.
+Not a pane. The queue and the diff live in ``inbox.py``, where an approval is one
+of three kinds of obligation and its diff opens inside the row rather than in a
+second pane with a second cursor. What is left here is the part that is about
+*deciding* rather than about drawing: the half-typed rejection reason, the edited
+arguments, the batch forms, and the keyboard.
 
 Driven by the keyboard. The layout matters less than not reaching for the mouse
 forty times an hour: j/k move, a approves, r rejects, e edits. Buttons stay for
@@ -18,15 +18,13 @@ what is rendered is always what the agent actually saw, never an optimistic gues
 
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass, field
 
 from imgui_bundle import imgui
 
-from ..approval import diff_line_kind
 from ..bridge import Bridge, Decision
-from ..model import NodeId, PendingApproval, Snapshot
-from ..theme import P
+from ..model import ApprovalNeeded, NodeId, PendingApproval, Snapshot
+from .focus import FocusState
 
 # Keys that act on the selected item. Kept in one place because the help line and
 # the handler must not drift apart.
@@ -51,7 +49,6 @@ class ReviewState:
     must take its draft with it.
     """
 
-    selected: str | None = None
     reasons: dict[str, str] = field(default_factory=dict)
     edits: dict[str, str] = field(default_factory=dict)
     # Diff text split into lines, cached per pending id. Pruned with the rest.
@@ -75,28 +72,6 @@ class ReviewState:
         if self.editing is not None and self.editing not in live_ids:
             self.editing = None
             self.edit_error = None
-        if self.selected is not None and self.selected not in live_ids:
-            self.selected = None
-
-    def ensure_selection(self, queue: tuple[PendingApproval, ...]) -> None:
-        if queue and self.selected is None:
-            self.selected = queue[0].id
-
-    def move(self, queue: tuple[PendingApproval, ...], delta: int) -> None:
-        if not queue:
-            return
-        ids = [p.id for p in queue]
-        try:
-            index = ids.index(self.selected or "")
-        except ValueError:
-            index = 0 if delta > 0 else len(ids) - 1
-        else:
-            index = max(0, min(len(ids) - 1, index + delta))
-        self.selected = ids[index]
-
-
-def _selected(snap: Snapshot, state: ReviewState) -> PendingApproval | None:
-    return next((p for p in snap.review_queue if p.id == state.selected), None)
 
 
 def approve_all_for_node(bridge: Bridge, snap: Snapshot, state: ReviewState, node: NodeId) -> int:
@@ -108,7 +83,7 @@ def approve_all_for_node(bridge: Bridge, snap: Snapshot, state: ReviewState, nod
     reading its diffs. Returns how many were sent.
     """
     sent = 0
-    for pending in snap.review_queue:
+    for pending in snap.approvals:
         if pending.node == node:
             resolve(bridge, state, pending, approved=True)
             sent += 1
@@ -126,7 +101,7 @@ def approve_everything(bridge: Bridge, snap: Snapshot, state: ReviewState) -> in
     is silent and unrecoverable.
     """
     sent = 0
-    for pending in snap.review_queue:
+    for pending in snap.approvals:
         resolve(bridge, state, pending, approved=True)
         sent += 1
     state.confirming_global = False
@@ -169,27 +144,43 @@ def _parse_edit(text: str) -> dict[str, object] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
-def handle_keys(snap: Snapshot, state: ReviewState, bridge: Bridge) -> None:
+def handle_keys(snap: Snapshot, focus: FocusState, state: ReviewState, bridge: Bridge) -> None:
     """
     Keyboard shortcuts, active only when no text field has the keyboard.
 
     ``want_capture_keyboard`` is the guard that matters: without it, typing the
     letter 'a' into a rejection reason would approve the thing you are explaining
     why you rejected.
+
+    j/k walk the whole inbox, not just the approvals in it. Skipping over questions
+    and failures would make the two obligation kinds that have no other surface
+    unreachable from the keyboard, which is most of the way back to them having no
+    surface at all. The action keys below then do nothing on a row that is not an
+    approval, which is the right kind of nothing: the cursor is still where the
+    operator put it, and the expanded row shows what it *can* do.
     """
     if imgui.get_io().want_capture_keyboard:
         return
-    pending = _selected(snap, state)
+
     if imgui.is_key_pressed(imgui.Key.j):
-        state.move(snap.review_queue, 1)
+        focus.move(snap, 1)
     if imgui.is_key_pressed(imgui.Key.k):
-        state.move(snap.review_queue, -1)
-    if pending is None:
+        focus.move(snap, -1)
+
+    if imgui.is_key_pressed(imgui.Key.escape):
+        state.editing = None
+        state.confirming_global = False
+        state.edit_error = None
+
+    current = focus.obligation(snap)
+    if not isinstance(current, ApprovalNeeded):
         return
+    pending = current.approval
+
     if imgui.is_key_pressed(imgui.Key.a):
-        # Shift+A is the batch form, scoped to the selected agent. Tested as one
+        # Shift+A is the batch form, scoped to the focused agent. Tested as one
         # branch rather than two ifs: an unguarded pair fires both, so Shift+A
-        # would approve the selection *and* everything beside it.
+        # would approve the focused call *and* everything beside it.
         if imgui.get_io().key_shift:
             approve_all_for_node(bridge, snap, state, pending.node)
         else:
@@ -198,226 +189,12 @@ def handle_keys(snap: Snapshot, state: ReviewState, bridge: Bridge) -> None:
         state.focus_reason = True
     if imgui.is_key_pressed(imgui.Key.e):
         state.editing = pending.id
-        state.edits.setdefault(pending.id, _pretty_args(pending))
+        state.edits.setdefault(pending.id, pretty_args(pending))
     if imgui.is_key_pressed(imgui.Key.escape):
-        state.editing = None
-        state.confirming_global = False
         state.edits.pop(pending.id, None)
-        state.edit_error = None
 
 
-def _pretty_args(pending: PendingApproval) -> str:
+def pretty_args(pending: PendingApproval) -> str:
     import json
 
     return json.dumps(dict(pending.raw_args), indent=2, sort_keys=True)
-
-
-def draw_queue(
-    snap: Snapshot, state: ReviewState, bridge: Bridge, now: float | None = None
-) -> None:
-    """The work list. Compact by design: this is scanned, not read."""
-    now = time.time() if now is None else now
-    state.prune({p.id for p in snap.review_queue})
-    state.ensure_selection(snap.review_queue)
-
-    if not snap.review_queue:
-        imgui.text_disabled("nothing awaiting review")
-        imgui.spacing()
-        imgui.text_disabled("agents run until they need to change something.")
-        return
-
-    imgui.text_colored(P.state_awaiting.vec4, f"{len(snap.review_queue)} awaiting review")
-    imgui.same_line()
-    imgui.text_disabled("  " + "   ".join(f"{k} {label}" for k, label in SHORTCUTS[:3]))
-    imgui.separator()
-
-    flags = imgui.TableFlags_.row_bg | imgui.TableFlags_.scroll_y
-    # Reserve the footer's height. A scrolling table otherwise claims the whole
-    # remaining pane and pushes the batch controls below the fold, where an action
-    # that needs deliberate discovery becomes one that cannot be found at all.
-    if not imgui.begin_table("##queue", 3, flags, imgui.ImVec2(0, -32)):
-        return
-    imgui.table_setup_column("agent", imgui.TableColumnFlags_.width_fixed, 130.0)
-    imgui.table_setup_column("waiting", imgui.TableColumnFlags_.width_fixed, 70.0)
-    imgui.table_setup_column("call", imgui.TableColumnFlags_.width_stretch)
-    imgui.table_setup_scroll_freeze(0, 1)
-    imgui.table_headers_row()
-
-    for pending in snap.review_queue:
-        imgui.table_next_row()
-        imgui.table_next_column()
-        imgui.push_id(pending.id)
-
-        record = snap.nodes.get(pending.node)
-        label = (record.agent_type if record else None) or "session"
-        clicked, _ = imgui.selectable(
-            f"{label}##row",
-            state.selected == pending.id,
-            imgui.SelectableFlags_.span_all_columns,
-        )
-        if clicked:
-            state.selected = pending.id
-
-        imgui.table_next_column()
-        # How long an agent has been blocked is the queue's ordering key and the
-        # only number here that gets worse on its own.
-        imgui.text_disabled(_waited(pending.requested_at, now))
-
-        imgui.table_next_column()
-        imgui.text(pending.summary)
-        imgui.pop_id()
-
-    imgui.end_table()
-    _draw_batch_controls(snap, state, bridge)
-
-
-def _draw_batch_controls(snap: Snapshot, state: ReviewState, bridge: Bridge) -> None:
-    """
-    Batch actions, with the global one behind a confirm.
-
-    The scoped button is safe enough to be one click. The global one is not: it can
-    write things the operator never looked at, and that failure is silent and
-    unrecoverable, so it costs a second click that states the count.
-    """
-    selected = _selected(snap, state)
-    if selected is not None:
-        record = snap.nodes.get(selected.node)
-        label = (record.agent_type if record else None) or "this agent"
-        count = sum(1 for p in snap.review_queue if p.node == selected.node)
-        if imgui.button(f"approve all {count} from {label}"):
-            approve_all_for_node(bridge, snap, state, selected.node)
-        imgui.same_line()
-
-    total = len(snap.review_queue)
-    if state.confirming_global:
-        imgui.text_colored(P.danger.vec4, f"approve all {total} without reading them?")
-        imgui.same_line()
-        if imgui.button("yes, approve all"):
-            approve_everything(bridge, snap, state)
-        imgui.same_line()
-        if imgui.button("cancel"):
-            state.confirming_global = False
-    elif imgui.button(f"approve all {total}..."):
-        state.confirming_global = True
-
-
-def _waited(requested_at: float, now: float) -> str:
-    seconds = max(0.0, now - requested_at)
-    if seconds < 60:
-        return f"{seconds:.0f}s"
-    if seconds < 3600:
-        return f"{seconds / 60:.0f}m{int(seconds) % 60:02d}s"
-    return f"{seconds / 3600:.0f}h"
-
-
-def draw_detail(snap: Snapshot, state: ReviewState, bridge: Bridge) -> None:
-    """One item in full: the diff, the reason field, and the actions."""
-    pending = _selected(snap, state)
-    if pending is None:
-        imgui.text_disabled("select a pending call to review it")
-        imgui.spacing()
-        for key, label in SHORTCUTS:
-            imgui.text_disabled(f"  {key:<6} {label}")
-        return
-
-    record = snap.nodes.get(pending.node)
-    imgui.text_colored(P.text_strong.vec4, pending.tool_name)
-    imgui.same_line()
-    imgui.text_disabled(f"  {(record.agent_type if record else None) or 'session'}")
-    imgui.text_disabled(pending.summary)
-    imgui.separator()
-
-    if state.editing == pending.id:
-        _draw_editor(state, pending)
-    elif pending.diff:
-        _draw_diff(state, pending, pending.diff)
-    else:
-        # No diff is a real answer, not a gap: a Bash command has nothing
-        # diff-shaped to show, and inventing one would be worse than the arguments.
-        imgui.text_disabled("no diff for this call - arguments:")
-        imgui.spacing()
-        for key, value in pending.raw_args.items():
-            imgui.text_wrapped(f"{key} = {value!r}")
-
-    imgui.separator()
-    _draw_actions(state, pending, bridge)
-
-
-def _draw_diff(state: ReviewState, pending: PendingApproval, diff: str) -> None:
-    # Split once per pending item, not once per frame. A whole-file Write produces
-    # a diff as long as the file, and re-splitting it sixty times a second is work
-    # proportional to the change being reviewed -- exactly backwards, since the
-    # large diffs are the ones the operator spends longest looking at.
-    lines = state.diff_lines.get(pending.id)
-    if lines is None:
-        lines = diff.splitlines() or [""]
-        state.diff_lines[pending.id] = lines
-
-    if not imgui.begin_child("##diff", imgui.ImVec2(0, -110)):
-        imgui.end_child()
-        return
-
-    colours = {
-        "add": P.diff_add,
-        "remove": P.diff_remove,
-        "meta": P.accent,
-        "context": P.diff_context,
-    }
-    # Rows are uniform height here (no wrapping), which is what lets the clipper
-    # work -- so only the visible slice of a thousand-line diff is emitted.
-    clipper = imgui.ListClipper()
-    clipper.begin(len(lines))
-    while clipper.step():
-        for index in range(clipper.display_start, clipper.display_end):
-            line = lines[index]
-            # The +/- gutter stays in the text regardless of colour. That is the
-            # non-hue channel, and it is what keeps a diff readable in high
-            # contrast and to a colour-deficient operator (§6.1).
-            imgui.text_colored(colours[diff_line_kind(line)].vec4, line if line else " ")
-    clipper.end()
-    imgui.end_child()
-
-
-def _draw_editor(state: ReviewState, pending: PendingApproval) -> None:
-    imgui.text_colored(P.focus.vec4, "editing arguments - approve runs the corrected call")
-    text = state.edits.get(pending.id, "")
-    changed, new_text = imgui.input_text_multiline(
-        "##edit", text, imgui.ImVec2(-1, -110), imgui.InputTextFlags_.allow_tab_input
-    )
-    if changed:
-        state.edits[pending.id] = new_text
-        state.edit_error = None
-
-
-def _draw_actions(state: ReviewState, pending: PendingApproval, bridge: Bridge) -> None:
-    if state.edit_error:
-        imgui.text_colored(P.danger.vec4, state.edit_error)
-
-    if state.focus_reason:
-        imgui.set_keyboard_focus_here()
-        state.focus_reason = False
-    reason = state.reasons.get(pending.id, "")
-    changed, new_reason = imgui.input_text_with_hint(
-        "##reason", "reason (shown to the agent on reject)", reason
-    )
-    if changed:
-        state.reasons[pending.id] = new_reason
-
-    if imgui.button("approve"):
-        resolve(bridge, state, pending, approved=True)
-    imgui.same_line()
-    if imgui.button("reject"):
-        resolve(bridge, state, pending, approved=False)
-    imgui.same_line()
-    if state.editing == pending.id:
-        if imgui.button("cancel edit"):
-            state.editing = None
-            state.edits.pop(pending.id, None)
-            state.edit_error = None
-    elif imgui.button("edit"):
-        state.editing = pending.id
-        state.edits.setdefault(pending.id, _pretty_args(pending))
-
-    imgui.same_line()
-    edited = pending.id in state.edits and state.editing == pending.id
-    imgui.text_disabled("  approve runs the edited arguments" if edited else "  a / r / e")

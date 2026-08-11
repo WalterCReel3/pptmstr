@@ -47,10 +47,34 @@ _TASKS = (
     "port the tree pane",
     "chase a flaky test",
 )
+# Distinct directories so --fake exercises the project axis. A fake fleet that all
+# shares one cwd renders as a single lane, which is the one arrangement the rail's
+# grouping cannot be judged from.
+_CWDS = (
+    "~/Source/pptmstr",
+    "~/Source/orbital",
+    "~/scratch",
+)
 _TOOLS = (
     ("Read", {"file_path": "/home/wreel/Source/pptmstr/pptmstr/store.py"}),
     ("Write", {"file_path": "/tmp/pptmstr-demo.txt", "content": "hello\nworld\n"}),
     ("Bash", {"command": "pytest -q"}),
+    # Long on purpose, and the only fixture here that is. Every other entry fits a
+    # column, which is why the queue looked correct for as long as it did: a real
+    # Bash call runs off the right edge of the row *and* past summarize's
+    # 90-character clip, so the row is a lossy rendering of a command that could
+    # delete something. DETAIL is the pane that has to hold this one.
+    (
+        "Bash",
+        {
+            "command": (
+                "for f in $(git ls-files '*.py'); do "
+                'python -m compileall -q "$f" || echo "FAILED $f" >> /tmp/compile.log; '
+                "done && rg -n 'TODO|FIXME' pptmstr tests "
+                "| awk -F: '{print $1}' | sort | uniq -c | sort -rn | head -20"
+            )
+        },
+    ),
     (
         "Edit",
         {
@@ -164,6 +188,9 @@ class FakeDriver:
                 started_at=time.monotonic(),
                 agent_type=agent_type,
                 topic="starting",
+                # Roots only. A sub-agent inherits its session's directory in the
+                # store, which is the same rule the real driver relies on.
+                cwd=self.rng.choice(_CWDS) if parent is None else None,
                 transcript=transcript,
             )
         )

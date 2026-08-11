@@ -20,6 +20,7 @@ here.
 
 from __future__ import annotations
 
+import time
 from collections.abc import Iterable
 from types import MappingProxyType
 from typing import assert_never
@@ -32,13 +33,23 @@ from .intents import (
     ApprovalResolved,
     CompactionObserved,
     ContextPolled,
+    FailureAcknowledged,
     Intent,
     StateChanged,
     SubagentProgress,
     TopicChanged,
     UsageAccrued,
 )
-from .model import AgentRecord, AgentState, NodeId, PendingApproval, Snapshot
+from .model import (
+    AgentRecord,
+    AgentState,
+    ApprovalNeeded,
+    NodeId,
+    Obligation,
+    QuestionPending,
+    SessionFailed,
+    Snapshot,
+)
 from .transcript import Transcript
 
 
@@ -64,26 +75,42 @@ class Store:
         """
         return self._snapshot
 
-    def apply(self, intent: Intent) -> None:
+    def apply(self, intent: Intent, now: float | None = None) -> None:
         """Apply one intent, producing a new snapshot."""
-        self._snapshot = _apply(self._snapshot, intent)
+        self._snapshot = _apply(self._snapshot, intent, _clock(now))
 
-    def apply_all(self, intents: Iterable[Intent]) -> None:
+    def apply_all(self, intents: Iterable[Intent], now: float | None = None) -> None:
         """
         Apply a batch, rebuilding derived state once at the end.
 
         Draining a frame's worth of intents this way keeps the per-intent
         bookkeeping from running N times when one pass would do.
+
+        ``now`` is the frame clock, passed in rather than read here so ``_apply``
+        stays a pure function of (snapshot, intent, time) and a test can hand it a
+        fixed instant. The whole batch shares one reading, which is also what the
+        frame does with its snapshot.
         """
+        clock = _clock(now)
         snap = self._snapshot
         for intent in intents:
-            snap = _apply(snap, intent)
+            snap = _apply(snap, intent, clock)
         self._snapshot = snap
 
 
-def _apply(snap: Snapshot, intent: Intent) -> Snapshot:
+def _clock(now: float | None) -> float:
     """
-    Pure: old snapshot plus intent gives new snapshot.
+    The caller's instant, or this one.
+
+    Defaulted at the entry point rather than inside ``_apply`` so the pure core
+    keeps a required argument and cannot silently read a clock mid-batch.
+    """
+    return time.monotonic() if now is None else now
+
+
+def _apply(snap: Snapshot, intent: Intent, now: float) -> Snapshot:
+    """
+    Pure: old snapshot plus intent and an instant gives new snapshot.
 
     A free function rather than a method so it can be exercised without a Store, and
     so the match below is the single audit point for every mutation in the system.
@@ -104,6 +131,11 @@ def _apply(snap: Snapshot, intent: Intent) -> Snapshot:
                 task=intent.task,
                 model=intent.model,
                 agent_type=intent.agent_type,
+                # Resolved here rather than at every emitter. A sub-agent's spawn
+                # hook is not told a working directory but does run in its
+                # session's, and making each emitter remember that is how the two
+                # sides of a boundary drift apart.
+                cwd=intent.cwd or (parent_rec.cwd if parent_rec else None),
                 started_at=intent.started_at,
                 transcript=intent.transcript or Transcript(),
             )
@@ -203,14 +235,18 @@ def _apply(snap: Snapshot, intent: Intent) -> Snapshot:
                 # So a placeholder row is created instead. It is uglier than a
                 # properly spawned node and infinitely better than a silent hang.
                 parent = (intent.node_id[0], None)
+                adopted = parent in nodes and parent != intent.node_id
                 nodes[intent.node_id] = AgentRecord(
                     node_id=intent.node_id,
-                    parent=parent if parent != intent.node_id and parent in nodes else None,
-                    depth=1 if parent in nodes and parent != intent.node_id else 0,
+                    parent=parent if adopted else None,
+                    depth=1 if adopted else 0,
                     state=AgentState.AWAITING_APPROVAL,
                     topic="awaiting approval",
                     task="(recovered from an approval for an unannounced agent)",
                     model="unknown",
+                    # So a recovered node still lands in the right project lane
+                    # rather than in an "unknown" one of its own.
+                    cwd=nodes[parent].cwd if adopted else None,
                     pending=(intent.pending,),
                     started_at=intent.pending.requested_at,
                 )
@@ -251,6 +287,12 @@ def _apply(snap: Snapshot, intent: Intent) -> Snapshot:
                 pending=(),
             )
 
+        case FailureAcknowledged():
+            rec = nodes.get(intent.node_id)
+            if rec is None:
+                return snap
+            nodes[intent.node_id] = rec.with_(acknowledged=True)
+
         case AgentRemoved():
             if intent.node_id not in nodes:
                 return snap
@@ -266,12 +308,25 @@ def _apply(snap: Snapshot, intent: Intent) -> Snapshot:
             # into a failed typecheck.
             assert_never(intent)
 
+    # Stamp the clock once, here, rather than in each arm that assigns a state.
+    #
+    # Six arms can change a node's state and three of them do it as a side effect of
+    # doing something else. Asking each to remember a timestamp is the same shape as
+    # every sync bug in this codebase's history: a fact maintained in several places
+    # by convention. Comparing before and after cannot be forgotten by an arm that
+    # has not been written yet.
+    touched = nodes.get(intent.node_id)
+    if touched is not None:
+        was = snap.nodes.get(intent.node_id)
+        if was is None or was.state is not touched.state:
+            nodes[intent.node_id] = touched.with_(state_since=now)
+
     order = _preorder(nodes) if reorder else snap.order
     return Snapshot(
         seq=snap.seq + 1,
         nodes=MappingProxyType(nodes),
         order=order,
-        review_queue=_review_queue(nodes, order),
+        needs_you=_needs_you(nodes, order),
         any_active=any(r.state.is_active for r in nodes.values()),
     )
 
@@ -320,15 +375,57 @@ def _preorder(nodes: dict[NodeId, AgentRecord]) -> tuple[NodeId, ...]:
     return tuple(out)
 
 
-def _review_queue(
+def _needs_you(
     nodes: dict[NodeId, AgentRecord], order: tuple[NodeId, ...]
-) -> tuple[PendingApproval, ...]:
+) -> tuple[Obligation, ...]:
     """
-    Every pending approval, oldest request first.
+    Everything waiting on the operator, oldest first.
 
-    Ordered by request time rather than tree position so the queue reads as a work
-    list -- the operator works the backlog, and the agent that has been blocked
-    longest is the one costing the most.
+    One walk producing all three kinds. Ordered by how long each has been waiting
+    rather than by tree position, because the operator works a backlog and the thing
+    that has been blocked longest is the thing costing the most. Ties keep tree
+    order, since the walk is over ``order`` and the sort is stable.
+
+    The three kinds are mutually exclusive per node by construction and not by luck:
+    a node with anything pending is held in AWAITING_APPROVAL by the guard in
+    StateChanged, and AgentFinished clears ``pending`` as it sets a terminal state.
     """
-    pend = [p for nid in order if nid in nodes for p in nodes[nid].pending]
-    return tuple(sorted(pend, key=lambda p: p.requested_at))
+    out: list[Obligation] = []
+    for nid in order:
+        rec = nodes.get(nid)
+        if rec is None:
+            continue
+
+        for p in rec.pending:
+            out.append(
+                ApprovalNeeded(node=nid, since=p.requested_at, summary=p.summary, approval=p)
+            )
+
+        if rec.state is AgentState.AWAITING_INPUT:
+            out.append(
+                QuestionPending(
+                    node=nid,
+                    since=rec.state_since,
+                    # Deliberately not the agent's last sentence. Naming the two
+                    # things the operator can do about it is useful and honest;
+                    # summarising what was asked would mean guessing whether the
+                    # turn ended in a question at all.
+                    summary="ended its turn - reply or close",
+                )
+            )
+
+        elif rec.state is AgentState.FAILED and not rec.acknowledged:
+            first_line = (rec.error or "").strip().splitlines()
+            out.append(
+                SessionFailed(
+                    node=nid,
+                    # A failure's wait starts when it died. ended_at is set by the
+                    # same intent that set FAILED, so state_since only stands in for
+                    # a record that reached FAILED some other way.
+                    since=rec.ended_at if rec.ended_at is not None else rec.state_since,
+                    summary=first_line[0][:120] if first_line else "session failed",
+                    error=rec.error,
+                )
+            )
+
+    return tuple(sorted(out, key=lambda o: o.since))

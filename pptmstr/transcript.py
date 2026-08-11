@@ -149,3 +149,16 @@ class Transcript:
         """Whole transcript up to ``limit``. For tests and export, not per-frame use."""
         cap = self._published_len if limit is None else limit
         return self.read(0, cap)
+
+    def tail(self, nbytes: int) -> str:
+        """
+        The last ``nbytes`` of published output.
+
+        Safe on the frame path in a way ``text()`` is not: the cost is the size of
+        the window asked for, not the size of the transcript, so a pane showing the
+        end of a long-running session's output does not get more expensive as that
+        session talks. Decoding tolerates a split codepoint at the start, since the
+        cut is by byte offset.
+        """
+        end = self._published_len
+        return self.read(max(0, end - nbytes), end)

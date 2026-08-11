@@ -95,11 +95,11 @@ def test_write_parks_the_agent_and_reaches_the_store(bridge: Bridge) -> None:
     task = bridge.submit(
         session._pre_tool_use(hook_input("Write", file_path="/x", content="hello"), None, {})
     )
-    pump(store, bridge, lambda: bool(store.snapshot().review_queue))
+    pump(store, bridge, lambda: bool(store.snapshot().approvals))
 
     snap = store.snapshot()
-    assert len(snap.review_queue) == 1
-    pending = snap.review_queue[0]
+    assert len(snap.approvals) == 1
+    pending = snap.approvals[0]
     assert pending.tool_name == "Write"
     assert pending.diff is not None
     assert snap.nodes[session.node_id].state is AgentState.AWAITING_APPROVAL
@@ -111,7 +111,7 @@ def test_write_parks_the_agent_and_reaches_the_store(bridge: Bridge) -> None:
     out = task.result(timeout=TIMEOUT)
     assert decision_of(out) == "allow"
 
-    pump(store, bridge, lambda: not store.snapshot().review_queue)
+    pump(store, bridge, lambda: not store.snapshot().approvals)
     assert store.snapshot().nodes[session.node_id].pending == ()
 
 
@@ -124,9 +124,9 @@ def test_rejection_carries_the_reason_to_the_model(bridge: Bridge) -> None:
     session = AgentSession(bridge, "task")
     session.announce()
     task = bridge.submit(session._pre_tool_use(hook_input("Bash", command="rm -rf /"), None, {}))
-    pump(store, bridge, lambda: bool(store.snapshot().review_queue))
+    pump(store, bridge, lambda: bool(store.snapshot().approvals))
 
-    pending = store.snapshot().review_queue[0]
+    pending = store.snapshot().approvals[0]
     bridge.resolve(pending.id, Decision(approved=False, reason="never do that"))
     out = task.result(timeout=TIMEOUT)
 
@@ -145,9 +145,9 @@ def test_edit_then_approve_substitutes_the_arguments(bridge: Bridge) -> None:
     task = bridge.submit(
         session._pre_tool_use(hook_input("Write", file_path="/wrong", content="x"), None, {})
     )
-    pump(store, bridge, lambda: bool(store.snapshot().review_queue))
+    pump(store, bridge, lambda: bool(store.snapshot().approvals))
 
-    pending = store.snapshot().review_queue[0]
+    pending = store.snapshot().approvals[0]
     bridge.resolve(
         pending.id,
         Decision(approved=True, edited_args={"file_path": "/right", "content": "x"}),
@@ -164,8 +164,8 @@ def test_plain_approval_sends_no_updated_input(bridge: Bridge) -> None:
     session = AgentSession(bridge, "task")
     session.announce()
     task = bridge.submit(session._pre_tool_use(hook_input("Bash", command="ls"), None, {}))
-    pump(store, bridge, lambda: bool(store.snapshot().review_queue))
-    bridge.resolve(store.snapshot().review_queue[0].id, Decision(approved=True))
+    pump(store, bridge, lambda: bool(store.snapshot().approvals))
+    bridge.resolve(store.snapshot().approvals[0].id, Decision(approved=True))
     out = task.result(timeout=TIMEOUT)
     assert "updatedInput" not in out["hookSpecificOutput"]
 
@@ -180,13 +180,13 @@ def test_one_parked_agent_does_not_block_another(bridge: Bridge) -> None:
     slow = bridge.submit(
         blocked._pre_tool_use(hook_input("Write", file_path="/x", content="y"), None, {})
     )
-    pump(store, bridge, lambda: bool(store.snapshot().review_queue))
+    pump(store, bridge, lambda: bool(store.snapshot().approvals))
 
     fast = bridge.submit(other._pre_tool_use(hook_input("Read", file_path="/y"), None, {}))
     assert decision_of(fast.result(timeout=TIMEOUT)) == "allow"
     assert not slow.done()
 
-    bridge.resolve(store.snapshot().review_queue[0].id, Decision(approved=False))
+    bridge.resolve(store.snapshot().approvals[0].id, Decision(approved=False))
     slow.result(timeout=TIMEOUT)
 
 
@@ -202,10 +202,10 @@ def test_cancellation_clears_the_pending_row(bridge: Bridge) -> None:
     task = bridge.submit(
         session._pre_tool_use(hook_input("Write", file_path="/x", content="y"), None, {})
     )
-    pump(store, bridge, lambda: bool(store.snapshot().review_queue))
+    pump(store, bridge, lambda: bool(store.snapshot().approvals))
 
     task.cancel()
-    pump(store, bridge, lambda: not store.snapshot().review_queue)
+    pump(store, bridge, lambda: not store.snapshot().approvals)
     assert store.snapshot().nodes[session.node_id].pending == ()
 
 
@@ -265,8 +265,8 @@ def test_approval_for_an_unannounced_node_is_recovered(bridge: Bridge) -> None:
         )
     )
     snap = store.snapshot()
-    assert len(snap.review_queue) == 1
-    assert snap.review_queue[0].id == "p1"
+    assert len(snap.approvals) == 1
+    assert snap.approvals[0].id == "p1"
     assert snap.nodes[ghost].state is AgentState.AWAITING_APPROVAL
 
 
@@ -278,9 +278,9 @@ def test_a_recovered_approval_can_be_resolved_normally(bridge: Bridge) -> None:
     task = bridge.submit(
         session._pre_tool_use(hook_input("Write", file_path="/x", content="y"), None, {})
     )
-    pump(store, bridge, lambda: bool(store.snapshot().review_queue))
+    pump(store, bridge, lambda: bool(store.snapshot().approvals))
 
-    pending = store.snapshot().review_queue[0]
+    pending = store.snapshot().approvals[0]
     assert bridge.resolve(pending.id, Decision(approved=True))
     assert decision_of(task.result(timeout=TIMEOUT)) == "allow"
 
@@ -288,12 +288,12 @@ def test_a_recovered_approval_can_be_resolved_normally(bridge: Bridge) -> None:
 def test_parked_futures_and_visible_queue_agree(bridge: Bridge) -> None:
     """
     The invariant the watchdog checks. Bridge.parked_count is how many agents are
-    blocked; review_queue is how many the operator can answer. A gap means a
+    blocked; approvals is how many the operator can answer. A gap means a
     permanent hang with no other symptom.
     """
     store = Store()
     session = AgentSession(bridge, "task")
     session.announce()
     bridge.submit(session._pre_tool_use(hook_input("Bash", command="ls"), None, {}))
-    pump(store, bridge, lambda: bool(store.snapshot().review_queue))
-    assert bridge.parked_count == len(store.snapshot().review_queue)
+    pump(store, bridge, lambda: bool(store.snapshot().approvals))
+    assert bridge.parked_count == len(store.snapshot().approvals)

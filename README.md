@@ -70,8 +70,10 @@ current turn, or close the session to reclaim its subprocess. An agent that asks
 question is therefore something you can answer rather than something that looks
 finished.
 
-Start sessions from the **LAUNCH** pane, each with its own working directory and
-model, so one window can drive work across several projects.
+Start a session with `Ctrl+N`, or **Session ▸ New Task…**, from either layout. Each
+carries its own working directory and model, so one window can drive work across
+several projects. `Enter` launches; `Ctrl+Enter` breaks a line in the task box;
+`Esc` dismisses without discarding the draft.
 
 The review loop is keyboard-driven: `j`/`k` to move, `a` approve, `r` reject with a
 reason the agent sees, `e` edit the arguments and approve the corrected call,
@@ -87,8 +89,8 @@ root as it is produced rather than landing in one block. Sub-agent output does n
 stream at all, and the pane says so rather than letting a quiet row read as a stuck
 one.
 
-Sub-agents appear as children in the tree, and a tool call made *inside* a
-sub-agent parks against that sub-agent's row rather than its parent's. Concurrency
+Sub-agents appear inside their session's card in the fleet rail, and a tool call made
+*inside* a sub-agent parks against that sub-agent rather than its parent. Concurrency
 is bounded by `concurrency_cap`; over-cap sessions queue rather than being refused,
 and the pool is shown in the status bar.
 
@@ -149,7 +151,7 @@ Read [orchestrator-design.md](orchestrator-design.md) §1 (invariants) and §3
 | [pptmstr/transcript.py](pptmstr/transcript.py) | Append-only per-agent output buffer |
 | [pptmstr/pool.py](pptmstr/pool.py) | Bounded concurrency; over-cap sessions queue |
 | [pptmstr/approval.py](pptmstr/approval.py) | Classification, summaries and diffs for the gate |
-| [pptmstr/ui/](pptmstr/ui/) | Tree, review queue, transcript pane, shared widgets |
+| [pptmstr/ui/](pptmstr/ui/) | Fleet rail, inbox, detail, health, transcript pane, launcher, shared widgets |
 | [pptmstr/theme.py](pptmstr/theme.py) | Semantic colour roles; light, dark and high-contrast |
 | [pptmstr/driver.py](pptmstr/driver.py) | One `ClaudeSDKClient` per session, translated into intents |
 | [pptmstr/app.py](pptmstr/app.py) | Runner, docking layout, and the frame loop |

@@ -21,12 +21,22 @@ from . import theme
 from .bridge import Bridge
 from .driver import AgentSession
 from .fake_driver import FakeDriver
+from .intents import FailureAcknowledged
 from .log import LOG
 from .model import Snapshot
 from .pool import SessionPool
 from .store import Store
 from .theme import REQUIRED_THEMES, THEMES, P
-from .ui import compose, review, transcript_pane, tree
+from .ui import compose, detail, health, inbox, launcher, rail, review, transcript_pane
+from .ui import focus as focus_mod
+from .ui.widgets import format_elapsed
+
+# The two arrangements of C. Same panels in both; the rail is in the same place in
+# each, and the cursor survives the switch. That shared anchor is the whole
+# mitigation for mode disorientation -- without it this is worse than either
+# arrangement alone.
+TRIAGE = "TRIAGE"
+FOCUS = "FOCUS"
 
 
 @dataclass
@@ -39,9 +49,13 @@ class AppState:
     store: Store
     bridge: Bridge
     settings: settings_mod.Settings
-    view: tree.ViewState = field(default_factory=tree.ViewState)
+    # One cursor. It is either on an obligation or on a node, and whichever it is
+    # on, the other is derived -- see ui/focus.py for why two were unfixable.
+    focus: focus_mod.FocusState = field(default_factory=focus_mod.FocusState)
     review: review.ReviewState = field(default_factory=review.ReviewState)
     compose: compose.ComposeState = field(default_factory=compose.ComposeState)
+    launcher: launcher.LauncherState = field(default_factory=launcher.LauncherState)
+    rail: rail.RailState = field(default_factory=rail.RailState)
     transcripts: transcript_pane.TranscriptState = field(
         default_factory=transcript_pane.TranscriptState
     )
@@ -60,6 +74,9 @@ class AppState:
     lost_reported: bool = False
     driver: FakeDriver | None = None
     pool: SessionPool | None = None
+    # Layout asked for on the command line, applied once the runner is up.
+    # switch_layout needs a live runner, so it cannot happen during setup.
+    pending_layout: str | None = None
 
 
 def begin_frame(state: AppState) -> None:
@@ -75,15 +92,51 @@ def begin_frame(state: AppState) -> None:
     state.frame_now = time.monotonic()
 
     _apply_theme_if_dirty(state)
-    state.store.apply_all(state.bridge.drain())
+    if state.pending_layout is not None:
+        hello_imgui.switch_layout(state.pending_layout)
+        state.pending_layout = None
+    # One clock for the whole batch, the same one the frame is built against, so a
+    # node's state_since and the wait times drawn from it agree to the frame.
+    state.store.apply_all(state.bridge.drain(), now=state.frame_now)
     state.frame_snap = state.store.snapshot()
-    state.view.prune(state.frame)
-    state.view.ensure_selection(state.frame_snap)
     state.transcripts.prune(state.frame)
+    # Before anything draws, so no pane can render a cursor pointing at an
+    # obligation that was answered between frames.
+    state.focus.settle(state.frame_snap)
     # Shortcuts are handled once per frame, before any panel draws, so they behave
     # the same whichever pane happens to have focus.
-    review.handle_keys(state.frame_snap, state.review, state.bridge)
+    review.handle_keys(state.frame_snap, state.focus, state.review, state.bridge)
+    _handle_layout_keys(state)
     _check_for_lost_approvals(state)
+
+
+def _handle_layout_keys(state: AppState) -> None:
+    """
+    Tab triages, Enter focuses, Esc returns.
+
+    Esc is shared with "cancel the edit I am in the middle of", and the edit wins:
+    yanking the layout out from under someone mid-diff is the failure mode this
+    whole two-mode design has to avoid, and an operator pressing Esc over an open
+    argument editor means the editor.
+
+    The launcher modal wins over both. ``want_capture_keyboard`` covers the usual
+    case -- its task box has the keyboard -- but not a modal whose focus sits on the
+    model combo, where Esc would otherwise dismiss the modal *and* change layout in
+    the same frame. ``is_open`` here is last frame's value, which is the one that
+    matches the frame the operator was looking at when they pressed the key.
+    """
+    snap = state.frame_snap
+    if snap is None or state.launcher.is_open or imgui.get_io().want_capture_keyboard:
+        return
+    current = hello_imgui.current_layout_name()
+    if imgui.is_key_pressed(imgui.Key.tab) and current != TRIAGE:
+        hello_imgui.switch_layout(TRIAGE)
+    elif imgui.is_key_pressed(imgui.Key.enter) and current != FOCUS:
+        hello_imgui.switch_layout(FOCUS)
+    elif (
+        imgui.is_key_pressed(imgui.Key.escape) and current == FOCUS and state.review.editing is None
+    ):
+        hello_imgui.switch_layout(TRIAGE)
 
 
 # Last error each panel reported, so a panel failing every frame logs once rather
@@ -149,7 +202,9 @@ def _check_for_lost_approvals(state: AppState) -> None:
     if snap is None:
         return
     parked = state.bridge.parked_count
-    visible = len(snap.review_queue)
+    # Approvals only, not the whole obligation list: this compares parked futures to
+    # what the operator can reach, and a question or a crash has no future behind it.
+    visible = len(snap.approvals)
 
     if parked <= visible:
         state.lost_since = None
@@ -215,6 +270,14 @@ def _session_action(state: AppState, coro_factory: Callable[[SessionPool], objec
 
 
 def _menus(state: AppState) -> None:
+    if imgui.begin_menu("Session"):
+        # The discoverable half of Ctrl+N. A shortcut with no menu entry is a
+        # shortcut nobody who did not read the README will ever press.
+        clicked, _ = imgui.menu_item("New Task...", "Ctrl+N", False)
+        if clicked:
+            state.launcher.request_open()
+        imgui.end_menu()
+
     if imgui.begin_menu("Theme"):
         for name, palette in THEMES.items():
             required = name in REQUIRED_THEMES
@@ -226,6 +289,14 @@ def _menus(state: AppState) -> None:
         imgui.text_disabled("* discretionary")
         imgui.end_menu()
 
+    # Named "Text" rather than "View" -- hello_imgui owns a built-in View menu for
+    # docking and layout, and a second one would be two menus with one name.
+    if imgui.begin_menu("Text"):
+        clicked, _ = imgui.menu_item("Wrap composers", "", state.settings.wrap_inputs)
+        if clicked:
+            _switch_wrap(state, not state.settings.wrap_inputs)
+        imgui.end_menu()
+
 
 def _switch_theme(state: AppState, name: str) -> None:
     theme.set_theme(name)
@@ -235,11 +306,24 @@ def _switch_theme(state: AppState, name: str) -> None:
     LOG.info("theme", f"switched to {name}")
 
 
+def _switch_wrap(state: AppState, wrap: bool) -> None:
+    """
+    Toggle composer wrapping, persisting immediately.
+
+    Saved at the point of mutation rather than on exit, as the theme is: there is no
+    ``before_exit`` callback registered, and a preference that survives only a clean
+    shutdown is one that silently resets after the first crash.
+    """
+    state.settings = state.settings.merged(wrap_inputs=wrap)
+    settings_mod.save(state.settings)
+    LOG.info("text", f"composer wrapping {'on' if wrap else 'off'}")
+
+
 def _status_bar(state: AppState) -> None:
     snap = state.frame_snap
     if snap is None:
         return
-    pending = len(snap.review_queue)
+    waiting = len(snap.needs_you)
     total = len(snap.nodes)
     active = snap.any_active
 
@@ -247,12 +331,27 @@ def _status_bar(state: AppState) -> None:
     imgui.same_line()
     imgui.text_disabled("|")
     imgui.same_line()
-    if pending:
-        # The one number worth colouring in the status bar: it is the only thing here
-        # that is waiting on the operator rather than reporting on the machine.
-        imgui.text_colored(P.state_awaiting.vec4, f"{pending} awaiting review")
+    if waiting:
+        # The one number worth colouring here: it is the only thing in this bar that
+        # is waiting on the operator rather than reporting on the machine.
+        #
+        # It counts obligations, not approvals. Counting approvals is what let this
+        # read "nothing awaiting review" while a session sat on an unanswered
+        # question and another had crashed -- the bar was reporting on one of the
+        # three ways an agent can be blocked and implying it had checked all three.
+        oldest = format_elapsed(state.frame_now - min(o.since for o in snap.needs_you))
+        imgui.text_colored(P.state_awaiting.vec4, f"{waiting} need you")
+        imgui.same_line()
+        imgui.text_disabled(f"(oldest {oldest})")
     else:
-        imgui.text_disabled("nothing awaiting review")
+        imgui.text_colored(P.ok.vec4, "nothing needs you")
+        if hello_imgui.current_layout_name() == TRIAGE and snap.order:
+            # Suggest, never switch. Yanking the layout out from under someone
+            # mid-diff is the failure mode a two-mode design has to avoid, and an
+            # emptying queue is exactly when the operator is most likely to be
+            # still reading the thing they just answered.
+            imgui.same_line()
+            imgui.text_disabled("- Enter to focus a session")
     imgui.same_line()
     imgui.text_disabled("|")
     imgui.same_line()
@@ -263,102 +362,233 @@ def _status_bar(state: AppState) -> None:
         imgui.same_line()
         imgui.text_colored(
             P.danger.vec4,
-            f"| {state.bridge.parked_count - len(snap.review_queue)} blocked, not in queue",
+            f"| {state.bridge.parked_count - len(snap.approvals)} blocked, not in queue",
         )
     if state.pool is not None:
         imgui.same_line()
         imgui.text_disabled("|")
         imgui.same_line()
         queued = state.pool.queued_count
-        text = f"{state.pool.running_count}/{state.pool.cap} sessions"
+        running, cap = state.pool.running_count, state.pool.cap
+        text = f"{running}/{cap} sessions"
         if queued:
             text += f", {queued} queued"
-        imgui.text_disabled(text)
+        if running >= cap:
+            # At cap a launch silently becomes a queue entry rather than a session.
+            # Not a refusal, but the one reading of this counter the operator cannot
+            # afford to skim, so it is the one reading that is not grey.
+            imgui.text_colored(P.warn.vec4, text)
+        else:
+            imgui.text_disabled(text)
 
 
-def _docking_params(state: AppState) -> hello_imgui.DockingParams:
+def _split(initial: str, new: str, direction: imgui.Dir, ratio: float) -> hello_imgui.DockingSplit:
     """
     Splits are declared parent-first: each carves a new named space off one that
-    already exists, so RightSpace has to be created before it can be split again.
+    already exists, so a space has to be created before it can be split again.
     """
-    params = hello_imgui.DockingParams()
-    params.layout_name = "pptmstr"
+    s = hello_imgui.DockingSplit()
+    s.initial_dock = initial
+    s.new_dock = new
+    s.direction = direction
+    s.ratio = ratio
+    return s
 
-    def split(
-        initial: str, new: str, direction: imgui.Dir, ratio: float
-    ) -> hello_imgui.DockingSplit:
-        s = hello_imgui.DockingSplit()
-        s.initial_dock = initial
-        s.new_dock = new
-        s.direction = direction
-        s.ratio = ratio
-        return s
 
-    d = imgui.Dir
-    params.docking_splits = [
-        split("MainDockSpace", "RightSpace", d.right, 0.36),
-        split("MainDockSpace", "BottomSpace", d.down, 0.34),
-    ]
+def _window(label: str, dock: str, fn: Callable[[], None]) -> hello_imgui.DockableWindow:
+    w = hello_imgui.DockableWindow()
+    w.label = label
+    w.dock_space_name = dock
+    w.gui_function = guarded(label, fn)
+    return w
 
-    def window(label: str, dock: str, fn: Callable[[], None]) -> hello_imgui.DockableWindow:
-        w = hello_imgui.DockableWindow()
-        w.label = label
-        w.dock_space_name = dock
-        w.gui_function = fn
-        return w
 
-    def draw_agents() -> None:
+def _panels(state: AppState) -> dict[str, Callable[[], None]]:
+    """
+    Every pane's draw function, built once and shared by both layouts.
+
+    The same objects appear in TRIAGE and FOCUS. A pane that existed twice would be
+    two panes that happened to look alike, and the scroll position, the half-typed
+    reply and the expanded row would all reset on every mode switch.
+    """
+
+    def rail_pane() -> None:
         # frame_snap is set in pre_new_frame, which always runs before a panel
         # draws. Guarded anyway rather than asserted: a panel is not the place to
         # discover a callback-ordering change.
         if state.frame_snap is not None:
-            tree.draw(state.frame_snap, state.view, state.frame_now)
+            rail.draw(state.frame_snap, state.focus, state.rail, state.frame_now)
 
-    def draw_queue() -> None:
-        if state.frame_snap is not None:
-            review.draw_queue(state.frame_snap, state.review, state.bridge)
-
-    def draw_review_detail() -> None:
-        if state.frame_snap is not None:
-            review.draw_detail(state.frame_snap, state.review, state.bridge)
-
-    def draw_transcript() -> None:
-        if state.frame_snap is not None:
-            transcript_pane.draw(state.frame_snap, state.transcripts, state.view.selected)
-
-    def draw_launcher() -> None:
-        pool = state.pool
-        if state.frame_snap is None or pool is None:
+    def inbox_pane() -> None:
+        if state.frame_snap is None or state.pool is None:
             return
-        compose.draw_launcher(
-            state.compose,
+        inbox.draw(
             state.frame_snap,
-            running=pool.running_count,
-            queued=pool.queued_count,
-            cap=pool.cap,
-            launch=lambda task, model, cwd: _launch(state, task, model, cwd),
+            state.focus,
+            state.review,
+            state.compose,
+            state.bridge,
+            inbox.InboxActions(
+                send=lambda node, text: _session_action(state, lambda p: p.send(node, text)),
+                interrupt=lambda node: _session_action(state, lambda p: p.interrupt(node)),
+                close=lambda node: _session_action(state, lambda p: p.close(node)),
+                dismiss=lambda node: state.bridge.emit(FailureAcknowledged(node)),
+                relaunch=lambda task, model, cwd: _launch(state, task, model, cwd),
+            ),
+            state.frame_now,
+            wrap=state.settings.wrap_inputs,
         )
 
-    def draw_conversation() -> None:
+    def context_pane() -> None:
+        # Follows the cursor. Not independently selectable -- that second selection
+        # is exactly what let an operator approve one agent's write while reading
+        # another agent's transcript.
+        if state.frame_snap is not None:
+            transcript_pane.draw(
+                state.frame_snap, state.transcripts, state.focus.node(state.frame_snap)
+            )
+
+    def detail_pane() -> None:
+        # Follows the cursor, exactly as CONTEXT does, and for the same reason: a
+        # pane here that could be pointed somewhere else is the old DETAIL, and the
+        # old DETAIL is how an operator approved one agent's write while reading
+        # another agent's diff.
+        if state.frame_snap is not None:
+            detail.draw(state.frame_snap, state.focus, state.review, state.frame_now)
+
+    def session_pane() -> None:
+        """FOCUS: the conversation, with its composer, in one pane."""
         if state.frame_snap is None:
             return
+        node = state.focus.node(state.frame_snap)
+        session = (node[0], None) if node else None
+        avail = imgui.get_content_region_avail().y
+        if imgui.begin_child("##scrollback", imgui.ImVec2(0, max(avail - 150.0, 80.0))):
+            transcript_pane.draw(state.frame_snap, state.transcripts, node)
+        imgui.end_child()
+        imgui.separator()
         compose.draw_conversation(
             state.frame_snap,
             state.compose,
-            state.view.selected,
-            send=lambda node, text: _session_action(state, lambda p: p.send(node, text)),
-            interrupt=lambda node: _session_action(state, lambda p: p.interrupt(node)),
-            close=lambda node: _session_action(state, lambda p: p.close(node)),
+            session,
+            send=lambda n, text: _session_action(state, lambda p: p.send(n, text)),
+            interrupt=lambda n: _session_action(state, lambda p: p.interrupt(n)),
+            close=lambda n: _session_action(state, lambda p: p.close(n)),
+            wrap=state.settings.wrap_inputs,
         )
 
+    def health_pane() -> None:
+        if state.frame_snap is None:
+            return
+        health.draw(
+            state.frame_snap,
+            state.focus.node(state.frame_snap),
+            health.HealthActions(
+                interrupt=lambda node: _session_action(state, lambda p: p.interrupt(node)),
+                close=lambda node: _session_action(state, lambda p: p.close(node)),
+                fork=lambda task, model, cwd: _launch(state, task, model, cwd),
+            ),
+            state.frame_now,
+        )
+
+    return {
+        "FLEET": rail_pane,
+        "NEEDS YOU": inbox_pane,
+        "CONTEXT": context_pane,
+        "DETAIL": detail_pane,
+        "SESSION": session_pane,
+        "HEALTH": health_pane,
+        "LOG": _log_panel,
+    }
+
+
+def _draw_overlays(state: AppState) -> None:
+    """
+    Root-level drawing, after every docked window.
+
+    The launcher lives here rather than in a panel for two reasons: a popup opened
+    inside a docked window is scoped to that window, and the shortcut that opens it
+    has to be evaluated inside a frame, which rules out ``begin_frame`` where the
+    rest of the key handling lives.
+    """
+    launcher.handle_shortcut(state.launcher)
+    pool = state.pool
+    if pool is None:
+        return
+    launcher.draw(
+        state.launcher,
+        running=pool.running_count,
+        queued=pool.queued_count,
+        cap=pool.cap,
+        launch=lambda task, model, cwd: _launch(state, task, model, cwd),
+        wrap=state.settings.wrap_inputs,
+    )
+
+
+def _triage_layout(panels: dict[str, Callable[[], None]]) -> hello_imgui.DockingParams:
+    """
+    A: the queue is the application.
+
+    The operator is a bottleneck by design, so the screen is the bottleneck's work
+    surface. One centre pane merging approvals, questions and failures, and a rail
+    that is scanned rather than browsed. Every *decision* is made at the row under
+    the cursor, so no second pane can be pointed at a different agent than the one
+    an ``a`` would approve -- DETAIL is a wider rendering of that same row, not a
+    second selection. Dispatch is not here at all: it is Ctrl+N, from either layout,
+    because intent belongs to a session rather than to an arrangement of the screen.
+    """
+    params = hello_imgui.DockingParams()
+    params.layout_name = TRIAGE
+    d = imgui.Dir
+    params.docking_splits = [
+        _split("MainDockSpace", "RailSpace", d.left, 0.21),
+        # 0.40 starved the inbox: identity, wait and call summary all have to fit
+        # between the rail and this pane, and the summary is what got cut.
+        _split("MainDockSpace", "ContextSpace", d.right, 0.32),
+    ]
     params.dockable_windows = [
-        window("AGENTS", "MainDockSpace", guarded("AGENTS", draw_agents)),
-        window("REVIEW", "BottomSpace", guarded("REVIEW", draw_queue)),
-        window("DETAIL", "RightSpace", guarded("DETAIL", draw_review_detail)),
-        window("TRANSCRIPT", "RightSpace", guarded("TRANSCRIPT", draw_transcript)),
-        window("LOG", "BottomSpace", guarded("LOG", _log_panel)),
-        window("LAUNCH", "BottomSpace", guarded("LAUNCH", draw_launcher)),
-        window("TALK", "RightSpace", guarded("TALK", draw_conversation)),
+        _window("FLEET", "RailSpace", panels["FLEET"]),
+        _window("NEEDS YOU", "MainDockSpace", panels["NEEDS YOU"]),
+        # First tab in the space, and deliberately in front of CONTEXT: the pane
+        # answering "what exactly am I approving" outranks the one answering "what
+        # was this agent doing beforehand", and the queue is what the operator is
+        # here for. A tab-mate rather than a fourth split -- the 0.32 width was
+        # already chosen so the inbox keeps room for identity, wait and summary.
+        _window("DETAIL", "ContextSpace", panels["DETAIL"]),
+        _window("CONTEXT", "ContextSpace", panels["CONTEXT"]),
+        # Reachable, not resident. LOG is a debugging surface, and its old status as
+        # tab-mate to the review queue -- in front of it, at that -- was precisely
+        # the inversion this layout exists to correct.
+        _window("LOG", "ContextSpace", panels["LOG"]),
+    ]
+    return params
+
+
+def _focus_layout(panels: dict[str, Callable[[], None]]) -> hello_imgui.DockingParams:
+    """
+    B: the conversation is the application.
+
+    The unit of work is a session and an approval is part of that conversation. The
+    rail stays exactly where it is in TRIAGE, which is the shared anchor that keeps
+    the mode switch from being disorienting.
+    """
+    params = hello_imgui.DockingParams()
+    params.layout_name = FOCUS
+    d = imgui.Dir
+    params.docking_splits = [
+        _split("MainDockSpace", "RailSpace", d.left, 0.21),
+        _split("MainDockSpace", "HealthSpace", d.right, 0.26),
+    ]
+    params.dockable_windows = [
+        _window("FLEET", "RailSpace", panels["FLEET"]),
+        _window("SESSION", "MainDockSpace", panels["SESSION"]),
+        _window("HEALTH", "HealthSpace", panels["HEALTH"]),
+        # Behind HEALTH here, in front of CONTEXT in TRIAGE. The pane is the same
+        # object either way; what differs is what the arrangement is for. FOCUS is
+        # for steering one session, and its facts -- cost, cwd, context headroom --
+        # are the ones worth resident space.
+        _window("DETAIL", "HealthSpace", panels["DETAIL"]),
+        _window("LOG", "HealthSpace", panels["LOG"]),
     ]
     return params
 
@@ -390,6 +620,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--cap", type=int, default=None, help="max concurrent sessions")
     ap.add_argument("--cwd", default=".", help="working directory for --task sessions")
     ap.add_argument("--fps-idle", type=float, default=None)
+    ap.add_argument(
+        "--layout",
+        default=None,
+        choices=(TRIAGE, FOCUS),
+        help=f"start in {TRIAGE} (the queue) or {FOCUS} (one conversation)",
+    )
     args = ap.parse_args(argv)
 
     loaded = settings_mod.load()
@@ -403,6 +639,7 @@ def main(argv: list[str] | None = None) -> int:
 
     state = AppState(store=Store(), bridge=Bridge(), settings=loaded)
     state.pool = SessionPool(state.bridge, cap=state.settings.concurrency_cap)
+    state.pending_layout = args.layout
 
     runner = hello_imgui.RunnerParams()
     runner.app_window_params.window_title = "pptmstr"
@@ -418,7 +655,10 @@ def main(argv: list[str] | None = None) -> int:
         hello_imgui.DefaultImGuiWindowType.provide_full_screen_dock_space
     )
     runner.imgui_window_params.background_color = P.bg.vec4
-    runner.docking_params = _docking_params(state)
+    panels = _panels(state)
+    runner.docking_params = _triage_layout(panels)
+    runner.alternative_docking_layouts = [_focus_layout(panels)]
+    runner.remember_selected_alternative_layout = True
     state.runner = runner
     runner.ini_folder_type = hello_imgui.IniFolderType.app_user_config_folder
 
@@ -451,6 +691,9 @@ def main(argv: list[str] | None = None) -> int:
     runner.callbacks.pre_new_frame = guarded("frame", pre_frame)
     runner.callbacks.show_menus = guarded("menu", lambda: _menus(state))
     runner.callbacks.show_status = guarded("status bar", lambda: _status_bar(state))
+    runner.callbacks.post_render_dockable_windows = guarded(
+        "launcher", lambda: _draw_overlays(state)
+    )
 
     state.bridge.start()
     if args.fake:
@@ -462,7 +705,7 @@ def main(argv: list[str] | None = None) -> int:
             # Submitting from the loop thread keeps every mutation of the pool on
             # one thread, so it needs no lock of its own.
             for task_text in args.task:
-                _launch(state, task_text, args.model or compose.MODELS[0], args.cwd)
+                _launch(state, task_text, args.model or launcher.MODELS[0], args.cwd)
 
         state.bridge.submit(launch_initial())
         LOG.info("app", f"{len(args.task)} task(s), cap {state.settings.concurrency_cap}")

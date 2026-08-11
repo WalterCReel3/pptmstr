@@ -684,6 +684,7 @@ class AgentSession:
                 model=self.model,
                 started_at=time.monotonic(),
                 topic="connecting",
+                cwd=self.cwd,
                 transcript=self.transcript,
             )
         )

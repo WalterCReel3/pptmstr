@@ -44,6 +44,10 @@ class AgentSpawned:
     started_at: float
     agent_type: str | None = None
     topic: str = "starting"
+    # Where this agent runs. None means "inherit from the parent", which is what a
+    # sub-agent does -- it runs in the session's directory and its spawn hook is not
+    # told one. The store resolves the inheritance so no emitter has to remember to.
+    cwd: str | None = None
     # Supplied by the spawner rather than created by the store. The driver writes
     # into it directly from the asyncio thread (I7), so both sides must hold the
     # same object -- letting the store build its own would give the UI an empty
@@ -158,8 +162,28 @@ class AgentRemoved:
 # Kept as an explicit union rather than a base class: it gives the store's match
 # statement exhaustiveness checking under mypy, so adding an intent without
 # handling it is a type error rather than a silently ignored state change.
+@dataclass(frozen=True, slots=True)
+class FailureAcknowledged:
+    """
+    The operator has seen a crashed session and cleared it from the inbox.
+
+    A fact about the operator, not about the agent -- but it belongs in the store
+    all the same, because ``needs_you`` is built there and every count reads that
+    one list. Filtering dismissed failures in the UI instead would leave the status
+    bar reporting obligations the inbox no longer shows, which is precisely the
+    disagreement this whole projection exists to remove.
+
+    Needed because a failure is the one obligation with no natural resolution. An
+    approval is answered and a question is replied to or closed; a crashed session
+    has already ended, so without this it would sit in the queue forever.
+    """
+
+    node_id: NodeId
+
+
 Intent = (
     AgentSpawned
+    | FailureAcknowledged
     | StateChanged
     | TopicChanged
     | UsageAccrued

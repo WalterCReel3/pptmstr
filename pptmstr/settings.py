@@ -38,6 +38,13 @@ class Settings:
     concurrency_cap: int = 4
     # Full speed while any agent is active, this while everything is idle or parked.
     fps_idle: float = 9.0
+    # Word-wrap the multi-line composers instead of scrolling them horizontally.
+    # Persisted rather than per-pane because it is a property of how the operator
+    # reads, not of any one composer -- the reply box and the argument editor
+    # disagreeing about it would be a defect, not a feature. Upstream still marks
+    # wrapping BETA (caret and selection across wrapped rows are the under-tested
+    # part), which is the reason this is a setting at all and not just the default.
+    wrap_inputs: bool = True
 
     def merged(self, **changes: Any) -> Settings:
         return replace(self, **changes)
