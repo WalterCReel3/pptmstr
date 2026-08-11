@@ -213,3 +213,37 @@ def test_review_state_prunes_its_diff_cache() -> None:
     state.diff_lines["live"] = ["c"]
     state.prune({"live"})
     assert set(state.diff_lines) == {"live"}
+
+
+# -- font faces ----------------------------------------------------------------
+
+
+def test_a_face_that_is_not_loaded_is_none_rather_than_an_error() -> None:
+    """
+    The degradation contract. push_font(None, size) means "keep the current face",
+    so a renderer asking for a face nobody loaded gets body text at the right size.
+    Nothing here runs a window, which is exactly the case this must survive.
+    """
+    assert theme.face(theme.Face.BODY) is None
+    assert theme.face(theme.Face.BOLD) is None
+
+
+def test_there_is_no_italic_face() -> None:
+    """
+    Deliberate, and not a gap to be filled: Inconsolata has no italic upstream and
+    ImGui will not synthesise an oblique, so emphasis is a colour shift. Adding
+    ITALIC here without vendoring a whole family gives a face that silently renders
+    as regular.
+    """
+    assert {f.name for f in theme.Face} == {"BODY", "BOLD"}
+
+
+def test_the_bold_face_ships_inside_the_package() -> None:
+    """
+    At the repo root it would be absent from the wheel, and the bold face would
+    degrade for everyone who installed rather than cloned -- invisibly, because a
+    missing face is a supported state.
+    """
+    vendored = theme._ASSETS / "fonts" / "Inconsolata-Bold.ttf"
+    assert vendored.is_file(), f"missing vendored face: {vendored}"
+    assert (theme._ASSETS / "fonts" / "OFL.txt").is_file(), "OFL requires the licence to ship"

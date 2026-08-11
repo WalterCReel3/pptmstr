@@ -23,7 +23,9 @@ Two rules here are load-bearing rather than cosmetic (design §6.1):
 
 from __future__ import annotations
 
+import enum
 from dataclasses import dataclass, fields
+from pathlib import Path
 from typing import cast
 
 from imgui_bundle import icons_fontawesome_6 as fa
@@ -487,13 +489,49 @@ def apply_style() -> None:
     s(c.docking_empty_bg, P.bg.vec4)
 
 
-FONT_MONO: imgui.ImFont | None = None
-FONT_SMALL: imgui.ImFont | None = None
+class Face(enum.Enum):
+    """
+    The faces a renderer can ask for by name.
+
+    There is no ITALIC, and there cannot be one: Inconsolata has no italic upstream
+    -- not "not bundled", it does not exist -- and ImGui will not synthesise an
+    oblique. Emphasis is therefore a colour shift, which is the terminal convention
+    (planning/2026-08-10-transcript-markdown.md).
+    """
+
+    BODY = "body"
+    BOLD = "bold"
+
+
+# Only one size is loaded per face. Since ImGui 1.92 a face rasterises on demand at
+# whatever size is pushed, so a second ImFont at another size buys nothing.
+_FONT_SIZE = 16.0
+# Inside the package, not at the repo root: the wheel ships ``packages = ["pptmstr"]``,
+# so a root-level assets folder would be absent from an installed copy and the bold
+# face would silently degrade for everyone who did not clone the repo.
+_ASSETS = Path(__file__).resolve().parent / "assets"
+_FACES: dict[Face, imgui.ImFont | None] = {}
+
+
+def face(which: Face) -> imgui.ImFont | None:
+    """
+    The loaded face, or ``None`` when it is not available.
+
+    ``None`` is a usable answer rather than an error: ``push_font(None, size)`` means
+    "keep the current face, change the size", so a caller pushing a missing face gets
+    body text at the right size instead of a crash. Faces therefore degrade one at a
+    time, and a renderer works with none of them loaded.
+
+    Callers must ``pop_font()`` before running anything that pushes a size with a
+    ``None`` face -- the small-text helpers in ``rail``, ``health`` and ``inbox`` all
+    do -- or that text inherits whichever face is still live.
+    """
+    return _FACES.get(which)
 
 
 def load_fonts() -> None:
     """
-    Load the UI font merged with FontAwesome glyphs.
+    Load the UI font merged with FontAwesome glyphs, plus the bold face.
 
     Called from a hello_imgui callback, not from main(): fonts must be built after
     the backend exists but before the first frame, and the runner owns that window.
@@ -503,15 +541,35 @@ def load_fonts() -> None:
     It has no FontAwesome glyphs, though, so STATE_GLYPH degrades to tofu while
     STATE_LABEL keeps carrying the meaning. That is the redundancy earning itself.
     """
-    global FONT_MONO, FONT_SMALL
+    from imgui_bundle import hello_imgui
+
+    # Inconsolata-Bold is vendored; Medium and FontAwesome come from the imgui-bundle
+    # wheel. Search paths are additive and consulted after the main folder, so this
+    # reaches the vendored face without shadowing anything the bundle ships.
+    hello_imgui.add_assets_search_path(str(_ASSETS))
+
+    # STATE_GLYPH uses FontAwesome 6 codepoints, and this merges FontAwesome 4
+    # unless told otherwise. FA4 stops around U+F2E0, so ICON_FA_BRAIN (U+F5DC)
+    # and ICON_FA_COMMENT_DOTS (U+F4AD) render as tofu without this.
+    hello_imgui.get_runner_params().callbacks.default_icon_font = (
+        hello_imgui.DefaultIconFont.font_awesome6
+    )
+
+    # Fonts[0] is the application default at NewFrame, so whichever face loads first
+    # becomes the UI font everywhere. Inconsolata must stay first: adding any load
+    # above this line silently reskins the whole application.
+    _FACES[Face.BODY] = _load_face("fonts/Inconsolata-Medium.ttf", icons=True)
+    # No icons merged into bold: FontAwesome codepoints only ever reach the UI
+    # through STATE_GLYPH, which draws in the body face.
+    _FACES[Face.BOLD] = _load_face("fonts/Inconsolata-Bold.ttf", icons=False)
+
+
+def _load_face(asset: str, *, icons: bool) -> imgui.ImFont | None:
     from imgui_bundle import hello_imgui
 
     try:
-        FONT_MONO = hello_imgui.load_font_ttf_with_font_awesome_icons(
-            "fonts/Inconsolata-Medium.ttf", 16.0
-        )
-        FONT_SMALL = hello_imgui.load_font_ttf_with_font_awesome_icons(
-            "fonts/Inconsolata-Medium.ttf", 13.0
-        )
+        if icons:
+            return hello_imgui.load_font_ttf_with_font_awesome_icons(asset, _FONT_SIZE)
+        return hello_imgui.load_font_ttf(asset, _FONT_SIZE)
     except Exception:
-        FONT_MONO = FONT_SMALL = None
+        return None
