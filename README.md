@@ -81,9 +81,11 @@ the one action here that can write something nobody read.
 
 The transcript pane styles output by kind — reasoning, output, tool calls, results,
 errors, compaction boundaries — with toggles for reasoning, wrapping and follow-tail,
-plus a filter. Reasoning streams token by token at the root; sub-agent output does
-not stream at all, and the pane says so rather than letting a quiet row read as a
-stuck one.
+plus a filter. Reasoning arrives as a *summary* of the model's thinking — current
+models never return the raw chain of thought — but that summary streams in at the
+root as it is produced rather than landing in one block. Sub-agent output does not
+stream at all, and the pane says so rather than letting a quiet row read as a stuck
+one.
 
 Sub-agents appear as children in the tree, and a tool call made *inside* a
 sub-agent parks against that sub-agent's row rather than its parent's. Concurrency

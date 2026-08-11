@@ -551,6 +551,13 @@ class AgentSession:
             # property a gate needs.
             permission_mode="dontAsk",
             include_partial_messages=True,
+            # display="summarized" is load-bearing, not decoration. Every model in
+            # the launcher except Haiku defaults to display="omitted", which still
+            # emits thinking blocks and thinking deltas -- with an empty string in
+            # them. Reasoning then renders as nothing at all, and the pane's toggle
+            # filters an empty set. What arrives here is a summary; the raw chain of
+            # thought is never returned by these models at any setting.
+            thinking={"type": "adaptive", "display": "summarized"},
             hooks={
                 "PreToolUse": [HookMatcher(hooks=[self._pre_tool_use], timeout=APPROVAL_TIMEOUT_S)],
                 "PreCompact": [HookMatcher(hooks=[self._pre_compact])],
