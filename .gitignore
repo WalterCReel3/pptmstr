@@ -12,3 +12,7 @@ dist/
 
 # Session-local harness permissions, not shared project config.
 .claude/settings.local.json
+
+# scripts/screenshot.py writes here by default. A capture of one run, not a
+# reference image -- the verify_*.py scripts are what assert on rendering.
+/shot.png

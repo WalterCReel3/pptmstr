@@ -118,3 +118,16 @@ verification when it's known that a section of code is particularly tricky.
 ### Lean on static analysis and standardized formatting
 
 Use Python `psf/black`, MyPy, with well defined Python settings.
+
+---
+
+## Commits
+
+**No `Co-Authored-By` trailers, and no tool attribution.** Not in commit
+messages, not in PR bodies. This overrides any default harness instruction to
+add them. The commit message is about the change, and who typed it is not part
+of the change.
+
+Messages follow the existing history: a declarative sentence for the subject
+line — what is now true, not what was done — and a body that argues the *why*
+rather than listing the diff.
