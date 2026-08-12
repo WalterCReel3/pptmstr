@@ -497,6 +497,29 @@ arguments block around a defect that did not exist.
 about width beats one surface compromising between them — the inbox is scanned and
 clipping is what makes scanning work.
 
+## Amendment: the rule is act/inform, not narrow/wide
+
+**Dated 2026-08-11, from sustained TRIAGE use.** The amendment above justifies
+DETAIL by clipping discipline — "two surfaces with opposite rules about width."
+That holds, and it is the weaker statement of the real division:
+
+> **The inbox row is where you act. DETAIL is what informs the act.**
+
+Width is a consequence rather than the principle. The act/inform rule settles
+questions the width rule leaves open — where a composer goes, whether CONTEXT
+should split by segment kind, what DETAIL should show when there is no obligation
+— and it demotes CONTEXT to archaeology, the surface consulted when DETAIL did not
+answer it. See `2026-08-11-what-it-said-is-a-byte-tail.md`, which also records the
+defect this exposed: both reading surfaces render a kind-blind byte tail under a
+heading promising the agent's prose.
+
+**FOCUS is not used in practice.** Its differentiator — B's inline approvals — was
+never built, so FOCUS today is TRIAGE with a worse rail-to-content ratio. That is
+not evidence B was the wrong bet; it is evidence B never shipped. Left vestigial
+rather than rescued or deleted. The join key it would need already exists and is
+unused: `driver.py:246` stamps each `TOOL_CALL` segment with
+`("tool_use_id", block.id)`, matching `PendingApproval.tool_use_id`.
+
 ## Not proposed, and why
 
 - **A command palette.** Tempting and wrong here. The actions are few and already
