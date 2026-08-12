@@ -754,6 +754,41 @@ palette on every access.
 Style itself (`ImGuiStyle`: rounding, padding, border sizes) is global mutable state
 that persists across frames — set it once on theme change, never per frame.
 
+### 6.2 Motion (rev. 4)
+
+A card is a still image, so a session that is working and a session whose subprocess
+has wedged render identically. Elapsed time answers it eventually and only if you
+watch the digits. The rail therefore carries one animated mark — three columns of
+falling cells beside the state glyph, in the state's own colour — whose entire job
+is to say *still moving*.
+
+Three constraints, and the first is the one that decides where motion is allowed at
+all:
+
+1. **Motion is drawn only for `AgentState.is_active`.** Those are exactly the states
+   that hold `enable_idling = False` (§4.2), so an animation can never be on screen
+   while the loop is throttled. This is not a coincidence to be maintained by hand —
+   it is why the predicate is `is_active` and not `state is THINKING`. A throbber on
+   a session parked at `AWAITING_APPROVAL` would animate at 9fps, which reads as
+   stuttering rather than as waiting, *and* would spend the CPU I8 says a parked
+   session must not.
+2. **Motion is never the only channel** (§6.1.1). The glyph, the label and the hue
+   already say *thinking*; motion only adds *still going*. An operator who cannot
+   perceive it loses nothing that is not said elsewhere.
+3. **It gets one bounded exception to "no colour arithmetic on the build path"**
+   (§6.1.2), because a fading trail is alpha that varies per cell per frame and
+   cannot be precomputed at theme change. `theme.faded()` quantises alpha to twelve
+   steps and memoises on `(packed colour, step)`, so the steady state is a dict hit
+   and the cache is bounded by palettes × steps. Anything else wanting per-frame
+   colour maths should go through it rather than open a second exception.
+
+The trail wraps around the top of its column rather than falling off the bottom and
+leaving the column empty until the next drop. That makes continuity structural —
+every column has exactly one head every frame — rather than a property of how the
+three periods happen to line up. The first version did the latter and went fully
+dark for 0.18s roughly every other minute, which is long enough to read as a stall:
+the precise message the mark exists to disprove.
+
 ---
 
 ## 7. Known traps

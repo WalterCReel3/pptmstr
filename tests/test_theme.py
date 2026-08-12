@@ -247,3 +247,29 @@ def test_the_bold_face_ships_inside_the_package() -> None:
     vendored = theme._ASSETS / "fonts" / "Inconsolata-Bold.ttf"
     assert vendored.is_file(), f"missing vendored face: {vendored}"
     assert (theme._ASSETS / "fonts" / "OFL.txt").is_file(), "OFL requires the licence to ship"
+
+
+def test_fading_scales_only_the_alpha() -> None:
+    base = theme.col(0x4FC1E9)
+    assert theme.faded(base, 1.0) == base.u32
+    assert theme.faded(base, 0.0) == 0x00E9C14F
+    assert theme.faded(base, 0.5) >> 24 == pytest.approx(127, abs=2)
+
+
+def test_fading_is_quantised_and_memoised() -> None:
+    """
+    The caller is an animation running per cell per frame per card. Neighbouring
+    alphas must collapse onto one cached entry rather than packing a new colour each
+    frame.
+    """
+    base = theme.col(0x4FC1E9)
+    theme._FADE_CACHE.clear()
+    first = theme.faded(base, 0.500)
+    assert theme.faded(base, 0.505) == first
+    assert len(theme._FADE_CACHE) == 1
+
+
+def test_fading_out_of_range_clamps() -> None:
+    base = theme.col(0x4FC1E9)
+    assert theme.faded(base, -1.0) == theme.faded(base, 0.0)
+    assert theme.faded(base, 5.0) == theme.faded(base, 1.0)

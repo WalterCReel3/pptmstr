@@ -9,11 +9,12 @@ a snapshot alone.
 from __future__ import annotations
 
 import math
+import zlib
 
 from imgui_bundle import imgui
 
 from ..model import AgentState, ContextSnapshot
-from ..theme import STATE_GLYPH, STATE_LABEL, P
+from ..theme import STATE_GLYPH, STATE_LABEL, Color, P, faded
 
 
 def follow_tail(following: bool) -> bool:
@@ -89,6 +90,119 @@ def state_cell(state: AgentState) -> None:
     imgui.text_colored(color, STATE_GLYPH[state])
     imgui.same_line()
     imgui.text_colored(color, STATE_LABEL[state])
+
+
+# The activity throbber: three columns of falling cells, each column on its own
+# period so the field never resolves into a marching row.
+#
+# Sizing is in whole pixels because the cells are two pixels wide -- a fractional
+# pitch would put some columns on a half-pixel boundary and render them dimmer than
+# their neighbours, which reads as a lit cell rather than as antialiasing.
+_RAIN_COLS = 3
+_RAIN_ROWS = 5
+_RAIN_CELL_W = 2.0
+_RAIN_PITCH = 3.0
+# Rows still lit behind the head. Fractional so the oldest cell in the trail is
+# part-faded rather than snapping off, and strictly less than _RAIN_ROWS so the gap
+# between the tail and the next head stays visible -- at trail == rows every cell is
+# lit and the moving feature inverts into a travelling dark cell.
+_RAIN_TRAIL = 2.2
+# Seconds per fall, per column. Deliberately not ratios of each other: equal or
+# harmonic periods resynchronise into a marching row.
+_RAIN_FALL = (1.35, 0.94, 1.13)
+_RAIN_PHASE = (0.0, 0.41, 0.73)
+
+RAIN_WIDTH = (_RAIN_COLS - 1) * _RAIN_PITCH + _RAIN_CELL_W
+
+
+def phase_seed(key: str) -> float:
+    """
+    A stable animation offset in [0, 1) for a string key.
+
+    CRC32 rather than ``hash()``: string hashing is salted per process, so the same
+    session would start its throbber at a different phase on every launch and no
+    test could pin the arithmetic. The point of the offset is only that two cards
+    stacked in the rail do not fall in lockstep.
+    """
+    return (zlib.crc32(key.encode("utf-8")) % 997) / 997.0
+
+
+def rain_cells(now: float, seed: float = 0.0) -> list[tuple[int, int, float, bool]]:
+    """
+    Which cells of the throbber are lit at ``now``, how brightly, and which is the head.
+
+    Returns ``(column, row, intensity, is_head)``, intensity falling from the head to
+    0.0 at the end of the trail. Split out from the drawing so the motion can be
+    tested without a GL context.
+
+    The trail wraps around the top of the column rather than the drop falling off the
+    bottom and the column waiting empty for the next one. That makes "something is
+    always moving" structural: every column has exactly one head every frame, so no
+    combination of periods can leave the field dark. The version this replaces let a
+    column idle for ``lead / span`` of its cycle, and with three columns that
+    coincided about 0.7% of the time -- a 0.18s blackout, which is long enough to read
+    as the app having stalled and is the exact opposite of what a throbber is for.
+
+    The head is flagged rather than inferred from intensity: the head lands on a
+    fractional offset, so its intensity is only ``1.0`` at the instant it sits exactly
+    on a row, and a brightness threshold would drop it on most frames.
+
+    ``now`` is the frame's ``time.monotonic()``, threaded down like every other clock
+    reading in this app rather than taken from ``imgui.get_time()``. A panel that
+    reads the clock itself cannot be driven from a snapshot.
+    """
+    out: list[tuple[int, int, float, bool]] = []
+    for c in range(_RAIN_COLS):
+        phase = ((now / _RAIN_FALL[c]) + _RAIN_PHASE[c] + seed) % 1.0
+        head = phase * _RAIN_ROWS
+        for r in range(_RAIN_ROWS):
+            behind = (head - r) % _RAIN_ROWS
+            if behind <= _RAIN_TRAIL:
+                out.append((c, r, 1.0 - behind / _RAIN_TRAIL, behind < 1.0))
+    return out
+
+
+def activity_rain(
+    now: float, colour: Color, seed: float = 0.0, height: float | None = None
+) -> None:
+    """
+    A throbber that says an agent is working, in the state's own colour.
+
+    Motion is a redundant channel here, never the only one: the glyph, the label and
+    the hue already say ``thinking``, and this only answers "is it still going" --
+    the question a static card cannot answer at all, since a stuck session and a
+    working one render identically. That redundancy is also why it is safe to ignore
+    for an operator who cannot see it (design §6.1).
+
+    Cost is bounded by the same rule that governs the frame rate: draw this only for
+    ``AgentState.is_active``, and it can never animate while the runner is idling,
+    because those are exactly the states that hold the loop at full speed. An
+    animation on a parked session would be a throbber that lies at 9fps *and* burns
+    the CPU I8 says a waiting session must not.
+    """
+    draw = imgui.get_window_draw_list()
+    box_h = height if height is not None else imgui.get_text_line_height()
+    origin = imgui.get_cursor_screen_pos()
+
+    # Dummy, not invisible_button: the card underneath owns the click, and a second
+    # interactive item stacked on it would take the hover and kill the card's
+    # highlight wherever the throbber happens to sit.
+    imgui.dummy(imgui.ImVec2(RAIN_WIDTH, box_h))
+
+    row_h = box_h / _RAIN_ROWS
+    cell_h = max(row_h - 1.0, 1.0)
+    for c, r, intensity, head in rain_cells(now, seed):
+        x = origin.x + c * _RAIN_PITCH
+        y = origin.y + r * row_h
+        draw.add_rect_filled(
+            imgui.ImVec2(x, y),
+            imgui.ImVec2(x + _RAIN_CELL_W, y + cell_h),
+            # The trail fades on a curve, not linearly. Linear alpha over three cells
+            # puts the last one at 9%, which on the panel colour is indistinguishable
+            # from unlit -- the trail collapses to a blinking dot and the state's own
+            # colour, the channel that says *which* kind of work, drops out with it.
+            faded(P.text_strong if head else colour, 1.0 if head else intensity**0.6),
+        )
 
 
 def short_model(model: str) -> str:

@@ -65,6 +65,39 @@ def col(hex_rgb: int, alpha: float = 1.0) -> Color:
     )
 
 
+_FADE_STEPS = 12
+_FADE_CACHE: dict[tuple[int, int], int] = {}
+
+
+def faded(colour: Color, alpha: float) -> int:
+    """
+    ``colour`` at a fraction of its own alpha, packed for the draw list.
+
+    Colour arithmetic lives here rather than in a panel for the reason stated at the
+    top of this module: lookups are on the per-frame build path. The only caller is
+    an animation, where the alpha *is* the animation, so it cannot be precomputed at
+    palette construction -- the compromise is to quantise to twelve steps and
+    memoise, which is finer than the eye resolves on a three-pixel square and turns
+    a per-cell-per-frame pack into a dict hit.
+
+    Keyed on the packed form, so a theme switch neither invalidates the cache nor
+    keeps the retired palette alive.
+    """
+    step = max(0, min(_FADE_STEPS, round(alpha * _FADE_STEPS)))
+    key = (colour.u32, step)
+    hit = _FADE_CACHE.get(key)
+    if hit is None:
+        v = colour.vec4
+        hit = imgui.IM_COL32(
+            int(v.x * 255.0),
+            int(v.y * 255.0),
+            int(v.z * 255.0),
+            int(v.w * 255.0 * step / _FADE_STEPS),
+        )
+        _FADE_CACHE[key] = hit
+    return hit
+
+
 @dataclass(frozen=True, slots=True)
 class Palette:
     """

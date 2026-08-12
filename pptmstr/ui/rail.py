@@ -28,7 +28,15 @@ from ..model import AgentRecord, AgentState, NodeId, Obligation, ObligationKind,
 from ..theme import OBLIGATION_GLYPH, STATE_GLYPH, STATE_LABEL, P
 from . import projects
 from .focus import FocusState
-from .widgets import context_cell, ellipsis, format_elapsed, short_model
+from .widgets import (
+    RAIN_WIDTH,
+    activity_rain,
+    context_cell,
+    ellipsis,
+    format_elapsed,
+    phase_seed,
+    short_model,
+)
 
 # Lines of text each density class gets. Fixed per class, not per card: variable
 # heights would rule out ListClipper, and the rail is the one pane that has to stay
@@ -42,6 +50,10 @@ _LINES = {"blocked": 3.0, "blocked_subs": 3.8, "active": 2.0, "ended": 1.0}
 
 _PAD = 6.0
 _SMALL_FONT = 12.5
+# Gap between the state glyph and the throbber. Tighter than the default item
+# spacing on both sides: the two marks are one reading -- what state, and whether it
+# is still moving -- and the pair is charged against the task's width.
+_RAIN_GAP = 5.0
 
 
 @dataclass
@@ -193,8 +205,18 @@ def _card(
     y = origin.y + _PAD
     colour = P.state(rec.state)
 
+    # Glyph, then the throbber for anything genuinely working. It rides beside the
+    # state glyph rather than in the badge slot on the right because that slot is the
+    # obligation's, and a session can be both working and owing the operator
+    # something -- a sub-agent parked on approval under a thinking root is the common
+    # case. Motion competing with the hand for the same eight pixels would trade the
+    # signal that must be acted on for the one that only has to be believed.
     imgui.set_cursor_screen_pos(imgui.ImVec2(inner_x, y))
     imgui.text_colored(colour.vec4, STATE_GLYPH[rec.state])
+    working = rec.state.is_active
+    if working:
+        imgui.same_line(0.0, _RAIN_GAP)
+        activity_rain(now, colour, phase_seed(f"{rec.node_id[0]}:{rec.node_id[1] or ''}"))
     imgui.same_line()
 
     if density == "ended":
@@ -212,6 +234,8 @@ def _card(
     # The task, not the node name. Every root is called "session", so the name is
     # the one string on a card that cannot tell two of them apart.
     title_room = width - (_PAD * 2 + 30.0) - (52.0 if owed else 42.0)
+    if working:
+        title_room -= _RAIN_GAP + RAIN_WIDTH
     imgui.text_colored(P.text_strong.vec4, ellipsis(rec.task, title_room))
 
     if owed:
