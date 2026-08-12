@@ -158,6 +158,26 @@ class FakeDriver:
         # the scoped batch button has something to act on.
         self.bridge.emit(ApprovalRequested(self.nodes[2], self._pending(self.nodes[2], "Edit")))
         self.bridge.emit(ApprovalRequested(self.nodes[3], self._pending(self.nodes[3], "Bash")))
+        # A turn that ended with a question, its prose sitting behind a bulky tool
+        # result. This is the only fixture for two things. AWAITING_INPUT is the
+        # obligation kind nothing else here produces, so the inbox composer and
+        # DETAIL's "what it said" had only ever been seen against hand-built
+        # snapshots -- and this is the exact shape that made both of them render
+        # machinery instead of words.
+        asked = self._spawn(parent=None, agent_type=None)
+        asked_transcript = self.transcripts[asked]
+        asked_transcript.append(SegmentKind.TOOL_CALL, "Grep(pattern=checksum)\n")
+        asked_transcript.append(
+            SegmentKind.TOOL_RESULT,
+            "Grep -> " + "".join(f"tle/parse.py:{i}: checksum ignored\n" for i in range(60)),
+        )
+        asked_transcript.append(
+            SegmentKind.OUTPUT,
+            "The checksum is computed but never compared, in sixty places.\n"
+            "Do you want me to fix the parser, or only report it?\n",
+        )
+        self.bridge.emit(StateChanged(asked, AgentState.AWAITING_INPUT, topic="waiting for you"))
+
         self.bridge.emit(
             AgentFinished(
                 self.nodes[4],
@@ -175,6 +195,15 @@ class FakeDriver:
         # both sides must hold the same object or the pane reads an empty buffer.
         transcript = Transcript()
         self.transcripts[node] = transcript
+        task = self.rng.choice(_TASKS)
+        if parent is None:
+            # A root's opening task goes through AgentSession.send, which writes a
+            # SYSTEM segment -- and that segment is the only turn boundary the
+            # transcript has (Transcript.turn_prose). A fixture that skipped it
+            # would leave every fake session looking like one endless turn, so the
+            # boundary would be exercised by nothing. Sub-agents are spawned by a
+            # tool call rather than by send and correctly get no marker.
+            transcript.append(SegmentKind.SYSTEM, f"\n> {task}\n")
         transcript.append(SegmentKind.REASONING, "Working out where to start.\n")
         transcript.append(SegmentKind.OUTPUT, "Right, here is the plan.\n")
         transcript.append(SegmentKind.TOOL_CALL, "Read(file_path=pptmstr/store.py)\n")
@@ -183,7 +212,7 @@ class FakeDriver:
             AgentSpawned(
                 node_id=node,
                 parent=parent,
-                task=self.rng.choice(_TASKS),
+                task=task,
                 model=self.rng.choice(_MODELS),
                 started_at=time.monotonic(),
                 agent_type=agent_type,

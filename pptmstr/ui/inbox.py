@@ -58,6 +58,10 @@ _X_WAIT_END = 458.0
 _X_SUMMARY = 476.0
 
 _TITLE_W = _X_QUALIFIER - _X_TITLE - 10.0
+
+# How much of a turn's prose the expanded question row previews. The box is a
+# fixed 110px, so this only has to be comfortably more than fits.
+_PREVIEW_CHARS = 1200
 _QUALIFIER_W = 150.0
 
 _SMALL_FONT = 12.5
@@ -362,7 +366,9 @@ def _expand_question(
     if record is None:
         return
 
-    tail = record.transcript.tail(1200)
+    # The turn's prose, clipped from the end: the ask is what a turn finishes on,
+    # and this box is scanned rather than read. DETAIL carries the whole of it.
+    tail = record.transcript.turn_prose()[-_PREVIEW_CHARS:]
     if imgui.begin_child("##body", imgui.ImVec2(-8.0, 110.0), imgui.ChildFlags_.borders):
         if tail.strip():
             imgui.push_text_wrap_pos(imgui.get_content_region_avail().x)

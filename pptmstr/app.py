@@ -53,6 +53,7 @@ class AppState:
     # on, the other is derived -- see ui/focus.py for why two were unfixable.
     focus: focus_mod.FocusState = field(default_factory=focus_mod.FocusState)
     review: review.ReviewState = field(default_factory=review.ReviewState)
+    detail_pane_state: detail.DetailState = field(default_factory=detail.DetailState)
     compose: compose.ComposeState = field(default_factory=compose.ComposeState)
     launcher: launcher.LauncherState = field(default_factory=launcher.LauncherState)
     rail: rail.RailState = field(default_factory=rail.RailState)
@@ -454,7 +455,13 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
         # old DETAIL is how an operator approved one agent's write while reading
         # another agent's diff.
         if state.frame_snap is not None:
-            detail.draw(state.frame_snap, state.focus, state.review, state.frame_now)
+            detail.draw(
+                state.frame_snap,
+                state.focus,
+                state.review,
+                state.detail_pane_state,
+                state.frame_now,
+            )
 
     def session_pane() -> None:
         """FOCUS: the conversation, with its composer, in one pane."""

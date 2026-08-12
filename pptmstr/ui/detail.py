@@ -31,7 +31,8 @@ is "nothing is lost" must not quietly lose things at the bottom.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any
 
 from imgui_bundle import imgui
@@ -39,6 +40,7 @@ from imgui_bundle import imgui
 from ..approval import diff_line_kind
 from ..model import (
     ApprovalNeeded,
+    NodeId,
     Obligation,
     ObligationKind,
     PendingApproval,
@@ -47,15 +49,27 @@ from ..model import (
     Snapshot,
 )
 from ..theme import OBLIGATION_GLYPH, P
-from . import inbox, review
+from ..transcript import SegmentKind, Transcript
+from . import inbox, review, rich_pane, widgets
+from .blocks import Block, BlockCursor
 from .focus import FocusState
 from .widgets import format_elapsed
 
 # Bounds. Generous, because a truncating detail pane is a contradiction, and every
 # one of them announces itself in the pane when it bites.
+#
+# Prose has no bound here: ``rich_pane.draw`` windows by rendered line count and
+# announces the drop itself, and a second character-level cap stacked on top of it
+# would mean two policies and two differently-worded truncation notices over one
+# body of text.
 _MAX_DIFF_LINES = 1200
 _MAX_ARG_CHARS = 20_000
-_TAIL_CHARS = 12_000
+# Narration is bounded by line, not by character: wrapped text has no uniform row
+# height, so a character count predicts neither how much frame it costs nor how far
+# it extends. Unbounded wrapped text is what stalls a frame -- the same bound, for
+# the same reason, as transcript_pane's _WRAP_WINDOW. Not a statement about how
+# tall the pane is; the panes dock and resize freely.
+_NARRATION_LINES = 200
 
 _KIND_LABEL: dict[ObligationKind, str] = {
     ObligationKind.APPROVAL: "wants approval",
@@ -71,11 +85,88 @@ _DIFF_COLOUR = {
 }
 
 
-def draw(snap: Snapshot, focus: FocusState, state: review.ReviewState, now: float) -> None:
+@dataclass(frozen=True, slots=True)
+class _ProseLine:
+    """
+    The two members ``blocks._LineLike`` asks for, and no more.
+
+    Deliberately not ``transcript_pane.Line``: that carries a run index, which is
+    the other pane's way of colouring a kind change across a mixed stream. Turn
+    prose is ``OUTPUT`` by construction, so there is no kind change to colour and no
+    run to carry. The structural protocol exists so the two panes can each hand the
+    parser their own line type without either importing the other's cache types.
+    """
+
+    kind: SegmentKind
+    text: str
+
+
+@dataclass
+class DetailState:
+    """
+    Presentation state for this pane (design §6). Never enters the store.
+
+    One memo, not a dict keyed by node: DETAIL renders whichever single obligation
+    the cursor is on, so a second entry could only ever be the one the cursor just
+    left. That is also why there is no frame-based sweep here as ``TranscriptState``
+    has -- the key changing *is* the eviction.
+    """
+
+    rich: rich_pane.RichState = field(default_factory=rich_pane.RichState)
+    # Whether the narration view is pinned to the newest line. Owned here rather
+    # than derived per frame -- see widgets.follow_tail for why scroll position
+    # cannot answer this while the view is being pinned.
+    narration_follow: bool = True
+    # (node, published_length) of the parse held in _blocks. The transcript is
+    # append-only, so a length that has not moved means bytes that have not moved.
+    _key: tuple[NodeId, int] | None = None
+    _blocks: tuple[Block, ...] = ()
+
+    def prose_blocks(self, node: NodeId, transcript: Transcript) -> Sequence[Block]:
+        """
+        This turn's prose as markdown blocks, re-parsed only when it changes.
+
+        A throwaway ``BlockCursor`` rather than a retained one, because a question
+        is a *finished* turn: the model has stopped and is waiting, so there is no
+        live tail for ``live_block`` to track and no incremental state worth keeping
+        between frames. Sharing ``TranscriptState``'s cursor was the alternative and
+        is worse three ways -- it parses from line 0, so the cost would grow with
+        the session that ``turn_prose`` exists to stop paying for; it is fed only in
+        RICH mode, so the from-scratch parse is the *common* case here rather than
+        the rare one; and touching that cache would keep the largest object this UI
+        holds alive for a node nobody is looking at.
+
+        On a settled turn the key stops moving, so this is one parse and then
+        pointer comparisons for as long as the operator reads it.
+        """
+        key = (node, transcript.published_length)
+        if self._key != key:
+            cursor = BlockCursor()
+            cursor.feed(
+                [
+                    _ProseLine(SegmentKind.OUTPUT, text)
+                    for text in transcript.turn_prose().split("\n")
+                ]
+            )
+            # The turn is over, so the trailing paragraph has no next line coming to
+            # finalise it -- and it is usually the question itself.
+            cursor.finish()
+            self._key = key
+            self._blocks = tuple(cursor.blocks)
+        return self._blocks
+
+
+def draw(
+    snap: Snapshot,
+    focus: FocusState,
+    state: review.ReviewState,
+    pane: DetailState,
+    now: float,
+) -> None:
     """Render the cursor's obligation in full. Never reads the store."""
     obligation = focus.obligation(snap)
     if obligation is None:
-        _nothing_selected(snap, focus)
+        _nothing_selected(snap, pane, focus)
         return
 
     _header(snap, obligation, now)
@@ -90,27 +181,73 @@ def draw(snap: Snapshot, focus: FocusState, state: review.ReviewState, now: floa
             case ApprovalNeeded():
                 _approval(state, obligation.approval)
             case QuestionPending():
-                _question(snap, obligation)
+                _question(snap, pane, obligation)
             case SessionFailed():
                 _failure(obligation)
         imgui.pop_text_wrap_pos()
     imgui.end_child()
 
 
-def _nothing_selected(snap: Snapshot, focus: FocusState) -> None:
+def _nothing_selected(snap: Snapshot, pane: DetailState, focus: FocusState) -> None:
     """
     No obligation under the cursor. Say which session it *is* on rather than going
-    blank, so an empty pane is never confused with a broken one.
+    blank, so an empty pane is never confused with a broken one -- and then show
+    what that session is saying.
+
+    A running agent owes the operator nothing, which is exactly why this branch used
+    to stop after two lines. Under the rule the pane is built on -- the row is where
+    you act, DETAIL is what informs the act -- mid-turn prose belongs here, because
+    the act it informs is the one you are deciding whether to interrupt.
     """
     node = focus.node(snap)
     record = snap.nodes.get(node) if node is not None else None
     if record is None:
         imgui.text_disabled("nothing needs you")
         return
+
     imgui.push_text_wrap_pos(0.0)
     imgui.text_colored(P.text_dim.vec4, "nothing waiting on you from")
     imgui.text_colored(P.text.vec4, record.task or "this session")
     imgui.pop_text_wrap_pos()
+
+    # is_active is "mid-turn and will emit more", which is the tense this heading
+    # needs. An idle or finished session keeps the section and reads in past tense
+    # rather than losing the last thing it said.
+    live = record.state.is_active
+    _section("what it is saying" if live else "what it said")
+    _narration(pane, record.transcript, live=live)
+
+
+def _narration(pane: DetailState, transcript: Transcript, *, live: bool) -> None:
+    """
+    The turn's prose as wrapped text rather than as markdown blocks.
+
+    **Deliberately not the block renderer that the question view above uses.**
+    Rich rendering wants prose that has settled: a mid-turn parse re-runs on every
+    frame a token arrives -- measured at ~1.6ms per KB, so a 4KB turn costs a third
+    of the frame budget, continuously -- and the incremental parser that would avoid
+    that is a large invariant to maintain for a view whose job is to be glanced at.
+    Watching output arrive is what wrapping is good at; reading a settled answer is
+    what blocks are good at. The two surfaces differ because the reading does.
+    """
+    prose, dropped = narration_tail(transcript.turn_prose(), _NARRATION_LINES)
+    if not prose.strip():
+        imgui.text_disabled("nothing said yet this turn")
+        return
+
+    if dropped:
+        imgui.text_colored(P.warn.vec4, f"… {dropped:,} earlier lines not shown")
+
+    if imgui.begin_child("##narration"):
+        imgui.push_text_wrap_pos(0.0)
+        imgui.text_colored(P.text.vec4, prose)
+        imgui.pop_text_wrap_pos()
+        # Only a live turn is worth chasing. On a settled one the flag is left alone
+        # so that returning to a running session resumes wherever the operator left
+        # it, rather than being silently re-pinned by a session that had stopped.
+        if live:
+            pane.narration_follow = widgets.follow_tail(pane.narration_follow)
+    imgui.end_child()
 
 
 def _header(snap: Snapshot, obligation: Obligation, now: float) -> None:
@@ -140,37 +277,37 @@ def _header(snap: Snapshot, obligation: Obligation, now: float) -> None:
 
 
 def _approval(state: review.ReviewState, pending: PendingApproval) -> None:
+    """
+    The change first, the call that produced it second.
+
+    For a Write or an Edit the diff *is* the decision; ``content`` is a whole-file
+    argument that would push it a screen and a half down. Arguments stay below it
+    rather than moving out of the pane -- ``file_path`` is worth a glance and the
+    Bash case has nothing else -- but they are the thing you scroll *to*, not the
+    thing you scroll *past*.
+    """
     imgui.text_colored(P.accent.vec4, pending.tool_name)
 
-    _section("arguments")
-    if pending.raw_args:
-        for key, value in pending.raw_args.items():
-            imgui.text_colored(P.text_dim.vec4, key)
-            imgui.indent(12.0)
-            text, omitted = clip(render_value(value), _MAX_ARG_CHARS)
-            imgui.text_colored(P.text.vec4, text or "(empty)")
-            if omitted:
-                imgui.text_colored(P.warn.vec4, f"… {omitted:,} more characters not shown")
-            imgui.unindent(12.0)
-    else:
-        imgui.text_disabled("(none)")
-
+    if pending.diff:
+        _diff(state, pending.id, pending.diff)
+    _arguments(pending.raw_args)
     if not pending.diff:
-        # Not a gap. A Bash command or a network call has nothing diff-shaped to
-        # show, and the arguments above are the whole story for it.
+        # Stated rather than omitted, and stated last: a call with no diff is not
+        # missing one, and the arguments above are the whole story for it.
         _section("diff")
         imgui.text_disabled("no diff for this call")
-        return
 
-    lines = state.diff_lines.get(pending.id)
+
+def _diff(state: review.ReviewState, pending_id: str, diff: str) -> None:
+    lines = state.diff_lines.get(pending_id)
     if lines is None:
         # Split once per pending item, sharing the inbox's cache rather than
         # keeping a second one. A whole-file Write produces a diff as long as the
         # file, and two panes re-splitting it sixty times a second each is work
         # proportional to the change being reviewed -- backwards, since the large
         # diffs are the ones stared at longest.
-        lines = pending.diff.splitlines() or [""]
-        state.diff_lines[pending.id] = lines
+        lines = diff.splitlines() or [""]
+        state.diff_lines[pending_id] = lines
 
     _section(f"diff · {len(lines):,} lines")
     for line in lines[:_MAX_DIFF_LINES]:
@@ -186,15 +323,37 @@ def _approval(state: review.ReviewState, pending: PendingApproval) -> None:
         )
 
 
-def _question(snap: Snapshot, obligation: QuestionPending) -> None:
+def _arguments(raw_args: Mapping[str, Any]) -> None:
+    _section("arguments")
+    if not raw_args:
+        imgui.text_disabled("(none)")
+        return
+    for key, value in raw_args.items():
+        imgui.text_colored(P.text_dim.vec4, key)
+        imgui.indent(12.0)
+        text, omitted = clip(render_value(value), _MAX_ARG_CHARS)
+        imgui.text_colored(P.text.vec4, text or "(empty)")
+        if omitted:
+            imgui.text_colored(P.warn.vec4, f"… {omitted:,} more characters not shown")
+        imgui.unindent(12.0)
+
+
+def _question(snap: Snapshot, pane: DetailState, obligation: QuestionPending) -> None:
     record = snap.nodes.get(obligation.node)
     if record is None:
         imgui.text_disabled("this session is gone")
         return
+    # The turn's prose, not a byte window over the stream. A question sitting
+    # behind a large tool result used to render the tool result under this
+    # heading -- the machinery displacing the words in the one pane whose job is
+    # to inform the reply.
     _section("what it said")
-    tail = record.transcript.tail(_TAIL_CHARS)
-    if tail.strip():
-        imgui.text_colored(P.text.vec4, tail)
+    blocks = pane.prose_blocks(obligation.node, record.transcript)
+    if blocks:
+        # live=None: the turn has ended, so there is no in-progress block. Drawn
+        # through the same renderer CONTEXT's RICH mode uses, so a list or a fence
+        # cannot look like one thing here and another there.
+        rich_pane.draw(pane.rich, blocks, None)
     else:
         imgui.text_disabled("no output on this turn")
     imgui.spacing()
@@ -245,6 +404,22 @@ def clip(text: str, limit: int) -> tuple[str, int]:
     return text[:limit], len(text) - limit
 
 
+def narration_tail(prose: str, limit: int) -> tuple[str, int]:
+    """
+    The last ``limit`` lines of a turn, and how many were dropped ahead of them.
+
+    Tail-anchored where ``clip`` is head-anchored, for the reason the inbox preview
+    is: narration is watched rather than read from the top, and the interesting end
+    of a turn in progress is the end. Reports the drop for the same reason every
+    other bound in this pane does.
+    """
+    lines = prose.split("\n")
+    if len(lines) <= limit:
+        return prose, 0
+    dropped = len(lines) - limit
+    return "\n".join(lines[dropped:]), dropped
+
+
 def plain_text(snap: Snapshot, obligation: Obligation) -> str:
     """
     The obligation as text, for the clipboard.
@@ -261,13 +436,13 @@ def plain_text(snap: Snapshot, obligation: Obligation) -> str:
         case ApprovalNeeded():
             pending = obligation.approval
             parts.append(f"tool: {pending.tool_name}")
-            parts.extend(_arg_text(pending.raw_args))
             if pending.diff:
                 parts += ["", pending.diff]
+            parts += [""] + _arg_text(pending.raw_args)
         case QuestionPending():
             record = snap.nodes.get(obligation.node)
             if record is not None:
-                parts.append(record.transcript.tail(_TAIL_CHARS))
+                parts.append(record.transcript.turn_prose())
         case SessionFailed():
             parts.append(obligation.error or "no detail recorded")
 

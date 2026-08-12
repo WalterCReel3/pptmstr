@@ -24,6 +24,7 @@ from pptmstr.model import (
 )
 from pptmstr.transcript import SegmentKind
 from pptmstr.ui import detail
+from pptmstr.ui.blocks import BlockKind
 
 ROOT: NodeId = ("s1", None)
 
@@ -137,6 +138,42 @@ def test_a_question_renders_the_turn_not_the_row_summary() -> None:
     assert "here is what I found, at length" in text
 
 
+def test_a_question_renders_the_prose_not_the_machinery() -> None:
+    """
+    "What it said" used to be a kind-blind byte tail, so a question sitting behind
+    a large tool result showed the tool result under a heading promising the
+    agent's own words. See planning/2026-08-11-what-it-said-is-a-byte-tail.md.
+    """
+    node = record()
+    node.transcript.append(SegmentKind.SYSTEM, "\n> audit the TLE parser\n")
+    node.transcript.append(SegmentKind.REASONING, "they probably mean the checksum\n")
+    node.transcript.append(SegmentKind.TOOL_CALL, "Grep(pattern=checksum)\n")
+    node.transcript.append(SegmentKind.TOOL_RESULT, "Grep -> " + "hit\n" * 400)
+    node.transcript.append(SegmentKind.OUTPUT, "Fix the parser, or only report it?")
+
+    obligation = QuestionPending(node=ROOT, since=1.0, summary="ended its turn")
+    text = detail.plain_text(snapshot(node, needs_you=(obligation,)), obligation)
+
+    assert "Fix the parser, or only report it?" in text
+    assert "hit" not in text
+    assert "Grep(" not in text
+    assert "they probably mean the checksum" not in text
+
+
+def test_a_question_shows_only_the_current_turn() -> None:
+    node = record()
+    node.transcript.append(SegmentKind.SYSTEM, "\n> first task\n")
+    node.transcript.append(SegmentKind.OUTPUT, "answered the first one")
+    node.transcript.append(SegmentKind.SYSTEM, "\n> now the other one\n")
+    node.transcript.append(SegmentKind.OUTPUT, "and here is the second answer")
+
+    obligation = QuestionPending(node=ROOT, since=1.0, summary="ended its turn")
+    text = detail.plain_text(snapshot(node, needs_you=(obligation,)), obligation)
+
+    assert "and here is the second answer" in text
+    assert "answered the first one" not in text
+
+
 def test_a_failure_renders_its_error() -> None:
     obligation = SessionFailed(node=ROOT, since=1.0, summary="died", error="Traceback: boom")
     text = detail.plain_text(snapshot(record(), needs_you=(obligation,)), obligation)
@@ -151,3 +188,141 @@ def test_every_obligation_kind_has_a_label() -> None:
     from pptmstr.model import ObligationKind
 
     assert set(detail._KIND_LABEL) == set(ObligationKind)
+
+
+# -- turn prose as blocks -------------------------------------------------------
+
+
+def test_prose_blocks_are_the_markdown_structure_of_the_turn() -> None:
+    node = record()
+    node.transcript.append(SegmentKind.SYSTEM, "\n> audit the TLE parser\n")
+    node.transcript.append(
+        SegmentKind.OUTPUT,
+        "## What I found\n\nThe checksum is never validated.\n\n- line 40\n",
+    )
+    pane = detail.DetailState()
+
+    blocks = pane.prose_blocks(ROOT, node.transcript)
+
+    assert [b.kind for b in blocks] == [
+        BlockKind.HEADING,
+        BlockKind.PARAGRAPH,
+        BlockKind.BULLET_ITEM,
+    ]
+
+
+def test_prose_blocks_include_the_final_unterminated_paragraph() -> None:
+    """
+    The question is the last thing in the turn and has no trailing blank line, so
+    without ``BlockCursor.finish`` it is the one block that never arrives.
+    """
+    node = record()
+    node.transcript.append(SegmentKind.OUTPUT, "Checked it.\n\nFix it, or only report it?")
+    pane = detail.DetailState()
+
+    blocks = pane.prose_blocks(ROOT, node.transcript)
+
+    assert blocks[-1].lines == ("Fix it, or only report it?",)
+
+
+def test_prose_blocks_exclude_the_machinery() -> None:
+    node = record()
+    node.transcript.append(SegmentKind.SYSTEM, "\n> audit the TLE parser\n")
+    node.transcript.append(SegmentKind.REASONING, "they probably mean the checksum\n")
+    node.transcript.append(SegmentKind.TOOL_RESULT, "Grep -> " + "hit\n" * 400)
+    node.transcript.append(SegmentKind.OUTPUT, "Fix the parser, or only report it?")
+    pane = detail.DetailState()
+
+    blocks = pane.prose_blocks(ROOT, node.transcript)
+
+    assert [b.segment_kind for b in blocks] == [SegmentKind.OUTPUT]
+    assert blocks[0].lines == ("Fix the parser, or only report it?",)
+
+
+def test_prose_blocks_are_parsed_once_while_the_turn_is_settled() -> None:
+    """A finished turn stops moving, so a pane left open on it must not re-parse
+    every frame -- the memo returns the same tuple, not an equal one."""
+    node = record()
+    node.transcript.append(SegmentKind.OUTPUT, "Fix it, or only report it?")
+    pane = detail.DetailState()
+
+    first = pane.prose_blocks(ROOT, node.transcript)
+    second = pane.prose_blocks(ROOT, node.transcript)
+
+    assert first is second
+
+
+def test_prose_blocks_reparse_when_the_transcript_grows() -> None:
+    node = record()
+    node.transcript.append(SegmentKind.OUTPUT, "Working on it.\n\n")
+    pane = detail.DetailState()
+    before = pane.prose_blocks(ROOT, node.transcript)
+
+    node.transcript.append(SegmentKind.OUTPUT, "Fix it, or only report it?")
+    after = pane.prose_blocks(ROOT, node.transcript)
+
+    assert after is not before
+    assert after[-1].lines == ("Fix it, or only report it?",)
+
+
+def test_prose_blocks_reparse_when_the_cursor_moves_to_another_node() -> None:
+    """The memo is one entry keyed by node as well as length: two nodes whose
+    transcripts happen to be the same length must not share a parse."""
+    other: NodeId = ("s2", None)
+    first_node = record()
+    first_node.transcript.append(SegmentKind.OUTPUT, "aaaa")
+    second_node = record(other)
+    second_node.transcript.append(SegmentKind.OUTPUT, "bbbb")
+    pane = detail.DetailState()
+
+    pane.prose_blocks(ROOT, first_node.transcript)
+    blocks = pane.prose_blocks(other, second_node.transcript)
+
+    assert blocks[0].lines == ("bbbb",)
+
+
+def test_prose_blocks_are_empty_when_the_turn_said_nothing() -> None:
+    """The empty case has to stay distinguishable, since it is what selects the
+    'no output on this turn' placeholder over the renderer."""
+    node = record()
+    node.transcript.append(SegmentKind.SYSTEM, "\n> go\n")
+    node.transcript.append(SegmentKind.TOOL_CALL, "Grep(pattern=checksum)\n")
+    pane = detail.DetailState()
+
+    assert pane.prose_blocks(ROOT, node.transcript) == ()
+
+
+# -- narration bounding ---------------------------------------------------------
+
+
+def test_narration_tail_keeps_the_end_not_the_start() -> None:
+    """
+    Head-anchored is right for ``clip``; narration is the opposite case. A turn in
+    progress is watched, and what it is saying now is at the bottom.
+    """
+    prose = "\n".join(str(i) for i in range(10))
+    text, dropped = detail.narration_tail(prose, 3)
+    assert text == "7\n8\n9"
+    assert dropped == 7
+
+
+def test_narration_tail_under_the_limit_is_unchanged() -> None:
+    text, dropped = detail.narration_tail("a\nb", 10)
+    assert (text, dropped) == ("a\nb", 0)
+
+
+def test_narration_tail_at_exactly_the_limit_drops_nothing() -> None:
+    text, dropped = detail.narration_tail("a\nb\nc", 3)
+    assert (text, dropped) == ("a\nb\nc", 0)
+
+
+def test_narration_tail_reports_what_it_dropped() -> None:
+    """The count is what the pane renders; a silent tail in a surface whose premise
+    is 'nothing is lost' is the thing this pane exists to not do."""
+    prose = "\n".join(str(i) for i in range(500))
+    _, dropped = detail.narration_tail(prose, detail._NARRATION_LINES)
+    assert dropped == 500 - detail._NARRATION_LINES
+
+
+def test_narration_tail_on_empty_prose() -> None:
+    assert detail.narration_tail("", 10) == ("", 0)

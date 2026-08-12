@@ -150,6 +150,47 @@ class Transcript:
         cap = self._published_len if limit is None else limit
         return self.read(0, cap)
 
+    def turn_prose(self) -> str:
+        """
+        What the agent has *said* this turn, with the machinery left out.
+
+        ``tail`` is a byte window over every kind, so a turn whose prose sits
+        behind a large tool result renders the tool result instead -- under a
+        heading promising the agent's own words. This returns ``OUTPUT`` only, and
+        only from the current turn.
+
+        **The turn boundary is already in the stream.** ``SegmentKind.SYSTEM`` is
+        appended by ``AgentSession.send`` and by nothing else, and every root turn
+        goes through ``send`` -- the opening task included. So the last ``SYSTEM``
+        segment is where this turn began, and no separate marker is needed. A
+        sub-agent is spawned by a tool call rather than by ``send`` and so has no
+        marker at all; its whole life is one turn, which is what makes the start of
+        the buffer the right fallback rather than an error.
+
+        Unbounded, unlike ``tail``, and safe on the frame path for a different
+        reason: the cost is one turn's prose, which does not grow with the length
+        of the session. Callers bound it themselves so the bound can announce
+        itself -- a surface whose premise is "this is what it said" must not
+        quietly show less than that.
+        """
+        with self._lock:
+            cap = self._published_len
+            start = 0
+            for segment in reversed(self._segments):
+                if segment.kind is SegmentKind.SYSTEM and segment.end <= cap:
+                    start = segment.end
+                    break
+            chunks = [
+                bytes(self._buf[max(segment.start, start) : min(segment.end, cap)])
+                for segment in self._segments
+                if segment.kind is SegmentKind.OUTPUT and segment.end > start
+            ]
+        # Decoded as one buffer rather than per segment: coalescing means a
+        # multi-byte character cannot straddle two OUTPUT segments, but it can
+        # straddle the published cap, and joining first keeps that the only place
+        # the replacement char can appear.
+        return b"".join(chunks).decode("utf-8", errors="replace")
+
     def tail(self, nbytes: int) -> str:
         """
         The last ``nbytes`` of published output.
