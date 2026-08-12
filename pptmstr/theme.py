@@ -381,7 +381,223 @@ GHOST = Palette(
     diff_context=col(0x5A8079),
 )
 
-THEMES: dict[str, Palette] = {p.name: p for p in (DARK, LIGHT, HIGH_CONTRAST, GHOST)}
+# -- the period pieces ---------------------------------------------------------
+#
+# Five themes that quote a specific machine. They are held to exactly the same
+# role table and the same measured contrast floors as the required three, which
+# is the interesting constraint: the originals were designed for a CRT and a
+# fixed 16-entry hardware palette, and several of their signature colours miss
+# WCAG AA outright. Where a quoted colour and a floor disagree the floor wins and
+# the colour moves the smallest distance that clears it -- noted per palette. A
+# theme that is authentic and unreadable is a screenshot, not a theme.
+
+# Black on warm paper, and the eight ANSI colours as xterm shipped them --
+# except that against paper xterm's green (#00CD00) and yellow (#CDCD00) read at
+# 1.9:1 and 1.5:1, so those two are taken from the dark half of the ramp instead.
+XTERM = Palette(
+    name="xterm",
+    display_name="Xterm",
+    is_dark=False,
+    bg=col(0xE8E6DC),
+    panel=col(0xF2F0E6),
+    panel_alt=col(0xDCD9CC),
+    border=col(0x9A9686),
+    selection=col(0xC8C4B0),
+    text=col(0x1C1B18),
+    text_dim=col(0x56534A),
+    text_strong=col(0x000000),
+    accent=col(0x0000C4),
+    focus=col(0x8B008B),
+    warn=col(0x8A6D00),
+    danger=col(0xCD0000),
+    ok=col(0x006B00),
+    state_spawning=col(0x56534A),
+    state_thinking=col(0x0000C4),
+    state_calling_tool=col(0x005F87),
+    state_awaiting=col(0x8A6D00),
+    state_running=col(0x006B00),
+    state_awaiting_input=col(0x005F87),
+    state_done=col(0x6B685E),
+    state_failed=col(0xCD0000),
+    state_cancelled=col(0x6B685E),
+    state_rate_limited=col(0xA34B00),
+    pressure_nominal=col(0x0000C4),
+    pressure_nearing=col(0xA05A00),
+    pressure_compacted=col(0xCD0000),
+    ring_track=col(0xC4C0AE),
+    diff_add=col(0x006B00),
+    diff_remove=col(0xCD0000),
+    diff_context=col(0x56534A),
+)
+
+# CDE's bluish widget grey (#AEB2C3) over a darker backdrop of the same hue.
+# Everything else follows from the surface: black text on a mid-grey panel
+# leaves state colours a ceiling of about 0.11 relative luminance, so every
+# accent here is a dark saturated one. That is not a stylistic choice -- it is
+# what a mid-tone chassis costs, and it is why CDE itself looked like this.
+CDE = Palette(
+    name="cde",
+    display_name="CDE",
+    is_dark=False,
+    bg=col(0x8F94AB),
+    panel=col(0xAEB2C3),
+    panel_alt=col(0xC2C6D4),
+    border=col(0x4E5065),
+    selection=col(0x8892AD),
+    text=col(0x0B0C12),
+    text_dim=col(0x33364A),
+    text_strong=col(0x000000),
+    accent=col(0x1F4E8C),
+    focus=col(0x5C2D91),
+    warn=col(0x6E4A00),
+    danger=col(0xA32020),
+    ok=col(0x165C33),
+    state_spawning=col(0x3E4152),
+    state_thinking=col(0x1F4E8C),
+    state_calling_tool=col(0x1F5490),
+    state_awaiting=col(0x6E4A00),
+    state_running=col(0x165C33),
+    state_awaiting_input=col(0x1F5490),
+    state_done=col(0x494D60),
+    state_failed=col(0xA32020),
+    state_cancelled=col(0x494D60),
+    state_rate_limited=col(0x8A3A00),
+    pressure_nominal=col(0x0E2E63),
+    pressure_nearing=col(0x7A4800),
+    pressure_compacted=col(0xA82020),
+    ring_track=col(0x8892AD),
+    diff_add=col(0x165C33),
+    diff_remove=col(0xA32020),
+    diff_context=col(0x3E4152),
+)
+
+# #C0C0C0 chassis, VGA 16-colour accents, and the teal desktop behind it. Two
+# departures, both forced: the desktop teal is lightened from #008080 (black on
+# it is 4.4:1, just under the AA floor, and lifting it is cheaper than giving up
+# black text), and the selection fill is a navy *tint* rather than #000080 --
+# ImGui draws the same P.text over a selected row as an unselected one, so a
+# true navy fill would swallow it.
+WIN311 = Palette(
+    name="win311",
+    display_name="Windows 3.11",
+    is_dark=False,
+    bg=col(0x74A0A0),
+    panel=col(0xC0C0C0),
+    panel_alt=col(0xCFCFCF),
+    border=col(0x808080),
+    selection=col(0xA8B4D8),
+    text=col(0x000000),
+    text_dim=col(0x44444A),
+    text_strong=col(0x000000),
+    accent=col(0x000080),
+    focus=col(0x800080),
+    warn=col(0x5E5E00),
+    danger=col(0x900000),
+    ok=col(0x006B00),
+    state_spawning=col(0x4A4A4A),
+    state_thinking=col(0x000080),
+    state_calling_tool=col(0x1A32A8),
+    state_awaiting=col(0x5E5E00),
+    state_running=col(0x006B00),
+    state_awaiting_input=col(0x1A32A8),
+    state_done=col(0x4A4A4A),
+    state_failed=col(0x900000),
+    state_cancelled=col(0x4A4A4A),
+    state_rate_limited=col(0x8A3D00),
+    pressure_nominal=col(0x000080),
+    pressure_nearing=col(0x7A4A00),
+    pressure_compacted=col(0x900000),
+    ring_track=col(0x808080),
+    diff_add=col(0x006B00),
+    diff_remove=col(0x900000),
+    diff_context=col(0x4A4A4A),
+)
+
+# Greetingz Kat. White face, red bow, yellow nose. The bow red carries `danger`
+# unchanged, but the nose is #FFD800 and that is 1.3:1 on these surfaces, so
+# `warn` is the same hue dragged down until it reads as text. The one theme here
+# whose surfaces are tinted rather than neutral: with a white panel the pink is
+# confined to borders and accents, and it reads as the light theme with trim.
+KITTY = Palette(
+    name="kitty",
+    display_name="Greetingz Kat",
+    is_dark=False,
+    bg=col(0xFBDCE8),
+    panel=col(0xFFF4F8),
+    panel_alt=col(0xFFE7F1),
+    border=col(0xF2A8C4),
+    selection=col(0xFFD0E2),
+    text=col(0x3A2A33),
+    text_dim=col(0x8A5E72),
+    text_strong=col(0x1F1219),
+    accent=col(0xE0407A),
+    focus=col(0x9B4DCA),
+    warn=col(0xB07A00),
+    danger=col(0xD62246),
+    ok=col(0x1E8F5E),
+    state_spawning=col(0x8A5E72),
+    state_thinking=col(0xE0407A),
+    state_calling_tool=col(0x5B6FD6),
+    state_awaiting=col(0xB07A00),
+    state_running=col(0x1E8F5E),
+    state_awaiting_input=col(0x5B6FD6),
+    state_done=col(0x8C7A85),
+    state_failed=col(0xD62246),
+    state_cancelled=col(0x8C7A85),
+    state_rate_limited=col(0xC85A1E),
+    pressure_nominal=col(0x5B6FD6),
+    pressure_nearing=col(0xB07A00),
+    pressure_compacted=col(0xD62246),
+    ring_track=col(0xF7CBDC),
+    diff_add=col(0x1E8F5E),
+    diff_remove=col(0xD62246),
+    diff_context=col(0x8A5E72),
+)
+
+# Turbo Vision: yellow on #0000A8, cyan window frames, the bright half of the
+# CGA palette for everything that has to be seen. The inverse of CDE -- a very
+# dark surface puts a *floor* under the accents instead of a ceiling, which is
+# why nothing here is a muted colour. Untouched by the contrast floors; sixteen
+# hard-coded colours chosen for a CRT turn out to clear WCAG AA comfortably.
+TURBO = Palette(
+    name="turbo",
+    display_name="Turbo Pascal",
+    is_dark=True,
+    bg=col(0x000078),
+    panel=col(0x0000A8),
+    panel_alt=col(0x0000C8),
+    border=col(0x00A8A8),
+    selection=col(0x00728C),
+    text=col(0xFFFF54),
+    text_dim=col(0xA8A8A8),
+    text_strong=col(0xFFFFFF),
+    accent=col(0x54FCFC),
+    focus=col(0xFF54FF),
+    warn=col(0xFFFF54),
+    danger=col(0xFF5454),
+    ok=col(0x54FC54),
+    state_spawning=col(0xA8A8A8),
+    state_thinking=col(0x54FCFC),
+    state_calling_tool=col(0x54A8FC),
+    state_awaiting=col(0xFFFF54),
+    state_running=col(0x54FC54),
+    state_awaiting_input=col(0x54A8FC),
+    state_done=col(0x8A8A8A),
+    state_failed=col(0xFF5454),
+    state_cancelled=col(0x8A8A8A),
+    state_rate_limited=col(0xFFA854),
+    pressure_nominal=col(0x54A8FC),
+    pressure_nearing=col(0xFFA854),
+    pressure_compacted=col(0xFF5454),
+    ring_track=col(0x5555AA),
+    diff_add=col(0x54FC54),
+    diff_remove=col(0xFF5454),
+    diff_context=col(0xA8A8A8),
+)
+
+THEMES: dict[str, Palette] = {
+    p.name: p for p in (DARK, LIGHT, HIGH_CONTRAST, GHOST, XTERM, CDE, WIN311, KITTY, TURBO)
+}
 # The required three, in the order the menu shows them. GHOST is discretionary and
 # deliberately not in this list: the three below are the ones §6.1 makes mandatory.
 REQUIRED_THEMES = ("dark", "light", "high_contrast")

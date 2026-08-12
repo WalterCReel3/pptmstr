@@ -153,7 +153,7 @@ Read [orchestrator-design.md](orchestrator-design.md) §1 (invariants) and §3
 | [pptmstr/pool.py](pptmstr/pool.py) | Bounded concurrency; over-cap sessions queue |
 | [pptmstr/approval.py](pptmstr/approval.py) | Classification, summaries and diffs for the gate |
 | [pptmstr/ui/](pptmstr/ui/) | Fleet rail, inbox, detail, health, transcript pane, launcher, shared widgets |
-| [pptmstr/theme.py](pptmstr/theme.py) | Semantic colour roles; light, dark and high-contrast |
+| [pptmstr/theme.py](pptmstr/theme.py) | Semantic colour roles; light, dark, high-contrast, and six discretionary |
 | [pptmstr/driver.py](pptmstr/driver.py) | One `ClaudeSDKClient` per session, translated into intents |
 | [pptmstr/app.py](pptmstr/app.py) | Runner, docking layout, and the frame loop |
 | [scripts/probe.py](scripts/probe.py) | Environment diagnosis; never installs anything |
