@@ -23,10 +23,19 @@ rather than letting the operator infer that a quiet sub-agent is a stuck one.
 **Copying.** ImGui text is not selectable, so a run of output is copied whole rather
 than dragged over. That is a better unit than a selection anyway: no partial first
 line, no dropped trailing newline, and it round-trips into an issue.
+
+**Rendering.** ``RenderMode.RICH`` (planning/2026-08-10-transcript-markdown.md,
+step 5) draws markdown structure instead of literal lines, via ``rich_pane`` --
+imported as a module rather than name-by-name, since ``rich_pane`` needs
+``Block``/``BlockCursor`` types this module also owns and a symbol-level import
+either direction risks a cycle as both grow. Search demotes RICH back to the line
+path: ``_visible()`` filters at line granularity, which would shred a multi-line
+fence into disconnected rows if rich rendering tried to honour it too.
 """
 
 from __future__ import annotations
 
+import enum
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 
@@ -35,10 +44,21 @@ from imgui_bundle import imgui
 from ..model import NodeId, Snapshot
 from ..theme import P
 from ..transcript import SegmentKind, Transcript
+from . import rich_pane, widgets
+from .blocks import Block, BlockCursor
 
 # How many lines to draw when wrapping is on and the clipper cannot be used.
 # Without a bound, turning wrap on over a large transcript stalls the frame.
 _WRAP_WINDOW = 400
+
+
+class RenderMode(enum.Enum):
+    """Replaces the old ``wrap: bool`` -- a third state (RICH) made a boolean
+    the wrong shape, not just a name."""
+
+    RAW = "raw"
+    WRAP = "wrap"
+    RICH = "rich"
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +96,10 @@ class NodeTranscript:
     # the next chunk, is what keeps a streamed token appending to the line it
     # belongs to instead of starting a new one.
     open_line: bool = False
+    # Markdown block structure, fed lazily -- only when RenderMode.RICH is actually
+    # selected (see draw()). A node nobody is viewing in RICH mode pays nothing for
+    # this; blocks.py's own docstring is why it does not feed itself eagerly here.
+    block_cursor: BlockCursor = field(default_factory=BlockCursor)
 
     def sync(self, transcript: Transcript, limit: int) -> None:
         """Convert newly published bytes into lines, up to ``limit``."""
@@ -141,7 +165,7 @@ class TranscriptState:
 
     caches: dict[NodeId, NodeTranscript] = field(default_factory=dict)
     show_reasoning: bool = True
-    wrap: bool = False
+    mode: RenderMode = RenderMode.RAW
     follow_tail: bool = True
     search: str = ""
     frame: int = 0
@@ -149,6 +173,9 @@ class TranscriptState:
     # opening it moves the hover onto the popup and would otherwise clear the target
     # out from under the item the operator just right-clicked.
     context_run: int | None = None
+    # RICH mode's own hover/context-menu latch -- see RichState's docstring for why
+    # it is a separate field rather than reusing context_run.
+    rich: rich_pane.RichState = field(default_factory=rich_pane.RichState)
 
     def cache_for(self, node_id: NodeId) -> NodeTranscript:
         cache = self.caches.get(node_id)
@@ -206,27 +233,48 @@ def draw(snap: Snapshot, state: TranscriptState, selected: NodeId | None) -> Non
     pinned = record.transcript.published_length
     cache.sync(record.transcript, pinned)
 
+    # RICH demotes to the line path while a search filter is active -- see the
+    # module docstring's "Rendering" section for why block-level filtering does
+    # not compose with _visible()'s line-granular one.
+    if state.mode is RenderMode.RICH and not state.search:
+        stable = len(cache.lines) - (1 if cache.open_line else 0)
+        cache.block_cursor.feed(cache.lines[:stable])
+        live = cache.block_cursor.live_block(cache.lines)
+        shown = rich_pane.windowed(cache.block_cursor.blocks)
+        copy_value = rich_pane.block_copy_text(shown + ([live] if live is not None else []))
+        _draw_controls(state, record.node_id, copy_value)
+        imgui.separator()
+        _draw_rich(state, cache, live)
+        return
+
     visible = _visible(state, cache)
-    _draw_controls(state, record.node_id, visible)
+    _draw_controls(state, record.node_id, copy_text(visible))
     imgui.separator()
     _draw_lines(state, cache, visible)
 
 
-def _draw_controls(state: TranscriptState, node_id: NodeId, visible: list[Line]) -> None:
+def _draw_controls(state: TranscriptState, node_id: NodeId, copy_value: str) -> None:
     changed, state.show_reasoning = imgui.checkbox("reasoning", state.show_reasoning)
     imgui.same_line()
-    _, state.wrap = imgui.checkbox("wrap", state.wrap)
-    imgui.same_line()
+    for mode in RenderMode:
+        if imgui.radio_button(mode.value, state.mode is mode):
+            state.mode = mode
+        imgui.same_line()
     _, state.follow_tail = imgui.checkbox("follow", state.follow_tail)
     imgui.same_line()
     imgui.set_next_item_width(200 * imgui.get_font_size() / 16.0)
     _, state.search = imgui.input_text_with_hint("##search", "filter", state.search)
     imgui.same_line()
     # Copies what is on screen, filters included -- the button sits next to the
-    # filters that decide its contents. Right-clicking a run copies that run whole,
-    # unfiltered; the two affordances are deliberately different units.
-    if imgui.small_button("copy") and visible:
-        imgui.set_clipboard_text(copy_text(visible))
+    # filters that decide its contents. Right-clicking a run (or block) copies
+    # that run/block whole, unfiltered; the two affordances are deliberately
+    # different units.
+    if imgui.small_button("copy") and copy_value:
+        imgui.set_clipboard_text(copy_value)
+
+    if state.mode is RenderMode.RICH:
+        imgui.same_line()
+        imgui.text_disabled("(rich: search falls back to raw lines)")
 
     if node_id[1] is not None:
         # Sub-agent output does not stream (§2.5.1). Saying so beats letting a quiet
@@ -274,7 +322,7 @@ def _draw_lines(state: TranscriptState, cache: NodeTranscript, lines: list[Line]
         if live and top <= mouse_y < row_top:
             hovered = line.run
 
-    if state.wrap:
+    if state.mode is RenderMode.WRAP:
         # No clipper: wrapped rows have no uniform height for it to work from. The
         # window bound is what keeps that affordable.
         for line in lines[-_WRAP_WINDOW:]:
@@ -295,6 +343,20 @@ def _draw_lines(state: TranscriptState, cache: NodeTranscript, lines: list[Line]
     if not imgui.is_popup_open(_CONTEXT_ID):
         state.context_run = hovered
     _draw_context_menu(state, cache, lines)
+
+    _handle_scroll(state)
+    imgui.end_child()
+
+
+def _draw_rich(state: TranscriptState, cache: NodeTranscript, live: Block | None) -> None:
+    if not imgui.begin_child("##transcript"):
+        imgui.end_child()
+        return
+
+    if not cache.block_cursor.blocks and live is None:
+        imgui.text_disabled("(nothing yet)")
+    else:
+        rich_pane.draw(state.rich, cache.block_cursor.blocks, live)
 
     _handle_scroll(state)
     imgui.end_child()
@@ -323,23 +385,9 @@ def _handle_scroll(state: TranscriptState) -> None:
     """
     Follow the tail until the operator scrolls away from it.
 
-    Scrolling up is an intent to read something, and yanking the view back to the
-    bottom on the next token is the single most annoying thing a log pane can do.
-    Re-enabled by the checkbox, or by scrolling back to the bottom.
+    The behaviour, and the reason position cannot drive the disengage, live in
+    ``widgets.follow_tail`` -- DETAIL's narration needs the same thing, and the two
+    panes drifting apart on it would be invisible until one of them felt wrong.
+    Here the flag is additionally re-enabled by the pane's own checkbox.
     """
-    hovered = imgui.is_window_hovered()
-    wheel = imgui.get_io().mouse_wheel
-
-    if state.follow_tail:
-        # Disengage on an upward wheel rather than on scroll position. Position
-        # cannot work while following: set_scroll_here_y pins it to the bottom every
-        # frame, so the view snaps back before any position test could notice the
-        # operator trying to leave.
-        if hovered and wheel > 0.0:
-            state.follow_tail = False
-        else:
-            imgui.set_scroll_here_y(1.0)
-        return
-
-    if imgui.get_scroll_max_y() > 0.0 and imgui.get_scroll_y() >= imgui.get_scroll_max_y() - 1.0:
-        state.follow_tail = True
+    state.follow_tail = widgets.follow_tail(state.follow_tail)

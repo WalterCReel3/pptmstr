@@ -1,6 +1,7 @@
 # Model output renders as literal text, so structure is invisible
 
-**Dated:** 2026-08-10 · **Status:** proposed · **Found by:** research
+**Dated:** 2026-08-10 · **Status:** steps 1–5 built; four rendering defects found
+and fixed 2026-08-11 (see the last section) · **Found by:** research
 
 ## What was observed
 
@@ -96,6 +97,11 @@ Font work proper:
 
 ### 3. Block segmentation
 
+**Built on 2026-08-11**, in `pptmstr/ui/blocks.py`. Not wired into
+`NodeTranscript`/`draw()` at the time it was built — there was no renderer yet to
+consume it, and paying the parse cost for a structure nothing read would have been
+waste. Wired in as part of step 5.
+
 A block layer over the existing line cache. Both are monotone and each carries
 exactly one "how far have I got" integer:
 
@@ -144,9 +150,55 @@ Three rules that are not obvious:
 
 ### 4. Inline parsing — `markdown-it-py`
 
-Parsed once at block finalisation, cached in the frozen `Block`.
+**Built on 2026-08-11**, in `pptmstr/ui/inline.py`. Parsed once at block
+finalisation, cached in the frozen `Block` — but only for blocks `feed()`
+actually commits, never for `live_block()`'s re-derived tail; see that module's
+docstring for why the two had to be pulled apart even though block *structure*
+deliberately shares one code path between them.
+
+`InlineToken` is a hashable, value-equal flattening of `markdown_it.token.Token`,
+not the library's own type: `Token` has structural equality but is not hashable,
+and `Block` is a frozen (hashable-by-default) dataclass, so a raw `Token` field
+would have made `hash(block)` a landmine.
 
 ### 5. Span layout and draw
+
+**Built on 2026-08-11.** Layout lives in `pptmstr/ui/span_layout.py` (no ImGui,
+unit-tested against a fixed-width fake measurer); drawing lives in
+`pptmstr/ui/rich_pane.py` (the one module in the stack that touches ImGui,
+exercised against a live frame by `scripts/verify_rich_render.py`).
+`RenderMode.RICH` is opt-in via a radio button next to the existing wrap
+toggle, exactly as the Open section below anticipated — `RAW` stays the
+default.
+
+**Descoped rather than guessed at, both flagged in `rich_pane.py`'s own
+docstring:**
+
+- **Clickable links.** This is the "must be prototyped first" item below.
+  Rather than prototype it, links render as underlined text with no click
+  affordance — sidestepping the invisible-button-vs-link-widget conflict
+  entirely rather than resolving it. Copy-block is how the URL gets out today.
+- **Syntax highlighting** — as already anticipated, deferred to arrive with
+  `TextEditor`-based code selection.
+- **Per-cell table styling and delimiter-row alignment** — a cell draws as
+  plain wrapped text (`imgui.text_wrapped` over the flattened token stream);
+  no nested emphasis, no `:---:`-driven column alignment.
+- **Heading level is not drawn visually** — no marker, no size change (headings
+  render as `Face.BOLD` + `P.accent`, distinguished from plain bold prose by
+  colour only). `Block.level` is still recorded, so this is a rendering gap,
+  not a data-loss one.
+
+Two things worth recording that the plan didn't anticipate:
+
+- **`begin_popup_context_item` after `EndTable()` binds to the table as "the
+  last item"**, the same as it does for an ordinary widget — this was the
+  single most uncertain assumption in the whole step and it holds. Verified in
+  `scripts/verify_rich_render.py`'s table stage, not inferred.
+- **Bold and regular share one set of width measurements.** Verified in step
+  2's `scripts/verify_fonts.py` (identical advance, 8.00px at 16px) and relied
+  on here: `layout_inline` only ever measures with `Face.BODY`, even for runs
+  that draw in `Face.BOLD` — a second measurement pass per style would have
+  been needed on a family where that isn't true.
 
 Draw-list based, using `ImFont.calc_word_wrap_position_python(size, text, width)`
 (`imgui/__init__.pyi:11469`) — ImGui's own break-opportunity finder, callable on
@@ -270,6 +322,17 @@ and the lines round-trip unchanged (asserting "the existing path is untouched"
 rather than claiming it); and the two emphasis cases the override deliberately
 changes.
 
+**Built**, across `tests/test_blocks.py`, `tests/test_inline.py` and
+`tests/test_span_layout.py`: the streaming-prefix property (plain and across
+mixed `SegmentKind`s), every block kind's finalisation and inline-content
+stripping, the underscore-emphasis override against the unpatched parser's own
+(wrong) output, and word-wrap layout (bold surviving a wrap, break tokens,
+overlong-word hard-break) against a fixed-width fake measurer — deliberately not
+against real ImGui metrics, so the layout *algorithm* is checkable without a live
+frame. What a fake measurer cannot check — real wrap-position/text-size
+semantics, draw-list output, table widget behaviour, hover and click — is
+`scripts/verify_rich_render.py`'s job instead.
+
 ## Open
 
 - **HiDPI is deliberately naive for now.** It is unverified whether font sizing
@@ -280,17 +343,15 @@ changes.
   hard-codes a scale factor, so the fix stays local to `load_fonts`.
 - **Nested list depth** — flat rendering with an indent is assumed sufficient.
   Worth revisiting once real transcripts have been read in rich mode.
-- **Block hit-testing vs. link clicks is unresolved and must be prototyped
-  first in step 5.** An `invisible_button` over a block rect restores hover,
-  context menu and a hover highlight to draw-list content, but it will eat clicks
-  from links underneath. `set_next_item_allow_overlap()`
-  (`imgui/__init__.pyi:2806`) is the intended lever; emitting links as real
-  `text_link_open_url` widgets instead sidesteps it by giving them correct
-  z-order. This does *not* block step 1, which operates on segment runs in the
-  existing line-based path.
-- **Whether `RICH` becomes the default mode** or stays opt-in. Defer until it can
-  be looked at; `RAW` stays the default meanwhile, so a regression in rich mode
-  cannot take the pane down with it.
+- **Block hit-testing vs. link clicks was sidestepped, not resolved.** Built
+  (2026-08-11) with an `invisible_button` per block for hover/context-menu/copy,
+  and links rendering as underlined text with **no click affordance** —
+  deliberately avoiding the conflict this bullet describes rather than
+  prototyping a fix for it. `set_next_item_allow_overlap()`
+  (`imgui/__init__.pyi:2806`) and real `text_link_open_url` widgets are both
+  still live options; still open for whenever clickable links are wanted.
+- **Whether `RICH` becomes the default mode.** Resolved as this bullet expected:
+  `RAW` stays the default, `RICH` is opt-in via a radio button.
 
 `orchestrator-design.md` is not amended by this document. Per the repo
 convention, `planning/` holds scope snapshots for work not yet started; §2.5 and
@@ -305,6 +366,74 @@ helper and its edge cases; `push_font` face/size semantics; first-loaded-font-wi
 4-vs-6 glyph coverage per icon and the fix; every CommonMark inline case quoted
 above, before and after the emphasis override; the inline parse timings.
 
+Step 5, additionally verified live via `scripts/verify_rich_render.py`: every
+`BlockKind` renders without raising, including an unbalanced fence and a
+still-streaming live block, across several frames; a long paragraph actually
+produces more than one row at a narrow width; a block's `invisible_button`
+correctly latches hover and right-click-copy puts its verbatim source on the
+clipboard; and — the single riskiest assumption in the whole step —
+`begin_popup_context_item` called immediately after `EndTable()` does bind to
+the table as "the last item", the same as for an ordinary widget. That last one
+would have failed silently (no context menu, no crash) had it been wrong, which
+is exactly why it got a targeted check rather than being inferred from the
+smoke test passing.
+
+Aiming a synthetic click at a popup menu item by a fixed pixel offset from the
+originating click (the pattern `scripts/verify_transcript_copy.py` uses) proved
+too fragile to reuse here — cursor-warp latency on a real X11 desktop drifts the
+observed mouse position by several pixels frame to frame, easily overshooting a
+popup row under 20px tall. `verify_rich_render.py` instead monkeypatches
+`imgui.menu_item_simple` to record where the widget actually rendered and aims
+there, which is worth reusing for any future script that needs to click inside a
+popup.
+
 Read from stubs but not executed: `ImFontConfig` field meanings, the `push_font`
 pre-global-scale note. `imgui_md`'s internal layout strategy was inferred from
 symbols in the stripped binary — no C++ source is vendored.
+
+## Four rendering defects, found by looking at it (2026-08-11)
+
+None of these had a failing test, and none would ever have produced one: each
+drew perfectly happily and merely looked wrong. They surfaced when DETAIL became
+the renderer's second caller (2026-08-11-what-it-said-is-a-byte-tail, step 3) and
+a screenshot got taken.
+
+- **A softbreak was rendering as a row break.** CommonMark says it is a space, and
+  the difference is not pedantic here: a model hard-wraps its prose near 80
+  columns, so honouring those newlines printed the model's wrapping *and* the
+  pane's on top of it — ragged double-wrapped paragraphs at any width. Now only a
+  hardbreak breaks.
+
+- **Every wrapped continuation row began with a space.** `calc_word_wrap_position`
+  returns the index *of* the space it broke at, so the remainder carries it
+  (verified live: index 27 of "…are being accepted" yields the tail " accepted").
+  **The unit tests could not have caught this**: `tests/test_span_layout.py`'s
+  fixed-width fake consumed the space, which was the one place it disagreed with
+  the real function, and its docstring conceded the convention was "not
+  ImGui-verified". The fake now matches, so the fake's own accuracy is what the
+  new test protects.
+
+- **Words split mid-line once paragraphs reflowed** — "at colum / n 68". Latent all
+  along and masked by the softbreak bug: with only a sliver of row left, a wrap
+  function *asked* for a break inside it will always give one. A break landing
+  inside a word now takes a fresh row instead, guarded on the row being non-empty
+  so an overlong word still makes progress rather than retrying forever.
+
+- **Every line of markdown carried an extra widget gap.** `_draw_rows` advanced by
+  `get_text_line_height_with_spacing()`, which adds `style.ItemSpacing.y` — the
+  gap ImGui puts between *widgets*. Correct between blocks, where `_draw_one`'s
+  `invisible_button` already supplies it; a widget gap inserted into a paragraph
+  everywhere else. A 60-word paragraph went 244px → 196px. The link underline was
+  written as `line_h - 4.0` and landed correctly only because `ItemSpacing.y`
+  happened to be 4; it is now measured from the tight height.
+
+Fences also stopped drawing their own ``` delimiters, showing the info string as a
+dim label instead. `Block.lines` stays verbatim — copy-as-markdown depends on it —
+so the trim happens at draw time, and `windowed()`'s per-fence cost was corrected
+to match what is now actually drawn.
+
+The lesson worth keeping: `rich_pane`'s pure helpers had **no test file at all**
+before this pass, and its two genuinely wrong behaviours both lived behind a
+correct-looking fake. `tests/test_rich_pane.py` now covers `fence_body`,
+`windowed` and the verbatim-copy guarantee. Rendering defects need eyes on pixels;
+the tests are what stop them coming back.

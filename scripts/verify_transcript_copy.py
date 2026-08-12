@@ -87,7 +87,8 @@ def main() -> int:
     cache = tp.NodeTranscript()
     cache.sync(transcript, transcript.published_length)
 
-    state = tp.TranscriptState(follow_tail=False, wrap=args.wrap)
+    mode = tp.RenderMode.WRAP if args.wrap else tp.RenderMode.RAW
+    state = tp.TranscriptState(follow_tail=False, mode=mode)
     probe = Probe()
     print(f"mode: {'wrap' if args.wrap else 'clipper'}")
 

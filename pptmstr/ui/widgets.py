@@ -16,6 +16,37 @@ from ..model import AgentState, ContextSnapshot
 from ..theme import STATE_GLYPH, STATE_LABEL, P
 
 
+def follow_tail(following: bool) -> bool:
+    """
+    Pin the current window to its bottom until the operator scrolls away.
+
+    Returns the new following state; the caller owns the flag. Shared rather than
+    written twice because the non-obvious half is easy to get wrong in the same way
+    independently: **disengage on an upward wheel, not on scroll position.**
+    ``set_scroll_here_y`` re-pins every frame while following, so the view snaps
+    back to the bottom before any position test could notice the operator trying to
+    leave it. Position is only a sound signal for the *re*-engage, once nothing is
+    pinning it any more.
+
+    Scrolling up is an intent to read something, and yanking the view back on the
+    next token is the single most annoying thing a streaming pane can do.
+
+    Must be called inside the window or child it scrolls, after its content.
+    """
+    hovered = imgui.is_window_hovered()
+    wheel = imgui.get_io().mouse_wheel
+
+    if following:
+        if hovered and wheel > 0.0:
+            return False
+        imgui.set_scroll_here_y(1.0)
+        return True
+
+    if imgui.get_scroll_max_y() > 0.0 and imgui.get_scroll_y() >= imgui.get_scroll_max_y() - 1.0:
+        return True
+    return False
+
+
 def multiline_input(
     label: str,
     value: str,
