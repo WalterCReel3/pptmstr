@@ -45,6 +45,7 @@ Early. Following the build order in [orchestrator-design.md](orchestrator-design
 | 5 | Idling | **done, measured** |
 | 6 | Concurrency, sub-agent tree, review queue, batching | **done, tested** |
 | 7 | Transcript pane | **done, tested** |
+| 8 | Work templates + inter-agent message bus | not started (design rev. 4, §2.7) |
 
 ## Getting started
 

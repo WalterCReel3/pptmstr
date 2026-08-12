@@ -1,10 +1,12 @@
-# Multi-Agent Orchestrator — Coarse Design (rev. 3)
+# Multi-Agent Orchestrator — Coarse Design (rev. 4)
 
 Design spec for an LLM multi-agent coordinator with an immediate-mode UI, built on the **Claude Agent SDK**. Written to be handed to an implementing agent.
 
 **Stack:** Python · `claude-agent-sdk` for agent execution · `imgui-bundle` (Dear ImGui + hello_imgui) for UI · personal/small-team tool, dev audience.
 
 Read §1 (Invariants) and §3 (Threading) first. §3 is the load-bearing decision in this revision.
+
+> **Changed in rev. 4:** the harness now ships a feature that overlaps this project — **agent teams** — and the response is recorded rather than left implicit. It is not adopted, for one structural reason (§0, "What you are deliberately not adopting"), and its primitives are consumed individually instead. Agents can now talk to each other: §2.7 is new and adds a wake path into the state machine (§2.3). I8 also gains a name — **the parking invariant** (§1) — because the agent-teams decision turns on it and "I8" is not a phrase anyone reasons in. Everything else is unchanged from rev. 3.
 
 > **Changed in rev. 3:** theming moves from non-goal to first-class feature (§6.1). Light, dark, and high-contrast are required; state must be legible without relying on hue. Everything else is unchanged from rev. 2.
 
@@ -35,7 +37,43 @@ The SDK owns these. Do not reimplement them:
 - subprocess and session lifecycle
 - the permission evaluation pipeline (you supply a callback, not a policy engine)
 
-You are building: the orchestration UI, the approval interaction, the cross-session state projection, and the tree/rollup views.
+You are building: the orchestration UI, the approval interaction, the cross-session state projection, the tree/rollup views, and the inter-agent message bus (§2.7).
+
+### What you are deliberately *not* adopting (rev. 4)
+
+The list above is things the SDK does *for* you. This is a different category: a
+thing the harness does *instead of* you, incompatibly.
+
+**Agent teams** (`CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS`) is a lead session that
+spawns named teammates, a shared task list they claim work from, and a mailbox they
+message each other through. That is the coordination half of this project, shipped.
+Six of the seven things it does are things this project does or intends to.
+
+It is not used, for one reason: **teammates run as separate Claude Code processes
+outside our driver and inherit the lead's permission mode wholesale.** Per-teammate
+modes cannot be set at spawn; if the lead runs `--dangerously-skip-permissions`,
+every teammate does. Their permission prompts surface in the lead session as
+ordinary approve/deny prompts — no diff, no queue, no edit-then-approve. Our gate is
+an in-process `PreToolUse` callback (§5); a teammate process loads settings-file
+hooks instead, so a teammate's `Edit` has no path through the `asyncio.Future` the
+operator's decision arrives on. That await *is* the gate — it is what makes **the
+parking invariant** (I8, §1: parking is unbounded and free) true — and an agent
+whose tool calls never reach it is ungated by construction.
+
+The consequence worth internalising: adopting agent teams would not merely fail to
+provide the parking invariant, it would **remove** it. So this is a fork, not a
+deferred feature — there is no later state in which we take the task list now and get
+the gate back after.
+
+What that leaves is the honest division of labour this project is for. Agent teams
+solved coordination. Nobody has solved control: the review queue, the editable
+approval, and a parked agent costing nothing. **Effort belongs on the uncontested
+half**, which is also the argument for §2.7 routing messages through our own store
+rather than leaning on the harness's channel — the routing is a means, the
+reviewability is the product.
+
+Its primitives are consumed individually instead (§2.7). Full reasoning and the
+list of what was taken: `planning/2026-08-11-agent-teams-vs-pptmstr.md`.
 
 ---
 
@@ -50,7 +88,15 @@ You are building: the orchestration UI, the approval interaction, the cross-sess
 | I5 | **The UI owns the main thread. The SDK owns a dedicated asyncio thread.** They communicate through exactly two primitives (§3). | ImGui contexts aren't thread-safe; the SDK is asyncio-native. Neither will yield. |
 | I6 | **Every agent node has a stable ID derived from SDK identifiers,** never from list position. | Dear ImGui keys widget state by hashed label. Key off index and reordering scrambles hover, focus, and scroll. |
 | I7 | **Transcripts are append-only.** Readers take `(buffer, length_at_snapshot)`. | Immutable-record CoW gives O(n²) rebuilds on token streams. Append-only sidesteps it and is lock-free for readers. |
-| I8 | **The approval gate must be able to block indefinitely** without stalling the UI or other agents. | You are the bottleneck by design. A parked agent must cost nothing. |
+| I8 · **the parking invariant** | **Parking is unbounded and free.** The approval gate must be able to block indefinitely, and blocking must not stall the UI or any other agent. | You are the bottleneck by design. A parked agent must cost nothing. |
+
+**On the name (rev. 4).** I8 earns a handle because it is cited more than any other
+invariant and it is the one a reader is most likely to violate by accident. Call it
+**the parking invariant**; the repo already speaks the word (`park`, `unpark`,
+`parked` throughout `tests/test_store.py` and the inbox pane). The number stays as
+the anchor — `I1`–`I8` are referenced from code comments and tests, and renaming one
+of eight breaks the scheme — so both forms are correct: the name in prose, `I8` where
+terseness wins.
 
 ---
 
@@ -109,9 +155,20 @@ ACTIVE_STATES = {THINKING, CALLING_TOOL, RUNNING_TOOL}
 IDLE_STATES   = {SPAWNING, AWAITING_APPROVAL, DONE, FAILED, CANCELLED, RATE_LIMITED}
 ```
 
-`ACTIVE_STATES` is the **idle predicate** for the render loop (§4.2). `AWAITING_APPROVAL` being idle is the point of I8 — agents parked on your review cost nothing, and the whole app drops to idle FPS while it waits on you.
+`ACTIVE_STATES` is the **idle predicate** for the render loop (§4.2). `AWAITING_APPROVAL` being idle is the point of the parking invariant (I8) — agents parked on your review cost nothing, and the whole app drops to idle FPS while it waits on you.
 
 `RATE_LIMITED` is driven by `RateLimitEvent`, which the SDK emits on rate-limit status changes. Surface it; it's the difference between "stuck" and "backing off."
+
+**Rev. 4 — terminal is not always terminal.** Once agents can message each other
+(§2.7), a *finished* sub-agent that receives a `SendMessage` **auto-resumes in the
+background**, with no new `Agent` tool call. A node can therefore leave a
+terminal-looking state without an intent from us and without the spawn path running.
+Two consequences: the state machine has an inbound edge into `THINKING` that
+originates from a sibling rather than from the operator or the parent, and any UI
+affordance that treats a finished row as disposable (prune, collapse, hide) is
+wrong for a node whose siblings still hold its name. An agent stopped via the SDK's
+`stop_task` is exempt — the send is refused rather than delivered — while one stopped
+by the model's own `TaskStop` still wakes.
 
 ### 2.4 Usage, and context as a *health* signal
 
@@ -273,6 +330,62 @@ where the SDK's own JSONL is the record and ours is a view.
 - **Override:** register a `set_topic` custom tool (in-process, via the `@tool` decorator — no extra subprocess) so an agent can say something better when it wants to.
 
 Never derive the topic via a summarization call. It's a per-frame-visible field; it must be free.
+
+### 2.7 Inter-agent messaging (rev. 4)
+
+A work template is a set of roles that need to pass concerns between them — a QA
+agent telling a feature worker what it broke, a build specialist reporting back to a
+lead. There are two transports for that, and the choice between them is not
+either/or.
+
+**The bus we own — default.** An in-process MCP server (`create_sdk_mcp_server` +
+the `@tool` decorator, same mechanism as `set_topic` in §2.6) exposing
+`post_concern(to, subject, body)`, `read_inbox()`, and `claim_task()`, backed by the
+store. This is the default because of what it buys, which is the whole thesis of the
+project applied to messages: **a concern becomes a store object, so it is snapshot
+(I2), rendered in a pane, and reviewable in flight** — a concern can be read,
+rejected with a reason, or *edited and then delivered*, exactly like a diff. Nothing
+in the harness offers that, because nothing in the harness models a message as
+anything but text in transit.
+
+**`SendMessage` — for the cases where the model should route without us.** A built-in
+tool, not gated behind agent teams; only the structured team-protocol messages
+(`shutdown_request`, `plan_approval_response`) need teams. Three behaviours are
+load-bearing:
+
+- **The sibling roster is a spawn-time snapshot.** A sub-agent whose tool list
+  includes `SendMessage` starts with a system reminder listing `main` and every
+  other *named* agent, each a valid `to` value. It appears only when at least one
+  other agent has a name, and agents named later are invisible to it. **Spawn order
+  is therefore part of a work template's definition**, not an implementation detail:
+  workers that must address each other have to exist before the ones addressing them.
+- **Delivery wakes a finished agent** (§2.3).
+- **Names can be reused; IDs cannot.** The CLI refuses a send when a name now
+  refers to a newer agent than the one it reached earlier in the conversation. Since
+  `NodeId` is `(session_id, agent_id)` and already ID-based (I6), our store is on the
+  right side of this — but any operator-facing "message this agent" affordance must
+  address by `NodeId`, never by the display name.
+
+**Across sessions, not just within one.** Cross-session messaging lets independent
+sessions message each other by name over a per-session Unix socket, never through
+Anthropic servers when both are local. Its path is exported to hooks and Bash as
+`CLAUDE_CODE_MESSAGING_SOCKET`, and it is the **only documented host → session
+injection path** — there is no SDK method to send a message to a specific agent, so
+`ClaudeSDKClient` control methods (§3.1) stop at `interrupt` / `set_model` /
+`stop_task`. This is the transport that matches the pool spanning projects, which
+agent teams (one team per session, scoped to one working directory) does not.
+Constraints: plain text only, macOS/Linux, first-party API only, inbound gating via
+`crossSessionInbound`, a 50-message cap, and repeat throttling.
+
+**Taken from agent teams without adopting it** (§0): the task model — dependency
+edges, a pending task with unresolved dependencies being unclaimable, automatic
+unblocking on completion, and **file-locked claiming** so two workers cannot take the
+same item. That lands beside `review_queue` as a second cross-agent projection. Also
+worth copying: their mailbox drops malformed entries and still delivers the valid
+ones, rather than failing the whole read.
+
+**Open:** whether `post_concern` and `SendMessage` are themselves approval-gated
+(§9). They are tool calls, so `PreToolUse` sees them either way.
 
 ---
 
@@ -455,7 +568,7 @@ options = ClaudeAgentOptions(
 > 3. **`HookMatcher.timeout` defaults to 60 seconds and is enforced by the CLI, not
 >    by the SDK.** This is the one that matters. See §5.2.1.
 
-### 5.2.1 The timeout is the real constraint on I8
+### 5.2.1 The timeout is the real constraint on the parking invariant
 
 `HookMatcher.timeout` is passed through to the CLI (`_internal/query.py:224`) and
 only when explicitly set; otherwise the CLI applies its own 60s default. On expiry
@@ -464,7 +577,7 @@ abort)"` and `"hook callback timed out after <n>ms"`. The Python side awaits the
 callback with no timeout of its own, so **nothing on our side of the boundary
 observes or prevents this.**
 
-I8 says the gate must be able to block indefinitely. That is not free, and rev. 2
+The parking invariant says the gate must be able to block indefinitely. That is not free, and rev. 2
 was wrong to assume it was: a default-configured gate aborts every review that takes
 more than a minute, which for a tool whose entire premise is "the operator is the
 bottleneck" is a constant failure, not an edge case. Walking away for coffee would
@@ -483,7 +596,7 @@ backstop against a wedged UI, not a review deadline).
 > | `exceeds-short` | 6s | 2s | **aborted at exactly 2.0s.** The hook coroutine is *cancelled*, so `asyncio.CancelledError` lands inside the gate. `ResultMessage.is_error` true. |
 > | `long-timeout` | 75s | 6h | **completed.** Tool ran, `terminal_reason: "completed"`, no error. |
 >
-> **I8 holds as designed. The gate can await the operator directly** and does not
+> **The parking invariant holds as designed. The gate can await the operator directly** and does not
 > need `defer`. Two details worth keeping: the abort arrives as a cancellation of
 > our own coroutine, which means the gate can catch it and resolve the pending
 > approval rather than leaking a future nobody completes; and the timeout is
@@ -553,7 +666,7 @@ async def approval_gate(hook_input, tool_use_id, context) -> SyncHookJSONOutput:
 
 The UI side is one line: `bridge.resolve(pending.future, Decision(approved=True))`.
 
-Because the await parks only that agent's task, other agents keep running and the app stays idle-able. That is I8 satisfied structurally rather than by convention.
+Because the await parks only that agent's task, other agents keep running and the app stays idle-able. That is the parking invariant satisfied structurally rather than by convention.
 
 ### 5.3 Two capabilities worth taking
 
@@ -666,6 +779,7 @@ that persists across frames — set it once on theme change, never per frame.
 5. **Idling.** Wire `any_active` to `enable_idling`. Measure idle CPU before and after.
 6. **Concurrency.** N sessions, subagent tree from `parent_tool_use_id`, review queue, batch approval, edit-then-approve, rejection reasons.
 7. **Transcript pane.** Segment styling, reasoning toggle, follow-tail, search. Expect to iterate; this is the part fighting the library.
+8. **Work templates and the message bus (rev. 4).** A template is a named set of `AgentDefinition` roles plus a lead prompt and a spawn order (§2.7). Land the store side first — concerns as records, the task projection with dependencies and locked claiming — then the `@tool` surface, then the pane. Close the §9 gating question *before* the pane, since whether a concern parks in the review queue decides what the pane is for.
 
 ---
 
@@ -680,13 +794,36 @@ that persists across frames — set it once on theme change, never per frame.
   - **We mint the session ID rather than learning it.** `ClaudeAgentOptions.session_id` accepts a caller-supplied UUID. This matters more than it looks: without it, `AgentSpawned` would have to invent a placeholder `NodeId` and re-key once the first message arrived — and since `NodeId` is the widget-key basis (I6), that re-key lands precisely when the agent starts streaming, scrambling hover and scroll at the worst moment. Minting it up front makes identity known before the first byte.
   - **"Retire this session" becomes a real action, not advice.** §2.4 says the answer to a compacted session is to start a fresh one. `resume=<id>` with `fork_session=True` is exactly that, and it is only available because we kept the ID.
 - **Cancellation semantics.** Does cancelling a parent kill its subagents? The subprocess model gives a natural boundary. Rev. 3 adds a second, softer lever: `ClaudeSDKClient.interrupt()` stops work without tearing down the session, and `stop_task(task_id)` targets one task. So the choice is now three-way — interrupt (recoverable), disconnect (session ends), or kill — and "cancel" in the UI should say which one it means.
+
+  **Rev. 4 adds a fourth axis: whether the thing we stopped can be woken by a
+  sibling.** `stop_task` makes an agent immune to `SendMessage` (the send is
+  refused); the model's own `TaskStop` does not. "Stopped" in the UI must therefore
+  distinguish *paused and reachable* from *stopped and deaf*, or the operator will
+  stop an agent and watch a teammate restart it.
 - ~~**Context-budget policy.**~~ **Settled in rev. 3 (§2.4):** context is a session-health signal, not a budget. Advisory only, surfaced as `ContextPressure` plus an observed compaction count, with "fork this session" as the offered action. Money is a separate axis with its own hard stop (`max_budget_usd`).
 - **Whether spawning a subagent is itself approval-gated.** Probably yes given your stated preferences — the `Agent` tool call is visible to `PreToolUse` like any other.
 - **Concurrency cap.** Subprocess-bound. Pick a number, surface it, make it configurable.
+- **Whether inter-agent messages are approval-gated (rev. 4, §2.7).** `post_concern` and `SendMessage` are tool calls, so the gate *can* see them. The argument for gating: a message that wakes a finished agent has blast radius comparable to spawning one, which §9 already leans toward gating. The argument against: a team that chats normally would make the operator a bottleneck on *conversation* rather than on writes, and the parking invariant's "parked agents cost nothing" says nothing about the operator's attention costing nothing. A plausible split is to gate on effect rather than on tool — deliver freely to a live agent, gate the send that wakes a terminal one — but that is a guess until step 8 makes it observable.
+- **Whether a settings-file hook inside a teammate process can reach our driver (rev. 4).** Assumed no, and the §0 decision rests on it. If it can, a bridged gate becomes conceivable and the agent-teams fork reopens. This is the single finding that would reverse a recorded decision, which is reason enough to close it deliberately rather than by accident.
 
 ---
 
 ## 10. Revision history
+
+### Diff from rev. 3
+
+| Area | rev. 3 | rev. 4 |
+|---|---|---|
+| Agent teams | not considered | **explicitly not adopted (§0)** — teammates are processes outside our driver, so adopting removes the parking invariant rather than merely lacking it |
+| I8 | referred to by number | **named: the parking invariant (§1)** — restated consequence-first as "parking is unbounded and free"; the number stays as the anchor |
+| Inter-agent communication | none; sub-agents report to the parent only | **§2.7** — an in-process MCP bus we own, plus `SendMessage` where the model should route unattended |
+| Concerns between agents | — | **store objects: snapshot, rendered, reviewable and editable in flight** |
+| Terminal states | terminal | **`SendMessage` wakes a finished sub-agent (§2.3)** — an inbound edge that originates from a sibling |
+| Stop semantics | three-way: interrupt / disconnect / kill | **four-way** — plus whether the stopped agent is still reachable by a sibling (§9) |
+| Spawn order | an implementation detail | **part of a work template's definition** — the sibling roster is a spawn-time snapshot (§2.7) |
+| Task list | `review_queue` only | **second projection: dependencies, unclaimable-while-blocked, file-locked claiming** (taken from agent teams) |
+| Cross-project reach | pool of independent roots | **cross-session messaging by name; `CLAUDE_CODE_MESSAGING_SOCKET` is the only host → session injection path** |
+| Build order | 7 steps | **step 8: work templates and the message bus** |
 
 ### Diff from rev. 2
 
@@ -724,6 +861,11 @@ that persists across frames — set it once on theme change, never per frame.
 **Claude Agent SDK** (gathered via research; verify against docs at build time):
 [overview](https://code.claude.com/docs/en/agent-sdk/overview) · [Python reference](https://code.claude.com/docs/en/agent-sdk/python) · [permissions](https://code.claude.com/docs/en/agent-sdk/permissions) · [hooks](https://code.claude.com/docs/en/agent-sdk/hooks) · [streaming output](https://code.claude.com/docs/en/agent-sdk/streaming-output) · [cost tracking](https://code.claude.com/docs/en/agent-sdk/cost-tracking) · [subagents](https://code.claude.com/docs/en/agent-sdk/subagents) · [sessions](https://code.claude.com/docs/en/agent-sdk/sessions) · [model config](https://code.claude.com/docs/en/model-config)
 
+**Claude Code harness** (read 2026-08-11 against the bundled CLI **2.1.226**, which clears every version gate below — 2.1.178 teams-as-documented, 2.1.198 background sub-agents by default, 2.1.199 name-collision check, 2.1.206 sibling roster, 2.1.224 cross-session messaging):
+[agent teams](https://code.claude.com/docs/en/agent-teams) · [sub-agents](https://code.claude.com/docs/en/sub-agents) · [cross-session messaging](https://code.claude.com/docs/en/cross-session-messaging) · [tools reference](https://code.claude.com/docs/en/tools-reference) · [SDK custom tools](https://code.claude.com/docs/en/agent-sdk/custom-tools)
+
+Two facts from that read constrain the design rather than merely informing it: `TeammateIdle` / `TaskCreated` / `TaskCompleted` are **TypeScript-only** hooks, so a Python host cannot observe team lifecycle even from outside; and there is **no SDK API to send a message to a specific agent**, which is what makes the messaging socket the only injection path (§2.7).
+
 **UI constraints:**
 - Table 3-frame auto-fit: `imgui_tables.cpp`, `column->AutoFitQueue = column->CannotSkipItemsQueue = (1 << 3) - 1; // Fit for three frames`
 - Idling machinery and defaults: [hello_imgui](https://github.com/pthom/hello_imgui) `runner_params.h`, `abstract_runner.cpp`
@@ -739,7 +881,7 @@ that persists across frames — set it once on theme change, never per frame.
 - Subagent attribution: `agent_id`/`agent_type` arrive on tool-lifecycle hook inputs, and the SDK's own comment says parallel subagents interleave over one control channel and `agent_id` is "the only reliable way to attribute each one" — direct confirmation of I6 and of `NodeId`. There are also `SubagentStart`/`SubagentStop` hooks carrying `agent_id`, which is a cleaner tree source than reconstructing from `parent_tool_use_id`.
 
 **Also closed at step 3, by running it:**
-- Hook timeout semantics end to end (§5.2.1). I8 holds; the gate awaits directly.
+- Hook timeout semantics end to end (§5.2.1). The parking invariant holds; the gate awaits directly.
 - `ThinkingBlock(thinking, signature)` is a real content block, and `thinking_delta` arrives as a `content_block_delta` on `StreamEvent`, so reasoning streams token by token.
 - `ClaudeAgentOptions.session_id` accepts a caller-minted UUID, which is what makes `NodeId` stable from spawn (§9).
 
@@ -748,3 +890,8 @@ that persists across frames — set it once on theme change, never per frame.
 - Whether `ResultMessage.total_cost_usd` is per-turn or cumulative across turns on one client. The driver deltas against the last seen value, which is correct either way, but the ambiguity is real and unresolved.
 - Model ID strings (§7, trap 9).
 - hello_imgui "cannot run GUI from separate Python thread" issue — title seen, thread not read. I5 holds regardless.
+
+**Opened in rev. 4 — close before step 8:**
+- Whether a settings-file hook in a teammate process can reach our driver (§9). The one finding that would reverse a recorded decision.
+- What an auto-resumed sub-agent looks like from our side: whether its activity arrives with `agent_id` set as usual, and whether the wake re-enters `THINKING` through a store path that already exists (§2.3). Extend `scripts/verify_subagents.py`; do not write a new probe.
+- Whether cross-session messaging is actually enabled in our configuration — it depends on feature-flag evaluation, which `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, `DISABLE_TELEMETRY`, `DO_NOT_TRACK`, and `DISABLE_GROWTHBOOK` each turn off. `/list-agents` in a plain CLI session is the one-command check.
