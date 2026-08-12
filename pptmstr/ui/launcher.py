@@ -145,20 +145,20 @@ def draw(
         imgui.set_keyboard_focus_here()
         state._focus_task = False
 
-    # enter_returns_true plus ctrl_enter_for_new_line inverts the usual multiline
-    # bindings: Enter launches, Ctrl+Enter breaks the line. A prompt is usually one
-    # paragraph and the common case should not need the mouse. escape_clears_all is
-    # deliberately absent -- it would eat the key that dismisses the modal.
+    # The same chord the reply boxes use: Ctrl+Enter launches, Enter breaks the
+    # line. Sharing it is the point -- a task box and a reply box are both prompts,
+    # and the binding that differed here was the one whose misfire costs the most,
+    # since a stray Enter mid-sentence spawns a session on half a sentence.
+    # escape_clears_all is deliberately absent on top of it: it would eat the key
+    # that dismisses the modal.
     submitted, state.task = widgets.multiline_input(
         "##task",
         state.task,
         imgui.ImVec2(-1, _TASK_HEIGHT),
         wrap=wrap,
-        flags=int(
-            imgui.InputTextFlags_.enter_returns_true | imgui.InputTextFlags_.ctrl_enter_for_new_line
-        ),
+        flags=widgets.CTRL_ENTER_SUBMITS,
     )
-    imgui.text_disabled("what should a new session do?  Enter launches, Ctrl+Enter for a new line")
+    imgui.text_disabled("what should a new session do?  Ctrl+Enter launches, Enter for a new line")
 
     imgui.spacing()
     imgui.separator()

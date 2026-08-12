@@ -16,6 +16,18 @@ from imgui_bundle import imgui
 from ..model import AgentState, ContextSnapshot
 from ..theme import STATE_GLYPH, STATE_LABEL, Color, P, faded
 
+# Ctrl+Enter sends, Enter breaks the line. One flag, not two: on a multiline box
+# ImGui already treats Ctrl+Enter as the validation chord, and
+# ``ctrl_enter_for_new_line`` is what *inverts* that into Enter-sends. Omitting it
+# is the binding, not the absence of one (``InputTextEx``: the enter branch
+# validates on ``!ctrl_enter_for_new_line && io.KeyCtrl``).
+#
+# It changes what the first element of ``multiline_input``'s result means: true on
+# Ctrl+Enter only, never on an ordinary keystroke. A caller that stores its draft
+# on that flag stores nothing until send, so callers using this mask must store the
+# returned value unconditionally.
+CTRL_ENTER_SUBMITS = int(imgui.InputTextFlags_.enter_returns_true)
+
 
 def follow_tail(following: bool) -> bool:
     """

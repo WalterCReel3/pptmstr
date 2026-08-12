@@ -69,11 +69,13 @@ Sessions are **conversations, not one-shot runs**. A finished turn leaves the
 session connected and marks it `YOUR TURN` — send another prompt, interrupt the
 current turn, or close the session to reclaim its subprocess. An agent that asks a
 question is therefore something you can answer rather than something that looks
-finished.
+finished. Every prompt box in the application sends on `Ctrl+Enter` and takes
+`Enter` as a newline — a prompt is routinely several lines, and the key that would
+send it half-written is the one pressed most often.
 
 Start a session with `Ctrl+N`, or **Session ▸ New Task…**, from either layout. Each
 carries its own working directory and model, so one window can drive work across
-several projects. `Enter` launches; `Ctrl+Enter` breaks a line in the task box;
+several projects. `Ctrl+Enter` launches; `Enter` breaks a line in the task box;
 `Esc` dismisses without discarding the draft.
 
 The review loop is keyboard-driven: `j`/`k` to move, `a` approve, `r` reject with a

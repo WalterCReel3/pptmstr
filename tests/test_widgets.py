@@ -5,7 +5,7 @@ Drawing is not what is under test -- that needs a GL context and would only asse
 that ImGui works. What is worth pinning is the flag arithmetic, because it is the
 part that can regress silently: a wrapper that dropped the caller's flags would
 still render a perfectly good text box, just one where Tab no longer indents and
-Enter no longer launches.
+Ctrl+Enter no longer sends.
 """
 
 from __future__ import annotations
@@ -19,6 +19,19 @@ from pptmstr.ui import widgets
 
 WORD_WRAP = int(imgui.InputTextFlags_.word_wrap)
 TAB = int(imgui.InputTextFlags_.allow_tab_input)
+CTRL_ENTER_NEWLINE = int(imgui.InputTextFlags_.ctrl_enter_for_new_line)
+
+
+def test_submit_binding_is_enter_returns_true_without_the_inverter() -> None:
+    """
+    The binding is defined by a flag that is *absent*, which is the kind of thing a
+    later edit adds back while "completing" the mask. Setting
+    ``ctrl_enter_for_new_line`` silently swaps the two keys: Enter would send a
+    half-written prompt and Ctrl+Enter would insert the newline. Nothing else in the
+    app would fail, and no test that only checks flags survive wrapping would notice.
+    """
+    assert widgets.CTRL_ENTER_SUBMITS & int(imgui.InputTextFlags_.enter_returns_true)
+    assert not widgets.CTRL_ENTER_SUBMITS & CTRL_ENTER_NEWLINE
 
 
 @pytest.fixture()
@@ -46,8 +59,8 @@ def test_wrap_off_leaves_it_clear(captured: list[dict[str, Any]]) -> None:
 
 def test_caller_flags_survive_wrapping(captured: list[dict[str, Any]]) -> None:
     """
-    The launcher's Enter-to-launch binding rides in on ``flags``. Wrapping augments
-    that mask; it must not replace it.
+    The Ctrl+Enter submit binding rides in on ``flags``. Wrapping augments that
+    mask; it must not replace it.
     """
     widgets.multiline_input("##a", "text", imgui.ImVec2(-1, 80), wrap=True, flags=TAB)
     flags = captured[0]["flags"]

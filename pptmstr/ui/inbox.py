@@ -43,9 +43,9 @@ from ..model import (
 )
 from ..theme import OBLIGATION_GLYPH, STATE_GLYPH, P
 from . import projects, review
-from .compose import ComposeState
+from .compose import ComposeState, wants_send
 from .focus import FocusState
-from .widgets import ellipsis, format_elapsed, multiline_input
+from .widgets import CTRL_ENTER_SUBMITS, ellipsis, format_elapsed, multiline_input
 
 # Column origins, measured from the row's left edge. Fixed zones with each field
 # ellipsized into its own, rather than laid out with same_line(): letting the fields
@@ -377,19 +377,24 @@ def _expand_question(
     if compose.focus_reply:
         imgui.set_keyboard_focus_here()
         compose.focus_reply = False
-    changed, draft = multiline_input(
+    submitted, draft = multiline_input(
         "##reply",
         draft,
         imgui.ImVec2(-8.0, 54.0),
         wrap=wrap,
-        flags=int(imgui.InputTextFlags_.allow_tab_input),
+        flags=int(imgui.InputTextFlags_.allow_tab_input) | CTRL_ENTER_SUBMITS,
     )
-    if changed:
-        compose.replies[node] = draft
+    # Stored every frame: CTRL_ENTER_SUBMITS makes the returned bool mean "sent",
+    # so there is no per-keystroke signal left to gate the draft on.
+    compose.replies[node] = draft
+    _small()
+    imgui.text_colored(P.text_dim.vec4, "Ctrl+Enter sends, Enter for a new line")
+    _normal()
 
-    if imgui.button("send") and draft.strip():
+    if wants_send(submitted, imgui.button("send"), draft):
         actions.send(node, draft.strip())
         compose.replies[node] = ""
+        compose.focus_reply = True
     imgui.same_line()
     if imgui.button("interrupt"):
         actions.interrupt(node)

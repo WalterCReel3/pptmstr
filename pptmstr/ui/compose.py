@@ -39,6 +39,18 @@ class ComposeState:
             del self.replies[node]
 
 
+def wants_send(submitted: bool, clicked: bool, draft: str) -> bool:
+    """
+    Whether this frame's input means "send it".
+
+    Both composers -- this pane and the inbox's expanded question -- ask the same
+    question of two different signals, and the whitespace rule is the part that
+    matters: a session handed an empty turn spends a turn on nothing, and a draft
+    of only newlines is exactly what a box bound to Enter accumulates.
+    """
+    return (submitted or clicked) and bool(draft.strip())
+
+
 def draw_conversation(
     snap: Snapshot,
     state: ComposeState,
@@ -80,19 +92,26 @@ def draw_conversation(
     disabled = record.state.is_terminal
     if disabled:
         imgui.begin_disabled()
-    changed, draft = widgets.multiline_input(
+    submitted, draft = widgets.multiline_input(
         "##reply",
         draft,
         imgui.ImVec2(-1, 80),
         wrap=wrap,
-        flags=int(imgui.InputTextFlags_.allow_tab_input),
+        flags=int(imgui.InputTextFlags_.allow_tab_input) | widgets.CTRL_ENTER_SUBMITS,
     )
-    if changed:
-        state.replies[selected] = draft
+    # Stored every frame, not on a change flag: under CTRL_ENTER_SUBMITS the
+    # returned bool reports submission, so there is no per-keystroke signal to
+    # gate on.
+    state.replies[selected] = draft
+    imgui.text_disabled("Ctrl+Enter sends, Enter for a new line")
 
-    if imgui.button("send") and draft.strip():
+    if wants_send(submitted, imgui.button("send"), draft):
         send(selected, draft.strip())
         state.replies[selected] = ""
+        # Sending deactivates the box (ImGui clears the active id on validate), and
+        # a reply is rarely the last thing said to a session that is still running.
+        # Put the caret back.
+        state.focus_reply = True
     if disabled:
         imgui.end_disabled()
 
