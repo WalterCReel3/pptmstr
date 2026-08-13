@@ -76,6 +76,9 @@ been run.
 
 Design decisions live in the repository with their reasoning:
 
+- [STYLE.md](STYLE.md) — how the code is shaped: the functional core and its
+  deliberate exceptions, what counts as verified, and the smells that have already
+  cost something here. Read before adding a record, an intent, or a projection.
 - [planning/](planning/) — dated scope snapshots for work not yet started
 
 Read these before proposing a direction. If you think a recorded decision is

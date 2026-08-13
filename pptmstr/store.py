@@ -20,23 +20,34 @@ here.
 
 from __future__ import annotations
 
+import dataclasses
 import time
 from collections.abc import Iterable
 from types import MappingProxyType
 from typing import assert_never
 
+from .effects import ClaimSettled, Effect, InboxDelivered
 from .intents import (
     AgentFinished,
     AgentRemoved,
+    AgentResumed,
     AgentSpawned,
     ApprovalRequested,
     ApprovalResolved,
     CompactionObserved,
+    ConcernEdited,
+    ConcernPosted,
+    ConcernWithdrawn,
     ContextPolled,
     FailureAcknowledged,
+    InboxRead,
     Intent,
     StateChanged,
     SubagentProgress,
+    TaskClaimRequested,
+    TaskCompleted,
+    TaskDeclared,
+    TaskReleased,
     TopicChanged,
     UsageAccrued,
 )
@@ -44,11 +55,15 @@ from .model import (
     AgentRecord,
     AgentState,
     ApprovalNeeded,
+    ConcernState,
     NodeId,
     Obligation,
     QuestionPending,
     SessionFailed,
     Snapshot,
+    Task,
+    TaskId,
+    TaskState,
 )
 from .transcript import Transcript
 
@@ -75,11 +90,17 @@ class Store:
         """
         return self._snapshot
 
-    def apply(self, intent: Intent, now: float | None = None) -> None:
-        """Apply one intent, producing a new snapshot."""
-        self._snapshot = _apply(self._snapshot, intent, _clock(now))
+    def apply(self, intent: Intent, now: float | None = None) -> tuple[Effect, ...]:
+        """
+        Apply one intent, producing a new snapshot and any answers it owes.
 
-    def apply_all(self, intents: Iterable[Intent], now: float | None = None) -> None:
+        The return is ignored by every caller that only mutates, which is most of
+        them; it matters for the bus intents that an agent is parked on.
+        """
+        self._snapshot, effects = _apply(self._snapshot, intent, _clock(now))
+        return effects
+
+    def apply_all(self, intents: Iterable[Intent], now: float | None = None) -> tuple[Effect, ...]:
         """
         Apply a batch, rebuilding derived state once at the end.
 
@@ -90,12 +111,19 @@ class Store:
         stays a pure function of (snapshot, intent, time) and a test can hand it a
         fixed instant. The whole batch shares one reading, which is also what the
         frame does with its snapshot.
+
+        Effects accumulate in application order and are returned together, so the
+        frame answers exactly what it applied -- no more, and never something whose
+        intent is still sitting in the queue.
         """
         clock = _clock(now)
         snap = self._snapshot
+        out: list[Effect] = []
         for intent in intents:
-            snap = _apply(snap, intent, clock)
+            snap, effects = _apply(snap, intent, clock)
+            out.extend(effects)
         self._snapshot = snap
+        return tuple(out)
 
 
 def _clock(now: float | None) -> float:
@@ -108,14 +136,23 @@ def _clock(now: float | None) -> float:
     return time.monotonic() if now is None else now
 
 
-def _apply(snap: Snapshot, intent: Intent, now: float) -> Snapshot:
+def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[Effect, ...]]:
     """
-    Pure: old snapshot plus intent and an instant gives new snapshot.
+    Pure: old snapshot plus intent and an instant gives new snapshot, and whatever
+    the shell has to be told about it.
 
     A free function rather than a method so it can be exercised without a Store, and
     so the match below is the single audit point for every mutation in the system.
+
+    Most intents answer nobody and return no effects. The two that do -- a claim and
+    an inbox read -- are questions from an agent parked on a future, and a reducer
+    that could only return the next world would have to hide the reply inside it.
+    See ``effects.py`` for why that was worth widening the signature over.
     """
     nodes = dict(snap.nodes)
+    concerns = dict(snap.concerns)
+    tasks = dict(snap.tasks)
+    effects: tuple[Effect, ...] = ()
     reorder = False
 
     match intent:
@@ -144,7 +181,7 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> Snapshot:
         case StateChanged():
             rec = nodes.get(intent.node_id)
             if rec is None:
-                return snap
+                return snap, ()
             changes: dict[str, object] = {"state": intent.state}
             if intent.topic is not None:
                 changes["topic"] = intent.topic
@@ -167,7 +204,7 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> Snapshot:
         case SubagentProgress():
             rec = nodes.get(intent.node_id)
             if rec is None:
-                return snap
+                return snap, ()
             # Progress implies the sub-agent is working, which is the only signal
             # there is: sub-agent content does not stream (§2.5.1), so without this
             # the row would sit at SPAWNING until it finished.
@@ -186,19 +223,19 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> Snapshot:
         case TopicChanged():
             rec = nodes.get(intent.node_id)
             if rec is None:
-                return snap
+                return snap, ()
             nodes[intent.node_id] = rec.with_(topic=intent.topic)
 
         case UsageAccrued():
             rec = nodes.get(intent.node_id)
             if rec is None:
-                return snap
+                return snap, ()
             nodes[intent.node_id] = rec.with_(usage=rec.usage.plus(intent.delta))
 
         case ContextPolled():
             rec = nodes.get(intent.node_id)
             if rec is None:
-                return snap
+                return snap, ()
             # A poll reports occupancy; it knows nothing about compaction history.
             # Carrying the previous counts forward is what keeps COMPACTED sticky --
             # letting a fresh poll reset them would erase the strongest retire signal
@@ -216,7 +253,7 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> Snapshot:
                 # Dropping the event loses the count; that is preferable to
                 # fabricating a ContextSnapshot whose token numbers would be
                 # invented. The next poll establishes the baseline.
-                return snap
+                return snap, ()
             nodes[intent.node_id] = rec.with_(
                 context=rec.context.with_compaction_history(rec.context.compactions + 1, intent.at)
             )
@@ -265,7 +302,7 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> Snapshot:
             if rec is None or rec.pending_by_id(intent.pending_id) is None:
                 # Unknown or already settled: a double click, or a decision for an
                 # approval that has since been cancelled. Both are normal.
-                return snap
+                return snap, ()
             remaining = tuple(p for p in rec.pending if p.id != intent.pending_id)
             # Still parked if other calls from the same turn are outstanding. Moving
             # to RUNNING_TOOL here would hide them and re-create the bug this tuple
@@ -279,7 +316,7 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> Snapshot:
         case AgentFinished():
             rec = nodes.get(intent.node_id)
             if rec is None:
-                return snap
+                return snap, ()
             nodes[intent.node_id] = rec.with_(
                 state=intent.state,
                 ended_at=intent.ended_at,
@@ -290,15 +327,108 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> Snapshot:
         case FailureAcknowledged():
             rec = nodes.get(intent.node_id)
             if rec is None:
-                return snap
+                return snap, ()
             nodes[intent.node_id] = rec.with_(acknowledged=True)
+
+        case AgentResumed():
+            rec = nodes.get(intent.node_id)
+            if rec is None:
+                # A resume for a node we never had. Dropped rather than fabricated:
+                # unlike ApprovalRequested, which invents a placeholder because an
+                # orphaned approval hangs an agent, a resume carries no obligation
+                # and a record built from it would have no history, no transcript
+                # and a made-up parent.
+                return snap, ()
+            nodes[intent.node_id] = rec.with_(
+                state=AgentState.THINKING,
+                topic=intent.topic,
+                # Only the liveness fields move. transcript, usage, started_at,
+                # parent and depth are deliberately untouched -- rebuilding them is
+                # exactly the defect this arm exists to prevent.
+                ended_at=None,
+                # A stale error on a node that is running again reads as a live
+                # failure, and would keep it in needs_you as an unacknowledged one.
+                error=None,
+                acknowledged=False,
+            )
 
         case AgentRemoved():
             if intent.node_id not in nodes:
-                return snap
+                return snap, ()
             for nid in _subtree(snap, intent.node_id):
                 nodes.pop(nid, None)
             reorder = True
+
+        case ConcernPosted():
+            # Filed even when the recipient is unknown to the store. A concern
+            # addressed to a node that has not spawned yet is a real ordering, and
+            # dropping it here would lose the operator's only view of a message the
+            # sender believes it sent.
+            if intent.concern.id not in concerns:
+                concerns[intent.concern.id] = intent.concern
+
+        case InboxRead():
+            # Read from the pre-apply view, then mark. Withdrawn and
+            # already-delivered concerns are excluded by inbox_of, so a second read
+            # hands back nothing rather than re-delivering.
+            waiting = snap.inbox_of(intent.node_id)
+            for posted in waiting:
+                concerns[posted.id] = dataclasses.replace(
+                    posted, state=ConcernState.DELIVERED, delivered_at=intent.at
+                )
+            # The delivered forms, not the posted ones: an operator may have edited
+            # a body in flight, and the effect must carry what was actually handed
+            # over or the transcript and the store will disagree about it.
+            effects = (
+                InboxDelivered(
+                    request_id=intent.request_id,
+                    concerns=tuple(concerns[posted.id] for posted in waiting),
+                ),
+            )
+
+        case ConcernEdited():
+            c = concerns.get(intent.concern_id)
+            if c is not None and c.state is ConcernState.POSTED:
+                concerns[intent.concern_id] = dataclasses.replace(c, body=intent.body, edited=True)
+
+        case ConcernWithdrawn():
+            c = concerns.get(intent.concern_id)
+            if c is not None and c.state is ConcernState.POSTED:
+                concerns[intent.concern_id] = dataclasses.replace(c, state=ConcernState.WITHDRAWN)
+
+        case TaskDeclared():
+            # Re-declaring an existing id is ignored rather than merged: the only
+            # way it happens is a retry, and overwriting would silently unclaim
+            # work somebody is doing.
+            if intent.task.id not in tasks and not _would_cycle(tasks, intent.task):
+                tasks[intent.task.id] = intent.task
+
+        case TaskClaimRequested():
+            won = _pick_claim(tasks, intent.task_id)
+            if won is not None:
+                won = dataclasses.replace(won, state=TaskState.CLAIMED, claimed_by=intent.node_id)
+                tasks[won.id] = won
+            # Emitted on both outcomes. A claim that found nothing must still be
+            # answered, or the asking agent stays parked on a future forever over
+            # an empty board -- which is the failure the whole effect channel
+            # exists to make unstateable.
+            effects = (ClaimSettled(request_id=intent.request_id, task=won),)
+
+        case TaskCompleted():
+            t = tasks.get(intent.task_id)
+            # Guarded on the claimer so a stale completion from a worker that
+            # released the task cannot finish it out from under its new owner.
+            if t is not None and t.state is TaskState.CLAIMED and t.claimed_by == intent.node_id:
+                tasks[intent.task_id] = dataclasses.replace(
+                    t, state=TaskState.COMPLETED, completed_at=intent.at
+                )
+
+        case TaskReleased():
+            t = tasks.get(intent.task_id)
+            if t is not None and t.state is TaskState.CLAIMED and t.claimed_by == intent.node_id:
+                tasks[intent.task_id] = dataclasses.replace(
+                    t, state=TaskState.PENDING, claimed_by=None
+                )
 
         case _:
             # Not reachable at runtime; it is here for mypy, which reports an
@@ -315,20 +445,74 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> Snapshot:
     # every sync bug in this codebase's history: a fact maintained in several places
     # by convention. Comparing before and after cannot be forgotten by an arm that
     # has not been written yet.
-    touched = nodes.get(intent.node_id)
-    if touched is not None:
-        was = snap.nodes.get(intent.node_id)
+    # Guarded on None because the bus intents include operator actions, which name
+    # no node. The guard lives here rather than in each new arm for the same reason
+    # the stamp does: an arm that has not been written yet cannot forget it.
+    node_id = intent.node_id
+    touched = nodes.get(node_id) if node_id is not None else None
+    if touched is not None and node_id is not None:
+        was = snap.nodes.get(node_id)
         if was is None or was.state is not touched.state:
-            nodes[intent.node_id] = touched.with_(state_since=now)
+            nodes[node_id] = touched.with_(state_since=now)
 
     order = _preorder(nodes) if reorder else snap.order
-    return Snapshot(
-        seq=snap.seq + 1,
-        nodes=MappingProxyType(nodes),
-        order=order,
-        needs_you=_needs_you(nodes, order),
-        any_active=any(r.state.is_active for r in nodes.values()),
+    return (
+        Snapshot(
+            seq=snap.seq + 1,
+            nodes=MappingProxyType(nodes),
+            order=order,
+            needs_you=_needs_you(nodes, order),
+            any_active=any(r.state.is_active for r in nodes.values()),
+            concerns=MappingProxyType(concerns),
+            tasks=MappingProxyType(tasks),
+        ),
+        effects,
     )
+
+
+def _pick_claim(tasks: dict[TaskId, Task], task_id: TaskId | None) -> Task | None:
+    """
+    The task this claim wins, or None.
+
+    Serialization is what makes this safe, and it is the store's confinement to one
+    thread that provides it -- not a lock, and not the file lock agent teams needs
+    for the same job across processes. Two workers racing for the last task are two
+    intents in a queue, and the second one reads the first one's result.
+    """
+    if task_id is not None:
+        t = tasks.get(task_id)
+        return t if t is not None and t.is_claimable(tasks) else None
+    claimable = [t for t in tasks.values() if t.is_claimable(tasks)]
+    # Oldest first, so a self-claiming pool drains the board in declaration order
+    # rather than in dict order, which would be arbitrary but reproducible -- the
+    # worst kind, because it looks deliberate.
+    return min(claimable, key=lambda t: (t.declared_at, t.id)) if claimable else None
+
+
+def _would_cycle(tasks: dict[TaskId, Task], new: Task) -> bool:
+    """
+    Would admitting ``new`` make some task permanently unclaimable?
+
+    Checked at declare time because the symptom is otherwise invisible and awful to
+    diagnose: every task in the cycle is unclaimable forever, so workers idle while
+    the board plainly shows outstanding work. Dependencies point at prerequisites,
+    so a cycle exists iff ``new`` is reachable from one of its own.
+    """
+    if new.id in new.depends_on:
+        return True
+    frontier = list(new.depends_on)
+    seen: set[TaskId] = set()
+    while frontier:
+        current = frontier.pop()
+        if current == new.id:
+            return True
+        if current in seen:
+            continue
+        seen.add(current)
+        existing = tasks.get(current)
+        if existing is not None:
+            frontier.extend(existing.depends_on)
+    return False
 
 
 def _subtree(snap: Snapshot, root: NodeId) -> tuple[NodeId, ...]:

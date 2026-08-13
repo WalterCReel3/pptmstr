@@ -399,6 +399,118 @@ class AgentRecord:
         return dataclasses.replace(self, **changes)
 
 
+ConcernId = str
+TaskId = str
+
+
+def _empty_map() -> Mapping[Any, Any]:
+    return MappingProxyType({})
+
+
+class ConcernState(enum.Enum):
+    """
+    Where a concern is between one agent posting it and another reading it.
+
+    WITHDRAWN is terminal and reachable only from POSTED: once a concern has been
+    delivered, the recipient has seen it, and pretending otherwise would make the
+    store disagree with a transcript that already contains it.
+    """
+
+    POSTED = "posted"
+    DELIVERED = "delivered"
+    WITHDRAWN = "withdrawn"
+
+
+@dataclass(frozen=True, slots=True)
+class Concern:
+    """
+    One agent's message to another, as a store object rather than text in transit.
+
+    ``sender`` is stamped by the approval gate from the ``agent_id`` on the hook
+    input, never taken from the tool's arguments. An in-process MCP handler is told
+    only the tool name and its arguments -- no session, no agent, no tool-use id --
+    so a sender the model wrote is a sender the model chose, and a worker posting
+    as the lead would be an ordinary consequence of asking a model to fill a field
+    rather than anything exotic. The gate is the only participant that knows who
+    called, which makes it the authentication layer and not merely a policy one.
+
+    ``body`` is the text as it will be delivered, which is not necessarily the text
+    that was posted -- ``edited`` records that the operator changed it in flight.
+    That capability is the reason this is a record at all: a concern that could
+    only be allowed or denied would not need to exist outside the transcript.
+    """
+
+    id: ConcernId
+    sender: NodeId
+    recipient: NodeId
+    subject: str
+    body: str
+    posted_at: float
+    state: ConcernState = ConcernState.POSTED
+    edited: bool = False
+    delivered_at: float | None = None
+
+
+class TaskState(enum.Enum):
+    """
+    Deliberately without a BLOCKED member.
+
+    Blocked-ness is a function of the dependency graph and is derived on read (see
+    ``Task.is_claimable``). Storing it would be a second fact about the same thing,
+    kept true by whoever remembers to update it on every completion -- which is the
+    shape of the defect ``needs_you`` exists to fix, one layer down.
+
+    Three states, all reachable: a released task returns to PENDING rather than
+    reaching a terminal "abandoned". A task still CLAIMED by a node that has since
+    died is a real condition and a derived one -- the claimer's state is already in
+    the same snapshot -- so it belongs in a projection when there is a pane to show
+    it in, not in a fourth member here that nothing sets.
+    """
+
+    PENDING = "pending"
+    CLAIMED = "claimed"
+    COMPLETED = "completed"
+
+
+@dataclass(frozen=True, slots=True)
+class Task:
+    """
+    A unit of work an agent can claim.
+
+    Carries no trace of the request that claimed it. An earlier draft put the
+    winning ``claim_id`` here so the UI thread could find its own answer by
+    scanning, which made a correlation token part of the domain and obliged
+    ``TaskReleased`` to clear it -- miss that and a later claim reusing the id gets
+    answered by a stale record. The reducer emits an ``Effect`` instead
+    (``effects.py``), so the answer travels as a value and the record stays about
+    the work.
+    """
+
+    id: TaskId
+    title: str
+    detail: str = ""
+    depends_on: tuple[TaskId, ...] = ()
+    claimed_by: NodeId | None = None
+    state: TaskState = TaskState.PENDING
+    declared_at: float = 0.0
+    completed_at: float | None = None
+
+    def is_claimable(self, tasks: Mapping[TaskId, Task]) -> bool:
+        """
+        Pending, and every dependency completed.
+
+        A dependency that does not exist counts as unsatisfied rather than as
+        absent. Declaring a task against a typo'd id should leave it unclaimable
+        and visibly so, not silently ready.
+        """
+        if self.state is not TaskState.PENDING:
+            return False
+        return all(
+            (dep := tasks.get(d)) is not None and dep.state is TaskState.COMPLETED
+            for d in self.depends_on
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class Snapshot:
     """
@@ -430,6 +542,16 @@ class Snapshot:
     needs_you: tuple[Obligation, ...]
     any_active: bool
 
+    # The two cross-agent projections (§2.7). Top-level rather than hung off
+    # AgentRecord: a concern has two nodes and a task has none until it is claimed,
+    # so either would have to be stored twice and kept in agreement.
+    #
+    # default_factory, not a bare MappingProxyType({}): dataclasses reject an
+    # unhashable default outright, and the shared instance a naive default would
+    # give every Snapshot is the thing that rule exists to prevent.
+    concerns: Mapping[ConcernId, Concern] = field(default_factory=_empty_map)
+    tasks: Mapping[TaskId, Task] = field(default_factory=_empty_map)
+
     @staticmethod
     def empty() -> Snapshot:
         return Snapshot(
@@ -438,6 +560,39 @@ class Snapshot:
             order=(),
             needs_you=(),
             any_active=False,
+            concerns=MappingProxyType({}),
+            tasks=MappingProxyType({}),
+        )
+
+    def inbox_of(self, node: NodeId) -> tuple[Concern, ...]:
+        """
+        Everything posted to ``node`` and not yet delivered or withdrawn, oldest
+        first -- the order a recipient should work them in.
+        """
+        return tuple(
+            sorted(
+                (
+                    c
+                    for c in self.concerns.values()
+                    if c.recipient == node and c.state is ConcernState.POSTED
+                ),
+                key=lambda c: c.posted_at,
+            )
+        )
+
+    def claimable_tasks(self) -> tuple[Task, ...]:
+        """
+        Every task a worker could take right now, oldest first.
+
+        Derived on each call rather than cached on the snapshot: it is read when an
+        agent claims, which is rare, and a cached copy would be one more thing that
+        can disagree with the graph it summarises.
+        """
+        return tuple(
+            sorted(
+                (t for t in self.tasks.values() if t.is_claimable(self.tasks)),
+                key=lambda t: t.declared_at,
+            )
         )
 
     @property

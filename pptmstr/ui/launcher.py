@@ -26,6 +26,7 @@ from dataclasses import dataclass
 
 from imgui_bundle import imgui
 
+from .. import templates
 from ..theme import P
 from . import widgets
 
@@ -61,6 +62,9 @@ class LauncherState:
     task: str = ""
     cwd: str = "."
     model_index: int = 0
+    # Index into templates.names(). "solo" is first and is the default, so the
+    # launcher behaves exactly as it did before teams existed unless asked otherwise.
+    template_index: int = 0
     # True from the frame the modal is drawn until the frame it stops being drawn.
     # Read by the global key handler, which runs before any drawing and therefore
     # sees the previous frame's value -- which is the correct one, because the key
@@ -78,12 +82,16 @@ class LauncherState:
     def ready(self) -> bool:
         return bool(self.task.strip())
 
-    def spec(self) -> tuple[str, str, str]:
-        """The launch arguments: task, model, cwd. Empty cwd means the repo root."""
+    def spec(self) -> tuple[str, str, str, str]:
+        """
+        The launch arguments: task, model, cwd, template. Empty cwd means the repo
+        root.
+        """
         return (
             self.task.strip(),
             MODELS[self.model_index],
             self.cwd.strip() or ".",
+            templates.names()[self.template_index],
         )
 
 
@@ -110,7 +118,7 @@ def draw(
     running: int,
     queued: int,
     cap: int,
-    launch: Callable[[str, str, str], None],
+    launch: Callable[[str, str, str, str], None],
     wrap: bool,
 ) -> None:
     """
@@ -178,6 +186,11 @@ def draw(
     imgui.spacing()
     imgui.set_next_item_width(240.0)
     _, state.model_index = imgui.combo("model", state.model_index, list(MODELS))
+    _, state.template_index = imgui.combo("team", state.template_index, list(templates.names()))
+    # The shape is not obvious from a one-word name, and picking the wrong one is
+    # only visible several turns later when workers start appearing -- so the
+    # description is on screen rather than a tooltip away.
+    imgui.text_disabled(templates.BUILT_IN[state.template_index].description)
 
     imgui.spacing()
     imgui.separator()

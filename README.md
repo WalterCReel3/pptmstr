@@ -45,7 +45,7 @@ Early. Following the build order in [orchestrator-design.md](orchestrator-design
 | 5 | Idling | **done, measured** |
 | 6 | Concurrency, sub-agent tree, review queue, batching | **done, tested** |
 | 7 | Transcript pane | **done, tested** |
-| 8 | Work templates + inter-agent message bus | not started (design rev. 4, §2.7) |
+| 8 | Work templates + inter-agent message bus | **done, tested, verified live** |
 
 ## Getting started
 
@@ -96,6 +96,34 @@ Sub-agents appear inside their session's card in the fleet rail, and a tool call
 *inside* a sub-agent parks against that sub-agent rather than its parent. Concurrency
 is bounded by `concurrency_cap`; over-cap sessions queue rather than being refused,
 and the pool is shown in the status bar.
+
+## Teams
+
+A session can run as a **team**: a lead plus named worker roles, chosen in the
+launcher or with `--template`. `solo` is the default and behaves exactly as a
+session did before teams existed.
+
+| | |
+|---|---|
+| `solo` | one agent, no team |
+| `feature` | lead plans, `builder` implements, read-only `reviewer` attacks it |
+| `research` | coordinator frames, `investigator` builds the case, `skeptic` refutes it |
+
+Agents coordinate over an **in-process message bus** rather than the harness's own
+channel, because that is what makes a message reviewable: `post_concern` parks in
+the review queue like any write, so a concern can be read, rejected with a reason,
+or edited before it is delivered. A shared task board carries dependency edges —
+blocked work becomes claimable the moment its dependencies complete, and workers
+claim rather than being assigned.
+
+The sender on a concern is **stamped by the approval gate**, never taken from the
+tool's arguments. An in-process MCP handler is told only the tool name and its
+arguments — no session, no agent — so a sender the model wrote would be a sender the
+model chose. The gate is the only participant that knows, which makes it the bus's
+authentication layer as well as its review point.
+
+Review roles are given read-only tools on purpose. A reviewer that can quietly fix
+what it was asked to find stops reporting it.
 
 `bootstrap.sh` never installs system packages. If something system-level is
 missing it prints the exact command and stops.

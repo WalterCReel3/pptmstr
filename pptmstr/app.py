@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from imgui_bundle import hello_imgui, imgui, immapp
 
 from . import settings as settings_mod
-from . import theme
+from . import templates, theme
 from .bridge import Bridge
 from .driver import AgentSession
 from .fake_driver import FakeDriver
@@ -73,6 +73,9 @@ class AppState:
     # None while they agree. See _check_for_lost_approvals.
     lost_since: float | None = None
     lost_reported: bool = False
+    # Same idea for the bus's crossing. See _check_for_stranded_requests.
+    stranded_since: float | None = None
+    stranded_reported: bool = False
     driver: FakeDriver | None = None
     pool: SessionPool | None = None
     # Layout asked for on the command line, applied once the runner is up.
@@ -98,7 +101,13 @@ def begin_frame(state: AppState) -> None:
         state.pending_layout = None
     # One clock for the whole batch, the same one the frame is built against, so a
     # node's state_since and the wait times drawn from it agree to the frame.
-    state.store.apply_all(state.bridge.drain(), now=state.frame_now)
+    effects = state.store.apply_all(state.bridge.drain(), now=state.frame_now)
+    # Answered here, in the same breath as the apply that produced them. Every
+    # effect corresponds to an intent this batch applied, so nothing is replied to
+    # speculatively and nothing survives the frame -- which is what keeps a bus
+    # request from becoming a second kind of lost approval.
+    for effect in effects:
+        state.bridge.settle(effect)
     state.frame_snap = state.store.snapshot()
     state.transcripts.prune(state.frame)
     # Before anything draws, so no pane can render a cursor pointing at an
@@ -109,6 +118,7 @@ def begin_frame(state: AppState) -> None:
     review.handle_keys(state.frame_snap, state.focus, state.review, state.bridge)
     _handle_layout_keys(state)
     _check_for_lost_approvals(state)
+    _check_for_stranded_requests(state)
 
 
 def _handle_layout_keys(state: AppState) -> None:
@@ -181,6 +191,45 @@ def guarded(name: str, draw: Callable[[], None]) -> Callable[[], None]:
 # than the ordinary lag between a gate parking and the UI applying its intent.
 _LOST_APPROVAL_GRACE_S = 3.0
 
+# A bus request is answered by the frame that applies its intent, so it should be
+# outstanding for a fraction of one frame. This is generous by three orders of
+# magnitude on purpose: it is a wedge detector, not a latency budget.
+_STRANDED_REQUEST_GRACE_S = 5.0
+
+
+def _check_for_stranded_requests(state: AppState) -> None:
+    """
+    A bus request that outlives several frames was dropped.
+
+    Unlike a parked approval, this has no surface at all -- an agent awaiting
+    ``claim_task`` is not an obligation and appears nowhere in ``needs_you``, by
+    design. So there is nothing on screen that would look wrong.
+
+    Worth a watchdog because the store commits the domain change at *apply* time
+    while the answer travels separately: a lost effect leaves the board reading
+    "claimed" while the agent that claimed it was eventually told, at shutdown,
+    that there was nothing to claim. The two disagree and neither side complains.
+
+    Found by the `research` template reviewing this codebase, which is the first
+    thing the team feature has been used for.
+    """
+    outstanding = state.bridge.asking_count
+    if outstanding == 0:
+        state.stranded_since = None
+        state.stranded_reported = False
+        return
+    if state.stranded_since is None:
+        state.stranded_since = state.frame_now
+        return
+    waited = state.frame_now - state.stranded_since
+    if waited >= _STRANDED_REQUEST_GRACE_S and not state.stranded_reported:
+        state.stranded_reported = True
+        LOG.error(
+            "bus",
+            f"{outstanding} bus request(s) unanswered for {waited:.0f}s - "
+            "an agent is blocked on a reply the frame loop never settled",
+        )
+
 
 def _check_for_lost_approvals(state: AppState) -> None:
     """
@@ -249,17 +298,21 @@ def _apply_theme_if_dirty(state: AppState) -> None:
     state.theme_dirty = False
 
 
-def _launch(state: AppState, task: str, model: str, cwd: str) -> None:
+def _launch(state: AppState, task: str, model: str, cwd: str, template: str = "solo") -> None:
     """Start a session. Safe from the UI thread; the pool is touched on the loop."""
     pool = state.pool
     if pool is None:
         return
+    # An unknown name falls back to solo rather than refusing the launch: the task
+    # the operator typed is worth more than the team shape they mistyped, and the
+    # log line says which one ran.
+    shape = templates.by_name(template) or templates.SOLO
 
     async def go() -> None:
-        pool.submit(AgentSession(state.bridge, task, model=model, cwd=cwd))
+        pool.submit(AgentSession(state.bridge, task, model=model, cwd=cwd, template=shape))
 
     state.bridge.submit(go())
-    LOG.info("app", f"launched in {cwd}: {task[:60]}")
+    LOG.info("app", f"launched in {cwd} as {shape.name}: {task[:60]}")
 
 
 def _session_action(state: AppState, coro_factory: Callable[[SessionPool], object]) -> None:
@@ -527,7 +580,7 @@ def _draw_overlays(state: AppState) -> None:
         running=pool.running_count,
         queued=pool.queued_count,
         cap=pool.cap,
-        launch=lambda task, model, cwd: _launch(state, task, model, cwd),
+        launch=lambda task, model, cwd, team: _launch(state, task, model, cwd, team),
         wrap=state.settings.wrap_inputs,
     )
 
@@ -626,6 +679,12 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--model", default=None, help="model for --task")
     ap.add_argument("--cap", type=int, default=None, help="max concurrent sessions")
     ap.add_argument("--cwd", default=".", help="working directory for --task sessions")
+    ap.add_argument(
+        "--template",
+        default="solo",
+        choices=templates.names(),
+        help="team shape for --task sessions",
+    )
     ap.add_argument("--fps-idle", type=float, default=None)
     ap.add_argument(
         "--layout",
@@ -712,7 +771,13 @@ def main(argv: list[str] | None = None) -> int:
             # Submitting from the loop thread keeps every mutation of the pool on
             # one thread, so it needs no lock of its own.
             for task_text in args.task:
-                _launch(state, task_text, args.model or launcher.MODELS[0], args.cwd)
+                _launch(
+                    state,
+                    task_text,
+                    args.model or launcher.MODELS[0],
+                    args.cwd,
+                    args.template,
+                )
 
         state.bridge.submit(launch_initial())
         LOG.info("app", f"{len(args.task)} task(s), cap {state.settings.concurrency_cap}")

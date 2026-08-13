@@ -30,6 +30,7 @@ from collections.abc import Coroutine, Mapping
 from dataclasses import dataclass
 from typing import Any, TypeVar
 
+from .effects import Effect
 from .intents import Intent
 
 T = TypeVar("T")
@@ -64,6 +65,10 @@ class Bridge:
         # operator decides -- genuinely shared, so genuinely locked.
         self._pending_lock = threading.Lock()
         self._pending: dict[str, asyncio.Future[Decision]] = {}
+        # Bus requests: the future to complete, and the answer to release it with
+        # if the store never gets the chance to. Same sharing, same locking.
+        self._requests_lock = threading.Lock()
+        self._requests: dict[str, tuple[asyncio.Future[Effect], Effect]] = {}
 
     # -- lifecycle ---------------------------------------------------------------
 
@@ -109,9 +114,13 @@ class Bridge:
         loop, thread = self._loop, self._thread
         if loop is None or thread is None:
             return
-        # Fail every parked approval before the loop dies. Without this, an agent
-        # awaiting a decision at shutdown leaves a future nobody will ever complete.
+        # Release everything parked before the loop dies. Without this, an agent
+        # awaiting a decision at shutdown leaves a future nobody will ever complete
+        # -- and an agent awaiting an inbox read is in exactly the same position,
+        # so both tables are drained here rather than only the one that predates
+        # the bus.
         self.fail_all_pending("shutting down")
+        self.abandon_all_requests()
         try:
             asyncio.run_coroutine_threadsafe(_drain_tasks(grace), loop).result(timeout=grace + 1.0)
         except (concurrent.futures.TimeoutError, RuntimeError, concurrent.futures.CancelledError):
@@ -209,6 +218,75 @@ class Bridge:
         self.loop.call_soon_threadsafe(_settle, fut, decision)
         return True
 
+    # -- bus plumbing ------------------------------------------------------------
+    #
+    # A third crossing, and the one that is easiest to mistake for the second. An
+    # approval is parked on a *person* and may wait hours (I8); a bus request is
+    # parked on the *frame* and is answered by the store as a matter of course.
+    # They are kept apart because merging them would put bus traffic in the count
+    # the lost-approval watchdog reads, and "17 things await your review" would
+    # start including questions nobody was ever going to be asked.
+
+    def ask(self, request_id: str, on_abandon: Effect) -> asyncio.Future[Effect]:
+        """
+        Register a future for a bus request. Called from the asyncio thread.
+
+        Must be called *before* the matching intent is emitted. Reversed, the UI
+        thread can apply the intent and settle an answer that has nowhere to go,
+        and the agent waits forever on a future registered a moment too late.
+
+        ``on_abandon`` is the answer to give if the request is never applied --
+        shutdown, mainly. It is supplied here rather than invented at teardown
+        because only the caller knows which effect shape it is waiting for, and an
+        agent released with the wrong one would crash rather than wind down.
+        """
+        fut: asyncio.Future[Effect] = self.loop.create_future()
+        with self._requests_lock:
+            self._requests[request_id] = (fut, on_abandon)
+        return fut
+
+    def settle(self, effect: Effect) -> bool:
+        """
+        Deliver an effect to whoever asked for it. Called from the UI thread.
+
+        False means nobody was waiting: an effect for a request that has already
+        been abandoned at shutdown, or one produced by an intent the store applied
+        on its own behalf. Neither is an error.
+        """
+        with self._requests_lock:
+            entry = self._requests.pop(effect.request_id, None)
+        if entry is None:
+            return False
+        self.loop.call_soon_threadsafe(_settle_effect, entry[0], effect)
+        return True
+
+    def abandon_all_requests(self) -> None:
+        """
+        Answer every outstanding bus request with its caller's fallback.
+
+        The counterpart to ``fail_all_pending``: an agent parked on an inbox read
+        holds the window open at teardown exactly as one parked on an approval does.
+        """
+        with self._requests_lock:
+            entries = list(self._requests.values())
+            self._requests.clear()
+        loop = self._loop
+        if loop is None:
+            return
+        for fut, fallback in entries:
+            with contextlib.suppress(RuntimeError):
+                loop.call_soon_threadsafe(_settle_effect, fut, fallback)
+
+    @property
+    def asking_count(self) -> int:
+        """
+        Outstanding bus requests. Deliberately not folded into ``parked_count``:
+        the watchdog that reads that number is looking for approvals the operator
+        cannot reach, and a bus request is not one.
+        """
+        with self._requests_lock:
+            return len(self._requests)
+
     def fail_all_pending(self, reason: str) -> None:
         """Reject every parked approval. Used on shutdown so no agent hangs."""
         with self._pending_lock:
@@ -230,6 +308,11 @@ class Bridge:
 def _settle(fut: asyncio.Future[Decision], decision: Decision) -> None:
     if not fut.done():
         fut.set_result(decision)
+
+
+def _settle_effect(fut: asyncio.Future[Effect], effect: Effect) -> None:
+    if not fut.done():
+        fut.set_result(effect)
 
 
 async def _drain_tasks(grace: float) -> None:
