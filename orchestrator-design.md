@@ -170,6 +170,37 @@ wrong for a node whose siblings still hold its name. An agent stopped via the SD
 `stop_task` is exempt — the send is refused rather than delivered — while one stopped
 by the model's own `TaskStop` still wakes.
 
+> **Measured, and it arrives as a second `SubagentStart`** (`scripts/verify_wake_path.py`,
+> CLI 2.1.226). The resume reports through the *same hook as a spawn*, carrying the
+> agent's original `agent_id` — observed 7s after that agent's own `task_notification:
+> completed`, with a matching second terminal notification for the same `task_id` when
+> it finished again. `SendMessage` returned
+> `{"success": true, "message": "…had no active task; resumed from transcript in the
+> background…", "resumedAgentId": …}`.
+>
+> **So the hook is ambiguous and the store must disambiguate it.** Emitting
+> `AgentSpawned` on the second start rebuilds the record: usage zeroed, `started_at`
+> reset, `ended_at` cleared *and the `Transcript` object replaced* — which orphans the
+> `(buffer, length_at_snapshot)` handle every reader holds under I7, leaving panes
+> following that node reading a buffer nothing writes to. This was a live defect
+> reachable without any of §2.7 being built, because a lead already has `SendMessage`
+> and already receives sub-agent IDs from background spawn results.
+>
+> The fix is a distinct `AgentResumed` intent: only the liveness fields move
+> (`state → THINKING`, `ended_at → None`, `error → None`), while `transcript`, `usage`,
+> `started_at`, `parent` and `depth` are untouched. The driver tells the two apart by
+> membership of the set it already keeps of sub-agent IDs it has seen.
+
+**Addressing is by agent ID, and a sibling cannot obtain one (rev. 4, measured).**
+`SendMessage` refuses a `subagent_type` — *"No agent named 'alpha' is reachable.
+Check the spelling, or use the agent ID from a background agent's spawn result."*
+The ID appears in the **lead's** context, never in a sibling's, so worker-to-worker
+messaging only happens if the orchestrator plumbs the ID into the worker's prompt
+(via `updatedInput` on the `Agent` call, which is how the probe achieved a delivery).
+That materially weakens the case for `SendMessage` as the channel the model routes
+over *without us*: it cannot address anyone we have not already addressed for it.
+The bus of §2.7 has no such problem, since it routes on `NodeId` (I6).
+
 ### 2.4 Usage, and context as a *health* signal
 
 Two different things get conflated under "budget," and this design keeps them apart

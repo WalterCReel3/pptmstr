@@ -59,7 +59,23 @@ def test_ready_ignores_whitespace_only_drafts(task: str, ready: bool) -> None:
 
 def test_spec_strips_task_and_resolves_model() -> None:
     state = LauncherState(task="  audit the parser  ", cwd="/tmp/x", model_index=1)
-    assert state.spec() == ("audit the parser", MODELS[1], "/tmp/x")
+    assert state.spec() == ("audit the parser", MODELS[1], "/tmp/x", "solo")
+
+
+def test_spec_defaults_to_a_lone_agent() -> None:
+    """
+    Index 0 is "solo". Teams are opt-in: launching without choosing one must behave
+    exactly as it did before templates existed, or every existing habit changes
+    meaning at once.
+    """
+    assert LauncherState(task="x").spec()[3] == "solo"
+
+
+def test_spec_carries_the_chosen_team() -> None:
+    from pptmstr import templates
+
+    state = LauncherState(task="x", template_index=templates.names().index("feature"))
+    assert state.spec()[3] == "feature"
 
 
 def test_spec_defaults_blank_cwd_to_repo_root() -> None:

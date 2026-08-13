@@ -558,3 +558,355 @@ def test_subagent_usage_is_billed_to_the_subagent() -> None:
         )
     )
     assert next(i for i in intents if isinstance(i, UsageAccrued)).node_id == SUB
+
+
+# -- the wake path (§2.3) ---------------------------------------------------------
+
+
+def _start_hook_input(agent_id: str, agent_type: str = "alpha") -> dict[str, object]:
+    return {
+        "hook_event_name": "SubagentStart",
+        "agent_id": agent_id,
+        "agent_type": agent_type,
+        "session_id": "sess-1",
+        "cwd": "/tmp",
+        "transcript_path": "/tmp/t.jsonl",
+    }
+
+
+async def _fire_start(session, agent_id: str) -> None:
+    await session._subagent_start(_start_hook_input(agent_id), None, None)  # type: ignore[arg-type]
+
+
+def test_the_first_subagent_start_is_a_spawn() -> None:
+    import asyncio
+
+    from pptmstr.bridge import Bridge
+    from pptmstr.driver import AgentSession
+    from pptmstr.intents import AgentSpawned
+
+    bridge = Bridge()
+    session = AgentSession(bridge, task="lead")
+    asyncio.run(_fire_start(session, "a9b0425f9b92a889e"))
+
+    (intent,) = bridge.drain()
+    assert isinstance(intent, AgentSpawned)
+    assert intent.node_id == (session.session_id, "a9b0425f9b92a889e")
+
+
+def test_a_second_start_for_the_same_agent_is_a_resume() -> None:
+    """
+    Measured behaviour, not a hypothetical: verify_wake_path.py saw SubagentStart
+    fire again for agent_id a9b0425f9b92a889e seven seconds after that agent's own
+    completion notification, because a sibling had messaged it.
+
+    Emitting AgentSpawned twice rebuilds the record -- zeroing usage, resetting
+    started_at, and swapping the Transcript the UI reads against (I7).
+    """
+    import asyncio
+
+    from pptmstr.bridge import Bridge
+    from pptmstr.driver import AgentSession
+    from pptmstr.intents import AgentResumed, AgentSpawned
+
+    bridge = Bridge()
+    session = AgentSession(bridge, task="lead")
+
+    async def both() -> None:
+        await _fire_start(session, "a9b0425f9b92a889e")
+        await _fire_start(session, "a9b0425f9b92a889e")
+
+    asyncio.run(both())
+
+    first, second = bridge.drain()
+    assert isinstance(first, AgentSpawned)
+    assert isinstance(second, AgentResumed)
+    assert second.node_id == first.node_id
+
+
+def test_a_different_agent_still_spawns_after_a_resume() -> None:
+    import asyncio
+
+    from pptmstr.bridge import Bridge
+    from pptmstr.driver import AgentSession
+    from pptmstr.intents import AgentResumed, AgentSpawned
+
+    bridge = Bridge()
+    session = AgentSession(bridge, task="lead")
+
+    async def three() -> None:
+        await _fire_start(session, "alpha-id")
+        await _fire_start(session, "alpha-id")
+        await _fire_start(session, "beta-id")
+
+    asyncio.run(three())
+
+    kinds = [type(i).__name__ for i in bridge.drain()]
+    assert kinds == [AgentSpawned.__name__, AgentResumed.__name__, AgentSpawned.__name__]
+
+
+# -- the bus stamp (§2.7) ---------------------------------------------------------
+#
+# An in-process MCP handler is handed only the tool name and its arguments. The
+# gate is the only participant that knows who called, so these pin the one
+# mechanism that gives a concern a sender at all.
+
+
+def _gate_input(tool_name: str, tool_input: dict, agent_id: str | None = None) -> dict:
+    data: dict = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": tool_name,
+        "tool_input": tool_input,
+        "tool_use_id": "tu-1",
+        "session_id": "sess-1",
+        "cwd": "/tmp",
+        "transcript_path": "/tmp/t.jsonl",
+    }
+    if agent_id is not None:
+        data["agent_id"] = agent_id
+    return data
+
+
+def _decision(out) -> dict:
+    return out["hookSpecificOutput"]
+
+
+def test_an_auto_approved_bus_call_still_gets_a_sender() -> None:
+    import asyncio
+
+    from pptmstr.bridge import Bridge
+    from pptmstr.bus import FROM_KEY, qualified
+    from pptmstr.driver import AgentSession
+
+    session = AgentSession(Bridge(), task="lead")
+    out = asyncio.run(
+        session._pre_tool_use(_gate_input(qualified("read_inbox"), {}, "agent-qa"), None, None)
+    )
+
+    spec = _decision(out)
+    assert spec["permissionDecision"] == "allow"
+    # The stamp is authentication, not policy. read_inbox is never reviewed, and it
+    # still cannot run without knowing whose inbox it is.
+    assert spec["updatedInput"][FROM_KEY] == [session.session_id, "agent-qa"]
+
+
+def test_a_root_call_is_stamped_with_no_agent_id() -> None:
+    import asyncio
+
+    from pptmstr.bridge import Bridge
+    from pptmstr.bus import FROM_KEY, qualified
+    from pptmstr.driver import AgentSession
+
+    session = AgentSession(Bridge(), task="lead")
+    out = asyncio.run(
+        session._pre_tool_use(_gate_input(qualified("claim_task"), {}, None), None, None)
+    )
+
+    # NodeId's shape exactly: root sessions have agent_id None (I6).
+    assert _decision(out)["updatedInput"][FROM_KEY] == [session.session_id, None]
+
+
+def test_a_non_bus_tool_is_not_rewritten() -> None:
+    import asyncio
+
+    from pptmstr.bridge import Bridge
+    from pptmstr.driver import AgentSession
+
+    session = AgentSession(Bridge(), task="lead")
+    out = asyncio.run(
+        session._pre_tool_use(_gate_input("Read", {"file_path": "/tmp/x"}), None, None)
+    )
+
+    # Stamping everything would put a private key into the arguments of every tool
+    # in the CLI, several of which validate their input strictly.
+    assert "updatedInput" not in _decision(out)
+
+
+def test_the_operators_edit_cannot_change_who_sent_it() -> None:
+    import asyncio
+
+    from pptmstr.bridge import Bridge, Decision
+    from pptmstr.bus import FROM_KEY, qualified
+    from pptmstr.driver import AgentSession
+
+    bridge = Bridge()
+    bridge.start()
+    try:
+        session = AgentSession(bridge, task="lead")
+
+        async def drive() -> dict:
+            call = asyncio.create_task(
+                session._pre_tool_use(
+                    _gate_input(
+                        qualified("post_concern"),
+                        {"to": "dev", "subject": "s", "body": "original"},
+                        "agent-qa",
+                    ),
+                    None,
+                    None,
+                )
+            )
+            # Let the gate park and register its future before answering it.
+            for _ in range(200):
+                await asyncio.sleep(0.005)
+                if bridge.parked_count:
+                    break
+            (pending,) = [i for i in bridge.drain() if hasattr(i, "pending")]
+            bridge.resolve(
+                pending.pending.id,
+                Decision(
+                    approved=True,
+                    edited_args={
+                        "to": "dev",
+                        "subject": "s",
+                        "body": "narrowed",
+                        # An edit that tries to reattribute the message.
+                        FROM_KEY: ["sess-1", "agent-lead"],
+                    },
+                ),
+            )
+            return await call
+
+        out = asyncio.run_coroutine_threadsafe(drive(), bridge.loop).result(timeout=10)
+    finally:
+        bridge.stop()
+
+    spec = _decision(out)
+    assert spec["permissionDecision"] == "allow"
+    # The operator's rewrite of the body is honoured; their rewrite of the sender
+    # is not, because the stamp is applied last.
+    assert spec["updatedInput"]["body"] == "narrowed"
+    assert spec["updatedInput"][FROM_KEY] == [session.session_id, "agent-qa"]
+
+
+# -- work templates ---------------------------------------------------------------
+
+
+def test_a_lone_agent_configures_no_team() -> None:
+    from pptmstr.bridge import Bridge
+    from pptmstr.driver import AgentSession
+
+    options = AgentSession(Bridge(), task="t")._options()
+
+    # None, not an empty dict. Solo must produce exactly the options the SDK saw
+    # before templates existed, or every existing session changes shape at once.
+    assert options.agents is None
+    assert options.system_prompt is None
+
+
+def test_a_template_becomes_agent_definitions() -> None:
+    from pptmstr.bridge import Bridge
+    from pptmstr.driver import AgentSession
+    from pptmstr.templates import FEATURE
+
+    options = AgentSession(Bridge(), task="t", template=FEATURE)._options()
+
+    assert options.agents is not None
+    assert set(options.agents) == set(FEATURE.role_names())
+    builder = options.agents["builder"]
+    assert "implement" in builder.prompt.lower()
+    # The worker half is appended, or a role has no idea it is on a team.
+    assert "read_inbox()" in builder.prompt
+
+
+def test_a_role_without_a_model_inherits_the_sessions() -> None:
+    from pptmstr.bridge import Bridge
+    from pptmstr.driver import AgentSession
+    from pptmstr.templates import FEATURE
+
+    options = AgentSession(Bridge(), task="t", model="claude-opus-4-5", template=FEATURE)._options()
+
+    assert options.agents is not None
+    # "inherit", not the session's model string: the launcher's choice applies to
+    # the whole team, and hard-coding it here would silently pin roles to whatever
+    # the lead happened to be launched with even after a set_model.
+    assert options.agents["builder"].model == "inherit"
+
+
+def test_a_restricted_role_reaches_the_sdk_with_the_bus_attached() -> None:
+    from pptmstr.bridge import Bridge
+    from pptmstr.driver import AgentSession
+    from pptmstr.templates import BUS_TOOL_NAMES, FEATURE
+
+    options = AgentSession(Bridge(), task="t", template=FEATURE)._options()
+
+    assert options.agents is not None
+    reviewer = options.agents["reviewer"].tools
+    assert reviewer is not None
+    assert set(BUS_TOOL_NAMES) <= set(reviewer)
+    assert "Edit" not in reviewer
+
+
+def test_the_briefing_is_appended_not_substituted() -> None:
+    from pptmstr.bridge import Bridge
+    from pptmstr.driver import AgentSession
+    from pptmstr.templates import FEATURE
+
+    options = AgentSession(Bridge(), task="t", template=FEATURE)._options()
+
+    # A bare string would discard Claude Code's own system prompt -- the tool
+    # conventions and environment description this agent still needs -- to say a few
+    # paragraphs about delegation.
+    assert isinstance(options.system_prompt, dict)
+    assert options.system_prompt["type"] == "preset"
+    assert options.system_prompt["preset"] == "claude_code"
+    assert "**builder**" in options.system_prompt["append"]
+
+
+def test_an_unstarted_role_is_a_different_error_from_an_unknown_one() -> None:
+    """
+    The wake-path probe's worker retried the same wrong name because the refusal
+    did not say which mistake it had made. A role that exists but has not spawned is
+    a timing problem the lead can fix; a misspelling is not.
+    """
+    from pptmstr.bridge import Bridge
+    from pptmstr.driver import AgentSession
+    from pptmstr.templates import FEATURE
+
+    session = AgentSession(Bridge(), task="t", template=FEATURE)
+
+    unstarted = session.role_status("builder")
+    assert "has not been started" in unstarted
+    assert "subagent_type='builder'" in unstarted
+
+    unknown = session.role_status("qa")
+    assert "No agent known as" in unknown
+    assert "lead" in unknown
+
+
+def test_a_role_becomes_reachable_once_it_spawns() -> None:
+    import asyncio
+
+    from pptmstr.bridge import Bridge
+    from pptmstr.driver import AgentSession
+    from pptmstr.templates import FEATURE
+
+    session = AgentSession(Bridge(), task="t", template=FEATURE)
+    assert session.resolve_role("builder") is None
+
+    asyncio.run(session._subagent_start(_start_hook_input("a-1", "builder"), None, None))
+
+    assert session.resolve_role("builder") == (session.session_id, "a-1")
+    assert session.role_of((session.session_id, "a-1")) == "builder"
+    # "lead" always resolves, because a worker's first instinct is to report upward.
+    assert session.resolve_role("lead") == session.node_id
+
+
+def test_a_second_agent_of_one_role_does_not_steal_the_address() -> None:
+    import asyncio
+
+    from pptmstr.bridge import Bridge
+    from pptmstr.driver import AgentSession
+    from pptmstr.templates import FEATURE
+
+    session = AgentSession(Bridge(), task="t", template=FEATURE)
+
+    async def two() -> None:
+        await session._subagent_start(_start_hook_input("a-1", "builder"), None, None)
+        await session._subagent_start(_start_hook_input("a-2", "builder"), None, None)
+
+    asyncio.run(two())
+
+    # First writer wins. A concern that consistently reaches the first builder is
+    # better than one that silently retargets to whichever twin spawned last.
+    assert session.resolve_role("builder") == (session.session_id, "a-1")

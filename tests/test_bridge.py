@@ -16,8 +16,9 @@ import time
 import pytest
 
 from pptmstr.bridge import Bridge, Decision
+from pptmstr.effects import ClaimSettled, Effect, InboxDelivered
 from pptmstr.intents import TopicChanged
-from pptmstr.model import NodeId
+from pptmstr.model import NodeId, Task
 
 NODE: NodeId = ("sess-1", None)
 TIMEOUT = 5.0
@@ -273,3 +274,97 @@ def test_many_agents_park_and_resolve_independently(bridge: Bridge) -> None:
     got = {pid: task.result(timeout=TIMEOUT) for pid, task in tasks.items()}
     assert got == {f"p{i}": f"p{i}:{i % 2 == 0}" for i in range(count)}
     assert bridge.parked_count == 0
+
+
+# -- the bus crossing ----------------------------------------------------------
+#
+# Shaped like the approval crossing and deliberately kept separate from it: these
+# park an agent on the *frame* rather than on a person, and folding them together
+# would put bus traffic into the count the lost-approval watchdog reads.
+
+
+def test_ask_blocks_until_the_store_settles_it(bridge: Bridge) -> None:
+    asked = threading.Event()
+    got: list[Effect] = []
+
+    async def claimer() -> None:
+        fut = bridge.ask("r1", on_abandon=ClaimSettled(request_id="r1", task=None))
+        asked.set()
+        got.append(await fut)
+
+    task = bridge.submit(claimer())
+    assert asked.wait(TIMEOUT)
+    assert bridge.asking_count == 1
+    assert not task.done()
+
+    won = Task(id="t1", title="do t1")
+    assert bridge.settle(ClaimSettled(request_id="r1", task=won))
+    task.result(timeout=TIMEOUT)
+
+    assert got[0] == ClaimSettled(request_id="r1", task=won)
+    assert bridge.asking_count == 0
+
+
+def test_a_bus_request_is_not_a_parked_approval(bridge: Bridge) -> None:
+    """
+    The watchdog at app.py compares parked_count against what the operator can
+    reach. A bus request is not something the operator can reach, and counting it
+    there would make the watchdog cry wolf on every claim.
+    """
+    asked = threading.Event()
+
+    async def claimer() -> None:
+        fut = bridge.ask("r1", on_abandon=ClaimSettled(request_id="r1", task=None))
+        asked.set()
+        await fut
+
+    bridge.submit(claimer())
+    assert asked.wait(TIMEOUT)
+
+    assert bridge.asking_count == 1
+    assert bridge.parked_count == 0
+
+    bridge.settle(ClaimSettled(request_id="r1", task=None))
+
+
+def test_settling_an_unknown_request_returns_false(bridge: Bridge) -> None:
+    # An effect for a request abandoned at shutdown, or one the store produced on
+    # its own behalf. Normal, and not worth raising into the frame loop.
+    assert bridge.settle(ClaimSettled(request_id="nobody", task=None)) is False
+
+
+def test_double_settle_is_refused(bridge: Bridge) -> None:
+    async def reader() -> None:
+        await bridge.ask("r1", on_abandon=InboxDelivered(request_id="r1", concerns=()))
+
+    task = bridge.submit(reader())
+    time.sleep(0.05)
+
+    assert bridge.settle(InboxDelivered(request_id="r1", concerns=()))
+    assert bridge.settle(InboxDelivered(request_id="r1", concerns=())) is False
+    task.result(timeout=TIMEOUT)
+
+
+def test_shutdown_releases_agents_waiting_on_the_bus() -> None:
+    """
+    The same guarantee the approval table gets. An agent awaiting an inbox read
+    holds the window open exactly as one awaiting a decision does, and it must be
+    released with the effect shape it is waiting for -- a claimer handed an
+    InboxDelivered would crash on the way out rather than wind down.
+    """
+    b = Bridge()
+    b.start()
+    asked = threading.Event()
+    got: list[Effect] = []
+
+    async def reader() -> None:
+        fut = b.ask("r1", on_abandon=InboxDelivered(request_id="r1", concerns=()))
+        asked.set()
+        got.append(await fut)
+
+    b.submit(reader())
+    assert asked.wait(TIMEOUT)
+
+    b.stop()
+
+    assert got == [InboxDelivered(request_id="r1", concerns=())]

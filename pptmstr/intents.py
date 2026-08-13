@@ -29,7 +29,17 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from .model import AgentState, ContextSnapshot, NodeId, PendingApproval, UsageRollup
+from .model import (
+    AgentState,
+    Concern,
+    ConcernId,
+    ContextSnapshot,
+    NodeId,
+    PendingApproval,
+    Task,
+    TaskId,
+    UsageRollup,
+)
 from .transcript import Transcript
 
 
@@ -153,8 +163,39 @@ class SubagentProgress:
 
 
 @dataclass(frozen=True, slots=True)
+class AgentResumed:
+    """
+    A node that had finished is running again (§2.3).
+
+    Distinct from ``AgentSpawned`` because the SDK reports both through the same
+    hook. ``SubagentStart`` fires a second time for the *same* ``agent_id`` when a
+    sibling's ``SendMessage`` wakes a completed sub-agent -- measured, not assumed:
+    ``scripts/verify_wake_path.py`` observed the resume 7 seconds after the agent's
+    own completion notification, carrying its original id.
+
+    Treating that as a spawn is not a cosmetic error. ``AgentSpawned`` builds a
+    fresh ``AgentRecord``, which zeroes the usage rollup, resets ``started_at``, and
+    -- worst -- swaps in a new ``Transcript``, orphaning the ``(buffer, length)``
+    handle any pane is already reading against (I7). The record must survive its own
+    resurrection; only the liveness fields move.
+    """
+
+    node_id: NodeId
+    at: float
+    topic: str = "resumed"
+
+
+@dataclass(frozen=True, slots=True)
 class AgentRemoved:
-    """Dropped from the tree entirely. Descendants go with it."""
+    """
+    Dropped from the tree entirely. Descendants go with it.
+
+    Nothing emits this today, and §2.3 is the reason to keep it that way: a
+    finished node can be woken by a sibling, so pruning one whose id another agent
+    still holds would leave the resumed work with nowhere to land. The store's
+    ``AgentResumed`` arm drops an intent for an unknown node rather than
+    resurrecting a record it has no history for.
+    """
 
     node_id: NodeId
 
@@ -181,6 +222,125 @@ class FailureAcknowledged:
     node_id: NodeId
 
 
+# -- the message bus and the task board (§2.7) ------------------------------------
+#
+# Every intent below carries ``node_id`` because the store stamps ``state_since``
+# by looking it up (store.py:318), and an intent that named no node would have to
+# be special-cased there. Operator actions have no node to name, so the field is
+# optional -- and the store's stamp is guarded on it rather than each new arm being
+# trusted to remember.
+
+
+@dataclass(frozen=True, slots=True)
+class ConcernPosted:
+    """
+    One agent sent another a concern.
+
+    ``concern.sender`` is authoritative and comes from the gate's ``agent_id``, not
+    from the tool arguments -- see ``model.Concern``. The driver builds the record;
+    the store only files it.
+    """
+
+    node_id: NodeId  # the sender
+    concern: Concern
+
+
+@dataclass(frozen=True, slots=True)
+class InboxRead:
+    """
+    A recipient asked for its inbox. Everything waiting for it is delivered, and
+    the reply comes back as an ``InboxDelivered`` effect.
+
+    A read, a mutation and a question at once, which is why it is one intent rather
+    than a query followed by a ``ConcernDelivered``. Splitting them would open a
+    window in which the recipient has been handed concerns the store still shows as
+    waiting -- and the asking agent cannot close that window itself, because it
+    reads the store from the asyncio thread, which is to say not at all.
+    """
+
+    node_id: NodeId  # the recipient
+    request_id: str
+    at: float
+
+
+@dataclass(frozen=True, slots=True)
+class ConcernEdited:
+    """
+    The operator changed a concern's text before it was delivered.
+
+    The capability §2.7 exists for. Applying to an already-delivered concern is a
+    no-op rather than an error: the recipient has read it, and rewriting history it
+    has already acted on would put the store and the transcript in disagreement.
+    """
+
+    concern_id: ConcernId
+    body: str
+    node_id: NodeId | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ConcernWithdrawn:
+    """The operator stopped a concern from being delivered."""
+
+    concern_id: ConcernId
+    reason: str | None = None
+    node_id: NodeId | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TaskDeclared:
+    """
+    A unit of work was put on the board.
+
+    Rejected by the store if its dependencies would close a cycle -- see
+    ``store._would_cycle``. A cycle is not a wedged task, it is a wedged *team*:
+    every member of the cycle is permanently unclaimable, and the symptom is
+    workers that idle while the board says there is work.
+    """
+
+    task: Task
+    node_id: NodeId | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TaskClaimRequested:
+    """
+    A worker asked for work. The store decides, because it is the only serialized
+    writer and therefore the only place the decision cannot race.
+
+    ``task_id`` None means "whatever is claimable", which is the self-claiming
+    model worth copying from agent teams. The answer comes back as a
+    ``ClaimSettled`` effect rather than on this intent or on the record it wins:
+    ``_apply`` is pure and cannot complete the future the asking agent is parked on.
+    """
+
+    node_id: NodeId
+    request_id: str
+    task_id: TaskId | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class TaskCompleted:
+    """A claimer finished. Anything depending on this becomes claimable by that fact alone."""
+
+    node_id: NodeId
+    task_id: TaskId
+    at: float
+
+
+@dataclass(frozen=True, slots=True)
+class TaskReleased:
+    """
+    A claimer gave the work back, and it returns to the pool.
+
+    Distinct from completion so that a worker which cannot proceed does not have to
+    lie about the outcome to unblock a teammate.
+    """
+
+    node_id: NodeId
+    task_id: TaskId
+
+
 Intent = (
     AgentSpawned
     | FailureAcknowledged
@@ -193,5 +353,14 @@ Intent = (
     | ApprovalResolved
     | AgentFinished
     | SubagentProgress
+    | AgentResumed
     | AgentRemoved
+    | ConcernPosted
+    | InboxRead
+    | ConcernEdited
+    | ConcernWithdrawn
+    | TaskDeclared
+    | TaskClaimRequested
+    | TaskCompleted
+    | TaskReleased
 )

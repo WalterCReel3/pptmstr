@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from typing import Any, cast
 
 from claude_agent_sdk import (
+    AgentDefinition,
     AssistantMessage,
     ClaudeAgentOptions,
     ClaudeSDKClient,
@@ -46,11 +47,14 @@ from claude_agent_sdk import (
     ToolUseBlock,
     UserMessage,
 )
+from claude_agent_sdk.types import SystemPromptPreset
 
 from .approval import Disposition, classify, render_diff, summarize
 from .bridge import Bridge
+from .bus import BUS_TOOLS, FROM_KEY, SERVER_NAME, build_server
 from .intents import (
     AgentFinished,
+    AgentResumed,
     AgentSpawned,
     ApprovalRequested,
     ApprovalResolved,
@@ -64,6 +68,7 @@ from .intents import (
 )
 from .log import LOG
 from .model import AgentState, ContextSnapshot, NodeId, PendingApproval, UsageRollup
+from .templates import SOLO, WorkTemplate, lead_briefing, worker_prompt
 from .transcript import SegmentKind, Transcript
 
 # Hours, not minutes. HookMatcher.timeout defaults to 60s and the CLI enforces it
@@ -475,9 +480,15 @@ class AgentSession:
         model: str | None = None,
         cwd: str | None = None,
         interactive: bool = True,
+        template: WorkTemplate | None = None,
     ) -> None:
         self.bridge = bridge
         self.task = task
+        # The team shape, or None for a lone agent. Held rather than unpacked at
+        # construction because resolve_role needs the role names for a role that has
+        # not spawned yet -- "part of this team, not started" and "no such role" are
+        # different answers, and only one of them means the sender got it wrong.
+        self.template = template or SOLO
         self.session_id = str(uuid.uuid4())
         self.node_id: NodeId = (self.session_id, None)
         self.transcript = Transcript()
@@ -493,8 +504,62 @@ class AgentSession:
         self._spawn_tool_use: dict[str, str] = {}
         self._last_spawn_tool_use_id: str | None = None
         self._subagents: set[str] = set()
+        # agent_type -> agent_id, so the bus can route on a role name the model can
+        # plausibly write ("qa") instead of an opaque id it has no way to learn.
+        # Driver-side rather than a store lookup because the answer is needed on the
+        # asyncio thread, where the store cannot be read.
+        #
+        # First writer wins: two sub-agents of one type would otherwise silently
+        # retarget a role mid-run, and a concern going to whichever twin spawned
+        # last is worse than a concern that consistently goes to the first.
+        self._roles: dict[str, str] = {}
         self._client: ClaudeSDKClient | None = None
         self.transcript_path: str | None = None
+
+    # -- roles, for the bus ------------------------------------------------------
+
+    def resolve_role(self, name: str) -> NodeId | None:
+        """
+        The node a role name addresses, or None.
+
+        "lead" and "main" both name the root session, because that is what a worker
+        naturally calls the agent that gave it the job.
+        """
+        key = name.strip().lower()
+        if key in ("lead", "main", "root"):
+            return self.node_id
+        agent_id = self._roles.get(key)
+        return (self.session_id, agent_id) if agent_id else None
+
+    def role_of(self, node: NodeId) -> str | None:
+        """The role name a node answers to -- the inverse, for rendering a sender."""
+        if node == self.node_id:
+            return "lead"
+        for role, agent_id in self._roles.items():
+            if (self.session_id, agent_id) == node:
+                return role
+        return None
+
+    def known_roles(self) -> tuple[str, ...]:
+        return ("lead", *sorted(self._roles))
+
+    def role_status(self, name: str) -> str:
+        """
+        Why a role could not be reached, in words the model can act on.
+
+        A role in the template that has not spawned is a *timing* problem the lead
+        can fix by starting it; an unknown name is a *spelling* problem. Collapsing
+        both into "no such agent" is what sent the probe's worker into retrying the
+        same wrong name.
+        """
+        key = name.strip().lower()
+        if self.template.role(key) is not None:
+            return (
+                f"{key!r} is a role on this team but has not been started yet. "
+                f"Start it with the Agent tool (subagent_type={key!r}) first."
+            )
+        known = ", ".join(self.known_roles())
+        return f"No agent known as {name!r}. Reachable now: {known}."
 
     # -- hooks -------------------------------------------------------------------
 
@@ -510,10 +575,26 @@ class AgentSession:
         agent_type = str(data.get("agent_type", "") or "agent")
         if not agent_id:
             return {}
+
+        # The same hook reports two different events. A second SubagentStart for an
+        # agent_id we have already seen is a *resume*: a sibling's SendMessage woke
+        # a sub-agent that had finished, and the CLI restarts it from its transcript
+        # under its original id (§2.3, measured in scripts/verify_wake_path.py).
+        # Emitting AgentSpawned again would rebuild the record from nothing --
+        # zeroing usage, resetting started_at, and swapping the Transcript the UI is
+        # reading (I7). Membership of _subagents is the only signal available here,
+        # and it is a reliable one because it is written on this path alone.
+        resumed = agent_id in self._subagents
         self._subagents.add(agent_id)
+        self._roles.setdefault(agent_type.lower(), agent_id)
         if self._last_spawn_tool_use_id:
             self._spawn_tool_use[agent_id] = self._last_spawn_tool_use_id
             self._last_spawn_tool_use_id = None
+
+        if resumed:
+            self.bridge.emit(AgentResumed(node_id=(self.session_id, agent_id), at=time.monotonic()))
+            return {}
+
         self.bridge.emit(
             AgentSpawned(
                 node_id=(self.session_id, agent_id),
@@ -567,7 +648,10 @@ class AgentSession:
 
         disposition = classify(tool_name, tool_input)
         if disposition is Disposition.AUTO_APPROVE:
-            return _hook_output("allow")
+            # Stamped even when nothing is reviewed. The stamp is authentication,
+            # not policy: an auto-approved read_inbox still has to know whose inbox
+            # it is, and a handler that reached its body unstamped would raise.
+            return _allow_with(self._stamp_bus_call(tool_name, tool_input, node))
         if disposition is Disposition.DENY:
             return _hook_output("deny", f"{tool_name} is not permitted by policy")
         if not self.interactive:
@@ -576,6 +660,30 @@ class AgentSession:
             return _hook_output("deny", f"{tool_name} needs approval and no operator is attached")
 
         return await self._park(tool_name, tool_input, str(data.get("tool_use_id", "")), node)
+
+    def _stamp_bus_call(
+        self, tool_name: str, tool_input: Mapping[str, Any], node: NodeId
+    ) -> Mapping[str, Any] | None:
+        """
+        Attach the authenticated sender to a bus call, or None for anything else.
+
+        This is what makes §2.7's bus possible at all. An in-process MCP handler is
+        handed only the tool name and its arguments -- no session, no agent, no
+        tool-use id -- so a sender it read out of its own arguments would be a
+        sender the model wrote. ``PreToolUse`` is the only participant that knows,
+        and ``updatedInput`` is the only way to tell the handler.
+
+        Applied *after* any operator edit (see ``_park``), so the sender cannot be
+        rewritten by edit-then-approve either. Returning None leaves the arguments
+        untouched, which is what every non-bus tool wants.
+        """
+        if tool_name not in BUS_TOOLS:
+            return None
+        stamped = dict(tool_input)
+        # A list, not the NodeId tuple: this crosses to the CLI as JSON and comes
+        # back, and JSON has no tuples. bus._sender reconstitutes it.
+        stamped[FROM_KEY] = [node[0], node[1]]
+        return stamped
 
     async def _park(
         self, tool_name: str, tool_input: dict[str, Any], tool_use_id: str, node: NodeId
@@ -624,7 +732,14 @@ class AgentSession:
             # updatedInput is why edit-then-approve exists: a wrong path or a
             # too-broad command can be corrected and run, rather than rejected and
             # waited on (§5.3).
-            return _allow_with(decision.edited_args)
+            #
+            # The stamp goes on last, over whatever the operator settled on, so an
+            # edited concern still carries the sender the gate authenticated rather
+            # than one the edit could have introduced.
+            approved_args = decision.edited_args if decision.edited_args is not None else tool_input
+            return _allow_with(
+                self._stamp_bus_call(tool_name, approved_args, node) or decision.edited_args
+            )
         reason = decision.reason or "Rejected by operator"
         LOG.warn("gate", f"rejected {pending.summary}")
         return _hook_output("deny", reason)
@@ -641,11 +756,44 @@ class AgentSession:
         LOG.warn("context", f"session compacted ({trigger})")
         return {}
 
+    def _team(self) -> dict[str, AgentDefinition] | None:
+        """The template's roles as SDK agent definitions, or None for a lone agent."""
+        if not self.template.roles:
+            return None
+        return {
+            role.name: AgentDefinition(
+                description=role.description,
+                prompt=worker_prompt(role),
+                tools=role.tool_list(),
+                # "inherit" rather than self.model: a role that does not ask for a
+                # model should run on whatever the session was launched with, not on
+                # the SDK's default, or the launcher's model choice would silently
+                # apply to the lead alone.
+                model=role.model or "inherit",
+            )
+            for role in self.template.roles
+        }
+
+    def _system_prompt(self) -> SystemPromptPreset | None:
+        """
+        The lead's briefing, appended to Claude Code's own system prompt.
+
+        Appended rather than replacing it: the preset carries the tool conventions
+        and the environment description this agent still needs, and a bare string
+        here would throw all of that away to say four paragraphs about delegation.
+        """
+        briefing = lead_briefing(self.template)
+        if not briefing:
+            return None
+        return {"type": "preset", "preset": "claude_code", "append": briefing}
+
     def _options(self) -> ClaudeAgentOptions:
         return ClaudeAgentOptions(
             model=self.model,
             cwd=self.cwd,
             session_id=self.session_id,
+            agents=self._team(),
+            system_prompt=self._system_prompt(),
             # Deny anything not explicitly allowed by the hook. PreToolUse runs on
             # every tool call regardless of mode and its deny is final, which is the
             # property a gate needs.
@@ -658,6 +806,10 @@ class AgentSession:
             # filters an empty set. What arrives here is a summary; the raw chain of
             # thought is never returned by these models at any setting.
             thinking={"type": "adaptive", "display": "summarized"},
+            # The bus (§2.7). In-process, so no subprocess and no extra lifecycle to
+            # manage -- the CLI reaches these handlers back over the same control
+            # channel it uses for hooks.
+            mcp_servers={SERVER_NAME: build_server(self)},
             hooks={
                 "PreToolUse": [HookMatcher(hooks=[self._pre_tool_use], timeout=APPROVAL_TIMEOUT_S)],
                 "PreCompact": [HookMatcher(hooks=[self._pre_compact])],

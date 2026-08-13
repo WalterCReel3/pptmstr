@@ -26,6 +26,13 @@ class Disposition(enum.Enum):
     DENY = "deny"
 
 
+# The bus server's name, spelled here rather than imported from pptmstr.bus:
+# approval.py is deliberately free of SDK imports so the policy can be tested and
+# reasoned about on its own, and bus.py pulls in claude_agent_sdk. The pair is
+# pinned by a test rather than by an import.
+_BUS_SERVER = "pptmstr"
+_BUS_POST = f"mcp__{_BUS_SERVER}__post_concern"
+
 # Reads, searches and listings. Cheap, reversible, and they do not leave the box.
 _AUTO = frozenset(
     {
@@ -54,6 +61,30 @@ _REVIEW = frozenset(
         "WebSearch",
         "Task",
         "Agent",
+        # A message between agents is reviewed for the same reason a write is: it
+        # changes what another agent does next. Gating the *send* rather than the
+        # read is what gives rejection somewhere to go -- permissionDecisionReason
+        # reaches the agent that wrote the message and could revise it, whereas the
+        # recipient could only be told about a message it never saw (§2.7).
+        #
+        # Nothing new is needed to review one. A parked post_concern is an ordinary
+        # PendingApproval: it queues by wait time with everything else, and
+        # edit-then-approve rewrites the body through updatedInput (§5.3).
+        _BUS_POST,
+    }
+)
+
+# Coordination that reads or reserves, but does not reach another agent or the
+# world. Auto-approving these is what keeps the operator a bottleneck on decisions
+# rather than on bookkeeping -- a worker taking the next item off a board the
+# operator already approved is not a second decision.
+_BUS_AUTO = frozenset(
+    {
+        f"mcp__{_BUS_SERVER}__read_inbox",
+        f"mcp__{_BUS_SERVER}__claim_task",
+        f"mcp__{_BUS_SERVER}__declare_task",
+        f"mcp__{_BUS_SERVER}__complete_task",
+        f"mcp__{_BUS_SERVER}__release_task",
     }
 )
 
@@ -66,7 +97,7 @@ def classify(tool_name: str, tool_input: Mapping[str, Any]) -> Disposition:
     tool call like any other, and an orchestrator that gates writes but not the
     spawning of things that write has a hole in it.
     """
-    if tool_name in _AUTO:
+    if tool_name in _AUTO or tool_name in _BUS_AUTO:
         return Disposition.AUTO_APPROVE
     if tool_name in _REVIEW:
         return Disposition.REQUIRE_APPROVAL
@@ -97,6 +128,13 @@ def summarize(tool_name: str, tool_input: Mapping[str, Any], width: int = 90) ->
     if tool_name in ("Task", "Agent"):
         subtype = tool_input.get("subagent_type") or "agent"
         return clip(f"spawn {subtype}: {tool_input.get('description') or ''}")
+    if tool_name == _BUS_POST:
+        # The row an operator scans to decide whether to open it, so it leads with
+        # who is being told what. The body is the diff-equivalent and belongs in the
+        # detail pane, not here.
+        to = tool_input.get("to") or "?"
+        subject = str(tool_input.get("subject") or "").strip()
+        return clip(f"message {to}: {subject or tool_input.get('body') or ''}")
     if not tool_input:
         return tool_name
     key = next(iter(tool_input))
