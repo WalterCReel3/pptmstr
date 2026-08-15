@@ -90,9 +90,26 @@ APPROVAL_TIMEOUT_S = 6 * 60 * 60
 # number it returns moves on the scale of turns rather than frames.
 CONTEXT_POLL_S = 20.0
 
-# How long to keep reading after the stream goes quiet. Only reached when a
-# sub-agent is still outstanding; the loop otherwise exits on the parent result.
-SUBAGENT_GRACE_S = 120.0
+# How often the post-result read loop wakes to re-examine its sub-agents. A poll
+# interval and nothing else: a tick that finds every sub-agent still alive costs one
+# set comparison and goes back to waiting, so this is short enough to keep the loop
+# responsive without being a deadline anything has to meet.
+SUBAGENT_POLL_S = 1.0
+
+# How long one sub-agent may show no sign of life before the session settles it.
+#
+# Per sub-agent and measured against that agent's own last signal, which is the whole
+# design. The signals are in `_note_subagent_activity`, and the load-bearing one is
+# PreToolUse: it carries `agent_id` whenever the call comes from inside a sub-agent, so
+# every tool a sub-agent runs is direct evidence that it is working. A sub-agent with a
+# call still in flight is never settled at all, whatever the clock says.
+#
+# The number is bounded from below by what a live agent can legitimately do between two
+# signals. That gap is thinking, and only thinking: every other long wait is a tool call,
+# and a call in flight is excluded outright rather than timed -- an operator sitting on
+# an approval holds one open for up to APPROVAL_TIMEOUT_S, six hours, and no clock this
+# side of that can tell a sub-agent waiting on a human from one that has died.
+SUBAGENT_SILENCE_S = 300.0
 
 # How many sub-agents one session may have running at once, when the operator has
 # not said otherwise.
@@ -615,6 +632,18 @@ class AgentSession:
         # after it has already stopped, so a set that a stop empties would call
         # that wake a spawn.
         self._seen_subagents: set[str] = set()
+        # agent_id -> when that sub-agent last gave a sign of life, and how many of
+        # its tool calls are still outstanding. Both are per agent because liveness
+        # is: one sub-agent thinking says nothing about whether its sibling has died,
+        # and a single global timer settles the sibling for it.
+        #
+        # The in-flight count is not an optimisation of the timestamp. A tool call is
+        # the one thing a sub-agent does that produces no signal *while* it happens --
+        # PreToolUse fires on entry and the next signal is whatever the agent does
+        # afterwards -- so a long Bash, or a call parked in the approval gate waiting
+        # on a human, looks exactly like death to a clock alone.
+        self._subagent_seen_at: dict[str, float] = {}
+        self._subagent_in_flight: dict[str, int] = {}
         # agent_id -> the Transcript handed to the store on AgentSpawned. Kept past
         # SubagentStop so a resumed sub-agent keeps appending to the buffer the UI
         # is already reading (I7), rather than to a replacement the record does not
@@ -794,6 +823,7 @@ class AgentSession:
         resumed = agent_id in self._seen_subagents
         self._seen_subagents.add(agent_id)
         self._live_subagents.add(agent_id)
+        self._note_subagent_activity(agent_id)
         self._roles[self._address_for(agent_id, agent_type)] = agent_id
 
         if resumed:
@@ -855,22 +885,76 @@ class AgentSession:
             self.bridge.emit(SubagentDelivered(node, answer))
         self.bridge.emit(AgentFinished(node, AgentState.DONE, time.monotonic()))
         self._live_subagents.discard(agent_id)
+        # Liveness bookkeeping ends with the agent it describes. Left behind, a stale
+        # timestamp would be read by the next wake under this id -- which resumes from
+        # the same transcript and keeps the same id -- and hand the resumed agent a
+        # last-seen from before it stopped.
+        self._subagent_seen_at.pop(agent_id, None)
+        self._subagent_in_flight.pop(agent_id, None)
         return {}
 
+    def _note_subagent_activity(self, agent_id: str) -> None:
+        """
+        Record that this sub-agent is alive, now.
+
+        Every signal the session receives that is attributable to one sub-agent lands
+        here, so there is one clock per agent and one place that winds it. Today those
+        are its start and each of its tool calls; a signal added later is a call to
+        this rather than a second timer to keep in step.
+
+        Only for agents still live. A stop can be followed by a late hook from the same
+        id, and stamping there would put a settled agent back on the clock without
+        putting it back in the live set -- an entry nothing would ever clear.
+        """
+        if agent_id in self._live_subagents:
+            self._subagent_seen_at[agent_id] = time.monotonic()
+
     async def _pre_tool_use(
-        self, hook_input: HookInput, _tool_use_id: str | None, _context: HookContext
+        self, hook_input: HookInput, tool_use_id: str | None, context: HookContext
+    ) -> HookJSONOutput:
+        """
+        The gate, bracketed by the liveness bookkeeping for whoever called it.
+
+        Split from `_gate_tool_use` for one reason: the decision can block for
+        APPROVAL_TIMEOUT_S waiting on an operator, and it has five ways out. The
+        bracket has to survive all of them -- an early deny that left the count raised
+        would pin that sub-agent alive for the session's life, and it is the deny paths
+        that are easiest to add another of later.
+        """
+        data = cast(PreToolUseHookInput, hook_input)
+        # agent_id is present only when the call comes from inside a sub-agent, and
+        # it is the only reliable attribution when several run in parallel.
+        agent_id = data.get("agent_id")
+        if not agent_id:
+            return await self._gate_tool_use(data, tool_use_id, context)
+
+        # Stamped on the way in and again on the way out. The exit stamp is what makes
+        # a run of long calls read as continuous life: without it an agent's clock
+        # would show the start of a ten-minute Bash and then be five minutes stale the
+        # moment the call returned.
+        self._note_subagent_activity(agent_id)
+        self._subagent_in_flight[agent_id] = self._subagent_in_flight.get(agent_id, 0) + 1
+        try:
+            return await self._gate_tool_use(data, tool_use_id, context)
+        finally:
+            remaining = self._subagent_in_flight.get(agent_id, 1) - 1
+            if remaining > 0:
+                self._subagent_in_flight[agent_id] = remaining
+            else:
+                self._subagent_in_flight.pop(agent_id, None)
+            self._note_subagent_activity(agent_id)
+
+    async def _gate_tool_use(
+        self, data: PreToolUseHookInput, _tool_use_id: str | None, _context: HookContext
     ) -> HookJSONOutput:
         # The union is discriminated by hook_event_name, and this callback is only
         # ever registered for PreToolUse -- narrowing here rather than branching on a
         # discriminator that cannot vary.
-        data = cast(PreToolUseHookInput, hook_input)
         tool_name = str(data.get("tool_name", ""))
         tool_input = data.get("tool_input") or {}
         # Recorded because it is the authoritative session log; ours is a view (§9).
         self.transcript_path = data.get("transcript_path") or self.transcript_path
 
-        # agent_id is present only when the call comes from inside a sub-agent, and
-        # it is the only reliable attribution when several run in parallel.
         agent_id = data.get("agent_id")
         node = self._node_for(agent_id)
         # The hook-visible name is "Agent" even though the tool list says "Task"
@@ -1376,48 +1460,98 @@ class AgentSession:
         """
         Keep reading after the parent's result while sub-agents are still running.
 
-        Bounded, unlike the main loop. Here the stream really may just go quiet: the
-        parent is finished, so nothing will produce another message if a background
-        task ends without reporting. The bound therefore only ever cuts short a
-        sub-agent that has stopped talking -- never an agent parked on the operator,
-        which is why the main loop reads with no deadline at all.
+        The read is on one channel and the thing being waited for arrives on another,
+        which is what this loop has to keep straight. Sub-agent completion is the
+        SubagentStop *hook*, so `_live_subagents` empties underneath a read that may
+        never produce a single message; the stream carries the sub-agents' assistant
+        messages, which is transcript content rather than the exit condition.
+
+        So the timeout is a poll tick and not a verdict. Waking with everything still
+        live means only that nothing was said, and silence on the stream is not
+        evidence of death: a sub-agent's tool calls announce themselves through the
+        gate, not here. `_settle_silent_subagents` owns the judgement, per agent.
+
+        A stream that *ends* is different in kind from one that is quiet, and it is the
+        one case where nothing further can arrive for anybody -- so it settles whatever
+        is left rather than continuing to poll a closed transport.
         """
         stream = client.receive_messages()
         while self._live_subagents:
             try:
-                message = await asyncio.wait_for(stream.__anext__(), timeout=SUBAGENT_GRACE_S)
-            except (TimeoutError, StopAsyncIteration):
-                LOG.warn("agent", f"{len(self._live_subagents)} sub-agent(s) stopped reporting")
-                self._abandon_live_subagents()
+                message = await asyncio.wait_for(stream.__anext__(), timeout=SUBAGENT_POLL_S)
+            except TimeoutError:
+                self._settle_silent_subagents()
+                continue
+            except StopAsyncIteration:
+                self._settle_live_subagents("the session stream closed while it was running")
                 return
             self._sync_subagent_map(translator)
             for intent in translator.handle(message):
                 self.bridge.emit(intent)
+            # Also here, and not only on the tick. The tick fires when the stream is
+            # quiet, so a loop that judged nowhere else would stop judging exactly when
+            # a sibling started talking -- one chatty sub-agent would keep a dead one
+            # alive for as long as it kept the stream busy.
+            self._settle_silent_subagents()
 
-    def _abandon_live_subagents(self) -> None:
+    def _settle_silent_subagents(self) -> None:
         """
-        Settle every sub-agent still outstanding when the grace period expires.
+        Settle the sub-agents that have individually gone quiet past the bound.
+
+        Per agent, and measured against that agent's own last signal. Nothing about one
+        sub-agent's silence is evidence about another's, so a session-wide timer would
+        end the siblings of whichever agent happened to be thinking hardest.
+
+        A call in flight is a veto rather than a factor. The gate blocks inside
+        PreToolUse for as long as the tool takes -- up to APPROVAL_TIMEOUT_S when a
+        human is deciding -- and during that window the agent is working and silent by
+        construction, so no clock can tell it from a dead one.
+        """
+        now = time.monotonic()
+        silent = [
+            agent_id
+            for agent_id in self._live_subagents
+            if not self._subagent_in_flight.get(agent_id)
+            and now - self._subagent_seen_at.get(agent_id, now) > SUBAGENT_SILENCE_S
+        ]
+        for agent_id in silent:
+            self._settle_subagent(agent_id, f"no sign of life for {SUBAGENT_SILENCE_S:g}s", now)
+
+    def _settle_live_subagents(self, reason: str) -> None:
+        """
+        Settle everything still outstanding, for a reason that really is collective.
+
+        Only the closed stream reaches this. Left live, a record never reaches a
+        terminal state: its card spins for the session's life and the capacity count
+        read off the set can only shrink.
+        """
+        now = time.monotonic()
+        for agent_id in list(self._live_subagents):
+            self._settle_subagent(agent_id, reason, now)
+
+    def _settle_subagent(self, agent_id: str, reason: str, ended_at: float) -> None:
+        """
+        End one sub-agent that this session has given up on.
 
         FAILED because the honest statement is that it stopped reporting: CANCELLED
-        would claim someone cancelled it and DONE would claim an answer arrived,
-        and neither is known here. Without this the record never reaches a terminal
-        state and the id never leaves the live set, so the card spins for the
-        session's life and the count the set answers can only shrink.
+        would claim someone cancelled it and DONE would claim an answer arrived, and
+        neither is known here.
 
         _seen_subagents is deliberately untouched -- a sub-agent that goes quiet can
         still be woken later, and that start is a resume, not a spawn.
         """
-        ended_at = time.monotonic()
-        for agent_id in self._live_subagents:
-            self.bridge.emit(
-                AgentFinished(
-                    (self.session_id, agent_id),
-                    AgentState.FAILED,
-                    ended_at,
-                    error=f"stopped reporting for {SUBAGENT_GRACE_S:g}s",
-                )
+        LOG.warn("agent", f"sub-agent {agent_id} settled: {reason}")
+        self.bridge.emit(
+            AgentFinished(
+                (self.session_id, agent_id),
+                AgentState.FAILED,
+                ended_at,
+                error=reason,
             )
-        self._live_subagents.clear()
+        )
+        self._live_subagents.discard(agent_id)
+        self._subagent_seen_at.pop(agent_id, None)
+        self._subagent_in_flight.pop(agent_id, None)
 
     def _forget_pending_spawns(self) -> None:
         """
@@ -1427,7 +1561,7 @@ class AgentSession:
         when it runs the tool the gate just allowed. One still here when the turn is
         over is owed to a call that will not start, and because the cap counts these
         it would take a slot away for the session's life -- the same permanently
-        shrinking capacity `_abandon_live_subagents` exists to prevent above.
+        shrinking capacity `_settle_live_subagents` exists to prevent above.
 
         Clearing costs nothing a spawn wanted: a sub-agent that starts afterwards has
         no admitted call to match anyway, so it joins nothing either way, and the
