@@ -53,6 +53,9 @@ class AgentSpawned:
     model: str
     started_at: float
     agent_type: str | None = None
+    # The session's work template, by name. Set on a root announce and left None
+    # for a sub-agent, which is spawned by the CLI and has no template of its own.
+    template: str | None = None
     topic: str = "starting"
     # Where this agent runs. None means "inherit from the parent", which is what a
     # sub-agent does -- it runs in the session's directory and its spawn hook is not
@@ -160,6 +163,29 @@ class SubagentProgress:
 
     node_id: NodeId
     description: str
+
+
+@dataclass(frozen=True, slots=True)
+class SubagentDelivered:
+    """
+    A sub-agent stopped, and handed over its whole final answer.
+
+    Separate from ``SubagentProgress`` because the two are different registers, not
+    different lengths of the same thing: progress is what a row shows while work
+    happens, and this is the thing the work was for. The hook gives both at once --
+    ``SubagentProgress`` still carries the one-line topic -- so folding them into one
+    intent would make every progress report claim to be an answer.
+
+    The text is not clipped anywhere on the way to the store. ``last_assistant_message``
+    on the ``SubagentStop`` hook is the only thing a sub-agent produces that is
+    *marked* as its answer -- its ``AssistantMessage``s reach the stream and its own
+    transcript, but nothing there says which of them was the deliverable, and no
+    ``ResultMessage`` can be attributed to its node at all. Truncating here would
+    destroy the only copy the store can hold.
+    """
+
+    node_id: NodeId
+    text: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -353,6 +379,7 @@ Intent = (
     | ApprovalResolved
     | AgentFinished
     | SubagentProgress
+    | SubagentDelivered
     | AgentResumed
     | AgentRemoved
     | ConcernPosted

@@ -8,6 +8,8 @@ rather than by poking at internals.
 
 from __future__ import annotations
 
+import dataclasses
+
 import pytest
 
 from pptmstr.intents import (
@@ -18,7 +20,9 @@ from pptmstr.intents import (
     ApprovalResolved,
     CompactionObserved,
     ContextPolled,
+    FailureAcknowledged,
     StateChanged,
+    SubagentDelivered,
     SubagentProgress,
     TopicChanged,
     UsageAccrued,
@@ -29,6 +33,7 @@ from pptmstr.model import (
     ContextSnapshot,
     NodeId,
     PendingApproval,
+    SessionFailed,
     UsageRollup,
 )
 from pptmstr.store import Store
@@ -556,3 +561,178 @@ def test_finishing_clears_every_pending_approval() -> None:
     store.apply(AgentFinished(ROOT, AgentState.CANCELLED, ended_at=9.0))
     assert store.snapshot().nodes[ROOT].pending == ()
     assert store.snapshot().approvals == ()
+
+
+# -- the team shape a session was launched under ----------------------------------
+
+
+def test_a_session_records_the_template_it_was_launched_under() -> None:
+    """
+    A launch-time choice that is not stored is gone: `template` lives on
+    driver.AgentSession, and the UI reads one Snapshot and nothing else.
+    """
+    store = Store()
+    store.apply(dataclasses.replace(spawn(ROOT), template="feature"))
+
+    assert store.snapshot().nodes[ROOT].template == "feature"
+
+
+def test_a_sub_agent_has_no_template_of_its_own() -> None:
+    """
+    Unlike cwd, this is **not** inherited from the parent. A sub-agent is spawned
+    by the CLI and is not the thing a template describes; inheriting it would make
+    every sub-agent answer "yes" to "are you a team", which is the question the
+    field exists to answer.
+    """
+    store = Store()
+    store.apply(dataclasses.replace(spawn(ROOT), template="feature"))
+    store.apply(spawn(CHILD, ROOT))
+
+    assert store.snapshot().nodes[CHILD].template is None
+
+
+def test_a_session_launched_without_a_template_records_none() -> None:
+    store = Store()
+    store.apply(spawn(ROOT))
+
+    assert store.snapshot().nodes[ROOT].template is None
+
+
+# -- a sub-agent's deliverable ---------------------------------------------------
+
+
+def test_a_delivered_answer_is_kept_whole() -> None:
+    """
+    The store is where the only copy lives. A sub-agent emits no ResultMessage for
+    its own node, so nothing later can reconstruct an answer clipped on the way in.
+    """
+    answer = "## Findings\n\n" + "\n".join(f"- line {i}" for i in range(200))
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(spawn(CHILD, ROOT))
+    store.apply(SubagentDelivered(CHILD, answer))
+
+    rec = store.snapshot().get(CHILD)
+    assert rec is not None
+    assert rec.deliverable == answer
+
+
+def test_delivering_does_not_move_the_node() -> None:
+    """Two intents arrive from one stop hook. If this one also claimed the state,
+    which of the two won would depend on their order in the queue."""
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(spawn(CHILD, ROOT))
+    store.apply(StateChanged(CHILD, AgentState.RUNNING_TOOL, topic="reading"))
+    store.apply(SubagentDelivered(CHILD, "done"))
+
+    rec = store.snapshot().get(CHILD)
+    assert rec is not None
+    assert rec.state is AgentState.RUNNING_TOOL
+    assert rec.topic == "reading"
+
+
+def test_a_second_answer_replaces_the_first() -> None:
+    """A sub-agent woken by a sibling answers again, and the newer answer is the one
+    the operator is being asked to read."""
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(spawn(CHILD, ROOT))
+    store.apply(SubagentDelivered(CHILD, "first pass"))
+    store.apply(SubagentDelivered(CHILD, "second pass"))
+
+    rec = store.snapshot().get(CHILD)
+    assert rec is not None
+    assert rec.deliverable == "second pass"
+
+
+def test_an_answer_for_an_unknown_node_is_a_no_op() -> None:
+    store = Store()
+    store.apply(spawn(ROOT))
+    before = store.snapshot()
+    store.apply(SubagentDelivered(CHILD, "from nowhere"))
+
+    assert store.snapshot().nodes == before.nodes
+
+
+def test_a_node_that_delivered_nothing_has_no_deliverable() -> None:
+    """The absence selects the narration over the whole render, so it has to stay
+    distinguishable from an empty string."""
+    store = Store()
+    store.apply(spawn(ROOT))
+    rec = store.snapshot().get(ROOT)
+    assert rec is not None
+    assert rec.deliverable is None
+
+
+# -- recovering from a terminal state --------------------------------------------
+
+
+def _failed_then_recovered(store: Store) -> None:
+    """A turn that errored, then a later turn that did not."""
+    store.apply(spawn(ROOT))
+    store.apply(AgentFinished(ROOT, AgentState.FAILED, ended_at=5.0, error="HTTP 529: overloaded"))
+    store.apply(StateChanged(ROOT, AgentState.AWAITING_INPUT, topic="waiting for you"))
+
+
+def test_a_recovered_session_has_no_end_time() -> None:
+    """
+    ended_at is what stops the elapsed clock and dims it, in the rail and in HEALTH.
+    A live session asking for a reply must not also read as finished.
+    """
+    store = Store()
+    _failed_then_recovered(store)
+
+    rec = store.snapshot().get(ROOT)
+    assert rec is not None
+    assert rec.state is AgentState.AWAITING_INPUT
+    assert rec.ended_at is None
+
+
+def test_a_recovered_session_keeps_what_went_wrong() -> None:
+    """
+    Deliberate, unlike ended_at: the error text is the record of the failure, and
+    nothing reads it except an obligation gated on FAILED, so a stale value is
+    invisible while clearing it would destroy the only structured copy.
+    """
+    store = Store()
+    _failed_then_recovered(store)
+
+    rec = store.snapshot().get(ROOT)
+    assert rec is not None
+    assert rec.error == "HTTP 529: overloaded"
+    assert store.snapshot().needs_you and not any(
+        isinstance(o, SessionFailed) for o in store.snapshot().needs_you
+    )
+
+
+def test_a_second_failure_is_asked_about_again() -> None:
+    """
+    acknowledged only means anything while FAILED. Carrying it through a recovery
+    would make the *next* failure produce no obligation at all -- the silent loss
+    of a failure signal, one recovery later.
+    """
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(AgentFinished(ROOT, AgentState.FAILED, ended_at=5.0, error="HTTP 529"))
+    store.apply(FailureAcknowledged(ROOT))
+    store.apply(StateChanged(ROOT, AgentState.AWAITING_INPUT, topic="waiting for you"))
+    store.apply(AgentFinished(ROOT, AgentState.FAILED, ended_at=9.0, error="HTTP 500: again"))
+
+    owed = store.snapshot().needs_you
+    assert [type(o) for o in owed] == [SessionFailed]
+
+
+def test_an_ordinary_state_change_leaves_a_live_session_alone() -> None:
+    """The clear is scoped to leaving a terminal state; a running node has nothing
+    to recover from and must not have its fields rewritten on every message."""
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(StateChanged(ROOT, AgentState.THINKING, topic="reading store.py"))
+    before = store.snapshot().get(ROOT)
+
+    store.apply(StateChanged(ROOT, AgentState.CALLING_TOOL, topic="read store.py"))
+    after = store.snapshot().get(ROOT)
+
+    assert before is not None and after is not None
+    assert (before.ended_at, before.acknowledged) == (after.ended_at, after.acknowledged)

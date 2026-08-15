@@ -43,6 +43,7 @@ from .intents import (
     InboxRead,
     Intent,
     StateChanged,
+    SubagentDelivered,
     SubagentProgress,
     TaskClaimRequested,
     TaskCompleted,
@@ -52,6 +53,7 @@ from .intents import (
     UsageAccrued,
 )
 from .model import (
+    INTERRUPTED_TOPIC,
     AgentRecord,
     AgentState,
     ApprovalNeeded,
@@ -168,6 +170,7 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
                 task=intent.task,
                 model=intent.model,
                 agent_type=intent.agent_type,
+                template=intent.template,
                 # Resolved here rather than at every emitter. A sub-agent's spawn
                 # hook is not told a working directory but does run in its
                 # session's, and making each emitter remember that is how the two
@@ -182,9 +185,6 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
             rec = nodes.get(intent.node_id)
             if rec is None:
                 return snap, ()
-            changes: dict[str, object] = {"state": intent.state}
-            if intent.topic is not None:
-                changes["topic"] = intent.topic
             # A parked node stays parked. The CLI dispatches the PreToolUse hook
             # *before* it delivers the AssistantMessage carrying the ToolUseBlock,
             # so the gate parks the node and a StateChanged for the same tool call
@@ -197,8 +197,25 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
             # `pending` is the authority: while it is set, any other state is a lie.
             # The topic still updates, because naming the call being reviewed is
             # useful and not misleading.
-            if rec.pending:
-                changes["state"] = AgentState.AWAITING_APPROVAL
+            state = AgentState.AWAITING_APPROVAL if rec.pending else intent.state
+            changes: dict[str, object] = {"state": state}
+            if intent.topic is not None:
+                changes["topic"] = intent.topic
+            if rec.state.is_terminal and not state.is_terminal:
+                # A node that is running again has no end. ``ended_at`` stops the
+                # elapsed clock (widgets.elapsed_cell, rail and health all prefer it
+                # to ``now``) and dims it, so a session that errored and
+                # then answered would sit in AWAITING_INPUT asking for a reply while
+                # every other surface said it was over.
+                #
+                # ``acknowledged`` goes with it for a sharper reason: it suppresses
+                # the SessionFailed obligation, and a stale True means the *next*
+                # failure produces no obligation at all. Only ``error`` survives --
+                # it is the record of what went wrong, nothing reads it except
+                # through an obligation gated on FAILED, and clearing it would
+                # destroy the only structured copy on the way through a recovery.
+                changes["ended_at"] = None
+                changes["acknowledged"] = False
             nodes[intent.node_id] = rec.with_(**changes)
 
         case SubagentProgress():
@@ -219,6 +236,20 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
             else:
                 state = AgentState.RUNNING_TOOL
             nodes[intent.node_id] = rec.with_(topic=intent.description, state=state)
+
+        case SubagentDelivered():
+            rec = nodes.get(intent.node_id)
+            if rec is None:
+                return snap, ()
+            # State is deliberately untouched. This says what the node produced, not
+            # where it is: the AgentFinished that follows it on the same hook is what
+            # settles the lifecycle, and having two intents from one hook both claim
+            # the state is how an ordering assumption becomes a defect.
+            #
+            # A second delivery replaces the first rather than accumulating. A
+            # sub-agent woken by a sibling's message answers again, and the answer it
+            # just gave is the one the operator is being asked to read.
+            nodes[intent.node_id] = rec.with_(deliverable=intent.text)
 
         case TopicChanged():
             rec = nodes.get(intent.node_id)
@@ -401,7 +432,12 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
             # way it happens is a retry, and overwriting would silently unclaim
             # work somebody is doing.
             if intent.task.id not in tasks and not _would_cycle(tasks, intent.task):
-                tasks[intent.task.id] = intent.task
+                # Provenance comes from the intent, never from the record handed
+                # in: the intent's node_id is the sender the gate authenticated,
+                # and a declared_by a caller set on the Task is not evidence of
+                # anything. Stamping unconditionally leaves one writer for the
+                # field rather than two that have to agree.
+                tasks[intent.task.id] = dataclasses.replace(intent.task, declared_by=intent.node_id)
 
         case TaskClaimRequested():
             won = _pick_claim(tasks, intent.task_id)
@@ -586,15 +622,25 @@ def _needs_you(
             )
 
         if rec.state is AgentState.AWAITING_INPUT:
+            # Deliberately not the agent's last sentence. Naming the two things the
+            # operator can do about it is useful and honest; summarising what was
+            # asked would mean guessing whether the turn ended in a question at all.
+            #
+            # Whether the turn was interrupted is a different kind of fact and does
+            # belong here: the driver reads it off the result's terminal_reason, so
+            # it is the CLI reporting what it did rather than a guess about what was
+            # said. An interrupt that does not read as one in the list the operator
+            # actually works from tells them their interrupt did nothing.
+            interrupted = rec.topic == INTERRUPTED_TOPIC
             out.append(
                 QuestionPending(
                     node=nid,
                     since=rec.state_since,
-                    # Deliberately not the agent's last sentence. Naming the two
-                    # things the operator can do about it is useful and honest;
-                    # summarising what was asked would mean guessing whether the
-                    # turn ended in a question at all.
-                    summary="ended its turn - reply or close",
+                    summary=(
+                        "interrupted - reply or close"
+                        if interrupted
+                        else "ended its turn - reply or close"
+                    ),
                 )
             )
 
