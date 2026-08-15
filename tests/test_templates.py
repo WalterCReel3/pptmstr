@@ -9,6 +9,8 @@ its tool list omitted the bus, and a default that quietly stops being solo.
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from pptmstr import templates
@@ -84,6 +86,149 @@ def test_the_briefing_tells_the_lead_to_wait() -> None:
     briefing = lead_briefing(FEATURE)
     assert "wait" in briefing.lower()
     assert "do not implement" in briefing.lower()
+
+
+# -- the count nouns the briefing is allowed to use -------------------------------
+#
+# The rewrite that removed "one agent per role" was argued from an **absence**: the
+# retired briefing contained no "several", no "more than one", nothing plural
+# applied to a role, so the singular was the whole instruction the lead had. Prose
+# is additive, so an assertion that the new wording is present cannot keep the old
+# one out -- a sentence appended to the fan-out paragraph, or to `## Your job`,
+# restores "start one of each and wait" with every presence assertion still green.
+#
+# So this is an allowlist over count nouns rather than a blocklist of phrasings.
+# Every clause of the generated body that puts a number on something has to be one
+# of the ones below; anything else is by construction a statement about how many
+# agents something gets, which is the class of instruction being excluded. Adding
+# an entry here is a decision about fan-out, not a formatting fix.
+
+_COUNT_WORD = re.compile(r"\b(one|two|single|only|exactly)\b")
+
+_ALLOWED_COUNTS = (
+    # A role is not an agent, and the fan-out is tied to the board's shape rather
+    # than to the roster's length.
+    "not a single agent",
+    "one worker per independent task",
+    "one per independent task, not one per role",
+    "rather than one after another",
+    # A worker's own throughput, stated on the tool that makes it true.
+    "unblocked item, one at a time",
+    # The bound on parallelism that is real: two writers, one file.
+    "two tasks with no dependency",
+    "two agents on work",
+    "two agents editing the same file",
+)
+
+
+def _counted_clauses(text: str) -> list[str]:
+    """Every clause of ``text`` that puts a number on something, whitespace flattened."""
+    flat = " ".join(text.split())
+    return [c.strip() for c in re.split(r"[.;—]", flat) if _COUNT_WORD.search(c.lower())]
+
+
+@pytest.mark.parametrize("template", [FEATURE, RESEARCH])
+def test_a_lead_is_not_told_to_drain_a_parallelisable_board_through_one_worker(
+    template: WorkTemplate,
+) -> None:
+    """
+    The hazard is a lead that declares four independent tasks, starts one agent of
+    each role, and then waits while a single worker claims them in turn. Every
+    count noun in this briefing is what decides that: a role has to read as a job
+    description that several agents can hold, and the fan-out has to be tied to the
+    number of independent tasks rather than to the number of roles.
+
+    No number is stated on purpose. A figure in the prose is a figure that
+    disagrees with whatever ceiling the operator is actually running under.
+    """
+    briefing = lead_briefing(template)
+    assert "several agents in the same role" in briefing
+    assert "one per independent task, not one per role" in briefing
+    assert "independent" in briefing
+
+    # And nothing anywhere below the roster caps a role at one agent. Scoped from
+    # this heading because a lead_prompt above it is the template's own words --
+    # RESEARCH's asks for "one answer" -- while everything after it is generated
+    # here and is the text this rewrite owns.
+    body = briefing.split("## How the team coordinates", 1)[1]
+    for clause in _counted_clauses(body):
+        assert any(ok in clause.lower() for ok in _ALLOWED_COUNTS), clause
+
+    # The one retired phrasing with no number in it. "Them" is the roster, and a
+    # roster instantiated once is exactly the reading being removed.
+    assert "start them in this order" not in briefing.lower()
+
+
+@pytest.mark.parametrize("template", [FEATURE, RESEARCH])
+def test_the_briefing_gives_the_address_of_the_second_agent_in_a_role(
+    template: WorkTemplate,
+) -> None:
+    """
+    Fan-out without this line produces agents the lead cannot answer. A role's bus
+    address is instance-keyed -- the first agent holds the bare name and later ones
+    take a suffix -- and nothing else in the session tells the lead that, so a
+    concern meant for the second builder goes to the first.
+
+    The worked example is generated from a role this template has, for the same
+    reason the roster is: a hardcoded `builder-2` would name a teammate the
+    research team does not have.
+    """
+    example = template.roles[0].name
+    briefing = lead_briefing(template)
+    assert f"`{example}-2`" in briefing
+    for other in templates.BUILT_IN:
+        for role in other.roles:
+            if template.role(role.name) is None:
+                assert f"{role.name}-2" not in briefing
+
+
+@pytest.mark.parametrize("template", [FEATURE, RESEARCH])
+def test_running_several_agents_does_not_licence_two_writers_on_one_file(
+    template: WorkTemplate,
+) -> None:
+    """
+    Parallelism is granted across *independent* tasks only. `depends_on` is the
+    mechanism that makes a task independent, so the briefing has to name it where
+    it tells the lead to fan out -- otherwise "one worker per task" reads as
+    permission to put two agents on the same file.
+    """
+    job = lead_briefing(template).split("## Your job", 1)[1]
+    assert "two agents editing the same file" in job
+    assert "`depends_on`" in job
+    assert "**wait**" in job
+
+
+# The only count a description may carry. A description is one line of the lead's
+# roster, so a number in it is read as a number of agents no matter what it was
+# written about -- "Run exactly one builder" and "Give it one task at a time" both
+# land there as a ceiling. This one is a fact about the worker's own claimed work
+# and says so grammatically: the subject is the worker, not the lead.
+_ALLOWED_COUNTS_IN_A_DESCRIPTION = ("works one claimed task at a time",)
+
+
+def test_a_role_description_bounds_the_worker_not_the_leads_fan_out() -> None:
+    """
+    A description is rendered into the lead's roster, so it is read as an
+    instruction to the lead. "Give it one task at a time" is true of the worker --
+    `claim_task()` returns a single item -- and false as a cap on how many agents
+    the role may run, which is what the lead sees. The throughput claim belongs on
+    the tool that makes it true.
+
+    Checked as an absence over every count noun rather than as a blocklist of the
+    phrasing that was there before: the roster is generated, so any description can
+    put a ceiling in the briefing, and the ceiling does not have to be spelled the
+    way the retired one was.
+    """
+    for template in templates.BUILT_IN:
+        for role in template.roles:
+            where = f"{template.name}:{role.name}"
+            for clause in _counted_clauses(role.description):
+                assert any(
+                    ok in clause.lower() for ok in _ALLOWED_COUNTS_IN_A_DESCRIPTION
+                ), f"{where}: {clause}"
+            # The retired phrasing itself, named because it is what was there.
+            assert "give it" not in role.description.lower(), where
+    assert "take the oldest unblocked item, one at a" in lead_briefing(FEATURE)
 
 
 def test_the_briefing_carries_the_spawn_order_when_there_is_one() -> None:

@@ -9,6 +9,7 @@ a thread, and testing them with one would be testing the wrong thing.
 
 from __future__ import annotations
 
+import dataclasses
 import time
 
 from pptmstr.effects import ClaimSettled, InboxDelivered
@@ -221,6 +222,106 @@ def test_redeclaring_an_id_does_not_disturb_the_claim_on_it() -> None:
     assert held.state is TaskState.CLAIMED
     assert held.claimed_by == DEV
     assert held.title == "do t1"
+
+
+# -- task provenance --------------------------------------------------------------
+#
+# There is one Store for the whole fleet, so `tasks` is a global map. An unclaimed
+# task has no node on it at all, so without the declarer nothing can say which
+# session's board it belongs to.
+
+
+def test_a_declared_task_remembers_who_declared_it() -> None:
+    store = Store()
+    store.apply(TaskDeclared(task("t1"), node_id=LEAD))
+
+    assert store.snapshot().tasks["t1"].declared_by == LEAD
+
+
+def test_a_declarer_is_not_lost_when_the_task_is_admitted() -> None:
+    """
+    The reducer rebuilds the record on admission. The provenance has to survive
+    that rebuild, not just be present on the intent.
+    """
+    store = Store()
+    store.apply(TaskDeclared(task("t1", at=0.0), node_id=LEAD))
+    store.apply(TaskDeclared(task("t2", deps=("t1",), at=1.0), node_id=QA))
+
+    tasks = store.snapshot().tasks
+    assert (tasks["t1"].declared_by, tasks["t2"].declared_by) == (LEAD, QA)
+    # The rebuild must not have disturbed anything else about the record.
+    assert tasks["t2"].depends_on == ("t1",)
+    assert tasks["t2"].state is TaskState.PENDING
+
+
+def test_provenance_comes_from_the_intent_not_from_the_record() -> None:
+    """
+    The declarer the gate authenticated is the only one that counts, so a
+    ``declared_by`` set on the incoming record is overwritten either way. One
+    writer for the field: a fallback to the record would be a second, and a
+    caller could then choose its own provenance.
+    """
+    store = Store()
+    store.apply(TaskDeclared(dataclasses.replace(task("t1"), declared_by=QA), node_id=LEAD))
+    store.apply(TaskDeclared(dataclasses.replace(task("t2"), declared_by=QA), node_id=None))
+
+    tasks = store.snapshot().tasks
+    assert (tasks["t1"].declared_by, tasks["t2"].declared_by) == (LEAD, None)
+
+
+def test_the_declare_handler_stamps_the_task_with_its_caller() -> None:
+    """
+    The wiring, not the reducer (STYLE.md §2). The handler discarded ``_sender``
+    entirely, so every reducer-level test above passes with the bus still emitting
+    an unattributed ``TaskDeclared``. This drives the real MCP server.
+    """
+    import asyncio
+
+    import mcp.types as mcp_types
+
+    from pptmstr.bridge import Bridge
+    from pptmstr.bus import FROM_KEY, build_server
+
+    class _Session:
+        def __init__(self, bridge: Bridge) -> None:
+            self.bridge = bridge
+
+    bridge = Bridge()  # emit() is a queue put; the loop is not needed here
+    server = build_server(_Session(bridge))["instance"]
+    handler = server.request_handlers[mcp_types.CallToolRequest]
+
+    result = asyncio.run(
+        handler(
+            mcp_types.CallToolRequest(
+                method="tools/call",
+                params=mcp_types.CallToolRequestParams(
+                    name="declare_task",
+                    # Every declared field is spelled: the `{name: type}` shorthand
+                    # emits them all as required, so a call omitting one is
+                    # rejected before the handler runs.
+                    #
+                    # The gate stamps the sender; it survives the JSON hop as a list.
+                    arguments={
+                        "task_id": "t1",
+                        "title": "do t1",
+                        "detail": "",
+                        "depends_on": [],
+                        FROM_KEY: list(QA),
+                    },
+                ),
+            )
+        )
+    )
+
+    # Named before the store is consulted: a call refused by the schema emits
+    # nothing, and "no such task" is a much worse clue than the refusal itself.
+    assert not result.root.isError, result.root.content
+
+    store = Store()
+    for intent in bridge.drain():
+        store.apply(intent)
+
+    assert store.snapshot().tasks["t1"].declared_by == QA
 
 
 # -- claiming ---------------------------------------------------------------------
@@ -583,6 +684,149 @@ def test_the_stamp_survives_a_json_round_trip() -> None:
 
     root = json.loads(json.dumps({FROM_KEY: ["s1", None]}))
     assert _sender(root) == ("s1", None)
+
+
+# -- the schema the model is actually shown ---------------------------------------
+#
+# Nothing else in the suite looks at a bus tool's schema. The handlers are driven
+# with complete argument dicts, which bypasses validation entirely -- so a tool
+# could announce a contract its own description contradicts and every test here
+# would still pass. That is how ``claim_task()`` came to answer
+# "'task_id' is a required property" to the call its description asks for.
+#
+# jsonschema below is the validator a real call meets, not a stand-in for one:
+# ``mcp.server.lowlevel.Server.call_tool`` validates arguments against the tool's
+# announced ``inputSchema`` before dispatching to the handler. It is not a direct
+# dependency and does not need to be -- mcp requires it, claude-agent-sdk requires
+# mcp, and pptmstr requires the SDK.
+
+
+def _announced_schemas() -> dict[str, dict[str, object]]:
+    """
+    The ``inputSchema`` for each tool as the CLI is handed it, from the real server.
+    """
+    import asyncio
+
+    import mcp.types as mcp_types
+
+    from pptmstr.bridge import Bridge
+    from pptmstr.bus import build_server
+
+    class _Session:
+        def __init__(self, bridge: Bridge) -> None:
+            self.bridge = bridge
+
+    server = build_server(_Session(Bridge()))["instance"]  # type: ignore[arg-type]
+    handler = server.request_handlers[mcp_types.ListToolsRequest]
+    listed = asyncio.run(handler(mcp_types.ListToolsRequest(method="tools/list")))
+    return {t.name: t.inputSchema for t in listed.root.tools}
+
+
+# The smallest call each tool's own description says is enough, with the sentence
+# that licenses each omission quoted beside it. Written as calls rather than as
+# expected `required` lists on purpose: the description is the contract a model
+# reads, and this table is what it reads it as.
+DOCUMENTED_CALLS: dict[str, dict[str, object]] = {
+    # "Use the agent's role name" -- all three are named, none optional.
+    "post_concern": {"to": "lead", "subject": "regression", "body": "the retry loop"},
+    "read_inbox": {},
+    # "Omit task_id to be given the oldest task whose dependencies are all met."
+    "claim_task": {},
+    # "Omit it and the board generates one" / "Omit it for a title-only task" /
+    # "Omit it for none" -- which leaves the title as the whole of a declaration.
+    "declare_task": {"title": "do t1"},
+    "complete_task": {"task_id": "t1"},
+    "release_task": {"task_id": "t1"},
+}
+
+
+def test_every_tool_accepts_the_call_its_own_description_documents() -> None:
+    import jsonschema
+
+    schemas = _announced_schemas()
+    assert set(schemas) == set(DOCUMENTED_CALLS), "a tool changed; document its call here"
+
+    for name, args in DOCUMENTED_CALLS.items():
+        errors = list(jsonschema.Draft202012Validator(schemas[name]).iter_errors(args))
+        assert not errors, f"{name}({args}) is refused: {[e.message for e in errors]}"
+
+
+def test_an_argument_a_tool_cannot_work_without_is_still_required() -> None:
+    """
+    The counterweight to the test above, which emptying every ``required`` list
+    would also satisfy -- leaving ``complete_task`` callable with nothing to
+    complete and the model free to omit the one argument that carries the work.
+    """
+    import jsonschema
+
+    schemas = _announced_schemas()
+    for name, needed in (
+        ("post_concern", "to"),
+        ("declare_task", "title"),
+        ("complete_task", "task_id"),
+        ("release_task", "task_id"),
+    ):
+        args = dict(DOCUMENTED_CALLS[name])
+        del args[needed]
+        errors = list(jsonschema.Draft202012Validator(schemas[name]).iter_errors(args))
+        assert errors, f"{name} accepts a call with no {needed}"
+
+
+def test_a_claim_with_no_task_id_asks_for_anything_claimable() -> None:
+    """
+    The documented call all the way through, not only past validation: omitting
+    ``task_id`` has to reach the handler's default and become a request for
+    *anything*, which is the self-claiming model the board is for. Passing the
+    schema and then asking for the task named "" would be the same defect one
+    layer in.
+    """
+    import mcp.types as mcp_types
+
+    from pptmstr.bridge import Bridge
+    from pptmstr.bus import FROM_KEY, build_server
+
+    class _Session:
+        def __init__(self, bridge: Bridge) -> None:
+            self.bridge = bridge
+
+    bridge = Bridge()
+    bridge.start()  # claim_task parks on a future, so this one needs the loop
+    try:
+        server = build_server(_Session(bridge))["instance"]  # type: ignore[arg-type]
+        handler = server.request_handlers[mcp_types.CallToolRequest]
+        call = handler(
+            mcp_types.CallToolRequest(
+                method="tools/call",
+                params=mcp_types.CallToolRequestParams(
+                    name="claim_task",
+                    # The stamp and nothing else: exactly what the CLI would deliver
+                    # for a `claim_task()` the gate has stamped.
+                    arguments={FROM_KEY: list(DEV)},
+                ),
+            )
+        )
+        result = bridge.submit(call)
+
+        intents: list[object] = []
+        for _ in range(200):
+            intents.extend(bridge.drain())
+            if intents:
+                break
+            time.sleep(0.005)
+
+        assert len(intents) == 1
+        asked = intents[0]
+        assert isinstance(asked, TaskClaimRequested)
+        assert asked.task_id is None, "an omitted task_id must mean 'anything', not ''"
+
+        won = task("t1")
+        bridge.settle(ClaimSettled(request_id=asked.request_id, task=won))
+        answered = result.result(timeout=5)
+    finally:
+        bridge.stop()
+
+    assert not answered.root.isError, answered.root.content
+    assert "t1" in answered.root.content[0].text
 
 
 def test_a_stranded_bus_request_is_noticed() -> None:

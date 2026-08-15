@@ -41,8 +41,8 @@ from ..model import (
     SessionFailed,
     Snapshot,
 )
-from ..theme import OBLIGATION_GLYPH, STATE_GLYPH, P
-from . import projects, review
+from ..theme import OBLIGATION_GLYPH, STATE_GLYPH, Face, P, face, faded
+from . import projects, review, splash, splash_art
 from .compose import ComposeState, wants_send
 from .focus import FocusState
 from .widgets import CTRL_ENTER_SUBMITS, ellipsis, format_elapsed, multiline_input
@@ -65,6 +65,13 @@ _PREVIEW_CHARS = 1200
 _QUALIFIER_W = 150.0
 
 _SMALL_FONT = 12.5
+
+# The two spellings the CLI uses for "start a sub-agent". Both are in
+# ``approval._REVIEW``, so both park, and a marker that knew only one would be
+# silently absent for half the spawns.
+_SPAWN_TOOLS = frozenset({"Agent", "Task"})
+
+_SUFFIX = {1: "st", 2: "nd", 3: "rd"}
 
 
 @dataclass
@@ -103,6 +110,28 @@ def draw(
     """Build the inbox from one snapshot. Never reads the store."""
     state.prune({p.id for p in snap.approvals})
     compose.prune(snap)
+
+    # Before the empty-queue branch, and the ordering is the whole distinction.
+    # ``_zero_state`` answers "a fleet exists and owes you nothing"; this answers
+    # "there is no fleet". An early return is what makes them mutually exclusive
+    # structurally rather than by the two conditions happening to disagree -- an
+    # empty node table also implies an empty ``needs_you``, so a later check would
+    # be reachable only by luck of ordering.
+    #
+    # ``nodes`` rather than ``order``, though ``store._preorder`` makes the two
+    # equivalent: it re-attaches orphans at the root specifically so nothing in the
+    # node table can be missing from the walk, and the lengths are therefore always
+    # equal. ``nodes`` is asked anyway because it is the primary fact and ``order``
+    # is a projection of it. If that recovery ever regressed, keying on the
+    # projection would put a cold-start splash over a live fleet -- silently, and
+    # over exactly the orphaned sub-agent that was carrying a pending approval.
+    #
+    # Note this is *not* the same question as ``_zero_state``'s "is anything live":
+    # a fleet of five crashed sessions is not an empty application. Those sessions
+    # still need to be seen and dismissed, and they keep the queue's empty state.
+    if not snap.nodes:
+        _splash(now)
+        return
 
     if not snap.needs_you:
         _zero_state(snap, now)
@@ -155,6 +184,57 @@ def identity(snap: Snapshot, obligation: Obligation) -> tuple[str, str]:
         return title, project
     sub = (node.agent_type if node else None) or "sub-agent"
     return title, f"{project} / {sub}"
+
+
+def spawn_marker(snap: Snapshot, obligation: Obligation) -> str | None:
+    """
+    Where a pending spawn sits in its session's fleet, and how much of that fleet is
+    running. ``None`` for every obligation that is not a spawn.
+
+    The row this qualifies reads ``spawn builder: <description>``, which is a
+    reasonable thing to say yes to twelve times in a row while nobody ever decides
+    to run twelve. ``approval.summarize`` cannot supply the number -- it is pure,
+    and is handed a tool name and its arguments and nothing else -- so the shell
+    renders it from the snapshot it already holds.
+
+    **The ordinal.** ``len(fleet) + (spawns queued ahead of this one) + 1``, where
+    the fleet is every descendant record of the session and "ahead" is position in
+    ``snap.approvals``, which is ordered by how long each has waited. The second
+    term is what makes the number honest while the board is still being built: an
+    approval nobody has answered has no ``AgentRecord`` yet, so a lead that issues
+    three ``Agent`` calls in one breath parks three rows that the record count alone
+    would call the first sub-agent three times.
+
+    **The live count.** Fleet members that are not terminal. A queued spawn is not
+    running -- it is what the operator is being asked about -- so the two numbers
+    move independently, and a session whose sub-agents have all finished reads
+    ``4th sub-agent · 0 running``. Terminality is the whole predicate here because
+    the question is "is it still working": ``_zero_state`` below spells FAILED out
+    separately for a different question, and ``rail._density`` deliberately files a
+    crashed agent as blocked rather than ended because a crash is an obligation.
+
+    Scoped to ``obligation.node[0]``. The store holds every session at once, so a
+    fleet-wide count would tell the operator about work they are not being asked to
+    consent to.
+    """
+    if not isinstance(obligation, ApprovalNeeded):
+        return None
+    pending = obligation.approval
+    if pending.tool_name not in _SPAWN_TOOLS:
+        return None
+
+    session = pending.node[0]
+    fleet = projects.subagents_of(snap, (session, None))
+    queued = [p.id for p in snap.approvals if p.tool_name in _SPAWN_TOOLS and p.node[0] == session]
+    ahead = queued.index(pending.id) if pending.id in queued else 0
+    running = sum(1 for rec in fleet if not rec.state.is_terminal)
+    return f"{_ordinal(len(fleet) + ahead + 1)} sub-agent · {running} running"
+
+
+def _ordinal(n: int) -> str:
+    # 11th, 12th and 13th are the exceptions the last digit gets wrong.
+    suffix = "th" if n % 100 in (11, 12, 13) else _SUFFIX.get(n % 10, "th")
+    return f"{n}{suffix}"
 
 
 def _row(
@@ -210,9 +290,24 @@ def _row(
     )
     imgui.text_colored(colour.vec4, wait)
 
-    imgui.set_cursor_screen_pos(imgui.ImVec2(origin.x + _X_SUMMARY, origin.y + 3.0))
+    # The marker goes in the summary zone, ahead of the summary, for two reasons.
+    # It is the only zone whose width is "whatever the window has left" rather than
+    # a fixed slot, so a string that varies in length can live in it without moving
+    # any other field along (see the column comment above). And it is the column
+    # being scanned, which is where a running total has to be if it is going to
+    # change the decision the row is asking for. Accent rather than warn: it is a
+    # live value, not an alarm, and the threshold at which twelve becomes too many
+    # is the operator's to hold, not this pane's.
+    summary_x = _X_SUMMARY
+    marker = spawn_marker(snap, obligation)
+    if marker is not None:
+        imgui.set_cursor_screen_pos(imgui.ImVec2(origin.x + summary_x, origin.y + 3.0))
+        imgui.text_colored(P.accent.vec4, marker)
+        summary_x += imgui.calc_text_size(marker).x + 10.0
+
+    imgui.set_cursor_screen_pos(imgui.ImVec2(origin.x + summary_x, origin.y + 3.0))
     imgui.text_colored(
-        P.text.vec4, ellipsis(obligation.summary, max(width - _X_SUMMARY - 12.0, 40.0))
+        P.text.vec4, ellipsis(obligation.summary, max(width - summary_x - 12.0, 40.0))
     )
 
     imgui.set_cursor_screen_pos(imgui.ImVec2(origin.x, hi.y))
@@ -476,6 +571,128 @@ def _batch_controls(
             state.confirming_global = False
     elif imgui.button(f"approve all {total} pending calls..."):
         state.confirming_global = True
+
+
+# -- the cold start ----------------------------------------------------------------
+#
+# Two empty states live in this pane and they are not the same emptiness.
+# ``_zero_state`` below is a fleet that exists and owes nothing -- it answers "what is
+# everyone doing". This one is a fleet that does not exist, which has no "everyone"
+# to report on and exactly one useful thing to say: how to start.
+
+_INTRO = "pptmstr runs a fleet of Claude agents, and hands you every decision they reach."
+
+# The chord is spelled out, not merely coloured. STYLE.md's first rule is that hue is
+# never the only channel, and an operator on ``high_contrast`` -- where accent and text
+# collapse toward each other -- would otherwise have nothing marking this line as an
+# instruction. The accent makes it findable; the literal "Ctrl+N" is what makes it
+# actionable, and that survives every palette.
+#
+# Phrased as a suggestion for the same reason app.py:411 phrases its neighbour that
+# way: the pane offers the next step, it does not take it.
+_HINT_CHORD = "Ctrl+N"
+_HINT_TEXT = "- start a session"
+
+_ART_ROWS = len(splash_art.ART)
+_ART_COLS = max(len(row) for row in splash_art.ART)
+
+# Module-level, which is the one place this departs from ``splash.ArtFrames``' own
+# advice to let the pane own it. ``inbox.draw`` is handed no presentation-state object
+# to hang it on, and adding a parameter would mean editing app.py's call site, which
+# belongs to nobody on this task.
+#
+# The deviation is affordable because there is nothing here to invalidate: the key is
+# the step index, the art and the ranking are module constants, and colour is applied
+# at draw time rather than baked into the memo -- so a theme switch cannot make an
+# entry stale and a pane teardown leaks one tuple of 61 strings. What it buys is worth
+# that: recomputing costs 4.1ms a frame against 0.002ms for a hit, and while the
+# operator drags a window edge the runner is awake at 60fps, where 4.1ms is a quarter
+# of the budget spent re-deriving a picture that has not changed.
+_ART_FRAMES = splash.ArtFrames()
+
+
+def _splash(now: float) -> None:
+    """
+    The cold start: what this is, the quote, how to begin, and the art under it.
+
+    Ordered so the two lines an operator has to *act* on are above the fold. The art
+    is the last thing drawn and the first thing dropped, because it is the only part
+    that can fail to fit.
+    """
+    imgui.spacing()
+    imgui.text_colored(P.text_dim.vec4, _INTRO)
+    imgui.spacing()
+    _quote(now)
+    imgui.spacing()
+    imgui.text_colored(P.accent.vec4, _HINT_CHORD)
+    imgui.same_line()
+    imgui.text_disabled(_HINT_TEXT)
+    imgui.spacing()
+    _art(now)
+
+
+def _quote(now: float) -> None:
+    """
+    The quote, one character at a time, each at its own alpha.
+
+    Through the draw list rather than as a chain of ``text_colored``/``same_line``
+    calls, for two reasons that both matter here. ``theme.faded`` returns the *packed*
+    colour and memoises it, so a per-character tint is a dict hit rather than the
+    per-frame colour arithmetic theme.py's header rules out of panels; and a hundred
+    characters as a hundred layout items would put a hundred entries in this window's
+    ID stack every frame to draw two lines of prose.
+
+    Positioning is by multiplying out a single advance, which is sound only because
+    the UI face is monospace -- the same property the art's column alignment rests on.
+    """
+    frame = splash.quote_frame(now)
+    draw = imgui.get_window_draw_list()
+    origin = imgui.get_cursor_screen_pos()
+    advance = imgui.calc_text_size("M").x
+    pitch = imgui.get_text_line_height_with_spacing()
+
+    for row, (line, alphas) in enumerate(zip(frame.lines, frame.alphas, strict=True)):
+        y = origin.y + row * pitch
+        for column, (char, alpha) in enumerate(zip(line, alphas, strict=True)):
+            if char == " ":
+                continue
+            draw.add_text(imgui.ImVec2(origin.x + column * advance, y), faded(P.text, alpha), char)
+
+    # The draw list writes pixels without advancing the cursor, so the space has to be
+    # claimed explicitly or everything below would be drawn on top of the quote.
+    imgui.dummy(imgui.ImVec2(advance * max(map(len, frame.lines)), pitch * len(frame.lines)))
+
+
+def _art(now: float) -> None:
+    """
+    The art, centred, at the largest size the remaining region allows.
+
+    Returns without drawing when it does not fit. ``fit_size`` clamps up to its floor
+    rather than reporting failure, so the answer still has to be checked against the
+    room -- a clipped half-silhouette reads as a rendering fault, where nothing reads
+    as deliberate.
+    """
+    avail = imgui.get_content_region_avail()
+    size = splash.fit_size(avail.x, avail.y, _ART_ROWS, _ART_COLS)
+    width, height = splash.required_extent(size, _ART_ROWS, _ART_COLS)
+    if width > avail.x or height > avail.y:
+        return
+
+    frame = _ART_FRAMES.frame(splash_art.ART, splash_art.RANK_OF, splash_art.RANKS, now)
+
+    imgui.set_cursor_pos_x(imgui.get_cursor_pos_x() + max(0.0, (avail.x - width) * 0.5))
+    imgui.push_font(face(Face.BODY), size)
+    imgui.push_style_color(imgui.Col_.text, P.text_dim.vec4)
+    # One text item containing newlines, not one call per row. ImGui advances a
+    # multi-line block by the font size per line, which is exactly what
+    # splash.LINE_PITCH_EM is; a call per row would add style.item_spacing.y between
+    # them and stand the art 61 spacings taller than required_extent just promised.
+    #
+    # ``text_unformatted`` rather than ``text``: the art contains '%', and a printf
+    # path would eat it.
+    imgui.text_unformatted("\n".join(frame))
+    imgui.pop_style_color()
+    imgui.pop_font()
 
 
 def _zero_state(snap: Snapshot, now: float) -> None:

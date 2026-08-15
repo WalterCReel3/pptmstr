@@ -80,6 +80,17 @@ class AgentState(enum.Enum):
 _ACTIVE_STATES = frozenset({AgentState.THINKING, AgentState.CALLING_TOOL, AgentState.RUNNING_TOOL})
 _TERMINAL_STATES = frozenset({AgentState.DONE, AgentState.FAILED, AgentState.CANCELLED})
 
+# The two topics a turn ending lands on. An interrupted turn is not a terminal
+# state -- interrupt is the recoverable lever, so the session stays messageable --
+# which leaves the topic as the only carrier for "your interrupt landed".
+#
+# They live here, next to the states they accompany, because both the driver that
+# writes them and the ``needs_you`` projection that reads them need the same
+# spelling, and a row and an inbox entry disagreeing about whether a turn was
+# interrupted is worse than either being wrong alone.
+AWAITING_TOPIC = "waiting for you"
+INTERRUPTED_TOPIC = "interrupted - waiting for you"
+
 
 @dataclass(frozen=True, slots=True)
 class UsageRollup:
@@ -359,6 +370,19 @@ class AgentRecord:
     # decision and is made in the UI (see ui/projects.py); putting the derived name
     # here would freeze one grouping rule into the store.
     cwd: str | None = None
+    # The work template this session was launched under, on a root record only.
+    # None on a sub-agent, which does not have one.
+    #
+    # Stored for the same reason as ``cwd`` directly above: it is chosen at launch,
+    # nothing else in the snapshot implies it, and a launch-time choice that is not
+    # stored is simply gone. It lives on ``driver.AgentSession`` otherwise, which
+    # the UI must not reach into -- a frame reads one Snapshot and nothing else.
+    #
+    # The *fact* -- the template's name -- not a derived "is a team" boolean. What
+    # counts as a team is a presentation judgement (see ui/board.has_board), and
+    # freezing one answer here would be the same mistake as storing a project name
+    # instead of a cwd.
+    template: str | None = None
     usage: UsageRollup = field(default_factory=UsageRollup)
     context: ContextSnapshot | None = None
     # A tuple, not one slot. An assistant turn can contain several tool calls, the
@@ -393,6 +417,20 @@ class AgentRecord:
     # Set once the operator has cleared this session's failure from the inbox. Only
     # meaningful while state is FAILED.
     acknowledged: bool = False
+    # The whole of this node's final answer, on a sub-agent that has stopped.
+    #
+    # Not derivable from the transcript, which is the reason it is stored. The
+    # transcript is an append-only stream of OUTPUT, TOOL_CALL and TOOL_RESULT
+    # segments with no marker saying where an answer begins -- "the OUTPUT since the
+    # last tool call" reconstructs it only for a sub-agent that never spoke
+    # mid-run, and gets it wrong for one that did. The driver, by contrast, is
+    # handed the answer whole on the SubagentStop hook and knows exactly what it is.
+    #
+    # Only a sub-agent has one today. A root's turn boundary is a ResultMessage,
+    # which carries no parent_tool_use_id and so can never be attributed to a
+    # sub-agent's node -- the reason this comes from the hook rather than from the
+    # message stream.
+    deliverable: str | None = None
 
     def with_(self, **changes: Any) -> AgentRecord:
         """Copy with fields replaced."""
@@ -494,6 +532,11 @@ class Task:
     state: TaskState = TaskState.PENDING
     declared_at: float = 0.0
     completed_at: float | None = None
+    # Who put it on the board. Stored rather than derived because nothing else in
+    # the snapshot implies it: there is one Store for the whole fleet, so `tasks` is
+    # a global map, and an unclaimed task has no other node attached to it. Without
+    # this a board cannot be scoped to the session whose agents are working it.
+    declared_by: NodeId | None = None
 
     def is_claimable(self, tasks: Mapping[TaskId, Task]) -> bool:
         """
@@ -505,9 +548,30 @@ class Task:
         """
         if self.state is not TaskState.PENDING:
             return False
-        return all(
-            (dep := tasks.get(d)) is not None and dep.state is TaskState.COMPLETED
+        return not self.blocked_on(tasks)
+
+    def blocked_on(self, tasks: Mapping[TaskId, Task]) -> tuple[TaskId, ...]:
+        """
+        The dependencies not yet completed, in declared order.
+
+        ``is_claimable`` is defined in terms of this rather than repeating the
+        walk, so the pane that shows *why* a task is blocked and the board that
+        decides *whether* it is cannot disagree.
+
+        A dependency naming a task that does not exist is unsatisfied, not absent
+        -- same rule as ``is_claimable``, and the reason a typo'd id shows as
+        blocked. Whether such an id was ever declared is a further question, and
+        one only the caller's ``tasks`` map can answer: `d not in tasks`.
+
+        Answered for a task in any state. A CLAIMED or COMPLETED task normally has
+        none outstanding, but nothing in the store enforces that -- a task can be
+        claimed and its dependency released afterwards -- and returning the honest
+        graph answer is cheaper than a state guard that hides it.
+        """
+        return tuple(
+            d
             for d in self.depends_on
+            if (dep := tasks.get(d)) is None or dep.state is not TaskState.COMPLETED
         )
 
 

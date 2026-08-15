@@ -210,6 +210,16 @@ OBLIGATION_GLYPH: dict[ObligationKind, str] = {
     ObligationKind.FAILURE: STATE_GLYPH[AgentState.FAILED],
 }
 
+# Open/closed, keyed by whether the thing is open. FontAwesome rather than the
+# Unicode triangles the shape suggests: the UI face is Inconsolata, whose cmap has
+# no U+25B0 block at all, so `▸` and `▾` both render as the same fallback box --
+# a disclosure that cannot say which way it points. The merged icon font is the
+# only one of the two guaranteed to carry a caret.
+DISCLOSURE_GLYPH: dict[bool, str] = {
+    False: fa.ICON_FA_CARET_RIGHT,
+    True: fa.ICON_FA_CARET_DOWN,
+}
+
 _OBLIGATION_ROLE: dict[ObligationKind, str] = {
     ObligationKind.APPROVAL: "state_awaiting",
     ObligationKind.QUESTION: "state_awaiting_input",

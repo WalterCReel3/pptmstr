@@ -61,6 +61,17 @@ SERVER_NAME = "pptmstr"
 # from every tool's declared schema so a model has no reason to invent it.
 FROM_KEY = "_from"
 
+# The key the gate writes when the operator rewrote a call before approving it.
+# Same convention and the same reason as FROM_KEY: the gate is the only
+# participant that can know, so a handler reading it out of its own arguments
+# would be reading something the model wrote.
+#
+# It exists because ``Concern.edited`` is otherwise unsettable. The operator's
+# rewrite reaches the handler as ordinary edited arguments, and a Concern built
+# from them is indistinguishable from one the sender wrote itself -- so the store
+# kept the edited text and no record that it was edited.
+EDITED_KEY = "_edited"
+
 
 def qualified(tool_name: str) -> str:
     """The name a tool is announced to the model under, and seen by the gate as."""
@@ -91,6 +102,28 @@ def _sender(args: dict[str, Any]) -> NodeId:
 
 def _text(body: str) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": body}]}
+
+
+def _schema(properties: dict[str, Any], required: tuple[str, ...] = ()) -> dict[str, Any]:
+    """
+    An explicit JSON Schema, for the tools that have an argument a caller may omit.
+
+    ``@tool`` takes either spelling. Given a mapping carrying a string ``type`` and a
+    ``properties`` key it announces that mapping verbatim; given anything else it
+    reads the mapping as ``{name: python_type}`` and puts **every** declared name in
+    ``required`` (``claude_agent_sdk.__init__._build_schema``, 0.2.134). The shorthand
+    therefore cannot say "optional", and a description inviting a caller to omit an
+    argument is refused by validation before the handler's default is ever reached.
+
+    Built here rather than written out at each call site because the fallback is
+    silent: a literal dict missing either key expands as the shorthand and marks
+    everything required again, with nothing to notice.
+
+    No ``additionalProperties: false``, and it must stay that way -- the gate adds
+    ``FROM_KEY`` through ``updatedInput``, so a closed schema would reject every
+    stamped call the bus runs on.
+    """
+    return {"type": "object", "properties": properties, "required": list(required)}
 
 
 def build_server(session: AgentSession) -> Any:
@@ -127,6 +160,10 @@ def build_server(session: AgentSession) -> Any:
             subject=str(args.get("subject", "")).strip(),
             body=str(args.get("body", "")),
             posted_at=time.monotonic(),
+            # Stamped by the gate, never by the sender. What the recipient was
+            # told differs from what the sender wrote, and this is the only place
+            # that fact survives the approval being resolved.
+            edited=bool(args.get(EDITED_KEY)),
         )
         bridge.emit(ConcernPosted(sender, concern))
         return _text(f"Concern delivered to {to}.")
@@ -159,7 +196,14 @@ def build_server(session: AgentSession) -> Any:
         "claim_task",
         "Take a unit of work off the shared board. Omit task_id to be given the "
         "oldest task whose dependencies are all met.",
-        {"task_id": str},
+        _schema(
+            {
+                "task_id": {
+                    "type": "string",
+                    "description": "The task to take. Omit it for the oldest claimable one.",
+                }
+            }
+        ),
     )
     async def claim_task(args: dict[str, Any]) -> dict[str, Any]:
         me = _sender(args)
@@ -185,10 +229,27 @@ def build_server(session: AgentSession) -> Any:
         "declare_task",
         "Put a unit of work on the shared board for any agent to claim. "
         "depends_on names tasks that must finish first.",
-        {"task_id": str, "title": str, "detail": str, "depends_on": list},
+        _schema(
+            {
+                "task_id": {
+                    "type": "string",
+                    "description": "Omit it and the board generates one.",
+                },
+                "title": {"type": "string"},
+                "detail": {
+                    "type": "string",
+                    "description": "The full specification. Omit it for a title-only task.",
+                },
+                "depends_on": {
+                    "type": "array",
+                    "description": "Task ids that must finish first. Omit it for none.",
+                },
+            },
+            required=("title",),
+        ),
     )
     async def declare_task(args: dict[str, Any]) -> dict[str, Any]:
-        _sender(args)
+        me = _sender(args)
         task_id = str(args.get("task_id", "")).strip() or f"t-{uuid.uuid4().hex[:8]}"
         raw_deps = args.get("depends_on") or []
         deps = tuple(str(d).strip() for d in raw_deps if str(d).strip())
@@ -200,7 +261,8 @@ def build_server(session: AgentSession) -> Any:
                     detail=str(args.get("detail", "")),
                     depends_on=deps,
                     declared_at=time.monotonic(),
-                )
+                ),
+                node_id=me,
             )
         )
         return _text(f"Task {task_id} is on the board.")

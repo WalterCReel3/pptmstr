@@ -43,6 +43,13 @@ dev = [
     "pytest-asyncio>=0.23",
     # Only scripts/screenshot.py imports this, for the glReadPixels grab.
     "pyopengl>=3.1",
+    # scripts/rank_glyphs.py reads glyph outlines out of Inconsolata-Medium to
+    # rank the splash art by ink. Dev-only on purpose: the ranking it produces is
+    # a checked-in literal in pptmstr/ui/splash_art.py, so nothing at runtime
+    # opens a font file. tests/test_splash_art.py recomputes the table when this
+    # is installed and skips when it is not, which is the only thing holding the
+    # literal to the face it was measured from.
+    "fonttools>=4.50",
 ]
 
 [project.scripts]

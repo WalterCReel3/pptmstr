@@ -528,32 +528,66 @@ Full speed while anything is `THINKING`/`CALLING_TOOL`/`RUNNING_TOOL`; ~9fps whe
 
 ### 4.3 Measured (rev. 3, step 5)
 
-`scripts/bench_idle.py`, three phases in one process and one GL context so the
-comparison is not across runs. Debian 12 / XWayland / Radeon, `fps_idle = 9`:
+`scripts/bench_idle.py`, four phases in one process and one GL context so the
+comparison is not across runs. Debian 12 / XWayland / Radeon, `fps_idle = 9`
+(`settings.fps_idle`, operator-settable, so every figure below is conditional on
+it). Twelve runs per layout, `--no-wake`, medians with ranges:
 
-| phase | fps | CPU % |
-|---|---|---|
-| full-speed — idling forced off | 60.7–60.8 | 10.5–13.5 |
-| idle — nothing active | 9.0 | 1.8 |
-| active — one agent `THINKING` | 59.7 | 12.7–13.6 |
+| phase | FOCUS — no splash | TRIAGE — splash | fps |
+|---|---|---|---|
+| full-speed — idling forced off, empty fleet | 13.3 (12.0–14.7) | 19.9 (17.6–21.0) | 60.8 |
+| idle — empty fleet | **1.7** (1.5–2.0) | **4.7** (3.7–5.0) | 8.7–9.0 |
+| idle+fleet — one session `AWAITING_APPROVAL` | **2.0** (1.9–2.2) | **2.1** (1.9–2.3) | 9.0 |
+| active — one agent `THINKING` | 16.8 (14.8–18.6) | 16.0 (13.7–18.6) | 59.5 |
 
-Four runs. **Idle costs 1.8% CPU against 10.5–13.5% at full speed** — call it a 6–7×
-reduction. The absolute idle figure is the stable one; the *ratio* moves between 14%
-and 21% purely because the full-speed baseline is noisy, so quote the absolute.
-Full speed is vsync-bound at ~60fps, so ~12% is the floor for a continuously
-redrawing window rather than anything this app is doing wrong.
+**The layout is now part of the measurement, and that is new.** The empty-fleet
+splash lives in NEEDS YOU, which exists only in TRIAGE, so the first two rows
+describe two different programs. `bench_idle.py` therefore takes `--layout` and
+prints it; before this it inherited whatever layout was last remembered, which
+meant consecutive runs could measure different things and the difference looked
+like noise.
 
-One run out of four showed the idle phase at 13.6fps/2.8% instead of 9.0/1.8. That
-is the benchmark perturbing what it measures: the wake probe emits an intent
-mid-phase, which wakes the UI and buys hello_imgui's full-speed-after-input window.
-Worth knowing rather than averaging away — the honest reading is "9fps except when
-something wakes it, which is the design working."
+**The splash costs 2.6× on the cold-start screen and nothing anywhere else.** Row
+two says 1.7% → 4.7%; row three says 2.0% → 2.1%. Seeding a single parked session
+is enough to make the two layouts agree to within the noise, because a non-empty
+fleet is exactly the condition under which the splash stops drawing. So the figure
+worth quoting for "the app is resting" is **2.0%**, unchanged by this feature, and
+the 4.7% is a cold-start-only cost that ends the moment the operator presses
+Ctrl+N. Row one moves for the same reason and is the more alarming number, but it
+is also the least real: with an empty fleet `any_active` is false, so full speed
+only happens inside hello_imgui's post-input window — an operator actively moving
+the mouse over an application they have not started anything in.
 
-The third row is the point of the experiment. The first two only show that idling
-*works*; an app that idles all the time would score beautifully on them and be
-useless. Row three is what proves `any_active` is the thing driving it — the
-predicate returns to full speed through its real input path (an `AgentSpawned` +
-`StateChanged` pair from the asyncio thread), not by being poked directly.
+Full speed is vsync-bound at ~60fps, so the low-teens figure is the floor for a
+continuously redrawing window rather than anything this app is doing wrong. Quote
+the absolute rather than the ratio: the ratio moves purely because the full-speed
+baseline is noisy.
+
+**Correction to the previous revision.** It attributed the occasional
+idle phase at 13.6fps to the benchmark's own wake probe — "the wake probe emits an
+intent mid-phase, which wakes the UI and buys hello_imgui's full-speed-after-input
+window." That explanation is wrong. With `--no-wake` the probe does not run at all
+and the anomaly persists: 3 of 12 TRIAGE and 4 of 12 FOCUS idle phases still came
+in above 11fps. The cause is hello_imgui's input-driven wake responding to
+environmental input on a live display — window mapping, focus, pointer crossing —
+which §4.2 keeps deliberately and calls orthogonal. Two things support this over
+the old reading: it is layout-independent and probe-independent, and it clusters in
+the *earlier* phase. The `idle+fleet` phase runs one slot later in the same process
+and was contaminated 0/12 times in FOCUS against 4/12 for the phase before it,
+which is what settling after the window opens looks like and is not what a
+mid-phase probe would produce. Runs above 11fps are dropped rather than averaged;
+the honest reading is still "9fps except when something wakes it, which is the
+design working", but the something is the desktop, not the benchmark.
+
+The last row is the point of the experiment. The ones above it only show that
+idling *works*; an app that idles all the time would score beautifully on them and
+be useless. The `active` row is what proves `any_active` is the thing driving it —
+the predicate returns to full speed through its real input path (an `AgentSpawned`
++ `StateChanged` pair from the asyncio thread), not by being poked directly. The
+`idle+fleet` row is the other half of that same argument, and it is why the phase
+was added: it seeds a session through the same path but parks it
+`AWAITING_APPROVAL`, so a predicate that keyed off "are there any agents" rather
+than "is any agent working" would show full speed there and does not.
 
 **Cross-thread wake latency: 69ms**, against the ≤111ms §4.2 predicted. That is the
 "an agent finished while you were reading something else" case, and it is also the
@@ -868,8 +902,13 @@ the precise message the mark exists to disprove.
   stop an agent and watch a teammate restart it.
 - ~~**Context-budget policy.**~~ **Settled in rev. 3 (§2.4):** context is a session-health signal, not a budget. Advisory only, surfaced as `ContextPressure` plus an observed compaction count, with "fork this session" as the offered action. Money is a separate axis with its own hard stop (`max_budget_usd`).
 - **Whether spawning a subagent is itself approval-gated.** Probably yes given your stated preferences — the `Agent` tool call is visible to `PreToolUse` like any other.
+- **Where a team's board and its concerns are drawn (new, step 8).** Both projections exist in the snapshot and nothing reads them, so a team is half-observable: the operator approves a message between two agents without seeing the work either holds. `planning/2026-08-12-the-board-has-no-surface.md`.
 - **Concurrency cap.** Subprocess-bound. Pick a number, surface it, make it configurable.
-- **Whether inter-agent messages are approval-gated (rev. 4, §2.7).** `post_concern` and `SendMessage` are tool calls, so the gate *can* see them. The argument for gating: a message that wakes a finished agent has blast radius comparable to spawning one, which §9 already leans toward gating. The argument against: a team that chats normally would make the operator a bottleneck on *conversation* rather than on writes, and the parking invariant's "parked agents cost nothing" says nothing about the operator's attention costing nothing. A plausible split is to gate on effect rather than on tool — deliver freely to a live agent, gate the send that wakes a terminal one — but that is a guess until step 8 makes it observable.
+- ~~**Whether inter-agent messages are approval-gated (rev. 4, §2.7).**~~ **Settled at step 8, and the question turned out to be two questions.** Interception is not optional: an in-process MCP handler is told only a tool name and its arguments, so `PreToolUse` stamping the sender is the only thing that gives a concern a `from` at all (§2.7). The gate is the bus's authentication layer, and that half is structural.
+
+  Only *the operator being asked* was ever policy, and it lands on the **send**. Rejection needs a channel back and only the sender has one — telling a recipient that a message it never saw was refused helps nobody, while `permissionDecisionReason` reaches the agent that wrote it and could revise it. The "gate on effect" split this entry proposed is unnecessary.
+
+  The bottleneck worry stands and is now answerable by use rather than by argument: concerns arrive as ordinary approval rows, so a dogfooding run measures it directly. Note that gating the send *reduced* scope — `ObligationKind` gains no fourth member and there is no concern review pane, because a parked `post_concern` is a `PendingApproval` like any other.
 - **Whether a settings-file hook inside a teammate process can reach our driver (rev. 4).** Assumed no, and the §0 decision rests on it. If it can, a bridged gate becomes conceivable and the agent-teams fork reopens. This is the single finding that would reverse a recorded decision, which is reason enough to close it deliberately rather than by accident.
 
 ---

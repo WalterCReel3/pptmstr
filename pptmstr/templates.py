@@ -12,11 +12,12 @@ the operator edits -- so it is worth being able to write, read and test one with
 an agent runtime anywhere near it.
 
 **The prompts are the feature.** Roles are cheap; a lead that implements the work
-itself instead of delegating, or workers that agree with each other, are the two
-ways a team produces less than one agent would. Both are prompt problems. The lead
-briefing is written to say *wait* and *synthesise*, and the review roles are
-written to disagree -- an investigator told to "check the work" reports that it
-looks fine, while one told to find the case that breaks it goes looking.
+itself instead of delegating, a lead that runs one agent per role while
+independent tasks sit unclaimed, and workers that agree with each other are the
+ways a team produces less than one agent would. All three are prompt problems. The
+lead briefing is written to say *fan out*, *wait* and *synthesise*, and the review
+roles are written to disagree -- an investigator told to "check the work" reports
+that it looks fine, while one told to find the case that breaks it goes looking.
 """
 
 from __future__ import annotations
@@ -110,7 +111,8 @@ def lead_briefing(template: WorkTemplate) -> str:
     Generated rather than written out per template so the role names in the prose
     cannot drift from the roles actually passed to the SDK. A briefing naming a
     teammate that does not exist is worse than no briefing: the lead spends turns
-    trying to reach it.
+    trying to reach it. The worked example of an instance address is taken from a
+    role this template has, for the same reason.
     """
     if not template.roles:
         return template.lead_prompt.strip()
@@ -119,21 +121,49 @@ def lead_briefing(template: WorkTemplate) -> str:
     for role in template.ordered_roles():
         lines.append(f"- **{role.name}** — {role.description}")
 
-    if template.spawn_order:
-        order = " → ".join(template.spawn_order)
-        lines += ["", f"Start them in this order when the work allows it: {order}."]
-
+    # The instance-address example names a role of this template, on the same
+    # no-drift grounds as the roster above. Which role it is does not have to agree
+    # with the head of the spawn order and deliberately is not made to: the order
+    # answers "which role first" and this answers "what is the second agent of a
+    # role called", and tying them would imply the two questions are one.
+    example = template.roles[0].name
     lines += [
         "",
         "## How the team coordinates",
         "",
-        "Use the Agent tool with `subagent_type` set to a role name to start one.",
+        "Use the Agent tool with `subagent_type` set to a role name to start an agent",
+        "in that role. A role is a job description, not a single agent — you may run",
+        "several agents in the same role, and where the board has independent tasks you",
+        "should run one worker per independent task, within reason. Start those workers",
+        "together rather than one after another.",
+    ]
+
+    # After the paragraph above, not before it. The order is advisory and real (see
+    # WorkTemplate), but a roster arrow read first is the line a skimming lead takes
+    # "one of each, then wait" from -- so it lands once the count question has
+    # already been answered, and says which question it is answering.
+    if template.spawn_order:
+        order = " → ".join(template.spawn_order)
+        lines += [
+            "",
+            f"When the work allows a choice, start the roles in this order: {order}.",
+            "That is which role goes first, not how many agents of each to run.",
+        ]
+
+    lines += [
+        "",
+        "The first agent in a role is addressed by the bare role name, the second as",
+        f"`{example}-2`, the third as `{example}-3`; `lead`, `main` and `root` are you.",
         "",
         "- `declare_task(task_id, title, detail, depends_on)` puts work on a shared",
         "  board. `depends_on` names tasks that must finish first; anything blocked",
-        "  becomes claimable on its own the moment its dependencies complete.",
-        "- Workers call `claim_task()` to take the oldest unblocked item. Declare the",
-        "  work and let them claim it rather than assigning it by hand.",
+        "  becomes claimable on its own the moment its dependencies complete. Two",
+        "  tasks with no dependency between them are independent and can be worked at",
+        "  the same time, so declare a dependency wherever two pieces of work would",
+        "  touch the same file.",
+        "- Workers call `claim_task()` to take the oldest unblocked item, one at a",
+        "  time. Declare the work and let them claim it rather than assigning it by",
+        "  hand; another agent in the same role is how the board drains faster.",
         "- `post_concern(to, subject, body)` sends a message to a role by name, or to",
         "  `lead` for you. `read_inbox()` collects what has been sent to you.",
         "- Messages between agents are reviewed by the operator before they arrive, so",
@@ -141,10 +171,12 @@ def lead_briefing(template: WorkTemplate) -> str:
         "",
         "## Your job",
         "",
-        "Break the work into tasks and put them on the board. Start the roles you",
-        "need. Then **wait** — read your inbox, answer concerns, and let the workers",
-        "work. Do not implement the task yourself while a worker is doing it; two",
-        "agents editing the same file is the failure this structure exists to avoid.",
+        "Break the work into tasks and put them on the board, then start the workers",
+        "the board needs — one per independent task, not one per role. Then **wait**",
+        "— read your inbox, answer concerns, and let the workers work. Do not implement",
+        "the task yourself while a worker is doing it, and do not put two agents on work",
+        "that touches the same file; two agents editing the same file is the failure this",
+        "structure exists to avoid, and `depends_on` is what keeps them apart.",
         "",
         "**Call `read_inbox()` before you write your final answer**, every time. A",
         "worker's concern is not the same thing as its result: the result is what it",
@@ -176,7 +208,9 @@ def worker_prompt(role: Role) -> str:
             "",
             "Take work with `claim_task()`; call `complete_task(task_id)` when it is",
             "done, or `release_task(task_id)` if you cannot proceed, so somebody else",
-            "can. Do not work on something you have not claimed.",
+            "can. Do not work on something you have not claimed — the board is shared,",
+            "another agent may be working in the same role as you, and the item you",
+            "claimed is the only one that is yours.",
             "",
             "**Before you finish, post a concern to `lead`** naming the thing you are",
             "least sure about, or what you noticed that nobody asked you to look at.",
@@ -209,7 +243,7 @@ FEATURE = WorkTemplate(
     roles=(
         Role(
             name="builder",
-            description="Implements the change. Give it one task at a time.",
+            description="Implements the change. Works one claimed task at a time.",
             prompt=(
                 "You implement changes. Work only on the task you have claimed, "
                 "keep the change as small as it can be and still be correct, and "

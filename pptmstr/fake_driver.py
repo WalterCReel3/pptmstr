@@ -25,11 +25,24 @@ from .intents import (
     AgentSpawned,
     ApprovalRequested,
     CompactionObserved,
+    ConcernPosted,
     ContextPolled,
+    InboxRead,
     StateChanged,
+    TaskClaimRequested,
+    TaskCompleted,
+    TaskDeclared,
     TopicChanged,
 )
-from .model import AgentState, ContextSnapshot, NodeId, PendingApproval
+from .model import (
+    AWAITING_TOPIC,
+    AgentState,
+    Concern,
+    ContextSnapshot,
+    NodeId,
+    PendingApproval,
+    Task,
+)
 from .transcript import SegmentKind, Transcript
 
 _MODELS = ("claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001")
@@ -176,7 +189,7 @@ class FakeDriver:
             "The checksum is computed but never compared, in sixty places.\n"
             "Do you want me to fix the parser, or only report it?\n",
         )
-        self.bridge.emit(StateChanged(asked, AgentState.AWAITING_INPUT, topic="waiting for you"))
+        self.bridge.emit(StateChanged(asked, AgentState.AWAITING_INPUT, topic=AWAITING_TOPIC))
 
         self.bridge.emit(
             AgentFinished(
@@ -188,7 +201,90 @@ class FakeDriver:
             )
         )
 
-    def _spawn(self, parent: NodeId | None, agent_type: str | None) -> NodeId:
+        # One team, so DETAIL's board section is reachable at all. Every other root
+        # here is solo and correctly renders no board, which is exactly why the
+        # section could not be judged from this fixture before.
+        self._seed_board(self._spawn(parent=None, agent_type=None, template="feature"))
+
+    def _seed_board(self, root: NodeId) -> None:
+        """
+        One team session with a board on it, so DETAIL's board section is reachable.
+
+        Without this the whole fixture is solo sessions, and the board renders as
+        absent everywhere -- which is correct behaviour and proves nothing about
+        the drawing. Every state the section has is represented here: claimed and
+        being worked, blocked, blocked on an id that was never declared, completed
+        by a worker that has since stopped, still claimed by a worker that stopped
+        holding it, and a concern in each of its three states including one the
+        operator rewrote.
+
+        The last two are the pair worth keeping distinct. Only one of them is a
+        warning, and a fixture carrying just the stranded row cannot show that the
+        ordinary success path is being flagged as one.
+        """
+        builder = self._spawn(parent=root, agent_type="builder")
+        reviewer = self._spawn(parent=root, agent_type="reviewer")
+        scout = self._spawn(parent=root, agent_type="explore")
+
+        for task in (
+            Task(id="t1", title="parse the element set", declared_at=1.0),
+            Task(id="t2", title="validate the checksum", depends_on=("t1",), declared_at=2.0),
+            Task(id="t3", title="cover the parser in tests", depends_on=("t2",), declared_at=3.0),
+            # A dependency nobody declared. Unclaimable forever, and this pane is
+            # the only place that is visible.
+            Task(id="t4", title="update the changelog", depends_on=("t9",), declared_at=4.0),
+            # Unblocked on purpose. A claim is refused while its dependencies are
+            # unfinished, so a task behind t2 could not reach the "owner stopped"
+            # state this row exists to show.
+            Task(id="t5", title="profile the hot loop", declared_at=5.0),
+        ):
+            self.bridge.emit(TaskDeclared(task, node_id=root))
+
+        # Done properly and by an agent that has since stopped, which is what a
+        # worker that did its job looks like. Not a warning, and the fixture needs
+        # it precisely so that a regression putting the warning here is visible.
+        self.bridge.emit(TaskClaimRequested(scout, request_id="fake-k1", task_id="t1"))
+        self.bridge.emit(TaskCompleted(scout, "t1", at=time.monotonic()))
+        self.bridge.emit(
+            AgentFinished(scout, AgentState.DONE, ended_at=time.monotonic(), error=None)
+        )
+        # Claimed and still being worked.
+        self.bridge.emit(TaskClaimRequested(builder, request_id="fake-k2", task_id="t2"))
+        # Claimed by an agent that then stopped, which is the stranded row: the task
+        # stays CLAIMED, nothing releases it, and nobody is working it.
+        self.bridge.emit(TaskClaimRequested(reviewer, request_id="fake-k3", task_id="t5"))
+        self.bridge.emit(
+            AgentFinished(reviewer, AgentState.DONE, ended_at=time.monotonic(), error=None)
+        )
+
+        for cid, sender, subject, body in (
+            ("fake-c1", reviewer, "the retry loop never terminates", "third call onward"),
+            ("fake-c2", builder, "checksum ignored in sixty places", "tle/parse.py"),
+            ("fake-c3", reviewer, "two roles answer to one name", "only the first is reachable"),
+        ):
+            self.bridge.emit(
+                ConcernPosted(
+                    sender,
+                    Concern(
+                        id=cid,
+                        sender=sender,
+                        recipient=root,
+                        subject=subject,
+                        body=body,
+                        posted_at=time.monotonic(),
+                        # The operator's rewrite, which is now a stamped fact
+                        # rather than an unsettable field.
+                        edited=cid == "fake-c2",
+                    ),
+                )
+            )
+        # One read, so the log shows delivered and waiting side by side rather than
+        # three rows in the same state.
+        self.bridge.emit(InboxRead(node_id=root, request_id="fake-r1", at=time.monotonic()))
+
+    def _spawn(
+        self, parent: NodeId | None, agent_type: str | None, template: str = "solo"
+    ) -> NodeId:
         n = next(_ids)
         node: NodeId = (f"sess-{n}", None) if parent is None else (parent[0], f"agent-{n}")
         # The transcript travels with the spawn, exactly as the real driver does it:
@@ -220,6 +316,9 @@ class FakeDriver:
                 # Roots only. A sub-agent inherits its session's directory in the
                 # store, which is the same rule the real driver relies on.
                 cwd=self.rng.choice(_CWDS) if parent is None else None,
+                # Roots only, exactly as the real driver announces it: a sub-agent
+                # has no template of its own and must not read as a team.
+                template=template if parent is None else None,
                 transcript=transcript,
             )
         )

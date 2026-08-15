@@ -141,7 +141,15 @@ before I reply" is the right end to keep anyway.
 Step 1 alone removed the machinery from the reading surface, which was the
 complaint. Step 3 makes what is left read well.
 
-### 4. Narration in DETAIL's empty state — done, and *not* as markdown
+### 4. Narration in DETAIL's empty state — done, and superseded
+
+Superseded by 2026-08-13-detail-swaps-to-a-deliverable. The measurement below
+stands; the conclusion drawn from it does not. It asked what is affordable to
+draw per frame, and the governing question turned out to be what an operator
+notices — a continuously updating surface is one the eye habituates to, so
+narration was spending the signal that a deliverable's arrival should carry.
+Retained here because the costs were measured rather than argued and are still
+the numbers to reason from.
 
 A *running* session has no obligation, so `detail._nothing_selected` renders
 "nothing waiting on you from X" and stops — dead space at exactly the moment its
