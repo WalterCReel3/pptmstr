@@ -36,6 +36,11 @@ class Settings:
     # Subprocess-bound rather than GIL-bound: one CLI process per session, so the
     # ceiling is RAM. Surfaced and configurable rather than hard-coded (design §9).
     concurrency_cap: int = 4
+    # Sub-agents of one session, which is a different constraint from the line above
+    # and must not be sized from it: a sub-agent is not a subprocess, it shares its
+    # parent's CLI process, so the cost is concurrent API streams and token burn
+    # rather than RAM. Kept equal to driver.DEFAULT_SUBAGENT_CAP by a test.
+    subagent_cap: int = 4
     # Full speed while any agent is active, this while everything is idle or parked.
     fps_idle: float = 9.0
     # Word-wrap the multi-line composers instead of scrolling them horizontally.

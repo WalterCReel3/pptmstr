@@ -51,7 +51,7 @@ from claude_agent_sdk.types import SystemPromptPreset
 
 from .approval import Disposition, classify, render_diff, summarize
 from .bridge import Bridge
-from .bus import BUS_TOOLS, FROM_KEY, SERVER_NAME, build_server
+from .bus import BUS_TOOLS, EDITED_KEY, FROM_KEY, SERVER_NAME, build_server
 from .intents import (
     AgentFinished,
     AgentResumed,
@@ -62,12 +62,21 @@ from .intents import (
     ContextPolled,
     Intent,
     StateChanged,
+    SubagentDelivered,
     SubagentProgress,
     TopicChanged,
     UsageAccrued,
 )
 from .log import LOG
-from .model import AgentState, ContextSnapshot, NodeId, PendingApproval, UsageRollup
+from .model import (
+    AWAITING_TOPIC,
+    INTERRUPTED_TOPIC,
+    AgentState,
+    ContextSnapshot,
+    NodeId,
+    PendingApproval,
+    UsageRollup,
+)
 from .templates import SOLO, WorkTemplate, lead_briefing, worker_prompt
 from .transcript import SegmentKind, Transcript
 
@@ -84,6 +93,51 @@ CONTEXT_POLL_S = 20.0
 # How long to keep reading after the stream goes quiet. Only reached when a
 # sub-agent is still outstanding; the loop otherwise exits on the parent result.
 SUBAGENT_GRACE_S = 120.0
+
+# How many sub-agents one session may have running at once, when the operator has
+# not said otherwise.
+#
+# Not `Settings.concurrency_cap`, and not the same constraint. That one bounds root
+# sessions and its ceiling is RAM, because each of those is a Claude Code CLI
+# subprocess. Sub-agents are not: they share the parent's session_id and their hooks
+# come back over the parent's single control channel, so what N of them cost is N
+# concurrent API streams and N transcripts of token burn against one node process,
+# plus an operator who has to answer for each spawn at the gate. Four lets both roles
+# of the two-role templates run doubled, which is the fan-out the briefing asks for,
+# and stops a lead that has read "one worker per independent task" from turning a
+# twelve-item board into twelve streams.
+DEFAULT_SUBAGENT_CAP = 4
+
+# The names that mean the root session, and so can never be allocated to a
+# sub-agent. A worker calls the agent that gave it the job by whichever of these
+# comes to mind, and all three have to land on the same node.
+ROOT_ADDRESSES = ("lead", "main", "root")
+
+
+def _split_address(address: str) -> tuple[str, int]:
+    """
+    An instance address as the role it belongs to and its ordinal.
+
+    ``builder-2`` is the second agent in the ``builder`` role; a bare ``builder`` is
+    the first. The inverse of the ``_address_for`` allocation, and the thing that
+    lets ``role_status`` tell an ordinal nobody is running from a name nobody has.
+    """
+    base, _, ordinal = address.rpartition("-")
+    if base and ordinal.isdigit() and int(ordinal) >= 2:
+        return base, int(ordinal)
+    return address, 1
+
+
+def _spawn_key(subagent_type: str) -> str:
+    """
+    The name both halves of the spawn join agree to call a role.
+
+    The Agent call writes ``subagent_type`` and ``SubagentStart`` reports
+    ``agent_type``; case and surrounding space are the only ways those two can name
+    one role differently. A call that named no role at all keys on the same fallback
+    ``_subagent_start`` gives an unnamed agent_type, so the pair still meets.
+    """
+    return subagent_type.strip().lower() or "agent"
 
 
 def _hook_output(decision: str, reason: str | None = None) -> HookJSONOutput:
@@ -178,9 +232,13 @@ class Translator:
     _last_cost: float = 0.0
     # Tool calls seen this turn, so a ToolResultBlock can name what it belongs to.
     _tool_names: dict[str, str] = field(default_factory=dict)
-    # Whether deltas have already written the current message's content. Set by
-    # _stream, consumed and cleared by _assistant.
-    _streamed_content: bool = False
+    # Nodes whose deltas have already written the current message's content. Added
+    # by _stream, consumed and discarded by _assistant. Keyed by node because a
+    # sub-agent's deltas and the root's complete message interleave on one stream,
+    # and a single flag would let one suppress the other's text entirely. A mark is
+    # cleared only by a complete message for the *same* node, so a node whose
+    # attribution changes between its deltas and its message keeps its mark.
+    _streamed_nodes: set[NodeId] = field(default_factory=set)
     # taskId -> subject, so a TaskUpdate carrying nothing but an id and a status can
     # still say which piece of work it is about. This is the agent's own statement of
     # what it is driving towards, which no amount of deriving from file paths reaches.
@@ -192,6 +250,11 @@ class Translator:
     # the session once SubagentStart has been joined; used to route Task* progress,
     # which is keyed by tool_use_id rather than agent_id (§2.5.1).
     subagent_by_tool_use: dict[str, NodeId] = field(default_factory=dict)
+    # Sub-agent NodeId -> the Transcript that node's record holds. Published by the
+    # session, which mints the buffer at spawn and hands the same object to the
+    # store on AgentSpawned (intents.py) -- both sides must write and read one
+    # object or the UI gets an empty buffer while the driver fills an orphan.
+    subagent_transcripts: dict[NodeId, Transcript] = field(default_factory=dict)
 
     def _node_of(self, message: object) -> NodeId:
         """
@@ -205,6 +268,18 @@ class Translator:
         if parent:
             return self.subagent_by_tool_use.get(parent, self.node_id)
         return self.node_id
+
+    def _transcript_of(self, node: NodeId) -> Transcript:
+        """
+        The buffer a node's segments belong in.
+
+        An unknown node falls back to the session's rather than being dropped: a
+        sub-agent whose spawn join is still missing is already attributed to the
+        root by _node_of, and the two must not disagree about where its words go.
+        """
+        if node == self.node_id:
+            return self.transcript
+        return self.subagent_transcripts.get(node, self.transcript)
 
     def handle(self, message: object) -> list[Intent]:
         if isinstance(message, AssistantMessage):
@@ -227,6 +302,7 @@ class Translator:
         out: list[Intent] = []
         topic: str | None = None
         node = self._node_of(msg)
+        transcript = self._transcript_of(node)
 
         # With include_partial_messages on, every text and thinking block has already
         # arrived delta by delta, and the complete message repeats it in full. Writing
@@ -234,20 +310,20 @@ class Translator:
         # The deltas win because they are what makes reasoning visible as it happens
         # (goal #3); the complete message is still the only source of usage, tool
         # calls and state, so it is not simply ignored.
-        already_streamed = self._streamed_content
-        self._streamed_content = False
+        already_streamed = node in self._streamed_nodes
+        self._streamed_nodes.discard(node)
 
         for block in msg.content:
             if isinstance(block, ThinkingBlock):
                 if not already_streamed:
-                    self.transcript.append(SegmentKind.REASONING, block.thinking)
+                    transcript.append(SegmentKind.REASONING, block.thinking)
             elif isinstance(block, TextBlock):
                 if not already_streamed:
-                    self.transcript.append(SegmentKind.OUTPUT, block.text)
+                    transcript.append(SegmentKind.OUTPUT, block.text)
             elif isinstance(block, ToolUseBlock):
                 self._tool_names[block.id] = block.name
                 self._note_task(block)
-                self.transcript.append(
+                transcript.append(
                     SegmentKind.TOOL_CALL,
                     f"\n{block.name}({_compact_args(block.input)})\n",
                     meta=(("tool", block.name), ("tool_use_id", block.id)),
@@ -331,15 +407,17 @@ class Translator:
         Tool results arrive as user messages -- that is how the protocol carries them
         back to the model, not a sign the operator typed anything.
         """
+        node = self._node_of(msg)
         if isinstance(msg.content, str):
             return []
+        transcript = self._transcript_of(node)
         for block in msg.content:
             if isinstance(block, ToolResultBlock):
                 self._bind_task_id(block)
                 name = self._tool_names.get(block.tool_use_id, "tool")
                 kind = SegmentKind.ERROR if block.is_error else SegmentKind.TOOL_RESULT
-                self.transcript.append(kind, f"{name} -> {_compact_result(block.content)}\n")
-        return [StateChanged(self._node_of(msg), AgentState.THINKING)]
+                transcript.append(kind, f"{name} -> {_compact_result(block.content)}\n")
+        return [StateChanged(node, AgentState.THINKING)]
 
     def _result(self, msg: ResultMessage) -> list[Intent]:
         out: list[Intent] = []
@@ -359,11 +437,11 @@ class Translator:
             )
             return out
 
-        # terminal_reason distinguishes "finished" from "you stopped it", which the
-        # UI must not conflate -- a cancelled agent is not a completed one.
-        cancelled = msg.terminal_reason in ("aborted_streaming", "aborted_tools")
-        state = AgentState.CANCELLED if cancelled else AgentState.DONE
-        out.append(AgentFinished(self.node_id, state, time.monotonic()))
+        # No state intent for a turn that merely ended, interrupted or not. A
+        # ResultMessage is a turn boundary and only ``run()`` knows what that means
+        # for the node -- it is the one place that has waited out the sub-agent
+        # grace window and the context poll first. Deciding here means naming a
+        # state before the facts that would settle it exist.
         return out
 
     def _rate_limit(self, msg: RateLimitEvent) -> list[Intent]:
@@ -409,10 +487,10 @@ class Translator:
         Token-level deltas, so reasoning is surfaced as it streams rather than
         reconstructed after the fact (goal #3).
 
-        Setting ``_streamed_content`` tells the complete AssistantMessage that follows
-        not to write the same text again. Doing it with a flag rather than by
-        comparing content means it also behaves correctly when streaming is
-        unavailable -- the flag stays false and the complete message is the source.
+        Recording the node in ``_streamed_nodes`` tells the complete AssistantMessage
+        that follows not to write the same text again. Doing it with a marker rather
+        than by comparing content means it also behaves correctly when streaming is
+        unavailable -- the node is absent and the complete message is the source.
 
         ``input_json_delta`` is deliberately dropped. It carries raw JSON fragments
         of a tool call's arguments, which would interleave with the formatted call
@@ -425,12 +503,13 @@ class Translator:
             return []
         delta = event.get("delta") or {}
         kind = delta.get("type")
+        node = self._node_of(msg)
         if kind == "thinking_delta":
-            self.transcript.append(SegmentKind.REASONING, delta.get("thinking", ""))
-            self._streamed_content = True
+            self._transcript_of(node).append(SegmentKind.REASONING, delta.get("thinking", ""))
+            self._streamed_nodes.add(node)
         elif kind == "text_delta":
-            self.transcript.append(SegmentKind.OUTPUT, delta.get("text", ""))
-            self._streamed_content = True
+            self._transcript_of(node).append(SegmentKind.OUTPUT, delta.get("text", ""))
+            self._streamed_nodes.add(node)
         return []
 
 
@@ -481,6 +560,7 @@ class AgentSession:
         cwd: str | None = None,
         interactive: bool = True,
         template: WorkTemplate | None = None,
+        subagent_cap: int = DEFAULT_SUBAGENT_CAP,
     ) -> None:
         self.bridge = bridge
         self.task = task
@@ -497,75 +577,202 @@ class AgentSession:
         # Whether an operator is attached to answer. False means headless, where a
         # tool needing approval is denied rather than left to hit the timeout.
         self.interactive = interactive
-        # agent_id -> the Agent call's tool_use_id, joined by adjacency: an
-        # Agent PreToolUse is immediately followed by SubagentStart. Used only to
-        # route progress descriptions and output (§2.5.1); approvals never depend
-        # on it, because a hook inside a sub-agent reports agent_id directly.
+        # agent_id -> the tool_use_id of the Agent call that started it, taken from
+        # the ledger below when it starts. Used only to route progress descriptions
+        # and output (§2.5.1); approvals never depend on it, because a hook inside a
+        # sub-agent reports agent_id directly.
         self._spawn_tool_use: dict[str, str] = {}
-        self._last_spawn_tool_use_id: str | None = None
-        self._subagents: set[str] = set()
-        # agent_type -> agent_id, so the bus can route on a role name the model can
-        # plausibly write ("qa") instead of an opaque id it has no way to learn.
+        # subagent_type -> the tool_use_ids of Agent calls this session has admitted
+        # in that role and not yet matched to a SubagentStart, oldest first.
+        #
+        # A ledger rather than one slot because the join has to hold whether or not
+        # the CLI interleaves the two hooks. The SDK says parallel sub-agents' tool
+        # lifecycle hooks share one control channel (claude_agent_sdk/types.py), and
+        # the briefing asks the lead to start independent work together, so two
+        # PreToolUse hooks may both be answered before either SubagentStart fires. A
+        # single slot then binds the second call's id to the first sub-agent and
+        # nothing at all to the second, and the unbound one's words fall back to the
+        # root's transcript.
+        #
+        # Keyed on the role because it is the only field both events carry:
+        # PreToolUse has the Agent call's `subagent_type` and SubagentStart has
+        # `agent_type`. Two agents started in one role are matched FIFO and so may
+        # end up swapped relative to their descriptions -- nothing distinguishes
+        # twins, since the tool_use_id passed to the SubagentStart callback is an
+        # unrelated UUID. A swap costs a label; a miss costs a whole transcript.
+        self._pending_spawns: dict[str, list[str]] = {}
+        # The most sub-agents allowed to be running or admitted at once.
+        self.subagent_cap = subagent_cap
+        # Two sets, because "how many are running now" and "have I met this id
+        # before" are different questions and the answers legitimately diverge.
+        #
+        # _live_subagents answers the first: added on SubagentStart, discarded on
+        # SubagentStop and on the grace-period expiry, so it is the count the loop
+        # waits on. _seen_subagents cannot answer it -- it never shrinks.
+        self._live_subagents: set[str] = set()
+        # _seen_subagents answers the second, and it is the only thing the resume
+        # signal may read: a woken sub-agent starts again under its original id
+        # after it has already stopped, so a set that a stop empties would call
+        # that wake a spawn.
+        self._seen_subagents: set[str] = set()
+        # agent_id -> the Transcript handed to the store on AgentSpawned. Kept past
+        # SubagentStop so a resumed sub-agent keeps appending to the buffer the UI
+        # is already reading (I7), rather than to a replacement the record does not
+        # hold.
+        self._subagent_transcripts: dict[str, Transcript] = {}
+        # address -> agent_id, so the bus can route on a name the model can plausibly
+        # write ("qa", "builder-2") instead of an opaque id it has no way to learn.
         # Driver-side rather than a store lookup because the answer is needed on the
         # asyncio thread, where the store cannot be read.
         #
-        # First writer wins: two sub-agents of one type would otherwise silently
-        # retarget a role mid-run, and a concern going to whichever twin spawned
-        # last is worse than a concern that consistently goes to the first.
+        # Keyed by instance, not by type: a role is a job description and several
+        # agents may hold it at once. One address names one agent for the session's
+        # life, so a concern cannot retarget mid-run.
         self._roles: dict[str, str] = {}
         self._client: ClaudeSDKClient | None = None
+        # Whether the cancellation this session is about to receive was asked for.
+        # Set by SessionPool.close and SessionPool.shutdown before they cancel; read
+        # by run()'s cancellation arm, which needs exactly this one bit.
+        #
+        # It exists because cancellation cannot answer the question by itself:
+        # Bridge.stop's loop thread cancels every remaining task at shutdown whether
+        # or not the pool was asked first, and the SDK's anyio task groups make a
+        # transport teardown surfacing as a CancelledError plausible too. Whether a
+        # teardown was intended is knowledge only the caller has, so the caller
+        # states it rather than run() inferring it from the exception.
+        self.teardown_requested = False
         self.transcript_path: str | None = None
 
     # -- roles, for the bus ------------------------------------------------------
 
     def resolve_role(self, name: str) -> NodeId | None:
         """
-        The node a role name addresses, or None.
+        The node an address names, or None.
 
-        "lead" and "main" both name the root session, because that is what a worker
-        naturally calls the agent that gave it the job.
+        "lead", "main" and "root" all name the root session, because that is what a
+        worker naturally calls the agent that gave it the job. Everything else is an
+        instance address allocated by ``_address_for``.
         """
         key = name.strip().lower()
-        if key in ("lead", "main", "root"):
+        if key in ROOT_ADDRESSES:
             return self.node_id
         agent_id = self._roles.get(key)
         return (self.session_id, agent_id) if agent_id else None
 
     def role_of(self, node: NodeId) -> str | None:
-        """The role name a node answers to -- the inverse, for rendering a sender."""
+        """
+        The address a node answers to -- the inverse, for rendering a sender.
+
+        The instance address, not the role's type: ``bus.py`` puts this in front of
+        a model that will reply to it, so it has to be a name ``resolve_role``
+        accepts and routes back to this same node.
+        """
         if node == self.node_id:
             return "lead"
-        for role, agent_id in self._roles.items():
+        for address, agent_id in self._roles.items():
             if (self.session_id, agent_id) == node:
-                return role
+                return address
         return None
 
     def known_roles(self) -> tuple[str, ...]:
         return ("lead", *sorted(self._roles))
 
+    def _addresses_in_role(self, base: str) -> tuple[str, ...]:
+        """
+        Every address currently answering in one role, lowest ordinal first.
+
+        Ordered on the parsed ordinal rather than on the string, which would put
+        ``builder-10`` in front of ``builder-2`` in a list the lead reads as a count.
+        """
+        found = [(_split_address(a), a) for a in self._roles]
+        return tuple(a for (parsed_base, _n), a in sorted(found) if parsed_base == base)
+
     def role_status(self, name: str) -> str:
         """
-        Why a role could not be reached, in words the model can act on.
+        Why an address could not be reached, in words the model can act on.
 
-        A role in the template that has not spawned is a *timing* problem the lead
-        can fix by starting it; an unknown name is a *spelling* problem. Collapsing
-        both into "no such agent" is what sent the probe's worker into retrying the
-        same wrong name.
+        Three mistakes, three answers, because the fix differs. A role on the team
+        with nothing running is *timing* -- start one. An ordinal past the agents
+        that are running is *counting* -- the role is reachable, just not that many
+        times over. Anything else is *spelling*. The probe's worker retried the same
+        wrong name because one message covered two of these.
         """
         key = name.strip().lower()
-        if self.template.role(key) is not None:
+        base, _ordinal = _split_address(key)
+        running = self._addresses_in_role(base)
+        if running:
+            reachable = ", ".join(running)
             return (
-                f"{key!r} is a role on this team but has not been started yet. "
-                f"Start it with the Agent tool (subagent_type={key!r}) first."
+                f"The {base!r} role is running {len(running)} agent(s), reachable as "
+                f"{reachable} -- nothing answers to {key!r}. Address one of those, or "
+                f"start another agent in the role with the Agent tool "
+                f"(subagent_type={base!r})."
+            )
+        if self.template.role(base) is not None:
+            return (
+                f"{base!r} is a role on this team but has not been started yet. "
+                f"Start it with the Agent tool (subagent_type={base!r}) first."
             )
         known = ", ".join(self.known_roles())
         return f"No agent known as {name!r}. Reachable now: {known}."
+
+    def _address_for(self, agent_id: str, agent_type: str) -> str:
+        """
+        The address a sub-agent answers to, allocated once and never moved.
+
+        The first agent of a type takes the bare role name and later ones take
+        ``builder-2``, ``builder-3`` -- the convention ``templates.lead_briefing``
+        hands the lead, so the two must not drift.
+
+        Idempotent per agent_id: ``SubagentStart`` fires again when a sibling wakes a
+        finished sub-agent (§2.3), and an address that moved mid-run would send every
+        concern already written to it to a sibling instead.
+
+        A candidate another role in the template answers to, or one of the root's own
+        names, is skipped rather than taken. A template may define a role literally
+        called ``builder-2``, and two agents at one address is the failure this table
+        exists to prevent.
+        """
+        for address, held in self._roles.items():
+            if held == agent_id:
+                return address
+        base = agent_type.strip().lower() or "agent"
+        declared = self.template.role_names()
+        ordinal = 1
+        while True:
+            candidate = base if ordinal == 1 else f"{base}-{ordinal}"
+            spoken_for = (
+                candidate in self._roles
+                or candidate in ROOT_ADDRESSES
+                or (candidate != base and candidate in declared)
+            )
+            if not spoken_for:
+                return candidate
+            ordinal += 1
 
     # -- hooks -------------------------------------------------------------------
 
     def _node_for(self, agent_id: str | None) -> NodeId:
         """The node a hook belongs to: the root session, or one of its sub-agents."""
         return (self.session_id, agent_id) if agent_id else self.node_id
+
+    def _model_for_type(self, agent_type: str) -> str:
+        """
+        The model a sub-agent of this type actually runs on.
+
+        `_team` gives the SDK `role.model or "inherit"`, so a record built from the
+        session's model states something false whenever a role overrode it. The join
+        is `agent_type` rather than the address `_roles` allocated: `builder-2` is a
+        second agent in the builder role, and a role is one model however many agents
+        hold it.
+
+        The session's own model is the honest fallback, not a guess -- "inherit" is
+        what an unconfigured role is given, and an agent_type outside the template
+        is one the CLI resolved from its own definitions, which this hook is not
+        told the model for.
+        """
+        role = self.template.role(agent_type)
+        return (role.model if role else None) or self.model
 
     async def _subagent_start(
         self, hook_input: HookInput, _tool_use_id: str | None, _context: HookContext
@@ -582,28 +789,36 @@ class AgentSession:
         # under its original id (§2.3, measured in scripts/verify_wake_path.py).
         # Emitting AgentSpawned again would rebuild the record from nothing --
         # zeroing usage, resetting started_at, and swapping the Transcript the UI is
-        # reading (I7). Membership of _subagents is the only signal available here,
-        # and it is a reliable one because it is written on this path alone.
-        resumed = agent_id in self._subagents
-        self._subagents.add(agent_id)
-        self._roles.setdefault(agent_type.lower(), agent_id)
-        if self._last_spawn_tool_use_id:
-            self._spawn_tool_use[agent_id] = self._last_spawn_tool_use_id
-            self._last_spawn_tool_use_id = None
+        # reading (I7). The wake follows the sub-agent's own stop, so only the set
+        # that outlives a stop can recognise it.
+        resumed = agent_id in self._seen_subagents
+        self._seen_subagents.add(agent_id)
+        self._live_subagents.add(agent_id)
+        self._roles[self._address_for(agent_id, agent_type)] = agent_id
 
         if resumed:
             self.bridge.emit(AgentResumed(node_id=(self.session_id, agent_id), at=time.monotonic()))
             return {}
 
+        # Below the resume return: a wake is not a spawn and no Agent call was
+        # admitted for it, so consuming a ledger entry here would overwrite a live
+        # sub-agent's join with an id belonging to some other call -- and take the
+        # entry from the pending spawn it really belongs to.
+        admitted = self._take_spawn_tool_use(agent_type)
+        if admitted:
+            self._spawn_tool_use[agent_id] = admitted
+
+        transcript = self._subagent_transcripts.setdefault(agent_id, Transcript())
         self.bridge.emit(
             AgentSpawned(
                 node_id=(self.session_id, agent_id),
                 parent=self.node_id,
                 task=agent_type,
-                model=self.model,
+                model=self._model_for_type(agent_type),
                 started_at=time.monotonic(),
                 agent_type=agent_type,
                 topic="starting",
+                transcript=transcript,
             )
         )
         return {}
@@ -618,11 +833,28 @@ class AgentSession:
         node = (self.session_id, agent_id)
         # last_assistant_message is the sub-agent's answer, handed over without
         # having to reconstruct it from a stream that never arrives (§2.5.1).
-        summary = str(data.get("last_assistant_message", "") or "")
-        if summary:
-            self.bridge.emit(SubagentProgress(node, summary.splitlines()[0][:80]))
+        answer = str(data.get("last_assistant_message", "") or "")
+        if answer:
+            # Two intents from one string, because the row and the pane want
+            # different things from it: the row needs a line that fits a column, and
+            # the pane needs the answer the sub-agent was spawned to produce.
+            #
+            # This hook is the only place the answer arrives *delimited*. A
+            # sub-agent's AssistantMessages do reach the stream, carrying
+            # parent_tool_use_id, and _assistant routes their text into this node's
+            # transcript -- so the words are usually there too, as bytes with nothing
+            # marking where the answer begins. Boundaries in the transcript are what
+            # 2026-08-13-detail-swaps-to-a-deliverable step 4 is for; until they
+            # exist, this string is the only whole answer the store can hold.
+            #
+            # The message that would carry a boundary cannot arrive: ResultMessage
+            # has no parent_tool_use_id field at all (claude_agent_sdk/types.py,
+            # unlike AssistantMessage, UserMessage and StreamEvent), so no result is
+            # ever attributable to a sub-agent's own node.
+            self.bridge.emit(SubagentProgress(node, answer.splitlines()[0][:80]))
+            self.bridge.emit(SubagentDelivered(node, answer))
         self.bridge.emit(AgentFinished(node, AgentState.DONE, time.monotonic()))
-        self._subagents.discard(agent_id)
+        self._live_subagents.discard(agent_id)
         return {}
 
     async def _pre_tool_use(
@@ -642,12 +874,19 @@ class AgentSession:
         agent_id = data.get("agent_id")
         node = self._node_for(agent_id)
         # The hook-visible name is "Agent" even though the tool list says "Task"
-        # (§2.5.1). Remember the id so the SubagentStart that follows can be joined.
-        if tool_name in ("Agent", "Task") and not agent_id:
-            self._last_spawn_tool_use_id = str(data.get("tool_use_id", "")) or None
+        # (§2.5.1).
+        spawn = tool_name in ("Agent", "Task") and not agent_id
+        tool_use_id = str(data.get("tool_use_id", ""))
+
+        # Ahead of classify, because a spawn that cannot be admitted must not reach
+        # the operator: parking it would ask a human to approve a call this session
+        # has already decided it will not run.
+        if spawn and self._outstanding_subagents() >= self.subagent_cap:
+            return _hook_output("deny", self._at_cap_reason())
 
         disposition = classify(tool_name, tool_input)
         if disposition is Disposition.AUTO_APPROVE:
+            self._expect_spawn(spawn, tool_use_id, tool_input)
             # Stamped even when nothing is reviewed. The stamp is authentication,
             # not policy: an auto-approved read_inbox still has to know whose inbox
             # it is, and a handler that reached its body unstamped would raise.
@@ -659,10 +898,80 @@ class AgentSession:
             # timeout. A run with no operator must fail closed and say why.
             return _hook_output("deny", f"{tool_name} needs approval and no operator is attached")
 
-        return await self._park(tool_name, tool_input, str(data.get("tool_use_id", "")), node)
+        return await self._park(tool_name, tool_input, tool_use_id, node, spawn=spawn)
+
+    def _expect_spawn(self, spawn: bool, tool_use_id: str, tool_input: Mapping[str, Any]) -> None:
+        """
+        Admit an Agent call to the ledger, for its SubagentStart to claim.
+
+        Written on the allow paths only, never when the hook is entered. The CLI
+        runs the tool -- and so fires the SubagentStart this pairs with -- only
+        after the hook permits it, so an id recorded any earlier belongs to a call
+        that may still be denied, cancelled, or overtaken by another spawn while a
+        human sits in the gate. `Agent` is in `_REVIEW`, so that gap is a human's
+        latency rather than a scheduling accident.
+
+        Appended rather than assigned: several calls can be admitted before the
+        first of them starts, and each one is owed its own join.
+        """
+        if not spawn or not tool_use_id:
+            return
+        role = _spawn_key(str(tool_input.get("subagent_type") or ""))
+        self._pending_spawns.setdefault(role, []).append(tool_use_id)
+
+    def _take_spawn_tool_use(self, agent_type: str) -> str | None:
+        """
+        The admitted Agent call a starting sub-agent belongs to, consumed.
+
+        None when nothing is outstanding in that role, which is a real case rather
+        than an error: a sub-agent that spawns its own sub-agent makes an Agent call
+        carrying an agent_id, which is not admitted here at all. Handing that start
+        some other role's entry would misroute two streams instead of one.
+        """
+        role = _spawn_key(agent_type)
+        queue = self._pending_spawns.get(role)
+        if not queue:
+            return None
+        tool_use_id = queue.pop(0)
+        if not queue:
+            del self._pending_spawns[role]
+        return tool_use_id
+
+    def _outstanding_subagents(self) -> int:
+        """
+        How many sub-agents are running or have been committed to.
+
+        The ledger term is what makes this a bound rather than a suggestion. Every
+        PreToolUse in a burst of spawns can be answered before the first
+        SubagentStart fires, so a count taken from `_live_subagents` alone reads
+        zero for each of them and admits the whole burst.
+        """
+        return len(self._live_subagents) + sum(len(q) for q in self._pending_spawns.values())
+
+    def _at_cap_reason(self) -> str:
+        """
+        Why a spawn was refused, in terms that separate it from a policy denial.
+
+        A capacity refusal is about timing, not about the call: the same Agent call
+        succeeds later, and the lead needs to be told that rather than left to
+        rewrite a request that was never wrong.
+        """
+        return (
+            f"This session already has {self._outstanding_subagents()} sub-agent(s) running "
+            f"or starting and its cap is {self.subagent_cap}, so this spawn is refused for "
+            f"capacity -- the call itself is fine. Wait for one of them to finish and start "
+            f"this one then, or declare the work with declare_task and name what it waits "
+            f"on in depends_on, so the board carries the ordering instead of an agent held "
+            f"open to express it."
+        )
 
     def _stamp_bus_call(
-        self, tool_name: str, tool_input: Mapping[str, Any], node: NodeId
+        self,
+        tool_name: str,
+        tool_input: Mapping[str, Any],
+        node: NodeId,
+        *,
+        edited: bool = False,
     ) -> Mapping[str, Any] | None:
         """
         Attach the authenticated sender to a bus call, or None for anything else.
@@ -676,6 +985,11 @@ class AgentSession:
         Applied *after* any operator edit (see ``_park``), so the sender cannot be
         rewritten by edit-then-approve either. Returning None leaves the arguments
         untouched, which is what every non-bus tool wants.
+
+        ``edited`` travels the same way and for the same reason: the gate is also
+        the only participant that can know the operator rewrote the call, and a
+        handler building a record from the rewritten arguments alone cannot tell
+        them from what the sender wrote.
         """
         if tool_name not in BUS_TOOLS:
             return None
@@ -683,10 +997,24 @@ class AgentSession:
         # A list, not the NodeId tuple: this crosses to the CLI as JSON and comes
         # back, and JSON has no tuples. bus._sender reconstitutes it.
         stamped[FROM_KEY] = [node[0], node[1]]
+        # Written on every stamped call, not only edited ones. `stamped` starts as
+        # a copy of the model's own arguments, so writing this only when it is True
+        # would let a sender that put `_edited` in its input keep it -- and claim
+        # the operator had vetted a message the operator never saw. Overwriting
+        # unconditionally is the same rule FROM_KEY follows, and it also makes it
+        # moot whether the CLI forwards an out-of-schema argument, which is
+        # unmeasured.
+        stamped[EDITED_KEY] = bool(edited)
         return stamped
 
     async def _park(
-        self, tool_name: str, tool_input: dict[str, Any], tool_use_id: str, node: NodeId
+        self,
+        tool_name: str,
+        tool_input: dict[str, Any],
+        tool_use_id: str,
+        node: NodeId,
+        *,
+        spawn: bool = False,
     ) -> HookJSONOutput:
         """
         Block this agent until the operator decides. I8, structurally.
@@ -737,8 +1065,21 @@ class AgentSession:
             # edited concern still carries the sender the gate authenticated rather
             # than one the edit could have introduced.
             approved_args = decision.edited_args if decision.edited_args is not None else tool_input
+            # Admitted from the arguments that will actually run: the operator can
+            # retype subagent_type in the editor, and the role the ledger files this
+            # call under has to be the one SubagentStart will report.
+            self._expect_spawn(spawn, tool_use_id, approved_args)
+            # Compared against the *original* input and before the stamp is
+            # applied. After it, every approved bus call differs from what the
+            # model sent -- the stamp itself is a rewrite -- so the comparison
+            # would report every concern as edited. Opening the editor and
+            # changing nothing is likewise not an edit.
+            edited = decision.edited_args is not None and dict(decision.edited_args) != dict(
+                tool_input
+            )
             return _allow_with(
-                self._stamp_bus_call(tool_name, approved_args, node) or decision.edited_args
+                self._stamp_bus_call(tool_name, approved_args, node, edited=edited)
+                or decision.edited_args
             )
         reason = decision.reason or "Rejected by operator"
         LOG.warn("gate", f"rejected {pending.summary}")
@@ -837,6 +1178,10 @@ class AgentSession:
                 started_at=time.monotonic(),
                 topic="connecting",
                 cwd=self.cwd,
+                # Announced here rather than left on the session: this is the only
+                # emitter that knows the template, and the UI cannot reach into an
+                # AgentSession to ask.
+                template=self.template.name,
                 transcript=self.transcript,
             )
         )
@@ -855,6 +1200,10 @@ class AgentSession:
         """
         self.announce()
         translator = Translator(self.node_id, self.transcript)
+        # The last failure this session reported and has not recovered from. Held
+        # across the whole body, not just the loop, because the cancellation arm has
+        # to know about it too.
+        failure: AgentFinished | None = None
 
         try:
             async with ClaudeSDKClient(options=self._options()) as client:
@@ -876,29 +1225,98 @@ class AgentSession:
                 async for message in client.receive_messages():
                     self._sync_subagent_map(translator)
                     for intent in translator.handle(message):
+                        if (
+                            isinstance(intent, AgentFinished)
+                            and intent.node_id == self.node_id
+                            and intent.state is AgentState.FAILED
+                        ):
+                            # Held, not just noted: re-asserting the failure later
+                            # needs the error text, and this is the only object that
+                            # has it. Re-emitting the same frozen intent also keeps
+                            # ended_at at the moment the session actually died rather
+                            # than moving it to whenever the stream happened to close.
+                            failure = intent
                         self.bridge.emit(intent)
-                    if isinstance(message, ResultMessage):
-                        if self._subagents:
+                    if isinstance(message, ResultMessage) and not message.is_error:
+                        # A good turn clears the standing failure. Read per result
+                        # rather than latched: a session that errored and then
+                        # answered is an ordinary session again.
+                        failure = None
+                    if isinstance(message, ResultMessage) and failure is None:
+                        if self._live_subagents:
                             await self._await_subagents(client, translator)
                         await self._poll_context()
                         # Ready for another prompt rather than finished. Idle, so a
                         # conversation paused on the operator still costs nothing.
-                        self.bridge.emit(
-                            StateChanged(
-                                self.node_id,
-                                AgentState.AWAITING_INPUT,
-                                topic="waiting for you",
-                            )
+                        #
+                        # An interrupted turn lands here too, on the same non-terminal
+                        # state: interrupt is meant to keep the session usable, so the
+                        # confirmation that it landed rides in the topic. The topic is
+                        # trustworthy where a summary would not be -- terminal_reason
+                        # is the CLI reporting what it did, not an inference about
+                        # what the agent said.
+                        topic = (
+                            INTERRUPTED_TOPIC
+                            if message.terminal_reason in ("aborted_streaming", "aborted_tools")
+                            else AWAITING_TOPIC
                         )
+                        self.bridge.emit(
+                            StateChanged(self.node_id, AgentState.AWAITING_INPUT, topic=topic)
+                        )
+                    if isinstance(message, ResultMessage):
+                        # The turn is over, including the drain above for any
+                        # sub-agent still reporting, so nothing admitted during it is
+                        # still on its way to starting.
+                        self._forget_pending_spawns()
                     if time.monotonic() - last_poll > CONTEXT_POLL_S:
                         await self._poll_context()
                         last_poll = time.monotonic()
 
-                # Only reached if the CLI closed the stream on us.
-                self.bridge.emit(AgentFinished(self.node_id, AgentState.DONE, time.monotonic()))
+                # Only reached if the CLI closed the stream on us -- which is one of
+                # the things it does after an error result.
+                #
+                # A standing failure is *re-asserted*, not merely left alone. Between
+                # the error and here, any StateChanged for this node moves the record
+                # off FAILED: the store's arm guards on `rec.pending` and not on
+                # terminality, and `_rate_limit` and `_assistant` both emit one for
+                # the root. Emitting nothing here would leave a session whose
+                # subprocess is gone reading as rate-limited or thinking -- no
+                # obligation, no error text, and `any_active` never settling.
+                if failure is not None:
+                    self.bridge.emit(failure)
+                else:
+                    self.bridge.emit(AgentFinished(self.node_id, AgentState.DONE, time.monotonic()))
         except asyncio.CancelledError:
-            # The normal way a session ends: the operator closed it.
-            self.bridge.emit(AgentFinished(self.node_id, AgentState.DONE, time.monotonic()))
+            # Cancellation is not by itself evidence of anything. `SessionPool.close`
+            # and `SessionPool.shutdown` both say so first; `Bridge.stop`'s loop
+            # thread cancels every remaining task whether or not the pool was asked,
+            # and the SDK's anyio task groups make a transport teardown surfacing
+            # here plausible as well.
+            #
+            # An asked-for teardown is DONE, and closing one session and quitting the
+            # application are the same statement for a session: the operator ended
+            # it. DONE deliberately wins over a standing FAILED there -- ending a
+            # session *is* the dismissal, and leaving FAILED would keep a dismissed
+            # session in the "needs you" list with nothing left to act on.
+            #
+            # A cancel nobody asked for ended a live session without being asked to,
+            # which is a failure and is reported as one. Reporting it as DONE would
+            # be the same silent loss of a failure signal this arm's neighbour exists
+            # to prevent; reporting nothing would leave the record wherever its last
+            # StateChanged put it, which is that neighbour's own defect.
+            if self.teardown_requested:
+                self.bridge.emit(AgentFinished(self.node_id, AgentState.DONE, time.monotonic()))
+            elif failure is not None:
+                self.bridge.emit(failure)
+            else:
+                self.bridge.emit(
+                    AgentFinished(
+                        self.node_id,
+                        AgentState.FAILED,
+                        time.monotonic(),
+                        error="the session was cancelled without being closed",
+                    )
+                )
             raise
         except Exception as exc:
             # The session dying must not take the asyncio thread with it: other
@@ -936,10 +1354,22 @@ class AgentSession:
         await client.query(text)
 
     def _sync_subagent_map(self, translator: Translator) -> None:
-        """Republish the tool_use_id -> node join the translator needs for progress."""
+        """
+        Republish what the translator needs to attribute a sub-agent's messages: the
+        tool_use_id -> node join for progress, and the node -> Transcript join that
+        keeps its words out of the root's buffer.
+
+        Both are rebuilt from the session's tables on every message rather than
+        pushed from the hook, because the hook runs on the CLI's callback and the
+        translator is only ever touched from the message loop.
+        """
         translator.subagent_by_tool_use = {
             tool_use_id: (self.session_id, agent_id)
             for agent_id, tool_use_id in self._spawn_tool_use.items()
+        }
+        translator.subagent_transcripts = {
+            (self.session_id, agent_id): transcript
+            for agent_id, transcript in self._subagent_transcripts.items()
         }
 
     async def _await_subagents(self, client: ClaudeSDKClient, translator: Translator) -> None:
@@ -953,15 +1383,57 @@ class AgentSession:
         which is why the main loop reads with no deadline at all.
         """
         stream = client.receive_messages()
-        while self._subagents:
+        while self._live_subagents:
             try:
                 message = await asyncio.wait_for(stream.__anext__(), timeout=SUBAGENT_GRACE_S)
             except (TimeoutError, StopAsyncIteration):
-                LOG.warn("agent", f"{len(self._subagents)} sub-agent(s) stopped reporting")
+                LOG.warn("agent", f"{len(self._live_subagents)} sub-agent(s) stopped reporting")
+                self._abandon_live_subagents()
                 return
             self._sync_subagent_map(translator)
             for intent in translator.handle(message):
                 self.bridge.emit(intent)
+
+    def _abandon_live_subagents(self) -> None:
+        """
+        Settle every sub-agent still outstanding when the grace period expires.
+
+        FAILED because the honest statement is that it stopped reporting: CANCELLED
+        would claim someone cancelled it and DONE would claim an answer arrived,
+        and neither is known here. Without this the record never reaches a terminal
+        state and the id never leaves the live set, so the card spins for the
+        session's life and the count the set answers can only shrink.
+
+        _seen_subagents is deliberately untouched -- a sub-agent that goes quiet can
+        still be woken later, and that start is a resume, not a spawn.
+        """
+        ended_at = time.monotonic()
+        for agent_id in self._live_subagents:
+            self.bridge.emit(
+                AgentFinished(
+                    (self.session_id, agent_id),
+                    AgentState.FAILED,
+                    ended_at,
+                    error=f"stopped reporting for {SUBAGENT_GRACE_S:g}s",
+                )
+            )
+        self._live_subagents.clear()
+
+    def _forget_pending_spawns(self) -> None:
+        """
+        Drop admitted spawns that never started, at the end of the parent's turn.
+
+        A ledger entry is only ever consumed by a SubagentStart, which the CLI fires
+        when it runs the tool the gate just allowed. One still here when the turn is
+        over is owed to a call that will not start, and because the cap counts these
+        it would take a slot away for the session's life -- the same permanently
+        shrinking capacity `_abandon_live_subagents` exists to prevent above.
+
+        Clearing costs nothing a spawn wanted: a sub-agent that starts afterwards has
+        no admitted call to match anyway, so it joins nothing either way, and the
+        alternative is that it joins some *other* call's id.
+        """
+        self._pending_spawns.clear()
 
     async def _poll_context(self) -> None:
         """

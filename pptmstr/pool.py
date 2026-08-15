@@ -109,10 +109,16 @@ class SessionPool:
         rather than on concurrent work, and makes this a first-class action rather
         than a tidy-up.
         """
+        session = self.sessions.pop(node_id, None)
+        if session is not None:
+            # Said before the cancel, because the session reads it while unwinding.
+            # A cancelled session cannot tell a teardown someone asked for from a
+            # transport dying under it, and only the first means it is finished
+            # rather than broken.
+            session.teardown_requested = True
         task = self._running.pop(node_id, None)
         if task is not None:
             task.cancel()
-        self.sessions.pop(node_id, None)
         self._drain()
 
     async def interrupt(self, node_id: NodeId) -> None:
@@ -127,8 +133,21 @@ class SessionPool:
             await session.interrupt()
 
     async def shutdown(self) -> None:
-        """Cancel everything and wait, so no subprocess outlives the UI."""
+        """
+        Cancel everything and wait, so no subprocess outlives the UI.
+
+        Quitting the application closes every session, which is the contract
+        ``AgentState.DONE`` states -- and it is the one cancellation where who asked
+        is known exactly. So each session is told the teardown was asked for, the
+        same as ``close`` does: reporting an intended shutdown as a failure would be
+        a false failure signal, which is the class of defect the terminal-state work
+        exists to remove.
+        """
         self._waiting.clear()
+        for node_id in self._running:
+            session = self.sessions.get(node_id)
+            if session is not None:
+                session.teardown_requested = True
         tasks = list(self._running.values())
         for task in tasks:
             task.cancel()

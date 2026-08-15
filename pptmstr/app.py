@@ -309,7 +309,16 @@ def _launch(state: AppState, task: str, model: str, cwd: str, template: str = "s
     shape = templates.by_name(template) or templates.SOLO
 
     async def go() -> None:
-        pool.submit(AgentSession(state.bridge, task, model=model, cwd=cwd, template=shape))
+        pool.submit(
+            AgentSession(
+                state.bridge,
+                task,
+                model=model,
+                cwd=cwd,
+                template=shape,
+                subagent_cap=state.settings.subagent_cap,
+            )
+        )
 
     state.bridge.submit(go())
     LOG.info("app", f"launched in {cwd} as {shape.name}: {task[:60]}")

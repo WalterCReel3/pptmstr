@@ -76,6 +76,35 @@ def test_wrap_inputs_rejects_non_bool(tmp_path: Path) -> None:
     assert load(path).wrap_inputs is Settings().wrap_inputs
 
 
+def test_subagent_cap_round_trips(tmp_path: Path) -> None:
+    path = tmp_path / "settings.json"
+    save(Settings(subagent_cap=7), path)
+    assert load(path).subagent_cap == 7
+
+
+def test_the_subagent_cap_default_matches_the_drivers_own() -> None:
+    """
+    Two defaults for one number, in modules that must not import each other: a
+    session built without a cap has to end up at the same ceiling as one built from
+    a settings file the operator never edited. Deliberate duplication, pinned.
+    """
+    from pptmstr.driver import DEFAULT_SUBAGENT_CAP
+
+    assert Settings().subagent_cap == DEFAULT_SUBAGENT_CAP
+
+
+def test_the_two_caps_are_separate_settings(tmp_path: Path) -> None:
+    """
+    Sub-agents share their parent's CLI process, so their ceiling is API concurrency
+    rather than the RAM one concurrency_cap bounds. Sizing one from the other would
+    make a machine with more memory run more agents per session, which is a category
+    error, not a tuning decision.
+    """
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"concurrency_cap": 12}))
+    assert load(path).subagent_cap == Settings().subagent_cap
+
+
 def test_save_is_atomic_and_leaves_no_temp_files(tmp_path: Path) -> None:
     """
     Written to a temp file in the same directory and renamed, so an interrupted
