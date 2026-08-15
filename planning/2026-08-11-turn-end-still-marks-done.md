@@ -1,11 +1,15 @@
 # A turn ending still marks the node DONE
 
-**Dated:** 2026-08-11 · **Status:** proposed, not built · **Found by:** operator
-report ("sessions marked done while still working"), confirmed by code review ·
-**Regresses:** the DONE/AWAITING_INPUT split decided in
+**Dated:** 2026-08-11 · **Status:** built 2026-08-14 (see *What was built* below) ·
+**Found by:** operator report ("sessions marked done while still working"),
+confirmed by code review · **Regresses:** the DONE/AWAITING_INPUT split decided in
 `2026-08-10-conversational-sessions.md` — that doc narrowed `DONE` to "the operator
 closed the session"; `Translator._result` was never updated to match and still
 implements the old one-shot meaning.
+
+Line numbers below are against the working tree of 2026-08-14. They have drifted
+30–300 lines since this was written, and a stale number reads as verified when it
+is not — recheck by symbol name if they no longer land.
 
 ## What was observed
 
@@ -19,13 +23,13 @@ moment an operator reaches for the reply box.
 
 ## Why it happens
 
-`AgentState.DONE`'s contract, stated on the enum itself (`model.py:43`): **"DONE
+`AgentState.DONE`'s contract, stated on the enum itself (`model.AgentState`): **"DONE
 means the operator closed the session, not that a turn ended."** Two places in
 `pptmstr/driver.py` don't honor it.
 
 ### 1. `Translator._result` fires DONE on every ordinary turn end
 
-`driver.py:339-362`:
+`Translator._result`, as it stood before the fix:
 
 ```python
 def _result(self, msg: ResultMessage) -> list[Intent]:
@@ -37,12 +41,12 @@ def _result(self, msg: ResultMessage) -> list[Intent]:
 ```
 
 Every `ResultMessage` is a turn boundary, not a session boundary — `run()`'s own
-docstring says so (`driver.py:694-703`). This method predates the conversational
+docstring says so (`AgentSession.run`). This method predates the conversational
 rewrite (`d6f0c96`) and still carries the pre-rewrite assumption that a result
 ends the session.
 
 The corrective intent, `StateChanged(AWAITING_INPUT)`, is emitted later in
-`run()`'s loop (`driver.py:724-740`) — but only after two real `await` points:
+`run()`'s message loop — but only after two real `await` points:
 
 ```python
 for intent in translator.handle(message):     # AgentFinished(DONE) queued here, immediately
@@ -54,25 +58,27 @@ if isinstance(message, ResultMessage):
     self.bridge.emit(StateChanged(self.node_id, AgentState.AWAITING_INPUT, ...))
 ```
 
-`Bridge`'s queue is a plain FIFO (`bridge.py:139-163`) — this is not a reordering
-race. It is a genuine gap: the UI thread drains and renders on its own frame
-cadence (`app.py:100`), independently of that coroutine's progress, so any frame
-landing between the two `emit()` calls renders `DONE`. Every consumer of
-`AgentState.is_terminal` treats that at face value:
+`Bridge`'s queue is a plain FIFO (`Bridge.to_ui`, written by `emit` and taken by
+`drain`) — this is not a reordering race. It is a genuine gap: the UI thread drains
+and renders on its own frame cadence (`app`'s frame loop), independently of
+that coroutine's progress, so any frame landing between the two `emit()` calls
+renders `DONE`. Every consumer of `AgentState.is_terminal` treats that at face
+value:
 
-- `ui/compose.py:81-94` disables the reply box.
-- `ui/rail.py:93-98` buckets the row as `"ended"`.
-- `store.py:_needs_you` (404-415) and `ui/inbox.py:490-494` only recognize a
-  waiting agent via `AWAITING_INPUT` — while the node sits at `DONE` it is in
-  neither the "needs you" list nor the "still running" list.
+- `ui/compose.py` disables the reply box on `state.is_terminal`.
+- `ui/rail._density` buckets the row as `"ended"`.
+- `store._needs_you` recognizes a waiting agent only via
+  `AWAITING_INPUT` — while the node sits at `DONE` it produces no obligation, so it
+  is in neither the "needs you" list the inbox renders (`ui/inbox`) nor the
+  "still running" list.
 
 It self-heals once `StateChanged(AWAITING_INPUT)` lands — `store.py`'s
-`StateChanged` arm has no terminal guard — but for the length of that gap the UI
-is actively, not just staleness-ly, wrong.
+`StateChanged` arm guards only on `rec.pending`, so a terminal state is no obstacle
+— but for the length of that gap the UI is actively, not just staleness-ly, wrong.
 
 ### 2. A real failure gets un-failed moments later
 
-`driver.py:724-740`'s `if isinstance(message, ResultMessage):` block does not
+`run()`'s `if isinstance(message, ResultMessage):` block does not
 check `msg.is_error`. So when `_result` correctly emits `AgentFinished(FAILED)`
 for a genuine API error, the same loop iteration goes on to await
 `_poll_context()` and then emits `StateChanged(AWAITING_INPUT)` regardless —
@@ -84,8 +90,8 @@ transient, it's a silent loss of the failure signal.
 
 ### What the tests currently lock in
 
-`tests/test_driver.py::test_success_finishes_done` (line 291) and
-`::test_interrupted_turn_is_cancelled_not_done` (line 298) assert the *current*
+`tests/test_driver.py::test_success_finishes_done` and
+`::test_interrupted_turn_is_cancelled_not_done` asserted the pre-fix
 behavior of `_result` at the unit level — a successful result produces
 `AgentFinished(DONE)`, an interrupted one produces `AgentFinished(CANCELLED)`.
 Both need to change as part of this fix, not just the integration-level behavior
@@ -126,9 +132,9 @@ turn merely ended or the session did. `Translator._result` stops deciding
 
 - **`AgentFinished(DONE)`** is reserved for the three call sites that are already
   correct and untouched by this change: the message stream closing on its own
-  (`driver.py:746`), the operator closing the session
-  (`asyncio.CancelledError`, `driver.py:749`), and a sub-agent's own stop hook
-  for its own node (`driver.py:543`).
+  (the end of `run()`'s `async for`), the operator closing the session
+  (`run()`'s `asyncio.CancelledError` arm), and a sub-agent's own stop hook for
+  its own node (`AgentSession._subagent_stop`).
 
 - **Tests**: rewrite `test_success_finishes_done` to assert `_result` emits *no*
   `AgentFinished` for an ordinary completion (only `UsageAccrued`), and
@@ -156,10 +162,13 @@ the transcript's own record of the interruption, not from the row looking
 finished.
 
 If that's accepted, `AgentState.CANCELLED` becomes reachable nowhere in the
-current codebase (it stays defined, and `ui/rail.py:96` keeps branching on it, in
-case a future terminal-cancellation path — e.g. the pool hard-cancelling a wedged
-session — needs it). Worth confirming that's an acceptable outcome before
+current codebase (it stays defined, and `ui/rail`'s `_density` and `_claim` keep branching
+on it, in case a future terminal-cancellation path — e.g. the pool hard-cancelling
+a wedged session — needs it). Worth confirming that's an acceptable outcome before
 building, since it is a step beyond "fix the bug as reported."
+
+**Decided 2026-08-14: accepted.** An interrupted turn lands on `AWAITING_INPUT`
+with `model.INTERRUPTED_TOPIC`, and `CANCELLED` is emitted nowhere.
 
 ## Consequences worth stating before building
 
@@ -167,8 +176,9 @@ building, since it is a step beyond "fix the bug as reported."
   emission-ordering fix; `AgentFinished`, `StateChanged`, and every store arm stay
   as they are. Lower risk than it looks from the size of the write-up.
 - **The `AgentFinished` store arm still has no guard** against being applied to a
-  node that shouldn't be touched (unlike `StateChanged`/`SubagentProgress`, which
-  both check `rec.pending` / `rec.state.is_terminal`). Not adding one is
+  node that shouldn't be touched. Neither does `StateChanged`, which guards on
+  `rec.pending` alone — a terminal state does not stop it. (`SubagentProgress` is
+  the one arm that checks `rec.state.is_terminal`.) Not adding one is
   deliberate: a guard there would paper over a future instance of this same class
   of bug (wrong intent, right shape) instead of surfacing it. The fix belongs at
   the emission site, which is where the meaning of the message is actually known.
@@ -189,3 +199,97 @@ building, since it is a step beyond "fix the bug as reported."
   through the sub-agent's lifetime — this is the reproduction with the widest
   window (up to 120s under the current code) and the easiest to confirm by eye.
 - `mypy`, `ruff`, `black`, full suite green before calling this built.
+
+## What was built (2026-08-14)
+
+The proposal above, plus five things it did not cover. Each is here because the
+proposal was wrong or silent about it, not because the scope grew.
+
+- **`Translator._result`** emits `AgentFinished(FAILED)` for `msg.is_error` and no
+  state intent otherwise. `AgentState.CANCELLED` is gone from the method.
+- **`AWAITING_TOPIC` / `INTERRUPTED_TOPIC` live in `model.py`**, next to the states
+  they accompany, because two components need the same spelling: `run()` writes the
+  topic and `_needs_you` reads it.
+- **The interrupt reaches the inbox, not only the row.** The proposal rested the
+  whole interrupt signal on the topic, and the rail does render `rec.topic` — but
+  `_needs_you` built `QuestionPending` with a hardcoded summary, so in the list the
+  operator actually works from an interrupted turn was indistinguishable from an
+  ordinary one. It now reads `"interrupted - reply or close"`. This does not
+  reintroduce the guess the surrounding comment refuses: `terminal_reason` is the
+  CLI reporting what it did, not an inference about what the agent said.
+- **The stream close re-asserts a standing failure.** The proposal listed
+  `AgentFinished(DONE)` there as "already correct and untouched". It is not: the CLI
+  closing the stream behind an error result turned a standing `FAILED` into `DONE`
+  and the node produced no obligation at all. `run()` holds the failing
+  `AgentFinished` — read per result, not latched, so a session that errors and then
+  takes a good turn can still close normally — and re-emits **that same intent** at
+  the close.
+
+  Re-emitting rather than suppressing the emit is the whole of the fix, and the
+  first attempt got it wrong. Between the error and the close, any `StateChanged`
+  for the node moves the record off `FAILED`: the store's arm guards on
+  `rec.pending` and not on terminality, and both `Translator._rate_limit` and
+  `_assistant` emit one for the root. Suppressing left a session whose subprocess
+  was gone reading as `RATE_LIMITED` — non-terminal, no obligation, reply box
+  enabled — or as `THINKING`, which is active, so `any_active` never settles and the
+  app never idles again. Re-emitting the original intent rather than a fresh one
+  also keeps `ended_at` at the moment the session died, which is what orders the
+  inbox.
+- **A recovery clears `ended_at` and `acknowledged`.** `StateChanged` moving a
+  record off a terminal state now clears both. `ended_at` stops and dims the elapsed
+  clock, so a recovered session read as finished in the rail and in HEALTH while the
+  inbox asked for a reply. `acknowledged` is worse than cosmetic: it suppresses the
+  `SessionFailed` obligation, so a stale `True` carried through a recovery means the
+  *next* failure asks for nothing. `error` deliberately survives — nothing reads it
+  except through an obligation gated on `FAILED`, and it is the only structured copy
+  of what went wrong.
+- **The `asyncio.CancelledError` arm asks whether the teardown was asked for.**
+  `SessionPool.close` and `SessionPool.shutdown` both set
+  `AgentSession.teardown_requested` before they cancel, and only that means DONE —
+  in which case DONE deliberately wins over a standing `FAILED`, because ending a
+  session *is* the dismissal and leaving `FAILED` would keep a dismissed session in
+  the "needs you" list with nothing left to act on.
+
+  The flag says "this cancellation was asked for", not "the operator clicked close",
+  and the difference was argued and settled: closing one session and quitting the
+  application are the same statement *for a session*, which is exactly the contract
+  `AgentState.DONE` carries on the enum. Shutdown is also the one cancellation where
+  who asked is known with certainty, so reporting it as a failure would be a false
+  failure signal — the class of defect this doc exists to remove.
+
+  An earlier draft asserted that `Pool.close` and `Pool.shutdown` were the only
+  cancellers. They are not: `Bridge.stop` stops the loop, and the loop thread's own
+  `finally` cancels every remaining task, so a session can be cancelled without the
+  pool being asked at all; and the SDK is built on anyio task groups whose cancelled
+  exception class on asyncio *is* `asyncio.CancelledError`, which makes a transport
+  teardown surfacing into our `async for` plausible. Reporting either as DONE is the
+  same silent loss of a failure signal, one arm over — so a cancel nobody asked for
+  re-asserts a standing failure, or reports one if there is none. Emitting *nothing*
+  there was considered and rejected: it leaves the record wherever its last
+  `StateChanged` put it, which is the stranded-session defect above in the other arm.
+
+Tests are integration-level against `AgentSession.run()` with a fake client, and
+every assertion is on an `AgentRecord` in a real `Store` rather than on the drained
+intents. That distinction is the point: "no `StateChanged(AWAITING_INPUT)` was
+emitted" passes while a later `AgentFinished(DONE)` clobbers `FAILED` anyway. The
+fake drains the bridge into the store after each message, standing in for the UI
+thread's own cadence, which is what makes the mid-stream state observable at all.
+
+### Known limits, not yet addressed
+
+**The interrupt fact rides on a topic string.** `run()` writes `INTERRUPTED_TOPIC`
+and `store._needs_you` compares against the same constant, so no drift between the
+two is possible and no duplicate of a derivable fact is stored. The narrow limit is
+that any later `TopicChanged` for a node sitting in `AWAITING_INPUT` erases "you
+interrupted this". Today the only emitter that could is `_rate_limit`'s
+`allowed_warning`, which cannot fire while a turn is over — so this is safe now and
+not safe by construction. Decided to keep as it stands: the structural alternative
+is a boolean on `StateChanged` and on `AgentRecord` duplicating what the topic
+already says.
+
+**The reply box.** `FAILED` now stands where it used to be overwritten, and it is in
+`_TERMINAL_STATES`, so `ui/compose.py` disables the reply box on it. After a
+transient API error the session is unmessageable even though `self._client` is
+still set and `run()` is still iterating — the defect this doc fixes was
+accidentally keeping it recoverable. Deliberately not fixed here, and now written
+up on its own: `2026-08-14-a-failed-session-can-still-be-talked-to.md`.

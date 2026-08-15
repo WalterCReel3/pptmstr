@@ -13,7 +13,13 @@ make run                                   # empty window, nothing to do (see be
 .venv/bin/python -m pptmstr --task "..."   # the real entry point
 .venv/bin/python -m pptmstr --task a --task b --cap 2
 .venv/bin/python -m pptmstr --fake         # UI only, no SDK, no cost
+.venv/bin/python -m pptmstr --task "..." --template research   # a team (step 8)
 ```
+
+`Ctrl+N` opens the launcher, which now carries a **team** combo: `solo` (the
+default, and unchanged behaviour), `feature`, `research`. `--fake` does not
+exercise the bus, so anything team-shaped costs real tokens — and a three-agent
+team on one review question has been measured past fifteen minutes.
 
 `j`/`k` move, `a` approve, `r` reject with a reason, `e` edit arguments then
 approve, `Shift+A` approve all from the selected agent.
@@ -42,6 +48,35 @@ that judgement is the useful signal, not the existence.
   stop on spend.
 - **Sub-agent output is not live.** Confirmed upstream behaviour, not a bug here
   (§2.5.1). The pane says so on sub-agent rows.
+- **A team's board and its concerns are drawn nowhere.** Both projections are in
+  the snapshot and no pane reads them, so an operator approves a message between
+  two agents without seeing the work either of them holds. Roles do appear as
+  sub-agent rows, and every concern appears as an approval row, so the *review*
+  path is fully exercisable — it is the context around it that is missing.
+  `2026-08-12-the-board-has-no-surface.md`.
+- **The inbox is not actually ordered oldest-first.** Approvals sort after every
+  question and failure regardless of age, because two clocks are compared.
+  Predates teams; `2026-08-12-needs-you-sorts-two-different-clocks.md`.
+- **No way to stop a team.** The existing "no way to stop one" gap is worse here:
+  a lead you cannot stop can spawn workers you also cannot stop.
+
+## The question a team run is worth doing to answer
+
+**Does gating every inter-agent message make the operator a bottleneck on
+*conversation* rather than on writes?** §9 raised it, step 8 could not settle it by
+argument, and it needs no new UI to answer — concerns already arrive as ordinary
+approval rows. The parking invariant says a parked agent costs nothing; it says
+nothing about the operator's attention costing nothing, and this is the run that
+finds out.
+
+Two smaller ones, both cheap to judge from the same session:
+
+- **Does the lead actually wait?** The briefing tells it to delegate and
+  synthesise. If it implements the work itself while a worker does the same thing,
+  that is a prompt defect and a cheap fix.
+- **Are the forced concerns worth reading?** Workers are now required to post one
+  before finishing. That may produce a genuine "here is what I am unsure about", or
+  dutiful noise — which would be worse than the silence it replaced.
 
 ## Open questions the design still carries
 

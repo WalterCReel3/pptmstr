@@ -159,6 +159,14 @@ transport for everything.
 `SendMessage` still earns a place for the cases where the model should route without
 us in the loop. Both can coexist; the MCP bus is the default and the one that renders.
 
+> **Correction, 2026-08-12.** The paragraph above understates what the MCP bus costs
+> and overstates what `SendMessage` buys. An in-process MCP handler is handed only a
+> tool name and its arguments — no session, no agent, no tool-use id — so the bus has
+> no sender until `PreToolUse` stamps one, which makes the gate its authentication
+> layer rather than a reviewer bolted on top. And `SendMessage` cannot address a
+> sibling without us supplying the agent id, so "routes without us in the loop" is
+> not a capability it actually has here.
+
 ---
 
 ## Where this landed in the spec (rev. 4)
@@ -182,19 +190,33 @@ than an append.
 
 ## Still unverified — close before relying on
 
+> **Update 2026-08-12 (step 8).** Two of the four below are now closed by probes, and
+> a third is closed as *moot*. Struck through where settled; see
+> `2026-08-12-a-message-has-no-sender-until-the-gate-gives-it-one.md`.
+
 - **Whether a settings-file hook inside a teammate process can reach our driver.**
   Would make a bridged gate conceivable and reopen the fork. Assumed no; not tested.
   This is the only finding that would change the decision above.
-- **Whether `SendMessage` should itself be approval-gated.** It is a tool call, so
-  `PreToolUse` sees it. §9 already answers yes for `Agent`; a message that wakes a
-  finished worker has comparable blast radius, and gating every inter-agent message
-  may make the operator the bottleneck in a way that is not "cheap".
-- **What a sibling-roster send looks like on the wire from our side** — whether the
-  recipient's resumed activity arrives with `agent_id` set as usual, and whether an
-  auto-resumed node re-enters `RUNNING` through a path the store already handles.
-  Extend `scripts/verify_subagents.py` rather than writing a new probe.
+- ~~**Whether `SendMessage` should itself be approval-gated.**~~ **Moot: it is not
+  adopted.** The question was answered for our own bus instead — gated on the send,
+  because rejection needs a channel back and only the sender has one. `SendMessage`
+  stays out of v1 for a reason found by probe rather than by argument: the CLI
+  refuses a `subagent_type` and wants an agent id that appears only in the *lead's*
+  context, so a worker cannot address a sibling unless we plumb the id into its
+  prompt. It does not let the model route without us.
+- ~~**What a sibling-roster send looks like on the wire from our side.**~~
+  **Closed, and it was a live defect.** `scripts/verify_wake_path.py`: a woken
+  sub-agent re-enters through a **second `SubagentStart`** carrying its original
+  `agent_id`, ~7s after its own terminal `task_notification`, with a second terminal
+  notification for the same `task_id` when it finishes again. The store did *not*
+  already handle it — the driver emitted `AgentSpawned` for an existing node, which
+  rebuilt the record and replaced the `Transcript` object readers hold under I7.
+  Fixed as `AgentResumed`. There is no roster for plain sub-agents; the send is
+  refused by name.
 - **Whether the bundled CLI's cross-session messaging is enabled in our
-  configuration.** It depends on feature-flag evaluation, which
+  configuration.** Still open, and now lower priority — the in-process bus covers
+  within-session routing, so this only matters when the pool needs to talk *across*
+  sessions. It depends on feature-flag evaluation, which
   `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, `DISABLE_TELEMETRY`, `DO_NOT_TRACK`,
   and `DISABLE_GROWTHBOOK` each turn off. `/list-agents` in a plain CLI session is
   the one-command check.
