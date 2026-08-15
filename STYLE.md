@@ -145,6 +145,27 @@ CLAIMED. The board is set at apply time whether or not the reply ever reached th
 agent, so the line asserted something it never tested. A verdict must be computed
 from the thing it names.
 
+### A test's name is a claim; check the body makes it
+
+Both defects that survived the board pane were tests asserting less than their names
+promised, and both were at the gate. `Concern.edited` had a reducer arm covered by
+unit tests that applied `ConcernEdited` directly, while **nothing in `pptmstr/` ever
+emitted it** — the operator's rewrite reached the handler as ordinary arguments and
+built a fresh record with the flag defaulted off, so the store kept the edited text
+and no trace that it was edited. Its replacement,
+`test_the_edit_stamp_is_not_something_a_model_can_set`, then passed a tool input that
+never contained `_edited` and asserted the key was absent afterwards — true of the
+defective code too, since the stamp is a copy of the model's own arguments and the
+only thing worth asserting was that a value *already there* gets overwritten.
+
+The gate is where this keeps happening because it is the one component whose job is
+to know something none of its neighbours can — who called, and whether the operator
+intervened. A test that does not supply the adversarial input cannot tell a gate that
+establishes a fact from one that merely passes it along. So: name the test after the
+hazard, then check the body actually constructs it, and mutation-test against the
+**current** line rather than a broken variant invented for the purpose — the invented
+one is chosen to fail.
+
 ---
 
 ## 3. Smells, with their instances
