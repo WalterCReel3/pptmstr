@@ -22,9 +22,43 @@ agent an ``approve`` keystroke applies to.
 
 from __future__ import annotations
 
+import enum
 from dataclasses import dataclass
 
 from ..model import NodeId, Obligation, Snapshot
+
+
+class Scope(enum.Enum):
+    """
+    What a cursor target answers for: itself, or everything in its session.
+
+    **Passed, never inferred, and that is the whole point.** ``node[1] is None`` says
+    a node is a root. It cannot say whether that root is standing in for its whole
+    session -- which a *collapsed* group's card does, because its sub-agents have no
+    card of their own -- or standing only for itself, which the same card does the
+    moment the group opens and they get one. No NodeId can express that difference,
+    because it is a fact about what is on screen rather than about the node.
+
+    Inferring it meant the highlight and the click each worked it out separately, and
+    they disagreed: clicking an open root resolved session-wide, selected one of its
+    members, lit *that* card and scrolled away from the one that was clicked. Two
+    expansion-aware code paths is how that got in; one scope value shared by both is
+    what stops it coming back.
+    """
+
+    AGENT = "agent"
+    SESSION = "session"
+
+
+def covers(scope: Scope, node: NodeId, other: NodeId) -> bool:
+    """
+    Whether ``other`` is an agent that ``node`` answers for under ``scope``.
+
+    The single predicate. A rail card derives its highlight, its click, its badge and
+    its density from one call to this with one scope value, so it cannot light for
+    one agent and select another.
+    """
+    return other[0] == node[0] if scope is Scope.SESSION else other == node
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +145,11 @@ class FocusState:
             None,
         )
 
+    def owed_by(self, snap: Snapshot, node: NodeId, scope: Scope) -> Obligation | None:
+        """The oldest obligation ``node`` answers for under ``scope``, if any."""
+        owed = [o for o in snap.needs_you if covers(scope, node, o.node)]
+        return min(owed, key=lambda o: o.since) if owed else None
+
     # -- movement --------------------------------------------------------------
 
     def settle(self, snap: Snapshot) -> None:
@@ -145,8 +184,25 @@ class FocusState:
             elif snap.needs_you and not self.target.pinned:
                 # Nothing chose this node; the queue did not exist when the cursor
                 # landed here. Now it does, so it takes precedence -- prefer this
-                # session's own oldest obligation if it has one.
-                self.to_node(snap, self.target.node)
+                # node's own oldest obligation, and otherwise drop to None so the
+                # block below takes the queue's oldest.
+                #
+                # Deliberately not `to_node`. That pins when the node owes nothing,
+                # which is right for a click and wrong here: a pin is the operator
+                # saying "show me this", and nothing was said. Routing through it
+                # made an unpinned cursor pin *itself* the moment work arrived in
+                # any other session, which is precisely the stuck cursor OnNode is
+                # split in two to prevent.
+                # Inferred here, and only here. A bare OnNode has no card behind it
+                # to say what it stands for -- nothing chose it -- so the node's own
+                # shape is the only information available, and a root preferring its
+                # session keeps the cursor near where the operator was looking. A
+                # card must not infer; see Scope.
+                node = self.target.node
+                owed = self.owed_by(snap, node, Scope.SESSION if node[1] is None else Scope.AGENT)
+                self.target = OnObligation(owed.key) if owed is not None else None
+                at = self.index(snap)
+                self._index = at if at is not None else 0
 
         if self.target is None:
             if snap.needs_you:
@@ -173,22 +229,23 @@ class FocusState:
     def to_obligation(self, obligation: Obligation) -> None:
         self.target = OnObligation(obligation.key)
 
-    def to_node(self, snap: Snapshot, node: NodeId) -> None:
+    def to_node(self, snap: Snapshot, node: NodeId, *, scope: Scope) -> None:
         """
-        Point at a session, by way of its oldest obligation if it has one.
+        Point at an agent, by way of the oldest obligation it answers for.
 
         This is what a click on a rail card does. It moves the one cursor; it does
         **not** filter the inbox. A filtered inbox can hide the oldest item in the
-        application while still looking like the inbox, which is defect 2 coming
-        back wearing a different coat -- scoping is available one level up, on the
-        project header, where it is a deliberate act that can announce itself.
+        application while still looking like the inbox, which is defect 2 coming back
+        wearing a different coat -- scoping is available one level up, on the project
+        header, where it is a deliberate act that can announce itself.
+
+        ``scope`` is required rather than defaulted. A default is the inference this
+        parameter exists to remove, and it would be silently wrong for exactly the
+        caller that forgot to think about it.
         """
-        # Matched on session id, not node id: a card stands for a whole session, so
-        # a sub-agent's parked call is an obligation of the card the operator
-        # clicked.
-        owed = [o for o in snap.needs_you if o.node[0] == node[0]]
-        if owed:
-            self.to_obligation(min(owed, key=lambda o: o.since))
+        owed = self.owed_by(snap, node, scope)
+        if owed is not None:
+            self.to_obligation(owed)
         else:
             # Pinned: an explicit ask for a session with nothing waiting. This is
             # the gesture that opens FOCUS, and it must survive work arriving

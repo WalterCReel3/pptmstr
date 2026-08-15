@@ -11,7 +11,7 @@ from __future__ import annotations
 from pptmstr.intents import AgentFinished, AgentSpawned, ApprovalRequested, StateChanged
 from pptmstr.model import AgentState, NodeId, PendingApproval
 from pptmstr.store import Store
-from pptmstr.ui.focus import FocusState, OnNode, OnObligation
+from pptmstr.ui.focus import FocusState, OnNode, OnObligation, Scope
 
 ROOT: NodeId = ("s1", None)
 CHILD: NodeId = ("s1", "agent-a")
@@ -196,14 +196,18 @@ def test_clicking_a_card_moves_to_that_session_s_oldest_obligation() -> None:
     focus = FocusState()
     focus.settle(snap)
 
-    focus.to_node(snap, OTHER)
+    focus.to_node(snap, OTHER, scope=Scope.SESSION)
     assert focus.obligation(snap).approval.id == "p3"  # type: ignore[union-attr]
 
 
 def test_a_card_click_reaches_its_sub_agents_obligations() -> None:
     """
-    A card stands for a session, and a sub-agent's parked call is that session's
-    obligation -- the operator clicking the card means "deal with this session".
+    A root answers for its whole session, and it has to keep doing so.
+
+    A sub-agent parked on approval under a thinking root is the common case, so a
+    click on the parent that reached only the parent's own obligations would stop
+    reaching the parked call -- leaving the operator poking at the one card that
+    looks like the way in.
     """
     store = Store()
     store.apply(spawn(ROOT), now=0.0)
@@ -212,7 +216,7 @@ def test_a_card_click_reaches_its_sub_agents_obligations() -> None:
 
     snap = store.snapshot()
     focus = FocusState()
-    focus.to_node(snap, ROOT)
+    focus.to_node(snap, ROOT, scope=Scope.SESSION)
 
     assert isinstance(focus.target, OnObligation)
     assert focus.node(snap) == CHILD
@@ -225,7 +229,7 @@ def test_clicking_an_idle_card_selects_the_node_itself() -> None:
     snap = store.snapshot()
 
     focus = FocusState()
-    focus.to_node(snap, ("s3", None))
+    focus.to_node(snap, ("s3", None), scope=Scope.SESSION)
     assert focus.target == OnNode(("s3", None), pinned=True)
     assert focus.obligation(snap) is None
     assert focus.node(snap) == ("s3", None)
@@ -242,7 +246,7 @@ def test_a_deliberately_chosen_session_survives_work_arriving_elsewhere() -> Non
     snap = store.snapshot()
 
     focus = FocusState()
-    focus.to_node(snap, ("s3", None))
+    focus.to_node(snap, ("s3", None), scope=Scope.SESSION)
     focus.settle(snap)
 
     assert snap.needs_you  # there is plenty waiting
@@ -271,3 +275,93 @@ def test_a_default_node_yields_as_soon_as_there_is_a_queue() -> None:
 
     assert isinstance(focus.target, OnObligation)
     assert focus.obligation(snap).approval.id == "p1"  # type: ignore[union-attr]
+
+
+def test_selecting_a_sub_agent_reaches_its_own_call_not_its_sessions_oldest() -> None:
+    """
+    A card stands for an agent, so selecting one lands on what *it* is asking for.
+
+    The root's approval is older, so a session-wide match would answer it instead
+    and the operator would be reading a diff belonging to the parent while the row
+    they clicked stayed parked -- the two-cursor failure with one cursor.
+    """
+    store = Store()
+    store.apply(spawn(ROOT), now=0.0)
+    store.apply(spawn(CHILD, ROOT), now=0.0)
+    store.apply(ApprovalRequested(ROOT, pending(ROOT, "p1", at=1.0)), now=1.0)
+    store.apply(ApprovalRequested(CHILD, pending(CHILD, "p2", at=2.0)), now=2.0)
+
+    snap = store.snapshot()
+    focus = FocusState()
+    focus.to_node(snap, CHILD, scope=Scope.AGENT)
+
+    assert focus.obligation(snap).approval.id == "p2"  # type: ignore[union-attr]
+    assert focus.node(snap) == CHILD
+
+
+def test_selecting_a_sub_agent_that_owes_nothing_pins_it() -> None:
+    """
+    Its session has work waiting and that is not this agent's. Widening to the
+    session here would mean clicking one row and selecting a sibling.
+    """
+    store = Store()
+    store.apply(spawn(ROOT), now=0.0)
+    store.apply(spawn(CHILD, ROOT), now=0.0)
+    store.apply(ApprovalRequested(ROOT, pending(ROOT, "p1", at=1.0)), now=1.0)
+
+    snap = store.snapshot()
+    focus = FocusState()
+    focus.to_node(snap, CHILD, scope=Scope.AGENT)
+
+    assert focus.target == OnNode(CHILD, pinned=True)
+    assert focus.node(snap) == CHILD
+
+
+def test_an_unchosen_cursor_yields_to_a_queue_in_another_session() -> None:
+    """
+    The regression the exact-node branch widens rather than causes.
+
+    ``settle`` used to route the unpinned case through ``to_node``, whose fallback
+    pins -- so a cursor that had merely landed somewhere promoted itself to a
+    deliberate choice the moment work appeared anywhere else, and never yielded
+    again. That is verbatim the failure ``OnNode`` is split in two to prevent:
+    ``index`` returns None, the inbox draws rows and expands none of them, and the
+    rail highlights a card, so every pixel looks correct.
+
+    Two sessions, no sub-agents. The single-session test above passes either way
+    because the arriving obligation happens to belong to the parked node.
+    """
+    store = Store()
+    store.apply(spawn(ROOT), now=0.0)
+    store.apply(spawn(OTHER), now=0.0)
+    focus = FocusState()
+    focus.settle(store.snapshot())
+    assert focus.target == OnNode(ROOT, pinned=False)
+
+    store.apply(ApprovalRequested(OTHER, pending(OTHER, "p1", at=3.0)), now=3.0)
+    snap = store.snapshot()
+    focus.settle(snap)
+
+    assert focus.target == OnObligation("approval:p1")
+    assert focus.index(snap) == 0
+    assert focus.node(snap) == OTHER
+
+
+def test_a_sub_agent_the_cursor_merely_landed_on_yields_too() -> None:
+    """
+    ``_last_node`` can hold a sub-agent, so the same unpinned node can now be one.
+    Its own scope is narrower, which makes the empty case -- and therefore the pin
+    that used to follow it -- more reachable, not less.
+    """
+    store = Store()
+    store.apply(spawn(ROOT), now=0.0)
+    store.apply(spawn(CHILD, ROOT), now=0.0)
+    focus = FocusState()
+    focus.target = OnNode(CHILD, pinned=False)
+
+    store.apply(ApprovalRequested(ROOT, pending(ROOT, "p1", at=3.0)), now=3.0)
+    snap = store.snapshot()
+    focus.settle(snap)
+
+    assert focus.target == OnObligation("approval:p1")
+    assert focus.node(snap) == ROOT
