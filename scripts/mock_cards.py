@@ -1,14 +1,17 @@
 #!/usr/bin/env python3
 """
-Static mock of the proposed card-rail + inbox layout. Throwaway.
+Static mock of the card-rail + inbox layout, for looking at density decisions
+with real font metrics and the real palette. Throwaway.
 
-Exists to settle density questions -- card width, line count, whether a
-sub-agent pip row is legible at 12pt -- with real font metrics and the real
-palette, before any of it is built against the store. It draws from a hardcoded
-fixture and talks to nothing: no Store, no Bridge, no SDK, no intents.
+The rail is **no longer mocked**: the fixture is adapted into a ``Snapshot`` and
+drawn by ``pptmstr.ui.rail`` itself, so what a capture shows is the shipped card
+path rather than a second implementation of it. That was not a refinement --
+while there were two, the fixture drifted and reproduced the very defect it was
+built to catch. The inbox and the side panes are still drawn here, and are still
+the thing to be sceptical of for the same reason.
 
-Deliberately NOT wired into the app. If this file is still here once the layout
-lands, delete it -- fake_driver.py is the cautionary tale (see planning/).
+No Store, no Bridge, no SDK, no intents: it builds frozen values by hand and runs
+no threads. Deliberately not wired into the app.
 
     .venv/bin/python scripts/mock_cards.py --out /tmp/mock.png --view triage
     .venv/bin/python scripts/mock_cards.py --view question --theme light
@@ -21,8 +24,9 @@ from __future__ import annotations
 
 import argparse
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
+from types import MappingProxyType
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -31,9 +35,22 @@ from imgui_bundle import hello_imgui, imgui, immapp  # noqa: E402
 from screenshot import write_png  # noqa: E402
 
 from pptmstr import theme  # noqa: E402
-from pptmstr.model import AgentState, ContextSnapshot  # noqa: E402
-from pptmstr.theme import STATE_GLYPH, STATE_LABEL, P  # noqa: E402
-from pptmstr.ui import widgets  # noqa: E402
+from pptmstr.model import (  # noqa: E402
+    AgentRecord,
+    AgentState,
+    ApprovalNeeded,
+    ContextSnapshot,
+    NodeId,
+    PendingApproval,
+    QuestionPending,
+    SessionFailed,
+    Snapshot,
+    UsageRollup,
+)
+from pptmstr.model import Obligation as StoreObligation  # noqa: E402
+from pptmstr.theme import STATE_GLYPH, P  # noqa: E402
+from pptmstr.ui import rail, widgets  # noqa: E402
+from pptmstr.ui.focus import FocusState, OnNode, OnObligation  # noqa: E402
 
 NOW = 1000.0
 
@@ -60,8 +77,17 @@ def ctx(used: int, threshold: int, compactions: int = 0, model: str = "claude-so
 
 @dataclass
 class Sub:
+    """
+    One sub-agent. Carries a topic, a model and a spend because the rail's
+    expansion renders those per row -- the slots a sub-agent genuinely has, minus
+    the context ring, which is session-scoped and has no per-sub-agent reading.
+    """
+
     name: str
     state: AgentState
+    topic: str = "working"
+    model: str = "claude-haiku-4-5"
+    cost_usd: float = 0.0
 
 
 @dataclass
@@ -123,35 +149,14 @@ class Card:
         return sum(1 for b in self.blocked if b.kind == "approval")
 
     @property
-    def badge_kind(self) -> str:
-        kinds = {b.kind for b in self.blocked}
-        return kinds.pop() if len(kinds) == 1 else "approval"
-
-    def pending_for(self, sub: Sub) -> int:
-        return sum(1 for b in self.blocked if b.kind == "approval" and b.who == sub.name)
-
-    @property
     def collapsed(self) -> bool:
-        return self.density == "ended"
-
-    @property
-    def density(self) -> str:
         """
-        How many lines this card earns, by whether it wants something from you.
-
-        Three classes, not two. Splitting on terminality was wrong at scale: at
-        twenty sessions most cards are working-but-not-blocking, and giving those
-        the same four lines as a blocked one fills the rail with the sessions
-        least likely to be acted on. Height tracks obligation, so the rail's
-        vertical budget goes to whatever is actually waiting.
-
-        Fixed per class, so ListClipper stays usable.
+        Terminal, and so drawn as one line. How many lines that is belongs to
+        ``pptmstr.ui.rail``, which this fixture now feeds rather than imitates;
+        what stays here is the fixture invariant that a finished session cannot
+        also be blocking (see ``check_fixture``).
         """
-        if self.blocked:
-            return "blocked"
-        if self.state in (AgentState.DONE, AgentState.CANCELLED):
-            return "ended"
-        return "active"
+        return self.state in (AgentState.DONE, AgentState.CANCELLED)
 
 
 @dataclass
@@ -200,16 +205,29 @@ CARDS: list[Card] = [
         name="session",
         title="add a bridge regression test",
         project="pptmstr",
-        state=AgentState.AWAITING_APPROVAL,
-        topic="writing tests/test_bridge.py",
+        # RUNNING_TOOL, not AWAITING_APPROVAL: the root is not the agent that parked.
+        # Agent/Task are gated, so what this root is doing is waiting on the Agent
+        # calls it made -- which is a tool running, and which is why it still throbs
+        # while two of its sub-agents sit on the operator.
+        state=AgentState.RUNNING_TOOL,
+        topic="delegating to 2 sub-agents",
         model="claude-sonnet-5",
         context=ctx(90_000, 134_000),
         cost_usd=0.42,
         tokens=61_400,
         started_at=NOW - 612,
         subs=[
-            Sub("Explore", AgentState.AWAITING_APPROVAL),
-            Sub("code-reviewer", AgentState.AWAITING_APPROVAL),
+            Sub("Explore", AgentState.AWAITING_APPROVAL, "wants to write a test", cost_usd=0.07),
+            Sub(
+                "code-reviewer",
+                AgentState.AWAITING_APPROVAL,
+                "wants to edit theme.py",
+                cost_usd=0.11,
+            ),
+            # Nothing reaps a finished sub-agent, so a session's expansion keeps
+            # every one it ever had. That is what makes the height monotone, and it
+            # is the case a fixture has to carry or nobody sees it.
+            Sub("skeptic", AgentState.DONE, "checked the join", cost_usd=0.04),
         ],
         blocked=[
             Blocked(
@@ -365,14 +383,28 @@ def check_fixture() -> None:
     render an impossible screen is worse than no mock.
     """
     for card in CARDS:
-        kinds = {b.kind for b in card.blocked}
+        # Scoped to the root, like the two checks below it. A parked state belongs to
+        # the node that parked: the store sets AWAITING_APPROVAL on the approval's own
+        # node and nothing propagates it upward, so a root whose sub-agent is waiting
+        # is still RUNNING_TOOL -- the Agent call it made is the tool that is running.
         root = {b.kind for b in card.blocked if b.who == card.name}
-        if "approval" in kinds and card.state is not AgentState.AWAITING_APPROVAL:
+        if "approval" in root and card.state is not AgentState.AWAITING_APPROVAL:
             raise AssertionError(f"{card.key}: approval pending but state is {card.state}")
         if "question" in root and card.state is not AgentState.AWAITING_INPUT:
             raise AssertionError(f"{card.key}: question pending but state is {card.state}")
         if "failure" in root and card.state is not AgentState.FAILED:
             raise AssertionError(f"{card.key}: failure listed but state is {card.state}")
+        # The converse, which is the half that was missing. Checking only that a
+        # parked card is in a parked state lets a card claim a state nothing parked
+        # it in -- and that is what put a root in AWAITING_APPROVAL for its
+        # sub-agents' calls, so every capture of an open group showed a root that
+        # cannot exist.
+        if card.state is AgentState.AWAITING_APPROVAL and "approval" not in root:
+            raise AssertionError(f"{card.key}: parked on approval but owes none itself")
+        for s in card.subs:
+            owned = {b.kind for b in card.blocked if b.who == s.name}
+            if s.state is AgentState.AWAITING_APPROVAL and "approval" not in owned:
+                raise AssertionError(f"{card.key}/{s.name}: parked on approval but owes none")
         if card.collapsed and card.blocked:
             raise AssertionError(f"{card.key}: collapsed card cannot be blocking")
 
@@ -512,164 +544,118 @@ def _waited(since: float) -> str:
 
 # --------------------------------------------------------------------------
 # The card rail
+#
+# Rendered by the real pane. This file used to carry a second implementation --
+# its own density table, its own pip row -- and a fixture that reproduces the
+# defect it exists to catch is worse than no fixture: the checked-in capture of
+# the suppressed sub-agent row was taken here by someone who did not notice the
+# pips had gone. So the fixture is adapted into a Snapshot and handed to
+# ``pptmstr.ui.rail``, and there is one card path in the repository.
+#
+# Adapting costs the ~25 lines below. It also settles the objection recorded at
+# the top of this file, that importing Snapshot means wanting a Store: it does
+# not. A Snapshot is a frozen value and can be built by hand.
 # --------------------------------------------------------------------------
 
+# Presentation state the pane owns across frames -- which sessions are open, and
+# whether the scroll has been pinned yet. The cursor is deliberately not here;
+# see _focus.
+_RAIL = rail.RailState()
 
-def draw_card(card: Card, focused: bool) -> None:
+
+def _node(card: Card, who: str) -> NodeId:
+    """The node a fixture name refers to. A card's own name means its root."""
+    return (card.key, None) if who == card.name else (card.key, who)
+
+
+def _obligation(card: Card, b: Blocked) -> StoreObligation:
+    node = _node(card, b.who)
+    if b.kind == "question":
+        return QuestionPending(node=node, since=b.since, summary=b.summary)
+    if b.kind == "failure":
+        return SessionFailed(node=node, since=b.since, summary=b.summary, error=b.summary)
+    return ApprovalNeeded(
+        node=node,
+        since=b.since,
+        summary=b.summary,
+        approval=PendingApproval(
+            id=f"{card.key}:{b.who}",
+            node=node,
+            tool_name="Edit",
+            tool_use_id=f"tu-{card.key}",
+            raw_args=b.args or {},
+            summary=b.summary,
+            requested_at=b.since,
+        ),
+    )
+
+
+def _record(card: Card, sub: Sub | None) -> AgentRecord:
     """
-    One session, drawn as a fixed-height card.
+    One fixture entry as the record the panes actually read.
 
-    Fixed height per density class on purpose: variable-height cards would rule
-    out ListClipper, and the rail is the one pane that has to stay cheap when N
-    gets large. Sub-agents render as pips inside the parent rather than as
-    indented rows, which is what lets the rail drop the tree widget entirely.
+    ``cwd`` is synthesised from the project name because grouping is derived from
+    the directory, not stored -- ``projects.project_key`` walks to a git root and
+    falls back to the last component, which for a path that does not exist is the
+    project name back again.
     """
-    draw = imgui.get_window_draw_list()
-    lh = imgui.get_text_line_height_with_spacing()
-    pad = 6.0
-    width = imgui.get_content_region_avail().x
-    lines = {"ended": 1.0, "active": 2.0, "blocked": 3.8 if card.subs else 3.0}[card.density]
-    height = lh * lines + pad * 2
+    root = sub is None
+    return AgentRecord(
+        node_id=(card.key, None if root else sub.name),  # type: ignore[union-attr]
+        parent=None if root else (card.key, None),
+        depth=0 if root else 1,
+        state=card.state if root else sub.state,  # type: ignore[union-attr]
+        topic=card.topic if root else sub.topic,  # type: ignore[union-attr]
+        task=card.title if root else sub.name,  # type: ignore[union-attr]
+        model=card.model if root else sub.model,  # type: ignore[union-attr]
+        agent_type=None if root else sub.name,  # type: ignore[union-attr]
+        cwd=f"/mock/{card.project}",
+        usage=UsageRollup(
+            total_cost_usd=card.cost_usd if root else sub.cost_usd  # type: ignore[union-attr]
+        ),
+        context=card.context if root else None,
+        started_at=card.started_at,
+        ended_at=card.ended_at if root else None,
+    )
 
-    origin = imgui.get_cursor_screen_pos()
-    imgui.push_id(card.key)
-    imgui.invisible_button("##card", imgui.ImVec2(max(width, 40.0), height))
-    hovered = imgui.is_item_hovered()
 
-    lo = imgui.ImVec2(origin.x, origin.y)
-    hi = imgui.ImVec2(origin.x + width, origin.y + height)
-    # Focus is drawn as an outline and an edge bar, never as a fill.
-    #
-    # Filling the focused card with P.selection was the obvious choice and it is
-    # wrong: every other mark on a card is a saturated state colour, and in
-    # high_contrast the selection fill is saturated too, so the pips and the state
-    # label lose their figure/ground the moment a card is selected. Keeping the
-    # fill constant means a card reads identically whether or not it is current,
-    # which is the property that actually matters when the colours on it are load
-    # bearing (design §6.1).
-    draw.add_rect_filled(lo, hi, (P.panel_alt if hovered else P.panel).u32)
-    # add_rect is (col, rounding, thickness) in this binding, not the C++
-    # (col, rounding, flags, thickness) -- the same transposition widgets.py
-    # documents for path_stroke. Passing the C++ order typechecks and throws.
-    draw.add_rect(lo, hi, (P.focus if focused else P.border).u32, 0.0, 2.0 if focused else 1.0)
-    if focused:
-        draw.add_rect_filled(lo, imgui.ImVec2(lo.x + 3.0, hi.y), P.focus.u32)
-        # Drag the rail to the current card. Without this the derived highlight is
-        # a lie at any real N: the inbox happily selects an obligation belonging to
-        # a project whose cards are entirely below the fold, and the one pane that
-        # is supposed to say "here is where this came from" shows nothing.
-        imgui.set_scroll_here_y(0.45)
+def _snapshot() -> Snapshot:
+    """The fixture as one immutable world, rebuilt each frame like the real app."""
+    records: list[AgentRecord] = []
+    for card in CARDS:
+        records.append(_record(card, None))
+        records.extend(_record(card, s) for s in card.subs)
+    owed = sorted((_obligation(c, b) for c in CARDS for b in c.blocked), key=lambda o: o.since)
+    return Snapshot(
+        seq=1,
+        nodes=MappingProxyType({r.node_id: r for r in records}),
+        order=tuple(r.node_id for r in records),
+        needs_you=tuple(owed),
+        any_active=any(c.state.is_active for c in CARDS),
+    )
 
-    inner_x = origin.x + pad + 4.0
-    y = origin.y + pad
-    colour = P.state(card.state)
 
-    # line 1: state glyph, name, elapsed, obligation badge
-    imgui.set_cursor_screen_pos(imgui.ImVec2(inner_x, y))
-    imgui.text_colored(colour.vec4, STATE_GLYPH[card.state])
-    imgui.same_line()
-    if card.collapsed:
-        imgui.text_colored(P.text_dim.vec4, _ellipsis(card.title, width - 150.0))
-        _small()
-        imgui.set_cursor_screen_pos(imgui.ImVec2(hi.x - 96.0, y + 2.0))
-        imgui.text_colored(P.text_dim.vec4, STATE_LABEL[card.state])
-        imgui.same_line()
-        imgui.text_colored(P.text_dim.vec4, _fmt_money(card.cost_usd))
-        _normal()
-        _end_card(origin, height)
-        imgui.pop_id()
-        return
+def _focus(snap: Snapshot) -> FocusState:
+    """
+    The mock's cursor, expressed the way the pane expects it.
 
-    # The task, not the node name. Every root is called "session", so the name is
-    # the one string on the card that cannot tell two of them apart.
-    title_room = width - (pad * 2 + 30.0) - (52.0 if card.waiting else 42.0)
-    imgui.text_colored(P.text_strong.vec4, _ellipsis(card.title, title_room))
+    Rebuilt from ``STATE`` every frame rather than kept beside it. ``MockState``
+    is the single cursor here, and a second one that the rail could write to is
+    the two-cursor defect this layout exists to remove -- so a click on a card
+    moves nothing, which is what a static fixture should do.
+    """
+    cur = STATE.current
+    if cur is None:
+        return FocusState()
+    card = next(c for c in CARDS if c.key == cur.card)
+    node = _node(card, cur.who)
+    owed = next((o for o in snap.needs_you if o.node == node and o.kind.value == cur.kind), None)
+    return FocusState(target=OnObligation(owed.key) if owed else OnNode(node, pinned=True))
 
-    badge_w = 0.0
-    if card.waiting:
-        badge = f"{KIND_GLYPH[card.badge_kind]} {card.waiting}"
-        badge_w = imgui.calc_text_size(badge).x + 10.0
-        bx = hi.x - pad - badge_w
-        draw.add_rect_filled(
-            imgui.ImVec2(bx, y - 1.0),
-            imgui.ImVec2(bx + badge_w, y + lh - 3.0),
-            getattr(P, KIND_ROLE[card.badge_kind]).u32,
-            2.0,
-        )
-        imgui.set_cursor_screen_pos(imgui.ImVec2(bx + 5.0, y))
-        imgui.text_colored(P.bg.vec4, badge)
-    else:
-        el = widgets.format_elapsed((card.ended_at or NOW) - card.started_at)
-        _small()
-        imgui.set_cursor_screen_pos(imgui.ImVec2(hi.x - pad - imgui.calc_text_size(el).x, y + 2.0))
-        imgui.text_colored(P.text_dim.vec4, el)
-        _normal()
 
-    topic_colour = P.danger if card.state is AgentState.FAILED else P.text_dim
-    spend = _fmt_money(card.cost_usd)
-
-    if card.density == "active":
-        # One line for everything: ring, state, topic, spend. A session that wants
-        # nothing gets a reading, not a dossier.
-        y += lh
-        imgui.set_cursor_screen_pos(imgui.ImVec2(inner_x, y + 2.0))
-        widgets.context_cell(card.context)
-        imgui.same_line()
-        _small()
-        imgui.text_colored(colour.vec4, STATE_LABEL[card.state])
-        imgui.same_line()
-        room = hi.x - pad - imgui.calc_text_size(spend).x - 8.0 - imgui.get_cursor_screen_pos().x
-        imgui.text_colored(topic_colour.vec4, _ellipsis(card.topic, max(room, 20.0)))
-        imgui.set_cursor_screen_pos(
-            imgui.ImVec2(hi.x - pad - imgui.calc_text_size(spend).x, y + 3.0)
-        )
-        imgui.text_colored(P.text_dim.vec4, spend)
-        _normal()
-        _end_card(origin, height)
-        imgui.pop_id()
-        return
-
-    # line 2: state label then what it is doing right now
-    y += lh
-    imgui.set_cursor_screen_pos(imgui.ImVec2(inner_x, y))
-    _small()
-    imgui.text_colored(colour.vec4, STATE_LABEL[card.state])
-    imgui.same_line()
-    avail = width - (pad * 2 + 8.0) - (imgui.get_cursor_screen_pos().x - inner_x)
-    imgui.text_colored(topic_colour.vec4, _ellipsis(card.topic, avail))
-    _normal()
-
-    # line 3: context ring, headroom, model, cost -- health and spend side by
-    # side but never merged, per design 2.4.
-    y += lh
-    imgui.set_cursor_screen_pos(imgui.ImVec2(inner_x, y + 2.0))
-    widgets.context_cell(card.context)
-    imgui.same_line()
-    _small()
-    imgui.text_colored(P.text_dim.vec4, widgets.short_model(card.model).replace("claude-", ""))
-    imgui.same_line()
-    imgui.set_cursor_screen_pos(imgui.ImVec2(hi.x - pad - imgui.calc_text_size(spend).x, y + 3.0))
-    imgui.text_colored(P.text.vec4, spend)
-    _normal()
-
-    # line 4: sub-agent pips
-    if card.subs:
-        y += lh
-        imgui.set_cursor_screen_pos(imgui.ImVec2(inner_x + 6.0, y + 1.0))
-        _small()
-        for i, sub in enumerate(card.subs):
-            if i:
-                imgui.same_line()
-            sc = P.state(sub.state)
-            label = f"{STATE_GLYPH[sub.state]} {sub.name}"
-            waiting = card.pending_for(sub)
-            if waiting:
-                label += f" {waiting}"
-            imgui.text_colored(sc.vec4, label)
-        _normal()
-
-    _end_card(origin, height)
-    imgui.pop_id()
+def draw_fleet() -> None:
+    snap = _snapshot()
+    rail.draw(snap, _focus(snap), _RAIL, NOW)
 
 
 def _ellipsis(text: str, width_px: float) -> str:
@@ -679,36 +665,6 @@ def _ellipsis(text: str, width_px: float) -> str:
     while out and imgui.calc_text_size(out + "…").x > width_px:
         out = out[:-1]
     return out + "…"
-
-
-def _end_card(origin: imgui.ImVec2, height: float) -> None:
-    """
-    Return the cursor to just after the card and claim the inter-card gap.
-
-    The gap has to be a real item (Dummy) rather than a cursor offset: moving the
-    cursor past the last submitted item does not grow the window's content
-    bounds, and ImGui asserts on it rather than silently clipping.
-    """
-    imgui.set_cursor_screen_pos(imgui.ImVec2(origin.x, origin.y + height))
-    imgui.dummy(imgui.ImVec2(1.0, 4.0))
-
-
-def draw_fleet() -> None:
-    focused = STATE.focused_card
-    for project, cards in cards_by_project():
-        imgui.spacing()
-        _small()
-        need = sum(c.waiting for c in cards)
-        imgui.text_colored(P.text_strong.vec4, project.upper())
-        imgui.same_line()
-        imgui.text_colored(P.text_dim.vec4, f"{len(cards)} sessions")
-        if need:
-            imgui.same_line()
-            imgui.text_colored(P.state_awaiting.vec4, f"· {need} waiting")
-        _normal()
-        imgui.spacing()
-        for card in cards:
-            draw_card(card, focused=card.key == focused)
 
 
 # --------------------------------------------------------------------------
@@ -1067,9 +1023,13 @@ def main() -> int:
             if card.state in (AgentState.AWAITING_APPROVAL, AgentState.AWAITING_INPUT):
                 card.state = AgentState.THINKING
                 card.topic = "working"
-            card.subs = [Sub(s.name, AgentState.RUNNING_TOOL) for s in card.subs]
+            card.subs = [replace(s, state=AgentState.RUNNING_TOOL) for s in card.subs]
 
     check_fixture()
+    # Open the first session that has sub-agents, so one capture shows both halves
+    # of the collapse rule. A fixture choosing what to open is not the pane's
+    # default -- a real session stays collapsed until the operator opens it.
+    _RAIL.expanded = {next((c.key for c in CARDS if c.subs), "")} - {""}
     STATE.obligations = build_obligations()
     if args.view == "question":
         STATE.cursor = next((i for i, o in enumerate(STATE.obligations) if o.kind == "question"), 0)
