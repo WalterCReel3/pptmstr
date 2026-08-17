@@ -12,6 +12,7 @@ a claim rather than an accident.
 
 from __future__ import annotations
 
+import functools
 import math
 import subprocess
 import sys
@@ -51,12 +52,31 @@ def make_art(rows: int = 48, cols: int = 40) -> tuple[str, ...]:
 
 
 ART = make_art()
-STEP = 1.0 / splash.STEPS_PER_SECOND
+STEP = 1.0 / splash.RASTER_ROWS_PER_SECOND
+
+# One sweep: the line crosses every row and then travels ``WAKE_ROWS`` further while the
+# wake drains off the bottom edge. This is the window nearly every claim below is made
+# over, because a shorter one leaves rows the line has not reached yet -- a cell only
+# substitutes while the line is within ``WAKE_ROWS`` of its row, so a 40-step sample of a
+# 48-row art reports the bottom third of the field as dead.
+SWEEP_STEPS = len(ART) + splash.WAKE_ROWS
+
+# The steps at which the whole wake lies on the art: the trailing edge has entered at the
+# top and the line has not yet left the bottom. The rate of substitution rises through the
+# steps before this and falls through the ones after, and that rise and fall is the sweep
+# itself rather than a change of rate -- which is why the bounds that would be violated by
+# it are taken over this stretch and named for it.
+PLATEAU_STEPS = range(splash.WAKE_ROWS - 1, len(ART) - 1)
 
 
-def frames_over_steps(n: int, art: tuple[str, ...] = ART) -> list[tuple[str, ...]]:
-    """One frame per substitution step, ``n`` steps starting at t=0."""
+def frames_over_steps(n: int, art: tuple[str, ...] = ART) -> list[splash.ArtFrame]:
+    """One frame per step of travel, ``n`` steps starting at t=0."""
     return [splash.art_frame(art, RANK_OF_BROKEN, RANKS, i * STEP + STEP / 2) for i in range(n)]
+
+
+def lines_over_steps(n: int, art: tuple[str, ...] = ART) -> list[tuple[str, ...]]:
+    """Just the glyphs of ``frames_over_steps``, for the tests that ignore luminance."""
+    return [frame.lines for frame in frames_over_steps(n, art)]
 
 
 def chars_seen(frames: list[tuple[str, ...]]) -> dict[tuple[int, int], set[str]]:
@@ -128,12 +148,13 @@ def test_a_ranked_space_neither_covers_ink_nor_gets_covered() -> None:
     """
     ranks_with_space = (("a", "b", "c", " "),) + RANKS[1:]
     rank_of_with_space = {c: i for i, bucket in enumerate(ranks_with_space) for c in bucket}
-    # Long enough that every cycling cell has advanced through its whole bucket twice:
-    # the slowest cell moves once every max(_CELL_PERIODS) steps.
-    steps = 2 * max(len(b) for b in ranks_with_space) * max(splash._CELL_PERIODS)
-    for i in range(steps):
+    # Two full sweeps, so every row spends every distance in the wake twice. The window is
+    # the sweep's geometry: a cell is only writable while the line is passing it, so a
+    # window shorter than a sweep never puts the guard under pressure at all on the rows
+    # the line has not yet reached.
+    for i in range(2 * SWEEP_STEPS):
         frame = splash.art_frame(ART, rank_of_with_space, ranks_with_space, i * STEP)
-        for r, line in enumerate(frame):
+        for r, line in enumerate(frame.lines):
             for c, ch in enumerate(line):
                 if ART[r][c] == " ":
                     assert ch == " ", f"space at ({r},{c}) became {ch!r} at step {i}"
@@ -142,8 +163,7 @@ def test_a_ranked_space_neither_covers_ink_nor_gets_covered() -> None:
 
 
 def test_an_unranked_glyph_is_left_alone_rather_than_raising() -> None:
-    frames = frames_over_steps(40)
-    for frame in frames:
+    for frame in lines_over_steps(SWEEP_STEPS):
         for r, line in enumerate(frame):
             for c, ch in enumerate(line):
                 if ART[r][c] == UNRANKED:
@@ -151,8 +171,7 @@ def test_an_unranked_glyph_is_left_alone_rather_than_raising() -> None:
 
 
 def test_a_rank_pointing_past_the_table_is_a_no_op_rather_than_an_index_error() -> None:
-    frames = frames_over_steps(40)
-    for frame in frames:
+    for frame in lines_over_steps(SWEEP_STEPS):
         for r, line in enumerate(frame):
             for c, ch in enumerate(line):
                 if ART[r][c] == OUT_OF_RANGE:
@@ -161,7 +180,7 @@ def test_a_rank_pointing_past_the_table_is_a_no_op_rather_than_an_index_error() 
 
 def test_a_substitute_comes_only_from_the_cells_own_bucket() -> None:
     """Brightness is preserved: nothing ever leaves the bucket it started in."""
-    for frame in frames_over_steps(60):
+    for frame in lines_over_steps(SWEEP_STEPS):
         for r, line in enumerate(frame):
             for c, ch in enumerate(line):
                 original = ART[r][c]
@@ -176,8 +195,16 @@ def test_which_cells_cycle_is_fixed_for_the_life_of_the_process() -> None:
     A cell moves over time exactly when ``is_cycling`` says it does and its bucket has
     somewhere to go. Membership that varied with the step would eventually pull in
     every cell, which reads as uniform noise rather than as texture.
+
+    Two sweeps, and one is not enough. A cell is only writable for the ``WAKE_ROWS``
+    steps the line takes to cross it, its draw succeeds at the ramp's rate, and a
+    successful draw lands back on the glyph it is already showing one time in
+    ``len(bucket)`` -- so a single sweep can leave a genuinely movable cell looking
+    frozen. Measured over 60 sweeps of this fixture: in some sweeps a movable cell makes
+    zero visible changes, while over any two consecutive sweeps the fewest any movable
+    cell makes is four.
     """
-    seen = chars_seen(frames_over_steps(120))
+    seen = chars_seen(lines_over_steps(2 * SWEEP_STEPS))
     for (r, c), chars in seen.items():
         original = ART[r][c]
         bucket_index = RANK_OF.get(original)
@@ -201,7 +228,7 @@ def test_one_bucket_shows_several_of_its_glyphs_at_a_single_instant() -> None:
     ``test_only_a_fraction_of_the_cycling_cells_change_on_any_one_step`` owns that, and
     a renderer that moved every cell on every step would pass this one.
     """
-    frame = splash.art_frame(ART, RANK_OF_BROKEN, RANKS, 5 * STEP)
+    frame = splash.art_frame(ART, RANK_OF_BROKEN, RANKS, 5 * STEP).lines
     bucket = RANKS[0]
     shown = {
         frame[r][c]
@@ -222,56 +249,109 @@ MOVABLE = [
     if ch in RANK_OF and len(RANKS[RANK_OF[ch]]) > 1 and splash.is_cycling(r, c)
 ]
 
-# The whole cycling set moving together is 1.0. This is the bound that separates a
-# shimmer from a full-field flicker, and it is deliberately far from both ends: the
-# implementation sits near 0.3, and neither 0.5 nor 0.05 is a restatement of it.
-MAX_SIMULTANEOUS_CHANGE = 0.5
-MIN_SIMULTANEOUS_CHANGE = 0.05
+# A successful draw is not the same thing as a visible change: the substitute is picked
+# from the cell's bucket without regard to what the cell already shows, so one draw in
+# ``len(bucket)`` lands back on the glyph that is there. Averaged over MOVABLE that leaves
+# this share of successful draws visible -- 0.583 under this fixture, whose smallest
+# movable bucket has two glyphs and whose largest has three. Every rate measured from the
+# rendered lines below is the draw rate times this number, and the difference is not
+# cosmetic: on the raster row *every* cycling cell is redrawn, and about 42% of them are
+# redrawn with what they already had.
+_VISIBLE_DRAW = [1.0 - 1.0 / len(RANKS[RANK_OF[ART[r][c]]]) for r, c in MOVABLE]
+MEAN_VISIBLE_DRAW = sum(_VISIBLE_DRAW) / len(_VISIBLE_DRAW)
 
-# ...and how much that fraction may vary from step to step. What the eye integrates is
-# the modulation of the change rate, not its level, so a field that moved a quarter of
-# its cells on even ticks and none on odd would beat at half the tick rate while staying
-# comfortably under the bound above. Measured spread is 0.05 over 60 steps and 0.07 over
-# 240; deriving a cell's offset from its period's own bits takes it to 0.29.
+# The whole cycling set moving together is 1.0, and that is what this separates the panel
+# from. Measured over 60 sweeps of this fixture the largest single step moves 0.24 of
+# MOVABLE, so 0.35 is a bound with room rather than a restatement of the implementation --
+# the per-sweep maximum itself ranges 0.198 to 0.240, and a bound at 0.25 would be pinning
+# which sweep the test happens to sample.
+#
+# What this bound cannot see, stated rather than left to be discovered: deleting the ramp
+# and firing every row of the wake at full intensity gives 20/48 x 0.583 = 0.243 of
+# MOVABLE, which is inside it, and mutating splash.py that way leaves this test green. The
+# ramp is pinned by ``test_the_draw_rate_falls_off_linearly_with_distance_behind_the_line``,
+# not here. This one is about the *locality*: removing the wake so that every cycling cell
+# draws on every step reads 0.643, and a wake that straddles the line rather than trailing
+# it reads 0.366.
+MAX_SIMULTANEOUS_CHANGE = 0.35
+
+# The floor, and it applies only while the whole wake is on the art. Over a full sweep the
+# rate legitimately reaches zero: the last WAKE_ROWS steps are the drain, when the line has
+# left the bottom edge and the trail is emptying, and that beat is what stops the next
+# sweep entering at the top while the previous one is still lit. Across PLATEAU_STEPS the
+# geometry is constant and the measured floor over 60 sweeps is 0.112; a renderer that held
+# each substitute for two steps drops it to 0.008.
+MIN_SIMULTANEOUS_CHANGE = 0.07
+
+# ...and how much the fraction may vary within that stretch. The rate rises as the wake
+# enters the art and falls as it drains, once per sweep, so a spread taken over a whole
+# sweep would be measuring the sweep. Over PLATEAU_STEPS the wake covers a constant 20
+# rows, and what is left is the art's own row composition and the draw's noise: measured
+# 0.067 over the two sweeps sampled here, and 0.115 for the worst two-sweep window in 60.
+#
+# What it catches, checked by mutation rather than argued: a renderer that re-rolled its
+# draw only every other step -- the "hold the last substitute" design ``art_frame``'s
+# docstring rejects -- moves the field on even steps and leaves it alone on odd ones, which
+# reads 0.204 here and 0.008 on the floor above. A wake that straddled the line reads 0.196,
+# and a sweep with no drain reads 0.190.
+#
+# What it does not catch, which matters more: substitution gated to even steps, with the
+# art restored on the odd ones, is a beat at half the step rate that this statistic is blind
+# to -- the restoration is itself a change, so both parities read 0.132 and the spread stays
+# at 0.073. Measured. That defect is caught by
+# ``test_the_moving_set_does_not_repeat_within_the_first_sixty_ticks`` instead, and the
+# reason this bound is kept anyway is that the two see different halves of the hazard.
 STEADY_RATE_SPREAD = 0.15
 
 
 def test_only_a_fraction_of_the_cycling_cells_change_on_any_one_step() -> None:
     """
-    The temporal claim: substitutions are spread across ticks, not fired on one.
+    The temporal claim: substitutions are spread across steps, not fired on one.
 
-    This is the safety-relevant property of the panel, not a stylistic one. Every
-    cycling cell advancing on the same tick is ~4.4k glyphs changing together at
-    STEPS_PER_SECOND -- full-field flicker at ~3Hz, inside the band photosensitivity
+    This is the safety-relevant property of the panel, not a stylistic one. Every cycling
+    cell advancing on the same step is ~4.4k glyphs changing together at
+    RASTER_ROWS_PER_SECOND -- full-field flicker at 16Hz, inside the band photosensitivity
     guidance treats as a risk, on a panel that is up for as long as the app is empty.
     Spatial variety at one instant cannot see it: with a global step every cell still
     shows a different glyph from its neighbour, and they all change at once anyway.
 
-    Three bounds, because the level alone is not the property. The lower one is here
-    because the cheapest way to pass the upper one is to stop animating, and the spread
-    is here because a rate that swings between a quarter and nothing is a beat at half
-    the tick rate while never exceeding the upper bound at all.
+    What holds the fraction down is the wake's *locality*: only the WAKE_ROWS rows behind
+    the line can change at all, and the ramp thins them further. The three bounds and what
+    each is protecting are argued where they are defined; the sample is two full sweeps so
+    that the maximum is taken over the stretch where the wake is fully on the art and the
+    minimum is not taken over the drain, where zero is the correct answer.
     """
-    frames = frames_over_steps(60)
+    frames = lines_over_steps(2 * SWEEP_STEPS + 1)
     fractions = [
         sum(a[r][c] != b[r][c] for r, c in MOVABLE) / len(MOVABLE)
         for a, b in zip(frames, frames[1:], strict=False)
     ]
     assert max(fractions) < MAX_SIMULTANEOUS_CHANGE, max(fractions)
-    assert min(fractions) > MIN_SIMULTANEOUS_CHANGE, min(fractions)
-    assert max(fractions) - min(fractions) < STEADY_RATE_SPREAD, (min(fractions), max(fractions))
+
+    plateau = [fractions[sweep * SWEEP_STEPS + i] for sweep in range(2) for i in PLATEAU_STEPS]
+    assert min(plateau) > MIN_SIMULTANEOUS_CHANGE, min(plateau)
+    assert max(plateau) - min(plateau) < STEADY_RATE_SPREAD, (min(plateau), max(plateau))
 
 
 def test_the_moving_set_does_not_repeat_within_the_first_sixty_ticks() -> None:
     """
-    Pins the choice of pairwise-coprime periods, which is otherwise a comment.
+    Pins that the draw is re-rolled per step, which is otherwise a comment.
 
-    *Which* cells move on a tick is fixed by their periods and offsets, so a period set
-    sharing a factor makes that set recur on a short cycle -- with every period equal it
-    is the period itself, three ticks, one second. The change rate stays perfectly steady
-    while the same cells take turns in the same order, so neither bound above sees it.
+    *Which* cells move on a step comes from ``_draw_hash``, which mixes the step index in.
+    The cheaper design the module argues against -- one fixed threshold per cell, compared
+    against its row's intensity -- makes this set a function of the line's position alone,
+    so the same cells light first on every sweep and the lowest-threshold ones are lit for
+    the whole 1.25s the wake covers them. The change rate stays perfectly steady while the
+    same cells take turns in the same order, so neither bound above sees it.
+
+    Sixty steps rather than a whole 68-step sweep, and the difference is where the claim
+    stops being true: by the last few steps of the drain the wake has thinned to one or two
+    movable cells, and two consecutive steps moving the same single cell is a coincidence
+    of a nearly empty set rather than a recurrence. Measured on this fixture, the sets at
+    steps 64 and 65 are both {(47, 1)}; every one of the first sixty is distinct, in each
+    of the 60 sweeps sampled.
     """
-    frames = frames_over_steps(61)
+    frames = lines_over_steps(61)
     moving = [
         frozenset((r, c) for r, c in MOVABLE if a[r][c] != b[r][c])
         for a, b in zip(frames, frames[1:], strict=False)
@@ -279,21 +359,40 @@ def test_the_moving_set_does_not_repeat_within_the_first_sixty_ticks() -> None:
     assert len(set(moving)) == len(moving)
 
 
-def test_a_cell_holds_its_glyph_for_several_steps_before_substituting() -> None:
-    """
-    The per-cell half of the same property, which the aggregate fraction can only imply.
+# Measured 352 of 358 movable cells in the first sweep, and 341 in the worst of 60. The
+# bound is a floor on that count, not the count itself: what is being pinned is that
+# consecutive-step substitution is normal near the line, and pinning it to the cell is
+# pinning the hash.
+CONSECUTIVE_SUBSTITUTIONS = 300
 
-    A field where every cell changed on every third step at random would keep the
-    aggregate low and still give each cell a 3Hz-adjacent flicker of its own. What is
-    asserted is a floor on the *gap*: no movable cell substitutes on two consecutive
-    steps, so the fastest thing on screen changes at half the tick rate or slower.
+
+def test_a_cell_near_the_line_may_substitute_on_consecutive_steps() -> None:
     """
-    frames = frames_over_steps(90)
-    for r, c in MOVABLE:
-        changed = [i for i in range(1, len(frames)) if frames[i][r][c] != frames[i - 1][r][c]]
-        assert changed, f"({r},{c}) is movable but never moved"
-        gaps = [b - a for a, b in zip(changed, changed[1:], strict=False)]
-        assert all(g >= 2 for g in gaps), f"({r},{c}) substituted on consecutive steps"
+    Consecutive-step substitution is allowed, and that is a decision rather than a gap.
+
+    A floor on the *gap* between one cell's substitutions is the obvious per-cell half of
+    the photosensitivity argument, and this design does not have it: intensity is 1.0 on
+    the raster row and 0.95 one row behind it, so a cell being overtaken by the line draws
+    on both steps and very probably changes on both. It is recorded as a cost rather than
+    as a property (``planning/2026-08-15-the-splash-cycles-behind-a-raster-line.md``, "Two
+    costs"), and what bounds the cost is the wake passing: a cell sees at most
+    RASTER_ROWS_PER_SECOND changes a second for the 1.25s the wake is over it, once per
+    sweep, against a field that is otherwise still.
+
+    Asserted rather than left unsaid because a per-cell cooldown, or the "hold the last
+    substitute" cache ``art_frame``'s docstring rejects, is exactly the kind of thing a
+    well-meaning change reintroduces -- and this test fails when it is.
+    """
+    frames = lines_over_steps(SWEEP_STEPS)
+    consecutive = sum(
+        1
+        for r, c in MOVABLE
+        if any(
+            frames[i][r][c] != frames[i - 1][r][c] and frames[i + 1][r][c] != frames[i][r][c]
+            for i in range(1, len(frames) - 1)
+        )
+    )
+    assert consecutive >= CONSECUTIVE_SUBSTITUTIONS, (consecutive, len(MOVABLE))
 
 
 def test_the_animation_actually_advances() -> None:
@@ -332,7 +431,7 @@ def test_the_cache_recomputes_once_per_step_and_not_once_per_frame(
     calls = 0
     real = splash.art_frame
 
-    def counted(*args: object, **kwargs: object) -> tuple[str, ...]:
+    def counted(*args: object, **kwargs: object) -> splash.ArtFrame:
         nonlocal calls
         calls += 1
         return real(*args, **kwargs)  # type: ignore[arg-type]
@@ -354,7 +453,220 @@ def test_the_cache_does_not_freeze_on_its_first_answer() -> None:
 
 def test_art_with_no_cycling_material_is_returned_unchanged() -> None:
     plain = ("   ", "???", "")
-    assert splash.art_frame(plain, RANK_OF_BROKEN, RANKS, 3.7) == plain
+    frame = splash.art_frame(plain, RANK_OF_BROKEN, RANKS, 3.7)
+    assert frame.lines == plain
+    # One luminance per line and never a ragged pair, even when nothing was substituted.
+    assert len(frame.luminance) == len(plain)
+
+
+# -- the sweep -----------------------------------------------------------------
+#
+# The line leads its wake, so everything it has touched is *above* it, at lower row
+# indices. The tests below are the geometry: where substitution is allowed to happen, how
+# hard it happens as a function of distance, that no band of the art is left out of it,
+# which rows are lit, and that the sweep repeats on the period the module says it does.
+
+
+def test_nothing_substitutes_ahead_of_the_line_or_beyond_the_wake() -> None:
+    """
+    The wake is bounded and behind the line, which is the whole locality argument.
+
+    Everything that protects this panel from reading as full-field flicker rests on the
+    modulation being confined to WAKE_ROWS of the art's rows and moving -- so a row
+    substituting ahead of the line, or one still substituting after the line has left it
+    behind by more than the wake, is not a cosmetic defect but the failure of the argument
+    ``MAX_SIMULTANEOUS_CHANGE`` is derived from.
+
+    Two sweeps, so the wrap at the end of a sweep is inside the window: an implementation
+    that took the distance without wrapping would be correct on the first sweep and light
+    the whole art on the second.
+    """
+    touched: set[int] = set()
+    for step, frame in enumerate(lines_over_steps(2 * SWEEP_STEPS)):
+        raster = step % SWEEP_STEPS
+        for row, line in enumerate(frame):
+            if line == ART[row]:
+                continue
+            assert 0 <= raster - row < splash.WAKE_ROWS, (step, row, raster)
+            touched.add(row)
+    # ...and the bound is not being satisfied by an art that never substitutes at all.
+    assert touched == set(range(len(ART)))
+
+
+def test_every_row_is_inside_the_wake_at_some_point_in_a_sweep() -> None:
+    """
+    No frozen band: every row substitutes at least once per sweep.
+
+    The complement of the test above, and the reason it is worth its own name. A bound on
+    where the wake may reach is satisfied perfectly by a wake that never reaches anywhere,
+    and the failure that would produce -- an off-by-one in the wrap, a ramp that reaches
+    zero a row early, a row index compared against the wrong height -- leaves a stripe of
+    the art visibly dead while every other test here still passes. Measured: all 48 rows
+    are touched in each of the 60 sweeps sampled, and the thinnest row of this fixture has
+    three movable cells.
+    """
+    frames = lines_over_steps(2 * SWEEP_STEPS)
+    every_row = set(range(len(ART)))
+    for sweep in range(2):
+        window = frames[sweep * SWEEP_STEPS : (sweep + 1) * SWEEP_STEPS]
+        touched = {row for frame in window for row in every_row if frame[row] != ART[row]}
+        assert touched == every_row, sorted(every_row - touched)
+
+
+# How many full sweeps to average over when reading the ramp off the rendered lines. The
+# draw is re-rolled per cell per step, so one sweep gives each distance a single sample per
+# row and the reading is noise: the ramp puts 1/WAKE_ROWS x MEAN_VISIBLE_DRAW = 0.029
+# between one distance and the next, while the measured error at a distance is 0.035 at two
+# sweeps, 0.021 at eight, 0.012 at sixteen and 0.011 at thirty. At four sweeps the reading
+# is not monotonic at all; at eight it is monotonic by less than its own error, which is a
+# green test that has not established anything. Thirty is the first sample where the error
+# is comfortably under half the gap it has to resolve, and it costs ~1s.
+INTENSITY_SWEEPS = 30
+
+# The gap between measurement and prediction that is attributed to sampling rather than to
+# a wrong ramp. Measured 0.011 at INTENSITY_SWEEPS, and it keeps falling with the sample
+# (0.005 at sixty), so this is a bound on the noise and not on the model.
+SURVIVAL_TOLERANCE = 0.02
+
+
+@functools.cache
+def survival_by_distance(sweeps: int) -> tuple[float, ...]:
+    """
+    The share of MOVABLE cells still showing the art's own glyph, by rows behind the line.
+
+    One entry per row of the wake, averaged over ``sweeps`` full sweeps. Every row is at
+    every distance exactly once per sweep, so the population behind each entry is the same
+    set of cells -- which is what lets the entries be compared to each other without the
+    art's row composition entering the comparison.
+
+    Cached because two tests read this table and building it is the most expensive thing
+    in the file.
+    """
+    frames = lines_over_steps(sweeps * SWEEP_STEPS)
+    return tuple(
+        sum(
+            1
+            for sweep in range(sweeps)
+            for r, c in MOVABLE
+            if frames[sweep * SWEEP_STEPS + r + distance][r][c] == ART[r][c]
+        )
+        / (sweeps * len(MOVABLE))
+        for distance in range(splash.WAKE_ROWS)
+    )
+
+
+def surviving_share(distance: int) -> float:
+    """
+    What ``survival_by_distance`` reads at ``distance`` if the ramp is what the module says.
+
+    A cell ``d`` rows behind the line draws with probability ``1 - d / WAKE_ROWS``. When
+    the draw fails it shows the art's own glyph; when it succeeds it picks uniformly from
+    its bucket and lands back on the art's glyph one time in ``len(bucket)``. So the share
+    still showing the original is ``1 - intensity * MEAN_VISIBLE_DRAW``, which is linear in
+    the intensity and therefore in the distance.
+
+    Derived from the ramp rather than from the implementation: a quadratic ramp, a wake of
+    a different depth, or an intensity that did not reach zero at ``WAKE_ROWS`` all move
+    this curve, and the test below reads the residual against it.
+    """
+    return 1.0 - (1.0 - distance / splash.WAKE_ROWS) * MEAN_VISIBLE_DRAW
+
+
+def test_the_draw_rate_falls_off_linearly_with_distance_behind_the_line() -> None:
+    """
+    The ramp, measured -- and measured on survival rather than on change.
+
+    The obvious statistic is how often a cell changes, and it is the wrong one. A cell one
+    row behind the line is compared against a glyph that was itself substituted a step ago,
+    so the change rate saturates: distance 0 and distance 1 both read exactly
+    MEAN_VISIBLE_DRAW and the first row of the ramp is invisible in it. How often the art's
+    *own* glyph survives has no such baseline -- it is a direct linear readout of the draw
+    intensity, and it is strictly monotonic across the whole wake.
+
+    Two assertions, because monotonicity alone is weak: a ramp of the wrong shape or the
+    wrong depth is still monotonic. The residual against ``surviving_share`` is what pins
+    the shape, and at INTENSITY_SWEEPS it is 0.011 against a curve that spans 0.583.
+    """
+    survival = survival_by_distance(INTENSITY_SWEEPS)
+    for distance in range(splash.WAKE_ROWS - 1):
+        assert survival[distance] < survival[distance + 1], (distance, survival)
+    worst = max((abs(survival[d] - surviving_share(d)), d) for d in range(splash.WAKE_ROWS))
+    assert worst[0] < SURVIVAL_TOLERANCE, (worst, survival)
+
+
+def test_every_cycling_cell_on_the_raster_row_is_redrawn() -> None:
+    """
+    Intensity is 1.0 on the line, and the only evidence for it is an aggregate.
+
+    A redraw is not observable per cell. The substitute is picked from the bucket without
+    regard to what is there, so a cell that is redrawn with the glyph it already had is
+    indistinguishable in the output from a cell that was never drawn -- on this fixture's
+    three-glyph bucket that is one redraw in three. Any test asserting that every cycling
+    cell on the raster row *changes* fails about a third of the time per cell, and would
+    have to be weakened until it said nothing.
+
+    What survives the aggregate is exact: if every cycling cell on the raster row is
+    redrawn, the share still showing the art's glyph there is exactly one over the bucket
+    size, averaged, which is ``1 - MEAN_VISIBLE_DRAW`` = 0.417. Any cell not redrawn can
+    only push that up. Measured 0.416 over INTENSITY_SWEEPS.
+    """
+    survival = survival_by_distance(INTENSITY_SWEEPS)
+    assert abs(survival[0] - (1.0 - MEAN_VISIBLE_DRAW)) < SURVIVAL_TOLERANCE, survival[0]
+
+
+def test_only_the_line_and_the_row_it_has_left_are_lit() -> None:
+    """
+    The luminance ramp is two rows, and it is not the substitution ramp.
+
+    The wake is twenty rows deep and the highlight is two, deliberately: spreading the
+    brightness over the whole wake lights a third of the panel and loses the line, which is
+    the thing being drawn. So this is the property that would quietly disappear if the two
+    ramps were ever unified -- the art would still cycle, still be local, still pass every
+    other test in this file, and read as a glowing block instead of a scan.
+
+    Two rows rather than one is a frame-rate bound rather than a taste: a band narrower
+    than its own per-frame displacement leaves rows that nothing ever lights. That bound
+    lives in ``splash.RASTER_ROWS_PER_SECOND`` and cannot be checked from here, because
+    what it is a bound against is the rate the window really redraws at.
+    """
+    for step, frame in enumerate(frames_over_steps(2 * SWEEP_STEPS)):
+        assert len(frame.luminance) == len(frame.lines)
+        lit = [row for row, level in enumerate(frame.luminance) if level > splash.Luminance.DIM]
+        assert len(lit) <= 2, (step, lit)
+        raster = step % SWEEP_STEPS
+        if raster < len(ART):
+            assert frame.luminance[raster] == splash.Luminance.RASTER
+            assert lit == ([raster - 1, raster] if raster else [raster]), (step, lit)
+        else:
+            # The drain: the line is off the bottom edge, so nothing is at full brightness.
+            assert splash.Luminance.RASTER not in frame.luminance, step
+
+
+def test_the_sweep_repeats_every_art_plus_wake_steps() -> None:
+    """
+    The period is ``rows + WAKE_ROWS`` and not ``rows``, and the difference is the drain.
+
+    Through the last WAKE_ROWS steps the line is off the bottom edge and only the wake
+    empties. That beat is load-bearing: without it the next sweep enters at the top while
+    the previous trail is still lit, and two lit bands with no line between them read as
+    noise rather than as a scan.
+
+    What repeats is the geometry, not the picture. ``_draw_hash`` mixes the *unwrapped*
+    step index, so the cells that substitute are drawn afresh on every sweep -- if the
+    glyphs repeated too, the panel would be a 4.25s loop of one fixed pattern, which is
+    what a per-cell fixed threshold would have produced and what the per-step draw exists
+    to avoid. Measured on this fixture: 66 of the 68 steps render different glyphs on the
+    next sweep, and the two that match are the last two, where the wake has drained and
+    both frames are the untouched art.
+    """
+    first = frames_over_steps(SWEEP_STEPS)
+    second = frames_over_steps(2 * SWEEP_STEPS)[SWEEP_STEPS:]
+    for step, (a, b) in enumerate(zip(first, second, strict=True)):
+        assert a.luminance == b.luminance, step
+    assert sum(1 for a, b in zip(first, second, strict=True) if a.lines != b.lines) >= 60
+
+    drained = [step for step, frame in enumerate(first) if frame.lines == ART]
+    assert drained and all(step >= len(ART) for step in drained), drained
 
 
 # -- the quote -----------------------------------------------------------------

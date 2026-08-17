@@ -173,6 +173,129 @@ def test_pressure_steps_differ_in_lightness_not_only_hue(palette: Palette) -> No
     assert spread >= 0.05, f"{palette.name} pressure colours span only {spread:.3f} luminance"
 
 
+# -- the splash's raster line --------------------------------------------------
+#
+# ``splash.RASTER_ROWS_PER_SECOND = 16.0`` is sound only under
+#
+#     rows_per_second <= band_rows * displayed_fps
+#
+# and at this panel's measured idle rate of 8.7fps that requires ``band_rows = 2``: one
+# row allows 8.7 rows/s, so at 16 the line would advance 1.84 rows between displayed
+# frames and hop down the art with a permanently unlit row inside it. That 2 counts
+# ``Luminance.RASTER`` and ``Luminance.TRAIL`` as *one* moving object, which holds only
+# where TRAIL is drawn far enough from DIM to be seen as part of the line rather than as
+# more background. splash.py cannot check that -- it emits an ordinal and imports no
+# palette by design -- so a rate constant in that file is an assertion about
+# ``inbox._ink`` and about all nine palettes here, and this is where it is held.
+#
+# The floor is measured rather than chosen. Across every palette against both surfaces
+# the shipping triple's thinnest separations are 1.227:1 (high_contrast, DIM to TRAIL,
+# where text_dim is #C0C0C0 and TRAIL is white at 212/255 over black) and 1.196:1 (cde,
+# TRAIL to RASTER). 1.19 is the tightest floor both clear, so a regression in the
+# triple or in any palette trips this while the shipping choice passes with no room to
+# spare on cde.
+#
+# It is cde that sets the floor, and cde provably cannot do better. Its entire ink range
+# against its own bg spans 3.96:1 (text_dim) to 6.99:1 (text_strong), a total of
+# 1.77:1 from end to end, so three evenly spaced levels are 1.33:1 per step at the very
+# best -- for this triple or for any triple that could be invented on that palette.
+# Going *brighter* than the bg to buy range is worse rather than better: the ramp would
+# cross the background and the mid-wake rows would vanish into it. So a floor above
+# 1.33 here would not be a stricter test, it would be an impossible one, and the honest
+# reading of 1.19 is that on cde and win311 this is thin by construction.
+SPLASH_BAND_SEPARATION = 1.19
+
+
+def _as_drawn(packed: int, surface: Color) -> Color:
+    """
+    What the draw list actually puts on screen when it blends ``packed`` over ``surface``.
+
+    ``inbox._ink`` hands back a packed ImU32 for all three levels, and one of them comes
+    from ``theme.faded`` and so carries an alpha under 255. An alpha is not a colour
+    until something has composited it, and the thing a contrast ratio has to be taken
+    between is the composited result -- measuring the unblended ink would credit TRAIL
+    with a separation it never has on screen. The opaque two fall through this
+    unchanged, so all three take the same path and none is special-cased.
+    """
+    alpha = ((packed >> 24) & 0xFF) / 255.0
+    # IM_COL32 packs ABGR; test_color_precomputes_both_forms pins that.
+    ink = (packed & 0xFF, (packed >> 8) & 0xFF, (packed >> 16) & 0xFF)
+    back = (round(c * 255.0) for c in surface.rgb)
+    r, g, b = (round(alpha * i + (1.0 - alpha) * s) for i, s in zip(ink, back, strict=True))
+    return theme.col((r << 16) | (g << 8) | b)
+
+
+def _splash_levels(palette: Palette, surface: Color) -> dict[object, Color]:
+    from pptmstr.ui import splash
+    from pptmstr.ui.inbox import _ink
+
+    theme.set_theme(palette.name)
+    return {level: _as_drawn(_ink(level), surface) for level in splash.Luminance}
+
+
+# Both surfaces, though the panel this draws in is a dockable window and its real
+# backdrop is ``bg``. ``panel`` costs nothing to hold and is the only other surface a
+# pane in this app is ever drawn on; as it happens both worst cases above are on ``bg``.
+_SPLASH_SURFACES = ("bg", "panel")
+
+
+@pytest.mark.parametrize("palette", ALL_PALETTES, ids=PALETTE_IDS)
+def test_the_splash_luminance_band_is_two_rows_on_every_palette(palette: Palette) -> None:
+    """
+    TRAIL has to be distinct from both its neighbours, or the raster line is one row.
+
+    Failing this does not make the splash slightly less pretty on an unpopular palette.
+    It makes ``splash.RASTER_ROWS_PER_SECOND`` exceed its own bound there, and the hole
+    that constant exists to close comes back on exactly the palettes nobody looks at:
+    TRAIL collapsing into DIM leaves a one-row band, and TRAIL collapsing into RASTER
+    leaves a two-row bar with no leading edge, which is the same failure seen from the
+    other side.
+    """
+    from pptmstr.ui import splash
+
+    for surface_role in _SPLASH_SURFACES:
+        surface = getattr(palette, surface_role)
+        level = _splash_levels(palette, surface)
+        where = f"{palette.name} on {surface_role}"
+
+        dim_to_trail = contrast_ratio(level[splash.Luminance.DIM], level[splash.Luminance.TRAIL])
+        assert dim_to_trail >= SPLASH_BAND_SEPARATION, (
+            f"{where}: TRAIL is only {dim_to_trail:.3f}:1 from DIM, so the band is one "
+            f"row and 16 rows/s hops"
+        )
+
+        trail_to_raster = contrast_ratio(
+            level[splash.Luminance.TRAIL], level[splash.Luminance.RASTER]
+        )
+        assert trail_to_raster >= SPLASH_BAND_SEPARATION, (
+            f"{where}: TRAIL is only {trail_to_raster:.3f}:1 from RASTER, so the line "
+            f"has no leading edge"
+        )
+
+
+@pytest.mark.parametrize("palette", ALL_PALETTES, ids=PALETTE_IDS)
+def test_the_splash_trail_sits_between_the_art_and_the_raster_line(palette: Palette) -> None:
+    """
+    Separation alone would be satisfied by a TRAIL on the wrong side of RASTER.
+
+    Ordering is what makes the two lit rows read as one object with a direction. It is
+    stated against the surface rather than as raw luminance because half these palettes
+    are light, where the strongest ink is the *darkest* -- distance from the background
+    is the quantity that means the same thing in both regimes.
+    """
+    from pptmstr.ui import splash
+
+    for surface_role in _SPLASH_SURFACES:
+        surface = getattr(palette, surface_role)
+        level = _splash_levels(palette, surface)
+        steps = [contrast_ratio(level[lum], surface) for lum in splash.Luminance]
+        assert steps == sorted(steps), (
+            f"{palette.name} on {surface_role}: DIM/TRAIL/RASTER stand at "
+            f"{steps[0]:.2f}/{steps[1]:.2f}/{steps[2]:.2f}:1 from the surface, which is "
+            f"not increasing"
+        )
+
+
 # Deliberately not tested: WCAG contrast between two *state* colours. The metric
 # does not mean what it looks like it means here -- it compares a foreground to a
 # background, and since every state colour must clear 3:1 against the same panel,

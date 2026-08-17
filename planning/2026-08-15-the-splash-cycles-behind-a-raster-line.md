@@ -7,13 +7,15 @@ FAILED, releases their cap slots, and can drop their results, and it surfaced
 than the code that was written against them, which is why they are here rather
 than only in a stash.
 
-The in-flight code is `git stash@{0}` on branch `checkpoint-fleet-board-splash`.
-It does not import — `NamedTuple` had been dropped from the imports in favour of
-`IntEnum` while `_Rhythm` still used it — so it was stashed rather than left in
-the tree, because a package that will not import cannot launch the app the driver
-fix has to be tested against. **It also carries the wrong rate and the wrong
-reason for it.** See "The rate is bounded by the frame rate" below before
-reapplying any of it.
+**Landed 2026-08-16**, at the rate this document argued for: 16 rows a second behind
+a two-row luminance band. The stash it was parked into carried the older 18 and a
+comment asserting an evenness against `fps_idle` that this repo had already measured
+to be absent, so it was dropped rather than reapplied — the model below is what
+shipped, and no branch holds a competing version of it.
+
+What follows is the design as it was written before the code existed. It is left
+in that tense because it is a snapshot; what changed on the way in, and what did
+not get answered at all, is in the closing note at the bottom.
 
 ---
 
@@ -179,3 +181,64 @@ only way to settle any of the visual claims — none of them were checked agains
 frame before this was parked. `scripts/bench_idle.py` measures the splash and may
 be made stale by a rate change. `CYCLING_FRACTION`, `is_cycling`, the quote, and
 the whole fitting section were out of scope and were not touched.
+
+---
+
+## Closing note, 2026-08-16
+
+The model above shipped as described. Three things this document left open, and
+where each of them ended up.
+
+**The photosensitivity argument was made rather than asserted, and it moved into
+the code.** It lives in `splash.py`'s "what protects the panel" section, because
+it is an argument about constants that a reader changing them has to meet. What
+carries the panel is rate and area: a fixed row pulses once per `rows + WAKE_ROWS`
+steps — 0.198 Hz, below the photosensitive band entirely rather than merely inside
+WCAG's allowance — and the two lit rows of 61 occupy 10% of a 10-degree field at
+the largest size `fit_size` returns, against a 25% area threshold. The argument
+from *dimness* is recorded there as false, which is the part worth carrying: the
+DIM-to-RASTER step is 0.47–0.76 of relative luminance depending on palette, against
+the 0.10 at which the general flash threshold starts, and it is supposed to read.
+
+What stayed thin is the per-cell rate, exactly where this document guessed it would
+be. A cell being overtaken can substitute on consecutive steps at 16 Hz, inside the
+15–20 Hz region where photosensitive response peaks, and nothing about the sweep's
+own 0.198 Hz protects it. What does is that a substitution never leaves the cell's
+measured ink bucket — so it moves about 0.05 of relative luminance, half the
+threshold. That is now a standing bound rather than an observation:
+`tests/test_splash_art.py`'s `test_no_swap_changes_a_cell_by_more_than_a_sixth`
+holds the ratio at 1.18, and it was written to keep the picture's shape rather than
+for this, so **widening the ink bands is a photosensitivity change** and `splash.py`
+is the only place that says so.
+
+**None of it was measured against a photometer or a live frame.** Every figure is
+computed from the palettes and from a viewing geometry stated in `splash.py` because
+this repo records none — 1920×1200 at 24 inches, viewed at 60cm. Written down so it
+can be disagreed with, not because it is authoritative.
+
+**The descender question was not settled.** Whether the last row's ink lands inside
+what `required_extent` reserved, now that rows are placed by hand rather than by
+ImGui's block layout, still wants `scripts/verify_splash.py` and a live frame.
+`tests/test_inbox_rail.py` pins the row pitch and pins that the claimed extent is
+exactly `required_extent` — that is the arithmetic, and the arithmetic was never the
+part in doubt. The supporting evidence is a `calc_text_size` measurement quoted in
+`_art`'s docstring showing ImGui's own multi-line block advancing by the same pitch,
+which makes the hand-placed rows a reimplementation of what the one call already did
+rather than a new geometry. That is an argument, not a rasterised frame.
+
+**The luminance triple is not the obvious one, and that is now pinned next door.**
+`text_dim`/`text`/`text_strong` must not ship: `text` and `text_strong` are the same
+bytes on `high_contrast` and `win311`, which flattens the line into a bar, and on
+`cde` and `turbo` they separate in hue alone, which `theme.py`'s first rule forbids.
+TRAIL is instead RASTER's own ink at `theme.faded` step 10 of 12, forced from both
+sides — step 9 collapses TRAIL into DIM on `high_contrast`, step 11 collapses it into
+RASTER on `dark`. `tests/test_theme.py` holds the band across all nine palettes,
+because `RASTER_ROWS_PER_SECOND = 16` is sound only while the band is two rows, and
+`splash.py` emits an ordinal and imports no palette by design so it cannot check its
+own precondition. On `cde` the separation is 1.196:1 and provably cannot be better:
+its whole ink range spans 1.77:1, so three levels are 1.33:1 per step at best.
+
+The test decisions went as proposed. The one genuinely obsolete test,
+`test_a_cell_holds_its_glyph_for_several_steps_before_substituting`, was replaced by
+its inverse rather than deleted, since consecutive-step substitution is now
+deliberate. `scripts/bench_idle.py` was not re-run.
