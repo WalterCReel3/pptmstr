@@ -10,8 +10,9 @@ short where DETAIL was narrow and tall, and that inverts which axis binds.
 No ImGui here, and no clock read. ``now`` is a parameter for the same reason the
 reducer takes one (STYLE.md §1): a core that reaches for ``time.monotonic()`` cannot
 be asked what it renders at t=4.5s, and every guarantee below -- stable membership,
-in-bucket substitution, a readable floor under the quote -- is a statement about two
-different ``now`` values that only a caller-supplied clock lets a test make.
+in-bucket substitution, where the raster line has reached, a readable floor under the
+quote -- is a statement about two different ``now`` values that only a caller-supplied
+clock lets a test make.
 
 The art data itself lives in ``splash_art.py``; this module never imports it. It takes
 ``art``/``ranks``/``rank_of`` as arguments so the behaviour is exercisable against
@@ -26,22 +27,93 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import NamedTuple
+from enum import IntEnum
 
-# -- rate ----------------------------------------------------------------------
+# -- the sweep -----------------------------------------------------------------
+#
+# A bright raster line runs down the art and drags a wake of substituting cells behind
+# it. Two ramps, deliberately different lengths: the wake decides how many cells
+# *substitute* and reaches ``WAKE_ROWS`` rows back, while the luminance highlight is two
+# rows and no more. Spreading the brightness over the whole wake lights a third of the
+# panel at once and loses the line, which is the thing being drawn.
+#
+# One step is one row of travel, so this is a speed and not a tick rate, and what bounds
+# it is the rate the window is really redrawing at:
+#
+#     rows_per_second <= band_rows * displayed_fps
+#
+# A luminance band narrower than its own per-frame displacement cannot read as motion. If
+# the line advances two rows between displayed frames and the band is one row tall, the
+# frames light rows p and p+2 and nothing ever lights p+1 -- the line hops down the block
+# with a permanent hole in it instead of sweeping.
 #
 # With no sessions there is nothing active, so app.py sets
 # ``runner.fps_idling.enable_idling = not snap.any_active`` and the window redraws at
-# ``settings.fps_idle`` -- 9.0 by default. The splash is therefore animating at ~9fps,
-# not 60, and a rate chosen against 60 would read as a strobe.
+# ``settings.fps_idle``, 9.0 by default. The figure to bound against is 8.7 rather than
+# 9.0: ``fps_idle`` is a ``glfwWaitEventsTimeout`` bound and not a clock, so an interval
+# is 1/9s plus render and scheduling time, and orchestrator-design.md:534-539 measures
+# the empty-fleet TRIAGE idle phase -- this panel, on screen -- at 8.7-9.0fps. Two rows
+# at 8.7fps allows 17.4 rows/s. Sixteen sits under that at 1.84 rows a frame, so the band
+# always abuts or overlaps where it just was and no row is skipped. The line crosses the
+# 61 rows in 3.8s and the whole cycle, drain included, is 5.0625s.
 #
-# This is the tick rate of the whole field, not the rate any one cell changes at: a cell
-# substitutes once every ``_CELL_PERIODS`` ticks of its own, so the fastest cell moves at
-# 1.5Hz and the slowest at under 0.5Hz. Three ticks a second puts three idle frames on
-# the shortest substitution, which is slow enough to read as a deliberate flicker rather
-# than as tearing. Do not raise this to "smooth it out" -- at 9fps anything above ~4
-# aliases against the frame rate and the art crawls.
-STEPS_PER_SECOND = 3.0
+# The bound puts a floor under ``fps_idle`` that nothing makes it respect. It is
+# operator-settable and unclamped: settings.py:45 defaults it to 9.0, ``load`` checks the
+# value's type without checking its range (settings.py:103), and ``--fps-idle`` takes any
+# float (app.py:697,709) -- which is why orchestrator-design.md:533 marks every figure in
+# that benchmark as conditional on it. Two rows at sixteen a second needs the window to
+# really display 8fps, so the floor on the setting is about 8.3 once the ~4ms of render
+# and scheduling behind the 8.7-against-9.0 gap is carried. At 6 the displacement is 2.67
+# rows a frame, wider than the band, and the permanent hole this constant is chosen to
+# avoid is back.
+#
+# Only the slow end needs checking, because faster frames only shrink the displacement --
+# and faster is what an operator produces: hello_imgui holds full rate for a few frames
+# after pointer crossing, focus or window mapping (orchestrator-design.md:566-580), which
+# is exactly what someone looking at a cold-start splash generates. At 60fps the
+# displacement is 0.27 rows and the line simply holds a row for several frames.
+RASTER_ROWS_PER_SECOND = 16.0
+
+# How far behind the line a cell can still substitute, in rows. Intensity is 1.0 on the
+# raster row and steps down one twentieth per row behind it, reaching zero exactly here.
+# A plain linear ramp, because "steps down for every line" is a statement about rows, and
+# equal steps are what make the trail read as one gradient rather than as a bright clump
+# with stragglers behind it.
+#
+# The cycle is ``rows + WAKE_ROWS`` steps rather than ``rows``: through the last
+# ``WAKE_ROWS`` of it the line is off the bottom edge and only the wake drains. That beat
+# is what stops the next sweep entering at the top while the previous trail is still lit
+# -- two lit bands with no line between them read as noise, not as a scan.
+WAKE_ROWS = 20
+
+# Resolution of the per-step draw, and the split of the draw hash's 32 bits between the
+# two questions asked of it. 1024 buckets resolve the ramp's twentieths to three decimal
+# places, so a cell's firing rate is its row's intensity rather than a rounding of it.
+_DRAW_BITS = 10
+_DRAW_BUCKETS = 1 << _DRAW_BITS
+
+
+class Luminance(IntEnum):
+    """
+    How bright a row is drawn, as an ordinal for the pane to map to a colour.
+
+    An int and never a colour: this module imports no ImGui and knows no palette, which
+    is what keeps the whole animation exercisable without a live frame. Named members
+    rather than a bare 0/1/2 so the pane's mapping is total and reviewable -- another
+    level here becomes a missing arm there rather than a silently dim row.
+
+    Two lit levels, not twenty. The substitution wake is ``WAKE_ROWS`` deep; the
+    luminance highlight is the raster row and the row it has just left. Two is not a
+    matter of taste. One row fails the bound in the sweep section at
+    ``RASTER_ROWS_PER_SECOND``, so it would strobe rather than travel, and it has no
+    trailing side either -- at the 8 to 16 pixels a row occupies at the sizes
+    ``fit_size`` returns for this pane, that reads as a hairline blinking down the panel.
+    """
+
+    DIM = 0
+    TRAIL = 1
+    RASTER = 2
+
 
 # -- the cycling set -----------------------------------------------------------
 #
@@ -57,24 +129,64 @@ CYCLING_FRACTION = 0.34
 _MEMBERSHIP_BUCKETS = 1024
 _MEMBERSHIP_THRESHOLD = CYCLING_FRACTION * _MEMBERSHIP_BUCKETS
 
-# -- the stagger ---------------------------------------------------------------
+# -- what protects the panel ---------------------------------------------------
 #
-# How many ticks apart one cell's substitutions are. A cell draws its period and its
-# alignment within that period from its own hash, so on any tick only the cells whose
-# period divides that tick move -- about three in ten of the cycling set, and roughly the
-# same three in ten on every tick, which is a field that shimmers rather than one that
-# blinks.
+# This is on screen for as long as the app has no sessions, so flicker is a live hazard
+# rather than a theoretical one, and nothing below is a limit on how often a single cell
+# may change. What carries it is rate and area, both by wide margins.
 #
-# This is the load-bearing part of the animation, not a refinement of it. A single global
-# step advances every cycling cell on the same frame: a thousand glyphs changing together
-# at STEPS_PER_SECOND is full-field flicker at ~3Hz, which is inside the band
-# photosensitivity guidance treats as a risk, on a panel that is on screen for as long as
-# the app has no sessions. The tests in the "only a fraction of the cycling cells change"
-# group hold both the fraction and its steadiness down, and they are not cosmetic.
+# *It is not carried by the modulation being small.* A pane mapping DIM and RASTER onto a
+# theme's dim and strong text colours puts 0.67 of relative luminance between them on
+# ``dark``, 0.76 on ``ghost`` and 0.47 on ``high_contrast``, against the 0.10 at which
+# WCAG's general flash threshold starts. The highlight is supposed to read, so a large
+# step is the design working -- but it means an argument from dimness would be false, and
+# no plausible palette pairing rescues it.
 #
-# Pairwise coprime, so which cells move repeats only every lcm(2,3,5,7) = 210 ticks --
-# 70 seconds -- rather than on the short cycle a set sharing a factor would realign on.
-_CELL_PERIODS: tuple[int, ...] = (2, 3, 5, 7)
+# *Any one place on the panel pulses at 0.198 Hz.* ``RASTER_ROWS_PER_SECOND`` is a speed
+# and not a flicker rate -- a step moves the line one row, it does not toggle anything --
+# so the quantity that matters is what a fixed row sees over a cycle: DIM for nearly all
+# of it, RASTER on the single step the line is on it, TRAIL on the next, then DIM again.
+# One pulse, one pair of opposing transitions, once per ``rows + WAKE_ROWS`` = 81 steps,
+# which at sixteen rows a second is 5.0625s. WCAG 2.3.1 permits three a second, so that
+# is 15x of margin, and it is below the ~3Hz lower edge of the photosensitive band
+# entirely -- the band never opens. It is frame-rate independent for the same reason: a
+# faster window spreads one pulse over more frames rather than repeating it.
+#
+# *What modulates luminance is two rows of 61*, travelling, never the whole field.
+# Nothing in this repo records a viewing distance, so the geometry has to be stated to be
+# argued: on a 1920x1200 24-inch panel, 37px/cm, viewed at 60cm, a 10-degree field is
+# 10.5cm and 390px across. The largest case the fitting section below records is size 16,
+# where the band is 32px tall against art 576px wide, and the part of it inside that
+# field is 10% -- against WCAG's 25% area threshold. At the smallest window in that same
+# table, size 8, it is 3.9%. Both take the whole band rectangle as flashing, where at
+# most 31% of a cell is ink.
+#
+# *Substitution is local, and it barely moves the area average.* Only the ``WAKE_ROWS``
+# rows behind the line can change at all -- 20 of the 61-row art -- the ramp averages
+# 0.525 over those, and the cycling set is ``CYCLING_FRACTION`` of the ranked cells to
+# begin with, so the bound is 20/61 x 0.525 x 0.34, under 6% of the field on any one
+# step, and the true figure is lower because a row's spaces never take part. A swap never
+# leaves the cell's own bucket, and the buckets are measured rather than eyeballed:
+# splash_art.py:66 records a 17.2% within-band ink spread, so a swap moves at most 4.6% of
+# a cell's area between ink and background -- the brightest glyph in the art covers 31% of
+# its cell -- for about 0.05 of relative luminance on the highest-contrast palette, half
+# the 0.10 threshold. Each cell draws independently, so the signs are independent and the
+# area-averaged luminance, which is the quantity WCAG measures, is essentially static.
+#
+# The cost, stated as a cost rather than left to be discovered. On the raster row every
+# cycling cell substitutes and a cell may substitute on consecutive steps, so a cell
+# being overtaken changes at up to ``RASTER_ROWS_PER_SECOND`` -- 16 Hz, inside the 15-20
+# Hz region where photosensitive response peaks, for the 1.25s the wake is over it, at an
+# average rate of 0.525 x 16 across that. Nothing about the sweep's own 0.198 Hz protects
+# that; what does is the ~0.05 per-cell step above.
+#
+# That last figure is a standing bound rather than an observation: NO SUBSTITUTION
+# MAY MOVE A CELL MORE THAN ONE INK BAND, with the ranking generated by
+# scripts/rank_glyphs.py rather than edited. tests/test_splash_art.py's
+# ``test_no_swap_changes_a_cell_by_more_than_a_sixth`` holds it at a ratio of 1.18, and
+# it was written to keep the picture's shape, not for this. Widening the bands to shrink
+# the literal is therefore a photosensitivity change, and this sentence is the only place
+# that says so.
 
 
 def _cell_hash(row: int, col: int) -> int:
@@ -83,8 +195,8 @@ def _cell_hash(row: int, col: int) -> int:
 
     Written out rather than delegated to ``hash()`` on purpose. CPython's ``hash`` is
     only guaranteed stable for ints within one build, and the *point* of this value is
-    that a cell's membership and phase are the same on every run and every machine --
-    a property that a test can pin only if the mixing is ours.
+    that a cell's membership is the same on every run and every machine -- a property
+    that a test can pin only if the mixing is ours.
     """
     x = (row * 0x9E3779B1 + col * 0x85EBCA77 + 0x165667B1) & 0xFFFFFFFF
     x ^= x >> 15
@@ -95,74 +207,85 @@ def _cell_hash(row: int, col: int) -> int:
     return x
 
 
+def _draw_hash(row: int, col: int, step: int) -> int:
+    """
+    A stable 32-bit mix of a cell and the step it is being drawn on.
+
+    Separate from ``_cell_hash``, and mixed with the step, because whether a member of
+    the cycling set substitutes is re-decided on every step. The cheaper design gives
+    each cell one fixed threshold from its own hash and compares that against its row's
+    intensity, and it is worse: the same cells light first on every sweep, and the
+    lowest-threshold ones are lit for the whole 1.25s the wake covers them, which is a
+    field of fixed strobes rather than a wake. Drawing afresh gives every cycling cell in
+    a row the same expected rate and none of them a fixed phase.
+
+    Written out rather than delegated for the same reason ``_cell_hash`` is: the value
+    has to be identical on every run and every machine, or nothing here is pinnable.
+
+    Two disjoint bit ranges:
+
+        0-9   the draw itself, against _DRAW_BUCKETS
+        10-31 which glyph of the cell's bucket is substituted in
+
+    Disjoint rather than convenient. Both are read from one value on one step, so shared
+    bits would make the glyph a function of how narrowly the draw succeeded -- and the
+    range that "succeeds" shrinks with every row further back in the wake, so the choice
+    would be drawn from a narrower and differently-shaped subset of each bucket the
+    dimmer the row, which is a correlation between position and glyph that no part of
+    this design wants.
+    """
+    x = (_cell_hash(row, col) ^ ((step & 0xFFFFFFFF) * 0x27D4EB2F)) & 0xFFFFFFFF
+    x ^= x >> 16
+    x = (x * 0x7FEB352D) & 0xFFFFFFFF
+    x ^= x >> 15
+    x = (x * 0x846CA68B) & 0xFFFFFFFF
+    x ^= x >> 16
+    return x
+
+
 def step_index(now: float) -> int:
     """
-    The substitution step ``now`` falls in.
+    How many rows of travel the line has made by ``now``, unwrapped.
 
     Exposed because it is the cache key: two ``now`` values in the same step produce
     byte-identical frames, which is what makes ``ArtFrames`` a memo rather than an
-    approximation.
+    approximation. It counts travel from t=0 rather than giving a position on the panel,
+    because the wrap to a row index needs the art's height, which ``art_frame`` is given
+    and this is not.
     """
-    return int(now * STEPS_PER_SECOND)
-
-
-class _Rhythm(NamedTuple):
-    """
-    Everything a cell's *position* decides about its animation.
-
-    ``offset`` is which tick within ``period`` the cell moves on, and ``phase`` is which
-    glyph of its bucket it starts from. The two are separate axes: ``phase`` alone picks
-    what is shown and never when it changes, so a stagger built out of it leaves the
-    whole field substituting on the same frame.
-    """
-
-    cycling: bool
-    period: int
-    offset: int
-    phase: int
-
-
-def _rhythm(row: int, col: int) -> _Rhythm:
-    """
-    A cell's four animation facts, from one hash and one call.
-
-    One call so ``is_cycling`` and ``art_frame`` cannot come to different conclusions
-    about the same cell -- an unpinned duplicate of a rule is the smell STYLE.md §3
-    names, and here the two readers are a public predicate and the renderer that has to
-    agree with it.
-
-    The four fields take disjoint bits of the 32:
-
-        0-9   membership, against _MEMBERSHIP_BUCKETS
-        10-17 which period the cell keeps
-        18-23 where in that period it lands
-        24-31 which glyph of its bucket it starts on
-
-    Disjoint rather than convenient, and it is ``offset`` that makes this matter rather
-    than a general tidiness argument. Taking the offset from the period's own bits sends
-    every cell of a period to the same tick of it -- the field then changes in a lump a
-    quarter its size and goes quiet in between, which is a beat at half the tick rate
-    even though no more cells are moving overall. The bound in
-    ``test_only_a_fraction_of_the_cycling_cells_change_on_any_one_step`` is on the
-    *steadiness* of the rate for that reason, and it is what pins these bit ranges.
-    """
-    h = _cell_hash(row, col)
-    period = _CELL_PERIODS[(h >> 10 & 0xFF) % len(_CELL_PERIODS)]
-    return _Rhythm(
-        cycling=h % _MEMBERSHIP_BUCKETS < _MEMBERSHIP_THRESHOLD,
-        period=period,
-        offset=(h >> 18 & 0x3F) % period,
-        phase=h >> 24,
-    )
+    return int(now * RASTER_ROWS_PER_SECOND)
 
 
 def is_cycling(row: int, col: int) -> bool:
     """
     Whether the cell at ``(row, col)`` ever substitutes.
 
-    A function of position alone -- not of the character there, and not of time.
+    A function of position alone -- not of the character there, and not of time. It
+    answers whether a cell is *eligible*; the sweep decides when an eligible cell
+    actually moves, and holding those apart is what lets membership be pinned by a test
+    that never mentions a clock.
+
+    ``art_frame`` calls this rather than repeating the comparison against its own hash,
+    so the predicate the pane can ask and the rule the renderer follows are the same line
+    of code -- an unpinned duplicate of a rule is the smell STYLE.md §3 names, and here
+    the two readers are a public predicate and the frame that has to agree with it.
     """
-    return _rhythm(row, col).cycling
+    return _cell_hash(row, col) % _MEMBERSHIP_BUCKETS < _MEMBERSHIP_THRESHOLD
+
+
+@dataclass(frozen=True, slots=True)
+class ArtFrame:
+    """
+    One frame of the art: the lines as they are drawn, and how bright each one is.
+
+    ``luminance[i]`` belongs to ``lines[i]``, one entry per line and never a ragged pair.
+    Carried as one object for the same reason ``QuoteFrame`` carries its own lines -- the
+    pane has a single thing to read and cannot pair this frame's glyphs with the previous
+    frame's highlight, which on a moving line is a smear rather than a subtle error.
+    """
+
+    lines: tuple[str, ...]
+    luminance: tuple[Luminance, ...]
 
 
 def art_frame(
@@ -170,16 +293,33 @@ def art_frame(
     rank_of: Mapping[str, int],
     ranks: Sequence[Sequence[str]],
     now: float,
-) -> tuple[str, ...]:
+) -> ArtFrame:
     """
-    ``art`` with the cycling cells swapped for other glyphs of the same brightness.
+    ``art`` at ``now``: the raster line's row, and the cells its wake has swapped.
+
+    The line is at ``step_index(now) % (rows + WAKE_ROWS)``, so it is legitimately at or
+    past the last row for the final ``WAKE_ROWS`` steps of each cycle -- that is the
+    drain, and during it nothing is highlighted and only rows near the bottom still
+    substitute. A row ``d`` above the line substitutes at rate ``1 - d / WAKE_ROWS``,
+    which is 1.0 on the line itself, so every cycling cell there moves.
+
+    Whether a given cell takes its row's rate is drawn per step from ``_draw_hash``, and
+    when the draw fails the cell shows *the glyph the art has there*, not the substitute
+    it last showed. Holding the last one would mean knowing the most recent step at which
+    the cell's draw succeeded, which is a backward scan of up to ``WAKE_ROWS`` steps per
+    cell per step -- twenty times this function's hash work, which is most of a 60fps
+    frame on its own, and desktop input is exactly what wakes this window to 60fps (see
+    ``RASTER_ROWS_PER_SECOND``). So the sweep would judder while the operator is looking
+    at it, to buy a stale glyph. One hash per cell per step is what the design affords,
+    and what that buys is arguably the better read anyway: the art
+    visibly heals as the wake drains behind the line, and nothing frozen is left in it.
 
     A cell is substituted only when all of these hold, and every failure is a no-op
     rather than an error (STYLE.md §1, "an intent for something that does not exist is
     a no-op"): the character is not a space, it has a rank, that rank indexes a real
-    bucket, the cell is in the cycling set, and the glyph its rhythm selects is not
-    itself a space. An unranked glyph is a hole in the ranking table, not a bug worth
-    aborting a frame for.
+    bucket, the cell is in the cycling set, its draw succeeds, and the glyph the draw
+    selects is not itself a space. An unranked glyph is a hole in the ranking table, not
+    a bug worth aborting a frame for.
 
     Space is guarded in both directions, even though the contract says U+0020 is absent
     from ``rank_of``. The art's shape *is* its whitespace, so a ranking table that grew
@@ -188,13 +328,34 @@ def art_frame(
     silhouette. Both are silent failures, and the second is the one that is visible at a
     glance, which is worth one comparison per substitution to make impossible.
 
-    A cell advances only on ticks its own period divides, so what changes between two
-    consecutive steps is a fraction of the cycling set rather than all of it. See
-    ``_CELL_PERIODS``.
+    A successful draw picks a glyph from the cell's bucket without regard to what is
+    already there, so a cell can draw the glyph it is already showing. That is a change
+    of nothing, and it is why the *visible* change rate of a row runs slightly under its
+    intensity rather than equal to it.
     """
     step = step_index(now)
-    out: list[str] = []
+    raster = step % (len(art) + WAKE_ROWS)
+
+    lines: list[str] = []
+    luminance: list[Luminance] = []
     for row, line in enumerate(art):
+        if row == raster:
+            luminance.append(Luminance.RASTER)
+        elif row == raster - 1:
+            luminance.append(Luminance.TRAIL)
+        else:
+            luminance.append(Luminance.DIM)
+
+        # The line leads its wake, so the rows it has passed are the ones above it and
+        # every row outside the wake is left exactly as the art has it. Skipping those
+        # here rather than letting each cell fail its draw is what keeps a frame to the
+        # cost of ``WAKE_ROWS`` rows instead of the whole picture.
+        distance = raster - row
+        if not 0 <= distance < WAKE_ROWS:
+            lines.append(line)
+            continue
+        threshold = (1.0 - distance / WAKE_ROWS) * _DRAW_BUCKETS
+
         cells: list[str] | None = None
         for col, ch in enumerate(line):
             if ch == " ":
@@ -205,18 +366,19 @@ def art_frame(
             bucket = ranks[bucket_index]
             if not bucket:
                 continue
-            rhythm = _rhythm(row, col)
-            if not rhythm.cycling:
+            if not is_cycling(row, col):
                 continue
-            tick = (step + rhythm.offset) // rhythm.period
-            substitute = bucket[(tick + rhythm.phase) % len(bucket)]
+            drawn = _draw_hash(row, col, step)
+            if drawn % _DRAW_BUCKETS >= threshold:
+                continue
+            substitute = bucket[(drawn >> _DRAW_BITS) % len(bucket)]
             if substitute == " ":
                 continue
             if cells is None:
                 cells = list(line)
             cells[col] = substitute
-        out.append(line if cells is None else "".join(cells))
-    return tuple(out)
+        lines.append(line if cells is None else "".join(cells))
+    return ArtFrame(lines=tuple(lines), luminance=tuple(luminance))
 
 
 class ArtFrames:
@@ -238,7 +400,7 @@ class ArtFrames:
 
     def __init__(self) -> None:
         self._step: int | None = None
-        self._frame: tuple[str, ...] = ()
+        self._frame = ArtFrame(lines=(), luminance=())
 
     def frame(
         self,
@@ -246,7 +408,7 @@ class ArtFrames:
         rank_of: Mapping[str, int],
         ranks: Sequence[Sequence[str]],
         now: float,
-    ) -> tuple[str, ...]:
+    ) -> ArtFrame:
         step = step_index(now)
         if step != self._step:
             self._frame = art_frame(art, rank_of, ranks, now)

@@ -12,6 +12,7 @@ from __future__ import annotations
 from types import MappingProxyType
 from typing import Any, NamedTuple
 
+import pytest
 from imgui_bundle import imgui as _real_imgui
 
 from pptmstr.approval import summarize
@@ -27,7 +28,7 @@ from pptmstr.model import (
     Snapshot,
 )
 from pptmstr.theme import DISCLOSURE_GLYPH
-from pptmstr.ui import inbox, rail
+from pptmstr.ui import inbox, rail, splash
 
 _ImVec2 = _real_imgui.ImVec2
 
@@ -1410,27 +1411,100 @@ def test_the_art_is_skipped_when_it_does_not_fit(monkeypatch) -> None:
     fake.text_unformatted.assert_not_called()
 
 
-def test_the_art_is_drawn_as_one_item_so_the_rows_are_not_spaced_apart(monkeypatch) -> None:
+def _art_calls(monkeypatch, avail=(2000.0, 2000.0)):
     """
-    ImGui advances a multi-line block by the font size per line, which is what
-    splash.LINE_PITCH_EM measures. One ``text_unformatted`` per row would insert
-    style.item_spacing.y between them and stand the art 60 spacings taller than
-    ``required_extent`` promised -- overflowing the region that was just checked.
+    Draw the art against a fake ImGui and hand back the draw-list calls and the fake.
+
+    The art needs more of the API stubbed than the rest of the pane does -- it reads
+    the screen cursor and the window draw list, neither of which a bare MagicMock
+    returns anything usable from.
     """
     from unittest.mock import MagicMock
 
     fake = MagicMock()
     fake.ImVec2 = _ImVec2
-    fake.get_content_region_avail.return_value = _ImVec2(2000.0, 2000.0)
+    fake.get_content_region_avail.return_value = _ImVec2(*avail)
     fake.get_cursor_pos_x.return_value = 0.0
+    fake.get_cursor_screen_pos.return_value = _ImVec2(100.0, 50.0)
+    draw = MagicMock()
+    fake.get_window_draw_list.return_value = draw
     monkeypatch.setattr(inbox, "imgui", fake)
 
     inbox._art(3.0)
+    return draw.add_text.call_args_list, fake
 
-    assert fake.text_unformatted.call_count == 1
-    drawn = fake.text_unformatted.call_args.args[0]
-    assert drawn.count("\n") == inbox._ART_ROWS - 1
-    assert len(drawn.split("\n")) == inbox._ART_ROWS
+
+def test_the_art_rows_are_pitched_by_line_pitch_em_and_nothing_else(monkeypatch) -> None:
+    """
+    The art must occupy exactly what ``required_extent`` reserved, to the row.
+
+    This used to be guaranteed by drawing the whole picture as one ``text_unformatted``
+    item, because ImGui advances a multi-line block by the font size per line -- which
+    is what ``splash.LINE_PITCH_EM`` records. A bright raster line needs a colour per
+    row, so the rows are now placed by hand and the guarantee comes from this pane's own
+    arithmetic instead of from ImGui's block layout. That is strictly more fragile, not
+    less, which is why the property is pinned harder than it was.
+
+    Stated against the resulting spacing rather than against the number of draw calls,
+    so it survives the mechanism changing again and still catches the specific mistake
+    that is sitting right there to be made: reaching for
+    ``get_text_line_height_with_spacing()``, which is what ``_quote`` twelve lines above
+    correctly uses and which would stand the art 60 ``style.item_spacing.y`` taller than
+    the pane was just promised.
+    """
+    calls, _ = _art_calls(monkeypatch)
+
+    assert len(calls) == inbox._ART_ROWS, "one add_text per art row"
+
+    size = splash.fit_size(2000.0, 2000.0, inbox._ART_ROWS, inbox._ART_COLS)
+    tops = [call.args[0].y for call in calls]
+    pitches = {round(b - a, 4) for a, b in zip(tops, tops[1:], strict=False)}
+    assert pitches == {round(size * splash.LINE_PITCH_EM, 4)}, (
+        f"rows are {pitches} apart; anything but a single pitch of "
+        f"size * LINE_PITCH_EM means a spacing crept in"
+    )
+    assert tops[-1] - tops[0] == pytest.approx((inbox._ART_ROWS - 1) * splash.LINE_PITCH_EM * size)
+
+
+def test_the_art_claims_exactly_the_extent_it_was_measured_against(monkeypatch) -> None:
+    """
+    The draw list writes pixels without moving the cursor, so the space has to be
+    claimed or the next widget lands on top of the art.
+
+    It has to be claimed at ``required_extent`` specifically -- the same number
+    ``_art`` just checked against the region. Claiming less would let the pane's own
+    content extent understate the picture, which is how a pane ends up able to scroll
+    to a place where the art is cut off.
+    """
+    _, fake = _art_calls(monkeypatch)
+
+    size = splash.fit_size(2000.0, 2000.0, inbox._ART_ROWS, inbox._ART_COLS)
+    width, height = splash.required_extent(size, inbox._ART_ROWS, inbox._ART_COLS)
+    claimed = fake.dummy.call_args.args[0]
+    # approx rather than ==: ImVec2 stores float32, and required_extent computes in
+    # float64, so the last couple of bits differ for reasons that are not this test's.
+    assert claimed.x == pytest.approx(width)
+    assert claimed.y == pytest.approx(height)
+
+
+def test_the_art_draws_each_row_in_its_own_luminance(monkeypatch) -> None:
+    """
+    The whole reason the one-call draw had to go: one pushed style colour cannot
+    express a bright line over dim art.
+
+    Pinned as "the frame's three levels reach the draw list as three distinct colours,
+    row for row", which is what a reader has to see. Checking that some colour was
+    passed would pass just as well if every row were handed ``P.text_dim`` -- the exact
+    regression that reverting to a single pushed colour would be.
+    """
+    calls, _ = _art_calls(monkeypatch)
+
+    frame = inbox._ART_FRAMES.frame(
+        inbox.splash_art.ART, inbox.splash_art.RANK_OF, inbox.splash_art.RANKS, 3.0
+    )
+    drawn = [call.args[1] for call in calls]
+    assert drawn == [inbox._ink(level) for level in frame.luminance]
+    assert len(set(drawn)) == len(set(frame.luminance)) > 1
 
 
 def test_the_hint_names_the_chord_rather_than_only_colouring_it(monkeypatch) -> None:
