@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 from unittest.mock import patch
 
 from claude_agent_sdk import (
@@ -929,8 +930,6 @@ def test_the_launcher_hands_a_session_the_operators_subagent_cap() -> None:
     built without it falls back to the module default, which looks identical from
     every other test and ignores whatever the operator configured.
     """
-    import time
-
     from pptmstr.app import AppState, _launch
     from pptmstr.settings import Settings
 
@@ -1039,11 +1038,51 @@ def _hurry(monkeypatch) -> None:
     monkeypatch.setattr(driver_mod, "SUBAGENT_SILENCE_S", 0.05)
 
 
-async def _fire_gate(session, agent_id: str | None, tool_name: str = "Read") -> None:
+async def _fire_gate(
+    session, agent_id: str | None, tool_name: str = "Read", call_id: str = "tu-1"
+) -> dict:
     """One PreToolUse, as a sub-agent's tool call arrives at the gate."""
-    await session._pre_tool_use(  # type: ignore[arg-type]
-        _gate_input(tool_name, {"file_path": "/tmp/x"}, agent_id=agent_id), "tu-1", None
-    )
+    data = _gate_input(tool_name, {"file_path": "/tmp/x"}, agent_id=agent_id)
+    data["tool_use_id"] = call_id
+    return await session._pre_tool_use(data, call_id, None)  # type: ignore[arg-type,no-any-return]
+
+
+async def _fire_post(
+    session,
+    agent_id: str,
+    call_id: str = "tu-1",
+    tool_name: str = "Read",
+    failed: bool = False,
+) -> None:
+    """
+    The closing half of one tool call, the way the CLI sends it.
+
+    Measured in scripts/verify_post_tool_use.py: a call that succeeds fires
+    PostToolUse, a call that fails fires PostToolUseFailure and *not* PostToolUse, and
+    both carry the agent_id and tool_use_id their PreToolUse carried.
+    """
+    data: dict = {
+        "hook_event_name": "PostToolUseFailure" if failed else "PostToolUse",
+        "tool_name": tool_name,
+        "tool_input": {"file_path": "/tmp/x"},
+        "tool_use_id": call_id,
+        "agent_id": agent_id,
+        "session_id": "sess-1",
+        "cwd": "/tmp",
+        "transcript_path": "/tmp/t.jsonl",
+    }
+    if failed:
+        data["error"] = "File does not exist."
+        data["is_interrupt"] = False
+    else:
+        data["tool_response"] = {"type": "text"}
+    await session._post_tool_use(data, call_id, None)  # type: ignore[arg-type]
+
+
+async def _fire_call(session, agent_id: str, tool_name: str = "Read") -> None:
+    """One whole tool call: through the gate, run, and returned."""
+    await _fire_gate(session, agent_id, tool_name)
+    await _fire_post(session, agent_id, tool_name=tool_name)
 
 
 def test_a_working_subagent_is_not_settled_for_the_streams_silence(monkeypatch) -> None:
@@ -1080,7 +1119,7 @@ def test_a_working_subagent_is_not_settled_for_the_streams_silence(monkeypatch) 
         # fifth of it -- a fixed-timer implementation gives up ten times over.
         for _ in range(20):
             await asyncio.sleep(0.01)
-            await _fire_gate(session, "alpha-id")
+            await _fire_call(session, "alpha-id")
         assert not waiter.done(), "the loop settled a sub-agent that was calling tools"
         await _fire_stop(session, "alpha-id", "finished properly")
         await asyncio.wait_for(waiter, timeout=2.0)
@@ -1118,7 +1157,7 @@ def test_one_subagents_silence_does_not_settle_its_sibling(monkeypatch) -> None:
         )
         for _ in range(20):
             await asyncio.sleep(0.01)
-            await _fire_gate(session, "alpha-id")
+            await _fire_call(session, "alpha-id")
         assert not waiter.done()
         await _fire_stop(session, "alpha-id", "finished properly")
         await asyncio.wait_for(waiter, timeout=2.0)
@@ -1185,6 +1224,228 @@ def test_a_subagent_parked_in_the_approval_gate_is_never_settled(monkeypatch) ->
     assert not session._subagent_in_flight
 
 
+def test_a_tool_call_that_outruns_the_bound_keeps_its_subagent_alive(monkeypatch) -> None:
+    """
+    The defect the operator watched: a sub-agent doing one WebFetch was settled FAILED
+    while it was working normally.
+
+    The gate decision is what the CLI is blocked on, so PreToolUse returns at the moment
+    the tool *begins*. A bracket that came down in that hook's `finally` therefore
+    covered the approval wait and nothing else, and then restarted the agent's clock as
+    the tool started -- leaving a full SUBAGENT_SILENCE_S of unvetoed execution, during
+    which the agent is silent by construction.
+
+    Here alpha's call is auto-approved -- so the gate returns immediately, exactly as it
+    does in the real defect -- and then the tool runs for many times the bound. It must
+    survive, and it must keep its capacity slot. The second half is the other half of
+    the requirement: once the call ends the veto is gone, so an agent that then really
+    does go quiet is settled. A veto that never lowered would pass the first assertion
+    and fail this one.
+    """
+    _hurry(monkeypatch)
+    from pptmstr.bridge import Bridge
+    from pptmstr.driver import AgentSession
+
+    bridge = Bridge()
+    session = AgentSession(bridge, task="lead", interactive=False)
+
+    async def start_then_run_one_long_call() -> None:
+        await _fire_start(session, "alpha-id")
+        bridge.drain()
+        waiter = asyncio.ensure_future(
+            session._await_subagents(  # type: ignore[arg-type]
+                _SilentClient(), Translator(session.node_id, session.transcript)
+            )
+        )
+        await _fire_gate(session, "alpha-id")
+        assert session._subagent_in_flight.get(
+            "alpha-id"
+        ), "the gate returning is the tool starting, not the tool finishing"
+        # Six times the silence bound, with the agent saying nothing because it is
+        # inside one long tool call.
+        await asyncio.sleep(0.3)
+        assert session._live_subagents == {"alpha-id"}, "a working sub-agent was settled"
+        assert session._outstanding_subagents() == 1
+
+        await _fire_post(session, "alpha-id")
+        assert not session._subagent_in_flight
+        await asyncio.wait_for(waiter, timeout=2.0)
+
+    asyncio.run(start_then_run_one_long_call())
+
+    finished = [i for i in bridge.drain() if isinstance(i, AgentFinished)]
+    assert [i.state for i in finished] == [AgentState.FAILED]
+    assert session._outstanding_subagents() == 0
+
+
+def test_a_denied_call_leaves_no_veto_behind(monkeypatch) -> None:
+    """
+    The path that would trade a false FAILED for a permanent false RUNNING.
+
+    A denied tool never runs, so the CLI fires no PostToolUse and no
+    PostToolUseFailure for it -- measured in scripts/verify_post_tool_use.py. This
+    application denies by default, so a bracket that waited for a closing hook that
+    cannot arrive would pin nearly every sub-agent alive for the session's life, still
+    holding its capacity slot.
+    """
+    _hurry(monkeypatch)
+    from pptmstr.bridge import Bridge
+    from pptmstr.driver import AgentSession
+
+    bridge = Bridge()
+    # Headless, so a tool needing review is denied rather than parked.
+    session = AgentSession(bridge, task="lead", interactive=False)
+
+    async def start_then_be_denied() -> None:
+        await _fire_start(session, "alpha-id")
+        bridge.drain()
+        out = await _fire_gate(session, "alpha-id", tool_name="Write")
+        assert out["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert not session._subagent_in_flight, "a denied call left its veto raised"
+        # And the agent is then judged on its clock like any other, rather than
+        # spinning RUNNING forever.
+        waiter = asyncio.ensure_future(
+            session._await_subagents(  # type: ignore[arg-type]
+                _SilentClient(), Translator(session.node_id, session.transcript)
+            )
+        )
+        await asyncio.wait_for(waiter, timeout=2.0)
+
+    asyncio.run(start_then_be_denied())
+
+    finished = [i for i in bridge.drain() if isinstance(i, AgentFinished)]
+    assert [i.state for i in finished] == [AgentState.FAILED]
+
+
+def test_a_call_that_failed_lowers_its_veto_like_one_that_succeeded(monkeypatch) -> None:
+    """
+    A tool that errors fires PostToolUseFailure and *not* PostToolUse
+    (scripts/verify_post_tool_use.py). Watching only the success event would leave the
+    veto raised on every failed call, which is a routine event -- a Read of a path that
+    does not exist is enough.
+    """
+    _hurry(monkeypatch)
+    from pptmstr.bridge import Bridge
+    from pptmstr.driver import AgentSession
+
+    bridge = Bridge()
+    session = AgentSession(bridge, task="lead", interactive=False)
+
+    async def start_then_fail_a_call() -> None:
+        await _fire_start(session, "alpha-id")
+        bridge.drain()
+        await _fire_gate(session, "alpha-id")
+        assert session._subagent_in_flight.get("alpha-id")
+        await _fire_post(session, "alpha-id", failed=True)
+        assert not session._subagent_in_flight
+
+    asyncio.run(start_then_fail_a_call())
+
+
+def test_one_calls_ending_cannot_lower_another_calls_veto(monkeypatch) -> None:
+    """
+    Why the record is keyed by tool_use_id rather than counted.
+
+    A count cannot distinguish a duplicate close from a second call: closing the same
+    call twice would decrement the veto belonging to a *different* tool that is still
+    running, and settle the agent in the middle of it. Nothing observed sends a
+    duplicate today -- this pins the property rather than a bug, because the failure it
+    prevents is a working agent reported dead and the cost of the property is a dict.
+    """
+    _hurry(monkeypatch)
+    from pptmstr.bridge import Bridge
+    from pptmstr.driver import AgentSession
+
+    bridge = Bridge()
+    session = AgentSession(bridge, task="lead", interactive=False)
+
+    async def two_calls_one_of_them_closed_twice() -> None:
+        await _fire_start(session, "alpha-id")
+        bridge.drain()
+        await _fire_gate(session, "alpha-id", call_id="tu-1")
+        await _fire_gate(session, "alpha-id", call_id="tu-2")
+        await _fire_post(session, "alpha-id", call_id="tu-1")
+        await _fire_post(session, "alpha-id", call_id="tu-1")
+        assert set(session._subagent_in_flight["alpha-id"]) == {"tu-2"}
+
+        session._subagent_seen_at["alpha-id"] = time.monotonic() - 10.0
+        session._settle_silent_subagents()
+        assert session._live_subagents == {"alpha-id"}, "tu-2 was still running"
+
+        await _fire_post(session, "alpha-id", call_id="tu-2")
+        # The closing hook is itself a signal, so it restarts the silence clock. Age
+        # the stamp again to isolate the veto from the liveness it also carries.
+        session._subagent_seen_at["alpha-id"] = time.monotonic() - 10.0
+        session._settle_silent_subagents()
+        assert session._live_subagents == set()
+
+    asyncio.run(two_calls_one_of_them_closed_twice())
+
+
+def test_a_veto_nothing_ever_lowers_expires(monkeypatch) -> None:
+    """
+    The bracket spans two hook invocations, so unlike a try/finally it can be left
+    raised by a signal that never arrives. Every closing signal the CLI is known to
+    emit is handled, but an unbounded veto turns any one that is missed into a
+    sub-agent stuck RUNNING for the session's life, holding a capacity slot nothing can
+    reclaim -- worse than the false FAILED being fixed, because nothing clears it.
+    """
+    _hurry(monkeypatch)
+    from pptmstr import driver as driver_mod
+    from pptmstr.bridge import Bridge
+    from pptmstr.driver import AgentSession
+
+    monkeypatch.setattr(driver_mod, "SUBAGENT_CALL_VETO_S", 0.2)
+
+    bridge = Bridge()
+    session = AgentSession(bridge, task="lead", interactive=False)
+
+    async def a_call_that_never_returns() -> None:
+        await _fire_start(session, "alpha-id")
+        bridge.drain()
+        await _fire_gate(session, "alpha-id")
+        # Past the silence bound but inside the veto: still working, as far as anyone
+        # here can tell.
+        session._subagent_seen_at["alpha-id"] = time.monotonic() - 10.0
+        session._settle_silent_subagents()
+        assert session._live_subagents == {"alpha-id"}
+
+        session._subagent_in_flight["alpha-id"]["tu-1"] = time.monotonic() - 1.0
+        session._settle_silent_subagents()
+        assert session._live_subagents == set(), "a veto with no closer held forever"
+
+    asyncio.run(a_call_that_never_returns())
+
+    finished = [i for i in bridge.drain() if isinstance(i, AgentFinished)]
+    assert [i.state for i in finished] == [AgentState.FAILED]
+    assert session._outstanding_subagents() == 0
+
+
+def test_a_live_subagent_with_no_clock_is_settled_rather_than_spared() -> None:
+    """
+    A missing timestamp used to default to `now`, which reads as "seen this instant"
+    and so as "never settle". The invariant that made it unreachable holds -- every
+    live agent is stamped by SubagentStart -- but the failure mode if it ever stopped
+    holding is silent and permanent, and the honest default for no evidence of life is
+    not immortality.
+    """
+    from pptmstr.bridge import Bridge
+    from pptmstr.driver import AgentSession
+
+    bridge = Bridge()
+    session = AgentSession(bridge, task="lead", interactive=False)
+    asyncio.run(_fire_start(session, "alpha-id"))
+    bridge.drain()
+
+    session._subagent_seen_at.pop("alpha-id")
+    session._settle_silent_subagents()
+
+    assert session._live_subagents == set()
+    (finished,) = [i for i in bridge.drain() if isinstance(i, AgentFinished)]
+    assert finished.state is AgentState.FAILED
+    assert "no liveness record" in (finished.error or "")
+
+
 def test_a_settled_subagent_gives_its_capacity_slot_back_and_a_live_one_does_not(
     monkeypatch,
 ) -> None:
@@ -1212,7 +1473,7 @@ def test_a_settled_subagent_gives_its_capacity_slot_back_and_a_live_one_does_not
         )
         for _ in range(20):
             await asyncio.sleep(0.01)
-            await _fire_gate(session, "alpha-id")
+            await _fire_call(session, "alpha-id")
         # Only the one that really stopped reporting has given its slot back.
         assert session._outstanding_subagents() == 1
         await _fire_stop(session, "alpha-id", "finished properly")
@@ -1222,27 +1483,104 @@ def test_a_settled_subagent_gives_its_capacity_slot_back_and_a_live_one_does_not
     asyncio.run(one_works_one_goes_quiet())
 
 
-def test_a_closed_stream_settles_everything_still_outstanding(monkeypatch) -> None:
+class _Feed:
     """
-    The one collective verdict left, and the only case that deserves one: a stream
-    that has ended can never deliver another message for anybody, where a quiet one
-    says nothing about anyone. Without this a record never reaches a terminal state,
-    its card spins for the session's life, and the capacity count can only shrink.
+    A message stream shaped the way the SDK's really is: ``receive_messages()`` is an
+    async *generator*.
+
+    That shape is the whole point of this double. A cancelled ``__anext__`` terminates
+    a generator's frame permanently, so every later ``__anext__`` raises
+    StopAsyncIteration without waiting. A hand-written ``__anext__`` -- like
+    ``_NeverSpeaks`` above -- builds a fresh coroutine per call and survives being
+    cancelled, which hides that defect completely.
+    """
+
+    def __init__(self, ends_at_once: bool = False) -> None:
+        self.queue: asyncio.Queue = asyncio.Queue()
+        self.ends_at_once = ends_at_once
+
+    async def receive_messages(self):
+        if self.ends_at_once:
+            return
+        while True:
+            message = await self.queue.get()
+            if message is None:
+                return
+            yield message
+
+
+def test_a_poll_tick_does_not_end_the_read(monkeypatch) -> None:
+    """
+    The defect the operator watched: a sub-agent reported FAILED that then carried on
+    working.
+
+    The loop timed each read out to poll, and a timeout around ``__anext__`` cancels
+    it. That terminated the generator ``receive_messages()`` returns, so the next tick
+    got StopAsyncIteration immediately -- from a transport that was wide open -- and
+    the loop read it as a closed session and settled everyone. With the poll tick at a
+    second, one quiet second was enough.
+
+    Here alpha works steadily across many ticks and the stream stays open throughout.
+    It must not be judged, it must keep its capacity slot, and the read must still be
+    able to deliver a message afterwards.
     """
     _hurry(monkeypatch)
     from pptmstr.bridge import Bridge
     from pptmstr.driver import AgentSession
 
-    class _EndsAtOnce:
-        def __aiter__(self):
-            return self
+    bridge = Bridge()
+    session = AgentSession(bridge, task="lead", interactive=False)
+    feed = _Feed()
 
-        async def __anext__(self):
-            raise StopAsyncIteration
+    async def work_through_many_ticks() -> None:
+        await _fire_start(session, "alpha-id")
+        bridge.drain()
+        waiter = asyncio.ensure_future(
+            session._await_subagents(  # type: ignore[arg-type]
+                feed, Translator(session.node_id, session.transcript)
+            )
+        )
+        for _ in range(20):
+            await asyncio.sleep(0.01)
+            await _fire_call(session, "alpha-id")
+        assert not waiter.done(), "a poll tick was read as a closed stream"
+        assert session._live_subagents == {"alpha-id"}
+        assert session._outstanding_subagents() == 1
+        # The read survived every one of those ticks, so it can still carry a message.
+        # Drained by polling rather than by one long sleep: a sleep here is silence
+        # like any other, and past the bound it would settle alpha for real.
+        feed.queue.put_nowait(AssistantMessage(content=[TextBlock(text="still here")], model="m"))
+        for _ in range(20):
+            await asyncio.sleep(0.001)
+            if feed.queue.empty():
+                break
+        assert feed.queue.empty(), "the read was destroyed by a tick and took no message"
+        await _fire_stop(session, "alpha-id", "finished properly")
+        await asyncio.wait_for(waiter, timeout=2.0)
 
-    class _ClosedClient:
-        def receive_messages(self):
-            return _EndsAtOnce()
+    asyncio.run(work_through_many_ticks())
+
+    finished = [i for i in bridge.drain() if isinstance(i, AgentFinished)]
+    assert [i.state for i in finished] == [AgentState.DONE]
+
+
+def test_a_closed_stream_settles_everything_still_outstanding(monkeypatch) -> None:
+    """
+    The one collective verdict, and the only case that deserves one: a stream that has
+    ended can never deliver another message for anybody, where a quiet one says nothing
+    about anyone. It holds across both channels, not only this one -- the SDK reads the
+    transport in a single task that routes control frames to the hook callbacks, and the
+    end of this stream is that task's own teardown, so no SubagentStop can follow it.
+    Without this a record never reaches a terminal state, its card spins for the
+    session's life, and the capacity count can only shrink.
+
+    Built on ``_Feed`` rather than a hand-written iterator on purpose: the verdict is
+    only sound if the stream really ended, and only a generator can tell the difference
+    between that and a read this loop destroyed itself.
+    """
+    _hurry(monkeypatch)
+    from pptmstr.bridge import Bridge
+    from pptmstr.driver import AgentSession
 
     bridge = Bridge()
     session = AgentSession(bridge, task="lead")
@@ -1251,8 +1589,11 @@ def test_a_closed_stream_settles_everything_still_outstanding(monkeypatch) -> No
         await _fire_start(session, "alpha-id")
         await _fire_start(session, "beta-id")
         bridge.drain()
-        await session._await_subagents(  # type: ignore[arg-type]
-            _ClosedClient(), Translator(session.node_id, session.transcript)
+        await asyncio.wait_for(
+            session._await_subagents(  # type: ignore[arg-type]
+                _Feed(ends_at_once=True), Translator(session.node_id, session.transcript)
+            ),
+            timeout=2.0,
         )
 
     asyncio.run(start_two_then_read_a_closed_stream())
@@ -1263,8 +1604,41 @@ def test_a_closed_stream_settles_everything_still_outstanding(monkeypatch) -> No
         (session.session_id, "beta-id"),
     }
     assert all(i.state is AgentState.FAILED for i in finished)
-    assert all(i.error for i in finished)
+    assert all("closed" in (i.error or "") for i in finished)
     assert session._live_subagents == set()
+
+
+def test_no_read_is_left_in_flight_when_the_wait_returns(monkeypatch) -> None:
+    """
+    Both this loop and the session's main read pull from one single-consumer stream,
+    where a message goes to exactly one receiver. The main loop resumes the instant
+    this returns, so a read left pending here would take the message meant for it.
+    """
+    _hurry(monkeypatch)
+    from pptmstr.bridge import Bridge
+    from pptmstr.driver import AgentSession
+
+    bridge = Bridge()
+    session = AgentSession(bridge, task="lead", interactive=False)
+    feed = _Feed()
+
+    async def wait_then_check_nobody_is_still_reading() -> None:
+        await _fire_start(session, "alpha-id")
+        waiter = asyncio.ensure_future(
+            session._await_subagents(  # type: ignore[arg-type]
+                feed, Translator(session.node_id, session.transcript)
+            )
+        )
+        await asyncio.sleep(0.01)
+        await _fire_stop(session, "alpha-id", "finished properly")
+        await asyncio.wait_for(waiter, timeout=2.0)
+        feed.queue.put_nowait(
+            AssistantMessage(content=[TextBlock(text="for the main loop")], model="m")
+        )
+        await asyncio.sleep(0.05)
+        assert feed.queue.qsize() == 1, "the abandoned read swallowed the next message"
+
+    asyncio.run(wait_then_check_nobody_is_still_reading())
 
 
 def test_a_wake_after_a_settlement_is_still_not_a_respawn(monkeypatch) -> None:
