@@ -264,3 +264,61 @@ def test_a_racing_writer_does_not_destroy_the_entry_that_beat_it(
     monkeypatch.undo()
     assert winner.read_text(encoding="utf-8").strip() == "the entry that got there first"
     assert [e.ordinal for e in brief.read_entries(tmp_path)] == [0, 1, 2]
+
+
+# -- counting, for the claim reply ------------------------------------------------
+
+
+def test_counting_entries_reads_none_of_them(tmp_path: Path, monkeypatch) -> None:
+    """
+    The caller is the claim handler, which runs on every claim. Reading N files to
+    report one integer would put the whole brief through an agent's reply path to
+    tell it a number.
+
+    Asserted by making a read fail rather than by timing it: the property is "does
+    not open these files", and a stopwatch cannot state that.
+    """
+    for _ in range(4):
+        brief.write_entry(tmp_path, "x")
+
+    def _no(*_args: object, **_kwargs: object) -> str:
+        raise AssertionError("count_entries read an entry")
+
+    monkeypatch.setattr(Path, "read_text", _no)
+
+    assert brief.count_entries(tmp_path) == 4
+
+
+def test_an_entry_that_cannot_be_read_is_still_counted(tmp_path: Path, monkeypatch) -> None:
+    """
+    Not the same number as `len(read_entries(...))`, which skips what it cannot
+    parse. A worker told "3 entries" that finds four files has been handed a
+    discrepancy it cannot resolve, and the count exists to be compared.
+    """
+    for _ in range(3):
+        brief.write_entry(tmp_path, "x")
+
+    real = Path.read_text
+
+    def _one_fails(self: Path, *args: object, **kwargs: object) -> str:
+        if self.name == "001-amendment.md":
+            raise OSError("permission denied")
+        return real(self, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(Path, "read_text", _one_fails)
+
+    assert brief.count_entries(tmp_path) == 3
+    assert len(brief.read_entries(tmp_path)) == 2
+
+
+def test_counting_an_empty_or_missing_directory_is_zero(tmp_path: Path) -> None:
+    assert brief.count_entries(tmp_path) == 0
+    assert brief.count_entries(tmp_path / "nothing") == 0
+
+
+def test_counting_ignores_files_that_are_not_entries(tmp_path: Path) -> None:
+    brief.write_entry(tmp_path, "real")
+    (tmp_path / ".entry-abc.md").write_text("mid-write", encoding="utf-8")
+    (tmp_path / "notes.md").write_text("not an entry", encoding="utf-8")
+
+    assert brief.count_entries(tmp_path) == 1

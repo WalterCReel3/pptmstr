@@ -104,8 +104,9 @@ class _Session:
 
     ROLES: dict[str, NodeId] = {"lead": LEAD, "builder": DEV, "reviewer": QA}
 
-    def __init__(self, bridge: Bridge) -> None:
+    def __init__(self, bridge: Bridge, brief: str | None = None) -> None:
         self.bridge = bridge
+        self.brief = brief
 
     def resolve_role(self, name: str) -> NodeId | None:
         return self.ROLES.get(name)
@@ -129,9 +130,9 @@ class _Bus:
     rather than as a passing test.
     """
 
-    def __init__(self, bridge: Bridge) -> None:
+    def __init__(self, bridge: Bridge, brief: str | None = None) -> None:
         self.bridge = bridge
-        self.handler = build_server(_Session(bridge))["instance"].request_handlers[  # type: ignore[arg-type]
+        self.handler = build_server(_Session(bridge, brief))["instance"].request_handlers[  # type: ignore[arg-type]
             mcp_types.CallToolRequest
         ]
 
@@ -174,11 +175,11 @@ class _Bus:
 
 
 @contextlib.contextmanager
-def _live_bus() -> Iterator[_Bus]:
+def _live_bus(brief: str | None = None) -> Iterator[_Bus]:
     bridge = Bridge()
     bridge.start()
     try:
-        yield _Bus(bridge)
+        yield _Bus(bridge, brief)
     finally:
         bridge.stop()
 
@@ -1911,3 +1912,110 @@ def test_an_amended_spec_is_what_the_worker_reads_back() -> None:
 
     assert "put the art in NEEDS YOU" in text
     assert "put the art in DETAIL" not in text
+
+
+# -- claiming work is when a worker re-reads the premises --------------------------
+#
+# A brief nobody re-reads is a frozen brief with extra steps. The candidates its
+# record lists are all things somebody has to remember -- prose, the lead posting a
+# concern, the gate's rejection channel. A claim is a mechanism: it fires every time
+# and a worker that wants work cannot skip it.
+
+
+def test_claiming_work_points_the_worker_at_the_premises(tmp_path) -> None:
+    from pptmstr import brief as brief_mod
+
+    brief_mod.write_entry(tmp_path, "the parser is fixed-width")
+    store = Store()
+    store.apply(declared("t1"))
+
+    with _live_bus(str(tmp_path)) as bus:
+        text = bus.call(store, "claim_task", {}, sender=DEV)
+
+    assert "You now own task t1" in text
+    assert str(tmp_path) in text
+
+
+def test_the_claim_reply_carries_a_count_the_worker_can_compare(tmp_path) -> None:
+    """
+    "Go and read it" is a ritual a worker performs or stops performing. A count is a
+    fact it can check against what it saw last time.
+    """
+    from pptmstr import brief as brief_mod
+
+    for _ in range(5):
+        brief_mod.write_entry(tmp_path, "x")
+    store = Store()
+    store.apply(declared("t1"))
+
+    with _live_bus(str(tmp_path)) as bus:
+        text = bus.call(store, "claim_task", {}, sender=DEV)
+
+    assert "5 entries" in text
+
+
+def test_a_single_premise_is_not_pluralised(tmp_path) -> None:
+    from pptmstr import brief as brief_mod
+
+    brief_mod.write_entry(tmp_path, "x")
+    store = Store()
+    store.apply(declared("t1"))
+
+    with _live_bus(str(tmp_path)) as bus:
+        text = bus.call(store, "claim_task", {}, sender=DEV)
+
+    assert "1 entry" in text and "1 entries" not in text
+
+
+def test_a_session_with_no_brief_says_nothing_about_premises() -> None:
+    store = Store()
+    store.apply(declared("t1"))
+
+    with _live_bus() as bus:
+        text = bus.call(store, "claim_task", {}, sender=DEV)
+
+    assert "premises" not in text
+
+
+def test_a_brief_path_that_cannot_be_read_says_nothing_rather_than_sending_a_worker(
+    tmp_path,
+) -> None:
+    """
+    "The path is broken" and "nothing written yet" lead to the same silence: a
+    worker sent to read an empty directory learns nothing and has one more thing to
+    report.
+    """
+    store = Store()
+    store.apply(declared("t1"))
+
+    with _live_bus(str(tmp_path / "not-there")) as bus:
+        text = bus.call(store, "claim_task", {}, sender=DEV)
+
+    assert "You now own task t1" in text
+    assert "premises" not in text
+
+
+def test_a_claim_that_won_nothing_does_not_mention_premises(tmp_path) -> None:
+    """No work taken, no specification to contextualise."""
+    from pptmstr import brief as brief_mod
+
+    brief_mod.write_entry(tmp_path, "x")
+
+    with _live_bus(str(tmp_path)) as bus:
+        text = bus.call(Store(), "claim_task", {}, sender=DEV)
+
+    assert "premises" not in text
+
+
+def test_the_specification_still_comes_with_the_claim(tmp_path) -> None:
+    """The premises are context around the spec, not a replacement for it."""
+    from pptmstr import brief as brief_mod
+
+    brief_mod.write_entry(tmp_path, "x")
+    store = Store()
+    store.apply(TaskDeclared(Task(id="t1", title="do t1", detail="the whole spec"), LEAD))
+
+    with _live_bus(str(tmp_path)) as bus:
+        text = bus.call(store, "claim_task", {}, sender=DEV)
+
+    assert "the whole spec" in text

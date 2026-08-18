@@ -44,10 +44,12 @@ import asyncio
 import time
 import uuid
 from collections.abc import Mapping
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, assert_never
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
+from . import brief
 from .board import BoardConcern, BoardTask
 from .bridge import Bridge
 from .effects import (
@@ -166,6 +168,49 @@ async def _outcome(future: asyncio.Future[Effect]) -> TaskWriteSettled:
     if not isinstance(answer, TaskWriteSettled):
         return TaskWriteSettled(request_id="", refusal=TaskRefusal.NOT_APPLIED)
     return answer
+
+
+def _premises_text(session: AgentSession) -> str:
+    """
+    What a worker is told about the session's premises when it takes work.
+
+    **The claim is the re-read trigger, and it is a mechanism rather than a habit.**
+    A brief nobody re-reads is a frozen brief with extra steps, and the three
+    candidates its record lists are all things somebody has to remember: prose in
+    the worker prompt, which this project records as the weakest lever it has; the
+    lead posting a concern, when the lead is precisely the participant nothing
+    checks; and the gate's rejection channel, which fires on tool calls rather than
+    on work. A claim fires every time, needs nobody, and a worker that wants work
+    cannot skip it.
+
+    It is also already the moment a worker's "what am I building" is set -- the
+    reply above carries the specification, and the premises are the context that
+    specification sits inside.
+
+    **The count is the point, not the reminder.** "Go and read it" on every claim is
+    a ritual a worker performs or stops performing; "5 entries" is a fact it can
+    compare against the three it saw last time. The store cannot supply it -- the
+    brief is on disk and ``_apply`` is pure -- so it is read here, on the asyncio
+    thread, which is where ``brief.py`` says reading belongs.
+
+    **This does not reach a worker mid-task**, and that is the case the
+    operator-instruction record is about: a builder redirected while holding a claim
+    hears about it at its *next* claim, by which time it has built the superseded
+    version. Closing that needs the gate's channel, which is a separate decision.
+    """
+    directory = getattr(session, "brief", None)
+    if not directory:
+        return ""
+    count = brief.count_entries(Path(directory))
+    if not count:
+        return ""
+    entries = "1 entry" if count == 1 else f"{count} entries"
+    return (
+        f"\n\nThe premises for this session are in {directory} ({entries}). Re-read them"
+        " before you start. Entries are appended and never edited, so a later one may"
+        " overturn an earlier one -- if the count has grown since you last looked, what"
+        " you are working from may no longer be current."
+    )
 
 
 def _board_line(row: BoardTask, reasons: Mapping[ConcernId, BoardConcern] | None = None) -> str:
@@ -485,7 +530,7 @@ def build_server(session: AgentSession) -> Any:
             )
         won = answer.task
         detail = f"\n{won.detail}" if won.detail else ""
-        return _text(f"You now own task {won.id}: {won.title}{detail}")
+        return _text(f"You now own task {won.id}: {won.title}{detail}{_premises_text(session)}")
 
     @tool(
         "read_board",

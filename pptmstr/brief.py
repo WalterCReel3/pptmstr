@@ -177,6 +177,27 @@ def write_entry(
     return target
 
 
+def count_entries(directory: Path) -> int:
+    """
+    How many entries the directory holds, without reading any of them.
+
+    Separate from ``read_entries`` because the caller that needs this is the claim
+    handler, which runs on every claim: reading N files to report one integer would
+    put the whole brief through an agent's reply path to tell it a number. Listing
+    the directory answers it.
+
+    Zero for a directory that is missing or unreadable, which is the same answer as
+    an empty one on purpose. The caller uses it to decide whether there is anything
+    worth telling a worker about, and "the path is broken" and "nothing written yet"
+    lead to the same silence -- a worker sent to read an empty directory learns
+    nothing and has one more thing to report.
+    """
+    try:
+        return sum(1 for p in directory.iterdir() if _ENTRY.match(p.name))
+    except OSError:
+        return 0
+
+
 def read_entries(directory: Path) -> tuple[BriefEntry, ...]:
     """
     Every entry in the directory, oldest first.
