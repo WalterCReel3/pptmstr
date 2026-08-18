@@ -57,6 +57,7 @@ class AppState:
     compose: compose.ComposeState = field(default_factory=compose.ComposeState)
     launcher: launcher.LauncherState = field(default_factory=launcher.LauncherState)
     rail: rail.RailState = field(default_factory=rail.RailState)
+    board: board_pane.BoardState = field(default_factory=board_pane.BoardState)
     transcripts: transcript_pane.TranscriptState = field(
         default_factory=transcript_pane.TranscriptState
     )
@@ -544,7 +545,7 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
         # the cursor moved would need a pointer of its own, and that second pointer
         # is what this layout deleted.
         if state.frame_snap is not None:
-            board_pane.draw(state.frame_snap, state.focus)
+            board_pane.draw(state.frame_snap, state.focus, state.board, state.bridge)
 
     def session_pane() -> None:
         """FOCUS: the conversation, with its composer, in one pane."""

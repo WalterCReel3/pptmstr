@@ -318,6 +318,43 @@ class ConcernWithdrawn:
 
 
 @dataclass(frozen=True, slots=True)
+class TaskAmended:
+    """
+    The operator changed a task's specification after it was declared.
+
+    **A different operation from a declaration, which is why it is a different
+    intent.** ``TaskDeclared`` ignores a re-declared id outright, and that guard is
+    correct: the only way a repeat declaration happens is a retry, and overwriting
+    would silently unclaim work somebody is doing. Weakening it to make room for
+    amendment would trade a live defect for a worse one. An amendment targets a task
+    that is *expected* to exist and *expected* to be claimed, which is the opposite
+    precondition, so it gets its own arm and leaves that guard alone.
+
+    ``node_id`` is None to mark it as the operator's, the way ``ConcernEdited``
+    already does. Nothing else in the system may emit this: an agent that could
+    rewrite its own specification could rewrite the thing it is being held to, and
+    the point of a spec is that one participant sets it and another is bound by it.
+
+    Amending a task that does not exist is a no-op rather than an error, like every
+    other arm. What it must never do is *create* one -- a typo in a task id would
+    otherwise put an unclaimable, undeclared task on the board with no title.
+
+    **Necessary and not sufficient, which its own record says plainly.**
+    ``claim_task`` copies ``detail`` into the worker's context once, at claim time,
+    so a task amended afterwards changes the board and reaches nobody. The worker
+    mid-task is the one reader who must see it and the one reader who has already
+    read. What closes that is the worker re-reading the board rather than trusting
+    its transcript copy -- which `what-the-board-does-not-carry.md` calls the
+    structurally stronger option, and which stopped being "a discipline the workers
+    do not have" when the board read began carrying ``detail``.
+    """
+
+    task_id: TaskId
+    detail: str
+    node_id: NodeId | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class TaskDeclared:
     """
     A unit of work was put on the board.
@@ -429,6 +466,7 @@ Intent = (
     | InboxRead
     | ConcernEdited
     | ConcernWithdrawn
+    | TaskAmended
     | TaskDeclared
     | TaskClaimRequested
     | TaskCompleted

@@ -25,6 +25,7 @@ from pptmstr.intents import (
     ConcernPosted,
     ConcernWithdrawn,
     InboxRead,
+    TaskAmended,
     TaskClaimRequested,
     TaskCompleted,
     TaskDeclared,
@@ -1740,3 +1741,106 @@ def test_the_board_read_says_a_row_has_an_open_concern() -> None:
         text = bus.call(store, "read_board", {}, sender=LEAD)
 
     assert "1 open concern(s) about it" in text
+
+
+# -- the operator amends a specification (row 6) -----------------------------------
+#
+# An operator redirected a builder mid-task; the spec it superseded had no second
+# reader. The lead had no record of the instruction, found a near-miss phrase in a
+# different builder's concern, and told the worker at length that it had promoted a
+# suggestion into an order. Every step was locally correct.
+
+
+def test_an_amendment_rewrites_the_spec_in_place() -> None:
+    store = Store()
+    store.apply(TaskDeclared(Task(id="t1", title="do t1", detail="put the art in DETAIL"), LEAD))
+
+    store.apply(TaskAmended(task_id="t1", detail="put the art in NEEDS YOU; leave detail.py"))
+
+    assert store.snapshot().tasks["t1"].detail == "put the art in NEEDS YOU; leave detail.py"
+
+
+def test_an_amendment_does_not_disturb_the_claim_on_the_task() -> None:
+    """
+    The worker holding it is the reader the amendment is *for*. Unclaiming to force
+    a re-read would take the work away from the one participant already doing it.
+    """
+    store = Store()
+    store.apply(declared("t1"))
+    store.apply(TaskClaimRequested(DEV, request_id="k1", task_id="t1"))
+
+    store.apply(TaskAmended(task_id="t1", detail="new spec"))
+
+    held = store.snapshot().tasks["t1"]
+    assert (held.state, held.claimed_by) == (TaskState.CLAIMED, DEV)
+
+
+def test_an_amendment_keeps_everything_it_does_not_change() -> None:
+    store = Store()
+    store.apply(
+        TaskDeclared(
+            Task(
+                id="t1",
+                title="do t1",
+                detail="old",
+                depends_on=("t0",),
+                touches=("a.py",),
+                declared_at=3.0,
+            ),
+            LEAD,
+        )
+    )
+
+    store.apply(TaskAmended(task_id="t1", detail="new"))
+
+    held = store.snapshot().tasks["t1"]
+    assert (held.title, held.depends_on, held.touches) == ("do t1", ("t0",), ("a.py",))
+    assert held.declared_by == LEAD
+
+
+def test_an_amendment_to_a_task_that_does_not_exist_creates_nothing() -> None:
+    """
+    A typo in a task id would otherwise put an untitled, undeclared, unclaimable row
+    on the board, indistinguishable from a real task nobody had got to yet.
+    """
+    store = Store()
+    store.apply(TaskAmended(task_id="t-nope", detail="x"))
+
+    assert store.snapshot().tasks == {}
+
+
+def test_declaring_over_an_existing_id_still_does_not_amend_it() -> None:
+    """
+    The guard row 6 must not weaken. A repeat declaration is a retry, and honouring
+    it would silently unclaim work somebody is doing -- which is why an amendment is
+    a different intent rather than a relaxation of this arm.
+    """
+    store = Store()
+    store.apply(TaskDeclared(Task(id="t1", title="do t1", detail="original"), LEAD))
+    store.apply(TaskClaimRequested(DEV, request_id="k1", task_id="t1"))
+
+    store.apply(TaskDeclared(Task(id="t1", title="something else", detail="rewritten"), LEAD))
+
+    held = store.snapshot().tasks["t1"]
+    assert (held.title, held.detail) == ("do t1", "original")
+    assert held.claimed_by == DEV
+
+
+def test_an_amended_spec_is_what_the_worker_reads_back() -> None:
+    """
+    The amendment is necessary and not sufficient: `claim_task` copies `detail` into
+    the worker's context once, so the board changing reaches nobody by itself. What
+    closes it is the worker asking the board rather than trusting that copy -- which
+    stopped being a discipline the workers cannot practise when the board read began
+    carrying the spec.
+    """
+    store = Store()
+    store.apply(TaskDeclared(Task(id="t1", title="do t1", detail="put the art in DETAIL"), LEAD))
+    store.apply(TaskClaimRequested(DEV, request_id="k1", task_id="t1"))
+    store.apply(TaskAmended(task_id="t1", detail="put the art in NEEDS YOU"))
+
+    with _live_bus() as bus:
+        text = bus.call(store, "read_board", {}, sender=DEV)
+
+    assert "put the art in NEEDS YOU" in text
+    assert "put the art in DETAIL" not in text

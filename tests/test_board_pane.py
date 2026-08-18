@@ -18,6 +18,7 @@ from types import MappingProxyType
 from unittest.mock import MagicMock
 
 from pptmstr.board import BoardConcern, BoardTask
+from pptmstr.bridge import Bridge
 from pptmstr.model import (
     AgentRecord,
     AgentState,
@@ -126,7 +127,9 @@ def drawn(monkeypatch, snap: Snapshot, focus: FocusState | None = None) -> list[
     fake = MagicMock()
     monkeypatch.setattr(board_pane, "imgui", fake)
     monkeypatch.setattr(board_pane, "section", MagicMock())
-    board_pane.draw(snap, at_root(snap) if focus is None else focus)
+    board_pane.draw(
+        snap, at_root(snap) if focus is None else focus, board_pane.BoardState(), Bridge()
+    )
     coloured = [str(a) for call in fake.text_colored.call_args_list for a in call.args[1:]]
     disabled = [str(a) for call in fake.text_disabled.call_args_list for a in call.args]
     nodes = [str(call.args[0]) for call in fake.tree_node_ex.call_args_list if call.args]
@@ -138,7 +141,7 @@ def headings(monkeypatch, snap: Snapshot) -> list[str]:
     seen: list[str] = []
     monkeypatch.setattr(board_pane, "imgui", MagicMock())
     monkeypatch.setattr(board_pane, "section", lambda label: seen.append(label))
-    board_pane.draw(snap, at_root(snap))
+    board_pane.draw(snap, at_root(snap), board_pane.BoardState(), Bridge())
     return seen
 
 
@@ -412,7 +415,7 @@ def test_a_cursor_on_nothing_says_so_rather_than_going_blank(monkeypatch) -> Non
     """An empty snapshot has no session to scope a board to, and must not invent one."""
     fake = MagicMock()
     monkeypatch.setattr(board_pane, "imgui", fake)
-    board_pane.draw(Snapshot.empty(), FocusState())
+    board_pane.draw(Snapshot.empty(), FocusState(), board_pane.BoardState(), Bridge())
     assert any("no session" in str(c.args[0]) for c in fake.text_disabled.call_args_list)
 
 
@@ -474,7 +477,7 @@ def test_the_summary_reaches_the_pane_before_the_rows(monkeypatch) -> None:
     monkeypatch.setattr(board_pane, "section", MagicMock())
 
     snap = board_snapshot(Task(id="t1", title="do t1", declared_by=ROOT))
-    board_pane.draw(snap, at_root(snap))
+    board_pane.draw(snap, at_root(snap), board_pane.BoardState(), Bridge())
 
     assert order[0].startswith("1 task(s)")
     assert "child" in order[1:]
@@ -540,19 +543,23 @@ def _tree_flags(monkeypatch, snap: Snapshot) -> int:
     fake.TreeNodeFlags_.no_tree_push_on_open = 4
     monkeypatch.setattr(board_pane, "imgui", fake)
     monkeypatch.setattr(board_pane, "section", MagicMock())
-    board_pane.draw(snap, at_root(snap))
+    board_pane.draw(snap, at_root(snap), board_pane.BoardState(), Bridge())
 
     (call,) = fake.tree_node_ex.call_args_list
     return int(call.args[1])
 
 
-def test_a_row_with_nothing_to_disclose_draws_no_triangle(monkeypatch) -> None:
+def test_a_row_with_nothing_to_show_still_opens(monkeypatch) -> None:
     """
-    A leaf flag, so a bare task does not offer an expander that opens onto nothing.
+    It was a leaf until the body gained the amend control. A task with no
+    specification is the one most likely to need one written, so a leaf flag here
+    would withhold the affordance from exactly the rows that need it -- which a
+    screenshot caught and the earlier version of this test asserted as correct.
+
     Checked through the flags because the arrow itself is pixels.
     """
     snap = board_snapshot(Task(id="t1", title="do t1", declared_by=ROOT))
-    assert _tree_flags(monkeypatch, snap) & _LEAF
+    assert not _tree_flags(monkeypatch, snap) & _LEAF
 
 
 def test_a_row_with_a_specification_offers_to_open(monkeypatch) -> None:
@@ -571,3 +578,112 @@ def test_a_row_with_only_a_file_list_offers_to_open(monkeypatch) -> None:
         Task(id="t1", title="do t1", touches=("pptmstr/store.py",), declared_by=ROOT)
     )
     assert not _tree_flags(monkeypatch, snap) & _LEAF
+
+
+# -- the operator amends a spec (row 6) -------------------------------------------
+
+
+def _amend_run(monkeypatch, snap: Snapshot, pane: board_pane.BoardState, clicks: set[str]):
+    """
+    Draw with every button named in `clicks` reporting pressed, and hand back the
+    intents the pane emitted.
+    """
+    emitted: list[object] = []
+
+    class _Bridge:
+        def emit(self, intent: object) -> None:
+            emitted.append(intent)
+
+    fake = MagicMock()
+    fake.small_button.side_effect = lambda label, *a, **k: label in clicks
+    monkeypatch.setattr(board_pane, "imgui", fake)
+    monkeypatch.setattr(board_pane, "section", MagicMock())
+    monkeypatch.setattr(
+        board_pane, "multiline_input", lambda *a, **k: (False, pane.drafts.get("t1", ""))
+    )
+    board_pane.draw(snap, at_root(snap), pane, _Bridge())  # type: ignore[arg-type]
+    return emitted
+
+
+def _spec_snapshot() -> Snapshot:
+    return board_snapshot(
+        Task(id="t1", title="do t1", detail="put the art in DETAIL", declared_by=ROOT)
+    )
+
+
+def test_opening_the_editor_seeds_the_draft_from_the_current_spec(monkeypatch) -> None:
+    """
+    An amendment is almost always an edit of what is there, not a replacement typed
+    from nothing. Starting empty would make every correction a retype.
+    """
+    pane = board_pane.BoardState()
+    _amend_run(monkeypatch, _spec_snapshot(), pane, {"amend##t1"})
+
+    assert pane.editing == "t1"
+    assert pane.drafts["t1"] == "put the art in DETAIL"
+
+
+def test_amending_emits_the_operators_intent(monkeypatch) -> None:
+    pane = board_pane.BoardState(editing="t1", drafts={"t1": "put the art in NEEDS YOU"})
+    emitted = _amend_run(monkeypatch, _spec_snapshot(), pane, {"amend##apply-t1"})
+
+    assert emitted == [
+        board_pane.TaskAmended(task_id="t1", detail="put the art in NEEDS YOU", node_id=None)
+    ]
+    # node_id None is what marks it the operator's, and the store reads that as the
+    # authority to rewrite a spec an agent is bound by.
+    assert emitted[0].node_id is None  # type: ignore[attr-defined]
+
+
+def test_amending_closes_the_editor_and_drops_the_draft(monkeypatch) -> None:
+    pane = board_pane.BoardState(editing="t1", drafts={"t1": "new"})
+    _amend_run(monkeypatch, _spec_snapshot(), pane, {"amend##apply-t1"})
+
+    assert pane.editing is None
+    assert "t1" not in pane.drafts
+
+
+def test_cancelling_emits_nothing_and_keeps_no_draft(monkeypatch) -> None:
+    """
+    A half-written correction that survives is one an operator can send later
+    believing they finished it.
+    """
+    pane = board_pane.BoardState(editing="t1", drafts={"t1": "half a thought"})
+    emitted = _amend_run(monkeypatch, _spec_snapshot(), pane, {"cancel##t1"})
+
+    assert emitted == []
+    assert pane.editing is None
+    assert "t1" not in pane.drafts
+
+
+def test_drawing_without_touching_a_button_amends_nothing(monkeypatch) -> None:
+    """The editor is open; typing into it must not apply on every frame."""
+    pane = board_pane.BoardState(editing="t1", drafts={"t1": "mid-sentence"})
+    emitted = _amend_run(monkeypatch, _spec_snapshot(), pane, set())
+
+    assert emitted == []
+    assert pane.editing == "t1"
+
+
+def test_a_draft_for_a_task_that_left_the_board_is_dropped(monkeypatch) -> None:
+    """Otherwise drafts accumulate for the life of the process."""
+    pane = board_pane.BoardState(editing="gone", drafts={"gone": "x"})
+    _amend_run(monkeypatch, _spec_snapshot(), pane, set())
+
+    assert pane.drafts == {}
+    assert pane.editing is None
+
+
+def test_a_task_with_no_spec_can_still_be_given_one(monkeypatch) -> None:
+    """
+    The defect the screenshot found: `t4` and `t5` in the fake fixture had no
+    detail, no files and no concerns, so they were leaves with no amend control --
+    and a task with no specification is precisely the one an operator needs to
+    write one for.
+    """
+    pane = board_pane.BoardState()
+    snap = board_snapshot(Task(id="t1", title="do t1", declared_by=ROOT))
+    _amend_run(monkeypatch, snap, pane, {"amend##t1"})
+
+    assert pane.editing == "t1"
+    assert pane.drafts["t1"] == ""

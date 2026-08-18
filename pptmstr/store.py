@@ -47,6 +47,7 @@ from .intents import (
     StateChanged,
     SubagentDelivered,
     SubagentProgress,
+    TaskAmended,
     TaskClaimRequested,
     TaskCompleted,
     TaskDeclared,
@@ -504,6 +505,24 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
             c = concerns.get(intent.concern_id)
             if c is not None and c.state is ConcernState.POSTED:
                 concerns[intent.concern_id] = dataclasses.replace(c, state=ConcernState.WITHDRAWN)
+
+        case TaskAmended():
+            # Amends, never creates. A typo in a task id would otherwise put an
+            # untitled, undeclared, unclaimable row on the board -- and it would be
+            # indistinguishable from a real task nobody had got to yet.
+            #
+            # The claim is deliberately left alone. The worker holding this task is
+            # the reader the amendment is *for*, so unclaiming to force a re-read
+            # would take the work away from the one participant already doing it,
+            # and `release_task` exists for the operator who actually wants that.
+            #
+            # A COMPLETED task is amended like any other. It reads as revising
+            # history and is the honest option: the alternative is a spec that
+            # disagrees with the record of what was built, and the board is what a
+            # later reader has.
+            amended = tasks.get(intent.task_id)
+            if amended is not None:
+                tasks[intent.task_id] = dataclasses.replace(amended, detail=intent.detail)
 
         case TaskDeclared():
             refused = _declaration_refusal(tasks, intent.task)

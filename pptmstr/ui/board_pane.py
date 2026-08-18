@@ -48,7 +48,7 @@ Bounded like every other pane here, and it announces every bound when it bites.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TypeVar
 
 from imgui_bundle import imgui
@@ -60,10 +60,12 @@ from ..board import (
     board_tasks,
     has_board,
 )
+from ..bridge import Bridge
+from ..intents import TaskAmended
 from ..model import ConcernId, ConcernState, Snapshot, TaskState
 from ..theme import P
 from .focus import FocusState
-from .widgets import section
+from .widgets import CTRL_ENTER_SUBMITS, multiline_input, section
 
 # Rows here are single-line and uniform, so these are about legibility rather than
 # frame cost: a board past this size is not being read as a board. Generous, since
@@ -91,6 +93,22 @@ _CONCERN_STATE_LABEL: dict[ConcernState, str] = {
 _T = TypeVar("_T")
 
 
+@dataclass
+class BoardState:
+    """
+    What the operator is part-way through typing, keyed by task id.
+
+    Here rather than in the store for the reason ``ReviewState`` gives: a half-typed
+    correction is not a fact about the world. Amending is the one thing this pane
+    does that changes anything, and an amendment abandoned mid-sentence must leave
+    no trace.
+    """
+
+    # The task whose specification is open for editing, or None.
+    editing: str | None = None
+    drafts: dict[str, str] = field(default_factory=dict)
+
+
 @dataclass(frozen=True, slots=True)
 class BoardCounts:
     """
@@ -113,7 +131,7 @@ class BoardCounts:
     undeclared: int
 
 
-def draw(snap: Snapshot, focus: FocusState) -> None:
+def draw(snap: Snapshot, focus: FocusState, pane: BoardState, bridge: Bridge) -> None:
     """
     Render the board of the session under the cursor. Never reads the store.
 
@@ -135,13 +153,23 @@ def draw(snap: Snapshot, focus: FocusState) -> None:
     rows = board_tasks(snap, session_id)
     concerns = board_concerns(snap, session_id)
     _summary(counts(rows))
+    # Drafts for tasks that have left the board keep no value and would otherwise
+    # accumulate for the life of the process.
+    _prune(pane, {r.id for r in rows})
 
     if imgui.begin_child("##board"):
         imgui.push_text_wrap_pos(0.0)
-        _tasks(rows, {c.id: c for c in concerns})
+        _tasks(rows, {c.id: c for c in concerns}, pane, bridge)
         _concerns(concerns)
         imgui.pop_text_wrap_pos()
     imgui.end_child()
+
+
+def _prune(pane: BoardState, live: set[str]) -> None:
+    for task_id in [t for t in pane.drafts if t not in live]:
+        del pane.drafts[task_id]
+    if pane.editing is not None and pane.editing not in live:
+        pane.editing = None
 
 
 def _summary(c: BoardCounts) -> None:
@@ -164,15 +192,25 @@ def _summary(c: BoardCounts) -> None:
     imgui.pop_text_wrap_pos()
 
 
-def _tasks(rows: Sequence[BoardTask], by_id: Mapping[ConcernId, BoardConcern]) -> None:
+def _tasks(
+    rows: Sequence[BoardTask],
+    by_id: Mapping[ConcernId, BoardConcern],
+    pane: BoardState,
+    bridge: Bridge,
+) -> None:
     shown, dropped = bound_rows(rows, _MAX_BOARD_TASKS)
     for row in shown:
-        _task_row(row, by_id)
+        _task_row(row, by_id, pane, bridge)
     if dropped:
         imgui.text_colored(P.text_dim.vec4, f"... {dropped} more task(s) not shown")
 
 
-def _task_row(row: BoardTask, by_id: Mapping[ConcernId, BoardConcern]) -> None:
+def _task_row(
+    row: BoardTask,
+    by_id: Mapping[ConcernId, BoardConcern],
+    pane: BoardState,
+    bridge: Bridge,
+) -> None:
     """
     One task: a headline that is always visible, and the rest behind a triangle.
 
@@ -182,13 +220,13 @@ def _task_row(row: BoardTask, by_id: Mapping[ConcernId, BoardConcern]) -> None:
     specification and the file list are what you open a row to read.
     """
     reasons = row_reasons(row, by_id)
-    expandable = bool(row.detail or row.touches or reasons)
 
+    # Every row opens, including one with nothing to show yet. The body stopped
+    # being purely informational when it gained the amend control, and a task with
+    # no specification is the one most likely to need one written -- a leaf flag
+    # here would put the affordance on exactly the rows that do not need it and
+    # withhold it from the rows that do.
     flags = int(imgui.TreeNodeFlags_.span_avail_width)
-    if not expandable:
-        # A leaf draws no triangle and pushes nothing, so there is no tree_pop to
-        # pair with it below.
-        flags |= int(imgui.TreeNodeFlags_.leaf) | int(imgui.TreeNodeFlags_.no_tree_push_on_open)
 
     opened = imgui.tree_node_ex(f"{row.id}  {row.state.value}###{row.id}", flags)
     imgui.same_line()
@@ -206,7 +244,7 @@ def _task_row(row: BoardTask, by_id: Mapping[ConcernId, BoardConcern]) -> None:
         # inherits; a closed row or a leaf has not. Indenting unconditionally would
         # therefore put the qualifiers one level deeper on exactly the rows whose
         # body is visible, so the same line moves as a row is opened.
-        pushed = opened and expandable
+        pushed = opened
         if not pushed:
             imgui.indent()
         if owner:
@@ -229,19 +267,65 @@ def _task_row(row: BoardTask, by_id: Mapping[ConcernId, BoardConcern]) -> None:
         if not pushed:
             imgui.unindent()
 
-    if not (opened and expandable):
+    if not opened:
         return
 
     if row.touches:
         imgui.text_colored(P.text_dim.vec4, touches_label(row))
     for reason in reasons:
         imgui.text_colored(P.accent.vec4, f"reason: {reason}")
-    if row.detail:
-        body, dropped = clip(row.detail, _MAX_DETAIL_CHARS)
-        imgui.text_colored(P.text.vec4, body)
-        if dropped:
-            imgui.text_colored(P.text_dim.vec4, f"... {dropped} more character(s) not shown")
+    if pane.editing == row.id:
+        _amend_editor(row, pane, bridge)
+    else:
+        if row.detail:
+            body, dropped = clip(row.detail, _MAX_DETAIL_CHARS)
+            imgui.text_colored(P.text.vec4, body)
+            if dropped:
+                imgui.text_colored(P.text_dim.vec4, f"... {dropped} more character(s) not shown")
+        if imgui.small_button(f"amend##{row.id}"):
+            pane.editing = row.id
+            pane.drafts.setdefault(row.id, row.detail)
     imgui.tree_pop()
+
+
+def _amend_editor(row: BoardTask, pane: BoardState, bridge: Bridge) -> None:
+    """
+    The operator rewriting a task's specification in place.
+
+    **This is the only thing in this pane that changes anything**, and it is here
+    rather than in a prompt to the lead because the defect it answers is that an
+    operator's redirect reached one worker and left no record anywhere else. The
+    lead had no copy, the board had no copy, and the worker that obeyed it was
+    accused of inventing it. A spec with one home cannot disagree with itself.
+
+    The draft is not applied as it is typed. An amendment is a decision, so it
+    lands on an explicit action -- the same reason the launcher does not spawn a
+    session per keystroke.
+
+    Cancelling drops the draft rather than keeping it, because a half-written
+    correction that survives is one an operator can send later believing they
+    finished it.
+    """
+    submitted, pane.drafts[row.id] = multiline_input(
+        f"##amend-{row.id}",
+        pane.drafts.get(row.id, row.detail),
+        imgui.ImVec2(-1, 120.0),
+        wrap=True,
+        flags=CTRL_ENTER_SUBMITS,
+    )
+    imgui.text_disabled("Ctrl+Enter amends, Enter for a new line")
+
+    applied = imgui.small_button(f"amend##apply-{row.id}") or submitted
+    imgui.same_line()
+    cancelled = imgui.small_button(f"cancel##{row.id}")
+
+    if applied:
+        # node_id stays None: this is the operator's, and the store reads that as
+        # the authority to rewrite a spec an agent is bound by.
+        bridge.emit(TaskAmended(task_id=row.id, detail=pane.drafts[row.id]))
+    if applied or cancelled:
+        pane.editing = None
+        pane.drafts.pop(row.id, None)
 
 
 def _concerns(rows: Sequence[BoardConcern]) -> None:
@@ -254,12 +338,16 @@ def _concerns(rows: Sequence[BoardConcern]) -> None:
         # qualifiers are: the subject is the long part, and anything placed after it
         # with ``same_line`` inherits whatever width the wrap left behind.
         imgui.text_colored(P.text_dim.vec4, concern_label(row))
-        about = about_label(row)
-        if about:
-            imgui.same_line()
-            imgui.text_colored((P.warn if row.task_missing else P.text_dim).vec4, about)
         imgui.indent()
         imgui.text_colored(P.text.vec4, row.subject or "(no subject)")
+        about = about_label(row)
+        if about:
+            # Its own line, not trailing the participants. The lesson is the same one
+            # the task qualifiers taught: `same_line` after any string that may wrap
+            # inherits whatever width the wrap left, and near the right edge that is
+            # a column one character wide. FOCUS docks this pane at 0.26, which is
+            # where it showed up.
+            imgui.text_colored((P.warn if row.task_missing else P.text_dim).vec4, about)
         imgui.unindent()
     if dropped:
         imgui.text_colored(P.text_dim.vec4, f"... {dropped} earlier concern(s) not shown")
