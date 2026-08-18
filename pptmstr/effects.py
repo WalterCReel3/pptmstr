@@ -37,7 +37,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .board import BoardTask
+from .board import BoardConcern, BoardTask
 from .model import Concern, Task, TaskId, TaskRefusal
 
 
@@ -118,6 +118,12 @@ class BoardDelivered:
     would put that derivation in ``bus.py``, which is a second implementation of the
     projection ``board.py`` already owns, free to disagree with the pane.
 
+    Carries the concern rows as well as the tasks, and carries *all* of them --
+    the same projection the pane draws. Which of them an agent is shown is the
+    tool's decision, not the store's: question 2 was answered "start wider, then
+    narrow if required", and a narrowing here would be a second rule about whose
+    reasoning is visible, kept in agreement with ``bus.py`` by nothing.
+
     This is the one effect whose intent changes nothing. It is still an effect
     rather than a store method the handler calls, because the handler is on the
     asyncio thread.
@@ -125,6 +131,7 @@ class BoardDelivered:
 
     request_id: str
     tasks: tuple[BoardTask, ...]
+    concerns: tuple[BoardConcern, ...] = ()
 
 
 # Explicit union, for the same reason ``Intent`` is one: the app loop matches over

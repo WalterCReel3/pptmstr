@@ -134,6 +134,16 @@ class BoardConcern:
     sender: str
     recipient: str
     subject: str
+    # What the sender actually said, not just what they called it.
+    #
+    # Carried because the subject is a label and the defect is about reasoning. A
+    # reader given "checksum ignored in sixty places" and nothing else knows a
+    # conclusion exists and not what it was, so it has to re-derive it -- which is
+    # the relitigating this projection is meant to end.
+    #
+    # As delivered, which is not always as posted: the operator can rewrite a
+    # concern in flight, and ``edited`` says when they did.
+    body: str
     state: ConcernState
     edited: bool
     # The task this concern is about, when the sender named one, and whether that
@@ -344,6 +354,7 @@ def board_concerns(snap: Snapshot, session_id: str) -> tuple[BoardConcern, ...]:
             sender=role_name(snap, c.sender, session_id),
             recipient=role_name(snap, c.recipient, session_id),
             subject=c.subject,
+            body=c.body,
             state=c.state,
             edited=c.edited,
             task_id=c.task_id,

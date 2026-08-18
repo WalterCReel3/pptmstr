@@ -83,6 +83,7 @@ def board_concern(
     sender: str = "reviewer",
     recipient: str = "lead",
     subject: str = "the retry loop never terminates",
+    body: str = "third call onward, the backoff never resets",
     state: ConcernState = ConcernState.POSTED,
     edited: bool = False,
     task_id: str | None = None,
@@ -93,6 +94,7 @@ def board_concern(
         sender=sender,
         recipient=recipient,
         subject=subject,
+        body=body,
         state=state,
         edited=edited,
         task_id=task_id,
@@ -225,15 +227,25 @@ def test_a_row_with_no_concern_has_no_reason() -> None:
     assert board_pane.row_reasons(board_task(), {}) == ()
 
 
-def test_a_rows_reason_is_the_subject_of_the_concern_that_explains_it() -> None:
+def test_a_rows_reason_carries_the_finding_not_just_its_label() -> None:
+    """
+    The row hands back the concern rather than its subject, because a subject is a
+    label and the reader needs the finding -- the same text `read_board` gives an
+    agent, so operator and team are not reading two different boards.
+    """
     row = board_task(concerns=("c1",))
-    by_id = {"c1": board_concern("c1", subject="waiting on the schema decision")}
-    assert board_pane.row_reasons(row, by_id) == ("waiting on the schema decision",)
+    by_id = {
+        "c1": board_concern(
+            "c1", subject="waiting on the schema decision", body="holding until the store lands"
+        )
+    }
 
+    (found,) = board_pane.row_reasons(row, by_id)
 
-def test_a_reason_with_no_subject_is_named_rather_than_blank() -> None:
-    row = board_task(concerns=("c1",))
-    assert board_pane.row_reasons(row, {"c1": board_concern("c1", subject="")}) == ("(no subject)",)
+    assert (found.subject, found.body) == (
+        "waiting on the schema decision",
+        "holding until the store lands",
+    )
 
 
 def test_a_reason_whose_concern_is_not_in_the_log_is_skipped() -> None:
@@ -687,3 +699,31 @@ def test_a_task_with_no_spec_can_still_be_given_one(monkeypatch) -> None:
 
     assert pane.editing == "t1"
     assert pane.drafts["t1"] == ""
+
+
+def test_the_operator_reads_the_finding_the_agents_read(monkeypatch) -> None:
+    """
+    The pane and `read_board` share one projection; rendering only the subject here
+    while the tool renders the body would put the operator and the team back on two
+    different boards -- the failure row 2 was organised around.
+    """
+    posted = Concern(
+        id="c1",
+        sender=QA,
+        recipient=ROOT,
+        subject="checksum ignored in sixty places",
+        body="tle/parse.py never validates before use",
+        posted_at=1.0,
+        task_id="t1",
+    )
+    snap = board_snapshot(Task(id="t1", title="do t1", declared_by=ROOT), concerns=(posted,))
+
+    fake = MagicMock()
+    monkeypatch.setattr(board_pane, "imgui", fake)
+    monkeypatch.setattr(board_pane, "section", MagicMock())
+    monkeypatch.setattr(board_pane, "multiline_input", lambda *a, **k: (False, ""))
+    board_pane.draw(snap, at_root(snap), board_pane.BoardState(), Bridge())
+    lines = [str(a) for call in fake.text_colored.call_args_list for a in call.args[1:]]
+
+    assert any("checksum ignored in sixty places" in line for line in lines)
+    assert any("tle/parse.py never validates before use" in line for line in lines)

@@ -43,11 +43,12 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, assert_never
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
-from .board import BoardTask
+from .board import BoardConcern, BoardTask
 from .bridge import Bridge
 from .effects import (
     BoardDelivered,
@@ -65,7 +66,7 @@ from .intents import (
     TaskDeclared,
     TaskReleased,
 )
-from .model import Concern, NodeId, Task, TaskId, TaskRefusal
+from .model import Concern, ConcernId, NodeId, Task, TaskId, TaskRefusal
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle only matters to the checker
     from .driver import AgentSession
@@ -77,6 +78,11 @@ SERVER_NAME = "pptmstr"
 # defect being fixed. Bounded at all because a board read is a reply an agent pays
 # for by the token, and one 40,000-character detail would crowd out every other row.
 _MAX_DETAIL_CHARS = 2000
+
+# One agent note in a board read. Tighter than a specification: a concern is one
+# finding, and a reader scanning a board wants the finding rather than the essay.
+# Announced when it bites, like every other bound here.
+_MAX_CONCERN_CHARS = 1200
 
 # The key the gate writes the authenticated sender into. Leading underscore so it
 # reads as ours rather than as something the model was meant to fill, and absent
@@ -162,7 +168,7 @@ async def _outcome(future: asyncio.Future[Effect]) -> TaskWriteSettled:
     return answer
 
 
-def _board_line(row: BoardTask) -> str:
+def _board_line(row: BoardTask, reasons: Mapping[ConcernId, BoardConcern] | None = None) -> str:
     """
     One board row, as the asking agent reads it.
 
@@ -206,8 +212,6 @@ def _board_line(row: BoardTask) -> str:
         parts.append(f"NEVER DECLARED: {', '.join(row.missing)}")
     if row.touches:
         parts.append(f"writes {', '.join(row.touches)}")
-    if row.concerns:
-        parts.append(f"{len(row.concerns)} open concern(s) about it")
     line = " · ".join(parts)
     if row.detail:
         # Indented under its row rather than joined with the separator: a
@@ -217,7 +221,44 @@ def _board_line(row: BoardTask) -> str:
         line += f"\n    {body}"
         if dropped:
             line += f"\n    ... {dropped} more character(s) -- ask the lead for the rest"
+    line += _reasons_text(row, reasons or {})
     return line
+
+
+def _reasons_text(row: BoardTask, by_id: Mapping[ConcernId, BoardConcern]) -> str:
+    """
+    What other agents have recorded about this task, in their own words.
+
+    **The count is not enough, which is the whole of this.** A row saying "1 open
+    concern" tells a reader that a conclusion exists and not what it was, so the
+    reader has to go and derive it again -- which is the relitigating the board is
+    meant to end. The subject alone has the same defect one level up: "checksum
+    ignored in sixty places" names a finding without giving the reader anything to
+    evaluate.
+
+    **Only concerns that named a task are broadcast.** A concern with no
+    ``task_id`` is a message between two agents -- a question to the lead, an
+    answer, a heads-up -- and putting it on everyone's board would turn a
+    point-to-point channel into a public one. ``Concern.task_id`` is what makes
+    that line drawable: a finding *about shared work* is shared state, and the
+    rest is mail.
+
+    Nothing here is unreviewed. Every body has already been through the approval
+    gate at ``post_concern``, and what is rendered is the text as *delivered* --
+    the operator's edit included, which is the version the recipient acted on.
+    """
+    shown = [by_id[cid] for cid in row.concerns if cid in by_id]
+    if not shown:
+        return ""
+    out = [f"\n    -- {len(shown)} agent note(s) on this task:"]
+    for concern in shown:
+        body, dropped = _clipped(concern.body, _MAX_CONCERN_CHARS)
+        out.append(f"\n       [{concern.sender}] {concern.subject or '(no subject)'}")
+        if body:
+            out.append(f"\n       {body}")
+        if dropped:
+            out.append(f"\n       ... {dropped} more character(s)")
+    return "".join(out)
 
 
 def _clipped(text: str, limit: int) -> tuple[str, int]:
@@ -467,9 +508,14 @@ def build_server(session: AgentSession) -> Any:
             # "nothing claimable" and "nothing declared" send an agent to different
             # places, and only one of them means the lead has not planned yet.
             return _text("Your board has no tasks on it yet.")
+        # Every concern on the board, unfiltered. Which of them reach a row is
+        # already decided by `board._open_concerns_by_task`, which skips the ones
+        # naming no task -- a second filter here would be the same rule in two
+        # places, free to drift from the one the pane reads.
+        by_id = {c.id: c for c in answer.concerns}
         lines = [f"{len(answer.tasks)} task(s) on your board:"]
         for row in answer.tasks:
-            lines.append(_board_line(row))
+            lines.append(_board_line(row, by_id))
         return _text("\n".join(lines))
 
     @tool(

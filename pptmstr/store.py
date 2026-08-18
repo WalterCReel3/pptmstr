@@ -26,7 +26,7 @@ from collections.abc import Iterable
 from types import MappingProxyType
 from typing import assert_never
 
-from .board import board_tasks
+from .board import board_concerns, board_tasks
 from .effects import BoardDelivered, ClaimSettled, Effect, InboxDelivered, TaskWriteSettled
 from .intents import (
     AgentFinished,
@@ -474,6 +474,7 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
                 BoardDelivered(
                     request_id=intent.request_id,
                     tasks=board_tasks(snap, intent.node_id[0]),
+                    concerns=board_concerns(snap, intent.node_id[0]),
                 ),
             )
 

@@ -1714,33 +1714,100 @@ def test_the_board_read_names_the_files_a_task_claims() -> None:
     assert "writes pptmstr/store.py" in text
 
 
-def test_the_board_read_says_a_row_has_an_open_concern() -> None:
+def test_an_agent_reads_what_another_agent_concluded_about_a_task() -> None:
     """
-    A row stalled for a recorded reason is a different row from one stalled
-    silently, and `owner_gone` distinguishes the wrong two cases on its own.
+    The defect this closes. A row stalled for a recorded reason is a different row
+    from one stalled silently -- but a *count* only says a conclusion exists, and a
+    subject only labels it. Neither lets the reader evaluate the finding, so it
+    re-derives it, which is the relitigating the board exists to end.
     """
     store = Store()
     store.apply(declared("t1"))
     store.apply(TaskClaimRequested(DEV, request_id="k1", task_id="t1"))
-    store.apply(
-        ConcernPosted(
-            DEV,
-            Concern(
-                id="c1",
-                sender=DEV,
-                recipient=LEAD,
-                subject="waiting on the schema decision",
-                body="...",
-                posted_at=1.0,
-                task_id="t1",
-            ),
-        )
-    )
+    store.apply(ConcernPosted(DEV, _about("c1", "t1")))
 
     with _live_bus() as bus:
-        text = bus.call(store, "read_board", {}, sender=LEAD)
+        text = bus.call(store, "read_board", {}, sender=QA)
 
-    assert "1 open concern(s) about it" in text
+    assert "waiting on the schema decision" in text
+    assert "holding this until the store lands" in text
+
+
+def test_a_message_that_is_not_about_a_task_is_not_broadcast() -> None:
+    """
+    A concern with no task_id is mail between two agents -- a question, an answer,
+    a heads-up. Putting it on everyone's board turns a point-to-point channel into
+    a public one, and `Concern.task_id` is what makes the line drawable.
+    """
+    store = Store()
+    store.apply(declared("t1"))
+    store.apply(ConcernPosted(DEV, _about("c1", None, body="do not broadcast me")))
+
+    with _live_bus() as bus:
+        text = bus.call(store, "read_board", {}, sender=QA)
+
+    assert "do not broadcast me" not in text
+
+
+def test_a_withdrawn_note_is_not_read_back_as_reasoning() -> None:
+    """A retracted conclusion is not a conclusion. `BoardTask.concerns` drops it."""
+    store = Store()
+    store.apply(declared("t1"))
+    store.apply(ConcernPosted(DEV, _about("c1", "t1", body="I take this back")))
+    store.apply(ConcernWithdrawn("c1"))
+
+    with _live_bus() as bus:
+        text = bus.call(store, "read_board", {}, sender=QA)
+
+    assert "I take this back" not in text
+
+
+def test_a_long_note_is_bounded_and_says_what_it_dropped() -> None:
+    from pptmstr.bus import _MAX_CONCERN_CHARS
+
+    store = Store()
+    store.apply(declared("t1"))
+    store.apply(ConcernPosted(DEV, _about("c1", "t1", body="y" * (_MAX_CONCERN_CHARS + 300))))
+
+    with _live_bus() as bus:
+        text = bus.call(store, "read_board", {}, sender=QA)
+
+    assert "300 more character(s)" in text
+
+
+def test_a_note_names_who_recorded_it() -> None:
+    """
+    The reader has to be able to act on it -- `post_concern(to=...)` routes by the
+    same name -- and an unattributed finding is one the reader cannot follow up.
+    """
+    store = Store()
+    store.apply(declared("t1"))
+    store.apply(ConcernPosted(DEV, _about("c1", "t1")))
+
+    with _live_bus() as bus:
+        text = bus.call(store, "read_board", {}, sender=QA)
+
+    # DEV has no spawned record here, so the projection names it honestly rather
+    # than inventing a role -- the point is that the slot is filled at all.
+    assert "[" in text.split("agent note(s)")[1].split("\n")[1]
+
+
+def _about(
+    cid: str,
+    tid: str | None,
+    *,
+    body: str = "holding this until the store lands",
+    sender: NodeId = DEV,
+) -> Concern:
+    return Concern(
+        id=cid,
+        sender=sender,
+        recipient=LEAD,
+        subject="waiting on the schema decision",
+        body=body,
+        posted_at=1.0,
+        task_id=tid,
+    )
 
 
 # -- the operator amends a specification (row 6) -----------------------------------

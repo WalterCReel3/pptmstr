@@ -81,6 +81,9 @@ _MAX_BLOCKED_IDS = 6
 _MAX_TOUCHES = 8
 # The specification, which is prose written by a lead and has no natural bound.
 _MAX_DETAIL_CHARS = 4000
+# One agent note. Tighter than a specification: a concern is one finding, and a
+# row carrying several of them should still read as a row.
+_MAX_CONCERN_CHARS = 1500
 
 _CONCERN_STATE_LABEL: dict[ConcernState, str] = {
     ConcernState.POSTED: "waiting",
@@ -273,7 +276,12 @@ def _task_row(
     if row.touches:
         imgui.text_colored(P.text_dim.vec4, touches_label(row))
     for reason in reasons:
-        imgui.text_colored(P.accent.vec4, f"reason: {reason}")
+        imgui.text_colored(P.accent.vec4, f"reason: {reason.subject or '(no subject)'}")
+        if reason.body:
+            body, dropped = clip(reason.body, _MAX_CONCERN_CHARS)
+            imgui.text_colored(P.text.vec4, body)
+            if dropped:
+                imgui.text_colored(P.text_dim.vec4, f"... {dropped} more character(s) not shown")
     if pane.editing == row.id:
         _amend_editor(row, pane, bridge)
     else:
@@ -414,7 +422,7 @@ def alarm_label(c: BoardCounts) -> str:
     return " · ".join(parts)
 
 
-def reasons_marker(reasons: tuple[str, ...]) -> str:
+def reasons_marker(reasons: tuple[BoardConcern, ...]) -> str:
     """
     How many concerns explain a row, pluralised.
 
@@ -426,22 +434,24 @@ def reasons_marker(reasons: tuple[str, ...]) -> str:
     return "1 concern" if len(reasons) == 1 else f"{len(reasons)} concerns"
 
 
-def row_reasons(row: BoardTask, by_id: Mapping[ConcernId, BoardConcern]) -> tuple[str, ...]:
+def row_reasons(
+    row: BoardTask, by_id: Mapping[ConcernId, BoardConcern]
+) -> tuple[BoardConcern, ...]:
     """
-    The subjects of the concerns that explain a row, oldest first.
+    The concerns that explain a row, oldest first.
 
-    Looked up rather than carried on ``BoardTask`` because the subject already
-    exists on the concern row and copying it onto the task row would be two places
-    holding one string. An id with no matching concern is skipped rather than
-    rendered as a blank line -- the two projections are built from one snapshot in
-    one frame, so a miss is not a state either of them can reach.
+    Looked up rather than carried on ``BoardTask`` because the text already exists
+    on the concern row and copying it onto the task row would be two places holding
+    one string. An id with no matching concern is skipped rather than rendered as a
+    blank line -- the two projections are built from one snapshot in one frame, so a
+    miss is not a state either of them can reach.
+
+    Returns the rows rather than their subjects so this pane can show what the
+    ``read_board`` tool shows an agent. A subject is a label; the body is the
+    finding, and an operator reading only labels is back to asking the team what it
+    already wrote down.
     """
-    out = []
-    for cid in row.concerns:
-        found = by_id.get(cid)
-        if found is not None:
-            out.append(found.subject or "(no subject)")
-    return tuple(out)
+    return tuple(by_id[cid] for cid in row.concerns if cid in by_id)
 
 
 def owner_label(row: BoardTask) -> str:
