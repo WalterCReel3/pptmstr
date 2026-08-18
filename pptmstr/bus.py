@@ -72,6 +72,12 @@ if TYPE_CHECKING:  # pragma: no cover - import cycle only matters to the checker
 
 SERVER_NAME = "pptmstr"
 
+# One task's specification in a board read. Generous: this is the field the tool
+# exists to expose, and a lead that has to ask for the rest of its own spec is the
+# defect being fixed. Bounded at all because a board read is a reply an agent pays
+# for by the token, and one 40,000-character detail would crowd out every other row.
+_MAX_DETAIL_CHARS = 2000
+
 # The key the gate writes the authenticated sender into. Leading underscore so it
 # reads as ours rather than as something the model was meant to fill, and absent
 # from every tool's declared schema so a model has no reason to invent it.
@@ -169,6 +175,25 @@ def _board_line(row: BoardTask) -> str:
     merely unfinished. They look identical on the record and they are different
     problems: the first is a typo in somebody's ``depends_on`` and will never clear
     on its own, and nothing else in the session would ever say so.
+
+    **Carries ``detail``, which is the point of the tool rather than a detail of
+    it.** ``Task.detail`` is the closest thing to an authoritative specification
+    this system has, and until this line it was written by ``declare_task`` and read
+    in exactly one place: the reply ``claim_task`` interpolates it into. So the lead
+    could not read back what it wrote, and the worker holding a task could not ask
+    for it again -- ``_pick_claim`` requires ``is_claimable``, which requires
+    PENDING, so the current owner is told "Nothing claimable right now".
+
+    That is what made the recorded fix for an amended specification impossible
+    rather than merely undisciplined: the preferred option is that a worker re-reads
+    the board instead of trusting its transcript copy, and
+    `what-the-board-does-not-carry.md` corrects "a discipline the workers do not
+    have" to **"one they cannot practise"**. This is the practising.
+
+    ``touches`` rides along because a worker that cannot see which files a task
+    claims cannot honour the boundary the auto-dependency exists to enforce, and an
+    open concern is named because a row stalled for a recorded reason is a different
+    row from one stalled silently.
     """
     parts = [f"- {row.id} [{row.state.value}] {row.title}"]
     if row.owner is not None:
@@ -179,7 +204,35 @@ def _board_line(row: BoardTask) -> str:
         parts.append(f"waiting on {', '.join(row.blocked_on)}")
     if row.missing:
         parts.append(f"NEVER DECLARED: {', '.join(row.missing)}")
-    return " · ".join(parts)
+    if row.touches:
+        parts.append(f"writes {', '.join(row.touches)}")
+    if row.concerns:
+        parts.append(f"{len(row.concerns)} open concern(s) about it")
+    line = " · ".join(parts)
+    if row.detail:
+        # Indented under its row rather than joined with the separator: a
+        # specification is a paragraph, and running it into a one-line summary is
+        # what made the summary unreadable when this was tried inline.
+        body, dropped = _clipped(row.detail, _MAX_DETAIL_CHARS)
+        line += f"\n    {body}"
+        if dropped:
+            line += f"\n    ... {dropped} more character(s) -- ask the lead for the rest"
+    return line
+
+
+def _clipped(text: str, limit: int) -> tuple[str, int]:
+    """
+    Bound a specification, reporting what was dropped.
+
+    Bounded per row rather than over the whole reply, because the row that matters
+    to the reader is its own and a global budget would spend it on whichever tasks
+    happened to be declared first. Says what it dropped for the same reason every
+    other bound in this project does: a silent cap on a specification is how a
+    worker builds confidently against half of one.
+    """
+    if len(text) <= limit:
+        return text, 0
+    return text[:limit], len(text) - limit
 
 
 def _refusal_text(refusal: TaskRefusal) -> str:
@@ -395,9 +448,10 @@ def build_server(session: AgentSession) -> Any:
 
     @tool(
         "read_board",
-        "See every task on your team's board: what exists, who holds it, and what "
-        "each one is waiting for. Read it before declaring work or reporting a "
-        "conflict.",
+        "See every task on your team's board: what exists, who holds it, what each "
+        "one is waiting for, and its full specification. Read it before declaring "
+        "work or reporting a conflict, and re-read it to check the spec of a task "
+        "you hold -- the board is authoritative and your copy of it is not.",
         {},
     )
     async def read_board(args: dict[str, Any]) -> dict[str, Any]:

@@ -1626,3 +1626,117 @@ def test_a_declaration_is_reviewed_by_policy_and_not_by_accident() -> None:
 
     assert approval._BUS_DECLARE in approval._REVIEW
     assert approval._BUS_DECLARE not in approval._BUS_AUTO
+
+
+# -- the board read carries the specification --------------------------------------
+#
+# `Task.detail` was written by declare_task and read in exactly one place: the string
+# claim_task interpolates. So the lead could not read back what it wrote, and the
+# worker holding a task could not ask for it again -- `_pick_claim` requires
+# `is_claimable`, which requires PENDING, so the owner is told "Nothing claimable
+# right now". That is what made the recorded fix for an amended spec impossible
+# rather than merely undisciplined.
+
+
+def test_a_worker_can_re_read_the_spec_of_the_task_it_holds() -> None:
+    store = Store()
+    store.apply(
+        TaskDeclared(
+            Task(id="t1", title="do t1", detail="keep the backoff; do not touch the parser"),
+            node_id=LEAD,
+        )
+    )
+    store.apply(TaskClaimRequested(DEV, request_id="k1", task_id="t1"))
+
+    with _live_bus() as bus:
+        text = bus.call(store, "read_board", {}, sender=DEV)
+
+    assert "keep the backoff; do not touch the parser" in text
+
+
+def test_a_lead_can_read_back_the_spec_it_wrote() -> None:
+    """
+    The other half of the same defect, and the one an amendment needs: a lead that
+    cannot see its own declaration cannot tell that it needs amending.
+    """
+    store = Store()
+    store.apply(TaskDeclared(Task(id="t1", title="do t1", detail="the whole spec"), node_id=LEAD))
+
+    with _live_bus() as bus:
+        text = bus.call(store, "read_board", {}, sender=LEAD)
+
+    assert "the whole spec" in text
+
+
+def test_a_task_with_no_spec_adds_no_empty_line() -> None:
+    store = Store()
+    store.apply(declared("t1"))
+
+    with _live_bus() as bus:
+        text = bus.call(store, "read_board", {}, sender=DEV)
+
+    assert "t1" in text
+    assert "\n    " not in text
+
+
+def test_a_long_spec_is_bounded_and_says_what_it_dropped() -> None:
+    """
+    A silent cap on a specification is how a worker builds confidently against half
+    of one -- worse than no spec, because half a spec reads as a whole one.
+    """
+    from pptmstr.bus import _MAX_DETAIL_CHARS
+
+    store = Store()
+    store.apply(
+        TaskDeclared(
+            Task(id="t1", title="do t1", detail="x" * (_MAX_DETAIL_CHARS + 500)), node_id=LEAD
+        )
+    )
+
+    with _live_bus() as bus:
+        text = bus.call(store, "read_board", {}, sender=LEAD)
+
+    assert "500 more character(s)" in text
+
+
+def test_the_board_read_names_the_files_a_task_claims() -> None:
+    """
+    A worker that cannot see which files a task claims cannot honour the boundary
+    the auto-dependency exists to enforce.
+    """
+    store = Store()
+    store.apply(declared("t1", touches=("pptmstr/store.py",)))
+
+    with _live_bus() as bus:
+        text = bus.call(store, "read_board", {}, sender=DEV)
+
+    assert "writes pptmstr/store.py" in text
+
+
+def test_the_board_read_says_a_row_has_an_open_concern() -> None:
+    """
+    A row stalled for a recorded reason is a different row from one stalled
+    silently, and `owner_gone` distinguishes the wrong two cases on its own.
+    """
+    store = Store()
+    store.apply(declared("t1"))
+    store.apply(TaskClaimRequested(DEV, request_id="k1", task_id="t1"))
+    store.apply(
+        ConcernPosted(
+            DEV,
+            Concern(
+                id="c1",
+                sender=DEV,
+                recipient=LEAD,
+                subject="waiting on the schema decision",
+                body="...",
+                posted_at=1.0,
+                task_id="t1",
+            ),
+        )
+    )
+
+    with _live_bus() as bus:
+        text = bus.call(store, "read_board", {}, sender=LEAD)
+
+    assert "1 open concern(s) about it" in text
