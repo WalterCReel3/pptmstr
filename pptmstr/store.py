@@ -26,7 +26,8 @@ from collections.abc import Iterable
 from types import MappingProxyType
 from typing import assert_never
 
-from .effects import ClaimSettled, Effect, InboxDelivered, TaskWriteSettled
+from .board import board_tasks
+from .effects import BoardDelivered, ClaimSettled, Effect, InboxDelivered, TaskWriteSettled
 from .intents import (
     AgentFinished,
     AgentRemoved,
@@ -34,6 +35,7 @@ from .intents import (
     AgentSpawned,
     ApprovalRequested,
     ApprovalResolved,
+    BoardRead,
     CompactionObserved,
     ConcernEdited,
     ConcernPosted,
@@ -459,6 +461,19 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
             if intent.concern.id not in concerns:
                 concerns[intent.concern.id] = intent.concern
 
+        case BoardRead():
+            # Answered from the pre-apply snapshot, which is the same view every
+            # other arm reads and the one the effect is paired with. Nothing is
+            # written, so there is no ordering question here -- but building the
+            # rows from the dicts under construction would answer a question about
+            # a world that does not exist until this function returns.
+            effects = (
+                BoardDelivered(
+                    request_id=intent.request_id,
+                    tasks=board_tasks(snap, intent.node_id[0]),
+                ),
+            )
+
         case InboxRead():
             # Read from the pre-apply view, then mark. Withdrawn and
             # already-delivered concerns are excluded by inbox_of, so a second read
@@ -500,7 +515,9 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
             effects = _settled(intent.request_id, refused)
 
         case TaskClaimRequested():
-            won = _pick_claim(tasks, intent.task_id)
+            # The claimer's own session, taken from the sender the gate
+            # authenticated rather than from anything the model can set.
+            won = _pick_claim(tasks, intent.task_id, intent.node_id[0])
             if won is not None:
                 won = dataclasses.replace(won, state=TaskState.CLAIMED, claimed_by=intent.node_id)
                 tasks[won.id] = won
@@ -628,7 +645,7 @@ def _ownership_refusal(
     return None
 
 
-def _pick_claim(tasks: dict[TaskId, Task], task_id: TaskId | None) -> Task | None:
+def _pick_claim(tasks: dict[TaskId, Task], task_id: TaskId | None, session_id: str) -> Task | None:
     """
     The task this claim wins, or None.
 
@@ -636,11 +653,25 @@ def _pick_claim(tasks: dict[TaskId, Task], task_id: TaskId | None) -> Task | Non
     thread that provides it -- not a lock, and not the file lock agent teams needs
     for the same job across processes. Two workers racing for the last task are two
     intents in a queue, and the second one reads the first one's result.
+
+    **Scoped to the claimer's own session.** ``tasks`` is fleet-wide -- one ``Store``
+    serves every session -- and this function applied no session filter at all while
+    ``board.board_tasks`` filtered by declarer, so a worker could be handed a task
+    that appeared on no board it or its operator could see. Both now ask
+    ``Task.belongs_to``, which makes the two answers one answer rather than two that
+    agree by inspection.
+
+    Blocked-ness is still evaluated against the **whole** map, not the session's
+    slice, matching ``board_tasks``. A dependency that does not exist counts as
+    unsatisfied, so narrowing the map first would invent a blocker out of a
+    cross-session dependency and wedge a task that is genuinely ready.
     """
     if task_id is not None:
         t = tasks.get(task_id)
-        return t if t is not None and t.is_claimable(tasks) else None
-    claimable = [t for t in tasks.values() if t.is_claimable(tasks)]
+        if t is None or not t.belongs_to(session_id) or not t.is_claimable(tasks):
+            return None
+        return t
+    claimable = [t for t in tasks.values() if t.belongs_to(session_id) and t.is_claimable(tasks)]
     # Oldest first, so a self-claiming pool drains the board in declaration order
     # rather than in dict order, which would be arbitrary but reproducible -- the
     # worst kind, because it looks deliberate.

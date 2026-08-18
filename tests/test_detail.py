@@ -14,6 +14,7 @@ from types import MappingProxyType
 from unittest.mock import MagicMock
 
 from pptmstr.approval import summarize
+from pptmstr.board import BoardConcern, BoardTask
 from pptmstr.model import (
     AgentRecord,
     AgentState,
@@ -31,7 +32,6 @@ from pptmstr.model import (
 from pptmstr.transcript import SegmentKind
 from pptmstr.ui import detail, inbox, review
 from pptmstr.ui.blocks import BlockKind
-from pptmstr.ui.board import BoardConcern, BoardTask
 from pptmstr.ui.focus import FocusState, Scope
 
 ROOT: NodeId = ("s1", None)

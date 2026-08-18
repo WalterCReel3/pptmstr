@@ -228,7 +228,7 @@ def spawn_marker(snap: Snapshot, obligation: Obligation) -> str | None:
         return None
 
     session = pending.node[0]
-    fleet = projects.subagents_of(snap, (session, None))
+    fleet = snap.subagents_of((session, None))
     queued = [p.id for p in snap.approvals if p.tool_name in _SPAWN_TOOLS and p.node[0] == session]
     ahead = queued.index(pending.id) if pending.id in queued else 0
     running = sum(1 for rec in fleet if not rec.state.is_terminal)

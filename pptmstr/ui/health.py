@@ -107,7 +107,7 @@ def draw(snap: Snapshot, node: NodeId | None, actions: HealthActions, now: float
         f"{_fmt_tokens(usage.cache_read_input_tokens)} cached"
     )
 
-    subs = projects.subagents_of(snap, session)
+    subs = snap.subagents_of(session)
     if subs:
         imgui.spacing()
         imgui.separator()

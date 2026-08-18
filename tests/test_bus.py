@@ -18,8 +18,9 @@ import mcp.types as mcp_types
 
 from pptmstr.bridge import Bridge
 from pptmstr.bus import FROM_KEY, build_server
-from pptmstr.effects import ClaimSettled, InboxDelivered, TaskWriteSettled
+from pptmstr.effects import BoardDelivered, ClaimSettled, InboxDelivered, TaskWriteSettled
 from pptmstr.intents import (
+    BoardRead,
     ConcernEdited,
     ConcernPosted,
     ConcernWithdrawn,
@@ -57,6 +58,27 @@ def concern(
 
 def task(tid: str, *, deps: tuple[str, ...] = (), at: float = 0.0) -> Task:
     return Task(id=tid, title=f"do {tid}", depends_on=deps, declared_at=at)
+
+
+def declared(
+    tid: str,
+    *,
+    deps: tuple[str, ...] = (),
+    at: float = 0.0,
+    by: NodeId | None = LEAD,
+    request_id: str | None = None,
+) -> TaskDeclared:
+    """
+    A declaration with a declarer, which is the only kind the application makes.
+
+    ``by`` defaults to a node rather than to None because a task belongs to the
+    session that declared it (``Task.belongs_to``) and one declared by nobody is on
+    no board and claimable by no worker. The bus stamps every declaration with the
+    sender the gate authenticated -- an unstamped call raises -- so an unattributed
+    task is a state only a test can build, and a suite built on one would be
+    exercising a path production cannot reach.
+    """
+    return TaskDeclared(task(tid, deps=deps, at=at), node_id=by, request_id=request_id)
 
 
 # -- the real server, driven the way the application drives it ---------------------
@@ -240,15 +262,15 @@ def test_a_concern_to_an_unspawned_node_is_kept_not_dropped() -> None:
 
 def test_a_task_with_no_dependencies_is_claimable() -> None:
     store = Store()
-    store.apply(TaskDeclared(task("t1")))
+    store.apply(declared("t1"))
 
     assert [t.id for t in store.snapshot().claimable_tasks()] == ["t1"]
 
 
 def test_a_dependency_blocks_until_it_completes() -> None:
     store = Store()
-    store.apply(TaskDeclared(task("t1", at=0.0)))
-    store.apply(TaskDeclared(task("t2", deps=("t1",), at=1.0)))
+    store.apply(declared("t1", at=0.0))
+    store.apply(declared("t2", deps=("t1",), at=1.0))
 
     assert [t.id for t in store.snapshot().claimable_tasks()] == ["t1"]
 
@@ -261,15 +283,15 @@ def test_a_dependency_blocks_until_it_completes() -> None:
 
 def test_a_dependency_on_a_nonexistent_task_blocks_rather_than_vanishes() -> None:
     store = Store()
-    store.apply(TaskDeclared(task("t2", deps=("typo",))))
+    store.apply(declared("t2", deps=("typo",)))
 
     assert store.snapshot().claimable_tasks() == ()
 
 
 def test_a_cycle_never_reaches_the_board() -> None:
     store = Store()
-    store.apply(TaskDeclared(task("t1", deps=("t2",))))
-    store.apply(TaskDeclared(task("t2", deps=("t1",))))
+    store.apply(declared("t1", deps=("t2",)))
+    store.apply(declared("t2", deps=("t1",)))
 
     # t1 is admitted (t2 does not exist yet, so no cycle closes); t2 would close
     # one and is refused. Every member of a cycle is unclaimable forever, and the
@@ -279,23 +301,23 @@ def test_a_cycle_never_reaches_the_board() -> None:
 
 def test_a_longer_cycle_is_caught_too() -> None:
     store = Store()
-    store.apply(TaskDeclared(task("a", deps=("b",))))
-    store.apply(TaskDeclared(task("b", deps=("c",))))
-    store.apply(TaskDeclared(task("c", deps=("a",))))
+    store.apply(declared("a", deps=("b",)))
+    store.apply(declared("b", deps=("c",)))
+    store.apply(declared("c", deps=("a",)))
 
     assert set(store.snapshot().tasks) == {"a", "b"}
 
 
 def test_a_task_cannot_depend_on_itself() -> None:
     store = Store()
-    store.apply(TaskDeclared(task("t1", deps=("t1",))))
+    store.apply(declared("t1", deps=("t1",)))
 
     assert store.snapshot().tasks == {}
 
 
 def test_redeclaring_an_id_does_not_disturb_the_claim_on_it() -> None:
     store = Store()
-    store.apply(TaskDeclared(task("t1")))
+    store.apply(declared("t1"))
     store.apply(TaskClaimRequested(DEV, request_id="k1", task_id="t1"))
 
     store.apply(TaskDeclared(Task(id="t1", title="something else")))
@@ -315,7 +337,7 @@ def test_redeclaring_an_id_does_not_disturb_the_claim_on_it() -> None:
 
 def test_a_declared_task_remembers_who_declared_it() -> None:
     store = Store()
-    store.apply(TaskDeclared(task("t1"), node_id=LEAD))
+    store.apply(declared("t1", by=LEAD))
 
     assert store.snapshot().tasks["t1"].declared_by == LEAD
 
@@ -326,8 +348,8 @@ def test_a_declarer_is_not_lost_when_the_task_is_admitted() -> None:
     that rebuild, not just be present on the intent.
     """
     store = Store()
-    store.apply(TaskDeclared(task("t1", at=0.0), node_id=LEAD))
-    store.apply(TaskDeclared(task("t2", deps=("t1",), at=1.0), node_id=QA))
+    store.apply(declared("t1", at=0.0, by=LEAD))
+    store.apply(declared("t2", deps=("t1",), at=1.0, by=QA))
 
     tasks = store.snapshot().tasks
     assert (tasks["t1"].declared_by, tasks["t2"].declared_by) == (LEAD, QA)
@@ -370,7 +392,7 @@ def test_the_declare_handler_stamps_the_task_with_its_caller() -> None:
 
 def test_a_claim_is_answered_with_the_task_it_won() -> None:
     store = Store()
-    store.apply(TaskDeclared(task("t1")))
+    store.apply(declared("t1"))
 
     effects = store.apply(TaskClaimRequested(DEV, request_id="k1"))
 
@@ -390,7 +412,7 @@ def test_an_empty_board_still_answers_the_claim() -> None:
 
 def test_a_blocked_board_answers_the_claim_too() -> None:
     store = Store()
-    store.apply(TaskDeclared(task("t2", deps=("missing",))))
+    store.apply(declared("t2", deps=("missing",)))
 
     assert store.apply(TaskClaimRequested(DEV, request_id="k1")) == (
         ClaimSettled(request_id="k1", task=None),
@@ -399,7 +421,7 @@ def test_a_blocked_board_answers_the_claim_too() -> None:
 
 def test_two_workers_racing_for_one_task_settle_differently() -> None:
     store = Store()
-    store.apply(TaskDeclared(task("t1")))
+    store.apply(declared("t1"))
 
     effects = store.apply_all(
         [
@@ -419,8 +441,8 @@ def test_two_workers_racing_for_one_task_settle_differently() -> None:
 
 def test_self_claiming_takes_the_oldest_first() -> None:
     store = Store()
-    store.apply(TaskDeclared(task("newer", at=9.0)))
-    store.apply(TaskDeclared(task("older", at=1.0)))
+    store.apply(declared("newer", at=9.0))
+    store.apply(declared("older", at=1.0))
 
     (settled,) = store.apply(TaskClaimRequested(DEV, request_id="k1"))
 
@@ -430,8 +452,8 @@ def test_self_claiming_takes_the_oldest_first() -> None:
 
 def test_claiming_a_named_task_that_is_blocked_wins_nothing() -> None:
     store = Store()
-    store.apply(TaskDeclared(task("t1", at=0.0)))
-    store.apply(TaskDeclared(task("t2", deps=("t1",), at=1.0)))
+    store.apply(declared("t1", at=0.0))
+    store.apply(declared("t2", deps=("t1",), at=1.0))
 
     # Not "falls back to t1". A worker that asked for t2 is told no.
     assert store.apply(TaskClaimRequested(DEV, request_id="k1", task_id="t2")) == (
@@ -441,7 +463,7 @@ def test_claiming_a_named_task_that_is_blocked_wins_nothing() -> None:
 
 def test_a_released_task_returns_to_the_pool() -> None:
     store = Store()
-    store.apply(TaskDeclared(task("t1")))
+    store.apply(declared("t1"))
     store.apply(TaskClaimRequested(DEV, request_id="k1"))
 
     store.apply(TaskReleased(DEV, "t1"))
@@ -457,7 +479,7 @@ def test_a_released_task_returns_to_the_pool() -> None:
 
 def test_only_the_claimer_can_complete_or_release() -> None:
     store = Store()
-    store.apply(TaskDeclared(task("t1")))
+    store.apply(declared("t1"))
     store.apply(TaskClaimRequested(DEV, request_id="k1"))
 
     store.apply(TaskCompleted(QA, "t1", at=3.0))
@@ -470,7 +492,7 @@ def test_only_the_claimer_can_complete_or_release() -> None:
 
 def test_completing_an_unclaimed_task_does_nothing() -> None:
     store = Store()
-    store.apply(TaskDeclared(task("t1")))
+    store.apply(declared("t1"))
 
     store.apply(TaskCompleted(DEV, "t1", at=3.0))
 
@@ -494,13 +516,13 @@ def _refusal(effects: tuple[object, ...]) -> TaskRefusal | None:
 def test_a_write_the_board_accepted_answers_with_no_refusal() -> None:
     store = Store()
 
-    declared = store.apply(TaskDeclared(task("t1"), node_id=DEV, request_id="d1"))
+    put_on_board = store.apply(declared("t1", by=DEV, request_id="d1"))
     store.apply(TaskClaimRequested(DEV, request_id="k1"))
     released = store.apply(TaskReleased(DEV, "t1", request_id="x1"))
     store.apply(TaskClaimRequested(DEV, request_id="k2"))
     completed = store.apply(TaskCompleted(DEV, "t1", at=3.0, request_id="f1"))
 
-    assert (_refusal(declared), _refusal(released), _refusal(completed)) == (None, None, None)
+    assert (_refusal(put_on_board), _refusal(released), _refusal(completed)) == (None, None, None)
 
 
 def test_a_declaration_the_board_drops_says_which_way_it_dropped() -> None:
@@ -510,11 +532,11 @@ def test_a_declaration_the_board_drops_says_which_way_it_dropped() -> None:
     single "declaration refused" would send it back to guess which.
     """
     store = Store()
-    store.apply(TaskDeclared(task("t1")))
-    store.apply(TaskDeclared(task("t2", deps=("t1",))))
+    store.apply(declared("t1"))
+    store.apply(declared("t2", deps=("t1",)))
 
-    duplicate = store.apply(TaskDeclared(task("t1"), request_id="d1"))
-    cycle = store.apply(TaskDeclared(task("t3", deps=("t3",)), request_id="d2"))
+    duplicate = store.apply(declared("t1", request_id="d1"))
+    cycle = store.apply(declared("t3", deps=("t3",), request_id="d2"))
 
     assert _refusal(duplicate) is TaskRefusal.DUPLICATE_ID
     assert _refusal(cycle) is TaskRefusal.WOULD_CYCLE
@@ -529,7 +551,7 @@ def test_a_write_to_a_task_you_do_not_hold_says_which_mistake_it_was() -> None:
     things: declare it, claim it, stop, or go and talk to whoever holds it.
     """
     store = Store()
-    store.apply(TaskDeclared(task("t1")))
+    store.apply(declared("t1"))
 
     missing = store.apply(TaskCompleted(DEV, "nope", at=1.0, request_id="f1"))
     unclaimed = store.apply(TaskCompleted(DEV, "t1", at=1.0, request_id="f2"))
@@ -555,7 +577,7 @@ def test_a_release_is_refused_on_the_same_terms_as_a_completion() -> None:
     back, or the reverse.
     """
     store = Store()
-    store.apply(TaskDeclared(task("t1")))
+    store.apply(declared("t1"))
 
     missing = store.apply(TaskReleased(DEV, "nope", request_id="x1"))
     unclaimed = store.apply(TaskReleased(DEV, "t1", request_id="x2"))
@@ -581,8 +603,8 @@ def test_a_write_nobody_is_waiting_on_answers_nobody() -> None:
     """
     store = Store()
 
-    assert store.apply(TaskDeclared(task("t1"))) == ()
-    assert store.apply(TaskDeclared(task("t1"))) == ()  # refused, and still silent
+    assert store.apply(declared("t1")) == ()
+    assert store.apply(declared("t1")) == ()  # refused, and still silent
     assert store.apply(TaskCompleted(QA, "t1", at=1.0)) == ()
     assert store.apply(TaskReleased(QA, "t1")) == ()
 
@@ -592,7 +614,7 @@ def test_a_write_nobody_is_waiting_on_answers_nobody() -> None:
 
 def test_effects_come_back_in_application_order() -> None:
     store = Store()
-    store.apply(TaskDeclared(task("t1")))
+    store.apply(declared("t1"))
     store.apply(ConcernPosted(QA, concern("c1")))
 
     effects = store.apply_all(
@@ -613,14 +635,14 @@ def test_effects_come_back_in_application_order() -> None:
 def test_intents_that_answer_nobody_produce_no_effects() -> None:
     store = Store()
 
-    assert store.apply(TaskDeclared(task("t1"))) == ()
+    assert store.apply(declared("t1")) == ()
     assert store.apply(ConcernPosted(QA, concern("c1"))) == ()
     assert store.apply(ConcernWithdrawn("c1")) == ()
 
 
 def test_bus_state_does_not_disturb_the_agent_projections() -> None:
     store = Store()
-    store.apply(TaskDeclared(task("t1")))
+    store.apply(declared("t1"))
     store.apply(ConcernPosted(QA, concern("c1")))
     store.apply(TaskClaimRequested(DEV, request_id="k1"))
 
@@ -634,7 +656,7 @@ def test_bus_state_does_not_disturb_the_agent_projections() -> None:
 
 def test_an_old_snapshot_still_describes_the_old_board() -> None:
     store = Store()
-    store.apply(TaskDeclared(task("t1")))
+    store.apply(declared("t1"))
     before = store.snapshot()
 
     store.apply(TaskClaimRequested(DEV, request_id="k1"))
@@ -881,6 +903,9 @@ DOCUMENTED_CALLS: dict[str, dict[str, object]] = {
     # "Use the agent's role name" -- all three are named, none optional.
     "post_concern": {"to": "lead", "subject": "regression", "body": "the retry loop"},
     "read_inbox": {},
+    # "See every task on your team's board" -- takes nothing. The session is the
+    # gate's stamp, not an argument, so there is nothing here for a model to fill.
+    "read_board": {},
     # "Omit task_id to be given the oldest task whose dependencies are all met."
     "claim_task": {},
     # "Omit it and the board generates one" / "Omit it for a title-only task" /
@@ -1042,6 +1067,107 @@ def test_a_release_the_board_refused_is_not_reported_as_success() -> None:
     assert "NOT released" in intruder
     assert "back on the board" in owner
     assert store.snapshot().tasks["t1"].state is TaskState.PENDING
+
+
+def test_a_worker_can_read_the_board_it_is_working_from() -> None:
+    """
+    Report 2, which the record calls *literally true and a gap in the original
+    specification*: `Task.detail` was written by one participant, read in exactly
+    one place in the application, and shown to nobody. A worker could not list the
+    tasks it was being asked to coordinate around.
+
+    Driven through the real server so the answer is the text an agent reads, not
+    the effect the store produced -- the projection is the point, and a tuple of
+    rows nobody formats is the same gap one layer up.
+    """
+    store = Store()
+    with _live_bus() as bus:
+        empty = bus.call(store, "read_board", {}, sender=LEAD)
+        bus.call(store, "declare_task", {"task_id": "t1", "title": "wire the gate"}, sender=LEAD)
+        bus.call(
+            store,
+            "declare_task",
+            {"task_id": "t2", "title": "test the gate", "depends_on": ["t1"]},
+            sender=LEAD,
+        )
+        bus.call(store, "claim_task", {"task_id": "t1"}, sender=DEV)
+        listed = bus.call(store, "read_board", {}, sender=QA)
+
+    assert "no tasks on it yet" in empty
+    assert "2 task(s)" in listed
+    # Every row, not only the caller's own and not only what is claimable: QA holds
+    # nothing and is shown both.
+    assert "t1" in listed and "wire the gate" in listed
+    assert "t2" in listed and "test the gate" in listed
+    # The three derived facts a bare Task cannot carry.
+    assert "claimed" in listed
+    assert "held by" in listed
+    assert "waiting on t1" in listed
+
+
+def test_the_board_read_names_a_dependency_that_was_never_declared() -> None:
+    """
+    A typo in a `depends_on` and an honest wait are the same row on the record and
+    opposite problems: one clears when a teammate finishes, the other never clears
+    at all. `declare_task` accepts a missing id silently, so this line is the only
+    thing in the session that would ever say so to the agent that has to act on it.
+    """
+    store = Store()
+    with _live_bus() as bus:
+        bus.call(
+            store,
+            "declare_task",
+            {"task_id": "t2", "title": "blocked forever", "depends_on": ["tpyo"]},
+            sender=LEAD,
+        )
+        listed = bus.call(store, "read_board", {}, sender=DEV)
+
+    assert "NEVER DECLARED: tpyo" in listed
+
+
+def test_a_worker_is_shown_its_own_sessions_board_and_no_other() -> None:
+    """
+    The scoping decision, at the layer an agent meets it. Two sessions share one
+    fleet-wide task map, and the read is keyed on the sender the gate authenticated
+    rather than on anything the model can pass -- there is no session argument to
+    get wrong.
+    """
+    other: NodeId = ("sess-2", None)
+    store = Store()
+    with _live_bus() as bus:
+        bus.call(store, "declare_task", {"task_id": "ours", "title": "our work"}, sender=LEAD)
+        bus.call(store, "declare_task", {"task_id": "theirs", "title": "their work"}, sender=other)
+
+        mine = bus.call(store, "read_board", {}, sender=DEV)
+        yours = bus.call(store, "read_board", {}, sender=other)
+
+    assert "ours" in mine and "theirs" not in mine
+    assert "theirs" in yours and "ours" not in yours
+    # And the claim agrees with the read: the worker cannot take what it was not shown.
+    assert store.snapshot().tasks["theirs"].state is TaskState.PENDING
+
+
+def test_the_board_read_and_the_pane_are_one_projection() -> None:
+    """
+    The reason ``board.py`` moved out of ``ui/``. Two derivations of "what is on
+    this board" would be two boards, and the operator and the team disagreeing
+    about the work is the failure the whole record is organised around.
+
+    Pinned by identity of the rows rather than by comparing strings: the tool
+    formats what the pane draws, and a second implementation in ``bus.py`` is
+    exactly what this forbids.
+    """
+    from pptmstr.board import board_tasks
+
+    store = Store()
+    with _live_bus() as bus:
+        bus.call(store, "declare_task", {"task_id": "t1", "title": "a thing"}, sender=LEAD)
+        bus.call(store, "claim_task", {"task_id": "t1"}, sender=DEV)
+
+        (asked,) = store.apply(BoardRead(node_id=QA, request_id="b1"))
+
+    assert isinstance(asked, BoardDelivered)
+    assert asked.tasks == board_tasks(store.snapshot(), "sess-1")
 
 
 def test_a_board_write_the_store_never_saw_is_not_reported_as_success() -> None:

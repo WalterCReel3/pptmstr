@@ -570,6 +570,29 @@ class Task:
     # this a board cannot be scoped to the session whose agents are working it.
     declared_by: NodeId | None = None
 
+    def belongs_to(self, session_id: str) -> bool:
+        """
+        Whether this task is on ``session_id``'s board.
+
+        Scoped by declarer, because a task carries no session otherwise and an
+        unclaimed one carries no node at all. Scoping by *claimer* would empty a
+        fresh board until somebody took something, which is the reverse defect.
+
+        **An undeclared-by task belongs to no session, and that is deliberate.**
+        Nothing in the application produces one -- ``bus.declare_task`` stamps the
+        sender the gate authenticated, and an unstamped call raises rather than
+        defaulting -- so the only sources are tests and a future operator-side
+        write. Answering True here would make such a task claimable by every
+        session at once, which is precisely the "claim work you were never shown"
+        hole this predicate closes.
+
+        One predicate rather than two agreeing filters: ``board.board_tasks`` shows
+        what it returns and ``store._pick_claim`` hands out what it returns, and
+        those two had drifted -- the pane filtered by session and the reducer
+        filtered by nothing.
+        """
+        return self.declared_by is not None and self.declared_by[0] == session_id
+
     def is_claimable(self, tasks: Mapping[TaskId, Task]) -> bool:
         """
         Pending, and every dependency completed.
@@ -708,3 +731,21 @@ class Snapshot:
 
     def children_of(self, node_id: NodeId | None) -> tuple[NodeId, ...]:
         return tuple(n for n in self.order if self.nodes[n].parent == node_id)
+
+    def subagents_of(self, root: NodeId) -> tuple[AgentRecord, ...]:
+        """
+        Every descendant of a root session, in spawn order.
+
+        No state filter, so the list is append-only: a terminal sub-agent stays on
+        it. That is what makes it usable as the membership of a session rather than
+        as a liveness signal, and the callers that want liveness ask the records.
+
+        Structural rather than presentational, which is why it sits beside
+        ``children_of`` -- ``order`` is a pre-order walk this class already owns, and
+        the bus address projection in ``board.py`` needs it from outside ``ui/``.
+        """
+        return tuple(
+            self.nodes[nid]
+            for nid in self.order
+            if nid != root and nid[0] == root[0] and self.nodes[nid].parent is not None
+        )

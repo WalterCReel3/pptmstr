@@ -1,11 +1,25 @@
 """
-One session's task board and concern log, as rows ready to draw.
+One session's task board and concern log, as rows.
 
-Presentation, not store. The store holds a single fleet-wide ``tasks`` map and a
-single ``concerns`` map -- there is one ``Store`` for every session (app.py) -- so
-scoping a board to a session, naming its participants and ordering its rows are all
-judgements made here. The facts stay in ``model.py``: ``Task.blocked_on`` is the
-dependency graph's answer and is derived on every read.
+**Read by two participants that used to have one reader between them.** The DETAIL
+pane draws these rows, and so does the ``read_board`` bus tool -- a worker asking
+what is on its board is answered from this module, through the effect channel, with
+the projection the operator is looking at. That is the point: a board with two
+derivations would be two boards, and the failure it exists to prevent is a team and
+its operator disagreeing about what the work is.
+
+It lives beside the store rather than under ``ui/`` for that reason. It was in
+``ui/`` while a pane was the only reader, which was true and stopped being true;
+nothing about scoping a board to a session or naming its participants was ever
+presentation.
+
+The store holds a single fleet-wide ``tasks`` map and a single ``concerns`` map --
+there is one ``Store`` for every session (app.py) -- so the session scoping happens
+here, and ``store._pick_claim`` applies the same predicate (``Task.belongs_to``) so
+a worker cannot claim a task this module would not have shown it.
+
+The facts stay in ``model.py``: ``Task.blocked_on`` is the dependency graph's answer
+and is derived on every read.
 
 Imports no imgui, so the derivation is testable without a GL context.
 """
@@ -14,9 +28,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..model import ConcernId, ConcernState, NodeId, Snapshot, TaskId, TaskState
-from ..templates import SOLO, by_name
-from .projects import subagents_of
+from .model import ConcernId, ConcernState, NodeId, Snapshot, TaskId, TaskState
+from .templates import SOLO, by_name
 
 # What a node with no record in the snapshot is called.
 #
@@ -142,7 +155,7 @@ def _addresses(snap: Snapshot, session_id: str) -> dict[NodeId, str]:
 
     Derived, not stored: the driver allocates an address per sub-agent in spawn
     order, and spawn order plus each record's ``agent_type`` is exactly what the
-    snapshot already holds (``projects.subagents_of`` over ``snap.order``). A copy on
+    snapshot already holds (``Snapshot.subagents_of``). A copy on
     ``AgentRecord`` would be a second version of a fact the records already imply.
 
     It replays ``AgentSession._address_for``: first of a type takes the bare role
@@ -163,7 +176,7 @@ def _addresses(snap: Snapshot, session_id: str) -> dict[NodeId, str]:
 
     out: dict[NodeId, str] = {}
     taken: set[str] = set()
-    for record in subagents_of(snap, root):
+    for record in snap.subagents_of(root):
         base = (record.agent_type or "").lower()
         if not base:
             continue
@@ -210,21 +223,22 @@ def board_tasks(snap: Snapshot, session_id: str) -> tuple[BoardTask, ...]:
     """
     The tasks declared by one session, oldest first.
 
-    Scoped by declarer: a task carries no session otherwise, and an unclaimed one
-    carries no node at all. Ordered by declaration rather than by state so a row
-    does not jump when somebody claims it -- the board is read while work moves.
+    Scoped by ``Task.belongs_to``, which is the same predicate ``store._pick_claim``
+    applies -- so a worker is handed only tasks this function would have shown it.
+    Ordered by declaration rather than by state so a row does not jump when somebody
+    claims it: the board is read while work moves.
 
-    **The case this filter gets wrong.** ``store._pick_claim`` scans the fleet-wide
-    task map with no session filter, so a worker in session B can claim a task
-    session A declared. That row stays on A's board and never appears on B's --
-    so B's operator, watching their own agent work it, sees nothing that accounts
-    for what the agent is doing. Scoping by claimer instead would trade that for
-    the mirror defect and a worse one: an unclaimed task has no node at all, so a
-    fresh board would be empty until somebody took something.
-    Which of the two is right is a store question -- whether the board should be
-    keyed by session at all -- and it is not settled here. What is settled is that
-    the foreign claimer on A's board is *named* as foreign rather than rendered as
-    one of A's own agents; see ``role_name``.
+    **That symmetry is new and was the open question here.** The filter used to live
+    only in this function while the reducer scanned the fleet-wide map, so a worker
+    in session B could claim a task session A declared -- the row stayed on A's board
+    and appeared on B's never, leaving B's operator watching an agent work on
+    something nothing accounted for. Deciding it in the model rather than in this
+    pane is what makes the pane and the reducer incapable of disagreeing.
+
+    ``role_name``'s foreign-claimer handling stays, and is now the record of a state
+    the store can no longer enter: a task claimed across sessions before the
+    predicate existed still renders honestly rather than as one of this board's own
+    agents.
 
     Blocked-ness is derived against the **whole** ``snap.tasks`` map, never
     against the filtered rows. A missing dependency counts as unsatisfied, so
@@ -233,7 +247,7 @@ def board_tasks(snap: Snapshot, session_id: str) -> tuple[BoardTask, ...]:
     """
     rows = []
     for task in sorted(snap.tasks.values(), key=lambda t: (t.declared_at, t.id)):
-        if task.declared_by is None or task.declared_by[0] != session_id:
+        if not task.belongs_to(session_id):
             continue
         blocked = task.blocked_on(snap.tasks)
         owner = task.claimed_by

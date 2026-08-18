@@ -37,6 +37,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .board import BoardTask
 from .model import Concern, Task, TaskRefusal
 
 
@@ -92,7 +93,28 @@ class TaskWriteSettled:
     refusal: TaskRefusal | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class BoardDelivered:
+    """
+    What is on the asking agent's board, as the rows the operator is also shown.
+
+    ``board.BoardTask`` rather than ``model.Task`` on purpose. A worker needs the
+    same three derived facts a reader does -- who holds it under the address the bus
+    routes to, what it is waiting on, and which of those dependencies were never
+    declared -- and none of them are on the record. Handing over raw ``Task`` values
+    would put that derivation in ``bus.py``, which is a second implementation of the
+    projection ``board.py`` already owns, free to disagree with the pane.
+
+    This is the one effect whose intent changes nothing. It is still an effect
+    rather than a store method the handler calls, because the handler is on the
+    asyncio thread.
+    """
+
+    request_id: str
+    tasks: tuple[BoardTask, ...]
+
+
 # Explicit union, for the same reason ``Intent`` is one: the app loop matches over
 # it and mypy reports an unhandled member as a type error rather than letting an
 # agent stay parked on a future nobody completes.
-Effect = ClaimSettled | InboxDelivered | TaskWriteSettled
+Effect = ClaimSettled | InboxDelivered | TaskWriteSettled | BoardDelivered

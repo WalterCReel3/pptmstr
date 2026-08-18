@@ -47,9 +47,17 @@ from typing import TYPE_CHECKING, Any, assert_never
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
+from .board import BoardTask
 from .bridge import Bridge
-from .effects import ClaimSettled, Effect, InboxDelivered, TaskWriteSettled
+from .effects import (
+    BoardDelivered,
+    ClaimSettled,
+    Effect,
+    InboxDelivered,
+    TaskWriteSettled,
+)
 from .intents import (
+    BoardRead,
     ConcernPosted,
     InboxRead,
     TaskClaimRequested,
@@ -141,6 +149,32 @@ async def _outcome(future: asyncio.Future[Effect]) -> TaskRefusal | None:
     if not isinstance(answer, TaskWriteSettled):
         return TaskRefusal.NOT_APPLIED
     return answer.refusal
+
+
+def _board_line(row: BoardTask) -> str:
+    """
+    One board row, as the asking agent reads it.
+
+    Says who holds a task rather than only its state, because "claimed" without an
+    owner is the answer that sends a worker to ask the lead what it already could
+    have known. The owner is the address the bus routes to, so a reader can act on
+    it -- ``post_concern(to="builder-2")`` -- rather than only recognise it.
+
+    A dependency that was never declared is called out separately from one that is
+    merely unfinished. They look identical on the record and they are different
+    problems: the first is a typo in somebody's ``depends_on`` and will never clear
+    on its own, and nothing else in the session would ever say so.
+    """
+    parts = [f"- {row.id} [{row.state.value}] {row.title}"]
+    if row.owner is not None:
+        parts.append(f"held by {row.owner}")
+    if row.owner_gone:
+        parts.append("but its owner has stopped -- this task is stranded")
+    if row.blocked_on:
+        parts.append(f"waiting on {', '.join(row.blocked_on)}")
+    if row.missing:
+        parts.append(f"NEVER DECLARED: {', '.join(row.missing)}")
+    return " · ".join(parts)
 
 
 def _refusal_text(refusal: TaskRefusal) -> str:
@@ -308,6 +342,31 @@ def build_server(session: AgentSession) -> Any:
         return _text(f"You now own task {won.id}: {won.title}{detail}")
 
     @tool(
+        "read_board",
+        "See every task on your team's board: what exists, who holds it, and what "
+        "each one is waiting for. Read it before declaring work or reporting a "
+        "conflict.",
+        {},
+    )
+    async def read_board(args: dict[str, Any]) -> dict[str, Any]:
+        me = _sender(args)
+        request_id = f"b-{uuid.uuid4().hex[:12]}"
+        future = bridge.ask(request_id, BoardDelivered(request_id=request_id, tasks=()))
+        bridge.emit(BoardRead(node_id=me, request_id=request_id))
+        answer = await future
+
+        if not isinstance(answer, BoardDelivered) or not answer.tasks:
+            # An empty board is an ordinary answer and a common one early in a
+            # session. Said plainly, and distinguished from the claim tool's reply:
+            # "nothing claimable" and "nothing declared" send an agent to different
+            # places, and only one of them means the lead has not planned yet.
+            return _text("Your board has no tasks on it yet.")
+        lines = [f"{len(answer.tasks)} task(s) on your board:"]
+        for row in answer.tasks:
+            lines.append(_board_line(row))
+        return _text("\n".join(lines))
+
+    @tool(
         "declare_task",
         "Put a unit of work on the shared board for any agent to claim. "
         "depends_on names tasks that must finish first.",
@@ -393,7 +452,15 @@ def build_server(session: AgentSession) -> Any:
     return create_sdk_mcp_server(
         SERVER_NAME,
         "1.0.0",
-        [post_concern, read_inbox, claim_task, declare_task, complete_task, release_task],
+        [
+            post_concern,
+            read_inbox,
+            read_board,
+            claim_task,
+            declare_task,
+            complete_task,
+            release_task,
+        ],
     )
 
 
@@ -406,6 +473,7 @@ BUS_TOOLS = frozenset(
     for name in (
         "post_concern",
         "read_inbox",
+        "read_board",
         "claim_task",
         "declare_task",
         "complete_task",

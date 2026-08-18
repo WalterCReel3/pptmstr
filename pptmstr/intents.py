@@ -352,6 +352,27 @@ class TaskClaimRequested:
 
 
 @dataclass(frozen=True, slots=True)
+class BoardRead:
+    """
+    An agent asked what is on its board. Nothing changes; the reply is everything.
+
+    A question with no mutation, which makes it the odd one of the five: ``InboxRead``
+    is a read *and* a mark, and a claim is a read and a write. This one exists as an
+    intent anyway rather than as a direct store call, because the handler runs on the
+    asyncio thread and the store is confined to the UI thread -- reading it from a bus
+    handler is the thread violation the Bridge exists to make unstateable, and a
+    "harmless" read of a snapshot mid-swap is exactly how that starts.
+
+    The board is scoped to ``node_id``'s own session (``Task.belongs_to``), so this
+    carries no session argument: one supplied by the caller would be one the model
+    chose, and the gate already authenticated which session is asking.
+    """
+
+    node_id: NodeId
+    request_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class TaskCompleted:
     """
     A claimer finished. Anything depending on this becomes claimable by that fact
@@ -408,4 +429,5 @@ Intent = (
     | TaskClaimRequested
     | TaskCompleted
     | TaskReleased
+    | BoardRead
 )

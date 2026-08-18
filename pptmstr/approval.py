@@ -81,6 +81,7 @@ _REVIEW = frozenset(
 _BUS_AUTO = frozenset(
     {
         f"mcp__{_BUS_SERVER}__read_inbox",
+        f"mcp__{_BUS_SERVER}__read_board",
         f"mcp__{_BUS_SERVER}__claim_task",
         f"mcp__{_BUS_SERVER}__declare_task",
         f"mcp__{_BUS_SERVER}__complete_task",

@@ -9,6 +9,16 @@ from the fleet-wide map rather than the filtered rows.
 
 from __future__ import annotations
 
+from pptmstr.board import (
+    FOREIGN,
+    LEAD,
+    UNKNOWN,
+    board_concerns,
+    board_tasks,
+    has_board,
+    role_name,
+)
+from pptmstr.effects import ClaimSettled
 from pptmstr.intents import (
     AgentFinished,
     AgentRemoved,
@@ -22,15 +32,6 @@ from pptmstr.intents import (
 )
 from pptmstr.model import AgentState, Concern, ConcernState, NodeId, Snapshot, Task, TaskState
 from pptmstr.store import Store
-from pptmstr.ui.board import (
-    FOREIGN,
-    LEAD,
-    UNKNOWN,
-    board_concerns,
-    board_tasks,
-    has_board,
-    role_name,
-)
 
 S1 = "sess-1"
 S2 = "sess-2"
@@ -270,25 +271,67 @@ def test_the_foreign_qualifier_does_not_imply_a_broken_node() -> None:
     assert UNKNOWN not in FOREIGN
 
 
-def test_a_task_claimed_across_sessions_names_the_foreign_owner() -> None:
+def test_a_worker_cannot_claim_a_task_from_another_session() -> None:
     """
-    The whole point, at the level the operator sees it. Hand-built rather than
-    driven through the fixture: `fake_driver` stages only what the system reaches
-    on its own, and nothing there produces a cross-session claim.
+    The asymmetry the board read forced a decision on. ``board_tasks`` has always
+    filtered by declarer while ``_pick_claim`` filtered by nothing, so a worker
+    could be handed a task that appeared on no board -- its own operator watching
+    an agent work on something with nothing on screen to account for it.
+
+    Both now ask ``Task.belongs_to``. Asserted on the effect rather than only on
+    the board, because the claim being *refused* is the property; a task that
+    stayed PENDING because the claim silently did nothing would look the same.
     """
     store = Store()
     team(store, S1)
     team(store, S2)
     declare(store, "t1", by=LEAD_1)
-    # Reachable: _pick_claim scans the fleet-wide map with no session filter.
-    store.apply(TaskClaimRequested(DEV_2, request_id="k1", task_id="t1"))
 
-    row = board_tasks(store.snapshot(), S1)[0]
-    assert row.state is TaskState.CLAIMED
-    assert row.owner == f"builder, {FOREIGN}"
-    # And it is still absent from the claimer's own board -- the case the filter
-    # loses, named in board_tasks' docstring.
+    (settled,) = store.apply(TaskClaimRequested(DEV_2, request_id="k1", task_id="t1"))
+
+    assert isinstance(settled, ClaimSettled)
+    assert settled.task is None, "a worker was handed a task from another session's board"
+    assert store.snapshot().tasks["t1"].state is TaskState.PENDING
+    # Still S1's, and still nobody's on S2.
+    assert [r.id for r in board_tasks(store.snapshot(), S1)] == ["t1"]
     assert board_tasks(store.snapshot(), S2) == ()
+
+
+def test_an_anything_claim_does_not_reach_across_sessions_either() -> None:
+    """
+    The named-task path and the self-claiming path are separate branches of
+    ``_pick_claim`` and only one of them was exercised above. A filter on the first
+    and not the second would leave `claim_task()` -- the call the briefing actually
+    tells workers to make -- reaching the whole fleet.
+    """
+    store = Store()
+    team(store, S1)
+    team(store, S2)
+    declare(store, "theirs", by=LEAD_1)
+
+    (settled,) = store.apply(TaskClaimRequested(DEV_2, request_id="k1"))
+
+    assert isinstance(settled, ClaimSettled) and settled.task is None
+
+
+def test_a_foreign_owner_is_still_named_rather_than_rendered_as_a_local_one() -> None:
+    """
+    ``role_name``'s foreign handling now guards a state the reducer cannot enter,
+    and it stays. It is one function call from a board row, the renderer is what
+    a stale store or a future cross-session feature would meet first, and "lead" is
+    the one name an operator would never think to doubt.
+
+    Driven through ``role_name`` directly because the path that used to build this
+    state -- a cross-session claim -- is exactly what the test above pins shut.
+    """
+    store = Store()
+    team(store, S1)
+    team(store, S2)
+    snap = store.snapshot()
+
+    assert role_name(snap, DEV_2, S2) == "builder"
+    assert role_name(snap, DEV_2, S1) == f"builder, {FOREIGN}"
+    assert role_name(snap, LEAD_2, S1) == f"lead, {FOREIGN}"
 
 
 # -- scoping ----------------------------------------------------------------------

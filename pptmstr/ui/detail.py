@@ -38,6 +38,7 @@ from typing import Any, TypeVar
 from imgui_bundle import imgui
 
 from ..approval import diff_line_kind
+from ..board import BoardConcern, BoardTask, board_concerns, board_tasks, has_board
 from ..model import (
     ApprovalNeeded,
     ConcernState,
@@ -53,7 +54,6 @@ from ..theme import OBLIGATION_GLYPH, P
 from ..transcript import SegmentKind, Transcript
 from . import inbox, review, rich_pane, widgets
 from .blocks import Block, BlockCursor
-from .board import BoardConcern, BoardTask, board_concerns, board_tasks, has_board
 from .focus import FocusState
 from .widgets import format_elapsed
 
