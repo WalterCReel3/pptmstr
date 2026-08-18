@@ -189,26 +189,53 @@ Two caveats, both real. A parked call on the root masks the label as `REVIEW`
 `_node_of` falls back to the root for any message whose sub-agent join is missing
 (`driver.py:322-325`), which can paint an idle root as thinking.
 
-## What the fix left open
+## What the fix left open, and what checking it found
 
-A **DONE row carrying a pending approval** is a combination that could not previously
-occur and now can: `ApprovalRequested` records the approval whatever the state, because a
-gate whose hook crossed the end still has a coroutine parked on a future that somebody
-must answer. Two consequences have not been checked in the running app.
+A **DONE row carrying a pending approval** was recorded here as a combination the latch
+newly permits, with two consequences unchecked. Both were checked. One was a real defect
+in this document's reasoning and one was a defect in the code's comments; neither was a
+defect in the fix.
 
-- `_needs_you`'s docstring (`store.py:653-668`) asserts the three obligation kinds are
-  mutually exclusive per node *"by construction and not by luck"*, on the grounds that
-  "a node with anything pending is held in `AWAITING_APPROVAL` by the guard in
-  `StateChanged`". **That premise is now false.** The conclusion survives by accident —
-  DONE is neither `AWAITING_INPUT` nor unacknowledged FAILED, so no second obligation is
-  emitted — but the stated reason no longer holds and the next reader will be misled.
-- `_claim` (`ui/rail.py:222-247`) ranks DONE at **0**, the bottom. An approval that is in
-  the operator's `needs_you` backlog now sits on a card the rail ranks as wanting no
-  attention. Whether that is harmful depends on how the rail uses the rank, and it has
-  not been looked at.
+**The state does not occur.** `ApprovalRequested` is emitted at `driver.py:1242`, inside
+`_park`, and the first suspension point on that path is the `await future` at `:1245` —
+*after* the emit. It is a hook path, so the buffered-message inversion this whole record
+is about cannot reorder it: that route needs a message-derived intent. `AgentFinished`
+clears `pending`, the bridge is one queue applied in emit order, and every DONE route is
+either a hook or a stream terminus that the gate emit precedes. So DONE-with-pending is
+reachable in the store and not from the driver, which is a distinction the previous
+version of this section did not draw.
 
-Neither is a reason to revert the latch. Both are the price of it, and they should be
-checked before this is called finished.
+One caveat belongs on the record rather than in a footnote: the teardown route holds
+because the SDK cancels a queued hook task before its first step, which is true only
+while no `session_store` is configured. Configure one and the state would occur. The
+invariant is ours by construction on two routes and a vendored dependency's property on
+the third.
+
+**The rail claim in the previous version was wrong.** It said `_claim`
+(`ui/rail.py:222`) ranks DONE at the bottom, so an approval would sit on a card ranked as
+wanting no attention. `_claim` has exactly one caller — `rail.py:279`, inside
+`_subs_signal` — and it selects the state shown beside a *collapsed group's sub-count
+marker*. Card ordering, height, the amber REVIEW badge and the `needs_you` backlog do not
+consult it. Rendered against a snapshot holding the combination, a collapsed session
+whose DONE sub-agent holds an approval shows the badge, the taller "blocked" density
+(`_density` tests `owed` before the DONE check at `rail.py:171-174`), and correct waiting
+counts. The single difference is the marker text's colour. The claim was an inference
+from reading the function without its callers, and it is withdrawn.
+
+**`_needs_you`'s docstring was genuinely false and is corrected.** It asserted the three
+obligation kinds are mutually exclusive *"by construction and not by luck"* on the
+grounds that anything pending holds a node in `AWAITING_APPROVAL`. The latch made that
+premise false. The conclusion still holds, now on stated grounds rather than the one that
+stopped applying.
+
+**One thing is left unresolved rather than settled.** The `_FINAL_STATES` guard in the
+`ApprovalResolved` arm may be dead: that arm returns early when the pending id is already
+gone, and `AgentFinished` clears `pending`, so an approval requested before the end and
+resolved after finds nothing. If DONE-with-pending cannot occur, the latch moved dead code
+from one arm to another rather than making a guard reachable — which contradicts the
+reasoning recorded in the commit that made the change, and also the comment now standing
+in that arm naming two live routes. Both guards are cheap and neither is wrong; the
+recorded *reason* for one of them is what is in doubt. Nobody has separated it.
 
 ## What to do next, in order
 
@@ -221,16 +248,36 @@ checked before this is called finished.
    `:1302`, `:1535`, `:1559`, `:1710`, `:1750`) only `:1710` concerns sub-agent lifetime,
    and it fires from `_settle_subagent` alone. That the incident was undiagnosable from a
    running system is the finding with the longest reach here.
-2. **Check the two combinations the latch newly permits** — the `_needs_you` docstring's
-   dead premise and the rail's ranking of a DONE card holding an approval.
-3. **Match the shape that actually stuck.** Park an `mcp__pptmstr__post_concern` call
+2. **Settle whether the `ApprovalResolved` guard is dead**, and reword the commit that
+   claimed the latch made it reachable if it is. Small, and it is the one loose thread the
+   fix left behind.
+3. **Move `_FINAL_STATES` to `model.py`** as `AgentState.is_final`, beside
+   `_TERMINAL_STATES`. Two `AgentState` classifications in two modules answering two
+   questions is the one-fact-in-several-places smell this codebase has already paid for:
+   whoever adds the next terminal state edits `model.py` and has no reason to know
+   `store.py` holds a second set. Note while doing it that `AgentState.CANCELLED` is never
+   emitted anywhere in production — only the enum, the theme tables and the rail's
+   special-cases — so `_FINAL_STATES` is effectively `{DONE}` today.
+4. **Correct `driver.py:1604-1608`.** It states the SDK "reads the transport in a single
+   task that dispatches control frames to the hook callbacks", and concludes there is no
+   state in which the read has ended and a SubagentStop can still arrive. The installed
+   SDK spawns each hook callback as an independent task rather than awaiting it. The
+   conclusion may hold for another reason — the stream's end sentinel is an ordinary item,
+   so control frames queue ahead of it — but the stated reason is wrong.
+5. **Match the shape that actually stuck.** Park an `mcp__pptmstr__post_concern` call
    from inside a sub-agent, hold it at the gate for a realistic annotation interval,
    approve it with edits, and record whether a closing hook arrives and under what
    `agent_id` and `tool_use_id`. Undeclared added keys and operator dwell must be varied
    separately or the run cannot say which one mattered.
 
-The probe drops to third because it is the most expensive and the least certain to
+The probe drops to last because it is the most expensive and the least certain to
 answer anything, not because the veto question stopped mattering.
+
+Two of this record's own claims have now been withdrawn after being checked — the
+gate branch in the first version, the rail ranking in the second. Both were inferences
+from reading a function without reading what called it or what else produced the same
+shape. Whoever works the list above should assume the same defect is still in here
+somewhere and check before building on any single citation.
 
 ## Why the edit was never the discriminator at the gate
 
