@@ -27,7 +27,7 @@ from .model import Snapshot
 from .pool import SessionPool
 from .store import Store
 from .theme import REQUIRED_THEMES, THEMES, P
-from .ui import compose, detail, health, inbox, launcher, rail, review, transcript_pane
+from .ui import board_pane, compose, detail, health, inbox, launcher, rail, review, transcript_pane
 from .ui import focus as focus_mod
 from .ui.widgets import format_elapsed
 
@@ -535,6 +535,13 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
                 state.frame_now,
             )
 
+    def board_pane_fn() -> None:
+        # Follows the cursor, like DETAIL and CONTEXT. A board that held still while
+        # the cursor moved would need a pointer of its own, and that second pointer
+        # is what this layout deleted.
+        if state.frame_snap is not None:
+            board_pane.draw(state.frame_snap, state.focus)
+
     def session_pane() -> None:
         """FOCUS: the conversation, with its composer, in one pane."""
         if state.frame_snap is None:
@@ -575,6 +582,7 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
         "NEEDS YOU": inbox_pane,
         "CONTEXT": context_pane,
         "DETAIL": detail_pane,
+        "BOARD": board_pane_fn,
         "SESSION": session_pane,
         "HEALTH": health_pane,
         "LOG": _log_panel,
@@ -634,6 +642,12 @@ def _triage_layout(panels: dict[str, Callable[[], None]]) -> hello_imgui.Docking
         # here for. A tab-mate rather than a fourth split -- the 0.32 width was
         # already chosen so the inbox keeps room for identity, wait and summary.
         _window("DETAIL", "ContextSpace", panels["DETAIL"]),
+        # Behind DETAIL, and that ordering is the whole of the operator's
+        # constraint: the queue is what the operator is here for, and a team's
+        # board is context for a decision rather than the decision. Absent in the
+        # common case without any layout help -- most sessions are solo, and the
+        # pane draws its own "not a team" line rather than an empty table.
+        _window("BOARD", "ContextSpace", panels["BOARD"]),
         _window("CONTEXT", "ContextSpace", panels["CONTEXT"]),
         # Reachable, not resident. LOG is a debugging surface, and its old status as
         # tab-mate to the review queue -- in front of it, at that -- was precisely
@@ -667,6 +681,10 @@ def _focus_layout(panels: dict[str, Callable[[], None]]) -> hello_imgui.DockingP
         # for steering one session, and its facts -- cost, cwd, context headroom --
         # are the ones worth resident space.
         _window("DETAIL", "HealthSpace", panels["DETAIL"]),
+        # FOCUS is for steering one session, and a team's board is a fact about
+        # that session in the same class as its cost and its context headroom --
+        # which is why it sits with HEALTH here rather than with the queue.
+        _window("BOARD", "HealthSpace", panels["BOARD"]),
         _window("LOG", "HealthSpace", panels["LOG"]),
     ]
     return params

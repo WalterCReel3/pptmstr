@@ -208,7 +208,7 @@ class FakeDriver:
 
     def _seed_board(self, root: NodeId) -> None:
         """
-        One team session with a board on it, so DETAIL's board section is reachable.
+        One team session with a board on it, so the BOARD pane is reachable.
 
         Without this the whole fixture is solo sessions, and the board renders as
         absent everywhere -- which is correct behaviour and proves nothing about
@@ -221,15 +221,44 @@ class FakeDriver:
         The last two are the pair worth keeping distinct. Only one of them is a
         warning, and a fixture carrying just the stranded row cannot show that the
         ordinary success path is being flagged as one.
+
+        Rows also carry a specification, a file list and -- on one row -- a concern
+        naming the task, because those three are what the row gained when the board
+        stopped being a section in DETAIL. A fixture without them exercises the pane
+        at its narrowest and says nothing about the disclosure it exists for.
         """
         builder = self._spawn(parent=root, agent_type="builder")
         reviewer = self._spawn(parent=root, agent_type="reviewer")
         scout = self._spawn(parent=root, agent_type="explore")
 
         for task in (
-            Task(id="t1", title="parse the element set", declared_at=1.0),
-            Task(id="t2", title="validate the checksum", depends_on=("t1",), declared_at=2.0),
-            Task(id="t3", title="cover the parser in tests", depends_on=("t2",), declared_at=3.0),
+            Task(
+                id="t1",
+                title="parse the element set",
+                detail=(
+                    "Read the TLE two-line format straight from the bytes. Keep the "
+                    "column offsets in one table -- the format is fixed-width and "
+                    "every field is positional, so a split on whitespace is wrong on "
+                    "the lines where a value runs into its neighbour."
+                ),
+                touches=("tle/parse.py",),
+                declared_at=1.0,
+            ),
+            Task(
+                id="t2",
+                title="validate the checksum",
+                detail="Modulo-10 over the line, minus signs counting as one.",
+                depends_on=("t1",),
+                touches=("tle/parse.py", "tle/checksum.py"),
+                declared_at=2.0,
+            ),
+            Task(
+                id="t3",
+                title="cover the parser in tests",
+                touches=("tests/test_parse.py",),
+                depends_on=("t2",),
+                declared_at=3.0,
+            ),
             # A dependency nobody declared. Unclaimable forever, and this pane is
             # the only place that is visible.
             Task(id="t4", title="update the changelog", depends_on=("t9",), declared_at=4.0),
@@ -257,10 +286,20 @@ class FakeDriver:
             AgentFinished(reviewer, AgentState.DONE, ended_at=time.monotonic(), error=None)
         )
 
-        for cid, sender, subject, body in (
-            ("fake-c1", reviewer, "the retry loop never terminates", "third call onward"),
-            ("fake-c2", builder, "checksum ignored in sixty places", "tle/parse.py"),
-            ("fake-c3", reviewer, "two roles answer to one name", "only the first is reachable"),
+        # fake-c2 names t2, which is the row that is claimed and being worked: a
+        # live, correctly reasoning owner that is deliberately waiting. `owner_gone`
+        # is false there, so without the link that row is pixel-identical to
+        # ordinary progress -- the exact case the task_id field exists for.
+        for cid, sender, subject, body, about in (
+            ("fake-c1", reviewer, "the retry loop never terminates", "third call onward", None),
+            ("fake-c2", builder, "checksum ignored in sixty places", "tle/parse.py", "t2"),
+            (
+                "fake-c3",
+                reviewer,
+                "two roles answer to one name",
+                "only the first is reachable",
+                None,
+            ),
         ):
             self.bridge.emit(
                 ConcernPosted(
@@ -275,6 +314,7 @@ class FakeDriver:
                         # The operator's rewrite, which is now a stamped fact
                         # rather than an unsettable field.
                         edited=cid == "fake-c2",
+                        task_id=about,
                     ),
                 )
             )
