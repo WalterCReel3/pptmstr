@@ -174,7 +174,7 @@ Ordered by what unblocks what, not by value. Each row says why it sits where it 
 | **2** | ~~A board read: the projection moves out of `ui/board.py`, one bus tool exposes it~~ **done, `b5287c3`** | reports 2 and 3; item 2 | Answers the report that is *literally true and a gap in the original specification*. Makes §1 above buildable |
 | **3** | ~~`detail` on `BoardTask`; `task_id` on `Concern`; the board rendered in the DETAIL pane~~ **done, `5b42e5c` and `59ee38c` — the pane is BOARD, not DETAIL; see below** | items 2 and 3; board-has-no-surface | Item 3's *"claimed, and there is an open concern about it"* is a projection over data that already exists — no new state, no flag to forget |
 | **4** | ~~`Task.touches`, and a `TaskDeclared` arm that appends an auto-dependency rather than refusing~~ **done, `de2b481` — see below** | item 9 | *"the highest-value store change in this document"* — the only change that removes a single point of failure. Needs row 1 |
-| **5** | The brief: ~~launch spec structured~~ **step 1 done, `879e425`**; entry writer on `settings.save`'s temp + `os.replace` primitive, a pane that derives and shows supersession, workers told the path with the confirm-or-refute framing | premise record steps 1–3 | Gated on row 0, which passed |
+| **5** | ~~The brief: launch spec structured, entry writer, a pane that derives and shows supersession, workers told the path with the confirm-or-refute framing~~ **done — `879e425` (step 1), `a38b141` (steps 2–3)** | premise record steps 1–3 | Gated on row 0, which passed |
 | **6** | ~~An amendment intent for `Task.detail`, `node_id=None`, distinct from `TaskDeclared`~~ **done, `7b7e433`** | operator-instruction record | Its own record establishes `declare_task` cannot be the path and the guard must not be weakened. Needed row 2 to be sufficient — and needed the board read to carry `detail`, `6ca0cae` |
 | **7** | ~~Sign-off on declaration~~ **done, `c9ab068` — per-declaration** | task-reaches-the-board | ~~**Unit unresolved — see below.**~~ Answered by the operator. Needed row 1 for a reply channel |
 | **8** | ~~Prose and Makefile: `format-file`, worker instance addressing, "confirm the defect still exists", evidence class on findings, hold-vs-release with *both* rules stated together, and dropping `worker_prompt`'s *"it is the only way that reaches anyone"*~~ **done, `5a16521`** — `typecheck` **not** widened, see below | items 1, 4, 5, 6, 7, 8, 10 | Free, and unbuilt since 08-15. `notes/…what-a-worker-is-given.md` shows `make format` writing every file is still an active cause of report 3 |
@@ -513,6 +513,7 @@ run and none has been performed for this record.
 6. ~~**Row 3**, the board's surface.~~ **done**, `5b42e5c` (the data) and `59ee38c` (the
    pane). It did not land in DETAIL: the companion record's pane was built in the same
    pass, and the board left DETAIL entirely.
-7. **Row 5**, the brief — after row 0 says it can exist.
+7. ~~**Row 5**, the brief.~~ **done**, `879e425` and `a38b141`. Amendments (the premise
+   record's step 4) stay deferred, and so does what makes a worker re-read.
 8. **Rows 6 and 7**, amendment and sign-off — after question 1 has an answer, and with the
    baseline numbers recorded before either lands.

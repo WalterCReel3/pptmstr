@@ -287,10 +287,53 @@ conflict is a better outcome than picking a winner, and this record does not pic
    **Done, `879e425`**, with two departures from the wording, both stated in the
    record below: the spec became a `LaunchSpec` value rather than a wider tuple, and
    the **title was not built**.
-2. **Write and render.** An entry writer using `settings.save`'s temp + `os.replace`
+2. ~~**Write and render.** An entry writer using `settings.save`'s temp + `os.replace`
    primitive, and a pane that derives the current brief from the directory and shows
-   supersession (obligation 1).
-3. **Tell workers it exists**, with the path, and the "confirm or refute, not an order"
-   framing lifted from the builder role (obligations 2 and 3).
+   supersession (obligation 1).~~ **Done, `a38b141`** — `brief.py` and the BRIEF pane.
+3. ~~**Tell workers it exists**, with the path, and the "confirm or refute, not an order"
+   framing lifted from the builder role (obligations 2 and 3).~~ **Done, `a38b141`** —
+   `worker_prompt` takes the path, and the framing is the builder's own words, pinned
+   by a test so the two registers cannot drift.
 4. **Amendments**, once there is evidence about the re-read trigger from steps 1–3
    rather than a guess about it.
+
+
+---
+
+## Steps 2 and 3 are done — 2026-08-18, solo, `a38b141`
+
+Three things came out of the building that the record did not have.
+
+**The pane's memo cannot be keyed on mtime, and that is measured rather than reasoned.**
+The obvious key for "has the directory changed" is its modification time, and it is
+wrong here: two appends in quick succession leave `st_mtime_ns` **identical** — the
+delta is zero. In a pane redrawing at 60fps that is not a rare race, and it fails
+silently in the worst direction: the operator appends, sees nothing, and appends again.
+The key is the entry filenames, which append-only guarantees to change. Worth
+generalising — any "did this directory change" check in this project should assume
+mtime is too coarse until measured otherwise.
+
+**The write-collision guard cannot be reached by a single-threaded call**, which makes
+it the first thing here that needed its race injected rather than waited for. The
+ordinal comes from the listing, and any file that could collide with the computed name
+is a file that listing already saw — so the loop only fires when another writer lands
+between `read_entries` and `os.replace`. It is tested by handing the writer a stale
+listing, which is exactly what the loser of that race holds. It matters because the
+failure is silent: `os.replace` onto an existing name destroys it with nothing raised.
+
+**Obligation 3's framing is a quotation, and the test says so.** The record says to lift
+the builder role's *"a finding to be confirmed or refuted, not an order"* rather than
+invent a second register, and a test now pins that the two strings are the same one. A
+paraphrase would have drifted on the next edit to either, and the whole point is that a
+worker meets one register for a reviewer's concern and the operator's premises alike.
+
+**Not built, and named rather than left implicit:** nothing yet *creates* a brief
+directory at launch — `session_dir` computes the canonical location and no caller uses
+it, because the operator supplies a path today. And step 4, amendments to `Task.detail`
+from the brief, stays deferred as the record specifies.
+
+**Still open, and deliberately deferred by the operator:** what makes a worker read the
+brief a second time. Steps 2 and 3 give it a directory and tell it to read; nothing
+makes it re-read after an amendment lands, so a brief amended mid-run reaches the
+workers that start afterwards and no others. That is the sharpest item in the Open
+section and the decision was to build first and measure rather than argue it now.
