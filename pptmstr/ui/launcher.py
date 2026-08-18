@@ -177,6 +177,11 @@ def draw(
         flags=widgets.CTRL_ENTER_SUBMITS,
     )
     imgui.text_disabled("what should a new session do?  Ctrl+Enter launches, Enter for a new line")
+    # Said here rather than left to be discovered, because it changes what the box is
+    # for: on a team, this text is the premises every worker is told to read, not
+    # just the lead's opening message.
+    if templates.BUILT_IN[state.template_index].roles:
+        imgui.text_disabled("on a team, this also becomes the premises every worker reads")
 
     imgui.spacing()
     imgui.separator()
@@ -193,19 +198,19 @@ def draw(
     )
     imgui.text_disabled("working directory")
 
-    # Under the working directory because it is the same kind of field -- a path the
-    # operator supplies and nothing validates -- and because a brief is read
-    # relative to nothing: it is an absolute directory, outside the tree, which the
-    # 08-17 probe measured a worker can read.
+    # **Not how a brief is created.** A team session writes the task above as its
+    # first premise at launch, because that is where the operator's premises already
+    # are -- this field is for pointing a session at one that exists, which is what a
+    # fork continuing its parent's work needs. Filling it in *suppresses* the seed,
+    # so a session told to continue a brief does not bury it under a new one.
     #
-    # Empty is the common case and must stay cheap to leave empty. Most sessions are
-    # solo with a one-line task, and a brief is the shape a team needs.
+    # Empty is the common case and must stay cheap to leave empty.
     imgui.spacing()
     imgui.set_next_item_width(-1)
     _, state.brief = imgui.input_text_with_hint(
-        "##brief", "brief directory (optional, premises the team can read)", state.brief
+        "##brief", "continue an existing brief (optional) -- leave empty for a new one", state.brief
     )
-    imgui.text_disabled("brief")
+    imgui.text_disabled("brief directory")
 
     imgui.spacing()
     imgui.set_next_item_width(240.0)

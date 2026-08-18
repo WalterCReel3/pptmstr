@@ -99,6 +99,19 @@ class DerivedEntry:
         return bool(self.superseded_by)
 
 
+def default_root() -> Path:
+    """
+    Where briefs live when the operator did not name a directory.
+
+    Beside the CLI's own per-project state rather than under this application's
+    config, because a brief explains a session and the session's transcript is
+    already there -- the 08-14 record measured 149 of them for this repository.
+    Splitting the two would mean answering "what did this worker act on" from two
+    directories that agree by convention.
+    """
+    return Path.home() / ".claude" / "projects"
+
+
 def session_dir(root: Path, cwd: str, session_id: str) -> Path:
     """
     Where a session's brief lives: ``<root>/<cwd-slug>/briefs/<session-id>/``.

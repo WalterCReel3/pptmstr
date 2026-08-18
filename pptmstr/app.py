@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 
 from imgui_bundle import hello_imgui, imgui, immapp
 
+from . import brief as brief_mod
 from . import settings as settings_mod
 from . import templates, theme
 from .bridge import Bridge
@@ -334,21 +335,58 @@ def _launch(state: AppState, spec: LaunchSpec) -> None:
     shape = (templates.by_name(spec.template) if spec.template else None) or templates.SOLO
 
     async def go() -> None:
-        pool.submit(
-            AgentSession(
-                state.bridge,
-                spec.task,
-                model=spec.model,
-                cwd=spec.cwd,
-                brief=spec.brief,
-                template=shape,
-                subagent_cap=state.settings.subagent_cap,
-            )
+        session = AgentSession(
+            state.bridge,
+            spec.task,
+            model=spec.model,
+            cwd=spec.cwd,
+            brief=spec.brief,
+            template=shape,
+            subagent_cap=state.settings.subagent_cap,
         )
+        _seed_brief(session, shape)
+        pool.submit(session)
 
     state.bridge.submit(go())
-    brief = f" brief={spec.brief}" if spec.brief else ""
-    LOG.info("app", f"launched in {spec.cwd} as {shape.name}{brief}: {spec.task[:60]}")
+    LOG.info("app", f"launched in {spec.cwd} as {shape.name}: {spec.task[:60]}")
+
+
+def _seed_brief(session: AgentSession, shape: templates.WorkTemplate) -> None:
+    """
+    Write the launch text as the session's first premise, for a team.
+
+    **This is where the premises already are.** The record that asked for a brief
+    diagnoses the gap as *"the premises the operator means are not in project
+    memory -- they are in the launch text box"*: that text reaches the lead as its
+    first user message and reaches a worker through nothing but the lead choosing to
+    re-express it. Writing it here is what makes it addressable, and it costs the
+    operator no new habit -- they already typed it.
+
+    Between construction and ``pool.submit``, which is the only window where the
+    session id exists and nothing has spawned yet. ``submit`` announces, ``run``
+    connects, and a worker cannot be told a path that was not set before either.
+
+    Skipped for a solo session, which has no workers to seed, and skipped when the
+    operator named a directory -- that is a session pointed at an existing brief,
+    typically a fork inheriting its parent's, and seeding over it would bury the
+    premises it was launched to continue.
+
+    A failure does not stop the launch. The work the operator asked for is worth
+    more than the seeding of it, and the log says which happened rather than
+    leaving a team quietly unbriefed.
+    """
+    if not shape.roles or session.brief or not session.task.strip():
+        return
+    directory = brief_mod.session_dir(
+        brief_mod.default_root(), session.cwd or ".", session.session_id
+    )
+    try:
+        brief_mod.write_entry(directory, session.task)
+    except OSError as exc:
+        LOG.warn("app", f"no brief seeded ({exc}); workers will not be told one exists")
+        return
+    session.brief = str(directory)
+    LOG.info("app", f"seeded brief at {directory}")
 
 
 def _session_action(state: AppState, coro_factory: Callable[[SessionPool], object]) -> None:

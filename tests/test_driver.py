@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
+from pathlib import Path
 from unittest.mock import patch
 
 from claude_agent_sdk import (
@@ -2900,3 +2901,140 @@ def test_a_worker_launched_without_a_brief_is_told_about_none() -> None:
     assert team is not None
     for name, definition in team.items():
         assert "premises this session" not in definition.prompt, name
+
+
+# -- the premises reach the workers, end to end -----------------------------------
+#
+# Every piece of row 5 passed on its own and the feature had no population path: the
+# operator had to hand-type a directory for a session id that did not exist yet.
+# These drive launcher -> _launch -> AgentSession -> worker prompt, which is the
+# claim the per-piece tests could not make.
+
+
+def _launched(spec: LaunchSpec, monkeypatch, root) -> AgentSession:
+    """Run `_launch` against a recording pool, with briefs rooted in a temp dir."""
+    from pptmstr import brief as brief_mod
+    from pptmstr.app import AppState, _launch
+    from pptmstr.settings import Settings
+
+    monkeypatch.setattr(brief_mod, "default_root", lambda: root)
+
+    started: list[AgentSession] = []
+
+    class _RecordingPool:
+        def submit(self, session: AgentSession) -> None:
+            started.append(session)
+
+    bridge = Bridge()
+    bridge.start()
+    try:
+        state = AppState(store=Store(), bridge=bridge, settings=Settings())
+        state.pool = _RecordingPool()  # type: ignore[assignment]
+        _launch(state, spec)
+        for _ in range(200):
+            if started:
+                break
+            time.sleep(0.005)
+    finally:
+        bridge.stop()
+    assert started, "the pool was never handed a session"
+    return started[0]
+
+
+def test_launching_a_team_writes_the_task_as_its_first_premise(monkeypatch, tmp_path) -> None:
+    """
+    The premises the operator means are in the launch text box -- that is the
+    record's own diagnosis. This is what makes them addressable, and it costs the
+    operator no new habit.
+    """
+    from pptmstr import brief as brief_mod
+
+    session = _launched(
+        LaunchSpec(
+            task="the TLE parser is fixed-width; every field is positional",
+            model="m",
+            cwd="/tmp",
+            template="feature",
+        ),
+        monkeypatch,
+        tmp_path,
+    )
+
+    assert session.brief is not None
+    (entry,) = brief_mod.read_entries(Path(session.brief))
+    assert entry.body == "the TLE parser is fixed-width; every field is positional"
+    assert entry.path.name == "000-premises.md"
+
+
+def test_every_worker_on_that_team_is_told_where_to_read_it(monkeypatch, tmp_path) -> None:
+    """
+    The end of the chain, and the claim no per-piece test could make: a brief that
+    is written and never reaches a worker prompt is a brief nobody reads.
+    """
+    session = _launched(
+        LaunchSpec(task="premises", model="m", cwd="/tmp", template="feature"),
+        monkeypatch,
+        tmp_path,
+    )
+
+    team = session._team()
+    assert team is not None
+    for name, definition in team.items():
+        assert session.brief in definition.prompt, name
+
+
+def test_a_solo_session_seeds_nothing(monkeypatch, tmp_path) -> None:
+    """No workers to seed, and a directory per solo launch is litter."""
+    session = _launched(LaunchSpec(task="do a thing", model="m", cwd="/tmp"), monkeypatch, tmp_path)
+
+    assert session.brief is None
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_session_pointed_at_an_existing_brief_is_not_seeded_over(monkeypatch, tmp_path) -> None:
+    """
+    A fork continuing its parent's work. Seeding here would bury the premises it was
+    launched to continue under a copy of its own task line.
+    """
+    from pptmstr import brief as brief_mod
+
+    parent = tmp_path / "parent"
+    brief_mod.write_entry(parent, "the original premises")
+
+    session = _launched(
+        LaunchSpec(
+            task="continue the work", model="m", cwd="/tmp", template="feature", brief=str(parent)
+        ),
+        monkeypatch,
+        tmp_path,
+    )
+
+    assert session.brief == str(parent)
+    (entry,) = brief_mod.read_entries(parent)
+    assert entry.body == "the original premises"
+
+
+def test_two_team_sessions_do_not_share_a_brief(monkeypatch, tmp_path) -> None:
+    spec = LaunchSpec(task="premises", model="m", cwd="/tmp", template="feature")
+    first = _launched(spec, monkeypatch, tmp_path)
+    second = _launched(spec, monkeypatch, tmp_path)
+
+    assert first.brief != second.brief
+
+
+def test_a_brief_that_cannot_be_written_does_not_stop_the_launch(monkeypatch, tmp_path) -> None:
+    """
+    The work the operator asked for is worth more than the seeding of it. The log
+    says which happened rather than leaving a team quietly unbriefed.
+    """
+    blocked = tmp_path / "blocked"
+    blocked.write_text("not a directory", encoding="utf-8")
+
+    session = _launched(
+        LaunchSpec(task="premises", model="m", cwd="/tmp", template="feature"),
+        monkeypatch,
+        blocked,
+    )
+
+    assert session.brief is None
+    assert session.task == "premises"

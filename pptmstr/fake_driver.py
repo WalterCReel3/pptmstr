@@ -222,7 +222,10 @@ class FakeDriver:
         overturned it -- has no state to show, and a regression that dropped it
         would look correct in every screenshot.
         """
-        directory = pathlib.Path(tempfile.mkdtemp(prefix="pptmstr-brief-"))
+        directory = brief.session_dir(
+            pathlib.Path(tempfile.mkdtemp(prefix="pptmstr-fake-")), "/x/orbital", "sess-fake"
+        )
+        # The seed a real launch writes: the operator's launch text, verbatim.
         brief.write_entry(
             directory,
             "The TLE parser is fixed-width. Every field is positional, so a split on "
