@@ -356,13 +356,18 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
                 # Appended, never replaced. Replacing is what orphaned the
                 # earlier approval's future and hung its agent invisibly.
                 #
-                # The approval is recorded whatever state the node is in -- a gate
-                # whose hook crossed the end still has a coroutine parked on a
-                # future, and ``needs_you`` walks ``pending`` rather than the state,
-                # so the operator can still answer it. Only the *state* is withheld
-                # from a node whose end was declared: it is over, and saying it
-                # waits on a reviewer would be the revival this guard exists to
-                # stop, one arm along.
+                # The approval is recorded whatever state the node is in. An approval
+                # is never dropped (see the arm above), and ``needs_you`` walks
+                # ``pending`` rather than the state, so one that lands on a node
+                # already reported finished is still answerable. Only the *state* is
+                # withheld from a node whose end was declared: saying it waits on a
+                # reviewer would be the revival this guard exists to stop, one arm
+                # along.
+                #
+                # Defensive rather than measured. The gate emits ``ApprovalRequested``
+                # synchronously on the PreToolUse hook path before it parks, and every
+                # route to DONE needs the agent stopped or its stream closed, so the
+                # driver has no ordering that reaches this branch in a final state.
                 if rec.pending_by_id(intent.pending.id) is None:
                     nodes[intent.node_id] = rec.with_(
                         pending=rec.pending + (intent.pending,),
@@ -661,9 +666,15 @@ def _needs_you(
     that has been blocked longest is the thing costing the most. Ties keep tree
     order, since the walk is over ``order`` and the sort is stable.
 
-    The three kinds are mutually exclusive per node by construction and not by luck:
-    a node with anything pending is held in AWAITING_APPROVAL by the guard in
-    StateChanged, and AgentFinished clears ``pending`` as it sets a terminal state.
+    The three kinds are mutually exclusive per node by construction and not by luck,
+    and it takes two constructions rather than one. While a node is live, the
+    ``pending`` guard in StateChanged and SubagentProgress holds anything carrying an
+    approval in AWAITING_APPROVAL, which is neither of the states the other two kinds
+    read. Once an end is declared, ``_FINAL_STATES`` stops those same arms from moving
+    the node at all, so a finished node still carrying an approval sits in DONE or
+    CANCELLED -- again neither. FAILED is the one terminal state that can be entered
+    with an approval outstanding, and ``AgentFinished`` clears ``pending`` as it sets
+    it, so that pair cannot coexist either.
     """
     out: list[Obligation] = []
     for nid in order:

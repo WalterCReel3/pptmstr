@@ -30,6 +30,7 @@ from pptmstr.intents import (
 )
 from pptmstr.model import (
     AgentState,
+    ApprovalNeeded,
     ContextPressure,
     ContextSnapshot,
     NodeId,
@@ -872,10 +873,13 @@ def test_a_failed_session_is_still_revivable() -> None:
 
 def test_a_finished_agent_keeps_a_late_approval_without_coming_back() -> None:
     """
-    A PreToolUse gate whose hook crossed the end still has a coroutine parked on a
-    future, so the approval is recorded and reaches the operator. What it must not
-    do is claim the agent is waiting on them: it is over, and the parked call is
-    unwinding.
+    Pins the store's behaviour for this combination, not an ordering the driver is
+    known to produce. The gate emits ``ApprovalRequested`` synchronously on the
+    PreToolUse hook path, before it parks, and every route to DONE requires the agent
+    to have stopped or its stream to have closed -- so the driver has no route that
+    puts a request after the end (see the note on ``_needs_you``). The arm is kept
+    because the store applies whatever it is handed: what it must not do is record the
+    approval and *also* claim the agent is waiting on the operator.
     """
     store = Store()
     store.apply(spawn(ROOT))
@@ -889,6 +893,29 @@ def test_a_finished_agent_keeps_a_late_approval_without_coming_back() -> None:
     assert rec.state is AgentState.DONE
     assert rec.ended_at == 7.0
     assert [p.id for p in snap.approvals] == ["late"]
+
+
+def test_a_finished_node_holding_an_approval_owes_only_that_approval() -> None:
+    """
+    The second of the two constructions ``_needs_you`` rests on.
+
+    A live node carrying an approval is held in AWAITING_APPROVAL by the pending
+    guard, which is what keeps the three obligation kinds apart. A node whose end was
+    declared is not held there -- it stays DONE -- so the exclusivity has to come from
+    somewhere else, and it comes from DONE being a state neither QuestionPending nor
+    SessionFailed reads. Pinning it here because the alternative is an invariant that
+    holds only as long as nobody adds a fourth kind keyed on a terminal state.
+    """
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(spawn(CHILD, ROOT))
+    store.apply(AgentFinished(CHILD, AgentState.DONE, ended_at=7.0))
+    store.apply(ApprovalRequested(CHILD, pending(CHILD, "late")))
+    # Nothing may relabel it into a state another kind would also claim.
+    store.apply(StateChanged(CHILD, AgentState.AWAITING_INPUT, topic="anything"))
+
+    owed = [o for o in store.snapshot().needs_you if o.node == CHILD]
+    assert [type(o) for o in owed] == [ApprovalNeeded]
 
 
 def test_resolving_a_late_approval_cannot_revive_a_finished_agent() -> None:
