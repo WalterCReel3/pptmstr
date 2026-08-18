@@ -166,9 +166,9 @@ Ordered by what unblocks what, not by value. Each row says why it sits where it 
 | **2** | ~~A board read: the projection moves out of `ui/board.py`, one bus tool exposes it~~ **done, `b5287c3`** | reports 2 and 3; item 2 | Answers the report that is *literally true and a gap in the original specification*. Makes §1 above buildable |
 | **3** | ~~`detail` on `BoardTask`; `task_id` on `Concern`; the board rendered in the DETAIL pane~~ **done, `5b42e5c` and `59ee38c` — the pane is BOARD, not DETAIL; see below** | items 2 and 3; board-has-no-surface | Item 3's *"claimed, and there is an open concern about it"* is a projection over data that already exists — no new state, no flag to forget |
 | **4** | ~~`Task.touches`, and a `TaskDeclared` arm that appends an auto-dependency rather than refusing~~ **done, `de2b481` — see below** | item 9 | *"the highest-value store change in this document"* — the only change that removes a single point of failure. Needs row 1 |
-| **5** | The brief: launch spec structured, entry writer on `settings.save`'s temp + `os.replace` primitive, a pane that derives and shows supersession, workers told the path with the confirm-or-refute framing | premise record steps 1–3 | Gated on row 0 |
+| **5** | The brief: ~~launch spec structured~~ **step 1 done, `879e425`**; entry writer on `settings.save`'s temp + `os.replace` primitive, a pane that derives and shows supersession, workers told the path with the confirm-or-refute framing | premise record steps 1–3 | Gated on row 0, which passed |
 | **6** | An amendment intent for `Task.detail`, `node_id=None`, distinct from `TaskDeclared` | operator-instruction record | Its own record establishes `declare_task` cannot be the path and the guard must not be weakened. Needs row 2 to be sufficient |
-| **7** | Sign-off on declaration | task-reaches-the-board | **Unit unresolved — see below.** Needs row 1 for a reply channel |
+| **7** | ~~Sign-off on declaration~~ **done, `c9ab068` — per-declaration** | task-reaches-the-board | ~~**Unit unresolved — see below.**~~ Answered by the operator. Needed row 1 for a reply channel |
 | **8** | ~~Prose and Makefile: `format-file`, worker instance addressing, "confirm the defect still exists", evidence class on findings, hold-vs-release with *both* rules stated together, and dropping `worker_prompt`'s *"it is the only way that reaches anyone"*~~ **done, `5a16521`** — `typecheck` **not** widened, see below | items 1, 4, 5, 6, 7, 8, 10 | Free, and unbuilt since 08-15. `notes/…what-a-worker-is-given.md` shows `make format` writing every file is still an active cause of report 3 |
 | **9** | ~~`relaunch` and `fork` carry the template~~ **done, `f4c9a6c`** | §3 above | Unrelated to the thesis, one line, and the team is broken without it |
 
@@ -343,11 +343,22 @@ tool over.
 Four questions, each of which one of the gathered records left open on purpose. Settling
 them here by implication is the way this PR goes wrong.
 
-**1. The unit of sign-off.** `a-task-reaches-the-board-without-a-decision.md` names this
-its first open question and says it *"decides whether the fix is usable"*. Per-declaration
+**1. The unit of sign-off.** ~~`a-task-reaches-the-board-without-a-decision.md` names this
+its first open question and says it *"decides whether the fix is usable"*.~~
+**Answered by the operator, 2026-08-18: per-declaration, over both alternatives.**
+Built as `c9ab068` — `declare_task` moves from the bus tools' auto-approve set into
+review, which is the whole change, because the gate already parks and edits a call in
+flight. The cost below was quoted at the time of the decision and accepted with it:
+this fires once per declaration. Per-declaration
 would have fired six times inside five minutes on the baseline run, at a moment when the
 operator had said one line. Per-plan costs one decision for the same coverage but *"the
 board has no vocabulary for a set of tasks and would need one."*
+
+What the build added to the argument: editing a parked declaration rewrites `detail`,
+`depends_on` and `touches` through `updatedInput` before the task lands, so the unit is
+not the binary gate the objection assumes. That is the record's own *"sign-off is a
+scoping moment, not only an approval one"*, available without the budget that was
+proposed to deliver it.
 
 A third shape falls out of the brief and is recorded here as a candidate, **not** as a
 resolution: the operator sets a **declaration budget** at launch, enforced structurally at

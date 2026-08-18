@@ -1,7 +1,8 @@
 # A task reaches the board without a decision
 
 **Recorded 2026-08-15**, after a splash animation cost eight agents. **Reframed
-2026-08-16.** Nothing here is built. This is the diagnosis and the design options,
+2026-08-16.** **Priority 1 built 2026-08-18, `c9ab068`, per-declaration** — see
+"How the unit was settled" at the end. The rest is not built. This is the diagnosis and the design options,
 written down before either is acted on, because the failure it describes is precisely
 the one where acting first is the mistake.
 
@@ -358,3 +359,40 @@ operator exactly as unconsulted about the other 82%. Origin may still earn a pla
 What replaces it is not settled either, which is the honest state: the defect is located,
 sign-off on declaration is the change this record argues for, and the unit of sign-off
 has to be answered before any of it is built.
+
+
+---
+
+## How the unit was settled — 2026-08-18, `c9ab068`
+
+**Per-declaration**, chosen by the operator over the two alternatives this record and the
+gathering record put beside it: a declaration budget set at launch, and a per-plan gate.
+The cost this record raises against it was quoted at the point of decision and accepted
+with it — on the baseline run it fires six times inside five minutes, at a moment when
+the operator had said one line.
+
+**The change is one line of policy, which is the argument for it.** `declare_task` moves
+out of the bus tools' auto-approve set and into review. Nothing new was needed: the gate
+already parks a call, queues it by wait time with everything else, and lets the operator
+rewrite it before it runs.
+
+**The auto-approve set was wrong on its own terms, which is sharper than "it should be
+gated".** That set is justified by one sentence — auto-approving coordination keeps the
+operator a bottleneck on decisions rather than on bookkeeping, because *a worker taking
+the next item off a board the operator already approved is not a second decision*. The
+premise was false for exactly one member. Nothing had ever approved the board. Claim,
+complete and release stay auto-approved and the premise now holds for them.
+
+**A finding from building it, which changes the objection.** This record argues sign-off
+*"is a scoping moment, not only an approval one — what the operator sets is the size, not
+just the yes"*, and the declaration-budget candidate existed largely to deliver that. It
+was already available: editing a parked call rewrites `detail`, `depends_on` and
+`touches` through `updatedInput` before the task lands. Per-declaration is therefore not
+the binary gate the argument against it assumes.
+
+**No briefing prose accompanies it**, per this record's own section on why the guard does
+not go in the prose. That section is why the whole of the fix is a set membership.
+
+**Not built:** the meter, the board's operator surface (now `2026-08-18-the-board-is-a-tenant-of-a-pane-that-owes-it-nothing.md`
+and built separately), and the structured fields under "What a declaration must carry".
+The last is a schema change this row did not ask for; `detail` carries that as prose today.

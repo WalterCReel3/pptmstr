@@ -266,7 +266,11 @@ conflict is a better outcome than picking a winner, and this record does not pic
   `permissionDecisionReason`, which is the only channel guaranteed to reach a live
   worker and is adversarial by design.
 - **What the card shows.** `AgentSpawned(task=...)` feeds the tree row, so a brief needs
-  a short title or the row renders a paragraph.
+  a short title or the row renders a paragraph. **Still open, and the title was
+  deliberately left unbuilt in step 1 because of it.** Step 1's own scope is "no reading
+  yet", so a title carried now would be a field with no reader — which is the shape this
+  whole record is about, in miniature. The path is what makes premises *addressable*; the
+  title is for a surface that does not exist. It should land with its reader.
 - **Where derivation lives.** Reading is IO and belongs in the shell; the derived brief
   is a projection and must not be persisted, or *derive; do not store* is violated on
   the way in.
@@ -277,9 +281,12 @@ conflict is a better outcome than picking a winner, and this record does not pic
 
 0. ~~**Measure the absolute-path read.**~~ **Done, run `84cb7f`** — it reads, at both the
    generic and the `~/.claude/projects/...` shape. Nothing below is void.
-1. **The launch spec becomes optional and structured** — a path beside `task: str`,
+1. ~~**The launch spec becomes optional and structured** — a path beside `task: str`,
    `LauncherState.spec` widened, `AgentRecord` carrying the path and a title. No
-   reading yet, no amendments: the smallest change that makes premises addressable.
+   reading yet, no amendments: the smallest change that makes premises addressable.~~
+   **Done, `879e425`**, with two departures from the wording, both stated in the
+   record below: the spec became a `LaunchSpec` value rather than a wider tuple, and
+   the **title was not built**.
 2. **Write and render.** An entry writer using `settings.save`'s temp + `os.replace`
    primitive, and a pane that derives the current brief from the directory and shows
    supersession (obligation 1).
