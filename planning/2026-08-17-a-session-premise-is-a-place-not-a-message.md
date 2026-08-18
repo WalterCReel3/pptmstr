@@ -233,11 +233,23 @@ conflict is a better outcome than picking a winner, and this record does not pic
 
 ## Open
 
-- **Whether a worker can read an absolute path outside `cwd`.** `approval.classify`
-  auto-approves `Read` regardless of path, but whether the CLI imposes its own
-  cwd-relative restriction is **not measured, and the whole design rests on it.** If it
-  refuses, the brief has to live in the tree after all and every trade above is
-  re-opened. This is one question added to an existing probe.
+- ~~**Whether a worker can read an absolute path outside `cwd`.**~~ **Answered: it can.**
+  `verify_worker_context.py` run `84cb7f`, 2026-08-17, `claude-sonnet-5`. Two targets, both
+  read: a temp directory merely outside `cwd`, and the exact
+  `~/.claude/projects/<cwd-slug>/briefs/<id>/000-premises.md` shape proposed above. The
+  canary was in `tool_response` on PostToolUse, so the evidence is the bytes the tool
+  returned rather than the worker's account of them. **Nothing above re-opens**, and the
+  brief does not have to live in the working tree.
+
+  Measured alongside it, and it closes an option rather than opening one:
+  **`AgentDefinition.initialPrompt` does not reach a worker** — set on one probe role with
+  its canary nowhere else, reported NONE. So the per-session seeding channel that would have
+  been strictly better than prose is not available, and step 3 below stays as written.
+
+  One number in this record is wrong and the conclusion it supports is not:
+  *"Two init messages arrived and they are identical"* — run `84cb7f` produced **seven**,
+  one per agent, and they are byte-identical. A worker's context is unreadable off the wire
+  because the inits carry nothing per-agent, not because there is only one of them.
 - **Whether an amendment must name what it supersedes.** Requiring the link makes
   derivation exact and adds ceremony an operator writing at speed will skip — and a
   missing link then reads as pure addition, which is silently wrong. Optional link plus
@@ -263,9 +275,8 @@ conflict is a better outcome than picking a winner, and this record does not pic
 
 ## In order, if any of this gets done
 
-0. **Measure the absolute-path read.** One question on
-   `verify_worker_context.py`. Everything below is void if it fails, and it is the
-   cheapest thing here by a wide margin.
+0. ~~**Measure the absolute-path read.**~~ **Done, run `84cb7f`** — it reads, at both the
+   generic and the `~/.claude/projects/...` shape. Nothing below is void.
 1. **The launch spec becomes optional and structured** — a path beside `task: str`,
    `LauncherState.spec` widened, `AgentRecord` carrying the path and a title. No
    reading yet, no amendments: the smallest change that makes premises addressable.
