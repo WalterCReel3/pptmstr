@@ -1311,7 +1311,7 @@ class AgentSession:
         return {
             role.name: AgentDefinition(
                 description=role.description,
-                prompt=worker_prompt(role),
+                prompt=worker_prompt(role, self.brief),
                 tools=role.tool_list(),
                 # "inherit" rather than self.model: a role that does not ask for a
                 # model should run on whatever the session was launched with, not on

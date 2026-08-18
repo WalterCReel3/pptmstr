@@ -527,3 +527,75 @@ def test_the_target_the_worker_prompt_names_is_a_target_that_exists() -> None:
         assert named in targets, f"worker_prompt names `make {named}`, which is not a target"
     # And the one it is pointed away from is still there to be pointed away from.
     assert {"format", "format-file"} <= targets
+
+
+# -- the premises a worker is told about (row 5, step 3) ---------------------------
+#
+# Prose is the only channel, and that is measured rather than assumed: run `84cb7f`
+# set `AgentDefinition.initialPrompt` on one probe role with its canary nowhere else
+# and the worker reported NONE. What the same run established is that a worker *can*
+# read an absolute path outside cwd, with the canary captured off the wire.
+
+
+@pytest.mark.parametrize("template", [FEATURE, RESEARCH])
+def test_a_worker_with_no_brief_is_told_nothing_about_one(template: WorkTemplate) -> None:
+    """
+    Most sessions have none. A heading about premises that do not exist sends a
+    worker looking for a directory it will not find.
+    """
+    for role in template.roles:
+        assert "premises this session" not in worker_prompt(role)
+
+
+@pytest.mark.parametrize("template", [FEATURE, RESEARCH])
+def test_a_worker_is_given_the_path_and_not_a_description_of_it(
+    template: WorkTemplate,
+) -> None:
+    path = "/home/x/.claude/projects/-x-orbital/briefs/sess-1"
+    for role in template.roles:
+        assert path in worker_prompt(role, path)
+
+
+@pytest.mark.parametrize("template", [FEATURE, RESEARCH])
+def test_a_worker_is_told_to_read_the_directory_not_a_file(template: WorkTemplate) -> None:
+    """
+    Append-only plus permitted contradiction means a superseded premise is still on
+    disk. A worker that opened one obvious filename would act on the version that
+    was overturned, and that footgun only surfaces in a session already gone wrong.
+    """
+    for role in template.roles:
+        prompt = worker_prompt(role, "/briefs/s1")
+        assert "every file in" in prompt
+        assert "directory and not a file" in prompt
+        assert "brief.md" not in prompt
+
+
+@pytest.mark.parametrize("template", [FEATURE, RESEARCH])
+def test_a_worker_is_told_supersession_changes_which_entry_is_current(
+    template: WorkTemplate,
+) -> None:
+    for role in template.roles:
+        prompt = worker_prompt(role, "/briefs/s1")
+        assert "supersedes" in prompt
+        assert "overturn" in prompt
+
+
+@pytest.mark.parametrize("template", [FEATURE, RESEARCH])
+def test_premises_are_framed_as_a_finding_not_an_order(template: WorkTemplate) -> None:
+    """
+    The only check on a wrong amendment is a worker arguing from evidence, which the
+    dogfooding run credits with saving it. The wording is lifted from the builder
+    role's framing of a reviewer's concern rather than invented as a second register
+    -- one operator writing for every worker concentrates authority further than any
+    concern does, so the framing matters more here, not less.
+    """
+    for role in template.roles:
+        assert "confirmed or refuted, not an" in worker_prompt(role, "/briefs/s1")
+
+
+def test_the_premises_framing_reuses_the_builders_own_words() -> None:
+    """Pinned, so the two registers cannot drift into disagreeing with each other."""
+    builder = FEATURE.role("builder")
+    assert builder is not None
+    assert "confirmed or refuted, not an order" in builder.prompt
+    assert "confirmed or refuted, not an order" in worker_prompt(builder, "/briefs/s1")

@@ -2860,3 +2860,43 @@ def test_the_announce_carries_the_brief_the_session_holds() -> None:
         bridge.stop()
 
     assert [s.brief for s in spawns] == ["/briefs/s1"]
+
+
+def test_a_worker_is_told_where_the_sessions_premises_are() -> None:
+    """
+    The wiring, not the prose (STYLE.md §2). `worker_prompt` can render the path and
+    `AgentSession` can hold it while `_team()` never joins the two -- which leaves
+    every worker launched with a brief it is never told about, and the run looks
+    exactly like one with no brief at all.
+    """
+    from pptmstr.templates import FEATURE
+
+    bridge = Bridge()
+    bridge.start()
+    try:
+        session = AgentSession(
+            bridge, "t", model="m", cwd="/tmp", brief="/briefs/s1", template=FEATURE
+        )
+        team = session._team()
+    finally:
+        bridge.stop()
+
+    assert team is not None
+    for name, definition in team.items():
+        assert "/briefs/s1" in definition.prompt, name
+
+
+def test_a_worker_launched_without_a_brief_is_told_about_none() -> None:
+    from pptmstr.templates import FEATURE
+
+    bridge = Bridge()
+    bridge.start()
+    try:
+        session = AgentSession(bridge, "t", model="m", cwd="/tmp", template=FEATURE)
+        team = session._team()
+    finally:
+        bridge.stop()
+
+    assert team is not None
+    for name, definition in team.items():
+        assert "premises this session" not in definition.prompt, name

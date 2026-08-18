@@ -16,9 +16,12 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import pathlib
 import random
+import tempfile
 import time
 
+from . import brief
 from .bridge import Bridge
 from .intents import (
     AgentFinished,
@@ -204,7 +207,40 @@ class FakeDriver:
         # One team, so DETAIL's board section is reachable at all. Every other root
         # here is solo and correctly renders no board, which is exactly why the
         # section could not be judged from this fixture before.
-        self._seed_board(self._spawn(parent=None, agent_type=None, template="feature"))
+        team = self._spawn(
+            parent=None, agent_type=None, template="feature", brief=self._seed_brief()
+        )
+        self._seed_board(team)
+
+    def _seed_brief(self) -> str:
+        """
+        A brief with one premise already overturned, so the pane's whole job is
+        reachable.
+
+        Without a superseded entry the fixture exercises the easy half: a list that
+        renders. Obligation 1 -- an overturned premise stays visible and says what
+        overturned it -- has no state to show, and a regression that dropped it
+        would look correct in every screenshot.
+        """
+        directory = pathlib.Path(tempfile.mkdtemp(prefix="pptmstr-brief-"))
+        brief.write_entry(
+            directory,
+            "The TLE parser is fixed-width. Every field is positional, so a split on "
+            "whitespace is wrong on the lines where a value runs into its neighbour.\n\n"
+            "Open: whether the checksum belongs in the parser or beside it.",
+        )
+        brief.write_entry(
+            directory,
+            "Out of scope: the orbit propagator. This session is the parser only.",
+        )
+        brief.write_entry(
+            directory,
+            "The checksum belongs beside the parser, not inside it -- 000 left this "
+            "open and the answer is that a parser that validates cannot be reused on "
+            "a record that has not been checksummed yet.",
+            supersedes=(0,),
+        )
+        return str(directory)
 
     def _seed_board(self, root: NodeId) -> None:
         """
@@ -323,7 +359,11 @@ class FakeDriver:
         self.bridge.emit(InboxRead(node_id=root, request_id="fake-r1", at=time.monotonic()))
 
     def _spawn(
-        self, parent: NodeId | None, agent_type: str | None, template: str = "solo"
+        self,
+        parent: NodeId | None,
+        agent_type: str | None,
+        template: str = "solo",
+        brief: str | None = None,
     ) -> NodeId:
         n = next(_ids)
         node: NodeId = (f"sess-{n}", None) if parent is None else (parent[0], f"agent-{n}")
@@ -359,6 +399,7 @@ class FakeDriver:
                 # Roots only, exactly as the real driver announces it: a sub-agent
                 # has no template of its own and must not read as a team.
                 template=template if parent is None else None,
+                brief=brief if parent is None else None,
                 transcript=transcript,
             )
         )

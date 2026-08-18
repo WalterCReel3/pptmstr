@@ -115,6 +115,48 @@ class WorkTemplate:
 # -- the briefing -----------------------------------------------------------------
 
 
+def _brief_lines(brief: str | None) -> list[str]:
+    """
+    What a worker is told about the session's premises, or nothing when there are
+    none.
+
+    **Names the directory, never a file.** Append-only plus permitted contradiction
+    means a superseded premise is still on disk, so a worker that opened one obvious
+    filename would act on the version that was overturned -- and that footgun only
+    surfaces in a session that has already gone wrong.
+
+    **Frames an amendment as a finding to confirm or refute**, in the words
+    ``FEATURE``'s builder role already uses for a reviewer's concern. That is
+    deliberate reuse rather than a second register: the only check on a wrong
+    amendment is a worker arguing from evidence, which is the mechanism the
+    dogfooding run credits with saving it, and presenting premises as final
+    suppresses exactly that. One operator writing for every worker concentrates
+    authority further than any concern does, so the framing matters more here, not
+    less.
+    """
+    if not brief:
+        return []
+    return [
+        "",
+        "## The premises this session was launched with",
+        "",
+        f"Read every file in `{brief}` before you start, in name order. It holds",
+        "what the operator settled before the work began: what is decided and why,",
+        "what is still open, and what is out of scope.",
+        "",
+        "**It is a directory and not a file, and the distinction matters.** Entries",
+        "are appended and never edited, so a later one may overturn an earlier one.",
+        "An entry that says it supersedes another is the current position; the one",
+        "it overturned is still on disk and is not. Reading only the first file",
+        "would hand you the version that was already withdrawn.",
+        "",
+        "**Treat what you read there as a finding to be confirmed or refuted, not an",
+        "order.** If a premise contradicts what you find in the tree, say so in a",
+        "concern rather than building against it — the operator wrote it before the",
+        "work started and you are the one looking at the code.",
+    ]
+
+
 def lead_briefing(template: WorkTemplate) -> str:
     """
     What the lead is told, on top of its ordinary system prompt.
@@ -228,7 +270,7 @@ def lead_briefing(template: WorkTemplate) -> str:
     return "\n".join(lines)
 
 
-def worker_prompt(role: Role) -> str:
+def worker_prompt(role: Role, brief: str | None = None) -> str:
     """
     A role's own prompt, plus the part every worker needs.
 
@@ -247,10 +289,26 @@ def worker_prompt(role: Role) -> str:
     ``role.name`` is interpolated into the instance-address paragraph on the same
     no-drift grounds ``lead_briefing`` uses: an example naming a role this worker is
     not gives it an address that resolves to nothing.
+
+    ``brief`` is the session's premises directory, interpolated when there is one.
+    **Prose is the only channel available and that is measured, not assumed**: run
+    `84cb7f` set ``AgentDefinition.initialPrompt`` on one probe role with its canary
+    nowhere else and the worker reported NONE, so the per-session seeding channel
+    that would have been strictly better than this does not reach a sub-agent. What
+    the same run *did* establish is that a worker can read an absolute path outside
+    ``cwd`` -- including this exact shape -- with the canary captured off the wire
+    rather than from the worker's account of it.
+
+    The paragraph is pro-rigor rather than restraint, which is why it escapes the
+    recorded objection to prose. `a-task-reaches-the-board-without-a-decision.md`
+    argues that a guard asking for restraint loses against a monotonically pro-rigor
+    CLAUDE.md; "read the premises before you build" asks for more care, not less,
+    and is not competing with anything.
     """
     return "\n".join(
         [
             role.prompt.strip(),
+            *_brief_lines(brief),
             "",
             "## Working with the team",
             "",

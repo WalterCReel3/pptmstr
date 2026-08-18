@@ -27,7 +27,18 @@ from .model import LaunchSpec, Snapshot
 from .pool import SessionPool
 from .store import Store
 from .theme import REQUIRED_THEMES, THEMES, P
-from .ui import board_pane, compose, detail, health, inbox, launcher, rail, review, transcript_pane
+from .ui import (
+    board_pane,
+    brief_pane,
+    compose,
+    detail,
+    health,
+    inbox,
+    launcher,
+    rail,
+    review,
+    transcript_pane,
+)
 from .ui import focus as focus_mod
 from .ui.widgets import format_elapsed
 
@@ -58,6 +69,7 @@ class AppState:
     launcher: launcher.LauncherState = field(default_factory=launcher.LauncherState)
     rail: rail.RailState = field(default_factory=rail.RailState)
     board: board_pane.BoardState = field(default_factory=board_pane.BoardState)
+    brief: brief_pane.BriefState = field(default_factory=brief_pane.BriefState)
     transcripts: transcript_pane.TranscriptState = field(
         default_factory=transcript_pane.TranscriptState
     )
@@ -547,6 +559,12 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
         if state.frame_snap is not None:
             board_pane.draw(state.frame_snap, state.focus, state.board, state.bridge)
 
+    def brief_pane_fn() -> None:
+        # Follows the cursor, like every other pane in this space. A brief belongs
+        # to one session and there is no second cursor to point at another.
+        if state.frame_snap is not None:
+            brief_pane.draw(state.frame_snap, state.focus, state.brief)
+
     def session_pane() -> None:
         """FOCUS: the conversation, with its composer, in one pane."""
         if state.frame_snap is None:
@@ -588,6 +606,7 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
         "CONTEXT": context_pane,
         "DETAIL": detail_pane,
         "BOARD": board_pane_fn,
+        "BRIEF": brief_pane_fn,
         "SESSION": session_pane,
         "HEALTH": health_pane,
         "LOG": _log_panel,
@@ -655,6 +674,9 @@ def _triage_layout(panels: dict[str, Callable[[], None]]) -> hello_imgui.Docking
         # sessions are solo, and the pane draws its own "not a team" line rather
         # than an empty table.
         _window("BOARD", "ContextSpace", panels["BOARD"]),
+        # Behind BOARD. A brief is written once and amended rarely, where the board
+        # moves every few minutes -- the resident tab should be the one that changes.
+        _window("BRIEF", "ContextSpace", panels["BRIEF"]),
         _window("CONTEXT", "ContextSpace", panels["CONTEXT"]),
         # Reachable, not resident. LOG is a debugging surface, and its old status as
         # tab-mate to the review queue -- in front of it, at that -- was precisely
@@ -692,6 +714,7 @@ def _focus_layout(panels: dict[str, Callable[[], None]]) -> hello_imgui.DockingP
         # that session in the same class as its cost and its context headroom --
         # which is why it sits with HEALTH here rather than with the queue.
         _window("BOARD", "HealthSpace", panels["BOARD"]),
+        _window("BRIEF", "HealthSpace", panels["BRIEF"]),
         _window("LOG", "HealthSpace", panels["LOG"]),
     ]
     return params
