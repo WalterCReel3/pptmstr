@@ -32,6 +32,7 @@ class Disposition(enum.Enum):
 # pinned by a test rather than by an import.
 _BUS_SERVER = "pptmstr"
 _BUS_POST = f"mcp__{_BUS_SERVER}__post_concern"
+_BUS_DECLARE = f"mcp__{_BUS_SERVER}__declare_task"
 
 # Reads, searches and listings. Cheap, reversible, and they do not leave the box.
 _AUTO = frozenset(
@@ -71,6 +72,23 @@ _REVIEW = frozenset(
         # PendingApproval: it queues by wait time with everything else, and
         # edit-then-approve rewrites the body through updatedInput (§5.3).
         _BUS_POST,
+        # A declaration is where work comes into existence, so it is where the
+        # decision belongs. Everything downstream -- which agent claims it, how many
+        # run at once, what each writes -- is bookkeeping about work whose existence
+        # was never in question, and everything upstream is a lead thinking, which
+        # is free.
+        #
+        # The recorded cost is real and was accepted with the unit: on the baseline
+        # run this fires once per declaration, which was six times inside five
+        # minutes at a moment when the operator had said one line. The alternatives
+        # were a budget set at launch and a per-plan gate, and both were declined.
+        #
+        # It reuses the same machinery post_concern does, and gains something
+        # post_concern does not need: editing a parked declaration through
+        # updatedInput rewrites `detail`, `depends_on` and `touches` before the task
+        # lands. That is what makes this a scoping moment rather than only a binary
+        # one -- the operator sets the size, not just the yes.
+        _BUS_DECLARE,
     }
 )
 
@@ -78,12 +96,17 @@ _REVIEW = frozenset(
 # world. Auto-approving these is what keeps the operator a bottleneck on decisions
 # rather than on bookkeeping -- a worker taking the next item off a board the
 # operator already approved is not a second decision.
+#
+# That sentence is the whole of the rule and it is why `declare_task` is no longer
+# in this set: it was auto-approved on the premise that the board had already been
+# approved, and nothing had ever approved it. The four that remain are the ones the
+# premise actually holds for -- each is bookkeeping about a task whose existence is
+# now a decision the operator made at declaration.
 _BUS_AUTO = frozenset(
     {
         f"mcp__{_BUS_SERVER}__read_inbox",
         f"mcp__{_BUS_SERVER}__read_board",
         f"mcp__{_BUS_SERVER}__claim_task",
-        f"mcp__{_BUS_SERVER}__declare_task",
         f"mcp__{_BUS_SERVER}__complete_task",
         f"mcp__{_BUS_SERVER}__release_task",
     }
@@ -136,6 +159,22 @@ def summarize(tool_name: str, tool_input: Mapping[str, Any], width: int = 90) ->
         to = tool_input.get("to") or "?"
         subject = str(tool_input.get("subject") or "").strip()
         return clip(f"message {to}: {subject or tool_input.get('body') or ''}")
+    if tool_name == _BUS_DECLARE:
+        # The question at this row is "should this work exist", so it leads with the
+        # claim. The specification is the diff-equivalent and belongs in the detail
+        # pane; what rides along here is the *size* -- how many files it will write
+        # and whether it is sequenced behind anything -- because sign-off is a
+        # scoping moment and those two are what the operator would otherwise open
+        # the row to find.
+        title = str(tool_input.get("title") or "").strip()
+        parts = [f"declare {title or '(untitled)'}"]
+        touches = tool_input.get("touches") or ()
+        if touches:
+            parts.append(f"writes {', '.join(str(p) for p in touches)}")
+        depends = tool_input.get("depends_on") or ()
+        if depends:
+            parts.append(f"after {', '.join(str(d) for d in depends)}")
+        return clip(" · ".join(parts))
     if not tool_input:
         return tool_name
     key = next(iter(tool_input))

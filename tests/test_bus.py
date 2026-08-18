@@ -1073,7 +1073,8 @@ def test_the_gate_and_the_bus_agree_on_tool_names() -> None:
     from pptmstr.bus import BUS_TOOLS, qualified
 
     assert approval._BUS_POST == qualified("post_concern")
-    assert approval._BUS_AUTO | {approval._BUS_POST} == set(BUS_TOOLS)
+    assert approval._BUS_DECLARE == qualified("declare_task")
+    assert approval._BUS_AUTO | {approval._BUS_POST, approval._BUS_DECLARE} == set(BUS_TOOLS)
 
 
 def test_a_message_between_agents_is_reviewed() -> None:
@@ -1083,13 +1084,27 @@ def test_a_message_between_agents_is_reviewed() -> None:
     assert classify(qualified("post_concern"), {}) is Disposition.REQUIRE_APPROVAL
 
 
+def test_a_declaration_is_reviewed() -> None:
+    """
+    Row 7, per-declaration: a declaration is where work comes into existence, so it
+    is where the decision belongs. It was previously auto-approved on the premise
+    that the board had already been approved -- and nothing had ever approved it.
+    """
+    from pptmstr.approval import Disposition, classify
+    from pptmstr.bus import qualified
+
+    assert classify(qualified("declare_task"), {}) is Disposition.REQUIRE_APPROVAL
+
+
 def test_coordination_is_not_reviewed() -> None:
     from pptmstr.approval import Disposition, classify
     from pptmstr.bus import qualified
 
-    # Bookkeeping, not decisions. Parking these would make the operator a
-    # bottleneck on a worker taking the next item off a board they already approved.
-    for name in ("read_inbox", "claim_task", "declare_task", "complete_task", "release_task"):
+    # Bookkeeping about work whose existence is now a decision the operator made at
+    # declaration. Parking these would make the operator a bottleneck on a worker
+    # taking the next item off a board they have already approved -- which, unlike
+    # before, is now true.
+    for name in ("read_inbox", "read_board", "claim_task", "complete_task", "release_task"):
         assert classify(qualified(name), {}) is Disposition.AUTO_APPROVE, name
 
 
@@ -1102,6 +1117,48 @@ def test_a_parked_concern_reads_as_a_message_not_an_argument_dict() -> None:
         {"to": "dev", "subject": "retry loop never terminates", "body": "..."},
     )
     assert row == "message dev: retry loop never terminates"
+
+
+def test_a_parked_declaration_reads_as_the_work_not_an_argument_dict() -> None:
+    """
+    Without a case of its own the row falls through to the generic branch and reads
+    `mcp__pptmstr__declare_task task_id='t-a1b2'`, which is the serialised argument
+    dict this function exists to avoid. The queue is scanned, not read.
+    """
+    from pptmstr.approval import summarize
+    from pptmstr.bus import qualified
+
+    row = summarize(qualified("declare_task"), {"task_id": "t1", "title": "validate the checksum"})
+    assert row == "declare validate the checksum"
+
+
+def test_a_parked_declaration_carries_its_size() -> None:
+    """
+    Sign-off is a scoping moment, so the two facts that say how big a task is ride
+    on the row rather than waiting behind it: what it will write, and what it is
+    sequenced after.
+    """
+    from pptmstr.approval import summarize
+    from pptmstr.bus import qualified
+
+    row = summarize(
+        qualified("declare_task"),
+        {
+            "title": "validate the checksum",
+            "touches": ["tle/parse.py", "tle/checksum.py"],
+            "depends_on": ["t1"],
+        },
+    )
+    assert row == (
+        "declare validate the checksum · writes tle/parse.py, tle/checksum.py · after t1"
+    )
+
+
+def test_a_declaration_with_no_title_is_named_rather_than_blank() -> None:
+    from pptmstr.approval import summarize
+    from pptmstr.bus import qualified
+
+    assert summarize(qualified("declare_task"), {"task_id": "t1"}) == "declare (untitled)"
 
 
 def test_an_unstamped_bus_call_is_refused_rather_than_guessed() -> None:
