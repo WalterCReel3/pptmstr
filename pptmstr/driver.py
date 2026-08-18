@@ -1017,6 +1017,18 @@ class AgentSession:
         alone would leave the veto raised on every failed call. Nothing here cares which
         of the two it was: a call that ended is a call that ended, and the agent that ran
         it is alive either way.
+
+        An allow carrying `updatedInput` closes here too, measured for one shape of it:
+        a single sub-agent's Bash call, allowed without parking, whose `updatedInput`
+        replaces an argument the tool's schema already declares. That arrives as
+        PostToolUse with `agent_id` and the `tool_use_id` its PreToolUse carried, so
+        `_end_tool_call` finds the bracket to close.
+
+        The rewrite this session actually sends is neither: `_stamp_bus_call` ADDS
+        `_from` and `_edited` -- keys the bus schema does not declare (bus.py:143) --
+        to an in-process MCP tool, and no probe here has watched an `mcp__` call for a
+        closing hook at all. Whether that path closes is unmeasured, and a bracket left
+        open holds the agent's capacity slot for SUBAGENT_CALL_VETO_S.
         """
         data = cast(PostToolUseHookInput | PostToolUseFailureHookInput, hook_input)
         agent_id = data.get("agent_id")
