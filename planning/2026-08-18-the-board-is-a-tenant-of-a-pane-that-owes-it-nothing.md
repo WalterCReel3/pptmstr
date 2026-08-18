@@ -1,6 +1,7 @@
 # The board is a tenant of a pane that owes it nothing
 
-**Dated:** 2026-08-18 · **Status:** open, not started · **Found by:** the operator, while
+**Dated:** 2026-08-18 · **Status:** built, `59ee38c` — see "How it was settled" below ·
+**Found by:** the operator, while
 rows 1–2 of [`2026-08-17-a-team-cannot-read-its-own-board.md`](2026-08-17-a-team-cannot-read-its-own-board.md)
 were landing · **Related:**
 [`2026-08-13-an-expansion-outgrows-its-pane.md`](2026-08-13-an-expansion-outgrows-its-pane.md)
@@ -10,10 +11,15 @@ were landing · **Related:**
 
 Symbol names, not line numbers, per the 08-14 convention.
 
-**Parked deliberately.** Rows 3 and 4 of the gathering record are next, and both add to
+~~**Parked deliberately.** Rows 3 and 4 of the gathering record are next, and both add to
 what a board row carries. Building a pane first would mean designing a surface for data
 that is still moving. This exists so the observation is not lost, and so the rows that
-land in the meantime can be checked against it.
+land in the meantime can be checked against it.~~
+
+**Unparked and built, in that order.** Rows 4 (`de2b481`) and 3 (`5b42e5c`) landed first,
+and the sequencing was worth keeping: the pane's row layout was designed once, around a
+`BoardTask` that already carried `detail`, `touches` and `concerns`. Building first would
+have meant designing the row twice, which is what this section predicted.
 
 ---
 
@@ -101,6 +107,54 @@ question is the same one that produced the current DETAIL.
 **4. Whether the concern log belongs with it.** They are two tables under one heading today
 because they arrived together. The task board is shared state with a tool behind it; the
 concern log is an audit trail. A pane called BOARD may not owe the second one a home.
+
+## How it was settled — 2026-08-18, `59ee38c`
+
+The four questions above were the operator's to answer, and three of the four went
+against the recommendation attached to them. Recorded as decisions with their costs
+rather than as the outcomes of a discussion nobody can reconstruct.
+
+**1. DETAIL keeps nothing. This is a move, not a promotion.** The summary line was
+offered and declined in favour of one pane owning the subject outright. **The cost is
+real and is not mitigated anywhere:** BOARD is a tab-mate of DETAIL, so during an
+approval the board is one click away and off screen, which is exactly the hazard
+`_board`'s docstring closed by drawing on both branches. If an operator ever approves a
+message between two agents without the context to judge it, this is the decision that
+allowed it, and the fix is the declined summary rather than anything new.
+
+**2. No row moves the cursor**, decided on the argument rather than by the operator. The
+single-cursor rule is not a DETAIL implementation detail that a new pane escapes by being
+new. A disclosure triangle was ruled *not* to be that click: it changes what the pane
+shows about a row, not which row the application is pointed at, so what `a` would approve
+is identical before and after it. Its open/closed state lives in ImGui's per-id storage,
+so `AppState` gained nothing.
+
+**3. It follows the cursor.** The pane flips between teams as the operator moves through
+the inbox, and that was accepted as the honest cost of not being a second selection: the
+alternative needs a pointer of its own, which is the old DETAIL. No per-layout rule --
+the same pane, following the same cursor, in both arrangements.
+
+**4. The concern log came too.** They stay together under one scroll. The distinction the
+record draws -- shared state with a tool behind it, versus an audit trail -- is real but
+did not justify deciding a third home before anything was on screen.
+
+### Two things only the screenshot found
+
+Both are consequences of this pane being narrow, which no unit test represents and which
+`_board` never had to face inside a pane that was already prose-width.
+
+**The summary ran off the right edge.** It is drawn outside the child window that sets
+the wrap position for everything else, so it needed its own `push_text_wrap_pos`, and
+"waiting on a task that was never declared" needed shortening to "blocked on a task
+nobody declared" for a line that sits above the scroll. The row keeps the full sentence,
+where the length is right.
+
+**`same_line` after a wrapped title renders the next string vertically.** The cursor
+lands wherever the title happened to end; near the right edge that is a column one
+character wide, and "about t2" came out as a stack of single letters down the edge. Every
+qualifier now takes its own line rather than trailing the title. This is the failure mode
+that makes a chain of `same_line` calls unsafe in any pane the operator can narrow, and
+it is worth knowing before the next one is written.
 
 ## Not doing
 

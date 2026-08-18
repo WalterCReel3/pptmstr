@@ -164,7 +164,7 @@ Ordered by what unblocks what, not by value. Each row says why it sits where it 
 | **0** | ~~Two questions on `scripts/verify_worker_context.py`~~ **done, run `84cb7f` — see below** | premise record step 0; §3 above | Group 5 is **void** if the first fails, and the second changes group 5's shape. Cheapest item here by a wide margin |
 | **1** | ~~`declare_task`, `complete_task`, `release_task` become question-shaped and answer truthfully~~ **done, `2dddfea`** | phase 6; item 9 | The keystone. Fixes a live defect standalone, and carries the plumbing three later rows need |
 | **2** | ~~A board read: the projection moves out of `ui/board.py`, one bus tool exposes it~~ **done, `b5287c3`** | reports 2 and 3; item 2 | Answers the report that is *literally true and a gap in the original specification*. Makes §1 above buildable |
-| **3** | `detail` on `BoardTask`; `task_id` on `Concern`; the board rendered in the DETAIL pane | items 2 and 3; board-has-no-surface | Item 3's *"claimed, and there is an open concern about it"* is a projection over data that already exists — no new state, no flag to forget |
+| **3** | ~~`detail` on `BoardTask`; `task_id` on `Concern`; the board rendered in the DETAIL pane~~ **done, `5b42e5c` and `59ee38c` — the pane is BOARD, not DETAIL; see below** | items 2 and 3; board-has-no-surface | Item 3's *"claimed, and there is an open concern about it"* is a projection over data that already exists — no new state, no flag to forget |
 | **4** | ~~`Task.touches`, and a `TaskDeclared` arm that appends an auto-dependency rather than refusing~~ **done, `de2b481` — see below** | item 9 | *"the highest-value store change in this document"* — the only change that removes a single point of failure. Needs row 1 |
 | **5** | The brief: launch spec structured, entry writer on `settings.save`'s temp + `os.replace` primitive, a pane that derives and shows supersession, workers told the path with the confirm-or-refute framing | premise record steps 1–3 | Gated on row 0 |
 | **6** | An amendment intent for `Task.detail`, `node_id=None`, distinct from `TaskDeclared` | operator-instruction record | Its own record establishes `declare_task` cannot be the path and the guard must not be weakened. Needs row 2 to be sufficient |
@@ -303,6 +303,38 @@ pass over the ten load-bearing decisions — inert overlap check, dropped normal
 COMPLETED not skipped, session filter removed, declared-dependency added twice, caller's
 own spelling stored, edges computed then dropped, effect not carrying them, handler not
 reporting them, `touches` dropped by the tool — **10/10 caught**.
+
+---
+
+### Row 3 is done — 2026-08-18, solo, `5b42e5c` and `59ee38c`
+
+Split in two because the data and the surface are separable and the surface moved: the
+projection landed first, then the board left DETAIL for a pane of its own
+([`2026-08-18-the-board-is-a-tenant-of-a-pane-that-owes-it-nothing.md`](2026-08-18-the-board-is-a-tenant-of-a-pane-that-owes-it-nothing.md),
+where the four design questions are answered).
+
+**The row-3 table entry says "rendered in the DETAIL pane" and that is now wrong**, which
+is worth leaving visible rather than editing out. The scope was written before the pane
+record existed, and the operator's decision to move the board out wholesale means DETAIL
+now carries no board at all — not even the one-line summary that was offered. That is
+recorded with its cost in the companion record.
+
+**The concern link is doing the work item 3 predicted, and the fixture proves it.** The
+fake driver's `t2` is claimed by a live, working builder and is not moving; before the
+link it was pixel-identical to ordinary progress, because `owner_gone` is false there.
+It now reads `1 concern` on the collapsed row and the subject behind the triangle. That
+is the whole of item 3's *"a derivation, not a new state"* — no fourth `TaskState`, no
+held-deliberately flag, nothing to forget to update.
+
+**A concern naming a task that does not exist is delivered, not refused**, and the
+projection reports the dangling id the way `missing` reports an undeclared dependency.
+The asymmetry is deliberate: `post_concern`'s other refusal, an unresolvable role, stops
+the message reaching anyone at all, whereas a bad task id costs the link and nothing else.
+
+**`post_concern` gained its first test through the live bus.** The test double never had
+`resolve_role`, so the one tool that does not park on a future was reaching the store with
+no coverage of its wiring at all — which is exactly the class of gap row 1 was about, one
+tool over.
 
 ---
 
@@ -459,11 +491,9 @@ run and none has been performed for this record.
 5. ~~**Row 4**, `Task.touches`.~~ **done**, `de2b481`, with two limits recorded rather
    than left to be discovered: normalisation is spelling only, and the check does not
    cross sessions.
-6. **Row 3**, the board's surface. **Next**, and cheaper than the table says: `detail` on
-   `BoardTask` now reaches the DETAIL pane *and* `read_board` from one field, because the
-   two share a projection. Note that `2026-08-18-the-board-is-a-tenant-of-a-pane-that-owes-it-nothing.md`
-   has since argued the board wants its own pane — row 3 puts the surface in DETAIL as
-   specified, and that record decides where it eventually lives.
+6. ~~**Row 3**, the board's surface.~~ **done**, `5b42e5c` (the data) and `59ee38c` (the
+   pane). It did not land in DETAIL: the companion record's pane was built in the same
+   pass, and the board left DETAIL entirely.
 7. **Row 5**, the brief — after row 0 says it can exist.
 8. **Rows 6 and 7**, amendment and sign-off — after question 1 has an answer, and with the
    baseline numbers recorded before either lands.
