@@ -162,15 +162,15 @@ Ordered by what unblocks what, not by value. Each row says why it sits where it 
 | | work | source | why here |
 |---|---|---|---|
 | **0** | ~~Two questions on `scripts/verify_worker_context.py`~~ **done, run `84cb7f` — see below** | premise record step 0; §3 above | Group 5 is **void** if the first fails, and the second changes group 5's shape. Cheapest item here by a wide margin |
-| **1** | `declare_task`, `complete_task`, `release_task` become question-shaped and answer truthfully | phase 6; item 9 | The keystone. Fixes a live defect standalone, and carries the plumbing three later rows need |
+| **1** | ~~`declare_task`, `complete_task`, `release_task` become question-shaped and answer truthfully~~ **done, `2dddfea`** | phase 6; item 9 | The keystone. Fixes a live defect standalone, and carries the plumbing three later rows need |
 | **2** | A board read: the projection moves out of `ui/board.py`, one bus tool exposes it | reports 2 and 3; item 2 | Answers the report that is *literally true and a gap in the original specification*. Makes §1 above buildable |
 | **3** | `detail` on `BoardTask`; `task_id` on `Concern`; the board rendered in the DETAIL pane | items 2 and 3; board-has-no-surface | Item 3's *"claimed, and there is an open concern about it"* is a projection over data that already exists — no new state, no flag to forget |
 | **4** | `Task.touches`, and a `TaskDeclared` arm that appends an auto-dependency rather than refusing | item 9 | *"the highest-value store change in this document"* — the only change that removes a single point of failure. Needs row 1 |
 | **5** | The brief: launch spec structured, entry writer on `settings.save`'s temp + `os.replace` primitive, a pane that derives and shows supersession, workers told the path with the confirm-or-refute framing | premise record steps 1–3 | Gated on row 0 |
 | **6** | An amendment intent for `Task.detail`, `node_id=None`, distinct from `TaskDeclared` | operator-instruction record | Its own record establishes `declare_task` cannot be the path and the guard must not be weakened. Needs row 2 to be sufficient |
 | **7** | Sign-off on declaration | task-reaches-the-board | **Unit unresolved — see below.** Needs row 1 for a reply channel |
-| **8** | Prose and Makefile: `format-file`, `typecheck` widened to `scripts`/`tests`, worker instance addressing, "confirm the defect still exists", evidence class on findings, hold-vs-release with *both* rules stated together, and dropping `worker_prompt`'s *"it is the only way that reaches anyone"* | items 1, 4, 5, 6, 7, 8, 10 | Free, and unbuilt since 08-15. `notes/…what-a-worker-is-given.md` shows `make format` writing every file is still an active cause of report 3 |
-| **9** | `relaunch` and `fork` carry the template | §3 above | Unrelated to the thesis, one line, and the team is broken without it |
+| **8** | ~~Prose and Makefile: `format-file`, worker instance addressing, "confirm the defect still exists", evidence class on findings, hold-vs-release with *both* rules stated together, and dropping `worker_prompt`'s *"it is the only way that reaches anyone"*~~ **done, `5a16521`** — `typecheck` **not** widened, see below | items 1, 4, 5, 6, 7, 8, 10 | Free, and unbuilt since 08-15. `notes/…what-a-worker-is-given.md` shows `make format` writing every file is still an active cause of report 3 |
+| **9** | ~~`relaunch` and `fork` carry the template~~ **done, `f4c9a6c`** | §3 above | Unrelated to the thesis, one line, and the team is broken without it |
 
 ### Row 0 is done — run `84cb7f`, 2026-08-17, `claude-sonnet-5`
 
@@ -207,6 +207,42 @@ they are byte-identical — checked, not eyeballed. So the count does track agen
 08-17 reading of it was wrong; the conclusion it supported is unchanged and now rests on
 the right evidence. **A worker's context is not readable off the wire because the inits
 carry nothing per-agent, not because there is only one of them.**
+
+### Rows 1, 9 and 8 are done — 2026-08-18, solo, `2dddfea`, `f4c9a6c`, `5a16521`
+
+Done by hand rather than by a team, for the reason the circularity section gives. Three
+things came out of the building that the record did not have.
+
+**Row 1 was wider than "three tools" once the refusals were named.** Splitting
+`TaskRefusal` by the recovery it implies rather than by the guard that produced it
+turns the two ownership guards into five answers, and the extra pair is real: a
+completion refused because nobody holds the task and one refused because the task is
+already finished were the same silent no-op, and they mean *claim it first* and *stop*.
+`NOT_APPLIED` is the member the reducer never returns — it is what the Bridge hands back
+when the frame loop dies before the intent is applied, and it exists because a write
+abandoned at shutdown has no ordinary negative to fall back on the way `claim_task` does.
+
+**Row 9 was not one line, and the missing line was the type.** The template was
+droppable because `_launch` gave it a default, so three-argument lambdas typechecked
+cleanly. Carrying it in the callback type (`Callable[[str, str, str, str | None], None]`)
+is what makes the same mistake a mypy error, which is the only guard available for a pane
+whose drawing cannot be tested without pixels.
+
+**Row 8's `typecheck` item is not free, and the claim it rests on does not survive being
+run.** `what-the-board-does-not-carry.md` item 5 calls widening `make typecheck` to
+`scripts/` and `tests/` "a one-line Makefile change" whose only cost is "a backlog".
+Measured: **498 findings across 27 files** at the strictness `pyproject.toml` holds the
+application to — 162 missing annotations, 116 `arg-type`, 70 `typeddict-item`, and the
+`arg-type` hits are mostly tests deliberately holding `list[object]` and narrowing by
+hand. Relaxing `strict` for those two directories only moves it to 480, because the bulk
+is not annotation hygiene.
+
+So the honest options are to fix the backlog or to decide what strictness test code is
+held to, and both are decisions rather than a Makefile edit. `make typecheck-all` was
+added outside `check` so the number is visible to whoever takes it; `check` is unchanged
+and `make typecheck` still reads one directory of three. **This is the item's own
+argument turned back on it** — the reason it did not happen on 08-15 is the reason it is
+not happening here, and saying "free" a second time would be the third instance.
 
 ---
 
@@ -348,14 +384,14 @@ run and none has been performed for this record.
 
 ## In order, if this gets done
 
-0. **Row 0**, the probe. Everything in group 5 is void if the first question fails, and it
-   is the cheapest thing here.
-1. **Row 1**, the three lying tools. Standalone defect, and the plumbing rows 4 and 7 need.
-2. **Row 9**, `relaunch`/`fork`. One line, unrelated to everything, and the team is broken
-   without it.
-3. **Row 8**, the prose and the two Makefile targets. Free, unbuilt for two days, and
-   `make format` writing every file is an active cause of report 3 today.
-4. **Row 2**, the board read — after questions 2 and 3 above have answers.
+0. ~~**Row 0**, the probe.~~ **done**, run `84cb7f`.
+1. ~~**Row 1**, the three lying tools.~~ **done**, `2dddfea`.
+2. ~~**Row 9**, `relaunch`/`fork`.~~ **done**, `f4c9a6c`.
+3. ~~**Row 8**, the prose and the two Makefile targets.~~ **done**, `5a16521`, less the
+   `typecheck` widening, which is not free and is now its own decision.
+4. **Row 2**, the board read — **stopped here.** Questions 2 and 3 have no answers, and
+   the record's own terms are that taking them by implication is how this goes wrong.
+   Everything above row 2 was chosen precisely because it needed neither.
 5. **Rows 3 and 4**, the board's surface and `Task.touches`.
 6. **Row 5**, the brief — after row 0 says it can exist.
 7. **Rows 6 and 7**, amendment and sign-off — after question 1 has an answer, and with the
