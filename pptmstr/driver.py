@@ -613,6 +613,7 @@ class AgentSession:
         *,
         model: str | None = None,
         cwd: str | None = None,
+        brief: str | None = None,
         interactive: bool = True,
         template: WorkTemplate | None = None,
         subagent_cap: int = DEFAULT_SUBAGENT_CAP,
@@ -624,6 +625,7 @@ class AgentSession:
         # not spawned yet -- "part of this team, not started" and "no such role" are
         # different answers, and only one of them means the sender got it wrong.
         self.template = template or SOLO
+        self.brief = brief
         self.session_id = str(uuid.uuid4())
         self.node_id: NodeId = (self.session_id, None)
         self.transcript = Transcript()
@@ -1391,8 +1393,9 @@ class AgentSession:
                 cwd=self.cwd,
                 # Announced here rather than left on the session: this is the only
                 # emitter that knows the template, and the UI cannot reach into an
-                # AgentSession to ask.
+                # AgentSession to ask. Same for the brief.
                 template=self.template.name,
+                brief=self.brief,
                 transcript=self.transcript,
             )
         )

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import pytest
 
+from pptmstr.model import LaunchSpec
 from pptmstr.ui.launcher import MODELS, LauncherState
 
 
@@ -59,7 +60,9 @@ def test_ready_ignores_whitespace_only_drafts(task: str, ready: bool) -> None:
 
 def test_spec_strips_task_and_resolves_model() -> None:
     state = LauncherState(task="  audit the parser  ", cwd="/tmp/x", model_index=1)
-    assert state.spec() == ("audit the parser", MODELS[1], "/tmp/x", "solo")
+    assert state.spec() == LaunchSpec(
+        task="audit the parser", model=MODELS[1], cwd="/tmp/x", template="solo", brief=None
+    )
 
 
 def test_spec_defaults_to_a_lone_agent() -> None:
@@ -68,14 +71,14 @@ def test_spec_defaults_to_a_lone_agent() -> None:
     exactly as it did before templates existed, or every existing habit changes
     meaning at once.
     """
-    assert LauncherState(task="x").spec()[3] == "solo"
+    assert LauncherState(task="x").spec().template == "solo"
 
 
 def test_spec_carries_the_chosen_team() -> None:
     from pptmstr import templates
 
     state = LauncherState(task="x", template_index=templates.names().index("feature"))
-    assert state.spec()[3] == "feature"
+    assert state.spec().template == "feature"
 
 
 def test_spec_defaults_blank_cwd_to_repo_root() -> None:
@@ -84,18 +87,39 @@ def test_spec_defaults_blank_cwd_to_repo_root() -> None:
     ``AgentSession`` and is the FLEET rail's grouping key, so a blank string would
     file the session under a project whose name is the empty string.
     """
-    assert LauncherState(task="t", cwd="   ").spec()[2] == "."
+    assert LauncherState(task="t", cwd="   ").spec().cwd == "."
 
 
 def test_spec_strips_cwd_whitespace() -> None:
-    assert LauncherState(task="t", cwd="  /srv/repo \n").spec()[2] == "/srv/repo"
+    assert LauncherState(task="t", cwd="  /srv/repo \n").spec().cwd == "/srv/repo"
 
 
 def test_default_model_is_first_in_the_list() -> None:
-    assert LauncherState(task="t").spec()[1] == MODELS[0]
+    assert LauncherState(task="t").spec().model == MODELS[0]
 
 
 def test_every_model_index_is_addressable() -> None:
     """Guards against a combo whose index outruns the tuple it is drawn from."""
     for i in range(len(MODELS)):
-        assert LauncherState(task="t", model_index=i).spec()[1] == MODELS[i]
+        assert LauncherState(task="t", model_index=i).spec().model == MODELS[i]
+
+
+def test_a_brief_is_optional_and_absent_by_default() -> None:
+    """
+    Most sessions are solo with a one-line task. A brief is the shape a team needs,
+    and making it mandatory would tax the common case for a problem it does not have.
+    """
+    assert LauncherState(task="t").spec().brief is None
+
+
+def test_a_blank_brief_is_absent_rather_than_an_empty_path() -> None:
+    """
+    An empty string is a path to nothing, and it would reach `AgentRecord.brief` as
+    a value that reads as present. None is the only honest spelling of "no brief".
+    """
+    assert LauncherState(task="t", brief="   ").spec().brief is None
+
+
+def test_a_brief_path_is_carried_and_stripped() -> None:
+    state = LauncherState(task="t", brief="  /home/x/.claude/briefs/s1  ")
+    assert state.spec().brief == "/home/x/.claude/briefs/s1"

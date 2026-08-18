@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from imgui_bundle import imgui
 
 from .. import templates
+from ..model import LaunchSpec
 from ..theme import P
 from . import widgets
 
@@ -61,6 +62,10 @@ class LauncherState:
 
     task: str = ""
     cwd: str = "."
+    # Path to a directory of premises, or empty for a session with only its task.
+    # Optional on purpose: most sessions are solo with a one-line task, and making
+    # a brief mandatory would tax the common case for a problem it does not have.
+    brief: str = ""
     model_index: int = 0
     # Index into templates.names(). "solo" is first and is the default, so the
     # launcher behaves exactly as it did before teams existed unless asked otherwise.
@@ -82,16 +87,21 @@ class LauncherState:
     def ready(self) -> bool:
         return bool(self.task.strip())
 
-    def spec(self) -> tuple[str, str, str, str]:
+    def spec(self) -> LaunchSpec:
         """
-        The launch arguments: task, model, cwd, template. Empty cwd means the repo
-        root.
+        The draft as the value the driver is handed. Empty cwd means the repo root.
+
+        A ``LaunchSpec`` rather than a tuple of strings, which is the correction row
+        9 paid for: the callback took four loose positionals, so dropping one still
+        typechecked and a relaunched team started solo. Adding the brief to a
+        positional list would be the same defect waiting on the same signature.
         """
-        return (
-            self.task.strip(),
-            MODELS[self.model_index],
-            self.cwd.strip() or ".",
-            templates.names()[self.template_index],
+        return LaunchSpec(
+            task=self.task.strip(),
+            model=MODELS[self.model_index],
+            cwd=self.cwd.strip() or ".",
+            template=templates.names()[self.template_index],
+            brief=self.brief.strip() or None,
         )
 
 
@@ -118,7 +128,7 @@ def draw(
     running: int,
     queued: int,
     cap: int,
-    launch: Callable[[str, str, str, str], None],
+    launch: Callable[[LaunchSpec], None],
     wrap: bool,
 ) -> None:
     """
@@ -183,6 +193,20 @@ def draw(
     )
     imgui.text_disabled("working directory")
 
+    # Under the working directory because it is the same kind of field -- a path the
+    # operator supplies and nothing validates -- and because a brief is read
+    # relative to nothing: it is an absolute directory, outside the tree, which the
+    # 08-17 probe measured a worker can read.
+    #
+    # Empty is the common case and must stay cheap to leave empty. Most sessions are
+    # solo with a one-line task, and a brief is the shape a team needs.
+    imgui.spacing()
+    imgui.set_next_item_width(-1)
+    _, state.brief = imgui.input_text_with_hint(
+        "##brief", "brief directory (optional, premises the team can read)", state.brief
+    )
+    imgui.text_disabled("brief")
+
     imgui.spacing()
     imgui.set_next_item_width(240.0)
     _, state.model_index = imgui.combo("model", state.model_index, list(MODELS))
@@ -221,7 +245,7 @@ def draw(
     dismissed = cancelled or imgui.is_key_pressed(imgui.Key.escape)
 
     if ready and (clicked or submitted):
-        launch(*state.spec())
+        launch(state.spec())
         state.task = ""
         dismissed = True
 

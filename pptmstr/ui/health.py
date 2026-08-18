@@ -24,7 +24,7 @@ from dataclasses import dataclass
 
 from imgui_bundle import imgui
 
-from ..model import AgentState, NodeId, Snapshot
+from ..model import AgentState, LaunchSpec, NodeId, Snapshot
 from ..theme import STATE_GLYPH, STATE_LABEL, P
 from . import projects
 from .widgets import context_cell, ellipsis, format_elapsed, short_model
@@ -38,7 +38,7 @@ class HealthActions:
     close: Callable[[NodeId], None]
     # task, model, cwd, template -- see InboxActions.relaunch for why the last one
     # is carried and not defaulted.
-    fork: Callable[[str, str, str, str | None], None]
+    fork: Callable[[LaunchSpec], None]
 
 
 def _small() -> None:
@@ -144,7 +144,7 @@ def draw(snap: Snapshot, node: NodeId | None, actions: HealthActions, now: float
         # compaction count because that count is the reason to reach for it: a
         # session that has compacted has already lost the reasoning that got it
         # here, and continuing it is worse than restarting it.
-        actions.fork(root.task, root.model, root.cwd or ".", root.template)
+        actions.fork(LaunchSpec.from_record(root))
 
     _small()
     if root.state is AgentState.AWAITING_INPUT:

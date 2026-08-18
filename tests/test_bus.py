@@ -1612,3 +1612,17 @@ def test_the_watchdogs_are_actually_wired_into_the_frame_loop() -> None:
     body = inspect.getsource(begin_frame)
     assert "_check_for_lost_approvals(state)" in body
     assert "_check_for_stranded_requests(state)" in body
+
+
+def test_a_declaration_is_reviewed_by_policy_and_not_by_accident() -> None:
+    """
+    `classify` is fail-closed, so a tool in neither set requires approval anyway --
+    which makes the behavioural assertion above pass whether the decision was made
+    or merely not made. `_REVIEW`'s own comment says the list must read as a
+    decision rather than as whatever was left over, and this is what holds it to
+    that: membership, not outcome.
+    """
+    from pptmstr import approval
+
+    assert approval._BUS_DECLARE in approval._REVIEW
+    assert approval._BUS_DECLARE not in approval._BUS_AUTO

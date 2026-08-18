@@ -42,6 +42,7 @@ from pptmstr.model import (
     AWAITING_TOPIC,
     INTERRUPTED_TOPIC,
     AgentState,
+    LaunchSpec,
     NodeId,
     QuestionPending,
     SessionFailed,
@@ -944,7 +945,7 @@ def test_the_launcher_hands_a_session_the_operators_subagent_cap() -> None:
     try:
         state = AppState(store=Store(), bridge=bridge, settings=Settings(subagent_cap=6))
         state.pool = _RecordingPool()  # type: ignore[assignment]
-        _launch(state, "do a thing", "claude-sonnet-5", "/tmp")
+        _launch(state, LaunchSpec(task="do a thing", model="claude-sonnet-5", cwd="/tmp"))
         for _ in range(200):
             if started:
                 break
@@ -983,7 +984,12 @@ def test_relaunching_a_team_session_relaunches_a_team() -> None:
         # What a relaunch of a team session passes, then what a relaunch of a
         # sub-agent record or a solo session passes, then a name no template has.
         for template in ("feature", None, "no-such-template"):
-            _launch(state, "do a thing", "claude-sonnet-5", "/tmp", template)
+            _launch(
+                state,
+                LaunchSpec(
+                    task="do a thing", model="claude-sonnet-5", cwd="/tmp", template=template
+                ),
+            )
         for _ in range(200):
             if len(started) == 3:
                 break
@@ -2714,3 +2720,143 @@ def test_a_subagent_that_said_nothing_delivers_nothing() -> None:
     asyncio.run(_fire_stop(session, "agent-a", ""))
 
     assert not [i for i in bridge.drain() if isinstance(i, SubagentDelivered)]
+
+
+# -- the brief travels with the launch (row 5, step 1) -----------------------------
+
+
+def _recording_launch(spec: LaunchSpec) -> list[AgentSession]:
+    """Run `_launch` against a pool that only records, and hand back what it built."""
+    from pptmstr.app import AppState, _launch
+    from pptmstr.settings import Settings
+
+    started: list[AgentSession] = []
+
+    class _RecordingPool:
+        def submit(self, session: AgentSession) -> None:
+            started.append(session)
+
+    bridge = Bridge()
+    bridge.start()
+    try:
+        state = AppState(store=Store(), bridge=bridge, settings=Settings())
+        state.pool = _RecordingPool()  # type: ignore[assignment]
+        _launch(state, spec)
+        for _ in range(200):
+            if started:
+                break
+            time.sleep(0.005)
+    finally:
+        bridge.stop()
+    return started
+
+
+def test_a_brief_reaches_the_session_it_was_launched_with() -> None:
+    """
+    The wiring, not the value (STYLE.md §2). `LaunchSpec` can carry it and `_launch`
+    can still drop it on the floor, which leaves the premises exactly as unreachable
+    as they were.
+    """
+    started = _recording_launch(
+        LaunchSpec(task="t", model="claude-sonnet-5", cwd="/tmp", brief="/briefs/s1")
+    )
+    assert [s.brief for s in started] == ["/briefs/s1"]
+
+
+def test_a_session_launched_without_a_brief_has_none() -> None:
+    started = _recording_launch(LaunchSpec(task="t", model="claude-sonnet-5", cwd="/tmp"))
+    assert [s.brief for s in started] == [None]
+
+
+def test_a_relaunch_keeps_the_brief_the_session_was_launched_with() -> None:
+    """
+    The reason the path is stored rather than derived from cwd and the session id.
+    A relaunch is a *new* session id, so a derived path would point at an empty
+    directory and lose the premises at the moment the record exists to keep them.
+
+    This is row 9's defect in a new field: `relaunch` and `fork` build a launch from
+    an `AgentRecord`, and the field that is not carried is gone with nothing on
+    screen saying so.
+    """
+    from pptmstr.model import AgentRecord
+
+    record = AgentRecord(
+        node_id=("s1", None),
+        parent=None,
+        depth=0,
+        state=AgentState.DONE,
+        topic="",
+        task="audit the parser",
+        model="claude-sonnet-5",
+        cwd="/srv/repo",
+        template="feature",
+        brief="/briefs/s1",
+    )
+
+    spec = LaunchSpec.from_record(record)
+
+    assert (spec.brief, spec.template) == ("/briefs/s1", "feature")
+    assert (spec.task, spec.model, spec.cwd) == ("audit the parser", "claude-sonnet-5", "/srv/repo")
+
+
+def test_a_record_with_no_cwd_relaunches_at_the_repo_root() -> None:
+    """A blank cwd is the FLEET rail's grouping key, so None must not become ""."""
+    from pptmstr.model import AgentRecord
+
+    record = AgentRecord(
+        node_id=("s1", None),
+        parent=None,
+        depth=0,
+        state=AgentState.DONE,
+        topic="",
+        task="t",
+        model="m",
+    )
+    assert LaunchSpec.from_record(record).cwd == "."
+
+
+def test_the_announce_puts_the_brief_on_the_record() -> None:
+    """
+    End of the chain: the store is the only place the UI can read it from, so a
+    brief that reaches `AgentSession` and stops there is still unaddressable.
+    """
+    from pptmstr.intents import AgentSpawned
+
+    store = Store()
+    store.apply(
+        AgentSpawned(
+            node_id=("s1", None),
+            parent=None,
+            task="t",
+            model="m",
+            started_at=0.0,
+            template="feature",
+            brief="/briefs/s1",
+        )
+    )
+    assert store.snapshot().nodes[("s1", None)].brief == "/briefs/s1"
+
+
+def test_the_announce_carries_the_brief_the_session_holds() -> None:
+    """
+    The link a hand-built `AgentSpawned` cannot test. `AgentSession` can hold the
+    brief and `announce` can still omit it from the intent, and the store would then
+    be building a correct record out of an incomplete announce -- "plumbed through"
+    and "works end to end" are different claims (STYLE.md §2).
+    """
+    from pptmstr.intents import AgentSpawned
+
+    bridge = Bridge()
+    bridge.start()
+    try:
+        session = AgentSession(bridge, "t", model="m", cwd="/tmp", brief="/briefs/s1")
+        session.announce()
+        for _ in range(200):
+            spawns = [i for i in bridge.drain() if isinstance(i, AgentSpawned)]
+            if spawns:
+                break
+            time.sleep(0.005)
+    finally:
+        bridge.stop()
+
+    assert [s.brief for s in spawns] == ["/briefs/s1"]

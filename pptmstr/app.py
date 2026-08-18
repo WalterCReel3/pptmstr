@@ -23,7 +23,7 @@ from .driver import AgentSession
 from .fake_driver import FakeDriver
 from .intents import FailureAcknowledged
 from .log import LOG
-from .model import Snapshot
+from .model import LaunchSpec, Snapshot
 from .pool import SessionPool
 from .store import Store
 from .theme import REQUIRED_THEMES, THEMES, P
@@ -298,15 +298,19 @@ def _apply_theme_if_dirty(state: AppState) -> None:
     state.theme_dirty = False
 
 
-def _launch(state: AppState, task: str, model: str, cwd: str, template: str | None = None) -> None:
+def _launch(state: AppState, spec: LaunchSpec) -> None:
     """
     Start a session. Safe from the UI thread; the pool is touched on the loop.
 
-    ``template`` None means solo, and the default is spelled here rather than at
-    each call site for a reason worth the line: ``relaunch`` and ``fork`` pass
-    ``AgentRecord.template``, which is None on any record that is not a session
-    root, and a caller that had to remember the fallback is a caller that can
-    forget it.
+    Takes the whole spec rather than loose arguments. ``relaunch`` and ``fork`` build
+    one from an ``AgentRecord``, and row 9's defect was that they could build a
+    partial one without the type system noticing -- a template dropped from a
+    positional list started a team session solo. A field missing from a ``LaunchSpec``
+    is a field the constructor names.
+
+    A None ``template`` still means solo, defaulted here rather than at each call
+    site because a record that is not a session root carries None and a caller that
+    had to remember the fallback is a caller that can forget it.
     """
     pool = state.pool
     if pool is None:
@@ -314,22 +318,24 @@ def _launch(state: AppState, task: str, model: str, cwd: str, template: str | No
     # An unknown name falls back to solo rather than refusing the launch: the task
     # the operator typed is worth more than the team shape they mistyped, and the
     # log line says which one ran.
-    shape = (templates.by_name(template) if template else None) or templates.SOLO
+    shape = (templates.by_name(spec.template) if spec.template else None) or templates.SOLO
 
     async def go() -> None:
         pool.submit(
             AgentSession(
                 state.bridge,
-                task,
-                model=model,
-                cwd=cwd,
+                spec.task,
+                model=spec.model,
+                cwd=spec.cwd,
+                brief=spec.brief,
                 template=shape,
                 subagent_cap=state.settings.subagent_cap,
             )
         )
 
     state.bridge.submit(go())
-    LOG.info("app", f"launched in {cwd} as {shape.name}: {task[:60]}")
+    brief = f" brief={spec.brief}" if spec.brief else ""
+    LOG.info("app", f"launched in {spec.cwd} as {shape.name}{brief}: {spec.task[:60]}")
 
 
 def _session_action(state: AppState, coro_factory: Callable[[SessionPool], object]) -> None:
@@ -504,9 +510,7 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
                 interrupt=lambda node: _session_action(state, lambda p: p.interrupt(node)),
                 close=lambda node: _session_action(state, lambda p: p.close(node)),
                 dismiss=lambda node: state.bridge.emit(FailureAcknowledged(node)),
-                relaunch=lambda task, model, cwd, template: _launch(
-                    state, task, model, cwd, template
-                ),
+                relaunch=lambda spec: _launch(state, spec),
             ),
             state.frame_now,
             wrap=state.settings.wrap_inputs,
@@ -572,7 +576,7 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
             health.HealthActions(
                 interrupt=lambda node: _session_action(state, lambda p: p.interrupt(node)),
                 close=lambda node: _session_action(state, lambda p: p.close(node)),
-                fork=lambda task, model, cwd, template: _launch(state, task, model, cwd, template),
+                fork=lambda spec: _launch(state, spec),
             ),
             state.frame_now,
         )
@@ -607,7 +611,7 @@ def _draw_overlays(state: AppState) -> None:
         running=pool.running_count,
         queued=pool.queued_count,
         cap=pool.cap,
-        launch=lambda task, model, cwd, team: _launch(state, task, model, cwd, team),
+        launch=lambda spec: _launch(state, spec),
         wrap=state.settings.wrap_inputs,
     )
 
@@ -812,10 +816,12 @@ def main(argv: list[str] | None = None) -> int:
             for task_text in args.task:
                 _launch(
                     state,
-                    task_text,
-                    args.model or launcher.MODELS[0],
-                    args.cwd,
-                    args.template,
+                    LaunchSpec(
+                        task=task_text,
+                        model=args.model or launcher.MODELS[0],
+                        cwd=args.cwd,
+                        template=args.template,
+                    ),
                 )
 
         state.bridge.submit(launch_initial())

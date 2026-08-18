@@ -346,6 +346,68 @@ Obligation = ApprovalNeeded | QuestionPending | SessionFailed
 
 
 @dataclass(frozen=True, slots=True)
+class LaunchSpec:
+    """
+    Everything an operator settles before a session exists.
+
+    A value rather than a positional argument list, which is the correction row 9
+    paid for: ``template`` was droppable because the callback took four loose
+    strings and a three-argument lambda typechecked cleanly, so a relaunch silently
+    started a team session solo. One more optional field on that signature would be
+    one more chance at the same defect, and a launch path is exactly where a
+    silently-dropped field is least visible -- the session starts, it just starts
+    wrong.
+
+    Not store state. It is what the launcher hands the driver, and nothing keeps a
+    copy after the session announces itself.
+    """
+
+    task: str
+    model: str
+    # Empty means the repository root; the launcher normalises before building one.
+    cwd: str = "."
+    # By name. None is solo, spelled here rather than at each call site because
+    # `relaunch` and `fork` pass `AgentRecord.template`, which is None on any record
+    # that is not a session root.
+    template: str | None = None
+    # The directory holding this session's brief, or None for a session launched
+    # with nothing but its task.
+    #
+    # A path and never the content: a stored copy of premises is the duplicate
+    # STYLE.md §1 names as this codebase's historic defect shape, and the brief is
+    # on disk precisely so there is one home for it.
+    #
+    # Stored rather than derived, which is the part worth the argument. The
+    # canonical location is `~/.claude/projects/<cwd-slug>/briefs/<session-id>/`,
+    # and that *is* a function of two facts a record already holds -- so §1 says
+    # compute it. It is stored anyway because a fork or a relaunch is a new session
+    # id, so deriving would hand the new session an empty directory and lose the
+    # premises at exactly the moment the record exists to keep them. A derived path
+    # is right for a session that owns its brief and wrong for every session that
+    # inherits one.
+    brief: str | None = None
+
+    @classmethod
+    def from_record(cls, record: AgentRecord) -> LaunchSpec:
+        """
+        The spec that starts this session again -- a relaunch, or a fork of it.
+
+        One constructor rather than the same four lines in ``inbox`` and ``health``.
+        Row 9's defect was those two call sites building a launch by hand and one of
+        them omitting the template; two hand-built copies of a growing argument list
+        will disagree eventually, and the failure is silent because a launch that
+        drops a field still launches.
+        """
+        return cls(
+            task=record.task,
+            model=record.model,
+            cwd=record.cwd or ".",
+            template=record.template,
+            brief=record.brief,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class AgentRecord:
     """One node in the agent tree."""
 
@@ -384,6 +446,16 @@ class AgentRecord:
     # freezing one answer here would be the same mistake as storing a project name
     # instead of a cwd.
     template: str | None = None
+    # Where this session's premises live, on a root record only, or None for a
+    # session launched with nothing but its task. See ``LaunchSpec.brief`` for why
+    # it is a path, why the store never holds the content, and why it is stored
+    # rather than derived from ``cwd`` and the session id.
+    #
+    # Nothing reads it yet. That is the honest state of this row and not an
+    # oversight: it makes premises *addressable*, which is the whole of step 1, and
+    # the writer and the reader are steps 2 and 3. A path with no reader is a
+    # smaller thing than a premise with no address.
+    brief: str | None = None
     usage: UsageRollup = field(default_factory=UsageRollup)
     context: ContextSnapshot | None = None
     # A tuple, not one slot. An assistant turn can contain several tool calls, the

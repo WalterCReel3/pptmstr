@@ -36,6 +36,7 @@ from ..bridge import Bridge
 from ..model import (
     AgentState,
     ApprovalNeeded,
+    LaunchSpec,
     NodeId,
     Obligation,
     QuestionPending,
@@ -90,7 +91,7 @@ class InboxActions:
     # task, model, cwd, template. The template is carried rather than defaulted:
     # dropping it turns a retry of a team session into a solo one, and nothing on
     # screen would say so.
-    relaunch: Callable[[str, str, str, str | None], None]
+    relaunch: Callable[[LaunchSpec], None]
 
 
 def _small() -> None:
@@ -526,7 +527,7 @@ def _expand_failure(snap: Snapshot, actions: InboxActions, obligation: SessionFa
         # cannot be resumed -- its subprocess is gone -- so the honest offer is a
         # fresh one carrying the same instructions, not a "resume" that would be a
         # new session wearing the old one's name.
-        actions.relaunch(record.task, record.model, record.cwd or ".", record.template)
+        actions.relaunch(LaunchSpec.from_record(record))
         actions.dismiss(obligation.node)
     imgui.same_line()
     if imgui.button("dismiss"):

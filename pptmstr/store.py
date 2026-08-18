@@ -196,6 +196,7 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
                 model=intent.model,
                 agent_type=intent.agent_type,
                 template=intent.template,
+                brief=intent.brief,
                 # Resolved here rather than at every emitter. A sub-agent's spawn
                 # hook is not told a working directory but does run in its
                 # session's, and making each emitter remember that is how the two

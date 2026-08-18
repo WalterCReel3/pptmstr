@@ -56,6 +56,10 @@ class AgentSpawned:
     # The session's work template, by name. Set on a root announce and left None
     # for a sub-agent, which is spawned by the CLI and has no template of its own.
     template: str | None = None
+    # The session's brief directory, on a root announce only. Same shape and same
+    # reason as ``template``: chosen at launch, implied by nothing in the snapshot,
+    # and gone if the announce does not carry it.
+    brief: str | None = None
     topic: str = "starting"
     # Where this agent runs. None means "inherit from the parent", which is what a
     # sub-agent does -- it runs in the session's directory and its spawn hook is not
