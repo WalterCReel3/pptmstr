@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import dataclasses
 import enum
-from collections.abc import Mapping
+import posixpath
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, ClassVar
@@ -542,6 +543,36 @@ class TaskRefusal(enum.Enum):
     NOT_APPLIED = "not_applied"
 
 
+def normalised_touches(paths: Iterable[str]) -> tuple[str, ...]:
+    """
+    File paths in the one spelling the overlap check compares.
+
+    Two leads writing ``./pptmstr/store.py`` and ``pptmstr/store.py`` mean the same
+    file, and an overlap check on raw strings would miss it -- silently, producing
+    exactly the concurrent write the field exists to prevent. Order is preserved and
+    duplicates are dropped, so the stored tuple reads back as the declarer wrote it.
+
+    **What it does not do**, stated because the gap is the interesting part: it
+    does not resolve a path against a session's ``cwd``, follow a symlink, or
+    reconcile an absolute path with a relative one. Those need the filesystem, and
+    the reducer does no IO. A declarer that mixes absolute and relative paths gets
+    no protection, which is a reason for the briefing to ask for repository-relative
+    paths rather than a reason to put a ``Path.resolve`` in a pure function.
+    """
+    out: list[str] = []
+    for raw in paths:
+        cleaned = raw.strip()
+        if not cleaned:
+            continue
+        # posixpath rather than os.path: a task's files are repository paths, and
+        # the separator should not depend on which machine the orchestrator runs on.
+        cleaned = posixpath.normpath(cleaned)
+        if cleaned in (".", "..") or cleaned in out:
+            continue
+        out.append(cleaned)
+    return tuple(out)
+
+
 @dataclass(frozen=True, slots=True)
 class Task:
     """
@@ -560,6 +591,22 @@ class Task:
     title: str
     detail: str = ""
     depends_on: tuple[TaskId, ...] = ()
+    # The files this task will write, normalised (``normalised_touches``).
+    #
+    # Stored rather than derived, and checked against STYLE.md §1 before being
+    # added: nothing else in the snapshot implies which files a task will edit --
+    # the work has not happened yet -- so this is the same case as ``declared_by``
+    # and not a second copy of a fact something else already holds.
+    #
+    # It exists because per-file ownership was prose inside ``detail``, honoured by
+    # every agent that read it and reached by nothing else. A lead declared two
+    # tasks over the same three files with no dependency between them, two agents
+    # wrote those files at once, and the only reason it cost minutes rather than a
+    # corrupted file is that a worker noticed and released. ``depends_on`` is the
+    # mechanism that prevents it, it is unbypassable, and it was simply not
+    # invoked -- so the store derives it from this instead of trusting that the one
+    # participant nothing checks remembered to.
+    touches: tuple[str, ...] = ()
     claimed_by: NodeId | None = None
     state: TaskState = TaskState.PENDING
     declared_at: float = 0.0

@@ -65,7 +65,7 @@ from .intents import (
     TaskDeclared,
     TaskReleased,
 )
-from .model import Concern, NodeId, Task, TaskRefusal
+from .model import Concern, NodeId, Task, TaskId, TaskRefusal
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle only matters to the checker
     from .driver import AgentSession
@@ -135,20 +135,25 @@ def _park(bridge: Bridge, request_id: str) -> asyncio.Future[Effect]:
     )
 
 
-async def _outcome(future: asyncio.Future[Effect]) -> TaskRefusal | None:
+async def _outcome(future: asyncio.Future[Effect]) -> TaskWriteSettled:
     """
-    Wait for the store's answer to a board write. None means it took effect.
+    Wait for the store's answer to a board write. A None ``refusal`` means it took
+    effect.
 
     An effect of the wrong shape is reported as ``NOT_APPLIED`` rather than as
     success. It cannot happen -- futures are settled by request id -- but the two
     ways to be wrong here are not symmetric: a spurious refusal makes an agent
     re-check the board, and a spurious success makes it build on a task that is not
     there.
+
+    Returns the settled effect rather than the refusal alone, because a declaration
+    now has two things to tell its caller and only one of them is whether it landed.
+    Pulling the refusal out here would mean a second waiter for the second answer.
     """
     answer = await future
     if not isinstance(answer, TaskWriteSettled):
-        return TaskRefusal.NOT_APPLIED
-    return answer.refusal
+        return TaskWriteSettled(request_id="", refusal=TaskRefusal.NOT_APPLIED)
+    return answer
 
 
 def _board_line(row: BoardTask) -> str:
@@ -218,6 +223,30 @@ def _refusal_text(refusal: TaskRefusal) -> str:
             return "The board never saw the request -- the application is shutting down."
         case _:  # pragma: no cover - mypy's exhaustiveness check, not a runtime path
             assert_never(refusal)
+
+
+def _auto_depends_text(added: tuple[TaskId, ...]) -> str:
+    """
+    What the declarer is told when the board added a dependency it did not ask for.
+
+    Said at declaration rather than left for the declarer to discover, because the
+    alternative is finding out from a worker that cannot claim the task -- the same
+    fact, arriving later and looking like a bug. This is the one place the board
+    changes what an agent asked for, and an agent planning a sequence needs to know
+    its plan was edited.
+
+    Names the tasks and the reason together. "Depends on t-4" without the reason
+    invites the lead to strip it back off, which is the concurrent write the field
+    exists to prevent; the file overlap is what makes the edge non-negotiable.
+    """
+    ids = ", ".join(added)
+    subject = "an unfinished task" if len(added) == 1 else "unfinished tasks"
+    return (
+        f"It also now depends on {ids}, added by the board: it writes files {subject} "
+        f"on this board will also write. Leave the dependency in place -- it is what "
+        f"keeps the two off the same file. If the overlap is wrong, narrow the touches "
+        f"of one of them rather than removing the edge."
+    )
 
 
 def _schema(properties: dict[str, Any], required: tuple[str, ...] = ()) -> dict[str, Any]:
@@ -369,7 +398,9 @@ def build_server(session: AgentSession) -> Any:
     @tool(
         "declare_task",
         "Put a unit of work on the shared board for any agent to claim. "
-        "depends_on names tasks that must finish first.",
+        "depends_on names tasks that must finish first, and touches names the files "
+        "the work will write -- the board adds a dependency for you when two tasks "
+        "would write the same file.",
         _schema(
             {
                 "task_id": {
@@ -385,6 +416,16 @@ def build_server(session: AgentSession) -> Any:
                     "type": "array",
                     "description": "Task ids that must finish first. Omit it for none.",
                 },
+                "touches": {
+                    "type": "array",
+                    "description": (
+                        "Repository-relative paths this task will write, e.g. "
+                        "'pptmstr/store.py'. Any unfinished task on this board that "
+                        "writes one of them becomes a dependency automatically. Give "
+                        "them relative to the repository root: an absolute path is "
+                        "not matched against a relative one."
+                    ),
+                },
             },
             required=("title",),
         ),
@@ -394,6 +435,8 @@ def build_server(session: AgentSession) -> Any:
         task_id = str(args.get("task_id", "")).strip() or f"t-{uuid.uuid4().hex[:8]}"
         raw_deps = args.get("depends_on") or []
         deps = tuple(str(d).strip() for d in raw_deps if str(d).strip())
+        raw_touches = args.get("touches") or []
+        touches = tuple(str(p) for p in raw_touches)
         request_id = f"d-{uuid.uuid4().hex[:12]}"
         future = _park(bridge, request_id)
         bridge.emit(
@@ -403,6 +446,7 @@ def build_server(session: AgentSession) -> Any:
                     title=str(args.get("title", "")).strip(),
                     detail=str(args.get("detail", "")),
                     depends_on=deps,
+                    touches=touches,
                     declared_at=time.monotonic(),
                 ),
                 node_id=me,
@@ -410,10 +454,14 @@ def build_server(session: AgentSession) -> Any:
             )
         )
 
-        refusal = await _outcome(future)
-        if refusal is None:
-            return _text(f"Task {task_id} is on the board.")
-        return _text(f"Task {task_id} is NOT on the board. {_refusal_text(refusal)}")
+        settled = await _outcome(future)
+        if settled.refusal is not None:
+            return _text(f"Task {task_id} is NOT on the board. {_refusal_text(settled.refusal)}")
+        if settled.auto_depends:
+            return _text(
+                f"Task {task_id} is on the board. {_auto_depends_text(settled.auto_depends)}"
+            )
+        return _text(f"Task {task_id} is on the board.")
 
     @tool("complete_task", "Mark a task you claimed as finished.", {"task_id": str})
     async def complete_task(args: dict[str, Any]) -> dict[str, Any]:
@@ -425,12 +473,12 @@ def build_server(session: AgentSession) -> Any:
             TaskCompleted(node_id=me, task_id=task_id, at=time.monotonic(), request_id=request_id)
         )
 
-        refusal = await _outcome(future)
-        if refusal is None:
+        settled = await _outcome(future)
+        if settled.refusal is None:
             return _text(
                 f"Task {task_id} marked complete. Anything waiting on it is now claimable."
             )
-        return _text(f"Task {task_id} is NOT complete. {_refusal_text(refusal)}")
+        return _text(f"Task {task_id} is NOT complete. {_refusal_text(settled.refusal)}")
 
     @tool(
         "release_task",
@@ -444,10 +492,10 @@ def build_server(session: AgentSession) -> Any:
         future = _park(bridge, request_id)
         bridge.emit(TaskReleased(node_id=me, task_id=task_id, request_id=request_id))
 
-        refusal = await _outcome(future)
-        if refusal is None:
+        settled = await _outcome(future)
+        if settled.refusal is None:
             return _text(f"Task {task_id} is back on the board.")
-        return _text(f"Task {task_id} was NOT released. {_refusal_text(refusal)}")
+        return _text(f"Task {task_id} was NOT released. {_refusal_text(settled.refusal)}")
 
     return create_sdk_mcp_server(
         SERVER_NAME,

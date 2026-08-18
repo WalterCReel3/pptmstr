@@ -38,7 +38,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .board import BoardTask
-from .model import Concern, Task, TaskRefusal
+from .model import Concern, Task, TaskId, TaskRefusal
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,10 +87,23 @@ class TaskWriteSettled:
     Carries no task id. The caller knows it -- ``declare_task`` generates the id
     before it emits -- so putting it here would be a second copy of a fact one side
     already holds, kept in agreement by nothing.
+
+    ``auto_depends`` is the one member only a declaration can populate, which bends
+    the paragraph above and is worth saying why. It is not a fourth refusal and not
+    a property of the intent: it is the store reporting that what landed is *not
+    what the caller asked for* -- dependencies it added, because the task overlaps
+    files an unfinished task already claims. A completion or a release cannot
+    change the caller's own request, so the tuple is empty there rather than
+    meaningless. Splitting a second effect out for the single write that can carry
+    it would give three handlers two shapes to await for one question.
+
+    Empty on refusal, and that is not a special case: nothing landed, so nothing was
+    added to it.
     """
 
     request_id: str
     refusal: TaskRefusal | None = None
+    auto_depends: tuple[TaskId, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

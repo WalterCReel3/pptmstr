@@ -69,6 +69,7 @@ from .model import (
     TaskId,
     TaskRefusal,
     TaskState,
+    normalised_touches,
 )
 from .transcript import Transcript
 
@@ -505,14 +506,27 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
 
         case TaskDeclared():
             refused = _declaration_refusal(tasks, intent.task)
+            auto: tuple[TaskId, ...] = ()
             if refused is None:
                 # Provenance comes from the intent, never from the record handed
                 # in: the intent's node_id is the sender the gate authenticated,
                 # and a declared_by a caller set on the Task is not evidence of
                 # anything. Stamping unconditionally leaves one writer for the
                 # field rather than two that have to agree.
-                tasks[intent.task.id] = dataclasses.replace(intent.task, declared_by=intent.node_id)
-            effects = _settled(intent.request_id, refused)
+                #
+                # Touches are normalised here for the same reason: the overlap
+                # check compares them, so a caller that could supply its own
+                # spelling could evade the check by writing `./x.py`.
+                landed = dataclasses.replace(
+                    intent.task,
+                    declared_by=intent.node_id,
+                    touches=normalised_touches(intent.task.touches),
+                )
+                auto = _auto_depends(tasks, landed)
+                if auto:
+                    landed = dataclasses.replace(landed, depends_on=(*landed.depends_on, *auto))
+                tasks[landed.id] = landed
+            effects = _settled(intent.request_id, refused, auto)
 
         case TaskClaimRequested():
             # The claimer's own session, taken from the sender the gate
@@ -585,7 +599,11 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
     )
 
 
-def _settled(request_id: str | None, refusal: TaskRefusal | None) -> tuple[Effect, ...]:
+def _settled(
+    request_id: str | None,
+    refusal: TaskRefusal | None,
+    auto_depends: tuple[TaskId, ...] = (),
+) -> tuple[Effect, ...]:
     """
     The reply to a board write, or nothing when nobody asked.
 
@@ -593,10 +611,65 @@ def _settled(request_id: str | None, refusal: TaskRefusal | None) -> tuple[Effec
     ``TaskClaimRequested`` arm gives: an agent parked on a future over a write the
     reducer silently dropped is the same hang, and the only difference is that the
     write's caller used to invent a success instead of waiting.
+
+    ``auto_depends`` rides on the success answer because a dependency the store
+    added is a change to what the declarer asked for. Applying it silently would
+    make the board disagree with the lead's own plan with nothing saying so -- and
+    "your task is waiting" arriving later, from a worker that cannot claim it, is
+    the same information at the worst moment.
     """
     if request_id is None:
         return ()
-    return (TaskWriteSettled(request_id=request_id, refusal=refusal),)
+    return (TaskWriteSettled(request_id=request_id, refusal=refusal, auto_depends=auto_depends),)
+
+
+def _auto_depends(tasks: dict[TaskId, Task], new: Task) -> tuple[TaskId, ...]:
+    """
+    Unfinished tasks on the same board that will write a file ``new`` also writes.
+
+    **The collision becomes a wait rather than a refusal**, which is the whole
+    design. Refusing would need the declarer to notice, re-plan and re-declare, and
+    would put a second thing in the reply channel that can be ignored; appending a
+    dependency produces exactly the sequencing the lead should have written by hand,
+    and produces it whether or not the lead was paying attention. Nothing is
+    rejected, so nothing is lost.
+
+    That matters more than it sounds. ``depends_on`` is the *entire* mechanism
+    keeping two agents out of one file, it is mechanical and unbypassable, and it
+    was also opt-in and invoked by hand by the one participant whose mistakes
+    nothing else checks. This is what stops it being opt-in.
+
+    **This cannot close a cycle**, so it is safe to run after ``_would_cycle`` has
+    already passed on the declared dependencies. A cycle through ``new`` needs
+    something to reach ``new``, and nothing can: its id is not in ``tasks`` (a
+    duplicate is refused before this runs), so no existing ``depends_on`` names it.
+    Every edge added here therefore points from a brand-new node at an old one.
+
+    Scoped to the declarer's own session, like everything else about a board. A
+    dependency on another session's task would be a blocker that never appears on
+    the board that is waiting for it -- unresolvable and invisible at once, which is
+    worse than the concurrent write. The honest limit: **two sessions in one working
+    directory get no protection from this**, and that is a real gap rather than a
+    solved case.
+
+    COMPLETED tasks are skipped because a finished task is not writing anything.
+    Ordering is by declaration so the added edges are stable across runs.
+    """
+    if not new.touches or new.declared_by is None:
+        return ()
+    session_id = new.declared_by[0]
+    mine = set(new.touches)
+    already = set(new.depends_on)
+    overlapping = [
+        t
+        for t in tasks.values()
+        if t.id != new.id
+        and t.id not in already
+        and t.state is not TaskState.COMPLETED
+        and t.belongs_to(session_id)
+        and mine.intersection(t.touches)
+    ]
+    return tuple(t.id for t in sorted(overlapping, key=lambda t: (t.declared_at, t.id)))
 
 
 def _declaration_refusal(tasks: dict[TaskId, Task], new: Task) -> TaskRefusal | None:

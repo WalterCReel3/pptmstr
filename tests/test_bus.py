@@ -56,8 +56,14 @@ def concern(
     )
 
 
-def task(tid: str, *, deps: tuple[str, ...] = (), at: float = 0.0) -> Task:
-    return Task(id=tid, title=f"do {tid}", depends_on=deps, declared_at=at)
+def task(
+    tid: str,
+    *,
+    deps: tuple[str, ...] = (),
+    at: float = 0.0,
+    touches: tuple[str, ...] = (),
+) -> Task:
+    return Task(id=tid, title=f"do {tid}", depends_on=deps, declared_at=at, touches=touches)
 
 
 def declared(
@@ -67,6 +73,7 @@ def declared(
     at: float = 0.0,
     by: NodeId | None = LEAD,
     request_id: str | None = None,
+    touches: tuple[str, ...] = (),
 ) -> TaskDeclared:
     """
     A declaration with a declarer, which is the only kind the application makes.
@@ -78,7 +85,9 @@ def declared(
     task is a state only a test can build, and a suite built on one would be
     exercising a path production cannot reach.
     """
-    return TaskDeclared(task(tid, deps=deps, at=at), node_id=by, request_id=request_id)
+    return TaskDeclared(
+        task(tid, deps=deps, at=at, touches=touches), node_id=by, request_id=request_id
+    )
 
 
 # -- the real server, driven the way the application drives it ---------------------
@@ -385,6 +394,181 @@ def test_the_declare_handler_stamps_the_task_with_its_caller() -> None:
 
     assert store.snapshot().tasks["t1"].declared_by == QA
     assert "t1 is on the board" in text
+
+
+# -- file overlap becomes a dependency ---------------------------------------------
+#
+# `depends_on` is the entire mechanism keeping two agents out of one file, and it was
+# opt-in and invoked by hand by the one participant nothing checks. These pin the
+# store deriving it instead, and the honest limits of that derivation.
+
+
+def test_two_tasks_over_one_file_are_sequenced_without_being_asked() -> None:
+    store = Store()
+    store.apply(declared("t1", at=0.0, touches=("pptmstr/store.py",)))
+    store.apply(declared("t2", at=1.0, touches=("pptmstr/store.py", "pptmstr/model.py")))
+
+    assert store.snapshot().tasks["t2"].depends_on == ("t1",)
+    # The edge points at the older task, so the board keeps declaration order and
+    # the second declarer waits rather than the first.
+    assert store.snapshot().tasks["t1"].depends_on == ()
+
+
+def test_the_overlap_check_is_not_fooled_by_how_a_path_is_spelled() -> None:
+    """
+    The failure this guards is silent: two spellings of one file look like two files
+    to a string comparison, and the concurrent write goes ahead with nothing said.
+    """
+    store = Store()
+    store.apply(declared("t1", at=0.0, touches=("./pptmstr/store.py",)))
+    store.apply(declared("t2", at=1.0, touches=("pptmstr/ui/../store.py",)))
+
+    assert store.snapshot().tasks["t1"].touches == ("pptmstr/store.py",)
+    assert store.snapshot().tasks["t2"].depends_on == ("t1",)
+
+
+def test_tasks_over_different_files_are_left_to_run_at_once() -> None:
+    store = Store()
+    store.apply(declared("t1", at=0.0, touches=("pptmstr/store.py",)))
+    store.apply(declared("t2", at=1.0, touches=("pptmstr/bus.py",)))
+
+    # The point of the field is parallelism where it is safe, so a false edge here
+    # costs exactly what the feature was meant to buy.
+    assert store.snapshot().tasks["t2"].depends_on == ()
+
+
+def test_a_finished_task_is_not_something_to_wait_for() -> None:
+    store = Store()
+    store.apply(declared("t1", at=0.0, touches=("pptmstr/store.py",)))
+    store.apply(TaskClaimRequested(DEV, request_id="k1", task_id="t1"))
+    store.apply(TaskCompleted(DEV, task_id="t1", at=2.0))
+
+    store.apply(declared("t2", at=3.0, touches=("pptmstr/store.py",)))
+
+    # A completed task is not writing anything. Depending on it would be a wait that
+    # is already over, which reads on the board as a blocker that is not one.
+    assert store.snapshot().tasks["t2"].depends_on == ()
+
+
+def test_another_sessions_task_is_not_made_a_blocker() -> None:
+    """
+    A dependency on a task from another board would never appear on the board that
+    is waiting for it: unresolvable and invisible at once. The recorded limit is
+    that two sessions in one working directory get no protection from this.
+    """
+    store = Store()
+    other: NodeId = ("sess-2", None)
+    store.apply(declared("t1", at=0.0, by=other, touches=("pptmstr/store.py",)))
+    store.apply(declared("t2", at=1.0, by=LEAD, touches=("pptmstr/store.py",)))
+
+    assert store.snapshot().tasks["t2"].depends_on == ()
+
+
+def test_a_dependency_the_declarer_already_named_is_not_added_twice() -> None:
+    store = Store()
+    store.apply(declared("t1", at=0.0, touches=("pptmstr/store.py",)))
+    store.apply(declared("t2", at=1.0, deps=("t1",), touches=("pptmstr/store.py",)))
+
+    assert store.snapshot().tasks["t2"].depends_on == ("t1",)
+
+
+def test_an_added_dependency_cannot_close_a_cycle() -> None:
+    """
+    The added edges run after ``_would_cycle`` has passed, so this is the claim that
+    makes that ordering safe: nothing existing can name the new task, because its id
+    is not on the board yet, so every added edge points from a new node at an old one.
+    """
+    store = Store()
+    store.apply(declared("t1", at=0.0, touches=("a.py",)))
+    store.apply(declared("t2", at=1.0, deps=("t1",), touches=("a.py",)))
+    store.apply(declared("t3", at=2.0, deps=("t2",), touches=("a.py",)))
+
+    tasks = store.snapshot().tasks
+    assert (tasks["t1"].depends_on, tasks["t2"].depends_on) == ((), ("t1",))
+    assert tasks["t3"].depends_on == ("t2", "t1")
+    # No member of the chain is permanently blocked: the oldest is claimable now, and
+    # a cycle would mean nothing on the board ever is.
+    assert store.apply(TaskClaimRequested(DEV, request_id="k1")) == (
+        ClaimSettled(request_id="k1", task=store.snapshot().tasks["t1"]),
+    )
+
+
+def test_a_declarer_is_told_the_board_edited_its_plan() -> None:
+    """
+    The alternative is the lead finding out from a worker that cannot claim the
+    task -- the same fact, arriving later and looking like a defect.
+    """
+    store = Store()
+    store.apply(declared("t1", at=0.0, touches=("pptmstr/store.py",)))
+
+    effects = store.apply(declared("t2", at=1.0, request_id="d1", touches=("pptmstr/store.py",)))
+
+    assert effects == (TaskWriteSettled(request_id="d1", refusal=None, auto_depends=("t1",)),)
+
+
+def test_a_declaration_that_added_nothing_says_so_by_saying_nothing() -> None:
+    store = Store()
+    effects = store.apply(declared("t1", request_id="d1", touches=("pptmstr/store.py",)))
+
+    assert effects == (TaskWriteSettled(request_id="d1", refusal=None, auto_depends=()),)
+
+
+def test_a_refused_declaration_carries_no_added_dependencies() -> None:
+    store = Store()
+    store.apply(declared("t1", at=0.0, touches=("pptmstr/store.py",)))
+
+    # Duplicate id: nothing landed, so nothing was added to it.
+    effects = store.apply(declared("t1", at=1.0, request_id="d1", touches=("pptmstr/store.py",)))
+
+    assert effects == (
+        TaskWriteSettled(request_id="d1", refusal=TaskRefusal.DUPLICATE_ID, auto_depends=()),
+    )
+
+
+def test_the_declare_handler_reports_a_dependency_the_board_added() -> None:
+    """
+    The wiring, not the reducer (STYLE.md §2). The store can compute the edge and
+    the handler can still drop it on the floor, which is the whole failure this row
+    is about -- shared state written by one participant and read by nobody.
+    """
+    store = Store()
+    with _live_bus() as bus:
+        bus.call(
+            store,
+            "declare_task",
+            {"task_id": "t1", "title": "do t1", "touches": ["pptmstr/store.py"]},
+            sender=LEAD,
+        )
+        text = bus.call(
+            store,
+            "declare_task",
+            {"task_id": "t2", "title": "do t2", "touches": ["./pptmstr/store.py"]},
+            sender=LEAD,
+        )
+
+    assert store.snapshot().tasks["t2"].depends_on == ("t1",)
+    assert "is on the board" in text
+    assert "t1" in text
+    # Naming the reason as well as the id: an edge with no reason invites the lead to
+    # strip it back off, which is the concurrent write the field exists to prevent.
+    assert "same file" in text or "also write" in text
+
+
+def test_a_caller_cannot_evade_the_overlap_check_with_its_own_spelling() -> None:
+    """
+    Normalisation belongs to the store for the same reason ``declared_by`` does: the
+    reducer compares these, so a caller choosing the spelling could choose to miss.
+    """
+    store = Store()
+    with _live_bus() as bus:
+        bus.call(
+            store,
+            "declare_task",
+            {"task_id": "t1", "title": "do t1", "touches": ["  pptmstr/store.py  "]},
+            sender=LEAD,
+        )
+
+    assert store.snapshot().tasks["t1"].touches == ("pptmstr/store.py",)
 
 
 # -- claiming ---------------------------------------------------------------------

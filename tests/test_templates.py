@@ -118,6 +118,7 @@ _ALLOWED_COUNTS = (
     "two tasks with no dependency",
     "two agents on work",
     "two agents editing the same file",
+    "when two tasks on your board would write the same file",
 )
 
 
