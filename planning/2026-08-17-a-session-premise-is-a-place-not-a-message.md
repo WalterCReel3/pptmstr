@@ -255,7 +255,32 @@ conflict is a better outcome than picking a winner, and this record does not pic
   missing link then reads as pure addition, which is silently wrong. Optional link plus
   strict chronological rendering is honest and cheap. The first few real amendments
   will answer this better than argument will.
-- **What makes a worker read it a second time.** The sharpest unresolved item.
+- ~~**What makes a worker read it a second time.**~~ **Answered by the operator,
+  2026-08-18: the claim.** Built as `7d801a5` — `claim_task`'s reply names the brief
+  directory and its entry count, so a worker is pointed at the premises every time it
+  takes work.
+
+  **It is a mechanism, and none of the three candidates below were.** Prose, the lead
+  posting a concern, and the gate's rejection channel all depend on somebody
+  remembering; a claim fires every time and a worker that wants work cannot skip it.
+  That is the `depends_on`-versus-"within reason" distinction this project has
+  already settled once. It is also the moment a worker's "what am I building" is set,
+  since the claim reply already carries the specification and the premises are the
+  context that specification sits inside.
+
+  **The count is the mechanism, not the sentence.** "Re-read the brief" on every
+  claim is a ritual a worker performs or stops performing. "5 entries" is a fact it
+  can compare against what it saw last time, and it costs one directory listing in
+  the handler — the store cannot supply it, because the brief is on disk and
+  `_apply` is pure.
+
+  **What it does not cover, stated because it is the case the sibling record is
+  about:** a worker *mid-task* still does not re-read. A builder redirected while
+  holding a claim hears at its next claim, by which point it has built the superseded
+  version. The gate's `permissionDecisionReason` remains the only channel guaranteed
+  to reach a live worker, and closing that gap is a separate decision.
+
+  The original framing, kept because the reasoning still stands:
   Item 2's defect is not that `Task.detail` is immutable — it is that the worker holds
   a transcript copy nothing can invalidate, and a file moves that copy from the claim
   reply into the `Read` result rather than removing it. **A live brief nobody re-reads
