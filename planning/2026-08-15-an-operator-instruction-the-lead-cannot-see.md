@@ -1,6 +1,6 @@
 # An operator instruction reaches one worker, and the spec it changed has no second reader
 
-**Dated:** 2026-08-15 · **Status:** open, no code changed · **Found by:** dogfooding
+**Dated:** 2026-08-15 · **Status:** built 2026-08-18, `7b7e433` — see the end · **Found by:** dogfooding
 the splash panel work · **Precedent:**
 [`2026-08-12-a-message-has-no-sender-until-the-gate-gives-it-one.md`](2026-08-12-a-message-has-no-sender-until-the-gate-gives-it-one.md),
 whose `Concern.edited` fix is the same defect class in the other channel.
@@ -174,3 +174,37 @@ refusing, and the failure after that one is silent.
   amendment is a different operation and needs a different intent.
 - **Any code change in this pass.** The defect is described here and the fix is not
   decided — only the two obstacles it has to clear.
+
+
+---
+
+## Built — 2026-08-18, `7b7e433`
+
+**Position taken as written: `Task.detail` is the authoritative spec and a redirect
+amends it.** `TaskAmended` carries `task_id` and `detail`, with `node_id=None` marking it
+the operator's the way `ConcernEdited` does. The operator amends from the BOARD pane,
+which is where the specification became visible to them at all
+([`2026-08-18-the-board-is-a-tenant-of-a-pane-that-owes-it-nothing.md`](2026-08-18-the-board-is-a-tenant-of-a-pane-that-owes-it-nothing.md)).
+
+**Both obstacles held exactly as recorded.** `declare_task` is still not the amendment
+path and the re-declaration guard was not weakened — a test pins that declaring over a
+claimed id still changes nothing. And amending alone still would not have fixed the case
+that occurred.
+
+**The insufficiency is closed, and by the option this record preferred.** The choice was
+between the worker re-reading the board and the amendment being delivered as a concern.
+The first was called *structurally stronger* and *costing a discipline the workers do not
+currently have*; `what-the-board-does-not-carry.md` corrected that to a discipline they
+**cannot practise**, because no tool served a claimed task's spec back.
+
+That was still true after `read_board` was built: the tool existed and rendered id, state,
+title, owner and blockers, not `detail`. `6ca0cae` put the specification in the board read,
+which is what made the preferred option practisable. **The delivered-as-a-concern
+fallback was not built**, and on the current design does not need to be.
+
+**What remains open is whether a worker re-reads without being told to.** The mechanism
+exists; the discipline is prose in `worker_prompt`, which this repository records as the
+weakest available lever. It escapes the recorded objection only because "re-read the board
+before you build" is *pro-rigor* rather than restraint — see the premise record, which
+draws that distinction and relies on it too. Unmeasured, and the first team run under this
+build is what would settle it.

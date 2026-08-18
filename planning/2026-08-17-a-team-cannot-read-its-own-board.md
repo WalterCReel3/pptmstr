@@ -117,6 +117,14 @@ stronger option is available for the first time, and the weaker one — deliver 
 amendment as a concern and accept the transcript copy as a cache with an invalidation
 message — does not have to be built.
 
+**This is what happened, and it needed one thing the synthesis did not name.** Row 2 built
+the read tool, but `_board_line` rendered id, state, title, owner and blockers — not
+`detail`. So the primitive existed and still could not do the thing the amendment needs,
+and "a discipline the workers cannot practise" was still true after the row that was
+supposed to end it. `6ca0cae` closes that, `7b7e433` is the amendment, and a test drives
+the whole path: declare with a spec, claim it, amend it, and read the new spec back off
+the board as the worker holding it. **The weaker option was not built.**
+
 ### 2. A read tool forces a scoping decision both records declined
 
 `ui/board.py`'s `board_tasks` is scoped by `declared_by[0] == session_id`. `store._pick_claim`
@@ -167,7 +175,7 @@ Ordered by what unblocks what, not by value. Each row says why it sits where it 
 | **3** | ~~`detail` on `BoardTask`; `task_id` on `Concern`; the board rendered in the DETAIL pane~~ **done, `5b42e5c` and `59ee38c` — the pane is BOARD, not DETAIL; see below** | items 2 and 3; board-has-no-surface | Item 3's *"claimed, and there is an open concern about it"* is a projection over data that already exists — no new state, no flag to forget |
 | **4** | ~~`Task.touches`, and a `TaskDeclared` arm that appends an auto-dependency rather than refusing~~ **done, `de2b481` — see below** | item 9 | *"the highest-value store change in this document"* — the only change that removes a single point of failure. Needs row 1 |
 | **5** | The brief: ~~launch spec structured~~ **step 1 done, `879e425`**; entry writer on `settings.save`'s temp + `os.replace` primitive, a pane that derives and shows supersession, workers told the path with the confirm-or-refute framing | premise record steps 1–3 | Gated on row 0, which passed |
-| **6** | An amendment intent for `Task.detail`, `node_id=None`, distinct from `TaskDeclared` | operator-instruction record | Its own record establishes `declare_task` cannot be the path and the guard must not be weakened. Needs row 2 to be sufficient |
+| **6** | ~~An amendment intent for `Task.detail`, `node_id=None`, distinct from `TaskDeclared`~~ **done, `7b7e433`** | operator-instruction record | Its own record establishes `declare_task` cannot be the path and the guard must not be weakened. Needed row 2 to be sufficient — and needed the board read to carry `detail`, `6ca0cae` |
 | **7** | ~~Sign-off on declaration~~ **done, `c9ab068` — per-declaration** | task-reaches-the-board | ~~**Unit unresolved — see below.**~~ Answered by the operator. Needed row 1 for a reply channel |
 | **8** | ~~Prose and Makefile: `format-file`, worker instance addressing, "confirm the defect still exists", evidence class on findings, hold-vs-release with *both* rules stated together, and dropping `worker_prompt`'s *"it is the only way that reaches anyone"*~~ **done, `5a16521`** — `typecheck` **not** widened, see below | items 1, 4, 5, 6, 7, 8, 10 | Free, and unbuilt since 08-15. `notes/…what-a-worker-is-given.md` shows `make format` writing every file is still an active cause of report 3 |
 | **9** | ~~`relaunch` and `fork` carry the template~~ **done, `f4c9a6c`** | §3 above | Unrelated to the thesis, one line, and the team is broken without it |
