@@ -132,6 +132,19 @@ it. The declined summary remains the answer if the *default* ever proves wrong f
 someone who never re-docks anything — but that is a question about defaults, not an
 unmitigated defect.
 
+**If the default does prove wrong, the recorded first move is the inbox, not the
+summary** (operator, 2026-08-18). BOARD would default under NEEDS YOU in `MainDockSpace`
+rather than beside DETAIL in the context space. The two are conceptually the same object
+seen from opposite sides: the inbox is the queue of what needs *the operator*, and the
+board is the queue of what needs *the team*, both ordered, both drained, both read to
+decide what happens next. Sitting them together says that, where the context space says
+"supporting material for the row under the cursor" — which is what the board stopped
+being when it acquired a second reader.
+
+It is a one-line change of `dock_space_name` per layout and nothing else: the pane draws
+from a projection and knows nothing about where it is docked. Cheap enough that it is not
+worth pre-empting the operator's own re-docking to find out.
+
 **2. No row moves the cursor**, decided on the argument rather than by the operator. The
 single-cursor rule is not a DETAIL implementation detail that a new pane escapes by being
 new. A disclosure triangle was ruled *not* to be that click: it changes what the pane
