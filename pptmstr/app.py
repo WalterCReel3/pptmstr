@@ -642,11 +642,13 @@ def _triage_layout(panels: dict[str, Callable[[], None]]) -> hello_imgui.Docking
         # here for. A tab-mate rather than a fourth split -- the 0.32 width was
         # already chosen so the inbox keeps room for identity, wait and summary.
         _window("DETAIL", "ContextSpace", panels["DETAIL"]),
-        # Behind DETAIL, and that ordering is the whole of the operator's
-        # constraint: the queue is what the operator is here for, and a team's
-        # board is context for a decision rather than the decision. Absent in the
-        # common case without any layout help -- most sessions are solo, and the
-        # pane draws its own "not a team" line rather than an empty table.
+        # Behind DETAIL as a starting position: the queue is what the operator is
+        # here for, and a team's board is context for a decision rather than the
+        # decision. Only a default -- layout_condition is first_use_ever, so an
+        # operator who wants the board in its own split drags it there once and the
+        # ini keeps it. Absent in the common case without any layout help -- most
+        # sessions are solo, and the pane draws its own "not a team" line rather
+        # than an empty table.
         _window("BOARD", "ContextSpace", panels["BOARD"]),
         _window("CONTEXT", "ContextSpace", panels["CONTEXT"]),
         # Reachable, not resident. LOG is a debugging surface, and its old status as

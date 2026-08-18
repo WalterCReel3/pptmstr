@@ -28,9 +28,9 @@ it to step over (see ``transcript_pane`` for the same collision). So everything
 here is bounded by count and **says when it truncated**. A pane whose whole purpose
 is "nothing is lost" must not quietly lose things at the bottom.
 
-The session's board is not here. It is ``board_pane``, which is a tab-mate rather
-than a section, and the consequence is deliberate and not free: an approval is
-decided from this pane with the board off screen. The reasoning is in that module.
+The session's board is not here. It is ``board_pane``, which ships as a tab-mate
+rather than a section -- a starting arrangement the operator is free to re-dock,
+not a claim about where the board belongs. The reasoning is in that module.
 """
 
 from __future__ import annotations

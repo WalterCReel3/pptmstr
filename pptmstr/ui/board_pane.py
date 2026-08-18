@@ -13,12 +13,16 @@ caps itself at sixty rows and prints *"... N more"* inside a pane whose contract
 *a wider rendering of the row under the cursor* was hosting something that wanted
 its own scroll.
 
-**The board is no longer in DETAIL at all**, which is the operator's decision and
-carries a cost worth stating plainly rather than discovering: BOARD is a tab-mate
-of DETAIL, so during an approval the board is one click away and not on screen.
-That is the hazard ``_board``'s old docstring argued against, now unmitigated. The
-alternative on the table was a one-line summary left behind on the obligation
-branch, and it was declined in favour of one pane owning the subject outright.
+**The board is no longer in DETAIL at all.** The alternative was a one-line
+summary left behind on the obligation branch, and it was declined in favour of one
+pane owning the subject outright.
+
+This pane ships docked behind DETAIL, and that is a default rather than a
+constraint: ``layout_condition`` is ``first_use_ever``, so the coded arrangement
+applies on first run and the operator's own docking wins from then on and persists
+in the ini. An operator who wants the board beside an approval drags it into its
+own split once. What is worth the screen is theirs to decide, and this module's
+job is to be worth docking somewhere rather than to guess where.
 
 **No row moves the cursor.** The single-cursor rule in ``focus.py`` is not a DETAIL
 implementation detail that a new pane escapes by being new -- "click a task to

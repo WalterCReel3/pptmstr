@@ -115,12 +115,22 @@ against the recommendation attached to them. Recorded as decisions with their co
 rather than as the outcomes of a discussion nobody can reconstruct.
 
 **1. DETAIL keeps nothing. This is a move, not a promotion.** The summary line was
-offered and declined in favour of one pane owning the subject outright. **The cost is
-real and is not mitigated anywhere:** BOARD is a tab-mate of DETAIL, so during an
-approval the board is one click away and off screen, which is exactly the hazard
-`_board`'s docstring closed by drawing on both branches. If an operator ever approves a
-message between two agents without the context to judge it, this is the decision that
-allowed it, and the fix is the declined summary rather than anything new.
+offered and declined in favour of one pane owning the subject outright.
+
+**What the tab position is, stated correctly.** BOARD ships docked behind DETAIL, and
+that is a *default*, not a constraint. `layout_condition` is `first_use_ever` — the
+hello_imgui default, which this app does not override — and `ini_folder_type` is the user
+config folder, so the coded arrangement applies on first run and the operator's own
+docking wins from then on and persists in `~/.config/pptmstr.ini`. An operator who wants
+the board beside an approval rather than behind it drags it into its own split once. The
+`[Window][BOARD]` entry is already in that file.
+
+So the thing to record is not a hazard the design imposes. **What arrangement is worth
+the screen is the operator's call, and the layout system already makes it theirs.** The
+pane's job is to be worth docking somewhere; where that is belongs to whoever is running
+it. The declined summary remains the answer if the *default* ever proves wrong for
+someone who never re-docks anything — but that is a question about defaults, not an
+unmitigated defect.
 
 **2. No row moves the cursor**, decided on the argument rather than by the operator. The
 single-cursor rule is not a DETAIL implementation detail that a new pane escapes by being
