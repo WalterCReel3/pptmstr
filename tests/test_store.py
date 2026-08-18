@@ -15,6 +15,7 @@ import pytest
 from pptmstr.intents import (
     AgentFinished,
     AgentRemoved,
+    AgentResumed,
     AgentSpawned,
     ApprovalRequested,
     ApprovalResolved,
@@ -736,3 +737,188 @@ def test_an_ordinary_state_change_leaves_a_live_session_alone() -> None:
 
     assert before is not None and after is not None
     assert (before.ended_at, before.acknowledged) == (after.ended_at, after.acknowledged)
+
+
+# -- a declared end is final ------------------------------------------------------
+#
+# The other half of the boundary tested just above. FAILED is revivable because a
+# session that errored and then answered is an ordinary session again. DONE and
+# CANCELLED are not: they say somebody ended this agent, and the only intents that
+# may move a record off them are AgentFinished and AgentResumed.
+
+
+def test_a_late_message_cannot_revive_a_finished_subagent() -> None:
+    """
+    Regression. A sub-agent's final AssistantMessage is on the message stream
+    *before* the SubagentStop control frame, but the frame is dispatched
+    immediately while the message waits in the SDK's buffer -- so the store sees
+    AgentFinished first and the StateChanged the message produces second. The
+    answer carries no ToolUseBlock, so it translates to a bare THINKING.
+    """
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(spawn(CHILD, ROOT))
+    store.apply(AgentFinished(CHILD, AgentState.DONE, ended_at=7.0))
+    store.apply(StateChanged(CHILD, AgentState.THINKING))
+
+    rec = store.snapshot().get(CHILD)
+    assert rec is not None
+    assert rec.state is AgentState.DONE
+    assert rec.ended_at == 7.0
+
+
+def test_a_late_message_does_not_restart_a_finished_agents_clocks() -> None:
+    """
+    The observable half. THINKING is active, so the row throbbed and the app never
+    idled; ended_at going back to None restarted the elapsed count on a session
+    that had already stopped.
+    """
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(AgentFinished(ROOT, AgentState.DONE, ended_at=7.0))
+    store.apply(StateChanged(ROOT, AgentState.THINKING, topic="reading store.py"))
+
+    assert store.snapshot().any_active is False
+
+
+def test_a_late_message_cannot_relabel_what_a_finished_agent_was_doing() -> None:
+    """
+    Unlike the parked guard, which lets the topic through because naming the call
+    under review is useful, nothing arriving after the end describes the present.
+    The topic a finished sub-agent carries is the first line of its answer.
+    """
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(spawn(CHILD, ROOT))
+    store.apply(SubagentProgress(CHILD, "the rail loses its throbber"))
+    store.apply(AgentFinished(CHILD, AgentState.DONE, ended_at=7.0))
+    store.apply(StateChanged(CHILD, AgentState.CALLING_TOOL, topic="grep -rn latch"))
+
+    rec = store.snapshot().get(CHILD)
+    assert rec is not None
+    assert rec.topic == "the rail loses its throbber"
+
+
+def test_a_late_progress_report_cannot_relabel_a_finished_subagent() -> None:
+    """
+    The same hole, one arm along: `task_progress` arrives as a SystemMessage on the
+    same buffered stream, so it inverts against the stop hook the same way. This arm
+    already kept the terminal state; the topic was still overwritten, replacing the
+    answer's first line with whatever the sub-agent was doing before it answered.
+    """
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(spawn(CHILD, ROOT))
+    store.apply(SubagentProgress(CHILD, "the rail loses its throbber"))
+    store.apply(AgentFinished(CHILD, AgentState.DONE, ended_at=7.0))
+    store.apply(SubagentProgress(CHILD, "Reading store.py"))
+
+    rec = store.snapshot().get(CHILD)
+    assert rec is not None
+    assert rec.state is AgentState.DONE
+    assert rec.topic == "the rail loses its throbber"
+
+
+def test_a_cancelled_session_is_final_too() -> None:
+    """CANCELLED says somebody ended it, which is DONE's statement, not FAILED's."""
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(AgentFinished(ROOT, AgentState.CANCELLED, ended_at=3.0))
+    store.apply(StateChanged(ROOT, AgentState.THINKING))
+
+    rec = store.snapshot().get(ROOT)
+    assert rec is not None
+    assert rec.state is AgentState.CANCELLED
+    assert rec.ended_at == 3.0
+
+
+def test_a_woken_subagent_still_comes_back() -> None:
+    """
+    The reason DONE can be latched at all. A sibling's SendMessage restarts a
+    finished sub-agent under its original id, and the CLI reports it as a second
+    SubagentStart -- which the driver turns into AgentResumed, not a StateChanged.
+    Latching DONE closes the accidental revival path without closing the real one.
+    """
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(spawn(CHILD, ROOT))
+    store.apply(AgentFinished(CHILD, AgentState.DONE, ended_at=7.0))
+    store.apply(AgentResumed(CHILD, at=9.0, topic="answering again"))
+
+    rec = store.snapshot().get(CHILD)
+    assert rec is not None
+    assert rec.state is AgentState.THINKING
+    assert rec.ended_at is None
+    assert store.snapshot().any_active is True
+
+
+def test_a_failed_session_is_still_revivable() -> None:
+    """
+    The recorded decision this fix must not break, asserted from the other side:
+    the latch is scoped to the ends that were declared, not to terminality.
+    """
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(AgentFinished(ROOT, AgentState.FAILED, ended_at=5.0, error="HTTP 529"))
+    store.apply(FailureAcknowledged(ROOT))
+    store.apply(StateChanged(ROOT, AgentState.THINKING, topic="trying again"))
+
+    rec = store.snapshot().get(ROOT)
+    assert rec is not None
+    assert rec.state is AgentState.THINKING
+    assert rec.ended_at is None
+    assert rec.acknowledged is False
+
+
+def test_a_finished_agent_keeps_a_late_approval_without_coming_back() -> None:
+    """
+    A PreToolUse gate whose hook crossed the end still has a coroutine parked on a
+    future, so the approval is recorded and reaches the operator. What it must not
+    do is claim the agent is waiting on them: it is over, and the parked call is
+    unwinding.
+    """
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(spawn(CHILD, ROOT))
+    store.apply(AgentFinished(CHILD, AgentState.DONE, ended_at=7.0))
+    store.apply(ApprovalRequested(CHILD, pending(CHILD, "late")))
+
+    snap = store.snapshot()
+    rec = snap.get(CHILD)
+    assert rec is not None
+    assert rec.state is AgentState.DONE
+    assert rec.ended_at == 7.0
+    assert [p.id for p in snap.approvals] == ["late"]
+
+
+def test_resolving_a_late_approval_cannot_revive_a_finished_agent() -> None:
+    """
+    Reachable two ways, both after the end: the CLI's per-hook timeout cancels the
+    gate, and Bridge.stop rejects every parked approval at shutdown. Both resolve
+    unapproved, which is the branch that sets THINKING.
+    """
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(spawn(CHILD, ROOT))
+    store.apply(AgentFinished(CHILD, AgentState.DONE, ended_at=7.0))
+    store.apply(ApprovalRequested(CHILD, pending(CHILD, "late")))
+    store.apply(ApprovalResolved(CHILD, "late", approved=False, reason="shutting down"))
+
+    snap = store.snapshot()
+    rec = snap.get(CHILD)
+    assert rec is not None
+    assert rec.state is AgentState.DONE
+    assert rec.ended_at == 7.0
+    assert rec.pending == ()
+    assert snap.any_active is False
+
+
+def test_an_approval_still_parks_a_live_node() -> None:
+    """The latch must not reach a node that has not ended."""
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(ApprovalRequested(ROOT, pending(ROOT, "p1")))
+    assert store.snapshot().nodes[ROOT].state is AgentState.AWAITING_APPROVAL
+
+    store.apply(ApprovalResolved(ROOT, "p1", approved=False))
+    assert store.snapshot().nodes[ROOT].state is AgentState.THINKING

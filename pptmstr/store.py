@@ -69,6 +69,27 @@ from .model import (
 )
 from .transcript import Transcript
 
+# The ends that cannot be undone by an ordinary status update.
+#
+# A narrower question than ``AgentState.is_terminal``, and deliberately not the
+# same set. ``is_terminal`` asks whether another transition is expected without
+# the operator; this asks who is allowed to contradict the end, and only
+# ``AgentFinished`` and ``AgentResumed`` are.
+#
+# FAILED is absent on purpose. A session that errored and then answered is an
+# ordinary session again (see the StateChanged arm), and that recovery arrives as
+# a plain StateChanged because nothing announces it -- the driver re-asserts a
+# standing failure afterwards rather than suppressing the recovery.
+#
+# DONE and CANCELLED make the opposite statement: somebody ended this agent. A
+# sub-agent's SubagentStop fires once, and the wake that can follow it comes in as
+# a second SubagentStart, which the driver translates to ``AgentResumed`` -- so
+# nothing legitimate reaches a finished sub-agent through StateChanged. What does
+# reach it is its own last AssistantMessage: the message stream is buffered while
+# the control frame carrying the stop is dispatched straight away, so the answer
+# translates into a THINKING that lands after the end it preceded.
+_FINAL_STATES = frozenset({AgentState.DONE, AgentState.CANCELLED})
+
 
 class Store:
     """
@@ -197,6 +218,12 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
             # `pending` is the authority: while it is set, any other state is a lie.
             # The topic still updates, because naming the call being reviewed is
             # useful and not misleading.
+            #
+            # A node whose end was *declared* is a different case and comes first:
+            # nothing that arrives afterwards describes the present, including the
+            # topic. See _FINAL_STATES.
+            if rec.state in _FINAL_STATES:
+                return snap, ()
             state = AgentState.AWAITING_APPROVAL if rec.pending else intent.state
             changes: dict[str, object] = {"state": state}
             if intent.topic is not None:
@@ -228,7 +255,13 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
             #
             # Same rule as StateChanged: a parked node stays parked, or a progress
             # report arriving while the sub-agent waits on the operator would hide
-            # the fact that it is waiting.
+            # the fact that it is waiting. And a declared end wins outright -- the
+            # `task_progress` system message this is built from rides the same
+            # buffered stream as the AssistantMessage that motivates the guard
+            # there, so one can land after the stop hook and relabel a finished
+            # sub-agent with what it was doing before it answered.
+            if rec.state in _FINAL_STATES:
+                return snap, ()
             if rec.pending:
                 state = AgentState.AWAITING_APPROVAL
             elif rec.state.is_terminal:
@@ -322,10 +355,22 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
             else:
                 # Appended, never replaced. Replacing is what orphaned the
                 # earlier approval's future and hung its agent invisibly.
+                #
+                # The approval is recorded whatever state the node is in -- a gate
+                # whose hook crossed the end still has a coroutine parked on a
+                # future, and ``needs_you`` walks ``pending`` rather than the state,
+                # so the operator can still answer it. Only the *state* is withheld
+                # from a node whose end was declared: it is over, and saying it
+                # waits on a reviewer would be the revival this guard exists to
+                # stop, one arm along.
                 if rec.pending_by_id(intent.pending.id) is None:
                     nodes[intent.node_id] = rec.with_(
                         pending=rec.pending + (intent.pending,),
-                        state=AgentState.AWAITING_APPROVAL,
+                        state=(
+                            rec.state
+                            if rec.state in _FINAL_STATES
+                            else AgentState.AWAITING_APPROVAL
+                        ),
                     )
 
         case ApprovalResolved():
@@ -338,7 +383,17 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
             # Still parked if other calls from the same turn are outstanding. Moving
             # to RUNNING_TOOL here would hide them and re-create the bug this tuple
             # exists to fix, one layer up.
-            if remaining:
+            #
+            # A settled approval always leaves ``pending``, including on a node whose
+            # end was declared -- otherwise the queue keeps a row for a decision
+            # already made. The state does not move there: the two ways an approval
+            # resolves after the end are the CLI cancelling the gate on its own
+            # timeout and Bridge.stop rejecting every parked future at shutdown, and
+            # both take the unapproved branch, which would otherwise report a
+            # finished agent as thinking.
+            if rec.state in _FINAL_STATES:
+                state = rec.state
+            elif remaining:
                 state = AgentState.AWAITING_APPROVAL
             else:
                 state = AgentState.RUNNING_TOOL if intent.approved else AgentState.THINKING
