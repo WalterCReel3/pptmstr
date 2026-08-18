@@ -955,6 +955,46 @@ def test_the_launcher_hands_a_session_the_operators_subagent_cap() -> None:
     assert [s.subagent_cap for s in started] == [6]
 
 
+def test_relaunching_a_team_session_relaunches_a_team() -> None:
+    """
+    ``relaunch`` and ``fork`` exist to re-run work, and both dropped the template
+    on the way to ``_launch`` -- so the two verbs whose whole purpose is repeating a
+    session silently repeated it as a solo one. Nothing on screen said so: the new
+    session runs, it just has no roles.
+
+    The call sites now pass ``AgentRecord.template``, which is None on anything that
+    is not a session root. That None is resolved here rather than at each caller, so
+    the fallback is one rule instead of two that have to agree.
+    """
+    from pptmstr.app import AppState, _launch
+    from pptmstr.settings import Settings
+
+    started: list[AgentSession] = []
+
+    class _RecordingPool:
+        def submit(self, session: AgentSession) -> None:
+            started.append(session)
+
+    bridge = Bridge()
+    bridge.start()
+    try:
+        state = AppState(store=Store(), bridge=bridge, settings=Settings())
+        state.pool = _RecordingPool()  # type: ignore[assignment]
+        # What a relaunch of a team session passes, then what a relaunch of a
+        # sub-agent record or a solo session passes, then a name no template has.
+        for template in ("feature", None, "no-such-template"):
+            _launch(state, "do a thing", "claude-sonnet-5", "/tmp", template)
+        for _ in range(200):
+            if len(started) == 3:
+                break
+            time.sleep(0.005)
+    finally:
+        bridge.stop()
+
+    assert [s.template.name for s in started] == ["feature", "solo", "solo"]
+    assert started[0].template.roles, "a team template with no roles is a solo session"
+
+
 async def _fire_stop(session, agent_id: str, answer: str = "") -> None:
     await session._subagent_stop(  # type: ignore[arg-type]
         {

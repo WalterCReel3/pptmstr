@@ -36,7 +36,9 @@ _SMALL_FONT = 12.5
 class HealthActions:
     interrupt: Callable[[NodeId], None]
     close: Callable[[NodeId], None]
-    fork: Callable[[str, str, str], None]
+    # task, model, cwd, template -- see InboxActions.relaunch for why the last one
+    # is carried and not defaulted.
+    fork: Callable[[str, str, str, str | None], None]
 
 
 def _small() -> None:
@@ -142,7 +144,7 @@ def draw(snap: Snapshot, node: NodeId | None, actions: HealthActions, now: float
         # compaction count because that count is the reason to reach for it: a
         # session that has compacted has already lost the reasoning that got it
         # here, and continuing it is worse than restarting it.
-        actions.fork(root.task, root.model, root.cwd or ".")
+        actions.fork(root.task, root.model, root.cwd or ".", root.template)
 
     _small()
     if root.state is AgentState.AWAITING_INPUT:

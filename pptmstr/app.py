@@ -298,15 +298,23 @@ def _apply_theme_if_dirty(state: AppState) -> None:
     state.theme_dirty = False
 
 
-def _launch(state: AppState, task: str, model: str, cwd: str, template: str = "solo") -> None:
-    """Start a session. Safe from the UI thread; the pool is touched on the loop."""
+def _launch(state: AppState, task: str, model: str, cwd: str, template: str | None = None) -> None:
+    """
+    Start a session. Safe from the UI thread; the pool is touched on the loop.
+
+    ``template`` None means solo, and the default is spelled here rather than at
+    each call site for a reason worth the line: ``relaunch`` and ``fork`` pass
+    ``AgentRecord.template``, which is None on any record that is not a session
+    root, and a caller that had to remember the fallback is a caller that can
+    forget it.
+    """
     pool = state.pool
     if pool is None:
         return
     # An unknown name falls back to solo rather than refusing the launch: the task
     # the operator typed is worth more than the team shape they mistyped, and the
     # log line says which one ran.
-    shape = templates.by_name(template) or templates.SOLO
+    shape = (templates.by_name(template) if template else None) or templates.SOLO
 
     async def go() -> None:
         pool.submit(
@@ -496,7 +504,9 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
                 interrupt=lambda node: _session_action(state, lambda p: p.interrupt(node)),
                 close=lambda node: _session_action(state, lambda p: p.close(node)),
                 dismiss=lambda node: state.bridge.emit(FailureAcknowledged(node)),
-                relaunch=lambda task, model, cwd: _launch(state, task, model, cwd),
+                relaunch=lambda task, model, cwd, template: _launch(
+                    state, task, model, cwd, template
+                ),
             ),
             state.frame_now,
             wrap=state.settings.wrap_inputs,
@@ -555,7 +565,7 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
             health.HealthActions(
                 interrupt=lambda node: _session_action(state, lambda p: p.interrupt(node)),
                 close=lambda node: _session_action(state, lambda p: p.close(node)),
-                fork=lambda task, model, cwd: _launch(state, task, model, cwd),
+                fork=lambda task, model, cwd, template: _launch(state, task, model, cwd, template),
             ),
             state.frame_now,
         )
