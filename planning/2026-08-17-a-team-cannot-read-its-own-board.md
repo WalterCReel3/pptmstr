@@ -163,7 +163,7 @@ Ordered by what unblocks what, not by value. Each row says why it sits where it 
 |---|---|---|---|
 | **0** | ~~Two questions on `scripts/verify_worker_context.py`~~ **done, run `84cb7f` — see below** | premise record step 0; §3 above | Group 5 is **void** if the first fails, and the second changes group 5's shape. Cheapest item here by a wide margin |
 | **1** | ~~`declare_task`, `complete_task`, `release_task` become question-shaped and answer truthfully~~ **done, `2dddfea`** | phase 6; item 9 | The keystone. Fixes a live defect standalone, and carries the plumbing three later rows need |
-| **2** | A board read: the projection moves out of `ui/board.py`, one bus tool exposes it | reports 2 and 3; item 2 | Answers the report that is *literally true and a gap in the original specification*. Makes §1 above buildable |
+| **2** | ~~A board read: the projection moves out of `ui/board.py`, one bus tool exposes it~~ **done, `b5287c3`** | reports 2 and 3; item 2 | Answers the report that is *literally true and a gap in the original specification*. Makes §1 above buildable |
 | **3** | `detail` on `BoardTask`; `task_id` on `Concern`; the board rendered in the DETAIL pane | items 2 and 3; board-has-no-surface | Item 3's *"claimed, and there is an open concern about it"* is a projection over data that already exists — no new state, no flag to forget |
 | **4** | `Task.touches`, and a `TaskDeclared` arm that appends an auto-dependency rather than refusing | item 9 | *"the highest-value store change in this document"* — the only change that removes a single point of failure. Needs row 1 |
 | **5** | The brief: launch spec structured, entry writer on `settings.save`'s temp + `os.replace` primitive, a pane that derives and shows supersession, workers told the path with the confirm-or-refute framing | premise record steps 1–3 | Gated on row 0 |
@@ -275,15 +275,28 @@ raises against per-declaration sign-off: the operator has no basis to pick the n
 launch either. The difference is that a wrong budget is paid once and raised, and a wrong
 per-task gate is paid every time.
 
-**2. Narrow read or general read.** Item 2 endorses `task_detail(task_id)`. That answers
-item 2 and does **not** answer report 2 — a worker still cannot list tasks — and therefore
-does not answer report 3, which the notes argue is mostly report 2's symptom. A general
-read subsumes the narrow one. The counter is real and not dismissed: showing every worker
-the whole board is a wider grant than anything recorded, and may feed the relitigation
-report 1 is about.
+**2. Narrow read or general read.** ~~Item 2 endorses `task_detail(task_id)`.~~
+**Answered by the operator, 2026-08-18: general, on the grounds that it is easier to
+narrow later than to discover the narrow one was never enough.** That answers report 2
+directly rather than answering item 2 and leaving the report open. The counter stands and
+is not dismissed — showing every worker the whole board is a wider grant than anything
+previously recorded, and may feed the relitigation report 1 is about. It is now a thing to
+watch on the next team run rather than a thing to argue: **if relitigation rises, the
+narrowing is a filter on `board_tasks`, not a redesign**, because the tool and the pane
+share one projection.
 
-**3. Session-scoped or fleet-scoped.** §2 above. Currently answered two different ways in
-two files, and the read tool forces one.
+**3. Session-scoped or fleet-scoped.** ~~§2 above.~~ **Answered by the operator,
+2026-08-18: session-scoped, without qualification.** Implemented as `Task.belongs_to`,
+applied by `board_tasks` and `store._pick_claim` alike, so the cross-session claim §2
+describes is no longer a state the reducer can enter rather than one nothing happened to
+exercise.
+
+A consequence the question did not anticipate, recorded because it is the kind of thing a
+later reader will meet as a surprise: **a task with no declarer now belongs to no
+session** — not to every session. Nothing in the application builds one, since the gate
+stamps every declaration and an unstamped call raises, so the only sources were tests. The
+alternative would have left precisely the unattributed tasks claimable by anybody, which
+is the hole the question was asked to close.
 
 **4. The same-day conflict.** `what-the-board-does-not-carry.md` item 0 — *"at the start of
 a session, the lead declares at least one task from `planning/`"* — against its sibling,
@@ -389,10 +402,11 @@ run and none has been performed for this record.
 2. ~~**Row 9**, `relaunch`/`fork`.~~ **done**, `f4c9a6c`.
 3. ~~**Row 8**, the prose and the two Makefile targets.~~ **done**, `5a16521`, less the
    `typecheck` widening, which is not free and is now its own decision.
-4. **Row 2**, the board read — **stopped here.** Questions 2 and 3 have no answers, and
-   the record's own terms are that taking them by implication is how this goes wrong.
-   Everything above row 2 was chosen precisely because it needed neither.
-5. **Rows 3 and 4**, the board's surface and `Task.touches`.
+4. ~~**Row 2**, the board read — after questions 2 and 3 above have answers.~~ **done**,
+   `b5287c3`, with both questions answered by the operator first rather than by the code.
+5. **Rows 3 and 4**, the board's surface and `Task.touches`. **Next**, and row 3 is
+   cheaper than the table says: `detail` on `BoardTask` now reaches the DETAIL pane *and*
+   `read_board` from one field, because the two share a projection.
 6. **Row 5**, the brief — after row 0 says it can exist.
 7. **Rows 6 and 7**, amendment and sign-off — after question 1 has an answer, and with the
    baseline numbers recorded before either lands.
