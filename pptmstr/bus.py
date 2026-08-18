@@ -284,8 +284,25 @@ def build_server(session: AgentSession) -> Any:
     @tool(
         "post_concern",
         "Send a concern to another agent working on this task. Use the agent's "
-        "role name, or 'lead' for the agent that started the work.",
-        {"to": str, "subject": str, "body": str},
+        "role name, or 'lead' for the agent that started the work. Name task_id "
+        "when the concern is about a task on the board.",
+        _schema(
+            {
+                "to": {"type": "string"},
+                "subject": {"type": "string"},
+                "body": {"type": "string"},
+                "task_id": {
+                    "type": "string",
+                    "description": (
+                        "The board task this concern is about. Omit it for a message "
+                        "that is not about one. Naming it is what puts the reason on "
+                        "the board next to the task, so an operator watching a row "
+                        "that is not moving can see why."
+                    ),
+                },
+            },
+            required=("to", "subject", "body"),
+        ),
     )
     async def post_concern(args: dict[str, Any]) -> dict[str, Any]:
         sender = _sender(args)
@@ -309,6 +326,12 @@ def build_server(session: AgentSession) -> Any:
             # told differs from what the sender wrote, and this is the only place
             # that fact survives the approval being resolved.
             edited=bool(args.get(EDITED_KEY)),
+            # Not checked against the board here. The tool's other refusal is a
+            # role that does not resolve, which stops the message reaching anyone;
+            # a task id that does not resolve costs the link and nothing else, and
+            # refusing the whole message over an optional field would lose the one
+            # part that was certainly correct. The pane reports the dangling id.
+            task_id=str(args.get("task_id", "")).strip() or None,
         )
         bridge.emit(ConcernPosted(sender, concern))
         return _text(f"Concern delivered to {to}.")

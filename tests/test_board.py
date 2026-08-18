@@ -24,6 +24,7 @@ from pptmstr.intents import (
     AgentRemoved,
     AgentSpawned,
     ConcernPosted,
+    ConcernWithdrawn,
     InboxRead,
     StateChanged,
     TaskClaimRequested,
@@ -55,9 +56,28 @@ def spawn(store: Store, node: NodeId, *, agent_type: str | None, task: str = "")
     )
 
 
-def declare(store: Store, tid: str, *, by: NodeId, deps: tuple[str, ...] = (), at: float = 0.0):
+def declare(
+    store: Store,
+    tid: str,
+    *,
+    by: NodeId,
+    deps: tuple[str, ...] = (),
+    at: float = 0.0,
+    detail: str = "",
+    touches: tuple[str, ...] = (),
+):
     store.apply(
-        TaskDeclared(Task(id=tid, title=f"do {tid}", depends_on=deps, declared_at=at), node_id=by)
+        TaskDeclared(
+            Task(
+                id=tid,
+                title=f"do {tid}",
+                detail=detail,
+                depends_on=deps,
+                declared_at=at,
+                touches=touches,
+            ),
+            node_id=by,
+        )
     )
 
 
@@ -647,3 +667,180 @@ def test_a_session_with_no_template_recorded_has_no_board() -> None:
 
 def test_a_session_with_no_root_record_has_no_board() -> None:
     assert not has_board(Snapshot.empty(), "sess-9")
+
+
+# -- what a row carries for the operator (row 3) -----------------------------------
+#
+# `Task.detail` was written once, read once, by one agent, and displayed nowhere.
+# `Concern` had no task_id, so a task stalled for a good reason was pixel-identical
+# to ordinary work in progress -- `owner_gone` distinguishes the wrong two cases.
+
+
+def test_a_row_carries_the_spec_its_declarer_wrote() -> None:
+    store = Store()
+    team(store, S1)
+    declare(store, "t1", by=LEAD_1, detail="rewrite the retry loop; keep the backoff")
+
+    assert board_tasks(store.snapshot(), S1)[0].detail == (
+        "rewrite the retry loop; keep the backoff"
+    )
+
+
+def test_a_row_carries_the_files_the_task_claimed() -> None:
+    """
+    On the row because the dependency graph is now partly derived from it: an edge
+    the board added is not in the lead's plan, and `blocked_on` without `touches`
+    is a wait with no visible cause.
+    """
+    store = Store()
+    team(store, S1)
+    declare(store, "t1", by=LEAD_1, at=0.0, touches=("pptmstr/store.py",))
+    declare(store, "t2", by=LEAD_1, at=1.0, touches=("./pptmstr/store.py",))
+
+    rows = {r.id: r for r in board_tasks(store.snapshot(), S1)}
+    # Normalised, so the row shows the spelling the overlap check actually compared.
+    assert rows["t2"].touches == ("pptmstr/store.py",)
+    assert rows["t2"].blocked_on == ("t1",)
+
+
+def test_a_stalled_task_shows_the_reason_somebody_bothered_to_record() -> None:
+    """
+    The defect this row exists for: a live, working, correctly-reasoning owner that
+    is deliberately waiting. `owner_gone` is false, so without this the row reads
+    as ordinary progress.
+    """
+    store = Store()
+    team(store, S1)
+    declare(store, "t1", by=LEAD_1)
+    store.apply(TaskClaimRequested(DEV_1, request_id="k1", task_id="t1"))
+    store.apply(
+        ConcernPosted(
+            DEV_1,
+            Concern(
+                id="c1",
+                sender=DEV_1,
+                recipient=LEAD_1,
+                subject="waiting on the schema decision",
+                body="holding this until the store lands",
+                posted_at=1.0,
+                task_id="t1",
+            ),
+        )
+    )
+
+    row = board_tasks(store.snapshot(), S1)[0]
+    assert (row.state, row.owner_gone) == (TaskState.CLAIMED, False)
+    assert row.concerns == ("c1",)
+
+
+def test_a_concern_about_nothing_in_particular_lands_on_no_row() -> None:
+    store = Store()
+    team(store, S1)
+    declare(store, "t1", by=LEAD_1)
+    store.apply(
+        ConcernPosted(
+            DEV_1,
+            Concern(
+                id="c1",
+                sender=DEV_1,
+                recipient=LEAD_1,
+                subject="a question",
+                body="which model should I use",
+                posted_at=1.0,
+            ),
+        )
+    )
+
+    assert board_tasks(store.snapshot(), S1)[0].concerns == ()
+
+
+def test_a_withdrawn_concern_is_not_a_reason_any_more() -> None:
+    store = Store()
+    team(store, S1)
+    declare(store, "t1", by=LEAD_1)
+    store.apply(ConcernPosted(DEV_1, _about("c1", "t1")))
+    store.apply(ConcernWithdrawn("c1"))
+
+    assert board_tasks(store.snapshot(), S1)[0].concerns == ()
+
+
+def test_a_delivered_concern_still_explains_the_row() -> None:
+    """
+    The recipient having read it does not settle the matter it raised. Dropping it
+    on delivery would make the explanation vanish exactly when someone started
+    acting on it.
+    """
+    store = Store()
+    team(store, S1)
+    declare(store, "t1", by=LEAD_1)
+    store.apply(ConcernPosted(DEV_1, _about("c1", "t1")))
+    store.apply(InboxRead(LEAD_1, request_id="r1", at=2.0))
+
+    assert board_tasks(store.snapshot(), S1)[0].concerns == ("c1",)
+
+
+def test_the_reasons_on_a_row_are_ordered_oldest_first() -> None:
+    store = Store()
+    team(store, S1)
+    declare(store, "t1", by=LEAD_1)
+    store.apply(ConcernPosted(DEV_1, _about("later", "t1", at=9.0)))
+    store.apply(ConcernPosted(DEV_1, _about("earlier", "t1", at=2.0)))
+
+    assert board_tasks(store.snapshot(), S1)[0].concerns == ("earlier", "later")
+
+
+def test_another_sessions_concern_does_not_explain_this_boards_row() -> None:
+    """
+    Scoped by sender to match `board_concerns`, so a row's explanation and the
+    concern log below it cannot disagree about whose messages these are.
+    """
+    store = Store()
+    team(store, S1)
+    team(store, S2)
+    declare(store, "t1", by=LEAD_1)
+    store.apply(ConcernPosted(DEV_2, _about("c1", "t1", sender=DEV_2, recipient=LEAD_2)))
+
+    assert board_tasks(store.snapshot(), S1)[0].concerns == ()
+
+
+def test_a_concern_naming_a_task_that_was_never_declared_says_so() -> None:
+    """
+    Not refused at the tool: the message was still sent, and rejecting mail over a
+    typo in an optional field costs the part that was certainly correct. Reported
+    the way `missing` reports a dependency that does not exist.
+    """
+    store = Store()
+    team(store, S1)
+    store.apply(ConcernPosted(DEV_1, _about("c1", "t-nope")))
+
+    row = board_concerns(store.snapshot(), S1)[0]
+    assert (row.task_id, row.task_missing) == ("t-nope", True)
+
+
+def test_a_concern_naming_a_real_task_is_not_marked_missing() -> None:
+    store = Store()
+    team(store, S1)
+    declare(store, "t1", by=LEAD_1)
+    store.apply(ConcernPosted(DEV_1, _about("c1", "t1")))
+
+    row = board_concerns(store.snapshot(), S1)[0]
+    assert (row.task_id, row.task_missing) == ("t1", False)
+
+
+def _about(
+    cid: str,
+    tid: str | None,
+    *,
+    at: float = 1.0,
+    sender: NodeId = DEV_1,
+    recipient: NodeId = LEAD_1,
+) -> Concern:
+    return Concern(
+        id=cid,
+        sender=sender,
+        recipient=recipient,
+        subject="waiting on the schema decision",
+        body="holding this until the store lands",
+        posted_at=at,
+        task_id=tid,
+    )

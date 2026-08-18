@@ -349,20 +349,26 @@ def board_task(
     tid: str = "t1",
     *,
     title: str = "do t1",
+    detail: str = "",
     state: TaskState = TaskState.PENDING,
     owner: str | None = None,
     owner_gone: bool = False,
     blocked_on: tuple[str, ...] = (),
     missing: tuple[str, ...] = (),
+    touches: tuple[str, ...] = (),
+    concerns: tuple[str, ...] = (),
 ) -> BoardTask:
     return BoardTask(
         id=tid,
         title=title,
+        detail=detail,
         state=state,
         owner=owner,
         owner_gone=owner_gone,
         blocked_on=blocked_on,
         missing=missing,
+        touches=touches,
+        concerns=concerns,
     )
 
 
@@ -374,6 +380,8 @@ def board_concern(
     subject: str = "the retry loop never terminates",
     state: ConcernState = ConcernState.POSTED,
     edited: bool = False,
+    task_id: str | None = None,
+    task_missing: bool = False,
 ) -> BoardConcern:
     return BoardConcern(
         id=cid,
@@ -382,6 +390,8 @@ def board_concern(
         subject=subject,
         state=state,
         edited=edited,
+        task_id=task_id,
+        task_missing=task_missing,
     )
 
 

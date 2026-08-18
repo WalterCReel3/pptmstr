@@ -78,6 +78,14 @@ class BoardTask:
 
     id: TaskId
     title: str
+    # The specification as the declarer wrote it.
+    #
+    # Carried because it was written once, read once, by one agent, and displayed
+    # nowhere: the only read of `Task.detail` in the application was the
+    # `claim_task` reply. The participant who can correct a wrong spec is the one
+    # who could not see it, which is how a task sat CLAIMED with a live, correctly
+    # reasoning owner and a reason nobody could read.
+    detail: str
     state: TaskState
     # None when nothing has claimed it. Otherwise a role name, never a NodeId:
     # ("sess-4", "agent-7") means nothing to a reader.
@@ -97,6 +105,25 @@ class BoardTask:
     # typo in a lead's depends_on and not a wait. `declare_task` accepts these
     # silently, so this row is the operator's only signal.
     missing: tuple[TaskId, ...]
+    # The files this task declared it would write.
+    #
+    # On the row because the dependency graph above is now partly derived from it:
+    # an edge the board added is not in the lead's plan, and an operator reading
+    # `blocked_on` with no sight of `touches` sees a wait with no cause.
+    touches: tuple[str, ...]
+    # Concerns naming this task and not yet withdrawn, newest last.
+    #
+    # The derived answer to "claimed, and there is an open concern about it". A row
+    # stalled for a recorded reason is not the same row as one stalled silently, and
+    # `owner_gone` distinguishes the wrong two cases on its own: it is false for the
+    # task whose owner is alive, working, and deliberately waiting, which is exactly
+    # the row that looked identical to ordinary progress.
+    #
+    # WITHDRAWN is excluded because a retracted reason is not a reason. DELIVERED is
+    # kept: the recipient having read it does not settle the matter it raised, and
+    # dropping it here would make the row's explanation vanish at the moment someone
+    # started acting on it.
+    concerns: tuple[ConcernId, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +136,13 @@ class BoardConcern:
     subject: str
     state: ConcernState
     edited: bool
+    # The task this concern is about, when the sender named one, and whether that
+    # id is on this board. A concern naming a task that was never declared is a
+    # typo the store deliberately does not refuse -- the message was still sent --
+    # so the projection reports it, in the same shape `missing` reports a
+    # dependency that does not exist.
+    task_id: TaskId | None
+    task_missing: bool
 
 
 def role_name(snap: Snapshot, node: NodeId, session_id: str) -> str:
@@ -245,6 +279,7 @@ def board_tasks(snap: Snapshot, session_id: str) -> tuple[BoardTask, ...]:
     filtering first would invent a blocker out of a cross-session dependency and
     show a claimable task as stuck.
     """
+    explained = _open_concerns_by_task(snap, session_id)
     rows = []
     for task in sorted(snap.tasks.values(), key=lambda t: (t.declared_at, t.id)):
         if not task.belongs_to(session_id):
@@ -255,6 +290,7 @@ def board_tasks(snap: Snapshot, session_id: str) -> tuple[BoardTask, ...]:
             BoardTask(
                 id=task.id,
                 title=task.title,
+                detail=task.detail,
                 state=task.state,
                 owner=None if owner is None else role_name(snap, owner, session_id),
                 owner_gone=(
@@ -262,9 +298,31 @@ def board_tasks(snap: Snapshot, session_id: str) -> tuple[BoardTask, ...]:
                 ),
                 blocked_on=blocked,
                 missing=tuple(d for d in blocked if d not in snap.tasks),
+                touches=task.touches,
+                concerns=explained.get(task.id, ()),
             )
         )
     return tuple(rows)
+
+
+def _open_concerns_by_task(snap: Snapshot, session_id: str) -> dict[TaskId, tuple[ConcernId, ...]]:
+    """
+    Concerns naming a task, indexed by that task, oldest first.
+
+    Built once per call rather than scanned per row: the alternative is a pass over
+    every concern for every task, and this projection is rebuilt every frame.
+
+    Scoped by sender to match ``board_concerns``, so a row's explanation and the
+    concern log below it cannot disagree about which messages are this board's.
+    """
+    index: dict[TaskId, list[ConcernId]] = {}
+    for c in sorted(snap.concerns.values(), key=lambda c: (c.posted_at, c.id)):
+        if c.task_id is None or c.sender[0] != session_id:
+            continue
+        if c.state is ConcernState.WITHDRAWN:
+            continue
+        index.setdefault(c.task_id, []).append(c.id)
+    return {tid: tuple(ids) for tid, ids in index.items()}
 
 
 def board_concerns(snap: Snapshot, session_id: str) -> tuple[BoardConcern, ...]:
@@ -288,6 +346,8 @@ def board_concerns(snap: Snapshot, session_id: str) -> tuple[BoardConcern, ...]:
             subject=c.subject,
             state=c.state,
             edited=c.edited,
+            task_id=c.task_id,
+            task_missing=c.task_id is not None and c.task_id not in snap.tasks,
         )
         for c in sorted(snap.concerns.values(), key=lambda c: (c.posted_at, c.id))
         if c.sender[0] == session_id

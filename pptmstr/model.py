@@ -488,6 +488,27 @@ class Concern:
     state: ConcernState = ConcernState.POSTED
     edited: bool = False
     delivered_at: float | None = None
+    # The task this concern is about, when the sender named one.
+    #
+    # Optional because most concerns are not about a board row -- a question to the
+    # lead, an answer, a heads-up -- and requiring one would make agents invent a
+    # task id to send a message.
+    #
+    # This is what lets "claimed, and there is an open concern about it" be derived
+    # rather than stored. The alternative that keeps being reached for is a fourth
+    # ``TaskState`` or a "held deliberately" flag, and ``TaskState``'s docstring
+    # already refuses that shape: intent stored as a flag is kept true by whoever
+    # remembers to update it. A builder that stalls a task for a good reason
+    # *already* records the reason by posting a concern -- the link was the only
+    # thing missing, so the board can now show a reason for every stalled row that
+    # anyone bothered to explain, with no new state and no flag to forget.
+    #
+    # Not validated against the board. A concern naming a task that does not exist
+    # is still a message that was sent and delivered, and refusing it would put the
+    # reducer in the business of rejecting mail over a typo in an optional field.
+    # The projection reports the dangling reference instead, the way ``missing``
+    # already does for a dependency that was never declared.
+    task_id: TaskId | None = None
 
 
 class TaskState(enum.Enum):

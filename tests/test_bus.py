@@ -94,10 +94,26 @@ def declared(
 
 
 class _Session:
-    """As much of ``AgentSession`` as ``build_server`` closes over."""
+    """
+    As much of ``AgentSession`` as ``build_server`` closes over.
+
+    ``resolve_role`` answers for the roles ``team()`` spawns and refuses everything
+    else, which is the branch ``post_concern`` reports out of ``role_status``.
+    """
+
+    ROLES: dict[str, NodeId] = {"lead": LEAD, "builder": DEV, "reviewer": QA}
 
     def __init__(self, bridge: Bridge) -> None:
         self.bridge = bridge
+
+    def resolve_role(self, name: str) -> NodeId | None:
+        return self.ROLES.get(name)
+
+    def role_status(self, name: str) -> str:
+        return f"No agent answers to {name!r}."
+
+    def role_of(self, node: NodeId) -> str | None:
+        return next((r for r, n in self.ROLES.items() if n == node), None)
 
 
 class _Bus:
@@ -569,6 +585,76 @@ def test_a_caller_cannot_evade_the_overlap_check_with_its_own_spelling() -> None
         )
 
     assert store.snapshot().tasks["t1"].touches == ("pptmstr/store.py",)
+
+
+# -- a concern that explains a row (row 3) -----------------------------------------
+
+
+def test_a_concern_can_name_the_task_it_is_about() -> None:
+    """
+    The wiring, not the reducer (STYLE.md §2). The store can carry the link and the
+    handler can still drop it, which leaves the board exactly as blind as before.
+    """
+    store = Store()
+    with _live_bus() as bus:
+        bus.call(
+            store,
+            "post_concern",
+            {
+                "to": "lead",
+                "subject": "waiting on the schema decision",
+                "body": "holding this until the store lands",
+                "task_id": "t1",
+            },
+            sender=DEV,
+        )
+        # post_concern is the one tool that does not park on a future, so its reply
+        # resolves before the frame loop has drained the intent it emitted.
+        bus.pump(store)
+
+    (posted,) = store.snapshot().concerns.values()
+    assert posted.task_id == "t1"
+
+
+def test_a_concern_about_no_task_in_particular_still_sends() -> None:
+    """
+    Most concerns are not about a board row. Requiring one would make agents invent
+    a task id to send a message.
+    """
+    store = Store()
+    with _live_bus() as bus:
+        text = bus.call(
+            store,
+            "post_concern",
+            {"to": "lead", "subject": "a question", "body": "which model"},
+            sender=DEV,
+        )
+        bus.pump(store)
+
+    (posted,) = store.snapshot().concerns.values()
+    assert posted.task_id is None
+    assert "delivered" in text.lower()
+
+
+def test_a_concern_naming_a_task_that_does_not_exist_is_still_delivered() -> None:
+    """
+    The tool's other refusal -- an unresolvable role -- stops the message reaching
+    anyone. A bad task id costs the link and nothing else, so refusing the whole
+    message would lose the part that was certainly correct.
+    """
+    store = Store()
+    with _live_bus() as bus:
+        text = bus.call(
+            store,
+            "post_concern",
+            {"to": "lead", "subject": "s", "body": "b", "task_id": "t-nope"},
+            sender=DEV,
+        )
+        bus.pump(store)
+
+    (posted,) = store.snapshot().concerns.values()
+    assert posted.task_id == "t-nope"
+    assert "delivered" in text.lower()
 
 
 # -- claiming ---------------------------------------------------------------------
