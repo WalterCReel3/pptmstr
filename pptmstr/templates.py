@@ -38,6 +38,16 @@ BUS_TOOL_NAMES = (
 
 # Enough to inspect a codebase without changing it. Used by the review roles, whose
 # value depends on their not being able to quietly fix what they were asked to find.
+#
+# The grant conflates two capabilities and only one of them was intended: **cannot
+# edit** is the property that was chosen, and **cannot execute** came along with it.
+# The second is what decides whether a finding is evidence or inference, so a review
+# role is structurally incapable of the "works end to end" claim STYLE.md §2
+# distinguishes from "plumbed through". Bash is not the answer -- it edits, which
+# discards the property -- and a narrowly scoped run capability is the version worth
+# building. Until then the limit is made legible instead of closed: every review
+# prompt below asks for a finding's evidence class, so the lead can weigh a claim
+# before turning it into a specification.
 READ_ONLY_TOOLS = ("Read", "Glob", "Grep", "NotebookRead", "WebFetch", "WebSearch")
 
 
@@ -178,6 +188,21 @@ def lead_briefing(template: WorkTemplate) -> str:
         "that touches the same file; two agents editing the same file is the failure this",
         "structure exists to avoid, and `depends_on` is what keeps them apart.",
         "",
+        "**A finding you have not verified goes on the board as a finding to check,",
+        "not as an instruction to carry out.** You are where an observation becomes a",
+        "specification: a claim inside `detail` reads as settled, and what you wrote",
+        "is the whole record of where it came from. Workers have had to refute things",
+        "relayed as established — a reviewer's error passing through you, and your own",
+        "— and refusing you costs a worker what being wrong does not cost you.",
+        "",
+        "**Declare a terminal task that greens the gate**, depending on every task",
+        "that touches a file. Lint and type errors in files no task named belong to",
+        "nobody: workers that meet them correctly report and move on, and the tree",
+        "stays red for the rest of the session. A task claimed after the writes have",
+        "stopped has no ownership conflict with anything, and its result is",
+        "trustworthy in a way an earlier run cannot be — a suite read while agents are",
+        "writing reads files mid-save.",
+        "",
         "**Call `read_inbox()` before you write your final answer**, every time. A",
         "worker's concern is not the same thing as its result: the result is what it",
         "was asked for, and the concern is what it noticed on the way, which is",
@@ -196,6 +221,18 @@ def worker_prompt(role: Role) -> str:
     Appended here rather than repeated in each role for the obvious reason, and
     because the bus half is what makes a worker a teammate rather than a sub-agent
     that happens to run alongside others.
+
+    Every paragraph below the role's own prompt answers something a dogfooding run
+    observed, and two of them exist to protect the property that run found to be
+    load-bearing: **a team that followed its instructions faithfully would have
+    shipped worse work than one that argued.** Four workers refused or corrected a
+    spec they were handed and all four were right, so the disagreement line is not
+    encouragement -- it is the mechanism that caught a working constant marked for
+    deletion and a finding that had already been fixed.
+
+    ``role.name`` is interpolated into the instance-address paragraph on the same
+    no-drift grounds ``lead_briefing`` uses: an example naming a role this worker is
+    not gives it an address that resolves to nothing.
     """
     return "\n".join(
         [
@@ -212,14 +249,40 @@ def worker_prompt(role: Role) -> str:
             "another agent may be working in the same role as you, and the item you",
             "claimed is the only one that is yours.",
             "",
+            "**Confirm a reported defect still exists before you fix it.** A finding is",
+            "a claim about the tree at the moment it was read, and by the time it",
+            "reaches you another agent may have repaired it. If the spec describes code",
+            "that is not there, say so and stop rather than reconstructing the defect it",
+            "expects. Cite symbol names rather than line numbers for the same reason:",
+            "symbols survive edits that line numbers do not.",
+            "",
+            "**Two rules about a task you cannot finish, and you need both.** Hold the",
+            "claim when releasing would republish a spec you believe is wrong — the next",
+            "worker would get the same bad instruction with none of your reasoning — and",
+            "post a concern saying why you are holding it. Release it when another agent",
+            "is writing in your files, because holding a claim does not stop anyone",
+            "else's writes and only your absence does.",
+            "",
+            "**The gate is tree-wide and other agents are writing.** Format only files",
+            "your task owns (`make format-file FILE=...`, not `make format`), and",
+            "`git add` a file as soon as you create it — an untracked file another agent",
+            "overwrites has no revert path. Re-run a red before reporting it and name",
+            "the failing file: a failure caused by someone else's half-written save",
+            "recovers on the second run, and a real one does not.",
+            "",
             "**Before you finish, post a concern to `lead`** naming the thing you are",
             "least sure about, or what you noticed that nobody asked you to look at.",
             "Your returned result answers the question you were given; the concern is",
-            "for everything else, and it is the only way that reaches anyone.",
+            "for everything else, and nothing else you write reaches the lead before it",
+            "has already synthesised.",
             "",
-            "Use `post_concern(to, subject, body)` to raise something with another",
-            "role too. Say plainly when you disagree with another agent rather than",
-            "deferring to it — an agreement nobody tested is worth nothing here.",
+            "Use `post_concern(to, subject, body)` to raise something with another role",
+            "too — it reaches any agent this session has started, not only the lead. The",
+            "first agent in a role answers to the bare role name, the second to",
+            f"`{role.name}-2`, the third to `{role.name}-3`; `lead`, `main` and `root`",
+            "are the coordinator. Say plainly when you disagree with another agent",
+            "rather than deferring to it — an agreement nobody tested is worth nothing",
+            "here.",
         ]
     )
 
@@ -263,6 +326,10 @@ FEATURE = WorkTemplate(
                 "produces a wrong result, and say concretely what it is. If you "
                 "cannot find one, say that plainly rather than inventing a stylistic "
                 "objection to have something to report.\n\n"
+                "Label every finding with how you know it: read-derived, from the "
+                "source alone, or run-derived, from output you saw. You cannot run "
+                "anything, so most of yours will be the first -- say so rather than "
+                "letting the lead read an inference as a measurement.\n\n"
                 "You have no editing tools on purpose. Report; do not fix."
             ),
             tools=READ_ONLY_TOOLS,
@@ -285,9 +352,12 @@ RESEARCH = WorkTemplate(
             description="Builds the case. Gathers evidence for the most likely answer.",
             prompt=(
                 "You investigate a question and build the best-supported answer you "
-                "can. Cite what you actually read -- file and line, or the source -- "
-                "rather than what you recall. Say which parts of your answer are "
-                "evidence and which are inference.\n\n"
+                "can. Cite what you actually read -- the file and the symbol, rather "
+                "than a line number that the next edit moves -- and cite it rather "
+                "than what you recall. Say which parts of your answer are evidence "
+                "and which are inference, and label each finding read-derived or "
+                "run-derived: you have no tools that run anything, so a claim about "
+                "behaviour is inference however confident it feels.\n\n"
                 "A skeptic is reading your work and looking for the hole in it. Make "
                 "its job hard by being explicit about your weakest step."
             ),

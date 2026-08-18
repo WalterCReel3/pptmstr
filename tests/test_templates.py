@@ -362,3 +362,167 @@ def test_the_lead_is_required_to_read_its_inbox_before_answering() -> None:
     # as no concern.
     briefing = lead_briefing(RESEARCH)
     assert "read_inbox()` before you write your final answer" in briefing
+
+
+# -- what a dogfooding run said the prompts get wrong ------------------------------
+#
+# Each of these pins a sentence a worker or lead was observed to act on, or the
+# absence of one it was observed to be misled by. They are string assertions and
+# that is what they are worth: prose does not bind, and a test that a sentence is
+# present is a test that nobody deleted it, not that anybody followed it.
+
+
+def _flat(text: str) -> str:
+    """
+    The prompt with its line wrapping removed.
+
+    These prompts are written as lists of source lines, so a phrase can be split by
+    a newline that means nothing to the model reading it. Asserting on the wrapped
+    form would make rewrapping a paragraph fail a test about its content.
+    """
+    return " ".join(text.split())
+
+
+def test_a_worker_is_not_told_the_lead_is_the_only_agent_it_can_reach() -> None:
+    """
+    ``post_concern`` resolves any address the session has spawned -- a builder can
+    post to `reviewer` or to `builder-2` and it lands. The prompt nonetheless said
+    of posting to the lead that *"it is the only way that reaches anyone"*, and that
+    is the sentence a worker acts on. The channel needed nothing; the sentence did.
+    """
+    prompt = _flat(worker_prompt(Role(name="w", description="d", prompt="p")))
+    assert "the only way that reaches anyone" not in prompt
+    assert "not only the lead" in prompt
+
+
+def test_a_worker_is_told_the_instance_addresses_the_lead_already_gets() -> None:
+    """
+    ``lead_briefing`` explains that the second agent in a role is `builder-2`;
+    nothing told the workers. A session running six builders was six agents each of
+    which could reach only the roles it could guess.
+
+    Interpolated from the role, so a worker is given an address that resolves --
+    the same no-drift rule the briefing's roster follows.
+    """
+    prompt = _flat(worker_prompt(Role(name="builder", description="d", prompt="p")))
+    assert "`builder-2`" in prompt
+    assert "`lead`, `main` and `root`" in prompt
+
+
+def test_both_the_hold_rule_and_the_release_rule_are_stated_together() -> None:
+    """
+    Two workers did opposite things and both were right: one held a task rather
+    than republish a spec the operator had superseded, one released a task because
+    another agent was writing in its files. The hazards differ, so the rules differ,
+    and a worker given only the rule it happened to read applies it to the other
+    case. Whoever writes one owes the other beside it.
+    """
+    prompt = _flat(worker_prompt(Role(name="w", description="d", prompt="p")))
+    hold = prompt.index("Hold the")
+    release = prompt.index("Release it when")
+    assert hold < release, "both rules are present, and in the same paragraph"
+    assert "republish a spec you believe is wrong" in prompt
+    assert "only your absence does" in prompt
+
+
+def test_a_worker_is_told_to_confirm_a_defect_before_fixing_it() -> None:
+    """
+    A finding is a claim about the tree at an instant; a task is an instruction
+    about the tree later. Three times in one session the tree had moved -- once
+    inside the same task that found the defect, which is the shortest window
+    possible and still produced a wrong instruction.
+    """
+    prompt = _flat(worker_prompt(Role(name="w", description="d", prompt="p")))
+    assert "Confirm a reported defect still exists before you fix it" in prompt
+    assert "symbols survive edits that line numbers do not" in prompt.lower()
+
+
+def test_the_lead_is_told_an_unverified_finding_is_not_an_instruction() -> None:
+    """
+    The lead is where an observation acquires authority, and nothing in the passage
+    tests it. Twice, a worker with less authority than the sender had to refute a
+    claim the lead had relayed as established -- which is the opposite of how this
+    structure is supposed to fail, and it is taxed: refusing costs a worker
+    something that being wrong does not cost the lead.
+    """
+    briefing = _flat(lead_briefing(FEATURE))
+    assert "finding to check" in briefing
+    assert "not as an instruction to carry out" in briefing
+
+
+def test_the_lead_is_told_to_declare_a_task_that_greens_the_gate() -> None:
+    """
+    A gate failure in a file no task named belongs to nobody: every worker that met
+    one correctly reported it and moved on, and the tree stayed red all session.
+    ``depends_on`` already expresses the fix and was simply never declared.
+
+    It also buys the only trustworthy gate run of the session, because a full-suite
+    result taken while other agents are writing reads files mid-save.
+    """
+    briefing = _flat(lead_briefing(FEATURE))
+    assert "terminal task that greens the gate" in briefing
+    assert "depending on every task that" in briefing
+
+
+def test_a_worker_is_pointed_at_the_target_that_cannot_cross_a_boundary() -> None:
+    """
+    ``make format`` is the one target that writes source files, and one agent used
+    it to reformat another agent's untracked file -- no revert path, because
+    untracked. The rule is worth nothing without the invocation beside it.
+    """
+    prompt = _flat(worker_prompt(Role(name="w", description="d", prompt="p")))
+    assert "make format-file FILE=" in prompt
+    assert "not `make format`" in prompt
+    assert "`git add` a file as soon as you create it" in prompt
+
+
+def test_a_worker_is_told_to_re_run_a_red_before_reporting_it() -> None:
+    """
+    A shared tree plus a tree-wide suite is a shared mutable resource: `make test`
+    went red twice mid-session inside a file another builder was writing, and
+    nothing was ever broken. A transient recovers on the second run and a real
+    failure does not, which separates them at nearly zero cost.
+    """
+    prompt = _flat(worker_prompt(Role(name="w", description="d", prompt="p")))
+    assert "Re-run a red before reporting it and name" in prompt
+
+
+@pytest.mark.parametrize("role", [FEATURE.role("reviewer"), RESEARCH.role("investigator")])
+def test_a_role_that_cannot_run_anything_says_so_on_its_findings(role: Role | None) -> None:
+    """
+    ``READ_ONLY_TOOLS`` was chosen to stop a reviewer quietly fixing what it was
+    asked to find. It also stops it running anything, which was not the intent and
+    is what decides whether a finding is evidence or inference -- STYLE.md §2's own
+    distinction, applied to the role that structurally cannot make the second claim.
+
+    Both reviewers on the observed run disclosed this voluntarily. The prompt makes
+    it reliable, which is what lets the lead weigh a finding before turning it into
+    a specification.
+    """
+    assert role is not None
+    assert "run-derived" in _flat(role.prompt)
+    assert "read-derived" in _flat(role.prompt)
+
+
+def test_the_target_the_worker_prompt_names_is_a_target_that_exists() -> None:
+    """
+    The prompt tells a worker to run `make format-file FILE=...` instead of the
+    tree-wide `make format`, and the rule is worth nothing if the invocation is
+    not real: a worker that meets "No rule to make target" falls back to the one
+    command it knows works, which is the one that crosses file boundaries.
+
+    STYLE.md §3 names this shape -- a duplicated constant with no test pinning it.
+    The duplication is deliberate, because a prompt cannot import a Makefile, so
+    this is the pin.
+    """
+    import re
+    from pathlib import Path
+
+    makefile = (Path(__file__).resolve().parents[1] / "Makefile").read_text()
+    targets = set(re.findall(r"^([a-zA-Z_-]+):", makefile, re.MULTILINE))
+    prompt = _flat(worker_prompt(Role(name="w", description="d", prompt="p")))
+
+    for named in re.findall(r"make ([a-z-]+)", prompt):
+        assert named in targets, f"worker_prompt names `make {named}`, which is not a target"
+    # And the one it is pointed away from is still there to be pointed away from.
+    assert {"format", "format-file"} <= targets
