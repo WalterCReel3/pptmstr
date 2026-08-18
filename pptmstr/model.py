@@ -510,6 +510,38 @@ class TaskState(enum.Enum):
     COMPLETED = "completed"
 
 
+class TaskRefusal(enum.Enum):
+    """
+    Why a write to the board did not take effect.
+
+    An enum rather than a string because the reducer is pure and prose is the
+    shell's job: ``bus.py`` owns the words an agent reads, and a sentence built in
+    ``_apply`` would be presentation smuggled into the core.
+
+    The members are separate for the reason STYLE.md §3 gives -- an error message
+    that does not distinguish the two mistakes it covers sends a worker back to
+    make the same one. Three pairs are here for that reason alone:
+    ``NOT_CLAIMED`` is "nobody holds this, claim it first" against ``NOT_YOURS``,
+    "somebody else is working it, ask them"; ``ALREADY_COMPLETE`` is neither, and
+    the recovery is to stop rather than to retry; and ``DUPLICATE_ID`` against
+    ``WOULD_CYCLE`` is a name collision against a dependency graph the declarer has
+    to redraw.
+
+    ``NOT_APPLIED`` is the one member ``_apply`` never returns. It is the answer the
+    Bridge hands back when the store never got to see the intent at all -- shutdown,
+    mainly -- and it exists because the alternative fallback is reporting a success
+    that certainly did not happen, which is the defect this whole channel is for.
+    """
+
+    DUPLICATE_ID = "duplicate_id"
+    WOULD_CYCLE = "would_cycle"
+    NO_SUCH_TASK = "no_such_task"
+    NOT_CLAIMED = "not_claimed"
+    NOT_YOURS = "not_yours"
+    ALREADY_COMPLETE = "already_complete"
+    NOT_APPLIED = "not_applied"
+
+
 @dataclass(frozen=True, slots=True)
 class Task:
     """

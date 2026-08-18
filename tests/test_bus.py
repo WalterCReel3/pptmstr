@@ -9,10 +9,16 @@ a thread, and testing them with one would be testing the wrong thing.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import time
+from collections.abc import Iterator
 
-from pptmstr.effects import ClaimSettled, InboxDelivered
+import mcp.types as mcp_types
+
+from pptmstr.bridge import Bridge
+from pptmstr.bus import FROM_KEY, build_server
+from pptmstr.effects import ClaimSettled, InboxDelivered, TaskWriteSettled
 from pptmstr.intents import (
     ConcernEdited,
     ConcernPosted,
@@ -23,7 +29,7 @@ from pptmstr.intents import (
     TaskDeclared,
     TaskReleased,
 )
-from pptmstr.model import Concern, ConcernState, NodeId, Task, TaskState
+from pptmstr.model import Concern, ConcernState, NodeId, Task, TaskRefusal, TaskState
 from pptmstr.store import Store
 
 LEAD: NodeId = ("sess-1", None)
@@ -51,6 +57,82 @@ def concern(
 
 def task(tid: str, *, deps: tuple[str, ...] = (), at: float = 0.0) -> Task:
     return Task(id=tid, title=f"do {tid}", depends_on=deps, declared_at=at)
+
+
+# -- the real server, driven the way the application drives it ---------------------
+
+
+class _Session:
+    """As much of ``AgentSession`` as ``build_server`` closes over."""
+
+    def __init__(self, bridge: Bridge) -> None:
+        self.bridge = bridge
+
+
+class _Bus:
+    """
+    A live MCP server plus the frame loop that answers it.
+
+    Here because five of the six tools now park on a future, and a test that only
+    reads the intent they emitted cannot see what the agent was *told* -- which is
+    the entire defect this class exists to cover. ``call`` therefore does what
+    ``app.begin_frame`` does, in the same order: drain, apply, settle. Anything the
+    real loop would fail to answer hangs here too, and is reported as a timeout
+    rather than as a passing test.
+    """
+
+    def __init__(self, bridge: Bridge) -> None:
+        self.bridge = bridge
+        self.handler = build_server(_Session(bridge))["instance"].request_handlers[  # type: ignore[arg-type]
+            mcp_types.CallToolRequest
+        ]
+
+    def call(
+        self,
+        store: Store,
+        name: str,
+        args: dict[str, object],
+        *,
+        sender: NodeId = DEV,
+        timeout: float = 5.0,
+    ) -> str:
+        """The text the calling agent reads. Fails if the tool reports an error."""
+        pending = self.bridge.submit(
+            self.handler(
+                mcp_types.CallToolRequest(
+                    method="tools/call",
+                    # The gate's stamp, as the CLI delivers it: a list, because the
+                    # arguments survive a JSON round trip and JSON has no tuples.
+                    params=mcp_types.CallToolRequestParams(
+                        name=name, arguments={**args, FROM_KEY: list(sender)}
+                    ),
+                )
+            )
+        )
+        deadline = time.monotonic() + timeout
+        while not pending.done():
+            self.pump(store)
+            if time.monotonic() > deadline:
+                raise AssertionError(f"{name} was never answered")
+            time.sleep(0.002)
+        answer = pending.result(timeout=timeout)
+        assert not answer.root.isError, answer.root.content
+        return str(answer.root.content[0].text)
+
+    def pump(self, store: Store) -> None:
+        """One frame's worth of the loop in ``app.begin_frame``."""
+        for effect in store.apply_all(self.bridge.drain(), now=time.monotonic()):
+            self.bridge.settle(effect)
+
+
+@contextlib.contextmanager
+def _live_bus() -> Iterator[_Bus]:
+    bridge = Bridge()
+    bridge.start()
+    try:
+        yield _Bus(bridge)
+    finally:
+        bridge.stop()
 
 
 # -- concerns ---------------------------------------------------------------------
@@ -275,53 +357,12 @@ def test_the_declare_handler_stamps_the_task_with_its_caller() -> None:
     entirely, so every reducer-level test above passes with the bus still emitting
     an unattributed ``TaskDeclared``. This drives the real MCP server.
     """
-    import asyncio
-
-    import mcp.types as mcp_types
-
-    from pptmstr.bridge import Bridge
-    from pptmstr.bus import FROM_KEY, build_server
-
-    class _Session:
-        def __init__(self, bridge: Bridge) -> None:
-            self.bridge = bridge
-
-    bridge = Bridge()  # emit() is a queue put; the loop is not needed here
-    server = build_server(_Session(bridge))["instance"]
-    handler = server.request_handlers[mcp_types.CallToolRequest]
-
-    result = asyncio.run(
-        handler(
-            mcp_types.CallToolRequest(
-                method="tools/call",
-                params=mcp_types.CallToolRequestParams(
-                    name="declare_task",
-                    # Every declared field is spelled: the `{name: type}` shorthand
-                    # emits them all as required, so a call omitting one is
-                    # rejected before the handler runs.
-                    #
-                    # The gate stamps the sender; it survives the JSON hop as a list.
-                    arguments={
-                        "task_id": "t1",
-                        "title": "do t1",
-                        "detail": "",
-                        "depends_on": [],
-                        FROM_KEY: list(QA),
-                    },
-                ),
-            )
-        )
-    )
-
-    # Named before the store is consulted: a call refused by the schema emits
-    # nothing, and "no such task" is a much worse clue than the refusal itself.
-    assert not result.root.isError, result.root.content
-
     store = Store()
-    for intent in bridge.drain():
-        store.apply(intent)
+    with _live_bus() as bus:
+        text = bus.call(store, "declare_task", {"task_id": "t1", "title": "do t1"}, sender=QA)
 
     assert store.snapshot().tasks["t1"].declared_by == QA
+    assert "t1 is on the board" in text
 
 
 # -- claiming ---------------------------------------------------------------------
@@ -434,6 +475,116 @@ def test_completing_an_unclaimed_task_does_nothing() -> None:
     store.apply(TaskCompleted(DEV, "t1", at=3.0))
 
     assert store.snapshot().tasks["t1"].state is TaskState.PENDING
+
+
+# -- a write the board refuses ----------------------------------------------------
+#
+# The three tools that assert facts are guarded, and every guard used to drop the
+# write in silence while its handler returned the success text unconditionally. The
+# reducer's behaviour is unchanged by this; what is new is that the refusal is a
+# value somebody has to look at.
+
+
+def _refusal(effects: tuple[object, ...]) -> TaskRefusal | None:
+    (settled,) = effects
+    assert isinstance(settled, TaskWriteSettled)
+    return settled.refusal
+
+
+def test_a_write_the_board_accepted_answers_with_no_refusal() -> None:
+    store = Store()
+
+    declared = store.apply(TaskDeclared(task("t1"), node_id=DEV, request_id="d1"))
+    store.apply(TaskClaimRequested(DEV, request_id="k1"))
+    released = store.apply(TaskReleased(DEV, "t1", request_id="x1"))
+    store.apply(TaskClaimRequested(DEV, request_id="k2"))
+    completed = store.apply(TaskCompleted(DEV, "t1", at=3.0, request_id="f1"))
+
+    assert (_refusal(declared), _refusal(released), _refusal(completed)) == (None, None, None)
+
+
+def test_a_declaration_the_board_drops_says_which_way_it_dropped() -> None:
+    """
+    Both silent drops, named apart. A duplicate id is a naming collision the
+    declarer fixes by renaming; a cycle is a dependency graph it has to redraw. A
+    single "declaration refused" would send it back to guess which.
+    """
+    store = Store()
+    store.apply(TaskDeclared(task("t1")))
+    store.apply(TaskDeclared(task("t2", deps=("t1",))))
+
+    duplicate = store.apply(TaskDeclared(task("t1"), request_id="d1"))
+    cycle = store.apply(TaskDeclared(task("t3", deps=("t3",)), request_id="d2"))
+
+    assert _refusal(duplicate) is TaskRefusal.DUPLICATE_ID
+    assert _refusal(cycle) is TaskRefusal.WOULD_CYCLE
+    # And the refusal is not a rollback of something half-done.
+    assert "t3" not in store.snapshot().tasks
+    assert store.snapshot().tasks["t1"].title == "do t1"
+
+
+def test_a_write_to_a_task_you_do_not_hold_says_which_mistake_it_was() -> None:
+    """
+    Four conditions, four answers, because the recoveries are four different
+    things: declare it, claim it, stop, or go and talk to whoever holds it.
+    """
+    store = Store()
+    store.apply(TaskDeclared(task("t1")))
+
+    missing = store.apply(TaskCompleted(DEV, "nope", at=1.0, request_id="f1"))
+    unclaimed = store.apply(TaskCompleted(DEV, "t1", at=1.0, request_id="f2"))
+
+    store.apply(TaskClaimRequested(DEV, request_id="k1"))
+    someone_elses = store.apply(TaskCompleted(QA, "t1", at=2.0, request_id="f3"))
+
+    store.apply(TaskCompleted(DEV, "t1", at=3.0))
+    twice = store.apply(TaskCompleted(DEV, "t1", at=4.0, request_id="f4"))
+
+    assert _refusal(missing) is TaskRefusal.NO_SUCH_TASK
+    assert _refusal(unclaimed) is TaskRefusal.NOT_CLAIMED
+    assert _refusal(someone_elses) is TaskRefusal.NOT_YOURS
+    assert _refusal(twice) is TaskRefusal.ALREADY_COMPLETE
+    # The completion that was refused as ALREADY_COMPLETE did not move the clock.
+    assert store.snapshot().tasks["t1"].completed_at == 3.0
+
+
+def test_a_release_is_refused_on_the_same_terms_as_a_completion() -> None:
+    """
+    The two arms share one guard, so they cannot drift into disagreeing about who
+    owns a task -- which would be a worker told it may finish work it may not give
+    back, or the reverse.
+    """
+    store = Store()
+    store.apply(TaskDeclared(task("t1")))
+
+    missing = store.apply(TaskReleased(DEV, "nope", request_id="x1"))
+    unclaimed = store.apply(TaskReleased(DEV, "t1", request_id="x2"))
+
+    store.apply(TaskClaimRequested(DEV, request_id="k1"))
+    someone_elses = store.apply(TaskReleased(QA, "t1", request_id="x3"))
+
+    store.apply(TaskCompleted(DEV, "t1", at=3.0))
+    finished = store.apply(TaskReleased(DEV, "t1", request_id="x4"))
+
+    assert _refusal(missing) is TaskRefusal.NO_SUCH_TASK
+    assert _refusal(unclaimed) is TaskRefusal.NOT_CLAIMED
+    assert _refusal(someone_elses) is TaskRefusal.NOT_YOURS
+    assert _refusal(finished) is TaskRefusal.ALREADY_COMPLETE
+    assert store.snapshot().tasks["t1"].state is TaskState.COMPLETED
+
+
+def test_a_write_nobody_is_waiting_on_answers_nobody() -> None:
+    """
+    ``request_id`` None is a real case, not a test convenience: the fake driver's
+    scripted board and any operator-side write have no agent parked on a future.
+    An effect for one would be settled against nothing every frame.
+    """
+    store = Store()
+
+    assert store.apply(TaskDeclared(task("t1"))) == ()
+    assert store.apply(TaskDeclared(task("t1"))) == ()  # refused, and still silent
+    assert store.apply(TaskCompleted(QA, "t1", at=1.0)) == ()
+    assert store.apply(TaskReleased(QA, "t1")) == ()
 
 
 # -- the effect channel itself ----------------------------------------------------
@@ -827,6 +978,110 @@ def test_a_claim_with_no_task_id_asks_for_anything_claimable() -> None:
 
     assert not answered.root.isError, answered.root.content
     assert "t1" in answered.root.content[0].text
+
+
+def test_a_declaration_the_board_refused_is_not_reported_as_success() -> None:
+    """
+    The keystone defect, at the layer it lived on. Every reducer test above passed
+    while ``declare_task`` returned "Task t1 is on the board." for a declaration the
+    store had dropped -- the handler composed the outcome instead of waiting for it,
+    so no test of the store could see the lie. The lead then waited on a task that
+    was not there.
+
+    Asserted on the text the agent reads, because that is the thing that was wrong.
+    """
+    store = Store()
+    with _live_bus() as bus:
+        first = bus.call(store, "declare_task", {"task_id": "t1", "title": "do t1"}, sender=LEAD)
+        again = bus.call(store, "declare_task", {"task_id": "t1", "title": "same id"}, sender=LEAD)
+        cycle = bus.call(
+            store,
+            "declare_task",
+            {"task_id": "t2", "title": "eats itself", "depends_on": ["t2"]},
+            sender=LEAD,
+        )
+
+    assert "t1 is on the board" in first
+    assert "NOT on the board" in again and "already on the board" in again
+    assert "NOT on the board" in cycle and "cycle" in cycle
+    # The board agrees with what each caller was told.
+    assert set(store.snapshot().tasks) == {"t1"}
+    assert store.snapshot().tasks["t1"].title == "do t1"
+
+
+def test_a_completion_the_board_refused_is_not_reported_as_success() -> None:
+    """
+    ``complete_task`` told a non-owner *"Anything waiting on it is now claimable."*
+    -- a lead could be told a dependency had cleared when nothing had unblocked.
+    """
+    store = Store()
+    with _live_bus() as bus:
+        bus.call(store, "declare_task", {"task_id": "t1", "title": "do t1"}, sender=LEAD)
+        bus.call(store, "claim_task", {"task_id": "t1"}, sender=DEV)
+
+        intruder = bus.call(store, "complete_task", {"task_id": "t1"}, sender=QA)
+        owner = bus.call(store, "complete_task", {"task_id": "t1"}, sender=DEV)
+        after = bus.call(store, "complete_task", {"task_id": "t1"}, sender=DEV)
+
+    assert "NOT complete" in intruder and "Another agent holds the claim" in intruder
+    assert "now claimable" in owner
+    assert "NOT complete" in after and "already complete" in after
+    assert store.snapshot().tasks["t1"].state is TaskState.COMPLETED
+
+
+def test_a_release_the_board_refused_is_not_reported_as_success() -> None:
+    store = Store()
+    with _live_bus() as bus:
+        bus.call(store, "declare_task", {"task_id": "t1", "title": "do t1"}, sender=LEAD)
+        unclaimed = bus.call(store, "release_task", {"task_id": "t1"}, sender=DEV)
+        bus.call(store, "claim_task", {"task_id": "t1"}, sender=DEV)
+        intruder = bus.call(store, "release_task", {"task_id": "t1"}, sender=QA)
+        owner = bus.call(store, "release_task", {"task_id": "t1"}, sender=DEV)
+
+    assert "NOT released" in unclaimed and "Claim it first" in unclaimed
+    assert "NOT released" in intruder
+    assert "back on the board" in owner
+    assert store.snapshot().tasks["t1"].state is TaskState.PENDING
+
+
+def test_a_board_write_the_store_never_saw_is_not_reported_as_success() -> None:
+    """
+    The one refusal the reducer never produces. A write abandoned at shutdown has
+    no ordinary negative to fall back on the way a claim does -- ``claim_task``
+    abandons as "nothing was claimable", which is merely unlucky, while a write
+    abandoned as "it landed" is the same lie the effect channel is here to remove.
+    """
+    bridge = Bridge()
+    bridge.start()
+    try:
+        bus = _Bus(bridge)
+        pending = bridge.submit(
+            bus.handler(
+                mcp_types.CallToolRequest(
+                    method="tools/call",
+                    params=mcp_types.CallToolRequestParams(
+                        name="declare_task",
+                        arguments={"task_id": "t1", "title": "do t1", FROM_KEY: list(LEAD)},
+                    ),
+                )
+            )
+        )
+        # Parked, and deliberately never applied: this is the frame loop dying
+        # between the emit and the apply.
+        for _ in range(400):
+            if bridge.asking_count:
+                break
+            time.sleep(0.005)
+        assert bridge.asking_count == 1, "the write did not park on a future at all"
+
+        bridge.abandon_all_requests()
+        answered = pending.result(timeout=5).root
+    finally:
+        bridge.stop()
+
+    assert not answered.isError, answered.content
+    text = answered.content[0].text
+    assert "NOT on the board" in text and "shutting down" in text
 
 
 def test_a_stranded_bus_request_is_noticed() -> None:

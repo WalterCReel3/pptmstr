@@ -27,20 +27,28 @@ Two consequences worth stating plainly:
   the edit-then-approve path either (§5.3).
 
 Everything a handler returns to the model is text. Everything it changes goes
-through the intent queue; the two tools that ask a *question* -- ``read_inbox``
-and ``claim_task`` -- park on the Bridge's third crossing and are answered by the
-store on the next frame (``effects.py``).
+through the intent queue, and **a handler never composes an outcome it did not
+wait for**. Five of the six tools park on the Bridge's third crossing and are
+answered by the store on the next frame (``effects.py``): ``read_inbox`` and
+``claim_task``, which ask questions, and the three board writes, which assert
+facts the reducer is entitled to refuse.
+
+``post_concern`` is the exception and is not in this class. Its only refusal is the
+``resolve_role`` check it makes here, before emitting, and it reports that one
+honestly out of ``role_status``.
 """
 
 from __future__ import annotations
 
+import asyncio
 import time
 import uuid
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, assert_never
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
-from .effects import ClaimSettled, InboxDelivered
+from .bridge import Bridge
+from .effects import ClaimSettled, Effect, InboxDelivered, TaskWriteSettled
 from .intents import (
     ConcernPosted,
     InboxRead,
@@ -49,7 +57,7 @@ from .intents import (
     TaskDeclared,
     TaskReleased,
 )
-from .model import Concern, NodeId, Task
+from .model import Concern, NodeId, Task, TaskRefusal
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle only matters to the checker
     from .driver import AgentSession
@@ -102,6 +110,80 @@ def _sender(args: dict[str, Any]) -> NodeId:
 
 def _text(body: str) -> dict[str, Any]:
     return {"content": [{"type": "text", "text": body}]}
+
+
+def _park(bridge: Bridge, request_id: str) -> asyncio.Future[Effect]:
+    """
+    Register the future a board write waits on, before the intent is emitted.
+
+    The abandon answer is a *refusal*, not a success. Every other fallback in this
+    module can afford to be the ordinary negative -- ``claim_task`` abandons as "the
+    board had nothing", which is true often enough to be harmless. A write has no
+    such answer: the only outcome that is certainly wrong at shutdown is the one
+    saying it landed.
+    """
+    return bridge.ask(
+        request_id, TaskWriteSettled(request_id=request_id, refusal=TaskRefusal.NOT_APPLIED)
+    )
+
+
+async def _outcome(future: asyncio.Future[Effect]) -> TaskRefusal | None:
+    """
+    Wait for the store's answer to a board write. None means it took effect.
+
+    An effect of the wrong shape is reported as ``NOT_APPLIED`` rather than as
+    success. It cannot happen -- futures are settled by request id -- but the two
+    ways to be wrong here are not symmetric: a spurious refusal makes an agent
+    re-check the board, and a spurious success makes it build on a task that is not
+    there.
+    """
+    answer = await future
+    if not isinstance(answer, TaskWriteSettled):
+        return TaskRefusal.NOT_APPLIED
+    return answer.refusal
+
+
+def _refusal_text(refusal: TaskRefusal) -> str:
+    """
+    What the agent is told, and what to do about it.
+
+    The words live here rather than in the store because ``_apply`` is pure and
+    prose is presentation. Each one names the recovery: a refusal that only says no
+    sends a worker back to make the same mistake, which STYLE.md §3 records as
+    having already happened once at this exact boundary.
+
+    The match is exhaustive on purpose -- a new ``TaskRefusal`` member with no
+    sentence is a mypy error at the final arm rather than a ``KeyError`` reaching an
+    agent mid-run.
+    """
+    match refusal:
+        case TaskRefusal.DUPLICATE_ID:
+            return (
+                "That id is already on the board, and re-declaring it would overwrite "
+                "work another agent may already be doing. Use a different id, or claim "
+                "the task that is there."
+            )
+        case TaskRefusal.WOULD_CYCLE:
+            return (
+                "Its depends_on would close a dependency cycle, which leaves every task "
+                "in the loop permanently unclaimable. Check what the tasks you named "
+                "already depend on."
+            )
+        case TaskRefusal.NO_SUCH_TASK:
+            return "No task with that id is on the board."
+        case TaskRefusal.ALREADY_COMPLETE:
+            return "It is already complete. Nothing changed, and nothing is left to do on it."
+        case TaskRefusal.NOT_CLAIMED:
+            return "Nobody holds it. Claim it first, with claim_task and that id."
+        case TaskRefusal.NOT_YOURS:
+            return (
+                "Another agent holds the claim, and only the claimer can change a task's "
+                "state. Send them a concern rather than acting on it yourself."
+            )
+        case TaskRefusal.NOT_APPLIED:
+            return "The board never saw the request -- the application is shutting down."
+        case _:  # pragma: no cover - mypy's exhaustiveness check, not a runtime path
+            assert_never(refusal)
 
 
 def _schema(properties: dict[str, Any], required: tuple[str, ...] = ()) -> dict[str, Any]:
@@ -253,6 +335,8 @@ def build_server(session: AgentSession) -> Any:
         task_id = str(args.get("task_id", "")).strip() or f"t-{uuid.uuid4().hex[:8]}"
         raw_deps = args.get("depends_on") or []
         deps = tuple(str(d).strip() for d in raw_deps if str(d).strip())
+        request_id = f"d-{uuid.uuid4().hex[:12]}"
+        future = _park(bridge, request_id)
         bridge.emit(
             TaskDeclared(
                 task=Task(
@@ -263,16 +347,31 @@ def build_server(session: AgentSession) -> Any:
                     declared_at=time.monotonic(),
                 ),
                 node_id=me,
+                request_id=request_id,
             )
         )
-        return _text(f"Task {task_id} is on the board.")
+
+        refusal = await _outcome(future)
+        if refusal is None:
+            return _text(f"Task {task_id} is on the board.")
+        return _text(f"Task {task_id} is NOT on the board. {_refusal_text(refusal)}")
 
     @tool("complete_task", "Mark a task you claimed as finished.", {"task_id": str})
     async def complete_task(args: dict[str, Any]) -> dict[str, Any]:
         me = _sender(args)
         task_id = str(args.get("task_id", "")).strip()
-        bridge.emit(TaskCompleted(node_id=me, task_id=task_id, at=time.monotonic()))
-        return _text(f"Task {task_id} marked complete. Anything waiting on it is now claimable.")
+        request_id = f"f-{uuid.uuid4().hex[:12]}"
+        future = _park(bridge, request_id)
+        bridge.emit(
+            TaskCompleted(node_id=me, task_id=task_id, at=time.monotonic(), request_id=request_id)
+        )
+
+        refusal = await _outcome(future)
+        if refusal is None:
+            return _text(
+                f"Task {task_id} marked complete. Anything waiting on it is now claimable."
+            )
+        return _text(f"Task {task_id} is NOT complete. {_refusal_text(refusal)}")
 
     @tool(
         "release_task",
@@ -282,8 +381,14 @@ def build_server(session: AgentSession) -> Any:
     async def release_task(args: dict[str, Any]) -> dict[str, Any]:
         me = _sender(args)
         task_id = str(args.get("task_id", "")).strip()
-        bridge.emit(TaskReleased(node_id=me, task_id=task_id))
-        return _text(f"Task {task_id} is back on the board.")
+        request_id = f"x-{uuid.uuid4().hex[:12]}"
+        future = _park(bridge, request_id)
+        bridge.emit(TaskReleased(node_id=me, task_id=task_id, request_id=request_id))
+
+        refusal = await _outcome(future)
+        if refusal is None:
+            return _text(f"Task {task_id} is back on the board.")
+        return _text(f"Task {task_id} was NOT released. {_refusal_text(refusal)}")
 
     return create_sdk_mcp_server(
         SERVER_NAME,

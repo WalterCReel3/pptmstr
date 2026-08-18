@@ -322,10 +322,16 @@ class TaskDeclared:
     ``store._would_cycle``. A cycle is not a wedged task, it is a wedged *team*:
     every member of the cycle is permanently unclaimable, and the symptom is
     workers that idle while the board says there is work.
+
+    ``request_id`` None means nobody is waiting to be told: the fake driver's
+    scripted board, a test, an operator action. It is optional rather than required
+    for that reason and not as a convenience -- a declaration with no agent parked
+    on it is a real case, and the store emits no reply for one.
     """
 
     task: Task
     node_id: NodeId | None = None
+    request_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -347,11 +353,19 @@ class TaskClaimRequested:
 
 @dataclass(frozen=True, slots=True)
 class TaskCompleted:
-    """A claimer finished. Anything depending on this becomes claimable by that fact alone."""
+    """
+    A claimer finished. Anything depending on this becomes claimable by that fact
+    alone.
+
+    Applied only for the node that holds the claim, so a stale completion cannot
+    finish a task out from under its new owner. The claimer therefore has to be told
+    which way it went -- a ``TaskWriteSettled`` on ``request_id``, when one is given.
+    """
 
     node_id: NodeId
     task_id: TaskId
     at: float
+    request_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -361,10 +375,14 @@ class TaskReleased:
 
     Distinct from completion so that a worker which cannot proceed does not have to
     lie about the outcome to unblock a teammate.
+
+    Guarded on the claimer exactly as ``TaskCompleted`` is, and answered the same
+    way: a release the store refused must not read as one it accepted.
     """
 
     node_id: NodeId
     task_id: TaskId
+    request_id: str | None = None
 
 
 Intent = (

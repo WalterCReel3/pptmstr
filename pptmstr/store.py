@@ -26,7 +26,7 @@ from collections.abc import Iterable
 from types import MappingProxyType
 from typing import assert_never
 
-from .effects import ClaimSettled, Effect, InboxDelivered
+from .effects import ClaimSettled, Effect, InboxDelivered, TaskWriteSettled
 from .intents import (
     AgentFinished,
     AgentRemoved,
@@ -65,6 +65,7 @@ from .model import (
     Snapshot,
     Task,
     TaskId,
+    TaskRefusal,
     TaskState,
 )
 from .transcript import Transcript
@@ -488,16 +489,15 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
                 concerns[intent.concern_id] = dataclasses.replace(c, state=ConcernState.WITHDRAWN)
 
         case TaskDeclared():
-            # Re-declaring an existing id is ignored rather than merged: the only
-            # way it happens is a retry, and overwriting would silently unclaim
-            # work somebody is doing.
-            if intent.task.id not in tasks and not _would_cycle(tasks, intent.task):
+            refused = _declaration_refusal(tasks, intent.task)
+            if refused is None:
                 # Provenance comes from the intent, never from the record handed
                 # in: the intent's node_id is the sender the gate authenticated,
                 # and a declared_by a caller set on the Task is not evidence of
                 # anything. Stamping unconditionally leaves one writer for the
                 # field rather than two that have to agree.
                 tasks[intent.task.id] = dataclasses.replace(intent.task, declared_by=intent.node_id)
+            effects = _settled(intent.request_id, refused)
 
         case TaskClaimRequested():
             won = _pick_claim(tasks, intent.task_id)
@@ -511,20 +511,22 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
             effects = (ClaimSettled(request_id=intent.request_id, task=won),)
 
         case TaskCompleted():
-            t = tasks.get(intent.task_id)
             # Guarded on the claimer so a stale completion from a worker that
             # released the task cannot finish it out from under its new owner.
-            if t is not None and t.state is TaskState.CLAIMED and t.claimed_by == intent.node_id:
+            refused = _ownership_refusal(tasks, intent.task_id, intent.node_id)
+            if refused is None:
                 tasks[intent.task_id] = dataclasses.replace(
-                    t, state=TaskState.COMPLETED, completed_at=intent.at
+                    tasks[intent.task_id], state=TaskState.COMPLETED, completed_at=intent.at
                 )
+            effects = _settled(intent.request_id, refused)
 
         case TaskReleased():
-            t = tasks.get(intent.task_id)
-            if t is not None and t.state is TaskState.CLAIMED and t.claimed_by == intent.node_id:
+            refused = _ownership_refusal(tasks, intent.task_id, intent.node_id)
+            if refused is None:
                 tasks[intent.task_id] = dataclasses.replace(
-                    t, state=TaskState.PENDING, claimed_by=None
+                    tasks[intent.task_id], state=TaskState.PENDING, claimed_by=None
                 )
+            effects = _settled(intent.request_id, refused)
 
         case _:
             # Not reachable at runtime; it is here for mypy, which reports an
@@ -564,6 +566,66 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
         ),
         effects,
     )
+
+
+def _settled(request_id: str | None, refusal: TaskRefusal | None) -> tuple[Effect, ...]:
+    """
+    The reply to a board write, or nothing when nobody asked.
+
+    Emitted on *both* outcomes when a request id is present, for the reason the
+    ``TaskClaimRequested`` arm gives: an agent parked on a future over a write the
+    reducer silently dropped is the same hang, and the only difference is that the
+    write's caller used to invent a success instead of waiting.
+    """
+    if request_id is None:
+        return ()
+    return (TaskWriteSettled(request_id=request_id, refusal=refusal),)
+
+
+def _declaration_refusal(tasks: dict[TaskId, Task], new: Task) -> TaskRefusal | None:
+    """
+    Why ``new`` may not go on the board, or None if it may.
+
+    Re-declaring an existing id is refused rather than merged: the only way it
+    happens is a retry, and overwriting would silently unclaim work somebody is
+    doing. A cycle is refused for the reason ``_would_cycle`` gives.
+
+    Both were already the reducer's behaviour. What is new is that the answer is a
+    value the caller has to look at, rather than a dropped write the caller reported
+    as a success.
+    """
+    if new.id in tasks:
+        return TaskRefusal.DUPLICATE_ID
+    if _would_cycle(tasks, new):
+        return TaskRefusal.WOULD_CYCLE
+    return None
+
+
+def _ownership_refusal(
+    tasks: dict[TaskId, Task], task_id: TaskId, node_id: NodeId
+) -> TaskRefusal | None:
+    """
+    Why ``node_id`` may not finish or release ``task_id``, or None if it may.
+
+    Shared by the two arms that have the same guard, so the refusal a worker is
+    given for completing someone else's task and the one it is given for releasing
+    it cannot drift apart.
+
+    The order of the tests is the order of the questions: does it exist, is it over,
+    is anyone holding it, is that me. A COMPLETED task is separated from a PENDING
+    one because both would otherwise read as "not claimed" while meaning opposite
+    things -- one says stop, the other says claim it first.
+    """
+    t = tasks.get(task_id)
+    if t is None:
+        return TaskRefusal.NO_SUCH_TASK
+    if t.state is TaskState.COMPLETED:
+        return TaskRefusal.ALREADY_COMPLETE
+    if t.state is not TaskState.CLAIMED:
+        return TaskRefusal.NOT_CLAIMED
+    if t.claimed_by != node_id:
+        return TaskRefusal.NOT_YOURS
+    return None
 
 
 def _pick_claim(tasks: dict[TaskId, Task], task_id: TaskId | None) -> Task | None:
