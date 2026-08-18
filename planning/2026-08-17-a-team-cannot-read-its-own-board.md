@@ -165,7 +165,7 @@ Ordered by what unblocks what, not by value. Each row says why it sits where it 
 | **1** | ~~`declare_task`, `complete_task`, `release_task` become question-shaped and answer truthfully~~ **done, `2dddfea`** | phase 6; item 9 | The keystone. Fixes a live defect standalone, and carries the plumbing three later rows need |
 | **2** | ~~A board read: the projection moves out of `ui/board.py`, one bus tool exposes it~~ **done, `b5287c3`** | reports 2 and 3; item 2 | Answers the report that is *literally true and a gap in the original specification*. Makes §1 above buildable |
 | **3** | `detail` on `BoardTask`; `task_id` on `Concern`; the board rendered in the DETAIL pane | items 2 and 3; board-has-no-surface | Item 3's *"claimed, and there is an open concern about it"* is a projection over data that already exists — no new state, no flag to forget |
-| **4** | `Task.touches`, and a `TaskDeclared` arm that appends an auto-dependency rather than refusing | item 9 | *"the highest-value store change in this document"* — the only change that removes a single point of failure. Needs row 1 |
+| **4** | ~~`Task.touches`, and a `TaskDeclared` arm that appends an auto-dependency rather than refusing~~ **done, `de2b481` — see below** | item 9 | *"the highest-value store change in this document"* — the only change that removes a single point of failure. Needs row 1 |
 | **5** | The brief: launch spec structured, entry writer on `settings.save`'s temp + `os.replace` primitive, a pane that derives and shows supersession, workers told the path with the confirm-or-refute framing | premise record steps 1–3 | Gated on row 0 |
 | **6** | An amendment intent for `Task.detail`, `node_id=None`, distinct from `TaskDeclared` | operator-instruction record | Its own record establishes `declare_task` cannot be the path and the guard must not be weakened. Needs row 2 to be sufficient |
 | **7** | Sign-off on declaration | task-reaches-the-board | **Unit unresolved — see below.** Needs row 1 for a reply channel |
@@ -251,6 +251,58 @@ objection is quoted in three of the gathered records and it is correct — but i
 argument against prose as a *fix for a structural problem*, not against prose at all. Rows
 1–7 are the structure. Row 8 is what the workers are told once the structure exists, and
 two of its entries (`format-file`, `typecheck`) are not prose.
+
+---
+
+### Row 4 is done — 2026-08-18, solo, `de2b481`
+
+Four things came out of the building that the record did not have. The first two are
+limits rather than results, and they are stated here because both are easy to read as
+solved from the outside.
+
+**The row-1 dependency is sharper than the table's reason for it.** The table says row 4
+needs row 1 because row 1 "carries the plumbing three later rows need", which is true and
+is not the binding reason. The binding reason is that this is the only place the board
+*changes what an agent asked for*, and an edit the caller is not told about is a board
+that silently disagrees with the lead's own plan. Without a reply channel the added edge
+would be discovered by a worker that cannot claim the task — the same fact, arriving
+later, shaped like a defect report. So `TaskWriteSettled` gained `auto_depends`, which
+bends its own recorded argument that one effect serves all three writes because they
+"differ only in which refusals they can produce". That is still the right shape: a
+completion and a release cannot change their caller's request, so the member is empty
+there rather than meaningless, and splitting a second effect out for the single write
+that can carry it would give three handlers two shapes to await for one question.
+
+**Normalisation is spelling, not resolution, and the gap is the interesting part.**
+`normalised_touches` runs `posixpath.normpath`, so `./pptmstr/store.py` and
+`pptmstr/ui/../store.py` are one file. It does *not* resolve against a session's `cwd`,
+follow a symlink, or reconcile an absolute path with a relative one — all of which need
+the filesystem, and the reducer does no IO. A declarer that mixes absolute and relative
+paths gets no protection. That is a reason for the briefing to ask for repository-relative
+paths, not a reason to put a `Path.resolve` in a pure function, and the briefing now says
+so in those words.
+
+**Session scoping cost coverage here, and the bill is worth naming.** Question 3's answer
+— which made the board session-scoped in row 2 — means the overlap check only sees the
+declarer's own board. **Two sessions in one working directory get no protection from this
+at all.** The alternative is worse: a dependency on another session's task would be a
+blocker that never appears on the board waiting for it, unresolvable and invisible at
+once. But this is a real gap rather than a solved case, and it is the first place row 2's
+answer has cost something.
+
+**The added edge cannot close a cycle, which is what makes the ordering safe.** The
+auto-dependency is appended *after* `_would_cycle` has already passed on the declared
+ones, which looks like a hole. It is not: a cycle through the new task needs something
+that reaches it, and nothing can — its id is not in `tasks` yet, because a duplicate is
+refused before this runs, so no existing `depends_on` can name it. Every edge added here
+points from a brand-new node at an old one. Pinned by a test rather than left as an
+argument.
+
+Verified: 972 tests, `ruff`, `black`, `mypy pptmstr`. Twelve new tests, and a mutation
+pass over the ten load-bearing decisions — inert overlap check, dropped normalisation,
+COMPLETED not skipped, session filter removed, declared-dependency added twice, caller's
+own spelling stored, edges computed then dropped, effect not carrying them, handler not
+reporting them, `touches` dropped by the tool — **10/10 caught**.
 
 ---
 
@@ -404,9 +456,14 @@ run and none has been performed for this record.
    `typecheck` widening, which is not free and is now its own decision.
 4. ~~**Row 2**, the board read — after questions 2 and 3 above have answers.~~ **done**,
    `b5287c3`, with both questions answered by the operator first rather than by the code.
-5. **Rows 3 and 4**, the board's surface and `Task.touches`. **Next**, and row 3 is
-   cheaper than the table says: `detail` on `BoardTask` now reaches the DETAIL pane *and*
-   `read_board` from one field, because the two share a projection.
-6. **Row 5**, the brief — after row 0 says it can exist.
-7. **Rows 6 and 7**, amendment and sign-off — after question 1 has an answer, and with the
+5. ~~**Row 4**, `Task.touches`.~~ **done**, `de2b481`, with two limits recorded rather
+   than left to be discovered: normalisation is spelling only, and the check does not
+   cross sessions.
+6. **Row 3**, the board's surface. **Next**, and cheaper than the table says: `detail` on
+   `BoardTask` now reaches the DETAIL pane *and* `read_board` from one field, because the
+   two share a projection. Note that `2026-08-18-the-board-is-a-tenant-of-a-pane-that-owes-it-nothing.md`
+   has since argued the board wants its own pane — row 3 puts the surface in DETAIL as
+   specified, and that record decides where it eventually lives.
+7. **Row 5**, the brief — after row 0 says it can exist.
+8. **Rows 6 and 7**, amendment and sign-off — after question 1 has an answer, and with the
    baseline numbers recorded before either lands.
