@@ -45,7 +45,7 @@ captured is a tool call, not a sentence about one.
      nothing -- a model that was never given the tool and a model that declined to
      call it look identical from here.
   5. **Can a worker read an absolute path outside its cwd?**
-     `planning/2026-08-17-a-session-premise-is-a-place-not-a-message.md` puts a
+     `planning/archive/2026-08-17-a-session-premise-is-a-place-not-a-message.md` puts a
      session's brief under `~/.claude/projects/<cwd-slug>/briefs/<session-id>/`,
      beside the transcripts the CLI already writes there, and records that the whole
      design rests on this being readable and that it is *not measured*. Two files,

@@ -3,8 +3,9 @@
 Does the rich renderer actually work against a live frame?
 
 blocks.py, inline.py and span_layout.py are plain data, unit-tested without
-ImGui. rich_pane.py is the one module in the markdown stack (planning/
-2026-08-10-transcript-markdown.md, step 5) that draws, and drawing is exactly
+ImGui. rich_pane.py is the one module in the markdown stack
+(planning/archive/2026-08-10-transcript-markdown.md, step 5) that draws, and
+drawing is exactly
 where a wrong ``add_text`` overload, a mismatched ``begin_table``/``end_table``
 pair, or a bad assumption about what "the last item" is after ``EndTable()``
 would surface -- none of that shows up until something actually renders a frame.

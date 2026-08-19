@@ -24,7 +24,7 @@ rather than letting the operator infer that a quiet sub-agent is a stuck one.
 than dragged over. That is a better unit than a selection anyway: no partial first
 line, no dropped trailing newline, and it round-trips into an issue.
 
-**Rendering.** ``RenderMode.RICH`` (planning/2026-08-10-transcript-markdown.md,
+**Rendering.** ``RenderMode.RICH`` (planning/archive/2026-08-10-transcript-markdown.md,
 step 5) draws markdown structure instead of literal lines, via ``rich_pane`` --
 imported as a module rather than name-by-name, since ``rich_pane`` needs
 ``Block``/``BlockCursor`` types this module also owns and a symbol-level import

@@ -1,7 +1,7 @@
 # A card is an agent, and a session is what collapses
 
-**Dated:** 2026-08-13 · **Status:** open, not started ·
-**Supersedes:** §5 of [`2026-08-13-sub-agents-are-invisible-while-they-work.md`](2026-08-13-sub-agents-are-invisible-while-they-work.md)
+**Dated:** 2026-08-13 · **Status:** built 2026-08-15, `380dfe1` ·
+**Supersedes:** §5 of [`2026-08-13-sub-agents-are-invisible-while-they-work.md`](../2026-08-13-sub-agents-are-invisible-while-they-work.md)
 
 The earlier note argued against free-standing sub-agent cards on three grounds: that
 the rail's value is that position never moves, that a sub-agent card would be

@@ -374,7 +374,7 @@ def test_a_cell_near_the_line_may_substitute_on_consecutive_steps() -> None:
     the photosensitivity argument, and this design does not have it: intensity is 1.0 on
     the raster row and 0.95 one row behind it, so a cell being overtaken by the line draws
     on both steps and very probably changes on both. It is recorded as a cost rather than
-    as a property (``planning/2026-08-15-the-splash-cycles-behind-a-raster-line.md``, "Two
+    as a property (``planning/archive/2026-08-15-the-splash-cycles-behind-a-raster-line.md``, "Two
     costs"), and what bounds the cost is the wake passing: a cell sees at most
     RASTER_ROWS_PER_SECOND changes a second for the 1.25s the wake is over it, once per
     sweep, against a field that is otherwise still.

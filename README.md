@@ -81,10 +81,9 @@ dated scope snapshots. Currently open, roughly in the order they cost something:
 
 | | |
 |---|---|
-| [The board has no surface](planning/2026-08-12-the-board-has-no-surface.md) | a team's tasks and concerns are in the store and drawn nowhere |
 | [`needs_you` sorts two clocks](planning/2026-08-12-needs-you-sorts-two-different-clocks.md) | the inbox is not oldest-first; approvals always sort last |
 | [The README shows nothing](planning/2026-08-13-the-readme-cannot-show-what-it-sells.md) | captures are not reproducible, so the screenshots above are placeholders |
-| [Dogfooding notes](planning/2026-08-09-dogfooding.md) | the friction log, and the question a team run is worth doing to answer |
+| [A halt does not reach queued work](planning/2026-08-14-a-halt-has-to-reach-work-that-has-not-started-yet.md) | closing a queued session starts it anyway, and it is then unreachable |
 
 Read [STYLE.md](STYLE.md) before adding a record, an intent, or a projection.
 

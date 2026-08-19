@@ -79,7 +79,9 @@ Design decisions live in the repository with their reasoning:
 - [STYLE.md](STYLE.md) — how the code is shaped: the functional core and its
   deliberate exceptions, what counts as verified, and the smells that have already
   cost something here. Read before adding a record, an intent, or a projection.
-- [planning/](planning/) — dated scope snapshots for work not yet started
+- [planning/](planning/) — dated scope snapshots for work not yet started.
+  [planning/archive/](planning/archive/) holds the ones that are built, or that
+  record a decision rather than work to do; read them for reasoning, not scope.
 
 Read these before proposing a direction. If you think a recorded decision is
 wrong, say so and say why — but engage with the recorded reasoning rather than

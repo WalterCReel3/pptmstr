@@ -1,7 +1,7 @@
 """
 Rich rendering: blocks in, draw-list output.
 
-Step 5 of planning/2026-08-10-transcript-markdown.md (the drawing half; wrapping
+Step 5 of planning/archive/2026-08-10-transcript-markdown.md (the drawing half; wrapping
 lives in span_layout.py). This is the only module in the markdown stack that
 touches ImGui -- blocks.py, inline.py and span_layout.py are all plain data and
 unit-tested; this one draws, and is exercised against a live frame by

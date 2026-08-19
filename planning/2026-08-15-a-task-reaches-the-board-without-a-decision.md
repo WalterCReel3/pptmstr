@@ -177,7 +177,7 @@ same question:
 **What it must not hold is a plan.** Work that arrives with a remedy attached reads as
 already-decided and invites approval — and the plan is the part that goes stale. This
 repository has already learned that once, in
-`planning/2026-08-15-the-splash-cycles-behind-a-raster-line.md`, which says of its own
+`planning/archive/2026-08-15-the-splash-cycles-behind-a-raster-line.md`, which says of its own
 parked branch that *the findings below are worth more than the code that was written
 against them*. The code did not survive the pause; the findings did. A remedy written now
 is written against code that will have moved by the time anyone acts on it.

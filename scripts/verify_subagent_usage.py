@@ -4,7 +4,7 @@ Four questions a sub-agent card rests on, none answerable by reading.
 
 `verify_subagents.py` established that sub-agents surface at all and carry an
 agent_id on their hooks. It spawns one, and never looks at token usage. The card
-design in planning/2026-08-13-a-card-is-an-agent.md needs three further facts, and
+design in planning/archive/2026-08-13-a-card-is-an-agent.md needs three further facts, and
 2026-08-13-detail-swaps-to-a-deliverable.md a fourth:
 
   1. Does the CLI populate `usage` on a sub-agent's AssistantMessage? Every

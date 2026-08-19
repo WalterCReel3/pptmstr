@@ -1,6 +1,6 @@
 # A message has no sender until the gate gives it one
 
-**Dated:** 2026-08-12 · **Status:** scoping — step 8 not started ·
+**Dated:** 2026-08-12 · **Status:** built 2026-08-12, `eccaa24` ·
 **Follows:** §8 step 8, `2026-08-11-agent-teams-vs-pptmstr.md` ·
 **Amends:** §2.7, which assumed the bus could identify its own callers
 

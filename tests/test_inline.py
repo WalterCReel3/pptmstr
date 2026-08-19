@@ -49,7 +49,7 @@ def test_link_carries_href_in_attrs() -> None:
 
 # -- the underscore-emphasis override --------------------------------------------
 #
-# planning/2026-08-10-transcript-markdown.md, "Underscore emphasis is disabled":
+# planning/archive/2026-08-10-transcript-markdown.md, "Underscore emphasis is disabled":
 # __init__ and __all__ are word-boundary delimiter runs by the letter of
 # CommonMark and bold under an unpatched parser -- verified below, since a
 # regression here is exactly the kind of thing that looks like a passing test

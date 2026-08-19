@@ -73,7 +73,7 @@ rather than leaning on the harness's channel — the routing is a means, the
 reviewability is the product.
 
 Its primitives are consumed individually instead (§2.7). Full reasoning and the
-list of what was taken: `planning/2026-08-11-agent-teams-vs-pptmstr.md`.
+list of what was taken: `planning/archive/2026-08-11-agent-teams-vs-pptmstr.md`.
 
 ---
 
@@ -902,7 +902,7 @@ the precise message the mark exists to disprove.
   stop an agent and watch a teammate restart it.
 - ~~**Context-budget policy.**~~ **Settled in rev. 3 (§2.4):** context is a session-health signal, not a budget. Advisory only, surfaced as `ContextPressure` plus an observed compaction count, with "fork this session" as the offered action. Money is a separate axis with its own hard stop (`max_budget_usd`).
 - **Whether spawning a subagent is itself approval-gated.** Probably yes given your stated preferences — the `Agent` tool call is visible to `PreToolUse` like any other.
-- **Where a team's board and its concerns are drawn (new, step 8).** Both projections exist in the snapshot and nothing reads them, so a team is half-observable: the operator approves a message between two agents without seeing the work either holds. `planning/2026-08-12-the-board-has-no-surface.md`.
+- **Where a team's board and its concerns are drawn (new, step 8).** Both projections exist in the snapshot and nothing reads them, so a team is half-observable: the operator approves a message between two agents without seeing the work either holds. `planning/archive/2026-08-12-the-board-has-no-surface.md`.
 - **Concurrency cap.** Subprocess-bound. Pick a number, surface it, make it configurable.
 - ~~**Whether inter-agent messages are approval-gated (rev. 4, §2.7).**~~ **Settled at step 8, and the question turned out to be two questions.** Interception is not optional: an in-process MCP handler is told only a tool name and its arguments, so `PreToolUse` stamping the sender is the only thing that gives a concern a `from` at all (§2.7). The gate is the bus's authentication layer, and that half is structural.
 

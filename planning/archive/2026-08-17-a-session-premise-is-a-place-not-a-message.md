@@ -1,15 +1,17 @@
 # A session's premises are a place, not a message
 
-**Dated:** 2026-08-17 · **Status:** open, not started · **Found by:** dogfooding —
+**Dated:** 2026-08-17 · **Status:** steps 1–3 built 2026-08-18 — `a38b141` for the
+brief itself, `b51df07` for seeding it at launch. Step 4 and the session title stay
+deferred, as the closing sections record · **Found by:** dogfooding —
 three operator reports — and settled against a measurement rather than a reading ·
 **Probe:** `scripts/verify_worker_context.py`, run `04e4db` · **Companions:**
-[`2026-08-15-what-the-board-does-not-carry.md`](2026-08-15-what-the-board-does-not-carry.md),
+[`2026-08-15-what-the-board-does-not-carry.md`](../2026-08-15-what-the-board-does-not-carry.md),
 [`2026-08-15-an-operator-instruction-the-lead-cannot-see.md`](2026-08-15-an-operator-instruction-the-lead-cannot-see.md),
 [`2026-08-14-the-transcript-outlives-the-window-and-our-record-of-it-does-not.md`](2026-08-14-the-transcript-outlives-the-window-and-our-record-of-it-does-not.md)
 
 Symbol names, not line numbers, per the 08-14 convention. The observations this
 argument was assembled from are in
-[`notes/2026-08-17-what-a-worker-is-given.md`](../notes/2026-08-17-what-a-worker-is-given.md),
+[`notes/2026-08-17-what-a-worker-is-given.md`](../../notes/2026-08-17-what-a-worker-is-given.md),
 which this record supersedes.
 
 ---
@@ -352,10 +354,11 @@ invent a second register, and a test now pins that the two strings are the same 
 paraphrase would have drifted on the next edit to either, and the whole point is that a
 worker meets one register for a reviewer's concern and the operator's premises alike.
 
-**Not built, and named rather than left implicit:** nothing yet *creates* a brief
-directory at launch — `session_dir` computes the canonical location and no caller uses
-it, because the operator supplies a path today. And step 4, amendments to `Task.detail`
-from the brief, stays deferred as the record specifies.
+**Creating the directory at launch landed separately, in `b51df07`:** `_seed_brief`
+computes the canonical location through `session_dir` and writes the launch text as
+the session's first entry, so a brief exists without the operator supplying a path.
+Step 4, amendments to `Task.detail` from the brief, stays deferred as the record
+specifies.
 
 **Still open, and deliberately deferred by the operator:** what makes a worker read the
 brief a second time. Steps 2 and 3 give it a directory and tell it to read; nothing

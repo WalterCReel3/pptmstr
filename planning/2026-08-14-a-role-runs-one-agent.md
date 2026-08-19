@@ -2,7 +2,7 @@
 
 **Dated:** 2026-08-14 · **Status:** phases 0–4 landed, plus one this note did not
 contain; 5–7 open — see [What landed](#what-landed) ·
-**Follows:** [`2026-08-12-a-message-has-no-sender-until-the-gate-gives-it-one.md`](2026-08-12-a-message-has-no-sender-until-the-gate-gives-it-one.md) §"First writer wins"
+**Follows:** [`2026-08-12-a-message-has-no-sender-until-the-gate-gives-it-one.md`](archive/2026-08-12-a-message-has-no-sender-until-the-gate-gives-it-one.md) §"First writer wins"
 
 The operator reports that a `feature` session declares several tasks and then
 starts one builder. Not a lead that refuses to delegate — a lead that delegates

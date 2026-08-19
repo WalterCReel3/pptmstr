@@ -4,12 +4,12 @@
 open records against the tree at `5bbb611`, plus four checks run for this document ·
 **Supersedes nothing** — every record below stands and is cited rather than restated ·
 **Gathers:**
-[`2026-08-17-a-session-premise-is-a-place-not-a-message.md`](2026-08-17-a-session-premise-is-a-place-not-a-message.md),
+[`2026-08-17-a-session-premise-is-a-place-not-a-message.md`](archive/2026-08-17-a-session-premise-is-a-place-not-a-message.md),
 [`2026-08-15-what-the-board-does-not-carry.md`](2026-08-15-what-the-board-does-not-carry.md),
-[`2026-08-15-an-operator-instruction-the-lead-cannot-see.md`](2026-08-15-an-operator-instruction-the-lead-cannot-see.md),
+[`2026-08-15-an-operator-instruction-the-lead-cannot-see.md`](archive/2026-08-15-an-operator-instruction-the-lead-cannot-see.md),
 [`2026-08-15-a-task-reaches-the-board-without-a-decision.md`](2026-08-15-a-task-reaches-the-board-without-a-decision.md),
 [`2026-08-14-a-role-runs-one-agent.md`](2026-08-14-a-role-runs-one-agent.md) (phases 5–7),
-[`2026-08-12-the-board-has-no-surface.md`](2026-08-12-the-board-has-no-surface.md)
+[`2026-08-12-the-board-has-no-surface.md`](archive/2026-08-12-the-board-has-no-surface.md)
 
 Symbol names, not line numbers, per the 08-14 convention.
 
@@ -318,7 +318,7 @@ reporting them, `touches` dropped by the tool — **10/10 caught**.
 
 Split in two because the data and the surface are separable and the surface moved: the
 projection landed first, then the board left DETAIL for a pane of its own
-([`2026-08-18-the-board-is-a-tenant-of-a-pane-that-owes-it-nothing.md`](2026-08-18-the-board-is-a-tenant-of-a-pane-that-owes-it-nothing.md),
+([`2026-08-18-the-board-is-a-tenant-of-a-pane-that-owes-it-nothing.md`](archive/2026-08-18-the-board-is-a-tenant-of-a-pane-that-owes-it-nothing.md),
 where the four design questions are answered).
 
 **The row-3 table entry says "rendered in the DETAIL pane" and that is now wrong**, which

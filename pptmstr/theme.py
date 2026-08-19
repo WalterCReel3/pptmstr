@@ -782,7 +782,7 @@ class Face(enum.Enum):
     There is no ITALIC, and there cannot be one: Inconsolata has no italic upstream
     -- not "not bundled", it does not exist -- and ImGui will not synthesise an
     oblique. Emphasis is therefore a colour shift, which is the terminal convention
-    (planning/2026-08-10-transcript-markdown.md).
+    (planning/archive/2026-08-10-transcript-markdown.md).
     """
 
     BODY = "body"

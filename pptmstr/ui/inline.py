@@ -1,7 +1,7 @@
 """
 Inline parsing: markdown-it-py over a block's content.
 
-Step 4 of planning/2026-08-10-transcript-markdown.md. Parsed once, at block
+Step 4 of planning/archive/2026-08-10-transcript-markdown.md. Parsed once, at block
 finalisation (``pptmstr/ui/blocks.py``), and cached on the frozen ``Block`` --
 so a long transcript pays for inline parsing exactly once per block, never once
 per frame. Only the inline chain is used (``MarkdownIt.parseInline``); block

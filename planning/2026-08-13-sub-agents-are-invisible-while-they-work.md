@@ -93,7 +93,7 @@ this for `PreToolUse` generally ("three at once, measured") but not for `Agent`,
 is special precisely because it parks.
 
 **Measured since, by `scripts/verify_subagent_usage.py`** — see
-[`2026-08-13-a-card-is-an-agent.md`](2026-08-13-a-card-is-an-agent.md) for the output:
+[`2026-08-13-a-card-is-an-agent.md`](archive/2026-08-13-a-card-is-an-agent.md) for the output:
 
 - The second callback parameter (`driver.py:570-571`) is **not** a usable join key. It
   equals the spawn's `tool_use_id` on `PreToolUse` but is an unrelated UUID on
@@ -136,7 +136,7 @@ under a thinking root is the common case.
 ## 5. On the proposal: keep the pips, fix the draw, take the left rule
 
 > **Superseded on the same day by
-> [`2026-08-13-a-card-is-an-agent.md`](2026-08-13-a-card-is-an-agent.md).** The
+> [`2026-08-13-a-card-is-an-agent.md`](archive/2026-08-13-a-card-is-an-agent.md).** The
 > operator's reply reframed the card as an *agent* rather than a session and answered
 > the stability objection with a collapse rule. Two of the three "structurally wrong"
 > slots below turned out to be defects rather than absences. §§1-4 above stand
