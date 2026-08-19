@@ -44,11 +44,34 @@ captured is a tool call, not a sentence about one.
      such: a PreToolUse for `Skill` proves the worker had it, but no hook proves
      nothing -- a model that was never given the tool and a model that declined to
      call it look identical from here.
+  5. **Can a worker read an absolute path outside its cwd?**
+     `planning/2026-08-17-a-session-premise-is-a-place-not-a-message.md` puts a
+     session's brief under `~/.claude/projects/<cwd-slug>/briefs/<session-id>/`,
+     beside the transcripts the CLI already writes there, and records that the whole
+     design rests on this being readable and that it is *not measured*. Two files,
+     because they can plausibly differ: one in a temp directory that is merely
+     outside cwd, one at the real `~/.claude/projects/...` shape. The answer is taken
+     from `tool_response` on PostToolUse -- the bytes the tool returned -- rather than
+     from the worker's account of them.
+  6. **Does `AgentDefinition.initialPrompt` reach a worker?** It is the one
+     *per-session* channel into a worker the SDK offers; `driver._team` leaves it
+     unset and nothing has ever asked whether it arrives. It matters because every
+     other channel is either per-build (`worker_prompt`) or the lead retyping, and a
+     *pointer* placed there is a pointer rather than the second copy
+     `2026-08-15-an-operator-instruction-the-lead-cannot-see.md` refuses.
 
-**Everything except the report tool and the spawn is denied at the gate**, so a canary
-cannot arrive by Read or Bash. The spawn arguments are recorded and scanned for the
-nonces afterwards: the lead is told to pass "begin" and nothing else, and if it pastes
-a canary in anyway that arm is void rather than quietly wrong.
+**Everything except the report tool, the spawn and two named absolute paths is denied
+at the gate**, so a canary cannot arrive by Read or Bash. The two readable paths are
+matched exactly, and the workspace `CLAUDE.md` is not one of them, so allowing question
+5's read does not put question 1's canary within reach. The spawn arguments are
+recorded and scanned for the nonces afterwards: the lead is told to pass "begin" and
+nothing else, and if it pastes a canary in anyway that arm is void rather than quietly
+wrong.
+
+**Questions 1-4 and their four roles are unchanged from run `04e4db`, deliberately.**
+The prompts those arms answer are byte-identical, so a re-run is comparable to the one
+the planning records cite. Questions 5 and 6 arrive as two new roles with their own
+prompts rather than as two more lines in the shared one.
 
 Usage:  .venv/bin/python scripts/verify_worker_context.py [--model claude-sonnet-5]
 """
@@ -58,6 +81,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import shutil
 import sys
 import tempfile
 import uuid
@@ -87,6 +111,9 @@ STAMP = "_agent"
 RUN = uuid.uuid4().hex[:6]
 MEMORY_CANARY = f"MEM-{uuid.uuid4().hex[:12]}"
 BRIEFING_CANARY = f"BRF-{uuid.uuid4().hex[:12]}"
+OUTSIDE_CANARY = f"OUT-{uuid.uuid4().hex[:12]}"
+BRIEFDIR_CANARY = f"BRD-{uuid.uuid4().hex[:12]}"
+INITIAL_CANARY = f"INI-{uuid.uuid4().hex[:12]}"
 
 # Role names carry the run nonce because question 3 turns on a worker naming a
 # *sibling*: a name it could not have guessed and was never told in its own prompt.
@@ -94,7 +121,9 @@ MEM_DEFAULT = f"memdefault-{RUN}"
 MEM_PROJECT = f"memproject-{RUN}"
 ROSTER_BROAD = f"rosterbroad-{RUN}"
 ROSTER_NARROW = f"rosternarrow-{RUN}"
-ROLES = (MEM_DEFAULT, MEM_PROJECT, ROSTER_BROAD, ROSTER_NARROW)
+PATH_READ = f"pathread-{RUN}"
+INIT_SEED = f"initseed-{RUN}"
+ROLES = (MEM_DEFAULT, MEM_PROJECT, ROSTER_BROAD, ROSTER_NARROW, PATH_READ, INIT_SEED)
 
 # What every worker is asked, in its own AgentDefinition.prompt rather than in the
 # spawn prompt -- the lead must not be the one carrying the questions, or a leak from
@@ -129,14 +158,73 @@ skill="probe-nonexistent". It will be denied; that is expected and the denial is
 measurement. If you have no Skill tool, skip this step and do not mention it.
 """
 
+# Question 5. Its own role rather than two more lines in WORKER_TASK, so the four arms
+# that answered run 04e4db keep the prompt they answered it with.
+#
+# The briefing question rides along because it is the negative control: a worker that
+# reports BRIEFING_CANARY makes its own other answers unreadable, and that has to be
+# checkable per role rather than assumed from the roles that were asked.
+PATH_READ_TASK = """\
+You are a probe worker. Answer by calling the tool {report}, once per question, and
+then stop.
+
+Call {report} three times, each with who="{name}":
+
+1. question="briefing", answer=the value of BRIEFING_CANARY if it appears anywhere in
+   your instructions or context, otherwise the exact word NONE. Do not guess.
+2. question="outside", answer=the value of OUTSIDE_CANARY. It is not in your context.
+   Read this exact absolute path to find it:
+     {outside}
+   If the read fails for any reason, answer with the word FAILED followed by the error
+   text you were given, verbatim.
+3. question="briefdir", answer=the value of BRIEFDIR_CANARY. It is not in your context.
+   Read this exact absolute path to find it:
+     {briefdir}
+   If the read fails for any reason, answer with the word FAILED followed by the error
+   text you were given, verbatim.
+
+Read is the only other tool you have and those two paths are the only ones it will
+open. Do not try any other path or tool.
+
+Then reply with the single word done.
+"""
+
+# Question 6. `initialPrompt` is set on this role and on no other; the canary exists
+# nowhere else, so reporting it is proof the field reached the worker.
+INIT_SEED_TASK = """\
+You are a probe worker. Answer two questions by calling the tool {report}, once per
+question, and then stop. Do not use any other tool; every other tool is denied.
+
+Answer ONLY from the instructions and context you were given at startup. You have no
+file access. If something is not present in your own context, the answer is the exact
+word NONE -- do not guess, and do not infer it from the shape of these questions.
+
+Call {report} twice, each with who="{name}":
+
+1. question="briefing", answer=the value of BRIEFING_CANARY if it appears anywhere in
+   your instructions or context, otherwise NONE.
+2. question="initial", answer=the value of INITIAL_CANARY if it appears anywhere in
+   your instructions or context, otherwise NONE.
+
+Then reply with the single word done.
+"""
+
+# The only place INITIAL_CANARY exists. Not on disk, not in a prompt we build into any
+# other role, and not in anything the lead can see.
+INIT_SEED_PROMPT = f"""\
+Before you begin: INITIAL_CANARY={INITIAL_CANARY}
+"""
+
 LEAD_PROMPT = f"""\
-Start four sub-agents, all in the same message so they run at once. Use the Agent tool
+Start six sub-agents, all in the same message so they run at once. Use the Agent tool
 (or Task, whichever you have) with these subagent_type values:
 
   {MEM_DEFAULT}
   {MEM_PROJECT}
   {ROSTER_BROAD}
   {ROSTER_NARROW}
+  {PATH_READ}
+  {INIT_SEED}
 
 For every one of them the prompt argument must be exactly the word: begin
 
@@ -149,7 +237,7 @@ Before you spawn them, call {REPORT_TOOL} once with who="root", question="memory
 answer set to the value of MEMORY_CANARY if it appears in your own context, or the
 exact word NONE if it does not.
 
-When all four have finished, reply with the single word finished.
+When all six have finished, reply with the single word finished.
 """
 
 observed: dict[str, Any] = {
@@ -164,8 +252,18 @@ observed: dict[str, Any] = {
     "memory_key": None,
     "memory_paths": None,
     "inits": [],  # one entry per init: does a sub-agent get its own?
+    # Question 5's actual evidence. A worker's account of a failed read is narration;
+    # `tool_response` on PostToolUse is what the tool returned. Both the attempt and
+    # its result are kept, because "never attempted" and "attempted and refused" are
+    # different answers and only one of them is the one being asked for.
+    "reads": [],
     "result_error": None,
 }
+
+# The absolute paths question 5 may open, filled in by `main` once the run's
+# directories exist. Matched exactly: nothing else is readable, so the workspace
+# CLAUDE.md stays out of reach and question 1's canary is still unreachable by Read.
+READABLE: dict[str, str] = {}
 
 
 def _worker_prompt(name: str, extra: str = "") -> str:
@@ -174,7 +272,11 @@ def _worker_prompt(name: str, extra: str = "") -> str:
 
 def _leaked(text: str) -> list[str]:
     """Which canaries appear in a string the lead wrote."""
-    return [c for c in (MEMORY_CANARY, BRIEFING_CANARY) if c in text]
+    return [
+        c
+        for c in (MEMORY_CANARY, BRIEFING_CANARY, OUTSIDE_CANARY, BRIEFDIR_CANARY, INITIAL_CANARY)
+        if c in text
+    ]
 
 
 async def main(model: str) -> int:
@@ -188,6 +290,24 @@ async def main(model: str) -> int:
         "This file exists only to be found (or not) by a sub-agent.\n",
         encoding="utf-8",
     )
+
+    # Question 5's two targets. They differ in one property and it is the one that
+    # could plausibly matter: `outside` is merely not under cwd, while `briefdir` is
+    # the exact shape the premise record proposes -- the CLI's own project directory,
+    # beside the transcripts it already writes there. A CLI that special-cases its own
+    # state directory would answer the two differently, and one path could not tell.
+    outside_dir = Path(tempfile.mkdtemp(prefix="pptmstr-outside-"))
+    outside_file = outside_dir / "000-premises.md"
+    outside_file.write_text(f"OUTSIDE_CANARY={OUTSIDE_CANARY}\n", encoding="utf-8")
+
+    slug = str(workspace).replace("/", "-")
+    briefdir = Path.home() / ".claude" / "projects" / slug / "briefs" / f"probe-{RUN}"
+    briefdir.mkdir(parents=True, exist_ok=True)
+    briefdir_file = briefdir / "000-premises.md"
+    briefdir_file.write_text(f"BRIEFDIR_CANARY={BRIEFDIR_CANARY}\n", encoding="utf-8")
+
+    READABLE[str(outside_file)] = "outside"
+    READABLE[str(briefdir_file)] = "briefdir"
 
     @tool(
         "report",
@@ -243,6 +363,31 @@ async def main(model: str) -> int:
                 }
             }
 
+        if name == "Read":
+            # Allowed only for the two paths question 5 is about, matched exactly.
+            # Recorded either way: an attempt on some other path is a worker going
+            # looking, and that is worth seeing rather than silently refusing.
+            path = str(tool_input.get("file_path") or "")
+            allowed = path in READABLE
+            observed["reads"].append(
+                {
+                    "agent_id": agent_id,
+                    "target": READABLE.get(path, "(not a probe target)"),
+                    "file_path": path,
+                    "allowed": allowed,
+                    "tool_use_id": tool_use_id,
+                    "response": None,
+                    "canary_in_response": None,
+                }
+            )
+            if allowed:
+                return {
+                    "hookSpecificOutput": {
+                        "hookEventName": "PreToolUse",
+                        "permissionDecision": "allow",
+                    }
+                }
+
         # Everything else. The denial is not a policy test -- it is what makes the
         # canaries mean something, because a worker that could Read the workspace
         # would report MEMORY_CANARY whether or not project memory reached it.
@@ -257,6 +402,29 @@ async def main(model: str) -> int:
                 ),
             }
         }
+
+    async def post_tool_use(
+        hook_input: dict[str, Any], tool_use_id: str | None, _context: Any
+    ) -> dict[str, Any]:
+        """
+        Close question 5 on the wire.
+
+        STYLE.md §2: a probe captures the result, not the narration. Whether a worker
+        *says* the read failed is a sentence about a tool call; `tool_response` is what
+        the tool returned. The two disagreeing is itself a finding, so both are kept
+        and neither is derived from the other.
+        """
+        if str(hook_input.get("tool_name") or "") != "Read":
+            return {}
+        body = str(hook_input.get("tool_response"))
+        for entry in observed["reads"]:
+            if entry["tool_use_id"] == tool_use_id and entry["response"] is None:
+                entry["response"] = body[:800]
+                entry["canary_in_response"] = [
+                    c for c in (OUTSIDE_CANARY, BRIEFDIR_CANARY) if c in body
+                ]
+                break
+        return {}
 
     server = create_sdk_mcp_server("probe", "1.0.0", [report])
 
@@ -287,6 +455,26 @@ async def main(model: str) -> int:
             prompt=_worker_prompt(ROSTER_NARROW),
             tools=[REPORT_TOOL, "Read", "Glob", "Grep"],
         ),
+        # Question 5. Read is granted here; the gate is what bounds it to two paths.
+        PATH_READ: AgentDefinition(
+            description="Probe worker: reads two absolute paths outside cwd.",
+            prompt=PATH_READ_TASK.format(
+                report=REPORT_TOOL,
+                name=PATH_READ,
+                outside=outside_file,
+                briefdir=briefdir_file,
+            ),
+            tools=[REPORT_TOOL, "Read"],
+        ),
+        # Question 6. The only role carrying initialPrompt, and INITIAL_CANARY exists
+        # nowhere else -- not on disk, not in any other prompt, not in the lead's
+        # context -- so a report of it has exactly one possible source.
+        INIT_SEED: AgentDefinition(
+            description="Probe worker: initialPrompt is set.",
+            prompt=INIT_SEED_TASK.format(report=REPORT_TOOL, name=INIT_SEED),
+            tools=[REPORT_TOOL],
+            initialPrompt=INIT_SEED_PROMPT,
+        ),
     }
 
     options = ClaudeAgentOptions(
@@ -310,7 +498,13 @@ async def main(model: str) -> int:
         permission_mode="dontAsk",
         max_turns=24,
         mcp_servers={"probe": server},
-        hooks={"PreToolUse": [HookMatcher(hooks=[pre_tool_use], timeout=600)]},
+        hooks={
+            "PreToolUse": [HookMatcher(hooks=[pre_tool_use], timeout=600)],
+            # Both events, because a refused read may close through either and
+            # question 5's answer is exactly the one that fails.
+            "PostToolUse": [HookMatcher(hooks=[post_tool_use], timeout=600)],
+            "PostToolUseFailure": [HookMatcher(hooks=[post_tool_use], timeout=600)],
+        },
     )
 
     async with ClaudeSDKClient(options=options) as client:
@@ -343,6 +537,10 @@ async def main(model: str) -> int:
                 observed["result_error"] = message.result
 
     report_findings(workspace)
+    # The two temp trees are left for inspection; this one is not, because it sits
+    # inside the CLI's own state directory and a probe has no business leaving run
+    # nonces there.
+    shutil.rmtree(briefdir, ignore_errors=True)
     return 0
 
 
@@ -380,6 +578,9 @@ def report_findings(workspace: Path) -> None:
     print(f"\nrun {RUN}   workspace {workspace}")
     print(f"  MEMORY_CANARY   {MEMORY_CANARY}   (only in {workspace}/CLAUDE.md)")
     print(f"  BRIEFING_CANARY {BRIEFING_CANARY} (only in the lead's system-prompt append)")
+    for path, target in READABLE.items():
+        print(f"  {target:<15} {path}")
+    print(f"  INITIAL_CANARY  {INITIAL_CANARY} (only in {INIT_SEED}'s initialPrompt)")
 
     print("\n=== every report received ===")
     for r in observed["reports"]:
@@ -440,6 +641,45 @@ def report_findings(workspace: Path) -> None:
             "not having the tool AND with it having the tool and declining to call "
             "it. This question is not answered."
         )
+
+    print("\n=== 5. can a worker read an absolute path outside cwd? ===")
+    if not observed["reads"]:
+        print(
+            "  no Read reached the gate at all. The question is NOT ANSWERED -- a "
+            "worker that never attempted the read and one that could not are the "
+            "same row here."
+        )
+    for target in ("outside", "briefdir"):
+        attempts = [r for r in observed["reads"] if r["target"] == target]
+        canary = OUTSIDE_CANARY if target == "outside" else BRIEFDIR_CANARY
+        said = _answers(target).get(PATH_READ, "(no report)")
+        print(f"  {target}:")
+        for attempt in attempts:
+            got = attempt["canary_in_response"]
+            print(f"    tool_response carried the canary: {bool(got)}")
+            if not got and attempt["response"] is not None:
+                print(f"    tool_response: {attempt['response'][:300]!r}")
+            if attempt["response"] is None:
+                print("    no PostToolUse arrived for this call -- result unobserved")
+        if not attempts:
+            print("    not attempted")
+        print(f"    worker reported: {said}")
+        # The wire and the account are compared rather than one standing in for the
+        # other, because a model reporting success is not evidence of success.
+        on_wire = any(attempt["canary_in_response"] for attempt in attempts)
+        if on_wire != (canary in said):
+            print("    !! the worker's answer disagrees with what the tool returned")
+
+    strays = [r for r in observed["reads"] if not r["allowed"]]
+    if strays:
+        print(f"  {len(strays)} read(s) on other paths, denied:")
+        for stray in strays:
+            print(f"    {stray['agent_id']}  {stray['file_path']}")
+
+    print("\n=== 6. does AgentDefinition.initialPrompt reach a worker? ===")
+    initial = _answers("initial").get(INIT_SEED, "(no report)")
+    print(f"  {INIT_SEED:<24}{initial}")
+    print(f"  {'':<24}carries the canary: {INITIAL_CANARY in initial}")
 
     print("\n=== system messages on the wire ===")
     # A tally, not a dump. The first version of this printed every message with its

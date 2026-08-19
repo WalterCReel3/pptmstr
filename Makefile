@@ -1,4 +1,4 @@
-.PHONY: help bootstrap probe smoke run test lint format typecheck check clean
+.PHONY: help bootstrap probe smoke run test lint format format-file typecheck typecheck-all check clean
 
 PY  := .venv/bin/python
 PIP := .venv/bin/python -m pip
@@ -25,7 +25,7 @@ endif
 help:              ## this list
 	@echo "pptmstr targets:"
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
-	  | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
+	  | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-14s\033[0m %s\n", $$1, $$2}'
 	@echo
 	@echo "display: HEADLESS=$(HEADLESS)$(if $(GUI), — window targets run under: $(GUI))"
 
@@ -66,11 +66,36 @@ lint: venv-check   ## ruff check + black --check
 	.venv/bin/ruff check pptmstr scripts tests
 	.venv/bin/black --check pptmstr scripts tests
 
-format: venv-check ## black, in place
+# The only target here that writes source files, and the only one that can cross a
+# file boundary the task board relies on. A team run had one agent reformat another
+# agent's untracked file -- untracked, so `git checkout` had nothing to restore from
+# and there was no revert path at all. Tree-wide *reading* is not the hazard and is
+# how an unowned failure becomes visible in the first place; tree-wide *writing* is.
+format: venv-check ## black, in place, across the whole tree
 	.venv/bin/black pptmstr scripts tests
 
-typecheck: venv-check
+# The safe path made the easy one, so an agent formatting its own work does not have
+# to know the invocation. Several files may be given: `make format-file FILE="a b"`.
+format-file: venv-check ## black, in place, on FILE= only
+	@test -n "$(FILE)" || { echo 'usage: make format-file FILE=path/to/file.py'; exit 2; }
+	.venv/bin/black $(FILE)
+
+typecheck: venv-check ## mypy over the application
 	.venv/bin/mypy pptmstr
+
+# Widened coverage, deliberately outside `check` for now. `lint` reads all three
+# directories and `typecheck` reads one, so a tree that passes `make check` has had
+# two thirds of itself typechecked by nobody -- but turning that on is not the
+# one-line change it looks like: at the strictness `pyproject.toml` sets for the
+# application, `scripts/` and `tests/` carry several hundred findings, most of them
+# missing annotations on test functions rather than defects.
+#
+# A separate target rather than a widened gate, because the two honest options are
+# to fix the backlog or to relax the settings for these directories, and both are
+# decisions rather than a Makefile edit. This makes the number visible to whoever
+# takes it, which is the thing that was missing.
+typecheck-all: venv-check ## mypy over the application, scripts and tests
+	.venv/bin/mypy pptmstr scripts tests
 
 check: lint typecheck test   ## everything the CI gate would run
 

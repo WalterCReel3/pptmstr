@@ -26,7 +26,8 @@ from collections.abc import Iterable
 from types import MappingProxyType
 from typing import assert_never
 
-from .effects import ClaimSettled, Effect, InboxDelivered
+from .board import board_concerns, board_tasks
+from .effects import BoardDelivered, ClaimSettled, Effect, InboxDelivered, TaskWriteSettled
 from .intents import (
     AgentFinished,
     AgentRemoved,
@@ -34,6 +35,7 @@ from .intents import (
     AgentSpawned,
     ApprovalRequested,
     ApprovalResolved,
+    BoardRead,
     CompactionObserved,
     ConcernEdited,
     ConcernPosted,
@@ -45,6 +47,7 @@ from .intents import (
     StateChanged,
     SubagentDelivered,
     SubagentProgress,
+    TaskAmended,
     TaskClaimRequested,
     TaskCompleted,
     TaskDeclared,
@@ -65,7 +68,9 @@ from .model import (
     Snapshot,
     Task,
     TaskId,
+    TaskRefusal,
     TaskState,
+    normalised_touches,
 )
 from .transcript import Transcript
 
@@ -192,6 +197,7 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
                 model=intent.model,
                 agent_type=intent.agent_type,
                 template=intent.template,
+                brief=intent.brief,
                 # Resolved here rather than at every emitter. A sub-agent's spawn
                 # hook is not told a working directory but does run in its
                 # session's, and making each emitter remember that is how the two
@@ -458,6 +464,20 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
             if intent.concern.id not in concerns:
                 concerns[intent.concern.id] = intent.concern
 
+        case BoardRead():
+            # Answered from the pre-apply snapshot, which is the same view every
+            # other arm reads and the one the effect is paired with. Nothing is
+            # written, so there is no ordering question here -- but building the
+            # rows from the dicts under construction would answer a question about
+            # a world that does not exist until this function returns.
+            effects = (
+                BoardDelivered(
+                    request_id=intent.request_id,
+                    tasks=board_tasks(snap, intent.node_id[0]),
+                    concerns=board_concerns(snap, intent.node_id[0]),
+                ),
+            )
+
         case InboxRead():
             # Read from the pre-apply view, then mark. Withdrawn and
             # already-delivered concerns are excluded by inbox_of, so a second read
@@ -487,20 +507,52 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
             if c is not None and c.state is ConcernState.POSTED:
                 concerns[intent.concern_id] = dataclasses.replace(c, state=ConcernState.WITHDRAWN)
 
+        case TaskAmended():
+            # Amends, never creates. A typo in a task id would otherwise put an
+            # untitled, undeclared, unclaimable row on the board -- and it would be
+            # indistinguishable from a real task nobody had got to yet.
+            #
+            # The claim is deliberately left alone. The worker holding this task is
+            # the reader the amendment is *for*, so unclaiming to force a re-read
+            # would take the work away from the one participant already doing it,
+            # and `release_task` exists for the operator who actually wants that.
+            #
+            # A COMPLETED task is amended like any other. It reads as revising
+            # history and is the honest option: the alternative is a spec that
+            # disagrees with the record of what was built, and the board is what a
+            # later reader has.
+            amended = tasks.get(intent.task_id)
+            if amended is not None:
+                tasks[intent.task_id] = dataclasses.replace(amended, detail=intent.detail)
+
         case TaskDeclared():
-            # Re-declaring an existing id is ignored rather than merged: the only
-            # way it happens is a retry, and overwriting would silently unclaim
-            # work somebody is doing.
-            if intent.task.id not in tasks and not _would_cycle(tasks, intent.task):
+            refused = _declaration_refusal(tasks, intent.task)
+            auto: tuple[TaskId, ...] = ()
+            if refused is None:
                 # Provenance comes from the intent, never from the record handed
                 # in: the intent's node_id is the sender the gate authenticated,
                 # and a declared_by a caller set on the Task is not evidence of
                 # anything. Stamping unconditionally leaves one writer for the
                 # field rather than two that have to agree.
-                tasks[intent.task.id] = dataclasses.replace(intent.task, declared_by=intent.node_id)
+                #
+                # Touches are normalised here for the same reason: the overlap
+                # check compares them, so a caller that could supply its own
+                # spelling could evade the check by writing `./x.py`.
+                landed = dataclasses.replace(
+                    intent.task,
+                    declared_by=intent.node_id,
+                    touches=normalised_touches(intent.task.touches),
+                )
+                auto = _auto_depends(tasks, landed)
+                if auto:
+                    landed = dataclasses.replace(landed, depends_on=(*landed.depends_on, *auto))
+                tasks[landed.id] = landed
+            effects = _settled(intent.request_id, refused, auto)
 
         case TaskClaimRequested():
-            won = _pick_claim(tasks, intent.task_id)
+            # The claimer's own session, taken from the sender the gate
+            # authenticated rather than from anything the model can set.
+            won = _pick_claim(tasks, intent.task_id, intent.node_id[0])
             if won is not None:
                 won = dataclasses.replace(won, state=TaskState.CLAIMED, claimed_by=intent.node_id)
                 tasks[won.id] = won
@@ -511,20 +563,22 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
             effects = (ClaimSettled(request_id=intent.request_id, task=won),)
 
         case TaskCompleted():
-            t = tasks.get(intent.task_id)
             # Guarded on the claimer so a stale completion from a worker that
             # released the task cannot finish it out from under its new owner.
-            if t is not None and t.state is TaskState.CLAIMED and t.claimed_by == intent.node_id:
+            refused = _ownership_refusal(tasks, intent.task_id, intent.node_id)
+            if refused is None:
                 tasks[intent.task_id] = dataclasses.replace(
-                    t, state=TaskState.COMPLETED, completed_at=intent.at
+                    tasks[intent.task_id], state=TaskState.COMPLETED, completed_at=intent.at
                 )
+            effects = _settled(intent.request_id, refused)
 
         case TaskReleased():
-            t = tasks.get(intent.task_id)
-            if t is not None and t.state is TaskState.CLAIMED and t.claimed_by == intent.node_id:
+            refused = _ownership_refusal(tasks, intent.task_id, intent.node_id)
+            if refused is None:
                 tasks[intent.task_id] = dataclasses.replace(
-                    t, state=TaskState.PENDING, claimed_by=None
+                    tasks[intent.task_id], state=TaskState.PENDING, claimed_by=None
                 )
+            effects = _settled(intent.request_id, refused)
 
         case _:
             # Not reachable at runtime; it is here for mypy, which reports an
@@ -566,7 +620,126 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
     )
 
 
-def _pick_claim(tasks: dict[TaskId, Task], task_id: TaskId | None) -> Task | None:
+def _settled(
+    request_id: str | None,
+    refusal: TaskRefusal | None,
+    auto_depends: tuple[TaskId, ...] = (),
+) -> tuple[Effect, ...]:
+    """
+    The reply to a board write, or nothing when nobody asked.
+
+    Emitted on *both* outcomes when a request id is present, for the reason the
+    ``TaskClaimRequested`` arm gives: an agent parked on a future over a write the
+    reducer silently dropped is the same hang, and the only difference is that the
+    write's caller used to invent a success instead of waiting.
+
+    ``auto_depends`` rides on the success answer because a dependency the store
+    added is a change to what the declarer asked for. Applying it silently would
+    make the board disagree with the lead's own plan with nothing saying so -- and
+    "your task is waiting" arriving later, from a worker that cannot claim it, is
+    the same information at the worst moment.
+    """
+    if request_id is None:
+        return ()
+    return (TaskWriteSettled(request_id=request_id, refusal=refusal, auto_depends=auto_depends),)
+
+
+def _auto_depends(tasks: dict[TaskId, Task], new: Task) -> tuple[TaskId, ...]:
+    """
+    Unfinished tasks on the same board that will write a file ``new`` also writes.
+
+    **The collision becomes a wait rather than a refusal**, which is the whole
+    design. Refusing would need the declarer to notice, re-plan and re-declare, and
+    would put a second thing in the reply channel that can be ignored; appending a
+    dependency produces exactly the sequencing the lead should have written by hand,
+    and produces it whether or not the lead was paying attention. Nothing is
+    rejected, so nothing is lost.
+
+    That matters more than it sounds. ``depends_on`` is the *entire* mechanism
+    keeping two agents out of one file, it is mechanical and unbypassable, and it
+    was also opt-in and invoked by hand by the one participant whose mistakes
+    nothing else checks. This is what stops it being opt-in.
+
+    **This cannot close a cycle**, so it is safe to run after ``_would_cycle`` has
+    already passed on the declared dependencies. A cycle through ``new`` needs
+    something to reach ``new``, and nothing can: its id is not in ``tasks`` (a
+    duplicate is refused before this runs), so no existing ``depends_on`` names it.
+    Every edge added here therefore points from a brand-new node at an old one.
+
+    Scoped to the declarer's own session, like everything else about a board. A
+    dependency on another session's task would be a blocker that never appears on
+    the board that is waiting for it -- unresolvable and invisible at once, which is
+    worse than the concurrent write. The honest limit: **two sessions in one working
+    directory get no protection from this**, and that is a real gap rather than a
+    solved case.
+
+    COMPLETED tasks are skipped because a finished task is not writing anything.
+    Ordering is by declaration so the added edges are stable across runs.
+    """
+    if not new.touches or new.declared_by is None:
+        return ()
+    session_id = new.declared_by[0]
+    mine = set(new.touches)
+    already = set(new.depends_on)
+    overlapping = [
+        t
+        for t in tasks.values()
+        if t.id != new.id
+        and t.id not in already
+        and t.state is not TaskState.COMPLETED
+        and t.belongs_to(session_id)
+        and mine.intersection(t.touches)
+    ]
+    return tuple(t.id for t in sorted(overlapping, key=lambda t: (t.declared_at, t.id)))
+
+
+def _declaration_refusal(tasks: dict[TaskId, Task], new: Task) -> TaskRefusal | None:
+    """
+    Why ``new`` may not go on the board, or None if it may.
+
+    Re-declaring an existing id is refused rather than merged: the only way it
+    happens is a retry, and overwriting would silently unclaim work somebody is
+    doing. A cycle is refused for the reason ``_would_cycle`` gives.
+
+    Both were already the reducer's behaviour. What is new is that the answer is a
+    value the caller has to look at, rather than a dropped write the caller reported
+    as a success.
+    """
+    if new.id in tasks:
+        return TaskRefusal.DUPLICATE_ID
+    if _would_cycle(tasks, new):
+        return TaskRefusal.WOULD_CYCLE
+    return None
+
+
+def _ownership_refusal(
+    tasks: dict[TaskId, Task], task_id: TaskId, node_id: NodeId
+) -> TaskRefusal | None:
+    """
+    Why ``node_id`` may not finish or release ``task_id``, or None if it may.
+
+    Shared by the two arms that have the same guard, so the refusal a worker is
+    given for completing someone else's task and the one it is given for releasing
+    it cannot drift apart.
+
+    The order of the tests is the order of the questions: does it exist, is it over,
+    is anyone holding it, is that me. A COMPLETED task is separated from a PENDING
+    one because both would otherwise read as "not claimed" while meaning opposite
+    things -- one says stop, the other says claim it first.
+    """
+    t = tasks.get(task_id)
+    if t is None:
+        return TaskRefusal.NO_SUCH_TASK
+    if t.state is TaskState.COMPLETED:
+        return TaskRefusal.ALREADY_COMPLETE
+    if t.state is not TaskState.CLAIMED:
+        return TaskRefusal.NOT_CLAIMED
+    if t.claimed_by != node_id:
+        return TaskRefusal.NOT_YOURS
+    return None
+
+
+def _pick_claim(tasks: dict[TaskId, Task], task_id: TaskId | None, session_id: str) -> Task | None:
     """
     The task this claim wins, or None.
 
@@ -574,11 +747,25 @@ def _pick_claim(tasks: dict[TaskId, Task], task_id: TaskId | None) -> Task | Non
     thread that provides it -- not a lock, and not the file lock agent teams needs
     for the same job across processes. Two workers racing for the last task are two
     intents in a queue, and the second one reads the first one's result.
+
+    **Scoped to the claimer's own session.** ``tasks`` is fleet-wide -- one ``Store``
+    serves every session -- and this function applied no session filter at all while
+    ``board.board_tasks`` filtered by declarer, so a worker could be handed a task
+    that appeared on no board it or its operator could see. Both now ask
+    ``Task.belongs_to``, which makes the two answers one answer rather than two that
+    agree by inspection.
+
+    Blocked-ness is still evaluated against the **whole** map, not the session's
+    slice, matching ``board_tasks``. A dependency that does not exist counts as
+    unsatisfied, so narrowing the map first would invent a blocker out of a
+    cross-session dependency and wedge a task that is genuinely ready.
     """
     if task_id is not None:
         t = tasks.get(task_id)
-        return t if t is not None and t.is_claimable(tasks) else None
-    claimable = [t for t in tasks.values() if t.is_claimable(tasks)]
+        if t is None or not t.belongs_to(session_id) or not t.is_claimable(tasks):
+            return None
+        return t
+    claimable = [t for t in tasks.values() if t.belongs_to(session_id) and t.is_claimable(tasks)]
     # Oldest first, so a self-claiming pool drains the board in declaration order
     # rather than in dict order, which would be arbitrary but reproducible -- the
     # worst kind, because it looks deliberate.

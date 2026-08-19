@@ -29,6 +29,20 @@ from ..theme import STATE_GLYPH, STATE_LABEL, Color, P, faded
 CTRL_ENTER_SUBMITS = int(imgui.InputTextFlags_.enter_returns_true)
 
 
+def section(label: str) -> None:
+    """
+    A dim heading with a rule above it.
+
+    Shared rather than copied: DETAIL and BOARD both divide themselves this way,
+    and the panes are tab-mates, so a difference of one ``spacing()`` between them
+    reads as one of the two being broken.
+    """
+    imgui.spacing()
+    imgui.separator()
+    imgui.text_colored(P.text_dim.vec4, label)
+    imgui.spacing()
+
+
 def follow_tail(following: bool) -> bool:
     """
     Pin the current window to its bottom until the operator scrolls away.

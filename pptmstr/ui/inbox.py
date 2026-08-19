@@ -36,6 +36,7 @@ from ..bridge import Bridge
 from ..model import (
     AgentState,
     ApprovalNeeded,
+    LaunchSpec,
     NodeId,
     Obligation,
     QuestionPending,
@@ -87,7 +88,10 @@ class InboxActions:
     interrupt: Callable[[NodeId], None]
     close: Callable[[NodeId], None]
     dismiss: Callable[[NodeId], None]
-    relaunch: Callable[[str, str, str], None]
+    # task, model, cwd, template. The template is carried rather than defaulted:
+    # dropping it turns a retry of a team session into a solo one, and nothing on
+    # screen would say so.
+    relaunch: Callable[[LaunchSpec], None]
 
 
 def _small() -> None:
@@ -225,7 +229,7 @@ def spawn_marker(snap: Snapshot, obligation: Obligation) -> str | None:
         return None
 
     session = pending.node[0]
-    fleet = projects.subagents_of(snap, (session, None))
+    fleet = snap.subagents_of((session, None))
     queued = [p.id for p in snap.approvals if p.tool_name in _SPAWN_TOOLS and p.node[0] == session]
     ahead = queued.index(pending.id) if pending.id in queued else 0
     running = sum(1 for rec in fleet if not rec.state.is_terminal)
@@ -519,11 +523,11 @@ def _expand_failure(snap: Snapshot, actions: InboxActions, obligation: SessionFa
 
     imgui.spacing()
     if record is not None and imgui.button("retry in a new session"):
-        # Same task, same directory, same model. A crashed session cannot be
-        # resumed -- its subprocess is gone -- so the honest offer is a fresh one
-        # carrying the same instructions, not a "resume" that would be a new
-        # session wearing the old one's name.
-        actions.relaunch(record.task, record.model, record.cwd or ".")
+        # Same task, same directory, same model, same team shape. A crashed session
+        # cannot be resumed -- its subprocess is gone -- so the honest offer is a
+        # fresh one carrying the same instructions, not a "resume" that would be a
+        # new session wearing the old one's name.
+        actions.relaunch(LaunchSpec.from_record(record))
         actions.dismiss(obligation.node)
     imgui.same_line()
     if imgui.button("dismiss"):

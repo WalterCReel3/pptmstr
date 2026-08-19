@@ -27,6 +27,7 @@ rail re-flows at the model's pace only inside the groups the operator asked to o
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import assert_never
 
@@ -248,7 +249,7 @@ def _claim(state: AgentState) -> int:
 
 
 def _subs_signal(
-    subs: list[AgentRecord], owed: list[Obligation], *, expanded: bool = False
+    subs: Sequence[AgentRecord], owed: list[Obligation], *, expanded: bool = False
 ) -> tuple[str, AgentState] | None:
     """
     What a card says about its sub-agents in one bounded string, or None for a
@@ -425,7 +426,7 @@ def _group(
 
     **What an open group costs, stated plainly.** Its height is the sum of its
     members' heights, so it is still monotone in sub-agent *count* -- nothing reaps a
-    terminal sub-agent, ``projects.subagents_of`` applies no state filter, and
+    terminal sub-agent, ``Snapshot.subagents_of`` applies no state filter, and
     ``snap.order`` is append-only, so members are only ever added and never reordered.
     It is **not** monotone in sub-agent *state*, and the motion that costs is larger
     than a line. Density classes apply per card, so a member parking on an approval
@@ -443,7 +444,7 @@ def _group(
     and cost the append-only property the whole collapse rule rests on; see
     ``planning/2026-08-13-an-expansion-outgrows-its-pane.md``.
     """
-    subs = projects.subagents_of(snap, rec.node_id)
+    subs = snap.subagents_of(rec.node_id)
     # A session with nothing in it cannot be open, whatever the set says. Membership
     # is not pruned on the 1->0 transition because there is no such transition:
     # sub-agents are never reaped. This guards the case where a session is expanded

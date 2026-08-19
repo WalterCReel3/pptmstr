@@ -27,20 +27,23 @@ Wrapping rules out ``ImGuiListClipper`` -- wrapped rows have no uniform height f
 it to step over (see ``transcript_pane`` for the same collision). So everything
 here is bounded by count and **says when it truncated**. A pane whose whole purpose
 is "nothing is lost" must not quietly lose things at the bottom.
+
+The session's board is not here. It is ``board_pane``, which ships as a tab-mate
+rather than a section -- a starting arrangement the operator is free to re-dock,
+not a claim about where the board belongs. The reasoning is in that module.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Any, TypeVar
+from typing import Any
 
 from imgui_bundle import imgui
 
 from ..approval import diff_line_kind
 from ..model import (
     ApprovalNeeded,
-    ConcernState,
     NodeId,
     Obligation,
     ObligationKind,
@@ -53,7 +56,6 @@ from ..theme import OBLIGATION_GLYPH, P
 from ..transcript import SegmentKind, Transcript
 from . import inbox, review, rich_pane, widgets
 from .blocks import Block, BlockCursor
-from .board import BoardConcern, BoardTask, board_concerns, board_tasks, has_board
 from .focus import FocusState
 from .widgets import format_elapsed
 
@@ -72,30 +74,11 @@ _MAX_ARG_CHARS = 20_000
 # the same reason, as transcript_pane's _WRAP_WINDOW. Not a statement about how
 # tall the pane is; the panes dock and resize freely.
 _NARRATION_LINES = 200
-# The board's two tables. Rows here are single-line and uniform, so these are much
-# tighter than the prose bounds above and are about legibility rather than frame
-# cost: a board past this size is not being read as a board.
-_MAX_BOARD_TASKS = 60
-_MAX_BOARD_CONCERNS = 40
-# Dependency ids in one "blocked on" cell. A four-dependency task rendered as
-# "blocked on t2 ..." is the same silent truncation as any other, in a smaller box.
-_MAX_BLOCKED_IDS = 6
-
-_CONCERN_STATE_LABEL: dict[ConcernState, str] = {
-    ConcernState.POSTED: "waiting",
-    ConcernState.DELIVERED: "delivered",
-    ConcernState.WITHDRAWN: "withdrawn",
-}
-
 _KIND_LABEL: dict[ObligationKind, str] = {
     ObligationKind.APPROVAL: "wants approval",
     ObligationKind.QUESTION: "is waiting on you",
     ObligationKind.FAILURE: "failed",
 }
-
-# Only ever a row type from .board; named so bound_rows can serve both tables and
-# the dependency-id list without three copies of the same slice.
-_T = TypeVar("_T")
 
 _DIFF_COLOUR = {
     "add": "diff_add",
@@ -221,7 +204,6 @@ def draw(
     if obligation is None:
         _nothing_selected(snap, pane, focus)
         return
-    session = obligation.node[0]
 
     _header(snap, obligation, now)
     imgui.separator()
@@ -238,7 +220,6 @@ def draw(
                 _question(snap, pane, obligation)
             case SessionFailed():
                 _failure(obligation)
-        _board(snap, session)
         imgui.pop_text_wrap_pos()
     imgui.end_child()
 
@@ -269,24 +250,17 @@ def _nothing_selected(snap: Snapshot, pane: DetailState, focus: FocusState) -> N
     # is_active is "mid-turn and will emit more", which is the tense this heading
     # needs. An idle or finished session keeps the section and reads in past tense
     # rather than losing the last thing it said.
-    # Before the narration, not after it. ``_narration`` opens a child window with
-    # no explicit size, so it takes the whole remaining content region -- anything
-    # drawn after it lands below the bottom of the pane and cannot be scrolled to.
-    # The board is compact and bounded; the narration is the part that should have
-    # whatever space is left.
-    _board(snap, node[0])
-
     live = record.state.is_active
     if not live and record.deliverable:
         # The deliverable *replaces* the narration rather than sitting under it.
         # Both render this node's words, so drawing both would print the answer
         # twice -- and the point of a whole, settled render is that it reads
         # differently from a running tail. Two registers in one pane is one too many.
-        _section("what it delivered")
+        widgets.section("what it delivered")
         _deliverable(pane, node, record.deliverable)
         return
 
-    _section("what it is saying" if live else "what it said")
+    widgets.section("what it is saying" if live else "what it said")
     _narration(pane, record.transcript, live=live)
 
 
@@ -394,7 +368,7 @@ def _approval(state: review.ReviewState, pending: PendingApproval) -> None:
     if not pending.diff:
         # Stated rather than omitted, and stated last: a call with no diff is not
         # missing one, and the arguments above are the whole story for it.
-        _section("diff")
+        widgets.section("diff")
         imgui.text_disabled("no diff for this call")
 
 
@@ -409,7 +383,7 @@ def _diff(state: review.ReviewState, pending_id: str, diff: str) -> None:
         lines = diff.splitlines() or [""]
         state.diff_lines[pending_id] = lines
 
-    _section(f"diff · {len(lines):,} lines")
+    widgets.section(f"diff · {len(lines):,} lines")
     for line in lines[:_MAX_DIFF_LINES]:
         # text_wrapped has no coloured variant, and the wrap pos pushed by draw()
         # applies to text_colored too -- so this stays text_colored and keeps the
@@ -424,7 +398,7 @@ def _diff(state: review.ReviewState, pending_id: str, diff: str) -> None:
 
 
 def _arguments(raw_args: Mapping[str, Any]) -> None:
-    _section("arguments")
+    widgets.section("arguments")
     if not raw_args:
         imgui.text_disabled("(none)")
         return
@@ -447,7 +421,7 @@ def _question(snap: Snapshot, pane: DetailState, obligation: QuestionPending) ->
     # behind a large tool result used to render the tool result under this
     # heading -- the machinery displacing the words in the one pane whose job is
     # to inform the reply.
-    _section("what it said")
+    widgets.section("what it said")
     blocks = pane.prose_blocks(obligation.node, record.transcript)
     if blocks:
         # live=None: the turn has ended, so there is no in-progress block. Drawn
@@ -461,86 +435,8 @@ def _question(snap: Snapshot, pane: DetailState, obligation: QuestionPending) ->
 
 
 def _failure(obligation: SessionFailed) -> None:
-    _section("error")
+    widgets.section("error")
     imgui.text_colored(P.danger.vec4, obligation.error or "no detail recorded")
-
-
-def _board(snap: Snapshot, session_id: str) -> None:
-    """
-    The session's task board and concern log.
-
-    **Drawn on every branch of ``draw``, deliberately.** The obligation branch is
-    the one the planning doc argues from: the operator is asked to approve a
-    message between two agents without being able to see the work either of them
-    holds, and putting the board only where nothing is waiting would hide it at
-    exactly the moment it informs the act. The no-obligation branch needs it too,
-    or an idle team's board is invisible. One helper, both branches, so the two
-    cannot drift.
-
-    **No row is clickable.** The pane's contract is that it projects the one
-    cursor and offers no way to move it; a clickable row would also flip
-    ``focus.obligation`` from None to non-None for a session that has work
-    waiting, so the board would vanish under the click that selected it.
-
-    Absent, not empty, for a session that is not a team: most sessions are solo
-    and would otherwise carry two permanently empty headings. ``has_board`` reads
-    the launched template for that, which is a fact in the record -- deriving it
-    from an empty board would make the heading appear mid-run on whichever event
-    happened to come first.
-
-    A team whose board *is* empty says so instead, because "no tasks declared yet"
-    and nothing at all are different states: one is a lead that has not started,
-    the other is a lead that is not going to.
-    """
-    if not has_board(snap, session_id):
-        return
-
-    tasks, dropped_tasks = bound_rows(board_tasks(snap, session_id), _MAX_BOARD_TASKS)
-    concerns, dropped_concerns = bound_rows(
-        board_concerns(snap, session_id), _MAX_BOARD_CONCERNS, tail=True
-    )
-
-    _section("board")
-    if not tasks:
-        imgui.text_colored(P.text_dim.vec4, "no tasks declared yet")
-    for row in tasks:
-        _task_row(row)
-    if dropped_tasks:
-        imgui.text_colored(P.text_dim.vec4, f"... {dropped_tasks} more task(s) not shown")
-
-    if concerns:
-        _section("concerns")
-        for concern in concerns:
-            imgui.text_colored(P.text_dim.vec4, concern_label(concern))
-            imgui.same_line()
-            imgui.text_colored(P.text.vec4, concern.subject or "(no subject)")
-        if dropped_concerns:
-            imgui.text_colored(
-                P.text_dim.vec4, f"... {dropped_concerns} earlier concern(s) not shown"
-            )
-
-
-def _task_row(row: BoardTask) -> None:
-    imgui.text_colored(P.text_dim.vec4, f"{row.id}  {row.state.value}")
-    imgui.same_line()
-    imgui.text_colored(P.text.vec4, row.title or "(untitled)")
-    owner = owner_label(row)
-    if owner:
-        imgui.same_line()
-        # An owner that has stopped is the derived condition TaskState's docstring
-        # promised a pane would carry: the row reads CLAIMED forever otherwise.
-        imgui.text_colored((P.warn if row.owner_gone else P.text_dim).vec4, owner)
-    blocked = blocked_label(row)
-    if blocked:
-        imgui.same_line()
-        imgui.text_colored(P.text_dim.vec4, blocked)
-
-
-def _section(label: str) -> None:
-    imgui.spacing()
-    imgui.separator()
-    imgui.text_colored(P.text_dim.vec4, label)
-    imgui.spacing()
 
 
 # -- pure helpers, testable without a GL context -------------------------------
@@ -589,71 +485,6 @@ def narration_tail(prose: str, limit: int) -> tuple[str, int]:
         return prose, 0
     dropped = len(lines) - limit
     return "\n".join(lines[dropped:]), dropped
-
-
-def bound_rows(rows: Sequence[_T], limit: int, *, tail: bool = False) -> tuple[tuple[_T, ...], int]:
-    """
-    Bound a list of rows, reporting how many were dropped.
-
-    ``tail`` picks which end survives, and the two callers want opposite ends for
-    the same reason ``clip`` and ``narration_tail`` do. Tasks are head-anchored:
-    they are ordered oldest first and dependencies point backwards, so the head is
-    what everything else is waiting on. Concerns are tail-anchored: a conversation
-    is watched at its end, and the newest message is the one still actionable.
-    """
-    if len(rows) <= limit:
-        return tuple(rows), 0
-    dropped = len(rows) - limit
-    return (tuple(rows[dropped:]) if tail else tuple(rows[:limit])), dropped
-
-
-def owner_label(row: BoardTask) -> str:
-    """
-    Who holds a task, or nothing at all when it is unclaimed.
-
-    A claimer that has finished, failed or left the snapshot is named as such
-    rather than shown as an ordinary owner. The task stays CLAIMED forever in that
-    case -- the store has no arm that releases work when its worker dies -- so a
-    row reading "builder" would report progress that has stopped.
-    """
-    if row.owner is None:
-        return ""
-    return f"[{row.owner}, stopped]" if row.owner_gone else f"[{row.owner}]"
-
-
-def blocked_label(row: BoardTask, limit: int = _MAX_BLOCKED_IDS) -> str:
-    """
-    What a task is waiting on, or nothing when it is waiting on nothing.
-
-    A dependency naming a task that was never declared is marked, not just listed.
-    ``declare_task`` answers "on the board" for a task whose ``depends_on`` names
-    an id that does not exist, and ``is_claimable`` deliberately treats that as
-    unsatisfied -- so the task is unclaimable forever and this cell is the only
-    place the operator can see it. "blocked on t9" is something to wait out;
-    "blocked on t9 (never declared)" is something to go and fix.
-
-    Bounded like everything else here, and says so when it bites.
-    """
-    if not row.blocked_on:
-        return ""
-    shown, dropped = bound_rows(row.blocked_on, limit)
-    ids = ", ".join(f"{d} (never declared)" if d in row.missing else d for d in shown)
-    return f"blocked on {ids}" + (f", and {dropped} more" if dropped else "")
-
-
-def concern_label(row: BoardConcern) -> str:
-    """
-    One concern's participants and where it got to.
-
-    An edited concern says so. The operator can rewrite a message on its way
-    through the review queue, and what the recipient was actually told is then
-    different from what the sender wrote -- which is the fact this log exists to
-    keep, and the one nothing else in the UI records after the approval is gone.
-    """
-    state = _CONCERN_STATE_LABEL[row.state]
-    if row.edited:
-        state += ", edited by you"
-    return f"{row.sender} -> {row.recipient}  ({state})"
 
 
 def plain_text(snap: Snapshot, obligation: Obligation) -> str:

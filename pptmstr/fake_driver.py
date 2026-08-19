@@ -16,9 +16,12 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import pathlib
 import random
+import tempfile
 import time
 
+from . import brief
 from .bridge import Bridge
 from .intents import (
     AgentFinished,
@@ -204,11 +207,47 @@ class FakeDriver:
         # One team, so DETAIL's board section is reachable at all. Every other root
         # here is solo and correctly renders no board, which is exactly why the
         # section could not be judged from this fixture before.
-        self._seed_board(self._spawn(parent=None, agent_type=None, template="feature"))
+        team = self._spawn(
+            parent=None, agent_type=None, template="feature", brief=self._seed_brief()
+        )
+        self._seed_board(team)
+
+    def _seed_brief(self) -> str:
+        """
+        A brief with one premise already overturned, so the pane's whole job is
+        reachable.
+
+        Without a superseded entry the fixture exercises the easy half: a list that
+        renders. Obligation 1 -- an overturned premise stays visible and says what
+        overturned it -- has no state to show, and a regression that dropped it
+        would look correct in every screenshot.
+        """
+        directory = brief.session_dir(
+            pathlib.Path(tempfile.mkdtemp(prefix="pptmstr-fake-")), "/x/orbital", "sess-fake"
+        )
+        # The seed a real launch writes: the operator's launch text, verbatim.
+        brief.write_entry(
+            directory,
+            "The TLE parser is fixed-width. Every field is positional, so a split on "
+            "whitespace is wrong on the lines where a value runs into its neighbour.\n\n"
+            "Open: whether the checksum belongs in the parser or beside it.",
+        )
+        brief.write_entry(
+            directory,
+            "Out of scope: the orbit propagator. This session is the parser only.",
+        )
+        brief.write_entry(
+            directory,
+            "The checksum belongs beside the parser, not inside it -- 000 left this "
+            "open and the answer is that a parser that validates cannot be reused on "
+            "a record that has not been checksummed yet.",
+            supersedes=(0,),
+        )
+        return str(directory)
 
     def _seed_board(self, root: NodeId) -> None:
         """
-        One team session with a board on it, so DETAIL's board section is reachable.
+        One team session with a board on it, so the BOARD pane is reachable.
 
         Without this the whole fixture is solo sessions, and the board renders as
         absent everywhere -- which is correct behaviour and proves nothing about
@@ -221,15 +260,44 @@ class FakeDriver:
         The last two are the pair worth keeping distinct. Only one of them is a
         warning, and a fixture carrying just the stranded row cannot show that the
         ordinary success path is being flagged as one.
+
+        Rows also carry a specification, a file list and -- on one row -- a concern
+        naming the task, because those three are what the row gained when the board
+        stopped being a section in DETAIL. A fixture without them exercises the pane
+        at its narrowest and says nothing about the disclosure it exists for.
         """
         builder = self._spawn(parent=root, agent_type="builder")
         reviewer = self._spawn(parent=root, agent_type="reviewer")
         scout = self._spawn(parent=root, agent_type="explore")
 
         for task in (
-            Task(id="t1", title="parse the element set", declared_at=1.0),
-            Task(id="t2", title="validate the checksum", depends_on=("t1",), declared_at=2.0),
-            Task(id="t3", title="cover the parser in tests", depends_on=("t2",), declared_at=3.0),
+            Task(
+                id="t1",
+                title="parse the element set",
+                detail=(
+                    "Read the TLE two-line format straight from the bytes. Keep the "
+                    "column offsets in one table -- the format is fixed-width and "
+                    "every field is positional, so a split on whitespace is wrong on "
+                    "the lines where a value runs into its neighbour."
+                ),
+                touches=("tle/parse.py",),
+                declared_at=1.0,
+            ),
+            Task(
+                id="t2",
+                title="validate the checksum",
+                detail="Modulo-10 over the line, minus signs counting as one.",
+                depends_on=("t1",),
+                touches=("tle/parse.py", "tle/checksum.py"),
+                declared_at=2.0,
+            ),
+            Task(
+                id="t3",
+                title="cover the parser in tests",
+                touches=("tests/test_parse.py",),
+                depends_on=("t2",),
+                declared_at=3.0,
+            ),
             # A dependency nobody declared. Unclaimable forever, and this pane is
             # the only place that is visible.
             Task(id="t4", title="update the changelog", depends_on=("t9",), declared_at=4.0),
@@ -257,10 +325,20 @@ class FakeDriver:
             AgentFinished(reviewer, AgentState.DONE, ended_at=time.monotonic(), error=None)
         )
 
-        for cid, sender, subject, body in (
-            ("fake-c1", reviewer, "the retry loop never terminates", "third call onward"),
-            ("fake-c2", builder, "checksum ignored in sixty places", "tle/parse.py"),
-            ("fake-c3", reviewer, "two roles answer to one name", "only the first is reachable"),
+        # fake-c2 names t2, which is the row that is claimed and being worked: a
+        # live, correctly reasoning owner that is deliberately waiting. `owner_gone`
+        # is false there, so without the link that row is pixel-identical to
+        # ordinary progress -- the exact case the task_id field exists for.
+        for cid, sender, subject, body, about in (
+            ("fake-c1", reviewer, "the retry loop never terminates", "third call onward", None),
+            ("fake-c2", builder, "checksum ignored in sixty places", "tle/parse.py", "t2"),
+            (
+                "fake-c3",
+                reviewer,
+                "two roles answer to one name",
+                "only the first is reachable",
+                None,
+            ),
         ):
             self.bridge.emit(
                 ConcernPosted(
@@ -275,6 +353,7 @@ class FakeDriver:
                         # The operator's rewrite, which is now a stamped fact
                         # rather than an unsettable field.
                         edited=cid == "fake-c2",
+                        task_id=about,
                     ),
                 )
             )
@@ -283,7 +362,11 @@ class FakeDriver:
         self.bridge.emit(InboxRead(node_id=root, request_id="fake-r1", at=time.monotonic()))
 
     def _spawn(
-        self, parent: NodeId | None, agent_type: str | None, template: str = "solo"
+        self,
+        parent: NodeId | None,
+        agent_type: str | None,
+        template: str = "solo",
+        brief: str | None = None,
     ) -> NodeId:
         n = next(_ids)
         node: NodeId = (f"sess-{n}", None) if parent is None else (parent[0], f"agent-{n}")
@@ -319,6 +402,7 @@ class FakeDriver:
                 # Roots only, exactly as the real driver announces it: a sub-agent
                 # has no template of its own and must not read as a team.
                 template=template if parent is None else None,
+                brief=brief if parent is None else None,
                 transcript=transcript,
             )
         )

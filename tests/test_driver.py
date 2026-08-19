@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import time
+from pathlib import Path
 from unittest.mock import patch
 
 from claude_agent_sdk import (
@@ -42,6 +43,7 @@ from pptmstr.model import (
     AWAITING_TOPIC,
     INTERRUPTED_TOPIC,
     AgentState,
+    LaunchSpec,
     NodeId,
     QuestionPending,
     SessionFailed,
@@ -944,7 +946,7 @@ def test_the_launcher_hands_a_session_the_operators_subagent_cap() -> None:
     try:
         state = AppState(store=Store(), bridge=bridge, settings=Settings(subagent_cap=6))
         state.pool = _RecordingPool()  # type: ignore[assignment]
-        _launch(state, "do a thing", "claude-sonnet-5", "/tmp")
+        _launch(state, LaunchSpec(task="do a thing", model="claude-sonnet-5", cwd="/tmp"))
         for _ in range(200):
             if started:
                 break
@@ -953,6 +955,51 @@ def test_the_launcher_hands_a_session_the_operators_subagent_cap() -> None:
         bridge.stop()
 
     assert [s.subagent_cap for s in started] == [6]
+
+
+def test_relaunching_a_team_session_relaunches_a_team() -> None:
+    """
+    ``relaunch`` and ``fork`` exist to re-run work, and both dropped the template
+    on the way to ``_launch`` -- so the two verbs whose whole purpose is repeating a
+    session silently repeated it as a solo one. Nothing on screen said so: the new
+    session runs, it just has no roles.
+
+    The call sites now pass ``AgentRecord.template``, which is None on anything that
+    is not a session root. That None is resolved here rather than at each caller, so
+    the fallback is one rule instead of two that have to agree.
+    """
+    from pptmstr.app import AppState, _launch
+    from pptmstr.settings import Settings
+
+    started: list[AgentSession] = []
+
+    class _RecordingPool:
+        def submit(self, session: AgentSession) -> None:
+            started.append(session)
+
+    bridge = Bridge()
+    bridge.start()
+    try:
+        state = AppState(store=Store(), bridge=bridge, settings=Settings())
+        state.pool = _RecordingPool()  # type: ignore[assignment]
+        # What a relaunch of a team session passes, then what a relaunch of a
+        # sub-agent record or a solo session passes, then a name no template has.
+        for template in ("feature", None, "no-such-template"):
+            _launch(
+                state,
+                LaunchSpec(
+                    task="do a thing", model="claude-sonnet-5", cwd="/tmp", template=template
+                ),
+            )
+        for _ in range(200):
+            if len(started) == 3:
+                break
+            time.sleep(0.005)
+    finally:
+        bridge.stop()
+
+    assert [s.template.name for s in started] == ["feature", "solo", "solo"]
+    assert started[0].template.roles, "a team template with no roles is a solo session"
 
 
 async def _fire_stop(session, agent_id: str, answer: str = "") -> None:
@@ -2674,3 +2721,320 @@ def test_a_subagent_that_said_nothing_delivers_nothing() -> None:
     asyncio.run(_fire_stop(session, "agent-a", ""))
 
     assert not [i for i in bridge.drain() if isinstance(i, SubagentDelivered)]
+
+
+# -- the brief travels with the launch (row 5, step 1) -----------------------------
+
+
+def _recording_launch(spec: LaunchSpec) -> list[AgentSession]:
+    """Run `_launch` against a pool that only records, and hand back what it built."""
+    from pptmstr.app import AppState, _launch
+    from pptmstr.settings import Settings
+
+    started: list[AgentSession] = []
+
+    class _RecordingPool:
+        def submit(self, session: AgentSession) -> None:
+            started.append(session)
+
+    bridge = Bridge()
+    bridge.start()
+    try:
+        state = AppState(store=Store(), bridge=bridge, settings=Settings())
+        state.pool = _RecordingPool()  # type: ignore[assignment]
+        _launch(state, spec)
+        for _ in range(200):
+            if started:
+                break
+            time.sleep(0.005)
+    finally:
+        bridge.stop()
+    return started
+
+
+def test_a_brief_reaches_the_session_it_was_launched_with() -> None:
+    """
+    The wiring, not the value (STYLE.md §2). `LaunchSpec` can carry it and `_launch`
+    can still drop it on the floor, which leaves the premises exactly as unreachable
+    as they were.
+    """
+    started = _recording_launch(
+        LaunchSpec(task="t", model="claude-sonnet-5", cwd="/tmp", brief="/briefs/s1")
+    )
+    assert [s.brief for s in started] == ["/briefs/s1"]
+
+
+def test_a_session_launched_without_a_brief_has_none() -> None:
+    started = _recording_launch(LaunchSpec(task="t", model="claude-sonnet-5", cwd="/tmp"))
+    assert [s.brief for s in started] == [None]
+
+
+def test_a_relaunch_keeps_the_brief_the_session_was_launched_with() -> None:
+    """
+    The reason the path is stored rather than derived from cwd and the session id.
+    A relaunch is a *new* session id, so a derived path would point at an empty
+    directory and lose the premises at the moment the record exists to keep them.
+
+    This is row 9's defect in a new field: `relaunch` and `fork` build a launch from
+    an `AgentRecord`, and the field that is not carried is gone with nothing on
+    screen saying so.
+    """
+    from pptmstr.model import AgentRecord
+
+    record = AgentRecord(
+        node_id=("s1", None),
+        parent=None,
+        depth=0,
+        state=AgentState.DONE,
+        topic="",
+        task="audit the parser",
+        model="claude-sonnet-5",
+        cwd="/srv/repo",
+        template="feature",
+        brief="/briefs/s1",
+    )
+
+    spec = LaunchSpec.from_record(record)
+
+    assert (spec.brief, spec.template) == ("/briefs/s1", "feature")
+    assert (spec.task, spec.model, spec.cwd) == ("audit the parser", "claude-sonnet-5", "/srv/repo")
+
+
+def test_a_record_with_no_cwd_relaunches_at_the_repo_root() -> None:
+    """A blank cwd is the FLEET rail's grouping key, so None must not become ""."""
+    from pptmstr.model import AgentRecord
+
+    record = AgentRecord(
+        node_id=("s1", None),
+        parent=None,
+        depth=0,
+        state=AgentState.DONE,
+        topic="",
+        task="t",
+        model="m",
+    )
+    assert LaunchSpec.from_record(record).cwd == "."
+
+
+def test_the_announce_puts_the_brief_on_the_record() -> None:
+    """
+    End of the chain: the store is the only place the UI can read it from, so a
+    brief that reaches `AgentSession` and stops there is still unaddressable.
+    """
+    from pptmstr.intents import AgentSpawned
+
+    store = Store()
+    store.apply(
+        AgentSpawned(
+            node_id=("s1", None),
+            parent=None,
+            task="t",
+            model="m",
+            started_at=0.0,
+            template="feature",
+            brief="/briefs/s1",
+        )
+    )
+    assert store.snapshot().nodes[("s1", None)].brief == "/briefs/s1"
+
+
+def test_the_announce_carries_the_brief_the_session_holds() -> None:
+    """
+    The link a hand-built `AgentSpawned` cannot test. `AgentSession` can hold the
+    brief and `announce` can still omit it from the intent, and the store would then
+    be building a correct record out of an incomplete announce -- "plumbed through"
+    and "works end to end" are different claims (STYLE.md §2).
+    """
+    from pptmstr.intents import AgentSpawned
+
+    bridge = Bridge()
+    bridge.start()
+    try:
+        session = AgentSession(bridge, "t", model="m", cwd="/tmp", brief="/briefs/s1")
+        session.announce()
+        for _ in range(200):
+            spawns = [i for i in bridge.drain() if isinstance(i, AgentSpawned)]
+            if spawns:
+                break
+            time.sleep(0.005)
+    finally:
+        bridge.stop()
+
+    assert [s.brief for s in spawns] == ["/briefs/s1"]
+
+
+def test_a_worker_is_told_where_the_sessions_premises_are() -> None:
+    """
+    The wiring, not the prose (STYLE.md §2). `worker_prompt` can render the path and
+    `AgentSession` can hold it while `_team()` never joins the two -- which leaves
+    every worker launched with a brief it is never told about, and the run looks
+    exactly like one with no brief at all.
+    """
+    from pptmstr.templates import FEATURE
+
+    bridge = Bridge()
+    bridge.start()
+    try:
+        session = AgentSession(
+            bridge, "t", model="m", cwd="/tmp", brief="/briefs/s1", template=FEATURE
+        )
+        team = session._team()
+    finally:
+        bridge.stop()
+
+    assert team is not None
+    for name, definition in team.items():
+        assert "/briefs/s1" in definition.prompt, name
+
+
+def test_a_worker_launched_without_a_brief_is_told_about_none() -> None:
+    from pptmstr.templates import FEATURE
+
+    bridge = Bridge()
+    bridge.start()
+    try:
+        session = AgentSession(bridge, "t", model="m", cwd="/tmp", template=FEATURE)
+        team = session._team()
+    finally:
+        bridge.stop()
+
+    assert team is not None
+    for name, definition in team.items():
+        assert "premises this session" not in definition.prompt, name
+
+
+# -- the premises reach the workers, end to end -----------------------------------
+#
+# Every piece of row 5 passed on its own and the feature had no population path: the
+# operator had to hand-type a directory for a session id that did not exist yet.
+# These drive launcher -> _launch -> AgentSession -> worker prompt, which is the
+# claim the per-piece tests could not make.
+
+
+def _launched(spec: LaunchSpec, monkeypatch, root) -> AgentSession:
+    """Run `_launch` against a recording pool, with briefs rooted in a temp dir."""
+    from pptmstr import brief as brief_mod
+    from pptmstr.app import AppState, _launch
+    from pptmstr.settings import Settings
+
+    monkeypatch.setattr(brief_mod, "default_root", lambda: root)
+
+    started: list[AgentSession] = []
+
+    class _RecordingPool:
+        def submit(self, session: AgentSession) -> None:
+            started.append(session)
+
+    bridge = Bridge()
+    bridge.start()
+    try:
+        state = AppState(store=Store(), bridge=bridge, settings=Settings())
+        state.pool = _RecordingPool()  # type: ignore[assignment]
+        _launch(state, spec)
+        for _ in range(200):
+            if started:
+                break
+            time.sleep(0.005)
+    finally:
+        bridge.stop()
+    assert started, "the pool was never handed a session"
+    return started[0]
+
+
+def test_launching_a_team_writes_the_task_as_its_first_premise(monkeypatch, tmp_path) -> None:
+    """
+    The premises the operator means are in the launch text box -- that is the
+    record's own diagnosis. This is what makes them addressable, and it costs the
+    operator no new habit.
+    """
+    from pptmstr import brief as brief_mod
+
+    session = _launched(
+        LaunchSpec(
+            task="the TLE parser is fixed-width; every field is positional",
+            model="m",
+            cwd="/tmp",
+            template="feature",
+        ),
+        monkeypatch,
+        tmp_path,
+    )
+
+    assert session.brief is not None
+    (entry,) = brief_mod.read_entries(Path(session.brief))
+    assert entry.body == "the TLE parser is fixed-width; every field is positional"
+    assert entry.path.name == "000-premises.md"
+
+
+def test_every_worker_on_that_team_is_told_where_to_read_it(monkeypatch, tmp_path) -> None:
+    """
+    The end of the chain, and the claim no per-piece test could make: a brief that
+    is written and never reaches a worker prompt is a brief nobody reads.
+    """
+    session = _launched(
+        LaunchSpec(task="premises", model="m", cwd="/tmp", template="feature"),
+        monkeypatch,
+        tmp_path,
+    )
+
+    team = session._team()
+    assert team is not None
+    for name, definition in team.items():
+        assert session.brief in definition.prompt, name
+
+
+def test_a_solo_session_seeds_nothing(monkeypatch, tmp_path) -> None:
+    """No workers to seed, and a directory per solo launch is litter."""
+    session = _launched(LaunchSpec(task="do a thing", model="m", cwd="/tmp"), monkeypatch, tmp_path)
+
+    assert session.brief is None
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_a_session_pointed_at_an_existing_brief_is_not_seeded_over(monkeypatch, tmp_path) -> None:
+    """
+    A fork continuing its parent's work. Seeding here would bury the premises it was
+    launched to continue under a copy of its own task line.
+    """
+    from pptmstr import brief as brief_mod
+
+    parent = tmp_path / "parent"
+    brief_mod.write_entry(parent, "the original premises")
+
+    session = _launched(
+        LaunchSpec(
+            task="continue the work", model="m", cwd="/tmp", template="feature", brief=str(parent)
+        ),
+        monkeypatch,
+        tmp_path,
+    )
+
+    assert session.brief == str(parent)
+    (entry,) = brief_mod.read_entries(parent)
+    assert entry.body == "the original premises"
+
+
+def test_two_team_sessions_do_not_share_a_brief(monkeypatch, tmp_path) -> None:
+    spec = LaunchSpec(task="premises", model="m", cwd="/tmp", template="feature")
+    first = _launched(spec, monkeypatch, tmp_path)
+    second = _launched(spec, monkeypatch, tmp_path)
+
+    assert first.brief != second.brief
+
+
+def test_a_brief_that_cannot_be_written_does_not_stop_the_launch(monkeypatch, tmp_path) -> None:
+    """
+    The work the operator asked for is worth more than the seeding of it. The log
+    says which happened rather than leaving a team quietly unbriefed.
+    """
+    blocked = tmp_path / "blocked"
+    blocked.write_text("not a directory", encoding="utf-8")
+
+    session = _launched(
+        LaunchSpec(task="premises", model="m", cwd="/tmp", template="feature"),
+        monkeypatch,
+        blocked,
+    )
+
+    assert session.brief is None
+    assert session.task == "premises"

@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 
 from imgui_bundle import hello_imgui, imgui, immapp
 
+from . import brief as brief_mod
 from . import settings as settings_mod
 from . import templates, theme
 from .bridge import Bridge
@@ -23,11 +24,22 @@ from .driver import AgentSession
 from .fake_driver import FakeDriver
 from .intents import FailureAcknowledged
 from .log import LOG
-from .model import Snapshot
+from .model import LaunchSpec, Snapshot
 from .pool import SessionPool
 from .store import Store
 from .theme import REQUIRED_THEMES, THEMES, P
-from .ui import compose, detail, health, inbox, launcher, rail, review, transcript_pane
+from .ui import (
+    board_pane,
+    brief_pane,
+    compose,
+    detail,
+    health,
+    inbox,
+    launcher,
+    rail,
+    review,
+    transcript_pane,
+)
 from .ui import focus as focus_mod
 from .ui.widgets import format_elapsed
 
@@ -57,6 +69,8 @@ class AppState:
     compose: compose.ComposeState = field(default_factory=compose.ComposeState)
     launcher: launcher.LauncherState = field(default_factory=launcher.LauncherState)
     rail: rail.RailState = field(default_factory=rail.RailState)
+    board: board_pane.BoardState = field(default_factory=board_pane.BoardState)
+    brief: brief_pane.BriefState = field(default_factory=brief_pane.BriefState)
     transcripts: transcript_pane.TranscriptState = field(
         default_factory=transcript_pane.TranscriptState
     )
@@ -298,30 +312,81 @@ def _apply_theme_if_dirty(state: AppState) -> None:
     state.theme_dirty = False
 
 
-def _launch(state: AppState, task: str, model: str, cwd: str, template: str = "solo") -> None:
-    """Start a session. Safe from the UI thread; the pool is touched on the loop."""
+def _launch(state: AppState, spec: LaunchSpec) -> None:
+    """
+    Start a session. Safe from the UI thread; the pool is touched on the loop.
+
+    Takes the whole spec rather than loose arguments. ``relaunch`` and ``fork`` build
+    one from an ``AgentRecord``, and row 9's defect was that they could build a
+    partial one without the type system noticing -- a template dropped from a
+    positional list started a team session solo. A field missing from a ``LaunchSpec``
+    is a field the constructor names.
+
+    A None ``template`` still means solo, defaulted here rather than at each call
+    site because a record that is not a session root carries None and a caller that
+    had to remember the fallback is a caller that can forget it.
+    """
     pool = state.pool
     if pool is None:
         return
     # An unknown name falls back to solo rather than refusing the launch: the task
     # the operator typed is worth more than the team shape they mistyped, and the
     # log line says which one ran.
-    shape = templates.by_name(template) or templates.SOLO
+    shape = (templates.by_name(spec.template) if spec.template else None) or templates.SOLO
 
     async def go() -> None:
-        pool.submit(
-            AgentSession(
-                state.bridge,
-                task,
-                model=model,
-                cwd=cwd,
-                template=shape,
-                subagent_cap=state.settings.subagent_cap,
-            )
+        session = AgentSession(
+            state.bridge,
+            spec.task,
+            model=spec.model,
+            cwd=spec.cwd,
+            brief=spec.brief,
+            template=shape,
+            subagent_cap=state.settings.subagent_cap,
         )
+        _seed_brief(session, shape)
+        pool.submit(session)
 
     state.bridge.submit(go())
-    LOG.info("app", f"launched in {cwd} as {shape.name}: {task[:60]}")
+    LOG.info("app", f"launched in {spec.cwd} as {shape.name}: {spec.task[:60]}")
+
+
+def _seed_brief(session: AgentSession, shape: templates.WorkTemplate) -> None:
+    """
+    Write the launch text as the session's first premise, for a team.
+
+    **This is where the premises already are.** The record that asked for a brief
+    diagnoses the gap as *"the premises the operator means are not in project
+    memory -- they are in the launch text box"*: that text reaches the lead as its
+    first user message and reaches a worker through nothing but the lead choosing to
+    re-express it. Writing it here is what makes it addressable, and it costs the
+    operator no new habit -- they already typed it.
+
+    Between construction and ``pool.submit``, which is the only window where the
+    session id exists and nothing has spawned yet. ``submit`` announces, ``run``
+    connects, and a worker cannot be told a path that was not set before either.
+
+    Skipped for a solo session, which has no workers to seed, and skipped when the
+    operator named a directory -- that is a session pointed at an existing brief,
+    typically a fork inheriting its parent's, and seeding over it would bury the
+    premises it was launched to continue.
+
+    A failure does not stop the launch. The work the operator asked for is worth
+    more than the seeding of it, and the log says which happened rather than
+    leaving a team quietly unbriefed.
+    """
+    if not shape.roles or session.brief or not session.task.strip():
+        return
+    directory = brief_mod.session_dir(
+        brief_mod.default_root(), session.cwd or ".", session.session_id
+    )
+    try:
+        brief_mod.write_entry(directory, session.task)
+    except OSError as exc:
+        LOG.warn("app", f"no brief seeded ({exc}); workers will not be told one exists")
+        return
+    session.brief = str(directory)
+    LOG.info("app", f"seeded brief at {directory}")
 
 
 def _session_action(state: AppState, coro_factory: Callable[[SessionPool], object]) -> None:
@@ -496,7 +561,7 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
                 interrupt=lambda node: _session_action(state, lambda p: p.interrupt(node)),
                 close=lambda node: _session_action(state, lambda p: p.close(node)),
                 dismiss=lambda node: state.bridge.emit(FailureAcknowledged(node)),
-                relaunch=lambda task, model, cwd: _launch(state, task, model, cwd),
+                relaunch=lambda spec: _launch(state, spec),
             ),
             state.frame_now,
             wrap=state.settings.wrap_inputs,
@@ -524,6 +589,19 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
                 state.detail_pane_state,
                 state.frame_now,
             )
+
+    def board_pane_fn() -> None:
+        # Follows the cursor, like DETAIL and CONTEXT. A board that held still while
+        # the cursor moved would need a pointer of its own, and that second pointer
+        # is what this layout deleted.
+        if state.frame_snap is not None:
+            board_pane.draw(state.frame_snap, state.focus, state.board, state.bridge)
+
+    def brief_pane_fn() -> None:
+        # Follows the cursor, like every other pane in this space. A brief belongs
+        # to one session and there is no second cursor to point at another.
+        if state.frame_snap is not None:
+            brief_pane.draw(state.frame_snap, state.focus, state.brief)
 
     def session_pane() -> None:
         """FOCUS: the conversation, with its composer, in one pane."""
@@ -555,7 +633,7 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
             health.HealthActions(
                 interrupt=lambda node: _session_action(state, lambda p: p.interrupt(node)),
                 close=lambda node: _session_action(state, lambda p: p.close(node)),
-                fork=lambda task, model, cwd: _launch(state, task, model, cwd),
+                fork=lambda spec: _launch(state, spec),
             ),
             state.frame_now,
         )
@@ -565,6 +643,8 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
         "NEEDS YOU": inbox_pane,
         "CONTEXT": context_pane,
         "DETAIL": detail_pane,
+        "BOARD": board_pane_fn,
+        "BRIEF": brief_pane_fn,
         "SESSION": session_pane,
         "HEALTH": health_pane,
         "LOG": _log_panel,
@@ -589,7 +669,7 @@ def _draw_overlays(state: AppState) -> None:
         running=pool.running_count,
         queued=pool.queued_count,
         cap=pool.cap,
-        launch=lambda task, model, cwd, team: _launch(state, task, model, cwd, team),
+        launch=lambda spec: _launch(state, spec),
         wrap=state.settings.wrap_inputs,
     )
 
@@ -624,6 +704,17 @@ def _triage_layout(panels: dict[str, Callable[[], None]]) -> hello_imgui.Docking
         # here for. A tab-mate rather than a fourth split -- the 0.32 width was
         # already chosen so the inbox keeps room for identity, wait and summary.
         _window("DETAIL", "ContextSpace", panels["DETAIL"]),
+        # Behind DETAIL as a starting position: the queue is what the operator is
+        # here for, and a team's board is context for a decision rather than the
+        # decision. Only a default -- layout_condition is first_use_ever, so an
+        # operator who wants the board in its own split drags it there once and the
+        # ini keeps it. Absent in the common case without any layout help -- most
+        # sessions are solo, and the pane draws its own "not a team" line rather
+        # than an empty table.
+        _window("BOARD", "ContextSpace", panels["BOARD"]),
+        # Behind BOARD. A brief is written once and amended rarely, where the board
+        # moves every few minutes -- the resident tab should be the one that changes.
+        _window("BRIEF", "ContextSpace", panels["BRIEF"]),
         _window("CONTEXT", "ContextSpace", panels["CONTEXT"]),
         # Reachable, not resident. LOG is a debugging surface, and its old status as
         # tab-mate to the review queue -- in front of it, at that -- was precisely
@@ -657,6 +748,11 @@ def _focus_layout(panels: dict[str, Callable[[], None]]) -> hello_imgui.DockingP
         # for steering one session, and its facts -- cost, cwd, context headroom --
         # are the ones worth resident space.
         _window("DETAIL", "HealthSpace", panels["DETAIL"]),
+        # FOCUS is for steering one session, and a team's board is a fact about
+        # that session in the same class as its cost and its context headroom --
+        # which is why it sits with HEALTH here rather than with the queue.
+        _window("BOARD", "HealthSpace", panels["BOARD"]),
+        _window("BRIEF", "HealthSpace", panels["BRIEF"]),
         _window("LOG", "HealthSpace", panels["LOG"]),
     ]
     return params
@@ -782,10 +878,12 @@ def main(argv: list[str] | None = None) -> int:
             for task_text in args.task:
                 _launch(
                     state,
-                    task_text,
-                    args.model or launcher.MODELS[0],
-                    args.cwd,
-                    args.template,
+                    LaunchSpec(
+                        task=task_text,
+                        model=args.model or launcher.MODELS[0],
+                        cwd=args.cwd,
+                        template=args.template,
+                    ),
                 )
 
         state.bridge.submit(launch_initial())

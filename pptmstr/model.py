@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import dataclasses
 import enum
-from collections.abc import Mapping
+import posixpath
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, ClassVar
@@ -345,6 +346,68 @@ Obligation = ApprovalNeeded | QuestionPending | SessionFailed
 
 
 @dataclass(frozen=True, slots=True)
+class LaunchSpec:
+    """
+    Everything an operator settles before a session exists.
+
+    A value rather than a positional argument list, which is the correction row 9
+    paid for: ``template`` was droppable because the callback took four loose
+    strings and a three-argument lambda typechecked cleanly, so a relaunch silently
+    started a team session solo. One more optional field on that signature would be
+    one more chance at the same defect, and a launch path is exactly where a
+    silently-dropped field is least visible -- the session starts, it just starts
+    wrong.
+
+    Not store state. It is what the launcher hands the driver, and nothing keeps a
+    copy after the session announces itself.
+    """
+
+    task: str
+    model: str
+    # Empty means the repository root; the launcher normalises before building one.
+    cwd: str = "."
+    # By name. None is solo, spelled here rather than at each call site because
+    # `relaunch` and `fork` pass `AgentRecord.template`, which is None on any record
+    # that is not a session root.
+    template: str | None = None
+    # The directory holding this session's brief, or None for a session launched
+    # with nothing but its task.
+    #
+    # A path and never the content: a stored copy of premises is the duplicate
+    # STYLE.md §1 names as this codebase's historic defect shape, and the brief is
+    # on disk precisely so there is one home for it.
+    #
+    # Stored rather than derived, which is the part worth the argument. The
+    # canonical location is `~/.claude/projects/<cwd-slug>/briefs/<session-id>/`,
+    # and that *is* a function of two facts a record already holds -- so §1 says
+    # compute it. It is stored anyway because a fork or a relaunch is a new session
+    # id, so deriving would hand the new session an empty directory and lose the
+    # premises at exactly the moment the record exists to keep them. A derived path
+    # is right for a session that owns its brief and wrong for every session that
+    # inherits one.
+    brief: str | None = None
+
+    @classmethod
+    def from_record(cls, record: AgentRecord) -> LaunchSpec:
+        """
+        The spec that starts this session again -- a relaunch, or a fork of it.
+
+        One constructor rather than the same four lines in ``inbox`` and ``health``.
+        Row 9's defect was those two call sites building a launch by hand and one of
+        them omitting the template; two hand-built copies of a growing argument list
+        will disagree eventually, and the failure is silent because a launch that
+        drops a field still launches.
+        """
+        return cls(
+            task=record.task,
+            model=record.model,
+            cwd=record.cwd or ".",
+            template=record.template,
+            brief=record.brief,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class AgentRecord:
     """One node in the agent tree."""
 
@@ -383,6 +446,16 @@ class AgentRecord:
     # freezing one answer here would be the same mistake as storing a project name
     # instead of a cwd.
     template: str | None = None
+    # Where this session's premises live, on a root record only, or None for a
+    # session launched with nothing but its task. See ``LaunchSpec.brief`` for why
+    # it is a path, why the store never holds the content, and why it is stored
+    # rather than derived from ``cwd`` and the session id.
+    #
+    # Nothing reads it yet. That is the honest state of this row and not an
+    # oversight: it makes premises *addressable*, which is the whole of step 1, and
+    # the writer and the reader are steps 2 and 3. A path with no reader is a
+    # smaller thing than a premise with no address.
+    brief: str | None = None
     usage: UsageRollup = field(default_factory=UsageRollup)
     context: ContextSnapshot | None = None
     # A tuple, not one slot. An assistant turn can contain several tool calls, the
@@ -487,6 +560,27 @@ class Concern:
     state: ConcernState = ConcernState.POSTED
     edited: bool = False
     delivered_at: float | None = None
+    # The task this concern is about, when the sender named one.
+    #
+    # Optional because most concerns are not about a board row -- a question to the
+    # lead, an answer, a heads-up -- and requiring one would make agents invent a
+    # task id to send a message.
+    #
+    # This is what lets "claimed, and there is an open concern about it" be derived
+    # rather than stored. The alternative that keeps being reached for is a fourth
+    # ``TaskState`` or a "held deliberately" flag, and ``TaskState``'s docstring
+    # already refuses that shape: intent stored as a flag is kept true by whoever
+    # remembers to update it. A builder that stalls a task for a good reason
+    # *already* records the reason by posting a concern -- the link was the only
+    # thing missing, so the board can now show a reason for every stalled row that
+    # anyone bothered to explain, with no new state and no flag to forget.
+    #
+    # Not validated against the board. A concern naming a task that does not exist
+    # is still a message that was sent and delivered, and refusing it would put the
+    # reducer in the business of rejecting mail over a typo in an optional field.
+    # The projection reports the dangling reference instead, the way ``missing``
+    # already does for a dependency that was never declared.
+    task_id: TaskId | None = None
 
 
 class TaskState(enum.Enum):
@@ -510,6 +604,68 @@ class TaskState(enum.Enum):
     COMPLETED = "completed"
 
 
+class TaskRefusal(enum.Enum):
+    """
+    Why a write to the board did not take effect.
+
+    An enum rather than a string because the reducer is pure and prose is the
+    shell's job: ``bus.py`` owns the words an agent reads, and a sentence built in
+    ``_apply`` would be presentation smuggled into the core.
+
+    The members are separate for the reason STYLE.md §3 gives -- an error message
+    that does not distinguish the two mistakes it covers sends a worker back to
+    make the same one. Three pairs are here for that reason alone:
+    ``NOT_CLAIMED`` is "nobody holds this, claim it first" against ``NOT_YOURS``,
+    "somebody else is working it, ask them"; ``ALREADY_COMPLETE`` is neither, and
+    the recovery is to stop rather than to retry; and ``DUPLICATE_ID`` against
+    ``WOULD_CYCLE`` is a name collision against a dependency graph the declarer has
+    to redraw.
+
+    ``NOT_APPLIED`` is the one member ``_apply`` never returns. It is the answer the
+    Bridge hands back when the store never got to see the intent at all -- shutdown,
+    mainly -- and it exists because the alternative fallback is reporting a success
+    that certainly did not happen, which is the defect this whole channel is for.
+    """
+
+    DUPLICATE_ID = "duplicate_id"
+    WOULD_CYCLE = "would_cycle"
+    NO_SUCH_TASK = "no_such_task"
+    NOT_CLAIMED = "not_claimed"
+    NOT_YOURS = "not_yours"
+    ALREADY_COMPLETE = "already_complete"
+    NOT_APPLIED = "not_applied"
+
+
+def normalised_touches(paths: Iterable[str]) -> tuple[str, ...]:
+    """
+    File paths in the one spelling the overlap check compares.
+
+    Two leads writing ``./pptmstr/store.py`` and ``pptmstr/store.py`` mean the same
+    file, and an overlap check on raw strings would miss it -- silently, producing
+    exactly the concurrent write the field exists to prevent. Order is preserved and
+    duplicates are dropped, so the stored tuple reads back as the declarer wrote it.
+
+    **What it does not do**, stated because the gap is the interesting part: it
+    does not resolve a path against a session's ``cwd``, follow a symlink, or
+    reconcile an absolute path with a relative one. Those need the filesystem, and
+    the reducer does no IO. A declarer that mixes absolute and relative paths gets
+    no protection, which is a reason for the briefing to ask for repository-relative
+    paths rather than a reason to put a ``Path.resolve`` in a pure function.
+    """
+    out: list[str] = []
+    for raw in paths:
+        cleaned = raw.strip()
+        if not cleaned:
+            continue
+        # posixpath rather than os.path: a task's files are repository paths, and
+        # the separator should not depend on which machine the orchestrator runs on.
+        cleaned = posixpath.normpath(cleaned)
+        if cleaned in (".", "..") or cleaned in out:
+            continue
+        out.append(cleaned)
+    return tuple(out)
+
+
 @dataclass(frozen=True, slots=True)
 class Task:
     """
@@ -528,6 +684,22 @@ class Task:
     title: str
     detail: str = ""
     depends_on: tuple[TaskId, ...] = ()
+    # The files this task will write, normalised (``normalised_touches``).
+    #
+    # Stored rather than derived, and checked against STYLE.md §1 before being
+    # added: nothing else in the snapshot implies which files a task will edit --
+    # the work has not happened yet -- so this is the same case as ``declared_by``
+    # and not a second copy of a fact something else already holds.
+    #
+    # It exists because per-file ownership was prose inside ``detail``, honoured by
+    # every agent that read it and reached by nothing else. A lead declared two
+    # tasks over the same three files with no dependency between them, two agents
+    # wrote those files at once, and the only reason it cost minutes rather than a
+    # corrupted file is that a worker noticed and released. ``depends_on`` is the
+    # mechanism that prevents it, it is unbypassable, and it was simply not
+    # invoked -- so the store derives it from this instead of trusting that the one
+    # participant nothing checks remembered to.
+    touches: tuple[str, ...] = ()
     claimed_by: NodeId | None = None
     state: TaskState = TaskState.PENDING
     declared_at: float = 0.0
@@ -537,6 +709,29 @@ class Task:
     # a global map, and an unclaimed task has no other node attached to it. Without
     # this a board cannot be scoped to the session whose agents are working it.
     declared_by: NodeId | None = None
+
+    def belongs_to(self, session_id: str) -> bool:
+        """
+        Whether this task is on ``session_id``'s board.
+
+        Scoped by declarer, because a task carries no session otherwise and an
+        unclaimed one carries no node at all. Scoping by *claimer* would empty a
+        fresh board until somebody took something, which is the reverse defect.
+
+        **An undeclared-by task belongs to no session, and that is deliberate.**
+        Nothing in the application produces one -- ``bus.declare_task`` stamps the
+        sender the gate authenticated, and an unstamped call raises rather than
+        defaulting -- so the only sources are tests and a future operator-side
+        write. Answering True here would make such a task claimable by every
+        session at once, which is precisely the "claim work you were never shown"
+        hole this predicate closes.
+
+        One predicate rather than two agreeing filters: ``board.board_tasks`` shows
+        what it returns and ``store._pick_claim`` hands out what it returns, and
+        those two had drifted -- the pane filtered by session and the reducer
+        filtered by nothing.
+        """
+        return self.declared_by is not None and self.declared_by[0] == session_id
 
     def is_claimable(self, tasks: Mapping[TaskId, Task]) -> bool:
         """
@@ -676,3 +871,21 @@ class Snapshot:
 
     def children_of(self, node_id: NodeId | None) -> tuple[NodeId, ...]:
         return tuple(n for n in self.order if self.nodes[n].parent == node_id)
+
+    def subagents_of(self, root: NodeId) -> tuple[AgentRecord, ...]:
+        """
+        Every descendant of a root session, in spawn order.
+
+        No state filter, so the list is append-only: a terminal sub-agent stays on
+        it. That is what makes it usable as the membership of a session rather than
+        as a liveness signal, and the callers that want liveness ask the records.
+
+        Structural rather than presentational, which is why it sits beside
+        ``children_of`` -- ``order`` is a pre-order walk this class already owns, and
+        the bus address projection in ``board.py`` needs it from outside ``ui/``.
+        """
+        return tuple(
+            self.nodes[nid]
+            for nid in self.order
+            if nid != root and nid[0] == root[0] and self.nodes[nid].parent is not None
+        )

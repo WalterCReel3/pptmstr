@@ -56,6 +56,10 @@ class AgentSpawned:
     # The session's work template, by name. Set on a root announce and left None
     # for a sub-agent, which is spawned by the CLI and has no template of its own.
     template: str | None = None
+    # The session's brief directory, on a root announce only. Same shape and same
+    # reason as ``template``: chosen at launch, implied by nothing in the snapshot,
+    # and gone if the announce does not carry it.
+    brief: str | None = None
     topic: str = "starting"
     # Where this agent runs. None means "inherit from the parent", which is what a
     # sub-agent does -- it runs in the session's directory and its spawn hook is not
@@ -314,6 +318,43 @@ class ConcernWithdrawn:
 
 
 @dataclass(frozen=True, slots=True)
+class TaskAmended:
+    """
+    The operator changed a task's specification after it was declared.
+
+    **A different operation from a declaration, which is why it is a different
+    intent.** ``TaskDeclared`` ignores a re-declared id outright, and that guard is
+    correct: the only way a repeat declaration happens is a retry, and overwriting
+    would silently unclaim work somebody is doing. Weakening it to make room for
+    amendment would trade a live defect for a worse one. An amendment targets a task
+    that is *expected* to exist and *expected* to be claimed, which is the opposite
+    precondition, so it gets its own arm and leaves that guard alone.
+
+    ``node_id`` is None to mark it as the operator's, the way ``ConcernEdited``
+    already does. Nothing else in the system may emit this: an agent that could
+    rewrite its own specification could rewrite the thing it is being held to, and
+    the point of a spec is that one participant sets it and another is bound by it.
+
+    Amending a task that does not exist is a no-op rather than an error, like every
+    other arm. What it must never do is *create* one -- a typo in a task id would
+    otherwise put an unclaimable, undeclared task on the board with no title.
+
+    **Necessary and not sufficient, which its own record says plainly.**
+    ``claim_task`` copies ``detail`` into the worker's context once, at claim time,
+    so a task amended afterwards changes the board and reaches nobody. The worker
+    mid-task is the one reader who must see it and the one reader who has already
+    read. What closes that is the worker re-reading the board rather than trusting
+    its transcript copy -- which `what-the-board-does-not-carry.md` calls the
+    structurally stronger option, and which stopped being "a discipline the workers
+    do not have" when the board read began carrying ``detail``.
+    """
+
+    task_id: TaskId
+    detail: str
+    node_id: NodeId | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class TaskDeclared:
     """
     A unit of work was put on the board.
@@ -322,10 +363,16 @@ class TaskDeclared:
     ``store._would_cycle``. A cycle is not a wedged task, it is a wedged *team*:
     every member of the cycle is permanently unclaimable, and the symptom is
     workers that idle while the board says there is work.
+
+    ``request_id`` None means nobody is waiting to be told: the fake driver's
+    scripted board, a test, an operator action. It is optional rather than required
+    for that reason and not as a convenience -- a declaration with no agent parked
+    on it is a real case, and the store emits no reply for one.
     """
 
     task: Task
     node_id: NodeId | None = None
+    request_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -346,12 +393,41 @@ class TaskClaimRequested:
 
 
 @dataclass(frozen=True, slots=True)
+class BoardRead:
+    """
+    An agent asked what is on its board. Nothing changes; the reply is everything.
+
+    A question with no mutation, which makes it the odd one of the five: ``InboxRead``
+    is a read *and* a mark, and a claim is a read and a write. This one exists as an
+    intent anyway rather than as a direct store call, because the handler runs on the
+    asyncio thread and the store is confined to the UI thread -- reading it from a bus
+    handler is the thread violation the Bridge exists to make unstateable, and a
+    "harmless" read of a snapshot mid-swap is exactly how that starts.
+
+    The board is scoped to ``node_id``'s own session (``Task.belongs_to``), so this
+    carries no session argument: one supplied by the caller would be one the model
+    chose, and the gate already authenticated which session is asking.
+    """
+
+    node_id: NodeId
+    request_id: str
+
+
+@dataclass(frozen=True, slots=True)
 class TaskCompleted:
-    """A claimer finished. Anything depending on this becomes claimable by that fact alone."""
+    """
+    A claimer finished. Anything depending on this becomes claimable by that fact
+    alone.
+
+    Applied only for the node that holds the claim, so a stale completion cannot
+    finish a task out from under its new owner. The claimer therefore has to be told
+    which way it went -- a ``TaskWriteSettled`` on ``request_id``, when one is given.
+    """
 
     node_id: NodeId
     task_id: TaskId
     at: float
+    request_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -361,10 +437,14 @@ class TaskReleased:
 
     Distinct from completion so that a worker which cannot proceed does not have to
     lie about the outcome to unblock a teammate.
+
+    Guarded on the claimer exactly as ``TaskCompleted`` is, and answered the same
+    way: a release the store refused must not read as one it accepted.
     """
 
     node_id: NodeId
     task_id: TaskId
+    request_id: str | None = None
 
 
 Intent = (
@@ -386,8 +466,10 @@ Intent = (
     | InboxRead
     | ConcernEdited
     | ConcernWithdrawn
+    | TaskAmended
     | TaskDeclared
     | TaskClaimRequested
     | TaskCompleted
     | TaskReleased
+    | BoardRead
 )

@@ -233,17 +233,54 @@ conflict is a better outcome than picking a winner, and this record does not pic
 
 ## Open
 
-- **Whether a worker can read an absolute path outside `cwd`.** `approval.classify`
-  auto-approves `Read` regardless of path, but whether the CLI imposes its own
-  cwd-relative restriction is **not measured, and the whole design rests on it.** If it
-  refuses, the brief has to live in the tree after all and every trade above is
-  re-opened. This is one question added to an existing probe.
+- ~~**Whether a worker can read an absolute path outside `cwd`.**~~ **Answered: it can.**
+  `verify_worker_context.py` run `84cb7f`, 2026-08-17, `claude-sonnet-5`. Two targets, both
+  read: a temp directory merely outside `cwd`, and the exact
+  `~/.claude/projects/<cwd-slug>/briefs/<id>/000-premises.md` shape proposed above. The
+  canary was in `tool_response` on PostToolUse, so the evidence is the bytes the tool
+  returned rather than the worker's account of them. **Nothing above re-opens**, and the
+  brief does not have to live in the working tree.
+
+  Measured alongside it, and it closes an option rather than opening one:
+  **`AgentDefinition.initialPrompt` does not reach a worker** — set on one probe role with
+  its canary nowhere else, reported NONE. So the per-session seeding channel that would have
+  been strictly better than prose is not available, and step 3 below stays as written.
+
+  One number in this record is wrong and the conclusion it supports is not:
+  *"Two init messages arrived and they are identical"* — run `84cb7f` produced **seven**,
+  one per agent, and they are byte-identical. A worker's context is unreadable off the wire
+  because the inits carry nothing per-agent, not because there is only one of them.
 - **Whether an amendment must name what it supersedes.** Requiring the link makes
   derivation exact and adds ceremony an operator writing at speed will skip — and a
   missing link then reads as pure addition, which is silently wrong. Optional link plus
   strict chronological rendering is honest and cheap. The first few real amendments
   will answer this better than argument will.
-- **What makes a worker read it a second time.** The sharpest unresolved item.
+- ~~**What makes a worker read it a second time.**~~ **Answered by the operator,
+  2026-08-18: the claim.** Built as `7d801a5` — `claim_task`'s reply names the brief
+  directory and its entry count, so a worker is pointed at the premises every time it
+  takes work.
+
+  **It is a mechanism, and none of the three candidates below were.** Prose, the lead
+  posting a concern, and the gate's rejection channel all depend on somebody
+  remembering; a claim fires every time and a worker that wants work cannot skip it.
+  That is the `depends_on`-versus-"within reason" distinction this project has
+  already settled once. It is also the moment a worker's "what am I building" is set,
+  since the claim reply already carries the specification and the premises are the
+  context that specification sits inside.
+
+  **The count is the mechanism, not the sentence.** "Re-read the brief" on every
+  claim is a ritual a worker performs or stops performing. "5 entries" is a fact it
+  can compare against what it saw last time, and it costs one directory listing in
+  the handler — the store cannot supply it, because the brief is on disk and
+  `_apply` is pure.
+
+  **What it does not cover, stated because it is the case the sibling record is
+  about:** a worker *mid-task* still does not re-read. A builder redirected while
+  holding a claim hears at its next claim, by which point it has built the superseded
+  version. The gate's `permissionDecisionReason` remains the only channel guaranteed
+  to reach a live worker, and closing that gap is a separate decision.
+
+  The original framing, kept because the reasoning still stands:
   Item 2's defect is not that `Task.detail` is immutable — it is that the worker holds
   a transcript copy nothing can invalidate, and a file moves that copy from the claim
   reply into the `Read` result rather than removing it. **A live brief nobody re-reads
@@ -254,7 +291,11 @@ conflict is a better outcome than picking a winner, and this record does not pic
   `permissionDecisionReason`, which is the only channel guaranteed to reach a live
   worker and is adversarial by design.
 - **What the card shows.** `AgentSpawned(task=...)` feeds the tree row, so a brief needs
-  a short title or the row renders a paragraph.
+  a short title or the row renders a paragraph. **Still open, and the title was
+  deliberately left unbuilt in step 1 because of it.** Step 1's own scope is "no reading
+  yet", so a title carried now would be a field with no reader — which is the shape this
+  whole record is about, in miniature. The path is what makes premises *addressable*; the
+  title is for a surface that does not exist. It should land with its reader.
 - **Where derivation lives.** Reading is IO and belongs in the shell; the derived brief
   is a projection and must not be persisted, or *derive; do not store* is violated on
   the way in.
@@ -263,16 +304,61 @@ conflict is a better outcome than picking a winner, and this record does not pic
 
 ## In order, if any of this gets done
 
-0. **Measure the absolute-path read.** One question on
-   `verify_worker_context.py`. Everything below is void if it fails, and it is the
-   cheapest thing here by a wide margin.
-1. **The launch spec becomes optional and structured** — a path beside `task: str`,
+0. ~~**Measure the absolute-path read.**~~ **Done, run `84cb7f`** — it reads, at both the
+   generic and the `~/.claude/projects/...` shape. Nothing below is void.
+1. ~~**The launch spec becomes optional and structured** — a path beside `task: str`,
    `LauncherState.spec` widened, `AgentRecord` carrying the path and a title. No
-   reading yet, no amendments: the smallest change that makes premises addressable.
-2. **Write and render.** An entry writer using `settings.save`'s temp + `os.replace`
+   reading yet, no amendments: the smallest change that makes premises addressable.~~
+   **Done, `879e425`**, with two departures from the wording, both stated in the
+   record below: the spec became a `LaunchSpec` value rather than a wider tuple, and
+   the **title was not built**.
+2. ~~**Write and render.** An entry writer using `settings.save`'s temp + `os.replace`
    primitive, and a pane that derives the current brief from the directory and shows
-   supersession (obligation 1).
-3. **Tell workers it exists**, with the path, and the "confirm or refute, not an order"
-   framing lifted from the builder role (obligations 2 and 3).
+   supersession (obligation 1).~~ **Done, `a38b141`** — `brief.py` and the BRIEF pane.
+3. ~~**Tell workers it exists**, with the path, and the "confirm or refute, not an order"
+   framing lifted from the builder role (obligations 2 and 3).~~ **Done, `a38b141`** —
+   `worker_prompt` takes the path, and the framing is the builder's own words, pinned
+   by a test so the two registers cannot drift.
 4. **Amendments**, once there is evidence about the re-read trigger from steps 1–3
    rather than a guess about it.
+
+
+---
+
+## Steps 2 and 3 are done — 2026-08-18, solo, `a38b141`
+
+Three things came out of the building that the record did not have.
+
+**The pane's memo cannot be keyed on mtime, and that is measured rather than reasoned.**
+The obvious key for "has the directory changed" is its modification time, and it is
+wrong here: two appends in quick succession leave `st_mtime_ns` **identical** — the
+delta is zero. In a pane redrawing at 60fps that is not a rare race, and it fails
+silently in the worst direction: the operator appends, sees nothing, and appends again.
+The key is the entry filenames, which append-only guarantees to change. Worth
+generalising — any "did this directory change" check in this project should assume
+mtime is too coarse until measured otherwise.
+
+**The write-collision guard cannot be reached by a single-threaded call**, which makes
+it the first thing here that needed its race injected rather than waited for. The
+ordinal comes from the listing, and any file that could collide with the computed name
+is a file that listing already saw — so the loop only fires when another writer lands
+between `read_entries` and `os.replace`. It is tested by handing the writer a stale
+listing, which is exactly what the loser of that race holds. It matters because the
+failure is silent: `os.replace` onto an existing name destroys it with nothing raised.
+
+**Obligation 3's framing is a quotation, and the test says so.** The record says to lift
+the builder role's *"a finding to be confirmed or refuted, not an order"* rather than
+invent a second register, and a test now pins that the two strings are the same one. A
+paraphrase would have drifted on the next edit to either, and the whole point is that a
+worker meets one register for a reviewer's concern and the operator's premises alike.
+
+**Not built, and named rather than left implicit:** nothing yet *creates* a brief
+directory at launch — `session_dir` computes the canonical location and no caller uses
+it, because the operator supplies a path today. And step 4, amendments to `Task.detail`
+from the brief, stays deferred as the record specifies.
+
+**Still open, and deliberately deferred by the operator:** what makes a worker read the
+brief a second time. Steps 2 and 3 give it a directory and tell it to read; nothing
+makes it re-read after an amendment lands, so a brief amended mid-run reaches the
+workers that start afterwards and no others. That is the sharpest item in the Open
+section and the decision was to build first and measure rather than argue it now.

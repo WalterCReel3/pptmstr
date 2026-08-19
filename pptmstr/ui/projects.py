@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ..model import AgentRecord, NodeId, Snapshot
+from ..model import NodeId, Snapshot
 
 # cwd string -> project name. Unbounded in principle and tiny in practice: one entry
 # per distinct working directory the operator has launched into.
@@ -98,12 +98,3 @@ def group_roots(snap: Snapshot) -> list[tuple[str, list[NodeId]]]:
     for nid in roots(snap):
         groups.setdefault(project_key(snap.nodes[nid].cwd), []).append(nid)
     return list(groups.items())
-
-
-def subagents_of(snap: Snapshot, root: NodeId) -> list[AgentRecord]:
-    """Every descendant of a root session, in spawn order."""
-    return [
-        snap.nodes[nid]
-        for nid in snap.order
-        if nid != root and nid[0] == root[0] and snap.nodes[nid].parent is not None
-    ]

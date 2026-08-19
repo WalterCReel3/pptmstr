@@ -30,6 +30,7 @@ from dataclasses import dataclass
 BUS_TOOL_NAMES = (
     "mcp__pptmstr__post_concern",
     "mcp__pptmstr__read_inbox",
+    "mcp__pptmstr__read_board",
     "mcp__pptmstr__claim_task",
     "mcp__pptmstr__declare_task",
     "mcp__pptmstr__complete_task",
@@ -38,6 +39,16 @@ BUS_TOOL_NAMES = (
 
 # Enough to inspect a codebase without changing it. Used by the review roles, whose
 # value depends on their not being able to quietly fix what they were asked to find.
+#
+# The grant conflates two capabilities and only one of them was intended: **cannot
+# edit** is the property that was chosen, and **cannot execute** came along with it.
+# The second is what decides whether a finding is evidence or inference, so a review
+# role is structurally incapable of the "works end to end" claim STYLE.md §2
+# distinguishes from "plumbed through". Bash is not the answer -- it edits, which
+# discards the property -- and a narrowly scoped run capability is the version worth
+# building. Until then the limit is made legible instead of closed: every review
+# prompt below asks for a finding's evidence class, so the lead can weigh a claim
+# before turning it into a specification.
 READ_ONLY_TOOLS = ("Read", "Glob", "Grep", "NotebookRead", "WebFetch", "WebSearch")
 
 
@@ -104,6 +115,48 @@ class WorkTemplate:
 # -- the briefing -----------------------------------------------------------------
 
 
+def _brief_lines(brief: str | None) -> list[str]:
+    """
+    What a worker is told about the session's premises, or nothing when there are
+    none.
+
+    **Names the directory, never a file.** Append-only plus permitted contradiction
+    means a superseded premise is still on disk, so a worker that opened one obvious
+    filename would act on the version that was overturned -- and that footgun only
+    surfaces in a session that has already gone wrong.
+
+    **Frames an amendment as a finding to confirm or refute**, in the words
+    ``FEATURE``'s builder role already uses for a reviewer's concern. That is
+    deliberate reuse rather than a second register: the only check on a wrong
+    amendment is a worker arguing from evidence, which is the mechanism the
+    dogfooding run credits with saving it, and presenting premises as final
+    suppresses exactly that. One operator writing for every worker concentrates
+    authority further than any concern does, so the framing matters more here, not
+    less.
+    """
+    if not brief:
+        return []
+    return [
+        "",
+        "## The premises this session was launched with",
+        "",
+        f"Read every file in `{brief}` before you start, in name order. It holds",
+        "what the operator settled before the work began: what is decided and why,",
+        "what is still open, and what is out of scope.",
+        "",
+        "**It is a directory and not a file, and the distinction matters.** Entries",
+        "are appended and never edited, so a later one may overturn an earlier one.",
+        "An entry that says it supersedes another is the current position; the one",
+        "it overturned is still on disk and is not. Reading only the first file",
+        "would hand you the version that was already withdrawn.",
+        "",
+        "**Treat what you read there as a finding to be confirmed or refuted, not an",
+        "order.** If a premise contradicts what you find in the tree, say so in a",
+        "concern rather than building against it — the operator wrote it before the",
+        "work started and you are the one looking at the code.",
+    ]
+
+
 def lead_briefing(template: WorkTemplate) -> str:
     """
     What the lead is told, on top of its ordinary system prompt.
@@ -155,15 +208,26 @@ def lead_briefing(template: WorkTemplate) -> str:
         "The first agent in a role is addressed by the bare role name, the second as",
         f"`{example}-2`, the third as `{example}-3`; `lead`, `main` and `root` are you.",
         "",
-        "- `declare_task(task_id, title, detail, depends_on)` puts work on a shared",
-        "  board. `depends_on` names tasks that must finish first; anything blocked",
-        "  becomes claimable on its own the moment its dependencies complete. Two",
-        "  tasks with no dependency between them are independent and can be worked at",
-        "  the same time, so declare a dependency wherever two pieces of work would",
-        "  touch the same file.",
+        "- `declare_task(task_id, title, detail, depends_on, touches)` puts work on a",
+        "  shared board. `depends_on` names tasks that must finish first; anything",
+        "  blocked becomes claimable on its own the moment its dependencies complete.",
+        "  Two tasks with no dependency between them are independent and can be worked",
+        "  at the same time.",
+        "- **`touches` names the files a task will write, relative to the repository",
+        "  root.** Give it on every task. When two tasks on your board would write the",
+        "  same file, the board adds the dependency itself and tells you it did — you",
+        "  do not have to spot the overlap across a plan you wrote in pieces. Paths are",
+        "  normalised before they are compared, so a leading `./` or an embedded `..`",
+        "  makes no difference; an absolute path, though, is never matched against a",
+        "  relative path, which is why they must be repository-relative. A dependency",
+        "  the board added is not advisory: leave it in place, and where the overlap is",
+        "  wrong, narrow the `touches` of a task rather than dropping the edge.",
         "- Workers call `claim_task()` to take the oldest unblocked item, one at a",
         "  time. Declare the work and let them claim it rather than assigning it by",
         "  hand; another agent in the same role is how the board drains faster.",
+        "- `read_board()` shows the board to you and to them. A worker asking what",
+        "  is on it no longer has to ask you, so route them to it rather than",
+        "  relaying the state yourself — your copy goes stale and the board does not.",
         "- `post_concern(to, subject, body)` sends a message to a role by name, or to",
         "  `lead` for you. `read_inbox()` collects what has been sent to you.",
         "- Messages between agents are reviewed by the operator before they arrive, so",
@@ -176,7 +240,24 @@ def lead_briefing(template: WorkTemplate) -> str:
         "— read your inbox, answer concerns, and let the workers work. Do not implement",
         "the task yourself while a worker is doing it, and do not put two agents on work",
         "that touches the same file; two agents editing the same file is the failure this",
-        "structure exists to avoid, and `depends_on` is what keeps them apart.",
+        "structure exists to avoid, and `depends_on` is what keeps them apart. Naming",
+        "`touches` on every task is what makes that mechanical rather than something",
+        "you have to remember at the moment you are least likely to.",
+        "",
+        "**A finding you have not verified goes on the board as a finding to check,",
+        "not as an instruction to carry out.** You are where an observation becomes a",
+        "specification: a claim inside `detail` reads as settled, and what you wrote",
+        "is the whole record of where it came from. Workers have had to refute things",
+        "relayed as established — a reviewer's error passing through you, and your own",
+        "— and refusing you costs a worker what being wrong does not cost you.",
+        "",
+        "**Declare a terminal task that greens the gate**, depending on every task",
+        "that touches a file. Lint and type errors in files no task named belong to",
+        "nobody: workers that meet them correctly report and move on, and the tree",
+        "stays red for the rest of the session. A task claimed after the writes have",
+        "stopped has no ownership conflict with anything, and its result is",
+        "trustworthy in a way an earlier run cannot be — a suite read while agents are",
+        "writing reads files mid-save.",
         "",
         "**Call `read_inbox()` before you write your final answer**, every time. A",
         "worker's concern is not the same thing as its result: the result is what it",
@@ -189,22 +270,56 @@ def lead_briefing(template: WorkTemplate) -> str:
     return "\n".join(lines)
 
 
-def worker_prompt(role: Role) -> str:
+def worker_prompt(role: Role, brief: str | None = None) -> str:
     """
     A role's own prompt, plus the part every worker needs.
 
     Appended here rather than repeated in each role for the obvious reason, and
     because the bus half is what makes a worker a teammate rather than a sub-agent
     that happens to run alongside others.
+
+    Every paragraph below the role's own prompt answers something a dogfooding run
+    observed, and two of them exist to protect the property that run found to be
+    load-bearing: **a team that followed its instructions faithfully would have
+    shipped worse work than one that argued.** Four workers refused or corrected a
+    spec they were handed and all four were right, so the disagreement line is not
+    encouragement -- it is the mechanism that caught a working constant marked for
+    deletion and a finding that had already been fixed.
+
+    ``role.name`` is interpolated into the instance-address paragraph on the same
+    no-drift grounds ``lead_briefing`` uses: an example naming a role this worker is
+    not gives it an address that resolves to nothing.
+
+    ``brief`` is the session's premises directory, interpolated when there is one.
+    **Prose is the only channel available and that is measured, not assumed**: run
+    `84cb7f` set ``AgentDefinition.initialPrompt`` on one probe role with its canary
+    nowhere else and the worker reported NONE, so the per-session seeding channel
+    that would have been strictly better than this does not reach a sub-agent. What
+    the same run *did* establish is that a worker can read an absolute path outside
+    ``cwd`` -- including this exact shape -- with the canary captured off the wire
+    rather than from the worker's account of it.
+
+    The paragraph is pro-rigor rather than restraint, which is why it escapes the
+    recorded objection to prose. `a-task-reaches-the-board-without-a-decision.md`
+    argues that a guard asking for restraint loses against a monotonically pro-rigor
+    CLAUDE.md; "read the premises before you build" asks for more care, not less,
+    and is not competing with anything.
     """
     return "\n".join(
         [
             role.prompt.strip(),
+            *_brief_lines(brief),
             "",
             "## Working with the team",
             "",
             "Call `read_inbox()` when you start and again whenever you finish a piece",
             "of work — a teammate may have told you something that changes it.",
+            "",
+            "`read_board()` shows every task on your team's board: what exists, who",
+            "holds it, and what each one is waiting for. Read it before you declare",
+            "work, before you report that something is blocked, and whenever you are",
+            "about to act on a claim about another task — the board is the shared",
+            "state, and it is current in a way your own transcript is not.",
             "",
             "Take work with `claim_task()`; call `complete_task(task_id)` when it is",
             "done, or `release_task(task_id)` if you cannot proceed, so somebody else",
@@ -212,14 +327,40 @@ def worker_prompt(role: Role) -> str:
             "another agent may be working in the same role as you, and the item you",
             "claimed is the only one that is yours.",
             "",
+            "**Confirm a reported defect still exists before you fix it.** A finding is",
+            "a claim about the tree at the moment it was read, and by the time it",
+            "reaches you another agent may have repaired it. If the spec describes code",
+            "that is not there, say so and stop rather than reconstructing the defect it",
+            "expects. Cite symbol names rather than line numbers for the same reason:",
+            "symbols survive edits that line numbers do not.",
+            "",
+            "**Two rules about a task you cannot finish, and you need both.** Hold the",
+            "claim when releasing would republish a spec you believe is wrong — the next",
+            "worker would get the same bad instruction with none of your reasoning — and",
+            "post a concern saying why you are holding it. Release it when another agent",
+            "is writing in your files, because holding a claim does not stop anyone",
+            "else's writes and only your absence does.",
+            "",
+            "**The gate is tree-wide and other agents are writing.** Format only files",
+            "your task owns (`make format-file FILE=...`, not `make format`), and",
+            "`git add` a file as soon as you create it — an untracked file another agent",
+            "overwrites has no revert path. Re-run a red before reporting it and name",
+            "the failing file: a failure caused by someone else's half-written save",
+            "recovers on the second run, and a real one does not.",
+            "",
             "**Before you finish, post a concern to `lead`** naming the thing you are",
             "least sure about, or what you noticed that nobody asked you to look at.",
             "Your returned result answers the question you were given; the concern is",
-            "for everything else, and it is the only way that reaches anyone.",
+            "for everything else, and nothing else you write reaches the lead before it",
+            "has already synthesised.",
             "",
-            "Use `post_concern(to, subject, body)` to raise something with another",
-            "role too. Say plainly when you disagree with another agent rather than",
-            "deferring to it — an agreement nobody tested is worth nothing here.",
+            "Use `post_concern(to, subject, body)` to raise something with another role",
+            "too — it reaches any agent this session has started, not only the lead. The",
+            "first agent in a role answers to the bare role name, the second to",
+            f"`{role.name}-2`, the third to `{role.name}-3`; `lead`, `main` and `root`",
+            "are the coordinator. Say plainly when you disagree with another agent",
+            "rather than deferring to it — an agreement nobody tested is worth nothing",
+            "here.",
         ]
     )
 
@@ -263,6 +404,10 @@ FEATURE = WorkTemplate(
                 "produces a wrong result, and say concretely what it is. If you "
                 "cannot find one, say that plainly rather than inventing a stylistic "
                 "objection to have something to report.\n\n"
+                "Label every finding with how you know it: read-derived, from the "
+                "source alone, or run-derived, from output you saw. You cannot run "
+                "anything, so most of yours will be the first -- say so rather than "
+                "letting the lead read an inference as a measurement.\n\n"
                 "You have no editing tools on purpose. Report; do not fix."
             ),
             tools=READ_ONLY_TOOLS,
@@ -285,9 +430,12 @@ RESEARCH = WorkTemplate(
             description="Builds the case. Gathers evidence for the most likely answer.",
             prompt=(
                 "You investigate a question and build the best-supported answer you "
-                "can. Cite what you actually read -- file and line, or the source -- "
-                "rather than what you recall. Say which parts of your answer are "
-                "evidence and which are inference.\n\n"
+                "can. Cite what you actually read -- the file and the symbol, rather "
+                "than a line number that the next edit moves -- and cite it rather "
+                "than what you recall. Say which parts of your answer are evidence "
+                "and which are inference, and label each finding read-derived or "
+                "run-derived: you have no tools that run anything, so a claim about "
+                "behaviour is inference however confident it feels.\n\n"
                 "A skeptic is reading your work and looking for the hole in it. Make "
                 "its job hard by being explicit about your weakest step."
             ),
