@@ -1,6 +1,9 @@
 # The task board and the conversation are in the store and on no screen
 
-**Dated:** 2026-08-12 · **Status:** open, not started ·
+**Dated:** 2026-08-12 · **Status:** built 2026-08-15, `c1f775e`, in DETAIL as this
+doc directed. It moved to a pane of its own on 2026-08-18
+([`2026-08-18-the-board-is-a-tenant-of-a-pane-that-owes-it-nothing.md`](2026-08-18-the-board-is-a-tenant-of-a-pane-that-owes-it-nothing.md),
+`7ccb745`), which is where the placement argued for below was reversed ·
 **Follows:** step 8 landing (`2026-08-12-a-message-has-no-sender-until-the-gate-gives-it-one.md`)
 
 `Snapshot.tasks` and `Snapshot.concerns` have **zero readers in `pptmstr/ui/`**.

@@ -1,7 +1,7 @@
 """
 Markdown block segmentation: lines in, blocks out.
 
-Step 3 of planning/2026-08-10-transcript-markdown.md. No ImGui here, same reason
+Step 3 of planning/archive/2026-08-10-transcript-markdown.md. No ImGui here, same reason
 ``NodeTranscript`` has none -- this is where the design gets subtle, so it needs to
 be testable without a live frame.
 

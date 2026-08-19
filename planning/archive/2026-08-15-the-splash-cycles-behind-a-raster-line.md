@@ -1,5 +1,7 @@
 # The splash cycles behind a raster line
 
+**Dated:** 2026-08-15 · **Status:** built 2026-08-16, `1f1a1fc`
+
 **Parked mid-flight on 2026-08-15**, three hours in, to fix
 `driver.py`'s sub-agent liveness bug first — that one reports live agents as
 FAILED, releases their cap slots, and can drop their results, and it surfaced

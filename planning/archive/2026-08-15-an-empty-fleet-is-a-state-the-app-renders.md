@@ -1,7 +1,7 @@
 # An empty fleet is a state the app renders, and the pane it renders in sets the arithmetic
 
 **Dated:** 2026-08-15 · **Status:** built, green, recorded after the fact ·
-**Related:** [`2026-08-10-layout-proposals.md`](2026-08-10-layout-proposals.md) for the
+**Related:** [`2026-08-10-layout-proposals.md`](../2026-08-10-layout-proposals.md) for the
 TRIAGE splits this depends on;
 [`2026-08-15-an-operator-instruction-the-lead-cannot-see.md`](2026-08-15-an-operator-instruction-the-lead-cannot-see.md),
 which is what the same session exposed about coordination.

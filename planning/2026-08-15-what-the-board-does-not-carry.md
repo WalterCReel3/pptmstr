@@ -2,7 +2,7 @@
 
 **Dated:** 2026-08-15 · **Status:** open, no code changed · **Found by:** dogfooding the
 splash-panel work · **Companion:**
-[`2026-08-15-an-operator-instruction-the-lead-cannot-see.md`](2026-08-15-an-operator-instruction-the-lead-cannot-see.md),
+[`2026-08-15-an-operator-instruction-the-lead-cannot-see.md`](archive/2026-08-15-an-operator-instruction-the-lead-cannot-see.md),
 which covers item 2 below in depth and is not restated here.
 
 Symbol names, not line numbers, per the 08-14 convention.
@@ -487,7 +487,7 @@ claim_task()  ->  Input validation error: 'task_id' is a required property
 ```
 
 The documented call fails, and `claim_task(task_id="")` succeeds. Fully described in
-[`2026-08-13-every-bus-tool-requires-its-optional-arguments.md`](2026-08-13-every-bus-tool-requires-its-optional-arguments.md),
+[`2026-08-13-every-bus-tool-requires-its-optional-arguments.md`](archive/2026-08-13-every-bus-tool-requires-its-optional-arguments.md),
 including the second reproduction on `declare_task`, and not restated here. Now on the
 board as `bus-tool-schema`, correctly framed as a fresh read of the SDK's `tool` /
 `SdkMcpTool` before any fix, since the whole defect is a belief about what the schema

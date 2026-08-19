@@ -96,7 +96,7 @@ rationalised into a feature request.
 |---|---|---|---|
 | 2026-08-09 | Session appeared stuck at "thinking" with no indication it wanted anything. It was parked on a Bash approval the whole time. | A real session abandoned as hung. First bug dogfooding found, and it made the product's central feature invisible. | Fixed: a node with a pending approval can no longer be moved out of AWAITING_APPROVAL by a late StateChanged. See below. |
 
-| 2026-08-10 | An agent asked clarifying questions and the session just went DONE. The question was never surfaced as something to answer. | A planning session lost; looked like the agent had finished when it was waiting. | Structural, not cosmetic: sessions are one-shot and there is no reply channel. See planning/2026-08-10-conversational-sessions.md |
+| 2026-08-10 | An agent asked clarifying questions and the session just went DONE. The question was never surfaced as something to answer. | A planning session lost; looked like the agent had finished when it was waiting. | Structural, not cosmetic: sessions are one-shot and there is no reply channel. See planning/archive/2026-08-10-conversational-sessions.md |
 
 | 2026-08-10 | Three "blocked on approval that is not in the queue" warnings in one session. Agent management felt unreliable. | Agents wedged mid-session; the watchdog was the only reason it was noticed at all. | Root cause: the store held one pending approval per node, the gate parks one per tool call, and a turn can contain several. Fixed by making it a collection. |
 

@@ -1,7 +1,7 @@
 # An expanded group outgrows its pane, and the filter rule changes at the cap
 
 **Dated:** 2026-08-13 · **Status:** open, not started ·
-**Extends:** [`2026-08-13-a-card-is-an-agent.md`](2026-08-13-a-card-is-an-agent.md)
+**Extends:** [`2026-08-13-a-card-is-an-agent.md`](archive/2026-08-13-a-card-is-an-agent.md)
 
 The card design in that note sizes an expanded session from
 `len(projects.subagents_of(...))` and shows every sub-agent, terminal ones included.

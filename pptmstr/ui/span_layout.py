@@ -1,7 +1,7 @@
 """
 Word-wrapping a block's inline token stream into drawable rows.
 
-Step 5 of planning/2026-08-10-transcript-markdown.md (the layout half; drawing
+Step 5 of planning/archive/2026-08-10-transcript-markdown.md (the layout half; drawing
 lives in ``rich_pane.py``). No ImGui here -- the one thing this module needs from
 ImGui, "how much of this text fits in this many pixels", is taken as an injected
 callable rather than called directly, which is what makes the wrapping *decisions*

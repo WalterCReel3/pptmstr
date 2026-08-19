@@ -1,7 +1,7 @@
 # What a worker is given
 
 **Dated:** 2026-08-17 · **Status:** superseded by
-[`planning/2026-08-17-a-session-premise-is-a-place-not-a-message.md`](../planning/2026-08-17-a-session-premise-is-a-place-not-a-message.md),
+[`planning/archive/2026-08-17-a-session-premise-is-a-place-not-a-message.md`](../planning/archive/2026-08-17-a-session-premise-is-a-place-not-a-message.md),
 which carries the decisions; this file is kept for the observations they were derived
 from · **Probe:** `scripts/verify_worker_context.py` · **Found by:** dogfooding, three
 reports from the operator
@@ -126,7 +126,7 @@ only one — it is gone the moment the worker starts:
   `(session_id, None)`, so even without that guard the text would land in the lead's
   conversation.
 - `SendMessage` is out of v1
-  ([2026-08-12](../planning/2026-08-12-a-message-has-no-sender-until-the-gate-gives-it-one.md))
+  ([2026-08-12](../planning/archive/2026-08-12-a-message-has-no-sender-until-the-gate-gives-it-one.md))
   and unusable anyway.
 
 The one exception: a gate denial's free-text reason reaches the calling agent as
@@ -221,7 +221,7 @@ to carry out*) is the same constraint seen from the lead's side.
 Not re-litigated here; listed so a proposal can be checked against them.
 
 1. **No second copy of a spec.**
-   [`an-operator-instruction-the-lead-cannot-see.md`](../planning/2026-08-15-an-operator-instruction-the-lead-cannot-see.md)
+   [`an-operator-instruction-the-lead-cannot-see.md`](../planning/archive/2026-08-15-an-operator-instruction-the-lead-cannot-see.md)
    refuses "adding a CC of operator prompts to the lead" on STYLE.md §1 grounds — a
    stored duplicate kept true by whoever remembers to update it, named as this
    codebase's historic defect shape. **Pasting the originating document into every

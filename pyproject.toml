@@ -23,8 +23,9 @@ dependencies = [
     # Bundles its own Claude Code CLI binary, which is why there is no Node
     # dependency here -- see check_agent_cli() in scripts/probe.py.
     "claude-agent-sdk>=0.2.134",
-    # Inline markdown parsing for the transcript pane (planning/2026-08-10-
-    # transcript-markdown.md, step 4). Only the inline chain is used
+    # Inline markdown parsing for the transcript pane
+    # (planning/archive/2026-08-10-transcript-markdown.md, step 4). Only the
+    # inline chain is used
     # (MarkdownIt.parseInline) -- block structure is our own segmenter
     # (pptmstr/ui/blocks.py), not this library's.
     "markdown-it-py>=3.0",

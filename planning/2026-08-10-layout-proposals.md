@@ -21,7 +21,7 @@ Six specific consequences, in descending order of cost.
 
 `AWAITING_APPROVAL` enters `review_queue` and gets a pane. `AWAITING_INPUT` — the
 state built specifically because a question looked like a finish
-(planning/2026-08-10-conversational-sessions.md) — appears only as a `YOUR TURN`
+(planning/archive/2026-08-10-conversational-sessions.md) — appears only as a `YOUR TURN`
 badge in the tree, and is answered in a different pane. `FAILED` gets nothing.
 
 These are the same operator obligation: *something is waiting on you*. They are
