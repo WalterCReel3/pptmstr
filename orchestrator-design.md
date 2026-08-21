@@ -740,6 +740,8 @@ Because the await parks only that agent's task, other agents keep running and th
 - **Edit-then-approve.** You can fix a wrong path or tighten a shell command in the UI and approve the corrected version, instead of rejecting and waiting for a retry. For a "persnickety about changes" workflow this is the highest-leverage feature in the whole tool.
 - **Rejection with a reason.** `permissionDecisionReason` is shown to the model. A rejection that explains itself is worth far more than a bare denial. Make the reason field a first-class input, not an afterthought.
 
+  The reason arrives at the model in the *tool result* slot — the same place a successful call's output lands. Sent bare, it is not distinguishable from output, and for `Bash` it is not distinguishable at all: rejecting `git push` with "use the release target instead" hands the agent what reads as a shell transcript, and it proceeds as though the push ran. Every denial therefore goes out through `driver._deny`, which frames the reason with who refused, that the call did not run, and that nothing below the rule was observed. The operator's words stay verbatim inside that frame. `_hook_output` is not called with a denial anywhere else.
+
 ### 5.4 Classification and batching
 
 ```python

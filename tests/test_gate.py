@@ -131,7 +131,46 @@ def test_rejection_carries_the_reason_to_the_model(bridge: Bridge) -> None:
     out = task.result(timeout=TIMEOUT)
 
     assert decision_of(out) == "deny"
-    assert out["hookSpecificOutput"]["permissionDecisionReason"] == "never do that"
+    assert out["hookSpecificOutput"]["permissionDecisionReason"].endswith("never do that")
+
+
+def test_a_rejection_does_not_read_as_the_tools_output(bridge: Bridge) -> None:
+    """
+    The reason arrives at the model in the slot a successful call's output arrives
+    in, so for Bash the operator's words are indistinguishable from stdout unless
+    something says otherwise. The frame is the only thing that says otherwise.
+    """
+    store = Store()
+    session = AgentSession(bridge, "task")
+    session.announce()
+    task = bridge.submit(session._pre_tool_use(hook_input("Bash", command="git push"), None, {}))
+    pump(store, bridge, lambda: bool(store.snapshot().approvals))
+
+    pending = store.snapshot().approvals[0]
+    bridge.resolve(pending.id, Decision(approved=False, reason="use the release target"))
+    reason = task.result(timeout=TIMEOUT)["hookSpecificOutput"]["permissionDecisionReason"]
+
+    assert "did not run" in reason
+    assert "not Bash's output" in reason
+    assert "human operator" in reason
+    assert reason.index("human operator") < reason.index("use the release target")
+
+
+def test_a_policy_denial_is_not_attributed_to_the_operator(bridge: Bridge) -> None:
+    """
+    A denial no human was asked about must not claim one refused it: an agent told
+    the operator objected will wait or ask, where the truth is that the session
+    cannot run this call at all and it should say so and move on.
+    """
+    session = AgentSession(bridge, "task", interactive=False)
+    out = bridge.submit(session._pre_tool_use(hook_input("Bash", command="ls"), None, {})).result(
+        timeout=TIMEOUT
+    )
+
+    reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "no human asked" in reason
+    assert "human operator" not in reason
+    assert "not Bash's output" in reason
 
 
 def test_edit_then_approve_substitutes_the_arguments(bridge: Bridge) -> None:
