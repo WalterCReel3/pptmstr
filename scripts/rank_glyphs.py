@@ -2,10 +2,20 @@
 """
 Rank the splash art's glyphs by how much ink each one puts in a cell.
 
-The splash animation swaps a cell's character for another that looks equally
-bright, so the silhouette holds still while the texture crawls. That needs an
-ordering of the art's 165 non-space glyphs by ink, and an ordering nobody
-measured is an ordering somebody guessed.
+The splash animation swaps a cell's character for any other glyph in the art's
+inventory, without regard to brightness -- ``splash.py`` reads ``RANKS`` as one
+flat pool, and the glitch that produces is the effect it is going for. What this
+script still supplies is the inventory itself and a measured ink ordering of the
+art's 165 non-space glyphs, and an ordering nobody measured is an ordering
+somebody guessed.
+
+**What the table is load-bearing for, now that substitution ignores it.** Three
+things. It is the eligibility list: a cell whose character is absent from it never
+animates. It refuses any glyph the face cannot draw, which is what keeps every
+substitute a glyph that exists in the baked atlas. And the *order* the buckets are
+emitted in fixes the flat pool's order, which fixes which glyph each cell shows on
+each step -- so re-running this script with different parameters changes every
+frame of the animation even though it cannot change the pool's contents.
 
 **What this measures.** The signed area enclosed by the glyph's outline
 (``fontTools.pens.areaPen.AreaPen``), absolute value, divided by the em square.
@@ -33,23 +43,25 @@ environment does, so this is the honest ceiling rather than a shortcut:
   brighter on screen than they rank here.
 * *Area says nothing about where the ink sits.* ``„`` and ``“`` are all but the
   same shape 0.5315 em apart -- 0.2840 and 0.2830 em tall, areas agreeing to
-  within 0.088% -- so no area-based metric can ever separate them. Equal area at
-  different heights is a cell that keeps its brightness and visibly hops, which
-  is what the second stage of the partition below exists to bound.
+  within 0.088% -- so no area-based metric can ever separate them. A band that
+  groups them is uniform in weight and spread across most of the cell in
+  position, which is what the second stage of the partition below exists to
+  bound.
 
 **The partition, in two stages.** *Ink bands* are contiguous runs of the
 area-sorted order chosen to minimise the *worst* within-band ink ratio, subject
 to a floor on band size -- solved exactly by binary search over the candidate
 ratios with a DP feasibility check, not by cutting the range into equal parts.
-Equal-width cuts put ``pilcrow`` alone in the top band, where a cell could never
-change; equal-frequency cuts put a 2.4x ink spread in the bottom one, where it
-would visibly pulse.
+Equal-width cuts put ``pilcrow`` alone in the top band and equal-frequency cuts
+put a 2.4x ink spread in the bottom one, so neither describes the inventory: one
+band of the twelve would carry a single glyph and one would carry a span the
+other eleven are chosen to avoid.
 
 A band wider than ``DEFAULT_MAX_SPREAD`` in ink height is then *subdivided* by
 the vertical centre of the ink bounding box, by the same exact method against a
 difference rather than a ratio. Sub-buckets of one band overlap in area and are
 therefore **not** separated dim-to-bright from each other -- only the bands are.
-That is the property the second stage trades away, and ``RANKS`` no longer claims
+That is the property the second stage trades away, and ``RANKS`` does not claim
 it; what survives is that no bucket is more than one band's ink ratio brighter
 than any later bucket.
 
@@ -59,8 +71,8 @@ cannot split at all with a floor of three members, and the two that can still
 carry one low-sitting mark (U+00B8, U+201A, U+201E) with no height-alike partner
 to sit with. Their spreads land at 0.416, 0.4315 and 0.470 em, which the
 per-bucket report prints on every run. That is a deliberate stop rather than an
-unfinished one: the panel is meant to read as glitchy, so the residual travel is
-within tolerance and the test bounding it is loose to match.
+unfinished one: the panel is meant to read as glitchy, so a band left wide in ink
+height is within tolerance and the test bounding it is loose to match.
 
 Usage:  .venv/bin/python scripts/rank_glyphs.py
         .venv/bin/python scripts/rank_glyphs.py --buckets 12 --min-size 3
@@ -86,7 +98,11 @@ ART_PATH = ROOT / "pptmstr" / "ui" / "splash_art.txt"
 # a 22.7% within-bucket ink spread, twelve admit 17.2%, and thirteen only buys
 # 16.6% while adding another three-member bucket. A floor of four is not
 # reachable at any useful ratio -- the four dimmest glyphs already span 47.7%
-# between them -- so three it is, and three is still enough for a cell to cycle.
+# between them -- so three it is.
+#
+# The floor also decides how finely the subdivision stage can cut, and that is what
+# ``tests/test_splash_art.py`` pins it by: the same twelve bands emit 14 buckets at a
+# floor of 3, 16 at 2 and 25 at 1, all three at the identical 1.1724 ratio.
 DEFAULT_BUCKETS = 12
 DEFAULT_MIN_SIZE = 3
 
@@ -258,9 +274,12 @@ def partition(
     Split the sorted glyphs into buckets minimising the worst within-bucket ratio.
 
     The objective is a *ratio* rather than a difference because brightness
-    discrimination is roughly proportional: a swap from 0.011 to 0.017 em^2 is
-    the same visible jump as one from 0.090 to 0.140, and an additive objective
-    would spend all its resolution at the bright end where the eye needs least.
+    discrimination is roughly proportional: 0.011 against 0.017 em^2 is as far
+    apart to the eye as 0.090 against 0.140, and an additive objective would
+    spend all its resolution at the bright end where the eye needs least. That is
+    a statement about the measurement, not about the animation -- the renderer
+    does not read these bands, and what the choice buys now is a partition whose
+    bands describe the inventory evenly enough to be worth pinning.
     """
     values = [area for _, area in ranked]
     candidates = sorted(

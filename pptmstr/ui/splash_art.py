@@ -1,12 +1,17 @@
 """
 The splash art, and a measured brightness ranking of the glyphs it is made of.
 
-The NEEDS YOU pane shows this when there are no sessions at all. Its cells cycle among
-characters of equal ink, so the picture holds its shape while the texture moves
--- which only works if "equal ink" is something that was measured rather than
-eyeballed. ``scripts/rank_glyphs.py`` does the measuring; this module carries
-the result and the art itself, and imports nothing that is not already a runtime
-dependency.
+The NEEDS YOU pane shows this when there are no sessions at all. A cell's animation
+draws its substitute from the union of every bucket in ``RANKS``, not from the one its
+own glyph belongs to, so ``RANKS``/``RANK_OF`` gate *eligibility* here -- whether a
+glyph is part of the curated, font-validated inventory at all -- rather than
+constraining which glyph a substitution returns. The buckets are measured rather than
+eyeballed, and they run in ink-band order, dimmest band first; they are *not* totally
+ordered dim to bright, because two bands are each split in half by ink height and the
+halves of one band interleave. ``scripts/rank_glyphs.py`` produces that partition and
+``tests/test_splash_art.py`` holds it, though substitution in ``splash.py`` reads only
+the membership. This module carries the result and the art itself, and imports nothing
+that is not already a runtime dependency.
 
 Three names are the contract, and the renderer in ``splash.py`` is written
 against them:
@@ -16,7 +21,9 @@ against them:
     were never in the file and are not added here -- so a renderer must not
     assume a rectangle.
 ``RANKS``
-    Buckets of interchangeable glyphs, ordered dim to bright.
+    Buckets of glyphs of similar ink, in ink-band order, dimmest band first. Not a
+    total dim-to-bright ordering -- see the note above ``_BUCKETS`` for the two
+    bands whose halves interleave.
 ``RANK_OF``
     Which bucket a character is in.
 
@@ -64,20 +71,24 @@ ART: tuple[str, ...] = _rows(_ART_PATH)
 #
 # Twelve ink bands with a floor of three members is the knee of the measured curve:
 # eleven admit a 22.7% within-band ink spread, twelve admit 17.2%, and thirteen only
-# reaches 16.6% while adding another three-member band. So no swap changes a cell's
-# ink by more than about a sixth, and every cell has at least two other glyphs it can
-# become.
+# reaches 16.6% while adding another three-member band. So no band spans more than
+# about a sixth in ink, and none holds fewer than three glyphs.
 #
 # Two of those bands are then split in half by ink *height*, giving fourteen buckets.
 # Equal ink area is not equal ink position: U+201E and U+201C are all but the same
-# shape 0.5315 em apart, with areas agreeing to within 0.088%, so a cell can swap
-# between them, hold its brightness and hop most of the cell. Some of that is wanted
-# -- the panel is meant to read as glitchy -- so the split *bounds* the travel rather
-# than removing it, and the bound is loose on purpose.
+# shape 0.5315 em apart, with areas agreeing to within 0.088%, so a band holding both
+# is uniform in weight while spanning most of the cell in position. Some of that
+# spread is wanted -- the panel is meant to read as glitchy -- so the split *bounds*
+# it rather than removing it, and the bound is loose on purpose.
 #
-# What it costs is that the buckets are no longer totally ordered dim to bright: two
-# buckets sharing one ink band interleave, so what holds instead is that no bucket is
-# more than one band's ink ratio brighter than any later one.
+# What it costs is that the buckets are not totally ordered dim to bright: two buckets
+# sharing one ink band interleave, so what holds instead is that no bucket is more than
+# one band's ink ratio brighter than any later one.
+#
+# All three are properties of this table and not of the animation. ``splash.py`` draws
+# a substitute from all fourteen buckets at once, so nothing here bounds what a cell
+# can become; tests/test_splash_art.py holds them because they are the only detectors
+# of a change to the generator's parameters.
 #
 # Escaped rather than literal because the inventory contains U+00AD, which is
 # invisible in an editor, and CP1252-range punctuation whose ASCII lookalikes are

@@ -1,6 +1,7 @@
 """
-The animation core for the cold-start splash: cycling text art, a breathing quote, and
-the sizing arithmetic that decides whether either of them fits.
+The animation core for the cold-start splash: cycling text art, a quote that breathes and
+intermittently corrupts, and the sizing arithmetic that decides whether either of them
+fits.
 
 The panel is NEEDS YOU, docked in MainDockSpace, and it shows this only when there are
 no sessions at all -- an empty queue with a live fleet is a different pane. Which host
@@ -10,9 +11,9 @@ short where DETAIL was narrow and tall, and that inverts which axis binds.
 No ImGui here, and no clock read. ``now`` is a parameter for the same reason the
 reducer takes one (STYLE.md §1): a core that reaches for ``time.monotonic()`` cannot
 be asked what it renders at t=4.5s, and every guarantee below -- stable membership,
-in-bucket substitution, where the raster line has reached, a readable floor under the
-quote -- is a statement about two different ``now`` values that only a caller-supplied
-clock lets a test make.
+substitution confined to the wake, where the raster line has reached, a readable floor
+under the quote, a glitch that settles to nothing for seconds at a time -- is a statement
+about two different ``now`` values that only a caller-supplied clock lets a test make.
 
 The art data itself lives in ``splash_art.py``; this module never imports it. It takes
 ``art``/``ranks``/``rank_of`` as arguments so the behaviour is exercisable against
@@ -129,64 +130,36 @@ CYCLING_FRACTION = 0.34
 _MEMBERSHIP_BUCKETS = 1024
 _MEMBERSHIP_THRESHOLD = CYCLING_FRACTION * _MEMBERSHIP_BUCKETS
 
-# -- what protects the panel ---------------------------------------------------
+# -- the substitution pool ------------------------------------------------------
 #
-# This is on screen for as long as the app has no sessions, so flicker is a live hazard
-# rather than a theoretical one, and nothing below is a limit on how often a single cell
-# may change. What carries it is rate and area, both by wide margins.
+# A cell that substitutes draws its replacement from the union of every bucket in
+# ``ranks`` -- one flat pool of the whole curated inventory, 165 non-space glyphs -- and
+# not from the bucket its own glyph belongs to. That is the point rather than a
+# simplification: near-random glyphs in the wake are the glitch effect this animation is
+# going for, not a texture that holds the picture's brightness steady underneath it.
 #
-# *It is not carried by the modulation being small.* A pane mapping DIM and RASTER onto a
-# theme's dim and strong text colours puts 0.67 of relative luminance between them on
-# ``dark``, 0.76 on ``ghost`` and 0.47 on ``high_contrast``, against the 0.10 at which
-# WCAG's general flash threshold starts. The highlight is supposed to read, so a large
-# step is the design working -- but it means an argument from dimness would be false, and
-# no plausible palette pairing rescues it.
+# So ``ranks``/``rank_of`` gate *eligibility* and nothing else. A cell substitutes only
+# if its glyph is ranked, that rank indexes a real, non-empty bucket, and the cell is in
+# the cycling set -- but *which* bucket never reaches the output.
 #
-# *Any one place on the panel pulses at 0.198 Hz.* ``RASTER_ROWS_PER_SECOND`` is a speed
-# and not a flicker rate -- a step moves the line one row, it does not toggle anything --
-# so the quantity that matters is what a fixed row sees over a cycle: DIM for nearly all
-# of it, RASTER on the single step the line is on it, TRAIL on the next, then DIM again.
-# One pulse, one pair of opposing transitions, once per ``rows + WAKE_ROWS`` = 81 steps,
-# which at sixteen rows a second is 5.0625s. WCAG 2.3.1 permits three a second, so that
-# is 15x of margin, and it is below the ~3Hz lower edge of the photosensitive band
-# entirely -- the band never opens. It is frame-rate independent for the same reason: a
-# faster window spreads one pulse over more frames rather than repeating it.
+# What that means for someone changing the bucket widths in scripts/rank_glyphs.py: the
+# partition is render-inert except for the order it is read in. Every partition of the
+# art's glyphs holds the same 165 glyphs, so re-banding cannot change what the pool
+# contains; it can only change the sequence the flattening in ``art_frame`` produces,
+# and that sequence is what fixes which glyph a given (row, col, step) shows. The
+# per-bucket ink bounds in tests/test_splash_art.py are drift detectors on the
+# generator's parameters now, not constraints on anything drawn here.
 #
-# *What modulates luminance is two rows of 61*, travelling, never the whole field.
-# Nothing in this repo records a viewing distance, so the geometry has to be stated to be
-# argued: on a 1920x1200 24-inch panel, 37px/cm, viewed at 60cm, a 10-degree field is
-# 10.5cm and 390px across. The largest case the fitting section below records is size 16,
-# where the band is 32px tall against art 576px wide, and the part of it inside that
-# field is 10% -- against WCAG's 25% area threshold. At the smallest window in that same
-# table, size 8, it is 3.9%. Both take the whole band rectangle as flashing, where at
-# most 31% of a cell is ink.
+# What "curated" is still doing: scripts/rank_glyphs.py refuses any glyph the face
+# cannot draw, and scripts/verify_splash.py checks that every codepoint in the art shares
+# one advance width at every size ``fit_size`` can return. A substitute is therefore
+# always a glyph that exists in the baked atlas and never one that shifts a column. A
+# pool of "any printable character" would give up both.
 #
-# *Substitution is local, and it barely moves the area average.* Only the ``WAKE_ROWS``
-# rows behind the line can change at all -- 20 of the 61-row art -- the ramp averages
-# 0.525 over those, and the cycling set is ``CYCLING_FRACTION`` of the ranked cells to
-# begin with, so the bound is 20/61 x 0.525 x 0.34, under 6% of the field on any one
-# step, and the true figure is lower because a row's spaces never take part. A swap never
-# leaves the cell's own bucket, and the buckets are measured rather than eyeballed:
-# splash_art.py:66 records a 17.2% within-band ink spread, so a swap moves at most 4.6% of
-# a cell's area between ink and background -- the brightest glyph in the art covers 31% of
-# its cell -- for about 0.05 of relative luminance on the highest-contrast palette, half
-# the 0.10 threshold. Each cell draws independently, so the signs are independent and the
-# area-averaged luminance, which is the quantity WCAG measures, is essentially static.
-#
-# The cost, stated as a cost rather than left to be discovered. On the raster row every
-# cycling cell substitutes and a cell may substitute on consecutive steps, so a cell
-# being overtaken changes at up to ``RASTER_ROWS_PER_SECOND`` -- 16 Hz, inside the 15-20
-# Hz region where photosensitive response peaks, for the 1.25s the wake is over it, at an
-# average rate of 0.525 x 16 across that. Nothing about the sweep's own 0.198 Hz protects
-# that; what does is the ~0.05 per-cell step above.
-#
-# That last figure is a standing bound rather than an observation: NO SUBSTITUTION
-# MAY MOVE A CELL MORE THAN ONE INK BAND, with the ranking generated by
-# scripts/rank_glyphs.py rather than edited. tests/test_splash_art.py's
-# ``test_no_swap_changes_a_cell_by_more_than_a_sixth`` holds it at a ratio of 1.18, and
-# it was written to keep the picture's shape, not for this. Widening the bands to shrink
-# the literal is therefore a photosensitivity change, and this sentence is the only place
-# that says so.
+# What changing ``RASTER_ROWS_PER_SECOND`` does to substitution, stated because it is not
+# visible from that constant's own section: the draw is re-taken every step and the
+# raster row's rate is 1.0, so a cycling cell being overtaken by the line changes at up
+# to that many times a second, and across the wake at 0.525 of it.
 
 
 def _cell_hash(row: int, col: int) -> int:
@@ -225,14 +198,14 @@ def _draw_hash(row: int, col: int, step: int) -> int:
     Two disjoint bit ranges:
 
         0-9   the draw itself, against _DRAW_BUCKETS
-        10-31 which glyph of the cell's bucket is substituted in
+        10-31 which glyph of the substitution pool is drawn in
 
     Disjoint rather than convenient. Both are read from one value on one step, so shared
     bits would make the glyph a function of how narrowly the draw succeeded -- and the
     range that "succeeds" shrinks with every row further back in the wake, so the choice
-    would be drawn from a narrower and differently-shaped subset of each bucket the
-    dimmer the row, which is a correlation between position and glyph that no part of
-    this design wants.
+    would be drawn from a narrower and differently-shaped subset of the pool the dimmer
+    the row, which is a correlation between position and glyph that no part of this
+    design wants.
     """
     x = (_cell_hash(row, col) ^ ((step & 0xFFFFFFFF) * 0x27D4EB2F)) & 0xFFFFFFFF
     x ^= x >> 16
@@ -328,13 +301,25 @@ def art_frame(
     silhouette. Both are silent failures, and the second is the one that is visible at a
     glance, which is worth one comparison per substitution to make impossible.
 
-    A successful draw picks a glyph from the cell's bucket without regard to what is
+    A successful draw picks a glyph from the substitution pool without regard to what is
     already there, so a cell can draw the glyph it is already showing. That is a change
     of nothing, and it is why the *visible* change rate of a row runs slightly under its
     intensity rather than equal to it.
     """
     step = step_index(now)
     raster = step % (len(art) + WAKE_ROWS)
+    # The pool a successful draw picks from: every glyph of every bucket, flattened once
+    # per frame rather than per cell -- ``art_frame`` runs at most once per step (see
+    # ``ArtFrames``), so building it here is one pass over the 165-glyph inventory a step
+    # rather than one per substituting cell.
+    #
+    # The *order* of this flattening is load-bearing, and what pins it is
+    # tests/test_splash_art.py::test_the_substitution_pool_flattens_in_the_order_that_ships,
+    # a digest over the flattened table. It is
+    # indexed directly below, so it decides which glyph each (row, col, step) shows;
+    # ``sorted(rank_of)`` or a set-based build would hold every test here green and
+    # change every frame of the animation.
+    pool: tuple[str, ...] = tuple(char for bucket in ranks for char in bucket)
 
     lines: list[str] = []
     luminance: list[Luminance] = []
@@ -371,7 +356,7 @@ def art_frame(
             drawn = _draw_hash(row, col, step)
             if drawn % _DRAW_BUCKETS >= threshold:
                 continue
-            substitute = bucket[(drawn >> _DRAW_BITS) % len(bucket)]
+            substitute = pool[(drawn >> _DRAW_BITS) % len(pool)]
             if substitute == " ":
                 continue
             if cells is None:
@@ -423,13 +408,19 @@ QUOTE_LINES: tuple[str, ...] = (
     "Your effort to remain what you are is what limits you.",
 )
 
-# The animation is per-character *alpha*, not per-character substitution. A splash
-# that swapped glyphs in prose would change the thing the reader is mid-sentence
-# through; alpha leaves the text and its metrics untouched, so nothing can reflow, no
-# column can shift, and the two lines occupy the same pixels on every frame no matter
-# what the animation is doing. It also costs the pane nothing new: theme.faded()
-# already quantises alpha to twelve steps and memoises the packed colour, so a
-# per-character tint is a dict hit per character.
+# Two animations run over the quote, on separate channels of the same frame: a
+# highlight that moves per-character *alpha*, and a glitch that substitutes glyphs.
+#
+# The alpha sweep costs the pane nothing new -- theme.faded() already quantises alpha to
+# twelve steps and memoises the packed colour, so a per-character tint is a dict hit per
+# character.
+#
+# What keeps the glitch from being a worse idea than it sounds is that the prose is never
+# rewritten. ``QuoteFrame`` carries the text and the drawn glyphs as separate fields, and
+# a substitution is one glyph for one character, never a space in and never a space out.
+# So the column a character sits in, the block's width, and the number of draw calls the
+# pane makes are all functions of ``QUOTE_LINES`` alone, and nothing either animation does
+# can reflow a line the reader is mid-sentence through.
 #
 # The floor is what makes "light" a constraint instead of a mood: no character is ever
 # dimmer than this, so the quote is body text in every frame rather than only in the
@@ -459,26 +450,226 @@ SHIMMER_PERIOD_SECONDS = 11.0
 SHIMMER_WIDTH_CHARS = 5.0
 
 
+# -- the glitch ----------------------------------------------------------------
+#
+# The specification is one sentence: "an ebb and flow of random character cycling that
+# settles (only up to 10 at a time then 0 for a few seconds)". Ten is the operator's
+# number and is the only one of these that is. Every other figure in this section was
+# chosen here, is defended here, and can be moved by anybody who has looked at a frame --
+# which is more than the author of these lines has done.
+
+# Every printable ASCII glyph, flat and unweighted.
+#
+# Flat is the whole point rather than an omission. The art panel spends a ranking table
+# matching a substitute's ink to what it replaced, and the verdict on that was that it
+# read as too tasteful to be a glitch -- see the "-- the substitution pool --" block
+# above. Nothing here looks at the character being replaced except to refuse to draw it
+# again.
+#
+# ASCII rather than the art's ranked inventory for two reasons. ``splash_art`` is not
+# imported by this module by design, and importing it to borrow a pool would be the first
+# exception. And the guarantee this pool has to make is narrower and easier to state:
+# every codepoint in 0x21..0x7E is in Inconsolata-Medium's cmap at advance 500/1000, the
+# same single advance ``scripts/verify_splash.py`` checks the art's inventory for, so no
+# substitute can overhang the character to its right at any size the UI face is loaded at.
+QUOTE_GLITCH_POOL: tuple[str, ...] = tuple(chr(code) for code in range(0x21, 0x7F))
+
+# The operator's number: at most this many characters are wrong at any instant. Ten of
+# the quote's 81 non-space characters is 12.3% of the line, against roughly 5.4% of the
+# art's field per step -- a denser effect than the panel below it, on text a reader is
+# actually reading, at body size rather than the art's 8-16px cells.
+QUOTE_GLITCH_MAX_CHARS = 10
+
+# "0 for a few seconds" is all the guidance there is on the quiet stretch, so four is a
+# reading of "a few" and nothing more. The burst is the figure with an argument behind it:
+# at the step rate below, 2.5s is twenty steps, which is long enough for the swell to be a
+# gesture that arrives and leaves rather than a blink, and short enough that the quiet is
+# the longer of the two states. The realised quiet is 4.375s, because the swell rounds to
+# zero for three steps at each end of the burst.
+#
+# The period that falls out, 6.5s, is deliberately incommensurate with
+# SHIMMER_PERIOD_SECONDS: 11 and 6.5 return to the same relative phase every 143 seconds,
+# so no pairing of highlight and corruption repeats inside a session anybody sits through.
+# Two periods that divided each other would make the whole panel one 11-second loop.
+QUOTE_GLITCH_REST_SECONDS = 4.0
+QUOTE_GLITCH_BURST_SECONDS = 2.5
+QUOTE_GLITCH_PERIOD_SECONDS = QUOTE_GLITCH_REST_SECONDS + QUOTE_GLITCH_BURST_SECONDS
+
+# How often the corrupted characters are redrawn. Bounded above by what the window really
+# displays, which is the same argument RASTER_ROWS_PER_SECOND's section makes and reaches
+# a different answer from: this animation has no band to overlap, so a step no frame lands
+# on is simply a glyph nobody ever sees, and a rate above the display rate would be a
+# constant that does not describe anything on screen. The empty-fleet idle phase measures
+# 8.7-9.0fps (orchestrator-design.md:534-539), so eight sits under the low end and every
+# step gets at least one frame. It is also fast enough that a corrupted character reads as
+# churn rather than as a sequence of legible substitutions, which is what "cycling" asks
+# for.
+#
+# 52 steps to the period, exactly, because 6.5 * 8 is an integer -- which is what lets a
+# test walk the whole envelope rather than sample it.
+QUOTE_GLITCH_STEPS_PER_SECOND = 8.0
+
+# Where the glitch is allowed to land: every non-space character, as (line, column).
+# Spaces are excluded from both ends. Ink dropped into a space moves a word boundary in
+# prose someone is reading, a space drawn over a character reads as a dropped glyph rather
+# than a corrupted one, and either would change the number of ``add_text`` calls the pane
+# makes -- which is the count tests/test_inbox_rail.py holds the renderer to.
+_QUOTE_GLITCH_SITES: tuple[tuple[int, int], ...] = tuple(
+    (row, col)
+    for row, line in enumerate(QUOTE_LINES)
+    for col, char in enumerate(line)
+    if char != " "
+)
+
+# One pool per character the quote contains, with that character removed.
+#
+# A substitute is never the character it replaced. The art panel lets a draw land on the
+# glyph already there and documents why -- it has thousands of cells and the check is not
+# worth the branch. Here there are ten slots, so a self-substitution is a tenth of the
+# effect spent on nothing visible. Pre-built per source character rather than resampled on
+# a collision, so the draw stays one modulo over a uniform pool instead of a retry whose
+# cost depends on what it drew.
+_GLITCH_POOLS: dict[str, tuple[str, ...]] = {
+    char: tuple(glyph for glyph in QUOTE_GLITCH_POOL if glyph != char)
+    for char in {c for line in QUOTE_LINES for c in line if c != " "}
+}
+
+
 @dataclass(frozen=True, slots=True)
 class QuoteFrame:
     """
-    The quote and one alpha per character of it.
+    The quote, the glyphs this frame draws for it, and one alpha per character.
 
-    ``lines[i][j]`` is drawn at ``alphas[i][j]``. ``lines`` is always ``QUOTE_LINES``
-    -- it is carried here so the pane has a single object to read and cannot pair this
-    frame's alphas with a different line list.
+    Three fields, and the pane reads all three. ``lines`` is the prose: what the quote
+    *says*, identical on every frame, and what anything asking how wide the block is or
+    how many characters are in it has to measure. ``glyphs`` is the same two lines with
+    this frame's corruption applied -- same lengths, same spaces in the same columns, one
+    glyph per character -- and is what reaches the screen. ``alphas[i][j]`` is the alpha
+    ``glyphs[i][j]`` is drawn at.
+
+    Named for what each is *for* rather than ``lines`` and ``drawn`` because a pane that
+    drew ``lines`` would render a correct, still quote and lose the glitch entirely
+    without failing to render anything, which is a mistake nothing downstream can catch.
     """
 
     lines: tuple[str, ...]
+    glyphs: tuple[str, ...]
     alphas: tuple[tuple[float, ...], ...]
+
+
+def quote_glitch_step(now: float) -> int:
+    """
+    Which glitch step ``now`` falls in, unwrapped.
+
+    The quote's counterpart to ``step_index``, and separate from it deliberately: the two
+    animations run at different rates over different periods, and a shared step would tie
+    the quote's cadence to the raster line's travel speed, which is a constant chosen
+    against a luminance band's height and has nothing to say about prose.
+    """
+    return int(now * QUOTE_GLITCH_STEPS_PER_SECOND)
+
+
+def _glitch_envelope(step: int) -> tuple[int, int]:
+    """
+    ``(period, count)`` at ``step``: which run of the animation it belongs to, and how
+    many characters that run has corrupted by now.
+
+    Both come off the same quantised time so they cannot disagree. The period number is
+    what the site ranking is keyed on, so a count read from a slightly later clock than
+    its ranking would give a frame whose tenth site was chosen by one burst's ordering and
+    whose ninth was chosen by the next.
+
+    A raised cosine over the burst rather than a triangle or a square: it leaves and
+    returns to zero with zero slope, so the burst swells and clears instead of switching
+    on, which is what "ebb and flow" asks for. The harshness this animation is going for
+    is *inside* the envelope and not in its shape -- unweighted random ASCII, rerolled
+    every step, with no regard for what it replaced.
+    """
+    at = step / QUOTE_GLITCH_STEPS_PER_SECOND
+    period = int(at // QUOTE_GLITCH_PERIOD_SECONDS)
+    into = at - period * QUOTE_GLITCH_PERIOD_SECONDS
+    if into < QUOTE_GLITCH_REST_SECONDS:
+        return period, 0
+    swell = (into - QUOTE_GLITCH_REST_SECONDS) / QUOTE_GLITCH_BURST_SECONDS
+    rise = 0.5 * (1.0 - math.cos(2.0 * math.pi * swell))
+    # Half-up rather than ``round``: the peak is an exact 10.0 * 0.5 * 2.0 and banker's
+    # rounding at the half-steps either side of it is a coin-flip a reader has to look up.
+    return period, int(QUOTE_GLITCH_MAX_CHARS * rise + 0.5)
+
+
+def quote_glitch_count(now: float) -> int:
+    """
+    How many characters are corrupted at ``now``, 0 through ``QUOTE_GLITCH_MAX_CHARS``.
+
+    Exposed because it is the sentence the operator wrote. "Only up to 10 at a time then 0
+    for a few seconds" is a statement about this number and nothing else, and this is the
+    one part of the animation a test can walk exhaustively -- 52 steps is the whole domain
+    of one period, where the frame it produces can only be sampled.
+    """
+    return _glitch_envelope(quote_glitch_step(now))[1]
+
+
+def _glitching(count: int, epoch: int) -> tuple[int, ...]:
+    """
+    Which sites are corrupted, as indices into ``_QUOTE_GLITCH_SITES``.
+
+    THIS FUNCTION IS THE FORK, and it is one function rather than a line spread through
+    ``quote_frame`` because "up to ten at a time" admits two animations that look
+    different on screen and the other one may well be the wanted one.
+
+    - Rank the sites and take the first ``count``. An exact cap, and which sites win is
+      decided without reference to how many will be taken. This is what is here.
+    - Draw each site independently against the envelope's intensity. The count then
+      wobbles and has to be clamped to hold the cap, and a clamp has to drop somebody --
+      in site order, which puts the bias at the front of the first line on every burst.
+
+    ``epoch`` is the second half of the choice and it is the half that carries the ebb and
+    flow. It is passed the *period* number, so one ranking holds for a whole burst: the
+    same sites join as the count climbs and fall away in reverse as it drops, which reads
+    as damage spreading and receding. Passing the *step* instead re-ranks eight times a
+    second, which scatters ten sites to ten new places every step -- the envelope is still
+    rising and falling underneath but no eye can see it, because sparkle at that rate is
+    one texture at any density. The nesting that per-step ranking exists to avoid is a
+    problem only when the ranking never changes at all; redrawing it each period gives a
+    set the eye cannot learn without giving up the shape.
+
+    Changing the argument at the call site is the whole of the other reading, and
+    ``test_a_burst_grows_out_of_the_sites_it_started_with`` is the test that would then
+    have to go.
+
+    Ties in the key fall back to site order, which is what ``sorted`` being stable buys;
+    a 32-bit collision across 81 sites is rare and its consequence is that two adjacent
+    characters corrupt in a fixed order for one burst.
+    """
+    if count <= 0:
+        return ()
+    order = sorted(range(len(_QUOTE_GLITCH_SITES)), key=lambda site: _cell_hash(site, epoch))
+    return tuple(order[:count])
 
 
 def quote_frame(now: float) -> QuoteFrame:
     """
-    The quote with a gaussian highlight sweeping across it.
+    The quote at ``now``: a highlight sweeping across it, and a burst of corrupted
+    characters ebbing in and out under that.
 
     The sweep starts and ends off the ends of the text, so there is a quiet stretch of
     each cycle where the whole quote sits at the base alpha.
+
+    The two animations share nothing but the frame. The highlight is continuous in ``now``
+    and runs on ``SHIMMER_PERIOD_SECONDS``; the glitch is quantised to
+    ``QUOTE_GLITCH_STEPS_PER_SECOND`` and runs on ``QUOTE_GLITCH_PERIOD_SECONDS``. So a
+    character can be corrupted and bright, corrupted and dim, or neither, and the alphas
+    are the same function of ``now`` they were before the glitch existed -- which is what
+    keeps ``QUOTE_BASE_ALPHA``'s contrast guarantee a statement about one number.
+
+    The glitch is quantised because a frame has to be one decision. Without it the count
+    could move between reading the envelope and picking the sites, and a character could
+    corrupt and heal inside a single displayed frame.
+
+    The glyph a site draws comes from the same two-hash arrangement the art uses:
+    ``_cell_hash`` decides the ranking, which holds for the burst, and ``_draw_hash``
+    re-mixes that with the step to pick the glyph, which does not. The glyph is read from
+    ``_draw_hash``'s upper range for the same reason ``art_frame`` reads it from there.
     """
     total = sum(len(line) for line in QUOTE_LINES)
     # Travel from one highlight-width before the first character to one after the
@@ -497,7 +688,22 @@ def quote_frame(now: float) -> QuoteFrame:
             row.append(QUOTE_BASE_ALPHA + (1.0 - QUOTE_BASE_ALPHA) * peak)
             index += 1
         alphas.append(tuple(row))
-    return QuoteFrame(lines=QUOTE_LINES, alphas=tuple(alphas))
+
+    step = quote_glitch_step(now)
+    period, count = _glitch_envelope(step)
+    glyphs = QUOTE_LINES
+    if count:
+        # Only built when something is actually corrupted. The rest is two thirds of the
+        # cycle, and during it this returns the module-level tuple untouched.
+        cells = [list(line) for line in QUOTE_LINES]
+        for site in _glitching(count, period):
+            line_index, col = _QUOTE_GLITCH_SITES[site]
+            pool = _GLITCH_POOLS[QUOTE_LINES[line_index][col]]
+            drawn = _draw_hash(site, period, step) >> _DRAW_BITS
+            cells[line_index][col] = pool[drawn % len(pool)]
+        glyphs = tuple("".join(cells_of_line) for cells_of_line in cells)
+
+    return QuoteFrame(lines=QUOTE_LINES, glyphs=glyphs, alphas=tuple(alphas))
 
 
 # -- fitting -------------------------------------------------------------------
@@ -525,8 +731,9 @@ def quote_frame(now: float) -> QuoteFrame:
 # nobody has yet.
 #
 # The property the art's legibility rests on is the other one that run checks: all 166
-# codepoints share a single advance at each size. Columns line up because of that, not
-# because the advance matches any formula.
+# codepoints -- the 165 ranked glyphs and U+0020, which has an advance like any other --
+# share a single advance at each size. Columns line up because of that, not because the
+# advance matches any formula.
 #
 # fit_size quantises to even sizes and the script only probes even sizes, so the odd ones
 # are outside both. That is deliberate on both sides -- an odd size is unreachable -- but

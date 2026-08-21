@@ -195,6 +195,38 @@ def _hook_output(decision: str, reason: str | None = None) -> HookJSONOutput:
     return cast(HookJSONOutput, {"hookSpecificOutput": specific})
 
 
+_DENIAL = (
+    "[pptmstr gate] Your {tool} call was refused and did not run, so it produced no "
+    "output. It was refused by {source}. The text below the line is that refusal's "
+    "reason, addressed to you -- it is not {tool}'s output and nothing it says was "
+    "observed by running the call.\n"
+    "----\n"
+    "{reason}"
+)
+
+
+def _deny(tool_name: str, reason: str, *, from_operator: bool = False) -> HookJSONOutput:
+    """
+    Refuse a call, framed so the reason cannot be read as the call's output.
+
+    The CLI delivers ``permissionDecisionReason`` to the model as the tool result for
+    the denied call -- the same slot a successful call's output arrives in. For Bash
+    that is indistinguishable from stdout: an operator who rejects `git push` with
+    "use the release target instead" hands the agent a shell transcript saying so, and
+    the agent reasons on from a command it believes ran.
+
+    Every denial goes through here rather than through ``_hook_output`` directly, so
+    no path can emit a bare reason. The operator's own words are kept verbatim below
+    the rule -- the frame says who is speaking, it does not paraphrase them (§5.3).
+    """
+    source = (
+        "the human operator reviewing this session"
+        if from_operator
+        else "this session's tool policy, with no human asked"
+    )
+    return _hook_output("deny", _DENIAL.format(tool=tool_name, source=source, reason=reason))
+
+
 def _allow_with(edited_args: Mapping[str, Any] | None) -> HookJSONOutput:
     """Allow, optionally replacing the arguments the agent asked for (§5.3)."""
     specific: dict[str, Any] = {"hookEventName": "PreToolUse", "permissionDecision": "allow"}
@@ -1089,7 +1121,7 @@ class AgentSession:
         # the operator: parking it would ask a human to approve a call this session
         # has already decided it will not run.
         if spawn and self._outstanding_subagents() >= self.subagent_cap:
-            return _hook_output("deny", self._at_cap_reason())
+            return _deny(tool_name, self._at_cap_reason())
 
         disposition = classify(tool_name, tool_input)
         if disposition is Disposition.AUTO_APPROVE:
@@ -1099,11 +1131,11 @@ class AgentSession:
             # it is, and a handler that reached its body unstamped would raise.
             return _allow_with(self._stamp_bus_call(tool_name, tool_input, node))
         if disposition is Disposition.DENY:
-            return _hook_output("deny", f"{tool_name} is not permitted by policy")
+            return _deny(tool_name, f"{tool_name} is not permitted by policy")
         if not self.interactive:
             # Headless: nothing can approve, so deny rather than hang until the
             # timeout. A run with no operator must fail closed and say why.
-            return _hook_output("deny", f"{tool_name} needs approval and no operator is attached")
+            return _deny(tool_name, f"{tool_name} needs approval and no operator is attached")
 
         return await self._park(tool_name, tool_input, tool_use_id, node, spawn=spawn)
 
@@ -1288,9 +1320,9 @@ class AgentSession:
                 self._stamp_bus_call(tool_name, approved_args, node, edited=edited)
                 or decision.edited_args
             )
-        reason = decision.reason or "Rejected by operator"
+        reason = decision.reason or "Rejected by operator, who gave no reason."
         LOG.warn("gate", f"rejected {pending.summary}")
-        return _hook_output("deny", reason)
+        return _deny(tool_name, reason, from_operator=True)
 
     async def _pre_compact(
         self, hook_input: HookInput, _tool_use_id: str | None, _context: HookContext
