@@ -73,9 +73,15 @@ def test_every_glyph_in_the_art_has_somewhere_to_go() -> None:
 
 def test_the_table_invents_no_glyph_the_art_does_not_use() -> None:
     """
-    Substitution draws from the art's own alphabet, which is what keeps the
-    "every character renders in this face" check a property of one inventory
-    rather than two.
+    The one thing keeping the substitution pool inside the font-validated set.
+
+    ``splash.py`` flattens ``RANKS`` into a pool and draws from the whole of it, so
+    every key of ``RANK_OF`` is a glyph that can land in any animating cell. That
+    makes this equality, not the inclusion its sibling above checks, the boundary:
+    a glyph added to the table that is not in the art has never been through
+    ``rank_glyphs.ink_areas`` refusing an uncmapped codepoint or through
+    ``scripts/verify_splash.py`` checking the advance, and it would substitute
+    itself into cells as a missing-glyph box or a sheared column.
     """
     inventory = set("".join(ART)) - {" "}
     assert set(RANK_OF) == inventory, sorted(set(RANK_OF) - inventory)
@@ -106,11 +112,22 @@ def test_no_bucket_is_empty() -> None:
     assert all(len(bucket) > 0 for bucket in RANKS)
 
 
-def test_every_bucket_can_actually_change_a_cell() -> None:
+def test_no_bucket_falls_below_the_generators_member_floor() -> None:
     """
-    Non-empty is not enough. A bucket of one holds a cell frozen for the whole
-    animation while everything around it moves, which reads as a rendering fault
-    rather than a still point.
+    A pin on ``rank_glyphs.DEFAULT_MIN_SIZE = 3``, stated where a reader lowering that
+    floor will look for it.
+
+    Substitution draws from all fourteen buckets at once, so a bucket of one freezes
+    nothing and this is not a claim about what a cell can become. What the floor decides
+    is how far the *subdivision* stage can cut: at a floor of 2 the same twelve ink bands
+    emit 16 buckets and at 1 they emit 25. The ratio is unaffected -- 1.1724 at all three
+    -- so neither of the two bounds below catches it.
+
+    Redundant today and kept deliberately. ``test_the_substitution_pool_flattens_in_the
+    _order_that_ships`` also fires at both lowered floors, because 16 and 25 buckets each
+    flatten to a different pool than the checked-in 14 do. This states the floor directly
+    rather than as a digest mismatch, so it says *which* parameter moved; the digest can
+    only say that something did.
     """
     assert min(len(bucket) for bucket in RANKS) >= 3
 
@@ -133,6 +150,49 @@ def test_every_bucket_entry_is_a_single_character() -> None:
     substitutes two cells' worth of text into one cell.
     """
     assert all(len(char) == 1 for bucket in RANKS for char in bucket)
+
+
+# The pool `splash.art_frame` indexes into: every bucket flattened, in order. It is the
+# whole of what the partition still contributes to the picture, so it is pinned by digest
+# on its own rather than left to follow from the table's shape.
+POOL_SHA256 = "0db05cf62232fa8d797b7c507f7f18c5585adc9df1ab5c4de748c2f01365a268"
+POOL_SIZE = 165
+
+
+def test_the_substitution_pool_flattens_in_the_order_that_ships() -> None:
+    """
+    The only pin on the sequence the animation is actually made of.
+
+    Since a substitution draws from the union of the buckets, the partition is inert at
+    render time *except* for the order it flattens to -- and ``splash.art_frame`` indexes
+    that flattening directly, so it fixes which glyph every cell shows on every step.
+    ``test_the_checked_in_table_is_what_the_script_generates`` cannot hold it: that one
+    regenerates from whatever the generator's defaults currently say, so changing a
+    default and pasting the new table keeps it green by construction. This reads the
+    checked-in literal against a constant, which is what closes that loop.
+
+    Measured by regenerating at each setting and rendering a full 81-step cycle against
+    the real art. ``DEFAULT_BUCKETS = 10`` still emits fourteen buckets -- so a bucket
+    count assertion passes it -- and changes 75 of the 81 frames. Of the 40 parameter
+    settings that emit exactly fourteen buckets, 31 reorder the pool. Those are what this
+    catches and nothing else here does.
+
+    Deliberately blind to a re-bucketing that preserves the order, which is a property
+    and not a gap. ``DEFAULT_BUCKETS = 13`` emits fifteen buckets at the same member
+    floor and flattens to this identical string; rendering both tables over a full cycle
+    gives 0 differing frames of 81. An ``assert len(RANKS) == 14`` would fire there, and
+    it would be firing on a change no viewer can see. The bucket count reaches the
+    renderer only as the bounds check on ``rank_of``'s value, which a self-consistent
+    table passes at any count, so the count is not pinned.
+
+    Opens no font, so unlike the pins below this cannot skip. Where the dev extra is
+    absent it is the only thing holding the table to anything at all.
+    """
+    pool = "".join(char for bucket in RANKS for char in bucket)
+    # Checked before the digest so a table that changed size reports its size rather than
+    # two hex strings that differ from the first byte.
+    assert len(pool) == POOL_SIZE, len(pool)
+    assert hashlib.sha256(pool.encode("utf-8")).hexdigest() == POOL_SHA256
 
 
 # -- the pin against the font ------------------------------------------------------
@@ -179,11 +239,15 @@ def test_no_bucket_is_much_brighter_than_a_later_one() -> None:
     What stands in for a total dim-to-bright ordering, which two buckets do not have.
 
     A bucket subdivided by ink height shares its ink band with its neighbour, so the
-    two interleave: bucket 3's dimmest glyph is dimmer than bucket 2's, and
-    ``max(dim) < min(bright)`` is false of a *correct* table. What the ordering was
-    ever for survives -- a cell is only ever offered glyphs within one swap's worth
-    of its own ink -- and this is that claim stated so overlap inside one band passes
-    and overlap across two bands does not.
+    two interleave: buckets 2 and 3 do, and buckets 6 and 7, and ``max(dim) <
+    min(bright)`` is false of a *correct* table. So the claim is stated to pass
+    overlap inside one band and fail overlap across two, which is what a table
+    emitted in band order looks like and what a shuffled one does not.
+
+    The order is what is being pinned, not a rendering guarantee. Substitution reads
+    the buckets as one flat pool, so nothing offers a cell glyphs near its own ink
+    any more; what the emission order still decides is the pool's order, and through
+    it every frame.
 
     A tie at a cut point passes here too. ``grave`` and ``acute`` have identical
     area, so a strict comparison would fail a table that split them correctly.
@@ -202,11 +266,33 @@ def test_no_bucket_is_much_brighter_than_a_later_one() -> None:
                 assert offset == index + 1, (index, offset)
 
 
-def test_no_swap_changes_a_cell_by_more_than_a_sixth() -> None:
+def test_no_ink_band_is_coarser_than_the_generator_settled_on() -> None:
     """
-    The claim the bucket count was chosen for. 1.18 rather than the measured
-    1.1724 so that a font revision moving a glyph slightly does not fail this,
-    while a re-bucketing that gave up the property does.
+    A drift detector on ``rank_glyphs.DEFAULT_BUCKETS``, from the quality side.
+
+    It no longer describes a swap: substitution draws from all fourteen buckets, so a
+    cell can go from the dimmest glyph in the art to the brightest. What it still does is
+    fail when the band count *drops*, and it is worth having because
+    ``test_the_checked_in_table_is_what_the_script_generates`` regenerates the table from
+    whatever the defaults say and stays green through exactly that change.
+
+    What it protects is the table's description of the inventory, not the picture. The
+    render-time consequence of a re-banding is held next door by
+    ``test_the_substitution_pool_flattens_in_the_order_that_ships``, and the two are
+    genuinely different questions: 13 bands reads 1.1655 here and passes, and is also
+    invisible to the digest because it flattens to the same pool -- measured at 0 of 81
+    frames differing. A band count that passes both has changed neither how evenly the
+    bands describe the ink nor anything drawn.
+
+    One-sided, and the gap is on the record rather than papered over. Measured against
+    the checked-in art: 11 bands gives ratio 1.2265 and spread 0.7260, so both bounds
+    fire; 14 gives 1.1655 and 0.7260, so the sibling below fires; 13 gives 1.1655 and
+    0.4700 with no bucket under three members, so nothing in this file fails it.
+
+    1.18 rather than the measured 1.1724 so a font revision moving a glyph slightly
+    does not fail it. That is under a percent of headroom, which is deliberate -- a
+    bound that only fires on a large change is not a detector -- and is why a real font
+    bump is expected to arrive here first.
     """
     rank_glyphs = _ranker()
 
@@ -216,18 +302,25 @@ def test_no_swap_changes_a_cell_by_more_than_a_sixth() -> None:
         assert span <= MAX_INK_RATIO, (span, "".join(bucket))
 
 
-def test_no_swap_moves_a_cell_s_ink_across_half_the_em() -> None:
+def test_no_bucket_spreads_its_ink_across_half_the_em() -> None:
     """
-    Equal ink area is not equal ink position, and the eye tracks position.
+    The drift detector on ``rank_glyphs.DEFAULT_MAX_SPREAD``, and on the band count
+    from the side its sibling above misses.
 
-    A cedilla and a tilde carry the same ink and sit 0.726 em apart, so a bucket
-    holding both offers a cell a swap that keeps its weight and hops most of the
-    cell's height. That is worst in the sparse speckle over the negative space,
-    where the moving glyph has empty background to move against.
+    Like that one it has stopped describing a swap -- the flat pool will move a cell's
+    ink anywhere in the em -- and like it, what it still catches is a regenerated table
+    that ``test_the_checked_in_table_is_what_the_script_generates`` would wave through.
+    It is the only test here that fires on 14 bands (spread 0.7260), and the only one
+    that fires when ``DEFAULT_MAX_SPREAD`` is raised far enough to switch the
+    subdivision stage off -- at 0.80 the table drops to 12 buckets and spreads 0.7260.
 
-    The bound is deliberately loose. Travel of this kind is partly wanted -- the
-    panel reads as glitchy on purpose -- so this fails a table that reintroduces a
-    hop like the cedilla's, not one that leaves a visible one. Three buckets stay
+    The measurement behind the number: a cedilla and a tilde carry the same ink and sit
+    0.726 em apart, so a band holding both is uniform in weight while spanning most of
+    the cell in position.
+
+    The bound is deliberately loose. Spread of this kind is partly wanted -- the panel
+    reads as glitchy on purpose -- so this fails a table that reintroduces a band as
+    wide as the cedilla's, not one that leaves a visible spread. Three buckets stay
     above the 0.30 em the generator subdivides at, and the floor of three members is
     why, in two different ways: one band holds five glyphs and so cannot be cut in
     two at all, and the two bands that can be cut each keep a low-sitting mark --

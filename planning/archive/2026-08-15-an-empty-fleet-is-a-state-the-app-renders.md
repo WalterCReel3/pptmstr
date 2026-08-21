@@ -1,6 +1,7 @@
 # An empty fleet is a state the app renders, and the pane it renders in sets the arithmetic
 
-**Dated:** 2026-08-15 · **Status:** built, green, recorded after the fact ·
+**Dated:** 2026-08-15 · **Status:** built, green, recorded after the fact; the substitution
+mechanism it describes was replaced 2026-08-20 — see the note at the bottom ·
 **Related:** [`2026-08-10-layout-proposals.md`](../2026-08-10-layout-proposals.md) for the
 TRIAGE splits this depends on;
 [`2026-08-15-an-operator-instruction-the-lead-cannot-see.md`](2026-08-15-an-operator-instruction-the-lead-cannot-see.md),
@@ -376,3 +377,49 @@ split ratios rather than measured, and the panel is not there any more to measur
 **Not established:** that the panel reads as intended to a person. Every property above is a
 number. The tolerance argument in the ranking section is the operator's aesthetic judgement,
 recorded as a decision, and it is not the kind of claim a test can carry.
+
+---
+
+## Note, 2026-08-20: cells no longer cycle among glyphs of equal ink
+
+Added rather than folded into the text above, because the reasoning this record preserves
+is worth more intact than corrected in place.
+
+`splash.art_frame` now draws a substitute from the union of all buckets — the whole
+165-glyph inventory — rather than from the cell's own measured ink bucket. The full
+decision, its reasoning and its cost are in
+[`2026-08-20-the-wake-picks-from-the-whole-inventory.md`](2026-08-20-the-wake-picks-from-the-whole-inventory.md).
+
+**"What the panel is" is now false where it says the cells "cycle among glyphs of equal
+ink so the silhouette holds while the texture moves."** They cycle among all of them. The
+silhouette still holds, but for a different reason: every glyph in the inventory shares
+one advance width, so a substitute never shifts a column, and the block stays 61x72
+whatever it fills with. What no longer holds is the picture's *brightness* underneath the
+animation, which was the point of matching ink and is deliberately given up.
+
+**"How far the brightness ranking is meant to go" is misjustified rather than wrong, and
+the distinction matters to anyone deciding whether to reopen it.** Its conclusion —
+visible artifacts are part of the aesthetic and the tolerance is loose on purpose — is
+now over-satisfied rather than merely satisfied; a flat pool is far past loose. But its
+premise is gone. The residual 0.470 em of ink-height travel was the glitch budget when
+substitution stayed inside a bucket; it is not the glitch budget now, because the
+substitution range is no longer bounded by a bucket at all. The section's numbers are
+still an accurate description of the partition `scripts/rank_glyphs.py` produces. They
+are no longer a description of what the animation draws.
+
+The floor argument moves the same way. `min_size = 3` was forced because "a bucket of
+fewer than three gives a cell nothing to cycle through". Every eligible cell now has 164
+alternatives whatever its bucket holds, so the animation no longer forces the floor. The
+floor and the partition it produces are unchanged; only the reason is gone. A reader
+weighing whether to lower `DEFAULT_MAX_SPREAD` should know that the constraint is now the
+generator's own, not the renderer's.
+
+Unaffected: the pane arithmetic, the fit and extent reasoning, the ordering argument in
+`inbox._splash`, and the space guard. None of them depend on which bucket a substitute
+comes from.
+
+Separately, and not caused by this change: **"The animation's two independent hazards"
+describes `_CELL_PERIODS`, which the raster-line rework removed on 2026-08-16.** That
+section was already history when this note was written;
+[`2026-08-15-the-splash-cycles-behind-a-raster-line.md`](2026-08-15-the-splash-cycles-behind-a-raster-line.md)
+is what replaced it.

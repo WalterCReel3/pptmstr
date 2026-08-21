@@ -2,7 +2,7 @@
 The animation driven by the real art and the real table, which is the one thing
 neither module's own tests do.
 
-``tests/test_splash.py`` proves ``art_frame``'s rules against a three-glyph fixture,
+``tests/test_splash.py`` proves ``art_frame``'s rules against a six-glyph fixture,
 and ``tests/test_splash_art.py`` proves the table's shape with nothing consuming it.
 Both were right to: the fixture is what let the renderer and the table be built at
 the same time, and it keeps the renderer's tests readable. But it leaves every
@@ -13,17 +13,18 @@ bucket that could collapse to a single member under a re-partition.
 So nothing here builds a fixture. Every assertion below reads ``ART``, ``RANKS`` and
 ``RANK_OF`` as they ship, and the properties are the ones that are meaningless
 against a fixture: that this image keeps its shape, that these buckets are all live,
-that these substitutions hold their brightness, and that this many cells is still
+that these substitutions stay inside the inventory, and that this many cells is still
 affordable to redraw.
 
-It is also the only place the sweep's design claims are measurable against a real
-picture rather than against arithmetic. ``splash.py`` argues that under 6% of the
-field substitutes on any one step from 20/61 x 0.525 x 0.34; the numbers quoted in
-the docstrings below are what that comes out as over the 61x72 art, and they are
-measurements taken from this file rather than the claim restated.
+The size of the fixture is the reason it cannot answer the question this file asks.
+Six glyphs make a substitution invisible one time in six; the shipped pool is 165, so
+it is invisible one time in 165, and the two put the measured rates 43% apart. Every
+figure quoted in the docstrings below is measured here over the real 61x72 art and the
+real table, and none of it is arithmetic carried over from the fixture or restated
+from a comment elsewhere.
 
-The font is deliberately not opened. Brightness is checked against the table's own
-buckets, so this file needs no dev extra and cannot skip.
+The font is deliberately not opened. Membership is checked against the table itself,
+so this file needs no dev extra and cannot skip.
 """
 
 from __future__ import annotations
@@ -140,8 +141,8 @@ def test_every_cycling_cell_actually_cycles() -> None:
     A cell in the cycling set that shows one glyph forever is a dead pixel sitting
     still while its neighbours move, which reads as a rendering fault.
 
-    ``test_every_bucket_can_actually_change_a_cell`` holds the buckets at three members
-    or more, but that is a statement about the table alone: a bucket can be large and
+    ``test_no_bucket_falls_below_the_generators_member_floor`` holds the buckets at three
+    members or more, but that is a statement about the table alone: a bucket can be large and
     still be unreachable at a position the sweep never offers a successful draw, and
     only the composition can say.
 
@@ -169,66 +170,76 @@ def test_every_cycling_cell_actually_cycles() -> None:
     assert frozen == [], frozen[:10]
 
 
-def test_no_substitution_leaves_its_ink_bucket() -> None:
+def test_no_substitution_leaves_the_ranked_inventory() -> None:
     """
-    Brightness preserved end to end, over the real table rather than a fixture whose
-    buckets were chosen to make the assertion easy.
+    Every glyph the animation can put on screen is one the table vouched for.
+
+    A substitution draws from the union of the buckets, so what a cell shows is no longer
+    confined to its own brightness band and this cannot assert one. What it can assert is
+    the property the union still has: ``RANK_OF`` is the whole set scripts/rank_glyphs.py
+    measured and scripts/verify_splash.py checked, and that check is not only about
+    brightness -- it holds every member to one advance width at every size the pane can
+    ask for, and to presence in the baked atlas. A glyph from outside it is a column out
+    of alignment or a tofu box on a 61x72 picture whose legibility is entirely a matter of
+    its columns lining up.
 
     Against ``RANK_OF`` and not against re-measured glyph areas on purpose. The font is
     the generator's evidence and ``tests/test_splash_art.py`` pins the table to it; what
-    is unproven until here is that the *renderer* honours the buckets it is handed. Going
-    back to the font would test the ranking a second time and this not at all.
+    is unproven until here is that the *renderer* stays inside the inventory it is handed.
+    Going back to the font would test the ranking a second time and this not at all.
+
+    The membership test is ``in RANK_OF`` rather than a flattening of ``RANKS`` built here,
+    because the two are the same set by construction -- ``test_rank_of_agrees_with_ranks``
+    in tests/test_splash_art.py is what holds them so -- and reading the mapping keeps this
+    file from carrying its own copy of the pool.
     """
     frames = _frames()
     for row, col in _animated_cells():
-        band = RANK_OF[ART[row][col]]
         for index, frame in enumerate(frames):
             shown = frame.lines[row][col]
-            assert RANK_OF.get(shown) == band, (row, col, index, ART[row][col], shown)
+            assert shown in RANK_OF, (row, col, index, ART[row][col], shown)
 
 
 def test_only_part_of_the_field_changes_on_any_one_step() -> None:
     """
-    The safety claim on the shipped image, where the cell count makes it matter.
+    How much of the shipped image moves at once, where the cell count makes it matter.
 
-    ``splash.py`` argues the panel is protected by the modulation being spatially local
-    and moving, and puts a number on it: 20 wake rows of 61, a ramp averaging 0.525 over
-    them, and a cycling set that is 0.34 of the ranked cells gives under 6% of the field
+    The design's own arithmetic for this is 20 wake rows of 61, a ramp averaging 0.525
+    over them, and a cycling set that is 0.34 of the ranked cells: under 6% of the field
     on any one step. Measured against all 4237 cells of the rectangle the art occupies:
 
-        showing a substitute      max 4.01% of the field, mean 1.88%
-        changed since last step   max 5.15% of the field, mean 2.57%
+        showing a substitute      max 4.15% of the field, mean 2.00%
+        changed since last step   max 5.40% of the field, mean 2.73%
 
-    Both are under the claimed 6%, so it holds on the real art -- but the headroom on the
-    second is 15%, not the comfortable margin the arithmetic reads as. The design's
-    calculation predicts the first quantity, and what a viewer's retina integrates is the
-    second: a step modulates a cell both when a substitute appears and when it reverts, so
-    the visible figure runs above the substitution figure rather than below it. Both still
-    run under the raw draw rate, because a successful draw may select the glyph the cell
-    already shows.
+    Both are under 6%, so the arithmetic holds on the real art -- but the headroom on the
+    second is 10%, which is not the comfortable margin it reads as. Two separate reasons
+    it runs high, and they compound. The calculation predicts the first quantity while
+    what a viewer integrates is the second: a step modulates a cell both when a substitute
+    appears and when it reverts, so the change figure sits above the substitution figure
+    rather than below it. And the ramp term is the *draw* rate, of which only ``1 - 1/165``
+    is visible -- a discount of 0.6%, where a substitution confined to one bucket of the
+    partition would have discounted it by about 7%.
 
     The bound asserted is 6% because 6% is the claim. It is deliberately not the
-    measurement plus a margin: if a re-partition or a wider wake pushes this over, what
-    has failed is the argument in ``splash.py``, and that should surface here rather than
-    be absorbed. There is no flake risk in a tight bound -- every hash in this animation
-    is written out in ``splash.py`` precisely so the sequence is identical on every run
-    and machine, so these numbers are exact rather than sampled.
+    measurement plus a margin: if a re-partition or a wider wake pushes this over, what has
+    failed is the arithmetic above, and that should surface here rather than be absorbed.
+    There is no flake risk in a tight bound -- every hash in this animation is written out
+    in ``splash.py`` precisely so the sequence is identical on every run and machine, so
+    these numbers are exact rather than sampled.
 
     ``_SAFETY_CYCLES`` sweeps rather than one, because one is flattering. One cycle passes
     the wake over each row exactly once, so it draws each cell at each distance once and
     its maximum is a maximum over 81 steps rather than over 810. The measured peak climbs
-    until about the tenth sweep and then stops: 4.67% over one cycle, 4.86% over five,
-    5.12% over ten, 5.15% over a hundred and no higher at two hundred.
+    until about the tenth sweep and then stops: 5.05% over one cycle, 5.17% over five,
+    5.40% over ten, and no higher at a hundred.
 
-    The lower bound has changed character and is no longer a bound over the whole cycle.
-    Under the old model the rate was steady by construction and a floor caught a field
-    that lumped and then went quiet; under this one the quiet stretch *is* the design.
-    Through the last ``WAKE_ROWS`` steps the line is off the bottom and only the wake
-    drains, and the measured change count falls to 1 cell of 658 at raster row 78. So the
-    floor is asserted where it means something -- while the wake is fully on the art,
-    raster rows 20 to 60 -- and there the change rate stays between 16.3% and 33.1% of the
-    cycling set over 200 cycles. A floor over the whole cycle would have to be 0.15% to
-    pass, which is a bound that no longer excludes a stalled field.
+    The lower bound is not a bound over the whole cycle, because the quiet stretch *is* the
+    design. Through the last ``WAKE_ROWS`` steps the line is off the bottom and only the
+    wake drains, and the measured change count reaches 0 of 658 cells at raster rows 78 and
+    79. So the floor is asserted where it means something -- while the wake is fully on the
+    art, raster rows 20 to 60 -- and there the change rate stays between 17.8% and 34.8% of
+    the cycling set over 100 cycles. Over the whole cycle no positive floor passes at all,
+    which is why one is not asserted there.
     """
     cells = _animated_cells()
     # One flat run rather than a cycle at a time, so the step from the last row of the

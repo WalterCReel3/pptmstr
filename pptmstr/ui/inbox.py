@@ -687,6 +687,13 @@ def _quote(now: float) -> None:
     """
     The quote, one character at a time, each at its own alpha.
 
+    Draws ``frame.glyphs`` and measures ``frame.lines``, and that split is the whole of
+    what this pane has to get right about the glitch. The glyphs carry this frame's
+    corrupted characters; the prose carries the block's extent, which must not move when
+    a character is corrupted. Drawing the prose would produce a correct, still quote with
+    no glitch in it, and measuring the glyphs would tie the space claimed below to an
+    animation.
+
     Through the draw list rather than as a chain of ``text_colored``/``same_line``
     calls, for two reasons that both matter here. ``theme.faded`` returns the *packed*
     colour and memoises it, so a per-character tint is a dict hit rather than the
@@ -703,7 +710,7 @@ def _quote(now: float) -> None:
     advance = imgui.calc_text_size("M").x
     pitch = imgui.get_text_line_height_with_spacing()
 
-    for row, (line, alphas) in enumerate(zip(frame.lines, frame.alphas, strict=True)):
+    for row, (line, alphas) in enumerate(zip(frame.glyphs, frame.alphas, strict=True)):
         y = origin.y + row * pitch
         for column, (char, alpha) in enumerate(zip(line, alphas, strict=True)):
             if char == " ":

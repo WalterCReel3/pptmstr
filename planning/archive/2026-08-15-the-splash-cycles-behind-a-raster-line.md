@@ -1,6 +1,8 @@
 # The splash cycles behind a raster line
 
-**Dated:** 2026-08-15 · **Status:** built 2026-08-16, `1f1a1fc`
+**Dated:** 2026-08-15 · **Status:** built 2026-08-16, `1f1a1fc`; the closing note's
+in-bucket substitution argument was superseded 2026-08-20 — see the second note at the
+bottom
 
 **Parked mid-flight on 2026-08-15**, three hours in, to fix
 `driver.py`'s sub-agent liveness bug first — that one reports live agents as
@@ -208,7 +210,8 @@ be. A cell being overtaken can substitute on consecutive steps at 16 Hz, inside 
 own 0.198 Hz protects it. What does is that a substitution never leaves the cell's
 measured ink bucket — so it moves about 0.05 of relative luminance, half the
 threshold. That is now a standing bound rather than an observation:
-`tests/test_splash_art.py`'s `test_no_swap_changes_a_cell_by_more_than_a_sixth`
+`tests/test_splash_art.py`'s `test_no_ink_band_is_coarser_than_the_generator_settled_on`
+(named `test_no_swap_changes_a_cell_by_more_than_a_sixth` when this note was written)
 holds the ratio at 1.18, and it was written to keep the picture's shape rather than
 for this, so **widening the ink bands is a photosensitivity change** and `splash.py`
 is the only place that says so.
@@ -244,3 +247,50 @@ The test decisions went as proposed. The one genuinely obsolete test,
 `test_a_cell_holds_its_glyph_for_several_steps_before_substituting`, was replaced by
 its inverse rather than deleted, since consecutive-step substitution is now
 deliberate. `scripts/bench_idle.py` was not re-run.
+
+---
+
+## Note, 2026-08-20: substitution no longer stays in the cell's bucket
+
+Added rather than folded into the closing note above, so the argument that was made in
+August is still readable in the form it was made. The body of this document is a
+pre-code snapshot and was already history; what follows corrects the **closing note**,
+which claims to describe the tree.
+
+The full decision, its reasoning and its cost are in
+[`2026-08-20-the-wake-picks-from-the-whole-inventory.md`](2026-08-20-the-wake-picks-from-the-whole-inventory.md).
+In short: `splash.art_frame` now draws a substitute from the union of all buckets — the
+whole 165-glyph inventory — because near-random glyphs in the wake are the glitch effect
+wanted. It is an aesthetic call made with the photosensitivity consequence in view, and
+photosensitivity was explicitly downgraded as a priority for this panel.
+
+Five present-tense claims in the closing note are now false:
+
+- **"It lives in `splash.py`'s 'what protects the panel' section."** That section was
+  deleted. Nothing in `pptmstr/` contains the phrase; the prior text is at
+  `git show 1f1a1fc:pptmstr/ui/splash.py`.
+- **"A substitution never leaves the cell's measured ink bucket — so it moves about 0.05
+  of relative luminance, half the threshold."** It leaves the bucket on every swap. The
+  per-cell luminance step is now whatever the full inventory spans, and that span has not
+  been computed.
+- **"That is now a standing bound rather than an observation."**
+  `tests/test_splash_art.py`'s ink-ratio assertion still holds `MAX_INK_RATIO = 1.18`, so
+  the number is live, but it bounds the *generator's* buckets and no longer bounds any
+  swap. It is a drift detector on `scripts/rank_glyphs.py`'s parameters.
+- **"Widening the ink bands is a photosensitivity change and `splash.py` is the only
+  place that says so."** False in both halves. Widening the bands cannot change what the
+  pool contains, so it is not a photosensitivity change; and `splash.py` says nothing
+  about photosensitivity now, while `tests/test_splash.py` and
+  [`2026-08-15-an-empty-fleet-is-a-state-the-app-renders.md`](2026-08-15-an-empty-fleet-is-a-state-the-app-renders.md)
+  both do.
+- **"A viewing geometry stated in `splash.py`."** `splash.py` states none — no viewing
+  distance, no display size, no field angle. The 1920×1200-at-24-inches-at-60cm geometry
+  exists only in the paragraph above. Which does not weaken that paragraph's own point:
+  it says every figure is computed and none was measured against a photometer or a live
+  frame, and that remains the most accurate sentence in this note.
+
+What survives unchanged: the rate-and-area argument for the sweep itself. A fixed row
+still pulses once per `rows + WAKE_ROWS` steps at 0.198 Hz, and two lit rows of 61 are
+still the only thing modulating field luminance by position. Those never depended on the
+in-bucket invariant. Whether the area argument alone is sufficient without it has not
+been re-examined.
