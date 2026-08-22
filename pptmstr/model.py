@@ -240,6 +240,14 @@ class PendingApproval:
     tool_use_id: str
     raw_args: Mapping[str, Any]
     summary: str
+    # ``time.monotonic()``, never ``time.time()``. This is the ``since`` an
+    # ``ApprovalNeeded`` carries, so it is subtracted from the frame clock and sorted
+    # against ``state_since`` and ``ended_at``, both of which are monotonic. An epoch
+    # reading here is not merely a different origin: it is larger than every genuine
+    # one, so it sorts last in a list ordered oldest-first, and the negative age it
+    # produces clamps to "0s" -- the longest wait in the queue rendering as the
+    # newest. Stamped by whoever builds the record; pinned by a test over every
+    # construction site in ``pptmstr/``, because there is no seam that can enforce it.
     requested_at: float
     # Unified diff for file-mutating tools; None when the tool has no diff to show
     # (Bash, network calls) and the summary carries the whole story.

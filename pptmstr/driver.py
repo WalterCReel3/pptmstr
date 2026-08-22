@@ -1269,7 +1269,10 @@ class AgentSession:
             tool_use_id=tool_use_id,
             raw_args=dict(tool_input),
             summary=summarize(tool_name, tool_input),
-            requested_at=time.time(),
+            # Monotonic, like every other instant a wait is measured from -- see
+            # PendingApproval.requested_at for why an epoch reading here renders the
+            # oldest park in the queue as "0s" and sorts it last.
+            requested_at=time.monotonic(),
             diff=render_diff(tool_name, tool_input),
         )
         future = self.bridge.park(pending.id)
