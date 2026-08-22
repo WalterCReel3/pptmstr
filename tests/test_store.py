@@ -8,7 +8,9 @@ rather than by poking at internals.
 
 from __future__ import annotations
 
+import ast
 import dataclasses
+import pathlib
 
 import pytest
 
@@ -29,6 +31,7 @@ from pptmstr.intents import (
     UsageAccrued,
 )
 from pptmstr.model import (
+    AWAITING_TOPIC,
     AgentState,
     ApprovalNeeded,
     ContextPressure,
@@ -949,3 +952,130 @@ def test_an_approval_still_parks_a_live_node() -> None:
 
     store.apply(ApprovalResolved(ROOT, "p1", approved=False))
     assert store.snapshot().nodes[ROOT].state is AgentState.THINKING
+
+
+# -- the clock every obligation's wait is measured against ---------------------
+
+
+def test_an_approval_and_a_question_are_aged_and_sorted_on_one_clock() -> None:
+    """
+    ``Obligation.since`` is a ``time.monotonic()`` reading whichever kind carries it.
+
+    The three kinds source it from three different fields -- an approval from
+    ``PendingApproval.requested_at``, a question from ``AgentRecord.state_since``, a
+    failure from ``ended_at`` -- and they are subtracted from one frame clock and
+    sorted into one list. Fixing the pair of instants here rather than sampling a
+    clock is what makes the sort assertion mean age rather than insertion order.
+    """
+    frame = 4_000.0
+    parked_at = frame - 21_600.0  # six hours before the frame being rendered
+    asked_at = frame - 60.0
+
+    store = Store()
+    # OTHER is spawned first, so it leads the tree order the walk follows. The sort
+    # assertion below is the only thing that can put the older obligation on top, and
+    # dropping the sort leaves this list in the opposite order.
+    store.apply(spawn(OTHER), now=parked_at)
+    store.apply(spawn(ROOT), now=parked_at)
+    store.apply(StateChanged(OTHER, AgentState.AWAITING_INPUT), now=asked_at)
+    store.apply(ApprovalRequested(ROOT, pending(ROOT, "parked", at=parked_at)), now=asked_at)
+
+    owed = store.snapshot().needs_you
+    ages = {o.node: frame - o.since for o in owed}
+    assert ages[ROOT] == pytest.approx(21_600.0)
+    assert ages[OTHER] == pytest.approx(60.0)
+    # Oldest first, so the six-hour park outranks the one-minute question.
+    assert [o.node for o in owed] == [ROOT, OTHER]
+
+
+def test_every_parked_call_is_stamped_from_the_monotonic_clock() -> None:
+    """
+    Read over the source because no runtime seam can enforce it.
+
+    ``requested_at`` is supplied by whoever constructs a ``PendingApproval``, and the
+    store applies the record it is handed rather than restamping it -- restamping
+    would tie an approval's age to when the UI thread got round to draining, which
+    collapses to zero for every call queued behind a stalled frame loop, which is the
+    one case the age is being read for. So the clock has to be right where it is
+    taken, and this is the only place that can say so. ``time.time()`` here is not a
+    loud failure: it renders as "0s" and sorts last.
+    """
+    root = pathlib.Path(__file__).resolve().parent.parent / "pptmstr"
+    wrong: list[str] = []
+    sites = 0
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(), filename=str(path))
+        for call in ast.walk(tree):
+            if not isinstance(call, ast.Call):
+                continue
+            if not (isinstance(call.func, ast.Name) and call.func.id == "PendingApproval"):
+                continue
+            stamp = next((k.value for k in call.keywords if k.arg == "requested_at"), None)
+            if stamp is None:
+                continue
+            sites += 1
+            if ast.unparse(stamp) != "time.monotonic()":
+                wrong.append(f"{path.name}:{call.lineno} requested_at={ast.unparse(stamp)}")
+
+    assert sites, "no PendingApproval construction found -- this pin has gone blind"
+    assert not wrong, "requested_at must be time.monotonic(): " + "; ".join(wrong)
+
+
+# -- a lead waiting on its workers -----------------------------------------------
+
+
+def test_supervising_does_not_hold_the_render_loop_at_full_speed() -> None:
+    """
+    A supervising lead is doing nothing itself; its workers are.
+
+    Those workers are separate nodes carrying their own active states, so a fan-out
+    with anything running in it already holds the loop at full speed through them --
+    counting the lead as well would count the same work twice. And a fan-out where
+    every worker is itself parked at the gate is a tree that should idle, which is
+    I8 as a CPU number rather than a claim.
+    """
+    assert not AgentState.SUPERVISING.is_active
+    assert not AgentState.SUPERVISING.is_terminal
+
+
+def test_a_supervising_lead_does_not_make_the_tree_look_busy() -> None:
+    """
+    ``any_active`` drives idling for the whole application, so the property above
+    has to hold through the projection and not only on the enum.
+    """
+    store = Store()
+    store.apply(spawn(ROOT), now=1.0)
+    store.apply(StateChanged(ROOT, AgentState.SUPERVISING), now=2.0)
+
+    assert store.snapshot().any_active is False
+
+
+def test_a_supervising_lead_is_kept_busy_by_a_worker_that_is_working() -> None:
+    """
+    The other half: the loop must stay hot while the fan-out is actually running,
+    and it does so through the workers rather than through the lead.
+    """
+    store = Store()
+    store.apply(spawn(ROOT), now=1.0)
+    store.apply(spawn(CHILD, ROOT), now=1.0)
+    store.apply(StateChanged(ROOT, AgentState.SUPERVISING), now=2.0)
+    store.apply(StateChanged(CHILD, AgentState.THINKING), now=2.0)
+
+    assert store.snapshot().any_active is True
+
+
+def test_a_supervising_lead_can_be_moved_off_the_state_like_any_other() -> None:
+    """
+    SUPERVISING is not terminal and nothing in the store treats it specially, so the
+    turn-over state that follows the wait has to land. A state that stuck would leave
+    a finished fan-out reading as one still in progress -- with a composer promising
+    an answer that will never come.
+    """
+    store = Store()
+    store.apply(spawn(ROOT), now=1.0)
+    store.apply(StateChanged(ROOT, AgentState.SUPERVISING), now=2.0)
+    store.apply(StateChanged(ROOT, AgentState.AWAITING_INPUT, topic=AWAITING_TOPIC), now=3.0)
+
+    rec = store.snapshot().nodes[ROOT]
+    assert rec.state is AgentState.AWAITING_INPUT
+    assert rec.state_since == 3.0

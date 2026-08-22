@@ -5,9 +5,9 @@ Everything here runs against small hand-built fixtures rather than against
 ``pptmstr.ui.splash_art``. That is not only for speed -- the real ranking table is
 produced by a separate task, and a test that imported it would be asserting facts
 about *that* data as much as about this code. The fixtures below deliberately include
-the shapes the real table promises never to contain (a ranked space, a bucket index
-past the end of the table) because those are the cases where "no-op, not an error" is
-a claim rather than an accident.
+the shapes the real table promises never to contain (a glyph it does not rank at all, a
+bucket index past the end of the table) because those are the cases where "no-op, not
+an error" is a claim rather than an accident.
 """
 
 from __future__ import annotations
@@ -37,17 +37,19 @@ from pptmstr.ui import splash
 RANKS: tuple[tuple[str, ...], ...] = (("a", "b", "c"), ("X", "Y"), ("#",))
 RANK_OF: dict[str, int] = {c: i for i, bucket in enumerate(RANKS) for c in bucket}
 
-# What a successful draw actually picks from: every glyph of every bucket, in order,
-# with no bucket structure surviving into the choice. Built here the same way
+# What a successful draw actually picks from: every glyph of every bucket, in order, and
+# then the one U+0020 that lets a draw blank an ink cell. Built here the same way
 # ``art_frame`` builds it so that the two cannot disagree about what the pool is -- the
 # alternative is a hand-written list that stays green while the flattening changes under
 # it, which pins the test file to itself rather than to the renderer.
 #
-# Six glyphs, against the shipped table's 165. The fixture is deliberately far smaller,
-# because every rate below scales as ``1 - 1/len(POOL)`` and a six-glyph pool leaves that
-# term visibly under 1.0 -- at 165 it is 0.994 and a test written against it could not
-# tell "picks from the pool" from "always changes".
-POOL: tuple[str, ...] = tuple(char for bucket in RANKS for char in bucket)
+# Seven slots, against the shipped table's 166. The fixture is deliberately far smaller,
+# because every rate below scales as ``1 - 1/len(POOL)`` and a seven-slot pool leaves that
+# term visibly under 1.0 -- at 166 it is 0.994 and a test written against it could not
+# tell "picks from the pool" from "always changes". It also puts the blank at one slot in
+# seven rather than the shipped one in 166, which is what lets the ink-to-blank direction
+# be asserted over a sweep of this fixture instead of over hundreds.
+POOL: tuple[str, ...] = tuple(char for bucket in RANKS for char in bucket) + (" ",)
 
 # The share of successful draws that are *visible*. A draw picks from POOL without
 # regard to what the cell already shows, so it lands back on that glyph one time in
@@ -57,7 +59,7 @@ POOL: tuple[str, ...] = tuple(char for bucket in RANKS for char in bucket)
 #
 # Every rate measured from the rendered lines below is a draw rate times this number.
 # The difference is not cosmetic: on the raster row *every* cycling cell is redrawn, and
-# one in six of them is redrawn with what it already had.
+# one in seven of them is redrawn with what it already had.
 VISIBLE_DRAW = 1.0 - 1.0 / len(POOL)
 
 # Not in RANK_OF at all, and mapped past the end of RANKS, respectively.
@@ -163,38 +165,6 @@ def test_the_frame_does_not_depend_on_the_interpreter_hash_seed() -> None:
         assert proc.stdout.strip() == reference
 
 
-def test_a_ranked_space_neither_covers_ink_nor_gets_covered() -> None:
-    """
-    The adversarial input, not the contracted one, and in both directions.
-
-    ``RANK_OF`` is contracted to omit U+0020, so a fixture that merely honours the
-    contract cannot tell a renderer that guards against a ranked space from one that
-    happens never to meet it. The art's shape *is* its negative space, and a table that
-    grew a space entry dissolves that shape from either side: a space overwritten with
-    ink fills the gaps, and ink replaced by a space punches holes in the silhouette. A
-    guard on only the first direction leaves the second, which is the visible half.
-
-    The fixture adds the space to a bucket, and the flat pool is what makes that one
-    edit reach everywhere: the space joins a pool of seven that every cycling cell draws
-    from, so an unguarded renderer punches a hole at one successful draw in seven
-    anywhere on the art rather than inside a single brightness band.
-    """
-    ranks_with_space = (("a", "b", "c", " "),) + RANKS[1:]
-    rank_of_with_space = {c: i for i, bucket in enumerate(ranks_with_space) for c in bucket}
-    # Two full sweeps, so every row spends every distance in the wake twice. The window is
-    # the sweep's geometry: a cell is only writable while the line is passing it, so a
-    # window shorter than a sweep never puts the guard under pressure at all on the rows
-    # the line has not yet reached.
-    for i in range(2 * SWEEP_STEPS):
-        frame = splash.art_frame(ART, rank_of_with_space, ranks_with_space, i * STEP)
-        for r, line in enumerate(frame.lines):
-            for c, ch in enumerate(line):
-                if ART[r][c] == " ":
-                    assert ch == " ", f"space at ({r},{c}) became {ch!r} at step {i}"
-                else:
-                    assert ch != " ", f"ink at ({r},{c}) became a space at step {i}"
-
-
 def test_an_unranked_glyph_is_left_alone_rather_than_raising() -> None:
     for frame in lines_over_steps(SWEEP_STEPS):
         for r, line in enumerate(frame):
@@ -211,29 +181,37 @@ def test_a_rank_pointing_past_the_table_is_a_no_op_rather_than_an_index_error() 
                     assert ch == OUT_OF_RANGE
 
 
-def test_a_substitute_comes_only_from_the_ranked_inventory() -> None:
+def test_the_glyphs_a_cell_can_show_are_exactly_the_pool() -> None:
     """
-    A cell may leave its brightness band. It may not leave the curated inventory.
+    Two hazards, and the pool is both sides of the same equality.
 
-    The buckets are a partition of one hand-checked set of glyphs, and what that set is
-    checked for is not only relative brightness: scripts/verify_splash.py holds every
-    member to a single advance width at every size ``fit_size`` can return, and to
-    presence in the baked atlas. A substitute from outside it is a column that no longer
-    lines up, or a tofu box, and neither is recoverable by the space guards next door --
-    they only see U+0020. That is the constraint the pool has to satisfy however wide it
-    is, and it is the whole of what this test asserts.
+    Nothing outside it: the buckets are a partition of one hand-checked set, and
+    scripts/verify_splash.py holds every member to a single advance width at every size
+    ``fit_size`` can return and to presence in the baked atlas. A substitute from outside
+    that set is a column that no longer lines up, or a tofu box.
 
-    The rank is still read, because a cell whose glyph is unranked or whose rank does not
-    index a live bucket is not eligible to substitute at all and keeps the art's own
-    glyph. That half is owned by the two no-op tests above.
+    And nothing inside it out of reach: a slot the index arithmetic can never land on is
+    a permitted-but-impossible substitute, which reads as a working pool and is not one.
+    An off-by-one in the modulo takes the last slot away, and the last slot is the one
+    the flattening appends.
+
+    The population is every cell the rank gate does not turn away; the two adversarial
+    glyphs are excluded because they are never eligible at all, which is the two no-op
+    tests above rather than this one. The reachable set is counted over cells that are
+    *showing something other than their own glyph*, which is the difference between the
+    two halves: a cell resting on the art contributes nothing, so a slot only joins the
+    set by having been drawn.
     """
+    reachable: set[str] = set()
     for frame in lines_over_steps(SWEEP_STEPS):
         for r, line in enumerate(frame):
             for c, ch in enumerate(line):
-                original = ART[r][c]
-                if RANK_OF.get(original) is None:
+                if ART[r][c] in (UNRANKED, OUT_OF_RANGE):
                     continue
-                assert ch in POOL, f"({r},{c}) {original!r} -> {ch!r}"
+                assert ch in POOL, f"({r},{c}) {ART[r][c]!r} -> {ch!r}"
+                if ch != ART[r][c]:
+                    reachable.add(ch)
+    assert reachable == set(POOL), sorted(set(POOL) - reachable)
 
 
 def test_which_cells_cycle_is_fixed_for_the_life_of_the_process() -> None:
@@ -242,35 +220,33 @@ def test_which_cells_cycle_is_fixed_for_the_life_of_the_process() -> None:
     Membership that varied with the step would eventually pull in every cell, which reads
     as uniform noise rather than as texture.
 
-    Eligible means ranked into a live bucket and in the cycling set, and that is the
-    whole predicate: every eligible cell draws from the same six glyphs, so the size of
-    the bucket the cell's own glyph sits in decides nothing. '#' is the case that makes
-    that concrete -- it is alone in its bucket and it moves like everything else.
+    Eligible means in the cycling set and past the rank gate, and the rank gate is the
+    only thing a cell's own content enters into: an unranked glyph and a broken rank index
+    are inert, and everything else moves -- including a cell holding nothing, which has no
+    rank to be gated on and needs none. That is why the predicate below names the two
+    adversarial glyphs rather than the ranking table; the table is not the population.
 
-    The property being protected is that membership is a function of position alone, so
-    the set of cells that ever move is exactly the set ``is_cycling`` names, on this step
-    and on every other.
+    Every eligible cell draws from the whole pool, so the size of the bucket its own glyph
+    sits in decides nothing. '#' is the case that makes that concrete -- it is alone in its
+    bucket and it moves like everything else.
 
     Two sweeps, and one is thin rather than wrong. A cell is only writable for the
-    ``WAKE_ROWS`` steps the line takes to cross it, and a successful draw lands back on
-    the glyph it is already showing one time in ``len(POOL)``. Measured over 60 sweeps of
-    this fixture: the fewest visible changes any movable cell makes in a single sweep is
-    2, and over any two consecutive sweeps it is 11. One sweep would pass, but a floor of
-    2 is close enough to zero that a re-partition or a smaller pool could reach it with
-    nothing wrong, and the window is kept at two so the assertion fails for the reason it
-    is named for.
+    ``WAKE_ROWS`` steps the line takes to cross it, and a successful draw lands back on the
+    glyph it is already showing one time in ``len(POOL)``, so the count of visible changes
+    a movable cell makes in a single sweep runs close enough to zero that a re-partition or
+    a smaller pool could reach it with nothing wrong. The window is kept at two so the
+    assertion fails for the reason it is named for.
     """
     seen = chars_seen(lines_over_steps(2 * SWEEP_STEPS))
     for (r, c), chars in seen.items():
-        original = ART[r][c]
-        bucket_index = RANK_OF.get(original)
-        movable = bucket_index is not None and splash.is_cycling(r, c)
+        movable = splash.is_cycling(r, c) and ART[r][c] not in (UNRANKED, OUT_OF_RANGE)
         assert (len(chars) > 1) is movable, f"({r},{c}) saw {sorted(chars)}, movable={movable}"
 
 
-def test_roughly_the_configured_fraction_of_ranked_cells_cycles() -> None:
-    ranked = [(r, c) for r, line in enumerate(ART) for c, ch in enumerate(line) if ch in RANK_OF]
-    fraction = sum(splash.is_cycling(r, c) for r, c in ranked) / len(ranked)
+def test_roughly_the_configured_fraction_of_the_field_cycles() -> None:
+    """Membership is a function of position, so the population is the whole rectangle."""
+    cells = [(r, c) for r, line in enumerate(ART) for c in range(len(line))]
+    fraction = sum(splash.is_cycling(r, c) for r, c in cells) / len(cells)
     assert abs(fraction - splash.CYCLING_FRACTION) < 0.05, fraction
 
 
@@ -294,9 +270,8 @@ def test_the_substitutes_on_one_step_are_not_all_the_same_glyph() -> None:
 
     Taken over the cells holding one art glyph rather than over a bucket. A bucket groups
     cells by a brightness the renderer does not consult, so it is not a population the
-    claim is about. These 62 cells are identical in the source image, and what makes the
-    panel read as texture is that they are not identical on screen: at the step sampled,
-    5 of them have moved and they show 4 different glyphs between them.
+    claim is about. These cells are identical in the source image, and what makes the panel
+    read as texture is that they are not identical on screen.
     """
     frame = splash.art_frame(ART, RANK_OF_BROKEN, RANKS, 5 * STEP).lines
     substitutes = {
@@ -308,15 +283,15 @@ def test_the_substitutes_on_one_step_are_not_all_the_same_glyph() -> None:
     assert len(substitutes) > 1, substitutes
 
 
-# The cells that can visibly move: in the cycling set and ranked into a live bucket. Every
-# eligible cell draws from the whole of POOL, so there is no such thing here as a member
-# that is physically unable to change and no cell has to be excluded to keep the fractions
-# below fair. 404 cells of this fixture.
+# The cells that can visibly move: in the cycling set, and not holding one of the two
+# glyphs the rank gate turns away. Every eligible cell draws from the whole of POOL, so
+# there is no such thing here as a member that is physically unable to change and no cell
+# has to be excluded to keep the fractions below fair.
 MOVABLE = [
     (r, c)
     for r, line in enumerate(ART)
     for c, ch in enumerate(line)
-    if ch in RANK_OF and splash.is_cycling(r, c)
+    if ch not in (UNRANKED, OUT_OF_RANGE) and splash.is_cycling(r, c)
 ]
 
 # What a step's change fraction should be, from the model rather than from a run. A cell
@@ -328,73 +303,50 @@ MOVABLE = [
 #     P(change) = q * (a + b - a*b)
 #
 # -- the cross terms cancel exactly, which is why the whole family of numbers below scales
-# with ``q`` and nothing else about the pool matters. Checked against the renderer step by
-# step over a sweep: mean absolute error 0.010, worst 0.040, which is the sampling spread of
-# 404 Bernoulli cells and not a bias.
-#
-# The three bounds are set against measurements taken over 60 sweeps rather than over the
-# two the test samples, so that a bound is not pinning which sweep it happens to look at.
+# with ``q`` and nothing else about the pool matters.
 
 
 # The whole cycling set moving together is 1.0, and that is what this separates the panel
-# from. Measured over 60 sweeps the largest single step moves 0.3045 of MOVABLE, and the
-# per-sweep maximum ranges 0.2698 to 0.3045; the two sweeps sampled here read 0.2946. The
-# bound has 15% of headroom over that, and nothing sits in the gap that a tighter one would
-# catch -- the nearest mutation above the design is 0.4158.
+# from. What it catches is a wake that has stopped thinning: deleting the ramp and firing
+# every row of the wake at full intensity, or removing the wake so every cycling cell draws
+# on every step, both push the per-step maximum well past this. The first of those is only
+# caught because the pool is wide -- a flat ramp moves the same cells whatever the pool is,
+# and what scales with ``VISIBLE_DRAW`` is how many of those moves are visible -- so the
+# ramp is not left to this bound and is pinned by
+# ``test_the_draw_rate_falls_off_linearly_with_distance_behind_the_line`` instead.
 #
-# What it catches, by mutation and measured rather than argued -- every mutant figure here
-# is that mutant's own 60-sweep extreme: deleting the ramp and firing every row of the wake
-# at full intensity reads 0.4158, and removing the wake so every cycling cell draws on every
-# step reads 0.8812. The first of those is only caught because the pool is wide. A flat ramp
-# moves the same cells whatever the pool is; what scales with ``VISIBLE_DRAW`` is how many
-# of those moves are visible, and at a pool of two or three glyphs the same mutant lands
-# under this bound. So the ramp is not left to this test -- it is pinned by
-# ``test_the_draw_rate_falls_off_linearly_with_distance_behind_the_line`` -- and catching it
-# here is a side effect that a narrower pool would take away again.
-#
-# What it does not catch: a wake that straddles the line rather than trailing it reads
-# 0.2847, *under* the design's own 0.3045, so no upper bound can see it at all.
-# MIN_SIMULTANEOUS_CHANGE is what carries that one, and is set where it is for that reason.
+# What no upper bound can see is a wake that straddles the line rather than trailing it: it
+# moves *fewer* cells per step than the design does. MIN_SIMULTANEOUS_CHANGE carries that
+# one, and is set where it is for that reason.
 MAX_SIMULTANEOUS_CHANGE = 0.35
 
 # The floor, and it applies only while the whole wake is on the art. Over a full sweep the
 # rate legitimately reaches zero: the last WAKE_ROWS steps are the drain, when the line has
 # left the bottom edge and the trail is emptying, and that beat is what stops the next
 # sweep entering at the top while the previous one is still lit. Across PLATEAU_STEPS the
-# geometry is constant and the measured floor over 60 sweeps is 0.1980.
+# geometry is constant.
 #
-# The value is what catches the locality mutation no upper bound can see: a wake centred on
-# the line rather than trailing it -- same depth, same ramp shape, reflected -- reads a floor
-# of 0.1139 over 60 sweeps and 0.1188 over the two sampled here, so 0.15 fails it either way
-# while leaving the design 32% of headroom. A renderer that held each substitute for two
-# steps reads 0.0149 over 60 sweeps and 0.0173 over the two sampled here.
-#
-# It does *not* pick up the even-step gating that STEADY_RATE_SPREAD is also blind to, and
-# the reason is worth stating because the numbers nearly touch: that mutant's floor is 0.1386
-# over 60 sweeps, which 0.15 would catch, but 0.1609 over the two sweeps this test samples,
-# which it does not. Lengthening the sample would catch it here as well. It is left at two
-# sweeps because ``test_the_moving_set_does_not_repeat_within_the_first_sixty_ticks`` already
-# fails on that mutation directly, and a bound that depends on how long you look is a worse
-# guard than one that does not.
+# This is the value that catches the locality mutation no upper bound can: a wake centred on
+# the line rather than trailing it -- same depth, same ramp shape, reflected -- puts fewer
+# cells at high intensity at once and drops under this floor. So does a renderer that held
+# each substitute for two steps.
 MIN_SIMULTANEOUS_CHANGE = 0.15
 
 # ...and how much the fraction may vary within that stretch. The rate rises as the wake
 # enters the art and falls as it drains, once per sweep, so a spread taken over a whole
 # sweep would be measuring the sweep. Over PLATEAU_STEPS the wake covers a constant 20
-# rows, and what is left is the art's own row composition and the draw's noise: measured
-# 0.0866 over the two sweeps sampled here, and 0.0941 for the worst two-sweep window in 60.
+# rows, and what is left is the art's own row composition and the draw's noise.
 #
-# What it catches, checked by mutation rather than argued: a renderer that re-rolled its
-# draw only every other step -- the "hold the last substitute" design ``art_frame``'s
-# docstring rejects -- moves the field on even steps and leaves it alone on odd ones, which
-# reads 0.2748 here and 0.0149 on the floor above.
+# What it catches is a renderer that re-rolls its draw only every other step -- the "hold
+# the last substitute" design ``art_frame``'s docstring rejects -- which moves the field on
+# even steps and leaves it alone on odd ones.
 #
-# What it does not catch, which matters more: substitution gated to even steps, with the
-# art restored on the odd ones, is a beat at half the step rate that this statistic is blind
-# to -- the restoration is itself a change, so both parities read alike and the spread comes
-# out at 0.0866, no wider than the design's own 0.0941. Measured. That defect is caught by
-# ``test_the_moving_set_does_not_repeat_within_the_first_sixty_ticks`` instead, and the
-# reason this bound is kept anyway is that the two see different halves of the hazard.
+# What it does not catch, which matters more: substitution gated to even steps with the art
+# restored on the odd ones is a beat at half the step rate that this statistic is blind to,
+# because the restoration is itself a change and both parities read alike. That defect is
+# caught by ``test_the_moving_set_does_not_repeat_within_the_first_sixty_ticks`` instead,
+# and the reason this bound is kept anyway is that the two see different halves of the
+# hazard.
 STEADY_RATE_SPREAD = 0.15
 
 
@@ -442,9 +394,6 @@ def test_the_moving_set_does_not_repeat_within_the_first_sixty_ticks() -> None:
     stops being true: by the last few steps of the drain the wake has thinned to one or two
     movable cells and sometimes to none, and two consecutive steps moving the same single
     cell -- or no cell -- is a coincidence of a nearly empty set rather than a recurrence.
-    Measured on this fixture over 60 sweeps: every one of the first sixty sets is distinct
-    in every sweep, and the earliest any sweep repeats at all is at 65 steps. The five
-    steps between those two numbers are the whole margin this constant has.
     """
     frames = lines_over_steps(61)
     moving = [
@@ -454,17 +403,16 @@ def test_the_moving_set_does_not_repeat_within_the_first_sixty_ticks() -> None:
     assert len(set(moving)) == len(moving)
 
 
-# Measured 404 of 404 movable cells in the first sweep, and 402 in the worst of 60. The
-# bound is a floor on that count, not the count itself: what is being pinned is that
-# consecutive-step substitution is normal near the line, and pinning it to the cell is
-# pinning the hash.
+# A floor on how many movable cells substitute on two consecutive steps at some point in a
+# sweep, not a count of them: what is being pinned is that consecutive-step substitution is
+# *normal* near the line, and pinning it to the cell would be pinning the hash.
 #
-# 380 is 94% of MOVABLE and 5.5% under the worst sweep measured, and it is a floor scaled to
-# the population rather than a threshold that separates anything: the design reads 402 and
-# the one mutation this test does catch reads 246, so any bound between them does the same
-# work. It is set here rather than lower so that it keeps saying "normal" as the population
-# moves, which is the claim the test's name makes.
-CONSECUTIVE_SUBSTITUTIONS = 380
+# Written as a share of MOVABLE rather than as a literal so it keeps saying "normal" as the
+# population moves, which is the claim the test's name makes. Nine tenths is a floor and not
+# a threshold that separates anything -- the design puts nearly every movable cell over the
+# line, and the mutation this catches puts about half of them under it -- so anything
+# between does the same work.
+CONSECUTIVE_SUBSTITUTIONS = 9 * len(MOVABLE) // 10
 
 
 def test_a_cell_near_the_line_may_substitute_on_consecutive_steps() -> None:
@@ -483,12 +431,12 @@ def test_a_cell_near_the_line_may_substitute_on_consecutive_steps() -> None:
     Asserted rather than left unsaid because the "hold the last substitute" cache
     ``art_frame``'s docstring rejects is exactly the kind of thing a well-meaning change
     reintroduces, and this test fails when it is: a renderer that re-rolls its draw only
-    every other step reads 246 of the 404.
+    every other step puts about half the population under the floor.
 
-    What it does not catch, measured rather than assumed, because the obvious reading of
-    the name is wrong: a genuine per-cell cooldown -- a cell whose draw succeeded last step
-    is forbidden to draw on this one -- reads 401 of 404 and passes, even applied to every
-    cell. The statistic is consecutive *visible change*, and when a cooldown blocks a draw
+    What it does not catch, because the obvious reading of the name is wrong: a genuine
+    per-cell cooldown -- a cell whose draw succeeded last step is forbidden to draw on this
+    one -- passes even applied to every cell. The statistic is consecutive *visible change*,
+    and when a cooldown blocks a draw
     the cell reverts to the art's own glyph, which is itself a change on both sides of the
     step. So this pins the absence of a substitute cache and not the absence of a gap rule,
     and a gap rule would have to be caught by something that can see which glyph is shown
@@ -563,11 +511,28 @@ def test_the_cache_does_not_freeze_on_its_first_answer() -> None:
 
 
 def test_art_with_no_cycling_material_is_returned_unchanged() -> None:
-    plain = ("   ", "???", "")
+    """
+    Nothing eligible means nothing drawn, and an empty line is not an edge case.
+
+    "No cycling material" is now an art of glyphs the rank gate turns away, because a blank
+    is eligible like anything else and an art of blanks would legitimately erode.
+    """
+    plain = (UNRANKED * 3, OUT_OF_RANGE * 3, "")
     frame = splash.art_frame(plain, RANK_OF_BROKEN, RANKS, 3.7)
     assert frame.lines == plain
     # One luminance per line and never a ragged pair, even when nothing was substituted.
     assert len(frame.luminance) == len(plain)
+
+
+def test_an_empty_ranking_table_leaves_the_pool_indexable() -> None:
+    """
+    A blank cell reaches the pool index without passing any gate that mentions ``ranks``,
+    so the trailing U+0020 is the only thing keeping that pool non-empty. Without it this
+    is a division by zero rather than a no-op, and no character-shaped fixture can reach
+    the line to find out.
+    """
+    plain = ("a b", "   ")
+    assert splash.art_frame(plain, {}, (), 3.7).lines == plain
 
 
 # -- the sweep -----------------------------------------------------------------
@@ -612,9 +577,7 @@ def test_every_row_is_inside_the_wake_at_some_point_in_a_sweep() -> None:
     where the wake may reach is satisfied perfectly by a wake that never reaches anywhere,
     and the failure that would produce -- an off-by-one in the wrap, a ramp that reaches
     zero a row early, a row index compared against the wrong height -- leaves a stripe of
-    the art visibly dead while every other test here still passes. Measured: all 48 rows
-    are touched in each of the 60 sweeps sampled, and the thinnest row of this fixture has
-    four movable cells.
+    the art visibly dead while every other test here still passes.
     """
     frames = lines_over_steps(2 * SWEEP_STEPS)
     every_row = set(range(len(ART)))
@@ -626,24 +589,16 @@ def test_every_row_is_inside_the_wake_at_some_point_in_a_sweep() -> None:
 
 # How many full sweeps to average over when reading the ramp off the rendered lines. The
 # draw is re-rolled per cell per step, so one sweep gives each distance a single sample per
-# row and the reading is noise: the ramp puts 1/WAKE_ROWS x VISIBLE_DRAW = 0.042 between one
-# distance and the next, while the measured error at a distance is 0.045 at two sweeps, 0.030
-# at four, 0.017 at eight, 0.010 at sixteen, 0.0088 at thirty and 0.0053 at sixty. At two
-# sweeps the reading is not monotonic at all.
-#
-# The wider pool made this cheaper rather than dearer, and the sample is kept where it was
-# anyway. The gap to resolve is what grew -- it was 0.029 when a successful draw was
-# invisible 42% of the time, and the noise at a given sample size did not move -- so sixteen
-# sweeps is the first that clears half the gap comfortably. Thirty is kept over sixteen
-# because it costs ~1s either way and it is what leaves SURVIVAL_TOLERANCE sitting at twice
-# the measurement rather than at 1.5 times it.
+# row and the reading is noise -- at two sweeps it is not even monotonic. What the sample
+# has to resolve is the gap the ramp puts between adjacent distances,
+# ``VISIBLE_DRAW / WAKE_ROWS``, and thirty sweeps is where the sampling error sits well
+# under half of that while still costing about a second.
 INTENSITY_SWEEPS = 30
 
 # The gap between measurement and prediction that is attributed to sampling rather than to
-# a wrong ramp. Measured 0.0088 at INTENSITY_SWEEPS, and it keeps falling with the sample
-# (0.0053 at sixty), so this is a bound on the noise and not on the model. Held at 0.02 as
-# the pool widened, which tightened it in the only terms that matter: it was 0.69 of the gap
-# between adjacent distances and is now 0.48 of it.
+# a wrong ramp. A bound on the noise and not on the model: it keeps falling as the sample
+# grows, and it stays under half the gap between adjacent distances, so a ramp of the wrong
+# shape or the wrong depth cannot sit inside it.
 SURVIVAL_TOLERANCE = 0.02
 
 
@@ -709,7 +664,7 @@ def test_the_draw_rate_falls_off_linearly_with_distance_behind_the_line() -> Non
 
     Two assertions, because monotonicity alone is weak: a ramp of the wrong shape or the
     wrong depth is still monotonic. The residual against ``surviving_share`` is what pins
-    the shape, and at INTENSITY_SWEEPS it is 0.0088 against a curve that spans 0.833.
+    the shape, against a curve that spans the whole of ``VISIBLE_DRAW``.
     """
     survival = survival_by_distance(INTENSITY_SWEEPS)
     for distance in range(splash.WAKE_ROWS - 1):
@@ -725,20 +680,19 @@ def test_every_cycling_cell_on_the_raster_row_is_redrawn() -> None:
     A redraw is not observable per cell. The substitute is picked from ``POOL`` without
     regard to what is there, so a cell that is redrawn with the glyph it already had is
     indistinguishable in the output from a cell that was never drawn -- on this fixture's
-    six-glyph pool that is one redraw in six. Any test asserting that every cycling cell on
-    the raster row *changes* fails about a sixth of the time per cell, and would have to be
-    weakened until it said nothing.
+    seven-slot pool that is one redraw in seven. Any test asserting that every cycling cell
+    on the raster row *changes* fails about a seventh of the time per cell, and would have
+    to be weakened until it said nothing.
 
     The flat pool narrows that hole without closing it, and the shipped table narrows it
-    much further -- 165 glyphs makes an invisible redraw a 0.6% event -- which is exactly
-    why the aggregate is still the right instrument here rather than a per-cell assertion
-    that would pass on the real art and be untestable on any fixture small enough to reason
+    much further -- 166 slots makes an invisible redraw a 0.6% event -- which is exactly why
+    the aggregate is still the right instrument here rather than a per-cell assertion that
+    would pass on the real art and be untestable on any fixture small enough to reason
     about.
 
     What survives the aggregate is exact: if every cycling cell on the raster row is
     redrawn, the share still showing the art's glyph there is one over the pool size, which
-    is ``1 - VISIBLE_DRAW`` = 0.167. Any cell not redrawn can only push that up. Measured
-    0.163 over INTENSITY_SWEEPS.
+    is ``1 - VISIBLE_DRAW``. Any cell not redrawn can only push that up.
     """
     survival = survival_by_distance(INTENSITY_SWEEPS)
     assert abs(survival[0] - (1.0 - VISIBLE_DRAW)) < SURVIVAL_TOLERANCE, survival[0]
@@ -785,9 +739,8 @@ def test_the_sweep_repeats_every_art_plus_wake_steps() -> None:
     step index, so the cells that substitute are drawn afresh on every sweep -- if the
     glyphs repeated too, the panel would be a 4.25s loop of one fixed pattern, which is
     what a per-cell fixed threshold would have produced and what the per-step draw exists
-    to avoid. Measured on this fixture: 66 of the 68 steps render different glyphs on the
-    next sweep, and the two that match are the last two, where the wake has drained and
-    both frames are the untouched art.
+    to avoid. The handful of steps that do match across sweeps are at the end of the drain,
+    where the wake has emptied and both frames are the untouched art.
     """
     first = frames_over_steps(SWEEP_STEPS)
     second = frames_over_steps(2 * SWEEP_STEPS)[SWEEP_STEPS:]

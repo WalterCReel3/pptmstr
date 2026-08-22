@@ -253,3 +253,66 @@ def test_a_recovered_node_inherits_its_session_directory() -> None:
     store.apply(ApprovalRequested(CHILD, pending(CHILD, "p1", at=1.0)), now=1.0)
 
     assert store.snapshot().nodes[CHILD].cwd == "/home/wreel/Source/orbital"
+
+
+# -- a supervising lead is not an obligation -------------------------------------
+
+
+def test_a_supervising_lead_owes_the_operator_nothing() -> None:
+    """
+    A lead waiting on its workers is waiting on its *workers*. Nothing is owed, so
+    nothing is queued.
+
+    This is deliberate and it is the reason SUPERVISING is not read here. The list
+    is sorted oldest-first and a lead enters the state when the fan-out begins,
+    which is older than every approval the fan-out then produces -- so listing it
+    would not merely add a row, it would hold position 0 for the whole fan-out.
+    ``ui/focus.py`` takes ``needs_you[0]`` for an unplaced cursor, so the cursor
+    that decides which agent an approve applies to would sit on the one node with
+    nothing to approve; and "N need you" would count a session that needs nobody,
+    which is the exact defect this projection was built to end.
+
+    Where the operator meets a supervising lead instead: the rail's own row and its
+    topic, ``ui/compose.py``, and ``ui/health.py``.
+    """
+    store = Store()
+    store.apply(spawn(ROOT), now=1.0)
+    store.apply(spawn(CHILD, ROOT), now=1.0)
+    store.apply(StateChanged(ROOT, AgentState.SUPERVISING), now=10.0)
+
+    assert store.snapshot().needs_you == ()
+
+
+def test_a_supervising_lead_still_surfaces_its_own_parked_call() -> None:
+    """
+    Not an obligation is not the same as invisible. A lead that entered the wait and
+    then parked a call of its own is blocked in the ordinary way, and the state must
+    not swallow the approval -- an approval nobody can reach is a permanent hang.
+    """
+    store = Store()
+    store.apply(spawn(ROOT), now=1.0)
+    store.apply(StateChanged(ROOT, AgentState.SUPERVISING), now=10.0)
+    store.apply(ApprovalRequested(ROOT, pending(ROOT, "p1", at=11.0)), now=11.0)
+
+    (obligation,) = store.snapshot().needs_you
+    assert isinstance(obligation, ApprovalNeeded)
+    assert obligation.node == ROOT
+
+
+def test_a_supervising_lead_does_not_hide_its_workers_obligations() -> None:
+    """
+    The queue during a fan-out is the workers' queue. A lead in a new state must not
+    change what its children are able to say -- and position 0 must be something the
+    operator can actually act on, because that is the entry an unplaced cursor takes.
+    """
+    store = Store()
+    store.apply(spawn(ROOT), now=1.0)
+    store.apply(spawn(CHILD, ROOT), now=1.0)
+    store.apply(spawn(OTHER), now=1.0)
+    # The lead enters the wait first, so if it were listed at all its age would put
+    # it ahead of both of these.
+    store.apply(StateChanged(ROOT, AgentState.SUPERVISING), now=10.0)
+    store.apply(ApprovalRequested(CHILD, pending(CHILD, "p1", at=12.0)), now=12.0)
+    store.apply(AgentFinished(OTHER, AgentState.FAILED, 13.0, error="died"), now=13.0)
+
+    assert [o.node for o in store.snapshot().needs_you] == [CHILD, OTHER]

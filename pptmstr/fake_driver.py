@@ -420,7 +420,11 @@ class FakeDriver:
             tool_use_id=f"tu-{next(_ids)}",
             raw_args=args,
             summary=summarize(name, args),
-            requested_at=time.time(),
+            # Monotonic, like the real driver's park and like every other instant an
+            # age is measured from -- see PendingApproval.requested_at. A fixture
+            # that stamped the other clock would render its own queue as uniformly
+            # "0s" and sorted last, which is the defect rather than a picture of it.
+            requested_at=time.monotonic(),
             diff=render_diff(name, args),
         )
 

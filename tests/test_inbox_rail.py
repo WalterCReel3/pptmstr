@@ -1589,3 +1589,60 @@ def test_the_trigger_asks_the_node_table_not_the_walk(monkeypatch) -> None:
 
     assert lost_the_walk.nodes
     assert _splash_branch(monkeypatch, lost_the_walk) == ["zero"]
+
+
+# -- what the surfaces say about a lead that is only waiting on its workers -------
+
+
+def test_every_state_has_an_attention_rank() -> None:
+    """
+    ``_claim`` is read inside a draw call. A member it does not handle raises there
+    and takes the frame down rather than the card, which is why it is a ``match``
+    ending in ``assert_never`` -- but a total function is only half of it, and mypy
+    checks that half. This checks the other: that every member actually resolves.
+    """
+    for state in AgentState:
+        assert isinstance(rail._claim(state), int)
+
+
+def test_supervising_does_not_outrank_an_agent_that_is_actually_blocked() -> None:
+    """
+    A supervising agent is reachable, not stopped. Ranking it with AWAITING_INPUT
+    would put "you could talk to this" above a sibling that has stopped and is
+    waiting, on the one marker a collapsed card has to summarise a group with.
+    """
+    assert rail._claim(AgentState.SUPERVISING) < rail._claim(AgentState.AWAITING_INPUT)
+    assert rail._claim(AgentState.SUPERVISING) < rail._claim(AgentState.AWAITING_APPROVAL)
+    assert rail._claim(AgentState.SUPERVISING) < rail._claim(AgentState.THINKING)
+    # Above nothing-left-to-say, though: it is a live session.
+    assert rail._claim(AgentState.SUPERVISING) > rail._claim(AgentState.DONE)
+
+
+def test_the_composer_stays_live_for_a_supervising_lead() -> None:
+    """
+    ``draw_conversation`` disables the box on ``is_terminal`` and nothing else, so
+    this one property is the whole of "compose offers input". The measured
+    capability it is offering is real -- verify_lead_turn_via_agent_session.py,
+    ANSWERED-IN-WAIT-LOOP -- and a box disabled here would deny it in the one state
+    it applies to.
+    """
+    assert not AgentState.SUPERVISING.is_terminal
+
+
+def test_the_composer_stops_telling_a_supervising_lead_to_wait() -> None:
+    """
+    Source-level, because drawing needs a GL context.
+
+    The line this replaces said "a message will be read after this turn" while the
+    turn was already over and the message would be read now. It was the operator's
+    only information about a capability they already had, and it was false --
+    which is the whole of item 2.
+    """
+    import inspect
+
+    from pptmstr.ui.compose import draw_conversation
+
+    body = inspect.getsource(draw_conversation)
+    arm = body.split("AgentState.SUPERVISING", 1)[1].split("elif", 1)[0]
+    assert "read now" in arm
+    assert "after this turn" not in arm

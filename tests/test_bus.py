@@ -1599,21 +1599,53 @@ def test_the_watchdog_resets_when_the_reply_lands() -> None:
     assert state.stranded_reported is False
 
 
-def test_the_watchdogs_are_actually_wired_into_the_frame_loop() -> None:
+def test_the_watchdogs_are_actually_started() -> None:
     """
-    Source-level, because the alternative is an untested integration point.
+    The watchdogs are pure functions with thorough unit tests, and every one of
+    those tests passes while nothing calls them -- verified by unwiring them.
 
-    Both watchdogs are pure functions with thorough unit tests, and unwiring either
-    from begin_frame leaves every one of those tests passing -- verified by doing
-    it. A watchdog nothing calls is worse than none: it reads as covered.
+    They no longer run on the frame loop. They cannot: the frame loop's own death is
+    the failure they exist to report, and a check called from ``begin_frame`` is
+    gone at exactly the moment it is needed. They run on the asyncio loop instead,
+    in ``app.watch``, which relocates the hazard rather than removing it -- a
+    coroutine can be defined, unit-tested and never scheduled, and reads as covered
+    just as thoroughly as an unwired function did.
+
+    So this asserts the task is started, by starting it. The source check that
+    follows is on the startup path itself, which is the point a rewiring would have
+    to move; asserting a name appears in some function's body would keep the letter
+    of the old test and lose what it was for.
     """
     import inspect
 
-    from pptmstr.app import begin_frame
+    from pptmstr.app import AppState, main, watch
+    from pptmstr.bridge import Bridge
+    from pptmstr.settings import Settings
 
-    body = inspect.getsource(begin_frame)
-    assert "_check_for_lost_approvals(state)" in body
-    assert "_check_for_stranded_requests(state)" in body
+    assert "state.bridge.submit(watch(state))" in inspect.getsource(main)
+
+    bridge = Bridge()
+    bridge.start()
+    try:
+        state = AppState(store=Store(), bridge=bridge, settings=Settings())
+        # Each of the three clears its latch when its condition does not hold, so a
+        # quiet application is enough to observe all three having run. Set them, and
+        # a tick is what puts them back -- nothing else in the process touches them.
+        state.stranded_since, state.stranded_reported = 1.0, True
+        state.lost_since, state.lost_reported = 1.0, True
+        state.stall_reported = True
+
+        future = bridge.submit(watch(state))
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and state.stranded_reported:
+            time.sleep(0.01)
+
+        assert state.stranded_reported is False, "watch() never reached the bus check"
+        assert state.lost_reported is False, "watch() never reached the approval check"
+        assert state.stall_reported is False, "watch() never reached the drain-stall check"
+        assert not future.done(), "the watchdog task died on its first tick"
+    finally:
+        bridge.stop()
 
 
 def test_a_declaration_is_reviewed_by_policy_and_not_by_accident() -> None:

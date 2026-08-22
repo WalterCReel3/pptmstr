@@ -118,7 +118,7 @@ class Luminance(IntEnum):
 
 # -- the cycling set -----------------------------------------------------------
 #
-# What fraction of the ranked, non-space cells take part. Membership is decided once
+# What fraction of the cells take part, blank and ink alike. Membership is decided once
 # per cell position from a hash and never changes: a set that is re-rolled per frame
 # reads as uniform noise over the whole image, because every cell is eventually in it.
 # Holding a third of the cells still-and-cycling and the rest simply still is what
@@ -133,14 +133,18 @@ _MEMBERSHIP_THRESHOLD = CYCLING_FRACTION * _MEMBERSHIP_BUCKETS
 # -- the substitution pool ------------------------------------------------------
 #
 # A cell that substitutes draws its replacement from the union of every bucket in
-# ``ranks`` -- one flat pool of the whole curated inventory, 165 non-space glyphs -- and
+# ``ranks`` plus one U+0020 -- 166 slots, the whole curated inventory and a blank -- and
 # not from the bucket its own glyph belongs to. That is the point rather than a
 # simplification: near-random glyphs in the wake are the glitch effect this animation is
 # going for, not a texture that holds the picture's brightness steady underneath it.
 #
-# So ``ranks``/``rank_of`` gate *eligibility* and nothing else. A cell substitutes only
-# if its glyph is ranked, that rank indexes a real, non-empty bucket, and the cell is in
-# the cycling set -- but *which* bucket never reaches the output.
+# Erosion is the effect -- the wake dissolves the image and subsides off it, revealing the
+# outline -- so blank cells take ink and ink blanks out, both on the same ramp. The blank
+# is one slot in 166, a rate the inventory's size gives rather than one anybody chose.
+#
+# So ``ranks``/``rank_of`` gate *eligibility*, and only ink's: ranked glyph, real
+# non-empty bucket, and in the cycling set. A blank has no rank by contract and rides on
+# membership alone. Either way *which* bucket never reaches the output.
 #
 # What that means for someone changing the bucket widths in scripts/rank_glyphs.py: the
 # partition is render-inert except for the order it is read in. Every partition of the
@@ -152,9 +156,10 @@ _MEMBERSHIP_THRESHOLD = CYCLING_FRACTION * _MEMBERSHIP_BUCKETS
 #
 # What "curated" is still doing: scripts/rank_glyphs.py refuses any glyph the face
 # cannot draw, and scripts/verify_splash.py checks that every codepoint in the art shares
-# one advance width at every size ``fit_size`` can return. A substitute is therefore
-# always a glyph that exists in the baked atlas and never one that shifts a column. A
-# pool of "any printable character" would give up both.
+# one advance width at every size ``fit_size`` can return -- U+0020 among them, since that
+# run reads its codepoints off the art's own rows. A substitute is therefore always a
+# glyph the baked atlas has and never one that shifts a column. A pool of "any printable
+# character" would give up both.
 #
 # What changing ``RASTER_ROWS_PER_SECOND`` does to substitution, stated because it is not
 # visible from that constant's own section: the draw is re-taken every step and the
@@ -287,19 +292,14 @@ def art_frame(
     and what that buys is arguably the better read anyway: the art
     visibly heals as the wake drains behind the line, and nothing frozen is left in it.
 
-    A cell is substituted only when all of these hold, and every failure is a no-op
-    rather than an error (STYLE.md §1, "an intent for something that does not exist is
-    a no-op"): the character is not a space, it has a rank, that rank indexes a real
-    bucket, the cell is in the cycling set, its draw succeeds, and the glyph the draw
-    selects is not itself a space. An unranked glyph is a hole in the ranking table, not
-    a bug worth aborting a frame for.
+    A cell is substituted when it is in the cycling set and its draw succeeds. Ink also
+    has to be ranked into a real, non-empty bucket; a blank has no rank by contract, so
+    those gates skip it and it runs on the same ramp as everything else. Every failure is
+    a no-op rather than an error (STYLE.md §1) -- an unranked glyph is a hole in the
+    ranking table, not a bug worth aborting a frame for.
 
-    Space is guarded in both directions, even though the contract says U+0020 is absent
-    from ``rank_of``. The art's shape *is* its whitespace, so a ranking table that grew
-    a space entry would dissolve the image from either side -- a space overwritten with
-    ink erodes the negative space, and ink replaced by a space punches holes in the
-    silhouette. Both are silent failures, and the second is the one that is visible at a
-    glance, which is worth one comparison per substitution to make impossible.
+    The pool carries a blank of its own, so ink erodes too. One glyph for one glyph in
+    either direction, so no line changes length and no cell moves column.
 
     A successful draw picks a glyph from the substitution pool without regard to what is
     already there, so a cell can draw the glyph it is already showing. That is a change
@@ -313,13 +313,18 @@ def art_frame(
     # ``ArtFrames``), so building it here is one pass over the 165-glyph inventory a step
     # rather than one per substituting cell.
     #
+    # The trailing blank is the slot that erodes ink, appended here rather than added to
+    # ``ranks`` so the ranking table stays a table of ranked glyphs. It also keeps the pool
+    # non-empty for a blank cell, which reaches the index below without passing any gate
+    # that mentions ``ranks``.
+    #
     # The *order* of this flattening is load-bearing, and what pins it is
     # tests/test_splash_art.py::test_the_substitution_pool_flattens_in_the_order_that_ships,
     # a digest over the flattened table. It is
     # indexed directly below, so it decides which glyph each (row, col, step) shows;
     # ``sorted(rank_of)`` or a set-based build would hold every test here green and
     # change every frame of the animation.
-    pool: tuple[str, ...] = tuple(char for bucket in ranks for char in bucket)
+    pool: tuple[str, ...] = tuple(char for bucket in ranks for char in bucket) + (" ",)
 
     lines: list[str] = []
     luminance: list[Luminance] = []
@@ -343,22 +348,18 @@ def art_frame(
 
         cells: list[str] | None = None
         for col, ch in enumerate(line):
-            if ch == " ":
-                continue
-            bucket_index = rank_of.get(ch)
-            if bucket_index is None or not 0 <= bucket_index < len(ranks):
-                continue
-            bucket = ranks[bucket_index]
-            if not bucket:
-                continue
+            if ch != " ":
+                bucket_index = rank_of.get(ch)
+                if bucket_index is None or not 0 <= bucket_index < len(ranks):
+                    continue
+                if not ranks[bucket_index]:
+                    continue
             if not is_cycling(row, col):
                 continue
             drawn = _draw_hash(row, col, step)
             if drawn % _DRAW_BUCKETS >= threshold:
                 continue
             substitute = pool[(drawn >> _DRAW_BITS) % len(pool)]
-            if substitute == " ":
-                continue
             if cells is None:
                 cells = list(line)
             cells[col] = substitute

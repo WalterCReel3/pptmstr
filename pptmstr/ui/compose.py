@@ -78,6 +78,16 @@ def draw_conversation(
     waiting = record.state is AgentState.AWAITING_INPUT
     if waiting:
         imgui.text_colored(P.state_awaiting_input.vec4, "this session is waiting for you")
+    elif record.state is AgentState.SUPERVISING:
+        # Measured, not assumed: a prompt sent while sub-agents are running is
+        # dispatched as its own turn and answered without waiting for the fan-out
+        # (scripts/verify_lead_turn_via_agent_session.py, ANSWERED-IN-WAIT-LOOP).
+        # This line used to say the message would be read after the turn, which was
+        # the operator's only information about a capability they already had.
+        imgui.text_colored(
+            P.state_supervising.vec4,
+            "supervising its sub-agents - a message will be read now, not after them",
+        )
     elif record.state.is_terminal:
         imgui.text_disabled(f"session {record.state.value} - it can no longer be messaged")
     else:
