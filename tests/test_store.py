@@ -31,6 +31,7 @@ from pptmstr.intents import (
     UsageAccrued,
 )
 from pptmstr.model import (
+    AWAITING_TOPIC,
     AgentState,
     ApprovalNeeded,
     ContextPressure,
@@ -1019,3 +1020,62 @@ def test_every_parked_call_is_stamped_from_the_monotonic_clock() -> None:
     assert sites, "no PendingApproval construction found -- this pin has gone blind"
     assert not wrong, "requested_at must be time.monotonic(): " + "; ".join(wrong)
 
+
+# -- a lead waiting on its workers -----------------------------------------------
+
+
+def test_supervising_does_not_hold_the_render_loop_at_full_speed() -> None:
+    """
+    A supervising lead is doing nothing itself; its workers are.
+
+    Those workers are separate nodes carrying their own active states, so a fan-out
+    with anything running in it already holds the loop at full speed through them --
+    counting the lead as well would count the same work twice. And a fan-out where
+    every worker is itself parked at the gate is a tree that should idle, which is
+    I8 as a CPU number rather than a claim.
+    """
+    assert not AgentState.SUPERVISING.is_active
+    assert not AgentState.SUPERVISING.is_terminal
+
+
+def test_a_supervising_lead_does_not_make_the_tree_look_busy() -> None:
+    """
+    ``any_active`` drives idling for the whole application, so the property above
+    has to hold through the projection and not only on the enum.
+    """
+    store = Store()
+    store.apply(spawn(ROOT), now=1.0)
+    store.apply(StateChanged(ROOT, AgentState.SUPERVISING), now=2.0)
+
+    assert store.snapshot().any_active is False
+
+
+def test_a_supervising_lead_is_kept_busy_by_a_worker_that_is_working() -> None:
+    """
+    The other half: the loop must stay hot while the fan-out is actually running,
+    and it does so through the workers rather than through the lead.
+    """
+    store = Store()
+    store.apply(spawn(ROOT), now=1.0)
+    store.apply(spawn(CHILD, ROOT), now=1.0)
+    store.apply(StateChanged(ROOT, AgentState.SUPERVISING), now=2.0)
+    store.apply(StateChanged(CHILD, AgentState.THINKING), now=2.0)
+
+    assert store.snapshot().any_active is True
+
+
+def test_a_supervising_lead_can_be_moved_off_the_state_like_any_other() -> None:
+    """
+    SUPERVISING is not terminal and nothing in the store treats it specially, so the
+    turn-over state that follows the wait has to land. A state that stuck would leave
+    a finished fan-out reading as one still in progress -- with a composer promising
+    an answer that will never come.
+    """
+    store = Store()
+    store.apply(spawn(ROOT), now=1.0)
+    store.apply(StateChanged(ROOT, AgentState.SUPERVISING), now=2.0)
+    store.apply(StateChanged(ROOT, AgentState.AWAITING_INPUT, topic=AWAITING_TOPIC), now=3.0)
+
+    rec = store.snapshot().nodes[ROOT]
+    assert rec.state is AgentState.AWAITING_INPUT
+    assert rec.state_since == 3.0

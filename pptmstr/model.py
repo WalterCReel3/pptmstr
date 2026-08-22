@@ -38,6 +38,7 @@ class AgentState(enum.Enum):
 
     SPAWNING -> THINKING <-> CALLING_TOOL -> AWAITING_APPROVAL -> RUNNING_TOOL
                                           \\-> (auto-approved) -/
+      -> SUPERVISING     (turn over, sub-agents still running)
       -> AWAITING_INPUT  (turn over, session live, operator may send another)
       -> DONE | FAILED | CANCELLED | RATE_LIMITED
 
@@ -49,6 +50,19 @@ class AgentState(enum.Enum):
     CALLING_TOOL = "calling_tool"
     AWAITING_APPROVAL = "awaiting_approval"
     RUNNING_TOOL = "running_tool"
+    # A lead whose own turn is over while its sub-agents are still running.
+    #
+    # It exists because THINKING was what this rendered as, and THINKING is also what
+    # a lead mid-turn renders as -- so the surfaces could not tell the operator
+    # something that is measured true: a prompt sent now is dispatched now, as its
+    # own turn, and answered without waiting for the fan-out
+    # (scripts/verify_lead_turn_via_agent_session.py, ANSWERED-IN-WAIT-LOOP). Every
+    # surface said the opposite. The state is what lets them stop.
+    #
+    # It is not an obligation. The lead is waiting on its workers, not on the
+    # operator, and nothing is owed -- see ``_needs_you``, which deliberately does
+    # not list it.
+    SUPERVISING = "supervising"
     # Turn finished, session still connected, ready for another prompt. Idle, like
     # AWAITING_APPROVAL: a conversation paused on the operator must cost nothing.
     # This is what DONE used to be mistaken for -- an agent that has asked a
@@ -69,6 +83,13 @@ class AgentState(enum.Enum):
         review is the normal resting state of this tool, and it must cost nothing
         (I8). An orchestrator that spins at 60fps while waiting on its operator has
         its idle behaviour exactly backwards.
+
+        SUPERVISING is not active either, for the same reason one step removed: the
+        lead is parked on its workers and doing nothing itself. The workers are
+        separate nodes carrying their own states, so a fan-out with anything running
+        in it already holds the loop at full speed through them -- counting the lead
+        as well would be counting the same work twice, and a fan-out where every
+        worker is itself parked on the operator is a tree that should idle.
         """
         return self in _ACTIVE_STATES
 
@@ -91,6 +112,14 @@ _TERMINAL_STATES = frozenset({AgentState.DONE, AgentState.FAILED, AgentState.CAN
 # interrupted is worse than either being wrong alone.
 AWAITING_TOPIC = "waiting for you"
 INTERRUPTED_TOPIC = "interrupted - waiting for you"
+
+# What a lead is doing between its own turn ending and its workers finishing.
+#
+# Here rather than spelled in the driver for the same reason as the two above: the
+# topic column is the row's one line of prose, and it has to agree with what
+# ``compose`` tells the operator they can do about it. Two spellings of the same
+# situation is how a row and a pane end up contradicting each other.
+SUPERVISING_TOPIC = "supervising its sub-agents - you can send now"
 
 
 @dataclass(frozen=True, slots=True)

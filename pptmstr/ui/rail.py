@@ -240,6 +240,14 @@ def _claim(state: AgentState) -> int:
             return 3
         case AgentState.CALLING_TOOL | AgentState.RUNNING_TOOL | AgentState.THINKING:
             return 2
+        # Below working. A supervising agent is reachable and worth showing, but it
+        # is not blocked on anything the operator holds -- ranking it with
+        # AWAITING_INPUT would put "you could talk to this" above a sibling that is
+        # actually stopped and waiting. Only a root reaches this state today; the arm
+        # is what keeps the match total, and the rank is what it would mean if a
+        # sub-agent ever fanned out of its own.
+        case AgentState.SUPERVISING:
+            return 1
         case AgentState.SPAWNING:
             return 1
         case AgentState.DONE | AgentState.CANCELLED:

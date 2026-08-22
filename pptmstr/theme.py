@@ -140,6 +140,7 @@ class Palette:
     state_awaiting: Color
     state_running: Color
     state_awaiting_input: Color
+    state_supervising: Color
     state_done: Color
     state_failed: Color
     state_cancelled: Color
@@ -173,6 +174,7 @@ _STATE_ROLE: dict[AgentState, str] = {
     AgentState.AWAITING_APPROVAL: "state_awaiting",
     AgentState.RUNNING_TOOL: "state_running",
     AgentState.AWAITING_INPUT: "state_awaiting_input",
+    AgentState.SUPERVISING: "state_supervising",
     AgentState.DONE: "state_done",
     AgentState.FAILED: "state_failed",
     AgentState.CANCELLED: "state_cancelled",
@@ -195,6 +197,7 @@ STATE_GLYPH: dict[AgentState, str] = {
     AgentState.AWAITING_APPROVAL: fa.ICON_FA_HAND,
     AgentState.RUNNING_TOOL: fa.ICON_FA_GEARS,
     AgentState.AWAITING_INPUT: fa.ICON_FA_COMMENT_DOTS,
+    AgentState.SUPERVISING: fa.ICON_FA_SITEMAP,
     AgentState.DONE: fa.ICON_FA_CHECK,
     AgentState.FAILED: fa.ICON_FA_TRIANGLE_EXCLAMATION,
     AgentState.CANCELLED: fa.ICON_FA_BAN,
@@ -233,6 +236,7 @@ STATE_LABEL: dict[AgentState, str] = {
     AgentState.AWAITING_APPROVAL: "REVIEW",
     AgentState.RUNNING_TOOL: "running",
     AgentState.AWAITING_INPUT: "YOUR TURN",
+    AgentState.SUPERVISING: "supervising",
     AgentState.DONE: "done",
     AgentState.FAILED: "failed",
     AgentState.CANCELLED: "cancelled",
@@ -263,6 +267,7 @@ DARK = Palette(
     state_awaiting=col(0xE8B339),
     state_running=col(0x4EC97E),
     state_awaiting_input=col(0x8AB4F8),
+    state_supervising=col(0xB39DFF),
     state_done=col(0x6E7688),
     state_failed=col(0xE5484D),
     state_cancelled=col(0x6E7688),
@@ -299,6 +304,7 @@ LIGHT = Palette(
     state_awaiting=col(0x8A5A00),
     state_running=col(0x1A6E3C),
     state_awaiting_input=col(0x2A4FA8),
+    state_supervising=col(0x5B3FBF),
     state_done=col(0x6B7280),
     state_failed=col(0xB3211F),
     state_cancelled=col(0x6B7280),
@@ -339,6 +345,7 @@ HIGH_CONTRAST = Palette(
     state_awaiting=col(0xFFD400),
     state_running=col(0x4CFF88),
     state_awaiting_input=col(0x8FB8FF),
+    state_supervising=col(0xD7A0FF),
     state_done=col(0xC0C0C0),
     state_failed=col(0xFF6B6B),
     state_cancelled=col(0xC0C0C0),
@@ -378,6 +385,7 @@ GHOST = Palette(
     state_awaiting=col(0xE8C547),
     state_running=col(0x5BE8A0),
     state_awaiting_input=col(0x4FD6FF),
+    state_supervising=col(0xB89CFF),
     state_done=col(0x4A6B66),
     state_failed=col(0xFF5470),
     state_cancelled=col(0x4A6B66),
@@ -427,6 +435,7 @@ XTERM = Palette(
     state_awaiting=col(0x8A6D00),
     state_running=col(0x006B00),
     state_awaiting_input=col(0x005F87),
+    state_supervising=col(0x5C2D91),
     state_done=col(0x6B685E),
     state_failed=col(0xCD0000),
     state_cancelled=col(0x6B685E),
@@ -468,6 +477,7 @@ CDE = Palette(
     state_awaiting=col(0x6E4A00),
     state_running=col(0x165C33),
     state_awaiting_input=col(0x1F5490),
+    state_supervising=col(0x3B2A63),
     state_done=col(0x494D60),
     state_failed=col(0xA32020),
     state_cancelled=col(0x494D60),
@@ -510,6 +520,7 @@ WIN311 = Palette(
     state_awaiting=col(0x5E5E00),
     state_running=col(0x006B00),
     state_awaiting_input=col(0x1A32A8),
+    state_supervising=col(0x4B0082),
     state_done=col(0x4A4A4A),
     state_failed=col(0x900000),
     state_cancelled=col(0x4A4A4A),
@@ -551,6 +562,7 @@ KITTY = Palette(
     state_awaiting=col(0xB07A00),
     state_running=col(0x1E8F5E),
     state_awaiting_input=col(0x5B6FD6),
+    state_supervising=col(0x7A3FBF),
     state_done=col(0x8C7A85),
     state_failed=col(0xD62246),
     state_cancelled=col(0x8C7A85),
@@ -592,6 +604,7 @@ TURBO = Palette(
     state_awaiting=col(0xFFFF54),
     state_running=col(0x54FC54),
     state_awaiting_input=col(0x54A8FC),
+    state_supervising=col(0xD79FFF),
     state_done=col(0x8A8A8A),
     state_failed=col(0xFF5454),
     state_cancelled=col(0x8A8A8A),

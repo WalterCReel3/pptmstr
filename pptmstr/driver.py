@@ -74,6 +74,7 @@ from .log import LOG
 from .model import (
     AWAITING_TOPIC,
     INTERRUPTED_TOPIC,
+    SUPERVISING_TOPIC,
     AgentState,
     ContextSnapshot,
     NodeId,
@@ -1536,6 +1537,19 @@ class AgentSession:
                         failure = None
                     if isinstance(message, ResultMessage) and failure is None:
                         if self._live_subagents:
+                            # The lead's own turn is over and its workers are not.
+                            # Said here rather than left on whatever the last
+                            # assistant message set, because THINKING is what that
+                            # leaves behind and THINKING is also what a lead
+                            # mid-turn looks like -- one state for two situations
+                            # the operator has to act on differently.
+                            self.bridge.emit(
+                                StateChanged(
+                                    self.node_id,
+                                    AgentState.SUPERVISING,
+                                    topic=SUPERVISING_TOPIC,
+                                )
+                            )
                             await self._await_subagents(client, translator)
                         await self._poll_context()
                         # Ready for another prompt rather than finished. Idle, so a

@@ -42,6 +42,7 @@ from pptmstr.intents import (
 from pptmstr.model import (
     AWAITING_TOPIC,
     INTERRUPTED_TOPIC,
+    SUPERVISING_TOPIC,
     AgentState,
     LaunchSpec,
     NodeId,
@@ -3038,3 +3039,103 @@ def test_a_brief_that_cannot_be_written_does_not_stop_the_launch(monkeypatch, tm
 
     assert session.brief is None
     assert session.task == "premises"
+
+
+# -- a lead that is only waiting on its workers ----------------------------------
+#
+# Measured, not supposed: `scripts/verify_lead_turn_via_agent_session.py` ran the
+# full stack and reported ANSWERED-IN-WAIT-LOOP -- a prompt sent while sub-agents
+# were live came back as its own turn, ahead of the fan-out. Every surface said
+# otherwise, and the reason is here: `_result` emits no state intent, so the lead
+# keeps whatever its last assistant message set. That is THINKING, which is also
+# what a lead mid-turn wears, so one state stood for two situations the operator
+# has to act on differently.
+
+
+def _states_of(session: AgentSession, intents: list[object]) -> list[AgentState]:
+    return [
+        i.state for i in intents if isinstance(i, StateChanged) and i.node_id == session.node_id
+    ]
+
+
+def test_a_lead_waiting_on_its_workers_is_not_left_reading_as_thinking(monkeypatch) -> None:
+    """
+    Entering `_await_subagents` is the one moment the lead's own state is knowable,
+    and it is emitted there rather than inferred later.
+    """
+    bridge = Bridge()
+    session = AgentSession(bridge, task="fan out")
+    # A worker admitted before the lead's turn ended, which is what puts run() into
+    # the wait at all.
+    session._live_subagents.add("worker-1")
+    seen: list[object] = []
+
+    def frame() -> None:
+        seen.extend(bridge.drain())
+
+    monkeypatch.setattr(
+        "pptmstr.driver.ClaudeSDKClient",
+        lambda **_: _FakeClient([result()], frame),
+    )
+    asyncio.run(session.run())
+    frame()
+
+    states = _states_of(session, seen)
+    assert AgentState.SUPERVISING in states, "the lead never said it was supervising"
+    # Before the turn-over state, not instead of it: once the workers are done the
+    # lead is genuinely waiting on the operator and must still say so.
+    assert states.index(AgentState.SUPERVISING) < states.index(AgentState.AWAITING_INPUT)
+
+
+def test_the_supervising_topic_says_the_lead_can_be_reached(monkeypatch) -> None:
+    """
+    The topic column is the row's one line of prose and is on screen every frame,
+    so it carries the part the operator can act on. A state with no topic would say
+    "supervising" and leave the capability as something to be found out.
+    """
+    bridge = Bridge()
+    session = AgentSession(bridge, task="fan out")
+    session._live_subagents.add("worker-1")
+    seen: list[object] = []
+
+    def frame() -> None:
+        seen.extend(bridge.drain())
+
+    monkeypatch.setattr(
+        "pptmstr.driver.ClaudeSDKClient",
+        lambda **_: _FakeClient([result()], frame),
+    )
+    asyncio.run(session.run())
+    frame()
+
+    supervising = [
+        i for i in seen if isinstance(i, StateChanged) and i.state is AgentState.SUPERVISING
+    ]
+    assert supervising
+    assert supervising[0].topic == SUPERVISING_TOPIC
+    assert "send" in SUPERVISING_TOPIC
+
+
+def test_a_lead_with_no_workers_never_claims_to_be_supervising(monkeypatch) -> None:
+    """
+    The state is about the wait, not about being a lead. A solo session whose turn
+    ends goes straight to AWAITING_INPUT, and a spurious SUPERVISING there would
+    tell the operator to expect an answer that has nothing to arrive from.
+    """
+    bridge = Bridge()
+    session = AgentSession(bridge, task="alone")
+    seen: list[object] = []
+
+    def frame() -> None:
+        seen.extend(bridge.drain())
+
+    monkeypatch.setattr(
+        "pptmstr.driver.ClaudeSDKClient",
+        lambda **_: _FakeClient([result()], frame),
+    )
+    asyncio.run(session.run())
+    frame()
+
+    states = _states_of(session, seen)
+    assert AgentState.SUPERVISING not in states
+    assert AgentState.AWAITING_INPUT in states

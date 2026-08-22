@@ -149,6 +149,14 @@ def draw(snap: Snapshot, node: NodeId | None, actions: HealthActions, now: float
     _small()
     if root.state is AgentState.AWAITING_INPUT:
         imgui.text_colored(P.text_dim.vec4, "this session holds a slot until it is closed")
+    elif root.state is AgentState.SUPERVISING:
+        # The measured fact, and the only one worth the line: a prompt sent now is
+        # dispatched now rather than queued behind the fan-out. What interrupt does
+        # to a lead's outstanding sub-agents has not been measured, so this does not
+        # say.
+        imgui.text_colored(
+            P.text_dim.vec4, "a prompt sent now is read now, without waiting for its sub-agents"
+        )
     else:
         imgui.text_colored(P.text_dim.vec4, "interrupt keeps context; close ends the session")
     _normal()
