@@ -26,6 +26,7 @@ import concurrent.futures
 import contextlib
 import queue
 import threading
+import time
 from collections.abc import Coroutine, Mapping
 from dataclasses import dataclass
 from typing import Any, TypeVar
@@ -45,6 +46,17 @@ class Decision:
     # Edit-then-approve (§5.3): the corrected arguments to run instead of what the
     # agent asked for. None means "run it as requested".
     edited_args: Mapping[str, Any] | None = None
+    # Whether a human settled this. False means the host ended the park with nobody
+    # asked -- ``fail_all_pending`` at teardown is the only producer today.
+    #
+    # It exists because the gate cannot tell the two apart from the outside: both
+    # arrive as ``approved=False`` with a reason, and the reason is handed to the
+    # model in the slot a tool result arrives in. Told a human refused it, an agent
+    # rewrites the call and tries again; told the host stopped, it has nothing to
+    # retry against. A park the host ended and one an operator declined must
+    # therefore not read alike, which is the be4cc53 property applied to the gate's
+    # own failure rather than to the tool's.
+    from_operator: bool = True
 
 
 class Bridge:
@@ -69,6 +81,21 @@ class Bridge:
         # if the store never gets the chance to. Same sharing, same locking.
         self._requests_lock = threading.Lock()
         self._requests: dict[str, tuple[asyncio.Future[Effect], Effect]] = {}
+        # When the UI thread last took the queue. The one signal that says the frame
+        # loop is alive, and the only one available from the asyncio side: intents
+        # keep arriving whether or not anybody is reading them, so queue depth
+        # cannot distinguish a quiet session from a dead consumer.
+        #
+        # Stamped from construction rather than left None, so "how long since a
+        # drain" is a number from the first poll instead of a special case, and a
+        # host that never rendered a frame at all is the loudest case rather than
+        # the silent one.
+        #
+        # A bare float, deliberately unlocked: one writer, one reader, and CPython
+        # attribute assignment is atomic. A lock here would put the frame loop
+        # behind a mutex 60 times a second to protect a value read against a
+        # threshold measured in tens of seconds.
+        self._last_drain_at = time.monotonic()
 
     # -- lifecycle ---------------------------------------------------------------
 
@@ -119,7 +146,7 @@ class Bridge:
         # -- and an agent awaiting an inbox read is in exactly the same position,
         # so both tables are drained here rather than only the one that predates
         # the bus.
-        self.fail_all_pending("shutting down")
+        self.fail_all_pending(self.host_stopped_reason())
         self.abandon_all_requests()
         try:
             asyncio.run_coroutine_threadsafe(_drain_tasks(grace), loop).result(timeout=grace + 1.0)
@@ -163,6 +190,7 @@ class Bridge:
         otherwise keep this loop fed forever and the frame would never render.
         Anything left over is picked up next frame.
         """
+        self._last_drain_at = time.monotonic()
         out: list[Intent] = []
         for _ in range(max_items):
             try:
@@ -287,8 +315,41 @@ class Bridge:
         with self._requests_lock:
             return len(self._requests)
 
+    def drain_stalled_for(self, now: float) -> float:
+        """
+        Seconds since the UI thread last took the queue.
+
+        ``now`` is passed in rather than read here so a watchdog can be driven
+        against a fixed clock pair, which is the only way to test a threshold whose
+        real value is measured in tens of seconds.
+        """
+        return now - self._last_drain_at
+
+    def host_stopped_reason(self) -> str:
+        """
+        Why a park is ending with nobody having answered it.
+
+        Names the frame loop's silence in seconds because that is the fact that
+        separates the two cases the model has to tell apart: a host torn down under
+        a live UI a moment after the operator quit, and one whose consumer had been
+        gone for hours before anything noticed.
+        """
+        stalled = self.drain_stalled_for(time.monotonic())
+        return (
+            "The pptmstr host stopped while this call was parked at its approval "
+            f"gate, and its frame loop had not drained for {stalled:.0f}s. Nobody "
+            "declined this call -- nobody saw it. Do not rewrite it and try again: "
+            "there is no longer an operator on the other side of this session."
+        )
+
     def fail_all_pending(self, reason: str) -> None:
-        """Reject every parked approval. Used on shutdown so no agent hangs."""
+        """
+        Reject every parked approval. Used on shutdown so no agent hangs.
+
+        ``from_operator=False``: this is the host ending the park, and the gate
+        renders it as such. Left at the default, every agent parked at teardown is
+        told a human refused it -- see ``Decision.from_operator``.
+        """
         with self._pending_lock:
             futures = list(self._pending.values())
             self._pending.clear()
@@ -297,7 +358,9 @@ class Bridge:
             return
         for fut in futures:
             with contextlib.suppress(RuntimeError):
-                loop.call_soon_threadsafe(_settle, fut, Decision(approved=False, reason=reason))
+                loop.call_soon_threadsafe(
+                    _settle, fut, Decision(approved=False, reason=reason, from_operator=False)
+                )
 
     @property
     def parked_count(self) -> int:

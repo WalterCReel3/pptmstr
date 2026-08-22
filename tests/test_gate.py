@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Callable
 
 import pytest
 
@@ -336,6 +337,327 @@ def test_parked_futures_and_visible_queue_agree(bridge: Bridge) -> None:
     bridge.submit(session._pre_tool_use(hook_input("Bash", command="ls"), None, {}))
     pump(store, bridge, lambda: bool(store.snapshot().approvals))
     assert bridge.parked_count == len(store.snapshot().approvals)
+
+
+# -- a dead gate must not be mistaken for a patient one --------------------------
+#
+# Session 7f0b40c2 spent three consecutive six-hour cycles parked against a host
+# that never answered, and could not tell that from an operator who had not looked
+# yet. The two facts a model needs to separate them are who ended the park and
+# whether anything is still consuming the queue.
+
+
+def test_a_park_the_host_ends_names_the_host_and_not_the_operator() -> None:
+    """
+    The frame loop stops, the host goes down under a parked approval, and the model
+    is told the host ended it -- not that a human refused it.
+
+    ``_DENIAL`` puts a source in front of every reason and the source is the whole
+    signal. An agent told the operator declined its call rewrites the call and comes
+    back; against a host that has stopped there is nothing to come back to, and that
+    retry is the six-hour cycle this item exists to break.
+
+    This drives the teardown path: the frame loop stops draining, and the process
+    then tears the Bridge down, which is what ``main``'s finally clause does when
+    ``immapp.run`` returns or raises. A frame loop that wedges *without* the process
+    exiting ends its parks through the CLI's per-hook timeout instead, which arrives
+    as a cancellation -- see ``_park``, which cannot answer that one.
+    """
+    b = Bridge()
+    b.start()
+    store = Store()
+    session = AgentSession(b, "task")
+    session.announce()
+    refusal: list[str] = []
+    done = threading.Event()
+
+    async def gate() -> None:
+        out = await session._pre_tool_use(hook_input("Bash", command="git push"), None, {})
+        refusal.append(out["hookSpecificOutput"]["permissionDecisionReason"])
+        done.set()
+
+    b.submit(gate())
+    # The frame loop is alive up to here: the approval is drained, applied, and on
+    # screen where the operator could have answered it.
+    pump(store, b, lambda: bool(store.snapshot().approvals))
+    assert b.parked_count == 1
+
+    # And now it is not. Nothing drains from this point; the host follows it down.
+    b.stop()
+    assert done.wait(TIMEOUT)
+
+    reason = refusal[0]
+    assert "human operator" not in reason
+    assert "host" in reason
+    # The drain age is what separates a host torn down a moment after the operator
+    # quit from one whose consumer had been gone for hours.
+    assert "not drained for" in reason
+    assert "no longer an operator" in reason
+
+
+def test_an_operators_refusal_still_reads_as_the_operators() -> None:
+    """
+    The other half of the same claim: widening the attribution must not have made
+    every denial say "host". A refusal a human actually gave is still theirs.
+    """
+    b = Bridge()
+    b.start()
+    try:
+        store = Store()
+        session = AgentSession(b, "task")
+        session.announce()
+        task = b.submit(session._pre_tool_use(hook_input("Bash", command="git push"), None, {}))
+        pump(store, b, lambda: bool(store.snapshot().approvals))
+        b.resolve(store.snapshot().approvals[0].id, Decision(approved=False, reason="not that"))
+        reason = task.result(timeout=TIMEOUT)["hookSpecificOutput"]["permissionDecisionReason"]
+    finally:
+        b.stop()
+
+    assert "human operator" in reason
+    assert "host" not in reason
+
+
+def test_a_stalled_host_warns_loudly_and_denies_nothing(bridge: Bridge) -> None:
+    """
+    The drain-stall watchdog's entire output is a warning. It must never settle a
+    parked future, at any stall length.
+
+    Its false-positive mode is an OS suspend or a closed lid, which is exactly the
+    overnight park decision 1 of 2026-08-22-an-approval-parked-overnight protects. A
+    deny arm here would auto-refuse the approvals the mechanism exists to keep alive,
+    and whether one is ever needed is probe P2's question, not this code's.
+
+    Both clock shapes are driven, because "no deny" is trivially true of a function
+    that does nothing and the two shapes together pin what it does do:
+
+      suspended -- the drain stamp and the clock advance together, as CLOCK_MONOTONIC
+                   does across a suspend. No warning, and nothing settled.
+      wedged    -- the clock advances alone. A warning, and still nothing settled.
+    """
+    from pptmstr.app import _check_for_drain_stall
+    from pptmstr.intents import ApprovalResolved
+    from pptmstr.log import LOG
+    from pptmstr.settings import Settings
+
+    store = Store()
+    session = AgentSession(bridge, "task")
+    session.announce()
+    task = bridge.submit(
+        session._pre_tool_use(hook_input("Write", file_path="/x", content="y"), None, {})
+    )
+    pump(store, bridge, lambda: bool(store.snapshot().approvals))
+    parked_id = store.snapshot().approvals[0].id
+
+    from pptmstr.app import AppState
+
+    state = AppState(store=store, bridge=bridge, settings=Settings())
+
+    def observables() -> tuple[int, bool, tuple[str, ...]]:
+        """Everything that would move if a deny had happened, and nothing else."""
+        queued = bridge.drain()
+        store.apply_all(queued)
+        return (
+            bridge.parked_count,
+            task.done(),
+            tuple(p.id for p in store.snapshot().approvals),
+        )
+
+    # Ten hours of suspend: the machine was asleep, so neither clock ran. The
+    # timestamp is placed rather than waited for -- the threshold is measured in
+    # tens of seconds and there is no seam that fakes the clock for both sides.
+    resumed_at = bridge._last_drain_at + 10 * 60 * 60
+    bridge._last_drain_at = resumed_at
+    before = len(LOG.snapshot()[0])
+    _check_for_drain_stall(state, resumed_at + 0.5)
+
+    assert state.stall_reported is False
+    assert len(LOG.snapshot()[0]) == before
+    assert observables() == (1, False, (parked_id,))
+
+    # Same ten hours, but only the clock moved: nothing has taken the queue.
+    _check_for_drain_stall(state, resumed_at + 10 * 60 * 60)
+
+    assert state.stall_reported is True
+    warnings = [e for e in LOG.snapshot()[0][before:] if e.level.name == "ERROR"]
+    assert warnings, "a wedged host with an approval parked must be reported"
+    assert "Nothing has been denied" in warnings[-1].text
+
+    # The point of the whole test: the warning changed nothing the agent depends on.
+    assert observables() == (1, False, (parked_id,))
+    assert not any(isinstance(i, ApprovalResolved) for i in bridge.drain())
+
+    bridge.resolve(parked_id, Decision(approved=True))
+    task.result(timeout=TIMEOUT)
+
+
+def _resolution_of(bridge: Bridge, cancel: Callable[[], object]) -> str:
+    """Cancel a parked gate and return the reason the cleared row carries."""
+    from pptmstr.intents import ApprovalResolved
+
+    cancel()
+    deadline = time.monotonic() + TIMEOUT
+    seen: list[ApprovalResolved] = []
+    while time.monotonic() < deadline and not seen:
+        seen += [i for i in bridge.drain() if isinstance(i, ApprovalResolved)]
+        time.sleep(0.01)
+    assert seen, "a cancelled park must clear its row"
+    return seen[0].reason or ""
+
+
+def test_a_hook_the_cli_aborted_is_not_recorded_as_a_decision(bridge: Bridge) -> None:
+    """
+    A park that ends in a cancellation nobody asked for is the host failing, and the
+    row it clears must not read like the operator's session ending.
+
+    Those are the only two ways the gate coroutine is cancelled: the CLI aborting
+    the hook at its timeout (measured, scripts/verify_hook_timeout.py) or a teardown.
+    ``teardown_requested`` is the caller's own statement that it asked, and it is the
+    only thing that can tell them apart -- a bare "cancelled" makes an expected close
+    and the 7f0b40c2 failure the same word.
+
+    This is the operator's surface. The model gets nothing distinguishing on this
+    path, because the CLI has aborted the hook the answer would travel back through.
+    """
+    store = Store()
+    session = AgentSession(bridge, "task")
+    session.announce()
+    task = bridge.submit(
+        session._pre_tool_use(hook_input("Write", file_path="/x", content="y"), None, {})
+    )
+    pump(store, bridge, lambda: bool(store.snapshot().approvals))
+
+    reason = _resolution_of(bridge, task.cancel)
+
+    assert "no answer" in reason
+    assert "CLI aborted" in reason
+    assert "closed" not in reason
+    # And the cancellation propagates rather than being answered. Deliberate, and
+    # pinned so that turning it into a returned denial is a decision somebody makes
+    # rather than one that slips in: whether the CLI still delivers a value returned
+    # from a hook it has already aborted is unmeasured, and suppressing the
+    # cancellation takes this coroutine out of the teardown the loop relies on.
+    assert task.cancelled()
+
+
+def test_a_park_ended_by_closing_the_session_says_so(bridge: Bridge) -> None:
+    """The other arm: a teardown the pool asked for is not a host failure."""
+    store = Store()
+    session = AgentSession(bridge, "task")
+    session.announce()
+    task = bridge.submit(
+        session._pre_tool_use(hook_input("Write", file_path="/x", content="y"), None, {})
+    )
+    pump(store, bridge, lambda: bool(store.snapshot().approvals))
+    session.teardown_requested = True
+
+    reason = _resolution_of(bridge, task.cancel)
+
+    assert "this session was closed" in reason
+    assert "CLI aborted" not in reason
+
+
+def test_taking_the_queue_is_what_says_the_frame_loop_is_alive(bridge: Bridge) -> None:
+    """
+    The stall watchdog's whole evidence is the drain stamp, and every test above
+    places that stamp by hand. This is the one that pins the frame loop to it.
+
+    Stamped on every drain, including one that finds the queue empty. The signal is
+    "something is taking the queue", not "something was queued": an idle application
+    drains at ``fps_idle`` and finds nothing almost every time, and a stamp that
+    advanced only on a non-empty drain would read that as a dead host.
+    """
+    time.sleep(0.05)
+    at = time.monotonic()
+    before = bridge.drain_stalled_for(at)
+    assert before >= 0.05
+
+    assert bridge.drain() == []
+    after = bridge.drain_stalled_for(at)
+
+    assert after < before
+    assert after <= 0.0
+
+
+def test_a_stalled_host_writes_the_warning_where_the_operator_will_find_it(
+    bridge: Bridge,
+) -> None:
+    """
+    A log line is not enough on its own: the log is a ring buffer the operator has
+    to go and look at, and the transcript is what they are already reading when they
+    come back to a session that has not moved.
+    """
+    from pptmstr.app import AppState, _check_for_drain_stall
+    from pptmstr.settings import Settings
+    from pptmstr.transcript import SegmentKind
+
+    store = Store()
+    session = AgentSession(bridge, "task")
+    session.announce()
+    bridge.submit(session._pre_tool_use(hook_input("Write", file_path="/x", content="y"), None, {}))
+    pump(store, bridge, lambda: bool(store.snapshot().approvals))
+
+    state = AppState(store=store, bridge=bridge, settings=Settings())
+    _check_for_drain_stall(state, bridge._last_drain_at + 10 * 60 * 60)
+
+    transcript = store.snapshot().nodes[session.node_id].transcript
+    errors = [s for s in transcript.segments() if s.kind is SegmentKind.ERROR]
+    assert errors, "the stall must reach the transcript of the node holding the approval"
+    assert "stopped draining" in transcript.read(errors[-1].start, errors[-1].end)
+
+
+def test_an_idle_host_with_nothing_parked_is_not_reported(bridge: Bridge) -> None:
+    """
+    Both conditions are necessary. A stalled drain with nothing parked is an
+    application nobody is using, and a watchdog that cried about it would be muted
+    long before the one real occurrence.
+    """
+    from pptmstr.app import AppState, _check_for_drain_stall
+    from pptmstr.settings import Settings
+
+    state = AppState(store=Store(), bridge=bridge, settings=Settings())
+    _check_for_drain_stall(state, bridge._last_drain_at + 10 * 60 * 60)
+    assert state.stall_reported is False
+
+
+def test_every_watchdog_runs_somewhere_that_outlives_the_frame_loop() -> None:
+    """
+    Source-level and start-level both, because either alone passes while the
+    watchdogs are dead.
+
+    The frame loop is what these three watch, so a check called from ``begin_frame``
+    reports nothing in the one case it exists for. Moving them onto the asyncio loop
+    is only worth anything if something actually starts the task -- STYLE.md's
+    "a watchdog nothing calls is worse than no watchdog" applies just as well to the
+    new home as to the old one, so the task is started here for real rather than
+    grepped for.
+    """
+    import inspect
+
+    from pptmstr.app import AppState, main, watch
+    from pptmstr.settings import Settings
+
+    body = inspect.getsource(watch)
+    assert "_check_for_lost_approvals(state, now)" in body
+    assert "_check_for_stranded_requests(state, now)" in body
+    assert "_check_for_drain_stall(state, now)" in body
+    # Reads its own clock. A body measuring against state.frame_now would freeze
+    # with the frame loop and never cross a grace threshold -- passing every unit
+    # test that hands it a clock by hand, and reporting nothing in production.
+    assert "time.monotonic()" in body
+    assert "state.bridge.submit(watch(state))" in inspect.getsource(main)
+
+    b = Bridge()
+    b.start()
+    try:
+        state = AppState(store=Store(), bridge=b, settings=Settings())
+        future = b.submit(watch(state))
+        # Still running one poll interval later: the task was scheduled and did not
+        # die on its first tick.
+        time.sleep(0.2)
+        assert not future.done()
+    finally:
+        future.cancel()
+        b.stop()
 
 
 # -- the operator's rewrite is recorded, not just applied -------------------------

@@ -9,6 +9,7 @@ else in this package exists to keep those five steps honest.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import time
 import traceback
 from collections.abc import Callable
@@ -28,6 +29,7 @@ from .model import LaunchSpec, Snapshot
 from .pool import SessionPool
 from .store import Store
 from .theme import REQUIRED_THEMES, THEMES, P
+from .transcript import SegmentKind, Transcript
 from .ui import (
     board_pane,
     brief_pane,
@@ -90,6 +92,11 @@ class AppState:
     # Same idea for the bus's crossing. See _check_for_stranded_requests.
     stranded_since: float | None = None
     stranded_reported: bool = False
+    # Latched while the frame loop is not draining and agents are parked behind it.
+    # No "since" of its own: Bridge stamps every drain, so the age is a fact the
+    # Bridge already holds and a second copy here would be one more thing to keep
+    # true. See _check_for_drain_stall.
+    stall_reported: bool = False
     driver: FakeDriver | None = None
     pool: SessionPool | None = None
     # Layout asked for on the command line, applied once the runner is up.
@@ -131,8 +138,6 @@ def begin_frame(state: AppState) -> None:
     # the same whichever pane happens to have focus.
     review.handle_keys(state.frame_snap, state.focus, state.review, state.bridge)
     _handle_layout_keys(state)
-    _check_for_lost_approvals(state)
-    _check_for_stranded_requests(state)
 
 
 def _handle_layout_keys(state: AppState) -> None:
@@ -210,8 +215,120 @@ _LOST_APPROVAL_GRACE_S = 3.0
 # magnitude on purpose: it is a wedge detector, not a latency budget.
 _STRANDED_REQUEST_GRACE_S = 5.0
 
+# How long the frame loop may go without draining, with agents parked behind it,
+# before the host is reported wedged.
+#
+# Long enough that nothing a live host does reaches it: idling runs at fps_idle and
+# still drains every frame, and even a pathological single-frame stall is orders of
+# magnitude under this. Short enough to be worth having -- the failure it names cost
+# ~18h in session 7f0b40c2, and the whole complaint about APPROVAL_TIMEOUT_S as a
+# host-death backstop is that six hours is not a detection latency, it is an outage.
+_DRAIN_STALL_S = 30.0
 
-def _check_for_stranded_requests(state: AppState) -> None:
+# How often the loop-side watchdog wakes. Each tick is three integer comparisons
+# and a subtraction against thresholds measured in seconds, so this is a resolution
+# choice and not a cost one.
+_WATCHDOG_POLL_S = 1.0
+
+
+async def watch(state: AppState) -> None:
+    """
+    Run every watchdog, on the asyncio loop, forever.
+
+    **This lives here rather than in ``begin_frame`` because the frame loop is one
+    of the things being watched.** All three of these checks were previously called
+    from the frame loop, which makes them unable to report the failure that matters
+    most: a UI thread that has died or wedged stops draining, stops applying
+    intents, and stops running its own watchdogs in the same instant. The evidence
+    is a park nobody answers, and the thread that would have said so is the thread
+    that is gone.
+
+    The asyncio loop is the right host because it is where the parked agents
+    themselves are: if it is dead too, there is nothing left to warn about.
+
+    Reads the store and never writes it. ``Store`` is documented as not thread-safe
+    and that is about writes -- ``snapshot()`` is a single attribute read of a
+    frozen value, which is exactly what a watchdog on another thread can afford to
+    take. Every mutation still happens on the frame loop.
+
+    One clock reading per tick, taken here rather than inside each check, so three
+    warnings raised on the same tick describe the same instant. Passing it in is
+    also what makes the thresholds testable at all: they are measured in tens of
+    seconds and no test can afford to wait one out.
+
+    A tick that raises is logged and the loop continues. An exception escaping this
+    coroutine kills the task and takes all three watchdogs with it, silently, which
+    is the one failure mode a watchdog cannot have -- the same reason ``guarded``
+    exists for the draw path.
+    """
+    while True:
+        await asyncio.sleep(_WATCHDOG_POLL_S)
+        try:
+            now = time.monotonic()
+            _check_for_lost_approvals(state, now)
+            _check_for_stranded_requests(state, now)
+            _check_for_drain_stall(state, now)
+        except Exception as exc:
+            LOG.error("watchdog", f"{type(exc).__name__}: {exc}")
+
+
+def _stalled_transcripts(snap: Snapshot) -> tuple[Transcript, ...]:
+    """
+    Where to write a host-stall warning so the operator meets it on the way back in.
+
+    The nodes with approvals on screen first, because a stall is a fact about the
+    call they are holding. When the store shows none, the drain that would have put
+    them there is the thing that stopped -- so the session roots take it instead,
+    and the warning is not lost for being unable to name its node.
+    """
+    parked = tuple(dict.fromkeys(p.node for p in snap.approvals))
+    nodes = parked or tuple(n for n in snap.order if n[1] is None)
+    return tuple(snap.nodes[n].transcript for n in nodes if n in snap.nodes)
+
+
+def _check_for_drain_stall(state: AppState, now: float | None = None) -> None:
+    """
+    Agents are parked at the gate and nothing is taking the queue: the host is wedged.
+
+    **Warn only. This must never deny.** Its false-positive mode is an OS suspend or
+    a closed lid, which stalls the drain and the clock together and is precisely the
+    overnight park the gate exists to protect -- a deny arm here would auto-refuse
+    the approvals the mechanism was built to keep alive. Whether host-fully-dead
+    self-detects, and so whether a deny arm is ever needed, is probe P2's question
+    and is not answered here.
+
+    The two conditions are both necessary. A stalled drain with nothing parked is an
+    idle application and says nothing; parked approvals with a live drain is the
+    ordinary state of an operator who has not looked yet, and is I8 working.
+
+    Latched, so a wedged host logs once rather than once per poll for as long as it
+    stays wedged; cleared as soon as a drain lands, so a recovered host can report
+    again if it wedges twice.
+    """
+    at = time.monotonic() if now is None else now
+    parked = state.bridge.parked_count
+    stalled_for = state.bridge.drain_stalled_for(at)
+    if parked == 0 or stalled_for < _DRAIN_STALL_S:
+        state.stall_reported = False
+        return
+    if state.stall_reported:
+        return
+    state.stall_reported = True
+    LOG.error(
+        "gate",
+        f"the frame loop has not drained for {stalled_for:.0f}s with {parked} approval(s) "
+        "parked - this host looks wedged, and no approval can be answered until it "
+        "recovers. Nothing has been denied",
+    )
+    for transcript in _stalled_transcripts(state.store.snapshot()):
+        transcript.append(
+            SegmentKind.ERROR,
+            f"\n--- the pptmstr host stopped draining {stalled_for:.0f}s ago with "
+            f"{parked} approval(s) parked; no decision has been made ---\n",
+        )
+
+
+def _check_for_stranded_requests(state: AppState, now: float | None = None) -> None:
     """
     A bus request that outlives several frames was dropped.
 
@@ -226,16 +343,21 @@ def _check_for_stranded_requests(state: AppState) -> None:
 
     Found by the `research` template reviewing this codebase, which is the first
     thing the team feature has been used for.
+
+    ``now`` is the clock to measure against, defaulting to the frame's. A caller
+    that already has one reading passes it, so every check in a sweep agrees about
+    the instant it is describing.
     """
+    at = state.frame_now if now is None else now
     outstanding = state.bridge.asking_count
     if outstanding == 0:
         state.stranded_since = None
         state.stranded_reported = False
         return
     if state.stranded_since is None:
-        state.stranded_since = state.frame_now
+        state.stranded_since = at
         return
-    waited = state.frame_now - state.stranded_since
+    waited = at - state.stranded_since
     if waited >= _STRANDED_REQUEST_GRACE_S and not state.stranded_reported:
         state.stranded_reported = True
         LOG.error(
@@ -245,7 +367,7 @@ def _check_for_stranded_requests(state: AppState) -> None:
         )
 
 
-def _check_for_lost_approvals(state: AppState) -> None:
+def _check_for_lost_approvals(state: AppState, now: float | None = None) -> None:
     """
     Every parked agent must be visible as something the operator can answer.
 
@@ -261,10 +383,14 @@ def _check_for_lost_approvals(state: AppState) -> None:
 
     Debounced: parking registers the future before the intent reaches the store,
     so the counts legitimately disagree for a frame or two.
+
+    Reads the store directly rather than the frame's snapshot. Off the frame loop
+    there is no frame, and a host whose UI thread has stopped applying intents is
+    the case this is worth the most in -- the parked approvals pile up on the Bridge
+    while the store's view of them stays exactly where the last drain left it.
     """
-    snap = state.frame_snap
-    if snap is None:
-        return
+    at = state.frame_now if now is None else now
+    snap = state.store.snapshot()
     parked = state.bridge.parked_count
     # Approvals only, not the whole obligation list: this compares parked futures to
     # what the operator can reach, and a question or a crash has no future behind it.
@@ -276,9 +402,9 @@ def _check_for_lost_approvals(state: AppState) -> None:
         return
 
     if state.lost_since is None:
-        state.lost_since = state.frame_now
+        state.lost_since = at
         return
-    if state.frame_now - state.lost_since < _LOST_APPROVAL_GRACE_S:
+    if at - state.lost_since < _LOST_APPROVAL_GRACE_S:
         return
     if not state.lost_reported:
         state.lost_reported = True
@@ -867,6 +993,9 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     state.bridge.start()
+    # On the loop, not on the frame loop: the frame loop is one of the things being
+    # watched, and a watchdog dies with the thread it runs on. See `watch`.
+    state.bridge.submit(watch(state))
     if args.fake:
         state.driver = FakeDriver(state.bridge)
         state.bridge.submit(state.driver.run())

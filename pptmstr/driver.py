@@ -205,7 +205,21 @@ _DENIAL = (
 )
 
 
-def _deny(tool_name: str, reason: str, *, from_operator: bool = False) -> HookJSONOutput:
+# Who refused a call, in the words the frame puts in front of the model.
+#
+# Three sources and not two. A policy refusal and an operator's refusal were always
+# distinct -- one is the session saying it cannot run this at all, the other a human
+# saying not like that -- and the third is the gate itself ending a park nobody
+# answered. That one has to be distinguishable from the operator's or a dead gate
+# reads as a patient one: an agent told a human declined its call rewrites it and
+# comes back, which against a host that has stopped is the exact loop that cost
+# session 7f0b40c2 three silent six-hour cycles.
+DENIED_BY_OPERATOR = "the human operator reviewing this session"
+DENIED_BY_POLICY = "this session's tool policy, with no human asked"
+DENIED_BY_HOST = "this session's approval gate, on behalf of a host that has stopped"
+
+
+def _deny(tool_name: str, reason: str, *, source: str = DENIED_BY_POLICY) -> HookJSONOutput:
     """
     Refuse a call, framed so the reason cannot be read as the call's output.
 
@@ -219,11 +233,6 @@ def _deny(tool_name: str, reason: str, *, from_operator: bool = False) -> HookJS
     no path can emit a bare reason. The operator's own words are kept verbatim below
     the rule -- the frame says who is speaking, it does not paraphrase them (§5.3).
     """
-    source = (
-        "the human operator reviewing this session"
-        if from_operator
-        else "this session's tool policy, with no human asked"
-    )
     return _hook_output("deny", _DENIAL.format(tool=tool_name, source=source, reason=reason))
 
 
@@ -1277,6 +1286,7 @@ class AgentSession:
         )
         future = self.bridge.park(pending.id)
         self.bridge.emit(ApprovalRequested(node, pending))
+        parked_at = pending.requested_at
 
         try:
             decision = await future
@@ -1285,7 +1295,33 @@ class AgentSession:
             # arrive as a cancellation of this coroutine, §5.2.1), or the session is
             # torn down. Either way the store still has the pending row, and leaving
             # it there would show an approval that can never be answered.
-            self.bridge.emit(ApprovalResolved(node, pending.id, approved=False, reason="cancelled"))
+            #
+            # Which of the two it was is knowledge only the caller has, and it is
+            # already recorded: `teardown_requested` is set by the pool before it
+            # cancels. A cancellation nobody asked for at the end of a long park is
+            # the CLI aborting the hook, which is the failure this gate is least able
+            # to see and the one that cost the most -- so it is named as such, and it
+            # is an ERROR rather than a line in the transcript nobody reads.
+            waited = time.monotonic() - parked_at
+            if self.teardown_requested:
+                why = f"cancelled after {waited:.0f}s: this session was closed"
+            else:
+                why = (
+                    f"cancelled after {waited:.0f}s with no answer -- the CLI aborted "
+                    "this hook at its timeout, or the host went down under it"
+                )
+                LOG.error("gate", f"{why}: {pending.summary}")
+            # The reason reaches the operator's queue and the log, not the model.
+            # The cancellation is re-raised rather than answered with a denial, and
+            # that is a choice made against an unmeasured question: whether the CLI
+            # still delivers a value returned from a hook it has already aborted is
+            # not something verify_hook_timeout.py tested. What is measured is that
+            # the abort arrives as a cancellation. Suppressing it would leave a task
+            # that reports a decision on a channel that may be closed, and would take
+            # this coroutine out of the cancellation the loop's teardown relies on --
+            # a real cost against a benefit nothing has shown exists. A park ended by
+            # the host through `fail_all_pending` does reach the model, below.
+            self.bridge.emit(ApprovalResolved(node, pending.id, approved=False, reason=why))
             raise
 
         self.bridge.emit(
@@ -1323,9 +1359,16 @@ class AgentSession:
                 self._stamp_bus_call(tool_name, approved_args, node, edited=edited)
                 or decision.edited_args
             )
+        if not decision.from_operator:
+            # The park ended without anyone deciding -- teardown, today. Attributing
+            # it to the operator is what makes a dead gate indistinguishable from a
+            # patient one, and the model acts on the difference.
+            reason = decision.reason or self.bridge.host_stopped_reason()
+            LOG.error("gate", f"host ended a park with no answer: {pending.summary}")
+            return _deny(tool_name, reason, source=DENIED_BY_HOST)
         reason = decision.reason or "Rejected by operator, who gave no reason."
         LOG.warn("gate", f"rejected {pending.summary}")
-        return _deny(tool_name, reason, from_operator=True)
+        return _deny(tool_name, reason, source=DENIED_BY_OPERATOR)
 
     async def _pre_compact(
         self, hook_input: HookInput, _tool_use_id: str | None, _context: HookContext
