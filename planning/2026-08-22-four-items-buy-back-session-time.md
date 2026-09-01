@@ -136,12 +136,26 @@ the verdict line captured into this record as a dated addendum.
 `STYLE.md` before writing; comments state live constraints, never history;
 docstring triple quotes on their own line; black + mypy + the test suite are
 part of the build (`make check`); commit messages are declarative sentences
-arguing why, with **no attribution trailers of any kind**. The splash-test
-failure `test_only_part_of_the_field_changes_on_any_one_step` (0.0692 > 0.06)
-predates this work, lives in dirty splash files, and is not yours — do not
-"fix" it and do not let it stop a green report on your own files. Declare
-`touches` on every board task; a terminal task greens the gate after all
-writes stop.
+arguing why, with **no attribution trailers of any kind**. A splash-test
+failure predating this work lived in dirty splash files and was not yours — do
+not "fix" a failure in the splash work and do not let it stop a green report on
+your own files. Declare `touches` on every board task; a terminal task greens
+the gate after all writes stop.
+
+**Correction, 2026-08-31.** The test named here as the one to expect red,
+`test_only_part_of_the_field_changes_on_any_one_step` at 0.0692 > 0.06, was
+**deleted in `6a2b950`** ("The wake erodes the art in both directions instead of
+only filling it", 2026-08-22), and no `.py` file in the tree has carried the name
+since. A later session instructed two gates to confirm it was "still the same
+failure with the same shape" and neither could, because there was nothing to
+confirm; two other agents reported clean full-suite runs that read as flaky
+passes and were a suite that no longer contained the test. Its successor,
+`tests/test_splash.py::test_only_a_fraction_of_the_cycling_cells_change_on_any_one_step`,
+asserts `MAX_SIMULTANEOUS_CHANGE = 0.35` over `len(MOVABLE)` — a different
+denominator answering a different question, since panel-area flicker is now
+bounded structurally by `WAKE_ROWS` rather than numerically. **The 0.06 figure
+corresponds to nothing enforced.** The reasoning above about a failure that
+belongs to other work still stands; only the name and the number are stale.
 
 ---
 

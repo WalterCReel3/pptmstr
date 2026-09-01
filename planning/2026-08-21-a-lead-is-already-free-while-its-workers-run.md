@@ -77,10 +77,19 @@ that was asked, which is answered.
 ## Verification boundary
 
 **Executed:** `scripts/verify_lead_turn_during_subagents.py`, twice, timelines
-above. `make check` — ruff and mypy clean;
+above. `make check` — ruff and mypy clean; one splash test failed, in splash work
+already dirty in the tree before this and untouched by it.
+
+*Correction, 2026-08-31:* the test named here was
 `tests/test_splash_junction.py::test_only_part_of_the_field_changes_on_any_one_step`
-fails at `0.0692 > 0.06`, in splash work already dirty in the tree before this and
-untouched by it.
+failing at `0.0692 > 0.06`. It was **deleted in `6a2b950`** on 2026-08-22 and the
+name appears in no `.py` file in the tree. Its successor,
+`tests/test_splash.py::test_only_a_fraction_of_the_cycling_cells_change_on_any_one_step`,
+bounds the change fraction at `MAX_SIMULTANEOUS_CHANGE = 0.35` over
+`len(MOVABLE)` — a different denominator, and panel-area flicker is bounded
+structurally by `WAKE_ROWS` rather than by the 6% figure. Nothing enforces 0.06.
+The point this section was making — that the failure belonged to the splash work
+and not to this measurement — is unaffected.
 
 **Read, not run:** every `driver.py`, `store.py` and `ui/compose.py` citation in
 this record.
