@@ -237,10 +237,12 @@ This is left as built, deliberately.
 
 `brief.write_entry` is append-only — entries are added and never edited, which is the
 brief format's own contract and the reason a reader is told a later entry may supersede
-an earlier one. Nothing is overwritten and nothing is lost. What the resumed session's
-workers get is the original premises plus one more saying what this launch was for, which
-is a truthful account of the session's history and is very close to what the operator
-would have written by hand.
+an earlier one. Nothing is overwritten and nothing is lost. The ordinal is taken from
+what is already on disk, so the seeded entry lands as an `amendment` rather than as
+`premises`; a worker reading the directory sees the original premises first and the
+resume's launch text as a later addition to them, which is what it is. What the resumed
+session's workers get is a truthful account of the session's history, and very close to
+what the operator would have written by hand.
 
 `_seed_brief`'s docstring says seeding is skipped "when the operator named a directory —
 that is a session pointed at an existing brief, typically a fork inheriting its parent's,

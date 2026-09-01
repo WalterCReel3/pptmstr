@@ -49,6 +49,7 @@ from claude_agent_sdk import (
     ToolResultBlock,
     ToolUseBlock,
     UserMessage,
+    tag_session,
 )
 from claude_agent_sdk.types import SystemPromptPreset
 
@@ -146,10 +147,59 @@ SUBAGENT_CALL_VETO_S = APPROVAL_TIMEOUT_S
 # twelve-item board into twelve streams.
 DEFAULT_SUBAGENT_CAP = 4
 
+# What every session this application starts writes into its own transcript, so a
+# later picker can tell which of the sessions on disk were ours.
+#
+# `SDKSessionInfo` has no producer field, and the tag is the only hook there is. It
+# is a marker and never a filter: sessions that predate this line, and the
+# operator's own Claude Code sessions, are exactly the ones a resume picker exists
+# to give back, so nothing may hide an untagged session.
+SESSION_TAG = "pptmstr"
+
 # The names that mean the root session, and so can never be allocated to a
 # sub-agent. A worker calls the agent that gave it the job by whichever of these
 # comes to mind, and all three have to land on the same node.
 ROOT_ADDRESSES = ("lead", "main", "root")
+
+
+class SessionIdentityError(RuntimeError):
+    """
+    The CLI is running under a different session id than this session's NodeId says.
+
+    Raised rather than absorbed, and it ends the session. Every NodeId in the tree is
+    ``(session_id, agent_id)``, and the pool's ``sessions`` and ``_running`` maps are
+    keyed on the root's. If the two ever disagree there is no recovery available from
+    here: the transcript accumulating on disk belongs to one session and every widget
+    key, every approval route and every ``session_for`` lookup belongs to another. A
+    session that stopped with an error the operator can read is a far cheaper outcome
+    than a live one whose ``send``, ``interrupt`` and ``close`` all silently miss.
+    """
+
+
+def _reported_session_id(message: object) -> str | None:
+    """
+    The session id a message says the CLI is actually using, or None if it does not
+    say.
+
+    Two sources, deliberately. ``ResultMessage.session_id`` is the authoritative one
+    -- a required attribute, reported after the CLI has settled what it is doing. The
+    ``init`` frame is the early one, and it is worth having only because it arrives
+    at the handshake rather than a whole turn later.
+
+    The ``init`` id is read out of ``data`` because ``SystemMessage`` carries nothing
+    but ``subtype`` and ``data`` -- there is no attribute to reach for. Elsewhere this
+    codebase refuses the init frame precisely because it echoes argv back; that
+    objection does not apply to a comparison whose whole purpose is to catch the CLI
+    disagreeing with the one id we passed it.
+
+    ``UserMessage`` is not a source: it has no ``session_id`` at all.
+    """
+    if isinstance(message, ResultMessage):
+        return message.session_id
+    if isinstance(message, SystemMessage) and message.subtype == "init":
+        reported = message.data.get("session_id")
+        return reported if isinstance(reported, str) and reported else None
+    return None
 
 
 def _split_address(address: str) -> tuple[str, int]:
@@ -643,9 +693,31 @@ class AgentSession:
     """
     One connected session: one CLI subprocess, one root node in the tree.
 
-    The session ID is minted here rather than learned from the first message, so the
+    The session ID is settled here rather than learned from the first message, so the
     NodeId -- and therefore every widget key under it (I6) -- is stable from the
-    moment the row appears.
+    moment the row appears. A fresh session mints one; a resumed session is already
+    named by the id it is continuing.
+
+    That it is settled *at construction* is a requirement and not a convenience.
+    ``SessionPool.submit`` keys ``sessions`` and ``_running`` on ``node_id`` and calls
+    ``announce`` before ``run`` is ever scheduled, and ``app._seed_brief`` derives the
+    brief directory from ``session_id`` before that. An id learned later would leave
+    all three pointing at an id nothing else uses: ``send``, ``interrupt`` and
+    ``close`` are lookups that would silently miss, the pool slot would never be
+    freed, and the store would hold a second root row stuck in SPAWNING. So the CLI's
+    reported id is *checked* against this one at the handshake, never swapped in.
+
+    **Resume restores the conversation and nothing else.** There is no ``AgentRecord``
+    on the other side of the CLI, so ``task``, ``model`` and ``template`` here are
+    whatever this launch supplied and are not what the original session ran with. No
+    surface may present them as recovered.
+
+    The brief is the one exception, and it is an exception only because the id does
+    not move. ``brief.session_dir`` is a function of cwd and session id, so a resumed
+    session lands on the same directory the original wrote its premises into and can
+    read them. That is a property of checking the id rather than adopting one -- a
+    session rehomed onto a new id would derive an empty directory and silently lose
+    the premises.
     """
 
     def __init__(
@@ -659,6 +731,7 @@ class AgentSession:
         interactive: bool = True,
         template: WorkTemplate | None = None,
         subagent_cap: int = DEFAULT_SUBAGENT_CAP,
+        resume: str | None = None,
     ) -> None:
         self.bridge = bridge
         self.task = task
@@ -668,8 +741,23 @@ class AgentSession:
         # different answers, and only one of them means the sender got it wrong.
         self.template = template or SOLO
         self.brief = brief
-        self.session_id = str(uuid.uuid4())
+        # The session being continued, or None for a fresh one. Held past
+        # construction because ``run`` has to know which handshake it is expecting.
+        self.resume = resume
+        # A resumed session runs under the id it is resuming. Nothing is minted for
+        # it, because a minted id would be a second candidate and the whole point of
+        # this path is that the CLI is never handed two ids to choose between:
+        # ``_options`` sets ``resume`` and omits ``session_id`` entirely.
+        self.session_id = resume or str(uuid.uuid4())
         self.node_id: NodeId = (self.session_id, None)
+        # Whether the CLI has named an id and it matched. Only a resumed session acts
+        # on this; a fresh one supplied its own id and is not re-litigating it here.
+        self._identity_confirmed = False
+        # Whether this session's transcript has been marked as ours, and the
+        # background task doing it. The task handle is what stops a second one being
+        # started and what lets `run` settle it before ending.
+        self._tagged = False
+        self._tag_task: asyncio.Task[None] | None = None
         self.transcript = Transcript()
         self.model = model or "claude-sonnet-5"
         self.cwd = cwd
@@ -1415,10 +1503,28 @@ class AgentSession:
         return {"type": "preset", "preset": "claude_code", "append": briefing}
 
     def _options(self) -> ClaudeAgentOptions:
+        # Exactly one of the two id arguments, never both, and `fork_session` left
+        # off. `ClaudeAgentOptions.session_id` says it "cannot be used with ...
+        # `resume` unless `fork_session` is also set", and `fork_session` says a fork
+        # is what makes a resumed session take a *new* id rather than continuing the
+        # previous one. So omitting `session_id` here is the documented shape, not a
+        # trick: the CLI is never handed two candidate ids, and with no fork it
+        # continues the session named by `resume`. `_check_effective_id` holds it to
+        # that at the handshake rather than trusting it.
+        #
+        # A falsy value is not passed at all -- the transport's blocks are
+        # `if self._options.session_id:` and `if self._options.resume:` -- so None
+        # here means the flag is absent from argv, which is what this needs.
+        #
+        # `session_store` stays unset on both paths. Setting it sends
+        # `_internal/client.py` down a materialize-into-a-temp-CLAUDE_CONFIG_DIR
+        # branch that overrides resume on a copy of these options -- a path
+        # production does not take, and so a path nothing here should be shaped by.
         return ClaudeAgentOptions(
             model=self.model,
             cwd=self.cwd,
-            session_id=self.session_id,
+            resume=self.resume,
+            session_id=None if self.resume is not None else self.session_id,
             agents=self._team(),
             system_prompt=self._system_prompt(),
             # Deny anything not explicitly allowed by the hook. PreToolUse runs on
@@ -1479,6 +1585,98 @@ class AgentSession:
             )
         )
 
+    def _check_identity(self, message: object) -> None:
+        """
+        Hold the CLI to the one id we gave it. Raises when it has not been held to.
+
+        Only a resumed session is checked. A fresh one passed ``session_id`` and is
+        the case that has always worked; whether the CLI honours *that* argument is a
+        separate question with its own measurement, and answering it here would mean
+        adding a new way for today's launches to fail.
+
+        The check is a comparison and never an assignment. ``self.session_id`` was
+        settled at construction and several things downstream have already been built
+        on it -- see the class docstring -- so the only useful thing to do with a
+        disagreement is stop.
+        """
+        if self.resume is None:
+            return
+        reported = _reported_session_id(message)
+        if reported is None:
+            # An ``init`` frame with no id in it is the handshake declining to say,
+            # which on this path is itself the answer we cannot get: we passed no
+            # ``session_id``, so there is nothing to fall back on. Every other
+            # message simply has no opinion and is passed over.
+            if isinstance(message, SystemMessage) and message.subtype == "init":
+                raise SessionIdentityError(
+                    f"resumed {self.resume} but the CLI's init frame carried no "
+                    "session id, so which conversation it opened is unknown"
+                )
+            return
+        if reported != self.session_id:
+            raise SessionIdentityError(
+                f"resumed {self.resume} but the CLI is running {reported}. Every "
+                "NodeId in this tree is derived from the session id, so continuing "
+                "would attach this session's rows, approvals and transcript to an id "
+                "nothing else uses"
+            )
+        self._identity_confirmed = True
+
+    def _start_tagging(self) -> None:
+        """
+        Mark this session's transcript as one of ours, once, in the background.
+
+        Detached rather than awaited, which is the part worth the argument. The write
+        has to happen off the event-loop thread -- ``tag_session`` is synchronous file
+        I/O and can reach a ``git worktree`` subprocess on its fallback path, and this
+        loop is the only thing servicing the approval gate and every hook callback for
+        this session. But ``await``-ing the thread hop from inside the loop would put
+        a suspension point on the critical path of message handling where there is
+        none today, which is both a latency cost on every session and a change in the
+        loop's observable ordering.
+
+        Not at construction: ``tag_session`` appends with ``O_WRONLY | O_APPEND`` and
+        no ``O_CREAT``, so it raises ``FileNotFoundError`` until the CLI has created
+        the file.
+
+        A session that never completes a turn stays untagged, and that is accepted.
+        The tag buys a picker the ability to say which sessions it *recognises*; it is
+        never a filter, so an untagged session is still listed and still resumable.
+        """
+        if self._tag_task is not None:
+            return
+        self._tag_task = asyncio.create_task(self._tag())
+
+    async def _tag(self) -> None:
+        try:
+            await asyncio.to_thread(tag_session, self.session_id, SESSION_TAG, self.cwd)
+        except Exception as exc:
+            LOG.debug("agent", f"session not tagged: {type(exc).__name__}: {exc}")
+            return
+        self._tagged = True
+
+    async def _finish_tagging(self) -> None:
+        """
+        Settle the background tag before the session's task ends.
+
+        A detached task outliving the loop that created it is destroyed with a
+        "Task was destroyed but it is pending" warning and an unpredictable partial
+        write. Awaiting it here bounds it to the session's own lifetime; every failure
+        is swallowed because a tag is a marker and the session is already over.
+        """
+        task = self._tag_task
+        if task is None:
+            return
+        self._tag_task = None
+        try:
+            await task
+        except BaseException:
+            # Includes this session being cancelled out from under the await, which
+            # leaves the write still pending. The tag is a marker and the session is
+            # over either way; the thing that matters is that nothing outlives the
+            # loop that owns it.
+            task.cancel()
+
     async def run(self) -> None:
         """
         Connect, send the opening task, then stay connected for further turns.
@@ -1516,6 +1714,13 @@ class AgentSession:
                 # session that is correctly waiting, which is I8 broken by the
                 # plumbing rather than by the design.
                 async for message in client.receive_messages():
+                    # Before anything is attributed to a node, because the whole
+                    # question is whether this session's NodeId names the session the
+                    # CLI is actually running. Deliberately synchronous: this loop is
+                    # the only thing servicing the approval gate and every hook
+                    # callback for this session, and nothing before the first message
+                    # suspends it today.
+                    self._check_identity(message)
                     self._sync_subagent_map(translator)
                     for intent in translator.handle(message):
                         if (
@@ -1530,6 +1735,10 @@ class AgentSession:
                             # than moving it to whenever the stream happened to close.
                             failure = intent
                         self.bridge.emit(intent)
+                    if isinstance(message, ResultMessage):
+                        # A completed turn is the first moment the session's file is
+                        # certain to be on disk, which is what `tag_session` needs.
+                        self._start_tagging()
                     if isinstance(message, ResultMessage) and not message.is_error:
                         # A good turn clears the standing failure. Read per result
                         # rather than latched: a session that errored and then
@@ -1577,6 +1786,17 @@ class AgentSession:
                     if time.monotonic() - last_poll > CONTEXT_POLL_S:
                         await self._poll_context()
                         last_poll = time.monotonic()
+
+                # A resumed session that got all the way here without the CLI ever
+                # naming an id was never confirmed to be the session it claims to be.
+                # Reported as a failure rather than DONE: "we could not check" and
+                # "we checked and it was fine" are different answers, and only one of
+                # them justifies a row the operator will trust as continued work.
+                if self.resume is not None and not self._identity_confirmed:
+                    raise SessionIdentityError(
+                        f"resumed {self.resume} but the CLI never reported a session "
+                        "id, so there is nothing confirming this is that conversation"
+                    )
 
                 # Only reached if the CLI closed the stream on us -- which is one of
                 # the things it does after an error result.
@@ -1638,6 +1858,7 @@ class AgentSession:
                 )
             )
         finally:
+            await self._finish_tagging()
             self._client = None
 
     async def send(self, text: str) -> None:
