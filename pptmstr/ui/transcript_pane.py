@@ -12,9 +12,11 @@ new output, not to history.
 
 **Wrapping.** ``ImGuiListClipper`` needs uniform row heights, and wrapped text does
 not have them. Wrapping also cannot be combined with per-line colour and selectable
-text -- that is a real gap in ImGui, not a workaround failing. So it is a toggle:
-off by default, giving uniform rows and a clipper that makes 100k-line transcripts
-free; on when reading prose, at the cost of rendering only a bounded window.
+text -- that is a real gap in ImGui, not a workaround failing. WRAP is the default
+anyway, because prose is what the operator reads, and it pays a price for that: with
+no clipper only the last ``_WRAP_WINDOW`` lines are drawn, so scrollback beyond them
+is unreachable until the mode is switched. RAW is the way to reach it -- uniform rows
+and a clipper make a 100k-line transcript free.
 
 **Liveness.** Root sessions stream token by token. Sub-agents do not -- their output
 arrives in complete messages only (§2.5.1). The pane says which it is looking at
@@ -165,7 +167,7 @@ class TranscriptState:
 
     caches: dict[NodeId, NodeTranscript] = field(default_factory=dict)
     show_reasoning: bool = True
-    mode: RenderMode = RenderMode.RAW
+    mode: RenderMode = RenderMode.WRAP
     follow_tail: bool = True
     search: str = ""
     frame: int = 0

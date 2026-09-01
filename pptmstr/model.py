@@ -423,6 +423,17 @@ class LaunchSpec:
     # is right for a session that owns its brief and wrong for every session that
     # inherits one.
     brief: str | None = None
+    # The id of an existing session to continue, or None to start a fresh one.
+    #
+    # It restores the conversation and nothing else. A resumed session has no
+    # `AgentRecord` on the other side of the CLI, so `task`, `model`, `template` and
+    # `brief` above are still whatever the operator supplied for *this* launch --
+    # they are not read back out of the session being continued, and no surface may
+    # present them as though they were.
+    #
+    # Deliberately not derived from `from_record`: a relaunch and a fork both want a
+    # new conversation from the same premises, which is the opposite of this.
+    resume: str | None = None
 
     @classmethod
     def from_record(cls, record: AgentRecord) -> LaunchSpec:
