@@ -469,12 +469,17 @@ def _launch(state: AppState, spec: LaunchSpec) -> None:
             brief=spec.brief,
             template=shape,
             subagent_cap=state.settings.subagent_cap,
+            resume=spec.resume,
         )
         _seed_brief(session, shape)
         pool.submit(session)
 
     state.bridge.submit(go())
-    LOG.info("app", f"launched in {spec.cwd} as {shape.name}: {spec.task[:60]}")
+    # Which of the two happened is worth a word. A resumed session runs under an id
+    # that already has a transcript, so "launched" alone would leave the log unable
+    # to explain why a node appeared with history behind it.
+    opening = "resumed" if spec.resume else "launched"
+    LOG.info("app", f"{opening} in {spec.cwd} as {shape.name}: {spec.task[:60]}")
 
 
 def _seed_brief(session: AgentSession, shape: templates.WorkTemplate) -> None:
