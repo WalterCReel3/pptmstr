@@ -127,3 +127,94 @@ refusal that behave differently for the severe case. Each wants an owner, not a 
 What is done is the measurement: defect 1 is falsifiable by re-running
 `scripts/verify_declaration_units.py`, and defect 2 is falsifiable by reading the four symbols
 named above.
+
+---
+
+## Amendment, 2026-09-05
+
+Two agents investigated these before either was fixed. Both findings above survive; three
+statements in them do not, and one of the corrections changes what the fix has to be.
+
+### §2's claim that the exclusion is undocumented is wrong
+
+This record says *"Why sub-agent spawns are outside the count is not written down anywhere."* It
+is written down, in two places, and one of them is a test in the file the change would touch.
+
+`planning/2026-08-14-a-role-runs-one-agent.md`, the record that introduced the cap, under *"The cap
+as specified would have leaked"*:
+
+> Nested spawns (`Agent` called from inside a sub-agent) are not counted, and today's behaviour is
+> pinned by a test so the hole is visible rather than inferred. Widening `spawn` to cover them would
+> corrupt the join to fix the count: a nested `SubagentStart` is not attributable to the parent's
+> ledger entry.
+
+And `tests/test_gate.py::test_a_spawn_from_inside_a_subagent_is_not_counted`, whose docstring says
+it is *"Pinned because it is a hole in the ceiling rather than a decision that reads obviously from
+the code."* Commit `6919662` carries the cap's own rationale.
+
+**The reason has two halves and only one survives.** The justification — *"it still parks, so the
+operator remains the bound on that branch"* — is exactly the premise
+[`2026-09-03`](2026-09-03-a-dangerously-autonomous-mode.md) §8 deletes by auto-approving spawns.
+The implementation half — widening the flag corrupts the join — is untouched and still binds.
+
+**So option 1 above, read literally, is the change 08-14 refused.** `spawn` is one flag with three
+consumers: the at-cap deny, `_expect_spawn` on the auto-approve return, and `_park(spawn=...)`.
+Dropping `and not agent_id` counts nested spawns *and* admits them to the FIFO ledger that
+`_take_spawn_tool_use` pops by `agent_type`. **The fix is to split the flag** — a cap-only
+predicate at the deny, leaving `_expect_spawn` on the existing narrow one.
+
+The clause also predates the cap: `planning/2026-08-13` quotes the same predicate guarding the
+single-slot join, where `not agent_id` is straightforwardly correct. The cap was later layered onto
+an inherited flag, which is why the code comment explains the ordering and not the exclusion.
+
+### §1's silent half is not fixed by any write-side change, and the call graph proves it
+
+`Task.touches` has one writer, the `TaskDeclared` arm. `relative_write` is reachable only from
+`approved_write`, itself reachable only from the `ApprovalResolved` arm. **The two sets are
+disjoint**, so any change to `relative_write`, `approved_write` or `ApprovedWrites` leaves
+`_auto_depends` byte-identical and leaves the missed collision exactly where the probe found it.
+
+Worse for this record's framing: the gap is already documented as an accepted limit.
+`normalised_touches` states that not resolving against a cwd is *"a reason for the briefing to ask
+for repository-relative paths rather than a reason to put a `Path.resolve` in a pure function."* A
+fix has to argue against that reasoning, not around it.
+
+**And the obvious form of the fix is worse than the defect.** Rebasing `Task.touches` in the
+reducer cannot distinguish a repo-root-relative declaration from a cwd-relative one — both are
+legal strings — so it would re-base *compliant* declarers and convert a conditional silent defect
+into an automatic one. It would also break a stated property: `normalised_touches` promises the
+stored tuple *"reads back as the declarer wrote it"*, and `board.BoardTask.touches` shows it to the
+operator verbatim. The form worth considering instead is to widen the *comparison* in
+`_auto_depends` — match on any candidate spelling — which is purely additive and can only add
+edges, which is the direction that docstring already argues is safe.
+
+**Say plainly what none of this closes.** `_auto_depends` is scoped by `belongs_to(session_id)`, so
+by its own docstring *"two sessions in one working directory get no protection from this."* The
+units gap is not the largest hole in it, and this record should stop calling that mechanism
+unbypassable.
+
+### A third defect, larger than either, found while investigating the first
+
+`relative_write` returns `None` for **every** absolute write whenever the agent's cwd is not itself
+absolute — `if not posixpath.isabs(base): return None`. `LaunchSpec.cwd` defaulted to `"."`, and
+`Write`/`Edit` take an absolute `file_path`. So on the commonest launch every write landed in
+`unplaced`, `Task.writes.paths` stayed empty, and `wrote_outside_declaration()` returned `()` for
+the whole run. Items 1 and 2 measured nothing there.
+
+Verified by execution and **fixed** in *A session is launched at a directory the store can resolve*:
+the launcher and the `--task` path now resolve the cwd. This was cheaper than the subdirectory case
+and strictly more severe, and it was invisible to the probe that found defect 1 because that probe
+passes an absolute cwd in every row.
+
+### Two probes now block, and neither existed when this record was written
+
+1. **Does `SubagentStart` fire for a sub-agent spawned by a sub-agent?** `_outstanding_subagents`
+   counts `_live_subagents`, populated only in `_subagent_start`. If a nested agent never appears
+   there, then even with the cap predicate split the cap bounds the *burst* and not the
+   *population*, and §8's "the cap is the only volume control" stays false after the fix lands.
+   Nothing in `scripts/` exercises a nested spawn.
+2. **Does the CLI grant `Task` to a sub-agent whose `AgentDefinition.tools` is `None`?** The
+   pptmstr side of the chain is established — `feature`'s `builder` sets no `tools`, and
+   `Role.tool_list()` returns `None` — but whether the CLI hands over the tool is a CLI behaviour
+   nothing here measures. If it does not, defect 2 is unreachable in shipped configuration and the
+   priority drops sharply.
