@@ -27,6 +27,9 @@ from pptmstr.intents import (
     StateChanged,
     SubagentDelivered,
     SubagentProgress,
+    TaskClaimRequested,
+    TaskCompleted,
+    TaskDeclared,
     TopicChanged,
     UsageAccrued,
 )
@@ -34,12 +37,15 @@ from pptmstr.model import (
     AWAITING_TOPIC,
     AgentState,
     ApprovalNeeded,
+    ApprovedWrites,
     ContextPressure,
     ContextSnapshot,
     NodeId,
     PendingApproval,
     SessionFailed,
+    Task,
     UsageRollup,
+    count_diff_lines,
 )
 from pptmstr.store import Store
 
@@ -1079,3 +1085,407 @@ def test_a_supervising_lead_can_be_moved_off_the_state_like_any_other() -> None:
     rec = store.snapshot().nodes[ROOT]
     assert rec.state is AgentState.AWAITING_INPUT
     assert rec.state_since == 3.0
+
+
+# -- what the resolved approval leaves behind ---------------------------------
+
+# One file, one hunk, two lines in and one out. The ``---``/``+++`` headers are the
+# hazard the counter has to survive: they start with the content markers, so a
+# counter that tests for those first reads this as three added and two removed.
+ONE_FILE_DIFF = """--- a/pptmstr/store.py
++++ b/pptmstr/store.py
+@@ -1,3 +1,4 @@
+ unchanged
+-gone
++new
++also new
+"""
+
+
+def writing(
+    node: NodeId,
+    pid: str = "p1",
+    *,
+    diff: str | None = ONE_FILE_DIFF,
+    tool: str = "Write",
+    args: dict[str, object] | None = None,
+) -> PendingApproval:
+    return PendingApproval(
+        id=pid,
+        node=node,
+        tool_name=tool,
+        tool_use_id="tu-1",
+        raw_args={"file_path": "pptmstr/store.py", "content": "hi"} if args is None else args,
+        summary="Write pptmstr/store.py",
+        requested_at=1.0,
+        diff=diff,
+    )
+
+
+def board(
+    store: Store,
+    *,
+    claimer: NodeId | None = CHILD,
+    task_id: str = "t1",
+    touches: tuple[str, ...] = (),
+) -> None:
+    """
+    A declared task, claimed by ``claimer`` unless that is None.
+    """
+    store.apply(TaskDeclared(Task(id=task_id, title="do a thing", touches=touches), node_id=ROOT))
+    if claimer is not None:
+        store.apply(TaskClaimRequested(claimer, request_id=f"k-{task_id}", task_id=task_id))
+
+
+def test_count_diff_lines_does_not_read_the_headers_as_changed_lines() -> None:
+    assert count_diff_lines(ONE_FILE_DIFF) == (2, 1)
+
+
+def test_count_diff_lines_of_nothing_is_zero_rather_than_an_error() -> None:
+    """
+    Bash and the network tools park with ``diff=None``, and that is the majority of
+    what an agent does. Raising here would make the reducer's most ordinary case the
+    one that throws.
+    """
+    assert count_diff_lines(None) == (0, 0)
+    assert count_diff_lines("") == (0, 0)
+
+
+def test_a_deleted_horizontal_rule_is_a_removal_and_not_a_header() -> None:
+    """
+    Why the counter tracks hunk budgets instead of classifying by leading character.
+    ``difflib`` prefixes a removed line with ``-``, so deleting the ``---`` rule that
+    every planning record in this repository uses emits the physical line ``----``.
+    A ``startswith("---")`` test reads that as a file header and loses the removal.
+    """
+    rule = "--- a/notes/x.md\n+++ b/notes/x.md\n@@ -1,3 +1,2 @@\n heading\n----\n body\n"
+    assert count_diff_lines(rule) == (0, 1)
+
+
+def test_an_approved_write_leaves_its_path_and_counts_on_the_task_its_writer_holds() -> None:
+    """
+    The whole point: ``PendingApproval.diff`` is dropped from ``pending`` in this
+    arm, and after the write lands there is no snapshot it can be recomputed from.
+    """
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(spawn(CHILD, ROOT))
+    board(store)
+    store.apply(ApprovalRequested(CHILD, writing(CHILD)))
+    store.apply(ApprovalResolved(CHILD, "p1", approved=True))
+
+    assert store.snapshot().tasks["t1"].writes == ApprovedWrites(
+        paths=("pptmstr/store.py",), lines_added=2, lines_removed=1
+    )
+
+
+def test_one_file_written_three_times_is_one_path_and_three_writes_of_lines() -> None:
+    """
+    Paths merge as a set and lines sum. Counting an integer per approval instead
+    would report this as three files, and the operator-facing line would read
+    "wrote 3 files" for one file touched three times.
+    """
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(spawn(CHILD, ROOT))
+    board(store)
+    for pid in ("p1", "p2", "p3"):
+        store.apply(ApprovalRequested(CHILD, writing(CHILD, pid)))
+        store.apply(ApprovalResolved(CHILD, pid, approved=True))
+
+    assert store.snapshot().tasks["t1"].writes == ApprovedWrites(
+        paths=("pptmstr/store.py",), lines_added=6, lines_removed=3
+    )
+
+
+def test_a_writer_holding_no_task_accumulates_nowhere_and_raises_nothing() -> None:
+    """
+    A lead editing a file outside any claimed task is ordinary, not an error. There
+    is no task to hang the measurement on and none is invented.
+    """
+    store = Store()
+    store.apply(spawn(ROOT))
+    board(store, claimer=None)
+    store.apply(ApprovalRequested(ROOT, writing(ROOT)))
+    store.apply(ApprovalResolved(ROOT, "p1", approved=True))
+
+    snap = store.snapshot()
+    assert snap.tasks["t1"].writes == ApprovedWrites()
+    assert snap.unattributed_writes == 0
+    assert snap.nodes[ROOT].pending == ()
+
+
+def test_a_write_by_one_worker_does_not_land_on_another_workers_task() -> None:
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(spawn(CHILD, ROOT))
+    board(store, claimer=CHILD, task_id="mine")
+    board(store, claimer=None, task_id="theirs")
+    store.apply(ApprovalRequested(CHILD, writing(CHILD)))
+    store.apply(ApprovalResolved(CHILD, "p1", approved=True))
+
+    assert store.snapshot().tasks["theirs"].writes == ApprovedWrites()
+
+
+def test_a_node_holding_two_open_tasks_attributes_its_write_to_neither() -> None:
+    """
+    Nothing in the snapshot says which of two claimed tasks a write was for, so
+    neither gets it and the ambiguity is counted instead. Guessing by declaration
+    order would put a made-up attribution into the one series this measures.
+
+    A non-zero count here is a reading about the board rather than the writer: "one
+    task at a time" is prose in ``templates.py`` that ``_pick_claim`` does not
+    enforce, and this is what makes a breach of it visible instead of silent.
+    """
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(spawn(CHILD, ROOT))
+    board(store, claimer=CHILD, task_id="first")
+    board(store, claimer=CHILD, task_id="second")
+    store.apply(ApprovalRequested(CHILD, writing(CHILD)))
+    store.apply(ApprovalResolved(CHILD, "p1", approved=True))
+
+    snap = store.snapshot()
+    assert snap.tasks["first"].writes == ApprovedWrites()
+    assert snap.tasks["second"].writes == ApprovedWrites()
+    assert snap.unattributed_writes == 1
+
+
+def test_the_ambiguity_count_survives_later_intents() -> None:
+    """
+    The counter is carried through every reduction rather than recomputed, so an
+    unrelated intent afterwards must not reset it. Without this the field reads zero
+    forever and is indistinguishable from an ambiguity that never fired.
+    """
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(spawn(CHILD, ROOT))
+    board(store, claimer=CHILD, task_id="first")
+    board(store, claimer=CHILD, task_id="second")
+    store.apply(ApprovalRequested(CHILD, writing(CHILD)))
+    store.apply(ApprovalResolved(CHILD, "p1", approved=True))
+    store.apply(TopicChanged(CHILD, "something else"))
+
+    assert store.snapshot().unattributed_writes == 1
+
+
+def test_a_refused_approval_accumulates_nothing() -> None:
+    """
+    Nothing was written, so there is nothing to count. The diff on the record
+    describes a write that never happened.
+    """
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(spawn(CHILD, ROOT))
+    board(store)
+    store.apply(ApprovalRequested(CHILD, writing(CHILD)))
+    store.apply(ApprovalResolved(CHILD, "p1", approved=False))
+
+    assert store.snapshot().tasks["t1"].writes == ApprovedWrites()
+
+
+def test_the_line_counts_are_what_the_operator_reviewed_not_what_reaches_disk() -> None:
+    """
+    An operator who rewrites a parked call's content before approving it resolves an
+    approval whose diff was rendered from the arguments as parked. The line counts
+    therefore describe the reviewed call. They cannot be recomputed in the reducer:
+    the "before" text came off the disk at park time and this arm does no IO.
+    """
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(spawn(CHILD, ROOT))
+    board(store)
+    store.apply(ApprovalRequested(CHILD, writing(CHILD)))
+    store.apply(
+        ApprovalResolved(
+            CHILD,
+            "p1",
+            approved=True,
+            edited_args={"file_path": "pptmstr/store.py", "content": "something else entirely"},
+        )
+    )
+
+    assert store.snapshot().tasks["t1"].writes == ApprovedWrites(
+        paths=("pptmstr/store.py",), lines_added=2, lines_removed=1
+    )
+
+
+def test_an_edited_path_is_the_one_recorded() -> None:
+    """
+    The line counts are an approximation on an edited call; the path is not.
+    ``driver._park`` names correcting a wrong path as the first reason
+    edit-then-approve exists, so taking the path from ``raw_args`` would name the
+    file the operator rejected and miss the one they redirected the write to.
+    """
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(spawn(CHILD, ROOT))
+    board(store)
+    store.apply(ApprovalRequested(CHILD, writing(CHILD)))
+    store.apply(
+        ApprovalResolved(
+            CHILD,
+            "p1",
+            approved=True,
+            edited_args={"file_path": "pptmstr/board.py"},
+        )
+    )
+
+    assert store.snapshot().tasks["t1"].writes.paths == ("pptmstr/board.py",)
+
+
+def test_a_bash_resolution_records_neither_a_path_nor_lines() -> None:
+    """
+    Bash names no file and parks with no diff, so it measures nothing. **That is not
+    evidence of compliance** -- a heredoc writing a file is invisible here and always
+    will be. A clean record over a session of Bash calls has earned nothing.
+    """
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(spawn(CHILD, ROOT))
+    board(store)
+    store.apply(
+        ApprovalRequested(
+            CHILD, writing(CHILD, diff=None, tool="Bash", args={"command": "echo hi > f"})
+        )
+    )
+    store.apply(ApprovalResolved(CHILD, "p1", approved=True))
+
+    assert store.snapshot().tasks["t1"].writes == ApprovedWrites()
+
+
+def test_a_notebook_edit_records_its_path_and_no_lines() -> None:
+    """
+    ``NotebookEdit`` carries ``notebook_path`` rather than ``file_path`` and
+    ``render_diff`` returns None for it. Reading only ``file_path`` would record a
+    notebook write as no write at all; the lines are simply a lower bound.
+    """
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(spawn(CHILD, ROOT))
+    board(store)
+    store.apply(
+        ApprovalRequested(
+            CHILD,
+            writing(CHILD, diff=None, tool="NotebookEdit", args={"notebook_path": "notes/x.ipynb"}),
+        )
+    )
+    store.apply(ApprovalResolved(CHILD, "p1", approved=True))
+
+    assert store.snapshot().tasks["t1"].writes == ApprovedWrites(paths=("notes/x.ipynb",))
+
+
+def test_an_absolute_write_under_the_agents_cwd_is_recorded_relative() -> None:
+    """
+    A declaration is repository-relative by construction; a write path is whatever
+    the model passed. The two are put in the same units through the agent's own cwd
+    so the comparison in ``wrote_outside_declaration`` is on the same footing.
+    """
+    store = Store()
+    store.apply(dataclasses.replace(spawn(ROOT), cwd="/home/w/repo"))
+    store.apply(spawn(CHILD, ROOT))
+    board(store)
+    store.apply(
+        ApprovalRequested(
+            CHILD, writing(CHILD, args={"file_path": "/home/w/repo/pptmstr/store.py"})
+        )
+    )
+    store.apply(ApprovalResolved(CHILD, "p1", approved=True))
+
+    writes = store.snapshot().tasks["t1"].writes
+    assert writes.paths == ("pptmstr/store.py",)
+    assert writes.unplaced == ()
+
+
+def test_an_absolute_write_outside_the_cwd_is_unplaced_rather_than_divergent() -> None:
+    """
+    A path that cannot be put in the declaration's units is held apart from one that
+    can. Reporting a units mismatch as a write outside the declaration would be a
+    false accusation, and it is the failure this split exists to prevent.
+    """
+    store = Store()
+    store.apply(dataclasses.replace(spawn(ROOT), cwd="/home/w/repo"))
+    store.apply(spawn(CHILD, ROOT))
+    board(store, touches=("pptmstr/store.py",))
+    store.apply(ApprovalRequested(CHILD, writing(CHILD, args={"file_path": "/etc/hosts"})))
+    store.apply(ApprovalResolved(CHILD, "p1", approved=True))
+
+    task = store.snapshot().tasks["t1"]
+    assert task.writes.paths == ()
+    assert task.writes.unplaced == ("/etc/hosts",)
+    assert task.wrote_outside_declaration() == ()
+
+
+def test_a_write_inside_the_declaration_does_not_diverge() -> None:
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(spawn(CHILD, ROOT))
+    board(store, touches=("pptmstr/store.py", "tests/test_store.py"))
+    store.apply(ApprovalRequested(CHILD, writing(CHILD)))
+    store.apply(ApprovalResolved(CHILD, "p1", approved=True))
+
+    assert store.snapshot().tasks["t1"].wrote_outside_declaration() == ()
+
+
+def test_a_write_outside_the_declaration_is_named() -> None:
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(spawn(CHILD, ROOT))
+    board(store, touches=("pptmstr/board.py",))
+    store.apply(ApprovalRequested(CHILD, writing(CHILD)))
+    store.apply(ApprovalResolved(CHILD, "p1", approved=True))
+
+    assert store.snapshot().tasks["t1"].wrote_outside_declaration() == ("pptmstr/store.py",)
+
+
+def test_a_task_that_declared_nothing_diverges_from_nothing() -> None:
+    """
+    Empty ``touches`` is the absence of a declaration, not a declaration of no files.
+    Reading it the other way puts every write by such a task out of scope and lights
+    the affordance on every row that never declared, which is most of them.
+    """
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(spawn(CHILD, ROOT))
+    board(store)
+    store.apply(ApprovalRequested(CHILD, writing(CHILD)))
+    store.apply(ApprovalResolved(CHILD, "p1", approved=True))
+
+    assert store.snapshot().tasks["t1"].wrote_outside_declaration() == ()
+
+
+def test_a_completed_task_stops_collecting_its_claimers_writes() -> None:
+    """
+    ``TaskCompleted`` keeps ``claimed_by``, so the state is the only thing that says
+    the work is still open. A worker that keeps writing afterwards is no longer
+    writing for that task, and counting it would grow a finished measurement.
+    """
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(spawn(CHILD, ROOT))
+    board(store)
+    store.apply(TaskCompleted(CHILD, "t1", at=5.0))
+    store.apply(ApprovalRequested(CHILD, writing(CHILD)))
+    store.apply(ApprovalResolved(CHILD, "p1", approved=True))
+
+    snap = store.snapshot()
+    assert snap.tasks["t1"].writes == ApprovedWrites()
+    assert snap.unattributed_writes == 0
+
+
+def test_a_stale_resolution_counts_nothing_twice() -> None:
+    """
+    A double click resolves an approval that has already left ``pending``. The arm
+    returns before it measures, so the counts cannot be applied a second time.
+    """
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(spawn(CHILD, ROOT))
+    board(store)
+    store.apply(ApprovalRequested(CHILD, writing(CHILD)))
+    store.apply(ApprovalResolved(CHILD, "p1", approved=True))
+    store.apply(ApprovalResolved(CHILD, "p1", approved=True))
+
+    assert store.snapshot().tasks["t1"].writes == ApprovedWrites(
+        paths=("pptmstr/store.py",), lines_added=2, lines_removed=1
+    )
