@@ -70,6 +70,7 @@ from .model import (
     TaskId,
     TaskRefusal,
     TaskState,
+    approved_write,
     normalised_touches,
 )
 from .transcript import Transcript
@@ -180,6 +181,7 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
     nodes = dict(snap.nodes)
     concerns = dict(snap.concerns)
     tasks = dict(snap.tasks)
+    unattributed = snap.unattributed_writes
     effects: tuple[Effect, ...] = ()
     reorder = False
 
@@ -386,7 +388,8 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
 
         case ApprovalResolved():
             rec = nodes.get(intent.node_id)
-            if rec is None or rec.pending_by_id(intent.pending_id) is None:
+            resolved = rec.pending_by_id(intent.pending_id) if rec is not None else None
+            if rec is None or resolved is None:
                 # Unknown or already settled: a double click, or a decision for an
                 # approval that has since been cancelled. Both are normal.
                 return snap, ()
@@ -409,6 +412,31 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
             else:
                 state = AgentState.RUNNING_TOOL if intent.approved else AgentState.THINKING
             nodes[intent.node_id] = rec.with_(pending=remaining, state=state)
+            # The one instant the measurement, the writer and the work it is on are
+            # all in hand. ``resolved`` leaves ``pending`` two lines up and its diff
+            # is unrecoverable from any later snapshot.
+            #
+            # The arguments measured are the ones the operator approved: an edit
+            # layered over the parked call, since edit-then-approve exists to correct
+            # a wrong path (``driver._park``) and the original path would then name a
+            # file nobody wrote. Merged rather than substituted, so an edit that
+            # rewrites one key does not drop the rest.
+            if intent.approved:
+                owned = _claimed_tasks(tasks, intent.node_id)
+                if len(owned) == 1:
+                    args = (
+                        {**resolved.raw_args, **intent.edited_args}
+                        if intent.edited_args is not None
+                        else resolved.raw_args
+                    )
+                    tasks[owned[0].id] = dataclasses.replace(
+                        owned[0],
+                        writes=owned[0].writes.plus(
+                            approved_write(resolved.tool_name, args, rec.cwd, resolved.diff)
+                        ),
+                    )
+                elif owned:
+                    unattributed += 1
 
         case AgentFinished():
             rec = nodes.get(intent.node_id)
@@ -615,6 +643,7 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
             any_active=any(r.state.is_active for r in nodes.values()),
             concerns=MappingProxyType(concerns),
             tasks=MappingProxyType(tasks),
+            unattributed_writes=unattributed,
         ),
         effects,
     )
@@ -737,6 +766,33 @@ def _ownership_refusal(
     if t.claimed_by != node_id:
         return TaskRefusal.NOT_YOURS
     return None
+
+
+def _claimed_tasks(tasks: dict[TaskId, Task], node_id: NodeId) -> tuple[Task, ...]:
+    """
+    Every task ``node_id`` is holding open. Empty and many are both ordinary.
+
+    **Holding none is not an error.** A lead editing a file outside any claimed task
+    is the common case, and there is nothing here to hang a measurement on; inventing
+    a task to carry it would put a row on the board that no agent declared.
+
+    CLAIMED only. ``TaskCompleted`` keeps ``claimed_by`` -- who did the work is worth
+    reading after the fact, and ``BoardTask.owner_gone`` relies on it -- so the state
+    rather than the owner is what says the work is still open. Filtering on
+    ``claimed_by`` alone would return the node's first-ever task, completed, forever,
+    since ``tasks`` is in declaration order.
+
+    **Every match is returned rather than one being chosen.** Nothing in the snapshot
+    says which of two open tasks a given write was for, and picking by declaration
+    order would put a made-up attribution into the one series this measurement exists
+    to produce. The caller records the ambiguity instead
+    (``Snapshot.unattributed_writes``); how often it fires is itself a reading, since
+    "one task at a time" is prose in ``templates.py`` that ``_pick_claim`` does not
+    enforce.
+    """
+    return tuple(
+        t for t in tasks.values() if t.state is TaskState.CLAIMED and t.claimed_by == node_id
+    )
 
 
 def _pick_claim(tasks: dict[TaskId, Task], task_id: TaskId | None, session_id: str) -> Task | None:

@@ -7,10 +7,12 @@ the tool stops being what it claims to be, and nothing else here compensates.
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 import pytest
 
+from pptmstr import approval
 from pptmstr.approval import (
     Disposition,
     classify,
@@ -18,6 +20,7 @@ from pptmstr.approval import (
     render_diff,
     summarize,
 )
+from pptmstr.model import WRITING_TOOLS, written_path
 
 # -- classification ------------------------------------------------------------
 
@@ -243,3 +246,42 @@ def test_a_whole_file_write_produces_a_large_diff(tmp_path: Path) -> None:
     diff = render_diff("Write", {"file_path": str(target), "content": "new\n"})
     assert diff is not None
     assert len(diff.splitlines()) > 1000
+
+
+def test_the_reducers_writing_tool_set_matches_summarizes_own_branch() -> None:
+    """
+    ``model.WRITING_TOOLS`` is a deliberate copy of the tuple ``summarize`` branches
+    on: the reducer's module graph stops at ``model`` and ``approval`` reads the
+    disk, so the set cannot be imported from here. Deliberate duplication is only
+    safe while something fails when the two drift, and this is that something.
+
+    A tool added to ``summarize`` and not to ``WRITING_TOOLS`` writes a file that is
+    measured as no write at all -- silently, and in the direction that makes an
+    agent look compliant.
+    """
+    tree = ast.parse(Path(approval.__file__).read_text(), filename=approval.__file__)
+    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "summarize")
+    branches = [
+        {e.value for e in cmp.comparators[0].elts if isinstance(e, ast.Constant)}
+        for cmp in ast.walk(fn)
+        if isinstance(cmp, ast.Compare)
+        and isinstance(cmp.ops[0], ast.In)
+        and isinstance(cmp.left, ast.Name)
+        and cmp.left.id == "tool_name"
+        and isinstance(cmp.comparators[0], ast.Tuple)
+    ]
+    writing = [b for b in branches if "Write" in b]
+    assert len(writing) == 1, "summarize's path branch is no longer a single tuple"
+    assert writing[0] == set(WRITING_TOOLS)
+
+
+def test_every_writing_tool_summarizes_to_a_path_the_reducer_can_also_read() -> None:
+    """
+    The behavioural half of the pin above. Both sides read ``file_path`` falling back
+    to ``notebook_path``; a tool whose path lives under a third key would summarize
+    fine and measure to nothing.
+    """
+    for tool in WRITING_TOOLS:
+        for key in ("file_path", "notebook_path"):
+            assert summarize(tool, {key: "pptmstr/store.py"}) == f"{tool} pptmstr/store.py"
+            assert written_path(tool, {key: "pptmstr/store.py"}) == "pptmstr/store.py"

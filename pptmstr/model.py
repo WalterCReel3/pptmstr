@@ -714,6 +714,223 @@ def normalised_touches(paths: Iterable[str]) -> tuple[str, ...]:
     return tuple(out)
 
 
+# The tools whose approved call writes a named file. Spelled here rather than
+# imported from ``approval``: the reducer's module graph stops at ``model``, and
+# ``approval`` reads the disk. Deliberate duplication, and pinned by a test against
+# ``approval.summarize``'s own branch, because unpinned duplication is the thing
+# that drifts (`STYLE.md` §3).
+#
+# ``NotebookEdit`` is in the set and carries ``notebook_path`` rather than
+# ``file_path``; reading only ``file_path`` records a notebook write as no write.
+WRITING_TOOLS = frozenset({"Write", "Edit", "MultiEdit", "NotebookEdit"})
+
+
+@dataclass(frozen=True, slots=True)
+class ApprovedWrites:
+    """
+    What a task's approved tool calls said they would write, accumulated.
+
+    **These are approved writes, not landed ones.** The gate sees a call it
+    permitted; the tool can still fail afterwards, and a permission the operator
+    granted is not a filesystem fact. A reader who treats these as disk state will
+    eventually read a divergence that is a failed tool call.
+
+    **Retained rather than derived, and it is the exception it looks like.**
+    ``approval.render_diff`` reads the current file from disk to build the diff at
+    park time, so the "before" state lives only inside the parked record: once the
+    write lands there is no snapshot the line counts follow from. `STYLE.md` §1's
+    *derive; do not store* asks whether another fact in the same snapshot implies
+    this one, and after the write none does.
+
+    **The line counts are a lower bound, and three inputs put them there.** A
+    ``NotebookEdit`` parks with no diff at all and contributes a path and no lines. A
+    ``Bash`` heredoc contributes neither, and is invisible to this and always will
+    be. A write whose task was completed in the same assistant turn is attributed to
+    no open task and contributes nothing anywhere.
+
+    ``paths`` is repository-relative and distinct, in the order first written, so it
+    can be compared against a declaration written in the same units. ``unplaced``
+    holds the ones that could not be put in those units -- an absolute path outside
+    the writing agent's ``cwd``, or a write by an agent whose ``cwd`` is unknown.
+    They are held apart because a units mismatch reported as an out-of-declaration
+    write is a false accusation, and it is the failure this split exists to prevent.
+    """
+
+    paths: tuple[str, ...] = ()
+    unplaced: tuple[str, ...] = ()
+    lines_added: int = 0
+    lines_removed: int = 0
+
+    def plus(self, other: ApprovedWrites) -> ApprovedWrites:
+        """
+        This measurement and another. Paths merge as a set; lines sum.
+
+        A file written ten times is one path and ten writes' worth of lines. Summing
+        the path count instead would report ten files, which is the number `Item 3`'s
+        one line would then show the operator.
+        """
+        return ApprovedWrites(
+            paths=_merged(self.paths, other.paths),
+            unplaced=_merged(self.unplaced, other.unplaced),
+            lines_added=self.lines_added + other.lines_added,
+            lines_removed=self.lines_removed + other.lines_removed,
+        )
+
+
+def _merged(first: tuple[str, ...], second: tuple[str, ...]) -> tuple[str, ...]:
+    return first + tuple(p for p in second if p not in first)
+
+
+def count_diff_lines(diff: str | None) -> tuple[int, int]:
+    """
+    Lines added and lines removed in a unified diff. Pure: no disk, no clock.
+
+    ``None`` and the empty string measure to zero rather than raising. Most of what
+    an agent does parks with no diff -- ``Bash``, the network tools, ``NotebookEdit``
+    -- so an exception here would fire on the ordinary case.
+
+    **Stateful over hunks, and it has to be.** A ``@@`` header declares how many old
+    and new lines its body holds, so the body is consumed against that budget and
+    everything outside a body is skipped. Classifying by leading character instead
+    would be fooled by this repository's own content: ``difflib`` prefixes a removed
+    line with ``-``, so deleting a horizontal rule produces the physical line
+    ``----``, and a ``---`` test applied to that reads a deletion as a file header.
+    Inside a body the budget says the line is content, and ``----`` is unambiguously
+    a removal.
+
+    A diff whose before-text has no closing newline undercounts by one. ``_unified``
+    splits with ``keepends=True`` and ``difflib`` emits no *\\ No newline at end of
+    file* marker, so the last removal and the following addition arrive joined into
+    one physical line. That is one of the reasons ``ApprovedWrites`` calls its line
+    counts a lower bound.
+    """
+    if not diff:
+        return 0, 0
+    added = 0
+    removed = 0
+    old_left = 0
+    new_left = 0
+    for line in diff.splitlines():
+        hunk = _hunk_budget(line)
+        if hunk is not None:
+            old_left, new_left = hunk
+            continue
+        if old_left <= 0 and new_left <= 0:
+            continue
+        if line.startswith("+"):
+            added += 1
+            new_left -= 1
+        elif line.startswith("-"):
+            removed += 1
+            old_left -= 1
+        elif line.startswith("\\"):
+            # A "no newline" marker belongs to the line above and is not one itself.
+            continue
+        else:
+            old_left -= 1
+            new_left -= 1
+    return added, removed
+
+
+def _hunk_budget(line: str) -> tuple[int, int] | None:
+    """
+    How many old and new lines the hunk this line opens holds, or None if it opens
+    no hunk. A range without a length is one line, which is the unified format's own
+    default and not a guess.
+    """
+    if not line.startswith("@@"):
+        return None
+    body = line[2:].partition("@@")[0].split()
+    if len(body) != 2 or not body[0].startswith("-") or not body[1].startswith("+"):
+        return None
+    lengths = []
+    for part in body:
+        _, sep, length = part[1:].partition(",")
+        if sep and not length.isdigit():
+            return None
+        lengths.append(int(length) if sep else 1)
+    return lengths[0], lengths[1]
+
+
+def written_path(tool_name: str, args: Mapping[str, Any]) -> str | None:
+    """
+    The file a parked call names, or None when it names none.
+
+    **None is not evidence that nothing is written.** ``Bash`` names no path and can
+    write anything; a heredoc is invisible here and always will be. This answers
+    "which file did the call declare", and a clean record over a session of ``Bash``
+    calls has earned nothing.
+    """
+    if tool_name not in WRITING_TOOLS:
+        return None
+    raw = args.get("file_path") or args.get("notebook_path")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    return raw
+
+
+def relative_write(path: str, cwd: str | None) -> str | None:
+    """
+    A written path in the units a declaration is written in, or None when the two
+    cannot be put in the same units.
+
+    A declaration is repository-relative by construction: ``normalised_touches``
+    reconciles no absolute path with a relative one and says so, and ``bus`` and
+    ``templates`` tell every lead the same. A write path is whatever the model
+    passed. Comparing the two directly reports every write as out-of-declaration,
+    which is the reverse of useful -- an affordance that fires on every row.
+
+    ``cwd`` is the writing agent's own (``AgentRecord.cwd``, inherited from the
+    parent for a sub-agent), so this is a string operation on facts already in the
+    snapshot rather than a filesystem question. It follows no symlink and resolves
+    nothing: an absolute path that is not under ``cwd`` returns None, and the caller
+    records it as unplaced rather than as a divergence.
+    """
+    cleaned = path.strip()
+    if not cleaned:
+        return None
+    if not posixpath.isabs(cleaned):
+        normalised = normalised_touches((cleaned,))
+        return normalised[0] if normalised else None
+    if not cwd:
+        return None
+    base = posixpath.normpath(cwd)
+    if not posixpath.isabs(base):
+        return None
+    prefix = base if base.endswith("/") else base + "/"
+    target = posixpath.normpath(cleaned)
+    if not target.startswith(prefix):
+        return None
+    return target[len(prefix) :] or None
+
+
+def approved_write(
+    tool_name: str, args: Mapping[str, Any], cwd: str | None, diff: str | None
+) -> ApprovedWrites:
+    """
+    One resolved approval, measured. Pure: the arguments are the whole input.
+
+    ``args`` is what the operator approved. When a parked call was edited before it
+    was approved that is ``edited_args`` over ``raw_args``, because correcting a
+    wrong path is the first reason ``driver._park`` gives for edit-then-approve --
+    so taking the path from the original arguments would name a file that was never
+    written and miss the one that was.
+
+    The line counts come from the diff regardless, and that diff was rendered from
+    the arguments as parked. So on an edited call the counts describe what the
+    operator reviewed rather than what reaches disk. They cannot be recomputed here:
+    the "before" text came off the disk at park time and this function does no IO.
+    """
+    added, removed = count_diff_lines(diff)
+    raw = written_path(tool_name, args)
+    if raw is None:
+        return ApprovedWrites(lines_added=added, lines_removed=removed)
+    placed = relative_write(raw, cwd)
+    if placed is None:
+        return ApprovedWrites(unplaced=(raw,), lines_added=added, lines_removed=removed)
+    return ApprovedWrites(paths=(placed,), lines_added=added, lines_removed=removed)
+
+
 @dataclass(frozen=True, slots=True)
 class Task:
     """
@@ -757,6 +974,42 @@ class Task:
     # a global map, and an unclaimed task has no other node attached to it. Without
     # this a board cannot be scoped to the session whose agents are working it.
     declared_by: NodeId | None = None
+    # What the approvals resolved while this task was claimed measured, accumulated.
+    #
+    # An accumulator rather than a projection, and it is the one place in this record
+    # that has to be: each addend exists only inside the ``PendingApproval`` that
+    # carried it, and that record is dropped in the same reducer arm that adds it
+    # here (``ApprovedWrites`` carries why it cannot be recovered afterwards).
+    #
+    # Zero and unmeasured read the same, deliberately. A task that wrote nothing and
+    # a task whose every write was a ``Bash`` heredoc both report zero, and nothing
+    # here distinguishes them because nothing in the snapshot can.
+    writes: ApprovedWrites = ApprovedWrites()
+
+    def wrote_outside_declaration(self) -> tuple[str, ...]:
+        """
+        The files this task wrote that ``touches`` does not name, in write order.
+
+        Derived rather than stored: both sides are on this record, so a second field
+        would be a copy of a fact this snapshot already implies -- kept true by
+        whoever remembers to update it, which `STYLE.md` §1 names as the shape of
+        this codebase's sync defects.
+
+        **A task that declared nothing diverges from nothing.** Empty ``touches`` is
+        the absence of a declaration rather than a declaration of no files, and
+        reading it the other way makes every write by such a task out-of-scope --
+        turning the one line the operator is meant to trust into a row that is always
+        lit. What granularity a directory-shaped declaration should have is a
+        separate question and is not answered here: the comparison is over whole
+        normalised paths.
+
+        Silence here is not compliance. ``ApprovedWrites.unplaced`` and every
+        pathless tool are outside what this can see.
+        """
+        if not self.touches:
+            return ()
+        declared = frozenset(normalised_touches(self.touches))
+        return tuple(p for p in self.writes.paths if p not in declared)
 
     def belongs_to(self, session_id: str) -> bool:
         """
@@ -858,6 +1111,19 @@ class Snapshot:
     # give every Snapshot is the thing that rule exists to prevent.
     concerns: Mapping[ConcernId, Concern] = field(default_factory=_empty_map)
     tasks: Mapping[TaskId, Task] = field(default_factory=_empty_map)
+    # Approved writes by a node holding more than one claimed task, which are
+    # therefore attributed to none.
+    #
+    # A count and not a list, because the interesting quantity is how often the
+    # attribution is impossible rather than which write it was. Nothing in the
+    # snapshot says which of a node's open tasks a given write was for, and guessing
+    # -- by declaration order, or by a claim timestamp added for the purpose --
+    # would put a made-up number into the one series this instrument produces.
+    #
+    # Non-zero is a reading about the *board*, not about the writer: "one task at a
+    # time" is prose in ``templates.py`` that ``_pick_claim`` does not enforce, and
+    # this is what makes a breach of it visible instead of silent.
+    unattributed_writes: int = 0
 
     @staticmethod
     def empty() -> Snapshot:
