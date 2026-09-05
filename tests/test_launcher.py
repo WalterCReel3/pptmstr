@@ -9,6 +9,7 @@ needs pixels.
 
 from __future__ import annotations
 
+import os
 import threading
 from collections.abc import Callable
 from pathlib import Path
@@ -358,8 +359,12 @@ def test_spec_defaults_blank_cwd_to_repo_root() -> None:
     An empty directory field means "here", not "". The value reaches
     ``AgentSession`` and is the FLEET rail's grouping key, so a blank string would
     file the session under a project whose name is the empty string.
+
+    "Here" is spelled absolutely because the store cannot resolve a relative one:
+    ``model.relative_write`` needs an absolute cwd to place an absolute write, and
+    the same value is what ``sessions.same_cwd`` narrows the resume picker by.
     """
-    assert LauncherState(task="t", cwd="   ").spec().cwd == "."
+    assert LauncherState(task="t", cwd="   ").spec().cwd == os.path.realpath(".")
 
 
 def test_spec_strips_cwd_whitespace() -> None:
@@ -799,3 +804,42 @@ def test_the_toggle_flips_from_what_was_drawn_not_from_the_overlay(
 
     assert not picker.rows[0].bookmarked
     assert "a" not in load_overlay(overlay_path())
+
+
+# -- the launched cwd is absolute (2026-09-04-two-mainline-defects, defect 1)
+
+
+def test_the_draft_hands_the_driver_an_absolute_cwd() -> None:
+    """
+    A relative cwd reaches the store and the store cannot resolve one.
+
+    ``model.relative_write`` returns None for an absolute write path unless the
+    writing agent's cwd is itself absolute, and the caller records that as
+    ``ApprovedWrites.unplaced``. So a session launched on the default "." puts every
+    write in ``unplaced``, leaves ``Task.writes.paths`` empty, and makes
+    ``wrote_outside_declaration`` read ``()`` for the whole run -- a measurement that
+    is silent rather than wrong, which is the harder failure to notice.
+
+    Pinned at the launcher because that is the one place a draft becomes a spec, and
+    because ``LaunchSpec.cwd``'s own comment already claimed this was happening.
+    """
+    state = LauncherState(task="anything", cwd="")
+    assert Path(state.spec().cwd).is_absolute()
+
+    state = LauncherState(task="anything", cwd=".")
+    assert Path(state.spec().cwd).is_absolute()
+
+
+def test_a_relative_cwd_in_the_draft_survives_as_the_directory_it_names(
+    tmp_path: Path,
+) -> None:
+    """
+    Resolving must not relocate the agent, only spell where it already runs.
+
+    The SDK resolves a relative ``ClaudeAgentOptions.cwd`` against this process's
+    directory, so resolving here names the same directory rather than a different
+    one. A fix that moved where agents run would be a behaviour change wearing a
+    units fix's clothes.
+    """
+    state = LauncherState(task="anything", cwd=str(tmp_path))
+    assert state.spec().cwd == str(Path(tmp_path).resolve())

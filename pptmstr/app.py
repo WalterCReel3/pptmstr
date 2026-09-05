@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import time
 import traceback
 from collections.abc import Callable
@@ -1015,7 +1016,11 @@ def main(argv: list[str] | None = None) -> int:
                     LaunchSpec(
                         task=task_text,
                         model=args.model or launcher.MODELS[0],
-                        cwd=args.cwd,
+                        # Resolved for the same reason `LauncherState.spec` resolves
+                        # it: a relative cwd makes every absolute write unplaced and
+                        # the divergence reading silently empty. `--cwd` defaults to
+                        # ".", so the headless path is the one most likely to hit it.
+                        cwd=os.path.realpath(args.cwd),
                         template=args.template,
                     ),
                 )

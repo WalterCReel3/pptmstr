@@ -410,7 +410,17 @@ class LauncherState:
         return LaunchSpec(
             task=self.task.strip(),
             model=MODELS[self.model_index],
-            cwd=self.cwd.strip() or ".",
+            # Resolved here, because a relative cwd reaches the store and the store
+            # cannot resolve one: ``model.relative_write`` returns None for every
+            # absolute write path unless the agent's cwd is itself absolute, so a
+            # session launched with the default "." records every write as unplaced
+            # and ``Task.wrote_outside_declaration`` reads empty for the whole run.
+            # The measurement is silent rather than wrong, which is worse.
+            #
+            # Behaviour-preserving for the agent: the SDK resolves a relative
+            # ``ClaudeAgentOptions.cwd`` against this process's directory, which is
+            # what ``realpath`` names here (see ui/projects._derive).
+            cwd=os.path.realpath(self.cwd.strip() or "."),
             template=templates.names()[self.template_index],
             brief=self.brief.strip() or None,
             resume=self.picker.selected,
