@@ -218,3 +218,46 @@ passes an absolute cwd in every row.
    `Role.tool_list()` returns `None` — but whether the CLI hands over the tool is a CLI behaviour
    nothing here measures. If it does not, defect 2 is unreachable in shipped configuration and the
    priority drops sharply.
+
+### Both blocking probes answered, 2026-09-08
+
+`scripts/verify_nested_spawn.py`, run against a team whose `builder` mirrors the shipped role
+exactly — `tools=None`, which is what `Role.tool_list()` returns for it and what `driver._team()`
+passes through. Reproducing the shipped shape was the point; granting tools explicitly would have
+measured a configuration nobody runs.
+
+```
+PreToolUse      tool=Agent agent_id=<<absent>>        subagent_type=builder
+SubagentStart   agent_id=ae36351d846b2afc1
+PreToolUse      tool=Agent agent_id=ae36351d846b2afc1 subagent_type=general-purpose
+SubagentStart   agent_id=a8462e25a13f97d9b
+```
+
+**Probe 2 — the CLI does grant `Task`/`Agent` to a sub-agent with `tools=None`.** The `builder`
+issued a spawn call carrying its own `agent_id`, and the nested agent ran and replied. So defect 2
+is reachable in shipped configuration, and `2026-09-03` §8d's *"very likely moot"* was wrong. The
+`feature` template can fan out past its cap today.
+
+**Probe 1 — `SubagentStart` does fire for a nested agent**, under its own `agent_id`, and
+`_subagent_start` adds it to `_live_subagents` (`driver.py:1005`) with no parentage filter.
+
+**This narrows the fix, and in the cheap direction.** The cap is not blind to nested agents:
+once started, one occupies a slot in `_outstanding_subagents` exactly like any other. What is
+missing is only the **admission** check — a nested spawn is never refused at the door, so the
+population can be pushed past the cap, but it is not invisible afterwards.
+
+So splitting the flag is **sufficient**. `2026-08-14`'s statement that nested spawns *"want a
+separate counter"* does not apply to the cap half — occupancy already works — and applies only to
+the join half, `_pending_spawns`, which splitting deliberately leaves on the existing narrow
+predicate. The two halves of that record's reasoning come apart cleanly:
+
+- **Cap:** widen the predicate at the at-cap deny. Nested spawns are counted at admission, and
+  their occupancy is already correct.
+- **Join:** leave `_expect_spawn` on `tool_name in (...) and not agent_id`. 08-14's objection —
+  a nested `SubagentStart` is not attributable to the parent's ledger entry — is untouched by this
+  change and stays true.
+
+**What this does not establish.** The probe ran one nested spawn, not a burst, so the interaction
+between nested admissions and the `_pending_spawns` ledger under concurrency is unmeasured. And it
+observed the CLI, not pptmstr's gate — the events are what `AgentSession` would receive, but the
+run did not go through `_gate_tool_use`.
