@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from .. import tree
 from ..model import NodeId, Snapshot
 
 # cwd string -> project name. Unbounded in principle and tiny in practice: one entry
@@ -51,28 +52,16 @@ def project_key(cwd: str | None) -> str:
 
 
 def _derive(cwd: str) -> str:
-    try:
-        # Relative paths resolve against this process's directory, which is also what
-        # the SDK does with ``ClaudeAgentOptions.cwd`` -- so "." here names the same
-        # place it names for the agent.
-        path = Path(cwd).expanduser().resolve()
-    except (OSError, RuntimeError):
-        # Unresolvable (a broken symlink loop, a vanished parent). The string still
-        # has a last component and that is better than reporting nothing.
-        return Path(cwd).name or cwd
+    """
+    The display name for the directory ``tree.repo_root`` files this cwd under.
 
-    for candidate in (path, *path.parents):
-        try:
-            # Not is_dir(): a worktree or submodule checkout has .git as a *file*
-            # holding a gitdir pointer, and treating those as unenclosed would file
-            # every worktree under its own name instead of its repo's.
-            if (candidate / ".git").exists():
-                return candidate.name or str(candidate)
-        except OSError:
-            # A directory we cannot stat is not a git root as far as we can tell.
-            # Keep walking rather than aborting the whole derivation.
-            continue
-    return path.name or str(path)
+    The walk itself is not here. It decides which directory a session's writes are
+    measured relative to, which is a store-facing fact rather than a display
+    judgement, and two walks that answered differently would put a session in one
+    project on screen and another in its units.
+    """
+    root = tree.repo_root(cwd)
+    return Path(root).name or root
 
 
 def roots(snap: Snapshot) -> list[NodeId]:
