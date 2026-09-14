@@ -1109,19 +1109,41 @@ def test_the_cap_gates_spawns_and_nothing_else(bridge: Bridge) -> None:
     assert not store.snapshot().approvals
 
 
-def test_a_spawn_from_inside_a_subagent_is_not_counted(bridge: Bridge) -> None:
+def test_a_spawn_from_inside_a_subagent_counts_against_the_cap(bridge: Bridge) -> None:
     """
-    The ceiling is per session and counts the sub-agents this session started. An
-    Agent call carrying an agent_id is a sub-agent starting its own, which is not
-    admitted to the ledger and is not counted here either -- it still parks, so the
-    operator remains the bound on that branch.
+    The ceiling is per session, and a sub-agent's own spawn adds to that session's
+    population exactly as the root's does. The nested SubagentStart arrives under its
+    own agent_id and `_subagent_start` puts it in `_live_subagents` without asking who
+    its parent is (measured, scripts/verify_nested_spawn.py), so a nested spawn
+    admitted past the ceiling pushes the session over it.
 
-    Pinned because it is a hole in the ceiling rather than a decision that reads
-    obviously from the code: `spawn` is false for these calls, and both the ledger
-    and the cap follow that one flag.
+    Refused rather than parked, for the reason every capacity refusal is: a call this
+    session has already decided it will not run is not a decision worth interrupting
+    someone for.
+    """
+    session = AgentSession(bridge, "task", subagent_cap=0)
+    session.announce()
+
+    nested = _agent_hook("tu-nested")
+    nested["agent_id"] = "a-1"
+    out = bridge.submit(session._pre_tool_use(nested, None, {})).result(timeout=TIMEOUT)
+
+    assert decision_of(out) == "deny"
+    assert session._pending_spawns == {}
+
+
+def test_a_spawn_from_inside_a_subagent_stays_out_of_the_spawn_ledger(bridge: Bridge) -> None:
+    """
+    The cap and the ledger ask different questions of the same call, which is why two
+    predicates read it. The ledger pairs a pending Agent call with the SubagentStart
+    that follows it, keyed by role and popped FIFO -- and a nested start is not
+    attributable to the parent's entry, so admitting one would hand the wrong
+    sub-agent to the wrong approval.
+
+    Below the ceiling the nested call is allowed and the ledger stays empty.
     """
     store = Store()
-    session = AgentSession(bridge, "task", subagent_cap=0)
+    session = AgentSession(bridge, "task", subagent_cap=4)
     session.announce()
 
     nested = _agent_hook("tu-nested")

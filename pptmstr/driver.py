@@ -1214,13 +1214,22 @@ class AgentSession:
         node = self._node_for(agent_id)
         # The hook-visible name is "Agent" even though the tool list says "Task"
         # (§2.5.1).
-        spawn = tool_name in ("Agent", "Task") and not agent_id
+        #
+        # Two predicates over one call, because the cap and the ledger are asking
+        # different questions. The cap asks how many sub-agents this session will
+        # have, and a sub-agent's own spawn adds one exactly like the root's does --
+        # measured, with the nested SubagentStart arriving under its own agent_id and
+        # entering `_live_subagents` (scripts/verify_nested_spawn.py). The ledger asks
+        # which pending Agent call a SubagentStart belongs to, and a nested start is
+        # not attributable to the parent's entry, so nested calls stay out of it.
+        is_spawn_call = tool_name in ("Agent", "Task")
+        spawn = is_spawn_call and not agent_id
         tool_use_id = str(data.get("tool_use_id", ""))
 
         # Ahead of classify, because a spawn that cannot be admitted must not reach
         # the operator: parking it would ask a human to approve a call this session
         # has already decided it will not run.
-        if spawn and self._outstanding_subagents() >= self.subagent_cap:
+        if is_spawn_call and self._outstanding_subagents() >= self.subagent_cap:
             return _deny(tool_name, self._at_cap_reason())
 
         disposition = classify(tool_name, tool_input)

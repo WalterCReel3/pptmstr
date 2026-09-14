@@ -380,6 +380,16 @@ is the hazard `_expect_spawn`'s docstring forbids, so admission is at approval; 
 that window the operator answering each row is the bound, which is what phase 3's
 ordinal exists to make visible.
 
+**Superseded 2026-09-08 — the cap now counts nested spawns.** The paragraph below
+still states the *ledger* half correctly and it still binds; the *cap* half is no
+longer how the code behaves. The two questions were riding one flag and are now two
+predicates in `_gate_tool_use`. What changed the answer is a measurement this note
+could not have had: `SubagentStart` does fire for a nested agent and
+`_subagent_start` adds it to `_live_subagents` regardless of parentage
+(`scripts/verify_nested_spawn.py`), so the separate counter this paragraph asks for
+is not needed — occupancy was already correct, only admission was unchecked. See
+[`2026-09-04-two-mainline-defects-the-autonomous-mode-exposed.md`](2026-09-04-two-mainline-defects-the-autonomous-mode-exposed.md).
+
 Nested spawns (`Agent` called from inside a sub-agent) are not counted, and today's
 behaviour is pinned by a test so the hole is visible rather than inferred. Widening
 `spawn` to cover them would corrupt the join to fix the count: a nested
