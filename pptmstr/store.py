@@ -205,6 +205,7 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
                 # session's, and making each emitter remember that is how the two
                 # sides of a boundary drift apart.
                 cwd=intent.cwd or (parent_rec.cwd if parent_rec else None),
+                repo_root=intent.repo_root or (parent_rec.repo_root if parent_rec else None),
                 started_at=intent.started_at,
                 transcript=intent.transcript or Transcript(),
             )
@@ -354,8 +355,13 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
                     task="(recovered from an approval for an unannounced agent)",
                     model="unknown",
                     # So a recovered node still lands in the right project lane
-                    # rather than in an "unknown" one of its own.
+                    # rather than in an "unknown" one of its own, and so its
+                    # writes are measured in the same units as its parent's. This
+                    # record is built *because* an approval arrived, so it is the
+                    # node most likely to be a writer -- omitting the base here
+                    # would fail silently in exactly the recovered case.
                     cwd=nodes[parent].cwd if adopted else None,
+                    repo_root=nodes[parent].repo_root if adopted else None,
                     pending=(intent.pending,),
                     started_at=intent.pending.requested_at,
                 )
@@ -432,7 +438,13 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
                     tasks[owned[0].id] = dataclasses.replace(
                         owned[0],
                         writes=owned[0].writes.plus(
-                            approved_write(resolved.tool_name, args, rec.cwd, resolved.diff)
+                            approved_write(
+                                resolved.tool_name,
+                                args,
+                                rec.cwd,
+                                resolved.diff,
+                                rec.repo_root,
+                            )
                         ),
                     )
                 elif owned:

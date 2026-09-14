@@ -65,6 +65,11 @@ class AgentSpawned:
     # sub-agent does -- it runs in the session's directory and its spawn hook is not
     # told one. The store resolves the inheritance so no emitter has to remember to.
     cwd: str | None = None
+    # The base ``cwd``'s writes are measured from. None means "inherit from the
+    # parent", for the same reason and by the same resolution as ``cwd`` above: the
+    # two travel together, and a sub-agent measured against a different base than the
+    # session it runs inside would report divergences that are only a change of ruler.
+    repo_root: str | None = None
     # Supplied by the spawner rather than created by the store. The driver writes
     # into it directly from the asyncio thread (I7), so both sides must hold the
     # same object -- letting the store build its own would give the UI an empty

@@ -1489,3 +1489,115 @@ def test_a_stale_resolution_counts_nothing_twice() -> None:
     assert store.snapshot().tasks["t1"].writes == ApprovedWrites(
         paths=("pptmstr/store.py",), lines_added=2, lines_removed=1
     )
+
+
+# -- writes and declarations share a base (2026-09-04-two-mainline-defects, defect 1)
+
+
+def test_a_write_from_a_subdirectory_is_recorded_in_the_declarations_units() -> None:
+    """
+    A session running below its repository root still measures against the root.
+
+    ``bus.declare_task`` tells every lead to write ``touches`` relative to the
+    repository, so a write placed against the agent's own ``cwd`` is in different
+    units than the declaration it is compared to. The agent here does exactly what it
+    declared; without the base it would be recorded as ``store.py`` and read as a
+    file the task never named.
+    """
+    store = Store()
+    store.apply(
+        dataclasses.replace(spawn(ROOT), cwd="/home/w/repo/pptmstr", repo_root="/home/w/repo")
+    )
+    store.apply(
+        dataclasses.replace(
+            spawn(CHILD, ROOT), cwd="/home/w/repo/pptmstr", repo_root="/home/w/repo"
+        )
+    )
+    board(store, touches=("pptmstr/store.py",))
+    store.apply(
+        ApprovalRequested(
+            CHILD,
+            writing(CHILD, args={"file_path": "/home/w/repo/pptmstr/store.py", "content": "hi"}),
+        )
+    )
+    store.apply(ApprovalResolved(CHILD, "p1", approved=True))
+
+    task = store.snapshot().tasks["t1"]
+    assert task.writes.paths == ("pptmstr/store.py",)
+    assert task.wrote_outside_declaration() == ()
+
+
+def test_a_relative_write_from_a_subdirectory_is_rebased_onto_the_root() -> None:
+    """
+    The half a base alone does not fix. An absolute path only needs the root chopped
+    off the front; a relative one was typed against the agent's ``cwd`` and has to be
+    carried up to the root before it means the same file.
+
+    A relative write path is read as relative to the agent's ``cwd``, which is what a
+    path in a tool call means everywhere else. It is ambiguous in principle -- the same
+    string could be meant from the root -- and unambiguous in practice, because
+    ``Write`` and ``Edit`` take an absolute ``file_path`` and this branch exists for
+    totality rather than for a shape the CLI sends.
+    """
+    store = Store()
+    store.apply(
+        dataclasses.replace(spawn(ROOT), cwd="/home/w/repo/pptmstr", repo_root="/home/w/repo")
+    )
+    store.apply(
+        dataclasses.replace(
+            spawn(CHILD, ROOT), cwd="/home/w/repo/pptmstr", repo_root="/home/w/repo"
+        )
+    )
+    board(store, touches=("pptmstr/store.py",))
+    store.apply(
+        ApprovalRequested(CHILD, writing(CHILD, args={"file_path": "store.py", "content": "hi"}))
+    )
+    store.apply(ApprovalResolved(CHILD, "p1", approved=True))
+
+    task = store.snapshot().tasks["t1"]
+    assert task.writes.paths == ("pptmstr/store.py",)
+    assert task.wrote_outside_declaration() == ()
+
+
+def test_a_write_above_the_root_is_unplaced_rather_than_a_divergence() -> None:
+    """
+    A path that climbs out of the repository has no spelling in the declaration's
+    units, so there is nothing to compare it against. ``unplaced`` says that; naming
+    it as out-of-declaration would accuse an agent on the strength of a ruler that
+    does not reach.
+    """
+    store = Store()
+    store.apply(
+        dataclasses.replace(spawn(ROOT), cwd="/home/w/repo/pptmstr", repo_root="/home/w/repo")
+    )
+    store.apply(
+        dataclasses.replace(
+            spawn(CHILD, ROOT), cwd="/home/w/repo/pptmstr", repo_root="/home/w/repo"
+        )
+    )
+    board(store, touches=("pptmstr/store.py",))
+    store.apply(
+        ApprovalRequested(CHILD, writing(CHILD, args={"file_path": "/etc/passwd", "content": "hi"}))
+    )
+    store.apply(ApprovalResolved(CHILD, "p1", approved=True))
+
+    task = store.snapshot().tasks["t1"]
+    assert task.writes.paths == ()
+    assert task.writes.unplaced == ("/etc/passwd",)
+    assert task.wrote_outside_declaration() == ()
+
+
+def test_a_subagent_inherits_the_base_its_parent_was_launched_with() -> None:
+    """
+    The pair travels together. A sub-agent measured against a different base than the
+    session it runs inside would report divergences that are only a change of ruler.
+    """
+    store = Store()
+    store.apply(
+        dataclasses.replace(spawn(ROOT), cwd="/home/w/repo/pptmstr", repo_root="/home/w/repo")
+    )
+    store.apply(spawn(CHILD, ROOT))
+
+    child = store.snapshot().nodes[CHILD]
+    assert child.cwd == "/home/w/repo/pptmstr"
+    assert child.repo_root == "/home/w/repo"

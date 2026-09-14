@@ -334,7 +334,14 @@ def test_ready_ignores_whitespace_only_drafts(task: str, ready: bool) -> None:
 def test_spec_strips_task_and_resolves_model() -> None:
     state = LauncherState(task="  audit the parser  ", cwd="/tmp/x", model_index=1)
     assert state.spec() == LaunchSpec(
-        task="audit the parser", model=MODELS[1], cwd="/tmp/x", template="solo", brief=None
+        task="audit the parser",
+        model=MODELS[1],
+        cwd="/tmp/x",
+        # A directory no repository encloses is its own base, which is what makes
+        # adopting the field a no-op for a scratch directory.
+        repo_root="/tmp/x",
+        template="solo",
+        brief=None,
     )
 
 
@@ -617,6 +624,7 @@ def test_picking_nothing_leaves_todays_fresh_launch_spec_untouched() -> None:
         task="audit the parser",
         model=MODELS[1],
         cwd="/tmp/x",
+        repo_root="/tmp/x",
         template="solo",
         brief=None,
         resume=None,

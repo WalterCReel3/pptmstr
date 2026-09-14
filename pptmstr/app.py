@@ -20,7 +20,7 @@ from imgui_bundle import hello_imgui, imgui, immapp
 
 from . import brief as brief_mod
 from . import settings as settings_mod
-from . import templates, theme
+from . import templates, theme, tree
 from .bridge import Bridge
 from .driver import AgentSession
 from .fake_driver import FakeDriver
@@ -467,6 +467,10 @@ def _launch(state: AppState, spec: LaunchSpec) -> None:
             spec.task,
             model=spec.model,
             cwd=spec.cwd,
+            # Travels with cwd: the pair is what a write is placed against, and a
+            # launch that carried one without the other would measure the session
+            # in units nothing else agrees with.
+            repo_root=spec.repo_root,
             brief=spec.brief,
             template=shape,
             subagent_cap=state.settings.subagent_cap,
@@ -1007,6 +1011,8 @@ def main(argv: list[str] | None = None) -> int:
         state.bridge.submit(state.driver.run())
     if args.task:
 
+        _cli_cwd = os.path.realpath(args.cwd)
+
         async def launch_initial() -> None:
             # Submitting from the loop thread keeps every mutation of the pool on
             # one thread, so it needs no lock of its own.
@@ -1020,7 +1026,8 @@ def main(argv: list[str] | None = None) -> int:
                         # it: a relative cwd makes every absolute write unplaced and
                         # the divergence reading silently empty. `--cwd` defaults to
                         # ".", so the headless path is the one most likely to hit it.
-                        cwd=os.path.realpath(args.cwd),
+                        cwd=_cli_cwd,
+                        repo_root=tree.repo_root(_cli_cwd),
                         template=args.template,
                     ),
                 )

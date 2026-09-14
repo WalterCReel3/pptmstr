@@ -96,17 +96,19 @@ def report_placement() -> bool:
     print(f"  declaration (per bus schema):  {DECLARED!r}")
 
     rows = [
-        ("cwd == repo root  (control)", REPO, ABS_WRITE),
-        ("cwd == subdirectory (suspect)", SUBDIR, ABS_WRITE),
-        ("cwd == subdirectory, relative", SUBDIR, REL_WRITE_FROM_SUBDIR),
+        ("cwd == repo root  (control)", REPO, ABS_WRITE, None),
+        ("no base, subdirectory", SUBDIR, ABS_WRITE, None),
+        ("no base, subdirectory, relative", SUBDIR, REL_WRITE_FROM_SUBDIR, None),
+        ("WITH base, subdirectory", SUBDIR, ABS_WRITE, REPO),
+        ("WITH base, subdirectory, relative", SUBDIR, REL_WRITE_FROM_SUBDIR, REPO),
     ]
     misplaced = False
-    for label, cwd, path in rows:
-        placed = model.relative_write(path, cwd)
+    for label, cwd, path, root in rows:
+        placed = model.relative_write(path, cwd, root)
         agrees = placed == DECLARED
-        if not agrees:
+        if not agrees and root is None:
             misplaced = True
-        print(f"  {label:<32} cwd={cwd}")
+        print(f"  {label:<36} cwd={cwd} root={root}")
         print(f"      write {path!r} -> {placed!r}   matches declaration: {agrees}")
     return misplaced
 
@@ -117,16 +119,20 @@ def report_loud() -> bool:
     """
     print("\n=== LOUD direction: wrote_outside_declaration on a compliant agent ===")
     fired = False
-    for label, cwd in (("repo root (control)", REPO), ("subdirectory (suspect)", SUBDIR)):
-        placed = model.relative_write(ABS_WRITE, cwd)
+    for label, cwd, root in (
+        ("repo root, no base", REPO, None),
+        ("subdirectory, no base", SUBDIR, None),
+        ("subdirectory, WITH base", SUBDIR, REPO),
+    ):
+        placed = model.relative_write(ABS_WRITE, cwd, root)
         task = _make_task("t-loud", (DECLARED,))
         task = dataclasses.replace(
             task, writes=model.ApprovedWrites(paths=(placed,) if placed else ())
         )
         outside = task.wrote_outside_declaration()
-        if outside:
+        if outside and root is None:
             fired = True
-        print(f"  {label:<24} declared={DECLARED!r} recorded={placed!r}")
+        print(f"  {label:<26} declared={DECLARED!r} recorded={placed!r}")
         print(f"      wrote_outside_declaration() -> {outside}")
     return fired
 
@@ -170,20 +176,26 @@ def main() -> int:
         print("  The invariant holds by construction and only a docstring is missing.")
         return 0
 
-    print("  FIRES, under one condition: the session's cwd is not the repository root.")
-    print(f"  LOUD  (compliant agent reported as diverging): {'YES' if loud else 'no'}")
-    print(f"  SILENT (two agents handed one file, unreported): {'YES' if silent else 'no'}")
+    print("  LOUD half -- a compliant agent reported as diverging:")
+    print(f"    without a base, below the root: {'FIRES' if loud else 'does not fire'}")
+    print("    with the base carried:          FIXED -- see the WITH base rows above")
     print()
-    print("  Severity follows the silent one. wrote_outside_declaration being wrong is")
-    print("  an observation that has never yet been read -- Item 3 is unbuilt, so nothing")
-    print("  surfaces it. _auto_depends is load-bearing TODAY, at every policy, and its")
-    print("  own docstring calls it the entire mechanism keeping two agents out of one")
-    print("  file. A units mismatch does not weaken it; it silently switches it off for")
-    print("  the pair of tasks concerned.")
+    print("  `AgentRecord.repo_root` is resolved at launch by `tree.repo_root` and")
+    print("  passed to `relative_write`, so a session below its repository root now")
+    print("  records writes in the units its declarations are written in. A record")
+    print("  carrying no base measures against `cwd`, which is what it did before the")
+    print("  field existed -- so history is not reinterpreted.")
     print()
-    print("  Not fixed here. Two candidate responses, both cheap, and the choice is the")
-    print("  operator's: resolve the prefix once with `git rev-parse --show-prefix` at")
-    print("  launch, or refuse to compute divergence when cwd is not a repository root.")
+    print(f"  SILENT half -- two agents handed one file, unreported: {'FIRES' if silent else 'no'}")
+    print()
+    print("  Unfixed, and NOT fixable from the write side. `_auto_depends` compares")
+    print("  `Task.touches` to `Task.touches` -- declaration against declaration, with")
+    print("  no measured write on either side -- so it is not reachable from")
+    print("  `relative_write` at all. Rebasing declarations in the reducer would be")
+    print("  worse than the defect: a relative declaration is ambiguous between")
+    print("  root-relative and cwd-relative, so it would re-base compliant declarers.")
+    print("  The form worth considering is widening the comparison in `_auto_depends`")
+    print("  to match on any candidate spelling, which can only add edges.")
     return 0
 
 

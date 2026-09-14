@@ -32,7 +32,7 @@ from imgui_bundle import imgui
 
 from .. import brief as brief_mod
 from .. import sessions as sessions_mod
-from .. import templates
+from .. import templates, tree
 from ..model import LaunchSpec
 from ..sessions import Overlay, SessionRow
 from ..theme import P
@@ -407,6 +407,7 @@ class LauncherState:
         a draft nobody opened the resume section on produces exactly the spec it did
         before the section existed.
         """
+        resolved_cwd = os.path.realpath(self.cwd.strip() or ".")
         return LaunchSpec(
             task=self.task.strip(),
             model=MODELS[self.model_index],
@@ -420,7 +421,13 @@ class LauncherState:
             # Behaviour-preserving for the agent: the SDK resolves a relative
             # ``ClaudeAgentOptions.cwd`` against this process's directory, which is
             # what ``realpath`` names here (see ui/projects._derive).
-            cwd=os.path.realpath(self.cwd.strip() or "."),
+            cwd=resolved_cwd,
+            # Resolved here, beside the cwd it is derived from, because it is the
+            # one place that stats the filesystem on the operator's behalf. The
+            # store cannot do it -- the reducer does no IO -- and the driver must
+            # not, or two sessions on one directory could disagree about where
+            # their writes are measured from.
+            repo_root=tree.repo_root(resolved_cwd),
             template=templates.names()[self.template_index],
             brief=self.brief.strip() or None,
             resume=self.picker.selected,

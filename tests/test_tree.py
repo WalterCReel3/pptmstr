@@ -13,6 +13,7 @@ from __future__ import annotations
 import posixpath
 from pathlib import Path
 
+from pptmstr.model import relative_write
 from pptmstr.tree import repo_root
 
 
@@ -78,3 +79,21 @@ def test_a_missing_directory_still_answers_absolutely(tmp_path: Path) -> None:
     """
     gone = tmp_path / "gone" / "vendor-sync"
     assert posixpath.isabs(repo_root(str(gone)))
+
+
+def test_the_root_it_returns_is_the_one_relative_write_can_strip(tmp_path: Path) -> None:
+    """
+    The integration the two halves are only correct together. ``repo_root`` resolves
+    symlinks; a write path that did not would not share the prefix, and a compliant
+    agent would be reported as writing outside its declaration.
+    """
+    repo = tmp_path / "orbital"
+    inner = repo / "pptmstr"
+    inner.mkdir(parents=True)
+    (repo / ".git").mkdir()
+    root = repo_root(str(inner))
+
+    written = posixpath.join(str(repo.resolve()), "pptmstr", "store.py")
+    assert relative_write(written, str(inner), root) == "pptmstr/store.py"
+    # And a relative write, which is typed against cwd rather than the root.
+    assert relative_write("store.py", str(inner), root) == "pptmstr/store.py"

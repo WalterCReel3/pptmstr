@@ -727,6 +727,7 @@ class AgentSession:
         *,
         model: str | None = None,
         cwd: str | None = None,
+        repo_root: str | None = None,
         brief: str | None = None,
         interactive: bool = True,
         template: WorkTemplate | None = None,
@@ -761,6 +762,7 @@ class AgentSession:
         self.transcript = Transcript()
         self.model = model or "claude-sonnet-5"
         self.cwd = cwd
+        self.repo_root = repo_root
         # Whether an operator is attached to answer. False means headless, where a
         # tool needing approval is denied rather than left to hit the timeout.
         self.interactive = interactive
@@ -1576,6 +1578,7 @@ class AgentSession:
                 started_at=time.monotonic(),
                 topic="connecting",
                 cwd=self.cwd,
+                repo_root=self.repo_root,
                 # Announced here rather than left on the session: this is the only
                 # emitter that knows the template, and the UI cannot reach into an
                 # AgentSession to ask. Same for the brief.

@@ -403,6 +403,14 @@ class LaunchSpec:
     model: str
     # Empty means the repository root; the launcher normalises before building one.
     cwd: str = "."
+    # The base ``cwd``'s writes are measured from, resolved by ``tree.repo_root``
+    # at the launch sites rather than here: this is a frozen value type and the
+    # resolution stats the filesystem.
+    #
+    # None is honest rather than a default worth guessing at -- a spec built
+    # without one measures against ``cwd``, which is what every record did before
+    # the field existed.
+    repo_root: str | None = None
     # By name. None is solo, spelled here rather than at each call site because
     # `relaunch` and `fork` pass `AgentRecord.template`, which is None on any record
     # that is not a session root.
@@ -450,6 +458,10 @@ class LaunchSpec:
             task=record.task,
             model=record.model,
             cwd=record.cwd or ".",
+            # Carried, unlike a field row 9 dropped: a relaunch or fork of a
+            # session measured from one base must not silently start measuring
+            # from another, which is what recomputing it here would risk.
+            repo_root=record.repo_root,
             template=record.template,
             brief=record.brief,
         )
@@ -481,6 +493,20 @@ class AgentRecord:
     # decision and is made in the UI (see ui/projects.py); putting the derived name
     # here would freeze one grouping rule into the store.
     cwd: str | None = None
+    # The directory ``cwd``'s writes are measured from, resolved once at launch by
+    # ``tree.repo_root``. Inherited by sub-agents alongside ``cwd``, because a write
+    # is placed against the pair and splitting them would measure a sub-agent in one
+    # base and its parent in another.
+    #
+    # Stored rather than derived, and the reason is stronger than for ``cwd``: this
+    # follows from ``cwd`` *on the filesystem*, and the filesystem moves. A ``.git``
+    # created later would silently re-base writes recorded before it existed, so a
+    # session's units would change underneath comparisons already made. Freezing it
+    # at launch is what keeps a run's measurements in one unit for its whole life.
+    #
+    # None on a record written before this field existed, which ``relative_write``
+    # reads as "measure against ``cwd``" -- exactly what it did then.
+    repo_root: str | None = None
     # The work template this session was launched under, on a root record only.
     # None on a sub-agent, which does not have one.
     #
@@ -869,10 +895,21 @@ def written_path(tool_name: str, args: Mapping[str, Any]) -> str | None:
     return raw
 
 
-def relative_write(path: str, cwd: str | None) -> str | None:
+def relative_write(path: str, cwd: str | None, repo_root: str | None = None) -> str | None:
     """
     A written path in the units a declaration is written in, or None when the two
     cannot be put in the same units.
+
+    ``repo_root`` is the base those units are measured from, resolved once at launch
+    by ``tree.repo_root`` and carried on ``AgentRecord``. It defaults to None, which
+    measures against ``cwd`` instead -- the behaviour of every record written before
+    the field existed, and the reason adding it does not reinterpret history.
+
+    **Both are needed, not either.** ``repo_root`` places an absolute write, and
+    ``cwd`` is what a *relative* write was typed against: a model in
+    ``<root>/pptmstr`` writing ``store.py`` means ``pptmstr/store.py``, and reading
+    it against the root alone would record ``store.py`` and report a compliant agent
+    as having written outside its declaration.
 
     A declaration is repository-relative by construction: ``normalised_touches``
     reconciles no absolute path with a relative one and says so, and ``bus`` and
@@ -889,13 +926,35 @@ def relative_write(path: str, cwd: str | None) -> str | None:
     cleaned = path.strip()
     if not cleaned:
         return None
+
+    root = _absolute(repo_root)
+
     if not posixpath.isabs(cleaned):
-        normalised = normalised_touches((cleaned,))
+        # A relative path is whatever the model typed, and it typed it against its
+        # own ``cwd``. Expressing it against the root needs the step between the two;
+        # skipping that step is what recorded a write to ``<root>/pptmstr/store.py``
+        # as ``store.py`` and then read it as out-of-declaration.
+        #
+        # ``inner`` is "" both when there is no root to rebase onto and when the agent
+        # already stands at it -- in either case the path is already in the units a
+        # declaration is written in, which is why this stayed correct for as long as
+        # every session ran at its repository root.
+        inner = "" if root is None else _within(root, _absolute(cwd))
+        if inner is None:
+            # A cwd that is not under the root it is paired with. The two disagree
+            # about where zero is, and guessing which to believe would rebase the
+            # write onto a tree it has nothing to do with.
+            return None
+        candidate = posixpath.normpath(posixpath.join(inner, cleaned)) if inner else cleaned
+        if candidate == ".." or candidate.startswith("../"):
+            # Climbed out of the base. There is no spelling of it in the declaration's
+            # units, so the caller records it as unplaced rather than as a divergence.
+            return None
+        normalised = normalised_touches((candidate,))
         return normalised[0] if normalised else None
-    if not cwd:
-        return None
-    base = posixpath.normpath(cwd)
-    if not posixpath.isabs(base):
+
+    base = root or _absolute(cwd)
+    if base is None:
         return None
     prefix = base if base.endswith("/") else base + "/"
     target = posixpath.normpath(cleaned)
@@ -904,8 +963,39 @@ def relative_write(path: str, cwd: str | None) -> str | None:
     return target[len(prefix) :] or None
 
 
+def _absolute(path: str | None) -> str | None:
+    """
+    ``path`` normalised, or None unless it is absolute. Pure: no filesystem.
+    """
+    if not path:
+        return None
+    base = posixpath.normpath(path)
+    return base if posixpath.isabs(base) else None
+
+
+def _within(base: str, inner: str | None) -> str | None:  # noqa: D401
+    """
+    ``inner`` expressed relative to ``base``: "" when they are the same directory,
+    None when ``inner`` is not under ``base``.
+
+    None rather than "" for the not-under case, because those are different answers.
+    Treating an unrelated directory as the base itself would rebase every relative
+    write in it onto a root it has nothing to do with.
+    """
+    if inner is None:
+        return None
+    if inner == base:
+        return ""
+    prefix = base if base.endswith("/") else base + "/"
+    return inner[len(prefix) :] if inner.startswith(prefix) else None
+
+
 def approved_write(
-    tool_name: str, args: Mapping[str, Any], cwd: str | None, diff: str | None
+    tool_name: str,
+    args: Mapping[str, Any],
+    cwd: str | None,
+    diff: str | None,
+    repo_root: str | None = None,
 ) -> ApprovedWrites:
     """
     One resolved approval, measured. Pure: the arguments are the whole input.
@@ -925,7 +1015,7 @@ def approved_write(
     raw = written_path(tool_name, args)
     if raw is None:
         return ApprovedWrites(lines_added=added, lines_removed=removed)
-    placed = relative_write(raw, cwd)
+    placed = relative_write(raw, cwd, repo_root)
     if placed is None:
         return ApprovedWrites(unplaced=(raw,), lines_added=added, lines_removed=removed)
     return ApprovedWrites(paths=(placed,), lines_added=added, lines_removed=removed)
