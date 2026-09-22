@@ -46,7 +46,8 @@ Three rules that are easy to read past:
   the command. A pipeline widens nothing: if ``git branch`` is refused alone it
   is refused in a pipeline, because the segment carrying it is checked exactly
   as it would have been on its own.
-- The metacharacter scan runs over the **raw segment**, before ``shlex.split``.
+- The metacharacter scan runs over the **raw segment**, before ``shlex.split``,
+  with one span removed first and `_DISCARD_STDERR` is the whole of it.
   What it catches would otherwise not survive tokenisation --
   ``shlex.split("ls\\rrm -rf /tmp/x")`` is ``["ls", "rm", "-rf", "/tmp/x"]``,
   which matches ``ls`` with "any flags". Scanning tokens would admit exactly the
@@ -435,6 +436,55 @@ _GIT_BRANCH_PREFIXES = ("--format=", "--sort=")
 _SED_ALLOWED_FLAGS = frozenset({"-n", "--quiet", "--silent"})
 _SED_PRINT_RANGE = re.compile(r"^[0-9,$]+p$")
 
+# The one exception to the `>` refusal, and the only redirect this module
+# admits. `/dev/null` is a character device: the redirect cannot create it and
+# cannot truncate it, and the bytes written are discarded, so there is no
+# observable write. It is fd 2 only, so the command's own output still reaches
+# the operator -- what is discarded is a diagnostic.
+#
+# Both lookarounds are word boundaries and neither is optional. Each stops a
+# different thing, and the first two were run rather than reasoned about
+# (2026-09-22, /bin/bash 3.2.57):
+#
+#   right   `2>/dev/nullcat /tmp/x` is a redirect to `/dev/nullcat` and then
+#           `/tmp/x` as the COMMAND WORD. With the target on a writable
+#           filesystem bash created it and executed the program; only the
+#           right anchor keeps this from being argv[0] substitution. The
+#           `/dev/null` spelling of it happens to fail with EPERM because
+#           `/dev` is root-owned devfs here, and that is the filesystem's
+#           doing, not this module's -- nothing here reads a filesystem, so
+#           nothing here may rely on one.
+#   left    `cat f 12>/dev/null` redirects fd 12 and leaves stderr alone, so
+#           the `2` has to begin a word. Confirmed: the diagnostic still
+#           printed.
+#   both    A quote character is not a boundary, so `grep "2>/dev/null" f`
+#           does not match and parks on its `>`. That is how the strip stays
+#           quote-blind without a second quote parser, which is the property
+#           `_split_segments` deliberately does not share with this scan.
+#
+# The replacement is a single space, and it is not what makes the rule safe.
+# Both anchors already put whitespace or a segment edge on each side of the
+# match, so the words either side of it are separated whether or not anything
+# is put back. A splice like `cat a2>/dev/nullb` -> `cat ab` cannot arise,
+# because that string does not match at all. The space is there so the rule
+# stays true if the anchors are ever loosened.
+#
+# `[ \t]` and not `\s`. A newline is the one separator that is also
+# whitespace, so a class matching it could delete a command boundary --
+# `ls 2>/dev/null\nrm -rf /tmp/x` would become one segment named `ls`. The
+# strip runs per segment, after the split has consumed that newline, so the
+# narrow class closes it a second time rather than for the first time.
+#
+# Exactly this spelling, and the rest is deliberate. `>/dev/null` and
+# `1>/dev/null` discard the command's own output, which is a different claim
+# from discarding a diagnostic: it hides what the operator would have read.
+# `2>&1` and `&>/dev/null` carry an `&` and are refused by a rule that has
+# nothing to do with this one. `2>>/dev/null`, `22>/dev/null` and
+# `2>"/dev/null"` do discard stderr -- all three verified 2026-09-22 -- and
+# they park, because each is a spelling a later reader would loosen the
+# pattern to reach.
+_DISCARD_STDERR = re.compile(r"(?<![^ \t])2>[ \t]*/dev/null(?![^ \t])")
+
 
 def _refuse_sed(args: list[str]) -> str | None:
     """
@@ -581,7 +631,18 @@ def _refuse_segment(command: str) -> str | None:
     table, the git rules and the tilde rule all run here, and `refusal` has no
     other way to reach them. A second, cheaper check for segments is the defect
     this shape exists to make unavailable.
+
+    `2>/dev/null` is removed first, and the order is forced from both sides.
+    The scan below refuses every `>`, so the strip has to precede it; and it
+    has to be here rather than over the whole command, because a right anchor
+    of "space or end" fails on the spacing-free `... 2>/dev/null|grep x` until
+    the split has consumed the `|`. Everything downstream of this line -- the
+    scan, `shlex.split`, the tilde rule, the table -- reads the stripped
+    string; `refusal` names the raw segment in its reason, so the operator is
+    shown what they typed.
     """
+    command = _DISCARD_STDERR.sub(" ", command)
+
     for index, char in enumerate(command):
         if char == _CARRIAGE_RETURN:
             return "a carriage return is dropped by tokenisation"

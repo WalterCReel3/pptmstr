@@ -116,6 +116,19 @@ NAMED = (
     "ls \\\n a",
     # A carriage return is not a separator and `shlex` drops it.
     "ls\ra",
+    # `_DISCARD_STDERR`'s anchors. The first is the one that matters: bash
+    # redirects fd 2 to `/dev/nullcat` and then runs `a` as the command word,
+    # so a pattern without a right anchor turns the exception into argv[0]
+    # substitution. It is reported here only if bash reaches the command, and
+    # on a machine whose `/dev` is root-owned devfs the redirect fails first --
+    # which is why the anchor is the defence and this row is a backstop.
+    "2>/dev/nullcat a",
+    "cat f 2>/dev/nullcat a",
+    "cat f 12>/dev/null ; a",
+    "cat f 2>/dev/null ; a",
+    "cat f 2> /dev/null ; a",
+    'cat "2>/dev/null" ; a',
+    "ls 2>/dev/null\na",
 )
 
 EXHAUSTIVE_TO = 3

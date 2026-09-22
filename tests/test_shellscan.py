@@ -175,6 +175,27 @@ REFUSED = [
     "cat $HOME/.ssh/id_rsa",
     "grep foo . >> out",
     "grep foo . 2> err",
+    # `2>/dev/null` is stripped before the scan, so every neighbouring spelling
+    # is here: the ones the anchors must reject, and the ones that discard
+    # stderr and are out of scope anyway. Argued at
+    # `test_the_stderr_discard_is_anchored_on_both_sides`.
+    "2>/dev/nullcat /tmp/evil.sh",
+    "cat f 2>/dev/nullx",
+    "cat f 12>/dev/null",
+    "cat a2>/dev/nullb",
+    "cat f 2>>/dev/null",
+    "cat f 22>/dev/null",
+    'cat f 2>"/dev/null"',
+    "cat f >/dev/null",
+    "cat f 1>/dev/null",
+    "cat f 2>&1",
+    "cat f &>/dev/null",
+    'grep "2>/dev/null" f',
+    "ls 2>/dev/null\nrm -rf /tmp/x",
+    "cd 2>/dev/null",
+    "rm -rf /tmp/x 2>/dev/null",
+    "git log --output=/tmp/pwn 2>/dev/null",
+    "cat f | 2>/dev/null",
     # `echo` is an admitted row, so everything that makes `echo` write or
     # execute is here: the redirects, the substitutions and the pipe into a
     # writer. `echo \`whoami\`` is the same hazard and is in 08-11's list at the
@@ -393,6 +414,23 @@ ADMITTED = [
     # `rm` as an operand of `ls`. Run on /bin/bash 3.2.57, 2026-09-22: it
     # printed `ls: rm: No such file or directory` and deleted nothing.
     "ls \\\n rm -rf /tmp/probe/a",
+    # -- discarding stderr, the one redirect this table admits ----------------
+    # The two shapes from the session that motivated it, then the spacing
+    # variant and a pipeline. `/dev/null` is a character device, so fd 2 going
+    # there writes nothing that can be observed.
+    "cat apps/contactability/models.py 2>/dev/null",
+    'grep -ril "blacklist" --include="*.md" . 2>/dev/null | grep -v node_modules | head -30',
+    "cat f 2> /dev/null",
+    "ls 2>/dev/null | head",
+    "cd /tmp 2>/dev/null",
+    # Right answer, wrong reason, and here so the next reader does not take it
+    # for a bug. The strip is quote-blind, so this is decided as `grep "   " f`
+    # rather than as a search for a literal `2>/dev/null` with spaces around
+    # it. Both are reads, so the verdict is the same either way; making the
+    # strip quote-aware would mean a second quote parser disagreeing with the
+    # scan it runs in front of. Without the spaces the quote blocks the
+    # anchors and it parks -- `grep "2>/dev/null" f` is in `REFUSED`.
+    'grep " 2>/dev/null " f',
 ]
 
 
@@ -1175,6 +1213,136 @@ def test_sed_last_line_address_parks_on_the_dollar_sign_not_on_sed() -> None:
     difference between this test and `test_sed_is_admitted_only_for_a_print_range`.
     """
     assert refusal("sed -n '1,$p' file") == "shell metacharacter '$'"
+
+
+def test_the_stderr_discard_is_anchored_on_both_sides() -> None:
+    """
+    The one exception to the `>` refusal, and the two anchors are the whole of
+    what makes it safe. Each was run rather than argued
+    (2026-09-22, /bin/bash 3.2.57):
+
+    Right. `2>/dev/nullcat /tmp/x` is a redirect to `/dev/nullcat` followed by
+    `/tmp/x` as the command word -- with the target on a writable filesystem,
+    bash created the file and executed the program. A left-only anchor strips
+    eleven characters and hands the table `cat /tmp/x`, so the exception
+    becomes argv[0] substitution. The `/dev/null` spelling of that happens to
+    fail with EPERM because `/dev` is root-owned devfs on this machine, which
+    is why this test asserts the anchor and not the permission: nothing in
+    `shellscan` reads a filesystem, so nothing in it may lean on one.
+
+    Left. `cat f 12>/dev/null` redirects fd 12 and leaves stderr alone -- the
+    diagnostic still printed -- so the `2` has to begin a word.
+
+    Both, together. A quote is not a word boundary, so a quoted occurrence
+    does not match and parks on its `>`. That is how a quote-blind strip
+    avoids needing the quote tracking `_split_segments` has.
+    """
+    assert is_read_only("cat f 2>/dev/null")
+    assert is_read_only("cat f 2> /dev/null")
+    assert is_read_only("cat 2>/dev/null f")
+
+    # Right anchor. The first is argv[0] substitution and the rest name a real
+    # file under a name the pattern must not reach past.
+    for command in (
+        "2>/dev/nullcat /tmp/evil.sh",
+        "cat f 2>/dev/nullx",
+        "cat f 2>/dev/null.bak",
+    ):
+        assert refusal(command) == "shell metacharacter '>'", command
+    # Left anchor: a digit in front of the `2` makes it a different fd.
+    for command in ("cat f 12>/dev/null", "cat f 22>/dev/null", "cat a2>/dev/nullb"):
+        assert refusal(command) == "shell metacharacter '>'", command
+    # A quote is not a boundary.
+    assert refusal('grep "2>/dev/null" f') == "shell metacharacter '>'"
+    assert refusal("grep '2>/dev/null' f") == "shell metacharacter '>'"
+
+
+def test_the_stderr_discard_cannot_eat_a_command_boundary() -> None:
+    """
+    A newline is the only separator that is also whitespace, so a pattern
+    whose class were `\\s` rather than `[ \\t]` could delete a command
+    boundary: `ls 2>/dev/null\\nrm -rf /tmp/x` would become the single segment
+    `ls rm -rf /tmp/x`, whose `argv[0]` is an unrestricted row and whose `rm`
+    is an operand.
+
+    Closed twice over, which is deliberate. The strip runs per segment, after
+    the split has already consumed the newline, AND the class excludes it. The
+    second half is what this test would still catch if someone moved the strip
+    up to the whole command.
+    """
+    for separator in (";", "|", "\n", "&&", "||"):
+        command = f"ls 2>/dev/null {separator} rm -rf /tmp/x"
+        reason = refusal(command)
+        assert reason is not None and reason.endswith("'rm' is not in the read-only table"), (
+            command,
+            reason,
+        )
+        assert reason.startswith("segment 2 "), (command, reason)
+    # The spacing-free spellings, which is where the per-segment placement
+    # earns itself: a right anchor of "space or end" is satisfied by the end of
+    # the segment only because the split consumed the operator first.
+    assert refusal("ls 2>/dev/null|rm -rf /tmp/x") == (
+        "segment 2 ('rm -rf /tmp/x'): 'rm' is not in the read-only table"
+    )
+    assert refusal("ls 2>/dev/null;rm -rf /tmp/x") == (
+        "segment 2 ('rm -rf /tmp/x'): 'rm' is not in the read-only table"
+    )
+    assert is_read_only("ls 2>/dev/null|head")
+
+    # `\r` is not whitespace to this pattern, and the case that separates
+    # `[ \t]` from `\s` behaviourally is `cat f 2>\r/dev/null`. Under `\s` the
+    # `\r` is consumed along with the redirect and the command is admitted;
+    # under `[ \t]` the pattern does not match and it parks on its `>`. Bash
+    # reads the target as a path under a directory named `\r`, so the open
+    # fails and it runs nothing -- run 2026-09-22, it reported the target
+    # missing. Admitting it would have been safe by the filesystem's doing and
+    # not by the module's, which is the same objection that makes the right
+    # anchor mandatory.
+    assert refusal("cat f 2>\r/dev/null") == "shell metacharacter '>'"
+    # A `\r` abutting the redirect is not a boundary either, so the match is
+    # blocked and the `>` decides. Elsewhere in the segment it survives the
+    # strip and reaches `_CARRIAGE_RETURN`. Both refuse, naming different
+    # rules, which is what says the strip did not swallow it.
+    assert refusal("ls 2>/dev/null\rrm -rf /tmp/x") == "shell metacharacter '>'"
+    assert refusal("ls 2>/dev/null x\rrm -rf /tmp/x") == (
+        "a carriage return is dropped by tokenisation"
+    )
+    assert refusal("ls x\rrm 2>/dev/null") == "a carriage return is dropped by tokenisation"
+
+
+def test_stripping_the_discard_does_not_hide_the_rest_of_the_segment() -> None:
+    """
+    Everything downstream of the strip reads the stripped string, so each rule
+    that could be fooled by a shorter one is checked with the redirect
+    attached. No rule sees two words spliced into one, and the anchors are why
+    rather than the replacement: they put whitespace or a segment edge on both
+    sides of the match, so the neighbours are already separated.
+
+    `cd 2>/dev/null` is the verdict that looks like a bug and is not: the
+    redirect is not an argument, and bare `cd` goes home. Run 2026-09-22,
+    `bash -c 'cd 2>/dev/null; pwd'` printed the home directory.
+    """
+    assert refusal("rm -rf /tmp/x 2>/dev/null") == "'rm' is not in the read-only table"
+    assert refusal("git log --output=/tmp/pwn 2>/dev/null") == "git --output writes a file"
+    assert refusal("sed 'w /tmp/pwned' f 2>/dev/null") == (
+        "sed's script language writes with `w` and takes no flag to do it"
+    )
+    assert refusal("tail -f build.log 2>/dev/null") == (
+        "tail -f is not a recognised read-only flag"
+    )
+    assert refusal("cat $HOME/.ssh/id_rsa 2>/dev/null") == "shell metacharacter '$'"
+    # The tilde rule tests the character before the `~`, so it is the rule most
+    # exposed to the strip changing a segment's shape. Attached, the `~` is
+    # still preceded by whitespace and still refuses; abutting, the redirect
+    # does not match and the `>` decides.
+    assert refusal("ls 2>/dev/null ~/x") == "shell metacharacter '~'"
+    assert refusal("ls 2>/dev/null~/x") == "shell metacharacter '>'"
+    # `cd` and the redirect-only segment.
+    assert refusal("cd 2>/dev/null") == (
+        "cd with no argument goes home, which is not an orienting move"
+    )
+    assert is_read_only("cd /tmp 2>/dev/null")
+    assert refusal("cat f | 2>/dev/null") == "segment 2 ('2>/dev/null'): empty command"
 
 
 def test_git_config_is_refused_because_it_installs_the_textconv_hole() -> None:
