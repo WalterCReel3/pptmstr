@@ -14,6 +14,7 @@ the failure mode `STYLE.md` §2 names: a test asserting less than its name.
 from __future__ import annotations
 
 import dataclasses
+from unittest import mock
 
 import pytest
 
@@ -1203,16 +1204,36 @@ def test_sed_with_no_script_is_refused() -> None:
     assert refusal("sed -n") == "sed with no script"
 
 
-def test_sed_last_line_address_parks_on_the_dollar_sign_not_on_sed() -> None:
+def test_sed_last_line_address_is_refused_twice_over() -> None:
     """
-    `1,$p` is a valid print range by sed's own grammar and `_SED_PRINT_RANGE`
-    accepts it, but nothing here ever gets asked: `$` is a refused
-    metacharacter everywhere in a segment, quoted or not, so
-    `sed -n '1,$p' file` parks at the raw scan before `sed` is dispatched to at
-    all. The reason names the character, not the script, which is the
-    difference between this test and `test_sed_is_admitted_only_for_a_print_range`.
+    `1,$p` is a valid print range by sed's own grammar and this module refuses
+    it in two independent places, which is the point of the test.
+
+    The raw scan gets there first: `$` is a refused metacharacter everywhere in
+    a segment, quoted or not, so the reason names the character rather than the
+    script and `sed` is never dispatched to. That is the difference between
+    this test and `test_sed_is_admitted_only_for_a_print_range`.
+
+    `_SED_PRINT_RANGE` refuses it as well, and it did not always -- the class
+    was `[0-9,$]+p`, faithful to sed's grammar, with the unreachability
+    recorded beside it. The second half below is why that was changed: with
+    `$` in the class, this row's safety was a property of `_METACHARACTERS`
+    rather than of the sed grammar, and removing `$` from that set for an
+    unrelated reason would have admitted a last-line print with nobody having
+    decided it.
     """
     assert refusal("sed -n '1,$p' file") == "shell metacharacter '$'"
+    assert refusal("sed -n '$p' file") == "shell metacharacter '$'"
+
+    # The grammar standing on its own, with the scan's `$` rule taken away.
+    # `1,80p` must still admit, or this would pass against a pattern that had
+    # simply stopped matching anything.
+    scan_without_dollar = frozenset(shellscan._METACHARACTERS - {"$"})
+    with mock.patch.object(shellscan, "_METACHARACTERS", scan_without_dollar):
+        assert is_read_only("sed -n '1,80p' file")
+        for command in ("sed -n '1,$p' file", "sed -n '$p' file", "sed -n '100,$p' file"):
+            reason = refusal(command)
+            assert reason is not None and "sed's script language" in reason, command
 
 
 def test_the_stderr_discard_is_anchored_on_both_sides() -> None:

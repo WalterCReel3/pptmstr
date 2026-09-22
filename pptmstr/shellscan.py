@@ -419,25 +419,30 @@ _GIT_BRANCH_PREFIXES = ("--format=", "--sort=")
 # same shape `awk` is refused for.
 #
 # What is admitted instead is one shape the script language cannot smuggle a
-# write or an `e` through: a print range and nothing else. `[0-9,$]+p` is
-# digits, commas and `$` -- sed's own address syntax -- followed by the one
-# letter that only prints. `w`, `e`, `r`, `R`, `s`, `y` and every other sed
-# command are outside that character class, so a script containing any of them
-# fails the pattern rather than needing to be denied by name. This is the
-# allowlist shape `_Rule` already uses for flags, carried into the one place a
-# flag rule cannot reach.
+# write or an `e` through: a print range and nothing else. `[0-9,]+p` is
+# digits and commas followed by the one letter that only prints. `w`, `e`,
+# `r`, `R`, `s`, `y` and every other sed command are outside that character
+# class, so a script containing any of them fails the pattern rather than
+# needing to be denied by name. This is the allowlist shape `_Rule` already
+# uses for flags, carried into the one place a flag rule cannot reach.
 #
-# `$` in this pattern is unreachable in practice, and that is worth being
-# honest about rather than trimming it: the raw metacharacter scan in
-# `_refuse_segment` refuses any `$` anywhere in the segment before `sed` is
-# ever dispatched to, quoted or not, because `$VAR` expands to text this
-# module never sees. So sed's last-line address parks like every other `$`
-# does, not because this pattern denies it. The class stays `[0-9,$]+p`
-# because that is sed's actual print-range grammar; the scan upstream is what
-# makes the `$` branch of it dead code today, and the two facts are recorded
-# separately rather than folded into one.
+# `$` is sed's last-line address and it is NOT in the class, which makes this
+# pattern narrower than sed's own print-range grammar. That is deliberate and
+# it is a decision about where the refusal lives rather than about `$`. The
+# raw metacharacter scan refuses a `$` anywhere in the segment, quoted or not,
+# before `sed` is dispatched to, so `sed -n '1,$p' f` parks either way today.
+# Having it in the class as well would mean this row's safety depended on a
+# rule in another part of the file: drop `$` from `_METACHARACTERS` for an
+# unrelated reason and `sed -n '1,$p'` starts admitting with nobody having
+# decided it. Narrow here, and the sed row is safe on its own terms.
+#
+# The cost is nil and it was measured rather than assumed: across
+# ~/.claude/projects, no command parks on this. Every real `$` near a `sed` is
+# a variable in the filename, a regex end-anchor inside an `s///`, or a
+# positional parameter holding the whole script -- all refused for reasons
+# that have nothing to do with the address grammar.
 _SED_ALLOWED_FLAGS = frozenset({"-n", "--quiet", "--silent"})
-_SED_PRINT_RANGE = re.compile(r"^[0-9,$]+p$")
+_SED_PRINT_RANGE = re.compile(r"^[0-9,]+p$")
 
 # The one exception to the `>` refusal, and the only redirect this module
 # admits. `/dev/null` is a character device: the redirect cannot create it and
