@@ -415,6 +415,14 @@ FEATURE = WorkTemplate(
     ),
 )
 
+# A team shape, not a permission. What a session's gate admits without an
+# operator is decided by `approval.Policy`, and no template selects a policy:
+# `app._launch` resolves `LaunchSpec.template` -- a free name string -- and
+# falls back to `templates.SOLO` when nothing matches, so a policy keyed on a
+# template name could turn autonomy on with the containment silently off and
+# log it as "launched as solo". This file is also committed to being
+# operator-editable configuration, which is the wrong place for a permission.
+# planning/2026-09-03-a-dangerously-autonomous-mode.md §6.7.
 RESEARCH = WorkTemplate(
     name="research",
     description="A coordinator and two investigators briefed to disagree with each other.",

@@ -21,12 +21,13 @@ from imgui_bundle import hello_imgui, imgui, immapp
 from . import brief as brief_mod
 from . import settings as settings_mod
 from . import templates, theme, tree
+from .approval import Policy
 from .bridge import Bridge
 from .driver import AgentSession
 from .fake_driver import FakeDriver
 from .intents import FailureAcknowledged
 from .log import LOG
-from .model import LaunchSpec, Snapshot
+from .model import LaunchSpec, NodeId, Snapshot
 from .pool import SessionPool
 from .store import Store
 from .theme import REQUIRED_THEMES, THEMES, P
@@ -475,6 +476,11 @@ def _launch(state: AppState, spec: LaunchSpec) -> None:
             template=shape,
             subagent_cap=state.settings.subagent_cap,
             resume=spec.resume,
+            # The launcher's choice, and the last point the spec is read for it:
+            # from here the session owns the policy and its live value is the only
+            # one a display may use. Rendering the spec would keep showing the rung
+            # the operator asked for at launch after the session had left it.
+            policy=spec.policy,
         )
         _seed_brief(session, shape)
         pool.submit(session)
@@ -523,6 +529,56 @@ def _seed_brief(session: AgentSession, shape: templates.WorkTemplate) -> None:
         return
     session.brief = str(directory)
     LOG.info("app", f"seeded brief at {directory}")
+
+
+def _policy_of(state: AppState, node: NodeId | None) -> Policy | None:
+    """
+    The gate policy the session behind a node is answering with right now, or None
+    if no session holds it.
+
+    Read off the session and never off the record or the spec: it narrows when the
+    phase ends, so any copy taken earlier describes a session that has already
+    moved. One dict lookup on the draw thread, in the same class as the pool counts
+    the status bar reads -- the attribute is monotone and written as a whole
+    constant, so a torn schedule can only show the wider value one frame longer.
+    """
+    pool = state.pool
+    if pool is None or node is None:
+        return None
+    session = pool.session_for(node)
+    return None if session is None else session.policy
+
+
+def _revoke_policy(state: AppState, node: NodeId | None) -> None:
+    """
+    End a session's relaxed phase now, rather than waiting for the call that ends
+    it by parking.
+
+    Called straight from the draw thread instead of through the Bridge. The write
+    is one constant and idempotent and ``revoke_policy`` is its only writer, so
+    there is no ordering for a hop to buy -- and the hop would cost the operator a
+    frame in which the display still reads the phase they just ended.
+    """
+    pool = state.pool
+    if pool is None or node is None:
+        return
+    session = pool.session_for(node)
+    if session is not None:
+        session.revoke_policy()
+
+
+def _relaxed_count(state: AppState) -> int:
+    """
+    How many live sessions are running under something other than ``STRICT``.
+
+    ``list()`` rather than a walk of the values: the pool is mutated on the asyncio
+    thread, and the copy completes without yielding to it where a loop over the view
+    can be interrupted mid-iteration.
+    """
+    pool = state.pool
+    if pool is None:
+        return 0
+    return sum(1 for s in list(pool.sessions.values()) if s.policy is not Policy.STRICT)
 
 
 def _session_action(state: AppState, coro_factory: Callable[[SessionPool], object]) -> None:
@@ -644,6 +700,14 @@ def _status_bar(state: AppState) -> None:
             imgui.text_colored(P.warn.vec4, text)
         else:
             imgui.text_disabled(text)
+        # In the status bar because it is the one surface both layouts keep. HEALTH
+        # names the session and carries the lever, but it is a FOCUS pane, so on its
+        # own a widened gate would be invisible from the layout the operator works
+        # the queue in.
+        relaxed = _relaxed_count(state)
+        if relaxed:
+            imgui.same_line()
+            imgui.text_colored(P.warn.vec4, f"| {relaxed} on a widened gate")
 
 
 def _split(initial: str, new: str, direction: imgui.Dir, ratio: float) -> hello_imgui.DockingSplit:
@@ -763,15 +827,18 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
     def health_pane() -> None:
         if state.frame_snap is None:
             return
+        node = state.focus.node(state.frame_snap)
         health.draw(
             state.frame_snap,
-            state.focus.node(state.frame_snap),
+            node,
             health.HealthActions(
                 interrupt=lambda node: _session_action(state, lambda p: p.interrupt(node)),
                 close=lambda node: _session_action(state, lambda p: p.close(node)),
                 fork=lambda spec: _launch(state, spec),
+                revoke_policy=lambda node: _revoke_policy(state, node),
             ),
             state.frame_now,
+            _policy_of(state, node),
         )
 
     return {

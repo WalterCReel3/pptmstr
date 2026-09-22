@@ -13,8 +13,65 @@ import zlib
 
 from imgui_bundle import imgui
 
+from ..approval import Disposition, Policy, classify
 from ..model import AgentState, ContextSnapshot
 from ..theme import STATE_GLYPH, STATE_LABEL, Color, P, faded
+
+# One representative call per class of thing an operator would ask about. The
+# dispositions are asked of the real classifier rather than written down, so a rung
+# that starts admitting one of these says so by itself. A prose list of what a
+# policy admits is a second copy of the policy, and the copy is what goes stale --
+# this file would still have been claiming egress was permitted an hour after it
+# stopped being.
+#
+# `classify` is set lookups and, for `Bash`, the shell scan -- no IO -- so this is
+# affordable in a draw call. The file read in approval.py is in the diff builder,
+# not here.
+_GATE_PROBES: tuple[tuple[str, str, dict[str, str]], ...] = (
+    ("shell reads", "Bash", {"command": "git status"}),
+    ("writes", "Write", {"file_path": "/probe", "content": ""}),
+    ("spawns", "Task", {"subagent_type": "builder", "description": "probe"}),
+    ("the web", "WebFetch", {"url": "https://probe.invalid"}),
+    ("messages", "mcp__pptmstr__post_concern", {"to": "lead", "subject": "probe"}),
+    ("shell that writes", "Bash", {"command": "rm -rf /probe"}),
+)
+
+
+def _gate_probe(policy: Policy, want: Disposition) -> tuple[str, ...]:
+    return tuple(
+        label
+        for label, tool, arguments in _GATE_PROBES
+        if classify(tool, arguments, policy) is want
+    )
+
+
+def gate_adds(policy: Policy) -> tuple[str, ...]:
+    """
+    What this rung lets run unattended that ``STRICT`` would have parked.
+
+    The counterweight to the rung's name, and the reason it is this rather than a
+    list of what still parks: a name is what an operator calibrates against, and
+    ``PERMISSIVE`` reads far broader than the thing it names. Stating the whole of
+    what it adds bounds the mode in one short line -- it is a small set, and if it
+    ever stops being small that is exactly when the operator should see it grow.
+
+    "That ``STRICT`` would have parked" is a property of the probe table rather
+    than a subtraction done here: every probe parks under ``STRICT``, which is
+    what makes an auto-approval under any other rung a widening by definition.
+    ``test_every_probe_parks_under_the_default_rung`` is what keeps that true.
+    """
+    return _gate_probe(policy, Disposition.AUTO_APPROVE)
+
+
+def gate_parks(policy: Policy) -> tuple[str, ...]:
+    """
+    Which classes of call still wait for the operator under a policy.
+
+    Shown where there is room for it. It is the reassuring half and the less
+    informative one -- under every rung built so far it is most of the list.
+    """
+    return _gate_probe(policy, Disposition.REQUIRE_APPROVAL)
+
 
 # Ctrl+Enter sends, Enter breaks the line. One flag, not two: on a multiline box
 # ImGui already treats Ctrl+Enter as the validation chord, and

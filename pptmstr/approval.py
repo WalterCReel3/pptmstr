@@ -19,11 +19,46 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+from .shellscan import is_read_only
+
 
 class Disposition(enum.Enum):
     AUTO_APPROVE = "auto_approve"
     REQUIRE_APPROVAL = "require_approval"
     DENY = "deny"
+
+
+class Policy(enum.Enum):
+    """
+    How much a session's gate admits without an operator.
+
+    An enum rather than a ``bool research_mode`` because the recorded preference
+    (2026-08-11 §"Two corrections", point 2) is to build the general shape -- a
+    policy value on the session -- and ship presets over it, so that a second
+    preset is a member here rather than a retrofit around a boolean.
+
+    The members are rungs on a ladder of postures (2026-08-22; 2026-09-03 §7),
+    not two alternatives. A rung names the posture and never the permission, and
+    none is named "read-only" or "safe": mutation and egress are independent
+    axes, and one reassuring word over both is what lets something mutation-free
+    and egress-positive onto an allowlist without a reviewer noticing
+    (2026-08-11 §"The reframe"). A posture name cannot carry a scope, so each
+    rung states its own.
+    """
+
+    # Today's behaviour, and the default: everything off the standing allowlist
+    # waits for an operator.
+    STRICT = "strict"
+    # Adds shellscan-passing `Bash`, and nothing else. Writes, spawns, messages,
+    # `WebFetch`, `WebSearch` and unknown tools park as they do under `STRICT`.
+    # Pinned row by row by test_the_corpus_under_permissive.
+    #
+    # Egress stays denied because `WebFetch` pairs with an admitted `cat` of any
+    # absolute path into an unattended read-then-send. Context still reaches the
+    # API, as it does under `STRICT` (2026-09-03 §8b.8).
+    #
+    # Rungs above this one carry their warning in their own name.
+    PERMISSIVE = "permissive"
 
 
 # The bus server's name, spelled here rather than imported from pptmstr.bus:
@@ -99,9 +134,10 @@ _REVIEW = frozenset(
 #
 # That sentence is the whole of the rule and it is why `declare_task` is no longer
 # in this set: it was auto-approved on the premise that the board had already been
-# approved, and nothing had ever approved it. The four that remain are the ones the
-# premise actually holds for -- each is bookkeeping about a task whose existence is
-# now a decision the operator made at declaration.
+# approved, and nothing had ever approved it. The ones that remain are the ones the
+# premise actually holds for, in one of two shapes: bookkeeping about a task whose
+# existence the operator decided at declaration, or -- `read_inbox` -- reading
+# messages that were already reviewed at the send.
 _BUS_AUTO = frozenset(
     {
         f"mcp__{_BUS_SERVER}__read_inbox",
@@ -113,15 +149,56 @@ _BUS_AUTO = frozenset(
 )
 
 
-def classify(tool_name: str, tool_input: Mapping[str, Any]) -> Disposition:
+# The whole of the widening: one tool, decided per command (2026-08-11 §1).
+# There is no by-name admission set, so adding a tool outright takes a visible
+# branch here rather than a name appended to a frozenset.
+#
+# `Task`/`Agent` are absent deliberately. Inheriting a relaxed gate through a
+# spawn would let one approval relax an unbounded number of downstream calls
+# (2026-08-11 §4); 2026-09-03 §8 reverses that, but only under a containment
+# that is unbuilt, so the premise its reversal rests on is not present here
+# (2026-09-17 §4).
+def _permissive_admits(tool_name: str, tool_input: Mapping[str, Any]) -> bool:
     """
-    Whether a tool call may run unattended.
+    Whether ``PERMISSIVE`` admits a call that ``STRICT`` would park.
+
+    Answers only about the widening. Everything ``_AUTO`` and ``_BUS_AUTO``
+    already admit is decided before this is reached, and everything this
+    returns False for falls through to the unchanged classification.
+    """
+    if tool_name != "Bash":
+        return False
+    command = tool_input.get("command")
+    # A `Bash` call whose command is absent or is not a string is a call the
+    # table has not read, so there is nothing to admit. Coercing it with `str()`
+    # would classify the repr rather than the command that runs.
+    return isinstance(command, str) and is_read_only(command)
+
+
+def classify(
+    tool_name: str,
+    tool_input: Mapping[str, Any],
+    policy: Policy = Policy.STRICT,
+) -> Disposition:
+    """
+    Whether a tool call may run unattended, under the caller's policy.
 
     ``Task``/``Agent`` require approval deliberately: spawning a sub-agent is a
     tool call like any other, and an orchestrator that gates writes but not the
     spawning of things that write has a hole in it.
+
+    ``policy`` is a parameter and not module state, so that a session running
+    relaxed cannot change what a concurrent session is gated by, and so that no
+    test in this module's suite becomes order-dependent (2026-08-11 §1).
+
+    A preset may only add a narrower allowlist *above* the ``_REVIEW`` check. It
+    may not touch the final ``REQUIRE_APPROVAL``: the tool this build has never
+    heard of is the one that must not run unreviewed, whatever the operator
+    asked for (2026-09-03 §6.1).
     """
     if tool_name in _AUTO or tool_name in _BUS_AUTO:
+        return Disposition.AUTO_APPROVE
+    if policy is Policy.PERMISSIVE and _permissive_admits(tool_name, tool_input):
         return Disposition.AUTO_APPROVE
     if tool_name in _REVIEW:
         return Disposition.REQUIRE_APPROVAL

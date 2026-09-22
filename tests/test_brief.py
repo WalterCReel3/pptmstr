@@ -9,6 +9,7 @@ something a reader trips over.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -27,10 +28,35 @@ def test_a_session_brief_sits_beside_the_transcripts_that_explain_it(tmp_path: P
     """
     Outside the working tree, which is where this project's durable state already
     is. In the tree, every launch would dirty the working directory.
-    """
-    path = brief.session_dir(tmp_path, "/home/x/Source/orbital", "sess-1")
 
-    assert path == tmp_path / "-home-x-Source-orbital" / "briefs" / "sess-1"
+    The directory is a resolved one the test owns rather than a fabricated absolute
+    path, because ``session_dir`` slugs the resolved form: a plausible-looking path
+    can sit under a symlink the platform supplies, and `/home` is one on macOS.
+    """
+    cwd = tmp_path.resolve() / "Source" / "orbital"
+    slug = str(cwd).replace(os.sep, "-")
+
+    path = brief.session_dir(tmp_path, str(cwd), "sess-1")
+
+    assert path == tmp_path / slug / "briefs" / "sess-1"
+
+
+def test_the_slug_is_taken_from_the_directory_the_cli_would_name(tmp_path: Path) -> None:
+    """
+    The slug has to match the one the CLI derived for its transcripts or the brief
+    lands in a sibling directory with nothing in it. The CLI takes its slug from the
+    process working directory, which POSIX defines as the physical path, and the
+    launcher's brief recovery passes `cwd or "."` -- so the string arriving here is
+    not necessarily resolved and two spellings of one directory must not part.
+    """
+    real = tmp_path / "orbital"
+    real.mkdir()
+    link = tmp_path / "by-another-name"
+    link.symlink_to(real)
+
+    assert brief.session_dir(tmp_path, str(link), "sess-1") == brief.session_dir(
+        tmp_path, str(real), "sess-1"
+    )
 
 
 def test_two_sessions_in_one_directory_do_not_share_a_brief(tmp_path: Path) -> None:

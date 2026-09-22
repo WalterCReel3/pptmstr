@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, ClassVar
 
+from .approval import Policy
 from .transcript import Transcript
 
 # (session_id, agent_id). Root sessions have agent_id None; sub-agents carry the
@@ -442,6 +443,16 @@ class LaunchSpec:
     # Deliberately not derived from `from_record`: a relaunch and a fork both want a
     # new conversation from the same premises, which is the opposite of this.
     resume: str | None = None
+    # How much this session's gate admits without asking, as chosen in the launcher.
+    #
+    # Not carried by `from_record`, which is why it lives here and not on
+    # `AgentRecord`: fork and relaunch build a spec from a record and launch it on
+    # one click, so a policy on that path would widen the gate for a session the
+    # operator never chose it for. It costs a deliberate act every time.
+    #
+    # The launch-time choice only. A session's live policy moves after it starts,
+    # so no surface may render this as what a running session is gated by.
+    policy: Policy = Policy.STRICT
 
     @classmethod
     def from_record(cls, record: AgentRecord) -> LaunchSpec:

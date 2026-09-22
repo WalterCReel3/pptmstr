@@ -331,15 +331,19 @@ def test_ready_ignores_whitespace_only_drafts(task: str, ready: bool) -> None:
     assert LauncherState(task=task).ready is ready
 
 
-def test_spec_strips_task_and_resolves_model() -> None:
-    state = LauncherState(task="  audit the parser  ", cwd="/tmp/x", model_index=1)
+def test_spec_strips_task_and_resolves_model(tmp_path: Path) -> None:
+    # An already-resolved directory, so `spec`'s realpath is the identity here and
+    # the expectation stays a literal. A fabricated path would not be: `/tmp` is a
+    # symlink to `/private/tmp` on macOS.
+    cwd = str(tmp_path.resolve())
+    state = LauncherState(task="  audit the parser  ", cwd=cwd, model_index=1)
     assert state.spec() == LaunchSpec(
         task="audit the parser",
         model=MODELS[1],
-        cwd="/tmp/x",
+        cwd=cwd,
         # A directory no repository encloses is its own base, which is what makes
         # adopting the field a no-op for a scratch directory.
-        repo_root="/tmp/x",
+        repo_root=cwd,
         template="solo",
         brief=None,
     )
@@ -614,17 +618,18 @@ def test_picking_a_row_puts_its_id_on_the_spec() -> None:
     assert state.spec().resume == "b"
 
 
-def test_picking_nothing_leaves_todays_fresh_launch_spec_untouched() -> None:
+def test_picking_nothing_leaves_todays_fresh_launch_spec_untouched(tmp_path: Path) -> None:
     """
     The default path. A draft nobody opened the resume section on must produce byte
     for byte the spec it produced before the section existed.
     """
-    state = LauncherState(task="  audit the parser  ", cwd="/tmp/x", model_index=1)
+    cwd = str(tmp_path.resolve())
+    state = LauncherState(task="  audit the parser  ", cwd=cwd, model_index=1)
     assert state.spec() == LaunchSpec(
         task="audit the parser",
         model=MODELS[1],
-        cwd="/tmp/x",
-        repo_root="/tmp/x",
+        cwd=cwd,
+        repo_root=cwd,
         template="solo",
         brief=None,
         resume=None,

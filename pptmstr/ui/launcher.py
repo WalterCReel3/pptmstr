@@ -33,6 +33,7 @@ from imgui_bundle import imgui
 from .. import brief as brief_mod
 from .. import sessions as sessions_mod
 from .. import templates, tree
+from ..approval import Policy
 from ..model import LaunchSpec
 from ..sessions import Overlay, SessionRow
 from ..theme import P
@@ -48,6 +49,13 @@ MODELS: tuple[str, ...] = (
 )
 
 TITLE = "New Task"
+
+# The rungs of the dial, read off the enum rather than listed, so a preset renamed
+# or added in approval.py cannot leave a stale second copy here. The consequence is
+# that every member is offerable at launch: a preset that must not be is a
+# distinction `Policy` does not currently draw, and adding one means drawing it here
+# too.
+POLICIES: tuple[Policy, ...] = tuple(Policy)
 
 # Ctrl+N. Key members are plain ints here and do not support ``|`` as enums, so the
 # chord is built from int() -- ``imgui.Key.mod_ctrl | imgui.Key.n`` raises.
@@ -351,6 +359,10 @@ class LauncherState:
     # Index into templates.names(). "solo" is first and is the default, so the
     # launcher behaves exactly as it did before teams existed unless asked otherwise.
     template_index: int = 0
+    # The gate policy this launch asks for. The value and not an index into
+    # ``POLICIES``, so reordering the enum cannot silently move the default off
+    # ``STRICT`` -- the one default worth being unable to change by accident.
+    policy: Policy = Policy.STRICT
     # True from the frame the modal is drawn until the frame it stops being drawn.
     # Read by the global key handler, which runs before any drawing and therefore
     # sees the previous frame's value -- which is the correct one, because the key
@@ -431,6 +443,7 @@ class LauncherState:
             template=templates.names()[self.template_index],
             brief=self.brief.strip() or None,
             resume=self.picker.selected,
+            policy=self.policy,
         )
 
 
@@ -658,6 +671,17 @@ def draw(
     # only visible several turns later when workers start appearing -- so the
     # description is on screen rather than a tooltip away.
     imgui.text_disabled(templates.BUILT_IN[state.template_index].description)
+
+    changed, picked = imgui.combo("gate", POLICIES.index(state.policy), [p.value for p in POLICIES])
+    if changed:
+        state.policy = POLICIES[picked]
+    # Both halves, derived from the classifier rather than described, because this
+    # is where the operator decides. The name of a rung is not enough to calibrate
+    # against -- PERMISSIVE reads as "the gate is off" and it is not -- so what it
+    # adds and what it leaves parked are both on screen at the moment of choosing.
+    adds = widgets.gate_adds(state.policy)
+    imgui.text_disabled(f"adds {', '.join(adds)}" if adds else "nothing runs unattended")
+    imgui.text_disabled(f"still parks {', '.join(widgets.gate_parks(state.policy))}")
 
     imgui.spacing()
     imgui.separator()

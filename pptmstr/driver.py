@@ -53,7 +53,7 @@ from claude_agent_sdk import (
 )
 from claude_agent_sdk.types import SystemPromptPreset
 
-from .approval import Disposition, classify, render_diff, summarize
+from .approval import Disposition, Policy, classify, render_diff, summarize
 from .bridge import Bridge
 from .bus import BUS_TOOLS, EDITED_KEY, FROM_KEY, SERVER_NAME, build_server
 from .intents import (
@@ -733,6 +733,7 @@ class AgentSession:
         template: WorkTemplate | None = None,
         subagent_cap: int = DEFAULT_SUBAGENT_CAP,
         resume: str | None = None,
+        policy: Policy = Policy.STRICT,
     ) -> None:
         self.bridge = bridge
         self.task = task
@@ -766,6 +767,32 @@ class AgentSession:
         # Whether an operator is attached to answer. False means headless, where a
         # tool needing approval is denied rather than left to hit the timeout.
         self.interactive = interactive
+        # How much this session's root node is gated by. Reached by `_policy_for`
+        # for the root and by `set_policy`/`revoke_policy` for the operator; never
+        # by anything automatic (2026-09-21 -- see the comment at the call site in
+        # `_gate_tool_use` for why the automatic version was removed).
+        #
+        # **A deliberate exception to the intent-only rule** (2026-08-11 §5). The
+        # store is never mutated optimistically from the UI -- the only writer of
+        # approval state is the `ApprovalResolved` intent emitted after the agent is
+        # actually released -- and that invariant is load-bearing against hang bugs
+        # that have shipped here before. This is allowed past it because it is not
+        # approval state: no parked call is settled by it, nothing in the store
+        # depends on it, and the gate reads it before any future exists to strand.
+        # Routing it through the Bridge as a `Decision` would buy ordering that
+        # nothing here needs.
+        #
+        # It is written by the UI thread, via `set_policy`, and read by the asyncio
+        # thread, in `_policy_for` -- and that is now the whole of the concurrency
+        # story rather than one leg of it. There used to be a second writer, the
+        # gate's own automatic revoke running on the asyncio thread, and the
+        # argument for safety turned on that writer moving one way only. With it
+        # gone there is exactly one writer and one reader, the write is a single
+        # reference assignment with nothing else to keep in step, and a torn
+        # schedule can only ever leave a read one frame stale -- never
+        # inconsistent, because there is no second field for the policy to agree
+        # with.
+        self._policy = policy
         # agent_id -> the tool_use_id of the Agent call that started it, taken from
         # the ledger below when it starts. Used only to route progress descriptions
         # and output (§2.5.1); approvals never depend on it, because a hook inside a
@@ -853,6 +880,81 @@ class AgentSession:
         # states it rather than run() inferring it from the exception.
         self.teardown_requested = False
         self.transcript_path: str | None = None
+
+    # -- the gate's policy -----------------------------------------------------
+
+    @property
+    def policy(self) -> Policy:
+        """
+        The policy this session's root node is currently gated by.
+
+        A property rather than a plain attribute so every reader goes through one
+        name, even though the underlying field is now written from two directions.
+        Read the live value, not a copy taken earlier: it changes only when the
+        operator changes it, but it does change, and a display or a decision built
+        on a stale read would be wrong in a way nothing here would catch.
+        """
+        return self._policy
+
+    def set_policy(self, policy: Policy) -> None:
+        """
+        Set this session's root policy directly, in either direction.
+
+        The only writer, now that nothing narrows or widens on its own -- see the
+        comment at ``self._policy``'s assignment in ``__init__`` for why the
+        automatic revoke this method replaces was removed on 2026-09-21, and the
+        comment at the call site in ``_gate_tool_use`` for the reasoning. The
+        operator is the only thing that moves this session's policy, in both
+        directions, for as long as the session runs.
+
+        Idempotent: setting the policy to what it already is is not an error,
+        because a control the operator can act on twice must behave the same way
+        on the second click as on the first.
+        """
+        self._policy = policy
+
+    def revoke_policy(self) -> None:
+        """
+        Narrow this session's root policy to ``STRICT``.
+
+        The one direction the operator reaches for by far the most, kept as its
+        own name rather than folded into ``set_policy(Policy.STRICT)`` at every
+        call site -- the launcher's own narrowing control and the tests written
+        against it predate ``set_policy`` and did not need to change shape for a
+        decision that only concerns the other direction. A thin wrapper, and nothing
+        this method does is different from what ``set_policy`` would do with the
+        same argument.
+        """
+        self.set_policy(Policy.STRICT)
+
+    def _policy_for(self, agent_id: str | None) -> Policy:
+        """
+        The policy a call classifies under, given the node that made it.
+
+        Sub-agents do not inherit the root's policy (2026-08-11 §4): one approval
+        -- the spawn -- would otherwise silently relax the gate for an unbounded
+        number of downstream calls, which is the hole gating ``Task``/``Agent``
+        closed in the first place.
+
+        This is a line of code rather than a consequence of where the field lives,
+        and that is the point. One ``AgentSession`` serves its sub-agents'
+        ``PreToolUse`` hooks, so a policy held on the session inherits by default;
+        doing nothing would leave the design decision to be read off an
+        implementation detail. The SDK cannot set a per-teammate mode at spawn, but
+        it does not have to -- the hook carries ``agent_id``, so the scope is ours.
+
+        ``is not None`` rather than the truthiness its neighbours use, and this call
+        site differs from them deliberately. ``_pre_tool_use``'s ``if not agent_id``
+        and ``_node_for``'s ``if agent_id`` are bookkeeping: an empty-string agent_id
+        would cost them an attribution. Here it would cost a sub-agent the root's
+        relaxed policy, which is the boundary this whole function exists to draw.
+        Nothing validates the field -- it is whatever ``data.get`` returned -- and no
+        probe has established whether the CLI can send an empty one, so the form that
+        is safe when the input is unexpected is the one to take.
+        """
+        if agent_id is not None:
+            return Policy.STRICT
+        return self._policy
 
     # -- roles, for the bus ------------------------------------------------------
 
@@ -1232,7 +1334,30 @@ class AgentSession:
         if is_spawn_call and self._outstanding_subagents() >= self.subagent_cap:
             return _deny(tool_name, self._at_cap_reason())
 
-        disposition = classify(tool_name, tool_input)
+        # The policy never changes as a side effect of a call being classified.
+        # 2026-08-11 §3 specified an automatic end to a relaxed phase -- the first
+        # call the policy would not admit -- and that was reversed on 2026-09-21,
+        # by the same criterion §3 itself argued from: it rejects a time box and
+        # a call-count box because "both expire for reasons the operator cannot
+        # see", and an automatic revoke is that same class of event. The operator
+        # chose it, did not choose when it ends, and could not see it end.
+        #
+        # What killed it was not only the principle. Measured over 74 sessions,
+        # the admit rate is 16.3% across the first three Bash calls but 5.2%
+        # across the first twenty -- real sessions orient, act, and re-orient
+        # after every failure, and an automatic one-way revoke captured the
+        # first arc and discarded every later one. `shellscan` compounds it: it
+        # has no verdict meaning "this command acts" (every refusal is a *can't
+        # vouch*, and its docstring rules out ever having one, because a
+        # deny-list of hazardous flags cannot be written against a parser that
+        # resolves abbreviations), so an automatic boundary keyed on its
+        # refusals was never reading a signal that existed.
+        #
+        # The only writer now is `revoke_policy` and the operator's own widening
+        # call, both reached from the dial. See the docstrings there for what
+        # that costs: nothing here bounds a relaxed session's length except the
+        # allowlist itself and the operator noticing it is on.
+        disposition = classify(tool_name, tool_input, self._policy_for(agent_id))
         if disposition is Disposition.AUTO_APPROVE:
             self._expect_spawn(spawn, tool_use_id, tool_input)
             # Stamped even when nothing is reviewed. The stamp is authentication,
