@@ -224,13 +224,19 @@ REFUSED = [
     "ls ||| pwd",
     "ls ; ; pwd",
     "ls &&& pwd",
-    # A `|` inside quotes splits into segments that are not commands, and the
-    # first of them always carries the unterminated quote. Over-rejection, and
-    # argued at `test_a_quoted_pipe_always_breaks_the_first_segment`.
-    "cat 'a|b' f",
-    "ls '|'",
-    "ls ';'",
-    r"cat a\|b",
+    # The ways bash closes a quoted region that a splitter can miss. Each of
+    # these runs `rm` as a second command, and each is refused only because the
+    # split reads the quoting the way bash does -- `;` and `|` are not in
+    # `METACHARACTERS`, so a missed operator has nothing downstream to catch
+    # it. Argued at `test_the_split_closes_a_quote_where_bash_closes_it`.
+    r"grep 'a\' ; rm -rf /tmp/x",
+    r"grep \' ; rm -rf /tmp/x",
+    'grep "it\'s" f ; rm -rf /tmp/x',
+    "grep 'say \"hi\"' f ; rm -rf /tmp/x",
+    'cat "a"|rm -rf /tmp/x',
+    'cat ""|rm -rf /tmp/x',
+    'cat a""|rm -rf /tmp/x',
+    'cat "a";rm -rf /tmp/x',
     # A carriage return is not a separator -- bash does not sequence on one --
     # but `shlex` drops it as whitespace, so the tokens are not the command.
     "ls\rrm -rf /tmp/x",
@@ -367,6 +373,26 @@ ADMITTED = [
     # `--output=/tmp/pwned` and creates nothing.
     "echo --output=/tmp/pwned",
     'sed -n 1,80p pptmstr/app.py; echo "=== approval ==="; sed -n 1,80p pptmstr/approval.py',
+    # -- a quoted separator, which is a character and not a boundary -----------
+    # The split reads quoting the way bash does, so these are one command each.
+    # A quoted alternation in a grep pattern is the shape that motivated it;
+    # the rest are the same rule reached by the other spellings.
+    'grep -i "append|add_attr" pptmstr/model.py',
+    "grep -i 'a|b' pptmstr/model.py",
+    'grep -i "a;b" pptmstr/model.py',
+    'cat "weird|name.txt"',
+    "cat 'a|b' f",
+    r"cat a\|b",
+    # These two were refused before the split tracked quotes, and by the split
+    # alone: `;` and `|` are absent from `METACHARACTERS`, so nothing else ever
+    # looked at them. Bash lists a file named `;`, and now so does this. The
+    # unquoted forms are in `REFUSED` for having an empty segment on one side.
+    "ls '|'",
+    "ls ';'",
+    # A backslash-newline is a line continuation, so bash runs one command with
+    # `rm` as an operand of `ls`. Run on /bin/bash 3.2.57, 2026-09-22: it
+    # printed `ls: rm: No such file or directory` and deleted nothing.
+    "ls \\\n rm -rf /tmp/probe/a",
 ]
 
 
@@ -403,6 +429,23 @@ def test_the_separator_set_is_the_one_this_corpus_was_written_against() -> None:
     assert sorted(SEPARATORS) == sorted(["|", "||", "&&", ";", "\n"]), "the hand copy drifted"
     for sep in SEPARATORS:
         assert shellscan._SEPARATORS.split(f"a{sep}b") == ["a", "b"], sep
+        # The same alphabet as the splitter reads it, and the three spellings
+        # bash does not treat as an operator. `_SEPARATORS` is the operator set
+        # for both, matched at a cursor that has tracked quoting.
+        assert shellscan._split_segments(f"a{sep}b") == ["a", "b"], sep
+        assert shellscan._split_segments(f"a'{sep}'b") == [f"a'{sep}'b"], sep
+        assert shellscan._split_segments(f'a"{sep}"b') == [f'a"{sep}"b'], sep
+
+    # Escaping is per character and not per operator, which the two-character
+    # separators make visible: in `a\||b` bash escapes the first `|` and the
+    # second one is still a pipe, so this splits into two. `a\&&b` is the
+    # mirror -- `\&` is literal and the `&` left over backgrounds rather than
+    # sequencing, so nothing is consumed and the scan refuses the `&`.
+    for sep in (";", "\n", "|"):
+        assert shellscan._split_segments("a" + "\\" + f"{sep}b") == ["a" + "\\" + f"{sep}b"], sep
+    assert shellscan._split_segments(r"a\||b") == [r"a\|", "b"]
+    assert shellscan._split_segments(r"a\&&b") == [r"a\&&b"]
+    assert refusal(r"ls \&& pwd") == "shell metacharacter '&'"
 
     # The pin in the other direction. It is over the SINGLE-character
     # separators only, and that is not a convenience: `&&` is a separator whose
@@ -450,31 +493,105 @@ def test_the_pipe_stderr_form_refuses_because_bare_ampersand_is_not_a_separator(
     assert refusal("ls & pwd") == "shell metacharacter '&'"
 
 
-def test_a_quoted_pipe_always_breaks_the_first_segment() -> None:
+def test_the_split_closes_a_quote_where_bash_closes_it() -> None:
     """
-    The split is not quote-aware, so `grep 'a|b' f` is cut into pieces that are
-    not commands. That over-rejects, which is the direction this module is
-    allowed to be wrong in, and it is a decided cost rather than a defect: a
-    quote-aware split means a parser inside a parser, and `shlex` cannot report
-    where the quotes were.
+    The four ways found to make bash close a quoted region that a tracker
+    misses, and they are the whole risk surface of a quote-aware split: every
+    character other than a consumed operator still reaches some segment's scan,
+    so splitting MORE than bash can only refuse more. Missing an operator is
+    the error that admits.
 
-    The guarantee is narrower than "every segment is unparseable" and the
-    narrow version is the true one. Segment 1 is the prefix ending at the first
-    `|`, so if that `|` is quoted, segment 1 stops inside the quote and carries
-    an unterminated one; if it is backslash-escaped, segment 1 ends on a
-    trailing backslash. `shlex.split` raises either way, and one failing
-    segment refuses the command. MIDDLE segments can parse perfectly well --
-    `cat 'a|b' 'c|d'` has a middle segment of `b' 'c`, which is a valid
-    `['b', 'c']` -- so a test asserting all segments fail would be asserting
-    something false.
+    Missing one has no second line of defence, which is why each case asserts
+    the reason rather than the verdict. `;` and `|` are not in
+    `METACHARACTERS`; if one survives into a segment, `shlex.split` makes it an
+    ordinary token, `_unrecognised_flag` ignores any token not starting with
+    `-`, and `_refuse_git` reads `rest` only for `--output`. So a missed `;`
+    does not merely weaken the verdict, it inverts it.
 
-    Brute-forced rather than argued, because the argument is about `shlex`.
+    Each string below is a real bash two-command sequence, confirmed by running
+    `bash -c 'set -x; ...'` and reading which commands bash executed --
+    `scripts/verify_split_against_bash.py` is that check over 25k strings.
+    """
+    hidden_rm = "'rm' is not in the read-only table"
+
+    # A backslash is literal inside single quotes, so `'a\\'` is a closed word
+    # whose content is `a\\`. A tracker that consumed the closing quote as
+    # escaped would stay "inside quotes" to the end of the string and split
+    # nothing -- and `shlex` reads it bash's way, so the `;` would arrive as a
+    # token the table walks straight past.
+    assert refusal(r"grep 'a\' ; rm -rf /tmp/x") == f"segment 2 ('rm -rf /tmp/x'): {hidden_rm}"
+    # Outside quotes it is honoured, including in front of a quote character,
+    # so `\\'` opens no region at all.
+    assert refusal(r"grep \' ; rm -rf /tmp/x") == f"segment 2 ('rm -rf /tmp/x'): {hidden_rm}"
+    # An apostrophe inside double quotes is an ordinary character, and a double
+    # quote inside single quotes likewise. Toggling on either is what leaves a
+    # tracker inside a region bash has already closed.
+    assert refusal('grep "it\'s" f ; rm -rf /tmp/x') == f"segment 2 ('rm -rf /tmp/x'): {hidden_rm}"
+    assert (
+        refusal("grep 'say \"hi\"' f ; rm -rf /tmp/x")
+        == f"segment 2 ('rm -rf /tmp/x'): {hidden_rm}"
+    )
+    # An operator abutting a closing quote. The empty and the abutting region
+    # are separate cases because an implementation that skips to the end of a
+    # quoted region does different arithmetic for each, and swallowing one
+    # character here makes the `rm` an operand of an unrestricted row.
+    for command in ('cat "a"|rm -rf /tmp/x', 'cat ""|rm -rf /tmp/x', 'cat a""|rm -rf /tmp/x'):
+        assert refusal(command) == f"segment 2 ('rm -rf /tmp/x'): {hidden_rm}", command
+    assert refusal('cat "a";rm -rf /tmp/x') == f"segment 2 ('rm -rf /tmp/x'): {hidden_rm}"
+
+    # The same four rules the other way: bash does NOT close these, so there is
+    # no second command and the whole string is one.
+    assert refusal("cat 'a;b' f") is None
+    assert refusal('cat "a;b" f') is None
+    assert refusal(r"cat a\;b f") is None
+    assert refusal('grep -i "it\'s|a|b" f') is None
+
+
+def test_a_quoted_ampersand_parks_on_the_scan_and_not_on_the_split() -> None:
+    """
+    `grep -i "a&&b" f` is one command to bash and one segment to the split, and
+    it is still refused -- for its `&`, by the metacharacter scan, which is
+    quote-blind on purpose.
+
+    This is the case where making the split quote-aware was NOT enough, and
+    that is a decision rather than unfinished work. `&&` is a separator whose
+    character `&` is a metacharacter, and the two facts coexist only because
+    the split consumes `&&` whole and leaves a lone `&` to a scan that refuses
+    it wherever it appears. Teaching the scan about quotes to admit this one
+    pattern would put `&` behind the same quote tracking that `$` and a
+    backtick are deliberately in front of, and would concede
+    `test_the_pipe_stderr_form_refuses_because_bare_ampersand_is_not_a_separator`
+    along with it.
+
+    So a quoted alternation costs one approval when it is spelled with `&&`
+    and none when it is spelled with `|`. The reason names the character, which
+    is what distinguishes this from the split not having tracked the quote.
+    """
+    assert refusal('grep -i "a&&b" f.py') == "shell metacharacter '&'"
+    assert refusal("grep -i 'a&b' f.py") == "shell metacharacter '&'"
+    assert shellscan._split_segments('grep -i "a&&b" f.py') == ['grep -i "a&&b" f.py']
+    # The `|` spelling of the same pattern, which is the one that got cheaper.
+    assert refusal('grep -i "a|b" f.py') is None
+
+
+def test_the_split_agrees_with_an_independent_reading_of_bash_quoting() -> None:
+    """
+    `_split_segments` brute-forced against a second implementation of the same
+    rule, over every string of length up to five in the characters that decide
+    it. The oracle returns operator offsets and the splitter returns segments,
+    so the two are compared through reassembly rather than by sharing code.
+
+    Two hand implementations agreeing is weaker evidence than it looks --
+    they can share a wrong assumption -- which is why the real check is
+    `scripts/verify_split_against_bash.py`, where the oracle is /bin/bash
+    itself. This test is here so the suite has the property without a
+    subprocess in it, and so a rewrite of the splitter has something to
+    disagree with.
     """
     import itertools
-    import shlex
 
-    def first_pipe_is_literal(text: str) -> bool:
-        index, single, double = 0, False, False
+    def operator_offsets(text: str) -> list[tuple[int, int]]:
+        spans, index, single, double = [], 0, False, False
         while index < len(text):
             char = text[index]
             if char == "\\" and not single:
@@ -484,23 +601,40 @@ def test_a_quoted_pipe_always_breaks_the_first_segment() -> None:
                 single = not single
             elif char == '"' and not single:
                 double = not double
-            elif char == "|" and not single and not double:
-                return False
-            index += 1
-        return "|" in text
-
-    checked = 0
-    for length in range(1, 6):
-        for tup in itertools.product("'\"\\a |", repeat=length):
-            command = "cat " + "".join(tup)
-            if not first_pipe_is_literal(command):
+            elif not (single or double):
+                for operator in ("||", "&&", ";", "\n", "|"):
+                    if text.startswith(operator, index):
+                        spans.append((index, index + len(operator)))
+                        index += len(operator)
+                        break
+                else:
+                    index += 1
                 continue
-            checked += 1
-            with pytest.raises(ValueError):
-                shlex.split(command.split("|")[0])
-            assert refusal(command) is not None, command
+            index += 1
+        return spans
 
-    assert checked > 2000, f"the brute force stopped generating cases: {checked}"
+    def expected_segments(text: str) -> list[str]:
+        pieces, cursor = [], 0
+        for begin, end in operator_offsets(text):
+            pieces.append(text[cursor:begin])
+            cursor = end
+        pieces.append(text[cursor:])
+        return pieces
+
+    checked, split = 0, 0
+    for length in range(1, 6):
+        for tup in itertools.product("'\"\\a ;|&", repeat=length):
+            command = "cat " + "".join(tup)
+            checked += 1
+            produced = shellscan._split_segments(command)
+            assert produced == expected_segments(command), command
+            if len(produced) > 1:
+                split += 1
+
+    assert checked > 30000, f"the brute force stopped generating cases: {checked}"
+    # The comparison is only worth something if the two disagree about where a
+    # boundary could be, so a run in which nothing ever split would be vacuous.
+    assert split > 10000, f"almost nothing split, so the oracle proved nothing: {split}"
 
 
 def test_a_segment_goes_through_the_whole_path_and_not_a_lighter_one() -> None:

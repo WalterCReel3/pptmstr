@@ -64,9 +64,15 @@ import re
 import shlex
 from dataclasses import dataclass
 
-# The separators bash uses to run one command after another. Each is consumed
-# by the split, so none of them can appear inside a segment, and every segment
-# is then checked as if it had been typed on its own.
+# The separators bash uses to run one command after another. `_split_segments`
+# matches this at a cursor it has tracked quoting with, so one of these is
+# consumed only where bash would read it as an operator: outside quotes and
+# unescaped. Every segment is then checked as if it had been typed on its own.
+#
+# A quoted or escaped one therefore survives into a segment, where nothing
+# refuses it -- `;` and `|` are absent from `_METACHARACTERS` below. That is the
+# admission this shape exists for: `ls ';'` lists a file named `;` and
+# `grep 'a|b' f` greps for a literal pipe, and neither sequences anything.
 #
 # `||` and `&&` are listed ahead of the single-character class deliberately:
 # `re` alternation is first-match, not longest-match, so a bare `[|]` earlier in
@@ -98,9 +104,16 @@ _MAX_SEGMENTS = 8
 # `$(`: `$VAR` and `${VAR}` expand to text the table below never sees, so a
 # token containing one is not the token that will run.
 #
-# `;` and `|` are absent because `_SEPARATORS` consumes them before this scan
-# runs. Removing them here is not a widening -- what they separate is now
-# checked as a command rather than rejected as a character.
+# `;` and `|` are absent because `_SEPARATORS` consumes them wherever bash
+# would sequence on them, and what they separate is then checked as a command
+# rather than rejected as a character. Where bash would *not* sequence on one --
+# quoted, or escaped -- it reaches a segment and is admitted as the literal
+# character bash passes to the command.
+#
+# Those two are the only characters the split is allowed to launder, and the
+# quote-blindness here is what keeps the rest out of reach. `$'...'` is bash's
+# other quoting form and it is refused by this scan on its `$`, so
+# `_split_segments` does not have to know about it.
 _METACHARACTERS = frozenset("&<>`$(){}")
 
 # `\r` is not a separator: bash does not sequence on it, so splitting there
@@ -147,10 +160,13 @@ _CARRIAGE_RETURN = "\r"
 # Every *other* character that can start a word in bash is accounted for, and
 # now in two different ways rather than one:
 #
-#   `;` `|` and a newline    consumed by `_SEPARATORS`, so they cannot occur
-#                            inside a segment at all, and the character after
-#                            one of them is at index 0 of the next segment --
-#                            which is a word start, and is read as one.
+#   `;` `|` and a newline    consumed by `_SEPARATORS` wherever bash sequences
+#                            on one, so the character after it is at index 0 of
+#                            the next segment -- a word start, and read as one.
+#                            Quoted, one survives into a segment, and bash does
+#                            not begin a word after it either: reaching a word
+#                            start still takes the whitespace this rule tests
+#                            for, so `ls ';'~/x` is one word to both of us.
 #   `&` `(` `<` `>`          still refused by the metacharacter scan, so no
 #                            segment carrying one reaches this rule.
 #
@@ -461,13 +477,65 @@ def _refuse_cd(args: list[str]) -> str | None:
     return None
 
 
+def _split_segments(command: str) -> list[str]:
+    """
+    ``command`` cut where bash would read a `_SEPARATORS` operator, and nowhere
+    else.
+
+    Quote-aware because bash's own operators are: `grep 'a|b' f` is one command
+    whose pattern contains a literal pipe, and cutting it there produces a
+    fragment carrying an unbalanced quote. The scan in `_refuse_segment` stays
+    quote-blind, and the two are different questions -- a quoted `$` still
+    expands nothing and is still refused, while a quoted `|` sequences nothing
+    and is kept.
+
+    The state machine is bash's three quoting constructs and nothing else:
+
+    - Outside single quotes a backslash escapes the next character, so `a\\|b`
+      is one word. Inside them it does not, so `'a\\'` is a closed word whose
+      content is `a\\` and the `;` after it *is* an operator. Getting that one
+      backwards admits `grep 'a\\' ; rm -rf /tmp/x`, because `shlex` reads it
+      bash's way and hands the table a `;` token no rule refuses.
+    - A `'` inside double quotes and a `"` inside single quotes are ordinary
+      characters.
+    - `$'...'` is bash's fourth quoting form and is not tracked here, because
+      `_METACHARACTERS` refuses its `$` before this ever decides anything.
+
+    One cursor, advancing by one character or by two across an escape. There is
+    no skip-to-the-end-of-the-quoted-region step: an off-by-one there swallows
+    the operator in `cat "a"|rm -rf /tmp/x` and the `rm` becomes an operand of
+    an unrestricted row.
+    """
+    segments: list[str] = []
+    start = index = 0
+    single = double = False
+    while index < len(command):
+        char = command[index]
+        if char == "\\" and not single:
+            index += 2
+            continue
+        if char == "'" and not double:
+            single = not single
+        elif char == '"' and not single:
+            double = not double
+        elif not single and not double:
+            operator = _SEPARATORS.match(command, index)
+            if operator is not None:
+                segments.append(command[start:index])
+                start = index = operator.end()
+                continue
+        index += 1
+    segments.append(command[start:])
+    return segments
+
+
 def refusal(command: str) -> str | None:
     """
     None when ``command`` only reads; otherwise why it still needs a human.
 
-    ``command`` is split on `_SEPARATORS` and every segment must pass on its
-    own, so a sequence is admitted only when each of its commands would have
-    been admitted alone. The first failing segment decides, and the reason
+    ``command`` is split by `_split_segments` and every segment must pass on
+    its own, so a sequence is admitted only when each of its commands would
+    have been admitted alone. The first failing segment decides, and the reason
     names it -- a pipeline refused for its fourth command is otherwise
     indistinguishable from one refused for its first.
 
@@ -480,7 +548,7 @@ def refusal(command: str) -> str | None:
     if not command.strip():
         return "empty command"
 
-    segments = _SEPARATORS.split(command)
+    segments = _split_segments(command)
     if len(segments) > _MAX_SEGMENTS:
         return (
             f"{len(segments)} segments is more than the {_MAX_SEGMENTS} an "
