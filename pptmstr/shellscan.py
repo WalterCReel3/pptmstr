@@ -15,8 +15,11 @@ and ``approval.py``'s docstring commits it to being a small policy file.
 on 2026-09-21, for a reason the record could not have had: measured against
 2335 real Bash calls, separator support takes the admit rate from 3.51% to
 4.84%, and it multiplies rather than adds against any later widening of the
-table. The quoting edge cases are real and they are handled by over-rejecting
--- see ``_SEPARATORS`` and the tilde rule below.
+table. The quoting edge cases are real and ``_split_segments`` answers them the
+way bash does rather than by over-rejecting, which is a widening and is
+checked against bash itself -- see that function and
+``scripts/verify_split_against_bash.py``. Over-rejection is still the rule
+everywhere else, and the metacharacter scan below is deliberately quote-blind.
 
 The table itself moved the same day, in both directions: ``grep`` came back
 after being measured against 2271 real Bash calls and found to be 439 of
