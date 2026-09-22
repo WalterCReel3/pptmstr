@@ -40,6 +40,13 @@ Two things cannot be expressed as a row and are modelled beside the table, both 
 SIMULATION where they are written: the `sed` print-range shape, which constrains an
 argument rather than a flag, and discarding a trailing `2>/dev/null`.
 
+A simulated widening the tree has since grown is switched off rather than run beside the
+real rule, and which ones those are is decided by asking `shellscan.refusal` rather than
+by reading a table. Nothing here keeps its own copy of a rule the classifier owns: the
+splitter, the `2>/dev/null` pattern and sed's print-range grammar are imported from
+`shellscan`, because a copy is always the older of the two and the arm that runs it
+measures the copy.
+
 One arm runs the other way. `segments=False` withholds `shellscan`'s own segment support
 to show what that support alone buys; it is a COUNTERFACTUAL NARROWING, not a widening,
 and the tree has not looked like it since segment support landed.
@@ -61,8 +68,9 @@ it claims to model, and it is worth more than a number that merely looks plausib
   MONOTONICITY          both must say OK, and the exit status is non-zero if either does
                         not. A failure means the simulation is wrong and every number
                         above it is suspect.
-  ORIENTING BURST       the same two table shapes over the first N calls of each session.
-                        A higher rate at small N is what "orienting burst" means.
+  ORIENTING BURST       the same two table shapes over the first N calls of each
+                        session, sub-agent transcripts excluded. A higher rate at small
+                        N is what "orienting burst" means.
   STILL REFUSED         what the widest candidate does not admit. Read the second block:
                         a command whose own head segment passes and whose later segments
                         do not is not unlocked by adding another row.
@@ -76,9 +84,10 @@ session like the ones this machine has run". The ORIENTING BURST block is the cl
 thing to a phase-filtered figure it can offer, and it is a proxy: the first N Bash calls
 of a transcript, not the calls made before the model started editing.
 
-One transcript file counts as one session. Sub-agent (sidechain) calls live in their
-parent's file and are counted with it, so a team run reads as one long session rather
-than several.
+A sub-agent gets a transcript of its own, under `<session-id>/subagents/`, so a file is
+either a session or one agent's slice of one. Every block counts both kinds, and
+ORIENTING BURST is the single exception: first-N is asked of sessions only, because a
+sub-agent file has no orienting phase of its own to measure.
 
 The corpus is live, and the session running this probe is being written into it, so two
 runs minutes apart disagree slightly. Quote a figure with the corpus size beside it.
@@ -108,16 +117,15 @@ CORPUS = Path.home() / ".claude" / "projects"
 
 SPAWN_TOOLS = frozenset({"Task", "Agent"})
 
-# SIMULATION. Discarding stderr is the one redirection an orienting command routinely
-# carries. Stripping it can only admit more: every spelling below contains `>`, which the
-# metacharacter scan refuses outright.
-_DISCARD_STDERR = re.compile(r"\s*2>\s*/dev/null|\s*2>&1|\s*>\s*/dev/null")
-
-# SIMULATION. `sed -n '1,80p' f` is a pure read, and it is the dominant `sed` form in the
-# corpus. The shape is a constraint on the script argument, which `_Rule` cannot express,
-# so the row injection is paired with this. `$` as a line address is deliberately absent:
-# it is a shell metacharacter, so `sed -n '1,$p' f` never reaches this test.
-_PRINT_RANGE = re.compile(r"^[0-9]+(,[0-9]+)?p$")
+# SIMULATION, both of them, and both are the classifier's own object rather than a copy
+# of it. A private name is imported on purpose: the alternative is a second spelling of
+# the same rule, and the arm that ran the second spelling was measuring it -- a local
+# `^[0-9]+(,[0-9]+)?p$` refused `sed -n 1,2,3p f` that `_SED_PRINT_RANGE` admits, which
+# made the sed arm a narrowing of the tree dressed as a widening of it. If either name
+# goes away in `shellscan`, this script must fail at import rather than measure something
+# else quietly.
+_DISCARD_STDERR = shellscan._DISCARD_STDERR
+_PRINT_RANGE = shellscan._SED_PRINT_RANGE
 
 # A refusal reason quotes the token that caused it, and a segment's reason quotes the
 # whole segment, so the raw strings make one bucket per command rather than one per rule
@@ -214,15 +222,54 @@ _SECTION_BEFORE = {
 }
 
 
+def _landed_widenings() -> frozenset[str]:
+    """
+    Which of the simulated widenings `shellscan` now decides for itself.
+
+    Probed by verdict, not by looking for a row name. `cd` and `sed` are reached by name
+    dispatch in `_refuse_segment` and are in no table, and `2>/dev/null` is a strip
+    rather than a row, so a `name in _TABLE` test sees none of the three and reports a
+    counterfactual that has already landed.
+
+    A landed widening is switched off in `admitted` rather than simulated on top of the
+    real rule. Simulating it measures this script's model of the rule against the tree's
+    implementation of it, and `sed` is the case that shows why: the model was the
+    narrower of the two, so arms E and F admitted 300-odd fewer commands than their own
+    subsets.
+
+    ``segments`` is absent because it is on the other axis: withholding it is a
+    counterfactual narrowing that stays meaningful precisely because the tree has it.
+    """
+    probes = {
+        "grep": "grep x f",
+        "sed_range": "sed -n 1,80p f",
+        "cd": "cd /tmp",
+        "discard_stderr": "ls 2>/dev/null",
+    }
+    return frozenset(name for name, probe in probes.items() if shellscan.refusal(probe) is None)
+
+
+LANDED = _landed_widenings()
+
+
 @dataclass(frozen=True, slots=True)
 class Transcript:
     """
-    One session file, reduced to the two orderings this script asks questions about.
+    One transcript file, reduced to the two orderings this script asks questions about.
+
+    ``sidechain`` is what keeps a sub-agent's file out of the first-N table, and it is
+    read off the path because the path is what decides whether a file is a session: the
+    harness writes an agent's transcript to `<session-id>/subagents/`. ``flagged`` is the
+    same question answered by the records' own `isSidechain`, kept so the two can be
+    compared -- the first-N figure rests on the two agreeing, and a run that found them
+    disagreeing would be measuring a corpus laid out differently than this assumes.
     """
 
     path: Path
     commands: tuple[str, ...]
     tools: tuple[str, ...]
+    sidechain: bool
+    flagged: bool
 
 
 def _tool_uses(node: object) -> Iterator[dict[str, Any]]:
@@ -261,6 +308,7 @@ def read_corpus(root: Path) -> tuple[list[Transcript], int, int]:
 
         commands: list[str] = []
         tools: list[str] = []
+        flagged = False
         for line in text.splitlines():
             if '"tool_use"' not in line:
                 continue
@@ -268,6 +316,8 @@ def read_corpus(root: Path) -> tuple[list[Transcript], int, int]:
                 record = json.loads(line)
             except ValueError:
                 continue
+            if isinstance(record, dict) and record.get("isSidechain"):
+                flagged = True
             for block in _tool_uses(record):
                 name = block.get("name")
                 if name in SPAWN_TOOLS:
@@ -279,22 +329,39 @@ def read_corpus(root: Path) -> tuple[list[Transcript], int, int]:
                         tools.append("Bash")
 
         if commands or tools:
-            transcripts.append(Transcript(path, tuple(commands), tuple(tools)))
+            transcripts.append(
+                Transcript(
+                    path,
+                    tuple(commands),
+                    tuple(tools),
+                    sidechain="subagents" in path.parts,
+                    flagged=flagged,
+                )
+            )
 
     return transcripts, seen, unreadable
 
 
 def _injected_rows(widening: Widening) -> dict[str, shellscan._Rule]:
+    """
+    The rows ``widening`` adds to the real table, minus any the tree already decides.
+
+    A row is withheld once its widening has landed, and for `cd` and `sed` withholding it
+    is the only honest option rather than a saving: `_refuse_segment` dispatches on those
+    two names before it consults `_TABLE`, so injecting them changes no verdict at all.
+    An arm reading "+ cd" against an unchanged count invites the reader to conclude `cd`
+    buys nothing, when what it buys is already inside the baseline via `_refuse_cd`.
+    """
     rows: dict[str, shellscan._Rule] = {}
-    if widening.grep:
+    if widening.grep and "grep" not in LANDED:
         rows["grep"] = shellscan._Rule()
         rows["rg"] = shellscan._Rule()
-    if widening.cd:
+    if widening.cd and "cd" not in LANDED:
         rows["cd"] = shellscan._Rule()
-    if widening.sed_range:
+    if widening.sed_range and "sed_range" not in LANDED:
         # Paired with `_is_sed_print_range`: the row decides the flags, the predicate
         # decides the script argument.
-        rows["sed"] = shellscan._Rule(allowed=frozenset({"-n"}))
+        rows["sed"] = shellscan._Rule(allowed=shellscan._SED_ALLOWED_FLAGS)
     return rows
 
 
@@ -326,8 +393,13 @@ def split_segments(command: str) -> list[str]:
     """
     The command cut up the way `shellscan` cuts it, so a per-segment question here and
     the classifier's own verdict cannot be answering about different pieces.
+
+    `shellscan._split_segments` and not `_SEPARATORS.split`. The regex is still there,
+    used by the splitter through `.match`, so calling `.split` on it raises nothing and
+    silently restores the quote-blind cut: `grep -i "append|add_attr" f.py` comes back as
+    two segments, the second of which carries an unbalanced quote.
     """
-    return shellscan._SEPARATORS.split(command)
+    return shellscan._split_segments(command)
 
 
 def _is_sed_print_range(segment: str) -> bool:
@@ -345,7 +417,7 @@ def _sed_shape_ok(command: str, widening: Widening) -> bool:
     print-range shape is checked here -- per segment, because a pipeline's `sed` is as
     much a `sed` as a bare one.
     """
-    if not widening.sed_range:
+    if not widening.sed_range or "sed_range" in LANDED:
         return True
     for segment in split_segments(command):
         try:
@@ -365,11 +437,17 @@ def admitted(command: str, widening: Widening) -> bool:
     per segment: `shellscan` splits the command itself, and a second splitter deciding
     the same question is how `grep x | rm -rf /` gets scored on its `grep`.
     """
-    if widening.discard_stderr:
-        command = _DISCARD_STDERR.sub("", command)
-    if not widening.segments and shellscan._SEPARATORS.search(command):
+    if widening.discard_stderr and "discard_stderr" not in LANDED:
+        # A single space and not the empty string, so stripping cannot splice two tokens
+        # into one. Applied to the whole command rather than per segment, which is where
+        # this differs from `_refuse_segment`: the pattern's right anchor is space-or-end,
+        # so `ls 2>/dev/null|head` keeps its redirect here and the arm is a lower bound.
+        command = _DISCARD_STDERR.sub(" ", command)
+    if not widening.segments and len(split_segments(command)) > 1:
         # COUNTERFACTUAL, not a widening: the table before it learned to split. A
-        # separator was a metacharacter then, and the command was refused for it.
+        # separator was a metacharacter then, and the command was refused for it. Asked
+        # of the splitter and not of `_SEPARATORS.search`, so that a quoted `|` does not
+        # read as a separator the old table never had to face.
         return False
     if shellscan.refusal(command) is not None:
         return False
@@ -438,6 +516,8 @@ def report_corpus(transcripts: Sequence[Transcript], seen: int, unreadable: int)
         print(f"  unreadable, skipped             {unreadable}")
     print(f"  files with a Bash or spawn call {len(transcripts)}")
     print(f"  files with at least one Bash    {len(with_bash)}")
+    print(f"    of those, sessions            {sum(1 for t in with_bash if not t.sidechain)}")
+    print(f"    of those, sub-agent slices    {sum(1 for t in with_bash if t.sidechain)}")
     print(f"  Bash calls                      {total}")
 
 
@@ -502,11 +582,8 @@ def report_simulation_state() -> None:
     it is the line that tells a reader six months on whether the widening arm was still
     a counterfactual when this output was produced.
     """
-    already = sorted(
-        name
-        for name in ("grep", "rg", "cd", "sed")
-        if name in shellscan._TABLE and name not in shellscan._NEVER_ALLOWED
-    )
+    already = sorted(LANDED)
+    outstanding = sorted({"grep", "sed_range", "cd", "discard_stderr"} - LANDED)
     # Probed rather than read off a constant: the question is whether a sequence is
     # decided segment by segment, and only a verdict answers that.
     splits = shellscan.refusal("pwd && pwd") is None
@@ -515,9 +592,14 @@ def report_simulation_state() -> None:
         f"  segment support in shellscan: {'yes' if splits else 'no'} "
         f"(max {shellscan._MAX_SEGMENTS} segments)"
     )
-    print(f"  simulated rows already real:  {', '.join(already) if already else 'none'}")
+    print(f"  landed, simulation off:       {', '.join(already) if already else 'none'}")
+    print(f"  still counterfactual:         {', '.join(outstanding) if outstanding else 'none'}")
     if already:
-        print("  Those candidates measure no delta; the widening they name has landed.")
+        print("  Those widenings measure no delta; the tree decides them itself, and the")
+        print("  arms naming them score as their subsets do.")
+    if not outstanding:
+        print("  Every widening this script can simulate has landed, so B is the widest")
+        print("  candidate as well as the tree, and C-F are B under other names.")
 
 
 def report_candidates(commands: Sequence[str]) -> dict[str, int]:
@@ -544,33 +626,47 @@ def report_candidates(commands: Sequence[str]) -> dict[str, int]:
 # just silently stops being a counterfactual. Each row below is a claim about the
 # SIMULATION rather than about the table's contents, so landing a new row does not
 # make one stale.
-_SELF_CHECK: tuple[tuple[str, str, bool], ...] = (
+#
+# The fourth field names a widening the row's claim depends on being a counterfactual. A
+# row carrying one asserts that two arms DIFFER, so it stops being a claim about the
+# simulation the moment the tree grows the thing one of them simulates -- both arms then
+# admit, and flipping the expected boolean would keep a row that no longer tests the
+# separation it was written for. Those rows are dropped and the drop is printed.
+_SELF_CHECK: tuple[tuple[str, str, bool, str | None], ...] = (
     # The counterfactual arm withholds segment support; the tree's arm has it.
-    ("pwd && pwd", "A", False),
-    ("pwd && pwd", "B", True),
+    ("pwd && pwd", "A", False, None),
+    ("pwd && pwd", "B", True, None),
     # No widening may admit a sequence on the strength of its first segment, and the
     # heads that matter are the widened ones -- a shortcut is only ever written for a
     # row the table does not have, so a probe headed by `pwd` cannot find one.
-    ("pwd | rm -rf /tmp/probe", "F", False),
-    ("cat f | rm -rf /tmp/probe", "F", False),
-    ("grep x f | rm -rf /tmp/probe", "F", False),
-    ("grep x f | rm -rf /tmp/probe", "G", False),
-    ("cd /tmp && rm -rf /tmp/probe", "F", False),
-    ("sed -n 1,80p f | rm -rf /tmp/probe", "F", False),
+    ("pwd | rm -rf /tmp/probe", "F", False, None),
+    ("cat f | rm -rf /tmp/probe", "F", False, None),
+    ("grep x f | rm -rf /tmp/probe", "F", False, None),
+    ("grep x f | rm -rf /tmp/probe", "G", False, None),
+    ("cd /tmp && rm -rf /tmp/probe", "F", False, None),
+    ("sed -n 1,80p f | rm -rf /tmp/probe", "F", False, None),
+    # A quoted separator is one command, and the arm that splits must agree with the
+    # classifier about that or the two are answering about different pieces.
+    ('grep -i "append|add_attr" f.py', "B", True, None),
+    ('grep -i "append|add_attr" f.py', "A", True, None),
     # The 2>/dev/null simulation is live, and only in the arms that claim it.
-    ("ls 2>/dev/null", "B", False),
-    ("ls 2>/dev/null", "C", True),
+    ("ls 2>/dev/null", "B", False, "discard_stderr"),
+    ("ls 2>/dev/null", "C", True, None),
     # The sed row admits the print-range shape and nothing else about sed.
-    ("sed -n 1,80p f", "F", True),
-    ("sed -i s/a/b/ f", "F", False),
-    ("sed s/a/b/ f", "F", False),
+    ("sed -n 1,80p f", "F", True, None),
+    ("sed -i s/a/b/ f", "F", False, None),
+    ("sed s/a/b/ f", "F", False, None),
 )
 
 
 def report_self_check() -> bool:
     by_key = {w.key: w for w in CANDIDATES}
     failures = []
-    for command, key, expected in _SELF_CHECK:
+    dropped = []
+    for command, key, expected, counterfactual in _SELF_CHECK:
+        if counterfactual is not None and counterfactual in LANDED:
+            dropped.append(f"{key} on {command!r}: {counterfactual} has landed")
+            continue
         widening = by_key[key]
         with simulated_table(widening):
             actual = admitted(command, widening)
@@ -578,8 +674,10 @@ def report_self_check() -> bool:
             failures.append(f"{key} on {command!r}: expected {expected}, got {actual}")
 
     print("\n=== SELF CHECK ===")
+    for line in dropped:
+        print(f"  dropped, no longer a claim about the simulation -- {line}")
     if not failures:
-        print(f"  OK -- {len(_SELF_CHECK)} fixed verdicts all as claimed.")
+        print(f"  OK -- {len(_SELF_CHECK) - len(dropped)} fixed verdicts all as claimed.")
         return True
     print("  FAILED. The simulation no longer does what it says; the numbers are not")
     print("  measuring the candidates they are labelled with.")
@@ -601,32 +699,68 @@ def report_monotonicity(scores: dict[str, int]) -> bool:
     return False
 
 
+def _window(verdicts: Sequence[Sequence[bool]], n: int) -> tuple[int, int]:
+    """
+    Admitted and total over the first ``n`` calls of each transcript, or all when n is 0.
+    """
+    windows = [v[:n] if n else v for v in verdicts]
+    return sum(sum(w) for w in windows), sum(len(w) for w in windows)
+
+
 def report_orienting(transcripts: Sequence[Transcript]) -> None:
-    with_bash = [t for t in transcripts if t.commands]
+    """
+    The admit rate over the first N Bash calls of a session.
+
+    Sub-agent transcripts are excluded here and nowhere else, and it changes the answer
+    rather than tidying it. A sub-agent file is not a session: it opens mid-task against
+    a brief somebody else wrote, and its opening calls are admitted at roughly twice a
+    session's rate, so counting one as a session reads an agent's first reads as though
+    an operator had typed them. They are half the corpus's files and over half of every
+    first-3 window. Every other block keeps them, because the gate sees those calls too
+    and the overall rate is a question about calls rather than about sessions.
+    """
+    sessions = [t for t in transcripts if t.commands and not t.sidechain]
+    agents = [t for t in transcripts if t.commands and t.sidechain]
     print("\n=== ORIENTING BURST ===")
-    print(f"  sessions with at least one Bash call: {len(with_bash)}")
-    print(f"  {'first N':>8}  {'calls':>6}  {'B tree today':>16}  {'F widest':>16}")
+    print(f"  sessions with at least one Bash call:   {len(sessions)}")
+    print(f"  sub-agent transcripts excluded:         {len(agents)}")
+
+    disagree = [t for t in transcripts if t.sidechain != t.flagged]
+    if disagree:
+        print(
+            f"  WARNING: {len(disagree)} transcripts whose path and whose own isSidechain"
+            " flag disagree.\n  The session/sub-agent split below is not trustworthy."
+        )
 
     with simulated_table(AS_BUILT):
-        built = {t.path: [admitted(c, AS_BUILT) for c in t.commands] for t in with_bash}
+        built = {t.path: [admitted(c, AS_BUILT) for c in t.commands] for t in transcripts}
     with simulated_table(WIDEST):
-        widest = {t.path: [admitted(c, WIDEST) for c in t.commands] for t in with_bash}
+        widest = {t.path: [admitted(c, WIDEST) for c in t.commands] for t in transcripts}
 
+    print(f"  {'first N':>8}  {'calls':>6}  {'B tree today':>16}  {'F widest':>16}")
     for n in (3, 5, 10, 20, 0):
-        head = sum(len(built[t.path][:n] if n else built[t.path]) for t in with_bash)
-        a = sum(sum(built[t.path][:n] if n else built[t.path]) for t in with_bash)
-        f = sum(sum(widest[t.path][:n] if n else widest[t.path]) for t in with_bash)
+        a, head = _window([built[t.path] for t in sessions], n)
+        f, _ = _window([widest[t.path] for t in sessions], n)
         label = str(n) if n else "all"
         print(
             f"  {label:>8}  {head:6d}  {a:6d} {100.0 * a / max(head, 1):8.1f}%  "
             f"{f:6d} {100.0 * f / max(head, 1):8.1f}%"
         )
 
-    barren = sum(1 for t in with_bash if not any(widest[t.path][:10]))
+    barren = sum(1 for t in sessions if not any(widest[t.path][:10]))
     print(
         f"  sessions where not one of the first 10 Bash calls is admitted, "
-        f"under F: {barren}/{len(with_bash)}"
+        f"under F: {barren}/{len(sessions)}"
     )
+    if agents:
+        agent_a, agent_head = _window([built[t.path] for t in agents], 3)
+        total_a, total_head = _window([built[t.path] for t in agents], 0)
+        print(
+            f"  the excluded sub-agent transcripts, for comparison: {agent_a}/{agent_head}"
+            f" = {100.0 * agent_a / max(agent_head, 1):.1f}% on their own first 3 under B,"
+            f"\n  against {100.0 * total_a / max(total_head, 1):.1f}% over all"
+            f" {total_head} of their calls."
+        )
 
 
 def report_still_refused(commands: Sequence[str]) -> None:
@@ -634,7 +768,9 @@ def report_still_refused(commands: Sequence[str]) -> None:
         refused = [c for c in commands if not admitted(c, WIDEST)]
         head_passes = 0
         for command in refused:
-            parts = split_segments(_DISCARD_STDERR.sub("", command))
+            # No strip before the split: `admitted` runs the whole classifier on the head
+            # segment, and `_refuse_segment` does its own `2>/dev/null` strip in there.
+            parts = split_segments(command)
             if len(parts) > 1 and admitted(parts[0].strip(), WIDEST):
                 head_passes += 1
 
