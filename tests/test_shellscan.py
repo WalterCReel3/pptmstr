@@ -14,6 +14,8 @@ the failure mode `STYLE.md` §2 names: a test asserting less than its name.
 from __future__ import annotations
 
 import dataclasses
+import pathlib
+import sys
 from unittest import mock
 
 import pytest
@@ -611,6 +613,54 @@ def test_a_quoted_ampersand_parks_on_the_scan_and_not_on_the_split() -> None:
     assert shellscan._split_segments('grep -i "a&&b" f.py') == ['grep -i "a&&b" f.py']
     # The `|` spelling of the same pattern, which is the one that got cheaper.
     assert refusal('grep -i "a|b" f.py') is None
+
+
+def test_the_split_agrees_with_bash_itself_on_the_cases_anyone_thought_of() -> None:
+    """
+    The `NAMED` arm of `scripts/verify_split_against_bash.py`, run in the suite.
+
+    Every other test here compares the splitter to a reading of bash. This one
+    compares it to bash: each candidate goes through `bash -c 'set -x'`, the
+    trace says which commands bash actually executed, and a refusal is required
+    whenever bash ran one the table refuses alone.
+
+    `NAMED` and not the whole probe, because the exhaustive and sampled arms are
+    tens of thousands of subprocesses. The split is not arbitrary: `NAMED`
+    carries the cases somebody worked out, it is the arm measured to catch a
+    tracker that honours a backslash inside single quotes, and the random arm
+    at length 6 finds that one zero times. `make verify` runs all three.
+
+    It fails rather than skips when `/bin/bash` is missing. A skipped
+    verification reads as a passed one in `-q` output, and this branch's
+    records already carry three probes whose results nobody collected.
+    """
+    import importlib.util
+
+    assert pathlib.Path("/bin/bash").exists(), (
+        "no /bin/bash, so the one test here whose oracle is the shell cannot run; "
+        "this is a failure and not a skip, because a skip reads as a pass"
+    )
+
+    probe_path = pathlib.Path(__file__).resolve().parent.parent / "scripts"
+    probe_path = probe_path / "verify_split_against_bash.py"
+    spec = importlib.util.spec_from_file_location("verify_split_against_bash", probe_path)
+    assert spec is not None and spec.loader is not None
+    probe = importlib.util.module_from_spec(spec)
+    # Registered before execution because `@dataclass(slots=True)` resolves the
+    # defining module out of `sys.modules`; `scripts/` is not a package, so this
+    # is the only way to reach the probe and it has to be done in this order.
+    sys.modules[spec.name] = probe
+    spec.loader.exec_module(probe)
+
+    result = probe.check(probe.NAMED)
+    assert result.holes == [], f"bash ran a refused command and we admitted it: {result.holes}"
+    # The positive control. Most of `NAMED` is written so bash reaches a command
+    # the table refuses; if that stopped being true the assertion above would
+    # pass while testing nothing.
+    assert result.exercised >= 10, (
+        f"only {result.exercised} of {result.total} named cases reached the "
+        "requirement, so this test has stopped exercising it"
+    )
 
 
 def test_the_split_agrees_with_an_independent_reading_of_bash_quoting() -> None:

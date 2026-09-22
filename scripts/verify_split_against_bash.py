@@ -54,8 +54,18 @@ testing anything and the count is the only thing that says so.
 
 === EXIT STATUS ===
 
-Non-zero when a hole is found, or when the run did not exercise the requirement at least
-1000 times -- a probe that never reached the assertion is not evidence.
+Non-zero when a hole is found, when `/bin/bash` is absent, or when fewer than 1000
+*multi-segment* candidates reached the requirement. The last one is deliberately not a
+count of candidates that merely refused: a one-character body makes bash run an unknown
+command and makes `refusal` refuse, meeting the requirement with no segmentation
+anywhere, so gating on that would pass a run in which the split was never tested.
+
+=== HOW TO RUN IT ===
+
+`make verify`, which is outside `make check` because this shells out tens of thousands
+of times. `tests/test_shellscan.py` runs the `NAMED` arm alone on every `make test`,
+which is the 20 cases and the arm proven to catch a mutation; the exhaustive and
+sampled arms are what this target adds.
 """
 
 from __future__ import annotations
@@ -65,11 +75,15 @@ import random
 import subprocess
 import sys
 import tempfile
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pptmstr.shellscan import refusal  # noqa: E402
+from pptmstr.shellscan import _split_segments, refusal  # noqa: E402
+
+BASH = "/bin/bash"
 
 # Quotes and a backslash decide where a quoted region begins and ends; `;`, `|` and `&`
 # are the operators and the one character that looks like an operator and is not; the
@@ -142,7 +156,7 @@ def bash_ran(candidate: str, cwd: str) -> tuple[list[str], str]:
     The command word of every simple command bash executed, plus the raw trace.
     """
     done = subprocess.run(
-        ["/bin/bash", "-c", "set -x\n" + candidate],
+        [BASH, "-c", "set -x\n" + candidate],
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
@@ -174,14 +188,38 @@ def candidates() -> list[str]:
     return list(NAMED) + [p + b for p in PREFIXES for b in bodies if (p + b).strip()]
 
 
-def main() -> int:
+@dataclass(frozen=True, slots=True)
+class Result:
+    """
+    What one pass over a candidate list found.
+
+    ``exercised`` and ``split_exercised`` are two different claims and only the
+    second says the split was involved. A one-character candidate makes bash run
+    an unknown command and makes ``refusal`` refuse the whole string, which meets
+    the requirement with no segmentation anywhere -- that is ``exercised``.
+    ``split_exercised`` counts only candidates `_split_segments` cut into more
+    than one piece, and it is the one the gate below reads.
+    """
+
+    holes: list[tuple[list[str], str]]
+    syntax: int
+    no_hazard: int
+    exercised: int
+    split_exercised: int
+    timeouts: int
+    total: int
+
+
+def check(probes: Sequence[str]) -> Result:
+    """
+    Run each candidate through bash and hold the classifier to the requirement.
+    """
     holes: list[tuple[list[str], str]] = []
-    syntax = no_hazard = exercised = timeouts = 0
+    syntax = no_hazard = exercised = split_exercised = timeouts = 0
 
     with tempfile.TemporaryDirectory(prefix="verify-split-") as cwd:
         Path(cwd, "a").write_text("scratch\n")
         Path(cwd, "ls").write_text("scratch\n")
-        probes = candidates()
         for candidate in probes:
             try:
                 words, trace = bash_ran(candidate, cwd)
@@ -197,23 +235,46 @@ def main() -> int:
                 continue
             if refusal(candidate) is None:
                 holes.append((hazards, candidate))
-            else:
-                exercised += 1
+                continue
+            exercised += 1
+            if len(_split_segments(candidate)) > 1:
+                split_exercised += 1
 
-    print(f"candidates run through /bin/bash: {len(probes)}")
-    print(f"  bash refused as a syntax error, so nothing ran: {syntax}")
-    print(f"  bash ran only commands the table admits alone:  {no_hazard}")
-    print(f"  bash ran a refused command AND we refused:      {exercised}")
-    print(f"  timed out:                                      {timeouts}")
-    print(f"  HOLES (bash ran a refused command, we admitted): {len(holes)}")
-    for hazards, candidate in holes[:40]:
+    return Result(
+        holes=holes,
+        syntax=syntax,
+        no_hazard=no_hazard,
+        exercised=exercised,
+        split_exercised=split_exercised,
+        timeouts=timeouts,
+        total=len(probes),
+    )
+
+
+def main() -> int:
+    if not Path(BASH).exists():
+        print(f"No {BASH} on this machine, so there is no oracle to compare against.")
+        print("This probe's whole value is that the answer comes from the shell itself.")
+        return 1
+
+    result = check(candidates())
+
+    print(f"candidates run through {BASH}: {result.total}")
+    print(f"  bash refused as a syntax error, so nothing ran: {result.syntax}")
+    print(f"  bash ran only commands the table admits alone:  {result.no_hazard}")
+    print(f"  bash ran a refused command AND we refused:      {result.exercised}")
+    print(f"    of those, ones the split actually cut up:     {result.split_exercised}")
+    print(f"  timed out:                                      {result.timeouts}")
+    print(f"  HOLES (bash ran a refused command, we admitted): {len(result.holes)}")
+    for hazards, candidate in result.holes[:40]:
         print(f"    {candidate!r} -> bash ran {hazards}")
 
-    if holes:
+    if result.holes:
         return 1
-    if exercised < MINIMUM_EXERCISED:
-        print(f"\nOnly {exercised} candidates reached the requirement, under the")
-        print(f"{MINIMUM_EXERCISED} this probe needs to be evidence of anything.")
+    if result.split_exercised < MINIMUM_EXERCISED:
+        print(f"\nOnly {result.split_exercised} multi-segment candidates reached the")
+        print(f"requirement, under the {MINIMUM_EXERCISED} this probe needs to be")
+        print("evidence of anything about the split.")
         return 1
     return 0
 
