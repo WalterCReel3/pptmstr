@@ -185,6 +185,12 @@ REFUSED = [
     "echo foo | tee bad.txt",
     "echo $(rm -rf /tmp/x)",
     "echo ~/x",
+    # The two spellings that survive tokenisation, so only the raw scan stops
+    # them: with no spaces, `foo>bad.txt` is a single shlex token and an
+    # operand of an unrestricted row, and `>|` is bash's noclobber-override
+    # redirect whose `|` is a separator.
+    "echo foo>bad.txt",
+    "echo -e 'x' >| bad.txt",
     # `&` backgrounds rather than sequences, so it is NOT a separator and stays
     # a refused metacharacter. `cat f | head` used to sit beside this row and
     # has moved to ADMITTED; these two rows are the entire difference between
@@ -355,6 +361,11 @@ ADMITTED = [
     "echo -n hello",
     r'echo -e "a\tb"',
     'echo "===ADMIN==="',
+    # `git --output` writes a file and is in `REFUSED`; here the same token is
+    # text, because the builtin has no option grammar past `-neE` and prints
+    # what it does not recognise. Run on bash 3.2.57: this prints
+    # `--output=/tmp/pwned` and creates nothing.
+    "echo --output=/tmp/pwned",
     'sed -n 1,80p pptmstr/app.py; echo "=== approval ==="; sed -n 1,80p pptmstr/approval.py',
 ]
 
@@ -1105,11 +1116,12 @@ def test_echo_is_a_label_between_reads_and_its_write_forms_are_caught_before_it(
     weakest-segment rule: a batched read labelled with `echo` is refused for the
     label while both of its `sed` segments are admitted.
 
-    Unrestricted, and for a reason `grep`'s row does not have. `-n`, `-e` and
-    `-E` are the entire option set of bash 3.2.57's builtin and zsh 5.9's, BSD
-    /bin/echo takes `-n` alone, and a leading-dash token none of them recognises
-    is printed as text rather than parsed -- so there is no unlisted spelling
-    for an allowlist to catch and no flag that opens a file.
+    Unrestricted, and for a reason `grep`'s row does not have. `-neE` is the
+    entire option set of bash 3.2.57's builtin and of zsh 5.9's, and past those
+    three the builtin has no option grammar: run on bash 3.2.57, `echo -x foo`
+    and `echo --output=/tmp/pwned` print their arguments and `--` does not end
+    the options. A flag allowlist would therefore park text, which is why the
+    `--output=` row in `ADMITTED` sits next to `git --output` in `REFUSED`.
 
     Everything that makes `echo` write or execute is caught upstream of the
     table, and the two mechanisms are different: the redirects and the
@@ -1124,6 +1136,7 @@ def test_echo_is_a_label_between_reads_and_its_write_forms_are_caught_before_it(
 
     assert refusal("echo foo > bad.txt") == "shell metacharacter '>'"
     assert refusal("echo foo >> bad.txt") == "shell metacharacter '>'"
+    assert refusal("echo foo>bad.txt") == "shell metacharacter '>'"
     assert refusal("echo $(rm -rf /tmp/x)") == "shell metacharacter '$'"
     assert refusal("echo `whoami`") == "shell metacharacter '`'"
     assert (

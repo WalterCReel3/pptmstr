@@ -303,13 +303,19 @@ _TABLE: dict[str, _Rule] = {
     # 1,80p b.py` is two admitted reads and one separator label, and without
     # this row the label parks the whole command.
     #
-    # Unrestricted, and not for `grep`'s reason. Every option set is `-n`,
-    # `-e`, `-E` and nothing else -- bash 3.2.57's builtin (`help echo`) and
-    # zsh 5.9's (zshbuiltins(1)) both document exactly those three, BSD
-    # /bin/echo(1) documents `-n` alone, and GNU coreutils adds only `--help`
-    # and `--version`. None of them opens a file, and an unrecognised
-    # leading-dash token is printed as text rather than parsed as an option, so
-    # there is no unlisted spelling for an allowlist to park.
+    # Unrestricted, and it is a stronger claim than `grep`'s row makes rather
+    # than the same one. The builtin's whole option set is `-neE` -- bash
+    # 3.2.57's `help echo` and zsh 5.9's zshbuiltins(1) both document exactly
+    # those three -- and beyond them it has no option grammar at all: run on
+    # bash 3.2.57, `echo -x foo`, `echo --output=/tmp/pwned` and `echo -- foo`
+    # each print their arguments verbatim, because the builtin does not error
+    # on an unrecognised option and does not read `--` as ending them. So a
+    # flag allowlist here would not be a narrower claim, it would be a wrong
+    # one: it would park tokens that are text.
+    #
+    # `/bin/echo` takes `-n` alone and GNU coreutils adds `--help` and
+    # `--version`; both sets are unreachable, because `argv[0]` is matched
+    # literally and a bare `echo` is the builtin.
     #
     # What makes `echo` write or execute is never a flag: `>`, `>>`, `$(`, a
     # backtick and `{}` are refused by the raw metacharacter scan before
