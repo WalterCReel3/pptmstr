@@ -591,11 +591,37 @@ are in the tree, so the question can be answered rather than restated.
 | first 3 calls of a session | 27.1% | 53.8% |
 | first 10 | 11.6% | 49.3% |
 
-The 09-21 table's rows were candidate simulations of widenings that had not landed. They
-cannot be compared row for row with this one, and the reason is not drift: every
-widening that script could simulate has now landed, so its simulation arms score as the
-tree does and the cumulative shape the old table had is gone. What survives the
-comparison is the direction and the magnitude, and both are larger than projected.
+**Read those two columns as direction and magnitude, not as a row-for-row delta**, for
+two reasons that both inflate the apparent improvement. The 09-21 rows were candidate
+*simulations* of widenings that had not landed; every one the script can simulate has
+since landed, so its arms now score as the tree does and the cumulative shape the old
+table had is gone. And the first-N population changed: the script used to treat one
+transcript file as one session, which counted 46 sub-agent slices as sessions, and
+those admit at roughly twice a session's opening rate. Both were repaired the same day.
+
+### Which widening bought what
+
+Measured by removing one at a time from the live classifier, so each delta is that
+widening's contribution against the other two being present. Sessions only.
+
+| | sessions | first 3 |
+|---|---|---|
+| the tree before the 09-22 widenings | 14.1% | 17.9% |
+| + the quote-aware split alone withheld | 27.2% | 47.9% |
+| + the `2>/dev/null` strip alone withheld | 32.2% | 36.8% |
+| + the `echo` row alone withheld | 22.2% | 30.8% |
+| all three | **38.1%** | **53.8%** |
+
+The `echo` row is the largest single mover, at 15.9 points, which is not where anyone
+expected the value to be: `echo` reads nothing and is on the table purely as the label
+between batched reads. The three deltas sum to 32.7 points against a combined gain of
+24.0, so they overlap heavily — a command frequently needs two of them before it
+admits. That is the same non-additive property §"two further facts" records for
+sequence support, and it is the reason a table of cumulative arms overstates each row.
+
+The 14.1% baseline row is the tree *after* `t-widenings` and before the 09-22 work. It
+is not the 09-21 amendment's 3.6%, which was a narrower table measured over a different
+corpus with a different session definition. The two do not subtract.
 
 ### The question, answered
 
@@ -635,18 +661,24 @@ flattering direction.** 41.1% is the honest answer to "what fraction of `Bash` c
 does the gate admit" and 38.1% is the honest answer to "what fraction of an operator's
 session", and the second is the one this record's argument is about.
 
-The 09-21 amendment's caveat about corpus counts stands and has not improved: the
-instrument reads `~/.claude/projects` while sessions write to it. Percentages are robust
-to roughly a point; absolute counts are dated snapshots.
+The 09-21 amendment's caveat about corpus counts stands and has not improved, and this
+session watched it happen. Two runs minutes apart saw the corpus grow from 2755 to 2796
+`Bash` calls and the all-calls rate move 41.1% -> 41.5%, while the session figure sat at
+exactly 586/1538 = 38.1% in both. The drift is entirely in the agent traffic, which is
+a second reason to publish the session number: it is the stable one as well as the
+honest one. Percentages are robust to roughly a point; absolute counts are dated
+snapshots.
 
 ### What was verified for this amendment
 
 **Verified by execution this session** (`.venv/bin/python`, 2026-09-22):
 
-- Every figure above, by running `scripts/measure_bash_burst.py` and reading its output.
-  The per-session table is not in that output; it was computed in the same process from
-  the script's own `read_corpus` and the live `shellscan.refusal`, so it shares the
-  corpus and the classifier with the rest.
+- Every figure above, by running `scripts/measure_bash_burst.py` and reading its output,
+  against the tree at `c47bd0e` with all four changes committed. The per-session and
+  per-widening tables are not in that output; they were computed in the same process
+  from the script's own `read_corpus` and the live `shellscan.refusal`, so they share
+  the corpus and the classifier with the rest. The per-widening figures were produced
+  by removing each widening from the live module, never by a copy of its rule.
 - That the script exits 0. It exited 1 before the same day's repair, on monotonicity
   rather than on its self check.
 - The four `shellscan` changes, each against the adversarial corpus in

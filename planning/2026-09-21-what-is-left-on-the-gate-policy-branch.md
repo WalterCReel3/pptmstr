@@ -129,6 +129,13 @@ monotonicity clean. 149 transcript files, 85 with a Bash call, 2755 Bash calls.
 | overall, per session | 4.7% | 38.1% |
 | overall, all calls including sub-agents | — | 41.1% |
 
+**The two columns are not a clean delta**, and both differences flatter the right-hand
+one. The 09-21 figures were candidate simulations of widenings that had not landed, and
+the first-N rows counted 46 sub-agent transcripts as sessions — the script treated one
+file as one session until it was repaired on 09-22. Read the direction and the
+magnitude. The 09-17 record's 09-22 amendment has the per-widening breakdown, which is
+the honest version of "what did each change buy".
+
 **Two overall figures, and they answer different questions.** 41.1% (1133/2755) is what
 fraction of `Bash` calls the gate admits. 38.1% (586/1538) is what fraction of an
 *operator's session* it admits, over the 39 session transcripts with sub-agent slices
