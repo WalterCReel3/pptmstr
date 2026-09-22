@@ -1,6 +1,6 @@
 # An egress-denied shell policy reduces the orienting burst, and the spawn stays gated
 
-**Dated:** 2026-09-17 · **Amended:** 2026-09-17, 2026-09-21 — see the amendments at the end ·
+**Dated:** 2026-09-17 · **Amended:** 2026-09-17, 2026-09-21, 2026-09-22 — see the amendments at the end ·
 **Status:** routing decision recorded; built on branch `experimental-gate-policy` ·
 **Origin:** an operator request (2026-09-17) to reduce approvals to *"only the important
 decisions"*, naming read-only `Bash`, task claiming, and sub-agent starts ·
@@ -514,6 +514,9 @@ proportional to this fraction**, and the honest question is no longer *what is i
 phase that admits 3.6% does not remove a presence; it is not obvious that 20.6% does
 either, and that is the question to hold the widenings to.
 
+**Answered, 2026-09-22: no. It thins the presence and does not remove it, and the rate
+is now roughly two in five rather than one.** See the amendment below.
+
 Two further facts from the same run, because they change how the table reads. Sequence
 support is nearly worthless alone (+1.3 points) and roughly doubles everything else — `cd`
 adds 0.0 points without it and 4.5 with it, because `cd X` alone is not a thing anyone runs.
@@ -536,9 +539,11 @@ exactly as 08-11 did.** It is the one thing from §6 that survives the ruling in
 `experimental-gate-policy`:
 
 - The admit-rate table above, by running `/tmp/measure_candidates.py` — reproduced rather
-  than quoted. The script is not in the tree; moving it to `scripts/` is queued separately,
-  and until it is there this table is not re-runnable by a later reader, which is a real
-  weakness of citing it here.
+  than quoted. ~~The script is not in the tree; moving it to `scripts/` is queued
+  separately, and until it is there this table is not re-runnable by a later reader,
+  which is a real weakness of citing it here.~~ **Retired 2026-09-22:** the script is
+  `scripts/measure_bash_burst.py` and the table is re-runnable. The stated weakness was
+  real and it was worse than stated — see the 09-22 amendment.
 - `ACT_SHAPED`, `_NOT_ACT_SHAPED` and their five members, and that `Read`/`Grep`/`Glob` sit
   in `_AUTO` — `pptmstr/approval.py`.
 - That the revoke is guarded by `at_root and tool_name in ACT_SHAPED and disposition is not
@@ -562,3 +567,97 @@ elsewhere on this branch; this amendment did not re-derive the seven findings.
 **Stated by the operator, not measured:** the ruling itself, and *"still captures too much
 of the operator's attention"*. It is a preference and it is recorded as one. No batch-approval
 session was instrumented, and per the ruling none will be.
+
+---
+
+## Amendment, 2026-09-22: the widenings landed, the rate roughly doubled, and the open question is answered no
+
+Four changes to `shellscan` landed on 2026-09-22 — an `echo` row, a quote-aware segment
+split, a `2>/dev/null` strip, and the repair of the measuring script itself. The
+09-21 amendment's open question was held against the widenings queued behind it. They
+are in the tree, so the question can be answered rather than restated.
+
+### The rate, re-measured
+
+`scripts/measure_bash_burst.py`, exit status 0, self check 14/14, monotonicity clean.
+149 transcript files, 85 with a `Bash` call, 2755 calls, 39 of the files sessions and
+46 sub-agent slices.
+
+| | 09-21 estimate | 09-22 measured |
+|---|---|---|
+| the table as built, no sequence support | 3.6% | 11.3% |
+| the tree today, all calls | 20.6% (projected) | 41.1% |
+| the tree today, sessions only | — | 38.1% |
+| first 3 calls of a session | 27.1% | 53.8% |
+| first 10 | 11.6% | 49.3% |
+
+The 09-21 table's rows were candidate simulations of widenings that had not landed. They
+cannot be compared row for row with this one, and the reason is not drift: every
+widening that script could simulate has now landed, so its simulation arms score as the
+tree does and the cumulative shape the old table had is gone. What survives the
+comparison is the direction and the magnitude, and both are larger than projected.
+
+### The question, answered
+
+*Whether one call in five is enough to remove a presence rather than merely thin one.*
+
+**No, and two in five is not either.** The rate is the wrong statistic for that question
+and the right one is per-session, measured the same run:
+
+| | sessions |
+|---|---|
+| whose first Bash call is admitted | 28/39 |
+| whose first 3 Bash calls all admit | 9/39 |
+| whose first 10 all admit | 2/39 |
+| with no parked Bash call at all | **0/39** |
+
+Not one session in the corpus gets through its `Bash` traffic without stopping for the
+operator. A presence is removed only by a session that never parks, and at 38.1% per
+call a session of any length will park — the per-call rate compounds against itself.
+What 38.1% buys is a *later* first presence and fewer of them, which is worth having and
+is not what the phase was sold as.
+
+This does not argue for widening further. The still-refused residual is `cd` in a
+composite, `source`, `.venv/bin/python`, `make` and `gh`, and 506 of 1622 refusals have
+a head segment the table already admits and fail on a later one. Those are not unlocked
+by another row. §"Why it cannot go further" in the 09-21 handover note already gives the
+reason and it is unchanged: the sandbox work changes the question from "can I decide
+what this command does" to "can I bound what any command can do", and that is the only
+thing that moves this number materially.
+
+### A caveat that is new, and it points the wrong way
+
+46 of the 85 files with a `Bash` call are sub-agent slices, carrying 1217 of the 2755
+calls, and a large share of them are this branch's own agents probing this branch's own
+gate over the last three days. They admit at 81.2% on their own first three against a
+session's 53.8%. **The corpus now measures the experiment along with the subject, in the
+flattering direction.** 41.1% is the honest answer to "what fraction of `Bash` calls
+does the gate admit" and 38.1% is the honest answer to "what fraction of an operator's
+session", and the second is the one this record's argument is about.
+
+The 09-21 amendment's caveat about corpus counts stands and has not improved: the
+instrument reads `~/.claude/projects` while sessions write to it. Percentages are robust
+to roughly a point; absolute counts are dated snapshots.
+
+### What was verified for this amendment
+
+**Verified by execution this session** (`.venv/bin/python`, 2026-09-22):
+
+- Every figure above, by running `scripts/measure_bash_burst.py` and reading its output.
+  The per-session table is not in that output; it was computed in the same process from
+  the script's own `read_corpus` and the live `shellscan.refusal`, so it shares the
+  corpus and the classifier with the rest.
+- That the script exits 0. It exited 1 before the same day's repair, on monotonicity
+  rather than on its self check.
+- The four `shellscan` changes, each against the adversarial corpus in
+  `tests/test_shellscan.py`, and the segment split additionally against `/bin/bash`
+  itself via `scripts/verify_split_against_bash.py` — 25521 candidate strings, 5167 of
+  which reached the requirement, no holes.
+
+**Taken on report, not re-derived:** that the measuring script's four defects were what
+the task board said they were. They were repaired by another agent this session and this
+amendment quotes the repaired script's output rather than auditing the repair.
+
+**Not measured, and unchanged from the 09-21 amendment:** 08-11's assumption that `Bash`
+is the bulk of the orienting burst. Every figure here is a share of `Bash`, and nothing
+has measured what share of the burst `Bash` is.
