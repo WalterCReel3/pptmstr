@@ -115,9 +115,15 @@ _MAX_SEGMENTS = 8
 # character bash passes to the command.
 #
 # Those two are the only characters the split is allowed to launder, and the
-# quote-blindness here is what keeps the rest out of reach. `$'...'` is bash's
-# other quoting form and it is refused by this scan on its `$`, so
-# `_split_segments` does not have to know about it.
+# quote-blindness here is what keeps the rest out of reach.
+#
+# `$'...'` is bash's third quoting form and `_split_segments` does not track
+# it. It does not need to, and not because this scan is blind: the `$` of
+# `$'...'` sits *outside* the quoted region -- at an index the splitter's own
+# state machine reports as unquoted -- so it is refused as an ordinary
+# unquoted `$` and would be by a quote-aware scan too. The two rules are
+# independent here, which is worth knowing before anyone reasons about
+# changing either.
 _METACHARACTERS = frozenset("&<>`$(){}")
 
 # `\r` is not a separator: bash does not sequence on it, so splitting there
