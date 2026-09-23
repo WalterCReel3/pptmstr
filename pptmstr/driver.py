@@ -23,6 +23,7 @@ import uuid
 from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, cast
 
 from claude_agent_sdk import (
@@ -53,7 +54,7 @@ from claude_agent_sdk import (
 )
 from claude_agent_sdk.types import SystemPromptPreset
 
-from .approval import Disposition, classify, render_diff, summarize
+from .approval import Disposition, Policy, classify, render_diff, summarize
 from .bridge import Bridge
 from .bus import BUS_TOOLS, EDITED_KEY, FROM_KEY, SERVER_NAME, build_server
 from .intents import (
@@ -76,14 +77,17 @@ from .model import (
     AWAITING_TOPIC,
     INTERRUPTED_TOPIC,
     SUPERVISING_TOPIC,
+    WRITING_TOOLS,
     AgentState,
     ContextSnapshot,
     NodeId,
     PendingApproval,
     UsageRollup,
+    written_path,
 )
 from .templates import SOLO, WorkTemplate, lead_briefing, worker_prompt
 from .transcript import SegmentKind, Transcript
+from .tree import lies_inside_checkout
 
 # Hours, not minutes. HookMatcher.timeout defaults to 60s and the CLI enforces it
 # with a per-hook abort, which would kill any review that took longer than a coffee
@@ -140,12 +144,22 @@ SUBAGENT_CALL_VETO_S = APPROVAL_TIMEOUT_S
 # sessions and its ceiling is RAM, because each of those is a Claude Code CLI
 # subprocess. Sub-agents are not: they share the parent's session_id and their hooks
 # come back over the parent's single control channel, so what N of them cost is N
-# concurrent API streams and N transcripts of token burn against one node process,
-# plus an operator who has to answer for each spawn at the gate. Four lets both roles
-# of the two-role templates run doubled, which is the fan-out the briefing asks for,
-# and stops a lead that has read "one worker per independent task" from turning a
-# twelve-item board into twelve streams.
-DEFAULT_SUBAGENT_CAP = 4
+# concurrent API streams and N transcripts of token burn against one node process.
+# That is the entire cost. Under `Policy.AUTONOMOUS` spawns are auto-approved, so an
+# operator answering for each one at the gate is not a second cost the number is
+# sized against -- nobody answers for any of them.
+#
+# Eight lets each of the two roles in the two-role templates run four deep, where
+# four ran them doubled, and it still stops a lead that has read "one worker per
+# independent task" from turning a twelve-item board into twelve streams. That
+# property is what the number is for; the particular value is a judgement for an
+# experimental phase and not a measurement. Nothing in this module makes eight right
+# and nine wrong.
+#
+# It is the only bound on fan-out no policy can widen, because the at-cap deny in
+# `_gate_tool_use` runs ahead of `classify`. That is why it is the number to set
+# deliberately rather than the one to leave alone.
+DEFAULT_SUBAGENT_CAP = 8
 
 # What every session this application starts writes into its own transcript, so a
 # later picker can tell which of the sessions on disk were ours.
@@ -173,6 +187,36 @@ class SessionIdentityError(RuntimeError):
     key, every approval route and every ``session_for`` lookup belongs to another. A
     session that stopped with an error the operator can read is a far cheaper outcome
     than a live one whose ``send``, ``interrupt`` and ``close`` all silently miss.
+    """
+
+
+class UncontainedAutonomy(RuntimeError):
+    """
+    The session would release every reviewed tool with no sandbox under it.
+
+    ``Policy.AUTONOMOUS`` and the containment settings are one arrangement and not
+    two options. The policy releases the tools; the sandbox is what bounds what a
+    released ``Bash`` reaches, and it is the only thing that does -- the gate's
+    write-region check covers the four CLI-process write tools and deliberately
+    leaves commands to the sandbox. ``planning/2026-09-03`` §8 records the two as
+    **not separable**, and an unpaired session is also one whose agents are told in
+    their own prompt that Bash reaches no host but the API, which would be false.
+
+    Raised at start rather than at construction. The hazard is a session that
+    *runs*: one built to exercise the gate and never started spawns no CLI, and
+    making the pair unconstructible would oblige every such test to declare a
+    sandbox it has nothing to say about.
+
+    Raised rather than downgraded to ``STRICT``. A launch that quietly does
+    something other than what it was asked for is the failure
+    ``app._containment_refusal`` and ``launcher.floor_refusal`` were both written
+    to avoid, and the operator who ticked the box is owed the refusal.
+
+    Nothing a user can do reaches this today: ``ui/launcher`` sets both fields from
+    one checkbox, ``app._launch`` is the only place in the tree that constructs an
+    ``AgentSession``, and ``LaunchSpec.from_record`` carries neither field, so a
+    fork or relaunch drops both together. This guards the next call site rather
+    than an existing one.
     """
 
 
@@ -311,6 +355,131 @@ def _is_allow(decision: HookJSONOutput | None) -> bool:
     if not isinstance(specific, dict):
         return False
     return specific.get("permissionDecision") == "allow"
+
+
+def _located(raw: str, base: Path | None = None) -> Path | None:
+    """
+    ``raw`` as one absolute path with its symlinks followed, or None when the
+    filesystem cannot say where it is.
+
+    ``base`` is what a relative path is measured from -- the directory the agent is
+    running in, not this process's. The two differ whenever a session was launched
+    somewhere other than where pptmstr was started, and a relative ``file_path``
+    means the agent's directory.
+
+    None for a symlink loop, a ``~user`` with no home, or a string the OS will not
+    accept as a path at all. ``tree._resolved`` makes the same distinction and its
+    caller treats None as *inside*, which is fail-closed for the question that asks
+    whether pptmstr's own source is exposed and fail-open for the one asked here.
+    So the answer is separated from the comparison: this says where a path is, and
+    the caller below decides that nowhere is a refusal.
+
+    ``ValueError`` is caught beside the other two and is the reason this is total.
+    An embedded NUL raises it rather than ``OSError``, and every string here came
+    from a model: an exception out of this runs up through ``PreToolUse`` into the
+    CLI's hook machinery, and what that does with a hook that raised is unmeasured.
+    A refusal is an answer this gate chose; a raise is one it did not.
+    """
+    try:
+        named = Path(raw).expanduser()
+        return (base / named if base is not None else named).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _escapes_write_region(tool_name: str, tool_input: Mapping[str, Any], region: str) -> str | None:
+    """
+    Why this write may not run inside ``region``, or None when it may.
+
+    **The replacement bound for the write tools.** ``planning/2026-09-03`` §9 defers
+    cwd-containment in the gate because "§4 supersedes the need for it under this
+    mode" -- §4 being the CLI's Bash sandbox, whose writable region is the session's
+    cwd. That supersession holds only while ``Bash`` is the only tool a policy
+    releases: ``Write``, ``Edit``, ``MultiEdit`` and ``NotebookEdit`` run inside the
+    CLI process, which the sandbox does not cover, so a policy that releases them
+    without this reaches the whole filesystem. What this buys is parity of region --
+    a released write tool reaches what a released ``Bash`` reaches and no more -- and
+    not the process boundary §4 has.
+
+    §3 closed content-classification of ``Bash`` on the ground that the parser
+    becomes the security property. That objection does not reach here: these four
+    name their target in a declared argument, and ``model.written_path`` is the
+    extractor the write ledger has read it with since 09-01.
+
+    **Everything that cannot be placed is refused.** A tool in the write set whose
+    target this build cannot read, a path the filesystem cannot locate, a region it
+    cannot locate, a spelling two readers would resolve differently: each is a case
+    where containment cannot be *shown*, and the only safe reading of that is no.
+
+    **A padded spelling is one of those, and it is the one that bit.** ``Path(" /x")``
+    is *relative* -- its first component is a space -- so an absolute-looking target
+    with a leading space joined the region and passed. Stripping it here instead
+    would be worse than refusing: the strip has to happen in the CLI as well for the
+    two to name one file, and nothing has measured that it does. Refusing covers
+    both readings, and it cannot be fixed in ``written_path`` because
+    ``planning/2026-09-03`` §11 U5 requires that function to normalise exactly as
+    ``normalised_touches`` and ``relative_write`` do -- changing one of the three
+    alone is what produces a false accusation against a compliant agent.
+
+    **Components, not characters** -- ``lies_inside_checkout`` does the comparison,
+    so ``/src/proj-scratch`` is not swept inside ``/src/proj`` by a string prefix,
+    and both sides are resolved before it, so a symlink out of the region is
+    followed rather than trusted.
+
+    **This decides before the call runs, and the sandbox denies as it runs.** The
+    region is resolved here, at gate time; the write happens afterwards, inside the
+    CLI process. A directory component of an approved path that becomes a symlink
+    out of the region in between is not something any ``PreToolUse`` check can see,
+    and the mode's parallel sub-agents are what make that window addressable at
+    all. It is a limit of where the check can live rather than of how it is
+    written: closing it needs enforcement at the write, which is the process
+    boundary §4 has and this does not. Hard links are outside it for the same
+    reason, and outside the sandbox's reach too.
+
+    **Blocking IO on the asyncio thread, and affordably so.** Resolving a path is
+    two or three ``realpath`` walks -- 42us for a file four directories deep on
+    this machine -- against a gate call that otherwise ends in an await the CLI
+    holds open for up to ``APPROVAL_TIMEOUT_S``. It runs only for the four write
+    tools and only when they were auto-approved, so the sessions that pay it are
+    the ones with no park to pay instead.
+    """
+    if tool_name not in WRITING_TOOLS:
+        return None
+
+    home = _located(region)
+    if home is None:
+        return (
+            f"{tool_name} was refused because this session cannot locate its own "
+            f"directory ({region!r}), so no write can be shown to stay inside it."
+        )
+
+    raw = written_path(tool_name, tool_input)
+    if raw is None:
+        return (
+            f"{tool_name} names no readable target path, and this session bounds its "
+            f"writes to {home} -- a write whose destination cannot be read cannot be "
+            f"shown to be inside it. Name the file in the argument the tool declares."
+        )
+
+    if raw != raw.strip():
+        return (
+            f"{tool_name} names {raw!r}, whose spelling carries leading or trailing "
+            f"whitespace. Two readers can disagree about what that names -- "
+            f"{raw.strip()!r} is what it looks like and is not what this build "
+            f"resolves -- so containment cannot be shown for it either way. Name the "
+            f"file without the padding."
+        )
+
+    target = _located(raw, home)
+    if target is None or not lies_inside_checkout(str(target), str(home)):
+        return (
+            f"{tool_name} names {raw}, which is outside {home}. This session runs "
+            f"unattended, so its writes are bounded to that directory the same way the "
+            f"sandbox bounds Bash to it, and no operator will be asked. Write under "
+            f"{home} instead; work that has to leave it is work for a session that has "
+            f"somebody watching."
+        )
+    return None
 
 
 # TaskCreate does not choose its own id: the call carries a subject, and the id the
@@ -727,11 +896,13 @@ class AgentSession:
         *,
         model: str | None = None,
         cwd: str | None = None,
-        repo_root: str | None = None,
+        session_base: str | None = None,
+        containment: str | None = None,
         brief: str | None = None,
         interactive: bool = True,
         template: WorkTemplate | None = None,
         subagent_cap: int = DEFAULT_SUBAGENT_CAP,
+        policy: Policy = Policy.STRICT,
         resume: str | None = None,
     ) -> None:
         self.bridge = bridge
@@ -762,7 +933,20 @@ class AgentSession:
         self.transcript = Transcript()
         self.model = model or "claude-sonnet-5"
         self.cwd = cwd
-        self.repo_root = repo_root
+        self.session_base = session_base
+        # §8's containment configuration as the JSON string ``settings`` takes -- what
+        # ``sandbox.containment_settings`` returns -- or None for a launch that is not
+        # contained. Carried as text rather than as anything structured because three of
+        # §8's keys have no slot in the SDK's ``SandboxSettings``; ``_options`` is the
+        # only reader, and the comment there says why the typed field must stay unset.
+        self.containment = containment
+        # Which allowlist this session's tool calls are measured against. STRICT is
+        # today's gate exactly, so a launch that does not name a policy is unchanged.
+        #
+        # Per session and not in Settings: 2026-08-11 rejected a global toggle because
+        # "the operator sets it for the session they are watching and forgets it is set
+        # for the four they are not". `_policy_for` is the only reader.
+        self.policy = policy
         # Whether an operator is attached to answer. False means headless, where a
         # tool needing approval is denied rather than left to hit the timeout.
         self.interactive = interactive
@@ -1232,8 +1416,24 @@ class AgentSession:
         if is_spawn_call and self._outstanding_subagents() >= self.subagent_cap:
             return _deny(tool_name, self._at_cap_reason())
 
-        disposition = classify(tool_name, tool_input)
+        disposition = classify(tool_name, tool_input, self._policy_for(agent_id))
         if disposition is Disposition.AUTO_APPROVE:
+            # Behind classify, and on this branch only. The at-cap deny above sits
+            # *ahead* of classify so that no policy can widen it; this one cannot be
+            # placed there, because what it bounds is precisely the calls a policy
+            # let through. It gets the same unwidenable property a different way: it
+            # does not consult the policy at all, so every auto-approval any present
+            # or future policy produces is measured against the region. Under STRICT
+            # no write tool reaches this branch, so nothing on that path -- including
+            # the resolution IO -- happens at all.
+            #
+            # A write an operator approved is deliberately not measured. They saw the
+            # path; a gate that refused it anyway would be overruling the human it
+            # exists to serve, which is a different decision from bounding the calls
+            # no human sees.
+            escape = _escapes_write_region(tool_name, tool_input, self._write_region())
+            if escape is not None:
+                return _deny(tool_name, escape)
             self._expect_spawn(spawn, tool_use_id, tool_input)
             # Stamped even when nothing is reviewed. The stamp is authentication,
             # not policy: an auto-approved read_inbox still has to know whose inbox
@@ -1241,12 +1441,113 @@ class AgentSession:
             return _allow_with(self._stamp_bus_call(tool_name, tool_input, node))
         if disposition is Disposition.DENY:
             return _deny(tool_name, f"{tool_name} is not permitted by policy")
+        unreviewable = self._no_reviewer_reason(tool_name, agent_id)
+        if unreviewable is not None:
+            return _deny(tool_name, unreviewable)
+
+        return await self._park(tool_name, tool_input, tool_use_id, node, spawn=spawn)
+
+    def _write_region(self) -> str:
+        """
+        The directory this session's auto-approved writes are bounded to.
+
+        ``self.cwd`` rather than ``self.session_base``, and the two are the same
+        directory for a session launched today. ``cwd`` is what the CLI is actually
+        run in, so it is the region the sandbox bounds ``Bash`` to, and parity with
+        ``Bash`` is what this bound is for. ``session_base`` is a reporting base --
+        resolved once at launch and carried so a write can be named in the units a
+        declaration uses -- and measuring containment against it would let a
+        book-keeping choice decide what may be written.
+
+        ``"."`` for a session that named no directory, because that is where its
+        agent runs: an absent ``ClaudeAgentOptions.cwd`` gives the CLI this
+        process's directory, and ``"."`` resolves to the same place. The region is
+        then still the directory the agent is in rather than an absence, which is
+        the honest answer -- refusing every write instead would bound a session
+        that is in fact already bounded.
+
+        Every node is measured against this one region. A sub-agent's record
+        inherits its parent's ``cwd`` in ``store._apply``, but nothing here reads
+        that record: one ``AgentSession`` serves every sub-agent's ``PreToolUse``,
+        so a sub-agent whose record carried the wrong directory would still be
+        measured against the session's.
+
+        The ``PreToolUse`` payload also carries a ``cwd`` and it is deliberately
+        not used. This is the value the operator set at launch; that one arrives
+        with the call being judged, and a bound taken from the same side as the
+        request is not a bound.
+        """
+        return self.cwd or "."
+
+    def _no_reviewer_reason(self, tool_name: str, agent_id: str | None = None) -> str | None:
+        """
+        Why a call that needs approval will not get one, or None when it can.
+
+        Takes ``agent_id`` and spends it on ``_policy_for`` rather than reading
+        ``self.policy``, which is the whole reason that function exists: it is the
+        one place that decides which policy a node's call is measured against, and
+        a second reader of the attribute here would make per-node scoping two
+        changes instead of one -- the property ``_policy_for``'s own docstring
+        claims.
+
+        Two ways to have no reviewer, and they are one decision rather than two
+        coincidences: a park is worth opening only when somebody will answer it,
+        and ``APPROVAL_TIMEOUT_S`` is six hours, so a park nobody answers is that
+        long a hang rather than an error anyone sees.
+
+        The reasons differ because they send an agent to different conclusions.
+        Headless is a property of the deployment -- the same call under a session
+        with a window open would have been reviewed. ``AUTONOMOUS`` is a choice the
+        operator made at launch, and the agent should stop looking for a human
+        rather than conclude it drew the wrong launch.
+
+        ``AUTONOMOUS`` is tested first because a session can be both, and of the
+        two it is the one that answers "what should I do instead": under this
+        policy everything this build recognises is released, so a call arriving
+        here is one it does not recognise, and no deployment would have run it
+        unreviewed.
+        """
+        if self._policy_for(agent_id) is Policy.AUTONOMOUS:
+            return (
+                f"{tool_name} needs approval and this session is running unattended by "
+                f"choice, so no operator will be asked and retrying will not change that. "
+                f"Under this policy the calls that still need approval are the ones this "
+                f"build does not recognise -- do the work with a tool it does."
+            )
         if not self.interactive:
             # Headless: nothing can approve, so deny rather than hang until the
             # timeout. A run with no operator must fail closed and say why.
-            return _deny(tool_name, f"{tool_name} needs approval and no operator is attached")
+            return f"{tool_name} needs approval and no operator is attached"
+        return None
 
-        return await self._park(tool_name, tool_input, tool_use_id, node, spawn=spawn)
+    def _policy_for(self, _agent_id: str | None) -> Policy:
+        """
+        The policy a call is measured against: this session's, for every node it
+        serves. A sub-agent is under its session's policy, deliberately.
+
+        The argument is taken and not branched on, and that is the whole point of
+        this function existing. One ``AgentSession`` serves its sub-agents'
+        ``PreToolUse`` hooks, so ``classify(..., self.policy)`` at the call site
+        would make inheritance a consequence of where the field is stored rather
+        than a decision -- and per-node scoping, if it is ever wanted, is a change
+        here and nowhere else. Every decision about a *call* comes through this:
+        ``classify``'s policy argument and ``_no_reviewer_reason``'s branch both.
+
+        ``_uncontained_autonomy`` and the two prompt builders read ``self.policy``
+        directly and are not exceptions to that. They ask a question about the
+        session rather than about a call -- whether it may start, and what its
+        agents are told before any of them exists -- and there is no node to scope
+        them to at the moment they run.
+
+        This inverts ``planning/2026-08-11`` §4's "sub-agents do not inherit it",
+        for this dial only, on the reasoning ``planning/2026-09-03`` §8 records:
+        sandbox configuration is per CLI process and sub-agents share the parent's,
+        so under containment each additional agent has the same bounded reach as the
+        first. What fan-out still multiplies is volume, and the bound on volume is
+        ``subagent_cap`` -- which no policy can widen, because the at-cap deny in
+        ``_gate_tool_use`` runs ahead of ``classify``.
+        """
+        return self.policy
 
     def _expect_spawn(self, spawn: bool, tool_use_id: str, tool_input: Mapping[str, Any]) -> None:
         """
@@ -1489,7 +1790,7 @@ class AgentSession:
         return {
             role.name: AgentDefinition(
                 description=role.description,
-                prompt=worker_prompt(role, self.brief),
+                prompt=worker_prompt(role, self.brief, self.policy),
                 tools=role.tool_list(),
                 # "inherit" rather than self.model: a role that does not ask for a
                 # model should run on whatever the session was launched with, not on
@@ -1507,11 +1808,42 @@ class AgentSession:
         Appended rather than replacing it: the preset carries the tool conventions
         and the environment description this agent still needs, and a bare string
         here would throw all of that away to say four paragraphs about delegation.
+
+        The policy is passed because several of the briefing's sentences are about
+        who is watching, and under ``AUTONOMOUS`` nobody is. An agent told its
+        messages reach a person writes for an audience that does not exist and can
+        wait for a reply nobody will prompt -- so the gate's answer and the prompt's
+        account of it have to come from the same value.
         """
-        briefing = lead_briefing(self.template)
+        briefing = lead_briefing(self.template, self.policy)
         if not briefing:
             return None
         return {"type": "preset", "preset": "claude_code", "append": briefing}
+
+    def _stderr_line(self, line: str) -> None:
+        """
+        One line of the CLI's own error stream, put where the operator is looking.
+
+        The sandbox's failure to start is the line this exists for. On Linux the CLI
+        sandbox needs ``bubblewrap`` and ``socat``; a CLI that does not honour
+        ``failIfUnavailable`` warns on stderr and runs *unsandboxed* (§8a.2), and the
+        version floor cannot establish that the key is honoured because no floor for it
+        is documented (§11 U2). Seeing the warning is the mitigation that does not
+        depend on the key.
+
+        Runs on the asyncio thread, inside the transport's stderr reader task.
+        ``Transcript.append`` takes the buffer's lock (I7), so a UI thread reading a
+        frame mid-line gets a consistent prefix rather than a torn one -- which is why
+        this may write to the transcript directly rather than going through an intent.
+        Nothing here may block or do IO: the reader task is awaiting this call and the
+        rest of the stream is queued on the pipe behind it.
+
+        The transport frames the stream into lines, strips each one's trailing
+        whitespace and drops the empties, so the newline is added back here. Without it
+        the segment coalescing that keeps a token stream cheap would run a whole run of
+        diagnostics together into one line.
+        """
+        self.transcript.append(SegmentKind.ERROR, f"{line}\n")
 
     def _options(self) -> ClaudeAgentOptions:
         # Exactly one of the two id arguments, never both, and `fork_session` left
@@ -1538,6 +1870,28 @@ class AgentSession:
             session_id=None if self.resume is not None else self.session_id,
             agents=self._team(),
             system_prompt=self._system_prompt(),
+            # §8's containment, or None. None is not a value the transport can see:
+            # `_build_settings_value` branches on `settings is not None` and returns
+            # early, so `--settings` is absent from argv and an uncontained launch is
+            # built exactly as it was before this field existed.
+            settings=self.containment,
+            #
+            # `sandbox` is deliberately absent, and not merely because None is its
+            # default. `_build_settings_value` ASSIGNS rather than merges --
+            # `settings_obj["sandbox"] = self._options.sandbox` -- and the string above
+            # carries exactly one top-level key, so setting the typed field here would
+            # delete the whole containment with no error. It could not carry a
+            # replacement either: `SandboxSettings` has no `failIfUnavailable` or
+            # `credentials`, and `SandboxNetworkConfig` no `strictAllowlist`
+            # (pptmstr/sandbox.py).
+            #
+            # Piping the CLI's error stream is what this field is for: the transport
+            # passes `stderr=PIPE` only when a callback is set, so without one every
+            # diagnostic the CLI writes goes to the terminal pptmstr was launched from
+            # and never reaches the window the operator is watching. Set on every
+            # session rather than only contained ones -- a failure the operator cannot
+            # see is not a property of the containment configuration.
+            stderr=self._stderr_line,
             # Deny anything not explicitly allowed by the hook. PreToolUse runs on
             # every tool call regardless of mode and its deny is final, which is the
             # property a gate needs.
@@ -1554,6 +1908,38 @@ class AgentSession:
             # manage -- the CLI reaches these handlers back over the same control
             # channel it uses for hooks.
             mcp_servers={SERVER_NAME: build_server(self)},
+            # The bus and nothing else. Without this the CLI also loads whatever the
+            # operator's project `.mcp.json`, user settings and plugins name, and this
+            # process cannot enumerate those or even see that they exist.
+            #
+            # What that costs is narrower than "any tool" and worse than it sounds.
+            # An unknown server's own tools are `mcp__<server>__<name>` and reach
+            # `classify`'s fail-closed fallthrough, so they park or are denied. But
+            # `ReadMcpResource` and `ListMcpResources` are in `_AUTO` and auto-approve
+            # at *every* policy -- so a resource on a server this build has never heard
+            # of is readable with no human asked, under STRICT as much as under
+            # AUTONOMOUS. An allowlist that admits whatever a config file adds is the
+            # thing `approval.py`'s own docstring refuses to be.
+            #
+            # On every session and not only contained ones, the same reasoning
+            # `stderr` above is set on every session: what this closes is not a
+            # property of the containment configuration, and a session nobody
+            # contained still has a gate that is supposed to know what it admits.
+            #
+            # The cost is real and belongs here rather than in a commit message: an
+            # operator who deliberately configured a project-scope MCP server no
+            # longer has it inside pptmstr, and the only way back is passing it in
+            # `mcp_servers` above, which nothing yet offers a surface for. That is a
+            # capability removed from a configuration this process cannot read, which
+            # is the trade -- and it is the same trade in the other direction that
+            # made it worth removing.
+            #
+            # The bus survives because it travels the channel this restricts *to*:
+            # the SDK passes an in-process server through `--mcp-config` like any
+            # other, as `{"type": "sdk", "name": ...}` with the instance stripped
+            # (claude_agent_sdk 0.2.134, `_internal/transport/subprocess_cli.py`), and
+            # `--strict-mcp-config` keeps exactly what `--mcp-config` carried.
+            strict_mcp_config=True,
             hooks={
                 "PreToolUse": [HookMatcher(hooks=[self._pre_tool_use], timeout=APPROVAL_TIMEOUT_S)],
                 # Both, not either. A tool that fails fires only PostToolUseFailure and
@@ -1587,12 +1973,18 @@ class AgentSession:
                 started_at=time.monotonic(),
                 topic="connecting",
                 cwd=self.cwd,
-                repo_root=self.repo_root,
+                session_base=self.session_base,
                 # Announced here rather than left on the session: this is the only
                 # emitter that knows the template, and the UI cannot reach into an
                 # AgentSession to ask. Same for the brief.
                 template=self.template.name,
                 brief=self.brief,
+                # The same value ``_policy_for`` hands the classifier, from the same
+                # attribute, so the record an operator reads and the allowlist the
+                # gate applies cannot drift. Sub-agents are not announced with one:
+                # they inherit in the store, which is the rule ``_policy_for``
+                # already implements on the gate's side.
+                policy=self.policy,
                 transcript=self.transcript,
             )
         )
@@ -1689,6 +2081,32 @@ class AgentSession:
             # loop that owns it.
             task.cancel()
 
+    def _uncontained_autonomy(self) -> str | None:
+        """
+        Why this session may not start, or None when it may. See
+        ``UncontainedAutonomy`` for the argument; this is the predicate, kept apart
+        from the raise so the three combinations can be exercised without starting
+        anything.
+
+        The test is for containment being absent rather than for it being
+        well-formed. Whether the CLI honours the keys inside it is a different
+        question, already asked at a different layer: ``app._launch`` refuses a
+        contained launch whose CLI version cannot be confirmed to support them, and
+        §8a.2's failure mode -- a CLI that warns on stderr and runs unsandboxed
+        anyway -- is not visible from here at all.
+        """
+        if self.policy is Policy.AUTONOMOUS and self.containment is None:
+            return (
+                "this session is under the autonomous policy with no containment "
+                "configured. The policy releases every reviewed tool to run "
+                "unattended and the sandbox is what bounds where a released Bash "
+                "reaches, so one without the other is half an arrangement nobody "
+                "chose. Refused rather than started under the ordinary gate, "
+                "because a launch that quietly runs under a policy other than the "
+                "one it was given is the worse of the two failures."
+            )
+        return None
+
     async def run(self) -> None:
         """
         Connect, send the opening task, then stay connected for further turns.
@@ -1709,6 +2127,15 @@ class AgentSession:
         failure: AgentFinished | None = None
 
         try:
+            # Ahead of the client, so a refused session never spawns a CLI, and
+            # behind `announce`, so the refusal lands on a row the operator can see
+            # rather than on a node the tree never heard of. Raised rather than
+            # returned: the handler below already turns a fatal into the log line,
+            # the transcript line and the FAILED record, and a second reporting
+            # path for this one would be a second thing to keep in step.
+            uncontained = self._uncontained_autonomy()
+            if uncontained is not None:
+                raise UncontainedAutonomy(uncontained)
             async with ClaudeSDKClient(options=self._options()) as client:
                 self._client = client
                 await self.send(self.task)

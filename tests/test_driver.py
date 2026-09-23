@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import time
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
 from claude_agent_sdk import (
     AssistantMessage,
     RateLimitEvent,
@@ -28,6 +30,7 @@ from claude_agent_sdk import (
     UserMessage,
 )
 
+from pptmstr.approval import Policy
 from pptmstr.bridge import Bridge
 from pptmstr.driver import AgentSession, Translator, _tool_topic
 from pptmstr.intents import (
@@ -2801,7 +2804,7 @@ def test_a_relaunch_keeps_the_brief_the_session_was_launched_with() -> None:
     assert (spec.task, spec.model, spec.cwd) == ("audit the parser", "claude-sonnet-5", "/srv/repo")
 
 
-def test_a_record_with_no_cwd_relaunches_at_the_repo_root() -> None:
+def test_a_record_with_no_cwd_relaunches_in_this_directory() -> None:
     """A blank cwd is the FLEET rail's grouping key, so None must not become ""."""
     from pptmstr.model import AgentRecord
 
@@ -3139,3 +3142,909 @@ def test_a_lead_with_no_workers_never_claims_to_be_supervising(monkeypatch) -> N
     states = _states_of(session, seen)
     assert AgentState.SUPERVISING not in states
     assert AgentState.AWAITING_INPUT in states
+
+
+# -- containment, and a sandbox that fails to start --------------------------------
+
+
+def test_an_uncontained_launch_is_handed_no_settings_at_all() -> None:
+    """
+    None has to reach the transport as an absent flag, not as a value. It does:
+    ``_build_settings_value`` branches on ``settings is not None`` and returns before
+    it can serialise anything, so a launch that asks for no containment builds the
+    argv it built before the field existed.
+    """
+    options = AgentSession(Bridge(), task="t")._options()
+
+    assert options.settings is None
+    assert options.sandbox is None
+
+
+def test_the_containment_configuration_reaches_the_settings_field_verbatim() -> None:
+    from pptmstr.sandbox import containment_settings
+
+    raw = containment_settings()
+    options = AgentSession(Bridge(), task="t", containment=raw)._options()
+
+    # Verbatim, not re-serialised: the string is the only form three of §8's keys have,
+    # since the SDK's types cannot express them and a round trip through them would
+    # drop exactly those.
+    assert options.settings == raw
+
+
+def test_the_typed_sandbox_field_is_left_unset_so_the_containment_survives() -> None:
+    """
+    The load-bearing assertion is not ``sandbox is None`` -- that is its default and a
+    test of it passes whatever this session does. It is that the settings value the
+    transport actually builds from these options still carries §8's four keys.
+
+    ``_build_settings_value`` assigns rather than merges, and
+    ``containment_settings()`` emits exactly one top-level key, so a session that set
+    the typed field as well would arrive here having silently deleted all four.
+    """
+    from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
+
+    from pptmstr.sandbox import containment_settings
+
+    options = AgentSession(Bridge(), task="t", containment=containment_settings())._options()
+    assert options.sandbox is None
+
+    built = SubprocessCLITransport("", options)._build_settings_value()
+    assert built is not None
+    sandbox = json.loads(built)["sandbox"]
+    assert sandbox["failIfUnavailable"] is True
+    assert sandbox["allowUnsandboxedCommands"] is False
+    assert sandbox["autoAllowBashIfSandboxed"] is False
+    assert sandbox["network"]["strictAllowlist"] is True
+
+
+def test_the_clis_error_stream_is_piped_into_the_transcript() -> None:
+    """
+    Driven through the callback the options actually carry, not through the method by
+    name: the transport pipes stderr only when ``options.stderr`` is set, so a handler
+    nothing is wired to would leave the warning on the terminal exactly as before.
+    """
+    session = AgentSession(Bridge(), task="t")
+    callback = session._options().stderr
+    assert callback is not None
+
+    callback("bwrap: command not found; continuing without sandbox")
+
+    assert "bwrap: command not found" in session.transcript.text()
+    kinds = {segment.kind for segment in session.transcript.segments()}
+    assert kinds == {SegmentKind.ERROR}
+
+
+def test_the_error_stream_is_piped_even_when_nothing_is_contained() -> None:
+    """
+    Deliberately unconditional. A diagnostic the operator cannot see is a property of
+    this application rather than of the containment configuration, and the launch most
+    likely to produce one is the launch that asked for containment and did not get it
+    -- which from here is indistinguishable from a launch that asked for none.
+    """
+    assert AgentSession(Bridge(), task="t")._options().stderr is not None
+
+
+def test_consecutive_diagnostics_stay_on_their_own_lines() -> None:
+    """
+    The transport hands over rstripped lines and drops the empty ones, so nothing
+    upstream restores the separator. ERROR segments coalesce, so a missing newline
+    would run a whole run of diagnostics into one unreadable line.
+    """
+    session = AgentSession(Bridge(), task="t")
+    callback = session._options().stderr
+    assert callback is not None
+
+    callback("first")
+    callback("second")
+
+    assert session.transcript.text() == "first\nsecond\n"
+
+
+def test_the_transport_delivers_whole_lines_to_the_callback() -> None:
+    """
+    ``_stderr_line``'s docstring asserts three facts about the SDK: the stream is
+    framed into lines, each is rstripped, and empty ones are dropped. It restores the
+    newline on that basis, so the assertion is load-bearing rather than descriptive.
+
+    Driven through the transport's own ``_handle_stderr`` against a stand-in stream,
+    because no part of those three is visible from the callback's own arguments -- a
+    test that called the callback directly would pass just as well against a transport
+    that handed over raw 64KiB chunks.
+    """
+    from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
+
+    session = AgentSession(Bridge(), task="t")
+    transport = SubprocessCLITransport("", session._options())
+
+    class _Chunks:
+        """Arbitrary chunk boundaries, which is what anyio's stream actually yields."""
+
+        async def __aiter__(self):
+            for chunk in ("bwrap: command ", "not found\n\nrunning unsandboxed\n"):
+                yield chunk
+
+    transport._stderr_stream = _Chunks()  # type: ignore[assignment]
+    asyncio.run(transport._handle_stderr())
+
+    assert session.transcript.text() == "bwrap: command not found\nrunning unsandboxed\n"
+
+
+# -- the gate's policy (2026-09-03 §5, §7, §8) -------------------------------------
+#
+# tests/test_approval.py already establishes what each policy classifies. These are
+# about the wire: that a policy set on a session is the one the gate measures with,
+# for the root agent and for its sub-agents, and that the sub-agent cap stays ahead
+# of it.
+
+
+def _spy_on_classify(monkeypatch) -> list[tuple[str, Policy]]:
+    """
+    Record (tool_name, policy) for every classification the gate makes, answering
+    exactly as the real classifier does.
+
+    Delegating rather than returning a canned Disposition is what lets these tests
+    assert the decision as well as the argument: a gate that passed the policy and
+    then ignored the answer would satisfy the argument assertion on its own.
+    """
+    from pptmstr import driver as driver_mod
+
+    seen: list[tuple[str, Policy]] = []
+    real = driver_mod.classify
+
+    def spy(tool_name, tool_input, policy=Policy.STRICT):
+        seen.append((tool_name, policy))
+        return real(tool_name, tool_input, policy)
+
+    monkeypatch.setattr(driver_mod, "classify", spy)
+    return seen
+
+
+def _headless_bash(session, agent_id: str | None = None) -> dict:
+    """
+    One Bash call through the real gate path, with no operator attached.
+
+    Headless is what makes the decision readable without a bridge and an approver:
+    a Bash call the policy does not release is denied for want of an operator rather
+    than parked, so allow-versus-deny is exactly the policy's answer.
+    """
+    return _decision(
+        asyncio.run(
+            session._pre_tool_use(_gate_input("Bash", {"command": "ls"}, agent_id), None, None)
+        )
+    )
+
+
+def test_a_session_that_names_no_policy_is_measured_against_strict(monkeypatch) -> None:
+    """
+    The OFF path, and §5 calls it the whole of the OFF-path evidence: a session built
+    the way every caller builds one today reaches the classifier with STRICT.
+    """
+    seen = _spy_on_classify(monkeypatch)
+    session = AgentSession(Bridge(), task="lead", interactive=False)
+
+    assert _headless_bash(session)["permissionDecision"] == "deny"
+    assert seen == [("Bash", Policy.STRICT)]
+
+
+def test_the_policy_a_session_was_built_with_reaches_the_classifier(monkeypatch) -> None:
+    """
+    The thing nothing pinned before: every classify call site passed two positional
+    arguments, so a policy could be correct and still be measured against nothing.
+    """
+    seen = _spy_on_classify(monkeypatch)
+    session = AgentSession(Bridge(), task="lead", policy=Policy.AUTONOMOUS, interactive=False)
+
+    assert _headless_bash(session)["permissionDecision"] == "allow"
+    assert seen == [("Bash", Policy.AUTONOMOUS)]
+
+
+def test_a_sub_agent_is_under_its_sessions_policy_deliberately(monkeypatch) -> None:
+    """
+    §8 inverts 2026-08-11 §4's "sub-agents do not inherit it" for this dial, on the
+    reasoning that containment is per CLI process and sub-agents share the parent's.
+
+    Named here because one AgentSession serves every sub-agent's PreToolUse, so the
+    behaviour would be the same if it were an accident of where the field is stored.
+    `_policy_for` takes the agent_id and declines to branch on it; this is the test
+    that says so out loud.
+    """
+    seen = _spy_on_classify(monkeypatch)
+    session = AgentSession(Bridge(), task="lead", policy=Policy.AUTONOMOUS, interactive=False)
+
+    assert _headless_bash(session, agent_id="agent-qa")["permissionDecision"] == "allow"
+    assert seen == [("Bash", Policy.AUTONOMOUS)]
+
+
+def test_a_sub_agent_of_a_strict_session_is_strict_too(monkeypatch) -> None:
+    """
+    Inheritance is the session's policy whichever one it is, not a release valve that
+    only ever widens. Without this the test above passes against a gate that hands
+    sub-agents AUTONOMOUS unconditionally.
+    """
+    seen = _spy_on_classify(monkeypatch)
+    session = AgentSession(Bridge(), task="lead", interactive=False)
+
+    assert _headless_bash(session, agent_id="agent-qa")["permissionDecision"] == "deny"
+    assert seen == [("Bash", Policy.STRICT)]
+
+
+def test_the_cap_refuses_a_spawn_before_any_policy_is_consulted(monkeypatch) -> None:
+    """
+    §7's ordering invariant, pinned against the policy rather than against parking:
+    the cap is the one bound a policy cannot widen, and it is only that because the
+    deny sits ahead of classify rather than inside it.
+
+    The existing cap tests would all pass with the two swapped -- the call is denied
+    either way -- so the assertion that carries this one is that the classifier was
+    never asked.
+    """
+    seen = _spy_on_classify(monkeypatch)
+    session = AgentSession(
+        Bridge(), task="lead", policy=Policy.AUTONOMOUS, subagent_cap=1, interactive=False
+    )
+    asyncio.run(_fire_start(session, "a-1"))
+
+    spec = _decision(
+        asyncio.run(
+            session._pre_tool_use(_gate_input("Agent", {"subagent_type": "builder"}), None, None)
+        )
+    )
+
+    assert spec["permissionDecision"] == "deny"
+    assert "cap is 1" in spec["permissionDecisionReason"]
+    assert seen == []
+
+
+def _drain_spawns(bridge: Bridge) -> list:
+    from pptmstr.intents import AgentSpawned
+
+    for _ in range(200):
+        spawns = [i for i in bridge.drain() if isinstance(i, AgentSpawned)]
+        if spawns:
+            return spawns
+        time.sleep(0.005)
+    return []
+
+
+def test_the_announce_carries_the_policy_the_gate_will_apply() -> None:
+    """
+    The record and the gate read the same attribute, asserted together on one session
+    so they cannot be right separately and disagree. An operator supervising several
+    sessions has only the record to tell which are under-gated; a record saying STRICT
+    beside a gate auto-approving Bash is the failure §6.3 exists to prevent, and it is
+    invisible from either half alone.
+
+    `AgentSession` can hold the policy and `announce` can still omit it -- "plumbed
+    through" and "works end to end" are different claims (STYLE.md §2).
+    """
+    bridge = Bridge()
+    bridge.start()
+    try:
+        session = AgentSession(bridge, "t", policy=Policy.AUTONOMOUS, interactive=False)
+        session.announce()
+        spawns = _drain_spawns(bridge)
+    finally:
+        bridge.stop()
+
+    store = Store()
+    for intent in spawns:
+        store.apply(intent)
+
+    assert store.snapshot().nodes[session.node_id].policy is Policy.AUTONOMOUS
+    assert _headless_bash(session)["permissionDecision"] == "allow"
+
+
+def test_a_session_that_names_no_policy_announces_strict() -> None:
+    """
+    The default path, which the AUTONOMOUS case alone cannot distinguish from an
+    announce that hard-codes the wider value.
+    """
+    bridge = Bridge()
+    bridge.start()
+    try:
+        session = AgentSession(bridge, "t", interactive=False)
+        session.announce()
+        spawns = _drain_spawns(bridge)
+    finally:
+        bridge.stop()
+
+    assert [s.policy for s in spawns] == [Policy.STRICT]
+
+
+# -- the autonomous policy: nothing parks, and writes stay in the region -------
+
+
+def _autonomous(tmp_path: Path, **kwargs) -> AgentSession:
+    """
+    A session under the autonomous policy with an operator attached.
+
+    ``interactive=True`` is the whole point of the helper and not a default taken
+    by accident: headless already denies everything that needs approval, so a
+    no-park claim measured on a headless session would pass against a gate that
+    had no autonomous branch at all.
+    """
+    kwargs.setdefault("cwd", str(tmp_path))
+    return AgentSession(Bridge(), task="lead", policy=Policy.AUTONOMOUS, interactive=True, **kwargs)
+
+
+def _gate(session: AgentSession, tool_name: str, tool_input: dict, agent_id=None) -> dict:
+    return _decision(
+        asyncio.run(session._pre_tool_use(_gate_input(tool_name, tool_input, agent_id), None, None))
+    )
+
+
+def _forbid_parking(monkeypatch) -> None:
+    async def explode(*args, **kwargs):
+        raise AssertionError(f"the gate parked: {args!r}")
+
+    monkeypatch.setattr(AgentSession, "_park", explode)
+
+
+def test_nothing_parks_under_the_autonomous_policy(tmp_path: Path, monkeypatch) -> None:
+    """
+    The invariant rather than an example. Every name this build classifies, plus
+    names it does not: a future SDK tool, an MCP tool from a server it has never
+    seen, a bus name this build does not have, and the empty string.
+
+    A park here is not a degraded mode. `APPROVAL_TIMEOUT_S` is six hours and the
+    CLI is blocked on the hook's answer for all of it, so one reachable path makes
+    the session hang rather than run unattended -- which is why this enumerates the
+    sets instead of sampling them, and reads them off `approval` so a tool added
+    there is swept in without anyone remembering to add it here.
+    """
+    from pptmstr import approval
+
+    _forbid_parking(monkeypatch)
+    session = _autonomous(tmp_path)
+    names = [
+        *sorted(approval._AUTO | approval._REVIEW | approval._BUS_AUTO),
+        "SomeFutureTool",
+        "mcp__other_server__do_thing",
+        "mcp__pptmstr__invent_a_task",
+        "",
+    ]
+
+    for name in names:
+        # An inside-the-region path so the write tools are answered by the policy
+        # rather than by the confinement; either answer is a decision, and this way
+        # the allow half of the sweep is exercised too.
+        args = {"file_path": str(tmp_path / "f.py"), "notebook_path": str(tmp_path / "n.ipynb")}
+        assert _gate(session, name, args)["permissionDecision"] in ("allow", "deny"), name
+
+
+def test_an_unrecognised_tool_is_denied_for_the_mode_not_for_a_missing_operator(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """
+    The two ways to have no reviewer say different things on purpose. "No operator
+    is attached" tells an agent the deployment was wrong and the same call would
+    have run elsewhere; under this mode the operator is attached and has said in
+    advance that they will not be asked, so the agent should stop looking for a
+    human and pick another tool.
+    """
+    _forbid_parking(monkeypatch)
+    spec = _gate(_autonomous(tmp_path), "SomeFutureTool", {})
+
+    assert spec["permissionDecision"] == "deny"
+    reason = spec["permissionDecisionReason"]
+    assert "unattended by choice" in reason
+    assert "retrying will not change that" in reason
+    assert "no operator is attached" not in reason
+
+
+def test_a_strict_session_with_an_operator_still_parks(tmp_path: Path, monkeypatch) -> None:
+    """
+    The ordering the new branch could have broken by sitting one line too early:
+    STRICT with an operator attached is still a park, and the autonomous deny is
+    reached only under the autonomous policy.
+    """
+    parked: list[str] = []
+
+    async def record(self, tool_name, *args, **kwargs):
+        parked.append(tool_name)
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": "deny"}}
+
+    monkeypatch.setattr(AgentSession, "_park", record)
+    session = AgentSession(Bridge(), task="lead", cwd=str(tmp_path), interactive=True)
+
+    _gate(session, "Write", {"file_path": str(tmp_path / "a.py"), "content": "x"})
+
+    assert parked == ["Write"]
+
+
+def test_an_auto_approved_write_inside_the_region_runs(tmp_path: Path) -> None:
+    (tmp_path / "pkg").mkdir()
+    spec = _gate(
+        _autonomous(tmp_path), "Write", {"file_path": str(tmp_path / "pkg" / "a.py"), "content": ""}
+    )
+
+    assert spec["permissionDecision"] == "allow"
+
+
+def test_a_relative_write_is_measured_from_the_sessions_directory(tmp_path: Path) -> None:
+    """
+    A relative ``file_path`` means the agent's directory, not pptmstr's. Resolving
+    it against this process's cwd would measure the write against the wrong tree
+    and answer no for an ordinary in-region write -- or yes for an escape, if the
+    two directories happened to nest the other way.
+    """
+    session = _autonomous(tmp_path)
+
+    assert _gate(session, "Write", {"file_path": "a.py"})["permissionDecision"] == "allow"
+    assert _gate(session, "Write", {"file_path": "../a.py"})["permissionDecision"] == "deny"
+
+
+def test_a_write_outside_the_region_is_denied_and_told_where_the_region_is(
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path.parent / "elsewhere.py"
+    spec = _gate(_autonomous(tmp_path / "work"), "Write", {"file_path": str(outside)})
+
+    assert spec["permissionDecision"] == "deny"
+    # The path it may not write and the region it may are both named: a refusal
+    # that says only "denied" is one the agent answers by trying a variation.
+    assert str(outside) in spec["permissionDecisionReason"]
+    assert str(tmp_path / "work") in spec["permissionDecisionReason"]
+
+
+def test_a_symlink_out_of_the_region_is_followed(tmp_path: Path) -> None:
+    """
+    The escape that a string comparison misses. The link is inside the region by
+    every spelling test; what it names is not, and the write lands where it points.
+    """
+    region = tmp_path / "work"
+    region.mkdir()
+    (tmp_path / "outside").mkdir()
+    (region / "door").symlink_to(tmp_path / "outside")
+
+    spec = _gate(_autonomous(region), "Write", {"file_path": str(region / "door" / "a.py")})
+
+    assert spec["permissionDecision"] == "deny"
+
+
+def test_a_sibling_named_after_the_region_is_not_inside_it(tmp_path: Path) -> None:
+    """
+    ``/src/proj-scratch`` has ``/src/proj`` as a string prefix and is a different
+    tree. ``lies_inside_checkout`` compares components, and this is the test that
+    says the gate uses it rather than a prefix of its own.
+    """
+    region = tmp_path / "proj"
+    region.mkdir()
+    (tmp_path / "proj-scratch").mkdir()
+
+    spec = _gate(_autonomous(region), "Write", {"file_path": str(tmp_path / "proj-scratch" / "a")})
+
+    assert spec["permissionDecision"] == "deny"
+
+
+def test_a_home_relative_write_is_expanded_before_it_is_measured(tmp_path: Path) -> None:
+    """
+    ``~/x`` is not an absolute path, so joining it to the region unexamined would
+    place it in a directory literally named ``~`` inside the region and allow it.
+    Whether the write tool expands it is the CLI's business; the gate cannot afford
+    to be the one that assumed it does not.
+    """
+    spec = _gate(_autonomous(tmp_path), "Write", {"file_path": "~/escaped.py"})
+
+    assert spec["permissionDecision"] == "deny"
+
+
+def test_a_path_the_filesystem_cannot_place_is_refused(tmp_path: Path) -> None:
+    """
+    A symlink loop leaves the filesystem unable to say where the path is. This is
+    the one case where ``lies_inside_checkout`` answers *inside* -- fail-closed for
+    the question of whether pptmstr's own source is exposed, fail-open for this one
+    -- so the gate resolves first and refuses a path with no location, rather than
+    taking an answer pointing the wrong way.
+    """
+    region = tmp_path / "work"
+    region.mkdir()
+    (region / "a").symlink_to(region / "b")
+    (region / "b").symlink_to(region / "a")
+
+    spec = _gate(_autonomous(region), "Write", {"file_path": str(region / "a")})
+
+    assert spec["permissionDecision"] == "deny"
+
+
+def test_a_write_tool_whose_target_cannot_be_read_is_refused(tmp_path: Path) -> None:
+    """
+    Fail closed on the case the confinement exists for: a released write tool whose
+    destination this build cannot extract cannot be shown to write inside the
+    region, and "cannot be shown" has to mean no.
+    """
+    spec = _gate(_autonomous(tmp_path), "Write", {"content": "x"})
+
+    assert spec["permissionDecision"] == "deny"
+    assert "no readable target path" in spec["permissionDecisionReason"]
+
+
+def test_notebook_edit_is_measured_on_its_own_argument_name(tmp_path: Path) -> None:
+    """
+    ``NotebookEdit`` names its target ``notebook_path`` where the other three use
+    ``file_path``. A confinement that read one key would let this one through, and
+    it is in the released set with the others.
+    """
+    session = _autonomous(tmp_path)
+    inside = {"notebook_path": str(tmp_path / "n.ipynb")}
+    outside = {"notebook_path": str(tmp_path.parent / "n.ipynb")}
+
+    assert _gate(session, "NotebookEdit", inside)["permissionDecision"] == "allow"
+    assert _gate(session, "NotebookEdit", outside)["permissionDecision"] == "deny"
+
+
+def test_a_sub_agents_write_is_measured_against_the_sessions_region(tmp_path: Path) -> None:
+    """
+    One `AgentSession` serves every sub-agent's PreToolUse, so the region is the
+    session's for every node it gates. A sub-agent inherits `cwd` in the store too,
+    but the gate does not read the record -- inheritance there and confinement here
+    are separate mechanisms and this pins the one that refuses the write.
+    """
+    session = _autonomous(tmp_path)
+    outside = {"file_path": str(tmp_path.parent / "a.py")}
+
+    assert _gate(session, "Write", outside, "agent-qa")["permissionDecision"] == "deny"
+
+
+def test_the_region_is_the_sessions_cwd_and_not_its_reporting_base(tmp_path: Path) -> None:
+    """
+    `cwd` and `session_base` are the same directory for a session launched today,
+    so only a session built with them apart can say which one the gate uses. It
+    must be `cwd`: that is where the CLI runs, and so the region the sandbox bounds
+    `Bash` to. `session_base` is the units a write is *reported* in, and a
+    book-keeping choice may not decide what may be written.
+    """
+    work = tmp_path / "work"
+    work.mkdir()
+    reporting = tmp_path / "reported"
+    reporting.mkdir()
+    session = _autonomous(work, session_base=str(reporting))
+
+    assert _gate(session, "Write", {"file_path": str(work / "a")})["permissionDecision"] == "allow"
+    assert (
+        _gate(session, "Write", {"file_path": str(reporting / "a")})["permissionDecision"] == "deny"
+    )
+
+
+def test_bash_is_left_to_the_sandbox(tmp_path: Path) -> None:
+    """
+    The confinement covers the four tools that run inside the CLI process, and
+    stops there. `Bash` is bounded by the CLI's own sandbox, whose writable region
+    is the same directory -- and classifying the contents of a command was closed
+    by `planning/2026-09-03` §3 on the ground that the parser becomes the security
+    property. A gate that half-read commands would be that parser.
+    """
+    spec = _gate(_autonomous(tmp_path), "Bash", {"command": f"touch {tmp_path.parent}/x"})
+
+    assert spec["permissionDecision"] == "allow"
+
+
+def test_a_strict_session_is_not_measured_against_a_region(tmp_path: Path) -> None:
+    """
+    The OFF path stays what it was. A `Write` outside the directory under STRICT is
+    refused for the reason it has always been refused -- there is nobody to approve
+    it -- and not by the new confinement, which never runs because no write tool
+    reaches the auto-approve branch under STRICT.
+    """
+    session = AgentSession(Bridge(), task="lead", cwd=str(tmp_path), interactive=False)
+
+    spec = _gate(session, "Write", {"file_path": str(tmp_path.parent / "a.py")})
+
+    assert spec["permissionDecision"] == "deny"
+    assert "no operator is attached" in spec["permissionDecisionReason"]
+
+
+def _briefing_spy(monkeypatch) -> dict[str, list]:
+    """
+    Record the policy each prompt builder is called with, answering as the real one
+    does. A spy rather than a comparison of the two texts: `lead_briefing` is free
+    to make the same text for both policies -- it does exactly that for a template
+    with no roles -- and a test comparing outputs would then pass against a session
+    that passed the wrong policy, or none.
+    """
+    from pptmstr import driver as driver_mod
+
+    seen: dict[str, list] = {"lead": [], "worker": []}
+    real_lead, real_worker = driver_mod.lead_briefing, driver_mod.worker_prompt
+
+    def lead(template, policy=Policy.STRICT):
+        seen["lead"].append(policy)
+        return real_lead(template, policy)
+
+    def worker(role, brief=None, policy=Policy.STRICT):
+        seen["worker"].append(policy)
+        return real_worker(role, brief, policy)
+
+    monkeypatch.setattr(driver_mod, "lead_briefing", lead)
+    monkeypatch.setattr(driver_mod, "worker_prompt", worker)
+    return seen
+
+
+def _two_role_team() -> WorkTemplate:
+    return WorkTemplate(
+        name="t",
+        description="d",
+        lead_prompt="p",
+        roles=(
+            Role(name="builder", description="d", prompt="p"),
+            Role(name="reviewer", description="d", prompt="p"),
+        ),
+    )
+
+
+def test_the_session_prompts_are_built_under_the_policy_the_gate_applies(monkeypatch) -> None:
+    """
+    The prompt and the gate have to agree about who is watching. Under AUTONOMOUS
+    nothing parks and no message reaches a person, and an agent told otherwise
+    writes for an audience that does not exist -- or waits for a reply a human was
+    supposed to prompt. Both halves of the team are covered because a worker never
+    reads the lead's briefing: `worker_prompt` is what a builder is told, and it is
+    builders that hit the write-region denial.
+    """
+    seen = _briefing_spy(monkeypatch)
+    session = AgentSession(
+        Bridge(), task="lead", template=_two_role_team(), policy=Policy.AUTONOMOUS
+    )
+
+    session._system_prompt()
+    session._team()
+
+    assert seen["lead"] == [Policy.AUTONOMOUS]
+    assert seen["worker"] == [Policy.AUTONOMOUS, Policy.AUTONOMOUS]
+
+
+def test_a_session_that_names_no_policy_is_briefed_as_strict(monkeypatch) -> None:
+    """
+    The default path, which the AUTONOMOUS case alone cannot distinguish from a
+    wiring that hands both prompt builders whatever value is to hand.
+    """
+    seen = _briefing_spy(monkeypatch)
+    session = AgentSession(Bridge(), task="lead", template=_two_role_team())
+
+    session._system_prompt()
+    session._team()
+
+    assert seen["lead"] == [Policy.STRICT]
+    assert seen["worker"] == [Policy.STRICT, Policy.STRICT]
+
+
+def test_a_path_the_os_will_not_accept_is_refused_rather_than_raised(tmp_path: Path) -> None:
+    """
+    An embedded NUL raises `ValueError` from `Path.resolve`, and every path here
+    was written by a model. An exception out of the gate leaves `PreToolUse`
+    raising into the CLI's hook machinery, and what that does with a hook that
+    raised is unmeasured -- so the string that cannot be a path is refused here,
+    where the answer is this gate's to choose.
+    """
+    spec = _gate(_autonomous(tmp_path), "Write", {"file_path": str(tmp_path / "a\0b")})
+
+    assert spec["permissionDecision"] == "deny"
+
+
+# -- the policy and the sandbox start together or not at all ------------------
+
+
+def test_the_pair_is_checked_for_absence_at_every_combination() -> None:
+    """
+    Three combinations and only one of them refuses. The two that pass are what
+    makes this a check on the pair rather than a check on the policy: an
+    autonomous session with containment starts, and so does an ordinary one
+    without it, which is every session this application has ever run.
+    """
+    contained = "{}"
+    assert AgentSession(Bridge(), "t", policy=Policy.AUTONOMOUS)._uncontained_autonomy()
+    assert (
+        AgentSession(
+            Bridge(), "t", policy=Policy.AUTONOMOUS, containment=contained
+        )._uncontained_autonomy()
+        is None
+    )
+    assert AgentSession(Bridge(), "t")._uncontained_autonomy() is None
+    assert AgentSession(Bridge(), "t", containment=contained)._uncontained_autonomy() is None
+
+
+def test_an_uncontained_autonomous_session_refuses_to_start(monkeypatch) -> None:
+    """
+    The wiring, and the half that matters: the predicate is worth nothing if the
+    session starts anyway. `ClaudeSDKClient` is replaced with something that raises
+    on construction, so "no CLI was spawned" is asserted rather than inferred from
+    the absence of a subprocess in a test that never had one.
+
+    The refusal is reported the way every other fatal here is -- a FAILED record
+    carrying the reason, and the reason on the transcript -- because an operator
+    who ticked the box is owed the refusal in the place they are looking.
+    """
+
+    def explode(**_):
+        raise AssertionError("an uncontained autonomous session spawned a CLI")
+
+    monkeypatch.setattr("pptmstr.driver.ClaudeSDKClient", explode)
+    bridge = Bridge()
+    session = AgentSession(bridge, "t", policy=Policy.AUTONOMOUS)
+
+    asyncio.run(session.run())
+
+    store = Store()
+    store.apply_all(bridge.drain())
+    record = store.snapshot().nodes[session.node_id]
+    assert record.state is AgentState.FAILED
+    assert "no containment" in (record.error or "")
+    assert "no containment" in session.transcript.text()
+
+
+def test_a_contained_autonomous_session_is_not_refused(monkeypatch) -> None:
+    """
+    The other direction, which the refusal alone cannot distinguish from a guard
+    that refuses the policy outright. This one reaches the client.
+    """
+    reached: list[bool] = []
+
+    def explode(**_):
+        reached.append(True)
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr("pptmstr.driver.ClaudeSDKClient", explode)
+    session = AgentSession(Bridge(), "t", policy=Policy.AUTONOMOUS, containment="{}")
+
+    asyncio.run(session.run())
+
+    assert reached == [True]
+
+
+def test_a_padded_path_cannot_smuggle_an_absolute_target_into_the_region(
+    tmp_path: Path,
+) -> None:
+    """
+    Escape A. `Path(" /etc/passwd")` is *relative* -- its first component is a
+    space -- so an absolute-looking target with a leading space joined the region
+    and resolved inside it.
+
+    Refused rather than stripped, and the difference is the whole point: stripping
+    here names one file and the CLI names whichever its own reading produces, and
+    nothing has measured that the two agree. A spelling two readers resolve
+    differently is a spelling containment cannot be shown for, which is the rule
+    this function already applies to everything else it cannot place.
+    """
+    session = _autonomous(tmp_path)
+    padded = f" {tmp_path.parent}/escaped.txt"
+
+    spec = _gate(session, "Write", {"file_path": padded})
+
+    assert spec["permissionDecision"] == "deny"
+    assert "whitespace" in spec["permissionDecisionReason"]
+
+
+@pytest.mark.parametrize("pad", [" ", "\t", "\n", "\xa0", "  "])
+def test_no_padding_character_gets_a_different_answer(pad: str, tmp_path: Path) -> None:
+    """
+    The class rather than the character. The reviewer found the space; the rule is
+    that a target whose spelling is not its own stripped form is refused, and these
+    are the paddings `str.strip` removes -- including the non-breaking space, which
+    a reader would not see at all.
+    """
+    session = _autonomous(tmp_path)
+
+    inside = _gate(session, "Write", {"file_path": f"{pad}{tmp_path}/a.txt"})
+    trailing = _gate(session, "Write", {"file_path": f"{tmp_path}/a.txt{pad}"})
+
+    assert inside["permissionDecision"] == "deny", pad
+    assert trailing["permissionDecision"] == "deny", pad
+
+
+def test_a_decoy_argument_cannot_answer_for_the_key_the_tool_acts_on(tmp_path: Path) -> None:
+    """
+    Escape B, at the gate. A `NotebookEdit` naming a harmless `file_path` inside
+    the region and a `notebook_path` outside it was measured on the harmless one
+    and allowed.
+    """
+    session = _autonomous(tmp_path)
+    decoyed = {
+        "file_path": str(tmp_path / "harmless.txt"),
+        "notebook_path": str(tmp_path.parent / "escaped.ipynb"),
+    }
+
+    spec = _gate(session, "NotebookEdit", decoyed)
+
+    assert spec["permissionDecision"] == "deny"
+    assert "escaped.ipynb" in spec["permissionDecisionReason"]
+
+
+def test_the_policy_a_denial_names_comes_through_the_one_function_that_decides_it(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """
+    `_policy_for` is the single place a call's policy is decided, and its docstring
+    says per-node scoping would be a change there and nowhere else. That was false
+    while `_no_reviewer_reason` read the attribute directly: a per-node policy
+    would have classified one way and refused the other.
+
+    Scoping the spy to a node rather than asserting the deny text, because the two
+    readers agree today and only a disagreement between them would show up in the
+    text.
+    """
+    seen: list[str | None] = []
+    real = AgentSession._policy_for
+
+    def spy(self, agent_id):
+        seen.append(agent_id)
+        return real(self, agent_id)
+
+    monkeypatch.setattr(AgentSession, "_policy_for", spy)
+    session = _autonomous(tmp_path)
+
+    spec = _gate(session, "SomeFutureTool", {}, "agent-qa")
+
+    assert spec["permissionDecision"] == "deny"
+    # Once for classify's policy and once for the refusal, both naming the node.
+    assert seen == ["agent-qa", "agent-qa"]
+
+
+# -- the CLI loads the bus and no other MCP server --------------------------------
+
+
+def test_the_session_restricts_the_cli_to_the_servers_it_passes() -> None:
+    """
+    §8a item 4, which shipped unbuilt. Without this the CLI also loads whatever the
+    operator's project `.mcp.json`, user settings and plugins name -- a set this
+    process cannot enumerate or even see.
+
+    Not policy-scoped, and that is the decision rather than an oversight:
+    `ReadMcpResource` and `ListMcpResources` are in `approval._AUTO` and
+    auto-approve at every policy, so an unenumerable server's resources are
+    readable with no human asked under STRICT as much as under AUTONOMOUS.
+    """
+    session = AgentSession(Bridge(), task="lead")
+
+    assert session._options().strict_mcp_config is True
+
+
+def test_the_bus_is_passed_explicitly_so_the_restriction_keeps_it() -> None:
+    """
+    The pairing, asserted on one options object so the two cannot be right
+    separately and disagree. `strict_mcp_config` keeps only what `mcp_servers`
+    carries, so the flag without the bus is a session whose agents cannot reach the
+    board -- which would present as a silent team rather than as an error.
+    """
+    from pptmstr.bus import SERVER_NAME
+
+    options = AgentSession(Bridge(), task="lead")._options()
+
+    assert options.strict_mcp_config is True
+    assert list(options.mcp_servers) == [SERVER_NAME]
+
+
+def test_the_bus_reaches_the_argv_that_the_restriction_narrows_to() -> None:
+    """
+    The mechanism the comment in `_options` rests on, pinned against the installed
+    SDK rather than quoted from its docstring: an in-process server is passed to the
+    CLI through `--mcp-config` like any other, as `{"type": "sdk", ...}` with the
+    instance stripped, and `--strict-mcp-config` keeps exactly what `--mcp-config`
+    carried.
+
+    Reaching into `_internal` is deliberate. This is the one claim in the pair that
+    is about the SDK's behaviour rather than ours, and an SDK that stopped routing
+    in-process servers through that flag would take the board silent with nothing
+    else in this repository disagreeing. `cli_version.resolve_cli_path` reaches the
+    same way and for the same reason.
+    """
+    import json
+
+    from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
+
+    from pptmstr import cli_version
+    from pptmstr.bus import SERVER_NAME
+
+    options = AgentSession(Bridge(), task="lead")._options()
+    transport = SubprocessCLITransport(prompt="x", options=options)
+    transport._cli_path = cli_version.resolve_cli_path()
+
+    argv = transport._build_command()
+
+    assert "--strict-mcp-config" in argv
+    carried = json.loads(argv[argv.index("--mcp-config") + 1])["mcpServers"]
+    assert list(carried) == [SERVER_NAME]
+    # The live handler cannot cross a process boundary, so the SDK strips it and the
+    # CLI reaches back over the control channel. A build that passed it would be
+    # serialising a Python object into argv.
+    assert "instance" not in carried[SERVER_NAME]

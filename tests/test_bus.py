@@ -15,6 +15,7 @@ import time
 from collections.abc import Iterator
 
 import mcp.types as mcp_types
+import pytest
 
 from pptmstr.bridge import Bridge
 from pptmstr.bus import FROM_KEY, build_server
@@ -791,7 +792,11 @@ def test_a_write_the_board_accepted_answers_with_no_refusal() -> None:
     put_on_board = store.apply(declared("t1", by=DEV, request_id="d1"))
     store.apply(TaskClaimRequested(DEV, request_id="k1"))
     released = store.apply(TaskReleased(DEV, "t1", request_id="x1"))
-    store.apply(TaskClaimRequested(DEV, request_id="k2"))
+    # By id, because a bare claim no longer returns a task this node released --
+    # see `store._pick_claim`. Naming it is the documented way back to a task you
+    # gave up, and it is what this test needs: the subject here is that an accepted
+    # write reports no refusal, not which of the two claim forms was used.
+    store.apply(TaskClaimRequested(DEV, request_id="k2", task_id="t1"))
     completed = store.apply(TaskCompleted(DEV, "t1", at=3.0, request_id="f1"))
 
     assert (_refusal(put_on_board), _refusal(released), _refusal(completed)) == (None, None, None)
@@ -2051,3 +2056,178 @@ def test_the_specification_still_comes_with_the_claim(tmp_path) -> None:
         text = bus.call(store, "claim_task", {}, sender=DEV)
 
     assert "the whole spec" in text
+
+
+# -- the whole board has a ceiling, not only each row ------------------------------
+#
+# Measured, not predicted: a twelve-task board returned 50.8 KB and exceeded the
+# tool's output cap, so the agent told to treat the board as authoritative could not
+# read it. Twelve bounded rows are not a bounded reply.
+
+
+def _crowded_board(tasks: int = 12, notes_per_task: int = 2) -> Store:
+    """
+    A board the size this session actually produced.
+
+    Built from specifications and notes of the length the real ones have rather
+    than from twelve one-line tasks -- a fixture that does not overflow cannot
+    demonstrate anything about the overflow, and the per-row bounds are what make a
+    short fixture pass either way.
+    """
+    store = Store()
+    for i in range(tasks):
+        store.apply(
+            TaskDeclared(
+                Task(
+                    id=f"t{i}",
+                    title=f"do the {i}th thing",
+                    detail=f"specification {i}. " + "detail " * 600,
+                    touches=(f"pptmstr/mod{i}.py", f"tests/test_mod{i}.py"),
+                ),
+                LEAD,
+            )
+        )
+        for j in range(notes_per_task):
+            store.apply(
+                ConcernPosted(
+                    DEV,
+                    _about(f"c{i}-{j}", f"t{i}", body=f"finding {i}.{j}. " + "body " * 400),
+                )
+            )
+    return store
+
+
+def test_the_fixture_reproduces_the_overflow() -> None:
+    """
+    Guards the three tests below. Each asserts something about a board that does
+    not fit, and all three would pass vacuously against a board that does -- so the
+    material has to be shown to exceed the ceiling before the bound is worth
+    testing at all.
+    """
+    from pptmstr.bus import _MAX_BOARD_CHARS
+
+    snap = _crowded_board().snapshot()
+    raw = sum(len(t.detail) for t in snap.tasks.values())
+    raw += sum(len(c.body) for c in snap.concerns.values())
+
+    assert raw > _MAX_BOARD_CHARS
+
+
+def test_a_board_too_large_to_send_is_bounded() -> None:
+    from pptmstr.bus import _MAX_BOARD_CHARS
+
+    with _live_bus() as bus:
+        text = bus.call(_crowded_board(), "read_board", {}, sender=DEV)
+
+    assert len(text) <= _MAX_BOARD_CHARS
+
+
+@pytest.mark.parametrize("tasks", [1, 3, 12, 15, 20, 40])
+@pytest.mark.parametrize("notes", [0, 1, 2, 4, 7])
+def test_the_ceiling_holds_across_board_shapes(tasks: int, notes: int) -> None:
+    """
+    The invariant rather than the example, and it is here because the example was
+    not enough: the first version of this bound divided the budget correctly and
+    then laid each body on an indent it had not charged for, which is five
+    characters a row -- invisible on one row, and the whole overflow on forty. One
+    shape passed while the neighbouring shapes did not.
+
+    The exception is stated rather than excluded. A board whose *structure* alone
+    exceeds the ceiling goes over it, because the alternative is dropping rows, and
+    this asserts the bound it actually holds: the ceiling, or the structure plus
+    the notice saying the board did not fit.
+    """
+    from pptmstr.board import board_concerns, board_tasks
+    from pptmstr.bus import _MAX_BOARD_CHARS, _board_line
+
+    snap = _crowded_board(tasks, notes).snapshot()
+    rows = board_tasks(snap, LEAD[0])
+    by_id = {c.id: c for c in board_concerns(snap, LEAD[0])}
+    preamble = f"{len(rows)} task(s) on your board:"
+    structure = len("\n".join([preamble, *(_board_line(r, by_id, 0) for r in rows)]))
+
+    with _live_bus() as bus:
+        text = bus.call(_crowded_board(tasks, notes), "read_board", {}, sender=DEV)
+
+    assert len(text) <= max(_MAX_BOARD_CHARS, structure + 400), (tasks, notes, len(text))
+
+
+def test_no_row_is_dropped_from_a_board_too_large_to_send() -> None:
+    """
+    The one shape to avoid. An agent stays off another agent's files by knowing
+    that the other task exists, so a listing short of a row is wrong in a way a
+    listing short of a paragraph is not -- and wrong invisibly.
+    """
+    with _live_bus() as bus:
+        text = bus.call(_crowded_board(), "read_board", {}, sender=DEV)
+
+    for i in range(12):
+        assert f"- t{i} [" in text, i
+        assert f"writes pptmstr/mod{i}.py" in text, i
+
+
+def test_a_trimmed_board_still_says_a_finding_exists_and_who_has_it() -> None:
+    """
+    The bodies are the first thing a long board can afford to lose and the
+    attributions are the last: a reader who cannot see that a note exists cannot
+    know to ask for it, which is the failure the count-versus-subject argument in
+    `_reasons_text` is already about.
+    """
+    with _live_bus() as bus:
+        text = bus.call(_crowded_board(), "read_board", {}, sender=DEV)
+
+    assert text.count("agent note(s) on this task") == 12
+    assert text.count("waiting on the schema decision") == 24
+
+
+def test_a_trimmed_board_says_it_was_trimmed_and_how_to_get_the_rest() -> None:
+    """
+    A silent cap is how a worker builds confidently against half a specification.
+    The notice is at the top rather than the bottom because a reader that stops
+    early is exactly the reader who needs it.
+    """
+    with _live_bus() as bus:
+        text = bus.call(_crowded_board(), "read_board", {}, sender=DEV)
+
+    assert "This board did not fit" in text.split("- t0 [")[0]
+    assert "claim_task returns a task's specification in full" in text
+
+
+def test_a_board_that_fits_is_not_trimmed_and_carries_its_specs_whole() -> None:
+    """
+    The OFF path. A board under the ceiling reads exactly as it read before the
+    ceiling existed -- otherwise every small board pays for a problem only a large
+    one has.
+    """
+    store = Store()
+    store.apply(TaskDeclared(Task(id="t1", title="do t1", detail="the whole spec"), LEAD))
+
+    with _live_bus() as bus:
+        text = bus.call(store, "read_board", {}, sender=DEV)
+
+    assert "the whole spec" in text
+    assert "did not fit" not in text
+
+
+def test_rows_survive_a_board_whose_structure_alone_exceeds_the_ceiling() -> None:
+    """
+    The degradation has a floor and the floor is the rows. At this size there is
+    nothing left to trim and the reply goes over the ceiling rather than hiding
+    tasks to get under it -- a board this long is a problem the renderer cannot
+    solve, and an agent that cannot see the row it must work around has been given
+    a worse answer than a long one.
+    """
+    from pptmstr.bus import _MAX_BOARD_CHARS
+
+    store = Store()
+    for i in range(400):
+        store.apply(
+            TaskDeclared(Task(id=f"t{i}", title=f"do the {i}th thing", detail="x" * 500), LEAD)
+        )
+
+    with _live_bus() as bus:
+        text = bus.call(store, "read_board", {}, sender=DEV)
+
+    assert len(text) > _MAX_BOARD_CHARS
+    for i in range(400):
+        assert f"- t{i} [" in text, i

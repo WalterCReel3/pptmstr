@@ -74,6 +74,8 @@ from claude_agent_sdk import (  # noqa: E402
     ResultMessage,
 )
 
+from pptmstr.cli_version import read_cli_version, resolve_cli_path  # noqa: E402
+
 ESCAPE_PATH = Path.home() / "probe-sandbox-escape.txt"
 EGRESS_URL = "https://example.com"
 ALLOWED_DOMAIN = "api.anthropic.com"
@@ -281,7 +283,14 @@ def verdict(control: Arm, sandboxed: Arm, nonsense: Arm) -> None:
 
 
 async def main() -> int:
-    print(f"CLI: {os.popen('claude -v').read().strip()}")
+    # The SDK spawns the CLI bundled in its own wheel in preference to the one on
+    # PATH, and the two are different binaries at different versions on this host.
+    # `cli_version.resolve_cli_path` mirrors that resolution order, so this labels the
+    # result with the binary that produced it -- which is the whole value of the line,
+    # since every floor in `planning/2026-09-03` §8 is quoted against a version.
+    read = read_cli_version()
+    print(f"CLI the SDK would spawn: {resolve_cli_path()}")
+    print(f"  version: {read.text or 'UNREADABLE'} ({read.detail})")
     print(f"bwrap: {os.popen('which bwrap').read().strip() or 'ABSENT'}")
 
     control = await run_arm("A / control, no sandbox settings", None)

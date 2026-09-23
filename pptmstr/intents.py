@@ -29,6 +29,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from .approval import Policy
 from .model import (
     AgentState,
     Concern,
@@ -69,7 +70,14 @@ class AgentSpawned:
     # parent", for the same reason and by the same resolution as ``cwd`` above: the
     # two travel together, and a sub-agent measured against a different base than the
     # session it runs inside would report divergences that are only a change of ruler.
-    repo_root: str | None = None
+    session_base: str | None = None
+    # Which allowlist the gate measures this node's calls against. None means
+    # "inherit from the parent", resolved in the store by the same rule as ``cwd``
+    # and ``session_base`` above -- and here the inheritance is not a convenience but a
+    # requirement, because ``driver._policy_for`` already classifies a sub-agent's
+    # calls under its session's policy. A sub-agent's record showing STRICT under an
+    # under-gated session would be a reassurance the gate does not honour.
+    policy: Policy | None = None
     # Supplied by the spawner rather than created by the store. The driver writes
     # into it directly from the asyncio thread (I7), so both sides must hold the
     # same object -- letting the store build its own would give the UI an empty

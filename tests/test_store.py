@@ -14,6 +14,7 @@ import pathlib
 
 import pytest
 
+from pptmstr.approval import Policy
 from pptmstr.intents import (
     AgentFinished,
     AgentRemoved,
@@ -27,9 +28,11 @@ from pptmstr.intents import (
     StateChanged,
     SubagentDelivered,
     SubagentProgress,
+    TaskAmended,
     TaskClaimRequested,
     TaskCompleted,
     TaskDeclared,
+    TaskReleased,
     TopicChanged,
     UsageAccrued,
 )
@@ -44,6 +47,7 @@ from pptmstr.model import (
     PendingApproval,
     SessionFailed,
     Task,
+    TaskState,
     UsageRollup,
     count_diff_lines,
 )
@@ -1377,9 +1381,10 @@ def test_a_notebook_edit_records_its_path_and_no_lines() -> None:
 
 def test_an_absolute_write_under_the_agents_cwd_is_recorded_relative() -> None:
     """
-    A declaration is repository-relative by construction; a write path is whatever
-    the model passed. The two are put in the same units through the agent's own cwd
-    so the comparison in ``wrote_outside_declaration`` is on the same footing.
+    A declaration is relative to the session's directory by construction; a write path
+    is whatever the model passed. The two are put in the same units through the
+    agent's own cwd so the comparison in ``wrote_outside_declaration`` is on the same
+    footing.
     """
     store = Store()
     store.apply(dataclasses.replace(spawn(ROOT), cwd="/home/w/repo"))
@@ -1494,23 +1499,53 @@ def test_a_stale_resolution_counts_nothing_twice() -> None:
 # -- writes and declarations share a base (2026-09-04-two-mainline-defects, defect 1)
 
 
+def test_a_session_measures_against_the_directory_it_was_launched_in() -> None:
+    """
+    The two halves named in the same units, which is the whole of the defect.
+
+    ``bus.declare_task`` and ``templates.lead_briefing`` tell every lead that
+    ``touches`` is relative to the directory the session was launched in, and this is
+    that session: launched in ``repo/pptmstr``, declaring ``store.py``, writing
+    ``repo/pptmstr/store.py``. A base that still climbed to the checkout would record
+    ``pptmstr/store.py`` here and read a compliant agent as having written a file its
+    task never named.
+    """
+    store = Store()
+    launched = "/home/w/repo/pptmstr"
+    store.apply(dataclasses.replace(spawn(ROOT), cwd=launched, session_base=launched))
+    store.apply(spawn(CHILD, ROOT))
+    board(store, touches=("store.py",))
+    store.apply(
+        ApprovalRequested(
+            CHILD,
+            writing(CHILD, args={"file_path": "/home/w/repo/pptmstr/store.py", "content": "hi"}),
+        )
+    )
+    store.apply(ApprovalResolved(CHILD, "p1", approved=True))
+
+    task = store.snapshot().tasks["t1"]
+    assert task.writes.paths == ("store.py",)
+    assert task.wrote_outside_declaration() == ()
+
+
 def test_a_write_from_a_subdirectory_is_recorded_in_the_declarations_units() -> None:
     """
-    A session running below its repository root still measures against the root.
+    A record whose ``cwd`` sits below its base still measures against the base.
 
-    ``bus.declare_task`` tells every lead to write ``touches`` relative to the
-    repository, so a write placed against the agent's own ``cwd`` is in different
-    units than the declaration it is compared to. The agent here does exactly what it
-    declared; without the base it would be recorded as ``store.py`` and read as a
-    file the task never named.
+    No launch builds that pair today -- ``LauncherState.spec`` resolves both from the
+    same directory -- so it is constructed here directly. The reducer accepts the pair
+    from any emitter and ``relative_write`` takes the two separately, so the branch is
+    live code whichever way a record reaches it, and the agent here does exactly what
+    it declared: without the base the write would be recorded as ``store.py`` and read
+    as a file the task never named.
     """
     store = Store()
     store.apply(
-        dataclasses.replace(spawn(ROOT), cwd="/home/w/repo/pptmstr", repo_root="/home/w/repo")
+        dataclasses.replace(spawn(ROOT), cwd="/home/w/repo/pptmstr", session_base="/home/w/repo")
     )
     store.apply(
         dataclasses.replace(
-            spawn(CHILD, ROOT), cwd="/home/w/repo/pptmstr", repo_root="/home/w/repo"
+            spawn(CHILD, ROOT), cwd="/home/w/repo/pptmstr", session_base="/home/w/repo"
         )
     )
     board(store, touches=("pptmstr/store.py",))
@@ -1527,25 +1562,25 @@ def test_a_write_from_a_subdirectory_is_recorded_in_the_declarations_units() -> 
     assert task.wrote_outside_declaration() == ()
 
 
-def test_a_relative_write_from_a_subdirectory_is_rebased_onto_the_root() -> None:
+def test_a_relative_write_from_a_subdirectory_is_rebased_onto_the_base() -> None:
     """
-    The half a base alone does not fix. An absolute path only needs the root chopped
+    The half a base alone does not fix. An absolute path only needs the base chopped
     off the front; a relative one was typed against the agent's ``cwd`` and has to be
-    carried up to the root before it means the same file.
+    carried up to the base before it means the same file.
 
     A relative write path is read as relative to the agent's ``cwd``, which is what a
     path in a tool call means everywhere else. It is ambiguous in principle -- the same
-    string could be meant from the root -- and unambiguous in practice, because
+    string could be meant from the base -- and unambiguous in practice, because
     ``Write`` and ``Edit`` take an absolute ``file_path`` and this branch exists for
     totality rather than for a shape the CLI sends.
     """
     store = Store()
     store.apply(
-        dataclasses.replace(spawn(ROOT), cwd="/home/w/repo/pptmstr", repo_root="/home/w/repo")
+        dataclasses.replace(spawn(ROOT), cwd="/home/w/repo/pptmstr", session_base="/home/w/repo")
     )
     store.apply(
         dataclasses.replace(
-            spawn(CHILD, ROOT), cwd="/home/w/repo/pptmstr", repo_root="/home/w/repo"
+            spawn(CHILD, ROOT), cwd="/home/w/repo/pptmstr", session_base="/home/w/repo"
         )
     )
     board(store, touches=("pptmstr/store.py",))
@@ -1559,20 +1594,20 @@ def test_a_relative_write_from_a_subdirectory_is_rebased_onto_the_root() -> None
     assert task.wrote_outside_declaration() == ()
 
 
-def test_a_write_above_the_root_is_unplaced_rather_than_a_divergence() -> None:
+def test_a_write_above_the_base_is_unplaced_rather_than_a_divergence() -> None:
     """
-    A path that climbs out of the repository has no spelling in the declaration's
-    units, so there is nothing to compare it against. ``unplaced`` says that; naming
-    it as out-of-declaration would accuse an agent on the strength of a ruler that
-    does not reach.
+    A path that climbs out of the base has no spelling in the declaration's units, so
+    there is nothing to compare it against. ``unplaced`` says that; naming it as
+    out-of-declaration would accuse an agent on the strength of a ruler that does not
+    reach.
     """
     store = Store()
     store.apply(
-        dataclasses.replace(spawn(ROOT), cwd="/home/w/repo/pptmstr", repo_root="/home/w/repo")
+        dataclasses.replace(spawn(ROOT), cwd="/home/w/repo/pptmstr", session_base="/home/w/repo")
     )
     store.apply(
         dataclasses.replace(
-            spawn(CHILD, ROOT), cwd="/home/w/repo/pptmstr", repo_root="/home/w/repo"
+            spawn(CHILD, ROOT), cwd="/home/w/repo/pptmstr", session_base="/home/w/repo"
         )
     )
     board(store, touches=("pptmstr/store.py",))
@@ -1594,10 +1629,220 @@ def test_a_subagent_inherits_the_base_its_parent_was_launched_with() -> None:
     """
     store = Store()
     store.apply(
-        dataclasses.replace(spawn(ROOT), cwd="/home/w/repo/pptmstr", repo_root="/home/w/repo")
+        dataclasses.replace(spawn(ROOT), cwd="/home/w/repo/pptmstr", session_base="/home/w/repo")
     )
     store.apply(spawn(CHILD, ROOT))
 
     child = store.snapshot().nodes[CHILD]
     assert child.cwd == "/home/w/repo/pptmstr"
-    assert child.repo_root == "/home/w/repo"
+    assert child.session_base == "/home/w/repo"
+
+
+# -- a session's record says which policy it is under
+
+
+def test_a_session_announced_without_a_policy_reads_as_strict() -> None:
+    """
+    The default the whole adoption argument rests on. ``classify`` defaults to
+    STRICT and ``AgentSession`` defaults to STRICT, so a record that defaulted to
+    anything else would describe a gate nothing in this repository applies.
+    """
+    store = Store()
+    store.apply(spawn(ROOT))
+
+    assert store.snapshot().nodes[ROOT].policy is Policy.STRICT
+
+
+def test_a_subagent_of_an_under_gated_session_reads_as_under_gated() -> None:
+    """
+    The record must agree with the gate. ``driver._policy_for`` takes the agent_id
+    and declines to branch on it, so a sub-agent's Bash calls are classified against
+    its session's allowlist -- and a sub-agent row showing STRICT under an
+    AUTONOMOUS session would tell a supervising operator that calls are being
+    reviewed when they are being auto-approved. A reassurance that is not true is
+    worse than showing nothing.
+    """
+    store = Store()
+    store.apply(dataclasses.replace(spawn(ROOT), policy=Policy.AUTONOMOUS))
+    store.apply(spawn(CHILD, ROOT))
+
+    assert store.snapshot().nodes[CHILD].policy is Policy.AUTONOMOUS
+
+
+def test_inheritance_does_not_widen_a_strict_session() -> None:
+    """
+    The other direction, which the AUTONOMOUS case alone cannot distinguish: a
+    resolution that reached for the parent unconditionally and one that reached for
+    it only when the intent is silent agree here and only here.
+    """
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(spawn(CHILD, ROOT))
+
+    assert store.snapshot().nodes[CHILD].policy is Policy.STRICT
+
+
+def test_a_stated_policy_survives_an_under_gated_parent() -> None:
+    """
+    An announce that names STRICT under an AUTONOMOUS parent keeps STRICT. The
+    resolution reads "None means inherit", and this is the case that tells that apart
+    from "the tighter value means inherit" -- a distinction that turns on ``Policy``
+    members being truthy, which is a property of the enum and not of this arm.
+    """
+    store = Store()
+    store.apply(dataclasses.replace(spawn(ROOT), policy=Policy.AUTONOMOUS))
+    store.apply(dataclasses.replace(spawn(CHILD, ROOT), policy=Policy.STRICT))
+
+    assert store.snapshot().nodes[CHILD].policy is Policy.STRICT
+
+
+def test_a_recovered_node_is_shown_under_the_policy_that_judged_its_call() -> None:
+    """
+    The placeholder built for an approval from an unannounced agent is the node most
+    likely to be misread, because it exists only when the spawn hook did not fire.
+    The approval that built it was classified under the session's policy, so leaving
+    it at STRICT would show a tighter gate than the one that just judged it.
+    """
+    store = Store()
+    store.apply(dataclasses.replace(spawn(ROOT), policy=Policy.AUTONOMOUS))
+    store.apply(ApprovalRequested(CHILD, pending(CHILD)))
+
+    assert store.snapshot().nodes[CHILD].policy is Policy.AUTONOMOUS
+
+
+# -- releasing a task is not a no-op for the agent that released it ---------------
+#
+# Measured against the tree: release t1, call bare claim_task, and t1 comes straight
+# back, because releasing does not change a task's age and nothing recorded who gave
+# it up. Two agents can hold that between them indefinitely and neither can see it
+# from its own transcript -- each sees an ordinary claim of an ordinary task.
+
+
+def _two_tasks() -> Store:
+    store = Store()
+    store.apply(TaskDeclared(Task(id="t1", title="reviewer work", declared_at=0.0), ROOT))
+    store.apply(TaskDeclared(Task(id="t2", title="builder work", declared_at=1.0), ROOT))
+    return store
+
+
+def test_a_bare_claim_does_not_hand_back_the_task_this_node_just_released() -> None:
+    """
+    The loop, closed. `t1` is the oldest and stays the oldest; what changes is that
+    the agent which declined it is no longer offered it.
+    """
+    store = _two_tasks()
+    store.apply(TaskClaimRequested(ROOT, request_id="k1"))
+    store.apply(TaskReleased(ROOT, "t1", request_id="x1"))
+
+    store.apply(TaskClaimRequested(ROOT, request_id="k2"))
+
+    tasks = store.snapshot().tasks
+    assert tasks["t2"].claimed_by == ROOT
+    assert tasks["t1"].claimed_by is None
+    assert tasks["t1"].state is TaskState.PENDING
+
+
+def test_a_released_task_is_still_there_for_everyone_else() -> None:
+    """
+    The property that keeps this from trading a livelock for a lost task. One
+    agent's refusal is not the board's, and the released task is still the oldest
+    claimable thing for any other node.
+    """
+    store = _two_tasks()
+    store.apply(TaskClaimRequested(ROOT, request_id="k1"))
+    store.apply(TaskReleased(ROOT, "t1", request_id="x1"))
+
+    store.apply(TaskClaimRequested(CHILD, request_id="k2"))
+
+    assert store.snapshot().tasks["t1"].claimed_by == CHILD
+
+
+def test_the_releaser_can_still_take_it_back_by_naming_it() -> None:
+    """
+    The asymmetry, and the reason no task is ever unreachable. Naming the id is an
+    agent saying it means this one -- a second thought, a blocker cleared, or the
+    spec re-read -- and the skip applies only to the claim that did not choose.
+    """
+    store = _two_tasks()
+    store.apply(TaskClaimRequested(ROOT, request_id="k1"))
+    store.apply(TaskReleased(ROOT, "t1", request_id="x1"))
+
+    store.apply(TaskClaimRequested(ROOT, request_id="k2", task_id="t1"))
+
+    assert store.snapshot().tasks["t1"].claimed_by == ROOT
+
+
+def test_a_board_every_agent_has_declined_answers_nothing_rather_than_looping() -> None:
+    """
+    The end state, named so it is a decision rather than a surprise: when every
+    claimable task has been declined by the asking node, a bare claim wins nothing
+    and the tasks stay PENDING on the board for another agent or for a claim by id.
+    That is the honest answer -- the alternative is handing back work the agent has
+    already said it will not do.
+    """
+    store = _two_tasks()
+    for request, task in (("k1", "t1"), ("k2", "t2")):
+        store.apply(TaskClaimRequested(ROOT, request_id=request, task_id=task))
+        store.apply(TaskReleased(ROOT, task, request_id=f"x-{task}"))
+
+    store.apply(TaskClaimRequested(ROOT, request_id="k3"))
+
+    tasks = store.snapshot().tasks
+    assert [t.state for t in tasks.values()] == [TaskState.PENDING, TaskState.PENDING]
+
+
+def test_releasing_the_same_task_twice_records_the_agent_once() -> None:
+    """
+    The tuple grows per agent, not per release, which is what bounds it without a
+    cap: its ceiling is the number of agents that have ever run against this board.
+    A cap would have to answer "which release do we forget?", and the only safe
+    answer to that is the one that reintroduces the loop.
+    """
+    store = _two_tasks()
+    for request in ("k1", "k2"):
+        store.apply(TaskClaimRequested(ROOT, request_id=request, task_id="t1"))
+        store.apply(TaskReleased(ROOT, "t1", request_id=f"x-{request}"))
+
+    assert store.snapshot().tasks["t1"].released_by == (ROOT,)
+
+
+def test_two_agents_declining_one_task_are_both_recorded() -> None:
+    store = _two_tasks()
+    for node in (ROOT, CHILD):
+        store.apply(TaskClaimRequested(node, request_id=f"k-{node[1]}", task_id="t1"))
+        store.apply(TaskReleased(node, "t1", request_id=f"x-{node[1]}"))
+
+    assert store.snapshot().tasks["t1"].released_by == (ROOT, CHILD)
+
+
+def test_a_refused_release_records_no_refusal_against_the_task() -> None:
+    """
+    The guard `TaskReleased` already had, extended to the new field. A node that
+    does not hold the task cannot release it, and it must not be able to mark the
+    task as declined either -- that would be a way to make work invisible to an
+    agent that never touched it.
+    """
+    store = _two_tasks()
+    store.apply(TaskClaimRequested(ROOT, request_id="k1", task_id="t1"))
+
+    store.apply(TaskReleased(CHILD, "t1", request_id="x1"))
+
+    assert store.snapshot().tasks["t1"].released_by == ()
+
+
+def test_an_amended_specification_is_offered_again_to_the_agent_that_declined_it() -> None:
+    """
+    An agent that gave a task back declined the specification it was holding, and an
+    amendment replaces exactly that. Holding the refusal against a spec nobody can
+    now read would be judging an offer that no longer exists -- and this is the only
+    route by which a task every agent has declined returns to circulation without
+    somebody naming its id.
+    """
+    store = _two_tasks()
+    store.apply(TaskClaimRequested(ROOT, request_id="k1", task_id="t1"))
+    store.apply(TaskReleased(ROOT, "t1", request_id="x1"))
+
+    store.apply(TaskAmended(task_id="t1", detail="the part that was missing"))
+    store.apply(TaskClaimRequested(ROOT, request_id="k2"))
+
+    assert store.snapshot().tasks["t1"].claimed_by == ROOT

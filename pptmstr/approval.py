@@ -17,13 +17,40 @@ import difflib
 import enum
 from collections.abc import Mapping
 from pathlib import Path
-from typing import Any
+from typing import Any, assert_never
 
 
 class Disposition(enum.Enum):
     AUTO_APPROVE = "auto_approve"
     REQUIRE_APPROVAL = "require_approval"
     DENY = "deny"
+
+
+class Policy(enum.Enum):
+    """
+    Which of the two allowlists a call is measured against.
+
+    A parameter of ``classify`` rather than module state: this module's purity is
+    the reason the dial is built over the gate at all, and a mode that worked by
+    mutating a global would make every test here order-dependent.
+
+    ``AUTONOMOUS`` is named for the mode rather than for a tool, because what it
+    releases is the whole of ``_REVIEW``: under it the set of calls that would
+    have waited for a human is empty, and the only thing still reaching
+    ``REQUIRE_APPROVAL`` is a tool nobody has heard of.
+
+    Containment under it is no longer the allowlist's width. ``Bash`` and its
+    children are bounded by the CLI's sandbox; the write tools run inside the CLI
+    process, which that sandbox does not cover, and are bounded instead to the
+    session's directory by the driver's gate. The two halves are one decision --
+    widening here without that write-region check leaves the CLI-process writers
+    unbounded. ``WebFetch``/``WebSearch`` are bounded by neither, and are released
+    anyway: what a URL and a prompt can carry out is small beside an unattended
+    agent that cannot read documentation.
+    """
+
+    STRICT = "strict"
+    AUTONOMOUS = "autonomous"
 
 
 # The bus server's name, spelled here rather than imported from pptmstr.bus:
@@ -44,11 +71,36 @@ _AUTO = frozenset(
         "TodoWrite",
         "ListMcpResources",
         "ReadMcpResource",
+        # A registry read. ``ToolSearch`` returns the JSON schema of a tool this
+        # session already holds; it calls nothing and changes nothing outside the
+        # model's context, which is what ``_AUTO``'s first sentence asks for.
+        #
+        # What it makes callable is judged on its own name and not on this one. The
+        # driver registers ``PreToolUse`` with no ``HookMatcher.matcher``, so the
+        # gate fires on every tool call, and ``driver._gate_tool_use`` reads the name
+        # off the hook payload and consults no record of which schemas were loaded.
+        # A schema loaded here therefore reaches ``classify`` exactly as if it had
+        # been offered up front -- under ``STRICT`` a loaded ``WebFetch`` still
+        # parks, and a loaded tool this build has never named still falls through
+        # fail-closed.
+        #
+        # It is not the ``ReadMcpResource``/``ListMcpResources`` case, which
+        # driver.py records as a wart rather than a pattern: those return *data*
+        # from a server this process cannot enumerate, so their answer is never
+        # classified. This returns a name the gate will judge before it runs.
+        #
+        # The live consequence, which is a reason to keep ``_AUTO`` narrow rather
+        # than a reason to refuse the loader: a deferred tool is unreachable while
+        # this is denied, so admitting it makes whatever ``_AUTO`` already holds
+        # reachable in fact rather than only on paper.
+        "ToolSearch",
     }
 )
 
 # Mutating, or reaching the network. Named explicitly so the list reads as a
-# decision rather than as whatever happened to be left over.
+# decision rather than as whatever happened to be left over. Each reason below is
+# a reason to put the call in front of the operator, so each holds exactly while
+# there is one: ``AUTONOMOUS`` releases this whole list.
 _REVIEW = frozenset(
     {
         "Write",
@@ -92,6 +144,15 @@ _REVIEW = frozenset(
     }
 )
 
+# What the autonomous policy releases is the review list itself. Written as that
+# identity rather than as a set that happens to enumerate the same names: the
+# property the mode needs is that nothing under it waits for a human, and a copy
+# would go quietly false the first time a tool joins ``_REVIEW`` -- which is the
+# moment the mode would start parking again with nothing in the repository
+# disagreeing. The identity is asserted through ``classify`` in
+# tests/test_approval.py, so the branch order in ``classify`` is covered with it.
+_AUTONOMOUS_AUTO = _REVIEW
+
 # Coordination that reads or reserves, but does not reach another agent or the
 # world. Auto-approving these is what keeps the operator a bottleneck on decisions
 # rather than on bookkeeping -- a worker taking the next item off a board the
@@ -113,15 +174,49 @@ _BUS_AUTO = frozenset(
 )
 
 
-def classify(tool_name: str, tool_input: Mapping[str, Any]) -> Disposition:
+def _policy_auto(policy: Policy) -> frozenset[str]:
+    """
+    The extra allowlist a policy adds beside ``_AUTO``, never in place of it.
+
+    A ``match`` rather than a dict lookup so that adding a ``Policy`` member and
+    forgetting to say what it releases is a type error here rather than a
+    ``KeyError`` raised on the gate path of a running session.
+    """
+    match policy:
+        case Policy.STRICT:
+            return frozenset()
+        case Policy.AUTONOMOUS:
+            return _AUTONOMOUS_AUTO
+    assert_never(policy)
+
+
+def classify(
+    tool_name: str,
+    tool_input: Mapping[str, Any],
+    policy: Policy = Policy.STRICT,
+) -> Disposition:
     """
     Whether a tool call may run unattended.
 
-    ``Task``/``Agent`` require approval deliberately: spawning a sub-agent is a
-    tool call like any other, and an orchestrator that gates writes but not the
-    spawning of things that write has a hole in it.
+    Under ``STRICT``, ``Task``/``Agent`` require approval deliberately: spawning a
+    sub-agent is a tool call like any other, and an orchestrator that gates writes
+    but not the spawning of things that write has a hole in it. Under
+    ``AUTONOMOUS`` they auto-approve, because a sub-agent runs in the same CLI
+    process under the same sandbox and so has the same bounded reach as the first
+    agent; total fan-out is bounded by ``subagent_cap``, whose deny sits ahead of
+    this function in ``driver._gate_tool_use`` and which no policy can widen.
+
+    The policy defaults to ``STRICT``, which is what makes adoption free: both
+    call sites pass two positional arguments and get exactly today's answers.
+
+    A policy widens the allowlist and nothing else. The final ``REQUIRE_APPROVAL``
+    is reached at every policy, because a mode that is dangerous by choice is
+    still not a mode that admits tools nobody has seen. Under ``AUTONOMOUS`` it is
+    the only way to reach ``REQUIRE_APPROVAL`` at all.
     """
     if tool_name in _AUTO or tool_name in _BUS_AUTO:
+        return Disposition.AUTO_APPROVE
+    if tool_name in _policy_auto(policy):
         return Disposition.AUTO_APPROVE
     if tool_name in _REVIEW:
         return Disposition.REQUIRE_APPROVAL
@@ -136,6 +231,17 @@ def summarize(tool_name: str, tool_input: Mapping[str, Any], width: int = 90) ->
     Reads as an action rather than as a serialised argument dict, because the queue
     is scanned rather than read -- the operator is deciding which item to look at,
     not deciding the item.
+
+    **The path comes from the key the tool declares**, which is the same rule
+    ``model.written_path`` applies and has to be the same rule. This is the row a
+    human approves from and that one is what the ledger measures and what the gate
+    bounds, so a call carrying both keys must not be able to show one path here and
+    act on the other -- a decoy that fools the reviewer is worse than one that only
+    fools the measurement, because the reviewer is what the measurement is for.
+
+    ``"?"`` when the declared key is absent, and that is the honest row rather than
+    a gap: the other key being filled in does not make it the target, and a call
+    whose destination cannot be read is one the operator should open.
     """
 
     def clip(text: str, limit: int = width) -> str:
@@ -143,7 +249,8 @@ def summarize(tool_name: str, tool_input: Mapping[str, Any], width: int = 90) ->
         return text if len(text) <= limit else text[: limit - 3] + "..."
 
     if tool_name in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
-        path = str(tool_input.get("file_path") or tool_input.get("notebook_path") or "?")
+        declared = "notebook_path" if tool_name == "NotebookEdit" else "file_path"
+        path = str(tool_input.get(declared) or "?")
         return clip(f"{tool_name} {path}")
     if tool_name == "Bash":
         return clip(str(tool_input.get("command") or ""))

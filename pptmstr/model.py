@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, ClassVar
 
+from .approval import Policy
 from .transcript import Transcript
 
 # (session_id, agent_id). Root sessions have agent_id None; sub-agents carry the
@@ -401,16 +402,16 @@ class LaunchSpec:
 
     task: str
     model: str
-    # Empty means the repository root; the launcher normalises before building one.
+    # Empty means this process's directory; the launcher normalises before building one.
     cwd: str = "."
-    # The base ``cwd``'s writes are measured from, resolved by ``tree.repo_root``
+    # The base ``cwd``'s writes are measured from, resolved by ``tree.session_base``
     # at the launch sites rather than here: this is a frozen value type and the
     # resolution stats the filesystem.
     #
     # None is honest rather than a default worth guessing at -- a spec built
     # without one measures against ``cwd``, which is what every record did before
     # the field existed.
-    repo_root: str | None = None
+    session_base: str | None = None
     # By name. None is solo, spelled here rather than at each call site because
     # `relaunch` and `fork` pass `AgentRecord.template`, which is None on any record
     # that is not a session root.
@@ -442,6 +443,54 @@ class LaunchSpec:
     # Deliberately not derived from `from_record`: a relaunch and a fork both want a
     # new conversation from the same premises, which is the opposite of this.
     resume: str | None = None
+    # The containment configuration as the JSON string `ClaudeAgentOptions.settings`
+    # takes -- what `sandbox.containment_settings` returns -- or None for a launch that
+    # is not contained. Text rather than anything structured for the reason
+    # `driver.AgentSession.containment` gives: several of the keys have no slot in the
+    # SDK's `SandboxSettings`.
+    #
+    # Not carried by `from_record`, and the contrast with `session_base` above is the
+    # useful part. `session_base` is carried because a relaunch that measures against a
+    # different base is a silent defect, so dropping it would lose a guarantee. This is
+    # dropped because `ui/health.py` forks with `actions.fork(LaunchSpec.from_record(
+    # root))` -- no modal, no combo, no confirmation -- and a fork is the one launch
+    # path with no surface on which an operator chooses either of these. A value that
+    # arrives without the surface that sets it is a value nobody chose.
+    containment: str | None = None
+    # Which allowlist the gate measures this session's calls against. `Policy.STRICT` is
+    # the gate as it has always classified; nothing widens unless a launch says so.
+    #
+    # Not carried by `from_record` either, and it travels with `containment` rather than
+    # separately: `planning/2026-09-03` records that the containment layer and the
+    # under-gated allowlist are not separable, because the sandbox covers `Bash` and its
+    # children while the writing tools run inside the CLI process. Carrying one without
+    # the other would relaunch half an arrangement, and carrying both would make an
+    # under-gated session inheritable in one click from a button pressed for an
+    # unrelated reason.
+    #
+    # Per launch and nowhere else: this is deliberately absent from `Settings`, because
+    # a persisted toggle is set for the session the operator is watching and forgotten
+    # for the four they are not.
+    policy: Policy = Policy.STRICT
+    # How many sub-agents this one session may run at once, or None to use
+    # ``Settings.subagent_cap``. ``app._launch`` is the only reader.
+    #
+    # None rather than a number, and the distinction is load-bearing twice. It keeps a
+    # spec built without one behaving exactly as every spec did before the field
+    # existed; and it leaves ``0`` free to mean what it says -- a session that may not
+    # spawn at all, which is a thing an operator might want under the autonomous mode
+    # and which ``spec.subagent_cap or settings.subagent_cap`` would silently eat.
+    #
+    # **Not carried by ``from_record``, for a different reason than ``containment``
+    # and ``policy`` above.** Those are dropped because they are permissions and
+    # ``ui/health.py`` forks with no modal and no confirmation, so a permission
+    # arriving through a surface nobody saw is a permission nobody chose. A cap is
+    # capacity, not permission, and that argument does not reach it. It is dropped
+    # because ``AgentRecord`` does not hold one: there is nothing on a record to
+    # carry, and the setting it would fall back to is the operator's current answer
+    # rather than the one that happened to be in force when the session first ran.
+    # Re-reading it is the behaviour a relaunch wants.
+    subagent_cap: int | None = None
 
     @classmethod
     def from_record(cls, record: AgentRecord) -> LaunchSpec:
@@ -461,7 +510,7 @@ class LaunchSpec:
             # Carried, unlike a field row 9 dropped: a relaunch or fork of a
             # session measured from one base must not silently start measuring
             # from another, which is what recomputing it here would risk.
-            repo_root=record.repo_root,
+            session_base=record.session_base,
             template=record.template,
             brief=record.brief,
         )
@@ -494,19 +543,19 @@ class AgentRecord:
     # here would freeze one grouping rule into the store.
     cwd: str | None = None
     # The directory ``cwd``'s writes are measured from, resolved once at launch by
-    # ``tree.repo_root``. Inherited by sub-agents alongside ``cwd``, because a write
+    # ``tree.session_base``. Inherited by sub-agents alongside ``cwd``, because a write
     # is placed against the pair and splitting them would measure a sub-agent in one
     # base and its parent in another.
     #
     # Stored rather than derived, and the reason is stronger than for ``cwd``: this
-    # follows from ``cwd`` *on the filesystem*, and the filesystem moves. A ``.git``
-    # created later would silently re-base writes recorded before it existed, so a
-    # session's units would change underneath comparisons already made. Freezing it
-    # at launch is what keeps a run's measurements in one unit for its whole life.
+    # follows from ``cwd`` *through the filesystem*, and the reducer does no IO.
+    # Freezing the answer at launch is also what keeps a run's measurements in one
+    # unit for its whole life -- a symlink on the operator's path re-pointed mid-run
+    # would otherwise change the units underneath comparisons already made.
     #
     # None on a record written before this field existed, which ``relative_write``
     # reads as "measure against ``cwd``" -- exactly what it did then.
-    repo_root: str | None = None
+    session_base: str | None = None
     # The work template this session was launched under, on a root record only.
     # None on a sub-agent, which does not have one.
     #
@@ -530,6 +579,19 @@ class AgentRecord:
     # the writer and the reader are steps 2 and 3. A path with no reader is a
     # smaller thing than a premise with no address.
     brief: str | None = None
+    # Which allowlist this node's tool calls are measured against. Inherited by
+    # sub-agents, because ``driver._policy_for`` classifies them under their
+    # session's policy -- so a sub-agent that did not inherit here would carry a
+    # record disagreeing with the gate that actually judges it.
+    #
+    # Stored for the same reason as ``cwd`` and ``template``: it is chosen at launch,
+    # nothing else in the snapshot implies it, and it otherwise lives only on
+    # ``driver.AgentSession``, which the UI must not reach into.
+    #
+    # ``STRICT`` rather than ``None`` on a record written without one, because STRICT
+    # is what the gate classifies an unspecified launch against -- there is no
+    # "unknown" state to be honest about, only the default the gate already applies.
+    policy: Policy = Policy.STRICT
     usage: UsageRollup = field(default_factory=UsageRollup)
     context: ContextSnapshot | None = None
     # A tuple, not one slot. An assistant turn can contain several tool calls, the
@@ -723,8 +785,18 @@ def normalised_touches(paths: Iterable[str]) -> tuple[str, ...]:
     does not resolve a path against a session's ``cwd``, follow a symlink, or
     reconcile an absolute path with a relative one. Those need the filesystem, and
     the reducer does no IO. A declarer that mixes absolute and relative paths gets
-    no protection, which is a reason for the briefing to ask for repository-relative
-    paths rather than a reason to put a ``Path.resolve`` in a pure function.
+    no protection, which is a reason for the briefing to ask for paths relative to the
+    session's directory rather than a reason to put a ``Path.resolve`` in a pure
+    function.
+
+    **The strip is an anti-evasion control, not a convenience.** The declaring caller
+    is a model choosing its own spelling, and the reducer compares what this stores,
+    so a caller free to pad a path is free to miss the overlap check:
+    ``"  pptmstr/store.py  "`` names the same file and would collide with nothing.
+    ``store._auto_depends`` is the whole of what keeps two agents out of one file, so
+    that miss costs a concurrent write rather than a tidier string.
+    ``tests/test_bus.py:test_a_caller_cannot_evade_the_overlap_check_with_its_own_spelling``
+    is what pins it.
     """
     out: list[str] = []
     for raw in paths:
@@ -774,8 +846,9 @@ class ApprovedWrites:
     be. A write whose task was completed in the same assistant turn is attributed to
     no open task and contributes nothing anywhere.
 
-    ``paths`` is repository-relative and distinct, in the order first written, so it
-    can be compared against a declaration written in the same units. ``unplaced``
+    ``paths`` is relative to the session's directory and distinct, in the order first
+    written, so it can be compared against a declaration written in the same units.
+    ``unplaced``
     holds the ones that could not be put in those units -- an absolute path outside
     the writing agent's ``cwd``, or a write by an agent whose ``cwd`` is unknown.
     They are held apart because a units mismatch reported as an out-of-declaration
@@ -886,36 +959,58 @@ def written_path(tool_name: str, args: Mapping[str, Any]) -> str | None:
     write anything; a heredoc is invisible here and always will be. This answers
     "which file did the call declare", and a clean record over a session of ``Bash``
     calls has earned nothing.
+
+    **The key is chosen by the tool, not by which one happens to be filled in.**
+    ``NotebookEdit`` declares ``notebook_path`` and the other three declare
+    ``file_path``, so a call carrying both has one target and one decoy. Reading the
+    first truthy key let the decoy answer for it: a ``NotebookEdit`` naming a
+    harmless ``file_path`` was measured on that while the tool acted on
+    ``notebook_path``. Whether the CLI forwards an argument a tool's schema does not
+    declare is unmeasured -- ``driver._stamp_bus_call`` records the same gap and
+    writes its stamp unconditionally rather than resting on it -- and a containment
+    check that is correct only if an unmeasured behaviour does not happen is the
+    defect whether or not it happens.
+
+    The path itself is returned exactly as it arrived, unstripped and unresolved.
+    ``planning/2026-09-03`` §11 U5 is the constraint: this, ``normalised_touches``
+    and ``relative_write`` must normalise identically or a declaration and a write
+    are compared in different units, and a caller that needs a stricter reading of
+    the spelling does it on top of this rather than by changing it here.
     """
     if tool_name not in WRITING_TOOLS:
         return None
-    raw = args.get("file_path") or args.get("notebook_path")
+    raw = args.get("notebook_path" if tool_name == "NotebookEdit" else "file_path")
     if not isinstance(raw, str) or not raw.strip():
         return None
     return raw
 
 
-def relative_write(path: str, cwd: str | None, repo_root: str | None = None) -> str | None:
+def relative_write(path: str, cwd: str | None, session_base: str | None = None) -> str | None:
     """
     A written path in the units a declaration is written in, or None when the two
     cannot be put in the same units.
 
-    ``repo_root`` is the base those units are measured from, resolved once at launch
-    by ``tree.repo_root`` and carried on ``AgentRecord``. It defaults to None, which
-    measures against ``cwd`` instead -- the behaviour of every record written before
-    the field existed, and the reason adding it does not reinterpret history.
+    ``session_base`` is the base those units are measured from: the directory the
+    session was launched in, resolved once at launch by ``tree.session_base`` and
+    carried on ``AgentRecord``. It defaults to None, which measures against ``cwd``
+    instead -- the behaviour of every record written before the field existed, and the
+    reason adding it does not reinterpret history.
 
-    **Both are needed, not either.** ``repo_root`` places an absolute write, and
-    ``cwd`` is what a *relative* write was typed against: a model in
-    ``<root>/pptmstr`` writing ``store.py`` means ``pptmstr/store.py``, and reading
-    it against the root alone would record ``store.py`` and report a compliant agent
+    **Both are needed, not either.** ``session_base`` places an absolute write, and
+    ``cwd`` is what a *relative* write was typed against. The two are the same
+    directory for a session launched today, and they are separate arguments because
+    nothing in this function may assume that: a record may carry a base and no ``cwd``
+    at all, and a sub-agent's pair is inherited rather than supplied. A model standing
+    in ``<base>/pptmstr`` writing ``store.py`` means ``pptmstr/store.py``, and reading
+    that against the base alone would record ``store.py`` and report a compliant agent
     as having written outside its declaration.
 
-    A declaration is repository-relative by construction: ``normalised_touches``
-    reconciles no absolute path with a relative one and says so, and ``bus`` and
-    ``templates`` tell every lead the same. A write path is whatever the model
-    passed. Comparing the two directly reports every write as out-of-declaration,
-    which is the reverse of useful -- an affordance that fires on every row.
+    A declaration is relative to the session's directory by construction:
+    ``normalised_touches`` reconciles no absolute path with a relative one and says so,
+    and ``bus`` and ``templates`` tell every lead the same. A write path is whatever
+    the model passed. Comparing the two directly reports every write as
+    out-of-declaration, which is the reverse of useful -- an affordance that fires on
+    every row.
 
     ``cwd`` is the writing agent's own (``AgentRecord.cwd``, inherited from the
     parent for a sub-agent), so this is a string operation on facts already in the
@@ -927,21 +1022,21 @@ def relative_write(path: str, cwd: str | None, repo_root: str | None = None) -> 
     if not cleaned:
         return None
 
-    root = _absolute(repo_root)
+    base = _absolute(session_base)
 
     if not posixpath.isabs(cleaned):
         # A relative path is whatever the model typed, and it typed it against its
-        # own ``cwd``. Expressing it against the root needs the step between the two;
-        # skipping that step is what recorded a write to ``<root>/pptmstr/store.py``
-        # as ``store.py`` and then read it as out-of-declaration.
+        # own ``cwd``. Expressing it against the base needs the step between the two;
+        # skipping that step records a write to ``<base>/pptmstr/store.py`` as
+        # ``store.py`` and then reads it as out-of-declaration.
         #
-        # ``inner`` is "" both when there is no root to rebase onto and when the agent
+        # ``inner`` is "" both when there is no base to rebase onto and when the agent
         # already stands at it -- in either case the path is already in the units a
-        # declaration is written in, which is why this stayed correct for as long as
-        # every session ran at its repository root.
-        inner = "" if root is None else _within(root, _absolute(cwd))
+        # declaration is written in, which is the case every session launched today is
+        # in.
+        inner = "" if base is None else _within(base, _absolute(cwd))
         if inner is None:
-            # A cwd that is not under the root it is paired with. The two disagree
+            # A cwd that is not under the base it is paired with. The two disagree
             # about where zero is, and guessing which to believe would rebase the
             # write onto a tree it has nothing to do with.
             return None
@@ -953,10 +1048,10 @@ def relative_write(path: str, cwd: str | None, repo_root: str | None = None) -> 
         normalised = normalised_touches((candidate,))
         return normalised[0] if normalised else None
 
-    base = root or _absolute(cwd)
-    if base is None:
+    measured_from = base or _absolute(cwd)
+    if measured_from is None:
         return None
-    prefix = base if base.endswith("/") else base + "/"
+    prefix = measured_from if measured_from.endswith("/") else measured_from + "/"
     target = posixpath.normpath(cleaned)
     if not target.startswith(prefix):
         return None
@@ -995,7 +1090,7 @@ def approved_write(
     args: Mapping[str, Any],
     cwd: str | None,
     diff: str | None,
-    repo_root: str | None = None,
+    session_base: str | None = None,
 ) -> ApprovedWrites:
     """
     One resolved approval, measured. Pure: the arguments are the whole input.
@@ -1015,7 +1110,7 @@ def approved_write(
     raw = written_path(tool_name, args)
     if raw is None:
         return ApprovedWrites(lines_added=added, lines_removed=removed)
-    placed = relative_write(raw, cwd, repo_root)
+    placed = relative_write(raw, cwd, session_base)
     if placed is None:
         return ApprovedWrites(unplaced=(raw,), lines_added=added, lines_removed=removed)
     return ApprovedWrites(paths=(placed,), lines_added=added, lines_removed=removed)
@@ -1064,6 +1159,32 @@ class Task:
     # a global map, and an unclaimed task has no other node attached to it. Without
     # this a board cannot be scoped to the session whose agents are working it.
     declared_by: NodeId | None = None
+    # The agents that took this task and gave it back, in the order they did.
+    #
+    # Stored rather than derived, and it is the one kind of fact that has to be:
+    # release history is not implied by anything else in the snapshot. ``claimed_by``
+    # is cleared by the release that creates this entry, so after it there is nothing
+    # left to distinguish a task an agent has already declined from one it has never
+    # seen. STYLE.md §1's question is whether another fact in the same snapshot
+    # implies this one, and none does.
+    #
+    # It is not the ``claim_id`` mistake this record's docstring describes. That was a
+    # transport correlation token, meaningful only to the request that minted it and
+    # obliging every later arm to clear it. This is a domain fact -- an agent declined
+    # this work -- and it is as much the board's business as who declared it.
+    #
+    # ``store._pick_claim`` consults it for a bare claim only, so a declined task is
+    # skipped by the agent that declined it, stays claimable by every other agent, and
+    # is still takeable by id by anyone including its releaser. A task that no agent
+    # could claim at all would be worse than the loop this prevents: a board nobody is
+    # watching cannot report a task it has quietly lost.
+    #
+    # Distinct, so it grows by one per agent that declines rather than once per
+    # release, which is what keeps it small without a cap. Its ceiling is the number
+    # of agents that have ever run against this board, and a cap would have to answer
+    # "which release do we forget?" -- whose only safe answer is the one that
+    # reintroduces the loop.
+    released_by: tuple[NodeId, ...] = ()
     # What the approvals resolved while this task was claimed measured, accumulated.
     #
     # An accumulator rather than a projection, and it is the one place in this record

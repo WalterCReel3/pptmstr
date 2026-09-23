@@ -52,28 +52,28 @@ def test_a_git_root_names_the_project(tmp_path: Path) -> None:
     assert project_key(str(repo)) == "orbital"
 
 
-def test_a_subdirectory_files_under_its_repo(tmp_path: Path) -> None:
+def test_a_subdirectory_names_itself(tmp_path: Path) -> None:
     """
-    The reason the derivation walks up at all.
+    The lane is named after the directory the operator launched in, and the enclosing
+    checkout is not consulted.
 
-    An operator running one session in a repo and another in that repo's tools
-    directory is working on one project; splitting them into two lanes would be a
-    distinction the layout invented rather than one the operator made.
+    This is a flatter grouping than the walk gave: a session in ``orbital`` and a
+    session in ``orbital/tools/parsers`` are two lanes now, not one. It is the
+    accepted cost of the lane agreeing with the units -- two derivations that answered
+    differently would put a session in one project on screen and another in the base
+    its writes are measured against, and the screen is the half that gets believed.
     """
     repo = tmp_path / "orbital"
     (repo / ".git").mkdir(parents=True)
     deep = repo / "tools" / "parsers"
     deep.mkdir(parents=True)
-    assert project_key(str(deep)) == "orbital"
+    assert project_key(str(deep)) == "parsers"
 
 
-def test_a_worktree_files_under_its_repo(tmp_path: Path) -> None:
+def test_a_worktree_names_itself(tmp_path: Path) -> None:
     """
-    A worktree or submodule checkout has .git as a *file* holding a gitdir pointer.
-
-    Testing for a directory would file every worktree under its own name, which is
-    wrong in the one situation where an operator most wants two checkouts of the
-    same project grouped together.
+    A worktree or submodule checkout has .git as a *file* holding a gitdir pointer,
+    and it is no more consulted than a .git directory is.
     """
     tree = tmp_path / "orbital-wt"
     tree.mkdir()

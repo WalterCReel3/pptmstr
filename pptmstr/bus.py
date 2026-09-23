@@ -43,7 +43,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, assert_never
 
@@ -85,6 +85,18 @@ _MAX_DETAIL_CHARS = 2000
 # finding, and a reader scanning a board wants the finding rather than the essay.
 # Announced when it bites, like every other bound here.
 _MAX_CONCERN_CHARS = 1200
+
+# The whole reply. The two bounds above are per row, and twelve bounded rows still
+# came to 50.8 KB in one measured read and 62.8 KB in another -- past the tool's
+# output cap both times, so the agent that was told the board is authoritative could
+# not read it. A bound on each row is not a bound on their sum.
+#
+# The number is a judgement and the measurements are what it answers: both overflows
+# were above it, and 30,000 characters is roughly 7.5k tokens, which is a large but
+# affordable slice of a worker's context to spend on one board read. Nothing here
+# knows the tool's actual ceiling -- it is the harness's, not ours -- so this is set
+# below both observations rather than derived from it.
+_MAX_BOARD_CHARS = 30_000
 
 # The key the gate writes the authenticated sender into. Leading underscore so it
 # reads as ours rather than as something the model was meant to fill, and absent
@@ -213,7 +225,11 @@ def _premises_text(session: AgentSession) -> str:
     )
 
 
-def _board_line(row: BoardTask, reasons: Mapping[ConcernId, BoardConcern] | None = None) -> str:
+def _board_line(
+    row: BoardTask,
+    reasons: Mapping[ConcernId, BoardConcern] | None = None,
+    budget: int | None = None,
+) -> str:
     """
     One board row, as the asking agent reads it.
 
@@ -245,6 +261,18 @@ def _board_line(row: BoardTask, reasons: Mapping[ConcernId, BoardConcern] | None
     claims cannot honour the boundary the auto-dependency exists to enforce, and an
     open concern is named because a row stalled for a recorded reason is a different
     row from one stalled silently.
+
+    **``budget`` is this row's whole allowance for prose**, shared by the
+    specification and the note bodies, or None for the per-row bounds alone. It
+    exists because the sum of bounded rows is not itself bounded (see
+    ``_MAX_BOARD_CHARS``). Nothing above the prose is charged against it: the
+    identifier, state, owner, blockers, files, and every note's sender and subject
+    are what a reader needs in order to claim correctly and to know who to ask, and
+    a board that has lost those has lost the thing it is for.
+
+    The specification is served before the notes when the two compete. A worker
+    reads this row to decide whether to claim it and then to build from it, and a
+    note is a finding *about* work whose description it presumes.
     """
     parts = [f"- {row.id} [{row.state.value}] {row.title}"]
     if row.owner is not None:
@@ -258,19 +286,25 @@ def _board_line(row: BoardTask, reasons: Mapping[ConcernId, BoardConcern] | None
     if row.touches:
         parts.append(f"writes {', '.join(row.touches)}")
     line = " · ".join(parts)
+    spare = _MAX_DETAIL_CHARS if budget is None else max(0, budget)
     if row.detail:
         # Indented under its row rather than joined with the separator: a
         # specification is a paragraph, and running it into a one-line summary is
         # what made the summary unreadable when this was tried inline.
-        body, dropped = _clipped(row.detail, _MAX_DETAIL_CHARS)
-        line += f"\n    {body}"
+        limit = spare if budget is None else _fits(spare, _MAX_DETAIL_CHARS, _DETAIL_INDENT)
+        body, dropped = _clipped(row.detail, limit)
+        if body:
+            line += f"{_DETAIL_INDENT}{body}"
         if dropped:
             line += f"\n    ... {dropped} more character(s) -- ask the lead for the rest"
-    line += _reasons_text(row, reasons or {})
+        spare -= _charged(body, _DETAIL_INDENT)
+    line += _reasons_text(row, reasons or {}, None if budget is None else spare)
     return line
 
 
-def _reasons_text(row: BoardTask, by_id: Mapping[ConcernId, BoardConcern]) -> str:
+def _reasons_text(
+    row: BoardTask, by_id: Mapping[ConcernId, BoardConcern], budget: int | None = None
+) -> str:
     """
     What other agents have recorded about this task, in their own words.
 
@@ -291,19 +325,113 @@ def _reasons_text(row: BoardTask, by_id: Mapping[ConcernId, BoardConcern]) -> st
     Nothing here is unreviewed. Every body has already been through the approval
     gate at ``post_concern``, and what is rendered is the text as *delivered* --
     the operator's edit included, which is the version the recipient acted on.
+
+    **``budget`` bounds the bodies and never the attributions.** Under a whole-board
+    ceiling the bodies are the first thing a long board can afford to lose, and the
+    sender and subject are the last: they are what tells a reader that a finding
+    exists and who to ask for it, which is the count-versus-subject distinction
+    above taken one step further rather than abandoned. A note whose body did not
+    fit still appears, and still says how much of it is missing.
     """
     shown = [by_id[cid] for cid in row.concerns if cid in by_id]
     if not shown:
         return ""
+    spare = budget
     out = [f"\n    -- {len(shown)} agent note(s) on this task:"]
     for concern in shown:
-        body, dropped = _clipped(concern.body, _MAX_CONCERN_CHARS)
+        limit = (
+            _MAX_CONCERN_CHARS if spare is None else _fits(spare, _MAX_CONCERN_CHARS, _NOTE_INDENT)
+        )
+        body, dropped = _clipped(concern.body, limit)
         out.append(f"\n       [{concern.sender}] {concern.subject or '(no subject)'}")
         if body:
-            out.append(f"\n       {body}")
+            out.append(f"{_NOTE_INDENT}{body}")
         if dropped:
             out.append(f"\n       ... {dropped} more character(s)")
+        if spare is not None:
+            spare -= _charged(body, _NOTE_INDENT)
     return "".join(out)
+
+
+# What a body is laid out on. Named because they are charged against a row's budget
+# rather than only written: a body and the newline and indent it arrives on are one
+# cost, and leaving the indent uncharged is what put the first version of the
+# whole-board ceiling over the ceiling it claimed to keep.
+_DETAIL_INDENT = "\n    "
+_NOTE_INDENT = "\n       "
+
+
+def _charged(body: str, indent: str) -> int:
+    """
+    What emitting ``body`` costs the row's budget, indent included, and nothing when
+    there is no body to lay out.
+    """
+    return len(body) + len(indent) if body else 0
+
+
+def _fits(spare: int, cap: int, indent: str) -> int:
+    """
+    How much text may be laid out on ``indent`` within ``spare``, and never more
+    than ``cap``.
+
+    The indent is taken off before the body rather than after, because both are
+    emitted and only the body would otherwise be measured. Charging it afterwards
+    is what put the first version of the whole-board ceiling a few characters over
+    the ceiling it claimed to keep -- once per row, which is invisible on one row
+    and is the whole overflow on forty.
+    """
+    return max(0, min(cap, spare - len(indent)))
+
+
+def _board_text(tasks: Sequence[BoardTask], by_id: Mapping[ConcernId, BoardConcern]) -> str:
+    """
+    The whole board reply, bounded.
+
+    **Rows are never dropped.** An agent reads this to find out what exists, what is
+    held and what is blocked, and it has to know about the task it is *not* going to
+    claim -- that is how it stays off another agent's files. A listing short of a row
+    is wrong in a way a listing short of a paragraph is not, and it is wrong
+    invisibly, which is the shape every other bound here avoids.
+
+    So the degradation is in the prose. Each row is measured with no prose at all;
+    what the ceiling leaves over that floor is divided equally between the rows, and
+    each spends its share on its specification first and its note bodies after.
+    Equally rather than by need: a proportional split would spend the board's budget
+    on whichever tasks were declared with the longest descriptions, and length is
+    not importance.
+
+    Under the ceiling nothing changes -- the same call with the same rows produces
+    exactly the bytes it produced before this function existed, which is what keeps
+    every board small enough to fit out of the business of being bounded.
+
+    **The structural floor wins if even it does not fit.** Then the reply is the
+    floor plus the notice explaining it, over the ceiling, rather than rows dropped
+    to get under it. A board of that many tasks has a problem this function cannot
+    solve, and hiding rows from the agent that has to work around them is not a fix.
+
+    So the bound this holds is ``max(_MAX_BOARD_CHARS, floor + notice)``, and it is
+    the ceiling itself for every board whose structure fits inside it.
+    """
+    preamble = f"{len(tasks)} task(s) on your board:"
+    full = "\n".join([preamble, *(_board_line(row, by_id) for row in tasks)])
+    if len(full) <= _MAX_BOARD_CHARS:
+        return full
+
+    # Rendered a second time rather than estimated. The floor is what the rows cost
+    # with every paragraph removed, and measuring it is the only way to divide what
+    # is left without the arithmetic and the renderer disagreeing.
+    floor = "\n".join([preamble, *(_board_line(row, by_id, budget=0) for row in tasks)])
+    notice = (
+        "\n\nThis board did not fit, so every specification and note below is cut to "
+        "{share} characters. Nothing is hidden: every task is listed and every note "
+        "names its sender and subject. claim_task returns a task's specification in "
+        "full, and the agent holding one can be asked for the rest."
+    )
+    spare = _MAX_BOARD_CHARS - len(floor) - len(notice)
+    share = max(0, spare // len(tasks))
+    return "\n".join(
+        [preamble + notice.format(share=share), *(_board_line(row, by_id, share) for row in tasks)]
+    )
 
 
 def _clipped(text: str, limit: int) -> tuple[str, int]:
@@ -558,10 +686,7 @@ def build_server(session: AgentSession) -> Any:
         # naming no task -- a second filter here would be the same rule in two
         # places, free to drift from the one the pane reads.
         by_id = {c.id: c for c in answer.concerns}
-        lines = [f"{len(answer.tasks)} task(s) on your board:"]
-        for row in answer.tasks:
-            lines.append(_board_line(row, by_id))
-        return _text("\n".join(lines))
+        return _text(_board_text(answer.tasks, by_id))
 
     @tool(
         "declare_task",
@@ -587,11 +712,12 @@ def build_server(session: AgentSession) -> Any:
                 "touches": {
                     "type": "array",
                     "description": (
-                        "Repository-relative paths this task will write, e.g. "
-                        "'pptmstr/store.py'. Any unfinished task on this board that "
-                        "writes one of them becomes a dependency automatically. Give "
-                        "them relative to the repository root: an absolute path is "
-                        "not matched against a relative one."
+                        "Paths this task will write, relative to the directory this "
+                        "session was launched in, e.g. 'pptmstr/store.py'. Any "
+                        "unfinished task on this board that writes one of them "
+                        "becomes a dependency automatically. Give them relative to "
+                        "that directory: an absolute path is not matched against a "
+                        "relative one."
                     ),
                 },
             },
