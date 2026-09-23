@@ -1,4 +1,4 @@
-.PHONY: help bootstrap probe smoke run test lint format format-file typecheck typecheck-all check clean
+.PHONY: help bootstrap probe smoke run test lint format format-file typecheck typecheck-all verify check clean
 
 PY  := .venv/bin/python
 PIP := .venv/bin/python -m pip
@@ -96,6 +96,18 @@ typecheck: venv-check ## mypy over the application
 # takes it, which is the thing that was missing.
 typecheck-all: venv-check ## mypy over the application, scripts and tests
 	.venv/bin/mypy pptmstr scripts tests
+
+# The differential probe against `/bin/bash`, in full. Outside `check` because it
+# shells out tens of thousands of times; `make test` already runs its `NAMED` arm,
+# which is the 20 cases somebody worked out and the arm measured to catch a real
+# mutation. What this adds is the exhaustive and sampled arms, which cover the
+# mistakes nobody thought of.
+#
+# Run it after any edit to `_split_segments`, `_METACHARACTERS` or `_SEPARATORS`.
+# The suite can tell you the splitter still handles the cases we know about; only
+# this can tell you it still agrees with the shell.
+verify: venv-check ## the full bash differential probe for the segment split
+	$(PY) scripts/verify_split_against_bash.py
 
 check: lint typecheck test   ## everything the CI gate would run
 

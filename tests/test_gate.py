@@ -14,6 +14,8 @@ from collections.abc import Callable
 
 import pytest
 
+from pptmstr import driver as driver_module
+from pptmstr.approval import Disposition, Policy, classify
 from pptmstr.bridge import Bridge, Decision
 from pptmstr.driver import AgentSession
 from pptmstr.model import AgentState
@@ -1154,3 +1156,329 @@ def test_a_spawn_from_inside_a_subagent_stays_out_of_the_spawn_ledger(bridge: Br
 
     assert decision_of(task.result(timeout=TIMEOUT)) == "allow"
     assert session._pending_spawns == {}
+
+
+# -- the session's policy, and its scope --------------------------------------
+#
+# What a preset *admits* is `approval.classify`'s business and is pinned in
+# test_approval.py. What is pinned here is the driver's half: which policy each
+# node's call is classified under, and that nothing but the operator ever
+# changes which policy a session holds (2026-09-21 -- see the comment at the
+# `classify` call site in `_gate_tool_use` for why the automatic version was
+# removed).
+#
+# The two helpers below are the seam between those halves. They replace
+# `classify` so that these tests state a fact about the gate rather than about
+# whichever preset happens to be filled in -- a behavioural test written against
+# the real PERMISSIVE arm would assert nothing on the day that arm is empty, and
+# would start silently re-testing `approval.py` on the day it is not.
+
+
+def _watch_policies(monkeypatch: pytest.MonkeyPatch) -> list[Policy]:
+    """
+    Record the policy each `classify` call is made under, deciding as usual.
+
+    Calls through to the real function rather than replacing it, so a change to
+    `classify`'s signature breaks this loudly instead of being absorbed.
+    """
+    seen: list[Policy] = []
+
+    def spy(tool_name, tool_input, policy=Policy.STRICT):  # type: ignore[no-untyped-def]
+        seen.append(policy)
+        return classify(tool_name, tool_input, policy)
+
+    monkeypatch.setattr(driver_module, "classify", spy)
+    return seen
+
+
+# The command `_permissive_admits_bash` treats as one the classifier could not
+# vouch for. Its text is arbitrary and deliberately so: the stub decides it, not
+# `shellscan`, so no test here turns on whether the real table happens to refuse
+# any particular string.
+UNVERIFIABLE_BASH = "make test 2>&1 | tail -40"
+
+
+def _permissive_admits_bash(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    Stand in for a preset that admits something, without coupling these tests
+    to which real command the table happens to admit on any given day.
+
+    The stub decides every `Bash` call itself rather than consulting the real
+    table for any of them, and it needs both verdicts: `_bash`'s default
+    command auto-approves, and `UNVERIFIABLE_BASH` requires approval, so a test
+    can produce a parked Bash deterministically. Deferring either to
+    `shellscan` would couple these tests to a table that moves for unrelated
+    reasons, and the coupling would be invisible until the row changed.
+    Reproducing the table here is equally out: that is `shellscan`'s test
+    file's job, and a second copy is a copy to keep true.
+    """
+
+    def stub(tool_name, tool_input, policy=Policy.STRICT):  # type: ignore[no-untyped-def]
+        if policy is Policy.PERMISSIVE and tool_name == "Bash":
+            if str(tool_input.get("command") or "") == UNVERIFIABLE_BASH:
+                return Disposition.REQUIRE_APPROVAL
+            return Disposition.AUTO_APPROVE
+        return classify(tool_name, tool_input, policy)
+
+    monkeypatch.setattr(driver_module, "classify", stub)
+
+
+def _bash(bridge: Bridge, session: AgentSession, command: str = "git status") -> str:
+    """The gate's verdict on one root Bash call, run to completion."""
+    out = bridge.submit(
+        session._pre_tool_use(hook_input("Bash", command=command), None, {})
+    ).result(timeout=TIMEOUT)
+    return decision_of(out)
+
+
+def test_a_session_is_strict_unless_it_was_launched_otherwise(bridge: Bridge) -> None:
+    """
+    The default is off, and it is off at the constructor rather than by the
+    launcher remembering to pass it. Every existing call site builds a session
+    without naming a policy.
+    """
+    assert AgentSession(bridge, "task").policy is Policy.STRICT
+
+
+def test_the_gate_classifies_under_the_policy_the_session_holds(
+    bridge: Bridge, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The wiring, asserted where it can be seen. A session holding a policy that
+    never reaches `classify` is a dial connected to nothing, and every
+    behavioural test of it would pass on the day the preset is still empty.
+    """
+    seen = _watch_policies(monkeypatch)
+    # Headless so the call resolves whichever way the real `classify` decides it:
+    # what is asserted is the policy it was decided under, not the decision.
+    session = AgentSession(bridge, "task", policy=Policy.PERMISSIVE, interactive=False)
+    session.announce()
+    _bash(bridge, session)
+    assert seen == [Policy.PERMISSIVE]
+
+
+def test_a_subagent_does_not_inherit_the_roots_policy(
+    bridge: Bridge, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    2026-08-11 §4. One `AgentSession` serves its sub-agents' PreToolUse hooks, so
+    a policy held on the session would inherit by default -- and inheriting it
+    means one approval, the spawn, silently relaxes the gate for an unbounded
+    number of downstream calls.
+
+    Asserted on the policy the call is classified under rather than on the
+    verdict, because those differ only while a preset admits something, and this
+    guarantee must not lapse in the window where none does.
+    """
+    seen = _watch_policies(monkeypatch)
+    session = AgentSession(bridge, "task", policy=Policy.PERMISSIVE, interactive=False)
+    session.announce()
+
+    nested = hook_input("Bash", command="git status")
+    nested["agent_id"] = "a-1"
+    bridge.submit(session._pre_tool_use(nested, None, {})).result(timeout=TIMEOUT)
+
+    assert seen == [Policy.STRICT]
+    # And the root's own phase is untouched by what its sub-agent was gated by.
+    assert session.policy is Policy.PERMISSIVE
+
+
+def test_the_same_command_is_admitted_for_the_root_and_refused_for_a_subagent(
+    bridge: Bridge, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Non-inheritance from the other side: one command, one session, two verdicts,
+    and the only difference is which node asked.
+
+    The test above reads the argument `classify` was given, which is what keeps
+    it honest while no preset admits anything. This one reads the gate's answer,
+    which is what an operator would see, and the pair is what distinguishes a
+    scoped policy from a session-wide one.
+    """
+    _permissive_admits_bash(monkeypatch)
+    session = AgentSession(bridge, "task", policy=Policy.PERMISSIVE, interactive=False)
+    session.announce()
+
+    nested = hook_input("Bash", command="git status")
+    nested["agent_id"] = "a-1"
+    out = bridge.submit(session._pre_tool_use(nested, None, {})).result(timeout=TIMEOUT)
+    assert decision_of(out) == "deny"
+
+    assert _bash(bridge, session) == "allow"
+
+
+def test_an_empty_agent_id_is_treated_as_a_subagent_and_not_as_the_root(
+    bridge: Bridge, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Nothing validates `agent_id` -- it is whatever `data.get` returned -- and no
+    probe has established whether an empty string is reachable. Under truthiness
+    it would read as the root and hand a sub-agent the relaxed policy, which is
+    the one direction this boundary must not fail in.
+
+    Both halves, because the two tests of "is this the root" have to agree: the
+    call is classified under STRICT *and* it does not end the root's phase. A
+    single `is None` fixed in one of the two places would pass half of this.
+    """
+    _permissive_admits_bash(monkeypatch)
+    session = AgentSession(bridge, "task", policy=Policy.PERMISSIVE, interactive=False)
+    session.announce()
+
+    anonymous = hook_input("Bash", command="git status")
+    anonymous["agent_id"] = ""
+    out = bridge.submit(session._pre_tool_use(anonymous, None, {})).result(timeout=TIMEOUT)
+
+    assert decision_of(out) == "deny"
+    assert session.policy is Policy.PERMISSIVE
+
+
+def test_nothing_but_the_operator_changes_the_policy(
+    bridge: Bridge, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    2026-08-11 §3 specified an automatic end to a relaxed phase, on the first
+    call the policy would not admit. That was reversed on 2026-09-21, by §3's
+    own argument: it rejects a time box and a call-count box because "both
+    expire for reasons the operator cannot see", and an automatic revoke is
+    that same class of event -- the operator did not choose it and could not
+    see it happen.
+
+    This replaces the whole family of tests this file used to have for the
+    automatic version -- one per shape of call that supposedly ended the
+    phase. There is no longer a shape of call that does, so there is one test
+    walking every shape this session can produce and asserting that none of
+    them touch `.policy`. `subagent_cap=0` throughout, so the capacity-refusal
+    case is reachable without a second session; nothing else here spawns, so
+    the cap costs nothing.
+    """
+    _permissive_admits_bash(monkeypatch)
+    store = Store()
+    session = AgentSession(bridge, "task", policy=Policy.PERMISSIVE, subagent_cap=0)
+    session.announce()
+
+    assert _bash(bridge, session) == "allow"
+    assert session.policy is Policy.PERMISSIVE
+
+    # A Bash the allowlist could not verify. `shellscan` refuses every
+    # pipeline (08-11 §2 scope (b)) and has no verdict meaning "this command
+    # acts", so this parks for a reason unrelated to whether the session has
+    # started acting.
+    unverifiable = bridge.submit(
+        session._pre_tool_use(hook_input("Bash", command=UNVERIFIABLE_BASH), None, {})
+    )
+    pump(store, bridge, lambda: bool(store.snapshot().approvals))
+    assert session.policy is Policy.PERMISSIVE
+    bridge.resolve(store.snapshot().approvals[0].id, Decision(approved=True))
+    unverifiable.result(timeout=TIMEOUT)
+    pump(store, bridge, lambda: not store.snapshot().approvals)
+    assert session.policy is Policy.PERMISSIVE
+
+    # A Write: the clearest act in the design, and the call the operator was
+    # actually present for. Approving it is not evidence the session should be
+    # trusted with more, and nothing here reads it as such.
+    write = bridge.submit(
+        session._pre_tool_use(hook_input("Write", file_path="/tmp/x", content="y"), None, {})
+    )
+    pump(store, bridge, lambda: bool(store.snapshot().approvals))
+    assert session.policy is Policy.PERMISSIVE
+    bridge.resolve(store.snapshot().approvals[0].id, Decision(approved=True))
+    write.result(timeout=TIMEOUT)
+    pump(store, bridge, lambda: not store.snapshot().approvals)
+    assert session.policy is Policy.PERMISSIVE
+
+    # A message to another agent. It changes what that agent does next, which
+    # is why `_REVIEW` gates the send rather than the read -- and gating it is
+    # not the same fact as ending this session's own phase.
+    message = bridge.submit(
+        session._pre_tool_use(
+            hook_input("mcp__pptmstr__post_concern", to="lead", subject="s", body="b"),
+            None,
+            {},
+        )
+    )
+    pump(store, bridge, lambda: bool(store.snapshot().approvals))
+    assert session.policy is Policy.PERMISSIVE
+    bridge.resolve(store.snapshot().approvals[0].id, Decision(approved=True))
+    message.result(timeout=TIMEOUT)
+    pump(store, bridge, lambda: not store.snapshot().approvals)
+    assert session.policy is Policy.PERMISSIVE
+
+    # A sub-agent's own Write. Classified under STRICT regardless of the
+    # root's policy (`test_a_subagent_does_not_inherit_the_roots_policy`), so
+    # it was never going to touch the root's -- confirmed rather than assumed.
+    nested = hook_input("Write", file_path="/tmp/y", content="z")
+    nested["agent_id"] = "a-1"
+    nested_call = bridge.submit(session._pre_tool_use(nested, None, {}))
+    pump(store, bridge, lambda: bool(store.snapshot().approvals))
+    bridge.resolve(store.snapshot().approvals[0].id, Decision(approved=False))
+    nested_call.result(timeout=TIMEOUT)
+    pump(store, bridge, lambda: not store.snapshot().approvals)
+    assert session.policy is Policy.PERMISSIVE
+
+    # A spawn refused by the cap, denied before `classify` ever runs
+    # (2026-09-03 §7's ordering) -- never classified under any policy at all,
+    # and still no touch to `.policy`.
+    capped = bridge.submit(session._pre_tool_use(_agent_hook("tu-capped"), None, {})).result(
+        timeout=TIMEOUT
+    )
+    assert decision_of(capped) == "deny"
+    assert session.policy is Policy.PERMISSIVE
+
+
+def test_the_operator_can_narrow_the_policy_at_any_time(
+    bridge: Bridge, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The one termination that exists now. Nothing about it changed except that
+    it is no longer racing an automatic one: the operator narrows directly,
+    at any point, and there is no boundary call to wait for because nothing
+    ends the phase on its own.
+    """
+    _permissive_admits_bash(monkeypatch)
+    session = AgentSession(bridge, "task", policy=Policy.PERMISSIVE)
+    session.announce()
+
+    assert _bash(bridge, session) == "allow"
+    session.revoke_policy()
+    session.revoke_policy()  # idempotent; a second click is not an error
+
+    assert session.policy is Policy.STRICT
+    store = Store()
+    parked = bridge.submit(session._pre_tool_use(hook_input("Bash", command="ls"), None, {}))
+    pump(store, bridge, lambda: bool(store.snapshot().approvals))
+    bridge.resolve(store.snapshot().approvals[0].id, Decision(approved=True))
+    parked.result(timeout=TIMEOUT)
+
+
+def test_the_operator_can_widen_the_policy_at_any_time(
+    bridge: Bridge, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The half of the 2026-09-21 reversal that a narrow-only dial could not have
+    given the operator. Under the old design a session narrowed once -- by the
+    gate automatically, or by the operator -- had no way back except starting
+    a new session, because every widening happened at launch. Removing the
+    automatic narrowing made that survivable for a session that is never
+    narrowed; it did nothing for one that is. `set_policy` closes it: the
+    operator's control now moves in both directions, at any point in a
+    session's life, not only at the start of one.
+    """
+    seen = _watch_policies(monkeypatch)
+    store = Store()
+    session = AgentSession(bridge, "task")
+    session.announce()
+    assert session.policy is Policy.STRICT
+
+    # STRICT parks a command PERMISSIVE would auto-approve.
+    parked = bridge.submit(session._pre_tool_use(hook_input("Bash", command="ls"), None, {}))
+    pump(store, bridge, lambda: bool(store.snapshot().approvals))
+    bridge.resolve(store.snapshot().approvals[0].id, Decision(approved=True))
+    parked.result(timeout=TIMEOUT)
+    pump(store, bridge, lambda: not store.snapshot().approvals)
+
+    session.set_policy(Policy.PERMISSIVE)
+    session.set_policy(Policy.PERMISSIVE)  # idempotent; a second click is not an error
+    assert session.policy is Policy.PERMISSIVE
+
+    assert _bash(bridge, session) == "allow"
+    assert Policy.PERMISSIVE in seen

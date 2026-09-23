@@ -178,7 +178,12 @@ def _concern_audience_lines(policy: Policy) -> list[str]:
     reply a person was supposed to prompt.
     """
     match policy:
-        case Policy.STRICT:
+        # ``PERMISSIVE`` groups here and not with the other widened rung, which is the
+        # answer a reader is most likely to get backwards. It widens ``Bash`` and
+        # nothing else, so ``post_concern`` parks under it exactly as under ``STRICT``
+        # and a person still reads every message on the way past. What a rung is called
+        # does not decide this; what it releases does.
+        case Policy.STRICT | Policy.PERMISSIVE:
             return [
                 "- Messages between agents are reviewed by the operator before they arrive, so",
                 "  write them to be read by a person as well as by their recipient.",
@@ -210,7 +215,14 @@ def _unattended_lines(policy: Policy) -> list[str]:
     makes an agent wait.
     """
     match policy:
-        case Policy.STRICT:
+        # ``PERMISSIVE`` is not an unattended session and says nothing here. Writes,
+        # spawns and messages all still park at a person under it, so an agent told
+        # "this session parks nothing at a person" would be told something false --
+        # and it is the belief that makes an agent stop waiting, which is the one
+        # place a wrong word here is expensive. Returning the empty block also keeps
+        # its prompt byte-identical to ``STRICT``'s, which is the right claim: the
+        # rung changes which of its own calls stop, not who is reading.
+        case Policy.STRICT | Policy.PERMISSIVE:
             return []
         case Policy.AUTONOMOUS:
             return [
@@ -516,6 +528,14 @@ FEATURE = WorkTemplate(
     ),
 )
 
+# A team shape, not a permission. What a session's gate admits without an
+# operator is decided by `approval.Policy`, and no template selects a policy:
+# `app._launch` resolves `LaunchSpec.template` -- a free name string -- and
+# falls back to `templates.SOLO` when nothing matches, so a policy keyed on a
+# template name could turn autonomy on with the containment silently off and
+# log it as "launched as solo". This file is also committed to being
+# operator-editable configuration, which is the wrong place for a permission.
+# planning/2026-09-03-a-dangerously-autonomous-mode.md §6.7.
 RESEARCH = WorkTemplate(
     name="research",
     description="A coordinator and two investigators briefed to disagree with each other.",

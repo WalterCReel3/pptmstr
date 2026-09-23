@@ -471,6 +471,10 @@ class LaunchSpec:
     # Per launch and nowhere else: this is deliberately absent from `Settings`, because
     # a persisted toggle is set for the session the operator is watching and forgotten
     # for the four they are not.
+    #
+    # The launch-time choice only. A session's live policy moves after it starts, via
+    # `driver.AgentSession.set_policy`, so no surface may render this as what a running
+    # session is currently gated by.
     policy: Policy = Policy.STRICT
     # How many sub-agents this one session may run at once, or None to use
     # ``Settings.subagent_cap``. ``app._launch`` is the only reader.

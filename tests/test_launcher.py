@@ -27,7 +27,7 @@ from pptmstr import cli_version, sandbox
 from pptmstr.approval import Policy
 from pptmstr.model import LaunchSpec
 from pptmstr.sessions import Overlay, SessionMark, SessionRow, load_overlay, overlay_path
-from pptmstr.ui import launcher
+from pptmstr.ui import launcher, widgets
 from pptmstr.ui.launcher import MODELS, LauncherState, SessionPicker, age_label
 
 
@@ -341,15 +341,19 @@ def test_ready_ignores_whitespace_only_drafts(task: str, ready: bool) -> None:
     assert LauncherState(task=task).ready is ready
 
 
-def test_spec_strips_task_and_resolves_model() -> None:
-    state = LauncherState(task="  audit the parser  ", cwd="/tmp/x", model_index=1)
+def test_spec_strips_task_and_resolves_model(tmp_path: Path) -> None:
+    # An already-resolved directory, so `spec`'s realpath is the identity here and
+    # the expectation stays a literal. A fabricated path would not be: `/tmp` is a
+    # symlink to `/private/tmp` on macOS.
+    cwd = str(tmp_path.resolve())
+    state = LauncherState(task="  audit the parser  ", cwd=cwd, model_index=1)
     assert state.spec() == LaunchSpec(
         task="audit the parser",
         model=MODELS[1],
-        cwd="/tmp/x",
+        cwd=cwd,
         # A directory no repository encloses is its own base, which is what makes
         # adopting the field a no-op for a scratch directory.
-        session_base="/tmp/x",
+        session_base=cwd,
         template="solo",
         brief=None,
     )
@@ -624,17 +628,18 @@ def test_picking_a_row_puts_its_id_on_the_spec() -> None:
     assert state.spec().resume == "b"
 
 
-def test_picking_nothing_leaves_todays_fresh_launch_spec_untouched() -> None:
+def test_picking_nothing_leaves_todays_fresh_launch_spec_untouched(tmp_path: Path) -> None:
     """
     The default path. A draft nobody opened the resume section on must produce byte
     for byte the spec it produced before the section existed.
     """
-    state = LauncherState(task="  audit the parser  ", cwd="/tmp/x", model_index=1)
+    cwd = str(tmp_path.resolve())
+    state = LauncherState(task="  audit the parser  ", cwd=cwd, model_index=1)
     assert state.spec() == LaunchSpec(
         task="audit the parser",
         model=MODELS[1],
-        cwd="/tmp/x",
-        session_base="/tmp/x",
+        cwd=cwd,
+        session_base=cwd,
         template="solo",
         brief=None,
         resume=None,
@@ -963,6 +968,14 @@ def _run_draw(
     fake_widgets = MagicMock()
     fake_widgets.ellipsis.side_effect = lambda text, width: text
     fake_widgets.multiline_input.side_effect = lambda *a, **k: (submit, state.task)
+    # The two gate helpers run for real, because what they return is the thing under
+    # test rather than scenery. They are pure -- set lookups and the shell scan, no
+    # imgui and no IO -- so calling through costs nothing a fake would have saved. Left
+    # as bare mocks they are worse than useless here: ``MagicMock`` iterates empty and
+    # is truthy, so ``adds`` came back as the string "adds " and a test asserting the
+    # rung's grant is named would have passed against every rung equally.
+    fake_widgets.gate_adds.side_effect = widgets.gate_adds
+    fake_widgets.gate_parks.side_effect = widgets.gate_parks
 
     monkeypatch.setattr(launcher, "imgui", fake)
     monkeypatch.setattr(launcher, "widgets", fake_widgets)
@@ -1021,7 +1034,7 @@ def test_the_mode_is_off_until_it_is_asked_for() -> None:
     The default launch is today's launch. Everything else in this section is about
     what happens when an operator departs from it deliberately.
     """
-    assert LauncherState().dangerous is False
+    assert LauncherState().policy is Policy.STRICT
 
 
 def test_a_draft_that_did_not_ask_for_the_mode_builds_the_spec_it_built_before(
@@ -1046,7 +1059,7 @@ def test_the_mode_puts_the_containment_and_the_policy_on_the_spec(tmp_path: Path
     containment is the only thing bounding what a released ``Bash`` reaches, so a spec
     carrying one of them is a worse state than a spec carrying neither.
     """
-    spec = LauncherState(task=A_PREMISE, cwd=str(tmp_path), dangerous=True).spec()
+    spec = LauncherState(task=A_PREMISE, cwd=str(tmp_path), policy=Policy.AUTONOMOUS).spec()
     assert spec.containment == sandbox.containment_settings()
     assert spec.policy is Policy.AUTONOMOUS
 
@@ -1060,7 +1073,7 @@ def test_nothing_about_the_rest_of_the_draft_moves_when_the_mode_is_on(
     """
     off = LauncherState(task=A_PREMISE, cwd=str(tmp_path), model_index=1, brief=" b ").spec()
     on = LauncherState(
-        task=A_PREMISE, cwd=str(tmp_path), model_index=1, brief=" b ", dangerous=True
+        task=A_PREMISE, cwd=str(tmp_path), model_index=1, brief=" b ", policy=Policy.AUTONOMOUS
     ).spec()
     assert replace(on, containment=None, policy=Policy.STRICT) == off
 
@@ -1102,8 +1115,8 @@ def test_a_refused_directory_launches_under_the_ordinary_gate() -> None:
     The refusal is not advice. A draft that asks for the mode in a directory it is
     refused for produces the defaults, which is today's launch.
     """
-    state = LauncherState(task=A_PREMISE, cwd=INSIDE_THE_CHECKOUT, dangerous=True)
-    assert state.dangerous is True
+    state = LauncherState(task=A_PREMISE, cwd=INSIDE_THE_CHECKOUT, policy=Policy.AUTONOMOUS)
+    assert state.policy is Policy.AUTONOMOUS
     assert state.dangerous_engaged is False
     spec = state.spec()
     assert spec.containment is None
@@ -1180,27 +1193,59 @@ def test_the_dial_is_drawn_whether_or_not_it_is_on(
     The danger is in the words, not only in the colour: hue is never the only channel
     here, and on ``high_contrast`` the danger role moves toward the text role.
     """
-    lines, _ = _drawn(monkeypatch, LauncherState(task="t", cwd=str(tmp_path)))
-    assert any("dangerous" in line for line in lines)
+    for rung in Policy:
+        fake, _ = _run_draw(monkeypatch, LauncherState(task="t", cwd=str(tmp_path), policy=rung))
+        assert "gate" in [call.args[0] for call in fake.combo.call_args_list], rung
+        # Not the control alone: what the chosen rung still holds is beside it at every
+        # rung, so the posture is readable without working it out from a one-word name.
+        assert any("still parks" in line for line in _lines(fake)), rung
 
 
-def test_the_label_does_not_understate_what_the_tick_grants(
+def test_the_dial_does_not_understate_what_the_top_rung_grants(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """
-    The hazard is a label narrower than the grant, which is worse than no label: an
-    operator who reads "run Bash unattended" and ticks it has consented to one tool and
-    been given every tool the gate would have held. ``AUTONOMOUS`` releases the whole of
-    ``approval._REVIEW``, so the checkbox has to name more than one kind of thing.
+    The hazard is a description narrower than the grant, which is worse than none: an
+    operator who reads "run Bash unattended" and chooses it has consented to one tool
+    and been given every tool the gate would have held. ``AUTONOMOUS`` releases the
+    whole of ``approval._REVIEW``, so the screen has to name more than one kind.
 
-    Asserted against the **checkbox label** specifically rather than against the frame,
-    because the detail below it is read after the decision and the label is read before.
+    Asserted against the line drawn *beside the dial*, which is read at the moment of
+    choosing, rather than against the containment detail below it, which is read after.
+    That line is derived from the classifier by ``widgets.gate_adds`` rather than
+    written out, which is what stops it understating a rung that later grows: the
+    former hand-written label could be widened by an edit to ``approval.py`` alone.
     """
-    lines, _ = _drawn(monkeypatch, LauncherState(task="t", cwd=str(tmp_path)))
-    label = next(line for line in lines if "dangerous" in line)
-    assert "unattended" in label
+    lines, _ = _drawn(
+        monkeypatch,
+        LauncherState(task=A_PREMISE, cwd=str(tmp_path), policy=Policy.AUTONOMOUS),
+    )
+    adds = next(line for line in lines if line.startswith("adds "))
     # More than one kind, and none of them the single tool the old label named.
-    assert "writes" in label and "spawns" in label and "messages" in label
+    assert "writes" in adds and "spawns" in adds and "messages" in adds
+
+
+def test_the_middle_rung_is_not_described_as_the_top_one(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """
+    The rung whose name most oversells it. ``PERMISSIVE`` reads as "the gate is off"
+    and it is not -- it adds read-only shell and nothing else -- so the screen has to
+    say so where the choice is made, or the name is the only thing calibrated against.
+
+    The shell probes are the discriminating pair: a rung that admitted both would be
+    admitting commands that act, which is the claim ``shellscan`` exists to refuse.
+    """
+    lines, _ = _drawn(
+        monkeypatch,
+        LauncherState(task=A_PREMISE, cwd=str(tmp_path), policy=Policy.PERMISSIVE),
+    )
+    adds = next(line for line in lines if line.startswith("adds "))
+    parks = next(line for line in lines if line.startswith("still parks "))
+    assert "shell reads" in adds
+    assert "shell that writes" in parks
+    for held in ("writes", "spawns", "messages", "the web"):
+        assert held in parks, held
 
 
 def test_an_engaged_mode_says_what_it_releases_and_what_it_does_not(
@@ -1217,7 +1262,9 @@ def test_an_engaged_mode_says_what_it_releases_and_what_it_does_not(
     ``WebFetch``, all of which run in the CLI process. The absence is asserted because a
     reassurance is the kind of line that gets added back by someone filling out a screen.
     """
-    lines, _ = _drawn(monkeypatch, LauncherState(task=A_PREMISE, cwd=str(tmp_path), dangerous=True))
+    lines, _ = _drawn(
+        monkeypatch, LauncherState(task=A_PREMISE, cwd=str(tmp_path), policy=Policy.AUTONOMOUS)
+    )
     released = next(line for line in lines if "without asking" in line)
     assert "writes files" in released and "spawns sub-agents" in released
     assert "never heard of is still not released" in released
@@ -1238,7 +1285,9 @@ def test_the_engaged_mode_names_the_boundary_the_released_tools_do_not_get(
     containment and omits the hole in it, which reads as a stronger guarantee than the
     one being offered.
     """
-    lines, _ = _drawn(monkeypatch, LauncherState(task=A_PREMISE, cwd=str(tmp_path), dangerous=True))
+    lines, _ = _drawn(
+        monkeypatch, LauncherState(task=A_PREMISE, cwd=str(tmp_path), policy=Policy.AUTONOMOUS)
+    )
     uncontained = [line for line in lines if "not contained" in line]
     assert len(uncontained) == 1
     assert "WebFetch" in uncontained[0] and "WebSearch" in uncontained[0]
@@ -1258,7 +1307,9 @@ def test_the_two_boundaries_are_named_as_two_mechanisms(
     fail differently and one of them is a ``PreToolUse`` decision they can see in the
     transcript.
     """
-    lines, _ = _drawn(monkeypatch, LauncherState(task="t", cwd=str(tmp_path), dangerous=True))
+    lines, _ = _drawn(
+        monkeypatch, LauncherState(task="t", cwd=str(tmp_path), policy=Policy.AUTONOMOUS)
+    )
     sandboxed = next(line for line in lines if "contained:" in line and "Bash" in line)
     assert sandbox.ALLOWED_DOMAIN in sandboxed
     gated = next(line for line in lines if "held to that same directory" in line)
@@ -1292,7 +1343,7 @@ def test_the_cap_in_force_is_on_screen_when_the_mode_is_engaged(
     """
     lines, _ = _drawn(
         monkeypatch,
-        LauncherState(task=A_PREMISE, cwd=str(tmp_path), dangerous=True),
+        LauncherState(task=A_PREMISE, cwd=str(tmp_path), policy=Policy.AUTONOMOUS),
         subagent_cap=8,
     )
     capped = next(line for line in lines if "sub-agents are capped" in line)
@@ -1378,7 +1429,7 @@ def test_the_cap_on_screen_is_the_one_this_launch_would_get(
     """
     lines, _ = _drawn(
         monkeypatch,
-        LauncherState(task=A_PREMISE, cwd=str(tmp_path), dangerous=True, subagent_cap=2),
+        LauncherState(task=A_PREMISE, cwd=str(tmp_path), policy=Policy.AUTONOMOUS, subagent_cap=2),
         subagent_cap=8,
     )
 
@@ -1451,13 +1502,13 @@ def test_an_unattended_launch_is_held_until_the_premise_is_more_than_a_subject_l
     beside it, and the draft survives, because the remedy is to keep typing in the field
     already on screen.
     """
-    state = LauncherState(task="make it autonomous", cwd=str(tmp_path), dangerous=True)
+    state = LauncherState(task="make it autonomous", cwd=str(tmp_path), policy=Policy.AUTONOMOUS)
     assert state.launch_hold() == launcher._HOLD_THIN
 
     _, launched = _drawn(monkeypatch, state, click_launch=True)
     assert launched == []
     assert state.task == "make it autonomous"
-    assert state.dangerous is True
+    assert state.policy is Policy.AUTONOMOUS
 
     state.task = "make it autonomous\nand here is what that has to mean"
     assert state.launch_hold() is None
@@ -1472,7 +1523,7 @@ def test_ctrl_enter_does_not_get_past_a_thin_premise_either(
     the key the operator's hands are already on. The same defect the version gate's hold
     was written against, and it does not stop being one for a different reason to hold.
     """
-    state = LauncherState(task="one line", cwd=str(tmp_path), dangerous=True)
+    state = LauncherState(task="one line", cwd=str(tmp_path), policy=Policy.AUTONOMOUS)
     _, launched = _drawn(monkeypatch, state, submit=True)
     assert launched == []
 
@@ -1486,12 +1537,16 @@ def test_naming_an_existing_brief_is_a_premise_and_lifts_the_hold(tmp_path: Path
     them for the length of the covering message would be refusing the better-specified of
     the two launches.
     """
-    state = LauncherState(task="continue", cwd=str(tmp_path), dangerous=True, brief="/tmp/b")
+    state = LauncherState(
+        task="continue", cwd=str(tmp_path), policy=Policy.AUTONOMOUS, brief="/tmp/b"
+    )
     assert state.premise_is_thin is False
     # Not "is None": this draft has not read a version yet, so the version gate holds it
     # for its own reason. What is asserted is that the premise is no longer one of them.
     assert state.launch_hold() != launcher._HOLD_THIN
-    assert LauncherState(task="continue", cwd=str(tmp_path), dangerous=True).premise_is_thin
+    assert LauncherState(
+        task="continue", cwd=str(tmp_path), policy=Policy.AUTONOMOUS
+    ).premise_is_thin
 
 
 def test_a_thin_premise_is_said_before_the_machine_is_asked_about(
@@ -1504,7 +1559,7 @@ def test_a_thin_premise_is_said_before_the_machine_is_asked_about(
     subprocess is still running. Showing them the machine's message first would spend the
     wait telling them about something they cannot do anything about.
     """
-    state = LauncherState(task="one line", cwd=str(tmp_path), dangerous=True)
+    state = LauncherState(task="one line", cwd=str(tmp_path), policy=Policy.AUTONOMOUS)
     # Deliberately the worst machine: even then the premise is what it says.
     _drawn(monkeypatch, state, prober=_below)
     assert state.launch_hold() == launcher._HOLD_THIN
@@ -1521,7 +1576,7 @@ def test_a_refused_directory_shows_no_grant_it_is_not_going_to_make(
     """
     lines, _ = _drawn(
         monkeypatch,
-        LauncherState(task=A_PREMISE, cwd=INSIDE_THE_CHECKOUT, dangerous=True),
+        LauncherState(task=A_PREMISE, cwd=INSIDE_THE_CHECKOUT, policy=Policy.AUTONOMOUS),
         subagent_cap=8,
     )
     assert any("refused" in line for line in lines)
@@ -1539,7 +1594,8 @@ def test_a_refused_directory_says_so_where_the_dial_is(
     reason is on screen beside the box that was ticked.
     """
     lines, _ = _drawn(
-        monkeypatch, LauncherState(task=A_PREMISE, cwd=INSIDE_THE_CHECKOUT, dangerous=True)
+        monkeypatch,
+        LauncherState(task=A_PREMISE, cwd=INSIDE_THE_CHECKOUT, policy=Policy.AUTONOMOUS),
     )
     assert any("refused" in line and "checkout" in line for line in lines)
 
@@ -1553,7 +1609,7 @@ def test_the_modal_launches_the_mode_it_was_showing(
     """
     _, launched = _drawn(
         monkeypatch,
-        LauncherState(task=A_PREMISE, cwd=str(tmp_path), dangerous=True),
+        LauncherState(task=A_PREMISE, cwd=str(tmp_path), policy=Policy.AUTONOMOUS),
         click_launch=True,
     )
     assert [s.policy for s in launched] == [Policy.AUTONOMOUS]
@@ -1565,7 +1621,7 @@ def test_a_launch_from_a_refused_directory_carries_nothing(
 ) -> None:
     _, launched = _drawn(
         monkeypatch,
-        LauncherState(task=A_PREMISE, cwd=INSIDE_THE_CHECKOUT, dangerous=True),
+        LauncherState(task=A_PREMISE, cwd=INSIDE_THE_CHECKOUT, policy=Policy.AUTONOMOUS),
         click_launch=True,
     )
     assert [s.containment for s in launched] == [None]
@@ -1582,11 +1638,11 @@ def test_the_mode_does_not_survive_the_launch_it_was_made_for(
     run is as unwatched as the first of the next. The draft survives a cancel, as it
     always has; only a launch clears this.
     """
-    state = LauncherState(task=A_PREMISE, cwd=str(tmp_path), dangerous=True)
+    state = LauncherState(task=A_PREMISE, cwd=str(tmp_path), policy=Policy.AUTONOMOUS)
     _, launched = _drawn(monkeypatch, state, click_launch=True)
 
     assert launched[0].containment is not None
-    assert state.dangerous is False
+    assert state.policy is Policy.STRICT
     assert state.spec().containment is None
 
 
@@ -1597,9 +1653,9 @@ def test_cancelling_keeps_the_mode_the_operator_set(
     The draft survives a dismissal on purpose -- going to look up a directory must not
     cost what was already chosen. Only the launch clears it.
     """
-    state = LauncherState(task=A_PREMISE, cwd=str(tmp_path), dangerous=True)
+    state = LauncherState(task=A_PREMISE, cwd=str(tmp_path), policy=Policy.AUTONOMOUS)
     _drawn(monkeypatch, state)
-    assert state.dangerous is True
+    assert state.policy is Policy.AUTONOMOUS
 
 
 # ---------------------------------------------------------------------------
@@ -1645,7 +1701,7 @@ def test_a_directory_already_refused_is_not_also_measured_against_the_cli(
     hold a button for a launch that is going to proceed under the ordinary gate.
     """
     prober, calls = _counted(_below)
-    state = LauncherState(task=A_PREMISE, cwd=INSIDE_THE_CHECKOUT, dangerous=True)
+    state = LauncherState(task=A_PREMISE, cwd=INSIDE_THE_CHECKOUT, policy=Policy.AUTONOMOUS)
 
     _, launched = _drawn(monkeypatch, state, click_launch=True, prober=prober, settle=False)
 
@@ -1663,7 +1719,7 @@ def test_a_cli_below_the_floor_holds_the_launch_and_keeps_the_draft(
     several hundred milliseconds later that the CLI is too old -- into a log tab that is
     not on screen. A silent refusal that also destroys work reads as a broken button.
     """
-    state = LauncherState(task=A_PREMISE, cwd=str(tmp_path), dangerous=True)
+    state = LauncherState(task=A_PREMISE, cwd=str(tmp_path), policy=Policy.AUTONOMOUS)
 
     fake, launched = _run_draw(monkeypatch, state, click_launch=True, prober=_below)
     lines = _lines(fake)
@@ -1672,7 +1728,7 @@ def test_a_cli_below_the_floor_holds_the_launch_and_keeps_the_draft(
     assert state.task == A_PREMISE
     # And the mode is still ticked, so correcting the machine does not also mean
     # remembering what was asked for.
-    assert state.dangerous is True
+    assert state.policy is Policy.AUTONOMOUS
     assert any("2.1.9" in line and cli_version.SANDBOX_FLOOR in line for line in lines)
     # Both halves of the refusal: the button is visibly dead, and something beside it
     # says why a press did nothing.
@@ -1694,7 +1750,7 @@ def test_a_cli_whose_version_cannot_be_read_is_refused_as_readily(
     contained -- which is the exact failure the containment exists to prevent, arrived
     at by trusting a "probably fine".
     """
-    state = LauncherState(task=A_PREMISE, cwd=str(tmp_path), dangerous=True)
+    state = LauncherState(task=A_PREMISE, cwd=str(tmp_path), policy=Policy.AUTONOMOUS)
 
     lines, launched = _drawn(monkeypatch, state, click_launch=True, prober=_unreadable)
 
@@ -1710,7 +1766,7 @@ def test_a_cli_that_clears_the_floor_launches_the_mode_it_was_showing(
     The control the three refusals above are worthless without. A gate that held every
     launch would pass every one of them and ship a mode nobody can use.
     """
-    state = LauncherState(task=A_PREMISE, cwd=str(tmp_path), dangerous=True)
+    state = LauncherState(task=A_PREMISE, cwd=str(tmp_path), policy=Policy.AUTONOMOUS)
 
     lines, launched = _drawn(monkeypatch, state, click_launch=True, prober=_meets)
 
@@ -1736,7 +1792,7 @@ def test_the_launch_is_held_until_the_version_has_been_read(
         release.wait(timeout=5.0)
         return _meets()
 
-    state = LauncherState(task=A_PREMISE, cwd=str(tmp_path), dangerous=True)
+    state = LauncherState(task=A_PREMISE, cwd=str(tmp_path), policy=Policy.AUTONOMOUS)
     try:
         lines, launched = _drawn(monkeypatch, state, click_launch=True, prober=slow, settle=False)
 
@@ -1759,14 +1815,14 @@ def test_ctrl_enter_does_not_get_past_a_held_launch(
     reachable from the key most likely to be used, since the operator's hands are
     already in the box they typed the paragraph into.
     """
-    state = LauncherState(task=A_PREMISE, cwd=str(tmp_path), dangerous=True)
+    state = LauncherState(task=A_PREMISE, cwd=str(tmp_path), policy=Policy.AUTONOMOUS)
 
     _, refused = _drawn(monkeypatch, state, submit=True, prober=_below)
     assert refused == []
     assert state.task == A_PREMISE
 
     # The same key, on a machine that clears the floor, still launches.
-    ok = LauncherState(task=A_PREMISE, cwd=str(tmp_path), dangerous=True)
+    ok = LauncherState(task=A_PREMISE, cwd=str(tmp_path), policy=Policy.AUTONOMOUS)
     _, launched = _drawn(monkeypatch, ok, submit=True, prober=_meets)
     assert [s.policy for s in launched] == [Policy.AUTONOMOUS]
 
@@ -1784,7 +1840,7 @@ def test_the_check_is_started_and_landed_by_the_draw_alone(
     reopening the modal.
     """
     prober, calls = _counted(_below)
-    state = LauncherState(task=A_PREMISE, cwd=str(tmp_path), dangerous=True)
+    state = LauncherState(task=A_PREMISE, cwd=str(tmp_path), policy=Policy.AUTONOMOUS)
 
     lines: list[str] = []
     for _ in range(400):
@@ -1808,7 +1864,7 @@ def test_the_version_is_read_once_and_not_once_a_frame(
     frame for as long as the box stays ticked.
     """
     prober, calls = _counted(_meets)
-    state = LauncherState(task=A_PREMISE, cwd=str(tmp_path), dangerous=True)
+    state = LauncherState(task=A_PREMISE, cwd=str(tmp_path), policy=Policy.AUTONOMOUS)
 
     for _ in range(5):
         _drawn(monkeypatch, state, prober=prober)

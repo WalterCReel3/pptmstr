@@ -52,6 +52,13 @@ MODELS: tuple[str, ...] = (
 
 TITLE = "New Task"
 
+# The rungs of the dial, read off the enum rather than listed, so a preset renamed
+# or added in approval.py cannot leave a stale second copy here. The consequence is
+# that every member is offerable at launch: a preset that must not be is a
+# distinction `Policy` does not currently draw, and adding one means drawing it here
+# too.
+POLICIES: tuple[Policy, ...] = tuple(Policy)
+
 # Ctrl+N. Key members are plain ints here and do not support ``|`` as enums, so the
 # chord is built from int() -- ``imgui.Key.mod_ctrl | imgui.Key.n`` raises.
 CHORD = int(imgui.Key.mod_ctrl) | int(imgui.Key.n)
@@ -565,6 +572,22 @@ class LauncherState:
     # Index into templates.names(). "solo" is first and is the default, so the
     # launcher behaves exactly as it did before teams existed unless asked otherwise.
     template_index: int = 0
+    # The gate rung this launch asks for. The value and not an index into
+    # ``POLICIES``, so reordering the enum cannot silently move the default off
+    # ``STRICT`` -- the one default worth being unable to change by accident.
+    #
+    # What was *asked for*, which at the top rung is not the same question as what
+    # this launch gets -- see ``granted_policy`` and ``dangerous_engaged``. Held as
+    # asked rather than as granted so that a refusal does not rewrite the operator's
+    # answer behind them: correcting the directory engages the mode without a second
+    # trip to the dial, and the refusal on screen is what says which of the two states
+    # they are in.
+    #
+    # Nothing here is written to ``Settings``. 08-11 rejected a persisted toggle
+    # because "the operator sets it for the session they are watching and forgets it
+    # is set for the four they are not", and ``draw`` resets this at the launch for the
+    # same reason one process's fifth session is as unwatched as the next run's first.
+    policy: Policy = Policy.STRICT
     # True from the frame the modal is drawn until the frame it stops being drawn.
     # Read by the global key handler, which runs before any drawing and therefore
     # sees the previous frame's value -- which is the correct one, because the key
@@ -574,18 +597,6 @@ class LauncherState:
     # it because a picked session is part of the intent -- it is what decides whether
     # the task typed above starts a conversation or continues one.
     picker: SessionPicker = field(default_factory=SessionPicker)
-    # Whether the operator asked for the dangerously autonomous mode on *this* launch,
-    # which is not the same question as whether this launch gets it -- see
-    # ``dangerous_engaged``. Held as what was asked rather than as what was granted so
-    # that a refusal does not rewrite the operator's answer behind them: correcting the
-    # directory engages the mode without a second click, and the refusal on screen is
-    # what says which of the two states they are in.
-    #
-    # Nothing here is written to ``Settings``. 08-11 rejected a persisted toggle
-    # because "the operator sets it for the session they are watching and forgets it
-    # is set for the four they are not", and ``draw`` clears this at the launch for the
-    # same reason one process's fifth session is as unwatched as the next run's first.
-    dangerous: bool = False
     # An override of ``Settings.subagent_cap`` for this launch, or None to use the
     # setting. None is the untouched default, so a draft nobody edited produces the
     # spec it produced before the control existed.
@@ -665,8 +676,28 @@ class LauncherState:
     def dangerous_engaged(self) -> bool:
         """
         Whether this launch actually carries the mode: asked for, and not refused.
+
+        Only the top rung asks. ``PERMISSIVE`` is not a contained mode and never
+        consults the directory, so it is not "refused" here -- it is simply not this
+        question, and answering False for it is what keeps the containment machinery
+        off a rung that does not want it.
         """
-        return self.dangerous and self.containment_refusal() is None
+        return self.policy is Policy.AUTONOMOUS and self.containment_refusal() is None
+
+    @property
+    def granted_policy(self) -> Policy:
+        """
+        The rung this launch actually runs under, as opposed to the one asked for.
+
+        They differ in exactly one case: ``AUTONOMOUS`` asked for where containment is
+        refused. That falls back to ``STRICT`` rather than to ``PERMISSIVE``, and the
+        distance is deliberate -- an operator who reached the top rung was not asking
+        for the middle one, and quietly seating them one rung down would be a gate
+        nobody chose. The refusal is on screen; the launch is the one it describes.
+        """
+        if self.policy is Policy.AUTONOMOUS and not self.dangerous_engaged:
+            return Policy.STRICT
+        return self.policy
 
     @property
     def premise_is_thin(self) -> bool:
@@ -755,13 +786,18 @@ class LauncherState:
         before the section existed.
         """
         resolved_cwd = os.path.realpath(self.cwd.strip() or ".")
-        # Both or neither, and the pairing is the mode. The policy releases ``Bash``
-        # from the gate and the containment is the only thing bounding what a released
-        # ``Bash`` reaches, so a spec carrying the policy alone is an unattended agent
-        # with the whole machine, and one carrying the containment alone is a sandbox
-        # around a gate that is still asking. A draft that did not ask for the mode, or
-        # asked in a directory it is refused for, produces the two defaults -- which is
-        # the spec this built before the mode existed.
+        # Both or neither, and the pairing is the top rung. ``AUTONOMOUS`` releases
+        # every reviewed tool and the containment is the only thing bounding what a
+        # released ``Bash`` reaches, so a spec carrying that rung alone is an unattended
+        # agent with the whole machine, and one carrying the containment alone is a
+        # sandbox around a gate that is still asking. A draft that did not reach the top
+        # rung, or reached it in a directory it is refused for, produces the two
+        # defaults -- which is the spec this built before the mode existed.
+        #
+        # ``PERMISSIVE`` is deliberately outside that pairing and carries no
+        # containment. What the sandbox bounds is writes and network, which that rung
+        # already refuses syntactically, so pairing them would cost the operator
+        # working invocations to buy the gate nothing. See ``approval.Policy``.
         engaged = self.dangerous_engaged
         return LaunchSpec(
             task=self.task.strip(),
@@ -787,12 +823,12 @@ class LauncherState:
             brief=self.brief.strip() or None,
             resume=self.picker.selected,
             containment=sandbox.containment_settings() if engaged else None,
-            policy=Policy.AUTONOMOUS if engaged else Policy.STRICT,
-            # Unconditionally, and not gated on ``engaged`` as the two above are.
-            # Those pair because the policy without the containment is an unattended
-            # agent with the whole machine; a cap is capacity and pairs with nothing,
-            # so an operator who sized this launch for two sub-agents gets two whether
-            # or not they also ticked the mode.
+            policy=self.granted_policy,
+            # Unconditionally, and not gated on ``engaged`` as the containment is. The
+            # policy and the containment pair because the top rung without the
+            # containment is an unattended agent with the whole machine; a cap is
+            # capacity and pairs with nothing, so an operator who sized this launch for
+            # two sub-agents gets two whether or not they also reached the top rung.
             subagent_cap=self.subagent_cap,
         )
 
@@ -924,7 +960,8 @@ def _containment_section(
     state: LauncherState, *, prober: Prober, subagent_cap: int | None = None
 ) -> None:
     """
-    The dial for the dangerously autonomous mode, and the refusals where it cannot go.
+    What the top rung costs, and the refusals where it cannot go. Drawn only when the
+    dial is on ``AUTONOMOUS``; the rung itself is chosen above, on the one dial.
 
     On the modal rather than as a follow-up because ``planning/2026-08-22`` D3 --
     "displaying the dial is part of shipping the dial, not a follow-up" -- binds
@@ -933,12 +970,15 @@ def _containment_section(
 
     **The word carries the danger, not the colour.** Hue is never the only channel on
     this screen (design §6.1), and on ``high_contrast`` the danger role moves toward
-    the text role -- so the label says "dangerous" in text that survives every
-    palette, and the colour only makes it findable.
+    the text role -- so this block spells the cost out in text that survives every
+    palette, and the colour only makes it findable. The rung's own name on the dial
+    carries the first half of that: it is "autonomous" rather than anything reassuring,
+    per ``approval.Policy``'s rule that a rung names the posture and never the
+    permission.
 
-    **The released set is every tool the gate would otherwise have held**, so the
-    label names the kinds rather than one tool: a label that said only ``Bash`` would
-    understate what the tick grants, and understating it is worse than saying nothing.
+    **The released set is every tool the gate would otherwise have held**, so this
+    names the kinds rather than one tool: a line that said only ``Bash`` would
+    understate what the rung grants, and understating it is worse than saying nothing.
 
     What the contained half claims is limited to what has been measured, and the
     measurements are per tool rather than per mode. ``scripts/verify_sandbox_gate.py``
@@ -961,19 +1001,17 @@ def _containment_section(
     the directory already refused is not a contained launch, so reading the CLI's
     version for it would spawn a subprocess to answer a question nothing asks.
     """
+    # Nothing at all for the rungs that do not ask for containment, rather than a
+    # disabled block saying so. The dial above already prints what the chosen rung adds
+    # and what it still parks, so a second "off" line here would be the same fact in
+    # weaker words -- and drawing a containment heading under ``PERMISSIVE`` would
+    # suggest that rung has a contained and an uncontained form. It has one.
+    if state.policy is not Policy.AUTONOMOUS:
+        return
+
     imgui.spacing()
     imgui.separator()
     imgui.spacing()
-
-    _, state.dangerous = imgui.checkbox(
-        "dangerous mode: run unattended -- writes, spawns and messages included",
-        state.dangerous,
-    )
-    if not state.dangerous:
-        imgui.text_disabled(
-            "off -- every write, command, spawn and message stops here for you, as it does today"
-        )
-        return
 
     imgui.push_text_wrap_pos(0.0)
     gate = state.version_gate
@@ -1137,6 +1175,20 @@ def draw(
     # description is on screen rather than a tooltip away.
     imgui.text_disabled(templates.BUILT_IN[state.template_index].description)
 
+    # The rung, above both of the controls below because each is read against it: the
+    # cap bounds fan-out under every rung, and the containment block is the top rung's
+    # own precondition rather than a control in its own right.
+    changed, picked = imgui.combo("gate", POLICIES.index(state.policy), [p.value for p in POLICIES])
+    if changed:
+        state.policy = POLICIES[picked]
+    # Both halves, derived from the classifier rather than described, because this
+    # is where the operator decides. The name of a rung is not enough to calibrate
+    # against -- PERMISSIVE reads as "the gate is off" and it is not -- so what it
+    # adds and what it leaves parked are both on screen at the moment of choosing.
+    adds = widgets.gate_adds(state.policy)
+    imgui.text_disabled(f"adds {', '.join(adds)}" if adds else "nothing runs unattended")
+    imgui.text_disabled(f"still parks {', '.join(widgets.gate_parks(state.policy))}")
+
     # Here, with the ordinary launch fields, rather than inside the containment
     # section: the cap bounds fan-out under every policy and the operator asked for an
     # override at launch, not an override under the dangerous mode. What the mode
@@ -1213,7 +1265,7 @@ def draw(
         # and the next Ctrl+N is the one the operator types a task into without
         # re-reading the panel above the button -- which is 08-11's "forgets it is set
         # for the four they are not" happening inside one run rather than across two.
-        state.dangerous = False
+        state.policy = Policy.STRICT
         # Cleared with the task, for the same reason the mode is: a number sized for
         # one piece of work outliving it means the next Ctrl+N silently carries a cap
         # the operator chose for something else. Back to None is back to the setting,
