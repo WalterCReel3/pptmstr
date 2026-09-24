@@ -15,18 +15,20 @@ import time
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import assert_never
 
 from imgui_bundle import hello_imgui, imgui, immapp
 
 from . import brief as brief_mod
+from . import cli_version, templates, theme, tree
 from . import settings as settings_mod
-from . import templates, theme, tree
+from .approval import Policy
 from .bridge import Bridge
 from .driver import AgentSession
 from .fake_driver import FakeDriver
 from .intents import FailureAcknowledged
 from .log import LOG
-from .model import LaunchSpec, Snapshot
+from .model import LaunchSpec, NodeId, Snapshot
 from .pool import SessionPool
 from .store import Store
 from .theme import REQUIRED_THEMES, THEMES, P
@@ -439,6 +441,36 @@ def _apply_theme_if_dirty(state: AppState) -> None:
     state.theme_dirty = False
 
 
+def _containment_refusal(check: cli_version.FloorCheck) -> str | None:
+    """
+    Why a contained launch cannot proceed against this version reading, or None.
+
+    Pure, so the three outcomes can be exercised without spawning anything.
+
+    ``Unreadable`` refuses. ``planning/2026-09-03-a-dangerously-autonomous-mode.md``
+    §8c measured that the CLI accepts an unrecognised settings key silently, so a CLI
+    that cannot be interrogated is a CLI that may ignore every sandbox key in
+    ``spec.containment`` and start a session the operator believes is contained.
+    ``cli_version`` keeps "could not tell" separate from "checked and fine" precisely
+    so this decision can be made here rather than collapsed there.
+    """
+    match check:
+        case cli_version.MeetsFloor():
+            return None
+        case cli_version.BelowFloor(version=version, floor=floor):
+            return (
+                f"the CLI reports {version}, below the {floor} floor for the sandbox keys "
+                "this mode sets - an older CLI accepts them silently and runs uncontained"
+            )
+        case cli_version.Unreadable(detail=detail, floor=floor):
+            return (
+                f"the CLI version could not be read ({detail}), so the {floor} floor for "
+                "the sandbox keys this mode sets cannot be confirmed"
+            )
+        case _:
+            assert_never(check)
+
+
 def _launch(state: AppState, spec: LaunchSpec) -> None:
     """
     Start a session. Safe from the UI thread; the pool is touched on the loop.
@@ -462,6 +494,27 @@ def _launch(state: AppState, spec: LaunchSpec) -> None:
     shape = (templates.by_name(spec.template) if spec.template else None) or templates.SOLO
 
     async def go() -> None:
+        if spec.containment is not None:
+            # Read on a worker, awaited here. ``check_installed_cli`` spawns
+            # ``claude --version`` and waits up to ten seconds for it, so the two
+            # threads it must not run on are the frame loop -- I7, and the reason
+            # ``ui/launcher`` scans sessions on a worker -- and this asyncio loop,
+            # which hosts every live session, the gate's parked futures and the
+            # watchdogs that report on them. ``driver`` places ``tag_session`` the
+            # same way for the same reason.
+            #
+            # Only for a contained launch: an ordinary one neither pays for the
+            # subprocess nor can be refused by it.
+            #
+            # No path is passed because nothing on this path sets
+            # ``ClaudeAgentOptions.cli_path``, so the SDK resolves the binary by the
+            # rule ``cli_version.resolve_cli_path`` reproduces. Setting that option
+            # anywhere in this launch means passing the same path here, or the
+            # version read describes a binary the session will not spawn.
+            refusal = _containment_refusal(await asyncio.to_thread(cli_version.check_installed_cli))
+            if refusal is not None:
+                LOG.error("app", f"refused a contained launch in {spec.cwd}: {refusal}")
+                return
         session = AgentSession(
             state.bridge,
             spec.task,
@@ -470,21 +523,40 @@ def _launch(state: AppState, spec: LaunchSpec) -> None:
             # Travels with cwd: the pair is what a write is placed against, and a
             # launch that carried one without the other would measure the session
             # in units nothing else agrees with.
-            repo_root=spec.repo_root,
+            session_base=spec.session_base,
+            containment=spec.containment,
             brief=spec.brief,
             template=shape,
-            subagent_cap=state.settings.subagent_cap,
+            # The launch's own number when it named one, the operator's setting
+            # otherwise. Tested against `is None` and never for truth: `0` is a
+            # session that may not spawn at all, and `or` would quietly replace that
+            # deliberate answer with the setting it was chosen instead of.
+            subagent_cap=(
+                state.settings.subagent_cap if spec.subagent_cap is None else spec.subagent_cap
+            ),
+            # Travels with containment, as it does on the spec: at the top rung the
+            # policy releases ``Bash`` from the gate and the containment is the only
+            # thing bounding what a released ``Bash`` reaches, so a session given one
+            # without the other is half an arrangement nobody chose.
+            #
+            # The last point the spec is read for the rung, too: from here the session
+            # owns its policy and the live value is the only one a display may use.
+            # Rendering the spec would keep showing the rung the operator asked for at
+            # launch after the session had left it.
+            policy=spec.policy,
             resume=spec.resume,
         )
         _seed_brief(session, shape)
+        # Here rather than beside the submit, so a launch the version check refused
+        # is not announced as one that happened. Which of the two it is is worth a
+        # word: a resumed session runs under an id that already has a transcript, so
+        # "launched" alone would leave the log unable to explain why a node appeared
+        # with history behind it.
+        opening = "resumed" if spec.resume else "launched"
+        LOG.info("app", f"{opening} in {spec.cwd} as {shape.name}: {spec.task[:60]}")
         pool.submit(session)
 
     state.bridge.submit(go())
-    # Which of the two happened is worth a word. A resumed session runs under an id
-    # that already has a transcript, so "launched" alone would leave the log unable
-    # to explain why a node appeared with history behind it.
-    opening = "resumed" if spec.resume else "launched"
-    LOG.info("app", f"{opening} in {spec.cwd} as {shape.name}: {spec.task[:60]}")
 
 
 def _seed_brief(session: AgentSession, shape: templates.WorkTemplate) -> None:
@@ -523,6 +595,56 @@ def _seed_brief(session: AgentSession, shape: templates.WorkTemplate) -> None:
         return
     session.brief = str(directory)
     LOG.info("app", f"seeded brief at {directory}")
+
+
+def _policy_of(state: AppState, node: NodeId | None) -> Policy | None:
+    """
+    The gate policy the session behind a node is answering with right now, or None
+    if no session holds it.
+
+    Read off the session and never off the record or the spec: it narrows when the
+    phase ends, so any copy taken earlier describes a session that has already
+    moved. One dict lookup on the draw thread, in the same class as the pool counts
+    the status bar reads -- the attribute is monotone and written as a whole
+    constant, so a torn schedule can only show the wider value one frame longer.
+    """
+    pool = state.pool
+    if pool is None or node is None:
+        return None
+    session = pool.session_for(node)
+    return None if session is None else session.policy
+
+
+def _revoke_policy(state: AppState, node: NodeId | None) -> None:
+    """
+    End a session's relaxed phase now, rather than waiting for the call that ends
+    it by parking.
+
+    Called straight from the draw thread instead of through the Bridge. The write
+    is one constant and idempotent and ``revoke_policy`` is its only writer, so
+    there is no ordering for a hop to buy -- and the hop would cost the operator a
+    frame in which the display still reads the phase they just ended.
+    """
+    pool = state.pool
+    if pool is None or node is None:
+        return
+    session = pool.session_for(node)
+    if session is not None:
+        session.revoke_policy()
+
+
+def _relaxed_count(state: AppState) -> int:
+    """
+    How many live sessions are running under something other than ``STRICT``.
+
+    ``list()`` rather than a walk of the values: the pool is mutated on the asyncio
+    thread, and the copy completes without yielding to it where a loop over the view
+    can be interrupted mid-iteration.
+    """
+    pool = state.pool
+    if pool is None:
+        return 0
+    return sum(1 for s in list(pool.sessions.values()) if s.policy is not Policy.STRICT)
 
 
 def _session_action(state: AppState, coro_factory: Callable[[SessionPool], object]) -> None:
@@ -644,6 +766,14 @@ def _status_bar(state: AppState) -> None:
             imgui.text_colored(P.warn.vec4, text)
         else:
             imgui.text_disabled(text)
+        # In the status bar because it is the one surface both layouts keep. HEALTH
+        # names the session and carries the lever, but it is a FOCUS pane, so on its
+        # own a widened gate would be invisible from the layout the operator works
+        # the queue in.
+        relaxed = _relaxed_count(state)
+        if relaxed:
+            imgui.same_line()
+            imgui.text_colored(P.warn.vec4, f"| {relaxed} on a widened gate")
 
 
 def _split(initial: str, new: str, direction: imgui.Dir, ratio: float) -> hello_imgui.DockingSplit:
@@ -763,15 +893,18 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
     def health_pane() -> None:
         if state.frame_snap is None:
             return
+        node = state.focus.node(state.frame_snap)
         health.draw(
             state.frame_snap,
-            state.focus.node(state.frame_snap),
+            node,
             health.HealthActions(
                 interrupt=lambda node: _session_action(state, lambda p: p.interrupt(node)),
                 close=lambda node: _session_action(state, lambda p: p.close(node)),
                 fork=lambda spec: _launch(state, spec),
+                revoke_policy=lambda node: _revoke_policy(state, node),
             ),
             state.frame_now,
+            _policy_of(state, node),
         )
 
     return {
@@ -807,6 +940,12 @@ def _draw_overlays(state: AppState) -> None:
         cap=pool.cap,
         launch=lambda spec: _launch(state, spec),
         wrap=state.settings.wrap_inputs,
+        # The setting in force, which the modal both states and offers to override for
+        # one launch. Without it the cap section has no number to name and the override
+        # box has nothing to be an override of -- `launcher._cap_line` refuses to
+        # substitute a plausible one, so this argument is what puts the figure on
+        # screen at all.
+        subagent_cap=state.settings.subagent_cap,
     )
 
 
@@ -1027,7 +1166,7 @@ def main(argv: list[str] | None = None) -> int:
                         # the divergence reading silently empty. `--cwd` defaults to
                         # ".", so the headless path is the one most likely to hit it.
                         cwd=_cli_cwd,
-                        repo_root=tree.repo_root(_cli_cwd),
+                        session_base=tree.session_base(_cli_cwd),
                         template=args.template,
                     ),
                 )

@@ -14,6 +14,7 @@ import re
 import pytest
 
 from pptmstr import templates
+from pptmstr.approval import Policy
 from pptmstr.templates import (
     BUS_TOOL_NAMES,
     FEATURE,
@@ -128,9 +129,10 @@ def _counted_clauses(text: str) -> list[str]:
     return [c.strip() for c in re.split(r"[.;—]", flat) if _COUNT_WORD.search(c.lower())]
 
 
+@pytest.mark.parametrize("policy", list(Policy))
 @pytest.mark.parametrize("template", [FEATURE, RESEARCH])
 def test_a_lead_is_not_told_to_drain_a_parallelisable_board_through_one_worker(
-    template: WorkTemplate,
+    template: WorkTemplate, policy: Policy
 ) -> None:
     """
     The hazard is a lead that declares four independent tasks, starts one agent of
@@ -141,8 +143,14 @@ def test_a_lead_is_not_told_to_drain_a_parallelisable_board_through_one_worker(
 
     No number is stated on purpose. A figure in the prose is a figure that
     disagrees with whatever ceiling the operator is actually running under.
+
+    Run over every policy, because the allowlist is over the generated body and
+    each policy generates a different one. The unattended text talks about a cap
+    on how many agents run at once, which is exactly the subject matter this
+    excludes -- it is allowed to say what the cap is and not allowed to turn that
+    into an instruction about fan-out.
     """
-    briefing = lead_briefing(template)
+    briefing = lead_briefing(template, policy)
     assert "several agents in the same role" in briefing
     assert "one per independent task, not one per role" in briefing
     assert "independent" in briefing
@@ -599,3 +607,258 @@ def test_the_premises_framing_reuses_the_builders_own_words() -> None:
     assert builder is not None
     assert "confirmed or refuted, not an order" in builder.prompt
     assert "confirmed or refuted, not an order" in worker_prompt(builder, "/briefs/s1")
+
+
+# -- who is watching, and what the prompts say about it ----------------------------
+#
+# Under `Policy.AUTONOMOUS` every reviewed tool is auto-approved, so `post_concern`
+# and `declare_task` reach nobody on the way past. The prompts are the only thing
+# that tells an agent that, and a sentence that was true under STRICT is not made
+# false loudly -- an agent acts on it and waits.
+
+
+_UNATTENDED_HEADING = "## This session runs unattended"
+
+
+def _unattended_block(text: str) -> str:
+    """The unattended section of a prompt, or "" when the prompt has none."""
+    if _UNATTENDED_HEADING not in text:
+        return ""
+    return text.split(_UNATTENDED_HEADING, 1)[1].split("\n## ", 1)[0]
+
+
+def test_the_policy_defaults_to_strict_in_both_prompts() -> None:
+    """
+    Every existing call site passes no policy, so the default is what decides
+    whether this change is invisible to them. Asserted as equality with STRICT
+    rather than by reading the signature: a default flipped here would turn every
+    ordinary session into one whose agents are told nobody is watching.
+    """
+    role = Role(name="w", description="d", prompt="p")
+    assert lead_briefing(FEATURE) == lead_briefing(FEATURE, Policy.STRICT)
+    assert worker_prompt(role, "/briefs/s1") == worker_prompt(role, "/briefs/s1", Policy.STRICT)
+
+
+def test_the_strict_briefing_generates_the_bytes_it_generated_before() -> None:
+    """
+    The whole of the STRICT text, captured from this function before it learned
+    about policies. A session under the default must read exactly what it read,
+    and "the parts I remembered to assert are still there" is a weaker claim than
+    that -- prose is additive, so every presence assertion in this file stays green
+    while a paragraph is inserted next to it.
+
+    The template's own ``lead_prompt`` is referenced rather than transcribed: it is
+    data this function is handed, not text it generates, and pinning it here would
+    make editing FEATURE's prompt fail a test about the briefing.
+    """
+    assert (
+        lead_briefing(FEATURE, Policy.STRICT) == FEATURE.lead_prompt.strip() + _FEATURE_STRICT_BODY
+    )
+
+
+@pytest.mark.parametrize("template", [FEATURE, RESEARCH])
+def test_a_strict_prompt_says_nothing_about_running_unattended(template: WorkTemplate) -> None:
+    # An operator is attached, so the section would be false. Checked on the worker
+    # prompt too: the lead briefing is not read by anybody else.
+    assert _UNATTENDED_HEADING not in lead_briefing(template)
+    for role in template.roles:
+        assert _UNATTENDED_HEADING not in worker_prompt(role, "/briefs/s1")
+
+
+@pytest.mark.parametrize("template", [FEATURE, RESEARCH])
+def test_an_unattended_lead_is_not_told_a_person_reads_its_messages(
+    template: WorkTemplate,
+) -> None:
+    """
+    The sentence this task exists for. `post_concern` parks under STRICT and an
+    operator reads it on the way past; under AUTONOMOUS it is auto-approved and
+    lands. A lead told otherwise writes its concerns for a reader that does not
+    exist, and can wait for a reply a person was supposed to prompt.
+
+    Both halves are asserted, because deleting the false sentence without saying
+    what replaced it leaves the lead with no account of who reads a concern.
+    """
+    strict = _flat(lead_briefing(template, Policy.STRICT))
+    unattended = _flat(lead_briefing(template, Policy.AUTONOMOUS))
+    assert "reviewed by the operator before they arrive" in strict
+    assert "reviewed by the operator" not in unattended
+    assert "nobody else reads it" in unattended
+    assert "rather than reaching a person" in unattended
+
+
+@pytest.mark.parametrize("template", [FEATURE, RESEARCH])
+def test_an_unattended_team_is_told_no_answer_is_coming(template: WorkTemplate) -> None:
+    """
+    The failure this prevents is an agent that raises a question and stops. With
+    nobody to answer it, a question is only worth asking if the team answers it
+    itself, so the instruction has to name what to do with it instead.
+
+    The wording deliberately avoids "no operator is attached", which is the
+    driver's *headless* denial -- a run nobody could have watched. This mode is a
+    run nobody is watching on purpose, and the two send an agent to different
+    conclusions about whether trying again later would help.
+    """
+    prompts = [lead_briefing(template, Policy.AUTONOMOUS)] + [
+        worker_prompt(role, "/briefs/s1", Policy.AUTONOMOUS) for role in template.roles
+    ]
+    for prompt in prompts:
+        flat = _flat(prompt)
+        assert "This session parks nothing at a person" in flat
+        assert "a choice the operator made rather than an accident" in flat
+        assert "no operator is attached" not in flat.lower()
+        assert "record the decision and the reason" in flat
+        # And that the premises will not grow a clarification mid-run, which is the
+        # other thing an agent waits for.
+        assert "nothing is added to them while it runs" in flat
+
+
+@pytest.mark.parametrize("template", [FEATURE, RESEARCH])
+def test_an_unattended_team_is_told_where_the_work_is_bounded(template: WorkTemplate) -> None:
+    """
+    The containment is real and an agent that does not know its shape spends turns
+    rediscovering it: a denied write reads as a bug rather than as a boundary, and
+    the useful response -- record the step as blocked -- is not the obvious one.
+
+    `WebFetch` is named because it is the carve-out. An agent that inferred "the
+    sandbox denies the network" from the Bash clause would conclude documentation
+    is unreachable and stop looking it up, which is a capability the operator chose
+    to grant knowing it is not bounded by the sandbox.
+    """
+    prompts = [lead_briefing(template, Policy.AUTONOMOUS)] + [
+        worker_prompt(role, "/briefs/s1", Policy.AUTONOMOUS) for role in template.roles
+    ]
+    for prompt in prompts:
+        flat = _flat(prompt)
+        assert "Writes outside the directory this session was launched in are denied" in flat
+        assert "`WebFetch` and `WebSearch` are not bounded that way" in flat
+        assert "record as blocked" in flat
+
+
+@pytest.mark.parametrize("template", [FEATURE, RESEARCH])
+def test_an_unattended_team_is_told_the_cap_is_a_capacity_answer(
+    template: WorkTemplate,
+) -> None:
+    """
+    Once spawns auto-approve, `subagent_cap` is the only volume control left, so a
+    refusal at the cap becomes something agents meet routinely. `_at_cap_reason` in
+    the driver already tells the caller the call itself was fine; this says the same
+    thing in advance, and the two must not disagree -- an agent told a refusal is a
+    rejection rewrites a request that was never wrong.
+
+    Not asserted against the driver's string, deliberately: these tests import no
+    SDK, and `driver.py` does. The agreement is a reading obligation on whoever
+    edits either one.
+    """
+    prompts = [lead_briefing(template, Policy.AUTONOMOUS)] + [
+        worker_prompt(role, "/briefs/s1", Policy.AUTONOMOUS) for role in template.roles
+    ]
+    for prompt in prompts:
+        flat = _flat(prompt)
+        assert "`subagent_cap` bounds how many agents run at once" in flat
+        assert "an answer about capacity rather than about the call" in flat
+
+
+@pytest.mark.parametrize("template", [FEATURE, RESEARCH])
+def test_the_lead_and_its_workers_are_told_the_same_thing(template: WorkTemplate) -> None:
+    """
+    One block for both, because these are facts about the session rather than
+    instructions to a role. A lead that believes a write outside the directory
+    lands and a worker that knows it does not will disagree about why a task
+    failed, and that disagreement is expensive to find in a transcript.
+    """
+    block = _unattended_block(lead_briefing(template, Policy.AUTONOMOUS))
+    assert block.strip()
+    for role in template.roles:
+        worker = _unattended_block(worker_prompt(role, "/briefs/s1", Policy.AUTONOMOUS))
+        assert worker == block, role.name
+
+
+def test_an_unattended_worker_is_still_told_about_the_premises() -> None:
+    # The two sections are adjacent and the unattended one is the reason the first
+    # matters more: the brief is all there is, so a worker that skipped it has no
+    # second source.
+    role = Role(name="w", description="d", prompt="p")
+    prompt = worker_prompt(role, "/briefs/s1", Policy.AUTONOMOUS)
+    assert "premises this session" in prompt
+    assert prompt.index("## The premises") < prompt.index(_UNATTENDED_HEADING)
+
+
+_FEATURE_STRICT_BODY = "\n\n" + """\
+## Your team
+
+- **reviewer** — Reads what the builder produced and tries to break it. Cannot edit.
+- **builder** — Implements the change. Works one claimed task at a time.
+
+## How the team coordinates
+
+Use the Agent tool with `subagent_type` set to a role name to start an agent
+in that role. A role is a job description, not a single agent — you may run
+several agents in the same role, and where the board has independent tasks you
+should run one worker per independent task, within reason. Start those workers
+together rather than one after another.
+
+When the work allows a choice, start the roles in this order: reviewer → builder.
+That is which role goes first, not how many agents of each to run.
+
+The first agent in a role is addressed by the bare role name, the second as
+`builder-2`, the third as `builder-3`; `lead`, `main` and `root` are you.
+
+- `declare_task(task_id, title, detail, depends_on, touches)` puts work on a
+  shared board. `depends_on` names tasks that must finish first; anything
+  blocked becomes claimable on its own the moment its dependencies complete.
+  Two tasks with no dependency between them are independent and can be worked
+  at the same time.
+- **`touches` names the files a task will write, relative to the directory
+  this session was launched in.** Give it on every task. When two tasks on
+  your board would write the same file, the board adds the dependency itself
+  and tells you it did — you do not have to spot the overlap across a plan you
+  wrote in pieces. Paths are normalised before they are compared, so a leading
+  `./` or an embedded `..` makes no difference; an absolute path, though, is
+  never matched against a relative path, which is why they must be relative to
+  the launch directory and to nothing else. A dependency the board added is
+  not advisory: leave it in place, and where the overlap is wrong, narrow the
+  `touches` of a task rather than dropping the edge.
+- Workers call `claim_task()` to take the oldest unblocked item, one at a
+  time. Declare the work and let them claim it rather than assigning it by
+  hand; another agent in the same role is how the board drains faster.
+- `read_board()` shows the board to you and to them. A worker asking what
+  is on it no longer has to ask you, so route them to it rather than
+  relaying the state yourself — your copy goes stale and the board does not.
+- `post_concern(to, subject, body)` sends a message to a role by name, or to
+  `lead` for you. `read_inbox()` collects what has been sent to you.
+- Messages between agents are reviewed by the operator before they arrive, so
+  write them to be read by a person as well as by their recipient.
+
+## Your job
+
+Break the work into tasks and put them on the board, then start the workers
+the board needs — one per independent task, not one per role. Then **wait**
+— read your inbox, answer concerns, and let the workers work. Do not implement
+the task yourself while a worker is doing it, and do not put two agents on work
+that touches the same file; two agents editing the same file is the failure this
+structure exists to avoid, and `depends_on` is what keeps them apart. Naming
+`touches` on every task is what makes that mechanical rather than something
+you have to remember at the moment you are least likely to.
+
+**A finding you have not verified goes on the board as a finding to check,
+not as an instruction to carry out.** You are where an observation becomes a
+specification: a claim inside `detail` reads as settled, and what you wrote
+is the whole record of where it came from. Workers have had to refute things
+relayed as established — a reviewer's error passing through you, and your own
+— and refusing you costs a worker what being wrong does not cost you.
+
+**Declare a terminal task that greens the gate**, depending on every task
+that touches a file. Lint and type errors in files no task named belong to
+nobody: workers that meet them correctly report and move on, and the tree
+stays red for the rest of the session. A task claimed after the writes have
+stopped has no ownership conflict with anything, and its result is
+trustworthy in a way an earlier run cannot be — a suite read while agents are
+writing reads files mid-save.
+
+**Call `read_inbox()` before you write your final answer**, every time. A
+worker's concern is not the same thing as its result: the result is what it
+was asked for, and the concern is what it noticed on the way, which is
+usually the part you did not know to ask about.
+
+Then synthesise the result yourself. That synthesis is your output, not a
+list of what each worker said."""

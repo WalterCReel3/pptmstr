@@ -59,6 +59,18 @@ captured is a tool call, not a sentence about one.
      other channel is either per-build (`worker_prompt`) or the lead retyping, and a
      *pointer* placed there is a pointer rather than the second copy
      `2026-08-15-an-operator-instruction-the-lead-cannot-see.md` refuses.
+  7. **Which tool names does this CLI build offer, and how many has
+     `pptmstr.approval` never heard of?** The size of that gap has been inferred
+     twice and the two inferences disagreed, so this arm records the list instead
+     of counting it. `message.data["tools"]` on the init message is the
+     authoritative array for the *root*. A sub-agent has no init of its own -- see
+     the init tally at the foot of the report -- so for a worker the wire carries
+     only the `deferred_tools_delta` the CLI writes into that worker's own
+     transcript, whose path arrives on `SubagentStop.agent_transcript_path`. A
+     delta names a *subset* of what the worker was offered, so a worker's
+     unclassified count is a lower bound and is printed as one. No model is asked
+     what tools it has: that answer would be narration, and a plausible list is
+     worse than no list because it is the kind that gets classified from.
 
 **Everything except the report tool, the spawn and two named absolute paths is denied
 at the gate**, so a canary cannot arrive by Read or Bash. The two readable paths are
@@ -101,6 +113,15 @@ from claude_agent_sdk import (  # noqa: E402
     create_sdk_mcp_server,
     tool,
 )
+
+from pptmstr import approval  # noqa: E402
+
+# The three sets `classify` dispatches on, unioned. Read off the private names
+# because the module exposes no accessor for them, and the measurement is
+# precisely "what does this module hold" -- a public wrapper would be a second
+# place for the answer to be wrong. `approval` imports no SDK, so pulling it in
+# here costs the probe nothing.
+CLASSIFIED = approval._AUTO | approval._REVIEW | approval._BUS_AUTO
 
 REPORT_TOOL = "mcp__probe__report"
 SPAWN_TOOLS = ("Task", "Agent")
@@ -252,6 +273,12 @@ observed: dict[str, Any] = {
     "memory_key": None,
     "memory_paths": None,
     "inits": [],  # one entry per init: does a sub-agent get its own?
+    # Question 7. The root's transcript path, taken off a hook payload rather than
+    # rebuilt from the session id and a cwd slug -- the CLI's own pointer cannot
+    # disagree with where the CLI actually wrote.
+    "root_transcript": None,
+    "subagents": [],  # agent_id, agent_type and the CLI's pointer to its transcript
+    "deferred": [],  # every deferred_tools_delta read back off those transcripts
     # Question 5's actual evidence. A worker's account of a failed read is narration;
     # `tool_response` on PostToolUse is what the tool returned. Both the attempt and
     # its result are kept, because "never attempted" and "attempted and refused" are
@@ -268,6 +295,59 @@ READABLE: dict[str, str] = {}
 
 def _worker_prompt(name: str, extra: str = "") -> str:
     return WORKER_TASK.format(report=REPORT_TOOL, name=name) + extra
+
+
+def _unclassified(names: list[str]) -> dict[str, list[str]]:
+    """
+    Which of these names `approval.classify` has never heard of.
+
+    Split by prefix because the two halves are different questions: an `mcp__`
+    name belongs to whichever server this machine happens to have mounted and
+    says nothing about the build, while a built-in is offered to every session
+    the app starts.
+    """
+    unknown = sorted(n for n in names if n not in CLASSIFIED)
+    return {
+        "builtin": [n for n in unknown if not n.startswith("mcp__")],
+        "mcp": [n for n in unknown if n.startswith("mcp__")],
+    }
+
+
+def _deferred_deltas(path: str | None) -> dict[str, Any]:
+    """
+    Every `deferred_tools_delta` the CLI wrote into one transcript.
+
+    This is a CLI-written record of which tools it withheld from an agent's
+    initial list, so it is a wire artifact and not a model's account of its own
+    context. It names a subset of what that agent was offered -- there is no
+    record of an agent's full offered list anywhere except the root's init -- so
+    a difference taken against it bounds the gap from below and nothing more.
+
+    A missing or unreadable file is reported as such rather than as an empty
+    delta: "the CLI deferred nothing" and "the probe could not look" are
+    different answers and only one of them is about the build.
+    """
+    if not path:
+        return {"path": None, "readable": False, "why": "no path on the wire", "names": []}
+    try:
+        lines = Path(path).read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        return {"path": path, "readable": False, "why": str(exc), "names": []}
+    names: list[str] = []
+    deltas = 0
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        attachment = record.get("attachment") or {}
+        if attachment.get("type") != "deferred_tools_delta":
+            continue
+        deltas += 1
+        for name in attachment.get("addedNames") or []:
+            if name not in names:
+                names.append(name)
+    return {"path": path, "readable": True, "why": None, "deltas": deltas, "names": sorted(names)}
 
 
 def _leaked(text: str) -> list[str]:
@@ -334,6 +414,12 @@ async def main(model: str) -> int:
         name = str(hook_input.get("tool_name") or "")
         agent_id = hook_input.get("agent_id")
         tool_input = hook_input.get("tool_input") or {}
+
+        # Question 7. `transcript_path` on a root-side hook is the session's own
+        # file; a sub-agent's hook carries the same session path, so the worker
+        # transcripts are collected from SubagentStop instead.
+        if agent_id is None and observed["root_transcript"] is None:
+            observed["root_transcript"] = hook_input.get("transcript_path")
 
         if name == REPORT_TOOL:
             stamped = dict(tool_input)
@@ -426,6 +512,27 @@ async def main(model: str) -> int:
                 break
         return {}
 
+    async def subagent_stop(
+        hook_input: dict[str, Any], _tool_use_id: str | None, _context: Any
+    ) -> dict[str, Any]:
+        """
+        Where question 7's worker evidence is.
+
+        A worker's tool list is not on the wire -- one init arrives and it is the
+        root's. What the CLI does write is each worker's deferred-tool delta into
+        a transcript of its own, and this event is the only place it says where
+        that file is. Recorded per stop and read after the run: reading it here
+        would race the writer.
+        """
+        observed["subagents"].append(
+            {
+                "agent_id": hook_input.get("agent_id"),
+                "agent_type": hook_input.get("agent_type"),
+                "transcript": hook_input.get("agent_transcript_path"),
+            }
+        )
+        return {}
+
     server = create_sdk_mcp_server("probe", "1.0.0", [report])
 
     agents = {
@@ -504,6 +611,7 @@ async def main(model: str) -> int:
             # question 5's answer is exactly the one that fails.
             "PostToolUse": [HookMatcher(hooks=[post_tool_use], timeout=600)],
             "PostToolUseFailure": [HookMatcher(hooks=[post_tool_use], timeout=600)],
+            "SubagentStop": [HookMatcher(hooks=[subagent_stop], timeout=600)],
         },
     )
 
@@ -523,18 +631,37 @@ async def main(model: str) -> int:
                     # Recorded per init rather than once. A second init naming a
                     # sub-agent would mean a worker's context is readable off the
                     # wire; one init means the only way to know is to ask it.
+                    tools = list(message.data.get("tools") or [])
                     observed["inits"].append(
                         {
                             "cwd": message.data.get("cwd"),
                             "agents": message.data.get("agents"),
                             "memory_paths": message.data.get("memory_paths"),
                             "skills": message.data.get("skills"),
-                            "tool_count": len(message.data.get("tools") or []),
-                            "has_skill_tool": "Skill" in (message.data.get("tools") or []),
+                            # Question 7. The array is kept beside the count rather
+                            # than reduced to it: a count answers "how many" and the
+                            # question on the table is "which", and a count that
+                            # disagrees with two people's recollections settles
+                            # nothing about what any of them named.
+                            "tools": tools,
+                            "tool_count": len(tools),
+                            "has_skill_tool": "Skill" in tools,
+                            "agent_id": message.data.get("agent_id"),
+                            "agent_type": message.data.get("agent_type"),
                         }
                     )
             if isinstance(message, ResultMessage) and message.is_error:
                 observed["result_error"] = message.result
+
+    # After the session closes, so the transcripts are flushed rather than read
+    # out from under their writer.
+    observed["deferred"].append(
+        {"who": "root (lead)"} | _deferred_deltas(observed["root_transcript"])
+    )
+    for sub in observed["subagents"]:
+        observed["deferred"].append(
+            {"who": sub["agent_type"] or sub["agent_id"]} | _deferred_deltas(sub["transcript"])
+        )
 
     report_findings(workspace)
     # The two temp trees are left for inspection; this one is not, because it sits
@@ -681,6 +808,57 @@ def report_findings(workspace: Path) -> None:
     print(f"  {INIT_SEED:<24}{initial}")
     print(f"  {'':<24}carries the canary: {INITIAL_CANARY in initial}")
 
+    print("\n=== 7. which offered tool names has `approval` never heard of? ===")
+    print(
+        f"  classified by pptmstr.approval (_AUTO | _REVIEW | _BUS_AUTO): {len(CLASSIFIED)} names"
+    )
+
+    print("\n  -- root/lead: the full offered array, off the init message --")
+    if not observed["inits"]:
+        print("    no init arrived. NOT ANSWERED; every row below is missing its baseline.")
+    # Grouped by array rather than printed per init. A session can be handed the
+    # same init twice, and two copies of one 39-name list printed in a row reads
+    # like two shapes -- which is the exact misreading this question exists to
+    # stop. The number of inits that carried each array is kept, because a second
+    # init carrying a *different* array would be the finding.
+    by_array: dict[tuple[str, ...], list[dict[str, Any]]] = {}
+    for init in observed["inits"]:
+        by_array.setdefault(tuple(init["tools"]), []).append(init)
+    print(f"    {len(observed['inits'])} init(s) carried {len(by_array)} distinct array(s)")
+    for tools, inits in by_array.items():
+        who = sorted(
+            {str(i.get("agent_type") or "root (no agent_type on the init)") for i in inits}
+        )
+        gap = _unclassified(list(tools))
+        print(f"    {', '.join(who)}: {len(tools)} tools offered, on {len(inits)} init(s)")
+        print(f"    {json.dumps(list(tools), indent=6)}")
+        print(f"    unclassified built-ins ({len(gap['builtin'])}): {json.dumps(gap['builtin'])}")
+        print(f"    unclassified mcp names ({len(gap['mcp'])}): {json.dumps(gap['mcp'])}")
+
+    print("\n  -- workers: a LOWER BOUND, from each worker's deferred-tool delta --")
+    print(
+        "    A worker has no init, so no full array exists for one. These names are\n"
+        "    what the CLI recorded itself as deferring from that worker's list, which\n"
+        "    is a subset of what it offered. A name absent here was not shown to be\n"
+        "    absent from the worker."
+    )
+    for entry in observed["deferred"]:
+        if not entry["readable"]:
+            print(f"    {entry['who']}: NOT READ -- {entry['why']}")
+            continue
+        gap = _unclassified(entry["names"])
+        print(
+            f"    {entry['who']}: {entry['deltas']} delta(s), "
+            f"{len(entry['names'])} deferred name(s)"
+        )
+        print(f"      deferred: {json.dumps(entry['names'])}")
+        print(
+            f"      unclassified built-ins (>= {len(gap['builtin'])}): {json.dumps(gap['builtin'])}"
+        )
+        print(f"      unclassified mcp names (>= {len(gap['mcp'])}): {json.dumps(gap['mcp'])}")
+    if not observed["subagents"]:
+        print("    no SubagentStop arrived, so no worker transcript was located.")
+
     print("\n=== system messages on the wire ===")
     # A tally, not a dump. The first version of this printed every message with its
     # keys; a run emits hundreds of `thinking_tokens` and the answers scrolled off
@@ -698,11 +876,17 @@ def report_findings(workspace: Path) -> None:
         f"\nmemory paths (key={observed['memory_key']}): "
         f"{json.dumps(observed['memory_paths'], default=str)}"
     )
-    if len(observed["inits"]) <= 1:
+    # The claim is about *scope*, not about arity. A session can be handed the
+    # same root init more than once, and counting inits would call that a
+    # per-agent init and retract a conclusion the wire still supports.
+    agent_scoped = [i for i in observed["inits"] if i.get("agent_id") or i.get("agent_type")]
+    if observed["inits"] and not agent_scoped:
         print(
-            "only one init -- no per-agent init on the wire, so a worker's context "
-            "is not readable except by asking it."
+            "every init is root-scoped -- no per-agent init on the wire, so a "
+            "worker's context is not readable except by asking it."
         )
+    elif agent_scoped:
+        print(f"{len(agent_scoped)} init(s) are agent-scoped -- a worker's context IS on the wire.")
 
     print("\n=== tool calls denied by the probe ===")
     for call in observed["denied"]:

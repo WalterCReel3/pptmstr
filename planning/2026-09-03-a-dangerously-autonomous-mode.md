@@ -571,8 +571,9 @@ edges rather than a short one.
 ## 9. Deferred, explicitly — do not pick these up
 
 - Content-classifying `Bash` in the gate. §3; both routes are closed.
-- cwd-containment in the gate. Still the separate decision `planning/2026-08-11` declined to make,
-  and §4 supersedes the need for it under this mode.
+- ~~cwd-containment in the gate. Still the separate decision `planning/2026-08-11` declined to make,
+  and §4 supersedes the need for it under this mode.~~ **No longer deferred — see §12.2.** The
+  supersession held only while `Bash` was the only released tool; it is built for the write tools.
 - Denying on divergence. Unchanged from `planning/2026-09-01`; this record does not touch it.
 - Persisting the policy anywhere.
 
@@ -610,3 +611,740 @@ affect it) from that work.
 §1 is falsifiable in one run: launch under the proposed mode and read
 `Snapshot.unattributed_writes` and any claimed task's `writes`. They should be empty. If they are
 not, §1 is wrong and this record's central argument fails with it.
+
+---
+
+## 11. Amendment, 2026-09-15 — the leaf modules are built, and what they left unverified
+
+§8a's three underlying modules exist and the gate is green over them: `pptmstr/tree.py:measure_writes`
+(§2's sensor, measurement half), `pptmstr/cli_version.py` (§8's version floor) and
+`pptmstr/sandbox.py` (§8's configuration as a value). Nothing is wired into `driver.py`, `app.py`,
+`store.py` or `model.py`. Each is a leaf with its own tests.
+
+**Two of this record's preconditions closed before the build, and the sections above do not know it.**
+§8e.3 calls the declaration-units defect "a precondition of option C, not an unrelated bug"; fixed in
+`4c17bce`. §8d says "a cap that a sub-agent can spawn around is not a cap"; the predicate was split in
+`74db9ab`, which keeps the ledger join §8d worried about rather than dropping `and not agent_id` as
+its option 1 proposed. [`2026-09-04-two-mainline-defects-the-autonomous-mode-exposed.md`](2026-09-04-two-mainline-defects-the-autonomous-mode-exposed.md)
+still reads "both established, neither fixed" and is stale.
+
+### Added to §8b's uncontained list
+
+**U1 — the `credentials.files` entry schema is unverified.** §8 spells an entry
+`{"path": ..., "mode": "deny"}`, reproduced from this record and not confirmed against upstream by
+either the builder or the reviewer; the settings reference documents that `sandbox.credentials.files`
+exists and what it does, not its entry format. Because §8c measured that **the CLI accepts
+unrecognised keys silently**, a wrong schema fails identically to a missing key and the version floor
+cannot catch it — the CLI is not too old, it is being handed something it does not understand. §8c
+exercised `strictAllowlist` and the writable-region confinement and never the credential denials.
+Not urgent by this record's own ranking: §8 calls the denials an enumeration control aimed at the
+wrong hazard and names `strictAllowlist` as the one to build if only one is built. A probe that reads
+a denied file from inside a sandboxed command settles it.
+
+**U2 — `failIfUnavailable` and `allowUnsandboxedCommands` have no documented version floor.**
+`SANDBOX_FLOOR` is `2.1.219`, the highest of `credentials` (2.1.187) and `network.strictAllowlist`
+(2.1.219). **So the floor covers the keys whose floors are known and is not evidence that a 2.1.219
+CLI honours `failIfUnavailable`** — the key §8 says cannot protect itself, and the one absent from the
+installed `SandboxSettings` TypedDict entirely. The independent mitigation is §8a.2's stderr callback:
+a sandbox that fails to start is visible whether or not the key is honoured. `SANDBOX_FLOOR_SOURCES`
+is keyed by settings key and a test recomputes the constant from it, so raising the floor is one line
+once the number is known.
+
+**U3 — `resolve_cli_path` reproduces two of `_find_cli`'s three steps.** Bundled copy, then PATH;
+`_find_cli` also probes `~/.claude/local/claude`, `~/.npm-global/bin/claude` and `/usr/local/bin/claude`.
+A host whose only CLI sits in one of those refuses the mode the SDK would have launched. Safe
+direction, real false-refusal cost. Its `import claude_agent_sdk` guards `ImportError` only, so another
+import-time exception escapes a function whose docstring claims nothing raises.
+
+**U4 — the sensor's untracked split can hide the writes it most wants to see.** `TreeWrites` reports
+untracked paths separately and contributes no lines for them, correctly: `git diff --numstat` cannot
+count a file absent from the index without `git add -N` writing to the repository being measured. The
+consequence is that a declared-versus-actual comparison reading `paths` alone omits the writes of an
+agent that ignored CLAUDE.md's `git add` rule — the compliant agent is fully measured and the
+non-compliant one partially disappears, which is backwards from what a divergence reading is for.
+`ApprovedWrites` has the same `paths`/`unplaced` shape, but there the split guards a **false
+accusation**; here it produces a **missed** one. The wiring must read both fields; `measured` guards
+only one of the two collapses.
+
+**U5 — whitespace is stripped from paths at three sites in `model.py`, and they must stay in step.**
+Found independently by two agents; the first statement of it in this amendment was wrong and is
+corrected here rather than edited away.
+
+`normalised_touches` strips, so a file named with a trailing space is recorded as a path that does not
+exist and one named only a space is dropped silently. That much holds, and `TreeWrites` inherits it.
+
+**What the first statement got wrong was `ApprovedWrites`.** It does *not* reach
+`normalised_touches` on the path production takes. `written_path` returns its argument unstripped,
+guarding only on `not raw.strip()`; `relative_write` then strips independently at its own entry; and
+`relative_write`'s **absolute** branch never calls `normalised_touches` at all, returning
+`target[len(prefix):]` directly. Its own docstring names the absolute shape as what the CLI sends, so
+that branch is the production path.
+
+So both sides strip today and therefore **agree**. The invariant that matters is not "do not strip",
+it is **the declaration side and the write side are normalised identically**. Fixing
+`normalised_touches` alone breaks it: the declaration keeps its whitespace, the write is still
+stripped by `relative_write`, the two stop matching, and `wrote_outside_declaration` reports a
+divergence that is correctly absent today — a false accusation against a compliant agent, which is
+the failure the 09-02 amendment to [`2026-09-01`](2026-09-01-the-gates-measurement-outlives-the-approval.md)
+already decided this measurement must never produce.
+
+All three sites are in `model.py`. Whether to preserve whitespace at all remains a genuine trade —
+incidental whitespace in a declaration a human or a lead agent typed, against a filename that really
+ends in a space — and documenting the current all-strip behaviour with a test pinning it is a
+legitimate resolution. What is not legitimate is changing one site.
+
+**U6 — the premise the spawn-inheritance reversal rests on has never been measured.** §8's
+"Remaining open" reverses [`2026-08-22`](2026-08-22-session-controls-and-the-mode-dial.md) D2 on one
+argument: *"sandbox configuration is per-CLI-process and sub-agents share the parent's, so under §8's
+containment each additional agent has the same bounded reach as the first. Fan-out still multiplies
+token spend and write volume. It no longer multiplies reach, and reach is what D2's argument is
+about."*
+
+**§8c's probe never spawned a sub-agent.** It exercised three `Bash` calls from a root session. So
+the claim that a sub-agent's `Bash` is confined by the parent's sandbox — the entire load-bearing
+step of the reversal — is inferred from the sandbox being per-process, not observed. Flagged by the
+builder that wired the policy through, which recorded it in `_policy_for`'s docstring as §8's claim
+attributed to §8 rather than as a measured fact.
+
+This is the most consequential unverified item in this amendment. If a sub-agent's `Bash` is *not*
+confined by the parent's sandbox, D2's original reasoning stands unreversed, fan-out multiplies reach,
+and the sub-agent cap is bounding the wrong quantity. Settled by re-running §8c's probe with a nested
+spawn that attempts the same `$HOME` write and off-allowlist fetch from inside a sub-agent.
+
+### Live constraints the build established
+
+**Setting `ClaudeAgentOptions.sandbox` deletes the containment rather than degrading it.**
+`_build_settings_value` assigns rather than merges (`settings_obj["sandbox"] = self._options.sandbox`).
+Because `containment_settings()` emits exactly one top-level key, a caller setting both the typed field
+and the settings string loses all four load-bearing keys with no error. §4's "extra keys survive" holds
+only on the settings-without-sandbox path, and for a stronger reason than §4 gives: there the SDK does
+not re-serialise at all, it passes the string through verbatim. Recorded in `containment_settings`' own
+docstring and pinned by a test that goes red if an SDK upgrade starts merging.
+
+**Four of §8's keys are untypeable, not three.** `SandboxNetworkConfig` declares no `strictAllowlist`.
+
+**The SDK spawns a bundled CLI in preference to PATH**, and that binary is present in this venv, so a
+PATH-first version check measures a binary that will not run the session. `resolve_cli_path` mirrors the
+SDK's order. `ClaudeAgentOptions.cli_path` overrides both — §4's shim-script upgrade path is exactly
+that — so a launch setting `cli_path` must pass it to the check rather than relying on the default.
+
+### What actually gates shipping, and it is unbuilt work rather than an unknown
+
+**The mandatory clone (§8a.6).** The sandbox's writable region *is* cwd. `LaunchSpec.cwd` defaults to
+`"."`, is free text, and is not resolved on the launch path, so the default launch makes pptmstr's own
+source the writable region and an unattended agent can rewrite `approval.py` for the next launch. §8:
+"the clone must be mandatory or this is not containment."
+
+**The policy and its dial (§8a.5, §6.3).** Displaying the dial is part of shipping the dial.
+
+---
+
+## 12. Amendment, 2026-09-22 — the mode is unattended, and what that cost
+
+The mode this record designs now runs without an operator. `Policy.AUTONOMOUS` releases the whole of
+`approval._REVIEW`; a call that still needs approval is denied with a reason rather than parked at a
+human who is not there; an auto-approved write whose target resolves outside the session's directory
+is denied; and the briefing every agent reads says which of those things are true of it. Before this,
+the mode released `Bash` and stopped at the first `Write` — so it was under-gated rather than
+autonomous, and the team it exists to run never formed.
+
+Four of this record's decisions are reversed by that, and the reversals are the substance of this
+section. Sections above are left as they were written; where one is superseded it is named here
+rather than edited, on the same reasoning §11 gives.
+
+### 12.1 The coupling reversal, and what replaced the boundary §8 demanded
+
+§8's "The coupling §8 previously got wrong" ends: *"the under-gated allowlist is `Bash` and nothing
+else, pinned by a test asserting exactly that … Widening past `Bash` requires the whole-process
+boundary in §4, not this one."* **The allowlist is now the whole of `_REVIEW` and the whole-process
+boundary was not built.** What stands in its place for the write tools is a region check in the gate:
+`driver._escapes_write_region` denies an auto-approved `Write`, `Edit`, `MultiEdit` or `NotebookEdit`
+whose target resolves outside `driver._write_region()`, which is the session's `cwd` — the same
+directory the CLI's sandbox makes the writable region for `Bash`.
+
+**The intent is parity of region; what is built falls short of it, and the gap is not academic.**
+The sandbox denies at the write, inside the kernel, for a command and everything it starts. This
+decides before the call runs, from a `PreToolUse` hook, for four tool names whose target is a
+declared argument. It is a check on a *name*, and that is the source of every limit below:
+
+- **A name is not an inode.** A hard link inside the region whose inode lives outside it is allowed,
+  and the write lands outside. `Path.resolve()` follows symlinks and a hard link gives it nothing to
+  follow. Reproduced by execution; see U9. **The sandbox shares this exact limit** — measured, below
+  — so it is the one gap on this list that is not the gate being weaker than §4.
+- **A path resolved at the gate is written afterwards.** A directory component that becomes a symlink
+  out of the region in between is invisible to any `PreToolUse` check. The mode's parallel sub-agents
+  are what make that window addressable at all.
+- **A name can be spelled so that this build and the filesystem disagree about where it points.**
+  See U9.
+- **Anything a released tool does that is not a write with a readable target.** `Bash` is
+  deliberately left to the sandbox; the check does not look at it.
+- **Reads.** The region bounds writing and nothing else. See U8.
+
+**On the hard link specifically the two layers are measured equal, and the measurement reversed
+itself halfway through.** `scripts/verify_nested_sandbox.py` carries the leg, and the order the
+evidence arrived in is worth keeping because the conclusion is only trustworthy with it:
+
+1. Under `containment_settings()`, `ln` fails with `Invalid cross-device link` in three legs. The
+   control arm made the same link successfully and `st_dev` is `64769` for both paths, so the
+   `EXDEV` is bubblewrap's mount layout and not the host's disk. **On that half alone the sandbox
+   looked stronger than the gate**, which would have made "parity" the wrong word.
+2. But `EXDEV` bounds *creating* a second name and says nothing about one that already exists. With
+   the link seeded from outside the sandbox, both the root's write and a sub-agent's went through it
+   to the inode outside the region and closed through `PostToolUse` — the sandbox did not treat them
+   as failures.
+3. The gate's released write tools call no linking syscall either, so neither layer can create a
+   hard link and both write through one that exists.
+
+**So the limit is precise and shared: a hard link created by anything outside the session defeats
+both layers identically.** That is parity on this axis, established rather than assumed — and it is
+parity at a floor rather than at a guarantee.
+
+**It is not parity overall, and the remaining asymmetries all run the same way.** U9b's whitespace
+spelling is a defect the gate has and the sandbox does not — the kernel does not read
+`" /etc/passwd"` as relative. The resolve-then-write window is likewise the gate's alone, because the
+sandbox decides at the syscall. So where the two differ, the gate is the weaker, and §4's
+whole-process boundary closes both. **Three independent arguments now point at §4** — the
+decision-time-versus-syscall-time gap, the spelling gap, and §8's own trigger — and they rest on
+measurement rather than on reading. The hard link is the one item that is *not* among them: §4 does
+not close it either.
+
+The ordering is worth recording because it is the same pattern §7 praises, reached a different way.
+The at-cap deny sits *ahead* of `classify` so no policy can widen it. The write-region check cannot
+be placed there, because what it bounds is precisely the calls a policy let through — so it sits on
+the `AUTO_APPROVE` branch and gets the unwidenable property instead by **not consulting the policy at
+all**: every auto-approval any present or future policy produces is measured against the region. A
+write an operator approved is deliberately not measured, because they saw the path.
+
+**The pairing is now enforced where it arrives rather than where it is chosen.** §8 records the
+containment layer and the policy contents as *not separable*; until this change the only thing making
+them inseparable was one `if engaged` in `ui/launcher.py`. `AgentSession` now raises
+`UncontainedAutonomy` at start when the policy is `AUTONOMOUS` and `containment` is `None`. At start
+rather than at construction, because the hazard is a session that *runs*. Raised rather than
+downgraded to `STRICT`, because a launch that quietly runs under a policy other than the one it was
+given is the worse of the two failures — the same reasoning `app._containment_refusal` and
+`launcher.floor_refusal` are both built on.
+
+### 12.2 §9's cwd-containment deferral expired rather than being overruled
+
+§9 lists "cwd-containment in the gate" under **do not pick these up**, on the reason *"§4 supersedes
+the need for it under this mode"*. That supersession was true and is no longer, and nothing about the
+reasoning was found wrong: §4 is the CLI's Bash sandbox, and it superseded a gate-side check exactly
+while `Bash` was the only tool the policy released. `Write`, `Edit`, `MultiEdit` and `NotebookEdit`
+run inside the CLI process, which that sandbox does not cover, so releasing them removed the premise
+the deferral rested on.
+
+**The item is therefore struck from §9 rather than left standing against the code.** A deferral whose
+premise has expired reads identically to one that was argued and kept, and the next reader cannot
+tell them apart. The other three items in §9 are untouched and remain deferred: content-classifying
+`Bash` (§3's argument is undisturbed — the write check reads a declared argument rather than parsing
+a command line, which is the objection §3 makes), denying on divergence, and persisting the policy.
+
+### 12.3 §4's upgrade path is still the answer for anything wider
+
+§4 says of `@anthropic-ai/sandbox-runtime`: *"If the policy ever widens past `Bash`, this becomes the
+answer rather than an option."* The policy has widened past `Bash` and the shim was **not** built.
+This record must not read as though it was.
+
+What was built is narrower and is described above: a region check covering four tool names, in the
+gate, in the same process. It is the right size for what was released and it is not a substitute for
+the thing §4 names. The shim remains the answer for a whole-process boundary, and what would force it
+is any of:
+
+- Releasing a tool that reaches the filesystem or the network and does **not** name its target in a
+  declared argument — at which point there is nothing for a gate-side check to read.
+- Wanting the read side bounded (U8). A `PreToolUse` allow bypasses the CLI's own permission rules,
+  so no settings key pptmstr can pass re-imposes a read boundary while the gate is allowing.
+- Closing the resolve-then-write window in 12.1, which needs enforcement at the write.
+- Closing U9b's spelling gap at a layer that reads the path the way the kernel does.
+
+**It would not close U9a.** A write through an existing hard link is an ordinary write to a path
+inside the writable region, and the shim's isolation is the same bubblewrap that was measured
+allowing it. Naming that here so the shim is not carried as an answer to everything on this list.
+
+Against it, unchanged from §4: a beta research preview whose config format may change, and a Linux
+deny-list built once at launch that *"does not cover anything the session creates later"*.
+
+### 12.4 The spawn reversal is built, and §8d is answered
+
+§8's "Remaining open" decided that spawns auto-approve and that the policy inherits to sub-agents,
+reversing [`2026-08-22`](2026-08-22-session-controls-and-the-mode-dial.md) D2, with two conditions.
+Both are met and the decision is now code rather than an intention.
+
+**Condition 1 — inheritance is an explicit line rather than a consequence of where the field lives.**
+`driver._policy_for` returns the session's policy for every node it serves and takes the `agent_id`
+it ignores, so per-node scoping stays one change in one place. **This inverts §6.4** — *"Sub-agents
+do not inherit it"*, from `2026-08-11` §4 — for this policy only, which is what §8's condition 1 said
+it would do; §6.4 stands unchanged for every other policy, and the inversion is not a drift.
+
+**Condition 2 — the cap bounds total fan-out.** Met in `74db9ab`, already noted in §11. §8d asked
+which of three responses to take and declined to choose. **The code took option 1's effect without
+option 1's cost**: the predicate was split rather than widened. `is_spawn_call` drives the cap, so a
+sub-agent's own spawn is counted exactly as the root's is; `spawn = is_spawn_call and not agent_id`
+still drives the ledger, because a nested `SubagentStart` is not attributable to the parent's pending
+entry and folding it in would corrupt the join `2026-08-14` protected. §8d's option 1 proposed
+dropping `and not agent_id` outright, which would have counted correctly and joined wrongly. Options
+2 and 3 are not taken and need not be.
+
+**The premise the reversal rests on is now measured rather than inferred — see U6 below.**
+
+### 12.5 `WebFetch` and `WebSearch` are released, and the cost is stated rather than argued away
+
+Both are in `_REVIEW` and both are therefore released. This was decided against a live argument for
+denying them, and the argument is recorded because the reason it was dropped matters more than the
+outcome.
+
+**The argument for denying**: they run inside the CLI process, which the sandbox does not wrap, so
+they are the one egress channel `network.strictAllowlist` does not reach. **Why it does not carry**:
+it borrowed §8.1's *"sends the tree somewhere"*, which is about `curl -F @file`. `WebFetch` takes a
+URL and a prompt — no request body, no method — so what one call can carry is bounded by a URL rather
+than by a file, and the high-bandwidth route stays denied for `Bash` by the sandbox.
+
+**What denying would have bought, stated at its true size**: a few kilobytes per call, *unbounded in
+the number of calls*, to a host the model names. That is a real channel and it is smaller than "the
+tree". What it would have cost is an unattended agent unable to read any documentation, in a
+repository whose `CLAUDE.md` makes fresh documentation reads a working rule — which is a standing
+instruction the mode would otherwise make impossible to follow.
+
+The capability was chosen. The residual is U7.
+
+### 12.6 The sub-agent cap keeps its argument and loses its number
+
+§8's "Remaining open" says, in bold: **"Set `subagent_cap` low for this mode."** The operator has
+raised the default and added a per-launch override, for an experimental phase. **The reasoning around
+that sentence is untouched and the number is not derived from it.**
+
+What is unchanged: the cap is still the only bound on fan-out a policy cannot widen, and the ordering
+that makes it so — the at-cap deny ahead of `classify` in `driver._gate_tool_use` — is exactly as §7
+describes it. Raising the value does not weaken that property; it sets it further out.
+
+What changed under the sentence is one of the two costs the original `4` was sized against.
+`driver.py`'s comment argues for `4` from *"N concurrent API streams and N transcripts of token burn
+against one node process, plus an operator who has to answer for each spawn at the gate"*. **The
+second cost is zero under this mode by construction** — spawns auto-approve and no operator answers
+for any of them — so `4` was carrying a constraint this mode removes. That is a reason the old value
+was specific to a gated world. It is not an argument that any particular new value is right, and the
+new one is a judgement made for a phase rather than a measurement.
+
+This also turns a note in §8 into a control. §8's "What this costs" records that with more than one
+candidate the git sensor's attribution *"degrades to session-level with an ambiguity counter
+climbing"*, and advises *"run solo to get an attributed reading, run a fleet to get throughput …
+Choose per run rather than once."* A per-launch override is the mechanism that advice needs; without
+it the choice was a persisted setting and therefore made once.
+
+### 12.7 The schema loader is admitted, and the mode was failing before the allowlist was consulted
+
+`ToolSearch` is in `_AUTO`, so it auto-approves at every policy rather than only at this one. Until
+2026-09-22 it was in none of `_AUTO`, `_REVIEW` or `_BUS_AUTO` and reached `classify`'s fail-closed
+fallthrough — which under this mode is not a park but a denial, `driver._no_reviewer_reason` telling
+the agent the build does not recognise the tool and to do the work with one it does. For a schema
+loader that instruction is false as well as refusing: no other tool loads a schema. `notes/2026-08-17-what-a-worker-is-given.md`
+records it happening, with `ToolSearch` among the denials of run `04e4db`.
+
+**What carries the classification is a claim about a different tool: loading a schema is not calling
+one, and admitting the loader does not admit what it loads.** That was checked in the gate path
+rather than assumed. `driver` registers `PreToolUse` with no `HookMatcher.matcher`, which in the
+installed SDK defaults to match-all, so the gate is not keyed on a name list and there is no name it
+can fail to see. `_gate_tool_use` takes the tool name off the hook payload and consults no record of
+which schemas were loaded — `AgentSession._tool_names` is a transcript-display map keyed by
+`tool_use_id`, not a gate input. So a schema loaded through `ToolSearch` reaches `classify` exactly
+as an up-front one would: under `STRICT` a loaded `WebFetch` still parks, and a loaded tool this
+build has never named still falls through fail-closed. `_REVIEW` was the narrower alternative and was
+declined, because parking a registry read puts an operator in front of a call with no decision in it.
+
+**The coherence cost of the denial was larger than the one tool, and larger than releasing
+documentation.** 12.5 releases `WebFetch`/`WebSearch` on the argument that an unattended agent unable
+to read documentation is the greater cost; in a harness that defers tool schemas, the loader is what
+makes that release reach anything, so denying it left 12.5's capability nominal. The same is true one
+level up of coordination. All five names in `_BUS_AUTO` — `read_board`, `read_inbox`, `claim_task`,
+`complete_task`, `release_task` — were observed arriving deferred from inside agent sessions of this
+run, alongside `declare_task` and `post_concern`. A team session that denies the loader is therefore
+potentially one whose agents cannot reach the board at all, and `_BUS_AUTO`'s own reasoning — *"a
+worker taking the next item off a board the operator already approved is not a second decision"* —
+goes nominal the same way.
+
+**That is an observation about particular sessions and is not established generally.** The deferred
+population is the harness's choice and may vary per session; the `AUTONOMOUS` lead session that
+produced this board declared tasks without difficulty while `ToolSearch` was still denied, which is
+direct evidence that it does vary. What is established is that the failure mode exists, not how often
+it fires.
+
+**The honest edge of "admitting the loader opens nothing": a deferred tool is unreachable while the
+loader is denied.** Admitting it makes whatever `_AUTO` already holds reachable *in fact* rather than
+only on paper — including `ReadMcpResource`, which `driver.py`'s `mcp_servers` comment already
+records as a wart and which U8 carries as the read route the containment does not bound. The denial
+was masking that wart rather than closing it. That is a reason to keep `_AUTO` narrow going forward,
+and it is not a reason to have refused the loader: an allowlist whose entries are unreachable is not
+a narrower allowlist, it is an inaccurate one.
+
+**The defect worth carrying out of this is the test closure, not the missing name.**
+`tests/test_approval.py::_known_tools` is `sorted(approval._AUTO | approval._REVIEW |
+approval._BUS_AUTO)` — read off the module under test — and every policy assertion in the file
+quantifies over it. So `test_the_review_list_is_empty_under_the_autonomous_policy` could claim that
+no name this build knows waits for an operator under `AUTONOMOUS`, and pass, while a tool the harness
+really offers was being denied in a live run. The suite was closed over the thing it was measuring.
+Demonstrated rather than asserted: removing `"ToolSearch"` from `_AUTO` fails exactly the two new
+tests — `test_the_schema_loader_is_auto_approved_at_every_policy` and the `ToolSearch` case of
+`test_no_tool_this_harness_offers_waits_for_an_operator_under_autonomy` — and leaves
+`test_the_review_list_is_empty_under_the_autonomous_policy` green, because with the name gone from
+`_AUTO` it is gone from `_known_tools()` too. The repair is the independent literal `_HARNESS_TOOLS`,
+written out from evidence about the harness rather than derived from `approval.py`, which is what
+makes "nothing waits under this mode" a claim about the build instead of about the module's own
+spelling.
+
+**Two things are open, and neither is a finding this record should be read as having settled.**
+
+1. **How many further names reach the gate unclassified is not established.** The estimates in hand
+   run from roughly thirteen to seventeen and come from different methods — an audit that calibrated
+   itself and found its own method failing, and one session's first-hand list. `ScheduleWakeup`,
+   `Skill` and `ExitPlanMode` are the three carried in the suite as `xfail(strict=True)`. The
+   strictness is deliberate: a plain `xfail` would go on passing quietly the day somebody classified
+   one of them, and the marker would outlive the question it names. `establish-the-tool-list` is
+   running to turn the count into an observation, and no classification should be decided from the
+   estimates before it lands.
+2. **`_no_reviewer_reason`'s wording asserts a substitute exists, and nothing has checked that.**
+   *"do the work with a tool it does"* tells a denied agent there is another route. The code has never
+   established one, and for `ScheduleWakeup` there is none at all — the same shape of falsehood that
+   made the `ToolSearch` denial unactionable rather than merely restrictive. It is deliberately not
+   fixed here, because the right wording depends on what the probe finds: a message for a genuinely
+   unknown tool and a message for a tool the harness offers that this build has not classified are
+   different messages, and which one the mode mostly sends is the thing being measured.
+
+### Added to §8b's uncontained list
+
+**U7 — `WebFetch` and `WebSearch` are a low-bandwidth egress channel with no bound on either end.**
+They run in the CLI process, so `network.strictAllowlist` does not reach them and neither does the
+gate's write region; the only bound is the URL shape. Reachable by prompt injection from anything the
+agent reads, which under this mode includes every file in the working directory and every page a
+previous `WebFetch` returned. Nothing measures the volume. This is the stated cost of 12.5 and not a
+defect in `approval.py`, and it should not be read as one.
+
+**U8 — pptmstr's own gate removes the only bound that covered reads, at every policy including
+`STRICT`.** Upstream, verbatim: *"`sandbox.credentials` affects sandboxed Bash commands only"*, and
+*"Other built-in tools such as `Read`, `Edit`, and `WebFetch` run inside the Claude Code process …
+Permission rules for path or domain gate them instead."* The CLI would ordinarily bound `Read` to the
+working directory through those permission rules — but a `PreToolUse` hook returning
+`permissionDecision: "allow"` is upstream of the permission flow and bypasses it, and `approval._AUTO`
+auto-approves `Read`, `Grep`, `NotebookRead` and `ReadMcpResource` at every policy. `Grep` with
+`output_mode="content"` returns the same bytes as `Read`.
+
+So `sandbox.DENIED_CREDENTIAL_FILES` stops the `Bash` route to `~/.ssh` and leaves the `Read` route
+open, and `containment_settings`' docstring concedes a narrower version of this than is true.
+
+**This is a pre-existing property of `_AUTO` and not a consequence of this change**, and filing it
+against the mode would send the fix to the wrong place. What this change alters is the consequence:
+`WebFetch` is now released, so a read and a send compose without a human at either end.
+
+**Measured 2026-09-23, and the measurement is carried as U11 below rather than here.** The
+`Bash` route reaches `/proc` files the `Read` route does not, so it is not this item restated:
+U8's remedy would make that one worse. U8 is unchanged for the ordinary filesystem.
+
+**U9 — the write-region bound has two confirmed escapes, both reproduced by execution, and both are
+in the gate rather than in `model.py`.**
+
+**U9a — a hard link inside the region writes to an inode outside it.** The check resolves a name and
+compares components; a hard link is a second directory entry on the same inode, so there is nothing
+in the path to resolve and the name is genuinely inside the region. Measured against the built
+`_escapes_write_region` with region `/tmp/hl/region`, target `/tmp/hl/region/link.txt` hard-linked to
+`/tmp/hl/outside.txt`: the gate **allowed** it, `Path(...).resolve()` returned the in-region name
+unchanged, the inodes compared equal, and writing through the in-region name replaced the contents of
+the file outside it. No race, no symlink, nothing the check could have seen.
+
+**And §4's whole-process boundary does not close it either**, which is the one place the "upgrade to
+the shim" answer does not apply. Measured: with a hard link seeded from outside, a write through it
+under `containment_settings()` reached the inode outside the region and closed through `PostToolUse`
+rather than as a violation. A write through an existing hard link is an ordinary write to a path
+inside the writable region, and bubblewrap sees nothing else. So unlike U9b this is not a repair to
+the existing check, and unlike the rest of 12.1's list it is not an argument for §4 — it needs
+enforcement at the inode, which no layer in this design has.
+
+What the sandbox *does* bound is **creating** the second name: `ln` returns `Invalid cross-device
+link` inside it. The gate's released write tools call no linking syscall at all. So neither layer
+can make a hard link and both write through one that already exists — the hazard is a link placed by
+something outside the session.
+
+**U9b — a leading whitespace character makes an absolute path relative.** `model.written_path`
+returns its target unstripped, deliberately: §11 U5 records that the declaration side and the write
+side must normalise identically and that changing one site alone produces a false accusation against
+a compliant agent. So `written_path` is not where this is fixed. `_escapes_write_region` hands that
+string to `Path(...)`, which reads the whitespace as an ordinary leading component and therefore
+reads the whole target as relative — so it is joined to the region and lands inside it. Reproduced by
+execution against the built code, region `/home/wreel/Source/pptmstr`:
+
+| target | verdict |
+|---|---|
+| `/etc/passwd` | denied |
+| `/etc/./passwd`, `/etc//passwd`, `//etc/passwd` | denied |
+| `../escape.txt`, `sub/../../escape.txt`, `<region>/../escape.txt` | denied |
+| `/home/wreel/Source/pptmstr-scratch/x` (sibling prefix) | denied |
+| `~/escape.txt`, `~root/escape.txt`, `~nosuchuser/escape.txt` | denied |
+| `<region>/link/escaped.txt`, `link` a **symlink** out of the region | denied |
+| an embedded NUL, in any position | denied |
+| `NotebookEdit` with `notebook_path=/etc/x.ipynb` | denied |
+| **any absolute path prefixed by one whitespace character** | **allowed** |
+
+`Path(" /etc/passwd").is_absolute()` is `False` and its `parts` are `(' ', 'etc', 'passwd')`, so the
+target joins under the region and resolves inside it. Everything else in the table is correctly
+denied — the component comparison, the symlink resolution and the `~` expansion all do what 12.1
+claims, and the hole is upstream of them in the spelling alone.
+
+**The escaping class is wider than one character.** Space, tab, `\n`, `\r`, vertical tab, form feed
+and **U+00A0** all produce it; the last matters to whoever closes this, because Python's `str.strip()`
+removes `\xa0` while the filesystem treats it as an ordinary filename character. So a fix phrased as
+"refuse any target whose spelling is not its own stripped form" also refuses a legitimate file whose
+name begins with a non-breaking space. That is the fail-closed direction and is probably the right
+trade, but it is a trade rather than a free check and should be made knowingly.
+
+Whether the write then lands on `/etc/passwd` or on a directory literally named `" "` inside the
+region depends on whether the CLI strips before resolving, and that is unmeasured. **Both outcomes
+are defects**: one is an escape, the other is the gate measuring a different path from the one that
+gets written, which is the property the check exists to have. The fix belongs in the gate and must
+not touch `written_path`, `normalised_touches` or `relative_write` — U5's invariant is that those
+three agree, and they do.
+
+Both are boarded as `close-write-escapes`. **Neither is a reason to doubt the rest of 12.1**: every
+other spelling in the table is correctly refused, and both holes are in reading the name rather than
+in the region comparison. U9b is a repair to the check. U9a is a limit of checking names at all.
+
+**U10 — an unattended agent may decline, and a refusal is indistinguishable from a boundary that
+held.** This is not a containment gap. It is a *measurement* gap, which is the axis this record
+cares most about.
+
+`hardlink-parity-probe`'s second run produced **zero tool calls in its control arm**. The lead
+declined the work — *"That's a sandbox/containment-boundary probe, not project work."* It was not
+wrong about what it had been asked to do. Run 1 had executed the same commands without objection and
+the two runs differ only in a seventh command, so this sits near a threshold rather than being a
+stable behaviour that could be designed around.
+
+**With no operator attached, "the boundary held" and "the agent declined to test the boundary"
+produce the same artefacts**: no violation, no failure, a clean disk, a session that ran to
+completion. Nothing in the session distinguishes them. That probe stayed readable only because its
+structure did — zero `PreToolUse` calls against an untouched filesystem, rather than a tidy-looking
+pass.
+
+This bears directly on §10's *"§1 is falsifiable in one run: launch under the proposed mode and read
+`Snapshot.unattributed_writes` and any claimed task's `writes`. They should be empty."* **A reading
+that comes back empty may be a run that measured nothing, and the mode's own autonomy is one of the
+reasons it might be.** An empty result under this mode has at least two causes and the session does
+not say which.
+
+No fix is proposed here. There may not be one, and inventing a conclusion would be worse than
+carrying the item.
+
+**U11 — under `PERMISSIVE` an admitted `cat` returns `/proc` files the CLI's `Read` refuses, so on
+that axis the rung adds reach rather than restating U8's.** Measured 2026-09-23 on the merged tree
+at `cd7f57f`, in two kinds that must not be run together. `shellscan.refusal` and
+`approval.classify` are pure functions of their arguments, so reading them establishes what the
+gate *decides* and needs no script and no binary version. What bytes come back afterwards is a
+separate question with a separate method, measured against the 2.1.226 binary
+`cli_version.resolve_cli_path()` returns.
+
+**Why this is numbered rather than filed as more evidence under U8.** U8's remedy is a bound on the
+in-process read tools — a `permissions.deny`, or `blockReadsOutsideWorkingDirectories` on a CLI new
+enough for it. Applying that remedy makes *this* item worse: `Bash` shares no downstream enforcer
+with `Read`, so closing the `Read` route leaves `cat` as the only route and removes the tool an
+operator would think to check. An item that worsens when its parent is repaired is not evidence for
+the parent. U8 is unaffected and still holds for the ordinary filesystem, where the two routes do
+reach the same bytes.
+
+The probe, sixteen commands through `shellscan.refusal`:
+
+| command | verdict |
+|---|---|
+| `cat /proc/self/environ`, `cat /proc/1/environ` | admitted |
+| `cat` of `/proc/self/cmdline`, `/maps`, `/mounts`, `/fd/0` | admitted |
+| `head -c 200`, `nl`, `wc -c`, `stat`, `grep PATH` over `/proc/self/environ` | admitted |
+| `cat /proc/self/root/etc/shadow` | admitted |
+| `env` | refused — *env runs a command this table never saw* |
+| `printenv`, `set`, `declare -x` | refused — *not in the read-only table* |
+
+Past those sixteen it is the whole table: every row of `_TABLE` that takes a path admits a `/proc`
+one — `ls`, `du`, `df` and `tail` alongside the six above, `tail`'s flag grammar raising no
+objection to `-c 200` over one. Four of those return metadata rather than contents, and the
+metadata lies: `stat /proc/self/environ` reports **size 0** for a file `cat` returns 5432 bytes of.
+It could not be otherwise. `shellscan`'s docstring commits the module to deciding a syntactic
+membership question and to never looking at the filesystem the command names, and **no row judges a
+path operand**. The module does judge two paths, neither an operand and neither a precedent:
+`_DISCARD_STDERR` matches the literal `/dev/null` of a stderr redirect, and `_refuse_git` refuses
+any token starting `--output` because that flag writes a file.
+
+**The asymmetry the probe found is the table working, not a gap in it.** `env`, `printenv`, `set`
+and `declare` are refused while the file holding the same bytes is admitted — so the convenient
+spelling of "read my environment" parks and the inconvenient one does not. Reading that as a
+deny-list with a hole in it is precisely the mistake `test_no_row_decides_a_flag_by_denying_it`
+exists to forbid; the row list is an allowlist over `argv[0]` and says nothing about operands.
+
+**The table's reach does not depend on `/proc`.** `shellscan` admits `cat /etc/shadow` and
+`cat /home/wreel/.ssh/id_rsa` exactly as typed; whether the bytes then come back is the operating
+system's business and not the gate's. What the `/proc/self/root` and `cd` spellings add is nothing
+to the reach — they are bounds on the *remedy*, and the last paragraph here is where they work.
+
+**At the gate this adds no new decision.** U8 rests on `Read`, `Grep`, `NotebookRead` and
+`ReadMcpResource` sitting in `_AUTO`, which `classify` consults before any policy widening.
+Measured through `classify`: `Read` with `file_path=/proc/self/environ`, and `Grep` with
+`output_mode="content"` over the same path, return `AUTO_APPROVE` at `STRICT`, `PERMISSIVE` and
+`AUTONOMOUS` alike, while `Bash` with `cat /proc/self/environ` parks under `STRICT` and admits
+under `PERMISSIVE`. As a matter of what pptmstr *decides*, the `Bash` route is a second spelling of
+a call the gate already waves through at its strictest rung.
+
+**Below the gate the two routes do not share an enforcer, and for part of `/proc` the parity
+fails.** `Read` runs in the CLI process and is what `permissions.deny` would bound; `Bash` under
+`PERMISSIVE` is a subprocess with no sandbox at all, since `requires_containment(Policy.PERMISSIVE)`
+is False. Nothing makes those two agree, and on the eight `/proc` paths measured they do not:
+
+| path | CLI `Read` | admitted `Bash cat` |
+|---|---|---|
+| `/proc/self/environ`, `/proc/self/cmdline`, `/proc/self/maps`, `/proc/self/fd/0` | refused — *this device file would block or produce infinite output* | returns what the OS gives it |
+| `/proc/self/mounts`, `/proc/self/status`, `/proc/version`, `/proc/self/root/etc/passwd` | returns the bytes | returns the bytes |
+
+So `Read` serves half the `/proc` paths measured and refuses the other half; this is not a property
+of `/proc` as a whole and must not be written as one. **Counted over the probe: twelve of the
+sixteen rows are admitted, ten of those name a path `Read` refuses, and seven of those actually
+hand over contents** — `cat`, `head`, `nl`, `grep` and `wc` over `/proc/self/environ`, plus `cat`
+of `cmdline` and of `maps`. The three that do not are `stat`, which reaches only the metadata that
+lies; `cat /proc/1/environ`, which is `Permission denied` to a non-root user; and
+`cat /proc/self/fd/0`, whose target is `/dev/null` in this harness and would return something under
+a different stdin.
+
+The enforcer producing the refusals is inside the `Read` tool, not in any setting. It is not
+binary-content detection — an ordinary file containing a NUL byte is served, and so is
+`/proc/self/mounts` — and it cannot be `permissions.blockReadsOutsideWorkingDirectories`, which is
+documented v2.1.257+ against the 2.1.226 binary that actually launches. **For the rest of the
+filesystem U8's parity holds**, which is most of it.
+
+Methodology, because the obvious version of this probe leaks: nobody read this session's own
+`/proc/self/environ`. A process was started with a chosen 34-byte environment
+(`env -i CANARY=… FOO=bar sleep 600`) and its `environ` read instead — same file, same interface,
+no secret on the wire. And the `Read` leg ran as an ordinary harness tool call rather than inside a
+gated session; the refusal comes from the CLI's own tool implementation, which a hook `allow` sits
+upstream of and never replaces, but **that last step is inference and a session run would close
+it**.
+
+**What none of it answers**, and the distinction is the same one: *Still unmeasured* below asks
+whether a `PreToolUse` allow defeats `permissions.deny` for `Read`. Nothing here touches that. The
+`Read` refusals above are a guard no `permissions` block configured, so they say nothing about
+whether a rule would have bitten. `scripts/verify_read_bound.py` is the instrument for that
+question and this is not it.
+
+**No fix is proposed and none should be filed from this.** The measurement names a reach; it does
+not name a fix worth its cost. Containment is not the answer either — `requires_containment` is
+False for this rung, and flipping it would not close this, because the sandbox's read policy is the
+whole computer minus `sandbox.DENIED_CREDENTIAL_FILES`' four prefixes and `/proc` is not among
+them. Nor is a path denial in the table. Measured 2026-09-23 against three candidates, each
+strictly stronger than the one above it:
+
+| candidate denial in `shellscan` | status |
+|---|---|
+| on the reading command's operand | defeated by `cd /proc; cat self/environ` — the operand is relative and names nothing |
+| on any token containing `/proc`, whole command | defeated by `cd /; cat proc/self/environ` — the string `/proc` appears nowhere in it |
+| on any path component named `proc`, any token | **not defeated** — it catches all three spellings |
+
+The third one works and is still not the fix, which is the more useful finding. It refuses a *name*
+and not a path: it also refuses `cat proc/README.md`, `ls proc` and `grep -rn handler proc`, all
+admitted today and all ordinary work in a repository with a directory called `proc`. It has to be
+written again for every sensitive path. And catching these as *paths* rather than as names means
+resolving each segment against a cwd carried from the segment before — state plus name resolution,
+which `shellscan`'s docstring rules out and which U9a and U9b above are the standing evidence
+against. What is left is a path allowlist on every read row, which would re-decide for `Bash` a
+question `_AUTO` answers the other way for `Read`.
+
+The spellings above are pinned in `tests/test_shellscan.py`'s `ADMITTED` corpus — both defeat
+witnesses and `cat /proc/self/environ` — so this argument fails as a test rather than ageing as an
+assertion. The corpus carries two further `cd` spellings this table does not name, and says so
+where they sit.
+
+### What is measured now, and what is not
+
+**U6 is closed, and it closed favourably.** §11 calls it *"the most consequential unverified item in
+this amendment"*: §8's D2 reversal rests on a sub-agent's `Bash` being confined by the parent's
+sandbox, and §8c's probe never spawned one. `scripts/verify_nested_sandbox.py` measures it. Two arms
+over four commands, each arm driven by both a lead and a `tools=None` sub-agent mirroring the shipped
+`builder`, with four distinct probe paths so the filesystem attributes. Under `containment_settings()`
+the sub-agent's write outside cwd failed with `touch: cannot touch '…': Read-only file system` — the
+same error §8c got from the root — and its off-allowlist HTTPS GET returned exit 56 with the same
+`<sandbox_violations>` block. In the unsandboxed control arm the same nested write landed and the
+same fetch returned `200`, so the denials discriminate. **So the D2 reversal rests on an observation
+and §8's spawn release is not resting on a false premise.**
+
+Three things the probe establishes that §8c could not:
+
+- **The region is cwd-shaped for a sub-agent, not empty.** The nested *in-cwd* write landed in the
+  same arm the `$HOME` write was refused. Without that leg, "denied outside cwd" and "cannot write
+  anywhere" are the same observation, and the second would mean the mode contains a team by stopping
+  it working.
+- **The boundary does not depend on who issued the call.** The lead's leg in the same arm was
+  confined identically, which is the within-arm control that separates "sub-agents are unconfined"
+  from "this configuration confines nothing".
+- **A sub-agent's violations close their hook brackets.** Four nested `Bash` calls, zero brackets
+  left open, two closing through `PostToolUseFailure`. §8c's finding about the git sensor's
+  window-close trigger generalises to the nested case unchanged.
+
+**§8c attributes its result to the wrong binary, and so did this record.** §8c opens *"run against
+CLI 2.1.251"*. That number is a PATH read, and §11's own "Live constraints" records that the SDK
+spawns a bundled CLI in preference to PATH. On this host PATH reports `2.1.251` and
+`cli_version.resolve_cli_path()` returns the bundled binary in the venv, which reports **2.1.226**.
+§8c's measured claims are therefore claims about 2.1.226, and the nested probe reproduced every one
+of them at 2.1.226 — so this corrects the attribution and not the finding. It is the better outcome:
+the floor's keys are now measured as honoured by the binary that actually launches. `SANDBOX_FLOOR`
+is `2.1.219`, so the real margin is seven patch releases rather than thirty-two, which sharpens U2's
+argument that the floor covers only the keys whose floors are known.
+
+**U1 is schema-confirmed and its residue is smaller.** Upstream prints the `credentials.files` entry
+schema verbatim as `{ "path": "~/.aws/credentials", "mode": "deny" }`, which is what
+`containment_settings` emits; `~`-prefixed paths are the documented form, so leaving `~` unexpanded is
+correct rather than merely defensible; and the documented floor is v2.1.187, matching
+`SANDBOX_FLOOR_SOURCES["credentials"]`. U1's *"a wrong schema fails identically to a missing key"* arm
+retires. **What is left of U1**: nobody has watched a sandboxed read of a denied path actually fail.
+U8 makes that residue less interesting than it was, since the denial covers only the `Bash` route
+regardless of whether it works.
+
+**Still unmeasured.** Whether a `PreToolUse` allow defeats `permissions.deny` for `Read`, and what if
+anything re-imposes a read boundary — the question U8 turns on. It is being probed and this record
+does not pre-empt the answer. One constraint on the answer is already known and is worth recording
+because it bounds the remedy: `permissions.blockReadsOutsideWorkingDirectories` is documented as
+requiring **v2.1.257 or later**, which the 2.1.226 binary that actually launches does not meet.
+
+`failIfUnavailable` remains unmeasured (U2) — every probe so far has run on a host where the sandbox
+was available, so the loud-failure path is still inferred from documentation.
+
+### What actually gates shipping, revisited
+
+§11's list named two items. One is built.
+
+**The policy and its dial (§8a.5, §6.3) is built.** The checkbox names the kinds it releases rather
+than one tool, the containment and the region are described as the two separate mechanisms they are,
+`subagent_cap` is shown while the mode is engaged, and the uncontained edge of 12.5 is on screen
+rather than only here. An engaged launch is also held while the task box is a single line and no
+existing brief is named, on the reasoning that under this mode the task text *is* the premise —
+`app._seed_brief` writes it as entry `000` — so a one-line task is the whole specification for a run
+nobody will correct.
+
+**The mandatory clone (§8a.6) is still not built, and is still what gates shipping.** The sandbox's
+writable region *is* cwd, and §8 is unambiguous: *"the clone must be mandatory or this is not
+containment."* `ui/launcher.py:refusal_for` is **not** the resolution and should not be recorded as
+one. It refuses the mode when the resolved cwd lies inside pptmstr's own checkout, which closes the
+specific case §8 names — an unattended agent rewriting `approval.py` for the next launch — and closes
+nothing else. Every other directory an operator types is still made writable in full by the tick, with
+no clone and no snapshot, and §8b.3 records that an untracked file removed inside that region has no
+recovery path. **This is a gap, not a resolution.**
+
+**`strict_mcp_config=True` (§8a.4) is also unbuilt.** Nothing in the tree sets it. §8a lists it ahead
+of the policy in build order and the policy shipped without it.
+
+### Owed an answer, and this record does not supply one
+
+**Board declarations are released with no volume bound, and the decline that covered them was made
+for a world with an operator in it.** `mcp__pptmstr__declare_task` is in `_REVIEW` and is therefore
+auto-approved under this policy. `approval.py`'s comment on `_BUS_DECLARE` records the measured cost
+that was accepted — *"on the baseline run this fires once per declaration, which was six times inside
+five minutes at a moment when the operator had said one line"* — and records that a launch budget and
+a per-plan gate were **both declined**. Those declines were reasonable because the operator was the
+backstop: each declaration was a decision a human made.
+
+Under this mode nobody makes it. Spawns have `subagent_cap`, whose deny sits ahead of `classify` and
+which no policy can widen; declarations have no equivalent, and the failure mode is not a hang but a
+board nobody asked for which the team then works through. Whether that wants a sibling to the cap, or
+whether a long board is an acceptable shape for an unattended run, is a decision this change did not
+make and this record will not make for it.
+
+*(Distinct from the size of `read_board`'s output, which is a separate and measured problem boarded
+on its own.)*

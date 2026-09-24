@@ -11,6 +11,12 @@ template is configuration -- the kind of thing that eventually comes from a file
 the operator edits -- so it is worth being able to write, read and test one without
 an agent runtime anywhere near it.
 
+``Policy`` is imported for the same reason: it is the one thing outside this module
+that a prompt has to agree with, and ``approval.py`` is as SDK-free as this file is.
+A prompt here **describes** what the gate permits and never decides it -- this is a
+file the operator is invited to rewrite, and a sentence in it that settled a
+permission would put the dial somewhere an edit could move it (§6.7).
+
 **The prompts are the feature.** Roles are cheap; a lead that implements the work
 itself instead of delegating, a lead that runs one agent per role while
 independent tasks sit unclaimed, and workers that agree with each other are the
@@ -23,6 +29,9 @@ that it looks fine, while one told to find the case that breaks it goes looking.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import assert_never
+
+from .approval import Policy
 
 # Tool names every role gets regardless of what else it is allowed, because they
 # are how a role participates in the team at all. A worker without read_inbox
@@ -157,7 +166,100 @@ def _brief_lines(brief: str | None) -> list[str]:
     ]
 
 
-def lead_briefing(template: WorkTemplate) -> str:
+def _concern_audience_lines(policy: Policy) -> list[str]:
+    """
+    Who reads a message between two agents.
+
+    That is a fact about the session rather than about the team, which is why it
+    takes the policy and not the template. Under ``STRICT`` a ``post_concern`` is
+    parked and an operator reads it on the way past; under ``AUTONOMOUS`` it is
+    auto-approved and reaches its recipient alone. A lead told the first while the
+    second is true writes for an audience that does not exist, and can wait for a
+    reply a person was supposed to prompt.
+    """
+    match policy:
+        # ``PERMISSIVE`` groups here and not with the other widened rung, which is the
+        # answer a reader is most likely to get backwards. It widens ``Bash`` and
+        # nothing else, so ``post_concern`` parks under it exactly as under ``STRICT``
+        # and a person still reads every message on the way past. What a rung is called
+        # does not decide this; what it releases does.
+        case Policy.STRICT | Policy.PERMISSIVE:
+            return [
+                "- Messages between agents are reviewed by the operator before they arrive, so",
+                "  write them to be read by a person as well as by their recipient.",
+            ]
+        case Policy.AUTONOMOUS:
+            return [
+                "- A concern reaches its recipient and nobody else reads it. That is what it",
+                "  is for: telling another agent something, rather than reaching a person.",
+            ]
+    assert_never(policy)
+
+
+def _unattended_lines(policy: Policy) -> list[str]:
+    """
+    What is true of a team nobody is watching, in the words every role is given.
+
+    One block shared by the lead and the workers rather than a paragraph in each,
+    because these are facts about the session and not instructions to a role. Two
+    copies would be two chances to disagree about what the mode grants, and a lead
+    and a worker holding different beliefs about whether a write outside the
+    directory lands is an expensive disagreement to diagnose from the transcript.
+
+    Empty under ``STRICT``, which is what keeps every existing session's prompt
+    byte-identical rather than merely equivalent.
+
+    A ``match`` with ``assert_never`` rather than a truth test on the policy: a
+    third mode added to ``Policy`` and not described here would otherwise ship as a
+    mode whose agents are told an operator is reading, which is the belief that
+    makes an agent wait.
+    """
+    match policy:
+        # ``PERMISSIVE`` is not an unattended session and says nothing here. Writes,
+        # spawns and messages all still park at a person under it, so an agent told
+        # "this session parks nothing at a person" would be told something false --
+        # and it is the belief that makes an agent stop waiting, which is the one
+        # place a wrong word here is expensive. Returning the empty block also keeps
+        # its prompt byte-identical to ``STRICT``'s, which is the right claim: the
+        # rung changes which of its own calls stop, not who is reading.
+        case Policy.STRICT | Policy.PERMISSIVE:
+            return []
+        case Policy.AUTONOMOUS:
+            return [
+                "",
+                "## This session runs unattended",
+                "",
+                "This session parks nothing at a person, and that is a choice the operator",
+                "made rather than an accident of how the session was started. Anything you",
+                "would have asked an operator is the team's to settle: settle it, record the",
+                "decision and the reason where the next reader will meet it — the task's",
+                "detail on the board, a concern to the agent it affects, or wherever this",
+                "tree records decisions — and carry on. A question raised and left is work",
+                "stopped rather than work paused.",
+                "",
+                "The premises this session was launched with are the whole of what the",
+                "operator said. They were written before the work began and nothing is added",
+                "to them while it runs, so where they are silent the team decides, and where",
+                "they disagree with the tree the tree is the evidence.",
+                "",
+                "Writes outside the directory this session was launched in are denied, and so",
+                "are Bash commands that leave it. A Bash command reaches no host but the API",
+                "this session itself runs on. `WebFetch` and `WebSearch` are not bounded that",
+                "way — the sandbox wraps a Bash command and its children, and those tools",
+                "are performed by the CLI process outside it — so documentation is still",
+                "readable. The work is otherwise bounded to that directory, and a step",
+                "needing something outside it is a step to record as blocked, naming what it",
+                "needed, rather than to attempt another way.",
+                "",
+                "`subagent_cap` bounds how many agents run at once. A spawn refused at the cap",
+                "is an answer about capacity rather than about the call — the same spawn",
+                "succeeds once a running agent finishes, and `depends_on` is where an ordering",
+                "belongs when the alternative is holding an agent open to express it.",
+            ]
+    assert_never(policy)
+
+
+def lead_briefing(template: WorkTemplate, policy: Policy = Policy.STRICT) -> str:
     """
     What the lead is told, on top of its ordinary system prompt.
 
@@ -166,6 +268,10 @@ def lead_briefing(template: WorkTemplate) -> str:
     teammate that does not exist is worse than no briefing: the lead spends turns
     trying to reach it. The worked example of an instance address is taken from a
     role this template has, for the same reason.
+
+    ``policy`` selects what the briefing says about who is watching and nothing
+    else, and it defaults to ``STRICT`` so a caller that does not pass it reads
+    exactly what it read before the mode existed.
     """
     if not template.roles:
         return template.lead_prompt.strip()
@@ -213,15 +319,16 @@ def lead_briefing(template: WorkTemplate) -> str:
         "  blocked becomes claimable on its own the moment its dependencies complete.",
         "  Two tasks with no dependency between them are independent and can be worked",
         "  at the same time.",
-        "- **`touches` names the files a task will write, relative to the repository",
-        "  root.** Give it on every task. When two tasks on your board would write the",
-        "  same file, the board adds the dependency itself and tells you it did — you",
-        "  do not have to spot the overlap across a plan you wrote in pieces. Paths are",
-        "  normalised before they are compared, so a leading `./` or an embedded `..`",
-        "  makes no difference; an absolute path, though, is never matched against a",
-        "  relative path, which is why they must be repository-relative. A dependency",
-        "  the board added is not advisory: leave it in place, and where the overlap is",
-        "  wrong, narrow the `touches` of a task rather than dropping the edge.",
+        "- **`touches` names the files a task will write, relative to the directory",
+        "  this session was launched in.** Give it on every task. When two tasks on",
+        "  your board would write the same file, the board adds the dependency itself",
+        "  and tells you it did — you do not have to spot the overlap across a plan you",
+        "  wrote in pieces. Paths are normalised before they are compared, so a leading",
+        "  `./` or an embedded `..` makes no difference; an absolute path, though, is",
+        "  never matched against a relative path, which is why they must be relative to",
+        "  the launch directory and to nothing else. A dependency the board added is",
+        "  not advisory: leave it in place, and where the overlap is wrong, narrow the",
+        "  `touches` of a task rather than dropping the edge.",
         "- Workers call `claim_task()` to take the oldest unblocked item, one at a",
         "  time. Declare the work and let them claim it rather than assigning it by",
         "  hand; another agent in the same role is how the board drains faster.",
@@ -230,8 +337,8 @@ def lead_briefing(template: WorkTemplate) -> str:
         "  relaying the state yourself — your copy goes stale and the board does not.",
         "- `post_concern(to, subject, body)` sends a message to a role by name, or to",
         "  `lead` for you. `read_inbox()` collects what has been sent to you.",
-        "- Messages between agents are reviewed by the operator before they arrive, so",
-        "  write them to be read by a person as well as by their recipient.",
+        *_concern_audience_lines(policy),
+        *_unattended_lines(policy),
         "",
         "## Your job",
         "",
@@ -270,7 +377,7 @@ def lead_briefing(template: WorkTemplate) -> str:
     return "\n".join(lines)
 
 
-def worker_prompt(role: Role, brief: str | None = None) -> str:
+def worker_prompt(role: Role, brief: str | None = None, policy: Policy = Policy.STRICT) -> str:
     """
     A role's own prompt, plus the part every worker needs.
 
@@ -304,11 +411,17 @@ def worker_prompt(role: Role, brief: str | None = None) -> str:
     argues that a guard asking for restraint loses against a monotonically pro-rigor
     CLAUDE.md; "read the premises before you build" asks for more care, not less,
     and is not competing with anything.
+
+    ``policy`` is here and not only on ``lead_briefing`` because the lead's briefing
+    is not read by anybody else: a worker is the agent that meets the write-region
+    denial, and a worker is the agent that posts a concern and waits. It carries the
+    same block the lead gets, and it defaults to ``STRICT``.
     """
     return "\n".join(
         [
             role.prompt.strip(),
             *_brief_lines(brief),
+            *_unattended_lines(policy),
             "",
             "## Working with the team",
             "",
@@ -415,6 +528,14 @@ FEATURE = WorkTemplate(
     ),
 )
 
+# A team shape, not a permission. What a session's gate admits without an
+# operator is decided by `approval.Policy`, and no template selects a policy:
+# `app._launch` resolves `LaunchSpec.template` -- a free name string -- and
+# falls back to `templates.SOLO` when nothing matches, so a policy keyed on a
+# template name could turn autonomy on with the containment silently off and
+# log it as "launched as solo". This file is also committed to being
+# operator-editable configuration, which is the wrong place for a permission.
+# planning/2026-09-03-a-dangerously-autonomous-mode.md §6.7.
 RESEARCH = WorkTemplate(
     name="research",
     description="A coordinator and two investigators briefed to disagree with each other.",

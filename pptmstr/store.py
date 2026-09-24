@@ -26,6 +26,7 @@ from collections.abc import Iterable
 from types import MappingProxyType
 from typing import assert_never
 
+from .approval import Policy
 from .board import board_concerns, board_tasks
 from .effects import BoardDelivered, ClaimSettled, Effect, InboxDelivered, TaskWriteSettled
 from .intents import (
@@ -205,7 +206,13 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
                 # session's, and making each emitter remember that is how the two
                 # sides of a boundary drift apart.
                 cwd=intent.cwd or (parent_rec.cwd if parent_rec else None),
-                repo_root=intent.repo_root or (parent_rec.repo_root if parent_rec else None),
+                session_base=intent.session_base
+                or (parent_rec.session_base if parent_rec else None),
+                # Resolved here for the same reason and with sharper stakes: the
+                # gate classifies a sub-agent's calls under its session's policy
+                # (``driver._policy_for``), so a record that did not inherit would
+                # say a node is gated more tightly than the gate judging it.
+                policy=intent.policy or (parent_rec.policy if parent_rec else Policy.STRICT),
                 started_at=intent.started_at,
                 transcript=intent.transcript or Transcript(),
             )
@@ -361,7 +368,13 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
                     # node most likely to be a writer -- omitting the base here
                     # would fail silently in exactly the recovered case.
                     cwd=nodes[parent].cwd if adopted else None,
-                    repo_root=nodes[parent].repo_root if adopted else None,
+                    session_base=nodes[parent].session_base if adopted else None,
+                    # Adopted for the same reason as the pair above, and it is this
+                    # arm's own gate that makes it necessary: the approval being
+                    # recovered was classified under the session's policy, so a
+                    # placeholder left at STRICT would show a tighter gate than the
+                    # one that just judged the call it was built from.
+                    policy=nodes[parent].policy if adopted else Policy.STRICT,
                     pending=(intent.pending,),
                     started_at=intent.pending.requested_at,
                 )
@@ -443,7 +456,7 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
                                 args,
                                 rec.cwd,
                                 resolved.diff,
-                                rec.repo_root,
+                                rec.session_base,
                             )
                         ),
                     )
@@ -561,9 +574,20 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
             # history and is the honest option: the alternative is a spec that
             # disagrees with the record of what was built, and the board is what a
             # later reader has.
+            #
+            # `released_by` is cleared, which is the one thing here that is not
+            # simply left alone. An agent that gave this task back declined the
+            # specification it was holding, and an amendment replaces exactly that
+            # -- so the refusal it recorded was about an offer that no longer
+            # exists, and continuing to skip the task on a bare claim would hold a
+            # decision against a spec nobody can now read. It is also the only way
+            # a task every agent has declined comes back into circulation without
+            # somebody naming its id.
             amended = tasks.get(intent.task_id)
             if amended is not None:
-                tasks[intent.task_id] = dataclasses.replace(amended, detail=intent.detail)
+                tasks[intent.task_id] = dataclasses.replace(
+                    amended, detail=intent.detail, released_by=()
+                )
 
         case TaskDeclared():
             refused = _declaration_refusal(tasks, intent.task)
@@ -592,7 +616,7 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
         case TaskClaimRequested():
             # The claimer's own session, taken from the sender the gate
             # authenticated rather than from anything the model can set.
-            won = _pick_claim(tasks, intent.task_id, intent.node_id[0])
+            won = _pick_claim(tasks, intent.task_id, intent.node_id)
             if won is not None:
                 won = dataclasses.replace(won, state=TaskState.CLAIMED, claimed_by=intent.node_id)
                 tasks[won.id] = won
@@ -615,8 +639,19 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
         case TaskReleased():
             refused = _ownership_refusal(tasks, intent.task_id, intent.node_id)
             if refused is None:
+                released = tasks[intent.task_id]
+                # Recorded here because this arm is the only thing that knows both
+                # the task and who is giving it back -- `claimed_by` is cleared on
+                # the same line. Appended only if new, so an agent that claims and
+                # releases the same task twice leaves one entry; see the field.
+                declined = released.released_by
+                if intent.node_id not in declined:
+                    declined += (intent.node_id,)
                 tasks[intent.task_id] = dataclasses.replace(
-                    tasks[intent.task_id], state=TaskState.PENDING, claimed_by=None
+                    released,
+                    state=TaskState.PENDING,
+                    claimed_by=None,
+                    released_by=declined,
                 )
             effects = _settled(intent.request_id, refused)
 
@@ -807,7 +842,7 @@ def _claimed_tasks(tasks: dict[TaskId, Task], node_id: NodeId) -> tuple[Task, ..
     )
 
 
-def _pick_claim(tasks: dict[TaskId, Task], task_id: TaskId | None, session_id: str) -> Task | None:
+def _pick_claim(tasks: dict[TaskId, Task], task_id: TaskId | None, node: NodeId) -> Task | None:
     """
     The task this claim wins, or None.
 
@@ -827,13 +862,32 @@ def _pick_claim(tasks: dict[TaskId, Task], task_id: TaskId | None, session_id: s
     slice, matching ``board_tasks``. A dependency that does not exist counts as
     unsatisfied, so narrowing the map first would invent a blocker out of a
     cross-session dependency and wedge a task that is genuinely ready.
+
+    **A bare claim skips what this node has already released, and a claim by id
+    does not.** Releasing does not change a task's age, so without the skip the
+    oldest claimable task is the one the caller just gave back and a bare claim
+    hands it straight over again. Two agents can hold that between them
+    indefinitely and neither can see it from its own transcript, because each sees
+    an ordinary claim of an ordinary task.
+
+    The skip is asymmetric on purpose. Naming the id is an agent saying it means
+    this one, which is the only way back to a task it declined and the reason a
+    declined task is never lost: it stays on the board, claimable by every other
+    agent and takeable by name by anyone. A filter that applied to both would trade
+    a livelock for a task nothing can pick up, and an unattended board cannot
+    report that.
     """
+    session_id = node[0]
     if task_id is not None:
         t = tasks.get(task_id)
         if t is None or not t.belongs_to(session_id) or not t.is_claimable(tasks):
             return None
         return t
-    claimable = [t for t in tasks.values() if t.belongs_to(session_id) and t.is_claimable(tasks)]
+    claimable = [
+        t
+        for t in tasks.values()
+        if t.belongs_to(session_id) and t.is_claimable(tasks) and node not in t.released_by
+    ]
     # Oldest first, so a self-claiming pool drains the board in declaration order
     # rather than in dict order, which would be arbitrary but reproducible -- the
     # worst kind, because it looks deliberate.

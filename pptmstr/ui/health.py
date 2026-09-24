@@ -24,10 +24,11 @@ from dataclasses import dataclass
 
 from imgui_bundle import imgui
 
+from ..approval import Policy
 from ..model import AgentState, LaunchSpec, NodeId, Snapshot
-from ..theme import STATE_GLYPH, STATE_LABEL, P
+from ..theme import STATE_GLYPH, STATE_LABEL, Color, P
 from . import projects
-from .widgets import context_cell, ellipsis, format_elapsed, short_model
+from .widgets import context_cell, ellipsis, format_elapsed, gate_adds, short_model
 
 _SMALL_FONT = 12.5
 
@@ -39,6 +40,10 @@ class HealthActions:
     # task, model, cwd, template -- see InboxActions.relaunch for why the last one
     # is carried and not defaulted.
     fork: Callable[[LaunchSpec], None]
+    # Put a session back on the strict gate, for one that is wandering rather than
+    # converging. Narrowing only: the session exposes no widening write, so there
+    # is no lever back from here.
+    revoke_policy: Callable[[NodeId], None]
 
 
 def _small() -> None:
@@ -49,6 +54,24 @@ def _normal() -> None:
     imgui.pop_font()
 
 
+def gate_line(policy: Policy | None) -> tuple[str, Color] | None:
+    """
+    What to say about this session's gate, and how loudly, or None to say nothing.
+
+    Nothing is the honest answer for a session no longer running: the policy is
+    held by the session, so once it is gone there is no reading to report and the
+    last one is not a fact about anything.
+
+    ``STRICT`` is stated rather than left blank, because a variable nobody displays
+    is one the UI can be silently wrong about. It is dimmed and every other rung is
+    not -- a session running under a widened gate is the case the operator has to
+    be able to notice without looking for it.
+    """
+    if policy is None:
+        return None
+    return f"gate: {policy.value}", P.text_dim if policy is Policy.STRICT else P.warn
+
+
 def _fmt_tokens(count: int) -> str:
     if count >= 1_000_000:
         return f"{count / 1_000_000:.1f}M"
@@ -57,8 +80,22 @@ def _fmt_tokens(count: int) -> str:
     return str(count)
 
 
-def draw(snap: Snapshot, node: NodeId | None, actions: HealthActions, now: float) -> None:
-    """Health for the session under the cursor. Never independently selectable."""
+def draw(
+    snap: Snapshot,
+    node: NodeId | None,
+    actions: HealthActions,
+    now: float,
+    policy: Policy | None = None,
+) -> None:
+    """
+    Health for the session under the cursor. Never independently selectable.
+
+    ``policy`` is the live reading taken from the session this frame, or None when
+    no session is holding this node any more. It is a parameter rather than
+    something read off the record because the record does not carry it: the policy
+    moves inside the session after launch, and the only value that is not a guess
+    is the one the session is answering with right now.
+    """
     if node is None or (record := snap.get(node)) is None:
         imgui.text_disabled("nothing selected")
         return
@@ -83,6 +120,18 @@ def draw(snap: Snapshot, node: NodeId | None, actions: HealthActions, now: float
 
     imgui.text_disabled(short_model(root.model))
     imgui.text_disabled(root.cwd or "(the orchestrator's directory)")
+    gate = gate_line(policy)
+    if gate is not None:
+        imgui.text_colored(gate[1].vec4, gate[0])
+        adds = gate_adds(policy) if policy is not None else ()
+        if adds:
+            # The whole extent of the widening, under the name of it. A rung called
+            # PERMISSIVE invites the reading that writes are ungated, and the name
+            # is what an operator calibrates against -- this is the line that says
+            # how far it actually goes.
+            _small()
+            imgui.text_colored(P.warn.vec4, f"adds {', '.join(adds)} - everything else parks")
+            _normal()
     imgui.spacing()
 
     # -- health, then money. Adjacent, never combined.
@@ -145,6 +194,14 @@ def draw(snap: Snapshot, node: NodeId | None, actions: HealthActions, now: float
         # session that has compacted has already lost the reasoning that got it
         # here, and continuing it is worse than restarting it.
         actions.fork(LaunchSpec.from_record(root))
+
+    if policy is not None and policy is not Policy.STRICT:
+        # Only while there is something to narrow. Absent rather than disabled: a
+        # greyed control reads as a lever this session has lost, and under STRICT
+        # there is simply nothing for it to do.
+        imgui.same_line()
+        if imgui.button("narrow to strict"):
+            actions.revoke_policy(session)
 
     _small()
     if root.state is AgentState.AWAITING_INPUT:

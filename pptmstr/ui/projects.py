@@ -21,7 +21,7 @@ from ..model import NodeId, Snapshot
 # per distinct working directory the operator has launched into.
 #
 # It exists because the derivation stats the filesystem and the callers are draw
-# functions. Walking to a git root once per card per frame would put filesystem I/O
+# functions. Resolving a directory once per card per frame would put filesystem I/O
 # on the 60fps path to answer a question whose answer does not change.
 _CACHE: dict[str, str] = {}
 
@@ -34,11 +34,11 @@ def project_key(cwd: str | None) -> str:
     """
     The project a working directory belongs to.
 
-    The enclosing git root's name, because that is the unit an operator thinks in --
-    ``~/Source/orbital/tools/parsers`` and ``~/Source/orbital`` are one project, and
-    grouping them apart would split a repo across two lanes for no reason the
-    operator can see. Falls back to the directory's own name when nothing encloses
-    it, which is the right answer for a scratch directory.
+    The name of the directory the session was launched in, because that directory is
+    the one the operator chose -- they point a session at the root of the work, and
+    the lane they expect to see it in is the one named after it. Two sessions launched
+    at different depths of one tree land in different lanes, which is the cost of
+    reading the operator's own answer rather than inferring a grouping over it.
 
     Cheap after the first call for a given directory; see ``_CACHE``.
     """
@@ -53,15 +53,15 @@ def project_key(cwd: str | None) -> str:
 
 def _derive(cwd: str) -> str:
     """
-    The display name for the directory ``tree.repo_root`` files this cwd under.
+    The display name for the directory ``tree.session_base`` files this cwd under.
 
-    The walk itself is not here. It decides which directory a session's writes are
-    measured relative to, which is a store-facing fact rather than a display
-    judgement, and two walks that answered differently would put a session in one
-    project on screen and another in its units.
+    The resolution itself is not here. It decides which directory a session's writes
+    are measured relative to, which is a store-facing fact rather than a display
+    judgement, and two resolutions that answered differently would put a session in
+    one project on screen and another in its units.
     """
-    root = tree.repo_root(cwd)
-    return Path(root).name or root
+    base = tree.session_base(cwd)
+    return Path(base).name or base
 
 
 def roots(snap: Snapshot) -> list[NodeId]:
