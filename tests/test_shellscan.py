@@ -339,12 +339,22 @@ ADMITTED = [
     # decision. Adding containment here is not a gap to close; it is a
     # decision neither record made.
     #
-    # What an admitted `cat` of an absolute path concedes is exactly what
+    # What an admitted `cat` of an ordinary absolute path concedes is what
     # `Read` already concedes at STRICT: the file's bytes reach the model's
     # context, and thence the API. Whether the session also has somewhere to
     # send them is decided in `approval.py` and not here -- this table has no
     # egress row, and `curl`, `wget` and `ssh` are in `REFUSED` above.
     "cat /Users/walter.reel/.aws/credentials",
+    # The same row for a path where that parity does **not** hold, which is why
+    # it is pinned separately. Measured 2026-09-23: the CLI's `Read` refuses
+    # `/proc/self/environ` -- "this device file would block or produce infinite
+    # output" -- while this table admits the `cat`, so here an admitted command
+    # reaches bytes the native read path does not. Every path-taking row does
+    # it, not just `cat`. The reasoning for leaving it admitted is unchanged and
+    # is under U8 in `planning/2026-09-03-a-dangerously-autonomous-mode.md`:
+    # containment for this table is a decision no record has made, and a path
+    # denial is defeated by `cd /proc; cat self/environ` below.
+    "cat /proc/self/environ",
     "git remote -v",
     "git remote",
     # -- sequences, which are what orienting in a repository actually looks ---
@@ -383,6 +393,31 @@ ADMITTED = [
     "cd /Users/walter.reel/Source/pptmstr && git status",
     "cd -",
     "cd ..",
+    # Pinned because they bound a remedy, not because anyone wants them. `cd`
+    # plus a relative operand reaches a path without the reading command naming
+    # it, and the last row reaches `/proc/self/environ` with no token and no
+    # substring anywhere in it spelling `/proc`. Measured 2026-09-23 against
+    # three candidate denials, and the third one *works*: a denial on the read
+    # row's operand misses all of these, a substring scan for `/proc` over the
+    # whole command misses the last, and a denial on any path component named
+    # `proc` catches every one.
+    #
+    # It is still not the fix, which is the useful half. It refuses a name and
+    # not a path, so it also refuses `cat proc/README.md` and `ls proc` -- both
+    # admitted today and both ordinary work in a repository with a directory
+    # called `proc` -- and it has to be written again for every path anyone
+    # cares about. Catching these as paths instead means resolving each segment
+    # against a cwd carried from the segment before, which this module's
+    # docstring rules out and which U9a/U9b show is where path checks go wrong.
+    #
+    # `2026-09-03` §12 U11 carries the same three candidates in a table; these
+    # four rows are its witnesses plus `cd /proc/self; cat environ`, which the
+    # record does not name and which is here because it is the spelling a model
+    # actually produces.
+    "cd /proc; cat self/environ",
+    "cd /; cat proc/self/environ",
+    "cd /proc/self; cat environ",
+    "cd /; cd proc; cd self; cat environ",
     # `echo`, added 2026-09-22. It reads nothing; it is on the table because a
     # sequence is admitted only when every segment is, and the model labels
     # batched reads with one. The last row is the shape that motivates it.

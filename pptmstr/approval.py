@@ -69,13 +69,26 @@ class Policy(enum.Enum):
     # absolute path into an unattended read-then-send. Context still reaches the
     # API, as it does under `STRICT` (2026-09-03 §8b.8).
     #
-    # Deliberately not paired with containment. What the sandbox bounds is writes
-    # and network, which this rung already refuses syntactically; what it does not
-    # bound is reads, which is the only axis this rung opens -- and `_AUTO` already
-    # auto-approves `Read` and `Grep` against any path at every policy, so an
-    # admitted `cat` reaches nothing `STRICT` did not already reach (2026-09-03
-    # §11 U8). A sandbox here would cost the operator working invocations and buy
-    # the gate nothing.
+    # Deliberately not paired with containment, and the reason is a cost
+    # judgement rather than a claim that containment buys nothing. What the
+    # sandbox bounds is writes and network, which this rung already refuses
+    # syntactically. On the read axis it adds exactly one thing: a deny at
+    # `sandbox.DENIED_CREDENTIAL_FILES`' four prefixes, since upstream's sandbox
+    # read policy is the rest of the computer. Four paths against a rung whose
+    # read reach is the filesystem, and whether that key is honoured at all is
+    # unmeasured -- 2026-09-03 §11 U1's residue, with
+    # `scripts/verify_read_bound.py`'s K arms as the instrument and no recorded
+    # run. Against that sits a real operator cost: an X server connection and a
+    # venv interpreter both break under the sandbox, which is what this rung
+    # exists to survive.
+    #
+    # The two routes do not share a downstream enforcer, so no parity argument
+    # is available here. Measured 2026-09-23: the CLI's `Read` refuses
+    # `/proc/self/environ` outright while an admitted `cat` returns it, so this
+    # rung reaches bytes `STRICT` cannot (2026-09-03 §12 U11). That is a reach
+    # containment would not close either -- the sandbox's read policy covers
+    # `/proc` -- which is why it is recorded rather than answered by flipping
+    # `requires_containment`.
     #
     # Rungs above this one carry their warning in their own name.
     PERMISSIVE = "permissive"
@@ -288,11 +301,20 @@ def requires_containment(policy: Policy) -> bool:
     so a fourth rung that released writes and returned False here would fail before
     it could put a reassuring line on the launcher.
 
-    ``PERMISSIVE`` returns False and is not an oversight. What the sandbox bounds is
-    writes and network, which that rung already refuses syntactically; what it does
-    not bound is reads, which is the only axis that rung opens. Requiring one would
-    cost the operator working invocations -- an X server connection, a venv
-    interpreter -- and buy the gate nothing (2026-09-03 §11 U8).
+    ``PERMISSIVE`` returns False and is not an oversight, but it rests on a cost
+    judgement rather than on containment being free of value. What the sandbox bounds
+    is writes and network, which that rung already refuses syntactically. Reads are
+    the axis it opens, and containment bounds those only at
+    ``sandbox.DENIED_CREDENTIAL_FILES``' four prefixes -- narrow but not nothing, and
+    itself unmeasured (2026-09-03 §11 U1). Set against an X server connection and a
+    venv interpreter that stop working under the sandbox, the rung declines the trade
+    and states its cost rather than claiming there is none.
+
+    **The reach this leaves open is real and is recorded at §12 U11**: an admitted
+    ``cat`` returns ``/proc/self/environ``, which the CLI's ``Read`` refuses. Flipping
+    this to True would not close it, because the sandbox's read policy is the whole
+    computer minus those four prefixes and ``/proc`` is not among them. So U11 is a
+    reason to know what the rung reaches, not a reason to change this answer.
     """
     match policy:
         case Policy.STRICT:

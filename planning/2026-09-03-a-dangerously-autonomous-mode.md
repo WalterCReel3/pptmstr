@@ -1034,6 +1034,10 @@ open, and `containment_settings`' docstring concedes a narrower version of this 
 against the mode would send the fix to the wrong place. What this change alters is the consequence:
 `WebFetch` is now released, so a read and a send compose without a human at either end.
 
+**Measured 2026-09-23, and the measurement is carried as U11 below rather than here.** The
+`Bash` route reaches `/proc` files the `Read` route does not, so it is not this item restated:
+U8's remedy would make that one worse. U8 is unchanged for the ordinary filesystem.
+
 **U9 — the write-region bound has two confirmed escapes, both reproduced by execution, and both are
 in the gate rather than in `model.py`.**
 
@@ -1125,6 +1129,128 @@ not say which.
 
 No fix is proposed here. There may not be one, and inventing a conclusion would be worse than
 carrying the item.
+
+**U11 — under `PERMISSIVE` an admitted `cat` returns `/proc` files the CLI's `Read` refuses, so on
+that axis the rung adds reach rather than restating U8's.** Measured 2026-09-23 on the merged tree
+at `cd7f57f`, in two kinds that must not be run together. `shellscan.refusal` and
+`approval.classify` are pure functions of their arguments, so reading them establishes what the
+gate *decides* and needs no script and no binary version. What bytes come back afterwards is a
+separate question with a separate method, measured against the 2.1.226 binary
+`cli_version.resolve_cli_path()` returns.
+
+**Why this is numbered rather than filed as more evidence under U8.** U8's remedy is a bound on the
+in-process read tools — a `permissions.deny`, or `blockReadsOutsideWorkingDirectories` on a CLI new
+enough for it. Applying that remedy makes *this* item worse: `Bash` shares no downstream enforcer
+with `Read`, so closing the `Read` route leaves `cat` as the only route and removes the tool an
+operator would think to check. An item that worsens when its parent is repaired is not evidence for
+the parent. U8 is unaffected and still holds for the ordinary filesystem, where the two routes do
+reach the same bytes.
+
+The probe, sixteen commands through `shellscan.refusal`:
+
+| command | verdict |
+|---|---|
+| `cat /proc/self/environ`, `cat /proc/1/environ` | admitted |
+| `cat` of `/proc/self/cmdline`, `/maps`, `/mounts`, `/fd/0` | admitted |
+| `head -c 200`, `nl`, `wc -c`, `stat`, `grep PATH` over `/proc/self/environ` | admitted |
+| `cat /proc/self/root/etc/shadow` | admitted |
+| `env` | refused — *env runs a command this table never saw* |
+| `printenv`, `set`, `declare -x` | refused — *not in the read-only table* |
+
+Past those sixteen it is the whole table: every row of `_TABLE` that takes a path admits a `/proc`
+one — `ls`, `du`, `df` and `tail` alongside the six above, `tail`'s flag grammar raising no
+objection to `-c 200` over one. Four of those return metadata rather than contents, and the
+metadata lies: `stat /proc/self/environ` reports **size 0** for a file `cat` returns 5432 bytes of.
+It could not be otherwise. `shellscan`'s docstring commits the module to deciding a syntactic
+membership question and to never looking at the filesystem the command names, and **no row judges a
+path operand**. The module does judge two paths, neither an operand and neither a precedent:
+`_DISCARD_STDERR` matches the literal `/dev/null` of a stderr redirect, and `_refuse_git` refuses
+any token starting `--output` because that flag writes a file.
+
+**The asymmetry the probe found is the table working, not a gap in it.** `env`, `printenv`, `set`
+and `declare` are refused while the file holding the same bytes is admitted — so the convenient
+spelling of "read my environment" parks and the inconvenient one does not. Reading that as a
+deny-list with a hole in it is precisely the mistake `test_no_row_decides_a_flag_by_denying_it`
+exists to forbid; the row list is an allowlist over `argv[0]` and says nothing about operands.
+
+**The table's reach does not depend on `/proc`.** `shellscan` admits `cat /etc/shadow` and
+`cat /home/wreel/.ssh/id_rsa` exactly as typed; whether the bytes then come back is the operating
+system's business and not the gate's. What the `/proc/self/root` and `cd` spellings add is nothing
+to the reach — they are bounds on the *remedy*, and the last paragraph here is where they work.
+
+**At the gate this adds no new decision.** U8 rests on `Read`, `Grep`, `NotebookRead` and
+`ReadMcpResource` sitting in `_AUTO`, which `classify` consults before any policy widening.
+Measured through `classify`: `Read` with `file_path=/proc/self/environ`, and `Grep` with
+`output_mode="content"` over the same path, return `AUTO_APPROVE` at `STRICT`, `PERMISSIVE` and
+`AUTONOMOUS` alike, while `Bash` with `cat /proc/self/environ` parks under `STRICT` and admits
+under `PERMISSIVE`. As a matter of what pptmstr *decides*, the `Bash` route is a second spelling of
+a call the gate already waves through at its strictest rung.
+
+**Below the gate the two routes do not share an enforcer, and for part of `/proc` the parity
+fails.** `Read` runs in the CLI process and is what `permissions.deny` would bound; `Bash` under
+`PERMISSIVE` is a subprocess with no sandbox at all, since `requires_containment(Policy.PERMISSIVE)`
+is False. Nothing makes those two agree, and on the eight `/proc` paths measured they do not:
+
+| path | CLI `Read` | admitted `Bash cat` |
+|---|---|---|
+| `/proc/self/environ`, `/proc/self/cmdline`, `/proc/self/maps`, `/proc/self/fd/0` | refused — *this device file would block or produce infinite output* | returns what the OS gives it |
+| `/proc/self/mounts`, `/proc/self/status`, `/proc/version`, `/proc/self/root/etc/passwd` | returns the bytes | returns the bytes |
+
+So `Read` serves half the `/proc` paths measured and refuses the other half; this is not a property
+of `/proc` as a whole and must not be written as one. **Counted over the probe: twelve of the
+sixteen rows are admitted, ten of those name a path `Read` refuses, and seven of those actually
+hand over contents** — `cat`, `head`, `nl`, `grep` and `wc` over `/proc/self/environ`, plus `cat`
+of `cmdline` and of `maps`. The three that do not are `stat`, which reaches only the metadata that
+lies; `cat /proc/1/environ`, which is `Permission denied` to a non-root user; and
+`cat /proc/self/fd/0`, whose target is `/dev/null` in this harness and would return something under
+a different stdin.
+
+The enforcer producing the refusals is inside the `Read` tool, not in any setting. It is not
+binary-content detection — an ordinary file containing a NUL byte is served, and so is
+`/proc/self/mounts` — and it cannot be `permissions.blockReadsOutsideWorkingDirectories`, which is
+documented v2.1.257+ against the 2.1.226 binary that actually launches. **For the rest of the
+filesystem U8's parity holds**, which is most of it.
+
+Methodology, because the obvious version of this probe leaks: nobody read this session's own
+`/proc/self/environ`. A process was started with a chosen 34-byte environment
+(`env -i CANARY=… FOO=bar sleep 600`) and its `environ` read instead — same file, same interface,
+no secret on the wire. And the `Read` leg ran as an ordinary harness tool call rather than inside a
+gated session; the refusal comes from the CLI's own tool implementation, which a hook `allow` sits
+upstream of and never replaces, but **that last step is inference and a session run would close
+it**.
+
+**What none of it answers**, and the distinction is the same one: *Still unmeasured* below asks
+whether a `PreToolUse` allow defeats `permissions.deny` for `Read`. Nothing here touches that. The
+`Read` refusals above are a guard no `permissions` block configured, so they say nothing about
+whether a rule would have bitten. `scripts/verify_read_bound.py` is the instrument for that
+question and this is not it.
+
+**No fix is proposed and none should be filed from this.** The measurement names a reach; it does
+not name a fix worth its cost. Containment is not the answer either — `requires_containment` is
+False for this rung, and flipping it would not close this, because the sandbox's read policy is the
+whole computer minus `sandbox.DENIED_CREDENTIAL_FILES`' four prefixes and `/proc` is not among
+them. Nor is a path denial in the table. Measured 2026-09-23 against three candidates, each
+strictly stronger than the one above it:
+
+| candidate denial in `shellscan` | status |
+|---|---|
+| on the reading command's operand | defeated by `cd /proc; cat self/environ` — the operand is relative and names nothing |
+| on any token containing `/proc`, whole command | defeated by `cd /; cat proc/self/environ` — the string `/proc` appears nowhere in it |
+| on any path component named `proc`, any token | **not defeated** — it catches all three spellings |
+
+The third one works and is still not the fix, which is the more useful finding. It refuses a *name*
+and not a path: it also refuses `cat proc/README.md`, `ls proc` and `grep -rn handler proc`, all
+admitted today and all ordinary work in a repository with a directory called `proc`. It has to be
+written again for every sensitive path. And catching these as *paths* rather than as names means
+resolving each segment against a cwd carried from the segment before — state plus name resolution,
+which `shellscan`'s docstring rules out and which U9a and U9b above are the standing evidence
+against. What is left is a path allowlist on every read row, which would re-decide for `Bash` a
+question `_AUTO` answers the other way for `Read`.
+
+The spellings above are pinned in `tests/test_shellscan.py`'s `ADMITTED` corpus — both defeat
+witnesses and `cat /proc/self/environ` — so this argument fails as a test rather than ageing as an
+assertion. The corpus carries two further `cd` spellings this table does not name, and says so
+where they sit.
 
 ### What is measured now, and what is not
 

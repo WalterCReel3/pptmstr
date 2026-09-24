@@ -1,7 +1,7 @@
 # What is left on the gate-policy branch
 
-**Dated:** 2026-09-21, amended 2026-09-22 · **Status:** handover note, not a design
-record · **Branch:** `experimental-gate-policy`, based on `85c95d1`
+**Dated:** 2026-09-21, amended 2026-09-22 and 2026-09-23 · **Status:** handover note, not
+a design record · **Branch:** `gate-policy-ingest`, at `cd7f57f`
 
 The design reasoning is in
 [`2026-09-17-a-research-policy-reduces-the-orienting-burst.md`](2026-09-17-a-research-policy-reduces-the-orienting-burst.md).
@@ -28,8 +28,12 @@ The 09-21 work was uncommitted and staged. It is committed now, along with the f
   flag and `test_no_row_decides_a_flag_by_denying_it` forbids adding one, because
   deny-lists are defeated by `getopt_long` abbreviation. Segment support splits on
   `|`, `||`, `&&`, `;`, newline; bare `&` and `\r` stay refused.
-- `approval.Policy` — rungs `STRICT` and `PERMISSIVE`, plus `classify(..., policy=)`.
-  `PERMISSIVE` admits shellscan-passing `Bash` and nothing else.
+- `approval.Policy` — a ladder of **three** rungs, `STRICT`, `PERMISSIVE` and
+  `AUTONOMOUS`, plus `classify(..., policy=)`. `PERMISSIVE` admits shellscan-passing
+  `Bash` and nothing else; `AUTONOMOUS` releases the whole of `_REVIEW` and is the only
+  rung for which `requires_containment` and `inherits_to_subagents` are True. Written out
+  here because the two-rung version this line carried until 2026-09-23 would have told a
+  cold resume that the one rung with a sandbox attached to it did not exist.
 - `driver.py` — policy per session, per-node scoping so sub-agents do not inherit.
 - Launcher dial, `LaunchSpec.policy`, HEALTH gate display, status-bar count.
 - `scripts/measure_bash_burst.py` — the acceptance test (see below).
@@ -183,6 +187,22 @@ rather than presentational, and why the TRIAGE gap above is worth closing.
 absolute path pairs with an auto-approved fetch into an unattended read-then-send with no
 approval record for either half. Re-adding them by name fails six tests across three
 guards.
+
+*"An admitted `cat` of any absolute path"* is measured rather than assumed, and it is
+every read row rather than `cat` — including relative spellings reached through an
+admitted `cd`. For ordinary files that is U8 rather than a property of this branch:
+`Read` is auto-approved for the same path at `STRICT`, so the fix belongs where U8 is.
+
+**Some `/proc` files are the exception, and there this rung adds reach of its own.** The
+CLI's `Read` refuses `/proc/self/environ`, `cmdline`, `maps` and `fd/0` outright while an
+admitted `cat` returns them; it serves `mounts`, `status`, `version` and
+`root/etc/passwd` like any other file. So it is four of the eight `/proc` paths measured
+and not `/proc` as a category. Seven of the sixteen probe rows hand over contents `Read`
+will not. Measured 2026-09-23 and carried as **U11** in
+[`2026-09-03-a-dangerously-autonomous-mode.md`](2026-09-03-a-dangerously-autonomous-mode.md),
+numbered separately from U8 because U8's remedy would make it worse. No fix is boarded and
+that record says why — including why turning containment on for this rung would not close
+it.
 
 ## Process lessons, recorded because they cost real work
 
