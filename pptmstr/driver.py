@@ -20,7 +20,7 @@ import asyncio
 import re
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -93,6 +93,7 @@ from .model import (
     UsageRollup,
     written_path,
 )
+from .settings import McpConnector
 from .templates import SOLO, WorkTemplate, lead_briefing, worker_prompt
 from .transcript import SegmentKind, Transcript
 from .tree import lies_inside_checkout
@@ -912,6 +913,7 @@ class AgentSession:
         subagent_cap: int = DEFAULT_SUBAGENT_CAP,
         policy: Policy = Policy.STRICT,
         resume: str | None = None,
+        connectors: Sequence[McpConnector] = (),
     ) -> None:
         self.bridge = bridge
         self.task = task
@@ -948,6 +950,11 @@ class AgentSession:
         # §8's keys have no slot in the SDK's ``SandboxSettings``; ``_options`` is the
         # only reader, and the comment there says why the typed field must stay unset.
         self.containment = containment
+        # The claude.ai connectors the operator admitted, from `Settings`. Held as the
+        # persisted records rather than as the CLI's dicts because `_options` is the
+        # only place the wire shape is needed and building it early would put a
+        # transport detail on every construction site.
+        self.connectors = tuple(connectors)
         # Whether an operator is attached to answer. False means headless, where a
         # tool needing approval is denied rather than left to hit the timeout.
         self.interactive = interactive
@@ -1978,6 +1985,27 @@ class AgentSession:
         """
         self.transcript.append(SegmentKind.ERROR, f"{line}\n")
 
+    def _mcp_servers(self) -> dict[str, Any]:
+        """
+        The in-process bus, plus the connectors the operator admitted.
+
+        The cast is the SDK's typing lagging its own CLI rather than a shortcut.
+        `McpClaudeAIProxyServerConfig` is defined in `claude_agent_sdk.types` and is
+        the shape `get_mcp_status` reports a connector as, but it is absent from the
+        `McpServerConfig` union that annotates `mcp_servers` (0.2.136). The CLI
+        accepts it: its settings schema describes a `claudeai-proxy` server "passed
+        explicitly (e.g. via --mcp-config or the SDK mcpServers option)".
+
+        Keyed by the operator's own name for the server, which is what the CLI
+        prefixes its tools with and therefore what the operator sees on a parked call.
+        """
+        servers: dict[str, Any] = {SERVER_NAME: build_server(self)}
+        for connector in self.connectors:
+            servers[connector.name] = cast(
+                Any, {"type": "claudeai-proxy", "url": connector.url, "id": connector.id}
+            )
+        return servers
+
     def _options(self) -> ClaudeAgentOptions:
         # Exactly one of the two id arguments, never both, and `fork_session` left
         # off. `ClaudeAgentOptions.session_id` says it "cannot be used with ...
@@ -2040,38 +2068,33 @@ class AgentSession:
             # The bus (§2.7). In-process, so no subprocess and no extra lifecycle to
             # manage -- the CLI reaches these handlers back over the same control
             # channel it uses for hooks.
-            mcp_servers={SERVER_NAME: build_server(self)},
-            # The bus and nothing else. Without this the CLI also loads whatever the
-            # operator's project `.mcp.json`, user settings and plugins name, and this
-            # process cannot enumerate those or even see that they exist.
+            mcp_servers=self._mcp_servers(),
+            # The bus plus whatever the operator admitted, and nothing else. Without
+            # this the CLI also loads whatever their project `.mcp.json`, user settings
+            # and plugins name.
             #
-            # What that costs is narrower than "any tool" and worse than it sounds.
-            # An unknown server's own tools are `mcp__<server>__<name>` and reach
-            # `classify`'s fail-closed fallthrough, so they park or are denied. But
-            # `ReadMcpResource` and `ListMcpResources` are in `_AUTO` and auto-approve
-            # at *every* policy -- so a resource on a server this build has never heard
-            # of is readable with no human asked, under STRICT as much as under
-            # AUTONOMOUS. An allowlist that admits whatever a config file adds is the
-            # thing `approval.py`'s own docstring refuses to be.
+            # What it buys is not about tool calls. An external server's own tools are
+            # `mcp__<server>__<name>` and reach `classify`'s fail-closed fallthrough,
+            # so they park in front of the operator at every policy, `AUTONOMOUS`
+            # included, and no policy can widen that. What a config file can do that
+            # the gate does not see is *connect*: an stdio server named there is
+            # spawned by the CLI process, which `sandbox.py` records as running outside
+            # the sandbox. That happens before any tool call exists, so the gate never
+            # gets a say and `toggle_mcp_server` cannot undo it. Naming the admitted
+            # set here is what keeps an unadmitted server from ever starting.
             #
-            # On every session and not only contained ones, the same reasoning
-            # `stderr` above is set on every session: what this closes is not a
-            # property of the containment configuration, and a session nobody
-            # contained still has a gate that is supposed to know what it admits.
+            # On every session and not only contained ones, for the same reason
+            # `stderr` above is: what this closes is not a property of the containment
+            # configuration, and a session nobody contained still has a gate that is
+            # supposed to know what it admits.
             #
-            # The cost is real and belongs here rather than in a commit message: an
-            # operator who deliberately configured a project-scope MCP server no
-            # longer has it inside pptmstr, and the only way back is passing it in
-            # `mcp_servers` above, which nothing yet offers a surface for. That is a
-            # capability removed from a configuration this process cannot read, which
-            # is the trade -- and it is the same trade in the other direction that
-            # made it worth removing.
-            #
-            # The bus survives because it travels the channel this restricts *to*:
-            # the SDK passes an in-process server through `--mcp-config` like any
-            # other, as `{"type": "sdk", "name": ...}` with the instance stripped
-            # (claude_agent_sdk 0.2.134, `_internal/transport/subprocess_cli.py`), and
-            # `--strict-mcp-config` keeps exactly what `--mcp-config` carried.
+            # Both kinds travel the channel this restricts *to*. The SDK passes an
+            # in-process server through `--mcp-config` as `{"type": "sdk", "name": ...}`
+            # with the instance stripped (claude_agent_sdk 0.2.136,
+            # `_internal/transport/subprocess_cli.py`), `--strict-mcp-config` keeps
+            # exactly what `--mcp-config` carried, and the CLI's own settings schema
+            # states that a `claudeai-proxy` server passed this way "still follows the
+            # normal MCP config trust flow".
             strict_mcp_config=True,
             hooks={
                 "PreToolUse": [HookMatcher(hooks=[self._pre_tool_use], timeout=APPROVAL_TIMEOUT_S)],

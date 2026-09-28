@@ -534,6 +534,10 @@ def _launch(state: AppState, spec: LaunchSpec) -> None:
             subagent_cap=(
                 state.settings.subagent_cap if spec.subagent_cap is None else spec.subagent_cap
             ),
+            # From the operator's settings rather than the spec: which MCP servers
+            # exist is a property of the machine they are sitting at, not of the piece
+            # of work they just typed.
+            connectors=state.settings.admitted_connectors,
             # Travels with containment, as it does on the spec: at the top rung the
             # policy releases ``Bash`` from the gate and the containment is the only
             # thing bounding what a released ``Bash`` reaches, so a session given one

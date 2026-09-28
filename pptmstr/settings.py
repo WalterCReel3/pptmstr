@@ -29,6 +29,27 @@ APP_NAME = "pptmstr"
 
 
 @dataclass(frozen=True, slots=True)
+class McpConnector:
+    """
+    A claude.ai connector the operator has admitted into every session.
+
+    Plain data, and deliberately free of SDK imports: the CLI's wire shape for one
+    of these is ``{"type": "claudeai-proxy", "url": ..., "id": ...}``, and building
+    that dict is ``driver``'s job. What is persisted is the operator's decision, not
+    a transport detail.
+
+    ``id`` is the account's ``mcpsrv_`` identifier. It is not re-validated at launch:
+    a rotated id means the CLI does not connect that server and the operator re-runs
+    `scripts/verify_mcp_status.py`. Checking it on every launch would put a network
+    fetch of every connector in front of every session to catch a rare case.
+    """
+
+    name: str
+    url: str
+    id: str
+
+
+@dataclass(frozen=True, slots=True)
 class Settings:
     """Everything that must survive a restart."""
 
@@ -55,9 +76,41 @@ class Settings:
     # wrapping BETA (caret and selection across wrapped rows are the under-tested
     # part), which is the reason this is a setting at all and not just the default.
     wrap_inputs: bool = True
+    # The MCP servers a session may reach, and the whole of them. `driver` passes
+    # these alongside the in-process bus under `strict_mcp_config=True`, so a server
+    # the operator has not named here is one no session loads -- which is what keeps
+    # an stdio server out of a process the sandbox does not wrap (`sandbox.py`: "the
+    # CLI process runs outside the sandbox").
+    #
+    # Admission is not a widening of the gate. Every `mcp__*` call still reaches
+    # `approval.classify`'s fail-closed fallthrough and parks in front of the
+    # operator at every policy, `AUTONOMOUS` included.
+    admitted_connectors: tuple[McpConnector, ...] = ()
 
     def merged(self, **changes: Any) -> Settings:
         return replace(self, **changes)
+
+
+def _connectors(value: Any) -> tuple[McpConnector, ...] | None:
+    """
+    Decode the persisted connector list, or None when it is not a list at all.
+
+    Entries missing a field or carrying a non-string are dropped rather than
+    refused: the rest of the file is still good, and a session that silently loses
+    one hand-edited connector is a smaller failure than one that starts with the
+    default theme because of it. ``load`` swallows a corrupt file for the same
+    reason.
+    """
+    if not isinstance(value, list):
+        return None
+    out: list[McpConnector] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        name, url, ident = item.get("name"), item.get("url"), item.get("id")
+        if isinstance(name, str) and isinstance(url, str) and isinstance(ident, str):
+            out.append(McpConnector(name=name, url=url, id=ident))
+    return tuple(out)
 
 
 def config_dir() -> Path:
@@ -102,6 +155,11 @@ def load(path: Path | None = None) -> Settings:
         # Guard the types the constructor would otherwise accept silently: a string
         # in fps_idle would survive construction and fail much later, inside a
         # comparison in the frame loop.
+        if key == "admitted_connectors":
+            decoded = _connectors(value)
+            if decoded is not None:
+                clean[key] = decoded
+            continue
         default = getattr(Settings(), key)
         if isinstance(default, bool) and not isinstance(value, bool):
             continue
