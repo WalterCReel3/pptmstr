@@ -23,6 +23,12 @@ dependencies = [
     # Bundles its own Claude Code CLI binary, which is why there is no Node
     # dependency here -- see check_agent_cli() in scripts/probe.py.
     "claude-agent-sdk>=0.2.134",
+    # `GET /v1/models` only, for the launcher's model list (pptmstr/model_catalog.py).
+    # The agent SDK drives sessions and does not expose the models endpoint, so this is
+    # the one call pptmstr makes to the API in its own right rather than through the CLI.
+    # Imported inside the probe worker, not at module scope, to keep pydantic and httpx
+    # off the path to the first frame.
+    "anthropic>=0.69",
     # Inline markdown parsing for the transcript pane
     # (planning/archive/2026-08-10-transcript-markdown.md, step 4). Only the
     # inline chain is used

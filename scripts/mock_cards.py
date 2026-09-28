@@ -34,7 +34,7 @@ sys.path.insert(0, str(ROOT))
 from imgui_bundle import hello_imgui, imgui, immapp  # noqa: E402
 from screenshot import write_png  # noqa: E402
 
-from pptmstr import theme  # noqa: E402
+from pptmstr import model_catalog, theme  # noqa: E402
 from pptmstr.model import (  # noqa: E402
     AgentRecord,
     AgentState,
@@ -901,7 +901,10 @@ def draw_omnibox() -> None:
     imgui.input_text_with_hint("##cwd", "working directory", "~/Source/pptmstr", 512)
     imgui.same_line()
     imgui.set_next_item_width(160.0)
-    imgui.combo("##model", 0, ["claude-sonnet-5", "claude-opus-5", "claude-haiku-4-5"])
+    # Imported rather than re-spelled: this mock carried its own copy of the list and
+    # had already drifted from it. A mock that shows models the launcher does not offer
+    # is worse than no mock, because it is read as a picture of the real screen.
+    imgui.combo("##model", 0, list(model_catalog.FALLBACK_MODELS))
     imgui.same_line()
     imgui.button("launch")
     imgui.same_line()

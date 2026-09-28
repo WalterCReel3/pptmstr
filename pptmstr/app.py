@@ -20,7 +20,7 @@ from typing import assert_never
 from imgui_bundle import hello_imgui, imgui, immapp
 
 from . import brief as brief_mod
-from . import cli_version, templates, theme, tree
+from . import cli_version, model_catalog, templates, theme, tree
 from . import settings as settings_mod
 from .approval import Policy
 from .bridge import Bridge
@@ -73,6 +73,10 @@ class AppState:
     detail_pane_state: detail.DetailState = field(default_factory=detail.DetailState)
     compose: compose.ComposeState = field(default_factory=compose.ComposeState)
     launcher: launcher.LauncherState = field(default_factory=launcher.LauncherState)
+    # Which models the launcher offers. Probed once on a worker at startup and the list
+    # in code until that answers, so it is readable from the first frame and there is no
+    # "not yet known" state for a caller to draw.
+    catalog: model_catalog.Catalog = field(default_factory=model_catalog.Catalog)
     rail: rail.RailState = field(default_factory=rail.RailState)
     board: board_pane.BoardState = field(default_factory=board_pane.BoardState)
     brief: brief_pane.BriefState = field(default_factory=brief_pane.BriefState)
@@ -937,6 +941,11 @@ def _draw_overlays(state: AppState) -> None:
     pool = state.pool
     if pool is None:
         return
+    # Started here rather than before the first frame: the probe is a network call and
+    # the list in code is already drawable, so waiting on it would trade a usable
+    # launcher for a slower splash. `request` is a no-op after the first one.
+    state.catalog.request()
+    state.catalog.poll()
     launcher.draw(
         state.launcher,
         running=pool.running_count,
@@ -950,6 +959,7 @@ def _draw_overlays(state: AppState) -> None:
         # substitute a plausible one, so this argument is what puts the figure on
         # screen at all.
         subagent_cap=state.settings.subagent_cap,
+        models=state.catalog.models,
     )
 
 
@@ -1164,7 +1174,7 @@ def main(argv: list[str] | None = None) -> int:
                     state,
                     LaunchSpec(
                         task=task_text,
-                        model=args.model or launcher.MODELS[0],
+                        model=args.model or model_catalog.DEFAULT_MODEL,
                         # Resolved for the same reason `LauncherState.spec` resolves
                         # it: a relative cwd makes every absolute write unplaced and
                         # the divergence reading silently empty. `--cwd` defaults to

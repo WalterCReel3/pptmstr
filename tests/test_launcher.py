@@ -26,9 +26,10 @@ import pytest
 from pptmstr import cli_version, sandbox
 from pptmstr.approval import Policy
 from pptmstr.model import LaunchSpec
+from pptmstr.model_catalog import DEFAULT_MODEL, FALLBACK_MODELS
 from pptmstr.sessions import Overlay, SessionMark, SessionRow, load_overlay, overlay_path
 from pptmstr.ui import launcher, widgets
-from pptmstr.ui.launcher import MODELS, LauncherState, SessionPicker, age_label
+from pptmstr.ui.launcher import LauncherState, SessionPicker, age_label
 
 
 def _row(session_id: str, *, last_modified: int = 0, bookmarked: bool = False) -> SessionRow:
@@ -346,10 +347,10 @@ def test_spec_strips_task_and_resolves_model(tmp_path: Path) -> None:
     # the expectation stays a literal. A fabricated path would not be: `/tmp` is a
     # symlink to `/private/tmp` on macOS.
     cwd = str(tmp_path.resolve())
-    state = LauncherState(task="  audit the parser  ", cwd=cwd, model_index=1)
+    state = LauncherState(task="  audit the parser  ", cwd=cwd, model=FALLBACK_MODELS[1])
     assert state.spec() == LaunchSpec(
         task="audit the parser",
-        model=MODELS[1],
+        model=FALLBACK_MODELS[1],
         cwd=cwd,
         # A directory no repository encloses is its own base, which is what makes
         # adopting the field a no-op for a scratch directory.
@@ -392,14 +393,25 @@ def test_spec_strips_cwd_whitespace() -> None:
     assert LauncherState(task="t", cwd="  /srv/repo \n").spec().cwd == "/srv/repo"
 
 
-def test_default_model_is_first_in_the_list() -> None:
-    assert LauncherState(task="t").spec().model == MODELS[0]
+def test_an_untouched_draft_launches_on_the_named_default() -> None:
+    """
+    The default is a name, not a position. The offered list is probed at startup and
+    ordered by the API, so "whatever is first" would hand the choice of default -- and
+    its price -- to whichever model shipped most recently.
+    """
+    assert LauncherState(task="t").spec().model == DEFAULT_MODEL
 
 
-def test_every_model_index_is_addressable() -> None:
-    """Guards against a combo whose index outruns the tuple it is drawn from."""
-    for i in range(len(MODELS)):
-        assert LauncherState(task="t", model_index=i).spec().model == MODELS[i]
+def test_a_pick_the_offered_list_does_not_contain_survives_to_the_spec() -> None:
+    """
+    A model pinned by ``--model``, or offered by a probe that has since failed, reaches
+    the session as chosen. An index could not express this: there is no position for a
+    model the list does not hold, so the pick would be silently rewritten to one it does.
+    """
+    pinned = "claude-opus-5-5"
+    assert pinned not in FALLBACK_MODELS
+
+    assert LauncherState(task="t", model=pinned).spec().model == pinned
 
 
 def test_a_brief_is_optional_and_absent_by_default() -> None:
@@ -634,10 +646,10 @@ def test_picking_nothing_leaves_todays_fresh_launch_spec_untouched(tmp_path: Pat
     for byte the spec it produced before the section existed.
     """
     cwd = str(tmp_path.resolve())
-    state = LauncherState(task="  audit the parser  ", cwd=cwd, model_index=1)
+    state = LauncherState(task="  audit the parser  ", cwd=cwd, model=FALLBACK_MODELS[1])
     assert state.spec() == LaunchSpec(
         task="audit the parser",
-        model=MODELS[1],
+        model=FALLBACK_MODELS[1],
         cwd=cwd,
         session_base=cwd,
         template="solo",
@@ -760,7 +772,7 @@ def test_launch_hands_the_picked_session_to_the_driver() -> None:
         state.pool = _RecordingPool()  # type: ignore[assignment]
         _launch(
             state,
-            LaunchSpec(task="carry on", model=MODELS[0], cwd="/tmp", resume="sess-42"),
+            LaunchSpec(task="carry on", model=DEFAULT_MODEL, cwd="/tmp", resume="sess-42"),
         )
         for _ in range(200):
             if started:
@@ -795,7 +807,7 @@ def test_launch_without_a_pick_mints_a_fresh_id() -> None:
     try:
         state = AppState(store=Store(), bridge=bridge, settings=Settings())
         state.pool = _RecordingPool()  # type: ignore[assignment]
-        _launch(state, LaunchSpec(task="do a thing", model=MODELS[0], cwd="/tmp"))
+        _launch(state, LaunchSpec(task="do a thing", model=DEFAULT_MODEL, cwd="/tmp"))
         for _ in range(200):
             if started:
                 break
@@ -1071,9 +1083,14 @@ def test_nothing_about_the_rest_of_the_draft_moves_when_the_mode_is_on(
     The mode is two fields and not a different launch. Anything else it changed would
     be a second behaviour riding on a checkbox whose label says one thing.
     """
-    off = LauncherState(task=A_PREMISE, cwd=str(tmp_path), model_index=1, brief=" b ").spec()
+    picked = FALLBACK_MODELS[1]
+    off = LauncherState(task=A_PREMISE, cwd=str(tmp_path), model=picked, brief=" b ").spec()
     on = LauncherState(
-        task=A_PREMISE, cwd=str(tmp_path), model_index=1, brief=" b ", policy=Policy.AUTONOMOUS
+        task=A_PREMISE,
+        cwd=str(tmp_path),
+        model=picked,
+        brief=" b ",
+        policy=Policy.AUTONOMOUS,
     ).spec()
     assert replace(on, containment=None, policy=Policy.STRICT) == off
 
@@ -1977,3 +1994,29 @@ def test_the_launcher_and_the_launch_path_refuse_the_same_readings() -> None:
     # And the agreement is not vacuous in either direction.
     assert launcher.floor_refusal(_meets()) is None
     assert launcher.floor_refusal(_below()) is not None
+
+
+# -- the model combo, once the list is probed rather than fixed ----------------------
+
+
+def test_a_pinned_model_the_offered_list_lacks_still_draws(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    The combo needs a *position* even though the draft holds a *name*, and a name the
+    list does not contain has none. Drawing it means prepending it to the options; not
+    doing so raises ``ValueError`` out of ``list.index`` on the frame the modal opens,
+    which takes the whole UI down rather than mis-selecting quietly.
+
+    Reachable today from ``--model`` and, once a probe has run, from any pick made
+    while the probed list was live and offered again after it failed.
+    """
+    pinned = "claude-opus-5-5"
+    assert pinned not in FALLBACK_MODELS
+
+    state = LauncherState(task="t", model=pinned)
+    state.request_open()
+
+    _drawn(monkeypatch, state)
+
+    assert state.model == pinned
