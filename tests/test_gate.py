@@ -1257,14 +1257,13 @@ def test_the_gate_classifies_under_the_policy_the_session_holds(
     assert seen == [Policy.PERMISSIVE]
 
 
-def test_a_subagent_does_not_inherit_the_roots_policy(
+def test_a_subagent_inherits_the_roots_policy(
     bridge: Bridge, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """
-    2026-08-11 §4. One `AgentSession` serves its sub-agents' PreToolUse hooks, so
-    a policy held on the session would inherit by default -- and inheriting it
-    means one approval, the spawn, silently relaxes the gate for an unbounded
-    number of downstream calls.
+    2026-09-24, reversing 2026-08-11 §4 for this rung. `shellscan` is re-run
+    fail-closed against every sub-agent command, so the claim the rung rests on
+    is re-established per call and does not weaken with fan-out.
 
     Asserted on the policy the call is classified under rather than on the
     verdict, because those differ only while a preset admits something, and this
@@ -1278,22 +1277,19 @@ def test_a_subagent_does_not_inherit_the_roots_policy(
     nested["agent_id"] = "a-1"
     bridge.submit(session._pre_tool_use(nested, None, {})).result(timeout=TIMEOUT)
 
-    assert seen == [Policy.STRICT]
-    # And the root's own phase is untouched by what its sub-agent was gated by.
-    assert session.policy is Policy.PERMISSIVE
+    assert seen == [Policy.PERMISSIVE]
 
 
-def test_the_same_command_is_admitted_for_the_root_and_refused_for_a_subagent(
+def test_the_same_command_is_admitted_for_the_root_and_for_a_subagent(
     bridge: Bridge, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """
-    Non-inheritance from the other side: one command, one session, two verdicts,
-    and the only difference is which node asked.
+    Inheritance from the other side: one command, one session, one verdict, and
+    which node asked makes no difference.
 
     The test above reads the argument `classify` was given, which is what keeps
     it honest while no preset admits anything. This one reads the gate's answer,
-    which is what an operator would see, and the pair is what distinguishes a
-    scoped policy from a session-wide one.
+    which is what an operator would see.
     """
     _permissive_admits_bash(monkeypatch)
     session = AgentSession(bridge, "task", policy=Policy.PERMISSIVE, interactive=False)
@@ -1302,9 +1298,32 @@ def test_the_same_command_is_admitted_for_the_root_and_refused_for_a_subagent(
     nested = hook_input("Bash", command="git status")
     nested["agent_id"] = "a-1"
     out = bridge.submit(session._pre_tool_use(nested, None, {})).result(timeout=TIMEOUT)
-    assert decision_of(out) == "deny"
+    assert decision_of(out) == "allow"
 
     assert _bash(bridge, session) == "allow"
+
+
+def test_a_subagent_spawn_still_parks_under_permissive(
+    bridge: Bridge, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The condition the inheritance argument rests on, pinned so a later widening
+    of the rung cannot remove it silently.
+
+    2026-08-11 §4's objection was that one approval relaxes the gate for an
+    unbounded number of downstream calls. The answer is that the spawn is still
+    an approval, so N agents cost N of them and the operator bounds fleet size
+    below `subagent_cap`. Auto-approving `Task` here would restore §4's objection
+    with nothing left answering it.
+    """
+    _permissive_admits_bash(monkeypatch)
+    session = AgentSession(bridge, "task", policy=Policy.PERMISSIVE, interactive=False)
+    session.announce()
+
+    out = bridge.submit(
+        session._pre_tool_use(hook_input("Task", subagent_type="Explore"), None, {})
+    ).result(timeout=TIMEOUT)
+    assert decision_of(out) == "deny"
 
 
 def test_an_empty_agent_id_is_treated_as_a_subagent_and_not_as_the_root(
@@ -1313,13 +1332,18 @@ def test_an_empty_agent_id_is_treated_as_a_subagent_and_not_as_the_root(
     """
     Nothing validates `agent_id` -- it is whatever `data.get` returned -- and no
     probe has established whether an empty string is reachable. Under truthiness
-    it would read as the root and hand a sub-agent the relaxed policy, which is
-    the one direction this boundary must not fail in.
+    it would read as the root and hand a sub-agent the wider policy, which is the
+    one direction this boundary must not fail in.
 
-    Both halves, because the two tests of "is this the root" have to agree: the
-    call is classified under STRICT *and* it does not end the root's phase. A
-    single `is None` fixed in one of the two places would pass half of this.
+    **No rung on today's ladder makes that observable.** `STRICT` is the only one
+    that does not inherit, and narrowing `STRICT` to `STRICT` is a no-op, so
+    `_policy_for` returns the same value down both arms for every policy that
+    exists (2026-09-24). The non-inheriting rung is supplied here rather than
+    waiting for a fourth one to be added, because the `is not None` this pins is
+    what that rung would arrive to and there would otherwise be nothing holding
+    it in place.
     """
+    monkeypatch.setattr(driver_module, "inherits_to_subagents", lambda policy: False)
     _permissive_admits_bash(monkeypatch)
     session = AgentSession(bridge, "task", policy=Policy.PERMISSIVE, interactive=False)
     session.announce()
@@ -1329,7 +1353,6 @@ def test_an_empty_agent_id_is_treated_as_a_subagent_and_not_as_the_root(
     out = bridge.submit(session._pre_tool_use(anonymous, None, {})).result(timeout=TIMEOUT)
 
     assert decision_of(out) == "deny"
-    assert session.policy is Policy.PERMISSIVE
 
 
 def test_nothing_but_the_operator_changes_the_policy(

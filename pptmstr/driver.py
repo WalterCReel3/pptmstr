@@ -1121,20 +1121,19 @@ class AgentSession:
         The policy a call classifies under, given the node that made it.
 
         Whether a sub-agent inherits is the rung's own answer, read from
-        ``approval.inherits_to_subagents``. The two widened rungs disagree and both
-        are right: ``AUTONOMOUS`` inherits because sandbox configuration is per CLI
-        process and a sub-agent shares its parent's, so each additional agent has
-        the same bounded reach as the first (2026-09-03 §8, reversing 2026-08-11 §4
-        for that rung); ``PERMISSIVE`` does not, because its safety is a claim about
-        a command string rather than a bound around a process, and nothing about the
-        parent's gate follows a spawn into a child. Under ``PERMISSIVE`` §4 stands
-        unchanged: one approval -- the spawn -- would otherwise silently relax the
-        gate for an unbounded number of downstream calls, which is the hole gating
-        ``Task``/``Agent`` closed in the first place.
+        ``approval.inherits_to_subagents``. Both widened rungs inherit, by different
+        routes: ``AUTONOMOUS`` because the sandbox is per CLI process and a sub-agent
+        shares its parent's, ``PERMISSIVE`` because ``shellscan`` is re-run per
+        command and its verdict does not weaken with fan-out. What still costs an
+        approval under both is the spawn itself at ``PERMISSIVE`` -- ``Task``/
+        ``Agent`` stay in ``_REVIEW`` there -- so agent count is operator-bounded one
+        at a time, under a ``subagent_cap`` no policy can widen.
 
         The rung decides and this function applies it, rather than the branch living
         here, so that a new rung cannot be added without answering the question --
-        ``inherits_to_subagents`` is closed by ``assert_never``.
+        ``inherits_to_subagents`` is closed by ``assert_never``. It is still a branch
+        and not a deletion: ``STRICT`` returns False, and the call site below is what
+        keeps a future non-inheriting rung working without touching the driver.
 
         This is a line of code rather than a consequence of where the field lives,
         and that is the point. One ``AgentSession`` serves its sub-agents'
@@ -1155,14 +1154,24 @@ class AgentSession:
         volume is ``subagent_cap`` -- which no policy can widen, because the at-cap
         deny in ``_gate_tool_use`` runs ahead of ``classify``.
 
-        ``is not None`` rather than the truthiness its neighbours use, and this call
-        site differs from them deliberately. ``_pre_tool_use``'s ``if not agent_id``
-        and ``_node_for``'s ``if agent_id`` are bookkeeping: an empty-string agent_id
-        would cost them an attribution. Here it would cost a sub-agent the root's
-        relaxed policy, which is the boundary this whole function exists to draw.
-        Nothing validates the field -- it is whatever ``data.get`` returned -- and no
-        probe has established whether the CLI can send an empty one, so the form that
-        is safe when the input is unexpected is the one to take.
+        **The narrowing arm is unreachable as the ladder currently stands, and is
+        kept rather than deleted.** The only rung that does not inherit is
+        ``STRICT``, and narrowing ``STRICT`` to ``STRICT`` is a no-op, so this
+        returns ``self._policy`` for every rung that exists today. It stays a branch
+        because ``inherits_to_subagents`` is the rung's property and a fourth rung
+        may answer False: deleting the arm would move that decision back into the
+        driver and make the next non-inheriting rung a driver change rather than an
+        enum one. Anything asserting the arm's behaviour is asserting a structure,
+        not an observable difference.
+
+        ``is not None`` rather than the truthiness its neighbours use.
+        ``_pre_tool_use``'s ``if not agent_id`` and ``_node_for``'s ``if agent_id``
+        are bookkeeping: an empty-string agent_id would cost them an attribution.
+        Here it would decide which policy a call classifies under, so the form that
+        is safe when the input is unexpected is the one to take. Nothing validates
+        the field -- it is whatever ``data.get`` returned -- and no probe has
+        established whether the CLI can send an empty one. The choice costs nothing
+        today, since both arms return the same value.
         """
         if agent_id is not None and not inherits_to_subagents(self._policy):
             return Policy.STRICT

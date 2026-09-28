@@ -1,6 +1,6 @@
 # An egress-denied shell policy reduces the orienting burst, and the spawn stays gated
 
-**Dated:** 2026-09-17 · **Amended:** 2026-09-17, 2026-09-21, 2026-09-22 — see the amendments at the end ·
+**Dated:** 2026-09-17 · **Amended:** 2026-09-17, 2026-09-21, 2026-09-22, 2026-09-24 — see the amendments at the end ·
 **Status:** routing decision recorded; built on branch `experimental-gate-policy` ·
 **Origin:** an operator request (2026-09-17) to reduce approvals to *"only the important
 decisions"*, naming read-only `Bash`, task claiming, and sub-agent starts ·
@@ -693,3 +693,123 @@ amendment quotes the repaired script's output rather than auditing the repair.
 **Not measured, and unchanged from the 09-21 amendment:** 08-11's assumption that `Bash`
 is the bulk of the orienting burst. Every figure here is a share of `Bash`, and nothing
 has measured what share of the burst `Bash` is.
+
+---
+
+## Amendment, 2026-09-24: `PERMISSIVE` inherits to sub-agents, and the spawn stays gated
+
+`approval.inherits_to_subagents(Policy.PERMISSIVE)` returns True. A sub-agent's calls are
+now classified under its session's rung instead of falling back to `STRICT`. **§4 is not
+withdrawn** — its conclusion, that spawns keep parking, is unchanged and is what this
+amendment rests on.
+
+### §4 answered two questions as one, and only one of them is being reopened
+
+The 09-17 request was that *sub-agent starts stop parking*. §4 declined it and gave four
+legs. Legs 2 (`2026-08-22` D2, blast radius is a fan-out) and 3 (`2026-09-03` §8's
+containment premise) both argue about auto-approving the **spawn**, and neither is touched
+here. Only leg 1, inherited from `2026-08-11` §4, argues about **inheritance**: *"one
+approval silently relaxes the gate for an unbounded number of downstream calls."*
+
+Those are separable and §4 does not separate them. A reader taking §4 as one decision will
+read this amendment as overturning it. It overturns leg 1 and leaves the heading intact.
+
+### Leg 1 does not describe the tree it is being applied to
+
+Two things it assumes are false as the branch was built:
+
+- **"One approval."** `Task`/`Agent` are in `_REVIEW` under `PERMISSIVE` and were never
+  moved out. Every agent costs its own approval, so N agents cost N. Fleet size is
+  operator-bounded one decision at a time, under a `subagent_cap` whose deny sits ahead of
+  `classify` in `_gate_tool_use` and which no policy can widen.
+- **"Unbounded downstream calls."** What is left after the spawn approval is that agent's
+  `Bash` traffic, each command re-run through `shellscan` fail-closed. That is the same
+  per-call test the root's own traffic gets, which the operator accepted when they set the
+  dial.
+
+`inherits_to_subagents`'s previous reasoning drew the line at *a claim about a command
+string, not a bound around a process*. Read for how each composes: a per-command verdict is
+re-established at every call and so does not weaken with fan-out, while a per-process
+sandbox claim needs sub-agents to actually share the parent's process, which is an
+empirical fact about CLI topology (`scripts/verify_nested_sandbox.py`). The rung whose
+safety is rebuilt from scratch at every call was the one refusing to inherit, and the rung
+resting on a probe result was the one inheriting. That ordering had it backwards.
+
+The rule is now pinned rather than argued per rung:
+`test_a_rung_that_inherits_bounds_its_fleet_by_approval_or_by_containment` requires every
+inheriting rung to park spawns **or** require containment. `PERMISSIVE` takes the first,
+`AUTONOMOUS` the second, and a fourth rung has to pick one.
+
+### What this costs, accepted rather than answered
+
+**Unreviewable volume multiplies.** `AUTO_APPROVE` returns before `_park`, so no
+`PendingApproval` is ever constructed — §5's point, now applying to every agent in the
+fleet rather than to the root alone. The transcript is the only record. `subagent_cap` is
+the only bound on it, since the automatic revoke was removed on 2026-09-21 and nothing ends
+a relaxed phase but the operator noticing the dial.
+
+**The read reach travels with it.** §12 U11's admitted `cat /proc/self/environ`, which the
+CLI's `Read` refuses, is now reachable from every sub-agent rather than from the root only.
+`requires_containment(PERMISSIVE)` stays False and flipping it would not close U11 anyway
+(the sandbox's read policy covers `/proc`), so this widens who can reach a hole that was
+already recorded and already open.
+
+### What is not claimed
+
+**Do not size this off the 09-22 amendment's 81.2% sub-agent admit rate.** That same
+amendment disqualifies the figure in the paragraph that reports it: 46 of the 85 files with
+a `Bash` call are sub-agent slices, many of them this branch's own agents probing this
+branch's own gate, and the corpus therefore *"measures the experiment along with the
+subject, in the flattering direction."* Nothing has measured the admit rate for sub-agents
+doing ordinary work.
+
+**Nor is this claimed to remove a presence.** The 09-22 amendment answered that question no
+for sessions, at 0 of 39 getting through their `Bash` traffic without parking. The same
+question for sub-agents is unmeasured, and the honest expectation is the same answer: fewer
+and later presences, not none. 08-11's unmeasured assumption that `Bash` is the bulk of the
+burst rides along here exactly as it does everywhere else in this record.
+
+**§4's 2026-09-17 revisit trigger is not discharged.** The sandbox landed (`e3a5e7a`,
+`b4f3153`, `2853e38`, merged at `5f33e9f`), which is the condition that amendment named —
+but it named it for *auto-approving spawns under `AUTONOMOUS`'s premise*, and nobody has
+taken that decision. It is still open and this amendment is not it.
+
+### A consequence in the driver, recorded because it is easy to misread
+
+`AgentSession._policy_for`'s narrowing arm is now **unreachable**. `STRICT` is the only rung
+that does not inherit, and narrowing `STRICT` to `STRICT` is a no-op, so the function
+returns `self._policy` for every rung that exists. It is kept as a branch, and its docstring
+now says so: deleting it would move the decision out of the rung property and back into the
+driver, making the next non-inheriting rung a driver change instead of an enum one. The
+test that pins the `is not None` handling of an empty `agent_id` supplies a non-inheriting
+rung by monkeypatch, because there is no longer one on the ladder.
+
+One thing this fixes for free: `store.py`'s child rows inherit the parent's policy
+unconditionally, so before this change a sub-agent of a `PERMISSIVE` session displayed
+`PERMISSIVE` while the gate applied `STRICT`. The record and the gate now agree, which is
+what `test_a_subagent_of_an_under_gated_session_reads_as_under_gated` asserts they must.
+
+### What was verified for this amendment
+
+**Verified by execution this session** (`.venv/bin/python`, 2026-09-24, working tree on
+`main` at `5f33e9f` plus uncommitted work that predates this change):
+
+- The full suite: 2545 passed, 1 failed, 6 skipped, 3 xfailed. The failure is
+  `test_a_path_the_filesystem_cannot_place_is_refused`, a symlink-loop write-region test
+  which **fails identically at `5f33e9f` with this change stashed**. It is pre-existing and
+  unrelated, and is not diagnosed here.
+- `make typecheck`'s target (`mypy pptmstr`): clean, 45 files.
+- `black` over the four edited files.
+- That the tree already contained uncommitted modifications to `pptmstr/app.py`,
+  `pptmstr/settings.py` and `tests/test_driver.py` before this change. They are untouched by
+  it and their purpose was not investigated.
+
+**Not verified by execution:** `mypy` over `tests/` fails and did so before this change —
+204 errors at `5f33e9f`, 207 after, the three new ones being the same `dict[str, object]`
+hook-input pattern every test in `test_gate.py` already uses. `make typecheck-all` was
+already red; this change neither fixes nor worsens that in kind.
+
+**Not run:** no live session has been driven under an inheriting `PERMISSIVE` rung. Every
+assertion here is at the level of the gate's verdicts and the classifier's arguments, which
+is where the decision was taken. Whether it feels different to operate is the thing the
+operator is about to find out, and this record does not predict it.
