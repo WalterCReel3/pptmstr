@@ -22,7 +22,9 @@ dependencies = [
     "imgui-bundle>=1.92",
     # Bundles its own Claude Code CLI binary, which is why there is no Node
     # dependency here -- see check_agent_cli() in scripts/probe.py.
-    "claude-agent-sdk>=0.2.134",
+    # The floor is the first release whose bundled CLI (2.1.280) knows
+    # claude-opus-5-5; 0.2.157 bundles 2.1.277, which does not.
+    "claude-agent-sdk>=0.2.158",
     # `GET /v1/models` only, for the launcher's model list (pptmstr/model_catalog.py).
     # The agent SDK drives sessions and does not expose the models endpoint, so this is
     # the one call pptmstr makes to the API in its own right rather than through the CLI.
