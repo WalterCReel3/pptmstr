@@ -169,6 +169,66 @@ SUBAGENT_CALL_VETO_S = APPROVAL_TIMEOUT_S
 # deliberately rather than the one to leave alone.
 DEFAULT_SUBAGENT_CAP = 8
 
+# The largest single NDJSON message the transport will accept from the CLI.
+#
+# CHARS in the name and characters in the comment, never bytes, whatever the SDK's
+# own error text says: the guard compares `len()` on a `str`, because the stdout
+# stream is a `TextReceiveStream` and is decoded before it is framed. There is no
+# fixed conversion to memory. CPython sizes a `str` by its *widest* code point, so
+# one astral character anywhere in an otherwise ASCII line widens the whole line to
+# four bytes per character, and `_LineFramer.push` joins its chunk list and then
+# splits the result while the list is still referenced, so two or three copies
+# coexist at the instant a long line completes. The worst-case bytes behind this
+# many characters are therefore closer to an order of magnitude above the number
+# than equal to it -- and that worst case is per session, with
+# `Settings.concurrency_cap` of them running at once (claude_agent_sdk 0.2.134,
+# `_internal/transport/subprocess_cli.py`).
+#
+# On the stdout read path it is a ceiling and not an allocation, which is what makes
+# raising it cost nothing in the ordinary case. `_read_messages_impl` checks each
+# completed line's length and the in-flight partial's; nothing is reserved, so a
+# session whose messages are a few KB costs a few KB no matter what this says. It is
+# per message and not cumulative -- the framer resets at every newline -- so a stream
+# of a million messages never approaches it. The memory above is a transient, paid
+# only by a session that actually receives a line this long.
+#
+# Eight times the SDK's own default, because the cost here is entirely a tail and the
+# benefit is not a curve worth climbing. Nothing has measured how far past a megabyte
+# the messages that trip this actually go, so no multiple can be justified as
+# sufficient; what a larger one reliably does is scale the worst case, which is already
+# an order of magnitude above the bound and multiplied by every concurrent session.
+# Eight gives real headroom over that default while keeping that product in a range
+# this process can absorb.
+# Like DEFAULT_SUBAGENT_CAP it is a judgement for an experimental phase: nothing here
+# makes eight right and nine wrong, and a measurement of real payload sizes should
+# replace it rather than an argument.
+#
+# This reduces how often an overrun happens. It does not make one survivable, and
+# what one costs is the session rather than the message: the read task that raises is
+# the task that delivers, so the oversized line and every message after it are lost
+# together and the session fails with the guard's text in its transcript. Raising the
+# ceiling above the payload restores the whole stream, the oversized message included
+# (both measured in scripts/verify_overrun_recovery.py).
+#
+# Two things that measurement found, for whoever reads this while holding a fix.
+# Catching it is not one: `_internal/query.py` queues its end-of-stream sentinel in a
+# `finally`, so re-entering the stream after the error yields nothing and raises
+# nothing, and a `try`/`except` that continued would report the node DONE having
+# silently dropped everything after the bad line -- worse than the visible failure,
+# and it looks like it worked. Nor can the failure be singled out by class: the error
+# crosses `Query` as a string and is re-raised as a bare `Exception`, so an `except`
+# for `CLIJSONDecodeError` -- which the package does export, so the temptation is real
+# -- would be dead code at this call site.
+#
+# The transport spends this same value a second way, where it is not a ceiling at
+# all: `_handle_stderr` uses it as the point at which a newline-free stderr
+# producer's accumulated text is force-flushed to the callback. Nothing raises there,
+# so what it bounds is memory genuinely held, and raising it means a diagnostic
+# written without a trailing newline waits longer before reaching the transcript
+# `_stderr_line` feeds. That path is taken on every session, because `_options()`
+# always sets `stderr`. One value, two consumers, opposite pressures.
+MAX_BUFFER_CHARS = 8 * 1024 * 1024
+
 # What every session this application starts writes into its own transcript, so a
 # later picker can tell which of the sessions on disk were ours.
 #
@@ -2016,6 +2076,12 @@ class AgentSession:
             # session rather than only contained ones -- a failure the operator cannot
             # see is not a property of the containment configuration.
             stderr=self._stderr_line,
+            # Ours rather than the SDK's. Left None the transport falls back to
+            # `_DEFAULT_MAX_BUFFER_SIZE`, and a message past that limit ends the
+            # session's message stream rather than just that message. The field is
+            # named for bytes and compared against characters; see MAX_BUFFER_CHARS for
+            # that, for what the number costs, and for what it does not fix.
+            max_buffer_size=MAX_BUFFER_CHARS,
             # Deny anything not explicitly allowed by the hook. PreToolUse runs on
             # every tool call regardless of mode and its deny is final, which is the
             # property a gate needs.

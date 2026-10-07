@@ -32,7 +32,7 @@ from claude_agent_sdk import (
 
 from pptmstr.approval import Policy
 from pptmstr.bridge import Bridge
-from pptmstr.driver import AgentSession, Translator, _tool_topic
+from pptmstr.driver import MAX_BUFFER_CHARS, AgentSession, Translator, _tool_topic
 from pptmstr.intents import (
     AgentFinished,
     CompactionObserved,
@@ -3268,6 +3268,60 @@ def test_the_transport_delivers_whole_lines_to_the_callback() -> None:
     asyncio.run(transport._handle_stderr())
 
     assert session.transcript.text() == "bwrap: command not found\nrunning unsandboxed\n"
+
+
+def test_a_message_past_the_sdks_default_ceiling_still_arrives() -> None:
+    """
+    The ceiling the session runs under is ours, and it is higher than the SDK's.
+
+    Driven through the transport's own read loop rather than by inspecting the
+    option, because ``max_buffer_size`` is only worth setting if it reaches the guard
+    -- and an assertion that the field equals the constant it was assigned from would
+    hold just as well against a transport that ignored it. The payload is sized past
+    ``_DEFAULT_MAX_BUFFER_SIZE`` and under ``MAX_BUFFER_CHARS``, which is the band the
+    change exists to move: without it this raises ``SDKJSONDecodeError`` and the
+    session's message stream ends.
+    """
+    from claude_agent_sdk._internal.transport.subprocess_cli import (
+        _DEFAULT_MAX_BUFFER_SIZE,
+        SubprocessCLITransport,
+    )
+
+    assert MAX_BUFFER_CHARS > _DEFAULT_MAX_BUFFER_SIZE
+    # Restating the constant back to itself proves nothing on its own, and the band
+    # below is what does the work. It is here because the assertion above would also
+    # hold for `sys.maxsize`, and a ceiling nobody chose is not the one we configured.
+    assert AgentSession(Bridge(), task="t")._options().max_buffer_size == MAX_BUFFER_CHARS
+
+    payload = "a" * (_DEFAULT_MAX_BUFFER_SIZE + 1024)
+    line = json.dumps({"type": "assistant", "pad": payload}) + "\n"
+    assert _DEFAULT_MAX_BUFFER_SIZE < len(line) < MAX_BUFFER_CHARS
+
+    class _Chunks:
+        """64KiB at a time, as anyio's stream yields on the asyncio backend."""
+
+        async def __aiter__(self):
+            for start in range(0, len(line), 65536):
+                yield line[start : start + 65536]
+
+    class _Process:
+        """The read loop checks the exit code once the stream is exhausted."""
+
+        async def wait(self) -> int:
+            return 0
+
+    session = AgentSession(Bridge(), task="t")
+    transport = SubprocessCLITransport("", session._options())
+    transport._process = _Process()  # type: ignore[assignment]
+    transport._stdout_stream = _Chunks()  # type: ignore[assignment]
+
+    async def drain() -> list[dict]:
+        return [message async for message in transport._read_messages_impl()]
+
+    messages = asyncio.run(drain())
+
+    assert [message["type"] for message in messages] == ["assistant"]
+    assert messages[0]["pad"] == payload
 
 
 # -- the gate's policy (2026-09-03 §5, §7, §8) -------------------------------------
