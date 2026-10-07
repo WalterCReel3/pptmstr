@@ -3986,13 +3986,16 @@ def test_the_policy_a_denial_names_comes_through_the_one_function_that_decides_i
 def test_the_session_restricts_the_cli_to_the_servers_it_passes() -> None:
     """
     §8a item 4, which shipped unbuilt. Without this the CLI also loads whatever the
-    operator's project `.mcp.json`, user settings and plugins name -- a set this
-    process cannot enumerate or even see.
+    operator's project `.mcp.json`, user settings and plugins name.
 
-    Not policy-scoped, and that is the decision rather than an oversight:
-    `ReadMcpResource` and `ListMcpResources` are in `approval._AUTO` and
-    auto-approve at every policy, so an unenumerable server's resources are
-    readable with no human asked under STRICT as much as under AUTONOMOUS.
+    What it guards is connect-time, not call-time. An external server's own tools
+    park at `classify`'s fail-closed fallthrough under every policy, so the gate
+    already covers those. An stdio server named in a config file is *spawned* by the
+    CLI process, which `sandbox.py` records as running outside the sandbox, and that
+    happens before any tool call exists for the gate to see.
+
+    Not policy-scoped, and that is the decision rather than an oversight: the spawn
+    it prevents is one no rung of the ladder would otherwise catch.
     """
     session = AgentSession(Bridge(), task="lead")
 
@@ -4048,3 +4051,54 @@ def test_the_bus_reaches_the_argv_that_the_restriction_narrows_to() -> None:
     # CLI reaches back over the control channel. A build that passed it would be
     # serialising a Python object into argv.
     assert "instance" not in carried[SERVER_NAME]
+
+
+def test_an_admitted_connector_rides_the_restriction_instead_of_being_cut_by_it() -> None:
+    """
+    The way back in. `strict_mcp_config` keeps what `mcp_servers` carries, so naming
+    a connector there is what restores it without widening anything -- the flag stays
+    True and no unadmitted server loads.
+
+    Asserted through argv rather than on the options object, because the claim is
+    that the CLI receives it. The SDK's `McpServerConfig` union does not include
+    `McpClaudeAIProxyServerConfig` (0.2.136), so `_mcp_servers` casts, and a cast
+    that produced a shape the transport dropped would leave the operator with a
+    connector they admitted and cannot use.
+    """
+    import json
+
+    from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
+
+    from pptmstr import cli_version
+    from pptmstr.bus import SERVER_NAME
+    from pptmstr.settings import McpConnector
+
+    asana = McpConnector(name="claude.ai Asana", url="https://mcp.asana.com/v2/mcp", id="mcpsrv_x")
+    options = AgentSession(Bridge(), task="lead", connectors=(asana,))._options()
+
+    assert options.strict_mcp_config is True
+
+    transport = SubprocessCLITransport(prompt="x", options=options)
+    transport._cli_path = cli_version.resolve_cli_path()
+    argv = transport._build_command()
+    carried = json.loads(argv[argv.index("--mcp-config") + 1])["mcpServers"]
+
+    assert sorted(carried) == sorted([SERVER_NAME, "claude.ai Asana"])
+    assert carried["claude.ai Asana"] == {
+        "type": "claudeai-proxy",
+        "url": "https://mcp.asana.com/v2/mcp",
+        "id": "mcpsrv_x",
+    }
+
+
+def test_a_session_with_no_admitted_connectors_carries_only_the_bus() -> None:
+    """
+    The default is unchanged. An operator who has admitted nothing gets exactly the
+    session they got before this field existed, which is what makes the setting an
+    opt-in rather than a behaviour change everyone pays for.
+    """
+    from pptmstr.bus import SERVER_NAME
+
+    options = AgentSession(Bridge(), task="lead")._options()
+
+    assert list(options.mcp_servers) == [SERVER_NAME]

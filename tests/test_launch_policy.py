@@ -19,7 +19,7 @@ from collections.abc import Iterator
 import pytest
 
 from pptmstr.app import AppState, _launch, _policy_of, _relaxed_count, _revoke_policy
-from pptmstr.approval import Policy, requires_containment
+from pptmstr.approval import Policy, inherits_to_subagents, requires_containment
 from pptmstr.bridge import Bridge
 from pptmstr.driver import AgentSession
 from pptmstr.model import AgentRecord, AgentState, LaunchSpec, NodeId
@@ -302,6 +302,30 @@ def test_the_only_rung_excused_from_that_is_the_one_that_cannot_start_uncontaine
     # stop parking the two, which is what made the narrowing necessary.
     assert "writes" not in gate_parks(Policy.AUTONOMOUS)
     assert "spawns" not in gate_parks(Policy.AUTONOMOUS)
+
+
+def test_a_rung_that_inherits_bounds_its_fleet_by_approval_or_by_containment() -> None:
+    """
+    The trade behind 2026-09-24's reversal of 2026-08-11 §4, as a rule rather than
+    as two hand-checked rungs.
+
+    §4's objection to inheritance was that one approval relaxes the gate for an
+    unbounded number of downstream calls. Two different things answer it, and a
+    rung needs one of them: ``PERMISSIVE`` parks spawns, so N agents cost N
+    approvals and the operator bounds the fleet; ``AUTONOMOUS`` releases spawns but
+    cannot start without containment, so each agent's reach is bounded instead of
+    its count. A rung that did neither would be §4's objection with nothing left
+    answering it.
+
+    Read off ``approval`` rather than listed here, so a fourth rung has to pick one.
+    """
+    for policy in Policy:
+        if not inherits_to_subagents(policy):
+            continue
+        bounded = "spawns" in gate_parks(policy) or requires_containment(policy)
+        assert (
+            bounded
+        ), f"{policy.name} inherits with neither an approval nor a sandbox bounding fan-out"
 
 
 def test_what_a_rung_adds_and_what_it_parks_do_not_overlap() -> None:

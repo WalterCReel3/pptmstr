@@ -37,18 +37,10 @@ from .. import cli_version, sandbox, templates, tree
 from .. import sessions as sessions_mod
 from ..approval import Policy
 from ..model import LaunchSpec
+from ..model_catalog import DEFAULT_MODEL, FALLBACK_MODELS
 from ..sessions import Overlay, SessionRow
 from ..theme import P
 from . import widgets
-
-# Verified against the model-config docs at build time (design §7, trap 9). Listed
-# rather than free-text so a typo cannot become a session that fails on first turn.
-MODELS: tuple[str, ...] = (
-    "claude-sonnet-5",
-    "claude-opus-5",
-    "claude-haiku-4-5-20251001",
-    "claude-fable-5",
-)
 
 TITLE = "New Task"
 
@@ -568,7 +560,13 @@ class LauncherState:
     # Optional on purpose: most sessions are solo with a one-line task, and making
     # a brief mandatory would tax the common case for a problem it does not have.
     brief: str = ""
-    model_index: int = 0
+    # The model id itself and not an index into the offered list, for the reason
+    # ``policy`` below holds a ``Policy``: the list is probed at startup and ordered by
+    # the API, so a position means a different model between one run and the next. A
+    # name also gives a pinned id somewhere to live when the probe fails and the list
+    # falls back -- an index has no way to express a model the list does not contain,
+    # and ``--model`` has always accepted one.
+    model: str = DEFAULT_MODEL
     # Index into templates.names(). "solo" is first and is the default, so the
     # launcher behaves exactly as it did before teams existed unless asked otherwise.
     template_index: int = 0
@@ -801,7 +799,7 @@ class LauncherState:
         engaged = self.dangerous_engaged
         return LaunchSpec(
             task=self.task.strip(),
-            model=MODELS[self.model_index],
+            model=self.model,
             # Resolved here, because a relative cwd reaches the store and the store
             # cannot resolve one: ``model.relative_write`` returns None for every
             # absolute write path unless the agent's cwd is itself absolute, so a
@@ -1072,6 +1070,7 @@ def draw(
     scanner: Scanner = scan_sessions,
     prober: Prober = cli_version.check_installed_cli,
     subagent_cap: int | None = None,
+    models: tuple[str, ...] = FALLBACK_MODELS,
 ) -> None:
     """
     Draw the modal if it has been asked for.
@@ -1079,6 +1078,10 @@ def draw(
     ``cap`` and ``subagent_cap`` are different bounds and are not interchangeable:
     ``cap`` is how many *sessions* run at once and already has a consequence on this
     screen, while ``subagent_cap`` is how many sub-agents one session may hold.
+
+    ``models`` is what the model combo offers -- ``model_catalog.Catalog.models``, which
+    is the list in code until the startup probe replaces it. Defaulted rather than
+    required so a caller that has not run a probe still draws a usable combo.
 
     ``subagent_cap`` is the operator's *setting*, which this modal both displays and
     offers to override for one launch. It is optional because a caller that does not
@@ -1168,7 +1171,16 @@ def draw(
 
     imgui.spacing()
     imgui.set_next_item_width(240.0)
-    _, state.model_index = imgui.combo("model", state.model_index, list(MODELS))
+    # A pick the offered list does not contain is kept and shown rather than corrected:
+    # it is what ``--model`` was given, or what a probe offered on an earlier run and no
+    # longer does. Dropping it would relaunch on a model the operator did not choose,
+    # and silently -- the combo would simply read as something else.
+    options = list(models)
+    if state.model not in options:
+        options.insert(0, state.model)
+    changed, chosen = imgui.combo("model", options.index(state.model), options)
+    if changed:
+        state.model = options[chosen]
     _, state.template_index = imgui.combo("team", state.template_index, list(templates.names()))
     # The shape is not obvious from a one-word name, and picking the wrong one is
     # only visible several turns later when workers start appearing -- so the

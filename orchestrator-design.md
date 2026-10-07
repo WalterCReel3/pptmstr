@@ -868,7 +868,7 @@ the precise message the mark exists to disprove.
 6. **Context-budget bars are estimates.** No remaining-window API; compaction fires invisibly. Label it as approximate in the UI rather than implying precision.
 7. **Subprocess count is your real concurrency ceiling.** One per session. Cap the pool and surface the count.
 8. **Never `from .theme import P` where `P` is a rebindable module global.** The import copies the reference; rebinding on theme switch updates nothing in the importer. Proxy object, always. See §6.1.
-9. **Verify model ID strings at build time.** Current families are Claude Fable 5, Opus 5, Sonnet 5, and Haiku 4.5 (`claude-fable-5`, `claude-opus-5`, `claude-sonnet-5`, `claude-haiku-4-5-20251001`). I saw a conflicting identifier during research; check the model-config docs rather than trusting any string in this document.
+9. **Verify model ID strings, and not only at build time.** A build-time check cannot see a model released after the build, so the list goes short rather than wrong and the newest model is simply unreachable. `pptmstr/model_catalog.py` probes `GET /v1/models` once at startup and falls back to the list in code; the ids above are that fallback. Listing rather than free-texting them still stands, so a typo cannot become a session that fails on first turn. See [`planning/2026-09-25-the-model-list-outlives-the-build-that-verified-it.md`](planning/2026-09-25-the-model-list-outlives-the-build-that-verified-it.md).
 
 ---
 

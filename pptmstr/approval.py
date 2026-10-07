@@ -334,22 +334,36 @@ def inherits_to_subagents(policy: Policy) -> bool:
     it is decided by what the rung rests on, and ``assert_never`` makes a third
     widened rung say which answer it takes.
 
-    ``AUTONOMOUS`` inherits. 2026-09-03 §8 reverses 2026-08-11 §4 for it, because
-    sandbox configuration is per CLI process and a sub-agent shares its parent's --
-    so each additional agent has the same bounded reach as the first, and what
-    fan-out multiplies is volume, which ``subagent_cap`` bounds ahead of
-    ``classify``.
+    Both widened rungs inherit, and they get there by different routes because they
+    rest on different things.
 
-    ``PERMISSIVE`` does not, and §4 stands for it unchanged. Its safety is a claim
-    about a command string, not a bound around a process, and nothing about the
-    parent's gate follows a spawn into a child. Inheriting it would be §4's original
-    hazard exactly: one approval relaxing an unbounded number of downstream calls.
+    ``AUTONOMOUS`` inherits because sandbox configuration is per CLI process and a
+    sub-agent shares its parent's, so each additional agent has the same bounded
+    reach as the first (2026-09-03 §8, reversing 2026-08-11 §4 for that rung).
+
+    ``PERMISSIVE`` inherits because its claim is per *command*: ``shellscan`` is
+    re-run, fail-closed, against every call a sub-agent makes, exactly as it is for
+    the root. Nothing about that verdict weakens with fan-out. 2026-08-11 §4 argued
+    the other way on the grounds that one approval would relax the gate for an
+    unbounded number of downstream calls, and that is no longer the shape of the
+    tree: ``Task``/``Agent`` stay in ``_REVIEW`` under this rung, so every agent
+    costs its own approval, and ``subagent_cap``'s deny runs ahead of ``classify``
+    where no policy can widen it (2026-09-24, amending 2026-09-17 §4).
+
+    What fan-out multiplies under either rung is volume, and the volume that matters
+    here is calls that auto-approve and so construct no ``PendingApproval``: they are
+    in the transcript but are not reviewable as decisions. ``subagent_cap`` is the
+    only thing bounding that, since the automatic revoke was removed on 2026-09-21.
+
+    A property of the rung, so it lives beside the rung rather than in the driver:
+    it is decided by what the rung rests on, and ``assert_never`` makes a fourth rung
+    say which answer it takes rather than inheriting one by position.
     """
     match policy:
         case Policy.STRICT:
             return False
         case Policy.PERMISSIVE:
-            return False
+            return True
         case Policy.AUTONOMOUS:
             return True
     assert_never(policy)
