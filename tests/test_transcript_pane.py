@@ -864,6 +864,50 @@ def test_the_log_is_markdown_by_default_with_the_seam_and_wrapped_lines_without(
     assert state.mode is None, "the default is derived and never written back"
 
 
+def test_the_log_starts_in_the_mode_the_settings_name_until_the_pane_is_told_another(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    ``Settings.context_mode`` is where the pane starts, not a lock on it: the
+    pane's own buttons still choose for the session, and a name this build does
+    not have is the build's default rather than an error.
+    """
+    assert transcript_pane.mode_named("raw") is RenderMode.RAW
+    assert transcript_pane.mode_named("") is None
+    assert transcript_pane.mode_named("hologram") is None
+
+    state = TranscriptState(start_in=RenderMode.RAW)
+    assert state.shown_mode() is RenderMode.RAW, "with the seam off too: RAW needs none"
+    monkeypatch.setattr(typeset, "enabled", lambda pane=None: True)
+    assert state.shown_mode() is RenderMode.RAW
+    state.mode = RenderMode.RICH
+    assert state.shown_mode() is RenderMode.RICH, "a pick in the pane wins for the session"
+
+    # TYPESET to start in falls back as a picked TYPESET does.
+    state = TranscriptState(start_in=RenderMode.TYPESET)
+    assert state.shown_mode() is RenderMode.TYPESET
+    monkeypatch.setattr(typeset, "enabled", lambda pane=None: False)
+    assert state.shown_mode() is RenderMode.WRAP
+
+
+def test_a_draw_is_what_tells_the_pane_where_the_settings_start_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    The pane keeps no copy of the setting: every draw writes it, a draw that names
+    none puts the default back, and it is written before the early return for a
+    pane with nothing selected.
+    """
+    state = TranscriptState()
+    snap = Store().snapshot()
+    monkeypatch.setattr(transcript_pane.imgui, "text_disabled", lambda text: None)
+
+    transcript_pane.draw(snap, state, None, start_in=RenderMode.RAW)
+    assert state.start_in is RenderMode.RAW and state.shown_mode() is RenderMode.RAW
+    transcript_pane.draw(snap, state, None)
+    assert state.start_in is None and state.mode is None
+
+
 def test_a_chosen_mode_is_drawn_and_typeset_only_while_the_seam_can_draw(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

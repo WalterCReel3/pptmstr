@@ -222,7 +222,7 @@ def test_a_saved_face_preset_is_read_as_the_role_choices_it_stood_for(
     seam_family, seam_roles = typeset.legacy(name)
     assert seam_family == family
     read = typeset.roles_from((each.role, each.slot, each.step) for each in roles)
-    assert typeset._checked(read) == typeset._checked(seam_roles)
+    assert typeset.checked(read) == typeset.checked(seam_roles)
 
     save(got, path)
     assert "typeset_faces" not in json.loads(path.read_text())
@@ -310,6 +310,22 @@ def test_hand_edited_role_choices_and_pane_switches_lose_only_what_is_malformed(
 
     path.write_text(json.dumps({"typeset_roles": ["prose"], "typeset_panes": "off"}))
     assert load(path) == Settings()
+
+
+def test_where_the_context_log_starts_survives_a_restart(tmp_path: Path) -> None:
+    """
+    Kept as a name, and empty for "this build's": a build that changes its default
+    then reaches every file that never chose. A value that is not a string is not
+    a name.
+    """
+    path = tmp_path / "settings.json"
+    assert Settings().context_mode == ""
+    save(Settings(context_mode="typeset"), path)
+    assert json.loads(path.read_text())["context_mode"] == "typeset"
+    assert load(path).context_mode == "typeset"
+
+    path.write_text(json.dumps({"context_mode": 3, "theme": "light"}))
+    assert load(path) == Settings(theme="light")
 
 
 def test_a_text_switch_that_is_not_a_boolean_falls_back_to_its_default(tmp_path: Path) -> None:

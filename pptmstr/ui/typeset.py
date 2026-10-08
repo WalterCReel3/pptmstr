@@ -37,7 +37,7 @@ height it claimed in pixels, and **raises outside a frame** (``_frame``).
 | ``DEFAULTS`` / ``SLOTS`` / ``STEPS`` / ``PROPORTIONALS`` / ``SCALES`` | what may be chosen |
 | ``chosen(role)`` / ``style(role)`` / ``px(role)`` / ``pitch(role)`` | a role as set, as in force |
 | ``proportional()`` / ``proportionals()`` / ``scale()`` / ``mono()`` | the rest in force |
-| ``roles_from`` / ``panes_from`` / ``legacy`` | settings' strings into the above |
+| ``roles_from`` / ``checked`` / ``panes_from`` / ``legacy`` | settings' strings into the above |
 | ``LEADING`` / ``METRICS`` | line spacing and whose advances: tables in code, not settings |
 
 A ``ViewCache`` answers, per key: ``view`` (the library's own object), ``height``,
@@ -759,7 +759,7 @@ ROLE_LABELS: dict[Role, str] = {
     Role.LABEL: "Row titles",
 }
 """
-What a menu or a dialog calls each role.
+What the settings dialog calls each role.
 """
 
 
@@ -893,7 +893,7 @@ PANE_LABELS: dict[Pane, str] = {
     Pane.BRIEF: "BRIEF",
 }
 """
-What a menu or a dialog calls each pane: the titles the panes carry.
+What the settings dialog calls each pane: the titles the panes carry.
 """
 
 
@@ -921,7 +921,7 @@ PROPORTIONALS: tuple[Proportional, ...] = (
     Proportional("droid", "Droid Sans (Roboto emphasis)", file="DroidSans.ttf"),
 )
 """
-What may fill the proportional slot, in menu order. The first is the default.
+What may fill the proportional slot, in the order offered. The first is the default.
 """
 
 DEFAULT_PRESET = "roboto"
@@ -948,7 +948,7 @@ proportional slot, and the roles that differ from ``DEFAULTS``.
 
 SCALES: tuple[float, ...] = (0.875, 1.0, 1.125, 1.25)
 """
-The text sizes the menu offers, as multiples of the UI font's: 14, 16, 18 and 20 px
+The text sizes the settings dialog offers, as multiples of the UI font's: 14, 16, 18 and 20 px
 at a 16 px UI font. ``configure`` takes any value between the first and the last.
 """
 
@@ -1071,11 +1071,11 @@ def configure(
     old = faces if faces is not None else None if mono is None else "mono" if mono else ""
     if old is not None:
         family, differing = legacy(old)
-        _STATE.family, _STATE.roles = family, _checked(differing)
+        _STATE.family, _STATE.roles = family, checked(differing)
     if proportional is not None:
         _STATE.family = proportional
     if roles is not None:
-        _STATE.roles = _checked(roles)
+        _STATE.roles = checked(roles)
     if scale is not None:
         wanted = float(scale)
         # A hand-edited NaN compares false with everything and would pass a clamp.
@@ -1086,9 +1086,12 @@ def configure(
         _STATE.themes.clear()
 
 
-def _checked(differing: Mapping[Role, RoleStyle]) -> dict[Role, RoleStyle]:
+def checked(differing: Mapping[Role, RoleStyle]) -> dict[Role, RoleStyle]:
     """
-    ``DEFAULTS`` with ``differing`` laid over it, each style made one its role allows.
+    ``DEFAULTS`` with ``differing`` laid over it, each style made one its role allows:
+    every role's style as ``configure(roles=differing)`` would leave it. Pure, so a
+    caller holding settings and no seam -- the settings dialog's model -- reads the
+    same answer the seam will give.
     """
     out = dict(DEFAULTS)
     for role, given in differing.items():
@@ -1203,7 +1206,7 @@ def multiline_kind(role: Role) -> Kind:
 def proportionals() -> tuple[tuple[Proportional, bool], ...]:
     """
     Every family for the proportional slot with whether it can be chosen now, in
-    menu order.
+    the order offered.
 
     One whose file did not load cannot: it would be measured from a file ImGui has
     no font for.
@@ -1328,7 +1331,7 @@ def enabled(pane: Pane | None = None) -> bool:
 def pane_on(pane: Pane) -> bool:
     """
     Whether the operator's settings have a pane switched on, whatever the master
-    switch and the faces say. What a menu entry shows.
+    switch and the faces say.
     """
     return pane not in _STATE.panes_off
 

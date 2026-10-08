@@ -243,6 +243,18 @@ watched pane, with the collector on and its pauses timed apart from the frames):
   and 35 holding 400 lines: still over, and as often.
 """
 
+
+def mode_named(name: str) -> RenderMode | None:
+    """
+    The mode a setting names (``Settings.context_mode``), or ``None`` for an empty
+    name and for one this build does not have: both mean ``DEFAULT_MODE``.
+    """
+    try:
+        return RenderMode(name)
+    except ValueError:
+        return None
+
+
 _MARKDOWN_KINDS = frozenset({SegmentKind.OUTPUT, SegmentKind.REASONING})
 
 _CLOSED_KEY = "closed"
@@ -663,6 +675,10 @@ class TranscriptState:
     # What the operator chose, or None until they choose. What is drawn is
     # ``shown_mode()``.
     mode: RenderMode | None = None
+    # The mode the operator's settings start the pane in, as the last ``draw`` was
+    # told it: written by every draw and by nothing else, so it is the setting and
+    # never a copy of it that could go stale.
+    start_in: RenderMode | None = None
     follow_tail: bool = True
     search: str = ""
     frame: int = 0
@@ -681,7 +697,8 @@ class TranscriptState:
 
     def shown_mode(self) -> RenderMode:
         """
-        The mode drawn this frame: the chosen one, or the default until one is
+        The mode drawn this frame: the one chosen in the pane, or until one is the
+        one the settings start it in (``start_in``), or with neither the default
         (``DEFAULT_MODE``, and WRAP with the seam off).
 
         TYPESET needs the seam, and without it the pane is in WRAP. Derived each
@@ -689,11 +706,12 @@ class TranscriptState:
         returns the operator to what they had chosen.
         """
         seam = typeset.enabled(typeset.Pane.CONTEXT)
-        if self.mode is None:
+        wanted = self.start_in if self.mode is None else self.mode
+        if wanted is None:
             return DEFAULT_MODE if seam else RenderMode.WRAP
-        if self.mode is RenderMode.TYPESET and not seam:
+        if wanted is RenderMode.TYPESET and not seam:
             return RenderMode.WRAP
-        return self.mode
+        return wanted
 
     def cache_for(self, node_id: NodeId) -> NodeTranscript:
         cache = self.caches.get(node_id)
@@ -753,7 +771,18 @@ _KIND_COLOUR = {
 }
 
 
-def draw(snap: Snapshot, state: TranscriptState, selected: NodeId | None) -> None:
+def draw(
+    snap: Snapshot,
+    state: TranscriptState,
+    selected: NodeId | None,
+    *,
+    start_in: RenderMode | None = None,
+) -> None:
+    """
+    ``start_in`` is the mode the operator's settings start the log in
+    (``mode_named(Settings.context_mode)``); left out, it is ``DEFAULT_MODE``.
+    """
+    state.start_in = start_in
     if selected is None or (record := snap.get(selected)) is None:
         imgui.text_disabled("select an agent to read its transcript")
         return

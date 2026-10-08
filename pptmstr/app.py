@@ -14,7 +14,7 @@ import os
 import time
 import traceback
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import assert_never
 
 from imgui_bundle import hello_imgui, imgui, immapp
@@ -43,6 +43,7 @@ from .ui import (
     launcher,
     rail,
     review,
+    settings_dialog,
     transcript_pane,
     typeset,
 )
@@ -74,6 +75,9 @@ class AppState:
     detail_pane_state: detail.DetailState = field(default_factory=detail.DetailState)
     compose: compose.ComposeState = field(default_factory=compose.ComposeState)
     launcher: launcher.LauncherState = field(default_factory=launcher.LauncherState)
+    settings_dialog: settings_dialog.DialogState = field(
+        default_factory=settings_dialog.DialogState
+    )
     # Which models the launcher offers. Probed once on a worker at startup and the list
     # in code until that answers, so it is readable from the first frame and there is no
     # "not yet known" state for a caller to draw.
@@ -160,11 +164,12 @@ def _handle_layout_keys(state: AppState) -> None:
     whole two-mode design has to avoid, and an operator pressing Esc over an open
     argument editor means the editor.
 
-    The launcher modal wins over both. ``want_capture_keyboard`` covers the usual
-    case -- its task box has the keyboard -- but not a modal whose focus sits on the
-    model combo, where Esc would otherwise dismiss the modal *and* change layout in
-    the same frame. ``is_open`` here is last frame's value, which is the one that
-    matches the frame the operator was looking at when they pressed the key.
+    A modal wins over both: the launcher, and the settings dialog.
+    ``want_capture_keyboard`` covers the usual case -- the launcher's task box has
+    the keyboard -- but not a modal whose focus sits on a combo, where Esc would
+    otherwise dismiss the modal *and* change layout in the same frame. ``is_open``
+    here is last frame's value, which is the one that matches the frame the
+    operator was looking at when they pressed the key.
 
     A chord is not one of these keys. Ctrl+Tab is ImGui's own window switcher and
     Ctrl+Enter sends a prompt; neither captures the keyboard while the mouse is over
@@ -173,7 +178,8 @@ def _handle_layout_keys(state: AppState) -> None:
     """
     snap = state.frame_snap
     io = imgui.get_io()
-    if snap is None or state.launcher.is_open or io.want_capture_keyboard:
+    modal = state.launcher.is_open or state.settings_dialog.is_open
+    if snap is None or modal or io.want_capture_keyboard:
         return
     if io.key_ctrl or io.key_alt or io.key_super:
         return
@@ -716,77 +722,104 @@ def _menus(state: AppState) -> None:
         reason = typeset.unavailable_reason()
         if reason is not None:
             imgui.text_disabled(f"  {reason}")
-        # Everything below takes effect on the click: every face a family names is
-        # on the atlas from start-up, so there is nothing to wait for a restart
-        # for. A tick is on what is in force, which is the default when the saved
-        # name is one this build cannot draw.
-        on = can_typeset and state.settings.typeset
-        if imgui.begin_menu("Panes", on):
-            for pane in typeset.Pane:
-                chosen = typeset.pane_on(pane)
-                clicked, _ = imgui.menu_item(typeset.PANE_LABELS[pane], "", chosen)
-                if clicked:
-                    _switch_typeset(state, pane=(pane.value, not chosen))
-            imgui.end_menu()
-        if imgui.begin_menu("Faces", on):
-            for family, usable in typeset.proportionals():
-                chosen = typeset.proportional().name == family.name
-                clicked, _ = imgui.menu_item(family.label, "", chosen, usable)
-                if clicked:
-                    _switch_typeset(state, family=family.name)
-            imgui.separator()
-            # A role is in one of two families. The roles whose columns are content
-            # are monospace and are offered nothing else, so they are not listed.
-            for role, slots in typeset.SLOTS.items():
-                if len(slots) < 2:
-                    continue
-                monospace = typeset.chosen(role).slot is typeset.Slot.MONOSPACE
-                label = f"Monospace {typeset.ROLE_LABELS[role].lower()}"
-                clicked, _ = imgui.menu_item(label, "", monospace)
-                if clicked:
-                    slot = typeset.Slot.PROPORTIONAL if monospace else typeset.Slot.MONOSPACE
-                    _switch_typeset(state, role=(role.value, slot.value, None))
-            imgui.end_menu()
-        if imgui.begin_menu("Text size", on):
-            for scale in typeset.SCALES:
-                chosen = abs(typeset.scale() - scale) < 1e-6
-                clicked, _ = imgui.menu_item(f"{scale * 100:g}%", "", chosen)
-                if clicked:
-                    _switch_typeset(state, scale=scale)
-            imgui.end_menu()
-        if imgui.begin_menu("Role sizes", on):
-            for role in typeset.Role:
-                if imgui.begin_menu(typeset.ROLE_LABELS[role]):
-                    for step in typeset.STEPS:
-                        chosen = typeset.chosen(role).step == step
-                        label = f"{step:+d} px##{role.value}" if step else f"body##{role.value}"
-                        clicked, _ = imgui.menu_item(label, "", chosen)
-                        if clicked:
-                            _switch_typeset(state, role=(role.value, None, step))
-                    imgui.end_menu()
-            imgui.end_menu()
+        imgui.separator()
+        # Everything else about text -- the family, a face and a size per role,
+        # a switch per pane -- is in the dialog, with the rest of what persists.
+        # The two entries above stay because each is one click here.
+        clicked, _ = imgui.menu_item("Settings...", settings_dialog.CHORD_LABEL, False)
+        if clicked:
+            state.settings_dialog.request_open()
         imgui.end_menu()
 
 
+_TYPESET_FIELDS = (
+    "typeset",
+    "typeset_family",
+    "typeset_roles",
+    "typeset_panes",
+    "typeset_scale",
+)
+"""
+The settings the seam is told. A change to any of them is one ``configure``.
+"""
+
+
+def _apply_settings(state: AppState, new: settings_mod.Settings) -> None:
+    """
+    Make ``new`` the settings: save them, and carry out what the difference means.
+
+    **The one place a setting changes after start-up.** The menu and the settings
+    dialog both end here, so a setting cannot be saved by one of them and applied
+    by the other. What has to happen is read off the difference between the two
+    values rather than passed in by the caller: a caller that had to say "and tell
+    the seam" is a caller that can forget to, and the setting would then hold until
+    restart, which for typeset text makes the comparison the switch exists for a
+    comparison of two launches.
+
+    Saved at the point of mutation rather than on exit: there is no ``before_exit``
+    callback registered, and a preference that survives only a clean shutdown is
+    one that silently resets after the first crash.
+
+    Settings equal to the ones in force do nothing at all -- no write, no
+    ``configure`` -- which is what makes a control safe to draw every frame.
+    """
+    old = state.settings
+    if new == old:
+        return
+    state.settings = new
+    settings_mod.save(new)
+    moved = [
+        each.name for each in fields(new) if getattr(new, each.name) != getattr(old, each.name)
+    ]
+    if "theme" in moved:
+        theme.set_theme(new.theme)
+        state.theme_dirty = True
+    if any(name in moved for name in _TYPESET_FIELDS):
+        _configure_typeset(new)
+    if "concurrency_cap" in moved:
+        cap = new.concurrency_cap
+
+        async def resize(pool: SessionPool) -> None:
+            # On the loop, where every other mutation of the pool happens. Raising
+            # it starts queued sessions; lowering it stops nothing that is running.
+            pool.set_cap(cap)
+
+        _session_action(state, resize)
+    if "fps_idle" in moved and state.runner is not None:
+        state.runner.fps_idling.fps_idle = new.fps_idle
+    if "context_mode" in moved:
+        # The pane's own buttons choose for the session and would otherwise hide
+        # this change until the next launch.
+        state.transcripts.mode = None
+    LOG.info("settings", _described(new, moved))
+
+
+def _described(settings: settings_mod.Settings, moved: list[str]) -> str:
+    """
+    One log line for a change: each field that moved and what it is now, with the
+    structured ones summarised rather than printed.
+    """
+    said = []
+    for name in moved:
+        match name:
+            case "typeset_roles":
+                said.append(f"{len(settings.typeset_roles)} role(s) set apart")
+            case "typeset_panes":
+                off = ", ".join(pane for pane, on in settings.typeset_panes if not on)
+                said.append(f"panes off: {off or 'none'}")
+            case "admitted_connectors":
+                said.append(f"{len(settings.admitted_connectors)} connector(s)")
+            case _:
+                said.append(f"{name} {getattr(settings, name)!r}")
+    return ", ".join(said)
+
+
 def _switch_theme(state: AppState, name: str) -> None:
-    theme.set_theme(name)
-    state.theme_dirty = True
-    state.settings = state.settings.merged(theme=name)
-    settings_mod.save(state.settings)
-    LOG.info("theme", f"switched to {name}")
+    _apply_settings(state, state.settings.merged(theme=name))
 
 
 def _switch_wrap(state: AppState, wrap: bool) -> None:
-    """
-    Toggle composer wrapping, persisting immediately.
-
-    Saved at the point of mutation rather than on exit, as the theme is: there is no
-    ``before_exit`` callback registered, and a preference that survives only a clean
-    shutdown is one that silently resets after the first crash.
-    """
-    state.settings = state.settings.merged(wrap_inputs=wrap)
-    settings_mod.save(state.settings)
-    LOG.info("text", f"composer wrapping {'on' if wrap else 'off'}")
+    _apply_settings(state, state.settings.merged(wrap_inputs=wrap))
 
 
 def _switch_typeset(
@@ -799,12 +832,8 @@ def _switch_typeset(
     pane: tuple[str, bool] | None = None,
 ) -> None:
     """
-    Change how text is set, persisting immediately, as ``_switch_wrap`` does.
-
-    One function for all of it because it is one piece of state to the seam, and
-    it has to be told in the same breath as the setting is saved: a setting the
-    panes do not see until restart would make the comparison this exists for a
-    comparison of two launches.
+    Change how text is set: the menu's switch, and what a test or a script reaches
+    for. ``_apply_settings`` saves it and tells the seam in the same breath.
 
     ``role`` is a role's name with the slot and the step to give it, either left
     ``None`` to keep what it has; ``pane`` is a pane's name and whether it is on.
@@ -820,15 +849,7 @@ def _switch_typeset(
         changed = changed.with_role(role[0], slot=role[1], step=role[2])
     if pane is not None:
         changed = changed.with_pane(*pane)
-    state.settings = changed
-    settings_mod.save(state.settings)
-    _configure_typeset(state.settings)
-    LOG.info(
-        "text",
-        f"typeset {'on' if changed.typeset else 'off'}, family {changed.typeset_family}, "
-        f"size x{changed.typeset_scale:g}, {len(changed.typeset_roles)} role(s) set apart, "
-        f"panes off: {', '.join(name for name, on in changed.typeset_panes if not on) or 'none'}",
-    )
+    _apply_settings(state, changed)
 
 
 def _configure_typeset(settings: settings_mod.Settings) -> None:
@@ -981,7 +1002,10 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
         # another agent's transcript.
         if state.frame_snap is not None:
             transcript_pane.draw(
-                state.frame_snap, state.transcripts, state.focus.node(state.frame_snap)
+                state.frame_snap,
+                state.transcripts,
+                state.focus.node(state.frame_snap),
+                start_in=transcript_pane.mode_named(state.settings.context_mode),
             )
 
     def detail_pane() -> None:
@@ -1019,7 +1043,12 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
         session = (node[0], None) if node else None
         avail = imgui.get_content_region_avail().y
         if imgui.begin_child("##scrollback", imgui.ImVec2(0, max(avail - 150.0, 80.0))):
-            transcript_pane.draw(state.frame_snap, state.transcripts, node)
+            transcript_pane.draw(
+                state.frame_snap,
+                state.transcripts,
+                node,
+                start_in=transcript_pane.mode_named(state.settings.context_mode),
+            )
         imgui.end_child()
         imgui.separator()
         compose.draw_conversation(
@@ -1069,9 +1098,18 @@ def _draw_overlays(state: AppState) -> None:
     The launcher lives here rather than in a panel for two reasons: a popup opened
     inside a docked window is scoped to that window, and the shortcut that opens it
     has to be evaluated inside a frame, which rules out ``begin_frame`` where the
-    rest of the key handling lives.
+    rest of the key handling lives. The settings dialog is here for both reasons
+    too, and ahead of the pool check: it needs no pool.
     """
     launcher.handle_shortcut(state.launcher)
+    # Not while the launcher is up: two modals opened from the root replace each
+    # other, and the launcher's is the one holding something typed.
+    settings_dialog.handle_shortcut(state.settings_dialog, blocked=state.launcher.is_open)
+    settings_dialog.draw(
+        state.settings_dialog,
+        state.settings,
+        lambda change: _apply_settings(state, settings_dialog.changed(state.settings, change)),
+    )
     pool = state.pool
     if pool is None:
         return
@@ -1327,7 +1365,7 @@ def main(argv: list[str] | None = None) -> int:
     runner.callbacks.show_menus = guarded("menu", lambda: _menus(state))
     runner.callbacks.show_status = guarded("status bar", lambda: _status_bar(state))
     runner.callbacks.post_render_dockable_windows = guarded(
-        "launcher", lambda: _draw_overlays(state)
+        "overlays", lambda: _draw_overlays(state)
     )
 
     state.bridge.start()

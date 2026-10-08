@@ -200,13 +200,15 @@ def test_the_modal_is_drawn_against_the_setting_it_offers_to_override(
     handing it nothing, which is STYLE.md §2's watchdog-nothing-calls shape.
     """
     from pptmstr import app
-    from pptmstr.ui import launcher
+    from pptmstr.ui import launcher, settings_dialog
 
     seen: list[object] = []
     monkeypatch.setattr(
         launcher, "draw", lambda state, **kw: seen.append(kw.get("subagent_cap", "ABSENT"))
     )
     monkeypatch.setattr(launcher, "handle_shortcut", lambda state: None)
+    monkeypatch.setattr(settings_dialog, "handle_shortcut", lambda state, **kw: None)
+    monkeypatch.setattr(settings_dialog, "draw", lambda state, settings, apply: None)
 
     class _IdlePool:
         running_count = 0
@@ -483,111 +485,47 @@ def _text_menu(
     return menu, state, saved
 
 
+def test_the_text_menu_keeps_its_two_switches_and_opens_the_dialog_for_the_rest(
+    monkeypatch: pytest.MonkeyPatch, typeset_state: object
+) -> None:
+    """
+    The family, the roles, the panes and the sizes are the dialog's. A menu that
+    still offered them would be a second place to change one setting; a menu with
+    no way into the dialog would leave the chord as the only door, and a chord
+    with no menu entry is one nobody who did not read the README presses.
+    """
+    from pptmstr.ui import settings_dialog
+
+    menu, state, saved = _text_menu(monkeypatch, "Settings...")
+
+    assert set(menu.menus) == {"Session", "Theme", "Text"}
+    text = [label for label in menu.items if label not in {"New Task..."}]
+    assert text[-3:] == ["Wrap composers", "Typeset text", "Settings..."]
+    assert state.settings_dialog._open_requested, "the entry asks for the modal"
+    assert not state.settings_dialog.is_open, "which is opened by the frame that draws it"
+    assert saved == [] and state.settings == Settings(), "and changes nothing by itself"
+    assert settings_dialog.CHORD_LABEL == "Ctrl+,"
+
+
 @pytest.mark.parametrize(
-    ("click", "family", "roles", "panes", "scale"),
+    ("click", "expected"),
     [
-        ("Monospace prose", "roboto", (RoleChoice("prose", "monospace", None),), (), 1.0),
-        ("Monospace headings", "roboto", (RoleChoice("heading", "monospace", None),), (), 1.0),
-        ("+2 px##prose", "roboto", (RoleChoice("prose", None, 2),), (), 1.0),
-        ("-1 px##inline-code", "roboto", (RoleChoice("inline-code", None, -1),), (), 1.0),
-        ("CONTEXT", "roboto", (), (("context", False),), 1.0),
-        ("Droid Sans (Roboto emphasis)", "roboto", (), (), 1.0),
-        ("125%", "roboto", (), (), 1.25),
-        ("87.5%", "roboto", (), (), 0.875),
+        ("Wrap composers", Settings(wrap_inputs=False)),
+        ("Typeset text", Settings(typeset=False)),
+        ("Light", Settings(theme="light")),
     ],
 )
-def test_the_text_menu_offers_every_role_pane_and_size_and_a_click_chooses_it(
-    monkeypatch: pytest.MonkeyPatch,
-    typeset_state: object,
-    click: str,
-    family: str,
-    roles: tuple[RoleChoice, ...],
-    panes: tuple[tuple[str, bool], ...],
-    scale: float,
+def test_what_was_one_click_in_a_menu_still_is(
+    monkeypatch: pytest.MonkeyPatch, typeset_state: object, click: str, expected: Settings
 ) -> None:
-    """
-    Until there is a settings dialog these are reachable from nowhere else in the
-    window. The Droid Sans entry is the one that cannot be clicked here: no font is
-    loaded in this test, and a family whose own file is not on the atlas is offered
-    disabled.
-    """
-    from pptmstr.ui import typeset
+    from pptmstr import theme
 
     menu, state, saved = _text_menu(monkeypatch, click)
-
-    got = state.settings
-    assert (got.typeset_family, got.typeset_roles, got.typeset_panes, got.typeset_scale) == (
-        family,
-        roles,
-        panes,
-        scale,
-    )
-    assert typeset.roles_from((each.role, each.slot, each.step) for each in roles) == {
-        role: typeset.chosen(role) for role in (typeset.Role(each.role) for each in roles)
-    }, "the seam was told in the same breath"
-    assert typeset.scale() == scale
-    assert all(menu.menus[name] for name in ("Panes", "Faces", "Text size", "Role sizes"))
-
-    assert {typeset.PANE_LABELS[pane] for pane in typeset.Pane} <= set(menu.items)
-    for each in typeset.PROPORTIONALS:
-        assert menu.items[each.label] == (each.name == "roboto", each.file is None), each.label
-    # A role offered one family has no entry: there is nothing to choose.
-    offered = {f"Monospace {typeset.ROLE_LABELS[role].lower()}" for role in typeset.Role}
-    assert (
-        {label for label in menu.items if label.startswith("Monospace ")}
-        == {
-            "Monospace prose",
-            "Monospace headings",
-            "Monospace tables",
-            "Monospace row titles",
-        }
-        < offered
-    )
-    for role in typeset.Role:
-        assert typeset.ROLE_LABELS[role] in menu.menus
-        assert {f"{step:+d} px##{role.value}" for step in typeset.STEPS if step} <= set(menu.items)
-        assert f"body##{role.value}" in menu.items
-    assert {f"{each * 100:g}%" for each in typeset.SCALES} <= set(menu.items)
-    # Ticked as drawn: an entry above it that took the click has already moved the tick.
-    assert menu.items["100%"] == (click != "87.5%", True)
-    assert bool(saved) == (got != Settings())
-
-
-def test_the_text_menu_ticks_what_the_settings_chose(
-    monkeypatch: pytest.MonkeyPatch, typeset_state: object
-) -> None:
-    chosen = (
-        Settings()
-        .with_role("heading", slot="monospace")
-        .with_role("table", step=-1)
-        .with_pane("brief", False)
-    )
-    menu, state, _ = _text_menu(monkeypatch, "Monospace headings", chosen)
-    assert menu.items["Monospace headings"] == (True, True)
-    assert menu.items["Monospace prose"] == (False, True)
-    assert menu.items["-1 px##table"][0] and not menu.items["body##table"][0]
-    assert menu.items["BRIEF"] == (False, True) and menu.items["BOARD"] == (True, True)
-    # The click on a ticked role puts it back, and keeps nothing else from moving.
-    assert state.settings.typeset_roles == (
-        RoleChoice("heading", "proportional", None),
-        RoleChoice("table", None, -1),
-    )
-
-
-def test_the_face_and_size_menus_do_not_open_while_text_is_not_typeset(
-    monkeypatch: pytest.MonkeyPatch, typeset_state: object
-) -> None:
-    from pptmstr import app
-    from pptmstr.ui import typeset
-
-    menu = _Menu("")
-    monkeypatch.setattr(app, "imgui", menu)
-    monkeypatch.setattr(typeset, "available", lambda: True)
-    state = app.AppState(store=Store(), bridge=Bridge(), settings=Settings(typeset=False))
-    app._menus(state)
-    assert not any(menu.menus[name] for name in ("Panes", "Faces", "Text size", "Role sizes"))
-    assert not any(each.label in menu.items for each in typeset.PROPORTIONALS)
-    assert "Monospace prose" not in menu.items and "CONTEXT" not in menu.items
+    try:
+        assert state.settings == expected and saved == [expected]
+        assert not state.settings_dialog._open_requested
+    finally:
+        theme.set_theme("dark")
 
 
 @pytest.mark.parametrize(
@@ -629,6 +567,211 @@ def test_the_typeset_entry_is_offered_only_when_it_can_work_and_says_why_when_it
     assert state.settings.typeset is offered, "a click on an entry that is offered is taken"
     under = [text for text in menu.said if text.startswith("  ")]
     assert under == ([] if reason is None else [f"  {reason}"])
+
+
+def test_the_overlays_give_the_dialog_the_settings_in_force_and_the_one_way_to_change_them(
+    monkeypatch: pytest.MonkeyPatch, typeset_state: object
+) -> None:
+    """
+    The dialog draws what it is handed and changes nothing itself. Unwired -- the
+    draw never called, or called with a callback that drops the change -- every
+    test of its model still passes and the window has no settings dialog.
+    """
+    from pptmstr import app
+    from pptmstr import settings as settings_mod
+    from pptmstr.ui import launcher, settings_dialog, typeset
+
+    drawn: list[tuple[object, Settings, Any]] = []
+    asked: list[tuple[object, bool]] = []
+    saved: list[Settings] = []
+    monkeypatch.setattr(settings_mod, "save", lambda settings, path=None: saved.append(settings))
+    monkeypatch.setattr(launcher, "handle_shortcut", lambda state: None)
+    monkeypatch.setattr(
+        settings_dialog,
+        "handle_shortcut",
+        lambda state, *, blocked=False: asked.append((state, blocked)),
+    )
+    monkeypatch.setattr(
+        settings_dialog,
+        "draw",
+        lambda state, settings, apply: drawn.append((state, settings, apply)),
+    )
+    held = Settings(theme="light")
+    state = app.AppState(store=Store(), bridge=Bridge(), settings=held)
+    app._configure_typeset(held)
+
+    # No pool: the dialog needs none, and is drawn all the same.
+    app._draw_overlays(state)
+    assert asked == [(state.settings_dialog, False)]
+    assert [(each[0], each[1]) for each in drawn] == [(state.settings_dialog, held)]
+
+    drawn[0][2](settings_dialog.RoleSet("prose", slot="monospace"))
+    assert state.settings == held.with_role("prose", slot="monospace")
+    assert saved == [state.settings]
+    assert typeset.mono(), "and the seam was told"
+
+    # With the launcher up the chord is not offered the keyboard.
+    state.launcher.is_open = True
+    app._draw_overlays(state)
+    assert asked[-1] == (state.settings_dialog, True)
+
+
+def test_a_setting_that_changes_is_carried_out_where_it_takes_effect(
+    monkeypatch: pytest.MonkeyPatch, typeset_state: object
+) -> None:
+    """
+    Saved is not applied. Each setting with something to tell -- the palette, the
+    pool, the runner's idle rate, the context log -- is told by the one function
+    every change goes through, in the frame the change is made.
+    """
+    from pptmstr import app, theme
+    from pptmstr import settings as settings_mod
+    from pptmstr.ui import transcript_pane
+
+    saved: list[Settings] = []
+    monkeypatch.setattr(settings_mod, "save", lambda settings, path=None: saved.append(settings))
+
+    class _Pool:
+        cap = 4
+        resized_on: threading.Thread | None = None
+
+        def set_cap(self, cap: int) -> None:
+            self.cap = cap
+            self.resized_on = threading.current_thread()
+
+    bridge = Bridge()
+    bridge.start()
+    try:
+        state = app.AppState(store=Store(), bridge=bridge, settings=Settings())
+        pool = _Pool()
+        state.pool = pool  # type: ignore[assignment]
+        state.runner = types.SimpleNamespace(  # type: ignore[assignment]
+            fps_idling=types.SimpleNamespace(fps_idle=9.0),
+            imgui_window_params=types.SimpleNamespace(background_color=None),
+        )
+        state.theme_dirty = False
+        state.transcripts.mode = transcript_pane.RenderMode.RAW
+
+        app._apply_settings(state, state.settings.merged(theme="light"))
+        assert theme.current() is theme.THEMES["light"] and state.theme_dirty
+        assert state.transcripts.mode is transcript_pane.RenderMode.RAW
+
+        app._apply_settings(state, state.settings.merged(fps_idle=15.0))
+        assert state.runner is not None and state.runner.fps_idling.fps_idle == 15.0
+
+        app._apply_settings(state, state.settings.merged(context_mode="typeset"))
+        assert state.transcripts.mode is None, "the pane's own pick would hide the change"
+
+        app._apply_settings(state, state.settings.merged(concurrency_cap=6))
+        # A round trip through the loop: the resize is queued behind nothing else.
+        bridge.submit(_nothing()).result(timeout=5)
+        assert pool.cap == 6
+        assert pool.resized_on is not None and pool.resized_on is not threading.current_thread()
+
+        assert len(saved) == 4
+        assert saved[-1] == Settings(
+            theme="light", fps_idle=15.0, context_mode="typeset", concurrency_cap=6
+        )
+
+        # Nothing moved: nothing written, nothing told.
+        state.theme_dirty = False
+        app._apply_settings(state, state.settings.merged(theme="light"))
+        assert len(saved) == 4 and not state.theme_dirty
+    finally:
+        bridge.stop()
+        theme.set_theme("dark")
+
+
+async def _nothing() -> None:
+    return None
+
+
+def test_the_context_log_is_drawn_in_the_mode_the_settings_start_it_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Both panes that draw the log -- CONTEXT in TRIAGE, SESSION in FOCUS -- read the
+    setting each frame. A pane that did not would start in the build's mode
+    whatever the dialog said.
+    """
+    from pptmstr import app
+    from pptmstr.ui import compose, transcript_pane
+
+    started: list[object] = []
+    monkeypatch.setattr(
+        transcript_pane,
+        "draw",
+        lambda snap, state, node, *, start_in=None: started.append(start_in),
+    )
+    monkeypatch.setattr(compose, "draw_conversation", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        app,
+        "imgui",
+        types.SimpleNamespace(
+            get_content_region_avail=lambda: types.SimpleNamespace(y=400.0),
+            begin_child=lambda *args: True,
+            end_child=lambda: None,
+            separator=lambda: None,
+            ImVec2=lambda x, y: (x, y),
+        ),
+    )
+    state = app.AppState(store=Store(), bridge=Bridge(), settings=Settings(context_mode="raw"))
+    state.frame_snap = state.store.snapshot()
+    panels = app._panels(state)
+
+    panels["CONTEXT"]()
+    panels["SESSION"]()
+    assert started == [transcript_pane.RenderMode.RAW] * 2
+
+    state.settings = Settings()
+    panels["CONTEXT"]()
+    assert started[-1] is None, "an empty name is the build's own default"
+
+
+def test_escape_over_the_settings_dialog_does_not_also_leave_the_layout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    The dialog closes on Escape, and FOCUS returns to TRIAGE on Escape. With its
+    focus on a combo the modal has not captured the keyboard, so the layout keys
+    have to be told it is up, as they are told about the launcher.
+    """
+    from imgui_bundle import imgui
+
+    from pptmstr import app
+
+    switched: list[str] = []
+    monkeypatch.setattr(
+        app,
+        "hello_imgui",
+        types.SimpleNamespace(current_layout_name=lambda: app.FOCUS, switch_layout=switched.append),
+    )
+
+    def escape(*, dialog_open: bool) -> list[str]:
+        del switched[:]
+        context = imgui.create_context()
+        try:
+            io = imgui.get_io()
+            io.set_ini_filename("")
+            io.display_size = imgui.ImVec2(800, 600)
+            io.delta_time = 1 / 60
+            io.backend_flags |= imgui.BackendFlags_.renderer_has_textures
+            io.add_key_event(imgui.Key.escape, True)
+            imgui.new_frame()
+            try:
+                assert imgui.is_key_pressed(imgui.Key.escape) and not io.want_capture_keyboard
+                state = app.AppState(store=Store(), bridge=Bridge(), settings=Settings())
+                state.frame_snap = state.store.snapshot()
+                state.settings_dialog.is_open = dialog_open
+                app._handle_layout_keys(state)
+            finally:
+                imgui.end_frame()
+        finally:
+            imgui.destroy_context(context)
+        return list(switched)
+
+    assert escape(dialog_open=False) == [app.TRIAGE]
+    assert escape(dialog_open=True) == []
 
 
 def test_a_chord_over_a_typeset_view_does_not_change_the_layout(
@@ -762,5 +905,5 @@ def test_the_renderer_can_be_chosen_for_one_run_from_the_command_line(
     on, faces, scale = expected
     family, roles = typeset.legacy(faces)
     assert (typeset._STATE.typeset, typeset._STATE.scale) == (on, scale)
-    assert (typeset._STATE.family, typeset._STATE.roles) == (family, typeset._checked(roles))
+    assert (typeset._STATE.family, typeset._STATE.roles) == (family, typeset.checked(roles))
     assert saved == [], "an override for one run must not become the saved setting"

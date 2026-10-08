@@ -153,6 +153,13 @@ application falls back to when the library or its faces are missing. With typese
 on the context log still opens in that older markdown renderer (RICH), with the typeset
 mode one radio button away; with it off the log opens in WRAP, as it did before.
 
+Everything else that persists is in one dialog: `Ctrl+,`, or **Text ▸ Settings…**. The
+proportional family, a face and a size for each role of typeset text with a sample
+of each, a switch per pane, where the context log starts, the theme, the caps. A
+change is applied and saved on the click that makes it; there is no Apply and no
+cancel. [planning/2026-10-08-settings-have-one-place.md](planning/2026-10-08-settings-have-one-place.md)
+says what is a setting and what is deliberately a constant in code.
+
 It has been run only on Xvfb with a software rasteriser, and no person has judged how
 it looks. The decisions, the measurements and what is unverified are in
 [planning/2026-10-07-advtext-sets-the-text.md](planning/2026-10-07-advtext-sets-the-text.md).
