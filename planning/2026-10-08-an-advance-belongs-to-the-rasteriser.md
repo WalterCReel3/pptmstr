@@ -471,6 +471,13 @@ The tool versions are the library's own: this worktree's `.venv` is a composite 
    looks better is exactly the judgement `docs/visual-review.md` reserves to a person.
    `NONE` I would not recommend for this backend, per §2, unless the draw rule changes
    with it.
+
+   **Decided for pptmstr, 2026-10-08.** The operator looked at the three paths on the
+   same prose (`shots/roles-hinted-prose-4x.png`, `roles-light-prose-4x.png`,
+   `roles-file-prose-4x.png`, on this machine) and said: "I think I prefer hinted." So
+   `typeset.METRICS` stays `"hinted"`. That settles pptmstr's constant; it is not a
+   decision about advtext's own default, which is still the operator's to take when
+   the patch is applied.
 2. **Whether the mismatch should be visible on every frame** (`DrawStats`) rather than
    on request (`check_advances`). §3.
 3. **Whether `docs/decisions.md` takes the amendment.** It is written as proposed.
