@@ -1,0 +1,2033 @@
+diff --git a/advtext/__init__.py b/advtext/__init__.py
+index 28936f7..10e95f6 100644
+--- a/advtext/__init__.py
++++ b/advtext/__init__.py
+@@ -152,6 +152,7 @@ if TYPE_CHECKING:  # pragma: no cover - for type checkers; see the module docstr
+         DiffPalette,
+         DrawStats,
+         Palette,
++        check_advances,
+         draw,
+     )
+     from advtext.diff import (
+@@ -241,7 +242,14 @@ if TYPE_CHECKING:  # pragma: no cover - for type checkers; see the module docstr
+         SyntaxColour,
+         language_for,
+     )
+-    from advtext.ui.fonts import ALL_FACES, TEXT_FACES, LoadedFaces, load_faces
++    from advtext.ui.fonts import (
++        ALL_FACES,
++        TEXT_FACES,
++        Hinting,
++        LoadedFaces,
++        baked_metrics,
++        load_faces,
++    )
+     from advtext.ui.stream_view import StreamView
+     from advtext.ui.units import LayoutStats
+     from advtext.units import Scaled, px_from_sp, sp_from_px
+@@ -316,6 +324,7 @@ _HOMES: dict[str, str] = {
+     "DEFAULT_PALETTE": "advtext.backends.imgui_draw",
+     "DARK_PALETTE": "advtext.backends.imgui_draw",
+     "DrawStats": "advtext.backends.imgui_draw",
++    "check_advances": "advtext.backends.imgui_draw",
+     "DiffPalette": "advtext.backends.imgui_draw",
+     "DEFAULT_DIFF_PALETTE": "advtext.backends.imgui_draw",
+     "DARK_DIFF_PALETTE": "advtext.backends.imgui_draw",
+@@ -346,6 +355,8 @@ _HOMES: dict[str, str] = {
+     "TextMatch": "advtext.spans",
+     # Fonts: onto the host's atlas, and the host's own files.
+     "load_faces": "advtext.ui.fonts",
++    "Hinting": "advtext.ui.fonts",
++    "baked_metrics": "advtext.ui.fonts",
+     "LoadedFaces": "advtext.ui.fonts",
+     "TEXT_FACES": "advtext.ui.fonts",
+     "ALL_FACES": "advtext.ui.fonts",
+@@ -403,6 +414,7 @@ __all__ = [
+     "FileStatus",
+     "FindIndex",
+     "FormulaSpan",
++    "Hinting",
+     "HostBlock",
+     "HostFor",
+     "Hosted",
+@@ -433,8 +445,10 @@ __all__ = [
+     "Theme",
+     "Typeset",
+     "UnifiedDiffStream",
++    "baked_metrics",
+     "build_document",
+     "char_measure",
++    "check_advances",
+     "code_block",
+     "code_position",
+     "colour_text",
+diff --git a/advtext/backends/imgui_draw.py b/advtext/backends/imgui_draw.py
+index 1a27e43..6c2f62d 100644
+--- a/advtext/backends/imgui_draw.py
++++ b/advtext/backends/imgui_draw.py
+@@ -195,6 +195,8 @@ if TYPE_CHECKING:  # pragma: no cover - imported for types only
+     from imgui_bundle import imgui
+ 
+ __all__ = [
++    "ADVANCE_TOLERANCE_PX",
++    "AdvanceCheck",
+     "DrawStats",
+     "FaceFont",
+     "DARK_DIFF_PALETTE",
+@@ -204,6 +206,7 @@ __all__ = [
+     "DiffPalette",
+     "Palette",
+     "baked_size_px",
++    "check_advances",
+     "draw",
+     "draw_runs",
+     "rgba",
+@@ -750,6 +753,107 @@ def draw_runs(
+     return stats
+ 
+ 
++ADVANCE_TOLERANCE_PX = 1.0 / 64.0
++"""
++How far a laid-out advance may be from the baked one and still be the same advance.
++
++FreeType states an advance in 26.6 fixed point, so an unhinted one is the file's
++to the nearest 1/64 px and no closer: the worst `tests/test_hinting.py` sees is
++under 0.01 px. One unit of that grid is therefore agreement, and a hinted
++advance measured from the file misses it by tenths of a pixel.
++"""
++
++
++@dataclass(frozen=True, slots=True)
++class AdvanceCheck:
++    """
++    Whether a layout's advances are the advances of the glyphs that will be drawn.
++
++    `glyphs` counts the distinct (font key, codepoint) pairs that could be
++    compared, `disagreeing` those further apart than the allowance
++    `check_advances` describes, and `worst_px` is the largest amount by which
++    any pair exceeded it.
++    """
++
++    glyphs: int = 0
++    disagreeing: int = 0
++    worst_px: float = 0.0
++
++    @property
++    def agrees(self) -> bool:
++        """
++        No glyph was laid out at an advance the atlas does not have.
++        """
++        return self.disagreeing == 0
++
++
++def check_advances(
++    cmds: Iterable[DrawCmd],
++    *,
++    fonts: FaceFont,
++    metrics: MetricsResolver = fontlib_metrics,
++    px_per_inch: float = DEFAULT_PX_PER_INCH,
++) -> AdvanceCheck:
++    """
++    Compare the advances a command list was laid out with against the atlas's.
++
++    "The same resolver measures and draws" is a contract nothing enforces, and
++    it is not quite the one that matters: a resolver can be handed to every
++    stage and still describe a raster the atlas does not hold, which is what
++    `fontlib_metrics` does for faces baked with a hinter. This asks the question
++    directly -- for every glyph the commands draw, is `metrics`' advance the one
++    `ImFontBaked.get_char_advance` gives at the size `draw` will draw it at --
++    and it is the check to run once after choosing a resolver, or in a test.
++    `draw` does not run it: it costs two calls for every distinct glyph and
++    answers the same on every frame.
++
++    **Two allowances, and what each forgives.** `ADVANCE_TOLERANCE_PX` is the
++    rasteriser's own grid. The second is the whole-pixel size: `draw` asks for
++    the size ImGui was going to bake at (`_baked`), so a face laid out at a
++    height of 18.75 px is drawn from the 19 px raster and every file advance is
++    1.3% short of it. That is `docs/subpixel.md` §5.1's trade, taken knowingly,
++    and it is not what this function is for, so an advance may also differ by
++    that proportion. A resolver that asks the atlas has neither difference.
++
++    A glyph is skipped when no face is loaded for its role or the face has no
++    raster for it: there is no baked advance to disagree with, and `DrawStats`
++    already counts the second.
++
++    Needs a current ImGui context whose backend flags carry
++    `renderer_has_textures`. Needs no frame and no draw list.
++    """
++    seen: dict[FontKey, set[int]] = {}
++    for cmd in cmds:
++        if isinstance(cmd, Glyph):
++            seen.setdefault(cmd.font, set()).add(cmd.codepoint)
++
++    glyphs = disagreeing = 0
++    worst = 0.0
++    for key, codepoints in seen.items():
++        spec = parse_font_key(key)
++        font = fonts(spec.face)
++        if font is None:
++            continue
++        ours = metrics(key)
++        size_px = baked_size_px(
++            px_from_sp(spec.size, px_per_inch), ours.ascent, ours.descent, ours.em
++        )
++        if size_px < 1.0:
++            continue
++        baked = _baked(font, size_px)
++        resized = abs(baked.size / size_px - 1.0)
++        for codepoint in sorted(codepoints):
++            if not font.is_glyph_in_font(codepoint):
++                continue
++            laid = ours.advance(codepoint) * px_from_sp(1, px_per_inch)
++            excess = abs(laid - baked.get_char_advance(codepoint)) - laid * resized
++            glyphs += 1
++            if excess > ADVANCE_TOLERANCE_PX:
++                disagreeing += 1
++                worst = max(worst, excess - ADVANCE_TOLERANCE_PX)
++    return AdvanceCheck(glyphs=glyphs, disagreeing=disagreeing, worst_px=worst)
++
++
+ def _snap_span(near: float, far: float) -> tuple[float, float]:
+     """
+     One axis of an area, snapped to pixel edges without ever losing its ink.
+diff --git a/advtext/fontmetrics.py b/advtext/fontmetrics.py
+index def9659..21453c3 100644
+--- a/advtext/fontmetrics.py
++++ b/advtext/fontmetrics.py
+@@ -44,8 +44,14 @@ Deliberately out of scope here:
+   advance widths and the one ImGui cannot give us at all.
+ - **Bidi, vertical writing, complex scripts.** Left to right, one direction, per
+   `docs/decisions.md`.
+-- **Variable-font axes, colour glyphs, hinting.** A glyph is an outline and an
+-  advance.
++- **Variable-font axes, colour glyphs.** A glyph is an outline and an advance.
++- **Hinting itself, which is the rasteriser's.** What is not out of scope is
++  its consequence: a hinting rasteriser chooses the advance, so the advance
++  belongs to (font, size, hinting mode) and not to (font, size). A
++  `FontMetrics` read from a file is linear in the size and describes an
++  unhinted raster and an outline backend. For a hinted one the layout has to be
++  told the mode, and `advtext.ui.fonts` is where it is told: `Hinting`,
++  `LoadedFaces.metrics`, `baked_metrics`.
+ - **Anything that names a file or a path.** That is `fontlib`'s alone.
+ """
+ 
+diff --git a/advtext/ui/fonts.py b/advtext/ui/fonts.py
+index 1c0ea8f..92c6d9a 100644
+--- a/advtext/ui/fonts.py
++++ b/advtext/ui/fonts.py
+@@ -105,6 +105,56 @@ file again and both roles take the result. `load_pending` still retries
+ nothing: a stand-in a `draw` asks for after its backing file failed is settled
+ as failed without a read.
+ 
++## Hinting is chosen here, because an advance belongs to the rasteriser
++
++imgui-bundle bakes its atlas with FreeType (`io.fonts.font_loader_name` reads
++`FreeType (2.13.3; 2.13.3)` in 1.92.900), and FreeType hints unless it is told
++not to. A hinted glyph's advance is a whole pixel the hinter chose, and it is
++not the file's advance scaled to the size: measured at a 16 px height, Roboto's
++`p` is 7.66 px in the file and 8 in the atlas, and every glyph of Inconsolata
++is 7.63 in the file and 8 in the atlas. So an advance is a property of (font,
++size, hinting mode), and a layout measured from the file describes a raster
++only when that raster was baked unhinted.
++
++`Hinting` names the mode and `load_faces(hinting=...)` sets it on the faces this
++module loads and records it on the `LoadedFaces` it returns.
++`LoadedFaces.metrics()` is then the resolver that agrees with those faces:
++`advtext.style.fontlib_metrics` -- the file -- under `Hinting.NONE`, and
++`baked_metrics` -- the file for everything but the advance, the atlas for the
++advance -- under the two hinted modes. Measure, compose, ship and draw with what
++it returns and every advance the layout holds is the advance of the glyph that
++is drawn.
++
++**That is the whole of what `Hinting.NONE` buys, and it is less than it sounds.**
++`_RigidSpan.pen` puts every glyph on a whole pixel by rounding each gap, whatever
++the mode. Under a hinted mode with `metrics()` the gaps are whole pixels already,
++the rounding finds nothing to do, and a word is drawn at the width it was laid
++out at. Under `NONE` the advances are the file's and fractional, the rounding
++still happens, and a word's width moves as `docs/advance-rule.md` §4 says --
++by 10 px over a line of code at a 16 px height, where every Inconsolata gap of
++7.63 is drawn at 8. An unhinted atlas is the matched one for a renderer that
++places a glyph at a fractional pen, which the SVG backend does and this one
++was decided not to (`docs/subpixel.md` §4.2). `scripts/pen_rules.py --hinting`
++prints all of it.
++
++**The default is `Hinting.DEFAULT` and nothing calls `metrics()` for a host**, so
++a host that changes nothing gets what it had: the loader's default flags, and
++`fontlib_metrics` wherever it passes no resolver. That pairing is the mismatched
++one. It is the default because every test and photograph in this tree was taken
++under it, and which pairing should replace it is the user's decision
++(`docs/advance-rule.md` §2 has the measurements).
++`advtext.backends.imgui_draw.check_advances` reports a mismatched pair.
++
++Under a host's own `loader` this module sets nothing: `hinting` is then a
++statement about what that loader does, and `Hinting.loader_flags` is the value
++for the host's own `ImFontConfig.font_loader_flags`.
++
++What was run: `tests/test_hinting.py`, against a real atlas in a context with
++no backend, at one density. Not run: a window, a renderer backend, a
++`rasterizer_density` other than 1 (measured once by hand: at 2, a hinted
++advance is a whole *device* pixel, so half a layout pixel), and a build of Dear
++ImGui whose loader is stb_truetype, which has no hinter and ignores the flag.
++
+ Deliberately out of scope: unloading a face, merging icon fonts, glyph ranges
+ (1.92 needs none), and choosing a size for the host -- `em_size_for_pixel_height`
+ converts the size a host already has, and is here so that a host has one import
+@@ -113,14 +163,19 @@ for everything about fonts.
+ 
+ from __future__ import annotations
+ 
++import enum
+ from collections.abc import Callable, Iterable, Mapping
+ from pathlib import Path
+ from types import MappingProxyType
+ from typing import TYPE_CHECKING, Any, TypeAlias
+ 
+ from advtext import fontlib
++from advtext.backends.imgui_draw import FaceFont, baked_size_px, snap_px
+ from advtext.fontlib import em_size_for_pixel_height
+-from advtext.fontmetrics import Face
++from advtext.fontmetrics import Face, FontMetrics, GlyphBBox
++from advtext.nodes import FontKey
++from advtext.style import MetricsResolver, fontlib_metrics, parse_font_key
++from advtext.units import DEFAULT_PX_PER_INCH, px_from_sp, sp_from_px
+ 
+ if TYPE_CHECKING:  # pragma: no cover - imported for types only
+     from imgui_bundle import imgui
+@@ -129,9 +184,13 @@ __all__ = [
+     "ALL_FACES",
+     "DEFAULT_LOAD_PX",
+     "TEXT_FACES",
++    "BakedFaceMetrics",
++    "BakedMetrics",
++    "Hinting",
+     "LoadedFaces",
+     "Loader",
+     "atlas_loader",
++    "baked_metrics",
+     "em_size_for_pixel_height",
+     "load_faces",
+ ]
+@@ -164,25 +223,291 @@ starting, and `draw` already knows what to do without one.
+ """
+ 
+ 
++class Hinting(enum.Enum):
++    """
++    How the atlas's rasteriser fits a glyph to the pixel grid, as far as layout cares.
++
++    Layout cares because the mode decides the advance. On imgui-bundle 1.92.900
++    (FreeType 2.13.3), and held by `tests/test_hinting.py` for the faces, sizes
++    and characters it names:
++
++    - `DEFAULT`: the loader's own flags. Every advance is a whole pixel, and it
++      is not the file's advance rounded -- the font's own instructions choose
++      it. Roboto's `m` at a 14 px height is 10.47 px in the file and 11 here.
++    - `LIGHT`: FreeType's light target, which fits vertically only. Every
++      advance is still a whole pixel, and it *is* the file's advance rounded:
++      that `m` is 10.
++    - `NONE`: no hinting. The advance is the file's, to a hundredth of a pixel.
++
++    So `NONE` is the one mode under which `advtext.style.fontlib_metrics`
++    describes the raster, and `DEFAULT` and `LIGHT` are different rasters with
++    different advances: the mode is recorded so that `LoadedFaces.metrics` can
++    answer for the one that was baked.
++
++    Not here: the rest of the loader's flags (auto-hinter choice, mono hinting,
++    synthetic bold and oblique). A host that sets those through a loader of its
++    own has a raster this enum cannot name, and `baked_metrics` still measures
++    it, because it asks the atlas.
++    """
++
++    DEFAULT = "default"
++    LIGHT = "light"
++    NONE = "none"
++
++    @property
++    def loader_flags(self) -> int:
++        """
++        The value for `ImFontConfig.font_loader_flags` under imgui-bundle's loader.
++
++        `ImGuiFreeTypeLoaderFlags_NoHinting` is `1 << 0` and `_LightHinting` is
++        `1 << 3` in `imgui_freetype.h`. imgui-bundle binds the field as a bare
++        `int` and does not bind the enum, so the two bits are written out here.
++        The field is "builder implementation dependent" in ImGui's own words: a
++        build whose loader is stb_truetype ignores it, and has no hinter.
++        """
++        return _FREETYPE_LOADER_FLAGS[self]
++
++
++_FREETYPE_LOADER_FLAGS: dict[Hinting, int] = {
++    Hinting.DEFAULT: 0,
++    Hinting.LIGHT: 1 << 3,
++    Hinting.NONE: 1 << 0,
++}
++
++
+ def atlas_loader(
+-    size_px: float = DEFAULT_LOAD_PX, atlas: imgui.ImFontAtlas | None = None
++    size_px: float = DEFAULT_LOAD_PX,
++    atlas: imgui.ImFontAtlas | None = None,
++    *,
++    hinting: Hinting = Hinting.DEFAULT,
+ ) -> Loader:
+     """
+     A `Loader` over a plain `ImFontAtlas`: the current context's unless one is given.
+ 
+     The atlas is looked up when a file is loaded and not when this is called, so
+     a loader built before the context exists still finds the right one.
++
++    `hinting` is set on each face's own `ImFontConfig` and not on the atlas,
++    whose `font_loader_flags` are shared with every font the host loaded for
++    itself. Under `Hinting.DEFAULT` no config is built at all.
+     """
+ 
+     def load(path: Path) -> Any:
+         from imgui_bundle import imgui
+ 
+         target = imgui.get_io().fonts if atlas is None else atlas
+-        return target.add_font_from_file_ttf(str(path), size_px)
++        if hinting is Hinting.DEFAULT:
++            return target.add_font_from_file_ttf(str(path), size_px)
++        config = imgui.ImFontConfig()
++        config.font_loader_flags = hinting.loader_flags
++        return target.add_font_from_file_ttf(str(path), size_px, config)
+ 
+     return load
+ 
+ 
++class BakedFaceMetrics:
++    """
++    `FontMetrics` for one face at one size, with each advance as the atlas baked it.
++
++    The advance is `ImFontBaked.get_char_advance` at the pixel height `draw`
++    will ask for -- the same `baked_size_px` arithmetic, quantised by ImGui the
++    same way -- so it is the advance of the glyph that is drawn, at the size it
++    is drawn at, under whatever the loader did to it. Everything a raster does
++    not define is the file's: ascent, descent, x-height, coverage, ink boxes.
++
++    **A pair kern is taken to the pixel when the advance before it is on one.**
++    `_RigidSpan.pen` draws a gap at `snap_px(advance + kern)`. When the advance
++    is a whole pixel that is `advance + snap_px(kern)`, so the kern is rounded
++    on screen whatever is returned here; returning it rounded makes the width
++    the layout believes the width that is drawn, and the residue that would
++    otherwise land in the following word space is zero. When the advance is
++    fractional -- no hinting, or a density above 1 -- the kern is the file's,
++    unrounded, as `fontlib_metrics` gives it. `scripts/pen_rules.py --hinting`
++    measures both.
++
++    A codepoint the loaded face has no glyph for, and every codepoint when no
++    face is loaded for the role, takes the file's advance: there is no raster
++    to ask, and `draw` counts such a glyph as missing.
++
++    The numbers are copied out of the `ImFontBaked` as floats and it is not
++    held: ImGui discards a baked size nothing has drawn with for a while.
++    Needs a current ImGui context whose backend flags carry
++    `renderer_has_textures`; needs no frame.
++    """
++
++    __slots__ = ("_baked_px", "_file", "_font", "_height_px", "_px_per_inch")
++
++    def __init__(
++        self, file: FontMetrics, font: imgui.ImFont | None, height_px: float, px_per_inch: float
++    ) -> None:
++        self._file = file
++        self._font = font
++        self._height_px = height_px
++        self._px_per_inch = px_per_inch
++        self._baked_px: dict[int, float | None] = {}
++
++    @property
++    def font(self) -> imgui.ImFont | None:
++        """
++        The loaded face the advances are read from, or `None` if there was none.
++        """
++        return self._font
++
++    @property
++    def face(self) -> Face:
++        return self._file.face
++
++    @property
++    def size(self) -> float:
++        return self._file.size
++
++    @property
++    def ascent(self) -> float:
++        return self._file.ascent
++
++    @property
++    def descent(self) -> float:
++        return self._file.descent
++
++    @property
++    def x_height(self) -> float:
++        return self._file.x_height
++
++    @property
++    def em(self) -> float:
++        return self._file.em
++
++    @property
++    def space_width(self) -> float:
++        return self.advance(0x20)
++
++    def has(self, codepoint: int) -> bool:
++        return self._file.has(codepoint)
++
++    def baked_advance_px(self, codepoint: int) -> float | None:
++        """
++        The atlas's advance for a codepoint in pixels, or `None` if it has no say.
++        """
++        try:
++            return self._baked_px[codepoint]
++        except KeyError:
++            font = self._font
++            found: float | None = None
++            if font is not None and self._height_px >= 1.0 and font.is_glyph_in_font(codepoint):
++                baked = font.get_font_baked(self._height_px)
++                found = float(baked.get_char_advance(codepoint))
++            self._baked_px[codepoint] = found
++            return found
++
++    def advance(self, codepoint: int) -> float:
++        baked = self.baked_advance_px(codepoint)
++        if baked is None:
++            return self._file.advance(codepoint)
++        return float(sp_from_px(baked, self._px_per_inch))
++
++    def bbox(self, codepoint: int) -> GlyphBBox:
++        return self._file.bbox(codepoint)
++
++    def kern(self, codepoint: int, following: int) -> float:
++        kern = self._file.kern(codepoint, following)
++        if not kern:
++            return kern
++        before = self.baked_advance_px(codepoint)
++        if before is None or before != snap_px(before):
++            return kern
++        kern_px = snap_px(px_from_sp(round(kern), self._px_per_inch))
++        return float(sp_from_px(kern_px, self._px_per_inch))
++
++    def __repr__(self) -> str:
++        return f"BakedFaceMetrics({self._file!r}, height_px={self._height_px!r})"
++
++
++class BakedMetrics:
++    """
++    A `MetricsResolver` over loaded faces: the file's metrics, the atlas's advances.
++
++    Built by `baked_metrics`, and by `LoadedFaces.metrics` for the faces it
++    loaded. Callable as `resolver(key)`, which is all a `MetricsResolver` is.
++
++    A key is resolved once and kept. What is kept is dropped when `fonts`
++    answers with a different `ImFont` for the role -- a face reloaded after
++    `advtext.fontlib.register_font`, or loaded late by `load_pending` -- so a
++    resolver never measures from a font the host has replaced. It cannot see
++    an atlas rebuilt *under* the same `ImFont` at another density; `clear` is
++    for that. Either way the host's own `char_measure` holds the old widths and
++    has to be rebuilt, as it does after a registration.
++
++    "A different `ImFont`" is decided by identity, so `fonts` should answer with
++    the same object for the same font, as `LoadedFaces` does. One that wraps the
++    pointer afresh on every call is measured correctly and from the atlas every
++    time.
++
++    `Face.MATH` is answered from the file alone. A formula is measured through
++    `advtext.math.MathResolver`, which this resolver is not, from advances read
++    together with italic corrections and variant extents that only the file
++    states; mixing one baked number into those is not something this class has
++    measured, so under a hinted mode a formula's glyphs are still laid out from
++    the file and `check_advances` says so.
++    """
++
++    __slots__ = ("_file", "_fonts", "_keys", "_px_per_inch")
++
++    def __init__(
++        self,
++        fonts: FaceFont,
++        *,
++        file: MetricsResolver = fontlib_metrics,
++        px_per_inch: float = DEFAULT_PX_PER_INCH,
++    ) -> None:
++        self._fonts = fonts
++        self._file = file
++        self._px_per_inch = px_per_inch
++        self._keys: dict[FontKey, tuple[Face, FontMetrics]] = {}
++
++    def __call__(self, key: FontKey) -> FontMetrics:
++        held = self._keys.get(key)
++        if held is not None:
++            face, metrics = held
++            if not isinstance(metrics, BakedFaceMetrics) or metrics.font is self._fonts(face):
++                return metrics
++        file = self._file(key)
++        spec = parse_font_key(key)
++        found: FontMetrics = file
++        if spec.face is not Face.MATH:
++            height_px = baked_size_px(
++                px_from_sp(spec.size, self._px_per_inch), file.ascent, file.descent, file.em
++            )
++            found = BakedFaceMetrics(file, self._fonts(spec.face), height_px, self._px_per_inch)
++        self._keys[key] = (spec.face, found)
++        return found
++
++    def clear(self) -> None:
++        """
++        Forget every advance read so far; the next question asks the atlas again.
++        """
++        self._keys.clear()
++
++
++def baked_metrics(
++    fonts: FaceFont,
++    *,
++    file: MetricsResolver = fontlib_metrics,
++    px_per_inch: float = DEFAULT_PX_PER_INCH,
++) -> BakedMetrics:
++    """
++    The resolver for faces baked with a hinter: the atlas's advances, the file's rest.
++
++    `fonts` is what `draw` takes as `fonts`. `px_per_inch` is the theme's, and
++    it has to be: a font key carries its size in scaled points and the atlas is
++    asked in pixels. `file` is where everything but the advance comes from, and
++    is a parameter so that a test can supply round numbers.
++
++    A host that loaded its faces with `load_faces` wants `LoadedFaces.metrics`,
++    which calls this when the faces were hinted and does not when they were not.
++    """
++    return BakedMetrics(fonts, file=file, px_per_inch=px_per_inch)
++
++
+ class LoadedFaces:
+     """
+     The `FaceFont` a host hands `draw`: a role in, its `ImFont` or `None` out.
+@@ -199,12 +524,19 @@ class LoadedFaces:
+     `load_pending` would be a font-file read per frame for the life of the app).
+     That holds for a role that shares another's file too: naming it retries the
+     shared file, and the role that backs it takes whatever comes back.
++
++    `hinting` is how these faces were baked, and `metrics()` is the resolver
++    that agrees with it. With no `loader` it is applied; with a host's own it is
++    taken on trust, which costs nothing under the hinted modes -- `metrics()`
++    then asks the atlas -- and is checked by nothing under `Hinting.NONE`.
+     """
+ 
+-    __slots__ = ("_failed", "_fonts", "_loader", "_paths", "_pending")
++    __slots__ = ("_failed", "_fonts", "_hinting", "_loader", "_paths", "_pending", "_resolvers")
+ 
+-    def __init__(self, loader: Loader | None = None) -> None:
+-        self._loader: Loader = atlas_loader() if loader is None else loader
++    def __init__(self, loader: Loader | None = None, *, hinting: Hinting = Hinting.DEFAULT) -> None:
++        self._loader: Loader = atlas_loader(hinting=hinting) if loader is None else loader
++        self._hinting = hinting
++        self._resolvers: dict[float, BakedMetrics] = {}
+         self._fonts: dict[Face, Any] = {}
+         # The file each directly loaded role's font was asked for from; absent
+         # when the path itself could not be resolved. What tells a stand-in
+@@ -229,6 +561,33 @@ class LoadedFaces:
+         """
+         return MappingProxyType(self._fonts)
+ 
++    @property
++    def hinting(self) -> Hinting:
++        """
++        The mode these faces were loaded under, or that the host's loader was said to use.
++        """
++        return self._hinting
++
++    def metrics(self, px_per_inch: float = DEFAULT_PX_PER_INCH) -> MetricsResolver:
++        """
++        The resolver that agrees with how these faces were baked.
++
++        Under `Hinting.NONE` that is `advtext.style.fontlib_metrics` itself: an
++        unhinted advance is the file's, and the file needs no atlas, no context
++        and no `px_per_inch`. Under `Hinting.DEFAULT` and `Hinting.LIGHT` it is
++        a `BakedMetrics` over this object, one per `px_per_inch` and the same
++        one each time, so it can be compared and held.
++
++        The one resolver measures the document, composes it, ships it and is
++        handed to `draw` as `metrics`.
++        """
++        if self._hinting is Hinting.NONE:
++            return fontlib_metrics
++        resolver = self._resolvers.get(px_per_inch)
++        if resolver is None:
++            resolver = self._resolvers[px_per_inch] = baked_metrics(self, px_per_inch=px_per_inch)
++        return resolver
++
+     @property
+     def pending(self) -> tuple[Face, ...]:
+         """
+@@ -358,6 +717,7 @@ def load_faces(
+     faces: Iterable[Face] = TEXT_FACES,
+     *,
+     loader: Loader | None = None,
++    hinting: Hinting = Hinting.DEFAULT,
+ ) -> LoadedFaces:
+     """
+     Register faces on the host's atlas and return the `FaceFont` to draw with.
+@@ -371,9 +731,14 @@ def load_faces(
+     document sets mathematics. Pass `ALL_FACES` to load it up front. Register a
+     host's own files with `advtext.fontlib.register_font` *before* this call.
+ 
++    `hinting` is how the faces are baked, and with no `loader` it is applied to
++    each of them. `Hinting.DEFAULT` leaves the loader's flags alone. Whichever
++    it is, the result's `metrics()` is the resolver to lay out and draw with;
++    the module docstring says what the default pairs with what.
++
+     The result is callable as `fonts(face)` and is what `draw`,
+     `DocumentView.draw` and the rest take as `fonts`.
+     """
+-    loaded = LoadedFaces(loader)
++    loaded = LoadedFaces(loader, hinting=hinting)
+     loaded.load(faces)
+     return loaded
+diff --git a/docs/advance-rule.md b/docs/advance-rule.md
+index 3a395cf..48185d6 100644
+--- a/docs/advance-rule.md
++++ b/docs/advance-rule.md
+@@ -11,6 +11,9 @@ nobody could re-derive:
+ 
+     .venv/bin/python scripts/pen_rules.py
+     .venv/bin/python scripts/pen_rules.py --native
++    .venv/bin/python scripts/pen_rules.py --hinting
++    .venv/bin/python scripts/pen_rules.py --hinting --pixel-height 16
++    .venv/bin/python scripts/ink_by_path.py
+ 
+ ---
+ 
+@@ -49,17 +52,96 @@ At 16 px Roboto with the origin at x = 100.0, the quad left edges are
+     difference  [100, 108, 111, 116, 121, 128, 133, 140, 148, 155]   fractional: 0 of 10
+ 
+ **Every inner glyph position is a whole pixel**, identically so whether
+-`ImDrawListFlags_TextNoPixelSnap` is set or clear. ImGui rounds each advance and
+-accumulates; it does no sub-pixel intra-word placement at all.
+-
+-Two consequences worth stating, because both correct something believed earlier:
+-
+-- ImGui's UI text is not even-spaced because it declines to quantise. It
+-  quantises thoroughly. Whatever makes it read well is not the absence of
+-  rounding.
+-- The flag this project sets in `draw` has **no effect on ImGui's own text path**.
+-  It matters only because *we* hand `add_text` fractional positions; ImGui never
+-  generates one itself.
++`ImDrawListFlags_TextNoPixelSnap` is set or clear.
++
++**The measurement stands and the cause given for it was wrong.** This section
++concluded "ImGui rounds each advance and accumulates". ImGui does not round an
++advance: it accumulates the advances the atlas holds, and those are whole pixels
++because the atlas was baked by a hinter. imgui-bundle's loader is FreeType
++(`io.fonts.font_loader_name` reads `FreeType (2.13.3; 2.13.3)`), and under its
++default flags every advance of every glyph is a whole pixel. Bake the same face
++with `ImGuiFreeTypeLoaderFlags_NoHinting` and the same `add_text` gives
++
++    people      [100, 107.656, 114.891, 122.672, 131.328, 133.641]   fractional: 5 of 6
++
++(`scripts/pen_rules.py --hinting`, last block). So:
++
++- ImGui's own text is even because the **hinter** fitted each advance to the
++  grid along with the outline, not because anything rounded a position.
++- The flag this project sets in `draw` has no effect on ImGui's own text path
++  **under a hinted atlas**. Under an unhinted one ImGui generates fractional
++  inner positions itself, with the flag clear; what the flag changes there was
++  not measured.
++- The whole-pixel advance is not the file's advance rounded. Roboto's `m` at a
++  14 px height is 10.47 px in the file, 10 under light hinting and 11 under
++  the default. Section 2a is what follows from that.
++
++## 2a. The advance this rule rounds is not the advance that is drawn
++
++Sections 3 to 5 measure each rule against the *designed* gap, and the designed
++gap is the layout's, from the font file. Under a hinted atlas the glyph that is
++drawn has its own advance, a whole pixel the file does not predict. `advance`
++rounds the file's gap; where that is not the hinter's number the next glyph is
++drawn a pixel away from where its neighbour's raster ends, and because the
++layout believed the file, the word is a different width on screen from the box
++it was set in.
++
++`demo/sample.md`, the shipped rule, against the atlas (`--hinting`). "advances
++off" is `check_advances`: distinct glyphs whose laid-out advance is not the
++baked one. "steps" are adjacent pairs inside a span, compared with the baked
++advance plus the kern the layout set.
++
++At `Theme.build()`, a 16 px em:
++
++| hinting | laid out from | advances off | steps off by >½ px | word width moved, mean | worst | words off by ≥1 px |
++|---|---|---|---|---|---|---|
++| default | the file (**what ships**) | 109 of 207 | 53 of 3453 | 0.3984 px | 2.0938 px | 66 of 824 |
++| default | the atlas | 0 of 207 | 0 | 0.0000 px | 0.0005 px | 0 |
++| default | the atlas, file kerns | 0 of 207 | 0 | 0.0546 px | 0.6256 px | 0 |
++| light | the file | 108 of 207 | 389 | 0.3984 px | 2.0938 px | 66 |
++| light | the atlas | 0 of 207 | 0 | 0.0000 px | 0.0005 px | 0 |
++| none | the file | 0 of 207 | 348 | 0.3984 px | 2.0938 px | 66 |
++| none | the atlas | 0 of 207 | 1 | 0.3929 px | 6.4535 px | 56 |
++
++At `Theme.at_pixel_height(16)`, which is how a host sizes text to its own UI
++font (`--hinting --pixel-height 16`):
++
++| hinting | laid out from | advances off | steps off by >½ px | word width moved, mean | worst | words off by ≥1 px |
++|---|---|---|---|---|---|---|
++| default | the file (**what ships**) | 197 of 207 | 793 of 3453 | 0.5222 px | 10.2274 px | 93 of 824 |
++| default | the atlas | 0 of 207 | 0 | 0.0034 px | 0.1734 px | 0 |
++| default | the atlas, file kerns | 0 of 207 | 0 | 0.0526 px | 0.6200 px | 0 |
++| light | the file | 197 of 207 | 138 | 0.5222 px | 10.2274 px | 93 |
++| light | the atlas | 0 of 207 | 0 | 0.0034 px | 0.1734 px | 0 |
++| none | the file | 0 of 207 | 21 | 0.5222 px | 10.2274 px | 93 |
++| none | the atlas | 0 of 207 | 0 | 0.5479 px | 11.3591 px | 101 |
++
++Four readings.
++
++- **Laid out from the atlas under a hinted mode, the rule has nothing left to
++  round.** Every laid-out gap is already a whole pixel, so section 4's width
++  cost -- 0.40 px mean, 2.09 worst -- is zero, and the space after a word is
++  the space the line breaker set. (The 0.17 px at a 16 px height is a span
++  holding a codepoint the face lacks, which takes the file's advance.)
++- **The demo's own size hid the monospace case.** Inconsolata's advance is
++  exactly half an em, so at a 16 px em it is 8.000 px in the file and 8 in the
++  atlas, by coincidence. At a 16 px *height* it is 7.63 in the file and 8 in
++  the atlas for every glyph, a fenced line is one rigid span, and the span is
++  drawn 10 px longer than the layout believed.
++- **Turning hinting off does not remove the width cost; it only makes the file
++  true.** Under `none` no advance is off, and the word still moves by the same
++  0.40 or 0.52 px mean and the same 10 px worst, because that cost is this
++  rule's rounding of fractional gaps and not the hinter's. An unhinted atlas
++  needs fractional pens to be drawn as laid out, which is `exact`, which
++  section 5 disqualifies.
++- **The pair kern.** `advtext.ui.fonts.BakedFaceMetrics` rounds a kern that
++  follows a whole-pixel advance, because `advance` would round that gap anyway.
++  Left as the file's ("file kerns") the pixels inside a word are the same and
++  the layout is 0.05 px mean, 0.63 worst, wider or narrower than the word.
++
++None of this says which looks better. It says which pairs are consistent:
++`load_faces(hinting=...)` with `LoadedFaces.metrics()`. What ships by default is
++the first row of each table, unchanged, until the user decides otherwise.
+ 
+ ## 3. The four rules
+ 
+@@ -162,14 +244,35 @@ quality.
+   than geometry, and a threshold-based measurement cannot separate the two. A
+   geometric measurement taken from the layout rather than from pixels would, and
+   has not been done.
+-- **An unexplained anomaly: ImGui's own text measures softer than `whole` or
+-  `advance`.** On the same face, atlas and frame, "people" reads solid 8.1% /
+-  midtone 84.9% under ImGui's path against 18.4% / 72.3% under both `whole` and
+-  `advance` — yet section 2 shows ImGui's pens are all integers, which should make
+-  it exactly as sharp. Candidates not yet tested: a baked-size mismatch between
+-  `add_font_from_file_ttf` and `add_text`, or differing atlas UVs between the two
+-  paths. **Until this is explained, ImGui's rendering must not be used as the
+-  reference point for sharpness.**
++- **An anomaly, with a candidate that reproduces it: ImGui's own text measured
++  softer than `whole` or `advance`.** On the same face, atlas and frame,
++  "people" read solid 8.1% / midtone 84.9% under ImGui's path against 18.4% /
++  72.3% under both `whole` and `advance` — yet section 2 shows ImGui's pens are
++  all integers, which should make it exactly as sharp.
++
++  The harness that took those figures was not committed, so this is a
++  reconstruction and not a re-run. `scripts/ink_by_path.py` composites both
++  paths on the CPU from the vertex buffer and the atlas and takes the same ink
++  profile. Three things, each measured there:
++
++  - **Hinting is not the explanation.** At the same whole pixel size the two
++    paths emit the same texels at whole-pixel pens and their ink is identical,
++    under the default flags and under light hinting: 33.6% / 62.9% both ways at
++    19 px, 38.7% / 57.4% both ways at 16.
++  - **A fractional size is.** `add_text(font, 18.75, ...)` -- the pixel height
++    of a 16 px em, unrounded, which is what `baked_size_px` returns -- reads
++    **7.8% / 85.4%**. ImGui serves it from the 19 px raster scaled by 0.987, so
++    every quad is resampled: `docs/subpixel.md` §2.3, the defect `_baked` fixed
++    on this project's path and that a native row drawn "at the same size" would
++    still have had. That is the first candidate above, in the one form that
++    produces the number.
++  - **The differing-UV candidate is refuted** for equal sizes: same texels.
++
++  The absolute figures of a CPU composite in black on white are not those of a
++  screenshot of ink on a page, so 7.8 against 8.1 is agreement in kind, and the
++  18.4% row is not reproduced at all (33.6% here). **ImGui's rendering at a whole
++  pixel size is this project's rendering at that size**; the caution stands only
++  for a comparison that has not checked the size it asked for.
+ - **Letter fusion: checked, and it goes the other way.** An earlier count in a
+   synthetic harness suggested `advance` merged one more adjacent pair than
+   `whole` on "difference". That harness was the one with the unsnapped-anchor bug
+diff --git a/docs/decisions.md b/docs/decisions.md
+index cda4c75..20dbdbf 100644
+--- a/docs/decisions.md
++++ b/docs/decisions.md
+@@ -270,6 +270,39 @@ disagree with the ones we lay out with. The ImGui backend therefore positions
+ A verify script must measure the disagreement when a display exists; until it
+ runs, the per-glyph decision is a hedge and not a measurement.
+ 
++> **AMENDMENT (2026-10-08), proposed with `advtext.ui.fonts.Hinting` and for
++> the user to accept or refuse: the advance is the exception.**
++>
++> The first bullet above is the one this engages. "ImGui's baked advances are
++> already pixel-rounded, so measuring through ImGui rounds twice" assumed the
++> baked advance is our advance, rounded. It is not. imgui-bundle bakes with
++> FreeType, hinting on, and the whole-pixel advance is the hinter's choice for
++> the glyph it drew: not the file's, and not the file's rounded.
++> It is the true advance of the raster on screen. Laying out from it rounds
++> nothing twice -- measured, a word is drawn at exactly the width it was set
++> at, where laying out from the file moves it by 0.40 px mean and 10 px worst
++> at a host's size (`docs/advance-rule.md` §2a).
++>
++> The other two bullets stand untouched and are why this is an exception and
++> not a reversal: pair kerns, vertical metrics, coverage, outlines and `MATH`
++> still come from fontTools, and `fontlib_metrics` is still the resolver for an
++> unhinted atlas and for the SVG backend. Round-once also stands. TeX's own
++> `char_width` is an integer the device's font supplied; a hinted advance is
++> that, for this device.
++>
++> The correction at the head of this section says the atlas bakes "through
++> stb_truetype". It bakes through FreeType. So do `docs/status.md`,
++> `docs/litmus.md` and `docs/imgui-risks.md`, and so do docstrings in
++> `advtext/backends/imgui_draw.py` and `advtext/fontlib.py`, where the name
++> stands for the *size convention* -- pixel height from `hhea`. An unhinted
++> bake agrees with the file at that conversion to a hundredth of a pixel, so
++> `baked_size_px` is right under FreeType and only the name is not. Those are
++> left as written.
++>
++> **Nothing changes by default.** `load_faces()` still loads under the loader's
++> flags and every caller still measures with `fontlib_metrics` unless it asks
++> `LoadedFaces.metrics()`.
++
+ ### 5. Device coordinates are pixels; the layout core works in scaled points
+ 
+ Settled after the `nodes` task raised it, because it is a seam that would be wrong by
+diff --git a/docs/guide/future.md b/docs/guide/future.md
+index 748c79b..1c77415 100644
+--- a/docs/guide/future.md
++++ b/docs/guide/future.md
+@@ -112,13 +112,17 @@ What stands between that and shipping:
+ 
+ ## 6. FreeType hinting
+ 
+-The strategy this project does not have and has never tested.
++The strategy this project has had all along without knowing it.
+ 
+ Every placement rule here moves glyphs; none reshapes a stem onto the grid.
+ Grid-fitting is what gets sharp stems *and* designed spacing simultaneously on an
+-off-grid face, it is what Metafont did for TeX, and stb_truetype does none of it.
+-ImGui can be built against `imgui_freetype`, which supports light hinting. Whether
+-imgui_bundle exposes it is unknown; no attribute search found one.
++off-grid face, and it is what Metafont did for TeX. imgui_bundle **is** built
++against `imgui_freetype` and hints under its default flags, so every photograph
++of this project is of hinted glyphs. The mode is `ImFontConfig.font_loader_flags`,
++a bare `int` with no bound enum, which is why no attribute search found it;
++`advtext.ui.fonts.Hinting` names the three that matter to layout. What is still
++untested is the one thing this section is about: which mode *looks* best.
++`docs/advance-rule.md` §2a measures their consistency and nothing else.
+ 
+ ## 7. Delta nodes in `try_break`
+ 
+diff --git a/docs/guide/tex.md b/docs/guide/tex.md
+index 9519d0b..754a174 100644
+--- a/docs/guide/tex.md
++++ b/docs/guide/tex.md
+@@ -86,8 +86,10 @@ TeX's answer to low-resolution output was not in `tex.web` at all — it was
+ **Metafont**, which generated hinted bitmap fonts per size and per device, with
+ pen strokes explicitly fitted to the pixel grid.
+ 
+-This project has TeX's layout half and none of its rasterisation half. It uses
+-stb_truetype through ImGui, which does no hinting whatsoever. So the question
++This project has TeX's layout half and none of its rasterisation half. It was
++written believing its rasteriser was stb_truetype, which does no hinting
++whatsoever; imgui-bundle's is FreeType, which hints by default, and the layout
++did not know (`docs/advance-rule.md` §2a). So the question
+ "are we being too faithful to TeX?" has an answer, and it is the opposite of what
+ it sounds like: we took the device-independent half and substituted a draw-time
+ rounding rule for the device-dependent half that Knuth actually wrote.
+diff --git a/docs/subpixel.md b/docs/subpixel.md
+index 066d43a..010cd52 100644
+--- a/docs/subpixel.md
++++ b/docs/subpixel.md
+@@ -232,6 +232,32 @@ GTK/Pango rounds by default and lets you turn it off:
+ 
+ ## 4. What stb_truetype and ImGui actually offer
+ 
++> **CORRECTION: the atlas this project draws from is not baked by stb_truetype.**
++> This section reads Dear ImGui's stb_truetype path, which is upstream's
++> default. imgui-bundle is built against `imgui_freetype`:
++> `io.fonts.font_loader_name` reads `FreeType (2.13.3; 2.13.3)` on 1.92.900,
++> once a frame has run. What that changes in the analysis below, each measured
++> (`scripts/pen_rules.py --hinting`, `tests/test_hinting.py`):
++>
++> - **4.1's quotation does not describe our glyphs.** "Since the font is
++>   anti-aliased, not hinted" is stb's account of itself. Ours are hinted under
++>   the loader's default flags, outline and advance both. The conclusion 4.1
++>   draws is unaffected: there is still one bitmap a glyph and no phase in the
++>   bake key, whichever loader filled it.
++> - **4.3 is wrong for this build.** Advances are whole pixels here without
++>   anyone asking, for every glyph `tests/test_hinting.py` samples. `PixelSnapH`
++>   reads `False` on the loaded font's source and the advances are whole
++>   regardless, so the rounding is the hinter's and not that option's. Only `ImGuiFreeTypeLoaderFlags_NoHinting` gives the file's advance.
++>   "We do not use ImGui's advances at all" was true, and is the defect:
++>   `docs/advance-rule.md` §2a.
++> - **3.3's option exists.** "Fractional advances, hinting off" is one flag on
++>   the face's `ImFontConfig`, and `advtext.ui.fonts.Hinting.NONE` sets it. It
++>   was never a choice between that and what ships, because what ships was
++>   never unhinted.
++>
++> The sections are otherwise left as written. Their measurements were taken
++> under the default flags and stand as measurements of that.
++
+ ### 4.1 stb_truetype has the machinery; ImGui does not use it
+ 
+ `stbtt_MakeGlyphBitmapSubpixel`, `stbtt_GetGlyphBitmapSubpixel`,
+diff --git a/scripts/ink_by_path.py b/scripts/ink_by_path.py
+new file mode 100644
+index 0000000..4592ec3
+--- /dev/null
++++ b/scripts/ink_by_path.py
+@@ -0,0 +1,194 @@
++#!/usr/bin/env python3
++"""
++The ink of one word drawn by ImGui's own `add_text` and by `advtext`'s `draw`.
++
++`docs/advance-rule.md` §7 records an anomaly: ImGui's own text measured softer
++than this project's on the same face, atlas and frame, with every pen of both on
++a whole pixel. The harness that measured it was never committed. This is the
++instrument for the question it left -- is that a property of ImGui's text path,
++of the hinting mode, or of the comparison -- committed so the answer can be
++re-derived.
++
++## What it does
++
++One atlas, the prose face loaded once under each `advtext.ui.fonts.Hinting`
++mode. For each mode the word is put on one draw list five ways:
++
++    ImGui's `add_text` at a 16 px height
++    ImGui's `add_text` at a 19 px height
++    ImGui's `add_text` at 18.75, the unrounded height of a 16 px em
++    `draw`, laid out at a 16 px em        (which `_baked` draws from the 19 px raster)
++    `draw`, laid out at a 16 px height
++
++Each is then composited **on the CPU**: every quad in the vertex buffer is
++filled from the atlas's own pixels with bilinear filtering, which is what a
++renderer with a linear sampler does, and `scripts/visual_diff.py`'s
++`ink_profile` is taken of the result.
++
++## What that can and cannot say
++
++A quad at a whole-pixel position, one texel to one pixel, composites to the
++same pixels under any filter, so for those rows this is exact. A resampled quad
++is filtered here by hand; a GPU's rounding of the same arithmetic may differ in
++the last bit. **No window is opened and no screenshot is taken**, the ink is
++black on white rather than a palette on a page, and the shares are therefore
++comparable between rows of this script and not with a figure read off a
++screenshot. `ink_profile`'s own docstring says what a midtone share is and is
++not evidence of.
++
++    .venv/bin/python scripts/ink_by_path.py
++    .venv/bin/python scripts/ink_by_path.py difference
++
++Needs numpy, as `scripts/visual_diff.py` does.
++"""
++
++from __future__ import annotations
++
++import argparse
++import math
++import sys
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parent.parent
++
++ROW_PX = 40.0
++"""
++The distance between rows. Fifteen rows have to fit the 768 px display the
++frame declares, because the background draw list clips to it and a clipped
++glyph appends no vertices.
++"""
++
++
++def main(argv: list[str] | None = None) -> int:
++    parser = argparse.ArgumentParser(description=__doc__.split("\n")[1])
++    parser.add_argument("word", nargs="?", default="people")
++    args = parser.parse_args(argv)
++    word = args.word
++
++    sys.path[:0] = [str(ROOT), str(ROOT / "scripts")]
++    import numpy as np
++    import visual_diff
++    from imgui_bundle import imgui
++
++    from advtext import fontlib
++    from advtext.backends.imgui_draw import draw
++    from advtext.fontmetrics import Face
++    from advtext.shipout import Glyph
++    from advtext.style import font_key, fontlib_metrics
++    from advtext.ui.fonts import Hinting, atlas_loader, em_size_for_pixel_height
++    from advtext.units import sp_from_px
++
++    imgui.create_context()
++    io = imgui.get_io()
++    io.display_size = imgui.ImVec2(1024.0, 768.0)
++    io.delta_time = 1.0 / 60.0
++    io.backend_flags |= imgui.BackendFlags_.renderer_has_textures.value
++    path = fontlib.imgui_font_file(Face.PROSE)
++    fonts = {mode: atlas_loader(16.0, hinting=mode)(path) for mode in Hinting}
++
++    def laid_out(em_px: float) -> list[Glyph]:
++        """
++        The word as the layout core sets it from the file: advance, then kern.
++        """
++        key = font_key(Face.PROSE, sp_from_px(em_px))
++        metrics = fontlib_metrics(key)
++        commands, x = [], 0
++        for index, character in enumerate(word):
++            commands.append(
++                Glyph(font=key, codepoint=ord(character), x=x, y=sp_from_px(30.0), index=index)
++            )
++            x += round(metrics.advance(ord(character)))
++            if index + 1 < len(word):
++                x += round(metrics.kern(ord(character), ord(word[index + 1])))
++        return commands
++
++    em_of_16_high = em_size_for_pixel_height(Face.PROSE, 16.0)
++    rows: list[tuple[str, int, int]] = []
++    imgui.new_frame()
++    draw_list = imgui.get_background_draw_list()
++    top = 4.0
++    for mode, font in fonts.items():
++        native = [(f"add_text at {size:g}", size, None) for size in (16.0, 19.0, 18.75)]
++        ours = [("draw, 16 px em", None, 16.0), ("draw, 16 px height", None, em_of_16_high)]
++        for label, size, em_px in native + ours:
++            first = draw_list.vtx_buffer.size()
++            origin = imgui.ImVec2(100.0, top)
++            if size is not None:
++                draw_list.add_text(font, size, origin, 0xFFFFFFFF, word)
++            else:
++                assert em_px is not None
++                draw(draw_list, laid_out(em_px), origin, fonts=lambda _face, font=font: font)
++            rows.append((f"{mode.value:<8} {label}", first, draw_list.vtx_buffer.size()))
++            top += ROW_PX
++    imgui.render()
++
++    textures = io.fonts.tex_list
++    if textures.size() != 1:
++        print(f"{textures.size()} atlas textures; this script reads exactly one", file=sys.stderr)
++        return 2
++    texture = textures[0]
++    pixels = np.asarray(texture.get_pixels_array()).reshape(
++        texture.height, texture.width, texture.bytes_per_pixel
++    )
++    alpha = pixels[:, :, texture.bytes_per_pixel - 1].astype(np.float64) / 255.0
++
++    def texel(column: int, row: int) -> float:
++        row = min(max(row, 0), texture.height - 1)
++        column = min(max(column, 0), texture.width - 1)
++        return float(alpha[row, column])
++
++    def sample(u: float, v: float) -> float:
++        """
++        The atlas at a texture coordinate, bilinear, texel centres at half-integers.
++        """
++        x, y = u * texture.width - 0.5, v * texture.height - 0.5
++        x0, y0 = math.floor(x), math.floor(y)
++        fx, fy = x - x0, y - y0
++        return (
++            texel(x0, y0) * (1 - fx) * (1 - fy)
++            + texel(x0 + 1, y0) * fx * (1 - fy)
++            + texel(x0, y0 + 1) * (1 - fx) * fy
++            + texel(x0 + 1, y0 + 1) * fx * fy
++        )
++
++    canvas = np.zeros((int(top + ROW_PX), 512))
++    buffer = draw_list.vtx_buffer
++    print(f"loader: {io.fonts.font_loader_name};  word {word!r};  Roboto\n")
++    head = ("hinting  path", "quads", "off-grid", "solid", "midtone", "inked")
++    print("{:<30} {:>5} {:>8} {:>7} {:>8} {:>6}".format(*head))
++    for label, first, last in rows:
++        off_grid = quads = 0
++        tops: list[float] = []
++        for start in range(first, last, 4):
++            corners = [buffer[index] for index in range(start, start + 4)]
++            x0, x1 = min(c.pos.x for c in corners), max(c.pos.x for c in corners)
++            y0, y1 = min(c.pos.y for c in corners), max(c.pos.y for c in corners)
++            u0, u1 = min(c.uv.x for c in corners), max(c.uv.x for c in corners)
++            v0, v1 = min(c.uv.y for c in corners), max(c.uv.y for c in corners)
++            quads += 1
++            off_grid += x0 != int(x0) or y0 != int(y0)
++            tops += [y0, y1]
++            for row in range(math.floor(y0), math.ceil(y1)):
++                for column in range(math.floor(x0), math.ceil(x1)):
++                    cx, cy = column + 0.5, row + 0.5
++                    if not (x0 <= cx < x1 and y0 <= cy < y1):
++                        continue
++                    cover = sample(
++                        u0 + (cx - x0) / (x1 - x0) * (u1 - u0),
++                        v0 + (cy - y0) / (y1 - y0) * (v1 - v0),
++                    )
++                    canvas[row, column] = cover + canvas[row, column] * (1.0 - cover)
++        if not quads:
++            print(f"{label:<30} NO QUADS -- nothing measured")
++            continue
++        region = 255.0 * (1.0 - canvas[math.floor(min(tops)) : math.ceil(max(tops)), :])
++        profile = visual_diff.ink_profile(region)
++        print(
++            f"{label:<30} {quads:>5} {off_grid:>8} {profile.solid_share * 100:>6.1f}% "
++            f"{profile.midtone_share * 100:>7.1f}% {profile.inked:>6}"
++        )
++    return 0
++
++
++if __name__ == "__main__":
++    raise SystemExit(main())
+diff --git a/scripts/pen_rules.py b/scripts/pen_rules.py
+index 15da9f0..73a365a 100644
+--- a/scripts/pen_rules.py
++++ b/scripts/pen_rules.py
+@@ -51,6 +51,23 @@ refuses to reduce them to a score.
+     .venv/bin/python scripts/pen_rules.py            # the four axes
+     .venv/bin/python scripts/pen_rules.py --native   # what ImGui does, from the
+                                                      # vertex buffer
++    .venv/bin/python scripts/pen_rules.py --hinting  # the shipped rule against the
++                                                     # atlas, a mode and a resolver
++                                                     # at a time
++
++## `--hinting`: the same rule, measured against what is baked
++
++The four axes above compare a rule with the *layout's* gaps, and the layout's
++gaps come from the font file. Under a hinting rasteriser the glyph that is drawn
++has a different advance from the file's, so "within half a pixel of the design"
++is a statement about a design the atlas does not hold. `--hinting` loads the
++faces once under each `advtext.ui.fonts.Hinting` mode, lays `demo/sample.md` out
++from the file and from the atlas, and measures the shipped `advance` rule
++against the baked advances instead, and then prints where ImGui's own `add_text`
++puts each glyph in each mode. `--pixel-height 16` sizes the body the way a host
++does, which is where the monospace advance leaves the pixel grid: at
++`Theme.build()`'s 16 px em Inconsolata advances exactly 8 px in the file, and
++at a 16 px height it advances 7.63.
+ 
+ Needs no display: a frame is not a window. The head of `tests/test_imgui_draw.py`
+ says why, and `--native` reads `ImDrawList.vtx_buffer` directly, which is the
+@@ -264,6 +281,161 @@ def native() -> int:
+     return 0
+ 
+ 
++def _demo_commands_with(resolve, pixel_height: float | None = None):
++    """
++    `demo/sample.md` composed and shipped with one resolver, at the tests' measure.
++
++    `tests/test_imgui_draw.py::_demo_commands` with the resolver made a
++    parameter; the source and the width are that module's. `pixel_height`
++    sizes the body the way a host does (`Theme.at_pixel_height`) instead of at
++    `Theme.build()`'s 16 px em.
++    """
++    import test_imgui_draw as T
++
++    from advtext.markdown import build_document
++    from advtext.shipout import Point, ship
++    from advtext.style import Theme, char_measure
++    from advtext.ui import compose
++    from advtext.units import sp_from_px
++
++    if pixel_height is None:
++        theme = Theme.build()
++    else:
++        theme = Theme.at_pixel_height(pixel_height, metrics=resolve)
++    measure = char_measure(resolve)
++    document = build_document(T.DEMO_SOURCE.read_text(encoding="utf-8"), theme, resolve)
++    box = compose(document, theme, sp_from_px(T.DEMO_WIDTH_PX), measure)
++    return tuple(ship(box, Point(0, box.height), measure=measure))
++
++
++class _FileKerns:
++    """
++    A resolver's metrics with the pair kern taken from the file, unrounded.
++
++    The alternative `advtext.ui.fonts.BakedFaceMetrics` decided against, kept
++    here so the decision can be re-measured rather than believed.
++    """
++
++    def __init__(self, baked, file) -> None:
++        self._baked = baked
++        self._file = file
++
++    def __getattr__(self, name: str):
++        return getattr(self._baked, name)
++
++    def kern(self, codepoint: int, following: int) -> float:
++        return self._file.kern(codepoint, following)
++
++
++def hinting(pixel_height: float | None = None) -> int:
++    """
++    The shipped rule against the atlas, under each hinting mode and each resolver.
++
++    For every adjacent pair of a rigid span the step `advance` draws is compared
++    with the step the *atlas* implies: the baked advance of the left glyph plus
++    whatever the layout put between the two beyond its own advance, which is the
++    kern. A step that differs from that by a pixel is a glyph drawn a pixel from
++    where its own raster says the previous one ended.
++    """
++    sys.path[:0] = [str(ROOT), str(ROOT / "tests")]
++    imgui, io = _frame()
++
++    import test_imgui_draw as T
++
++    from advtext.backends.imgui_draw import baked_size_px, check_advances, snap_px
++    from advtext.style import fontlib_metrics, parse_font_key
++    from advtext.ui.fonts import ALL_FACES, Hinting, baked_metrics, load_faces
++    from advtext.units import px_from_sp
++
++    loaded = {mode: load_faces(ALL_FACES, hinting=mode) for mode in Hinting}
++    imgui.new_frame()
++    print(f"loader: {io.fonts.font_loader_name}")
++    sized = "Theme.build()" if pixel_height is None else f"Theme.at_pixel_height({pixel_height:g})"
++    print(f"document: demo/sample.md at {T.DEMO_WIDTH_PX:g} px, {sized}\n")
++    head = (
++        f"{'hinting':<8} {'laid out from':<22} {'advances off':>14} {'steps':>6} "
++        f"{'step err mean':>13} {'max':>7} {'>0.5 px':>8} {'word width mean':>15} "
++        f"{'worst':>7} {'>=1 px':>12}"
++    )
++    print(head)
++    for mode, fonts in loaded.items():
++        atlas = baked_metrics(fonts)
++
++        def file_kerns(key, atlas=atlas):
++            return _FileKerns(atlas(key), fontlib_metrics(key))
++
++        for label, resolve in (
++            ("the file", fontlib_metrics),
++            ("the atlas", atlas),
++            ("the atlas, file kerns", file_kerns),
++        ):
++            commands = _demo_commands_with(resolve, pixel_height)
++            found = check_advances(commands, fonts=fonts, metrics=resolve)
++            baked_of: dict[tuple[str, int], float] = {}
++
++            def baked_advance(cmd, fonts=fonts, resolve=resolve, baked_of=baked_of) -> float:
++                try:
++                    return baked_of[(cmd.font, cmd.codepoint)]
++                except KeyError:
++                    spec = parse_font_key(cmd.font)
++                    ours = resolve(cmd.font)
++                    size_px = baked_size_px(
++                        px_from_sp(spec.size), ours.ascent, ours.descent, ours.em
++                    )
++                    baked = fonts(spec.face).get_font_baked(size_px)
++                    value = baked_of[(cmd.font, cmd.codepoint)] = float(
++                        baked.get_char_advance(cmd.codepoint)
++                    )
++                    return value
++
++            step_err: list[float] = []
++            width_err: list[float] = []
++            for span in T._spans(commands):
++                vis = [c for c in span if T._visible(fonts, c) is not None]
++                anchor = T._anchor_of(fonts, span)
++                if not vis or anchor is None:
++                    continue
++                left = snap_px(T.ORIGIN_X + px_from_sp(anchor.x))
++                offsets = [px_from_sp(c.x - anchor.x) for c in vis]
++                at = place_advance(left, offsets)
++                for index in range(len(vis) - 1):
++                    this, following = vis[index], vis[index + 1]
++                    laid_gap = px_from_sp(following.x - this.x)
++                    laid_advance = px_from_sp(round(resolve(this.font).advance(this.codepoint)))
++                    implied = baked_advance(this) + (laid_gap - laid_advance)
++                    step_err.append(abs((at[index + 1] - at[index]) - implied))
++                if len(at) > 1:
++                    width_err.append(abs((at[-1] - at[0]) - (offsets[-1] - offsets[0])))
++            wide = sum(1 for e in width_err if e >= 1.0)
++            print(
++                f"{mode.value:<8} {label:<22} "
++                f"{f'{found.disagreeing} of {found.glyphs}':>14} {len(step_err):>6} "
++                f"{sum(step_err) / len(step_err):>13.4f} {max(step_err):>7.4f} "
++                f"{sum(1 for e in step_err if e > 0.5):>8} "
++                f"{sum(width_err) / len(width_err):>15.4f} {max(width_err):>7.4f} "
++                f"{f'{wide} of {len(width_err)}':>12}"
++            )
++
++    draw_list = imgui.get_background_draw_list()
++    size = 16.0
++    print(f"\nImGui's own add_text, Roboto at a {size:g} px height, origin x = 100:")
++    for mode, fonts in loaded.items():
++        font = fonts(T.Face.PROSE)
++        for word in NATIVE_WORDS:
++            start = len(draw_list.vtx_buffer)
++            draw_list.add_text(font, size, imgui.ImVec2(100.0, 50.0), 0xFFFFFFFF, word)
++            buf = draw_list.vtx_buffer
++            xs = [buf[i].pos.x for i in range(start, len(buf))]
++            lefts = [min(xs[i : i + 4]) for i in range(0, len(xs) - 3, 4)]
++            frac = [x for x in lefts if x != int(x)]
++            print(
++                f"  {mode.value:<8} {word:<11} {[round(x, 3) for x in lefts]}  "
++                f"fractional: {len(frac)} of {len(lefts)}"
++            )
++    imgui.render()
++    return 0
++
++
+ def main(argv: list[str] | None = None) -> int:
+     parser = argparse.ArgumentParser(description=__doc__.split("\n")[1])
+     parser.add_argument(
+@@ -271,7 +443,20 @@ def main(argv: list[str] | None = None) -> int:
+         action="store_true",
+         help="read ImGui's own glyph placement from the vertex buffer instead",
+     )
++    parser.add_argument(
++        "--hinting",
++        action="store_true",
++        help="measure the shipped rule against the atlas under each hinting mode",
++    )
++    parser.add_argument(
++        "--pixel-height",
++        type=float,
++        default=None,
++        help="with --hinting: size the body by pixel height, as a host does",
++    )
+     args = parser.parse_args(argv)
++    if args.hinting:
++        return hinting(args.pixel_height)
+     return native() if args.native else axes()
+ 
+ 
+diff --git a/tests/test_hinting.py b/tests/test_hinting.py
+new file mode 100644
+index 0000000..1a6a2e8
+--- /dev/null
++++ b/tests/test_hinting.py
+@@ -0,0 +1,641 @@
++r"""
++The hinting mode a face is baked under, and the resolver that agrees with it.
++
++`advtext.ui.fonts` argues that an advance belongs to the rasteriser. These tests
++hold the three things that argument needs to be true in this build, and then the
++pairing that follows from them.
++
++- **What the rasteriser does** is pinned against a real `ImFontAtlas`: hinted
++  advances are whole pixels and are not the file's, unhinted ones are the
++  file's. These are facts about imgui-bundle's loader and not about this
++  project, and they are pinned for the reason `tests/test_makefile_env.py` pins
++  a flag's existence: the release that changes one should go red here rather
++  than somewhere that looks unrelated.
++- **What the resolver does** is tested twice: with fakes whose numbers are
++  round, for the rules (which advance, which kern, what a reload costs), and
++  against the real atlas, for agreement with it.
++- **That a mismatched pair is detectable** is `check_advances`, against the
++  real atlas, in both directions.
++
++**No window is opened and nothing is composited.** Every assertion is about an
++advance the atlas reports or a pen `draw` hands `add_text`. One density, 1.0.
++
++The faces loaded here stay in the session's atlas, as every other module's do;
++`tests/test_imgui_draw.py`'s `imgui_context` says why nothing is torn down.
++"""
++
++from __future__ import annotations
++
++from pathlib import Path
++from typing import Any
++
++import pytest
++
++from advtext import fontlib
++from advtext.backends.imgui_draw import (
++    ADVANCE_TOLERANCE_PX,
++    baked_size_px,
++    check_advances,
++    draw,
++    snap_px,
++)
++from advtext.fontmetrics import Face, GlyphBBox
++from advtext.shipout import Glyph
++from advtext.style import font_key, fontlib_metrics, parse_font_key
++from advtext.ui.fonts import (
++    BakedFaceMetrics,
++    Hinting,
++    LoadedFaces,
++    atlas_loader,
++    baked_metrics,
++    em_size_for_pixel_height,
++    load_faces,
++)
++from advtext.units import px_from_sp, sp_from_px
++
++imgui_bundle = pytest.importorskip("imgui_bundle")
++
++FACES = (Face.PROSE, Face.PROSE_BOLD, Face.CODE)
++"""
++A proportional face with instructions, its bold, and the monospace.
++
++Roboto is where the hinter's advance departs from the rounded file advance, and
++Inconsolata is where the departure is the same for every glyph and so adds up.
++"""
++
++HEIGHTS_PX = (13.0, 14.0, 16.0, 20.0)
++"""
++Whole pixel heights, as a host states a UI font size.
++"""
++
++SAMPLE = "people difference iiii mmmm The quick brown fox AV To Wa 0123456789 .,;:()"
++
++
++@pytest.fixture(scope="module")
++def imgui_context() -> Any:
++    """
++    The process's ImGui context, made if no other test module has made one.
++
++    The recipe of `tests/test_fonts_setup.py`'s fixture: no backend, no window,
++    no frame.
++    """
++    from imgui_bundle import imgui
++
++    if imgui.get_current_context() is None:
++        imgui.create_context()
++    io = imgui.get_io()
++    io.display_size = imgui.ImVec2(1024.0, 768.0)
++    io.delta_time = 1.0 / 60.0
++    io.backend_flags |= imgui.BackendFlags_.renderer_has_textures.value
++    return imgui
++
++
++@pytest.fixture(scope="module")
++def loaded(imgui_context: Any) -> dict[Hinting, LoadedFaces]:
++    """
++    The same faces loaded once under each mode, into the one atlas.
++    """
++    return {mode: load_faces(FACES, hinting=mode) for mode in Hinting}
++
++
++def _key(face: Face, height_px: float) -> str:
++    """
++    The font key at which a face comes out `height_px` tall, as a host would build it.
++    """
++    return font_key(face, sp_from_px(em_size_for_pixel_height(face, height_px)))
++
++
++def _baked_px(font: Any, key: str, codepoint: int) -> float:
++    """
++    The atlas's advance for a glyph at the size `draw` asks for, read independently.
++    """
++    spec = parse_font_key(key)
++    file = fontlib_metrics(key)
++    size_px = baked_size_px(px_from_sp(spec.size), file.ascent, file.descent, file.em)
++    return float(font.get_font_baked(size_px).get_char_advance(codepoint))
++
++
++def _cases() -> list[tuple[Face, float, int]]:
++    return [
++        (face, height, ord(character))
++        for face in FACES
++        for height in HEIGHTS_PX
++        for character in sorted(set(SAMPLE))
++    ]
++
++
++# ----------------------------------------------------------------------
++# What the rasteriser does
++
++
++def test_the_atlas_is_baked_by_freetype(imgui_context: Any) -> None:
++    """
++    The loader this module's flags are written for is the one in the build.
++
++    `font_loader_name` is empty until a frame has run, so one is run. A build on
++    stb_truetype would ignore `font_loader_flags` and every test below that
++    expects a hinted advance would fail for that reason; this says so first.
++    """
++    imgui = imgui_context
++    imgui.new_frame()
++    imgui.render()
++    assert str(imgui.get_io().fonts.font_loader_name).startswith("FreeType")
++
++
++@pytest.mark.parametrize("mode", [Hinting.DEFAULT, Hinting.LIGHT])
++def test_a_hinted_advance_is_a_whole_pixel(
++    loaded: dict[Hinting, LoadedFaces], mode: Hinting
++) -> None:
++    fonts = loaded[mode]
++    for face, height, codepoint in _cases():
++        advance = _baked_px(fonts(face), _key(face, height), codepoint)
++        assert advance == round(advance), (mode, face, height, chr(codepoint), advance)
++
++
++def test_an_unhinted_advance_is_the_file_s(loaded: dict[Hinting, LoadedFaces]) -> None:
++    """
++    Under `Hinting.NONE` the file and the atlas agree to a hundredth of a pixel.
++
++    At whole pixel heights, where the size `draw` asks for is the size that was
++    laid out. `ADVANCE_TOLERANCE_PX` is the bound `check_advances` uses and is
++    larger than what is seen here.
++    """
++    fonts = loaded[Hinting.NONE]
++    worst = 0.0
++    for face, height, codepoint in _cases():
++        key = _key(face, height)
++        file_px = px_from_sp(round(fontlib_metrics(key).advance(codepoint)))
++        worst = max(worst, abs(file_px - _baked_px(fonts(face), key, codepoint)))
++    assert worst <= 0.01 < ADVANCE_TOLERANCE_PX, worst
++
++
++def test_a_hinted_monospace_advance_is_not_the_file_s_for_any_glyph(
++    loaded: dict[Hinting, LoadedFaces],
++) -> None:
++    """
++    The case that adds up: Inconsolata at 16 px is 8 in the atlas and 7.63 in the file.
++
++    Every glyph errs the same way, so a line laid out from the file is 5% shorter
++    than the line that is drawn.
++    """
++    key = _key(Face.CODE, 16.0)
++    file_px = px_from_sp(round(fontlib_metrics(key).advance(ord("m"))))
++    assert file_px == pytest.approx(7.626, abs=0.005)
++    for mode in (Hinting.DEFAULT, Hinting.LIGHT):
++        for character in SAMPLE:
++            assert _baked_px(loaded[mode](Face.CODE), key, ord(character)) == 8.0
++
++
++def test_light_hinting_rounds_the_file_s_advance_and_the_default_does_not(
++    loaded: dict[Hinting, LoadedFaces],
++) -> None:
++    """
++    The two hinted modes are different rasters with different advances.
++
++    Light hinting fits vertically only and its advance is the file's, rounded:
++    never more than half a pixel away, give or take the rasteriser's 1/64. The
++    default runs the font's own instructions, which move an advance further --
++    Roboto's `m` at 14 px is 10.47 in the file, 10 under light and 11 by
++    default. So `LIGHT` is distinguishable by its advances and not only by its
++    outlines, which is why `Hinting` names it.
++    """
++    key = _key(Face.PROSE, 14.0)
++    file_px = px_from_sp(round(fontlib_metrics(key).advance(ord("m"))))
++    assert file_px == pytest.approx(10.469, abs=0.005)
++    assert _baked_px(loaded[Hinting.LIGHT](Face.PROSE), key, ord("m")) == 10.0
++    assert _baked_px(loaded[Hinting.DEFAULT](Face.PROSE), key, ord("m")) == 11.0
++
++    for face, height, codepoint in _cases():
++        key = _key(face, height)
++        file_px = px_from_sp(round(fontlib_metrics(key).advance(codepoint)))
++        light = _baked_px(loaded[Hinting.LIGHT](face), key, codepoint)
++        assert abs(light - file_px) <= 0.5 + ADVANCE_TOLERANCE_PX, (face, height, chr(codepoint))
++
++
++# ----------------------------------------------------------------------
++# The loader flag, and what the default leaves alone
++
++
++class _RecordingAtlas:
++    """
++    An atlas that keeps the arguments of every `add_font_from_file_ttf`.
++    """
++
++    def __init__(self) -> None:
++        self.calls: list[tuple[Any, ...]] = []
++
++    def add_font_from_file_ttf(self, *args: Any) -> str:
++        self.calls.append(args)
++        return "font"
++
++
++def test_the_default_mode_hands_the_atlas_no_config_at_all() -> None:
++    """
++    `Hinting.DEFAULT` is the call this module made before it knew about hinting.
++
++    Not a config with zero flags: no config, so nothing a host or a later
++    ImGui puts in `ImFontConfig`'s defaults can differ between the two.
++    """
++    atlas = _RecordingAtlas()
++    path = Path("/nowhere/Face.ttf")
++
++    assert atlas_loader(16.0, atlas)(path) == "font"
++    assert atlas_loader(16.0, atlas, hinting=Hinting.DEFAULT)(path) == "font"
++
++    assert atlas.calls == [(str(path), 16.0), (str(path), 16.0)]
++    assert load_faces((), loader=lambda _path: None).hinting is Hinting.DEFAULT
++
++
++@pytest.mark.parametrize(("mode", "bits"), [(Hinting.NONE, 1), (Hinting.LIGHT, 8)])
++def test_a_mode_is_set_on_the_face_s_own_config(
++    imgui_context: Any, mode: Hinting, bits: int
++) -> None:
++    atlas = _RecordingAtlas()
++
++    atlas_loader(20.0, atlas, hinting=mode)(Path("/nowhere/Face.ttf"))
++
++    ((path, size, config),) = atlas.calls
++    assert (path, size) == ("/nowhere/Face.ttf", 20.0)
++    assert config.font_loader_flags == bits == mode.loader_flags
++    assert Hinting.DEFAULT.loader_flags == 0
++
++
++def test_a_host_s_own_loader_is_told_nothing_and_the_mode_is_still_recorded() -> None:
++    """
++    With a `loader` the mode is a statement about it, kept for `metrics()` to read.
++    """
++    asked: list[Path] = []
++
++    def loader(path: Path) -> Any:
++        asked.append(path)
++        return None
++
++    fonts = load_faces([Face.CODE], loader=loader, hinting=Hinting.NONE)
++
++    assert asked == [fontlib.imgui_font_file(Face.CODE)]
++    assert fonts.hinting is Hinting.NONE
++    assert fonts.metrics() is fontlib_metrics
++
++
++# ----------------------------------------------------------------------
++# The resolver's rules, with round numbers
++
++
++class _Baked:
++    def __init__(self, advances: dict[int, float], asked: list[float], size: float) -> None:
++        self._advances = advances
++        self._asked = asked
++        self.size = size
++
++    def get_char_advance(self, codepoint: int) -> float:
++        return self._advances[codepoint]
++
++
++class _Font:
++    """
++    A loaded face that answers from a table, and records each size it is asked to bake.
++    """
++
++    def __init__(self, advances: dict[int, float]) -> None:
++        self.advances = advances
++        self.asked: list[float] = []
++
++    def is_glyph_in_font(self, codepoint: int) -> bool:
++        return codepoint in self.advances
++
++    def get_font_baked(self, size_px: float) -> _Baked:
++        self.asked.append(size_px)
++        return _Baked(self.advances, self.asked, float(snap_px(size_px)))
++
++
++class _FileMetrics:
++    """
++    A file whose every advance is 7.5 px and whose one kern, A before V, is -1.25 px.
++
++    The height is 1.25 em, so a key of 16 px is asked of the atlas at 20.
++    """
++
++    def __init__(self, key: str) -> None:
++        spec = parse_font_key(key)
++        self.face = spec.face
++        self.size = self.em = float(spec.size)
++        self.ascent = 1.0 * self.size
++        self.descent = 0.25 * self.size
++        self.x_height = 0.5 * self.size
++
++    @property
++    def space_width(self) -> float:
++        return self.advance(0x20)
++
++    def has(self, codepoint: int) -> bool:
++        return True
++
++    def advance(self, codepoint: int) -> float:
++        return float(sp_from_px(7.5))
++
++    def bbox(self, codepoint: int) -> GlyphBBox:
++        return GlyphBBox(0.0, -1.0, 2.0, 3.0)
++
++    def kern(self, codepoint: int, following: int) -> float:
++        return float(sp_from_px(-1.25)) if (codepoint, following) == (ord("A"), ord("V")) else 0.0
++
++
++KEY = font_key(Face.PROSE, sp_from_px(16.0))
++
++
++def _resolver(font: Any) -> Any:
++    return baked_metrics(lambda _face: font, file=_FileMetrics)
++
++
++def test_the_advance_is_the_atlas_s_at_the_size_draw_will_ask_for() -> None:
++    font = _Font({ord("A"): 9.0, 0x20: 4.0})
++    metrics = _resolver(font)(KEY)
++
++    assert px_from_sp(round(metrics.advance(ord("A")))) == pytest.approx(9.0, abs=1e-4)
++    assert px_from_sp(round(metrics.space_width)) == pytest.approx(4.0, abs=1e-4)
++    assert font.asked and all(size == pytest.approx(20.0, abs=1e-4) for size in font.asked)
++
++
++def test_everything_a_raster_does_not_define_is_the_file_s() -> None:
++    file = _FileMetrics(KEY)
++    metrics = _resolver(_Font({ord("A"): 9.0}))(KEY)
++
++    assert (metrics.face, metrics.size, metrics.em) == (file.face, file.size, file.em)
++    assert (metrics.ascent, metrics.descent, metrics.x_height) == (
++        file.ascent,
++        file.descent,
++        file.x_height,
++    )
++    assert metrics.bbox(ord("A")) == file.bbox(ord("A"))
++    assert metrics.has(0x2192)
++
++
++def test_a_glyph_the_face_lacks_and_a_role_with_no_face_take_the_file_s_advance() -> None:
++    file = _FileMetrics(KEY)
++
++    assert _resolver(_Font({}))(KEY).advance(ord("A")) == file.advance(ord("A"))
++    assert _resolver(None)(KEY).advance(ord("A")) == file.advance(ord("A"))
++
++
++def test_an_advance_is_read_from_the_atlas_once() -> None:
++    font = _Font({ord("A"): 9.0})
++    resolve = _resolver(font)
++
++    for _ in range(3):
++        resolve(KEY).advance(ord("A"))
++
++    assert len(font.asked) == 1
++    assert resolve(KEY) is resolve(KEY)
++
++
++def test_a_pair_kern_is_a_whole_pixel_where_the_advance_before_it_is() -> None:
++    """
++    After a whole-pixel advance the kern is rounded the way the gap will be drawn.
++
++    -1.25 px goes to -1: `draw` sets the gap at `snap_px(9 - 1.25)`, which is 8,
++    so a layout that believed 7.75 would be a quarter pixel narrower than the
++    word on screen.
++    """
++    metrics = _resolver(_Font({ord("A"): 9.0, ord("V"): 9.0}))(KEY)
++
++    assert px_from_sp(round(metrics.kern(ord("A"), ord("V")))) == pytest.approx(-1.0, abs=1e-4)
++    assert metrics.kern(ord("V"), ord("A")) == 0.0
++
++
++def test_a_pair_kern_is_the_file_s_where_the_advance_before_it_is_fractional() -> None:
++    """
++    Unhinted, or at a density above 1, the kern is not rounded here.
++
++    The gap is `snap_px` of a fractional sum either way, so rounding the kern
++    first would be a second rounding of the same gap.
++    """
++    file = _FileMetrics(KEY)
++    metrics = _resolver(_Font({ord("A"): 8.75, ord("V"): 9.0}))(KEY)
++
++    assert metrics.kern(ord("A"), ord("V")) == file.kern(ord("A"), ord("V"))
++
++
++def test_a_reloaded_face_is_measured_from_its_new_font() -> None:
++    """
++    What a resolver holds for a key is dropped when the role's `ImFont` changes.
++
++    Including from no font at all to one, which is a face `load_pending` loaded
++    after a layout had already asked about it.
++    """
++    held: list[Any] = [None]
++    resolve = baked_metrics(lambda _face: held[0], file=_FileMetrics)
++    file = _FileMetrics(KEY)
++    assert resolve(KEY).advance(ord("A")) == file.advance(ord("A"))
++
++    held[0] = _Font({ord("A"): 9.0})
++    assert px_from_sp(round(resolve(KEY).advance(ord("A")))) == pytest.approx(9.0, abs=1e-4)
++
++    held[0] = _Font({ord("A"): 10.0})
++    assert px_from_sp(round(resolve(KEY).advance(ord("A")))) == pytest.approx(10.0, abs=1e-4)
++
++    held[0].advances[ord("A")] = 11.0
++    assert px_from_sp(round(resolve(KEY).advance(ord("A")))) == pytest.approx(10.0, abs=1e-4)
++    resolve.clear()
++    assert px_from_sp(round(resolve(KEY).advance(ord("A")))) == pytest.approx(11.0, abs=1e-4)
++
++
++def test_the_math_face_is_answered_from_the_file() -> None:
++    """
++    A formula's advances are read with numbers only the file states, so they stay there.
++    """
++    key = font_key(Face.MATH, sp_from_px(16.0))
++    font = _Font({ord("A"): 9.0})
++    seen: list[Any] = []
++
++    def file(asked: str) -> Any:
++        seen.append(_FileMetrics(asked))
++        return seen[-1]
++
++    resolve = baked_metrics(lambda _face: font, file=file)
++
++    assert resolve(key) is seen[0]
++    assert resolve(key) is seen[0] and len(seen) == 1
++    assert font.asked == []
++
++
++# ----------------------------------------------------------------------
++# The pairing, against the real atlas
++
++
++def test_metrics_is_the_file_s_resolver_when_nothing_was_hinted(
++    loaded: dict[Hinting, LoadedFaces],
++) -> None:
++    assert loaded[Hinting.NONE].metrics() is fontlib_metrics
++    assert loaded[Hinting.NONE].metrics(120.0) is fontlib_metrics
++
++
++@pytest.mark.parametrize("mode", [Hinting.DEFAULT, Hinting.LIGHT])
++def test_metrics_is_one_baked_resolver_a_density_when_the_faces_were_hinted(
++    loaded: dict[Hinting, LoadedFaces], mode: Hinting
++) -> None:
++    fonts = loaded[mode]
++
++    assert fonts.metrics() is fonts.metrics()
++    assert fonts.metrics() is not fontlib_metrics
++    assert fonts.metrics(120.0) is not fonts.metrics()
++    assert isinstance(fonts.metrics()(_key(Face.PROSE, 16.0)), BakedFaceMetrics)
++
++
++@pytest.mark.parametrize("mode", list(Hinting))
++def test_the_resolver_a_load_returns_gives_the_advance_the_atlas_baked(
++    loaded: dict[Hinting, LoadedFaces], mode: Hinting
++) -> None:
++    """
++    Under every mode, `loaded.metrics()` and the atlas agree about every advance.
++
++    Exactly, to the scaled point, under the hinted modes, where the resolver
++    read the atlas; to `ADVANCE_TOLERANCE_PX` under `NONE`, where it read the
++    file.
++    """
++    fonts = loaded[mode]
++    resolve = fonts.metrics()
++    bound = ADVANCE_TOLERANCE_PX if mode is Hinting.NONE else 1e-4
++    for face, height, codepoint in _cases():
++        key = _key(face, height)
++        ours = px_from_sp(round(resolve(key).advance(codepoint)))
++        theirs = _baked_px(fonts(face), key, codepoint)
++        assert abs(ours - theirs) <= bound, (mode, face, height, chr(codepoint), ours, theirs)
++
++
++def _set(text: str, key: str, resolve: Any) -> list[Glyph]:
++    """
++    A word laid out the way the layout core lays one out: advance, then kern.
++
++    Each rounded to a scaled point on its own, as `char_measure` and a kern
++    node round them.
++    """
++    metrics = resolve(key)
++    commands: list[Glyph] = []
++    x = sp_from_px(3.0)
++    for index, character in enumerate(text):
++        commands.append(
++            Glyph(font=key, codepoint=ord(character), x=x, y=sp_from_px(40.0), index=index)
++        )
++        x += round(metrics.advance(ord(character)))
++        if index + 1 < len(text):
++            x += round(metrics.kern(ord(character), ord(text[index + 1])))
++    return commands
++
++
++class _RecordingDrawList:
++    """
++    A draw list that keeps the pen of every `add_text` instead of drawing.
++    """
++
++    def __init__(self) -> None:
++        self.flags = 0
++        self.pens: list[float] = []
++
++    def add_text(self, _font: Any, _size: float, position: Any, _colour: int, _text: str) -> None:
++        self.pens.append(position.x)
++
++
++@pytest.mark.parametrize("mode", [Hinting.DEFAULT, Hinting.LIGHT])
++@pytest.mark.parametrize("face", FACES)
++def test_a_word_laid_out_from_the_baked_resolver_is_drawn_at_the_width_it_was_laid_out_at(
++    imgui_context: Any, loaded: dict[Hinting, LoadedFaces], mode: Hinting, face: Face
++) -> None:
++    """
++    Hinted faces, the matching resolver: every pen is where the layout put it.
++
++    The step from one glyph to the next is the atlas's advance plus a
++    whole-pixel kern, so `_RigidSpan.pen`'s rounding finds nothing to round and
++    the word ends exactly where the layout believes it does. That is the
++    property the mismatched pair lacks -- under it a word's width moves by up
++    to 2 px (`docs/advance-rule.md` §4) and the difference lands in the space
++    after it.
++    """
++    fonts = loaded[mode]
++    resolve = fonts.metrics()
++    for height in HEIGHTS_PX:
++        key = _key(face, height)
++        for word in SAMPLE.split():
++            commands = _set(word, key, resolve)
++            recorder = _RecordingDrawList()
++            draw(
++                recorder, commands, imgui_context.ImVec2(40.25, 10.0), fonts=fonts, metrics=resolve
++            )
++            laid = [px_from_sp(cmd.x - commands[0].x) for cmd in commands]
++            drawn = [pen - recorder.pens[0] for pen in recorder.pens]
++            assert drawn == pytest.approx(laid, abs=1e-3), (mode, face, height, word)
++
++
++def test_a_layout_from_the_file_is_reported_against_hinted_faces_and_not_against_unhinted_ones(
++    loaded: dict[Hinting, LoadedFaces],
++) -> None:
++    """
++    `check_advances` tells the mismatched pair from the matched ones, both ways.
++
++    The mismatched pair is this library's default: the loader's flags and
++    `fontlib_metrics`. In monospace every glyph disagrees.
++    """
++    key = _key(Face.CODE, 16.0)
++    commands = _set("people", key, fontlib_metrics)
++    distinct = len(set("people"))
++
++    hinted = check_advances(commands, fonts=loaded[Hinting.DEFAULT])
++    assert not hinted.agrees
++    assert (hinted.glyphs, hinted.disagreeing) == (distinct, distinct)
++    assert hinted.worst_px == pytest.approx(0.374 - ADVANCE_TOLERANCE_PX, abs=0.005)
++
++    unhinted = check_advances(commands, fonts=loaded[Hinting.NONE])
++    assert unhinted.agrees and unhinted.glyphs == distinct and unhinted.worst_px == 0.0
++
++
++@pytest.mark.parametrize("mode", list(Hinting))
++def test_the_resolver_a_load_returns_is_never_reported(
++    loaded: dict[Hinting, LoadedFaces], mode: Hinting
++) -> None:
++    """
++    Whatever the mode, laying out with `loaded.metrics()` passes the check.
++
++    At whole pixel heights and at a fractional one -- a 16 px em is an 18.75 px
++    height in Roboto, drawn from the 19 px raster -- which is the case the
++    size allowance in `check_advances` exists for under `Hinting.NONE`.
++    """
++    fonts = loaded[mode]
++    resolve = fonts.metrics()
++    keys = [_key(face, height) for face in FACES for height in HEIGHTS_PX]
++    keys += [font_key(face, sp_from_px(16.0)) for face in FACES]
++    for key in keys:
++        found = check_advances(_set(SAMPLE, key, resolve), fonts=fonts, metrics=resolve)
++        assert found.agrees and found.glyphs == len(set(SAMPLE)), (mode, key, found)
++
++
++def test_a_baked_resolver_over_unhinted_faces_agrees_too(
++    loaded: dict[Hinting, LoadedFaces],
++) -> None:
++    """
++    Asking the atlas is right under every mode; the file is right under one.
++
++    So a host that cannot say how its loader hints can use `baked_metrics`
++    regardless, and one that says `Hinting.NONE` wrongly is caught by the check.
++    """
++    fonts = loaded[Hinting.NONE]
++    resolve = baked_metrics(fonts)
++    key = _key(Face.PROSE, 16.0)
++
++    assert check_advances(_set(SAMPLE, key, resolve), fonts=fonts, metrics=resolve).agrees
++
++    hinted = loaded[Hinting.DEFAULT]
++    said_none = LoadedFaces(lambda _path: hinted(Face.PROSE), hinting=Hinting.NONE)
++    said_none.load([Face.PROSE])
++    wrong = said_none.metrics()
++    assert wrong is fontlib_metrics
++    assert not check_advances(_set(SAMPLE, key, wrong), fonts=said_none, metrics=wrong).agrees
++
++
++def test_a_glyph_with_no_raster_and_a_role_with_no_face_are_not_compared(
++    loaded: dict[Hinting, LoadedFaces],
++) -> None:
++    fonts = loaded[Hinting.DEFAULT]
++    arrow = Glyph(font=_key(Face.PROSE, 16.0), codepoint=0x2192, x=0, y=0, index=0)
++    math = Glyph(font=font_key(Face.MATH, sp_from_px(16.0)), codepoint=ord("x"), x=0, y=0, index=1)
++
++    assert not fonts(Face.PROSE).is_glyph_in_font(0x2192)
++    assert check_advances([arrow, math], fonts=lambda face: fonts.fonts.get(face)).glyphs == 0
