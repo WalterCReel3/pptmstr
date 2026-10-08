@@ -15,7 +15,7 @@ import time
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import assert_never
+from typing import Any, assert_never
 
 from imgui_bundle import hello_imgui, imgui, immapp
 
@@ -44,6 +44,7 @@ from .ui import (
     rail,
     review,
     transcript_pane,
+    typeset,
 )
 from .ui import focus as focus_mod
 from .ui.widgets import format_elapsed
@@ -124,6 +125,9 @@ def begin_frame(state: AppState) -> None:
     state.frame_now = time.monotonic()
 
     _apply_theme_if_dirty(state)
+    # Between frames: the only place the atlas is added to, and the only moment
+    # ImGui's font size is the UI font's and not one a pane pushed.
+    typeset.pre_frame()
     if state.pending_layout is not None:
         hello_imgui.switch_layout(state.pending_layout)
         state.pending_layout = None
@@ -161,9 +165,17 @@ def _handle_layout_keys(state: AppState) -> None:
     model combo, where Esc would otherwise dismiss the modal *and* change layout in
     the same frame. ``is_open`` here is last frame's value, which is the one that
     matches the frame the operator was looking at when they pressed the key.
+
+    A chord is not one of these keys. Ctrl+Tab is ImGui's own window switcher and
+    Ctrl+Enter sends a prompt; neither captures the keyboard while the mouse is over
+    a typeset view, which submits no item, so with only the capture guard both would
+    also change the layout. The same rule as ``review.handle_keys``.
     """
     snap = state.frame_snap
-    if snap is None or state.launcher.is_open or imgui.get_io().want_capture_keyboard:
+    io = imgui.get_io()
+    if snap is None or state.launcher.is_open or io.want_capture_keyboard:
+        return
+    if io.key_ctrl or io.key_alt or io.key_super:
         return
     current = hello_imgui.current_layout_name()
     if imgui.is_key_pressed(imgui.Key.tab) and current != TRIAGE:
@@ -689,6 +701,40 @@ def _menus(state: AppState) -> None:
         clicked, _ = imgui.menu_item("Wrap composers", "", state.settings.wrap_inputs)
         if clicked:
             _switch_wrap(state, not state.settings.wrap_inputs)
+        imgui.separator()
+        # Offered only while the faces are there to draw with, or will be once it
+        # is switched on: a ticked entry that changes nothing on screen would read
+        # as a broken switch. Why it is not offered, or what switching it on will
+        # cost, is said under it rather than left to be guessed.
+        can_typeset = typeset.available()
+        offered = can_typeset or typeset.obtainable()
+        clicked, _ = imgui.menu_item(
+            "Typeset text", "", state.settings.typeset and can_typeset, offered
+        )
+        if clicked:
+            _switch_typeset(state, typeset_on=not state.settings.typeset)
+        reason = typeset.unavailable_reason()
+        if reason is not None:
+            imgui.text_disabled(f"  {reason}")
+        # Both take effect on the click: every face a preset names is on the atlas
+        # from start-up, so there is nothing to wait for a restart for. The tick is
+        # on the preset in force, which is the default when the saved name is one
+        # this build cannot draw.
+        on = can_typeset and state.settings.typeset
+        if imgui.begin_menu("Faces", on):
+            for preset, usable in typeset.presets():
+                chosen = typeset.preset().name == preset.name
+                clicked, _ = imgui.menu_item(preset.label, "", chosen, usable)
+                if clicked:
+                    _switch_typeset(state, faces=preset.name)
+            imgui.end_menu()
+        if imgui.begin_menu("Text size", on):
+            for scale in typeset.SCALES:
+                chosen = abs(typeset.scale() - scale) < 1e-6
+                clicked, _ = imgui.menu_item(f"{scale * 100:g}%", "", chosen)
+                if clicked:
+                    _switch_typeset(state, scale=scale)
+            imgui.end_menu()
         imgui.end_menu()
 
 
@@ -711,6 +757,44 @@ def _switch_wrap(state: AppState, wrap: bool) -> None:
     state.settings = state.settings.merged(wrap_inputs=wrap)
     settings_mod.save(state.settings)
     LOG.info("text", f"composer wrapping {'on' if wrap else 'off'}")
+
+
+def _switch_typeset(
+    state: AppState,
+    *,
+    typeset_on: bool | None = None,
+    faces: str | None = None,
+    scale: float | None = None,
+) -> None:
+    """
+    Change how text is set, persisting immediately, as ``_switch_wrap`` does.
+
+    One function for all three because they are one piece of state to the seam,
+    and it has to be told in the same breath as the setting is saved: a setting the
+    panes do not see until restart would make the comparison this exists for a
+    comparison of two launches.
+    """
+    changes: dict[str, Any] = {}
+    if typeset_on is not None:
+        changes["typeset"] = typeset_on
+    if faces is not None:
+        changes["typeset_faces"] = faces
+    if scale is not None:
+        changes["typeset_scale"] = scale
+    state.settings = state.settings.merged(**changes)
+    settings_mod.save(state.settings)
+    _configure_typeset(state.settings)
+    LOG.info(
+        "text",
+        f"typeset {'on' if state.settings.typeset else 'off'}, "
+        f"faces {state.settings.typeset_faces}, size x{state.settings.typeset_scale:g}",
+    )
+
+
+def _configure_typeset(settings: settings_mod.Settings) -> None:
+    typeset.configure(
+        typeset=settings.typeset, faces=settings.typeset_faces, scale=settings.typeset_scale
+    )
 
 
 def _status_bar(state: AppState) -> None:
@@ -1080,6 +1164,33 @@ def main(argv: list[str] | None = None) -> int:
         help="team shape for --task sessions",
     )
     ap.add_argument("--fps-idle", type=float, default=None)
+    # Like --theme: overrides for this run, not saved. A screenshot run has a
+    # throwaway HOME and reads nobody's settings, so comparing the two renderers
+    # from the command line needs a way to say which one.
+    ap.add_argument(
+        "--typeset",
+        choices=("on", "off"),
+        default=None,
+        help="set text through the layout library, or with the renderers before it",
+    )
+    ap.add_argument(
+        "--prose",
+        choices=("proportional", "mono"),
+        default=None,
+        help="the face typeset prose is set in; --faces says the same and more",
+    )
+    ap.add_argument(
+        "--faces",
+        choices=tuple(preset.name for preset in typeset.PRESETS),
+        default=None,
+        help="the face set typeset text is in; wins over --prose",
+    )
+    ap.add_argument(
+        "--text-scale",
+        type=float,
+        default=None,
+        help="typeset text's size as a multiple of the UI font's",
+    )
     ap.add_argument(
         "--layout",
         default=None,
@@ -1095,7 +1206,18 @@ def main(argv: list[str] | None = None) -> int:
         loaded = loaded.merged(fps_idle=args.fps_idle)
     if args.cap is not None:
         loaded = loaded.merged(concurrency_cap=args.cap)
+    if args.typeset is not None:
+        loaded = loaded.merged(typeset=args.typeset == "on")
+    if args.prose is not None:
+        loaded = loaded.merged(
+            typeset_faces="mono" if args.prose == "mono" else typeset.DEFAULT_PRESET
+        )
+    if args.faces is not None:
+        loaded = loaded.merged(typeset_faces=args.faces)
+    if args.text_scale is not None:
+        loaded = loaded.merged(typeset_scale=args.text_scale)
     theme.set_theme(loaded.theme)
+    _configure_typeset(loaded)
 
     state = AppState(store=Store(), bridge=Bridge(), settings=loaded)
     state.pool = SessionPool(state.bridge, cap=state.settings.concurrency_cap)
@@ -1142,7 +1264,10 @@ def main(argv: list[str] | None = None) -> int:
         # done or parked on the operator. AWAITING_APPROVAL counts as idle, which is
         # I8 showing up as a CPU number rather than a claim.
         snap = state.frame_snap
-        runner.fps_idling.enable_idling = not (snap is not None and snap.any_active)
+        # A view still being typeset counts as work: it is built a piece a frame,
+        # and an idling loop would hand it one frame every few hundred milliseconds.
+        working = (snap is not None and snap.any_active) or typeset.pending()
+        runner.fps_idling.enable_idling = not working
 
     runner.callbacks.load_additional_fonts = theme.load_fonts
     runner.callbacks.post_init = post_init

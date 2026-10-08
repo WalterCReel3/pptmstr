@@ -91,6 +91,7 @@ Read [STYLE.md](STYLE.md) before adding a record, an intent, or a projection.
 
 ```sh
 ./bootstrap.sh          # probe -> venv -> install -> window smoke test
+                        # needs an advtext checkout: ADVTEXT_SRC, default ~/Source/imgui-adv-text
 make check              # lint + typecheck + tests
 make run                # launch
 
@@ -135,6 +136,26 @@ The transcript pane styles output by kind — reasoning, output, tool calls, res
 errors, compaction boundaries — with toggles for reasoning, wrapping and follow-tail,
 plus a filter. Concurrency is bounded by `concurrency_cap`; over-cap sessions queue
 rather than being refused, and the pool is shown in the status bar.
+
+### Text is set by `advtext`, experimentally
+
+On this branch DETAIL, the NEEDS YOU expansion, BOARD, BRIEF and one mode of the
+context log set their text through `advtext` — a layout library kept in a separate
+checkout, on no package index — instead of ImGui's
+own text calls: proportional prose, real italics, selectable text, diffs built from
+the texts a parked call carries. [pptmstr/ui/typeset.py](pptmstr/ui/typeset.py) is the
+only module that imports it, and its docstring is the reference for what it does and
+costs.
+
+**Text ▸ Typeset text** switches it off, and off is every pane as it was before: the
+hand-rolled markdown renderer is kept, both as the comparison and as what the
+application falls back to when the library or its faces are missing. With typesetting
+on the context log still opens in that older markdown renderer (RICH), with the typeset
+mode one radio button away; with it off the log opens in WRAP, as it did before.
+
+It has been run only on Xvfb with a software rasteriser, and no person has judged how
+it looks. The decisions, the measurements and what is unverified are in
+[planning/2026-10-07-advtext-sets-the-text.md](planning/2026-10-07-advtext-sets-the-text.md).
 
 ## Teams
 
@@ -224,6 +245,7 @@ Read [orchestrator-design.md](orchestrator-design.md) §1 (invariants) and §3
 | [pptmstr/pool.py](pptmstr/pool.py) | Bounded concurrency; over-cap sessions queue |
 | [pptmstr/approval.py](pptmstr/approval.py) | Classification, summaries and diffs for the gate |
 | [pptmstr/ui/](pptmstr/ui/) | Fleet rail, inbox, detail, health, transcript pane, launcher, shared widgets |
+| [pptmstr/ui/typeset.py](pptmstr/ui/typeset.py) | The one module that imports `advtext`: faces, palette, held views, approval diffs |
 | [pptmstr/theme.py](pptmstr/theme.py) | Semantic colour roles; light, dark, high-contrast, and six discretionary |
 | [pptmstr/driver.py](pptmstr/driver.py) | One `ClaudeSDKClient` per session, translated into intents |
 | [pptmstr/app.py](pptmstr/app.py) | Runner, docking layout, and the frame loop |

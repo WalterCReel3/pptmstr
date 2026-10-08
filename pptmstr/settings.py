@@ -76,6 +76,22 @@ class Settings:
     # wrapping BETA (caret and selection across wrapped rows are the under-tested
     # part), which is the reason this is a setting at all and not just the default.
     wrap_inputs: bool = True
+    # Set text through the layout library (`ui/typeset.py`) instead of the renderers
+    # each pane had before it. Off is not a degraded mode: every pane keeps its old
+    # path whole, which is what makes this the instrument for comparing the two.
+    typeset: bool = True
+    # Which faces typeset text is set in: the name of one of `ui.typeset.PRESETS`,
+    # all of them built from fonts that already ship. A setting because the question
+    # it answers -- does proportional prose beside monospace chrome read as polish or
+    # as a foreign body -- is one for whoever is looking at it. Not validated here:
+    # the seam owns the names and falls back to its default for one it does not
+    # know, so a file written by a later build keeps its choice through this one.
+    # The default is spelled rather than imported so this module stays free of the
+    # UI; a test holds the two together.
+    typeset_faces: str = "roboto"
+    # Typeset text's size as a multiple of the UI font's, which it still follows.
+    # The seam clamps it.
+    typeset_scale: float = 1.0
     # The MCP servers a session may reach, and the whole of them. `driver` passes
     # these alongside the in-process bus under `strict_mcp_config=True`, so a server
     # the operator has not named here is one no session loads -- which is what keeps
@@ -168,6 +184,10 @@ def load(path: Path | None = None) -> Settings:
         if isinstance(default, str) and not isinstance(value, str):
             continue
         clean[key] = value
+    # `typeset_mono` is the switch `typeset_faces` replaced. A file that has only
+    # the old key keeps what it said.
+    if "typeset_faces" not in clean and raw.get("typeset_mono") is True:
+        clean["typeset_faces"] = "mono"
     return Settings(**clean)
 
 

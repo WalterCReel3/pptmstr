@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from pptmstr import settings as settings_mod
 from pptmstr.settings import Settings, load, save
 
@@ -147,3 +149,77 @@ def test_config_dir_ignores_relative_xdg(monkeypatch) -> None:
 def test_config_dir_falls_back_when_unset(monkeypatch) -> None:
     monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
     assert settings_mod.config_dir() == Path.home() / ".config" / "pptmstr"
+
+
+def test_text_is_typeset_in_proportional_prose_unless_the_operator_says_otherwise() -> None:
+    """
+    The defaults are the experiment's "on" arm: a fresh install shows the new
+    renderer, and the old one is one menu entry away.
+    """
+    from pptmstr.ui import typeset
+
+    assert Settings().typeset is True
+    assert Settings().typeset_scale == 1.0
+    # The default is spelled in `settings` so that module stays free of the UI.
+    assert Settings().typeset_faces == typeset.DEFAULT_PRESET
+    assert not typeset.PRESETS[0].mono
+
+
+def test_the_text_switches_survive_a_restart(tmp_path: Path) -> None:
+    path = tmp_path / "settings.json"
+    save(Settings(typeset=False, typeset_faces="droid", typeset_scale=1.25), path)
+    got = load(path)
+    assert (got.typeset, got.typeset_faces, got.typeset_scale) == (False, "droid", 1.25)
+
+
+def test_a_file_saved_with_the_monospace_switch_keeps_monospace_prose(tmp_path: Path) -> None:
+    """
+    ``typeset_mono`` is the boolean the face presets replaced. An operator who had
+    chosen monospace prose must not find proportional prose after an upgrade.
+    """
+    from pptmstr.ui import typeset
+
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"typeset": True, "typeset_mono": True, "theme": "light"}))
+    got = load(path)
+    assert got.typeset_faces == "mono" and got.theme == "light"
+    assert any(preset.name == "mono" and preset.mono for preset in typeset.PRESETS)
+
+    save(got, path)
+    assert "typeset_mono" not in json.loads(path.read_text())
+    assert load(path).typeset_faces == "mono"
+
+
+@pytest.mark.parametrize(
+    ("saved", "faces"),
+    [
+        ({"typeset_mono": False}, "roboto"),
+        ({"typeset_mono": 1}, "roboto"),
+        ({"typeset_mono": "true"}, "roboto"),
+        ({"typeset_mono": True, "typeset_faces": "droid"}, "droid"),
+        ({"typeset_mono": True, "typeset_faces": 7}, "mono"),
+        ({"typeset_faces": "from-a-later-build"}, "from-a-later-build"),
+    ],
+)
+def test_the_old_switch_is_read_only_when_it_is_true_and_no_preset_is_named(
+    tmp_path: Path, saved: dict[str, object], faces: str
+) -> None:
+    """
+    A named preset wins over the old key, a preset that is not a string is no
+    preset, and a name this build does not know is kept for the build that does.
+    """
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps(saved))
+    assert load(path).typeset_faces == faces
+
+
+def test_a_text_switch_that_is_not_a_boolean_falls_back_to_its_default(tmp_path: Path) -> None:
+    """
+    ``"false"`` is truthy. Accepted as written it would turn the renderer *on* for
+    someone who hand-edited the file to turn it off.
+    """
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"typeset": "false", "typeset_scale": "1.25"}))
+    got = load(path)
+    assert got.typeset is Settings().typeset
+    assert got.typeset_scale == Settings().typeset_scale

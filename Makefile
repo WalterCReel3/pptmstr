@@ -1,4 +1,4 @@
-.PHONY: help bootstrap probe smoke run test lint format format-file typecheck typecheck-all verify check clean
+.PHONY: help bootstrap probe smoke run shot shot-xvfb test lint format format-file typecheck typecheck-all verify check clean
 
 PY  := .venv/bin/python
 PIP := .venv/bin/python -m pip
@@ -56,8 +56,19 @@ run: venv-check gui-check     ## launch the orchestrator
 bench: venv-check gui-check   ## measure idling CPU and cross-thread wake latency
 	$(GUI) $(PY) scripts/bench_idle.py
 
-shot: venv-check gui-check    ## render the UI to shot.png
+shot: venv-check gui-check    ## render the UI to shots/shot.png
 	$(GUI) $(PY) scripts/screenshot.py --argv --fake
+
+# For a DISPLAY that is set and cannot be reached, which `HEADLESS` cannot see: it
+# is computed from DISPLAY being empty. A sandbox that refuses socket(AF_UNIX) is
+# that case, and `xvfb-run` is no way out of it either -- its server listens on a
+# unix socket, so it hangs there rather than failing. scripts/xvfb_shot.sh says
+# what it does instead. SHOT_ARGS reaches screenshot.py as written, so a quoted
+# window name survives: make shot-xvfb SHOT_ARGS='--focus "NEEDS YOU"'.
+FOCUS ?=
+OUT   ?= shots/shot.png
+shot-xvfb: venv-check         ## the same on a private Xvfb: FOCUS=BOARD OUT=shots/x.png
+	scripts/xvfb_shot.sh --out $(OUT) $(if $(FOCUS),--focus $(FOCUS)) $(SHOT_ARGS)
 
 test: venv-check   ## pytest
 	$(PY) -m pytest -q

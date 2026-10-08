@@ -19,7 +19,15 @@ dependencies = [
     # style.set_color_(), imgui.SortDirection, imgui.Col_.nav_cursor and the
     # ImPlot Spec API all postdate 1.6, and a too-low floor turns a clear
     # install-time failure into an AttributeError on the first theme switch.
-    "imgui-bundle>=1.92",
+    #
+    # The third component is advtext's requirement, not ours: its draw backend
+    # sets `ImDrawListFlags_.text_no_pixel_snap` on every call, and 1.92.900 is
+    # the first release that has it (Dear ImGui 1.92.9; 1.92.801 is on 1.92.8).
+    # advtext's own pyproject records how that was established -- by the two
+    # changelogs and by the flag being present in an installed 1.92.900, not by
+    # watching 1.92.801 fail. tests/test_env_floor.py pins the flag, so the
+    # release that renames it fails there and not on the first frame drawn.
+    "imgui-bundle>=1.92.900",
     # Bundles its own Claude Code CLI binary, which is why there is no Node
     # dependency here -- see check_agent_cli() in scripts/probe.py.
     # The floor is the first release whose bundled CLI (2.1.280) knows
@@ -37,6 +45,19 @@ dependencies = [
     # (MarkdownIt.parseInline) -- block structure is our own segmenter
     # (pptmstr/ui/blocks.py), not this library's.
     "markdown-it-py>=3.0",
+    # The text-layout engine behind pptmstr/ui/typeset.py. It is on no package
+    # index, so it is named bare and bootstrap.sh installs it first, editable,
+    # from the checkout ADVTEXT_SRC points at. A `file://` direct reference
+    # would commit one machine's absolute path, and a relative one assumes a
+    # sibling checkout that a git worktree is not.
+    "advtext",
+    # advtext opens the faces it sets through fontTools at run time. As
+    # pptmstr/ui/typeset.py measures (`pixel_metrics`), a glyph's advance is
+    # ImGui's hinted one; the file still supplies what ImGui does not expose:
+    # pair kerns, ascent and descent, glyph boxes, which characters a face
+    # has, and the advance of a glyph ImGui's font lacks.
+    # scripts/rank_glyphs.py and tests/test_splash_art.py use it too.
+    "fonttools>=4.50",
 ]
 
 [project.optional-dependencies]
@@ -50,15 +71,9 @@ dev = [
     "black>=24.1",
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
-    # Only scripts/screenshot.py imports this, for the glReadPixels grab.
+    # scripts/screenshot.py and scripts/mock_cards.py import this, for the
+    # glReadPixels grab.
     "pyopengl>=3.1",
-    # scripts/rank_glyphs.py reads glyph outlines out of Inconsolata-Medium to
-    # rank the splash art by ink. Dev-only on purpose: the ranking it produces is
-    # a checked-in literal in pptmstr/ui/splash_art.py, so nothing at runtime
-    # opens a font file. tests/test_splash_art.py recomputes the table when this
-    # is installed and skips when it is not, which is the only thing holding the
-    # literal to the face it was measured from.
-    "fonttools>=4.50",
 ]
 
 [project.scripts]

@@ -861,6 +861,43 @@ def load_fonts() -> None:
     # No icons merged into bold: FontAwesome codepoints only ever reach the UI
     # through STATE_GLYPH, which draws in the body face.
     _FACES[Face.BOLD] = _load_face("fonts/Inconsolata-Bold.ttf", icons=False)
+    # Only behind a UI font that loaded. With none, the first of these would be
+    # Fonts[0] and every widget in the application would be set in Roboto.
+    if _FACES[Face.BODY] is not None:
+        _load_typeset_faces()
+
+
+def _load_typeset_faces() -> None:
+    """
+    Put the text-layout library's faces on the atlas, after the two above.
+
+    After, because of the rule in ``load_fonts``: these include a proportional face
+    and a second copy of Inconsolata without the icons merged, and either one as
+    Fonts[0] would become the font of every widget. The math face is among them and
+    costs about a second: ``typeset.load_fonts`` says why it is paid here.
+
+    Only when the operator's setting asks for typeset text. With it off the load is
+    put off -- over a second, and a patched font written to the temporary directory,
+    for a renderer nobody is looking at -- and the seam does it between frames if
+    the setting is switched on later (``typeset.load_fonts_later``).
+
+    Imported here rather than at the top: ``ui.typeset`` imports this module for the
+    palette. A failure of any kind -- a font file missing, the library broken in a
+    way its import did not show -- is the same non-fatal degradation as a missing
+    face above: ``typeset.enabled()`` stays false and every pane draws as it did
+    before the library existed. The library being absent altogether does not reach
+    here as an exception: the seam imports without it and says so when asked.
+    """
+    try:
+        from .ui import typeset
+
+        bold = _ASSETS / "fonts" / "Inconsolata-Bold.ttf"
+        if typeset.wanted():
+            typeset.load_fonts(bold, loader=typeset.hello_loader())
+        else:
+            typeset.load_fonts_later(bold, loader=typeset.hello_loader())
+    except Exception:
+        return
 
 
 def _load_face(asset: str, *, icons: bool) -> imgui.ImFont | None:

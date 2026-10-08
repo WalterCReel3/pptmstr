@@ -17,6 +17,7 @@ version shortfall and a session the operator believes is contained.
 from __future__ import annotations
 
 import threading
+import types
 
 import pytest
 
@@ -318,3 +319,351 @@ def test_the_version_read_runs_off_both_the_frame_loop_and_the_asyncio_loop(
     assert out.pool_thread is not None
     assert out.checked_on[0] is not out.pool_thread
     assert out.checked_on[0] is not threading.current_thread()
+
+
+# -- the typeset seam is told what the operator set --------------------------------
+
+
+class _Reached(Exception):
+    """
+    Raised by a stand-in to stop a function at the call under test.
+    """
+
+
+@pytest.fixture
+def typeset_state() -> object:
+    """
+    The seam's module state, put back afterwards: it outlives a test otherwise.
+    """
+    from pptmstr.ui import typeset
+
+    before = (typeset._STATE.typeset, typeset._STATE.faces, typeset._STATE.scale)
+    yield typeset._STATE
+    typeset.configure(typeset=before[0], faces=before[1], scale=before[2])
+
+
+def test_the_persisted_text_settings_reach_the_seam_before_the_first_frame(
+    monkeypatch: pytest.MonkeyPatch, typeset_state: object
+) -> None:
+    """
+    ``Settings.typeset`` is the switch between two renderers. Loaded and never handed
+    to the seam, the menu would show it off while every pane drew through it.
+    """
+    from pptmstr import app
+    from pptmstr import settings as settings_mod
+    from pptmstr.ui import typeset
+
+    def stop(**kwargs: object) -> None:
+        raise _Reached
+
+    monkeypatch.setattr(
+        settings_mod,
+        "load",
+        lambda: Settings(typeset=False, typeset_faces="mono", typeset_scale=1.25, theme="dark"),
+    )
+    monkeypatch.setattr(app, "AppState", stop)
+    typeset.configure(typeset=True, mono=False, scale=1.0)
+    with pytest.raises(_Reached):
+        app.main([])
+    assert (typeset._STATE.typeset, typeset._STATE.faces) == (False, "mono")
+    assert typeset.mono() and typeset.scale() == 1.25
+
+
+def test_a_text_switch_is_saved_and_takes_effect_without_a_restart(
+    monkeypatch: pytest.MonkeyPatch, typeset_state: object
+) -> None:
+    """
+    The comparison this setting exists for is made by flipping it and looking. A
+    switch that only took effect at the next launch would be comparing two launches.
+    """
+    from pptmstr import app
+    from pptmstr import settings as settings_mod
+    from pptmstr.ui import typeset
+
+    saved: list[Settings] = []
+    monkeypatch.setattr(settings_mod, "save", lambda settings, path=None: saved.append(settings))
+    typeset.configure(typeset=True, mono=False)
+    state = app.AppState(store=Store(), bridge=Bridge(), settings=Settings())
+    epoch = typeset._STATE.epoch
+
+    app._switch_typeset(state, typeset_on=False)
+    assert state.settings.typeset is False and saved[-1].typeset is False
+    assert typeset._STATE.typeset is False
+    assert typeset._STATE.epoch == epoch, "turning it off rebuilds nothing"
+
+    app._switch_typeset(state, faces="mono")
+    assert state.settings.typeset_faces == "mono" and saved[-1].typeset_faces == "mono"
+    assert state.settings.typeset is False, "one switch must not move the other"
+    assert typeset.mono() is True
+    assert typeset._STATE.epoch == epoch + 1, "documents built in the other faces are stale"
+
+    app._switch_typeset(state, scale=1.25)
+    assert state.settings.typeset_scale == 1.25 and saved[-1].typeset_scale == 1.25
+    assert state.settings.typeset_faces == "mono", "nor the size the faces"
+    assert typeset.scale() == 1.25
+    assert typeset._STATE.epoch == epoch + 2, "documents built at the other size are stale"
+
+
+class _Menu:
+    """
+    The five ImGui calls ``app._menus`` makes, with one entry that reports a click.
+
+    A disabled menu does not open and a disabled entry cannot be clicked, as in ImGui.
+    """
+
+    def __init__(self, click: str) -> None:
+        self.click = click
+        self.menus: dict[str, bool] = {}
+        self.items: dict[str, tuple[bool, bool]] = {}
+        self.said: list[str] = []
+
+    def begin_menu(self, label: str, enabled: bool = True) -> bool:
+        self.menus[label] = enabled
+        return enabled
+
+    def end_menu(self) -> None:
+        pass
+
+    def menu_item(
+        self, label: str, shortcut: str, selected: bool, enabled: bool = True
+    ) -> tuple[bool, bool]:
+        self.items[label] = (selected, enabled)
+        return (enabled and label == self.click, selected)
+
+    def separator(self) -> None:
+        pass
+
+    def text_disabled(self, text: str) -> None:
+        self.said.append(text)
+
+
+@pytest.mark.parametrize(
+    ("click", "faces", "scale"),
+    [
+        ("Inconsolata throughout", "mono", 1.0),
+        ("Roboto prose a size up, Inconsolata code", "roboto-large", 1.0),
+        ("Droid Sans prose, Roboto emphasis, Inconsolata code", "roboto", 1.0),
+        ("125%", "roboto", 1.25),
+        ("87.5%", "roboto", 0.875),
+    ],
+)
+def test_the_text_menu_offers_every_preset_and_size_and_a_click_chooses_it(
+    monkeypatch: pytest.MonkeyPatch, typeset_state: object, click: str, faces: str, scale: float
+) -> None:
+    """
+    The presets and the scale are reachable from nowhere else in the window. The
+    Droid Sans entry is the one that cannot be clicked here: no font is loaded in
+    this test, and a preset whose own file is not on the atlas is offered disabled.
+    """
+    from pptmstr import app
+    from pptmstr import settings as settings_mod
+    from pptmstr.ui import typeset
+
+    menu = _Menu(click)
+    saved: list[Settings] = []
+    monkeypatch.setattr(app, "imgui", menu)
+    monkeypatch.setattr(settings_mod, "save", lambda settings, path=None: saved.append(settings))
+    monkeypatch.setattr(typeset, "available", lambda: True)
+    monkeypatch.setattr(typeset._STATE, "files", {})
+    typeset.configure(typeset=True, faces=typeset.DEFAULT_PRESET, scale=1.0)
+    state = app.AppState(store=Store(), bridge=Bridge(), settings=Settings())
+
+    app._menus(state)
+
+    assert (state.settings.typeset_faces, state.settings.typeset_scale) == (faces, scale)
+    assert (typeset._STATE.faces, typeset.scale()) == (faces, scale)
+    assert menu.menus["Faces"] is True and menu.menus["Text size"] is True
+    labels = {preset.label: preset for preset in typeset.PRESETS}
+    assert set(labels) <= set(menu.items)
+    assert {f"{each * 100:g}%" for each in typeset.SCALES} <= set(menu.items)
+    for label, preset in labels.items():
+        assert menu.items[label] == (preset.name == "roboto", preset.prose_file is None), label
+    # Ticked as drawn: an entry above it that took the click has already moved the tick.
+    assert menu.items["100%"] == (click != "87.5%", True)
+    assert bool(saved) == ((faces, scale) != ("roboto", 1.0))
+
+
+def test_the_face_and_size_menus_do_not_open_while_text_is_not_typeset(
+    monkeypatch: pytest.MonkeyPatch, typeset_state: object
+) -> None:
+    from pptmstr import app
+    from pptmstr.ui import typeset
+
+    menu = _Menu("")
+    monkeypatch.setattr(app, "imgui", menu)
+    monkeypatch.setattr(typeset, "available", lambda: True)
+    state = app.AppState(store=Store(), bridge=Bridge(), settings=Settings(typeset=False))
+    app._menus(state)
+    assert menu.menus["Faces"] is False and menu.menus["Text size"] is False
+    assert not any(preset.label in menu.items for preset in typeset.PRESETS)
+
+
+@pytest.mark.parametrize(
+    ("available", "obtainable", "reason", "offered"),
+    [
+        (True, True, None, True),
+        (False, True, "faces load when this is switched on: about a second", True),
+        (False, False, "the text library did not import (ImportError: gone)", False),
+    ],
+)
+def test_the_typeset_entry_is_offered_only_when_it_can_work_and_says_why_when_it_cannot(
+    monkeypatch: pytest.MonkeyPatch,
+    typeset_state: object,
+    available: bool,
+    obtainable: bool,
+    reason: str | None,
+    offered: bool,
+) -> None:
+    """
+    With the library absent the application still starts, and the one place the
+    operator would look for typeset text says why it is not there. With the faces
+    put off until asked for, the entry can be clicked and says what the click costs.
+    """
+    from pptmstr import app
+    from pptmstr import settings as settings_mod
+    from pptmstr.ui import typeset
+
+    menu = _Menu("Typeset text")
+    saved: list[Settings] = []
+    monkeypatch.setattr(app, "imgui", menu)
+    monkeypatch.setattr(settings_mod, "save", lambda settings, path=None: saved.append(settings))
+    monkeypatch.setattr(typeset, "available", lambda: available)
+    monkeypatch.setattr(typeset, "obtainable", lambda: obtainable)
+    monkeypatch.setattr(typeset, "unavailable_reason", lambda: reason)
+    monkeypatch.setattr(typeset, "configure", lambda **kwargs: None)
+    state = app.AppState(store=Store(), bridge=Bridge(), settings=Settings(typeset=False))
+    app._menus(state)
+    assert menu.items["Typeset text"] == (False, offered)
+    assert state.settings.typeset is offered, "a click on an entry that is offered is taken"
+    under = [text for text in menu.said if text.startswith("  ")]
+    assert under == ([] if reason is None else [f"  {reason}"])
+
+
+def test_a_chord_over_a_typeset_view_does_not_change_the_layout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Ctrl+Tab is ImGui's window switcher and Ctrl+Enter sends a prompt. A typeset view
+    submits no item, so nothing has captured the keyboard while the mouse is over
+    one, and the capture guard alone lets both through to Tab and Enter here. Run in
+    a real frame: what ImGui says was pressed, and held with it, is the thing tested.
+    """
+    from imgui_bundle import imgui
+
+    from pptmstr import app
+
+    switched: list[str] = []
+    layout = types.SimpleNamespace(
+        current_layout_name=lambda: app.TRIAGE if not switched else switched[-1],
+        switch_layout=switched.append,
+    )
+    monkeypatch.setattr(app, "hello_imgui", layout)
+
+    def press(key: imgui.Key, *mods: imgui.Key) -> list[str]:
+        del switched[:]
+        context = imgui.create_context()
+        try:
+            io = imgui.get_io()
+            io.set_ini_filename("")
+            io.display_size = imgui.ImVec2(800, 600)
+            io.delta_time = 1 / 60
+            io.backend_flags |= imgui.BackendFlags_.renderer_has_textures
+            for mod in mods:
+                io.add_key_event(mod, True)
+            io.add_key_event(key, True)
+            imgui.new_frame()
+            try:
+                assert imgui.is_key_pressed(key) and not io.want_capture_keyboard
+                state = app.AppState(store=Store(), bridge=Bridge(), settings=Settings())
+                state.frame_snap = state.store.snapshot()
+                app._handle_layout_keys(state)
+            finally:
+                imgui.end_frame()
+        finally:
+            imgui.destroy_context(context)
+        return list(switched)
+
+    assert press(imgui.Key.enter) == [app.FOCUS]
+    for mod in (imgui.Key.mod_ctrl, imgui.Key.mod_alt, imgui.Key.mod_super):
+        assert press(imgui.Key.enter, mod) == [], mod
+        assert press(imgui.Key.tab, mod) == [], mod
+    # Shift is not a chord here: Shift+Enter is still Enter.
+    assert press(imgui.Key.enter, imgui.Key.mod_shift) == [app.FOCUS]
+
+
+def test_the_application_stays_awake_while_a_view_is_still_being_typeset() -> None:
+    """
+    A long text is built a piece a frame. An idling loop gives it a frame every few
+    hundred milliseconds, so the loop has to be told there is work. The wiring is
+    what is checked: ``typeset.pending`` unread would leave every test of the seam
+    passing and a long document crawling.
+    """
+    import inspect
+
+    from pptmstr import app
+
+    source = inspect.getsource(app)
+    wired = source[source.index("def pre_frame() -> None:") :]
+    wired = wired[: wired.index("runner.callbacks.load_additional_fonts")]
+    assert "typeset.pending()" in wired and "enable_idling = not working" in wired
+
+
+def test_the_frame_loop_gives_the_seam_its_turn_between_frames(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    ``typeset.pre_frame`` loads a face a draw asked for and reads the UI font's size,
+    and both have to happen before ``new_frame``. Nothing else calls it: unwired, the
+    text never follows a display scale and every unit test of the seam passes.
+    """
+    from pptmstr import app
+    from pptmstr.ui import typeset
+
+    def reached() -> None:
+        raise _Reached
+
+    monkeypatch.setattr(typeset, "pre_frame", reached)
+    state = app.AppState(store=Store(), bridge=Bridge(), settings=Settings())
+    state.theme_dirty = False
+    with pytest.raises(_Reached):
+        app.begin_frame(state)
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        (["--typeset", "on"], (True, "mono", 1.0)),
+        (["--typeset", "on", "--prose", "mono"], (True, "mono", 1.0)),
+        (["--prose", "proportional"], (False, "roboto", 1.0)),
+        (["--faces", "roboto-large"], (False, "roboto-large", 1.0)),
+        (["--prose", "mono", "--faces", "droid"], (False, "droid", 1.0)),
+        (["--text-scale", "1.25"], (False, "mono", 1.25)),
+        ([], (False, "mono", 1.0)),
+    ],
+)
+def test_the_renderer_can_be_chosen_for_one_run_from_the_command_line(
+    monkeypatch: pytest.MonkeyPatch,
+    typeset_state: object,
+    argv: list[str],
+    expected: tuple[bool, str, float],
+) -> None:
+    """
+    A screenshot run has a throwaway HOME, so the persisted setting is never the
+    operator's. The on/off pictures the experiment is judged by are taken with
+    these flags, over a saved setting of off and monospace.
+    """
+    from pptmstr import app
+    from pptmstr import settings as settings_mod
+    from pptmstr.ui import typeset
+
+    def stop(**kwargs: object) -> None:
+        raise _Reached
+
+    saved: list[Settings] = []
+    monkeypatch.setattr(settings_mod, "load", lambda: Settings(typeset=False, typeset_faces="mono"))
+    monkeypatch.setattr(settings_mod, "save", lambda settings, path=None: saved.append(settings))
+    monkeypatch.setattr(app, "AppState", stop)
+    with pytest.raises(_Reached):
+        app.main(argv)
+    assert (typeset._STATE.typeset, typeset._STATE.faces, typeset._STATE.scale) == expected
+    assert saved == [], "an override for one run must not become the saved setting"

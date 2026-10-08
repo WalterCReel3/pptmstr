@@ -58,8 +58,9 @@ from .approval import (
     Disposition,
     Policy,
     classify,
+    diff_texts,
     inherits_to_subagents,
-    render_diff,
+    render_texts,
     requires_containment,
     summarize,
 )
@@ -1812,6 +1813,7 @@ class AgentSession:
         stays idle-able while it waits. The Bridge holds the future; the store only
         learns that something is pending.
         """
+        texts = diff_texts(tool_name, tool_input)
         pending = PendingApproval(
             id=f"{self.session_id[:8]}-{tool_use_id or uuid.uuid4().hex[:8]}",
             node=node,
@@ -1823,7 +1825,8 @@ class AgentSession:
             # PendingApproval.requested_at for why an epoch reading here renders the
             # oldest park in the queue as "0s" and sorts it last.
             requested_at=time.monotonic(),
-            diff=render_diff(tool_name, tool_input),
+            diff=render_texts(tool_name, texts),
+            texts=texts,
         )
         future = self.bridge.park(pending.id)
         self.bridge.emit(ApprovalRequested(node, pending))

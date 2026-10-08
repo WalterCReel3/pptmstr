@@ -16,6 +16,7 @@ from __future__ import annotations
 import difflib
 import enum
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, assert_never
 
@@ -474,6 +475,126 @@ def summarize(tool_name: str, tool_input: Mapping[str, Any], width: int = 90) ->
     return clip(f"{tool_name} {key}={tool_input[key]!r}")
 
 
+@dataclass(frozen=True, slots=True)
+class DiffText:
+    """
+    One before/after pair a parked call would produce, as texts rather than a diff.
+
+    Defined here rather than beside ``PendingApproval``: ``model`` imports this
+    module, so the record sits on the side of that edge that both can reach.
+
+    ``before`` and ``after`` are either **the whole file** -- so a line number counted
+    in them is the file's -- or **fragments**, the call's own strings diffed alone.
+    They are fragments whenever ``will_not_apply`` is set, and for every ``MultiEdit``
+    part, whose label is ``edit N`` rather than a path.
+    """
+
+    # None is "no such file", not "empty file": it is what puts ``/dev/null`` in the
+    # unified header. ``diff_texts`` never produces ``after=None`` -- no tool it knows
+    # deletes a file -- but the record can say it.
+    before: str | None
+    after: str | None
+    # The path exactly as the call gave it, or a stand-in when it gave none. Never
+    # decorated: ``render_diff`` writes it into the header verbatim.
+    label: str
+    # Why the texts are fragments: the gate's own read says this Edit has no place
+    # to land. One of four fixed phrases, because an operator acts differently on
+    # each -- see ``_edit_refusal``. A prediction from this read, not the tool's
+    # verdict.
+    will_not_apply: str | None = None
+    # The file exists and could not be read as UTF-8 text (binary, a directory, no
+    # permission). On a Write this is the only thing separating "replaces a file
+    # whose content could not be shown" from "creates a file": ``before`` is None
+    # in both, because the unified diff has always drawn them the same.
+    unreadable: bool = False
+
+
+def diff_texts(tool_name: str, tool_input: Mapping[str, Any]) -> tuple[DiffText, ...] | None:
+    """
+    The texts a call would turn into one another, or None when there is nothing
+    diff-shaped to show.
+
+    The one place that decides what a file-mutating call does to a file:
+    ``render_diff`` is ``render_texts`` over this, so the unified string and the
+    texts cannot describe different edits.
+
+    Reads the current file from disk so the diff is against what is actually there
+    -- an Edit's own ``old_string`` is what the model *believes* is there, and the
+    difference between those two is exactly what review is for. That read is the
+    only IO, and it is why this runs once at park time and never per frame.
+
+    - **Write**: the file against the new content. ``before`` is None for a file that
+      is not there and for one that cannot be read; ``unreadable`` tells them apart.
+    - **Edit**: the whole file before and after, ``replace_all`` honoured, when the
+      anchor is in it. Otherwise the two strings alone, with ``will_not_apply``.
+    - **MultiEdit**: one part per edit, always fragments. The file is not read, so
+      nothing is claimed about whether they apply.
+    """
+    if tool_name == "Write":
+        path = str(tool_input.get("file_path") or "")
+        new = str(tool_input.get("content") or "")
+        current, state = _read(path)
+        return (DiffText(current, new, path, unreadable=state is _FileState.UNREADABLE),)
+
+    if tool_name == "Edit":
+        path = str(tool_input.get("file_path") or "")
+        old_string = str(tool_input.get("old_string") or "")
+        new_string = str(tool_input.get("new_string") or "")
+        current, state = _read(path)
+        if current is not None and old_string and old_string in current:
+            replaced = current.replace(
+                old_string, new_string, -1 if tool_input.get("replace_all") else 1
+            )
+            return (DiffText(current, replaced, path),)
+        # Show the intended replacement rather than nothing -- "this edit will not
+        # apply" is itself something the operator wants to see before approving.
+        return (
+            DiffText(
+                old_string,
+                new_string,
+                path or "(anchor not found in file)",
+                will_not_apply=_edit_refusal(state, old_string),
+                unreadable=state is _FileState.UNREADABLE,
+            ),
+        )
+
+    if tool_name == "MultiEdit":
+        edits = tool_input.get("edits")
+        if not isinstance(edits, list):
+            return None
+        # Numbered by position in the call, so a malformed entry leaves a gap rather
+        # than renumbering the edits after it.
+        parts = tuple(
+            DiffText(
+                str(edit.get("old_string") or ""),
+                str(edit.get("new_string") or ""),
+                f"edit {i}",
+            )
+            for i, edit in enumerate(edits, 1)
+            if isinstance(edit, dict)
+        )
+        return parts or None
+
+    return None
+
+
+def render_texts(tool_name: str, texts: tuple[DiffText, ...] | None) -> str | None:
+    """
+    The unified diff of ``diff_texts``' answer for the same call.
+
+    Separate from ``render_diff`` so a caller that keeps the texts can have both
+    from one read of the file. ``tool_name`` is needed because the two shapes join
+    differently and the bytes are relied on: a MultiEdit drops its empty parts and
+    is None when none are left, where a Write or an Edit that changes nothing is
+    the empty string.
+    """
+    if texts is None:
+        return None
+    if tool_name == "MultiEdit":
+        return "\n".join(p for p in map(_unified, texts) if p) or None
+    return "".join(map(_unified, texts))
+
+
 def render_diff(tool_name: str, tool_input: Mapping[str, Any]) -> str | None:
     """
     A unified diff of what the call would change, or None when there is nothing
@@ -483,71 +604,58 @@ def render_diff(tool_name: str, tool_input: Mapping[str, Any]) -> str | None:
     and inventing one would be worse than the summary the caller already has. The
     detail pane branches on it.
 
-    Reads the current file from disk so the diff is against what is actually there
-    -- an Edit's own ``old_string`` is what the model *believes* is there, and the
-    difference between those two is exactly what review is for.
+    Reads the file; see ``diff_texts``.
     """
-    if tool_name == "Write":
-        path = str(tool_input.get("file_path") or "")
-        new = str(tool_input.get("content") or "")
-        return _unified(_read(path), new, path)
-
-    if tool_name == "Edit":
-        path = str(tool_input.get("file_path") or "")
-        old_string = str(tool_input.get("old_string") or "")
-        new_string = str(tool_input.get("new_string") or "")
-        current = _read(path)
-        if current is not None and old_string and old_string in current:
-            replaced = current.replace(
-                old_string, new_string, -1 if tool_input.get("replace_all") else 1
-            )
-            return _unified(current, replaced, path)
-        # The file is unreadable, or the anchor is not in it. Show the intended
-        # replacement rather than nothing -- "this edit will not apply" is itself
-        # something the operator wants to see before approving.
-        return _unified(old_string, new_string, path or "(anchor not found in file)")
-
-    if tool_name == "MultiEdit":
-        edits = tool_input.get("edits")
-        if not isinstance(edits, list):
-            return None
-        parts = []
-        for i, edit in enumerate(edits, 1):
-            if not isinstance(edit, dict):
-                continue
-            parts.append(
-                _unified(
-                    str(edit.get("old_string") or ""),
-                    str(edit.get("new_string") or ""),
-                    f"edit {i}",
-                )
-            )
-        return "\n".join(p for p in parts if p) or None
-
-    return None
+    return render_texts(tool_name, diff_texts(tool_name, tool_input))
 
 
-def _read(path: str) -> str | None:
+class _FileState(enum.Enum):
+    READ = "read"
+    MISSING = "missing"
+    UNREADABLE = "unreadable"
+
+
+def _read(path: str) -> tuple[str | None, _FileState]:
     if not path:
-        return None
+        return None, _FileState.MISSING
     try:
-        return Path(path).read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
+        return Path(path).read_text(encoding="utf-8"), _FileState.READ
+    except (FileNotFoundError, NotADirectoryError):
         # Missing file is the common case for Write, and it is not an error --
         # the diff is then simply "everything is new".
-        return None
+        return None, _FileState.MISSING
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None, _FileState.UNREADABLE
 
 
-def _unified(before: str | None, after: str, label: str) -> str:
+def _edit_refusal(state: _FileState, old_string: str) -> str:
+    """
+    Which of the four reasons an Edit has nowhere to land.
+
+    Ordered so the file's condition is named before the anchor's: an anchor cannot
+    be looked for in a file that was never read.
+    """
+    match state:
+        case _FileState.MISSING:
+            return "file not found"
+        case _FileState.UNREADABLE:
+            return "file is not readable as text"
+        case _FileState.READ:
+            return "old_string is empty" if not old_string else "anchor not found in file"
+        case _:
+            assert_never(state)
+
+
+def _unified(text: DiffText) -> str:
     # The a/ b/ prefixes are a git convention for repo-relative paths; on an
     # absolute path they produce "b//tmp/x", which reads as a typo in the header of
     # every diff the operator sees.
-    prefix_a, prefix_b = ("", "") if label.startswith("/") else ("a/", "b/")
+    prefix_a, prefix_b = ("", "") if text.label.startswith("/") else ("a/", "b/")
     lines = difflib.unified_diff(
-        (before or "").splitlines(keepends=True),
-        after.splitlines(keepends=True),
-        fromfile=f"{prefix_a}{label}" if before is not None else "/dev/null",
-        tofile=f"{prefix_b}{label}",
+        (text.before or "").splitlines(keepends=True),
+        (text.after or "").splitlines(keepends=True),
+        fromfile=f"{prefix_a}{text.label}" if text.before is not None else "/dev/null",
+        tofile=f"{prefix_b}{text.label}" if text.after is not None else "/dev/null",
         n=3,
     )
     return "".join(lines)

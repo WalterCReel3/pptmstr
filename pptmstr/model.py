@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, ClassVar
 
-from .approval import Policy
+from .approval import DiffText, Policy
 from .transcript import Transcript
 
 # (session_id, agent_id). Root sessions have agent_id None; sub-agents carry the
@@ -282,6 +282,18 @@ class PendingApproval:
     # Unified diff for file-mutating tools; None when the tool has no diff to show
     # (Bash, network calls) and the summary carries the whole story.
     diff: str | None = None
+    # The before/after texts ``diff`` was rendered from; None exactly when the tool
+    # has nothing diff-shaped. Both are carried although one follows from the other:
+    # ``diff`` is ``approval.render_texts`` of this, and deriving it on read would put
+    # ``difflib`` over a whole file on the frame path for as long as the call is
+    # parked. Built from one ``approval.diff_texts`` call at the construction site,
+    # so the two cannot describe different reads of the file.
+    #
+    # Holds the file's whole text, twice for a whole-file Edit, in every snapshot
+    # until the approval settles -- about what ``diff`` already costs for a Write
+    # that replaces a file, and more than it for a one-line Edit to a large one. In
+    # memory only: nothing persists a ``PendingApproval``.
+    texts: tuple[DiffText, ...] | None = None
 
 
 class ObligationKind(enum.Enum):

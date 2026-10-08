@@ -25,7 +25,7 @@ looked at with seven sessions in one project.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Hashable, Mapping
 from dataclasses import dataclass
 from typing import assert_never
 
@@ -39,12 +39,13 @@ from ..model import (
     LaunchSpec,
     NodeId,
     Obligation,
+    PendingApproval,
     QuestionPending,
     SessionFailed,
     Snapshot,
 )
 from ..theme import OBLIGATION_GLYPH, STATE_GLYPH, Face, P, face, faded
-from . import projects, review, splash, splash_art
+from . import projects, review, splash, splash_art, typeset
 from .compose import ComposeState, wants_send
 from .focus import FocusState
 from .widgets import CTRL_ENTER_SUBMITS, ellipsis, format_elapsed, multiline_input
@@ -74,6 +75,57 @@ _SMALL_FONT = 12.5
 _SPAWN_TOOLS = frozenset({"Agent", "Task"})
 
 _SUFFIX = {1: "st", 2: "nd", 3: "rd"}
+
+# The tallest an expanded approval's body gets: lines of the UI font for the native
+# diff child and for a typeset document, rows of the diff view for a typeset diff.
+# The two are the same height at the UI's own size, so a row costs the queue no more
+# under either renderer; under ``Settings.typeset_scale`` the diff keeps its count of
+# rows. The seam ends a capped view on a whole line of whatever pitch its text has.
+_BODY_LINES = 24.0
+
+# The typeset views this pane holds between frames, keyed ``(obligation.key, part)``.
+#
+# Module-level for the reason ``_ART_FRAMES`` below is: ``draw`` is handed no
+# presentation-state object of this pane's own, ``review.ReviewState`` is shared
+# with DETAIL -- which draws the same parked call in the same frame and must not
+# share a view with this pane, because a view holds one scroll position and one
+# origin -- and hanging it on either would mean editing a file this pane does not
+# own. Pruned in ``draw`` by the obligations still in the queue, the rule
+# ``ReviewState.prune`` applies to everything else remembered about an approval.
+_VIEWS = typeset.ViewCache()
+_VIEW_PARTS = ("diff", "body", "arguments")
+
+# The parts last made for a view, beside what they were made from, under the view's
+# key and pruned with it. Kept because the seam's body classifier reads every line
+# of its text -- 1.5 ms for 1,200 lines, measured, against a frame's 6 ms -- and
+# because a tuple handed to ``typeset.document`` again unchanged is compared by
+# identity and not part by part.
+_PARTS: dict[Hashable, tuple[object, tuple[typeset.Part, ...]]] = {}
+
+_NO_DIFF = "no diff for this call - arguments:"
+_WITHHELD = "shown as the agent sent it - approve sends YOUR EDIT, which differs"
+_STILL_TYPESETTING = "still typesetting - the body above is not all of this call yet"
+
+# The bus tools' names as the CLI spells them. ``approval.py`` owns the spelling and
+# keeps it private; tests/test_inbox_typeset.py fails if these two drift from it.
+_POST_CONCERN = "mcp__pptmstr__post_concern"
+_DECLARE_TASK = "mcp__pptmstr__declare_task"
+
+# Calls whose substance is prose rather than a file change: for each, the argument
+# that is the prose and the arguments that head it, in reading order. Any argument
+# named in neither place is still shown, after these -- see ``describe``.
+_DESCRIBED: dict[str, tuple[str, tuple[str, ...]]] = {
+    _POST_CONCERN: ("body", ("to", "subject", "task_id")),
+    _DECLARE_TASK: ("detail", ("task_id", "title", "depends_on", "touches")),
+    "Agent": ("prompt", ("subagent_type", "description")),
+    "Task": ("prompt", ("subagent_type", "description")),
+}
+assert _SPAWN_TOOLS <= _DESCRIBED.keys()
+_LIST_FIELDS = frozenset({"depends_on", "touches"})
+
+# Where a field's value starts, from the left edge of the block. Wide enough for
+# the longest name in ``_DESCRIBED`` in either prose face.
+_X_FIELD_VALUE = 120.0
 
 
 @dataclass
@@ -115,6 +167,11 @@ def draw(
     """Build the inbox from one snapshot. Never reads the store."""
     state.prune({p.id for p in snap.approvals})
     compose.prune(snap)
+    if len(_VIEWS) or _PARTS:
+        live = {(o.key, part) for o in snap.needs_you for part in _VIEW_PARTS}
+        _VIEWS.prune(live)
+        for stale in _PARTS.keys() - live:
+            del _PARTS[stale]
 
     # Before the empty-queue branch, and the ordering is the whole distinction.
     # ``_zero_state`` answers "a fleet exists and owes you nothing"; this answers
@@ -346,55 +403,42 @@ def _expand_approval(
     cursor in a diff view that can be pointed at a different agent than the queue's.
     """
     pending = obligation.approval
-    line_h = imgui.get_text_line_height_with_spacing()
+    # Lines of the body the seam has not set yet: a long body is built over several
+    # frames, and until it is whole the row is showing less than the call.
+    unset = 0
 
     if state.editing == pending.id:
+        # The draft, in ImGui's own input and all of it: ``unset`` stays zero.
         _editor(state, pending, wrap=wrap)
     else:
-        lines = state.diff_lines.get(pending.id)
-        if lines is None:
-            # Split once per pending item, not once per frame. A whole-file Write
-            # produces a diff as long as the file, and re-splitting it sixty times a
-            # second is work proportional to the change being reviewed -- backwards,
-            # since the large diffs are the ones stared at longest.
-            lines = (pending.diff.splitlines() or [""]) if pending.diff else []
-            state.diff_lines[pending.id] = lines
-
-        if lines:
-            # Fit the diff up to a cap. A short diff that still needs scrolling is
-            # the thing that makes an operator stop reading them.
-            body_h = min(24.0 * line_h, line_h * len(lines) + 10.0)
-            if imgui.begin_child("##body", imgui.ImVec2(-8.0, body_h), imgui.ChildFlags_.borders):
-                colours = {
-                    "add": P.diff_add,
-                    "remove": P.diff_remove,
-                    "meta": P.accent,
-                    "context": P.diff_context,
-                }
-                clipper = imgui.ListClipper()
-                clipper.begin(len(lines))
-                while clipper.step():
-                    for index in range(clipper.display_start, clipper.display_end):
-                        line = lines[index]
-                        # The +/- gutter stays in the text regardless of colour: the
-                        # non-hue channel is what keeps a diff readable in high
-                        # contrast and to a colour-deficient operator (6.1).
-                        imgui.text_colored(colours[diff_line_kind(line)].vec4, line or " ")
-                clipper.end()
-            imgui.end_child()
+        # Both above the body under either renderer: the native one is also what is
+        # drawn when the faces did not load.
+        if edit_withheld(state, pending):
+            _warning(_WITHHELD)
+        # The gate predicts this from its own read of the file at park time; the
+        # tool is what decides, on the file as it is when the call runs.
+        #
+        # Said here, from the record, and by nothing else: the typeset diff is asked
+        # to leave its copy out (``warning=False``). This line is the same one under
+        # either renderer and is up while a large diff's model is still being made.
+        # The view's copy is neither, and at a width its header does not fit it is
+        # said twice, above the view and cut off inside it.
+        for reason in refusals(pending):
+            _warning(f"may not apply: {reason}")
+        if typeset.enabled():
+            unset = _typeset_body(pending, obligation.key)
         else:
-            # No diff is a real answer, not a gap: a Bash command has nothing
-            # diff-shaped to show, and inventing one would be worse than the args.
-            body_h = line_h * (len(pending.raw_args) + 1) + 10.0
-            if imgui.begin_child("##body", imgui.ImVec2(-8.0, body_h), imgui.ChildFlags_.borders):
-                imgui.text_colored(P.text_dim.vec4, "no diff for this call - arguments:")
-                for key, value in pending.raw_args.items():
-                    imgui.text_colored(P.text.vec4, f"  {key} = {value!r}")
-            imgui.end_child()
+            _native_body(state, pending)
+    # What every approve path is answered from (``review.withheld``), the keys'
+    # on the next frame and this row's own button on this one.
+    state.body_shown("inbox", pending.id, unset, int(imgui.get_frame_count()))
 
     imgui.spacing()
     if state.edit_error:
         imgui.text_colored(P.danger.vec4, state.edit_error)
+    not_sent = review.refusal_for(state, pending.id)
+    if not_sent is not None:
+        _warning(not_sent)
 
     if state.focus_reason:
         imgui.set_keyboard_focus_here()
@@ -407,8 +451,13 @@ def _expand_approval(
         state.reasons[pending.id] = reason
 
     imgui.same_line()
+    # Not clickable while this row's body is short of its text, which is the
+    # button showing what ``review.resolve`` would answer; the decision is made
+    # there, for the click as for the ``a`` key.
+    imgui.begin_disabled(unset > 0)
     if imgui.button("approve"):
         review.resolve(bridge, state, pending, approved=True)
+    imgui.end_disabled()
     imgui.same_line()
     if imgui.button("reject"):
         review.resolve(bridge, state, pending, approved=False)
@@ -418,6 +467,10 @@ def _expand_approval(
             state.editing = None
             state.edits.pop(pending.id, None)
             state.edit_error = None
+            # This frame's reading was of the draft in its editor. With the draft
+            # gone approve sends the agent's call, whose body this row has not
+            # drawn since: there is no reading of that until the next frame.
+            state.bodies.pop(pending.id, None)
     elif imgui.button("edit"):
         state.editing = pending.id
         state.edits.setdefault(pending.id, review.pretty_args(pending))
@@ -425,6 +478,304 @@ def _expand_approval(
     _small()
     imgui.text_colored(P.text_dim.vec4, "a / r / e")
     _normal()
+    if unset > 0:
+        _warning(_STILL_TYPESETTING)
+
+
+def _warning(text: str) -> None:
+    """
+    One line the approver must not miss, wrapped to the pane and not clipped by it.
+    """
+    imgui.push_text_wrap_pos(0.0)
+    imgui.text_colored(P.warn.vec4, text)
+    imgui.pop_text_wrap_pos()
+
+
+def _native_body(state: review.ReviewState, pending: PendingApproval) -> None:
+    """
+    What the call would do, in ImGui's own text: its unified diff a line to a row,
+    or its arguments.
+    """
+    line_h = imgui.get_text_line_height_with_spacing()
+    lines = state.diff_lines.get(pending.id)
+    if lines is None:
+        # Split once per pending item, not once per frame. A whole-file Write
+        # produces a diff as long as the file, and re-splitting it sixty times a
+        # second is work proportional to the change being reviewed -- backwards,
+        # since the large diffs are the ones stared at longest.
+        lines = (pending.diff.splitlines() or [""]) if pending.diff else []
+        state.diff_lines[pending.id] = lines
+    if not lines:
+        _native_arguments(pending)
+        return
+
+    # Fit the diff up to a cap. A short diff that still needs scrolling is the
+    # thing that makes an operator stop reading them.
+    body_h = min(_BODY_LINES * line_h, line_h * len(lines) + 10.0)
+    if imgui.begin_child("##body", imgui.ImVec2(-8.0, body_h), imgui.ChildFlags_.borders):
+        colours = {
+            "add": P.diff_add,
+            "remove": P.diff_remove,
+            "meta": P.accent,
+            "context": P.diff_context,
+        }
+        clipper = imgui.ListClipper()
+        clipper.begin(len(lines))
+        while clipper.step():
+            for index in range(clipper.display_start, clipper.display_end):
+                line = lines[index]
+                # The +/- gutter stays in the text regardless of colour: the
+                # non-hue channel is what keeps a diff readable in high
+                # contrast and to a colour-deficient operator (6.1).
+                imgui.text_colored(colours[diff_line_kind(line)].vec4, line or " ")
+        clipper.end()
+    imgui.end_child()
+
+
+def argument_text(value: object) -> str:
+    """
+    One argument as the approver reads it: a string is itself, never its ``repr``.
+
+    A ``repr`` escapes a command's quotes and folds its line breaks into ``\\n``, so
+    what is read is not what would run. Anything that is not a string is its
+    ``repr``, and so is a string with nothing visible in it, which would otherwise
+    be drawn as nothing at all.
+    """
+    return value if isinstance(value, str) and value.strip() else repr(value)
+
+
+def _native_arguments(pending: PendingApproval) -> None:
+    """
+    The arguments of a call with nothing diff-shaped to show, each wrapped to the
+    pane and all of it reachable: the block is as tall as its text up to the body
+    cap and scrolls past it.
+
+    No diff is a real answer, not a gap: a Bash command has nothing diff-shaped to
+    show, and inventing one would be worse than the args.
+    """
+    style = imgui.get_style()
+    shown = [f"  {name} = {argument_text(value)}" for name, value in pending.raw_args.items()]
+    # Measured at the width the text will have, so that the block is sized by the
+    # lines wrapping makes. The scrollbar's width is left out of the measure: it is
+    # there only when the text is already taller than the cap.
+    inner = max(imgui.get_content_region_avail().x - 8.0 - 2.0 * style.window_padding.x, 40.0)
+    tall = imgui.get_text_line_height() + sum(
+        style.item_spacing.y + imgui.calc_text_size(text, None, False, inner).y for text in shown
+    )
+    cap = _BODY_LINES * imgui.get_text_line_height_with_spacing()
+    body_h = min(cap, tall + 2.0 * style.window_padding.y)
+    if imgui.begin_child("##body", imgui.ImVec2(-8.0, body_h), imgui.ChildFlags_.borders):
+        imgui.text_colored(P.text_dim.vec4, _NO_DIFF)
+        imgui.push_text_wrap_pos(0.0)
+        for text in shown:
+            imgui.text_colored(P.text.vec4, text)
+        imgui.pop_text_wrap_pos()
+    imgui.end_child()
+
+
+def argument_parts(raw_args: Mapping[str, object]) -> tuple[typeset.Part, ...]:
+    """
+    A call's arguments as one document: each name dim and tight over its value,
+    which is set whitespace-exact and broken to the window at any column.
+
+    That form for every value and not only a command: an argument of a call this
+    pane has no reading for is approved as it is, so none of it may be collapsed
+    and none of it may run past the edge of a window that does not scroll sideways.
+    """
+    parts: list[typeset.Part] = []
+    for name, value in raw_args.items():
+        parts.append(typeset.Part(name or '""', typeset.Kind.LITERAL, "text_dim", tight=True))
+        parts.append(typeset.Part(argument_text(value), typeset.Kind.WRAPPED_EXACT))
+    return tuple(parts)
+
+
+def _parts(
+    view: Hashable, source: object, make: Callable[[], tuple[typeset.Part, ...]]
+) -> tuple[typeset.Part, ...]:
+    """
+    The parts of ``view``, made again only when ``source`` is another object.
+
+    Identity is the test because a parked call is a frozen record: the same
+    arguments are the same objects for as long as the call is in the queue.
+    """
+    held = _PARTS.get(view)
+    if held is None or held[0] is not source:
+        held = _PARTS[view] = (source, make())
+    return held[1]
+
+
+@dataclass(frozen=True, slots=True)
+class Description:
+    """
+    A parked call read as a short header and a piece of prose.
+
+    ``fields`` are ``(argument name, value as shown)``. ``body`` is the prose, or
+    ``""`` when the call carries none.
+    """
+
+    fields: tuple[tuple[str, str], ...]
+    body: str
+
+
+def describe(pending: PendingApproval) -> Description | None:
+    """
+    The header fields and the prose of a concern, a task declaration or a spawn.
+    ``None`` for any other call.
+
+    **Every argument lands somewhere.** The ones ``_DESCRIBED`` names come first, in
+    its order; the rest follow in the call's own. An argument this pane has never
+    heard of is still part of what an approval releases, and a header that listed
+    only the expected names would be a place to put one where the approver cannot
+    see it. For the same reason the prose argument is the body only when it is a
+    non-blank string: anything else is shown among the fields as its ``repr``.
+
+    Pure, and cheap enough per frame: it copies a handful of references and joins
+    two short lists. The prose itself is not copied.
+    """
+    shape = _DESCRIBED.get(pending.tool_name)
+    if shape is None:
+        return None
+    prose, leading = shape
+    args = pending.raw_args
+    raw = args.get(prose)
+    body = raw if isinstance(raw, str) and raw.strip() else ""
+    names = [name for name in leading if name in args]
+    names += [name for name in args if name not in leading and (name != prose or not body)]
+    return Description(tuple((name, _field_text(name, args[name])) for name in names), body)
+
+
+def _field_text(name: str, value: object) -> str:
+    """
+    A string as itself and a list of names joined, each only where the bus declares
+    that type; anything else as its ``repr``, so a value of a type its argument
+    should not have looks like what it is rather than like the value it resembles.
+    """
+    if name in _LIST_FIELDS:
+        if isinstance(value, list | tuple) and value:
+            items = [item for item in value if isinstance(item, str)]
+            if len(items) == len(value):
+                return ", ".join(items)
+        return repr(value)
+    return value if isinstance(value, str) else repr(value)
+
+
+def edit_withheld(state: review.ReviewState, pending: PendingApproval) -> bool:
+    """
+    Whether the operator holds an edit of these arguments that the row is not showing.
+
+    The body under a closed editor is drawn from the call as the agent made it,
+    while ``review.resolve`` sends the draft. They differ whenever a draft outlives
+    its editor -- ``e`` on another row moves the editor and keeps this one's text --
+    and then ``a`` approves something other than the diff above it.
+
+    Serialises the arguments to compare, which for a whole-file Write is the file;
+    only reached while a draft exists.
+    """
+    draft = state.edits.get(pending.id)
+    if draft is None or state.editing == pending.id:
+        return False
+    return draft != review.pretty_args(pending)
+
+
+def refusals(pending: PendingApproval) -> tuple[str, ...]:
+    """
+    Each distinct reason the gate's read gives for this call's edit having no place
+    to land, in the order the parts give them.
+    """
+    reasons = (text.will_not_apply for text in pending.texts or ())
+    return tuple(dict.fromkeys(reason for reason in reasons if reason))
+
+
+def _typeset_body(pending: PendingApproval, key: str) -> int:
+    """
+    What the call would do, set through the seam: its diff, or its description, or
+    failing both its arguments. Answers how many lines of it are not set yet.
+
+    **A body short of its text says so above itself** (``notice_above``), and the
+    row holds its approve button until the answer here is zero: under the seam's
+    budget a long body is whole some frames after it is first on screen -- a
+    100,000-character concern took 27 frames, measured -- and the part that is
+    there looks like all of it.
+
+    **No child of this pane's own around a view.** A capped diff and a capped
+    document each open one when they are taller than the cap, and a second scrolling
+    child around that would be two wheels and two scrollbars for one body. A body
+    under the cap is drawn straight into the queue's window, which scrolls, so the
+    view culls to it.
+
+    **The diff carries no copy of the gate's prediction** (``warning=False``): the
+    row says it, above this body, under either renderer. **A large diff's model is
+    made off the frame** (``background=True``); until it arrives the seam draws a
+    line saying so and answers that line's height, so the row has its body, and
+    its warning, on every frame in between.
+    """
+    line_h = imgui.get_text_line_height_with_spacing()
+    wide = imgui.get_content_region_avail().x - 8.0
+    cap = _BODY_LINES * line_h
+
+    # Asked of the record before the seam: texts with no parts make a diff model
+    # with nothing in it, and the seam's answer for that is "nothing to show".
+    diffed = bool(pending.diff) if pending.texts is None else bool(pending.texts)
+    if diffed and (
+        typeset.diff(
+            _VIEWS,
+            (key, "diff"),
+            pending,
+            height_cap=_BODY_LINES * typeset.diff_row_height(),
+            width=wide,
+            warning=False,
+            background=True,
+        )
+        is not None
+    ):
+        return _VIEWS.unbuilt((key, "diff")) or 0
+    described = describe(pending)
+    if described is None:
+        imgui.text_colored(P.text_dim.vec4, _NO_DIFF)
+        raw = pending.raw_args
+        typeset.document(
+            _VIEWS,
+            (key, "arguments"),
+            _parts((key, "arguments"), raw, lambda: argument_parts(raw)),
+            width=wide,
+            height_cap=cap - line_h,
+            notice_above=True,
+        )
+        return _VIEWS.unbuilt((key, "arguments")) or 0
+
+    # The fields are text on the pane's own ground, with no band of their own to
+    # stand off the row's focus rectangle the way a diff's file header does.
+    imgui.spacing()
+    top = imgui.get_cursor_pos_y()
+    left = imgui.get_cursor_pos_x()
+    for name, value in described.fields:
+        typeset.label(name, weight=typeset.Weight.REGULAR, colour=P.text_dim)
+        imgui.same_line(left + _X_FIELD_VALUE)
+        # Wrapped, not ellipsized: a subject is short enough that this is one line,
+        # and when it is not, the rest of it is still something being approved.
+        imgui.push_text_wrap_pos(left + wide)
+        with typeset.font(typeset.Weight.REGULAR):
+            imgui.text_colored(P.text_strong.vec4, value or '""')
+        imgui.pop_text_wrap_pos()
+    body = described.body
+    if body:
+        # The fields come out of the cap, down to a floor: a call with many
+        # arguments still gets a readable window onto its prose.
+        used = imgui.get_cursor_pos_y() - top
+        room = max(cap - used, 8.0 * line_h)
+        # ``prose_parts`` and not markdown outright: the seam's one rule for what a
+        # body somebody wrote is read as, so this body reads here as it does in
+        # DETAIL, on the board and in the brief.
+        typeset.document(
+            _VIEWS,
+            (key, "body"),
+            _parts((key, "body"), body, lambda: typeset.prose_parts(body)),
+            width=wide,
+            height_cap=room,
+            notice_above=True,
+        )
+        return _VIEWS.unbuilt((key, "body")) or 0
+    return 0
 
 
 def _editor(state: review.ReviewState, pending: object, *, wrap: bool = True) -> None:
@@ -555,6 +906,15 @@ def _batch_controls(
         return
 
     imgui.separator()
+    # A refused approve is said on the open row of a call it covered. Here when
+    # there is no such row: the cursor is on a question, a failure, or nothing.
+    refusal = state.refusal
+    current = focus.obligation(snap)
+    on_row = isinstance(current, ApprovalNeeded) and (
+        refusal is not None and current.approval.id in refusal.asked
+    )
+    if refusal is not None and not on_row:
+        _warning(refusal.text)
     node = focus.node(snap)
     if node is not None:
         scoped = sum(1 for p in approvals if p.node == node)

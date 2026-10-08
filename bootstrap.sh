@@ -8,10 +8,26 @@
 # has no X display, so the window smoke test is wrapped in Xvfb or skipped with
 # an explanation, rather than failing for a reason unrelated to the build.
 #
+# advtext is on no package index. It is installed editable from a source
+# checkout, located by ADVTEXT_SRC (default: $HOME/Source/imgui-adv-text).
+#
 # Usage: ./bootstrap.sh [--no-window] [--python PATH]
 set -euo pipefail
 
 cd "$(dirname "$0")"
+
+ADVTEXT_SRC="${ADVTEXT_SRC:-$HOME/Source/imgui-adv-text}"
+
+# Checked before anything is created, so a missing checkout does not leave a
+# venv behind that looks finished and cannot import the UI.
+if [ ! -f "$ADVTEXT_SRC/pyproject.toml" ]; then
+  echo "advtext source checkout not found at: $ADVTEXT_SRC" >&2
+  echo "    pptmstr depends on advtext, which is on no package index." >&2
+  echo "    Set ADVTEXT_SRC to a checkout of imgui-adv-text and re-run:" >&2
+  echo >&2
+  echo "        ADVTEXT_SRC=/path/to/imgui-adv-text ./bootstrap.sh" >&2
+  exit 1
+fi
 
 # Keep in step with requires-python in pyproject.toml.
 MIN_MAJOR=3
@@ -24,7 +40,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --no-window) SKIP_WINDOW=1; shift ;;
     --python) PYTHON="${2:-}"; shift 2 ;;
-    -h|--help) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown flag: $1" >&2; exit 2 ;;
   esac
 done
@@ -90,6 +106,10 @@ fi
 
 echo
 echo ">>> stage 3/4: install"
+# advtext first: the resolver cannot find a bare `advtext` on an index, and an
+# already-installed distribution of that name is what satisfies it.
+echo "    advtext from $ADVTEXT_SRC"
+"${INSTALL[@]}" -e "$ADVTEXT_SRC"
 "${INSTALL[@]}" -e ".[dev]"
 
 echo
