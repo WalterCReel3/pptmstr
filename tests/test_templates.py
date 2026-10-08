@@ -337,6 +337,32 @@ def test_a_worker_is_told_to_read_its_inbox_and_claim_work() -> None:
     assert "release_task" in prompt
 
 
+def test_a_worker_is_told_what_a_task_read_is_for() -> None:
+    """
+    Listing a tool does not make it used (STYLE.md §3). The path a worker already
+    has to the rest of a cut row is asking the lead, so the prompt has to name the
+    situation -- a row that was cut, a task it does not hold -- and say the lead is
+    not the answer to it.
+    """
+    prompt = worker_prompt(Role(name="w", description="d", prompt="p"))
+    paragraph = next(p for p in prompt.split("\n\n") if "read_task(task_id)" in p)
+    assert "cut" in paragraph
+    assert "you do not hold" in paragraph and "without claiming it" in paragraph
+    assert "lead" in paragraph
+
+
+@pytest.mark.parametrize("template", [FEATURE, RESEARCH])
+def test_the_lead_is_told_to_route_a_cut_row_to_the_task_read(template: WorkTemplate) -> None:
+    """
+    The other end of the same relay. A lead asked for the rest of a specification
+    will helpfully re-send it unless it knows the worker had a way to read it.
+    """
+    briefing = lead_briefing(template)
+    bullet = next(b for b in briefing.split("\n- ") if b.startswith("`read_task(task_id)`"))
+    assert "open to every agent" in bullet
+    assert "rather than re-sending" in bullet
+
+
 def test_the_adversarial_roles_are_told_to_disagree() -> None:
     """
     The whole reason a reviewer is worth a second agent. One told to "check the
@@ -824,6 +850,11 @@ The first agent in a role is addressed by the bare role name, the second as
 - `read_board()` shows the board to you and to them. A worker asking what
   is on it no longer has to ask you, so route them to it rather than
   relaying the state yourself — your copy goes stale and the board does not.
+- `read_task(task_id)` returns a task whole. The board cuts a long
+  specification and a long note, and the claim reply is the other place a
+  specification arrives in full — so a worker asking you for the rest of
+  another task's row is asking for this, and it is open to every agent on
+  the board. Send them there rather than re-sending the text.
 - `post_concern(to, subject, body)` sends a message to a role by name, or to
   `lead` for you. `read_inbox()` collects what has been sent to you.
 - Messages between agents are reviewed by the operator before they arrive, so

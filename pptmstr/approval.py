@@ -220,11 +220,14 @@ _AUTONOMOUS_AUTO = _REVIEW
 # approved, and nothing had ever approved it. The ones that remain are the ones the
 # premise actually holds for, in one of two shapes: bookkeeping about a task whose
 # existence the operator decided at declaration, or -- `read_inbox` -- reading
-# messages that were already reviewed at the send.
+# messages that were already reviewed at the send. `read_task` is both at once and
+# nothing else: a specification reviewed when it was declared, and the notes on it
+# reviewed when they were sent.
 _BUS_AUTO = frozenset(
     {
         f"mcp__{_BUS_SERVER}__read_inbox",
         f"mcp__{_BUS_SERVER}__read_board",
+        f"mcp__{_BUS_SERVER}__read_task",
         f"mcp__{_BUS_SERVER}__claim_task",
         f"mcp__{_BUS_SERVER}__complete_task",
         f"mcp__{_BUS_SERVER}__release_task",

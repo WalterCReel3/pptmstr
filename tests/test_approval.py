@@ -386,6 +386,7 @@ _TODAY: tuple[tuple[str, Mapping[str, Any], Disposition], ...] = (
     # Bus coordination that reads or reserves.
     ("mcp__pptmstr__read_inbox", {}, Disposition.AUTO_APPROVE),
     ("mcp__pptmstr__read_board", {}, Disposition.AUTO_APPROVE),
+    ("mcp__pptmstr__read_task", {"task_id": "t-1"}, Disposition.AUTO_APPROVE),
     ("mcp__pptmstr__claim_task", {}, Disposition.AUTO_APPROVE),
     ("mcp__pptmstr__complete_task", {"task_id": "t-1"}, Disposition.AUTO_APPROVE),
     ("mcp__pptmstr__release_task", {"task_id": "t-1"}, Disposition.AUTO_APPROVE),

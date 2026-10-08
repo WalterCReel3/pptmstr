@@ -1111,7 +1111,14 @@ def test_coordination_is_not_reviewed() -> None:
     # declaration. Parking these would make the operator a bottleneck on a worker
     # taking the next item off a board they have already approved -- which, unlike
     # before, is now true.
-    for name in ("read_inbox", "read_board", "claim_task", "complete_task", "release_task"):
+    for name in (
+        "read_inbox",
+        "read_board",
+        "read_task",
+        "claim_task",
+        "complete_task",
+        "release_task",
+    ):
         assert classify(qualified(name), {}) is Disposition.AUTO_APPROVE, name
 
 
@@ -1240,6 +1247,8 @@ DOCUMENTED_CALLS: dict[str, dict[str, object]] = {
     # "See every task on your team's board" -- takes nothing. The session is the
     # gate's stamp, not an argument, so there is nothing here for a model to fill.
     "read_board": {},
+    # "Omit part for the first" -- the id is the whole of the ordinary call.
+    "read_task": {"task_id": "t1"},
     # "Omit task_id to be given the oldest task whose dependencies are all met."
     "claim_task": {},
     # "Omit it and the board generates one" / "Omit it for a title-only task" /
@@ -1273,6 +1282,7 @@ def test_an_argument_a_tool_cannot_work_without_is_still_required() -> None:
     for name, needed in (
         ("post_concern", "to"),
         ("declare_task", "title"),
+        ("read_task", "task_id"),
         ("complete_task", "task_id"),
         ("release_task", "task_id"),
     ):
@@ -2189,8 +2199,12 @@ def test_a_trimmed_board_says_it_was_trimmed_and_how_to_get_the_rest() -> None:
     with _live_bus() as bus:
         text = bus.call(_crowded_board(), "read_board", {}, sender=DEV)
 
-    assert "This board did not fit" in text.split("- t0 [")[0]
-    assert "claim_task returns a task's specification in full" in text
+    notice = text.split("- t0 [")[0]
+    assert "This board did not fit" in notice
+    # The way to the rest is a tool any reader can call. Claiming is not one: it
+    # takes the task, and the reader of somebody else's row must not.
+    assert "read_task(task_id)" in notice
+    assert "claim_task" not in notice and "be asked for the rest" not in notice
 
 
 def test_a_board_that_fits_is_not_trimmed_and_carries_its_specs_whole() -> None:
@@ -2231,3 +2245,337 @@ def test_rows_survive_a_board_whose_structure_alone_exceeds_the_ceiling() -> Non
     assert len(text) > _MAX_BOARD_CHARS
     for i in range(400):
         assert f"- t{i} [" in text, i
+
+
+# -- one task, whole ---------------------------------------------------------------
+#
+# A board row ends where its bounds say, and the bounds stay: a listing is paid for
+# by the token and twelve unbounded rows do not reach the agent at all. What was
+# missing is a way to follow the row past its end. The only reader ever handed a
+# long specification whole was the one that claimed it, and the readers who most
+# need another task's specification -- a builder designing for its consumers, a
+# reviewer auditing the plan -- hold no claim on it.
+
+
+def _prose(words: int, stem: str = "clause") -> str:
+    """
+    Text in which every position is distinguishable from every other.
+
+    A run of one repeated character cannot tell a reply that carries a specification
+    whole from one that carries the right number of characters from the wrong place,
+    and it cannot show that pages meet without a gap or an overlap.
+    """
+    return " ".join(f"{stem}-{i}" for i in range(words))
+
+
+def test_a_spec_the_board_cuts_is_whole_in_a_task_read() -> None:
+    from pptmstr.bus import _MAX_DETAIL_CHARS
+
+    spec = _prose(520)
+    assert len(spec) > 5000 > _MAX_DETAIL_CHARS
+    store = Store()
+    store.apply(TaskDeclared(Task(id="t1", title="do t1", detail=spec), node_id=LEAD))
+
+    with _live_bus() as bus:
+        listed = bus.call(store, "read_board", {}, sender=QA)
+        whole = bus.call(store, "read_task", {"task_id": "t1"}, sender=QA)
+
+    assert spec not in listed and "clause-519" not in listed
+    assert spec in whole
+    assert "more character(s)" not in whole
+
+
+def test_a_cut_spec_names_the_tool_and_the_task_that_carry_the_rest() -> None:
+    """
+    The notice is the only thing that turns a bound into a pointer, and a pointer at
+    the lead is a pointer at the one copy the board exists to replace.
+    """
+    store = Store()
+    store.apply(TaskDeclared(Task(id="t-long", title="x", detail=_prose(520)), node_id=LEAD))
+    store.apply(TaskDeclared(Task(id="t-short", title="y", detail="one line"), node_id=LEAD))
+
+    with _live_bus() as bus:
+        listed = bus.call(store, "read_board", {}, sender=QA)
+
+    assert 'read_task("t-long")' in listed
+    # Only the row that was cut points anywhere: a pointer on every row is noise a
+    # reader learns to skip, on the one row where it matters included.
+    assert 'read_task("t-short")' not in listed
+    assert "ask the lead" not in listed
+
+
+def test_a_reader_who_does_not_hold_a_task_reads_it_whole() -> None:
+    """
+    The claim reply already carries a specification whole, to the claimer. This is
+    for everybody else, so the reader here holds nothing and the task is taken.
+    """
+    spec = _prose(520)
+    store = Store()
+    store.apply(declared("t0", touches=("pptmstr/store.py",)))
+    store.apply(
+        TaskDeclared(
+            Task(
+                id="t1",
+                title="wire the gate",
+                detail=spec,
+                depends_on=("t0",),
+                touches=("pptmstr/bus.py", "tests/test_bus.py"),
+            ),
+            node_id=LEAD,
+        )
+    )
+    store.apply(TaskDeclared(Task(id="t2", title="another", detail="NOT ASKED FOR"), LEAD))
+    store.apply(TaskClaimRequested(node_id=DEV, request_id="k0", task_id="t0"))
+
+    with _live_bus() as bus:
+        blocked = bus.call(store, "read_task", {"task_id": "t1"}, sender=QA)
+        held = bus.call(store, "read_task", {"task_id": "t0"}, sender=QA)
+
+    assert spec in blocked
+    assert "t1 [pending] wire the gate" in blocked
+    assert "waiting on t0" in blocked
+    assert "writes pptmstr/bus.py, tests/test_bus.py" in blocked
+    # One task, which is what keeps this cheap enough to be the answer to a cut row.
+    assert "NOT ASKED FOR" not in blocked and "another" not in blocked
+    assert "t0 [claimed]" in held and "held by" in held
+    assert store.snapshot().tasks["t0"].claimed_by == DEV
+
+
+def test_a_note_the_board_cuts_is_whole_in_a_task_read() -> None:
+    from pptmstr.bus import _MAX_CONCERN_CHARS
+
+    finding = _prose(200, "finding")
+    assert len(finding) > _MAX_CONCERN_CHARS
+    store = Store()
+    store.apply(declared("t1"))
+    store.apply(ConcernPosted(DEV, _about("c1", "t1", body=finding)))
+    store.apply(ConcernPosted(DEV, _about("c2", "t1", body="a short second note")))
+    store.apply(ConcernPosted(DEV, _about("c3", None, body="MAIL, NOT A NOTE")))
+
+    with _live_bus() as bus:
+        listed = bus.call(store, "read_board", {}, sender=QA)
+        whole = bus.call(store, "read_task", {"task_id": "t1"}, sender=QA)
+
+    assert finding not in listed
+    assert 'read_task("t1")' in listed
+    assert finding in whole and "a short second note" in whole
+    assert "2 agent note(s)" in whole
+    assert whole.count("waiting on the schema decision") == 2
+    # The same line the board draws between a finding about shared work and mail.
+    assert "MAIL, NOT A NOTE" not in whole
+
+
+def test_a_task_read_for_an_id_that_is_not_there_says_what_is() -> None:
+    """
+    A refusal that only says no sends the reader back to make the same call. The
+    ids are the recovery for a misspelling, and they are all this tool can know.
+    """
+    store = Store()
+    store.apply(declared("t1"))
+    store.apply(declared("t2"))
+
+    with _live_bus() as bus:
+        missing = bus.call(store, "read_task", {"task_id": "t-3"}, sender=QA)
+        blank = bus.call(store, "read_task", {"task_id": "  "}, sender=QA)
+        padded = bus.call(store, "read_task", {"task_id": " t2 "}, sender=QA)
+
+    assert "No task 't-3'" in missing
+    assert "t1, t2" in missing
+    assert "t1, t2" in blank and "No task ''" not in blank
+    assert "t2 [pending] do t2" in padded
+
+
+def test_a_task_read_does_not_reach_another_sessions_board() -> None:
+    """
+    The scoping the board read already has, at the narrower tool. The refusal says
+    the board is scoped rather than only that the id is absent, because an id
+    carried over from another session is a different mistake from a misspelling and
+    retyping it will never work.
+    """
+    other: NodeId = ("sess-2", None)
+    store = Store()
+    store.apply(declared("ours"))
+    store.apply(TaskDeclared(Task(id="theirs", title="their work", detail="THEIR SPEC"), other))
+
+    with _live_bus() as bus:
+        refused = bus.call(store, "read_task", {"task_id": "theirs"}, sender=QA)
+        granted = bus.call(store, "read_task", {"task_id": "theirs"}, sender=other)
+
+    assert "THEIR SPEC" not in refused and "their work" not in refused
+    assert "another session" in refused
+    assert "THEIR SPEC" in granted
+
+
+def test_a_task_read_on_an_empty_board_says_the_board_is_empty() -> None:
+    with _live_bus() as bus:
+        text = bus.call(Store(), "read_task", {"task_id": "t1"}, sender=QA)
+
+    assert "no tasks on it yet" in text
+
+
+def _pages(bus: _Bus, store: Store, task_id: str) -> list[str]:
+    """Every part of one task, fetched the way a reader following the replies would."""
+    first = bus.call(store, "read_task", {"task_id": task_id}, sender=QA)
+    count = int(first.split(" of ", 1)[1].split(":", 1)[0])
+    rest = [
+        bus.call(store, "read_task", {"task_id": task_id, "part": n}, sender=QA)
+        for n in range(2, count + 1)
+    ]
+    return [first, *rest]
+
+
+def _huge_task() -> tuple[Store, str, str]:
+    """A task no single reply can carry: a long specification and a long note."""
+    from pptmstr.bus import _MAX_TASK_CHARS
+
+    spec = _prose(6000)
+    finding = _prose(3000, "finding")
+    assert len(spec) > _MAX_TASK_CHARS
+    store = Store()
+    store.apply(TaskDeclared(Task(id="t1", title="do t1", detail=spec), node_id=LEAD))
+    store.apply(ConcernPosted(DEV, _about("c1", "t1", body=finding)))
+    return store, spec, finding
+
+
+def test_a_task_too_large_for_one_reply_announces_its_own_ceiling() -> None:
+    """
+    The whole-task read is a reply too, and the cap it has to fit under is the
+    harness's rather than ours. An unbounded one would re-create, for the longest
+    specification on the board, exactly the reply that could not be read.
+    """
+    from pptmstr.bus import _MAX_TASK_CHARS
+
+    store, spec, _ = _huge_task()
+
+    with _live_bus() as bus:
+        pages = _pages(bus, store, "t1")
+
+    assert len(pages) > 1
+    for page in pages:
+        assert len(page) <= _MAX_TASK_CHARS
+    head = pages[0].split("\n\n", 1)[0]
+    assert f"part 1 of {len(pages)}" in head
+    # The next call is spelled out, not left to be inferred from a page count.
+    assert 'read_task("t1", part=2)' in head
+    assert "last part" in pages[-1].split("\n\n", 1)[0]
+    assert "part=" not in pages[-1].split("\n\n", 1)[0]
+
+
+def test_the_parts_of_a_task_meet_without_a_gap_or_an_overlap() -> None:
+    """
+    Paging that drops or repeats a character at each seam hands over a
+    specification that reads as whole and is not, which is the silent cap again.
+    """
+    store, spec, finding = _huge_task()
+
+    with _live_bus() as bus:
+        pages = _pages(bus, store, "t1")
+
+    joined = "".join(page.split("\n\n", 1)[1] for page in pages)
+    assert spec in joined
+    assert finding in joined
+    assert joined.count("clause-3000 ") == 1
+
+
+def test_a_task_that_fits_in_one_reply_is_not_paged() -> None:
+    store = Store()
+    store.apply(TaskDeclared(Task(id="t1", title="do t1", detail=_prose(520)), node_id=LEAD))
+
+    with _live_bus() as bus:
+        text = bus.call(store, "read_task", {"task_id": "t1"}, sender=QA)
+
+    assert "part 1 of" not in text and "part=" not in text
+
+
+@pytest.mark.parametrize("part", [0, -1, 99])
+def test_a_part_that_does_not_exist_is_refused_with_the_count(part: int) -> None:
+    """
+    Not clamped to the nearest part. A reader that asked for part 99 and was handed
+    the last one would file it as the ninety-ninth.
+    """
+    store, _, _ = _huge_task()
+
+    with _live_bus() as bus:
+        count = len(_pages(bus, store, "t1"))
+        text = bus.call(store, "read_task", {"task_id": "t1", "part": part}, sender=QA)
+
+    assert "clause-" not in text
+    assert f"{count} part(s)" in text
+
+
+def test_a_part_of_a_task_that_has_only_one_is_refused() -> None:
+    store = Store()
+    store.apply(TaskDeclared(Task(id="t1", title="do t1", detail="the whole spec"), LEAD))
+
+    with _live_bus() as bus:
+        first = bus.call(store, "read_task", {"task_id": "t1", "part": 1}, sender=QA)
+        second = bus.call(store, "read_task", {"task_id": "t1", "part": 2}, sender=QA)
+
+    assert "the whole spec" in first
+    assert "the whole spec" not in second and "1 part(s)" in second
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [(None, 1), (3, 3), (2.0, 2), (2.5, None), ("2", None), (True, None), ([2], None)],
+)
+def test_a_part_that_is_not_a_whole_number_is_not_read_as_one(
+    raw: object, expected: int | None
+) -> None:
+    """
+    The schema refuses these before the handler runs, so nothing driven through the
+    server can reach this. It is pinned directly because the alternative reading --
+    coerce, or fall back to the first part -- answers with a part the caller did
+    not name.
+    """
+    from pptmstr.bus import _part_number
+
+    assert _part_number(raw) == expected
+
+
+def test_a_task_read_is_stamped_or_it_is_refused() -> None:
+    """
+    The wiring rather than the unit: `_sender` refusing an unstamped call is
+    covered above, and is worth nothing for a tool whose handler never asks.
+    """
+    from pptmstr.bus import BUS_TOOLS, qualified
+
+    assert qualified("read_task") in BUS_TOOLS
+
+    bridge = Bridge()
+    bridge.start()
+    try:
+        bus = _Bus(bridge)
+        pending = bridge.submit(
+            bus.handler(
+                mcp_types.CallToolRequest(
+                    method="tools/call",
+                    params=mcp_types.CallToolRequestParams(
+                        name="read_task", arguments={"task_id": "t1"}
+                    ),
+                )
+            )
+        )
+        answer = pending.result(timeout=5.0)
+    finally:
+        bridge.stop()
+
+    assert answer.root.isError
+    assert "no authenticated sender" in str(answer.root.content[0].text)
+    assert not bridge.drain()
+
+
+def test_a_task_read_changes_nothing() -> None:
+    store = Store()
+    store.apply(declared("t1"))
+    store.apply(ConcernPosted(DEV, _about("c1", "t1")))
+    before = store.snapshot()
+
+    with _live_bus() as bus:
+        bus.call(store, "read_task", {"task_id": "t1"}, sender=QA)
+
+    after = store.snapshot()
+    assert after.tasks == before.tasks
+    # A note read off a task is not a message collected: the recipient's inbox
+    # still owes it to them.
+    assert after.concerns == before.concerns

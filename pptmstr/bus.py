@@ -28,10 +28,10 @@ Two consequences worth stating plainly:
 
 Everything a handler returns to the model is text. Everything it changes goes
 through the intent queue, and **a handler never composes an outcome it did not
-wait for**. Five of the six tools park on the Bridge's third crossing and are
-answered by the store on the next frame (``effects.py``): ``read_inbox`` and
-``claim_task``, which ask questions, and the three board writes, which assert
-facts the reducer is entitled to refuse.
+wait for**. Every tool but one parks on the Bridge's third crossing and is
+answered by the store on the next frame (``effects.py``): ``read_inbox``,
+``claim_task``, ``read_board`` and ``read_task``, which ask questions, and the
+three board writes, which assert facts the reducer is entitled to refuse.
 
 ``post_concern`` is the exception and is not in this class. Its only refusal is the
 ``resolve_role`` check it makes here, before emitting, and it reports that one
@@ -75,15 +75,15 @@ if TYPE_CHECKING:  # pragma: no cover - import cycle only matters to the checker
 
 SERVER_NAME = "pptmstr"
 
-# One task's specification in a board read. Generous: this is the field the tool
-# exists to expose, and a lead that has to ask for the rest of its own spec is the
-# defect being fixed. Bounded at all because a board read is a reply an agent pays
-# for by the token, and one 40,000-character detail would crowd out every other row.
+# One task's specification in a board read. Bounded because a board read is a reply
+# an agent pays for by the token, and one 40,000-character detail would crowd out
+# every other row. What makes the bound affordable is that it is not the end of the
+# specification: the row that is cut names ``read_task``, which carries the rest.
 _MAX_DETAIL_CHARS = 2000
 
 # One agent note in a board read. Tighter than a specification: a concern is one
 # finding, and a reader scanning a board wants the finding rather than the essay.
-# Announced when it bites, like every other bound here.
+# Announced when it bites, like every other bound here, and followed the same way.
 _MAX_CONCERN_CHARS = 1200
 
 # The whole reply. The two bounds above are per row, and twelve bounded rows still
@@ -97,6 +97,15 @@ _MAX_CONCERN_CHARS = 1200
 # knows the tool's actual ceiling -- it is the harness's, not ours -- so this is set
 # below both observations rather than derived from it.
 _MAX_BOARD_CHARS = 30_000
+
+# One reply from ``read_task``. The board's ceiling by identity rather than a second
+# number, because the evidence is the same evidence: what overflowed was a reply, and
+# the harness's cap does not care whether twelve tasks or one filled it. A whole-task
+# read with no ceiling would move the unreadable reply from the longest board to the
+# longest specification -- and ``declare_task`` puts no bound on a detail.
+#
+# A task past it is paged rather than cut, since being whole is the tool's one job.
+_MAX_TASK_CHARS = _MAX_BOARD_CHARS
 
 # The key the gate writes the authenticated sender into. Leading underscore so it
 # reads as ours rather than as something the model was meant to fill, and absent
@@ -274,18 +283,7 @@ def _board_line(
     reads this row to decide whether to claim it and then to build from it, and a
     note is a finding *about* work whose description it presumes.
     """
-    parts = [f"- {row.id} [{row.state.value}] {row.title}"]
-    if row.owner is not None:
-        parts.append(f"held by {row.owner}")
-    if row.owner_gone:
-        parts.append("but its owner has stopped -- this task is stranded")
-    if row.blocked_on:
-        parts.append(f"waiting on {', '.join(row.blocked_on)}")
-    if row.missing:
-        parts.append(f"NEVER DECLARED: {', '.join(row.missing)}")
-    if row.touches:
-        parts.append(f"writes {', '.join(row.touches)}")
-    line = " · ".join(parts)
+    line = f"- {_row_head(row)}"
     spare = _MAX_DETAIL_CHARS if budget is None else max(0, budget)
     if row.detail:
         # Indented under its row rather than joined with the separator: a
@@ -296,10 +294,44 @@ def _board_line(
         if body:
             line += f"{_DETAIL_INDENT}{body}"
         if dropped:
-            line += f"\n    ... {dropped} more character(s) -- ask the lead for the rest"
+            line += f"\n    ... {dropped} more character(s): {_task_call(row.id)} has all of it"
         spare -= _charged(body, _DETAIL_INDENT)
     line += _reasons_text(row, reasons or {}, None if budget is None else spare)
     return line
+
+
+def _row_head(row: BoardTask) -> str:
+    """
+    What a task is and where it stands, on one line: everything about it but prose.
+
+    One function because the board and ``read_task`` both open on it. The reader who
+    follows a cut row to the whole task is checking that it arrived at the same
+    task in the same state, and two spellings of "held by" would make that a
+    comparison rather than a glance.
+    """
+    parts = [f"{row.id} [{row.state.value}] {row.title}"]
+    if row.owner is not None:
+        parts.append(f"held by {row.owner}")
+    if row.owner_gone:
+        parts.append("but its owner has stopped -- this task is stranded")
+    if row.blocked_on:
+        parts.append(f"waiting on {', '.join(row.blocked_on)}")
+    if row.missing:
+        parts.append(f"NEVER DECLARED: {', '.join(row.missing)}")
+    if row.touches:
+        parts.append(f"writes {', '.join(row.touches)}")
+    return " · ".join(parts)
+
+
+def _task_call(task_id: TaskId, part: int | None = None) -> str:
+    """
+    The call that reads ``task_id`` whole, spelled as an agent would make it.
+
+    Written out with the id in it rather than described. A notice saying "the rest
+    is available" leaves the reader to work out from where, and the answer it
+    reaches for first is the lead -- whose copy is the one the board replaces.
+    """
+    return f'read_task("{task_id}")' if part is None else f'read_task("{task_id}", part={part})'
 
 
 def _reasons_text(
@@ -333,7 +365,7 @@ def _reasons_text(
     above taken one step further rather than abandoned. A note whose body did not
     fit still appears, and still says how much of it is missing.
     """
-    shown = [by_id[cid] for cid in row.concerns if cid in by_id]
+    shown = _notes(row, by_id)
     if not shown:
         return ""
     spare = budget
@@ -347,10 +379,24 @@ def _reasons_text(
         if body:
             out.append(f"{_NOTE_INDENT}{body}")
         if dropped:
-            out.append(f"\n       ... {dropped} more character(s)")
+            out.append(
+                f"\n       ... {dropped} more character(s): {_task_call(row.id)} has the"
+                " whole note"
+            )
         if spare is not None:
             spare -= _charged(body, _NOTE_INDENT)
     return "".join(out)
+
+
+def _notes(row: BoardTask, by_id: Mapping[ConcernId, BoardConcern]) -> list[BoardConcern]:
+    """
+    The notes a row carries, oldest first.
+
+    Which concerns are a task's notes is ``board._open_concerns_by_task``'s
+    decision, read off ``row.concerns``. Shared by the board and ``read_task`` so
+    the whole task cannot show a note the row that pointed at it did not count.
+    """
+    return [by_id[cid] for cid in row.concerns if cid in by_id]
 
 
 # What a body is laid out on. Named because they are charged against a row's budget
@@ -424,8 +470,8 @@ def _board_text(tasks: Sequence[BoardTask], by_id: Mapping[ConcernId, BoardConce
     notice = (
         "\n\nThis board did not fit, so every specification and note below is cut to "
         "{share} characters. Nothing is hidden: every task is listed and every note "
-        "names its sender and subject. claim_task returns a task's specification in "
-        "full, and the agent holding one can be asked for the rest."
+        "names its sender and subject. read_task(task_id) returns any one task whole "
+        "-- its specification and every note on it -- to any agent on this board."
     )
     spare = _MAX_BOARD_CHARS - len(floor) - len(notice)
     share = max(0, spare // len(tasks))
@@ -447,6 +493,144 @@ def _clipped(text: str, limit: int) -> tuple[str, int]:
     if len(text) <= limit:
         return text, 0
     return text[:limit], len(text) - limit
+
+
+def _task_text(row: BoardTask, by_id: Mapping[ConcernId, BoardConcern]) -> str:
+    """
+    One task with nothing cut: where it stands, its specification, every note.
+
+    The board's row with its bounds removed and nothing else changed -- the same
+    head, the same notes under the same attributions. It is the continuation of a
+    row, so it adds no field a row does not have; a reader who came here from a
+    notice is owed the rest of what it was reading and not a second format to learn.
+
+    Laid out flush rather than indented, because a specification is usually
+    markdown and nothing here has to be told apart from a neighbouring row.
+    """
+    out = [f"Task {_row_head(row)}"]
+    # Said rather than left blank: an empty reply under a heading cannot be told
+    # from a specification that failed to arrive.
+    out.append(row.detail or "It was declared with a title and no specification.")
+    shown = _notes(row, by_id)
+    if shown:
+        out.append(f"-- {len(shown)} agent note(s) on this task:")
+        out.extend(f"[{c.sender}] {c.subject or '(no subject)'}\n{c.body}" for c in shown)
+    return "\n\n".join(out)
+
+
+# Between a part's head and its text. Named because it is charged against the
+# ceiling like the head is.
+_PART_GAP = "\n\n"
+
+
+def _part_head(task_id: TaskId, part: int, count: int, start: int, end: int, total: int) -> str:
+    """
+    What one part of a paged task says about itself, before its text.
+
+    Carries the character range and the total, not only "part 2 of 4". A task can
+    be amended or gain a note between two reads, and the parts of a text that moved
+    do not meet; the total is what lets a reader see that it did.
+    """
+    where = f"Task {task_id}, part {part} of {count}: characters {start + 1}-{end} of {total}."
+    if part < count:
+        return (
+            f"{where} It did not fit in one reply and is cut where the ceiling fell, not"
+            f" at a paragraph. {_task_call(task_id, part + 1)} continues from the next"
+            " character."
+        )
+    return f"{where} This is the last part."
+
+
+def _paged(task_id: TaskId, whole: str, part: int) -> str:
+    """
+    ``whole`` if it fits one reply, and otherwise the part of it that was asked for.
+
+    **Paged rather than cut, and the parts are exact.** Being whole is the only
+    reason this tool exists, so its ceiling cannot be a second place a
+    specification ends: every part names the call that fetches the next, and the
+    parts laid end to end are the text with nothing dropped or repeated. The seam
+    falls on a character count rather than a paragraph because a seam chosen by
+    content is a seam two reads of a changed text would choose differently.
+
+    A part that does not exist is refused, never clamped. Clamping answers a
+    question the reader did not ask and lets it file the last part as the one it
+    named.
+
+    The window is the ceiling less the longest head any part of this text could
+    carry, so the bound holds for the reply and not only for the slice inside it.
+    """
+    total = len(whole)
+    fits = total <= _MAX_TASK_CHARS
+    # No part number or count can have more digits than the total has, so a head
+    # built from the total in every slot is at least as long as any real one.
+    widest = _part_head(task_id, total, total + 1, total, total, total)
+    window = total if fits else max(1, _MAX_TASK_CHARS - len(widest) - len(_PART_GAP))
+    count = 1 if fits else -(-total // window)
+    if not 1 <= part <= count:
+        return (
+            f"Task {task_id} has {count} part(s), numbered from 1, so there is no part"
+            f" {part}. {_task_call(task_id)} returns the first."
+        )
+    if fits:
+        return whole
+    start = (part - 1) * window
+    end = min(total, start + window)
+    return f"{_part_head(task_id, part, count, start, end, total)}{_PART_GAP}{whole[start:end]}"
+
+
+def _part_number(raw: object) -> int | None:
+    """
+    The part a caller asked for: 1 when it named none, None when what it named is
+    not a whole number.
+
+    Not coerced. ``"2"`` and a truthy ``True`` both have a plausible reading, and a
+    default where the honest answer is a refusal would hand back part 1 under
+    whatever number the caller believes it asked for. The announced schema refuses
+    these before the handler runs; this is the same refusal for a call that reached
+    the handler some other way. JSON has one number type, so ``2.0`` validates as
+    an integer and is one.
+    """
+    if raw is None:
+        return 1
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        return None
+    if not float(raw).is_integer():
+        return None
+    return int(raw)
+
+
+def _no_such_task_text(wanted: str, tasks: Sequence[BoardTask]) -> str:
+    """
+    What a reader is told when the id it asked for is not on its board.
+
+    Three situations, and the first two are told apart: a board with nothing on it,
+    where no id could have worked and the lead has not planned yet, and a board
+    that has tasks and not this one.
+
+    **The third cannot be told from the second here, and the reply says so instead
+    of guessing.** An id that is absent is either misspelled or belongs to another
+    session's board, and those want different recoveries -- retype it, or stop,
+    because no spelling will work. This handler is answered with its own session's
+    rows and nothing else (``BoardDelivered``), which is the scoping decision and
+    not an oversight: telling one session which ids exist in another is a read
+    across the boundary ``Task.belongs_to`` draws. So it gives the reader what
+    settles the first case, the ids that are here, and names the second as the
+    remaining possibility along with why retrying cannot fix it.
+    """
+    if not tasks:
+        return (
+            "Your board has no tasks on it yet, so there is nothing for read_task to "
+            "read. The lead declares them; read_board shows them once it has."
+        )
+    ids = ", ".join(row.id for row in tasks)
+    if not wanted:
+        return f"read_task needs the id of a task on your board. The ids on it are: {ids}."
+    return (
+        f"No task {wanted!r} is on your board. The ids on it are: {ids}. If you meant "
+        "one of those, read it under that spelling. If the id came from another "
+        "session, it is on that session's board and no spelling reaches it from here: "
+        "a board carries only what its own session declared."
+    )
 
 
 def _refusal_text(refusal: TaskRefusal) -> str:
@@ -663,9 +847,10 @@ def build_server(session: AgentSession) -> Any:
     @tool(
         "read_board",
         "See every task on your team's board: what exists, who holds it, what each "
-        "one is waiting for, and its full specification. Read it before declaring "
+        "one is waiting for, and its specification. Read it before declaring "
         "work or reporting a conflict, and re-read it to check the spec of a task "
-        "you hold -- the board is authoritative and your copy of it is not.",
+        "you hold -- the board is authoritative and your copy of it is not. A long "
+        "specification or note is cut here and says so: read_task has the rest.",
         {},
     )
     async def read_board(args: dict[str, Any]) -> dict[str, Any]:
@@ -687,6 +872,55 @@ def build_server(session: AgentSession) -> Any:
         # places, free to drift from the one the pane reads.
         by_id = {c.id: c for c in answer.concerns}
         return _text(_board_text(answer.tasks, by_id))
+
+    @tool(
+        "read_task",
+        "Read one task whole: its specification and every note on it, with nothing "
+        "cut. This is where to go when read_board says a row was cut -- any agent on "
+        "the board may read any task, and reading one does not claim it. Use it for "
+        "the specification of a task you do not hold, rather than asking the lead "
+        "to repeat it.",
+        _schema(
+            {
+                "task_id": {"type": "string", "description": "The task to read."},
+                "part": {
+                    "type": "integer",
+                    "description": (
+                        "Which part, counting from 1. Omit it for the first. Only a "
+                        "task too large for one reply has more than one, and each "
+                        "part says how to ask for the next."
+                    ),
+                },
+            },
+            required=("task_id",),
+        ),
+    )
+    async def read_task(args: dict[str, Any]) -> dict[str, Any]:
+        me = _sender(args)
+        wanted = str(args.get("task_id", "")).strip()
+        request_id = f"t-{uuid.uuid4().hex[:12]}"
+        # The board read's own intent and effect, asked a second time, rather than
+        # an intent of its own. The store's answer to "what is on this agent's
+        # board" already holds this task with every derived fact a row has; a
+        # narrower question would need a second projection of one task, kept in
+        # agreement with ``board_tasks`` by nothing. The narrowing is this tool's,
+        # which is where ``BoardDelivered`` says it belongs.
+        future = bridge.ask(request_id, BoardDelivered(request_id=request_id, tasks=()))
+        bridge.emit(BoardRead(node_id=me, request_id=request_id))
+        answer = await future
+
+        tasks = answer.tasks if isinstance(answer, BoardDelivered) else ()
+        row = next((t for t in tasks if t.id == wanted), None)
+        if row is None:
+            return _text(_no_such_task_text(wanted, tasks))
+        part = _part_number(args.get("part"))
+        if part is None:
+            return _text(
+                f"part must be a whole number, counting from 1. {_task_call(row.id)} "
+                "returns the first."
+            )
+        by_id = {c.id: c for c in answer.concerns} if isinstance(answer, BoardDelivered) else {}
+        return _text(_paged(row.id, _task_text(row, by_id), part))
 
     @tool(
         "declare_task",
@@ -798,6 +1032,7 @@ def build_server(session: AgentSession) -> Any:
             post_concern,
             read_inbox,
             read_board,
+            read_task,
             claim_task,
             declare_task,
             complete_task,
@@ -816,6 +1051,7 @@ BUS_TOOLS = frozenset(
         "post_concern",
         "read_inbox",
         "read_board",
+        "read_task",
         "claim_task",
         "declare_task",
         "complete_task",
