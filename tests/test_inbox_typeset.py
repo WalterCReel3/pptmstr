@@ -19,10 +19,10 @@ import pytest
 from pptmstr import approval, fake_driver
 from pptmstr.approval import DiffText
 from pptmstr.bridge import Bridge
-from pptmstr.intents import AgentSpawned, ApprovalRequested, ApprovalResolved
-from pptmstr.model import NodeId, PendingApproval, Snapshot
+from pptmstr.intents import AgentSpawned, ApprovalRequested, ApprovalResolved, StateChanged
+from pptmstr.model import AgentState, NodeId, PendingApproval, QuestionPending, Snapshot
 from pptmstr.store import Store
-from pptmstr.transcript import Transcript
+from pptmstr.transcript import SegmentKind, Transcript
 from pptmstr.ui import inbox, review, typeset
 from pptmstr.ui.compose import ComposeState
 from pptmstr.ui.focus import FocusState
@@ -54,9 +54,11 @@ def no_views_held() -> Iterator[None]:
     """
     inbox._VIEWS.clear()
     inbox._PARTS.clear()
+    inbox._PREVIEWS.clear()
     yield
     inbox._VIEWS.clear()
     inbox._PARTS.clear()
+    inbox._PREVIEWS.clear()
 
 
 def parked(tool_name: str, raw_args: Mapping[str, Any], ident: str = "p1") -> PendingApproval:
@@ -1337,3 +1339,357 @@ def test_a_batch_refused_with_no_approval_row_open_is_said_by_the_buttons(
     pane.draw(seam)
 
     assert len([line for line in said if line.startswith("none sent - 1 of these 1 calls")]) == 1
+
+
+# -- the question row's preview ------------------------------------------------
+
+REPORT = fake_driver._REPORT_OPENING + fake_driver._REPORT_BODY
+FENCE = "```python\n" + "".join(f"line_{n} = {n}\n\n" for n in range(30)) + "```"
+
+
+def asked(prose: str) -> Pane:
+    """
+    One session that said ``prose`` and ended its turn, the cursor on its question.
+    """
+    pane = Pane()
+    pane.snap.nodes[ROOT].transcript.append(SegmentKind.OUTPUT, prose)
+    pane.store.apply(StateChanged(ROOT, AgentState.AWAITING_INPUT))
+    (question,) = pane.snap.needs_you
+    assert isinstance(question, QuestionPending)
+    pane.focus.to_obligation(question)
+    return pane
+
+
+def preview(pane: Pane) -> Any:
+    (question,) = pane.snap.needs_you
+    return inbox._VIEWS.view((question.key, "preview"))
+
+
+def test_a_turn_that_fits_is_previewed_whole() -> None:
+    prose = "Right, here is the plan.\n\n- one\n- two\n\nFix it, or only report it?\n"
+    assert inbox.preview_tail(prose) == (prose.rstrip(), 0)
+    assert inbox.preview_tail("  \n\n") == ("", 0)
+
+
+@pytest.mark.parametrize("lines", [1, 3, 6, 10, 40])
+def test_a_preview_is_the_end_of_the_turn_from_the_start_of_a_block(lines: int) -> None:
+    """
+    Whatever the budget: what is taken is the turn's own text to its last line,
+    what is counted as left out is every line ahead of it, and the line ahead of
+    the cut is blank -- it is not the middle of a paragraph, a list or a table.
+    """
+    source = REPORT.rstrip().split("\n")
+    tail, dropped = inbox.preview_tail(REPORT, lines=lines)
+    assert tail.split("\n") == source[dropped:]
+    assert 0 < dropped < len(source)
+    assert source[dropped - 1] == ""
+    assert tail.endswith("should that stay with its caller?")
+
+
+def test_a_longer_budget_takes_no_less_of_the_turn() -> None:
+    kept = [inbox.preview_tail(REPORT, lines=n)[1] for n in (1, 3, 6, 10, 40, 400)]
+    assert kept == sorted(kept, reverse=True)
+    assert kept[-1] == 0
+
+
+def test_a_fence_is_taken_whole_or_not_at_all() -> None:
+    """
+    A cut inside a fence turns its second half into prose and the prose after it
+    into code. The fence here has blank lines in it, which are not block ends.
+    """
+    before = "Some words first.\n\n"
+    # The last block, however long: all of it.
+    assert inbox.preview_tail(before + FENCE, lines=6) == (FENCE, 2)
+    # Not the last and too long for what is left: none of it.
+    ending = FENCE + "\n\nWhich of these should go?"
+    assert inbox.preview_tail(before + ending, lines=6) == ("Which of these should go?", 65)
+    # And with room, from its opening line.
+    assert inbox.preview_tail(before + ending, lines=80) == (before + ending, 0)
+
+
+def test_a_fence_nobody_closed_runs_to_the_end_of_the_turn() -> None:
+    prose = "Words.\n\n```\na\n\nb\n\nc"
+    assert inbox.preview_tail(prose, lines=1) == ("```\na\n\nb\n\nc", 2)
+
+
+def test_a_preview_never_begins_on_what_belongs_to_the_block_above_it() -> None:
+    """
+    An item's second paragraph, set without its item, is an indented code block.
+    The cut moves up to the item.
+    """
+    prose = (
+        "A paragraph that the budget leaves out.\n\n"
+        "- the first item\n\n"
+        "- the second item\n\n"
+        "  its second paragraph\n\n"
+        "      and a snippet under it"
+    )
+    tail, dropped = inbox.preview_tail(prose, lines=1)
+    assert tail.startswith("- the second item")
+    assert dropped == 4
+
+
+def test_a_question_row_sets_the_end_of_the_turn_as_markdown(seam: Any, said: list[str]) -> None:
+    """
+    The fixture's report ends on a rule, a fence and a paragraph with emphasis and
+    code spans in it. Read as markdown none of the marks is on screen; as the
+    string, all of them are.
+    """
+    pane = asked(REPORT)
+    pane.draw(seam)
+
+    view = preview(pane)
+    assert view is not None
+    text = rig._shown(view)
+    assert "One question before I go further" in text
+    assert "should tle/ingest.py call verify itself" in text
+    assert "**" not in text and "`" not in text
+    _, dropped = inbox.preview_tail(REPORT)
+    assert f"… {dropped:,} earlier lines of this turn - DETAIL has all of it" in said
+    # No box of ImGui's own text beside it.
+    assert not any("##body" in w.name and w.active for w in seam.get_current_context().windows)
+
+
+def test_a_preview_reads_the_turn_as_the_panes_showing_all_of_it_do(seam: Any) -> None:
+    """
+    DETAIL sets the same turn beside this row, as markdown. Three lines a writer
+    ended early are one paragraph there, and a body's rule would keep their breaks
+    here: one text, two readings, in one frame.
+    """
+    prose = "Right, here is the plan.\nIt is computed but never compared.\nFix it, or report it?"
+    pane = asked(prose)
+    cache = typeset.ViewCache()
+    pane.draw(seam, lambda: typeset.markdown(cache, "whole", prose))
+
+    assert rig._shown(preview(pane)) == rig._shown(cache.view("whole"))
+    assert rig._shown(preview(pane)) == prose.replace("\n", " ")
+
+
+def test_a_previewed_table_is_a_table(seam: Any) -> None:
+    table = "| Input | Result |\n|---|---|\n| ISS | pass |\n| NOAA 19 | **pass** |"
+    pane = asked("Checked:\n\n" + table)
+    pane.draw(seam)
+
+    text = rig._shown(preview(pane))
+    assert "NOAA 19" in text
+    assert "|" not in text and "**" not in text
+
+
+def test_a_turn_previewed_whole_says_nothing_is_left_out(seam: Any, said: list[str]) -> None:
+    pane = asked("Fix it, or *only* report it?")
+    pane.draw(seam)
+
+    assert rig._shown(preview(pane)) == "Fix it, or only report it?"
+    assert not [line for line in said if "earlier lines" in line]
+
+
+def test_a_preview_is_as_tall_as_its_text_and_no_taller_than_its_cap(seam: Any) -> None:
+    """
+    The native box is 110 px whatever is in it. A one-line ask costs the queue one
+    line, and a turn ending on a sixty-line fence costs it the cap.
+    """
+    line = typeset.line_height(role=typeset.Role.PROSE)
+    (question,) = (short := asked("Fix it, or only report it?")).snap.needs_you
+    short.draw(seam)
+    one_line = inbox._VIEWS.height((question.key, "preview"))
+    assert one_line is not None and one_line <= 2 * line
+
+    inbox._VIEWS.clear()
+    inbox._PREVIEWS.clear()
+    long = asked("Words.\n\n" + FENCE)
+    long.draw(seam)
+    whole = inbox._VIEWS.height((question.key, "preview"))
+    assert whole is not None and whole > 50 * line
+    # The line saying what is left out is the row's own, over the cap.
+    said = seam.get_text_line_height_with_spacing()
+    assert short.height < long.height <= short.height + inbox._PREVIEW_LINES * line + said
+
+
+def test_a_preview_is_cut_when_the_turn_grows_and_not_once_a_frame(
+    seam: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    pane = asked("First answer.")
+    reads: list[int] = []
+    real = Transcript.turn_prose
+
+    def turn_prose(self: Transcript) -> str:
+        reads.append(1)
+        return real(self)
+
+    monkeypatch.setattr(Transcript, "turn_prose", turn_prose)
+    pane.draw(seam)
+    pane.draw(seam)
+    assert len(reads) == 1
+    assert rig._shown(preview(pane)) == "First answer."
+
+    pane.snap.nodes[ROOT].transcript.append(SegmentKind.OUTPUT, "\n\nAnd a second.")
+    pane.draw(seam)
+    assert len(reads) == 2
+    assert rig._shown(preview(pane)) == "First answer.\n\nAnd a second."
+
+
+def test_a_turn_that_said_nothing_says_so_and_holds_no_view(seam: Any, said: list[str]) -> None:
+    pane = asked("")
+    pane.draw(seam)
+
+    assert "no output on this turn" in said
+    assert preview(pane) is None
+
+
+def test_a_question_is_not_a_body_any_approve_waits_on(seam: Any) -> None:
+    pane = asked(REPORT)
+    pane.draw(seam)
+
+    assert pane.state.bodies == {}
+
+
+@pytest.mark.parametrize("switch", ["master", "pane"])
+def test_with_typeset_off_a_question_is_previewed_in_the_native_box(
+    seam: Any, said: list[str], switch: str
+) -> None:
+    if switch == "master":
+        typeset.configure(typeset=False, mono=False)
+    else:
+        typeset.configure(typeset=True, mono=False, panes={typeset.Pane.INBOX: False})
+    pane = asked(REPORT)
+    pane.draw(seam)
+
+    assert len(inbox._VIEWS) == 0 and not inbox._PREVIEWS
+    assert REPORT[-inbox._PREVIEW_CHARS :] in said
+    assert native_body(seam).size.y == 110.0
+
+
+def test_a_preview_is_dropped_when_its_question_is_answered(seam: Any) -> None:
+    pane = asked(REPORT)
+    pane.draw(seam)
+    assert len(inbox._VIEWS) == 1 and len(inbox._PREVIEWS) == 1
+
+    pane.store.apply(StateChanged(ROOT, AgentState.THINKING))
+    pane.draw(seam)
+
+    assert len(inbox._VIEWS) == 0 and not inbox._PREVIEWS
+
+
+# -- the other calls whose argument is prose -----------------------------------
+
+PROSE_CALLS: list[tuple[str, dict[str, Any]]] = [
+    ("ExitPlanMode", {"plan": CONCERN_BODY, "planFilePath": "/home/x/.claude/plans/a.md"}),
+    ("SendMessage", {"to": "qa", "summary": "t2 as specified", "message": CONCERN_BODY}),
+    ("TaskCreate", {"subject": "hold t2", "description": CONCERN_BODY, "activeForm": "Holding"}),
+    ("TaskUpdate", {"taskId": "7", "status": "in_progress", "description": CONCERN_BODY}),
+    ("WebFetch", {"url": "https://example.invalid/tle-fmt.php", "prompt": CONCERN_BODY}),
+]
+
+
+def test_every_described_call_names_a_prose_argument_and_none_that_is_acted_on() -> None:
+    """
+    The table is the whole of what either pane reads as prose. The names on the
+    right are arguments a tool acts on character for character.
+    """
+    never = {"command", "content", "old_string", "new_string", "pattern", "file_path", "url"}
+    assert {tool for tool, _ in PROSE_CALLS} | {
+        inbox._POST_CONCERN,
+        inbox._DECLARE_TASK,
+        "Agent",
+        "Task",
+    } == inbox.DESCRIBED.keys()
+    assert not never & {prose for prose, _ in inbox.DESCRIBED.values()}
+    assert not {"query", "edits", "new_source"} & {p for p, _ in inbox.DESCRIBED.values()}
+    assert inbox.prose_argument("Bash") is None and inbox.prose_argument("WebSearch") is None
+    for tool, (prose, _) in inbox.DESCRIBED.items():
+        assert inbox.prose_argument(tool) == prose
+
+
+@pytest.mark.parametrize(("tool", "args"), PROSE_CALLS, ids=[tool for tool, _ in PROSE_CALLS])
+def test_a_call_whose_argument_is_prose_is_set_word_for_word_and_its_fields_over_it(
+    seam: Any, said: list[str], tool: str, args: dict[str, Any]
+) -> None:
+    """
+    The body that hides nothing of a concern hides nothing of a plan: every word of
+    the fixture's text is set, the tags a markdown reader would drop included, and
+    every other argument is a line of the row's own over it.
+    """
+    call = parked(tool, args)
+    assert call.diff is None
+    pane = Pane(call)
+    pane.draw(seam)
+
+    view = inbox._VIEWS.view(key(call, "body"))
+    assert view is not None and inbox._VIEWS.view(key(call, "arguments")) is None
+    shown = " ".join(rig._shown(view).split())
+    for needle in ("Optional<int>", "ask <lead> for", "<!-- generated", "<details>"):
+        assert needle in shown
+
+    def words(text: str) -> list[str]:
+        plain = text.replace("`", "").replace("*", "")
+        return [word for word in plain.split() if word not in ("-", "\u2022")]
+
+    assert words(shown) == words(CONCERN_BODY)
+    prose = inbox.prose_argument(tool)
+    for name, value in args.items():
+        if name != prose:
+            assert value in said
+    assert inbox._NO_DIFF not in said
+
+
+@pytest.mark.parametrize(("tool", "args"), PROSE_CALLS, ids=[tool for tool, _ in PROSE_CALLS])
+def test_a_long_prose_argument_of_any_described_call_holds_its_approve(
+    seam: Any,
+    said: list[str],
+    clicking_approve: list[bool],
+    monkeypatch: pytest.MonkeyPatch,
+    tool: str,
+    args: dict[str, Any],
+) -> None:
+    """
+    What is newly read as prose is newly built over several frames, so it is newly
+    something an approve can get ahead of. It does not.
+    """
+    prose = inbox.prose_argument(tool)
+    assert prose is not None
+    body = "".join(f"Paragraph {n} asks for something else to be done.\n\n" for n in range(600))
+    call = parked(tool, {**args, prose: body})
+    pane = Pane(call)
+    sent = _sent(pane, monkeypatch)
+    typeset.set_budget(6.0)
+
+    pane.draw(seam)
+
+    left = inbox._VIEWS.unbuilt(key(call, "body"))
+    assert left is not None and left > 0, "the body was whole on its first frame"
+    assert pane.state.bodies[call.id]["inbox"][1] == left
+    assert review.withheld(pane.state, call) == review.NOT_WHOLE
+    assert clicking_approve == [True] and sent == []
+    assert inbox._STILL_TYPESETTING in said
+    until_whole(pane, seam, call)
+    assert review.withheld(pane.state, call) is None and sent == [call.id]
+
+
+def test_a_message_that_is_an_object_is_a_field_and_not_a_body(seam: Any, said: list[str]) -> None:
+    message = {"type": "shutdown_request", "reason": "*done*"}
+    call = parked("SendMessage", {"to": "qa", "message": message})
+    pane = Pane(call)
+    pane.draw(seam)
+
+    assert inbox._VIEWS.view(key(call, "body")) is None
+    assert repr(message) in said
+
+
+def test_questions_put_to_the_user_are_set_as_the_structure_they_are(seam: Any) -> None:
+    """
+    ``AskUserQuestion`` carries a list of questions with options and no one argument
+    that is its prose. Every character of it is in the arguments view, as written.
+    """
+    questions = [
+        {
+            "question": "Which *one*?",
+            "header": "Pick",
+            "options": [{"label": "a_b", "description": "the `first`"}],
+        }
+    ]
+    call = parked("AskUserQuestion", {"questions": questions})
+    pane = Pane(call)
+    pane.draw(seam)
+
+    assert inbox._VIEWS.view(key(call, "body")) is None
+    assert repr(questions) in shown(call, "arguments").replace("\n", "")

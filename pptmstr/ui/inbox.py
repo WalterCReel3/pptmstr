@@ -25,7 +25,9 @@ looked at with seven sessions in one project.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Hashable, Mapping
+import math
+import re
+from collections.abc import Callable, Hashable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import assert_never
 
@@ -45,6 +47,7 @@ from ..model import (
     Snapshot,
 )
 from ..theme import OBLIGATION_GLYPH, STATE_GLYPH, Face, P, face, faded
+from ..transcript import Transcript
 from . import projects, review, splash, splash_art, typeset
 from .compose import ComposeState, wants_send
 from .focus import FocusState
@@ -62,9 +65,16 @@ _X_SUMMARY = 476.0
 
 _TITLE_W = _X_QUALIFIER - _X_TITLE - 10.0
 
-# How much of a turn's prose the expanded question row previews. The box is a
-# fixed 110px, so this only has to be comfortably more than fits.
+# How much of a turn's prose the expanded question row previews in ImGui's own
+# text. The box is a fixed 110px, so this only has to be comfortably more than fits.
 _PREVIEW_CHARS = 1200
+# The typeset preview: the last whole blocks of the turn that come to about this
+# many lines of the prose face at ``_PREVIEW_MEASURE`` characters to the line, in a
+# view no taller than that many lines. Ten and not the native box's six: the end of
+# a turn is as often a table or a list as a sentence, and six lines of either is
+# the head of it. A turn that ends on three lines takes three.
+_PREVIEW_LINES = 10
+_PREVIEW_MEASURE = 96
 _QUALIFIER_W = 150.0
 
 _SMALL_FONT = 12.5
@@ -93,7 +103,7 @@ _BODY_LINES = 24.0
 # own. Pruned in ``draw`` by the obligations still in the queue, the rule
 # ``ReviewState.prune`` applies to everything else remembered about an approval.
 _VIEWS = typeset.ViewCache()
-_VIEW_PARTS = ("diff", "body", "arguments")
+_VIEW_PARTS = ("diff", "body", "arguments", "preview")
 
 # The parts last made for a view, beside what they were made from, under the view's
 # key and pruned with it. Kept because the seam's body classifier reads every line
@@ -101,6 +111,11 @@ _VIEW_PARTS = ("diff", "body", "arguments")
 # because a tuple handed to ``typeset.document`` again unchanged is compared by
 # identity and not part by part.
 _PARTS: dict[Hashable, tuple[object, tuple[typeset.Part, ...]]] = {}
+
+# The preview last cut for a question row, beside the length of the transcript it
+# was cut from, under the view's key and pruned with it. A transcript is append-only,
+# so a length that has not moved is a turn that has not.
+_PREVIEWS: dict[Hashable, tuple[int, int, str]] = {}
 
 _NO_DIFF = "no diff for this call - arguments:"
 _WITHHELD = "shown as the agent sent it - approve sends YOUR EDIT, which differs"
@@ -114,17 +129,45 @@ _DECLARE_TASK = "mcp__pptmstr__declare_task"
 # Calls whose substance is prose rather than a file change: for each, the argument
 # that is the prose and the arguments that head it, in reading order. Any argument
 # named in neither place is still shown, after these -- see ``describe``.
-_DESCRIBED: dict[str, tuple[str, tuple[str, ...]]] = {
+#
+# **The one table.** DETAIL reads which argument is prose from here
+# (``prose_argument``), so a call cannot be prose in its row and a literal beside it.
+#
+# An argument is here when its tool says it is text somebody writes for a reader,
+# and each is as its tool's schema has it:
+#
+# - the bus's ``body`` and ``detail`` (``pptmstr.bus``) and a spawn's ``prompt``;
+# - ``ExitPlanMode.plan``, the plan file's markdown, with the file's path;
+# - ``SendMessage.message``, "Plain text message content" -- or an object, for the
+#   protocol messages, which is then a field like any other value not a string;
+# - ``TaskCreate.description``, "What needs to be done", and ``TaskUpdate``'s;
+# - ``WebFetch.prompt``, "The prompt to run on the fetched content".
+#
+# Nothing promises any of them is *markdown*, the bus's included, which is why what
+# each is read as is ``typeset.prose_parts``' answer and not this table's.
+#
+# Never here: an argument that is acted on character for character -- a command, a
+# file's content, an edit's strings, a pattern, a path, a URL, a query. A markdown
+# reading of ``rm *tmp and old*`` draws no stars.
+#
+# ``AskUserQuestion`` is not here either: its text is a list of questions each
+# with options, not one argument, and is set as the structure it is.
+DESCRIBED: dict[str, tuple[str, tuple[str, ...]]] = {
     _POST_CONCERN: ("body", ("to", "subject", "task_id")),
     _DECLARE_TASK: ("detail", ("task_id", "title", "depends_on", "touches")),
     "Agent": ("prompt", ("subagent_type", "description")),
     "Task": ("prompt", ("subagent_type", "description")),
+    "ExitPlanMode": ("plan", ("planFilePath",)),
+    "SendMessage": ("message", ("to", "summary")),
+    "TaskCreate": ("description", ("subject", "activeForm")),
+    "TaskUpdate": ("description", ("taskId", "subject", "status")),
+    "WebFetch": ("prompt", ("url",)),
 }
-assert _SPAWN_TOOLS <= _DESCRIBED.keys()
+assert _SPAWN_TOOLS <= DESCRIBED.keys()
 _LIST_FIELDS = frozenset({"depends_on", "touches"})
 
 # Where a field's value starts, from the left edge of the block. Wide enough for
-# the longest name in ``_DESCRIBED`` in either prose face.
+# the longest name in ``DESCRIBED`` in either prose face.
 _X_FIELD_VALUE = 120.0
 
 
@@ -167,11 +210,13 @@ def draw(
     """Build the inbox from one snapshot. Never reads the store."""
     state.prune({p.id for p in snap.approvals})
     compose.prune(snap)
-    if len(_VIEWS) or _PARTS:
+    if len(_VIEWS) or _PARTS or _PREVIEWS:
         live = {(o.key, part) for o in snap.needs_you for part in _VIEW_PARTS}
         _VIEWS.prune(live)
         for stale in _PARTS.keys() - live:
             del _PARTS[stale]
+        for stale in _PREVIEWS.keys() - live:
+            del _PREVIEWS[stale]
 
     # Before the empty-queue branch, and the ordering is the whole distinction.
     # ``_zero_state`` answers "a fleet exists and owes you nothing"; this answers
@@ -630,10 +675,11 @@ class Description:
 
 def describe(pending: PendingApproval) -> Description | None:
     """
-    The header fields and the prose of a concern, a task declaration or a spawn.
-    ``None`` for any other call.
+    The header fields and the prose of a call whose substance is prose
+    (``DESCRIBED``): a concern, a task declaration, a spawn, a plan. ``None`` for
+    any other call.
 
-    **Every argument lands somewhere.** The ones ``_DESCRIBED`` names come first, in
+    **Every argument lands somewhere.** The ones ``DESCRIBED`` names come first, in
     its order; the rest follow in the call's own. An argument this pane has never
     heard of is still part of what an approval releases, and a header that listed
     only the expected names would be a place to put one where the approver cannot
@@ -643,7 +689,7 @@ def describe(pending: PendingApproval) -> Description | None:
     Pure, and cheap enough per frame: it copies a handful of references and joins
     two short lists. The prose itself is not copied.
     """
-    shape = _DESCRIBED.get(pending.tool_name)
+    shape = DESCRIBED.get(pending.tool_name)
     if shape is None:
         return None
     prose, leading = shape
@@ -653,6 +699,14 @@ def describe(pending: PendingApproval) -> Description | None:
     names = [name for name in leading if name in args]
     names += [name for name in args if name not in leading and (name != prose or not body)]
     return Description(tuple((name, _field_text(name, args[name])) for name in names), body)
+
+
+def prose_argument(tool_name: str) -> str | None:
+    """
+    The argument of this tool that is prose by the tool's contract, if it has one.
+    """
+    shape = DESCRIBED.get(tool_name)
+    return None if shape is None else shape[0]
 
 
 def _field_text(name: str, value: object) -> str:
@@ -828,9 +882,20 @@ def _expand_question(
     if record is None:
         return
 
+    if typeset.enabled(typeset.Pane.INBOX):
+        _typeset_preview(record.transcript, obligation.key)
+    else:
+        _native_preview(record.transcript)
+    _reply(compose, actions, node, wrap=wrap)
+
+
+def _native_preview(transcript: Transcript) -> None:
+    """
+    The end of the turn's prose in ImGui's own text, in a box of a fixed height.
+    """
     # The turn's prose, clipped from the end: the ask is what a turn finishes on,
     # and this box is scanned rather than read. DETAIL carries the whole of it.
-    tail = record.transcript.turn_prose()[-_PREVIEW_CHARS:]
+    tail = transcript.turn_prose()[-_PREVIEW_CHARS:]
     if imgui.begin_child("##body", imgui.ImVec2(-8.0, 110.0), imgui.ChildFlags_.borders):
         if tail.strip():
             imgui.push_text_wrap_pos(imgui.get_content_region_avail().x)
@@ -840,6 +905,153 @@ def _expand_question(
             imgui.text_colored(P.text_dim.vec4, "no output on this turn")
     imgui.end_child()
 
+
+_FENCE = re.compile(r" {0,3}(`{3,}|~{3,})")
+# A line that is a row of its own however wide the pane: a list item, a heading,
+# a quote, a table row.
+_OWN_ROW = re.compile(r"\s*(?:[-*+]\s|\d{1,9}[.)]\s|#{1,6}\s|>|\|)")
+
+
+def markdown_blocks(source: Sequence[str]) -> list[tuple[int, int]]:
+    """
+    Where a markdown text can be cut: its blocks, each as the index of its first
+    line and one past its last.
+
+    A block is a run of lines between blank ones. A fence is in one block from its
+    opening line to its closing one with its blank lines, and a fence nobody closed
+    runs to the end, as a markdown reader has it. Whatever touches a fence with no
+    blank line between is in the fence's block.
+    """
+    blocks: list[tuple[int, int]] = []
+    start: int | None = None
+    fence: str | None = None
+    for number, line in enumerate(source):
+        if fence is not None:
+            closing = line.strip()
+            if closing.startswith(fence) and not closing.strip(fence[0]):
+                fence = None
+            continue
+        opened = _FENCE.match(line)
+        if opened is not None:
+            fence = opened.group(1)
+        elif not line.strip():
+            if start is not None:
+                blocks.append((start, number))
+                start = None
+            continue
+        if start is None:
+            start = number
+    if start is not None:
+        blocks.append((start, len(source)))
+    return blocks
+
+
+def preview_tail(
+    prose: str, lines: int = _PREVIEW_LINES, measure: int = _PREVIEW_MEASURE
+) -> tuple[str, int]:
+    """
+    The end of a turn's prose cut where markdown can be cut, and how many lines of
+    the turn are ahead of the cut.
+
+    A cut at a character count lands inside a fence, a list or a table, and what
+    follows it then reads as something else: the second half of a fence is prose
+    and the prose after it is code. So the turn is taken a **block** at a time --
+    a run of lines between blank ones, a fence whole with its blank lines -- from
+    the end, for as long as the blocks taken come to no more than ``lines`` rows
+    at ``measure`` characters to the row.
+
+    Two things take it past that, and the view's cap is what bounds them on
+    screen:
+
+    - **The last block is always taken, whole**, whatever its length: a turn that
+      ends on a sixty-line fence is previewed as that fence, scrolled.
+    - **The cut is never above an indented block.** Indented lines belong to
+      whatever is over them -- a list item's second paragraph, a nested item --
+      and set without it they are a code block. The cut moves up to the first
+      block that starts at the margin.
+
+    The rows are an estimate and only decide where the cut goes: a paragraph is
+    its characters over the measure, and a line that is a row of its own (a list
+    item, a table row, a line of a fence) is one row or its own length over the
+    measure. Pure; no character of what is taken is altered.
+    """
+    if not prose.strip():
+        return "", 0
+    source = prose.rstrip().split("\n")
+    blocks = markdown_blocks(source)
+
+    def rows(first: int, stop: int) -> float:
+        block = source[first:stop]
+        if any(_OWN_ROW.match(line) or _FENCE.match(line) for line in block):
+            return float(sum(max(1, math.ceil(len(line) / measure)) for line in block))
+        return float(max(1, math.ceil(sum(len(line) + 1 for line in block) / measure)))
+
+    taken = len(blocks) - 1
+    used = rows(*blocks[taken])
+    while taken > 0:
+        # Half a row for the air between two blocks.
+        more = rows(*blocks[taken - 1]) + 0.5
+        if used + more > lines:
+            break
+        used += more
+        taken -= 1
+    while taken > 0 and source[blocks[taken][0]].startswith((" ", "\t")):
+        taken -= 1
+    first = blocks[taken][0]
+    return "\n".join(source[first:]), first
+
+
+def _typeset_preview(transcript: Transcript, key: str) -> None:
+    """
+    The end of the turn's prose, set through the seam: whole blocks, under a line
+    saying how much of the turn is above them.
+
+    **Markdown outright, and not ``typeset.prose_parts``.** That rule is for a body
+    nothing promises is markdown. This is the agent's own output, which DETAIL and
+    the context log both read as markdown, and DETAIL shows the same turn beside
+    this row: one text read two ways in one frame is the thing a single rule per
+    kind of text is for.
+
+    As tall as its text up to ``_PREVIEW_LINES`` of the prose face, and scrolling
+    past that. Not held for ``unbuilt`` and reported to no one: a question is not an
+    approval, and nothing is decided on this text that DETAIL does not show whole.
+    """
+    view = (key, "preview")
+    length = transcript.published_length
+    held = _PREVIEWS.get(view)
+    if held is None or held[0] != length:
+        cut, ahead = preview_tail(transcript.turn_prose())
+        held = _PREVIEWS[view] = (length, ahead, cut)
+    _, dropped, tail = held
+    if not tail:
+        imgui.text_colored(P.text_dim.vec4, "no output on this turn")
+        return
+    imgui.spacing()
+    if dropped:
+        _small()
+        imgui.text_colored(
+            P.text_dim.vec4, f"… {dropped:,} earlier lines of this turn - DETAIL has all of it"
+        )
+        _normal()
+    typeset.markdown(
+        _VIEWS,
+        view,
+        tail,
+        width=imgui.get_content_region_avail().x - 8.0,
+        height_cap=_PREVIEW_LINES * typeset.line_height(role=typeset.Role.PROSE),
+    )
+
+
+def _reply(
+    compose: ComposeState,
+    actions: InboxActions,
+    node: NodeId,
+    *,
+    wrap: bool = True,
+) -> None:
+    """
+    The composer under a question's preview, and the ways out of the turn.
+    """
     imgui.spacing()
     draft = compose.replies.get(node, "")
     if compose.focus_reply:

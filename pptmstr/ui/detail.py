@@ -46,7 +46,8 @@ as described above. On, every body is a view from the seam, held in
   without a scrollbar, and copies without the breaks the pane made.
 * **A body somebody wrote is read by ``typeset.prose_parts``**, the rule the inbox
   row, the board and the brief use, so a concern reads the same here and in its row.
-* **A turn still arriving is not typeset.** See ``_narration``.
+* **A turn still arriving is a stream**, read twenty times a second and bounded
+  from its start. See ``_narration``.
 * **A view culls to the child it is in**, so a diff and a settled document have no
   bound on what is *drawn*, and the seam spreads a long text's first layout over
   frames. What it cannot spread is the re-break at a new width, so the bounds that
@@ -102,6 +103,16 @@ _MAX_ARG_CHARS = 20_000
 # the same reason, as transcript_pane's _WRAP_WINDOW. Not a statement about how
 # tall the pane is; the panes dock and resize freely.
 _NARRATION_LINES = 200
+# Typeset only. How far a turn still arriving grows past ``_NARRATION_LINES`` before
+# its start is cut again. The seam's stream cannot let go of its head, so a new cut
+# is the whole of what is kept read again: a few readings of a piece each, during
+# which the pane is short of its text and says so. Every line would be that
+# continuously; one cut in two hundred lines is a quarter of a second of it.
+_NARRATION_STEP = 200
+# How often the stream of a turn still arriving is read, the transcript pane's
+# figure: text is at most three or four frames late, and the open block is laid out
+# twenty times a second and not sixty.
+_NARRATION_EVERY_MS = 50.0
 # Typeset only. A settled document longer than this shows its head and offers the
 # rest. Not for the first layout, which the seam builds a piece a frame (5,600 lines
 # of markdown: 134 frames at a median of 40 ms, measured through this pane). For the
@@ -117,15 +128,6 @@ _SIDE_BY_SIDE_PX = 1000.0
 # out in one go, at every new width: 30 ms for 2,000 characters and 310 ms for
 # 20,000, measured, against 12 ms and 120 ms cut at the pane's edge.
 _SENTENCE_CHARS = 2000
-# The argument that is prose, for the calls whose substance is prose. The inbox row
-# reads the same fields out of ``inbox._DESCRIBED``; tests/test_detail.py fails if
-# the two drift.
-_PROSE_ARGUMENT: dict[str, str] = {
-    "mcp__pptmstr__post_concern": "body",
-    "mcp__pptmstr__declare_task": "detail",
-    "Agent": "prompt",
-    "Task": "prompt",
-}
 _EDITED_NOTICE = (
     "you have edited these arguments: everything below is the call as the agent "
     "made it, and approving sends YOUR EDIT instead"
@@ -201,6 +203,13 @@ class DetailState:
     # handed to the seam every frame, which is what lets it skip comparing them.
     _arguments_key: tuple[str, int] | None = None
     _arguments: tuple[typeset.Part, ...] = ()
+    # Where the turn still arriving is cut: (node, step, the text just ahead of the
+    # cut) and (characters, lines) ahead of it. See ``saying``.
+    _saying_key: tuple[NodeId, int, str] | None = None
+    _saying_cut: tuple[int, int] = (0, 0)
+    # The text last handed to the stream, so that a frame in which nothing arrived
+    # hands it nothing.
+    _saying_text: str | None = None
 
     def prose_blocks(self, node: NodeId, transcript: Transcript) -> Sequence[Block]:
         """
@@ -273,6 +282,28 @@ class DetailState:
             self._turn_key = key
             self._turn_text = transcript.turn_prose()
         return self._turn_text
+
+    def saying(self, node: NodeId, text: str) -> tuple[str, int]:
+        """
+        A turn still arriving from where it is cut, and how many lines are ahead of
+        the cut.
+
+        ``narration_cut`` reads the turn from its start, so it is asked once per
+        ``_NARRATION_STEP`` lines and not once a frame: a turn only grows, so a cut
+        made at one length holds until the next step. The few characters ahead of
+        the cut are kept and compared, because the same node at the same step is
+        not always the same turn -- the cursor can leave during one long turn and
+        come back during the next.
+        """
+        step = max(0, text.count("\n") + 1 - _NARRATION_LINES) // _NARRATION_STEP
+        held = self._saying_key
+        at = self._saying_cut[0]
+        if held is None or held[:2] != (node, step) or text[max(0, at - 80) : at] != held[2]:
+            at, dropped = self._saying_cut = narration_cut(
+                text, step * _NARRATION_STEP if step else 0
+            )
+            self._saying_key = (node, step, text[max(0, at - 80) : at])
+        return text[at:], self._saying_cut[1]
 
     def argument_parts(self, pending: PendingApproval, columns: int) -> tuple[typeset.Part, ...]:
         """
@@ -433,26 +464,31 @@ def _deliverable(pane: DetailState, node: NodeId, text: str) -> None:
 
 def _narration(pane: DetailState, node: NodeId, transcript: Transcript, *, live: bool) -> None:
     """
-    The turn's prose as wrapped text rather than as markdown blocks.
+    What the node has said this turn: watched while it arrives, read once it has.
 
-    **Deliberately not the block renderer that the question view above uses.**
-    Rich rendering wants prose that has settled: a mid-turn parse re-runs on every
-    frame a token arrives -- measured at ~1.6ms per KB, so a 4KB turn costs a third
-    of the frame budget, continuously -- and the incremental parser that would avoid
-    that is a large invariant to maintain for a view whose job is to be glanced at.
-    Watching output arrive is what wrapping is good at; reading a settled answer is
-    what blocks are good at. The two surfaces differ because the reading does.
+    **In ImGui's own text it is wrapped text and not the block renderer the
+    question view uses.** Rich rendering wants prose that has settled: a mid-turn
+    parse re-runs on every frame a token arrives -- measured at ~1.6ms per KB, so a
+    4KB turn costs a third of the frame budget, continuously -- and the incremental
+    parser that would avoid that is a large invariant to maintain for a view whose
+    job is to be glanced at.
 
-    **Typeset changes the settled half only.** A turn that has ended is one markdown
-    view, as a question's is. A turn still arriving stays ImGui text although the
-    seam has a stream for exactly this, because of what the stream costs here: every
-    frame a token arrives it sets the open block again -- measured at 3 to 5 ms for
-    a paragraph of ordinary length and 39 ms for one 400 words long, on top of
-    drawing it -- and CONTEXT, which follows the same cursor, is already paying that
-    for the same text in the same frame. Wrapped text is 0.2 ms. The reasoning above
-    is about a cost of that size, and the stream does not remove it.
+    **Typeset sets both halves, each its own way.** A turn that has ended is one
+    markdown view, as a question's is. A turn still arriving is a ``typeset.stream``:
+    text already committed is laid out once, and the block still open is laid out
+    again at each reading, which is the cost the paragraph above is about. It is
+    read every ``_NARRATION_EVERY_MS`` and not every frame, so that cost is paid
+    twenty times a second, and it is bounded from its start (``DetailState.saying``)
+    because a stream re-breaks whole when the pane changes width. CONTEXT follows
+    the same cursor and streams the same node's text in a view of its own: the two
+    are two layouts of one text, and each pays for its own.
     """
-    if typeset.enabled(typeset.Pane.DETAIL) and not live:
+    if typeset.enabled(typeset.Pane.DETAIL) and live:
+        _live_markdown(pane, node, pane.turn_text(node, transcript))
+        return
+    if typeset.enabled(typeset.Pane.DETAIL):
+        pane.views.drop((node, "saying"))
+        pane._saying_text = None
         text = pane.turn_text(node, transcript)
         if not text.strip():
             imgui.text_disabled("nothing said yet this turn")
@@ -478,6 +514,39 @@ def _narration(pane: DetailState, node: NodeId, transcript: Transcript, *, live:
         # it, rather than being silently re-pinned by a session that had stopped.
         if live:
             pane.narration_follow = widgets.follow_tail(pane.narration_follow)
+    imgui.end_child()
+
+
+def _live_markdown(pane: DetailState, node: NodeId, text: str) -> None:
+    """
+    A turn still arriving, as markdown, pinned to its newest line until the
+    operator scrolls up.
+
+    One stream per node, handed the turn from its cut onward whenever the turn has
+    grown. Text that extends what the stream holds is appended to it; a new cut, or
+    a new turn, is not an extension and is read again from its start, which the
+    stream announces under what it has while it does.
+
+    The child always has its vertical scrollbar and allows a horizontal one, as a
+    stream asks (``typeset.Stream.draw``): the first so that the text does not
+    re-break on the frame it outgrows the pane, the second because a stream reports
+    a long code line's width and leaves reaching it to the window.
+    """
+    if not text.strip():
+        imgui.text_disabled("nothing said yet this turn")
+        return
+    shown, dropped = pane.saying(node, text)
+    if dropped:
+        imgui.text_colored(P.warn.vec4, f"… {dropped:,} earlier lines not shown")
+    stream = typeset.stream(
+        pane.views, (node, "saying"), every_ms=_NARRATION_EVERY_MS, free_allowance=False
+    )
+    if pane._saying_text is not text or not stream.text:
+        stream.set_text(shown)
+        pane._saying_text = text
+    if _begin_body("##narration", True):
+        stream.draw()
+        pane.narration_follow = widgets.follow_tail(pane.narration_follow)
     imgui.end_child()
 
 
@@ -824,6 +893,31 @@ def narration_tail(prose: str, limit: int) -> tuple[str, int]:
     return "\n".join(lines[dropped:]), dropped
 
 
+def narration_cut(text: str, ahead: int) -> tuple[int, int]:
+    """
+    Where to cut a markdown text so that about ``ahead`` lines are left out: the
+    characters and the lines ahead of the cut.
+
+    The cut is at the start of a block (``inbox.markdown_blocks``) that begins at
+    the margin, so nothing after it reads differently for what was left out: not
+    inside a fence, whose second half would be prose, and not at an indented line,
+    which belongs to the list item over it. It is the first such block at or after
+    line ``ahead``; with none there -- the rest of the text is one fence -- it is the
+    last one before it, and more than was asked for is kept.
+    """
+    if ahead <= 0:
+        return 0, 0
+    source = text.split("\n")
+    starts = [
+        first
+        for first, _ in inbox.markdown_blocks(source)
+        if not source[first].startswith((" ", "\t"))
+    ]
+    later = [first for first in starts if first >= ahead]
+    line = later[0] if later else max(starts, default=0)
+    return sum(len(source[n]) + 1 for n in range(line)), line
+
+
 def head_lines(text: str, limit: int) -> tuple[str, int]:
     """
     The first ``limit`` lines of a text, and how many follow them.
@@ -862,7 +956,8 @@ def argument_parts(
     through its value into the next, and the whole call is one layout.
 
     A value is read as prose only where the argument is prose by the tool's contract
-    (``_PROSE_ARGUMENT``): a concern's body, a task's detail, a spawn's prompt. Even
+    (``inbox.prose_argument``, the row's own table): a concern's body, a task's
+    detail, a spawn's prompt, a plan. Even
     there nothing enforces the contract, so what it is read *as* is the seam's
     answer and not this pane's: ``typeset.prose_parts``, the rule the inbox row uses
     for the same body.
@@ -894,7 +989,7 @@ def argument_parts(
 
     Bounded by ``_MAX_ARG_CHARS`` as the native block is, and says so.
     """
-    prose = _PROSE_ARGUMENT.get(tool_name)
+    prose = inbox.prose_argument(tool_name)
     exact = typeset.Kind.WRAPPED_EXACT
     role = typeset.Role.ARGUMENT
     parts: list[typeset.Part] = []

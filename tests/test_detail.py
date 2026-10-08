@@ -632,7 +632,7 @@ def test_a_body_is_read_by_the_rule_the_inbox_row_reads_it_by() -> None:
     is one rule's answer: a body set one way in this pane and another in its row,
     in the same frame, is one call shown two ways.
     """
-    for tool, name in detail._PROSE_ARGUMENT.items():
+    for tool, (name, _) in inbox.DESCRIBED.items():
         for body in _BODIES:
             label, *value = detail.argument_parts(tool, {name: body}, 40)
 
@@ -730,14 +730,116 @@ def test_a_bounded_argument_says_what_it_dropped() -> None:
     assert parts[2].colour == "warn"
 
 
-def test_the_prose_arguments_are_the_ones_the_inbox_row_describes() -> None:
+def test_this_pane_and_the_inbox_row_read_one_table() -> None:
     """
-    ``_PROSE_ARGUMENT`` spells out what ``inbox._DESCRIBED`` already knows, so that
-    this pane does not read a private table. Pinned, because a field the row sets
-    as prose and this pane sets as a literal is one call shown two ways.
+    A field the row sets as prose and this pane sets as a literal is one call shown
+    two ways. There is one table, the row's, and this pane asks it.
     """
-    assert detail._PROSE_ARGUMENT == {tool: shape[0] for tool, shape in inbox._DESCRIBED.items()}
-    assert {approval_mod._BUS_POST, approval_mod._BUS_DECLARE} <= detail._PROSE_ARGUMENT.keys()
+    assert not hasattr(detail, "_PROSE_ARGUMENT")
+    assert {approval_mod._BUS_POST, approval_mod._BUS_DECLARE} <= inbox.DESCRIBED.keys()
+    for tool, (name, _) in inbox.DESCRIBED.items():
+        described = inbox.describe(
+            PendingApproval(
+                id="p1",
+                node=ROOT,
+                tool_name=tool,
+                tool_use_id="tu",
+                raw_args={name: "Some *words*."},
+                summary="",
+                requested_at=0.0,
+            )
+        )
+        assert described is not None and described.body == "Some *words*."
+        _, value = detail.argument_parts(tool, {name: "Some *words*."}, 40)
+        assert value.kind is typeset.Kind.MARKDOWN
+
+
+@pytest.mark.parametrize(
+    ("tool", "name"),
+    [
+        ("Bash", "command"),
+        ("Bash", "description"),
+        ("Write", "content"),
+        ("Edit", "old_string"),
+        ("Edit", "new_string"),
+        ("Grep", "pattern"),
+        ("Read", "file_path"),
+        ("WebFetch", "url"),
+        ("WebSearch", "query"),
+        ("NotebookEdit", "new_source"),
+        ("mcp__somebody__else", "body"),
+        ("AskUserQuestion", "questions"),
+    ],
+)
+def test_what_is_acted_on_as_written_is_never_read_as_prose(tool: str, name: str) -> None:
+    """
+    A markdown reading draws no stars for ``rm *tmp and old*``, and those two stars
+    are the difference between the command approved and the command run.
+    """
+    assert inbox.prose_argument(tool) != name
+    written = "rm *tmp and old* && echo `date` > _a_/__b__"
+    _, value = detail.argument_parts(tool, {name: written}, 40)
+    assert value.kind is not typeset.Kind.MARKDOWN
+    assert value.text == written
+
+
+@pytest.mark.parametrize(
+    ("tool", "args"),
+    [
+        ("ExitPlanMode", {"plan": "## Plan\n\n1. *Read* it.", "planFilePath": "/p/x.md"}),
+        ("SendMessage", {"to": "qa", "message": "## Plan\n\n1. *Read* it."}),
+        ("TaskCreate", {"subject": "s", "description": "## Plan\n\n1. *Read* it."}),
+        ("TaskUpdate", {"taskId": "3", "description": "## Plan\n\n1. *Read* it."}),
+        ("WebFetch", {"url": "https://x.invalid", "prompt": "## Plan\n\n1. *Read* it."}),
+    ],
+)
+def test_a_call_whose_argument_is_prose_by_its_tools_contract_is_read_as_prose(
+    seam, monkeypatch, tool: str, args: dict[str, object]
+) -> None:
+    """
+    Through the pane, for the tools beyond the bus's and a spawn: the prose argument
+    is markdown in the arguments view, the others are as written, and what is still
+    to typeset of it is what the approve waits on.
+    """
+    obligation = parked(tool, args)
+    snap = snapshot(record(), needs_you=(obligation,))
+    rig = Pane(seam, monkeypatch)
+    rig.focus.move(snap, 0)
+
+    rig.frame(snap)
+
+    view = rig.pane.views.view((obligation.key, "arguments"))
+    text = "\n".join(view.block_text(n) for n in range(len(view.document.blocks)))
+    assert "Plan" in text and "Read it." in text
+    assert "##" not in text and "*" not in text
+    for name, value in args.items():
+        if name != inbox.prose_argument(tool):
+            assert name in text and str(value) in text
+    assert rig.state.bodies["p1"]["detail"][1] == 0
+    assert review.withheld(rig.state, obligation.approval) is None
+
+
+def test_a_prose_argument_that_is_not_a_string_is_shown_as_what_it_is() -> None:
+    """
+    ``SendMessage.message`` is text or one of the protocol's objects. An object is
+    not prose, and is the literal it is in both panes.
+    """
+    message = {"type": "shutdown_request", "reason": "*done*"}
+    _, value = detail.argument_parts("SendMessage", {"message": message}, 80)
+    assert value.kind is not typeset.Kind.MARKDOWN and "*done*" in value.text
+    described = inbox.describe(
+        PendingApproval(
+            id="p1",
+            node=ROOT,
+            tool_name="SendMessage",
+            tool_use_id="tu",
+            raw_args={"to": "qa", "message": message},
+            summary="",
+            requested_at=0.0,
+        )
+    )
+    assert described is not None and described.body == ""
+    assert described.fields == (("to", "qa"), ("message", repr(message)))
 
 
 def test_a_draft_that_differs_is_reported_even_with_its_editor_open() -> None:
@@ -1572,15 +1674,81 @@ def test_a_deliverable_past_the_bound_shows_its_head_and_offers_the_rest(seam, m
     assert rig.pane.whole is None
 
 
-def test_a_turn_still_arriving_is_not_typeset(seam, monkeypatch) -> None:
-    """
-    The seam's stream sets the open block again on every frame a token arrives, and
-    CONTEXT is already paying that for the same node. Live narration stays wrapped
-    ImGui text; see ``detail._narration`` for the measurement.
-    """
+def _talking(text: str) -> AgentRecord:
     rec = dataclasses.replace(record(("s1", "agent-a")), state=AgentState.THINKING)
-    rec.transcript.append(SegmentKind.OUTPUT, "Looking at the *parser*.")
+    rec.transcript.append(SegmentKind.OUTPUT, text)
+    return rec
+
+
+SAYING: tuple[NodeId, str] = (("s1", "agent-a"), "saying")
+
+
+def _stream_text(rig: Pane) -> str:
+    view = rig.pane.views.view(SAYING)
+    return "\n\n".join(view.block_text(n) for n in range(len(view.document.blocks)))
+
+
+def test_a_turn_still_arriving_is_read_as_markdown(seam, monkeypatch) -> None:
+    """
+    The marks of the source are not on screen while the agent is still talking: a
+    heading is a heading and emphasis is emphasis, as they will be when it stops.
+    """
+    rec = _talking("## Plan\n\nLooking at the *parser* and `tle/parse.py`.")
     snap, focus_state = _unselected(rec)
+    rig = Pane(seam, monkeypatch)
+    rig.focus = focus_state
+
+    rig.frame(snap)
+
+    assert "section:what it is saying" in rig.said
+    assert set(rig.pane.views.keys()) == {SAYING}
+    assert _stream_text(rig) == "Plan\n\nLooking at the parser and tle/parse.py."
+    # Nothing in ImGui's own text beside it.
+    assert not [line for line in rig.said if "Looking" in line]
+    flags = rig.children["##narration"]
+    assert flags & seam.WindowFlags_.always_vertical_scrollbar.value
+    assert flags & seam.WindowFlags_.horizontal_scrollbar.value
+
+
+def test_what_arrives_is_added_to_the_view_and_the_turn_is_read_only_when_it_grows(
+    seam, monkeypatch
+) -> None:
+    rec = _talking("Looking at the *parser*.")
+    snap, focus_state = _unselected(rec)
+    rig = Pane(seam, monkeypatch)
+    rig.focus = focus_state
+    reads: list[int] = []
+    real = type(rec.transcript).turn_prose
+
+    def turn_prose(self: object) -> str:
+        reads.append(1)
+        return real(self)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(type(rec.transcript), "turn_prose", turn_prose)
+    rig.frame(snap)
+    rig.frame(snap)
+    held = rig.pane.views.view(SAYING)
+    assert len(reads) == 1
+
+    rec.transcript.append(SegmentKind.OUTPUT, "\n\nIt drops the **checksum**.")
+    # The stream is read twenty times a second, so a few frames at sixty.
+    for _ in range(6):
+        rig.frame(snap)
+
+    assert len(reads) == 2
+    assert rig.pane.views.view(SAYING) is held
+    assert _stream_text(rig) == "Looking at the parser.\n\nIt drops the checksum."
+
+
+@pytest.mark.parametrize("switch", ["master", "pane"])
+def test_with_typeset_off_a_turn_still_arriving_is_wrapped_text(
+    seam, monkeypatch, switch: str
+) -> None:
+    if switch == "master":
+        typeset.configure(typeset=False, mono=False)
+    else:
+        typeset.configure(typeset=True, mono=False, panes={typeset.Pane.DETAIL: False})
+    snap, focus_state = _unselected(_talking("Looking at the *parser*."))
     rig = Pane(seam, monkeypatch)
     rig.focus = focus_state
 
@@ -1589,6 +1757,111 @@ def test_a_turn_still_arriving_is_not_typeset(seam, monkeypatch) -> None:
     assert len(rig.pane.views) == 0
     assert rig.said[-2:] == ["section:what it is saying", "Looking at the *parser*."]
     assert rig.children == {"##narration": 0}
+
+
+def _long_turn(lines: int) -> str:
+    """
+    Paragraphs of one line each, with a fence across line 200 and a list item's
+    indented paragraph just after it.
+    """
+    out: list[str] = []
+    for n in range(lines // 2):
+        if n == 95:
+            out += ["```python", *[f"line_{k} = {k}" for k in range(8)], "", "tail = 1", "```", ""]
+            out += ["- an item", "", "  its second paragraph", ""]
+        out += [f"Paragraph {n} of the turn.", ""]
+    return "\n".join(out)
+
+
+def test_a_cut_is_at_the_start_of_a_block_at_the_margin() -> None:
+    text = _long_turn(420)
+    source = text.split("\n")
+    assert source[190] == "```python" and source[200] == "tail = 1"
+    assert detail.narration_cut(text, 0) == (0, 0)
+
+    at, dropped = detail.narration_cut(text, 200)
+
+    # Past the fence line 200 is in and past the blank line in it: the first line
+    # at the margin with a blank line over it.
+    assert (dropped, source[dropped]) == (203, "- an item")
+    assert text[at:].split("\n") == source[dropped:]
+    # An indented line belongs to the item over it, and is not where a cut goes.
+    assert source[205] == "  its second paragraph"
+    at, dropped = detail.narration_cut(text, 204)
+    assert (dropped, source[dropped]) == (207, "Paragraph 95 of the turn.")
+    assert text[at:].split("\n") == source[dropped:]
+
+
+def test_a_cut_with_only_a_fence_after_it_is_made_before_the_fence() -> None:
+    text = "One.\n\nTwo.\n\n```\n" + "x\n\n" * 300
+    at, dropped = detail.narration_cut(text, 200)
+    assert (dropped, text[at : at + 4]) == (4, "```\n")
+
+
+def test_a_long_turn_still_arriving_is_cut_once_in_many_lines_and_says_so(
+    seam, monkeypatch
+) -> None:
+    """
+    The stream cannot let go of its start, so a cut that moved with every line would
+    be the whole text read again at every line. Inside a step the text handed over
+    only grows.
+    """
+    pane = detail.DetailState()
+    node: NodeId = ("s1", "agent-a")
+    text = _long_turn(420)
+    shown, dropped = pane.saying(node, text)
+    assert dropped == detail.narration_cut(text, 200)[1] == 203
+    grown = text + "\n\n" + "\n\n".join(f"More {n}." for n in range(60))
+    assert pane.saying(node, grown) == (shown + grown[len(text) :], dropped)
+    # A turn under the bound is whole.
+    assert pane.saying(node, _long_turn(300)) == (_long_turn(300), 0)
+
+    rec = _talking(text)
+    snap, focus_state = _unselected(rec)
+    rig = Pane(seam, monkeypatch)
+    rig.focus = focus_state
+    rig.frame(snap)
+    assert f"… {dropped:,} earlier lines not shown" in rig.said
+    said = _stream_text(rig)
+    assert said.startswith("• an item") and "line_0" not in said and "tail = 1" not in said
+
+
+def test_the_same_step_of_another_turn_is_cut_again() -> None:
+    """
+    The cursor leaves a node during one long turn and comes back during the next:
+    the same node, as many lines, other text. A cut kept from the first would land
+    wherever that count of characters falls in the second.
+    """
+    pane = detail.DetailState()
+    node: NodeId = ("s1", "agent-a")
+    first = _long_turn(420)
+    pane.saying(node, first)
+    second = "\n".join(
+        f"- item {n}, which is rather longer than a paragraph was" for n in range(420)
+    )
+    second = second.replace("\n- item 150,", "\n\n- item 150,").replace(
+        "\n- item 260,", "\n\n- item 260,"
+    )
+
+    shown, dropped = pane.saying(node, second)
+
+    assert (shown, dropped) == (second[detail.narration_cut(second, 200)[0] :], 262)
+    assert shown.startswith("- item 260,")
+
+
+def test_a_turn_that_ends_lets_go_of_its_stream(seam, monkeypatch) -> None:
+    rec = _talking("## Done\n\nLooked at the *parser*.")
+    snap, focus_state = _unselected(rec)
+    rig = Pane(seam, monkeypatch)
+    rig.focus = focus_state
+    rig.frame(snap)
+    assert set(rig.pane.views.keys()) == {SAYING}
+
+    ended = dataclasses.replace(rec, state=AgentState.DONE)
+    rig.frame(snapshot(ended))
+
+    assert set(rig.pane.views.keys()) == {(rec.node_id, "narration")}
+    assert "section:what it said" in rig.said
 
 
 def test_a_turn_that_has_ended_is_one_markdown_view(seam, monkeypatch) -> None:
