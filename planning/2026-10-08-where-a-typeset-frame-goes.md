@@ -166,7 +166,8 @@ does. The profile is the first frame's without the parse.
 | paragraph, 10 lines | a token a frame | 26.7 | 2.6 | 18.2 | 5.9 | 8.1× |
 | paragraph, 100 lines | nothing | 20.8 | 0.0 | 0.0 | 20.8 | |
 | paragraph, 100 lines | a token a frame | 198 | 19.9 | 145 | 31.1 | 9.5× |
-| paragraph, 400 lines | a token a frame | 699 | | | | 35× |
+| paragraph, 400 lines | nothing | 18.3 | 0.0 | 0.0 | 18.3 | |
+| paragraph, 400 lines | a token a frame | 724 | 73.3 | 556 | 29.5 | 40× |
 | list, 100 items | nothing | 10.9 | 0.0 | 0.0 | 10.9 | |
 | list, 100 items | a token a frame | 13.0 | 0.7 | 1.4 | 10.8 | 1.2× |
 | list, 400 items | a token a frame | 14.4 | | | | 1.4× |
@@ -174,7 +175,9 @@ does. The profile is the first frame's without the parse.
 | fence, 100 lines | a token a frame | 10.9 | 0.2 | 1.8 | 8.9 | 1.3× |
 | fence, 400 lines | a token a frame | 9.9 | | | | 1.2× |
 
-(The 400-line rows have no parts: the paragraph's is 20 frames, wall only. Every open
+(The 400-line paragraph rows are from a separate run of 300 frames, an hour long and
+at load 4–7; the same row over 20 frames in the run the other rows share read 699 ms.
+The 400-line list and fence rows have no parts. Every open
 block grows as the tokens arrive; the "10-line" paragraph goes from 10 source lines to
 about 16 over the samples, and is called 10–16 below.)
 
@@ -323,8 +326,8 @@ same way twice"); the estimate does not weigh that.
 **3. Lay out only what a token added to a live block.** `_first_fit`'s own docstring
 argues that "a finished line never changes when material is appended". Nothing uses it:
 the live block is parsed, broken and shipped from its first word.
-*Named by:* a token frame over an idle one — 8× at 10–16 lines, 9.5× at 100, 35× at 400 —
-with `layout_for` 68–73% of the frame and the parse 10%; and by the collector table, where
+*Named by:* a token frame over an idle one — 8× at 10–16 lines, 9.5× at 100, 40× at 400 —
+with `layout_for` 68–77% of the frame and the parse 10%; and by the collector table, where
 this is the only per-frame scenario that reaches a full collection.
 *Ceiling (estimate):* 70–80% of a token frame on an open paragraph, more as it grows, and
 with it most of that row of the collector table. Nothing for a list or a fence, which are
@@ -453,7 +456,7 @@ ms above is this script's process.
 - **CPython 3.11 only.** The constructor cost in §4.2 and the profiler's blind spot in §1
   are properties of that interpreter.
 - **Unequal samples.** A frame scenario has 300 samples (100 for streams), a 5,000-line
-  build has 3. The 400-line paragraph row is 20 frames with no profile.
+  build has 3.
 - **`µs a glyph` on a stream row** divides one pass's time by another pass's glyph count,
   and the passes' texts differ; treat it as approximate there.
 - **The application.** Nothing here ran `python -m pptmstr`; panes, their caches and their
@@ -469,7 +472,7 @@ ms above is this script's process.
 ```
 
 About two minutes, twelve, eight and three. The default (`--only` everything, every size)
-includes the 400-line paragraph through all four passes and is most of an hour for that
-row alone. Output is printed at the end of a run and not before, so a run that is killed
+includes the 400-line paragraph through all four passes: the stream group alone then took
+61 minutes. Output is printed at the end of a run and not before, so a run that is killed
 leaves nothing: run groups separately. The header of every table file carries the load
 average before and after.
