@@ -165,7 +165,7 @@ def draw(snap: Snapshot, focus: FocusState, pane: BriefState) -> None:
     derived = pane.entries(directory)
     _summary(derived, directory)
 
-    typeset_on = typeset.enabled()
+    typeset_on = typeset.enabled(typeset.Pane.BRIEF)
     # A fenced line is never broken, so under the seam the child scrolls sideways to
     # the end of one. A window that scrolls sideways wraps native text at its widest
     # content rather than at its edge, hence the explicit wrap position.
@@ -199,7 +199,7 @@ def _entry(item: brief.DerivedEntry, pane: BriefState) -> None:
     entry = item.entry
     imgui.spacing()
     body, dropped = clip(entry.body, _MAX_BODY_CHARS)
-    if typeset.enabled():
+    if typeset.enabled(typeset.Pane.BRIEF):
         typeset.document(pane.views, str(entry.path), pane.parts(item))
     else:
         imgui.text_colored((P.text_dim if item.is_superseded else P.accent).vec4, entry_label(item))

@@ -251,7 +251,7 @@ def draw(snap: Snapshot, focus: FocusState, pane: BoardState, bridge: Bridge) ->
     if imgui.begin_child("##board"):
         imgui.push_text_wrap_pos(0.0)
         pane.shown = set()
-        if typeset.enabled():
+        if typeset.enabled(typeset.Pane.BOARD):
             _typeset_tasks(session_id, rows, {c.id: c for c in concerns}, pane, bridge)
             _typeset_concerns(session_id, concerns, pane)
         else:

@@ -44,7 +44,7 @@ def old_renderer(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
     The faces stay loaded from the first typeset test to the end of the module.
     """
     if "seam" not in request.fixturenames:
-        monkeypatch.setattr(typeset, "enabled", lambda: False)
+        monkeypatch.setattr(typeset, "enabled", lambda pane=None: False)
 
 
 def sync(cache: NodeTranscript, transcript: Transcript) -> None:
@@ -858,7 +858,7 @@ def test_the_log_is_markdown_by_default_with_the_seam_and_wrapped_lines_without(
     state = TranscriptState()
     assert state.mode is None
     assert state.shown_mode() is RenderMode.WRAP
-    monkeypatch.setattr(typeset, "enabled", lambda: True)
+    monkeypatch.setattr(typeset, "enabled", lambda pane=None: True)
     assert state.shown_mode() is transcript_pane.DEFAULT_MODE
     assert transcript_pane.DEFAULT_MODE in (RenderMode.RICH, RenderMode.TYPESET)
     assert state.mode is None, "the default is derived and never written back"
@@ -873,15 +873,15 @@ def test_a_chosen_mode_is_drawn_and_typeset_only_while_the_seam_can_draw(
     """
     state = TranscriptState(mode=RenderMode.TYPESET)
     assert state.shown_mode() is RenderMode.WRAP
-    monkeypatch.setattr(typeset, "enabled", lambda: True)
+    monkeypatch.setattr(typeset, "enabled", lambda pane=None: True)
     assert state.shown_mode() is RenderMode.TYPESET
     assert state.mode is RenderMode.TYPESET
     for chosen in (RenderMode.RAW, RenderMode.WRAP, RenderMode.RICH):
         state.mode = chosen
         assert state.shown_mode() is chosen
-        monkeypatch.setattr(typeset, "enabled", lambda: False)
+        monkeypatch.setattr(typeset, "enabled", lambda pane=None: False)
         assert state.shown_mode() is chosen
-        monkeypatch.setattr(typeset, "enabled", lambda: True)
+        monkeypatch.setattr(typeset, "enabled", lambda pane=None: True)
 
 
 # -- the pane, drawn -------------------------------------------------------------

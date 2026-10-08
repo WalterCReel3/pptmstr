@@ -688,7 +688,7 @@ class TranscriptState:
         frame and never written back, so switching the seam off and on again
         returns the operator to what they had chosen.
         """
-        seam = typeset.enabled()
+        seam = typeset.enabled(typeset.Pane.CONTEXT)
         if self.mode is None:
             return DEFAULT_MODE if seam else RenderMode.WRAP
         if self.mode is RenderMode.TYPESET and not seam:
@@ -806,7 +806,7 @@ def _draw_controls(
     # does not fit starts a second row rather than sitting off the right edge,
     # where the filter cannot be reached at all, and the filter gives up width
     # before it takes a third.
-    flows = typeset.enabled()
+    flows = typeset.enabled(typeset.Pane.CONTEXT)
     scale = imgui.get_font_size() / 16.0
     style = imgui.get_style()
     gap = style.item_spacing.x

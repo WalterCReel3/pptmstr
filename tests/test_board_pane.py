@@ -57,7 +57,7 @@ def old_renderer(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
     a mocked ``imgui`` has no frame for the seam to draw in.
     """
     if "seam" not in request.fixturenames:
-        monkeypatch.setattr(typeset, "enabled", lambda: False)
+        monkeypatch.setattr(typeset, "enabled", lambda pane=None: False)
 
 
 ROOT: NodeId = ("s1", None)

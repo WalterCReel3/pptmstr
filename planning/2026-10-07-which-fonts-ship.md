@@ -1,7 +1,9 @@
 # Four face sets from the fonts already in the wheel, switched without a restart
 
 **Dated:** 2026-10-07 (built 2026-10-08) ·
-**Status:** built on `adv-text-experiment`; nothing vendored, no font binary added ·
+**Status:** built on `adv-text-experiment`; nothing vendored, no font binary added.
+**The presets of §1 and §2 are superseded by per-role choices (§0, 2026-10-08)**;
+§3's measurements and §4's pictures are of the presets and stand as what was seen ·
 **Origin:** the operator, 2026-10-07 — *"I would be more keen to ship with fonts that are
 bundled already but even checking installed in order to find an open font we could bundle
 ourselves may be worthwhile."* ·
@@ -14,7 +16,91 @@ FreeType), throwaway drivers under the gitignored `shots/fonts/` ·
 
 ---
 
+## 0. Superseded, 2026-10-08: text is configured by role, not by named preset
+
+**The operator's words.** On choosing faces: *"Per pane setting for the font
+selections is what's driving me that direction. Another option is to set the font
+per _role_. We would need to catalog the output types."* and, to the lead's per-role
+recommendation, *"yeah. Let's do that."* Asked whether `droid` should stay, the
+answer was *"Preset?"* — presets were never the operator's concept; they were this
+record's. On line spacing: *"1.35 was an arbitrary default that truly wasn't decided
+on. I like the idea of per-role but let's hide that setting internally and just make
+it easy to tweak via code for now. I don't want settings to get too fiddly."*
+
+**What replaces §1.** `ui/typeset.py` holds the catalogue, `Role`: prose, headings,
+inline code, code blocks, diffs, tool output (literal text), arguments, tables, row
+titles (native labels). For each the operator may choose a `RoleStyle`: a `Slot`
+(proportional or monospace) and a size step in whole pixels relative to the body.
+`Settings.typeset_roles` holds only the roles set apart from `DEFAULTS`,
+`Settings.typeset_family` the family in the proportional slot, and
+`Settings.typeset_panes` which panes typeset at all (all five by default, under
+`Settings.typeset`). The Text menu offers all of it; a settings dialog is to replace
+the menu.
+
+**Why a slot and not a family per role: checked against the library, and it holds.**
+advtext's `Face` has seven members (four proportional, two monospace, one for
+mathematics) and `register_font` keeps one file per member for the process, clearing
+every metric cache when it changes. So two text families are live at once. What is
+*not* limited is which of the two a role uses: a `Theme` gives each block kind its
+own `FontSpec`, and `Theme.face_for` reads a block's family off the block's own
+face, so a monospace heading stands over proportional prose in one view
+(`test_a_role_takes_its_own_slot_and_size_inside_one_document`). The shipped
+candidates are unchanged: Roboto in four styles or Droid Sans upright borrowing
+Roboto's emphasis for the proportional slot; Inconsolata Medium and the vendored
+Bold for the monospace one. Code blocks, diffs, tool output and arguments are
+offered monospace only: their columns are content.
+
+**A saved preset still means what it said.** `settings.load` reads a
+`typeset_faces` (and the older `typeset_mono`) when the file says nothing about
+roles or the family: `mono` is every role that may be monospace set so,
+`roboto-large` is prose two pixels up, `droid` is the Droid Sans family, `roboto`
+the defaults. `typeset.configure(faces=, mono=)`, `typeset.mono()`,
+`typeset.DEFAULT_PRESET`, `--faces` and `--prose` are kept as those spellings
+because the panes' tests and four scripts call them; `Preset`, `PRESETS`,
+`presets()` and `preset()` are gone.
+
+**§5's second item is refuted: a code span can be sized inside a paragraph, from
+this tree, without rewriting a node.** The library's markdown reader asks the theme
+what every run is set in (`Theme.font_for`), for a settled document and a stream
+alike. The seam's theme is a subclass that answers a code span with its own size.
+So `roboto-large`'s purpose — inline code level with the chrome — is met by the
+default: `Role.INLINE_CODE` at step 0 is Inconsolata at the chrome's 16 px inside
+16 px Roboto, where the block's em gave 14.3 px. Prose keeps its size and its
+density. Whether a 16 px monospace span reads as *large* beside Roboto (its advance
+is 8 px to Roboto's 7 or so) is a judgement for a person; the role's step is the
+remedy, one pixel at a time.
+
+**Line spacing is a table in code**, `typeset.LEADING`: a role's pitch as a multiple
+of its own pixel height, taken to a whole pixel. Not a multiple of the em, which
+differs by face at one height (Roboto 13.65 px, Inconsolata 15.25 px at 16). The
+defaults are the lead's, for the operator's eye: 17 px at a 16 px size for prose,
+code blocks, tool output, arguments and tables (it was 18.43 for prose and 19.07
+for code and literal text), a heading at its own pixel height (22 px for an h1; it
+was 21.6), a diff's row 18 px (it was 20) — the row is the library's `DiffView`
+grid, which takes it from the theme it is handed, so it is in the same table, and
+a diff fenced in a document is given the same theme.
+
+What tightening needed, measured in `tests/test_typeset.py`: the library moves a
+line down whenever its ink would touch the line above, and at 17 px the strut is
+12.75 px over 4.25, which a bracket, an accented capital and every box-drawing
+glyph reach past. Unhandled, lines of one paragraph were not one pitch apart and a
+`tree` listing's rules did not join. The seam's metrics now measure no glyph taller
+than the strut of the tightest entry in the table (the glyph is still drawn whole),
+and with that every line of a block is one pitch under the last at 17 px and at
+16 px, selection bands tile with no seam and no overlap, and no descender of one
+line reaches the ascender of the next in either family at 16 px (they may touch).
+Lines in a 600 px pane: prose 32 → 35, literal text 31 → 35, diff rows 30 → 33.
+
+**Whose advances lay text out is one constant**, `typeset.METRICS`, for the same
+reason leading is a table: `"hinted"` (what ships: ImGui's hinted advances) or
+`"file"` (the faces loaded unhinted, the library's own metrics, nothing of its
+measuring overridden). Both draw every view kind and pass the suite. See
+`planning/2026-10-07-advtext-sets-the-text.md` §6 for the decision this is the
+instrument for; `scripts/compare_metrics.py` puts the two side by side.
+
 ## 1. What was decided
+
+*Superseded by §0. Kept as the record of what the presets were.*
 
 **Selection is among presets, and a preset is data.** `ui/typeset.py` holds `PRESETS`; a
 `Preset` is a name, a menu label, whether prose is monospace, an optional file for the
@@ -46,6 +132,9 @@ still follows the size `hello_imgui` gives the UI font for the display. It scale
 text only; the chrome does not move.
 
 ## 2. Is there an honest third preset? Two, of different worth
+
+*Superseded by §0: `roboto-large` is prose at step +2, and its reason for existing
+is met at the default size by the inline-code role.*
 
 **`roboto-large` is the honest one, and it answers the survey's open question 3.** At one
 pixel height Roboto's em is 13.65 px and Inconsolata's 15.25 px, and a code span has its
@@ -139,7 +228,7 @@ proportional chrome font is a layout change, not a font choice.
 
 **A per-face size adjustment inside one paragraph.** It needs a size on a span or a scale
 on a face in `advtext`, which is outside this tree. `roboto-large` is what can be done
-from here.
+from here. *(Refuted 2026-10-08: see §0. `Theme.font_for` is the size on a span.)*
 
 ## 6. Not verified
 
@@ -155,6 +244,11 @@ from here.
 - The between-frames atlas add was one run, two fonts, one backend.
 
 ## 7. Open, for the operator
+
+*Items 1 and 2 are closed by §0: Droid Sans is a family for the proportional slot
+and not a preset, and nothing has to be the default to level inline code. Open
+instead: the leading defaults (17 px, and 18 for a diff) are the lead's and are for
+the operator's eye; and whether inline code at the chrome's height reads as large.*
 
 1. **Does `droid` stay?** It is honest about what it is and it is the weakest entry. If the
    answer is no, the registry machinery it needs (`_apply_faces`, the remembered loader)

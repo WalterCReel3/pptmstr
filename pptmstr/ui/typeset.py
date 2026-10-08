@@ -16,7 +16,7 @@ height it claimed in pixels, and **raises outside a frame** (``_frame``).
 
 | call | what it is for |
 |---|---|
-| ``enabled()`` | whether a pane should use this module at all |
+| ``enabled(pane)`` / ``pane_on(pane)`` | whether a pane should use this module at all |
 | ``markdown(cache, key, source, ...)`` | a settled markdown document: selectable, culled |
 | ``plain(cache, key, text, ...)`` | text that is not markdown: tool output, a command, a path |
 | ``document(cache, key, parts, ...)`` | ``Part``s of every ``Kind`` as one view, one selection |
@@ -25,14 +25,20 @@ height it claimed in pixels, and **raises outside a frame** (``_frame``).
 | ``stream(cache, key)`` -> ``Stream`` | markdown that is still arriving |
 | ``diff_model(texts)`` / ``approval_diff(pending)`` | the diff model, no window, no file read |
 | ``font(weight, size)`` / ``label(text, ...)`` | the same faces for a native ImGui line |
-| ``line_height()`` / ``diff_row_height()`` | a literal line's pitch, a diff row's: to size a cap |
+| ``line_height()`` / ``diff_row_height()`` | a role's line pitch, a diff row's: to size a cap |
+| ``multiline_kind(role)`` | the ``Kind`` a role's text of several lines is set as |
 | ``ViewCache`` | what holds the views; one per pane, pruned by live key set |
 | ``set_budget(ms)`` / ``pending()`` | what a frame may spend building, and whether more is owed |
 | ``palette(ink)`` / ``build_palette(p)`` | the library's colours for the live theme |
 | ``available()`` / ``obtainable()`` / ``unavailable_reason()`` | the menu's questions |
 | ``configure`` / ``wanted`` / ``pre_frame`` / ``reset`` | the app's side, each frame |
 | ``load_fonts`` / ``load_fonts_later`` / ``hello_loader`` | the app's side, at start-up |
-| ``presets()`` / ``preset()`` / ``scale()`` / ``mono()`` | the face sets, and what is in force |
+| ``Role`` / ``Slot`` / ``RoleStyle`` / ``Pane`` | what is configured, and by what |
+| ``DEFAULTS`` / ``SLOTS`` / ``STEPS`` / ``PROPORTIONALS`` / ``SCALES`` | what may be chosen |
+| ``chosen(role)`` / ``style(role)`` / ``px(role)`` / ``pitch(role)`` | a role as set, as in force |
+| ``proportional()`` / ``proportionals()`` / ``scale()`` / ``mono()`` | the rest in force |
+| ``roles_from`` / ``panes_from`` / ``legacy`` | settings' strings into the above |
+| ``LEADING`` / ``METRICS`` | line spacing and whose advances: tables in code, not settings |
 
 A ``ViewCache`` answers, per key: ``view`` (the library's own object), ``height``,
 ``drawn`` and ``replaced`` (see "Two counts"), ``unbuilt`` (source lines still to be
@@ -48,11 +54,11 @@ swaps one view for another and watches ``unbuilt``, ``document(notice_above=True
 for a pane whose reader decides on the text and must see at once that it is not
 all there, and ``Part(tight=True)`` for a part that names the one under it.
 
-``enabled()`` false means every pane uses the renderer it had before, untouched. That
-is the experiment's instrument (the operator flips ``Settings.typeset`` and compares)
-and it is also the degraded mode: it is false when the library did not import, when
-the faces did not load, and when the faces that are loaded belong to another ImGui
-context than the current one.
+``enabled(pane)`` false means that pane uses the renderer it had before, untouched.
+That is the experiment's instrument (the operator flips ``Settings.typeset``, or one
+pane's switch, and compares) and it is also the degraded mode: it is false when the
+library did not import, when the faces did not load, and when the faces that are
+loaded belong to another ImGui context than the current one.
 
 ## Nothing written is hidden
 
@@ -195,23 +201,49 @@ no such record, so for a diff ``replaced`` is 0 and says nothing.
 running text on the same raster the chrome is drawn from, so density does not drop.
 Justified text needs hyphenation to avoid loose lines and the library has none.
 
-**Which faces set the text is a named preset (``PRESETS``), from fonts that already
-ship.** ``Settings.typeset_faces`` names one. Roboto prose with Inconsolata code is
-the default; ``mono`` sets everything in Inconsolata. Whether proportional prose
-beside Inconsolata chrome reads as professional or as foreign is a judgement for a
-person looking at it, which is why it is a setting and not a constant. A preset is
-data -- a file for the upright prose role, whether prose is monospace, a size for
-prose relative to the chrome -- and ``Preset`` says what each one falls back to.
-``planning/2026-10-07-which-fonts-ship.md`` has the reasoning and what was looked at.
+**Text is configured by role, from fonts that already ship.** ``Role`` is the
+catalogue -- prose, headings, inline code, code blocks, diffs, tool output,
+arguments, tables, row titles -- and for each the operator may choose a ``RoleStyle``:
+which of two families it is set in (``Slot``) and a size in whole pixels relative
+to the body. Not per pane, and not by a named set of faces: a pane shows several
+roles, and a named set answered a question nobody asked. Whether proportional
+prose beside Inconsolata chrome reads as professional or as foreign is a judgement
+for a person looking at it, which is why it is a setting and not a constant.
+``DEFAULTS`` is Roboto for prose, headings, tables and row titles and Inconsolata
+for the rest, all at the body's size. ``planning/2026-10-07-which-fonts-ship.md`` has
+the reasoning and the operator's words.
 
-**A preset switch adds nothing to the atlas.** The library names faces by role and
-keeps one file per role for the whole process, so a preset with a prose file of its
-own re-registers ``Face.PROSE``. Every file any preset names is put on the atlas once,
+**Two families are live at once, and that is the library's limit.** It names font
+files by ``Face`` -- four proportional members, two monospace, one for mathematics --
+and ``register_font`` keeps one file per member for the whole process. So "a family
+per role" is: one family fills the proportional members (``proportional()``: Roboto,
+or Droid Sans upright with Roboto's bold and italics), Inconsolata fills the
+monospace pair because nothing else monospace ships, and a role chooses a slot.
+Inside that limit the choice is free per role in one document: a theme gives every
+block kind its own font, and the library reads a block's family off the block's
+face (``_document_theme``). Roles whose columns are content -- code, diffs, tool
+output, arguments -- are offered monospace only (``SLOTS``).
+
+**A change of family adds nothing to the atlas.** A family with a file of its own
+re-registers ``Face.PROSE``. Every file any family names is put on the atlas once,
 in ``load_fonts``, and remembered by path (``_State.files``); a switch is then a
 registry change, a font looked up by path, and the epoch. It is safe from inside a
 frame, which is where a menu click arrives. The registration drops every metric the
 library had read from a font file, so the frame after such a switch re-reads them:
-half a second, once, on the operator's own click ("What it costs").
+half a second, once, on the operator's own click ("What it costs"). A role changing
+slot or size registers nothing and costs the rebuild of what is on screen.
+
+**Line spacing is a table in code** (``LEADING``): a role's pitch as a multiple of
+its own pixel height, taken to a whole pixel -- 17 px at a 16 px size for prose and
+for literal text, 18 for a diff's rows. There is no setting, by the operator's
+decision; the table is the place to change it. It holds at a pitch as tight as
+the face itself because no glyph is measured taller than its line
+(``_LineMetrics.bbox``): the library otherwise moves a line down when its ink would
+touch the one above, which at 17 px is every line with a bracket in it.
+
+**Each pane is switched on its own** (``Pane``, ``enabled(pane)``), under
+``Settings.typeset`` as the switch over all of them. Switching a pane is not a
+change of faces and rebuilds nothing.
 
 **Typesetting that is off is not paid for, and a library that is absent is
 survivable.** This module imports with ``advtext`` missing or broken: nothing at
@@ -228,12 +260,14 @@ when the process ends (``_remember_scratch``).
 a test file that leaves its faces loaded and destroys its context cannot leave the
 seam switched on for the next one.
 
-**Code, diffs and literal text are Inconsolata at the chrome's own size.** A theme
-sizes every block in ems of its body, and Roboto's em at 16 px is smaller than
-Inconsolata's, so a fenced block in a proportional document would come out about
-14 px tall. The prose theme takes its fenced-code style from the monospace theme
-instead. Inline code spans cannot be resized that way (a span has its block's size)
-and do sit slightly small in proportional prose.
+**Code, diffs and literal text are Inconsolata at the chrome's own size, and so is
+a code span.** A theme sizes every block in ems of its body, and Roboto's em at
+16 px is smaller than Inconsolata's, so a fenced block in a proportional document
+would come out about 14 px tall, and a code span in a paragraph the same. Each
+block kind is given its own role's size, and a span the size of ``Role.INLINE_CODE``
+through the one call the library's markdown reader makes to ask what a run is set
+in (``_theme_class``): a settled document and a stream alike, with no built node
+rewritten.
 
 **Headings are a tighter scale than the library's.** The library's ratio is 1.25 per
 level, an h1 nearly twice the body: right for a page, wasteful in a pane. ``_HEADINGS``
@@ -249,17 +283,27 @@ a second, in the callback that also drains the bridge -- would arrive mid-sessio
 ``load_fonts`` pays it once: loading the faces is 0.34 s without the math face and
 1.15 s with it, measured here in fresh processes.
 
-**Text is measured with ImGui's advances, not the font file's** (``pixel_metrics``).
-The library lays out from the file's advances and draws each glyph of a word a
-whole-pixel gap from the last. ImGui's advance for a glyph is a different number --
-a whole pixel chosen by its hinter, 8 for Inconsolata at 16 px where the file says
-7.63 -- so each word was drawn wider or narrower than the layout believed and the
-error landed in the space after it: a long word followed by almost no gap, a short
-one by a double gap, in both faces. The library takes its metrics through a
-resolver the host supplies, and the one supplied here asks ImGui. Word spacing is
-then even and monospace text sits on the chrome's 8 px grid. Pair kerns are the
-file's, to the whole pixel; ImGui does not kern, so a laid-out ``AV`` is narrower
-than ``calc_text_size`` says, and is drawn where it was laid out.
+**Text is measured with ImGui's advances, not the font file's** (``pixel_metrics``,
+under ``METRICS = "hinted"``, which is what ships). The library lays out from the
+file's advances and draws each glyph of a word a whole-pixel gap from the last.
+ImGui's advance for a glyph is a different number -- a whole pixel chosen by its
+hinter, 8 for Inconsolata at 16 px where the file says 7.63 -- so each word was
+drawn wider or narrower than the layout believed and the error landed in the space
+after it: a long word followed by almost no gap, a short one by a double gap, in
+both faces. The library takes its metrics through a resolver the host supplies, and
+the one supplied here asks ImGui. Word spacing is then even and monospace text sits
+on the chrome's 8 px grid. Pair kerns are the file's, to the whole pixel; ImGui
+does not kern, so a laid-out ``AV`` is narrower than ``calc_text_size`` says, and is
+drawn where it was laid out.
+
+**The other way is one constant away** (``METRICS = "file"``): the faces loaded
+unhinted, so that ImGui's advances are the file's, and the library's own metrics
+with nothing overridden but a glyph's measured height. Every view kind draws under
+it and the suite passes under it (``PPTMSTR_TEST_METRICS=file``). It does not by
+itself make what is drawn agree with what was laid out: the library's draw sets
+each glyph a whole number of pixels from the last whatever the atlas, so a
+monospace word laid out at 7.63 px a glyph is drawn at 8 and takes the difference
+out of the space after it. ``scripts/compare_metrics.py`` shows both.
 
 **Every space is the same width** (``Spacing.FRENCH``). The library's default widens
 the space after a full stop by a third, which reads a ``.`` in ``foo.bar baz`` or after
@@ -283,8 +327,8 @@ library's stands a blank line under the header and its rows are otherwise
 indistinguishable from a wrapped cell's lines); a veil over the table and the
 fenced diff of a part drawn dim (``_overlay``); a table that fits held at its
 columns' natural widths, as a stream holds one (``_held_table``); a paragraph's
-air under the last item of a list (``_dressed``); and every line of a monospace
-face measured no taller than the face, so box-drawing joins (``_PixelMetrics.bbox``).
+air under the last item of a list (``_dressed``); and no glyph measured taller
+than its line, so that a pitch holds and box-drawing joins (``_LineMetrics.bbox``).
 
 **A view is rebuilt only when what it shows changes**, and then as little of it as
 changed. New text under a key is shown by the same view, which keeps its selection;
@@ -401,10 +445,11 @@ made of one paragraph a hundred times over measures a fifth of this).
 - A small diff 0.6 ms a frame, a stream with nothing arriving 0.7 ms, six literal
   lines 0.3 ms, a view out of sight 0.004 ms: measured before the budget existed and
   not re-run.
-- **A preset switch**, in a real window (Xvfb, llvmpipe) with a 30-line document
-  in view: between presets that share their files -- ``roboto``, ``mono``,
-  ``roboto-large`` -- ``configure`` is 0.03 ms and the frame that rebuilds the views
-  20 to 40 ms. To or from a preset with a file of its own (``droid``), ``configure``
+- **A change of faces**, in a real window (Xvfb, llvmpipe) with a 30-line document
+  in view, measured when these were named presets: between ones that share their
+  files -- a role changing slot or size -- ``configure`` is 0.03 ms and the frame
+  that rebuilds the views 20 to 40 ms. To or from a family with a file of its own
+  (Droid Sans), ``configure``
   is 50 to 250 ms and the next frame 430 to 510 ms, nearly all of it the library
   reading every face's metrics again after the registration, the math face's
   among them. The atlas holds the same ten fonts throughout. Measured by the task
@@ -468,8 +513,16 @@ content edge, to draw a stale layout without widening the window).
   library offers on a view and does not list, to read a selection block by block.
 
 Read through objects the facade hands out, and so not pinned by that test: a diff
-view's ``frame_plan`` and the glyph commands in it (``_headers``), and a block
-style's ``strut`` (``_table_rules``, ``_last_foot``).
+view's ``frame_plan`` and the glyph commands in it (``_headers``); a block style's
+``strut`` (``_table_rules``, ``_last_foot``) and, off a style of ``Theme.build()``, how
+the library divides a leading into a strut and spells a font key (``_template``);
+a hosted diff view's ``theme``, which is assigned (``_Fences``).
+
+**``Theme`` is subclassed** (``_theme_class``), to answer ``font_for`` for a code span.
+The library's markdown reader calls it for every run; a reader that stopped
+calling it would set spans at their block's size again, and
+``test_inline_code_is_the_chromes_height_inside_prose_of_the_same_height`` reads
+the built nodes to say so.
 
 One selection at a time across every view is the library's own doing
 (``SELECTION_OWNERSHIP``, in ``advtext.ui.bare_view``); nothing here needs to touch it.
@@ -486,9 +539,17 @@ import shutil
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Collection, Hashable, Iterable, Iterator, Sequence
+from collections.abc import (
+    Callable,
+    Collection,
+    Hashable,
+    Iterable,
+    Iterator,
+    Mapping,
+    Sequence,
+)
 from contextlib import contextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -608,7 +669,7 @@ class Weight(enum.Enum):
     """
     The faces a native ImGui line can be set in, by what they are for.
 
-    The prose weights follow the preset: under a monospace one they are
+    The prose weights follow ``Role.LABEL``: where that role is monospace they are
     Inconsolata, and there is no monospace italic, so ``ITALIC`` is upright there.
     """
 
@@ -625,48 +686,264 @@ _PROSE_FACES = ("PROSE", "PROSE_BOLD", "PROSE_ITALIC", "PROSE_BOLD_ITALIC")
 The library's proportional roles, by name: ``Face[name]`` where one is needed.
 """
 
+METRICS = "hinted"
+"""
+Whose advances lay text out: ``"hinted"``, ``"light"`` or ``"file"``. Code, not a
+setting.
+
+- ``"hinted"``: the faces are loaded as ImGui loads any font, through FreeType's
+  hinter, and every advance is asked of ImGui's baked font (``_PixelMetrics``).
+  Word spaces are even and monospace text sits on the chrome's whole-pixel grid.
+- ``"light"``: the same, with the faces loaded under FreeType's light hinting
+  (``_LOADER_FLAGS``), whose whole-pixel advances stay nearer the font file's.
+- ``"file"``: the faces are loaded with hinting off, so ImGui's advances are the
+  font file's, and the library measures from the file as it was designed to.
+  Nothing of its measuring is overridden. **What is drawn still does not agree
+  with what was laid out**: the library's draw sets every glyph a whole number of
+  pixels from the last whatever the atlas (measured by ``scripts/compare_metrics.py``:
+  no pen is fractional), so a monospace word laid out at 7.63 px a glyph is drawn
+  at 8 and the difference comes out of the space after it.
+
+Read when the faces are loaded and when a metric is first asked for, so changing
+it means loading the faces again (``load_fonts``); the test suite does, to run
+under another (``tests/conftest.py``).
+"""
+
+_LOADER_FLAGS = {"file": 1, "light": 8}
+"""
+``ImGuiFreeTypeLoaderFlags_NoHinting`` and ``_LightHinting``, by ``METRICS``, for
+``ImFontConfig.font_loader_flags``. The binding exposes the field and not the enum.
+"""
+
+
+class Role(enum.Enum):
+    """
+    What a run of typeset text is, which is what its face and size are chosen by.
+
+    The catalogue is what the seam and the panes tell apart, and no finer:
+
+    - ``PROSE``: paragraphs, list items and quotes of a markdown body, and plain
+      text set in the prose face (``plain(mono=False)``).
+    - ``HEADING``: the six heading levels, which keep their scale between them.
+    - ``INLINE_CODE``: a code span inside prose, a heading or a table cell.
+    - ``CODE_BLOCK``: a fenced block.
+    - ``DIFF``: the rows of ``diff()``, and of a diff fenced in a document.
+    - ``LITERAL``: text that is not markdown -- tool calls, results, errors,
+      tracebacks: every ``Kind`` but ``MARKDOWN`` unless the part says otherwise.
+    - ``ARGUMENT``: a parked call's argument names and values (``Part.role``).
+    - ``TABLE``: the cells of a markdown table.
+    - ``LABEL``: a native ImGui line in a typeset face (``label()``, ``font()``): a
+      board row's title, a subject.
+    """
+
+    PROSE = "prose"
+    HEADING = "heading"
+    INLINE_CODE = "inline-code"
+    CODE_BLOCK = "code-block"
+    DIFF = "diff"
+    LITERAL = "literal"
+    ARGUMENT = "argument"
+    TABLE = "table"
+    LABEL = "label"
+
+
+ROLE_LABELS: dict[Role, str] = {
+    Role.PROSE: "Prose",
+    Role.HEADING: "Headings",
+    Role.INLINE_CODE: "Inline code",
+    Role.CODE_BLOCK: "Code blocks",
+    Role.DIFF: "Diffs",
+    Role.LITERAL: "Tool output",
+    Role.ARGUMENT: "Arguments",
+    Role.TABLE: "Tables",
+    Role.LABEL: "Row titles",
+}
+"""
+What a menu or a dialog calls each role.
+"""
+
+
+class Slot(enum.Enum):
+    """
+    Which of the two live families a role is set in.
+
+    Two, because the library names font files by ``Face`` -- four proportional
+    members, two monospace, one for mathematics -- and keeps one file per member
+    for the whole process (``register_font``). So at any moment one family fills
+    the proportional members (``proportional()``) and one the monospace pair
+    (Inconsolata, the only monospace that ships), and what a role chooses is which
+    of the two it uses. A theme sets a face per block kind and one view takes one
+    theme, so the choice is free per role inside a single document.
+    """
+
+    PROPORTIONAL = "proportional"
+    MONOSPACE = "monospace"
+
 
 @dataclass(frozen=True, slots=True)
-class Preset:
+class RoleStyle:
     """
-    A named set of faces for typeset text, built from fonts that already ship.
+    What the operator may choose for one role: a family slot, and a size.
 
-    ``prose_file`` is a font in the imgui-bundle wheel, relative to its fonts
-    directory, to set upright prose in instead of the library's Roboto. It replaces
-    one role and no other, which is the honest shape of a family that ships in one
-    style: bold, italic and bold italic -- so every heading -- stay the library's
-    Roboto faces, and a preset with a ``prose_file`` is two families in one paragraph.
+    ``step`` is whole pixels on top of the body size (``body_px()``), which is the
+    UI font's times ``scale()``: 0 is the chrome's own height, in either family.
+    Whole pixels because that is what ImGui bakes.
+    """
 
-    ``mono`` sets every role in Inconsolata. There is no monospace italic in the
-    library or on disk, so emphasis is upright there.
+    slot: Slot
+    step: int = 0
 
-    ``prose_scale`` sizes prose relative to the chrome. At one pixel height Roboto's
-    em is nine tenths of Inconsolata's, and a code span has its paragraph's em, so
-    inline code in proportional prose is a pixel or two shorter than the chrome
-    around the pane. A scale of 9/8 puts the code span back on the chrome's raster
-    and pays for it with taller prose. Fenced code, diffs and literal text are the
-    chrome's size under every preset.
+
+STEPS: tuple[int, ...] = (-2, -1, 0, 1, 2, 3, 4)
+"""
+The size steps offered, in pixels relative to the body. ``configure`` clamps to the
+first and the last.
+"""
+
+DEFAULTS: dict[Role, RoleStyle] = {
+    Role.PROSE: RoleStyle(Slot.PROPORTIONAL),
+    Role.HEADING: RoleStyle(Slot.PROPORTIONAL),
+    Role.INLINE_CODE: RoleStyle(Slot.MONOSPACE),
+    Role.CODE_BLOCK: RoleStyle(Slot.MONOSPACE),
+    Role.DIFF: RoleStyle(Slot.MONOSPACE),
+    Role.LITERAL: RoleStyle(Slot.MONOSPACE),
+    Role.ARGUMENT: RoleStyle(Slot.MONOSPACE),
+    Role.TABLE: RoleStyle(Slot.PROPORTIONAL),
+    Role.LABEL: RoleStyle(Slot.PROPORTIONAL),
+}
+"""
+Every role's style until the operator says otherwise.
+
+Inline code at step 0 is Inconsolata at the chrome's own pixel height inside prose
+of the same height, so a code span is the size of the same word in the chrome.
+"""
+
+SLOTS: dict[Role, tuple[Slot, ...]] = {
+    Role.PROSE: (Slot.PROPORTIONAL, Slot.MONOSPACE),
+    Role.HEADING: (Slot.PROPORTIONAL, Slot.MONOSPACE),
+    Role.INLINE_CODE: (Slot.MONOSPACE,),
+    Role.CODE_BLOCK: (Slot.MONOSPACE,),
+    Role.DIFF: (Slot.MONOSPACE,),
+    Role.LITERAL: (Slot.MONOSPACE,),
+    Role.ARGUMENT: (Slot.MONOSPACE,),
+    Role.TABLE: (Slot.PROPORTIONAL, Slot.MONOSPACE),
+    Role.LABEL: (Slot.PROPORTIONAL, Slot.MONOSPACE),
+}
+"""
+The slots a role may be given. Code, diffs, literal text and arguments are
+monospace by nature -- their columns are content -- and are offered nothing else.
+"""
+
+LEADING: dict[Role, float] = {
+    Role.PROSE: 17 / 16,
+    Role.HEADING: 1.0,
+    Role.CODE_BLOCK: 17 / 16,
+    Role.DIFF: 18 / 16,
+    Role.LITERAL: 17 / 16,
+    Role.ARGUMENT: 17 / 16,
+    Role.TABLE: 17 / 16,
+}
+"""
+Line spacing, per role: the distance from one baseline to the next as a multiple
+of the role's own **pixel height**. THE place to change it; there is no setting.
+
+``17 / 16`` reads "17 px a line at a 16 px size". The product is taken to a whole
+pixel (``pitch()``), so every line of a block is the same height. For scale: ImGui
+sets wrapped text at 1.0 (16 px at 16), and at 1.0 a line's descenders and the
+next line's ascenders touch but do not overlap -- the faces are exactly their
+pixel height tall. A multiple of the pixel height and not of the em, because the
+em at one height differs by face (Roboto 13.65 px, Inconsolata 15.25 px at 16).
+
+A heading's is of its own size (22 px at h1), which is where a wrapped heading's
+lines go. A diff's rows are the library's grid and take the number rounded up.
+Inline code has no line of its own, and a label is ImGui's line: neither is here.
+"""
+
+_MULTILINE: dict[Role, str] = {
+    Role.LITERAL: "literal",
+    Role.ARGUMENT: "literal",
+}
+"""
+How a role's text of **several lines** meets the window's edge, by ``Kind`` value:
+``"literal"`` is set unbroken and the window scrolls sideways to it,
+``"wrapped-exact"`` is broken at the edge with every space kept. Internal, like
+``LEADING``. ``multiline_kind()`` answers from it.
+
+By value and not by member because ``Kind`` is defined further down.
+"""
+
+
+class Pane(enum.Enum):
+    """
+    The panes that can set their text through this module, each switched on its own.
+    """
+
+    DETAIL = "detail"
+    INBOX = "inbox"
+    CONTEXT = "context"
+    BOARD = "board"
+    BRIEF = "brief"
+
+
+PANE_LABELS: dict[Pane, str] = {
+    Pane.DETAIL: "DETAIL",
+    Pane.INBOX: "NEEDS YOU",
+    Pane.CONTEXT: "CONTEXT",
+    Pane.BOARD: "BOARD",
+    Pane.BRIEF: "BRIEF",
+}
+"""
+What a menu or a dialog calls each pane: the titles the panes carry.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class Proportional:
+    """
+    A family for the proportional slot, from fonts that already ship.
+
+    ``file`` is a font in the imgui-bundle wheel, relative to its fonts directory,
+    to set upright text in instead of the library's Roboto. It replaces one of
+    the library's four proportional faces and no other, which is the honest shape
+    of a family that ships in one style: bold, italic and bold italic -- so every
+    heading -- stay Roboto, and such a family is two families in one paragraph.
     """
 
     name: str
     label: str
-    mono: bool = False
-    prose_file: str | None = None
-    prose_scale: float = 1.0
+    file: str | None = None
 
 
-DEFAULT_PRESET = "roboto"
+DEFAULT_PROPORTIONAL = "roboto"
 
-PRESETS: tuple[Preset, ...] = (
-    Preset(DEFAULT_PRESET, "Roboto prose, Inconsolata code"),
-    Preset("mono", "Inconsolata throughout", mono=True),
-    Preset("roboto-large", "Roboto prose a size up, Inconsolata code", prose_scale=18 / 16),
-    Preset(
-        "droid", "Droid Sans prose, Roboto emphasis, Inconsolata code", prose_file="DroidSans.ttf"
-    ),
+PROPORTIONALS: tuple[Proportional, ...] = (
+    Proportional(DEFAULT_PROPORTIONAL, "Roboto"),
+    Proportional("droid", "Droid Sans (Roboto emphasis)", file="DroidSans.ttf"),
 )
 """
-What the Text menu offers, in its order. The first is the default.
+What may fill the proportional slot, in menu order. The first is the default.
+"""
+
+DEFAULT_PRESET = "roboto"
+"""
+The name the face presets gave the defaults, kept as a spelling ``configure(faces=)``
+and a saved ``typeset_faces`` still understand (``legacy()``).
+"""
+
+_LEGACY: dict[str, tuple[str, dict[Role, RoleStyle]]] = {
+    DEFAULT_PRESET: (DEFAULT_PROPORTIONAL, {}),
+    "mono": (
+        DEFAULT_PROPORTIONAL,
+        {role: RoleStyle(Slot.MONOSPACE) for role, offered in SLOTS.items() if len(offered) > 1},
+    ),
+    "roboto-large": (DEFAULT_PROPORTIONAL, {Role.PROSE: RoleStyle(Slot.PROPORTIONAL, 2)}),
+    "droid": ("droid", {}),
+}
+"""
+What each face preset of the build before roles means now: a family for the
+proportional slot, and the roles that differ from ``DEFAULTS``.
+
+``roboto-large`` was prose at 18 px beside 16 px chrome, which is two steps.
 """
 
 SCALES: tuple[float, ...] = (0.875, 1.0, 1.125, 1.25)
@@ -686,18 +963,22 @@ class _State:
     """
 
     typeset: bool = True
-    # The preset the operator named. `preset()` is the one in force, which differs
-    # when this names nothing known or a file that did not load.
-    faces: str = DEFAULT_PRESET
+    # What the operator chose: a style for every role, the family in the
+    # proportional slot, and the panes switched off. `style()` and
+    # `proportional()` are what is in force, which differs when a face did not load.
+    roles: dict[Role, RoleStyle] = field(default_factory=lambda: dict(DEFAULTS))
+    family: str = DEFAULT_PROPORTIONAL
+    panes_off: frozenset[Pane] = frozenset()
     scale: float = 1.0
     fonts: LoadedFaces | None = None
     # Every font file put on the atlas since `load_fonts`, by path. What makes a
-    # preset switch a lookup: see "A preset switch adds nothing to the atlas".
+    # change of family a lookup: see "A change of family adds nothing to the atlas".
     files: dict[Path, Any] = field(default_factory=dict)
     # The UI font's size as ImGui last reported it; see `pre_frame`.
     live_px: float = BODY_PX
-    # Goes up whenever a document built before would be wrong now: the preset or
-    # the scale changed, the UI font's size did, or the fonts were loaded again.
+    # Goes up whenever a document built before would be wrong now: a role's
+    # style, the family or the scale changed, the UI font's size did, or the
+    # fonts were loaded again.
     # Views compare it with the one they were built under.
     epoch: int = 0
     themes: dict[str, Theme] = field(default_factory=dict)
@@ -750,70 +1031,197 @@ _STATE = _State()
 def configure(
     *,
     typeset: bool,
+    scale: float | None = None,
+    proportional: str | None = None,
+    roles: Mapping[Role, RoleStyle] | None = None,
+    panes: Mapping[Pane, bool] | None = None,
     mono: bool | None = None,
     faces: str | None = None,
-    scale: float | None = None,
 ) -> None:
     """
     Tell the seam what the operator's settings say. Call it on any change.
 
-    ``faces`` names a preset; one this build does not know is kept as written and
-    the default is used (``preset()``). ``mono`` is the same choice spelled as the
-    switch it was before there were presets: true is ``mono``, false is the default.
-    ``faces`` wins when both are given, and a call that gives neither, or no
-    ``scale``, leaves that setting as it was.
+    ``roles`` is every role that differs from ``DEFAULTS``; a role it leaves out is
+    at its default, so ``{}`` is the defaults. A slot the role is not offered
+    (``SLOTS``) is read as the role's default slot and a step is clamped to
+    ``STEPS``. ``proportional`` names the family in the proportional slot; one this
+    build does not know is kept as written and the default is used
+    (``proportional()``). ``panes`` says which panes are switched on; one it leaves
+    out is on.
 
-    A change of preset or of scale means every document was built in the wrong
-    faces or at the wrong size, so the epoch moves and each view is rebuilt the next
-    time it is drawn. Callable before the fonts are loaded, and from inside a frame.
+    ``faces`` and ``mono`` are the same choices spelled as the presets and the
+    switch they were before there were roles (``legacy``): ``faces`` sets the family
+    and the roles together, ``mono=True`` is ``faces="mono"`` and ``mono=False`` the
+    defaults. ``roles`` and ``proportional`` win over ``faces``, which wins over
+    ``mono``. A call that gives none of them, or no ``scale``, or no ``panes``,
+    leaves that setting as it was.
+
+    A change of a role, of the family or of the scale means every document was
+    built in the wrong faces or at the wrong size, so the epoch moves and each
+    view is rebuilt the next time it is drawn. Switching a pane moves nothing.
+    Callable before the fonts are loaded, and from inside a frame.
     """
     _STATE.typeset = typeset
-    if _IMPORT_FAILURE is not None:
-        # Nothing to rebuild and no registry to keep in step; the settings are
-        # still remembered, so the menu shows what was chosen.
-        if faces is not None:
-            _STATE.faces = faces
-        elif mono is not None:
-            _STATE.faces = "mono" if mono else DEFAULT_PRESET
-        if scale is not None and math.isfinite(float(scale)):
-            _STATE.scale = min(max(float(scale), SCALES[0]), SCALES[-1])
-        return
-    before = (preset(), _STATE.body_px)
-    if faces is not None:
-        _STATE.faces = faces
-    elif mono is not None:
-        _STATE.faces = "mono" if mono else DEFAULT_PRESET
+    absent = _IMPORT_FAILURE is not None
+    # With the library absent there is nothing to rebuild and no registry to keep
+    # in step; the settings are still remembered, so the menu shows what was chosen.
+    before = None if absent else _in_force()
+    if panes is not None:
+        _STATE.panes_off = frozenset(pane for pane, on in panes.items() if not on)
+    old = faces if faces is not None else None if mono is None else "mono" if mono else ""
+    if old is not None:
+        family, differing = legacy(old)
+        _STATE.family, _STATE.roles = family, _checked(differing)
+    if proportional is not None:
+        _STATE.family = proportional
+    if roles is not None:
+        _STATE.roles = _checked(roles)
     if scale is not None:
         wanted = float(scale)
         # A hand-edited NaN compares false with everything and would pass a clamp.
         _STATE.scale = min(max(wanted, SCALES[0]), SCALES[-1]) if math.isfinite(wanted) else 1.0
-    if (preset(), _STATE.body_px) != before:
+    if not absent and _in_force() != before:
         _apply_faces()
         _STATE.epoch += 1
         _STATE.themes.clear()
 
 
-def presets() -> tuple[tuple[Preset, bool], ...]:
+def _checked(differing: Mapping[Role, RoleStyle]) -> dict[Role, RoleStyle]:
     """
-    Every preset with whether it can be chosen now, in menu order.
-
-    One whose ``prose_file`` did not load cannot: it would be measured from a file
-    ImGui has no font for.
+    ``DEFAULTS`` with ``differing`` laid over it, each style made one its role allows.
     """
-    return tuple((each, _usable(each)) for each in PRESETS)
+    out = dict(DEFAULTS)
+    for role, given in differing.items():
+        slot = given.slot if given.slot in SLOTS[role] else DEFAULTS[role].slot
+        step = given.step if math.isfinite(given.step) else 0
+        out[role] = RoleStyle(slot, int(min(max(step, STEPS[0]), STEPS[-1])))
+    return out
 
 
-def preset() -> Preset:
+def _in_force() -> tuple[object, ...]:
     """
-    The preset in force: the one the settings name, or the default.
-
-    The default when the name is not one of ``PRESETS`` -- a settings file from a
-    later build -- and when the preset's own prose file is not on the atlas.
+    Everything a built document depends on, to tell a change that needs a rebuild.
     """
-    for each in PRESETS:
-        if each.name == _STATE.faces and _usable(each):
+    return (tuple(style(role) for role in Role), proportional(), _STATE.body_px)
+
+
+def legacy(name: str) -> tuple[str, dict[Role, RoleStyle]]:
+    """
+    What a face preset's name means now: the proportional family, and the roles
+    that differ from ``DEFAULTS``. A name that was never a preset is the defaults.
+
+    ``settings.load`` spells the same table for a saved ``typeset_faces``, without
+    importing this module; a test holds the two together.
+    """
+    family, differing = _LEGACY.get(name, _LEGACY[DEFAULT_PRESET])
+    return family, dict(differing)
+
+
+def roles_from(entries: Iterable[tuple[str, str | None, int | None]]) -> dict[Role, RoleStyle]:
+    """
+    Role styles from how settings keep them: ``(role, slot, step)`` by value, with
+    ``None`` for "the default". A role or a slot this build does not know is left
+    out, so a file from a later build still loads.
+    """
+    out: dict[Role, RoleStyle] = {}
+    for name, slot, step in entries:
+        try:
+            role = Role(name)
+        except ValueError:
+            continue
+        base = DEFAULTS[role]
+        try:
+            chosen = base.slot if slot is None else Slot(slot)
+        except ValueError:
+            chosen = base.slot
+        out[role] = RoleStyle(chosen, base.step if step is None else step)
+    return out
+
+
+def panes_from(entries: Iterable[tuple[str, bool]]) -> dict[Pane, bool]:
+    """
+    Pane switches from how settings keep them, by value; an unknown pane is left out.
+    """
+    out: dict[Pane, bool] = {}
+    for name, on in entries:
+        try:
+            out[Pane(name)] = bool(on)
+        except ValueError:
+            continue
+    return out
+
+
+def chosen(role: Role) -> RoleStyle:
+    """
+    The style the operator's settings give a role, whether or not it can be had.
+    """
+    return _STATE.roles[role]
+
+
+def style(role: Role) -> RoleStyle:
+    """
+    The style a role is set in: the one chosen, or monospace when a proportional
+    face failed to load -- text measured from a file ImGui does not have would be
+    drawn in whatever font was bound, at the wrong advances.
+    """
+    given = _STATE.roles[role]
+    if given.slot is Slot.PROPORTIONAL and not _proportional_loaded():
+        return RoleStyle(Slot.MONOSPACE, given.step)
+    return given
+
+
+def _proportional_loaded() -> bool:
+    fonts = _STATE.fonts
+    return fonts is None or all(fonts.fonts.get(Face[name]) is not None for name in _PROSE_FACES)
+
+
+def px(role: Role) -> float:
+    """
+    The pixel height a role's text is set at: the body's, plus the role's step.
+    """
+    return max(1.0, _STATE.body_px + style(role).step)
+
+
+def pitch(role: Role, tall: float | None = None) -> float:
+    """
+    A role's line pitch in pixels, whole: ``LEADING`` times the role's pixel height.
+
+    ``tall`` is the height to take it of, for a heading level's own size.
+    """
+    return max(1.0, _half_up((px(role) if tall is None else tall) * LEADING[role]))
+
+
+def multiline_kind(role: Role) -> Kind:
+    """
+    The ``Kind`` a role's text of several lines is set as: unbroken, for the window
+    to scroll to, or broken at its edge (``_MULTILINE``). A role with no entry is
+    broken at the edge, which hides nothing in a window that cannot scroll.
+    """
+    return Kind(_MULTILINE.get(role, Kind.WRAPPED_EXACT.value))
+
+
+def proportionals() -> tuple[tuple[Proportional, bool], ...]:
+    """
+    Every family for the proportional slot with whether it can be chosen now, in
+    menu order.
+
+    One whose file did not load cannot: it would be measured from a file ImGui has
+    no font for.
+    """
+    return tuple((each, _usable(each)) for each in PROPORTIONALS)
+
+
+def proportional() -> Proportional:
+    """
+    The family in the proportional slot: the one the settings name, or the default.
+
+    The default when the name is not one of ``PROPORTIONALS`` -- a settings file
+    from a later build -- and when the family's own file is not on the atlas.
+    """
+    for each in PROPORTIONALS:
+        if each.name == _STATE.family and _usable(each):
             return each
-    return PRESETS[0]
+    return PROPORTIONALS[0]
 
 
 def scale() -> float:
@@ -823,22 +1231,22 @@ def scale() -> float:
     return _STATE.scale
 
 
-def _usable(which: Preset) -> bool:
+def _usable(which: Proportional) -> bool:
     path = _prose_path(which)
     return path is None or _STATE.files.get(path) is not None
 
 
 @cache
-def _prose_path(which: Preset) -> Path | None:
+def _prose_path(which: Proportional) -> Path | None:
     """
-    The file a preset sets upright prose in, or ``None`` for the library's own.
+    The file a family sets upright text in, or ``None`` for the library's own.
 
-    Kept, because ``preset()`` is asked on every native line a pane draws and
-    resolving a path is a system call.
+    Kept, because ``proportional()`` is asked whenever the settings are compared
+    and resolving a path is a system call.
     """
-    if which.prose_file is None:
+    if which.file is None:
         return None
-    return (_bundle_fonts() / which.prose_file).resolve()
+    return (_bundle_fonts() / which.file).resolve()
 
 
 def _bundle_fonts() -> Path:
@@ -849,15 +1257,15 @@ def _bundle_fonts() -> Path:
 
 def _apply_faces() -> None:
     """
-    Make the library's font registry agree with the preset in force.
+    Make the library's font registry agree with the family in force.
 
     A no-op unless the file behind ``Face.PROSE`` has to change. When it does, the
     registration drops every metric the library read from a file, so the measure is
-    made again and the prose role takes the font already on the atlas for the new
-    file. Nothing is added to the atlas: ``preset()`` only answers a preset whose
-    file ``load_fonts`` put there.
+    made again and the prose face takes the font already on the atlas for the new
+    file. Nothing is added to the atlas: ``proportional()`` only answers a family
+    whose file ``load_fonts`` put there.
     """
-    want = _prose_path(preset())
+    want = _prose_path(proportional())
     if registered_fonts().get(Face.PROSE) == want:
         return
     if want is None:
@@ -875,7 +1283,12 @@ def _atlas_loader(path: Path) -> Any:
     """
     A font file onto the current context's atlas: the loader a headless test wants.
     """
-    return _imgui().get_io().fonts.add_font_from_file_ttf(str(path), BODY_PX)
+    im = _imgui()
+    if METRICS not in _LOADER_FLAGS:
+        return im.get_io().fonts.add_font_from_file_ttf(str(path), BODY_PX)
+    config = im.ImFontConfig()
+    config.font_loader_flags = _LOADER_FLAGS[METRICS]
+    return im.get_io().fonts.add_font_from_file_ttf(str(path), BODY_PX, config)
 
 
 def _remembering(loader: Callable[[Path], Any]) -> Callable[[Path], Any]:
@@ -897,15 +1310,27 @@ def _remembering(loader: Callable[[Path], Any]) -> Callable[[Path], Any]:
     return load
 
 
-def enabled() -> bool:
+def enabled(pane: Pane | None = None) -> bool:
     """
     Whether a pane should set its text through this module this frame.
 
-    False when the operator turned it off, and false when the faces are not there to
-    draw with -- before ``load_fonts`` has run, or when the monospace face failed to
-    load. A pane that asks this and takes the other branch is unchanged.
+    A pane asks for itself: ``enabled(Pane.BOARD)``. False when the operator turned
+    typesetting off, false when that pane is switched off (``pane_on``), and false
+    when the faces are not there to draw with -- before ``load_fonts`` has run, or
+    when the monospace face failed to load. A pane that asks this and takes the
+    other branch is unchanged. With no pane it is the master switch and the faces.
     """
+    if pane is not None and pane in _STATE.panes_off:
+        return False
     return _STATE.typeset and available()
+
+
+def pane_on(pane: Pane) -> bool:
+    """
+    Whether the operator's settings have a pane switched on, whatever the master
+    switch and the faces say. What a menu entry shows.
+    """
+    return pane not in _STATE.panes_off
 
 
 def available() -> bool:
@@ -961,14 +1386,10 @@ def mono() -> bool:
     """
     Whether prose is being set in the monospace face.
 
-    True under a monospace preset, and true when a proportional face failed to
-    load: text measured from a file ImGui does not have would be drawn in whatever
-    font was bound, at the wrong advances.
+    True when ``Role.PROSE`` is monospace, and true when a proportional face failed
+    to load (``style``).
     """
-    if preset().mono:
-        return True
-    fonts = _STATE.fonts
-    return fonts is not None and any(fonts.fonts.get(Face[name]) is None for name in _PROSE_FACES)
+    return style(Role.PROSE).slot is Slot.MONOSPACE
 
 
 def hello_loader() -> Callable[[Path], Any]:
@@ -984,6 +1405,8 @@ def hello_loader() -> Callable[[Path], Any]:
     # The files are in the imgui-bundle wheel and in advtext's scratch directory,
     # not in an assets folder of ours.
     params.inside_assets = False
+    if METRICS in _LOADER_FLAGS:
+        params.font_config.font_loader_flags = _LOADER_FLAGS[METRICS]
     return lambda path: hello_imgui.load_font(str(path), BODY_PX, params)
 
 
@@ -1002,8 +1425,8 @@ def load_fonts(bold: Path | None = None, *, loader: Callable[[Path], Any] | None
     ``loader`` defaults to the current context's atlas, which is what a headless test
     wants; the app passes ``hello_loader()``.
 
-    Every file a preset names is loaded here too, whichever preset is in force, so
-    that choosing one later is not a font read in the middle of a session.
+    Every file a proportional family names is loaded here too, whichever is in
+    force, so that choosing one later is not a font read in the middle of a session.
     """
     _STATE.fonts = None
     _STATE.files.clear()
@@ -1023,14 +1446,14 @@ def load_fonts(bold: Path | None = None, *, loader: Callable[[Path], Any] | None
             resolved = bold.resolve()
             if registered_fonts().get(Face.CODE_BOLD) != resolved:
                 register_font(Face.CODE_BOLD, resolved)
-        # The library's own prose file first, whatever a preset registered in an
-        # earlier load: it is the one every preset can fall back to.
+        # The library's own prose file first, whatever a family registered in an
+        # earlier load: it is the one every family can fall back to.
         unregister_font(Face.PROSE)
         # After the registrations, which invalidate a measure made before them.
         _STATE.measure = char_measure(pixel_metrics)
         remembered = _remembering(_atlas_loader if loader is None else loader)
         fonts = load_faces(ALL_FACES, loader=remembered)
-        for each in PRESETS:
+        for each in PROPORTIONALS:
             extra = _prose_path(each)
             if extra is not None and extra.is_file():
                 try:
@@ -1188,7 +1611,65 @@ def _bold_monospace() -> bool:
 # ---------------------------------------------------------------------------
 
 
-class _PixelMetrics:
+class _LineMetrics:
+    """
+    A face's metrics as the library reads them from the font file, with one thing
+    changed: no glyph is measured taller than a line (``bbox``).
+
+    What ``METRICS = "file"`` lays out with: every advance and kern is the
+    library's own.
+    """
+
+    __slots__ = ("_bottom", "_boxes", "_inner", "_top", "has")
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self._boxes: dict[int, Any] = {}
+        # Asked once a character of every block built; through `__getattr__` that
+        # is two calls and a bound method each time.
+        self.has = inner.has
+        # The tightest line this face is ever set on: the strut of the smallest
+        # `LEADING`, at this face's own pixel height.
+        tall = _px(inner.ascent + inner.descent)
+        top, bottom = _strut(float(sp_from_px(_half_up(tall * min(LEADING.values())))))
+        if inner.face in (Face.CODE, Face.CODE_BOLD):
+            top, bottom = min(top, inner.ascent), min(bottom, inner.descent)
+        self._top, self._bottom = top, -bottom
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+    def bbox(self, codepoint: int) -> Any:
+        """
+        The glyph's ink, no taller than the line it is set on.
+
+        A line is as tall as its tallest glyph or as its block's strut, whichever
+        is more, and a line taller than the strut is one its block's pitch does
+        not hold for: the library sets it lower, so the rhythm breaks, and its
+        selection band is taller than its neighbours'. Two things reach past a
+        tight strut. Inconsolata's
+        box-drawing glyphs reach past its ascent and descent on purpose, to meet
+        the line above and below -- measured as drawn they made every line of a
+        ``tree`` listing 23 px against the 19 around it, which is exactly what
+        stops them meeting -- and at a pitch near the face's own height so do an
+        accented capital and a bracket. So a glyph is measured no taller than the
+        strut of the tightest ``LEADING``, and in a monospace face no taller than
+        the face says it is either. It is still drawn whole.
+
+        Kept by character. The library asks once for every character of every
+        line it measures, and its own answer is a new object each time.
+        """
+        box = self._boxes.get(codepoint)
+        if box is None:
+            box = self._inner.bbox(codepoint)
+            top, bottom = min(box.y_max, self._top), max(box.y_min, self._bottom)
+            if top != box.y_max or bottom != box.y_min:
+                box = type(box)(box.x_min, bottom, box.x_max, top)
+            self._boxes[codepoint] = box
+        return box
+
+
+class _PixelMetrics(_LineMetrics):
     """
     A face's metrics with each advance as ImGui will draw it.
 
@@ -1199,23 +1680,15 @@ class _PixelMetrics:
     it is 8.36 and still 8).
     """
 
-    __slots__ = ("_advances", "_boxes", "_font", "_grid", "_inner", "_tall", "has")
+    __slots__ = ("_advances", "_font", "_tall")
 
     def __init__(self, inner: Any) -> None:
-        self._inner = inner
+        super().__init__(inner)
         self._advances: dict[int, float] = {}
-        self._boxes: dict[int, Any] = {}
-        self._grid = inner.face in (Face.CODE, Face.CODE_BOLD)
-        # Asked once a character of every block built; through `__getattr__` that
-        # is two calls and a bound method each time.
-        self.has = inner.has
         fonts = _STATE.fonts
         self._font = None if fonts is None else fonts.fonts.get(inner.face)
         # The pixel height this em comes to, which is what ImGui is asked to bake at.
         self._tall = _px(inner.ascent + inner.descent)
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._inner, name)
 
     def advance(self, codepoint: int) -> float:
         hit = self._advances.get(codepoint)
@@ -1237,32 +1710,6 @@ class _PixelMetrics:
     def kern(self, codepoint: int, following: int) -> float:
         raw = self._inner.kern(codepoint, following)
         return float(sp_from_px(_half_up(_px(raw)))) if raw else 0.0
-
-    def bbox(self, codepoint: int) -> Any:
-        """
-        The glyph's ink, and for a monospace face no taller than the face says it is.
-
-        A line is as tall as its tallest glyph, and Inconsolata's box-drawing
-        glyphs reach past its ascent and descent on purpose, to meet the line
-        above and below. Measured as drawn they make every line of a ``tree``
-        listing a different height from the plain lines around it -- 23 px
-        against 19 -- which is exactly what stops them meeting. Literal text is
-        a grid: every line of it is the face's height, and the glyph is still
-        drawn whole.
-
-        Kept by character. The library asks once for every character of every
-        line it measures, and its own answer is a new object each time.
-        """
-        box = self._boxes.get(codepoint)
-        if box is None:
-            inner = self._inner
-            box = inner.bbox(codepoint)
-            if self._grid:
-                top, bottom = min(box.y_max, inner.ascent), max(box.y_min, -inner.descent)
-                if top != box.y_max or bottom != box.y_min:
-                    box = type(box)(box.x_min, bottom, box.x_max, top)
-            self._boxes[codepoint] = box
-        return box
 
     @property
     def space_width(self) -> float:
@@ -1288,25 +1735,53 @@ def _sp_per_px() -> float:
     return float(sp_from_px(4096.0)) / 4096.0
 
 
-_PIXEL_METRICS: dict[str, _PixelMetrics] = {}
+@cache
+def _template() -> Any:
+    """
+    A paragraph style of the library's, to make a font key or a strut from.
+
+    ``Theme.build`` opens no font. What is read off its style is the library's own
+    arithmetic -- how a key is spelled, how a strut divides a leading -- which is
+    not offered by name.
+    """
+    return Theme.build().style(BlockKind.PARAGRAPH)
+
+
+def _strut(leading: float) -> tuple[float, float]:
+    """
+    The height and depth the library's strut gives a line of ``leading``.
+    """
+    style = _template()
+    skip = style.interline
+    lead = replace(skip.baselineskip, width=round(leading))
+    strut = replace(style, interline=replace(skip, baselineskip=lead)).strut
+    return float(strut.height), float(strut.depth)
+
+
+_PIXEL_METRICS: dict[str, Any] = {}
 
 
 def pixel_metrics(key: str) -> Any:
     """
-    The resolver every document here is measured with: real faces, ImGui's advances.
+    The resolver every document here is measured with.
 
-    The library measures a glyph from the font file and draws each glyph of a word
-    at gaps rounded to the pixel. ImGui's advance for that glyph is a different
-    number -- a whole pixel, chosen by the hinter -- so a word came out wider or
-    narrower than the layout believed and the difference landed in the space after
-    it. Seen here before this existed: in monospace every word 5% too wide
-    (Inconsolata at 16 px advances 8 on screen and 7.63 in the file), a ten-letter
-    word eating half the space that followed; in Roboto, gaps between words from one
-    pixel to seven.
-
+    **Under ``METRICS = "hinted"`` or ``"light"``: real faces, ImGui's advances.** The library
+    measures a glyph from the font file and draws each glyph of a word at gaps
+    rounded to the pixel. ImGui's advance for a hinted glyph is a different number
+    -- a whole pixel, chosen by the hinter -- so a word came out wider or narrower
+    than the layout believed and the difference landed in the space after it. Seen
+    here before this existed: in monospace every word 5% too wide (Inconsolata at
+    16 px advances 8 on screen and 7.63 in the file), a ten-letter word eating half
+    the space that followed; in Roboto, gaps between words from one pixel to seven.
     Measuring with the advances ImGui will use makes the layout a statement about
-    what is drawn (pinned against ``calc_text_size`` in ``tests/test_typeset.py``). What
-    is given up is sub-pixel spacing the screen was not showing.
+    what is drawn (pinned against ``calc_text_size`` in ``tests/test_typeset.py``).
+    What is given up is sub-pixel spacing the screen was not showing.
+
+    **Under ``METRICS = "file"``: the library's own metrics**, which are then also
+    ImGui's advances, because the faces are loaded unhinted -- and still not the
+    gaps the library's draw sets glyphs at (``METRICS``).
+
+    Either way no glyph is measured taller than its line (``_LineMetrics.bbox``).
 
     Needs the faces loaded and a current ImGui context, which is every caller here:
     nothing is built until ``enabled()``. The entries hold ``ImFont`` pointers, so the
@@ -1314,7 +1789,8 @@ def pixel_metrics(key: str) -> Any:
     """
     hit = _PIXEL_METRICS.get(key)
     if hit is None:
-        hit = _PIXEL_METRICS[key] = _PixelMetrics(fontlib_metrics(key))
+        made = _LineMetrics if METRICS == "file" else _PixelMetrics
+        hit = _PIXEL_METRICS[key] = made(fontlib_metrics(key))
     return hit
 
 
@@ -1322,143 +1798,276 @@ def pixel_metrics(key: str) -> Any:
 # Themes
 # ---------------------------------------------------------------------------
 
+_HEADING_FACES = {5: "PROSE_BOLD_ITALIC", 6: "PROSE_ITALIC"}
+"""
+The proportional face of a heading level that is not plain bold, by name. The
+library's own choice: below the fourth level the size is the body's, and the
+levels are told apart by face.
+"""
+
 
 def _theme(name: str) -> Theme:
     """
-    One of the four themes, built on first use and kept until the epoch moves.
+    A theme by name, built on first use and kept until the epoch moves.
 
-    - ``prose``: a markdown document, in the preset's faces at the preset's size.
-    - ``literal``: text that is not markdown, and diffs. Monospace, no margins.
-    - ``prose-literal``: plain text in the prose face, no margins.
-    - ``part``: literal and wrapped parts of a ``document``. Monospace, a little air.
-    - ``mono``: the monospace document theme the others borrow sizes from.
+    - ``prose``: a markdown document, every role in its own style.
+    - ``diff``: what a ``DiffView`` is given: ``Role.DIFF``.
+    - ``literal`` / ``part``: ``Role.LITERAL`` text, flush or with a little air
+      under it for a part of a ``document``.
+    - ``<role>-literal`` / ``<role>-part``: the same for another role --
+      ``argument-part``, and ``prose-literal`` for plain text in the prose face.
     """
     hit = _STATE.themes.get(name)
     if hit is not None:
         return hit
-    if name == "mono":
-        table = Faces.mono() if _bold_monospace() else Faces.mono(bold=Face.CODE)
-        built = _dense(
-            Theme.at_pixel_height(
-                _STATE.body_px, faces=table, align=Align.LEFT, spacing=Spacing.FRENCH
-            ),
-            None,
-        )
-    elif name == "prose":
-        base = _theme("mono")
-        built = base
-        if not mono():
-            tall = _STATE.body_px
-            ratio = preset().prose_scale
-            if ratio != 1.0:
-                tall = max(1.0, _half_up(tall * ratio))
-            sized = Theme.at_pixel_height(tall, align=Align.LEFT, spacing=Spacing.FRENCH)
-            built = _dense(sized, base)
-    elif name == "literal":
-        built = _flush(_theme("mono"))
-    elif name == "prose-literal":
-        built = _flush(_theme("prose"))
-    elif name == "part":
-        built = _flush(_theme("mono"), gap_em=_PART_GAP_EM)
+    if name == "prose":
+        built = _document_theme()
+    elif name == "diff":
+        built = _literal_theme(Role.DIFF, 0.0)
     else:
-        raise KeyError(name)
+        role, _, form = name.rpartition("-")
+        if form not in ("literal", "part"):
+            raise KeyError(name)
+        built = _literal_theme(Role(role or "literal"), _PART_GAP_EM if form == "part" else 0.0)
     _STATE.themes[name] = built
     return built
 
 
-def _dense(theme: Theme, code_from: Theme | None) -> Theme:
+def _literal_name(role: Role, *, gap: bool) -> str:
     """
-    ``theme`` with the heading scale and block spacing of a pane rather than a page.
+    The name of a role's literal theme: with ``gap``, the one with air under it.
+    """
+    form = "part" if gap else "literal"
+    return form if role is Role.LITERAL else f"{role.value}-{form}"
 
-    ``code_from`` is the theme whose fenced-code face, size and leading to use, for a
-    proportional theme whose own would come out smaller than the chrome.
+
+def _faces(slot: Slot) -> Faces:
     """
-    em = theme.style(BlockKind.PARAGRAPH).font.size
-    blocks = dict(theme.blocks)
-    for level, scale, above, below in _HEADINGS:
-        kind = _heading(level)
-        style = blocks[kind]
-        size = round(em * scale)
-        ratio = size / style.font.size
-        skip = style.interline
-        blocks[kind] = replace(
-            style,
-            font=replace(style.font, size=size),
-            interline=replace(
-                skip,
-                baselineskip=_scaled(skip.baselineskip, ratio),
-                lineskip=_scaled(skip.lineskip, ratio),
-            ),
-            space_above=round(size * above),
-            space_below=round(size * below),
-        )
+    The face table of a theme whose running text is in ``slot``.
+
+    Without a bold monospace the weight is given up and the columns kept.
+    """
+    bold = Face.CODE_BOLD if _bold_monospace() else Face.CODE
+    return Faces.mono(bold=bold) if slot is Slot.MONOSPACE else Faces(code_bold=bold)
+
+
+def _regular(slot: Slot) -> Face:
+    return Face.CODE if slot is Slot.MONOSPACE else Face.PROSE
+
+
+def _em(face: Face, tall: float) -> int:
+    """
+    The em, in scaled points, at which ``face`` is ``tall`` pixels high as ImGui
+    means a font size: ``Theme.at_pixel_height``'s arithmetic, for any face.
+    """
+    probe = fontlib_metrics(replace(_template().font, face=face, size=sp_from_px(1024.0)).key)
+    extent = probe.ascent + probe.descent
+    em = tall * probe.em / extent if extent > 0 and probe.em > 0 else tall
+    return int(sp_from_px(em))
+
+
+def _tall(font: Any) -> float:
+    """
+    The pixel height of a font at its size: ``_em`` the other way.
+    """
+    probe = fontlib_metrics(replace(font, size=sp_from_px(1024.0)).key)
+    if probe.em <= 0:
+        return _px(font.size)
+    return _px(font.size) * (probe.ascent + probe.descent) / probe.em
+
+
+def _fixed(skip: Any, tall: float, *, grid: bool = False) -> Any:
+    """
+    An interline skip whose baselines are ``tall`` pixels apart.
+
+    For every line no taller than its strut, which is every line whose glyphs are
+    its own role's size (``_LineMetrics.bbox``). The library still moves a line
+    down when something larger is set in it -- a code span given a bigger size than
+    its paragraph -- and that is right: the alternative is ink over the line above.
+
+    A whole pixel is not a whole number of scaled points, and which side of it the
+    skip falls matters to who reads it. ImGui truncates a cursor position, so a
+    view a hair under a whole number of pixels tall loses one: a skip is a hair
+    over. A diff view (``grid``) takes its row height *up* to the next pixel, so
+    for it a hair over 18 is 19: its skip is a hair under.
+    """
+    exact = tall * _sp_per_px()
+    width = math.floor(exact) if grid else math.ceil(exact)
+    return replace(skip, baselineskip=replace(skip.baselineskip, width=width))
+
+
+@cache
+def _theme_class() -> type[Any]:
+    """
+    The library's ``Theme`` with one answer of its own: the size of a code span.
+
+    A theme sizes a span by its block, and at one em Inconsolata is a pixel or two
+    shorter than Roboto beside it. ``font_for`` is where the library's markdown
+    reader asks what a run is set in, a settled document's and a stream's alike,
+    so a code span is given its own size there and no built node is rewritten.
+
+    Made on first use, so that this module imports with the library absent.
+    """
+
+    @dataclass(frozen=True, slots=True)
+    class RoleTheme(Theme):  # type: ignore[misc]
+        # Pixels a code span is taller than the text of the block it is in.
+        span_step: float = 0.0
+        # A span's size, by the font of its block.
+        spans: dict[Any, int] = field(default_factory=dict, compare=False)
+
+        def font_for(self, kind: BlockKind, emphasis: Any) -> Any:
+            spec = Theme.font_for(self, kind, emphasis)
+            base = self.style(kind).font
+            # On a monospace base a span is the block's own face and size: there
+            # is no second family for it to differ from.
+            if not emphasis.code or base.face in self.faces.monospace:
+                return spec
+            size = self.spans.get(base)
+            if size is None:
+                size = self.spans[base] = _em(spec.face, _tall(base) + self.span_step)
+            return replace(spec, size=size)
+
+    return RoleTheme
+
+
+def _document_theme() -> Theme:
+    """
+    The theme of a markdown document: each block kind in its role's face, size and
+    leading, with the heading scale and block spacing of a pane rather than a page.
+
+    The library builds a theme from one body size and one face table. Its faces
+    stay as the library names them and each block kind is given the face of its
+    role's slot, which is what lets a monospace heading stand over proportional
+    prose: the library reads a block's family off the block's own face.
+    """
+    prose = style(Role.PROSE)
+    base = Theme.at_pixel_height(
+        px(Role.PROSE), faces=_faces(prose.slot), align=Align.LEFT, spacing=Spacing.FRENCH
+    )
+    blocks = dict(base.blocks)
+    em = blocks[BlockKind.PARAGRAPH].font.size
+    running = _fixed(blocks[BlockKind.PARAGRAPH].interline, pitch(Role.PROSE))
+    for kind in (
+        BlockKind.PARAGRAPH,
+        BlockKind.BULLET_ITEM,
+        BlockKind.ORDERED_ITEM,
+        BlockKind.QUOTE,
+        BlockKind.RULE,
+    ):
+        blocks[kind] = replace(blocks[kind], interline=running)
     blocks[BlockKind.PARAGRAPH] = replace(
         blocks[BlockKind.PARAGRAPH], space_below=round(em * _PARAGRAPH_GAP_EM)
     )
+
+    heading = style(Role.HEADING)
+    for level, scale, above, below in _HEADINGS:
+        kind = _heading(level)
+        tall = max(1.0, _half_up(px(Role.HEADING) * scale))
+        if heading.slot is Slot.PROPORTIONAL:
+            face = Face[_HEADING_FACES.get(level, "PROSE_BOLD")]
+        else:
+            face = Face.CODE_BOLD if level < 6 and _bold_monospace() else Face.CODE
+        size = _em(face, tall)
+        blocks[kind] = replace(
+            blocks[kind],
+            font=replace(blocks[kind].font, face=face, size=size),
+            interline=_fixed(blocks[kind].interline, pitch(Role.HEADING, tall)),
+            space_above=round(size * above),
+            space_below=round(size * below),
+        )
+
+    # Fenced code at its own role's size: sized in ems of proportional prose it
+    # would come out smaller than the chrome.
     code = blocks[BlockKind.CODE]
-    if code_from is not None:
-        borrowed = code_from.style(BlockKind.CODE)
-        code = replace(code, font=borrowed.font, interline=borrowed.interline)
     blocks[BlockKind.CODE] = replace(
-        code, space_above=round(em * _CODE_GAP_EM), space_below=round(em * _CODE_GAP_EM)
+        code,
+        font=replace(code.font, face=Face.CODE, size=_em(Face.CODE, px(Role.CODE_BLOCK))),
+        interline=_fixed(code.interline, pitch(Role.CODE_BLOCK)),
+        space_above=round(em * _CODE_GAP_EM),
+        space_below=round(em * _CODE_GAP_EM),
     )
+
+    cell = _regular(style(Role.TABLE).slot)
     table = blocks[BlockKind.TABLE]
     blocks[BlockKind.TABLE] = replace(
-        table, space_above=round(em * _CODE_GAP_EM), space_below=round(em * _PARAGRAPH_GAP_EM)
+        table,
+        font=replace(table.font, face=cell, size=_em(cell, px(Role.TABLE))),
+        interline=_fixed(table.interline, pitch(Role.TABLE)),
+        space_above=round(em * _CODE_GAP_EM),
+        space_below=round(em * _PARAGRAPH_GAP_EM),
     )
-    # No rule of the library's under a table's header: it is stacked as a line of
-    # its own and puts a blank line under the header. The seam rules every row
-    # itself (`_table_rules`).
-    return replace(theme, blocks=blocks, table_rule_thickness=0)
+
+    given = {each.name: getattr(base, each.name) for each in fields(base)}
+    given.update(
+        blocks=blocks,
+        faces=_faces(Slot.PROPORTIONAL),
+        # No rule of the library's under a table's header: it is stacked as a line
+        # of its own and puts a blank line under the header. The seam rules every
+        # row itself (`_table_rules`).
+        table_rule_thickness=0,
+        span_step=px(Role.INLINE_CODE) - px(Role.PROSE),
+    )
+    made: Theme = _theme_class()(**given)
+    return made
 
 
-def _scaled(glue: Any, ratio: float) -> Any:
+def _literal_theme(role: Role, gap_em: float) -> Theme:
     """
-    A glue spec with its natural width scaled. The library's leading has no stretch.
-    """
-    return replace(glue, width=round(glue.width * ratio))
+    The theme of text that is not markdown, in ``role``'s face, size and leading:
+    ``gap_em`` of air below a paragraph or a code block, no margins, no code indent.
 
-
-def _flush(theme: Theme, *, gap_em: float = 0.0) -> Theme:
+    No air at all for text set on its own, where the pane's layout supplies the
+    spacing. Wrapped text is a paragraph of it and exact text a code block.
     """
-    ``theme`` with ``gap_em`` of air below a paragraph or a code block and no code indent.
-
-    None at all for text set on its own, where the pane's layout supplies the spacing.
-    """
-    blocks = dict(theme.blocks)
-    gap = round(blocks[BlockKind.PARAGRAPH].font.size * gap_em)
-    blocks[BlockKind.PARAGRAPH] = replace(blocks[BlockKind.PARAGRAPH], space_below=gap)
+    tall = px(role)
+    base = Theme.at_pixel_height(
+        tall, faces=_faces(style(role).slot), align=Align.LEFT, spacing=Spacing.FRENCH
+    )
+    blocks = dict(base.blocks)
+    paragraph = blocks[BlockKind.PARAGRAPH]
+    gap = round(paragraph.font.size * gap_em)
+    blocks[BlockKind.PARAGRAPH] = replace(
+        paragraph, interline=_fixed(paragraph.interline, pitch(role)), space_below=gap
+    )
+    code = blocks[BlockKind.CODE]
     blocks[BlockKind.CODE] = replace(
-        blocks[BlockKind.CODE], space_above=0, space_below=gap, left_indent=0
+        code,
+        font=replace(code.font, face=Face.CODE, size=_em(Face.CODE, tall)),
+        interline=_fixed(code.interline, pitch(role), grid=role is Role.DIFF),
+        space_above=0,
+        space_below=gap,
+        left_indent=0,
     )
-    return replace(theme, blocks=blocks)
+    return replace(base, blocks=blocks, table_rule_thickness=0)
 
 
-def line_height(*, mono: bool = True) -> float:
+def line_height(*, mono: bool = True, role: Role | None = None) -> float:
     """
-    The pitch of one line of literal text, in pixels: 19.07 at a 16 px body.
+    The pitch of one line of a role's text, in pixels: 17 at a 16 px body.
 
     What a pane multiplies by to turn "at most 24 lines" into a ``height_cap`` for
-    ``plain()``, a literal part or a fenced block. ``mono=False`` is the pitch of a
-    line of prose. **Not a diff's row**: a diff view sets its rows on whole pixels
-    and its pitch is ``diff_row_height()``. A cap need not be exact either way --
-    a capped view ends on a whole line or row at or under the cap it was given.
+    ``plain()``, a literal part or a fenced block. With no ``role`` it is literal
+    text's, or prose's with ``mono=False``. **Not a diff's row**: a diff view sets
+    its rows on its own grid and its pitch is ``diff_row_height()``. A cap need not
+    be exact either way -- a capped view ends on a whole line or row at or under
+    the cap it was given.
     """
-    kind = BlockKind.CODE if mono else BlockKind.PARAGRAPH
-    chosen = _theme("literal" if mono else "prose")
-    return float(px_from_sp(chosen.style(kind).interline.baselineskip.width, chosen.px_per_inch))
+    if role is None:
+        role = Role.LITERAL if mono else Role.PROSE
+    return pitch(role)
 
 
 def diff_row_height() -> float:
     """
-    The height of one row of a ``diff()``, in pixels: 20 at a 16 px body.
+    The height of one row of a ``diff()``, in pixels: 18 at a 16 px body.
 
     Every row of a diff view is this tall -- a file header, a hunk header, a line,
     a collapsed gap -- so "at most 24 rows" is 24 of these.
     """
     hit = _STATE.diff_row
     if hit is None or hit[0] != _STATE.epoch:
-        probe = DiffView(Diff(()), _theme("literal"), metrics=pixel_metrics)
+        probe = DiffView(Diff(()), _theme("diff"), metrics=pixel_metrics)
         hit = _STATE.diff_row = (_STATE.epoch, float(probe.metrics_px.row))
     return hit[1]
 
@@ -1909,6 +2518,10 @@ class Part:
     (``_PART_GAP_EM``): for a part that names the one after it -- an argument's
     name over its value -- where the gap belongs under the pair. A markdown part
     has its blocks' own spacing and ignores it.
+
+    ``role`` is whose size and leading a literal or wrapped part is set in:
+    ``Role.ARGUMENT`` for a call's argument. A markdown part's blocks each have a
+    role of their own and it ignores this.
     """
 
     text: str
@@ -1916,6 +2529,7 @@ class Part:
     colour: Color | str | None = None
     demote: int = 0
     tight: bool = False
+    role: Role = Role.LITERAL
 
 
 @dataclass(frozen=True, slots=True)
@@ -2022,13 +2636,14 @@ def _line_pieces(text: str, size: int = _LITERAL_PIECE_LINES) -> list[str]:
 
 
 def _pieces_of(
-    parts: Sequence[Part], *, literal: str = "part", inked: bool = True, patient: bool = False
+    parts: Sequence[Part], *, flush: bool = False, inked: bool = True, patient: bool = False
 ) -> tuple[_Piece, ...]:
     """
-    The pieces a sequence of parts is built as. ``literal`` is the theme a part's
-    last literal piece takes: the one with the air below it. ``inked`` false leaves
-    literal text to the palette's ink, for a view that is one part in one colour.
-    ``patient`` cuts smaller, for a view built without the frame's free allowance.
+    The pieces a sequence of parts is built as. A part's last literal piece takes
+    its role's theme with the air below it, unless ``flush``: a view that is one
+    part has none. ``inked`` false leaves literal text to the palette's ink, for a
+    view that is one part in one colour. ``patient`` cuts smaller, for a view built
+    without the frame's free allowance.
     """
     out: list[_Piece] = []
     scale = _PATIENT_PIECES if patient else 1.0
@@ -2056,18 +2671,14 @@ def _pieces_of(
         cut = [part.text] if part.kind is Kind.WRAPPED else _line_pieces(part.text, literal_lines)
         for index, text in enumerate(cut):
             # Only the last piece of a part takes the gap that separates parts.
-            last = index + 1 == len(cut) and not part.tight
-            chosen = literal if last else _gapless(literal)
+            last = index + 1 == len(cut) and not part.tight and not flush
+            chosen = _literal_name(part.role, gap=last)
             out.append(_Piece(part.kind, text, chosen, 0, number, ink, (0, 0), _line_count(text)))
     return tuple(out)
 
 
 def _line_count(text: str) -> int:
     return text.count("\n") + (1 if text and not text.endswith("\n") else 0)
-
-
-def _gapless(name: str) -> str:
-    return "literal" if name == "part" else name
 
 
 def _build_piece(piece: _Piece) -> _Built:
@@ -3950,9 +4561,10 @@ def _last_foot(view: Any, room: float) -> float:
     if low < len(blocks):
         block = blocks[low]
         rect = view.block_rect(low)
-        if view.hosted(low) is not None and rect is not None:
+        hosted = view.hosted(low)
+        if hosted is not None and rect is not None:
             # A fenced diff: rows of one height from the block's top.
-            row = float(sp_from_px(diff_row_height(), ppi))
+            row = float(sp_from_px(hosted.view.metrics_px.row, ppi))
             fit = int((limit - rect.y) // row)
             if fit > 0:
                 best = max(best, float(rect.y + fit * row))
@@ -4100,6 +4712,9 @@ class _Fences:
         if isinstance(block, CodeBlock) and _is_diff_fence(block):
             hosted = self.inner(view, number, block)
             if hosted is not None and _accounted(hosted.text, hosted.view.diff):
+                # The library gives a fenced diff the theme of the document it is
+                # in. A diff is `Role.DIFF` wherever it is drawn.
+                hosted.view.theme = _theme("diff")
                 return hosted
         return None
 
@@ -4352,6 +4967,7 @@ def plain(
     colour: Color | None = None,
     width: float | None = None,
     height_cap: float | None = None,
+    role: Role = Role.LITERAL,
 ) -> float:
     """
     Text that is not markdown, set exactly as written: an asterisk is an asterisk.
@@ -4381,17 +4997,22 @@ def plain(
     text that gains a line builds its last piece again and no other.
 
     ``colour`` is the ink: a segment kind's role. The default is the theme's text.
+    ``role`` is whose size and leading the text is set in; ``mono=False`` is
+    ``Role.PROSE``.
     """
     im = _frame()
     if wrap and not exact:
-        kind, chosen = Kind.WRAPPED, "literal" if mono else "prose-literal"
+        kind = Kind.WRAPPED
+        if not mono:
+            role = Role.PROSE
     else:
-        kind, chosen = (Kind.WRAPPED_EXACT if wrap else Kind.LITERAL), "literal"
+        kind = Kind.WRAPPED_EXACT if wrap else Kind.LITERAL
+    chosen = _literal_name(role, gap=False)
     entry, _ = cache._held(key, f"plain-{chosen}", lambda: _bare(None, None, chosen))
     token = (text, kind)
     if entry.token != token:
         entry.token = token
-        _open(entry, _pieces_of((Part(text, kind),), literal=chosen, inked=False))
+        _open(entry, _pieces_of((Part(text, kind, role=role),), flush=True, inked=False))
         entry.stretch = not wrap
     if not _begin(im, key, entry):
         return _twice(im, key)
@@ -4524,7 +5145,7 @@ def diff(
             held.set_diff(model)
             view = held
         else:
-            view = DiffView(model, _theme("literal"), metrics=pixel_metrics)
+            view = DiffView(model, _theme("diff"), metrics=pixel_metrics)
         entry = cache._put(key, "diff", token, view)
         entry.warned = warning
         _spend(im, started)
@@ -5394,8 +6015,8 @@ _MONO_FACE: dict[Weight, str] = {
     Weight.CODE_BOLD: "CODE_BOLD",
 }
 """
-The library's role for each weight, by name (``Face[name]``), in proportional and
-in monospace presets.
+The library's face for each weight, by name (``Face[name]``), where ``Role.LABEL``
+is proportional and where it is monospace.
 """
 
 
@@ -5407,7 +6028,8 @@ def imfont(weight: Weight) -> imgui.ImFont | None:
     fonts = _STATE.fonts
     if fonts is None:
         return None
-    face = Face[(_MONO_FACE if mono() else _WEIGHT_FACE)[weight]]
+    monospace = style(Role.LABEL).slot is Slot.MONOSPACE
+    face = Face[(_MONO_FACE if monospace else _WEIGHT_FACE)[weight]]
     if face is Face.CODE_BOLD and not _bold_monospace():
         face = Face.CODE
     found: imgui.ImFont | None = fonts.fonts.get(face)
@@ -5429,14 +6051,14 @@ def font(weight: Weight, size: float | None = None) -> Iterator[None]:
     **A native line has one font and no fallback.** A typeset view borrows a
     character its face lacks from another face; ImGui does not. The prose faces
     (Roboto, Droid Sans) have no ``→``, ``✓`` or box-drawing characters, so under a
-    proportional preset those are drawn here as U+FFFD. Keep such characters out of
+    proportional ``Role.LABEL`` those are drawn here as U+FFFD. Keep such characters out of
     a line set in a prose weight, or set the line in ``Weight.CODE``, whose face
     (Inconsolata) has them. Giving the prose faces those ranges means merging a
     second font into each when the library loads it, and the library's loader takes
     a path and offers no merge.
     """
     im = _frame()
-    im.push_font(imfont(weight), _STATE.body_px if size is None else size)
+    im.push_font(imfont(weight), px(Role.LABEL) if size is None else size)
     try:
         yield
     finally:

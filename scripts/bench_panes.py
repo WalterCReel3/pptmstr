@@ -865,7 +865,11 @@ def main() -> int:
         default="off",
         help="draw through pptmstr.ui.typeset (Settings.typeset) or the renderers before it",
     )
-    ap.add_argument("--mono", action="store_true", help="Settings.typeset_mono")
+    ap.add_argument(
+        "--mono",
+        action="store_true",
+        help="every role that may be monospace is: typeset.configure(mono=True)",
+    )
     ap.add_argument("--frames", type=int, default=300, help="measured frames per scenario")
     ap.add_argument(
         "--sizes",

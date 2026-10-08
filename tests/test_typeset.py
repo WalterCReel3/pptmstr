@@ -33,9 +33,27 @@ from advtext import BlockKind, Diff, Face, RowKind, registered_fonts, unregister
 from pptmstr import approval, theme
 from pptmstr.model import NodeId, PendingApproval
 from pptmstr.ui import typeset
+from pptmstr.ui.typeset import Kind, Pane, Part, Role, RoleStyle, Slot
 
 BOLD = theme._ASSETS / "fonts" / "Inconsolata-Bold.ttf"
 WINDOW = (700.0, 600.0)
+
+hinted_only = pytest.mark.skipif(
+    typeset.METRICS == "file",
+    reason="pins what the hinted path does: ImGui's whole-pixel advances and whole-pixel "
+    "kerns. Under METRICS = 'file' the library measures from the font file and the seam "
+    "overrides nothing.",
+)
+
+
+def _cell() -> float:
+    """
+    The advance of one character of literal text in pixels, under either source of
+    metrics: 8 hinted, 7.63 from the file at a 16 px body.
+    """
+    key = typeset._theme("literal").style(BlockKind.CODE).font.key
+    return float(advtext.px_from_sp(typeset.pixel_metrics(key).advance(ord("m"))))
+
 
 MARKDOWN = (
     "# Heading\n\nA paragraph with **bold** and `code` and an arrow → in it.\n\n"
@@ -74,20 +92,20 @@ def seam(imgui: Any) -> Iterator[Any]:
     second); a test that breaks them loads its own and this puts them back.
     """
     theme.set_theme("dark")
-    typeset.configure(typeset=True, faces=typeset.DEFAULT_PRESET, scale=1.0)
+    typeset.configure(typeset=True, faces=typeset.DEFAULT_PRESET, scale=1.0, panes={})
     fonts = typeset._STATE.fonts
     whole = fonts is not None and typeset.available() and fonts.failed == ()
-    if not whole or Face.CODE_BOLD not in registered_fonts() or not _every_preset_usable():
+    if not whole or Face.CODE_BOLD not in registered_fonts() or not _every_family_usable():
         assert typeset.load_fonts(BOLD)
     yield imgui
     theme.set_theme("dark")
-    # The default preset again, which also takes a preset's file back out of the
+    # The defaults again, which also takes a family's file back out of the
     # library's registry: that registry is the process's, not this module's.
-    typeset.configure(typeset=True, faces=typeset.DEFAULT_PRESET, scale=1.0)
+    typeset.configure(typeset=True, faces=typeset.DEFAULT_PRESET, scale=1.0, panes={})
 
 
-def _every_preset_usable() -> bool:
-    return all(usable for _, usable in typeset.presets())
+def _every_family_usable() -> bool:
+    return all(usable for _, usable in typeset.proportionals())
 
 
 def frame(im: Any, body: Callable[[], None], *, lead: float = 0.0, sideways: bool = False) -> None:
@@ -254,7 +272,7 @@ def test_losing_the_proportional_faces_sets_prose_in_monospace(seam: Any) -> Non
 
 def test_the_bold_monospace_is_registered_and_used(seam: Any) -> None:
     assert registered_fonts()[Face.CODE_BOLD] == BOLD.resolve()
-    assert typeset._theme("mono").faces.code_bold is Face.CODE_BOLD
+    assert typeset._theme("literal").faces.code_bold is Face.CODE_BOLD
 
 
 def test_without_a_bold_monospace_bold_keeps_the_columns(seam: Any, tmp_path: Path) -> None:
@@ -264,7 +282,8 @@ def test_without_a_bold_monospace_bold_keeps_the_columns(seam: Any, tmp_path: Pa
     """
     unregister_font(Face.CODE_BOLD)
     assert typeset.load_fonts(tmp_path / "not-there.ttf")
-    assert typeset._theme("mono").faces.code_bold is Face.CODE
+    assert typeset._theme("literal").faces.code_bold is Face.CODE
+    assert typeset._theme("prose").faces.code_bold is Face.CODE
     assert typeset.imfont(typeset.Weight.CODE_BOLD) is typeset.imfont(typeset.Weight.CODE)
 
 
@@ -289,6 +308,7 @@ def test_an_arrow_in_prose_does_not_leave_a_face_to_load_mid_session(seam: Any) 
 WORDS = "columns of Hamburgefonstiv, 0123 (wide) AV To a.i"
 
 
+@hinted_only
 def test_a_laid_out_word_is_imguis_advances_and_whole_pixel_kerns(seam: Any) -> None:
     """
     The premise of ``pixel_metrics``, checked on a real layout against ImGui itself,
@@ -353,6 +373,7 @@ def test_a_laid_out_word_is_imguis_advances_and_whole_pixel_kerns(seam: Any) -> 
     assert all(abs(kern) < 0.001 for key, _, kern in kerns if key == code)
 
 
+@hinted_only
 def test_the_font_files_own_advances_are_not_what_imgui_draws(seam: Any) -> None:
     """
     Why the test above is not vacuous: measured from the file, as the library does by
@@ -371,7 +392,7 @@ def test_the_font_files_own_advances_are_not_what_imgui_draws(seam: Any) -> None
 def test_running_text_is_the_ui_fonts_sixteen_pixels(seam: Any) -> None:
     from advtext import px_from_sp
 
-    for name in ("prose", "mono", "literal"):
+    for name in ("prose", "literal", "part", "argument-part", "diff"):
         style = typeset._theme(name).style(BlockKind.PARAGRAPH)
         metrics = typeset.pixel_metrics(style.font.key)
         tall = px_from_sp(round(metrics.ascent + metrics.descent))
@@ -457,35 +478,36 @@ def test_a_face_a_draw_asked_for_is_loaded_before_the_next_frame(
 
 def test_fenced_code_in_proportional_prose_is_the_chromes_size(seam: Any) -> None:
     """
-    Sized in ems of a Roboto body it would be about 14 px; it borrows the monospace
-    theme's style so that a fence reads at the size of every other piece of code.
+    Sized in ems of a Roboto body it would be about 14 px; it has its own role's
+    size so that a fence reads at the size of every other piece of code.
     """
-    prose, mono = typeset._theme("prose"), typeset._theme("mono")
+    prose, literal = typeset._theme("prose"), typeset._theme("literal")
     assert prose.style(BlockKind.PARAGRAPH).font.face is Face.PROSE
-    assert prose.style(BlockKind.CODE).font == mono.style(BlockKind.CODE).font
+    assert prose.style(BlockKind.CODE).font == literal.style(BlockKind.CODE).font
     assert prose.style(BlockKind.CODE).font.size > prose.style(BlockKind.PARAGRAPH).font.size
+    assert _tall("prose", BlockKind.CODE) == pytest.approx(16.0, abs=0.01)
 
 
 def test_the_monospace_setting_puts_every_role_in_inconsolata(seam: Any) -> None:
     typeset.configure(typeset=True, mono=True)
     faces = {style.font.face for style in typeset._theme("prose").blocks.values()}
     assert faces <= {Face.CODE, Face.CODE_BOLD}
+    assert all(typeset.style(role).slot is Slot.MONOSPACE for role in Role)
 
 
 def test_text_is_ragged_and_headings_are_a_panes_scale(seam: Any) -> None:
-    from advtext import Align, px_from_sp
+    from advtext import Align
 
     prose = typeset._theme("prose")
     assert prose.style(BlockKind.PARAGRAPH).align is Align.LEFT
-    body = prose.style(BlockKind.PARAGRAPH).font.size
     heights = [
-        round(px_from_sp(prose.style(kind).font.size) * typeset.BODY_PX / px_from_sp(body))
+        round(_tall("prose", kind))
         for kind in (BlockKind.HEADING_1, BlockKind.HEADING_2, BlockKind.HEADING_3)
     ]
     assert heights == [22, 19, 17]
 
 
-# -- presets -------------------------------------------------------------------
+# -- roles ---------------------------------------------------------------------
 
 
 def _tall(theme_name: str, kind: BlockKind, face: Face | None = None) -> float:
@@ -501,6 +523,25 @@ def _tall(theme_name: str, kind: BlockKind, face: Face | None = None) -> float:
     return float(px_from_sp(round(metrics.ascent + metrics.descent)))
 
 
+def _key_tall(key: str) -> float:
+    from advtext import px_from_sp
+
+    metrics = typeset.pixel_metrics(key)
+    return float(px_from_sp(round(metrics.ascent + metrics.descent)))
+
+
+def _span_heights(source: str) -> dict[str, float]:
+    """
+    The pixel height of each face a markdown source's first block is set in, by
+    the face's name: read off the nodes the library built.
+    """
+    from advtext import build_document
+
+    block = build_document(source, typeset._theme("prose"), typeset.pixel_metrics).blocks[0]
+    keys = {node.font for node in block.material if hasattr(node, "codepoint")}
+    return {key.rpartition("@")[0]: _key_tall(key) for key in keys}
+
+
 def _atlas_fonts(im: Any) -> int:
     return len(im.get_io().fonts.fonts)
 
@@ -509,83 +550,465 @@ def _bundled(name: str) -> Path:
     return (typeset._bundle_fonts() / name).resolve()
 
 
-def test_the_default_preset_is_first_and_the_names_are_distinct() -> None:
-    names = [preset.name for preset in typeset.PRESETS]
-    assert names[0] == typeset.DEFAULT_PRESET
-    assert len(set(names)) == len(names)
-    assert "mono" in names, "configure(mono=True) and --prose mono name it"
-
-
-def test_no_preset_names_a_font_that_does_not_already_ship() -> None:
+def test_every_role_has_a_default_among_the_slots_it_is_offered() -> None:
     """
-    The operator's condition for choosing faces in this version. A preset's file is
+    The catalogue is one enum and three tables keyed by it. A role missing from one
+    is a ``KeyError`` on the frame that first sets that kind of text.
+    """
+    assert set(typeset.DEFAULTS) == set(typeset.SLOTS) == set(Role)
+    for role in Role:
+        assert typeset.DEFAULTS[role].slot in typeset.SLOTS[role], role
+        assert typeset.DEFAULTS[role].step in typeset.STEPS, role
+    # Inline code is a run in somebody else's line and a label is ImGui's line.
+    assert set(typeset.LEADING) == set(Role) - {Role.INLINE_CODE, Role.LABEL}
+    for role in (Role.CODE_BLOCK, Role.DIFF, Role.LITERAL, Role.ARGUMENT, Role.INLINE_CODE):
+        assert typeset.SLOTS[role] == (Slot.MONOSPACE,), "its columns are content"
+    assert {typeset.multiline_kind(role) for role in Role} <= {Kind.LITERAL, Kind.WRAPPED_EXACT}
+
+
+def test_the_default_family_is_first_and_none_names_a_font_that_does_not_ship() -> None:
+    """
+    The operator's condition for choosing faces in this version. A family's file is
     one in the imgui-bundle wheel; nothing here may point at the system's fonts.
     """
-    for preset in typeset.PRESETS:
-        if preset.prose_file is not None:
-            assert not Path(preset.prose_file).is_absolute()
-            assert _bundled(preset.prose_file).is_file(), preset.name
-            assert typeset._bundle_fonts().resolve() in _bundled(preset.prose_file).parents
+    names = [family.name for family in typeset.PROPORTIONALS]
+    assert names[0] == typeset.DEFAULT_PROPORTIONAL and len(set(names)) == len(names)
+    for family in typeset.PROPORTIONALS:
+        if family.file is not None:
+            assert not Path(family.file).is_absolute()
+            assert _bundled(family.file).is_file(), family.name
+            assert typeset._bundle_fonts().resolve() in _bundled(family.file).parents
 
 
-def test_the_old_monospace_switch_still_chooses_between_two_presets(seam: Any) -> None:
+def test_the_old_monospace_switch_and_the_preset_names_still_choose(seam: Any) -> None:
     """
-    ``configure(mono=)`` is what five panes' tests and two scripts call.
+    ``configure(mono=)`` and ``configure(faces=)`` are what five panes' tests and
+    three scripts call, and what a saved ``typeset_faces`` is read as.
     """
     typeset.configure(typeset=True, mono=True)
-    assert typeset.preset().name == "mono" and typeset.mono()
+    assert typeset.mono() and typeset.style(Role.HEADING).slot is Slot.MONOSPACE
     typeset.configure(typeset=True, mono=False)
-    assert typeset.preset().name == typeset.DEFAULT_PRESET and not typeset.mono()
+    assert not typeset.mono() and typeset._STATE.roles == typeset.DEFAULTS
     typeset.configure(typeset=True, mono=False, faces="mono")
-    assert typeset.preset().name == "mono", "a named preset wins over the old switch"
+    assert typeset.mono(), "a named preset wins over the old switch"
     typeset.configure(typeset=False)
-    assert typeset.preset().name == "mono", "a call that names no faces changes none"
+    assert typeset.mono(), "a call that names no faces changes none"
+    typeset.configure(typeset=True, faces="mono", roles={})
+    assert not typeset.mono(), "the roles win over a preset's name"
+    typeset.configure(typeset=True, faces="roboto-large")
+    assert typeset.px(Role.PROSE) == 18.0 and typeset.px(Role.INLINE_CODE) == 16.0
+    typeset.configure(typeset=True, faces="droid")
+    assert typeset.proportional().name == "droid" and typeset._STATE.roles == typeset.DEFAULTS
 
 
-def test_a_preset_this_build_does_not_know_is_the_default_and_rebuilds_nothing(
-    seam: Any,
-) -> None:
+def test_a_preset_name_that_never_was_is_the_defaults_and_rebuilds_nothing(seam: Any) -> None:
     epoch = typeset._STATE.epoch
     typeset.configure(typeset=True, faces="comic-sans")
-    assert typeset.preset().name == typeset.DEFAULT_PRESET
+    assert typeset._STATE.roles == typeset.DEFAULTS
+    assert typeset.proportional().name == typeset.DEFAULT_PROPORTIONAL
     assert typeset._STATE.epoch == epoch
     assert typeset.enabled()
 
 
-def test_a_size_up_puts_inline_code_on_the_chromes_raster_and_leaves_code_blocks_alone(
-    seam: Any,
+def test_a_role_is_refused_a_slot_it_is_not_offered_and_a_step_out_of_range(seam: Any) -> None:
+    """
+    A settings file is hand-editable. Proportional code would lose its columns, and
+    a step of 40 is a typo, not a size.
+    """
+    typeset.configure(
+        typeset=True,
+        roles={
+            Role.CODE_BLOCK: RoleStyle(Slot.PROPORTIONAL, 40),
+            Role.DIFF: RoleStyle(Slot.PROPORTIONAL, -40),
+            Role.PROSE: RoleStyle(Slot.MONOSPACE, 1),
+        },
+    )
+    assert typeset.style(Role.CODE_BLOCK) == RoleStyle(Slot.MONOSPACE, typeset.STEPS[-1])
+    assert typeset.style(Role.DIFF) == RoleStyle(Slot.MONOSPACE, typeset.STEPS[0])
+    assert typeset.style(Role.PROSE) == RoleStyle(Slot.MONOSPACE, 1)
+    assert typeset.style(Role.TABLE) == typeset.DEFAULTS[Role.TABLE], "left out is the default"
+
+
+def test_settings_entries_become_role_styles_and_unknown_ones_are_left_out() -> None:
+    got = typeset.roles_from(
+        [
+            ("prose", "monospace", 2),
+            ("heading", None, 1),
+            ("table", "monospace", None),
+            ("label", "cursive", None),
+            ("marginalia", "monospace", 0),
+        ]
+    )
+    assert got == {
+        Role.PROSE: RoleStyle(Slot.MONOSPACE, 2),
+        Role.HEADING: RoleStyle(Slot.PROPORTIONAL, 1),
+        Role.TABLE: RoleStyle(Slot.MONOSPACE, 0),
+        Role.LABEL: RoleStyle(Slot.PROPORTIONAL, 0),
+    }
+    assert typeset.panes_from([("board", False), ("attic", False), ("brief", True)]) == {
+        Pane.BOARD: False,
+        Pane.BRIEF: True,
+    }
+
+
+def test_inline_code_is_the_chromes_height_inside_prose_of_the_same_height(seam: Any) -> None:
+    """
+    A theme sizes a code span by its block, and at one em Inconsolata is shorter
+    than Roboto: 14.3 px beside 16. The span has a size of its own instead, and it
+    is the nodes the library built that say so, not a style nobody reads.
+    """
+    source = "Set `Settings.typeset` and **bold `code`** here.\n"
+    assert _span_heights(source) == {
+        "prose": pytest.approx(16.0, abs=0.01),
+        "prose-bold": pytest.approx(16.0, abs=0.01),
+        "code": pytest.approx(16.0, abs=0.01),
+    }
+    assert _tall("prose", BlockKind.PARAGRAPH, Face.CODE) < 14.5, "what the block's em would give"
+
+    typeset.configure(typeset=True, roles={Role.INLINE_CODE: RoleStyle(Slot.MONOSPACE, -2)})
+    assert _span_heights(source)["code"] == pytest.approx(14.0, abs=0.01)
+    assert _tall("prose", BlockKind.CODE) == pytest.approx(16.0, abs=0.01), "a fence is not a span"
+
+    # In a heading the span keeps its distance from the heading's own size.
+    typeset.configure(typeset=True, roles={})
+    heading = _span_heights("# Title with `code`\n")
+    assert heading["prose-bold"] == pytest.approx(22.0, abs=0.01)
+    assert heading["code"] == pytest.approx(22.0, abs=0.01)
+
+
+def test_a_streamed_code_span_is_sized_as_a_settled_one(seam: Any) -> None:
+    """
+    A stream's blocks are built by the library's stream document, from the same
+    theme: a span must not change size on the frame its run settles.
+    """
+    cache = typeset.ViewCache()
+    stream = typeset.stream(cache, "s")
+
+    def body() -> None:
+        stream.set_text("Set `Settings.typeset` here.\n\nAnd more")
+        stream.draw()
+
+    frame(seam, body)
+    block = cache.view("s").document.blocks[0]
+    keys = {node.font for node in block.material if hasattr(node, "codepoint")}
+    assert {key.rpartition("@")[0]: round(_key_tall(key), 2) for key in keys} == {
+        "prose": 16.0,
+        "code": 16.0,
+    }
+
+
+def test_in_monospace_prose_a_code_span_is_the_blocks_own_font(seam: Any) -> None:
+    typeset.configure(
+        typeset=True,
+        roles={
+            Role.PROSE: RoleStyle(Slot.MONOSPACE),
+            Role.INLINE_CODE: RoleStyle(Slot.MONOSPACE, 3),
+        },
+    )
+    heights = _span_heights("Set `Settings.typeset` here.\n")
+    assert heights == {"code": pytest.approx(16.0, abs=0.01)}
+
+
+def test_a_role_takes_its_own_slot_and_size_inside_one_document(seam: Any) -> None:
+    """
+    Two families are live at once and a role chooses between them: a monospace
+    heading over proportional prose, in one view, with bold in each its own family's.
+    """
+    typeset.configure(
+        typeset=True,
+        roles={
+            Role.HEADING: RoleStyle(Slot.MONOSPACE, 1),
+            Role.TABLE: RoleStyle(Slot.MONOSPACE, -1),
+            Role.CODE_BLOCK: RoleStyle(Slot.MONOSPACE, 2),
+        },
+    )
+    prose = typeset._theme("prose")
+    assert prose.style(BlockKind.PARAGRAPH).font.face is Face.PROSE
+    assert prose.style(BlockKind.HEADING_1).font.face is Face.CODE_BOLD
+    assert prose.style(BlockKind.HEADING_6).font.face is Face.CODE
+    assert prose.style(BlockKind.TABLE).font.face is Face.CODE
+    assert round(_tall("prose", BlockKind.HEADING_1)) == round(17 * 22 / 16)
+    assert _tall("prose", BlockKind.TABLE) == pytest.approx(15.0, abs=0.01)
+    assert _tall("prose", BlockKind.CODE) == pytest.approx(18.0, abs=0.01)
+    assert _tall("prose", BlockKind.PARAGRAPH) == pytest.approx(16.0, abs=0.01)
+    assert _span_heights("# A **bold** title\n") == {"code-bold": pytest.approx(23.0, abs=0.01)}
+    assert set(_span_heights("Some **bold** prose\n")) == {"prose", "prose-bold"}
+
+    cache = typeset.ViewCache()
+    source = (
+        "# Title\n\nBody **bold** `code`.\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n```\nx = 1\n```\n"
+    )
+    frame(seam, lambda: typeset.markdown(cache, "k", source))
+    drawn = cache.drawn("k")
+    assert drawn is not None and drawn[0] > 20 and drawn[1] == 0
+    assert cache.replaced("k") == 0 and cache.unruled("k") == 0
+
+
+def test_a_literal_part_is_set_in_the_role_it_names(seam: Any) -> None:
+    """
+    An argument and a tool's output are both literal text and are sized apart.
+    """
+    typeset.configure(typeset=True, roles={Role.ARGUMENT: RoleStyle(Slot.MONOSPACE, 2)})
+    parts = (
+        Part("output\nlines", Kind.LITERAL),
+        Part("name", Kind.WRAPPED_EXACT, tight=True, role=Role.ARGUMENT),
+        Part("value\nlines", Kind.LITERAL, role=Role.ARGUMENT),
+    )
+    cache = typeset.ViewCache()
+    frame(seam, lambda: typeset.document(cache, "k", parts))
+    blocks = cache.view("k").document.blocks
+    assert [round(_key_tall(block.style.font.key)) for block in blocks] == [16, 18, 18]
+    assert typeset.line_height(role=Role.ARGUMENT) == 19.0 and typeset.line_height() == 17.0
+
+
+def test_native_lines_follow_the_label_role(seam: Any) -> None:
+    fonts = typeset._fonts().fonts
+    assert typeset.imfont(typeset.Weight.REGULAR) is fonts[Face.PROSE]
+    typeset.configure(typeset=True, roles={Role.LABEL: RoleStyle(Slot.MONOSPACE, 2)})
+    assert not typeset.mono(), "prose is another role"
+    assert typeset.imfont(typeset.Weight.REGULAR) is fonts[Face.CODE]
+    assert typeset.imfont(typeset.Weight.BOLD) is fonts[Face.CODE_BOLD]
+    sizes: list[float] = []
+
+    def body() -> None:
+        with typeset.font(typeset.Weight.REGULAR):
+            sizes.append(seam.get_font_size())
+        with typeset.font(typeset.Weight.REGULAR, 12.0):
+            sizes.append(seam.get_font_size())
+
+    frame(seam, body)
+    assert sizes == [18.0, 12.0]
+
+
+# -- leading -------------------------------------------------------------------
+
+TALL_PROSE = (
+    "Ångström É (brackets) [and] {braces} | pipes gjpqy `code|[]{}` → ✓ "
+    "and enough words after them that the paragraph wraps over several lines of "
+    "the window, each of which has to sit one pitch under the last whatever is "
+    "set in it, ÅÉ gjpqy ÅÉ gjpqy ÅÉ gjpqy ÅÉ gjpqy ÅÉ gjpqy ÅÉ gjpqy.\n"
+)
+TALL_TREE = "src\n├── a.py\n│   └── b.py\n└── c.py\n│ ┃ ║ █\nÅÉgjpqy|()[]{}\n"
+
+
+def _steps(view: Any, block: int = 0) -> set[float]:
+    from advtext import px_from_sp
+
+    lines = view.set_lines(block, block + 1)
+    assert len(lines) > 3
+    return {
+        round(float(px_from_sp(b.baseline - a.baseline)), 3)
+        for a, b in zip(lines, lines[1:], strict=False)
+    }
+
+
+def _line_boxes(view: Any) -> list[tuple[float, float]]:
+    """
+    Each line's top and foot in pixels, as the selection draws its band: from the
+    layout's line records, which carry the box the strut was applied to.
+    """
+    from advtext import px_from_sp
+    from advtext.shipout import Line
+
+    out = []
+    for placed in view.layout.placed:
+        for cmd in placed.unit.cmds:
+            if isinstance(cmd, Line) and cmd.end > cmd.start:
+                top = float(px_from_sp(placed.y + cmd.y - cmd.height))
+                out.append((top, float(px_from_sp(placed.y + cmd.y + cmd.depth))))
+    return out
+
+
+def test_leading_is_a_table_of_whole_pixel_pitches_by_role(seam: Any) -> None:
+    """
+    The table is the one place line spacing is decided, in multiples of a role's
+    pixel height; what a line is set at is that product taken to a whole pixel.
+    """
+    assert typeset.LEADING[Role.PROSE] == 17 / 16
+    assert typeset.pitch(Role.PROSE) == typeset.line_height(mono=False) == 17.0
+    assert typeset.pitch(Role.LITERAL) == typeset.line_height() == 17.0
+    assert typeset.pitch(Role.HEADING, 22.0) == 22.0
+    assert typeset.diff_row_height() == 18.0
+    typeset.configure(typeset=True, scale=0.875)
+    assert typeset.pitch(Role.PROSE) == 15.0, "14 x 17/16 is 14.875"
+    assert typeset.diff_row_height() == 16.0
+
+
+@pytest.mark.parametrize("multiple", [17 / 16, 1.0, 1.35])
+def test_every_line_of_a_block_is_one_pitch_under_the_last_whatever_is_in_it(
+    seam: Any, monkeypatch: pytest.MonkeyPatch, multiple: float
 ) -> None:
     """
-    A code span has its paragraph's em and Roboto's em is the smaller, so at one
-    pixel height inline code is drawn shorter than the chrome. ``roboto-large`` pays
-    two pixels of prose for it.
+    The hazard of a tight pitch: the library moves a line down when its ink would
+    touch the line above, so an accented capital, a bracket or a box-drawing glyph
+    made its own line taller than its neighbours -- a ragged rhythm in prose, and a
+    ``tree`` listing whose rules do not join. At 1.0 the strut is 12 px over 4 and
+    both faces have glyphs that reach past it.
     """
-    assert _tall("prose", BlockKind.PARAGRAPH) == pytest.approx(16.0, abs=0.01)
-    small = _tall("prose", BlockKind.PARAGRAPH, Face.CODE)
-    assert small < 14.5, "the span the default preset draws short"
-    fenced = typeset._theme("prose").style(BlockKind.CODE).font
+    for role in (Role.PROSE, Role.LITERAL, Role.CODE_BLOCK):
+        monkeypatch.setitem(typeset.LEADING, role, multiple)
+    typeset.reset()
+    assert typeset.load_fonts(BOLD)
+    want = float(round(16 * multiple))
+    cache = typeset.ViewCache()
 
-    typeset.configure(typeset=True, faces="roboto-large")
-    assert _tall("prose", BlockKind.PARAGRAPH) == pytest.approx(18.0, abs=0.01)
-    assert _tall("prose", BlockKind.PARAGRAPH, Face.CODE) == pytest.approx(16.0, abs=0.25)
-    assert typeset._theme("prose").style(BlockKind.CODE).font == fenced
-    assert _tall("literal", BlockKind.CODE) == pytest.approx(16.0, abs=0.01)
-    assert typeset.body_px() == 16.0, "a native line and a diff row stay the chrome's size"
-    assert typeset.line_height(mono=False) > typeset.line_height()
+    def body() -> None:
+        typeset.markdown(cache, "prose", TALL_PROSE, width=300.0)
+        typeset.plain(cache, "tree", TALL_TREE)
+        typeset.markdown(cache, "fence", "```\n" + TALL_TREE + "```\n")
+        typeset.plain(cache, "wrapped", TALL_PROSE, wrap=True, width=300.0)
+
+    frame(seam, body)
+    for key in ("prose", "tree", "fence", "wrapped"):
+        assert _steps(cache.view(key)) == {want}, key
+
+
+@pytest.mark.parametrize("multiple", [17 / 16, 1.0])
+def test_the_selection_bands_of_a_block_tile_with_no_seam_and_no_overlap(
+    seam: Any, monkeypatch: pytest.MonkeyPatch, multiple: float
+) -> None:
+    """
+    A selected line is filled from its box's top to its foot. Each line's box is
+    its strut unless a glyph is measured taller, and then two bands overlap and
+    the overlap is drawn twice as dark.
+    """
+    for role in (Role.PROSE, Role.LITERAL):
+        monkeypatch.setitem(typeset.LEADING, role, multiple)
+    typeset.reset()
+    assert typeset.load_fonts(BOLD)
+    want = float(round(16 * multiple))
+    cache = typeset.ViewCache()
+
+    def body() -> None:
+        typeset.markdown(cache, "prose", TALL_PROSE, width=300.0)
+        typeset.plain(cache, "tree", TALL_TREE)
+
+    frame(seam, body)
+    for key in ("prose", "tree"):
+        boxes = _line_boxes(cache.view(key))
+        assert len(boxes) > 3, key
+        for (_, foot), (top, _) in zip(boxes, boxes[1:], strict=False):
+            assert top == pytest.approx(foot, abs=0.01), key
+        assert {round(foot - top, 2) for top, foot in boxes} == {want}, key
+
+
+def test_no_glyph_of_one_line_reaches_into_the_next_at_the_tightest_pitch(seam: Any) -> None:
+    """
+    At a pitch of the face's own pixel height a descender and the next line's
+    ascender may touch and must not overlap, in both families. Box-drawing glyphs
+    are the exception on purpose: they reach past the face to join.
+    """
+    from advtext import fontlib_metrics, px_from_sp
+
+    for face, name in ((Face.PROSE, "prose"), (Face.CODE, "literal")):
+        kind = BlockKind.PARAGRAPH if face is Face.PROSE else BlockKind.CODE
+        real = fontlib_metrics(typeset._theme(name).style(kind).font.key)
+        boxes = [real.bbox(ord(c)) for c in "ÅÉÑÜgjpqy|()[]{}@$Q/\\_"]
+        high = max(float(px_from_sp(round(box.y_max))) for box in boxes)
+        low = max(float(px_from_sp(round(-box.y_min))) for box in boxes)
+        assert high + low <= 16.0 + 0.5, (face, high, low)
+    rule = fontlib_metrics(typeset._theme("literal").style(BlockKind.CODE).font.key).bbox(ord("│"))
+    assert float(px_from_sp(round(rule.y_max - rule.y_min))) >= 17.0, "it joins at the pitch"
+
+
+def test_a_diff_rows_pitch_is_its_roles_fenced_in_a_document_or_not(
+    seam: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The diff view's grid takes its row from the theme it is given, so the row is in
+    the same table as every other pitch. The library gives a diff fenced in a
+    document the document's theme, which would make its rows a code block's; it is
+    given the diff's, so a diff is one size and one pitch wherever it is drawn.
+    """
+    texts = approval.diff_texts("Write", {"file_path": "/x/a.py", "content": "one\ntwo\n"})
+    cache = typeset.ViewCache()
+    frame(seam, lambda: typeset.diff(cache, "d", texts))
+    assert cache.view("d").metrics_px.row == 18 == typeset.diff_row_height()
+
+    monkeypatch.setitem(typeset.LEADING, Role.DIFF, 20 / 16)
+    typeset.reset()
+    assert typeset.load_fonts(BOLD)
+    fresh = typeset.ViewCache()
+    fenced = "```diff\n--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n one\n-two\n+three\n```\n"
+
+    def body() -> None:
+        typeset.diff(fresh, "d", texts)
+        typeset.markdown(fresh, "m", fenced)
+
+    frame(seam, body)
+    assert fresh.view("d").metrics_px.row == 20 == typeset.diff_row_height()
+    hosted = fresh.view("m").hosted(0)
+    assert hosted is not None and hosted.view.metrics_px.row == 20
+    assert typeset.pitch(Role.CODE_BLOCK) == 17.0, "which a fence that is not a diff keeps"
+
+
+# -- panes ---------------------------------------------------------------------
+
+
+def test_a_pane_is_switched_off_alone_and_the_master_switch_is_over_all(seam: Any) -> None:
+    """
+    Each pane asks for itself. Switching one off is not a change of faces: nothing
+    is rebuilt, and the others' views are the views they had.
+    """
+    assert all(typeset.enabled(pane) for pane in Pane) and typeset.enabled()
+    epoch = typeset._STATE.epoch
+    typeset.configure(typeset=True, panes={Pane.CONTEXT: False, Pane.BOARD: True})
+    assert not typeset.enabled(Pane.CONTEXT) and not typeset.pane_on(Pane.CONTEXT)
+    assert all(typeset.enabled(pane) for pane in Pane if pane is not Pane.CONTEXT)
+    assert typeset.enabled(), "the master switch is still on"
+    assert typeset._STATE.epoch == epoch
+
+    typeset.configure(typeset=True)
+    assert not typeset.enabled(Pane.CONTEXT), "a call that names no panes changes none"
+    typeset.configure(typeset=False)
+    assert not any(typeset.enabled(pane) for pane in Pane)
+    assert typeset.pane_on(Pane.BOARD) and not typeset.pane_on(Pane.CONTEXT)
+    typeset.configure(typeset=True, panes={})
+    assert all(typeset.enabled(pane) for pane in Pane), "a pane left out is on"
+
+
+@pytest.mark.parametrize(
+    ("module", "pane"),
+    [
+        ("detail", Pane.DETAIL),
+        ("inbox", Pane.INBOX),
+        ("transcript_pane", Pane.CONTEXT),
+        ("board_pane", Pane.BOARD),
+        ("brief_pane", Pane.BRIEF),
+    ],
+)
+def test_each_pane_asks_whether_it_is_switched_on_for_itself(module: str, pane: Pane) -> None:
+    """
+    A pane's switch is only a switch if the pane asks about it. One that asked the
+    master switch, or about its neighbour, would pass every test of the seam and of
+    its own two renderers. Read off the source: every call a pane makes to
+    ``typeset.enabled`` names that pane.
+    """
+    source = (Path(typeset.__file__).parent / f"{module}.py").read_text(encoding="utf-8")
+    asked = [
+        ast.unparse(node)
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call) and ast.unparse(node.func) == "typeset.enabled"
+    ]
+    assert asked, module
+    assert set(asked) == {f"typeset.enabled(typeset.Pane.{pane.name})"}, module
+
+
+# -- families ------------------------------------------------------------------
 
 
 def test_a_one_style_family_sets_upright_prose_and_borrows_the_rest_from_roboto(
     seam: Any,
 ) -> None:
     """
-    Droid Sans ships in one style. What the preset falls back to, pinned: bold,
+    Droid Sans ships in one style. What the family falls back to, pinned: bold,
     italic, bold italic and so every heading are the Roboto faces already loaded,
-    code is Inconsolata, and only the upright prose role changes file.
+    code is Inconsolata, and only the upright prose face changes file.
     """
     fonts = typeset._fonts()
     before = {face: fonts.fonts[face] for face in Face}
-    typeset.configure(typeset=True, faces="droid")
-    assert typeset.preset().name == "droid" and not typeset.mono()
+    typeset.configure(typeset=True, proportional="droid")
+    assert typeset.proportional().name == "droid" and not typeset.mono()
 
     assert registered_fonts()[Face.PROSE] == _bundled("DroidSans.ttf")
     after = {face: fonts.fonts[face] for face in Face}
@@ -616,7 +1039,7 @@ def test_a_one_style_family_sets_upright_prose_and_borrows_the_rest_from_roboto(
     assert fonts.pending == () and fonts.failed == ()
 
 
-def test_a_preset_with_its_own_file_is_measured_as_imgui_draws_that_file(seam: Any) -> None:
+def test_a_family_with_its_own_file_is_measured_as_imgui_draws_that_file(seam: Any) -> None:
     """
     The layout's advances are cached per face and each entry holds an ``ImFont``. One
     kept across the switch would measure Droid Sans prose with Roboto's widths.
@@ -635,24 +1058,28 @@ def test_a_preset_with_its_own_file_is_measured_as_imgui_draws_that_file(seam: A
         seam.end_frame()
         return px_from_sp(round(sum(metrics.advance(ord(c)) for c in text))), drawn
 
+    # Under either source of metrics. Unhinted, ImGui's advances are the file's to
+    # a sixty-fourth of a pixel a glyph -- half a pixel over these 49 -- and
+    # `calc_text_size` rounds a width up.
+    slack = 0.01 if typeset.METRICS == "hinted" else 1.5
     roboto = both()
-    assert roboto[0] == pytest.approx(roboto[1], abs=0.01)
-    typeset.configure(typeset=True, faces="droid")
+    assert roboto[0] == pytest.approx(roboto[1], abs=slack)
+    typeset.configure(typeset=True, proportional="droid")
     droid = both()
-    assert droid[0] == pytest.approx(droid[1], abs=0.01)
-    assert abs(droid[1] - roboto[1]) > 2.0, "or the two files draw alike and this shows nothing"
-    typeset.configure(typeset=True, faces=typeset.DEFAULT_PRESET)
+    assert droid[0] == pytest.approx(droid[1], abs=slack)
+    assert abs(droid[0] - roboto[0]) > 0.5, "or the two files draw alike and this shows nothing"
+    typeset.configure(typeset=True, proportional=typeset.DEFAULT_PROPORTIONAL)
     back = both()
     assert back == pytest.approx(roboto, abs=0.01)
 
 
 def test_one_font_key_is_measured_from_the_file_now_behind_its_role(seam: Any) -> None:
     """
-    A key names a role and a size, not a file, so a key that outlives a preset
-    switch means another font afterwards. Two caches are keyed by it: the seam's
-    table of ImGui advances, and the memo inside the measure the library is handed.
-    Two presets' themes rarely share a key -- their ems differ -- which is why this
-    asks for one key by name rather than through a theme.
+    A key names a role and a size, not a file, so a key that outlives a change of
+    family means another font afterwards. Two caches are keyed by it: the seam's
+    table of metrics, and the memo inside the measure the library is handed. Two
+    families' themes may not share a key, which is why this asks for one by name
+    rather than through a theme.
     """
     from types import SimpleNamespace
 
@@ -668,35 +1095,38 @@ def test_one_font_key_is_measured_from_the_file_now_behind_its_role(seam: Any) -
         )
 
     roboto = widths()
-    typeset.configure(typeset=True, faces="droid")
+    typeset.configure(typeset=True, proportional="droid")
     droid = widths()
-    fresh = typeset._PixelMetrics(typeset.fontlib_metrics(key))
+    fresh = type(typeset.pixel_metrics(key))(typeset.fontlib_metrics(key))
     assert droid[0] == sum(fresh.advance(ord(c)) for c in text)
     assert droid[1] == sum(round(fresh.advance(ord(c))) for c in text)
     assert droid[0] != roboto[0] and droid[1] != roboto[1]
 
 
-def test_switching_presets_adds_nothing_to_the_atlas_and_comes_back_whole(seam: Any) -> None:
+def test_changing_family_and_roles_adds_nothing_to_the_atlas_and_comes_back_whole(
+    seam: Any,
+) -> None:
     """
-    The library adds a font each time a role is loaded and never removes one. Every
-    preset's file is on the atlas from ``load_fonts``, so a session of switching is
+    The library adds a font each time a face is loaded and never removes one. Every
+    family's file is on the atlas from ``load_fonts``, so a session of switching is
     the same atlas, the same ``ImFont`` for Roboto afterwards, and a clean registry.
     """
     fonts = typeset._fonts()
     count, roboto = _atlas_fonts(seam), fonts.fonts[Face.PROSE]
     registry = dict(registered_fonts())
     for _ in range(2):
-        for preset in typeset.PRESETS:
-            typeset.configure(typeset=True, faces=preset.name)
-            assert typeset.preset() is preset
-            assert _atlas_fonts(seam) == count, preset.name
+        for family in typeset.PROPORTIONALS:
+            for old in ("roboto", "mono", "roboto-large"):
+                typeset.configure(typeset=True, faces=old, proportional=family.name)
+                assert typeset.proportional() is family
+                assert _atlas_fonts(seam) == count, (family.name, old)
     typeset.configure(typeset=True, faces=typeset.DEFAULT_PRESET)
     assert fonts.fonts[Face.PROSE] is roboto
     assert dict(registered_fonts()) == registry
     assert Face.PROSE not in registered_fonts()
 
 
-def test_a_preset_is_chosen_inside_a_frame_and_drawn_in_that_frame(seam: Any) -> None:
+def test_a_family_is_chosen_inside_a_frame_and_drawn_in_that_frame(seam: Any) -> None:
     """
     A menu click arrives between ``new_frame`` and the panes. The view drawn after it
     in the same frame is in the new faces, with nothing missing and nothing pending.
@@ -706,7 +1136,7 @@ def test_a_preset_is_chosen_inside_a_frame_and_drawn_in_that_frame(seam: Any) ->
     first, tall = cache.view("k"), cache.height("k")
 
     def body() -> None:
-        typeset.configure(typeset=True, faces="droid")
+        typeset.configure(typeset=True, proportional="droid")
         typeset.markdown(cache, "k", MARKDOWN)
 
     frame(seam, body)
@@ -714,66 +1144,124 @@ def test_a_preset_is_chosen_inside_a_frame_and_drawn_in_that_frame(seam: Any) ->
     assert cache.drawn("k") is not None and cache.drawn("k")[1] == 0  # type: ignore[index]
     assert cache.replaced("k") == 0
     assert typeset._fonts().pending == ()
-    typeset.configure(typeset=True, faces="roboto-large")
+    typeset.configure(typeset=True, roles={Role.PROSE: RoleStyle(Slot.PROPORTIONAL, 2)})
     frame(seam, lambda: typeset.markdown(cache, "k", MARKDOWN))
     assert (cache.height("k") or 0.0) > (tall or 0.0)
 
 
-def test_choosing_the_preset_already_in_force_rebuilds_nothing(seam: Any) -> None:
+def test_choosing_what_is_already_in_force_rebuilds_nothing(seam: Any) -> None:
     cache = typeset.ViewCache()
-    typeset.configure(typeset=True, faces="droid")
+    roles = {Role.HEADING: RoleStyle(Slot.MONOSPACE, 1)}
+    typeset.configure(typeset=True, proportional="droid", roles=roles)
     frame(seam, lambda: typeset.markdown(cache, "k", MARKDOWN))
     first, epoch = cache.view("k"), typeset._STATE.epoch
-    typeset.configure(typeset=True, faces="droid", scale=1.0)
+    typeset.configure(typeset=True, proportional="droid", roles=dict(roles), scale=1.0)
     frame(seam, lambda: typeset.markdown(cache, "k", MARKDOWN))
     assert typeset._STATE.epoch == epoch and cache.view("k") is first
 
 
-def test_a_preset_whose_file_did_not_load_cannot_be_chosen(seam: Any) -> None:
+def test_a_family_whose_file_did_not_load_cannot_be_chosen(seam: Any) -> None:
     """
     Prose measured from a file ImGui has no font for would be drawn in whatever face
     was bound, at the wrong advances. The default is used and the menu is told.
     """
-    typeset.configure(typeset=True, faces="droid")
+    typeset.configure(typeset=True, proportional="droid")
     assert typeset.load_fonts(
         BOLD, loader=lambda path: None if "Droid" in str(path) else typeset._atlas_loader(path)
     )
-    assert dict((preset.name, usable) for preset, usable in typeset.presets()) == {
+    assert {family.name: usable for family, usable in typeset.proportionals()} == {
         "roboto": True,
-        "mono": True,
-        "roboto-large": True,
         "droid": False,
     }
-    assert typeset.preset().name == typeset.DEFAULT_PRESET
+    assert typeset.proportional().name == typeset.DEFAULT_PROPORTIONAL
     assert Face.PROSE not in registered_fonts()
     assert typeset.enabled() and not typeset.mono()
-    assert typeset._STATE.faces == "droid", "what the operator asked for is not overwritten"
+    assert typeset._STATE.family == "droid", "what the operator asked for is not overwritten"
 
 
-def test_a_saved_preset_with_its_own_file_is_in_force_from_the_first_load(seam: Any) -> None:
+def test_a_saved_family_with_its_own_file_is_in_force_from_the_first_load(seam: Any) -> None:
     """
     The app configures before the atlas exists. ``load_fonts`` is what applies a
-    preset then -- and it still puts the library's own Roboto on the atlas, which is
-    what switching away from the preset will want without a font read.
+    family then -- and it still puts the library's own Roboto on the atlas, which is
+    what switching away from the family will want without a font read.
     """
     typeset.reset()
-    typeset.configure(typeset=True, faces="droid")
-    assert typeset.preset().name == typeset.DEFAULT_PRESET, "nothing is loaded yet"
+    typeset.configure(typeset=True, proportional="droid")
+    assert typeset.proportional().name == typeset.DEFAULT_PROPORTIONAL, "nothing is loaded yet"
     assert typeset.load_fonts(BOLD)
-    assert typeset.preset().name == "droid"
+    assert typeset.proportional().name == "droid"
     assert registered_fonts()[Face.PROSE] == _bundled("DroidSans.ttf")
     assert typeset._fonts().fonts[Face.PROSE] is typeset._STATE.files[_bundled("DroidSans.ttf")]
     assert typeset._STATE.files[_bundled("Roboto/Roboto-Regular.ttf")] is not None
 
-    # Loaded again with the preset's file still registered, as a second run of the
+    # Loaded again with the family's file still registered, as a second run of the
     # app in one process would: Roboto is on the atlas all the same.
     assert typeset.load_fonts(BOLD)
-    assert typeset.preset().name == "droid"
+    assert typeset.proportional().name == "droid"
     assert typeset._STATE.files.get(_bundled("Roboto/Roboto-Regular.ttf")) is not None
     count = _atlas_fonts(seam)
-    typeset.configure(typeset=True, faces=typeset.DEFAULT_PRESET)
+    typeset.configure(typeset=True, proportional=typeset.DEFAULT_PROPORTIONAL)
     assert _atlas_fonts(seam) == count
     assert typeset._fonts().fonts[Face.PROSE] is not None
+
+
+# -- whose advances ------------------------------------------------------------
+
+
+@pytest.mark.parametrize("source", ["hinted", "light", "file"])
+def test_the_metrics_source_is_one_constant_and_each_way_agrees_with_what_imgui_draws(
+    seam: Any, monkeypatch: pytest.MonkeyPatch, source: str
+) -> None:
+    """
+    Hinted, the layout asks ImGui for each advance; from the file, the faces are
+    loaded unhinted and the library's own advances are ImGui's. Either way a line
+    is as wide as ImGui will draw it, which is the claim the choice has to keep.
+    """
+    from advtext import fontlib_metrics, px_from_sp
+
+    monkeypatch.setattr(typeset, "METRICS", source)
+    typeset.reset()
+    assert typeset.load_fonts(BOLD)
+    try:
+        text = "difference people iiii mmmm"
+        for face, name, kind in (
+            (Face.PROSE, "prose", BlockKind.PARAGRAPH),
+            (Face.CODE, "literal", BlockKind.CODE),
+        ):
+            key = typeset._theme(name).style(kind).font.key
+            metrics = typeset.pixel_metrics(key)
+            laid = float(px_from_sp(round(sum(metrics.advance(ord(c)) for c in text))))
+            seam.new_frame()
+            seam.push_font(typeset._fonts()(face), 16.0)
+            drawn = float(seam.calc_text_size(text).x)
+            seam.pop_font()
+            seam.end_frame()
+            file = float(px_from_sp(round(sum(fontlib_metrics(key).advance(ord(c)) for c in text))))
+            if source != "file":
+                assert laid == pytest.approx(drawn, abs=0.01), face
+                assert abs(file - drawn) > 1.0, "or hinting moved nothing and this shows nothing"
+                assert isinstance(metrics, typeset._PixelMetrics)
+            else:
+                assert laid == file, "nothing of the library's measuring is overridden"
+                # `calc_text_size` rounds a width up to a pixel.
+                assert laid == pytest.approx(drawn, abs=1.0), face
+                assert not isinstance(metrics, typeset._PixelMetrics)
+        cache = typeset.ViewCache()
+        texts = approval.diff_texts("Write", {"file_path": "/x/a.py", "content": "one\ntwo\n"})
+
+        def body() -> None:
+            typeset.markdown(cache, "m", MARKDOWN)
+            typeset.plain(cache, "p", TREE)
+            typeset.diff(cache, "d", texts)
+
+        frame(seam, body)
+        for key in ("m", "p", "d"):
+            drawn_now = cache.drawn(key)
+            assert drawn_now is not None and drawn_now[0] > 5 and drawn_now[1] == 0, key
+    finally:
+        monkeypatch.undo()
+        typeset.reset()
+        assert typeset.load_fonts(BOLD)
 
 
 def test_the_operators_scale_multiplies_the_ui_fonts_size_to_a_whole_pixel(
@@ -1251,7 +1739,7 @@ def test_a_capped_diff_ends_on_a_whole_row_and_keeps_its_scrollbar_clear(seam: A
     scrollbar where there is one.
     """
     row = typeset.diff_row_height()
-    assert row == 20.0 and row != typeset.line_height()
+    assert row == 18.0 and row != typeset.line_height()
     short = "\n".join(f"line {n}" for n in range(40))
     texts = (approval.DiffText(short, short.replace("line 7", "LINE 7"), "f.py"),)
     long = (approval.DiffText(short, short.replace("line 7", "LINE 7 " + "x" * 200), "f.py"),)
@@ -1457,7 +1945,7 @@ def test_a_code_line_wider_than_the_window_can_be_scrolled_to(seam: Any, kind: s
 
     for _ in range(3):
         frame(seam, body, sideways=True)
-    assert reach[-1] > 400 * 8.0 - WINDOW[0]
+    assert reach[-1] > 400 * _cell() - WINDOW[0]
     if kind == "markdown":
         # Prose is still broken to the window: only the scroll range is wider.
         assert cache._entries["k"].width < WINDOW[0]
@@ -1488,7 +1976,7 @@ def test_under_a_cap_a_wide_line_gets_the_views_own_child_a_scrollbar(seam: Any)
     frame(seam, body)
     assert got["fits"] is not None and got["over"] is not None
     assert got["over"] == pytest.approx(got["fits"] + seam.get_style().scrollbar_size)
-    assert cache._entries["over"].width == pytest.approx(400 * 8.0, abs=0.01)
+    assert cache._entries["over"].width == pytest.approx(400 * _cell(), abs=0.01)
     assert (cache.drawn("over") or (0, 0))[0] > 0
 
 
@@ -1501,7 +1989,7 @@ def test_a_cap_stated_in_lines_is_that_many_lines_of_literal_text(seam: Any) -> 
     got: list[float] = []
     frame(seam, lambda: got.append(typeset.plain(cache, "k", "\n".join(["line"] * 7))))
     assert got[0] == pytest.approx(7 * typeset.line_height(), abs=0.5)
-    assert 17.0 < typeset.line_height() < 22.0
+    assert 16.0 <= typeset.line_height() < 22.0
 
 
 def test_a_segment_kinds_colour_is_the_ink(seam: Any) -> None:
@@ -2690,7 +3178,8 @@ def test_a_large_diff_is_announced_a_frame_before_it_is_made(seam: Any) -> None:
     assert got[0] is not None and 0 < got[0] < 40
     frame(seam, lambda: got.append(typeset.diff(cache, "k", texts, height_cap=200.0)))
     assert cache.view("k") is not None and not typeset.pending()
-    assert got[1] == 200.0
+    row = typeset.diff_row_height()
+    assert got[1] == 200.0 // row * row, "the cap, down to whole rows"
     # One changed line in a file as long is not a stall and is not announced.
     frame(seam, lambda: got.append(typeset.diff(cache, "one", small, height_cap=200.0)))
     assert cache.view("one") is not None
@@ -3706,7 +4195,7 @@ def test_a_line_of_box_drawing_is_the_height_of_any_other_literal_line(seam: Any
     drawn = code._inner.bbox(0x2502)
     assert float(advtext.px_from_sp(round(drawn.y_max - drawn.y_min))) > typeset.line_height()
     kept = code.bbox(0x2502)
-    assert kept.y_max == code._inner.ascent and kept is code.bbox(0x2502)
+    assert kept.y_max <= code._inner.ascent and kept is code.bbox(0x2502)
 
 
 def test_the_paragraph_after_a_list_has_a_paragraphs_gap_above_it(seam: Any) -> None:

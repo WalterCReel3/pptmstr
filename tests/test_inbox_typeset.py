@@ -814,6 +814,20 @@ def test_an_arguments_name_is_set_tight_over_its_value() -> None:
     assert not value.tight
 
 
+def test_a_command_of_several_lines_is_broken_at_the_rows_edge_whatever_the_role_says() -> None:
+    """
+    The seam sets an argument of several lines unbroken, for a pane that scrolls
+    sideways to it (DETAIL). This row is where the approve button is, under a cap:
+    text past its edge is text approved unread, so here every value is broken at
+    the edge with its spaces kept, and stays so if the role's entry changes.
+    """
+    command = "set -e\ncd /srv   &&   rm -rf  ./build\n" + "x" * 300
+    assert typeset.multiline_kind(typeset.Role.ARGUMENT) is typeset.Kind.LITERAL
+    name, value = inbox.argument_parts({"command": command})
+    assert value.kind is typeset.Kind.WRAPPED_EXACT and value.text == command
+    assert name.role is value.role is typeset.Role.ARGUMENT
+
+
 def test_a_call_parked_with_no_parts_shows_its_arguments_and_not_an_empty_diff(
     seam: Any, said: list[str]
 ) -> None:

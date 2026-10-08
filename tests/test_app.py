@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import threading
 import types
+from typing import Any
 
 import pytest
 
@@ -27,7 +28,7 @@ from pptmstr.bridge import Bridge
 from pptmstr.cli_version import BelowFloor, FloorCheck, MeetsFloor, Unreadable
 from pptmstr.driver import AgentSession
 from pptmstr.model import LaunchSpec
-from pptmstr.settings import Settings
+from pptmstr.settings import RoleChoice, Settings, legacy_faces
 from pptmstr.store import Store
 
 # Stands in for what `sandbox.containment_settings()` returns. Its content does not
@@ -337,9 +338,16 @@ def typeset_state() -> object:
     """
     from pptmstr.ui import typeset
 
-    before = (typeset._STATE.typeset, typeset._STATE.faces, typeset._STATE.scale)
-    yield typeset._STATE
-    typeset.configure(typeset=before[0], faces=before[1], scale=before[2])
+    state = typeset._STATE
+    before = (state.typeset, state.scale, state.family, dict(state.roles), state.panes_off)
+    yield state
+    typeset.configure(
+        typeset=before[0],
+        scale=before[1],
+        proportional=before[2],
+        roles=before[3],
+        panes={pane: pane not in before[4] for pane in typeset.Pane},
+    )
 
 
 def test_the_persisted_text_settings_reach_the_seam_before_the_first_frame(
@@ -359,14 +367,19 @@ def test_the_persisted_text_settings_reach_the_seam_before_the_first_frame(
     monkeypatch.setattr(
         settings_mod,
         "load",
-        lambda: Settings(typeset=False, typeset_faces="mono", typeset_scale=1.25, theme="dark"),
+        lambda: Settings(typeset=False, typeset_scale=1.25, typeset_family="droid", theme="dark")
+        .with_role("prose", slot="monospace")
+        .with_role("code-block", step=2)
+        .with_pane("context", False),
     )
     monkeypatch.setattr(app, "AppState", stop)
-    typeset.configure(typeset=True, mono=False, scale=1.0)
+    typeset.configure(typeset=True, mono=False, scale=1.0, panes={})
     with pytest.raises(_Reached):
         app.main([])
-    assert (typeset._STATE.typeset, typeset._STATE.faces) == (False, "mono")
+    assert (typeset._STATE.typeset, typeset._STATE.family) == (False, "droid")
     assert typeset.mono() and typeset.scale() == 1.25
+    assert typeset.chosen(typeset.Role.CODE_BLOCK).step == 2
+    assert not typeset.pane_on(typeset.Pane.CONTEXT) and typeset.pane_on(typeset.Pane.BOARD)
 
 
 def test_a_text_switch_is_saved_and_takes_effect_without_a_restart(
@@ -391,17 +404,28 @@ def test_a_text_switch_is_saved_and_takes_effect_without_a_restart(
     assert typeset._STATE.typeset is False
     assert typeset._STATE.epoch == epoch, "turning it off rebuilds nothing"
 
-    app._switch_typeset(state, faces="mono")
-    assert state.settings.typeset_faces == "mono" and saved[-1].typeset_faces == "mono"
+    app._switch_typeset(state, role=("prose", "monospace", None))
+    mono = (RoleChoice("prose", "monospace", None),)
+    assert state.settings.typeset_roles == mono and saved[-1].typeset_roles == mono
     assert state.settings.typeset is False, "one switch must not move the other"
     assert typeset.mono() is True
     assert typeset._STATE.epoch == epoch + 1, "documents built in the other faces are stale"
 
     app._switch_typeset(state, scale=1.25)
     assert state.settings.typeset_scale == 1.25 and saved[-1].typeset_scale == 1.25
-    assert state.settings.typeset_faces == "mono", "nor the size the faces"
+    assert state.settings.typeset_roles == mono, "nor the size the faces"
     assert typeset.scale() == 1.25
     assert typeset._STATE.epoch == epoch + 2, "documents built at the other size are stale"
+
+    app._switch_typeset(state, role=("prose", None, 2))
+    assert saved[-1].typeset_roles == (RoleChoice("prose", "monospace", 2),)
+    assert typeset.chosen(typeset.Role.PROSE) == typeset.RoleStyle(typeset.Slot.MONOSPACE, 2)
+    assert typeset._STATE.epoch == epoch + 3
+
+    app._switch_typeset(state, pane=("context", False))
+    assert saved[-1].typeset_panes == (("context", False),)
+    assert not typeset.pane_on(typeset.Pane.CONTEXT)
+    assert typeset._STATE.epoch == epoch + 3, "a pane switched off rebuilds nothing"
 
 
 class _Menu:
@@ -437,23 +461,11 @@ class _Menu:
         self.said.append(text)
 
 
-@pytest.mark.parametrize(
-    ("click", "faces", "scale"),
-    [
-        ("Inconsolata throughout", "mono", 1.0),
-        ("Roboto prose a size up, Inconsolata code", "roboto-large", 1.0),
-        ("Droid Sans prose, Roboto emphasis, Inconsolata code", "roboto", 1.0),
-        ("125%", "roboto", 1.25),
-        ("87.5%", "roboto", 0.875),
-    ],
-)
-def test_the_text_menu_offers_every_preset_and_size_and_a_click_chooses_it(
-    monkeypatch: pytest.MonkeyPatch, typeset_state: object, click: str, faces: str, scale: float
-) -> None:
+def _text_menu(
+    monkeypatch: pytest.MonkeyPatch, click: str, settings: Settings | None = None
+) -> tuple[_Menu, Any, list[Settings]]:
     """
-    The presets and the scale are reachable from nowhere else in the window. The
-    Droid Sans entry is the one that cannot be clicked here: no font is loaded in
-    this test, and a preset whose own file is not on the atlas is offered disabled.
+    ``app._menus`` drawn once against a stand-in ImGui, with one entry clicked.
     """
     from pptmstr import app
     from pptmstr import settings as settings_mod
@@ -465,22 +477,101 @@ def test_the_text_menu_offers_every_preset_and_size_and_a_click_chooses_it(
     monkeypatch.setattr(settings_mod, "save", lambda settings, path=None: saved.append(settings))
     monkeypatch.setattr(typeset, "available", lambda: True)
     monkeypatch.setattr(typeset._STATE, "files", {})
-    typeset.configure(typeset=True, faces=typeset.DEFAULT_PRESET, scale=1.0)
-    state = app.AppState(store=Store(), bridge=Bridge(), settings=Settings())
-
+    state = app.AppState(store=Store(), bridge=Bridge(), settings=settings or Settings())
+    app._configure_typeset(state.settings)
     app._menus(state)
+    return menu, state, saved
 
-    assert (state.settings.typeset_faces, state.settings.typeset_scale) == (faces, scale)
-    assert (typeset._STATE.faces, typeset.scale()) == (faces, scale)
-    assert menu.menus["Faces"] is True and menu.menus["Text size"] is True
-    labels = {preset.label: preset for preset in typeset.PRESETS}
-    assert set(labels) <= set(menu.items)
+
+@pytest.mark.parametrize(
+    ("click", "family", "roles", "panes", "scale"),
+    [
+        ("Monospace prose", "roboto", (RoleChoice("prose", "monospace", None),), (), 1.0),
+        ("Monospace headings", "roboto", (RoleChoice("heading", "monospace", None),), (), 1.0),
+        ("+2 px##prose", "roboto", (RoleChoice("prose", None, 2),), (), 1.0),
+        ("-1 px##inline-code", "roboto", (RoleChoice("inline-code", None, -1),), (), 1.0),
+        ("CONTEXT", "roboto", (), (("context", False),), 1.0),
+        ("Droid Sans (Roboto emphasis)", "roboto", (), (), 1.0),
+        ("125%", "roboto", (), (), 1.25),
+        ("87.5%", "roboto", (), (), 0.875),
+    ],
+)
+def test_the_text_menu_offers_every_role_pane_and_size_and_a_click_chooses_it(
+    monkeypatch: pytest.MonkeyPatch,
+    typeset_state: object,
+    click: str,
+    family: str,
+    roles: tuple[RoleChoice, ...],
+    panes: tuple[tuple[str, bool], ...],
+    scale: float,
+) -> None:
+    """
+    Until there is a settings dialog these are reachable from nowhere else in the
+    window. The Droid Sans entry is the one that cannot be clicked here: no font is
+    loaded in this test, and a family whose own file is not on the atlas is offered
+    disabled.
+    """
+    from pptmstr.ui import typeset
+
+    menu, state, saved = _text_menu(monkeypatch, click)
+
+    got = state.settings
+    assert (got.typeset_family, got.typeset_roles, got.typeset_panes, got.typeset_scale) == (
+        family,
+        roles,
+        panes,
+        scale,
+    )
+    assert typeset.roles_from((each.role, each.slot, each.step) for each in roles) == {
+        role: typeset.chosen(role) for role in (typeset.Role(each.role) for each in roles)
+    }, "the seam was told in the same breath"
+    assert typeset.scale() == scale
+    assert all(menu.menus[name] for name in ("Panes", "Faces", "Text size", "Role sizes"))
+
+    assert {typeset.PANE_LABELS[pane] for pane in typeset.Pane} <= set(menu.items)
+    for each in typeset.PROPORTIONALS:
+        assert menu.items[each.label] == (each.name == "roboto", each.file is None), each.label
+    # A role offered one family has no entry: there is nothing to choose.
+    offered = {f"Monospace {typeset.ROLE_LABELS[role].lower()}" for role in typeset.Role}
+    assert (
+        {label for label in menu.items if label.startswith("Monospace ")}
+        == {
+            "Monospace prose",
+            "Monospace headings",
+            "Monospace tables",
+            "Monospace row titles",
+        }
+        < offered
+    )
+    for role in typeset.Role:
+        assert typeset.ROLE_LABELS[role] in menu.menus
+        assert {f"{step:+d} px##{role.value}" for step in typeset.STEPS if step} <= set(menu.items)
+        assert f"body##{role.value}" in menu.items
     assert {f"{each * 100:g}%" for each in typeset.SCALES} <= set(menu.items)
-    for label, preset in labels.items():
-        assert menu.items[label] == (preset.name == "roboto", preset.prose_file is None), label
     # Ticked as drawn: an entry above it that took the click has already moved the tick.
     assert menu.items["100%"] == (click != "87.5%", True)
-    assert bool(saved) == ((faces, scale) != ("roboto", 1.0))
+    assert bool(saved) == (got != Settings())
+
+
+def test_the_text_menu_ticks_what_the_settings_chose(
+    monkeypatch: pytest.MonkeyPatch, typeset_state: object
+) -> None:
+    chosen = (
+        Settings()
+        .with_role("heading", slot="monospace")
+        .with_role("table", step=-1)
+        .with_pane("brief", False)
+    )
+    menu, state, _ = _text_menu(monkeypatch, "Monospace headings", chosen)
+    assert menu.items["Monospace headings"] == (True, True)
+    assert menu.items["Monospace prose"] == (False, True)
+    assert menu.items["-1 px##table"][0] and not menu.items["body##table"][0]
+    assert menu.items["BRIEF"] == (False, True) and menu.items["BOARD"] == (True, True)
+    # The click on a ticked role puts it back, and keeps nothing else from moving.
+    assert state.settings.typeset_roles == (
+        RoleChoice("heading", "proportional", None),
+        RoleChoice("table", None, -1),
+    )
 
 
 def test_the_face_and_size_menus_do_not_open_while_text_is_not_typeset(
@@ -494,8 +585,9 @@ def test_the_face_and_size_menus_do_not_open_while_text_is_not_typeset(
     monkeypatch.setattr(typeset, "available", lambda: True)
     state = app.AppState(store=Store(), bridge=Bridge(), settings=Settings(typeset=False))
     app._menus(state)
-    assert menu.menus["Faces"] is False and menu.menus["Text size"] is False
-    assert not any(preset.label in menu.items for preset in typeset.PRESETS)
+    assert not any(menu.menus[name] for name in ("Panes", "Faces", "Text size", "Role sizes"))
+    assert not any(each.label in menu.items for each in typeset.PROPORTIONALS)
+    assert "Monospace prose" not in menu.items and "CONTEXT" not in menu.items
 
 
 @pytest.mark.parametrize(
@@ -660,10 +752,15 @@ def test_the_renderer_can_be_chosen_for_one_run_from_the_command_line(
         raise _Reached
 
     saved: list[Settings] = []
-    monkeypatch.setattr(settings_mod, "load", lambda: Settings(typeset=False, typeset_faces="mono"))
+    monkeypatch.setattr(
+        settings_mod, "load", lambda: Settings(typeset=False).merged(**legacy_faces("mono"))
+    )
     monkeypatch.setattr(settings_mod, "save", lambda settings, path=None: saved.append(settings))
     monkeypatch.setattr(app, "AppState", stop)
     with pytest.raises(_Reached):
         app.main(argv)
-    assert (typeset._STATE.typeset, typeset._STATE.faces, typeset._STATE.scale) == expected
+    on, faces, scale = expected
+    family, roles = typeset.legacy(faces)
+    assert (typeset._STATE.typeset, typeset._STATE.scale) == (on, scale)
+    assert (typeset._STATE.family, typeset._STATE.roles) == (family, typeset._checked(roles))
     assert saved == [], "an override for one run must not become the saved setting"

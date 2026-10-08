@@ -30,18 +30,20 @@ is "nothing is lost" must not quietly lose things at the bottom.
 
 ## Two renderers
 
-``typeset.enabled()`` chooses, per frame. Off, every body is ImGui text as described
-above. On, every body is a view from the seam, held in ``DetailState.views``:
+``typeset.enabled(Pane.DETAIL)`` chooses, per frame. Off, every body is ImGui text
+as described above. On, every body is a view from the seam, held in
+``DetailState.views``:
 
-* **Everything wraps but a diff and a fenced block.** Prose breaks at its spaces.
-  An argument and an error are literal text and break at the pane's edge, at any
-  column, with every space, indent and blank line kept (``Kind.WRAPPED_EXACT``): a
-  path or a command is read to its end without a scrollbar, and copies without the
-  breaks the pane made. One line that breaking at spaces would not alter is broken
-  there instead (``wraps_at_spaces``). A diff row is never broken -- the diff is where a file
-  reads as a file -- and its view scrolls its own rows sideways. Neither is a
-  fenced block in prose, nor a traceback pasted into a body, and for those the
-  pane's child keeps a horizontal scrollbar.
+* **Prose wraps; code and text of several lines do not.** Prose breaks at its
+  spaces. A diff row is never broken -- the diff is where a file reads as a file
+  -- and its view scrolls its own rows sideways. An argument or an error of
+  several lines is set the same way, each line as written, and so is a fenced
+  block in prose and a traceback pasted into a body: for those the pane's child
+  keeps a horizontal scrollbar. An argument or an error of **one** line is broken
+  to the pane instead, at its spaces where that alters nothing
+  (``wraps_at_spaces``) and otherwise at any column with every space kept
+  (``Kind.WRAPPED_EXACT``): a path or a one-line command is read to its end
+  without a scrollbar, and copies without the breaks the pane made.
 * **A body somebody wrote is read by ``typeset.prose_parts``**, the rule the inbox
   row, the board and the brief use, so a concern reads the same here and in its row.
 * **A turn still arriving is not typeset.** See ``_narration``.
@@ -294,7 +296,7 @@ def draw(
     now: float,
 ) -> None:
     """Render the cursor's obligation in full. Never reads the store."""
-    typeset_on = typeset.enabled()
+    typeset_on = typeset.enabled(typeset.Pane.DETAIL)
     if typeset_on:
         subjects = live_subjects(snap, focus)
         pane.views.prune([key for key in pane.views.keys() if _subject(key) in subjects])
@@ -409,7 +411,7 @@ def _deliverable(pane: DetailState, node: NodeId, text: str) -> None:
     the pane exists to show. It is finite by construction -- one final message from
     one sub-agent -- rather than by policy.
     """
-    if typeset.enabled():
+    if typeset.enabled(typeset.Pane.DETAIL):
         if not text.strip():
             imgui.text_disabled("it delivered nothing")
             return
@@ -450,7 +452,7 @@ def _narration(pane: DetailState, node: NodeId, transcript: Transcript, *, live:
     for the same text in the same frame. Wrapped text is 0.2 ms. The reasoning above
     is about a cost of that size, and the stream does not remove it.
     """
-    if typeset.enabled() and not live:
+    if typeset.enabled(typeset.Pane.DETAIL) and not live:
         text = pane.turn_text(node, transcript)
         if not text.strip():
             imgui.text_disabled("nothing said yet this turn")
@@ -560,7 +562,7 @@ def _approval(state: review.ReviewState, pane: DetailState, obligation: Approval
         imgui.text_colored(P.warn.vec4, not_sent)
 
     frame = int(imgui.get_frame_count())
-    if typeset.enabled():
+    if typeset.enabled(typeset.Pane.DETAIL):
         unset = _typeset_approval(state, pane, pending, obligation.key)
         state.body_shown("detail", pending.id, unset, frame)
         return
@@ -730,7 +732,7 @@ def _question(snap: Snapshot, pane: DetailState, obligation: QuestionPending) ->
     # heading -- the machinery displacing the words in the one pane whose job is
     # to inform the reply.
     widgets.section("what it said")
-    if typeset.enabled():
+    if typeset.enabled(typeset.Pane.DETAIL):
         text = pane.turn_text(obligation.node, record.transcript)
         if text.strip():
             _settled_markdown(pane, (obligation.key, "prose"), text)
@@ -753,13 +755,20 @@ def _question(snap: Snapshot, pane: DetailState, obligation: QuestionPending) ->
 
 def _failure(pane: DetailState, obligation: SessionFailed) -> None:
     widgets.section("error")
-    if typeset.enabled():
+    if typeset.enabled(typeset.Pane.DETAIL):
         # Literal, never markdown: an error is a traceback or a line from a CLI, and
-        # an underscore in a path is an underscore. Broken at the pane's edge with
-        # its indentation kept: the end of a traceback's line is its line number.
+        # an underscore in a path is an underscore. A traceback is set as its
+        # lines are and the pane scrolls sideways to the end of a long one, like
+        # an argument of several lines; one line is broken at the pane's edge.
         text, omitted = clip(obligation.error or "no detail recorded", _MAX_ARG_CHARS)
+        kind = literal_kind(text, typeset.Role.LITERAL)
         typeset.plain(
-            pane.views, (obligation.key, "error"), text, wrap=True, exact=True, colour=P.danger
+            pane.views,
+            (obligation.key, "error"),
+            text,
+            wrap=kind is not typeset.Kind.LITERAL,
+            exact=kind is not typeset.Kind.WRAPPED,
+            colour=P.danger,
         )
         if omitted:
             imgui.text_colored(P.warn.vec4, f"… {omitted:,} more characters not shown")
@@ -858,13 +867,23 @@ def argument_parts(
     answer and not this pane's: ``typeset.prose_parts``, the rule the inbox row uses
     for the same body.
 
-    Every other value is the call verbatim, monospace, and none ends past the pane's
-    edge: broken at its spaces where that alters nothing (``wraps_at_spaces``), and
-    otherwise with every space kept and broken wherever the edge falls
-    (``Kind.WRAPPED_EXACT``) -- a command with a heredoc, a file. Which of the two is
-    a fact about the text and not about the pane, so no value changes form as the
-    pane is resized. A value that is not a string is its Python literal broken on
-    its own structure (``_value_text``).
+    Every other value is the call verbatim, monospace, in one of three forms, and
+    which is a fact about the text and not about the pane, so no value changes form
+    as the pane is resized:
+
+    * **several lines** -- a Write's ``content``, an Edit's ``old_string``, a command
+      with a heredoc -- as the seam sets the role's (``typeset.multiline_kind``):
+      unbroken, each line as written, and the pane scrolls sideways to a long one
+      as it does to the diff above. A line of code broken mid-word at the pane's
+      edge is harder to read than one that runs on;
+    * **one line of single-spaced words** -- a path, a subject, a one-line command
+      -- broken at its spaces, which alters nothing (``wraps_at_spaces``);
+    * **any other single line** with every space kept and broken wherever the edge
+      falls (``Kind.WRAPPED_EXACT``): there is no line structure to keep, and one
+      line thousands of characters wide is not read by scrolling.
+
+    A value that is not a string is its Python literal broken on its own structure
+    (``_value_text``), and so several lines.
 
     A subject and a title are among them, in the literal face although the inbox row
     sets them in its prose face. The seam has two ways to the prose face and neither
@@ -877,24 +896,36 @@ def argument_parts(
     """
     prose = _PROSE_ARGUMENT.get(tool_name)
     exact = typeset.Kind.WRAPPED_EXACT
+    role = typeset.Role.ARGUMENT
     parts: list[typeset.Part] = []
     for name, value in raw_args.items():
-        parts.append(typeset.Part(name or '""', exact, "text_dim", tight=True))
+        parts.append(typeset.Part(name or '""', exact, "text_dim", tight=True, role=role))
         text, omitted = clip(_value_text(value, columns), _MAX_ARG_CHARS)
         if not text:
-            parts.append(typeset.Part("(empty)", exact))
+            parts.append(typeset.Part("(empty)", exact, role=role))
         elif not text.strip():
             # Whitespace alone would be set as nothing at all; its repr is something.
-            parts.append(typeset.Part(repr(text), exact))
+            parts.append(typeset.Part(repr(text), exact, role=role))
         elif name == prose and isinstance(value, str):
             parts.extend(typeset.prose_parts(text))
-        elif wraps_at_spaces(text):
-            parts.append(typeset.Part(text, typeset.Kind.WRAPPED))
         else:
-            parts.append(typeset.Part(text, exact))
+            parts.append(typeset.Part(text, literal_kind(text, role), role=role))
         if omitted:
-            parts.append(typeset.Part(f"… {omitted:,} more characters not shown", exact, "warn"))
+            parts.append(
+                typeset.Part(f"… {omitted:,} more characters not shown", exact, "warn", role=role)
+            )
     return tuple(parts)
+
+
+def literal_kind(text: str, role: typeset.Role) -> typeset.Kind:
+    """
+    The form literal text is set in here: the role's own for several lines, and for
+    one line broken at its spaces where that alters nothing and at the edge
+    otherwise. ``argument_parts`` says why each.
+    """
+    if "\n" in text.strip("\n"):
+        return typeset.multiline_kind(role)
+    return typeset.Kind.WRAPPED if wraps_at_spaces(text) else typeset.Kind.WRAPPED_EXACT
 
 
 def _value_text(value: Any, columns: int) -> str:

@@ -660,8 +660,9 @@ def test_a_traceback_in_a_body_is_set_as_written_between_its_prose() -> None:
 
 def test_an_argument_whose_whitespace_is_its_meaning_keeps_all_of_it() -> None:
     """
-    Every value that is not prose by contract is one form, whatever is in it and
-    however wide the pane: the form that keeps every space and breaks at the edge.
+    A value of several lines is set as its lines are, every space kept, however
+    wide the pane: the form is a fact about the text. It is never the form that
+    collapses whitespace, and a single line whose spacing matters is not either.
     """
     heredoc = "python - <<EOF\n    indented()\n\nEOF"
     for columns in (20, 40, 200):
@@ -672,10 +673,28 @@ def test_an_argument_whose_whitespace_is_its_meaning_keeps_all_of_it() -> None:
             ("wrapped-exact", "file_path"),
             ("wrapped", "a.py"),
             ("wrapped-exact", "content"),
-            ("wrapped-exact", "def f():\n    return 1\n"),
+            ("literal", "def f():\n    return 1\n"),
         ]
         bash = detail.argument_parts("Bash", {"command": heredoc}, columns)
-        assert _kinds(bash)[1] == ("wrapped-exact", heredoc)
+        assert _kinds(bash)[1] == ("literal", heredoc)
+        spaced = detail.argument_parts("Bash", {"command": "grep  -n   'a  b'"}, columns)
+        assert _kinds(spaced)[1] == ("wrapped-exact", "grep  -n   'a  b'")
+    assert all(part.role is typeset.Role.ARGUMENT for part in parts)
+
+
+def test_the_form_of_text_of_several_lines_is_the_seams_answer_for_the_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Whether a multi-line literal scrolls or breaks is one entry in the seam's table,
+    not a rule of this pane's: change the entry and the pane follows.
+    """
+    text = "def f():\n    return 1\n"
+    assert detail.literal_kind(text, typeset.Role.ARGUMENT) is typeset.Kind.LITERAL
+    monkeypatch.setitem(typeset._MULTILINE, typeset.Role.ARGUMENT, "wrapped-exact")
+    assert detail.literal_kind(text, typeset.Role.ARGUMENT) is typeset.Kind.WRAPPED_EXACT
+    _, value = detail.argument_parts("Write", {"content": text}, 40)
+    assert value.kind is typeset.Kind.WRAPPED_EXACT
 
 
 def test_an_argument_that_would_be_set_as_nothing_says_what_it_is() -> None:
@@ -698,7 +717,7 @@ def test_a_structured_argument_is_broken_on_its_structure() -> None:
 
     _, part = detail.argument_parts("MultiEdit", {"edits": edits}, 40)
 
-    assert part.kind is detail.typeset.Kind.WRAPPED_EXACT
+    assert part.kind is detail.typeset.Kind.LITERAL, "several lines, set as they are"
     assert max(len(line) for line in part.text.split("\n")) <= 50
     assert eval(part.text) == edits  # noqa: S307 - a literal this test wrote
 
@@ -1172,19 +1191,28 @@ def test_a_refusal_is_said_while_a_large_diff_is_still_being_made(seam, monkeypa
     ]
 
 
-def test_a_long_path_and_a_long_command_are_read_to_their_end_without_a_scrollbar(
+def _literal_cell() -> float:
+    """
+    The advance of one character of literal text, in pixels, as the seam lays it
+    out: the chrome's 8 with hinted metrics, the font file's 7.63 without.
+    """
+    import advtext
+
+    key = typeset._theme("literal").style(advtext.BlockKind.CODE).font.key
+    return float(advtext.px_from_sp(typeset.pixel_metrics(key).advance(ord("m"))))
+
+
+def test_a_long_path_and_a_long_one_line_command_are_read_to_their_end_without_a_scrollbar(
     seam, monkeypatch
 ) -> None:
     """
-    At the width DETAIL docks at, a path of 150 characters and a command with a
-    heredoc: all of each is inside the pane, and what is copied is what was sent.
+    At the width DETAIL docks at, a path of 150 characters and a command of one
+    long line: all of each is inside the pane, and what is copied is what was sent.
     """
     path = "/home/wreel/Source/orbital/src/" + "deep/" * 20 + "near_earth_initialisation.py"
     command = (
-        "cd ~/Source/orbital && python - <<'EOF'\n    import  orbital\n\n"
-        "    print(orbital.__version__)\nEOF\n"
-        "pytest -q tests/test_tle_parser.py::test_checksum --maxfail=1 --tb=short"
-        " -p no:cacheprovider"
+        "cd ~/Source/orbital  &&  pytest -q tests/test_tle_parser.py::test_checksum"
+        " --maxfail=1 --tb=short -p no:cacheprovider"
     )
     obligation = parked("Bash", {"command": command, "file_path": path})
     snap = snapshot(record(), needs_you=(obligation,))
@@ -1199,12 +1227,41 @@ def test_a_long_path_and_a_long_command_are_read_to_their_end_without_a_scrollba
     view = rig.pane.views.view(key)
     assert [view.block_text(n) for n in range(4)] == ["command", command, "file_path", path]
     # Taller than its source lines: the pane broke what did not fit.
-    lines = 2 + command.count("\n") + 1 + 1
-    assert rig.pane.views.height(key) > (lines + 3) * typeset.line_height()
+    assert rig.pane.views.height(key) > (4 + 3) * typeset.line_height()
 
 
-def test_an_error_is_read_to_its_end_without_a_scrollbar(seam, monkeypatch) -> None:
-    error = "Traceback:\n  File " + "/a/long/path" * 12 + "/__init__.py, line 4821\nValueError"
+def test_an_argument_of_several_lines_is_set_unbroken_and_the_pane_scrolls_to_its_end(
+    seam, monkeypatch
+) -> None:
+    """
+    A command with a heredoc, a file's content: each line is one line, as in the
+    diff above it, and the end of the longest is inside the pane's scroll range --
+    reachable, which is what replaces "inside the pane" for text of several lines.
+    """
+    longest = "pytest -q tests/test_tle_parser.py::test_checksum --maxfail=1 --tb=short -p no:x"
+    command = f"cd ~/Source/orbital && python - <<'EOF'\n    import  orbital\n\nEOF\n{longest}"
+    obligation = parked("Bash", {"command": command})
+    snap = snapshot(record(), needs_you=(obligation,))
+    rig = Pane(seam, monkeypatch, width=370.0)
+    rig.focus.move(snap, 0)
+
+    for _ in range(3):
+        rig.frame(snap)
+
+    key = (obligation.key, "arguments")
+    view = rig.pane.views.view(key)
+    assert [view.block_text(n) for n in range(2)] == ["command", command]
+    assert len(view.set_lines(1, 2)) == 4, "a line each, the blank one having no glyph"
+    cell = _literal_cell()
+    assert rig.sideways["##detail"] >= len(longest) * cell - 370.0
+    assert rig.pane.views.height(key) == pytest.approx(6 * typeset.line_height(), abs=8.0)
+
+
+def test_a_traceback_scrolls_to_the_end_of_its_lines_and_a_one_line_error_wraps(
+    seam, monkeypatch
+) -> None:
+    line = "  File " + "/a/long/path" * 12 + "/__init__.py, line 4821"
+    error = f"Traceback:\n{line}\nValueError"
     obligation = SessionFailed(node=ROOT, since=1.0, summary="died", error=error)
     snap = snapshot(record(), needs_you=(obligation,))
     rig = Pane(seam, monkeypatch, width=370.0)
@@ -1213,8 +1270,19 @@ def test_an_error_is_read_to_its_end_without_a_scrollbar(seam, monkeypatch) -> N
     for _ in range(3):
         rig.frame(snap)
 
+    cell = _literal_cell()
+    assert rig.sideways["##detail"] >= len(line) * cell - 370.0
+    view = rig.pane.views.view((obligation.key, "error"))
+    assert view.block_text(0) == error and len(view.set_lines()) == 3
+
+    one = SessionFailed(node=ROOT, since=1.0, summary="died", error=line.strip())
+    snap = snapshot(record(), needs_you=(one,))
+    rig = Pane(seam, monkeypatch, width=370.0)
+    rig.focus.move(snap, 0)
+    for _ in range(3):
+        rig.frame(snap)
     assert rig.sideways == {"##detail": 0.0}
-    assert rig.pane.views.view((obligation.key, "error")).block_text(0) == error
+    assert rig.pane.views.view((one.key, "error")).block_text(0) == line.strip()
 
 
 def test_a_diff_row_is_not_broken_at_the_panes_edge(seam, monkeypatch) -> None:

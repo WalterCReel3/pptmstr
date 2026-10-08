@@ -15,7 +15,7 @@ import time
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, assert_never
+from typing import assert_never
 
 from imgui_bundle import hello_imgui, imgui, immapp
 
@@ -716,17 +716,36 @@ def _menus(state: AppState) -> None:
         reason = typeset.unavailable_reason()
         if reason is not None:
             imgui.text_disabled(f"  {reason}")
-        # Both take effect on the click: every face a preset names is on the atlas
-        # from start-up, so there is nothing to wait for a restart for. The tick is
-        # on the preset in force, which is the default when the saved name is one
-        # this build cannot draw.
+        # Everything below takes effect on the click: every face a family names is
+        # on the atlas from start-up, so there is nothing to wait for a restart
+        # for. A tick is on what is in force, which is the default when the saved
+        # name is one this build cannot draw.
         on = can_typeset and state.settings.typeset
-        if imgui.begin_menu("Faces", on):
-            for preset, usable in typeset.presets():
-                chosen = typeset.preset().name == preset.name
-                clicked, _ = imgui.menu_item(preset.label, "", chosen, usable)
+        if imgui.begin_menu("Panes", on):
+            for pane in typeset.Pane:
+                chosen = typeset.pane_on(pane)
+                clicked, _ = imgui.menu_item(typeset.PANE_LABELS[pane], "", chosen)
                 if clicked:
-                    _switch_typeset(state, faces=preset.name)
+                    _switch_typeset(state, pane=(pane.value, not chosen))
+            imgui.end_menu()
+        if imgui.begin_menu("Faces", on):
+            for family, usable in typeset.proportionals():
+                chosen = typeset.proportional().name == family.name
+                clicked, _ = imgui.menu_item(family.label, "", chosen, usable)
+                if clicked:
+                    _switch_typeset(state, family=family.name)
+            imgui.separator()
+            # A role is in one of two families. The roles whose columns are content
+            # are monospace and are offered nothing else, so they are not listed.
+            for role, slots in typeset.SLOTS.items():
+                if len(slots) < 2:
+                    continue
+                monospace = typeset.chosen(role).slot is typeset.Slot.MONOSPACE
+                label = f"Monospace {typeset.ROLE_LABELS[role].lower()}"
+                clicked, _ = imgui.menu_item(label, "", monospace)
+                if clicked:
+                    slot = typeset.Slot.PROPORTIONAL if monospace else typeset.Slot.MONOSPACE
+                    _switch_typeset(state, role=(role.value, slot.value, None))
             imgui.end_menu()
         if imgui.begin_menu("Text size", on):
             for scale in typeset.SCALES:
@@ -734,6 +753,17 @@ def _menus(state: AppState) -> None:
                 clicked, _ = imgui.menu_item(f"{scale * 100:g}%", "", chosen)
                 if clicked:
                     _switch_typeset(state, scale=scale)
+            imgui.end_menu()
+        if imgui.begin_menu("Role sizes", on):
+            for role in typeset.Role:
+                if imgui.begin_menu(typeset.ROLE_LABELS[role]):
+                    for step in typeset.STEPS:
+                        chosen = typeset.chosen(role).step == step
+                        label = f"{step:+d} px##{role.value}" if step else f"body##{role.value}"
+                        clicked, _ = imgui.menu_item(label, "", chosen)
+                        if clicked:
+                            _switch_typeset(state, role=(role.value, None, step))
+                    imgui.end_menu()
             imgui.end_menu()
         imgui.end_menu()
 
@@ -763,37 +793,57 @@ def _switch_typeset(
     state: AppState,
     *,
     typeset_on: bool | None = None,
-    faces: str | None = None,
     scale: float | None = None,
+    family: str | None = None,
+    role: tuple[str, str | None, int | None] | None = None,
+    pane: tuple[str, bool] | None = None,
 ) -> None:
     """
     Change how text is set, persisting immediately, as ``_switch_wrap`` does.
 
-    One function for all three because they are one piece of state to the seam,
-    and it has to be told in the same breath as the setting is saved: a setting the
+    One function for all of it because it is one piece of state to the seam, and
+    it has to be told in the same breath as the setting is saved: a setting the
     panes do not see until restart would make the comparison this exists for a
     comparison of two launches.
+
+    ``role`` is a role's name with the slot and the step to give it, either left
+    ``None`` to keep what it has; ``pane`` is a pane's name and whether it is on.
     """
-    changes: dict[str, Any] = {}
+    changed = state.settings
     if typeset_on is not None:
-        changes["typeset"] = typeset_on
-    if faces is not None:
-        changes["typeset_faces"] = faces
+        changed = changed.merged(typeset=typeset_on)
     if scale is not None:
-        changes["typeset_scale"] = scale
-    state.settings = state.settings.merged(**changes)
+        changed = changed.merged(typeset_scale=scale)
+    if family is not None:
+        changed = changed.merged(typeset_family=family)
+    if role is not None:
+        changed = changed.with_role(role[0], slot=role[1], step=role[2])
+    if pane is not None:
+        changed = changed.with_pane(*pane)
+    state.settings = changed
     settings_mod.save(state.settings)
     _configure_typeset(state.settings)
     LOG.info(
         "text",
-        f"typeset {'on' if state.settings.typeset else 'off'}, "
-        f"faces {state.settings.typeset_faces}, size x{state.settings.typeset_scale:g}",
+        f"typeset {'on' if changed.typeset else 'off'}, family {changed.typeset_family}, "
+        f"size x{changed.typeset_scale:g}, {len(changed.typeset_roles)} role(s) set apart, "
+        f"panes off: {', '.join(name for name, on in changed.typeset_panes if not on) or 'none'}",
     )
 
 
 def _configure_typeset(settings: settings_mod.Settings) -> None:
+    """
+    Hand the seam everything the settings say about typeset text. The settings keep
+    names; the seam owns what they mean and drops one it does not know.
+    """
     typeset.configure(
-        typeset=settings.typeset, faces=settings.typeset_faces, scale=settings.typeset_scale
+        typeset=settings.typeset,
+        scale=settings.typeset_scale,
+        proportional=settings.typeset_family,
+        roles=typeset.roles_from(
+            (each.role, each.slot, each.step) for each in settings.typeset_roles
+        ),
+        panes=typeset.panes_from(settings.typeset_panes),
     )
 
 
@@ -1177,13 +1227,13 @@ def main(argv: list[str] | None = None) -> int:
         "--prose",
         choices=("proportional", "mono"),
         default=None,
-        help="the face typeset prose is set in; --faces says the same and more",
+        help="typeset prose proportional, or every role monospace (--faces mono)",
     )
     ap.add_argument(
         "--faces",
-        choices=tuple(preset.name for preset in typeset.PRESETS),
+        choices=tuple(settings_mod.LEGACY_FACES),
         default=None,
-        help="the face set typeset text is in; wins over --prose",
+        help="a named set of role choices, as a saved typeset_faces is read; wins over --prose",
     )
     ap.add_argument(
         "--text-scale",
@@ -1210,10 +1260,10 @@ def main(argv: list[str] | None = None) -> int:
         loaded = loaded.merged(typeset=args.typeset == "on")
     if args.prose is not None:
         loaded = loaded.merged(
-            typeset_faces="mono" if args.prose == "mono" else typeset.DEFAULT_PRESET
+            **settings_mod.legacy_faces("mono" if args.prose == "mono" else "roboto")
         )
     if args.faces is not None:
-        loaded = loaded.merged(typeset_faces=args.faces)
+        loaded = loaded.merged(**settings_mod.legacy_faces(args.faces))
     if args.text_scale is not None:
         loaded = loaded.merged(typeset_scale=args.text_scale)
     theme.set_theme(loaded.theme)

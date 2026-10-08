@@ -425,7 +425,7 @@ def _expand_approval(
         # said twice, above the view and cut off inside it.
         for reason in refusals(pending):
             _warning(f"may not apply: {reason}")
-        if typeset.enabled():
+        if typeset.enabled(typeset.Pane.INBOX):
             unset = _typeset_body(pending, obligation.key)
         else:
             _native_body(state, pending)
@@ -581,11 +581,22 @@ def argument_parts(raw_args: Mapping[str, object]) -> tuple[typeset.Part, ...]:
     That form for every value and not only a command: an argument of a call this
     pane has no reading for is approved as it is, so none of it may be collapsed
     and none of it may run past the edge of a window that does not scroll sideways.
+
+    **Not the form the seam gives the role** (``typeset.multiline_kind``), under
+    which DETAIL sets a value of several lines unbroken and scrolls to it. This is
+    the row the approve button is on, twenty-four lines tall: a command set
+    unbroken here ends at the row's edge with a scrollbar at the foot of a capped
+    child, which may itself be scrolled out of sight, and the words past the edge
+    are then approved unread. Broken at the edge, every word is in the body the
+    operator already scrolls down.
     """
+    role = typeset.Role.ARGUMENT
     parts: list[typeset.Part] = []
     for name, value in raw_args.items():
-        parts.append(typeset.Part(name or '""', typeset.Kind.LITERAL, "text_dim", tight=True))
-        parts.append(typeset.Part(argument_text(value), typeset.Kind.WRAPPED_EXACT))
+        parts.append(
+            typeset.Part(name or '""', typeset.Kind.LITERAL, "text_dim", tight=True, role=role)
+        )
+        parts.append(typeset.Part(argument_text(value), typeset.Kind.WRAPPED_EXACT, role=role))
     return tuple(parts)
 
 

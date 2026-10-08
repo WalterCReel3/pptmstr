@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from pptmstr import settings as settings_mod
-from pptmstr.settings import Settings, load, save
+from pptmstr.settings import LEGACY_FACES, RoleChoice, Settings, load, save
 
 
 def test_round_trip(tmp_path: Path) -> None:
@@ -154,22 +154,87 @@ def test_config_dir_falls_back_when_unset(monkeypatch) -> None:
 def test_text_is_typeset_in_proportional_prose_unless_the_operator_says_otherwise() -> None:
     """
     The defaults are the experiment's "on" arm: a fresh install shows the new
-    renderer, and the old one is one menu entry away.
+    renderer in every pane, and the old one is one menu entry away.
     """
     from pptmstr.ui import typeset
 
     assert Settings().typeset is True
     assert Settings().typeset_scale == 1.0
     # The default is spelled in `settings` so that module stays free of the UI.
-    assert Settings().typeset_faces == typeset.DEFAULT_PRESET
-    assert not typeset.PRESETS[0].mono
+    assert Settings().typeset_family == typeset.DEFAULT_PROPORTIONAL
+    assert Settings().typeset_roles == () and Settings().typeset_panes == ()
+    assert typeset.DEFAULTS[typeset.Role.PROSE].slot is typeset.Slot.PROPORTIONAL
+    assert typeset.panes_from(Settings().typeset_panes) == {}, "a pane not named is on"
 
 
 def test_the_text_switches_survive_a_restart(tmp_path: Path) -> None:
     path = tmp_path / "settings.json"
-    save(Settings(typeset=False, typeset_faces="droid", typeset_scale=1.25), path)
+    chosen = (
+        Settings(typeset=False, typeset_family="droid", typeset_scale=1.25)
+        .with_role("prose", step=2)
+        .with_role("heading", slot="monospace")
+        .with_pane("context", False)
+        .with_pane("board", True)
+    )
+    save(chosen, path)
+    assert load(path) == chosen
+    # By name in the file, as a person editing it would write them.
+    written = json.loads(path.read_text())
+    assert written["typeset_roles"] == {"heading": {"slot": "monospace"}, "prose": {"step": 2}}
+    assert written["typeset_panes"] == {"board": True, "context": False}
+
+
+def test_a_role_keeps_what_was_chosen_for_it_when_one_half_changes() -> None:
+    """
+    The size and the family of a role are chosen in two places in the window. A
+    click on one must not put the other back to its default.
+    """
+    chosen = Settings().with_role("prose", slot="monospace").with_role("prose", step=2)
+    assert chosen.typeset_roles == (RoleChoice("prose", "monospace", 2),)
+    chosen = chosen.with_role("prose", slot="proportional").with_role("label", step=-1)
+    assert chosen.typeset_roles == (
+        RoleChoice("label", None, -1),
+        RoleChoice("prose", "proportional", 2),
+    )
+    assert chosen.with_pane("brief", False).with_pane("brief", True).typeset_panes == (
+        ("brief", True),
+    )
+
+
+@pytest.mark.parametrize("name", list(LEGACY_FACES))
+def test_a_saved_face_preset_is_read_as_the_role_choices_it_stood_for(
+    tmp_path: Path, name: str
+) -> None:
+    """
+    ``typeset_faces`` named one of four presets before text was configured by role.
+    An operator who had chosen one must find the same text after an upgrade, and
+    the seam must mean the same by the name: the table is spelled in both.
+    """
+    from pptmstr.ui import typeset
+
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"typeset": True, "typeset_faces": name, "theme": "light"}))
     got = load(path)
-    assert (got.typeset, got.typeset_faces, got.typeset_scale) == (False, "droid", 1.25)
+    family, roles = LEGACY_FACES[name]
+    assert (got.typeset_family, got.typeset_roles, got.theme) == (family, roles, "light")
+
+    assert set(LEGACY_FACES) == set(typeset._LEGACY)
+    seam_family, seam_roles = typeset.legacy(name)
+    assert seam_family == family
+    read = typeset.roles_from((each.role, each.slot, each.step) for each in roles)
+    assert typeset._checked(read) == typeset._checked(seam_roles)
+
+    save(got, path)
+    assert "typeset_faces" not in json.loads(path.read_text())
+    assert load(path) == got
+
+
+def test_the_presets_meant_what_the_migration_says() -> None:
+    assert {each.role for each in LEGACY_FACES["mono"][1]} == {"prose", "heading", "table", "label"}
+    assert all(each.slot == "monospace" for each in LEGACY_FACES["mono"][1])
+    assert LEGACY_FACES["roboto-large"][1] == (RoleChoice("prose", "proportional", 2),)
+    assert LEGACY_FACES["droid"] == ("droid", ())
+    assert LEGACY_FACES["roboto"] == ("roboto", ())
 
 
 def test_a_file_saved_with_the_monospace_switch_keeps_monospace_prose(tmp_path: Path) -> None:
@@ -177,17 +242,14 @@ def test_a_file_saved_with_the_monospace_switch_keeps_monospace_prose(tmp_path: 
     ``typeset_mono`` is the boolean the face presets replaced. An operator who had
     chosen monospace prose must not find proportional prose after an upgrade.
     """
-    from pptmstr.ui import typeset
-
     path = tmp_path / "settings.json"
     path.write_text(json.dumps({"typeset": True, "typeset_mono": True, "theme": "light"}))
     got = load(path)
-    assert got.typeset_faces == "mono" and got.theme == "light"
-    assert any(preset.name == "mono" and preset.mono for preset in typeset.PRESETS)
+    assert got.typeset_roles == LEGACY_FACES["mono"][1] and got.theme == "light"
 
     save(got, path)
     assert "typeset_mono" not in json.loads(path.read_text())
-    assert load(path).typeset_faces == "mono"
+    assert load(path).typeset_roles == LEGACY_FACES["mono"][1]
 
 
 @pytest.mark.parametrize(
@@ -198,19 +260,56 @@ def test_a_file_saved_with_the_monospace_switch_keeps_monospace_prose(tmp_path: 
         ({"typeset_mono": "true"}, "roboto"),
         ({"typeset_mono": True, "typeset_faces": "droid"}, "droid"),
         ({"typeset_mono": True, "typeset_faces": 7}, "mono"),
-        ({"typeset_faces": "from-a-later-build"}, "from-a-later-build"),
+        ({"typeset_faces": "from-a-later-build"}, "roboto"),
+        # What the file says about roles is newer than a preset's name and wins.
+        ({"typeset_faces": "mono", "typeset_roles": {}}, "roboto"),
+        ({"typeset_faces": "droid", "typeset_family": "roboto"}, "roboto"),
     ],
 )
-def test_the_old_switch_is_read_only_when_it_is_true_and_no_preset_is_named(
+def test_the_old_keys_are_read_only_when_the_file_says_nothing_newer(
     tmp_path: Path, saved: dict[str, object], faces: str
 ) -> None:
     """
-    A named preset wins over the old key, a preset that is not a string is no
-    preset, and a name this build does not know is kept for the build that does.
+    A named preset wins over the older switch, a preset that is not a string is no
+    preset, and a name that was never a preset is the defaults.
     """
     path = tmp_path / "settings.json"
     path.write_text(json.dumps(saved))
-    assert load(path).typeset_faces == faces
+    got = load(path)
+    assert (got.typeset_family, got.typeset_roles) == LEGACY_FACES[faces]
+
+
+def test_hand_edited_role_choices_and_pane_switches_lose_only_what_is_malformed(
+    tmp_path: Path,
+) -> None:
+    """
+    ``"false"`` is truthy and ``true`` is an integer to Python. A pane switched off
+    by a string would be on, and a step of ``true`` would be one pixel.
+    """
+    path = tmp_path / "settings.json"
+    path.write_text(
+        json.dumps(
+            {
+                "typeset_roles": {
+                    "prose": {"slot": "monospace", "step": True},
+                    "heading": {"slot": 7, "step": 1},
+                    "table": "monospace",
+                    "from-a-later-build": {"slot": "serif"},
+                },
+                "typeset_panes": {"context": False, "board": "false", "brief": 0},
+            }
+        )
+    )
+    got = load(path)
+    assert got.typeset_roles == (
+        RoleChoice("from-a-later-build", "serif", None),
+        RoleChoice("heading", None, 1),
+        RoleChoice("prose", "monospace", None),
+    )
+    assert got.typeset_panes == (("context", False),)
+
+    path.write_text(json.dumps({"typeset_roles": ["prose"], "typeset_panes": "off"}))
+    assert load(path) == Settings()
 
 
 def test_a_text_switch_that_is_not_a_boolean_falls_back_to_its_default(tmp_path: Path) -> None:
