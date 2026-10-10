@@ -1,4 +1,4 @@
-.PHONY: help bootstrap probe smoke run test lint format format-file typecheck typecheck-all verify check clean
+.PHONY: help bootstrap worktree probe smoke run test lint format format-file typecheck typecheck-all verify check clean
 
 PY  := .venv/bin/python
 PIP := .venv/bin/python -m pip
@@ -29,8 +29,13 @@ help:              ## this list
 	@echo
 	@echo "display: HEADLESS=$(HEADLESS)$(if $(GUI), — window targets run under: $(GUI))"
 
+# The second line is for a worktree made by `make worktree`, whose .venv borrows the
+# packages of the checkout it was made from. It fails once this tree's pyproject.toml
+# declares different dependencies from that checkout's, which is the one case where a
+# borrowed environment gives wrong answers quietly. Silent for an installed .venv.
 venv-check:
 	@test -x $(PY) || { echo "no ./.venv — run 'make bootstrap' first"; exit 1; }
+	@$(PY) scripts/worktree.py check
 
 gui-check:
 ifeq ($(HEADLESS),1)
@@ -43,6 +48,15 @@ endif
 
 bootstrap:         ## probe, create .venv, install, smoke test
 	./bootstrap.sh
+
+# A sibling checkout on BRANCH with a .venv that borrows this one's packages, so it
+# costs no install. BASE defaults to this checkout's HEAD. scripts/worktree.py says
+# what borrowing costs and when to run ./bootstrap.sh there instead.
+BRANCH ?=
+BASE   ?=
+worktree: venv-check   ## a linked worktree for a feature: BRANCH=name [BASE=ref]
+	@test -n "$(BRANCH)" || { echo "usage: make worktree BRANCH=name [BASE=ref]"; exit 2; }
+	@$(PY) scripts/worktree.py create "$(BRANCH)" $(if $(BASE),--base "$(BASE)")
 
 probe:             ## stdlib-only environment diagnosis (no venv needed)
 	@python3 scripts/probe.py --stage pre

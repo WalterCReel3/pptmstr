@@ -1,7 +1,8 @@
 # A session can run in its own git worktree
 
 **Dated:** 2026-10-07 · **Status:** scope for work not started; eight operator decisions, the
-rest recommendation or open — nothing built except the probe script · **Found by:** operator
+rest recommendation or open — nothing built except the probe script and, from 2026-10-10,
+the operator's bootstrap script (D6) · **Found by:** operator
 request — "multiple sessions/agent-teams can work independently on different features that could
 normally be merged via normal git PRs" · **Sibling:**
 [`2026-10-07-a-session-can-continue-under-a-different-mode.md`](2026-10-07-a-session-can-continue-under-a-different-mode.md),
@@ -324,6 +325,25 @@ the sibling record is about making that sequence one action.
 One thing the CLI already does that removes part of the need: the main checkout's
 `.claude/settings.local.json` is read from any linked worktree and wins over a local copy (n=1,
 one scalar key), and auto-memory is keyed on the main repository, so worktrees share it.
+
+**Amended 2026-10-10 — the operator's own bootstrap borrows an environment (D).** The operator:
+"Ideally composite would be fine in _almost_ all instances since worktree forking _should_ be off
+of main or a shallow stack of work." `scripts/worktree.py` (`make worktree BRANCH=…`) is that, for
+this repository and run by hand: a worktree at D4's placement whose `.venv` holds no packages and
+names the launching checkout's site-packages in one `.pth` file. It is the operator's tool and not
+the launcher's — nothing in `pptmstr/` calls it, and D3, the notice and the (R) derivation above
+are untouched by it.
+
+The instance outside "almost" is a branch that changes its dependencies: it would be tested
+against the source's, with nothing to say so. `worktree.py check` compares the dependency tables
+of the two `pyproject.toml` files and fails on a difference; `make`'s `venv-check` runs it. Run on
+2026-10-10: the guard fired on an edited requirement, a worktree made from a worktree imported its
+own tree and linted, and `make check` passed in `enhanced-sessions` on an environment the script
+built. Not run: `make run` or any window from a borrowed environment, and any session, contained
+or not, launched into one. What borrowing costs otherwise is in the script's docstring.
+
+`enhanced-sessions` is the first tree at D4's placement, `…/pptmstr-worktrees/enhanced-sessions`,
+on a branch with no prefix.
 
 ## D7 — Fork is left exactly as it is (D)
 
