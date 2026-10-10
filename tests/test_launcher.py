@@ -408,7 +408,7 @@ def test_a_pick_the_offered_list_does_not_contain_survives_to_the_spec() -> None
     the session as chosen. An index could not express this: there is no position for a
     model the list does not hold, so the pick would be silently rewritten to one it does.
     """
-    pinned = "claude-opus-5-5"
+    pinned = "claude-a-model-no-list-offers"
     assert pinned not in FALLBACK_MODELS
 
     assert LauncherState(task="t", model=pinned).spec().model == pinned
@@ -2011,7 +2011,7 @@ def test_a_pinned_model_the_offered_list_lacks_still_draws(
     Reachable today from ``--model`` and, once a probe has run, from any pick made
     while the probed list was live and offered again after it failed.
     """
-    pinned = "claude-opus-5-5"
+    pinned = "claude-a-model-no-list-offers"
     assert pinned not in FALLBACK_MODELS
 
     state = LauncherState(task="t", model=pinned)

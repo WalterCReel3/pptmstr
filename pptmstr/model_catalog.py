@@ -67,6 +67,7 @@ __all__ = [
 # newest-first to match what a successful probe returns, so the list does not visibly
 # reshuffle when one arrives.
 FALLBACK_MODELS: tuple[str, ...] = (
+    "claude-opus-5-5",
     "claude-opus-5",
     "claude-sonnet-5",
     "claude-fable-5",
