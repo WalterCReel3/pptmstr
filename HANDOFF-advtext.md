@@ -713,24 +713,34 @@ followed (pptmstr's builder, 2026-10-12, commit `029cbc8`, advtext `38f5fac`).
 | P32 | **A reader option for backslash escapes set as written**, and a supported way for a host to mark punctuation it wants taken literally. Belongs with P7. | By a run, settled and streamed: `C:\_work\*.log` was set as `C:_work*.log`, `foo\.py` as `foo.py`, `\\server` as `\server`. An approver reading a path or a regex in a concern must see the backslashes. pptmstr now replaces the reader's `escape` rule in its private reach, and, because its own shaping used a backslash to protect punctuation, marks that punctuation with U+FDD0 instead: an in-band mark it would rather not own. Underscores were checked at the same time and are set as written (`__main__.py`, `__all__`). Not reached: `\|` in a table cell, a backslash in a link's destination. | open |
 | P33 | **`reset()` should not need the environment it was first given.** | pptmstr finds its own checkout's library, sets the two variables for its process, asks `typesetter.module()` once, and then removes them, because every agent session it launches would otherwise inherit them and run another worktree's tests on this checkout's library (reproduced: a child process had both). Read, not run: advtext asks the variables again when its "tried" state is reset, so a "try again" (P18) after that would find no library. Either the route taken is remembered across a reset, or a host can hand the pair to `module()` without the environment. | open |
 
-## Work in hand
+## Where pptmstr stands (2026-10-12, at commit `56ff0bf`)
 
-- **The seam**, now the package `pptmstr/ui/typeset/` on `advtext.typesetter`
-  (commit `d9bd081`): every pane still draws with pptmstr's own renderer and
-  the reason is one sentence in the Text menu. Panes are switched over one at
-  a time, each after a run. `brief_pane`, the settings dialog's samples and
-  `board_pane` are over (commit `455a450`): their markdown through the
-  library, anything that is not markdown still ImGui's (P21). `detail` and
-  `inbox` are over for their markdown: a deliverable, a turn settled or still
-  arriving (a stream), a question's prose and preview, and the prose argument
-  of a parked call. An approval's diff, its other arguments and an error are
-  pptmstr's own text in both, by the measurement above. `review` holds an
-  approve only over a body the library stopped under. `transcript_pane` is
-  over for the markdown runs of
-  its TYPESET mode, with every other kind of run ImGui's; RICH is still the
-  mode the log starts in, by an agent's decision recorded on
-  `transcript_pane.DEFAULT_MODE`. **Every pane is now adopted**, and each keeps
-  its own renderer (P6).
+- **Every pane sets its markdown through the library** when the library can
+  draw, and draws with its own renderer when it cannot, with one sentence in
+  the Text menu saying why. What is not markdown, and everything whose
+  columns are content (tool output, arguments, errors, an approval's diff),
+  is ImGui's (P21, P22). `typeset.diff()` is built and tested and no pane
+  calls it. No renderer of pptmstr's was deleted (P6).
+- **The gate**, by the last builder's run after all writes had stopped:
+  with the pair, lint and typecheck clean, 3550 passed, 0 skipped, 24 strict
+  xfails (21 under P9, P10, P11, P12, P13, P15, P16, P17, P19, P21; 3 that
+  predate this work), 2 failed; without the pair 3148 passed, 423 skipped for
+  want of the library, 3 xfails, 2 failed. The 2 are `tests/test_launcher.py`'s
+  and come from an uncommitted line in `pptmstr/model_catalog.py` that is not
+  this session's (an export of `HEAD` passes them).
+- **The application was run** under Xvfb and llvmpipe, 720 frames, with the
+  pair (the typeset branch taken in all five panes on every frame) and without
+  (none taken), exit 0 both ways. **Nobody has looked at a picture of the new
+  core's text in pptmstr.**
+- **Built against** advtext `38f5fac` and imtypeset `c9f8902`, stand-in
+  headers, from local repositories; nothing was fetched from GitHub, and
+  `bootstrap.sh` has not been run end to end. The wheel under the library is
+  the advtext lead's venv's (see the state at the top).
+- **Re-read last** with advtext's checkout at `04a51c8` ("Move the pin to
+  imtypeset 03b5cd4") and its remote-tracking ref still `38f5fac`. pptmstr has
+  tried `3428142` (above) and nothing later; `03b5cd4` has not been built here.
+- **Not started**: the lock a Mac install is made from, an updater, CI,
+  anything on a Mac.
 
 ## Agent decisions, awaiting the user
 
