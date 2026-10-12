@@ -277,8 +277,17 @@ whole pixels per role.
 
 ### A4 — every advtext name pptmstr uses
 
-Kept current here as the adoption lands. Today the seam uses names that no
-longer exist; the list starts when the first pane is re-adopted.
+Current at pptmstr commit `d9bd081` (the seam's foundation; no pane typesets
+yet). Held by `test_the_seam_imports_the_librarys_facade_and_one_named_module_past_it`.
+
+- From `advtext.__all__`: `Face`, `register_font`, `unregister_font`,
+  `registered_fonts`, `Diff` (with `Diff.from_texts`, `Diff.from_unified`, and
+  the fields of its files, hunks and rows).
+- Past `__all__`, one module: `advtext.typesetter`, for `module`,
+  `load_fonts`, `ready`, `reason`, `trouble`, `unload`, `LIBRARY_VARIABLE`.
+- In `scripts/measure_typeset_advances.py` only: `TypesetView` (`span_rects`,
+  `set_lines`), `Theme.at_pixel_height`, `Faces`, `Align`, `Spacing`,
+  `advtext.description.FACE_ROLES`, and `typesetter.module().font_atlas_index`.
 
 ### A5 — what pptmstr needs that is not offered
 
@@ -319,7 +328,7 @@ build confirms or withdraws one.
 | P14 | **The `ImFont` the library draws a face with, as a supported name.** | Board row titles and key labels are native ImGui lines set in the typeset face at the text's size (A3). Without it they are a second, differently hinted copy beside typeset text, or the UI font. Tests: `test_a_native_line_in_a_typeset_face_is_the_texts_size`. | open |
 | P15 | **A rule under every row of a table as an option**, and the header's rule not costing a line (your H8). | Rows of wrapped cells cannot be told from a cell's own lines. Test: `test_every_row_of_a_table_has_a_rule_under_it_where_the_row_ends`. | open |
 | P16 | **Whether a diff's file header fit its view, or its text, as a public answer.** | "May not apply" and the end of a long path are cut at the view's edge; pptmstr says them again above the view when they did not fit. Test: `test_a_diff_header_too_long_for_its_view_is_said_above_it_warning_first`. pptmstr will print it above always meanwhile. | open |
-| P17 | **What `typesetter.load_fonts()` promises when called after start-up**, between frames. | The operator turns typeset text on, and changes the proportional family, from the settings dialog while sessions are open. Read: it remakes the library's context and closes every document, and its docstring places it in `load_additional_fonts`. Whether a later call is safe is stated nowhere pptmstr read. | open |
+| P17 | **What `typesetter.load_fonts()` promises when called after start-up**, between frames. **Sharpened by a run, 2026-10-12** (pptmstr's builder; the pinned wheel, a hello_imgui window under Xvfb, reloads in `pre_new_frame` at frames 5, 12 and 20 with `Face.PROSE` re-registered): it answered true each time, a view kept from before and a view made after both drew, exit 0; so the atlas does take fonts after `load_additional_fonts` has returned. **But each call leaves the previous context's 7 fonts on the atlas** (8, 15, 22, 29 entries; 50 after six headless reloads). The request is now: a reload that does not grow the atlas. pptmstr reloads only when the proportional family changes. | The operator turns typeset text on, and changes the proportional family, from the settings dialog while sessions are open. Read: it remakes the library's context and closes every document, and its docstring places it in `load_additional_fonts`. Whether a later call is safe is stated nowhere pptmstr read. | open |
 | P18 | **A supported way back from `typesetter.disable()`**. | One provoked failure switches the library off for the rest of a test process; only the private `_forget()` undoes it. An operator-facing "try again" needs the same call. | open |
 | P19 | **A settled table at its natural widths**, as a stream holds it. | A table changes every column's width on the frame its stream is replaced by the settled view. Test: `test_a_table_that_fits_keeps_its_natural_widths_settled_as_it_had_streamed`. | open |
 
@@ -335,9 +344,29 @@ P21 to P23 follow from pptmstr's measurement of the new core (A2 above).
 | P22 | **A glyph is drawn where it was laid out, or the view answers hit tests, selection and marks from where it was drawn.** | In a 74-character fenced row at mono 16 a glyph is drawn up to 16.9 px (more than two characters) left of the rectangle `span_rects` gives for it, because the short steps come first. Not measured: where a selection highlight lands. If it follows layout, a selection in code is over the wrong characters by up to two. | open |
 | P23 | **Every word space one width when the theme says `Spacing.FRENCH`**, as laid out. | With `Theme.at_pixel_height(…, spacing=Spacing.FRENCH)`, one of 52 spaces on the mono page is laid out at 10.168 px against 7.626 (at 14, 16 and 20 px; none at 18). Either the theme's spacing does not reach the library or a sentence space survives it. | open |
 
+| # | request | the measurement behind it | state |
+|---|---|---|---|
+| P24 | **`typesetter.ready()` is false, and a view raises `TypesetUnavailable`, once the ImGui context the fonts were loaded in is gone**, whether or not the host called `unload()` first. | By a run (pptmstr's builder, 2026-10-12): destroy the ImGui context without `unload()`, keep a view, make a new context: `ready()` is still `True` and the kept view's `draw()` returns without raising, against a library context whose ImGui context no longer exists. Nothing detects it. With `unload()` first everything is as documented. pptmstr's gate now also compares the ImGui context the load was asked in, and its tests unload before every `destroy_context`; a host that forgets has no signal. | open |
+
+### Where the requests stand (2026-10-12)
+
+advtext answered P1 to P20 in `HANDOFF-pptmstr.md` at its commit `4b84ec8`:
+most accepted, P5, P9, P10 and P15 carried to imtypeset (H19, H22, H23, H24,
+H8), P20 done in `a6c81ed`. **None is closed here**: nothing accepted exists
+yet, and `a6c81ed` and `4b84ec8` are not pushed, so pptmstr stays on `38f5fac`,
+the last commit known to be on the remote branch (rule 4 of the channel). When
+advtext names a pushed commit carrying P8 and P7, pptmstr moves `advtext.ref`
+to it, rebuilds, and replaces its by-module import of the block types and its
+parked tests' reasons with the supported names. P21 to P24 were written after
+that answer.
+
 ## Work in hand
 
-- **The seam** (`pptmstr/ui/typeset.py`) re-adopted pane by pane.
+- **The seam**, now the package `pptmstr/ui/typeset/` on `advtext.typesetter`
+  (commit `d9bd081`): every pane still draws with pptmstr's own renderer and
+  the reason is one sentence in the Text menu. Panes are switched over one at
+  a time, each after a run: `brief_pane`, the settings previews and
+  `board_pane` first.
 
 ## Agent decisions, awaiting the user
 
