@@ -705,6 +705,14 @@ three-run turns, 400 for 3,199 lines.
 |---|---|---|---|
 | P31 | **A name pptmstr can require**: advtext (and imtypeset, your H3) installable by a requirement string that an installer resolves without a clone at a mutable place — a release artefact per tag with a hash, or an index entry under a name you hold. | `advtext` is unclaimed on PyPI and pptmstr cannot name it in `dependencies`: bare, it is whoever registers it; as a git reference, pip clones again over what a bootstrap installed and an offline or mirrored install fails. A wheel of pptmstr today declares no dependency on the library that sets its text. | open |
 
+P32 and P33 come from a review of the re-adopted panes and the fixes that
+followed (pptmstr's builder, 2026-10-12, commit `029cbc8`, advtext `38f5fac`).
+
+| # | request | the measurement behind it | state |
+|---|---|---|---|
+| P32 | **A reader option for backslash escapes set as written**, and a supported way for a host to mark punctuation it wants taken literally. Belongs with P7. | By a run, settled and streamed: `C:\_work\*.log` was set as `C:_work*.log`, `foo\.py` as `foo.py`, `\\server` as `\server`. An approver reading a path or a regex in a concern must see the backslashes. pptmstr now replaces the reader's `escape` rule in its private reach, and, because its own shaping used a backslash to protect punctuation, marks that punctuation with U+FDD0 instead: an in-band mark it would rather not own. Underscores were checked at the same time and are set as written (`__main__.py`, `__all__`). Not reached: `\|` in a table cell, a backslash in a link's destination. | open |
+| P33 | **`reset()` should not need the environment it was first given.** | pptmstr finds its own checkout's library, sets the two variables for its process, asks `typesetter.module()` once, and then removes them, because every agent session it launches would otherwise inherit them and run another worktree's tests on this checkout's library (reproduced: a child process had both). Read, not run: advtext asks the variables again when its "tried" state is reset, so a "try again" (P18) after that would find no library. Either the route taken is remembered across a reset, or a host can hand the pair to `module()` without the environment. | open |
+
 ## Work in hand
 
 - **The seam**, now the package `pptmstr/ui/typeset/` on `advtext.typesetter`
