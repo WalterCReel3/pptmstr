@@ -99,14 +99,98 @@ somebody runs it where the remote is reachable.
 
 ### A2 — hinting, advances and the atlas, as requirements
 
-In progress; the record is `planning/2026-10-08-an-advance-belongs-to-the-rasteriser.md`
-and commit `a0ce752` ("pptmstr keeps the hinted atlas, by the operator's
-eye"). To be restated here as measurable requirements, not as the patch.
+**Standing of what follows.** Restated by pptmstr's reviewer on 2026-10-11
+**from reading**; nothing was re-run, and nothing below can be re-run today:
+`scripts/compare_metrics.py` imports `draw` from advtext (gone), the
+`pen_rules.py --hinting` instrument exists only inside
+`planning/patches/advtext-hinting.patch` (against the deleted core), and the
+pins in `tests/test_typeset.py` are among the errors above. All figures are on
+`imgui-bundle` 1.92.900, FreeType 2.13.3, density 1, no GPU.
+
+- **(G)** `shots/metrics/gaps.txt`: output of `scripts/compare_metrics.py`, by
+  an earlier pptmstr builder, under Xvfb and llvmpipe, loader flags 0. It reads
+  `add_text` arguments and vertex-buffer quads, not pixels. **The file is
+  untracked** (`/shots/` is ignored); that it came from the script as committed
+  cannot be shown.
+- **(P)** `planning/2026-10-08-an-advance-belongs-to-the-rasteriser.md` §1 and
+  §2, by pptmstr's hinting builder on 2026-10-08: headless, advtext's
+  `demo/sample.md` at 700 px and a 16 px pixel height.
+
+In (G), column A is layout from the font file, B is layout from ImGui's baked
+advances (what this branch shipped), D is the file with unhinted faces, C is
+ImGui's own text calls.
+
+| # | what must be true of text on screen | how it is measured | what this branch measured |
+|---|---|---|---|
+| R1 | A run of glyphs with no space in it is drawn as wide as it was laid out. | First pen to last pen, drawn less laid out, per run of two or more glyphs and per line. | (G) B: 0.00 px mean and worst, every face and size. (G) A, Inconsolata 16, a 40-character ruler: laid 297.43, drawn 312.00, +14.57 px. (P) layout from the file: 0.52 px mean, 10.23 px worst (a fenced code line), 93 of 824 words moved by 1 px or more; from the atlas 0.003 / 0.17 px and 0 words. Turning hinting off changed neither. |
+| R2 | The step between adjacent glyphs is the advance layout used, plus the kern. | Drawn step against `ImFontBaked.get_char_advance` of the font drawn from, and against layout's advance. | (G) B: 442 of 442 steps for Inconsolata at 14 to 20 px, 433 of 442 for Roboto 16 (the nine are not broken out; presumably kerned pairs). (G) A, Roboto 16: 376 of 442. (P) from the file: 197 of 207 advances and 793 of 3453 steps off by more than half a pixel; from the atlas 0 and 0. |
+| R3 | Word spaces on a line of one face are drawn at one width. | Pen to pen across each space less the baked advance of the glyph before it. | (G) B: 8.0 px every space in Inconsolata 16, 3.0 px in Roboto 16, sd 0.00. (G) A: 4.0 to 7.0 px (sd 0.81) and 1.0 to 5.0 px (sd 0.75); one space of 66 narrower than a pixel. |
+| R4 | N characters of the monospace face occupy N times one constant, on every row. | Distinct steps between columns over fenced rows; largest disagreement between rows at one column. | (G) A, B and D at every size: one distinct step (8 px at 16), 0 px between rows. Laid-out pitch 8.000 in B, 7.63 in A and D. |
+| R5 | Typeset monospace lines up with ImGui-drawn monospace at the same pixel height from the same x. pptmstr sets native ImGui labels and chrome beside typeset text, and `pptmstr/ui/inbox.py`'s column constants assume the monospace advance. | Pen of character k typeset, less pen of character k through `ImDrawList.add_text` in the hinted face. | (G) B at 16 px: the 40th character of a ruler is 312 px from the first, drawn, laid out and ImGui's all equal. 0.00 px at characters 1, 10, 20, 30, 40, 74 of a code line at 14 to 20 px. |
+| R6 | Every glyph is on the pixel grid and no bitmap is resampled. | Fractional pens sent; quad corners off the grid; quad width against bitmap width. | (G), every column: 0 of 525 pens fractional, 0 quads off the grid, 0 resampled. (P): under every hinted loader mode every baked advance is a whole pixel (Inconsolata 7 / 7 / 8 / 8 / 9 / 10 at 14 / 15 / 16 / 17 / 18 / 20 px; the file says 7.63 at 16). |
+
+**R7, what "by the operator's eye" chose** (commit `a0ce752`; from the
+planning record §10): shown three pictures of the same **prose** (hinted,
+light, file), the operator said "I think I prefer hinted". That set
+`typeset.METRICS = "hinted"`: FreeType's default hinter, layout from ImGui's
+baked advances, kerns rounded to the pixel. All three candidates were drawn by
+the old rule. No monospace or column picture is recorded as shown for it, and
+the record says it settles pptmstr's constant, not advtext's default.
+
+**Where the new core is known to differ** (read from imtypeset's sources and
+plan; nothing measured in pptmstr): layout is from the font's own metrics
+(`docs/advtext-rework-plan.md` §5.1: Inconsolata at 16 is 7.626 px against
+ImGui's 8.01, "a column of code in the pane no longer lines up with
+ImGui-drawn monospace beside it"; this branch read ImGui's as 8 exactly). The
+draw rule rounds gaps to whole pixels and then holds a word to its laid-out
+width within 0.5 px. The library adds its own copy of each face. Inferred from
+those, not measured: R1 would hold within 0.5 px; a 40-character Inconsolata
+run at 16 px would be 297 or 298 px, a mix of 7 and 8 px steps, 14 to 15 px
+short of ImGui's 312, so **R4 and R5 would not hold, nor R2 against the baked
+advance.**
+
+**Unknown:** R1 to R6 on the new core in pptmstr (pptmstr is measuring: see
+"Work in hand"); whether a fenced code row is one word under the width bound;
+anything at density 2, on a GPU, or on a Mac. The operator has not been shown
+the new core's text.
 
 ### A3 — fonts
 
-In progress; the record is `planning/2026-10-07-which-fonts-ship.md` and
-`planning/2026-10-07-font-survey.md`.
+From reading `pptmstr/theme.py`, `pptmstr/ui/typeset.py` and advtext's
+`fontlib.py`; file sizes from `planning/2026-10-07-font-survey.md`.
+
+| file | where it is | used for |
+|---|---|---|
+| `Inconsolata-Medium.ttf` | the wheel, `imgui_bundle/assets/fonts` | the chrome's `Fonts[0]`, with Font Awesome 6 merged; and `Face.CODE` for typeset text as a separate atlas entry without icons |
+| `Inconsolata-Bold.ttf` (+ `OFL.txt`) | **vendored**, `pptmstr/assets/fonts`; the only font pptmstr ships itself | chrome bold; `Face.CODE_BOLD` through `register_font` |
+| `Roboto-{Regular,Bold,RegularItalic,BoldItalic}.ttf` | the wheel | the four proportional faces |
+| `DroidSans.ttf` | the wheel | optional upright prose |
+| `latinmodern-math.otf` | the wheel | glyphs Roboto lacks (`→`, `✓`); pptmstr does not parse mathematics |
+
+Text is configured by role: prose, headings, tables and labels take the
+proportional or the monospace slot; inline code, code blocks, diffs, tool
+output and arguments are monospace only ("their columns are content"). Body
+size is the UI font's live size (16 px by default), with a step of −2 to +4
+whole pixels per role.
+
+- **Same atlas entries as the rest of the UI: not required**, and not so
+  today (the seam loads a second Inconsolata without icons).
+- **Same file for monospace: required**, as a consequence of R4 and R5.
+- **The chrome's font cannot come from the library** as the library loads
+  faces today: it must be `Fonts[0]`, carries merged Font Awesome glyphs, and
+  is loaded through hello_imgui for the runner's DPI handling.
+- **pptmstr needs an `ImFont` for a typeset face** for native ImGui lines set
+  in the role's face (`Role.LABEL`). On the new core that is a second load by
+  pptmstr or the library's entry through `font_atlas_index`; whether native
+  text drawn from the library's entry (its character map is rewritten) matches
+  is unverified.
+- **The vendored bold must be registered before `typesetter.load_fonts`**:
+  `advtext.fontlib` otherwise backs `Face.CODE_BOLD` with Roboto Bold and bold
+  code stops being monospace.
+- A packaged pptmstr must carry the wheel's `assets/fonts` (H20) and its own
+  `pptmstr/assets/fonts`.
+- Cost of a second copy of each face in the atlas: **unknown**, no number on
+  record for pptmstr.
 
 ### A4 — every advtext name pptmstr uses
 
