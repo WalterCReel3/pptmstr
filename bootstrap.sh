@@ -25,8 +25,11 @@
 # ADVTEXT_PIP_ARGS="--no-deps --no-index --no-build-isolation" is what it takes.
 #
 # Fetching needs git, and bootstrap stops without advtext. The library also
-# needs a C++ compiler and Linux; without those bootstrap says so and carries
-# on, because pptmstr runs without the library and typeset panes fall back.
+# needs a C++ compiler, Linux, and the Dear ImGui headers of the wheel's own
+# fork, fetched from github.com/pthom/imgui; without any of those bootstrap says
+# so and carries on, because pptmstr runs without the library and typeset panes
+# fall back. IMTYPESET_BUNDLE_HEADERS=stand-in builds against upstream Dear
+# ImGui's headers instead, and `pptmstr --version` then says so.
 #
 # Usage: ./bootstrap.sh [--no-window] [--python PATH]
 set -euo pipefail

@@ -3,4 +3,4 @@
 # is gated against (its HANDOFF-imtypeset.md, "What advtext consumes today").
 # One ref, on the first line that is neither blank nor a comment: a full 40-digit hash.
 # Read by scripts/typeset_deps.py. A bump is: this line, HANDOFF-advtext.md, `make deps`, the gate.
-c9f8902a67adf00a18426876d5983617b7d1408c
+2fd705e2bc358c7dbfda1eb60bd9b71609869e1d

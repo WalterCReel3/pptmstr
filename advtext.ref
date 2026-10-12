@@ -2,4 +2,4 @@
 # experimental/imtypeset-adoption of https://github.com/WalterCReel3/imgui-adv-text.
 # One ref, on the first line that is neither blank nor a comment: a full 40-digit hash.
 # Read by scripts/typeset_deps.py. A bump is: this line, HANDOFF-advtext.md, `make deps`, the gate.
-38f5fac1172b48e7b57f91428957c51591d38105
+68eb18bad6a1b5d0ddf2470f975295b971babf99

@@ -98,7 +98,9 @@ bootstrap:         ## probe, create .venv, install, smoke test
 # The part of bootstrap that pins advtext and builds the imtypeset library, on its
 # own: after a bump of advtext.ref or imtypeset.ref, or once whatever stopped the
 # library building is dealt with. ADVTEXT_REPO, IMTYPESET_REPO, IMGUI_BUNDLE_REPO
-# and IMGUI_REPO name where to fetch from (scripts/typeset_deps.py lists them);
+# and IMGUI_REPO name where to fetch from (scripts/typeset_deps.py lists them),
+# and IMTYPESET_BUNDLE_HEADERS=stand-in asks for upstream Dear ImGui's headers
+# where the wheel's fork cannot be fetched (BUILT-FROM records which were used);
 # ADVTEXT_PIP_ARGS is added to the install, e.g. "--no-deps --no-index
 # --no-build-isolation" where no package index is reachable -- which works in a
 # .venv that already holds advtext's build backend and what advtext requires.

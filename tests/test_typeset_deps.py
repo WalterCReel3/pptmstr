@@ -339,12 +339,26 @@ def test_advtext_that_cannot_be_fetched_does_fail_the_caller(
 
 # --- the build, around a stand-in for imtypeset's script --------------------------
 
+# The shape of imtypeset's script where `build_library` meets it: which headers
+# are asked for by its own variable, the fork's unless that says otherwise and
+# never one in place of the other; HEADERS once it has them, BUILD once linked.
 FAKE_BUILD = """\
 #!/bin/sh
+out="$IMTYPESET_BUNDLE_OUT"
+kind="${IMTYPESET_BUNDLE_HEADERS:-fork}"
+: > "$out/HEADERS"
+if [ "$kind" = fork ]; then
+    [ -n "${FAKE_FORK:-}" ] || { echo "the fork cannot be fetched" >&2; exit 1; }
+else
+    [ -d "${IMTYPESET_IMGUI_CLONE:-}" ] || { echo "no upstream clone" >&2; exit 1; }
+fi
+printf 'dir=%s\\nlabel=%s:fake-headers\\n' "$out" "$kind" > "$out/HEADERS"
 [ -z "${FAKE_FAIL:-}" ] || exit 3
-: > "$IMTYPESET_BUNDLE_OUT/libimtypeset_bundle.so"
-: > "$IMTYPESET_BUNDLE_OUT/libimtypeset_bundle.so.gate"
-echo "built $IMTYPESET_BUNDLE_OUT/libimtypeset_bundle.so (stand-in:fake-headers)"
+: > "$out/libimtypeset_bundle.so"
+echo attested > "$out/libimtypeset_bundle.so.attestation.json"
+printf 'library=%s\\nheaders=%s:fake-headers\\nbind=link\\n' \\
+    "$out/libimtypeset_bundle.so" "${FAKE_LABEL:-$kind}" > "$out/BUILD"
+echo "built $out/libimtypeset_bundle.so ($kind:fake-headers, bind=link)"
 """
 
 FAKE_PACKAGE = """\
@@ -378,8 +392,9 @@ def fake_imtypeset(
     monkeypatch.setenv("IMGUI_BUNDLE_REPO", str(headers))
     monkeypatch.setenv("IMGUI_REPO", str(headers))
     monkeypatch.setenv("CXX", "sh")
-    monkeypatch.delenv("FAKE_FAIL", raising=False)
-    monkeypatch.delenv("FAKE_REFUSE", raising=False)
+    monkeypatch.setenv("IMTYPESET_BUNDLE_HEADERS", "stand-in")
+    for variable in ("FAKE_FAIL", "FAKE_REFUSE", "FAKE_FORK", "FAKE_LABEL"):
+        monkeypatch.delenv(variable, raising=False)
     monkeypatch.setattr(deps.platform, "system", lambda: "Linux")
     monkeypatch.setattr(deps, "wheel_facts", lambda: ("1.0", "9.9", "/wheel/_imgui_bundle.so"))
     monkeypatch.setattr(deps, "read_ref", lambda path: commit)
@@ -397,13 +412,97 @@ def test_a_build_installs_a_whole_pair_and_a_second_one_replaces_it(
         pair = out / "imtypeset"
         assert (pair / deps.LIBRARY_NAME).is_file()
         assert (pair / "pysnap" / "imtypeset" / "__init__.py").is_file()
-        assert not (pair / (deps.LIBRARY_NAME + ".gate")).exists()
+        # The build's record that the library was accepted goes where the library goes.
+        assert (pair / (deps.LIBRARY_NAME + ".attestation.json")).read_text() == "attested\n"
         assert not (out / "imtypeset.building").exists()
         built_from = (pair / "BUILT-FROM").read_text(encoding="utf-8")
         assert f"commit: {fake_imtypeset}\n" in built_from
         assert "headers: stand-in:fake-headers\n" in built_from
+        assert "bind: link\n" in built_from
         assert f"for: {sys.executable}\n" in built_from
         assert "module: /wheel/_imgui_bundle.so\n" in built_from
+
+
+@needs_git
+def test_the_forks_headers_are_asked_for_unless_the_stand_in_is_named(
+    tmp_path: Path,
+    fake_imtypeset: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    out = tmp_path / "deps"
+    monkeypatch.delenv("IMTYPESET_BUNDLE_HEADERS")
+    fetch_tag, read = deps.fetch_tag, []
+
+    def recorded(source: object, tag: str, clone: Path) -> Path:
+        read.append(source)
+        return fetch_tag(source, tag, clone)
+
+    monkeypatch.setattr(deps, "fetch_tag", recorded)
+
+    assert deps.main(["library", "--deps", str(out)]) == 0
+
+    # The fork could not be had, and no library built against other headers stands in.
+    assert not (out / "imtypeset").exists()
+    err = capsys.readouterr().err
+    assert "NOT built" in err and "fall back" in err
+    assert "IMTYPESET_BUNDLE_HEADERS=stand-in" in err and "IMTYPESET_IMGUI_FORK_SOURCE=" in err
+    assert "status 1" in err and "status 3" not in err
+
+    monkeypatch.setenv("FAKE_FORK", "1")
+    assert deps.build_library(out) == "fork:fake-headers"
+    assert "headers: fork:fake-headers\n" in (out / "imtypeset" / "BUILT-FROM").read_text()
+    # Upstream is the stand-in's source: a build against the fork never waits on it.
+    assert read == [deps.IMGUI_BUNDLE, deps.IMGUI_BUNDLE]
+
+
+@needs_git
+def test_a_build_that_fails_once_it_has_headers_is_not_called_a_want_of_headers(
+    tmp_path: Path,
+    fake_imtypeset: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("FAKE_FAIL", "1")
+    assert deps.main(["library", "--deps", str(tmp_path / "deps")]) == 0
+    err = capsys.readouterr().err
+    assert "status 3" in err and "IMTYPESET_BUNDLE_HEADERS" not in err
+
+
+@needs_git
+def test_the_stand_in_that_cannot_be_had_names_its_own_repository(
+    tmp_path: Path,
+    fake_imtypeset: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(deps, "fetch_tag", lambda source, tag, clone: tmp_path / "not-there")
+    assert deps.main(["library", "--deps", str(tmp_path / "deps")]) == 0
+    err = capsys.readouterr().err
+    assert "NOT built" in err and "IMGUI_REPO=" in err
+    assert "IMTYPESET_IMGUI_FORK_SOURCE" not in err
+
+
+@needs_git
+@pytest.mark.parametrize(
+    ("variable", "value", "said"),
+    [
+        ("IMTYPESET_BUNDLE_HEADERS", "standin", "'fork' or 'stand-in', not 'standin'"),
+        ("FAKE_LABEL", "fork", "stand-in headers were asked for"),
+    ],
+)
+def test_headers_that_are_not_the_ones_asked_for_are_never_recorded_as_them(
+    tmp_path: Path,
+    fake_imtypeset: str,
+    monkeypatch: pytest.MonkeyPatch,
+    variable: str,
+    value: str,
+    said: str,
+) -> None:
+    monkeypatch.setenv(variable, value)
+    with pytest.raises(deps.DepsError, match=said):
+        deps.build_library(tmp_path / "deps")
+    assert not (tmp_path / "deps" / "imtypeset").exists()
 
 
 @needs_git

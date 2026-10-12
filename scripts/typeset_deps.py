@@ -14,6 +14,10 @@ Stdlib only, and run by the interpreter the result is for (`.venv/bin/python`):
         libimtypeset_bundle.so    IMTYPESET_LIBRARY
         pysnap/                   IMTYPESET_PYTHON (holds the `imtypeset` package)
         BUILT-FROM                what it was built from, and against which headers
+        libimtypeset_bundle.so.attestation.json
+                                  the build's record that its full probe accepted this
+                                  library beside this wheel, by the content of both
+                                  files; `import imtypeset` holds the library to it
 
 Three steps that make it, because the install between the first two belongs to
 the caller, which knows whether the installer is pip or uv, and one that reads it:
@@ -35,13 +39,30 @@ GitHub by default:
     IMGUI_BUNDLE_REPO   https://github.com/pthom/imgui_bundle.git
     IMGUI_REPO          https://github.com/ocornut/imgui.git
 
-The last two are read by imtypeset's build script for Dear ImGui's headers,
-which the wheel does not ship. Either may instead name a local checkout, which
-is then read in place and not copied; that is the only way to the wheel's own
-(fork) headers, which the build script uses when the bundle checkout's
-`external/imgui/imgui` submodule is at the commit the wheel's tag pins. Fetched
-from a URL there is no submodule, so the headers are upstream Dear ImGui's as a
-stand-in. BUILT-FROM and the last line of the build say which.
+The last two are read by imtypeset's build script: the first for the bundle's
+ImGui configuration header, the second only when stand-in headers are asked
+for. Either may instead name a local checkout, which is then read in place and
+not copied.
+
+Which Dear ImGui headers the library is compiled against is imtypeset's own
+choice of two, and its two variables are passed through as they are set:
+
+    IMTYPESET_BUNDLE_HEADERS     fork (the default): the wheel's own headers,
+                                 from https://github.com/pthom/imgui.git at the
+                                 commit imtypeset records for the wheel's
+                                 version. The correct build. When they cannot
+                                 be fetched nothing is built: neither this
+                                 script nor imtypeset's substitutes others.
+                                 stand-in: upstream Dear ImGui's docking tag of
+                                 the same version, from IMGUI_REPO. Dear
+                                 ImGui's own layout check refuses such a
+                                 library and imtypeset accepts it on its field
+                                 probe alone.
+    IMTYPESET_IMGUI_FORK_SOURCE  another copy of the fork, a URL or a local
+                                 repository, in place of GitHub's.
+
+BUILT-FROM records which headers were used, `pptmstr --version` prints it, and
+so does the last line of the build.
 
 The library is linked against one installed `imgui-bundle` binary and is for
 that interpreter alone, which is why `pyproject.toml` pins the wheel exactly.
@@ -53,7 +74,6 @@ import argparse
 import importlib.util
 import os
 import platform
-import re
 import shutil
 import subprocess
 import sys
@@ -80,8 +100,14 @@ DEPS = ROOT / pairing.DEPS_DIR
 BUILD_SCRIPT = Path("python") / "host" / "build_bundle_library.sh"
 PACKAGE = Path("python") / "imtypeset"
 
-# The build script's closing line, the one place it names the headers it used.
-_BUILT = re.compile(r"^built .*\((?P<label>(?:fork|stand-in):[^)]*)\)\s*$")
+# imtypeset's own variables for which headers it compiles against, and what the
+# build script leaves in its output directory: HEADERS once it has headers
+# (`dir=`, `label=`), BUILD once it has linked (`headers=`, `bind=`, key=value).
+HEADERS_VARIABLE = "IMTYPESET_BUNDLE_HEADERS"
+FORK_VARIABLE = "IMTYPESET_IMGUI_FORK_SOURCE"
+FORK, STAND_IN = "fork", "stand-in"
+HEADERS_FILE = "HEADERS"
+BUILD_FILE = "BUILD"
 
 
 @dataclass(frozen=True, slots=True)
@@ -278,11 +304,10 @@ def wheel_facts() -> tuple[str, str, str]:
     return wheel, imgui, module
 
 
-def _run_build(command: list[str], env: dict[str, str]) -> tuple[int, str | None]:
+def _run_build(command: list[str], env: dict[str, str]) -> int:
     """
-    Run the build script with its output passed through; its status and headers label.
+    Run the build script with its output passed through, indented; its status.
     """
-    label: str | None = None
     with subprocess.Popen(
         command, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT
     ) as build:
@@ -290,10 +315,50 @@ def _run_build(command: list[str], env: dict[str, str]) -> tuple[int, str | None
         for line in build.stdout:
             sys.stdout.write("    " + line)
             sys.stdout.flush()
-            found = _BUILT.match(line)
-            if found:
-                label = found["label"]
-    return build.returncode, label
+    return build.returncode
+
+
+def _facts(path: Path) -> dict[str, str]:
+    """
+    The `key=value` lines of a file the build script wrote; empty when it is not there.
+    """
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return {}
+    return {key: value for key, equals, value in (line.partition("=") for line in lines) if equals}
+
+
+def headers_asked() -> str:
+    """
+    Which headers this build is to use: the fork's unless the variable names the stand-in.
+    """
+    asked = os.environ.get(HEADERS_VARIABLE) or FORK
+    if asked not in (FORK, STAND_IN):
+        raise DepsError(f"{HEADERS_VARIABLE} is '{FORK}' or '{STAND_IN}', not {asked!r}")
+    return asked
+
+
+def _no_headers(asked: str, status: int) -> str:
+    """
+    The sentence for a build that ended before it had headers, naming what would change it.
+    """
+    if asked == STAND_IN:
+        return (
+            f"the stand-in headers that {HEADERS_VARIABLE}={STAND_IN} asks for could not be "
+            f"had (imtypeset's build script ended with status {status}; its reason is above). "
+            f"{IMGUI.variable}=... names another copy of upstream Dear ImGui"
+        )
+    return (
+        f"the wheel's own Dear ImGui headers could not be had (imtypeset's build script ended "
+        f"with status {status}; its reason is above). They are the fork's, fetched from "
+        f"{os.environ.get(FORK_VARIABLE) or 'https://github.com/pthom/imgui.git'}, and nothing "
+        f"is put in their place unasked. Either {FORK_VARIABLE}=... names a copy of the fork "
+        f"that can be reached, a URL or a local repository; or {HEADERS_VARIABLE}={STAND_IN} "
+        f"builds against upstream Dear ImGui's headers instead, which Dear ImGui's own layout "
+        f"check refuses and imtypeset accepts on its field probe, and which BUILT-FROM records "
+        f"and `pptmstr --version` prints"
+    )
 
 
 def build_library(deps: Path) -> str:
@@ -312,6 +377,7 @@ def build_library(deps: Path) -> str:
     if shutil.which(cxx) is None:
         raise DepsError(f"there is no C++ compiler ({cxx} is not on PATH; CXX=... names another)")
 
+    asked = headers_asked()
     ref = read_ref(ROOT / "imtypeset.ref")
     wheel, imgui, module = wheel_facts()
     source = deps / "imtypeset-src"
@@ -320,7 +386,9 @@ def build_library(deps: Path) -> str:
         if not (source / needed).is_file():
             raise DepsError(f"imtypeset {ref} has no {needed}")
     bundle = fetch_tag(IMGUI_BUNDLE, f"v{wheel}", deps / "imgui_bundle")
-    upstream = fetch_tag(IMGUI, f"v{imgui}-docking", deps / "imgui")
+    # Upstream is the stand-in's source and nothing else's: a build against the
+    # fork neither needs it nor fails for want of it.
+    upstream = fetch_tag(IMGUI, f"v{imgui}-docking", deps / "imgui") if asked == STAND_IN else None
 
     stage = deps / "imtypeset.building"
     final = deps / "imtypeset"
@@ -331,14 +399,14 @@ def build_library(deps: Path) -> str:
         stage / "pysnap" / "imtypeset",
         ignore=shutil.ignore_patterns("__pycache__"),
     )
-    env = dict(
-        os.environ,
-        CXX=cxx,
-        IMTYPESET_BUNDLE_OUT=str(stage),
-        IMTYPESET_IMGUI_CLONE=str(upstream),
-    )
-    status, label = _run_build(["sh", str(source / BUILD_SCRIPT), str(bundle), sys.executable], env)
+    env = dict(os.environ, CXX=cxx, IMTYPESET_BUNDLE_OUT=str(stage))
+    env[HEADERS_VARIABLE] = asked
+    if upstream is not None:
+        env["IMTYPESET_IMGUI_CLONE"] = str(upstream)
+    status = _run_build(["sh", str(source / BUILD_SCRIPT), str(bundle), sys.executable], env)
     library = stage / LIBRARY_NAME
+    if status != 0 and "label" not in _facts(stage / HEADERS_FILE):
+        raise DepsError(_no_headers(asked, status))
     if status != 0 or not library.is_file():
         raise DepsError(
             f"imtypeset's build script ended with status {status} (its own output is above; "
@@ -363,10 +431,13 @@ def build_library(deps: Path) -> str:
     if loads.returncode != 0:
         detail = (loads.stderr.strip().splitlines() or ["no message"])[-1]
         raise DepsError(f"the library was built and its own package refuses it ({detail})")
-    # The gate's stamp names the library by its staging path.
-    (stage / (LIBRARY_NAME + ".gate")).unlink(missing_ok=True)
 
-    headers = label or "unknown (the build script did not say)"
+    built = _facts(stage / BUILD_FILE)
+    headers = built.get("headers") or "unknown (the build script did not say)"
+    if not headers.startswith(asked + ":"):
+        raise DepsError(
+            f"{asked} headers were asked for and the build script says it used {headers}"
+        )
     (stage / BUILT_FROM).write_text(
         f"imtypeset: {IMTYPESET.repo()}\n"
         f"commit: {ref}\n"
@@ -374,6 +445,7 @@ def build_library(deps: Path) -> str:
         f"wheel: imgui-bundle {wheel} (Dear ImGui {imgui})\n"
         f"module: {module}\n"
         f"headers: {headers}\n"
+        f"bind: {built.get('bind') or 'unknown'}\n"
         f"bundle: {bundle}\n"
         f"date: {datetime.now(UTC):%Y-%m-%dT%H:%M:%SZ}\n",
         encoding="utf-8",
@@ -453,8 +525,9 @@ def step_library(deps: Path) -> int:
     kind = (
         "the wheel's own Dear ImGui headers (the fork)"
         if headers.startswith("fork:")
-        else "upstream Dear ImGui's headers as a STAND-IN for the wheel's fork, which Dear "
-        "ImGui's own layout check refuses and imtypeset accepts on its field probe"
+        else f"upstream Dear ImGui's headers as a STAND-IN for the wheel's fork, as "
+        f"{HEADERS_VARIABLE}={STAND_IN} asked, which Dear ImGui's own layout check refuses "
+        f"and imtypeset accepts on its field probe"
     )
     print(f"imtypeset built against {headers}: {kind}.")
     for line in (final / BUILT_FROM).read_text(encoding="utf-8").splitlines():
