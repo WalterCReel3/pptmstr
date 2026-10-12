@@ -41,14 +41,16 @@ pane is drawn in a ``--width`` x ``--height`` window.
 and ended under. Compare rows of one run with each other, or two runs taken
 back to back on the same machine.
 
-**Which groups run through the seam.** ``board``, ``brief``, ``settings`` (the
-dialog's samples), ``detail`` and ``inbox``: those are the panes whose typeset
-branch is built on the library as it is now, and ``--typeset on`` needs the
-library (``make`` exports ``IMTYPESET_LIBRARY`` and ``IMTYPESET_PYTHON`` when the
-built pair exists). An approval's diff is the pane's own rows under either
-setting, so an inbox row showing only a diff posts a 0 in ``seam`` with the flag
-on. The transcript groups draw with the pane's own renderer whatever the flag
-says, and their ``seam`` column says so with a 0.
+**Which groups run through the seam.** Every pane's typeset branch is built on
+the library as it is now, and ``--typeset on`` needs the library (``make``
+exports ``IMTYPESET_LIBRARY`` and ``IMTYPESET_PYTHON`` when the built pair
+exists). An approval's diff is the pane's own rows under either setting, so an
+inbox row showing only a diff posts a 0 in ``seam`` with the flag on. Of the
+transcript's four modes only TYPESET calls the seam; with the flag off its rows
+are WRAP under that label and say so with a 0. ``views`` is the typeset log
+alone, by how many of the library's views it holds, and is skipped with the
+flag off. ``watch`` streams a whole session into a watched pane, and counts the
+collector's pauses beside the frames.
 
 Usage:
     .venv/bin/python scripts/bench_panes.py                    # today's renderers
@@ -68,7 +70,7 @@ import statistics
 import sys
 import time
 from collections.abc import Callable, Iterator, Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -574,6 +576,187 @@ def bench_transcript_parts(transcript: Transcript, snap: Snapshot) -> list[Row]:
 
 
 # ---------------------------------------------------------------------------
+# 1b. The typeset log: many views in one window
+# ---------------------------------------------------------------------------
+
+
+def turns_transcript(turns: int) -> Transcript:
+    """
+    ``turns`` turns of a working session, no two alike: what the model said, a
+    call, and its result. Three runs a turn, so a view of the library's a turn.
+    """
+    transcript = Transcript()
+    for n in range(1, turns + 1):
+        transcript.append(
+            SegmentKind.OUTPUT,
+            f"Turn {n}: the checksum of line {n} is `{n * 7919 % 10}`, which **does not** match "
+            f"what the catalogue has for it.\nReading the next file to see where the offset "
+            f"comes from.\n\n- first, the header of part {n}\n- then its fields\n",
+        )
+        transcript.append(SegmentKind.TOOL_CALL, f"\nRead(file_path=tle/part_{n}.py)\n")
+        transcript.append(
+            SegmentKind.TOOL_RESULT,
+            f'Read -> {{"lines": {n + 200}, "symbols": ["parse_{n}", "_field_{n}"]}}\n',
+        )
+    return transcript
+
+
+def bench_transcript_views(harness: Harness, turns: int, frames: int) -> list[Row]:
+    """
+    What a long log costs in TYPESET by what it holds, and what a view out of
+    the window costs.
+
+    The log is the one pane with many of the library's views in one window: a
+    view for each markdown run between two literal ones. Each scenario is drawn
+    with the pane's bounds as they are (``_TYPESET_WINDOW``, ``_TYPESET_KEEP``)
+    and with both lifted, so that every turn is held; and with a document that
+    is out of the window left to rest, as the pane does, and drawn all the same
+    (``rests`` forced off). The size column is what the feed held at the end.
+    """
+    rows: list[Row] = []
+    bounds = (transcript_pane._TYPESET_WINDOW, transcript_pane._TYPESET_KEEP)
+    document = typeset.document
+
+    def drawn_all(*args: Any, **given: Any) -> Any:
+        return document(*args, **{**given, "rests": False})
+
+    for bounded in (True, False):
+        for rests in (True, False):
+            for streaming in (False, True):
+                if streaming and not rests:
+                    continue
+                transcript = turns_transcript(turns)
+                snap = spawned(transcript).snapshot()
+                stream = tokens()
+                state = TranscriptState(mode=RenderMode.TYPESET)
+                tick = itertools.count(1)
+
+                def draw(
+                    state: TranscriptState = state,
+                    snap: Snapshot = snap,
+                    tick: Iterator[int] = tick,
+                ) -> None:
+                    state.prune(next(tick))
+                    transcript_pane.draw(snap, state, ROOT_NODE)
+
+                def append_token(
+                    transcript: Transcript = transcript, stream: Iterator[str] = stream
+                ) -> None:
+                    transcript.append(SegmentKind.OUTPUT, next(stream))
+
+                if not bounded:
+                    transcript_pane._TYPESET_WINDOW = transcript_pane._TYPESET_KEEP = 10**9
+                typeset.document = document if rests else drawn_all
+                try:
+                    row = measure(
+                        harness,
+                        "typeset log",
+                        f"{turns} turns, {'bounded' if bounded else 'every line held'}, "
+                        f"{'' if rests else 'nothing rests, '}"
+                        f"{'one token a frame' if streaming else 'idle'}",
+                        "",
+                        draw,
+                        frames,
+                        before_frame=append_token if streaming else None,
+                    )
+                finally:
+                    transcript_pane._TYPESET_WINDOW, transcript_pane._TYPESET_KEEP = bounds
+                    typeset.document = document
+                feed = state.feeds.get(ROOT_NODE)
+                if feed is None or not row.seam_calls:
+                    raise RuntimeError("the log was not drawn through the seam")
+                keys = feed.views.keys()
+                held = sum(len(feed.views.views(key)) for key in keys)
+                size = f"{feed.held:,} lines in {held} views under {len(keys)} keys"
+                rows.append(replace(row, size=size))
+    return rows
+
+
+def bench_watch(harness: Harness, lines: int) -> list[Row]:
+    """
+    A session watched from its first line to its last, sixteen characters a
+    frame, in each mode that reads the log as it is written: the frame, and
+    what Python's collector did to it.
+
+    The collector is left on and its pauses are timed apart (``gc.callbacks``):
+    a full collection stops the frame it lands in for as long as there is heap
+    to walk, and a renderer that makes many objects a frame has more of them.
+    The size column is the lines streamed, the collections of the oldest
+    generation that ran inside the pane's draw, and the longest of them.
+    """
+    script = [
+        (kind, numbered(text, f"@{cycle}"))
+        for cycle in range(1, lines // 40 + 2)
+        for kind, text in fake_driver._REPORT_SCRIPT
+    ]
+    return [
+        _watched(harness, mode, script, lines)
+        for mode in (RenderMode.WRAP, RenderMode.RICH, RenderMode.TYPESET)
+    ]
+
+
+def _watched(
+    harness: Harness, mode: RenderMode, script: list[tuple[SegmentKind, str]], lines: int
+) -> Row:
+    """
+    One mode's row of ``bench_watch``.
+    """
+    transcript = Transcript()
+    snap = spawned(transcript).snapshot()
+    state = TranscriptState(mode=mode)
+    tick = itertools.count(1)
+    pauses: list[int] = []
+    started = [0]
+    drawing = [False]
+
+    def draw() -> None:
+        state.prune(next(tick))
+        transcript_pane.draw(snap, state, ROOT_NODE)
+
+    def collected(phase: str, info: Mapping[str, Any]) -> None:
+        if info.get("generation") != 2 or not drawing[0]:
+            return
+        if phase == "start":
+            started[0] = time.perf_counter_ns()
+        else:
+            pauses.append(time.perf_counter_ns() - started[0])
+
+    harness.fresh_window()
+    samples: list[int] = []
+    written = 0
+    seam_calls = 0
+    gc.callbacks.append(collected)
+    try:
+        for kind, text in script:
+            if written >= lines:
+                break
+            written += text.count("\n")
+            for start in range(0, len(text), 16):
+                transcript.append(kind, text[start : start + 16])
+                drawing[0] = True
+                samples.append(harness.frame(draw))
+                drawing[0] = False
+                seam_calls = max(seam_calls, harness.seam_calls)
+    finally:
+        gc.callbacks.remove(collected)
+    over = sum(1 for each in samples if each > 16_600_000)
+    longest = f", the longest {_ms(max(pauses)):.1f} ms" if pauses else ""
+    row = Row(
+        group="a session watched",
+        scenario=f"{mode.name}, {len(samples):,} frames, {over} over 16.6 ms",
+        size=f"{written:,} lines, {len(pauses)} full collections{longest}",
+        first_ms=None,
+        median_ms=_ms(statistics.median(samples)),
+        p95_ms=_ms(_p95(samples)),
+        max_ms=_ms(max(samples)),
+        vertices=harness.vertices,
+        seam_calls=seam_calls,
+    )
+    _progress(row)
+    return row
+
+
+# ---------------------------------------------------------------------------
 # 2. Coming back to a pruned transcript
 # ---------------------------------------------------------------------------
 
@@ -894,7 +1077,17 @@ def _load() -> str:
     return f"{one:.2f} {five:.2f} {fifteen:.2f}"
 
 
-GROUPS = ("transcript", "prune", "detail", "inbox", "board", "brief", "settings")
+GROUPS = (
+    "transcript",
+    "views",
+    "watch",
+    "prune",
+    "detail",
+    "inbox",
+    "board",
+    "brief",
+    "settings",
+)
 
 
 def main() -> int:
@@ -919,6 +1112,8 @@ def main() -> int:
         help="transcript lengths, in lines",
     )
     ap.add_argument("--prune-lines", type=int, default=5_000)
+    ap.add_argument("--turns", type=int, default=400, help="turns of the typeset log (views)")
+    ap.add_argument("--watch-lines", type=int, default=5_000, help="lines streamed (watch)")
     ap.add_argument("--width", type=float, default=900.0)
     ap.add_argument("--height", type=float, default=700.0)
     ap.add_argument(
@@ -951,6 +1146,13 @@ def main() -> int:
     try:
         if "transcript" in args.only:
             rows += bench_transcript(harness, args.sizes, args.frames)
+        if "views" in args.only:
+            if want:
+                rows += bench_transcript_views(harness, args.turns, args.frames)
+            else:
+                print("  .. views: skipped, it measures the typeset log", file=sys.stderr)
+        if "watch" in args.only:
+            rows += bench_watch(harness, args.watch_lines)
         if "prune" in args.only:
             rows += bench_prune(harness, args.prune_lines)
         if "detail" in args.only:

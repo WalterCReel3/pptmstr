@@ -135,14 +135,17 @@ somebody runs it where the remote is reachable.
 ### A2 — hinting, advances and the atlas, as requirements
 
 **Standing of what follows.** Restated by pptmstr's reviewer on 2026-10-11
-**from reading**; nothing was re-run, and nothing below can be re-run today:
-`scripts/compare_metrics.py` imports `draw` from advtext (gone), the
+**from reading**; nothing was re-run, and nothing below can be re-run:
+`scripts/compare_metrics.py` set text through advtext's `draw`, which is gone,
+and is deleted from this branch (its last state is commit `a98ba5b`;
+`scripts/measure_typeset_advances.py` is the instrument now), the
 `pen_rules.py --hinting` instrument exists only inside
 `planning/patches/advtext-hinting.patch` (against the deleted core), and the
 pins in `tests/test_typeset.py` are among the errors above. All figures are on
 `imgui-bundle` 1.92.900, FreeType 2.13.3, density 1, no GPU.
 
-- **(G)** `shots/metrics/gaps.txt`: output of `scripts/compare_metrics.py`, by
+- **(G)** `shots/metrics/gaps.txt`: output of `scripts/compare_metrics.py`
+  (since deleted), by
   an earlier pptmstr builder, under Xvfb and llvmpipe, loader flags 0. It reads
   `add_text` arguments and vertex-buffer quads, not pixels. **The file is
   untracked** (`/shots/` is ignored); that it came from the script as committed
@@ -277,9 +280,12 @@ whole pixels per role.
 
 ### A4 — every advtext name pptmstr uses
 
-Current at the pptmstr commit that adopts DETAIL and INBOX (BRIEF, BOARD and
-the settings dialog's samples before it, `455a450`). Held by
-`test_the_seam_imports_the_librarys_facade_and_one_named_module_past_it`.
+Current at the pptmstr commit that adopts the context log, the last pane
+(DETAIL and INBOX before it, `56c803d`; BRIEF, BOARD and the settings dialog's
+samples, `455a450`). **Every pane now draws its markdown through these names.**
+The package's imports are held by
+`test_the_seam_imports_the_librarys_facade_and_one_named_module_past_it`; the
+list below was read off the package by grep at that commit.
 
 - From `advtext.__all__`: `TypesetView`, `TypesetUnavailable`, `Theme`,
   `Faces`, `Align`, `Spacing`, `BlockKind`, `Palette`, `DiffPalette`,
@@ -301,6 +307,11 @@ the settings dialog's samples before it, `455a450`). Held by
   `layout=`, `draw`, `set_diff`, `set_layout`, `layout`, `height_cap` (assigned),
   `close`, `diff`, `grid.row`, and in tests `grid.cell`, `row_count`,
   `content_width`, `origin`; `parse_markdown(more_may_follow=)` in a test.
+  **Added with the context log:** on a view `block_under_mouse`,
+  `owns_selection`, `selection`, `selected_text` (the log's context menu: the
+  block under the mouse and the selection in force, through pptmstr's
+  `ViewCache.pointed` and `ViewCache.selected`); and in tests `block_rect`,
+  `origin`, `select_all`, `clear_selection`.
 - Past `__all__`, by module: `advtext.typesetter` (`module`, `load_fonts`,
   `ready`, `reason`, `trouble`, `unload`, `LIBRARY_VARIABLE`, `FACE_ROLES`, and
   `module().font_atlas_index`, which is P14's route);
@@ -313,6 +324,18 @@ the settings dialog's samples before it, `455a450`). Held by
 - In `scripts/measure_typeset_diff.py` only: `TypesetDiffView.native_documents`
   and the native document's `hit_test`, `row_info`, `Faces.mono`,
   `advtext.description.FACE_ROLES`.
+- In `scripts/survey_fonts.py --render` only (candidate families set by the
+  library, outside the seam): `TypesetView(source, theme=, palette=)`,
+  `view.stats` (`vertices`, `whole`), `Theme.at_pixel_height(faces=, align=)`,
+  `Faces(code=, code_bold=, monospace=)`, `Faces.mono`,
+  `Palette(...).with_roles`, and `typesetter.load_fonts`, `module`, `reason`,
+  `trouble`, `unload`. `scripts/verify_typeset.py` reads `view.stats` and
+  `view.origin` besides.
+
+**Names pptmstr does not use and might be expected to:** `TypesetDiffFences`,
+`MarkdownText` / `MarkdownCode` (no host-made block is handed over: text that
+is not markdown is ImGui's), `Finder` / `FindIndex` (below), `view.under_mouse`,
+`view.set_marks`, `view.scroll_to`, `view.copy` / `copy_as`.
 
 ### A5 — what pptmstr needs that is not offered
 
@@ -587,6 +610,76 @@ question is the first draw of a very long text, 33 ms a thousand lines, once.
 |---|---|---|---|
 | P29 | **A tab in a fenced block survives a copy as a tab.** | By a run (pptmstr's builder, 2026-10-12, `38f5fac`): a tab in a fence is set as spaces to its stop, and copied so. Nothing is absent from the screen, but a Makefile recipe an approver copies out of a body would not run. | open |
 
+### What building the transcript showed (2026-10-12)
+
+By runs through pptmstr's seam on advtext `38f5fac` (pptmstr's builder, an
+agent; headless frames for the timings, the application under Xvfb and
+llvmpipe for the rest; draw-list counts and the library's own answers, no
+pixel read, nobody looked).
+
+The context log is the pane with **many views in one window**. Its markdown
+runs (what a model said, and its reasoning) are the library's and every run
+between them (a tool call, its result, an error) is ImGui's, by P21. So
+closed runs are a `TypesetView` for each markdown run, and the open run a
+`TypesetStreamView`: 50 views for the last 400 lines of a session of
+three-run turns, 400 for 3,199 lines.
+
+- **A view out of the window costs a call** (`scripts/bench_panes.py --typeset
+  on --only views`, four runs, load average 3 to 10): 400 views in one scrolling
+  child, about thirty of them in sight, are **11 to 17 ms a frame with
+  nothing new**, 0.03 to 0.04 ms a view; the library culls glyphs, and
+  `TypesetView.draw` still lays out, draws, sizes, hit-tests and reads keys.
+  pptmstr now leaves alone a document that is out of the window and unchanged,
+  claiming the height its last draw measured (0.9 to 1.6 ms for the same 400
+  views), which costs it two things it would rather not own: the room is an
+  estimate where the library's was (a block never in sight), and a selection
+  that has scrolled away has to be special-cased so that its keys still work.
+  Request P30.
+- **Costs in the pane** (`--only transcript watch prune`, CPU ms inside the
+  pane's draw, 900 by 700, load average 3 to 10). TYPESET is the library,
+  RICH pptmstr's own markdown renderer, WRAP ImGui's wrapped lines:
+
+  | | TYPESET | RICH | WRAP |
+  |---|---|---|---|
+  | nothing new, 1,080 / 10,080 lines, median | 0.23 / 0.27 | 5.90 / 6.04 | 1.03 / 2.16 |
+  | a token a frame, 1,080 / 10,080 lines, median | 1.23 / 1.38 | 6.19 / 6.48 | 1.07 / 2.70 |
+  | first frame, 1,080 / 10,080 lines | 71 / 34 (the last 400 lines) | 25 / 227 | 2.5 / 12 |
+  | 20,040 lines watched, 16 characters a frame, two runs: median | 1.26, 1.05 | 5.51, 5.85 | 1.94, 2.61 |
+  | the same: p95; max | 2.20, 1.76; 62.1, 44.0 | 8.29, 8.39; 47.9, 66.8 | 4.67, 5.41; 12.9, 50.3 |
+  | the same: full collections; frames over 16.6 ms of 52,313 | one a run, 56 and 40 ms; 1, 16 | one a run, 43 and 61 ms; 35, 24 | none; 0, 40 |
+  | returning to a node whose line cache was dropped, 5,040 lines | 4.0 | 68.5 | 4.8 |
+
+  The two 20,040-line runs overlapped each other and other work on the
+  machine, and the count of frames over 16.6 ms follows that more than the
+  mode: WRAP's 40 are in a watch with no collection at all. Python's
+  collector, which stopped a frame for 109 ms once in every 600 on the old
+  core, ran one full collection in each whole watch.
+- **P9, sharpened by a run** (`scripts/verify_typeset.py`, a real window):
+  `x 😀 y 漢`, two of whose characters no face pptmstr ships has, adds 16
+  vertices (four quads, one for each character that is not a space) and
+  `TypesetView.stats.whole` is `True`. What the two quads are was not read
+  (no pixel, nobody looked). So `whole` does not stand in for the count P9
+  asks for: the view reports nothing amiss over text it cannot have set as
+  written.
+- **P19 in the log**: a run that closes is set again as a settled view, so a
+  table's columns move in that frame. Not rebuilt in pptmstr.
+- **`advtext.Finder` does not serve the log's search box as it is, and
+  pptmstr has not built on it.** Read at `38f5fac`, not run. The box is a
+  *filter*: it hides every line that does not match. A `Finder` is a needle
+  over one document and marks matches in place. To use it the log would need
+  an index for each of its views built from the descriptions that view was
+  given (the seam sets a fence's info string as a line of its code, so those
+  are not the library's own), new marks for a view whenever its stream is
+  read, one current match and one `scroll_to` across views, and something of
+  pptmstr's own for the literal runs, which no `Finder` can search or mark
+  because the library does not draw them. That is a find-in-text feature and
+  new scope; with P21 answered and literal runs handed over as host blocks a
+  generation would be one view and most of it would fall away.
+
+| # | request | the measurement behind it | state |
+|---|---|---|---|
+| P30 | **A view wholly outside the window's clip rectangle costs next to nothing to draw**, and still claims its height. | 400 `TypesetView`s in one scrolling child, about thirty in sight: 11 to 17 ms a frame with nothing new, 0.03 to 0.04 ms for each view out of sight (pptmstr's builder, 2026-10-12, four runs, headless, load average 3 to 10). A log is a view for each markdown run while its literal runs are ImGui's (P21), so views out of sight are most of them. pptmstr skips the draw itself meanwhile (`typeset.document(rests=True)`), at the price above. | open |
+
 ## Work in hand
 
 - **The seam**, now the package `pptmstr/ui/typeset/` on `advtext.typesetter`
@@ -599,7 +692,12 @@ question is the first draw of a very long text, 33 ms a thousand lines, once.
   arriving (a stream), a question's prose and preview, and the prose argument
   of a parked call. An approval's diff, its other arguments and an error are
   pptmstr's own text in both, by the measurement above. `review` holds an
-  approve only over a body the library stopped under. Next `transcript_pane`.
+  approve only over a body the library stopped under. `transcript_pane` is
+  over for the markdown runs of
+  its TYPESET mode, with every other kind of run ImGui's; RICH is still the
+  mode the log starts in, by an agent's decision recorded on
+  `transcript_pane.DEFAULT_MODE`. **Every pane is now adopted**, and each keeps
+  its own renderer (P6).
 
 ## Agent decisions, awaiting the user
 
@@ -612,3 +710,12 @@ question is the first draw of a very long text, 33 ms a thousand lines, once.
 - Monospace roles are not moved to an even em to buy columns (the trial under
   P21): it would set code larger than the chrome, against the sizes the
   operator configured. Offered to the user as an option, not taken.
+- The context log still starts in RICH although TYPESET now meets the cost
+  rule recorded for making it the default (the table under "What building the
+  transcript showed"): nobody has looked at the library's text in that pane,
+  and a fence inside a markdown run does not keep its columns (P21). One word
+  in `transcript_pane.DEFAULT_MODE`.
+- `scripts/profile_typeset.py` and `scripts/compare_metrics.py` are deleted:
+  both measured the old core's Python layout and its four metric routes, and
+  neither imports. `scripts/verify_typeset.py` and `scripts/survey_fonts.py`
+  are repaired onto the new layer.

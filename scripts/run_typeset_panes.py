@@ -14,8 +14,9 @@ so this counts them where they are made:
   library   draws of the library's own views (``TypesetView.draw`` and its
             stream and diff views), which is what "typeset" finally means
   own       the panes' own renderers for the same surfaces: DETAIL's diff and
-            arguments, the inbox row's diff rows, arguments and preview, and
-            the block renderer DETAIL shares with the context log
+            arguments, the inbox row's diff rows, arguments and preview, the
+            block renderer DETAIL shares with the context log, and the log's
+            line modes
 
 The cursor is moved down the queue with ``j`` every ``--step`` frames (the key
 event enters at ImGui, as ``review.handle_keys`` reads it), so approvals,
@@ -26,12 +27,19 @@ session mid-turn is DETAIL's stream and a finished one its deliverable. A PNG is
 written at each stop under ``--out``. **Nothing here says how any of it looks, and nobody has
 looked at the pictures unless they say so.**
 
+``--context MODE`` starts the context log in that mode, as
+``Settings.context_mode`` would, and brings its tab to the front beside DETAIL:
+``typeset`` is the log's markdown runs through the library, and with the
+library absent the pane's own wrapped lines.
+
 The library is used when ``IMTYPESET_LIBRARY`` and ``IMTYPESET_PYTHON`` name the
 built pair (``make typeset-env`` prints them) and not otherwise; the report says
 which, and the sentence the Text menu would show.
 
 Usage:
     scripts/xvfb_shot.sh -- .venv/bin/python scripts/run_typeset_panes.py --out shots/seam2-with
+    scripts/xvfb_shot.sh -- .venv/bin/python scripts/run_typeset_panes.py \\
+        --context typeset --out shots/seam3-with
     scripts/xvfb_shot.sh -- env -u IMTYPESET_LIBRARY -u IMTYPESET_PYTHON \\
         .venv/bin/python scripts/run_typeset_panes.py --out shots/seam2-without
 """
@@ -76,13 +84,19 @@ def main() -> int:
     ap.add_argument("--stops", type=int, default=8, help="rows of the queue to stop on")
     ap.add_argument("--nodes", type=int, default=8, help="sessions owing nothing to stop on")
     ap.add_argument("--step", type=int, default=45, help="frames at each stop")
+    ap.add_argument(
+        "--context",
+        choices=("raw", "wrap", "rich", "typeset"),
+        default=None,
+        help="the mode the context log starts in, and bring the log to the front",
+    )
     ap.add_argument("--argv", nargs=argparse.REMAINDER, default=[])
     args = ap.parse_args()
 
     from imgui_bundle import hello_imgui, imgui, immapp
 
     from pptmstr import app as pptmstr_app
-    from pptmstr.ui import detail, inbox, rich_pane, typeset
+    from pptmstr.ui import detail, inbox, rich_pane, transcript_pane, typeset
     from pptmstr.ui.focus import Scope
     from pptmstr.ui.typeset import views
 
@@ -99,8 +113,24 @@ def main() -> int:
         (inbox, "_native_arguments", "inbox._native_arguments"),
         (inbox, "_native_preview", "inbox._native_preview"),
         (rich_pane, "draw", "rich_pane.draw"),
+        (transcript_pane, "_draw_lines", "transcript_pane._draw_lines"),
+        (transcript_pane, "_draw_rich", "transcript_pane._draw_rich"),
     ):
         counted(owner, name, own, label, False)
+    shown: Counter[str] = Counter()
+    real_log = transcript_pane.draw
+
+    def log_draw(snap: Any, state: Any, selected: Any, *, start_in: Any = None) -> None:
+        if args.context is not None:
+            start_in = transcript_pane.RenderMode(args.context)
+        real_log(snap, state, selected, start_in=start_in)
+        if selected is not None:
+            feed = state.feeds.get(selected)
+            held = 0 if feed is None else sum(len(feed.views.views(k)) for k in feed.views.keys())
+            shown[f"{state.shown_mode().value}, {'a feed' if feed else 'no feed'}"] += 1
+            handed["log"] = f"{state.shown_mode().value}, {held} of the library's views held"
+
+    transcript_pane.draw = log_draw  # type: ignore[assignment]
     try:
         import advtext
 
@@ -161,7 +191,10 @@ def main() -> int:
                 _grab(out)
                 held = sorted({str(key[1]) for key in inbox._VIEWS.keys()})
                 where = handed.pop("where", "a row of the queue")
-                stops.append(f"stop {stop} ({where}): {out}; inbox holds {held or 'nothing'}")
+                log = handed.get("log", "not drawn")
+                stops.append(
+                    f"stop {stop} ({where}): {out}; inbox holds {held or 'nothing'}; log {log}"
+                )
                 handed["sentence"] = typeset.unavailable_reason() or "(none: text is typeset)"
 
         def after_swap() -> None:
@@ -178,7 +211,10 @@ def main() -> int:
             elif at == 1:
                 io.add_key_event(imgui.Key.j, False)
             if counter["n"] == 2:
-                hello_imgui.get_runner_params().docking_params.focus_dockable_window("DETAIL")
+                docking = hello_imgui.get_runner_params().docking_params
+                docking.focus_dockable_window("DETAIL")
+                if args.context is not None:
+                    docking.focus_dockable_window("CONTEXT")
             if counter["n"] >= frames:
                 hello_imgui.get_runner_params().app_shall_exit = True
 
@@ -204,6 +240,9 @@ def main() -> int:
     print(f"  seam calls, by caller: {dict(sorted(seam.items())) or 'none'}")
     print(f"  the library's views drawn: {dict(sorted(library.items())) or 'none'}")
     print(f"  the panes' own renderers: {dict(sorted(own.items())) or 'none'}")
+    print(
+        f"  frames the context log drew a session, by mode: {dict(sorted(shown.items())) or 'none'}"
+    )
     for stop in stops:
         print(f"  {stop}")
     print("  nobody has looked at the pictures")

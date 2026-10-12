@@ -45,18 +45,20 @@ dependencies = [
     # (pptmstr/ui/blocks.py), not this library's.
     "markdown-it-py>=3.0",
     # Typeset text: markdown, streaming and diff views drawn through the
-    # imtypeset library. It is on no package index, so it is named bare, and
+    # imtypeset library. pptmstr meets it in one package, pptmstr/ui/typeset/,
+    # and every pane keeps a renderer of its own for when the library cannot
+    # draw. It is on no package index, so it is named bare, and
     # bootstrap.sh installs it first, from a clone at the commit advtext.ref
     # names (scripts/typeset_deps.py). The commit is not written here as a
     # `git+https` direct reference because the same line has to install where
     # GitHub cannot be reached, from a repository ADVTEXT_REPO names.
     "advtext",
-    # advtext opens the faces it sets through fontTools at run time. As
-    # pptmstr/ui/typeset.py measures (`pixel_metrics`), a glyph's advance is
-    # ImGui's hinted one; the file still supplies what ImGui does not expose:
-    # pair kerns, ascent and descent, glyph boxes, which characters a face
-    # has, and the advance of a glyph ImGui's font lacks.
-    # scripts/rank_glyphs.py and tests/test_splash_art.py use it too.
+    # advtext reads the faces it sets through fontTools at run time: a theme
+    # sizes each face from its file's ascent and descent
+    # (pptmstr/ui/typeset/themes.py, through advtext's own calls). Nothing in
+    # the pptmstr package imports it; its scripts and tests read font files
+    # with it (scripts/rank_glyphs.py, scripts/survey_fonts.py and
+    # tests/test_splash_art.py among them).
     "fonttools>=4.50",
 ]
 

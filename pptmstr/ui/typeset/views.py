@@ -65,10 +65,21 @@ lines, and each of its pieces was a frame in which a pane showed less than it
 had been handed. What is left of that question is the first draw of a very
 long text, linear in its length and paid once, which a pane with no bound of
 its own on what it hands over pays in one frame (DETAIL asks first, past
-``detail._SETTLED_LINES``). ``document`` still accepts ``build_hidden`` and
-``free_allowance``, and ``stream`` ``every_ms`` and ``free_allowance``, from
-the one caller written for that machinery (``transcript_pane``, whose typeset
-branch is not adopted); they change nothing and go when that pane is.
+``review.SETTLED_LINES``; the log bounds what one frame takes in,
+``transcript_pane._TYPESET_WINDOW``).
+
+## What a frame costs when nothing moved
+
+A view that is drawn is a call into the library whether or not any of it is in
+the window: the library culls its glyphs, and the call, the hit test and the
+keys are still paid. Measured in pptmstr on 2026-10-12 (``scripts/bench_panes.py
+--typeset on --only views``, four runs: headless, load average 3 to 10): 400
+views in one window, a pane's worth of them in sight, are 11 to 17 ms a frame
+with nothing new, 0.03 to 0.04 ms a view. A pane of a few views does not notice.
+The log is a view for every markdown run, so
+``document(rests=True)`` leaves a document that is out of the window and as it
+was last drawn alone, and claims the room it took (``_rest``): the same 400
+views are then 0.9 to 1.6 ms.
 """
 
 from __future__ import annotations
@@ -109,6 +120,8 @@ class _Segment:
     # How far right the view's text reaches from its left edge, and the view's
     # revision and the measure that was worked out for.
     reach: tuple[int, float, float] | None = None
+    # Where the last draw put it, top and bottom, in pixels down the screen.
+    band: tuple[float, float] = (0.0, 0.0)
 
 
 @dataclass
@@ -135,6 +148,13 @@ class _Entry:
     # Under a cap: how tall the content was when it was last drawn inside its
     # child, and the measure that was at. ``None`` until it has been drawn.
     natural: tuple[float, float] | None = None
+    # What the parts were last drawn at: the measure, how far right they ran
+    # from the cursor, and pptmstr's theme. ``None`` until they have been.
+    shown: tuple[float, float, object] | None = None
+    # Whether the last draw left the parts alone, out of the window (``_rest``).
+    resting: bool = False
+    # Whether each markdown part has a view of its own (``document``).
+    apart: bool = False
     # Source lines handed over that the last draw did not put on screen: all of
     # them when the library stopped inside it, none otherwise.
     missing: int = 0
@@ -254,6 +274,53 @@ class ViewCache:
                 continue
             return segment.owner[block] if 0 <= block < len(segment.owner) else None
         return None
+
+    def pointed(self, key: Hashable) -> tuple[int, str] | None:
+        """
+        What of a key is under the mouse, as it was drawn this frame: the index
+        of the part and the text of the block of it, or ``None`` between blocks
+        and for a key not drawn. A part ImGui draws is one block, the whole
+        width of the window; a stream is part 0.
+
+        A fenced block's text is its code, without the info string the seam
+        sets over it. Ask inside the window the key was drawn in, and only when
+        that window is hovered: a part ImGui draws is found by where it is, and
+        nothing here knows what is in front of it.
+        """
+        entry = self._entries.get(key)
+        if entry is None or entry.resting or entry.missing:
+            return None
+        im = _imgui()
+        if entry.frame != im.get_frame_count():
+            return None
+        at = im.get_io().mouse_pos.y
+        for segment in entry.segments:
+            view = segment.view
+            if view is None:
+                index = segment.parts[0]
+                if segment.band[0] <= at < segment.band[1]:
+                    return (index, entry.parts[index].text)
+                continue
+            block = view.block_under_mouse()
+            if block is None:
+                continue
+            text = str(view.texts[block])
+            said = segment.captions.get(block)
+            if said is not None:
+                text = text[said + 1 :]
+            return (segment.owner[block] if block < len(segment.owner) else 0, text)
+        return None
+
+    def selected(self, key: Hashable) -> str:
+        """
+        The text selected under a key if the selection is the one in force, or
+        ``""``. A selection is inside one of the library's views: it does not
+        cross a part ImGui draws.
+        """
+        for view in self.views(key):
+            if view.owns_selection and (text := view.selected_text()):
+                return str(text)
+        return ""
 
     def _held(self, key: Hashable, kind: str) -> _Entry:
         """
@@ -567,6 +634,8 @@ def _open(entry: _Entry, parts: tuple[Part, ...], on_link: Callable[[str], None]
         if not part.text.strip():
             continue
         if part.kind is Kind.MARKDOWN:
+            if entry.apart:
+                close_run()
             run.append(index)
         else:
             close_run()
@@ -665,14 +734,51 @@ def _show(
     Draw every part at the cursor. Returns where the last of them ended, in
     pixels down the screen: the foot of the text, with no spacing under it.
     """
-    foot = float(im.get_cursor_screen_pos().y)
+    at = im.get_cursor_screen_pos()
+    foot = float(at.y)
+    right = 0.0
     for segment in entry.segments:
+        top = float(im.get_cursor_screen_pos().y)
         if segment.view is None:
             _native(im, entry.parts[segment.parts[0]], wide)
             foot = float(im.get_item_rect_max().y)
+            right = max(right, float(im.get_item_rect_max().x - at.x))
         else:
             foot = _show_view(im, segment, wide, palette, on_link)
+            right = max(right, wide, segment.reach[2] if segment.reach else 0.0)
+        segment.band = (top, foot)
+    entry.shown = (wide, right, ui_theme.current())
+    entry.resting = False
     return foot
+
+
+def _rest(im: Any, entry: _Entry, wide: float) -> bool:
+    """
+    Claim the room the parts took when they were last drawn, and draw nothing,
+    if they are out of the window and would be drawn as they were: the same
+    parts, measure and theme. False where they have to be drawn.
+
+    The room is the last draw's own measurement, so a document that rests
+    moves nothing under it. A view that holds the selection in force is drawn
+    wherever it is: the keys that copy it are read in its draw. A document the
+    library stopped under is never asked: the way back is a load of the fonts,
+    which moves the epoch, and its entry is made again.
+    """
+    if entry.height is None or entry.shown is None or not entry.segments:
+        return False
+    was, right, theme = entry.shown
+    if was != wide or theme is not ui_theme.current():
+        return False
+    if im.is_rect_visible(im.ImVec2(max(right, 1.0), entry.height)):
+        return False
+    for segment in entry.segments:
+        view = segment.view
+        if view is not None and view.owns_selection and view.selection is not None:
+            return False
+    # An item's spacing follows the dummy as it followed the last part.
+    im.dummy(im.ImVec2(right, max(0.0, entry.height - float(im.get_style().item_spacing.y))))
+    entry.resting = True
+    return True
 
 
 def _show_view(
@@ -798,6 +904,8 @@ def _draw(
     height_cap: float | None,
     ink: Color | None = None,
     on_link: Callable[[str], None] | None = None,
+    rests: bool = False,
+    apart: bool = False,
 ) -> float:
     """
     Draw what is held under ``key`` for ``parts``, building what changed. The
@@ -813,14 +921,18 @@ def _draw(
     entry.frame = frame
     top = im.get_cursor_pos().y
     try:
-        if not (isinstance(parts, tuple) and entry.token is parts):
+        wide = _width(im, width)
+        same = isinstance(parts, tuple) and entry.token is parts
+        if rests and same and height_cap is None and _rest(im, entry, wide):
+            return float(entry.height or 0.0)
+        if not same:
             given = parts if isinstance(parts, tuple) else tuple(parts)
             if given != entry.parts:
+                entry.apart = apart
                 _open(entry, given, on_link)
             entry.token = given
         if entry.inked is not ui_theme.current():
             _ink(entry)
-        wide = _width(im, width)
         if height_cap is None:
             _show(im, entry, wide, themes.palette(ink), on_link)
         else:
@@ -878,8 +990,8 @@ def document(
     width: float | None = None,
     height_cap: float | None = None,
     on_link: Callable[[str], None] | None = None,
-    build_hidden: bool = False,
-    free_allowance: bool = True,
+    rests: bool = False,
+    apart: bool = False,
 ) -> float:
     """
     Several parts in sequence under one key, each read its own way and in its own
@@ -896,8 +1008,33 @@ def document(
 
     A table inside a coloured markdown part takes the part's ink in its cells.
     ``height_cap`` is ``markdown``'s.
+
+    ``rests`` is for a pane that holds many documents in one window: one that
+    is out of the window, and is handed the tuple, measure and theme it was
+    last drawn with, claims the room it took then and is not drawn (the module
+    docstring has what that saves). Nothing of a resting document is under the
+    mouse (``ViewCache.pointed``).
+
+    ``apart`` gives every markdown part a view of its own, for a pane whose
+    parts arrive one at a time and were each on screen before they were parts
+    (the log's runs). Joined, a part is set a block's gap under the markdown
+    part before it, which is the library's and depends on what that part ends
+    with; apart, it is ImGui's item spacing under the view before it, as it was
+    when it was drawn alone, so it does not move when it becomes a part. The
+    price is the selection, which then ends with each part. Taken when the
+    parts are read: the same for every call under a key.
     """
-    return _draw(cache, key, "document", parts, width=width, height_cap=height_cap, on_link=on_link)
+    return _draw(
+        cache,
+        key,
+        "document",
+        parts,
+        width=width,
+        height_cap=height_cap,
+        on_link=on_link,
+        rests=rests,
+        apart=apart,
+    )
 
 
 def plain(
@@ -950,17 +1087,14 @@ def stream(
     key: Hashable,
     *,
     follow: bool = False,
-    every_ms: float = 0.0,
-    free_allowance: bool = True,
 ) -> Stream:
     """
     The stream held under a key, made on first asking.
 
     Nothing is drawn here and the library is not asked for anything, so this
     does not raise where the library cannot draw. ``follow`` is taken when the
-    stream is made. ``every_ms`` and ``free_allowance`` are accepted and change
-    nothing: what arrived is read at the next draw (the module docstring has
-    what that costs).
+    stream is made. What arrived is read at the next draw (the module docstring
+    has what that costs).
     """
     entry = cache._entries.get(key)
     if entry is None or entry.kind != "stream" or entry.stream is None:

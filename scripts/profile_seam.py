@@ -3,10 +3,8 @@
 What the seam's calls cost on the library as it is: a reply arriving in pieces,
 a long settled document, and a diff, each beside ImGui's own text for the same.
 
-``scripts/profile_typeset.py`` asked these of a seam that built a long text over
-frames and is not repaired: nearly every row of it names a function that is gone.
-This asks the questions that decide whether anything needs building over frames
-at all.
+These are the questions that decide whether anything needs building over
+frames at all. ``scripts/bench_panes.py`` asks what a *pane* costs.
 
 **What is timed.** ``perf_counter_ns`` around the seam's call and nothing else,
 in a frame of a bare ImGui context: no window, no rasteriser, the real font

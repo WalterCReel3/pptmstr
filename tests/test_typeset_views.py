@@ -2271,6 +2271,203 @@ def test_a_block_is_traced_back_to_the_part_it_came_from(seam: Any) -> None:
     assert cache.part_at("missing", 0) is None
 
 
+def _library_draws(monkeypatch: pytest.MonkeyPatch) -> set[int]:
+    """
+    The library's views drawn from here on, by ``id``.
+    """
+    drawn: set[int] = set()
+    real = advtext.TypesetView.draw
+
+    def draw(self: Any, **given: Any) -> bool:
+        drawn.add(id(self))
+        return bool(real(self, **given))
+
+    monkeypatch.setattr(advtext.TypesetView, "draw", draw)
+    return drawn
+
+
+def test_what_is_under_the_mouse_is_a_part_and_the_text_of_its_block(
+    seam: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    A pane's context menu asks one question of text two renderers drew. A part
+    ImGui draws answers across the whole width of the window; a fence answers
+    with its code and not the info string the seam sets over it.
+    """
+    cache = typeset.ViewCache()
+    rows = "ab\ncd"
+    parts = (
+        Part("First paragraph.\n\n```py not a language\nx = 1\n```\n"),
+        Part(rows, Kind.LITERAL),
+        Part("Last.\n"),
+    )
+    at: list[float] = []
+    real = seam.text_unformatted
+
+    def text_unformatted(text: str) -> None:
+        if text == rows:
+            at.append(seam.get_cursor_screen_pos().y)
+        real(text)
+
+    monkeypatch.setattr(seam, "text_unformatted", text_unformatted)
+    io = seam.get_io()
+    seen: list[Any] = []
+
+    def body() -> None:
+        typeset.document(cache, "k", parts)
+        seen.append(cache.pointed("k"))
+
+    def pointed(x: float, y: float) -> Any:
+        io.add_mouse_pos_event(x, y)
+        for _ in range(2):
+            frame(seam, body)
+        return seen[-1]
+
+    try:
+        frame(seam, body)
+        assert seen == [None], "the mouse is nowhere"
+        first, last = cache.views("k")
+        left, top, _, bottom = first.block_rect(1)
+        assert pointed(left + 12.0, (top + bottom) / 2.0) == (0, "x = 1")
+        left, top, _, bottom = first.block_rect(0)
+        assert pointed(left + 12.0, (top + bottom) / 2.0) == (0, "First paragraph.")
+        # Two characters wide, and found at the far side of the window.
+        assert pointed(10.0 + WINDOW[0] - 30.0, at[-1] + 3.0) == (1, rows)
+        left, top, _, bottom = last.block_rect(0)
+        assert pointed(left + 12.0, (top + bottom) / 2.0) == (2, "Last.")
+
+        # Asked in a frame the key was not drawn in, the answer is not the last
+        # frame's: the view still says what was under the mouse when it drew.
+        frame(seam, lambda: seen.append(cache.pointed("k")))
+        assert last.block_under_mouse() == 0, "the view forgot: nothing is tested"
+        assert seen[-1] is None
+        assert pointed(left + 12.0, bottom + 200.0) is None
+        assert cache.pointed("missing") is None
+    finally:
+        io.add_mouse_pos_event(-1.0, -1.0)
+        frame(seam, lambda: None)
+
+
+def test_a_stream_under_the_mouse_is_part_zero(seam: Any) -> None:
+    cache = typeset.ViewCache()
+    stream = typeset.stream(cache, "s")
+    stream.set_text("A paragraph.\n\nAnd another, still arriv")
+    io = seam.get_io()
+    try:
+        frame(seam, lambda: stream.draw())
+        left, top, _, bottom = stream.view.block_rect(1)
+        io.add_mouse_pos_event(left + 12.0, (top + bottom) / 2.0)
+        for _ in range(2):
+            frame(seam, lambda: stream.draw())
+        seen: list[Any] = []
+        frame(seam, lambda: (stream.draw(), seen.append(cache.pointed("s"))))
+        assert seen == [(0, "And another, still arriv")]
+    finally:
+        io.add_mouse_pos_event(-1.0, -1.0)
+        frame(seam, lambda: None)
+
+
+def test_a_document_out_of_the_window_rests_and_takes_the_room_it_took(
+    seam: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    A view is a call into the library wherever it is. A pane with many of them
+    asks that a document nobody can see be left alone, and what is under it must
+    not move for that: the room is the last draw's own measurement.
+    """
+    cache = typeset.ViewCache()
+    parts = (
+        Part("# One\n\nfirst paragraph\n"),
+        Part("literal\nrows", Kind.LITERAL),
+        Part("last\n"),
+    )
+    drawn = _library_draws(monkeypatch)
+    ends: list[tuple[float, float]] = []
+
+    def body(given: tuple[Part, ...] = parts, **how: Any) -> None:
+        # A measure of its own: the window's changes when its scrollbar comes.
+        tall = typeset.document(cache, "k", given, **{"rests": True, "width": 500.0, **how})
+        ends.append((tall, seam.get_cursor_pos_y()))
+
+    def one(lead: float, given: tuple[Part, ...] = parts, **how: Any) -> int:
+        drawn.clear()
+        frame(seam, lambda: body(given, **how), lead=lead)
+        return len(drawn)
+
+    below = WINDOW[1] + 400.0
+    assert one(below) == 2, "its first draw is a draw: nothing has been measured"
+    assert one(below) == 0
+    assert ends[1] == ends[0] and ends[0][0] > 40.0
+    assert cache.unbuilt("k") == 0 and cache.texts("k")[2] == "literal\nrows"
+    assert cache.pointed("k") is None
+
+    # In the window it is drawn, and with the mouse on it something is under
+    # the mouse. Out of it again, at once, the view's own answer is a frame
+    # old and still says so: nothing of a resting document is under the mouse.
+    io = seam.get_io()
+    try:
+        assert one(0.0) == 2
+        left, top, _, bottom = cache.views("k")[0].block_rect(1)
+        io.add_mouse_pos_event(left + 12.0, (top + bottom) / 2.0)
+        assert one(0.0) == 2 and one(0.0) == 2
+        assert cache.pointed("k") == (0, "first paragraph")
+        assert one(below) == 0
+        assert cache.views("k")[0].block_under_mouse() == 1, "the view answered: nothing is tested"
+        assert cache.pointed("k") is None
+    finally:
+        io.add_mouse_pos_event(-1.0, -1.0)
+        frame(seam, lambda: None)
+    assert one(below) == 0
+    assert one(below, rests=False) == 2, "and wherever it is, unless the pane asks"
+    assert one(below, tuple(parts)) == 0, "the same tuple"
+    assert one(below, (*parts[:2], Part("last\n"))) == 2, "an equal one is compared, so drawn"
+    assert one(below) == 2 and one(below) == 0
+    assert one(below, width=400.0) == 2, "another measure is another layout"
+    assert one(below, width=400.0) == 0
+    theme.set_theme("light")
+    assert one(below, width=400.0) == 2, "another theme is other inks"
+    theme.set_theme("dark")
+    assert one(below, width=400.0) == 2
+    assert one(below, width=400.0) == 0
+
+    # The selection in force is copied by keys its view reads in its draw.
+    first = cache.views("k")[0]
+    try:
+        first.select_all()
+        assert one(below, width=400.0) == 2
+    finally:
+        first.clear_selection()
+    assert one(below, width=400.0) == 0
+
+
+def test_parts_set_apart_are_a_view_each_and_stand_where_they_stood_alone(seam: Any) -> None:
+    """
+    A pane draws a text alone and later hands it over as a part under another.
+    Joined, it is set the library's gap under that part; apart, ImGui's, which
+    is where it already was.
+    """
+    cache = typeset.ViewCache()
+    first, second = "One paragraph.\n", "And the next.\n"
+
+    def alone() -> None:
+        typeset.markdown(cache, "a", first)
+        typeset.markdown(cache, "b", second)
+
+    frame(seam, alone)
+    stood = cache.view("b").origin
+    parts = (Part(first), Part(second))
+    frame(seam, lambda: typeset.document(cache, "apart", parts, apart=True))
+    above, below = cache.views("apart")
+    assert (list(above.texts), list(below.texts)) == (["One paragraph."], ["And the next."])
+    assert below.origin == stood
+    assert [cache.part_at("apart", 0, view) for view in (above, below)] == [0, 1]
+
+    frame(seam, lambda: typeset.document(cache, "joined", parts))
+    (one,) = cache.views("joined")
+    assert list(one.texts) == ["One paragraph.", "And the next."]
+    assert one.block_rect(1)[1] != pytest.approx(stood[1], abs=0.5), "nothing to choose between"
+
+
 def test_a_demoted_heading_is_set_as_the_level_below_and_stays_a_heading(seam: Any) -> None:
     """
     A pane heads an entry with a line of its own, and a ``#`` in the entry's body

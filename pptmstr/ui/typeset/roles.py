@@ -538,7 +538,7 @@ def _bundle_fonts() -> Path:
     return Path(imgui_bundle.__file__).parent / "assets" / "fonts"
 
 
-ADOPTED: frozenset[Pane] = frozenset({Pane.BRIEF, Pane.BOARD, Pane.DETAIL, Pane.INBOX})
+ADOPTED: frozenset[Pane] = frozenset(Pane)
 """
 The panes whose typeset branch is built on the library as it is now. ``enabled``
 is false for every other pane whatever the switches and the library say, so a
@@ -548,7 +548,9 @@ A pane is added by the change that builds its branch and shows it by a run.
 BRIEF and BOARD were, on 2026-10-12: the application under Xvfb with the fake
 fleet, each pane's cache holding the library's views of what it showed. DETAIL
 and INBOX were the same day, for their markdown: an approval's diff and every
-literal text in them stay ImGui's.
+literal text in them stay ImGui's. CONTEXT was the same day, for the markdown
+runs of the log's TYPESET mode. That is every pane, and the set stays: a pane
+added to ``Pane`` is typeset from the change that names it here.
 """
 
 

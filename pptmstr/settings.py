@@ -121,7 +121,7 @@ class Settings:
     # wrapping BETA (caret and selection across wrapped rows are the under-tested
     # part), which is the reason this is a setting at all and not just the default.
     wrap_inputs: bool = True
-    # Set text through the layout library (`ui/typeset.py`) instead of the renderers
+    # Set text through the layout library (`ui/typeset/`) instead of the renderers
     # each pane had before it. Off is not a degraded mode: every pane keeps its old
     # path whole, which is what makes this the instrument for comparing the two.
     typeset: bool = True

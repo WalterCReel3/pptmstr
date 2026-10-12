@@ -2,20 +2,21 @@
 """
 Does the typeset seam work in a real window, through the app's own font path?
 
-``pptmstr/ui/typeset.py`` is unit-tested in bare ImGui frames with no backend
-(``tests/test_typeset.py``). Three things that cannot show there are what this is for:
+``pptmstr/ui/typeset/`` is unit-tested in bare ImGui frames with no backend
+(``tests/test_typeset_views.py``). Three things that cannot show there are what
+this is for:
 
   1. **Fonts through ``theme.load_fonts``.** The real callback, under the real runner:
-     Inconsolata is still the default font afterwards, every one of the library's
-     faces loaded through ``hello_imgui``'s loader, and nothing is left pending to be
-     read mid-session.
+     Inconsolata is still the default font afterwards and the library can draw in
+     the first frame.
   2. **A frame with a renderer.** A markdown document, two diffs, a stream, literal,
-     wrapped and whitespace-exact text and a document of parts through the seam, each
-     reporting glyphs drawn, none without a raster when it was drawn and none
-     replaced by U+FFFD when it was built. Those are two different counts
-     (``ViewCache.drawn`` and ``ViewCache.replaced``), and one view here is there to
-     show it: text no shipped face can set, which draws four glyphs with none
-     missing and two of them not what was written.
+     wrapped and whitespace-exact text and a document of parts through the seam.
+     Each view of the library's reports the vertices its draw added and that
+     everything in view was set as asked (``TypesetView.stats``), and nothing
+     handed over is left unset (``ViewCache.unbuilt``). The library has no count
+     of characters set as U+FFFD or borrowed from another face (request P9 of
+     ``HANDOFF-advtext.md``), so the view of text no shipped face can set is
+     drawn and only its ``whole`` is printed.
   3. **The switches, live.** Monospace prose and a palette change applied between
      frames: the first rebuilds the documents, the second (light to high contrast,
      nothing else changing) must not.
@@ -38,6 +39,7 @@ import argparse
 import sys
 import time
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -113,7 +115,31 @@ PARTS_TEXT = (
 )
 
 STAGES = (("dark", False), ("dark", True), ("light", False), ("high_contrast", False))
+
+KEYS = 10
+"""
+How many keys ``gui`` draws under.
+"""
+
+LIBRARY_KEYS = frozenset({"md", "edit", "edit-sbs", "parts", "unbroken", "stream"})
+"""
+The keys with a view of the library's: markdown, the two diffs, the document's
+markdown parts and the stream. The rest is text that is not markdown, which
+ImGui draws (``pptmstr/ui/typeset/views.py`` says why).
+"""
 FRAMES_PER_STAGE = 30
+
+
+def _drew(views: tuple[Any, ...]) -> tuple[int, bool]:
+    """
+    The vertices the last draw of some views added, and whether each set all in
+    view as asked. A diff view reports neither and counts as one vertex, whole.
+    """
+    stats = [getattr(view, "stats", None) for view in views]
+    return (
+        sum(1 if each is None else each.vertices for each in stats),
+        all(each is None or each.whole for each in stats),
+    )
 
 
 def main() -> int:
@@ -151,6 +177,8 @@ def main() -> int:
         frame = int(seen["frame"])  # type: ignore[call-overload]
         if frame == 0:
             seen["default_font"] = imgui.get_font().get_debug_name()
+            seen["could_draw"] = typeset.can_draw()
+            seen["why_not"] = typeset.unavailable_reason()
         started = time.perf_counter()
         viewport = imgui.get_main_viewport()
         imgui.set_next_window_pos(viewport.work_pos)
@@ -179,7 +207,7 @@ def main() -> int:
         typeset.plain(cache, "lit", LITERAL, colour=theme.P.diff_context)
         typeset.label("plain(wrap=True, mono=False)", colour=theme.P.text_dim)
         typeset.plain(cache, "wrapped", "A wrapped sentence. " * 12, wrap=True, mono=False)
-        typeset.label("document(): parts, one view", colour=theme.P.text_dim)
+        typeset.label("document(): parts", colour=theme.P.text_dim)
         typeset.document(cache, "parts", parts)
         typeset.label("font(): the faces as native ImGui text", colour=theme.P.text_dim)
         for weight in typeset.Weight:
@@ -250,7 +278,8 @@ def main() -> int:
             name, mono = STAGES[stage]
             screenshot._grab(args.out / f"typeset-seam-{name}-{'mono' if mono else 'prose'}.png")
             seen[f"stats-{stage}"] = {
-                key: (cache.drawn(key), cache.replaced(key)) for key in cache.keys()
+                key: (*_drew(cache.views(key)), cache.unbuilt(key), len(cache.views(key)))
+                for key in cache.keys()
             }
         if stage == len(STAGES) and at == 12:
             screenshot._grab(args.out / "typeset-seam-selection.png")
@@ -285,30 +314,30 @@ def main() -> int:
     immapp.run(params)
     edit_file.unlink(missing_ok=True)
 
-    fonts = typeset._STATE.fonts
     print(f"theme.load_fonts took {loading['s']:.2f}s")
     check("Inconsolata is still the default font", "Inconsolata" in str(seen.get("default_font")))
     check(
-        "every face loaded, none failed, none pending",
-        fonts is not None and fonts.failed == () and fonts.pending == (),
-        "" if fonts is None else f"failed={fonts.failed} pending={fonts.pending}",
+        "the library could draw in the first frame",
+        seen.get("could_draw") is True,
+        str(seen.get("why_not")),
     )
     for stage, (name, mono) in enumerate(STAGES):
         stats = dict(seen.get(f"stats-{stage}") or {})  # type: ignore[call-overload]
         no_face = stats.pop("no-face", None)
-        drawn = {k: (*v[0], v[1]) for k, v in stats.items() if v[0] is not None}
         label = f"{name}/{'mono' if mono else 'prose'}"
         check(
-            f"{label}: every view drew glyphs, none missing drawn, none replaced built",
-            len(drawn) == 9 and all(g > 0 and m == 0 and r == 0 for g, m, r in drawn.values()),
-            str(drawn),
+            f"{label}: all {KEYS} keys were drawn and nothing handed over is unset",
+            len(stats) == KEYS - 1 and all(left == 0 for _, _, left, _ in stats.values()),
+            str({key: left for key, (_, _, left, _) in stats.items()}),
         )
-        # (glyphs, missing) says nothing is wrong with this one. `replaced` does.
+        library = {key: each for key, each in stats.items() if each[3]}
         check(
-            f"{label}: characters no face has are four glyphs, none missing, two replaced",
-            no_face == ((4, 0), 2),
-            str(no_face),
+            f"{label}: every view of the library's added vertices and set all in view as asked",
+            set(library) == LIBRARY_KEYS
+            and all(vertices > 0 and whole for vertices, whole, _, _ in library.values()),
+            str({key: each[:2] for key, each in library.items()}),
         )
+        print(f"     {label}: characters no face has (vertices, whole, unset, views): {no_face}")
     # views[n] is the markdown view as stage n began, so as stage n-1 left it.
     views = seen["views"]
     check(

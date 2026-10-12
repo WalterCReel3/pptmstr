@@ -42,22 +42,30 @@ seam is on, RICH is what the pane shows until the operator picks a mode
 (``DEFAULT_MODE``, which has the measurements that decided it).
 
 **Typesetting.** ``RenderMode.TYPESET`` sets the log through ``typeset`` (the seam
-over the layout library). It is the one mode that wraps, colours by kind, selects
-text and culls at once, and it is made of a few views a frame, not one per run:
+over the layout library). **What is markdown is the library's and what is not is
+ImGui's**: OUTPUT and REASONING runs are read as markdown and set by the
+library, wrapped, selectable and culled; every other kind -- a tool call, its
+result, an error, a system line -- is literal text whose columns are content,
+and the library does not keep a monospace column (``typeset`` has the
+measurement; request P21 of ``HANDOFF-advtext.md``), so ImGui draws it in the
+chrome's font, unbroken, in its ``_KIND_COLOUR``. A fence inside a markdown run
+goes with its run and is the library's.
 
-- *closed* runs are the ``typeset.Part``s of a ``typeset.document``: OUTPUT and
-  REASONING as markdown, every other kind literal, monospace and unparsed, in its
-  ``_KIND_COLOUR`` role. One view is one selection across its runs and one culled
-  draw. A document holds one ``Generation`` of runs, ``_GENERATION_LINES`` lines or
-  so, and the oldest generation is what a long watch drops (``_TYPESET_KEEP``): it
-  is a view, so the room it took is known when it goes and nothing on screen moves
-  (``_trim``).
-- the *open* run -- the last one, which can still grow -- is a ``typeset.stream`` when
-  it is markdown, so text already committed is laid out once, read twenty times a
-  second (``_STREAM_EVERY_MS``), and ``typeset.plain`` when it is literal
-  (``_draw_run``).
-- a run that has *just closed* keeps the view it had until its document has built
-  its part, which for a long run is several frames (``_draw_generation``).
+- *closed* runs are the ``typeset.Part``s of a ``typeset.document``, which makes
+  one view of the library's for each markdown run. A document holds one
+  ``Generation`` of runs, ``_GENERATION_LINES`` lines
+  or so, and the oldest generation is what a long watch drops
+  (``_TYPESET_KEEP``): the room it took is known when it goes and nothing on
+  screen moves (``_trim``). A generation that is out of the pane is not drawn at
+  all (``_draw_generation``): a view costs a call whether or not it is in sight,
+  and the scrollback is most of a log.
+- the *open* run -- the last one, which can still grow -- is a ``typeset.stream``
+  when it is markdown, so text already committed is laid out once and what
+  arrived is read in the frame that draws it, and ``typeset.plain`` when it is
+  literal (``_draw_run``).
+- a run that *closes* is a part of its document in the frame it closes. The
+  seam reads and lays out what it is handed in the call that draws it, so there
+  is no frame in which the run is in neither place or in both.
 
 A kind change closes the open run, so a fence a model left open ends with its run
 instead of styling the rest of the session. Nothing else closes it: an open stream
@@ -66,10 +74,20 @@ the next one to go on. ``TypesetFeed`` is the part of this that needs no ImGui.
 What the mode costs is on ``DEFAULT_MODE``, and where it is bounded on
 ``_TYPESET_WINDOW`` and ``_TYPESET_KEEP``.
 
-The seam has no find-in-text, so a search demotes this mode to the line path as it
-does RICH. REASONING is a dimmed markdown part, left out of the parts when the
-checkbox is off. Follow-the-tail has one owner, ``widgets.follow_tail``: the stream is
-made with the seam's ``follow`` off.
+What the split costs: a selection is inside one of the library's views, so it
+ends with its run, and a literal run is copied whole from the context menu and
+not by dragging. A table changes its columns' widths in the
+frame its run closes (request P19).
+
+A search demotes this mode to the line path as it does RICH: nothing here marks
+or scrolls to a match in typeset text. REASONING is a dimmed markdown part, left
+out of the parts when the checkbox is off. Follow-the-tail has one owner,
+``widgets.follow_tail``: the stream is made with the seam's ``follow`` off.
+
+**When the library stops.** A view can stop inside its draw. That frame says why
+where the text would be (the seam's sentence); from the next the seam is off and
+the pane is in WRAP, with the operator's choice of mode kept for the day it is
+back. The feeds are dropped with it (``draw``).
 """
 
 from __future__ import annotations
@@ -96,27 +114,21 @@ _TYPESET_WINDOW = 400
 """
 How many lines one ``TypesetFeed.advance`` will typeset; older ones are skipped.
 
-Parsing and laying out markdown is paid once per line and is not cheap, about
-0.4 ms, and without a bound a long session is seconds of it. The seam spreads a
-document and a stream over frames and this pane declines the frame's free
-allowance for both (``_stream``, ``_draw_generation``), so the window does not set
-the length of the first frame, only how many frames pass before the text is
-whole. Measured on a session of 5,000 lines: the first frame is 37 ms at 200
-lines, 56 to 61 at 400 and 38 at 800 -- it follows what the first piece under the
-window's top happens to be -- and the rest arrives over 10, 16 and 31 frames of
-15 to 18 ms at the median, none longer than the first. When the tail is a single
-open markdown run the first frame is 39, 25 to 30 and 20 ms, and the stream then
-reads a piece of forty lines at each reading (``_STREAM_EVERY_MS``), a frame of 20
-to 36 ms in every three: five of them at 200 lines, ten at 400, twenty at 800.
+A text is read and laid out in the frame that first draws it, once, and that is
+the frame this bounds: the first on a node, and a sub-agent's whole message.
+Measured here (``scripts/bench_panes.py --typeset on``, headless, load average 3
+to 10, a pane of 900 by 700): the first frame on a session of 1,080 to 10,080
+lines is 23 to 71 ms with this window, against RICH's 25 and 227; on 400 turns
+of three runs each it is 26 to 93 ms for the last 400 lines (50 views) and 176
+to 362 ms with every one of 3,199 lines taken in (400 views), 593 once with the
+machine at other work. About half of it is reading the markdown, a part at a
+time.
 
-400 is ten panes' worth of scrollback inside a third of a second, on a first frame
-shorter than RICH's return to a node (67 ms at the median, 120 at the 95th
-percentile). 800 is half a second of building with a full collection of 60 ms in
-it, and four fifths of ``_TYPESET_KEEP``: a feed that was then watched would start
-dropping what it had just built. The pane says how many lines it left out and
-where to read them (RAW). The bound is on what one advance takes in, not on what
-the feed holds: lines that arrive while the node is watched are added as they
-come, up to ``_TYPESET_KEEP``.
+400 is ten panes' worth of scrollback in a first frame no longer than RICH's.
+The pane says how many lines it left out and where to read them (RAW). The
+bound is on what one advance takes in, not on what the feed holds: lines that
+arrive while the node is watched are added as they come, up to
+``_TYPESET_KEEP``.
 """
 
 _TYPESET_KEEP = 1000
@@ -125,20 +137,13 @@ How many lines of closed runs a ``TypesetFeed`` holds before it drops its oldest
 ``Generation``.
 
 The window above bounds one advance, so a transcript watched while it streams
-would otherwise hold every run it was ever shown. Measured over 20,000 lines
-streamed into a watched pane with this bound: 5.3 ms at the median over the first
-2,000 lines and 5.9 over the last, 32 and 33 ms at the slowest, and a full
-collection by Python's collector, which lands in a frame, 109 ms at the median
-and 134 at most. RICH gains the same 0.8 ms over that stream: it is the line
-cache, which every mode has.
-
-What the bound buys is the collector's pause, which follows what is alive. With
-no bound, and with the stream read on every frame (not run since it is read
-every ``_STREAM_EVERY_MS``), the median frame went from 7 ms to 9.4 over that
-stream, the slowest frame a run closed in from 36 ms to 126, and a full
-collection reached 646 ms; holding 1,000, 2,000 and 4,000 lines the pause was
-121, 166 and 243 ms and the frame 6.8 ms at each, a generation out of sight
-costing 0.015 ms. A thousand is two and a half windows of scrollback.
+would otherwise hold every run it was ever shown, each markdown run a view of
+the library's. What a held line costs a frame is small, because a generation out
+of the pane is not drawn: on 400 turns the idle frame is 0.6 to 1.1 ms holding
+399 lines in 50 views and 0.9 to 1.6 ms holding 3,199 in 400 (same runs). What it
+costs to hold is memory, and the first frame at another width, when every
+generation is laid out again whether or not it is in sight. A thousand is two
+and a half windows of scrollback.
 
 The lines dropped are counted in the row that says where to read them.
 """
@@ -148,25 +153,10 @@ _GENERATION_LINES = 250
 How many lines of closed runs go into one ``Generation`` before the next is started.
 
 A generation is what the feed drops whole, so this is how far past
-``_TYPESET_KEEP`` it gets and how much scrollback goes at once; it is also how many
-parts a document walks when a run closes. Holding 1,000 lines of the bench's
-report is three or four of them.
-"""
-
-_STREAM_EVERY_MS = 50.0
-"""
-How often the open run's stream reads what has arrived, in milliseconds.
-
-Each reading lays the block still arriving out again, which is most of what a
-token costs in this mode and nearly all of what a stream gives Python's collector
-to do. Read on every frame that is paid sixty times a second; read every 50 ms it
-is paid twenty, and what arrives between two readings is on screen at most three
-frames after it arrived. Measured on the bench's stream of a token a frame: the
-median frame is 5.9 ms where it was 7.9, the frame that reads still 9 to 10, and
-the frames of a 20,000-line watch ran 10,000 collections where they ran 13,800.
-
-The seam keeps frames coming while a stream holds text it has not read
-(``typeset.pending``), so the last words of a turn do not wait for the mouse.
+``_TYPESET_KEEP`` it gets and how much scrollback goes at once. It is also what
+is drawn or left alone as one: every view of a generation any part of which is
+in the pane is drawn, thirty or so at this size, which is most of the idle
+frame above; and it is how many parts the seam walks when a run closes.
 """
 
 _FEED_KEEP_S = 60.0
@@ -181,8 +171,9 @@ sixty while an agent works.
 The line cache is dropped early because it holds a whole transcript. A feed holds
 at most ``_TYPESET_KEEP`` lines of one, and laid out, which is the expensive part:
 dropping it with the lines would make every return to a node the first frame
-again, on each ``j``/``k`` between two agents being watched in turn. Kept, the return
-costs the line rebuild (4 ms at 5,000 lines) and one culled draw.
+again, on each ``j``/``k`` between two agents being watched in turn. Kept, the
+return costs the line rebuild and one culled draw: 4.0 ms at 5,040 lines,
+measured (``scripts/bench_panes.py --only prune``), against RICH's 68.
 """
 
 _CACHE_KEEP_S = 2.0
@@ -214,33 +205,39 @@ DEFAULT_MODE = RenderMode.RICH
 What the pane shows until the operator picks a mode, while the seam is on. With
 the seam off it is WRAP, the pane as it was before there was a seam.
 
-The log is markdown by default, and of the two modes that read markdown RICH is
-the one with no long frame in it; TYPESET is one radio button away. The rule is
-that TYPESET is the default if it streams within 2 ms a frame of RICH at 1,000
-and at 10,000 lines **and** leaves no recurring frame over 30 ms in a long watch.
-It meets the first half and not the second. Measured here, in a pane of 900 by
-700 on text that does not repeat (``scripts/bench_panes.py --typeset on --only
-transcript``, twice, and 20,000 lines streamed sixteen characters a frame into a
-watched pane, with the collector on and its pauses timed apart from the frames):
+The log is markdown by default, and TYPESET is one radio button away. The rule
+recorded for moving it there is about cost: TYPESET is the default if it streams
+within 2 ms a frame of RICH at 1,000 and at 10,000 lines **and** leaves no
+recurring frame over 30 ms in a long watch. **By measurement it now meets the
+first half outright and the second as RICH does (one full collection in a watch
+of 52,313 frames, twice), and the default has not moved**, for a reason the
+rule does not hold: nobody has looked at the library's text in this pane, and a
+fenced block inside a markdown run is set by the library, which does not keep a
+monospace column (request P21 of ``HANDOFF-advtext.md``). What an operator
+reads first is theirs to choose after seeing it.
 
-- **A token a frame.** TYPESET's median frame is 5.9 ms at 1,000 lines, 5.9 at
-  10,000 and 6.7 at 100,000; RICH's is 4.2, 4.4 and 6.7. Idle they are 5.1 to 5.3
-  against 4.2 to 5.8. Two frames in three read nothing (``_STREAM_EVERY_MS``) and
-  are the median; the one that reads is the 95th percentile, 9.6 to 10.4 ms
-  against RICH's 4.3 to 4.7, and 6.9 at 100,000 lines.
-- **A run that closes** is parsed and laid out again as a part, twenty source
-  lines a frame: 25 to 34 ms for each of the two or three frames a markdown run of
-  thirty lines or more takes, about 4 ms of it the parse and the rest laying the
-  piece out and drawing it. Over the watch 83 frames in 42,300 were over 30 ms
-  and the longest was 34.5; RICH's longest was 7.9. ``_draw_generation`` keeps the
-  text on screen meanwhile and cannot make it cheaper.
-- **The collector** is what fails the rule. TYPESET's frames ran 9,980
-  collections and RICH's 138, and a full one stops the frame it lands in for as
-  long as there is heap to walk: 69 of them for TYPESET, one in every 600 frames,
-  109 ms at the median and 134 at most with ``_TYPESET_KEEP`` lines alive; one for
-  RICH, 48 ms. Over 6,000 lines with everything alive at start-up put out of the
-  collector's reach (``gc.freeze``) a full collection was 59 ms at the median,
-  and 35 holding 400 lines: still over, and as often.
+Measured here on 2026-10-12 (``scripts/bench_panes.py --typeset on --only
+transcript watch``; headless, nothing rasterised, CPU ms inside this pane's
+draw, a pane of 900 by 700, text that does not repeat, load average 3 to 10):
+
+- **Nothing new.** TYPESET's median frame is 0.23 ms at 1,080 lines and 0.27 at
+  10,080; RICH's is 5.9 and 6.0, WRAP's 1.0 and 2.2.
+- **A token a frame.** TYPESET 1.2 and 1.4 ms at the median and 2.0 and 1.6 at
+  the 95th percentile; RICH 6.2 and 6.5; WRAP 1.1 and 2.7.
+- **The first frame** on a session is 23 to 71 ms for TYPESET, which takes in
+  the last ``_TYPESET_WINDOW`` lines whatever the length; RICH's is 25 ms at
+  1,080 lines and 227 at 10,080; WRAP's 2.5 and 12.
+- **A session watched from its first line**, 20,040 lines sixteen characters a
+  frame, 52,313 frames, the collector on and its pauses timed apart, twice:
+  TYPESET's median frame is 1.1 to 1.3 ms and its 95th percentile 1.8 to 2.2,
+  with one full collection in each watch, 40 and 56 ms. RICH: 5.5 to 5.8 and
+  8.3 to 8.4 ms, one full collection in each, 43 and 61 ms. WRAP: 1.9 to 2.6
+  and 4.7 to 5.4 ms, no full collection. Frames over 16.6 ms were 1 and 16
+  for TYPESET, 35 and 24 for RICH, 0 and 40 for WRAP: the 40 are in a watch
+  with no collection at all, on a machine running other work, so that count
+  says more about the machine than the mode. In three watches of 5,040 lines
+  TYPESET had no full collection, and its longest frame was 5.6, 9.1 and
+  14.0 ms.
 """
 
 
@@ -302,33 +299,39 @@ class OpenRun:
     """
     The last run, which the next bytes may extend.
 
-    ``fresh`` is the text not yet handed to the run's stream; ``pieces`` is all of it.
-    ``lines`` counts the transcript lines fed whole.
+    ``pieces`` is its text as it arrived and ``lines`` counts the transcript lines
+    fed whole.
     """
 
     run: int
     kind: SegmentKind
     pieces: list[str] = field(default_factory=list)
-    fresh: list[str] = field(default_factory=list)
     lines: int = 0
+    _literal: tuple[str, str] = ("", "")
 
     def add(self, text: str) -> None:
         self.pieces.append(text)
-        self.fresh.append(text)
 
     @property
     def text(self) -> str:
+        """
+        **The same object until more arrives**, which is what lets a frame with
+        nothing new compare nothing.
+        """
         if len(self.pieces) > 1:
             self.pieces = ["".join(self.pieces)]
         return self.pieces[0] if self.pieces else ""
 
-    def take(self) -> str:
+    @property
+    def literal(self) -> str:
         """
-        The text that arrived since the last ``take``.
+        The text as a literal run is set (``_literal``); the same object until
+        more arrives, as ``text`` is.
         """
-        taken = "".join(self.fresh)
-        self.fresh.clear()
-        return taken
+        text = self.text
+        if self._literal[0] is not text:
+            self._literal = (text, _literal(text))
+        return self._literal[1]
 
 
 @dataclass
@@ -336,23 +339,14 @@ class Generation:
     """
     Consecutive closed runs set as one ``typeset.document``, under one key.
 
-    ``runs[:settled]`` are the runs the document has shown whole. The ones after
-    them are being *handed over*: the document has been given their parts and has
-    not finished building them, and meanwhile each is still drawn by the view it
-    had while it was the open run (``_draw_generation``).
-
-    The measurements are of the last frame the generation was drawn: ``height`` and
-    ``room`` are what its document claimed and how far it moved the cursor when it
-    showed the settled runs and nothing else, ``extent`` is how far the whole
-    generation moved it, and ``in_sight`` whether any of that was on screen.
+    The measurements are of the last frame the generation was drawn: ``extent``
+    is how far it moved the cursor and ``in_sight`` whether any of that was on
+    screen.
     """
 
     serial: int
     runs: list[ClosedRun] = field(default_factory=list)
     lines: int = 0
-    settled: int = 0
-    height: float = 0.0
-    room: float = 0.0
     extent: float = 0.0
     in_sight: bool = False
     _revision: int = 0
@@ -419,8 +413,7 @@ class TypesetFeed:
 
     Fed from ``NodeTranscript.lines`` by a line cursor, lazily -- only by a draw in
     this mode. The cursor and the views it has fed are one object and are dropped
-    as one (``TranscriptState.prune``): a stream that outlived its cursor would be
-    fed the same text again.
+    as one (``TranscriptState.prune``).
 
     A feed may outlive the ``NodeTranscript`` it read (``_FEED_KEEP_S``). That is
     sound because the lines are a function of the transcript's bytes alone, however
@@ -691,9 +684,11 @@ class TranscriptState:
     # RICH mode's own hover/context-menu latch -- see RichState's docstring for why
     # it is a separate field rather than reusing context_run.
     rich: rich_pane.RichState = field(default_factory=rich_pane.RichState)
-    # TYPESET's context-menu latch: the view under the mouse, by its key in the
-    # node's ``TypesetFeed.views``, and the block of it. Latched as context_run is.
-    typeset_target: tuple[Hashable, int] | None = None
+    # TYPESET's context-menu latch: the run under the mouse, where there is one,
+    # and the text of the block of it. Latched as context_run is, and as text
+    # rather than as a place in a view: a run can close while the menu is open,
+    # and what is copied is what was clicked.
+    typeset_target: tuple[int | None, str] | None = None
 
     def shown_mode(self) -> RenderMode:
         """
@@ -794,6 +789,12 @@ def draw(
     cache.sync(record.transcript, pinned)
 
     mode = state.shown_mode()
+    if state.feeds and not typeset.enabled(typeset.Pane.CONTEXT):
+        # A feed is the library's views of lines this pane still has. With the
+        # seam off they are views nothing draws, and after the library stopped
+        # they are views of a library that may never draw again: the lines set
+        # them again in one frame if it does.
+        state.feeds.clear()
 
     # RICH and TYPESET demote to the line path while a search filter is active --
     # see the module docstring's "Rendering" section for why block-level filtering
@@ -979,74 +980,36 @@ def _draw_rich(state: TranscriptState, cache: NodeTranscript, live: Block | None
 
 def _run_key(run: int) -> tuple[str, int]:
     """
-    The key of the view a run is drawn by while it is open, and while it is handed over.
+    The key of the view the open run is drawn by.
     """
     return ("open", run)
 
 
-def _tail_key(run: int) -> tuple[str, int]:
+def _draw_run(views: typeset.ViewCache, run: OpenRun, live: list[Hashable]) -> None:
     """
-    The key of the view that draws an open literal run's unfinished last line.
+    The open run in a view of its own: a stream for markdown, which lays out once
+    what is committed and reads what arrived, and ImGui's text for the rest.
     """
-    return ("tail", run)
-
-
-def _stream(views: typeset.ViewCache, run: int) -> typeset.Stream:
-    """
-    The stream a markdown run is read into, made on first asking.
-
-    Every call site asks through here: the seam reads a stream's arguments when
-    it makes one, so whichever asked first would otherwise decide them.
-    ``free_allowance=False`` is for a stream opened on a run that is already long,
-    which is then read a piece a frame.
-    """
-    return typeset.stream(views, _run_key(run), every_ms=_STREAM_EVERY_MS, free_allowance=False)
-
-
-def _draw_run(
-    views: typeset.ViewCache,
-    run: int,
-    kind: SegmentKind,
-    text: str,
-    live: list[Hashable],
-    *,
-    closed: bool = False,
-) -> None:
-    """
-    One run in a view of its own: a stream for markdown, literal text for the rest.
-    The keys it drew under, and the ones it wants kept, are added to ``live``.
-
-    An open literal run is two views, its whole lines and the line still arriving.
-    ``typeset.plain`` builds the last sixty lines or so of a text again whenever the
-    text changes (measured here: 6 ms), and a line that arrives a token at a time
-    would pay that every frame; the second view is one line, so those frames cost
-    what a frame with nothing new does, and the 6 ms is paid once a line.
-    """
-    ink = getattr(P, _KIND_COLOUR[kind])
-    key = _run_key(run)
-    if kind in _MARKDOWN_KINDS:
-        _stream(views, run).draw(ink=None if kind is SegmentKind.OUTPUT else ink)
-        live.append(key)
+    ink = getattr(P, _KIND_COLOUR[run.kind])
+    key = _run_key(run.run)
+    live.append(key)
+    if run.kind not in _MARKDOWN_KINDS:
+        typeset.plain(views, key, run.literal, colour=ink)
         return
-    cut = len(text) if closed else text.rfind("\n") + 1
-    if whole := _literal(text[:cut]):
-        typeset.plain(views, key, whole, colour=ink)
-        live.append(key)
-    if closed:
-        return
-    if text[cut:]:
-        if whole:
-            # Straight under the lines above, where it will be once it is one of them.
-            imgui.set_cursor_pos_y(imgui.get_cursor_pos_y() - imgui.get_style().item_spacing.y)
-        typeset.plain(views, _tail_key(run), text[cut:], colour=ink)
-    # Kept between the lines it draws: a view is dearer to make than to change.
-    live.append(_tail_key(run))
+    stream = typeset.stream(views, key)
+    text = run.text
+    # By length and not by what was last handed over: a stream made again (the
+    # reasoning shown after being hidden, a feed kept across a stop) is given
+    # everything, and one that has it all is given nothing.
+    if len(stream.text) < len(text):
+        stream.append(text[len(stream.text) :])
+    stream.draw(ink=None if run.kind is SegmentKind.OUTPUT else ink)
 
 
 def _draw_typeset(state: TranscriptState, feed: TypesetFeed, cache: NodeTranscript) -> None:
     # The scrollbar is always there so that the measure does not change, and every
     # paragraph re-break, on the frame the text first outgrows the pane. Literal
-    # runs and fenced code are never broken, hence the horizontal one.
+    # runs are never broken, hence the horizontal one.
     flags = (
         imgui.WindowFlags_.always_vertical_scrollbar.value
         | imgui.WindowFlags_.horizontal_scrollbar.value
@@ -1056,13 +1019,8 @@ def _draw_typeset(state: TranscriptState, feed: TypesetFeed, cache: NodeTranscri
         return
 
     show = state.show_reasoning
-    run = feed.open
-    # Every view drawn this frame, in the order drawn.
+    # Every key drawn this frame, in the order drawn.
     live: list[Hashable] = []
-    if run is not None and run.kind in _MARKDOWN_KINDS:
-        # Fed whether or not it is drawn, so showing reasoning again does not
-        # lay out everything that arrived while it was hidden in one frame.
-        _stream(feed.views, run.run).append(run.take())
 
     announced = feed.skipped > 0
     lost = _trim(feed)
@@ -1080,16 +1038,15 @@ def _draw_typeset(state: TranscriptState, feed: TypesetFeed, cache: NodeTranscri
     shown = feed.shown_open(show)
     if not feed.generations and shown is None and not feed.skipped:
         imgui.text_disabled("(nothing yet)")
-    for generation in tuple(feed.generations):
+    for generation in feed.generations:
         _draw_generation(feed, generation, show, live)
     if shown is not None:
-        _draw_run(feed.views, shown.run, shown.kind, shown.text, live)
-    # An open run the filter hides keeps its stream: it is still being fed.
-    feed.views.prune(live if run is None else [*live, _run_key(run.run)])
+        _draw_run(feed.views, shown, live)
+    feed.views.prune(live)
 
     if not imgui.is_popup_open(_CONTEXT_ID):
         hovered = imgui.is_window_hovered()
-        state.typeset_target = _typeset_pointed(feed, live) if hovered else None
+        state.typeset_target = _typeset_pointed(feed, live, show) if hovered else None
     _draw_typeset_menu(state, feed, cache)
 
     end = imgui.get_cursor_pos_y()
@@ -1128,23 +1085,15 @@ def _draw_generation(
     feed: TypesetFeed, generation: Generation, show: bool, live: list[Hashable]
 ) -> None:
     """
-    One generation: its document, and under it the runs still being handed over.
+    One generation, as one document. A run that closed is in it from the frame it
+    closed: the seam reads and lays out what it is handed in the call that draws it.
+    Each run is a view of its own (``apart``), as it was while it was open, so it
+    is where it was: joined to a markdown run above it, it would be set the
+    library's block gap under that run and not ImGui's item spacing, 2.1 px
+    lower for a paragraph under a paragraph, in the frame it closed.
 
-    **A run that closes is not swapped for its part in one frame.** The document is
-    given the part at once and builds it as the seam's budget allows, which for a
-    long run is several frames, and it shows what it has built so far. Until it has
-    built all of it the run stays on screen in the view it already had -- its
-    stream, closed -- and the document is drawn clipped to the height it had before,
-    with the cursor put back where that ended. The frame after the document is
-    whole the run's own view is dropped and the clip with it.
-
-    **The document is asked to build wherever it is, and a small piece a frame**
-    (``build_hidden``, ``free_allowance=False``). By the seam's rule a document that
-    is whole and out of sight builds nothing, so one that scrolled away would
-    never take its new runs and their own views would be kept for ever. And the
-    frame's free allowance is the whole of an ordinary run in the frame it closes,
-    30 to 45 ms, which nothing here needs: the run's own view is what is read
-    until ``ViewCache.unbuilt`` says the part is whole.
+    Out of the window and unchanged, the document rests (``typeset.document``):
+    a generation is twenty views or more, and the scrollback is most of the log.
     """
     start = imgui.get_cursor_pos_y()
     wide = max(1.0, imgui.get_content_region_avail().x)
@@ -1152,100 +1101,62 @@ def _draw_generation(
         imgui.ImVec2(wide, generation.extent)
     )
     parts = generation.parts(show)
-    handing = generation.runs[generation.settled :]
-    bridged = [
-        run
-        for run in handing
-        if (_run_key(run.run) in feed.views or _tail_key(run.run) in feed.views)
-        and (show or run.kind is not SegmentKind.REASONING)
-    ]
-    whole = True
-    # What the document claims this frame, for all the runs it has been given.
-    height = room = 0.0
     if parts:
         live.append(generation.key)
-        if bridged:
-            at = imgui.get_cursor_screen_pos()
-            edge = imgui.get_window_pos().x + imgui.get_window_size().x
-            imgui.push_clip_rect(at, imgui.ImVec2(edge, at.y + generation.height), True)
-        height = typeset.document(
-            feed.views, generation.key, parts, build_hidden=True, free_allowance=False
-        )
-        room = imgui.get_cursor_pos_y() - start
-        whole = not feed.views.unbuilt(generation.key)
-        if bridged:
-            imgui.pop_clip_rect()
-            imgui.set_cursor_pos_y(start + generation.room)
-    if whole or not bridged:
-        # From the next frame the document is drawn for what it holds now.
-        generation.height, generation.room = height, room
-    for run in bridged:
-        if run.kind in _MARKDOWN_KINDS:
-            # Whatever arrived in the frame the run closed, and the end of the
-            # text: the last block is settled and an open fence closed.
-            _stream(feed.views, run.run).set_text(run.part.text, closed=True)
-        _draw_run(feed.views, run.run, run.kind, run.part.text, live, closed=True)
+        typeset.document(feed.views, generation.key, parts, rests=True, apart=True)
     generation.extent = imgui.get_cursor_pos_y() - start
 
-    if whole:
-        generation.settled = len(generation.runs)
 
-
-def _typeset_pointed(feed: TypesetFeed, drawn: Sequence[Hashable]) -> tuple[Hashable, int] | None:
+def _typeset_pointed(
+    feed: TypesetFeed, drawn: Sequence[Hashable], show: bool
+) -> tuple[int | None, str] | None:
     """
-    The view and block under the mouse, or ``None`` between blocks.
-
-    The last view drawn is asked first: a document being handed a run is laid out
-    under that run's own view, where it is clipped away.
+    The run under the mouse and the text of the block of it, or ``None`` between
+    blocks. A block is a paragraph, a fence, a table, or a whole literal run.
     """
-    for key in reversed(drawn):
-        view = feed.views.view(key)
-        block = None if view is None else view.under_mouse().block
-        if block is not None:
-            return (key, block)
+    for key in drawn:
+        found = feed.views.pointed(key)
+        if found is not None:
+            part, text = found
+            return (_typeset_run(feed, key, part, show), text)
     return None
 
 
-def _typeset_run(feed: TypesetFeed, target: tuple[Hashable, int], show: bool) -> int | None:
+def _typeset_run(feed: TypesetFeed, key: Hashable, part: int, show: bool) -> int | None:
     """
-    The run a block of a view belongs to, as its index in ``NodeTranscript.run_starts``.
+    The run a part of a key belongs to, as its index in ``NodeTranscript.run_starts``.
+
+    A generation's document holds only the parts the reasoning filter lets
+    through, so its part numbers are not the generation's run numbers.
     """
-    key, block = target
     generation = feed.generation(key)
     if generation is None:
-        # A run's own view, which is keyed by the run.
+        # The open run's view, which is keyed by the run.
         return key[1] if isinstance(key, tuple) and isinstance(key[1], int) else None
-    part = feed.views.part_at(key, block)
     runs = generation.shown(show)
-    return runs[part].run if part is not None and part < len(runs) else None
+    return runs[part].run if 0 <= part < len(runs) else None
 
 
 def _draw_typeset_menu(state: TranscriptState, feed: TypesetFeed, cache: NodeTranscript) -> None:
     """
     Copy the selection, the block or the run that was right-clicked, or everything shown.
 
-    A block is a paragraph, a fence or a literal run. The run is copied as the line
-    modes copy it: whole and unfiltered, from the lines, so a run the window cut
-    short at the top is copied from its first line.
+    The run is copied as the line modes copy it: whole and unfiltered, from the
+    lines, so a run the window cut short at the top is copied from its first line.
+    A selection is inside one of the library's views, so it ends with its run.
     """
     if not imgui.begin_popup_context_window(_CONTEXT_ID, imgui.PopupFlags_.mouse_button_right):
         return
 
     for key in feed.views.keys():
-        view = feed.views.view(key)
-        if view.owns_selection and (selected := view.selected_text()):
-            if imgui.menu_item_simple("copy selection"):
-                imgui.set_clipboard_text(selected)
+        if (selected := feed.views.selected(key)) and imgui.menu_item_simple("copy selection"):
+            imgui.set_clipboard_text(selected)
     if state.typeset_target is not None:
-        key, block = state.typeset_target
-        view = feed.views.view(key)
-        # The view can be gone, or shorter, if a run closed while the menu was open.
-        if view is not None and block < len(view.document.blocks):
-            if imgui.menu_item_simple("copy block"):
-                imgui.set_clipboard_text(view.block_text(block))
-            run = _typeset_run(feed, state.typeset_target, state.show_reasoning)
-            if run is not None:
-                _copy_run_item(cache, run)
+        run, block = state.typeset_target
+        if block and imgui.menu_item_simple("copy block"):
+            imgui.set_clipboard_text(block)
+        if run is not None:
+            _copy_run_item(cache, run)
     if imgui.menu_item_simple("copy visible"):
         imgui.set_clipboard_text(feed.visible_text(state.show_reasoning))
     imgui.end_popup()

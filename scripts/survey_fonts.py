@@ -659,32 +659,36 @@ def render_one(name: str, out: Path) -> int:
     imgui-bundle whose loader is FreeType applies a face's hinting, and one on
     stb_truetype applies none.
 
-    A character the candidate's regular face does not map is drawn as ImGui's
-    fallback glyph and is **not** counted by the view's ``DrawStats.missing``,
-    which counts something else. So the unmapped characters of ``MARKDOWN`` are
-    worked out here from the ``cmap`` and printed beside the draw statistics.
+    The library reports no count of characters a face lacks (``TypesetView.stats``
+    has vertices and whether everything in view was set as asked). So the
+    unmapped characters of ``MARKDOWN`` are worked out here from the ``cmap``
+    and printed beside what the views report.
+
+    Needs the imtypeset library (``IMTYPESET_LIBRARY``, ``IMTYPESET_PYTHON``):
+    the views are the library's, and without it this says why and exits 1.
 
     What it does not show: any subpixel or LCD rendering,
     a high-DPI display, or pptmstr's own panes.
     """
     from advtext import (
         Align,
-        BareView,
         BlockKind,
         Face,
         Faces,
         Palette,
         Theme,
-        build_document,
-        char_measure,
-        fontlib_metrics,
-        load_faces,
+        TypesetView,
         register_font,
+        typesetter,
     )
     from imgui_bundle import hello_imgui, imgui, immapp
     from OpenGL import GL
     from screenshot import write_png
 
+    if typesetter.module() is None:
+        print(f"FAIL {name}: the library cannot draw: {typesetter.reason()}")
+        return 1
+    out = out.resolve()
     roboto, inconsolata = shipped()
     if name == roboto.name:
         family = roboto
@@ -726,20 +730,14 @@ def render_one(name: str, out: Path) -> int:
         }
     )
     ground, panel = _colour(0x14161C), _colour(0x1A1D26)
-    views = [
-        BareView(
-            document=build_document(MARKDOWN, theme, fontlib_metrics),
-            theme=theme,
-            measure=char_measure(fontlib_metrics),
-            px_per_inch=theme.px_per_inch,
-        )
-        for theme in themes
-    ]
-    seen: dict[str, Any] = {"frame": 0, "fonts": None, "stats": [], "done": False}
+    views = [TypesetView(MARKDOWN, theme=theme, palette=palette) for theme in themes]
+    seen: dict[str, Any] = {"frame": 0, "ready": False, "stats": [], "done": False}
 
     def load_fonts() -> None:
         hello_imgui.imgui_default_settings.load_default_font_with_font_awesome_icons()
-        seen["fonts"] = load_faces()
+        # Last, so that Fonts[0] stays the default font: the registrations above
+        # are the files the library loads for the prose roles.
+        seen["ready"] = typesetter.load_fonts()
 
     def gui() -> None:
         viewport = imgui.get_main_viewport()
@@ -759,7 +757,9 @@ def render_one(name: str, out: Path) -> int:
                 f"##pane-{number}", imgui.ImVec2(LINE_PX, 0.0), imgui.ChildFlags_.borders.value
             )
             top = imgui.get_cursor_pos_y()
-            stats.append(view.draw(fonts=seen["fonts"], palette=palette))
+            if seen["ready"]:
+                view.draw(palette=palette)
+                stats.append(view.stats)
             heights.append(imgui.get_cursor_pos_y() - top)
             imgui.end_child()
             imgui.end_group()
@@ -808,12 +808,19 @@ def render_one(name: str, out: Path) -> int:
     params.callbacks.show_gui = gui
     params.callbacks.before_swap = before_swap
     params.callbacks.after_swap = after_swap
+    # The library's context goes before the ImGui context its fonts are on.
+    params.callbacks.before_exit = typesetter.unload
     immapp.run(params)
 
+    if not seen["ready"]:
+        print(
+            f"FAIL {name}: the library cannot draw: {typesetter.reason() or typesetter.trouble()}"
+        )
+        return 1
     if not seen["done"]:
         print(f"FAIL {name}: the window closed before a frame was grabbed")
         return 1
-    drawn = " ".join(f"glyphs={s.glyphs}" for s in seen["stats"])
+    drawn = " ".join(f"vertices={s.vertices},whole={s.whole}" for s in seen["stats"])
     cmap = _font(family.regular).getBestCmap() or {}
     unmapped = "".join(sorted({c for c in MARKDOWN if not c.isspace() and ord(c) not in cmap}))
     heights = " ".join(f"{height:.0f}" for height in seen["heights"])

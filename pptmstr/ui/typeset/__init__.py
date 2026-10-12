@@ -33,8 +33,9 @@ text can be had at all, which is the library drawing and at least one pane
 adopted. The Text menu and the settings dialog offer their switches by it, and
 say ``unavailable_reason()``, one sentence, when it is false.
 
-**BRIEF, BOARD, DETAIL and INBOX are in ``ADOPTED``, and the settings dialog
-draws its samples through the same calls.** CONTEXT draws with its own renderer.
+**Every pane is in ``ADOPTED``, and the settings dialog draws its samples
+through the same calls.** CONTEXT's typeset branch is one of four modes of the
+log and not the one it starts in (``transcript_pane.DEFAULT_MODE``).
 
 **The library sets markdown, and ImGui draws text that is not markdown**
 (``themes.native``): monospace set by the library does not keep its columns, by

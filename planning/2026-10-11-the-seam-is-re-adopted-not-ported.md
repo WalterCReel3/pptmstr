@@ -180,6 +180,52 @@ under the body. The inbox row's field names and values are ImGui's chrome
 font: the proportional face has no arrow or tick and a native line has no
 fallback.
 
+**Step 3 as built (`SEAM-3`):** CONTEXT is in `roles.ADOPTED`, which is now
+every pane. The log's TYPESET mode hands the library its markdown runs (OUTPUT
+and REASONING) and ImGui every other kind, by the same measurement as the
+approval's diff: a tool call, its result and an error are text whose columns
+are content. A fence inside a markdown run goes with its run. So a document of
+closed runs is **a view of the library's for each markdown run**, not one
+view: fifty views for the last 400 lines of a session of three-run turns.
+Three things follow, each by a run
+(`scripts/bench_panes.py --typeset on --only views watch transcript prune`):
+
+- **A view out of the window is not free**, 0.03 to 0.04 ms a frame each (the
+  call, the hit test, the keys; the library culls only its glyphs): 400 views
+  held with none culled is 11 to 17 ms a frame with nothing new (four runs,
+  load average 3 to 10). So `typeset.document(rests=True)` leaves a document
+  alone that is out of the window and is handed the tuple, measure and theme
+  it was last drawn with, and claims the room that draw measured; the same 400
+  views are then 0.9 to 1.6 ms.
+  Only the log asks for it. A cheaper draw of a view nobody can see is request
+  P30.
+- **Nothing is handed over across frames.** A run that closes is a part of
+  its document in the frame it closes, where it was. "Where it was" is why
+  each markdown run keeps a view of its own (`typeset.document(apart=True)`):
+  joined to a markdown run above it, a run would be set the library's block
+  gap under that run and not ImGui's item spacing, measured 2.1 px lower for a
+  paragraph under a paragraph, in the frame it closed. The bridge that kept a
+  closed run's own view on screen while its part was built, the stream's
+  reading interval and the split of an open literal run into two views are
+  deleted with the budget they answered.
+- **The context menu asks the seam, not a view**: `ViewCache.pointed(key)` is
+  the part under the mouse and the text of its block, whichever renderer drew
+  it (a part ImGui draws is found by where it is, across the window's width),
+  and `ViewCache.selected(key)` the selection in force. A selection ends with
+  its run; a literal run is copied whole from the menu.
+
+After a stop the pane drops its feeds, as DETAIL clears its views and unlike
+the inbox, which only prunes: a feed is the library's views of lines the pane
+still has, it is kept for a minute after a node was last shown, and the lines
+set it again in one frame.
+
+RICH is still what the log starts in (`transcript_pane.DEFAULT_MODE` has the
+measurements and the reason). The search box filters lines in every mode:
+`advtext.Finder` marks matches in one document and is not a filter, and the
+log is many documents with ImGui's text between them, so finding in typeset
+text is new work and not a call (`HANDOFF-advtext.md`, "What building the
+transcript showed").
+
 ## 5. Shape and order
 
 `pptmstr/ui/typeset.py` becomes a package of the same name with the same
