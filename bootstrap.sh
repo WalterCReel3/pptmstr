@@ -8,25 +8,31 @@
 # has no X display, so the window smoke test is wrapped in Xvfb or skipped with
 # an explanation, rather than failing for a reason unrelated to the build.
 #
-# advtext is on no package index. It is installed editable from a source
-# checkout, located by ADVTEXT_SRC (default: $HOME/Source/imgui-adv-text).
+# advtext is on no package index. Stage 3 fetches it at the commit advtext.ref
+# names, installs that, and then builds the imtypeset library advtext draws
+# through, from the commit imtypeset.ref names, for the interpreter in .venv
+# (scripts/typeset_deps.py; everything lands in .deps/). The sources come from
+# GitHub unless a variable names another repository -- a URL, a file:// URL or a
+# local path:
+#
+#   ADVTEXT_REPO  IMTYPESET_REPO  IMGUI_BUNDLE_REPO  IMGUI_REPO
+#
+# ADVTEXT_PIP_ARGS is added to the advtext install, for a machine with no
+# package index: "--no-deps --no-index --no-build-isolation".
+#
+# Fetching needs git, and bootstrap stops without advtext. The library also
+# needs a C++ compiler and Linux; without those bootstrap says so and carries
+# on, because pptmstr runs without the library and typeset panes fall back.
+# `make deps` repeats this part alone.
 #
 # Usage: ./bootstrap.sh [--no-window] [--python PATH]
 set -euo pipefail
 
 cd "$(dirname "$0")"
 
-ADVTEXT_SRC="${ADVTEXT_SRC:-$HOME/Source/imgui-adv-text}"
-
-# Checked before anything is created, so a missing checkout does not leave a
-# venv behind that looks finished and cannot import the UI.
-if [ ! -f "$ADVTEXT_SRC/pyproject.toml" ]; then
-  echo "advtext source checkout not found at: $ADVTEXT_SRC" >&2
-  echo "    pptmstr depends on advtext, which is on no package index." >&2
-  echo "    Set ADVTEXT_SRC to a checkout of imgui-adv-text and re-run:" >&2
-  echo >&2
-  echo "        ADVTEXT_SRC=/path/to/imgui-adv-text ./bootstrap.sh" >&2
-  exit 1
+if [ -n "${ADVTEXT_SRC:-}" ]; then
+  echo "note: ADVTEXT_SRC is set and is not read. advtext is installed at the commit" >&2
+  echo "      in advtext.ref; ADVTEXT_REPO names a repository to fetch that commit from." >&2
 fi
 
 # Keep in step with requires-python in pyproject.toml.
@@ -40,7 +46,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --no-window) SKIP_WINDOW=1; shift ;;
     --python) PYTHON="${2:-}"; shift 2 ;;
-    -h|--help) sed -n '2,14p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown flag: $1" >&2; exit 2 ;;
   esac
 done
@@ -85,6 +91,9 @@ echo ">>> stage 2/4: virtualenv"
 if command -v uv >/dev/null 2>&1; then
   uv venv --python "$PYTHON" .venv
   INSTALL=(uv pip install --python .venv/bin/python)
+  # uv may otherwise keep its cached build of a directory whose version number
+  # did not change, which is every bump of advtext.ref.
+  REINSTALL_ADVTEXT="--reinstall-package advtext"
 else
   echo "    uv not found, falling back to python -m venv"
   # Debian splits ensurepip into python3-venv, so this is the step that fails on
@@ -102,15 +111,28 @@ else
   fi
   .venv/bin/python -m pip install --quiet --upgrade pip
   INSTALL=(.venv/bin/python -m pip install)
+  REINSTALL_ADVTEXT=""
 fi
 
 echo
 echo ">>> stage 3/4: install"
 # advtext first: the resolver cannot find a bare `advtext` on an index, and an
-# already-installed distribution of that name is what satisfies it.
-echo "    advtext from $ADVTEXT_SRC"
-"${INSTALL[@]}" -e "$ADVTEXT_SRC"
+# already-installed distribution of that name is what satisfies it. Installed
+# as a copy, not editable, so what .venv holds is the pinned commit whatever
+# happens to .deps afterwards; `verify` then holds the interpreter to it, since
+# anything ahead of site-packages on sys.path would win without a word.
+.venv/bin/python scripts/typeset_deps.py advtext
+# shellcheck disable=SC2086  # both are lists of options, possibly empty
+"${INSTALL[@]}" $REINSTALL_ADVTEXT ${ADVTEXT_PIP_ARGS:-} .deps/advtext
+.venv/bin/python scripts/typeset_deps.py verify
 "${INSTALL[@]}" -e ".[dev]"
+# After the install: the library is built for the imgui-bundle wheel that is now
+# in .venv. The step reports its own failures and exits 0 for them; the guard is
+# for the step itself breaking, which must not take bootstrap with it either.
+.venv/bin/python scripts/typeset_deps.py library || {
+  echo "    The imtypeset library step ended abnormally. pptmstr runs without the" >&2
+  echo "    library and typeset panes fall back; 'make deps' tries again." >&2
+}
 
 echo
 if [ "$SKIP_WINDOW" = 1 ]; then

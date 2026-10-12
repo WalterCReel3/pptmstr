@@ -15,19 +15,18 @@ dependencies = [
     # Those are not Python packages and cannot be declared here;
     # scripts/probe.py checks for them by soname and prints the install line.
     #
-    # The floor is 1.92, not the 1.6 that would satisfy a naive import test:
-    # style.set_color_(), imgui.SortDirection, imgui.Col_.nav_cursor and the
-    # ImPlot Spec API all postdate 1.6, and a too-low floor turns a clear
-    # install-time failure into an AttributeError on the first theme switch.
-    #
-    # The third component is advtext's requirement, not ours: its draw backend
-    # sets `ImDrawListFlags_.text_no_pixel_snap` on every call, and 1.92.900 is
-    # the first release that has it (Dear ImGui 1.92.9; 1.92.801 is on 1.92.8).
-    # advtext's own pyproject records how that was established -- by the two
-    # changelogs and by the flag being present in an installed 1.92.900, not by
-    # watching 1.92.801 fail. tests/test_env_floor.py pins the flag, so the
-    # release that renames it fails there and not on the first frame drawn.
-    "imgui-bundle>=1.92.900",
+    # EXACT. advtext draws through imtypeset, a shared library that is linked
+    # against this wheel's own extension module and refused at import beside
+    # any other, so one build of the library is for one wheel binary
+    # (scripts/typeset_deps.py builds it for the wheel in .venv). A range would
+    # promise versions the library was never built for, and the failure would
+    # arrive as typeset panes falling back, not at install. advtext holds the
+    # same pin. A bump is therefore several acts and never a side effect of
+    # `pip install -U`: advtext's pin and advtext.ref, imtypeset.ref if the
+    # library needs it, this line, then `make deps` to rebuild.
+    # tests/test_env_floor.py holds this line to `==` one version and the
+    # installed wheel to that version.
+    "imgui-bundle==1.92.900",
     # Bundles its own Claude Code CLI binary, which is why there is no Node
     # dependency here -- see check_agent_cli() in scripts/probe.py.
     # The floor is the first release whose bundled CLI (2.1.280) knows
@@ -45,11 +44,12 @@ dependencies = [
     # (MarkdownIt.parseInline) -- block structure is our own segmenter
     # (pptmstr/ui/blocks.py), not this library's.
     "markdown-it-py>=3.0",
-    # The text-layout engine behind pptmstr/ui/typeset.py. It is on no package
-    # index, so it is named bare and bootstrap.sh installs it first, editable,
-    # from the checkout ADVTEXT_SRC points at. A `file://` direct reference
-    # would commit one machine's absolute path, and a relative one assumes a
-    # sibling checkout that a git worktree is not.
+    # Typeset text: markdown, streaming and diff views drawn through the
+    # imtypeset library. It is on no package index, so it is named bare, and
+    # bootstrap.sh installs it first, from a clone at the commit advtext.ref
+    # names (scripts/typeset_deps.py). The commit is not written here as a
+    # `git+https` direct reference because the same line has to install where
+    # GitHub cannot be reached, from a repository ADVTEXT_REPO names.
     "advtext",
     # advtext opens the faces it sets through fontTools at run time. As
     # pptmstr/ui/typeset.py measures (`pixel_metrics`), a glyph's advance is

@@ -1,10 +1,11 @@
 """
-The declared environment floor, held to the thing each bound exists for.
+The declared environment, held to the thing each bound exists for.
 
-`pyproject.toml` raises imgui-bundle to 1.92.900 for one draw-list flag that
-advtext sets on every draw. A floor is a version number and the reason is an
-attribute; these tests assert the attribute, so an imgui-bundle that renames it
-fails here by name rather than as an AttributeError on the first frame drawn.
+`pyproject.toml` pins imgui-bundle to one version because the imtypeset library
+advtext draws through is built against one wheel binary. A pin is a line in a
+file and the reason is the wheel that is installed; these tests hold both, so
+an environment that drifted from the pin fails here by name and not as typeset
+panes that fall back.
 """
 
 from __future__ import annotations
@@ -27,17 +28,21 @@ def _name(requirement: str) -> str:
     return re.split(r"[<>=!~\[; ]", requirement, maxsplit=1)[0].lower()
 
 
-def test_imgui_has_the_draw_flag_the_floor_was_raised_for() -> None:
-    from imgui_bundle import imgui
-
-    assert hasattr(imgui.ImDrawListFlags_, "text_no_pixel_snap")
-
-
-def test_the_declared_imgui_floor_is_at_least_the_release_with_the_flag() -> None:
+def _imgui_pin() -> str:
     (spec,) = [d for d in _dependencies() if _name(d) == "imgui-bundle"]
-    match = re.fullmatch(r"imgui-bundle>=(\d+)\.(\d+)\.(\d+)", spec)
-    assert match, spec
-    assert tuple(int(part) for part in match.groups()) >= (1, 92, 900)
+    match = re.fullmatch(r"imgui-bundle==(\d+\.\d+\.\d+)", spec)
+    assert match, f"{spec!r} is not an exact pin of one version"
+    return match[1]
+
+
+def test_imgui_bundle_is_pinned_to_exactly_one_version() -> None:
+    assert _imgui_pin()
+
+
+def test_the_installed_imgui_bundle_is_the_pinned_one() -> None:
+    import imgui_bundle
+
+    assert imgui_bundle.__version__ == _imgui_pin()
 
 
 def test_what_advtext_needs_at_run_time_is_a_runtime_dependency() -> None:

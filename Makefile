@@ -1,4 +1,4 @@
-.PHONY: help bootstrap probe smoke run shot shot-xvfb test lint format format-file typecheck typecheck-all verify check clean
+.PHONY: help bootstrap deps typeset-env probe smoke run shot shot-xvfb test lint format format-file typecheck typecheck-all verify check clean
 
 PY  := .venv/bin/python
 PIP := .venv/bin/python -m pip
@@ -18,6 +18,32 @@ ifeq ($(HEADLESS),1)
 GUI := $(XVFB_RUN)
 else
 GUI :=
+endif
+
+# The imtypeset pair `make deps` builds (scripts/typeset_deps.py): the library and
+# the ctypes package that was built with it. advtext looks for the library only
+# when IMTYPESET_LIBRARY names it and finds the package through IMTYPESET_PYTHON,
+# so both are exported to every recipe here -- tests, the app, the window
+# targets -- whenever BOTH halves exist, and neither when one is missing: a
+# library with another build's package fails at import. A value already in the
+# environment or on the command line wins, and an empty one
+# (`make test IMTYPESET_LIBRARY=`) runs without the library. `make typeset-env`
+# prints what a recipe gets.
+TYPESET_DIR     ?= .deps/imtypeset
+TYPESET_LIBRARY := $(TYPESET_DIR)/libimtypeset_bundle.so
+TYPESET_PACKAGE := $(TYPESET_DIR)/pysnap
+ifneq ($(and $(wildcard $(TYPESET_LIBRARY)),$(wildcard $(TYPESET_PACKAGE)/imtypeset/__init__.py)),)
+export IMTYPESET_LIBRARY ?= $(abspath $(TYPESET_LIBRARY))
+export IMTYPESET_PYTHON  ?= $(abspath $(TYPESET_PACKAGE))
+endif
+
+# What installs into .venv: uv when there is one, as bootstrap.sh chooses, since
+# a venv uv made has no pip in it. --reinstall-package because uv may otherwise
+# keep its cached build of a directory whose version number did not change.
+ifneq ($(shell command -v uv 2>/dev/null),)
+INSTALL_ADVTEXT := uv pip install --python $(PY) --reinstall-package advtext
+else
+INSTALL_ADVTEXT := $(PIP) install
 endif
 
 .DEFAULT_GOAL := help
@@ -43,6 +69,22 @@ endif
 
 bootstrap:         ## probe, create .venv, install, smoke test
 	./bootstrap.sh
+
+# The part of bootstrap that pins advtext and builds the imtypeset library, on its
+# own: after a bump of advtext.ref or imtypeset.ref, or once whatever stopped the
+# library building is dealt with. ADVTEXT_REPO, IMTYPESET_REPO, IMGUI_BUNDLE_REPO
+# and IMGUI_REPO name where to fetch from (scripts/typeset_deps.py lists them);
+# ADVTEXT_PIP_ARGS is added to the install, e.g. "--no-deps --no-index
+# --no-build-isolation" where no package index is reachable.
+deps: venv-check   ## advtext at advtext.ref, and the imtypeset library for .venv
+	$(PY) scripts/typeset_deps.py advtext
+	$(INSTALL_ADVTEXT) $(ADVTEXT_PIP_ARGS) .deps/advtext
+	$(PY) scripts/typeset_deps.py verify
+	$(PY) scripts/typeset_deps.py library
+
+typeset-env:       ## the IMTYPESET_* variables a recipe here runs with
+	@echo "IMTYPESET_LIBRARY=$${IMTYPESET_LIBRARY-}"
+	@echo "IMTYPESET_PYTHON=$${IMTYPESET_PYTHON-}"
 
 probe:             ## stdlib-only environment diagnosis (no venv needed)
 	@python3 scripts/probe.py --stage pre

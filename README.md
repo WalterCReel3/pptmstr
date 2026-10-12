@@ -91,7 +91,9 @@ Read [STYLE.md](STYLE.md) before adding a record, an intent, or a projection.
 
 ```sh
 ./bootstrap.sh          # probe -> venv -> install -> window smoke test
-                        # needs an advtext checkout: ADVTEXT_SRC, default ~/Source/imgui-adv-text
+                        # fetches advtext and imtypeset at the commits in advtext.ref and
+                        # imtypeset.ref, and builds the imtypeset library into .deps/
+make deps               # that fetch and build alone, after a ref moves
 make check              # lint + typecheck + tests
 make run                # launch
 

@@ -16,3 +16,8 @@ dist/
 # scripts/screenshot.py writes here by default. Captures of one run, not
 # reference images -- the verify_*.py scripts are what assert on rendering.
 /shots/
+
+# scripts/typeset_deps.py builds here: advtext and imtypeset at the commits
+# advtext.ref and imtypeset.ref name, and the library built from them for this
+# checkout's interpreter. Remade by `make deps`.
+/.deps/
