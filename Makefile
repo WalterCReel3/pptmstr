@@ -32,7 +32,12 @@ endif
 #                                  from the commit imtypeset.ref names. If not,
 #                                  neither is, and every recipe runs without the
 #                                  library; a pair that is there and refused is
-#                                  a warning on every run.
+#                                  a warning on every run. So is a pair that is
+#                                  exported and was NOT built against the
+#                                  wheel's own Dear ImGui headers (`ok;` and
+#                                  what it was built against): a stand-in is
+#                                  not refused, and no run on one is silent
+#                                  about it.
 #   either is set by the caller    in the environment or on the command line,
 #                                  empty or not: nothing is added, so a library
 #                                  named from outside never meets this pair's
@@ -52,10 +57,15 @@ else ifeq ($(wildcard $(PY)),)
 TYPESET_WHY := there is no $(PY) to check $(TYPESET_DIR) with; 'make bootstrap' first
 else
 TYPESET_WHY := $(shell $(PY) scripts/typeset_deps.py pair --pair $(TYPESET_DIR) 2>&1)
-ifeq ($(TYPESET_WHY),ok)
+ifneq ($(filter ok ok;,$(firstword $(TYPESET_WHY))),)
 export IMTYPESET_LIBRARY := $(abspath $(TYPESET_LIBRARY))
 export IMTYPESET_PYTHON  := $(abspath $(TYPESET_PACKAGE))
+TYPESET_HEADERS := $(wordlist 2,$(words $(TYPESET_WHY)),$(TYPESET_WHY))
 TYPESET_WHY := the pair in $(TYPESET_DIR), built from the commit imtypeset.ref names
+ifneq ($(TYPESET_HEADERS),)
+$(warning $(TYPESET_HEADERS))
+TYPESET_WHY := $(TYPESET_WHY); $(TYPESET_HEADERS)
+endif
 else
 $(warning imtypeset is NOT exported and typeset panes fall back: $(TYPESET_WHY))
 endif

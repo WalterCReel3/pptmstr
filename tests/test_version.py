@@ -939,3 +939,104 @@ def test_the_gate_answers_in_a_sentence_whatever_asking_raises(
     kind, sentence = gate.library()
     assert kind == gate.NOT_INSTALLED
     assert sentence.startswith("the text library is not installed (ModuleNotFoundError")
+
+
+# -- a pair built against other headers than the wheel's is said to be one ---------------
+
+
+def _built(pair: Path, headers: str | None) -> Path:
+    pair.mkdir(parents=True)
+    against = f"headers: {headers}\n" if headers else ""
+    (pair / pairing.BUILT_FROM).write_text(f"commit: {REF}\n{against}", encoding="utf-8")
+    (pair / pairing.LIBRARY_NAME).write_bytes(b"")
+    (pair / pairing.PACKAGE_DIR / "imtypeset").mkdir(parents=True)
+    (pair / pairing.PACKAGE_DIR / "imtypeset" / "__init__.py").write_text("", encoding="utf-8")
+    return pair
+
+
+def test_a_pair_is_noted_unless_it_was_built_against_the_wheels_own_headers(
+    tmp_path: Path,
+) -> None:
+    """
+    Not a refusal: a stand-in is the only build there is where the wheel's
+    fork cannot be fetched. A note, for wherever the pair is handed over, and
+    a pair whose record names no headers at all is not taken for the fork's.
+    """
+    assert pairing.headers_note(_built(tmp_path / "fork", "fork:pthom-0123abc")) is None
+    stood = pairing.headers_note(_built(tmp_path / "stood", "stand-in:ocornut-v1.92.9-docking"))
+    assert stood is not None and str(tmp_path / "stood") in stood
+    assert "built against stand-in:ocornut-v1.92.9-docking, NOT the wheel's own" in stood
+    silent = pairing.headers_note(_built(tmp_path / "silent", None))
+    assert silent is not None and "headers its BUILT-FROM does not record" in silent
+    # And handing such a pair over is not refused for it.
+    for name in ("fork", "stood", "silent"):
+        assert pairing.pair_refusal(tmp_path / name, REF) is None
+
+
+def test_a_test_run_says_first_what_it_ran_against(tmp_path: Path) -> None:
+    """
+    The lines every run of the suite opens with (``tests/conftest.py``): the
+    imscribe imported, the library named with its commit and headers, and a
+    line of its own for a stand-in, since a run "with the pair" says nothing
+    else about which pair.
+    """
+    from tests.conftest import ran_against
+
+    stood = _built(tmp_path / "stood", "stand-in:ocornut-v1.92.9-docking")
+    lines = ran_against({pairing.LIBRARY_VARIABLE: str(stood / pairing.LIBRARY_NAME)})
+    assert [line.split()[0] for line in lines] == ["imscribe", "imtypeset", "STAND-IN:"]
+    assert REF in lines[1] and "with headers stand-in:ocornut-v1.92.9-docking" in lines[1]
+    assert "NOT the wheel's own Dear ImGui headers" in lines[2]
+
+    fork = _built(tmp_path / "fork", "fork:pthom-0123abc")
+    lines = ran_against({pairing.LIBRARY_VARIABLE: str(fork / pairing.LIBRARY_NAME)})
+    assert len(lines) == 2 and "with headers fork:pthom-0123abc" in lines[1]
+
+    assert ran_against({})[1].startswith("imtypeset: no library (IMTYPESET_LIBRARY is not set)")
+    assert ran_against({pairing.LIBRARY_VARIABLE: ""})[1].startswith(
+        "imtypeset: no library (IMTYPESET_LIBRARY is empty)"
+    )
+    # A library named with nothing beside it is said, not raised.
+    bare = ran_against({pairing.LIBRARY_VARIABLE: str(tmp_path / "nowhere" / "lib.so")})
+    assert bare[-1].startswith("imtypeset at an unrecorded commit: ")
+    assert "nothing says what it was built from or against" in bare[-1]
+
+
+@pytest.mark.parametrize("quiet", [True, False], ids=["-q, as make test runs it", "as it comes"])
+def test_the_lines_open_a_run_of_the_suite_quiet_or_not(tmp_path: Path, quiet: bool) -> None:
+    stood = _built(tmp_path / "stood", "stand-in:ocornut-v1.92.9-docking")
+    (tmp_path / "test_nothing.py").write_text("def test_nothing():\n    pass\n", encoding="utf-8")
+    clean = {k: v for k, v in os.environ.items() if not k.startswith(("IMTYPESET_", "PYTEST_"))}
+    done = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            *(["-q"] if quiet else []),
+            "-p",
+            "no:cacheprovider",
+            "--confcutdir",
+            str(ROOT),
+            "-c",
+            str(ROOT / "pyproject.toml"),
+            "--rootdir",
+            str(ROOT),
+            "-p",
+            "tests.conftest",
+            str(tmp_path / "test_nothing.py"),
+        ],
+        cwd=ROOT,
+        env={**clean, pairing.LIBRARY_VARIABLE: str(stood / pairing.LIBRARY_NAME)},
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert done.returncode == 0, done.stdout + done.stderr
+    out = done.stdout
+    said = [
+        line for line in out.splitlines() if line.startswith(("imscribe", "imtypeset", "STAND"))
+    ]
+    assert [line.split()[0] for line in said] == ["imscribe", "imtypeset", "STAND-IN:"]
+    assert "built against stand-in:ocornut-v1.92.9-docking, NOT" in said[2]
+    assert out.index(said[0]) < out.index("1 passed"), "before any result"

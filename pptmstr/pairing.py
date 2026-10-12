@@ -168,6 +168,39 @@ def pair_refusal(pair: Path, ref: str) -> str | None:
     return None
 
 
+FORK_HEADERS = "fork:"
+"""
+How ``BUILT-FROM`` begins its ``headers`` line for a library compiled against
+the wheel's own Dear ImGui headers. ``scripts/typeset_deps.py`` records what
+imtypeset's build says it used and holds that to the kind it asked for by
+this prefix; ``tests/test_typeset_deps.py`` holds the two to one spelling.
+"""
+
+
+def headers_note(pair: Path) -> str | None:
+    """
+    One line saying a pair was not built against the wheel's own Dear ImGui
+    headers, with what it was built against; ``None`` when it was.
+
+    Not a refusal. A library compiled against upstream's headers as a stand-in
+    for the wheel's fork is accepted by imtypeset on its field probe and is the
+    only build there is where the fork cannot be fetched; and a build that
+    fails for want of the fork leaves the pair before it in place. So such a
+    pair is handed over, and is **said** wherever it is: by the Makefile on
+    every run that exports it, and in the first lines of a test run
+    (``tests/conftest.py``), because "green with the pair" is otherwise read
+    as green against the wheel's headers. Raises what reading the record does.
+    """
+    headers = built_from(pair).get("headers", "")
+    if headers.startswith(FORK_HEADERS):
+        return None
+    against = headers or f"headers its {BUILT_FROM} does not record"
+    return (
+        f"the imtypeset pair in {pair} was built against {against}, NOT the wheel's own "
+        f"Dear ImGui headers (the fork): a stand-in, accepted on imtypeset's field probe alone"
+    )
+
+
 def package_differences(pinned: Path, installed: Path) -> list[str]:
     """
     Python files that differ between two ``imscribe`` package directories, by relative path.

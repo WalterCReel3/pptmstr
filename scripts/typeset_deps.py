@@ -23,11 +23,15 @@ Three steps that make it, because the install between the first two belongs to
 the caller, which knows whether the installer is pip or uv, and one that reads it:
 
     imscribe  fetch and check out the pinned commit, then take what an install
-              under the library's earlier name left out of this interpreter.
-              Failing here fails the caller.
+              under the library's earlier name left out of this interpreter's
+              environment, which must be this checkout's `.venv` or the one
+              `--environment` names: the step deletes from it. Failing here
+              fails the caller.
     verify    the clone is at the commit imscribe.ref names, unedited, the
               `imscribe` this interpreter imports is that clone's, file for file,
-              and nothing imports under the earlier name.
+              and nothing in this environment imports under the earlier name;
+              a copy of that name another environment on the path supplies is
+              named and left.
     library   build the pair. Never fails the caller: without the library pptmstr
               still runs and typeset panes fall back, so a missing compiler is a
               paragraph on standard error and exit status 0.
@@ -113,6 +117,8 @@ HEADERS_VARIABLE = "IMTYPESET_BUNDLE_HEADERS"
 FORK_VARIABLE = "IMTYPESET_IMGUI_FORK_SOURCE"
 FORK, STAND_IN = "fork", "stand-in"
 HEADERS_FILE = "HEADERS"
+# What `pair` answers for a pair a process may be handed, and the Makefile reads.
+OK = "ok"
 BUILD_FILE = "BUILD"
 
 
@@ -270,20 +276,53 @@ def own_site_directories() -> set[Path]:
     return {Path(sysconfig.get_path(kind)).resolve() for kind in ("purelib", "platlib")}
 
 
-def remove_earlier_name(deps: Path) -> list[Path]:
+def foreign_interpreter(environment: Path | None = None) -> str | None:
+    """
+    Why this interpreter's environment is not one to delete from; None when it is.
+
+    "This environment" is whichever interpreter runs the script, and the script
+    runs under any: with another project's environment active -- the library's
+    own checkout, which holds an editable install under the earlier name -- the
+    removal would take that project's install out of it. So it is done only in
+    this checkout's `.venv`, which is what `bootstrap.sh` and `make deps` run
+    the script with, or in the environment `--environment` names, for a
+    checkout whose environment is somewhere else.
+    """
+    wanted = (environment or ROOT / ".venv").resolve()
+    running = Path(sys.prefix).resolve()
+    if running == wanted:
+        return None
+    how = (
+        "which is what --environment names"
+        if environment
+        else "this checkout's (`.venv/bin/python scripts/typeset_deps.py ...`, as `make deps` "
+        "runs it), or name the environment that is meant with --environment"
+    )
+    return (
+        f"this is {sys.executable}, whose environment is {running}, and the step deletes an "
+        f"install under the name {EARLIER_NAME} from the environment it runs in: nothing was "
+        f"removed. Run it with the interpreter of {wanted}, {how}."
+    )
+
+
+def remove_earlier_name(deps: Path, environment: Path | None = None) -> list[Path]:
     """
     Take the distribution under the earlier name out of this environment; what was removed.
 
     What an installer's own uninstall does, by the distribution's record, since
     a .venv uv made has no pip to ask: every file the record lists, the package
     directory, the metadata directory. **Only in this environment's own site
-    directories.** sys.path can reach another environment's (a .pth file naming
-    it), and a distribution found there is that environment's: it is left, and
-    so is a copy that is no distribution at all (a directory on PYTHONPATH).
-    `verify` refuses whichever of them still imports. The clone under `deps`
-    goes too: nothing reads it, and it is what the old distribution's record
-    names as its source.
+    directories, and only when this environment is the checkout's**
+    (`foreign_interpreter`; raises under any other). sys.path can reach another
+    environment's (a .pth file naming it), and a distribution found there is
+    that environment's: it is left, and so is a copy that is no distribution at
+    all (a directory on PYTHONPATH). `verify` says which of them still imports.
+    The clone under `deps` goes too: nothing reads it, and it is what the old
+    distribution's record names as its source.
     """
+    foreign = foreign_interpreter(environment)
+    if foreign:
+        raise DepsError(foreign)
     removed: list[Path] = []
     own = own_site_directories()
     for distribution in importlib.metadata.distributions(name=EARLIER_NAME):
@@ -318,15 +357,19 @@ def remove_earlier_name(deps: Path) -> list[Path]:
     return removed
 
 
-def step_imscribe(deps: Path) -> int:
+def step_imscribe(deps: Path, environment: Path | None = None) -> int:
     unread = unread_variables(os.environ)
     if unread:
         print(unread, file=sys.stderr)
+    # Before anything is fetched: the step ends by deleting from this environment.
+    foreign = foreign_interpreter(environment)
+    if foreign:
+        raise DepsError(foreign)
     ref = read_ref(ROOT / "imscribe.ref")
     clone = deps / "imscribe"
     fetch_commit(IMSCRIBE, ref, clone)
     print(f"imscribe {ref} from {IMSCRIBE.repo()} -> {clone}")
-    for gone in remove_earlier_name(deps):
+    for gone in remove_earlier_name(deps, environment):
         print(f"removed {gone}: the library under its earlier name, {EARLIER_NAME}")
     return 0
 
@@ -384,15 +427,56 @@ def step_verify(deps: Path) -> int:
         )
     earlier = imported_earlier_name()
     if earlier is not None:
-        raise DepsError(
-            f"{sys.executable} can still import {EARLIER_NAME}, from {earlier}: the name imscribe "
-            f"had before, left by an earlier install. Nothing here is tested against it, and a "
-            f"module that still imported that name would run in this environment and in no "
-            f"other. `make deps` removes the distribution of that name; a copy that is not one "
-            f"(a directory on PYTHONPATH, a .pth file) is removed by hand."
-        )
+        whose = earlier_name_in_this_environment(earlier)
+        if whose is None:
+            # Not refused: the copy cannot stand in for imscribe, which nothing
+            # imports by that name, and it is nothing this checkout may remove,
+            # so a refusal here would be one `make deps` could never get past.
+            print(
+                f"note: {sys.executable} can import {EARLIER_NAME}, the name imscribe had "
+                f"before, from {earlier}. That is outside this environment "
+                f"({_listed(own_site_directories())}): another environment's, or a directory "
+                f"on sys.path. It is not this checkout's to remove and `make deps` leaves it. "
+                f"A module here that still imported that name would run with it and in no "
+                f"other environment; tests/test_typeset_deps.py holds the source to importing "
+                f"it nowhere.",
+                file=sys.stderr,
+            )
+        else:
+            raise DepsError(
+                f"{sys.executable} can still import {EARLIER_NAME}, from {earlier}: the name "
+                f"imscribe had before, left in this environment by an earlier install. Nothing "
+                f"here is tested against it, and a module that still imported that name would "
+                f"run in this environment and in no other. {whose}"
+            )
     print(f"imscribe imports from {installed}, identical to {ref}")
     return 0
+
+
+def _listed(paths: set[Path]) -> str:
+    return ", ".join(sorted(str(path) for path in paths))
+
+
+def earlier_name_in_this_environment(imported: Path) -> str | None:
+    """
+    What takes a copy under the earlier name out of this environment, as a sentence; None
+    when the copy `imported` is not in this environment at all.
+
+    In it two ways: a distribution recorded in one of its own site directories,
+    which is what `remove_earlier_name` removes wherever the record says its
+    files are (an editable install's are in another directory); or files in a
+    site directory with no record, which nothing here removes.
+    """
+    own = own_site_directories()
+    for distribution in importlib.metadata.distributions(name=EARLIER_NAME):
+        if Path(str(distribution.locate_file(""))).resolve() in own:
+            return "`make deps` removes the distribution of that name."
+    if any(site in imported.parents for site in own):
+        return (
+            f"No distribution of that name is recorded there, so `make deps` does not remove "
+            f"it: remove {imported} by hand."
+        )
+    return None
 
 
 def wheel_facts() -> tuple[str, str, str]:
@@ -608,14 +692,25 @@ def step_pair(pair: Path) -> int:
     """
     Print `ok`, or the one line saying why the Makefile exports nothing.
 
+    `ok` alone for a pair built against the wheel's own headers. For a whole
+    pair at the pinned commit that was built against others the line is `ok;`
+    and what they were (`pairing.headers_note`): the Makefile exports that pair
+    too -- a stand-in is the only build there is where the fork cannot be
+    fetched -- and says the rest of the line on every run, so a test run "with
+    the pair" is not read as one against the wheel's headers.
+
     Always one line and always status 0: the Makefile reads the line while it is
-    being parsed, for every target, and has nowhere to put a failure.
+    being parsed, for every target, and has nowhere to put a failure. `pair` is
+    an absolute path, so no refusal begins with `ok`.
     """
     try:
-        refusal = pair_refusal(pair)
+        said = pair_refusal(pair)
+        if said is None:
+            note = pairing.headers_note(pair)
+            said = f"{OK}; {note}" if note else OK
     except Exception as error:  # whatever it is, it is the reason
-        refusal = f"{pair} could not be checked ({type(error).__name__}: {error})"
-    print(" ".join((refusal or "ok").split()))
+        said = f"{pair} could not be checked ({type(error).__name__}: {error})"
+    print(" ".join(said.split()))
     return 0
 
 
@@ -626,11 +721,15 @@ def step_library(deps: Path) -> int:
     except Exception as error:  # the promise is about every failure
         # A DepsError is a sentence already; anything else is named for what it is.
         cause = str(error) if isinstance(error, DepsError) else f"{type(error).__name__}: {error}"
-        kept = (
-            f" The pair already in {final} was left as it was."
-            if (final / LIBRARY_NAME).is_file()
-            else ""
-        )
+        kept = ""
+        if (final / LIBRARY_NAME).is_file():
+            try:
+                against = pairing.headers_note(final)
+            except Exception:  # an unreadable record is not this step's failure
+                against = None
+            kept = f" The pair already in {final} was left as it was" + (
+                f": {against}." if against else "."
+            )
         print(
             f"\nThe imtypeset library was NOT built: {cause}. pptmstr does not need it to "
             f"run: without it imscribe cannot draw, so typeset panes fall back, and nothing "
@@ -641,7 +740,7 @@ def step_library(deps: Path) -> int:
         return 0
     kind = (
         "the wheel's own Dear ImGui headers (the fork)"
-        if headers.startswith("fork:")
+        if headers.startswith(pairing.FORK_HEADERS)
         else f"upstream Dear ImGui's headers as a STAND-IN for the wheel's fork, as "
         f"{HEADERS_VARIABLE}={STAND_IN} asked, which Dear ImGui's own layout check refuses "
         f"and imtypeset accepts on its field probe"
@@ -662,12 +761,18 @@ def step_library(deps: Path) -> int:
     return 0
 
 
-STEPS = {"imscribe": step_imscribe, "verify": step_verify, "library": step_library}
+STEPS = {"verify": step_verify, "library": step_library}
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=(__doc__ or "").strip().splitlines()[0])
-    parser.add_argument("step", choices=sorted([*STEPS, "pair"]))
+    parser.add_argument("step", choices=sorted([*STEPS, "imscribe", "pair"]))
+    parser.add_argument(
+        "--environment",
+        type=Path,
+        help="the environment `imscribe` may delete the earlier name from, which must be "
+        "the one this interpreter runs in (default: this checkout's .venv)",
+    )
     parser.add_argument("--deps", type=Path, default=DEPS, help="where to build (default: .deps)")
     parser.add_argument(
         "--pair", type=Path, help="the pair `pair` reads (default: imtypeset under --deps)"
@@ -677,6 +782,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.step == "pair":
         return step_pair(args.pair.resolve() if args.pair else deps / "imtypeset")
     try:
+        if args.step == "imscribe":
+            return step_imscribe(deps, args.environment)
         return STEPS[args.step](deps)
     except DepsError as error:
         print(f"typeset_deps {args.step}: {error}", file=sys.stderr)

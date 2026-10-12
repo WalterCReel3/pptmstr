@@ -600,30 +600,229 @@ def test_what_is_wrong_with_a_file_is_said_above_its_diff_before_its_name(
         approval.DiffText("a\r\nb\r\n", "a\nb\n", "crlf.txt"),
     )
     assert diffs.above(typeset.diff_model(texts)) == (
-        ("contains invisible or bidirectional control characters", True),
+        ("contains invisible or bidirectional control characters: U+202E", True),
         ("bidi.py", False),
-        ("contains control characters", True),
+        ("contains control characters: U+0007", True),
         ("bell.py", False),
         ("blob.bin  (existing file is not readable as text; shown as new)  (new file)", False),
         ("crlf.txt  (line endings only: CRLF -> LF)", False),
     )
-    # Drawn, a diff says those lines. The first file is left out of the
-    # drawing: U+202E is a character the code face has no glyph for, so that
-    # diff is its pane's own rows under a line naming it (``diffs.unfit``).
+    # Drawn, a diff says those lines, and nothing else is said of it.
     cache = typeset.ViewCache()
     said = _native_lines(seam, monkeypatch)
-    frame(seam, lambda: typeset.diff(cache, "k", texts[1:]))
-    drawn = [line for line, _ in diffs.above(cache.view("k").diff)]
-    assert said == drawn and len(drawn) == 4 and drawn[0] == "contains control characters"
-
-    got: list[float | None] = []
     stated = _said_by_the_seam(monkeypatch)
-    frame(seam, lambda: got.append(typeset.diff(cache, "bidi", texts[:1])))
-    assert got == [None] and cache.view("bidi") is None
-    assert stated == [
-        "this diff is the pane's own rows: a row holds U+202E, which the code face "
-        "has no glyph for, and the library would set what follows off its column"
-    ]
+    frame(seam, lambda: typeset.diff(cache, "k", texts))
+    drawn = [line for line, _ in diffs.above(cache.view("k").diff)]
+    assert said == drawn and len(drawn) == 6 and stated == []
+    assert drawn[0] == "contains invisible or bidirectional control characters: U+202E"
+
+
+def test_what_a_file_holds_unseen_is_said_before_what_the_gate_predicts_of_it() -> None:
+    """
+    Before anything else about the file: a prediction that an edit may not
+    apply is about the call, and a bidirectional override in the text is about
+    what the approver is reading while deciding whether that matters.
+    """
+    texts = (approval.DiffText("a\n", "a \u202e\n", "x.py", will_not_apply="anchor not found"),)
+    assert diffs.above(typeset.diff_model(texts)) == (
+        ("contains invisible or bidirectional control characters: U+202E", True),
+        ("may not apply: anchor not found", True),
+        ("x.py", False),
+    )
+
+
+# -- what a diff holds that cannot be seen is named, whoever draws it -------------------
+
+HIDDEN = {
+    "a bidirectional override": (
+        "mm\u202emm",
+        "invisible or bidirectional control characters: U+202E",
+    ),
+    "a byte-order mark at the start of line 1": (
+        "\ufeffimport",
+        "invisible or bidirectional control characters: U+FEFF",
+    ),
+    "a zero-width space": ("mm\u200bmm", "invisible or bidirectional control characters: U+200B"),
+    "a C0 control": ("mm\x07mm", "control characters: U+0007"),
+    "a C1 control": ("mm\x9bmm", "control characters: U+009B"),
+    "a NUL": ("mm\x00mm", "control characters: U+0000"),
+}
+"""
+One row for each class of character that draws as nothing or as a placeholder,
+and what is said of it after "contains ".
+"""
+
+
+def test_the_characters_named_are_the_ones_the_library_sets_a_placeholder_for() -> None:
+    """
+    Two lists of one class, deliberately: a pane's own rows are warned of
+    where there is no library to ask. Held equal at every code point, with
+    the placeholder.
+    """
+    from imscribe.diff import has_control, has_invisible
+    from imscribe.ui.typeset_diff_view import CONTROL_PLACEHOLDER, _shown
+
+    assert diffs.PLACEHOLDER == CONTROL_PLACEHOLDER
+    for code in range(0x110000):
+        char = chr(code)
+        ours = diffs._hides(char)
+        if char in "\t\n" or 0xD800 <= code <= 0xDFFF:
+            assert ours is None, hex(code)
+            continue
+        theirs = "control" if has_control(char) else "invisible" if has_invisible(char) else None
+        assert ours == theirs, hex(code)
+        if char != CONTROL_PLACEHOLDER:
+            assert (_shown(char)[0] == CONTROL_PLACEHOLDER) is (ours is not None), hex(code)
+
+
+def test_a_warning_names_the_bidirectional_controls_first_and_counts_past_twelve() -> None:
+    """
+    No count of other characters stands between an approver and an override:
+    a file of zero-width joiners, soft hyphens and tag characters still names
+    U+202E, first.
+    """
+    tags = "".join(chr(code) for code in range(0xE0020, 0xE0030))
+    assert diffs.hidden(["a\u00ad\u200b" + tags, "\x1b[0m \u2066x\u2069 \u202e"])[:4] == (
+        "\u202e",
+        "\u2066",
+        "\u2069",
+        "\x1b",
+    )
+    assert diffs.hidden_warning(["a\u00ad\u200b" + tags, "\x1b[0m \u2066x\u2069 \u202e"]) == (
+        "contains invisible or bidirectional control characters: U+202E, U+2066, U+2069, "
+        "U+00AD, U+200B, U+E0020, U+E0021, U+E0022, U+E0023, U+E0024, U+E0025, U+E0026 "
+        "and 9 more; and control characters: U+001B"
+    )
+    assert diffs.hidden_warning(["plain", "tab\tbed", "café π 中"]) is None
+    assert diffs.hidden(["lone \udc80"]) == ()
+
+
+@pytest.mark.parametrize("name", list(HIDDEN))
+def test_a_diff_holding_what_cannot_be_seen_is_the_views_on_its_columns_under_its_name(
+    columns_hold: Any, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    """
+    The library sets a control or an invisible character as U+FFFD, which the
+    code face has: one cell, on the grid. So such a diff is not one the view
+    is refused, and is said to hold the character, by code point, in the first
+    line above the view. Read from the draw list: the row's glyphs are where
+    the same row's are with the placeholder written in it.
+    """
+    text, words = HIDDEN[name]
+    said = _said_by_the_seam(monkeypatch)
+    model = typeset.diff_model(_one_row(text))
+    assert diffs.unfit(model) is None
+    assert diffs.above(model) == ((f"contains {words}", True), ("x.py", False))
+    lines = _native_lines(columns_hold, monkeypatch)
+    view, lefts = _drawn_row(columns_hold, text)
+    assert view is not None and said == []
+    assert lines == [f"contains {words}", "x"]
+    placeholder = "".join(diffs.PLACEHOLDER if diffs._hides(char) else char for char in text)
+    assert placeholder != text
+    _, expected = _drawn_row(columns_hold, placeholder)
+    assert lefts == expected and len(lefts) == len(text)
+    assert {(left - lefts[0]) % 8.0 for left in lefts} <= {0.0, 1.0}, "a bearing, and no more"
+
+
+@pytest.mark.parametrize("name", list(HIDDEN))
+def test_a_diff_handed_back_to_its_pane_is_first_said_to_hold_what_cannot_be_seen(
+    columns_hold: Any, monkeypatch: pytest.MonkeyPatch, name: str
+) -> None:
+    """
+    The finding this closes. Beside five Cyrillic letters, which the code face
+    lacks, the diff is the pane's own rows, and the line saying why names four
+    letters and counts the rest: the control was the count. ImGui draws it
+    there with the glyph it draws any letter it lacks with, so the diff is
+    said to hold it, in the sentence the view would have been under, before
+    the line that hands it back; and the reason given is the letters, which
+    it is true of, and not the control, which the view would have set on its
+    column.
+    """
+    text, words = HIDDEN[name]
+    said = _said_by_the_seam(monkeypatch)
+    cache = typeset.ViewCache()
+    texts = _one_row(f"{text}  # абвгд")
+    got: list[float | None] = []
+    for _ in range(2):
+        said.clear()
+        frame(columns_hold, lambda: got.append(typeset.diff(cache, "k", texts)))
+        assert got[-1] is None and cache.view("k") is None
+        assert said == [
+            f"contains {words}",
+            "this diff is the pane's own rows: a row holds U+0430, U+0431, U+0432, U+0433 "
+            "and 1 more, which the code face has no glyph for, and the library would set "
+            "what follows off its column",
+        ]
+    assert said[0] == diffs.above(typeset.diff_model(texts))[0][0], "one sentence on either"
+
+
+@pytest.mark.parametrize("name", list(HIDDEN))
+def test_a_panes_own_rows_are_warned_of_in_the_sentence_the_view_is_under(name: str) -> None:
+    """
+    Where the library draws no diff at all a pane never asks ``diff()``, and
+    asks this of the call: the unified string its rows are, in the words
+    ``above`` has for the view. No library is asked.
+    """
+    text, words = HIDDEN[name]
+    call = pending("Write", {"file_path": "no/such/dir/x.py", "content": f"one\n{text}\n"})
+    assert call.diff is not None and call.texts is not None
+    assert diffs.own_rows_warning(call) == f"contains {words}"
+    assert typeset.diff_own_rows_warning(call) == diffs.above(typeset.diff_model(call.texts))[0][0]
+    plain = pending("Write", {"file_path": "no/such/dir/x.py", "content": "one\r\ntwo\tx\r\n"})
+    assert diffs.own_rows_warning(plain) is None, "a CRLF end and a tab are neither"
+
+
+def test_a_path_holding_what_cannot_be_seen_is_named_on_either_renderer() -> None:
+    """
+    A file's name is drawn by ImGui above the view and in a ``+++`` row of a
+    pane's own: ``gpj.py`` after an override reads as another name. The
+    library's own answer is of a file's rows, so the label is asked here.
+    """
+    call = pending("Write", {"file_path": "no/such/dir/x\u202egpj.py", "content": "one\n"})
+    assert call.diff is not None and call.texts is not None
+    words = "contains invisible or bidirectional control characters: U+202E"
+    model = typeset.diff_model(call.texts)
+    assert diffs.above(model)[0] == (words, True)
+    assert diffs._hidden_in(model) == words, "and over a diff handed back to its pane"
+    assert diffs.own_rows_warning(call) == words
+
+
+def test_where_columns_hold_a_fenced_diff_holding_what_cannot_be_seen_says_so_over_its_view(
+    columns_hold: Any,
+) -> None:
+    """
+    A fence with a bidirectional override in a row is a diff the view draws,
+    the placeholder in the character's cell. The view's own word for it is in
+    a header row, cut at the view's edge, so the sentence leads the block of
+    header lines set above the hosted view.
+    """
+    text = "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-area = 3\n+area = 4 \u202e# checked"
+    assert diffs.fence_diff("diff", text) is not None
+    words = "contains invisible or bidirectional control characters: U+202E"
+    assert diffs.fence_headers(text) == (words, "--- a/x.py", "+++ b/x.py")
+    assert diffs.fence_headers("-old\n+new\x07") == ("contains control characters: U+0007",)
+    cache = typeset.ViewCache()
+    source = f"Before.\n\n```diff\n{text}\n```\n"
+    for _ in range(2):
+        frame(columns_hold, lambda: typeset.markdown(cache, "k", source))
+    view = cache.view("k")
+    assert list(view.hosts) == [2] and cache.unbuilt("k") == 0
+    assert cache.texts("k")[1] == "\n".join([words, "--- a/x.py", "+++ b/x.py"])
+
+
+def test_what_a_panes_rows_were_broken_at_is_still_named() -> None:
+    """
+    A pane makes its rows with ``str.splitlines``, which breaks a line at a
+    form feed, at U+0085 and at a line separator: the character is then in no
+    row. The warning is of the string and not of the rows.
+    """
+    call = pending("Write", {"file_path": "no/such/dir/x.py", "content": "a\x0cb\u2028c\x85d\n"})
+    assert call.diff is not None
+    assert not any(char in row for row in call.diff.splitlines() for char in "\x0c\u2028\x85")
+    assert diffs.own_rows_warning(call) == (
+        "contains invisible or bidirectional control characters: U+2028; "
+        "and control characters: U+000C, U+0085"
+    )
 
 
 def test_a_model_made_from_texts_has_nothing_in_a_header_row_but_what_is_said_above(
@@ -863,7 +1062,6 @@ def test_the_view_a_pane_draws_and_the_view_that_is_measured_are_made_by_one_fun
 
     monkeypatch.setattr(imscribe.TypesetDiffView, "__init__", recording)
     monkeypatch.setattr(imscribe.TypesetDiffFences, "__init__", recording_fences)
-    monkeypatch.setattr(diffs.views, "_FENCES", [])
     assert typeset.load_fonts(BOLD), "so that the measurement is taken again"
     assert made == [("view", "pixel")], "the measurement at the load"
     made.clear()
@@ -873,11 +1071,72 @@ def test_the_view_a_pane_draws_and_the_view_that_is_measured_are_made_by_one_fun
     made.clear()
     source = "Before.\n\n```diff\n-old1\n+new1\n```\n"
     frame(seam, lambda: typeset.markdown(cache, "fenced", source))
-    assert made[0] == ("fences", "pixel") and len(made) == 2
+    # The library's hook is made once a process, by whichever test first hosts.
+    assert made in ([("view", "pixel")], [("fences", "pixel"), ("view", "pixel")])
     (at,) = cache.view("fenced").hosts
     assert cache.view("fenced").hosted(at).view.cell == "pixel"
     monkeypatch.undo()
     assert typeset.load_fonts(BOLD)
+
+
+def test_a_hosted_fence_is_on_the_cell_the_columns_are_asked_about_whenever_it_is_made(
+    seam: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The hook that hosts a fenced diff lives as long as the process, and the
+    cell is asked of the gate at each fence and not when the hook was made:
+    a view hosted while the cell is the library's default is on that cell, and
+    one hosted afterwards is on the whole pixel, which is the cell
+    ``gate.columns`` then says holds. A hook that kept the cell it was made
+    with fails one half of this or the other, whichever cell that was.
+    """
+    source = "Before.\n\n```diff\n-old1\n+new1\n```\n"
+    cache = typeset.ViewCache()
+
+    def hosted_cell(key: str) -> str:
+        frame(seam, lambda: typeset.markdown(cache, key, source))
+        (at,) = cache.view(key).hosts
+        return str(cache.view(key).hosted(at).view.cell)
+
+    with monkeypatch.context() as patched:
+        patched.setattr(gate, "DIFF_CELL", "font")
+        # The measurement says no on this cell, and a fence is hosted only
+        # where a diff is the library's: looked at all the same.
+        patched.setattr(diffs, "ADOPT", "always")
+        assert not diffs.columns().holds
+        assert hosted_cell("on the default cell") == "font"
+    assert diffs.columns().holds and gate.DIFF_CELL == "pixel"
+    assert hosted_cell("on a whole pixel") == "pixel"
+    with monkeypatch.context() as patched:
+        patched.setattr(gate, "DIFF_CELL", "font")
+        patched.setattr(diffs, "ADOPT", "always")
+        assert hosted_cell("and back") == "font"
+
+
+def test_a_hosted_fence_is_the_diff_roles_pitch_in_the_frame_that_first_hosts_it(
+    seam: Any,
+) -> None:
+    """
+    The library makes a hosted view on the theme of the document it is in and
+    the hook hands it the diff role's afterwards. With the role at 22 px in a
+    document whose code is 20, the rows are the role's pitch in the first
+    frame and the document claims then the height it claims in the next: no
+    frame is drawn at the document's pitch.
+    """
+    _diff_at(22.0)
+    assert typeset.px(Role.CODE_BLOCK) == 20.0 and typeset.diff_row_height() == 25.0
+    source = "Before.\n\n```diff\n-old1\n+new1\n kept\n```\n\nAfter.\n"
+    cache = typeset.ViewCache()
+    claimed: list[float | None] = []
+    rows_: list[float] = []
+    for _ in range(3):
+        frame(seam, lambda: claimed.append(typeset.markdown(cache, "k", source)))
+        (at,) = cache.view("k").hosts
+        hosted = cache.view("k").hosted(at)
+        rows_.append(float(hosted.view.grid.row))
+        assert hosted.height_for(600.0) == hosted.view.row_count * 25.0
+    assert rows_ == [25.0, 25.0, 25.0]
+    assert claimed[0] is not None and claimed == [claimed[0]] * 3
 
 
 def test_the_cell_held_to_the_bound_is_the_one_the_row_was_laid_out_at(seam: Any) -> None:
@@ -1538,20 +1797,20 @@ def test_a_diff_row_with_a_lone_surrogate_is_the_panes_own_and_stops_nothing(
     ``json.loads`` makes a lone surrogate of ``"\\udc80"`` in a tool's
     arguments. The library sets one as U+FFFD, raises nothing and notes
     nothing, so an approver would read a replacement character with no word
-    that the text holds something else. It is not handed over: the code face
-    has no glyph for it, so the diff is its pane's own rows under a line that
-    names it, and the library goes on drawing.
+    that the text holds something else. It is not handed over: the diff is
+    its pane's own rows under a line that names it and says what is true of
+    it, and the library goes on drawing. It is not one of the characters a
+    diff is warned of (``diffs.hidden``): a pane's rows write it out.
     """
     said = _said_by_the_seam(monkeypatch)
     cache = typeset.ViewCache()
     texts = (approval.DiffText("a\n", "b \udc80 c\n", "x.py"),)
-    assert gate.code_lacks("b \udc80 c") == ("\udc80",)
     got: list[float | None] = []
     frame(seam, lambda: got.append(typeset.diff(cache, "k", texts)))
     assert got == [None] and cache.view("k") is None and cache.unbuilt("k") == 0
     assert said == [
-        "this diff is the pane's own rows: a row holds U+DC80, which the code face "
-        "has no glyph for, and the library would set what follows off its column"
+        "this diff is the pane's own rows: a row holds U+DC80, a lone surrogate, "
+        "which the library would set as U+FFFD and not name"
     ]
     typeset.pre_frame()
     assert typeset.can_draw()

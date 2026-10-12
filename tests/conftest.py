@@ -22,22 +22,78 @@ where none was named, and **fails** where one was named and cannot draw
 
 It deliberately does not switch the seam off for tests that did not ask for it: the
 files that draw panes against a mocked ``imgui`` do that themselves.
+
+**A run says what it ran against, first** (``ran_against``): the imscribe that
+is imported, the library named and the headers it was built against, or that
+none was named. "Green with the pair" is a claim about one library, and a
+pair built against stand-in headers is handed over like any other
+(``pairing.headers_note``).
 """
 
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from pptmstr import theme
+from pptmstr import pairing, theme, version
 from pptmstr.ui import typeset
 from pptmstr.ui.typeset import gate
 
 BOLD = theme._ASSETS / "fonts" / "Inconsolata-Bold.ttf"
+
+
+def ran_against(environ: Mapping[str, str]) -> list[str]:
+    """
+    What a test run with this environment draws through, a line a fact: the
+    imscribe the interpreter imports and the commit that is, the library
+    ``IMTYPESET_LIBRARY`` names with the commit and the headers its
+    ``BUILT-FROM`` records, and a line of its own where those headers are not
+    the wheel's. The imscribe sentence is ``pptmstr --version``'s. Never raises.
+    """
+    named = environ.get(pairing.LIBRARY_VARIABLE)
+    lines = [version._said("imscribe", version._imscribe)]
+    if not named:
+        return [
+            *lines,
+            f"imtypeset: no library ({pairing.LIBRARY_VARIABLE} is "
+            f"{'empty' if named == '' else 'not set'}): every test that draws through it is "
+            f"skipped",
+        ]
+    try:
+        record = pairing.built_from(Path(named).parent)
+        note = pairing.headers_note(Path(named).parent)
+    except Exception as failure:
+        return [
+            *lines,
+            f"imtypeset at an unrecorded commit: {named}, with no {pairing.BUILT_FROM} beside "
+            f"it that can be read ({type(failure).__name__}); nothing says what it was built "
+            f"from or against",
+        ]
+    lines.append(
+        f"imtypeset {record.get('commit', 'at an unrecorded commit')}: {named}, built for "
+        f"{record.get('wheel', 'an unrecorded wheel')} with headers "
+        f"{record.get('headers', 'that are not recorded')}"
+    )
+    return [*lines, f"STAND-IN: {note}"] if note else lines
+
+
+def pytest_report_header(config: pytest.Config) -> list[str]:
+    return ran_against(os.environ)
+
+
+def pytest_sessionstart(session: pytest.Session) -> None:
+    """
+    The same lines for a quiet run, which is what ``make test`` is: pytest
+    prints no header under ``-q``.
+    """
+    reporter = session.config.pluginmanager.get_plugin("terminalreporter")
+    if reporter is not None and not reporter.showheader:
+        for line in ran_against(os.environ):
+            reporter.write_line(line)
 
 
 @pytest.fixture(autouse=True)

@@ -99,6 +99,26 @@ proportional face, a lookalike of ``a``, and the chrome's font, which has no
 Cyrillic, draws its replacement glyph (measured 2026-10-12). Tabs are the
 library's question and are measured with the columns: stops every four cells.
 
+**A character that draws as nothing, or reorders what is beside it, is named
+by its code point over the diff, whoever draws the diff** (``hidden``,
+``hidden_warning``): a C0 or C1 control, a format character (the
+bidirectional controls, a zero-width space, a byte-order mark), a line or
+paragraph separator. Neither renderer shows one as what it is. Measured in
+pptmstr on 2026-10-12 (imscribe ``bb240c3``, imtypeset ``2fd705e``, the chrome
+font at 16 px, headless, quads read and no pixel): the library's view sets
+each as U+FFFD, which the code face has, in one cell on the grid, so such a
+character is no reason to refuse a diff to the view; ImGui draws U+202E,
+U+FEFF, U+0007 and U+0085 with the quad it draws U+0430 and U+4E2D with, its
+fallback glyph, and U+200B as an advance with no ink, so on a pane's own rows
+a bidirectional override is one more letter the font lacks and a zero-width
+space is a space. The sentence is the same one on either renderer and is what
+a pane says before a file's name: ``above`` has it for the view, and ``diff()``
+says it over the line that hands a diff back to its pane. ``own_rows_warning``
+is the same sentence of a call's unified string, for a pane that draws its own
+rows without having asked ``diff()``; **no pane calls it yet**, so with typeset
+text off, or wherever no diff is the library's, a pane's own rows are still
+drawn under no such line.
+
 **A parked call's model is made once, for every pane that draws it**
 (``Parked``), in the frame that first asks, and not at all unasked where that
 frame would stall (``work``; the panes hold it to ``review.SETTLED_LINES``).
@@ -121,7 +141,7 @@ the package imports without it.
 from __future__ import annotations
 
 import re
-from collections.abc import Hashable, Sequence
+from collections.abc import Hashable, Iterable, Iterator, Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -252,10 +272,12 @@ def above(model: Diff) -> tuple[tuple[str, bool], ...]:
     cap it does not know the width before the draw, since the child's
     scrollbar narrows it; and a warning that is above the view at one width of
     the pane and inside a row at another is one an approver has to find twice.
-    For each file, warnings first: the gate's prediction where the model still
-    carries it (``diff(warning=True)``), lines read as nothing, and characters
-    drawn as a placeholder, in the library's own words for them. Then the
-    file's label with its state. A hunk's section is a header row too and
+    For each file, warnings first, and first of them the characters the view
+    draws as a placeholder, by code point (``hidden_warning``), with any such
+    character in the file's label, which the library does not ask about; then the
+    gate's prediction where the model still carries it
+    (``diff(warning=True)``) and lines read as nothing, in the library's own
+    words for them. Then the file's label with its state. A hunk's section is a header row too and
     follows its file. Counts are not repeated: they are short and lead the row.
     """
     from imscribe import FileStatus
@@ -273,26 +295,187 @@ def above(model: Diff) -> tuple[tuple[str, bool], ...]:
         with _READING:
             refusal = str(file.will_not_apply)
             unread = len(file.unread)
-            invisible = bool(file.invisible_characters)
-            control = bool(file.control_characters)
+            # The library's own answer, which it keeps, says whether there is
+            # anything to name: the rows are read here only where there is.
+            lines = tuple(_lines(file)) if file.control_characters else ()
             label, status, endings = str(file.label), file.status, str(file.line_endings)
             sections = [str(hunk.section) for hunk in file.hunks if hunk.section]
+        marked = hidden_warning((label, *lines))
+        if marked is not None:
+            out.append((marked, True))
         if refusal:
             out.append((refusal, True))
         if unread:
             out.append(
                 (f"{unread} line{'s' if unread != 1 else ''} not read as part of the diff", True)
             )
-        if invisible:
-            out.append(("contains invisible or bidirectional control characters", True))
-        elif control:
-            out.append(("contains control characters", True))
         said = (label or "(unnamed)") + state.get(status, "")
         if endings:
             said += f"  (line endings only: {endings})"
         out.append((said, False))
         out.extend((f"@@ {section}", False) for section in sections)
     return tuple(out)
+
+
+_C0 = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+
+_INVISIBLE = frozenset(
+    "\u00ad\u061c\u06dd\u070f\u0890\u0891\u08e2\u180e\ufeff\U000110bd\U000110cd\U000e0001"
+).union(
+    *(
+        map(chr, range(first, last + 1))
+        for first, last in (
+            (0x0600, 0x0605),
+            (0x200B, 0x200F),
+            (0x2028, 0x202E),
+            (0x2060, 0x2064),
+            (0x2066, 0x206F),
+            (0xFFF9, 0xFFFB),
+            (0x13430, 0x1343F),
+            (0x1BCA0, 0x1BCA3),
+            (0x1D173, 0x1D17A),
+            (0xE0020, 0xE007F),
+        )
+    )
+)
+"""
+Unicode's format characters (Cf) and its line and paragraph separators (Zl,
+Zp), written out as the library writes them out (``imscribe.diff``): a pane's
+own rows are answered for where there is no library to ask, and Python's own
+table is whichever Unicode the interpreter was built with -- 3.11's has no
+U+13439, which the library's list has. ``tests/test_typeset_diffs.py`` holds
+this list and the library's equal at every code point.
+"""
+
+_BIDIRECTIONAL = frozenset(
+    "\u061c\u200e\u200f\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069"
+)
+"""
+The characters that reorder the letters beside them: the marks, the embeddings
+and overrides, the isolates and what ends them. Named first in a warning, so
+no count of other characters stands between an approver and one of these.
+"""
+
+_NAMED = 12
+"""
+How many code points of a class one warning spells out before it counts the rest.
+"""
+
+PLACEHOLDER = "\ufffd"
+"""
+What the library's diff view sets in place of a character ``hidden`` answers,
+and of a lone surrogate (``imscribe.ui.typeset_diff_view.CONTROL_PLACEHOLDER``;
+``tests/test_typeset_diffs.py`` holds the two equal).
+"""
+
+
+def _hides(char: str) -> str | None:
+    """
+    ``"control"`` for a C0 control other than a tab or a newline, DEL, or a C1
+    control; ``"invisible"`` for a format character (Unicode's Cf) or a line or
+    paragraph separator (Zl, Zp); ``None`` for any other character.
+
+    The library's classes (``imscribe.diff.has_control``, ``has_invisible``;
+    ``_INVISIBLE`` has why they are written again here).
+    """
+    if char < "\x7f":
+        return "control" if char < " " and char not in "\t\n" else None
+    if char <= "\x9f":
+        return "control"
+    return "invisible" if char in _INVISIBLE else None
+
+
+def hidden(lines: Iterable[str]) -> tuple[str, ...]:
+    """
+    The characters of some lines of a diff that draw as nothing or as a
+    placeholder and are not what the text beside them looks like, each once:
+    the bidirectional controls first, then the rest in code-point order.
+
+    A tab is not one, nor a newline, nor a lone surrogate, which is neither
+    renderer's to draw (``unfit``). Pure, and no library: one pass over the
+    lines.
+    """
+    seen: set[str] = set()
+    for line in lines:
+        if not line.isascii():
+            seen.update(line)
+        elif not line.isprintable():
+            seen.update(_C0.findall(line))
+    found = [char for char in seen if _hides(char) is not None]
+    return tuple(sorted(found, key=lambda char: (char not in _BIDIRECTIONAL, char)))
+
+
+def hidden_warning(lines: Iterable[str]) -> str | None:
+    """
+    The one sentence that says some lines of a diff hold characters an
+    approver cannot see for what they are, and which: ``None`` where they
+    hold none (``hidden``).
+
+    **The same sentence whoever draws the diff**, since what it warns of is in
+    the text and not in the renderer: said above the library's view for each
+    file (``above``), over a diff handed back to its pane (``diff()``), and by
+    a pane over rows of its own (``own_rows_warning``). The words are the
+    library's for its header row, with the code points after them, as many as
+    ``_NAMED`` of each class and the bidirectional ones first.
+    """
+    found = hidden(lines)
+    if not found:
+        return None
+    unseen = [char for char in found if _hides(char) == "invisible"]
+    controls = [char for char in found if _hides(char) == "control"]
+    said = []
+    for words, chars in (
+        ("invisible or bidirectional control characters", unseen),
+        ("control characters", controls),
+    ):
+        if not chars:
+            continue
+        named = ", ".join(f"U+{ord(char):04X}" for char in chars[:_NAMED])
+        if len(chars) > _NAMED:
+            named += f" and {len(chars) - _NAMED} more"
+        said.append(f"{words}: {named}")
+    return "contains " + "; and ".join(said)
+
+
+def own_rows_warning(pending: PendingApproval) -> str | None:
+    """
+    ``hidden_warning`` of a parked call's unified diff, which is what a pane's
+    own rows are: for a pane to say over them where it draws them without
+    having asked ``diff()``, which says it itself over a diff it hands back.
+
+    Of the string cut at its newlines only, each line less the carriage return
+    of a CRLF end: ``str.splitlines``, which is how a pane makes its rows,
+    breaks a line at a form feed, at U+0085 and at U+2028, and what it broke
+    at is in no row to be found.
+    """
+    if not pending.diff:
+        return None
+    return hidden_warning(line.removesuffix("\r") for line in pending.diff.split("\n"))
+
+
+def _lines(*files: Any) -> Iterator[str]:
+    """
+    Every line of some files of a model that the diff view sets as code: each
+    hunk's rows, and the lines of a file shown as written. Reads the library's
+    model; raises what that raises.
+    """
+    for file in files:
+        for hunk in file.hunks:
+            for row in hunk.rows:
+                yield row.text
+        yield from file.raw
+
+
+def _hidden_in(model: Diff) -> str | None:
+    """
+    ``hidden_warning`` of a whole model, its files' labels with their rows:
+    what ``diff()`` says over a diff it hands back to its pane, whose rows are
+    every file's. Raises what the library raises.
+    """
+    with _READING:
+        labels = tuple(str(file.label) for file in model.files)
+        lines = tuple(_lines(*(file for file in model.files if file.control_characters)))
+    return hidden_warning((*labels, *lines))
 
 
 def unfit(model: Diff) -> str | None:
@@ -307,7 +490,12 @@ def unfit(model: Diff) -> str | None:
       from another face at that face's advance, and everything right of it on
       that row is off the grid: measured at an em of 16, ``c`` after ``ab π``
       is 2 px right of its column, and what follows a ``Ж`` 8 px. Asked of
-      the library the way its own diff view asks (``gate.code_lacks``).
+      the library (``gate.code_lacks``) about the row as the view is handed
+      it: **a control or an invisible character is asked about as the
+      placeholder the view sets for it** (``hidden``, ``PLACEHOLDER``), which
+      the code face has and which is one cell on the grid, so a diff is not
+      refused for one. It is named above the view instead (``above``).
+    - *A row holding a lone surrogate.* Refused on its own account, below.
     - *A row longer than the measured cell holds for* (``gate.Columns.reach``).
 
     Of the rows the model holds: what a click on collapsed context brings in
@@ -319,10 +507,11 @@ def unfit(model: Diff) -> str | None:
     only because ``ADOPT`` says so, to be looked at, and no row of it is on a
     grid for these to be off.
 
-    **A lone surrogate is such a character**: ``json.loads`` makes one of
-    ``"\\udc80"`` in a tool's arguments, the library would set it as U+FFFD
-    and say nothing, and the code face has no glyph for it, so the diff is its
-    pane's own rows under a line naming it (``tests/test_typeset_diffs.py``).
+    **A lone surrogate is the pane's own rows, and for what is true of it**:
+    ``json.loads`` makes one of ``"\\udc80"`` in a tool's arguments, and the
+    library would set it as U+FFFD, on its column, and say nothing of it in
+    any header. A pane's own rows write the code unit out, so that is where
+    such a diff goes, under a line naming it (``tests/test_typeset_diffs.py``).
     """
     found = columns()
     if not found.holds:
@@ -338,7 +527,17 @@ def unfit(model: Diff) -> str | None:
                     longest = max(longest, len(text))
                     if not text.isascii():
                         above_ascii.update(text)
-        lacking = gate.code_lacks("".join(sorted(above_ascii)))
+    lone = sorted(char for char in above_ascii if "\ud800" <= char <= "\udfff")
+    if lone:
+        named = ", ".join(f"U+{ord(char):04X}" for char in lone[:4])
+        more = f" and {len(lone) - 4} more" if len(lone) > 4 else ""
+        return (
+            f"a row holds {named}{more}, a lone surrogate, which the library "
+            f"would set as U+{ord(PLACEHOLDER):04X} and not name"
+        )
+    asked = {PLACEHOLDER if _hides(char) else char for char in above_ascii}
+    with _READING:
+        lacking = gate.code_lacks("".join(sorted(asked)))
     if lacking:
         named = ", ".join(f"U+{ord(char):04X}" for char in lacking[:4])
         more = f" and {len(lacking) - 4} more" if len(lacking) > 4 else ""
@@ -472,8 +671,16 @@ def fence_headers(text: str) -> tuple[str, ...]:
     The lines of an honest fenced diff that the view draws as header rows, as
     written: a file's ``---`` and ``+++`` and a hunk's ``@@`` line that names a
     section. They are set above the hosted view as well (``above`` has why).
+
+    **Over them, where the fence holds what cannot be seen, the sentence that
+    says so** (``hidden_warning``): such a fence is one the view draws, a
+    placeholder in each such character's cell, and the view's own word for it
+    is in a header row.
     """
     out = []
+    marked = hidden_warning(line.removesuffix("\r") for line in text.split("\n"))
+    if marked is not None:
+        out.append(marked)
     for line in text.split("\n"):
         line = line.rstrip("\r")
         if line.startswith(("--- ", "+++ ")):
@@ -637,6 +844,10 @@ def diff(
 
     **What the view's header rows say is set above it first, wrapped to the
     view's width** (``above``), always: a header row is cut at the view's edge.
+    **And a diff handed back to its pane is first said to hold what it holds
+    that cannot be seen** (``hidden_warning``), over the line saying why it
+    is handed back: the pane's rows show such a character as a letter its
+    font lacks, or as nothing.
 
     ``source`` is a parked call as its panes hold it (``Parked``: one model,
     made here on first asking, for both of them), a parked call itself, the
@@ -702,6 +913,8 @@ def diff(
                     shown = entry.view.diff
             if entry.scanned is not shown:
                 entry.scanned = shown
+                entry.said = above(shown)
+                entry.hidden = _hidden_in(shown)
                 entry.unset = unfit(shown)
         if empty or entry.unset is not None:
             if entry.view is not None:
@@ -709,12 +922,14 @@ def diff(
                     entry.view.close()
                 entry.segments = []
             if not empty:
+                if entry.hidden is not None:
+                    views._said(im, entry.hidden, ui_theme.P.warn)
                 views._said(im, f"this diff is the pane's own rows: {entry.unset}")
             return None
         entry.frame = frame
         layout = DiffLayout.SIDE_BY_SIDE if side_by_side else DiffLayout.UNIFIED
         wide = views._width(im, width)
-        said = above(model)
+        said = entry.said
         im.push_text_wrap_pos(im.get_cursor_pos_x() + wide)
         for line, warns in said:
             im.text_colored((ui_theme.P.warn if warns else ui_theme.P.accent).vec4, line)

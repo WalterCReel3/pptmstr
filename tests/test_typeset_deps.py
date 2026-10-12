@@ -13,6 +13,7 @@ Makefile exports the pair only when it is whole, built from the commit
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import os
 import re
@@ -42,8 +43,16 @@ def _load() -> ModuleType:
 
 deps = _load()
 
+# The environment these tests run in, named: the fetch step deletes from the
+# environment it runs in and takes this checkout's `.venv` unless told.
+HERE = ("--environment", sys.prefix)
+
 needs_git = pytest.mark.skipif(shutil.which("git") is None, reason="git is not installed")
 needs_make = pytest.mark.skipif(shutil.which("make") is None, reason="make is not installed")
+needs_venv = pytest.mark.skipif(
+    not (ROOT / ".venv" / "bin" / "python").is_file(),
+    reason="the Makefile checks a pair with .venv/bin/python, and there is none",
+)
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -283,28 +292,101 @@ def test_verify_refuses_a_directory_that_is_no_checkout_inside_one_that_is(
 
 
 @needs_git
-def test_verify_refuses_an_interpreter_that_still_imports_the_earlier_name(
+def test_verify_refuses_the_earlier_name_in_this_environment_and_says_what_removes_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     # Everything else about the install is right: the old copy is the only fault.
     pinned, _ = _imscribe_clone(tmp_path, monkeypatch)
     monkeypatch.setattr(deps, "imported_imscribe", lambda: pinned)
-    left = tmp_path / "site"
-    (left / deps.EARLIER_NAME).mkdir(parents=True)
-    (left / deps.EARLIER_NAME / "__init__.py").write_text("", encoding="utf-8")
-    monkeypatch.syspath_prepend(str(left))
+    own = tmp_path / "site"
+    monkeypatch.setattr(deps, "own_site_directories", lambda: {own.resolve()})
+    monkeypatch.syspath_prepend(str(own))
 
+    # A distribution, as an installer left it: the fetch step removes that.
+    _earlier_distribution(own)
     assert deps.main(["verify", "--deps", str(tmp_path)]) == 1
     said = capsys.readouterr()
-    assert str(left / deps.EARLIER_NAME) in said.err and "identical" not in said.out
+    assert str(own / deps.EARLIER_NAME) in said.err and "identical" not in said.out
+    assert "`make deps` removes the distribution of that name." in said.err
+
+    # Files with no record of them: nothing here removes those, and it says so.
+    shutil.rmtree(own / f"{deps.EARLIER_NAME}-0.2.0.dev0.dist-info")
+    assert deps.main(["verify", "--deps", str(tmp_path)]) == 1
+    err = capsys.readouterr().err
+    assert "`make deps` does not remove it" in err
+    assert f"remove {(own / deps.EARLIER_NAME).resolve()} by hand" in err
 
     # With no `__init__.py` it imports all the same, as a namespace package.
-    (left / deps.EARLIER_NAME / "__init__.py").unlink()
+    shutil.rmtree(own / deps.EARLIER_NAME)
+    (own / deps.EARLIER_NAME).mkdir()
     assert deps.main(["verify", "--deps", str(tmp_path)]) == 1
-    assert str(left / deps.EARLIER_NAME) in capsys.readouterr().err
+    assert "by hand" in capsys.readouterr().err
 
-    shutil.rmtree(left / deps.EARLIER_NAME)
+    shutil.rmtree(own / deps.EARLIER_NAME)
     assert deps.main(["verify", "--deps", str(tmp_path)]) == 0
+    assert capsys.readouterr().err == ""
+
+
+@needs_git
+def test_verify_names_the_earlier_name_another_environment_supplies_and_goes_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """
+    sys.path here reaches another environment's site directory. A copy under
+    the earlier name there is one the fetch step leaves by design, so telling
+    its reader that `make deps` removes it would be untrue, and refusing would
+    stop `make deps` before the library is built for a reason nothing in this
+    checkout can clear. It is named, with where it is and that it is not ours,
+    and the step succeeds: what keeps the name out of the source is the test
+    below, which reads the source.
+    """
+    pinned, _ = _imscribe_clone(tmp_path, monkeypatch)
+    monkeypatch.setattr(deps, "imported_imscribe", lambda: pinned)
+    own, other = tmp_path / "own" / "site", tmp_path / "other" / "site"
+    own.mkdir(parents=True)
+    _earlier_distribution(other)
+    monkeypatch.setattr(deps, "own_site_directories", lambda: {own.resolve()})
+    monkeypatch.syspath_prepend(str(other))
+
+    assert deps.main(["verify", "--deps", str(tmp_path)]) == 0
+    said = capsys.readouterr()
+    assert "identical" in said.out
+    (note,) = said.err.splitlines()
+    assert note.startswith("note: ") and str((other / deps.EARLIER_NAME).resolve()) in note
+    assert f"outside this environment ({own.resolve()})" in note
+    assert "not this checkout's to remove and `make deps` leaves it" in note
+    assert "removes the distribution" not in note
+
+
+def _imports(path: Path, name: str) -> list[str]:
+    """
+    Every module a file imports that is `name` or under it, wherever in the file.
+    """
+    found = []
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.Import):
+            found += [alias.name for alias in node.names]
+        if isinstance(node, ast.ImportFrom) and not node.level:
+            found.append(node.module or "")
+    return [module for module in found if module.split(".")[0] == name]
+
+
+def test_nothing_in_the_tree_imports_the_library_by_its_earlier_name() -> None:
+    """
+    What `verify` leaves to this test where the earlier name still imports from
+    another environment: a module that imported it would pass there and fail
+    in a new one. Read from the source, so it holds whatever is installed.
+    """
+    sources = [
+        path
+        for top in ("pptmstr", "scripts", "tests")
+        for path in sorted((ROOT / top).rglob("*.py"))
+    ]
+    # The search finds an import it is known to be looking at, or "none" is
+    # said of a search that finds nothing anywhere.
+    assert _imports(Path(__file__), "pytest") == ["pytest"]
+    assert len(sources) > 100
+    assert [str(path) for path in sources if _imports(path, deps.EARLIER_NAME)] == []
 
 
 def _earlier_distribution(site: Path) -> None:
@@ -341,6 +423,7 @@ def test_the_earlier_name_is_removed_from_this_environment_and_from_no_other(
         (site / "imscribe").mkdir()
         monkeypatch.syspath_prepend(str(site))
     monkeypatch.setattr(deps, "own_site_directories", lambda: {own.resolve()})
+    monkeypatch.setattr(deps, "foreign_interpreter", lambda environment=None: None)
     clone = tmp_path / "deps" / deps.EARLIER_NAME
     clone.mkdir(parents=True)
     theirs = sorted(other.rglob("*"))
@@ -361,6 +444,64 @@ def test_the_site_directories_removed_from_are_this_interpreters_own() -> None:
     assert own and all(Path(sys.prefix).resolve() in site.parents for site in own)
 
 
+def test_nothing_is_removed_by_an_interpreter_that_is_not_this_checkouts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """
+    "This environment" is whichever interpreter runs the script. Run with the
+    library's own checkout active, whose environment holds an editable install
+    under the earlier name, the removal would take that project's install out
+    of it. So the step refuses any environment but this checkout's `.venv` or
+    the one named, before it fetches, and the function that deletes refuses
+    for itself.
+    """
+    theirs = tmp_path / "library" / ".venv"
+    site = theirs / "site"
+    _earlier_distribution(site)
+    monkeypatch.syspath_prepend(str(site))
+    monkeypatch.setattr(deps, "own_site_directories", lambda: {site.resolve()})
+    monkeypatch.setattr(sys, "prefix", str(theirs))
+    monkeypatch.setattr(deps, "fetch_commit", lambda *given: pytest.fail("fetched"))
+    before = sorted(site.rglob("*"))
+    clone = tmp_path / "deps" / deps.EARLIER_NAME
+    clone.mkdir(parents=True)
+
+    assert deps.main(["imscribe", "--deps", str(tmp_path / "deps")]) == 1
+    said = capsys.readouterr().err
+    assert f"whose environment is {theirs.resolve()}" in said and "nothing was removed" in said
+    assert str((ROOT / ".venv").resolve()) in said and "--environment" in said
+    with pytest.raises(deps.DepsError, match="nothing was removed"):
+        deps.remove_earlier_name(tmp_path / "deps")
+    with pytest.raises(deps.DepsError, match="which is what --environment names"):
+        deps.remove_earlier_name(tmp_path / "deps", tmp_path / "another")
+    assert sorted(site.rglob("*")) == before and clone.is_dir()
+
+    # Named, it is the environment that is meant.
+    assert deps.foreign_interpreter(theirs) is None
+    assert deps.remove_earlier_name(tmp_path / "deps", theirs) == [
+        site / deps.EARLIER_NAME,
+        clone,
+    ]
+
+
+@needs_venv
+def test_this_checkouts_own_environment_is_one_the_step_runs_in() -> None:
+    done = subprocess.run(
+        [
+            str(ROOT / ".venv" / "bin" / "python"),
+            "-c",
+            "import runpy, sys; sys.argv = ['typeset_deps']; "
+            f"m = runpy.run_path({str(ROOT / 'scripts' / 'typeset_deps.py')!r}); "
+            "print(m['foreign_interpreter']())",
+        ],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    assert done.stdout.strip() == "None"
+
+
 @needs_git
 def test_the_fetch_step_removes_the_earlier_name_and_names_a_variable_it_does_not_read(
     upstream: tuple[Path, str, str],
@@ -374,9 +515,11 @@ def test_the_fetch_step_removes_the_earlier_name_and_names_a_variable_it_does_no
     monkeypatch.setenv("ADVTEXT_REPO", "file:///nowhere")
     monkeypatch.setenv("ADVTEXT_PIP_ARGS", "--no-index")
     called: list[Path] = []
-    monkeypatch.setattr(deps, "remove_earlier_name", lambda where: called.append(where) or [])
+    monkeypatch.setattr(
+        deps, "remove_earlier_name", lambda where, environment: called.append(where) or []
+    )
 
-    assert deps.main(["imscribe", "--deps", str(tmp_path / "deps")]) == 0
+    assert deps.main(["imscribe", "--deps", str(tmp_path / "deps"), *HERE]) == 0
 
     assert called == [(tmp_path / "deps").resolve()]
     (note,) = capsys.readouterr().err.splitlines()
@@ -385,7 +528,7 @@ def test_the_fetch_step_removes_the_earlier_name_and_names_a_variable_it_does_no
 
     monkeypatch.delenv("ADVTEXT_REPO")
     monkeypatch.delenv("ADVTEXT_PIP_ARGS")
-    assert deps.main(["imscribe", "--deps", str(tmp_path / "deps")]) == 0
+    assert deps.main(["imscribe", "--deps", str(tmp_path / "deps"), *HERE]) == 0
     assert capsys.readouterr().err == ""
 
 
@@ -424,7 +567,15 @@ def test_a_failed_build_leaves_the_pair_that_was_there_and_says_so(
     assert deps.main(["library", "--deps", str(tmp_path)]) == 0
 
     assert library.read_bytes() == b"the previous build"
-    assert "left as it was" in capsys.readouterr().err
+    assert "left as it was." in capsys.readouterr().err
+
+    # What a build that asked for the fork and could not have it leaves behind
+    # is said to be what it is: the stand-in pair from before.
+    (library.parent / "BUILT-FROM").write_text("headers: stand-in:upstream\n", encoding="utf-8")
+    assert deps.main(["library", "--deps", str(tmp_path)]) == 0
+    err = " ".join(capsys.readouterr().err.split())
+    assert "left as it was: the imtypeset pair in" in err
+    assert "built against stand-in:upstream, NOT the wheel's own" in err
 
 
 def test_a_platform_without_a_recipe_is_not_a_failure_either(
@@ -440,7 +591,7 @@ def test_imscribe_that_cannot_be_fetched_does_fail_the_caller(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setenv("IMSCRIBE_REPO", (tmp_path / "no-such-repo").as_uri())
-    assert deps.main(["imscribe", "--deps", str(tmp_path / "deps")]) == 1
+    assert deps.main(["imscribe", "--deps", str(tmp_path / "deps"), *HERE]) == 1
     assert "IMSCRIBE_REPO=" in capsys.readouterr().err
 
 
@@ -748,7 +899,9 @@ def test_a_pair_is_refused_once_the_ref_file_names_another_commit(
     deps.build_library(out)
     capsys.readouterr()
     assert deps.main(["pair", "--deps", str(out)]) == 0
-    assert capsys.readouterr().out == "ok\n"
+    # The fixture's build asks for the stand-in, and `pair` says it got one.
+    (line,) = capsys.readouterr().out.splitlines()
+    assert line.startswith("ok; ") and "built against stand-in:fake-headers, NOT" in line
 
     bumped = "f" * 40
     monkeypatch.setattr(deps, "read_ref", lambda path: bumped)
@@ -788,12 +941,6 @@ def test_the_pair_step_is_one_line_and_no_failure_whatever_goes_wrong(
 # --- the Makefile ----------------------------------------------------------------
 
 
-needs_venv = pytest.mark.skipif(
-    not (ROOT / ".venv" / "bin" / "python").is_file(),
-    reason="the Makefile checks a pair with .venv/bin/python, and there is none",
-)
-
-
 def _make_typeset_env(
     *make_args: str, env: dict[str, str] | None = None
 ) -> tuple[dict[str, str], str]:
@@ -817,14 +964,24 @@ def _typeset_env(*make_args: str, env: dict[str, str] | None = None) -> dict[str
     return _make_typeset_env(*make_args, env=env)[0]
 
 
-def _pair(top: Path, *, package: bool = True, commit: str | None = None) -> Path:
+def _pair(
+    top: Path,
+    *,
+    package: bool = True,
+    commit: str | None = None,
+    headers: str | None = "fork:pthom-abc",
+) -> Path:
     """
-    A pair as `library` leaves one, built from `commit` or from what `imtypeset.ref` names.
+    A pair as `library` leaves one, built from `commit` or from what `imtypeset.ref` names,
+    against the wheel's own headers unless `headers` says otherwise.
     """
     top.mkdir(parents=True)
     (top / deps.LIBRARY_NAME).write_bytes(b"")
     built = commit or deps.read_ref(ROOT / "imtypeset.ref")
-    (top / "BUILT-FROM").write_text(f"imtypeset: somewhere\ncommit: {built}\n", encoding="utf-8")
+    against = f"headers: {headers}\n" if headers else ""
+    (top / "BUILT-FROM").write_text(
+        f"imtypeset: somewhere\ncommit: {built}\n{against}", encoding="utf-8"
+    )
     if package:
         (top / "pysnap" / "imtypeset").mkdir(parents=True)
         (top / "pysnap" / "imtypeset" / "__init__.py").write_text("", encoding="utf-8")
@@ -844,6 +1001,55 @@ def test_make_exports_a_whole_pair_by_absolute_path(tmp_path: Path) -> None:
         "IMTYPESET_LIBRARY": str(pair / deps.LIBRARY_NAME),
         "IMTYPESET_PYTHON": str(pair / "pysnap"),
     }
+
+
+def test_the_pair_step_says_ok_alone_only_of_a_pair_built_against_the_wheels_headers(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert deps.FORK + ":" == deps.pairing.FORK_HEADERS
+    for name, headers, said in (
+        ("fork", "fork:pthom-abc", ""),
+        ("stand-in", "stand-in:ocornut-v1.92.9-docking", "stand-in:ocornut-v1.92.9-docking"),
+        ("unrecorded", None, "headers its BUILT-FROM does not record"),
+    ):
+        pair = _pair(tmp_path / name, headers=headers)
+        assert deps.main(["pair", "--pair", str(pair)]) == 0
+        (line,) = capsys.readouterr().out.splitlines()
+        if not said:
+            assert line == "ok"
+            continue
+        assert line.startswith(f"ok; the imtypeset pair in {pair} was built against {said}, NOT ")
+
+
+@needs_make
+@needs_venv
+@pytest.mark.parametrize("headers", ["stand-in:ocornut-v1.92.9-docking", None])
+def test_make_exports_a_stand_in_pair_and_says_on_every_run_that_it_is_one(
+    tmp_path: Path, headers: str | None
+) -> None:
+    """
+    A pair built against upstream's headers is the only build there is where
+    the wheel's fork cannot be fetched, and a default build that fails there
+    leaves it in place and exits 0. It is exported, and the run says what it
+    is: once as a warning every target gets, once in the reason.
+    """
+    pair = _pair(tmp_path / "pair", headers=headers)
+    got, said = _make_typeset_env(f"TYPESET_DIR={pair}")
+    assert got == {
+        "IMTYPESET_LIBRARY": str(pair / deps.LIBRARY_NAME),
+        "IMTYPESET_PYTHON": str(pair / "pysnap"),
+    }
+    warning, why = said.strip().splitlines()
+    against = headers or "headers its BUILT-FROM does not record"
+    for line in (warning, why):
+        assert f"was built against {against}, NOT the wheel's own Dear ImGui headers" in line
+    assert warning.startswith("Makefile:") and why.startswith("# the pair in ")
+
+    # And a pair built against the wheel's own says nothing more than it did.
+    fork = _pair(tmp_path / "fork")
+    got, said = _make_typeset_env(f"TYPESET_DIR={fork}")
+    assert got["IMTYPESET_LIBRARY"] == str(fork / deps.LIBRARY_NAME)
+    assert said.strip() == (f"# the pair in {fork}, built from the commit imtypeset.ref names")
 
 
 @needs_make

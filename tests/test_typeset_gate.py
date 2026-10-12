@@ -703,6 +703,43 @@ def test_a_measurement_taken_at_one_display_density_is_not_the_answer_at_another
     assert len(taken) == 2
 
 
+def test_a_view_held_from_one_display_density_is_made_again_at_another(seam: Any) -> None:
+    """
+    A diff view keeps the grid it worked out, and the measurement is taken
+    again for another density: so a change of density moves the seam's epoch
+    between frames, and every view held from before it is let go, as the
+    baked sizes are (``theme.keep_baked_sizes``). The density is the number
+    ImGui reports, changed here under a context with no backend: **this has
+    not run on a display whose density is not 1**, and what the library
+    draws there nobody has measured.
+    """
+    from pptmstr import approval
+    from tests.test_typeset_views import frame
+
+    texts = (approval.DiffText("one\n", "two\n", "x.py"),)
+    cache = typeset.ViewCache()
+    io = seam.get_io()
+    was = (float(io.display_framebuffer_scale.x), float(io.display_framebuffer_scale.y))
+
+    def drawn() -> Any:
+        frame(seam, lambda: typeset.diff(cache, "k", texts))
+        return cache.view("k")
+
+    first = drawn()
+    epoch = gate.epoch()
+    assert drawn() is first and gate.epoch() == epoch, "nothing moves while nothing changes"
+    try:
+        io.display_framebuffer_scale = seam.ImVec2(2.0, 2.0)
+        second = drawn()
+        assert gate.epoch() == epoch + 1
+        assert second is not None and second is not first
+        assert drawn() is second and gate.epoch() == epoch + 1, "once a change"
+    finally:
+        io.display_framebuffer_scale = seam.ImVec2(*was)
+    assert drawn() is not second and gate.epoch() == epoch + 2, "and back is a change"
+    assert typeset.load_fonts(BOLD)
+
+
 def test_how_long_a_row_the_columns_answer_for_follows_how_far_out_the_cell_is(
     seam: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:

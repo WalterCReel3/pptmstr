@@ -202,6 +202,8 @@ class _Gate:
     # What a view raised when the library stopped inside a draw, kept until the
     # frame it happened in is over (`stopped`, `pre_frame`).
     stopping: str | None = None
+    # The display's density as `pre_frame` last read it, or `None` before it has.
+    density: tuple[float, float] | None = None
 
 
 _GATE = _Gate()
@@ -841,14 +843,25 @@ def diff_view(model: Any, theme: Any, **given: Any) -> Any:
     return TypesetDiffView(model, theme, cell=DIFF_CELL, **given)
 
 
-def diff_fences() -> Any:
+def diff_fences(held: Any = None) -> Any:
     """
     The library's hook for a fenced diff in a settled document, on the same
     cell as ``diff_view``. Raises what the library raises.
+
+    **Asked for each fence, with what the asking before answered** (``held``):
+    the hook is one object for as long as the process runs, because what it
+    knows of a fence it has read is found through it, and the cell it hands
+    the next view it makes is put to ``DIFF_CELL`` here every time. A hook
+    that kept the cell it was made with would host a view on one cell while
+    ``columns`` answered for another.
     """
     from imscribe import TypesetDiffFences
 
-    return TypesetDiffFences(cell=DIFF_CELL)
+    if held is None:
+        return TypesetDiffFences(cell=DIFF_CELL)
+    if held.cell != DIFF_CELL:
+        held.cell = DIFF_CELL
+    return held
 
 
 def code_lacks(text: str) -> tuple[str, ...]:
@@ -861,9 +874,10 @@ def code_lacks(text: str) -> tuple[str, ...]:
     of it. Asked as the library's diff view asks for its own
     ``code_face_lacks``, which is not a name the library promises: the native
     module's ``face_has_glyph`` for the code face's role, one call a distinct
-    character. Stricter than the view's own answer in one way: a control or
-    an invisible character the view would show as a placeholder is asked
-    about as itself. Raises what the library raises; for ``diffs.unfit``.
+    character. Of the text as given: the view asks about a row as it hands
+    the row over, with a placeholder where a control or an invisible
+    character was, and ``diffs.unfit`` puts the placeholder there before it
+    asks. Raises what the library raises.
     """
     if text.isascii():
         return ()
@@ -1265,6 +1279,7 @@ def unload() -> None:
     _GATE.family = None
     _GATE.accepted = _GATE.loaded = False
     _GATE.failure = _GATE.stopping = None
+    _GATE.density = None
     _COLUMNS.clear()
     try:
         _typesetter().unload()
@@ -1291,6 +1306,15 @@ def pre_frame() -> None:
     size its theme names and not at ImGui's current font size, and
     ``hello_imgui`` scales the UI font for the display, so the size is read from
     what ImGui reports. A change moves the epoch.
+
+    **So does a change of the display's density.** A view keeps the grid it
+    worked out, and a diff view's whole-pixel cell is a pixel of the raster
+    ImGui had for the density it was made at; ``columns`` is asked again for
+    another density (``_columns_key``), so a view held from before would be
+    drawn on a cell the fresh answer is not about. ``theme.keep_baked_sizes``
+    lets go of every baked size on the same change. **Nobody has run this on
+    a display whose density is not 1**: ``tests/test_typeset_gate.py`` changes
+    the number ImGui reports, under a context with no backend.
     """
     if _GATE.stopping is not None:
         _GATE.failure, _GATE.stopping = _GATE.stopping, None
@@ -1302,6 +1326,13 @@ def pre_frame() -> None:
         size = _live_font_size()
         if size is not None:
             roles.follow(size)
+            # Read where the size is: once a frame has been, so the density is
+            # the one a backend reported and not the one a context starts with.
+            density = _density()
+            if density != _GATE.density:
+                if _GATE.density is not None:
+                    roles.moved()
+                _GATE.density = density
     except Exception as failure:
         failed(failure)
 

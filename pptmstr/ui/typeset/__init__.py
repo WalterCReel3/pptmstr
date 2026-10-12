@@ -74,6 +74,7 @@ from .diffs import (
 )
 from .diffs import adopted as diff_adopted
 from .diffs import draws as diff_draws
+from .diffs import own_rows_warning as diff_own_rows_warning
 from .diffs import renderer as diff_renderer
 from .gate import (
     available,
@@ -179,6 +180,7 @@ __all__ = [
     "diff_adopted",
     "diff_draws",
     "diff_model",
+    "diff_own_rows_warning",
     "diff_renderer",
     "diff_row_height",
     "document",

@@ -224,9 +224,13 @@ class _Entry:
     # For the kind ``stream``: the ``Stream`` a pane appends to.
     stream: Stream | None = None
     # For the kind ``diff``: the library's model of what was last handed over,
-    # and the model ``diffs.unfit`` was last asked of.
+    # and the model ``diffs.unfit`` was last asked of, with what was read of
+    # it then: the lines said above the view (``diffs.above``), and the
+    # sentence naming what its rows hold that cannot be seen.
     model: Any = None
     scanned: Any = None
+    said: tuple[tuple[str, bool], ...] = ()
+    hidden: str | None = None
 
     @property
     def view(self) -> Any:
@@ -870,14 +874,22 @@ class _Fences:
 
     The library gives a fenced diff the theme of the document it is in. A diff
     is ``Role.DIFF`` wherever it is drawn, and it is that theme the columns
-    were measured for.
+    were measured for. Measured in pptmstr on 2026-10-12 with the diff role at
+    22 px in a document whose code is 20 (headless, imscribe ``bb240c3``): the
+    hosted view's rows are the diff role's pitch, 25 px, in the frame that
+    first hosts it, and the height the document claims in that frame is the
+    height it claims in the next.
+
+    **The cell is the gate's at every fence** (``gate.diff_fences``), for the
+    view about to be made and for one this hook made before: the library's
+    hook is kept for as long as the process runs, and the cell a view is on
+    is the one ``gate.columns`` answers for or the answer is about nothing.
     """
 
     __slots__ = ("inner",)
 
     def __init__(self) -> None:
-        with _MAKING:
-            self.inner = gate.diff_fences()
+        self.inner: Any = None
 
     def __call__(self, view: Any, number: int, block: Any) -> Any:
         from . import diffs
@@ -888,9 +900,13 @@ class _Fences:
             return None
         if diffs.fence_diff("diff", text) is None:
             return None
+        with _MAKING:
+            self.inner = gate.diff_fences(self.inner)
         hosted = self.inner(view, number, block)
         if hosted is None or not diffs.accounted(hosted.text, hosted.view.diff):
             return None
+        if hosted.view.cell != self.inner.cell:
+            hosted.view.cell = self.inner.cell
         hosted.view.theme = themes.diff_theme()
         return hosted
 
