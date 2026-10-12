@@ -1888,6 +1888,17 @@ def test_the_operators_edit_cannot_change_who_sent_it() -> None:
 # -- work templates ---------------------------------------------------------------
 
 
+def test_a_sessions_process_is_given_pptmstrs_environment_and_nothing_of_the_drivers() -> None:
+    """
+    The SDK starts the CLI with ``os.environ`` under ``options.env``, and nothing
+    in ``options.env`` can take a variable away. So what a session's process is
+    given is settled where pptmstr's own environment is (``pairing.release``),
+    and holds only while the driver adds none of its own.
+    """
+    options = AgentSession(Bridge(), task="t")._options()
+    assert options.env == {}
+
+
 def test_a_lone_agent_configures_no_team() -> None:
     from pptmstr.bridge import Bridge
     from pptmstr.driver import AgentSession

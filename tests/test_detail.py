@@ -2123,6 +2123,37 @@ def test_a_is_not_sent_over_a_body_the_library_stopped_under(seam, monkeypatch) 
     assert typeset.load_fonts(theme_mod._ASSETS / "fonts" / "Inconsolata-Bold.ttf")
 
 
+def test_a_is_not_sent_over_a_body_first_drawn_after_the_library_stopped(seam, monkeypatch) -> None:
+    """
+    The library stopped under another pane earlier in the frame the cursor
+    reached this call: DETAIL's key is new, no view can be made for it, and the
+    pane shows the sentence. Every line is missing from that frame's reading
+    and ``a`` is not sent on it; the next frame is this pane's own renderer.
+    """
+    from tests import test_typeset_views as views_rig
+
+    obligation = parked("mcp__pptmstr__post_concern", {"to": "lead", "body": "One.\n\nTwo."})
+    snap = snapshot(record(), needs_you=(obligation,))
+    key = (obligation.key, "arguments")
+    rig = Pane(seam, monkeypatch)
+    rig.focus.move(snap, 0)
+    bridge = _Sent()
+    with monkeypatch.context() as stop:
+        views_rig.no_view_can_be_made(stop)
+        rig.frame(snap)
+        assert rig.pane.views.unbuilt(key) > 0
+        assert review.unset_lines(rig.state, "p1") == rig.pane.views.unbuilt(key)
+        assert review.withheld(rig.state, obligation.approval) == review.NOT_WHOLE
+        _press_a(rig, snap, bridge)
+        assert bridge.resolved == []
+
+        rig.frame(snap)
+        assert not typeset.enabled(typeset.Pane.DETAIL)
+        _press_a(rig, snap, bridge)
+        assert bridge.resolved == [("p1", True)]
+    assert typeset.load_fonts(theme_mod._ASSETS / "fonts" / "Inconsolata-Bold.ttf")
+
+
 def test_with_typeset_off_a_approves_once_detail_has_drawn_the_call(imgui, monkeypatch) -> None:
     typeset.configure(typeset=False)
     assert not typeset.enabled()

@@ -1312,6 +1312,67 @@ def test_a_right_click_offers_the_block_and_the_run_under_the_mouse_and_the_sele
             rig.frame(seam, lambda: None)
 
 
+def test_the_library_stopping_under_an_open_menu_leaves_the_menu_and_the_frame_whole(
+    seam: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The menu reads the selection between the popup's begin and its end, inside
+    the log's child, and reading it is a call into the library. If the library
+    has stopped, the menu offers no selection and everything else it had, the
+    popup and the child are closed, and the next frame is wrapped lines.
+    """
+    state = typeset_state(follow_tail=False)
+    snap = session(report())
+    io = seam.get_io()
+    offered: list[str] = []
+    selecting: Any = None
+
+    def stopped() -> str:
+        raise rig.advtext.TypesetUnavailable(STOPPED)
+
+    def labelled() -> None:
+        real = seam.menu_item_simple
+        outer = seam.internal.get_current_window().name
+        seam.menu_item_simple = lambda label: (offered.append(label), real(label))[1]
+        try:
+            transcript_pane.draw(snap, state, ROOT)
+        finally:
+            seam.menu_item_simple = real
+        assert seam.internal.get_current_window().name == outer, "a window was left open"
+
+    try:
+        io.add_mouse_pos_event(80.0, 140.0)
+        for _ in range(3):
+            draw(seam, snap, state)
+        (held,) = state.feeds[ROOT].generations
+        selecting = state.feeds[ROOT].views.views(held.key)[0]
+        selecting.select_all()
+        io.add_mouse_button_event(1, True)
+        draw(seam, snap, state)
+        io.add_mouse_button_event(1, False)
+        draw(seam, snap, state)
+        rig.frame(seam, labelled)
+        assert offered[0] == "copy selection" and offered[-1] == "copy visible"
+
+        offered.clear()
+        with monkeypatch.context() as stop:
+            stop.setattr(selecting, "selected_text", stopped)
+            rig.frame(seam, labelled)
+        assert "copy selection" not in offered and offered[-1] == "copy visible"
+
+        draw(seam, snap, state)
+        assert not typeset.enabled(typeset.Pane.CONTEXT)
+        assert state.shown_mode() is RenderMode.WRAP
+    finally:
+        io.add_mouse_button_event(1, False)
+        io.add_mouse_pos_event(-1.0, -1.0)
+        if selecting is not None:
+            selecting.clear_selection()
+        for _ in range(2):
+            rig.frame(seam, lambda: None)
+        assert typeset.load_fonts(rig.BOLD), "a load is the way back"
+
+
 @pytest.mark.parametrize(
     ("kind", "text"),
     [

@@ -286,7 +286,12 @@ class ViewCache:
         sets over it. Ask inside the window the key was drawn in, and only when
         that window is hovered: a part ImGui draws is found by where it is, and
         nothing here knows what is in front of it.
+
+        Asked outside a draw, so a library that has stopped is caught here as a
+        draw catches it: the answer is ``None`` and the gate is told.
         """
+        from advtext import TypesetUnavailable
+
         entry = self._entries.get(key)
         if entry is None or entry.resting or entry.missing:
             return None
@@ -294,21 +299,24 @@ class ViewCache:
         if entry.frame != im.get_frame_count():
             return None
         at = im.get_io().mouse_pos.y
-        for segment in entry.segments:
-            view = segment.view
-            if view is None:
-                index = segment.parts[0]
-                if segment.band[0] <= at < segment.band[1]:
-                    return (index, entry.parts[index].text)
-                continue
-            block = view.block_under_mouse()
-            if block is None:
-                continue
-            text = str(view.texts[block])
-            said = segment.captions.get(block)
-            if said is not None:
-                text = text[said + 1 :]
-            return (segment.owner[block] if block < len(segment.owner) else 0, text)
+        try:
+            for segment in entry.segments:
+                view = segment.view
+                if view is None:
+                    index = segment.parts[0]
+                    if segment.band[0] <= at < segment.band[1]:
+                        return (index, entry.parts[index].text)
+                    continue
+                block = view.block_under_mouse()
+                if block is None:
+                    continue
+                text = str(view.texts[block])
+                said = segment.captions.get(block)
+                if said is not None:
+                    text = text[said + 1 :]
+                return (segment.owner[block] if block < len(segment.owner) else 0, text)
+        except TypesetUnavailable as stopped:
+            gate.stopped(stopped)
         return None
 
     def selected(self, key: Hashable) -> str:
@@ -316,10 +324,19 @@ class ViewCache:
         The text selected under a key if the selection is the one in force, or
         ``""``. A selection is inside one of the library's views: it does not
         cross a part ImGui draws.
+
+        Reading a selection is a call into the library, made outside any draw
+        (a pane asks from inside a popup). A library that has stopped is caught
+        here as a draw catches it: the answer is ``""`` and the gate is told.
         """
-        for view in self.views(key):
-            if view.owns_selection and (text := view.selected_text()):
-                return str(text)
+        from advtext import TypesetUnavailable
+
+        try:
+            for view in self.views(key):
+                if view.owns_selection and (text := view.selected_text()):
+                    return str(text)
+        except TypesetUnavailable as stopped:
+            gate.stopped(stopped)
         return ""
 
     def _held(self, key: Hashable, kind: str) -> _Entry:
@@ -802,6 +819,24 @@ def _show_view(
     return foot
 
 
+_WIDEST_EM = 1.5
+"""
+More than the widest character is, as a multiple of the pixel height it is set
+at. Measured in pptmstr on 2026-10-12 over 1,850 characters of Latin, Greek,
+Cyrillic, punctuation and symbols in a first-level heading: the widest is
+U+2031 at 1.21, and a capital ``W`` is 0.75.
+"""
+
+
+def _tallest_px() -> float:
+    """
+    The tallest pixel height any text of a document is set at: a role's own, or
+    the first heading level's over the heading role's.
+    """
+    heading = roles.px(Role.HEADING) * max(scale for _, scale, _, _ in themes.HEADINGS)
+    return max(heading, *(roles.px(role) for role in Role))
+
+
 def _reach(segment: _Segment, wide: float) -> float:
     """
     How far right of its left edge a view's text reaches at the measure it was
@@ -810,17 +845,17 @@ def _reach(segment: _Segment, wide: float) -> float:
     The library breaks a line at a space and nowhere else, never breaks code, and
     does not say how wide the result is (requests P10 and P12). It is asked where
     it set the lines of the blocks that could run over -- code, a table, and text
-    holding a run with no space in it that would not fit at one and a half body
-    heights a character, which is wider than any glyph of any role is set --
-    once for a revision of the view at a measure, since asking lays those blocks
-    out: about 0.05 ms a block, measured on a document of 370.
+    holding a run with no space in it that would not fit at ``_WIDEST_EM`` of
+    the tallest text a character -- once for a revision of the view at a
+    measure, since asking lays those blocks out: about 0.05 ms a block,
+    measured on a document of 370.
     """
     view = segment.view
     held = segment.reach
     if held is not None and held[0] == view.revision and held[1] == wide:
         return held[2]
     reach = 0.0
-    longest = wide / (1.5 * roles.body_px())
+    longest = wide / (_WIDEST_EM * _tallest_px())
     for block, text in enumerate(view.texts):
         role = view.block_role(block)
         if role == "TABLE":
@@ -940,7 +975,10 @@ def _draw(
         entry.missing = 0
     except TypesetUnavailable as stopped:
         gate.stopped(stopped)
-        entry.missing = sum(part.text.count("\n") + 1 for part in entry.parts)
+        # Of the parts handed in, and not of ``entry.parts``: an entry holds
+        # its parts only once every view of them was made, and the library can
+        # refuse the first.
+        entry.missing = sum(part.text.count("\n") + 1 for part in parts)
         _said(im, f"typeset text stopped: {stopped}", ui_theme.P.warn)
     entry.height = float(im.get_cursor_pos().y - top)
     return entry.height

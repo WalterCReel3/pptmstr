@@ -115,7 +115,20 @@ _BODY_BLOCK = re.compile(r" {0,3}(?:#{1,6}(?:\s|$)|[-*+](?:\s|$)|\d{1,9}[.)](?:\
 _BODY_RULE = re.compile(r"\s*([-=*_])(?:\s*\1)*\s*$")
 _BODY_FIELD = re.compile(r"[A-Za-z_][\w.-]*(?: [\w.-]+){0,2}:(?:\s+\S|$)")
 _BODY_INLINE = re.compile(r"`[^`\n]+`|\*\*\S|\]\(")
-_BODY_PUNCTUATION = re.compile(r"([!-/:-@\[-`{-~])")
+AS_WRITTEN = "\ufdd0"
+"""
+Before a character in markdown source: the character is text, whatever it would
+have meant. What ``_shaped`` writes where CommonMark would write a backslash,
+because the seam's reader sets a backslash somebody typed as a backslash
+(``gate._written_escapes``), so a backslash cannot also be the mark that is not
+set. ``gate._as_written`` is the reader's rule for it.
+
+U+FDD0 is one of the code points Unicode sets aside for a program's own use and
+no font draws, so a body that already holds one loses nothing a reader could
+have seen; ``_shaped`` writes it twice where it finds it.
+"""
+
+_BODY_PUNCTUATION = re.compile(rf"([!-/:-@\[-`{{-~{AS_WRITTEN}])")
 # What a writer wrapping by hand carries to the next line whole: a link, a code
 # span, or failing those a word.
 _BODY_UNIT = re.compile(r"\[[^\]\n]*\]\([^)\n]*\)\S*|`[^`\n]+`\S*|\S+")
@@ -253,7 +266,7 @@ def _shaped(lines: list[str]) -> tuple[str, list[str]]:
     meant = bool(_BODY_INLINE.search("\n".join(lines)))
     out: list[str] = []
     for n, line in enumerate(lines):
-        kept = line.rstrip() if meant else _BODY_PUNCTUATION.sub(r"\\\1", line.strip())
+        kept = line.rstrip() if meant else _BODY_PUNCTUATION.sub(AS_WRITTEN + r"\1", line.strip())
         # Two trailing spaces are markdown's hard line break.
         out.append(kept + "  " if n in breaks else kept)
     return "lines", out

@@ -85,12 +85,13 @@ fails when the library stops answering it.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ... import pairing
 from . import roles, themes
+from .parts import AS_WRITTEN
 
 _HIDING_RULES = ("html_block", "html_inline", "image", "entity")
 """
@@ -101,13 +102,26 @@ by the last, and the body's recipient gets the five characters.
 
 _DESTINATIONS_RULE = "pptmstr_link_destinations"
 _STARS_RULE = "pptmstr_written_stars"
+_AS_WRITTEN_RULE = "pptmstr_as_written"
 
-READER_PROBE = "a <b>x</b> ![alt](u) rm **/*.py and t/**/*.md R&amp;D\n"
-READER_PROBE_WORDS = ("<b>x</b>", "alt", "(u)", "**/*.py", "t/**/*.md", "R&amp;D")
+READER_PROBE = (
+    "a <b>x</b> ![alt](u) rm **/*.py and t/**/*.md R&amp;D C:\\_w\\*.log " f"{AS_WRITTEN}*z*\n"
+)
+READER_PROBE_WORDS = (
+    "<b>x</b>",
+    "alt",
+    "(u)",
+    "**/*.py",
+    "t/**/*.md",
+    "R&amp;D",
+    "C:\\_w\\*.log",
+    " *z*",
+)
 """
 A line every word of which a CommonMark reader hides some of, and what must come
 back from it: the tags, the image's description and destination, the stars,
-the entity as its characters.
+the entity as its characters, the backslashes, and the stars the seam marked as
+text without its mark.
 """
 
 
@@ -292,7 +306,7 @@ def _kind(typesetter: Any) -> str:
         return str(getattr(found, "value", found))
     if typesetter.module() is not None:
         return READY
-    return REFUSED if os.environ.get(typesetter.LIBRARY_VARIABLE) else NOT_INSTALLED
+    return REFUSED if pairing.named(typesetter.LIBRARY_VARIABLE) else NOT_INSTALLED
 
 
 def _unaccepted(kind: str, why: str) -> str:
@@ -336,6 +350,26 @@ def library() -> tuple[str, str]:
     return kind, "" if kind == READY else _unaccepted(kind, why)
 
 
+def settle() -> None:
+    """
+    Ask the library whether it is there, and then take the two variables a
+    checkout set for itself back out of the environment (``pairing.release``).
+
+    For the entry point, before the application starts anything. In that
+    order: the library reads the variables the first time it is asked and not
+    again, and what is left in the environment after that is only what a
+    session's process would inherit. The first asking is the library's import
+    and its check against the wheel, which the font load would otherwise have
+    been the first to pay. Never raises: an advtext that is not there has
+    nothing to read them with, and ``unavailable_reason`` finds that again.
+    """
+    try:
+        _typesetter().module()
+    except Exception:
+        pass
+    pairing.release()
+
+
 def read(source: str, theme: Any) -> Any:
     """
     Markdown source as the library's blocks, read with ``theme``: the one call the
@@ -354,7 +388,7 @@ def _reader() -> None:
     """
     Make the library's markdown reader show what was written, and check that it does.
 
-    Three changes to the one parser object ``read`` and the library's stream
+    Five changes to the one parser object ``read`` and the library's stream
     read with (reference definitions off, mathematics off), all made on the
     parser and not on the text:
 
@@ -366,6 +400,12 @@ def _reader() -> None:
       its text.
     - An inline rule (``_written_stars``) reads the stars of a glob, a comment
       opener or a product as the characters they are.
+    - The reader's ``escape`` rule is replaced (``_written_escapes``): a
+      backslash before punctuation is set, where CommonMark shows only the
+      punctuation.
+    - An inline rule (``_as_written``) reads ``AS_WRITTEN`` and the character
+      after it as that character, which is the seam's own way to say what a
+      backslash said.
 
     On the parser because the alternative, escaping the source before it is
     parsed, is a second markdown reader that has to agree with the first about
@@ -386,6 +426,12 @@ def _reader() -> None:
         parser.core.ruler.push(_DESTINATIONS_RULE, _show_destinations)
     if _STARS_RULE not in parser.inline.ruler.get_all_rules():
         parser.inline.ruler.before("emphasis", _STARS_RULE, _written_stars)
+    parser.inline.ruler.at("escape", _written_escapes)
+    if _AS_WRITTEN_RULE not in parser.inline.ruler.get_all_rules():
+        # The reader's text rule runs to the next character some rule starts
+        # at, and has to be told this is one.
+        parser.inline.add_terminator_char(AS_WRITTEN)
+        parser.inline.ruler.before("escape", _AS_WRITTEN_RULE, _as_written)
     missing = reader_hides()
     if missing:
         raise RuntimeError(f"the markdown reader hides text: {', '.join(missing)}")
@@ -454,6 +500,65 @@ def _written_stars(state: Any, silent: bool) -> bool:
     if not silent:
         state.pending += source[start:stop]
     state.pos = stop
+    return True
+
+
+_ESCAPABLE = frozenset("!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~")
+"""
+The characters a backslash escapes in CommonMark: ASCII punctuation.
+"""
+
+
+def _written_escapes(state: Any, silent: bool) -> bool:
+    """
+    Read a backslash before punctuation as CommonMark does -- the punctuation
+    is text and marks nothing -- and set the backslash as well.
+
+    CommonMark does not draw it: ``C:\\_work\\*.log`` is set as ``C:_work*.log``
+    and the pattern ``foo\\.py`` as ``foo.py``, and the reader of a body sees a
+    different path and a different pattern from the ones its recipient gets.
+    What it costs: a writer who escaped a star on purpose sees their backslash.
+    A backslash that ends a line is a line break, as it is in CommonMark, and
+    is set before the break. Before anything else a backslash is not this
+    rule's and is text already.
+
+    Not reached: a backslash in a table cell before ``|``, which the reader's
+    table rule takes when it splits the row, and one in a link's destination.
+    """
+    source: str = state.src
+    at: int = state.pos
+    if source[at] != "\\" or at + 1 >= state.posMax:
+        return False
+    after = source[at + 1]
+    if after == "\n":
+        if not silent:
+            state.pending += "\\"
+            state.push("hardbreak", "br", 0)
+        at += 2
+        # The next line's indentation is not text.
+        while at < state.posMax and source[at] in " \t":
+            at += 1
+        state.pos = at
+        return True
+    if after not in _ESCAPABLE:
+        return False
+    if not silent:
+        state.pending += source[at : at + 2]
+    state.pos = at + 2
+    return True
+
+
+def _as_written(state: Any, silent: bool) -> bool:
+    """
+    Read ``AS_WRITTEN`` and the character after it as that character, as text.
+    """
+    source: str = state.src
+    at: int = state.pos
+    if source[at] != AS_WRITTEN or at + 1 >= state.posMax:
+        return False
+    if not silent:
+        state.pending += source[at + 1]
+    state.pos = at + 2
     return True
 
 

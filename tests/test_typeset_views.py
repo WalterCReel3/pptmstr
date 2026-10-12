@@ -344,10 +344,10 @@ HIDING = [
         "before ![the alt text](http://x/y.png) after",
         "before !the alt text (http://x/y.png) after",
     ),
-    # A ``<`` the writer escaped is one ``<`` and stays escaped; a backslash they
-    # escaped is a backslash and the tag after it is still text.
-    ("a \\<div>x\\</div> b", "a <div>x</div> b"),
-    ("two \\\\<div> here", "two \\<div> here"),
+    # A backslash is set where it was written, and the tag after it is text
+    # with it or without.
+    ("a \\<div>x\\</div> b", "a \\<div>x\\</div> b"),
+    ("two \\\\<div> here", "two \\\\<div> here"),
     # A backtick that closes nothing is a backtick. The tags after it, and a comment
     # opener starting a line of the same paragraph, are still text.
     (
@@ -1459,6 +1459,38 @@ def test_what_cannot_be_broken_at_a_space_is_broken_at_the_windows_edge(seam: An
     assert max(line.right for line in view.set_lines()) <= 300.0
 
 
+def test_a_heading_of_wide_characters_that_overhangs_can_be_scrolled_to(seam: Any) -> None:
+    """
+    A block is asked how far right it reaches only if a word of it could
+    overhang, judged by its length in characters, so the judgement has to hold
+    for the widest character at the tallest size text is set at. Twelve
+    characters of a first-level heading: U+2031 is 26.6 px a character at the
+    heading's 22 px, 310 px in a 304 px measure, where twelve capital ``W`` are
+    197 px and fit.
+    """
+    seen: dict[str, list[float]] = {}
+    cache = typeset.ViewCache()
+
+    def body(key: str, source: str) -> None:
+        seam.set_next_window_size(seam.ImVec2(320.0, 500.0))
+        seam.begin("##narrow-sideways", None, seam.WindowFlags_.horizontal_scrollbar.value)
+        try:
+            assert seam.get_content_region_avail().x == 304.0
+            typeset.markdown(cache, key, source)
+            seen.setdefault(key, []).append(float(seam.get_scroll_max_x()))
+        finally:
+            seam.end()
+
+    for key, source in (("fits", "# " + "W" * 12), ("over", "# x" + "\u2031" * 11)):
+        cache.clear()
+        for _ in range(3):
+            frame(seam, lambda key=key, source=source: body(key, source))
+        seen[key].append(max(float(line.right) for line in cache.view(key).set_lines(0, 1)))
+    assert seen["fits"][-1] < 304.0 and seen["fits"][-2] == 0.0
+    assert seen["over"][-1] > 304.0, "the string no longer overhangs: find another"
+    assert seen["over"][-2] > 0.0, "text past the measure and no scroll range to it"
+
+
 @pytest.mark.xfail(strict=True, reason=P10)
 def test_a_selection_that_starts_inside_a_broken_word_copies_without_the_breaks(seam: Any) -> None:
     view = _view(seam, typeset.ViewCache(), "k", LONG_LABEL, width=300.0)
@@ -1612,6 +1644,84 @@ def test_every_word_written_is_set(seam: Any) -> None:
             assert word in settled, (source, word)
 
 
+WRITTEN = [
+    # Underscores: the library's own reader pairs none of them into emphasis.
+    "touches pptmstr/__main__.py",
+    "edit __init__.py and export __all__ here",
+    'the __name__ == "__main__" guard',
+    "snake_case_name and _private and a_b_c",
+    "__bold__ and _em_ words",
+    # A backslash before punctuation, which a CommonMark reader reads as an
+    # escape and sets without the backslash.
+    "C:\\_work\\*.log",
+    "a regex foo\\.py in prose",
+    "escaped \\* star and \\# hash and \\_ under \\[x\\] \\`t\\`",
+    "path C:\\Users\\me\\file.txt and \\n and \\\\server\\share",
+    "\\# not a heading\n\n\\- not an item\n\n1\\. not a number",
+    "a line continued \\\nonto the next",
+    "tail\\",
+]
+
+WRITTEN_PIECES = (
+    "plain words ",
+    "C:\\_work\\*.log ",
+    "foo\\.py ",
+    "__main__.py ",
+    "x_y_z ",
+    "a \\< b ",
+    "\\\\server\\share ",
+    "2\\*3\\*4 ",
+    "\\[not a link\\](x) ",
+    "end\\! ",
+    "over \\\nthe line ",
+    "\n\n",
+    "tail\\",
+)
+
+
+def _characters(text: str) -> str:
+    return "".join(text.split())
+
+
+def _set_both_ways(seam: Any, cache: typeset.ViewCache, source: str) -> tuple[str, str]:
+    """
+    Every non-space character a source was given to be set as, settled and as a
+    stream that has ended.
+    """
+    settled = _view(seam, cache, "settled", source)
+    arriving = typeset.stream(cache, "stream")
+    arriving.set_text(source, closed=True)
+    frame(seam, lambda: arriving.draw())
+    return _characters("".join(settled.texts)), _characters("".join(arriving.view.texts))
+
+
+@pytest.mark.parametrize("written", WRITTEN)
+def test_an_underscore_and_a_backslash_are_set_as_written(seam: Any, written: str) -> None:
+    """
+    A reader of an approval reads ``main.py`` for ``__main__.py`` and
+    ``foo.py`` for the pattern ``foo\\.py`` if the reader takes either
+    character for markup. Every character that is not a space is on screen,
+    settled and streamed.
+    """
+    settled, streamed = _set_both_ways(seam, typeset.ViewCache(), written)
+    assert settled == _characters(written)
+    assert streamed == _characters(written)
+
+
+def test_every_character_written_without_markup_is_set(seam: Any) -> None:
+    """
+    The property the cases above are instances of, for text with no markup in
+    it: nothing but the spaces differs between what was written and what was set.
+    """
+    rng = random.Random(20261012)
+    cache = typeset.ViewCache()
+    for _ in range(16):
+        source = "".join(rng.choices(WRITTEN_PIECES, k=7))
+        settled, streamed = _set_both_ways(seam, cache, source)
+        assert settled == _characters(source), source
+        assert streamed == _characters(source), source
+
+
 def test_a_links_destination_is_on_screen(seam: Any) -> None:
     """
     The text of a link says what the writer wants it to say; where it goes is the
@@ -1710,16 +1820,19 @@ def test_the_probe_names_what_a_bare_commonmark_reader_hides(seam: Any) -> None:
     the real parser, every word of it is reported missing.
     """
     from advtext import markdown_rules as library
+    from markdown_it.rules_inline import escape
 
     parser = library._parser(False, False)
     parser.enable(list(gate._HIDING_RULES))
-    parser.inline.ruler.disable([gate._STARS_RULE])
+    parser.inline.ruler.disable([gate._STARS_RULE, gate._AS_WRITTEN_RULE])
+    parser.inline.ruler.at("escape", escape)
     try:
         missing = gate.reader_hides()
     finally:
         parser.disable(list(gate._HIDING_RULES))
-        parser.inline.ruler.enable([gate._STARS_RULE])
-    assert set(missing) >= {"<b>x</b>", "alt", "**/*.py", "t/**/*.md"}
+        parser.inline.ruler.enable([gate._STARS_RULE, gate._AS_WRITTEN_RULE])
+        parser.inline.ruler.at("escape", gate._written_escapes)
+    assert set(missing) == set(gate.READER_PROBE_WORDS)
     assert gate.reader_hides() == ()
 
 
@@ -2509,6 +2622,12 @@ def test_lines_kept_without_any_sign_of_markdown_keep_their_punctuation(seam: An
     cache = typeset.ViewCache()
     frame(seam, lambda: typeset.document(cache, "k", typeset.prose_parts(body)))
     assert cache.texts("k") == (body.rstrip("\n"),)
+    # The seam's own mark for "this character is text" is not on screen, and one
+    # that was in the body already is still in what is set.
+    assert gate.AS_WRITTEN not in body and gate.AS_WRITTEN in typeset.prose_parts(body)[0].text
+    marked = f"key: a*b\nmark: {gate.AS_WRITTEN}*c*\n"
+    frame(seam, lambda: typeset.document(cache, "m", typeset.prose_parts(marked)))
+    assert cache.texts("m") == (marked.rstrip("\n"),)
     # With a code span in it the writer meant markdown, and gets it.
     (meant,) = typeset.prose_parts("run: `make test`\nthen: **stop**\n")
     assert meant.text == "run: `make test`  \nthen: **stop**"
@@ -2637,6 +2756,95 @@ def test_a_library_that_stops_inside_a_draw_is_said_in_the_pane_and_is_off_the_n
     monkeypatch.undo()
     assert typeset.load_fonts(BOLD), "a load is the way back"
     assert typeset.enabled(typeset.Pane.BRIEF)
+
+
+def no_view_can_be_made(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    Make the library refuse every new view, as it does once it has stopped:
+    ``typesetter.disable()`` leaves ``module()`` answering ``None``, and a
+    view's constructor then raises before the seam holds anything for the key.
+    """
+
+    def refused(self: Any, *given: Any, **named: Any) -> None:
+        raise advtext.TypesetUnavailable("imtypeset is not in use: the library said no")
+
+    monkeypatch.setattr(advtext.TypesetView, "__init__", refused)
+
+
+def test_a_key_first_drawn_after_the_library_stopped_reports_all_of_its_text_missing(
+    seam: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The library stops under one pane and, later in the same frame, another draws
+    a key it holds nothing for yet. No view can be made for it, so what is on
+    screen is the sentence, and every line handed over is reported as not set:
+    a caller that offers a decision on the text must not read "nothing missing".
+    The same for a key whose entry is made again because the epoch moved.
+    """
+    cache = typeset.ViewCache()
+    parts = (Part("One.\n\nTwo."), Part("x = 1\ny = 2", Kind.LITERAL), Part("Three."))
+    frame(seam, lambda: typeset.document(cache, "held", parts))
+    assert cache.unbuilt("held") == 0
+    no_view_can_be_made(monkeypatch)
+    said = _said(monkeypatch)
+    roles.moved()
+
+    def body() -> None:
+        typeset.markdown(cache, "new", "One.\n\nTwo.\n\nThree.")
+        typeset.document(cache, "held", parts)
+
+    frame(seam, body)
+    assert said == ["typeset text stopped: imtypeset is not in use: the library said no"] * 2
+    assert cache.unbuilt("new") == 5
+    assert cache.unbuilt("held") == 6
+    assert cache.pointed("new") is None
+    monkeypatch.undo()
+    assert typeset.load_fonts(BOLD), "a load is the way back"
+
+
+def test_asking_a_stopped_library_for_the_selection_or_the_block_is_an_empty_answer(
+    seam: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    A pane asks for the selection and for what is under the mouse outside any
+    draw -- the log does between a popup's begin and end -- and the selection is
+    a call into the library, which can have stopped. The answer is then "no
+    selection" and "nothing there", and the gate is told as a draw would tell it.
+    """
+    cache = typeset.ViewCache()
+    view = _view(seam, cache, "k", "A sentence to select.")
+    view.select_all()
+    io = seam.get_io()
+
+    def stopped(*given: Any) -> Any:
+        raise advtext.TypesetUnavailable("imtypeset stopped: the library said no")
+
+    seen: list[Any] = []
+
+    def body() -> None:
+        typeset.markdown(cache, "k", "A sentence to select.")
+        seen.append(cache.selected("k"))
+        seen.append(cache.pointed("k"))
+        monkeypatch.setattr(view, "selected_text", stopped)
+        monkeypatch.setattr(view, "block_under_mouse", stopped)
+        seen.append(cache.selected("k"))
+        seen.append(cache.pointed("k"))
+        seen.append(typeset.enabled(typeset.Pane.BRIEF))
+
+    try:
+        io.add_mouse_pos_event(40.0, 40.0)
+        frame(seam, lambda: None)
+        frame(seam, body)
+    finally:
+        io.add_mouse_pos_event(-1.0, -1.0)
+        view.clear_selection()
+    assert seen[:2] == ["A sentence to select.", (0, "A sentence to select.")]
+    assert seen[2:] == ["", None, True]
+    typeset.pre_frame()
+    assert not typeset.can_draw()
+    assert "the library said no" in (typeset.unavailable_reason() or "")
+    monkeypatch.undo()
+    assert typeset.load_fonts(BOLD)
 
 
 def test_anything_else_raised_inside_a_draw_is_a_defect_and_is_not_caught(

@@ -168,7 +168,7 @@ def _route(found: pairing.Found) -> str:
 
 def _imtypeset(found: pairing.Found) -> str:
     asked = _asked_for(pairing.IMTYPESET_REF)
-    named = os.environ.get(pairing.LIBRARY_VARIABLE)
+    named = pairing.named(pairing.LIBRARY_VARIABLE)
     if not named:
         why = found.why
         if found.route == pairing.ROUTE_ENVIRONMENT:
@@ -225,9 +225,35 @@ def report(found: pairing.Found) -> str:
     )
 
 
+def _write(text: str) -> None:
+    """
+    Put the report on standard output, whatever standard output is.
+
+    A character the output's encoding lacks is written as its escape: a path
+    under a locale that is not UTF-8 costs that character and not the report.
+    An output nobody reads, or none at all, costs the report and nothing else.
+    """
+    out = sys.stdout
+    if out is None:
+        return
+    try:
+        encoding = out.encoding or "utf-8"
+        out.write(text.encode(encoding, "backslashreplace").decode(encoding))
+        out.flush()
+    except BrokenPipeError:
+        # The interpreter flushes standard output again as it exits, and says
+        # so on standard error when that fails; there is nobody to flush to.
+        try:
+            os.dup2(os.open(os.devnull, os.O_WRONLY), out.fileno())
+        except (OSError, ValueError):
+            pass
+    except (OSError, ValueError, LookupError):
+        pass
+
+
 def main() -> int:
     """
     Print the report. Always 0: a report of what is wrong is not itself a failure.
     """
-    print(report(pairing.adopt()))
+    _write(report(pairing.adopt()) + "\n")
     return 0

@@ -255,6 +255,23 @@ def test_a_pair_built_for_another_environment_is_not_this_ones(tmp_path: Path) -
     assert environ == {}
 
 
+@pytest.mark.skipif(os.geteuid() == 0, reason="root searches any directory")
+def test_a_deps_directory_that_cannot_be_searched_is_a_reason_and_not_a_traceback(
+    tmp_path: Path,
+) -> None:
+    # Every start of pptmstr decides this first, --version included.
+    _checkout(tmp_path)
+    deps = tmp_path / pairing.DEPS_DIR
+    deps.chmod(0o000)
+    try:
+        environ: dict[str, str] = {}
+        found = pairing.decide(environ, tmp_path)
+    finally:
+        deps.chmod(0o755)
+    assert found.route == pairing.ROUTE_NONE and environ == {}
+    assert "could not be checked (PermissionError" in found.why
+
+
 def test_the_process_decides_once_and_does_not_mistake_its_own_answer_for_the_callers(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -274,6 +291,203 @@ def test_the_process_decides_once_and_does_not_mistake_its_own_answer_for_the_ca
             os.environ.pop(name, None)
 
 
+# -- what a process pptmstr launches is given ------------------------------------------
+
+
+def _built_pair() -> Path | None:
+    """
+    This checkout's pair when a process started here would take it, else ``None``.
+    """
+    environ: dict[str, str] = {}
+    if pairing.decide(environ, ROOT).route != pairing.ROUTE_CHECKOUT:
+        return None
+    return Path(environ[pairing.LIBRARY_VARIABLE]).parent
+
+
+def _adopted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, environ: dict[str, str]) -> Path:
+    """
+    ``pairing`` as it is once ``adopt`` has decided for a checkout in ``environ``; the pair.
+    """
+    pair = _checkout(tmp_path, prefix=Path(sys.prefix))
+    monkeypatch.setattr(pairing, "_FOUND", pairing.decide(environ, tmp_path))
+    return pair
+
+
+def test_what_a_checkout_set_for_itself_is_taken_back_and_still_answered(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for name in VARIABLES:
+        monkeypatch.delenv(name, raising=False)
+    environ = {"PATH": "/bin"}
+    pair = _adopted(tmp_path, monkeypatch, environ)
+    assert set(VARIABLES) < set(environ)
+
+    pairing.release(environ)
+
+    assert environ == {"PATH": "/bin"}
+    assert pairing.named(pairing.LIBRARY_VARIABLE) == str(pair / pairing.LIBRARY_NAME)
+    assert pairing.named(pairing.PACKAGE_VARIABLE) == str(pair / pairing.PACKAGE_DIR)
+    pairing.release(environ)
+    assert environ == {"PATH": "/bin"}
+
+
+def test_a_pair_the_caller_set_is_passed_on_as_it_came(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _checkout(tmp_path)
+    environ = {pairing.LIBRARY_VARIABLE: "/another/lib.so", pairing.PACKAGE_VARIABLE: ""}
+    monkeypatch.setattr(pairing, "_FOUND", pairing.decide(dict(environ), tmp_path))
+    assert pairing._FOUND is not None and pairing._FOUND.route == pairing.ROUTE_ENVIRONMENT
+
+    kept = dict(environ)
+    pairing.release(kept)
+
+    assert kept == environ
+    monkeypatch.setenv(pairing.LIBRARY_VARIABLE, "/another/lib.so")
+    assert pairing.named(pairing.LIBRARY_VARIABLE) == "/another/lib.so"
+
+
+def test_a_variable_changed_since_is_somebody_elses_and_is_left(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    environ: dict[str, str] = {}
+    pair = _adopted(tmp_path, monkeypatch, environ)
+    environ[pairing.LIBRARY_VARIABLE] = "/set/later.so"
+
+    pairing.release(environ)
+
+    assert environ == {pairing.LIBRARY_VARIABLE: "/set/later.so"}
+    assert pair.is_dir()
+
+
+def test_nothing_is_taken_back_before_the_process_has_decided(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(pairing, "_FOUND", None)
+    environ = {pairing.LIBRARY_VARIABLE: "/x.so"}
+    pairing.release(environ)
+    assert environ == {pairing.LIBRARY_VARIABLE: "/x.so"}
+    monkeypatch.delenv(pairing.LIBRARY_VARIABLE, raising=False)
+    assert pairing.named(pairing.LIBRARY_VARIABLE) is None
+
+
+def test_the_library_is_asked_before_its_variables_are_taken_back_whatever_asking_does(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    order: list[str] = []
+    monkeypatch.setattr(typesetter, "module", lambda: order.append("asked"))
+    monkeypatch.setattr(pairing, "release", lambda: order.append("released"))
+    gate.settle()
+    assert order == ["asked", "released"]
+
+    def gone() -> Any:
+        raise ModuleNotFoundError("No module named 'advtext'")
+
+    monkeypatch.setattr(gate, "_typesetter", gone)
+    gate.settle()
+    assert order == ["asked", "released", "released"]
+
+
+def test_a_refused_library_is_still_refused_once_its_variable_is_taken_back(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Without a `kind` of its own the library is read by whether one was named.
+    for name in VARIABLES:
+        monkeypatch.delenv(name, raising=False)
+    environ: dict[str, str] = {}
+    _adopted(tmp_path, monkeypatch, environ)
+    pairing.release(environ)
+    monkeypatch.setattr(typesetter, "reason", lambda: "why")
+    monkeypatch.setattr(typesetter, "module", lambda: None)
+    assert gate.library() == (gate.REFUSED, "the typesetting library was refused (why)")
+
+
+_CHILD = (
+    "import json, os, subprocess, sys\n"
+    "from pptmstr import __main__ as entry, app, pairing\n"
+    "def application(argv):\n"
+    "    # What the SDK's transport starts a session's process with: os.environ.\n"
+    "    child = subprocess.run(\n"
+    "        [sys.executable, '-c', 'import json, os; print(json.dumps('\n"
+    "         '{k: v for k, v in os.environ.items() if k.startswith(\"IMTYPESET_\")}))'],\n"
+    "        capture_output=True, text=True, check=True)\n"
+    "    from imgui_bundle import imgui\n"
+    "    from pptmstr import theme\n"
+    "    from pptmstr.ui import typeset\n"
+    "    context = imgui.create_context()\n"
+    "    io = imgui.get_io()\n"
+    "    io.display_size = imgui.ImVec2(800.0, 600.0)\n"
+    "    io.backend_flags |= imgui.BackendFlags_.renderer_has_textures.value\n"
+    "    io.fonts.add_font_default()\n"
+    "    bold = theme._ASSETS / 'fonts' / 'Inconsolata-Bold.ttf'\n"
+    "    loaded = [typeset.load_fonts(bold)]\n"
+    "    cache = typeset.ViewCache()\n"
+    "    for _ in range(2):\n"
+    "        typeset.pre_frame(); imgui.new_frame(); imgui.begin('w')\n"
+    "        typeset.markdown(cache, 'k', 'Some *text* to set.')\n"
+    "        imgui.end(); imgui.render()\n"
+    "    loaded.append(typeset.load_fonts(bold))\n"
+    "    print(json.dumps({'child': json.loads(child.stdout), 'loaded': loaded,\n"
+    "        'unset': cache.unbuilt('k'), 'route': pairing.adopt().route,\n"
+    "        'named': pairing.named(pairing.LIBRARY_VARIABLE),\n"
+    "        'reason': typeset.unavailable_reason()}))\n"
+    "    typeset.unload(); imgui.destroy_context(context)\n"
+    "    return 0\n"
+    "app.main = application\n"
+    "raise SystemExit(entry.main(['--fake']))\n"
+)
+
+
+@pytest.mark.skipif(_built_pair() is None, reason="no pair built for this checkout's interpreter")
+@pytest.mark.skipif(
+    os.environ.get(pairing.LIBRARY_VARIABLE) == "", reason="this run is the one without the library"
+)
+def test_a_process_pptmstr_starts_is_not_given_the_pair_pptmstr_found_for_itself() -> None:
+    """
+    Started with neither variable, a checkout sets both for itself; a session's
+    process started from it would read them as set by its caller, and another
+    checkout's tests would run on this one's library. By the time the
+    application runs a child is given neither, and the library that was found
+    through them still loads its fonts, draws, and loads them again.
+    """
+    pair = _built_pair()
+    assert pair is not None
+    done = _run(script=_CHILD)
+    assert done.returncode == 0, done.stderr
+    seen = json.loads(done.stdout.splitlines()[-1])
+    assert seen["route"] == pairing.ROUTE_CHECKOUT
+    assert seen["child"] == {}
+    assert seen["loaded"] == [True, True] and seen["unset"] == 0, seen["reason"]
+    assert seen["named"] == str(pair / pairing.LIBRARY_NAME)
+
+
+@pytest.mark.skipif(_built_pair() is None, reason="no pair built for this checkout's interpreter")
+@pytest.mark.skipif(
+    os.environ.get(pairing.LIBRARY_VARIABLE) == "", reason="this run is the one without the library"
+)
+def test_a_process_pptmstr_starts_is_given_the_pair_pptmstrs_caller_named() -> None:
+    pair = _built_pair()
+    assert pair is not None
+    named = {
+        pairing.LIBRARY_VARIABLE: str(pair / pairing.LIBRARY_NAME),
+        pairing.PACKAGE_VARIABLE: str(pair / pairing.PACKAGE_DIR),
+    }
+    done = _run(script=_CHILD, **named)
+    assert done.returncode == 0, done.stderr
+    seen = json.loads(done.stdout.splitlines()[-1])
+    assert seen["route"] == pairing.ROUTE_ENVIRONMENT
+    assert seen["child"] == named
+    assert seen["loaded"] == [True, True]
+
+
+@pytest.mark.skipif(_built_pair() is None, reason="no pair built for this checkout's interpreter")
+def test_the_report_asked_for_through_the_application_still_names_the_checkouts_pair() -> None:
+    # `--fake --version` is the application's parser's, after the variables were taken back.
+    lines = _lines(_run("--fake", "--version"))
+    assert "found through this checkout's .deps" in lines["imtypeset"]
+    assert lines["typeset"].startswith("typeset text: the library is accepted beside this wheel")
+
+
 # -- the entry point ----------------------------------------------------------------
 
 
@@ -283,11 +497,14 @@ def test_the_command_and_the_module_are_one_entry_that_decides_before_the_applic
     assert _pyproject()["project"]["scripts"] == {"pptmstr": "pptmstr.__main__:main"}
     order: list[Any] = []
     monkeypatch.setattr(pairing, "adopt", lambda: order.append("adopt"))
+    monkeypatch.setattr(gate, "settle", lambda: order.append("settle"))
     monkeypatch.setattr(app, "main", lambda argv: order.append(argv) or 7)
 
     assert entry.main(["--fake"]) == 7
 
-    assert order == ["adopt", ["--fake"]]
+    # The library is asked for, and the variables taken back, before the
+    # application can start a session that would inherit them.
+    assert order == ["adopt", "settle", ["--fake"]]
 
 
 def test_the_applications_own_parser_answers_version_the_same_way(
@@ -315,6 +532,79 @@ def test_version_is_answered_without_the_application_or_an_imgui_context() -> No
         IMTYPESET_LIBRARY="",
     )
     assert _lines(done)["pptmstr"].startswith("pptmstr ")
+
+
+@pytest.mark.parametrize(
+    "args",
+    [["--task", "--version"], ["--theme", "--version"], ["--", "--version"]],
+)
+def test_version_where_another_options_value_goes_is_the_applications_parser_to_read(
+    monkeypatch: pytest.MonkeyPatch, args: list[str]
+) -> None:
+    """
+    Only the application's parser knows which options take a value, and it
+    refuses each of these. The entry answers ``--version`` itself where nothing
+    before it could be an option waiting for one, and hands the rest over.
+    """
+    order: list[Any] = []
+    monkeypatch.setattr(pairing, "adopt", lambda: None)
+    monkeypatch.setattr(gate, "settle", lambda: None)
+    monkeypatch.setattr(version, "main", lambda: order.append("report") or 0)
+    monkeypatch.setattr(app, "main", lambda argv: order.append(argv) or 2)
+    assert entry.main(args) == 2
+    assert order == [args]
+    with pytest.raises(SystemExit) as refused:
+        monkeypatch.undo()
+        monkeypatch.setattr(version, "main", lambda: pytest.fail("the report was printed"))
+        app.main(args)
+    assert refused.value.code == 2
+
+
+@pytest.mark.parametrize(
+    "args", [["--version"], ["--theme=dark", "--version"], ["--version", "--fake"]]
+)
+def test_version_where_a_flag_goes_is_answered_before_the_application(
+    monkeypatch: pytest.MonkeyPatch, args: list[str]
+) -> None:
+    monkeypatch.setattr(pairing, "adopt", lambda: None)
+    monkeypatch.setattr(version, "main", lambda: 0)
+    monkeypatch.setattr(app, "main", lambda argv: pytest.fail("the application was asked"))
+    assert entry.main(args) == 0
+
+
+def test_the_report_is_printed_to_an_output_that_cannot_encode_it() -> None:
+    """
+    A path with a character the terminal's encoding lacks, under a locale that
+    is not UTF-8: the character is written as its escape and the rest whole.
+    """
+    done = _run(
+        "--version",
+        IMTYPESET_LIBRARY="/nowhere/caf\u00e9/lib.so",
+        PYTHONIOENCODING="ascii",
+    )
+    lines = _lines(done)
+    assert "/nowhere/caf\\xe9/lib.so" in lines["imtypeset"]
+
+
+def test_the_report_into_a_pipe_nobody_reads_is_not_a_traceback() -> None:
+    # `pptmstr --version | head -1`, with the reader gone before the first line.
+    clean = {k: v for k, v in os.environ.items() if not k.startswith("IMTYPESET_")}
+    reading, writing = os.pipe()
+    os.close(reading)
+    try:
+        done = subprocess.run(
+            [sys.executable, "-m", "pptmstr", "--version"],
+            cwd=ROOT,
+            stdout=writing,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=120,
+            check=False,
+            env={**clean, "IMTYPESET_LIBRARY": ""},
+        )
+    finally:
+        os.close(writing)
+    assert done.stderr == "" and done.returncode == 0
 
 
 # -- the report, each wrong thing a sentence ------------------------------------------
@@ -405,16 +695,6 @@ def test_a_part_that_raises_costs_its_own_line_and_no_other(
 
     assert lines[1] == "python: could not be read (RuntimeError: no such thing)"
     assert len(lines) == 6 and lines[0].startswith("pptmstr ") and lines[5].endswith("not asked")
-
-
-def _built_pair() -> Path | None:
-    """
-    This checkout's pair when a process started here would take it, else ``None``.
-    """
-    environ: dict[str, str] = {}
-    if pairing.decide(environ, ROOT).route != pairing.ROUTE_CHECKOUT:
-        return None
-    return Path(environ[pairing.LIBRARY_VARIABLE]).parent
 
 
 @pytest.mark.skipif(_built_pair() is None, reason="no pair built for this checkout's interpreter")

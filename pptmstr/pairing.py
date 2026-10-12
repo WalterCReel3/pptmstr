@@ -32,6 +32,15 @@ before advtext is asked anything:
                                            look in, and a wheel must not go
                                            looking beside itself.
 
+**What a checkout set for itself is its own, and is not handed on**
+(``release``). A process pptmstr launches inherits pptmstr's environment: an
+agent's shell, and through it another checkout's ``make test`` or another
+``pptmstr``. Both variables read there as "set by the caller", so that checkout
+would run its tests on this one's library without one of its own checks. So
+once advtext has been asked for the library the pair this process set is taken
+back out of its environment, and ``named`` still answers what it was. A pair
+the caller set is the caller's and is passed on as it came.
+
 ``IMGUI_BUNDLE_PIN`` and the two variable names are spelled here as well as
 where they are decided (``pyproject.toml``; ``advtext.typesetter``), because
 this module is read before either can be: ``tests/test_version.py`` holds each
@@ -207,6 +216,8 @@ class Found:
 
     route: str
     why: str
+    # The variables ``decide`` set, with their values; empty on any other route.
+    given: tuple[tuple[str, str], ...] = ()
 
 
 def decide(
@@ -229,9 +240,9 @@ def decide(
             f"installed with no source checkout to look in",
         )
     pair = root / DEPS_DIR / PAIR_DIR
-    if not pair.is_dir():
-        return Found(ROUTE_NONE, f"there is no {pair}; `make deps` builds the pair")
     try:
+        if not pair.is_dir():
+            return Found(ROUTE_NONE, f"there is no {pair}; `make deps` builds the pair")
         refusal = pair_refusal(pair, read_ref(root / IMTYPESET_REF)) or _another_environment(
             pair, prefix or Path(sys.prefix)
         )
@@ -239,9 +250,16 @@ def decide(
         refusal = f"{pair} could not be checked ({type(error).__name__}: {error})"
     if refusal:
         return Found(ROUTE_NONE, " ".join(refusal.split()))
-    environ[LIBRARY_VARIABLE] = str(pair / LIBRARY_NAME)
-    environ[PACKAGE_VARIABLE] = str(pair / PACKAGE_DIR)
-    return Found(ROUTE_CHECKOUT, f"the pair in {pair}, built from the commit {IMTYPESET_REF} names")
+    given = (
+        (LIBRARY_VARIABLE, str(pair / LIBRARY_NAME)),
+        (PACKAGE_VARIABLE, str(pair / PACKAGE_DIR)),
+    )
+    environ.update(given)
+    return Found(
+        ROUTE_CHECKOUT,
+        f"the pair in {pair}, built from the commit {IMTYPESET_REF} names",
+        given,
+    )
 
 
 _FOUND: Found | None = None
@@ -259,3 +277,29 @@ def adopt() -> Found:
     if _FOUND is None:
         _FOUND = decide(os.environ, checkout())
     return _FOUND
+
+
+def release(environ: MutableMapping[str, str] | None = None) -> None:
+    """
+    Take back out of the environment the variables ``adopt`` set there.
+
+    For the entry point, once advtext has been asked for the library: advtext
+    reads the two variables the first time it is asked and not again, and from
+    then on they are only what a child process would inherit (the module
+    docstring says why it must not). A variable the caller set, and one that no
+    longer holds what ``adopt`` set, is left. Does nothing before ``adopt``.
+    """
+    target = os.environ if environ is None else environ
+    for name, value in _FOUND.given if _FOUND is not None else ():
+        if target.get(name) == value:
+            del target[name]
+
+
+def named(name: str) -> str | None:
+    """
+    What one of the two variables holds for this process, or ``None``: the
+    environment's value, or the one ``adopt`` set and ``release`` took back out.
+    """
+    if name in os.environ:
+        return os.environ[name]
+    return dict(_FOUND.given).get(name) if _FOUND is not None else None

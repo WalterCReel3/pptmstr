@@ -946,6 +946,31 @@ def test_a_body_the_library_stopped_under_says_so_and_cannot_be_approved_by_a_cl
     assert inbox._NOT_ON_SCREEN not in said
 
 
+def test_a_body_first_drawn_after_the_library_stopped_cannot_be_approved_by_a_click(
+    seam: Any, said: list[str], clicking_approve: list[bool], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The library stopped under another pane earlier in the frame the cursor
+    reached this call, so the row's keys are new and no view can be made for
+    them. The body is a sentence, the row says it is not on screen and a click
+    on approve sends nothing; the next frame is the row's own renderer.
+    """
+    call = long_concern()
+    pane = Pane(call)
+    sent = _sent(pane, monkeypatch)
+    rig.no_view_can_be_made(monkeypatch)
+
+    pane.draw(seam)
+    assert inbox._VIEWS.unbuilt(key(call, "body")) == call.raw_args["body"].count("\n") + 1
+    assert review.withheld(pane.state, call) == review.NOT_WHOLE
+    assert clicking_approve == [True] and sent == []
+    assert inbox._NOT_ON_SCREEN in said
+
+    pane.draw(seam)
+    assert not typeset.enabled(typeset.Pane.INBOX)
+    assert clicking_approve[-1] is False and sent == [call.id]
+
+
 def test_a_long_body_is_whole_and_approvable_on_its_first_frame(
     seam: Any, said: list[str], clicking_approve: list[bool], monkeypatch: pytest.MonkeyPatch
 ) -> None:
