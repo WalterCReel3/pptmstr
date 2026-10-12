@@ -238,7 +238,9 @@ def test_a_parked_calls_diff_is_built_once_and_never_from_the_disk(
 
     built: list[object] = []
     real = diffs.diff_model
-    monkeypatch.setattr(diffs, "diff_model", lambda texts: (built.append(texts), real(texts))[1])
+    monkeypatch.setattr(
+        diffs, "diff_model", lambda texts, **how: (built.append(texts), real(texts, **how))[1]
+    )
     cache = typeset.ViewCache()
     heights: list[float | None] = []
     for _ in range(3):
@@ -297,7 +299,9 @@ def test_a_call_with_no_diff_is_none_and_stays_none_cheaply(
 ) -> None:
     asked: list[str] = []
     real = diffs.approval_diff
-    monkeypatch.setattr(diffs, "approval_diff", lambda p: (asked.append(p.tool_name), real(p))[1])
+    monkeypatch.setattr(
+        diffs, "approval_diff", lambda p, **how: (asked.append(p.tool_name), real(p, **how))[1]
+    )
     call = pending("Bash", {"command": "ls"})
     assert call.texts is None
     cache = typeset.ViewCache()
@@ -801,8 +805,10 @@ def test_a_cell_that_is_the_baked_advance_is_not_enough_if_one_glyph_is_drawn_of
 
     def nudged(native: Any, vertices: bytes) -> list[tuple[float, float, float, float]]:
         quads = real(native, vertices)
-        left, right, u, v = quads[90]
-        quads[90] = (left + 1.0, right + 1.0, u, v)
+        if len(quads) == 156:
+            # The row of code, and not the row of tabs measured after it.
+            left, right, u, v = quads[90]
+            quads[90] = (left + 1.0, right + 1.0, u, v)
         return quads
 
     monkeypatch.setattr(gate, "_glyph_quads", nudged)
@@ -1230,3 +1236,397 @@ def test_a_diff_with_a_line_no_view_would_draw_is_not_accounted_for(lines: list[
     one such line is code, where all of it is on screen.
     """
     assert not diffs.accounted(*_read(lines))
+
+
+# -- a view that set less than it was handed, and a library that raises ----------------
+
+
+def _said_by_the_seam(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    said: list[str] = []
+    real = diffs.views._said
+    monkeypatch.setattr(
+        diffs.views, "_said", lambda im, text, ink=None: (said.append(text), real(im, text, ink))[1]
+    )
+    return said
+
+
+_THREE = (approval.DiffText("one\ntwo\nthree\n", "one\n2\nthree\nfour\n", "x.py"),)
+"""
+A change of three rows: one removed, two added.
+"""
+
+
+def _draw_answers_false(patched: pytest.MonkeyPatch) -> None:
+    real = advtext.TypesetDiffView.draw
+    patched.setattr(
+        advtext.TypesetDiffView, "draw", lambda self, **given: bool(real(self, **given)) and False
+    )
+
+
+def _draw_cuts_an_edit(patched: pytest.MonkeyPatch) -> None:
+    real = advtext.TypesetDiffView.draw
+
+    def cut(self: Any, **given: Any) -> bool:
+        advtext.typesetter.note("a diff edit was cut: block 2: the text is longer than 16 MiB")
+        return bool(real(self, **given))
+
+    patched.setattr(advtext.TypesetDiffView, "draw", cut)
+
+
+@pytest.mark.parametrize(
+    ("short", "words"),
+    [
+        (_draw_answers_false, "could not set something in view as it was asked to"),
+        (_draw_cuts_an_edit, "said: a diff edit was cut: block 2: the text is longer than 16 MiB"),
+    ],
+    ids=["draw answers false", "an edit was cut and draw answers true"],
+)
+def test_a_diff_the_view_set_less_of_than_it_was_handed_is_unset_and_then_the_panes_own(
+    seam: Any, monkeypatch: pytest.MonkeyPatch, short: Any, words: str
+) -> None:
+    """
+    ``TypesetDiffView.draw`` answers false when a row in view could not be set as
+    asked, and the library cuts a block past 16 MiB and notes it while the draw
+    answers true: either way rows of the change are on no screen. Both are
+    made here by their signal, since a real one needs a 16 MiB line. In that
+    frame every changed row is reported unset under a sentence, so nothing is
+    decided over it; from the next ``diff()`` answers ``None`` under a line
+    saying why, which is a pane's cue to draw its own rows, and holds no view.
+    The library is not stopped for one diff.
+    """
+    said = _said_by_the_seam(monkeypatch)
+    cache = typeset.ViewCache()
+    got: list[float | None] = []
+    with monkeypatch.context() as patched:
+        short(patched)
+        frame(seam, lambda: got.append(typeset.diff(cache, "k", _THREE)))
+    assert got[0] is not None and got[0] > 0
+    assert cache.unbuilt("k") == 3
+    assert said == [f"typeset: the library {words}"]
+
+    frame(seam, lambda: got.append(typeset.diff(cache, "k", _THREE)))
+    assert got[1] is None and cache.view("k") is None
+    assert said[-1] == f"this diff is the pane's own rows: the library {words}"
+    typeset.pre_frame()
+    assert typeset.can_draw()
+
+    again = (approval.DiffText("a\n", "b\n", "y.py"),)
+    frame(seam, lambda: got.append(typeset.diff(cache, "k", again)))
+    assert got[2] is not None and cache.unbuilt("k") == 0, "another diff is asked of the library"
+
+
+def test_a_diff_with_characters_no_face_has_is_set_whole(
+    seam: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    What a false answer does not track: a row with an emoji, CJK, Greek and a
+    control character draws true. (Where the columns hold such a row is the
+    pane's own for another reason: ``unfit``.)
+    """
+    said = _said_by_the_seam(monkeypatch)
+    texts = (approval.DiffText("a\n", "x \U0001f600 y 漢 π \x01 z\n", "x.py"),)
+    cache = typeset.ViewCache()
+    assert not diffs.adopted()
+    for _ in range(3):
+        frame(seam, lambda: typeset.diff(cache, "k", texts))
+        assert cache.unbuilt("k") == 0 and cache.view("k") is not None
+    assert said == []
+
+
+def _raises_attribute_error(*given: Any, **named: Any) -> Any:
+    raise AttributeError("'FileDiff' object has no attribute 'renamed'")
+
+
+def _fault_in_draw(patched: pytest.MonkeyPatch) -> None:
+    patched.setattr(advtext.TypesetDiffView, "draw", _raises_attribute_error)
+
+
+def _fault_in_set_diff(patched: pytest.MonkeyPatch) -> None:
+    patched.setattr(advtext.TypesetDiffView, "set_diff", _raises_attribute_error)
+
+
+def _fault_in_what_above_reads(patched: pytest.MonkeyPatch) -> None:
+    patched.setattr(advtext.FileDiff, "invisible_characters", property(_raises_attribute_error))
+
+
+DIFF_FAULTS: dict[str, tuple[Any, str]] = {
+    "draw": (_fault_in_draw, "drawing a diff"),
+    "set_diff": (_fault_in_set_diff, "handing a diff view its diff"),
+    "an attribute above reads": (_fault_in_what_above_reads, "reading a diff"),
+}
+
+
+@pytest.mark.parametrize("where", list(DIFF_FAULTS))
+def test_anything_else_the_library_raises_under_a_diff_is_the_library_stopping(
+    seam: Any, monkeypatch: pytest.MonkeyPatch, where: str
+) -> None:
+    """
+    The diff view, and the model ``above`` reads, can raise what is not the
+    library's own stop: a library that renamed a field of ``FileDiff`` is an
+    ``AttributeError`` on every frame an approval is queued. ``diff()`` does
+    not let it out: it is said at the cursor with its type, every changed row
+    is unset for that frame, ``diff()`` still answers a height so that the
+    pane does not draw half of each renderer, and the next frame the library
+    is off. The view is held from an earlier frame, so that handing it a new
+    model is reached.
+    """
+    said = _said_by_the_seam(monkeypatch)
+    cache = typeset.ViewCache()
+    frame(seam, lambda: typeset.diff(cache, "k", (approval.DiffText("a\n", "b\n", "x.py"),)))
+    fault, doing = DIFF_FAULTS[where]
+    got: list[float | None] = []
+    with monkeypatch.context() as patched:
+        fault(patched)
+        frame(seam, lambda: got.append(typeset.diff(cache, "k", _THREE)))
+        assert got[0] is not None
+        assert said == [
+            f"typeset text stopped: the library raised AttributeError while {doing}: "
+            "'FileDiff' object has no attribute 'renamed'"
+        ]
+        assert cache.unbuilt("k") == 3
+        assert typeset.can_draw(), "until the frame is over"
+        typeset.pre_frame()
+        assert not typeset.can_draw()
+        assert "AttributeError" in (typeset.unavailable_reason() or "")
+    assert typeset.load_fonts(BOLD)
+
+
+def test_a_lone_surrogate_in_a_diff_row_stops_the_library_and_does_not_leave_the_seam(
+    seam: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    said = _said_by_the_seam(monkeypatch)
+    cache = typeset.ViewCache()
+    texts = (approval.DiffText("a\n", "b \udc80 c\n", "x.py"),)
+    frame(seam, lambda: typeset.diff(cache, "k", texts))
+    assert len(said) == 1 and "the library raised UnicodeEncodeError" in said[0]
+    assert cache.unbuilt("k") == 2
+    typeset.pre_frame()
+    assert not typeset.can_draw()
+    assert typeset.load_fonts(BOLD)
+
+
+def test_what_the_seams_own_code_raises_under_a_diff_is_a_defect_and_is_not_caught(
+    seam: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = typeset.ViewCache()
+
+    def broken() -> Any:
+        raise ValueError("a slip in the seam")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(diffs.themes, "diff_theme", broken)
+        with pytest.raises(ValueError, match="a slip in the seam"):
+            frame(seam, lambda: typeset.diff(cache, "k", _THREE))
+    typeset.pre_frame()
+    assert typeset.can_draw()
+
+
+# -- adoption is per diff as well as per library --------------------------------------
+
+
+def _one_row(text: str) -> tuple[approval.DiffText, ...]:
+    return (approval.DiffText("", text + "\n", "x.py"),)
+
+
+def test_a_row_with_a_character_the_code_face_lacks_is_off_its_columns_where_they_hold(
+    columns_hold: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Why the rule below exists, on the library as it is. The measurement is of
+    ASCII in the code face and holds at this em. A row with U+03C0 and U+0416
+    in it, drawn by the diff view in a window: the ``x`` after the first is
+    2 px right of its column and the one after the second a whole column
+    right of its own, because the library set each letter from the
+    proportional face at that face's advance. A tab does land on the grid.
+    """
+    monkeypatch.setattr(diffs, "unfit", lambda model: None)
+    assert diffs.columns().holds
+    _, plain = _drawn_row(columns_hold, "xxxxxxxxxx")
+    assert {b - a for a, b in zip(plain, plain[1:], strict=False)} == {8.0}
+
+    # The helper answers a left edge a character of the text, tabs counted:
+    # the row's five glyphs are the last five.
+    _, tabbed = _drawn_row(columns_hold, "x\tx\txx\tx")
+    tabbed = tabbed[-5:]
+    assert {(left - tabbed[0]) % 8.0 for left in tabbed} == {0.0}
+
+    _, lefts = _drawn_row(columns_hold, "xπxЖx")
+    # The third and fifth characters, two and four columns in: 16 and 32 px.
+    assert [lefts[2] - lefts[0], lefts[4] - lefts[0]] == [18.0, 40.0], lefts
+
+
+def test_where_columns_hold_a_diff_with_such_a_row_is_not_given_to_the_view_and_says_why(
+    columns_hold: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Adoption is per diff as well as per library. A model with a row holding a
+    character the code face has no glyph for is answered ``None``, which is a
+    pane's cue for its own rows, under one line naming the characters; it
+    holds no view and reports nothing unset, since the pane's rows are the
+    diff. ASCII, an accent the face has, and a tab are given to the view.
+    """
+    said = _said_by_the_seam(monkeypatch)
+    cache = typeset.ViewCache()
+    got: dict[str, float | None] = {}
+
+    def body() -> None:
+        got["greek"] = typeset.diff(cache, "greek", _one_row("area = π * r ** 2  # Ж"))
+        got["path"] = typeset.diff(cache, "path", _one_row("open('src/pаth.py')"))
+        got["ascii"] = typeset.diff(cache, "ascii", _one_row("area = 3 * r ** 2"))
+        got["accent"] = typeset.diff(cache, "accent", _one_row("café = '→'\tcolumn"))
+
+    for _ in range(2):
+        said.clear()
+        frame(columns_hold, body)
+        assert got["greek"] is None and got["path"] is None
+        assert got["ascii"] is not None and got["accent"] is not None
+        assert cache.view("greek") is None and cache.view("path") is None
+        assert cache.view("ascii") is not None and cache.view("accent") is not None
+        assert said == [
+            "this diff is the pane's own rows: a row holds U+03C0, U+0416, which the code face "
+            "has no glyph for, and the library would set what follows off its column",
+            "this diff is the pane's own rows: a row holds U+0430, which the code face "
+            "has no glyph for, and the library would set what follows off its column",
+        ]
+    assert cache.unbuilt("greek") == 0 and cache.unbuilt("ascii") == 0
+    assert typeset.diff_renderer() == f"diffs are the library's: it {diffs.columns().why}"
+
+
+def test_context_a_click_brings_in_is_asked_about_as_the_rows_before_it_were(
+    columns_hold: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The rows of a model are what is asked about, and a click on collapsed
+    context makes another model with more rows. A line of the file that was
+    not a row, and holds a character the code face lacks, is one once it is
+    expanded into view: the next frame the diff is the pane's own rows.
+    """
+    said = _said_by_the_seam(monkeypatch)
+    before = ["# π is defined here"] + [f"line_{n} = {n}" for n in range(1, 40)]
+    after = list(before)
+    after[30] = "line_30 = 'changed'"
+    texts = (approval.DiffText("\n".join(before) + "\n", "\n".join(after) + "\n", "x.py"),)
+    cache = typeset.ViewCache()
+    got: list[float | None] = []
+    frame(columns_hold, lambda: got.append(typeset.diff(cache, "k", texts)))
+    view = cache.view("k")
+    assert got == [got[0]] and got[0] is not None and view is not None and said == []
+    view.expand(0, 0, 100)
+    assert "# π is defined here" in rows(view.diff, RowKind.CONTEXT)
+    frame(columns_hold, lambda: got.append(typeset.diff(cache, "k", texts)))
+    assert got[1] is None and cache.view("k") is None
+    assert len(said) == 1 and "U+03C0" in said[0]
+
+
+def test_where_columns_hold_a_row_longer_than_they_were_measured_for_is_the_panes_own(
+    columns_hold: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The cell is held to the baked advance within a bound, and what that
+    answers for ends at ``Columns.reach`` columns. A minified file is one row:
+    one column past the reach it is the pane's own, and at the reach the view's.
+    """
+    said = _said_by_the_seam(monkeypatch)
+    reach = diffs.columns().reach
+    assert 40_000 < reach < 50_000
+    cache = typeset.ViewCache()
+    got: dict[str, float | None] = {}
+
+    def body() -> None:
+        got["at"] = typeset.diff(cache, "at", _one_row("m" * reach))
+        got["past"] = typeset.diff(cache, "past", _one_row("m" * (reach + 1)))
+
+    frame(columns_hold, body)
+    assert got["at"] is not None and got["past"] is None
+    assert said == [
+        f"this diff is the pane's own rows: a row is {reach + 1:,} columns and the library's "
+        f"columns were measured to hold for {reach:,}"
+    ]
+
+
+def test_where_columns_hold_a_fenced_diff_with_such_a_row_is_the_code_of_its_document(
+    columns_hold: Any,
+) -> None:
+    honest = "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-area = 3\n+area = 4\n"
+    assert diffs.fence_diff("diff", honest) is not None
+    assert diffs.fence_diff("diff", honest.replace("4", "π")) is None
+
+
+# -- a parked call's model is made once, for every pane that draws it ------------------
+
+
+def test_the_lines_a_diff_has_to_match_are_what_its_texts_do_not_share() -> None:
+    """
+    What a model costs follows the lines left once the common head and tail
+    are set aside, and not the length of the file.
+    """
+    file = [f"line {n}" for n in range(1000)]
+
+    def text(lines: list[str]) -> str:
+        return "\n".join(lines) + "\n"
+
+    one = list(file)
+    one[500] = "changed"
+    scattered = [line + (" x" if n % 37 == 0 else "") for n, line in enumerate(file)]
+    grown = file[:400] + ["new"] * 30 + file[400:]
+    assert diffs.work((approval.DiffText(text(file), text(one), "x"),)) == 1
+    assert diffs.work((approval.DiffText(text(file), text(scattered), "x"),)) == 1000
+    assert diffs.work((approval.DiffText(text(file), text(grown), "x"),)) == 30
+    assert diffs.work((approval.DiffText(None, text(file), "x"),)) == 1000
+    assert diffs.work((approval.DiffText(text(file), text(file), "x"),)) == 0
+    assert diffs.work((approval.DiffText("a", "b", "1"), approval.DiffText("c\nd", "e", "2"))) == 3
+    assert diffs.work(()) == 0
+
+
+def test_two_panes_drawing_one_parked_call_make_its_model_once(
+    seam: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    DETAIL follows the inbox's cursor, so one call is drawn by two panes in
+    every frame, each in a view of its own. Handed the call's texts, each made
+    the model -- ``difflib`` over the change, twice. Handed the one ``Parked``
+    the panes share, the model is made in the frame that first asks and is the
+    same object in both views; nothing is made before a pane asks.
+    """
+    built: list[object] = []
+    real = diffs.diff_model
+    monkeypatch.setattr(
+        diffs, "diff_model", lambda texts, **how: (built.append(texts), real(texts, **how))[1]
+    )
+    held = typeset.ParkedDiff(_THREE)
+    assert held.work == 3 and built == []
+    detail, inbox = typeset.ViewCache(), typeset.ViewCache()
+
+    def body() -> None:
+        typeset.diff(detail, "d", held, warning=False)
+        typeset.diff(inbox, "i", held, warning=False, height_cap=200.0)
+
+    for _ in range(3):
+        frame(seam, body)
+    assert len(built) == 1
+    assert detail.view("d") is not inbox.view("i")
+    assert detail.view("d").diff is inbox.view("i").diff is held.model(False)
+    assert detail.unbuilt("d") == 0 == inbox.unbuilt("i")
+
+    built.clear()
+    frame(seam, lambda: (typeset.diff(detail, "d", _THREE), typeset.diff(inbox, "i", _THREE)))
+    assert len(built) == 2, "what handing each pane the texts costs"
+
+
+def test_a_pane_that_says_a_files_warnings_itself_has_them_left_out_of_the_model(
+    tmp_path: Path,
+) -> None:
+    """
+    A pane says the gate's prediction and "this file could not be read" above
+    the view, from the record. Left in the model as well, the second was in
+    the file's label, which the seam also sets above the view: said twice.
+    """
+    target = tmp_path / "blob.bin"
+    target.write_bytes(b"\xff\xfe\x00\x80binary")
+    over = approval.diff_texts("Write", {"file_path": str(target), "content": "text\n"}) or ()
+    assert "not readable as text" in typeset.diff_model(over).files[0].label
+    assert typeset.diff_model(over, warned=False).files[0].label == str(target)
+
+    edit = (approval.DiffText("a", "b", "x.py", will_not_apply="anchor not found in file"),)
+    assert typeset.diff_model(edit).files[0].will_not_apply.startswith("may not apply")
+    assert typeset.diff_model(edit, warned=False).files[0].will_not_apply == ""

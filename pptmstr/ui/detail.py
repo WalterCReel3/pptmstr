@@ -105,6 +105,9 @@ from .widgets import format_elapsed
 # announces the drop itself, and a second character-level cap stacked on top of it
 # would mean two policies and two differently-worded truncation notices over one
 # body of text.
+#
+# How long a diff this pane draws a wrapped line to an item. Not a cut: a longer
+# one is rows in a child that scrolls (``_diff_lines``).
 _MAX_DIFF_LINES = 1200
 # An error's bound, and only an error's: nothing is decided over one. A parked
 # call's arguments are bounded by ``review.SETTLED_LINES`` and the rest offered.
@@ -715,21 +718,25 @@ def _diff(
     """
     What the call would change, under one heading and the gate's prediction.
     Answers how many of its lines the frame did not put on screen: none, unless
-    the library stopped under the diff view (``ViewCache.unbuilt``).
+    the library stopped under the diff view or set less of the diff than it
+    was handed (``ViewCache.unbuilt``).
 
-    **Who draws the rows is the seam's answer** (``typeset.diff_adopted``, and
-    ``typeset.diff_draws`` of this call): the library's diff view where its
-    columns hold, and otherwise, and whenever the view has nothing to show,
-    this pane's own lines (``_diff_lines``). The heading and the prediction
-    are the same lines either way, said before either.
+    **Who draws the rows is the seam's answer** (``inbox.library_diff``, the
+    question the inbox row asks of the same call): the library's diff view
+    where its columns hold, and otherwise, and whenever that view is not what
+    draws this diff, this pane's own lines (``_diff_lines``). The heading and
+    the prediction are the same lines either way, said before either.
 
     **What differs, and is meant to.** This pane's own lines are the unified
-    string, wrapped at the pane's edge, cut at ``_MAX_DIFF_LINES`` with a line
-    saying so: wrapped text is laid out again every frame. The library's view
-    is made from the call's texts, culls to the pane, and has no bound: every
-    row of the change is in it, a row is never broken, and one wider than the
-    pane is scrolled to by the view's own bar. Two columns are offered where
-    the pane is ``_SIDE_BY_SIDE_PX`` wide.
+    string. The library's view is made from the call's texts, culls to the
+    pane, and has no bound: every row of the change is in it, a row is never
+    broken, and one wider than the pane is scrolled to by the view's own bar.
+    Two columns are offered where the pane is ``_SIDE_BY_SIDE_PX`` wide.
+
+    **What may not differ: every line of the diff can be brought on screen in
+    this pane, whoever draws it.** The diff shows what the arguments below do
+    not -- the lines a Write removes, the file around an Edit -- so a line
+    this pane left out would be one an approver here could not read.
     """
     assert pending.diff is not None
     lines = state.diff_lines.get(pending.id)
@@ -744,41 +751,47 @@ def _diff(
 
     widgets.section(f"diff · {len(lines):,} lines")
     _may_not_apply(pending.texts)
-    if (
-        typeset.enabled(typeset.Pane.DETAIL)
-        and typeset.diff_adopted()
-        and typeset.diff_draws(pending)
-    ):
-        key = (subject, "diff")
+    key = (subject, "diff")
+    held = inbox.library_diff(state, pending) if typeset.enabled(typeset.Pane.DETAIL) else None
+    if held is not None:
         roomy = imgui.get_content_region_avail().x >= _SIDE_BY_SIDE_PX
         if roomy:
             _, pane.side_by_side = imgui.checkbox("side by side", pane.side_by_side)
         # The prediction is said above, from the record: the view's copy would
         # be in a header row, which is cut at the pane's edge.
         shown = typeset.diff(
-            pane.views, key, pending, side_by_side=roomy and pane.side_by_side, warning=False
+            pane.views, key, held, side_by_side=roomy and pane.side_by_side, warning=False
         )
         if shown is not None:
             return pane.views.unbuilt(key) or 0
-    _diff_lines(lines)
+    _diff_lines(lines, key)
     return 0
 
 
-def _diff_lines(lines: Sequence[str]) -> None:
+def _diff_lines(lines: Sequence[str], view: Hashable) -> None:
     """
-    A unified diff in ImGui's own text, a line to an item, as far as the bound.
+    A unified diff in ImGui's own text, every line of it.
+
+    As far as ``_MAX_DIFF_LINES`` a line is an item, wrapped at the pane's edge.
+    Wrapped text is laid out again every frame, so a longer diff is not drawn
+    that way: it is the inbox row's rows (``inbox._diff_rows``) -- a line to a
+    row, unbroken, in a child that scrolls both ways and draws only the rows
+    in sight -- under one line saying so. All of it is in reach either way,
+    which is why nothing here is reported as not on screen.
     """
-    for line in lines[:_MAX_DIFF_LINES]:
+    if len(lines) > _MAX_DIFF_LINES:
+        imgui.text_colored(
+            P.text_dim.vec4,
+            f"{len(lines):,} lines is more than this pane wraps ({_MAX_DIFF_LINES:,}): "
+            "every line is in the box below, which scrolls",
+        )
+        inbox._diff_rows(lines, view)
+        return
+    for line in lines:
         # text_wrapped has no coloured variant, and the wrap pos pushed by draw()
         # applies to text_colored too -- so this stays text_colored and keeps the
         # +/- gutter as the non-hue channel (design §6.1).
         imgui.text_colored(getattr(P, _DIFF_COLOUR[diff_line_kind(line)]).vec4, line or " ")
-    if len(lines) > _MAX_DIFF_LINES:
-        imgui.text_colored(
-            P.warn.vec4,
-            f"… {len(lines) - _MAX_DIFF_LINES:,} more lines not shown here — "
-            "the inbox row scrolls the whole diff",
-        )
 
 
 def _arguments(pane: DetailState, raw_args: Mapping[str, Any], subject: str) -> int:

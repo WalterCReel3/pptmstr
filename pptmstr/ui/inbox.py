@@ -834,12 +834,14 @@ def _typeset_body(state: review.ReviewState, pending: PendingApproval, key: str)
     body longer than one frame should set unasked (``_unset_tail``).
 
     **The diff is the library's diff view where the library that is running
-    keeps a column** (``typeset.diff_adopted``, a measurement, and
-    ``typeset.diff_draws`` of this call), no taller than ``_BODY_LINES`` of its
-    own rows, scrolling inside itself past that and sideways to a long row by
-    its own bar. **Otherwise, and whenever that view has nothing to show, it
-    is this pane's own rows** (``_diff_rows``), as it is without the library.
-    A diff the library stopped under is counted as not on screen, like a body.
+    keeps a column** (``library_diff``: a measurement, this call's texts, and
+    a bound on what one frame is asked to make), no taller than ``_BODY_LINES``
+    of its own rows, scrolling inside itself past that and sideways to a long
+    row by its own bar. **Otherwise, and whenever that view is not what draws
+    this diff** (``typeset.diff`` answers ``None``, having said why), **it is
+    this pane's own rows** (``_diff_rows``), as it is without the library.
+    A diff the library stopped under, or set less of than it was handed, is
+    counted as not on screen, like a body.
     **Arguments are literal text**, which the seam hands to ImGui. **A
     description's prose is set by the library**: a concern's body, a task's
     detail, a spawn's prompt, a plan.
@@ -860,13 +862,14 @@ def _typeset_body(state: review.ReviewState, pending: PendingApproval, key: str)
     lines = _diff_lines(state, pending)
     if lines:
         view = (key, "diff")
-        if typeset.diff_adopted() and typeset.diff_draws(pending):
+        held = library_diff(state, pending)
+        if held is not None:
             # The prediction is the row's to say, above: the view's copy would
             # be in a header row, which is cut at the row's edge.
             shown = typeset.diff(
                 _VIEWS,
                 view,
-                pending,
+                held,
                 height_cap=_BODY_LINES * typeset.diff_row_height(),
                 width=wide,
                 warning=False,
@@ -927,6 +930,42 @@ def _typeset_body(state: review.ReviewState, pending: PendingApproval, key: str)
             _offer_whole(view, more)
         return (_VIEWS.unbuilt(view) or 0) + more
     return 0
+
+
+def library_diff(state: review.ReviewState, pending: PendingApproval) -> typeset.ParkedDiff | None:
+    """
+    What a pane hands ``typeset.diff`` for this call, or ``None`` where the
+    pane draws the call's diff with its own rows. For this row and for DETAIL,
+    which ask the same thing of the same call.
+
+    ``None`` where the library's diff view is not what draws a diff
+    (``typeset.diff_adopted``, ``typeset.diff_draws``), and **where making the
+    library's model would stall the frame that asked for it**: the model is
+    ``difflib`` over the lines the call changes, a second and a half for
+    changes scattered through 20,000 lines (``typeset.diffs`` has the
+    measurement), and the pane's own rows are the whole diff already, made
+    when the call parked. Past ``review.SETTLED_LINES`` of such lines the pane
+    says so in one line, draws its rows, and offers the library's view; the
+    answer is the call's and not the pane's, so asking once is asking for
+    both. Nothing is held on it: every row is on screen either way.
+
+    One ``ParkedDiff`` a call, kept in ``state`` until the call leaves the
+    queue: both panes draw the model it makes, each in a view of its own.
+    """
+    if not (typeset.diff_adopted() and typeset.diff_draws(pending)):
+        return None
+    held = state.diffs.get(pending.id)
+    if not isinstance(held, typeset.ParkedDiff):
+        held = state.diffs[pending.id] = typeset.ParkedDiff(pending.texts or ())
+    if held.work > review.SETTLED_LINES and pending.id not in state.diff_whole:
+        _warning(
+            f"this diff is the pane's own rows: the library's view of it would match "
+            f"{held.work:,} changed lines in one frame"
+        )
+        if imgui.small_button("use the library's view"):
+            state.diff_whole.add(pending.id)
+        return None
+    return held
 
 
 def _head(body: str) -> str:

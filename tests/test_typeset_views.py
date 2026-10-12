@@ -2847,16 +2847,224 @@ def test_asking_a_stopped_library_for_the_selection_or_the_block_is_an_empty_ans
     assert typeset.load_fonts(BOLD)
 
 
-def test_anything_else_raised_inside_a_draw_is_a_defect_and_is_not_caught(
+def _raises_attribute_error(*given: Any, **named: Any) -> Any:
+    raise AttributeError("'TypesetView' object has no attribute 'renamed'")
+
+
+def _fault_in_draw(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(advtext.TypesetView, "draw", _raises_attribute_error)
+
+
+def _fault_in_set_document(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(advtext.TypesetView, "set_document", _raises_attribute_error)
+
+
+def _fault_in_the_reader(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(advtext, "parse_markdown", _raises_attribute_error)
+
+
+FAULTS = {
+    "draw": (_fault_in_draw, "drawing a view"),
+    "set_document": (_fault_in_set_document, "handing a view its text"),
+    "the reader": (_fault_in_the_reader, "reading markdown"),
+}
+
+
+@pytest.mark.parametrize("where", list(FAULTS))
+def test_anything_else_the_library_raises_inside_a_draw_is_the_library_stopping(
+    seam: Any, monkeypatch: pytest.MonkeyPatch, where: str
+) -> None:
+    """
+    A call into the library can raise what is not ``TypesetUnavailable``: the
+    library passes on whatever it does not take for its own failure. A newer
+    library that dropped a name is an ``AttributeError`` on every frame the
+    text is on screen. It does not leave the seam: the reason is said where
+    the text would be with the exception's type in it, every line is reported
+    unset, the frame goes on as it began, and from the next the library is off
+    and its sentence in the menu names the type.
+    """
+    said = _said(monkeypatch)
+    cache = typeset.ViewCache()
+    fault, doing = FAULTS[where]
+    with monkeypatch.context() as patched:
+        fault(patched)
+        frame(seam, lambda: typeset.markdown(cache, "k", "One.\n\nTwo.\n\nThree."))
+        assert said == [
+            f"typeset text stopped: the library raised AttributeError while {doing}: "
+            "'TypesetView' object has no attribute 'renamed'"
+        ]
+        assert cache.unbuilt("k") == 5
+        assert typeset.can_draw(), "until the frame is over"
+        typeset.pre_frame()
+        assert not typeset.can_draw()
+        reason = typeset.unavailable_reason() or ""
+        assert "AttributeError" in reason and doing in reason
+    assert typeset.load_fonts(BOLD), "a load is the way back"
+
+
+def test_a_lone_surrogate_in_a_body_stops_the_library_and_does_not_leave_the_seam(
     seam: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    cache = typeset.ViewCache()
-    view = _view(seam, cache, "k", MARKDOWN, height_cap=40.0)
+    """
+    The fault above with nothing patched. ``json.loads`` makes a lone surrogate
+    of ``"\\udc80"``, so a tool call's arguments can hold one, and the library
+    cannot encode it for its native half: ``UnicodeEncodeError``, which is not
+    its own failure and which it passes on.
+    """
+    import json
 
-    def broken(**given: Any) -> bool:
+    body = json.loads('"a \\udc80 b"')
+    assert body == "a \udc80 b"
+    said = _said(monkeypatch)
+    cache = typeset.ViewCache()
+    frame(seam, lambda: typeset.markdown(cache, "k", body))
+    assert len(said) == 1 and "the library raised UnicodeEncodeError" in said[0]
+    assert cache.unbuilt("k") == 1
+    typeset.pre_frame()
+    assert not typeset.can_draw()
+    assert "UnicodeEncodeError" in (typeset.unavailable_reason() or "")
+    assert typeset.load_fonts(BOLD)
+
+
+def test_what_the_seams_own_code_raises_inside_a_draw_is_a_defect_and_is_not_caught(
+    seam: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Only the calls into the library are the library's. A slip in pptmstr's own
+    code on the way to one -- here, the palette the view is handed -- leaves
+    as itself, and the library is not switched off for it.
+    """
+    cache = typeset.ViewCache()
+    _view(seam, cache, "k", MARKDOWN)
+
+    def broken(ink: Any = None) -> Any:
         raise ValueError("a slip in the seam")
 
-    monkeypatch.setattr(view, "draw", broken)
-    with pytest.raises(ValueError, match="a slip in the seam"):
-        frame(seam, lambda: typeset.markdown(cache, "k", MARKDOWN, height_cap=40.0))
+    with monkeypatch.context() as patched:
+        patched.setattr(views.themes, "palette", broken)
+        with pytest.raises(ValueError, match="a slip in the seam"):
+            frame(seam, lambda: typeset.markdown(cache, "k", MARKDOWN))
+    typeset.pre_frame()
     assert typeset.can_draw(), "the library is not switched off for it"
+
+
+# -- a draw that set less than it was handed -----------------------------------------
+
+WIDE_TABLE = "|" + "c|" * 1100 + "\n|" + "-|" * 1100 + "\n|" + "v|" * 1100 + "\n"
+"""
+A table of 1,100 columns, 2.2 KB of a body. The library sets 1,024 cells of a
+row and leaves out the rest, notes that it cut an edit, and its draw answers
+true (measured in pptmstr on 2026-10-12, advtext ``38f5fac``).
+"""
+
+
+def _unformatted(seam: Any, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """
+    Every string handed to ``imgui.text_unformatted`` from here on: what ImGui
+    draws of a part that is not the library's, and what the seam says.
+    """
+    drawn: list[str] = []
+    real = seam.text_unformatted
+    monkeypatch.setattr(seam, "text_unformatted", lambda text: (drawn.append(text), real(text))[1])
+    return drawn
+
+
+def test_a_table_the_library_cut_is_reported_unset_and_then_set_as_written(
+    seam: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The view says it set the text whole and 152 cells of it are on no screen.
+    The seam reads the library's note as well as the draw's answer: in the
+    frame of the cut every line under the key is unset and a sentence says so,
+    and from the next the key is ImGui's -- the body as written, every cell,
+    under one line saying why -- with nothing unset, so that an approver can
+    read it and then decide. The library is not stopped for it, and a second
+    key with the same body is found out the same way: the note is the same
+    words, and is told apart by being another string.
+    """
+    assert typeset.prose_parts(WIDE_TABLE)[0].kind is typeset.Kind.MARKDOWN
+    said = _said(monkeypatch)
+    drawn = _unformatted(seam, monkeypatch)
+    cache = typeset.ViewCache()
+    frame(seam, lambda: typeset.markdown(cache, "k", WIDE_TABLE))
+    assert cache.unbuilt("k") == 4
+    assert len(said) == 1 and said[0].startswith("typeset: the library said: an edit was cut")
+    assert "1,024 cells" in said[0]
+
+    drawn.clear()
+    frame(seam, lambda: typeset.markdown(cache, "k", WIDE_TABLE))
+    assert cache.unbuilt("k") == 0 and cache.view("k") is None
+    assert WIDE_TABLE in drawn, "the source, every cell of it"
+    assert said[-1].startswith("typeset: the library said: an edit was cut")
+    assert said[-1].endswith("shown as written")
+    assert cache.texts("k") == (WIDE_TABLE,)
+    typeset.pre_frame()
+    assert typeset.can_draw() and typeset.enabled(typeset.Pane.INBOX)
+
+    frame(seam, lambda: typeset.markdown(cache, "second", WIDE_TABLE))
+    assert cache.unbuilt("second") == 4
+
+    frame(seam, lambda: typeset.markdown(cache, "k", "A body the library sets whole."))
+    assert cache.unbuilt("k") == 0 and cache.view("k") is not None, "asked of the library again"
+
+
+def test_a_draw_that_answers_false_is_reported_unset_and_then_set_as_written(
+    seam: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    ``TypesetView.draw`` answers false when a block in view could not be set as
+    asked: a block cut at 16 MiB, a character that could not be measured and
+    was left off its line. Made here by the answer itself, since the first
+    needs 16 MiB of text. The answer is not dropped.
+    """
+    said = _said(monkeypatch)
+    drawn = _unformatted(seam, monkeypatch)
+    cache = typeset.ViewCache()
+    source = "One line.\n\nAnother, *with emphasis*."
+    real = advtext.TypesetView.draw
+    with monkeypatch.context() as patched:
+        patched.setattr(
+            advtext.TypesetView, "draw", lambda self, **given: bool(real(self, **given)) and False
+        )
+        frame(seam, lambda: typeset.markdown(cache, "k", source, height_cap=200.0))
+        assert cache.unbuilt("k") == 3
+        assert said == [f"typeset: the library {views._NOT_ALL_SET}"]
+    drawn.clear()
+    frame(seam, lambda: typeset.markdown(cache, "k", source, height_cap=200.0))
+    assert cache.unbuilt("k") == 0 and cache.view("k") is None
+    assert source in drawn, "as written: the stars are on screen"
+
+
+def test_text_with_characters_no_face_has_is_set_whole_and_stays_the_librarys(
+    seam: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    What a false answer does not track, so that the rule above does not take
+    typeset text from every body with an emoji in it: a character no loaded
+    face has is set as U+FFFD and the draw answers true (request P9). Greek
+    and Cyrillic, which the prose face has, and controls likewise.
+    """
+    said = _said(monkeypatch)
+    cache = typeset.ViewCache()
+    source = "x \U0001f600 y 漢 π Ж а z \x01 ‮ w"
+    for _ in range(3):
+        frame(seam, lambda: typeset.markdown(cache, "k", source))
+        assert cache.unbuilt("k") == 0 and cache.view("k") is not None
+    assert said == []
+
+
+def test_a_stream_the_library_cut_reports_its_text_unset_for_as_long_as_it_is_drawn(
+    seam: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    said = _said(monkeypatch)
+    cache = typeset.ViewCache()
+    arriving = typeset.stream(cache, "s")
+    arriving.append(WIDE_TABLE)
+    arriving.close()
+    for _ in range(3):
+        frame(seam, arriving.draw)
+        assert arriving.unbuilt == 4
+    assert len(said) == 3 and all("an edit was cut" in line for line in said)
+    arriving.set_text("Another turn.", closed=True)
+    frame(seam, arriving.draw)
+    assert arriving.unbuilt == 0

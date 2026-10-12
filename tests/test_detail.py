@@ -2334,7 +2334,11 @@ def test_where_columns_hold_a_write_over_a_file_that_is_not_text_says_so(
     heading = next(n for n, line in enumerate(rig.said) if line.startswith("section:diff"))
     assert rig.said[heading + 1] == said
     assert _diff_view(rig, obligation) is not None and "+now text" not in everything
-    label = next(line for line in everything if "shown as new)" in line)
+    # Said once, by the pane: the file's header above the view is its path and
+    # state, and not the same sentence again in other words.
+    assert everything.count(said) == 1
+    assert not [line for line in everything if "shown as new)" in line]
+    label = next(line for line in everything if line.endswith("blob.bin  (new file)"))
     assert everything.index(said) < everything.index(label)
 
 
@@ -2350,29 +2354,112 @@ def _long_write() -> ApprovalNeeded:
     return parked("Write", {"file_path": "nowhere/long.py", "content": content})
 
 
-def test_this_panes_own_diff_is_cut_at_its_bound_and_says_how_much_is_not_shown(
-    seam, monkeypatch
+def _long_rewrite(tmp_path, mark: str = "") -> ApprovalNeeded:
+    """
+    A Write over a file of ``LONG_WRITE`` lines that changes every one of them:
+    the diff's removed lines are the file's, and are in no argument of the call.
+    """
+    target = tmp_path / "long.py"
+    target.write_text("".join(f"old_{n} = {n}{mark}\n" for n in range(LONG_WRITE)))
+    content = "".join(f"line_{n} = {n}\n" for n in range(LONG_WRITE))
+    return parked("Write", {"file_path": str(target), "content": content})
+
+
+def _diff_box(im):
+    """
+    The child this pane draws a long diff's rows in, as the last frame left it.
+    """
+    (window,) = (w for w in im.get_current_context().windows if "##body" in w.name and w.active)
+    return window
+
+
+@pytest.mark.parametrize("held", [False, True], ids=["today", "where columns hold"])
+def test_every_line_of_a_diff_past_this_panes_bound_can_be_brought_on_screen_here(
+    request, monkeypatch, tmp_path, held: bool
 ) -> None:
     """
-    The branch the product takes today: wrapped text is laid out again in every
-    frame, so the pane's own lines stop at ``_MAX_DIFF_LINES`` and say so.
+    This pane wraps a diff a line to an item, which is laid out again in every
+    frame, so it does that as far as ``_MAX_DIFF_LINES``. Past it the pane used
+    to stop, say the inbox row had the rest, and report nothing unset -- with
+    the inbox behind another tab ``a`` was sent over a diff of which 1,200
+    lines had been drawn. The arguments below do not stand in for the rest: a
+    Write's removed lines are the file's and are in no argument.
+
+    A longer diff is now rows in a box that scrolls, every line of it: the
+    last removed and the last added line are each drawn once the box is
+    scrolled to them. Nothing is unset, so nothing is held, and the rule is the same
+    whoever was asked first: where the library's view would draw a diff and
+    declines this one (a character the code face lacks), the pane's own
+    renderer is this one.
     """
-    obligation = _long_write()
+    im = request.getfixturevalue("columns_hold" if held else "seam")
+    obligation = _long_rewrite(tmp_path, " # π" if held else "")
+    snap = snapshot(record(), needs_you=(obligation,))
+    everything = _every_native_line(monkeypatch, im)
+    rig = Pane(im, monkeypatch)
+    rig.focus.move(snap, 0)
+    rig.frame(snap)
+    rig.frame(snap)
+    assert typeset.diff_adopted() is held
+    assert _diff_view(rig, obligation) is None
+    total = len(rig.state.diff_lines["p1"])
+    assert total > 2 * LONG_WRITE > detail._MAX_DIFF_LINES
+    assert not [line for line in everything if "more lines not shown" in line]
+    assert (
+        f"{total:,} lines is more than this pane wraps ({detail._MAX_DIFF_LINES:,}): "
+        "every line is in the box below, which scrolls"
+    ) in rig.said
+    last_removed = f"-old_{LONG_WRITE - 1} = {LONG_WRITE - 1}" + (" # π" if held else "")
+    last_added = f"+line_{LONG_WRITE - 1} = {LONG_WRITE - 1}"
+    assert last_removed not in everything and last_added not in everything
+    assert last_removed.lstrip("-") not in "\n".join(
+        str(value) for value in obligation.approval.raw_args.values()
+    ), "the arguments do not hold it"
+
+    box = _diff_box(im)
+    pitch = im.get_text_line_height_with_spacing()
+    assert box.scroll_max.y >= (total - inbox._BODY_LINES) * pitch
+    # A file rewritten whole is every old line and then every new one: the
+    # last removed line is half way down the box and the last added at its end.
+    box.scroll.y = rig.state.diff_lines["p1"].index(last_removed) * pitch
+    everything.clear()
+    rig.frame(snap)
+    assert last_removed in everything and last_added not in everything
+    box.scroll.y = box.scroll_max.y
+    # The box's foot can be under the pane's own edge: the pane scrolls to it.
+    (outer,) = (
+        w
+        for w in im.get_current_context().windows
+        if w.active and "##detail_" in w.name and "##body" not in w.name
+    )
+    under = (box.pos.y + box.size.y) - (outer.pos.y + outer.size.y)
+    outer.scroll.y = max(0.0, under + 8.0)
+    everything.clear()
+    try:
+        rig.frame(snap)
+    finally:
+        # The pane's window is every test's: left where it was found.
+        outer.scroll.y = 0.0
+    assert last_added in everything
+    assert review.unset_lines(rig.state, "p1") == 0
+    bridge = _Sent()
+    _press_a(rig, snap, bridge)
+    assert bridge.resolved == [("p1", True)]
+
+
+def test_a_diff_within_this_panes_bound_is_still_a_wrapped_line_to_an_item(
+    seam, monkeypatch
+) -> None:
+    lines = detail._MAX_DIFF_LINES - 10
+    content = "".join(f"line_{n} = {n}\n" for n in range(lines))
+    obligation = parked("Write", {"file_path": "nowhere/long.py", "content": content})
     snap = snapshot(record(), needs_you=(obligation,))
     rig = Pane(seam, monkeypatch)
     rig.focus.move(snap, 0)
     rig.frame(snap)
-    assert not typeset.diff_adopted()
-    assert _diff_view(rig, obligation) is None
-    total = len(rig.state.diff_lines["p1"])
-    assert total > detail._MAX_DIFF_LINES
-    assert f"+line_{detail._MAX_DIFF_LINES - 10} = {detail._MAX_DIFF_LINES - 10}" in rig.said
-    assert f"+line_{LONG_WRITE - 1} = {LONG_WRITE - 1}" not in rig.said
-    cut = [line for line in rig.said if "more lines not shown here" in line]
-    assert cut == [
-        f"… {total - detail._MAX_DIFF_LINES:,} more lines not shown here — "
-        "the inbox row scrolls the whole diff"
-    ]
+    assert len(rig.state.diff_lines["p1"]) <= detail._MAX_DIFF_LINES
+    assert f"+line_{lines - 1} = {lines - 1}" in rig.said
+    assert not [w for w in seam.get_current_context().windows if "##body" in w.name and w.active]
 
 
 def test_where_columns_hold_the_whole_of_a_long_diff_is_in_the_view_and_no_bound_is_said(
@@ -2515,6 +2602,10 @@ def test_where_columns_hold_a_still_waits_on_an_argument_past_the_bound(
     content = "\n".join(f"line_{n} = {n}" for n in range(lines))
     obligation = parked("Write", {"file_path": "nowhere/long.py", "content": content})
     rig = Pane(columns_hold, monkeypatch)
+    # The diff's own bound is another question, asked of the operator once for
+    # the call (``inbox.library_diff``): answered here, so that only the
+    # argument's is in play.
+    rig.state.diff_whole.add("p1")
     _held_until_asked(
         rig,
         obligation,
@@ -2522,3 +2613,126 @@ def test_where_columns_hold_a_still_waits_on_an_argument_past_the_bound(
         f"line_{lines - 1} = {lines - 1}",
     )
     assert len(_added(_diff_view(rig, obligation))) == lines
+
+
+def _raises_attribute_error(*given, **named):
+    raise AttributeError("'X' object has no attribute 'renamed'")
+
+
+def _diff_draw_raises(patched) -> None:
+    import advtext
+
+    patched.setattr(advtext.TypesetDiffView, "draw", _raises_attribute_error)
+
+
+def _diff_attribute_raises(patched) -> None:
+    import advtext
+
+    patched.setattr(advtext.FileDiff, "invisible_characters", property(_raises_attribute_error))
+
+
+def _diff_model_raises(patched) -> None:
+    import advtext
+
+    patched.setattr(advtext.Diff, "from_texts", _raises_attribute_error)
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [_diff_draw_raises, _diff_attribute_raises, _diff_model_raises],
+    ids=["draw", "an attribute read above the view", "making the model"],
+)
+def test_where_columns_hold_a_diff_the_library_raises_under_does_not_take_the_pane(
+    columns_hold, monkeypatch, fault
+) -> None:
+    """
+    The adopted branch: the diff view, or the model read above it, raises what
+    is not the library's own stop. It used to leave ``typeset.diff`` and the
+    pane with it on every frame the approval was queued. The pane draws, the
+    frame's reading is of rows missing and ``a`` is not sent on it; the next
+    frame is this pane's own lines and ``a`` is sent.
+    """
+    obligation = parked("Write", {"file_path": "nowhere/new.py", "content": "a = 1\nb = 2\n"})
+    snap = snapshot(record(), needs_you=(obligation,))
+    rig = Pane(columns_hold, monkeypatch)
+    rig.focus.move(snap, 0)
+    bridge = _Sent()
+    with monkeypatch.context() as patched:
+        fault(patched)
+        rig.frame(snap)
+        assert (review.unset_lines(rig.state, "p1") or 0) > 0
+        assert review.withheld(rig.state, obligation.approval) == review.NOT_WHOLE
+        assert "+a = 1" not in rig.said
+        _press_a(rig, snap, bridge)
+        assert bridge.resolved == []
+
+        rig.frame(snap)
+        assert not typeset.enabled(typeset.Pane.DETAIL)
+        assert "AttributeError" in (typeset.unavailable_reason() or "")
+        assert "+a = 1" in rig.said and "+b = 2" in rig.said
+        assert review.unset_lines(rig.state, "p1") == 0
+        _press_a(rig, snap, bridge)
+        assert bridge.resolved == [("p1", True)]
+    assert typeset.load_fonts(theme_mod._ASSETS / "fonts" / "Inconsolata-Bold.ttf")
+
+
+def test_a_markdown_argument_the_library_raises_under_does_not_take_the_pane(
+    seam, monkeypatch
+) -> None:
+    """
+    The branch the product takes today: a concern's body is markdown and the
+    library's. Its view raising what is not the library's own stop leaves the
+    pane drawn, the arguments counted as not on screen and ``a`` unsent; the
+    next frame is the pane's own renderer.
+    """
+    import advtext
+
+    args = {"to": "lead", "subject": "s", "body": "A body.\n\nOf *two* paragraphs."}
+    obligation = parked("mcp__pptmstr__post_concern", args)
+    snap = snapshot(record(), needs_you=(obligation,))
+    rig = Pane(seam, monkeypatch)
+    rig.focus.move(snap, 0)
+    bridge = _Sent()
+    with monkeypatch.context() as patched:
+        patched.setattr(advtext.TypesetView, "draw", _raises_attribute_error)
+        rig.frame(snap)
+        assert (review.unset_lines(rig.state, "p1") or 0) > 0
+        _press_a(rig, snap, bridge)
+        assert bridge.resolved == []
+        rig.frame(snap)
+        assert not typeset.enabled(typeset.Pane.DETAIL)
+        assert review.unset_lines(rig.state, "p1") == 0
+        _press_a(rig, snap, bridge)
+        assert bridge.resolved == [("p1", True)]
+    assert typeset.load_fonts(theme_mod._ASSETS / "fonts" / "Inconsolata-Bold.ttf")
+
+
+def test_a_markdown_argument_the_library_cut_is_unset_for_a_frame_and_then_as_written(
+    seam, monkeypatch
+) -> None:
+    """
+    A concern whose body holds a table wider than the library sets: its draw
+    answers true over a row with cells left out. The frame's reading is of the
+    arguments not on screen; the next they are ImGui's, as written, and ``a``
+    is sent. The library is still drawing everything else.
+    """
+    table = "|" + "c|" * 1100 + "\n|" + "-|" * 1100 + "\n|" + "v|" * 1100 + "\n"
+    args = {"to": "lead", "subject": "s", "body": "The matrix follows.\n\n" + table}
+    obligation = parked("mcp__pptmstr__post_concern", args)
+    snap = snapshot(record(), needs_you=(obligation,))
+    rig = Pane(seam, monkeypatch)
+    rig.focus.move(snap, 0)
+    bridge = _Sent()
+    key = (obligation.key, "arguments")
+    rig.frame(snap)
+    assert (rig.pane.views.unbuilt(key) or 0) > 0
+    assert review.withheld(rig.state, obligation.approval) == review.NOT_WHOLE
+    _press_a(rig, snap, bridge)
+    assert bridge.resolved == []
+
+    rig.frame(snap)
+    assert typeset.enabled(typeset.Pane.DETAIL)
+    assert rig.pane.views.unbuilt(key) == 0 and rig.pane.views.views(key) == ()
+    assert "v|" * 1100 in "\n".join(rig.pane.views.texts(key))
+    _press_a(rig, snap, bridge)
+    assert bridge.resolved == [("p1", True)]

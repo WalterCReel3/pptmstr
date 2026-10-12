@@ -47,12 +47,38 @@ at the cursor in the pane's own text, returns the height of what it drew, and
 tells the gate (``gate.stopped``). ``enabled()`` answers as it did for the rest
 of that frame, so a pane that asks it more than once does not change branch
 half way down, and is false from the next: the pane is back on its own
-renderer. Anything else raised is a defect and is not caught.
+renderer.
+
+**Whatever else a call into the library raises is the library stopping too**
+(``gate.into_library``): each such call is made inside one of the ``with`` blocks
+named at the top of this module, and nothing of pptmstr's own is inside one.
+What pptmstr's own code raises here is a defect and is not caught.
+
+## When the library sets less than it was handed
+
+It does that without raising (``gate`` has what was measured): a view's
+``draw`` answers false, or the library notes an edit it cut and the draw
+answers true. Either way some of the text is on no screen, and on an approval
+surface that is text the recipient reads and the approver does not. So a draw
+under a key is read both ways (``_short``), and where either says so:
+
+- that frame the key reports every line unset, with a sentence under what was
+  drawn, so no decision is offered over it;
+- from the next frame **that key's parts are ImGui's, as written**, under one
+  line saying why, in the chrome's font and wrapped to the measure: every
+  character is then on screen and nothing is reported unset. Markdown is not
+  rendered there; its source is what is read.
+
+One key and not the library: a table of 1,100 columns in one agent's message
+is no reason to take typeset text from every pane. The parts are asked of the
+library again when they change. A stream has no such fallback: it reports its
+lines unset and says so for as long as it is drawn, and what it holds is set
+again as a document when its turn settles.
 
 **What a caller that decides on the text is told** (``ViewCache.unbuilt``):
-the lines the last draw did not set. Zero for anything drawn, and all of them
-when the library stopped under it, because what is on screen then is the
-sentence and not the text.
+the lines the last draw did not set. Zero for anything drawn whole, and all of
+them when the library stopped under it or set less than all of it, because
+what is on screen then is not the text.
 
 ## Nothing is built over more than one frame
 
@@ -110,6 +136,23 @@ _MIN_WIDTH_PX = 80.0
 The narrowest measure a view is given; the library's own floor.
 """
 
+_READING = gate.into_library("reading markdown")
+_MAKING = gate.into_library("making a view")
+_HANDING = gate.into_library("handing a view its text")
+_INKING = gate.into_library("inking a view")
+_DRAWING = gate.into_library("drawing a view")
+_ASKING = gate.into_library("asking a view about its text")
+"""
+Where this module calls into the library while a pane draws (``gate.into_library``).
+Around the calls and nothing else.
+"""
+
+_NOT_ALL_SET = "could not set something in view as it was asked to"
+"""
+What is said of a draw that answered false with no note from the library: its
+own words for that answer.
+"""
+
 
 @dataclass
 class _Segment:
@@ -132,6 +175,9 @@ class _Segment:
     reach: tuple[int, float, float] | None = None
     # Where the last draw put it, top and bottom, in pixels down the screen.
     band: tuple[float, float] = (0.0, 0.0)
+    # What the view's last draw answered: false when something in view could
+    # not be set as asked.
+    whole: bool = True
 
 
 @dataclass
@@ -167,12 +213,20 @@ class _Entry:
     # Whether each markdown part has a view of its own (``document``).
     apart: bool = False
     # Source lines handed over that the last draw did not put on screen: all of
-    # them when the library stopped inside it, none otherwise.
+    # them when the library stopped inside it or set less than all of them,
+    # none otherwise.
     missing: int = 0
+    # Why the parts are ImGui's and not the library's: what the library said
+    # when it set less than it was handed. ``None`` while they are the library's.
+    unset: str | None = None
+    # The parts as ImGui draws them then: markdown as its source.
+    written: tuple[Part, ...] = ()
     # For the kind ``stream``: the ``Stream`` a pane appends to.
     stream: Stream | None = None
-    # For the kind ``diff``: the library's model of what was last handed over.
+    # For the kind ``diff``: the library's model of what was last handed over,
+    # and the model ``diffs.unfit`` was last asked of.
     model: Any = None
+    scanned: Any = None
 
     @property
     def view(self) -> Any:
@@ -264,10 +318,11 @@ class ViewCache:
         for no view.
 
         Text is read and laid out in the call that draws it, so this is zero
-        for anything that was drawn. It is every line of the text when the
-        library stopped inside that draw: the pane then shows a sentence where
-        the text would be, and a caller that offers a decision on the text
-        (``review.withheld``) must not offer it over the sentence.
+        for anything that was drawn whole. It is every line of the text when
+        the library stopped inside that draw, and when it set less than it was
+        handed (the module docstring): what is on screen then is not the text,
+        and a caller that offers a decision on the text (``review.withheld``)
+        must not offer it.
         """
         entry = self._entries.get(key)
         return None if entry is None else entry.missing
@@ -318,10 +373,11 @@ class ViewCache:
                     if segment.band[0] <= at < segment.band[1]:
                         return (index, entry.parts[index].text)
                     continue
-                block = view.block_under_mouse()
+                with _ASKING:
+                    block = view.block_under_mouse()
+                    text = "" if block is None else str(view.texts[block])
                 if block is None:
                     continue
-                text = str(view.texts[block])
                 said = segment.captions.get(block)
                 if said is not None:
                     text = text[said + 1 :]
@@ -344,7 +400,9 @@ class ViewCache:
 
         try:
             for view in self.views(key):
-                if view.owns_selection and (text := view.selected_text()):
+                with _ASKING:
+                    text = view.selected_text() if view.owns_selection else ""
+                if text:
                     return str(text)
         except TypesetUnavailable as stopped:
             gate.stopped(stopped)
@@ -424,6 +482,8 @@ class Stream:
         # The view's revision and pptmstr's theme the fences' info strings were
         # last inked for.
         self._inked: tuple[int, object] | None = None
+        # What the library said when it set less of the text than it was fed.
+        self._unset: str | None = None
 
     @property
     def text(self) -> str:
@@ -494,6 +554,7 @@ class Stream:
         self._fed = 0
         self._ended = False
         self._inked = None
+        self._unset = None
         self._entry.segments = []
 
     def _catch_up(self) -> None:
@@ -505,16 +566,21 @@ class Stream:
         from advtext import MarkdownStream, TypesetStreamView
 
         if self._view is None:
-            self._source = MarkdownStream(themes.document_theme())
-            self._view = TypesetStreamView(
-                _Captioned(self._source), palette=themes.palette(), follow=self._follow
-            )
+            theme, palette = themes.document_theme(), themes.palette()
+            with _MAKING:
+                self._source = MarkdownStream(theme)
+                self._view = TypesetStreamView(
+                    _Captioned(self._source), palette=palette, follow=self._follow
+                )
             self._entry.segments = [_Segment((), self._view)]
         if self._fed < len(self._text):
-            self._source.append(self._text[self._fed :])
+            arrived = self._text[self._fed :]
+            with _HANDING:
+                self._source.append(arrived)
             self._fed = len(self._text)
         if self._closed and not self._ended:
-            self._source.close()
+            with _HANDING:
+                self._source.close()
             self._ended = True
 
     def _ink(self) -> None:
@@ -524,19 +590,25 @@ class Stream:
         drops the inks of a block an edit replaced.
         """
         view = self._view
-        view.sync()
-        now = (view.revision, ui_theme.current())
+        with _HANDING:
+            view.sync()
+            revision = view.revision
+        now = (revision, ui_theme.current())
         if self._inked == now:
             return
         self._inked = now
+        with _ASKING:
+            blocks = tuple(view.blocks)
         captions = {
             at: len(said)
-            for at, block in enumerate(view.blocks)
+            for at, block in enumerate(blocks)
             if (said := getattr(block, "language", ""))
         }
         self._entry.segments[0].captions = captions
+        accent = ui_theme.P.accent.u32
         for block, said in captions.items():
-            view.set_colours(block, [(0, said, ui_theme.P.accent.u32)])
+            with _INKING:
+                view.set_colours(block, [(0, said, accent)])
 
     def draw(self, *, width: float | None = None, ink: Color | None = None) -> float:
         """
@@ -552,10 +624,15 @@ class Stream:
         entry.frame = frame
         top = im.get_cursor_pos().y
         try:
+            noted = gate.noted()
             self._catch_up()
             self._ink()
             _show_view(im, entry.segments[0], _width(im, width), themes.palette(ink), None)
+            self._unset = _short(entry, noted) or self._unset
             entry.missing = 0
+            if self._unset is not None:
+                entry.missing = self._text.count("\n") + 1
+                _said(im, f"typeset: the library {self._unset}", ui_theme.P.warn)
         except TypesetUnavailable as stopped:
             gate.stopped(stopped)
             entry.missing = self._text.count("\n") + 1
@@ -644,16 +721,23 @@ def _open(entry: _Entry, parts: tuple[Part, ...], on_link: Callable[[str], None]
             key = (part.text, part.demote, hosting)
             made = read.get(key, entry.read.get(key))
             if made is None:
-                made = _captioned(gate.read(part.text, themes.demoted(part.demote)).blocks, hosting)
+                theme = themes.demoted(part.demote)
+                with _READING:
+                    parsed = gate.read(part.text, theme).blocks
+                made = _captioned(parsed, hosting)
             read[key] = made
             blocks += made
             owner += [index] * len(made)
-        view = kept.pop(0) if kept else None
+        view: Any = kept.pop(0) if kept else None
         if view is None:
-            view = TypesetView(theme=themes.document_theme(), palette=themes.palette())
-        view.on_link = on_link
-        view.host_for = _fences() if hosting else None
-        view.set_document(tuple(blocks))
+            theme, palette = themes.document_theme(), themes.palette()
+            with _MAKING:
+                view = TypesetView(theme=theme, palette=palette)
+        fences = _fences() if hosting else None
+        with _HANDING:
+            view.on_link = on_link
+            view.host_for = fences
+            view.set_document(tuple(blocks))
         captions = {
             at: len(said)
             for at, block in enumerate(blocks)
@@ -678,6 +762,53 @@ def _open(entry: _Entry, parts: tuple[Part, ...], on_link: Callable[[str], None]
     entry.read = read
     entry.inked = None
     entry.natural = None
+    entry.unset = None
+    entry.written = ()
+
+
+def _short(entry: _Entry, noted: object) -> str | None:
+    """
+    What the library said if the draw that has just ended set less than it was
+    handed, or ``None``: a view's ``draw`` answered false, or the library
+    noted something since ``noted`` was read (``gate.noted``; an edit it cut).
+    """
+    now = gate.noted()
+    if now is not noted and now:
+        return f"said: {now}"
+    if not all(segment.whole for segment in entry.segments):
+        return _NOT_ALL_SET
+    return None
+
+
+def _as_written(entry: _Entry, why: str) -> None:
+    """
+    Hand the parts held to ImGui, each as written, from the next draw on (the
+    module docstring says when and why).
+
+    Markdown is its source in the chrome's font at the literal role's size,
+    wrapped to the measure by ImGui, which breaks inside a run with no space
+    in it: the reason this is asked for at all is text that was not on screen.
+    The library's views are let go of.
+    """
+    for segment in entry.segments:
+        if segment.view is not None:
+            with _HANDING:
+                segment.view.close()
+    entry.unset = why
+    entry.written = tuple(
+        (
+            replace(part, kind=Kind.WRAPPED, role=Role.LITERAL, tight=False)
+            if part.kind is Kind.MARKDOWN
+            else part
+        )
+        for part in entry.parts
+    )
+    entry.segments = [
+        _Segment((index,)) for index, part in enumerate(entry.parts) if part.text.strip()
+    ]
+    entry.read = {}
+    entry.natural = None
+    entry.shown = None
 
 
 def _captioned(blocks: Sequence[Any], hosting: bool = False) -> tuple[Any, ...]:
@@ -747,7 +878,8 @@ class _Fences:
     def __init__(self) -> None:
         from advtext import TypesetDiffFences
 
-        self.inner = TypesetDiffFences()
+        with _MAKING:
+            self.inner = TypesetDiffFences()
 
     def __call__(self, view: Any, number: int, block: Any) -> Any:
         from . import diffs
@@ -789,9 +921,10 @@ def _ink(entry: _Entry) -> None:
         view = segment.view
         if view is None:
             continue
-        view.clear_colours()
-        texts = view.texts
-        hosted = set(view.hosts)
+        with _INKING:
+            view.clear_colours()
+            lengths = [len(text) for text in view.texts]
+            hosted = set(view.hosts)
         for block, index in enumerate(segment.owner):
             if block in hosted:
                 # A diff view's inks are its own.
@@ -800,10 +933,11 @@ def _ink(entry: _Entry) -> None:
             # A fence's info string is told from its code by ink.
             said = segment.captions.get(block, 0)
             spans = [(0, said, ui_theme.P.accent.u32)] if said else []
-            if ink is not None and len(texts[block]) > said:
-                spans.append((said, len(texts[block]), ink.u32))
+            if ink is not None and lengths[block] > said:
+                spans.append((said, lengths[block], ink.u32))
             if spans:
-                view.set_colours(block, spans)
+                with _INKING:
+                    view.set_colours(block, spans)
     entry.inked = ui_theme.current()
 
 
@@ -855,7 +989,7 @@ def _show(
     for segment in entry.segments:
         top = float(im.get_cursor_screen_pos().y)
         if segment.view is None:
-            _native(im, entry.parts[segment.parts[0]], wide)
+            _native(im, (entry.written or entry.parts)[segment.parts[0]], wide)
             foot = float(im.get_item_rect_max().y)
             right = max(right, float(im.get_item_rect_max().x - at.x))
         else:
@@ -888,7 +1022,11 @@ def _rest(im: Any, entry: _Entry, wide: float) -> bool:
         return False
     for segment in entry.segments:
         view = segment.view
-        if view is not None and view.owns_selection and view.selection is not None:
+        if view is None:
+            continue
+        with _ASKING:
+            selecting = view.owns_selection and view.selection is not None
+        if selecting:
             return False
     # An item's spacing follows the dummy as it followed the last part.
     im.dummy(im.ImVec2(right, max(0.0, entry.height - float(im.get_style().item_spacing.y))))
@@ -903,8 +1041,9 @@ def _show_view(
     Draw one of the library's views at the cursor and tell the window how far
     right its text runs. Returns the view's foot, in pixels down the screen.
     """
-    segment.view.on_link = on_link
-    segment.view.draw(palette=palette, width_px=wide)
+    with _DRAWING:
+        segment.view.on_link = on_link
+        segment.whole = bool(segment.view.draw(palette=palette, width_px=wide))
     foot = float(im.get_item_rect_max().y)
     reach = _reach(segment, wide)
     if reach > wide + 0.5:
@@ -950,24 +1089,32 @@ def _reach(segment: _Segment, wide: float) -> float:
     """
     view = segment.view
     held = segment.reach
-    if held is not None and held[0] == view.revision and held[1] == wide:
+    with _ASKING:
+        revision = view.revision
+    if held is not None and held[0] == revision and held[1] == wide:
         return held[2]
     reach = 0.0
     longest = wide / (_WIDEST_EM * _tallest_px())
-    hosted = set(view.hosts)
-    for block, text in enumerate(view.texts):
+    with _ASKING:
+        hosted = set(view.hosts)
+        texts = tuple(view.texts)
+        roles_of = [view.block_role(block) for block in range(len(texts))]
+    for block, text in enumerate(texts):
         if block in hosted:
             # A diff view scrolls its own rows and is as wide as the measure.
             continue
-        role = view.block_role(block)
+        role = roles_of[block]
         if role == "TABLE":
-            geometry = view.table_geometry(block)
-            if geometry is not None:
-                reach = max(reach, float(geometry.max[0]))
+            with _ASKING:
+                geometry = view.table_geometry(block)
+                right = None if geometry is None else float(geometry.max[0])
+            if right is not None:
+                reach = max(reach, right)
         elif role == "CODE" or any(len(word) > longest for word in text.split()):
-            for line in view.set_lines(block, block + 1):
-                reach = max(reach, float(line.right))
-    segment.reach = (view.revision, wide, reach)
+            with _ASKING:
+                rights = [float(line.right) for line in view.set_lines(block, block + 1)]
+            reach = max(reach, *rights) if rights else reach
+    segment.reach = (revision, wide, reach)
     return reach
 
 
@@ -983,10 +1130,11 @@ def _estimate(im: Any, entry: _Entry, wide: float) -> float:
         # The spacing under a part counts only when another part follows it.
         tall += under
         if segment.view is not None:
-            tall += float(segment.view.layout_for(wide))
+            with _ASKING:
+                tall += float(segment.view.layout_for(wide))
             under = gap
             continue
-        part = entry.parts[segment.parts[0]]
+        part = (entry.written or entry.parts)[segment.parts[0]]
         with _native_font(im, part):
             wrap = -1.0 if part.kind is Kind.LITERAL else wide
             tall += float(im.calc_text_size(part.text, wrap_width=wrap).y)
@@ -1062,6 +1210,7 @@ def _draw(
         same = isinstance(parts, tuple) and entry.token is parts
         if rests and same and height_cap is None and _rest(im, entry, wide):
             return float(entry.height or 0.0)
+        noted = gate.noted()
         if not same:
             given = parts if isinstance(parts, tuple) else tuple(parts)
             if given != entry.parts:
@@ -1070,11 +1219,20 @@ def _draw(
             entry.token = given
         if entry.inked is not ui_theme.current():
             _ink(entry)
+        if entry.unset is not None:
+            _said(im, f"typeset: the library {entry.unset} - shown as written", ui_theme.P.warn)
         if height_cap is None:
             _show(im, entry, wide, themes.palette(ink), on_link)
         else:
             _capped(im, key, entry, wide, height_cap, themes.palette(ink), on_link)
         entry.missing = 0
+        short = None if entry.unset is not None else _short(entry, noted)
+        if short is not None:
+            # What is on screen is less than was handed over: no line of it
+            # is answered for in this frame, and the next is ImGui's.
+            entry.missing = sum(part.text.count("\n") + 1 for part in parts)
+            _said(im, f"typeset: the library {short}", ui_theme.P.warn)
+            _as_written(entry, short)
     except TypesetUnavailable as stopped:
         gate.stopped(stopped)
         # Of the parts handed in, and not of ``entry.parts``: an entry holds

@@ -18,7 +18,8 @@ those answers live here once.
   inks as its palette, and which text the library sets at all.
 - ``views``: ``ViewCache``, and the calls a pane's typeset branch makes.
 - ``diffs``: the diff model of a parked call, a view of it, which fences are
-  honest diffs, and who draws a diff (``diff_adopted``).
+  honest diffs, and who draws a diff (``diff_adopted``, and of one diff
+  ``diffs.unfit``).
 
 ## A pane asks first
 
@@ -59,6 +60,7 @@ constant that overrides the measurement (``diffs.ADOPT``).
 - Destroy an ImGui context the fonts were loaded in without ``unload()`` first.
 """
 
+from .diffs import Parked as ParkedDiff
 from .diffs import (
     accounted,
     approval_diff,
@@ -149,6 +151,7 @@ __all__ = [
     "STEPS",
     "Kind",
     "Pane",
+    "ParkedDiff",
     "Part",
     "Proportional",
     "Role",

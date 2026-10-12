@@ -503,3 +503,292 @@ def test_the_epoch_the_atlas_guard_follows_moves_with_sizes_and_with_a_load(seam
     assert gate.epoch() == scaled
     assert typeset.load_fonts(BOLD)
     assert gate.epoch() > scaled
+
+
+# -- a call into the library that raises something of its own ---------------------
+
+
+def _log_since(mark: int) -> list[tuple[str, str]]:
+    from pptmstr.log import LOG
+
+    entries, _ = LOG.snapshot()
+    return [(entry.level.name, entry.text) for entry in entries[mark:] if entry.source == "typeset"]
+
+
+def _log_mark() -> int:
+    from pptmstr.log import LOG
+
+    return len(LOG.snapshot()[0])
+
+
+def test_what_a_call_into_the_library_raises_is_the_library_stopping_said_and_logged_once(
+    seam: Any,
+) -> None:
+    """
+    The library passes on whatever it does not take for its own failure: a name
+    a newer library dropped, a string it could not encode. Raised out of a draw
+    that leaves the pane on every frame the text is on screen. Through
+    ``into_library`` it is the stop a draw already handles -- the same frame
+    still answers ``can_draw``, the next does not -- with the exception's type
+    in the sentence, and one entry in the log with the traceback beside it
+    however many calls raise in that frame.
+    """
+    mark = _log_mark()
+    for attempt in range(2):
+        with pytest.raises(advtext.TypesetUnavailable, match="AttributeError") as raised:
+            with gate.into_library("drawing a view"):
+                raise AttributeError(f"'FileDiff' object has no attribute 'label' ({attempt})")
+        assert isinstance(raised.value.__cause__, AttributeError)
+    assert typeset.can_draw(), "the frame it happened in is drawn as it began"
+    logged = _log_since(mark)
+    assert [level for level, _ in logged] == ["ERROR", "DEBUG"], logged
+    assert logged[0][1] == (
+        "the library raised AttributeError while drawing a view: "
+        "'FileDiff' object has no attribute 'label' (0)"
+    )
+    assert "Traceback" in logged[1][1] and "AttributeError" in logged[1][1]
+
+    typeset.pre_frame()
+    assert not typeset.can_draw() and not typeset.enabled(Pane.INBOX)
+    reason = typeset.unavailable_reason() or ""
+    assert "AttributeError" in reason and "while drawing a view" in reason
+    assert typeset.load_fonts(BOLD), "a load is the way back"
+
+
+def test_the_librarys_own_stop_and_what_is_not_an_error_pass_through_as_they_are(
+    seam: Any,
+) -> None:
+    mark = _log_mark()
+    with pytest.raises(advtext.TypesetUnavailable, match="^the library said no$"):
+        with gate.into_library("drawing a view"):
+            raise advtext.TypesetUnavailable("the library said no")
+    with pytest.raises(KeyboardInterrupt):
+        with gate.into_library("drawing a view"):
+            raise KeyboardInterrupt
+    with gate.into_library("drawing a view"):
+        pass
+    assert _log_since(mark) == [] and gate._GATE.stopping is None
+    typeset.pre_frame()
+    assert typeset.can_draw()
+
+
+# -- the columns: what a measurement is of, and what it leaves behind ---------------
+
+
+def _baked(im: Any) -> dict[int, list[float]]:
+    """
+    Every baked size on the atlas, by the index of its font, none made or marked.
+    """
+    atlas = im.get_io().fonts
+    return {
+        index: [size for size, _ in theme.baked_sizes(atlas, font)]
+        for index, font in enumerate(atlas.fonts)
+        if theme.baked_sizes(atlas, font)
+    }
+
+
+def _even_em(monkeypatch: pytest.MonkeyPatch) -> None:
+    tall = 16.0 / advtext.em_size_for_pixel_height(Face.CODE, 1.0)
+    monkeypatch.setattr(gate, "_live_font_size", lambda: tall)
+    roles.follow(tall)
+
+
+@pytest.mark.parametrize("even", [False, True], ids=["pixel height 16", "em 16"])
+def test_measuring_the_columns_leaves_no_baked_size_on_the_atlas(
+    seam: Any, monkeypatch: pytest.MonkeyPatch, even: bool
+) -> None:
+    """
+    The measurement draws a row to buffers, which rasterises it at the size it
+    is set at, and looks for the size the glyphs came from. Both used to leave
+    sizes on ImGui's atlas that nothing draws from -- the code face at the
+    diff role's size from the font load on, and at an em an empty size either
+    side of it -- and ``theme.keep_baked_sizes`` keeps whatever is there until
+    the epoch moves. What a font load leaves on the atlas is nothing, and a
+    measurement taken later adds nothing to what it found.
+    """
+    from pptmstr.ui.typeset import themes
+
+    before = _baked(seam)
+    assert typeset.load_fonts(BOLD)
+    assert _baked(seam) == before, "a load, with its measurement, bakes nothing"
+    if even:
+        _even_em(monkeypatch)
+    found = gate._measured_columns(themes.diff_theme())
+    assert found.glyphs == 156 and found.size > 0 and found.holds is even
+    assert _baked(seam) == before
+
+
+def test_a_size_the_measurement_found_on_the_atlas_is_left_there(seam: Any) -> None:
+    """
+    Only what the measurement made is discarded. A size something drew from
+    before it is still there afterwards, with its glyphs.
+    """
+    from pptmstr.ui.typeset import themes
+    from tests.test_typeset_views import frame
+
+    assert typeset.load_fonts(BOLD)
+    cache = typeset.ViewCache()
+    frame(seam, lambda: typeset.markdown(cache, "k", "```\ncode at the code role's size\n```\n"))
+    drawn = _baked(seam)
+    assert drawn, "a fence is the library's code face"
+    gate._measured_columns(themes.diff_theme())
+    assert _baked(seam) == drawn
+    frame(seam, lambda: typeset.markdown(cache, "k", "```\ncode at the code role's size\n```\n"))
+    assert _baked(seam) == drawn
+
+
+def test_a_measurement_taken_at_one_display_density_is_not_the_answer_at_another(
+    seam: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    ImGui bakes a size again for another density, and the advance it bakes is a
+    whole pixel of that raster. A window dragged to a display of another
+    density keeps its size in points, so the code style is the same and the
+    measurement is not: it is taken again there, and the first is still the
+    answer back on the first display.
+    """
+    from pptmstr.ui.typeset import themes
+
+    taken: list[object] = []
+    real = gate._measured_columns
+    monkeypatch.setattr(gate, "_measured_columns", lambda theme: (taken.append(1), real(theme))[1])
+    assert typeset.load_fonts(BOLD)
+    theme_now = themes.diff_theme()
+    assert len(taken) == 1, "the load measured, at the density there is"
+    gate.columns(theme_now)
+    assert len(taken) == 1
+    scale = seam.get_io().display_framebuffer_scale
+    assert gate._density() == (float(scale.x), float(scale.y))
+
+    monkeypatch.setattr(gate, "_density", lambda: (2.0, 2.0))
+    gate.columns(theme_now)
+    gate.columns(theme_now)
+    assert len(taken) == 2
+    monkeypatch.setattr(gate, "_density", lambda: (float(scale.x), float(scale.y)))
+    gate.columns(theme_now)
+    assert len(taken) == 2
+
+
+def test_how_long_a_row_the_columns_answer_for_follows_how_far_out_the_cell_is(
+    seam: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The row measured is 186 characters and the cell is held to the baked
+    advance within a bound. A cell out by ``e`` has a pen half a pixel out
+    after ``0.5 / e`` columns, so the answer is for rows that long and no
+    longer: 5,000 columns at the bound itself, some 43,000 at the rounding
+    the library has at an em of 16, and none where nothing holds.
+    """
+    from pptmstr.ui.typeset import themes
+
+    exact = gate.Columns(True, "", cell=8.0, baked=8.0)
+    assert exact.reach == gate._FARTHEST_COLUMN
+    at_the_bound = gate.Columns(True, "", cell=8.0 - gate.COLUMN_EPSILON_PX, baked=8.0)
+    assert 4_990 <= at_the_bound.reach <= 5_000
+    assert gate.Columns(False, "", cell=8.0, baked=8.0).reach == 0
+    _even_em(monkeypatch)
+    found = gate.columns(themes.diff_theme())
+    assert found.holds and 40_000 < found.reach < 50_000, found
+
+
+def test_what_follows_a_tab_is_held_to_the_grid_like_any_other_glyph(
+    seam: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    A tab is the library's to expand, and the row of code measured has none. A
+    second row of tabs is set and every glyph after one must be a whole number
+    of columns in: on the library as it is they are (stops every four cells),
+    and a library that put one a pixel off would not keep a diff's columns.
+    """
+    from pptmstr.ui.typeset import themes
+
+    _even_em(monkeypatch)
+    assert typeset.load_fonts(BOLD)
+    found = gate.columns(themes.diff_theme())
+    assert found.holds and found.tabs
+
+    real = gate._glyph_quads
+
+    def nudged(native: Any, vertices: bytes) -> list[tuple[float, float, float, float]]:
+        quads = real(native, vertices)
+        if len(quads) == len(gate._TAB_ROW.replace("\t", "")):
+            left, right, u, v = quads[-1]
+            quads[-1] = (left + 1.0, right + 1.0, u, v)
+        return quads
+
+    monkeypatch.setattr(gate, "_glyph_quads", nudged)
+    assert typeset.load_fonts(BOLD), "so that nothing measured earlier is held"
+    off = gate.columns(themes.diff_theme())
+    assert (off.off, off.mishit, off.tabs, off.holds) == (0, 0, False, False)
+    assert off.why == "draws what follows a tab off its column"
+    monkeypatch.undo()
+    assert typeset.load_fonts(BOLD)
+
+
+def test_the_code_face_is_asked_which_characters_it_has_no_glyph_for(seam: Any) -> None:
+    """
+    What ``diffs.unfit`` asks of a diff's rows. The bundled code face has Latin
+    with its accents, box drawing and the replacement character, and neither
+    Greek nor Cyrillic nor CJK: those are set from another face, at its advance.
+    """
+    assert gate.code_lacks("plain ASCII, with ~ and |") == ()
+    assert gate.code_lacks("café │ � →") == ()
+    assert gate.code_lacks("a π b Ж c а π 中") == (
+        "π",
+        "Ж",
+        "а",
+        "中",
+    )
+
+
+@pytest.mark.parametrize("guarded", [False, True], ids=["no guard", "the guard each frame"])
+def test_a_size_made_where_the_measurements_was_discarded_is_rasterised_as_itself(
+    seam: Any, guarded: bool
+) -> None:
+    """
+    The hazard ``theme.keep_baked_sizes`` exists for is a size at an address
+    ImGui's font loader remembers for another. The measurement makes a size of
+    the code face, which is then the last the loader made current, and
+    discards it; the next size made is put where it was. That one is made, and
+    not moved there, so the loader is told: its glyphs, and those of a size
+    made after it and of the measured size made again, are their own -- each
+    compared with the same character when its size is the only one on the
+    atlas. With other sizes ahead of it in the pool, which a discard leaves
+    where they are.
+    """
+    from pptmstr.ui.typeset import themes
+    from tests import test_baked_sizes as baked
+
+    assert typeset.load_fonts(BOLD)
+    code = gate.face_font("CODE")
+    chars = baked.FIRST + baked.LATER
+
+    def before() -> None:
+        typeset.pre_frame()
+        if guarded:
+            theme.keep_baked_sizes(gate.epoch())
+
+    was = theme._KEPT.under
+    theme._KEPT.under = None
+    try:
+        baked.drop_everything(seam)
+        baked.frame(seam, lambda: baked.line(seam, None, baked.DECOY_PX, "decoy"), before)
+        baked.frame(seam, lambda: baked.line(seam, code, 13.0, "abc"), before)
+        ahead = _baked(seam)
+        found = gate._measured_columns(themes.diff_theme())
+        assert found.size == 16.0 and _baked(seam) == ahead
+
+        def both() -> None:
+            baked.line(seam, code, 19.0, chars)
+            baked.line(seam, code, 16.0, chars)
+            baked.line(seam, code, 13.0, chars)
+
+        for _ in range(3):
+            baked.frame(seam, both, before)
+        got = {size: baked.dims(code, size, chars) for size in (19.0, 16.0, 13.0)}
+        for size, glyphs in got.items():
+            assert glyphs == baked.fresh(seam, code, size, chars), size
+        assert got[19.0] != got[16.0] != got[13.0], "three sizes, told apart by the comparison"
+    finally:
+        theme._KEPT.under = was
+        baked.drop_everything(seam)

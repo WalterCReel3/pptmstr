@@ -992,8 +992,11 @@ def test_a_write_over_a_file_that_is_not_text_says_so_above_the_diff(
     assert "not readable as text" in line and said.count(line) == 1
     assert (diff_view(call) is not None) is held
     assert ("+now text" in said) is not held
+    # Once: the view's file header is set above it as well, and is the path
+    # and its state without the row's sentence over again.
+    assert not [text for text in said if "shown as new)" in text]
     if held:
-        assert said.index(line) < next(n for n, text in enumerate(said) if "shown as new)" in text)
+        assert said.index(line) < said.index(f"{target}  (new file)")
 
 
 FENCED = (
@@ -2105,3 +2108,240 @@ def test_questions_put_to_the_user_are_set_as_the_structure_they_are(seam: Any) 
 
     assert key(call, "body") not in inbox._VIEWS
     assert repr(questions) in shown(call, "arguments").replace("\n", "")
+
+
+# -- a body or a diff the library set less of than it was handed, or raised under ------
+
+WIDE_TABLE = "|" + "c|" * 1100 + "\n|" + "-|" * 1100 + "\n|" + "v|" * 1100 + "\n"
+
+
+def test_a_concern_whose_table_the_library_cut_waits_a_frame_and_is_then_all_on_screen(
+    seam: Any, said: list[str], clicking_approve: list[bool], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The branch the product takes today. A concern whose body holds a table of
+    1,100 columns: the library sets 1,024 cells of a row, and its draw says it
+    set everything. In the frame it is first drawn the row says the body is
+    not on screen and a click on approve sends nothing; the next frame the
+    body is ImGui's, as written, every cell in the text handed over, and the
+    click lands. Typeset text stays on for everything else.
+    """
+    body = "The matrix follows.\n\n" + WIDE_TABLE
+    call = parked("mcp__pptmstr__post_concern", {"to": "lead", "subject": "s", "body": body})
+    pane = Pane(call)
+    sent = _sent(pane, monkeypatch)
+    drawn: list[str] = []
+    real = seam.text_unformatted
+    monkeypatch.setattr(seam, "text_unformatted", lambda text: (drawn.append(text), real(text))[1])
+
+    pane.draw(seam)
+    assert inbox._VIEWS.unbuilt(key(call, "body")) == body.count("\n") + 1
+    assert review.withheld(pane.state, call) == review.NOT_WHOLE
+    assert clicking_approve == [True] and sent == []
+    assert inbox._NOT_ON_SCREEN in said
+
+    said.clear()
+    drawn.clear()
+    pane.draw(seam)
+    assert typeset.enabled(typeset.Pane.INBOX)
+    assert inbox._VIEWS.unbuilt(key(call, "body")) == 0
+    assert body in drawn, "as written, every cell"
+    assert [line for line in drawn if line.endswith("shown as written")]
+    assert clicking_approve[-1] is False and sent == [call.id]
+    assert inbox._NOT_ON_SCREEN not in said
+
+
+def _raises_attribute_error(*given: Any, **named: Any) -> Any:
+    raise AttributeError("'X' object has no attribute 'renamed'")
+
+
+def test_a_body_the_library_raises_under_does_not_take_the_pane_and_cannot_be_approved(
+    seam: Any, said: list[str], clicking_approve: list[bool], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Today's branch again: the view of a concern's body raises something that is
+    not the library's own stop, on every frame. The pane draws -- nothing
+    leaves ``inbox.draw`` -- the row says the body is not on screen and holds
+    the click; the next frame is the row's own renderer and the click lands.
+    """
+    call = long_concern()
+    pane = Pane(call)
+    sent = _sent(pane, monkeypatch)
+    monkeypatch.setattr(rig.advtext.TypesetView, "draw", _raises_attribute_error)
+
+    pane.draw(seam)
+    assert inbox._VIEWS.unbuilt(key(call, "body")) == call.raw_args["body"].count("\n") + 1
+    assert clicking_approve == [True] and sent == []
+    assert inbox._NOT_ON_SCREEN in said
+
+    said.clear()
+    pane.draw(seam)
+    assert not typeset.enabled(typeset.Pane.INBOX)
+    assert "AttributeError" in (typeset.unavailable_reason() or "")
+    assert clicking_approve[-1] is False and sent == [call.id]
+    monkeypatch.undo()
+    assert typeset.load_fonts(rig.BOLD)
+
+
+def _diff_draw_raises(patched: pytest.MonkeyPatch) -> None:
+    patched.setattr(rig.advtext.TypesetDiffView, "draw", _raises_attribute_error)
+
+
+def _diff_attribute_raises(patched: pytest.MonkeyPatch) -> None:
+    patched.setattr(rig.advtext.FileDiff, "invisible_characters", property(_raises_attribute_error))
+
+
+def _diff_model_raises(patched: pytest.MonkeyPatch) -> None:
+    patched.setattr(rig.advtext.Diff, "from_texts", _raises_attribute_error)
+
+
+@pytest.mark.parametrize(
+    "fault",
+    [_diff_draw_raises, _diff_attribute_raises, _diff_model_raises],
+    ids=["draw", "an attribute read above the view", "making the model"],
+)
+def test_where_columns_hold_a_diff_the_library_raises_under_does_not_take_the_pane(
+    columns_hold: Any, said: list[str], monkeypatch: pytest.MonkeyPatch, fault: Any
+) -> None:
+    """
+    The adopted branch. Anything the diff view or its model raises that is not
+    the library's own stop used to leave ``typeset.diff`` and with it the pane,
+    on every frame the approval was queued. It is the library stopping: the
+    row shows the sentence, holds the click, and is its own rows from the next
+    frame, where the click lands.
+    """
+    im = columns_hold
+    call = write(5)
+    pane = Pane(call)
+    sent = _sent(pane, monkeypatch)
+    clicks = request_clicks(im, monkeypatch)
+    fault(monkeypatch)
+
+    pane.draw(im)
+    assert (inbox._VIEWS.unbuilt(key(call, "diff")) or 0) > 0
+    assert review.withheld(pane.state, call) == review.NOT_WHOLE
+    assert clicks == [True] and sent == []
+    assert inbox._NOT_ON_SCREEN in said
+    assert not [line for line in said if line.startswith("+line_")]
+
+    said.clear()
+    pane.draw(im)
+    assert not typeset.enabled(typeset.Pane.INBOX)
+    assert [line for line in said if line.startswith("+line_")], "the row's own rows"
+    assert clicks[-1] is False and sent == [call.id]
+    monkeypatch.undo()
+    assert typeset.load_fonts(rig.BOLD)
+
+
+def test_where_columns_hold_a_diff_with_a_character_the_code_face_lacks_is_the_rows_own(
+    columns_hold: Any, said: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The measurement answers for ASCII in the code face. A Write with a Greek
+    letter in it is drawn by the row's own child, under one line saying why,
+    with the menu's sentence about the library unchanged; every row is on
+    screen, so the click lands on the first frame it can.
+    """
+    im = columns_hold
+    call = parked("Write", {"file_path": "no/such/dir/area.py", "content": "area = π * r\n"})
+    pane = Pane(call)
+    sent = _sent(pane, monkeypatch)
+    clicks = request_clicks(im, monkeypatch)
+    drawn: list[str] = []
+    real = im.text_unformatted
+    monkeypatch.setattr(im, "text_unformatted", lambda text: (drawn.append(text), real(text))[1])
+
+    pane.draw(im)
+    assert typeset.diff_adopted() and typeset.diff_renderer().startswith("diffs are the library's")
+    assert diff_view(call) is None and not no_native_body(im)
+    assert "+area = π * r" in said
+    (why,) = [line for line in drawn if line.startswith("this diff is the pane's own rows")]
+    assert "U+03C0" in why
+    assert review.unset_lines(pane.state, call.id) == 0
+    assert clicks == [False] and sent == [call.id]
+
+
+def test_where_columns_hold_a_diff_past_the_bound_is_the_rows_own_until_the_view_is_asked_for(
+    columns_hold: Any, said: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The library's model of a diff is ``difflib`` over the lines the call
+    changes, in the frame that first asks for it: a second and a half for
+    changes scattered through 20,000 lines. Past ``review.SETTLED_LINES`` of
+    them the row does not ask: it draws its own rows, which are the whole
+    diff already, says why in one line and offers the view. Nothing is held
+    on it. Asked, the view is made and is every row; the answer is the
+    call's, so DETAIL asks nothing more.
+    """
+    im = columns_hold
+    lines = review.SETTLED_LINES + 100
+    call = write(lines)
+    pane = Pane(call)
+    built: list[object] = []
+    real = typeset.diffs.diff_model
+    monkeypatch.setattr(
+        typeset.diffs,
+        "diff_model",
+        lambda texts, **how: (built.append(texts), real(texts, **how))[1],
+    )
+    asked: list[str] = []
+    button = im.small_button
+    monkeypatch.setattr(im, "small_button", lambda label: bool(button(label)) or label in asked)
+
+    pane.draw(im)
+    notice = (
+        "this diff is the pane's own rows: the library's view of it would match "
+        f"{lines:,} changed lines in one frame"
+    )
+    assert notice in said
+    assert diff_view(call) is None and not no_native_body(im) and built == []
+    assert review.unset_lines(pane.state, call.id) == 0
+
+    asked.append("use the library's view")
+    pane.draw(im)
+    said.clear()
+    pane.draw(im)
+    assert call.id in pane.state.diff_whole and notice not in said
+    view = diff_view(call)
+    assert view is not None and len(added(view)) == lines and len(built) == 1
+    assert inbox.library_diff(pane.state, call) is pane.state.diffs[call.id]
+
+    under = write(review.SETTLED_LINES, "p2")
+    assert inbox.library_diff(pane.state, under) is not None, "at the bound it is the view"
+
+
+def test_where_columns_hold_the_row_and_detail_draw_one_call_from_one_model(
+    columns_hold: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    DETAIL follows this pane's cursor, so the two draw one parked call in every
+    frame. Each used to make the library's model of it for itself. Both are
+    handed what ``library_diff`` keeps for the call: one model, made once, in
+    two views, and forgotten when the call leaves the queue.
+    """
+    im = columns_hold
+    call = write(40)
+    pane = Pane(call)
+    built: list[object] = []
+    real = typeset.diffs.diff_model
+    monkeypatch.setattr(
+        typeset.diffs,
+        "diff_model",
+        lambda texts, **how: (built.append(texts), real(texts, **how))[1],
+    )
+    beside = detail.DetailState()
+
+    def detail_too() -> None:
+        detail.draw(pane.snap, pane.focus, pane.state, beside, 1.0)
+
+    for _ in range(3):
+        pane.draw(im, detail_too)
+    mine = diff_view(call)
+    theirs = beside.views.view((f"approval:{call.id}", "diff"))
+    assert mine is not None and theirs is not None and mine is not theirs
+    assert mine.diff is theirs.diff
+    assert len(built) == 1
+    assert review.unset_lines(pane.state, call.id) == 0
+
+    pane.state.prune(set())
+    assert pane.state.diffs == {} and pane.state.diff_whole == set()

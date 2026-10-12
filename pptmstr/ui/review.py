@@ -86,6 +86,14 @@ class ReviewState:
     edits: dict[str, str] = field(default_factory=dict)
     # Diff text split into lines, cached per pending id. Pruned with the rest.
     diff_lines: dict[str, list[str]] = field(default_factory=dict)
+    # A parked call's diff as the typeset seam holds it (``typeset.ParkedDiff``),
+    # per pending id: one for every pane that draws the call, so that the model
+    # behind it is made once and not once a pane. Opaque here; ``inbox.
+    # library_diff`` makes and reads it.
+    diffs: dict[str, object] = field(default_factory=dict)
+    # The calls whose diff the operator asked to have made past the bound
+    # (``inbox.library_diff``).
+    diff_whole: set[str] = field(default_factory=set)
     editing: str | None = None
     edit_error: str | None = None
     focus_reason: bool = False
@@ -121,6 +129,9 @@ class ReviewState:
             del self.edits[stale]
         for stale in [k for k in self.diff_lines if k not in live_ids]:
             del self.diff_lines[stale]
+        for stale in [k for k in self.diffs if k not in live_ids]:
+            del self.diffs[stale]
+        self.diff_whole &= live_ids
         for stale in [k for k in self.bodies if k not in live_ids]:
             del self.bodies[stale]
         if self.refusal is not None and not (self.refusal.asked & live_ids):
