@@ -56,7 +56,8 @@ first: ``app`` in ``before_exit``, the tests in ``tests/conftest.py``.
 
 Reached past ``advtext.__all__``: the module ``advtext.typesetter`` itself, for
 ``module``, ``trouble``, ``unload`` and ``LIBRARY_VARIABLE``, which the library
-lists as reached through their module with no promise attached; and the module
+lists as reached through their module with no promise attached, and for ``kind``
+where the library has one (``_kind``); and the module
 ``advtext.markdown_rules``, for its private ``_parser``, as said below. A test
 reads this package's imports and holds them to those two names.
 
@@ -107,6 +108,17 @@ READER_PROBE_WORDS = ("<b>x</b>", "alt", "(u)", "**/*.py", "t/**/*.md", "R&amp;D
 A line every word of which a CommonMark reader hides some of, and what must come
 back from it: the tags, the image's description and destination, the stars,
 the entity as its characters.
+"""
+
+
+READY = "ready"
+NOT_INSTALLED = "not-installed"
+REFUSED = "refused"
+FAILED = "failed"
+"""
+The kinds ``library`` answers with. They are the values of advtext's
+``typesetter.Kind`` where it has one, so a kind it reports is one of these or a
+word of its own, which is said as it is.
 """
 
 
@@ -254,15 +266,74 @@ def unavailable_reason() -> str | None:
                 return f"the typesetting library stopped while drawing ({noted or why})"
             if _GATE.accepted:
                 return f"the typesetting library's fonts did not load ({why})"
-            if not os.environ.get(typesetter.LIBRARY_VARIABLE):
-                return f"the typesetting library is not installed ({why})"
-            return f"the typesetting library was refused ({why})"
+            return _unaccepted(_kind(typesetter), why)
         if not typesetter.ready():
             noted = str(typesetter.trouble())
             return f"the typesetting library's fonts did not load ({noted or 'no reason given'})"
     except Exception as failure:
         return f"the typesetting library failed and is not in use ({type(failure).__name__})"
     return "the typesetting library's fonts are in another window's context"
+
+
+def _kind(typesetter: Any) -> str:
+    """
+    Which kind of thing is so of the library, as one of advtext's own words for it.
+
+    **The one place pptmstr asks whether the library can say this itself.** An
+    advtext that has ``typesetter.kind()`` is asked, and what it answers is
+    final: it knows of routes to a library, and of reasons for there being
+    none, that the two variables do not show. One that has not is read by what
+    it does answer: accepted is ``READY``, a library that was named and is not
+    in use was ``REFUSED``, and no library named is ``NOT_INSTALLED``.
+    """
+    asked = getattr(typesetter, "kind", None)
+    if callable(asked):
+        found = asked()
+        return str(getattr(found, "value", found))
+    if typesetter.module() is not None:
+        return READY
+    return REFUSED if os.environ.get(typesetter.LIBRARY_VARIABLE) else NOT_INSTALLED
+
+
+def _unaccepted(kind: str, why: str) -> str:
+    """
+    The sentence for a library that is not accepted, quoting its own words for why.
+    """
+    if kind == NOT_INSTALLED:
+        return f"the typesetting library is not installed ({why})"
+    if kind == REFUSED:
+        return f"the typesetting library was refused ({why})"
+    return f"the typesetting library is not in use ({kind}: {why})"
+
+
+def library() -> tuple[str, str]:
+    """
+    Whether the library is accepted beside the wheel that is running, with no
+    window and no fonts: its kind, and the sentence when it is not ``READY``.
+
+    For ``pptmstr --version``. ``unavailable_reason`` answers for a running
+    application, where fonts not yet loaded is a reason of its own; this asks
+    only what can be known before there is an ImGui context. The first call may
+    be the library's import, and with it its check against the wheel. Never
+    raises.
+    """
+    try:
+        typesetter = _typesetter()
+    except Exception as failure:
+        return (
+            NOT_INSTALLED,
+            f"the text library is not installed ({type(failure).__name__}: {failure})",
+        )
+    try:
+        kind = _kind(typesetter)
+        why = str(typesetter.reason())
+    except Exception as failure:
+        return (
+            FAILED,
+            f"the typesetting library failed and is not in use "
+            f"({type(failure).__name__}: {failure})",
+        )
+    return kind, "" if kind == READY else _unaccepted(kind, why)
 
 
 def read(source: str, theme: Any) -> Any:

@@ -51,13 +51,20 @@ def test_the_imgui_bundle_that_runs_and_the_one_that_is_installed_are_the_pinned
 
 
 def test_what_advtext_needs_at_run_time_is_a_runtime_dependency() -> None:
-    names = {_name(d) for d in _dependencies()}
-    assert {"advtext", "fonttools"} <= names
+    assert "fonttools" in {_name(d) for d in _dependencies()}
 
 
-def test_advtext_is_declared_without_a_machine_path() -> None:
-    (spec,) = [d for d in _dependencies() if _name(d) == "advtext"]
-    assert "@" not in spec and "/" not in spec, spec
+def test_advtext_is_asked_of_no_package_index() -> None:
+    # The name is unclaimed on PyPI: a requirement that names it bare installs
+    # whatever is registered under it. bootstrap.sh installs advtext, at the
+    # commit advtext.ref names, and nothing in the build's metadata asks for it.
+    with (ROOT / "pyproject.toml").open("rb") as handle:
+        project = tomllib.load(handle)["project"]
+    named = [*project["dependencies"]]
+    for group in project.get("optional-dependencies", {}).values():
+        named += group
+    assert [spec for spec in named if _name(spec) == "advtext"] == []
+    assert "typeset_deps.py advtext" in (ROOT / "bootstrap.sh").read_text(encoding="utf-8")
 
 
 def test_advtext_and_its_metrics_library_import() -> None:

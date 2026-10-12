@@ -1,6 +1,8 @@
 [project]
 name = "pptmstr"
-version = "0.1.0"
+# Read from `__version__` in pptmstr/__init__.py ([tool.hatch.version]), which
+# is what `pptmstr --version` prints.
+dynamic = ["version"]
 description = "Puppet Master — a multi-agent LLM orchestrator with an immediate-mode UI"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -44,15 +46,22 @@ dependencies = [
     # (MarkdownIt.parseInline) -- block structure is our own segmenter
     # (pptmstr/ui/blocks.py), not this library's.
     "markdown-it-py>=3.0",
-    # Typeset text: markdown, streaming and diff views drawn through the
-    # imtypeset library. pptmstr meets it in one package, pptmstr/ui/typeset/,
-    # and every pane keeps a renderer of its own for when the library cannot
-    # draw. It is on no package index, so it is named bare, and
-    # bootstrap.sh installs it first, from a clone at the commit advtext.ref
-    # names (scripts/typeset_deps.py). The commit is not written here as a
-    # `git+https` direct reference because the same line has to install where
-    # GitHub cannot be reached, from a repository ADVTEXT_REPO names.
-    "advtext",
+    # NOT HERE, and it is a dependency: advtext, which sets typeset text
+    # (markdown, streaming and diff views drawn through the imtypeset library;
+    # pptmstr meets it in one package, pptmstr/ui/typeset/). It is on no package
+    # index and the name `advtext` is unclaimed on PyPI, so a bare requirement
+    # would ask the index for it on every install route but bootstrap.sh, and
+    # install whatever somebody registers under the name. A direct reference
+    # (`advtext @ git+https://github.com/...@<commit>`) is not written either:
+    # the same install has to work where GitHub cannot be reached, from the
+    # repository ADVTEXT_REPO names, and pip does not take an advtext already
+    # installed from that repository as meeting one -- it clones the URL again
+    # (run with pip 26.2.1 on 2026-10-12, the commit the same; uv not run). It
+    # would also be the commit written a second time, beside advtext.ref.
+    # bootstrap.sh installs advtext, from a clone at the commit advtext.ref
+    # names, and holds the interpreter to that commit after the last install
+    # (scripts/typeset_deps.py). Without it pptmstr runs, every pane draws with
+    # its own renderer, and `pptmstr --version` says it is missing.
     # advtext reads the faces it sets through fontTools at run time: a theme
     # sizes each face from its file's ascent and descent
     # (pptmstr/ui/typeset/themes.py, through advtext's own calls). Nothing in
@@ -79,14 +88,26 @@ dev = [
 ]
 
 [project.scripts]
-pptmstr = "pptmstr.app:main"
+# Not `pptmstr.app:main`: the entry settles where the text library is found and
+# answers --version before the application is imported.
+pptmstr = "pptmstr.__main__:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.version]
+path = "pptmstr/__init__.py"
+
 [tool.hatch.build.targets.wheel]
 packages = ["pptmstr"]
+
+# The two commits pptmstr is built against, inside the package, so an installed
+# pptmstr can say what it asked for (pptmstr/pairing.py reads them from the
+# root of a checkout and from here in a wheel).
+[tool.hatch.build.targets.wheel.force-include]
+"advtext.ref" = "pptmstr/advtext.ref"
+"imtypeset.ref" = "pptmstr/imtypeset.ref"
 
 # Listed explicitly rather than inferred: hatchling falls back to parsing
 # .gitignore when not told otherwise, which silently couples what ships to what
@@ -95,7 +116,7 @@ packages = ["pptmstr"]
 include = [
     "/pptmstr", "/scripts", "/tests", "/planning", "/LICENSE", "/README.md",
     "/CLAUDE.md", "/orchestrator-design.md", "/Makefile", "/bootstrap.sh",
-    "/pyproject.toml",
+    "/pyproject.toml", "/advtext.ref", "/imtypeset.ref",
 ]
 exclude = ["**/__pycache__", "**/*.pyc"]
 

@@ -22,6 +22,7 @@ from imgui_bundle import hello_imgui, imgui, immapp
 from . import brief as brief_mod
 from . import cli_version, model_catalog, templates, theme, tree
 from . import settings as settings_mod
+from . import version as version_mod
 from .approval import Policy
 from .bridge import Bridge
 from .driver import AgentSession
@@ -1233,6 +1234,13 @@ def _log_panel() -> None:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="pptmstr - multi-agent orchestrator")
+    # Answered by `pptmstr.__main__` before this module is imported; declared
+    # here so that --help lists it and a caller of this function gets the same.
+    ap.add_argument(
+        "--version",
+        action="store_true",
+        help="print what is running and what the tree pins, open no window, and exit",
+    )
     ap.add_argument("--theme", default=None, help="override the persisted theme")
     ap.add_argument("--fake", action="store_true", help="run the fake driver (no SDK, no cost)")
     ap.add_argument(
@@ -1285,6 +1293,8 @@ def main(argv: list[str] | None = None) -> int:
         help=f"start in {TRIAGE} (the queue) or {FOCUS} (one conversation)",
     )
     args = ap.parse_args(argv)
+    if args.version:
+        return version_mod.main()
 
     loaded = settings_mod.load()
     if args.theme:

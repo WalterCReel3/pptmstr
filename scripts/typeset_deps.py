@@ -62,22 +62,26 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-DEPS = ROOT / ".deps"
 
-LIBRARY_NAME = "libimtypeset_bundle.so"
+# The rule for reading a ref file and for which pair a process may be handed is
+# the package's, which applies it to itself at start-up; `pptmstr.pairing` is
+# standard library only, so it imports in a .venv that holds nothing yet.
+sys.path.insert(0, str(ROOT))
+from pptmstr import pairing  # noqa: E402
+from pptmstr.pairing import (  # noqa: E402
+    BUILT_FROM,
+    LIBRARY_NAME,
+    package_differences,
+)
+from pptmstr.pairing import PinError as DepsError  # noqa: E402
+
+DEPS = ROOT / pairing.DEPS_DIR
+
 BUILD_SCRIPT = Path("python") / "host" / "build_bundle_library.sh"
 PACKAGE = Path("python") / "imtypeset"
-BUILT_FROM = "BUILT-FROM"
 
-_HASH = re.compile(r"[0-9a-f]{40}")
 # The build script's closing line, the one place it names the headers it used.
 _BUILT = re.compile(r"^built .*\((?P<label>(?:fork|stand-in):[^)]*)\)\s*$")
-
-
-class DepsError(Exception):
-    """
-    A step could not be done; the message is the sentence to print.
-    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,23 +105,9 @@ IMGUI = Source("IMGUI_REPO", "https://github.com/ocornut/imgui.git")
 
 def read_ref(path: Path) -> str:
     """
-    The commit a ref file names: its first line that is neither blank nor a comment.
-
-    A full hash and nothing shorter. An abbreviated hash is not fetchable from a
-    remote, and a branch name would make the pin whatever the branch is today.
+    The commit a ref file names (`pptmstr.pairing.read_ref`).
     """
-    try:
-        lines = path.read_text(encoding="utf-8").splitlines()
-    except OSError as error:
-        raise DepsError(f"{path} cannot be read ({error.strerror}).") from error
-    for line in lines:
-        ref = line.strip()
-        if not ref or ref.startswith("#"):
-            continue
-        if not _HASH.fullmatch(ref):
-            raise DepsError(f"{path} names {ref!r}, which is not a full 40-digit commit hash.")
-        return ref
-    raise DepsError(f"{path} names no commit.")
+    return pairing.read_ref(path)
 
 
 def _git(*args: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
@@ -187,24 +177,6 @@ def fetch_tag(source: Source, tag: str, clone: Path) -> Path:
     commit = fetch(source, f"refs/tags/{tag}", clone)
     _git("update-ref", f"refs/tags/{tag}", commit, cwd=clone)
     return clone
-
-
-def package_differences(pinned: Path, installed: Path) -> list[str]:
-    """
-    Python files that differ between two `advtext` package directories, by relative path.
-    """
-
-    def sources(top: Path) -> dict[str, Path]:
-        return {str(path.relative_to(top)): path for path in top.rglob("*.py")}
-
-    want, have = sources(pinned), sources(installed)
-    return sorted(
-        name
-        for name in want.keys() | have.keys()
-        if name not in want
-        or name not in have
-        or want[name].read_bytes() != have[name].read_bytes()
-    )
 
 
 def imported_advtext() -> Path | None:
@@ -438,29 +410,9 @@ def pair_refusal(pair: Path) -> str | None:
     """
     Why the pair in `pair` is not to be handed to a process; None when it is.
 
-    Whole, and built from the commit `imtypeset.ref` names now: a pair left
-    from before a bump of the ref is a library nobody pinned.
+    `pptmstr.pairing.pair_refusal`, against the commit `imtypeset.ref` names now.
     """
-    missing = [
-        str(part)
-        for part in (Path(LIBRARY_NAME), Path("pysnap") / "imtypeset" / "__init__.py", BUILT_FROM)
-        if not (pair / part).is_file()
-    ]
-    if missing:
-        return f"{pair} is not a whole pair (no {', no '.join(missing)}); `make deps` builds one"
-    ref = read_ref(ROOT / "imtypeset.ref")
-    commits = [
-        line.removeprefix("commit: ").strip()
-        for line in (pair / BUILT_FROM).read_text(encoding="utf-8").splitlines()
-        if line.startswith("commit: ")
-    ]
-    if commits != [ref]:
-        built = commits[0] if len(commits) == 1 else "no one commit"
-        return (
-            f"{pair} was built from {built} and imtypeset.ref names {ref}; "
-            f"`make deps` builds that one"
-        )
-    return None
+    return pairing.pair_refusal(pair, read_ref(ROOT / "imtypeset.ref"))
 
 
 def step_pair(pair: Path) -> int:

@@ -119,18 +119,19 @@ fi
 
 echo
 echo ">>> stage 3/4: install"
-# advtext first: the resolver cannot find a bare `advtext` on an index, and an
-# already-installed distribution of that name is what satisfies it. Installed
-# as a copy, not editable, so what .venv holds is the pinned commit whatever
-# happens to .deps afterwards; `verify` then holds the interpreter to it, since
-# anything ahead of site-packages on sys.path would win without a word.
+# advtext is installed here and by nothing else: pyproject.toml does not name
+# it, because the name is on no package index and a requirement would ask one
+# for it. Installed as a copy, not editable, so what .venv holds is the pinned
+# commit whatever happens to .deps afterwards; `verify` then holds the
+# interpreter to it, since anything ahead of site-packages on sys.path would win
+# without a word.
 .venv/bin/python scripts/typeset_deps.py advtext
 # shellcheck disable=SC2086  # both are lists of options, possibly empty
 "${INSTALL[@]}" $REINSTALL_ADVTEXT ${ADVTEXT_PIP_ARGS:-} .deps/advtext
 .venv/bin/python scripts/typeset_deps.py verify
 "${INSTALL[@]}" -e ".[dev]"
-# Again, after the last thing that installs: pyproject.toml names advtext too,
-# and what that install left in .venv is what runs.
+# Again, after the last thing that installs: what that install left in .venv
+# is what runs.
 .venv/bin/python scripts/typeset_deps.py verify
 # After the install: the library is built for the imgui-bundle wheel that is now
 # in .venv. The step reports its own failures and exits 0 for them; the guard is
