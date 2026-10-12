@@ -384,6 +384,81 @@ def test_the_batch_forms_send_calls_no_pane_has_drawn(frame: None) -> None:
     assert [pid for pid, _ in bridge.resolved] == ["p1", "p2"]
 
 
+def test_a_pane_that_failed_to_draw_holds_every_approve_and_no_rejection(frame: None) -> None:
+    """
+    Every body was read whole, and a pane that shows parked calls then raised:
+    what it had on screen is not known, so ``a`` on any call and both batch forms
+    send nothing, and say why on every call they covered.
+    """
+    for pane in (review.INBOX, review.DETAIL):
+        state = read_whole()
+        state.pane_drew(review.INBOX, 2, pane != review.INBOX)
+        state.pane_drew(review.DETAIL, 2, pane != review.DETAIL)
+        assert review.failed_panes(state) == (pane,)
+
+        bridge, _, state = press(imgui.Key.a, state=state)
+        assert bridge.resolved == []
+        assert review.refusal_for(state, "p1") == review.PANE_FAILED
+
+        bridge, _, state = press(imgui.Key.a, SHIFT, state=state)
+        assert bridge.resolved == []
+        assert review.refusal_for(state, "p2") == review.PANE_FAILED
+
+        snap = queue()
+        sink = RecordingBridge()
+        assert review.approve_everything(sink, snap, state) == 0  # type: ignore[arg-type]
+        assert sink.resolved == []
+        assert state.refusal is not None and state.refusal.asked == {"p1", "p2", "p3"}
+
+        p1, *_ = snap.approvals
+        assert review.resolve(sink, state, p1, approved=False)  # type: ignore[arg-type]
+        assert [(pid, d.approved) for pid, d in sink.resolved] == [("p1", False)]
+
+
+def test_a_failed_draw_holds_approve_for_the_frame_after_it_and_no_longer(frame: None) -> None:
+    """
+    The keys are read before the panes draw, so the newest a failure can be is the
+    frame before; and a pane that has since drawn, or is no longer drawn at all,
+    says nothing about what is on screen now.
+    """
+    state = read_whole()
+    state.pane_drew(review.DETAIL, 5, False)
+    state.pane_drew(review.INBOX, 5, True)
+    assert review.failed_panes(state) == (review.DETAIL,)
+
+    # It drew to its end in the next frame.
+    state.pane_drew(review.DETAIL, 6, True)
+    state.pane_drew(review.INBOX, 6, True)
+    assert review.failed_panes(state) == ()
+
+    # It failed, and its tab then went behind another: the inbox draws on alone.
+    state.pane_drew(review.DETAIL, 7, False)
+    state.pane_drew(review.INBOX, 7, True)
+    state.pane_drew(review.INBOX, 8, True)
+    assert review.failed_panes(state) == (review.DETAIL,)
+    state.pane_drew(review.INBOX, 9, True)
+    assert review.failed_panes(state) == ()
+    bridge, _, _ = press(imgui.Key.a, state=state)
+    assert [pid for pid, _ in bridge.resolved] == ["p1"]
+
+
+def test_r_sends_the_rejection_itself_only_where_the_inbox_failed_to_draw(frame: None) -> None:
+    state = read_whole()
+    state.pane_drew(review.INBOX, 2, True)
+    state.pane_drew(review.DETAIL, 2, False)
+    bridge, _, state = press(imgui.Key.r, state=state)
+    assert bridge.resolved == [] and state.focus_reason is True
+
+    state = read_whole()
+    state.reasons["p1"] = "wrong directory"
+    state.pane_drew(review.INBOX, 2, False)
+    bridge, _, state = press(imgui.Key.r, state=state)
+    assert [(pid, d.approved, d.reason) for pid, d in bridge.resolved] == [
+        ("p1", False, "wrong directory")
+    ]
+    assert state.focus_reason is False
+
+
 def test_reject_and_edit_ask_nothing_of_the_body(frame: None) -> None:
     short = read_whole()
     short.body_shown("inbox", "p1", 40, frame=9)

@@ -188,6 +188,18 @@ agent" covered both a misspelled role and a role that simply had not started yet
 one is a spelling problem, the other a timing problem the lead can fix. A worker
 retried the same wrong name because the refusal did not say which it had made.
 
+**A record field that is both drawn and acted on.** A tool argument can hold a lone
+surrogate or a NUL (`json.loads('"\\udc80"')`); every ImGui text call raises on the
+first and stops reading at the second, so one such call took the queue and DETAIL off
+the screen while the batch approve still sent it. Session text is made drawable once,
+where it enters (`drawable`, applied in `store._apply`, `Transcript.append`, the log
+and the session listing), and the store holds the drawable form. The exceptions are
+the fields something is *run* with — `PendingApproval.raw_args`, a session's `cwd` —
+which stay exactly as they arrived, are listed in `store._VERBATIM`, and are not
+drawn: a pane reads `PendingApproval.args`, and a test fails if one reads `raw_args`.
+A new field that is acted on goes in that table; anything else is drawable by
+default.
+
 **A channel that duplicates a path the model already has.** The first team run used
 the message bus zero times, because a sub-agent's result already returns to its lead
 through the `Agent` tool. Listing a tool in a prompt does not make it used; saying

@@ -18,6 +18,8 @@ from collections import deque
 from dataclasses import dataclass
 from enum import IntEnum
 
+from . import drawable
+
 
 class Level(IntEnum):
     DEBUG = 0
@@ -42,6 +44,10 @@ class Log:
         self._revision = 0
 
     def _append(self, level: Level, source: str, text: str) -> None:
+        # A line can quote what a session wrote -- the gate logs a call's summary --
+        # and both destinations refuse a lone surrogate: the panel's text call and
+        # a print to a UTF-8 stream, on whichever thread was logging.
+        text = drawable.text(text)
         with self._lock:
             self._entries.append(Entry(time.time(), level, source, text))
             self._revision += 1

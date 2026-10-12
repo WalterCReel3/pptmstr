@@ -52,6 +52,7 @@ from typing import Any, Protocol
 
 from claude_agent_sdk import SDKSessionInfo, list_sessions
 
+from pptmstr import drawable
 from pptmstr.settings import config_dir
 
 
@@ -268,12 +269,16 @@ def merge_overlay(
         SessionRow(
             session_id=info.session_id,
             cwd=info.cwd,
-            git_branch=info.git_branch,
-            summary=info.summary,
-            first_prompt=info.first_prompt,
+            # What a transcript on disk says of itself, read by nothing but the
+            # eye: a session's words can hold what no text call takes
+            # (``drawable``). The id and the directory are acted on, and are not
+            # touched.
+            git_branch=drawable.shown(info.git_branch),
+            summary=drawable.text(info.summary),
+            first_prompt=drawable.shown(info.first_prompt),
             created_at=info.created_at,
             last_modified=info.last_modified,
-            tag=info.tag,
+            tag=drawable.shown(info.tag),
             bookmarked=marks.get(info.session_id, SessionMark()).bookmarked,
             title=marks.get(info.session_id, SessionMark()).title,
         )

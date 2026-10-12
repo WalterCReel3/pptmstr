@@ -474,6 +474,8 @@ def _expand_approval(
         # The gate predicts this from its own read of the file at park time; the
         # tool is what decides, on the file as it is when the call runs.
         #
+        if pending.shown_args is not None:
+            _warning(review.ESCAPED)
         for reason in refusals(pending):
             _warning(f"may not apply: {reason}")
         for said in shown_as_new(pending.texts):
@@ -484,7 +486,7 @@ def _expand_approval(
             _native_body(state, pending, obligation.key)
     # What every approve path is answered from (``review.withheld``), the keys'
     # on the next frame and this row's own button on this one.
-    state.body_shown("inbox", pending.id, unset, int(imgui.get_frame_count()))
+    state.body_shown(review.INBOX, pending.id, unset, int(imgui.get_frame_count()))
 
     imgui.spacing()
     if state.edit_error:
@@ -654,7 +656,7 @@ def _native_arguments(pending: PendingApproval) -> None:
     show, and inventing one would be worse than the args.
     """
     style = imgui.get_style()
-    shown = [f"  {name} = {argument_text(value)}" for name, value in pending.raw_args.items()]
+    shown = [f"  {name} = {argument_text(value)}" for name, value in pending.args.items()]
     # Measured at the width the text will have, so that the block is sized by the
     # lines wrapping makes. The scrollbar's width is left out of the measure: it is
     # there only when the text is already taller than the cap.
@@ -748,7 +750,7 @@ def describe(pending: PendingApproval) -> Description | None:
     if shape is None:
         return None
     prose, leading = shape
-    args = pending.raw_args
+    args = pending.args
     raw = args.get(prose)
     body = raw if isinstance(raw, str) and raw.strip() else ""
     names = [name for name in leading if name in args]
@@ -881,7 +883,7 @@ def _typeset_body(state: review.ReviewState, pending: PendingApproval, key: str)
     described = describe(pending)
     if described is None:
         imgui.text_colored(P.text_dim.vec4, _NO_DIFF)
-        raw = pending.raw_args
+        raw = pending.args
         typeset.document(
             _VIEWS,
             (key, "arguments"),

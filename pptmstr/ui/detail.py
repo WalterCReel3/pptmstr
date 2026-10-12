@@ -326,13 +326,11 @@ class DetailState:
         key = (pending.id, columns, whole)
         if self._arguments_key != key:
             self._arguments_key = key
-            self._arguments = argument_parts(
-                pending.tool_name, pending.raw_args, columns, whole=whole
-            )
+            self._arguments = argument_parts(pending.tool_name, pending.args, columns, whole=whole)
             self._arguments_unset = (
                 (0, 0)
                 if whole
-                else lines_past_bound(_value_text(v, columns) for v in pending.raw_args.values())
+                else lines_past_bound(_value_text(v, columns) for v in pending.args.values())
             )
         return self._arguments, self._arguments_unset
 
@@ -656,6 +654,8 @@ def _approval(state: review.ReviewState, pane: DetailState, obligation: Approval
     # one line this body may not lose.
     if edit_differs(state, pending):
         imgui.text_colored(P.warn.vec4, _EDITED_NOTICE)
+    if pending.shown_args is not None:
+        imgui.text_colored(P.warn.vec4, review.ESCAPED)
     # A unified string of white space holds no row and is headed as no diff,
     # whoever would have drawn it.
     has_diff = bool(pending.diff and pending.diff.strip())
@@ -663,7 +663,7 @@ def _approval(state: review.ReviewState, pane: DetailState, obligation: Approval
     if typeset.enabled(typeset.Pane.DETAIL):
         unset += _typeset_arguments(pane, pending, obligation.key)
     else:
-        unset += _arguments(pane, pending.raw_args, obligation.key)
+        unset += _arguments(pane, pending.args, obligation.key)
     if not has_diff:
         # Stated rather than omitted, and stated last: a call with no diff is not
         # missing one, and the arguments above are the whole story for it.
@@ -673,7 +673,7 @@ def _approval(state: review.ReviewState, pane: DetailState, obligation: Approval
     # What ``review.withheld`` holds an approve on: lines of this body the frame
     # did not put on screen. Those past the bound that have not been asked for,
     # under either renderer, and all of a text the library stopped under.
-    state.body_shown("detail", pending.id, unset, int(imgui.get_frame_count()))
+    state.body_shown(review.DETAIL, pending.id, unset, int(imgui.get_frame_count()))
 
 
 def _typeset_arguments(pane: DetailState, pending: PendingApproval, subject: str) -> int:
@@ -686,7 +686,7 @@ def _typeset_arguments(pane: DetailState, pending: PendingApproval, subject: str
     every other value is literal and ImGui's (``argument_parts``).
     """
     widgets.section("arguments")
-    if not pending.raw_args:
+    if not pending.args:
         imgui.text_disabled("(none)")
         return 0
     columns = int(imgui.get_content_region_avail().x // imgui.calc_text_size("M").x)
@@ -1157,7 +1157,7 @@ def plain_text(snap: Snapshot, obligation: Obligation) -> str:
             parts.append(f"tool: {pending.tool_name}")
             if pending.diff:
                 parts += ["", pending.diff]
-            parts += [""] + _arg_text(pending.raw_args)
+            parts += [""] + _arg_text(pending.args)
         case QuestionPending():
             record = snap.nodes.get(obligation.node)
             if record is not None:

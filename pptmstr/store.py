@@ -26,6 +26,7 @@ from collections.abc import Iterable
 from types import MappingProxyType
 from typing import assert_never
 
+from . import drawable
 from .approval import Policy
 from .board import board_concerns, board_tasks
 from .effects import BoardDelivered, ClaimSettled, Effect, InboxDelivered, TaskWriteSettled
@@ -64,6 +65,7 @@ from .model import (
     ConcernState,
     NodeId,
     Obligation,
+    PendingApproval,
     QuestionPending,
     SessionFailed,
     Snapshot,
@@ -166,6 +168,46 @@ def _clock(now: float | None) -> float:
     return time.monotonic() if now is None else now
 
 
+# What ``_drawable`` leaves exactly as it arrived, because it is acted on and not
+# only read: the arguments a parked call's editor opens on, which approve sends back
+# to the tool, and the directories a session is launched, forked and measured in.
+_VERBATIM: drawable.Verbatim = {
+    PendingApproval: frozenset({"raw_args", "shown_args"}),
+    AgentSpawned: frozenset({"cwd", "session_base"}),
+}
+
+
+def _drawable(intent: Intent) -> Intent:
+    """
+    The intent with every string a session wrote in a form a text call can be
+    handed (``drawable``): the same object unless it held a lone surrogate, a NUL,
+    or a backslash spelling the escape of one.
+
+    **Here, at the reducer's door, and so once for everything the store will ever
+    hold.** A record is drawn by whichever panes come to read it, through several
+    hundred text calls; a string that raises in one of them is that pane not
+    drawn, on every frame the record lives. Everything in a snapshot got there
+    through an intent, and what the reducer derives it derives from this one.
+
+    An identifier is rewritten with the rest. The mapping is one to one, every
+    path by which an identifier reaches the store is this one, and the ones a
+    reply is matched on outside the store -- a pending id, a request id -- are
+    made by the host from an id the API issued, not written by a model.
+
+    A parked call keeps ``raw_args`` as the agent made them and gains the drawable
+    form beside them where the two differ (``PendingApproval.args``).
+    """
+    intent = drawable.shown(intent, _VERBATIM)
+    if isinstance(intent, ApprovalRequested):
+        pending = intent.pending
+        twin = drawable.shown(pending.raw_args)
+        if twin is not pending.raw_args:
+            intent = dataclasses.replace(
+                intent, pending=dataclasses.replace(pending, shown_args=twin)
+            )
+    return intent
+
+
 def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[Effect, ...]]:
     """
     Pure: old snapshot plus intent and an instant gives new snapshot, and whatever
@@ -179,6 +221,7 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
     that could only return the next world would have to hide the reply inside it.
     See ``effects.py`` for why that was worth widening the signature over.
     """
+    intent = _drawable(intent)
     nodes = dict(snap.nodes)
     concerns = dict(snap.concerns)
     tasks = dict(snap.tasks)
@@ -443,10 +486,13 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
             if intent.approved:
                 owned = _claimed_tasks(tasks, intent.node_id)
                 if len(owned) == 1:
+                    #
+                    # The drawable arguments, as the edit already is: a path measured
+                    # here is kept in the ledger and drawn on the board.
                     args = (
-                        {**resolved.raw_args, **intent.edited_args}
+                        {**resolved.args, **intent.edited_args}
                         if intent.edited_args is not None
-                        else resolved.raw_args
+                        else resolved.args
                     )
                     tasks[owned[0].id] = dataclasses.replace(
                         owned[0],

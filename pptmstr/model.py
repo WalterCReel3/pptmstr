@@ -268,6 +268,7 @@ class PendingApproval:
     node: NodeId
     tool_name: str
     tool_use_id: str
+    # The call exactly as the agent made it. Not for drawing: see ``args``.
     raw_args: Mapping[str, Any]
     summary: str
     # ``time.monotonic()``, never ``time.time()``. This is the ``since`` an
@@ -294,6 +295,27 @@ class PendingApproval:
     # that replaces a file, and more than it for a one-line Edit to a large one. In
     # memory only: nothing persists a ``PendingApproval``.
     texts: tuple[DiffText, ...] | None = None
+    # ``raw_args`` as a pane may draw them (``drawable``), where that is another
+    # mapping; None where the arguments are drawable as they are, which is nearly
+    # always. Read through ``args``. Set by the reducer when the call enters the
+    # store, and held rather than derived on read because the panes key their views
+    # on the identity of what they are handed: a derivation per frame would be a
+    # new mapping per frame for exactly the calls that have one.
+    shown_args: Mapping[str, Any] | None = None
+
+    @property
+    def args(self) -> Mapping[str, Any]:
+        """
+        The arguments for anything that draws, measures or copies them as text.
+
+        ``raw_args`` is the call exactly as the agent made it, and can hold what no
+        text call takes: a lone surrogate raises in every one of ImGui's, and a NUL
+        ends the string there. It is read where the call is *acted on* -- the
+        editor's draft, which approve sends back to the tool -- and nowhere a
+        string is drawn. Every other record field that holds session text is
+        drawable as stored.
+        """
+        return self.raw_args if self.shown_args is None else self.shown_args
 
 
 class ObligationKind(enum.Enum):

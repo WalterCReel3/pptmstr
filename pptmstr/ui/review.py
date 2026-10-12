@@ -50,10 +50,29 @@ SHORTCUTS: tuple[tuple[str, str], ...] = (
 # reports to ``ReviewState.body_shown``, and ``withheld`` holds the approve on them.
 SETTLED_LINES = 2000
 
+# The two panes that show a parked call, as each names itself to ``body_shown`` and
+# ``pane_drew``.
+INBOX, DETAIL = "inbox", "detail"
+
 NOT_DRAWN = "not sent - this call's body had not been drawn when approve was asked for; ask again"
 NOT_WHOLE = (
     "not sent - this call's body was not all on screen when approve was asked for; "
     "ask again once it is"
+)
+# Said above a parked call's body by each pane that draws it, where the arguments
+# drawn are not character for character the ones sent (``PendingApproval.args``).
+# ``printf '\\udc80'`` is a command a shell understands, so the escape alone would
+# read as something the agent typed.
+ESCAPED = (
+    "not all of this is text: the arguments hold a code unit that is no character "
+    "(a lone surrogate, a NUL), or a backslash that spells the escape of one. Each "
+    "is drawn as \\uXXXX, and such a backslash as \\u005c. Approve sends the call "
+    "as the agent made it."
+)
+# Said of an approve by any route, a batch included, and worded for all of them.
+PANE_FAILED = (
+    "not sent - a pane that shows parked calls failed to draw when approve was asked "
+    "for, and nothing is approved over one; reject still works"
 )
 
 
@@ -111,6 +130,11 @@ class ReviewState:
     # one call -- so it is held here, written by ``body_shown`` and read only by
     # ``unset_lines``.
     bodies: dict[str, dict[str, tuple[int, int]]] = field(default_factory=dict)
+    # How each pane that shows parked calls last came out of its draw: pane ->
+    # (the ImGui frame, whether it drew to its end). Written by ``pane_drew`` on
+    # every frame the pane is drawn, and as old as ``bodies`` is, for the same
+    # reason. Read only by ``failed_panes``.
+    panes: dict[str, tuple[int, bool]] = field(default_factory=dict)
     refusal: Refusal | None = None
 
     def body_shown(self, pane: str, pending_id: str, unbuilt: int, frame: int) -> None:
@@ -121,6 +145,13 @@ class ReviewState:
         library stopped under (``typeset.ViewCache.unbuilt``).
         """
         self.bodies.setdefault(pending_id, {})[pane] = (frame, unbuilt)
+
+    def pane_drew(self, pane: str, frame: int, whole: bool) -> None:
+        """
+        A pane that shows parked calls was drawn in ``frame``, to its end or --
+        ``whole`` false -- as far as whatever it raised.
+        """
+        self.panes[pane] = (frame, whole)
 
     def prune(self, live_ids: set[str]) -> None:
         for stale in [k for k in self.reasons if k not in live_ids]:
@@ -174,10 +205,38 @@ def unset_lines(state: ReviewState, pending_id: str) -> int | None:
     return max(unbuilt for frame, unbuilt in seen.values() if frame >= newest - 1)
 
 
+def failed_panes(state: ReviewState) -> tuple[str, ...]:
+    """
+    The panes showing parked calls whose last draw raised, among those drawn in the
+    newest frame any of them was or the one before.
+
+    The same window ``unset_lines`` reads a body by, and for its reasons: the keys
+    are read before any pane draws, a click is settled part-way through a frame,
+    and a pane that is no longer drawn -- its tab went behind another while it was
+    failing -- says nothing about what is on screen now.
+    """
+    if not state.panes:
+        return ()
+    newest = max(frame for frame, _ in state.panes.values())
+    return tuple(
+        pane
+        for pane, (frame, whole) in sorted(state.panes.items())
+        if not whole and frame >= newest - 1
+    )
+
+
 def withheld(state: ReviewState, pending: PendingApproval, *, unread: bool = False) -> str | None:
     """
     Why this call may not be approved yet, or ``None`` when it may. Every approve
     path asks here and nowhere else.
+
+    **A pane that shows parked calls failed to draw** (``failed_panes``), and then
+    nothing is approved, this call or another, read or not. What such a pane had
+    on screen when it raised is not known: a reading it made before raising is of
+    a body that may have been drawn over by the failure notice or cut off under
+    it, a call further down its queue was not drawn at all, and the batch forms
+    count on a list that was not finished. So it is not asked which call the
+    failure was under.
 
     Two things can stand between a call and its approver's eyes. **Its body was
     never drawn**: the keys are read before the panes draw, so on the frame the
@@ -192,6 +251,8 @@ def withheld(state: ReviewState, pending: PendingApproval, *, unread: bool = Fal
     design and behind a count, so for them a body never drawn is not a reason; a
     body known not to have been on screen still is.
     """
+    if failed_panes(state):
+        return PANE_FAILED
     unset = unset_lines(state, pending.id)
     if unset is None:
         return None if unread else NOT_DRAWN
@@ -212,8 +273,12 @@ def _approve_batch(bridge: Bridge, state: ReviewState, batch: list[PendingApprov
 
     None, when any body in it is known not to have been on screen: a batch that
     went out without that one call would leave the operator believing the agent's
-    queue was cleared, and the refusal names the calls that held it.
+    queue was cleared, and the refusal names the calls that held it. None, too,
+    while a pane that shows parked calls is failing to draw.
     """
+    if batch and failed_panes(state):
+        state.refusal = Refusal(frozenset(p.id for p in batch), PANE_FAILED)
+        return 0
     short = [p for p in batch if withheld(state, p, unread=True) is not None]
     if short:
         names = "; ".join(p.summary for p in short)
@@ -331,6 +396,11 @@ def handle_keys(snap: Snapshot, focus: FocusState, state: ReviewState, bridge: B
     up to the frame before (``withheld``): a body that was not on screen, or one
     never drawn -- the row the cursor reached on this very frame -- is not approved.
     ``r`` and ``e`` ask nothing of the body.
+
+    ``r`` asks for a reason, in the field on the inbox row, and the row's button
+    sends it. Where the inbox failed to draw there is no field and no button, and
+    a call that cannot be refused is an agent parked until its session is closed:
+    there ``r`` sends the rejection itself, with whatever reason was already typed.
     """
     io = imgui.get_io()
     if io.want_capture_keyboard:
@@ -365,7 +435,10 @@ def handle_keys(snap: Snapshot, focus: FocusState, state: ReviewState, bridge: B
         else:
             resolve(bridge, state, pending, approved=True)
     if letter(imgui.Key.r):
-        state.focus_reason = True
+        if INBOX in failed_panes(state):
+            resolve(bridge, state, pending, approved=False)
+        else:
+            state.focus_reason = True
     if letter(imgui.Key.e):
         state.editing = pending.id
         state.edits.setdefault(pending.id, pretty_args(pending))

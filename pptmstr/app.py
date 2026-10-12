@@ -20,7 +20,7 @@ from typing import assert_never
 from imgui_bundle import hello_imgui, imgui, immapp
 
 from . import brief as brief_mod
-from . import cli_version, model_catalog, templates, theme, tree
+from . import cli_version, drawable, model_catalog, templates, theme, tree
 from . import settings as settings_mod
 from . import version as version_mod
 from .approval import Policy
@@ -235,13 +235,20 @@ def guarded(name: str, draw: Callable[[], None]) -> Callable[[], None]:
     and with recovery asserts on that aborts the process -- trading one crash for
     another. With recovery on, ImGui unwinds the stack itself and logs what was
     left open. Verified before relying on it.
+
+    What was raised is drawn through ``drawable``: an exception can quote the very
+    text a text call refused, and this is the one place a second raise has nothing
+    above it to catch it.
+
+    A pane that shows parked calls says more than that it failed (``_reviewing``):
+    what it had on screen is not known, so nothing is approved until it draws.
     """
 
     def wrapper() -> None:
         try:
             draw()
         except Exception as exc:
-            detail = f"{type(exc).__name__}: {exc}"
+            detail = drawable.text(f"{type(exc).__name__}: {exc}")
             if _PANEL_ERRORS.get(name) != detail:
                 _PANEL_ERRORS[name] = detail
                 LOG.error("ui", f"{name}: {detail}")
@@ -249,6 +256,47 @@ def guarded(name: str, draw: Callable[[], None]) -> Callable[[], None]:
             imgui.text_colored(P.danger.vec4, f"{name} failed to draw")
             imgui.text_wrapped(detail)
             imgui.text_disabled("the rest of the app, and every running agent, is unaffected")
+            if name in _REVIEW_PANES:
+                imgui.push_text_wrap_pos(0.0)
+                imgui.text_colored(P.warn.vec4, _APPROVE_HELD)
+                imgui.pop_text_wrap_pos()
+
+    return wrapper
+
+
+# The panes that show a parked call, by the label each is docked under, and the
+# name each reports to the review state by. A draw of one of these that raises
+# holds every approve (``review.withheld``).
+_REVIEW_PANES = {"NEEDS YOU": review.INBOX, "DETAIL": review.DETAIL}
+
+_APPROVE_HELD = (
+    "nothing is approved while this pane cannot draw: a, A and the approve buttons "
+    "send nothing. r rejects the call under the cursor at once when it is the queue "
+    "that cannot draw, and closing a session ends its parked calls."
+)
+
+
+def _reviewing(state: AppState, label: str, draw: Callable[[], None]) -> Callable[[], None]:
+    """
+    A pane that shows parked calls, telling the review state how each draw of it
+    came out, and raising what the pane raised for ``guarded`` to say.
+
+    Here, around the pane's own function, and not in ``guarded``: that one wraps
+    every callback the runner has and holds no state, and this is the wiring of
+    two particular panes to the state that decides an approve. A draw that returns
+    is one that reached its end, which is all "whole" means here -- how much of a
+    body it set is the pane's own report (``ReviewState.body_shown``).
+    """
+    pane = _REVIEW_PANES[label]
+
+    def wrapper() -> None:
+        frame = int(imgui.get_frame_count())
+        try:
+            draw()
+        except Exception:
+            state.review.pane_drew(pane, frame, False)
+            raise
+        state.review.pane_drew(pane, frame, True)
 
     return wrapper
 
@@ -1103,9 +1151,9 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
 
     return {
         "FLEET": rail_pane,
-        "NEEDS YOU": inbox_pane,
+        "NEEDS YOU": _reviewing(state, "NEEDS YOU", inbox_pane),
         "CONTEXT": context_pane,
-        "DETAIL": detail_pane,
+        "DETAIL": _reviewing(state, "DETAIL", detail_pane),
         "BOARD": board_pane_fn,
         "BRIEF": brief_pane_fn,
         "SESSION": session_pane,
