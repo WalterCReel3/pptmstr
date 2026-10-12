@@ -55,7 +55,7 @@ def no_views_held() -> Iterator[None]:
     """
     The pane's view cache is module state; a test starts and ends with it empty.
     """
-    held = (inbox._VIEWS, inbox._PARTS, inbox._PREVIEWS, inbox._WIDTHS, inbox._WHOLE)
+    held = (inbox._VIEWS, inbox._PARTS, inbox._PREVIEWS, inbox._WIDTHS, inbox._HIDDEN, inbox._WHOLE)
     for cache in held:
         cache.clear()
     yield
@@ -2376,6 +2376,148 @@ def test_where_columns_hold_a_diff_past_the_bound_is_the_rows_own_until_the_view
 
     under = write(review.SETTLED_LINES, "p2")
     assert inbox.library_diff(pane.state, under) is not None, "at the bound it is the view"
+
+
+# -- what a diff holds that cannot be seen ------------------------------------
+#
+# ImGui draws a bidirectional override and a byte-order mark with the glyph it
+# has for a letter its font lacks, and a zero-width space as nothing. One
+# sentence names them over the diff, and it is said once whoever draws the rows:
+# by the row over its own, by ``typeset.diff`` over a diff it hands back, and
+# above the library's view.
+
+HIDDEN = "\ufeffa = 1\nb = '\u202e'\nc\u200b = 2\n"
+HIDDEN_SAID = "contains invisible or bidirectional control characters: U+202E, U+200B, U+FEFF"
+
+# Each route to a drawn diff: the fixture it runs on, and who draws the rows.
+# ``imgui`` is a context with no library asked for, so that case runs without one.
+_ROUTES = {
+    "typeset off": ("imgui", "the row"),
+    "ADOPT is never": ("own_rows", "the row"),
+    "a call with no texts": ("columns_hold", "the row"),
+    "past the bound on one frame's matching": ("columns_hold", "the row"),
+    "a diff the view is not given": ("columns_hold", "the row, handed back"),
+    "the library's view": ("columns_hold", "the view"),
+}
+
+
+def every_line(im: Any, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """
+    Every string drawn as a native line by anyone: the pane's, which are
+    ``text_colored``, and the seam's own (``views._said``), which are
+    ``text_unformatted``.
+    """
+    lines: list[str] = []
+    coloured, plain = im.text_colored, im.text_unformatted
+    monkeypatch.setattr(
+        im, "text_colored", lambda ink, text: (lines.append(text), coloured(ink, text))[1]
+    )
+    monkeypatch.setattr(im, "text_unformatted", lambda text: (lines.append(text), plain(text))[1])
+    return lines
+
+
+def hidden_call(route: str, monkeypatch: pytest.MonkeyPatch) -> PendingApproval:
+    """
+    A Write whose content holds a byte-order mark at its first line, a
+    bidirectional override and a zero-width space, parked so that ``route`` is
+    the one its diff is drawn by.
+    """
+    import dataclasses
+
+    if route == "typeset off":
+        typeset.configure(typeset=False)
+    content = HIDDEN + ("area = π * r\n" if route == "a diff the view is not given" else "")
+    call = parked("Write", {"file_path": "no/such/dir/file.py", "content": content})
+    if route == "a call with no texts":
+        call = dataclasses.replace(call, texts=None)
+    if route == "past the bound on one frame's matching":
+        monkeypatch.setattr(review, "SETTLED_LINES", 2)
+    return call
+
+
+@pytest.mark.parametrize("route", list(_ROUTES))
+def test_a_diff_holding_what_cannot_be_seen_says_so_once_whoever_draws_its_rows(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch, route: str
+) -> None:
+    """
+    The hazard is a bidirectional override in a diff being approved: on the
+    row's own rows it is the glyph of any letter the font lacks. The sentence
+    naming it is over the rows on every route to them, in every frame, and is
+    never said twice: where ``typeset.diff`` was asked and handed the diff
+    back, that said it, and the row does not say it again.
+    """
+    fixture, drawn_by = _ROUTES[route]
+    im = request.getfixturevalue(fixture)
+    call = hidden_call(route, monkeypatch)
+    assert typeset.diff_own_rows_warning(call) == HIDDEN_SAID
+    pane = Pane(call)
+    lines = every_line(im, monkeypatch)
+
+    for _ in range(3):
+        lines.clear()
+        pane.draw(im)
+        assert lines.count(HIDDEN_SAID) == 1, route
+        assert not [line for line in lines if line != HIDDEN_SAID and "contains" in line]
+        if drawn_by == "the view":
+            assert diff_view(call) is not None and no_native_body(im)
+        else:
+            assert not no_native_body(im)
+            assert lines.index(HIDDEN_SAID) < lines.index("+++ b/no/such/dir/file.py")
+            assert "+b = '\u202e'" in lines
+        handed_back = [line for line in lines if line.startswith("this diff is the pane's own")]
+        assert len(handed_back) == (1 if route in _SAYS_WHY else 0)
+    assert typeset.enabled(typeset.Pane.INBOX) is (route != "typeset off")
+    assert review.unset_lines(pane.state, call.id) == 0
+
+
+_SAYS_WHY = {"past the bound on one frame's matching", "a diff the view is not given"}
+
+
+@pytest.mark.parametrize("route", ["typeset off", "ADOPT is never"])
+def test_a_diff_holding_nothing_hidden_is_drawn_under_no_such_line(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch, route: str
+) -> None:
+    im = request.getfixturevalue(_ROUTES[route][0])
+    if route == "typeset off":
+        typeset.configure(typeset=False)
+    pane = Pane(write(5))
+    lines = every_line(im, monkeypatch)
+    pane.draw(im)
+    assert "+line_4 = 4" in lines
+    assert not [line for line in lines if "contains" in line]
+
+
+def test_what_a_diff_hides_is_read_once_for_both_panes_and_forgotten_with_the_call(
+    imgui: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The unified string is as long as the change. It is read for the sentence
+    once, for this row and for DETAIL beside it, and not once a frame.
+    """
+    typeset.configure(typeset=False)
+    call = hidden_call("typeset off", monkeypatch)
+    pane = Pane(call)
+    read: list[str] = []
+    real = typeset.diff_own_rows_warning
+    monkeypatch.setattr(
+        typeset, "diff_own_rows_warning", lambda given: (read.append(given.id), real(given))[1]
+    )
+    lines = every_line(imgui, monkeypatch)
+    beside = detail.DetailState()
+
+    def detail_too() -> None:
+        detail.draw(pane.snap, pane.focus, pane.state, beside, 1.0)
+
+    for _ in range(3):
+        lines.clear()
+        pane.draw(imgui, detail_too)
+        assert lines.count(HIDDEN_SAID) == 2, "once by the row and once by DETAIL"
+    assert read == [call.id]
+    assert set(inbox._HIDDEN) == {key(call, "diff")}
+
+    pane.store.apply(ApprovalResolved(ROOT, call.id, approved=True))
+    pane.draw(imgui)
+    assert inbox._HIDDEN == {}
 
 
 def test_where_columns_hold_the_row_and_detail_draw_one_call_from_one_model(

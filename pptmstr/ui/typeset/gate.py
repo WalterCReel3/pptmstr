@@ -33,9 +33,11 @@ could not be set as asked, and the library notes an edit it cut --
 pptmstr on 2026-10-12 (imscribe ``38f5fac``, imtypeset ``c9f8902``): a table row
 of more than 1,024 cells loses the rest and draws true; a block over 16 MiB is
 cut and draws false while it is in view; no character does either. A lone
-surrogate, which ``json.loads`` makes of ``"\\udc80"`` in a tool's arguments,
-is set as U+FFFD and noted nowhere (the library the tree pins now, by
-``tests/test_typeset_views.py``). ``views`` and ``diffs`` read both.
+surrogate is set as U+FFFD and noted nowhere (the library the tree pins now,
+by ``tests/test_typeset_views.py``); session text holds none by the time it
+is drawn, since one is written out where that text enters the store
+(``pptmstr.drawable``), so this is of text handed to the seam any other way.
+``views`` and ``diffs`` read both.
 
 **Fonts are loaded once the UI font is, at the end of hello_imgui's
 ``load_additional_fonts``**, and never from ``post_init``: the runner empties the

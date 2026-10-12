@@ -115,9 +115,9 @@ space is a space. The sentence is the same one on either renderer and is what
 a pane says before a file's name: ``above`` has it for the view, and ``diff()``
 says it over the line that hands a diff back to its pane. ``own_rows_warning``
 is the same sentence of a call's unified string, for a pane that draws its own
-rows without having asked ``diff()``; **no pane calls it yet**, so with typeset
-text off, or wherever no diff is the library's, a pane's own rows are still
-drawn under no such line.
+rows without having asked ``diff()``: with typeset text off, where no diff is
+the library's, and past the bound on what one frame is asked to match
+(``inbox.hidden_in_rows``, which the inbox row and DETAIL both say it from).
 
 **A parked call's model is made once, for every pane that draws it**
 (``Parked``), in the frame that first asks, and not at all unasked where that

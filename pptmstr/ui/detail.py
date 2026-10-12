@@ -764,6 +764,11 @@ def _diff(
         )
         if shown is not None:
             return pane.views.unbuilt(key) or 0
+    else:
+        # ``typeset.diff`` says this itself over a diff it hands back.
+        hidden = inbox.hidden_in_rows(key, pending)
+        if hidden is not None:
+            imgui.text_colored(P.warn.vec4, hidden)
     _diff_lines(lines, key)
     return 0
 

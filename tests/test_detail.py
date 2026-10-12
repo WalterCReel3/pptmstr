@@ -2533,6 +2533,117 @@ def test_where_columns_hold_two_columns_are_offered_only_where_there_is_room(
     assert _diff_view(roomy, obligation).layout.name == "SIDE_BY_SIDE"
 
 
+# What a diff holds that cannot be seen: the sentence ``tests/test_inbox_typeset.py``
+# reads off the inbox row, read off this pane on each of its routes to a diff.
+
+HIDDEN = "\ufeffa = 1\nb = '\u202e'\nc\u200b = 2\n"
+HIDDEN_SAID = "contains invisible or bidirectional control characters: U+202E, U+200B, U+FEFF"
+
+# Each route: the fixture it runs on, and who draws the rows. ``imgui`` is this
+# module's context with no library asked for, so those cases run without one.
+_HIDDEN_ROUTES = {
+    "typeset off": ("imgui", "the pane"),
+    "typeset off, past the lines this pane wraps": ("imgui", "the inbox's rows"),
+    "ADOPT is never": ("own_rows", "the pane"),
+    "a call with no texts": ("columns_hold", "the pane"),
+    "past the bound on one frame's matching": ("columns_hold", "the pane"),
+    "a diff the view is not given": ("columns_hold", "the pane, handed back"),
+    "the library's view": ("columns_hold", "the view"),
+}
+_HIDDEN_SAYS_WHY = {"past the bound on one frame's matching", "a diff the view is not given"}
+
+
+def _hidden_call(route: str, monkeypatch) -> ApprovalNeeded:
+    """
+    A Write whose content holds a byte-order mark at its first line, a
+    bidirectional override and a zero-width space, parked so that ``route`` is
+    the one its diff is drawn by.
+    """
+    content = HIDDEN
+    if route.startswith("typeset off"):
+        typeset.configure(typeset=False)
+    if route == "a diff the view is not given":
+        content += "area = π * r\n"
+    if route == "typeset off, past the lines this pane wraps":
+        content += "".join(f"line_{n} = {n}\n" for n in range(detail._MAX_DIFF_LINES))
+    obligation = parked("Write", {"file_path": "nowhere/new.py", "content": content})
+    if route == "a call with no texts":
+        obligation = _with_texts(obligation, texts=None)
+    if route == "past the bound on one frame's matching":
+        monkeypatch.setattr(review, "SETTLED_LINES", 2)
+    return obligation
+
+
+@pytest.mark.parametrize("route", list(_HIDDEN_ROUTES))
+def test_a_diff_holding_what_cannot_be_seen_says_so_once_whoever_draws_its_rows(
+    request, monkeypatch, route: str
+) -> None:
+    """
+    The hazard is a bidirectional override in a diff being approved: in this
+    pane's own lines it is the glyph of any letter the font lacks. The sentence
+    naming it is over the lines on every route to them, in every frame, under
+    the diff's heading, and is never said twice: where ``typeset.diff`` was
+    asked and handed the diff back, that said it, and the pane does not again.
+    """
+    fixture, drawn_by = _HIDDEN_ROUTES[route]
+    im = request.getfixturevalue(fixture)
+    obligation = _hidden_call(route, monkeypatch)
+    assert typeset.diff_own_rows_warning(obligation.approval) == HIDDEN_SAID
+    snap = snapshot(record(), needs_you=(obligation,))
+    # The pane's lines and the seam's ``text_colored`` ones, then the seam's
+    # ``text_unformatted`` ones (``views._said``): every native line there is.
+    everything = _every_native_line(monkeypatch, im)
+    plain = im.text_unformatted
+    monkeypatch.setattr(
+        im, "text_unformatted", lambda text: (everything.append(text), plain(text))[1]
+    )
+    rig = Pane(im, monkeypatch)
+    rig.focus.move(snap, 0)
+
+    for _ in range(3):
+        everything.clear()
+        rig.frame(snap)
+        assert everything.count(HIDDEN_SAID) == 1, route
+        assert not [line for line in everything if line != HIDDEN_SAID and "contains" in line]
+        heading = next(n for n, line in enumerate(rig.said) if line.startswith("section:diff"))
+        if drawn_by == "the view":
+            assert _diff_view(rig, obligation) is not None
+            assert "+b = '\u202e'" not in everything
+        else:
+            # Before any line of the diff, and where the pane is who says it,
+            # under the diff's heading and above the arguments'.
+            if drawn_by == "the inbox's rows":
+                # Rows in a box that scrolls, and which of them are in sight is
+                # the box's to say: the line that heads the box is what follows.
+                (boxed,) = [line for line in rig.said if "is more than this pane wraps" in line]
+                assert rig.said.index(HIDDEN_SAID) < rig.said.index(boxed)
+                assert "+b = '\u202e'" not in rig.said
+            else:
+                assert everything.index(HIDDEN_SAID) < everything.index("+++ b/nowhere/new.py")
+                assert "+b = '\u202e'" in rig.said
+            assert (HIDDEN_SAID in rig.said) is (drawn_by != "the pane, handed back")
+            if HIDDEN_SAID in rig.said:
+                assert heading < rig.said.index(HIDDEN_SAID) < rig.said.index("section:arguments")
+        handed_back = [
+            line for line in everything if line.startswith("this diff is the pane's own")
+        ]
+        assert len(handed_back) == (1 if route in _HIDDEN_SAYS_WHY else 0)
+    assert typeset.enabled(typeset.Pane.DETAIL) is not route.startswith("typeset off")
+
+
+def test_this_panes_own_diff_holding_nothing_hidden_is_under_no_such_line(
+    imgui, monkeypatch
+) -> None:
+    typeset.configure(typeset=False)
+    obligation = parked("Write", {"file_path": "nowhere/new.py", "content": "a = 1\n"})
+    snap = snapshot(record(), needs_you=(obligation,))
+    rig = Pane(imgui, monkeypatch)
+    rig.focus.move(snap, 0)
+    rig.frame(snap)
+    assert "+a = 1" in rig.said
+    assert not [line for line in rig.said if "contains" in line]
+
+
 def test_with_this_panes_own_diff_no_layout_is_offered(own_rows, monkeypatch) -> None:
     obligation = parked("Write", {"file_path": "nowhere/new.py", "content": "a = 1\n"})
     snap = snapshot(record(), needs_you=(obligation,))

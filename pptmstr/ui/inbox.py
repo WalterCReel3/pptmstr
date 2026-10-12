@@ -120,6 +120,12 @@ _PREVIEWS: dict[Hashable, tuple[int, int, str]] = {}
 # measured once and not once a frame.
 _WIDTHS: dict[Hashable, tuple[object, float]] = {}
 
+# What a diff drawn as a pane's own rows holds that cannot be seen, as the
+# sentence said over those rows (``hidden_in_rows``), beside the unified string
+# it was read from, under the view's key and pruned with it: the string is as
+# long as the change, and it is read once and not once a frame.
+_HIDDEN: dict[Hashable, tuple[str | None, str | None]] = {}
+
 # The bodies the operator asked to have set whole, past the bound ``_typeset_body``
 # puts on one, by the view's key and pruned with it.
 _WHOLE: set[Hashable] = set()
@@ -217,7 +223,7 @@ def draw(
     """Build the inbox from one snapshot. Never reads the store."""
     state.prune({p.id for p in snap.approvals})
     compose.prune(snap)
-    if len(_VIEWS) or _PARTS or _PREVIEWS or _WIDTHS or _WHOLE:
+    if len(_VIEWS) or _PARTS or _PREVIEWS or _WIDTHS or _HIDDEN or _WHOLE:
         live = {(o.key, part) for o in snap.needs_you for part in _VIEW_PARTS}
         _VIEWS.prune(live)
         for stale in _PARTS.keys() - live:
@@ -226,6 +232,8 @@ def draw(
             del _PREVIEWS[stale]
         for stale in _WIDTHS.keys() - live:
             del _WIDTHS[stale]
+        for stale in _HIDDEN.keys() - live:
+            del _HIDDEN[stale]
         _WHOLE.intersection_update(live)
 
     # Before the empty-queue branch, and the ordering is the whole distinction.
@@ -549,13 +557,49 @@ def _warning(text: str) -> None:
 def _native_body(state: review.ReviewState, pending: PendingApproval, key: str) -> None:
     """
     What the call would do, in ImGui's own text: its unified diff a line to a row,
-    or its arguments.
+    or its arguments. Over the rows, what they hold that cannot be seen
+    (``hidden_in_rows``).
     """
     lines = _diff_lines(state, pending)
     if lines:
-        _diff_rows(lines, (key, "diff"))
+        view = (key, "diff")
+        hidden = hidden_in_rows(view, pending)
+        if hidden is not None:
+            _warning(hidden)
+        _diff_rows(lines, view)
     else:
         _native_arguments(pending)
+
+
+def hidden_in_rows(view: Hashable, pending: PendingApproval) -> str | None:
+    """
+    The sentence a pane says over a diff it draws with its own rows, having not
+    asked ``typeset.diff`` for it: that the diff holds invisible, bidirectional
+    or control characters, and which (``typeset.diff_own_rows_warning``).
+    ``None`` for a diff that holds none. For this row and for DETAIL.
+
+    ImGui draws a bidirectional override, a byte-order mark and a C1 control
+    with the glyph it draws for a letter its font lacks, and a zero-width space
+    as nothing, so the rows alone do not show that one is there.
+
+    **Said only where ``typeset.diff`` was not called for the diff in this
+    frame**: handed a diff it gives back to its pane, that says the same
+    sentence itself, and a pane saying it as well would say it twice.
+
+    **Asked of the string the rows are made from, which is the store's
+    drawable one, and not of the arguments as the agent sent them.** A lone
+    surrogate or a NUL is in these rows as ``\\uXXXX``, six characters of
+    ASCII that an approver reads, so it is not among what cannot be seen and
+    this names neither; the line over a call holding one is the pane's
+    ``review.ESCAPED``, which is said where the arguments hold it.
+
+    Read from the unified string once for as long as the record holds that
+    string, and not once a frame.
+    """
+    held = _HIDDEN.get(view)
+    if held is None or held[0] is not pending.diff:
+        held = _HIDDEN[view] = (pending.diff, typeset.diff_own_rows_warning(pending))
+    return held[1]
 
 
 def _diff_lines(state: review.ReviewState, pending: PendingApproval) -> list[str]:
@@ -878,6 +922,11 @@ def _typeset_body(state: review.ReviewState, pending: PendingApproval, key: str)
             )
             if shown is not None:
                 return _VIEWS.unbuilt(view) or 0
+        else:
+            # ``typeset.diff`` says this itself over a diff it hands back.
+            hidden = hidden_in_rows(view, pending)
+            if hidden is not None:
+                _warning(hidden)
         _diff_rows(lines, view)
         return 0
     described = describe(pending)
