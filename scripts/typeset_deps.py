@@ -15,14 +15,17 @@ Stdlib only, and run by the interpreter the result is for (`.venv/bin/python`):
         pysnap/                   IMTYPESET_PYTHON (holds the `imtypeset` package)
         BUILT-FROM                what it was built from, and against which headers
 
-Three steps, because the install between the first two belongs to the caller,
-which knows whether the installer is pip or uv:
+Three steps that make it, because the install between the first two belongs to
+the caller, which knows whether the installer is pip or uv, and one that reads it:
 
     advtext   fetch and check out the pinned commit. Failing here fails the caller.
-    verify    the `advtext` this interpreter imports is that commit's, file for file.
+    verify    the clone is at the commit advtext.ref names, unedited, and the
+              `advtext` this interpreter imports is that clone's, file for file.
     library   build the pair. Never fails the caller: without the library pptmstr
               still runs and typeset panes fall back, so a missing compiler is a
               paragraph on standard error and exit status 0.
+    pair      one line for the Makefile: `ok` when the pair is whole and was built
+              from the commit imtypeset.ref names, and otherwise why it is not.
 
 Where each source comes from is a variable holding anything `git fetch` accepts,
 GitHub by default:
@@ -63,6 +66,8 @@ DEPS = ROOT / ".deps"
 
 LIBRARY_NAME = "libimtypeset_bundle.so"
 BUILD_SCRIPT = Path("python") / "host" / "build_bundle_library.sh"
+PACKAGE = Path("python") / "imtypeset"
+BUILT_FROM = "BUILT-FROM"
 
 _HASH = re.compile(r"[0-9a-f]{40}")
 # The build script's closing line, the one place it names the headers it used.
@@ -220,8 +225,45 @@ def step_advtext(deps: Path) -> int:
     return 0
 
 
+def clone_is_at(clone: Path, ref: str) -> None:
+    """
+    Raise unless `clone` is checked out at `ref` with no Python file of its package edited.
+
+    What `verify` compares the import against is the clone's working tree, so the
+    tree is only evidence about `ref` while it is that commit's and nothing else.
+    """
+    # Its own `.git`, or git would answer for whichever repository encloses it.
+    head = (
+        _git("rev-parse", "--verify", "--quiet", "HEAD^{commit}", cwd=clone)
+        if (clone / ".git").exists()
+        else None
+    )
+    if head is None or head.returncode != 0:
+        raise DepsError(
+            f"{clone} is not a checkout of advtext, so nothing here says which commit is "
+            f"installed. `make deps` fetches {ref}, which advtext.ref names, and installs it."
+        )
+    at = head.stdout.strip()
+    if at != ref:
+        raise DepsError(
+            f"advtext.ref names {ref} and {clone} is at {at}: the ref file moved and what is "
+            f"installed did not. `make deps` fetches and installs the commit it names now."
+        )
+    edited = [
+        line[3:]
+        for line in _git("status", "--porcelain", "--", "advtext", cwd=clone).stdout.splitlines()
+        if line.endswith(".py")
+    ]
+    if edited:
+        raise DepsError(
+            f"{clone} is at {ref} with {len(edited)} Python file(s) of the package edited or "
+            f"added since, the first {edited[0]}; `make deps` checks the commit out clean."
+        )
+
+
 def step_verify(deps: Path) -> int:
     ref = read_ref(ROOT / "advtext.ref")
+    clone_is_at(deps / "advtext", ref)
     pinned = deps / "advtext" / "advtext"
     installed = imported_advtext()
     if installed is None:
@@ -256,7 +298,11 @@ def wheel_facts() -> tuple[str, str, str]:
     if asked.returncode != 0:
         detail = (asked.stderr.strip().splitlines() or ["no message"])[-1]
         raise DepsError(f"imgui-bundle does not import in {sys.executable} ({detail})")
-    wheel, imgui, module = asked.stdout.splitlines()
+    # The last three lines: anything the wheel prints while it is imported comes first.
+    answer = asked.stdout.splitlines()[-3:]
+    if len(answer) != 3:
+        raise DepsError(f"imgui-bundle in {sys.executable} did not say what it is ({answer})")
+    wheel, imgui, module = answer
     return wheel, imgui, module
 
 
@@ -282,7 +328,7 @@ def build_library(deps: Path) -> str:
     """
     Build the pair into `deps/imtypeset`; the headers it was compiled against.
 
-    Made in `imtypeset.building` and renamed into place whole, so a build that
+    Made in `imtypeset.building` and put in place by `_install`, so a build that
     fails at any step leaves the pair that was there as it was.
     """
     if platform.system() != "Linux":
@@ -298,16 +344,18 @@ def build_library(deps: Path) -> str:
     wheel, imgui, module = wheel_facts()
     source = deps / "imtypeset-src"
     fetch_commit(IMTYPESET, ref, source)
-    if not (source / BUILD_SCRIPT).is_file():
-        raise DepsError(f"imtypeset {ref} has no {BUILD_SCRIPT}")
+    for needed in (BUILD_SCRIPT, PACKAGE / "__init__.py"):
+        if not (source / needed).is_file():
+            raise DepsError(f"imtypeset {ref} has no {needed}")
     bundle = fetch_tag(IMGUI_BUNDLE, f"v{wheel}", deps / "imgui_bundle")
     upstream = fetch_tag(IMGUI, f"v{imgui}-docking", deps / "imgui")
 
     stage = deps / "imtypeset.building"
     final = deps / "imtypeset"
-    shutil.rmtree(stage, ignore_errors=True)
+    if stage.exists():
+        shutil.rmtree(stage)
     shutil.copytree(
-        source / "python" / "imtypeset",
+        source / PACKAGE,
         stage / "pysnap" / "imtypeset",
         ignore=shutil.ignore_patterns("__pycache__"),
     )
@@ -347,7 +395,7 @@ def build_library(deps: Path) -> str:
     (stage / (LIBRARY_NAME + ".gate")).unlink(missing_ok=True)
 
     headers = label or "unknown (the build script did not say)"
-    (stage / "BUILT-FROM").write_text(
+    (stage / BUILT_FROM).write_text(
         f"imtypeset: {IMTYPESET.repo()}\n"
         f"commit: {ref}\n"
         f"for: {sys.executable}\n"
@@ -358,23 +406,92 @@ def build_library(deps: Path) -> str:
         f"date: {datetime.now(UTC):%Y-%m-%dT%H:%M:%SZ}\n",
         encoding="utf-8",
     )
-    shutil.rmtree(final, ignore_errors=True)
-    stage.rename(final)
+    _install(stage, final)
     return headers
+
+
+def _install(stage: Path, final: Path) -> None:
+    """
+    Put the built pair where the old one is, by renames alone.
+
+    The old pair is moved aside whole before the new one is moved in, and moved
+    back if that fails, so `final` is at every instant the old pair, no pair, or
+    the new one, and never part of either. Deleting comes last, on a directory
+    nothing points a process at.
+    """
+    aside = final.with_name(final.name + ".previous")
+    if aside.exists():
+        shutil.rmtree(aside)
+    had = final.exists()
+    if had:
+        final.rename(aside)
+    try:
+        stage.rename(final)
+    except OSError:
+        if had:
+            aside.rename(final)
+        raise
+    shutil.rmtree(aside, ignore_errors=True)
+
+
+def pair_refusal(pair: Path) -> str | None:
+    """
+    Why the pair in `pair` is not to be handed to a process; None when it is.
+
+    Whole, and built from the commit `imtypeset.ref` names now: a pair left
+    from before a bump of the ref is a library nobody pinned.
+    """
+    missing = [
+        str(part)
+        for part in (Path(LIBRARY_NAME), Path("pysnap") / "imtypeset" / "__init__.py", BUILT_FROM)
+        if not (pair / part).is_file()
+    ]
+    if missing:
+        return f"{pair} is not a whole pair (no {', no '.join(missing)}); `make deps` builds one"
+    ref = read_ref(ROOT / "imtypeset.ref")
+    commits = [
+        line.removeprefix("commit: ").strip()
+        for line in (pair / BUILT_FROM).read_text(encoding="utf-8").splitlines()
+        if line.startswith("commit: ")
+    ]
+    if commits != [ref]:
+        built = commits[0] if len(commits) == 1 else "no one commit"
+        return (
+            f"{pair} was built from {built} and imtypeset.ref names {ref}; "
+            f"`make deps` builds that one"
+        )
+    return None
+
+
+def step_pair(pair: Path) -> int:
+    """
+    Print `ok`, or the one line saying why the Makefile exports nothing.
+
+    Always one line and always status 0: the Makefile reads the line while it is
+    being parsed, for every target, and has nowhere to put a failure.
+    """
+    try:
+        refusal = pair_refusal(pair)
+    except Exception as error:  # whatever it is, it is the reason
+        refusal = f"{pair} could not be checked ({type(error).__name__}: {error})"
+    print(" ".join((refusal or "ok").split()))
+    return 0
 
 
 def step_library(deps: Path) -> int:
     final = deps / "imtypeset"
     try:
         headers = build_library(deps)
-    except DepsError as error:
+    except Exception as error:  # the promise is about every failure
+        # A DepsError is a sentence already; anything else is named for what it is.
+        cause = str(error) if isinstance(error, DepsError) else f"{type(error).__name__}: {error}"
         kept = (
             f" The pair already in {final} was left as it was."
             if (final / LIBRARY_NAME).is_file()
             else ""
         )
         print(
-            f"\nThe imtypeset library was NOT built: {error}. pptmstr does not need it to "
+            f"\nThe imtypeset library was NOT built: {cause}. pptmstr does not need it to "
             f"run: without it advtext cannot draw, so typeset panes fall back, and nothing "
             f"else is affected.{kept} Once the cause is dealt with, `make deps` builds it "
             f"without repeating the rest of bootstrap.\n",
@@ -388,7 +505,7 @@ def step_library(deps: Path) -> int:
         "ImGui's own layout check refuses and imtypeset accepts on its field probe"
     )
     print(f"imtypeset built against {headers}: {kind}.")
-    for line in (final / "BUILT-FROM").read_text(encoding="utf-8").splitlines():
+    for line in (final / BUILT_FROM).read_text(encoding="utf-8").splitlines():
         if line.startswith("module: "):
             print(
                 f"    linked against {line.removeprefix('module: ')} and for that file "
@@ -397,7 +514,9 @@ def step_library(deps: Path) -> int:
             )
     print(f"    IMTYPESET_LIBRARY={final / LIBRARY_NAME}")
     print(f"    IMTYPESET_PYTHON={final / 'pysnap'}")
-    print("    (the Makefile exports both whenever this pair exists)")
+    print(
+        "    (the Makefile exports both while imtypeset.ref names the commit this was built from)"
+    )
     return 0
 
 
@@ -406,11 +525,17 @@ STEPS = {"advtext": step_advtext, "verify": step_verify, "library": step_library
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=(__doc__ or "").strip().splitlines()[0])
-    parser.add_argument("step", choices=sorted(STEPS))
+    parser.add_argument("step", choices=sorted([*STEPS, "pair"]))
     parser.add_argument("--deps", type=Path, default=DEPS, help="where to build (default: .deps)")
+    parser.add_argument(
+        "--pair", type=Path, help="the pair `pair` reads (default: imtypeset under --deps)"
+    )
     args = parser.parse_args(argv)
+    deps = args.deps.resolve()
+    if args.step == "pair":
+        return step_pair(args.pair.resolve() if args.pair else deps / "imtypeset")
     try:
-        return STEPS[args.step](args.deps.resolve())
+        return STEPS[args.step](deps)
     except DepsError as error:
         print(f"typeset_deps {args.step}: {error}", file=sys.stderr)
         return 1

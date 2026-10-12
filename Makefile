@@ -24,18 +24,43 @@ endif
 # the ctypes package that was built with it. advtext looks for the library only
 # when IMTYPESET_LIBRARY names it and finds the package through IMTYPESET_PYTHON,
 # so both are exported to every recipe here -- tests, the app, the window
-# targets -- whenever BOTH halves exist, and neither when one is missing: a
-# library with another build's package fails at import. A value already in the
-# environment or on the command line wins, and an empty one
-# (`make test IMTYPESET_LIBRARY=`) runs without the library. `make typeset-env`
-# prints what a recipe gets.
+# targets -- and always as a pair, because a library with another build's
+# package fails at import:
+#
+#   neither is set by the caller   both are exported if `typeset_deps.py pair`
+#                                  answers ok: the pair is whole and was built
+#                                  from the commit imtypeset.ref names. If not,
+#                                  neither is, and every recipe runs without the
+#                                  library; a pair that is there and refused is
+#                                  a warning on every run.
+#   either is set by the caller    in the environment or on the command line,
+#                                  empty or not: nothing is added, so a library
+#                                  named from outside never meets this pair's
+#                                  package. `make test IMTYPESET_LIBRARY=` is how
+#                                  to run without the library.
+#
+# `make typeset-env` prints what a recipe gets and, on standard error, why.
 TYPESET_DIR     ?= .deps/imtypeset
 TYPESET_LIBRARY := $(TYPESET_DIR)/libimtypeset_bundle.so
 TYPESET_PACKAGE := $(TYPESET_DIR)/pysnap
-ifneq ($(and $(wildcard $(TYPESET_LIBRARY)),$(wildcard $(TYPESET_PACKAGE)/imtypeset/__init__.py)),)
-export IMTYPESET_LIBRARY ?= $(abspath $(TYPESET_LIBRARY))
-export IMTYPESET_PYTHON  ?= $(abspath $(TYPESET_PACKAGE))
+TYPESET_SET     := $(strip $(foreach v,IMTYPESET_LIBRARY IMTYPESET_PYTHON,$(if $(filter undefined,$(origin $(v))),,$(v))))
+ifneq ($(TYPESET_SET),)
+TYPESET_WHY := $(TYPESET_SET) set by the caller and left exactly as set; the pair in $(TYPESET_DIR) is exported whole or not at all
+else ifeq ($(wildcard $(TYPESET_DIR)),)
+TYPESET_WHY := there is no $(TYPESET_DIR); 'make deps' builds the pair
+else ifeq ($(wildcard $(PY)),)
+TYPESET_WHY := there is no $(PY) to check $(TYPESET_DIR) with; 'make bootstrap' first
+else
+TYPESET_WHY := $(shell $(PY) scripts/typeset_deps.py pair --pair $(TYPESET_DIR) 2>&1)
+ifeq ($(TYPESET_WHY),ok)
+export IMTYPESET_LIBRARY := $(abspath $(TYPESET_LIBRARY))
+export IMTYPESET_PYTHON  := $(abspath $(TYPESET_PACKAGE))
+TYPESET_WHY := the pair in $(TYPESET_DIR), built from the commit imtypeset.ref names
+else
+$(warning imtypeset is NOT exported and typeset panes fall back: $(TYPESET_WHY))
 endif
+endif
+export TYPESET_WHY
 
 # What installs into .venv: uv when there is one, as bootstrap.sh chooses, since
 # a venv uv made has no pip in it. --reinstall-package because uv may otherwise
@@ -75,7 +100,8 @@ bootstrap:         ## probe, create .venv, install, smoke test
 # library building is dealt with. ADVTEXT_REPO, IMTYPESET_REPO, IMGUI_BUNDLE_REPO
 # and IMGUI_REPO name where to fetch from (scripts/typeset_deps.py lists them);
 # ADVTEXT_PIP_ARGS is added to the install, e.g. "--no-deps --no-index
-# --no-build-isolation" where no package index is reachable.
+# --no-build-isolation" where no package index is reachable -- which works in a
+# .venv that already holds advtext's build backend and what advtext requires.
 deps: venv-check   ## advtext at advtext.ref, and the imtypeset library for .venv
 	$(PY) scripts/typeset_deps.py advtext
 	$(INSTALL_ADVTEXT) $(ADVTEXT_PIP_ARGS) .deps/advtext
@@ -85,6 +111,7 @@ deps: venv-check   ## advtext at advtext.ref, and the imtypeset library for .ven
 typeset-env:       ## the IMTYPESET_* variables a recipe here runs with
 	@echo "IMTYPESET_LIBRARY=$${IMTYPESET_LIBRARY-}"
 	@echo "IMTYPESET_PYTHON=$${IMTYPESET_PYTHON-}"
+	@echo "# $$TYPESET_WHY" >&2
 
 probe:             ## stdlib-only environment diagnosis (no venv needed)
 	@python3 scripts/probe.py --stage pre

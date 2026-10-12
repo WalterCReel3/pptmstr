@@ -17,13 +17,16 @@
 #
 #   ADVTEXT_REPO  IMTYPESET_REPO  IMGUI_BUNDLE_REPO  IMGUI_REPO
 #
-# ADVTEXT_PIP_ARGS is added to the advtext install, for a machine with no
-# package index: "--no-deps --no-index --no-build-isolation".
+# ADVTEXT_PIP_ARGS is added to the advtext install and to nothing else. This
+# script as a whole needs a package index: a .venv it has just made holds
+# nothing, so advtext's build backend and everything pyproject.toml names come
+# from one. Where there is no index, `make deps` repeats the advtext and library
+# part alone in a .venv that already holds them, and there
+# ADVTEXT_PIP_ARGS="--no-deps --no-index --no-build-isolation" is what it takes.
 #
 # Fetching needs git, and bootstrap stops without advtext. The library also
 # needs a C++ compiler and Linux; without those bootstrap says so and carries
 # on, because pptmstr runs without the library and typeset panes fall back.
-# `make deps` repeats this part alone.
 #
 # Usage: ./bootstrap.sh [--no-window] [--python PATH]
 set -euo pipefail
@@ -46,7 +49,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --no-window) SKIP_WINDOW=1; shift ;;
     --python) PYTHON="${2:-}"; shift 2 ;;
-    -h|--help) sed -n '2,26p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,/^# Usage:/p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) echo "unknown flag: $1" >&2; exit 2 ;;
   esac
 done
@@ -126,6 +129,9 @@ echo ">>> stage 3/4: install"
 "${INSTALL[@]}" $REINSTALL_ADVTEXT ${ADVTEXT_PIP_ARGS:-} .deps/advtext
 .venv/bin/python scripts/typeset_deps.py verify
 "${INSTALL[@]}" -e ".[dev]"
+# Again, after the last thing that installs: pyproject.toml names advtext too,
+# and what that install left in .venv is what runs.
+.venv/bin/python scripts/typeset_deps.py verify
 # After the install: the library is built for the imgui-bundle wheel that is now
 # in .venv. The step reports its own failures and exits 0 for them; the guard is
 # for the step itself breaking, which must not take bootstrap with it either.

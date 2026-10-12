@@ -6,7 +6,9 @@ none of that is run here against a real remote or a compiler. What is held is
 what the rest depends on: a ref file names one full hash, a pinned commit that
 is not a branch tip can be fetched from a `file://` repository and checked out
 clean, the library step cannot fail its caller, the interpreter imports the
-advtext the pin names, and the Makefile exports the pair only when it is whole.
+advtext the pin names and the clone it is compared with is at that pin, and the
+Makefile exports the pair only when it is whole, built from the commit
+`imtypeset.ref` names, and not mixed with a value the caller set.
 """
 
 from __future__ import annotations
@@ -197,13 +199,29 @@ def test_package_differences_names_changed_added_and_missing_files(tmp_path: Pat
     ]
 
 
+def _advtext_clone(deps_dir: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, str]:
+    """
+    A checkout standing for `.deps/advtext`, and `advtext.ref` naming its commit.
+    """
+    clone = deps_dir / "advtext"
+    (clone / "advtext").mkdir(parents=True)
+    (clone / "advtext" / "__init__.py").write_text("PINNED = True\n", encoding="utf-8")
+    _git(clone, "init", "--quiet")
+    _git(clone, "add", ".")
+    _git(clone, "commit", "--quiet", "-m", "pinned")
+    commit = _git(clone, "rev-parse", "HEAD")
+    monkeypatch.setattr(deps, "read_ref", lambda path: commit)
+    return clone / "advtext", commit
+
+
+@needs_git
 def test_verify_refuses_an_advtext_that_is_not_the_pinned_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    pinned, other = tmp_path / "advtext" / "advtext", tmp_path / "elsewhere" / "advtext"
-    for top, text in ((pinned, "PINNED = True\n"), (other, "PINNED = False\n")):
-        top.mkdir(parents=True)
-        (top / "__init__.py").write_text(text, encoding="utf-8")
+    pinned, _ = _advtext_clone(tmp_path, monkeypatch)
+    other = tmp_path / "elsewhere" / "advtext"
+    other.mkdir(parents=True)
+    (other / "__init__.py").write_text("PINNED = False\n", encoding="utf-8")
     monkeypatch.setattr(deps, "imported_advtext", lambda: other)
 
     assert deps.main(["verify", "--deps", str(tmp_path)]) == 1
@@ -212,6 +230,56 @@ def test_verify_refuses_an_advtext_that_is_not_the_pinned_one(
 
     monkeypatch.setattr(deps, "imported_advtext", lambda: pinned)
     assert deps.main(["verify", "--deps", str(tmp_path)]) == 0
+
+
+@needs_git
+def test_verify_refuses_a_clone_the_ref_file_has_moved_away_from(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The bump with no `make deps` after it: what is imported is the clone's,
+    # file for file, and neither is the commit the ref file names.
+    pinned, commit = _advtext_clone(tmp_path, monkeypatch)
+    monkeypatch.setattr(deps, "imported_advtext", lambda: pinned)
+    assert deps.main(["verify", "--deps", str(tmp_path)]) == 0
+    assert commit in capsys.readouterr().out
+
+    bumped = "f" * 40
+    monkeypatch.setattr(deps, "read_ref", lambda path: bumped)
+
+    assert deps.main(["verify", "--deps", str(tmp_path)]) == 1
+    told = capsys.readouterr()
+    assert bumped in told.err and commit in told.err and "make deps" in told.err
+    assert "identical" not in told.out
+
+
+@needs_git
+def test_verify_refuses_a_clone_edited_since_it_was_checked_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    pinned, _ = _advtext_clone(tmp_path, monkeypatch)
+    monkeypatch.setattr(deps, "imported_advtext", lambda: pinned)
+    (pinned / "__init__.py").write_text("PINNED = 'edited'\n", encoding="utf-8")
+
+    assert deps.main(["verify", "--deps", str(tmp_path)]) == 1
+    assert "__init__.py" in capsys.readouterr().err
+
+
+@needs_git
+def test_verify_refuses_a_directory_that_is_no_checkout_inside_one_that_is(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # `.deps` is inside pptmstr's own repository, whose HEAD git would answer with.
+    _git(tmp_path, "init", "--quiet")
+    _git(tmp_path, "commit", "--quiet", "--allow-empty", "-m", "the enclosing repository")
+    enclosing = _git(tmp_path, "rev-parse", "HEAD")
+    package = tmp_path / "deps" / "advtext" / "advtext"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    monkeypatch.setattr(deps, "read_ref", lambda path: enclosing)
+    monkeypatch.setattr(deps, "imported_advtext", lambda: package)
+
+    assert deps.main(["verify", "--deps", str(tmp_path / "deps")]) == 1
+    assert "not a checkout" in capsys.readouterr().err
 
 
 def test_this_interpreter_imports_the_advtext_the_pin_names() -> None:
@@ -364,10 +432,168 @@ def test_a_build_that_fails_late_installs_nothing_and_fails_nobody(
     assert "NOT built" in err and said in err and "left as it was" in err
 
 
+def _whole_pair(out: Path) -> dict[str, bytes]:
+    pair = out / "imtypeset"
+    return {
+        str(path.relative_to(pair)): path.read_bytes() for path in pair.rglob("*") if path.is_file()
+    }
+
+
+@needs_git
+@pytest.mark.parametrize("failure", ["no package", "wheel", "rename", "unexpected"])
+def test_no_failure_of_the_build_escapes_or_touches_the_pair_that_was_there(
+    tmp_path: Path,
+    fake_imtypeset: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failure: str,
+) -> None:
+    out = tmp_path / "deps"
+    deps.build_library(out)
+    (out / "imtypeset" / "marker").write_text("the pair that was there", encoding="utf-8")
+    before = _whole_pair(out)
+
+    if failure == "no package":
+        repo = tmp_path / "imtypeset-upstream"
+        _git(repo, "rm", "--quiet", "-r", "python/imtypeset")
+        _git(repo, "commit", "--quiet", "-m", "a commit with no package")
+        bare = _git(repo, "rev-parse", "HEAD")
+        monkeypatch.setattr(deps, "read_ref", lambda path: bare)
+        said = "python/imtypeset"
+    elif failure == "wheel":
+        monkeypatch.setattr(deps, "wheel_facts", lambda: (_ for _ in ()).throw(ValueError("odd")))
+        said = "ValueError: odd"
+    elif failure == "rename":
+        rename = Path.rename
+
+        def refuse_the_stage(self: Path, target: Path) -> Path:
+            if self.name == "imtypeset.building":
+                raise OSError(39, "Directory not empty", str(self))
+            return rename(self, target)
+
+        monkeypatch.setattr(Path, "rename", refuse_the_stage)
+        said = "Directory not empty"
+    else:
+        monkeypatch.setattr(deps, "_install", lambda stage, final: 1 / 0)
+        said = "ZeroDivisionError"
+
+    assert deps.main(["library", "--deps", str(out)]) == 0
+
+    assert _whole_pair(out) == before
+    assert not (out / "imtypeset.previous").exists()
+    err = capsys.readouterr().err
+    assert "NOT built" in err and said in err and "fall back" in err and "left as it was" in err
+    assert "Traceback" not in err
+
+
+@needs_git
+def test_replacing_a_pair_never_deletes_inside_the_one_in_place(
+    tmp_path: Path, fake_imtypeset: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A delete that stops half way leaves a directory with a library in it and
+    # half a package, which is a pair by every test of existence.
+    out = tmp_path / "deps"
+    deps.build_library(out)
+    rmtree = shutil.rmtree
+
+    def stops_half_way(path: Path, *args: object, **kwargs: object) -> None:
+        if Path(path) == out / "imtypeset":
+            (Path(path) / "pysnap" / "imtypeset" / "__init__.py").unlink()
+            return
+        rmtree(path, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(deps.shutil, "rmtree", stops_half_way)
+
+    assert deps.main(["library", "--deps", str(out)]) == 0
+
+    assert deps.pair_refusal(out / "imtypeset") is None
+    assert not (out / "imtypeset.building").exists()
+    assert not (out / "imtypeset.previous").exists()
+
+
+def test_a_wheel_that_prints_while_it_is_imported_is_still_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fake = tmp_path / "imgui_bundle"
+    fake.mkdir()
+    (fake / "__init__.py").write_text(
+        "print('a notice on import')\n__version__ = '1.0'\nfrom . import imgui, _imgui_bundle\n",
+        encoding="utf-8",
+    )
+    (fake / "imgui.py").write_text("def get_version(): return '9.9'\n", encoding="utf-8")
+    (fake / "_imgui_bundle.py").write_text("", encoding="utf-8")
+    monkeypatch.setenv("PYTHONPATH", str(tmp_path))
+
+    assert deps.wheel_facts() == ("1.0", "9.9", str(fake / "_imgui_bundle.py"))
+
+
+# --- which pair may be handed to a process ----------------------------------------
+
+
+@needs_git
+def test_a_pair_is_refused_once_the_ref_file_names_another_commit(
+    tmp_path: Path,
+    fake_imtypeset: str,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Built by the real step, so what `pair` reads is what `library` writes.
+    out = tmp_path / "deps"
+    deps.build_library(out)
+    capsys.readouterr()
+    assert deps.main(["pair", "--deps", str(out)]) == 0
+    assert capsys.readouterr().out == "ok\n"
+
+    bumped = "f" * 40
+    monkeypatch.setattr(deps, "read_ref", lambda path: bumped)
+
+    assert deps.main(["pair", "--pair", str(out / "imtypeset")]) == 0
+    (line,) = capsys.readouterr().out.splitlines()
+    assert fake_imtypeset in line and bumped in line and "make deps" in line
+
+
+@pytest.mark.parametrize(
+    "part", [deps.LIBRARY_NAME, os.path.join("pysnap", "imtypeset", "__init__.py"), "BUILT-FROM"]
+)
+def test_a_pair_missing_any_part_is_refused_by_name(tmp_path: Path, part: str) -> None:
+    pair = _pair(tmp_path / "pair")
+    assert deps.pair_refusal(pair) is None
+    (pair / part).unlink()
+    assert part in (deps.pair_refusal(pair) or "")
+
+
+def test_the_pair_step_is_one_line_and_no_failure_whatever_goes_wrong(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The Makefile reads this at parse time and takes anything but `ok` as the reason.
+    pair = _pair(tmp_path / "pair")
+    monkeypatch.setattr(deps, "ROOT", tmp_path)  # where there is no imtypeset.ref
+    assert deps.main(["pair", "--pair", str(pair)]) == 0
+    (line,) = capsys.readouterr().out.splitlines()
+    assert line != "ok" and "imtypeset.ref" in line
+
+    (pair / "BUILT-FROM").write_bytes(b"\xff\n\n")
+    (tmp_path / "imtypeset.ref").write_text("a" * 40 + "\n", encoding="utf-8")
+    assert deps.main(["pair", "--pair", str(pair)]) == 0
+    (line,) = capsys.readouterr().out.splitlines()
+    assert line != "ok" and "UnicodeDecodeError" in line
+
+
 # --- the Makefile ----------------------------------------------------------------
 
 
-def _typeset_env(*make_args: str, env: dict[str, str] | None = None) -> dict[str, str]:
+needs_venv = pytest.mark.skipif(
+    not (ROOT / ".venv" / "bin" / "python").is_file(),
+    reason="the Makefile checks a pair with .venv/bin/python, and there is none",
+)
+
+
+def _make_typeset_env(
+    *make_args: str, env: dict[str, str] | None = None
+) -> tuple[dict[str, str], str]:
+    """
+    What a recipe gets, and what `make typeset-env` says on standard error about it.
+    """
     # This test may itself be running under `make test`, which exports the pair.
     clean = {k: v for k, v in os.environ.items() if not k.startswith(("IMTYPESET_", "MAKE"))}
     done = subprocess.run(
@@ -378,19 +604,32 @@ def _typeset_env(*make_args: str, env: dict[str, str] | None = None) -> dict[str
         capture_output=True,
         check=True,
     )
-    return dict(line.split("=", 1) for line in done.stdout.splitlines())
+    return dict(line.split("=", 1) for line in done.stdout.splitlines()), done.stderr
 
 
-def _pair(top: Path, *, package: bool = True) -> Path:
+def _typeset_env(*make_args: str, env: dict[str, str] | None = None) -> dict[str, str]:
+    return _make_typeset_env(*make_args, env=env)[0]
+
+
+def _pair(top: Path, *, package: bool = True, commit: str | None = None) -> Path:
+    """
+    A pair as `library` leaves one, built from `commit` or from what `imtypeset.ref` names.
+    """
     top.mkdir(parents=True)
     (top / deps.LIBRARY_NAME).write_bytes(b"")
+    built = commit or deps.read_ref(ROOT / "imtypeset.ref")
+    (top / "BUILT-FROM").write_text(f"imtypeset: somewhere\ncommit: {built}\n", encoding="utf-8")
     if package:
         (top / "pysnap" / "imtypeset").mkdir(parents=True)
         (top / "pysnap" / "imtypeset" / "__init__.py").write_text("", encoding="utf-8")
     return top
 
 
+NOTHING = {"IMTYPESET_LIBRARY": "", "IMTYPESET_PYTHON": ""}
+
+
 @needs_make
+@needs_venv
 def test_make_exports_a_whole_pair_by_absolute_path(tmp_path: Path) -> None:
     pair = _pair(tmp_path / "pair")
     # Named relative to the Makefile, as the default is: a recipe that changes
@@ -403,19 +642,51 @@ def test_make_exports_a_whole_pair_by_absolute_path(tmp_path: Path) -> None:
 
 @needs_make
 def test_make_exports_nothing_for_half_a_pair_or_none(tmp_path: Path) -> None:
-    nothing = {"IMTYPESET_LIBRARY": "", "IMTYPESET_PYTHON": ""}
-    assert _typeset_env(f"TYPESET_DIR={_pair(tmp_path / 'half', package=False)}") == nothing
-    assert _typeset_env(f"TYPESET_DIR={tmp_path / 'absent'}") == nothing
+    assert _typeset_env(f"TYPESET_DIR={_pair(tmp_path / 'half', package=False)}") == NOTHING
+    assert _typeset_env(f"TYPESET_DIR={tmp_path / 'absent'}") == NOTHING
 
 
 @needs_make
-def test_the_callers_own_value_wins_and_an_empty_one_turns_the_library_off(
+@needs_venv
+def test_make_exports_nothing_from_a_pair_built_from_another_commit_and_says_why(
+    tmp_path: Path,
+) -> None:
+    # What a bump of imtypeset.ref leaves when the build after it fails.
+    stale = "e" * 40
+    pair = _pair(tmp_path / "pair", commit=stale)
+
+    got, said = _make_typeset_env(f"TYPESET_DIR={pair}")
+
+    assert got == NOTHING
+    assert stale in said and deps.read_ref(ROOT / "imtypeset.ref") in said
+    # Once as the reason typeset-env gives, once as the warning every target gets.
+    assert "NOT exported" in said and len(said.strip().splitlines()) == 2
+
+
+@needs_make
+@needs_venv
+@pytest.mark.parametrize("mine", ["IMTYPESET_LIBRARY", "IMTYPESET_PYTHON"])
+def test_a_value_the_caller_set_is_never_paired_with_half_of_this_checkouts(
+    tmp_path: Path, mine: str
+) -> None:
+    pair = _pair(tmp_path / "pair")
+    assert _typeset_env(f"TYPESET_DIR={pair}") != NOTHING
+
+    got, said = _make_typeset_env(f"TYPESET_DIR={pair}", env={mine: "/another/project"})
+
+    assert got == {**NOTHING, mine: "/another/project"}
+    assert mine in said and "set by the caller" in said
+
+
+@needs_make
+@needs_venv
+def test_both_values_from_the_caller_win_and_an_empty_one_turns_the_library_off(
     tmp_path: Path,
 ) -> None:
     pair = _pair(tmp_path / "pair")
-    mine = _typeset_env(f"TYPESET_DIR={pair}", env={"IMTYPESET_LIBRARY": "/mine/lib.so"})
-    assert mine["IMTYPESET_LIBRARY"] == "/mine/lib.so"
-    assert _typeset_env(f"TYPESET_DIR={pair}", "IMTYPESET_LIBRARY=")["IMTYPESET_LIBRARY"] == ""
+    both = {"IMTYPESET_LIBRARY": "/mine/lib.so", "IMTYPESET_PYTHON": "/mine/pysnap"}
+    assert _typeset_env(f"TYPESET_DIR={pair}", env=both) == both
+    assert _typeset_env(f"TYPESET_DIR={pair}", "IMTYPESET_LIBRARY=") == NOTHING
 
 
 def test_the_default_pair_is_where_the_script_builds_it() -> None:
@@ -430,12 +701,17 @@ def test_the_default_pair_is_where_the_script_builds_it() -> None:
 
 
 def _order(text: str, *needles: str) -> None:
-    at = [text.find(needle) for needle in needles]
-    assert -1 not in at, [n for n, i in zip(needles, at, strict=True) if i == -1]
-    assert at == sorted(at), dict(zip(needles, at, strict=True))
+    """
+    Each needle is found after the one before it, so one named twice is there twice.
+    """
+    at = 0
+    for needle in needles:
+        found = text.find(needle, at)
+        assert found != -1, f"{needle!r} is not after {text[:at][-60:]!r}"
+        at = found + len(needle)
 
 
-def test_bootstrap_pins_installs_verifies_then_builds_and_guards_the_build() -> None:
+def test_bootstrap_verifies_after_each_install_then_builds_and_guards_the_build() -> None:
     script = (ROOT / "bootstrap.sh").read_text(encoding="utf-8")
     stage = script[script.index("stage 3/4") : script.index("stage 4/4")]
     _order(
@@ -444,8 +720,27 @@ def test_bootstrap_pins_installs_verifies_then_builds_and_guards_the_build() -> 
         " .deps/advtext\n",
         "typeset_deps.py verify\n",
         '-e ".[dev]"\n',
+        # pyproject.toml names advtext too: the last install is the one to hold.
+        "typeset_deps.py verify\n",
         "typeset_deps.py library || {",
     )
+    assert "${INSTALL[@]}" not in stage[stage.rindex("typeset_deps.py verify\n") :]
+
+
+def test_bootstrap_help_is_the_whole_header_and_none_of_the_script() -> None:
+    done = subprocess.run(
+        [str(ROOT / "bootstrap.sh"), "--help"],
+        env={k: v for k, v in os.environ.items() if k != "ADVTEXT_SRC"},
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    lines = done.stdout.splitlines()
+    assert lines[0].startswith("Bootstrap:")
+    assert lines[-1].startswith("Usage: ./bootstrap.sh")
+    script = (ROOT / "bootstrap.sh").read_text(encoding="utf-8").splitlines()
+    header = [line for line in script[1 : script.index("set -euo pipefail")]]
+    assert len(lines) == len(header) and all(line.startswith("#") for line in header)
 
 
 @needs_make
