@@ -486,3 +486,20 @@ def test_destroying_the_context_the_faces_are_in_forgets_them(seam: Any) -> None
         seam.destroy_context(again)
         seam.set_current_context(home)
     assert typeset.load_fonts(BOLD)
+
+
+def test_the_epoch_the_atlas_guard_follows_moves_with_sizes_and_with_a_load(seam: Any) -> None:
+    """
+    ``theme.keep_baked_sizes`` lets go of every size on ImGui's atlas when this
+    moves. A text scale that did not move it would leave the sizes of the scale
+    before on the atlas for good, and a load that did not would leave the sizes
+    of fonts nothing draws from again.
+    """
+    before = gate.epoch()
+    typeset.configure(typeset=True, scale=1.125)
+    scaled = gate.epoch()
+    assert scaled > before
+    typeset.configure(typeset=True, scale=1.125)
+    assert gate.epoch() == scaled
+    assert typeset.load_fonts(BOLD)
+    assert gate.epoch() > scaled

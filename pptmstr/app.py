@@ -133,6 +133,7 @@ def begin_frame(state: AppState) -> None:
     # Between frames: the only place the atlas is added to, and the only moment
     # ImGui's font size is the UI font's and not one a pane pushed.
     typeset.pre_frame()
+    _keep_baked_sizes()
     if state.pending_layout is not None:
         hello_imgui.switch_layout(state.pending_layout)
         state.pending_layout = None
@@ -154,6 +155,26 @@ def begin_frame(state: AppState) -> None:
     # the same whichever pane happens to have focus.
     review.handle_keys(state.frame_snap, state.focus, state.review, state.bridge)
     _handle_layout_keys(state)
+
+
+def _keep_baked_sizes() -> None:
+    """
+    Keep every font size ImGui has rasterised from being discarded and moved
+    (``theme.keep_baked_sizes`` says why), after the seam's turn: a change of
+    family or of size is known by then, and is what lets go of the old sizes.
+
+    Whatever it raises is logged once and the frame goes on. This runs ahead of
+    the intents, and a frame that applies none is worse than one whose glyphs
+    may come out at the wrong size.
+    """
+    try:
+        theme.keep_baked_sizes(typeset.gate.epoch())
+    except Exception as exc:
+        detail = f"{type(exc).__name__}: {exc}"
+        if _PANEL_ERRORS.get("baked sizes") != detail:
+            _PANEL_ERRORS["baked sizes"] = detail
+            LOG.error("ui", f"baked sizes: {detail}")
+            LOG.debug("ui", traceback.format_exc())
 
 
 def _handle_layout_keys(state: AppState) -> None:

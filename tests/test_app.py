@@ -846,6 +846,51 @@ def test_the_frame_loop_gives_the_seam_its_turn_between_frames(
         app.begin_frame(state)
 
 
+def test_the_frame_loop_keeps_the_baked_sizes_once_the_seam_has_had_its_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    ``theme.keep_baked_sizes`` is worth nothing uncalled: ImGui then discards a
+    size nobody drew, moves the others, and a heading's letters come out at
+    another size, with every test of the guard itself passing. After the
+    seam's turn, because that is where a family is loaded again and the epoch
+    moves, and it is the epoch as it then stands that says the old sizes go.
+    """
+    from pptmstr import app, theme
+    from pptmstr.ui import typeset
+
+    calls: list[object] = []
+
+    def seam() -> None:
+        typeset.roles.moved()
+        calls.append("seam")
+
+    def keep(generation: object = None) -> int:
+        calls.append(generation)
+        raise _Reached
+
+    monkeypatch.setattr(typeset, "pre_frame", seam)
+    monkeypatch.setattr(theme, "keep_baked_sizes", keep)
+    state = app.AppState(store=Store(), bridge=Bridge(), settings=Settings())
+    state.theme_dirty = False
+    logged: list[str] = []
+    monkeypatch.setattr(app.LOG, "error", lambda where, said: logged.append(said))
+    monkeypatch.setattr(app.LOG, "debug", lambda where, said: None)
+    monkeypatch.setattr(app.review, "handle_keys", lambda *args: None)
+    monkeypatch.setattr(app, "_handle_layout_keys", lambda state: None)
+    app._PANEL_ERRORS.pop("baked sizes", None)
+    try:
+        app.begin_frame(state)
+        app.begin_frame(state)
+    finally:
+        app._PANEL_ERRORS.pop("baked sizes", None)
+    assert calls == ["seam", typeset.gate.epoch() - 1, "seam", typeset.gate.epoch()]
+    # A guard that raises costs its own work and a line in the log, once: the
+    # intents behind it are applied and the frame has its snapshot.
+    assert logged == ["baked sizes: _Reached: "]
+    assert state.frame == 2 and state.frame_snap is not None
+
+
 @pytest.mark.parametrize(
     ("argv", "expected"),
     [

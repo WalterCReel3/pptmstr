@@ -62,9 +62,11 @@ at a known place in a stream or a native scene:
     and left unused by then. Run 0, 1 and 2, each in its own process; the
     line "before room is made, the atlas holds" says what there was to discard.
 
-    --keep          before every frame, ``ImFont.get_font_baked`` of every
-                    baked size the atlas holds, which marks each used: what a
-                    host would do so that ImGui discards none.
+    --keep          before every frame, after the seam's turn,
+                    ``pptmstr.theme.keep_baked_sizes`` as ``pptmstr/app.py``
+                    calls it: every baked size the atlas holds is marked used,
+                    so ImGui discards none. Without it this window is the
+                    application less that one call.
 
 ## What is read, and from what
 
@@ -632,7 +634,7 @@ def arguments(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--keep",
         action="store_true",
-        help="before each frame, mark every baked size the atlas holds as used",
+        help="before each frame, the application's guard: theme.keep_baked_sizes",
     )
     parser.add_argument(
         "--tables",
@@ -757,6 +759,7 @@ def main(argv: list[str] | None = None) -> int:
     import imgui_bundle
     from imgui_bundle import hello_imgui, imgui
 
+    from pptmstr import theme
     from pptmstr.ui import typeset
     from pptmstr.ui.typeset import gate, themes
 
@@ -793,12 +796,8 @@ def main(argv: list[str] | None = None) -> int:
         if state["phase"] == "wait" and state["at"] < len(scenes):
             setup(scenes[state["at"]])
         typeset.pre_frame()
-        if args.keep and imgui.get_frame_count() > 0:
-            # A size asked for by its own size is found, not made, and is
-            # marked used: ImGui then has nothing to discard.
-            for font in imgui.get_io().fonts.fonts:
-                for size in [float(baked.size) for baked in bakes_of(imgui, font)]:
-                    font.get_font_baked(size)
+        if args.keep:
+            theme.keep_baked_sizes(gate.epoch())
 
     def entry_of(font: Any) -> int | None:
         if font is None:

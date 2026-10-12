@@ -245,6 +245,25 @@ def glyph_quads(draw_list: Any, start: int, stop: int, white: Any) -> list[tuple
     return out
 
 
+def held_bake(font: Any, size: float) -> Any:
+    """
+    The baked size ``font`` has at ``size`` px, or ``None``: none made, none marked used.
+
+    ``ImFont.get_font_baked`` makes the size it is asked for and marks it used
+    for the frame. Asked of every candidate size on every frame read, it keeps
+    each of them from ever being discarded, and this window then cannot show
+    what the application's shows when ImGui discards a size and moves the
+    others (``pptmstr.theme.keep_baked_sizes``). The closest-match lookup does
+    neither; asked for just over a size it answers that size where it exists.
+    """
+    from imgui_bundle import imgui
+
+    atlas = imgui.get_io().fonts
+    # A density no size has, so that none is preferred for its density.
+    baked = imgui.internal.im_font_atlas_baked_get_closest_match(atlas, font, size + 0.01, 0.0)
+    return baked if baked is not None and abs(float(baked.size) - size) < 0.005 else None
+
+
 def read_view(
     view: Any, draw_list: Any, start: int, stop: int, white: Any, candidates: list[Any]
 ) -> list[list[Glyph]]:
@@ -278,7 +297,9 @@ def read_view(
         best: tuple[int, str, Any] | None = None
         for role, font, sizes in candidates:
             for size in sizes:
-                baked = font.get_font_baked(float(size))
+                baked = held_bake(font, float(size))
+                if baked is None:
+                    continue
                 hits = 0
                 for (_, char), quad in zip(mine, took, strict=True):
                     if not baked.is_glyph_loaded(ord(char)):

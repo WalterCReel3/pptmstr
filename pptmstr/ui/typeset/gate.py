@@ -50,7 +50,9 @@ approval first came under the cursor would otherwise pay both.
 another file means another context. Run in a window on 2026-10-11: 11 ms, a view
 kept across it draws, and **each load leaves seven more fonts on ImGui's atlas**
 that nothing takes off. That is the cost of an operator's click on the family
-list and of nothing else.
+list and of nothing else. What the fonts left behind had rasterised is let go
+of: a load moves the epoch, and ``theme.keep_baked_sizes`` drops every baked
+size when it moves.
 
 **The library's context belongs to one ImGui context** (``_Gate.home``).
 ``advtext.typesetter.ready()`` stays true after the ImGui context its fonts are
@@ -1021,6 +1023,18 @@ def pre_frame() -> None:
             roles.follow(size)
     except Exception as failure:
         failed(failure)
+
+
+def epoch() -> int:
+    """
+    What moves whenever text is about to be drawn in other faces or at other
+    sizes than before: the seam's epoch (``roles.moved``).
+
+    For ``theme.keep_baked_sizes``, which keeps the sizes on ImGui's atlas for
+    as long as this stands still and lets go of them all when it moves. Read
+    whether or not the library can draw: the roles size the panes' own text too.
+    """
+    return roles._STATE.epoch
 
 
 def _live_font_size() -> float | None:

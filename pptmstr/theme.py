@@ -902,3 +902,116 @@ def _load_face(asset: str, *, icons: bool) -> imgui.ImFont | None:
         return hello_imgui.load_font_ttf(asset, _FONT_SIZE)
     except Exception:
         return None
+
+
+_NO_DENSITY = 0.0
+"""
+A rasteriser density no baked size has (ImGui asserts one is positive): asked for
+with it, the closest-match lookup has no size of "the same density" to prefer and
+answers among all of them.
+"""
+
+
+@dataclass(slots=True)
+class _Kept:
+    """
+    What the baked sizes on the atlas were drawn under, as ``keep_baked_sizes`` last saw it.
+    """
+
+    under: object | None = None
+
+
+_KEPT = _Kept()
+
+
+def baked_sizes(atlas: imgui.ImFontAtlas, font: imgui.ImFont) -> list[tuple[float, float]]:
+    """
+    The baked sizes the atlas holds for ``font``, as (pixel height, rasteriser
+    density), largest first, and none made or marked used.
+
+    ``ImFont.get_font_baked`` makes the size it is asked for and marks it used,
+    so it cannot be what finds them; the closest-match lookup does neither, and
+    is the only way the bindings have into ImGui's pool of them. Asked for just
+    under a size that exists it answers the next one down, or one that is not
+    smaller when there is none.
+
+    **One answer a pixel height.** Two sizes equal but for their density are
+    answered as the one made first: the lookup has no way to be asked for the
+    other without knowing its density. ``keep_baked_sizes`` lets go of every
+    size when the display's density changes, which is what would make such a
+    pair.
+    """
+    closest = imgui.internal.im_font_atlas_baked_get_closest_match
+    out: list[tuple[float, float]] = []
+    ask = 1.0e6
+    while True:
+        baked = closest(atlas, font, ask, _NO_DENSITY)
+        if baked is None or float(baked.size) >= ask:
+            return out
+        out.append((float(baked.size), float(baked.rasterizer_density)))
+        ask = out[-1][0] - 0.01
+
+
+def keep_baked_sizes(generation: object = None) -> int:
+    """
+    Mark every baked size on the atlas used, so that ImGui discards none. Call
+    it before each ``new_frame``. How many were marked.
+
+    **Why.** Dear ImGui rasterises a glyph the first time it is drawn at a size,
+    and when one does not fit the atlas texture it discards every baked size no
+    text used in the last two frames and, at the next frame, closes the gaps in
+    its pool of them by moving the ones behind a gap down. Its FreeType loader
+    remembers the size it last made current for a font file by that size's
+    address in the pool, and skips making a size current when the address is
+    the same. A size moved to the address the loader remembers is then
+    rasterised at the scale of the size that was there: its new glyphs have the
+    bitmap and the advance of another size, in this size's cells, for as long
+    as the size lives. Seen as letters of another size inside a heading; any
+    font drawn at two sizes can have it, the chrome's included
+    (``tests/test_baked_sizes.py`` makes it happen, and
+    ``scripts/measure_heading_glyphs.py`` reads it in a window). Nothing is
+    moved while nothing is discarded, and ImGui discards only what was not
+    used, so every size is marked used: ``ImFont.get_font_baked`` of a size
+    that exists finds it and does that.
+
+    **The set is the atlas's own**, read each frame (``baked_sizes``), and not a
+    list kept beside it: every font ``io.fonts`` has, the typesetting library's
+    among them, at every size anything drew or measured at, whoever it was. So
+    no reference to a font is held from one frame to the next, and a font the
+    library left behind when it loaded its faces again is on the list like any
+    other and is not touched once it is off it.
+
+    **What bounds it.** Kept for ever, the sizes of every text scale the
+    operator tried would stay on the texture. ``generation`` is whatever the
+    faces and sizes of text follow (``typeset.gate.epoch``), and the UI font's
+    size and the display's density are read beside it: when any of them is not
+    what it was at the last call, every baked size of every font is discarded
+    here, in one go, and the frame that follows rasterises what it draws. That
+    is safe where ImGui's own discard is not: a size made afterwards is at an
+    address the loader was told when it was made, and none is moved after
+    that. So the atlas holds the sizes drawn since the last change and no
+    others, and the fonts of a family no longer in use hold none. The first
+    call discards nothing: the sizes the font load made are the ones the first
+    frames draw.
+
+    Does nothing before the first frame, when the atlas has not been built, and
+    with no ImGui context.
+    """
+    if imgui.get_current_context() is None or imgui.get_frame_count() < 1:
+        return 0
+    io = imgui.get_io()
+    atlas = io.fonts
+    display = (float(io.display_framebuffer_scale.x), float(io.display_framebuffer_scale.y))
+    under = (generation, float(imgui.get_font_size()), display)
+    stale = _KEPT.under is not None and _KEPT.under != under
+    _KEPT.under = under
+    if stale:
+        for font in atlas.fonts:
+            imgui.internal.im_font_atlas_font_discard_bakes(atlas, font, 0)
+        return 0
+    kept = 0
+    for font in atlas.fonts:
+        for size, density in baked_sizes(atlas, font):
+            font.get_font_baked(size, density)
+            kept += 1
+    return kept
