@@ -46,10 +46,10 @@ over the layout library). **What is markdown is the library's and what is not is
 ImGui's**: OUTPUT and REASONING runs are read as markdown and set by the
 library, wrapped, selectable and culled; every other kind -- a tool call, its
 result, an error, a system line -- is literal text whose columns are content,
-and the library does not keep a monospace column (``typeset`` has the
-measurement; request P21 of ``HANDOFF-advtext.md``), so ImGui draws it in the
-chrome's font, unbroken, in its ``_KIND_COLOUR``. A fence inside a markdown run
-goes with its run and is the library's.
+and outside its diff view the library does not keep a monospace column
+(``typeset`` has the measurement; request P21 of ``HANDOFF-advtext.md``), so
+ImGui draws it in the chrome's font, unbroken, in its ``_KIND_COLOUR``. A fence
+inside a markdown run goes with its run and is the library's.
 
 - *closed* runs are the ``typeset.Part``s of a ``typeset.document``, which makes
   one view of the library's for each markdown run. A document holds one

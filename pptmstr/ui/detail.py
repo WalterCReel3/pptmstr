@@ -41,10 +41,10 @@ everything else is still ImGui's**, through the seam, in views held in
   selected and copied from it.
 * **What it does not**: a call's other arguments, and an error. Their columns
   are content, and by pptmstr's measurement the library does not keep a
-  monospace column. They go through the seam, which hands text that is not
-  markdown to ImGui. An argument or an error of several lines is set each line
-  as written and the pane's child scrolls sideways to a long one; one of
-  **one** line is wrapped to the pane.
+  monospace column outside its diff view. They go through the seam, which
+  hands text that is not markdown to ImGui. An argument or an error of several
+  lines is set each line as written and the pane's child scrolls sideways to a
+  long one; one of **one** line is wrapped to the pane.
 * **An approval's diff is the library's diff view where the library that is
   running keeps a column, and this pane's own lines where it does not**
   (``typeset.diff_adopted``, a measurement; ``typeset.diffs`` has the numbers,

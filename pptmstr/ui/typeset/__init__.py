@@ -39,9 +39,10 @@ through the same calls.** CONTEXT's typeset branch is one of four modes of the
 log and not the one it starts in (``transcript_pane.DEFAULT_MODE``).
 
 **The library sets markdown, and ImGui draws text that is not markdown**
-(``themes.native``): monospace set by the library does not keep its columns, by
-pptmstr's measurement. So a literal part, ``plain()`` and a label are ImGui
-items in the chrome's font or the library's own atlas entry.
+(``themes.native``): monospace set by the library outside its diff view does
+not keep its columns, by pptmstr's measurement. So a literal part, ``plain()``
+and a label are ImGui items in the chrome's font or the library's own atlas
+entry.
 
 **A diff is the library's where the library that is running keeps a column,
 and its pane's own renderer where it does not** (``diff_adopted``): the

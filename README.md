@@ -146,9 +146,12 @@ context log set their text through `imscribe` — a library on no package index,
 installed at the commit `imscribe.ref` names, which draws through the native imtypeset
 library built beside the `imgui-bundle` wheel — instead of ImGui's
 own text calls: proportional prose, real italics, selectable text. An approval's diff
-is the library's diff view only where a measurement of the running library says it
-keeps a monospace column; the pinned one does, on a whole-pixel cell, so DETAIL and
-NEEDS YOU draw a diff with it, and with their own rows for a diff it is not given.
+is drawn by the library's diff view by default, in DETAIL and in NEEDS YOU, wherever
+the check pptmstr measures of the running library holds: that the view keeps a
+monospace column, which the pinned one does on a whole-pixel cell. Otherwise it is
+the panes' own rows: where the check fails, and for a diff the check does not cover
+(a character the code face lacks, a row longer than was measured, a call that carries
+no texts, one too large to build in a frame).
 pptmstr marks every baked font size used each frame, so ImGui discards none under a
 frame. [pptmstr/ui/typeset/](pptmstr/ui/typeset/) is the
 only package that imports it, and its docstring is the reference for what it does and
