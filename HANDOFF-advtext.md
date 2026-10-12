@@ -583,6 +583,10 @@ library. **So pptmstr builds nothing over frames any more**: the budget, its
 pieces and its pacing are deleted with their tests, and what is left of the
 question is the first draw of a very long text, 33 ms a thousand lines, once.
 
+| # | request | the measurement behind it | state |
+|---|---|---|---|
+| P29 | **A tab in a fenced block survives a copy as a tab.** | By a run (pptmstr's builder, 2026-10-12, `38f5fac`): a tab in a fence is set as spaces to its stop, and copied so. Nothing is absent from the screen, but a Makefile recipe an approver copies out of a body would not run. | open |
+
 ## Work in hand
 
 - **The seam**, now the package `pptmstr/ui/typeset/` on `advtext.typesetter`
