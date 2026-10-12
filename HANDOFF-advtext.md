@@ -849,6 +849,25 @@ the view's rows, not the view; a library that set a row differently inside
 `TypesetDiffView` would pass it. If H34 arrives as an option a host must turn
 on, pptmstr needs to be told its name; the check only reports the result.
 
+### Three requests from closing the diff review (2026-10-12, pptmstr `94e2cf1`)
+
+By pptmstr's builder, runs headless on advtext `38f5fac`, imtypeset
+`c9f8902`, load 2 to 9. P37 is live today for an approval body.
+
+| # | request | the measurement behind it | state |
+|---|---|---|---|
+| P37 | **A view says when what it was given was cut**: `draw()` false, `stats.whole` false, and an answer per view that names what was left out. | A markdown table row of more than 1,024 cells (2.2 KB of a concern's body): the library "left out the rest"; `TypesetView.draw()` answers true, `stats.whole` true, `table_geometry` 1,024 columns of 1,100 written, 152 of 2,200 cells on no screen. The same for a table past 262,144 cells, and for a block or diff row past 16 MiB when the cut is out of view. The only trace is `typesetter.note()`, a process-wide last-message string. pptmstr holds an approve over a body it cannot show, so it now compares that string **by identity** across each call, which works only because the note is built afresh each time. What does make `draw()` false, by a sweep of every code point to U+FFFF and the emoji block in prose, fences, headings and diff rows: nothing but a block over 16 MiB in view. | open |
+| P38 | **A lone surrogate in the text is not an exception out of `draw`.** | `json.loads('"\\udc80"')` gives one, so a tool call's argument can carry it: `UnicodeEncodeError` out of `TypesetView` and `TypesetDiffView.draw`, on every frame the call is queued. pptmstr now treats any exception out of a library call as the library failing (logged once, typesetting stopped with a sentence, the pane's own renderer from the next frame), so one such string turns typeset text off for the session. | open |
+| P39 | **`code_face_lacks`, or the question behind it, as a supported name.** | A diff row holding a character the code face lacks is set from another face at that face's advance: at an even em, in `x π x Ж x` the third character is 18 px in where the grid says 16 and the fifth 40 where it says 32. pptmstr draws such a diff with its own rows and asks through `typesetter.module().face_has_glyph`. A tab was checked at the same time and lands on the grid. | open |
+
+**Noticed, not asked:** in typeset prose the library sets U+0430 (Cyrillic
+"а") as a real letter from Roboto, where pptmstr's chrome font has no
+Cyrillic and draws U+FFFD. So a lookalike in a path or URL inside a concern's
+body is visible as odd on pptmstr's own renderer and not in typeset text.
+pptmstr guards link text already and now keeps such diffs on its own rows;
+nothing guards a path in prose. It is a property of setting text well, and is
+recorded here because an approval surface is where it matters.
+
 ### Coming: advtext is to be renamed `imscribe` (the user, 2026-10-12)
 
 The user, to pptmstr's lead: "Heads up on an upcoming change for the advtext
