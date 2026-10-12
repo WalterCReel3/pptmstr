@@ -1035,8 +1035,8 @@ def test_every_line_of_a_diff_fence_is_set_settled_and_arriving(
     cache = typeset.ViewCache()
 
     def code(upto: int) -> str:
-        # As the library's reader has a fence: a tab is the spaces to its stop.
-        return "\n".join(["diff", *lines[:upto]]).expandtabs(4)
+        # As the library's reader has a fence: a tab is a tab.
+        return "\n".join(["diff", *lines[:upto]])
 
     def body_() -> None:
         typeset.markdown(cache, "markdown", source)
@@ -1105,8 +1105,8 @@ def test_where_columns_hold_an_honest_diff_fence_is_a_diff_view_and_every_line_i
     the library that does not keep its columns. A stream hosts none.
     """
     seam = columns_hold
-    # As the library's reader has a fence: a tab is the spaces to its stop.
-    text = "\n".join(lines).expandtabs(4)
+    # As the library's reader has a fence: a tab is a tab.
+    text = "\n".join(lines)
     honest = diffs.fence_diff("diff", text) is not None
     assert honest is (name in HOSTED)
     body = "".join(line + "\n" for line in lines)
@@ -1391,18 +1391,18 @@ def test_anything_else_the_library_raises_under_a_diff_is_the_library_stopping(
     assert typeset.load_fonts(BOLD)
 
 
-def test_a_lone_surrogate_in_a_diff_row_stops_the_library_and_does_not_leave_the_seam(
+def test_a_lone_surrogate_in_a_diff_row_is_drawn_and_stops_nothing(
     seam: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # The library sets a lone surrogate as U+FFFD where it cannot encode it.
     said = _said_by_the_seam(monkeypatch)
     cache = typeset.ViewCache()
     texts = (approval.DiffText("a\n", "b \udc80 c\n", "x.py"),)
     frame(seam, lambda: typeset.diff(cache, "k", texts))
-    assert len(said) == 1 and "the library raised UnicodeEncodeError" in said[0]
-    assert cache.unbuilt("k") == 2
+    assert said == []
+    assert cache.unbuilt("k") == 0
     typeset.pre_frame()
-    assert not typeset.can_draw()
-    assert typeset.load_fonts(BOLD)
+    assert typeset.can_draw()
 
 
 def test_what_the_seams_own_code_raises_under_a_diff_is_a_defect_and_is_not_caught(

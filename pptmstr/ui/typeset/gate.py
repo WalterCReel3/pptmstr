@@ -18,13 +18,12 @@ is caught, kept as the sentence, and costs the typeset path and nothing else.
 **Anything a call into the library raises while a pane draws is the library
 stopping** (``into_library``). The library sorts its own failures from this side's
 and passes the second kind on as they are: an ``AttributeError`` for a name a
-newer library dropped, a ``UnicodeEncodeError`` for a lone surrogate in a
-tool's arguments (``json.loads`` makes one of ``"\\udc80"``). Left alone that
-leaves the pane on every frame the text is on screen. So every such call in
-``views`` and ``diffs`` is made inside ``into_library()``, which logs what was
-raised once with its traceback, stops the library as a draw that raised
-``TypesetUnavailable`` does (``stopped``), and raises that in its place. Only
-the calls into the library are inside it: what pptmstr's own code raises
+newer library dropped, an encoding error for text its native half cannot take.
+Left alone that leaves the pane on every frame the text is on screen. So every
+such call in ``views`` and ``diffs`` is made inside ``into_library()``, which
+logs what was raised once with its traceback, stops the library as a draw that
+raised ``TypesetUnavailable`` does (``stopped``), and raises that in its place.
+Only the calls into the library are inside it: what pptmstr's own code raises
 around them is a defect and leaves as itself.
 
 **A draw that set less than it was handed says so two ways, and neither is an
@@ -33,8 +32,10 @@ could not be set as asked, and the library notes an edit it cut --
 ``typesetter.trouble()`` -- while the draw over it answers true. Measured in
 pptmstr on 2026-10-12 (advtext ``38f5fac``, imtypeset ``c9f8902``): a table row
 of more than 1,024 cells loses the rest and draws true; a block over 16 MiB is
-cut and draws false while it is in view; no character does either, a lone
-surrogate apart, which raises. ``views`` and ``diffs`` read both.
+cut and draws false while it is in view; no character does either. A lone
+surrogate, which ``json.loads`` makes of ``"\\udc80"`` in a tool's arguments,
+is set as U+FFFD and noted nowhere (the library the tree pins now, by
+``tests/test_typeset_views.py``). ``views`` and ``diffs`` read both.
 
 **Fonts are loaded once the UI font is, at the end of hello_imgui's
 ``load_additional_fonts``**, and never from ``post_init``: the runner empties the
@@ -75,19 +76,25 @@ list and of nothing else. What the fonts left behind had rasterised is let go
 of: a load moves the epoch, and ``theme.keep_baked_sizes`` drops every baked
 size when it moves.
 
-**The library's context belongs to one ImGui context** (``_Gate.home``).
-``advtext.typesetter.ready()`` stays true after the ImGui context its fonts are
-on is destroyed, and a view then draws without raising, into an atlas that is
-gone. So ``can_draw()`` also asks whether the current ImGui context is the one
-the fonts were loaded in, and whoever destroys that context calls ``unload()``
-first: ``app`` in ``before_exit``, the tests in ``tests/conftest.py``.
+**The library's context belongs to one ImGui context, and the library is the
+one that knows which.** ``advtext.typesetter.ready()`` is false wherever the
+ImGui context that is current is not the one its fonts were loaded in: another
+one, none, or that one destroyed, with ``unload()`` called first or not. It
+holds the current context to the font it loaded and that font's bytes, because
+a context made after one was destroyed is often given its address, and a
+comparison of contexts then takes the new one for the old. So ``can_draw()``
+asks ``ready()`` and keeps no record of its own, and ``why_not_ready()`` is the
+sentence. ``app`` still calls ``unload()`` in ``before_exit``: that is where the
+library's context is given back, and nothing here depends on it.
 
 Reached past ``advtext.__all__``: the module ``advtext.typesetter`` itself, for
-``module``, ``trouble``, ``unload`` and ``LIBRARY_VARIABLE``, which the library
-lists as reached through their module with no promise attached, and for ``kind``
-where the library has one (``_kind``); and the module
-``advtext.markdown_rules``, for its private ``_parser``, as said below. A test
-reads this package's imports and holds them to those two names.
+``module``, ``trouble``, ``unload``, ``font`` and ``why_not_ready``, which the
+module lists as its own (``typesetter.__all__``) and the facade does not; and
+the module ``advtext.markdown_rules``, for its private ``_parser``, as said
+below. A test reads this package's imports and holds them to those two names.
+Two reaches are on neither list: the native module's ``face_has_glyph`` with
+``typesetter.FACE_ROLES`` (``code_lacks``), and the native module's documents
+(``columns``).
 
 **The markdown reader is told to hide nothing, and then asked whether it does**
 (``_reader``, ``reader_hides``). A CommonMark reader shows nothing for raw HTML
@@ -103,15 +110,8 @@ through the library's public calls: a probe that comes back short stops the
 library being offered to draw with, which is the honest answer when the reader
 cannot be told to hide nothing.
 
-**One reach has no promise of any kind** (``face_font``): the ``ImFont`` the
-library draws a face with, for a native ImGui line in that face. It is found the
-way the library's own demonstration finds it, through the native module's
-``font_atlas_index``; a supported name is request P14 of ``HANDOFF-advtext.md``.
-It is here once, it answers ``None`` when anything about it fails, and a test
-fails when the library stops answering it.
-
-**Whether monospace keeps its columns is measured, and the measurement is a
-reach of the same kind** (``columns``). The library has no answer for "is a row
+**Whether monospace keeps its columns is measured, and the measurement has no
+promise of any kind** (``columns``). The library has no answer for "is a row
 of code drawn on ImGui's grid", so one row is set in a document of the native
 module's, as the diff view sets a row, and read back: where it was laid out,
 the vertices a draw of it would emit, what a hit test answers on them. Through
@@ -171,8 +171,8 @@ REFUSED = "refused"
 FAILED = "failed"
 """
 The kinds ``library`` answers with. They are the values of advtext's
-``typesetter.Kind`` where it has one, so a kind it reports is one of these or a
-word of its own, which is said as it is.
+``typesetter.Kind``, so a kind it reports is one of these or another word of
+its own, which is said as it is.
 """
 
 
@@ -187,10 +187,6 @@ class _Gate:
 
     # Whether the fonts have been asked for since the last `unload`.
     asked: bool = False
-    # The ImGui context they were asked for in: where the library's context is,
-    # if it made one. Kept whether or not the load succeeded, so that whoever
-    # destroys that context knows there may be something to unload first.
-    home: Any = None
     # Whether the library accepted its pairing with the wheel at that load, and
     # whether the load succeeded: what tells "refused" from "its fonts did not
     # load" from "stopped while drawing" afterwards.
@@ -320,16 +316,17 @@ def can_draw() -> bool:
     Whether the library can draw *in the ImGui context that is current*.
 
     Its fonts are loaded, it has not been switched off since, and the current
-    context is the one they were loaded in. Never raises. This is the library's
-    half of ``roles.enabled``. In the frame the library stopped inside a draw
-    the answer is the one the frame began with (``stopped``).
+    context is the one they were loaded in, which is the library's to know
+    (``typesetter.ready``). Never raises. This is the library's half of
+    ``roles.enabled``. In the frame the library stopped inside a draw the
+    answer is the one the frame began with (``stopped``).
     """
     if not _GATE.loaded or _GATE.failure is not None:
         return False
     if _GATE.stopping is not None:
         return True
     try:
-        return bool(_typesetter().ready()) and _imgui().get_current_context() == _GATE.home
+        return bool(_typesetter().ready())
     except Exception as failure:
         failed(failure)
         return False
@@ -363,8 +360,9 @@ def unavailable_reason() -> str | None:
     Why text cannot be typeset, as one sentence for the menu, or ``None`` when it can.
 
     The sentence says which of the things that can be wrong is: not installed,
-    refused, fonts not loaded, stopped while drawing, or a failure in the gate
-    itself. The library's own words are quoted, not paraphrased.
+    refused, fonts not loaded, fonts loaded in another ImGui context, stopped
+    while drawing, or a failure in the gate itself. The library's own words are
+    quoted, not paraphrased.
     """
     if can_draw():
         if roles.ADOPTED:
@@ -387,32 +385,26 @@ def unavailable_reason() -> str | None:
             if _GATE.accepted:
                 return f"the typesetting library's fonts did not load ({why})"
             return _unaccepted(_kind(typesetter), why)
-        if not typesetter.ready():
-            noted = str(typesetter.trouble())
-            return f"the typesetting library's fonts did not load ({noted or 'no reason given'})"
+        if _GATE.loaded:
+            return (
+                f"the typesetting library's fonts are in another window's context "
+                f"({typesetter.why_not_ready()})"
+            )
+        noted = str(typesetter.trouble())
+        return f"the typesetting library's fonts did not load ({noted or 'no reason given'})"
     except Exception as failure:
         return f"the typesetting library failed and is not in use ({type(failure).__name__})"
-    return "the typesetting library's fonts are in another window's context"
 
 
 def _kind(typesetter: Any) -> str:
     """
-    Which kind of thing is so of the library, as one of advtext's own words for it.
+    Which kind of thing is so of the library, as advtext's own word for it.
 
-    **The one place pptmstr asks whether the library can say this itself.** An
-    advtext that has ``typesetter.kind()`` is asked, and what it answers is
-    final: it knows of routes to a library, and of reasons for there being
-    none, that the two variables do not show. One that has not is read by what
-    it does answer: accepted is ``READY``, a library that was named and is not
-    in use was ``REFUSED``, and no library named is ``NOT_INSTALLED``.
+    ``typesetter.kind()`` is asked and what it answers is final: it knows of
+    routes to a library, and of reasons for there being none, that the two
+    variables do not show.
     """
-    asked = getattr(typesetter, "kind", None)
-    if callable(asked):
-        found = asked()
-        return str(getattr(found, "value", found))
-    if typesetter.module() is not None:
-        return READY
-    return REFUSED if pairing.named(typesetter.LIBRARY_VARIABLE) else NOT_INSTALLED
+    return str(typesetter.kind().value)
 
 
 def _unaccepted(kind: str, why: str) -> str:
@@ -462,9 +454,9 @@ def settle() -> None:
     checkout set for itself back out of the environment (``pairing.release``).
 
     For the entry point, before the application starts anything. In that
-    order: the library reads the variables the first time it is asked and not
-    again, and what is left in the environment after that is only what a
-    session's process would inherit. The first asking is the library's import
+    order: the library remembers the pair it accepted when it was first asked,
+    and what is left in the environment after that is only what a session's
+    process would inherit. The first asking is the library's import
     and its check against the wheel, which the font load would otherwise have
     been the first to pay. Never raises: an advtext that is not there has
     nothing to read them with, and ``unavailable_reason`` finds that again.
@@ -735,7 +727,6 @@ def load_fonts(bold: Path | None = None) -> bool:
     anything raised on the way; ``unavailable_reason()`` has the sentence.
     """
     _GATE.asked = True
-    _GATE.home = None
     _GATE.family = None
     _GATE.bold = bold
     _COLUMNS.clear()
@@ -753,7 +744,6 @@ def load_fonts(bold: Path | None = None) -> bool:
             _reader()
             family = roles.proportional()
             _register(bold, roles.prose_path(family))
-            _GATE.home = _imgui().get_current_context()
             if typesetter.load_fonts():
                 _GATE.family = family.name
                 _GATE.loaded = True
@@ -806,24 +796,21 @@ def face_font(face: str) -> Any:
     member (``"PROSE_BOLD"``), or ``None``.
 
     ``None`` when the library cannot draw, when it loaded no file for the face,
-    and when the reach itself fails; ``imgui.push_font`` reads ``None`` as "keep
-    the current font", so a caller that pushes the answer falls back to the UI
-    font. Asked every time: the library's fonts move on the atlas when it loads
-    them again. Never raises.
+    and when the library cannot say (``typesetter.font``); ``imgui.push_font``
+    reads ``None`` as "keep the current font", so a caller that pushes the
+    answer falls back to the UI font. Asked every time: the library's fonts
+    move on the atlas when it loads them again. Never raises.
 
-    The module docstring says what kind of reach this is. Measured on ASCII in
-    Inconsolata (``scripts/measure_typeset_advances.py``, the control): text
-    ImGui draws from this entry lands where the chrome's own font puts it.
+    Measured on ASCII in Inconsolata (``scripts/measure_typeset_advances.py``,
+    the control): text ImGui draws from this entry lands where the chrome's own
+    font puts it.
     """
     if not can_draw():
         return None
     try:
-        typesetter = _typesetter()
-        index = typesetter.module().font_atlas_index(typesetter.FACE_ROLES[face])
-        fonts = _imgui().get_io().fonts.fonts
-        if index is None or not 0 <= index < len(fonts):
-            return None
-        return fonts[index]
+        from advtext import Face
+
+        return _typesetter().font(Face[face])
     except Exception:
         return None
 
@@ -1227,7 +1214,6 @@ def unload() -> None:
     if not _GATE.asked:
         return
     _GATE.asked = False
-    _GATE.home = None
     _GATE.family = None
     _GATE.accepted = _GATE.loaded = False
     _GATE.failure = _GATE.stopping = None

@@ -32,10 +32,10 @@ PAST_THE_FACADE = {"typesetter", "markdown_rules"}
 """
 What the seam imports from ``advtext`` that is not in ``advtext.__all__``, and why.
 
-- ``typesetter``: the module itself. ``module``, ``trouble``, ``unload`` and
-  ``LIBRARY_VARIABLE`` are reached through it and nowhere else; the library says
-  so of the first three in its own docstring, and its examples import it the
-  same way.
+- ``typesetter``: the module itself. ``module``, ``trouble``, ``unload``,
+  ``font`` and ``why_not_ready`` are reached through it and nowhere else; they
+  are names of the module's own list and not of the facade's, and the library's
+  examples import it the same way.
 - ``markdown_rules``: for its private ``_parser``, in ``gate._reader`` and nowhere
   else. The library has no supported place for a host's reader rules (request P7
   of ``HANDOFF-advtext.md``), and without them a pane hides what was written:
@@ -206,10 +206,13 @@ def test_the_application_imports_with_the_library_absent_and_says_why() -> None:
 def _a_library_that_accepts(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     The library's gate answering yes, whether or not there is a library: what is
-    under test is what pptmstr does when the step after it goes wrong.
+    under test is what pptmstr does when the step after it goes wrong. Nothing
+    is sized at the load: a theme is sized from the library's own font metrics,
+    and what stands in for the library here has none.
     """
     monkeypatch.setattr(typesetter, "module", lambda: object())
     monkeypatch.setattr(gate, "_register", lambda bold, prose: None)
+    monkeypatch.setattr(gate.themes, "document_theme", lambda: None)
 
 
 def test_a_font_load_that_raises_leaves_pptmstr_drawing_and_the_reason_said(
@@ -282,10 +285,11 @@ def test_the_sentence_tells_refused_from_fonts_from_stopped_while_drawing(
     sentence: str,
 ) -> None:
     """
-    Three faults an operator acts on differently, and the library answers all
-    three as "not in use" with a reason. Which it is, is what pptmstr saw happen.
+    Three faults an operator acts on differently. A library that was never
+    accepted says which kind of thing it is itself; one that was, and is not in
+    use now, is told apart by what pptmstr saw happen.
     """
-    monkeypatch.setenv(typesetter.LIBRARY_VARIABLE, "/somewhere/libimtypeset_bundle.so")
+    monkeypatch.setattr(typesetter, "kind", lambda: typesetter.Kind.REFUSED)
     monkeypatch.setattr(typesetter, "module", lambda: None)
     monkeypatch.setattr(typesetter, "reason", lambda: said)
     monkeypatch.setattr(typesetter, "trouble", lambda: noted)
@@ -440,52 +444,74 @@ def test_unloading_stops_the_library_drawing_and_loading_starts_it_again(seam: A
 
 def test_faces_loaded_under_one_context_are_not_available_under_another(seam: Any) -> None:
     """
-    The library's fonts are on one context's atlas, and its own ``ready()`` does
-    not know which. A second context made beside the first must not find the seam
-    switched on: ``enabled()`` true there is a pane drawing into an atlas that is
-    not the current one, or is gone.
+    The library's fonts are on one context's atlas, and its ``ready()`` answers
+    for the context that is current. A second context made beside the first
+    does not find the seam switched on: ``enabled()`` true there is a pane
+    drawing into an atlas that is not the current one. The sentence is the
+    library's own.
     """
     home = seam.get_current_context()
     assert typeset.can_draw() and typeset.enabled()
     other = seam.create_context()
     try:
         seam.set_current_context(other)
-        assert typesetter.ready(), "the library does not tell the two apart"
+        assert not typesetter.ready()
         assert not typeset.can_draw() and not typeset.enabled()
-        assert "another window's context" in (typeset.unavailable_reason() or "")
+        assert typeset.unavailable_reason() == (
+            "the typesetting library's fonts are in another window's context "
+            f"({typesetter.why_not_ready()})"
+        )
+        assert "is not the current one" in typesetter.why_not_ready()
+        assert typeset.face_font("CODE") is None
     finally:
         seam.set_current_context(home)
         seam.destroy_context(other)
     assert typeset.can_draw() and typeset.enabled()
 
 
-def test_destroying_the_context_the_faces_are_in_forgets_them(seam: Any) -> None:
+def _a_context_with_a_font(im: Any) -> Any:
+    import imgui_bundle
+
+    context = im.create_context()
+    im.set_current_context(context)
+    io = im.get_io()
+    io.display_size = im.ImVec2(1200.0, 800.0)
+    io.backend_flags |= im.BackendFlags_.renderer_has_textures.value
+    medium = Path(imgui_bundle.__file__).parent / "assets" / "fonts" / "Inconsolata-Medium.ttf"
+    io.fonts.add_font_from_file_ttf(str(medium), 16.0)
+    return context
+
+
+def test_a_context_destroyed_with_the_faces_in_it_and_nobody_told_takes_them_with_it(
+    seam: Any,
+) -> None:
     """
-    ``available()`` knows the fonts' context by its address, and the next context
-    made can be given the address of one just destroyed: the seam would then be
-    available over an atlas that is freed. So whoever destroys that context, the
-    library is unloaded first (``tests/conftest.py``).
+    Nobody calls ``unload()`` here, and the seam keeps no record of where the
+    fonts are. The context they were loaded in is destroyed under the library;
+    the next context made is often given that one's address, with a font of
+    the test's own where the library's stood. In neither that context nor the
+    one the module began with is the seam switched on over an atlas that is
+    gone, and a load in a live context is the whole way back.
     """
     home = seam.get_current_context()
-    other = seam.create_context()
+    doomed = _a_context_with_a_font(seam)
     try:
-        seam.set_current_context(other)
-        # As if the fonts had been loaded here: the seam's only record of where.
-        gate._GATE.home = other
-        assert typeset.can_draw()
+        assert typeset.load_fonts(BOLD) and typeset.can_draw()
     finally:
-        seam.destroy_context(other)
+        seam.destroy_context(doomed)
         seam.set_current_context(home)
-    assert gate._GATE.home is None and not gate._GATE.asked
-    assert not typesetter.ready(), "the library's context went with it"
-    again = seam.create_context()
+    assert not typeset.can_draw() and not typeset.enabled()
+    assert "another window's context" in (typeset.unavailable_reason() or "")
+    again = _a_context_with_a_font(seam)
     try:
-        seam.set_current_context(again)
-        assert not typeset.can_draw()
+        assert not typeset.can_draw() and typeset.face_font("CODE") is None
+        assert typeset.load_fonts(BOLD) and typeset.can_draw()
+        assert typeset.face_font("CODE") is not None
     finally:
         seam.destroy_context(again)
         seam.set_current_context(home)
-    assert typeset.load_fonts(BOLD)
+    assert not typeset.can_draw()
+    assert typeset.load_fonts(BOLD) and typeset.can_draw()
 
 
 def test_the_epoch_the_atlas_guard_follows_moves_with_sizes_and_with_a_load(seam: Any) -> None:

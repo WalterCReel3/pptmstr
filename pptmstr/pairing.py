@@ -284,10 +284,12 @@ def release(environ: MutableMapping[str, str] | None = None) -> None:
     Take back out of the environment the variables ``adopt`` set there.
 
     For the entry point, once advtext has been asked for the library: advtext
-    reads the two variables the first time it is asked and not again, and from
-    then on they are only what a child process would inherit (the module
-    docstring says why it must not). A variable the caller set, and one that no
-    longer holds what ``adopt`` set, is left. Does nothing before ``adopt``.
+    remembers the pair a load by the two variables was accepted with, and is
+    made with it again when it is asked again after a ``typesetter.reset()``,
+    so from then on the variables are only what a child process would inherit
+    (the module docstring says why it must not). A variable the caller set, and
+    one that no longer holds what ``adopt`` set, is left. Does nothing before
+    ``adopt``.
     """
     target = os.environ if environ is None else environ
     for name, value in _FOUND.given if _FOUND is not None else ():

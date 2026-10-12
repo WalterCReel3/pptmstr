@@ -2,20 +2,16 @@
 What every test file gets: the typeset seam cannot leak from one test into another.
 
 The seam is module state -- one library context, one font registry, one operator
-setting -- and two things about it are properties of a *process* that a test must
-not inherit:
+setting -- and one thing about it is a property of a *process* that a test must
+not inherit: **the operator's settings.** A test that switches typesetting off,
+a pane off, or gives a role another face or size, leaves the seam as it found
+it: the next file's tests are not run with a switch somebody else threw.
 
-- **A library context whose ImGui context is gone.** The library's own
-  ``ready()`` stays true after the ImGui context its fonts are on is destroyed,
-  and a view then draws into an atlas that is freed. ``typeset.can_draw()``
-  compares the current context with the one the fonts were loaded in, but that is
-  a comparison of addresses and a context made later can be given the address of
-  one destroyed earlier. So **destroying the context the fonts are in unloads the
-  library first, whoever destroys it** (``_a_destroyed_context_takes_its_fonts``):
-  no test file has to remember ``typeset.unload()`` for that to hold.
-- **The operator's settings.** A test that switches typesetting off, a pane off, or
-  gives a role another face or size, leaves the seam as it found it: the next
-  file's tests are not run with a switch somebody else threw.
+A library context whose ImGui context is gone is not such a thing: the library
+answers that it cannot draw in any context but the one its fonts were loaded
+in, a destroyed one included (``typesetter.ready``), so a test file that
+destroys its context without ``typeset.unload()`` leaves nothing the next one
+can draw into.
 
 **With the library and without.** The library is found through
 ``IMTYPESET_LIBRARY`` and ``IMTYPESET_PYTHON``; ``make test`` sets them when the
@@ -42,30 +38,6 @@ from pptmstr.ui import typeset
 from pptmstr.ui.typeset import gate
 
 BOLD = theme._ASSETS / "fonts" / "Inconsolata-Bold.ttf"
-
-
-@pytest.fixture(autouse=True, scope="session")
-def _a_destroyed_context_takes_its_fonts() -> Iterator[None]:
-    try:
-        from imgui_bundle import imgui
-    except Exception:
-        yield
-        return
-    real = imgui.destroy_context
-
-    def destroy(context: Any = None) -> None:
-        home = gate._GATE.home
-        doomed = imgui.get_current_context() if context is None else context
-        if home is not None and doomed == home:
-            typeset.unload()
-        if context is None:
-            real()
-        else:
-            real(context)
-
-    imgui.destroy_context = destroy
-    yield
-    imgui.destroy_context = real
 
 
 @pytest.fixture(autouse=True)

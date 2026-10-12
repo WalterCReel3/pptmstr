@@ -44,7 +44,6 @@ P10 = "P10: a run wider than the measure with no space in it is not broken at th
 P11 = "P11: an inline code run has no size of its own"
 P12 = "P12: code wider than its view cannot be scrolled to and its width is not reported"
 P13 = "P13: the lines of a block are not one pitch whatever is on them"
-P14 = "P14: the ImFont the library draws a face with is not a supported name"
 P15 = "P15: no rule under every row of a table"
 P16 = "P16: whether a diff's file header fit its view is not answered"
 P17 = (
@@ -1239,14 +1238,13 @@ FACE_FILES = {
 }
 
 
-def test_the_librarys_font_for_a_face_is_still_found_where_its_demonstration_finds_it(
+def test_the_librarys_font_for_a_face_is_the_atlas_entry_of_that_faces_file(
     seam: Any,
 ) -> None:
     """
-    The probe of the one reach that has no promise (``gate.face_font``, request
-    P14): each face answers the atlas entry of its own file, and text ImGui
-    measures in the library's monospace entry is as wide as in the chrome's own
-    font. A library that moved the reach answers ``None`` and fails here.
+    ``gate.face_font`` is the library's own answer (``typesetter.font``): each
+    face answers the atlas entry of its own file, and text ImGui measures in
+    the library's monospace entry is as wide as in the chrome's own font.
     """
     found = {name: typeset.face_font(name) for name in FACE_FILES}
     assert {name: font and font.get_debug_name() for name, font in found.items()} == FACE_FILES
@@ -2902,14 +2900,15 @@ def test_anything_else_the_library_raises_inside_a_draw_is_the_library_stopping(
     assert typeset.load_fonts(BOLD), "a load is the way back"
 
 
-def test_a_lone_surrogate_in_a_body_stops_the_library_and_does_not_leave_the_seam(
+def test_a_lone_surrogate_in_a_body_is_set_as_the_replacement_character_and_stops_nothing(
     seam: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """
-    The fault above with nothing patched. ``json.loads`` makes a lone surrogate
-    of ``"\\udc80"``, so a tool call's arguments can hold one, and the library
-    cannot encode it for its native half: ``UnicodeEncodeError``, which is not
-    its own failure and which it passes on.
+    ``json.loads`` makes a lone surrogate of ``"\\udc80"``, so a tool call's
+    arguments can hold one, and it cannot be encoded for the library's native
+    half. The library sets it as U+FFFD, one for one, so no offset moves:
+    nothing is raised, the body is on screen, and the library goes on drawing.
+    What is on screen is then not what was written, by that one character.
     """
     import json
 
@@ -2918,12 +2917,11 @@ def test_a_lone_surrogate_in_a_body_stops_the_library_and_does_not_leave_the_sea
     said = _said(monkeypatch)
     cache = typeset.ViewCache()
     frame(seam, lambda: typeset.markdown(cache, "k", body))
-    assert len(said) == 1 and "the library raised UnicodeEncodeError" in said[0]
-    assert cache.unbuilt("k") == 1
+    assert said == []
+    assert cache.unbuilt("k") == 0
+    assert cache.texts("k") == ("a \ufffd b",)
     typeset.pre_frame()
-    assert not typeset.can_draw()
-    assert "UnicodeEncodeError" in (typeset.unavailable_reason() or "")
-    assert typeset.load_fonts(BOLD)
+    assert typeset.can_draw()
 
 
 def test_what_the_seams_own_code_raises_inside_a_draw_is_a_defect_and_is_not_caught(

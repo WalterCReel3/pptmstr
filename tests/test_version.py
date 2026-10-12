@@ -388,20 +388,6 @@ def test_the_library_is_asked_before_its_variables_are_taken_back_whatever_askin
     assert order == ["asked", "released", "released"]
 
 
-def test_a_refused_library_is_still_refused_once_its_variable_is_taken_back(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # Without a `kind` of its own the library is read by whether one was named.
-    for name in VARIABLES:
-        monkeypatch.delenv(name, raising=False)
-    environ: dict[str, str] = {}
-    _adopted(tmp_path, monkeypatch, environ)
-    pairing.release(environ)
-    monkeypatch.setattr(typesetter, "reason", lambda: "why")
-    monkeypatch.setattr(typesetter, "module", lambda: None)
-    assert gate.library() == (gate.REFUSED, "the typesetting library was refused (why)")
-
-
 _CHILD = (
     "import json, os, subprocess, sys\n"
     "from pptmstr import __main__ as entry, app, pairing\n"
@@ -459,6 +445,61 @@ def test_a_process_pptmstr_starts_is_not_given_the_pair_pptmstr_found_for_itself
     assert seen["child"] == {}
     assert seen["loaded"] == [True, True] and seen["unset"] == 0, seen["reason"]
     assert seen["named"] == str(pair / pairing.LIBRARY_NAME)
+
+
+_AGAIN = (
+    "import json, os, subprocess, sys\n"
+    "from pptmstr import __main__ as entry, app, pairing\n"
+    "def named():\n"
+    "    return sorted(k for k in os.environ if k.startswith('IMTYPESET_'))\n"
+    "def application(argv):\n"
+    "    from advtext import typesetter\n"
+    "    seen = {'route': pairing.adopt().route, 'released': named(),\n"
+    "            'first': typesetter.kind().value}\n"
+    "    typesetter.reset()\n"
+    "    seen['again'] = typesetter.module() is not None\n"
+    "    seen['kind'] = typesetter.kind().value\n"
+    "    seen['reason'] = typesetter.reason()\n"
+    "    seen['named_by'] = typesetter.pairing()['named_by']\n"
+    "    seen['library'] = typesetter.pairing()['library']\n"
+    "    seen['after'] = named()\n"
+    "    child = subprocess.run(\n"
+    "        [sys.executable, '-c', 'import os; print(sorted('\n"
+    "         'k for k in os.environ if k.startswith(\"IMTYPESET_\")))'],\n"
+    "        capture_output=True, text=True, check=True)\n"
+    "    seen['child'] = child.stdout.strip()\n"
+    "    print(json.dumps(seen))\n"
+    "    return 0\n"
+    "app.main = application\n"
+    "raise SystemExit(entry.main(['--fake']))\n"
+)
+
+
+@pytest.mark.skipif(_built_pair() is None, reason="no pair built for this checkout's interpreter")
+@pytest.mark.skipif(
+    os.environ.get(pairing.LIBRARY_VARIABLE) == "", reason="this run is the one without the library"
+)
+def test_the_library_asked_again_is_found_again_after_its_variables_were_taken_back() -> None:
+    """
+    The library is asked again after a ``typesetter.reset()``: a test process
+    that provoked a failure, an operator's "try again". By then the entry
+    point has taken both variables back out of the environment, and a library
+    that looked only there would answer "not installed" beside the pair it had
+    just been drawing with. It remembers the pair a load by the environment was
+    accepted with, so the second asking loads it; nothing is put back in the
+    environment for that, and a child is still given neither variable.
+    """
+    pair = _built_pair()
+    assert pair is not None
+    done = _run(script=_AGAIN)
+    assert done.returncode == 0, done.stderr
+    seen = json.loads(done.stdout.splitlines()[-1])
+    assert seen["route"] == pairing.ROUTE_CHECKOUT
+    assert seen["released"] == [] and seen["first"] == gate.READY
+    assert seen["again"] is True and seen["kind"] == gate.READY, seen["reason"]
+    assert seen["named_by"] == typesetter.NAMED_BY_MEMORY
+    assert seen["library"] == str(pair / pairing.LIBRARY_NAME)
+    assert seen["after"] == [] and seen["child"] == "[]"
 
 
 @pytest.mark.skipif(_built_pair() is None, reason="no pair built for this checkout's interpreter")
@@ -844,52 +885,40 @@ def test_the_library_line_is_held_to_built_from_and_not_to_the_ref_file(
 # -- the kind, asked of the library where it can say ---------------------------------
 
 
-class _Kind:
-    def __init__(self, value: str) -> None:
-        self.value = value
-
-
-def test_a_library_that_names_its_own_kind_is_believed_over_the_variables(
+def test_the_librarys_own_kind_is_the_answer_whatever_the_variables_say(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # advtext after the pinned commit: a library found with neither variable
-    # set, and a platform it says it does not serve.
+    # A library found with neither variable set, one named and refused once
+    # its variable was taken back, and a platform the library does not serve.
     monkeypatch.delenv(pairing.LIBRARY_VARIABLE, raising=False)
     monkeypatch.setattr(typesetter, "reason", lambda: "its own words")
 
-    monkeypatch.setattr(typesetter, "kind", lambda: _Kind("ready"), raising=False)
+    monkeypatch.setattr(typesetter, "kind", lambda: typesetter.Kind.READY)
     assert gate.library() == (gate.READY, "")
 
-    monkeypatch.setattr(typesetter, "kind", lambda: _Kind("refused"), raising=False)
+    monkeypatch.setattr(typesetter, "kind", lambda: typesetter.Kind.REFUSED)
     assert gate.library() == (
         gate.REFUSED,
         "the typesetting library was refused (its own words)",
     )
 
-    monkeypatch.setattr(typesetter, "kind", lambda: _Kind("unsupported"), raising=False)
+    monkeypatch.setenv(pairing.LIBRARY_VARIABLE, "/some/lib.so")
+    monkeypatch.setattr(typesetter, "kind", lambda: typesetter.Kind.NOT_INSTALLED)
+    assert gate.library() == (
+        gate.NOT_INSTALLED,
+        "the typesetting library is not installed (its own words)",
+    )
+
+    monkeypatch.setattr(typesetter, "kind", lambda: typesetter.Kind.UNSUPPORTED)
     assert gate.library() == (
         "unsupported",
         "the typesetting library is not in use (unsupported: its own words)",
     )
 
 
-def test_a_library_with_no_kind_is_read_by_what_it_does_answer(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    assert not hasattr(typesetter, "kind"), "the pinned advtext has a kind: close P1 and drop this"
-    monkeypatch.setattr(typesetter, "reason", lambda: "why")
-
-    monkeypatch.setattr(typesetter, "module", lambda: object())
-    assert gate.library() == (gate.READY, "")
-
-    monkeypatch.setattr(typesetter, "module", lambda: None)
-    monkeypatch.setenv(pairing.LIBRARY_VARIABLE, "/some/lib.so")
-    assert gate.library() == (gate.REFUSED, "the typesetting library was refused (why)")
-
-    monkeypatch.delenv(pairing.LIBRARY_VARIABLE)
-    assert gate.library() == (
-        gate.NOT_INSTALLED,
-        "the typesetting library is not installed (why)",
+def test_the_kinds_the_gate_names_are_the_librarys_words_for_them() -> None:
+    assert (gate.READY, gate.NOT_INSTALLED, gate.REFUSED, gate.FAILED) == tuple(
+        typesetter.Kind[name].value for name in ("READY", "NOT_INSTALLED", "REFUSED", "FAILED")
     )
 
 
