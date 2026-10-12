@@ -890,34 +890,59 @@ pin's move to the renamed commit and not before.
 |---|---|---|---|
 | P34 | **The rename is a commit that changes names only, and the commit before it is named too.** And say, when it is specified: whether an `advtext` alias ships for a release, whether the GitHub repository's URL changes, and what the distribution is called to pip. | pptmstr moves its pin in two steps so that a failure can be told apart: first to the last `advtext` commit (behaviour: the diff-view work, reader options, the rest of what was built for it), suite green; then to the rename, where the only edits are names. If behaviour and names arrive in one commit a red suite does not say which. pptmstr's `bootstrap.sh` fetches by repository URL and installs by distribution name, so both are things it has to be told. | open |
 
-## Where pptmstr stands (2026-10-12, at commit `d163520`)
+## Where pptmstr stands (2026-10-12, at commit `b20dd00`)
 
-- **Every pane sets its markdown through the library** when the library can
-  draw, and draws with its own renderer when it cannot, with one sentence in
-  the Text menu saying why. What is not markdown, and everything whose
-  columns are content (tool output, arguments, errors), is ImGui's (P21). No
-  renderer of pptmstr's was deleted (P6).
-- **The diff view is wired into DETAIL, the inbox and settled fences behind a
-  measured check of the running library** (`02dfb06`, `94e2cf1`), which the
-  pinned library fails at every pixel height, so today both panes draw diffs
-  with their own rows. A body or diff the library cut, or a library call that
-  raised, is never what an approve is decided over.
-- **pptmstr keeps every baked font size alive each frame** (`d096838`), the
-  host-side guard for ImGui's mis-sized glyphs (the notice above).
-- **The gate**, read by the last builder after all writes had stopped: with
-  the pair, lint and typecheck clean, 3738 passed, 0 skipped, 24 strict xfails
-  (21 under P9, P10, P11, P12, P13, P15, P16, P17, P19, P21; 3 that predate
-  this work), 2 failed; without the pair 3165 passed, 594 skipped for want of
-  the library, 3 xfails, 2 failed. The 2 are `tests/test_launcher.py`'s, from
-  an uncommitted line in `pptmstr/model_catalog.py` that is not this
-  session's (an export of `HEAD` passes them).
-- **The application was run** under Xvfb and llvmpipe, 720 frames, with the
-  diff override at "measured" and at "always", with the pair and without,
-  exit 0 each time. **Nobody has looked at a picture of the new core's text in
-  pptmstr**, and the user has seen it only in their own two screenshots.
-- **Built against** advtext `38f5fac` and imtypeset `c9f8902`, stand-in
-  headers, from local repositories. The wheel under the library is the
-  advtext lead's venv's (see the state at the top).
+- **Built against** imscribe `bb240c3` and imtypeset `2fd705e` (the section
+  below), **stand-in headers**; every `make` target and every test run now
+  says so in its first lines.
+- **Every pane sets its markdown through the library**, and **an approval's
+  diff is the library's diff view by default** in DETAIL and the inbox, on a
+  whole-pixel cell that pptmstr measures at font load. A diff falls to the
+  pane's own rows, with a line saying why, when the measurement fails, a row
+  holds a character the code face lacks, the call carries no texts, or the
+  diff is past the bound of what is built in a frame (then a button asks for
+  the view). Tool output, arguments, errors and a fence inside a document
+  are still not on a kept column (P21).
+- **What an approve is never decided over** (each held by tests that fail
+  without it): text the library cut or set in part; a view whose library call
+  raised; a body or argument past 2,000 lines until it is asked for; a pane
+  that failed to draw; and, found on the way and older than this branch, a
+  tool argument holding a NUL (ImGui drew `ls\x00; rm -rf x` as `ls`) or a
+  lone surrogate. Such code units are written out as `\uXXXX` for display
+  where session text enters pptmstr; the tool is sent the original. A diff
+  holding invisible or bidirectional control characters says so by code point
+  on whichever renderer draws it.
+- **pptmstr keeps every baked font size alive each frame**, the host-side
+  guard for ImGui's mis-sized glyphs (the notice above).
+- **The gate**, by `make check` after all writes had stopped: with the pair,
+  lint and typecheck clean, 3930 passed, 0 skipped, 23 strict xfails (20
+  under P9, P10, P11, P12, P13, P15, P16, P17, P19, P21; 3 that predate this
+  work), 2 failed; without the pair 3276 passed, 674 skipped for want of the
+  library, 3 xfails, 2 failed. The 2 are `tests/test_launcher.py`'s, from an
+  uncommitted line in `pptmstr/model_catalog.py` that is not this session's
+  (an export of `HEAD` passes them).
+- **The application was run** under Xvfb and llvmpipe, 720 frames: with the
+  pair the library's diff view drew in both panes on every frame it was asked
+  (360 draws) and no own diff rows; forced off and without the pair, the
+  panes' own rows; exit 0 each. The user has six screenshots under
+  `shots/bump-b/`; nobody else has looked at a picture.
+- **Re-read last** with imscribe's checkout at `a45edd5` (its pushed head is
+  `bb240c3`, which is the pin) and imtypeset's at `60b2f32`, which names a
+  `v0.4.0` answering H34 and H35; imscribe's `imtypeset.ref` is still
+  `2fd705e`, so pptmstr's is too.
+
+**Next, when imscribe consumes imtypeset `v0.4.0`:** move both pins, re-run
+`scripts/measure_typeset_advances.py`, and where a fence and prose monospace
+hold their columns, let tool output, arguments and errors go through the
+library and drop the three P21 xfails. **And independent of that:**
+`ReaderOptions` in place of the private parser reach (less P35's two gaps),
+and the options for P11, P12, P13 and P19.
+
+**Measured in simulation only, and it bears on the Mac** (pptmstr's builder,
+`e6e2065`): with the framebuffer scale patched to 2, pptmstr's column check
+says no ("lays out a 8.000 px column where ImGui draws 16 px"). If a real 2x
+display does the same, every diff on a Retina Mac is its pane's own rows.
+Nobody has run a display that is not 1x. This is P5 and your H19.
 
 ## The pins moved, and the diff view is live (2026-10-12, pptmstr `8c6a43e`)
 
