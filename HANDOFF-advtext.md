@@ -35,6 +35,30 @@ measured is said with who measured it; the user's direction is quoted.
 | imtypeset | commit `c9f8902a67adf00a18426876d5983617b7d1408c`, the ref `HANDOFF-imtypeset.md` names under "What advtext consumes today" and `imtypeset.ref` holds. |
 | interpreter | CPython 3.11.2, `imgui-bundle` 1.92.900, Linux x86-64 (Debian 12). |
 
+**Built against, by a run** (pptmstr's `DEPS` builder, 2026-10-12; commits
+`41adf6f`, `d32c2a7`):
+
+- `make deps` fetches both projects at the hashes in `advtext.ref` and
+  `imtypeset.ref` (tracked, at this repository's root), installs advtext as a
+  copy, checks the imported package file for file against the pinned commit,
+  and builds the library into the gitignored `.deps/`. **Run against
+  `file://` URLs of the sibling checkouts only; not run against GitHub**, whose
+  URLs are the defaults. `./bootstrap.sh` end to end was not run (it needs a
+  package index).
+- The library: imtypeset `c9f8902`, for `imgui-bundle` 1.92.900, **linked
+  against the advtext lead's venv's `_imgui_bundle` module** (see the state
+  below), with **stand-in headers** (`stand-in:ocornut-v1.92.9-docking`). The
+  fork's headers are on this machine nowhere the builder found (the bundle
+  checkout's ImGui submodule is empty), so a fork-header build has not been
+  made or tested by pptmstr either (your H2).
+- With the pair, `typesetter.module()` loads and advtext's
+  `examples/typeset_minimal.py --frames 3` from the pinned tree exits 0 under
+  Xvfb (`frames=3 renderer=TypesetView blocks=37`). Without it: exit 1 with
+  `IMTYPESET_LIBRARY is not set`.
+- The pair under an interpreter whose first `imgui_bundle` is another wheel
+  (1.92.801): `module()` is `None`, `reason()` names both module paths, no
+  crash. Not run: the wheel module replaced in place at the same path.
+
 This table is updated at each boundary of the work; the git history of this
 file is the record of when the refs moved.
 
@@ -251,10 +275,12 @@ build confirms or withdraws one.
 | P18 | **A supported way back from `typesetter.disable()`**. | One provoked failure switches the library off for the rest of a test process; only the private `_forget()` undoes it. An operator-facing "try again" needs the same call. | open |
 | P19 | **A settled table at its natural widths**, as a stream holds it. | A table changes every column's width on the frame its stream is replaced by the settled view. Test: `test_a_table_that_fits_keeps_its_natural_widths_settled_as_it_had_streamed`. | open |
 
+| # | request | the behaviour behind it | state |
+|---|---|---|---|
+| P20 | **Commit `imtypeset.ref`, and name it as the place pptmstr reads the ref from.** | pptmstr builds the library itself and keeps the hash in its own `imtypeset.ref`. advtext's file of that name is untracked and absent at `38f5fac`, so nothing can hold the two in step: a test here would compare them if yours were in the commit pptmstr pins. | open |
+
 ## Work in hand
 
-- **Dependencies by ref** (`DEPS` on pptmstr's board): advtext and imtypeset
-  fetched at the commits above, the sidecar built inside this worktree.
 - **R1 to R6 measured on the new core** (`MEASURE-ADV`): a probe in a
   pptmstr-shaped window, reading the vertex buffer. The numbers go under A2
   when they exist; any request that follows from them is a `P` then, not
