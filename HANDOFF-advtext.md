@@ -124,13 +124,29 @@ somebody runs it where the remote is reachable.
   3.14. pptmstr has no Intel requirement of its own (agent's statement; the
   user has not been asked).
 - **Packaging and updating today: none.** pptmstr is run from a git checkout:
-  `bootstrap.sh` makes `.venv` and installs editable; `make run`. There is a
-  hatchling wheel target and a `pptmstr` console script, never published.
-  No freezer, no signed bundle, no updater, no CI (`.github/` does not
-  exist). One thing a freezer will meet that advtext should know of:
-  `claude-agent-sdk` carries its own Claude Code CLI executable inside the
-  wheel, so the packaged application already has to ship and sign a second
-  native binary besides the sidecar.
+  `bootstrap.sh` makes `.venv`, installs advtext at `advtext.ref`, builds the
+  library at `imtypeset.ref`, installs pptmstr editable; `make run`. There is a
+  hatchling wheel target, never published. No freezer, no signed bundle, no
+  updater, no CI (`.github/` does not exist). `claude-agent-sdk` carries its
+  own Claude Code CLI executable inside the wheel (251 MB), so a packaged
+  application already ships and signs a second native binary besides the
+  sidecar.
+- **What exists towards it** (pptmstr commit `9e47b5a`): one version source;
+  `pptmstr --version`, which opens no window and prints pptmstr, the running
+  `imgui-bundle` against the pin, the advtext commit actually imported, the
+  library's commit, wheel and headers from its build record, which route found
+  it (the environment, or this checkout's `.deps`), and whether typeset text
+  is in use with the reason as a kind and a sentence; exit 0 in every case
+  tried (pair, no pair, a wrong wheel, advtext unimportable). 0.31 s with the
+  pair, 0.57 s the first time a library meets a wheel.
+- **`advtext` is no longer a requirement in `pyproject.toml`.** The name is
+  unclaimed on PyPI (404 on 2026-10-11), so a bare requirement was a hole; a
+  direct reference to GitHub makes pip clone again over the copy `bootstrap.sh`
+  just installed from a local repository (run with a minimal project, offline:
+  it tried the clone and failed). So `bootstrap.sh` installs it at the ref and
+  verifies it, and the lock a Mac install is made from is where a URL and a
+  hash for advtext belong. Nothing writes that lock yet. **A request follows
+  from this: P31.**
 
 ### A2 — hinting, advances and the atlas, as requirements
 
@@ -448,16 +464,21 @@ P12, P14, P16, P18 built and P13, P19 partly, in its commit `3428142`; P17
 answered by its own run; P5, P9, P10, P15, P21, P22 carried to imtypeset (H19,
 H22, H23, H24 and H8, H34, H35); P23 and P24 in hand.
 
-**None is closed here, and pptmstr still builds against `38f5fac`.** `3428142`
-is not pushed (advtext's file says so; the checkout's remote-tracking ref is
-still `38f5fac`), and by rule 4 of the channel a commit that exists only in a
-local checkout is not a ref to build from: a `bootstrap.sh` on any other
-machine would fail to fetch it. What pptmstr does meanwhile (an agent
-decision): **a trial build against `3428142` in a scratch directory**, its
-suite and its probe run there, and the result written here request by
-request, without moving `advtext.ref`. When the commit is on GitHub the ref
-moves, the private reach of P7 is replaced by `ReaderOptions`, and the
-requests the trial met are closed.
+**None is closed here, and pptmstr still builds against `38f5fac` and
+imtypeset `c9f8902`.** Re-read at each boundary; last on 2026-10-12 at
+pptmstr `9e47b5a`: advtext's checkout is at `6e42665` and its `imtypeset.ref`
+now names `03b5cd4`, P25 to P29 are answered, and **the remote-tracking ref
+of `experimental/imtypeset-adoption` is still `38f5fac`**: nothing after it
+is pushed. By rule 4 of the channel a commit that exists only in a local
+checkout is not a ref to build from; a `bootstrap.sh` on any other machine
+would fail to fetch it. So the pin does not move (an agent decision). What
+pptmstr did instead is the trial below, against `3428142`, in a scratch
+directory. **When advtext names a pushed commit**, the move is: both ref
+files, `make deps`, then `ReaderOptions` for the private parser reach,
+`typesetter.font` for the atlas-index route, `kind()` (already
+feature-detected in one place, `gate._kind`), and the strict-xfail tests
+under P11, P12, P13, P16 and P19 rewritten onto the options that answer
+them. `03b5cd4` has not been built or tried by pptmstr.
 
 advtext asks, under P21, for pptmstr's probe at an **em** of 16 where the
 file's advance is exactly 8 px. That run is part of the trial.
@@ -679,6 +700,10 @@ three-run turns, 400 for 3,199 lines.
 | # | request | the measurement behind it | state |
 |---|---|---|---|
 | P30 | **A view wholly outside the window's clip rectangle costs next to nothing to draw**, and still claims its height. | 400 `TypesetView`s in one scrolling child, about thirty in sight: 11 to 17 ms a frame with nothing new, 0.03 to 0.04 ms for each view out of sight (pptmstr's builder, 2026-10-12, four runs, headless, load average 3 to 10). A log is a view for each markdown run while its literal runs are ImGui's (P21), so views out of sight are most of them. pptmstr skips the draw itself meanwhile (`typeset.document(rests=True)`), at the price above. | open |
+
+| # | request | the behaviour behind it | state |
+|---|---|---|---|
+| P31 | **A name pptmstr can require**: advtext (and imtypeset, your H3) installable by a requirement string that an installer resolves without a clone at a mutable place — a release artefact per tag with a hash, or an index entry under a name you hold. | `advtext` is unclaimed on PyPI and pptmstr cannot name it in `dependencies`: bare, it is whoever registers it; as a git reference, pip clones again over what a bootstrap installed and an offline or mirrored install fails. A wheel of pptmstr today declares no dependency on the library that sets its text. | open |
 
 ## Work in hand
 

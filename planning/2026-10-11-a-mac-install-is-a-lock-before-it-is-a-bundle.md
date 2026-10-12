@@ -1,7 +1,7 @@
 # A Mac install is a lock before it is a bundle
 
 **Dated:** 2026-10-11 ·
-**Status:** a recommendation; nothing built. **From reading, by pptmstr's
+**Status:** a recommendation; §5's first step is built (2026-10-12), nothing else. **From reading, by pptmstr's
 reviewer; nothing was run and nobody had a Mac.** Web pages were read through a
 summarising fetch. Apple's developer pages returned only their titles, so every
 statement about dyld, Apple's linker, signing and library validation is
@@ -63,9 +63,9 @@ advtext's repository `HANDOFF-imtypeset.md`, requests H1, H3, H5, H6, H15 to H20
 
 | | today (read) | needed |
 |---|---|---|
-| pins | `imgui-bundle>=1.92.900`, a bare `advtext` | exact, in one tracked manifest of the four-part unit (the `DEPS` task starts it) |
-| version | `__version__` in `pptmstr/__init__.py` and `version` in `pyproject.toml`, two literals nothing ties | one source; `pptmstr --version` prints it with the library pairing and the reason when not drawing, without a window |
-| a refused sidecar | `theme._load_typeset_faces` swallows every exception; "not installed" and "refused" are the same non-empty string | the reason shown once, in one persistent place; never a traceback (P1) |
+| pins | `imgui-bundle==1.92.900`; `advtext.ref` and `imtypeset.ref` hold the two commits, and what is built under `.deps` is held to them; `advtext` is in no requirement, because the name is unclaimed on PyPI | one lock per release naming all four, with hashes; nothing writes it yet |
+| version | one source (`pptmstr.__version__`); `pptmstr --version` prints it with the pairing actually running and the reason when not drawing, without a window (commit `9e47b5a`) | the same line from an updater's staging check, which needs advtext's `verdict()` (P2) |
+| a refused sidecar | every pane falls back to its own renderer and the Text menu and settings dialog say one sentence; the kind is advtext's where it has one | the kind for "not supported on this platform" (P1), once advtext with `kind()` is the pin |
 | own renderers | present for every pane | **kept**, at least until H1 is answered: they are the macOS product if the answer is no (P6) |
 | settings | `$XDG_CONFIG_HOME/pptmstr` or `~/.config/pptmstr`; hello_imgui's ini in its own user-config folder | works on macOS as it is; moving to `~/Library/Application Support` later needs a migration, so decide before the first Mac user |
 | assets | found by `__file__` (`theme._ASSETS`, `splash_art`, the wheel's fonts, the SDK's executable) | "files on disk at package-relative paths", stated to any freezer; `importlib.resources` buys nothing since hello_imgui and the gate want paths |
