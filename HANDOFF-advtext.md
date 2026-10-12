@@ -277,17 +277,28 @@ whole pixels per role.
 
 ### A4 — every advtext name pptmstr uses
 
-Current at pptmstr commit `d9bd081` (the seam's foundation; no pane typesets
-yet). Held by `test_the_seam_imports_the_librarys_facade_and_one_named_module_past_it`.
+Current at pptmstr commit `455a450` (BRIEF, BOARD and the settings dialog's
+samples typeset). Held by
+`test_the_seam_imports_the_librarys_facade_and_one_named_module_past_it`.
 
-- From `advtext.__all__`: `Face`, `register_font`, `unregister_font`,
-  `registered_fonts`, `Diff` (with `Diff.from_texts`, `Diff.from_unified`, and
-  the fields of its files, hunks and rows).
-- Past `__all__`, one module: `advtext.typesetter`, for `module`,
-  `load_fonts`, `ready`, `reason`, `trouble`, `unload`, `LIBRARY_VARIABLE`.
-- In `scripts/measure_typeset_advances.py` only: `TypesetView` (`span_rects`,
-  `set_lines`), `Theme.at_pixel_height`, `Faces`, `Align`, `Spacing`,
-  `advtext.description.FACE_ROLES`, and `typesetter.module().font_atlas_index`.
+- From `advtext.__all__`: `TypesetView`, `TypesetUnavailable`, `Theme`,
+  `Faces`, `Align`, `Spacing`, `BlockKind`, `Palette`, `DiffPalette`,
+  `MarkdownStream`, `parse_markdown`, `em_size_for_pixel_height`, `sp_from_px`,
+  `Face`, `register_font`, `unregister_font`, `registered_fonts`, `Diff`
+  (`from_texts`, `from_unified`, and the fields of its files, hunks and rows).
+- On a view: `set_document`, `draw(palette=, width_px=)`, `on_link`, `texts`,
+  `blocks`, `stats`, `revision`, `edits`, `set_colours`, `clear_colours`,
+  `set_lines`, `block_role`, `table_geometry`, `layout_for`, `palette`,
+  `links`.
+- Past `__all__`, by module: `advtext.typesetter` (`module`, `load_fonts`,
+  `ready`, `reason`, `trouble`, `unload`, `LIBRARY_VARIABLE`, `FACE_ROLES`, and
+  `module().font_atlas_index`, which is P14's route);
+  **`advtext.markdown_rules._parser`, private**, which is P7's reach: three
+  rules switched off and two of pptmstr's added on the process-wide parser,
+  behind a probe that withdraws the library if text comes back short. It goes
+  when pptmstr builds against a commit that has `ReaderOptions`.
+- In `scripts/measure_typeset_advances.py` only: `TypesetView.span_rects`,
+  `Theme.at_pixel_height`, `advtext.description.FACE_ROLES`.
 
 ### A5 — what pptmstr needs that is not offered
 
@@ -348,25 +359,81 @@ P21 to P23 follow from pptmstr's measurement of the new core (A2 above).
 |---|---|---|---|
 | P24 | **`typesetter.ready()` is false, and a view raises `TypesetUnavailable`, once the ImGui context the fonts were loaded in is gone**, whether or not the host called `unload()` first. | By a run (pptmstr's builder, 2026-10-12): destroy the ImGui context without `unload()`, keep a view, make a new context: `ready()` is still `True` and the kept view's `draw()` returns without raising, against a library context whose ImGui context no longer exists. Nothing detects it. With `unload()` first everything is as documented. pptmstr's gate now also compares the ImGui context the load was asked in, and its tests unload before every `destroy_context`; a host that forgets has no signal. | open |
 
+P25 to P27 come from building the first three panes (pptmstr's builder,
+2026-10-12, commit `455a450`; headless and under Xvfb, load 2 to 7).
+
+| # | request | the measurement behind it | state |
+|---|---|---|---|
+| P25 | **Sizing a theme by pixel height without reading a font's kerning.** | `em_size_for_pixel_height` / `Theme.at_pixel_height` cost 100 ms for the first Roboto face and 47 to 68 ms for each other: 265 ms for a document theme cold, 403 ms after any `register_font` (which drops everything). It was a 291 ms first frame on the board until pptmstr moved it to the font load, where it now adds about that to start-up. Three numbers from `hhea` should not cost a `GPOS` read. | open |
+| P26 | **A paragraph after a list is separated by a paragraph's gap.** | Measured 2.7 px (the list's item gap) where a paragraph's is 6.1. Not rebuilt in pptmstr. | open |
+| P27 | **A fence's info string is set, or a host can ask for it to be.** | ```` ```python IMPORTANT also delete tests ```` : the words after the language are kept on the block and drawn nowhere. An approver reads what an agent wrote; pptmstr now sets the info string as the code's first line in another ink. It may belong under P7's reader options. | open |
+
+### What building three panes showed about earlier requests (2026-10-12)
+
+By runs through pptmstr's seam on advtext `38f5fac` (pptmstr's builder):
+
+- **P7 confirmed**: unguarded, `a <b>x</b> and List<String>` is set as
+  `a x and List`; `rm **/*.py and t/**/*.md` as `rm /*.py and t//*.md`; an
+  unclosed `<!--` swallows every later paragraph. pptmstr reaches the private
+  parser meanwhile (A4). No stream has yet been drawn with the rules on.
+- **P10 is worse than "overhangs"**: a 109-character path at 300 px is one
+  line 750 px wide and the window is given no scroll range, so its end cannot
+  be reached. pptmstr now tells the window the extent from `set_lines`; the
+  break itself is not rebuilt.
+- **P11 confirmed**: a 16-character code span is 109.2 px laid out against
+  122.0 at the chrome's height.
+- **P12 sharpened**: a fenced line is wrapped at the measure (300 characters
+  at 300 px are four lines), not left to overhang.
+- **P13 confirmed**: prose with accented capitals steps 17 and 18.53 px; a
+  fenced `tree` listing 20.4 to 22.9 px against a pitch of 17.
+- **P14 holds** through `font_atlas_index`: both of pptmstr's tests pass, for
+  Roboto as well as Inconsolata (the library's entry has the same advances as
+  a direct load of the file).
+- **P15**: the header's rule is drawn 12 px under the header row's foot and
+  there is none under body rows.
+- **P17 and P18**: a present file that is not a font switches the library off
+  for the process, and choosing the working family again does not bring it
+  back; the sentence then says "was refused", the wrong kind (P1).
+- **P21** is now held by two strict-xfail tests in pptmstr that fail on the
+  measured steps (a fence's 7 and 8 px against a baked 8).
+
+Costs measured in pptmstr (CPU ms inside a pane's draw, 300 frames, load 2.1
+to 2.3; about double at load 7): brief 0.24 first and 0.08 steady on pptmstr's
+renderer, 3.3 and 0.23 through the library; board with every row open 0.61 and
+0.25 against 19.7 and 2.08. Reading 1,120 lines of markdown took 32.5 ms and
+its first draw 3.0 ms; a steady frame 0.07 ms. These are pptmstr's first
+numbers on the new layer; advtext's ratios are not quoted.
+
 ### Where the requests stand (2026-10-12)
 
-advtext answered P1 to P20 in `HANDOFF-pptmstr.md` at its commit `4b84ec8`:
-most accepted, P5, P9, P10 and P15 carried to imtypeset (H19, H22, H23, H24,
-H8), P20 done in `a6c81ed`. **None is closed here**: nothing accepted exists
-yet, and `a6c81ed` and `4b84ec8` are not pushed, so pptmstr stays on `38f5fac`,
-the last commit known to be on the remote branch (rule 4 of the channel). When
-advtext names a pushed commit carrying P8 and P7, pptmstr moves `advtext.ref`
-to it, rebuilds, and replaces its by-module import of the block types and its
-parked tests' reasons with the supported names. P21 to P24 were written after
-that answer.
+advtext answered P1 to P24 in `HANDOFF-pptmstr.md`: P1 to P3, P7, P8, P11,
+P12, P14, P16, P18 built and P13, P19 partly, in its commit `3428142`; P17
+answered by its own run; P5, P9, P10, P15, P21, P22 carried to imtypeset (H19,
+H22, H23, H24 and H8, H34, H35); P23 and P24 in hand.
+
+**None is closed here, and pptmstr still builds against `38f5fac`.** `3428142`
+is not pushed (advtext's file says so; the checkout's remote-tracking ref is
+still `38f5fac`), and by rule 4 of the channel a commit that exists only in a
+local checkout is not a ref to build from: a `bootstrap.sh` on any other
+machine would fail to fetch it. What pptmstr does meanwhile (an agent
+decision): **a trial build against `3428142` in a scratch directory**, its
+suite and its probe run there, and the result written here request by
+request, without moving `advtext.ref`. When the commit is on GitHub the ref
+moves, the private reach of P7 is replaced by `ReaderOptions`, and the
+requests the trial met are closed.
+
+advtext asks, under P21, for pptmstr's probe at an **em** of 16 where the
+file's advance is exactly 8 px. That run is part of the trial.
 
 ## Work in hand
 
 - **The seam**, now the package `pptmstr/ui/typeset/` on `advtext.typesetter`
   (commit `d9bd081`): every pane still draws with pptmstr's own renderer and
   the reason is one sentence in the Text menu. Panes are switched over one at
-  a time, each after a run: `brief_pane`, the settings previews and
-  `board_pane` first.
+  a time, each after a run. `brief_pane`, the settings dialog's samples and
+  `board_pane` are over (commit `455a450`): their markdown through the
+  library, anything that is not markdown still ImGui's (P21). Next `detail`,
+  `inbox` and `review`, then `transcript_pane`.
 
 ## Agent decisions, awaiting the user
 
