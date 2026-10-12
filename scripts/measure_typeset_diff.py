@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Where advtext's ``TypesetDiffView`` puts the glyphs of a diff's rows, as numbers.
+Where imscribe's ``TypesetDiffView`` puts the glyphs of a diff's rows, as numbers.
 
 The question is the one ``scripts/measure_typeset_advances.py`` asks of a fenced
 block (R4 and R5 of ``HANDOFF-advtext.md``, requests P21 and P22), asked of the
@@ -293,7 +293,7 @@ def main() -> int:
     os.environ.setdefault("IMTYPESET_LIBRARY", str(PAIR / "libimtypeset_bundle.so"))
     os.environ.setdefault("IMTYPESET_PYTHON", str(PAIR / "pysnap"))
 
-    from advtext import (
+    from imscribe import (
         DARK_PALETTE,
         Align,
         Diff,
@@ -310,8 +310,8 @@ def main() -> int:
         print(f"imtypeset is not drawing: {typesetter.reason()}", file=sys.stderr)
         return 1
 
-    from advtext.description import FACE_ROLES
     from imgui_bundle import hello_imgui, imgui, immapp
+    from imscribe.description import FACE_ROLES
 
     from pptmstr import theme as ui_theme
     from pptmstr.ui import typeset

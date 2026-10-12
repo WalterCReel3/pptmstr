@@ -115,7 +115,7 @@ def _bold_monospace() -> bool:
     Whether the library was given a bold monospace file of its own. Without one it
     backs the face with a proportional bold, and the columns go with it.
     """
-    from advtext import Face, registered_fonts
+    from imscribe import Face, registered_fonts
 
     return Face.CODE_BOLD in registered_fonts()
 
@@ -125,7 +125,7 @@ def _faces(slot: Slot) -> Any:
     The face table of a theme whose running text is in ``slot``. Without a bold
     monospace the weight is given up and the columns kept.
     """
-    from advtext import Face, Faces
+    from imscribe import Face, Faces
 
     bold = Face.CODE_BOLD if _bold_monospace() else Face.CODE
     return Faces.mono(bold=bold) if slot is Slot.MONOSPACE else Faces(code_bold=bold)
@@ -136,7 +136,7 @@ def _sized(style: Any, face: Any, tall: float, pitch: float) -> Any:
     A block style in ``face``, ``tall`` pixels high as ImGui means a font size,
     its baselines ``pitch`` pixels apart.
     """
-    from advtext import em_size_for_pixel_height, sp_from_px
+    from imscribe import em_size_for_pixel_height, sp_from_px
 
     size = sp_from_px(em_size_for_pixel_height(face, tall))
     return replace(style, font=replace(style.font, face=face, size=size), leading=sp_from_px(pitch))
@@ -162,7 +162,7 @@ def diff_theme() -> Any:
     base = demoted(0)
     hit = _KEPT.diff
     if hit is None:
-        from advtext import BlockKind, Face, px_from_sp
+        from imscribe import BlockKind, Face, px_from_sp
 
         pitch = roles.pitch(Role.DIFF)
         code = _sized(base.blocks[BlockKind.CODE], Face.CODE, roles.px(Role.DIFF), pitch)
@@ -195,7 +195,7 @@ def demoted(levels: int) -> Any:
             base = _KEPT.themes[0] = _build()
         hit = base
         if levels:
-            from advtext import BlockKind
+            from imscribe import BlockKind
 
             blocks = dict(base.blocks)
             for level in range(1, 7):
@@ -206,7 +206,7 @@ def demoted(levels: int) -> Any:
 
 
 def _build() -> Any:
-    from advtext import Align, BlockKind, Face, Spacing, Theme
+    from imscribe import Align, BlockKind, Face, Spacing, Theme
 
     prose = roles.style(Role.PROSE)
     base = Theme.at_pixel_height(
@@ -287,7 +287,7 @@ def build_palette(p: ui_theme.Palette) -> Any:
     for both and are what tells the two apart without hue, so that ink is the
     theme's ``text`` and not a dim one.
     """
-    from advtext import BlockKind, DiffPalette, Palette
+    from imscribe import BlockKind, DiffPalette, Palette
 
     roles_ink = {BlockKind[f"HEADING_{level}"]: p.accent.u32 for level, _, _, _ in HEADINGS}
     roles_ink[BlockKind.QUOTE] = p.text_dim.u32

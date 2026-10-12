@@ -8,23 +8,23 @@
 # has no X display, so the window smoke test is wrapped in Xvfb or skipped with
 # an explanation, rather than failing for a reason unrelated to the build.
 #
-# advtext is on no package index. Stage 3 fetches it at the commit advtext.ref
-# names, installs that, and then builds the imtypeset library advtext draws
+# imscribe is on no package index. Stage 3 fetches it at the commit imscribe.ref
+# names, installs that, and then builds the imtypeset library imscribe draws
 # through, from the commit imtypeset.ref names, for the interpreter in .venv
 # (scripts/typeset_deps.py; everything lands in .deps/). The sources come from
 # GitHub unless a variable names another repository -- a URL, a file:// URL or a
 # local path:
 #
-#   ADVTEXT_REPO  IMTYPESET_REPO  IMGUI_BUNDLE_REPO  IMGUI_REPO
+#   IMSCRIBE_REPO  IMTYPESET_REPO  IMGUI_BUNDLE_REPO  IMGUI_REPO
 #
-# ADVTEXT_PIP_ARGS is added to the advtext install and to nothing else. This
+# IMSCRIBE_PIP_ARGS is added to the imscribe install and to nothing else. This
 # script as a whole needs a package index: a .venv it has just made holds
-# nothing, so advtext's build backend and everything pyproject.toml names come
-# from one. Where there is no index, `make deps` repeats the advtext and library
+# nothing, so imscribe's build backend and everything pyproject.toml names come
+# from one. Where there is no index, `make deps` repeats the imscribe and library
 # part alone in a .venv that already holds them, and there
-# ADVTEXT_PIP_ARGS="--no-deps --no-index --no-build-isolation" is what it takes.
+# IMSCRIBE_PIP_ARGS="--no-deps --no-index --no-build-isolation" is what it takes.
 #
-# Fetching needs git, and bootstrap stops without advtext. The library also
+# Fetching needs git, and bootstrap stops without imscribe. The library also
 # needs a C++ compiler, Linux, and the Dear ImGui headers of the wheel's own
 # fork, fetched from github.com/pthom/imgui; without any of those bootstrap says
 # so and carries on, because pptmstr runs without the library and typeset panes
@@ -37,8 +37,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 if [ -n "${ADVTEXT_SRC:-}" ]; then
-  echo "note: ADVTEXT_SRC is set and is not read. advtext is installed at the commit" >&2
-  echo "      in advtext.ref; ADVTEXT_REPO names a repository to fetch that commit from." >&2
+  echo "note: ADVTEXT_SRC is set and is not read. imscribe is installed at the commit" >&2
+  echo "      in imscribe.ref; IMSCRIBE_REPO names a repository to fetch that commit from." >&2
 fi
 
 # Keep in step with requires-python in pyproject.toml.
@@ -98,8 +98,8 @@ if command -v uv >/dev/null 2>&1; then
   uv venv --python "$PYTHON" .venv
   INSTALL=(uv pip install --python .venv/bin/python)
   # uv may otherwise keep its cached build of a directory whose version number
-  # did not change, which is every bump of advtext.ref.
-  REINSTALL_ADVTEXT="--reinstall-package advtext"
+  # did not change, which is every bump of imscribe.ref.
+  REINSTALL_IMSCRIBE="--reinstall-package imscribe"
 else
   echo "    uv not found, falling back to python -m venv"
   # Debian splits ensurepip into python3-venv, so this is the step that fails on
@@ -117,20 +117,20 @@ else
   fi
   .venv/bin/python -m pip install --quiet --upgrade pip
   INSTALL=(.venv/bin/python -m pip install)
-  REINSTALL_ADVTEXT=""
+  REINSTALL_IMSCRIBE=""
 fi
 
 echo
 echo ">>> stage 3/4: install"
-# advtext is installed here and by nothing else: pyproject.toml does not name
+# imscribe is installed here and by nothing else: pyproject.toml does not name
 # it, because the name is on no package index and a requirement would ask one
 # for it. Installed as a copy, not editable, so what .venv holds is the pinned
 # commit whatever happens to .deps afterwards; `verify` then holds the
 # interpreter to it, since anything ahead of site-packages on sys.path would win
 # without a word.
-.venv/bin/python scripts/typeset_deps.py advtext
+.venv/bin/python scripts/typeset_deps.py imscribe
 # shellcheck disable=SC2086  # both are lists of options, possibly empty
-"${INSTALL[@]}" $REINSTALL_ADVTEXT ${ADVTEXT_PIP_ARGS:-} .deps/advtext
+"${INSTALL[@]}" $REINSTALL_IMSCRIBE ${IMSCRIBE_PIP_ARGS:-} .deps/imscribe
 .venv/bin/python scripts/typeset_deps.py verify
 "${INSTALL[@]}" -e ".[dev]"
 # Again, after the last thing that installs: what that install left in .venv

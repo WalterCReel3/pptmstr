@@ -6,7 +6,7 @@ finds the text library (``pptmstr.pairing``, ``pptmstr.version``,
 The report is for installs where something is wrong, so most of what is held
 here is that each wrong thing is a sentence and the exit status is 0: no
 library, a library that is refused, an ``imgui-bundle`` that is not the pinned
-one, no advtext at all. Runs of the whole report are in an interpreter of their
+one, no imscribe at all. Runs of the whole report are in an interpreter of their
 own, because the report's first act is to settle the library's two variables in
 its own environment, which must not become this process's.
 """
@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from advtext import typesetter
+from imscribe import typesetter
 
 from pptmstr import __main__ as entry
 from pptmstr import app, pairing, version
@@ -88,17 +88,17 @@ def test_the_pin_the_report_names_is_the_one_the_build_declares() -> None:
     assert spec == f"imgui-bundle=={pairing.IMGUI_BUNDLE_PIN}"
 
 
-def test_the_variables_pptmstr_sets_are_the_ones_advtext_reads() -> None:
+def test_the_variables_pptmstr_sets_are_the_ones_imscribe_reads() -> None:
     assert VARIABLES == (typesetter.LIBRARY_VARIABLE, typesetter.PACKAGE_VARIABLE)
 
 
 def test_the_ref_files_go_into_the_wheel_inside_the_package_and_into_the_sdist() -> None:
     hatch = _pyproject()["tool"]["hatch"]["build"]["targets"]
     assert hatch["wheel"]["force-include"] == {
-        pairing.ADVTEXT_REF: f"pptmstr/{pairing.ADVTEXT_REF}",
+        pairing.IMSCRIBE_REF: f"pptmstr/{pairing.IMSCRIBE_REF}",
         pairing.IMTYPESET_REF: f"pptmstr/{pairing.IMTYPESET_REF}",
     }
-    assert {f"/{pairing.ADVTEXT_REF}", f"/{pairing.IMTYPESET_REF}"} <= set(
+    assert {f"/{pairing.IMSCRIBE_REF}", f"/{pairing.IMTYPESET_REF}"} <= set(
         hatch["sdist"]["include"]
     )
 
@@ -188,7 +188,7 @@ def test_an_installed_pptmstr_with_no_checkout_looks_nowhere(
 
 def test_this_tree_is_a_checkout_and_its_ref_files_are_at_its_root() -> None:
     assert pairing.checkout() == ROOT
-    assert pairing.ref_path(pairing.ADVTEXT_REF) == ROOT / pairing.ADVTEXT_REF
+    assert pairing.ref_path(pairing.IMSCRIBE_REF) == ROOT / pairing.IMSCRIBE_REF
 
 
 def _spoil_nothing(pair: Path) -> None:
@@ -381,7 +381,7 @@ def test_the_library_is_asked_before_its_variables_are_taken_back_whatever_askin
     assert order == ["asked", "released"]
 
     def gone() -> Any:
-        raise ModuleNotFoundError("No module named 'advtext'")
+        raise ModuleNotFoundError("No module named 'imscribe'")
 
     monkeypatch.setattr(gate, "_typesetter", gone)
     gate.settle()
@@ -453,7 +453,7 @@ _AGAIN = (
     "def named():\n"
     "    return sorted(k for k in os.environ if k.startswith('IMTYPESET_'))\n"
     "def application(argv):\n"
-    "    from advtext import typesetter\n"
+    "    from imscribe import typesetter\n"
     "    seen = {'route': pairing.adopt().route, 'released': named(),\n"
     "            'first': typesetter.kind().value}\n"
     "    typesetter.reset()\n"
@@ -705,19 +705,19 @@ def test_the_pinned_imgui_bundle_is_said_to_be_the_pinned_one() -> None:
     )
 
 
-def test_with_advtext_unimportable_the_report_says_so_twice_and_exits_0() -> None:
+def test_with_imscribe_unimportable_the_report_says_so_twice_and_exits_0() -> None:
     done = _run(
         script=(
             "import sys\n"
-            "sys.modules['advtext'] = None\n"
+            "sys.modules['imscribe'] = None\n"
             "from pptmstr import version\n"
             "raise SystemExit(version.main())\n"
         ),
         IMTYPESET_LIBRARY="",
     )
     lines = _lines(done)
-    assert lines["advtext"].startswith("advtext: not installed (")
-    assert pairing.read_ref(ROOT / pairing.ADVTEXT_REF) in lines["advtext"]
+    assert lines["imscribe"].startswith("imscribe: not installed (")
+    assert pairing.read_ref(ROOT / pairing.IMSCRIBE_REF) in lines["imscribe"]
     assert lines["typeset"].startswith(
         "typeset text: not in use (not-installed): the text library is not installed ("
     )
@@ -769,20 +769,20 @@ def test_the_same_pair_named_by_the_caller_is_said_to_come_from_the_environment(
 # -- what is installed, against what the tree asks for --------------------------------
 
 
-def _installed_advtext(
+def _installed_imscribe(
     top: Path, monkeypatch: pytest.MonkeyPatch, direct_url: dict[str, Any]
 ) -> Path:
     """
-    An ``advtext`` package in a site directory of its own, with a distribution that
+    An ``imscribe`` package in a site directory of its own, with a distribution that
     records ``direct_url``; the package's directory.
     """
     site = top / "site"
-    package = site / "advtext"
+    package = site / "imscribe"
     package.mkdir(parents=True)
-    (package / "__init__.py").write_text("NAME = 'advtext'\n", encoding="utf-8")
-    record = site / "advtext-0.1.0.dist-info"
+    (package / "__init__.py").write_text("NAME = 'imscribe'\n", encoding="utf-8")
+    record = site / "imscribe-0.1.0.dist-info"
     record.mkdir()
-    (record / "METADATA").write_text("Name: advtext\nVersion: 0.1.0\n", encoding="utf-8")
+    (record / "METADATA").write_text("Name: imscribe\nVersion: 0.1.0\n", encoding="utf-8")
     (record / "direct_url.json").write_text(json.dumps(direct_url), encoding="utf-8")
     monkeypatch.setattr(
         importlib.metadata, "distribution", lambda name: importlib.metadata.Distribution.at(record)
@@ -794,8 +794,8 @@ def _clone(top: Path, head: str) -> Path:
     clone = top / "clone"
     (clone / ".git").mkdir(parents=True)
     (clone / ".git" / "HEAD").write_text(f"{head}\n", encoding="utf-8")
-    (clone / "advtext").mkdir()
-    (clone / "advtext" / "__init__.py").write_text("NAME = 'advtext'\n", encoding="utf-8")
+    (clone / "imscribe").mkdir()
+    (clone / "imscribe" / "__init__.py").write_text("NAME = 'imscribe'\n", encoding="utf-8")
     return clone
 
 
@@ -803,12 +803,12 @@ def test_a_copy_installed_from_a_checkout_is_that_checkouts_commit_only_file_for
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     clone = _clone(tmp_path, REF)
-    package = _installed_advtext(tmp_path, monkeypatch, {"url": clone.as_uri(), "dir_info": {}})
+    package = _installed_imscribe(tmp_path, monkeypatch, {"url": clone.as_uri(), "dir_info": {}})
 
     assert version._installed_from(package) == (REF, f"file for file the checkout at {clone}")
 
     # The clone moved on after the install: `make deps` fetched and did not install.
-    (clone / "advtext" / "__init__.py").write_text("NAME = 'newer'\n", encoding="utf-8")
+    (clone / "imscribe" / "__init__.py").write_text("NAME = 'newer'\n", encoding="utf-8")
     commit, how = version._installed_from(package)
     assert commit is None and "1 file(s) differ" in how and "__init__.py" in how
 
@@ -817,7 +817,7 @@ def test_a_checkout_on_a_branch_names_no_commit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     clone = _clone(tmp_path, "ref: refs/heads/main")
-    package = _installed_advtext(tmp_path, monkeypatch, {"url": clone.as_uri(), "dir_info": {}})
+    package = _installed_imscribe(tmp_path, monkeypatch, {"url": clone.as_uri(), "dir_info": {}})
     commit, how = version._installed_from(package)
     assert commit is None and "on a branch" in how
 
@@ -825,8 +825,8 @@ def test_a_checkout_on_a_branch_names_no_commit(
 def test_a_copy_installed_from_version_control_is_the_commit_its_record_names(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    url = "https://example.invalid/advtext.git"
-    package = _installed_advtext(
+    url = "https://example.invalid/imscribe.git"
+    package = _installed_imscribe(
         tmp_path, monkeypatch, {"url": url, "vcs_info": {"vcs": "git", "commit_id": OTHER}}
     )
     assert version._installed_from(package) == (OTHER, f"installed from {url}")
@@ -836,32 +836,32 @@ def test_a_distribution_that_is_another_copy_says_nothing_of_the_one_imported(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     clone = _clone(tmp_path, REF)
-    _installed_advtext(tmp_path, monkeypatch, {"url": clone.as_uri(), "dir_info": {}})
-    commit, how = version._installed_from(tmp_path / "elsewhere" / "advtext")
+    _installed_imscribe(tmp_path, monkeypatch, {"url": clone.as_uri(), "dir_info": {}})
+    commit, how = version._installed_from(tmp_path / "elsewhere" / "imscribe")
     assert commit is None and "another copy" in how
 
 
-def test_the_advtext_line_says_plainly_when_what_runs_is_not_what_the_tree_asks_for(
+def test_the_imscribe_line_says_plainly_when_what_runs_is_not_what_the_tree_asks_for(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     package = Path(typesetter.__file__).resolve().parent
     monkeypatch.setattr(version, "_asked_for", lambda name: REF)
 
     monkeypatch.setattr(version, "_installed_from", lambda found: (REF, "as recorded"))
-    assert version._advtext() == (
-        f"advtext {REF}: imported from {package}, as recorded; the commit advtext.ref names"
+    assert version._imscribe() == (
+        f"imscribe {REF}: imported from {package}, as recorded; the commit imscribe.ref names"
     )
 
     monkeypatch.setattr(version, "_installed_from", lambda found: (OTHER, "as recorded"))
-    line = version._advtext()
+    line = version._imscribe()
     assert (
-        line.startswith(f"advtext {OTHER}: ")
-        and f"NOT the commit advtext.ref names, which is {REF}" in line
+        line.startswith(f"imscribe {OTHER}: ")
+        and f"NOT the commit imscribe.ref names, which is {REF}" in line
     )
 
     monkeypatch.setattr(version, "_installed_from", lambda found: (None, "nothing records it"))
-    line = version._advtext()
-    assert line.startswith("advtext at an unrecorded commit: ") and "nothing records it" in line
+    line = version._imscribe()
+    assert line.startswith("imscribe at an unrecorded commit: ") and "nothing records it" in line
     assert "nothing here says whether this is it" in line
 
 
@@ -926,7 +926,7 @@ def test_the_gate_answers_in_a_sentence_whatever_asking_raises(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def gone() -> Any:
-        raise ModuleNotFoundError("No module named 'advtext'")
+        raise ModuleNotFoundError("No module named 'imscribe'")
 
     def broken() -> Any:
         raise RuntimeError("the gate broke")

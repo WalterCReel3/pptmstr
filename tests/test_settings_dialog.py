@@ -1014,7 +1014,7 @@ def test_the_diff_sample_is_the_librarys_diff_view_and_the_note_says_so(rig: Rig
     columns, which is a row shorter than unified (``_diff_sample`` says what
     that buys), and nothing of it is cut: it is narrower than its cell.
     """
-    import advtext
+    import imscribe
 
     from pptmstr.ui.typeset import diffs
 
@@ -1025,10 +1025,10 @@ def test_the_diff_sample_is_the_librarys_diff_view_and_the_note_says_so(rig: Rig
     cache = rig.dialog.previews
     key = ("sample", "diff")
     (view,) = cache.views(key)
-    assert isinstance(view, advtext.TypesetDiffView)
+    assert isinstance(view, imscribe.TypesetDiffView)
     assert (view.diff.added, view.diff.removed) == (1, 1) and view.origin is not None
     assert view.cell == "pixel" and view.grid.cell == 8.0
-    assert view.layout is advtext.DiffLayout.SIDE_BY_SIDE
+    assert view.layout is imscribe.DiffLayout.SIDE_BY_SIDE
     assert [view.row_info(row).kind for row in range(view.row_count)] == ["file", "hunk", "row"]
     (header,) = view.headers()
     assert header.fits and view.content_width <= (header.available_px or 0.0)

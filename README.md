@@ -91,7 +91,7 @@ Read [STYLE.md](STYLE.md) before adding a record, an intent, or a projection.
 
 ```sh
 ./bootstrap.sh          # probe -> venv -> install -> window smoke test
-                        # fetches advtext and imtypeset at the commits in advtext.ref and
+                        # fetches imscribe and imtypeset at the commits in imscribe.ref and
                         # imtypeset.ref, and builds the imtypeset library into .deps/
 make deps               # that fetch and build alone, after a ref moves
 make check              # lint + typecheck + tests
@@ -139,11 +139,11 @@ errors, compaction boundaries — with toggles for reasoning, wrapping and follo
 plus a filter. Concurrency is bounded by `concurrency_cap`; over-cap sessions queue
 rather than being refused, and the pool is shown in the status bar.
 
-### Text is set by `advtext`, experimentally
+### Text is set by `imscribe`, experimentally
 
 On this branch DETAIL, the NEEDS YOU expansion, BOARD, BRIEF and one mode of the
-context log set their text through `advtext` — a library on no package index,
-installed at the commit `advtext.ref` names, which draws through the native imtypeset
+context log set their text through `imscribe` — a library on no package index,
+installed at the commit `imscribe.ref` names, which draws through the native imtypeset
 library built beside the `imgui-bundle` wheel — instead of ImGui's
 own text calls: proportional prose, real italics, selectable text. An approval's diff
 is the library's diff view only where a measurement of the running library says it
@@ -259,7 +259,7 @@ Read [orchestrator-design.md](orchestrator-design.md) §1 (invariants) and §3
 | [pptmstr/pool.py](pptmstr/pool.py) | Bounded concurrency; over-cap sessions queue |
 | [pptmstr/approval.py](pptmstr/approval.py) | Classification, summaries and diffs for the gate |
 | [pptmstr/ui/](pptmstr/ui/) | Fleet rail, inbox, detail, health, transcript pane, launcher, shared widgets |
-| [pptmstr/ui/typeset/](pptmstr/ui/typeset/) | The one package that imports `advtext`: the gate, fonts, roles, themes, held views, the diff model |
+| [pptmstr/ui/typeset/](pptmstr/ui/typeset/) | The one package that imports `imscribe`: the gate, fonts, roles, themes, held views, the diff model |
 | [pptmstr/theme.py](pptmstr/theme.py) | Semantic colour roles; light, dark, high-contrast, and six discretionary |
 | [pptmstr/driver.py](pptmstr/driver.py) | One `ClaudeSDKClient` per session, translated into intents |
 | [pptmstr/app.py](pptmstr/app.py) | Runner, docking layout, and the frame loop |

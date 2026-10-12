@@ -3,25 +3,25 @@
 
 A report for a bug report and for whoever replaces an install: pptmstr's
 version, the interpreter, the ``imgui-bundle`` that is imported against the
-pin, the advtext and the imtypeset that are in this process against the two ref
+pin, the imscribe and the imtypeset that are in this process against the two ref
 files, how the library was found, and whether it is accepted beside the wheel.
 It opens no window and makes no ImGui context.
 
 **What the tree asks for and what is installed are two facts, and both are
-printed.** ``advtext.ref`` and ``imtypeset.ref`` say what was asked. What runs
-is the ``advtext`` the interpreter imports, and the library the environment
+printed.** ``imscribe.ref`` and ``imtypeset.ref`` say what was asked. What runs
+is the ``imscribe`` the interpreter imports, and the library the environment
 names with the ``BUILT-FROM`` beside it. A commit is claimed for what runs only
-by something that records one: for advtext, the checkout its install names,
+by something that records one: for imscribe, the checkout its install names,
 compared with the imported package file for file; for the library,
 ``BUILT-FROM``. Where nothing records it the line says so.
 
 **Every line is a sentence and none is a traceback.** Each part is asked on its
-own and whatever it raises becomes that part's line, so a missing advtext, a
+own and whatever it raises becomes that part's line, so a missing imscribe, a
 refused library or a wheel that is not the pinned one each cost one line and
 the exit status is 0: the report is for exactly the installs where something
 is wrong.
 
-advtext is located by name and not imported here; the one place pptmstr
+imscribe is located by name and not imported here; the one place pptmstr
 imports it is ``pptmstr.ui.typeset``, which is asked for the library's kind.
 """
 
@@ -93,7 +93,7 @@ def _imgui_bundle() -> str:
 
 def _installed_from(package: Path) -> tuple[str | None, str]:
     """
-    The commit the imported advtext is, when something records it, and how that is known.
+    The commit the imported imscribe is, when something records it, and how that is known.
 
     A distribution installed from a version-control URL records the commit. One
     installed from a directory records the directory; if that is a checkout
@@ -102,12 +102,12 @@ def _installed_from(package: Path) -> tuple[str | None, str]:
     with the commit here: ``scripts/typeset_deps.py verify`` does that.
     """
     try:
-        distribution = importlib.metadata.distribution("advtext")
+        distribution = importlib.metadata.distribution("imscribe")
     except importlib.metadata.PackageNotFoundError:
         return None, "no distribution of that name is installed"
     # A path that reaches two site-packages can find the distribution in one
     # and the module in the other.
-    if Path(str(distribution.locate_file("advtext"))).resolve() != package:
+    if Path(str(distribution.locate_file("imscribe"))).resolve() != package:
         return None, "the installed distribution of that name is another copy"
     record = json.loads(distribution.read_text("direct_url.json") or "{}")
     commit = str(record.get("vcs_info", {}).get("commit_id", ""))
@@ -123,7 +123,7 @@ def _installed_from(package: Path) -> tuple[str | None, str]:
         return None, f"installed from {clone}, which is not a checkout now"
     if not _HASH.fullmatch(head):
         return None, f"installed from {clone}, which is on a branch and not at a commit"
-    differing = pairing.package_differences(clone / "advtext", package)
+    differing = pairing.package_differences(clone / "imscribe", package)
     if differing:
         return None, (
             f"installed from {clone}, now at {head}, and {len(differing)} file(s) differ "
@@ -132,31 +132,31 @@ def _installed_from(package: Path) -> tuple[str | None, str]:
     return head, f"file for file the checkout at {clone}"
 
 
-def _advtext() -> str:
-    asked = _asked_for(pairing.ADVTEXT_REF)
+def _imscribe() -> str:
+    asked = _asked_for(pairing.IMSCRIBE_REF)
     try:
-        spec = importlib.util.find_spec("advtext")
+        spec = importlib.util.find_spec("imscribe")
     except Exception as failure:
         spec, missing = None, f"{type(failure).__name__}: {failure}"
     else:
         missing = "no module of that name is on the path"
     if spec is None or spec.origin is None:
-        return f"advtext: not installed ({missing}); {pairing.ADVTEXT_REF} names {asked}"
+        return f"imscribe: not installed ({missing}); {pairing.IMSCRIBE_REF} names {asked}"
     package = Path(spec.origin).resolve().parent
     commit, how = _installed_from(package)
     if commit is None:
         return (
-            f"advtext at an unrecorded commit: imported from {package} ({how}); "
-            f"{pairing.ADVTEXT_REF} names {asked} and nothing here says whether this is it"
+            f"imscribe at an unrecorded commit: imported from {package} ({how}); "
+            f"{pairing.IMSCRIBE_REF} names {asked} and nothing here says whether this is it"
         )
     if commit == asked:
         return (
-            f"advtext {commit}: imported from {package}, {how}; "
-            f"the commit {pairing.ADVTEXT_REF} names"
+            f"imscribe {commit}: imported from {package}, {how}; "
+            f"the commit {pairing.IMSCRIBE_REF} names"
         )
     return (
-        f"advtext {commit}: imported from {package}, {how}; NOT the commit "
-        f"{pairing.ADVTEXT_REF} names, which is {asked} (`make deps` installs that one)"
+        f"imscribe {commit}: imported from {package}, {how}; NOT the commit "
+        f"{pairing.IMSCRIBE_REF} names, which is {asked} (`make deps` installs that one)"
     )
 
 
@@ -218,7 +218,7 @@ def report(found: pairing.Found) -> str:
             _said("pptmstr", _pptmstr),
             _said("python", _python),
             _said("imgui-bundle", _imgui_bundle),
-            _said("advtext", _advtext),
+            _said("imscribe", _imscribe),
             _said("imtypeset", lambda: _imtypeset(found)),
             _said("typeset text", _typeset),
         ]

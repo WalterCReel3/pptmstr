@@ -15,11 +15,11 @@ Two modes:
      bold, and for each named in ``CANDIDATES`` prints its faces, sizes,
      metrics at a 16 px ImGui pixel height, glyph coverage and licence
      evidence. Every number is read with fontTools directly from the file whose
-     path is printed; ``advtext.fontlib.em_size_for_pixel_height`` is called
+     path is printed; ``imscribe.fontlib.em_size_for_pixel_height`` is called
      once, on the two bundled faces, as a cross-check that the pixel-height
      arithmetic here is the library's.
   2. **The renders** (``--render``; needs a display). One child process per
-     family, because ``advtext``'s font registry is process-wide and ImGui's
+     family, because ``imscribe``'s font registry is process-wide and ImGui's
      atlas is filled once: the candidate is registered under the four prose
      roles for that run only, straight from its installed path. Nothing is
      copied into the tree.
@@ -390,7 +390,7 @@ def measure(path: Path) -> Measured:
 
     ImGui sizes a font so that ``hhea`` ascender minus descender is the pixel
     height asked for, so the scale is the face's own and two faces "at 16" have
-    different ems. That is ``advtext.fontlib``'s statement of it, which
+    different ems. That is ``imscribe.fontlib``'s statement of it, which
     ``cross_check`` holds this to; the font loader's source was not read.
 
     x-height and cap-height are the outline tops of ``x`` and ``H``, not the
@@ -610,12 +610,12 @@ def print_licences(rows: list[Family]) -> None:
 
 def cross_check() -> None:
     """
-    Compare this script's pixel-height arithmetic with advtext's, on the bundled faces.
+    Compare this script's pixel-height arithmetic with imscribe's, on the bundled faces.
     """
-    from advtext import Face, em_size_for_pixel_height
+    from imscribe import Face, em_size_for_pixel_height
 
     roboto, inconsolata = shipped()
-    print("\n## Cross-check against advtext.em_size_for_pixel_height\n")
+    print("\n## Cross-check against imscribe.em_size_for_pixel_height\n")
     for label, face, family in (
         ("Roboto", Face.PROSE, roboto),
         ("Inconsolata", Face.CODE, inconsolata),
@@ -623,7 +623,7 @@ def cross_check() -> None:
         theirs = em_size_for_pixel_height(face, PIXEL_HEIGHT)
         ours = measure(family.regular).em
         agree = "agree" if abs(theirs - ours) < 1e-6 else "DISAGREE"
-        print(f"  {label:12} advtext {theirs:.3f} px   here {ours:.3f} px   {agree}")
+        print(f"  {label:12} imscribe {theirs:.3f} px   here {ours:.3f} px   {agree}")
 
 
 def _colour(rgb: int, alpha: int = 255) -> int:
@@ -639,11 +639,11 @@ def render_one(name: str, out: Path) -> int:
     Render ``MARKDOWN`` in one family beside today's all-Inconsolata, and write two PNGs.
 
     The left pane is the candidate and the right pane is the family pptmstr
-    draws everything in now, set by ``advtext``'s all-mono theme rather than by
+    draws everything in now, set by ``imscribe``'s all-mono theme rather than by
     pptmstr's own panes; both are ``LINE_PX`` wide at ``PIXEL_HEIGHT``. A proportional candidate
     takes the four prose roles and leaves code to Inconsolata, so the picture
     shows how the two sit together. A monospace candidate takes every role,
-    code included: ``advtext`` has no monospace-italic role, so its italic is
+    code included: ``imscribe`` has no monospace-italic role, so its italic is
     registered under the prose italic and the face table is declared
     proportional, which is the only way ``Theme.face_for`` will reach it.
 
@@ -670,7 +670,8 @@ def render_one(name: str, out: Path) -> int:
     What it does not show: any subpixel or LCD rendering,
     a high-DPI display, or pptmstr's own panes.
     """
-    from advtext import (
+    from imgui_bundle import hello_imgui, imgui, immapp
+    from imscribe import (
         Align,
         BlockKind,
         Face,
@@ -681,7 +682,6 @@ def render_one(name: str, out: Path) -> int:
         register_font,
         typesetter,
     )
-    from imgui_bundle import hello_imgui, imgui, immapp
     from OpenGL import GL
     from screenshot import write_png
 
@@ -713,7 +713,7 @@ def render_one(name: str, out: Path) -> int:
     )
     captions = (
         f"{family.name}" + ("" if mono else " + Inconsolata code") + f"  {PIXEL_HEIGHT:g} px",
-        f"Inconsolata, every role (advtext's all-mono theme)  {PIXEL_HEIGHT:g} px",
+        f"Inconsolata, every role (imscribe's all-mono theme)  {PIXEL_HEIGHT:g} px",
     )
     # pptmstr's dark palette: text, text_strong for headings, text_dim for a
     # quote, border for rules, accent for links, on the panel colour.

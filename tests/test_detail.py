@@ -2098,7 +2098,7 @@ def test_a_is_not_sent_over_a_body_the_library_stopped_under(seam, monkeypatch) 
     frame's reading is of every line missing, and ``a`` is not sent on it. The
     next frame is this pane's own renderer, which has all of it.
     """
-    import advtext
+    import imscribe
 
     obligation = parked("mcp__pptmstr__post_concern", {"to": "lead", "body": "One.\n\nTwo."})
     snap = snapshot(record(), needs_you=(obligation,))
@@ -2110,7 +2110,7 @@ def test_a_is_not_sent_over_a_body_the_library_stopped_under(seam, monkeypatch) 
     assert review.unset_lines(rig.state, "p1") == 0
 
     def stopped(**given):
-        raise advtext.TypesetUnavailable("imtypeset stopped: the library said no")
+        raise imscribe.TypesetUnavailable("imtypeset stopped: the library said no")
 
     monkeypatch.setattr(rig.pane.views.view(key), "draw", stopped)
     rig.frame(snap)
@@ -2546,13 +2546,13 @@ def _diff_view_stops(monkeypatch) -> None:
     """
     Make the library's diff view stop inside its draw, and refuse to be made.
     """
-    import advtext
+    import imscribe
 
     def stopped(self, *given, **named):
-        raise advtext.TypesetUnavailable("imtypeset stopped: the library said no")
+        raise imscribe.TypesetUnavailable("imtypeset stopped: the library said no")
 
-    monkeypatch.setattr(advtext.TypesetDiffView, "draw", stopped)
-    monkeypatch.setattr(advtext.TypesetDiffView, "__init__", stopped)
+    monkeypatch.setattr(imscribe.TypesetDiffView, "draw", stopped)
+    monkeypatch.setattr(imscribe.TypesetDiffView, "__init__", stopped)
 
 
 @pytest.mark.parametrize("first", [False, True], ids=["a view held", "a key never drawn"])
@@ -2626,21 +2626,21 @@ def _raises_attribute_error(*given, **named):
 
 
 def _diff_draw_raises(patched) -> None:
-    import advtext
+    import imscribe
 
-    patched.setattr(advtext.TypesetDiffView, "draw", _raises_attribute_error)
+    patched.setattr(imscribe.TypesetDiffView, "draw", _raises_attribute_error)
 
 
 def _diff_attribute_raises(patched) -> None:
-    import advtext
+    import imscribe
 
-    patched.setattr(advtext.FileDiff, "invisible_characters", property(_raises_attribute_error))
+    patched.setattr(imscribe.FileDiff, "invisible_characters", property(_raises_attribute_error))
 
 
 def _diff_model_raises(patched) -> None:
-    import advtext
+    import imscribe
 
-    patched.setattr(advtext.Diff, "from_texts", _raises_attribute_error)
+    patched.setattr(imscribe.Diff, "from_texts", _raises_attribute_error)
 
 
 @pytest.mark.parametrize(
@@ -2683,24 +2683,24 @@ def test_where_columns_hold_a_diff_the_library_raises_under_does_not_take_the_pa
 
 
 def _diff_draw_answers_false(patched) -> None:
-    import advtext
+    import imscribe
 
-    real = advtext.TypesetDiffView.draw
+    real = imscribe.TypesetDiffView.draw
     patched.setattr(
-        advtext.TypesetDiffView, "draw", lambda self, **given: bool(real(self, **given)) and False
+        imscribe.TypesetDiffView, "draw", lambda self, **given: bool(real(self, **given)) and False
     )
 
 
 def _diff_edit_is_cut(patched) -> None:
-    import advtext
+    import imscribe
 
-    real = advtext.TypesetDiffView.draw
+    real = imscribe.TypesetDiffView.draw
 
     def cut(self, **given) -> bool:
-        advtext.typesetter.note("a diff edit was cut: block 2: the text is longer than 16 MiB")
+        imscribe.typesetter.note("a diff edit was cut: block 2: the text is longer than 16 MiB")
         return bool(real(self, **given))
 
-    patched.setattr(advtext.TypesetDiffView, "draw", cut)
+    patched.setattr(imscribe.TypesetDiffView, "draw", cut)
 
 
 @pytest.mark.parametrize(
@@ -2751,7 +2751,7 @@ def test_a_markdown_argument_the_library_raises_under_does_not_take_the_pane(
     pane drawn, the arguments counted as not on screen and ``a`` unsent; the
     next frame is the pane's own renderer.
     """
-    import advtext
+    import imscribe
 
     args = {"to": "lead", "subject": "s", "body": "A body.\n\nOf *two* paragraphs."}
     obligation = parked("mcp__pptmstr__post_concern", args)
@@ -2760,7 +2760,7 @@ def test_a_markdown_argument_the_library_raises_under_does_not_take_the_pane(
     rig.focus.move(snap, 0)
     bridge = _Sent()
     with monkeypatch.context() as patched:
-        patched.setattr(advtext.TypesetView, "draw", _raises_attribute_error)
+        patched.setattr(imscribe.TypesetView, "draw", _raises_attribute_error)
         rig.frame(snap)
         assert (review.unset_lines(rig.state, "p1") or 0) > 0
         _press_a(rig, snap, bridge)

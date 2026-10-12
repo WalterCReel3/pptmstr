@@ -54,7 +54,7 @@ from imgui_bundle import imgui  # noqa: E402
 from pptmstr import approval, theme  # noqa: E402
 from pptmstr.ui import typeset  # noqa: E402
 
-SAMPLE = ROOT / ".deps" / "advtext" / "demo" / "sample.md"
+SAMPLE = ROOT / ".deps" / "imscribe" / "demo" / "sample.md"
 WINDOW = (700.0, 600.0)
 
 

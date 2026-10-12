@@ -17,9 +17,9 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-import advtext
+import imscribe
 import pytest
-from advtext import Diff, RowKind
+from imscribe import Diff, RowKind
 
 from pptmstr import approval
 from pptmstr.model import NodeId, PendingApproval
@@ -92,7 +92,7 @@ def test_a_record_with_a_unified_string_and_no_texts_is_still_shown() -> None:
 
 
 def test_a_text_with_no_before_is_a_new_file() -> None:
-    from advtext import FileStatus
+    from imscribe import FileStatus
 
     built = typeset.diff_model((approval.DiffText(None, "a\nb\n", "/tmp/new.py"),))
     (file,) = built.files
@@ -425,7 +425,7 @@ def test_a_pane_that_says_the_warning_itself_can_have_the_diff_leave_it_out(seam
 def test_a_diff_the_library_stops_under_says_so_and_reports_its_rows_missing(
     seam: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import advtext
+    import imscribe
 
     texts = (approval.DiffText("a\nb\n", "a\nc\nd\n", "x.py"),)
     cache = typeset.ViewCache()
@@ -433,7 +433,7 @@ def test_a_diff_the_library_stops_under_says_so_and_reports_its_rows_missing(
     assert cache.unbuilt("k") == 0
 
     def stopped(**given: Any) -> bool:
-        raise advtext.TypesetUnavailable("imtypeset stopped: the library said no")
+        raise imscribe.TypesetUnavailable("imtypeset stopped: the library said no")
 
     monkeypatch.setattr(cache.view("k"), "draw", stopped)
     said = _native_lines(seam, monkeypatch)
@@ -521,9 +521,9 @@ def test_a_diff_the_library_refuses_a_view_for_reports_every_changed_row_missing
     """
 
     def refused(self: Any, *given: Any, **named: Any) -> None:
-        raise advtext.TypesetUnavailable("imtypeset is not in use: the library said no")
+        raise imscribe.TypesetUnavailable("imtypeset is not in use: the library said no")
 
-    monkeypatch.setattr(advtext.TypesetDiffView, "__init__", refused)
+    monkeypatch.setattr(imscribe.TypesetDiffView, "__init__", refused)
     texts = (approval.DiffText("a\nb\n", "a\nc\nd\n", "x.py"),)
     cache = typeset.ViewCache()
     tall: list[float | None] = []
@@ -730,7 +730,7 @@ def _em(em: float) -> float:
     """
     The pixel height at which Inconsolata's em is ``em`` pixels.
     """
-    return em / advtext.em_size_for_pixel_height(advtext.Face.CODE, 1.0)
+    return em / imscribe.em_size_for_pixel_height(imscribe.Face.CODE, 1.0)
 
 
 def test_the_measurement_is_what_decides_and_nothing_has_overridden_it() -> None:
@@ -773,10 +773,10 @@ def test_on_a_whole_pixel_cell_a_diffs_columns_hold_at_every_size_the_product_se
     assert diffs.adopted() and typeset.diff_adopted()
     assert found.why == f"keeps a {found.baked:g} px column: laid out, drawn and hit over a row"
 
-    grid = gate.diff_view(advtext.Diff(), diffs.themes.diff_theme()).grid
+    grid = gate.diff_view(imscribe.Diff(), diffs.themes.diff_theme()).grid
     assert grid.cell == found.baked and grid.row == typeset.diff_row_height()
-    drawn, asked = grid.em * grid.scale, tall * advtext.em_size_for_pixel_height(
-        advtext.Face.CODE, 1.0
+    drawn, asked = grid.em * grid.scale, tall * imscribe.em_size_for_pixel_height(
+        imscribe.Face.CODE, 1.0
     )
     assert drawn == pytest.approx(2.0 * found.baked, abs=1e-3)
     even = tall % 2 == 0
@@ -849,20 +849,20 @@ def test_the_view_a_pane_draws_and_the_view_that_is_measured_are_made_by_one_fun
     are each a diff view made with ``cell="pixel"``, and none is made without.
     """
     made: list[tuple[str, object]] = []
-    real = advtext.TypesetDiffView.__init__
+    real = imscribe.TypesetDiffView.__init__
 
     def recording(self: Any, *given: Any, **named: Any) -> None:
         made.append(("view", named.get("cell")))
         real(self, *given, **named)
 
-    real_fences = advtext.TypesetDiffFences.__init__
+    real_fences = imscribe.TypesetDiffFences.__init__
 
     def recording_fences(self: Any, *given: Any, **named: Any) -> None:
         made.append(("fences", named.get("cell")))
         real_fences(self, *given, **named)
 
-    monkeypatch.setattr(advtext.TypesetDiffView, "__init__", recording)
-    monkeypatch.setattr(advtext.TypesetDiffFences, "__init__", recording_fences)
+    monkeypatch.setattr(imscribe.TypesetDiffView, "__init__", recording)
+    monkeypatch.setattr(imscribe.TypesetDiffFences, "__init__", recording_fences)
     monkeypatch.setattr(diffs.views, "_FENCES", [])
     assert typeset.load_fonts(BOLD), "so that the measurement is taken again"
     assert made == [("view", "pixel")], "the measurement at the load"
@@ -890,7 +890,7 @@ def test_the_cell_held_to_the_bound_is_the_one_the_row_was_laid_out_at(seam: Any
     half a pixel after some 45,000 columns and not after a million.
     """
     found = diffs.columns()
-    grid = gate.diff_view(advtext.Diff(), diffs.themes.diff_theme()).grid
+    grid = gate.diff_view(imscribe.Diff(), diffs.themes.diff_theme()).grid
     assert grid.cell == found.baked == 8.0
     assert 5e-6 < abs(found.cell - 8.0) < 2e-5
     assert 40_000 < found.reach < 50_000
@@ -907,14 +907,14 @@ def test_a_row_too_short_to_show_it_is_not_enough_if_the_cell_is_not_the_baked_a
     """
     import dataclasses
 
-    real = advtext.TypesetDiffView.grid.fget
+    real = imscribe.TypesetDiffView.grid.fget
     assert real is not None
 
     def a_thousandth_wide(self: Any) -> Any:
         grid = real(self)
         return dataclasses.replace(grid, cell=grid.cell + 0.001)
 
-    monkeypatch.setattr(advtext.TypesetDiffView, "grid", property(a_thousandth_wide))
+    monkeypatch.setattr(imscribe.TypesetDiffView, "grid", property(a_thousandth_wide))
     assert typeset.load_fonts(BOLD), "so that nothing measured earlier is held"
     found = diffs.columns()
     assert (found.off, found.mishit) == (0, 0)
@@ -962,7 +962,7 @@ def test_a_row_drawn_on_its_columns_is_not_enough_if_a_press_lands_on_a_neighbou
     hit test answers from somewhere else -- here, three pixels to the left, as
     it would if it answered from a layout the draw had moved away from.
     """
-    native = advtext.typesetter.module()
+    native = imscribe.typesetter.module()
     real = native.Document.hit_test
 
     def shifted(self: Any, at: tuple[float, float]) -> Any:
@@ -1319,9 +1319,9 @@ def test_a_fence_the_library_stops_under_while_hosting_reports_its_text_missing(
     """
 
     def refused(self: Any, *given: Any, **named: Any) -> None:
-        raise advtext.TypesetUnavailable("imtypeset is not in use: the library said no")
+        raise imscribe.TypesetUnavailable("imtypeset is not in use: the library said no")
 
-    monkeypatch.setattr(advtext.TypesetDiffView, "__init__", refused)
+    monkeypatch.setattr(imscribe.TypesetDiffView, "__init__", refused)
     source = "Before.\n\n```diff\n-old1\n+new1\n```\n"
     cache = typeset.ViewCache()
     frame(columns_hold, lambda: typeset.markdown(cache, "k", source))
@@ -1395,20 +1395,20 @@ A change of three rows: one removed, two added.
 
 
 def _draw_answers_false(patched: pytest.MonkeyPatch) -> None:
-    real = advtext.TypesetDiffView.draw
+    real = imscribe.TypesetDiffView.draw
     patched.setattr(
-        advtext.TypesetDiffView, "draw", lambda self, **given: bool(real(self, **given)) and False
+        imscribe.TypesetDiffView, "draw", lambda self, **given: bool(real(self, **given)) and False
     )
 
 
 def _draw_cuts_an_edit(patched: pytest.MonkeyPatch) -> None:
-    real = advtext.TypesetDiffView.draw
+    real = imscribe.TypesetDiffView.draw
 
     def cut(self: Any, **given: Any) -> bool:
-        advtext.typesetter.note("a diff edit was cut: block 2: the text is longer than 16 MiB")
+        imscribe.typesetter.note("a diff edit was cut: block 2: the text is longer than 16 MiB")
         return bool(real(self, **given))
 
-    patched.setattr(advtext.TypesetDiffView, "draw", cut)
+    patched.setattr(imscribe.TypesetDiffView, "draw", cut)
 
 
 @pytest.mark.parametrize(
@@ -1478,15 +1478,15 @@ def _raises_attribute_error(*given: Any, **named: Any) -> Any:
 
 
 def _fault_in_draw(patched: pytest.MonkeyPatch) -> None:
-    patched.setattr(advtext.TypesetDiffView, "draw", _raises_attribute_error)
+    patched.setattr(imscribe.TypesetDiffView, "draw", _raises_attribute_error)
 
 
 def _fault_in_set_diff(patched: pytest.MonkeyPatch) -> None:
-    patched.setattr(advtext.TypesetDiffView, "set_diff", _raises_attribute_error)
+    patched.setattr(imscribe.TypesetDiffView, "set_diff", _raises_attribute_error)
 
 
 def _fault_in_what_above_reads(patched: pytest.MonkeyPatch) -> None:
-    patched.setattr(advtext.FileDiff, "invisible_characters", property(_raises_attribute_error))
+    patched.setattr(imscribe.FileDiff, "invisible_characters", property(_raises_attribute_error))
 
 
 DIFF_FAULTS: dict[str, tuple[Any, str]] = {

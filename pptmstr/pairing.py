@@ -1,9 +1,9 @@
 """
 What pptmstr is built against, and where a process of it finds the text library.
 
-Typeset text is four things that belong together: pptmstr, an advtext commit,
+Typeset text is four things that belong together: pptmstr, an imscribe commit,
 the imtypeset library with its Python package from one commit, and one exact
-``imgui-bundle`` wheel. The tree names the last three -- ``advtext.ref``,
+``imgui-bundle`` wheel. The tree names the last three -- ``imscribe.ref``,
 ``imtypeset.ref``, the pin in ``pyproject.toml`` -- and this module is the rule
 for reading them and for holding what was built to them.
 
@@ -12,11 +12,11 @@ for reading them and for holding what was built to them.
 ``pptmstr.__main__`` calls it before anything else is imported.
 
 **The library is found through two environment variables, and a source
-checkout sets them for itself** (``adopt``). advtext looks for the library only
+checkout sets them for itself** (``adopt``). imscribe looks for the library only
 when ``IMTYPESET_LIBRARY`` names it, and the Makefile exports the pair
 ``make deps`` built to its recipes. A ``pptmstr`` started any other way got
 neither variable and said "not installed" beside a built library. So, once,
-before advtext is asked anything:
+before imscribe is asked anything:
 
     either variable is set by the caller   nothing is added, empty or not, as
                                            the Makefile has it: a library named
@@ -37,12 +37,12 @@ before advtext is asked anything:
 agent's shell, and through it another checkout's ``make test`` or another
 ``pptmstr``. Both variables read there as "set by the caller", so that checkout
 would run its tests on this one's library without one of its own checks. So
-once advtext has been asked for the library the pair this process set is taken
+once imscribe has been asked for the library the pair this process set is taken
 back out of its environment, and ``named`` still answers what it was. A pair
 the caller set is the caller's and is passed on as it came.
 
 ``IMGUI_BUNDLE_PIN`` and the two variable names are spelled here as well as
-where they are decided (``pyproject.toml``; ``advtext.typesetter``), because
+where they are decided (``pyproject.toml``; ``imscribe.typesetter``), because
 this module is read before either can be: ``tests/test_version.py`` holds each
 to its source.
 """
@@ -63,14 +63,14 @@ IMGUI_BUNDLE_PIN = "1.92.900"
 LIBRARY_VARIABLE = "IMTYPESET_LIBRARY"
 PACKAGE_VARIABLE = "IMTYPESET_PYTHON"
 
-ADVTEXT_REF = "advtext.ref"
+IMSCRIBE_REF = "imscribe.ref"
 IMTYPESET_REF = "imtypeset.ref"
 
 # Where `scripts/typeset_deps.py` builds, under a checkout's root, and what a
 # pair is made of.
 DEPS_DIR = ".deps"
 PAIR_DIR = "imtypeset"
-ADVTEXT_DIR = "advtext"
+IMSCRIBE_DIR = "imscribe"
 LIBRARY_NAME = "libimtypeset_bundle.so"
 PACKAGE_DIR = "pysnap"
 BUILT_FROM = "BUILT-FROM"
@@ -170,7 +170,7 @@ def pair_refusal(pair: Path, ref: str) -> str | None:
 
 def package_differences(pinned: Path, installed: Path) -> list[str]:
     """
-    Python files that differ between two ``advtext`` package directories, by relative path.
+    Python files that differ between two ``imscribe`` package directories, by relative path.
     """
 
     def sources(top: Path) -> dict[str, Path]:
@@ -269,7 +269,7 @@ def adopt() -> Found:
     """
     Decide once for this process, in its own environment; the same answer afterwards.
 
-    For the entry point, before advtext's typesetter is first asked. Once,
+    For the entry point, before imscribe's typesetter is first asked. Once,
     because a second reading would find the variables the first one set and
     call them the caller's.
     """
@@ -283,7 +283,7 @@ def release(environ: MutableMapping[str, str] | None = None) -> None:
     """
     Take back out of the environment the variables ``adopt`` set there.
 
-    For the entry point, once advtext has been asked for the library: advtext
+    For the entry point, once imscribe has been asked for the library: imscribe
     remembers the pair a load by the two variables was accepted with, and is
     made with it again when it is asked again after a ``typesetter.reset()``,
     so from then on the variables are only what a child process would inherit

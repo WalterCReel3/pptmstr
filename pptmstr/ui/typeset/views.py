@@ -13,8 +13,8 @@ ImGui line in a typeset face.
 ## Who draws what
 
 **Markdown is the library's.** Each run of consecutive markdown parts is one
-``advtext.TypesetView``: one selection, one layout, one draw that culls to the
-window. A part is read by the library's own reader (``advtext.parse_markdown``)
+``imscribe.TypesetView``: one selection, one layout, one draw that culls to the
+window. A part is read by the library's own reader (``imscribe.parse_markdown``)
 with the theme of its ``demote``, and the blocks of the run are handed to the
 view together, so parts of different heading levels share a view.
 
@@ -41,7 +41,7 @@ reader is worse than one that is code until its turn settles.
 
 ## When the library stops
 
-A view can raise ``advtext.TypesetUnavailable`` from inside its draw, with the
+A view can raise ``imscribe.TypesetUnavailable`` from inside its draw, with the
 pane already in its typeset branch. Every call here catches it, says the reason
 at the cursor in the pane's own text, returns the height of what it drew, and
 tells the gate (``gate.stopped``). ``enabled()`` answers as it did for the rest
@@ -356,7 +356,7 @@ class ViewCache:
         Asked outside a draw, so a library that has stopped is caught here as a
         draw catches it: the answer is ``None`` and the gate is told.
         """
-        from advtext import TypesetUnavailable
+        from imscribe import TypesetUnavailable
 
         entry = self._entries.get(key)
         if entry is None or entry.resting or entry.missing:
@@ -396,7 +396,7 @@ class ViewCache:
         (a pane asks from inside a popup). A library that has stopped is caught
         here as a draw catches it: the answer is ``""`` and the gate is told.
         """
-        from advtext import TypesetUnavailable
+        from imscribe import TypesetUnavailable
 
         try:
             for view in self.views(key):
@@ -563,7 +563,7 @@ class Stream:
         where there are none. Raises ``TypesetUnavailable`` when there is no
         library to make them with.
         """
-        from advtext import MarkdownStream, TypesetStreamView
+        from imscribe import MarkdownStream, TypesetStreamView
 
         if self._view is None:
             theme, palette = themes.document_theme(), themes.palette()
@@ -614,7 +614,7 @@ class Stream:
         """
         Take in what has arrived and draw it at the cursor. The height claimed.
         """
-        from advtext import TypesetUnavailable
+        from imscribe import TypesetUnavailable
 
         im = _frame()
         entry = self._entry
@@ -701,7 +701,7 @@ def _open(entry: _Entry, parts: tuple[Part, ...], on_link: Callable[[str], None]
     Make of ``parts`` what draws them, keeping every view that still has a run of
     markdown to show: a view handed blocks it already has lays nothing out again.
     """
-    from advtext import TypesetView
+    from imscribe import TypesetView
 
     from . import diffs
 
@@ -1194,7 +1194,7 @@ def _draw(
     Draw what is held under ``key`` for ``parts``, building what changed. The
     height claimed.
     """
-    from advtext import TypesetUnavailable
+    from imscribe import TypesetUnavailable
 
     im = _frame()
     entry = cache._held(key, kind)

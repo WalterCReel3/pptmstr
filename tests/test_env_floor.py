@@ -2,7 +2,7 @@
 The declared environment, held to the thing each bound exists for.
 
 `pyproject.toml` pins imgui-bundle to one version because the imtypeset library
-advtext draws through is built against one wheel binary. A pin is a line in a
+imscribe draws through is built against one wheel binary. A pin is a line in a
 file and the reason is the wheel that is installed; these tests hold both, so
 an environment that drifted from the pin fails here by name and not as typeset
 panes that fall back.
@@ -50,26 +50,26 @@ def test_the_imgui_bundle_that_runs_and_the_one_that_is_installed_are_the_pinned
     assert importlib.metadata.version("imgui-bundle") == _imgui_pin()
 
 
-def test_what_advtext_needs_at_run_time_is_a_runtime_dependency() -> None:
+def test_what_imscribe_needs_at_run_time_is_a_runtime_dependency() -> None:
     assert "fonttools" in {_name(d) for d in _dependencies()}
 
 
-def test_advtext_is_asked_of_no_package_index() -> None:
+def test_imscribe_is_asked_of_no_package_index() -> None:
     # The name is unclaimed on PyPI: a requirement that names it bare installs
-    # whatever is registered under it. bootstrap.sh installs advtext, at the
-    # commit advtext.ref names, and nothing in the build's metadata asks for it.
+    # whatever is registered under it. bootstrap.sh installs imscribe, at the
+    # commit imscribe.ref names, and nothing in the build's metadata asks for it.
     with (ROOT / "pyproject.toml").open("rb") as handle:
         project = tomllib.load(handle)["project"]
     named = [*project["dependencies"]]
     for group in project.get("optional-dependencies", {}).values():
         named += group
-    assert [spec for spec in named if _name(spec) == "advtext"] == []
-    assert "typeset_deps.py advtext" in (ROOT / "bootstrap.sh").read_text(encoding="utf-8")
+    assert [spec for spec in named if _name(spec) == "imscribe"] == []
+    assert "typeset_deps.py imscribe" in (ROOT / "bootstrap.sh").read_text(encoding="utf-8")
 
 
-def test_advtext_and_its_metrics_library_import() -> None:
-    import advtext
+def test_imscribe_and_its_metrics_library_import() -> None:
     import fontTools.ttLib
+    import imscribe
 
-    assert advtext.__all__
+    assert imscribe.__all__
     assert fontTools.ttLib.TTFont

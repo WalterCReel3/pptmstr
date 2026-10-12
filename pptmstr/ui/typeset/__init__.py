@@ -1,8 +1,8 @@
 """
-The one place pptmstr meets ``advtext``: the gate, the fonts, the roles, the views.
+The one place pptmstr meets ``imscribe``: the gate, the fonts, the roles, the views.
 
 Every pane that wants typeset text calls into this package and no other module
-in ``pptmstr`` imports ``advtext`` (a test reads the imports). ``advtext`` draws
+in ``pptmstr`` imports ``imscribe`` (a test reads the imports). ``imscribe`` draws
 through imtypeset, a native library beside the ``imgui-bundle`` wheel; what it
 needs of a host is small but easy to get five different ways in five panes, and
 those answers live here once.
@@ -56,7 +56,7 @@ overrides the measurement (``diffs.ADOPT``).
 
 ## What a consumer must not do
 
-- Import ``advtext``. Ask for what is missing here instead.
+- Import ``imscribe``. Ask for what is missing here instead.
 - Decide for itself whether a body is markdown. ``prose_parts`` is the rule.
 - Draw without asking ``enabled(pane)`` in the same frame.
 - Share one ``ViewCache`` between two panes.

@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Where advtext's ``TypesetView`` puts glyphs in a pptmstr-shaped window, as numbers.
+Where imscribe's ``TypesetView`` puts glyphs in a pptmstr-shaped window, as numbers.
 
 ``HANDOFF-advtext.md`` (A2) states six requirements of text on screen, R1 to R6.
 This prints what each comes to when the text is set by the imtypeset library
-through ``advtext.TypesetView``, for Inconsolata Medium and Roboto Regular at 14,
+through ``imscribe.TypesetView``, for Inconsolata Medium and Roboto Regular at 14,
 16, 18 and 20 px. It measures and decides nothing: no verdict is printed, and
 nothing here says how anything looks.
 
 "Size" names two lengths. Dear ImGui sizes a font by its pixel HEIGHT (ascent
-plus descent); advtext sizes a face by its EM. ``--px`` pages are the first and
+plus descent); imscribe sizes a face by its EM. ``--px`` pages are the first and
 ``--em`` pages the second: Inconsolata's advance is half an em, so at an em of
 16 the file's advance is a whole 8 px where at a pixel height of 16 it is
 7.626.
@@ -19,8 +19,8 @@ plus descent); advtext sizes a face by its EM. ``--px`` pages are the first and
 Fonts are loaded as ``pptmstr/theme.py`` loads them, the lines copied here
 rather than imported: Inconsolata Medium with Font Awesome 6 merged as
 ``Fonts[0]`` through hello_imgui, the vendored Inconsolata Bold, then
-``advtext.fontlib.register_font(Face.CODE_BOLD, <the vendored bold>)`` and
-``advtext.typesetter.load_fonts()`` last in ``load_additional_fonts``.
+``imscribe.fontlib.register_font(Face.CODE_BOLD, <the vendored bold>)`` and
+``imscribe.typesetter.load_fonts()`` last in ``load_additional_fonts``.
 
 A page is one face table at one size. The view is made to set text at that size
 by its theme, and by nothing else:
@@ -63,8 +63,8 @@ Nothing is read from pixels.
             (b) the chrome font at the page's pixel height.
 
 The library's atlas entry is found with ``typesetter.module().font_atlas_index``
-and ``advtext.description.FACE_ROLES``. Neither is a name in ``advtext.__all__``;
-it is how advtext's own demo finds the font (``advtext/ui/app.py``), and
+and ``imscribe.description.FACE_ROLES``. Neither is a name in ``imscribe.__all__``;
+it is how imscribe's own demo finds the font (``imscribe/ui/app.py``), and
 pptmstr's request P14 asks for a supported name.
 
 ## Running it
@@ -73,7 +73,7 @@ pptmstr's request P14 asks for a supported name.
     ... measure_typeset_advances.py --faces mono --em 14,16,18,20 --px 16
 
 With no option the pages are both faces at the four pixel heights and no em
-page. The header says which ``advtext`` was imported and, where its directory
+page. The header says which ``imscribe`` was imported and, where its directory
 is a git checkout, the commit.
 
 ``IMTYPESET_LIBRARY`` and ``IMTYPESET_PYTHON`` are taken from the environment
@@ -201,7 +201,7 @@ class Unread(Exception):
 
 
 def theme_for(page: Page) -> Any:
-    from advtext import Align, Faces, Spacing, Theme, em_size_for_pixel_height
+    from imscribe import Align, Faces, Spacing, Theme, em_size_for_pixel_height
 
     faces = Faces.mono() if page.face == "mono" else Faces()
     px = page.size
@@ -214,8 +214,8 @@ def expected_sizes(theme: Any) -> dict[str, float]:
     """
     The pixel height (ascent plus descent) of the paragraph's and the code block's font.
     """
-    from advtext import BlockKind, px_from_sp
-    from advtext.style import fontlib_metrics
+    from imscribe import BlockKind, px_from_sp
+    from imscribe.style import fontlib_metrics
 
     out = {}
     for name, kind in (("paragraph", BlockKind.PARAGRAPH), ("code", BlockKind.CODE)):
@@ -695,10 +695,10 @@ def uptime() -> str:
 
 def provenance(package: Any) -> str:
     """
-    The file ``advtext`` was imported from, and the commit when its directory is a checkout.
+    The file ``imscribe`` was imported from, and the commit when its directory is a checkout.
     """
     where = Path(package.__file__).resolve().parent
-    said = f"advtext imported from {where}"
+    said = f"imscribe imported from {where}"
     if not (where.parent / ".git").exists():
         return f"{said};  not a git checkout, so no commit is read here"
     try:
@@ -709,7 +709,7 @@ def provenance(package: Any) -> str:
             check=False,
         ).stdout.strip()
         edits = subprocess.run(
-            ["git", "-C", str(where.parent), "status", "--porcelain", "--", "advtext"],
+            ["git", "-C", str(where.parent), "status", "--porcelain", "--", "imscribe"],
             capture_output=True,
             text=True,
             check=False,
@@ -757,8 +757,8 @@ def main(argv: list[str] | None = None) -> int:
         assert len(text) == mark, (len(text), mark)
         assert all(not text[k - 1].isspace() for k in MARKS if k <= len(text)), text
 
-    import advtext
-    from advtext import DARK_PALETTE, Face, TypesetUnavailable, TypesetView, fontlib, typesetter
+    import imscribe
+    from imscribe import DARK_PALETTE, Face, TypesetUnavailable, TypesetView, fontlib, typesetter
 
     ts = typesetter.module()
     if ts is None:
@@ -766,8 +766,8 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     import imgui_bundle
-    from advtext.description import FACE_ROLES
     from imgui_bundle import hello_imgui, imgui, immapp
+    from imscribe.description import FACE_ROLES
 
     before = uptime()
     pages = [
@@ -977,7 +977,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  uptime before: {before}")
     print(f"  uptime after:  {after}")
     print(f"  display: {os.environ.get('DISPLAY', 'unset')};  python {sys.version.split()[0]}")
-    print(f"  {provenance(advtext)}")
+    print(f"  {provenance(imscribe)}")
     print(f"  imgui_bundle {imgui_bundle.__version__} at {Path(imgui_bundle.__file__).parent}")
     print(f"  IMTYPESET_LIBRARY={os.environ['IMTYPESET_LIBRARY']}")
     print(f"  IMTYPESET_PYTHON={os.environ['IMTYPESET_PYTHON']}")

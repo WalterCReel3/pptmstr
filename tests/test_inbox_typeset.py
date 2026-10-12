@@ -1060,10 +1060,10 @@ def diff_view_stops(monkeypatch: pytest.MonkeyPatch) -> None:
     """
 
     def stopped(self: Any, *given: Any, **named: Any) -> None:
-        raise rig.advtext.TypesetUnavailable("imtypeset stopped: the library said no")
+        raise rig.imscribe.TypesetUnavailable("imtypeset stopped: the library said no")
 
-    monkeypatch.setattr(rig.advtext.TypesetDiffView, "draw", stopped)
-    monkeypatch.setattr(rig.advtext.TypesetDiffView, "__init__", stopped)
+    monkeypatch.setattr(rig.imscribe.TypesetDiffView, "draw", stopped)
+    monkeypatch.setattr(rig.imscribe.TypesetDiffView, "__init__", stopped)
 
 
 @pytest.mark.parametrize("first", [False, True], ids=["a view held", "a key never drawn"])
@@ -1163,9 +1163,9 @@ def library_stops(monkeypatch: pytest.MonkeyPatch) -> None:
     """
 
     def stopped(self: Any, **given: Any) -> bool:
-        raise rig.advtext.TypesetUnavailable("imtypeset stopped: the library said no")
+        raise rig.imscribe.TypesetUnavailable("imtypeset stopped: the library said no")
 
-    monkeypatch.setattr(rig.advtext.TypesetView, "draw", stopped)
+    monkeypatch.setattr(rig.imscribe.TypesetView, "draw", stopped)
 
 
 def test_a_body_the_library_stopped_under_says_so_and_cannot_be_approved_by_a_click(
@@ -2172,7 +2172,7 @@ def test_a_body_the_library_raises_under_does_not_take_the_pane_and_cannot_be_ap
     call = long_concern()
     pane = Pane(call)
     sent = _sent(pane, monkeypatch)
-    monkeypatch.setattr(rig.advtext.TypesetView, "draw", _raises_attribute_error)
+    monkeypatch.setattr(rig.imscribe.TypesetView, "draw", _raises_attribute_error)
 
     pane.draw(seam)
     assert inbox._VIEWS.unbuilt(key(call, "body")) == call.raw_args["body"].count("\n") + 1
@@ -2189,15 +2189,17 @@ def test_a_body_the_library_raises_under_does_not_take_the_pane_and_cannot_be_ap
 
 
 def _diff_draw_raises(patched: pytest.MonkeyPatch) -> None:
-    patched.setattr(rig.advtext.TypesetDiffView, "draw", _raises_attribute_error)
+    patched.setattr(rig.imscribe.TypesetDiffView, "draw", _raises_attribute_error)
 
 
 def _diff_attribute_raises(patched: pytest.MonkeyPatch) -> None:
-    patched.setattr(rig.advtext.FileDiff, "invisible_characters", property(_raises_attribute_error))
+    patched.setattr(
+        rig.imscribe.FileDiff, "invisible_characters", property(_raises_attribute_error)
+    )
 
 
 def _diff_model_raises(patched: pytest.MonkeyPatch) -> None:
-    patched.setattr(rig.advtext.Diff, "from_texts", _raises_attribute_error)
+    patched.setattr(rig.imscribe.Diff, "from_texts", _raises_attribute_error)
 
 
 @pytest.mark.parametrize(
@@ -2239,22 +2241,22 @@ def test_where_columns_hold_a_diff_the_library_raises_under_does_not_take_the_pa
 
 
 def _diff_draw_answers_false(patched: pytest.MonkeyPatch) -> None:
-    real = rig.advtext.TypesetDiffView.draw
+    real = rig.imscribe.TypesetDiffView.draw
     patched.setattr(
-        rig.advtext.TypesetDiffView,
+        rig.imscribe.TypesetDiffView,
         "draw",
         lambda self, **given: bool(real(self, **given)) and False,
     )
 
 
 def _diff_edit_is_cut(patched: pytest.MonkeyPatch) -> None:
-    real = rig.advtext.TypesetDiffView.draw
+    real = rig.imscribe.TypesetDiffView.draw
 
     def cut(self: Any, **given: Any) -> bool:
-        rig.advtext.typesetter.note("a diff edit was cut: block 2: the text is longer than 16 MiB")
+        rig.imscribe.typesetter.note("a diff edit was cut: block 2: the text is longer than 16 MiB")
         return bool(real(self, **given))
 
-    patched.setattr(rig.advtext.TypesetDiffView, "draw", cut)
+    patched.setattr(rig.imscribe.TypesetDiffView, "draw", cut)
 
 
 @pytest.mark.parametrize(

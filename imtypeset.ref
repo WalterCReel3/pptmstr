@@ -1,5 +1,5 @@
 # The imtypeset commit the sidecar library is built from: a commit of
-# https://github.com/WalterCReel3/imtypeset, and the one the advtext commit in advtext.ref
+# https://github.com/WalterCReel3/imtypeset, and the one the imscribe commit in imscribe.ref
 # is gated against (its HANDOFF-imtypeset.md, "What advtext consumes today").
 # One ref, on the first line that is neither blank nor a comment: a full 40-digit hash.
 # Read by scripts/typeset_deps.py. A bump is: this line, HANDOFF-advtext.md, `make deps`, the gate.

@@ -1,9 +1,9 @@
 """
 Whether the text library can draw, its fonts, and the sentence when it cannot.
 
-The library is ``advtext`` drawing through imtypeset, a native library built for
+The library is ``imscribe`` drawing through imtypeset, a native library built for
 one ``imgui-bundle`` wheel and found through two environment variables.
-``advtext.typesetter`` is its gate; this module is pptmstr's side of that gate
+``imscribe.typesetter`` is its gate; this module is pptmstr's side of that gate
 and the only place the two meet for anything but a diff model (``diffs``).
 
 **pptmstr is still pptmstr when the library cannot draw.** Four things can be
@@ -30,7 +30,7 @@ around them is a defect and leaves as itself.
 exception** (``noted``). A view's ``draw`` answers false when a block in view
 could not be set as asked, and the library notes an edit it cut --
 ``typesetter.trouble()`` -- while the draw over it answers true. Measured in
-pptmstr on 2026-10-12 (advtext ``38f5fac``, imtypeset ``c9f8902``): a table row
+pptmstr on 2026-10-12 (imscribe ``38f5fac``, imtypeset ``c9f8902``): a table row
 of more than 1,024 cells loses the rest and draws true; a block over 16 MiB is
 cut and draws false while it is in view; no character does either. A lone
 surrogate, which ``json.loads`` makes of ``"\\udc80"`` in a tool's arguments,
@@ -42,7 +42,7 @@ is set as U+FFFD and noted nowhere (the library the tree pins now, by
 atlas before that callback, so a face added earlier is gone by the first frame.
 The library puts its own copy of each face on the atlas, after the application's
 first font, which stays ``Fonts[0]``. Two files are pptmstr's to name before it
-does (``advtext.register_font``): the vendored bold monospace, without which the
+does (``imscribe.register_font``): the vendored bold monospace, without which the
 library backs bold code with a proportional bold and bold code stops being
 monospace; and the upright file of the proportional family in force.
 
@@ -77,7 +77,7 @@ of: a load moves the epoch, and ``theme.keep_baked_sizes`` drops every baked
 size when it moves.
 
 **The library's context belongs to one ImGui context, and the library is the
-one that knows which.** ``advtext.typesetter.ready()`` is false wherever the
+one that knows which.** ``imscribe.typesetter.ready()`` is false wherever the
 ImGui context that is current is not the one its fonts were loaded in: another
 one, none, or that one destroyed, with ``unload()`` called first or not. It
 holds the current context to the font it loaded and that font's bytes, because
@@ -87,10 +87,10 @@ asks ``ready()`` and keeps no record of its own, and ``why_not_ready()`` is the
 sentence. ``app`` still calls ``unload()`` in ``before_exit``: that is where the
 library's context is given back, and nothing here depends on it.
 
-Reached past ``advtext.__all__``: the module ``advtext.typesetter`` itself, for
+Reached past ``imscribe.__all__``: the module ``imscribe.typesetter`` itself, for
 ``module``, ``trouble``, ``unload``, ``font`` and ``why_not_ready``, which the
 module lists as its own (``typesetter.__all__``) and the facade does not; and
-the module ``advtext.markdown_rules``, for its private ``_parser``, as said
+the module ``imscribe.markdown_rules``, for its private ``_parser``, as said
 below. A test reads this package's imports and holds them to those two names.
 Two reaches are on neither list: the native module's ``face_has_glyph`` with
 ``typesetter.FACE_ROLES`` (``code_lacks``), and the native module's documents
@@ -170,7 +170,7 @@ NOT_INSTALLED = "not-installed"
 REFUSED = "refused"
 FAILED = "failed"
 """
-The kinds ``library`` answers with. They are the values of advtext's
+The kinds ``library`` answers with. They are the values of imscribe's
 ``typesetter.Kind``, so a kind it reports is one of these or another word of
 its own, which is said as it is.
 """
@@ -208,7 +208,7 @@ _GATE = _Gate()
 
 
 def _typesetter() -> Any:
-    from advtext import typesetter
+    from imscribe import typesetter
 
     return typesetter
 
@@ -279,7 +279,7 @@ class into_library:
     ) -> None:
         if failure is None or not isinstance(failure, Exception):
             return
-        from advtext import TypesetUnavailable
+        from imscribe import TypesetUnavailable
 
         if isinstance(failure, TypesetUnavailable):
             return
@@ -398,7 +398,7 @@ def unavailable_reason() -> str | None:
 
 def _kind(typesetter: Any) -> str:
     """
-    Which kind of thing is so of the library, as advtext's own word for it.
+    Which kind of thing is so of the library, as imscribe's own word for it.
 
     ``typesetter.kind()`` is asked and what it answers is final: it knows of
     routes to a library, and of reasons for there being none, that the two
@@ -458,7 +458,7 @@ def settle() -> None:
     and what is left in the environment after that is only what a session's
     process would inherit. The first asking is the library's import
     and its check against the wheel, which the font load would otherwise have
-    been the first to pay. Never raises: an advtext that is not there has
+    been the first to pay. Never raises: an imscribe that is not there has
     nothing to read them with, and ``unavailable_reason`` finds that again.
     """
     try:
@@ -477,7 +477,7 @@ def read(source: str, theme: Any) -> Any:
     a text reads the same finished as it did arriving; and that is the parser
     ``_reader`` put pptmstr's rules on.
     """
-    from advtext import parse_markdown
+    from imscribe import parse_markdown
 
     return parse_markdown(source, theme, references=False)
 
@@ -516,7 +516,7 @@ def _reader() -> None:
     this raises when the name is gone or the probe comes back short. Safe to
     call again: a rule already there is not added twice.
     """
-    from advtext import markdown_rules
+    from imscribe import markdown_rules
 
     parser = markdown_rules._parser(False, False)
     parser.disable(list(_HIDING_RULES))
@@ -544,7 +544,7 @@ def reader_hides() -> tuple[str, ...]:
     -- through the library's public calls and nothing of the parser, so that what
     is checked is the reader in use and not the object ``_reader`` was handed.
     """
-    from advtext import MarkdownStream, Theme
+    from imscribe import MarkdownStream, Theme
 
     theme = Theme.build()
     arriving = MarkdownStream(theme)
@@ -778,7 +778,7 @@ def _register(bold: Path | None, prose: Path | None) -> None:
     Only where the registry does not already say so: a registration drops every
     metric the library has read from a font file.
     """
-    from advtext import Face, register_font, registered_fonts, unregister_font
+    from imscribe import Face, register_font, registered_fonts, unregister_font
 
     held = registered_fonts()
     if bold is not None and bold.is_file() and held.get(Face.CODE_BOLD) != bold.resolve():
@@ -808,7 +808,7 @@ def face_font(face: str) -> Any:
     if not can_draw():
         return None
     try:
-        from advtext import Face
+        from imscribe import Face
 
         return _typesetter().font(Face[face])
     except Exception:
@@ -836,7 +836,7 @@ def diff_view(model: Any, theme: Any, **given: Any) -> Any:
     made here, so what was measured is the configuration that is drawn.
     Raises what the library raises.
     """
-    from advtext import TypesetDiffView
+    from imscribe import TypesetDiffView
 
     return TypesetDiffView(model, theme, cell=DIFF_CELL, **given)
 
@@ -846,7 +846,7 @@ def diff_fences() -> Any:
     The library's hook for a fenced diff in a settled document, on the same
     cell as ``diff_view``. Raises what the library raises.
     """
-    from advtext import TypesetDiffFences
+    from imscribe import TypesetDiffFences
 
     return TypesetDiffFences(cell=DIFF_CELL)
 
@@ -1061,7 +1061,7 @@ def _columns_key(theme: Any) -> object:
     open); the key is what keeps an answer taken at one density from being
     given at another, and says nothing about what the answer there is.
     """
-    from advtext import BlockKind
+    from imscribe import BlockKind
 
     return (DIFF_CELL, theme.style(BlockKind.CODE).font, theme.px_per_inch, _density())
 
@@ -1128,7 +1128,7 @@ def _measured(theme: Any) -> Columns:
     """
     The measurement itself: ``_measured_columns`` cleans up after it.
     """
-    from advtext import Diff
+    from imscribe import Diff
 
     typesetter = _typesetter()
     native = typesetter.module()

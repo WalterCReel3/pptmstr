@@ -427,7 +427,7 @@ def test_glyphs_the_library_loads_are_the_moved_sizes_too(kept: Any, guarded: bo
     none by ImGui's text: bold words as a paragraph, at the pixel height of the
     body and of a heading. Whoever asks the atlas for the glyph gets the wrong one.
     """
-    from advtext import DARK_PALETTE, Align, Faces, Spacing, Theme, TypesetView
+    from imscribe import DARK_PALETTE, Align, Faces, Spacing, Theme, TypesetView
 
     bold = gate.face_font("PROSE_BOLD")
     views: dict[tuple[float, str], Any] = {}

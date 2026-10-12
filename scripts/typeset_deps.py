@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """
-advtext at the commit `advtext.ref` names, and the imtypeset library for this interpreter.
+imscribe at the commit `imscribe.ref` names, and the imtypeset library for this interpreter.
 
 Stdlib only, and run by the interpreter the result is for (`.venv/bin/python`):
 `bootstrap.sh` and `make deps` are the two callers. Everything it makes is under
 `.deps/`, which is ignored:
 
-    .deps/advtext/            a clone checked out at the commit in advtext.ref
+    .deps/imscribe/           a clone checked out at the commit in imscribe.ref
     .deps/imtypeset-src/      a clone checked out at the commit in imtypeset.ref
     .deps/imgui_bundle/       objects only: Dear ImGui Bundle's tag for the wheel
     .deps/imgui/              objects only: Dear ImGui's docking tag for the wheel
@@ -22,9 +22,12 @@ Stdlib only, and run by the interpreter the result is for (`.venv/bin/python`):
 Three steps that make it, because the install between the first two belongs to
 the caller, which knows whether the installer is pip or uv, and one that reads it:
 
-    advtext   fetch and check out the pinned commit. Failing here fails the caller.
-    verify    the clone is at the commit advtext.ref names, unedited, and the
-              `advtext` this interpreter imports is that clone's, file for file.
+    imscribe  fetch and check out the pinned commit, then take what an install
+              under the library's earlier name left out of this interpreter.
+              Failing here fails the caller.
+    verify    the clone is at the commit imscribe.ref names, unedited, the
+              `imscribe` this interpreter imports is that clone's, file for file,
+              and nothing imports under the earlier name.
     library   build the pair. Never fails the caller: without the library pptmstr
               still runs and typeset panes fall back, so a missing compiler is a
               paragraph on standard error and exit status 0.
@@ -34,7 +37,7 @@ the caller, which knows whether the installer is pip or uv, and one that reads i
 Where each source comes from is a variable holding anything `git fetch` accepts,
 GitHub by default:
 
-    ADVTEXT_REPO        https://github.com/WalterCReel3/imgui-adv-text.git
+    IMSCRIBE_REPO       https://github.com/WalterCReel3/imgui-adv-text.git
     IMTYPESET_REPO      https://github.com/WalterCReel3/imtypeset.git
     IMGUI_BUNDLE_REPO   https://github.com/pthom/imgui_bundle.git
     IMGUI_REPO          https://github.com/ocornut/imgui.git
@@ -71,12 +74,15 @@ that interpreter alone, which is why `pyproject.toml` pins the wheel exactly.
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import importlib.util
 import os
 import platform
 import shutil
 import subprocess
 import sys
+import sysconfig
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -123,10 +129,21 @@ class Source:
         return os.environ.get(self.variable) or self.default
 
 
-ADVTEXT = Source("ADVTEXT_REPO", "https://github.com/WalterCReel3/imgui-adv-text.git")
+IMSCRIBE = Source("IMSCRIBE_REPO", "https://github.com/WalterCReel3/imgui-adv-text.git")
 IMTYPESET = Source("IMTYPESET_REPO", "https://github.com/WalterCReel3/imtypeset.git")
 IMGUI_BUNDLE = Source("IMGUI_BUNDLE_REPO", "https://github.com/pthom/imgui_bundle.git")
 IMGUI = Source("IMGUI_REPO", "https://github.com/ocornut/imgui.git")
+
+# The name the library was distributed and imported under up to the commit
+# before cd437c1 of its repository. An environment made on that side of it holds
+# a distribution an installer does not know is the same project, so installing
+# imscribe leaves it importable, and a module that still imported the old name
+# would run there and nowhere else.
+EARLIER_NAME = "advtext"
+EARLIER_VARIABLES = {
+    "ADVTEXT_REPO": IMSCRIBE.variable,
+    "ADVTEXT_PIP_ARGS": "IMSCRIBE_PIP_ARGS",
+}
 
 
 def read_ref(path: Path) -> str:
@@ -205,21 +222,112 @@ def fetch_tag(source: Source, tag: str, clone: Path) -> Path:
     return clone
 
 
-def imported_advtext() -> Path | None:
+def _imported(name: str) -> Path | None:
     """
-    The directory `import advtext` would load in this interpreter, without importing it.
+    The directory `import <name>` would load in this interpreter, without importing it.
     """
-    spec = importlib.util.find_spec("advtext")
-    if spec is None or spec.origin is None:
+    importlib.invalidate_caches()
+    spec = importlib.util.find_spec(name)
+    if spec is None:
         return None
-    return Path(spec.origin).resolve().parent
+    if spec.origin is not None:
+        return Path(spec.origin).resolve().parent
+    # A directory with no `__init__.py` imports too, as a namespace package.
+    places = list(spec.submodule_search_locations or ())
+    return Path(places[0]).resolve() if places else None
 
 
-def step_advtext(deps: Path) -> int:
-    ref = read_ref(ROOT / "advtext.ref")
-    clone = deps / "advtext"
-    fetch_commit(ADVTEXT, ref, clone)
-    print(f"advtext {ref} from {ADVTEXT.repo()} -> {clone}")
+def imported_imscribe() -> Path | None:
+    """
+    The directory `import imscribe` would load in this interpreter, or None.
+    """
+    return _imported("imscribe")
+
+
+def imported_earlier_name() -> Path | None:
+    """
+    The directory an import under the library's earlier name would load, or None.
+    """
+    return _imported(EARLIER_NAME)
+
+
+def unread_variables(environ: Mapping[str, str]) -> str | None:
+    """
+    One line naming each variable of the earlier name that is set, and what is read instead.
+    """
+    told = [
+        f"{old} is set and is not read ({new} is)"
+        for old, new in EARLIER_VARIABLES.items()
+        if environ.get(old)
+    ]
+    return f"note: {'; '.join(told)}." if told else None
+
+
+def own_site_directories() -> set[Path]:
+    """
+    Where this interpreter's environment installs packages: the only places an install here wrote.
+    """
+    return {Path(sysconfig.get_path(kind)).resolve() for kind in ("purelib", "platlib")}
+
+
+def remove_earlier_name(deps: Path) -> list[Path]:
+    """
+    Take the distribution under the earlier name out of this environment; what was removed.
+
+    What an installer's own uninstall does, by the distribution's record, since
+    a .venv uv made has no pip to ask: every file the record lists, the package
+    directory, the metadata directory. **Only in this environment's own site
+    directories.** sys.path can reach another environment's (a .pth file naming
+    it), and a distribution found there is that environment's: it is left, and
+    so is a copy that is no distribution at all (a directory on PYTHONPATH).
+    `verify` refuses whichever of them still imports. The clone under `deps`
+    goes too: nothing reads it, and it is what the old distribution's record
+    names as its source.
+    """
+    removed: list[Path] = []
+    own = own_site_directories()
+    for distribution in importlib.metadata.distributions(name=EARLIER_NAME):
+        site = Path(str(distribution.locate_file(""))).resolve()
+        if site not in own:
+            continue
+        listed = [Path(str(distribution.locate_file(file))) for file in distribution.files or ()]
+        files = [
+            path
+            for path in listed
+            if site in path.resolve().parents and (path.is_file() or path.is_symlink())
+        ]
+        left = [
+            path
+            for path in (site / EARLIER_NAME, *site.glob(f"{EARLIER_NAME}-*.dist-info"))
+            if path.is_dir()
+        ]
+        # A directory listing importlib.metadata remembers can name a
+        # distribution that is no longer on disk; that one was not removed now.
+        if not files and not left:
+            continue
+        for path in files:
+            path.unlink()
+        for path in left:
+            shutil.rmtree(path)
+        removed.append(site / EARLIER_NAME)
+    clone = deps / EARLIER_NAME
+    if clone.is_dir():
+        shutil.rmtree(clone)
+        removed.append(clone)
+    importlib.invalidate_caches()
+    return removed
+
+
+def step_imscribe(deps: Path) -> int:
+    unread = unread_variables(os.environ)
+    if unread:
+        print(unread, file=sys.stderr)
+    ref = read_ref(ROOT / "imscribe.ref")
+    clone = deps / "imscribe"
+    fetch_commit(IMSCRIBE, ref, clone)
+    print(f"imscribe {ref} from {IMSCRIBE.repo()} -> {clone}")
+    for gone in remove_earlier_name(deps):
+        print(f"removed {gone}: the library under its earlier name, {EARLIER_NAME}")
     return 0
 
 
@@ -238,18 +346,18 @@ def clone_is_at(clone: Path, ref: str) -> None:
     )
     if head is None or head.returncode != 0:
         raise DepsError(
-            f"{clone} is not a checkout of advtext, so nothing here says which commit is "
-            f"installed. `make deps` fetches {ref}, which advtext.ref names, and installs it."
+            f"{clone} is not a checkout of imscribe, so nothing here says which commit is "
+            f"installed. `make deps` fetches {ref}, which imscribe.ref names, and installs it."
         )
     at = head.stdout.strip()
     if at != ref:
         raise DepsError(
-            f"advtext.ref names {ref} and {clone} is at {at}: the ref file moved and what is "
+            f"imscribe.ref names {ref} and {clone} is at {at}: the ref file moved and what is "
             f"installed did not. `make deps` fetches and installs the commit it names now."
         )
     edited = [
         line[3:]
-        for line in _git("status", "--porcelain", "--", "advtext", cwd=clone).stdout.splitlines()
+        for line in _git("status", "--porcelain", "--", "imscribe", cwd=clone).stdout.splitlines()
         if line.endswith(".py")
     ]
     if edited:
@@ -260,21 +368,30 @@ def clone_is_at(clone: Path, ref: str) -> None:
 
 
 def step_verify(deps: Path) -> int:
-    ref = read_ref(ROOT / "advtext.ref")
-    clone_is_at(deps / "advtext", ref)
-    pinned = deps / "advtext" / "advtext"
-    installed = imported_advtext()
+    ref = read_ref(ROOT / "imscribe.ref")
+    clone_is_at(deps / "imscribe", ref)
+    pinned = deps / "imscribe" / "imscribe"
+    installed = imported_imscribe()
     if installed is None:
-        raise DepsError(f"advtext is not installed for {sys.executable}.")
+        raise DepsError(f"imscribe is not installed for {sys.executable}.")
     differing = package_differences(pinned, installed)
     if differing:
         raise DepsError(
-            f"{sys.executable} imports advtext from {installed}, and that is not commit {ref} "
+            f"{sys.executable} imports imscribe from {installed}, and that is not commit {ref} "
             f"as checked out in {pinned}: {len(differing)} file(s) differ, the first "
             f"{differing[0]}. Something ahead of the installed copy on sys.path (an editable "
-            f"install, a .pth file) is supplying another advtext."
+            f"install, a .pth file) is supplying another imscribe."
         )
-    print(f"advtext imports from {installed}, identical to {ref}")
+    earlier = imported_earlier_name()
+    if earlier is not None:
+        raise DepsError(
+            f"{sys.executable} can still import {EARLIER_NAME}, from {earlier}: the name imscribe "
+            f"had before, left by an earlier install. Nothing here is tested against it, and a "
+            f"module that still imported that name would run in this environment and in no "
+            f"other. `make deps` removes the distribution of that name; a copy that is not one "
+            f"(a directory on PYTHONPATH, a .pth file) is removed by hand."
+        )
+    print(f"imscribe imports from {installed}, identical to {ref}")
     return 0
 
 
@@ -516,7 +633,7 @@ def step_library(deps: Path) -> int:
         )
         print(
             f"\nThe imtypeset library was NOT built: {cause}. pptmstr does not need it to "
-            f"run: without it advtext cannot draw, so typeset panes fall back, and nothing "
+            f"run: without it imscribe cannot draw, so typeset panes fall back, and nothing "
             f"else is affected.{kept} Once the cause is dealt with, `make deps` builds it "
             f"without repeating the rest of bootstrap.\n",
             file=sys.stderr,
@@ -535,7 +652,7 @@ def step_library(deps: Path) -> int:
             print(
                 f"    linked against {line.removeprefix('module: ')} and for that file "
                 f"alone: beside another imgui-bundle binary the library is refused and "
-                f"advtext.typesetter.reason() says so."
+                f"imscribe.typesetter.reason() says so."
             )
     print(f"    IMTYPESET_LIBRARY={final / LIBRARY_NAME}")
     print(f"    IMTYPESET_PYTHON={final / 'pysnap'}")
@@ -545,7 +662,7 @@ def step_library(deps: Path) -> int:
     return 0
 
 
-STEPS = {"advtext": step_advtext, "verify": step_verify, "library": step_library}
+STEPS = {"imscribe": step_imscribe, "verify": step_verify, "library": step_library}
 
 
 def main(argv: list[str] | None = None) -> int:

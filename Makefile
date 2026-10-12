@@ -21,7 +21,7 @@ GUI :=
 endif
 
 # The imtypeset pair `make deps` builds (scripts/typeset_deps.py): the library and
-# the ctypes package that was built with it. advtext looks for the library only
+# the ctypes package that was built with it. imscribe looks for the library only
 # when IMTYPESET_LIBRARY names it and finds the package through IMTYPESET_PYTHON,
 # so both are exported to every recipe here -- tests, the app, the window
 # targets -- and always as a pair, because a library with another build's
@@ -66,9 +66,9 @@ export TYPESET_WHY
 # a venv uv made has no pip in it. --reinstall-package because uv may otherwise
 # keep its cached build of a directory whose version number did not change.
 ifneq ($(shell command -v uv 2>/dev/null),)
-INSTALL_ADVTEXT := uv pip install --python $(PY) --reinstall-package advtext
+INSTALL_IMSCRIBE := uv pip install --python $(PY) --reinstall-package imscribe
 else
-INSTALL_ADVTEXT := $(PIP) install
+INSTALL_IMSCRIBE := $(PIP) install
 endif
 
 .DEFAULT_GOAL := help
@@ -95,18 +95,18 @@ endif
 bootstrap:         ## probe, create .venv, install, smoke test
 	./bootstrap.sh
 
-# The part of bootstrap that pins advtext and builds the imtypeset library, on its
-# own: after a bump of advtext.ref or imtypeset.ref, or once whatever stopped the
-# library building is dealt with. ADVTEXT_REPO, IMTYPESET_REPO, IMGUI_BUNDLE_REPO
+# The part of bootstrap that pins imscribe and builds the imtypeset library, on its
+# own: after a bump of imscribe.ref or imtypeset.ref, or once whatever stopped the
+# library building is dealt with. IMSCRIBE_REPO, IMTYPESET_REPO, IMGUI_BUNDLE_REPO
 # and IMGUI_REPO name where to fetch from (scripts/typeset_deps.py lists them),
 # and IMTYPESET_BUNDLE_HEADERS=stand-in asks for upstream Dear ImGui's headers
 # where the wheel's fork cannot be fetched (BUILT-FROM records which were used);
-# ADVTEXT_PIP_ARGS is added to the install, e.g. "--no-deps --no-index
+# IMSCRIBE_PIP_ARGS is added to the install, e.g. "--no-deps --no-index
 # --no-build-isolation" where no package index is reachable -- which works in a
-# .venv that already holds advtext's build backend and what advtext requires.
-deps: venv-check   ## advtext at advtext.ref, and the imtypeset library for .venv
-	$(PY) scripts/typeset_deps.py advtext
-	$(INSTALL_ADVTEXT) $(ADVTEXT_PIP_ARGS) .deps/advtext
+# .venv that already holds imscribe's build backend and what imscribe requires.
+deps: venv-check   ## imscribe at imscribe.ref, and the imtypeset library for .venv
+	$(PY) scripts/typeset_deps.py imscribe
+	$(INSTALL_IMSCRIBE) $(IMSCRIBE_PIP_ARGS) .deps/imscribe
 	$(PY) scripts/typeset_deps.py verify
 	$(PY) scripts/typeset_deps.py library
 

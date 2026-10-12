@@ -1,5 +1,5 @@
-# The advtext commit pptmstr installs and is tested against: a commit of the branch
+# The imscribe commit pptmstr installs and is tested against: a commit of the branch
 # experimental/imtypeset-adoption of https://github.com/WalterCReel3/imgui-adv-text.
 # One ref, on the first line that is neither blank nor a comment: a full 40-digit hash.
 # Read by scripts/typeset_deps.py. A bump is: this line, HANDOFF-advtext.md, `make deps`, the gate.
-68eb18bad6a1b5d0ddf2470f975295b971babf99
+bb240c3db97aaef4c62382d3822913f70acfa540

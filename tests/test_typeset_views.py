@@ -26,9 +26,9 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-import advtext
+import imscribe
 import pytest
-from advtext import BlockKind, Diff, Face, RowKind, registered_fonts, unregister_font
+from imscribe import BlockKind, Diff, Face, RowKind, registered_fonts, unregister_font
 
 from pptmstr import approval, theme
 from pptmstr.model import NodeId, PendingApproval
@@ -600,7 +600,7 @@ def test_a_reply_cut_anywhere_reads_at_every_piece_as_it_would_whole(seam: Any, 
     comment opener, a run of stars, an entity, a fence's info string. ``0`` is
     pieces of uneven length from a fixed seed.
     """
-    from advtext import MarkdownStream, parse_markdown
+    from imscribe import MarkdownStream, parse_markdown
 
     plain = themes.document_theme()
     stream = MarkdownStream(plain)
@@ -707,7 +707,7 @@ def test_a_stream_the_library_stops_under_says_so_and_reports_its_text_missing(
     assert cache.unbuilt("s") == 0
 
     def stopped(**given: Any) -> bool:
-        raise advtext.TypesetUnavailable("imtypeset stopped: the library said no")
+        raise imscribe.TypesetUnavailable("imtypeset stopped: the library said no")
 
     monkeypatch.setattr(handle.view, "draw", stopped)
     said = _said(monkeypatch)
@@ -961,7 +961,7 @@ def _tall(kind: BlockKind, levels: int = 0) -> float:
     The pixel height ImGui means by a font size, for the font the document theme
     sets a block kind in: what "how big is it on screen" means here.
     """
-    from advtext import fontlib_metrics, px_from_sp
+    from imscribe import fontlib_metrics, px_from_sp
 
     metrics = fontlib_metrics(themes.demoted(levels).style(kind).font.key)
     return float(px_from_sp(round(metrics.ascent + metrics.descent)))
@@ -1104,7 +1104,7 @@ def test_the_monospace_setting_puts_every_role_in_inconsolata(seam: Any) -> None
 
 
 def test_in_monospace_prose_a_code_span_is_the_blocks_own_font(seam: Any) -> None:
-    from advtext import Emphasis
+    from imscribe import Emphasis
 
     typeset.configure(typeset=True, roles={Role.PROSE: RoleStyle(Slot.MONOSPACE)})
     theme_ = themes.document_theme()
@@ -1114,7 +1114,7 @@ def test_in_monospace_prose_a_code_span_is_the_blocks_own_font(seam: Any) -> Non
 
 
 def test_text_is_ragged_and_headings_are_a_panes_scale(seam: Any) -> None:
-    from advtext import Align
+    from imscribe import Align
 
     assert themes.document_theme().style(BlockKind.PARAGRAPH).align is Align.LEFT
     heights = [
@@ -1787,7 +1787,7 @@ def test_a_reader_the_views_do_not_read_with_is_refused(
     calls a view makes, and the library is not offered to draw with when a word
     of it is missing.
     """
-    from advtext import markdown_rules as library
+    from imscribe import markdown_rules as library
 
     real = library._parser
     parser = real(False, False)
@@ -1817,7 +1817,7 @@ def test_the_probe_names_what_a_bare_commonmark_reader_hides(seam: Any) -> None:
     The check is only as good as its probe: with the seam's rules taken back off
     the real parser, every word of it is reported missing.
     """
-    from advtext import markdown_rules as library
+    from imscribe import markdown_rules as library
     from markdown_it.rules_inline import escape
 
     parser = library._parser(False, False)
@@ -2391,13 +2391,13 @@ def _library_draws(monkeypatch: pytest.MonkeyPatch) -> set[int]:
     The library's views drawn from here on, by ``id``.
     """
     drawn: set[int] = set()
-    real = advtext.TypesetView.draw
+    real = imscribe.TypesetView.draw
 
     def draw(self: Any, **given: Any) -> bool:
         drawn.add(id(self))
         return bool(real(self, **given))
 
-    monkeypatch.setattr(advtext.TypesetView, "draw", draw)
+    monkeypatch.setattr(imscribe.TypesetView, "draw", draw)
     return drawn
 
 
@@ -2721,14 +2721,14 @@ def test_a_library_that_stops_inside_a_draw_is_said_in_the_pane_and_is_off_the_n
     frame(seam, both)
     assert typeset.enabled(typeset.Pane.BRIEF)
 
-    from advtext import typesetter
+    from imscribe import typesetter
 
     down: list[bool] = []
 
     def stopped(**given: Any) -> bool:
         # As the library does it: switched off, and then the view raises.
         down.append(True)
-        raise advtext.TypesetUnavailable("imtypeset stopped: the library said no")
+        raise imscribe.TypesetUnavailable("imtypeset stopped: the library said no")
 
     real = typesetter.ready
     monkeypatch.setattr(typesetter, "ready", lambda: not down and real())
@@ -2768,9 +2768,9 @@ def no_view_can_be_made(monkeypatch: pytest.MonkeyPatch) -> None:
     """
 
     def refused(self: Any, *given: Any, **named: Any) -> None:
-        raise advtext.TypesetUnavailable("imtypeset is not in use: the library said no")
+        raise imscribe.TypesetUnavailable("imtypeset is not in use: the library said no")
 
-    monkeypatch.setattr(advtext.TypesetView, "__init__", refused)
+    monkeypatch.setattr(imscribe.TypesetView, "__init__", refused)
 
 
 def test_a_key_first_drawn_after_the_library_stopped_reports_all_of_its_text_missing(
@@ -2819,7 +2819,7 @@ def test_asking_a_stopped_library_for_the_selection_or_the_block_is_an_empty_ans
     io = seam.get_io()
 
     def stopped(*given: Any) -> Any:
-        raise advtext.TypesetUnavailable("imtypeset stopped: the library said no")
+        raise imscribe.TypesetUnavailable("imtypeset stopped: the library said no")
 
     seen: list[Any] = []
 
@@ -2854,15 +2854,15 @@ def _raises_attribute_error(*given: Any, **named: Any) -> Any:
 
 
 def _fault_in_draw(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(advtext.TypesetView, "draw", _raises_attribute_error)
+    monkeypatch.setattr(imscribe.TypesetView, "draw", _raises_attribute_error)
 
 
 def _fault_in_set_document(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(advtext.TypesetView, "set_document", _raises_attribute_error)
+    monkeypatch.setattr(imscribe.TypesetView, "set_document", _raises_attribute_error)
 
 
 def _fault_in_the_reader(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(advtext, "parse_markdown", _raises_attribute_error)
+    monkeypatch.setattr(imscribe, "parse_markdown", _raises_attribute_error)
 
 
 FAULTS = {
@@ -2956,7 +2956,7 @@ WIDE_TABLE = "|" + "c|" * 1100 + "\n|" + "-|" * 1100 + "\n|" + "v|" * 1100 + "\n
 """
 A table of 1,100 columns, 2.2 KB of a body. The library sets 1,024 cells of a
 row and leaves out the rest, notes that it cut an edit, and its draw answers
-true (measured in pptmstr on 2026-10-12, advtext ``38f5fac``).
+true (measured in pptmstr on 2026-10-12, imscribe ``38f5fac``).
 """
 
 
@@ -3023,10 +3023,10 @@ def test_a_draw_that_answers_false_is_reported_unset_and_then_set_as_written(
     drawn = _unformatted(seam, monkeypatch)
     cache = typeset.ViewCache()
     source = "One line.\n\nAnother, *with emphasis*."
-    real = advtext.TypesetView.draw
+    real = imscribe.TypesetView.draw
     with monkeypatch.context() as patched:
         patched.setattr(
-            advtext.TypesetView, "draw", lambda self, **given: bool(real(self, **given)) and False
+            imscribe.TypesetView, "draw", lambda self, **given: bool(real(self, **given)) and False
         )
         frame(seam, lambda: typeset.markdown(cache, "k", source, height_cap=200.0))
         assert cache.unbuilt("k") == 3

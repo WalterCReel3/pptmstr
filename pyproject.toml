@@ -17,14 +17,14 @@ dependencies = [
     # Those are not Python packages and cannot be declared here;
     # scripts/probe.py checks for them by soname and prints the install line.
     #
-    # EXACT. advtext draws through imtypeset, a shared library that is linked
+    # EXACT. imscribe draws through imtypeset, a shared library that is linked
     # against this wheel's own extension module and refused at import beside
     # any other, so one build of the library is for one wheel binary
     # (scripts/typeset_deps.py builds it for the wheel in .venv). A range would
     # promise versions the library was never built for, and the failure would
-    # arrive as typeset panes falling back, not at install. advtext holds the
+    # arrive as typeset panes falling back, not at install. imscribe holds the
     # same pin. A bump is therefore several acts and never a side effect of
-    # `pip install -U`: advtext's pin and advtext.ref, imtypeset.ref if the
+    # `pip install -U`: imscribe's pin and imscribe.ref, imtypeset.ref if the
     # library needs it, this line, then `make deps` to rebuild.
     # tests/test_env_floor.py holds this line to `==` one version and the
     # installed wheel to that version.
@@ -46,25 +46,25 @@ dependencies = [
     # (MarkdownIt.parseInline) -- block structure is our own segmenter
     # (pptmstr/ui/blocks.py), not this library's.
     "markdown-it-py>=3.0",
-    # NOT HERE, and it is a dependency: advtext, which sets typeset text
+    # NOT HERE, and it is a dependency: imscribe, which sets typeset text
     # (markdown, streaming and diff views drawn through the imtypeset library;
     # pptmstr meets it in one package, pptmstr/ui/typeset/). It is on no package
-    # index and the name `advtext` is unclaimed on PyPI, so a bare requirement
+    # index and the name `imscribe` is unclaimed on PyPI, so a bare requirement
     # would ask the index for it on every install route but bootstrap.sh, and
     # install whatever somebody registers under the name. A direct reference
-    # (`advtext @ git+https://github.com/...@<commit>`) is not written either:
+    # (`imscribe @ git+https://github.com/...@<commit>`) is not written either:
     # the same install has to work where GitHub cannot be reached, from the
-    # repository ADVTEXT_REPO names, and pip does not take an advtext already
+    # repository IMSCRIBE_REPO names, and pip does not take an imscribe already
     # installed from that repository as meeting one -- it clones the URL again
     # (run with pip 26.2.1 on 2026-10-12, the commit the same; uv not run). It
-    # would also be the commit written a second time, beside advtext.ref.
-    # bootstrap.sh installs advtext, from a clone at the commit advtext.ref
+    # would also be the commit written a second time, beside imscribe.ref.
+    # bootstrap.sh installs imscribe, from a clone at the commit imscribe.ref
     # names, and holds the interpreter to that commit after the last install
     # (scripts/typeset_deps.py). Without it pptmstr runs, every pane draws with
     # its own renderer, and `pptmstr --version` says it is missing.
-    # advtext reads the faces it sets through fontTools at run time: a theme
+    # imscribe reads the faces it sets through fontTools at run time: a theme
     # sizes each face from its file's ascent and descent
-    # (pptmstr/ui/typeset/themes.py, through advtext's own calls). Nothing in
+    # (pptmstr/ui/typeset/themes.py, through imscribe's own calls). Nothing in
     # the pptmstr package imports it; its scripts and tests read font files
     # with it (scripts/rank_glyphs.py, scripts/survey_fonts.py and
     # tests/test_splash_art.py among them).
@@ -106,7 +106,7 @@ packages = ["pptmstr"]
 # pptmstr can say what it asked for (pptmstr/pairing.py reads them from the
 # root of a checkout and from here in a wheel).
 [tool.hatch.build.targets.wheel.force-include]
-"advtext.ref" = "pptmstr/advtext.ref"
+"imscribe.ref" = "pptmstr/imscribe.ref"
 "imtypeset.ref" = "pptmstr/imtypeset.ref"
 
 # Listed explicitly rather than inferred: hatchling falls back to parsing
@@ -116,7 +116,7 @@ packages = ["pptmstr"]
 include = [
     "/pptmstr", "/scripts", "/tests", "/planning", "/LICENSE", "/README.md",
     "/CLAUDE.md", "/orchestrator-design.md", "/Makefile", "/bootstrap.sh",
-    "/pyproject.toml", "/advtext.ref", "/imtypeset.ref",
+    "/pyproject.toml", "/imscribe.ref", "/imtypeset.ref",
 ]
 exclude = ["**/__pycache__", "**/*.pyc"]
 

@@ -17,7 +17,7 @@ dist/
 # reference images -- the verify_*.py scripts are what assert on rendering.
 /shots/
 
-# scripts/typeset_deps.py builds here: advtext and imtypeset at the commits
-# advtext.ref and imtypeset.ref name, and the library built from them for this
+# scripts/typeset_deps.py builds here: imscribe and imtypeset at the commits
+# imscribe.ref and imtypeset.ref name, and the library built from them for this
 # checkout's interpreter. Remade by `make deps`.
 /.deps/

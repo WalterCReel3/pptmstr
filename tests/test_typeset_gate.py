@@ -17,9 +17,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
-import advtext
+import imscribe
 import pytest
-from advtext import Face, registered_fonts, typesetter
+from imscribe import Face, registered_fonts, typesetter
 
 from pptmstr import theme
 from pptmstr.ui import typeset
@@ -30,7 +30,7 @@ PACKAGE = Path(typeset.__file__).resolve().parent
 
 PAST_THE_FACADE = {"typesetter", "markdown_rules"}
 """
-What the seam imports from ``advtext`` that is not in ``advtext.__all__``, and why.
+What the seam imports from ``imscribe`` that is not in ``imscribe.__all__``, and why.
 
 - ``typesetter``: the module itself. ``module``, ``trouble``, ``unload``,
   ``font`` and ``why_not_ready`` are reached through it and nowhere else; they
@@ -62,15 +62,24 @@ def _run(script: str, **env: str) -> subprocess.CompletedProcess[str]:
 # -- the boundary --------------------------------------------------------------
 
 
-def _advtext_imports(path: Path) -> list[tuple[str, str]]:
+# The name the imports are looked for under is the one this file itself imports
+# the library by, so the search cannot go on looking for a name nothing has.
+LIBRARY = imscribe.__name__
+
+
+def _of_the_library(module: str) -> bool:
+    return module.split(".")[0] == LIBRARY
+
+
+def _imscribe_imports(path: Path) -> list[tuple[str, str]]:
     """
     Every ``(module, name)`` a file imports from the library, wherever in the file.
     """
     found = []
     for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
         if isinstance(node, ast.Import):
-            found += [(alias.name, "") for alias in node.names if alias.name.startswith("advtext")]
-        if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("advtext"):
+            found += [(alias.name, "") for alias in node.names if _of_the_library(alias.name)]
+        if isinstance(node, ast.ImportFrom) and _of_the_library(node.module or ""):
             found += [(node.module or "", alias.name) for alias in node.names]
     return found
 
@@ -81,25 +90,28 @@ def test_no_other_module_imports_the_layout_library() -> None:
     fonts, the palette and who keeps a view alive, which is what this package is for.
     """
     application = PACKAGE.parent.parent
+    # The search finds the imports the seam is known to make, or "no offenders"
+    # is said of a search that finds nothing anywhere.
+    assert _imscribe_imports(PACKAGE / "gate.py"), "the search finds no import of the library"
     offenders = [
         str(path.relative_to(application))
         for path in sorted(application.rglob("*.py"))
-        if PACKAGE not in path.parents and _advtext_imports(path)
+        if PACKAGE not in path.parents and _imscribe_imports(path)
     ]
     assert offenders == []
 
 
 def test_the_seam_imports_the_librarys_facade_and_one_named_module_past_it() -> None:
     """
-    The library promises the names in ``advtext.__all__`` and nothing behind them.
-    Every import the package makes is ``from advtext import <name>``, the name is
+    The library promises the names in ``imscribe.__all__`` and nothing behind them.
+    Every import the package makes is ``from imscribe import <name>``, the name is
     on that list or is one ``PAST_THE_FACADE`` gives a reason for, and each of
     those is in fact imported -- a reason for a reach nobody makes is a stale list.
     """
-    found = [each for path in sorted(PACKAGE.glob("*.py")) for each in _advtext_imports(path)]
+    found = [each for path in sorted(PACKAGE.glob("*.py")) for each in _imscribe_imports(path)]
     assert found, "the package no longer imports the library at all"
-    assert {module for module, _ in found} == {"advtext"}, "a module behind the facade"
-    past = {name for _, name in found if name not in advtext.__all__}
+    assert {module for module, _ in found} == {LIBRARY}, "a module behind the facade"
+    past = {name for _, name in found if name not in imscribe.__all__}
     assert past == PAST_THE_FACADE
 
 
@@ -120,8 +132,9 @@ def test_policy_and_parts_import_neither_the_library_nor_imgui(module: str) -> N
             else [node.module or ""]
         )
     }
-    assert not {name for name in names if name.split(".")[0] in ("advtext", "imgui_bundle")}
-    assert _advtext_imports(PACKAGE / f"{module}.py") == []
+    assert not {name for name in names if name.split(".")[0] in (LIBRARY, "imgui_bundle")}
+    assert _imscribe_imports(PACKAGE / "gate.py"), "the search finds no import of the library"
+    assert _imscribe_imports(PACKAGE / f"{module}.py") == []
 
 
 # -- without the library ---------------------------------------------------------
@@ -184,7 +197,7 @@ def test_the_application_imports_with_the_library_absent_and_says_why() -> None:
     """
     script = (
         "import sys\n"
-        "sys.modules['advtext'] = None\n"
+        "sys.modules['imscribe'] = None\n"
         "from pptmstr.ui import typeset\n"
         "import pptmstr.app, pptmstr.theme\n"
         "assert not typeset.can_draw() and not typeset.enabled()\n"
@@ -561,7 +574,7 @@ def test_what_a_call_into_the_library_raises_is_the_library_stopping_said_and_lo
     """
     mark = _log_mark()
     for attempt in range(2):
-        with pytest.raises(advtext.TypesetUnavailable, match="AttributeError") as raised:
+        with pytest.raises(imscribe.TypesetUnavailable, match="AttributeError") as raised:
             with gate.into_library("drawing a view"):
                 raise AttributeError(f"'FileDiff' object has no attribute 'label' ({attempt})")
         assert isinstance(raised.value.__cause__, AttributeError)
@@ -585,9 +598,9 @@ def test_the_librarys_own_stop_and_what_is_not_an_error_pass_through_as_they_are
     seam: Any,
 ) -> None:
     mark = _log_mark()
-    with pytest.raises(advtext.TypesetUnavailable, match="^the library said no$"):
+    with pytest.raises(imscribe.TypesetUnavailable, match="^the library said no$"):
         with gate.into_library("drawing a view"):
-            raise advtext.TypesetUnavailable("the library said no")
+            raise imscribe.TypesetUnavailable("the library said no")
     with pytest.raises(KeyboardInterrupt):
         with gate.into_library("drawing a view"):
             raise KeyboardInterrupt

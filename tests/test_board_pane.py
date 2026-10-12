@@ -23,7 +23,7 @@ from types import MappingProxyType
 from typing import Any
 from unittest.mock import MagicMock
 
-import advtext
+import imscribe
 import pytest
 from imgui_bundle import icons_fontawesome_6 as fa
 
@@ -1198,9 +1198,9 @@ def test_a_cursor_that_passes_over_a_session_with_no_board_lays_nothing_out_agai
     view = frames.pane.views.view(("s1", "spec", "t1"))
     parts = frames.pane.parts[("s1", "spec", "t1")][1]
     read: list[str] = []
-    parse = advtext.parse_markdown
+    parse = imscribe.parse_markdown
     monkeypatch.setattr(
-        advtext,
+        imscribe,
         "parse_markdown",
         lambda text, *rest, **kw: read.append(text) or parse(text, *rest, **kw),
     )

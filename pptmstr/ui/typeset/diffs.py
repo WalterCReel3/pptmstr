@@ -31,7 +31,7 @@ not, each pane draws its own rows and a fence is the code of its document.
 at every size the product sets a diff at; on the library's default cell it is
 so at none** (``gate.DIFF_CELL``, and ``gate.diff_view``, which makes both the
 view a pane draws and the view that is measured). Measured in pptmstr on
-2026-10-12 (``scripts/measure_typeset_diff.py``, a window under Xvfb, advtext
+2026-10-12 (``scripts/measure_typeset_diff.py``, a window under Xvfb, imscribe
 ``68eb18b``, imtypeset ``2fd705e``, the chrome font and the vendored bold as the
 application loads them, load average 3.8, vertices read and no pixel), with
 the diff role at each pixel height from 12 to 24, which is every text scale
@@ -133,7 +133,7 @@ from .roles import Role
 from .views import ViewCache
 
 if TYPE_CHECKING:
-    from advtext import Diff
+    from imscribe import Diff
 
 _READING = gate.into_library("reading a diff")
 _MAKING = gate.into_library("making a diff view")
@@ -258,7 +258,7 @@ def above(model: Diff) -> tuple[tuple[str, bool], ...]:
     file's label with its state. A hunk's section is a header row too and
     follows its file. Counts are not repeated: they are short and lead the row.
     """
-    from advtext import FileStatus
+    from imscribe import FileStatus
 
     state = {
         FileStatus.NEW: "  (new file)",
@@ -455,7 +455,7 @@ def fence_diff(info: str, text: str) -> Diff | None:
     """
     if not is_diff_fence(info) or not text.strip():
         return None
-    from advtext import Diff
+    from imscribe import Diff
 
     with _READING:
         model = Diff.from_unified(text if text.endswith("\n") else text + "\n")
@@ -511,7 +511,7 @@ def diff_model(texts: Sequence[DiffText], *, warned: bool = True) -> Diff:
     changes are not -- the module docstring has the times.
     Immutable, so one model may be drawn by two panes -- each in a view of its own.
     """
-    from advtext import Diff
+    from imscribe import Diff
 
     files: list[Any] = []
     for part in texts:
@@ -601,7 +601,7 @@ def approval_diff(pending: PendingApproval, *, warned: bool = True) -> Diff | No
     if pending.texts is not None:
         return diff_model(pending.texts, warned=warned)
     if pending.diff:
-        from advtext import Diff
+        from imscribe import Diff
 
         with _READING:
             read = Diff.from_unified(pending.diff)
@@ -655,7 +655,7 @@ def diff(
     the library stopped under the diff, whatever it raised and wherever, and
     when the view's draw set less than it was handed; none otherwise.
     """
-    from advtext import Diff, DiffLayout, TypesetUnavailable
+    from imscribe import Diff, DiffLayout, TypesetUnavailable
 
     im = views._frame()
     entry = cache._held(key, "diff")
@@ -768,7 +768,7 @@ def _model(
     The library's model of whatever ``diff()`` was handed, with or without
     what a pane says above the view itself.
     """
-    from advtext import Diff
+    from imscribe import Diff
 
     if source is None:
         return None

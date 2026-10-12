@@ -27,7 +27,7 @@ role and one proportional family.
             stream   ``typeset.stream(cache, key)``, appended to a piece a
                      frame and drawn with ``draw(ink=None)``: the log's open
                      run (``transcript_pane._draw_run``). Read on every frame.
-            direct   ``advtext.TypesetView`` with ``Theme.at_pixel_height`` and
+            direct   ``imscribe.TypesetView`` with ``Theme.at_pixel_height`` and
                      no pptmstr theme: the heading's words as a bold paragraph
                      at the pixel height the seam's heading asked for, and the
                      same markdown under the library's own heading scale.
@@ -488,8 +488,8 @@ def asked_px(theme: Any, role: str, bold: bool) -> float:
     """
     from dataclasses import replace
 
-    from advtext import BlockKind, Face, px_from_sp
-    from advtext.style import fontlib_metrics
+    from imscribe import BlockKind, Face, px_from_sp
+    from imscribe.style import fontlib_metrics
 
     font = theme.blocks[BlockKind[role]].font
     if bold and font.face is Face.PROSE:
@@ -869,7 +869,7 @@ def main(argv: list[str] | None = None) -> int:
         else:
             made["roomed"] = True
         if scene.path == "direct":
-            from advtext import DARK_PALETTE, Align, Faces, Spacing, Theme, TypesetView
+            from imscribe import DARK_PALETTE, Align, Faces, Spacing, Theme, TypesetView
 
             # The seam's own theme is read for the size to ask of the library
             # without it: the heading level's, or the paragraph's for a form
@@ -941,7 +941,7 @@ def main(argv: list[str] | None = None) -> int:
                 made["fed"] += 1
             stream.draw(ink=None)
             return {"": (stream.view, themes.document_theme())} if stream.view is not None else {}
-        from advtext import DARK_PALETTE
+        from imscribe import DARK_PALETTE
 
         for view, _ in made["direct"].values():
             view.draw(palette=DARK_PALETTE, width_px=args.width - 40.0)
@@ -1119,8 +1119,8 @@ def main(argv: list[str] | None = None) -> int:
     fresh, trouble = fresh_glyphs(names, args.families) if names else ({}, [])
     after_reference = uptime()
 
-    import advtext
-    from advtext import typesetter
+    import imscribe
+    from imscribe import typesetter
 
     print(
         "measure_heading_glyphs: sources, sizes, bitmaps and pens from the draw list and the "
@@ -1130,7 +1130,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  uptime after:  {after}")
     print(f"  uptime after the fresh processes: {after_reference}")
     print(f"  display: {os.environ.get('DISPLAY', 'unset')};  python {sys.version.split()[0]}")
-    print(f"  advtext imported from {Path(advtext.__file__).resolve().parent}")
+    print(f"  imscribe imported from {Path(imscribe.__file__).resolve().parent}")
     print(f"  imgui_bundle {imgui_bundle.__version__}, Dear ImGui {imgui.get_version()}")
     print(f"  IMTYPESET_LIBRARY={os.environ['IMTYPESET_LIBRARY']}")
     ts = typesetter.module()

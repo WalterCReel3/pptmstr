@@ -992,7 +992,7 @@ def library_views_drawn(monkeypatch: pytest.MonkeyPatch) -> set[int]:
     view's draw goes through a settled view's.
     """
     drawn: set[int] = set()
-    for kind in (rig.advtext.TypesetView, rig.advtext.TypesetStreamView):
+    for kind in (rig.imscribe.TypesetView, rig.imscribe.TypesetStreamView):
         real = kind.draw
 
         def spy(self: Any, _real: Any = real, **given: Any) -> bool:
@@ -1199,7 +1199,7 @@ def test_the_frame_the_library_stops_in_says_so_and_the_next_is_wrapped_lines(
     branch. That frame says why where the text would be; the next is the pane's
     own renderer with every line, and no view of the stopped library is kept.
     """
-    from advtext import typesetter
+    from imscribe import typesetter
 
     state = typeset_state()
     snap = session(report())
@@ -1214,11 +1214,11 @@ def test_the_frame_the_library_stops_in_says_so_and_the_next_is_wrapped_lines(
         def stopped(self: Any, **given: Any) -> bool:
             # As the library does it: switched off, and then the view raises.
             down.append(True)
-            raise rig.advtext.TypesetUnavailable(STOPPED)
+            raise rig.imscribe.TypesetUnavailable(STOPPED)
 
         ready = typesetter.ready
         stop.setattr(typesetter, "ready", lambda: not down and ready())
-        for kind in (rig.advtext.TypesetView, rig.advtext.TypesetStreamView):
+        for kind in (rig.imscribe.TypesetView, rig.imscribe.TypesetStreamView):
             stop.setattr(kind, "draw", stopped)
         unformatted, text_wrapped = seam.text_unformatted, seam.text_wrapped
         stop.setattr(
@@ -1328,7 +1328,7 @@ def test_the_library_stopping_under_an_open_menu_leaves_the_menu_and_the_frame_w
     selecting: Any = None
 
     def stopped() -> str:
-        raise rig.advtext.TypesetUnavailable(STOPPED)
+        raise rig.imscribe.TypesetUnavailable(STOPPED)
 
     def labelled() -> None:
         real = seam.menu_item_simple

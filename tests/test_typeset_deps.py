@@ -1,12 +1,12 @@
 """
 `scripts/typeset_deps.py` and the Makefile's use of what it builds.
 
-The script fetches advtext and imtypeset at pinned commits and builds a library;
+The script fetches imscribe and imtypeset at pinned commits and builds a library;
 none of that is run here against a real remote or a compiler. What is held is
 what the rest depends on: a ref file names one full hash, a pinned commit that
 is not a branch tip can be fetched from a `file://` repository and checked out
 clean, the library step cannot fail its caller, the interpreter imports the
-advtext the pin names and the clone it is compared with is at that pin, and the
+imscribe the pin names and the clone it is compared with is at that pin, and the
 Makefile exports the pair only when it is whole, built from the commit
 `imtypeset.ref` names, and not mixed with a value the caller set.
 """
@@ -80,7 +80,7 @@ def upstream(tmp_path: Path) -> tuple[Path, str, str]:
 # --- ref files -------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("name", ["advtext.ref", "imtypeset.ref"])
+@pytest.mark.parametrize("name", ["imscribe.ref", "imtypeset.ref"])
 def test_each_tracked_ref_file_names_one_full_hash(name: str) -> None:
     ref = deps.read_ref(ROOT / name)
     assert len(ref) == 40 and set(ref) <= set("0123456789abcdef")
@@ -178,7 +178,7 @@ def test_a_local_checkout_is_read_where_it_is(
         deps.fetch_tag(source, "v9.9", clone)
 
 
-# --- which advtext is imported ---------------------------------------------------
+# --- which imscribe is imported ---------------------------------------------------
 
 
 def test_package_differences_names_changed_added_and_missing_files(tmp_path: Path) -> None:
@@ -199,36 +199,36 @@ def test_package_differences_names_changed_added_and_missing_files(tmp_path: Pat
     ]
 
 
-def _advtext_clone(deps_dir: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, str]:
+def _imscribe_clone(deps_dir: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, str]:
     """
-    A checkout standing for `.deps/advtext`, and `advtext.ref` naming its commit.
+    A checkout standing for `.deps/imscribe`, and `imscribe.ref` naming its commit.
     """
-    clone = deps_dir / "advtext"
-    (clone / "advtext").mkdir(parents=True)
-    (clone / "advtext" / "__init__.py").write_text("PINNED = True\n", encoding="utf-8")
+    clone = deps_dir / "imscribe"
+    (clone / "imscribe").mkdir(parents=True)
+    (clone / "imscribe" / "__init__.py").write_text("PINNED = True\n", encoding="utf-8")
     _git(clone, "init", "--quiet")
     _git(clone, "add", ".")
     _git(clone, "commit", "--quiet", "-m", "pinned")
     commit = _git(clone, "rev-parse", "HEAD")
     monkeypatch.setattr(deps, "read_ref", lambda path: commit)
-    return clone / "advtext", commit
+    return clone / "imscribe", commit
 
 
 @needs_git
-def test_verify_refuses_an_advtext_that_is_not_the_pinned_one(
+def test_verify_refuses_an_imscribe_that_is_not_the_pinned_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    pinned, _ = _advtext_clone(tmp_path, monkeypatch)
-    other = tmp_path / "elsewhere" / "advtext"
+    pinned, _ = _imscribe_clone(tmp_path, monkeypatch)
+    other = tmp_path / "elsewhere" / "imscribe"
     other.mkdir(parents=True)
     (other / "__init__.py").write_text("PINNED = False\n", encoding="utf-8")
-    monkeypatch.setattr(deps, "imported_advtext", lambda: other)
+    monkeypatch.setattr(deps, "imported_imscribe", lambda: other)
 
     assert deps.main(["verify", "--deps", str(tmp_path)]) == 1
     said = capsys.readouterr().err
     assert str(other) in said and "__init__.py" in said
 
-    monkeypatch.setattr(deps, "imported_advtext", lambda: pinned)
+    monkeypatch.setattr(deps, "imported_imscribe", lambda: pinned)
     assert deps.main(["verify", "--deps", str(tmp_path)]) == 0
 
 
@@ -238,8 +238,8 @@ def test_verify_refuses_a_clone_the_ref_file_has_moved_away_from(
 ) -> None:
     # The bump with no `make deps` after it: what is imported is the clone's,
     # file for file, and neither is the commit the ref file names.
-    pinned, commit = _advtext_clone(tmp_path, monkeypatch)
-    monkeypatch.setattr(deps, "imported_advtext", lambda: pinned)
+    pinned, commit = _imscribe_clone(tmp_path, monkeypatch)
+    monkeypatch.setattr(deps, "imported_imscribe", lambda: pinned)
     assert deps.main(["verify", "--deps", str(tmp_path)]) == 0
     assert commit in capsys.readouterr().out
 
@@ -256,8 +256,8 @@ def test_verify_refuses_a_clone_the_ref_file_has_moved_away_from(
 def test_verify_refuses_a_clone_edited_since_it_was_checked_out(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    pinned, _ = _advtext_clone(tmp_path, monkeypatch)
-    monkeypatch.setattr(deps, "imported_advtext", lambda: pinned)
+    pinned, _ = _imscribe_clone(tmp_path, monkeypatch)
+    monkeypatch.setattr(deps, "imported_imscribe", lambda: pinned)
     (pinned / "__init__.py").write_text("PINNED = 'edited'\n", encoding="utf-8")
 
     assert deps.main(["verify", "--deps", str(tmp_path)]) == 1
@@ -272,19 +272,126 @@ def test_verify_refuses_a_directory_that_is_no_checkout_inside_one_that_is(
     _git(tmp_path, "init", "--quiet")
     _git(tmp_path, "commit", "--quiet", "--allow-empty", "-m", "the enclosing repository")
     enclosing = _git(tmp_path, "rev-parse", "HEAD")
-    package = tmp_path / "deps" / "advtext" / "advtext"
+    package = tmp_path / "deps" / "imscribe" / "imscribe"
     package.mkdir(parents=True)
     (package / "__init__.py").write_text("", encoding="utf-8")
     monkeypatch.setattr(deps, "read_ref", lambda path: enclosing)
-    monkeypatch.setattr(deps, "imported_advtext", lambda: package)
+    monkeypatch.setattr(deps, "imported_imscribe", lambda: package)
 
     assert deps.main(["verify", "--deps", str(tmp_path / "deps")]) == 1
     assert "not a checkout" in capsys.readouterr().err
 
 
-def test_this_interpreter_imports_the_advtext_the_pin_names() -> None:
-    if not (deps.DEPS / "advtext" / "advtext").is_dir():
-        pytest.skip(".deps/advtext is not there: `make deps` has not run in this checkout")
+@needs_git
+def test_verify_refuses_an_interpreter_that_still_imports_the_earlier_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Everything else about the install is right: the old copy is the only fault.
+    pinned, _ = _imscribe_clone(tmp_path, monkeypatch)
+    monkeypatch.setattr(deps, "imported_imscribe", lambda: pinned)
+    left = tmp_path / "site"
+    (left / deps.EARLIER_NAME).mkdir(parents=True)
+    (left / deps.EARLIER_NAME / "__init__.py").write_text("", encoding="utf-8")
+    monkeypatch.syspath_prepend(str(left))
+
+    assert deps.main(["verify", "--deps", str(tmp_path)]) == 1
+    said = capsys.readouterr()
+    assert str(left / deps.EARLIER_NAME) in said.err and "identical" not in said.out
+
+    # With no `__init__.py` it imports all the same, as a namespace package.
+    (left / deps.EARLIER_NAME / "__init__.py").unlink()
+    assert deps.main(["verify", "--deps", str(tmp_path)]) == 1
+    assert str(left / deps.EARLIER_NAME) in capsys.readouterr().err
+
+    shutil.rmtree(left / deps.EARLIER_NAME)
+    assert deps.main(["verify", "--deps", str(tmp_path)]) == 0
+
+
+def _earlier_distribution(site: Path) -> None:
+    """
+    The library as an installer left it under its earlier name: a package, and a record of it.
+    """
+    name = deps.EARLIER_NAME
+    (site / name / "ui").mkdir(parents=True)
+    (site / name / "__init__.py").write_text("", encoding="utf-8")
+    (site / name / "ui" / "view.py").write_text("", encoding="utf-8")
+    (site / name / "__pycache__").mkdir()
+    (site / name / "__pycache__" / "unlisted.pyc").write_bytes(b"")
+    (site / f"__editable__.{name}.pth").write_text("", encoding="utf-8")
+    record = site / f"{name}-0.2.0.dev0.dist-info"
+    record.mkdir()
+    (record / "METADATA").write_text(f"Name: {name}\nVersion: 0.2.0.dev0\n", encoding="utf-8")
+    (record / "RECORD").write_text(
+        f"{name}/__init__.py,,\n{name}/ui/view.py,,\n__editable__.{name}.pth,,\n"
+        f"{name}-0.2.0.dev0.dist-info/METADATA,,\n{name}-0.2.0.dev0.dist-info/RECORD,,\n"
+        f"../outside.py,,\n",
+        encoding="utf-8",
+    )
+
+
+def test_the_earlier_name_is_removed_from_this_environment_and_from_no_other(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # sys.path here can reach another environment's site directory, and a
+    # distribution found there is not this checkout's to delete.
+    own, other = tmp_path / "own" / "site", tmp_path / "other" / "site"
+    for site in (own, other):
+        _earlier_distribution(site)
+        (site.parent / "outside.py").write_text("", encoding="utf-8")
+        (site / "imscribe").mkdir()
+        monkeypatch.syspath_prepend(str(site))
+    monkeypatch.setattr(deps, "own_site_directories", lambda: {own.resolve()})
+    clone = tmp_path / "deps" / deps.EARLIER_NAME
+    clone.mkdir(parents=True)
+    theirs = sorted(other.rglob("*"))
+
+    removed = deps.remove_earlier_name(tmp_path / "deps")
+
+    assert removed == [own / deps.EARLIER_NAME, clone]
+    assert sorted(path.name for path in own.iterdir()) == ["imscribe"]
+    assert (own.parent / "outside.py").is_file(), "a record's path out of the site directory"
+    assert not clone.exists()
+    assert sorted(other.rglob("*")) == theirs and len(theirs) > 8
+    assert deps.imported_earlier_name() == (other / deps.EARLIER_NAME).resolve()
+    assert deps.remove_earlier_name(tmp_path / "deps") == []
+
+
+def test_the_site_directories_removed_from_are_this_interpreters_own() -> None:
+    own = deps.own_site_directories()
+    assert own and all(Path(sys.prefix).resolve() in site.parents for site in own)
+
+
+@needs_git
+def test_the_fetch_step_removes_the_earlier_name_and_names_a_variable_it_does_not_read(
+    upstream: tuple[Path, str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo, first, _ = upstream
+    monkeypatch.setattr(deps, "read_ref", lambda path: first)
+    monkeypatch.setenv("IMSCRIBE_REPO", repo.as_uri())
+    monkeypatch.setenv("ADVTEXT_REPO", "file:///nowhere")
+    monkeypatch.setenv("ADVTEXT_PIP_ARGS", "--no-index")
+    called: list[Path] = []
+    monkeypatch.setattr(deps, "remove_earlier_name", lambda where: called.append(where) or [])
+
+    assert deps.main(["imscribe", "--deps", str(tmp_path / "deps")]) == 0
+
+    assert called == [(tmp_path / "deps").resolve()]
+    (note,) = capsys.readouterr().err.splitlines()
+    assert "ADVTEXT_REPO is set and is not read (IMSCRIBE_REPO is)" in note
+    assert "ADVTEXT_PIP_ARGS is set and is not read (IMSCRIBE_PIP_ARGS is)" in note
+
+    monkeypatch.delenv("ADVTEXT_REPO")
+    monkeypatch.delenv("ADVTEXT_PIP_ARGS")
+    assert deps.main(["imscribe", "--deps", str(tmp_path / "deps")]) == 0
+    assert capsys.readouterr().err == ""
+
+
+def test_this_interpreter_imports_the_imscribe_the_pin_names() -> None:
+    if not (deps.DEPS / "imscribe" / "imscribe").is_dir():
+        pytest.skip(".deps/imscribe is not there: `make deps` has not run in this checkout")
     assert deps.step_verify(deps.DEPS) == 0
 
 
@@ -329,12 +436,12 @@ def test_a_platform_without_a_recipe_is_not_a_failure_either(
 
 
 @needs_git
-def test_advtext_that_cannot_be_fetched_does_fail_the_caller(
+def test_imscribe_that_cannot_be_fetched_does_fail_the_caller(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setenv("ADVTEXT_REPO", (tmp_path / "no-such-repo").as_uri())
-    assert deps.main(["advtext", "--deps", str(tmp_path / "deps")]) == 1
-    assert "ADVTEXT_REPO=" in capsys.readouterr().err
+    monkeypatch.setenv("IMSCRIBE_REPO", (tmp_path / "no-such-repo").as_uri())
+    assert deps.main(["imscribe", "--deps", str(tmp_path / "deps")]) == 1
+    assert "IMSCRIBE_REPO=" in capsys.readouterr().err
 
 
 # --- the build, around a stand-in for imtypeset's script --------------------------
@@ -815,11 +922,11 @@ def test_bootstrap_verifies_after_each_install_then_builds_and_guards_the_build(
     stage = script[script.index("stage 3/4") : script.index("stage 4/4")]
     _order(
         stage,
-        "typeset_deps.py advtext\n",
-        " .deps/advtext\n",
+        "typeset_deps.py imscribe\n",
+        " .deps/imscribe\n",
         "typeset_deps.py verify\n",
         '-e ".[dev]"\n',
-        # pyproject.toml names advtext too: the last install is the one to hold.
+        # pyproject.toml names imscribe too: the last install is the one to hold.
         "typeset_deps.py verify\n",
         "typeset_deps.py library || {",
     )
@@ -853,8 +960,8 @@ def test_make_deps_runs_the_same_steps_in_the_same_order() -> None:
     ).stdout
     _order(
         recipe,
-        "typeset_deps.py advtext\n",
-        " .deps/advtext\n",
+        "typeset_deps.py imscribe\n",
+        " .deps/imscribe\n",
         "typeset_deps.py verify\n",
         "typeset_deps.py library\n",
     )

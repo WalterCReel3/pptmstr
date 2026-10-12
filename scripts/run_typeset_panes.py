@@ -168,9 +168,9 @@ def main() -> int:
 
     transcript_pane.draw = log_draw  # type: ignore[assignment]
     try:
-        import advtext
+        import imscribe
 
-        for cls in (advtext.TypesetView, advtext.TypesetStreamView, advtext.TypesetDiffView):
+        for cls in (imscribe.TypesetView, imscribe.TypesetStreamView, imscribe.TypesetDiffView):
             if "draw" in vars(cls):
                 counted(cls, "draw", library, cls.__name__, False)
     except Exception as failure:  # noqa: BLE001 -- said in the report, not fatal
