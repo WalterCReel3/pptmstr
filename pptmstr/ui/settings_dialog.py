@@ -624,9 +624,7 @@ SAMPLES: dict[typeset.Role, str] = {
     typeset.Role.HEADING: "## What the gate parks",
     typeset.Role.INLINE_CODE: "run `make test` before `make lint`",
     typeset.Role.CODE_BLOCK: "```\nfor node in order: emit(node)\n```",
-    typeset.Role.DIFF: (
-        "```diff\n--- a/pool.py\n+++ b/pool.py\n@@ -1 +1 @@\n-cap = 4\n+cap = 8\n```"
-    ),
+    typeset.Role.DIFF: "--- a/pool.py\n+++ b/pool.py\n@@ -1 +1 @@\n-cap = 4\n+cap = 8",
     typeset.Role.LITERAL: "$ make test  ... 3347 passed in 41.2s",
     typeset.Role.ARGUMENT: 'file_path: "pptmstr/app.py"',
     typeset.Role.TABLE: "| pane | set by |\n|---|---|\n| BOARD | the seam |",
@@ -656,12 +654,14 @@ def _preview(cache: typeset.ViewCache, role: typeset.Role) -> None:
             | typeset.Role.HEADING
             | typeset.Role.INLINE_CODE
             | typeset.Role.CODE_BLOCK
-            | typeset.Role.DIFF
             | typeset.Role.TABLE
         ):
             typeset.markdown(cache, key, SAMPLES[role])
-        case typeset.Role.LITERAL:
-            typeset.plain(cache, key, SAMPLES[role])
+        case typeset.Role.LITERAL | typeset.Role.DIFF:
+            # A diff's rows as text at the role's size, in one ink: no diff view
+            # is built on the library, and fenced in markdown the sample would
+            # be a code block's size and not this role's.
+            typeset.plain(cache, key, SAMPLES[role], role=role)
         case typeset.Role.ARGUMENT:
             typeset.document(cache, key, _ARGUMENT)
         case typeset.Role.LABEL:

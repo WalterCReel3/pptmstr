@@ -198,7 +198,7 @@ def test_a_scale_out_of_range_is_clamped_and_one_that_is_no_number_is_one(
     assert typeset.body_px() == round(16.0 * got)
 
 
-def test_no_pane_is_adopted_so_none_is_typeset_whatever_is_switched_on(
+def test_a_pane_that_is_not_adopted_is_not_typeset_whatever_is_switched_on(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
@@ -208,11 +208,12 @@ def test_no_pane_is_adopted_so_none_is_typeset_whatever_is_switched_on(
     """
     monkeypatch.setattr(roles, "_can_draw", lambda: True)
     typeset.configure(typeset=True, panes={pane: True for pane in Pane})
-    assert roles.ADOPTED == frozenset()
-    assert typeset.enabled(), "the master switch and the library"
+    monkeypatch.setattr(roles, "ADOPTED", frozenset())
     assert not any(typeset.enabled(pane) for pane in Pane)
+    assert not typeset.enabled(), "asked of no pane, it is not true where every pane's is false"
     monkeypatch.setattr(roles, "ADOPTED", frozenset({Pane.BRIEF}))
     assert [pane for pane in Pane if typeset.enabled(pane)] == [Pane.BRIEF]
+    assert typeset.enabled()
 
 
 def test_a_library_that_cannot_draw_switches_every_pane_off(

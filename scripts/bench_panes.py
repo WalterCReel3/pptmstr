@@ -41,9 +41,16 @@ pane is drawn in a ``--width`` x ``--height`` window.
 and ended under. Compare rows of one run with each other, or two runs taken
 back to back on the same machine.
 
+**Which groups run through the seam.** ``board``, ``brief`` and ``settings``
+(the dialog's samples): those are the panes whose typeset branch is built on the
+library as it is now, and ``--typeset on`` needs the library (``make`` exports
+``IMTYPESET_LIBRARY`` and ``IMTYPESET_PYTHON`` when the built pair exists). The
+other groups draw with the panes' own renderers whatever the flag says, and
+their ``seam`` column says so with a 0.
+
 Usage:
     .venv/bin/python scripts/bench_panes.py                    # today's renderers
-    .venv/bin/python scripts/bench_panes.py --typeset on       # through the seam
+    .venv/bin/python scripts/bench_panes.py --typeset on --only board brief settings
     .venv/bin/python scripts/bench_panes.py --only detail --json shots/detail.json
 """
 
@@ -88,6 +95,7 @@ from pptmstr.ui import (  # noqa: E402
     inbox,
     review,
     rich_pane,
+    settings_dialog,
     transcript_pane,
     typeset,
 )
@@ -204,7 +212,8 @@ class Harness:
         return elapsed
 
     def close(self) -> None:
-        typeset.reset()
+        # The library's context goes before the ImGui context its fonts are on.
+        typeset.unload()
         imgui.destroy_context(self.context)
 
 
@@ -796,6 +805,35 @@ def bench_brief(harness: Harness, frames: int, fleet: tuple[Any, Snapshot]) -> l
     ]
 
 
+def bench_settings(harness: Harness, frames: int) -> list[Row]:
+    """
+    The settings dialog's samples: one of every role, as its table draws them.
+
+    Only through the seam. The dialog has no renderer of its own for a sample: with
+    no typeset text it draws a dash in the cell, so there is no other row to set
+    this one beside.
+    """
+    if not typeset.available():
+        print("  .. settings: no typeset text, so the dialog draws no sample", file=sys.stderr)
+        return []
+    cache = typeset.ViewCache()
+
+    def draw() -> None:
+        for role in typeset.Role:
+            settings_dialog._preview(cache, role)
+
+    return [
+        measure(
+            harness,
+            "settings_dialog._preview",
+            "a sample of every role",
+            f"{len(typeset.Role)} roles",
+            draw,
+            frames,
+        )
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Output
 # ---------------------------------------------------------------------------
@@ -854,7 +892,7 @@ def _load() -> str:
     return f"{one:.2f} {five:.2f} {fifteen:.2f}"
 
 
-GROUPS = ("transcript", "prune", "detail", "inbox", "board", "brief")
+GROUPS = ("transcript", "prune", "detail", "inbox", "board", "brief", "settings")
 
 
 def main() -> int:
@@ -923,6 +961,8 @@ def main() -> int:
                 rows += bench_board(harness, args.frames, fleet)
             if "brief" in args.only:
                 rows += bench_brief(harness, args.frames, fleet)
+        if "settings" in args.only:
+            rows += bench_settings(harness, args.frames)
     finally:
         frames_drawn = harness.frames
         harness.close()

@@ -52,7 +52,13 @@ application, where it was 1.1 s, so the fonts are loaded at start-up whatever
 debounce. The last is conditional: its only basis is advtext's own 33 ms for
 `sample.md` ×10 under load, so it goes when a parse is timed in pptmstr and not
 before. Step 0 left it unbuilt and parked its tests under the step that times a
-parse.
+parse. **By a run (`SEAM-1`, 2026-10-12, headless, load average 2.5):** reading
+`sample.md` (112 lines) and making its view is 3.7 ms and the first draw 1.8;
+×10 (1,120 lines) is 32.5 ms and 3.0; a frame after that 0.07. BRIEF, BOARD and
+the settings samples hand over bodies bounded far under the first figure, so
+`views.py` builds nothing over frames. An approval body and a transcript are
+not bounded: the tests stay parked for the step that adopts those and times
+its own content.
 
 ## 2. A view takes markdown or advtext's own blocks, not a host's description
 
@@ -70,13 +76,24 @@ needed is request P8. pptmstr's own block segmenter and inline tokeniser
 (`ui/blocks.py`, `ui/inline.py`) feed only pptmstr's RICH renderer and stay
 there; the typeset seam never used them (decision: the lead's).
 
+**As built (`SEAM-1`), and it differs.** Monospace set by the library does not
+keep its columns (`HANDOFF-advtext.md`, A2 and P21, by pptmstr's measurement),
+so text that is not markdown is not handed to the library at all: ImGui draws
+it, in the chrome's font at the role's pixel height, between the library's
+views (`themes.native`, `views._native`). No `MarkdownText` or `MarkdownCode`
+is built and the P8 import is not made. A markdown part is read with the
+library's public `parse_markdown` and its blocks handed to the view, so that
+consecutive parts of different heading levels share one view; a fence's info
+string, which the library keeps and does not draw, is set as the first line of
+its code.
+
 The three reaches past the old facade:
 
 | reach | on the new layer |
 |---|---|
-| reader rules (HTML and images as text, a glob's stars kept, a link's destination shown) | mechanically still possible through the private `advtext.markdown_rules._parser(references, math)`, with traps: a `str` given to a view parses with `references=True`, a stream with `False`, and they are different cached parsers; advtext's stream invariants were never tested with rules switched off. Request P7. |
+| reader rules (HTML and images as text, a glob's stars kept, a link's destination shown) | mechanically still possible through the private `advtext.markdown_rules._parser(references, math)`, with traps: a `str` given to a view parses with `references=True`, a stream with `False`, and they are different cached parsers; advtext's stream invariants were never tested with rules switched off. Request P7. **By a run (`SEAM-1`):** unguarded, `a <b>x</b> and List<String>` is set as `a x and List`, `rm **/*.py and t/**/*.md` as `rm /*.py and t//*.md`, and an unclosed `<!--` takes every paragraph after it. The reach is made, in `gate._reader` only, on the one parser `_parser(False, False)`: the seam reads every settled text with `references=False` (`gate.read`), which is the parser a stream uses, so the first trap does not arise. A probe reads through the library's public calls, settled and streamed, and the library is not offered to draw with when it comes back short. Streams have not been drawn with the rules on. |
 | count of characters set as U+FFFD | no counterpart. Request P9. |
-| breaking a word wider than the measure | no counterpart and nothing to reach; the library lets it overhang. Request P10. |
+| breaking a word wider than the measure | no counterpart and nothing to reach; the library lets it overhang. Request P10. **By a run (`SEAM-1`):** a 109-character path at a 300 px measure is one line 750 px wide, and the window has no scroll range to it. The seam does not break it; it tells the window how far the text runs (`views._reach`, from `set_lines`), so a pane whose window scrolls sideways reaches the end. A fenced line, by contrast, **is** wrapped by the library at the measure (P12 asks for scroll or clip). |
 
 ## 3. Fonts
 
@@ -124,7 +141,14 @@ added, or the dialog is guarded first.
 `draw()`, when the pane is already in its typeset branch with a child window
 open. The seam catches it inside every draw call, says the reason at the
 cursor, returns a height, and has `enabled()` read `typesetter.ready()` so the
-next frame is the pane's own renderer. One frame may show both.
+next frame is the pane's own renderer. One frame may show both. **As built
+(`SEAM-1`):** `enabled()` keeps its answer until the frame is over
+(`gate.stopped`, taken up by `gate.pre_frame`), because a pane asks it at more
+than one place in a frame; so the frame the library stops in shows the reason
+wherever its text would have been and neither renderer's half.
+
+**Step 1 as built:** BRIEF and BOARD are in `roles.ADOPTED`, and the settings
+dialog draws its samples through the same calls.
 
 ## 5. Shape and order
 

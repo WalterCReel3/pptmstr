@@ -14,6 +14,8 @@ those answers live here once.
   body is markdown. Pure.
 - ``gate``: whether the library can draw and the sentence when it cannot; its
   fonts; ``unload``.
+- ``themes``: a role's face, size and leading as the library's theme, pptmstr's
+  inks as its palette, and which text the library sets at all.
 - ``views``: ``ViewCache``, and the calls a pane's typeset branch makes.
 - ``diffs``: the diff model of a parked call; which fences are honest diffs.
 
@@ -30,9 +32,15 @@ text can be had at all, which is the library drawing and at least one pane
 adopted. The Text menu and the settings dialog offer their switches by it, and
 say ``unavailable_reason()``, one sentence, when it is false.
 
-**No pane is in ``ADOPTED``, so every pane draws with its own renderer, the
-switches are not offered, and the drawing calls of ``views`` and ``diffs`` raise
-if reached.** The gate, the fonts, the settings and the diff model are live.
+**BRIEF and BOARD are in ``ADOPTED``, and the settings dialog draws its samples
+through the same calls.** Every other pane draws with its own renderer.
+``markdown``, ``document``, ``plain``, ``label`` and ``font`` draw; ``stream`` and
+``diff`` are not built on the library and raise if reached.
+
+**The library sets markdown, and ImGui draws text that is not markdown**
+(``themes.native``): monospace set by the library does not keep its columns, by
+pptmstr's measurement. So a literal part, ``plain()`` and a label are ImGui
+items in the chrome's font or the library's own atlas entry.
 
 ## What a consumer must not do
 
@@ -47,6 +55,7 @@ from .diffs import accounted, approval_diff, diff, diff_model, is_diff_fence
 from .gate import (
     available,
     can_draw,
+    face_font,
     load_fonts,
     obtainable,
     pre_frame,
@@ -93,6 +102,7 @@ from .roles import (
     style,
     wanted,
 )
+from .themes import build_palette, palette
 from .views import (
     NotAdopted,
     Stream,
@@ -100,6 +110,7 @@ from .views import (
     diff_row_height,
     document,
     font,
+    imfont,
     label,
     line_height,
     markdown,
@@ -139,6 +150,7 @@ __all__ = [
     "approval_diff",
     "available",
     "body_px",
+    "build_palette",
     "can_draw",
     "checked",
     "chosen",
@@ -148,7 +160,9 @@ __all__ = [
     "diff_row_height",
     "document",
     "enabled",
+    "face_font",
     "font",
+    "imfont",
     "is_diff_fence",
     "label",
     "legacy",
@@ -158,6 +172,7 @@ __all__ = [
     "mono",
     "multiline_kind",
     "obtainable",
+    "palette",
     "pane_on",
     "panes_from",
     "pending",

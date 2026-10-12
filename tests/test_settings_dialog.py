@@ -44,6 +44,8 @@ from pptmstr.ui.settings_dialog import (
     build,
     changed,
 )
+from pptmstr.ui.typeset import views
+from tests.conftest import needs_the_library
 
 BOLD = theme._ASSETS / "fonts" / "Inconsolata-Bold.ttf"
 GONE = "the text library did not import (ImportError: gone)"
@@ -677,12 +679,6 @@ class Rig:
         return imgui.internal.find_window_by_name(dialog.TITLE)
 
 
-SEAM_1 = (
-    "SEAM-1: the dialog's rows about typeset text are live, and its samples drawn, "
-    "only once a pane's typeset branch is re-adopted"
-)
-
-
 @pytest.fixture(scope="module")
 def context() -> Iterator[None]:
     """
@@ -709,6 +705,17 @@ def context() -> Iterator[None]:
     finally:
         typeset.unload()
         imgui.destroy_context(made)
+
+
+@pytest.fixture
+def typeset_live(context: None) -> None:
+    """
+    For a test of the rows about typeset text and of the samples: they are live
+    only where the library can draw. Skips or fails where it cannot, as ``seam``
+    does (``tests/conftest.py``).
+    """
+    if not typeset.available():
+        needs_the_library(typeset.unavailable_reason())
 
 
 @pytest.fixture
@@ -833,7 +840,7 @@ def test_escape_over_an_open_list_closes_the_list_and_not_the_dialog(
     assert not rig.dialog.is_open
 
 
-@pytest.mark.skip(reason=SEAM_1)
+@pytest.mark.usefixtures("typeset_live")
 def test_ticking_a_box_in_the_open_dialog_changes_that_setting_once(
     rig: Rig, saved: list[Settings]
 ) -> None:
@@ -850,7 +857,7 @@ def test_ticking_a_box_in_the_open_dialog_changes_that_setting_once(
     assert len(rig.changes) == 1 and len(saved) == 1
 
 
-@pytest.mark.skip(reason=SEAM_1)
+@pytest.mark.usefixtures("typeset_live")
 def test_picking_from_a_list_changes_that_setting_and_the_entry_in_force_changes_nothing(
     rig: Rig, saved: list[Settings]
 ) -> None:
@@ -923,7 +930,7 @@ def test_the_title_bars_close_box_closes_it_and_the_state_follows(rig: Rig) -> N
     assert rig.dialog.is_open and rig.listed, "and it opens again"
 
 
-@pytest.mark.skip(reason=SEAM_1)
+@pytest.mark.usefixtures("typeset_live")
 def test_the_defaults_button_is_dead_at_the_defaults_and_restores_otherwise(rig: Rig) -> None:
     rig.open()
     rig.click("defaults##text")
@@ -937,34 +944,42 @@ def test_the_defaults_button_is_dead_at_the_defaults_and_restores_otherwise(rig:
     assert typeset.chosen(typeset.Role.PROSE) == typeset.DEFAULTS[typeset.Role.PROSE]
 
 
-@pytest.mark.skip(reason=SEAM_1)
-def test_every_role_shows_a_sample_set_in_the_faces_it_has_and_none_is_refused(
+@pytest.mark.usefixtures("typeset_live")
+def test_every_role_shows_a_sample_and_none_is_refused(
     rig: Rig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """
-    The samples are the seam's own views, so the two ways a view goes wrong are
-    asked of each: a character no face had (``replaced``), and a glyph with no
-    raster at draw time (``missing``). A key drawn twice in a frame is refused in
-    words on screen, which is the third.
+    The samples are the seam's own calls. A role the library sets has a view, and
+    its glyphs reached the draw list with nothing left unset; a role ImGui draws
+    (literal text, an argument, a diff's rows) has no view and still claimed its
+    lines. What the
+    seam says on screen in place of text -- a key drawn twice in a frame, a
+    library that stopped -- is said through one function, and it said nothing.
     """
-    refused: list[object] = []
-    real = typeset._twice
-    monkeypatch.setattr(typeset, "_twice", lambda im, key: (refused.append(key), real(im, key))[1])
+    said: list[str] = []
+    real = views._said
+    monkeypatch.setattr(
+        views, "_said", lambda im, text, ink=None: (said.append(text), real(im, text, ink))[1]
+    )
     rig.open()
     rig.frames(3)
 
     cache = rig.dialog.previews
-    views = [role for role in typeset.Role if role is not typeset.Role.LABEL]
-    assert set(cache.keys()) == {("sample", role.value) for role in views}
-    for role in views:
+    shown = [role for role in typeset.Role if role is not typeset.Role.LABEL]
+    assert set(cache.keys()) == {("sample", role.value) for role in shown}
+    for role in shown:
         key = ("sample", role.value)
-        drawn = cache.drawn(key)
-        assert drawn is not None and drawn[0] > 0 and drawn[1] == 0, (role, drawn)
-        assert cache.replaced(key) == 0 and cache.unbuilt(key) == 0, role
-    assert refused == []
+        assert (cache.height(key) or 0.0) > 0.0 and cache.unbuilt(key) == 0, role
+        if role in (typeset.Role.LITERAL, typeset.Role.ARGUMENT, typeset.Role.DIFF):
+            assert cache.views(key) == (), role
+            continue
+        (view,) = cache.views(key)
+        assert view.stats.whole and view.stats.vertices > 0, (role, view.stats)
+    assert said == []
+    assert typeset.can_draw()
 
 
-@pytest.mark.skip(reason=SEAM_1)
+@pytest.mark.usefixtures("typeset_live")
 def test_a_role_made_larger_is_seen_in_its_sample_before_the_dialog_is_closed(rig: Rig) -> None:
     rig.open()
     rig.frames(2)
@@ -1022,7 +1037,7 @@ def test_the_dialog_is_one_screen_at_the_applications_window_size(rig: Rig) -> N
     assert "close" in rig.rects and rig.rects["close"][1] < window.pos.y + window.size.y
 
 
-@pytest.mark.skip(reason=SEAM_1)
+@pytest.mark.usefixtures("typeset_live")
 def test_a_dialog_that_grows_past_the_foot_of_the_screen_is_moved_back_onto_it(rig: Rig) -> None:
     """
     Opened and centred at the defaults, then given the largest text there is: 20 px

@@ -28,7 +28,7 @@ from tests.conftest import BOLD
 
 PACKAGE = Path(typeset.__file__).resolve().parent
 
-PAST_THE_FACADE = {"typesetter"}
+PAST_THE_FACADE = {"typesetter", "markdown_rules"}
 """
 What the seam imports from ``advtext`` that is not in ``advtext.__all__``, and why.
 
@@ -36,6 +36,11 @@ What the seam imports from ``advtext`` that is not in ``advtext.__all__``, and w
   ``LIBRARY_VARIABLE`` are reached through it and nowhere else; the library says
   so of the first three in its own docstring, and its examples import it the
   same way.
+- ``markdown_rules``: for its private ``_parser``, in ``gate._reader`` and nowhere
+  else. The library has no supported place for a host's reader rules (request P7
+  of ``HANDOFF-advtext.md``), and without them a pane hides what was written:
+  HTML, an image, the stars of a glob, where a link goes. ``tests/
+  test_typeset_views.py`` has the probe that fails when the reach stops working.
 """
 
 
@@ -347,6 +352,7 @@ def test_with_the_library_drawing_and_no_pane_adopted_the_switch_is_not_offered(
     on screen would read as broken, so the menu's question is answered no, with
     a sentence that is not a fault of the library's.
     """
+    monkeypatch.setattr(roles, "ADOPTED", frozenset())
     assert typeset.can_draw() and typesetter.ready()
     assert not any(typeset.enabled(pane) for pane in Pane)
     assert not typeset.available() and not typeset.obtainable()
@@ -428,7 +434,8 @@ def test_unloading_stops_the_library_drawing_and_loading_starts_it_again(seam: A
     assert not typeset.can_draw() and not typesetter.ready()
     assert typeset.unavailable_reason() == "the typesetting library's fonts have not been loaded"
     assert typeset.load_fonts(BOLD)
-    assert typeset.can_draw() and typeset.unavailable_reason() == NO_PANE
+    assert typeset.can_draw()
+    assert typeset.unavailable_reason() == (None if roles.ADOPTED else NO_PANE)
 
 
 def test_faces_loaded_under_one_context_are_not_available_under_another(seam: Any) -> None:

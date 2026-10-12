@@ -20,8 +20,9 @@ not inherit:
 **With the library and without.** The library is found through
 ``IMTYPESET_LIBRARY`` and ``IMTYPESET_PYTHON``; ``make test`` sets them when the
 built pair exists and ``make test IMTYPESET_LIBRARY=`` does not. A test that needs
-it asks for ``seam``, which skips with the library's own reason when it cannot
-draw, and runs otherwise.
+it asks for ``seam``, which runs where the library draws, skips with the reason
+where none was named, and **fails** where one was named and cannot draw
+(``needs_the_library``).
 
 It deliberately does not switch the seam off for tests that did not ask for it: the
 files that draw panes against a mocked ``imgui`` do that themselves.
@@ -29,6 +30,7 @@ files that draw panes against a mocked ``imgui`` do that themselves.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -81,6 +83,16 @@ def _typeset_does_not_leak() -> Iterator[None]:
         )
 
 
+def needs_the_library(reason: str | None) -> None:
+    """
+    Stop a test that draws through the library where the library cannot draw:
+    skipped where none was named, failed where one was.
+    """
+    if os.environ.get("IMTYPESET_LIBRARY"):
+        pytest.fail(f"IMTYPESET_LIBRARY is set and the typesetting library cannot draw: {reason}")
+    pytest.skip(f"needs the typesetting library: {reason}")
+
+
 @pytest.fixture(scope="module")
 def imgui() -> Iterator[Any]:
     """
@@ -109,14 +121,17 @@ def seam(imgui: Any) -> Iterator[Any]:
     """
     The seam with the library's fonts loaded and the settings at their defaults.
 
-    **Skips, with the reason, when the library cannot draw**: absent, refused, or
-    its fonts not loaded. The fonts are loaded once a module and kept across its
+    **Skips, with the reason, where no library was named** (``IMTYPESET_LIBRARY``
+    unset or empty). **Where one was named and cannot draw, the test fails**:
+    a pair that is stale and refused, or a library some earlier test stopped
+    for the rest of the process, would otherwise skip every test that draws and
+    leave the run green. The fonts are loaded once a module and kept across its
     tests; a test that unloads them or loads its own has them put back here.
     """
     theme.set_theme("dark")
     typeset.configure(typeset=True, faces=typeset.DEFAULT_PRESET, scale=1.0, panes={})
     if not typeset.can_draw() and not typeset.load_fonts(BOLD):
-        pytest.skip(f"needs the typesetting library: {typeset.unavailable_reason()}")
+        needs_the_library(typeset.unavailable_reason())
     yield imgui
     theme.set_theme("dark")
     typeset.configure(typeset=True, faces=typeset.DEFAULT_PRESET, scale=1.0, panes={})

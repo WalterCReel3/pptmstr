@@ -12,15 +12,17 @@ premise silently vanish, so the log would exist and nobody reading it could tell
 anything had changed. An overturned premise is shown struck through in the reader's
 attention rather than removed, labelled with the entry that overturned it.
 
-**With the typeset seam on, an entry is one held view: its heading and its body.**
-One ``typeset.document`` per entry rather than one over the whole brief, because
-each entry is followed by a checkbox and a widget cannot sit inside a view. The
-price is that a selection stops at an entry's edge. The views are uncapped: the
-pane's own child scrolls, each view culls to it, and a second scrollbar inside an
-entry would hide premises behind a gesture. The child scrolls sideways too, since a
-fenced line is never broken and one longer than the pane has to be reachable. The
-heading is a part of the view, so it wraps at the pane's width and is copied with
-the body it heads.
+**With the typeset seam on, an entry is one key of the seam: its heading and its
+body.** One ``typeset.document`` per entry rather than one over the whole brief,
+because each entry is followed by a checkbox and a widget cannot sit inside a
+view. The heading and the markdown of the body are one view, so the heading wraps
+at the pane's width and is copied with the body it heads; a paragraph that is not
+markdown (a pasted traceback) is drawn by ImGui between views, and a selection
+stops at it as it stops at an entry's edge. Nothing is capped: the pane's own
+child scrolls, each view culls to it, and a second scrollbar inside an entry
+would hide premises behind a gesture. The child scrolls sideways too: a line set
+as written is never broken and neither is a word with no space in it, and one
+longer than the pane has to be reachable.
 
 **Nothing in a body outranks the line that heads its entry.** The entry's own line
 is set as a second-level heading and every heading in the body ``_BODY_DEMOTE``
@@ -166,9 +168,10 @@ def draw(snap: Snapshot, focus: FocusState, pane: BriefState) -> None:
     _summary(derived, directory)
 
     typeset_on = typeset.enabled(typeset.Pane.BRIEF)
-    # A fenced line is never broken, so under the seam the child scrolls sideways to
-    # the end of one. A window that scrolls sideways wraps native text at its widest
-    # content rather than at its edge, hence the explicit wrap position.
+    # A line set as written is never broken, nor a word with no space in it, so
+    # under the seam the child scrolls sideways to the end of one. A window that
+    # scrolls sideways wraps native text at its widest content rather than at its
+    # edge, hence the explicit wrap position.
     flags = imgui.WindowFlags_.horizontal_scrollbar.value if typeset_on else 0
     if imgui.begin_child("##brief", window_flags=flags):
         wrap_at = 0.0

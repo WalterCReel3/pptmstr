@@ -23,6 +23,7 @@ from types import MappingProxyType
 from typing import Any
 from unittest.mock import MagicMock
 
+import advtext
 import pytest
 from imgui_bundle import icons_fontawesome_6 as fa
 
@@ -42,16 +43,6 @@ from pptmstr.ui import board_pane, typeset
 from pptmstr.ui.focus import FocusState, Scope
 from pptmstr.ui.typeset import Kind, Part
 from tests import test_typeset_views as rig
-
-
-@pytest.fixture
-def seam(imgui: Any) -> None:
-    """
-    Parked: ``board_pane``'s typeset branch is not built on the library as it is now,
-    so every test that asks for the seam is skipped, by step. The step that
-    builds the branch deletes this fixture and ``tests/conftest.py``'s takes over.
-    """
-    pytest.skip("SEAM-1: board_pane's typeset branch is not re-adopted yet")
 
 
 @pytest.fixture(autouse=True)
@@ -965,7 +956,7 @@ class Frames:
         return list(self.strings)
 
     def shown(self, key: object) -> str:
-        return rig._shown(self.pane.views.view(key))
+        return "\n\n".join(self.pane.views.texts(key))
 
     def people(self, snap: Snapshot) -> str:
         (row,) = board_concerns(snap, "s1")
@@ -1035,8 +1026,9 @@ def test_an_opened_task_sets_its_specification_as_markdown(frames: Frames) -> No
     assert "Builder task. tle/parse.py only." in shown
     assert "`" not in shown
     assert not any("Builder task" in s for s in strings)
-    glyphs, _ = frames.pane.views.drawn(("s1", "spec", "t1")) or (0, 0)
-    assert glyphs > 20
+    # Four vertices a glyph: the text reached the draw list.
+    (view,) = frames.pane.views.views(("s1", "spec", "t1"))
+    assert view.stats.vertices > 4 * 20
 
 
 def test_a_concern_is_drawn_under_its_task_and_in_the_log_as_two_views(frames: Frames) -> None:
@@ -1205,9 +1197,14 @@ def test_a_cursor_that_passes_over_a_session_with_no_board_lays_nothing_out_agai
     frames.draw(snap, "t1")
     view = frames.pane.views.view(("s1", "spec", "t1"))
     parts = frames.pane.parts[("s1", "spec", "t1")][1]
-    built: list[object] = []
-    build_piece = typeset._build_piece
-    monkeypatch.setattr(typeset, "_build_piece", lambda p: built.append(p) or build_piece(p))
+    read: list[str] = []
+    parse = advtext.parse_markdown
+    monkeypatch.setattr(
+        advtext,
+        "parse_markdown",
+        lambda text, *rest, **kw: read.append(text) or parse(text, *rest, **kw),
+    )
+    revision = view.revision
 
     assert "do t1" not in frames.draw(snap, "t1", focus=at(snap, "s2"))
     assert frames.pane.views.view(("s1", "spec", "t1")) is view
@@ -1216,7 +1213,7 @@ def test_a_cursor_that_passes_over_a_session_with_no_board_lays_nothing_out_agai
 
     assert frames.pane.views.view(("s1", "spec", "t1")) is view
     assert frames.pane.parts[("s1", "spec", "t1")][1] is parts
-    assert built == []
+    assert read == [] and view.revision == revision
     assert "Builder task." in frames.shown(("s1", "spec", "t1"))
 
 

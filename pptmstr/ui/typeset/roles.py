@@ -538,13 +538,15 @@ def _bundle_fonts() -> Path:
     return Path(imgui_bundle.__file__).parent / "assets" / "fonts"
 
 
-ADOPTED: frozenset[Pane] = frozenset()
+ADOPTED: frozenset[Pane] = frozenset({Pane.BRIEF, Pane.BOARD})
 """
 The panes whose typeset branch is built on the library as it is now. ``enabled``
 is false for every other pane whatever the switches and the library say, so a
 pane not named here draws with its own renderer.
 
 A pane is added by the change that builds its branch and shows it by a run.
+BRIEF and BOARD were, on 2026-10-12: the application under Xvfb with the fake
+fleet, each pane's cache holding the library's views of what it showed.
 """
 
 
@@ -575,9 +577,14 @@ def enabled(pane: Pane | None = None) -> bool:
     when the pane's typeset branch is not built on the library (``ADOPTED``), and
     false when the library cannot draw -- absent, refused, its fonts not loaded,
     or stopped. A pane that asks this and takes the other branch is unchanged.
-    With no pane it is the master switch and the library, and no pane's answer.
+
+    With no pane it is whether *any* pane could be: the master switch, the
+    library, and some pane's branch built on it. Never true where every pane's
+    answer is false for a reason that is not the pane's own switch.
     """
-    if pane is not None and (pane not in ADOPTED or pane in _STATE.panes_off):
+    if pane is None:
+        return bool(ADOPTED) and _STATE.typeset and _can_draw()
+    if pane not in ADOPTED or pane in _STATE.panes_off:
         return False
     return _STATE.typeset and _can_draw()
 

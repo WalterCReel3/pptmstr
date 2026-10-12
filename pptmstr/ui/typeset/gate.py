@@ -28,6 +28,18 @@ monospace; and the upright file of the proportional family in force.
 application under Xvfb and llvmpipe on 2026-10-11: 21 ms. Switching typeset
 text on is then a setting and not a load.
 
+**What a theme costs is paid here and not in a frame.** A theme sizes each face
+from its font file, and the library reads a file's kerning with its metrics the
+first time a face is asked about: measured in pptmstr on 2026-10-12 (headless,
+load average 2.0), 100 ms for the first Roboto face and 47 to 68 ms for each
+other, 2.5 ms for Inconsolata, 265 ms for the five a document's theme names.
+Left to the first draw that is one frame of a quarter of a second -- the board's,
+with every row open, was 291 ms. So where the operator's setting asks for
+typeset text the document theme is built at the load, and where it does not the
+frame that follows switching it on pays instead. A registration drops what the
+library read, so a change of family costs it again: 403 ms measured, in the
+frame after the click.
+
 **A change of proportional family loads them again, between frames**
 (``pre_frame``): the library reads its files when its context is made, so
 another file means another context. Run in a window on 2026-10-11: 11 ms, a view
@@ -44,8 +56,30 @@ first: ``app`` in ``before_exit``, the tests in ``tests/conftest.py``.
 
 Reached past ``advtext.__all__``: the module ``advtext.typesetter`` itself, for
 ``module``, ``trouble``, ``unload`` and ``LIBRARY_VARIABLE``, which the library
-lists as reached through their module with no promise attached. A test reads
-this package's imports and holds them to that one name.
+lists as reached through their module with no promise attached; and the module
+``advtext.markdown_rules``, for its private ``_parser``, as said below. A test
+reads this package's imports and holds them to those two names.
+
+**The markdown reader is told to hide nothing, and then asked whether it does**
+(``_reader``, ``reader_hides``). A CommonMark reader shows nothing for raw HTML
+and for an image, pairs the stars of a glob into emphasis, and draws a link
+without where it goes; the panes show what an operator decides on. Measured
+through the library as it is, 2026-10-12: ``a <b>x</b> and List<String>`` is set
+as ``a x and List``, ``rm **/*.py and t/**/*.md`` as ``rm /*.py and t//*.md``,
+and an unclosed ``<!--`` takes every paragraph after it. The library has no
+supported place for a host's reader rules (request P7 of
+``HANDOFF-advtext.md``, accepted and not built), so the rules are put on its
+private parser object, here and nowhere else, and the reader is then read
+through the library's public calls: a probe that comes back short stops the
+library being offered to draw with, which is the honest answer when the reader
+cannot be told to hide nothing.
+
+**One reach has no promise of any kind** (``face_font``): the ``ImFont`` the
+library draws a face with, for a native ImGui line in that face. It is found the
+way the library's own demonstration finds it, through the native module's
+``font_atlas_index``; a supported name is request P14 of ``HANDOFF-advtext.md``.
+It is here once, it answers ``None`` when anything about it fails, and a test
+fails when the library stops answering it.
 """
 
 from __future__ import annotations
@@ -55,7 +89,22 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import roles
+from . import roles, themes
+
+_HIDING_RULES = ("html_block", "html_inline", "image")
+"""
+The rules of the library's markdown reader that consume text and show nothing for it.
+"""
+
+_DESTINATIONS_RULE = "pptmstr_link_destinations"
+_STARS_RULE = "pptmstr_written_stars"
+
+READER_PROBE = "a <b>x</b> ![alt](u) rm **/*.py and t/**/*.md\n"
+READER_PROBE_WORDS = ("<b>x</b>", "alt", "(u)", "**/*.py", "t/**/*.md")
+"""
+A line every word of which a CommonMark reader hides some of, and what must come
+back from it: the tags, the image's description and destination, the stars.
+"""
 
 
 @dataclass
@@ -85,6 +134,9 @@ class _Gate:
     # Something raised in this module, as `Type: message`. While it is set the
     # library is not offered to draw with; the next load clears it.
     failure: str | None = None
+    # What a view raised when the library stopped inside a draw, kept until the
+    # frame it happened in is over (`stopped`, `pre_frame`).
+    stopping: str | None = None
 
 
 _GATE = _Gate()
@@ -112,16 +164,35 @@ def failed(failure: BaseException) -> None:
     _GATE.failure = f"{type(failure).__name__}: {failure}"
 
 
+def stopped(failure: BaseException) -> None:
+    """
+    Take what a view raised when the library stopped inside a draw. For ``views``.
+
+    **The answer of ``can_draw`` does not change until the frame is over.** A
+    pane asks ``enabled`` at several places in one frame, and one that took its
+    typeset branch at the first and its own renderer at the second would draw
+    half of each into a window laid out for one. So the rest of the frame's
+    calls are still made through the seam, each says the reason where its text
+    would be, and ``pre_frame`` makes the stop the gate's failure: the next
+    frame is every pane's own renderer.
+    """
+    if _GATE.stopping is None:
+        _GATE.stopping = f"{type(failure).__name__}: {failure}"
+
+
 def can_draw() -> bool:
     """
     Whether the library can draw *in the ImGui context that is current*.
 
     Its fonts are loaded, it has not been switched off since, and the current
     context is the one they were loaded in. Never raises. This is the library's
-    half of ``roles.enabled``.
+    half of ``roles.enabled``. In the frame the library stopped inside a draw
+    the answer is the one the frame began with (``stopped``).
     """
     if not _GATE.loaded or _GATE.failure is not None:
         return False
+    if _GATE.stopping is not None:
+        return True
     try:
         return bool(_typesetter().ready()) and _imgui().get_current_context() == _GATE.home
     except Exception as failure:
@@ -191,6 +262,176 @@ def unavailable_reason() -> str | None:
     return "the typesetting library's fonts are in another window's context"
 
 
+def read(source: str, theme: Any) -> Any:
+    """
+    Markdown source as the library's blocks, read with ``theme``: the one call the
+    seam reads a settled text with.
+
+    Link reference definitions are off, as they are in the library's stream, so
+    a text reads the same finished as it did arriving; and that is the parser
+    ``_reader`` put pptmstr's rules on.
+    """
+    from advtext import parse_markdown
+
+    return parse_markdown(source, theme, references=False)
+
+
+def _reader() -> None:
+    """
+    Make the library's markdown reader show what was written, and check that it does.
+
+    Three changes to the one parser object ``read`` and the library's stream
+    read with (reference definitions off, mathematics off), all made on the
+    parser and not on the text:
+
+    - The rules in ``_HIDING_RULES`` are switched off. Raw HTML is then text, as
+      CommonMark's own ``html: false`` reading has it -- a tag, a comment opener, a
+      generic's ``<T>`` -- and ``![alt](url)`` is an exclamation mark and a link.
+    - A core rule (``_show_destinations``) writes each link's destination after
+      its text.
+    - An inline rule (``_written_stars``) reads the stars of a glob, a comment
+      opener or a product as the characters they are.
+
+    On the parser because the alternative, escaping the source before it is
+    parsed, is a second markdown reader that has to agree with the first about
+    every code span, fence and container, and is wrong wherever it does not.
+
+    The parser is the library's private object and is shared by the process;
+    nothing else in this process reads markdown with it. The library could keep
+    the name and hand back a parser its views do not read with, and the changes
+    would land on nothing: so the reader is then asked (``reader_hides``), and
+    this raises when the name is gone or the probe comes back short. Safe to
+    call again: a rule already there is not added twice.
+    """
+    from advtext import markdown_rules
+
+    parser = markdown_rules._parser(False, False)
+    parser.disable(list(_HIDING_RULES))
+    if _DESTINATIONS_RULE not in parser.core.ruler.get_all_rules():
+        parser.core.ruler.push(_DESTINATIONS_RULE, _show_destinations)
+    if _STARS_RULE not in parser.inline.ruler.get_all_rules():
+        parser.inline.ruler.before("emphasis", _STARS_RULE, _written_stars)
+    missing = reader_hides()
+    if missing:
+        raise RuntimeError(f"the markdown reader hides text: {', '.join(missing)}")
+
+
+def reader_hides() -> tuple[str, ...]:
+    """
+    Which of the probe's words the reader does not give back: none, when it shows
+    what was written.
+
+    Read the two ways text reaches a view -- ``read``, and the library's stream
+    -- through the library's public calls and nothing of the parser, so that what
+    is checked is the reader in use and not the object ``_reader`` was handed.
+    """
+    from advtext import MarkdownStream, Theme
+
+    theme = Theme.build()
+    arriving = MarkdownStream(theme)
+    arriving.append(READER_PROBE)
+    missing: list[str] = []
+    for blocks in (read(READER_PROBE, theme).blocks, arriving.blocks):
+        said = " ".join(str(getattr(block, "text", "")) for block in blocks)
+        missing += [word for word in READER_PROBE_WORDS if word not in said]
+    return tuple(dict.fromkeys(missing))
+
+
+def _written_stars(state: Any, silent: bool) -> bool:
+    """
+    Read a run of ``*`` as text where it was written as a character and not as
+    emphasis: ``**/*.py``, ``src/*``, ``*.md``, ``/* note */``, ``2*3*4``.
+
+    CommonMark pairs such stars up wherever its flanking rules allow --
+    ``delete **/*.py and tests/**/*.md`` is ``delete``, a bold ``/*.py and tests/``
+    and ``/*.md`` -- and a delimiter is not drawn, so the reader of a body sees a
+    different command from the one its recipient gets. A run is text when:
+
+    - a ``/`` is on either side of it (a path, a comment opener or closer);
+    - a ``.`` and more follows it (``*.py``, ``**.tar.gz``);
+    - a letter or a digit is on both sides (``a*b``, ``foo*bar``), which is how
+      CommonMark itself reads ``_``.
+
+    ``**bold**``, ``*emphasis*`` and ``**Ends in a stop.**`` are none of those. What
+    still loses its stars is whatever is written exactly as emphasis is: ``rm *tmp
+    and old*`` is ``rm`` and an italic ``tmp and old``. In the other direction
+    ``**/usr/bin**`` keeps its stars and is not bold. A star in a code span or a
+    fence never gets here.
+    """
+    source: str = state.src
+    start: int = state.pos
+    if source[start] != "*":
+        return False
+    stop = start
+    while stop < state.posMax and source[stop] == "*":
+        stop += 1
+    before = source[start - 1] if start else " "
+    after = source[stop] if stop < len(source) else " "
+    more = source[stop + 1] if stop + 1 < len(source) else " "
+    written = (
+        before == "/"
+        or after == "/"
+        or (after == "." and not more.isspace())
+        or (before.isalnum() and after.isalnum())
+    )
+    if not written:
+        return False
+    if not silent:
+        state.pending += source[start:stop]
+    state.pos = stop
+    return True
+
+
+def _show_destinations(state: Any) -> None:
+    """
+    Append to each link's text where it goes: ``text (https://...)``.
+
+    A link drawn as its text alone asks its reader to trust a destination they
+    cannot see. The destination is written inside the link, so it takes the
+    link's ink and its click, and is left out only where the text already is the
+    destination to the character (``_names_itself``: most autolinks, a bare
+    URL). A title is hidden text too and is written with it.
+    """
+    for token in state.tokens:
+        if token.type != "inline" or not token.children:
+            continue
+        out: list[Any] = []
+        opened: list[tuple[str, str, int]] = []
+        for child in token.children:
+            if child.type == "link_open":
+                attrs = child.attrs or {}
+                opened.append((str(attrs.get("href", "")), str(attrs.get("title") or ""), len(out)))
+            elif child.type == "link_close" and opened:
+                href, title, start = opened.pop()
+                said = "".join(
+                    str(each.content)
+                    for each in out[start + 1 :]
+                    if each.type in ("text", "code_inline")
+                )
+                if title or not _names_itself(said, href):
+                    note = type(child)("text", "", 0)
+                    note.content = f' ({href} "{title}")' if title else f" ({href})"
+                    out.append(note)
+            out.append(child)
+        token.children = out
+
+
+def _names_itself(said: str, href: str) -> bool:
+    """
+    Whether a link's text is its own destination, character for character.
+
+    Only then is the destination left unsaid. The two may differ in a scheme the
+    reader supplied (``mailto:``, ``http://``) and in a closing ``/``, and in nothing
+    else: the reader's own normalising is not asked, because it is what turns
+    ``https://аpple.com`` with a Cyrillic ``а`` into the ``xn--`` host it goes to,
+    and a text that only *normalises* to its destination is a lookalike of it.
+    Such a link, an autolink included, is set with where it goes after it.
+    """
+    said = said.strip().removesuffix("/")
+    goes = href.removesuffix("/")
+    return bool(said) and goes in (said, f"mailto:{said}", f"http://{said}", f"https://{said}")
+
+
 def load_fonts(bold: Path | None = None) -> bool:
     """
     Give the library its fonts, in the current ImGui context. Whether it can draw
@@ -201,6 +442,9 @@ def load_fonts(bold: Path | None = None) -> bool:
     call makes the library's context again, which closes every document a view
     made before it, so the epoch moves.
 
+    The markdown reader is made to show what was written first (``_reader``); a
+    reader that cannot be is a failure like any other here, and no font is loaded.
+
     Never raises: a library that is absent or refused answers false, and so does
     anything raised on the way; ``unavailable_reason()`` has the sentence.
     """
@@ -209,7 +453,7 @@ def load_fonts(bold: Path | None = None) -> bool:
     _GATE.family = None
     _GATE.bold = bold
     _GATE.accepted = _GATE.loaded = False
-    _GATE.failure = None
+    _GATE.failure = _GATE.stopping = None
     try:
         typesetter = _typesetter()
     except Exception:
@@ -219,6 +463,7 @@ def load_fonts(bold: Path | None = None) -> bool:
     try:
         _GATE.accepted = typesetter.module() is not None
         if _GATE.accepted:
+            _reader()
             family = roles.proportional()
             _register(bold, roles.prose_path(family))
             _GATE.home = _imgui().get_current_context()
@@ -228,6 +473,13 @@ def load_fonts(bold: Path | None = None) -> bool:
     except Exception as failure:
         failed(failure)
     roles.moved()
+    if roles.wanted() and can_draw():
+        # Here and not in the first frame that sets text: "What a theme costs"
+        # in the module docstring.
+        try:
+            themes.document_theme()
+        except Exception as failure:
+            failed(failure)
     return can_draw()
 
 
@@ -250,6 +502,34 @@ def _register(bold: Path | None, prose: Path | None) -> None:
             register_font(Face.PROSE, prose)
 
 
+def face_font(face: str) -> Any:
+    """
+    The ``ImFont`` the library draws a face with, by the name of its ``Face``
+    member (``"PROSE_BOLD"``), or ``None``.
+
+    ``None`` when the library cannot draw, when it loaded no file for the face,
+    and when the reach itself fails; ``imgui.push_font`` reads ``None`` as "keep
+    the current font", so a caller that pushes the answer falls back to the UI
+    font. Asked every time: the library's fonts move on the atlas when it loads
+    them again. Never raises.
+
+    The module docstring says what kind of reach this is. Measured on ASCII in
+    Inconsolata (``scripts/measure_typeset_advances.py``, the control): text
+    ImGui draws from this entry lands where the chrome's own font puts it.
+    """
+    if not can_draw():
+        return None
+    try:
+        typesetter = _typesetter()
+        index = typesetter.module().font_atlas_index(typesetter.FACE_ROLES[face])
+        fonts = _imgui().get_io().fonts.fonts
+        if index is None or not 0 <= index < len(fonts):
+            return None
+        return fonts[index]
+    except Exception:
+        return None
+
+
 def unload() -> None:
     """
     Take the library's context down. For whoever destroys the ImGui context, first.
@@ -263,7 +543,7 @@ def unload() -> None:
     _GATE.home = None
     _GATE.family = None
     _GATE.accepted = _GATE.loaded = False
-    _GATE.failure = None
+    _GATE.failure = _GATE.stopping = None
     try:
         _typesetter().unload()
     except Exception as failure:
@@ -277,6 +557,9 @@ def pre_frame() -> None:
     Both cheap when there is nothing to do, which is nearly always, and neither
     is done while the library cannot draw.
 
+    **A library that stopped inside a draw of the frame before is off from
+    here** (``stopped``).
+
     **A family the library was not given is given to it.** The operator chose
     another proportional family; the fonts are loaded again, here and not in the
     click, because a load remakes the library's context under whatever is
@@ -287,6 +570,8 @@ def pre_frame() -> None:
     ``hello_imgui`` scales the UI font for the display, so the size is read from
     what ImGui reports. A change moves the epoch.
     """
+    if _GATE.stopping is not None:
+        _GATE.failure, _GATE.stopping = _GATE.stopping, None
     if not can_draw():
         return
     try:

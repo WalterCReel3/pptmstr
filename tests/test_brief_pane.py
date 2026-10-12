@@ -24,17 +24,6 @@ from pptmstr.ui import brief_pane, typeset
 from pptmstr.ui.focus import FocusState, Scope
 from tests import test_typeset_views as rig
 
-
-@pytest.fixture
-def seam(imgui: Any) -> None:
-    """
-    Parked: ``brief_pane``'s typeset branch is not built on the library as it is now,
-    so every test that asks for the seam is skipped, by step. The step that
-    builds the branch deletes this fixture and ``tests/conftest.py``'s takes over.
-    """
-    pytest.skip("SEAM-1: brief_pane's typeset branch is not re-adopted yet")
-
-
 ROOT: NodeId = ("s1", None)
 
 
@@ -335,10 +324,13 @@ def test_a_heading_in_a_body_is_set_under_the_entrys_own(seam: Any, tmp_path: Pa
     typeset_frame(seam, tmp_path, pane)
 
     view = pane.views.view(str(tmp_path / "000-premises.md"))
-    texts = [view.block_text(n) for n in range(len(view.document.blocks))]
-    assert texts == ["000 premises", "Title", "Section", "words"]
-    entry, title, section, words = (block.style.font.size for block in view.document.blocks)
+    assert list(view.texts) == ["000 premises", "Title", "Section", "words"]
+    entry, title, section, words = (block.style.font.size for block in view.blocks)
     assert entry > title > section == words
+    # And on screen, not only in what the view was told: the height of each
+    # heading's line.
+    tall = [line.bottom - line.top for line in view.set_lines()]
+    assert tall[0] > tall[1] > tall[2]
 
 
 # -- the typeset path -------------------------------------------------------------
@@ -350,8 +342,14 @@ def typeset_frame(im: Any, directory: Path, pane: brief_pane.BriefState) -> None
 
 
 def shown(pane: brief_pane.BriefState, directory: Path, name: str) -> list[str]:
+    """
+    The text of each block the entry's view set, a list item with its marker.
+    """
     view = pane.views.view(str(directory / name))
-    return [view.block_text(n) for n in range(len(view.document.blocks))]
+    return [
+        f"{getattr(block, 'marker', '')} {text}".strip()
+        for block, text in zip(view.blocks, view.texts, strict=True)
+    ]
 
 
 def test_with_the_seam_off_the_seam_is_not_drawn_through(
@@ -379,8 +377,9 @@ def test_an_entry_is_set_as_its_heading_and_its_markdown_body(seam: Any, tmp_pat
         "• one",
         "• two",
     ]
-    glyphs, _ = pane.views.drawn(str(tmp_path / "000-premises.md")) or (0, 0)
-    assert glyphs >= len("000premisesTitleAboldclaim.onetwo")
+    # Four vertices a glyph: the text reached the draw list.
+    drawn = pane.views.view(str(tmp_path / "000-premises.md")).stats.vertices
+    assert drawn >= 4 * len("000premisesTitleAboldclaim.onetwo")
 
 
 def test_a_body_of_one_item_a_line_is_drawn_on_as_many_lines(seam: Any, tmp_path: Path) -> None:
@@ -426,12 +425,13 @@ def test_the_parts_are_the_same_object_from_frame_to_frame(seam: Any, tmp_path: 
     (item,) = pane.entries(tmp_path)
     held = pane.parts(item)
     view = pane.views.view(str(item.entry.path))
-    layout = view.layout
+    revision, edits = view.revision, dict(view.edits)
 
     typeset_frame(seam, tmp_path, pane)
 
     assert pane.parts(pane.entries(tmp_path)[0]) is held
-    assert pane.views.view(str(item.entry.path)) is view and view.layout is layout
+    assert pane.views.view(str(item.entry.path)) is view
+    assert (view.revision, view.edits) == (revision, edits)
 
 
 def test_an_entry_overturned_later_keeps_its_view(seam: Any, tmp_path: Path) -> None:
@@ -505,8 +505,8 @@ def test_the_child_scrolls_sideways_only_under_the_seam(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """
-    Under the seam a fenced line is never broken, so one longer than the pane is
-    reachable only if the child scrolls to it; native text in that child is then
+    Under the seam a line set as written is never broken, so one longer than the
+    pane is reachable only if the child scrolls to it; native text in that child is then
     wrapped at a stated position, not at "the window's end", which has moved. With
     the seam off both are what they always were.
     """
