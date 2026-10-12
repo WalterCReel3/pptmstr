@@ -15,18 +15,44 @@ screen. On an approval surface that is text the recipient reads and the approver
 does not. The library's own test for a fence is looser -- any info string that
 begins with the word -- so the rule is pptmstr's and is asked first.
 
-**``diff()`` sets a diff through the library's diff view, and no pane calls
-it.** Measured in pptmstr on 2026-10-12 (``scripts/measure_typeset_diff.py``, a
-window under Xvfb, advtext ``38f5fac``): the view's rows are drawn in steps of 7
-and 8 px mixed at 16 px against a baked advance of 8, rows disagree at one
-column by up to 13 px, the 40th character of a row is 15 px left of where
-ImGui puts it, and a point on a drawn glyph is answered as a neighbouring
-character for 40 of the 64 glyphs of a 74-character row. A diff's columns are
-content and its selection is what an operator copies, so DETAIL and the inbox
-draw an approval's diff with their own renderer (request P21 and P22 of
-``HANDOFF-advtext.md``). For the same reason a fenced ``diff`` block inside
-markdown is not handed to the library's diff fences: it is the code block of
-its document, under its info string.
+**``diff()`` sets a diff through the library's diff view, and a pane calls it
+where the library that is running keeps a column** (``adopted``). A diff's
+columns are content and its selection is what an operator copies, so the
+question is put to the library as a measurement (``gate.columns``, requests
+P21 and P22 of ``HANDOFF-advtext.md``) and not to a version number: the
+advance a row is laid out at is the one ImGui has baked for the face, every
+glyph of a long row is drawn on it, and a point on a drawn glyph is answered
+as that glyph's character. Where that is so DETAIL and the inbox row draw an
+approval's diff with ``diff()`` and a fenced ``diff`` block of a settled
+document is hosted by the library's diff fences (``fence_diff``); where it is
+not, each pane draws its own rows and a fence is the code of its document.
+
+**It is not so on the library pptmstr is built against.** Measured in pptmstr
+on 2026-10-12 (``scripts/measure_typeset_diff.py``, a window under Xvfb,
+advtext ``38f5fac``, imtypeset ``c9f8902``): at a pixel height of 16 the view
+lays a column out at 7.626 px against a baked 8, draws rows in steps of 7 and
+8 px mixed, rows disagree at one column by up to 13 px, the 40th character of
+a row is 15 px left of where ImGui puts it, and a point on a drawn glyph lands
+on another character for 54 of the 64 glyphs of a 74-character row. The same
+at 14, 18 and 20. At an even **em** (14, 16, 18, 20 px: Inconsolata's advance
+is half an em) every one of those is exact, which is the configuration the
+tests draw the adopted branch in; pptmstr's roles are sized by pixel height,
+so no setting of the product reaches it.
+
+**What an adopted diff view is held to**, since an approval is decided over it:
+
+- *Nothing in a header row is only there.* The view's file header is one line
+  cut at the view's edge and outside what the view scrolls (request P16), so
+  what it says is said above the view, wrapped, always (``above``): a file's
+  label and state, and what is wrong with it.
+- *Only a model made from texts is drawn* (``draws``). One read back from a
+  unified string keeps lines the view does not draw (``accounted``) and may
+  hold a file shown as written, whose rows do not scroll; a parked call that
+  carries no texts is its pane's own rows, which are that string line for line.
+- *A row is never broken*, and one wider than the view is scrolled to by the
+  view's own bar.
+- *The library stopping is said and counted* (``ViewCache.unbuilt``), whether
+  it stops in the draw or refuses to make the view.
 
 The library is imported where a model is made and not when this module is, so
 the package imports without it.
@@ -37,7 +63,7 @@ from __future__ import annotations
 import re
 from collections.abc import Hashable, Sequence
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from ... import theme as ui_theme
 from ...approval import DiffText
@@ -48,6 +74,127 @@ from .views import ViewCache
 
 if TYPE_CHECKING:
     from advtext import Diff
+
+ADOPT: Literal["measured", "always", "never"] = "measured"
+"""
+Who draws a diff where the library can draw at all. THE place to change it;
+there is no setting.
+
+- ``"measured"``: the library's diff view where its columns hold by
+  measurement (``gate.columns``), each pane's own renderer where they do not.
+- ``"never"``: each pane's own renderer.
+- ``"always"``: the library's diff view whatever was measured, for looking at
+  it. **What that costs on the library as it is** (advtext ``38f5fac``; the
+  module docstring has the run): at a pixel height of 16 a column is laid out
+  at 7.626 px and drawn in steps of 7 and 8, so rows disagree at one column by
+  up to 13 px, a row of 40 characters ends 15 px left of the same text in
+  ImGui's, and a press on 54 of the 64 glyphs of a 74-character row selects
+  from a neighbouring character. An approver would be reading a diff whose
+  columns drift and copying text other than what the highlight covers.
+"""
+
+
+def adopted() -> bool:
+    """
+    Whether a diff is drawn by the library's diff view in this frame: ``ADOPT``
+    asked of the library that is running. A pane asks ``enabled(pane)`` as well,
+    and ``draws`` of the call it holds. Never raises.
+
+    Measured once for the diff role's size until the fonts are loaded again, so
+    the answer does not change inside a frame; the frame a pane first asks in
+    pays the measurement (``gate.columns`` has the cost).
+    """
+    if ADOPT == "never" or not gate.can_draw():
+        return False
+    return ADOPT == "always" or columns().holds
+
+
+def columns() -> gate.Columns:
+    """
+    What was measured of a row set as a diff's rows are, at the diff role's size
+    (``gate.columns``). Never raises.
+    """
+    try:
+        return gate.columns(themes.diff_theme())
+    except Exception as failure:
+        return gate.Columns(False, f"gave no theme for the diff role ({failure})")
+
+
+def renderer() -> str | None:
+    """
+    Who draws a diff and why, as one sentence for the Text menu and the settings
+    dialog. ``None`` where the answer is already on screen as another
+    sentence: the library cannot draw (``unavailable_reason``), or the operator
+    has typeset text switched off.
+    """
+    if not gate.can_draw() or not roles.wanted():
+        return None
+    if ADOPT == "never":
+        return "diffs.ADOPT is 'never': diffs are pptmstr's own rows"
+    found = columns()
+    if ADOPT == "always":
+        return f"diffs.ADOPT is 'always': the library {found.why}"
+    if found.holds:
+        return f"diffs are the library's: it {found.why}"
+    return f"diffs are pptmstr's own rows: the library {found.why}"
+
+
+def draws(pending: PendingApproval) -> bool:
+    """
+    Whether a parked call's diff is one the diff view shows all of: it carries
+    the texts the diff is made from.
+
+    A record with a unified string and no texts is read back from the string
+    (``approval_diff``), and that model can hold what the view draws nowhere
+    or cannot scroll to: lines over a file's header, a hunk's section in a
+    header row, a file shown as written. The string itself is every line, so
+    such a call is its pane's own rows.
+    """
+    return pending.texts is not None
+
+
+def above(model: Diff) -> tuple[tuple[str, bool], ...]:
+    """
+    What the diff view's header rows say that a pane must say above the view,
+    a line each: the text, and whether it is a warning.
+
+    A header row is one line, cut at the view's edge, and the view scrolls its
+    code and not its headers, so the end of a long path and whatever warning
+    follows it can be where nothing reaches them. The library as built against
+    does not say whether a header fit (request P16), so these are said always.
+    For each file, warnings first: the gate's prediction where the model still
+    carries it (``diff(warning=True)``), lines read as nothing, and characters
+    drawn as a placeholder, in the library's own words for them. Then the
+    file's label with its state. A hunk's section is a header row too and
+    follows its file. Counts are not repeated: they are short and lead the row.
+    """
+    from advtext import FileStatus
+
+    state = {
+        FileStatus.NEW: "  (new file)",
+        FileStatus.DELETED: "  (deleted file)",
+        FileStatus.BINARY: "  (binary file)",
+        FileStatus.UNCHANGED: "  (no changes)",
+    }
+    out: list[tuple[str, bool]] = []
+    for file in model.files:
+        if file.will_not_apply:
+            out.append((file.will_not_apply, True))
+        if file.unread:
+            count = len(file.unread)
+            out.append(
+                (f"{count} line{'s' if count != 1 else ''} not read as part of the diff", True)
+            )
+        if file.invisible_characters:
+            out.append(("contains invisible or bidirectional control characters", True))
+        elif file.control_characters:
+            out.append(("contains control characters", True))
+        said = (file.label or "(unnamed)") + state.get(file.status, "")
+        if file.line_endings:
+            said += f"  (line endings only: {file.line_endings})"
+        out.append((said, False))
+        out.extend((f"@@ {hunk.section}", False) for hunk in file.hunks if hunk.section)
+    return tuple(out)
 
 
 def is_diff_fence(info: str) -> bool:
@@ -136,6 +283,46 @@ def accounted(text: str, model: Diff) -> bool:
     return True
 
 
+def fence_diff(info: str, text: str) -> Diff | None:
+    """
+    The model of a fenced block the diff view is to draw, or ``None`` for a
+    fence that is the code of its document: pptmstr's rule for a fence, whole.
+
+    A diff view draws it when the info string is the one word
+    (``is_diff_fence``), the view draws every line of the text (``accounted``),
+    and no file of it is shown as written: those lines are header rows, which
+    the view cuts at its edge and does not scroll. Pure, and asked of a
+    block's own text both where the block is dressed and where the view asks
+    who draws it, so the two cannot disagree.
+    """
+    if not is_diff_fence(info) or not text.strip():
+        return None
+    from advtext import Diff
+
+    model = Diff.from_unified(text if text.endswith("\n") else text + "\n")
+    if not accounted(text, model) or any(file.dialect or file.raw for file in model.files):
+        return None
+    return model
+
+
+def fence_headers(text: str) -> tuple[str, ...]:
+    """
+    The lines of an honest fenced diff that the view draws as header rows, as
+    written: a file's ``---`` and ``+++`` and a hunk's ``@@`` line that names a
+    section. They are set above the hosted view as well (``above`` has why).
+    """
+    out = []
+    for line in text.split("\n"):
+        line = line.rstrip("\r")
+        if line.startswith(("--- ", "+++ ")):
+            out.append(line)
+        elif line.startswith("@@"):
+            found = _HUNK_LINE.match(line)
+            if (found[1] if found else line.strip("@ ")).strip():
+                out.append(line)
+    return tuple(out)
+
+
 def diff_model(texts: Sequence[DiffText]) -> Diff:
     """
     The diff of some before/after texts: one file of it per part.
@@ -215,9 +402,11 @@ def diff(
     A diff at the cursor, set by the library, or ``None`` when there is nothing
     diff-shaped to show. The height claimed.
 
-    **No pane calls this** (the module docstring has the measurement). It is
-    built and tested so that the day the library keeps its columns is a change
-    of two call sites.
+    **A pane calls this where ``adopted()`` and, for a parked call, ``draws``
+    say so**, and draws its own rows otherwise and when this answers ``None``.
+
+    **What the view's header rows say is set above it first, wrapped to the
+    view's width** (``above``), always: a header row is cut at the view's edge.
 
     ``source`` is a parked call, the texts of one (``approval.diff_texts``' answer,
     for arguments the operator is editing), or a ``Diff`` already made. The
@@ -267,6 +456,11 @@ def diff(
     entry.frame = frame
     top = im.get_cursor_pos().y
     layout = DiffLayout.SIDE_BY_SIDE if side_by_side else DiffLayout.UNIFIED
+    wide = views._width(im, width)
+    im.push_text_wrap_pos(im.get_cursor_pos_x() + wide)
+    for said, warns in above(model):
+        im.text_colored((ui_theme.P.warn if warns else ui_theme.P.accent).vec4, said)
+    im.pop_text_wrap_pos()
     try:
         view = entry.view
         if view is None:
@@ -275,7 +469,7 @@ def diff(
         if view.layout is not layout:
             view.set_layout(layout)
         view.height_cap = height_cap
-        view.draw(palette=themes.palette(), width_px=views._width(im, width))
+        view.draw(palette=themes.palette(), width_px=wide)
         entry.missing = 0
     except TypesetUnavailable as stopped:
         gate.stopped(stopped)

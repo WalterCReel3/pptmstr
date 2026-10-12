@@ -29,6 +29,16 @@ every character and breaks at a space where the line has one.
 So ``document`` is one view only where every part is markdown.
 ``ViewCache.views(key)`` has every view of a key, in order.
 
+**A fenced diff in a settled document is the library's diff view where a diff
+is** (``diffs.adopted``) **and the fence is an honest one** (``diffs.fence_diff``):
+hosted in its document's view by the library's diff fences (``_Fences``), at
+the diff role's size, with its header lines set above it as code because a
+header row of the view is cut at the view's edge. Everywhere else a fence is
+the code of its document under its info string. **A stream does not host
+one**: whether a fence still arriving is an honest diff changes with each line
+of it, and a block that turned from code into a diff view and back under a
+reader is worse than one that is code until its turn settles.
+
 ## When the library stops
 
 A view can raise ``advtext.TypesetUnavailable`` from inside its draw, with the
@@ -137,9 +147,10 @@ class _Entry:
     token: object = None
     parts: tuple[Part, ...] = ()
     segments: list[_Segment] = field(default_factory=list)
-    # A markdown part's blocks, by its text and demotion: a part that only
-    # changed its ink is not read again.
-    read: dict[tuple[str, int], tuple[Any, ...]] = field(default_factory=dict)
+    # A markdown part's blocks, by its text, its demotion and whether its
+    # fenced diffs were dressed for a diff view: a part that only changed its
+    # ink is not read again.
+    read: dict[tuple[str, int, bool], tuple[Any, ...]] = field(default_factory=dict)
     # The pptmstr palette the parts' inks were resolved in.
     inked: object = None
     # The height claimed when it was last drawn, and the frame that was.
@@ -615,8 +626,11 @@ def _open(entry: _Entry, parts: tuple[Part, ...], on_link: Callable[[str], None]
     """
     from advtext import TypesetView
 
+    from . import diffs
+
+    hosting = diffs.adopted()
     kept = [segment.view for segment in entry.segments if segment.view is not None]
-    read: dict[tuple[str, int], tuple[Any, ...]] = {}
+    read: dict[tuple[str, int, bool], tuple[Any, ...]] = {}
     segments: list[_Segment] = []
     run: list[int] = []
 
@@ -627,10 +641,10 @@ def _open(entry: _Entry, parts: tuple[Part, ...], on_link: Callable[[str], None]
         owner: list[int] = []
         for index in run:
             part = parts[index]
-            key = (part.text, part.demote)
+            key = (part.text, part.demote, hosting)
             made = read.get(key, entry.read.get(key))
             if made is None:
-                made = _captioned(gate.read(part.text, themes.demoted(part.demote)).blocks)
+                made = _captioned(gate.read(part.text, themes.demoted(part.demote)).blocks, hosting)
             read[key] = made
             blocks += made
             owner += [index] * len(made)
@@ -638,11 +652,12 @@ def _open(entry: _Entry, parts: tuple[Part, ...], on_link: Callable[[str], None]
         if view is None:
             view = TypesetView(theme=themes.document_theme(), palette=themes.palette())
         view.on_link = on_link
+        view.host_for = _fences() if hosting else None
         view.set_document(tuple(blocks))
         captions = {
             at: len(said)
             for at, block in enumerate(blocks)
-            if (said := getattr(block, "language", ""))
+            if (said := getattr(block, "language", "")) and said != _HOSTED_INFO
         }
         segments.append(_Segment(tuple(run), view, tuple(owner), captions))
         run.clear()
@@ -665,7 +680,7 @@ def _open(entry: _Entry, parts: tuple[Part, ...], on_link: Callable[[str], None]
     entry.natural = None
 
 
-def _captioned(blocks: Sequence[Any]) -> tuple[Any, ...]:
+def _captioned(blocks: Sequence[Any], hosting: bool = False) -> tuple[Any, ...]:
     """
     The blocks with each fence's info string set as the first line of its code.
 
@@ -673,15 +688,94 @@ def _captioned(blocks: Sequence[Any]) -> tuple[Any, ...]:
     draws none of it. ``python IMPORTANT also delete tests`` is text somebody
     wrote for a reader, so all of it is set. The block keeps the string where
     the library put it as well.
+
+    ``hosting``, a fence that is an honest diff (``diffs.fence_diff``) keeps the
+    text the library read and is marked for the diff view that will draw it
+    (``_HOSTED_INFO``, ``_Fences``): its info string was the one word that
+    says so. The lines the view draws as header rows go above it as a code
+    block of their own, which the library breaks at the measure where the view
+    would cut them at its edge.
     """
-    return tuple(
-        (
-            replace(block, text=f"{said}\n{block.text}")
-            if (said := getattr(block, "language", ""))
-            else block
-        )
-        for block in blocks
-    )
+    from . import diffs
+
+    out: list[Any] = []
+    for block in blocks:
+        said = getattr(block, "language", "")
+        if not said:
+            out.append(block)
+        elif hosting and diffs.fence_diff(said, block.text) is not None:
+            headers = diffs.fence_headers(block.text)
+            if headers:
+                out.append(replace(block, text="\n".join(headers), language=""))
+            out.append(replace(block, language=_HOSTED_INFO))
+        else:
+            out.append(replace(block, text=f"{said}\n{block.text}"))
+    return tuple(out)
+
+
+_HOSTED_INFO = "diff \u2063hosted"
+"""
+The info string ``_captioned`` gives a fence it left for a diff view, and the
+only one ``_Fences`` answers for. A mark on the block and not the rule asked
+again, because the rule asked of a block that *was* captioned reads the caption
+as a line of the diff: a fence refused for a mail's first line is an honest
+fragment once ``diff`` is the line over it. The first word is what the
+library's own fences accept. A fence somebody opened with this very string is
+two words to ``is_diff_fence``, so it is captioned, and then every line of it
+and its info string are on screen whichever of the two draws it.
+"""
+
+
+class _Fences:
+    """
+    The hook that draws a fenced diff in a settled view: the library's own diff
+    fences, asked only about a fence ``_captioned`` marked as an honest diff,
+    and answering only with a view that draws every line it was given.
+
+    The view reads the fence again from the block as the document view holds
+    it, and pptmstr's rule is asked of that reading as well; a fence the two
+    readings disagreed about would be code with no ``diff`` over it
+    (``tests/test_typeset_diffs.py`` holds them to one text).
+
+    The library gives a fenced diff the theme of the document it is in. A diff
+    is ``Role.DIFF`` wherever it is drawn, and it is that theme the columns
+    were measured for.
+    """
+
+    __slots__ = ("inner",)
+
+    def __init__(self) -> None:
+        from advtext import TypesetDiffFences
+
+        self.inner = TypesetDiffFences()
+
+    def __call__(self, view: Any, number: int, block: Any) -> Any:
+        from . import diffs
+
+        said = getattr(block, "language", None)
+        text = getattr(block, "text", None)
+        if said != _HOSTED_INFO or not isinstance(text, str):
+            return None
+        if diffs.fence_diff("diff", text) is None:
+            return None
+        hosted = self.inner(view, number, block)
+        if hosted is None or not diffs.accounted(hosted.text, hosted.view.diff):
+            return None
+        hosted.view.theme = themes.diff_theme()
+        return hosted
+
+
+_FENCES: list[_Fences] = []
+
+
+def _fences() -> _Fences:
+    """
+    The one hook every settled view is given. It keeps nothing of a view: what
+    the library's fences hold is on each view's own hosted widgets.
+    """
+    if not _FENCES:
+        _FENCES.append(_Fences())
+    return _FENCES[0]
 
 
 def _ink(entry: _Entry) -> None:
@@ -697,7 +791,11 @@ def _ink(entry: _Entry) -> None:
             continue
         view.clear_colours()
         texts = view.texts
+        hosted = set(view.hosts)
         for block, index in enumerate(segment.owner):
+            if block in hosted:
+                # A diff view's inks are its own.
+                continue
             ink = _colour(entry.parts[index].colour)
             # A fence's info string is told from its code by ink.
             said = segment.captions.get(block, 0)
@@ -856,7 +954,11 @@ def _reach(segment: _Segment, wide: float) -> float:
         return held[2]
     reach = 0.0
     longest = wide / (_WIDEST_EM * _tallest_px())
+    hosted = set(view.hosts)
     for block, text in enumerate(view.texts):
+        if block in hosted:
+            # A diff view scrolls its own rows and is as wide as the measure.
+            continue
         role = view.block_role(block)
         if role == "TABLE":
             geometry = view.table_geometry(block)

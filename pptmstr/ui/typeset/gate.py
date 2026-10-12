@@ -40,6 +40,11 @@ frame that follows switching it on pays instead. A registration drops what the
 library read, so a change of family costs it again: 403 ms measured, in the
 frame after the click.
 
+**Whether a diff's columns hold is measured there too** (``columns``), where
+typeset text is wanted: the first diff view made in a process is 29 ms and the
+measurement 3 to 6 (headless, 2026-10-12, load average 12), and the frame an
+approval first came under the cursor would otherwise pay both.
+
 **A change of proportional family loads them again, between frames**
 (``pre_frame``): the library reads its files when its context is made, so
 another file means another context. Run in a window on 2026-10-11: 11 ms, a view
@@ -81,10 +86,19 @@ way the library's own demonstration finds it, through the native module's
 ``font_atlas_index``; a supported name is request P14 of ``HANDOFF-advtext.md``.
 It is here once, it answers ``None`` when anything about it fails, and a test
 fails when the library stops answering it.
+
+**Whether monospace keeps its columns is measured, and the measurement is a
+reach of the same kind** (``columns``). The library has no answer for "is a row
+of code drawn on ImGui's grid", so one row is set in a document of the native
+module's, as the diff view sets a row, and read back: where it was laid out,
+the vertices a draw of it would emit, what a hit test answers on them. Through
+``typesetter.module()`` and ``typesetter.base_style``, here and nowhere else.
 """
 
 from __future__ import annotations
 
+import math
+import struct
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -632,6 +646,7 @@ def load_fonts(bold: Path | None = None) -> bool:
     _GATE.home = None
     _GATE.family = None
     _GATE.bold = bold
+    _COLUMNS.clear()
     _GATE.accepted = _GATE.loaded = False
     _GATE.failure = _GATE.stopping = None
     try:
@@ -660,6 +675,17 @@ def load_fonts(bold: Path | None = None) -> bool:
             themes.document_theme()
         except Exception as failure:
             failed(failure)
+    if roles.wanted() and can_draw():
+        # And whether a diff's columns hold, for the same reason: the first
+        # diff view made in a process is 29 ms, measured, and a pane would
+        # otherwise pay it in the frame an approval first came under the
+        # cursor. Kept only if it could be taken: what cannot be measured here
+        # is asked again, and then kept, by the frame that wants to know.
+        try:
+            theme = themes.diff_theme()
+            _COLUMNS[_columns_key(theme)] = _measured_columns(theme)
+        except Exception:
+            pass
     return can_draw()
 
 
@@ -710,6 +736,238 @@ def face_font(face: str) -> Any:
         return None
 
 
+@dataclass(frozen=True, slots=True)
+class Columns:
+    """
+    What was measured of one row of monospace set by the library (``columns``).
+
+    ``cell`` is the advance the library lays a column out at and ``baked`` the
+    advance ImGui has baked for the face at ``size``, the pixel height the row's
+    glyphs were drawn from; both 0 where the row could not be read. Of the
+    ``glyphs`` with ink, ``off`` are not drawn at their index times ``baked``
+    from the row's first, and ``mishit`` are ones a point on the drawn glyph is
+    answered for as another character's. ``why`` is what the library does,
+    as the words that follow "the library" in a sentence about the answer,
+    and short: the settings dialog has one line for that sentence.
+    """
+
+    holds: bool
+    why: str
+    cell: float = 0.0
+    baked: float = 0.0
+    size: float = 0.0
+    glyphs: int = 0
+    off: int = 0
+    mishit: int = 0
+
+
+COLUMN_EPSILON_PX = 1e-4
+"""
+How far the laid-out cell may be from the baked advance and still be it.
+
+The library's lengths are whole scaled points, 1/65536 pt, so a cell that is
+meant to be 8 px comes back as 7.999989 (measured at an em of 16; 6.999995 at
+14): a rounding of about 1e-5 px. The library draws a glyph at its laid-out pen
+rounded to a pixel, so an error of e a column moves a glyph once the row is
+0.5 / e columns long: 5,000 columns at this bound, 50,000 at the rounding
+measured, and 1.3 at the 0.374 px a 16 px pixel height is out by today. The
+row's own pens are compared as well (``Columns.off``), so the bound decides
+only what the probe row is too short to show.
+"""
+
+_COLUMN_ROW = (
+    "total = float(baked.get_char_advance(code)) + kern_px  # 40th is in 'kern'  "
+    "iiii|llll|mmmm|WWWW|0000|1111|8888|....|  name       size  kind  @@ -1,7 +1,9 @@  "
+    '{[<(~^`_-=+*/\\%$#!?;:,"&)>]}'
+)
+"""
+The row ``columns`` sets: 186 characters, 156 of them with ink. Code as a diff
+holds it, with runs of spaces, the narrowest and the widest glyphs of the face
+in runs of their own, and punctuation; on the library as it was on 2026-10-12
+a row of 40 was already 15 px short of ImGui's.
+"""
+
+_COLUMNS: dict[object, Columns] = {}
+"""
+What ``columns`` measured, by the code style measured. Emptied when the fonts
+are loaded or taken down: the measurement is of one atlas.
+"""
+
+
+def columns(theme: Any) -> Columns:
+    """
+    Whether a row of code set by the library with ``theme`` keeps its columns
+    and is hit where it is drawn, by measurement. Never raises: a row that
+    cannot be measured does not hold, and ``why`` says what stopped it.
+
+    **What is asked** (requests P21 and P22 of ``HANDOFF-advtext.md``, as one
+    answer):
+
+    - the cell the diff view lays a column out at (``TypesetDiffView.grid``)
+      is the advance ImGui has baked for the code face at the pixel height the
+      row is drawn from, within ``COLUMN_EPSILON_PX``;
+    - every glyph of ``_COLUMN_ROW`` is drawn with its pen at its index times
+      that advance from the row's first, so N characters are N advances on
+      this row and on any other, and the row lines up with the same text
+      through ``ImDrawList.add_text``;
+    - a point a quarter of an advance into a drawn glyph is answered by the
+      library's hit test as the position before that character, and a point
+      three quarters in as the position after it. The hit test answers the
+      nearest position *between* characters, so "the character drawn there" is
+      those two answers, and a press, a drag and a copy land on what is seen.
+
+    **How, with no frame.** The row is one Code block of a document of the
+    native module's, styled as the diff view styles its own (the view's grid
+    gives the scale and the pitch), laid out, and drawn to buffers and not to a
+    window (``Document.draw_to_buffers``): the vertices are the ones a window
+    would get. Drawn twice and the second read, so every glyph is on the atlas
+    before a texture coordinate is compared. The pixel height the glyphs came
+    from is the one whose baked glyph has the first quad's texture
+    coordinates; a pen is a quad's left edge less that glyph's bearing.
+    ``tests/test_typeset_diffs.py`` holds the answer to what a diff view
+    drawn in a window does, where it holds and where it does not.
+
+    **What it costs**: one diff view made and never drawn, one document of one
+    line laid out, two draws to buffers, 312 hit tests: 3 to 6 ms measured in
+    pptmstr on 2026-10-12 (headless, load average 2.6 and 12), once for a
+    code style until the fonts are loaded again, and 29 ms more the first time
+    a diff view is made in a process. ``load_fonts`` takes it for the diff
+    role's size where typeset text is wanted, so a frame pays only after the
+    size of the diff role has changed under it.
+    """
+    try:
+        key = _columns_key(theme)
+    except Exception as failure:
+        return Columns(False, f"was given a theme with no code style ({type(failure).__name__})")
+    held = _COLUMNS.get(key)
+    if held is None:
+        if not can_draw():
+            return Columns(False, "is not drawing")
+        try:
+            held = _measured_columns(theme)
+        except Exception as failure:
+            held = Columns(False, f"could not be measured ({type(failure).__name__}: {failure})")
+        _COLUMNS[key] = held
+    return held
+
+
+def _columns_key(theme: Any) -> object:
+    """
+    What a measurement is of: the code style the row was set in.
+    """
+    from advtext import BlockKind
+
+    return (theme.style(BlockKind.CODE).font, theme.px_per_inch)
+
+
+def _measured_columns(theme: Any) -> Columns:
+    """
+    ``columns``, uncached, raising whatever the library raises.
+    """
+    from advtext import Diff, Face, TypesetDiffView, em_size_for_pixel_height
+
+    typesetter = _typesetter()
+    native = typesetter.module()
+    grid = TypesetDiffView(Diff(), theme).grid
+    cell = float(grid.cell)
+    base = typesetter.base_style(theme, 0)
+    pitched = native.BlockStyle(Scale=grid.scale, LineHeight=grid.row / (grid.em * grid.scale))
+    row = _COLUMN_ROW
+    inked = [index for index, char in enumerate(row) if not char.isspace()]
+    with native.Document.from_blocks(
+        [native.Block(native.BlockKind.Code, row)], [pitched]
+    ) as document:
+        document.layout(float(len(row) + 8) * max(cell, 1.0) * 2.0, base)
+        clip = (-16.0, -16.0, float(len(row) + 8) * max(cell, 1.0) * 2.0, 4.0 * grid.row)
+        document.draw_to_buffers((0.0, 0.0), clip)
+        quads = _glyph_quads(native, document.draw_to_buffers((0.0, 0.0), clip)[0])
+        if len(quads) != len(inked):
+            return Columns(
+                False,
+                f"draws a row of {len(inked)} characters as {len(quads)} glyphs",
+                cell=cell,
+                glyphs=len(inked),
+            )
+        code = face_font("CODE")
+        if code is None:
+            return Columns(False, "has no code face on ImGui's atlas", cell=cell)
+        tall = grid.em * grid.scale / em_size_for_pixel_height(Face.CODE, 1.0)
+        baked = _bake_of(code, tall, row[inked[0]], quads[0])
+        if baked is None:
+            return Columns(
+                False,
+                "draws its glyphs from a pixel height that could not be found",
+                cell=cell,
+                glyphs=len(inked),
+            )
+        advance = float(baked.get_char_advance(ord("0")))
+        middle = grid.row / 2.0
+        off = mishit = 0
+        first: float | None = None
+        for index, quad in zip(inked, quads, strict=True):
+            pen = quad[0] - float(baked.find_glyph(ord(row[index])).x0)
+            if first is None:
+                first = pen - index * advance
+            if abs(pen - first - index * advance) > 0.01:
+                off += 1
+            before = document.hit_test((pen + 0.25 * advance, middle)).position[1]
+            after = document.hit_test((pen + 0.75 * advance, middle)).position[1]
+            if (int(before), int(after)) != (index, index + 1):
+                mishit += 1
+    size = float(baked.size)
+    if abs(cell - advance) > COLUMN_EPSILON_PX:
+        why = f"lays out a {cell:.3f} px column where ImGui draws {advance:g} px"
+    elif off:
+        why = f"draws {off} of {len(inked)} glyphs of a row off their column"
+    elif mishit:
+        why = f"answers a press on {mishit} of {len(inked)} glyphs as a neighbour"
+    else:
+        why = f"keeps a {advance:g} px column: laid out, drawn and hit over a row"
+    holds = abs(cell - advance) <= COLUMN_EPSILON_PX and not off and not mishit
+    return Columns(holds, why, cell, advance, size, len(inked), off, mishit)
+
+
+def _glyph_quads(native: Any, vertices: bytes) -> list[tuple[float, float, float, float]]:
+    """
+    The quads among ``Document.draw_to_buffers``' vertices, in the order drawn,
+    each as (left, right, u of its left edge, v of its top edge).
+    """
+    built = native.build_info()
+    step = int(built.sizeof_imdrawvert)
+    at_pos, at_uv = int(built.offsetof_imdrawvert_pos), int(built.offsetof_imdrawvert_uv)
+    out = []
+    for start in range(0, len(vertices) - 4 * step + 1, 4 * step):
+        corners = [
+            (
+                *struct.unpack_from("<ff", vertices, start + n * step + at_pos),
+                *struct.unpack_from("<ff", vertices, start + n * step + at_uv),
+            )
+            for n in range(4)
+        ]
+        xs, _, us, vs = zip(*corners, strict=True)
+        out.append((min(xs), max(xs), min(us), min(vs)))
+    return out
+
+
+def _bake_of(font: Any, tall: float, char: str, quad: tuple[float, float, float, float]) -> Any:
+    """
+    The ``ImFontBaked`` of ``font`` a quad of ``char`` was drawn from: the one,
+    at a whole pixel height beside ``tall``, whose glyph is on the atlas where
+    the quad's texture coordinates are. ``None`` when none is.
+    """
+    nearest = math.floor(tall + 0.5)
+    for size in (nearest, nearest + 1, nearest - 1, nearest + 2, nearest - 2):
+        if size < 1:
+            continue
+        baked = font.get_font_baked(float(size))
+        if not baked.is_glyph_loaded(ord(char)):
+            continue
+        glyph = baked.find_glyph(ord(char))
+        if abs(glyph.u0 - quad[2]) < 1e-7 and abs(glyph.v0 - quad[3]) < 1e-7:
+            return baked
+    return None
+
+
 def unload() -> None:
     """
     Take the library's context down. For whoever destroys the ImGui context, first.
@@ -724,6 +982,7 @@ def unload() -> None:
     _GATE.family = None
     _GATE.accepted = _GATE.loaded = False
     _GATE.failure = _GATE.stopping = None
+    _COLUMNS.clear()
     try:
         _typesetter().unload()
     except Exception as failure:

@@ -557,6 +557,18 @@ def test_the_seam_is_told_once_for_a_change_and_not_at_all_for_none(
     theme.set_theme("dark")
 
 
+def test_the_note_under_the_master_switch_says_who_draws_a_diff_where_text_is_typeset() -> None:
+    """
+    One note, one line: why text is not typeset, and where it is, who draws a
+    diff and by what measurement. An operator cannot tell either from the text.
+    """
+    measured = "diffs are pptmstr's own rows: the library lays out a 7.626 px column"
+    assert build(Settings(), Facts(diffs=measured)).typeset.note == measured
+    assert build(Settings(), Facts()).typeset.note == ""
+    gone = build(Settings(), Facts(available=False, obtainable=False, reason=GONE, diffs=measured))
+    assert gone.typeset.note == GONE, "why there is no typeset text comes first"
+
+
 # -- the modal, in a real frame ---------------------------------------------------------
 
 CTRL = imgui.Key.mod_ctrl
@@ -977,6 +989,50 @@ def test_every_role_shows_a_sample_and_none_is_refused(
         assert view.stats.whole and view.stats.vertices > 0, (role, view.stats)
     assert said == []
     assert typeset.can_draw()
+
+
+@pytest.mark.usefixtures("typeset_live")
+def test_the_facts_carry_the_seams_sentence_about_diffs(rig: Rig) -> None:
+    known = dialog.facts()
+    assert known.reason is None
+    assert known.diffs == typeset.diff_renderer()
+    assert (known.diffs or "").startswith("diffs are pptmstr's own rows: the library lays out")
+    rig.open()
+    rig.frames(2)
+    assert build(rig.state.settings, known).typeset.note == known.diffs
+
+
+@pytest.mark.usefixtures("typeset_live")
+def test_where_columns_hold_the_diff_sample_is_the_librarys_diff_view_and_the_note_says_so(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The sample follows what a pane does. On the library pptmstr is built against
+    a diff's rows are ImGui's text (the test above this pair holds that: the
+    diff sample has no view); where the library keeps a column, at an even em,
+    the sample is the diff view a pane would draw, and the dialog is still one
+    screen with it.
+    """
+    import advtext
+
+    from pptmstr.ui.typeset import diffs, gate, roles
+
+    tall = 16.0 / advtext.em_size_for_pixel_height(advtext.Face.CODE, 1.0)
+    monkeypatch.setattr(gate, "_live_font_size", lambda: tall)
+    roles.follow(tall)
+    assert diffs.columns().holds and typeset.diff_adopted()
+    rig.open()
+    rig.frames(3)
+
+    cache = rig.dialog.previews
+    key = ("sample", "diff")
+    (view,) = cache.views(key)
+    assert isinstance(view, advtext.TypesetDiffView)
+    assert (view.diff.added, view.diff.removed) == (1, 1) and view.origin is not None
+    assert cache.unbuilt(key) == 0
+    assert (dialog.facts().diffs or "").startswith("diffs are the library's: it keeps a 8 px")
+    window = rig.window()
+    assert window.scroll_max.y == 0 and window.size.y <= DISPLAY[1] - CHROME
 
 
 @pytest.mark.usefixtures("typeset_live")

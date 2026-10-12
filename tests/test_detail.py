@@ -1042,9 +1042,12 @@ def parked(tool: str, args: dict[str, object], pid: str = "p1") -> ApprovalNeede
 
 def test_a_parked_write_is_the_panes_own_diff_and_an_arguments_document(seam, monkeypatch) -> None:
     """
-    The diff is this pane's lines whichever renderer is on: a diff's columns are
-    content, and the library does not keep them. The arguments of a Write are
-    literal, so the seam hands every part of them to ImGui and holds no view.
+    On the library pptmstr is built against the diff is this pane's lines
+    whichever renderer is on: a diff's columns are content, and that library
+    does not keep them (``typeset.diff_adopted`` is a measurement of it). The
+    arguments of a Write are literal, so the seam hands every part of them to
+    ImGui and holds no view. ``test_where_columns_hold_a_parked_write_is_the_
+    librarys_diff_view`` is the same call on the other answer.
     """
     content = "a = 1\nb = 2\n"
     obligation = parked("Write", {"file_path": "nowhere/new.py", "content": content})
@@ -2171,3 +2174,351 @@ def test_with_typeset_off_a_approves_once_detail_has_drawn_the_call(imgui, monke
     assert review.NOT_DRAWN in rig.said
     _press_a(rig, snap, bridge)
     assert bridge.resolved == [("p1", True)]
+
+
+# -- where the library keeps a column, the diff is its diff view --------------------
+#
+# ``columns_hold`` (tests/conftest.py) is the one configuration in which the
+# library pptmstr is built against keeps a monospace column, so the pane takes
+# this branch by its own measurement. Each test here has a twin above, on the
+# branch the product takes today, and the pair fails if the switch is stuck
+# either way.
+
+
+def _diff_view(rig: Pane, obligation: ApprovalNeeded):
+    return rig.pane.views.view((obligation.key, "diff"))
+
+
+def _added(view) -> list[str]:
+    return [
+        row.text
+        for file in view.diff.files
+        for hunk in file.hunks
+        for row in hunk.rows
+        if row.kind.value == "+"
+    ]
+
+
+def test_where_columns_hold_a_parked_write_is_the_librarys_diff_view(
+    columns_hold, monkeypatch
+) -> None:
+    """
+    The same call as ``test_a_parked_write_is_the_panes_own_diff_and_an_arguments_
+    document``, where the library that is running keeps a column: the rows are
+    the library's diff view of the call's texts, under the same heading, with
+    the file's label said above the view; none of this pane's own diff lines
+    is drawn, and the arguments are as they were.
+    """
+    content = "a = 1\nb = 2\n"
+    obligation = parked("Write", {"file_path": "nowhere/new.py", "content": content})
+    snap = snapshot(record(), needs_you=(obligation,))
+    everything = _every_native_line(monkeypatch, columns_hold)
+    rig = Pane(columns_hold, monkeypatch)
+    rig.focus.move(snap, 0)
+
+    rig.frame(snap)
+    everything.clear()
+    rig.frame(snap)
+
+    assert typeset.diff_adopted() and typeset.diff_draws(obligation.approval)
+    views = rig.pane.views
+    assert set(views.keys()) == {(obligation.key, "diff"), (obligation.key, "arguments")}
+    view = _diff_view(rig, obligation)
+    assert _added(view) == ["a = 1", "b = 2"]
+    assert view.origin is not None and view.layout.name == "UNIFIED"
+    assert view.grid.cell == pytest.approx(8.0, abs=1e-4), "drawn on the column that was measured"
+    assert "+a = 1" not in everything and "+b = 2" not in everything
+    heading = next(line for line in rig.said if line.startswith("section:diff"))
+    assert heading == f"section:diff · {len(rig.state.diff_lines['p1']):,} lines"
+    assert "nowhere/new.py  (new file)" in everything, "the header row's words, above the view"
+    assert "no diff for this call" not in rig.said
+    assert rig.said.index(heading) < rig.said.index("section:arguments")
+    assert views.texts((obligation.key, "arguments")) == (
+        "file_path",
+        "nowhere/new.py",
+        "content",
+        content,
+    )
+    assert review.unset_lines(rig.state, "p1") == 0
+
+
+def test_where_columns_hold_a_call_with_no_texts_is_still_the_panes_own_lines(
+    columns_hold, monkeypatch
+) -> None:
+    """
+    A record with a unified string and no texts would be read back from the
+    string, and that reading can hold a line the view draws nowhere. The string
+    is every line, so it is drawn as it is.
+    """
+    diff = "said over the header\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"
+    obligation = _with_texts(parked("Bash", {"command": "ls"}), texts=None, diff=diff)
+    snap = snapshot(record(), needs_you=(obligation,))
+    rig = Pane(columns_hold, monkeypatch)
+    rig.focus.move(snap, 0)
+    rig.frame(snap)
+    assert typeset.diff_adopted() and not typeset.diff_draws(obligation.approval)
+    assert _diff_view(rig, obligation) is None
+    assert [line for line in diff.splitlines() if line not in rig.said] == []
+
+
+@pytest.mark.parametrize("path", ["nowhere/absent.py", _LONG_NOWHERE + "absent.py"])
+def test_where_columns_hold_the_prediction_is_said_first_and_the_path_above_the_view(
+    columns_hold, monkeypatch, path
+) -> None:
+    """
+    The view's header row is cut at the pane's edge and is not scrolled, so
+    neither the prediction nor the end of a long path may be only there. The
+    pane says the prediction, once, under the heading; the seam says the path
+    under that, broken at the pane's edge; and the view is handed no copy of
+    the prediction to cut.
+    """
+    obligation = parked("Edit", {**_NOWHERE, "file_path": path})
+    snap = snapshot(record(), needs_you=(obligation,))
+    everything = _every_native_line(monkeypatch, columns_hold)
+    rig = Pane(columns_hold, monkeypatch, width=370.0)
+    rig.focus.move(snap, 0)
+
+    rig.frame(snap)
+
+    assert [line for line in everything if "may not apply" in line] == [
+        "may not apply: file not found"
+    ]
+    heading = next(n for n, line in enumerate(rig.said) if line.startswith("section:diff"))
+    assert rig.said[heading + 1] == "may not apply: file not found"
+    assert everything.index("may not apply: file not found") < everything.index(path)
+    view = _diff_view(rig, obligation)
+    assert view is not None and [file.will_not_apply for file in view.diff.files] == [""]
+    assert view.diff.files[0].label == path
+
+
+def _binary(tmp_path) -> ApprovalNeeded:
+    target = tmp_path / "blob.bin"
+    target.write_bytes(b"\xff\xfe\x00\x01 not text")
+    obligation = parked("Write", {"file_path": str(target), "content": "now text\n"})
+    assert obligation.approval.texts[0].unreadable
+    return obligation
+
+
+def test_a_write_over_a_file_that_is_not_text_says_so_under_either_renderer(
+    seam, monkeypatch, tmp_path
+) -> None:
+    """
+    The unified diff of a Write over a binary is every line added, exactly as for
+    a file being created, and so are this pane's own lines. The record knows
+    the difference and the pane says it, above the diff, whoever draws it.
+    """
+    obligation = _binary(tmp_path)
+    snap = snapshot(record(), needs_you=(obligation,))
+    said = inbox.shown_as_new(obligation.approval.texts)
+    assert len(said) == 1 and "not readable as text" in said[0]
+    for on in (True, False):
+        typeset.configure(typeset=on)
+        rig = Pane(seam, monkeypatch)
+        rig.focus.move(snap, 0)
+        rig.frame(snap)
+        heading = next(n for n, line in enumerate(rig.said) if line.startswith("section:diff"))
+        assert rig.said[heading + 1] == said[0], on
+        assert "+now text" in rig.said, "this pane's own lines"
+
+
+def test_where_columns_hold_a_write_over_a_file_that_is_not_text_says_so(
+    columns_hold, monkeypatch, tmp_path
+) -> None:
+    obligation = _binary(tmp_path)
+    snap = snapshot(record(), needs_you=(obligation,))
+    everything = _every_native_line(monkeypatch, columns_hold)
+    rig = Pane(columns_hold, monkeypatch)
+    rig.focus.move(snap, 0)
+    rig.frame(snap)
+    said = inbox.shown_as_new(obligation.approval.texts)[0]
+    heading = next(n for n, line in enumerate(rig.said) if line.startswith("section:diff"))
+    assert rig.said[heading + 1] == said
+    assert _diff_view(rig, obligation) is not None and "+now text" not in everything
+    label = next(line for line in everything if "shown as new)" in line)
+    assert everything.index(said) < everything.index(label)
+
+
+LONG_WRITE = 1900
+"""
+Lines of a Write past DETAIL's bound on its own diff lines and under the bound
+on an argument, so that only the first is in play.
+"""
+
+
+def _long_write() -> ApprovalNeeded:
+    content = "".join(f"line_{n} = {n}\n" for n in range(LONG_WRITE))
+    return parked("Write", {"file_path": "nowhere/long.py", "content": content})
+
+
+def test_this_panes_own_diff_is_cut_at_its_bound_and_says_how_much_is_not_shown(
+    seam, monkeypatch
+) -> None:
+    """
+    The branch the product takes today: wrapped text is laid out again in every
+    frame, so the pane's own lines stop at ``_MAX_DIFF_LINES`` and say so.
+    """
+    obligation = _long_write()
+    snap = snapshot(record(), needs_you=(obligation,))
+    rig = Pane(seam, monkeypatch)
+    rig.focus.move(snap, 0)
+    rig.frame(snap)
+    assert not typeset.diff_adopted()
+    assert _diff_view(rig, obligation) is None
+    total = len(rig.state.diff_lines["p1"])
+    assert total > detail._MAX_DIFF_LINES
+    assert f"+line_{detail._MAX_DIFF_LINES - 10} = {detail._MAX_DIFF_LINES - 10}" in rig.said
+    assert f"+line_{LONG_WRITE - 1} = {LONG_WRITE - 1}" not in rig.said
+    cut = [line for line in rig.said if "more lines not shown here" in line]
+    assert cut == [
+        f"… {total - detail._MAX_DIFF_LINES:,} more lines not shown here — "
+        "the inbox row scrolls the whole diff"
+    ]
+
+
+def test_where_columns_hold_the_whole_of_a_long_diff_is_in_the_view_and_no_bound_is_said(
+    columns_hold, monkeypatch
+) -> None:
+    """
+    The stated difference between the two renderers. The library's view culls to
+    the pane, so it holds every row of the change and nothing is cut: the last
+    line of a 1,900-line Write is a row of it, the view is as tall as its rows
+    inside the pane's scrolling child, and no line says anything was left out.
+    """
+    obligation = _long_write()
+    snap = snapshot(record(), needs_you=(obligation,))
+    everything = _every_native_line(monkeypatch, columns_hold)
+    rig = Pane(columns_hold, monkeypatch)
+    rig.focus.move(snap, 0)
+    rig.frame(snap)
+    rig.frame(snap)
+    view = _diff_view(rig, obligation)
+    added = _added(view)
+    assert len(added) == LONG_WRITE and added[-1] == f"line_{LONG_WRITE - 1} = {LONG_WRITE - 1}"
+    assert view.row_count >= LONG_WRITE
+    assert view.height_cap is None
+    assert rig.pane.views.height((obligation.key, "diff")) >= LONG_WRITE * view.grid.row
+    assert not [line for line in everything if "more lines not shown" in line]
+    assert review.unset_lines(rig.state, "p1") == 0
+
+
+def test_where_columns_hold_a_long_row_is_one_row_and_the_view_scrolls_to_its_end(
+    columns_hold, monkeypatch
+) -> None:
+    row = "x = '" + "a" * 293 + "Z'"
+    obligation = parked("Write", {"file_path": "nowhere/wide.py", "content": f"short\n{row}\n"})
+    snap = snapshot(record(), needs_you=(obligation,))
+    rig = Pane(columns_hold, monkeypatch)
+    rig.focus.move(snap, 0)
+    rig.frame(snap)
+    view = _diff_view(rig, obligation)
+    assert _added(view) == ["short", row]
+    assert view.content_width >= len(row) * 8.0 > 420.0
+    view.scroll_x = 10**6
+    rig.frame(snap)
+    assert view.scroll_x > 1500, "the view's own bar reaches the end of the row"
+    assert view.content_width - view.scroll_x <= 420.0
+
+
+def test_where_columns_hold_two_columns_are_offered_only_where_there_is_room(
+    columns_hold, monkeypatch
+) -> None:
+    obligation = parked("Write", {"file_path": "nowhere/new.py", "content": "a = 1\n"})
+    snap = snapshot(record(), needs_you=(obligation,))
+    narrow = Pane(columns_hold, monkeypatch, width=600.0)
+    narrow.focus.move(snap, 0)
+    narrow.frame(snap)
+    assert "side by side" not in narrow.widgets
+    assert _diff_view(narrow, obligation).layout.name == "UNIFIED"
+
+    roomy = Pane(columns_hold, monkeypatch, width=1300.0)
+    roomy.focus.move(snap, 0)
+    roomy.frame(snap)
+    assert "side by side" in roomy.widgets
+    assert _diff_view(roomy, obligation).layout.name == "UNIFIED", "unified until asked"
+    roomy.pane.side_by_side = True
+    roomy.frame(snap)
+    assert _diff_view(roomy, obligation).layout.name == "SIDE_BY_SIDE"
+
+
+def test_with_this_panes_own_diff_no_layout_is_offered(seam, monkeypatch) -> None:
+    obligation = parked("Write", {"file_path": "nowhere/new.py", "content": "a = 1\n"})
+    snap = snapshot(record(), needs_you=(obligation,))
+    rig = Pane(seam, monkeypatch, width=1300.0)
+    rig.focus.move(snap, 0)
+    rig.frame(snap)
+    assert "side by side" not in rig.widgets
+
+
+def _diff_view_stops(monkeypatch) -> None:
+    """
+    Make the library's diff view stop inside its draw, and refuse to be made.
+    """
+    import advtext
+
+    def stopped(self, *given, **named):
+        raise advtext.TypesetUnavailable("imtypeset stopped: the library said no")
+
+    monkeypatch.setattr(advtext.TypesetDiffView, "draw", stopped)
+    monkeypatch.setattr(advtext.TypesetDiffView, "__init__", stopped)
+
+
+@pytest.mark.parametrize("first", [False, True], ids=["a view held", "a key never drawn"])
+def test_where_columns_hold_a_is_not_sent_over_a_diff_the_library_stopped_under(
+    columns_hold, monkeypatch, first: bool
+) -> None:
+    """
+    The hazard an approval cannot have, on the branch that hands the diff to the
+    library. The library stops inside the diff view's draw, or, the cursor
+    having just reached the call, refuses to make the view at all: the pane
+    shows a sentence where the rows would be, the frame's reading is of every
+    changed line missing, and ``a`` is not sent on it. The next frame is this
+    pane's own lines, all of them, and ``a`` is sent.
+    """
+    obligation = parked("Write", {"file_path": "nowhere/new.py", "content": "a = 1\nb = 2\n"})
+    snap = snapshot(record(), needs_you=(obligation,))
+    key = (obligation.key, "diff")
+    rig = Pane(columns_hold, monkeypatch)
+    rig.focus.move(snap, 0)
+    bridge = _Sent()
+    if not first:
+        rig.frame(snap)
+        assert rig.pane.views.unbuilt(key) == 0 == review.unset_lines(rig.state, "p1")
+    with monkeypatch.context() as stop:
+        _diff_view_stops(stop)
+        rig.frame(snap)
+        assert rig.pane.views.unbuilt(key) == 2
+        assert review.unset_lines(rig.state, "p1") == 2
+        assert review.withheld(rig.state, obligation.approval) == review.NOT_WHOLE
+        assert "+a = 1" not in rig.said, "the rows are not on screen"
+        _press_a(rig, snap, bridge)
+        assert bridge.resolved == []
+
+        rig.frame(snap)
+        assert not typeset.enabled(typeset.Pane.DETAIL)
+        assert "+a = 1" in rig.said and "+b = 2" in rig.said
+        assert review.unset_lines(rig.state, "p1") == 0
+        _press_a(rig, snap, bridge)
+        assert bridge.resolved == [("p1", True)]
+    assert typeset.load_fonts(theme_mod._ASSETS / "fonts" / "Inconsolata-Bold.ttf")
+
+
+def test_where_columns_hold_a_still_waits_on_an_argument_past_the_bound(
+    columns_hold, monkeypatch
+) -> None:
+    """
+    The bound on a call's arguments is not the diff's and does not move with who
+    draws the diff: a Write whose content runs past ``review.SETTLED_LINES`` has
+    every row of its change in the diff view, and its ``content`` argument is
+    still set as far as the bound, counted, and held on until asked for.
+    """
+    lines = review.SETTLED_LINES + 199
+    content = "\n".join(f"line_{n} = {n}" for n in range(lines))
+    obligation = parked("Write", {"file_path": "nowhere/long.py", "content": content})
+    rig = Pane(columns_hold, monkeypatch)
+    _held_until_asked(
+        rig,
+        obligation,
+        lambda: "\n".join(rig.pane.views.texts((obligation.key, "arguments"))),
+        f"line_{lines - 1} = {lines - 1}",
+    )
+    assert len(_added(_diff_view(rig, obligation))) == lines

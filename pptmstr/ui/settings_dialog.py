@@ -49,6 +49,7 @@ from imgui_bundle import imgui
 
 from .. import settings as settings_mod
 from .. import theme as theme_mod
+from ..approval import DiffText
 from ..settings import Settings
 from . import transcript_pane, typeset
 
@@ -178,12 +179,16 @@ class Facts:
 
     ``reason`` is ``typeset.unavailable_reason()``: why text cannot be typeset, or
     what switching it on will cost while the faces are still to load, or ``None``.
+    ``diffs`` is ``typeset.diff_renderer()``: who draws a diff where text is
+    typeset, and by what measurement, or ``None``. One of the two is the note
+    under the master switch.
     ``unusable`` names the proportional families whose file is not on the atlas.
     """
 
     available: bool = True
     obtainable: bool = True
     reason: str | None = None
+    diffs: str | None = None
     unusable: frozenset[str] = frozenset()
     path: str = ""
 
@@ -196,6 +201,7 @@ def facts() -> Facts:
         available=typeset.available(),
         obtainable=typeset.obtainable(),
         reason=typeset.unavailable_reason(),
+        diffs=typeset.diff_renderer(),
         unusable=frozenset(each.name for each, usable in typeset.proportionals() if not usable),
         path=str(settings_mod.settings_path()),
     )
@@ -433,7 +439,7 @@ def build(settings: Settings, known: Facts | None = None) -> Model:
         label="typeset text",
         on=settings.typeset and known.available,
         flip=FieldSet("typeset", not settings.typeset),
-        note=known.reason or "",
+        note=known.reason or known.diffs or "",
         disabled=None if known.obtainable else (known.reason or "the faces are not loaded"),
     )
 
@@ -635,6 +641,11 @@ What each role's row shows of itself, small enough that nine of them fit a scree
 ASCII only: the label is a native line in one font with no fallback.
 """
 
+_DIFF = (DiffText("cap = 4\n", "cap = 8\n", "pool.py"),)
+"""
+``SAMPLES[Role.DIFF]`` as the texts a diff view is made from.
+"""
+
 _ARGUMENT = (
     typeset.Part(SAMPLES[typeset.Role.ARGUMENT], typeset.Kind.LITERAL, role=typeset.Role.ARGUMENT),
 )
@@ -657,10 +668,13 @@ def _preview(cache: typeset.ViewCache, role: typeset.Role) -> None:
             | typeset.Role.TABLE
         ):
             typeset.markdown(cache, key, SAMPLES[role])
-        case typeset.Role.LITERAL | typeset.Role.DIFF:
-            # A diff's rows as text at the role's size, in one ink: no diff view
-            # is built on the library, and fenced in markdown the sample would
-            # be a code block's size and not this role's.
+        case typeset.Role.DIFF:
+            # As a pane draws one: the library's diff view where its columns
+            # hold, and the rows as text at the role's size where they do not.
+            # Fenced in markdown the sample would be a code block's size.
+            if not typeset.diff_adopted() or typeset.diff(cache, key, _DIFF) is None:
+                typeset.plain(cache, key, SAMPLES[role], role=role)
+        case typeset.Role.LITERAL:
             typeset.plain(cache, key, SAMPLES[role], role=role)
         case typeset.Role.ARGUMENT:
             typeset.document(cache, key, _ARGUMENT)

@@ -7,9 +7,12 @@ withheld from view, what the gate predicted -- need no ImGui. The rest runs
 with no backend, the real faces, and what the seam was handed to set under each key.
 
 **What is the library's and what is not.** A description's prose (a concern's
-body, a spawn's prompt, a plan) is set by the library; a diff is the pane's own
-rows and arguments are ImGui's text through the seam, under either renderer,
-because their columns are content and the library does not keep them.
+body, a spawn's prompt, a plan) is set by the library; arguments are ImGui's
+text through the seam, because their columns are content and the library does
+not keep them. A diff is the pane's own rows for the same reason on the
+library pptmstr is built against, and the library's diff view where the one
+that is running keeps a column (``typeset.diff_adopted``, a measurement):
+both are drawn here, the second on ``columns_hold`` (``tests/conftest.py``).
 """
 
 from __future__ import annotations
@@ -318,10 +321,10 @@ def test_the_gates_prediction_is_each_reason_once() -> None:
 
 def test_a_parked_write_is_the_panes_own_rows_under_either_renderer(seam: Any) -> None:
     """
-    A diff's columns are content and the library does not keep them
-    (``typeset.diffs`` has the measurement), so the row draws the unified
-    string a line to a row with typeset text on as with it off, and hands the
-    seam nothing.
+    A diff's columns are content and the library pptmstr is built against
+    does not keep them (``typeset.diff_adopted`` is the measurement), so the
+    row draws the unified string a line to a row with typeset text on as with
+    it off, and hands the seam nothing.
     """
     limit = cap(seam)
     call = write(400)
@@ -580,7 +583,7 @@ def test_a_predicted_refusal_is_on_a_line_of_the_panes_own_under_either_renderer
 ) -> None:
     """
     Worded as a prediction, once, on a line that wraps -- and once means in the
-    whole row. The diff is the unified string under either renderer and has
+    whole row. The diff here is the unified string under either renderer and has
     nothing else to carry it.
     """
     typeset.configure(typeset=on)
@@ -865,15 +868,246 @@ def test_nothing_written_in_a_concern_is_absent_from_what_the_row_can_bring_on_s
     assert child.scrollbar_x, "and there is a bar to reach it by"
 
 
+# -- where the library keeps a column, the diff is its diff view --------------------
+#
+# ``columns_hold`` (tests/conftest.py) is the one configuration in which the
+# library pptmstr is built against keeps a monospace column, so the row takes
+# this branch by its own measurement. The tests above are the branch the
+# product takes today.
+
+
+def diff_view(call: PendingApproval) -> Any:
+    return inbox._VIEWS.view(key(call, "diff"))
+
+
+def added(view: Any) -> list[str]:
+    return [
+        row.text
+        for file in view.diff.files
+        for hunk in file.hunks
+        for row in hunk.rows
+        if row.kind.value == "+"
+    ]
+
+
+def no_native_body(im: Any) -> bool:
+    return not [w for w in im.get_current_context().windows if "##body" in w.name and w.active]
+
+
+def test_where_columns_hold_a_parked_write_is_the_librarys_diff_view_no_taller_than_the_cap(
+    columns_hold: Any, said: list[str]
+) -> None:
+    """
+    The same call as ``test_a_parked_write_is_the_panes_own_rows_under_either_
+    renderer``, where the library that is running keeps a column: the rows are
+    the library's diff view of the call's texts, every one of them in it, in a
+    view that is ``_BODY_LINES`` of its own rows tall and scrolls inside itself.
+    The row's own child is not drawn.
+    """
+    im = columns_hold
+    call = write(400)
+    pane = Pane(call)
+    pane.draw(im)
+    pane.draw(im)
+
+    assert typeset.diff_adopted() and typeset.diff_draws(call)
+    view = diff_view(call)
+    assert view is not None and no_native_body(im)
+    assert len(added(view)) == 400 and added(view)[-1] == "line_399 = 399"
+    assert view.row_count > 400
+    row = typeset.diff_row_height()
+    assert view.grid.row == row and view.height_cap == inbox._BODY_LINES * row
+    tall = inbox._VIEWS.height(key(call, "diff"))
+    label = im.get_text_line_height_with_spacing()
+    assert tall is not None and tall - label <= inbox._BODY_LINES * row + 8.0
+    assert "no/such/dir/file.py  (new file)" in said, "the header row's words, above the view"
+    assert not [line for line in said if line.startswith("+line_")]
+    assert review.unset_lines(pane.state, call.id) == 0
+
+
+def test_where_columns_hold_a_row_wider_than_the_view_is_one_row_and_its_end_is_in_reach(
+    columns_hold: Any,
+) -> None:
+    im = columns_hold
+    call = wide_write(5)
+    pane = Pane(call)
+    pane.draw(im)
+    view = diff_view(call)
+    widest = max(added(view), key=len)
+    assert len(widest) == 300 and widest.endswith("Z'")
+    measure = rig.WINDOW[0]
+    assert view.content_width >= 300 * 8.0 > 2 * measure
+    assert view.height_for(measure) > view.content_height, "taller by the bar that reaches it"
+    view.scroll_x = 10**6
+    pane.draw(im)
+    assert view.scroll_x > 1500
+    assert view.content_width - view.scroll_x <= measure
+
+
+def test_where_columns_hold_a_call_with_no_texts_is_still_the_rows_own_child(
+    columns_hold: Any, said: list[str]
+) -> None:
+    """
+    A record carrying a unified string and no texts is drawn as that string: read
+    back into a model it can hold a line the diff view draws nowhere.
+    """
+    import dataclasses
+
+    diff = "said over the header\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n"
+    call = dataclasses.replace(parked("Bash", {"command": "ls"}), texts=None, diff=diff)
+    pane = Pane(call)
+    pane.draw(columns_hold)
+    assert typeset.diff_adopted() and not typeset.diff_draws(call)
+    assert diff_view(call) is None and not no_native_body(columns_hold)
+    assert [line for line in diff.splitlines() if line not in said] == []
+
+
+def test_where_columns_hold_the_prediction_is_said_before_the_path_and_not_by_the_view(
+    columns_hold: Any, said: list[str]
+) -> None:
+    call = parked("Edit", {"file_path": "no/such.py", "old_string": "a", "new_string": "b"})
+    pane = Pane(call)
+    pane.draw(columns_hold)
+    assert [line for line in said if "may not apply" in line] == ["may not apply: file not found"]
+    assert said.index("may not apply: file not found") < said.index("no/such.py")
+    assert [file.will_not_apply for file in diff_view(call).diff.files] == [""]
+
+
+@pytest.mark.parametrize("held", [False, True], ids=["own rows", "the library's view"])
+def test_a_write_over_a_file_that_is_not_text_says_so_above_the_diff(
+    request: pytest.FixtureRequest, said: list[str], tmp_path: Any, held: bool
+) -> None:
+    """
+    A Write over a binary is every line added, as a file being created is. The
+    record knows the difference, and the row says it above the diff whoever
+    draws the rows.
+    """
+    im = request.getfixturevalue("columns_hold" if held else "seam")
+    target = tmp_path / "blob.bin"
+    target.write_bytes(b"\xff\xfe\x00\x01 not text")
+    call = parked("Write", {"file_path": str(target), "content": "now text\n"})
+    pane = Pane(call)
+    pane.draw(im)
+    (line,) = inbox.shown_as_new(call.texts)
+    assert "not readable as text" in line and said.count(line) == 1
+    assert (diff_view(call) is not None) is held
+    assert ("+now text" in said) is not held
+    if held:
+        assert said.index(line) < next(n for n, text in enumerate(said) if "shown as new)" in text)
+
+
+FENCED = (
+    "Apply this before the merge.\n\n"
+    "```diff\n--- a/pool.py\n+++ b/pool.py\n@@ -1 +1 @@ def size():\n-cap = 4\n+cap = 8\n```\n\n"
+    "```diff\nAlso run the cleanup afterwards.\n"
+    "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b\n```\n\n"
+    + "".join(f"Paragraph {n} of the reasons.\n\n" for n in range(40))
+)
+"""
+A concern's body with two fenced diffs and enough prose under them to pass the
+row's cap: the first an honest diff, the second with a sentence over its header.
+"""
+
+
+@pytest.mark.parametrize("held", [False, True], ids=["own rows", "the library's view"])
+def test_every_line_of_a_fenced_diff_in_a_concern_is_set_whoever_draws_a_diff(
+    request: pytest.FixtureRequest, held: bool
+) -> None:
+    """
+    The body an approve releases can hold a diff of its own. Where the library
+    keeps a column the honest one is a diff view inside the body's document,
+    in the capped child the row scrolls, with its header lines set over it;
+    where it does not, it is the code of the document. The fence with a
+    sentence where no diff view would draw it is code either way, and no line
+    of either is missing from what the row was handed to set.
+    """
+    im = request.getfixturevalue("columns_hold" if held else "seam")
+    call = parked("mcp__pptmstr__post_concern", {"to": "lead", "subject": "s", "body": FENCED})
+    pane = Pane(call)
+    for _ in range(3):
+        pane.draw(im)
+    (view,) = inbox._VIEWS.views(key(call, "body"))
+    texts = inbox._VIEWS.texts(key(call, "body"))
+    assert inbox._VIEWS.unbuilt(key(call, "body")) == 0
+    assert review.unset_lines(pane.state, call.id) == 0
+    assert texts[0] == "Apply this before the merge."
+    sentence = "diff\nAlso run the cleanup afterwards.\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a\n+b"
+    assert sentence in texts, "code, under the word it was opened with"
+    first = "--- a/pool.py\n+++ b/pool.py\n@@ -1 +1 @@ def size():\n-cap = 4\n+cap = 8"
+    if not held:
+        assert not view.hosts and texts[1] == "diff\n" + first
+        return
+    assert list(view.hosts) == [2]
+    assert texts[1] == "--- a/pool.py\n+++ b/pool.py\n@@ -1 +1 @@ def size():"
+    hosted = view.hosted(2)
+    assert hosted.text == first + "\n" and hosted.view.origin is not None
+    assert (hosted.view.diff.added, hosted.view.diff.removed) == (1, 1)
+    child = typeset_child(im)
+    assert child.size.y <= cap(im) + 1.0 and child.scroll_max.y > 0, "capped, and it scrolls"
+
+
+def diff_view_stops(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    Make the library's diff view stop inside its draw, and refuse to be made.
+    """
+
+    def stopped(self: Any, *given: Any, **named: Any) -> None:
+        raise rig.advtext.TypesetUnavailable("imtypeset stopped: the library said no")
+
+    monkeypatch.setattr(rig.advtext.TypesetDiffView, "draw", stopped)
+    monkeypatch.setattr(rig.advtext.TypesetDiffView, "__init__", stopped)
+
+
+@pytest.mark.parametrize("first", [False, True], ids=["a view held", "a key never drawn"])
+def test_where_columns_hold_a_diff_the_library_stopped_under_cannot_be_approved_by_a_click(
+    columns_hold: Any,
+    said: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+    first: bool,
+) -> None:
+    """
+    The hazard an approval cannot have, on the branch that hands the diff to the
+    library. The library stops inside the diff view's draw, or refuses to make
+    a view for a row the cursor has just reached: the row shows a sentence
+    where the diff would be, says the body is not on screen, and a click on
+    approve sends nothing. The next frame is the row's own rows, and the click
+    lands.
+    """
+    im = columns_hold
+    call = write(5)
+    pane = Pane(call)
+    sent = _sent(pane, monkeypatch)
+    if not first:
+        pane.draw(im)
+        assert review.unset_lines(pane.state, call.id) == 0
+    clicks = request_clicks(im, monkeypatch)
+    diff_view_stops(monkeypatch)
+
+    said.clear()
+    pane.draw(im)
+    assert inbox._VIEWS.unbuilt(key(call, "diff")) == 5
+    assert pane.state.bodies[call.id]["inbox"][1] == 5
+    assert review.withheld(pane.state, call) == review.NOT_WHOLE
+    assert clicks == [True] and sent == []
+    assert inbox._NOT_ON_SCREEN in said
+    assert not [line for line in said if line.startswith("+line_")]
+
+    said.clear()
+    pane.draw(im)
+    assert not typeset.enabled(typeset.Pane.INBOX)
+    assert [line for line in said if line.startswith("+line_")], "the row's own rows"
+    assert clicks[-1] is False and sent == [call.id]
+    assert inbox._NOT_ON_SCREEN not in said
+
+
 # -- a body is on screen before it can be approved ---------------------------------
 
 
-@pytest.fixture
-def clicking_approve(monkeypatch: pytest.MonkeyPatch, seam: Any) -> list[bool]:
+def request_clicks(seam: Any, monkeypatch: pytest.MonkeyPatch) -> list[bool]:
     """
     Every ``approve`` button reports a click on every frame it is drawn enabled, as
-    ImGui would for a mouse held over it. The list has, per frame the button was
-    drawn, whether it was disabled.
+    ImGui would for a mouse held over it, from here on. The list has, per frame
+    the button was drawn, whether it was disabled.
     """
     depth: list[bool] = []
     drawn: list[bool] = []
@@ -898,6 +1132,14 @@ def clicking_approve(monkeypatch: pytest.MonkeyPatch, seam: Any) -> list[bool]:
     monkeypatch.setattr(seam, "end_disabled", end)
     monkeypatch.setattr(seam, "button", button)
     return drawn
+
+
+@pytest.fixture
+def clicking_approve(monkeypatch: pytest.MonkeyPatch, seam: Any) -> list[bool]:
+    """
+    ``request_clicks``, from the start of the test.
+    """
+    return request_clicks(seam, monkeypatch)
 
 
 def _sent(pane: Pane, monkeypatch: pytest.MonkeyPatch) -> list[str]:

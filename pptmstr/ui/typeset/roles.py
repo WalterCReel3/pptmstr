@@ -547,8 +547,9 @@ pane not named here draws with its own renderer.
 A pane is added by the change that builds its branch and shows it by a run.
 BRIEF and BOARD were, on 2026-10-12: the application under Xvfb with the fake
 fleet, each pane's cache holding the library's views of what it showed. DETAIL
-and INBOX were the same day, for their markdown: an approval's diff and every
-literal text in them stay ImGui's. CONTEXT was the same day, for the markdown
+and INBOX were the same day, for their markdown: every literal text in them
+stays ImGui's, and an approval's diff is the library's only where the library
+that is running keeps a column (``diffs.adopted``). CONTEXT was the same day, for the markdown
 runs of the log's TYPESET mode. That is every pane, and the set stays: a pane
 added to ``Pane`` is typeset from the change that names it here.
 """

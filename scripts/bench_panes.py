@@ -44,8 +44,14 @@ back to back on the same machine.
 **Which groups run through the seam.** Every pane's typeset branch is built on
 the library as it is now, and ``--typeset on`` needs the library (``make``
 exports ``IMTYPESET_LIBRARY`` and ``IMTYPESET_PYTHON`` when the built pair
-exists). An approval's diff is the pane's own rows under either setting, so an
-inbox row showing only a diff posts a 0 in ``seam`` with the flag on. Of the
+exists). An approval's diff is the library's diff view where the library that
+is running keeps a column (``typeset.diff_adopted``, a measurement) and the
+pane's own rows where it does not, which is the case on the library pptmstr is
+built against: there an inbox row showing only a diff posts a 0 in ``seam``
+with the flag on. ``--diffs always`` hands the diff to the library whatever
+was measured, and ``--ui-px 16.784`` tells the seam the UI font is that tall,
+an em of 16 in Inconsolata, where the measurement holds; a row's size column
+says who drew its diff. ``--diff-lines`` is the lengths of the parked Write. Of the
 transcript's four modes only TYPESET calls the seam; with the flag off its rows
 are WRAP under that label and say so with a 0. ``views`` is the typeset log
 alone, by how many of the library's views it holds, and is skipped with the
@@ -69,7 +75,7 @@ import os
 import statistics
 import sys
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import Any
@@ -106,6 +112,7 @@ from pptmstr.ui import (  # noqa: E402
 from pptmstr.ui.compose import ComposeState  # noqa: E402
 from pptmstr.ui.focus import FocusState, Scope  # noqa: E402
 from pptmstr.ui.transcript_pane import RenderMode, TranscriptState  # noqa: E402
+from pptmstr.ui.typeset import diffs, gate  # noqa: E402
 
 WARMUP_FRAMES = 20
 FRAME_S = 1.0 / 60.0
@@ -824,9 +831,17 @@ def _require_diff_drawn(
         raise RuntimeError("the parked call's diff was not drawn; the row measured something else")
 
 
-def bench_detail(harness: Harness, frames: int) -> list[Row]:
+def _diff_by(seam_key: bool) -> str:
+    """
+    Who drew the diff of the row just measured: whether the pane holds a diff
+    view for it.
+    """
+    return "the library's diff view" if seam_key else "the pane's own rows"
+
+
+def bench_detail(harness: Harness, frames: int, diff_lines: Sequence[int]) -> list[Row]:
     rows: list[Row] = []
-    for lines in (60, 5000):
+    for lines in diff_lines:
         snap, focus, pending = parked(write_call(lines))
         review_state = review.ReviewState()
         pane = detail.DetailState()
@@ -839,17 +854,17 @@ def bench_detail(harness: Harness, frames: int) -> list[Row]:
         ) -> None:
             detail.draw(snap, focus, review_state, pane, time.monotonic())
 
-        diff_lines = len((pending.diff or "").splitlines())
-        rows.append(
-            measure(
-                harness,
-                "detail.draw",
-                f"parked Write, {lines:,} lines",
-                f"{diff_lines:,} diff lines",
-                draw,
-                frames,
-            )
+        unified = len((pending.diff or "").splitlines())
+        row = measure(
+            harness,
+            "detail.draw",
+            f"parked Write, {lines:,} lines",
+            f"{unified:,} diff lines",
+            draw,
+            frames,
         )
+        held = any(key[1] == "diff" for key in pane.views.keys())
+        rows.append(replace(row, size=f"{row.size}, {_diff_by(held)}"))
         _require_diff_drawn(harness, review_state, pending)
 
     markdown = report_markdown()
@@ -882,7 +897,7 @@ def bench_detail(harness: Harness, frames: int) -> list[Row]:
     return rows
 
 
-def bench_inbox(harness: Harness, frames: int) -> list[Row]:
+def bench_inbox(harness: Harness, frames: int, diff_lines: Sequence[int]) -> list[Row]:
     rows: list[Row] = []
     actions = inbox.InboxActions(
         send=lambda node, text: None,
@@ -891,7 +906,7 @@ def bench_inbox(harness: Harness, frames: int) -> list[Row]:
         dismiss=lambda node: None,
         relaunch=lambda spec: None,
     )
-    for lines in (60, 5000):
+    for lines in diff_lines:
         snap, focus, pending = parked(write_call(lines))
         review_state = review.ReviewState()
         compose = ComposeState()
@@ -906,18 +921,19 @@ def bench_inbox(harness: Harness, frames: int) -> list[Row]:
         ) -> None:
             inbox.draw(snap, focus, review_state, compose, bridge, actions, time.monotonic())
 
-        diff_lines = len((pending.diff or "").splitlines())
-        rows.append(
-            measure(
-                harness,
-                "inbox.draw",
-                f"one approval expanded, Write of {lines:,} lines",
-                f"{diff_lines:,} diff lines",
-                draw,
-                frames,
-            )
+        unified = len((pending.diff or "").splitlines())
+        row = measure(
+            harness,
+            "inbox.draw",
+            f"one approval expanded, Write of {lines:,} lines",
+            f"{unified:,} diff lines",
+            draw,
+            frames,
         )
+        held = any(key[1] == "diff" for key in inbox._VIEWS.keys())
+        rows.append(replace(row, size=f"{row.size}, {_diff_by(held)}"))
         _require_diff_drawn(harness, review_state, pending)
+        inbox._VIEWS.clear()
     return rows
 
 
@@ -1124,6 +1140,25 @@ def main() -> int:
         help="which groups to run",
     )
     ap.add_argument("--json", type=Path, default=None, help="also write the rows here")
+    ap.add_argument(
+        "--diff-lines",
+        type=int,
+        nargs="+",
+        default=[60, 5000],
+        help="lines of the parked Write (detail, inbox)",
+    )
+    ap.add_argument(
+        "--diffs",
+        choices=("measured", "always", "never"),
+        default="measured",
+        help="who draws a diff: typeset.diffs.ADOPT for this run",
+    )
+    ap.add_argument(
+        "--ui-px",
+        type=float,
+        default=None,
+        help="tell the seam the UI font is this tall (16.784: an even em in Inconsolata)",
+    )
     args = ap.parse_args()
     if args.frames < 20:
         ap.error("--frames must be at least 20 for a p95 to mean anything")
@@ -1136,6 +1171,16 @@ def main() -> int:
         print("--typeset on: the seam's faces did not load, so nothing would be typeset")
         return 2
     typeset.configure(typeset=want, mono=args.mono)
+    diffs.ADOPT = args.diffs
+    if args.ui_px is not None:
+        gate._live_font_size = lambda: args.ui_px
+        typeset.roles.follow(args.ui_px)
+    # Asked here, and timed: a pane's first frame would otherwise pay it.
+    asked = time.perf_counter_ns()
+    measured = diffs.columns() if want else None
+    asking_ms = _ms(time.perf_counter_ns() - asked)
+    adopted = diffs.adopted()
+    diff_px = typeset.px(typeset.Role.DIFF)
     if typeset.enabled() != want:
         print(f"--typeset {args.typeset}: typeset.enabled() is {typeset.enabled()}")
         return 2
@@ -1156,9 +1201,9 @@ def main() -> int:
         if "prune" in args.only:
             rows += bench_prune(harness, args.prune_lines)
         if "detail" in args.only:
-            rows += bench_detail(harness, args.frames)
+            rows += bench_detail(harness, args.frames, args.diff_lines)
         if "inbox" in args.only:
-            rows += bench_inbox(harness, args.frames)
+            rows += bench_inbox(harness, args.frames, args.diff_lines)
         if {"board", "brief"} & set(args.only):
             fleet = fake_fleet()
             if "board" in args.only:
@@ -1181,6 +1226,12 @@ def main() -> int:
         f"load average (1/5/15 min) before: {load_before} | after: {_load()}\n"
         "CPU ms inside the pane's draw function; headless, nothing rasterised.\n"
     )
+    if measured is not None:
+        header += (
+            f"diffs: ADOPT {diffs.ADOPT!r}, the diff role at {diff_px:.3f} px,"
+            f" adopted {adopted}; the library {measured.why}"
+            f" (asked in {asking_ms:.2f} ms, before any frame)\n"
+        )
     print(header)
     print(render(rows))
     if args.json is not None:

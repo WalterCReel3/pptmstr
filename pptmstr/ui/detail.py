@@ -39,13 +39,17 @@ everything else is still ImGui's**, through the seam, in views held in
   or still arriving, and the prose argument of a parked call (a concern's body,
   a spawn's prompt, a plan). Prose breaks at its spaces, and text can be
   selected and copied from it.
-* **What it does not**: an approval's diff, a call's other arguments, and an
-  error. Their columns are content, and by pptmstr's measurement the library
-  does not keep a monospace column (``typeset.diffs`` has the numbers for a
-  diff). The diff is this pane's own lines; arguments and errors go through the
-  seam, which hands text that is not markdown to ImGui. An argument or an error
-  of several lines is set each line as written and the pane's child scrolls
-  sideways to a long one; one of **one** line is wrapped to the pane.
+* **What it does not**: a call's other arguments, and an error. Their columns
+  are content, and by pptmstr's measurement the library does not keep a
+  monospace column. They go through the seam, which hands text that is not
+  markdown to ImGui. An argument or an error of several lines is set each line
+  as written and the pane's child scrolls sideways to a long one; one of
+  **one** line is wrapped to the pane.
+* **An approval's diff is the library's diff view where the library that is
+  running keeps a column, and this pane's own lines where it does not**
+  (``typeset.diff_adopted``, a measurement; ``typeset.diffs`` has the numbers,
+  and on the library pptmstr is built against the answer is no). See ``_diff``
+  for what differs between the two and what may not.
 * **A body somebody wrote is read by ``typeset.prose_parts``**, the rule the inbox
   row, the board and the brief use, so a concern reads the same here and in its row.
 * **A turn still arriving is a stream**, bounded from its start. See ``_narration``.
@@ -118,6 +122,9 @@ _NARRATION_LINES = 200
 # The bound itself is for the frames in between: a frame that reads a piece costs
 # 0.7 ms with 400 lines held and 1.9 ms with 2,000, and a turn has no length limit.
 _NARRATION_STEP = 200
+# The narrowest content region in which two columns of a diff each hold a line of
+# code: below it side-by-side is two columns of horizontal scrolling.
+_SIDE_BY_SIDE_PX = 1000.0
 # The longest single line set broken at its spaces; a longer one is one run of
 # characters and is cut at the pane's edge.
 _SENTENCE_CHARS = 2000
@@ -189,6 +196,9 @@ class DetailState:
     # The one document the operator asked to have set past review.SETTLED_LINES:
     # a settled text, or a parked call's arguments.
     whole: Hashable | None = None
+    # Whether a diff the library draws is two columns, where the pane has the
+    # room to offer it.
+    side_by_side: bool = False
     # (node, published_length) of the text held in _turn_text; as _key above.
     _turn_key: tuple[NodeId, int] | None = None
     _turn_text: str = ""
@@ -643,17 +653,14 @@ def _approval(state: review.ReviewState, pane: DetailState, obligation: Approval
     # one line this body may not lose.
     if edit_differs(state, pending):
         imgui.text_colored(P.warn.vec4, _EDITED_NOTICE)
-    # The diff is this pane's own lines under either renderer: a diff's columns
-    # are content, and the library does not keep them (``typeset.diffs``).
-    # A unified string of white space holds no row and is headed as no diff.
+    # A unified string of white space holds no row and is headed as no diff,
+    # whoever would have drawn it.
     has_diff = bool(pending.diff and pending.diff.strip())
-    if has_diff:
-        assert pending.diff is not None
-        _diff(state, pending.id, pending.diff, pending.texts)
+    unset = _diff(state, pane, pending, obligation.key) if has_diff else 0
     if typeset.enabled(typeset.Pane.DETAIL):
-        unset = _typeset_arguments(pane, pending, obligation.key)
+        unset += _typeset_arguments(pane, pending, obligation.key)
     else:
-        unset = _arguments(pane, pending.raw_args, obligation.key)
+        unset += _arguments(pane, pending.raw_args, obligation.key)
     if not has_diff:
         # Stated rather than omitted, and stated last: a call with no diff is not
         # missing one, and the arguments above are the whole story for it.
@@ -693,26 +700,74 @@ def _may_not_apply(texts: Sequence[DiffText] | None) -> None:
     The gate's prediction that an edit has nowhere to land, as native lines that
     wrap at the pane's edge. **Predicts**: it is the gate's read of the file when
     the call parked, and the tool decides on the file as it is when the call runs.
+    Then each file the diff shows as new because what is there could not be
+    read (``inbox.shown_as_new``).
     """
     for reason in refusals(texts):
         imgui.text_colored(P.warn.vec4, f"may not apply: {reason}")
+    for said in inbox.shown_as_new(texts):
+        imgui.text_colored(P.warn.vec4, said)
 
 
 def _diff(
-    state: review.ReviewState, pending_id: str, diff: str, texts: Sequence[DiffText] | None
-) -> None:
-    lines = state.diff_lines.get(pending_id)
+    state: review.ReviewState, pane: DetailState, pending: PendingApproval, subject: str
+) -> int:
+    """
+    What the call would change, under one heading and the gate's prediction.
+    Answers how many of its lines the frame did not put on screen: none, unless
+    the library stopped under the diff view (``ViewCache.unbuilt``).
+
+    **Who draws the rows is the seam's answer** (``typeset.diff_adopted``, and
+    ``typeset.diff_draws`` of this call): the library's diff view where its
+    columns hold, and otherwise, and whenever the view has nothing to show,
+    this pane's own lines (``_diff_lines``). The heading and the prediction
+    are the same lines either way, said before either.
+
+    **What differs, and is meant to.** This pane's own lines are the unified
+    string, wrapped at the pane's edge, cut at ``_MAX_DIFF_LINES`` with a line
+    saying so: wrapped text is laid out again every frame. The library's view
+    is made from the call's texts, culls to the pane, and has no bound: every
+    row of the change is in it, a row is never broken, and one wider than the
+    pane is scrolled to by the view's own bar. Two columns are offered where
+    the pane is ``_SIDE_BY_SIDE_PX`` wide.
+    """
+    assert pending.diff is not None
+    lines = state.diff_lines.get(pending.id)
     if lines is None:
         # Split once per pending item, sharing the inbox's cache rather than
         # keeping a second one. A whole-file Write produces a diff as long as the
         # file, and two panes re-splitting it sixty times a second each is work
         # proportional to the change being reviewed -- backwards, since the large
         # diffs are the ones stared at longest.
-        lines = diff.splitlines() or [""]
-        state.diff_lines[pending_id] = lines
+        lines = pending.diff.splitlines() or [""]
+        state.diff_lines[pending.id] = lines
 
     widgets.section(f"diff · {len(lines):,} lines")
-    _may_not_apply(texts)
+    _may_not_apply(pending.texts)
+    if (
+        typeset.enabled(typeset.Pane.DETAIL)
+        and typeset.diff_adopted()
+        and typeset.diff_draws(pending)
+    ):
+        key = (subject, "diff")
+        roomy = imgui.get_content_region_avail().x >= _SIDE_BY_SIDE_PX
+        if roomy:
+            _, pane.side_by_side = imgui.checkbox("side by side", pane.side_by_side)
+        # The prediction is said above, from the record: the view's copy would
+        # be in a header row, which is cut at the pane's edge.
+        shown = typeset.diff(
+            pane.views, key, pending, side_by_side=roomy and pane.side_by_side, warning=False
+        )
+        if shown is not None:
+            return pane.views.unbuilt(key) or 0
+    _diff_lines(lines)
+    return 0
+
+
+def _diff_lines(lines: Sequence[str]) -> None:
+    """
+    A unified diff in ImGui's own text, a line to an item, as far as the bound.
+    """
     for line in lines[:_MAX_DIFF_LINES]:
         # text_wrapped has no coloured variant, and the wrap pos pushed by draw()
         # applies to text_colored too -- so this stays text_colored and keeps the

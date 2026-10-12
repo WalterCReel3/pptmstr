@@ -17,8 +17,8 @@ those answers live here once.
 - ``themes``: a role's face, size and leading as the library's theme, pptmstr's
   inks as its palette, and which text the library sets at all.
 - ``views``: ``ViewCache``, and the calls a pane's typeset branch makes.
-- ``diffs``: the diff model of a parked call, a view of it, and which fences
-  are honest diffs.
+- ``diffs``: the diff model of a parked call, a view of it, which fences are
+  honest diffs, and who draws a diff (``diff_adopted``).
 
 ## A pane asks first
 
@@ -40,10 +40,15 @@ log and not the one it starts in (``transcript_pane.DEFAULT_MODE``).
 **The library sets markdown, and ImGui draws text that is not markdown**
 (``themes.native``): monospace set by the library does not keep its columns, by
 pptmstr's measurement. So a literal part, ``plain()`` and a label are ImGui
-items in the chrome's font or the library's own atlas entry, and **an
-approval's diff is drawn by its pane's own renderer**: ``diff()`` sets one
-through the library's diff view, is tested, and is called by no pane
-(``diffs`` has the numbers).
+items in the chrome's font or the library's own atlas entry.
+
+**A diff is the library's where the library that is running keeps a column,
+and its pane's own renderer where it does not** (``diff_adopted``): the
+question is measured of the running library (``gate.columns``) and is false
+on the one pptmstr is built against, so today DETAIL and the inbox row draw
+an approval's diff themselves and a fenced diff is the code of its document.
+``diffs`` has the numbers, the rules an adopted view is held to, and the one
+constant that overrides the measurement (``diffs.ADOPT``).
 
 ## What a consumer must not do
 
@@ -54,7 +59,17 @@ through the library's diff view, is tested, and is called by no pane
 - Destroy an ImGui context the fonts were loaded in without ``unload()`` first.
 """
 
-from .diffs import accounted, approval_diff, diff, diff_model, diff_row_height, is_diff_fence
+from .diffs import (
+    accounted,
+    approval_diff,
+    diff,
+    diff_model,
+    diff_row_height,
+    is_diff_fence,
+)
+from .diffs import adopted as diff_adopted
+from .diffs import draws as diff_draws
+from .diffs import renderer as diff_renderer
 from .gate import (
     available,
     can_draw,
@@ -155,7 +170,10 @@ __all__ = [
     "chosen",
     "configure",
     "diff",
+    "diff_adopted",
+    "diff_draws",
     "diff_model",
+    "diff_renderer",
     "diff_row_height",
     "document",
     "enabled",

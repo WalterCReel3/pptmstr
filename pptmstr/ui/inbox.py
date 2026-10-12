@@ -33,7 +33,7 @@ from typing import assert_never
 
 from imgui_bundle import imgui
 
-from ..approval import diff_line_kind
+from ..approval import DiffText, diff_line_kind
 from ..bridge import Bridge
 from ..model import (
     AgentState,
@@ -88,7 +88,8 @@ _SUFFIX = {1: "st", 2: "nd", 3: "rd"}
 
 # The tallest an expanded approval's body gets, in lines of the UI font: the diff
 # child's height and a typeset document's cap, so a row costs the queue no more
-# under either renderer.
+# under either renderer. A diff the library draws is this many of its own rows,
+# under the lines its header says, which are set above it.
 _BODY_LINES = 24.0
 
 # The typeset views this pane holds between frames, keyed ``(obligation.key, part)``.
@@ -475,6 +476,8 @@ def _expand_approval(
         #
         for reason in refusals(pending):
             _warning(f"may not apply: {reason}")
+        for said in shown_as_new(pending.texts):
+            _warning(said)
         if typeset.enabled(typeset.Pane.INBOX):
             unset = _typeset_body(state, pending, obligation.key)
         else:
@@ -585,9 +588,9 @@ def _widest(view: Hashable, lines: Sequence[str]) -> float:
 def _diff_rows(lines: Sequence[str], view: Hashable) -> None:
     """
     A unified diff a line to a row in ImGui's own text, in a child that fits it
-    up to ``_BODY_LINES``. **Drawn under either renderer**: a diff's columns are
-    content, and the typesetting library does not keep them (``typeset.diffs``
-    has the measurement).
+    up to ``_BODY_LINES``. **This pane's own renderer of a diff**: drawn with
+    typeset text off, and with it on wherever the library's diff view is not
+    (``_typeset_body``).
 
     A short diff that still needs scrolling is the thing that makes an operator
     stop reading them, so the child is no taller than its lines.
@@ -803,6 +806,25 @@ def refusals(pending: PendingApproval) -> tuple[str, ...]:
     return tuple(dict.fromkeys(reason for reason in reasons if reason))
 
 
+def shown_as_new(texts: Sequence[DiffText] | None) -> tuple[str, ...]:
+    """
+    One line for each file a call would replace whose content could not be read
+    as text -- a binary, a directory, no permission -- and whose diff is
+    therefore every line added, exactly as for a file being created.
+
+    Said by the row and by DETAIL above the diff, whoever draws it: the unified
+    string cannot tell the two apart, and the library's file header, which
+    can, is cut at its view's edge. An Edit of such a file is already said, as
+    a reason it may not apply.
+    """
+    return tuple(
+        f"{part.label or '(no path)'}: this file exists and is not readable as text - "
+        "the diff shows it as new"
+        for part in texts or ()
+        if part.unreadable and part.will_not_apply is None
+    )
+
+
 def _typeset_body(state: review.ReviewState, pending: PendingApproval, key: str) -> int:
     """
     What the call would do, with its prose set through the seam: its diff, or its
@@ -811,10 +833,16 @@ def _typeset_body(state: review.ReviewState, pending: PendingApproval, key: str)
     what the library stopped short of (``ViewCache.unbuilt``), and the end of a
     body longer than one frame should set unasked (``_unset_tail``).
 
-    **The diff is this pane's own rows** (``_diff_rows``), as it is without the
-    library. **Arguments are literal text**, which the seam hands to ImGui.
-    **Only a description's prose is set by the library**: a concern's body, a
-    task's detail, a spawn's prompt, a plan.
+    **The diff is the library's diff view where the library that is running
+    keeps a column** (``typeset.diff_adopted``, a measurement, and
+    ``typeset.diff_draws`` of this call), no taller than ``_BODY_LINES`` of its
+    own rows, scrolling inside itself past that and sideways to a long row by
+    its own bar. **Otherwise, and whenever that view has nothing to show, it
+    is this pane's own rows** (``_diff_rows``), as it is without the library.
+    A diff the library stopped under is counted as not on screen, like a body.
+    **Arguments are literal text**, which the seam hands to ImGui. **A
+    description's prose is set by the library**: a concern's body, a task's
+    detail, a spawn's prompt, a plan.
 
     **No child of this pane's own around a document.** A capped one opens its
     own when it is taller than the cap, and a second scrolling child around
@@ -831,7 +859,21 @@ def _typeset_body(state: review.ReviewState, pending: PendingApproval, key: str)
 
     lines = _diff_lines(state, pending)
     if lines:
-        _diff_rows(lines, (key, "diff"))
+        view = (key, "diff")
+        if typeset.diff_adopted() and typeset.diff_draws(pending):
+            # The prediction is the row's to say, above: the view's copy would
+            # be in a header row, which is cut at the row's edge.
+            shown = typeset.diff(
+                _VIEWS,
+                view,
+                pending,
+                height_cap=_BODY_LINES * typeset.diff_row_height(),
+                width=wide,
+                warning=False,
+            )
+            if shown is not None:
+                return _VIEWS.unbuilt(view) or 0
+        _diff_rows(lines, view)
         return 0
     described = describe(pending)
     if described is None:

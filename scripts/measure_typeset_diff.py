@@ -12,10 +12,13 @@ measures and decides nothing, and says nothing about how anything looks.
 ## The window
 
 That script's: the chrome's Inconsolata as ``Fonts[0]`` through hello_imgui,
-then ``typesetter.load_fonts()``. One page a pixel height (14, 16, 18, 20). A
-page is one ``TypesetDiffView`` of one file whose every row is added --
-that script's seven code rows, the 40-character ruler and the 74-character
-line among them -- unified, 1100 px wide, sized with ``pixel_height``.
+then the library's fonts through pptmstr's seam (``typeset.load_fonts``), as
+the application loads them. One page a size: a pixel height (``--px``, default
+14, 16, 18, 20) or an em in pixels (``--em``; Inconsolata's advance is half an
+em, so an even em is a whole-pixel column). A page is one ``TypesetDiffView``
+of one file whose every row is added -- that script's seven code rows, the
+40-character ruler and the 74-character line among them -- unified, 1100 px
+wide, sized with ``pixel_height``.
 
 ## What is read, and from what
 
@@ -33,20 +36,32 @@ Nothing is read from pixels.
             cumulative baked advances (that script's control shows ImGui's
             quads are there).
     hit     ``hit_test`` of the view's code document (``native_documents``,
-            the second), at the centre of a drawn glyph's quad on its row: the
-            character it answers, less the one answered at the row's first
-            glyph. Where that is not the glyph's own index, a press on a glyph
-            lands on another character.
+            the second) on its row. The library answers the nearest position
+            *between* characters, so two points are asked for each drawn
+            glyph, a quarter and three quarters of the baked advance from its
+            pen: the first must answer the position before the character and
+            the second the one after (past a row's last character the
+            library answers the start of the next line, which the view reads
+            as the end of this one, and so does this). Where either does not,
+            a press on that glyph lands on another character. The count at the centre of each
+            quad is printed beside it and is not a verdict: a quad's centre is
+            left or right of its cell's by the glyph's bearing, so it answers
+            either neighbour on a row whose columns are exact.
+    seam    ``pptmstr.ui.typeset.gate.columns`` for the page's theme: the
+            answer the panes switch on, from one row set with no window. The
+            two are printed side by side; this script decides nothing.
 
 ## Running it
 
     scripts/xvfb_shot.sh -- .venv/bin/python scripts/measure_typeset_diff.py
+    scripts/xvfb_shot.sh -- .venv/bin/python scripts/measure_typeset_diff.py --em 14,16,18,20
 
 Exit status 1 when the library is not drawing; 2 when a page could not be read.
 """
 
 from __future__ import annotations
 
+import argparse
 import os
 import subprocess
 import sys
@@ -56,6 +71,7 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 PAIR = ROOT / ".deps" / "imtypeset"
 ASSETS = ROOT / "pptmstr" / "assets"
 CHROME_PX = 16.0
@@ -153,7 +169,8 @@ def code_pens(
     rows = [row for row in range(view.row_count) if view.row_info(row).kind not in HEADER_ROWS]
     if len(rows) != len(CODE_ROWS):
         raise Unread(f"{len(rows)} rows of code for {len(CODE_ROWS)} lines")
-    for size in (px, px - 1.0, px + 1.0, px - 2.0, px + 2.0):
+    whole_px = float(int(px + 0.5))
+    for size in (whole_px, whole_px - 1.0, whole_px + 1.0, whole_px - 2.0, whole_px + 2.0):
         baked = font.get_font_baked(float(size))
         out: dict[str, list[tuple[int, float, tuple[float, ...]]]] = {}
         whole = True
@@ -181,7 +198,17 @@ def code_pens(
     raise Unread("no baked size of the library's code entry accounts for every quad of the rows")
 
 
+def _lengths(text: str) -> tuple[float, ...]:
+    return tuple(float(each) for each in text.split(",") if each.strip())
+
+
 def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("--px", type=_lengths, default=None, help="pixel heights, comma separated")
+    ap.add_argument("--em", type=_lengths, default=(), help="em sizes in pixels, comma separated")
+    args = ap.parse_args()
+    if args.px is None:
+        args.px = () if args.em else SIZES
     os.environ.setdefault("IMTYPESET_LIBRARY", str(PAIR / "libimtypeset_bundle.so"))
     os.environ.setdefault("IMTYPESET_PYTHON", str(PAIR / "pysnap"))
 
@@ -194,7 +221,7 @@ def main() -> int:
         Theme,
         TypesetDiffView,
         TypesetUnavailable,
-        register_font,
+        em_size_for_pixel_height,
         typesetter,
     )
 
@@ -206,6 +233,12 @@ def main() -> int:
     from advtext.description import FACE_ROLES
     from imgui_bundle import hello_imgui, imgui, immapp
 
+    from pptmstr.ui import typeset
+    from pptmstr.ui.typeset import gate
+
+    per_em = em_size_for_pixel_height(Face.CODE, 1.0)
+    pages = [(f"em {em:g} px", em / per_em) for em in args.em]
+    pages += [(f"{px:g} px", px) for px in args.px]
     before = uptime()
     state: dict[str, Any] = {"page": 0, "shown": 0, "view": None}
     report: list[str] = []
@@ -220,14 +253,13 @@ def main() -> int:
         state["chrome"] = hello_imgui.load_font_ttf_with_font_awesome_icons(
             "fonts/Inconsolata-Medium.ttf", CHROME_PX
         )
-        register_font(Face.CODE_BOLD, ASSETS / "fonts" / "Inconsolata-Bold.ttf")
-        typesetter.load_fonts()
+        typeset.load_fonts(ASSETS / "fonts" / "Inconsolata-Bold.ttf")
 
     def gui() -> None:
-        if failed or state["page"] >= len(SIZES):
+        if failed or state["page"] >= len(pages):
             hello_imgui.get_runner_params().app_shall_exit = True
             return
-        px = SIZES[state["page"]]
+        name, px = pages[state["page"]]
         io = imgui.get_io()
         imgui.set_next_window_pos(imgui.ImVec2(0.0, 0.0))
         imgui.set_next_window_size(io.display_size)
@@ -238,11 +270,9 @@ def main() -> int:
                 failed.append(typesetter.reason() or typesetter.trouble() or "fonts not loaded")
                 return
             if state["view"] is None:
+                state["theme"] = Theme.at_pixel_height(px, faces=Faces.mono(), align=Align.LEFT)
                 state["view"] = TypesetDiffView(
-                    model,
-                    Theme.at_pixel_height(px, faces=Faces.mono(), align=Align.LEFT),
-                    pixel_height=px,
-                    palette=DARK_PALETTE,
+                    model, state["theme"], pixel_height=px, palette=DARK_PALETTE
                 )
                 state["shown"] = 0
             view = state["view"]
@@ -259,11 +289,17 @@ def main() -> int:
             pens, baked_px = code_pens(view, glyph_quads(draw_list, start, stop, white), own, px)
             cell = float(view.grid.cell)
             pitch = float(view.grid.row)
-            baked = float(state["chrome"].get_font_baked(px).get_char_advance(ord("0")))
+            baked = float(state["chrome"].get_font_baked(baked_px).get_char_advance(ord("0")))
             report.append(
-                f"mono {px:g} px: grid.cell {cell:.3f}, grid.row {pitch:g}; rows drawn from the "
-                f"library's CODE entry baked at {baked_px:g} px; the chrome font's advance at "
-                f"{px:g} px is {baked:g}"
+                f"mono {name} (pixel height {px:.3f}): grid.cell {cell:.6f}, grid.row {pitch:g}; "
+                f"rows drawn from the library's CODE entry baked at {baked_px:g} px; the chrome "
+                f"font's advance at {baked_px:g} px is {baked:g}"
+            )
+            seam = gate.columns(state["theme"])
+            report.append(
+                f"  the seam's answer for this theme: holds {seam.holds} (cell {seam.cell:.6f}, "
+                f"baked {seam.baked:g} at {seam.size:g} px, {seam.off} of {seam.glyphs} glyphs "
+                f"off their column, {seam.mishit} mishit): {seam.why}"
             )
             steps = [
                 b[1] - a[1] for row in pens.values() for a, b in pairwise(row) if b[0] == a[0] + 1
@@ -285,7 +321,7 @@ def main() -> int:
                 row = pens[text]
                 at = {index: pen for index, pen, _ in row}
                 first = row[0][1]
-                native = chrome_pens(state["chrome"], px, first, text)
+                native = chrome_pens(state["chrome"], baked_px, first, text)
                 marks = [k for k in MARKS if k <= len(text)]
                 report.append(
                     f"  the {len(text)}-character row: first pen to last pen "
@@ -308,27 +344,41 @@ def main() -> int:
                 middle = (row[0][2][1] + row[0][2][3]) / 2.0 - view.origin[1]
                 base = int(code.hit_test((0.5, middle)).position[1])
                 wrong = []
-                for index, _, quad in row:
+                centred = 0
+                for index, pen, quad in row:
                     x = (quad[0] + quad[2]) / 2.0 - first
-                    hit = int(code.hit_test((x, middle)).position[1]) - base
-                    if hit != index:
-                        wrong.append((index, hit))
-                worst = max(wrong, key=lambda pair: abs(pair[1] - pair[0]), default=None)
+                    centred += int(code.hit_test((x, middle)).position[1]) - base != index
+                    left = int(code.hit_test((pen - first + 0.25 * baked, middle)).position[1])
+                    right = int(code.hit_test((pen - first + 0.75 * baked, middle)).position[1])
+                    if index == len(text) - 1:
+                        # A point at a line's end answers the start of the next
+                        # line, which the view reads as the end of this one.
+                        right = min(right, base + index + 1)
+                    if (left - base, right - base) != (index, index + 1):
+                        wrong.append((index, left - base, right - base))
+                worst = max(
+                    wrong,
+                    key=lambda found: abs(found[1] - found[0]) + abs(found[2] - found[0] - 1),
+                    default=None,
+                )
                 report.append(
-                    f"     hit_test at the centre of each drawn glyph: {len(wrong)} of {len(row)} "
-                    f"answer another character"
+                    f"     hit_test a quarter and three quarters into each drawn glyph: "
+                    f"{len(wrong)} of {len(row)} land on another character"
                     + (
-                        f"; worst, glyph {worst[0] + 1} answers character {worst[1] + 1}"
+                        f"; worst, character {worst[0]} (from 0) answers positions "
+                        f"{worst[1]} and {worst[2]} for {worst[0]} and {worst[0] + 1}"
                         if worst
                         else ""
                     )
+                    + f"  (at the centre of each quad, {centred} answer the position after: "
+                    f"not a verdict)"
                 )
             report.append("")
             view.close()
             state["view"] = None
             state["page"] += 1
         except (Unread, TypesetUnavailable) as exc:
-            failed.append(f"mono {px:g} px: {exc}")
+            failed.append(f"mono {name}: {exc}")
         finally:
             imgui.end()
 
@@ -341,7 +391,7 @@ def main() -> int:
     params.ini_disable = True
     params.callbacks.load_additional_fonts = load_fonts
     params.callbacks.show_gui = gui
-    params.callbacks.before_exit = typesetter.unload
+    params.callbacks.before_exit = typeset.unload
     immapp.run(params)
 
     print("measure_typeset_diff: positions and counts from the draw list; no pixel was read")

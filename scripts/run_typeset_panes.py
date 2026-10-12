@@ -32,6 +32,14 @@ looked at the pictures unless they say so.**
 ``typeset`` is the log's markdown runs through the library, and with the
 library absent the pane's own wrapped lines.
 
+``--diffs`` sets who draws a diff for the run (``typeset.diffs.ADOPT``:
+``measured``, which is the product's, ``always`` or ``never``). An approval's
+diff is counted on both sides: ``typeset.diff`` and the library's
+``TypesetDiffView`` where the library drew it, ``detail._diff_lines`` and
+``inbox._diff_rows`` where the pane did. The report says what was measured of
+the library's columns, in which frame the measurement was taken (0: at the
+font load, before any frame), and what ``diff_adopted`` answered on each frame.
+
 The library is used when ``IMTYPESET_LIBRARY`` and ``IMTYPESET_PYTHON`` name the
 built pair (``make typeset-env`` prints them) and not otherwise; the report says
 which, and the sentence the Text menu would show.
@@ -42,6 +50,8 @@ Usage:
         --context typeset --out shots/seam3-with
     scripts/xvfb_shot.sh -- env -u IMTYPESET_LIBRARY -u IMTYPESET_PYTHON \\
         .venv/bin/python scripts/run_typeset_panes.py --out shots/seam2-without
+    scripts/xvfb_shot.sh -- .venv/bin/python scripts/run_typeset_panes.py \\
+        --diffs always --out shots/diffs-always
 """
 
 from __future__ import annotations
@@ -90,6 +100,12 @@ def main() -> int:
         default=None,
         help="the mode the context log starts in, and bring the log to the front",
     )
+    ap.add_argument(
+        "--diffs",
+        choices=("measured", "always", "never"),
+        default="measured",
+        help="who draws a diff: typeset.diffs.ADOPT for this run",
+    )
     ap.add_argument("--argv", nargs=argparse.REMAINDER, default=[])
     args = ap.parse_args()
 
@@ -98,8 +114,28 @@ def main() -> int:
     from pptmstr import app as pptmstr_app
     from pptmstr.ui import detail, inbox, rich_pane, transcript_pane, typeset
     from pptmstr.ui.focus import Scope
-    from pptmstr.ui.typeset import views
+    from pptmstr.ui.typeset import diffs, gate, views
 
+    diffs.ADOPT = args.diffs
+    measurements: list[str] = []
+    real_measure = gate._measured_columns
+
+    def measuring(theme: Any) -> Any:
+        context = imgui.get_current_context()
+        frame = imgui.get_frame_count() if context is not None else -1
+        try:
+            found = real_measure(theme)
+        except Exception as failure:
+            measurements.append(f"frame {frame}: raised {type(failure).__name__}: {failure}")
+            raise
+        measurements.append(
+            f"frame {frame}: holds {found.holds}, cell {found.cell:.6f}, baked {found.baked:g} "
+            f"at {found.size:g} px, {found.off} of {found.glyphs} glyphs off their column, "
+            f"{found.mishit} mishit"
+        )
+        return found
+
+    gate._measured_columns = measuring  # type: ignore[assignment]
     seam: Counter[str] = Counter()
     library: Counter[str] = Counter()
     own: Counter[str] = Counter()
@@ -107,7 +143,7 @@ def main() -> int:
         counted(typeset, name, seam, name, True)
     counted(views.Stream, "draw", seam, "stream", True)
     for owner, name, label in (
-        (detail, "_diff", "detail._diff"),
+        (detail, "_diff_lines", "detail._diff_lines"),
         (detail, "_arguments", "detail._arguments"),
         (inbox, "_diff_rows", "inbox._diff_rows"),
         (inbox, "_native_arguments", "inbox._native_arguments"),
@@ -174,6 +210,7 @@ def main() -> int:
         return f"{what}, {'a' if record.deliverable else 'no'} deliverable"
 
     enabled: Counter[str] = Counter()
+    adopted: Counter[str] = Counter()
     real_run = immapp.run
 
     def patched_run(runner: Any, *rest: Any) -> Any:
@@ -185,6 +222,8 @@ def main() -> int:
                 user_before()
             for pane in typeset.Pane:
                 enabled[pane.name] += bool(typeset.enabled(pane))
+            adopted[str(typeset.diff_adopted())] += 1
+            handed["diffs"] = typeset.diff_renderer() or "(none: not typeset)"
             if counter["n"] % args.step == args.step - 1:
                 stop = counter["n"] // args.step
                 out = args.out / f"stop-{stop}.png"
@@ -237,6 +276,12 @@ def main() -> int:
         "  frames each pane's typeset branch was on, of "
         f"{counter['n']}: {dict(sorted(enabled.items()))}"
     )
+    print(
+        f"  diffs.ADOPT {diffs.ADOPT!r}; diff_adopted() by frame: {dict(sorted(adopted.items()))}"
+    )
+    print(f"  the sentence about diffs at the last frame: {handed.get('diffs', 'not read')}")
+    for taken in measurements or ["none taken"]:
+        print(f"  the library's columns, measured: {taken}")
     print(f"  seam calls, by caller: {dict(sorted(seam.items())) or 'none'}")
     print(f"  the library's views drawn: {dict(sorted(library.items())) or 'none'}")
     print(f"  the panes' own renderers: {dict(sorted(own.items())) or 'none'}")

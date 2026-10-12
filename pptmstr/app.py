@@ -720,7 +720,9 @@ def _menus(state: AppState) -> None:
         )
         if clicked:
             _switch_typeset(state, typeset_on=not state.settings.typeset)
-        reason = typeset.unavailable_reason()
+        # One sentence: why text is not typeset, or, where it is, who draws a
+        # diff and by what measurement of the library that is running.
+        reason = typeset.unavailable_reason() or typeset.diff_renderer()
         if reason is not None:
             imgui.text_disabled(f"  {reason}")
         imgui.separator()
