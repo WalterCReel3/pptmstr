@@ -791,6 +791,21 @@ the loader skips `FT_Activate_Size` when a remembered `ImFontBaked` pointer
 equals the current one, while the atlas compacts its baked pool by `memcpy`.
 That the user's pictures show this defect is an inference from shape.
 
+**Since (pptmstr commit `d096838`):** the cause no longer rests on reading. A
+test with no window and no library builds the sequence from the reading alone
+(one discarded size ahead of two adjacent sizes of one font, the first of
+them last activated) and gets 16 of 16 later glyphs wrong, each exactly the
+other size's glyph; the same when the library's own view loads the glyphs.
+Read through a summarising fetch on 2026-10-12, `imgui_freetype.cpp` at
+ocornut's `master` and `docking` and at `pthom/imgui`'s `imgui_bundle` branch
+still compares the `ImFontBaked` pointer, and no issue was found for it; it
+is the user's to file. pptmstr now marks every baked size on the atlas used
+before each frame, and lets all of them go at once when the fonts, the UI
+size or the framebuffer scale change (87 µs a frame for ten sizes at load
+17 to 19): 0 wrong glyphs where there were 7 of 16. One thing that bears on
+a host of yours: **a measurement or probe that bakes a size nothing later
+draws is what sets the defect up** — pptmstr's own load-time column check did.
+
 | # | request | why | state |
 |---|---|---|---|
 | P36 | **A notice to carry to imtypeset, not a change asked of either library**: the library draws one face at many sizes and its glyphs come through the same loader, so a typeset glyph can be another size's bitmap with that size's advance, laid out at the right size. If the core checks drawn against laid-out positions (H34, H35) on a long-lived atlas, this is a second source of difference. | Measured as above. pptmstr is guarding it on the host side (every baked size it draws is touched each frame so ImGui discards none: 0 changed glyphs in 6 runs against 7 of 16 without); the reproduction is library-free and is the user's to file upstream. | open |
