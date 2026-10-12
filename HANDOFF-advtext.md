@@ -425,6 +425,77 @@ requests the trial met are closed.
 advtext asks, under P21, for pptmstr's probe at an **em** of 16 where the
 file's advance is exactly 8 px. That run is part of the trial.
 
+### Trial of advtext `3428142` beside the pin (2026-10-12)
+
+By pptmstr's builder, an agent: a clean clone of `3428142` first on the path
+for its own runs, imtypeset `c9f8902` (stand-in headers; `3428142`'s
+`imtypeset.ref` names the same commit), `imgui-bundle` 1.92.900. Windows
+under Xvfb and llvmpipe for the probe and P18 (load 4.7 to 6.5, and 0.8);
+headless ImGui frames for the rest (load 0.7 to 1.2). Positions and counts;
+nobody looked at a picture. `advtext.ref` did not move.
+
+**"Met by trial" is not "closed".** A request closes when the commit is on
+GitHub, the pin moves, and pptmstr's own seam uses the name.
+
+| # | by trial | what was run, and the numbers |
+|---|---|---|
+| P1 | met | `kind()`: variable unset NOT_INSTALLED; library file or package missing, or a wrong wheel first on the path, REFUSED with a sentence; context destroyed under a view, or a non-font file registered, FAILED; `unsupported(why)` UNSUPPORTED. Not run: the wheel replaced in place at the same path. |
+| P2 | met | `verdict()` on the pair: ready in 173 ms with neither `imtypeset` nor `imgui_bundle` loaded into the asker; a refused verdict did not stop a later `module()`. `python -m advtext.typesetter`: exit 0 / 3 / 4 for pair / nothing / missing file, 183 to 203 ms with the pair. With `sys.frozen` set: `unchecked`. |
+| P3 | met for missing names | A package copy with `Document.set_table_columns` and `font_atlas_index` deleted is refused with a sentence naming both; a view raises `TypesetUnavailable`, not `AttributeError`. A name whose meaning changed was not tried. |
+| P7 | partly | `ReaderOptions` with all four fields, on a settled view and on a stream fed 1 and 5 characters a frame: `a <b>x</b> and List<String>`, `rm **/*.py and t/**/*.md`, an unclosed `<!--` with two paragraphs after it, a link's destination and an image all come out whole, and emphasis is still emphasis. **Not met: a fence's info string is drawn nowhere** (P27 stands). |
+| P8 | met through `MarkdownCode`; see P28 | Host-made blocks draw and mix with parsed ones; an unknown object, a `str` in a list, `None`, a `dict` are each a `TypeError` naming the block, and the view is unchanged. |
+| P11 | met | `inline_code_scale` and `inline_code_step`: a 16-character span 109.226 px unscaled, 122.021 scaled to the chrome's height; the line stayed 18.432 px. |
+| P12 | met for grow | A 400-character fenced line in a 300 px pane: wrap 14 lines; clip 2 lines and no width; grow 2 lines, `content_width` 3065.8, the window's `scroll_max_x` 2781, prose beside it still wrapped. The same for a host block, a stream view, and a switch on a live view. |
+| P13 | partly, as advtext said | One block: a fenced `tree` listing steps 19.07 / 20.59 / 22.88 without the flag and 19.07 every line with it. Across thirty paragraphs: 18.43 inside a block and 25.94 between blocks, and nothing on the view answers "the foot of the last whole line above y", so pptmstr's capped view is not met. |
+| P14 | met as a name | `typesetter.font(face)` is the same `ImFont` as the atlas-index route for PROSE, CODE, CODE_BOLD. |
+| P16 | met | `TypesetDiffView.headers(width)`: `fits`, `text_fits`, `warning`, `text` as pptmstr's rule needs them; before a draw `fits` is `None`. Not run through pptmstr's own code. |
+| P18 | met | Two real disables in one process and a real window (a non-font file; the library's context destroyed under open views): `reset()` then `load_fonts()` and a view kept from before and one made after both drew again. Seven more atlas fonts per load (P17). |
+| P19 | partly, as advtext said | pptmstr's table: settled natural, streamed whole and streamed by threes agree to 0.000 px. A table with bold, code and a link streamed by threes ends 54.74 px wider than the settled view; `set_table_columns` with the stream's widths closes it. |
+
+pptmstr's seam tests, unchanged, against `3428142` with the pair: 457 passed,
+1 failed (the guard that the imported advtext is the pinned commit, which is
+the trial itself), 187 skipped, 23 strict xfails and no unexpected pass; the
+same as on `38f5fac` otherwise. The three reaches pptmstr makes
+(`markdown_rules._parser`, `typesetter.FACE_ROLES`, `font_atlas_index`) all
+still exist there, so the move is not forced and can follow the push.
+
+**The probe at an em, as advtext asked under P21** (`--em`, commit `3ca5f24`;
+both advtext commits give identical output to the digit):
+
+| mono | em 14 | em 16 | em 18 | em 20 | pixel height 16 |
+|---|---|---|---|---|---|
+| the library's entry is baked at | 15 px | 17 px | 19 px | 21 px | 16 px |
+| advance laid out / baked / chrome's at that number | 7.000 / 7 / 7 | 8.000 / 8 / 8 | 9.000 / 9 / 9 | 10.000 / 10 / 10 | 7.626 / 8 / 8 |
+| R1 runs inside a fenced row, drawn less laid out | 0.00 | 0.00 | 0.00 | 0.00 | −6.29 to +2.24 |
+| R2 code steps equal to the baked advance | 158 of 158 | 158 of 158 | 158 of 158 | 158 of 158 | 92 of 158 |
+| R4 distinct steps; worst row disagreement | 7; 0 | 8; 0 | 9; 0 | 10; 0 | 7 and 8; 13 px |
+| R5 pen less chrome's at characters 10, 20, 40 | 0, 0, 0 | 0, 0, 0 | 0, 0, 0 | 0, 0, 0 | −9, −15, −15 |
+| R3 word spaces, px | 7 ×52, 9 ×1 | 8 ×50, 11 ×1 | 9 ×50 | 10 ×49, 13 ×1 | 7 ×47, 8 ×4, 10 ×1 |
+| fenced line pitch laid out; drawn | 17.5; 17 and 18 | 20; 20 | 22.5; 22 and 23 | 25; 25 | 19.066; 19 and 20 |
+| bitmap of `0`, typeset / chrome | 7×9 / 6×9 | 8×11 / 7×9 | 9×12 / 8×11 | 8×12 / 9×12 | 7×9 / 7×9 |
+
+- **At an even em R1, R2, R4, R5 and R6 hold exactly**; advtext's figure is
+  confirmed in pptmstr's window.
+- **At an odd em (13, 15, 17; run on `3428142`) they fail** as at a pixel
+  height: two step values, rows 17 px apart at a column, the 40th character
+  19 px from chrome's. Inconsolata's advance is half an em. pptmstr's role
+  sizes step by whole pixels, −2 to +4, so half of them are odd.
+- **What an even em costs**: at em 16 the glyphs are the 17 px bake (a `0` of
+  8×11 against the chrome's 7×9 at 16) on a 20 px line against the chrome's
+  16. "Lines up with ImGui at the same pixel height" (R5) is then true of the
+  columns and not of the glyphs.
+- **P23 is not an effect of size**: one space is laid out at 4/3 width at em
+  14, 16 and 20 too.
+
+So sizing monospace roles by even em is a way for pptmstr to have columns
+today, at the price of larger code than the chrome beside it. **Not adopted**:
+it changes the size the operator chose and is the user's to weigh (recorded
+under "Agent decisions"); P21 stands as asked.
+
+| # | request | the measurement behind it | state |
+|---|---|---|---|
+| P28 | **A host-made `MarkdownText` is drawn with the whitespace `texts` says it has**, or says that it will not be. | By trial at `3428142`: `a   b    c` in a host `MarkdownText`, `hard_breaks=True` or not, is drawn at two-cell steps and copied as `a b c`, tabs dropped, while `view.texts` still shows every space. A test that asserts on `texts` passes with the screen wrong. `MarkdownCode` keeps every character, so pptmstr's literal text will go in as that; a literal part in a proportional face has no way in that keeps its spaces. | open |
+
 ## Work in hand
 
 - **The seam**, now the package `pptmstr/ui/typeset/` on `advtext.typesetter`
@@ -443,3 +514,6 @@ file's advance is exactly 8 px. That run is part of the trial.
 - This worktree keeps its composite `.venv` (a real one is blocked on
   network); the pinned advtext clone replaces the live checkout on its path.
 - pptmstr keeps every one of its own renderers through this adoption (P6).
+- Monospace roles are not moved to an even em to buy columns (the trial under
+  P21): it would set code larger than the chrome, against the sizes the
+  operator configured. Offered to the user as an option, not taken.
