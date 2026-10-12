@@ -713,6 +713,67 @@ followed (pptmstr's builder, 2026-10-12, commit `029cbc8`, advtext `38f5fac`).
 | P32 | **A reader option for backslash escapes set as written**, and a supported way for a host to mark punctuation it wants taken literally. Belongs with P7. | By a run, settled and streamed: `C:\_work\*.log` was set as `C:_work*.log`, `foo\.py` as `foo.py`, `\\server` as `\server`. An approver reading a path or a regex in a concern must see the backslashes. pptmstr now replaces the reader's `escape` rule in its private reach, and, because its own shaping used a backslash to protect punctuation, marks that punctuation with U+FDD0 instead: an in-band mark it would rather not own. Underscores were checked at the same time and are set as written (`__main__.py`, `__all__`). Not reached: `\|` in a table cell, a backslash in a link's destination. | open |
 | P33 | **`reset()` should not need the environment it was first given.** | pptmstr finds its own checkout's library, sets the two variables for its process, asks `typesetter.module()` once, and then removes them, because every agent session it launches would otherwise inherit them and run another worktree's tests on this checkout's library (reproduced: a child process had both). Read, not run: advtext asks the variables again when its "tried" state is reset, so a "try again" (P18) after that would find no library. Either the route taken is remembered across a reset, or a host can hand the pair to `module()` without the environment. | open |
 
+### Trial of the heads beside the pins (2026-10-12, 08:32 to 08:45)
+
+By pptmstr's builder, an agent: advtext `35c6e59` and imtypeset `2fd705e`
+(local tag `v0.3.0`) built into a scratch directory from `file://`
+repositories, found by the environment variables, **stand-in headers**;
+pptmstr's tree at `a28d6e1` unchanged, from a clean export. Xvfb and llvmpipe
+for the probes (load 3 to 6), headless for the suites (load 2 to 15).
+Positions and counts; nobody looked at a picture. No pin moved. Neither
+commit is on GitHub (the lead fetched the branch page on 2026-10-12: its
+head is `38f5fac`, and imtypeset's tags page is empty).
+
+- **Monospace columns and hit tests are the same at the heads as at the pins,
+  to the digit**, in a fence and in `TypesetDiffView`, at every pixel height
+  from 14 to 20: at 16, steps of 7 and 8 px, rows 13 px apart at a column, the
+  40th character at 297 against ImGui's 312, a hit test at a drawn glyph
+  answering another character for 40 of 64 glyphs of a 74-character diff row.
+  At 15, 17 and 19 px the long steps come first and glyphs stand right of
+  their rectangles (up to +9.35 px), and nearly every hit test answers a
+  neighbour (62, 64 and 61 of 64). **No option for layout from baked advances
+  exists in either commit** (H34, H35 in progress at imtypeset, uncommitted).
+  So P21 and P22 stand, and pptmstr's diff view stays behind its measured
+  check.
+- **P23 is met at the head**: the one space laid out at 4/3 width is gone.
+- **pptmstr's suite against the head pair: 11 failed**, 3541 passed, 24 strict
+  xfails unchanged, none turned. None of the 11 is a regression of yours:
+  seven are requests met and held here by a plain assertion that the old
+  behaviour holds (P29 a tab is now a tab, five cases; P24 the library now
+  tells two ImGui contexts apart; P1 `kind()` exists), and four are pptmstr's
+  own test doubles and inference meeting `kind()`, P24 and themes sized from
+  the library's `font_metrics` (P25). The application walked 720 frames with
+  the typeset branch on in all five panes, exit 0, with identical draw counts.
+- **Met by run through pptmstr's own code**: P33 (after pptmstr clears the
+  variables, `reset()` then `module()` loads again, "remembered", and a child
+  inherits neither); P14 (`typesetter.font` is the same `ImFont` as the atlas
+  index for four faces); P30 half (400 views with nothing resting: 11.7 to
+  12.9 ms a frame against 21.4 to 24.3 at the pin; pptmstr keeps its resting,
+  1.8 to 2.1 ms on both).
+- **`ReaderOptions` against pptmstr's reach**: seven of nine sample strings
+  agree, settled and a character at a time. The two that do not are P35
+  below, and they are what stops the private reach being deleted at the bump.
+- **The build**: `v0.3.0`'s script no longer falls back to stand-in headers;
+  it fetched `pthom/imgui` from GitHub and failed here (no network). It built
+  only with `IMTYPESET_BUNDLE_HEADERS=stand-in`. pptmstr's `make deps` will
+  need that said in its environment, or a reachable fork, when the pin moves.
+
+| # | request | the measurement behind it | state |
+|---|---|---|---|
+| P35 | **Two reader gaps beside `ReaderOptions`**: an entity set as written (`R&amp;D` in the source is five characters on screen, not `R&D`), and a way to mark punctuation literal **inside a markdown string and a stream** (P32's second half; a host-made `MarkdownText` is no answer for a stream or for text that is otherwise markdown). | By trial at `35c6e59`: with all five options on, `R&amp;D` is still set as `R&D`, which pptmstr's probe refuses, and nothing replaces pptmstr's U+FDD0 mark. Also seen: `\|` in a table cell is now set as `\|` where pptmstr's reach sets `|`; a backslash in a link's destination is lost on both. | open |
+
+**The bump, when a commit is on GitHub** (from the trial; run unless marked):
+move both ref files together; `make deps` with the headers named; the
+library's stamp is now `<library>.attestation.json`; then in pptmstr:
+`gate._kind` loses its fallback, `gate.face_font` becomes `typesetter.font`,
+`gate._reader` becomes `ReaderOptions` less the two gaps of P35, the context
+guard and four test doubles are rewritten, the five tab assertions flip, and
+the options that answer P11, P12, P13, P16, P19 are turned on with their
+strict xfails expected to turn (read, not run). **pptmstr's lead would make
+that move once, at the renamed commit** (below), unless a pushed `advtext`
+commit carries the monospace fix first: then the diff view is worth a move of
+its own.
+
 ### Coming: advtext is to be renamed `imscribe` (the user, 2026-10-12)
 
 The user, to pptmstr's lead: "Heads up on an upcoming change for the advtext
