@@ -508,10 +508,13 @@ def unfit(model: Diff) -> str | None:
     grid for these to be off.
 
     **A lone surrogate is the pane's own rows, and for what is true of it**:
-    ``json.loads`` makes one of ``"\\udc80"`` in a tool's arguments, and the
-    library would set it as U+FFFD, on its column, and say nothing of it in
-    any header. A pane's own rows write the code unit out, so that is where
-    such a diff goes, under a line naming it (``tests/test_typeset_diffs.py``).
+    the library would set it as U+FFFD, on its column, and say nothing of it
+    in any header, so the diff is handed back under a line naming it
+    (``tests/test_typeset_diffs.py``). A parked call's texts hold none: what
+    ``json.loads`` makes of ``"\\udc80"`` in a tool's arguments is written
+    out where session text enters the store (``pptmstr.drawable``), and is
+    ASCII by the time it is a row. This answers for texts that reach the seam
+    any other way.
     """
     found = columns()
     if not found.holds:
