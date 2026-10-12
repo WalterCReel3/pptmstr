@@ -40,11 +40,22 @@ file is the record of when the refs moved.
 
 ## State of the branch on 2026-10-11, by running (the lead; machine otherwise idle)
 
-- The environment imports. `.venv` holds advtext **editable from the advtext
-  lead's live checkout** (`~/Source/imgui-adv-text`, then at `f34f6c8` with a
-  dirty tree), which is what `bootstrap.sh` installs. `import pptmstr.ui.typeset`
-  succeeds; `advtext.typesetter.ready()` is `False`, `reason()` is
-  `IMTYPESET_LIBRARY is not set`.
+- The environment imports, and **it is not an environment `bootstrap.sh`
+  made**. `.venv` was created `--without-pip` and its site-packages holds one
+  file, `_composite.pth`, naming four directories: this worktree; the advtext
+  lead's live checkout `~/Source/imgui-adv-text` (a raw path entry, then at
+  `f34f6c8` with a dirty tree); that checkout's venv site-packages (where
+  `imgui_bundle` 1.92.900, fontTools and markdown-it-py come from); and the
+  main pptmstr checkout's venv site-packages (`claude_agent_sdk`, `anthropic`,
+  and a second `imgui_bundle`, 1.92.801, shadowed by order). Found from
+  reading by pptmstr's reviewer, then confirmed by the lead's run. So pptmstr
+  here rides the same `.venv` that `HANDOFF-imtypeset.md` says advtext leaves
+  untouched for imtypeset's oracle. A venv of pptmstr's own needs a package
+  index, which this session cannot reach: **blocked on network**, and until
+  then the sidecar built here is linked against the advtext venv's wheel
+  module, another project's file.
+- `import pptmstr.ui.typeset` succeeds; `advtext.typesetter.ready()` is
+  `False`, `reason()` is `IMTYPESET_LIBRARY is not set`.
 - `pytest -q`: **55 failed, 2930 passed, 3 xfailed, 464 errors** in 105 s.
   - 464 errors and 51 of the failures are one cause: fixtures assert
     `typeset.load_fonts(...)` and it answers `False`, because the names the
@@ -203,10 +214,35 @@ As `P` requests, below.
 
 ## Requests of advtext
 
-None yet. Numbered `P1`, `P2`, … as they arise; never renumbered.
+Numbered, never renumbered. State is pptmstr's: **open** until pptmstr has
+built against what answers it. P1 to P6 come from pptmstr's packaging audit
+(`planning/2026-10-11-a-mac-install-is-a-lock-before-it-is-a-bundle.md`),
+which is from reading, with no Mac and nothing run.
+
+| # | request | the behaviour or measurement behind it | state |
+|---|---|---|---|
+| P1 | **The reason the library is not drawing, as a kind and not only a sentence**: not installed, refused by the gate, failed while drawing, not supported on this platform. | pptmstr falls back to its own renderers and tells the operator why, once, in one place. "Not installed" is a normal state on a Mac if H1's answer is no; "refused" after an update is a fault the operator must act on. Today both are a non-empty `reason()`, and on a platform without a sidecar the sentence would be `IMTYPESET_LIBRARY is not set`, which reads as a broken install. | open |
+| P2 | **A gate verdict for a pair without drawing, and without it being remembered for the process**: would this library be accepted against this wheel. | An update that replaces pptmstr, advtext, imtypeset and `imgui-bundle` together has to test the new environment before it switches to it, and `pptmstr --version` should print the pairing with no window. `module()` is once per process. | open |
+| P3 | **A check at import that advtext and the imtypeset it found belong together** (carries H4). | Of the pairs a partial update can produce, new advtext with old imtypeset is the one nothing gates (read: the wheel is gated by version, the library by its exports). It would surface as an `AttributeError` or `TypeError` inside a draw, which a view rightly does not turn into `TypesetUnavailable`, so pptmstr shows an error page where it should have fallen back. | open |
+| P4 | **Confirm the installed-distribution route is the one pptmstr should rely on, and say when a prebuilt macOS arm64 distribution of imtypeset per `imgui-bundle` pin can exist** (restates H3 and H5 with pptmstr's reason). | Both install shapes pptmstr is weighing need it: a venv made from a lock cannot ask the user for a compiler, and a frozen bundle needs a file its freezer collects and re-signs. The route exists only in advtext's uncommitted working tree today. | open |
+| P5 | **Density: typeset faces rasterised at the framebuffer's scale, or a parameter pptmstr passes from hello_imgui's** (carries H19). | pptmstr sets ImGui labels (loaded through hello_imgui's DPI handling) and typeset text in the same pane at the same nominal size. Read, not seen: the library adds faces at `RasterizerDensity` 1.0. On a 2x display the two would differ in size or sharpness. Needs a person at a Mac. | open |
+| P6 | **H1 answered before pptmstr deletes any of its own renderers**, and H15, H18, H20 before a frozen bundle. A sequencing request. | pptmstr's plan if the sidecar does not work on macOS is to ship there on its own renderers. That plan exists only while they do. In a frozen application the gate's child would be the application itself, relaunched with `-P -B -c`, which pptmstr's argument parser rejects. | open |
+
+## Work in hand
+
+- **Dependencies by ref** (`DEPS` on pptmstr's board): advtext and imtypeset
+  fetched at the commits above, the sidecar built inside this worktree.
+- **R1 to R6 measured on the new core** (`MEASURE-ADV`): a probe in a
+  pptmstr-shaped window, reading the vertex buffer. The numbers go under A2
+  when they exist; any request that follows from them is a `P` then, not
+  before.
+- **The seam** (`pptmstr/ui/typeset.py`) re-adopted pane by pane.
 
 ## Agent decisions, awaiting the user
 
 - `imgui-bundle` is pinned `==1.92.900` in pptmstr (A1).
 - pptmstr builds against advtext `38f5fac`, the last commit known to be on
   the remote branch, not against the four unpushed commits after it.
+- This worktree keeps its composite `.venv` (a real one is blocked on
+  network); the pinned advtext clone replaces the live checkout on its path.
+- pptmstr keeps every one of its own renderers through this adoption (P6).
