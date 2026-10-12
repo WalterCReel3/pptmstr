@@ -142,11 +142,12 @@ rather than being refused, and the pool is shown in the status bar.
 ### Text is set by `advtext`, experimentally
 
 On this branch DETAIL, the NEEDS YOU expansion, BOARD, BRIEF and one mode of the
-context log set their text through `advtext` — a layout library kept in a separate
-checkout, on no package index — instead of ImGui's
-own text calls: proportional prose, real italics, selectable text, diffs built from
-the texts a parked call carries. [pptmstr/ui/typeset.py](pptmstr/ui/typeset.py) is the
-only module that imports it, and its docstring is the reference for what it does and
+context log set their text through `advtext` — a library on no package index,
+installed at the commit `advtext.ref` names, which draws through the native imtypeset
+library built beside the `imgui-bundle` wheel — instead of ImGui's
+own text calls: proportional prose, real italics, selectable text. An approval's diff
+is still drawn by the pane's own renderer. [pptmstr/ui/typeset/](pptmstr/ui/typeset/) is the
+only package that imports it, and its docstring is the reference for what it does and
 costs.
 
 **Text ▸ Typeset text** switches it off, and off is every pane as it was before: the
@@ -254,7 +255,7 @@ Read [orchestrator-design.md](orchestrator-design.md) §1 (invariants) and §3
 | [pptmstr/pool.py](pptmstr/pool.py) | Bounded concurrency; over-cap sessions queue |
 | [pptmstr/approval.py](pptmstr/approval.py) | Classification, summaries and diffs for the gate |
 | [pptmstr/ui/](pptmstr/ui/) | Fleet rail, inbox, detail, health, transcript pane, launcher, shared widgets |
-| [pptmstr/ui/typeset.py](pptmstr/ui/typeset.py) | The one module that imports `advtext`: faces, palette, held views, approval diffs |
+| [pptmstr/ui/typeset/](pptmstr/ui/typeset/) | The one package that imports `advtext`: the gate, fonts, roles, themes, held views, the diff model |
 | [pptmstr/theme.py](pptmstr/theme.py) | Semantic colour roles; light, dark, high-contrast, and six discretionary |
 | [pptmstr/driver.py](pptmstr/driver.py) | One `ClaudeSDKClient` per session, translated into intents |
 | [pptmstr/app.py](pptmstr/app.py) | Runner, docking layout, and the frame loop |
