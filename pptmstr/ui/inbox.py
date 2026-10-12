@@ -887,39 +887,25 @@ def _typeset_body(state: review.ReviewState, pending: PendingApproval, key: str)
     return 0
 
 
-def _settled_rule() -> tuple[int, Callable[[str, int], tuple[str, int]]]:
-    """
-    DETAIL's bound on a document set in one frame, and its cut: one rule for both
-    panes, read from the pane that states it and measured it.
-
-    Imported at the call because ``detail`` imports this module.
-    """
-    from .detail import _SETTLED_LINES, head_lines
-
-    return _SETTLED_LINES, head_lines
-
-
 def _head(body: str) -> str:
     """
-    The start of a body, as far as DETAIL's bound on a settled document.
+    The start of a body, as far as the bound both panes hold a text to unasked.
     """
-    limit, head_lines = _settled_rule()
-    return head_lines(body, limit)[0]
+    return review.head_lines(body, review.SETTLED_LINES)[0]
 
 
 def _unset_tail(view: Hashable, body: str) -> int:
     """
     How many lines at the end of ``body`` this row leaves unset: none under
-    DETAIL's bound, and none once the operator has asked for all of it.
+    ``review.SETTLED_LINES``, and none once the operator has asked for all of it.
 
     A text is read and laid out whole in the frame that first draws it, so a body
     past the bound would stall the queue on the frame the cursor reached its row,
-    unasked. Counted a line the way ``detail.head_lines`` splits one.
+    unasked. Counted a line the way ``review.head_lines`` splits one.
     """
     if view in _WHOLE:
         return 0
-    limit, _ = _settled_rule()
-    return max(body.count("\n") + 1 - limit, 0)
+    return max(body.count("\n") + 1 - review.SETTLED_LINES, 0)
 
 
 def _offer_whole(view: Hashable, more: int) -> None:
@@ -927,13 +913,12 @@ def _offer_whole(view: Hashable, more: int) -> None:
     Under a body set as far as the bound: how much is not, and the button that
     sets it.
 
-    **The rest is set here and not left to DETAIL.** DETAIL clips a call's argument
-    at a character count and offers no more of it, so this row is the one place
-    all of a long body is on screen. The lines not set are reported as not on
-    screen (``_typeset_body``), which holds the approve until they are asked for.
+    **The rest is set here and not left to DETAIL**, which holds its own view of
+    the call to the same bound and is asked separately. The lines not set are
+    reported as not on screen (``_typeset_body``), which holds the approve until
+    they are asked for.
     """
-    limit, _ = _settled_rule()
-    total = limit + more
+    total = review.SETTLED_LINES + more
     _warning(
         f"… {more:,} more lines not set: all {total:,} would be read and laid out in one frame"
     )

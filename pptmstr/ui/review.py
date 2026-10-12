@@ -37,6 +37,19 @@ SHORTCUTS: tuple[tuple[str, str], ...] = (
     ("esc", "cancel edit / confirm"),
 )
 
+# How many lines of one text a pane puts on screen unasked; past it the pane sets
+# the head and offers the rest (``head_lines``). A text handed to the typesetting
+# library is read and laid out whole in the frame that first draws it, 33 ms for
+# each thousand lines of markdown (``scripts/profile_seam.py``): four frames at
+# this bound, once, and a stall the operator did not ask for past it -- so they
+# are asked.
+#
+# Here, and not in either pane that applies it: DETAIL and the inbox row show one
+# parked call and must cut its body at one place, ``detail`` imports ``inbox``, and
+# what the cut costs is this module's -- the lines a pane leaves unset are what it
+# reports to ``ReviewState.body_shown``, and ``withheld`` holds the approve on them.
+SETTLED_LINES = 2000
+
 NOT_DRAWN = "not sent - this call's body had not been drawn when approve was asked for; ask again"
 NOT_WHOLE = (
     "not sent - this call's body was not all on screen when approve was asked for; "
@@ -95,9 +108,9 @@ class ReviewState:
     def body_shown(self, pane: str, pending_id: str, unbuilt: int, frame: int) -> None:
         """
         A pane drew this call's body in ``frame`` with ``unbuilt`` source lines of it
-        not on screen: zero for any body in ImGui's own text, and for text handed
-        to the typesetting seam unless the library stopped under it
-        (``typeset.ViewCache.unbuilt``).
+        not on screen: the lines past ``SETTLED_LINES`` that have not been asked
+        for, under either renderer, and every line of a text the typesetting
+        library stopped under (``typeset.ViewCache.unbuilt``).
         """
         self.bodies.setdefault(pending_id, {})[pane] = (frame, unbuilt)
 
@@ -115,6 +128,19 @@ class ReviewState:
         if self.editing is not None and self.editing not in live_ids:
             self.editing = None
             self.edit_error = None
+
+
+def head_lines(text: str, limit: int) -> tuple[str, int]:
+    """
+    The first ``limit`` lines of a text, and how many follow them.
+
+    For text that is read from the top. The count is what a pane says it left
+    unset, and what holds an approve when the text is a parked call's body.
+    """
+    if text.count("\n") < limit:
+        return text, 0
+    lines = text.split("\n")
+    return "\n".join(lines[:limit]), len(lines) - limit
 
 
 def unset_lines(state: ReviewState, pending_id: str) -> int | None:
@@ -145,12 +171,11 @@ def withheld(state: ReviewState, pending: PendingApproval, *, unread: bool = Fal
     Two things can stand between a call and its approver's eyes. **Its body was
     never drawn**: the keys are read before the panes draw, so on the frame the
     cursor lands on a row there is no reading for it, and "no reading" must not
-    mean "nothing missing". **Its body was drawn and is not on screen**: text
-    handed to the typesetting library is read and laid out in the frame that
-    draws it, so there is no partly built body to get ahead of, but the library
-    can stop inside that draw, and the pane then shows a sentence where the
-    text would be. So a call is approved only once every pane showing it had all
-    of its body on screen the last time it drew it.
+    mean "nothing missing". **Its body was drawn and is not on screen**: a pane
+    sets a body past ``SETTLED_LINES`` only that far until it is asked for the
+    rest, and the typesetting library can stop inside a draw, when the pane
+    shows a sentence where the text would be. So a call is approved only once
+    every pane showing it had all of its body on screen the last time it drew it.
 
     ``unread`` is the batch forms' question. They approve calls nobody opened, by
     design and behind a count, so for them a body never drawn is not a reason; a

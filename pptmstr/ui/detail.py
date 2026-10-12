@@ -53,9 +53,13 @@ everything else is still ImGui's**, through the seam, in views held in
   the call that first draws it: 15 ms for 400 lines of markdown and 66 ms for
   2,000, once (``scripts/profile_seam.py``, 2026-10-12, load average 0.4); a
   frame after that is 0.09 ms whatever the length, and a new width 7 ms at 2,000
-  lines. So the bounds that remain are ``_MAX_ARG_CHARS`` as before and
-  ``_SETTLED_LINES``, past which a document shows its head and a button that
-  sets the rest. Both say so in the pane.
+  lines. So the bound on a document is ``review.SETTLED_LINES``, past which it
+  shows its head and a button that sets the rest.
+* **A parked call's arguments are held to that bound under either renderer**, and
+  to no other: each argument is set as far as the bound, the lines past it are
+  counted to ``review.body_shown``, and an approve waits until they are asked
+  for (``_offer_rest``). This pane can be the only one showing a call, so what
+  it leaves out it must be able to bring in.
 * The ``copy`` button is unchanged and still carries the whole obligation.
 
 The session's board is not here. It is ``board_pane``, which ships as a tab-mate
@@ -66,7 +70,7 @@ not a claim about where the board belongs. The reasoning is in that module.
 from __future__ import annotations
 
 import pprint
-from collections.abc import Hashable, Mapping, Sequence
+from collections.abc import Hashable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -98,7 +102,9 @@ from .widgets import format_elapsed
 # would mean two policies and two differently-worded truncation notices over one
 # body of text.
 _MAX_DIFF_LINES = 1200
-_MAX_ARG_CHARS = 20_000
+# An error's bound, and only an error's: nothing is decided over one. A parked
+# call's arguments are bounded by ``review.SETTLED_LINES`` and the rest offered.
+_MAX_ERROR_CHARS = 20_000
 # Narration is bounded by line, not by character: wrapped text has no uniform row
 # height, so a character count predicts neither how much frame it costs nor how far
 # it extends. Unbounded wrapped text is what stalls a frame -- the same bound, for
@@ -112,12 +118,6 @@ _NARRATION_LINES = 200
 # The bound itself is for the frames in between: a frame that reads a piece costs
 # 0.7 ms with 400 lines held and 1.9 ms with 2,000, and a turn has no length limit.
 _NARRATION_STEP = 200
-# Typeset only. A settled document longer than this shows its head and offers the
-# rest. A text is read and laid out whole in the frame that first draws it, 33 ms
-# for each thousand lines of markdown (``scripts/profile_seam.py``): four frames
-# at this bound, once, and a stall the operator did not ask for past it -- so
-# they are asked.
-_SETTLED_LINES = 2000
 # The longest single line set broken at its spaces; a longer one is one run of
 # characters and is cut at the pane's edge.
 _SENTENCE_CHARS = 2000
@@ -186,15 +186,18 @@ class DetailState:
     # origin, so the inbox drawing the same parked call holds another. Keyed
     # ``(subject, part)`` and pruned in ``draw`` -- see ``live_subjects``.
     views: typeset.ViewCache = field(default_factory=typeset.ViewCache)
-    # The one settled document the operator asked to have set past _SETTLED_LINES.
+    # The one document the operator asked to have set past review.SETTLED_LINES:
+    # a settled text, or a parked call's arguments.
     whole: Hashable | None = None
     # (node, published_length) of the text held in _turn_text; as _key above.
     _turn_key: tuple[NodeId, int] | None = None
     _turn_text: str = ""
-    # (pending id, columns) of the parts held in _arguments. The same tuple is
-    # handed to the seam every frame, which is what lets it skip comparing them.
-    _arguments_key: tuple[str, int] | None = None
+    # (pending id, columns, asked for whole) of the parts held in _arguments, with
+    # what they leave unset. The same tuple is handed to the seam every frame,
+    # which is what lets it skip comparing them.
+    _arguments_key: tuple[str, int, bool] | None = None
     _arguments: tuple[typeset.Part, ...] = ()
+    _arguments_unset: tuple[int, int] = (0, 0)
     # Where the turn still arriving is cut: (node, step, the text just ahead of the
     # cut) and (characters, lines) ahead of it. See ``saying``.
     _saying_key: tuple[NodeId, int, str] | None = None
@@ -297,18 +300,28 @@ class DetailState:
             self._saying_key = (node, step, text[max(0, at - 80) : at])
         return text[at:], self._saying_cut[1]
 
-    def argument_parts(self, pending: PendingApproval, columns: int) -> tuple[typeset.Part, ...]:
+    def arguments(
+        self, pending: PendingApproval, columns: int, whole: bool
+    ) -> tuple[tuple[typeset.Part, ...], tuple[int, int]]:
         """
-        ``argument_parts`` for a parked call, built once per call and pane width.
+        ``argument_parts`` for a parked call and what they leave unset
+        (``lines_past_bound``), built once per call, pane width and asking.
 
         A parked call's arguments never change -- an edit is a draft in
         ``ReviewState``, and a resolved call leaves the queue -- so its id names them.
         """
-        key = (pending.id, columns)
+        key = (pending.id, columns, whole)
         if self._arguments_key != key:
             self._arguments_key = key
-            self._arguments = argument_parts(pending.tool_name, pending.raw_args, columns)
-        return self._arguments
+            self._arguments = argument_parts(
+                pending.tool_name, pending.raw_args, columns, whole=whole
+            )
+            self._arguments_unset = (
+                (0, 0)
+                if whole
+                else lines_past_bound(_value_text(v, columns) for v in pending.raw_args.values())
+            )
+        return self._arguments, self._arguments_unset
 
 
 def draw(
@@ -320,11 +333,11 @@ def draw(
 ) -> None:
     """Render the cursor's obligation in full. Never reads the store."""
     typeset_on = typeset.enabled(typeset.Pane.DETAIL)
+    subjects = live_subjects(snap, focus)
+    if pane.whole is not None and _subject(pane.whole) not in subjects:
+        pane.whole = None
     if typeset_on:
-        subjects = live_subjects(snap, focus)
         pane.views.prune([key for key in pane.views.keys() if _subject(key) in subjects])
-        if pane.whole is not None and _subject(pane.whole) not in subjects:
-            pane.whole = None
     elif len(pane.views):
         pane.views.clear()
 
@@ -542,22 +555,32 @@ def _settled_markdown(pane: DetailState, key: Hashable, text: str) -> None:
     """
     A finished markdown text, whole unless it is long enough to stall the frame.
 
-    Past ``_SETTLED_LINES`` the head is set and the rest is one click away, with the
-    count said. Not a tail and not a window: this is read from the top, and the
-    click sets all of it for as long as the cursor stays.
+    Past ``review.SETTLED_LINES`` the head is set and the rest is one click away,
+    with the count said. Not a tail and not a window: this is read from the top,
+    and the click sets all of it for as long as the cursor stays.
 
     Under the bound the text is whole on the frame it is first drawn.
     """
-    head, more = head_lines(text, _SETTLED_LINES)
+    head, more = review.head_lines(text, review.SETTLED_LINES)
     if not more or pane.whole == key:
         typeset.markdown(pane.views, key, text)
         return
     typeset.markdown(pane.views, key, head)
-    total = _SETTLED_LINES + more
+    _offer_rest(pane, key, more, review.SETTLED_LINES + more)
+
+
+def _offer_rest(pane: DetailState, key: Hashable, more: int, total: int) -> None:
+    """
+    Under a document set as far as the bound: how much is not, and the button
+    that sets it. The inbox row's words for the same cut (``inbox._offer_whole``).
+
+    One document is whole at a time: asking for another lets the first go back to
+    its head, and with it the approve over it, if it is a parked call's.
+    """
     imgui.push_text_wrap_pos(_visible_edge())
     imgui.text_colored(
         P.warn.vec4,
-        f"… {more:,} more lines not set: all {total:,} would be read and laid out " "in one frame",
+        f"… {more:,} more lines not set: all {total:,} would be read and laid out in one frame",
     )
     imgui.pop_text_wrap_pos()
     if imgui.small_button(f"set all {total:,} lines"):
@@ -627,11 +650,10 @@ def _approval(state: review.ReviewState, pane: DetailState, obligation: Approval
     if has_diff:
         assert pending.diff is not None
         _diff(state, pending.id, pending.diff, pending.texts)
-    unset = 0
     if typeset.enabled(typeset.Pane.DETAIL):
         unset = _typeset_arguments(pane, pending, obligation.key)
     else:
-        _arguments(pending.raw_args)
+        unset = _arguments(pane, pending.raw_args, obligation.key)
     if not has_diff:
         # Stated rather than omitted, and stated last: a call with no diff is not
         # missing one, and the arguments above are the whole story for it.
@@ -639,15 +661,16 @@ def _approval(state: review.ReviewState, pane: DetailState, obligation: Approval
         _may_not_apply(pending.texts)
         imgui.text_disabled("no diff for this call")
     # What ``review.withheld`` holds an approve on: lines of this body the frame
-    # did not put on screen. ImGui's own text is all there on the frame it is
-    # drawn; text handed to the seam is too, unless the library stopped under it.
+    # did not put on screen. Those past the bound that have not been asked for,
+    # under either renderer, and all of a text the library stopped under.
     state.body_shown("detail", pending.id, unset, int(imgui.get_frame_count()))
 
 
 def _typeset_arguments(pane: DetailState, pending: PendingApproval, subject: str) -> int:
     """
     The call's arguments through the seam, as one document. Answers how many
-    lines of it the frame did not set (``ViewCache.unbuilt``).
+    lines of it the frame did not set: those past the bound and not asked for,
+    and all of them when the library stopped (``ViewCache.unbuilt``).
 
     The prose argument of a call that has one is markdown and the library's;
     every other value is literal and ImGui's (``argument_parts``).
@@ -658,8 +681,11 @@ def _typeset_arguments(pane: DetailState, pending: PendingApproval, subject: str
         return 0
     columns = int(imgui.get_content_region_avail().x // imgui.calc_text_size("M").x)
     key = (subject, "arguments")
-    typeset.document(pane.views, key, pane.argument_parts(pending, columns))
-    return pane.views.unbuilt(key) or 0
+    parts, (more, total) = pane.arguments(pending, columns, pane.whole == key)
+    typeset.document(pane.views, key, parts)
+    if more:
+        _offer_rest(pane, key, more, total)
+    return (pane.views.unbuilt(key) or 0) + more
 
 
 def _may_not_apply(texts: Sequence[DiffText] | None) -> None:
@@ -700,19 +726,36 @@ def _diff(
         )
 
 
-def _arguments(raw_args: Mapping[str, Any]) -> None:
+def _arguments(pane: DetailState, raw_args: Mapping[str, Any], subject: str) -> int:
+    """
+    The call's arguments in ImGui's own text. Answers how many lines of them the
+    frame did not draw: those past the bound and not asked for.
+
+    The bound is the typeset path's. Wrapped text is measured again in every
+    frame it is drawn, so its cost here is per frame and not once; and the rule
+    is one, so a call past it reads the same and waits the same whichever
+    renderer is on.
+    """
     widgets.section("arguments")
     if not raw_args:
         imgui.text_disabled("(none)")
-        return
-    for key, value in raw_args.items():
-        imgui.text_colored(P.text_dim.vec4, key)
+        return 0
+    key = (subject, "arguments")
+    whole = pane.whole == key
+    more = total = 0
+    for name, value in raw_args.items():
+        imgui.text_colored(P.text_dim.vec4, name)
         imgui.indent(12.0)
-        text, omitted = clip(render_value(value), _MAX_ARG_CHARS)
+        text, rest = bounded(render_value(value), whole)
         imgui.text_colored(P.text.vec4, text or "(empty)")
-        if omitted:
-            imgui.text_colored(P.warn.vec4, f"… {omitted:,} more characters not shown")
+        if rest:
+            imgui.text_colored(P.warn.vec4, _not_set(rest))
+            more += rest
+            total += review.SETTLED_LINES + rest
         imgui.unindent(12.0)
+    if more:
+        _offer_rest(pane, key, more, total)
+    return more
 
 
 def _question(snap: Snapshot, pane: DetailState, obligation: QuestionPending) -> None:
@@ -753,7 +796,7 @@ def _failure(pane: DetailState, obligation: SessionFailed) -> None:
         # an underscore in a path is an underscore. A traceback is set as its
         # lines are and the pane scrolls sideways to the end of a long one, like
         # an argument of several lines; one line is broken at the pane's edge.
-        text, omitted = clip(obligation.error or "no detail recorded", _MAX_ARG_CHARS)
+        text, omitted = clip(obligation.error or "no detail recorded", _MAX_ERROR_CHARS)
         kind = literal_kind(text, typeset.Role.LITERAL)
         typeset.plain(
             pane.views,
@@ -842,16 +885,35 @@ def narration_cut(text: str, ahead: int) -> tuple[int, int]:
     return sum(len(source[n]) + 1 for n in range(line)), line
 
 
-def head_lines(text: str, limit: int) -> tuple[str, int]:
+def bounded(text: str, whole: bool) -> tuple[str, int]:
     """
-    The first ``limit`` lines of a text, and how many follow them.
+    One argument of a parked call as far as this pane sets it unasked, and how many
+    lines follow: all of it once the operator has asked (``whole``), and otherwise
+    as far as the bound the inbox row holds the same call to.
+    """
+    return (text, 0) if whole else review.head_lines(text, review.SETTLED_LINES)
 
-    ``narration_tail`` the other way up, for text that is read from the top.
+
+def lines_past_bound(texts: Iterable[str]) -> tuple[int, int]:
     """
-    lines = text.split("\n")
-    if len(lines) <= limit:
-        return text, 0
-    return "\n".join(lines[:limit]), len(lines) - limit
+    Over a call's arguments as text: how many lines ``bounded`` leaves out of them
+    unasked, and how many lines the arguments it cuts have in all.
+    """
+    more = total = 0
+    for text in texts:
+        rest = bounded(text, False)[1]
+        if rest:
+            more += rest
+            total += review.SETTLED_LINES + rest
+    return more, total
+
+
+def _not_set(more: int) -> str:
+    """
+    What is said in place, under an argument cut at the bound. The button is under
+    the last argument (``_offer_rest``); an argument above it must not read as whole.
+    """
+    return f"… {more:,} more lines not set"
 
 
 def wraps_at_spaces(text: str) -> bool:
@@ -871,7 +933,7 @@ def wraps_at_spaces(text: str) -> bool:
 
 
 def argument_parts(
-    tool_name: str, raw_args: Mapping[str, Any], columns: int
+    tool_name: str, raw_args: Mapping[str, Any], columns: int, *, whole: bool = False
 ) -> tuple[typeset.Part, ...]:
     """
     A call's arguments as one document: each name dim and tight over its value.
@@ -911,7 +973,9 @@ def argument_parts(
     so the arrow a model puts in a subject is drawn as U+FFFD -- and is not part of
     this document's selection.
 
-    Bounded by ``_MAX_ARG_CHARS`` as the native block is, and says so.
+    Each value is set as far as ``bounded`` takes it, as the native block is, and
+    says in place what it left out. There is no bound by character: a body of any
+    length under the line bound is whole here, as it is in the inbox row.
     """
     prose = inbox.prose_argument(tool_name)
     exact = typeset.Kind.WRAPPED_EXACT
@@ -919,7 +983,7 @@ def argument_parts(
     parts: list[typeset.Part] = []
     for name, value in raw_args.items():
         parts.append(typeset.Part(name or '""', exact, "text_dim", tight=True, role=role))
-        text, omitted = clip(_value_text(value, columns), _MAX_ARG_CHARS)
+        text, rest = bounded(_value_text(value, columns), whole)
         if not text:
             parts.append(typeset.Part("(empty)", exact, role=role))
         elif not text.strip():
@@ -929,10 +993,8 @@ def argument_parts(
             parts.extend(typeset.prose_parts(text))
         else:
             parts.append(typeset.Part(text, literal_kind(text, role), role=role))
-        if omitted:
-            parts.append(
-                typeset.Part(f"… {omitted:,} more characters not shown", exact, "warn", role=role)
-            )
+        if rest:
+            parts.append(typeset.Part(_not_set(rest), exact, "warn", role=role))
     return tuple(parts)
 
 

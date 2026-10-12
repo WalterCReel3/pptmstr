@@ -551,13 +551,6 @@ def test_without_the_faces_the_pane_draws_as_it_always_did(monkeypatch) -> None:
     fake.push_text_wrap_pos.assert_called_with(0.0)
 
 
-def test_head_lines_keeps_the_start_and_counts_the_rest() -> None:
-    text = "\n".join(str(n) for n in range(10))
-
-    assert detail.head_lines(text, 10) == (text, 0)
-    assert detail.head_lines(text, 3) == ("0\n1\n2", 7)
-
-
 def _kinds(parts: tuple[detail.typeset.Part, ...]) -> list[tuple[str, str]]:
     return [(part.kind.value, part.text) for part in parts]
 
@@ -721,12 +714,54 @@ def test_a_structured_argument_is_broken_on_its_structure() -> None:
     assert eval(part.text) == edits  # noqa: S307 - a literal this test wrote
 
 
-def test_a_bounded_argument_says_what_it_dropped() -> None:
-    parts = detail.argument_parts("Write", {"content": "x" * (detail._MAX_ARG_CHARS + 7)}, 40)
+def test_an_argument_has_no_bound_by_character() -> None:
+    """
+    A count of characters cut a body the inbox row set whole, and nothing here
+    could bring the rest in.
+    """
+    content = "x" * 50_000
+    _, value = detail.argument_parts("Write", {"content": content}, 40)
 
-    assert len(parts[1].text) == detail._MAX_ARG_CHARS
-    assert parts[2].text == "… 7 more characters not shown"
-    assert parts[2].colour == "warn"
+    assert value.text == content
+
+
+def test_an_argument_past_the_bound_is_set_to_it_and_says_in_place_what_is_not(
+    monkeypatch,
+) -> None:
+    """
+    In place, under the argument cut: the button is under the last argument, and a
+    cut argument with another below it must not read as all of itself.
+    """
+    monkeypatch.setattr(review, "SETTLED_LINES", 3)
+    args = {"content": "a\nb\nc\nd\ne", "file_path": "x.py", "edits": "1\n2\n3\n4"}
+
+    parts = detail.argument_parts("Write", args, 40)
+
+    assert [(p.text, p.colour) for p in parts if p.colour != "text_dim"] == [
+        ("a\nb\nc", None),
+        ("… 2 more lines not set", "warn"),
+        ("x.py", None),
+        ("1\n2\n3", None),
+        ("… 1 more lines not set", "warn"),
+    ]
+    assert detail.lines_past_bound(args.values()) == (3, 9)
+
+    whole = detail.argument_parts("Write", args, 40, whole=True)
+    assert [p.text for p in whole if p.colour != "text_dim"] == [*args.values()]
+
+
+def test_a_prose_argument_past_the_bound_is_cut_before_it_is_read(monkeypatch) -> None:
+    """
+    The head is what is read as markdown, so nothing after the cut is in a part.
+    """
+    monkeypatch.setattr(review, "SETTLED_LINES", 3)
+    body = "One.\n\nTwo.\n\nThree *hidden*."
+
+    parts = detail.argument_parts(inbox._POST_CONCERN, {"body": body}, 40)
+
+    assert [p.kind for p in parts[1:]] == [typeset.Kind.MARKDOWN, typeset.Kind.WRAPPED_EXACT]
+    assert parts[1].text == "One.\n\nTwo."
+    assert parts[2].text == "… 2 more lines not set"
 
 
 def test_this_pane_and_the_inbox_row_read_one_table() -> None:
@@ -910,6 +945,8 @@ class Pane:
         self.focus = FocusState()
         self.said: list[str] = []
         self.widgets: list[str] = []
+        # Labels of buttons that answer as clicked in the next frame drawn.
+        self.clicks: set[str] = set()
         # Each child opened, with its window flags; each native wrap position pushed.
         self.children: dict[str, int] = {}
         self.wraps: list[float] = []
@@ -950,7 +987,7 @@ class Pane:
 
             def small_button(self, label: str) -> bool:
                 outer.widgets.append(label)
-                return bool(im.small_button(label))
+                return bool(im.small_button(label)) or label in outer.clicks
 
         monkeypatch.setattr(detail, "imgui", Spy())
         real_section = detail.widgets.section
@@ -975,6 +1012,7 @@ class Pane:
         try:
             detail.draw(snap, self.focus, self.state, self.pane, 10.0)
         finally:
+            self.clicks.clear()
             im.end()
             im.render()
 
@@ -1512,7 +1550,7 @@ def test_a_deliverable_past_the_bound_shows_its_head_and_offers_the_rest(seam, m
     A bound here announces itself and is the operator's to lift: the deliverable is
     the artifact, and the pane has no other route to its tail.
     """
-    monkeypatch.setattr(detail, "_SETTLED_LINES", 4)
+    monkeypatch.setattr(review, "SETTLED_LINES", 4)
     text = "\n\n".join(f"paragraph {n}" for n in range(6))
     rec = _settled(text)
     snap, focus_state = _unselected(rec)
@@ -1858,11 +1896,12 @@ def test_a_is_sent_once_detail_has_drawn_a_long_body_which_is_whole_in_that_fram
     """
     DETAIL can be the only pane up, and it has no approve button to disable: the
     key is the whole of the hazard there. Nothing is built over frames, so the
-    one frame that draws a body of 1,200 lines has all of it, and the reading
-    says so; before that frame there is no reading and ``a`` is not sent.
+    one frame that draws a body of 1,800 lines and 34,000 characters has all of
+    it, and the reading says so; before that frame there is no reading and ``a``
+    is not sent.
     """
-    body = "".join(f"Paragraph {n} asks for something else.\n\n" for n in range(600))
-    assert len(body) > detail._MAX_ARG_CHARS, "clipped, and said to be"
+    body = "".join(f"Paragraph {n} asks for something else.\n\n" for n in range(900))
+    assert len(body) > 30_000 and body.count("\n") < review.SETTLED_LINES
     obligation = parked("mcp__pptmstr__post_concern", {"to": "lead", "body": body})
     snap = snapshot(record(), needs_you=(obligation,))
     key = (obligation.key, "arguments")
@@ -1877,11 +1916,172 @@ def test_a_is_sent_once_detail_has_drawn_a_long_body_which_is_whole_in_that_fram
     rig.frame(snap)
     assert rig.pane.views.unbuilt(key) == 0 == review.unset_lines(rig.state, "p1")
     shown = "\n".join(rig.pane.views.texts(key))
-    clipped = body[: detail._MAX_ARG_CHARS]
-    assert [word for word in clipped.split() if word not in shown] == []
-    assert "more characters not shown" in shown
+    assert [word for word in body.split() if word not in shown] == []
+    assert "not shown" not in shown and "not set" not in shown
     _press_a(rig, snap, bridge)
     assert bridge.resolved == [("p1", True)]
+
+
+PAST = review.SETTLED_LINES // 2 + 100
+PROSE_PAST = "\n\n".join(f"Paragraph {n} asks for something else." for n in range(PAST))
+LITERAL_PAST = "\n".join(f"echo {n} > out/{n}.txt" for n in range(PAST * 2 - 1))
+
+
+def _held_until_asked(rig: Pane, obligation: ApprovalNeeded, shown, last: str) -> None:
+    """
+    A call whose argument runs 199 lines past the bound, in DETAIL alone: the
+    head is on screen and says what is not, ``a`` is not sent, the button sets
+    the rest, and ``a`` is sent once a frame has drawn all of it. ``shown`` reads
+    what the frame put on screen; ``last`` is in the argument's last line only.
+    """
+    more, total = 199, review.SETTLED_LINES + 199
+    notice = f"… {more:,} more lines not set: all {total:,} would be read and laid out in one frame"
+    button = f"set all {total:,} lines"
+    snap = snapshot(record(), needs_you=(obligation,))
+    rig.focus.move(snap, 0)
+    bridge = _Sent()
+
+    rig.frame(snap)
+    assert last not in shown()
+    assert f"… {more:,} more lines not set" in shown()
+    assert notice in rig.said and button in rig.widgets
+    assert rig.state.bodies["p1"]["detail"][1] == more == review.unset_lines(rig.state, "p1")
+    assert review.withheld(rig.state, obligation.approval) == review.NOT_WHOLE
+    _press_a(rig, snap, bridge)
+    assert bridge.resolved == []
+
+    # Said in this pane, which may be the only one up, and still not sent on a
+    # second asking: the rest has to be asked for, not waited for.
+    rig.frame(snap)
+    assert review.NOT_WHOLE in rig.said
+    _press_a(rig, snap, bridge)
+    assert bridge.resolved == []
+
+    # The click is read in the frame that drew the head, so that frame's reading
+    # is still short; the next frame's is not.
+    rig.clicks.add(button)
+    rig.frame(snap)
+    assert rig.pane.whole == (obligation.key, "arguments")
+    assert review.unset_lines(rig.state, "p1") == more
+    rig.frame(snap)
+    assert last in shown()
+    assert "not set" not in shown() and button not in rig.widgets
+    assert not [line for line in rig.said if "not set" in line]
+    assert review.unset_lines(rig.state, "p1") == 0
+    _press_a(rig, snap, bridge)
+    assert bridge.resolved == [("p1", True)]
+
+
+@pytest.mark.parametrize(
+    ("tool", "args", "last"),
+    [
+        (
+            "mcp__pptmstr__post_concern",
+            {"to": "lead", "body": PROSE_PAST},
+            f"Paragraph {PAST - 1} asks",
+        ),
+        ("Bash", {"command": LITERAL_PAST}, f"out/{PAST * 2 - 2}.txt"),
+    ],
+    ids=["prose", "literal"],
+)
+def test_a_waits_on_an_argument_past_the_bound_until_detail_is_asked_for_it(
+    seam, monkeypatch, tool: str, args: dict[str, object], last: str
+) -> None:
+    obligation = parked(tool, args)
+    rig = Pane(seam, monkeypatch)
+    key = (obligation.key, "arguments")
+
+    _held_until_asked(rig, obligation, lambda: "\n".join(rig.pane.views.texts(key)), last)
+
+
+@pytest.mark.parametrize(
+    ("tool", "args", "last"),
+    [
+        (
+            "mcp__pptmstr__post_concern",
+            {"to": "lead", "body": PROSE_PAST},
+            f"Paragraph {PAST - 1} asks",
+        ),
+        ("Bash", {"command": LITERAL_PAST}, f"out/{PAST * 2 - 2}.txt"),
+    ],
+    ids=["prose", "literal"],
+)
+def test_with_typeset_off_a_waits_on_an_argument_past_the_bound_until_detail_is_asked(
+    imgui, monkeypatch, tool: str, args: dict[str, object], last: str
+) -> None:
+    typeset.configure(typeset=False)
+    assert not typeset.enabled()
+    rig = Pane(imgui, monkeypatch)
+
+    _held_until_asked(rig, parked(tool, args), lambda: "\n".join(rig.said), last)
+
+
+def test_with_typeset_off_a_body_past_twenty_thousand_characters_is_all_drawn(
+    imgui, monkeypatch
+) -> None:
+    """
+    Under the bound nothing is cut, by line or by character, and ``a`` is sent over
+    a body every word of which the frame drew.
+    """
+    typeset.configure(typeset=False)
+    body = "".join(f"Paragraph {n} asks for something else.\n\n" for n in range(900))
+    assert len(body) > 30_000 and body.count("\n") < review.SETTLED_LINES
+    obligation = parked("mcp__pptmstr__post_concern", {"to": "lead", "body": body})
+    snap = snapshot(record(), needs_you=(obligation,))
+    rig = Pane(imgui, monkeypatch)
+    rig.focus.move(snap, 0)
+    bridge = _Sent()
+
+    rig.frame(snap)
+
+    assert body in rig.said
+    assert not [line for line in rig.said if "not shown" in line or "not set" in line]
+    assert review.unset_lines(rig.state, "p1") == 0
+    _press_a(rig, snap, bridge)
+    assert bridge.resolved == [("p1", True)]
+
+
+def test_with_typeset_off_an_argument_cut_above_another_says_so_in_place(
+    imgui, monkeypatch
+) -> None:
+    """
+    The button is under the last argument. An argument cut above it is followed by
+    the next one's name, and without its own line would read as ending there.
+    """
+    typeset.configure(typeset=False)
+    monkeypatch.setattr(review, "SETTLED_LINES", 3)
+    obligation = parked("Bash", {"command": "a\nb\nc\nd\ne", "description": "five lines"})
+    snap = snapshot(record(), needs_you=(obligation,))
+    rig = Pane(imgui, monkeypatch)
+    rig.focus.move(snap, 0)
+
+    rig.frame(snap)
+
+    at = rig.said.index("a\nb\nc")
+    assert rig.said[at + 1 : at + 4] == ["… 2 more lines not set", "description", "five lines"]
+    assert rig.said[at + 4] == (
+        "… 2 more lines not set: all 5 would be read and laid out in one frame"
+    )
+    assert rig.widgets[-1] == "set all 5 lines"
+    assert review.unset_lines(rig.state, "p1") == 2
+
+
+def test_with_typeset_off_the_asking_goes_with_the_call(imgui, monkeypatch) -> None:
+    """
+    A call asked for whole and then settled leaves nothing held: the next document
+    past the bound is asked for again.
+    """
+    typeset.configure(typeset=False)
+    obligation = parked("Bash", {"command": LITERAL_PAST})
+    snap = snapshot(record(), needs_you=(obligation,))
+    rig = Pane(imgui, monkeypatch)
+    rig.focus.move(snap, 0)
+    rig.pane.whole = (obligation.key, "arguments")
+    rig.frame(snap)
+    assert rig.pane.whole is not None
+
+    rig.frame(snapshot(record()))
+    assert rig.pane.whole is None
 
 
 def test_a_is_not_sent_over_a_body_the_library_stopped_under(seam, monkeypatch) -> None:

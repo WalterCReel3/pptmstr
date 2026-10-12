@@ -980,7 +980,7 @@ def test_an_ordinary_body_is_whole_and_approvable_on_its_first_frame(
 
 def paragraphs(count: int) -> str:
     """
-    ``count`` paragraphs, two lines each as ``detail.head_lines`` counts them, and
+    ``count`` paragraphs, two lines each as ``review.head_lines`` counts them, and
     one more line for the end of the last.
     """
     return "".join(f"Paragraph {n} asks for something else to be done.\n\n" for n in range(count))
@@ -988,9 +988,9 @@ def paragraphs(count: int) -> str:
 
 def past_the_bound(ident: str = "p1") -> PendingApproval:
     """
-    A concern 201 lines longer than DETAIL sets unasked.
+    A concern 201 lines longer than a pane sets unasked.
     """
-    args = {"to": "lead", "subject": "s", "body": paragraphs(detail._SETTLED_LINES // 2 + 100)}
+    args = {"to": "lead", "subject": "s", "body": paragraphs(review.SETTLED_LINES // 2 + 100)}
     return parked(inbox._POST_CONCERN, args, ident)
 
 
@@ -1017,14 +1017,17 @@ def setting_all(monkeypatch: pytest.MonkeyPatch, seam: Any) -> list[str]:
 
 def test_the_bound_on_a_body_is_details_bound_counted_as_detail_counts(seam: Any) -> None:
     """
-    One rule for a document set in one frame, not one a pane.
+    One rule for a document set in one frame, not one a pane: this row and DETAIL
+    cut a concern's body at the same line and count the same lines after it.
     """
-    limit = detail._SETTLED_LINES
+    limit = review.SETTLED_LINES
     for lines in (1, limit - 1, limit, limit + 1, limit + 500):
         body = "\n".join(f"line {n}" for n in range(lines))
-        head, more = detail.head_lines(body, limit)
+        head, more = review.head_lines(body, limit)
         assert inbox._unset_tail(("k", "body"), body) == more, lines
         assert inbox._head(body) == head, lines
+        assert detail.bounded(body, False) == (head, more), lines
+        assert detail.lines_past_bound([body])[0] == more, lines
 
 
 def test_a_body_past_the_bound_is_set_to_the_bound_and_holds_its_approve(
@@ -1045,7 +1048,7 @@ def test_a_body_past_the_bound_is_set_to_the_bound_and_holds_its_approve(
     pane.draw(seam)
 
     handed = shown(call, "body").replace(" ", "")
-    last = detail._SETTLED_LINES // 2 - 1
+    last = review.SETTLED_LINES // 2 - 1
     assert f"Paragraph{last}asks" in handed and f"Paragraph{last + 1}asks" not in handed
     assert inbox._VIEWS.unbuilt(key(call, "body")) == 0
     assert review.unset_lines(pane.state, call.id) == 201
@@ -1081,7 +1084,7 @@ def test_a_body_past_the_bound_is_whole_and_approvable_once_asked_for(
     said.clear()
     pane.draw(seam)
     handed = shown(call, "body").replace(" ", "")
-    assert f"Paragraph{detail._SETTLED_LINES // 2 + 99}asks" in handed
+    assert f"Paragraph{review.SETTLED_LINES // 2 + 99}asks" in handed
     assert review.unset_lines(pane.state, call.id) == 0
     assert setting_all == [] and not [line for line in said if "more lines not set" in line]
     assert clicking_approve[-1] is False and sent == [call.id]
@@ -1090,8 +1093,8 @@ def test_a_body_past_the_bound_is_whole_and_approvable_once_asked_for(
 def test_a_body_at_the_bound_is_whole_and_offers_nothing(
     seam: Any, said: list[str], setting_all: list[str]
 ) -> None:
-    body = "\n\n".join(f"Paragraph {n}." for n in range(detail._SETTLED_LINES // 2)) + "\nEnd."
-    assert body.count("\n") + 1 == detail._SETTLED_LINES
+    body = "\n\n".join(f"Paragraph {n}." for n in range(review.SETTLED_LINES // 2)) + "\nEnd."
+    assert body.count("\n") + 1 == review.SETTLED_LINES
     call = parked(inbox._POST_CONCERN, {"to": "lead", "body": body})
     pane = Pane(call)
     pane.draw(seam)
@@ -1133,16 +1136,17 @@ def test_with_typeset_off_a_body_past_the_bound_is_all_drawn_and_approvable(
     assert sent == [call.id]
 
 
-def test_detail_does_not_carry_the_end_of_a_body_this_row_holds_back() -> None:
+def test_detail_holds_back_the_same_end_of_a_body_and_says_how_much() -> None:
     """
-    Why the row sets the rest itself and does not point at DETAIL: DETAIL cuts a
-    call's argument at a character count and has no way to the rest.
+    Why the row sets the rest itself and does not point at DETAIL: DETAIL holds
+    its own view of the call to the same bound, and is asked separately.
     """
     body = str(past_the_bound().raw_args["body"])
     parts = detail.argument_parts(inbox._POST_CONCERN, {"body": body}, 80)
-    assert len(body) > detail._MAX_ARG_CHARS
-    assert f"Paragraph {detail._SETTLED_LINES // 2 + 99} " not in "".join(p.text for p in parts)
-    assert "more characters not shown" in parts[-1].text
+    shown = "".join(p.text for p in parts)
+    assert f"Paragraph {review.SETTLED_LINES // 2 - 1} " in shown
+    assert f"Paragraph {review.SETTLED_LINES // 2} " not in shown
+    assert parts[-1].text == f"… {inbox._unset_tail(('k', 'body'), body):,} more lines not set"
 
 
 # -- no approve path sends a call whose body is not all on screen ------------------

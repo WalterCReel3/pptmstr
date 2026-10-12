@@ -260,6 +260,22 @@ def test_escape_still_cancels_with_a_modifier_held(frame: None) -> None:
 # tests/test_inbox_typeset.py's and tests/test_detail.py's.
 
 
+def test_head_lines_keeps_the_start_and_counts_the_rest() -> None:
+    """
+    The cut both panes make in a body past ``SETTLED_LINES``. The count is what a
+    pane reports as not on screen, so a line more or less is an approve held or
+    let go wrongly.
+    """
+    text = "\n".join(str(n) for n in range(10))
+
+    assert review.head_lines(text, 10) == (text, 0)
+    assert review.head_lines(text, 11) == (text, 0)
+    assert review.head_lines(text, 9) == ("\n".join(str(n) for n in range(9)), 1)
+    assert review.head_lines(text, 3) == ("0\n1\n2", 7)
+    # A newline at the end is a line, as it is where the count is read back.
+    assert review.head_lines("a\nb\n", 2) == ("a\nb", 1)
+
+
 def test_a_over_a_call_no_pane_has_drawn_sends_nothing_and_says_why(frame: None) -> None:
     bridge, _, state = press(imgui.Key.a, state=review.ReviewState())
 
