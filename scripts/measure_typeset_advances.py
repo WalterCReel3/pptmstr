@@ -8,6 +8,12 @@ through ``advtext.TypesetView``, for Inconsolata Medium and Roboto Regular at 14
 16, 18 and 20 px. It measures and decides nothing: no verdict is printed, and
 nothing here says how anything looks.
 
+"Size" names two lengths. Dear ImGui sizes a font by its pixel HEIGHT (ascent
+plus descent); advtext sizes a face by its EM. ``--px`` pages are the first and
+``--em`` pages the second: Inconsolata's advance is half an em, so at an em of
+16 the file's advance is a whole 8 px where at a pixel height of 16 it is
+7.626.
+
 ## The window
 
 Fonts are loaded as ``pptmstr/theme.py`` loads them, the lines copied here
@@ -16,11 +22,15 @@ rather than imported: Inconsolata Medium with Font Awesome 6 merged as
 ``advtext.fontlib.register_font(Face.CODE_BOLD, <the vendored bold>)`` and
 ``advtext.typesetter.load_fonts()`` last in ``load_additional_fonts``.
 
-A page is one face table at one pixel height. The view is made to set text at a
-PIXEL height by its theme, and by nothing else:
+A page is one face table at one size. The view is made to set text at that size
+by its theme, and by nothing else:
 
     Theme.at_pixel_height(px, faces=Faces.mono() | Faces(), align=Align.LEFT,
                           spacing=Spacing.FRENCH)
+
+An ``--em`` page asks the same constructor for the pixel height that em comes
+to in the page's running face (``em / em_size_for_pixel_height(face, 1)``), so
+the two kinds of page differ in the size and in nothing else.
 
 Ragged right and one space width, so a word space that varies does so because of
 how it was drawn and not because a line was justified. On a Roboto page fenced
@@ -31,8 +41,9 @@ Each page draws two views, one under the other: prose (a paragraph, a rhythm
 line, a line of digits) 400 px wide, and one fenced block 1000 px wide whose
 last two rows are a 40-character ruler and a 74-character line of code.
 Under them the same two rows go through ``ImDrawList.add_text`` in the chrome
-font (``Fonts[0]``) at the page's pixel height, from the x of the typeset
-row's first pen.
+font (``Fonts[0]``), from the x of the typeset row's first pen: at the page's
+pixel height on a ``--px`` page, and on an ``--em N`` page at a pixel height of
+N, which is the size a host's chrome is when it says "N".
 
 ## What is read, and from what
 
@@ -59,6 +70,11 @@ pptmstr's request P14 asks for a supported name.
 ## Running it
 
     scripts/xvfb_shot.sh -- .venv/bin/python scripts/measure_typeset_advances.py
+    ... measure_typeset_advances.py --faces mono --em 14,16,18,20 --px 16
+
+With no option the pages are both faces at the four pixel heights and no em
+page. The header says which ``advtext`` was imported and, where its directory
+is a git checkout, the commit.
 
 ``IMTYPESET_LIBRARY`` and ``IMTYPESET_PYTHON`` are taken from the environment
 (``make typeset-env`` prints them) and default to the pair under
@@ -68,6 +84,7 @@ drawing; 2 when a page could not be read whole.
 
 from __future__ import annotations
 
+import argparse
 import math
 import os
 import statistics
@@ -127,6 +144,27 @@ EPS = 1e-4
 
 
 @dataclass(frozen=True, slots=True)
+class Page:
+    """
+    One face table at one size, and which of the two lengths the size is.
+
+    ``beside`` is the pixel height the chrome font is drawn at next to the page.
+    """
+
+    face: str
+    unit: str
+    size: float
+
+    @property
+    def beside(self) -> float:
+        return self.size
+
+    @property
+    def label(self) -> str:
+        return f"{self.face} {self.unit} {self.size:g}"
+
+
+@dataclass(frozen=True, slots=True)
 class Glyph:
     """
     One character with ink: where the layout has it and the quad that drew it.
@@ -134,6 +172,8 @@ class Glyph:
     ``laid`` and ``laid_right`` are screen x of the library's rectangle for the
     character. ``pen`` is the quad's left edge less the bitmap's ``x0``;
     ``advance`` the baked advance of the atlas entry the quad came from.
+    ``pen_y`` is the quad's top less the bitmap's ``y0``, the same for every
+    glyph of a line.
     """
 
     char: str
@@ -144,6 +184,7 @@ class Glyph:
     laid_right: float
     quad: tuple[float, float, float, float]
     bitmap: tuple[float, float]
+    pen_y: float
     advance: float
     role: str
     baked_px: float
@@ -159,10 +200,13 @@ class Unread(Exception):
     """
 
 
-def theme_for(face: str, px: float) -> Any:
-    from advtext import Align, Faces, Spacing, Theme
+def theme_for(page: Page) -> Any:
+    from advtext import Align, Faces, Spacing, Theme, em_size_for_pixel_height
 
-    faces = Faces.mono() if face == "mono" else Faces()
+    faces = Faces.mono() if page.face == "mono" else Faces()
+    px = page.size
+    if page.unit == "em":
+        px = page.size / em_size_for_pixel_height(faces.regular, 1.0)
     return Theme.at_pixel_height(px, faces=faces, align=Align.LEFT, spacing=Spacing.FRENCH)
 
 
@@ -270,6 +314,7 @@ def read_view(
                     laid_right=origin[0] + rects[0][2],
                     quad=(quad[0], quad[1], quad[2], quad[3]),
                     bitmap=(float(glyph.x0), float(glyph.x1)),
+                    pen_y=quad[1] - float(glyph.y0),
                     advance=float(baked.get_char_advance(ord(char))),
                     role=role,
                     baked_px=float(baked.size),
@@ -369,7 +414,6 @@ def _said(run: list[Glyph]) -> str:
 
 
 def measure(
-    face: str,
     px: float,
     prose: list[list[Glyph]],
     code: list[Glyph],
@@ -377,12 +421,15 @@ def measure(
     natives: dict[str, tuple[list[float], list[float], int, int]],
     controls: dict[str, tuple[list[float], list[float], int, int]],
     sizes: dict[str, float],
+    code_lines: list[Any],
 ) -> tuple[list[str], dict[str, str]]:
     """
     A page's numbers as report lines, and the few of them the table carries.
 
+    ``px`` is the pixel height the chrome font is drawn at beside the page.
     ``natives`` maps a code row's text to ``chrome_line``'s answer for it in the
     chrome font, ``controls`` to its answer in the library's own code entry.
+    ``code_lines`` are the fenced block's ``SetLine``s.
     """
     out: list[str] = []
     brief: dict[str, str] = {}
@@ -405,6 +452,29 @@ def measure(
         f"  advance of '0' in the code block, px: laid out {zero.laid_right - zero.laid:.3f};  "
         f"the library's entry {zero.advance:g};  the chrome font at {px:g} px "
         f"{chrome_advance(zero):g}"
+    )
+
+    # Size: the fenced block's line pitch, and one glyph's bitmap beside the chrome's.
+    pitches = [b.top - a.top for a, b in pairwise(code_lines)]
+    heights = [line.bottom - line.top for line in code_lines]
+    drawn_pitches = [b[0].pen_y - a[0].pen_y for a, b in pairwise(rows_of(code))]
+    out.append(
+        f"  size: fenced lines {len(code_lines)};  top to top as laid out, px: {_tally(pitches)};  "
+        f"as drawn (a row's glyphs' pen y to the next row's): {_tally(drawn_pitches)};  line "
+        f"height as laid out: {_tally(heights)};  the chrome font's line at {px:g} px: "
+        f"{chrome_baked.size:g}"
+    )
+    theirs = chrome_baked.find_glyph(ord("0"))
+    mine = (zero.quad[2] - zero.quad[0], zero.quad[3] - zero.quad[1])
+    chromes = (float(theirs.x1 - theirs.x0), float(theirs.y1 - theirs.y0))
+    out.append(
+        f"  size: the bitmap of '0', width x height px: typeset {mine[0]:g} x {mine[1]:g} "
+        f"(the library's entry baked at {zero.baked_px:g});  the chrome font at {px:g} px "
+        f"{chromes[0]:g} x {chromes[1]:g}"
+    )
+    brief["size"] = (
+        f"{'/'.join(f'{v:g}' for v in sorted({round(p, 3) for p in drawn_pitches}))} "
+        f"{mine[0]:g}x{mine[1]:g}/{chromes[0]:g}x{chromes[1]:g}"
     )
 
     # R1: a spaceless run, first pen to last pen, drawn less laid out.
@@ -565,6 +635,7 @@ def _row_start(row: list[Glyph], text: str) -> int:
 
 
 TABLE = (
+    ("size", "pitch, '0' ts/chrome", 24),
     ("r1 prose", "R1 prose runs d-l", 19),
     ("r1 code", "R1 code runs d-l", 18),
     ("r1 40", "R1 40ch drawn/laid/chrome", 27),
@@ -582,7 +653,9 @@ TABLE = (
 """
 The table's columns: key in ``measure``'s brief, heading, width.
 
-R1 runs are the least and greatest drawn-less-laid-out width of a spaceless
+The first column is the fenced block's line pitch as drawn and the bitmap of
+``0`` as typeset and as the chrome font has it at the pixel height beside the
+page. R1 runs are the least and greatest drawn-less-laid-out width of a spaceless
 run; ``in 74ch`` the least and greatest of one glyph's x from the row's first.
 R2a counts steps equal to the baked advance of the library's own atlas entry,
 R2b of the chrome font at the page's pixel height. R3 is the word space by the
@@ -599,13 +672,71 @@ def uptime() -> str:
         return f"uptime not run: {exc}"
 
 
-def main() -> int:
+def provenance(package: Any) -> str:
+    """
+    The file ``advtext`` was imported from, and the commit when its directory is a checkout.
+    """
+    where = Path(package.__file__).resolve().parent
+    said = f"advtext imported from {where}"
+    if not (where.parent / ".git").exists():
+        return f"{said};  not a git checkout, so no commit is read here"
+    try:
+        head = subprocess.run(
+            ["git", "-C", str(where.parent), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout.strip()
+        edits = subprocess.run(
+            ["git", "-C", str(where.parent), "status", "--porcelain", "--", "advtext"],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout.splitlines()
+    except OSError as exc:
+        return f"{said};  git not run: {exc}"
+    return f"{said};  commit {head or 'not read'};  {len(edits)} path(s) edited or added under it"
+
+
+def _lengths(text: str) -> tuple[float, ...]:
+    return tuple(float(part) for part in text.split(",") if part.strip())
+
+
+def _faces(text: str) -> tuple[str, ...]:
+    faces = tuple(part.strip() for part in text.split(",") if part.strip())
+    for face in faces:
+        if face not in FACES:
+            raise argparse.ArgumentTypeError(f"{face!r} is not one of {', '.join(FACES)}")
+    return faces
+
+
+def arguments(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=(__doc__ or "").strip().splitlines()[0])
+    parser.add_argument(
+        "--px",
+        type=_lengths,
+        default=None,
+        help="pixel heights, comma separated (default 14,16,18,20; none when only --em is given)",
+    )
+    parser.add_argument(
+        "--em", type=_lengths, default=(), help="em sizes in pixels, comma separated (default none)"
+    )
+    parser.add_argument("--faces", type=_faces, default=FACES, help="mono, roboto or both")
+    args = parser.parse_args(argv)
+    if args.px is None:
+        args.px = () if args.em else SIZES
+    return args
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = arguments(argv)
     os.environ.setdefault("IMTYPESET_LIBRARY", str(PAIR / "libimtypeset_bundle.so"))
     os.environ.setdefault("IMTYPESET_PYTHON", str(PAIR / "pysnap"))
     for mark, text in ((MARKS[-2], RULER), (MARKS[-1], LONG)):
         assert len(text) == mark, (len(text), mark)
         assert all(not text[k - 1].isspace() for k in MARKS if k <= len(text)), text
 
+    import advtext
     from advtext import DARK_PALETTE, Face, TypesetUnavailable, TypesetView, fontlib, typesetter
 
     ts = typesetter.module()
@@ -618,11 +749,16 @@ def main() -> int:
     from imgui_bundle import hello_imgui, imgui, immapp
 
     before = uptime()
-    pages = [(face, px) for face in FACES for px in SIZES]
+    pages = [
+        Page(face, unit, size)
+        for face in args.faces
+        for unit, sizes in (("em", args.em), ("px", args.px))
+        for size in sizes
+    ]
     state: dict[str, Any] = {"page": 0, "shown": 0, "views": None, "first_draw": 0.0, "made": 0.0}
     facts: dict[str, str] = {}
     report: list[str] = []
-    table: list[tuple[str, float, dict[str, str]]] = []
+    table: list[tuple[Page, dict[str, str]]] = []
     failed: list[str] = []
 
     def load_fonts() -> None:
@@ -651,8 +787,8 @@ def main() -> int:
             f"{entries} before typesetter.load_fonts(), {len(atlas.fonts)} after"
         )
 
-    def page_views(face: str, px: float) -> dict[str, Any]:
-        theme = theme_for(face, px)
+    def page_views(page: Page) -> dict[str, Any]:
+        theme = theme_for(page)
         prose = TypesetView("\n\n".join((PROSE, RHYTHM, DIGITS)), theme=theme, palette=DARK_PALETTE)
         code = TypesetView(
             "```\n" + "\n".join(CODE_ROWS) + "\n```", theme=theme, palette=DARK_PALETTE
@@ -705,7 +841,8 @@ def main() -> int:
         if failed or state["page"] >= len(pages):
             hello_imgui.get_runner_params().app_shall_exit = True
             return
-        face, px = pages[state["page"]]
+        page = pages[state["page"]]
+        px = page.beside
         io = imgui.get_io()
         imgui.set_next_window_pos(imgui.ImVec2(0.0, 0.0))
         imgui.set_next_window_size(io.display_size)
@@ -720,7 +857,7 @@ def main() -> int:
                 return
             if state["views"] is None:
                 started = time.perf_counter()
-                state["views"] = page_views(face, px)
+                state["views"] = page_views(page)
                 state["made"] = time.perf_counter() - started
                 state["shown"] = 0
             views = state["views"]
@@ -771,21 +908,30 @@ def main() -> int:
                     text,
                     white,
                 )
-            lines, brief = measure(face, px, prose, code, state["chrome"], natives, controls, sizes)
+            lines, brief = measure(
+                px,
+                prose,
+                code,
+                state["chrome"],
+                natives,
+                controls,
+                sizes,
+                list(views["code"].set_lines()),
+            )
             report.append(
-                f"{face} {px:g} px   (the page's two views made in "
-                f"{state['made'] * 1000.0:.1f} ms; their first draw "
+                f"{page.label}   (the chrome font beside it at {px:g} px; the page's two views "
+                f"made in {state['made'] * 1000.0:.1f} ms; their first draw "
                 f"{state['first_draw'] * 1000.0:.1f} ms, layout and baking included)"
             )
             report.extend(lines)
             report.append("")
-            table.append((face, px, brief))
+            table.append((page, brief))
             for name in ("prose", "code"):
                 views[name].close()
             state["views"] = None
             state["page"] += 1
         except (Unread, TypesetUnavailable) as exc:
-            failed.append(f"{face} {px:g} px: {exc}")
+            failed.append(f"{page.label}: {exc}")
         finally:
             imgui.end()
 
@@ -810,6 +956,7 @@ def main() -> int:
     print(f"  uptime before: {before}")
     print(f"  uptime after:  {after}")
     print(f"  display: {os.environ.get('DISPLAY', 'unset')};  python {sys.version.split()[0]}")
+    print(f"  {provenance(advtext)}")
     print(f"  imgui_bundle {imgui_bundle.__version__} at {Path(imgui_bundle.__file__).parent}")
     print(f"  IMTYPESET_LIBRARY={os.environ['IMTYPESET_LIBRARY']}")
     print(f"  IMTYPESET_PYTHON={os.environ['IMTYPESET_PYTHON']}")
@@ -828,17 +975,17 @@ def main() -> int:
         print(f"  {name}: {value}")
     print(
         "  theme: Theme.at_pixel_height(px, faces=Faces.mono() | Faces(), align=Align.LEFT, "
-        "spacing=Spacing.FRENCH)"
+        "spacing=Spacing.FRENCH);  on an em page px is em / em_size_for_pixel_height(face, 1)"
     )
     print(f"  views: prose {PROSE_PX:g} px wide, fenced block {CODE_PX:g} px wide")
     print()
     print("\n".join(report))
-    head = f"{'face':<7}{'px':>3}  " + "".join(f"{title:<{w}}" for _, title, w in TABLE)
+    head = f"{'page':<13}" + "".join(f"{title:<{w}}" for _, title, w in TABLE)
     print(head)
     print("-" * len(head))
-    for face, px, brief in table:
+    for page, brief in table:
         cells = "".join(f"{brief.get(key, '-'):<{w}}" for key, _, w in TABLE)
-        print(f"{face:<7}{px:>3g}  {cells}")
+        print(f"{page.label:<13}{cells}")
     if failed:
         print()
         for reason in failed:
