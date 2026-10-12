@@ -238,13 +238,17 @@ def step_verify(deps: Path) -> int:
     return 0
 
 
-def wheel_facts() -> tuple[str, str]:
+def wheel_facts() -> tuple[str, str, str]:
     """
-    The installed wheel's version and its Dear ImGui's, asked of a child interpreter.
+    The wheel a child interpreter imports: its version, its Dear ImGui's, its module file.
+
+    The module file is what the library is linked against, by name and with a
+    run path to its directory, so it is the one thing the library cannot outlive.
     """
     code = (
         "import imgui_bundle; from imgui_bundle import imgui; "
-        "print(imgui_bundle.__version__); print(imgui.get_version())"
+        "print(imgui_bundle.__version__); print(imgui.get_version()); "
+        "print(imgui_bundle._imgui_bundle.__file__)"
     )
     asked = subprocess.run(
         [sys.executable, "-P", "-B", "-c", code], text=True, capture_output=True, check=False
@@ -252,8 +256,8 @@ def wheel_facts() -> tuple[str, str]:
     if asked.returncode != 0:
         detail = (asked.stderr.strip().splitlines() or ["no message"])[-1]
         raise DepsError(f"imgui-bundle does not import in {sys.executable} ({detail})")
-    wheel, imgui = asked.stdout.split()
-    return wheel, imgui
+    wheel, imgui, module = asked.stdout.splitlines()
+    return wheel, imgui, module
 
 
 def _run_build(command: list[str], env: dict[str, str]) -> tuple[int, str | None]:
@@ -291,7 +295,7 @@ def build_library(deps: Path) -> str:
         raise DepsError(f"there is no C++ compiler ({cxx} is not on PATH; CXX=... names another)")
 
     ref = read_ref(ROOT / "imtypeset.ref")
-    wheel, imgui = wheel_facts()
+    wheel, imgui, module = wheel_facts()
     source = deps / "imtypeset-src"
     fetch_commit(IMTYPESET, ref, source)
     if not (source / BUILD_SCRIPT).is_file():
@@ -348,6 +352,7 @@ def build_library(deps: Path) -> str:
         f"commit: {ref}\n"
         f"for: {sys.executable}\n"
         f"wheel: imgui-bundle {wheel} (Dear ImGui {imgui})\n"
+        f"module: {module}\n"
         f"headers: {headers}\n"
         f"bundle: {bundle}\n"
         f"date: {datetime.now(UTC):%Y-%m-%dT%H:%M:%SZ}\n",
@@ -383,6 +388,13 @@ def step_library(deps: Path) -> int:
         "ImGui's own layout check refuses and imtypeset accepts on its field probe"
     )
     print(f"imtypeset built against {headers}: {kind}.")
+    for line in (final / "BUILT-FROM").read_text(encoding="utf-8").splitlines():
+        if line.startswith("module: "):
+            print(
+                f"    linked against {line.removeprefix('module: ')} and for that file "
+                f"alone: beside another imgui-bundle binary the library is refused and "
+                f"advtext.typesetter.reason() says so."
+            )
     print(f"    IMTYPESET_LIBRARY={final / LIBRARY_NAME}")
     print(f"    IMTYPESET_PYTHON={final / 'pysnap'}")
     print("    (the Makefile exports both whenever this pair exists)")

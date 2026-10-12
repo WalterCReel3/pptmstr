@@ -10,6 +10,7 @@ panes that fall back.
 
 from __future__ import annotations
 
+import importlib.metadata
 import re
 import tomllib
 from pathlib import Path
@@ -39,10 +40,14 @@ def test_imgui_bundle_is_pinned_to_exactly_one_version() -> None:
     assert _imgui_pin()
 
 
-def test_the_installed_imgui_bundle_is_the_pinned_one() -> None:
+def test_the_imgui_bundle_that_runs_and_the_one_that_is_installed_are_the_pinned_one() -> None:
+    # Two questions with one answer in a clean environment and possibly two on
+    # a path that reaches more than one site-packages: which module is
+    # imported, and which distribution the metadata finds first.
     import imgui_bundle
 
     assert imgui_bundle.__version__ == _imgui_pin()
+    assert importlib.metadata.version("imgui-bundle") == _imgui_pin()
 
 
 def test_what_advtext_needs_at_run_time_is_a_runtime_dependency() -> None:

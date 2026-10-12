@@ -313,7 +313,7 @@ def fake_imtypeset(
     monkeypatch.delenv("FAKE_FAIL", raising=False)
     monkeypatch.delenv("FAKE_REFUSE", raising=False)
     monkeypatch.setattr(deps.platform, "system", lambda: "Linux")
-    monkeypatch.setattr(deps, "wheel_facts", lambda: ("1.0", "9.9"))
+    monkeypatch.setattr(deps, "wheel_facts", lambda: ("1.0", "9.9", "/wheel/_imgui_bundle.so"))
     monkeypatch.setattr(deps, "read_ref", lambda path: commit)
     return commit
 
@@ -335,6 +335,7 @@ def test_a_build_installs_a_whole_pair_and_a_second_one_replaces_it(
         assert f"commit: {fake_imtypeset}\n" in built_from
         assert "headers: stand-in:fake-headers\n" in built_from
         assert f"for: {sys.executable}\n" in built_from
+        assert "module: /wheel/_imgui_bundle.so\n" in built_from
 
 
 @needs_git
