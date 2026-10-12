@@ -5,27 +5,20 @@ The helpers are the rig: ``frame`` draws one frame in a fixed window of a bare
 ImGui context (``tests/conftest.py`` has the context and ``seam``, which skips
 with the library's own reason where it cannot draw).
 
-**Three kinds of test are here.**
+**Two kinds of test are here.**
 
-- Tests of the seam on the library as it is: the second half of the file. What a
-  view was given to set is read back from the view (``texts``), where it put a
-  line from the library (``set_lines``), and what a frame drew from the draw
-  list's vertices. Nobody reads a pixel.
+- Tests of the seam on the library as it is. What a view was given to set is
+  read back from the seam (``ViewCache.texts``) or the view (``texts``), where it
+  put a line from the library (``set_lines``), and what a frame drew from the
+  draw list's vertices. Nobody reads a pixel.
 - ``xfail(strict=True, reason="P<n>: ...")``: a behaviour the library does not
   give, asked for under that number in ``HANDOFF-advtext.md``. Each body runs on
   the library and fails on the behaviour its request names, so a library that
-  starts giving it turns the test red and the mark comes off. Four of them are
-  about a stream and still call a seam that is not built: they fail for that
-  reason until the step that builds ``stream()`` rewrites them.
-- ``skip(reason="SEAM-2: ...")``: parked for the step that builds streams, and
-  for its decision on building a long text over frames. Their bodies are as they
-  were written, against a seam that is gone.
+  starts giving it turns the test red and the mark comes off.
 """
 
 from __future__ import annotations
 
-import functools
-import math
 import os
 import random
 import re
@@ -42,16 +35,6 @@ from pptmstr.model import NodeId, PendingApproval
 from pptmstr.ui import typeset
 from pptmstr.ui.typeset import Kind, Part, Role, RoleStyle, Slot, gate, roles, themes, views
 
-SEAM_2 = "SEAM-2: streams and diffs are not re-adopted yet"
-BUDGET = (
-    "SEAM-2: whether a long text is built over frames. Timed in pptmstr (views.py has "
-    "the numbers): 1,120 lines of markdown are read in 32.5 ms and first drawn in 3.0, "
-    "and the bodies brief, board and the settings samples hand over are bounded far "
-    "under that, so nothing in views.py builds over frames. An approval body and a "
-    "transcript have no such bound: the step that adopts them times theirs, and "
-    "builds a budget and un-parks these, or deletes them"
-)
-SEAM_2_BUDGET = BUDGET
 P7 = (
     "P7: no supported reader options, so HTML, a glob's stars and a link's "
     "destination are not set as written"
@@ -137,44 +120,23 @@ def rows(diff: Diff, kind: RowKind) -> list[str]:
     ]
 
 
-WORDS = "columns of Hamburgefonstiv, 0123 (wide) AV To a.i"
-
-
-def _key_tall(key: str) -> float:
-    from advtext import px_from_sp
-
-    metrics = typeset.pixel_metrics(key)
-    return float(px_from_sp(round(metrics.ascent + metrics.descent)))
-
-
-def _atlas_fonts(im: Any) -> int:
-    return len(im.get_io().fonts.fonts)
-
-
 def _bundled(name: str) -> Path:
     return (roles._bundle_fonts() / name).resolve()
 
 
 @pytest.mark.xfail(strict=True, reason=P11)
-def test_a_streamed_code_span_is_sized_as_a_settled_one(seam: Any) -> None:
+def test_a_streamed_code_span_is_the_chromes_height(seam: Any) -> None:
     """
-    A stream's blocks are built by the library's stream document, from the same
-    theme: a span must not change size on the frame its run settles.
+    A stream's blocks are built by the library's stream, from the same theme as
+    a settled view's, and its code span is the same 109 px for sixteen
+    characters where the chrome's 16 px would lay them out at 122.
     """
     cache = typeset.ViewCache()
     stream = typeset.stream(cache, "s")
-
-    def body() -> None:
-        stream.set_text("Set `Settings.typeset` here.\n\nAnd more")
-        stream.draw()
-
-    frame(seam, body)
-    block = cache.view("s").document.blocks[0]
-    keys = {node.font for node in block.material if hasattr(node, "codepoint")}
-    assert {key.rpartition("@")[0]: round(_key_tall(key), 2) for key in keys} == {
-        "prose": 16.0,
-        "code": 16.0,
-    }
+    stream.set_text("Set `Settings.typeset` here.\n\nAnd more")
+    frame(seam, lambda: stream.draw())
+    ((left, _, right, _),) = stream.view.span_rects(0, 4, 20)
+    assert right - left == pytest.approx(16 * 7.626, abs=1.0)
 
 
 TALL_PROSE = (
@@ -413,142 +375,6 @@ def _shown(view: Any) -> str:
     return "\n\n".join(view.texts)
 
 
-def _feet(view: Any) -> list[float]:
-    """
-    The foot of every line of a view, in pixels from its top: baseline and depth.
-    """
-    out: list[float] = []
-    for line in view.set_lines():
-        depth = view.document.blocks[line.block].style.strut.depth
-        out.append(float(advtext.px_from_sp(line.baseline + depth)))
-    return out
-
-
-def _resized(seam: Any, cache: typeset.ViewCache, source: str, width: float) -> float:
-    """
-    One frame of ``source`` in a window ``width`` wide; the width its layout is at after.
-    """
-    narrow(seam, lambda: typeset.markdown(cache, "k", source), width=width)
-    return float(advtext.px_from_sp(cache.view("k").layout.width))
-
-
-@pytest.mark.skip(reason=BUDGET)
-def test_an_expensive_view_waits_for_a_resize_to_stop(
-    seam: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """
-    Dragging a splitter asks for a new width every frame, and a layout at a new
-    width is linear in the text. A view that is not cheap keeps its layout until
-    the width has stood for ``_RESIZE_SETTLE_S``, and frames keep coming meanwhile.
-    """
-    source = long_markdown(40)
-    monkeypatch.setitem(typeset._STATE.layout_rate, "markdown", 0.2)
-    # A budget, and one no frame here reaches: with none set nothing waits.
-    typeset.set_budget(1e9)
-    cache = typeset.ViewCache()
-    first = _resized(seam, cache, source, 700.0)
-    assert typeset._rebreak_ms(cache._entries["k"]) > typeset._CHEAP_RELAYOUT_MS
-    assert _resized(seam, cache, source, 690.0) == first
-    assert typeset.pending(), "nothing would end the wait if the frames stopped"
-    assert _resized(seam, cache, source, 680.0) == first, "still moving: the clock restarts"
-    frames = 1
-    while _resized(seam, cache, source, 680.0) == first:
-        frames += 1
-        assert frames < 60
-    # A sixtieth of a second a frame: the width stood for the whole wait.
-    assert frames >= int(typeset._RESIZE_SETTLE_S * 60)
-    assert cache._entries["k"].measure == cache._entries["k"].width < first
-
-
-@pytest.mark.skip(reason=BUDGET)
-def test_a_cheap_view_follows_a_resize_at_once(seam: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    """
-    Three lines are cheap whatever the learned rate says: a rate is learned from
-    the last thing laid out, and one slow frame must not make every view wait.
-    """
-    monkeypatch.setitem(typeset._STATE.layout_rate, "markdown", 500.0)
-    typeset.set_budget(1e9)
-    cache = typeset.ViewCache()
-    first = _resized(seam, cache, "one\n\ntwo\n", 700.0)
-    cache._entries["k"].cost_ms = typeset._CHEAP_RELAYOUT_MS / 2
-    assert _resized(seam, cache, "one\n\ntwo\n", 690.0) < first
-
-
-@pytest.mark.skip(reason=BUDGET)
-def test_with_no_budget_a_new_width_is_taken_at_once_however_slow_the_last_layout_was(
-    seam: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """
-    The wait for a width to stand is decided by what the last layout cost, which is
-    a time. With no budget set -- every test, and a script taking one screenshot --
-    a frame shows the text at the width it was asked for, on a machine of any
-    speed and after tests that left any rate behind.
-    """
-    source = long_markdown(40)
-    cache = typeset.ViewCache()
-    first = _resized(seam, cache, source, 700.0)
-    monkeypatch.setitem(typeset._STATE.layout_rate, "markdown", 500.0)
-    cache._entries["k"].cost_ms = 5000.0
-    assert _resized(seam, cache, source, 500.0) < first
-    assert not typeset.pending()
-
-
-@pytest.mark.skip(reason=BUDGET)
-def test_a_test_leaves_a_learned_rate_behind_it() -> None:
-    """
-    The first half of a pair: the next test finds this gone (``tests/conftest.py``).
-    """
-    typeset._STATE.layout_rate["markdown"] = 123.0
-
-
-@pytest.mark.skip(reason=BUDGET)
-def test_no_test_starts_with_a_rate_another_learned() -> None:
-    assert typeset._STATE.layout_rate == {}
-
-
-@pytest.mark.skip(reason=BUDGET)
-def test_a_layout_kept_at_an_old_width_does_not_widen_its_window(seam: Any) -> None:
-    """
-    While a new width is waited on the view draws the layout it has, which may be
-    wider than the room: 14 px wider on the frame a pane gains a scrollbar. Drawn
-    as an ordinary item it gave the window a scroll range across to text that was
-    about to be re-broken.
-    """
-    source = long_markdown(40)
-    # A budget no frame here reaches: with none set a new width is not waited on.
-    typeset.set_budget(1e9)
-    cache = typeset.ViewCache()
-    reach: list[float] = []
-    kept: list[float] = []
-
-    def body() -> None:
-        typeset.markdown(cache, "k", source, height_cap=200.0)
-
-    def measured() -> None:
-        real = seam.end_child
-
-        def end_child() -> None:
-            reach.append(seam.get_scroll_max_x())
-            real()
-
-        seam.end_child = end_child
-        try:
-            body()
-        finally:
-            seam.end_child = real
-
-    narrow(seam, body, width=666.0)
-    entry = cache._entries["k"]
-    entry.cost_ms = 60.0
-    wide = entry.measure
-    # Twice: a window's scroll range is worked out from what the frame before drew.
-    for _ in range(2):
-        narrow(seam, measured, width=652.0)
-        kept.append(entry.measure or 0.0)
-    assert kept == [wide, wide], "the old layout, for the length of the wait"
-    assert reach == [0.0, 0.0]
-
-
 def _parts() -> tuple[typeset.Part, ...]:
     return (
         typeset.Part("# Title\n\nSome **prose** here.\n"),
@@ -575,10 +401,6 @@ def _inks(seam: Any, draw: Callable[[], object]) -> set[int]:
     return seen
 
 
-FENCED = "Before.\n\n```diff\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-old\n+new\n```\n\nAfter.\n"
-
-
-@pytest.mark.skip(reason=SEAM_2)
 def test_a_stream_grows_as_it_is_fed_and_settles_when_closed(seam: Any) -> None:
     cache = typeset.ViewCache()
     handle = typeset.stream(cache, "s")
@@ -592,13 +414,30 @@ def test_a_stream_grows_as_it_is_fed_and_settles_when_closed(seam: Any) -> None:
     handle.close()
     frame(seam, lambda: heights.append(handle.draw()))
     assert handle.closed
-    assert cache.drawn("s") is not None and (cache.drawn("s") or (0, 1))[1] == 0
-    assert cache.replaced("s") == 0
+    assert cache.view("s") is handle.view and cache.views("s") == (handle.view,)
+    assert cache.unbuilt("s") == 0 and handle.unbuilt == 0
+    assert cache.height("s") == heights[-1]
+    assert cache.texts("s") == ("Title", "first paragraph", "item", "another", "py\nx = 1")
     with pytest.raises(ValueError):
         handle.append("more")
 
 
-@pytest.mark.skip(reason=SEAM_2)
+def test_a_stream_can_be_fed_before_it_is_drawn_and_has_no_view_until_then(seam: Any) -> None:
+    """
+    ``stream()`` asks the library for nothing, so a pane may make one and append
+    to it wherever it holds its text; the library's stream and view are made by
+    the draw, inside the seam's catch.
+    """
+    cache = typeset.ViewCache()
+    handle = typeset.stream(cache, "s")
+    handle.append("one ")
+    handle.append("two\n")
+    assert handle.view is None and cache.view("s") is None and cache.texts("s") == ()
+    assert handle.text == "one two\n" and not handle.following
+    frame(seam, lambda: handle.draw())
+    assert cache.texts("s") == ("one two",)
+
+
 def test_text_that_extends_the_stream_is_appended_and_anything_else_replays(seam: Any) -> None:
     cache = typeset.ViewCache()
     handle = typeset.stream(cache, "s")
@@ -609,36 +448,44 @@ def test_text_that_extends_the_stream_is_appended_and_anything_else_replays(seam
     frame(seam, lambda: handle.draw())
     assert handle.view is view, "an extension must not cost the selection"
     assert handle.text == "first paragraph\n\nsecond one\n"
+    assert cache.texts("s") == ("first paragraph", "second one")
 
     handle.set_text("something else entirely\n", closed=True)
     frame(seam, lambda: handle.draw())
     assert handle.view is not view
     assert handle.closed
-    assert [handle.view.block_text(0)] == ["something else entirely"]
+    assert cache.texts("s") == ("something else entirely",)
     assert cache.view("s") is handle.view
 
+    # A closed stream given its own text again with more after it is read again:
+    # the library's stream has been told the text ended.
+    handle.set_text("something else entirely\n\nand more\n")
+    frame(seam, lambda: handle.draw())
+    assert not handle.closed
+    assert cache.texts("s") == ("something else entirely", "and more")
 
-@pytest.mark.skip(reason=SEAM_2)
+
 def test_a_stream_survives_the_face_setting_by_replaying_what_it_was_fed(seam: Any) -> None:
     cache = typeset.ViewCache()
     handle = typeset.stream(cache, "s")
     handle.append("some **bold** text\n")
     handle.close()
     frame(seam, lambda: handle.draw())
+    before = handle.view
     typeset.configure(typeset=True, mono=True)
-    frame(seam, lambda: handle.draw())
+    frame(seam, lambda: typeset.stream(cache, "s").draw())
+    assert typeset.stream(cache, "s") is handle and handle.view is not before
     assert handle.view.theme.style(BlockKind.PARAGRAPH).font.face is Face.CODE
-    assert handle.view.block_text(0) == "some bold text"
-    assert handle.closed
+    assert cache.texts("s") == ("some bold text",)
+    assert handle.closed and handle.text == "some **bold** text\n"
 
 
-@pytest.mark.skip(reason=SEAM_2)
 @pytest.mark.parametrize("follow", [True, False])
 def test_only_a_stream_asked_to_follow_scrolls_its_window(seam: Any, follow: bool) -> None:
     """
-    The transcript pane already owns follow-the-tail. A stream that also scrolled
-    the window by default would be a second owner, and the two would disagree on
-    the frame the reader scrolls up.
+    A pane that owns follow-the-tail itself (``widgets.follow_tail``) must not have
+    a second owner in the stream: the two would disagree on the frame the reader
+    scrolls up.
     """
     cache = typeset.ViewCache()
     handle = typeset.stream(cache, "s", follow=follow)
@@ -660,20 +507,163 @@ def test_only_a_stream_asked_to_follow_scrolls_its_window(seam: Any, follow: boo
         assert at == 0
 
 
-@pytest.mark.xfail(strict=True, reason=P7)
 def test_html_arriving_in_pieces_is_still_shown(seam: Any) -> None:
+    """
+    The reader's rules are on the parser a stream reads with (``gate._reader``):
+    a tag cut between two pieces is the tag, and a comment opener hides nothing.
+    """
     cache = typeset.ViewCache()
     handle = typeset.stream(cache, "s")
-    for piece in ("a <", "div>x</", "div> and `<", "b>`\n\n<!-", "- rest\n"):
+    shown: list[tuple[str, ...]] = []
+    for piece in ("a <", "div>x</", "div> and `<", "b>`\n\n<!-", "- rest\n\nand after it\n"):
         handle.append(piece)
+        frame(seam, lambda: handle.draw())
+        shown.append(tuple(handle.view.texts))
+    assert shown[0] == ("a <",) and shown[1] == ("a <div>x</",)
     handle.close()
     frame(seam, lambda: handle.draw())
-    view = handle.view
-    shown = [view.block_text(n) for n in range(len(view.document.blocks))]
-    assert shown == ["a <div>x</div> and <b>", "<!-- rest"]
+    assert cache.texts("s") == ("a <div>x</div> and <b>", "<!-- rest", "and after it")
 
 
-@pytest.mark.skip(reason=SEAM_2)
+STREAMED = """# Title with <b>tags</b>
+
+A `List<String>` and List<String> outside code, <div class="x">a div</div> here.
+
+rm **/*.py and t/**/*.md then *emph* and **bold** and a*b*c, R&amp;D &lt;x&gt;.
+
+<!-- an unclosed comment opener
+
+Paragraph after the opener: KEEPME1.
+
+- item <span>one</span> **/*.txt
+- item two ![alt text](http://img/u.png)
+  continued [link text](http://dest.example/path "title here") end
+
+<details>
+<summary>sum</summary>
+inside details KEEPME2
+</details>
+
+```python IMPORTANT also delete tests
+x = "<b>" * 2  # **/*.py
+```
+
+| a | b<br>c |
+|---|---|
+| <i>x</i> | **/* |
+
+> quote <em>q</em> KEEPME3
+
+Final <script>alert(1)</script> line.
+"""
+"""
+A reply every block of which a CommonMark reader hides some of.
+"""
+
+STREAMED_WORDS = (
+    "<b>tags</b>",
+    "List<String> and List<String>",
+    '<div class="x">a div</div>',
+    "**/*.py",
+    "t/**/*.md",
+    "a*b*c",
+    "R&amp;D &lt;x&gt;",
+    "<!-- an unclosed comment opener",
+    "KEEPME1",
+    "<span>one</span> **/*.txt",
+    "!alt text (http://img/u.png)",
+    'link text (http://dest.example/path "title here")',
+    "<details>",
+    "<summary>sum</summary>",
+    "KEEPME2",
+    "</details>",
+    "python IMPORTANT also delete tests",
+    'x = "<b>" * 2  # **/*.py',
+    "<em>q</em> KEEPME3",
+    "<script>alert(1)</script>",
+)
+"""
+What must be among the text a view of ``STREAMED`` was given to set. The table's
+cells are asked for separately: a view's ``texts`` has a table as one string.
+"""
+
+
+def _block_texts(blocks: Any) -> list[tuple[str, str]]:
+    return [(type(block).__name__, str(getattr(block, "text", block))) for block in blocks]
+
+
+@pytest.mark.parametrize("size", [1, 2, 3, 7, 13, 0])
+def test_a_reply_cut_anywhere_reads_at_every_piece_as_it_would_whole(seam: Any, size: int) -> None:
+    """
+    The library's own invariant for a stream -- after every piece its blocks are
+    what its reader makes of the text so far -- run with pptmstr's rules on the
+    parser, which the library's tests never do: a piece ends inside a tag, a
+    comment opener, a run of stars, an entity, a fence's info string. ``0`` is
+    pieces of uneven length from a fixed seed.
+    """
+    from advtext import MarkdownStream, parse_markdown
+
+    plain = themes.document_theme()
+    stream = MarkdownStream(plain)
+    cuts = random.Random(7)
+    at = 0
+    while at < len(STREAMED):
+        step = size or cuts.randint(1, 25)
+        stream.append(STREAMED[at : at + step])
+        at += step
+        whole = parse_markdown(STREAMED[:at], plain, references=False, more_may_follow=True)
+        assert _block_texts(stream.blocks) == _block_texts(whole.blocks), at
+    stream.close()
+    assert _block_texts(stream.blocks) == _block_texts(gate.read(STREAMED, plain).blocks)
+
+
+@pytest.mark.parametrize("piece", [1, 5, 40, len(STREAMED)])
+def test_nothing_written_is_absent_from_a_stream_or_from_the_same_text_settled(
+    seam: Any, piece: int
+) -> None:
+    """
+    Drawn, through the seam: a turn still arriving and the same turn settled
+    are handed the same words, and they are the words that were written.
+    """
+    cache = typeset.ViewCache()
+    handle = typeset.stream(cache, "s")
+    for at in range(0, len(STREAMED), piece):
+        handle.append(STREAMED[at : at + piece])
+        frame(seam, lambda: handle.draw())
+    handle.close()
+    frame(seam, lambda: handle.draw())
+    frame(seam, lambda: typeset.markdown(cache, "m", STREAMED))
+
+    streamed, settled = cache.texts("s"), cache.texts("m")
+    assert streamed == settled
+    said = "\n".join(streamed)
+    assert [word for word in STREAMED_WORDS if word not in said] == []
+    (table,) = [n for n, _ in enumerate(streamed) if handle.view.block_role(n) == "TABLE"]
+    for cell in ("b<br>c", "<i>x</i>", "**/*"):
+        assert cell in streamed[table]
+
+
+def test_a_fences_info_string_is_set_while_its_code_is_still_arriving(seam: Any) -> None:
+    """
+    A stream view reads its blocks from the library's stream, which keeps a
+    fence's info string and draws none of it. The seam stands between the two.
+    """
+    cache = typeset.ViewCache()
+    handle = typeset.stream(cache, "s")
+    handle.append("Do this:\n\n```python IMPORTANT also delete tests\nx = 1\n")
+    frame(seam, lambda: handle.draw())
+    assert handle.view.texts[1].startswith("python IMPORTANT also delete tests\nx = 1")
+    handle.append("y = 2\n```\n\nafter\n")
+    frame(seam, lambda: handle.draw())
+    assert cache.texts("s") == (
+        "Do this:",
+        "python IMPORTANT also delete tests\nx = 1\ny = 2",
+        "after",
+    )
+    # Told from the code by ink, as in a settled view.
+    assert theme.P.accent.u32 in _inks(seam, lambda: handle.draw())
+
+
 def test_a_stream_out_of_sight_with_new_text_is_still_taken_in(seam: Any) -> None:
     """
     Its height is what the pane scrolls by; a stream culled while it grows would
@@ -690,37 +680,45 @@ def test_a_stream_out_of_sight_with_new_text_is_still_taken_in(seam: Any) -> Non
     handle.append("two\n\nthree\n\n")
     frame(seam, lambda: heights.append(handle.draw()), lead=5000.0)
     assert heights[2] > heights[1] == heights[0]
+    assert cache.texts("s") == ("one", "two", "three")
 
 
-def _written(blocks: Any) -> str:
+@pytest.mark.parametrize("ending", ["Done!", "is a <", "a tick `", "ends \\", "two ``", "x <!-"])
+def test_a_stream_shows_all_it_was_given_without_waiting_for_more(seam: Any, ending: str) -> None:
     """
-    The text of some blocks read straight off their material: no layout, no window.
+    A stream that pauses -- the model is thinking, the tool is running -- must not be
+    showing less than arrived. Each ending is one a reader that has to look ahead
+    would hold back until the next piece. Read in the draw after it arrived:
+    nothing paces a stream.
     """
-    from advtext import nodes
-
-    def line(material: Any) -> str:
-        out = []
-        for node in material:
-            if isinstance(node, nodes.CharNode):
-                out.append(chr(getattr(node, "original", node.codepoint)))
-            elif isinstance(node, nodes.Glue) and not node.spec.stretch_order:
-                out.append(" ")
-        return "".join(out)
-
-    texts = []
-    for block in blocks:
-        if isinstance(block, advtext.TextBlock):
-            texts.append(line(block.marker) + " " + line(block.material))
-        elif isinstance(block, advtext.CodeBlock):
-            texts.append("\n".join(line(each) for each in block.lines))
-        elif isinstance(block, advtext.TableBlock):
-            cells = [cell for row in (block.header, *block.rows) for cell in row]
-            texts.append(" | ".join(line(cell.material) for cell in cells))
-    return "\n\n".join(texts)
+    cache = typeset.ViewCache()
+    handle = typeset.stream(cache, "s")
+    handle.append(f"Some words and then {ending}")
+    frame(seam, lambda: handle.draw())
+    assert _shown(handle.view) == f"Some words and then {ending}"
 
 
-def _settled_blocks(source: str) -> Any:
-    return typeset._build_piece(typeset._Piece(typeset.Kind.MARKDOWN, source, "prose")).blocks
+def test_a_stream_the_library_stops_under_says_so_and_reports_its_text_missing(
+    seam: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = typeset.ViewCache()
+    handle = typeset.stream(cache, "s")
+    handle.append("one\n\ntwo\n\nthree\n")
+    frame(seam, lambda: handle.draw())
+    assert cache.unbuilt("s") == 0
+
+    def stopped(**given: Any) -> bool:
+        raise advtext.TypesetUnavailable("imtypeset stopped: the library said no")
+
+    monkeypatch.setattr(handle.view, "draw", stopped)
+    said = _said(monkeypatch)
+    tall: list[float] = []
+    frame(seam, lambda: tall.append(handle.draw()))
+    assert said == ["typeset text stopped: imtypeset stopped: the library said no"]
+    assert tall[0] > 0.0
+    assert cache.unbuilt("s") == handle.unbuilt == 6
+    monkeypatch.undo()
+    assert typeset.load_fonts(BOLD), "a load is the way back"
 
 
 FRAGMENTS = (
@@ -747,409 +745,7 @@ FRAGMENTS = (
 )
 
 
-@pytest.mark.skip(reason=SEAM_2)
-@pytest.mark.parametrize("ending", ["Done!", "is a <", "a tick `", "ends \\", "two ``", "x <!-"])
-def test_a_stream_shows_all_it_was_given_without_waiting_for_more(seam: Any, ending: str) -> None:
-    """
-    A stream that pauses -- the model is thinking, the tool is running -- must not be
-    showing less than arrived. Each ending is one a reader that has to look ahead
-    would hold back until the next piece.
-    """
-    cache = typeset.ViewCache()
-    handle = typeset.stream(cache, "s")
-    handle.append(f"Some words and then {ending}")
-    frame(seam, lambda: handle.draw())
-    assert _shown(handle.view) == f"Some words and then {ending}"
-
-
-def long_markdown(sections: int) -> str:
-    return "".join(
-        f"## Section {n}\n\nParagraph {n} has a few words in it and `code_{n}`.\n\n"
-        for n in range(sections)
-    )
-
-
-@pytest.mark.skip(reason=BUDGET)
-def test_a_long_document_is_built_over_frames_and_says_how_much_is_left(
-    seam: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """
-    No call may stall a frame unannounced. Six hundred lines is past what one frame
-    builds, so the first frame draws the top of it and a line saying how many lines
-    are to come, and asks for more frames; when they have come the text is the same
-    as the one built at a stroke.
-    """
-    source = long_markdown(150)
-    said: list[str] = []
-    real = seam.text_colored
-    monkeypatch.setattr(seam, "text_colored", lambda c, t: (said.append(t), real(c, t))[1])
-    cache = typeset.ViewCache()
-    heights: list[float] = []
-    typeset.set_budget(0.0)
-    frame(seam, lambda: heights.append(typeset.markdown(cache, "k", source)))
-    left = cache.unbuilt("k")
-    assert left is not None and 0 < left < source.count("\n")
-    assert typeset.pending()
-    assert said == [f"typesetting: {left:,} more lines"]
-    assert _shown(cache.view("k")).startswith("Section 0\n\nParagraph 0")
-    frames = 1
-    while typeset.pending():
-        frame(seam, lambda: heights.append(typeset.markdown(cache, "k", source)))
-        frames += 1
-        assert frames < 40
-    assert frames > 3 and cache.unbuilt("k") == 0
-    assert heights == sorted(heights)
-
-    typeset.set_budget(math.inf)
-    frame(seam, lambda: typeset.markdown(cache, "whole", source))
-    assert cache.unbuilt("whole") == 0
-    assert _shown(cache.view("k")) == _shown(cache.view("whole"))
-    assert cache.height("k") == cache.height("whole")
-
-
-TRICKY = "\n".join(
-    part
-    for n in range(40)
-    for part in (
-        f"Paragraph {n} line one\nline two of {n}\n",
-        f"- item {n}\n\n  a second paragraph of item {n}\n\n- another {n}\n",
-        f"```\ncode {n}\n\nan unindented line after a blank one, inside the fence {n}\n```\n",
-        f"> quote {n}\n>\n> more of {n}\n",
-        f"1. one {n}\n2. two {n}\n\n   a paragraph inside two\n",
-        f"| a | b |\n|---|---|\n| {n} | x |\n",
-    )
-)
-
-
-@pytest.mark.skip(reason=BUDGET)
-def test_a_long_markdown_is_cut_only_where_cutting_changes_nothing(seam: Any) -> None:
-    """
-    A long source is parsed in pieces. A cut inside a list, a fence or a quote would
-    make two of it, so the pieces are checked the only way that matters: built one
-    by one they are, block for block, what the whole source builds to.
-    """
-    pieces = typeset._markdown_pieces(TRICKY)
-    assert len(pieces) > 8
-    assert "".join(text for text, _, _ in pieces) == TRICKY
-    for text, line, char in pieces:
-        assert TRICKY[char : char + len(text)] == text
-        assert TRICKY[:char].count("\n") == line
-    cut = typeset._pieces_of((typeset.Part(TRICKY),))
-    built = [block for piece in cut for block in typeset._build_piece(piece).blocks]
-    whole = list(_settled_blocks(TRICKY))
-    assert len(built) == len(whole) > 300
-    assert built == whole
-
-
-@pytest.mark.skip(reason=BUDGET)
-def test_a_long_list_is_not_cut_between_its_items(seam: Any) -> None:
-    """
-    A list whose items are a blank line apart, every one numbered ``1.`` as people
-    write them: each item starts in the first column after a blank line, which is
-    everything a cut asks for except that it is a list item. Cut there, the second
-    half would count from one again.
-    """
-    items = "".join(f"1. item number {n}\n\n" for n in range(1, 61))
-    source = f"Before the list.\n\n{items}After the list.\n\n" + long_markdown(30)
-    pieces = typeset._markdown_pieces(source)
-    assert len(pieces) > 2
-    assert pieces[0][0].endswith("1. item number 60\n\n"), "the whole list is in one piece"
-    for text, _, _ in pieces[1:]:
-        assert not re.match(r"[-*+>]|\d+[.)]", text), text[:20]
-    cut = typeset._pieces_of((typeset.Part(source),))
-    built = [block for piece in cut for block in typeset._build_piece(piece).blocks]
-    # Dressed again as one run: a piece cannot see that its last item ends the list,
-    # which is the view's to put right where two pieces meet (``_assemble``).
-    assert typeset._dressed(built) == typeset._dressed(list(_settled_blocks(source)))
-    cache = typeset.ViewCache()
-    frame(seam, lambda: typeset.markdown(cache, "k", source))
-    assert cache.view("k").block_text(60) == "60. item number 60"
-
-
-@pytest.mark.skip(reason=BUDGET)
-def test_the_blocks_of_a_document_built_in_pieces_know_where_they_came_from(seam: Any) -> None:
-    """
-    A fenced diff is read from the source by the line numbers of its block, so those
-    have to be the whole source's and not its piece's.
-    """
-    source = long_markdown(60) + FENCED
-    cache = typeset.ViewCache()
-    frame(seam, lambda: typeset.markdown(cache, "k", source))
-    view = cache.view("k")
-    assert len(typeset._markdown_pieces(source)) > 2
-    last = len(view.document.blocks) - 1
-    assert view.block_source(last, source) == "After.\n"
-    hosted = view.hosted(last - 1)
-    assert hosted is not None and (hosted.view.diff.added, hosted.view.diff.removed) == (1, 1)
-
-
-@pytest.mark.skip(reason=BUDGET)
-@pytest.mark.parametrize("kind", ["markdown", "plain"])
-def test_text_that_grows_at_the_end_is_read_again_from_its_last_piece_only(
-    seam: Any, monkeypatch: pytest.MonkeyPatch, kind: str
-) -> None:
-    """
-    The cost of a change must be the change's and not the document's. Under one key,
-    in one view, with the selection it had.
-    """
-    source = (
-        long_markdown(120)
-        if kind == "markdown"
-        else "".join(f"line {n}: output\n" for n in range(600))
-    )
-    cache = typeset.ViewCache()
-
-    def draw(text: str) -> None:
-        if kind == "markdown":
-            frame(seam, lambda: typeset.markdown(cache, "k", text))
-        else:
-            frame(seam, lambda: typeset.plain(cache, "k", text))
-
-    draw(source)
-    view = cache.view("k")
-    view.select_all()
-    built: list[int] = []
-    real = typeset._build_piece
-    monkeypatch.setattr(
-        typeset, "_build_piece", lambda piece: (built.append(piece.lines), real(piece))[1]
-    )
-    for n in range(3):
-        source += f"and one more line, number {n}\n"
-        draw(source)
-    # The last piece each time, and once the piece before it, whose end moved when
-    # the text stopped ending where it did.
-    assert 3 <= len(built) <= 4 and sum(built) < 100
-    assert cache.view("k") is view
-    assert view.selected_text().rstrip().endswith("and one more line, number 2")
-
-
-@pytest.mark.skip(reason=BUDGET)
-def test_views_wait_their_turn_when_a_frame_has_built_its_share(seam: Any) -> None:
-    """
-    Three views that each need building are not three builds in one frame: the frame's
-    allowance goes to the first of them, and what it does not reach claims its room
-    and says it is coming.
-    """
-    sources = [long_markdown(30 + n) for n in range(3)]
-    cache = typeset.ViewCache()
-
-    def body() -> None:
-        for n, source in enumerate(sources):
-            typeset.markdown(cache, n, source)
-
-    typeset.set_budget(0.0)
-    frame(seam, body)
-    total = sum(source.count("\n") for source in sources)
-    left = [cache.unbuilt(n) or 0 for n in range(3)]
-    # The allowance and no more, wherever it fell: eighty lines of some 370, in
-    # whole pieces. The last view has had none of it.
-    assert total - 100 <= sum(left) < total
-    assert left[0] < sources[0].count("\n") and left[2] == sources[2].count("\n")
-    assert typeset.pending()
-    frames = 1
-    while typeset.pending():
-        frame(seam, body)
-        frames += 1
-        assert frames < 40
-    assert [cache.unbuilt(n) for n in range(3)] == [0, 0, 0]
-
-
-@pytest.mark.skip(reason=BUDGET)
-def test_a_view_out_of_sight_is_not_rebuilt_when_the_faces_change(
-    seam: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """
-    A change of faces makes every held document stale at once. The ones on screen
-    are rebuilt; one scrolled out of sight keeps its room and waits to be looked at,
-    and does not keep the application awake while it waits.
-    """
-    cache = typeset.ViewCache()
-    heights: dict[str, float] = {}
-
-    def body(lead: float = 3000.0) -> None:
-        heights["near"] = typeset.markdown(cache, "near", MARKDOWN)
-        seam.dummy(seam.ImVec2(1.0, lead))
-        heights["far"] = typeset.markdown(cache, "far", MARKDOWN + "\nfar away\n")
-
-    frame(seam, body)
-    assert cache.unbuilt("far") == 0, "a view never drawn is built wherever it is"
-    before = dict(heights)
-    built: list[str] = []
-    real = typeset._build_piece
-    monkeypatch.setattr(
-        typeset, "_build_piece", lambda piece: (built.append(piece.text), real(piece))[1]
-    )
-    typeset.configure(typeset=True, faces="mono")
-    frame(seam, body)
-    assert built == [MARKDOWN]
-    assert heights["far"] == pytest.approx(before["far"], abs=0.01) and cache.unbuilt("far") > 0
-    assert not typeset.pending()
-    frame(seam, lambda: body(0.0))
-    assert len(built) == 2 and cache.unbuilt("far") == 0
-
-
-@pytest.mark.skip(reason=BUDGET)
-def test_text_too_long_to_cut_is_announced_a_frame_before_it_is_built(seam: Any) -> None:
-    """
-    Wrapped text is one block, so that copying it gives no break its source did not
-    have, and one block cannot be built in pieces.
-    """
-    text = "".join(f"wrapped line {n} of several hundred\n" for n in range(500))
-    cache = typeset.ViewCache()
-    typeset.set_budget(6.0)
-    frame(seam, lambda: typeset.plain(cache, "k", text, wrap=True))
-    assert cache.unbuilt("k") == 500 and typeset.pending()
-    frame(seam, lambda: typeset.plain(cache, "k", text, wrap=True))
-    assert cache.unbuilt("k") == 0 and not typeset.pending()
-    # Said once. A long piece that then changes every frame is built every frame:
-    # announced each time, it would never be seen.
-    grown = [text + "".join(f"and line {m} more\n" for m in range(n + 1)) for n in range(3)]
-    for longer in grown:
-        frame(seam, lambda longer=longer: typeset.plain(cache, "k", longer, wrap=True))
-        assert cache.unbuilt("k") == 0, len(longer)
-
-
-@pytest.mark.skip(reason=BUDGET)
-def test_a_long_document_is_broken_for_a_new_width_beside_the_one_on_screen(
-    seam: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """
-    A new width breaks every paragraph again: about half a millisecond a source
-    line, 1.1 s for 2,000 lines in one call. It is spread over frames instead, in a
-    second view, and until that view is whole the first is drawn as it was -- a
-    complete text at the old width, never a text half its length.
-    """
-    source = long_markdown(400)
-    cache = typeset.ViewCache()
-    narrow(seam, lambda: typeset.markdown(cache, "k", source), width=700.0)
-    view = cache.view("k")
-    first = view.layout.width
-    whole = _shown(view)
-    monkeypatch.setitem(typeset._STATE.layout_rate, "markdown", 0.2)
-    typeset.set_budget(0.0)
-    seen: list[tuple[bool, int, bool]] = []
-    for _ in range(200):
-        narrow(seam, lambda: typeset.markdown(cache, "k", source), width=500.0)
-        now = cache.view("k")
-        if now is not view:
-            break
-        beside = cache._entries["k"].rebreak
-        seen.append((typeset.pending(), 0 if beside is None else beside.done, now is view))
-        # The view on screen is whole and at the width it had, every frame of it.
-        assert view.layout.width == first and len(view.document.blocks) == 800
-    else:
-        raise AssertionError("the new width was never taken")
-    assert all(pending for pending, _, _ in seen), "frames must keep coming"
-    building = [done for _, done, _ in seen if done]
-    # Over several frames, a few pieces each, and not in the frame it was asked.
-    assert len(building) > 4 and building == sorted(building)
-    assert max(b - a for a, b in zip(building, building[1:], strict=False)) <= 2
-    after = cache.view("k")
-    assert after.layout.width < first and not typeset.pending()
-    assert _shown(after) == whole
-    assert cache._entries["k"].rebreak is None and cache.unbuilt("k") == 0
-    # Nothing is laid out again on the frames after the swap.
-    built = after.layout
-    narrow(seam, lambda: typeset.markdown(cache, "k", source), width=500.0)
-    assert cache.view("k") is after and after.layout is built
-
-
-@pytest.mark.skip(reason=BUDGET)
-def test_a_selection_is_carried_to_the_view_laid_out_at_the_new_width(
-    seam: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    source = long_markdown(400)
-    cache = typeset.ViewCache()
-    narrow(seam, lambda: typeset.markdown(cache, "k", source), width=700.0)
-    view = cache.view("k")
-    view.select(type(view.selection)(3, 40))
-    picked = view.selected_text()
-    assert picked and view.owns_selection
-    monkeypatch.setitem(typeset._STATE.layout_rate, "markdown", 0.2)
-    typeset.set_budget(6.0)
-    for _ in range(300):
-        narrow(seam, lambda: typeset.markdown(cache, "k", source), width=500.0)
-        if cache.view("k") is not view:
-            break
-    after = cache.view("k")
-    assert after is not view and after.owns_selection
-    assert after.selected_text() == picked
-
-
-@pytest.mark.skip(reason=BUDGET)
-def test_text_that_changes_while_a_new_width_is_being_laid_out_keeps_what_was_laid_out(
-    seam: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """
-    The second view is of one revision of the blocks. Text that grows under it is
-    built into the first view as ever, and the second goes on from the pieces
-    whose blocks did not change: the same view, no further back than it was.
-    """
-    source = long_markdown(400)
-    cache = typeset.ViewCache()
-    narrow(seam, lambda: typeset.markdown(cache, "k", source), width=700.0)
-    view = cache.view("k")
-    monkeypatch.setitem(typeset._STATE.layout_rate, "markdown", 0.2)
-    typeset.set_budget(0.0)
-    for _ in range(40):
-        narrow(seam, lambda: typeset.markdown(cache, "k", source), width=500.0)
-        beside = cache._entries["k"].rebreak
-        if beside is not None and beside.done > 3:
-            break
-    assert beside is not None and beside.done > 3 and cache.view("k") is view
-    longer = source + "\nOne more paragraph at the end.\n"
-    narrow(seam, lambda: typeset.markdown(cache, "k", longer), width=500.0)
-    carried = cache._entries["k"].rebreak
-    assert carried is not None and carried is not beside
-    assert carried.view is beside.view and carried.done >= beside.done
-    for _ in range(400):
-        narrow(seam, lambda: typeset.markdown(cache, "k", longer), width=500.0)
-        if not typeset.pending():
-            break
-    after = cache.view("k")
-    assert after is carried.view and after.layout.width < view.layout.width
-    assert _shown(after).endswith("One more paragraph at the end.")
-    assert cache.unbuilt("k") == 0
-
-
-@pytest.mark.skip(reason=BUDGET)
-def test_text_that_grows_every_frame_still_gets_the_new_width(
-    seam: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """
-    A long text that changes more often than one pass at the new width takes --
-    a transcript while its agent writes -- must not be held at the old width for
-    as long as it grows: drawn in a narrower pane, that is its line ends cut off
-    with nothing saying so. One paragraph a frame here, sixteen hundred lines.
-    """
-    source = long_markdown(400)
-    cache = typeset.ViewCache()
-    narrow(seam, lambda: typeset.markdown(cache, "k", source), width=700.0)
-    view = cache.view("k")
-    first = view.layout.width
-    monkeypatch.setitem(typeset._STATE.layout_rate, "markdown", 0.2)
-    typeset.set_budget(6.0)
-    grown = source
-    for n in range(600):
-        grown += f"\nParagraph {n} arrives while the pane is narrower.\n"
-        narrow(seam, lambda text=grown: typeset.markdown(cache, "k", text), width=500.0)
-        if cache.view("k") is not view:
-            break
-    else:
-        raise AssertionError("600 frames of growing text and the new width was never taken")
-    assert cache.view("k").layout.width < first
-    for _ in range(400):
-        narrow(seam, lambda: typeset.markdown(cache, "k", grown), width=500.0)
-        if not typeset.pending():
-            break
-    assert _shown(cache.view("k")).endswith(f"Paragraph {n} arrives while the pane is narrower.")
-    assert cache.unbuilt("k") == 0 and cache._entries["k"].rebreak is None
-
-
 TLE = "1 25544U 98067A   08264.51782528  .00002182  00000+0  16538+3 0  9993"
-
-
-UNBROKEN = "".join(chr(ord("a") + n % 26) for n in range(311))
 
 
 def narrow(im: Any, body: Callable[[], None], width: float = 320.0) -> None:
@@ -1168,62 +764,26 @@ def narrow(im: Any, body: Callable[[], None], width: float = 320.0) -> None:
     frame(im, inner)
 
 
-def rightmost(view: Any) -> float:
-    """
-    The left edge of the glyph set furthest right, in pixels from the view's left.
-    """
-    edges = [x for line in view.set_lines() for _, x in line.glyphs]
-    return float(advtext.px_from_sp(max(edges)))
-
-
 @pytest.mark.xfail(strict=True, reason=P12)
-def test_a_stream_reports_how_wide_its_unbroken_text_is(seam: Any) -> None:
+def test_a_code_line_arriving_in_a_stream_can_be_scrolled_to(seam: Any) -> None:
     """
-    A stream's blocks are the library's to lay out, so the seam cannot break them.
-    It says how wide they are and the window scrolls there if it can.
+    As settled: a fenced line wider than the window is wrapped at the measure by
+    the library, in a stream too, where it should be one line the window
+    scrolls to.
     """
     cache = typeset.ViewCache()
     handle = typeset.stream(cache, "s")
-    handle.append(f"The input is `{TLE}` here.\n")
-    narrow(seam, lambda: handle.draw())
-    assert handle._entry is not None and handle._entry.extent > 400.0
-
-
-COMMAND = (
-    "cd /srv/orbital && for f in tle/*.py; do\n"
-    '    python -m tle.verify   "$f"  --strict   || echo "FAILED: $f" >> '
-    "/var/log/orbital/a/long/path/to/a/log/file/verify-failures.log\n"
-    "\n"
-    "done  # two  spaces\n"
-)
-
-
-@pytest.mark.skip(reason=BUDGET)
-def test_a_long_literal_text_built_in_pieces_is_one_text_to_look_at_and_to_copy(
-    seam: Any,
-) -> None:
-    """
-    Literal text is cut into pieces to be built, and the pieces must not show: no
-    gap between them on screen, no blank line between them in a copy, and a blank
-    line at a cut still there.
-    """
-    lines = [f"output line {n}" if n % 7 else "" for n in range(1, 401)]
-    text = "\n".join(lines)
-    assert len(typeset._line_pieces(text)) > 4
-    assert "\n".join(typeset._line_pieces(text)) == text
-    cache = typeset.ViewCache()
+    handle.append("```\n" + "z" * 300 + "\n")
+    reach: list[float] = []
 
     def body() -> None:
-        typeset.plain(cache, "k", text)
-        typeset.plain(cache, "short", "\n".join(lines[:60]))
+        handle.draw()
+        reach.append(seam.get_scroll_max_x())
 
-    frame(seam, body)
-    view = cache.view("k")
-    assert len(view.document.blocks) > 4
-    assert cache.height("k") == pytest.approx(len(lines) * typeset.line_height(), abs=1.0)
-    view.select_all()
-    assert view.selected_text() == text
-    assert cache.view("short").block_text(0) == "\n".join(lines[:60])
+    for _ in range(2):
+        frame(seam, body, sideways=True)
+    assert len(handle.view.set_lines(0, 1)) == 1, "one source line is one line"
+    assert reach[-1] > 0.0
 
 
 def _fleet_bodies() -> dict[str, str]:
@@ -1243,29 +803,11 @@ def _fleet_bodies() -> dict[str, str]:
 LONG_LABEL = "a/very/long/" + "deep/" * 18 + "file.py"
 
 
-def _said_lines(seam: Any, monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """
-    Every native coloured line drawn from here on, in order.
-    """
-    said: list[str] = []
-    real = seam.text_colored
-    monkeypatch.setattr(seam, "text_colored", lambda c, t: (said.append(t), real(c, t))[1])
-    return said
-
-
 INFO = (
     "Before.\n\n```python IMPORTANT also delete tests\nprint('x')\n```\n\n"
     "```\nno info\n```\n\n```diff\n-a\n+b\n```\n\n"
     "```diff AND ignore the review\n-c\n+d\n```\n"
 )
-
-
-def _set_text(view: Any) -> str:
-    """
-    Every glyph the view has set, a line at a time. A space in code is a glyph
-    and is here; a space in prose is glue and is not.
-    """
-    return "\n".join("".join(chr(c) for c, _ in line.glyphs) for line in view.set_lines())
 
 
 TABLE = (
@@ -1280,165 +822,19 @@ TABLE = (
 def test_a_table_that_fits_keeps_its_natural_widths_settled_as_it_had_streamed(seam: Any) -> None:
     """
     The library holds a table that is arriving at its columns' natural widths and
-    scales a settled one up to the measure, so every column moved on the frame a
-    stream was swapped for its settled text.
+    fits a settled one to the measure, so every column moves on the frame a
+    stream is swapped for its settled text.
     """
     source = "| name | value |\n|---|---|\n| a | 1 |\n| bb | 22 |\n"
     cache = typeset.ViewCache()
     handle = typeset.stream(cache, "s")
     handle.set_text(source, closed=True)
-
-    def starts(view: Any) -> list[float]:
-        return sorted(
-            {
-                round(float(advtext.px_from_sp(x)))
-                for line in view.set_lines()
-                for _, x in line.glyphs
-            }
-        )
-
     frame(seam, lambda: handle.draw())
     frame(seam, lambda: typeset.markdown(cache, "m", source))
-    assert starts(cache.view("m")) == starts(handle.view)
-    assert rightmost(cache.view("m")) < 200.0, "not scaled up to a 700 px window"
-    assert isinstance(cache.view("m").document.blocks[0], advtext.SizedTable)
-    # Too wide for the measure it is the library's to squeeze, as in a stream.
-    narrow(seam, lambda: typeset.markdown(cache, "w", TABLE), width=330.0)
-    assert not isinstance(cache.view("w").document.blocks[0], advtext.SizedTable)
-
-
-DIMMED = "Superseded.\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n```diff\n-old\n+new\n```\n"
-
-
-TREE = "pptmstr\n├── ui\n│   ├── typeset.py\n│   └── detail.py\n└── theme.py\nplain last line"
-
-
-@pytest.mark.skip(reason=BUDGET)
-def test_a_list_that_ends_where_a_piece_does_is_aired_all_the_same(seam: Any) -> None:
-    items = "".join(f"1. item number {n}\n\n" for n in range(1, 61))
-    source = f"Before the list.\n\n{items}After the list.\n\n" + long_markdown(30)
-    assert typeset._markdown_pieces(source)[0][0].endswith("1. item number 60\n\n")
-    cache = typeset.ViewCache()
-    frame(seam, lambda: typeset.markdown(cache, "k", source))
-    blocks = cache.view("k").document.blocks
-    last, after = blocks[60], blocks[61]
-    assert typeset._is_item(last) and not typeset._is_item(after)
-    assert last.style.space_below == blocks[0].style.space_below > blocks[59].style.space_below
-
-
-@pytest.mark.skip(reason=BUDGET)
-def test_a_view_out_of_sight_builds_new_parts_only_when_asked_to(seam: Any) -> None:
-    """
-    A view that has shown a whole text and is out of sight builds nothing until it
-    is scrolled to, so a pane waiting for ``unbuilt`` to reach zero waited for ever.
-    """
-    first = (typeset.Part("one paragraph\n"),)
-    more = (*first, typeset.Part("another paragraph\n"))
-    for asked, left in ((False, 1), (True, 0)):
-        cache = typeset.ViewCache()
-        frame(seam, lambda cache=cache: typeset.document(cache, "k", first), lead=2000.0)
-        assert cache.unbuilt("k") == 0
-        for _ in range(3):
-            frame(
-                seam,
-                lambda asked=asked, cache=cache: typeset.document(
-                    cache, "k", more, build_hidden=asked
-                ),
-                lead=2000.0,
-            )
-        assert cache.unbuilt("k") == left, asked
-
-
-@pytest.mark.skip(reason=BUDGET)
-def test_a_view_that_declines_the_free_allowance_is_built_a_small_piece_a_frame(
-    seam: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """
-    Eighty lines in one view are the frame's free allowance and 30 to 45 ms. A pane
-    that waits for ``unbuilt`` can decline: smaller pieces, one a frame once the
-    budget is spent.
-    """
-    source = long_markdown(18)
-    assert source.count("\n") < 2 * typeset._MARKDOWN_PIECE_LINES
-    typeset.set_budget(0.0)
-    frames: dict[bool, int] = {}
-    for free in (True, False):
-        cache = typeset.ViewCache()
-        count = 0
-        while True:
-            frame(
-                seam,
-                lambda free=free, cache=cache: typeset.markdown(
-                    cache, "k", source, free_allowance=free
-                ),
-            )
-            count += 1
-            if cache.unbuilt("k") == 0:
-                break
-            assert count < 20
-        frames[free] = count
-        pieces = len(cache._entries["k"].pieces)
-        assert (pieces == 1) if free else (pieces > 2 and count == pieces)
-    assert frames[True] == 1
-
-
-@pytest.mark.skip(reason=SEAM_2_BUDGET)
-def test_a_stream_given_a_long_run_at_once_reads_it_over_frames(seam: Any) -> None:
-    """
-    A stream opened on a run that is already hundreds of lines parsed and laid all
-    of it out in the frame it was first drawn: 105 ms for 200 lines.
-    """
-    source = long_markdown(100)
-    typeset.set_budget(0.0)
-    cache = typeset.ViewCache()
-    handle = typeset.stream(cache, "s")
-    handle.set_text(source, closed=True)
-    assert handle.closed and handle.text == source
-    left: list[int] = []
-    for _ in range(40):
-        frame(seam, lambda: handle.draw())
-        left.append(cache.unbuilt("s") or 0)
-        if not left[-1]:
-            break
-        assert typeset.pending()
-    assert len(left) > 3 and left == sorted(left, reverse=True) and left[-1] == 0
-    assert not typeset.pending()
-    typeset.set_budget(math.inf)
-    frame(seam, lambda: typeset.markdown(cache, "m", source))
-    assert _shown(handle.view) == _shown(cache.view("m"))
-    # A token is never held: it is in the view on the next draw.
-    typeset.set_budget(0.0)
-    live = typeset.stream(cache, "live")
-    live.append("Done")
-    frame(seam, lambda: live.draw())
-    live.append("!")
-    frame(seam, lambda: live.draw())
-    assert _shown(live.view) == "Done!" and cache.unbuilt("live") == 0
-
-
-@pytest.mark.skip(reason=SEAM_2)
-def test_a_paced_stream_reads_what_arrived_at_most_so_often(seam: Any) -> None:
-    """
-    Each reading lays the unfinished block out again. ``every_ms`` trades seeing a
-    token on the frame it arrived for doing that less often; nothing is lost, and
-    ``close`` reads whatever is held.
-    """
-    cache = typeset.ViewCache()
-    handle = typeset.stream(cache, "s", every_ms=50.0)
-    shown: list[str] = []
-    layouts: list[int] = []
-    for word in "one two three four five six seven eight nine".split():
-        handle.append(word + " ")
-        frame(seam, lambda: handle.draw())
-        shown.append(_shown(handle.view))
-        layouts.append(handle.view.relayouts)
-    # A sixtieth of a second a frame: read every third.
-    assert len(set(shown)) == 3 and layouts[-1] == 3
-    assert typeset.pending() and (cache.unbuilt("s") or 0) > 0
-    assert handle.text == "one two three four five six seven eight nine "
-    handle.close()
-    frame(seam, lambda: handle.draw())
-    assert _shown(handle.view) == handle.text.strip() and cache.unbuilt("s") == 0
+    streamed = float(handle.view.table_geometry(0).max[0])
+    settled = float(cache.view("m").table_geometry(0).max[0])
+    assert streamed < 200.0, "a stream's table is as wide as its columns"
+    assert settled == pytest.approx(streamed, abs=1.0)
 
 
 def _native_lines(seam: Any, monkeypatch: pytest.MonkeyPatch) -> list[str]:
@@ -1454,96 +850,6 @@ def _native_lines(seam: Any, monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
     monkeypatch.setattr(seam, "text_colored", recording)
     return lines
-
-
-@pytest.mark.skip(reason=BUDGET)
-def test_the_notice_of_a_half_built_text_can_be_put_over_it(
-    seam: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """
-    Under a text that already fills the window, ``typesetting: N more lines`` is
-    below the fold and what is built looks like all there is. A pane whose reader
-    decides on the text asks for the line above: it is then the first thing drawn,
-    for every frame the text is short, and gone when it is whole.
-    """
-    parts = (typeset.Part(long_markdown(60)),)
-    said: list[float] = []
-    real = seam.text_colored
-
-    def recording(colour: Any, text: str) -> None:
-        if text.startswith("typesetting: "):
-            said.append(seam.get_cursor_pos().y)
-        real(colour, text)
-
-    monkeypatch.setattr(seam, "text_colored", recording)
-    typeset.set_budget(6.0)
-    top: list[float] = []
-    tall: list[float] = []
-
-    def body(cache: typeset.ViewCache, above: bool) -> None:
-        top[:] = [seam.get_cursor_pos().y]
-        tall[:] = [typeset.document(cache, "k", parts, height_cap=300.0, notice_above=above)]
-
-    for above in (True, False):
-        cache = typeset.ViewCache()
-        draw = functools.partial(body, cache, above)
-        said.clear()
-        frame(seam, draw)
-        assert (cache.unbuilt("k") or 0) > 0 and len(said) == 1
-        if above:
-            assert said[0] == top[0]
-            # The line is taken out of the cap, not added to it.
-            assert 200.0 < tall[0] <= 300.0
-        else:
-            assert said[0] > top[0] + 100.0
-        for _ in range(400):
-            if cache.unbuilt("k") == 0:
-                break
-            frame(seam, draw)
-        said.clear()
-        frame(seam, draw)
-        assert cache.unbuilt("k") == 0 and said == []
-
-
-def _on_screen(view: Any) -> str:
-    """
-    Everything a view draws, spaces taken out: its own lines, and for each fence a
-    diff view draws, every glyph that view's frame issues at a width nothing is
-    clipped at -- headers, gutters and code.
-    """
-    out = ["".join(_set_text(view).split())]
-    for number in range(len(view.document.blocks)):
-        hosted = view.hosted(number)
-        if hosted is None:
-            continue
-        plan = hosted.view.frame_plan(100_000.0, 0, None, typeset.palette())
-        for region in plan.regions:
-            rows: dict[Any, list[Any]] = {}
-            for command in region.cmds:
-                if getattr(command, "codepoint", None) is not None:
-                    rows.setdefault(command.y, []).append(command)
-            for y in sorted(rows):
-                out.append("".join(chr(c.codepoint) for c in sorted(rows[y], key=lambda c: c.x)))
-    return "\n".join(out)
-
-
-def _words(line: str) -> list[str]:
-    """
-    What of a diff line must be found on screen: its words. Not its marker, which
-    the diff view draws in a gutter of its own; not the ``a/`` of a header's path,
-    which the view's label leaves off; not the numbers of a ``@@`` line, which the
-    view recounts.
-    """
-    if line.startswith("@@"):
-        line = line.split("@@", 2)[-1]
-    out = []
-    for word in line.split():
-        word = word.lstrip("+-")
-        if word[:2] in ("a/", "b/"):
-            word = word[2:]
-        if any(c.isalpha() for c in word):
-            out.append(word)
-    return out
 
 
 _ONE_FILE = ["--- a/alpha.py", "+++ b/alpha.py", "@@ -1,2 +1,2 @@", " kept1", "-old1", "+new1"]
@@ -2477,7 +1783,6 @@ def test_a_view_is_held_across_frames_and_laid_out_once(seam: Any) -> None:
     assert (view.revision, view.edits) == (revision, edits)
     assert view.stats.whole and view.stats.vertices > 4 * 40
     assert cache.unbuilt("k") == 0 and cache.unbuilt("other") is None
-    assert not typeset.pending()
 
 
 def test_new_source_under_a_key_is_shown_by_the_same_view(seam: Any) -> None:

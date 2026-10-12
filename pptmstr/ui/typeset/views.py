@@ -6,9 +6,9 @@ pane with the keys still live. **The panes hold the views**; there is no table
 in this package keyed by approval or node.
 
 ``markdown``, ``document`` and ``plain`` draw at the cursor and return the
-height they claimed. ``label`` and ``font`` are for a native ImGui line in a
-typeset face. ``stream`` is not built on the library yet and raises
-``NotAdopted``; so does ``diff_row_height``.
+height they claimed. ``stream`` answers markdown still arriving, which a pane
+appends to and draws (``Stream``). ``label`` and ``font`` are for a native
+ImGui line in a typeset face.
 
 ## Who draws what
 
@@ -39,16 +39,36 @@ of that frame, so a pane that asks it more than once does not change branch
 half way down, and is false from the next: the pane is back on its own
 renderer. Anything else raised is a defect and is not caught.
 
-## What is not here
+**What a caller that decides on the text is told** (``ViewCache.unbuilt``):
+the lines the last draw did not set. Zero for anything drawn, and all of them
+when the library stopped under it, because what is on screen then is the
+sentence and not the text.
 
-Nothing is built over more than one frame. Timed in pptmstr on 2026-10-12
-(headless, load average 2.5; the library's ``demo/sample.md``): reading 112
-lines of markdown and making their view is 3.7 ms and the first draw 1.8 ms;
-1,120 lines are 32.5 ms and 3.0 ms; a frame after that is 0.07 ms. The bodies
-the panes built on this hand over are bounded well under the first figure
-(``brief_pane._MAX_BODY_CHARS``, ``board_pane._MAX_DETAIL_CHARS``).
-``build_hidden``, ``free_allowance`` and ``notice_above`` are accepted and
-change nothing.
+## Nothing is built over more than one frame
+
+A text is read and laid out in the call that first draws it, and a stream
+reads what arrived in the draw after it arrived. Timed in pptmstr on
+2026-10-12 (``scripts/profile_seam.py``: headless, no rasteriser, load average
+0.4, the library's ``demo/sample.md`` repeated, a 700 px window):
+
+- settled markdown, first draw: 15.5 ms for 400 lines and 65.9 ms for 2,000;
+  a frame after it 0.09 ms at either length; the first frame at another width
+  1.5 ms and 6.7 ms;
+- a reply arriving 40 characters a frame, every frame reading the open tail
+  again: a median of 0.70 ms and a 95th percentile of 1.17 ms with up to 400
+  lines held, 1.86 and 3.09 ms with up to 2,000; no frame of the first run and
+  one of 2,638 of the second (37 ms, 400 characters a frame) was over 16.6 ms.
+
+So there is no budget, no piece and no pacing here: the machinery that spread
+a long text over frames answered a core whose layout was a second for 2,000
+lines, and each of its pieces was a frame in which a pane showed less than it
+had been handed. What is left of that question is the first draw of a very
+long text, linear in its length and paid once, which a pane with no bound of
+its own on what it hands over pays in one frame (DETAIL asks first, past
+``detail._SETTLED_LINES``). ``document`` still accepts ``build_hidden`` and
+``free_allowance``, and ``stream`` ``every_ms`` and ``free_allowance``, from
+the one caller written for that machinery (``transcript_pane``, whose typeset
+branch is not adopted); they change nothing and go when that pane is.
 """
 
 from __future__ import annotations
@@ -56,7 +76,7 @@ from __future__ import annotations
 from collections.abc import Callable, Collection, Hashable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
-from typing import Any, Protocol
+from typing import Any
 
 from ... import theme as ui_theme
 from ...theme import Color
@@ -68,19 +88,6 @@ _MIN_WIDTH_PX = 80.0
 """
 The narrowest measure a view is given; the library's own floor.
 """
-
-
-class NotAdopted(RuntimeError):
-    """
-    A drawing call of the seam that is not built on the library yet was made.
-
-    A pane reaches one only by not asking ``enabled(pane)`` first.
-    """
-
-    def __init__(self, name: str) -> None:
-        super().__init__(
-            f"typeset.{name} draws nothing yet; ask typeset.enabled(pane) before drawing"
-        )
 
 
 @dataclass
@@ -128,6 +135,13 @@ class _Entry:
     # Under a cap: how tall the content was when it was last drawn inside its
     # child, and the measure that was at. ``None`` until it has been drawn.
     natural: tuple[float, float] | None = None
+    # Source lines handed over that the last draw did not put on screen: all of
+    # them when the library stopped inside it, none otherwise.
+    missing: int = 0
+    # For the kind ``stream``: the ``Stream`` a pane appends to.
+    stream: Stream | None = None
+    # For the kind ``diff``: the library's model of what was last handed over.
+    model: Any = None
 
     @property
     def view(self) -> Any:
@@ -215,10 +229,17 @@ class ViewCache:
 
     def unbuilt(self, key: Hashable) -> int | None:
         """
-        How many source lines of the view are waiting to be typeset, or ``None``
-        for no view. A view that is held is whole.
+        How many source lines under a key the last draw did not set, or ``None``
+        for no view.
+
+        Text is read and laid out in the call that draws it, so this is zero
+        for anything that was drawn. It is every line of the text when the
+        library stopped inside that draw: the pane then shows a sentence where
+        the text would be, and a caller that offers a decision on the text
+        (``review.withheld``) must not offer it over the sentence.
         """
-        return None if key not in self._entries else 0
+        entry = self._entries.get(key)
+        return None if entry is None else entry.missing
 
     def part_at(self, key: Hashable, block: int, view: Any = None) -> int | None:
         """
@@ -245,43 +266,207 @@ class ViewCache:
         return entry
 
 
-class Stream(Protocol):
+class _Captioned:
+    """
+    A library stream whose fenced blocks are read with their info string as the
+    first line of their code (``_captioned``); everything else is the stream's.
+
+    A stream view reads its blocks from its stream, so this stands between the
+    two. A block that is the object it was is answered with the object it was
+    answered with, which is how the view finds the first block that changed.
+    """
+
+    def __init__(self, stream: Any) -> None:
+        self._stream = stream
+        self._made: dict[int, tuple[Any, Any]] = {}
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._stream, name)
+
+    @property
+    def blocks(self) -> tuple[Any, ...]:
+        made: dict[int, tuple[Any, Any]] = {}
+        out: list[Any] = []
+        for block in self._stream.blocks:
+            if getattr(block, "language", ""):
+                held = self._made.get(id(block))
+                if held is None or held[0] is not block:
+                    held = (block, _captioned((block,))[0])
+                made[id(block)] = held
+                block = held[1]
+            out.append(block)
+        self._made = made
+        return tuple(out)
+
+
+class Stream:
     """
     Markdown that is still arriving, as a pane holds it: what ``stream()`` answers.
+
+    The text is kept here and handed to the library's stream when it is drawn,
+    so a pane may append before the first frame and while the library cannot
+    draw, and a change of face or size (the epoch) sets again what was fed.
+    The library reads what arrived at the next draw: committed blocks are laid
+    out once and the open tail again at each reading.
+
+    ``draw`` is ``markdown``'s contract: it catches the library stopping, says
+    so at the cursor and answers the height it claimed. Draw it in a child that
+    scrolls; with ``follow`` the view keeps that child's end in sight until the
+    reader scrolls up.
     """
 
-    @property
-    def text(self) -> str: ...
+    def __init__(self, entry: _Entry, follow: bool) -> None:
+        self._entry = entry
+        self._follow = follow
+        self._text = ""
+        self._closed = False
+        self._source: Any = None
+        self._view: Any = None
+        # How much of the text the library's stream has been given, and whether
+        # it has been told the text ended.
+        self._fed = 0
+        self._ended = False
+        # The view's revision and pptmstr's theme the fences' info strings were
+        # last inked for.
+        self._inked: tuple[int, object] | None = None
 
     @property
-    def closed(self) -> bool: ...
+    def text(self) -> str:
+        return self._text
 
     @property
-    def view(self) -> Any: ...
+    def closed(self) -> bool:
+        return self._closed
 
     @property
-    def following(self) -> bool: ...
+    def view(self) -> Any:
+        """
+        The library's view, or ``None`` until the stream has been drawn.
+        """
+        return self._view
 
     @property
-    def unbuilt(self) -> int: ...
+    def following(self) -> bool:
+        return bool(self._view is not None and self._view.following)
 
-    def follow_tail(self) -> None: ...
+    @property
+    def unbuilt(self) -> int:
+        """
+        Source lines given and not yet set (``ViewCache.unbuilt``).
+        """
+        return self._entry.missing
 
-    def append(self, text: str) -> None: ...
+    def follow_tail(self) -> None:
+        """
+        Go to the end and follow it again, whatever the reader had scrolled to.
+        """
+        if self._view is not None:
+            self._view.follow_tail()
 
-    def close(self) -> None: ...
+    def append(self, text: str) -> None:
+        """
+        The next piece: any size, cut anywhere. Raises ``ValueError`` once closed.
+        """
+        if self._closed:
+            raise ValueError("append() on a closed stream")
+        self._text += text
 
-    def set_text(self, text: str, *, closed: bool = False) -> None: ...
+    def close(self) -> None:
+        """
+        The text has ended: its unfinished last line is set as a finished one.
+        """
+        self._closed = True
 
-    def draw(self, *, width: float | None = None, ink: Color | None = None) -> float: ...
+    def set_text(self, text: str, *, closed: bool = False) -> None:
+        """
+        Make the stream hold ``text``. Text that extends what is held is
+        appended; anything else, and any text given to a closed stream, is read
+        again from its start.
+        """
+        if self._closed or not text.startswith(self._text):
+            self._forget()
+        self._text = text
+        self._closed = closed
 
+    def _forget(self) -> None:
+        """
+        Let go of the library's stream and view: the next draw makes them again
+        from the text held.
+        """
+        if self._view is not None:
+            self._view.close()
+        self._source = self._view = None
+        self._fed = 0
+        self._ended = False
+        self._inked = None
+        self._entry.segments = []
 
-def pending() -> bool:
-    """
-    Whether a view on screen is short of its text, so the application's loop
-    should not idle. No view is: nothing is built over more than one frame.
-    """
-    return False
+    def _catch_up(self) -> None:
+        """
+        Give the library what it has not had, making its stream and view first
+        where there are none. Raises ``TypesetUnavailable`` when there is no
+        library to make them with.
+        """
+        from advtext import MarkdownStream, TypesetStreamView
+
+        if self._view is None:
+            self._source = MarkdownStream(themes.document_theme())
+            self._view = TypesetStreamView(
+                _Captioned(self._source), palette=themes.palette(), follow=self._follow
+            )
+            self._entry.segments = [_Segment((), self._view)]
+        if self._fed < len(self._text):
+            self._source.append(self._text[self._fed :])
+            self._fed = len(self._text)
+        if self._closed and not self._ended:
+            self._source.close()
+            self._ended = True
+
+    def _ink(self) -> None:
+        """
+        Tell each fence's info string from its code by ink, as ``_ink`` does
+        for a settled view. Again whenever the blocks changed: the library
+        drops the inks of a block an edit replaced.
+        """
+        view = self._view
+        view.sync()
+        now = (view.revision, ui_theme.current())
+        if self._inked == now:
+            return
+        self._inked = now
+        captions = {
+            at: len(said)
+            for at, block in enumerate(view.blocks)
+            if (said := getattr(block, "language", ""))
+        }
+        self._entry.segments[0].captions = captions
+        for block, said in captions.items():
+            view.set_colours(block, [(0, said, ui_theme.P.accent.u32)])
+
+    def draw(self, *, width: float | None = None, ink: Color | None = None) -> float:
+        """
+        Take in what has arrived and draw it at the cursor. The height claimed.
+        """
+        from advtext import TypesetUnavailable
+
+        im = _frame()
+        entry = self._entry
+        frame = im.get_frame_count()
+        if entry.frame == frame:
+            return _said(im, "typeset: a stream drawn twice in one frame", ui_theme.P.danger)
+        entry.frame = frame
+        top = im.get_cursor_pos().y
+        try:
+            self._catch_up()
+            self._ink()
+            _show_view(im, entry.segments[0], _width(im, width), themes.palette(ink), None)
+            entry.missing = 0
+        except TypesetUnavailable as stopped:
+            gate.stopped(stopped)
+            entry.missing = self._text.count("\n") + 1
+            _said(im, f"typeset text stopped: {stopped}", ui_theme.P.warn)
+        entry.height = float(im.get_cursor_pos().y - top)
+        return entry.height
 
 
 def _imgui() -> Any:
@@ -486,17 +671,28 @@ def _show(
             _native(im, entry.parts[segment.parts[0]], wide)
             foot = float(im.get_item_rect_max().y)
         else:
-            segment.view.on_link = on_link
-            segment.view.draw(palette=palette, width_px=wide)
-            foot = float(im.get_item_rect_max().y)
-            reach = _reach(segment, wide)
-            if reach > wide + 0.5:
-                # Glyphs on a draw list are not items: text past the measure
-                # adds nothing to the window's scroll range by being drawn. The
-                # window is told, with the cursor left where it was.
-                at = im.get_cursor_pos()
-                im.dummy(im.ImVec2(reach, 0.0))
-                im.set_cursor_pos(at)
+            foot = _show_view(im, segment, wide, palette, on_link)
+    return foot
+
+
+def _show_view(
+    im: Any, segment: _Segment, wide: float, palette: Any, on_link: Callable[[str], None] | None
+) -> float:
+    """
+    Draw one of the library's views at the cursor and tell the window how far
+    right its text runs. Returns the view's foot, in pixels down the screen.
+    """
+    segment.view.on_link = on_link
+    segment.view.draw(palette=palette, width_px=wide)
+    foot = float(im.get_item_rect_max().y)
+    reach = _reach(segment, wide)
+    if reach > wide + 0.5:
+        # Glyphs on a draw list are not items: text past the measure adds
+        # nothing to the window's scroll range by being drawn. The window is
+        # told, with the cursor left where it was.
+        at = im.get_cursor_pos()
+        im.dummy(im.ImVec2(reach, 0.0))
+        im.set_cursor_pos(at)
     return foot
 
 
@@ -629,8 +825,10 @@ def _draw(
             _show(im, entry, wide, themes.palette(ink), on_link)
         else:
             _capped(im, key, entry, wide, height_cap, themes.palette(ink), on_link)
+        entry.missing = 0
     except TypesetUnavailable as stopped:
         gate.stopped(stopped)
+        entry.missing = sum(part.text.count("\n") + 1 for part in entry.parts)
         _said(im, f"typeset text stopped: {stopped}", ui_theme.P.warn)
     entry.height = float(im.get_cursor_pos().y - top)
     return entry.height
@@ -646,8 +844,6 @@ def markdown(
     ink: Color | None = None,
     on_link: Callable[[str], None] | None = None,
     demote: int = 0,
-    build_hidden: bool = False,
-    free_allowance: bool = True,
 ) -> float:
     """
     A markdown document at the cursor: selectable, culled, as wide as the window.
@@ -684,7 +880,6 @@ def document(
     on_link: Callable[[str], None] | None = None,
     build_hidden: bool = False,
     free_allowance: bool = True,
-    notice_above: bool = False,
 ) -> float:
     """
     Several parts in sequence under one key, each read its own way and in its own
@@ -760,8 +955,22 @@ def stream(
 ) -> Stream:
     """
     The stream held under a key, made on first asking.
+
+    Nothing is drawn here and the library is not asked for anything, so this
+    does not raise where the library cannot draw. ``follow`` is taken when the
+    stream is made. ``every_ms`` and ``free_allowance`` are accepted and change
+    nothing: what arrived is read at the next draw (the module docstring has
+    what that costs).
     """
-    raise NotAdopted("stream")
+    entry = cache._entries.get(key)
+    if entry is None or entry.kind != "stream" or entry.stream is None:
+        entry = cache._entries[key] = _Entry("stream", roles._STATE.epoch)
+        entry.stream = Stream(entry, follow)
+    elif entry.epoch != roles._STATE.epoch:
+        # Another face or size: the text is set again, in the theme there is now.
+        entry.epoch = roles._STATE.epoch
+        entry.stream._forget()
+    return entry.stream
 
 
 def line_height(*, mono: bool = True, role: Role | None = None) -> float:
@@ -776,13 +985,6 @@ def line_height(*, mono: bool = True, role: Role | None = None) -> float:
     if role is None:
         role = Role.LITERAL if mono else Role.PROSE
     return themes.line_height(role)
-
-
-def diff_row_height() -> float:
-    """
-    The height of one row of a ``diff()``, in pixels: to size a cap.
-    """
-    raise NotAdopted("diff_row_height")
 
 
 _WEIGHT_FACE: dict[Weight, str] = {

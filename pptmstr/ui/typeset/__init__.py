@@ -17,7 +17,8 @@ those answers live here once.
 - ``themes``: a role's face, size and leading as the library's theme, pptmstr's
   inks as its palette, and which text the library sets at all.
 - ``views``: ``ViewCache``, and the calls a pane's typeset branch makes.
-- ``diffs``: the diff model of a parked call; which fences are honest diffs.
+- ``diffs``: the diff model of a parked call, a view of it, and which fences
+  are honest diffs.
 
 ## A pane asks first
 
@@ -32,15 +33,16 @@ text can be had at all, which is the library drawing and at least one pane
 adopted. The Text menu and the settings dialog offer their switches by it, and
 say ``unavailable_reason()``, one sentence, when it is false.
 
-**BRIEF and BOARD are in ``ADOPTED``, and the settings dialog draws its samples
-through the same calls.** Every other pane draws with its own renderer.
-``markdown``, ``document``, ``plain``, ``label`` and ``font`` draw; ``stream`` and
-``diff`` are not built on the library and raise if reached.
+**BRIEF, BOARD, DETAIL and INBOX are in ``ADOPTED``, and the settings dialog
+draws its samples through the same calls.** CONTEXT draws with its own renderer.
 
 **The library sets markdown, and ImGui draws text that is not markdown**
 (``themes.native``): monospace set by the library does not keep its columns, by
 pptmstr's measurement. So a literal part, ``plain()`` and a label are ImGui
-items in the chrome's font or the library's own atlas entry.
+items in the chrome's font or the library's own atlas entry, and **an
+approval's diff is drawn by its pane's own renderer**: ``diff()`` sets one
+through the library's diff view, is tested, and is called by no pane
+(``diffs`` has the numbers).
 
 ## What a consumer must not do
 
@@ -51,7 +53,7 @@ items in the chrome's font or the library's own atlas entry.
 - Destroy an ImGui context the fonts were loaded in without ``unload()`` first.
 """
 
-from .diffs import accounted, approval_diff, diff, diff_model, is_diff_fence
+from .diffs import accounted, approval_diff, diff, diff_model, diff_row_height, is_diff_fence
 from .gate import (
     available,
     can_draw,
@@ -104,17 +106,14 @@ from .roles import (
 )
 from .themes import build_palette, palette
 from .views import (
-    NotAdopted,
     Stream,
     ViewCache,
-    diff_row_height,
     document,
     font,
     imfont,
     label,
     line_height,
     markdown,
-    pending,
     plain,
     stream,
 )
@@ -133,7 +132,6 @@ __all__ = [
     "SLOTS",
     "STEPS",
     "Kind",
-    "NotAdopted",
     "Pane",
     "Part",
     "Proportional",
@@ -175,7 +173,6 @@ __all__ = [
     "palette",
     "pane_on",
     "panes_from",
-    "pending",
     "pitch",
     "plain",
     "pre_frame",

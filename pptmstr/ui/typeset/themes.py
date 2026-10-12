@@ -80,6 +80,7 @@ class _Kept:
 
     epoch: int = -1
     themes: dict[int, Any] = field(default_factory=dict)
+    diff: Any = None
     palette_of: object = None
     palettes: dict[int | None, Any] = field(default_factory=dict)
 
@@ -153,6 +154,30 @@ def document_theme() -> Any:
     return demoted(0)
 
 
+def diff_theme() -> Any:
+    """
+    The theme a diff view is given: the document's, with code set at the diff
+    role's pixel height and pitch. The view reads its row from the code style.
+    """
+    base = demoted(0)
+    hit = _KEPT.diff
+    if hit is None:
+        from advtext import BlockKind, Face, px_from_sp
+
+        pitch = roles.pitch(Role.DIFF)
+        code = _sized(base.blocks[BlockKind.CODE], Face.CODE, roles.px(Role.DIFF), pitch)
+        # The view's row is its leading rounded UP to a pixel, and a pitch
+        # converted to the library's unit may land a fraction over the pixel
+        # it came from: the leading is brought back under it.
+        leading = code.leading
+        while px_from_sp(leading) > pitch:
+            leading -= 1
+        blocks = dict(base.blocks)
+        blocks[BlockKind.CODE] = replace(code, leading=leading)
+        hit = _KEPT.diff = replace(base, blocks=blocks)
+    return hit
+
+
 def demoted(levels: int) -> Any:
     """
     The document theme with each heading set as the one ``levels`` below it; past
@@ -161,6 +186,7 @@ def demoted(levels: int) -> Any:
     if _KEPT.epoch != roles._STATE.epoch:
         _KEPT.epoch = roles._STATE.epoch
         _KEPT.themes.clear()
+        _KEPT.diff = None
     levels = min(max(int(levels), 0), 6)
     hit = _KEPT.themes.get(levels)
     if hit is None:

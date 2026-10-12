@@ -1351,9 +1351,7 @@ def main(argv: list[str] | None = None) -> int:
         # done or parked on the operator. AWAITING_APPROVAL counts as idle, which is
         # I8 showing up as a CPU number rather than a claim.
         snap = state.frame_snap
-        # A view short of its text counts as work: an idling loop would hand it
-        # one frame every few hundred milliseconds.
-        working = (snap is not None and snap.any_active) or typeset.pending()
+        working = snap is not None and snap.any_active
         runner.fps_idling.enable_idling = not working
 
     runner.callbacks.load_additional_fonts = theme.load_fonts

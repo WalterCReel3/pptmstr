@@ -39,8 +39,8 @@ SHORTCUTS: tuple[tuple[str, str], ...] = (
 
 NOT_DRAWN = "not sent - this call's body had not been drawn when approve was asked for; ask again"
 NOT_WHOLE = (
-    "not sent - the body was still being typeset when approve was asked for; "
-    "ask again once it is all there"
+    "not sent - this call's body was not all on screen when approve was asked for; "
+    "ask again once it is"
 )
 
 
@@ -51,7 +51,7 @@ class Refusal:
 
     Worded in the past tense on purpose. It is a record of one request, shown on the
     rows it covered until a decision is sent or it is cancelled, and it stays true
-    after the body it was refused over has become whole.
+    after the body it was refused over is on screen.
     """
 
     asked: frozenset[str]
@@ -82,19 +82,22 @@ class ReviewState:
     # keystroke -- see confirm_global_approve.
     confirming_global: bool = False
     # What each pane last saw of each parked call's body: pending id -> pane ->
-    # (the ImGui frame it drew the body in, source lines of it not typeset yet).
-    # A reading and not a fact: it is as old as the pane's last draw of that body,
-    # and ``handle_keys`` runs before any pane draws, so the newest it can be is
-    # the frame before. Nothing in the snapshot implies it -- how much of a text is
-    # built is the seam's and differs between two panes showing one call -- so it
-    # is held here, written by ``body_shown`` and read only by ``unset_lines``.
+    # (the ImGui frame it drew the body in, source lines of it that frame did not
+    # put on screen). A reading and not a fact: it is as old as the pane's last
+    # draw of that body, and ``handle_keys`` runs before any pane draws, so the
+    # newest it can be is the frame before. Nothing in the snapshot implies it --
+    # whether a text was set is the seam's and differs between two panes showing
+    # one call -- so it is held here, written by ``body_shown`` and read only by
+    # ``unset_lines``.
     bodies: dict[str, dict[str, tuple[int, int]]] = field(default_factory=dict)
     refusal: Refusal | None = None
 
     def body_shown(self, pane: str, pending_id: str, unbuilt: int, frame: int) -> None:
         """
         A pane drew this call's body in ``frame`` with ``unbuilt`` source lines of it
-        still to typeset: zero for a whole body, and for any body in ImGui's own text.
+        not on screen: zero for any body in ImGui's own text, and for text handed
+        to the typesetting seam unless the library stopped under it
+        (``typeset.ViewCache.unbuilt``).
         """
         self.bodies.setdefault(pending_id, {})[pane] = (frame, unbuilt)
 
@@ -139,15 +142,19 @@ def withheld(state: ReviewState, pending: PendingApproval, *, unread: bool = Fal
     Why this call may not be approved yet, or ``None`` when it may. Every approve
     path asks here and nowhere else.
 
-    A long body is typeset over several frames, and the part that is up looks like
-    all of it. So a call is approved only once its body was whole the last time it
-    was drawn, and one never drawn is not approved at all: the keys are read before
-    the panes draw, so on the frame the cursor lands on a row there is no reading
-    for it, and "no reading" must not mean "nothing missing".
+    Two things can stand between a call and its approver's eyes. **Its body was
+    never drawn**: the keys are read before the panes draw, so on the frame the
+    cursor lands on a row there is no reading for it, and "no reading" must not
+    mean "nothing missing". **Its body was drawn and is not on screen**: text
+    handed to the typesetting library is read and laid out in the frame that
+    draws it, so there is no partly built body to get ahead of, but the library
+    can stop inside that draw, and the pane then shows a sentence where the
+    text would be. So a call is approved only once every pane showing it had all
+    of its body on screen the last time it drew it.
 
     ``unread`` is the batch forms' question. They approve calls nobody opened, by
     design and behind a count, so for them a body never drawn is not a reason; a
-    body known to be short still is.
+    body known not to have been on screen still is.
     """
     unset = unset_lines(state, pending.id)
     if unset is None:
@@ -167,8 +174,8 @@ def _approve_batch(bridge: Bridge, state: ReviewState, batch: list[PendingApprov
     """
     Send all of ``batch`` or none of it. Returns how many were sent.
 
-    None, when any body in it is known to be short: a batch that went out without
-    the one call still being typeset would leave the operator believing the agent's
+    None, when any body in it is known not to have been on screen: a batch that
+    went out without that one call would leave the operator believing the agent's
     queue was cleared, and the refusal names the calls that held it.
     """
     short = [p for p in batch if withheld(state, p, unread=True) is not None]
@@ -176,9 +183,8 @@ def _approve_batch(bridge: Bridge, state: ReviewState, batch: list[PendingApprov
         names = "; ".join(p.summary for p in short)
         state.refusal = Refusal(
             frozenset(p.id for p in batch),
-            f"none sent - {len(short)} of these {len(batch)} calls had a body still being "
-            f"typeset when approve all was asked for ({names}); open it until it is all "
-            "there, then ask again",
+            f"none sent - {len(short)} of these {len(batch)} calls had a body that was not "
+            f"all on screen when approve all was asked for ({names}); open it, then ask again",
         )
         return 0
     return sum(resolve(bridge, state, p, approved=True, unread=True) for p in batch)
@@ -286,8 +292,8 @@ def handle_keys(snap: Snapshot, focus: FocusState, state: ReviewState, bridge: B
     direction and should not depend on which modifiers happen to be down.
 
     This runs before any pane draws, so ``a`` is answered from what the panes showed
-    up to the frame before (``withheld``): a body short of its text, or one never
-    drawn -- the row the cursor reached on this very frame -- is not approved.
+    up to the frame before (``withheld``): a body that was not on screen, or one
+    never drawn -- the row the cursor reached on this very frame -- is not approved.
     ``r`` and ``e`` ask nothing of the body.
     """
     io = imgui.get_io()

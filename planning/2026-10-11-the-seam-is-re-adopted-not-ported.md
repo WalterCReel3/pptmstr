@@ -58,7 +58,17 @@ parse. **By a run (`SEAM-1`, 2026-10-12, headless, load average 2.5):** reading
 the settings samples hand over bodies bounded far under the first figure, so
 `views.py` builds nothing over frames. An approval body and a transcript are
 not bounded: the tests stay parked for the step that adopts those and times
-its own content.
+its own content. **By a run (`SEAM-2`, 2026-10-12, `scripts/profile_seam.py`,
+headless, load average 0.4): the budget goes.** Settled markdown is 15.5 ms
+for 400 lines and 65.9 ms for 2,000 on its first draw, 0.09 ms a frame after,
+and 6.7 ms for a new width at 2,000 lines; a reply arriving 40 characters a
+frame, read again every frame, is a median of 0.70 ms (p95 1.17) with 400
+lines held and 1.86 ms (p95 3.09) with 2,000. No frame of a stream needs
+pacing, and the one cost left is the first draw of a very long text, linear
+and paid once: four frames at 2,000 lines, which DETAIL already asks before
+exceeding. The 25 parked tests are deleted, `views.pending()` and its read in
+`app.py` with them. What `ViewCache.unbuilt` answers now is the one way text
+handed to the seam is not on screen: the library stopped inside its draw.
 
 ## 2. A view takes markdown or advtext's own blocks, not a host's description
 
@@ -91,7 +101,7 @@ The three reaches past the old facade:
 
 | reach | on the new layer |
 |---|---|
-| reader rules (HTML and images as text, a glob's stars kept, a link's destination shown) | mechanically still possible through the private `advtext.markdown_rules._parser(references, math)`, with traps: a `str` given to a view parses with `references=True`, a stream with `False`, and they are different cached parsers; advtext's stream invariants were never tested with rules switched off. Request P7. **By a run (`SEAM-1`):** unguarded, `a <b>x</b> and List<String>` is set as `a x and List`, `rm **/*.py and t/**/*.md` as `rm /*.py and t//*.md`, and an unclosed `<!--` takes every paragraph after it. The reach is made, in `gate._reader` only, on the one parser `_parser(False, False)`: the seam reads every settled text with `references=False` (`gate.read`), which is the parser a stream uses, so the first trap does not arise. A probe reads through the library's public calls, settled and streamed, and the library is not offered to draw with when it comes back short. Streams have not been drawn with the rules on. |
+| reader rules (HTML and images as text, a glob's stars kept, a link's destination shown) | mechanically still possible through the private `advtext.markdown_rules._parser(references, math)`, with traps: a `str` given to a view parses with `references=True`, a stream with `False`, and they are different cached parsers; advtext's stream invariants were never tested with rules switched off. Request P7. **By a run (`SEAM-1`):** unguarded, `a <b>x</b> and List<String>` is set as `a x and List`, `rm **/*.py and t/**/*.md` as `rm /*.py and t//*.md`, and an unclosed `<!--` takes every paragraph after it. The reach is made, in `gate._reader` only, on the one parser `_parser(False, False)`: the seam reads every settled text with `references=False` (`gate.read`), which is the parser a stream uses, so the first trap does not arise. A probe reads through the library's public calls, settled and streamed, and the library is not offered to draw with when it comes back short. **By a run (`SEAM-2`):** streams are drawn with the rules on, and the library's stream invariant holds under them at every piece of a reply cut anywhere (`test_a_reply_cut_anywhere_reads_at_every_piece_as_it_would_whole`). A fourth rule is off, `entity`: `&amp;` was set as `&`. |
 | count of characters set as U+FFFD | no counterpart. Request P9. |
 | breaking a word wider than the measure | no counterpart and nothing to reach; the library lets it overhang. Request P10. **By a run (`SEAM-1`):** a 109-character path at a 300 px measure is one line 750 px wide, and the window has no scroll range to it. The seam does not break it; it tells the window how far the text runs (`views._reach`, from `set_lines`), so a pane whose window scrolls sideways reaches the end. A fenced line, by contrast, **is** wrapped by the library at the measure (P12 asks for scroll or clip). |
 
@@ -149,6 +159,26 @@ wherever its text would have been and neither renderer's half.
 
 **Step 1 as built:** BRIEF and BOARD are in `roles.ADOPTED`, and the settings
 dialog draws its samples through the same calls.
+
+**Step 2 as built (`SEAM-2`):** DETAIL and INBOX are in `roles.ADOPTED`.
+`stream()` is a `MarkdownStream` under a `TypesetStreamView`, made by the draw
+and fed there, so a pane appends where it holds its text and nothing raises
+outside the seam's catch. `diff()` is a `TypesetDiffView` **that no pane
+calls**: by `scripts/measure_typeset_diff.py` its rows are drawn in steps of 7
+and 8 px against a baked 8, rows disagree at a column by up to 13 px, and a
+press on a drawn glyph is answered as a neighbouring character for 40 of 64
+glyphs of a row, so an approval's diff is each pane's own renderer under
+either setting, and a fenced `diff` is the code of its document
+(`TypesetDiffFences` is not used; `is_diff_fence` and `accounted` stay, for the
+day it is). What the library sets in these two panes is markdown: a
+deliverable, a turn, a question's prose and preview, the prose argument of a
+parked call. For that last one, the approval body, three things are held by
+test in each pane: every word of a body built to be hidden is in what was
+handed over, a run the library cannot break is inside the scroll range of the
+window it is in, and an approve is not sent in the frame the library stops
+under the body. The inbox row's field names and values are ImGui's chrome
+font: the proportional face has no arrow or tick and a native line has no
+fallback.
 
 ## 5. Shape and order
 

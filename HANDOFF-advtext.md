@@ -277,8 +277,8 @@ whole pixels per role.
 
 ### A4 — every advtext name pptmstr uses
 
-Current at pptmstr commit `455a450` (BRIEF, BOARD and the settings dialog's
-samples typeset). Held by
+Current at the pptmstr commit that adopts DETAIL and INBOX (BRIEF, BOARD and
+the settings dialog's samples before it, `455a450`). Held by
 `test_the_seam_imports_the_librarys_facade_and_one_named_module_past_it`.
 
 - From `advtext.__all__`: `TypesetView`, `TypesetUnavailable`, `Theme`,
@@ -286,10 +286,21 @@ samples typeset). Held by
   `MarkdownStream`, `parse_markdown`, `em_size_for_pixel_height`, `sp_from_px`,
   `Face`, `register_font`, `unregister_font`, `registered_fonts`, `Diff`
   (`from_texts`, `from_unified`, and the fields of its files, hunks and rows).
+  **Added with DETAIL and INBOX:** `TypesetStreamView`, `TypesetDiffView`,
+  `DiffLayout`, `px_from_sp`.
 - On a view: `set_document`, `draw(palette=, width_px=)`, `on_link`, `texts`,
   `blocks`, `stats`, `revision`, `edits`, `set_colours`, `clear_colours`,
   `set_lines`, `block_role`, `table_geometry`, `layout_for`, `palette`,
-  `links`.
+  `links`. **Added:** on a view `close`; on a stream view `sync`,
+  `follow_tail`, `following` and the constructor's `follow=`, and it is handed
+  an object that answers `blocks` itself and passes every other read to a
+  `MarkdownStream` (pptmstr's fence info strings; so the stream view's reads of
+  its stream, `theme`, `revision`, `committed`, `live_theme`, `closed`,
+  `source`, `sources`, are names pptmstr depends on staying reads); on a
+  `MarkdownStream` `append`, `close`, `blocks`; on a diff view the constructor's
+  `layout=`, `draw`, `set_diff`, `set_layout`, `layout`, `height_cap` (assigned),
+  `close`, `diff`, `grid.row`, and in tests `grid.cell`, `row_count`,
+  `content_width`, `origin`; `parse_markdown(more_may_follow=)` in a test.
 - Past `__all__`, by module: `advtext.typesetter` (`module`, `load_fonts`,
   `ready`, `reason`, `trouble`, `unload`, `LIBRARY_VARIABLE`, `FACE_ROLES`, and
   `module().font_atlas_index`, which is P14's route);
@@ -299,6 +310,9 @@ samples typeset). Held by
   when pptmstr builds against a commit that has `ReaderOptions`.
 - In `scripts/measure_typeset_advances.py` only: `TypesetView.span_rects`,
   `Theme.at_pixel_height`, `advtext.description.FACE_ROLES`.
+- In `scripts/measure_typeset_diff.py` only: `TypesetDiffView.native_documents`
+  and the native document's `hit_test`, `row_info`, `Faces.mono`,
+  `advtext.description.FACE_ROLES`.
 
 ### A5 — what pptmstr needs that is not offered
 
@@ -496,6 +510,79 @@ under "Agent decisions"); P21 stands as asked.
 |---|---|---|---|
 | P28 | **A host-made `MarkdownText` is drawn with the whitespace `texts` says it has**, or says that it will not be. | By trial at `3428142`: `a   b    c` in a host `MarkdownText`, `hard_breaks=True` or not, is drawn at two-cell steps and copied as `a b c`, tabs dropped, while `view.texts` still shows every space. A test that asserts on `texts` passes with the screen wrong. `MarkdownCode` keeps every character, so pptmstr's literal text will go in as that; a literal part in a proportional face has no way in that keeps its spaces. | open |
 
+### What building detail, inbox and review showed (2026-10-12)
+
+By runs through pptmstr's seam on advtext `38f5fac` (pptmstr's builder; headless
+and under Xvfb with llvmpipe; draw-list vertices and the library's own answers,
+no pixel read, nobody looked).
+
+- **P21 and P22 hold for `TypesetDiffView` as for a fence**
+  (`scripts/measure_typeset_diff.py`, load average 4 to 5, one run). Mono 16:
+  `grid.cell` 7.626, rows drawn in steps of 7 px (66) and 8 px (92); rows
+  disagree at one column by up to 13 px; the 40th character of a row is at 297
+  px against ImGui's 312; typeset pen less ImGui's at characters 10, 20, 40 of
+  40: −9, −15, −15, and at 74 of 74: −27. A glyph is up to 16.9 px left of its
+  cell. **A `hit_test` of the view's code document at the centre of each drawn
+  glyph answers another character for 40 of the 64 glyphs of the 74-character
+  row** (9 of 40 on the ruler; the worst is two characters off). At 14, 18 and
+  20 px the steps are 6 and 7, 8 and 9, 9 and 10. So **an approval's diff
+  stays on pptmstr's own renderer in DETAIL and INBOX**, `typeset.diff()` is
+  built and tested and called by no pane, and a fenced `diff` block is not
+  handed to `TypesetDiffFences`: it is the code of its document. Held by a
+  strict xfail that fails on the steps.
+- **P7, a stream with the rules on, by a run for the first time.** The
+  library's stream invariant (after every piece, its blocks are what
+  `parse_markdown(source so far, references=False, more_may_follow=True)`
+  makes) holds with pptmstr's rules on the parser: pieces of 1, 2, 3, 7 and 13
+  characters and of uneven length, through a reply with tags, an unclosed
+  `<!--`, glob stars, an image, a link with a title, `<details>`, a fence with
+  an info string and a table, every read compared (4,340 reads in the probe
+  that preceded the test, no mismatch). **One more rule is switched off,
+  `entity`**: `R&amp;D` was set as `R&D`, and the body's recipient gets the
+  five characters. It belongs in `ReaderOptions`.
+- **A tab in a fenced block is set as the spaces to its stop**
+  (`+new1<TAB>stamped` is `+new1   stamped` in `view.texts`). Nothing is
+  absent; a Makefile recipe shown to an approver has spaces where the agent
+  wrote a tab, and a copy of it would not run. Not asked for yet: say whether
+  it is the reader's or the description's.
+- **P10 is reachable where the window scrolls sideways, and only there.** A
+  283-character path in a concern's body is one line; DETAIL's child and the
+  capped child of an inbox row scroll to its end (asserted from the window's
+  scroll range against the line's right edge). The break is still wanted.
+- **P11, P12 and P19 in a stream**, each now a strict xfail that fails on the
+  behaviour: a streamed code span of 16 characters is 109.2 px against 122.0;
+  a fenced line of 300 characters arriving in a stream is four lines; a
+  two-column table is 93.5 px wide streamed and 684 px settled in a 700 px
+  window.
+- **P16**: at 420 px a file header of 151 characters (1,152 px at the cell)
+  sits over a view whose `content_width` is 83.9 px, so nothing scrolls to
+  it. No pane shows it today.
+- **A stream's fence does not show its info string either** (P27), and a
+  stream view reads its blocks from its stream, so pptmstr stands an object
+  between the two (A4).
+
+Costs measured in pptmstr (`scripts/profile_seam.py`: CPU ms inside the seam's
+call, headless, no rasteriser, load average 0.4; `demo/sample.md` repeated, a
+700 px window):
+
+| | 400 lines | 2,000 lines |
+|---|---|---|
+| settled markdown, first draw (read, lay out, draw) | 15.5 | 65.9 |
+| a frame after it | 0.09 | 0.09 |
+| first frame at another width | 1.5 | 6.7 |
+| the same text as ImGui's wrapped text, first / steady | 0.8 / 0.12 | 0.8 / 0.52 |
+| a reply arriving 40 characters a frame: median / p95 / max of a frame that reads a piece | 0.70 / 1.17 / 8.3 | 1.86 / 3.09 / 6.6 |
+| the same, 400 characters a frame | 1.27 / 1.70 / 1.9 | 2.39 / 3.69 / 37.3 |
+| `append` | 0.002 to 0.004 | 0.011 to 0.015 |
+
+A diff of 1,200 changed-in-place lines (3,603 unified rows): `typeset.diff`
+23.3 ms first and 0.16 steady; the same rows as ImGui lines 2.3 and 2.2. In
+DETAIL (`scripts/bench_panes.py`, load 2.4): a deliverable of 970 lines is
+19.8 ms first and 4.79 steady on pptmstr's renderer, 35.8 and 0.18 through the
+library. **So pptmstr builds nothing over frames any more**: the budget, its
+pieces and its pacing are deleted with their tests, and what is left of the
+question is the first draw of a very long text, 33 ms a thousand lines, once.
+
 ## Work in hand
 
 - **The seam**, now the package `pptmstr/ui/typeset/` on `advtext.typesetter`
@@ -503,8 +590,12 @@ under "Agent decisions"); P21 stands as asked.
   the reason is one sentence in the Text menu. Panes are switched over one at
   a time, each after a run. `brief_pane`, the settings dialog's samples and
   `board_pane` are over (commit `455a450`): their markdown through the
-  library, anything that is not markdown still ImGui's (P21). Next `detail`,
-  `inbox` and `review`, then `transcript_pane`.
+  library, anything that is not markdown still ImGui's (P21). `detail` and
+  `inbox` are over for their markdown: a deliverable, a turn settled or still
+  arriving (a stream), a question's prose and preview, and the prose argument
+  of a parked call. An approval's diff, its other arguments and an error are
+  pptmstr's own text in both, by the measurement above. `review` holds an
+  approve only over a body the library stopped under. Next `transcript_pane`.
 
 ## Agent decisions, awaiting the user
 

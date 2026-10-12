@@ -538,7 +538,7 @@ def _bundle_fonts() -> Path:
     return Path(imgui_bundle.__file__).parent / "assets" / "fonts"
 
 
-ADOPTED: frozenset[Pane] = frozenset({Pane.BRIEF, Pane.BOARD})
+ADOPTED: frozenset[Pane] = frozenset({Pane.BRIEF, Pane.BOARD, Pane.DETAIL, Pane.INBOX})
 """
 The panes whose typeset branch is built on the library as it is now. ``enabled``
 is false for every other pane whatever the switches and the library say, so a
@@ -546,7 +546,9 @@ pane not named here draws with its own renderer.
 
 A pane is added by the change that builds its branch and shows it by a run.
 BRIEF and BOARD were, on 2026-10-12: the application under Xvfb with the fake
-fleet, each pane's cache holding the library's views of what it showed.
+fleet, each pane's cache holding the library's views of what it showed. DETAIL
+and INBOX were the same day, for their markdown: an approval's diff and every
+literal text in them stay ImGui's.
 """
 
 

@@ -31,30 +31,32 @@ is "nothing is lost" must not quietly lose things at the bottom.
 ## Two renderers
 
 ``typeset.enabled(Pane.DETAIL)`` chooses, per frame. Off, every body is ImGui text
-as described above. On, every body is a view from the seam, held in
+as described above. On, **markdown is set by the typesetting library and
+everything else is still ImGui's**, through the seam, in views held in
 ``DetailState.views``:
 
-* **Prose wraps; code and text of several lines do not.** Prose breaks at its
-  spaces. A diff row is never broken -- the diff is where a file reads as a file
-  -- and its view scrolls its own rows sideways. An argument or an error of
-  several lines is set the same way, each line as written, and so is a fenced
-  block in prose and a traceback pasted into a body: for those the pane's child
-  keeps a horizontal scrollbar. An argument or an error of **one** line is broken
-  to the pane instead, at its spaces where that alters nothing
-  (``wraps_at_spaces``) and otherwise at any column with every space kept
-  (``Kind.WRAPPED_EXACT``): a path or a one-line command is read to its end
-  without a scrollbar, and copies without the breaks the pane made.
+* **What the library sets**: a sub-agent's deliverable, a turn's prose settled
+  or still arriving, and the prose argument of a parked call (a concern's body,
+  a spawn's prompt, a plan). Prose breaks at its spaces, and text can be
+  selected and copied from it.
+* **What it does not**: an approval's diff, a call's other arguments, and an
+  error. Their columns are content, and by pptmstr's measurement the library
+  does not keep a monospace column (``typeset.diffs`` has the numbers for a
+  diff). The diff is this pane's own lines; arguments and errors go through the
+  seam, which hands text that is not markdown to ImGui. An argument or an error
+  of several lines is set each line as written and the pane's child scrolls
+  sideways to a long one; one of **one** line is wrapped to the pane.
 * **A body somebody wrote is read by ``typeset.prose_parts``**, the rule the inbox
   row, the board and the brief use, so a concern reads the same here and in its row.
-* **A turn still arriving is a stream**, read twenty times a second and bounded
-  from its start. See ``_narration``.
-* **A view culls to the child it is in**, so a diff and a settled document have no
-  bound on what is *drawn*, and the seam spreads a long text's first layout over
-  frames. What it cannot spread is the re-break at a new width, so the bounds that
-  remain are ``_MAX_ARG_CHARS`` as before and ``_SETTLED_LINES``, past which a
-  document shows its head and a button that sets the rest. Both say so in the pane.
-* **Text can be selected and copied** from any view. The ``copy`` button is unchanged
-  and still carries the whole obligation, bounds or no bounds.
+* **A turn still arriving is a stream**, bounded from its start. See ``_narration``.
+* **Nothing is built over more than one frame.** A text is read and laid out in
+  the call that first draws it: 15 ms for 400 lines of markdown and 66 ms for
+  2,000, once (``scripts/profile_seam.py``, 2026-10-12, load average 0.4); a
+  frame after that is 0.09 ms whatever the length, and a new width 7 ms at 2,000
+  lines. So the bounds that remain are ``_MAX_ARG_CHARS`` as before and
+  ``_SETTLED_LINES``, past which a document shows its head and a button that
+  sets the rest. Both say so in the pane.
+* The ``copy`` button is unchanged and still carries the whole obligation.
 
 The session's board is not here. It is ``board_pane``, which ships as a tab-mate
 rather than a section -- a starting arrangement the operator is free to re-dock,
@@ -104,29 +106,20 @@ _MAX_ARG_CHARS = 20_000
 # tall the pane is; the panes dock and resize freely.
 _NARRATION_LINES = 200
 # Typeset only. How far a turn still arriving grows past ``_NARRATION_LINES`` before
-# its start is cut again. The seam's stream cannot let go of its head, so a new cut
-# is the whole of what is kept read again: a few readings of a piece each, during
-# which the pane is short of its text and says so. Every line would be that
-# continuously; one cut in two hundred lines is a quarter of a second of it.
+# its start is cut again. A stream cannot let go of its head, so a new cut is the
+# whole of what is kept read again in one frame: 15 ms for 400 lines, measured.
+# Cutting at every line would pay that every line; one cut in two hundred does not.
+# The bound itself is for the frames in between: a frame that reads a piece costs
+# 0.7 ms with 400 lines held and 1.9 ms with 2,000, and a turn has no length limit.
 _NARRATION_STEP = 200
-# How often the stream of a turn still arriving is read, the transcript pane's
-# figure: text is at most three or four frames late, and the open block is laid out
-# twenty times a second and not sixty.
-_NARRATION_EVERY_MS = 50.0
 # Typeset only. A settled document longer than this shows its head and offers the
-# rest. Not for the first layout, which the seam builds a piece a frame (5,600 lines
-# of markdown: 134 frames at a median of 40 ms, measured through this pane). For the
-# re-break when the pane's width changes, which is one call into the library, linear
-# in the text, on one frame with one frame's notice: 1.3 s for 2,000 lines of
-# unrepeated prose and 3.5 s for 5,600. Under the bound a splitter drag ends in a
-# pause; over it, in a stall the operator did not ask for -- so they are asked.
+# rest. A text is read and laid out whole in the frame that first draws it, 33 ms
+# for each thousand lines of markdown (``scripts/profile_seam.py``): four frames
+# at this bound, once, and a stall the operator did not ask for past it -- so
+# they are asked.
 _SETTLED_LINES = 2000
-# The narrowest content region in which two columns of a diff each hold a line of
-# code: below it side-by-side is two columns of horizontal scrolling.
-_SIDE_BY_SIDE_PX = 1000.0
-# The longest single line set broken at its spaces. That form is one paragraph laid
-# out in one go, at every new width: 30 ms for 2,000 characters and 310 ms for
-# 20,000, measured, against 12 ms and 120 ms cut at the pane's edge.
+# The longest single line set broken at its spaces; a longer one is one run of
+# characters and is cut at the pane's edge.
 _SENTENCE_CHARS = 2000
 _EDITED_NOTICE = (
     "you have edited these arguments: everything below is the call as the agent "
@@ -193,7 +186,6 @@ class DetailState:
     # origin, so the inbox drawing the same parked call holds another. Keyed
     # ``(subject, part)`` and pruned in ``draw`` -- see ``live_subjects``.
     views: typeset.ViewCache = field(default_factory=typeset.ViewCache)
-    side_by_side: bool = False
     # The one settled document the operator asked to have set past _SETTLED_LINES.
     whole: Hashable | None = None
     # (node, published_length) of the text held in _turn_text; as _key above.
@@ -379,9 +371,9 @@ def _begin_body(label: str, typeset_on: bool) -> bool:
     For typeset text the vertical scrollbar is always there and a horizontal one is
     allowed. Always, because a view is measured against the child's width, and a
     scrollbar that appeared when the text outgrew the pane would re-break every
-    paragraph on that frame. Horizontal, because a line of a fenced block or of a
-    literal part of a body is never broken and the seam only *reports* how wide it
-    is: the window decides whether that is reachable. A diff scrolls itself.
+    paragraph on that frame. Horizontal, because a literal line of several is
+    never broken, and neither is a word of prose wider than the pane: the seam
+    tells the window how far such text runs and the window is what reaches it.
     """
     if not typeset_on:
         return bool(imgui.begin_child(label))
@@ -476,12 +468,11 @@ def _narration(pane: DetailState, node: NodeId, transcript: Transcript, *, live:
     **Typeset sets both halves, each its own way.** A turn that has ended is one
     markdown view, as a question's is. A turn still arriving is a ``typeset.stream``:
     text already committed is laid out once, and the block still open is laid out
-    again at each reading, which is the cost the paragraph above is about. It is
-    read every ``_NARRATION_EVERY_MS`` and not every frame, so that cost is paid
-    twenty times a second, and it is bounded from its start (``DetailState.saying``)
-    because a stream re-breaks whole when the pane changes width. CONTEXT follows
-    the same cursor and streams the same node's text in a view of its own: the two
-    are two layouts of one text, and each pays for its own.
+    again in each frame that brought more of it -- under a millisecond at the
+    lengths ``DetailState.saying`` keeps, which bounds the turn from its start
+    because that cost grows with what the stream holds. CONTEXT follows the same
+    cursor and shows the same node's text in a view of its own: the two are two
+    layouts of one text, and each pays for its own.
     """
     if typeset.enabled(typeset.Pane.DETAIL) and live:
         _live_markdown(pane, node, pane.turn_text(node, transcript))
@@ -524,13 +515,12 @@ def _live_markdown(pane: DetailState, node: NodeId, text: str) -> None:
 
     One stream per node, handed the turn from its cut onward whenever the turn has
     grown. Text that extends what the stream holds is appended to it; a new cut, or
-    a new turn, is not an extension and is read again from its start, which the
-    stream announces under what it has while it does.
+    a new turn, is not an extension and is read again from its start, in that frame.
 
-    The child always has its vertical scrollbar and allows a horizontal one, as a
-    stream asks (``typeset.Stream.draw``): the first so that the text does not
-    re-break on the frame it outgrows the pane, the second because a stream reports
-    a long code line's width and leaves reaching it to the window.
+    The child always has its vertical scrollbar and allows a horizontal one: the
+    first so that the text does not re-break on the frame it outgrows the pane,
+    the second because the seam reports how far a line that cannot be broken
+    runs and leaves reaching it to the window.
     """
     if not text.strip():
         imgui.text_disabled("nothing said yet this turn")
@@ -538,9 +528,7 @@ def _live_markdown(pane: DetailState, node: NodeId, text: str) -> None:
     shown, dropped = pane.saying(node, text)
     if dropped:
         imgui.text_colored(P.warn.vec4, f"… {dropped:,} earlier lines not shown")
-    stream = typeset.stream(
-        pane.views, (node, "saying"), every_ms=_NARRATION_EVERY_MS, free_allowance=False
-    )
+    stream = typeset.stream(pane.views, (node, "saying"))
     if pane._saying_text is not text or not stream.text:
         stream.set_text(shown)
         pane._saying_text = text
@@ -558,8 +546,7 @@ def _settled_markdown(pane: DetailState, key: Hashable, text: str) -> None:
     count said. Not a tail and not a window: this is read from the top, and the
     click sets all of it for as long as the cursor stays.
 
-    Under the bound nothing here waits for the seam to finish a long text: the view
-    draws what is built and says how many lines are still to come.
+    Under the bound the text is whole on the frame it is first drawn.
     """
     head, more = head_lines(text, _SETTLED_LINES)
     if not more or pane.whole == key:
@@ -570,8 +557,7 @@ def _settled_markdown(pane: DetailState, key: Hashable, text: str) -> None:
     imgui.push_text_wrap_pos(_visible_edge())
     imgui.text_colored(
         P.warn.vec4,
-        f"… {more:,} more lines not set: all {total:,} would re-break in one frame "
-        "whenever this pane changes width",
+        f"… {more:,} more lines not set: all {total:,} would be read and laid out " "in one frame",
     )
     imgui.pop_text_wrap_pos()
     if imgui.small_button(f"set all {total:,} lines"):
@@ -630,119 +616,57 @@ def _approval(state: review.ReviewState, pane: DetailState, obligation: Approval
     if not_sent is not None:
         imgui.text_colored(P.warn.vec4, not_sent)
 
-    frame = int(imgui.get_frame_count())
-    if typeset.enabled(typeset.Pane.DETAIL):
-        unset = _typeset_approval(state, pane, pending, obligation.key)
-        state.body_shown("detail", pending.id, unset, frame)
-        return
-    # ImGui's own text is all there on the frame it is drawn.
-    state.body_shown("detail", pending.id, 0, frame)
-
-    # Both warnings are drawn here as well as through the seam: this is the body
-    # the pane falls back to when the faces did not load, and a fallback that drops
-    # "what you approve is not what is drawn" is worse than no fallback.
+    # Said under either renderer: "what you approve is not what is drawn" is the
+    # one line this body may not lose.
     if edit_differs(state, pending):
         imgui.text_colored(P.warn.vec4, _EDITED_NOTICE)
-    if pending.diff:
+    # The diff is this pane's own lines under either renderer: a diff's columns
+    # are content, and the library does not keep them (``typeset.diffs``).
+    # A unified string of white space holds no row and is headed as no diff.
+    has_diff = bool(pending.diff and pending.diff.strip())
+    if has_diff:
+        assert pending.diff is not None
         _diff(state, pending.id, pending.diff, pending.texts)
-    _arguments(pending.raw_args)
-    if not pending.diff:
+    unset = 0
+    if typeset.enabled(typeset.Pane.DETAIL):
+        unset = _typeset_arguments(pane, pending, obligation.key)
+    else:
+        _arguments(pending.raw_args)
+    if not has_diff:
         # Stated rather than omitted, and stated last: a call with no diff is not
         # missing one, and the arguments above are the whole story for it.
         widgets.section("diff")
         _may_not_apply(pending.texts)
         imgui.text_disabled("no diff for this call")
+    # What ``review.withheld`` holds an approve on: lines of this body the frame
+    # did not put on screen. ImGui's own text is all there on the frame it is
+    # drawn; text handed to the seam is too, unless the library stopped under it.
+    state.body_shown("detail", pending.id, unset, int(imgui.get_frame_count()))
 
 
-def _typeset_approval(
-    state: review.ReviewState, pane: DetailState, pending: PendingApproval, subject: str
-) -> int:
+def _typeset_arguments(pane: DetailState, pending: PendingApproval, subject: str) -> int:
     """
-    The same order as the native body -- change, then call -- through the seam.
-    Answers how many lines of the two views are not set yet, which is what
-    ``review.withheld`` holds an approve on.
+    The call's arguments through the seam, as one document. Answers how many
+    lines of it the frame did not set (``ViewCache.unbuilt``).
 
-    Three things are said in words, because none of them is visible in a diff that
-    looks perfectly ordinary:
-
-    * the operator holds an edit, so what approving sends is not what is drawn;
-    * the gate predicts an edit has nowhere to land. **Predicts**: it is the gate's
-      read of the file when the call parked, and the tool decides on the file as it
-      is when the call runs. The pane says it, from the record, on the line the
-      native body says it on, and the diff view is asked to carry no copy
-      (``warning=False``): the pane's line is there before a large diff's model is,
-      and at this pane's docked width the view's copy is said twice even for a
-      short path, above the view and cut off in its header;
-    * there is no diff at all, last, as in the native body.
-
-    **Whether there is a diff is asked of the record first and of the seam second.**
-    Texts with no parts in them (``texts == ()``) are a call with nothing to diff,
-    and a heading over them would head nothing. A record that does carry something
-    can still come to a model with no files, which only the seam knows and only by
-    making it: then the heading is already drawn, and the line under it says so.
+    The prose argument of a call that has one is markdown and the library's;
+    every other value is literal and ImGui's (``argument_parts``).
     """
-    if edit_differs(state, pending):
-        imgui.text_colored(P.warn.vec4, _EDITED_NOTICE)
-
-    key = (subject, "diff")
-    has_diff = bool(pending.diff) if pending.texts is None else bool(pending.texts)
-    if has_diff:
-        # The counts are the held view's, so the heading gains them on the frame
-        # after the model is made: the second the call is drawn, or however many a
-        # large change takes on the seam's thread, with the seam's note under the
-        # heading until then. The model is not built twice to have them sooner.
-        view = pane.views.view(key)
-        counts = "" if view is None else f" · +{view.diff.added:,} -{view.diff.removed:,}"
-        widgets.section(f"diff{counts}")
-        _may_not_apply(pending.texts)
-        # Unified unless the operator asks, and the asking is only offered where two
-        # columns each fit a line of code. The +/- gutter is the view's in either
-        # layout, and is the channel that does not depend on telling two hues apart
-        # (design §6.1).
-        roomy = imgui.get_content_region_avail().x >= _SIDE_BY_SIDE_PX
-        if roomy:
-            _, pane.side_by_side = imgui.checkbox("side by side", pane.side_by_side)
-        # No cap, so no child of the view's own: it culls to this pane's, and a
-        # 5,000-line Write draws the rows in sight.
-        shown = typeset.diff(
-            pane.views,
-            key,
-            pending,
-            side_by_side=roomy and pane.side_by_side,
-            warning=False,
-            background=True,
-        )
-        if shown is None:
-            imgui.text_disabled("no diff for this call")
-    unset = (pane.views.unbuilt(key) or 0) if has_diff else 0
-
     widgets.section("arguments")
     if not pending.raw_args:
         imgui.text_disabled("(none)")
-    else:
-        columns = int(imgui.get_content_region_avail().x // imgui.calc_text_size("M").x)
-        # The notice over the text: this pane scrolls, and under a body longer than
-        # the pane "typesetting: N more lines" is below the fold while the part
-        # that is built looks like the whole call.
-        typeset.document(
-            pane.views,
-            (subject, "arguments"),
-            pane.argument_parts(pending, columns),
-            notice_above=True,
-        )
-        unset += pane.views.unbuilt((subject, "arguments")) or 0
-
-    if not has_diff:
-        widgets.section("diff")
-        _may_not_apply(pending.texts)
-        imgui.text_disabled("no diff for this call")
-    return unset
+        return 0
+    columns = int(imgui.get_content_region_avail().x // imgui.calc_text_size("M").x)
+    key = (subject, "arguments")
+    typeset.document(pane.views, key, pane.argument_parts(pending, columns))
+    return pane.views.unbuilt(key) or 0
 
 
 def _may_not_apply(texts: Sequence[DiffText] | None) -> None:
     """
     The gate's prediction that an edit has nowhere to land, as native lines that
-    wrap at the pane's edge. Drawn by both bodies.
+    wrap at the pane's edge. **Predicts**: it is the gate's read of the file when
+    the call parked, and the tool decides on the file as it is when the call runs.
     """
     for reason in refusals(texts):
         imgui.text_colored(P.warn.vec4, f"may not apply: {reason}")

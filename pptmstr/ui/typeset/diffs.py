@@ -15,7 +15,18 @@ screen. On an approval surface that is text the recipient reads and the approver
 does not. The library's own test for a fence is looser -- any info string that
 begins with the word -- so the rule is pptmstr's and is asked first.
 
-``diff()`` draws nothing yet (``views.NotAdopted``).
+**``diff()`` sets a diff through the library's diff view, and no pane calls
+it.** Measured in pptmstr on 2026-10-12 (``scripts/measure_typeset_diff.py``, a
+window under Xvfb, advtext ``38f5fac``): the view's rows are drawn in steps of 7
+and 8 px mixed at 16 px against a baked advance of 8, rows disagree at one
+column by up to 13 px, the 40th character of a row is 15 px left of where
+ImGui puts it, and a point on a drawn glyph is answered as a neighbouring
+character for 40 of the 64 glyphs of a 74-character row. A diff's columns are
+content and its selection is what an operator copies, so DETAIL and the inbox
+draw an approval's diff with their own renderer (request P21 and P22 of
+``HANDOFF-advtext.md``). For the same reason a fenced ``diff`` block inside
+markdown is not handed to the library's diff fences: it is the code block of
+its document, under its info string.
 
 The library is imported where a model is made and not when this module is, so
 the package imports without it.
@@ -28,9 +39,12 @@ from collections.abc import Hashable, Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
+from ... import theme as ui_theme
 from ...approval import DiffText
 from ...model import PendingApproval
-from .views import NotAdopted, ViewCache
+from . import gate, roles, themes, views
+from .roles import Role
+from .views import ViewCache
 
 if TYPE_CHECKING:
     from advtext import Diff
@@ -187,11 +201,6 @@ def approval_diff(pending: PendingApproval) -> Diff | None:
     return None
 
 
-# ---------------------------------------------------------------------------
-# One rule for "is this body markdown?"
-# ---------------------------------------------------------------------------
-
-
 def diff(
     cache: ViewCache,
     key: Hashable,
@@ -201,12 +210,96 @@ def diff(
     height_cap: float | None = None,
     width: float | None = None,
     warning: bool = True,
-    background: bool = False,
 ) -> float | None:
     """
-    A diff at the cursor, or ``None`` when there is nothing diff-shaped to show.
+    A diff at the cursor, set by the library, or ``None`` when there is nothing
+    diff-shaped to show. The height claimed.
+
+    **No pane calls this** (the module docstring has the measurement). It is
+    built and tested so that the day the library keeps its columns is a change
+    of two call sites.
 
     ``source`` is a parked call, the texts of one (``approval.diff_texts``' answer,
-    for arguments the operator is editing), or a ``Diff`` already made.
+    for arguments the operator is editing), or a ``Diff`` already made. The
+    model is made when the source is another object than the one held, in this
+    call: ``diff_model`` says what that costs for a large change.
+
+    ``height_cap`` puts a diff taller than it in a child of the view's own,
+    which scrolls; a long row is scrolled to sideways by the view's own bar.
+    ``warning=False`` leaves the gate's prediction out of each file's header,
+    for a pane that says it above the view. ``side_by_side`` is two columns.
     """
-    raise NotAdopted("diff")
+    from advtext import Diff, DiffLayout, TypesetDiffView, TypesetUnavailable
+
+    im = views._frame()
+    entry = cache._held(key, "diff")
+    frame = im.get_frame_count()
+    if entry.frame == frame:
+        return views._said(im, f"typeset: {key!r} drawn twice in one frame", ui_theme.P.danger)
+    given: Any = source
+    if isinstance(source, Sequence):
+        # Never the caller's own list, which is theirs to change.
+        given = tuple(source)
+    held = entry.token
+    # A model is the same source only when it is the same one: two that compare
+    # equal may differ in the context a click would expand. Texts and a parked
+    # call are what they hold.
+    if not (
+        isinstance(held, tuple)
+        and len(held) == 2
+        and held[1] == warning
+        and (held[0] is given or (not isinstance(given, Diff) and held[0] == given))
+    ):
+        model = _model(given)
+        if model is not None and not warning:
+            model = Diff(tuple(replace(file, will_not_apply="") for file in model.files))
+        entry.token = (given, warning)
+        entry.model = model
+        # The view is kept: its scroll position is the reader's place.
+        if entry.view is not None and model is not None and model.files:
+            entry.view.set_diff(model)
+    model = entry.model
+    if model is None or not model.files:
+        if entry.view is not None:
+            entry.view.close()
+            entry.segments = []
+        return None
+    entry.frame = frame
+    top = im.get_cursor_pos().y
+    layout = DiffLayout.SIDE_BY_SIDE if side_by_side else DiffLayout.UNIFIED
+    try:
+        view = entry.view
+        if view is None:
+            view = TypesetDiffView(model, themes.diff_theme(), layout=layout)
+            entry.segments = [views._Segment((), view)]
+        if view.layout is not layout:
+            view.set_layout(layout)
+        view.height_cap = height_cap
+        view.draw(palette=themes.palette(), width_px=views._width(im, width))
+        entry.missing = 0
+    except TypesetUnavailable as stopped:
+        gate.stopped(stopped)
+        entry.missing = sum(file.added + file.removed for file in model.files) or 1
+        views._said(im, f"typeset text stopped: {stopped}", ui_theme.P.warn)
+    entry.height = float(im.get_cursor_pos().y - top)
+    return entry.height
+
+
+def _model(source: PendingApproval | Diff | tuple[DiffText, ...] | None) -> Diff | None:
+    """
+    The library's model of whatever ``diff()`` was handed.
+    """
+    if source is None:
+        return None
+    if isinstance(source, PendingApproval):
+        return approval_diff(source)
+    if isinstance(source, tuple):
+        return diff_model(source)
+    return source
+
+
+def diff_row_height() -> float:
+    """
+    The height of one row of a ``diff()``, in pixels: to size a cap.
+    """
+    return roles.pitch(Role.DIFF)

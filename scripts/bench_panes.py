@@ -41,12 +41,14 @@ pane is drawn in a ``--width`` x ``--height`` window.
 and ended under. Compare rows of one run with each other, or two runs taken
 back to back on the same machine.
 
-**Which groups run through the seam.** ``board``, ``brief`` and ``settings``
-(the dialog's samples): those are the panes whose typeset branch is built on the
-library as it is now, and ``--typeset on`` needs the library (``make`` exports
-``IMTYPESET_LIBRARY`` and ``IMTYPESET_PYTHON`` when the built pair exists). The
-other groups draw with the panes' own renderers whatever the flag says, and
-their ``seam`` column says so with a 0.
+**Which groups run through the seam.** ``board``, ``brief``, ``settings`` (the
+dialog's samples), ``detail`` and ``inbox``: those are the panes whose typeset
+branch is built on the library as it is now, and ``--typeset on`` needs the
+library (``make`` exports ``IMTYPESET_LIBRARY`` and ``IMTYPESET_PYTHON`` when the
+built pair exists). An approval's diff is the pane's own rows under either
+setting, so an inbox row showing only a diff posts a 0 in ``seam`` with the flag
+on. The transcript groups draw with the pane's own renderer whatever the flag
+says, and their ``seam`` column says so with a 0.
 
 Usage:
     .venv/bin/python scripts/bench_panes.py                    # today's renderers

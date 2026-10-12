@@ -86,11 +86,9 @@ _SPAWN_TOOLS = frozenset({"Agent", "Task"})
 
 _SUFFIX = {1: "st", 2: "nd", 3: "rd"}
 
-# The tallest an expanded approval's body gets: lines of the UI font for the native
-# diff child and for a typeset document, rows of the diff view for a typeset diff.
-# The two are the same height at the UI's own size, so a row costs the queue no more
-# under either renderer; under ``Settings.typeset_scale`` the diff keeps its count of
-# rows. The seam ends a capped view on a whole line of whatever pitch its text has.
+# The tallest an expanded approval's body gets, in lines of the UI font: the diff
+# child's height and a typeset document's cap, so a row costs the queue no more
+# under either renderer.
 _BODY_LINES = 24.0
 
 # The typeset views this pane holds between frames, keyed ``(obligation.key, part)``.
@@ -107,9 +105,8 @@ _VIEW_PARTS = ("diff", "body", "arguments", "preview")
 
 # The parts last made for a view, beside what they were made from, under the view's
 # key and pruned with it. Kept because the seam's body classifier reads every line
-# of its text -- 1.5 ms for 1,200 lines, measured, against a frame's 6 ms -- and
-# because a tuple handed to ``typeset.document`` again unchanged is compared by
-# identity and not part by part.
+# of its text, and because a tuple handed to ``typeset.document`` again unchanged
+# is compared by identity and not part by part.
 _PARTS: dict[Hashable, tuple[object, tuple[typeset.Part, ...]]] = {}
 
 # The preview last cut for a question row, beside the length of the transcript it
@@ -119,7 +116,7 @@ _PREVIEWS: dict[Hashable, tuple[int, int, str]] = {}
 
 _NO_DIFF = "no diff for this call - arguments:"
 _WITHHELD = "shown as the agent sent it - approve sends YOUR EDIT, which differs"
-_STILL_TYPESETTING = "still typesetting - the body above is not all of this call yet"
+_NOT_ON_SCREEN = "the body above is not on screen - approve is held until it is"
 
 # The bus tools' names as the CLI spells them. ``approval.py`` owns the spelling and
 # keeps it private; tests/test_inbox_typeset.py fails if these two drift from it.
@@ -448,8 +445,8 @@ def _expand_approval(
     cursor in a diff view that can be pointed at a different agent than the queue's.
     """
     pending = obligation.approval
-    # Lines of the body the seam has not set yet: a long body is built over several
-    # frames, and until it is whole the row is showing less than the call.
+    # Lines of the body this frame did not put on screen: none, unless the
+    # typesetting library stopped under it (``ViewCache.unbuilt``).
     unset = 0
 
     if state.editing == pending.id:
@@ -463,15 +460,10 @@ def _expand_approval(
         # The gate predicts this from its own read of the file at park time; the
         # tool is what decides, on the file as it is when the call runs.
         #
-        # Said here, from the record, and by nothing else: the typeset diff is asked
-        # to leave its copy out (``warning=False``). This line is the same one under
-        # either renderer and is up while a large diff's model is still being made.
-        # The view's copy is neither, and at a width its header does not fit it is
-        # said twice, above the view and cut off inside it.
         for reason in refusals(pending):
             _warning(f"may not apply: {reason}")
         if typeset.enabled(typeset.Pane.INBOX):
-            unset = _typeset_body(pending, obligation.key)
+            unset = _typeset_body(state, pending, obligation.key)
         else:
             _native_body(state, pending)
     # What every approve path is answered from (``review.withheld``), the keys'
@@ -496,9 +488,9 @@ def _expand_approval(
         state.reasons[pending.id] = reason
 
     imgui.same_line()
-    # Not clickable while this row's body is short of its text, which is the
-    # button showing what ``review.resolve`` would answer; the decision is made
-    # there, for the click as for the ``a`` key.
+    # Not clickable while this row's body is not on screen, which is the button
+    # showing what ``review.resolve`` would answer; the decision is made there,
+    # for the click as for the ``a`` key.
     imgui.begin_disabled(unset > 0)
     if imgui.button("approve"):
         review.resolve(bridge, state, pending, approved=True)
@@ -524,7 +516,7 @@ def _expand_approval(
     imgui.text_colored(P.text_dim.vec4, "a / r / e")
     _normal()
     if unset > 0:
-        _warning(_STILL_TYPESETTING)
+        _warning(_NOT_ON_SCREEN)
 
 
 def _warning(text: str) -> None:
@@ -541,21 +533,40 @@ def _native_body(state: review.ReviewState, pending: PendingApproval) -> None:
     What the call would do, in ImGui's own text: its unified diff a line to a row,
     or its arguments.
     """
-    line_h = imgui.get_text_line_height_with_spacing()
+    lines = _diff_lines(state, pending)
+    if lines:
+        _diff_rows(lines)
+    else:
+        _native_arguments(pending)
+
+
+def _diff_lines(state: review.ReviewState, pending: PendingApproval) -> list[str]:
+    """
+    The call's unified diff as lines, split once per pending item and not once
+    per frame; empty for a call with nothing diff-shaped.
+
+    A whole-file Write produces a diff as long as the file, and re-splitting it
+    sixty times a second is work proportional to the change being reviewed --
+    backwards, since the large diffs are the ones stared at longest.
+    """
     lines = state.diff_lines.get(pending.id)
     if lines is None:
-        # Split once per pending item, not once per frame. A whole-file Write
-        # produces a diff as long as the file, and re-splitting it sixty times a
-        # second is work proportional to the change being reviewed -- backwards,
-        # since the large diffs are the ones stared at longest.
         lines = (pending.diff.splitlines() or [""]) if pending.diff else []
         state.diff_lines[pending.id] = lines
-    if not lines:
-        _native_arguments(pending)
-        return
+    return lines
 
-    # Fit the diff up to a cap. A short diff that still needs scrolling is the
-    # thing that makes an operator stop reading them.
+
+def _diff_rows(lines: Sequence[str]) -> None:
+    """
+    A unified diff a line to a row in ImGui's own text, in a child that fits it
+    up to ``_BODY_LINES``. **Drawn under either renderer**: a diff's columns are
+    content, and the typesetting library does not keep them (``typeset.diffs``
+    has the measurement).
+
+    A short diff that still needs scrolling is the thing that makes an operator
+    stop reading them, so the child is no taller than its lines.
+    """
+    line_h = imgui.get_text_line_height_with_spacing()
     body_h = min(_BODY_LINES * line_h, line_h * len(lines) + 10.0)
     if imgui.begin_child("##body", imgui.ImVec2(-8.0, body_h), imgui.ChildFlags_.borders):
         colours = {
@@ -751,49 +762,35 @@ def refusals(pending: PendingApproval) -> tuple[str, ...]:
     return tuple(dict.fromkeys(reason for reason in reasons if reason))
 
 
-def _typeset_body(pending: PendingApproval, key: str) -> int:
+def _typeset_body(state: review.ReviewState, pending: PendingApproval, key: str) -> int:
     """
-    What the call would do, set through the seam: its diff, or its description, or
-    failing both its arguments. Answers how many lines of it are not set yet.
+    What the call would do, with its prose set through the seam: its diff, or its
+    description, or failing both its arguments. Answers how many lines of it
+    this frame did not put on screen (``ViewCache.unbuilt``), which holds the
+    row's approve button.
 
-    **A body short of its text says so above itself** (``notice_above``), and the
-    row holds its approve button until the answer here is zero: under the seam's
-    budget a long body is whole some frames after it is first on screen -- a
-    100,000-character concern took 27 frames, measured -- and the part that is
-    there looks like all of it.
+    **The diff is this pane's own rows** (``_diff_rows``), as it is without the
+    library. **Arguments are literal text**, which the seam hands to ImGui.
+    **Only a description's prose is set by the library**: a concern's body, a
+    task's detail, a spawn's prompt, a plan.
 
-    **No child of this pane's own around a view.** A capped diff and a capped
-    document each open one when they are taller than the cap, and a second scrolling
-    child around that would be two wheels and two scrollbars for one body. A body
-    under the cap is drawn straight into the queue's window, which scrolls, so the
-    view culls to it.
+    **No child of this pane's own around a document.** A capped one opens its
+    own when it is taller than the cap, and a second scrolling child around
+    that would be two wheels and two scrollbars for one body. That child
+    scrolls sideways as well as down: a word the library cannot break runs past
+    its edge, and the seam tells the child how far.
 
-    **The diff carries no copy of the gate's prediction** (``warning=False``): the
-    row says it, above this body, under either renderer. **A large diff's model is
-    made off the frame** (``background=True``); until it arrives the seam draws a
-    line saying so and answers that line's height, so the row has its body, and
-    its warning, on every frame in between.
+    **The gate's prediction is said by the row**, above this body, under either
+    renderer.
     """
     line_h = imgui.get_text_line_height_with_spacing()
     wide = imgui.get_content_region_avail().x - 8.0
     cap = _BODY_LINES * line_h
 
-    # Asked of the record before the seam: texts with no parts make a diff model
-    # with nothing in it, and the seam's answer for that is "nothing to show".
-    diffed = bool(pending.diff) if pending.texts is None else bool(pending.texts)
-    if diffed and (
-        typeset.diff(
-            _VIEWS,
-            (key, "diff"),
-            pending,
-            height_cap=_BODY_LINES * typeset.diff_row_height(),
-            width=wide,
-            warning=False,
-            background=True,
-        )
-        is not None
-    ):
-        return _VIEWS.unbuilt((key, "diff")) or 0
+    lines = _diff_lines(state, pending)
+    if lines:
+        _diff_rows(lines)
+        return 0
     described = describe(pending)
     if described is None:
         imgui.text_colored(P.text_dim.vec4, _NO_DIFF)
@@ -804,7 +801,6 @@ def _typeset_body(pending: PendingApproval, key: str) -> int:
             _parts((key, "arguments"), raw, lambda: argument_parts(raw)),
             width=wide,
             height_cap=cap - line_h,
-            notice_above=True,
         )
         return _VIEWS.unbuilt((key, "arguments")) or 0
 
@@ -813,14 +809,17 @@ def _typeset_body(pending: PendingApproval, key: str) -> int:
     imgui.spacing()
     top = imgui.get_cursor_pos_y()
     left = imgui.get_cursor_pos_x()
+    # In the chrome's font, names and values both: a native line has one font
+    # and no fallback, and the proportional face has no arrow, tick or box
+    # rule, so a subject set in it shows a replacement glyph where the agent
+    # wrote one. These are words being approved.
     for name, value in described.fields:
-        typeset.label(name, weight=typeset.Weight.REGULAR, colour=P.text_dim)
+        imgui.text_colored(P.text_dim.vec4, name)
         imgui.same_line(left + _X_FIELD_VALUE)
         # Wrapped, not ellipsized: a subject is short enough that this is one line,
         # and when it is not, the rest of it is still something being approved.
         imgui.push_text_wrap_pos(left + wide)
-        with typeset.font(typeset.Weight.REGULAR):
-            imgui.text_colored(P.text_strong.vec4, value or '""')
+        imgui.text_colored(P.text_strong.vec4, value or '""')
         imgui.pop_text_wrap_pos()
     body = described.body
     if body:
@@ -837,7 +836,6 @@ def _typeset_body(pending: PendingApproval, key: str) -> int:
             _parts((key, "body"), body, lambda: typeset.prose_parts(body)),
             width=wide,
             height_cap=room,
-            notice_above=True,
         )
         return _VIEWS.unbuilt((key, "body")) or 0
     return 0
@@ -1013,7 +1011,7 @@ def _typeset_preview(transcript: Transcript, key: str) -> None:
     kind of text is for.
 
     As tall as its text up to ``_PREVIEW_LINES`` of the prose face, and scrolling
-    past that. Not held for ``unbuilt`` and reported to no one: a question is not an
+    past that. Reported to no one (``review.body_shown``): a question is not an
     approval, and nothing is decided on this text that DETAIL does not show whole.
     """
     view = (key, "preview")

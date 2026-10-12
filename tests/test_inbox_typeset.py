@@ -4,20 +4,22 @@ The inbox's expanded approval, set through the typeset seam.
 The pure parts -- which arguments head a description, when an edit is being
 withheld from view, what the gate predicted -- need no ImGui. The rest runs
 ``inbox.draw`` in real frames on the rig ``tests/test_typeset_views.py`` builds: a context
-with no backend, the real faces, and the seam's own record of what a view drew.
+with no backend, the real faces, and what the seam was handed to set under each key.
+
+**What is the library's and what is not.** A description's prose (a concern's
+body, a spawn's prompt, a plan) is set by the library; a diff is the pane's own
+rows and arguments are ImGui's text through the seam, under either renderer,
+because their columns are content and the library does not keep them.
 """
 
 from __future__ import annotations
 
-import threading
-import time
 from collections.abc import Iterator, Mapping
 from typing import Any
 
 import pytest
 
 from pptmstr import approval, fake_driver
-from pptmstr.approval import DiffText
 from pptmstr.bridge import Bridge
 from pptmstr.intents import AgentSpawned, ApprovalRequested, ApprovalResolved, StateChanged
 from pptmstr.model import AgentState, NodeId, PendingApproval, QuestionPending, Snapshot
@@ -27,17 +29,6 @@ from pptmstr.ui import inbox, review, typeset
 from pptmstr.ui.compose import ComposeState
 from pptmstr.ui.focus import FocusState
 from tests import test_typeset_views as rig
-
-
-@pytest.fixture
-def seam(imgui: Any) -> None:
-    """
-    Parked: ``inbox``'s typeset branch is not built on the library as it is now,
-    so every test that asks for the seam is skipped, by step. The step that
-    builds the branch deletes this fixture and ``tests/conftest.py``'s takes over.
-    """
-    pytest.skip("SEAM-2: inbox's typeset branch is not re-adopted yet")
-
 
 ROOT: NodeId = ("sess-1", None)
 
@@ -146,11 +137,20 @@ def key(call: PendingApproval, part: str) -> tuple[str, str]:
 
 def shown(call: PendingApproval, part: str) -> str:
     """
-    The text in one of the pane's views, a blank line between its blocks.
+    The text one of the pane's keys was handed to set, a blank line between its
+    blocks: the library's and ImGui's alike.
     """
-    view = inbox._VIEWS.view(key(call, part))
-    assert view is not None, part
-    return rig._shown(view)
+    assert key(call, part) in inbox._VIEWS, part
+    return "\n\n".join(inbox._VIEWS.texts(key(call, part)))
+
+
+def typeset_child(im: Any) -> Any:
+    """
+    The scrolling child the seam opened for a capped document, as the last frame
+    left it: what is seen of the document.
+    """
+    (window,) = (w for w in im.get_current_context().windows if "##typeset:" in w.name and w.active)
+    return window
 
 
 def native_body(im: Any) -> Any:
@@ -317,18 +317,26 @@ def test_the_gates_prediction_is_each_reason_once() -> None:
 # -- drawn ---------------------------------------------------------------------
 
 
-def test_a_parked_write_is_drawn_as_a_diff_by_the_seam_and_not_split_into_lines(
-    seam: Any,
-) -> None:
-    call = write(5)
+def test_a_parked_write_is_the_panes_own_rows_under_either_renderer(seam: Any) -> None:
+    """
+    A diff's columns are content and the library does not keep them
+    (``typeset.diffs`` has the measurement), so the row draws the unified
+    string a line to a row with typeset text on as with it off, and hands the
+    seam nothing.
+    """
+    limit = cap(seam)
+    call = write(400)
     pane = Pane(call)
     pane.draw(seam)
+    pane.draw(seam)
 
-    drawn = inbox._VIEWS.drawn(key(call, "diff"))
-    assert drawn is not None
-    assert drawn[0] > 0
-    # The native renderer's trace: it splits the unified string where it draws it.
-    assert pane.state.diff_lines == {}
+    assert typeset.enabled(typeset.Pane.INBOX)
+    assert call.id in pane.state.diff_lines
+    assert len(inbox._VIEWS) == 0
+    body = native_body(seam)
+    assert body.size.y == pytest.approx(limit, abs=1.0)
+    assert body.scroll_max.y > 300 * seam.get_text_line_height()
+    assert review.unset_lines(pane.state, call.id) == 0
 
 
 def test_with_typeset_off_the_native_diff_is_drawn_and_no_view_is_held(seam: Any) -> None:
@@ -339,64 +347,6 @@ def test_with_typeset_off_the_native_diff_is_drawn_and_no_view_is_held(seam: Any
 
     assert call.id in pane.state.diff_lines
     assert len(inbox._VIEWS) == 0
-
-
-@pytest.mark.parametrize("scale", [1.0, 1.25])
-def test_a_short_diff_takes_its_own_height_and_a_long_one_the_cap(seam: Any, scale: float) -> None:
-    """
-    "A short diff that still needs scrolling is the thing that makes an operator
-    stop reading them", and a long one must not push the queue out of the pane.
-
-    The cap is a count of the diff's own rows, at whatever size the operator has
-    set typeset text to: a cap in lines of the UI font is fewer rows of larger text.
-    """
-    typeset.configure(typeset=True, scale=scale)
-    row = typeset.diff_row_height()
-    short, long = write(3, "short"), write(400, "long")
-
-    pane = Pane(short)
-    pane.draw(seam)
-    short_h = inbox._VIEWS.height(key(short, "diff"))
-    assert short_h is not None
-    assert 3 * row <= short_h < inbox._BODY_LINES * row / 2
-
-    pane = Pane(long)
-    pane.draw(seam)
-    # Counted in the view's own rows, all of them: no row of these lines is wide
-    # enough for a scrollbar to take room from, so the cap is rows and nothing else.
-    assert inbox._VIEWS.height(key(long, "diff")) == inbox._BODY_LINES * row
-
-
-@pytest.mark.parametrize("faces", ["roboto", "mono", "roboto-large"])
-def test_a_capped_paragraph_ends_between_two_lines_in_every_face_set(seam: Any, faces: str) -> None:
-    """
-    The cap is counted in lines of the UI font and prose has another pitch, a
-    different one in each face set. A cap that is not a multiple of that pitch cuts
-    the last line on screen through its glyphs.
-
-    Read from where the layout put each line, not from the cap's own arithmetic.
-    One paragraph: the gap between two blocks is not something a pane is told.
-    """
-    typeset.configure(typeset=True, faces=faces, scale=1.0)
-    pitch = typeset.line_height(mono=False)
-
-    many = parked(inbox._POST_CONCERN, {"body": "word " * 4000}, "many")
-    pane = Pane(many)
-    pane.draw(seam)
-    pane.draw(seam)
-    view = inbox._VIEWS.view(key(many, "body"))
-    assert view is not None
-    # The scrolling child the seam opened for the capped document: what is seen.
-    (child,) = (
-        w for w in seam.get_current_context().windows if "typeset-document" in w.name and w.active
-    )
-    tall = child.size.y
-    assert tall < child.content_size.y, "the fixture must be capped"
-    baselines = [float(rig.advtext.px_from_sp(line.baseline)) for line in view.set_lines()]
-    tops = [baseline - baselines[0] for baseline in baselines]
-    assert tops[1] == pytest.approx(pitch, abs=0.01)
-    cut = [top for top in tops if top < tall - 1.0 and top + pitch > tall + 1.0]
-    assert cut == []
 
 
 def test_a_long_body_costs_the_queue_no_more_than_the_cap(seam: Any) -> None:
@@ -428,11 +378,9 @@ def test_every_word_of_a_parked_concern_is_set_including_what_reads_as_html(
     pane = Pane(call)
     pane.draw(seam)
 
-    view = inbox._VIEWS.view(key(call, "body"))
-    assert view is not None
-    shown = " ".join(rig._shown(view).split())
+    said = " ".join(shown(call, "body").split())
     for needle in ("Optional<int>", "ask <lead> for", "<!-- generated", "<details>"):
-        assert needle in shown
+        assert needle in said
 
     def words(text: str) -> list[str]:
         # Less the marks that are markup on one side and typography on the other:
@@ -440,9 +388,9 @@ def test_every_word_of_a_parked_concern_is_set_including_what_reads_as_html(
         plain = text.replace("`", "").replace("*", "")
         return [word for word in plain.split() if word not in ("-", "\u2022")]
 
-    assert words(shown) == words(CONCERN_BODY)
-    assert inbox._VIEWS.view(key(call, "diff")) is None
-    assert pane.state.diff_lines == {}
+    assert words(said) == words(CONCERN_BODY)
+    assert key(call, "diff") not in inbox._VIEWS
+    assert pane.state.diff_lines == {call.id: []}
 
 
 FENCED_BODY = (
@@ -465,34 +413,31 @@ def test_what_follows_a_fences_opening_marks_is_set_with_the_body(seam: Any) -> 
     pane = Pane(call)
     pane.draw(seam)
 
-    view = inbox._VIEWS.view(key(call, "body"))
-    assert view is not None
-    # The glyphs the view set, which is what is seen: a block's text as it is
-    # copied leaves the info string out. A space in prose is glue and no glyph, so
-    # the whole body is compared with its white space taken out.
-    glyphs = rig._set_text(view)
-    assert "python IMPORTANT also delete tests\ndef helper() -> int:" in glyphs
-    assert "".join(glyphs.split()) == "".join(FENCED_BODY.replace("```", "").split())
+    assert inbox._VIEWS.texts(key(call, "body")) == (
+        "Replace the helper as below.",
+        "python IMPORTANT also delete tests\ndef helper() -> int:\n    return 1",
+        "Nothing else changes.",
+    )
 
 
 def test_a_view_is_dropped_when_its_call_leaves_the_queue(seam: Any) -> None:
-    first, second = write(5, "first"), parked(*fake_driver._POST_CONCERN, ident="second")
+    first, second = parked(*fake_driver._BASH, ident="first"), short_concern("second")
     pane = Pane(first, second)
     pane.draw(seam)
     pane.focus.move(pane.snap, 1)
     pane.draw(seam)
-    assert key(first, "diff") in inbox._VIEWS
+    assert key(first, "arguments") in inbox._VIEWS
     assert key(second, "body") in inbox._VIEWS
 
     pane.store.apply(ApprovalResolved(ROOT, first.id, approved=True))
     assert [p.id for p in pane.snap.approvals] == ["second"]
     pane.draw(seam)
-    assert key(first, "diff") not in inbox._VIEWS
+    assert key(first, "arguments") not in inbox._VIEWS
     assert key(second, "body") in inbox._VIEWS
 
 
 def test_the_last_call_leaving_empties_the_cache_on_the_zero_state_frame(seam: Any) -> None:
-    call = write(5)
+    call = short_concern("p1")
     pane = Pane(call)
     pane.draw(seam)
     assert len(inbox._VIEWS) > 0
@@ -510,16 +455,17 @@ def test_another_pane_draws_the_same_call_in_the_same_frame_in_a_view_of_its_own
     A shared view would be refused by the seam as drawn twice; two views must not
     both hold a selection, or Ctrl+C copies from whichever drew last.
     """
-    call = write(5)
+    call = short_concern("p1")
+    parts = typeset.prose_parts(CONCERN_BODY)
     pane = Pane(call)
     other = typeset.ViewCache()
     for _ in range(2):
-        pane.draw(seam, lambda: typeset.diff(other, call.id, call))
+        pane.draw(seam, lambda: typeset.document(other, call.id, parts))
 
     assert not [line for line in said if "drawn twice" in line]
-    mine, theirs = inbox._VIEWS.view(key(call, "diff")), other.view(call.id)
+    mine, theirs = inbox._VIEWS.view(key(call, "body")), other.view(call.id)
     assert mine is not None and theirs is not None and mine is not theirs
-    assert other.drawn(call.id) is not None and other.drawn(call.id)[0] > 0  # type: ignore[index]
+    assert list(mine.texts) == list(theirs.texts)
 
     mine.select_all()
     assert mine.owns_selection
@@ -540,11 +486,8 @@ def test_a_predicted_refusal_is_on_a_line_of_the_panes_own_under_either_renderer
 ) -> None:
     """
     Worded as a prediction, once, on a line that wraps -- and once means in the
-    whole row: not again above the typeset diff, and not again in its file header.
-
-    The native diff is the unified string and has nothing else to carry it, and it
-    is what an approver gets when the faces did not load. The typeset diff could
-    say it, and is asked not to: one statement, the same under both renderers.
+    whole row. The diff is the unified string under either renderer and has
+    nothing else to carry it.
     """
     typeset.configure(typeset=on)
     call = parked("Edit", {"file_path": path, "old_string": "a", "new_string": "b"})
@@ -553,88 +496,7 @@ def test_a_predicted_refusal_is_on_a_line_of_the_panes_own_under_either_renderer
     # ``said`` hears the seam's native lines as well as the pane's.
     assert [line for line in said if "may not apply" in line] == ["may not apply: file not found"]
     assert not [line for line in said if "will not apply" in line]
-    if not on:
-        return
-    view = inbox._VIEWS.view(key(call, "diff"))
-    assert view is not None
-    # The view's header is worded from its model, which carries no prediction.
-    assert [file.will_not_apply for file in view.diff.files] == [""]
-    if path == LONG_PATH:
-        # What the view can be scrolled across is its rows and never its header, so
-        # the path is said above it, wrapped -- and that line is not a warning.
-        assert view.content_width < rig.WINDOW[0] < 8.0 * len(path)
-        assert [line for line in said if line.startswith(path)]
-
-
-def held_off_the_frame(monkeypatch: pytest.MonkeyPatch) -> tuple[threading.Event, list[str]]:
-    """
-    Make the seam's diff model wait to be released wherever it is made off the
-    drawing thread, and record which thread made it.
-    """
-    release = threading.Event()
-    made_on: list[str] = []
-    real = typeset.approval_diff
-
-    def gated(pending: PendingApproval) -> Any:
-        mine = threading.current_thread()
-        made_on.append(mine.name)
-        if mine is not threading.main_thread():
-            release.wait(60.0)
-        return real(pending)
-
-    monkeypatch.setattr(typeset, "approval_diff", gated)
-    return release, made_on
-
-
-def test_a_refusal_is_said_while_a_large_diff_is_still_being_made(
-    seam: Any, said: list[str], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """
-    A large change is diffed on a thread of the seam's and the row shows a note
-    until it arrives. The gate's prediction is on the record and not in the model,
-    so it is on screen for every one of those frames and once when the diff is.
-    """
-    before = "".join(f"value_{n} = {n}\n" for n in range(6000))
-    after = "".join(f"value_{n} = {n + (n % 2)}\n" for n in range(6000))
-    refused = (DiffText(before, after, "tle/parse.py", will_not_apply="anchor not found in file"),)
-    call = PendingApproval(
-        id="p1",
-        node=ROOT,
-        tool_name="Edit",
-        tool_use_id="tu-p1",
-        raw_args={"file_path": "tle/parse.py"},
-        summary="Edit tle/parse.py",
-        requested_at=0.0,
-        diff=approval.render_texts("Edit", refused),
-        texts=refused,
-    )
-    release, made_on = held_off_the_frame(monkeypatch)
-    pane = Pane(call)
-    typeset.set_budget(6.0)
-
-    for _ in range(3):
-        said.clear()
-        pane.draw(seam)
-        assert inbox._VIEWS.view(key(call, "diff")) is None
-        assert "diffing a large change..." in said
-        assert [line for line in said if "may not apply" in line] == [
-            "may not apply: anchor not found in file"
-        ]
-        assert inbox._NO_DIFF not in said
-
-    release.set()
-    deadline = time.monotonic() + 60.0
-    while inbox._VIEWS.view(key(call, "diff")) is None:
-        assert time.monotonic() < deadline, "the model never arrived"
-        time.sleep(0.005)
-        said.clear()
-        pane.draw(seam)
-    assert made_on and "MainThread" not in made_on
-    view = inbox._VIEWS.view(key(call, "diff"))
-    assert view is not None and view.diff.added == 3000
-    assert [line for line in said if "may not apply" in line] == [
-        "may not apply: anchor not found in file"
-    ]
+    assert call.id in pane.state.diff_lines and key(call, "diff") not in inbox._VIEWS
 
 
 def test_a_call_that_applies_carries_no_warning_line(seam: Any, said: list[str]) -> None:
@@ -670,37 +532,36 @@ def test_a_parked_command_is_on_screen_to_its_last_character(seam: Any, said: li
     escaped.
     """
     call = parked(*fake_driver._BASH)
-    Pane(call).draw(seam)
+    pane = Pane(call)
+    # Twice: a window knows how far it scrolls from the frame before.
+    pane.draw(seam)
+    pane.draw(seam)
     assert inbox._NO_DIFF in said
-    assert inbox._VIEWS.view(key(call, "body")) is None
+    assert key(call, "body") not in inbox._VIEWS
 
-    view = inbox._VIEWS.view(key(call, "arguments"))
-    assert view is not None
-    assert [view.block_text(n) for n in range(2)] == ["command", BASH_COMMAND]
-    lines = ["".join(chr(code) for code, _ in line.glyphs) for line in view.set_lines(1, 2)]
-    assert len(lines) > 1, "broken to the window"
-    assert "".join(lines) == BASH_COMMAND, "every character, spaces included"
-    assert rig.rightmost(view) < rig.WINDOW[0]
+    # Literal text: the seam hands it to ImGui, every character, and holds no view.
+    assert inbox._VIEWS.texts(key(call, "arguments")) == ("command", BASH_COMMAND)
+    assert inbox._VIEWS.views(key(call, "arguments")) == ()
     assert inbox._VIEWS.unbuilt(key(call, "arguments")) == 0
-    # What is copied is the command, without the breaks the window made.
-    view.select_all()
-    assert view.selected_text() == f"command\n\n{BASH_COMMAND}"
+    # Broken to the window: taller than its two source lines, and nothing of it
+    # past the edge of the child it is in.
+    assert (inbox._VIEWS.height(key(call, "arguments")) or 0.0) > 3 * typeset.line_height()
+    child = typeset_child(seam)
+    assert child.content_size.x <= child.size.x and child.scroll_max.x == 0.0
 
 
 def test_a_command_of_several_lines_keeps_its_lines_and_its_spaces(seam: Any) -> None:
     command = "set -e\ncd /srv   &&   rm -rf  ./build\n\n    make  all"
     call = parked("Bash", {"command": command, "timeout": 600, "description": ""})
     Pane(call).draw(seam)
-    view = inbox._VIEWS.view(key(call, "arguments"))
-    assert view is not None
-    assert [view.block_text(n) for n in range(6)] == [
+    assert inbox._VIEWS.texts(key(call, "arguments")) == (
         "command",
         command,
         "timeout",
         "600",
         "description",
         "''",
-    ]
+    )
 
 
 def test_a_command_longer_than_the_cap_scrolls_in_a_view_no_taller_than_it(seam: Any) -> None:
@@ -714,7 +575,7 @@ def test_a_command_longer_than_the_cap_scrolls_in_a_view_no_taller_than_it(seam:
     pane = Pane(long)
     pane.draw(seam)
     assert short_h < pane.height <= short_h + limit
-    assert shown(long, "arguments").endswith("echo 399")
+    assert shown(long, "arguments").rstrip().endswith("echo 399")
 
 
 def test_with_typeset_off_a_command_is_the_string_wrapped_and_all_in_its_block(
@@ -791,7 +652,7 @@ def test_a_body_is_read_by_the_seams_one_rule_and_not_as_markdown_outright(seam:
 
     other = typeset.ViewCache()
     rig.frame(seam, lambda: typeset.document(other, "same", parts))
-    assert text == rig._shown(other.view("same"))
+    assert text == "\n\n".join(other.texts("same"))
 
 
 def test_a_bodys_parts_are_made_once_and_forgotten_with_the_call(
@@ -842,8 +703,8 @@ def test_a_call_parked_with_no_parts_shows_its_arguments_and_not_an_empty_diff(
 ) -> None:
     """
     ``texts`` may be an empty tuple: the record allows it, though ``diff_texts`` does
-    not produce one today. The seam has no diff view for that, and a pane that drew
-    nothing in its place would leave the approver a row with a reason box and no body.
+    not produce one today. A pane that drew nothing for it would leave the approver
+    a row with a reason box and no body.
     """
     call = PendingApproval(
         id="p1",
@@ -859,10 +720,58 @@ def test_a_call_parked_with_no_parts_shows_its_arguments_and_not_an_empty_diff(
     Pane(call).draw(seam)
     assert inbox._NO_DIFF in said
     assert shown(call, "arguments").split("\n\n") == ["file_path", "tle/parse.py", "edits", "[]"]
-    assert inbox._VIEWS.view(key(call, "diff")) is None
+    assert key(call, "diff") not in inbox._VIEWS
 
 
-# -- a body is whole before it can be approved -----------------------------------
+# -- nothing the agent wrote is absent from what the row can show ------------------
+
+UNBREAKABLE = "/srv/releases/" + "a-very-long-directory-name/" * 9 + "the-end-of-the-path.tar.gz"
+
+
+def test_nothing_written_in_a_concern_is_absent_from_what_the_row_can_bring_on_screen(
+    seam: Any, said: list[str]
+) -> None:
+    """
+    The body an approval releases, with everything in it a markdown reader hides
+    some of (``rig.STREAMED``) and a path no line can hold. Every word is in what
+    the row was handed to set, the fields in the chrome's font, and the capped
+    child the body is in scrolls sideways as far as the path runs: the library
+    does not break it, and its end would otherwise be off the row.
+    """
+    body = f"{rig.STREAMED}\nUnpack {UNBREAKABLE} first.\n"
+    args = {"to": "lead", "subject": "fix → deploy ✓", "body": body}
+    call = parked(inbox._POST_CONCERN, args)
+    pane = Pane(call)
+    # Three: a window knows its scroll range from the frame before, and gains its
+    # scrollbars on the frame after that.
+    for _ in range(3):
+        said.clear()
+        pane.draw(seam)
+
+    handed = "\n".join(inbox._VIEWS.texts(key(call, "body")))
+    assert [word for word in rig.STREAMED_WORDS if word not in handed] == []
+    for cell in ("b<br>c", "<i>x</i>", "**/*"):
+        assert cell in handed
+    assert f"Unpack {UNBREAKABLE} first." in handed
+    assert inbox._VIEWS.unbuilt(key(call, "body")) == 0
+    # The fields are ImGui's own lines, in a font that has the arrow and the tick.
+    assert "fix → deploy ✓" in said and "lead" in said
+    chrome = seam.get_io().fonts.fonts[0]
+    assert chrome.is_glyph_in_font(ord("→")) and chrome.is_glyph_in_font(ord("✓"))
+
+    reach = max(
+        float(line.right)
+        for view in inbox._VIEWS.views(key(call, "body"))
+        for line in view.set_lines()
+    )
+    child = typeset_child(seam)
+    visible = child.inner_rect.max.x - child.inner_rect.min.x
+    assert reach > visible + 200.0, "the fixture must run past the row"
+    assert child.scroll_max.x + visible >= reach - 1.0
+    assert child.scrollbar_x, "and there is a bar to reach it by"
+
+
+# -- a body is on screen before it can be approved ---------------------------------
 
 
 @pytest.fixture
@@ -903,41 +812,62 @@ def _sent(pane: Pane, monkeypatch: pytest.MonkeyPatch) -> list[str]:
     return sent
 
 
-def test_a_body_short_of_its_text_says_so_above_it_and_cannot_be_approved_by_a_click(
+def library_stops(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    Make every view of the library's stop inside its draw, as the library does
+    when it fails: the one way text handed to the seam is not on screen.
+    """
+
+    def stopped(self: Any, **given: Any) -> bool:
+        raise rig.advtext.TypesetUnavailable("imtypeset stopped: the library said no")
+
+    monkeypatch.setattr(rig.advtext.TypesetView, "draw", stopped)
+
+
+def test_a_body_the_library_stopped_under_says_so_and_cannot_be_approved_by_a_click(
     seam: Any, said: list[str], clicking_approve: list[bool], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """
-    A frame may spend a few milliseconds building, so a long concern is on screen
-    in part for some frames before it is whole, and the part looks like all of it.
-    For each of those frames the seam's line is the first thing of the body, the
-    row says the body is not the whole call, and a click on approve sends nothing.
+    The frame the library stops in shows a sentence where the body would be. The
+    row says the body is not on screen and a click on approve sends nothing; the
+    next frame is the row's own renderer, all of it, and the click lands.
     """
-    body = "".join(f"Paragraph {n} asks for something else to be done.\n\n" for n in range(600))
-    call = parked("mcp__pptmstr__post_concern", {"to": "lead", "subject": "s", "body": body})
+    call = long_concern()
     pane = Pane(call)
     sent = _sent(pane, monkeypatch)
-    typeset.set_budget(6.0)
+    library_stops(monkeypatch)
 
     pane.draw(seam)
     left = inbox._VIEWS.unbuilt(key(call, "body"))
-    assert left is not None and left > 0, "the body was whole on its first frame"
+    assert left == call.raw_args["body"].count("\n") + 1
+    assert pane.state.bodies[call.id]["inbox"][1] == left
     assert clicking_approve == [True] and sent == []
-    notice = [line for line in said if line.startswith("typesetting: ")]
-    assert len(notice) == 1 and inbox._STILL_TYPESETTING in said
-    assert said.index(notice[0]) < said.index(inbox._STILL_TYPESETTING)
-    assert "Paragraph599" not in shown(call, "body").replace(" ", "")
+    assert inbox._NOT_ON_SCREEN in said
 
-    frames = 1
-    while inbox._VIEWS.unbuilt(key(call, "body")):
-        assert sent == [] and frames < 2000
-        said.clear()
-        pane.draw(seam)
-        frames += 1
-    assert frames > 2
-    # Whole on the frame that built the last of it, and the click lands on that one.
+    said.clear()
+    pane.draw(seam)
+    assert not typeset.enabled(typeset.Pane.INBOX)
+    assert call.id in pane.state.diff_lines, "the row's own renderer drew it"
     assert clicking_approve[-1] is False and sent == [call.id]
-    assert inbox._STILL_TYPESETTING not in said
-    assert not [line for line in said if line.startswith("typesetting: ")]
+    assert inbox._NOT_ON_SCREEN not in said
+
+
+def test_a_long_body_is_whole_and_approvable_on_its_first_frame(
+    seam: Any, said: list[str], clicking_approve: list[bool], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Nothing is built over frames: 1,200 lines of concern are read and laid out in
+    the frame that first draws them, so the body that frame shows is the body.
+    """
+    call = long_concern()
+    pane = Pane(call)
+    sent = _sent(pane, monkeypatch)
+    pane.draw(seam)
+    assert inbox._VIEWS.unbuilt(key(call, "body")) == 0
+    assert "Paragraph599" in shown(call, "body").replace(" ", "")
+    assert len(inbox._VIEWS.texts(key(call, "body"))) == 600
+    assert clicking_approve == [False] and sent == [call.id]
+    assert inbox._NOT_ON_SCREEN not in said
 
 
 def test_an_ordinary_body_is_whole_and_approvable_on_its_first_frame(
@@ -946,62 +876,9 @@ def test_an_ordinary_body_is_whole_and_approvable_on_its_first_frame(
     call = parked("mcp__pptmstr__post_concern", dict(fake_driver._POST_CONCERN[1]))
     pane = Pane(call)
     sent = _sent(pane, monkeypatch)
-    typeset.set_budget(6.0)
     pane.draw(seam)
     assert clicking_approve == [False] and sent == [call.id]
-    assert inbox._STILL_TYPESETTING not in said
-
-
-def test_a_diff_that_could_not_be_made_is_said_once_a_frame_over_the_calls_arguments(
-    seam: Any, said: list[str], clicking_approve: list[bool], monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """
-    The row asks for a large diff's model on a thread. A thread that raises is not
-    started again on the next frame, and the approver is not left with a note that
-    a diff is coming: they see what was raised and, under it, the whole call.
-    """
-    before = "".join(f"value_{n} = {n}\n" for n in range(6000))
-    after = "".join(f"value_{n} = {n + (n % 2)}\n" for n in range(6000))
-    texts = (DiffText(before, after, "tle/parse.py"),)
-    call = PendingApproval(
-        id="p1",
-        node=ROOT,
-        tool_name="Edit",
-        tool_use_id="tu-p1",
-        raw_args={"file_path": "tle/parse.py", "old_string": "a", "new_string": "b"},
-        summary="Edit tle/parse.py",
-        requested_at=0.0,
-        diff=approval.render_texts("Edit", texts),
-        texts=texts,
-    )
-    made: list[str] = []
-
-    def failing(pending: PendingApproval) -> Any:
-        made.append(threading.current_thread().name)
-        raise ValueError("no model")
-
-    monkeypatch.setattr(typeset, "approval_diff", failing)
-    pane = Pane(call)
-    _sent(pane, monkeypatch)
-    typeset.set_budget(6.0)
-    deadline = time.monotonic() + 30.0
-    while not [line for line in said if "could not be made" in line]:
-        assert time.monotonic() < deadline
-        said.clear()
-        pane.draw(seam)
-        time.sleep(0.005)
-    for _ in range(4):
-        said.clear()
-        del clicking_approve[:]
-        pane.draw(seam)
-        failure = [line for line in said if "could not be made" in line]
-        assert failure == [
-            "the diff of this call could not be made (ValueError: no model): read its arguments"
-        ]
-        assert inbox._NO_DIFF in said and "diffing a large change..." not in said
-        assert "old_string" in shown(call, "arguments")
-        assert clicking_approve == [False]
-    assert made == ["typeset-diff"]
+    assert inbox._NOT_ON_SCREEN not in said
 
 
 # -- no approve path sends a call whose body is not all on screen ------------------
@@ -1012,7 +889,8 @@ def test_a_diff_that_could_not_be_made_is_said_once_a_frame_over_the_calls_argum
 
 def long_concern(ident: str = "p1") -> PendingApproval:
     """
-    A concern long enough to be short of its text for several frames under a budget.
+    A concern of 1,200 lines: long enough that a seam building over frames would
+    show part of it first.
     """
     body = "".join(f"Paragraph {n} asks for something else to be done.\n\n" for n in range(600))
     args = {"to": "lead", "subject": "s", "body": body}
@@ -1047,22 +925,27 @@ def press(pane: Pane, im: Any, *keys: Any) -> None:
     rig.frame(im, lambda: None)
 
 
-def until_whole(pane: Pane, im: Any, call: PendingApproval, part: str = "body") -> None:
-    frames = 0
-    while inbox._VIEWS.unbuilt(key(call, part)) != 0:
-        assert frames < 2000
-        pane.draw(im)
-        frames += 1
+def until_whole(pane: Pane, im: Any, call: PendingApproval) -> None:
+    """
+    The frame after the library stopped: the row's own renderer, all of the body.
+    """
+    pane.draw(im)
+    assert not typeset.enabled(typeset.Pane.INBOX)
+    assert review.unset_lines(pane.state, call.id) == 0
 
 
-def short_on_its_first_frame(pane: Pane, im: Any, call: PendingApproval) -> None:
+def short_on_its_first_frame(
+    pane: Pane, im: Any, call: PendingApproval, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """
-    Draw one frame under the application's budget and insist the hazard is there.
+    Draw one frame in which the library stops under the body, and insist the
+    hazard is there: the row's reading is of text that is not on screen.
     """
-    typeset.set_budget(6.0)
+    library_stops(monkeypatch)
     pane.draw(im)
     left = inbox._VIEWS.unbuilt(key(call, "body"))
-    assert left is not None and left > 0, "the body was whole on its first frame"
+    assert left is not None and left > 0, "the body was on screen on its first frame"
+    assert review.unset_lines(pane.state, call.id) == left
 
 
 @pytest.fixture
@@ -1088,7 +971,7 @@ def test_a_over_a_body_short_of_its_text_sends_nothing_and_says_why(
     call = long_concern()
     pane = Pane(call)
     sent = _sent(pane, monkeypatch)
-    short_on_its_first_frame(pane, seam, call)
+    short_on_its_first_frame(pane, seam, call, monkeypatch)
 
     said.clear()
     press(pane, seam, seam.Key.a)
@@ -1147,10 +1030,9 @@ def test_with_typeset_off_a_approves_a_drawn_row_whatever_its_length(
 ) -> None:
     """
     The native body is whole on the frame it is first drawn, so one drawn frame is
-    all ``a`` waits for, under a budget that would hold a typeset body back.
+    all ``a`` waits for.
     """
     typeset.configure(typeset=False)
-    typeset.set_budget(6.0)
     pane = Pane(call)
     sent = _sent(pane, monkeypatch)
     pane.draw(seam)
@@ -1168,11 +1050,11 @@ def test_reject_and_edit_are_never_held_by_a_short_body(
     pane = Pane(call)
     decided: list[tuple[str, bool]] = []
     monkeypatch.setattr(pane.bridge, "resolve", lambda i, d: decided.append((i, d.approved)))
-    short_on_its_first_frame(pane, seam, call)
+    short_on_its_first_frame(pane, seam, call, monkeypatch)
     assert review.withheld(pane.state, call) == review.NOT_WHOLE
 
-    # The keys alone, with no pane drawn after them: nothing below has built
-    # any more of the body, which is still short when the rejection is sent.
+    # The keys alone, with no pane drawn after them: the reading is still of a
+    # body that was not on screen when the rejection is sent.
     io = seam.get_io()
     for letter in (seam.Key.r, seam.Key.e):
         io.add_key_event(letter, True)
@@ -1202,12 +1084,11 @@ def test_an_open_editor_is_what_is_approved_and_does_not_wait_for_a_body(
 ) -> None:
     """
     ``e`` on a row nobody has drawn yet: the row then shows the draft in ImGui's
-    own input, all of it, and approve sends that draft. Nothing typeset is awaited.
+    own input, all of it, and approve sends that draft.
     """
     call = long_concern()
     pane = Pane(call)
     sent = _sent(pane, monkeypatch)
-    typeset.set_budget(6.0)
     pane.state.editing = call.id
     pane.state.edits[call.id] = review.pretty_args(call)
 
@@ -1227,7 +1108,6 @@ def test_a_cancelled_edit_takes_the_editors_reading_with_it(
     call = long_concern()
     pane = Pane(call)
     sent = _sent(pane, monkeypatch)
-    typeset.set_budget(6.0)
     pane.state.editing = call.id
     pane.state.edits[call.id] = review.pretty_args(call)
     pane.draw(seam)
@@ -1249,7 +1129,7 @@ def test_shift_a_with_one_short_body_in_the_agents_queue_sends_none_of_it(
     long, brief = long_concern("p1"), short_concern("p2")
     pane = Pane(long, brief)
     sent = _sent(pane, monkeypatch)
-    short_on_its_first_frame(pane, seam, long)
+    short_on_its_first_frame(pane, seam, long, monkeypatch)
 
     said.clear()
     press(pane, seam, seam.Key.mod_shift, seam.Key.a)
@@ -1257,18 +1137,8 @@ def test_shift_a_with_one_short_body_in_the_agents_queue_sends_none_of_it(
     refused = [line for line in said if line.startswith("none sent - 1 of these 2 calls")]
     assert len(refused) == 1 and long.summary in refused[0]
 
-    # From the other row as well: the long body is no longer being drawn, and what
-    # is known of it is still that it was short.
-    pane.focus.to_obligation(pane.snap.needs_you[1])
-    pane.draw(seam)
-    assert inbox._VIEWS.unbuilt(key(long, "body"))
-    said.clear()
-    press(pane, seam, seam.Key.mod_shift, seam.Key.a)
-    assert sent == []
-    assert [line for line in said if line.startswith("none sent - ")]
-
-    pane.focus.to_obligation(pane.snap.needs_you[0])
-    until_whole(pane, seam, long)
+    # That frame drew the row with its own renderer, all of it.
+    assert review.unset_lines(pane.state, long.id) == 0
     press(pane, seam, seam.Key.mod_shift, seam.Key.a)
     assert sent == ["p1", "p2"]
 
@@ -1280,11 +1150,11 @@ def test_an_approve_all_button_with_one_short_body_in_its_batch_sends_none_of_it
     long, brief = long_concern("p1"), short_concern("p2")
     pane = Pane(long, brief)
     sent = _sent(pane, monkeypatch)
-    short_on_its_first_frame(pane, seam, long)
 
     # The button is drawn after the row in the same frame, so the row's reading of
-    # this frame is the one it is answered from: clicked while the body is short.
-    said.clear()
+    # this frame is the one it is answered from: clicked in the frame the library
+    # stopped under the body.
+    library_stops(monkeypatch)
     pane.state.confirming_global = True
     clicking.append(label)
     pane.draw(seam)
@@ -1297,7 +1167,7 @@ def test_an_approve_all_button_with_one_short_body_in_its_batch_sends_none_of_it
     pane.draw(seam)
     assert [line for line in said if line.startswith("none sent - 1 of these 2 calls")]
 
-    until_whole(pane, seam, long)
+    assert review.unset_lines(pane.state, long.id) == 0
     pane.state.confirming_global = True
     clicking.append(label)
     pane.draw(seam)
@@ -1314,7 +1184,6 @@ def test_a_batch_still_sends_the_calls_nobody_opened(
     calls = [short_concern("p1"), long_concern("p2"), write(300, "p3")]
     pane = Pane(*calls)
     sent = _sent(pane, monkeypatch)
-    typeset.set_budget(6.0)
     pane.draw(seam)
     assert review.unset_lines(pane.state, "p1") == 0
     assert review.unset_lines(pane.state, "p2") is None
@@ -1337,7 +1206,7 @@ def test_a_batch_refused_with_no_approval_row_open_is_said_by_the_buttons(
     long = long_concern("p1")
     pane = Pane(long)
     sent = _sent(pane, monkeypatch)
-    short_on_its_first_frame(pane, seam, long)
+    short_on_its_first_frame(pane, seam, long, monkeypatch)
     pane.focus = FocusState()
     assert review.approve_everything(pane.bridge, pane.snap, pane.state) == 0
     assert sent == []
@@ -1504,9 +1373,11 @@ def test_a_preview_is_as_tall_as_its_text_and_no_taller_than_its_cap(seam: Any) 
     inbox._VIEWS.clear()
     inbox._PREVIEWS.clear()
     long = asked("Words.\n\n" + FENCE)
+    # Twice: a window knows how tall its content is from the frame before.
     long.draw(seam)
-    whole = inbox._VIEWS.height((question.key, "preview"))
-    assert whole is not None and whole > 50 * line
+    long.draw(seam)
+    whole = typeset_child(seam).content_size.y
+    assert whole > 50 * line
     # The line saying what is left out is the row's own, over the cap.
     said = seam.get_text_line_height_with_spacing()
     assert short.height < long.height <= short.height + inbox._PREVIEW_LINES * line + said
@@ -1621,17 +1492,16 @@ def test_a_call_whose_argument_is_prose_is_set_word_for_word_and_its_fields_over
     pane = Pane(call)
     pane.draw(seam)
 
-    view = inbox._VIEWS.view(key(call, "body"))
-    assert view is not None and inbox._VIEWS.view(key(call, "arguments")) is None
-    shown = " ".join(rig._shown(view).split())
+    assert key(call, "arguments") not in inbox._VIEWS
+    set_ = " ".join(shown(call, "body").split())
     for needle in ("Optional<int>", "ask <lead> for", "<!-- generated", "<details>"):
-        assert needle in shown
+        assert needle in set_
 
     def words(text: str) -> list[str]:
         plain = text.replace("`", "").replace("*", "")
         return [word for word in plain.split() if word not in ("-", "\u2022")]
 
-    assert words(shown) == words(CONCERN_BODY)
+    assert words(set_) == words(CONCERN_BODY)
     prose = inbox.prose_argument(tool)
     for name, value in args.items():
         if name != prose:
@@ -1649,8 +1519,8 @@ def test_a_long_prose_argument_of_any_described_call_holds_its_approve(
     args: dict[str, Any],
 ) -> None:
     """
-    What is newly read as prose is newly built over several frames, so it is newly
-    something an approve can get ahead of. It does not.
+    Whatever is read as prose is the library's to set, so it is what an approve
+    could be offered over if the library stopped under it. It is not.
     """
     prose = inbox.prose_argument(tool)
     assert prose is not None
@@ -1658,16 +1528,16 @@ def test_a_long_prose_argument_of_any_described_call_holds_its_approve(
     call = parked(tool, {**args, prose: body})
     pane = Pane(call)
     sent = _sent(pane, monkeypatch)
-    typeset.set_budget(6.0)
+    library_stops(monkeypatch)
 
     pane.draw(seam)
 
     left = inbox._VIEWS.unbuilt(key(call, "body"))
-    assert left is not None and left > 0, "the body was whole on its first frame"
+    assert left is not None and left > 0
     assert pane.state.bodies[call.id]["inbox"][1] == left
     assert review.withheld(pane.state, call) == review.NOT_WHOLE
     assert clicking_approve == [True] and sent == []
-    assert inbox._STILL_TYPESETTING in said
+    assert inbox._NOT_ON_SCREEN in said
     until_whole(pane, seam, call)
     assert review.withheld(pane.state, call) is None and sent == [call.id]
 
@@ -1678,7 +1548,7 @@ def test_a_message_that_is_an_object_is_a_field_and_not_a_body(seam: Any, said: 
     pane = Pane(call)
     pane.draw(seam)
 
-    assert inbox._VIEWS.view(key(call, "body")) is None
+    assert key(call, "body") not in inbox._VIEWS
     assert repr(message) in said
 
 
@@ -1698,5 +1568,5 @@ def test_questions_put_to_the_user_are_set_as_the_structure_they_are(seam: Any) 
     pane = Pane(call)
     pane.draw(seam)
 
-    assert inbox._VIEWS.view(key(call, "body")) is None
+    assert key(call, "body") not in inbox._VIEWS
     assert repr(questions) in shown(call, "arguments").replace("\n", "")

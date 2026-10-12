@@ -256,8 +256,8 @@ def test_escape_still_cancels_with_a_modifier_held(frame: None) -> None:
 # -- what a pane showed decides what ``a`` may send --------------------------------
 #
 # The readings here are written as a pane writes them. The panes writing them, and
-# a body really held short by the seam's budget, are tests/test_inbox_typeset.py's
-# and tests/test_detail.py's.
+# a body the typesetting library really stopped under, are
+# tests/test_inbox_typeset.py's and tests/test_detail.py's.
 
 
 def test_a_over_a_call_no_pane_has_drawn_sends_nothing_and_says_why(frame: None) -> None:

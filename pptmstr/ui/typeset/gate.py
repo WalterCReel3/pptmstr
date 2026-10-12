@@ -91,19 +91,22 @@ from typing import Any
 
 from . import roles, themes
 
-_HIDING_RULES = ("html_block", "html_inline", "image")
+_HIDING_RULES = ("html_block", "html_inline", "image", "entity")
 """
-The rules of the library's markdown reader that consume text and show nothing for it.
+The rules of the library's markdown reader that consume text and show nothing
+for it, or show other characters than were written: ``&amp;`` is set as ``&``
+by the last, and the body's recipient gets the five characters.
 """
 
 _DESTINATIONS_RULE = "pptmstr_link_destinations"
 _STARS_RULE = "pptmstr_written_stars"
 
-READER_PROBE = "a <b>x</b> ![alt](u) rm **/*.py and t/**/*.md\n"
-READER_PROBE_WORDS = ("<b>x</b>", "alt", "(u)", "**/*.py", "t/**/*.md")
+READER_PROBE = "a <b>x</b> ![alt](u) rm **/*.py and t/**/*.md R&amp;D\n"
+READER_PROBE_WORDS = ("<b>x</b>", "alt", "(u)", "**/*.py", "t/**/*.md", "R&amp;D")
 """
 A line every word of which a CommonMark reader hides some of, and what must come
-back from it: the tags, the image's description and destination, the stars.
+back from it: the tags, the image's description and destination, the stars,
+the entity as its characters.
 """
 
 
@@ -286,7 +289,8 @@ def _reader() -> None:
 
     - The rules in ``_HIDING_RULES`` are switched off. Raw HTML is then text, as
       CommonMark's own ``html: false`` reading has it -- a tag, a comment opener, a
-      generic's ``<T>`` -- and ``![alt](url)`` is an exclamation mark and a link.
+      generic's ``<T>`` -- ``![alt](url)`` is an exclamation mark and a link, and
+      a character reference is the characters it was written with.
     - A core rule (``_show_destinations``) writes each link's destination after
       its text.
     - An inline rule (``_written_stars``) reads the stars of a glob, a comment

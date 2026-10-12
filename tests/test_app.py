@@ -825,23 +825,6 @@ def test_a_chord_over_a_typeset_view_does_not_change_the_layout(
     assert press(imgui.Key.enter, imgui.Key.mod_shift) == [app.FOCUS]
 
 
-def test_the_application_stays_awake_while_a_view_is_still_being_typeset() -> None:
-    """
-    A long text is built a piece a frame. An idling loop gives it a frame every few
-    hundred milliseconds, so the loop has to be told there is work. The wiring is
-    what is checked: ``typeset.pending`` unread would leave every test of the seam
-    passing and a long document crawling.
-    """
-    import inspect
-
-    from pptmstr import app
-
-    source = inspect.getsource(app)
-    wired = source[source.index("def pre_frame() -> None:") :]
-    wired = wired[: wired.index("runner.callbacks.load_additional_fonts")]
-    assert "typeset.pending()" in wired and "enable_idling = not working" in wired
-
-
 def test_the_frame_loop_gives_the_seam_its_turn_between_frames(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
