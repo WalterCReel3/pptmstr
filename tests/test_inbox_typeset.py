@@ -25,7 +25,7 @@ from pptmstr.intents import AgentSpawned, ApprovalRequested, ApprovalResolved, S
 from pptmstr.model import AgentState, NodeId, PendingApproval, QuestionPending, Snapshot
 from pptmstr.store import Store
 from pptmstr.transcript import SegmentKind, Transcript
-from pptmstr.ui import inbox, review, typeset
+from pptmstr.ui import detail, inbox, review, typeset
 from pptmstr.ui.compose import ComposeState
 from pptmstr.ui.focus import FocusState
 from tests import test_typeset_views as rig
@@ -50,13 +50,12 @@ def no_views_held() -> Iterator[None]:
     """
     The pane's view cache is module state; a test starts and ends with it empty.
     """
-    inbox._VIEWS.clear()
-    inbox._PARTS.clear()
-    inbox._PREVIEWS.clear()
+    held = (inbox._VIEWS, inbox._PARTS, inbox._PREVIEWS, inbox._WIDTHS, inbox._WHOLE)
+    for cache in held:
+        cache.clear()
     yield
-    inbox._VIEWS.clear()
-    inbox._PARTS.clear()
-    inbox._PREVIEWS.clear()
+    for cache in held:
+        cache.clear()
 
 
 def parked(tool_name: str, raw_args: Mapping[str, Any], ident: str = "p1") -> PendingApproval:
@@ -347,6 +346,101 @@ def test_with_typeset_off_the_native_diff_is_drawn_and_no_view_is_held(seam: Any
 
     assert call.id in pane.state.diff_lines
     assert len(inbox._VIEWS) == 0
+
+
+def wide_write(lines: int, ident: str = "p1") -> PendingApproval:
+    """
+    ``write`` with one line of 300 characters in the middle of it, ending in a ``Z``.
+    """
+    rows = [f"line_{n} = {n}\n" for n in range(lines)]
+    rows[lines // 2] = "x = '" + "a" * 293 + "Z'\n"
+    return parked("Write", {"file_path": "no/such/dir/file.py", "content": "".join(rows)}, ident)
+
+
+@pytest.fixture(params=["typeset", "native"])
+def either_renderer(request: pytest.FixtureRequest, imgui: Any) -> Any:
+    """
+    The context with typeset text on, where the library draws, and with it off,
+    which needs no library.
+    """
+    if request.param == "typeset":
+        return request.getfixturevalue("seam")
+    typeset.configure(typeset=False)
+    return imgui
+
+
+def test_a_diff_row_wider_than_the_row_has_a_bar_and_its_last_character_in_reach(
+    either_renderer: Any,
+) -> None:
+    """
+    The row the approve button is on does not break a diff's rows. The end of a
+    300-character one is inside what the child scrolls to, and the child shows
+    that it scrolls: with no bar the wheel still reaches it and nothing says so.
+    """
+    im = either_renderer
+    call = wide_write(5)
+    pane = Pane(call)
+    # Three: a window knows its scroll range from the frame before, and gains its
+    # scrollbars on the frame after that.
+    for _ in range(3):
+        pane.draw(im)
+
+    child = native_body(im)
+    left, right = child.dc.cursor_start_pos.x, child.inner_clip_rect.max.x
+    reach, bar = child.scroll_max.x, child.scrollbar_x
+    # Measured in a frame of its own, which is the end of the child's.
+    im.new_frame()
+    widest = max(im.calc_text_size(line).x for line in pane.state.diff_lines[call.id])
+    im.render()
+    assert left + widest > right + 1000.0, "the fixture must run past the row"
+    assert left + widest <= right + reach
+    assert bar, "and there is a bar to reach it by"
+
+
+def test_a_bar_under_a_short_diff_costs_it_no_line(either_renderer: Any) -> None:
+    """
+    A diff that fits is not scrolled down to be read, with a wide row in it or
+    without: the child is taller by the bar, and only when there is one.
+    """
+    im = either_renderer
+    narrow, wide = write(5, "narrow"), wide_write(5, "wide")
+    seen = {}
+    for call in (narrow, wide):
+        pane = Pane(call)
+        for _ in range(3):
+            pane.draw(im)
+        seen[call.id] = native_body(im)
+    assert len(pane.state.diff_lines[wide.id]) == len((narrow.diff or "").splitlines())
+
+    assert not seen["narrow"].scrollbar_x and seen["wide"].scrollbar_x
+    bar = im.get_style().scrollbar_size
+    assert seen["wide"].size.y == pytest.approx(seen["narrow"].size.y + bar)
+    assert seen["wide"].scroll_max.y == pytest.approx(seen["narrow"].scroll_max.y)
+
+
+def test_a_diffs_width_is_measured_once_and_forgotten_with_the_call(
+    either_renderer: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    im = either_renderer
+    call = wide_write(400)
+    pane = Pane(call)
+    pane.draw(im)
+    assert key(call, "diff") in inbox._WIDTHS
+
+    measured: list[str] = []
+    real = im.calc_text_size
+
+    def counting(text: str, *rest: Any) -> Any:
+        measured.append(text)
+        return real(text, *rest)
+
+    monkeypatch.setattr(im, "calc_text_size", counting)
+    pane.draw(im)
+    assert not [text for text in measured if text in pane.state.diff_lines[call.id]]
+
+    pane.store.apply(ApprovalResolved(ROOT, call.id, approved=True))
+    pane.draw(im)
+    assert inbox._WIDTHS == {}
 
 
 def test_a_long_body_costs_the_queue_no_more_than_the_cap(seam: Any) -> None:
@@ -879,6 +973,176 @@ def test_an_ordinary_body_is_whole_and_approvable_on_its_first_frame(
     pane.draw(seam)
     assert clicking_approve == [False] and sent == [call.id]
     assert inbox._NOT_ON_SCREEN not in said
+
+
+# -- a body past the bound is set as far as the bound, and the rest when asked ------
+
+
+def paragraphs(count: int) -> str:
+    """
+    ``count`` paragraphs, two lines each as ``detail.head_lines`` counts them, and
+    one more line for the end of the last.
+    """
+    return "".join(f"Paragraph {n} asks for something else to be done.\n\n" for n in range(count))
+
+
+def past_the_bound(ident: str = "p1") -> PendingApproval:
+    """
+    A concern 201 lines longer than DETAIL sets unasked.
+    """
+    args = {"to": "lead", "subject": "s", "body": paragraphs(detail._SETTLED_LINES // 2 + 100)}
+    return parked(inbox._POST_CONCERN, args, ident)
+
+
+@pytest.fixture
+def setting_all(monkeypatch: pytest.MonkeyPatch, seam: Any) -> list[str]:
+    """
+    Every ``set all`` button drawn, by label; each reports a click while the list
+    it returns holds ``"click"``.
+    """
+    drawn: list[str] = []
+    real = seam.small_button
+
+    def small_button(label: str) -> bool:
+        pressed = bool(real(label))
+        if not label.startswith("set all"):
+            return pressed
+        clicked = "click" in drawn
+        drawn.append(label)
+        return clicked
+
+    monkeypatch.setattr(seam, "small_button", small_button)
+    return drawn
+
+
+def test_the_bound_on_a_body_is_details_bound_counted_as_detail_counts(seam: Any) -> None:
+    """
+    One rule for a document set in one frame, not one a pane.
+    """
+    limit = detail._SETTLED_LINES
+    for lines in (1, limit - 1, limit, limit + 1, limit + 500):
+        body = "\n".join(f"line {n}" for n in range(lines))
+        head, more = detail.head_lines(body, limit)
+        assert inbox._unset_tail(("k", "body"), body) == more, lines
+        assert inbox._head(body) == head, lines
+
+
+def test_a_body_past_the_bound_is_set_to_the_bound_and_holds_its_approve(
+    seam: Any,
+    said: list[str],
+    setting_all: list[str],
+    clicking_approve: list[bool],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    The frame the cursor reaches the row reads and lays out no more than DETAIL
+    would unasked. What is past that is not on screen, and the row says so three
+    ways: the count, the button that sets it, and an approve that sends nothing.
+    """
+    call = past_the_bound()
+    pane = Pane(call)
+    sent = _sent(pane, monkeypatch)
+    pane.draw(seam)
+
+    handed = shown(call, "body").replace(" ", "")
+    last = detail._SETTLED_LINES // 2 - 1
+    assert f"Paragraph{last}asks" in handed and f"Paragraph{last + 1}asks" not in handed
+    assert inbox._VIEWS.unbuilt(key(call, "body")) == 0
+    assert review.unset_lines(pane.state, call.id) == 201
+    assert [line for line in said if "201 more lines not set: all 2,201" in line]
+    assert setting_all == ["set all 2,201 lines"]
+    assert clicking_approve == [True] and sent == []
+    assert inbox._NOT_ON_SCREEN in said
+
+    press(pane, seam, seam.Key.a)
+    assert sent == [] and pane.state.refusal is not None
+    assert pane.state.refusal.text == review.NOT_WHOLE
+
+
+def test_a_body_past_the_bound_is_whole_and_approvable_once_asked_for(
+    seam: Any,
+    said: list[str],
+    setting_all: list[str],
+    clicking_approve: list[bool],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    call = past_the_bound()
+    pane = Pane(call)
+    sent = _sent(pane, monkeypatch)
+    pane.draw(seam)
+    assert sent == []
+
+    # The click lands under the body it asks for: that frame is still the head.
+    setting_all.append("click")
+    pane.draw(seam)
+    setting_all.clear()
+    assert sent == []
+
+    said.clear()
+    pane.draw(seam)
+    handed = shown(call, "body").replace(" ", "")
+    assert f"Paragraph{detail._SETTLED_LINES // 2 + 99}asks" in handed
+    assert review.unset_lines(pane.state, call.id) == 0
+    assert setting_all == [] and not [line for line in said if "more lines not set" in line]
+    assert clicking_approve[-1] is False and sent == [call.id]
+
+
+def test_a_body_at_the_bound_is_whole_and_offers_nothing(
+    seam: Any, said: list[str], setting_all: list[str]
+) -> None:
+    body = "\n\n".join(f"Paragraph {n}." for n in range(detail._SETTLED_LINES // 2)) + "\nEnd."
+    assert body.count("\n") + 1 == detail._SETTLED_LINES
+    call = parked(inbox._POST_CONCERN, {"to": "lead", "body": body})
+    pane = Pane(call)
+    pane.draw(seam)
+
+    assert "End." in shown(call, "body")
+    assert review.unset_lines(pane.state, call.id) == 0
+    assert setting_all == [] and not [line for line in said if "more lines not set" in line]
+
+
+def test_a_body_asked_for_whole_is_forgotten_with_its_call(
+    seam: Any, setting_all: list[str]
+) -> None:
+    call = past_the_bound()
+    pane = Pane(call)
+    setting_all.append("click")
+    pane.draw(seam)
+    assert inbox._WHOLE == {key(call, "body")}
+
+    pane.store.apply(ApprovalResolved(ROOT, call.id, approved=True))
+    pane.draw(seam)
+    assert inbox._WHOLE == set()
+
+
+def test_with_typeset_off_a_body_past_the_bound_is_all_drawn_and_approvable(
+    imgui: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The bound is on what the library reads and lays out in one frame. ImGui's own
+    text has no such frame, and the native block scrolls to all of it.
+    """
+    typeset.configure(typeset=False)
+    call = past_the_bound()
+    pane = Pane(call)
+    sent = _sent(pane, monkeypatch)
+    pane.draw(imgui)
+    assert review.unset_lines(pane.state, call.id) == 0
+
+    press(pane, imgui, imgui.Key.a)
+    assert sent == [call.id]
+
+
+def test_detail_does_not_carry_the_end_of_a_body_this_row_holds_back() -> None:
+    """
+    Why the row sets the rest itself and does not point at DETAIL: DETAIL cuts a
+    call's argument at a character count and has no way to the rest.
+    """
+    body = str(past_the_bound().raw_args["body"])
+    parts = detail.argument_parts(inbox._POST_CONCERN, {"body": body}, 80)
+    assert len(body) > detail._MAX_ARG_CHARS
+    assert f"Paragraph {detail._SETTLED_LINES // 2 + 99} " not in "".join(p.text for p in parts)
+    assert "more characters not shown" in parts[-1].text
 
 
 # -- no approve path sends a call whose body is not all on screen ------------------

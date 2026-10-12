@@ -114,6 +114,15 @@ _PARTS: dict[Hashable, tuple[object, tuple[typeset.Part, ...]]] = {}
 # so a length that has not moved is a turn that has not.
 _PREVIEWS: dict[Hashable, tuple[int, int, str]] = {}
 
+# The width of the widest row of a diff, beside the lines it was measured over,
+# under the view's key and pruned with it: every row of a whole-file Write is
+# measured once and not once a frame.
+_WIDTHS: dict[Hashable, tuple[object, float]] = {}
+
+# The bodies the operator asked to have set whole, past the bound ``_typeset_body``
+# puts on one, by the view's key and pruned with it.
+_WHOLE: set[Hashable] = set()
+
 _NO_DIFF = "no diff for this call - arguments:"
 _WITHHELD = "shown as the agent sent it - approve sends YOUR EDIT, which differs"
 _NOT_ON_SCREEN = "the body above is not on screen - approve is held until it is"
@@ -207,13 +216,16 @@ def draw(
     """Build the inbox from one snapshot. Never reads the store."""
     state.prune({p.id for p in snap.approvals})
     compose.prune(snap)
-    if len(_VIEWS) or _PARTS or _PREVIEWS:
+    if len(_VIEWS) or _PARTS or _PREVIEWS or _WIDTHS or _WHOLE:
         live = {(o.key, part) for o in snap.needs_you for part in _VIEW_PARTS}
         _VIEWS.prune(live)
         for stale in _PARTS.keys() - live:
             del _PARTS[stale]
         for stale in _PREVIEWS.keys() - live:
             del _PREVIEWS[stale]
+        for stale in _WIDTHS.keys() - live:
+            del _WIDTHS[stale]
+        _WHOLE.intersection_update(live)
 
     # Before the empty-queue branch, and the ordering is the whole distinction.
     # ``_zero_state`` answers "a fleet exists and owes you nothing"; this answers
@@ -446,7 +458,8 @@ def _expand_approval(
     """
     pending = obligation.approval
     # Lines of the body this frame did not put on screen: none, unless the
-    # typesetting library stopped under it (``ViewCache.unbuilt``).
+    # typesetting library stopped under it (``ViewCache.unbuilt``) or the body is
+    # past the bound and its end has not been asked for (``_unset_tail``).
     unset = 0
 
     if state.editing == pending.id:
@@ -465,7 +478,7 @@ def _expand_approval(
         if typeset.enabled(typeset.Pane.INBOX):
             unset = _typeset_body(state, pending, obligation.key)
         else:
-            _native_body(state, pending)
+            _native_body(state, pending, obligation.key)
     # What every approve path is answered from (``review.withheld``), the keys'
     # on the next frame and this row's own button on this one.
     state.body_shown("inbox", pending.id, unset, int(imgui.get_frame_count()))
@@ -528,14 +541,14 @@ def _warning(text: str) -> None:
     imgui.pop_text_wrap_pos()
 
 
-def _native_body(state: review.ReviewState, pending: PendingApproval) -> None:
+def _native_body(state: review.ReviewState, pending: PendingApproval, key: str) -> None:
     """
     What the call would do, in ImGui's own text: its unified diff a line to a row,
     or its arguments.
     """
     lines = _diff_lines(state, pending)
     if lines:
-        _diff_rows(lines)
+        _diff_rows(lines, (key, "diff"))
     else:
         _native_arguments(pending)
 
@@ -556,7 +569,20 @@ def _diff_lines(state: review.ReviewState, pending: PendingApproval) -> list[str
     return lines
 
 
-def _diff_rows(lines: Sequence[str]) -> None:
+def _widest(view: Hashable, lines: Sequence[str]) -> float:
+    """
+    The width of the widest of ``lines`` in the current font, measured again only
+    when ``lines`` is another object: ``_diff_lines`` hands back the same list
+    for as long as the call is in the queue.
+    """
+    held = _WIDTHS.get(view)
+    if held is None or held[0] is not lines:
+        wide = max((imgui.calc_text_size(line).x for line in lines), default=0.0)
+        held = _WIDTHS[view] = (lines, wide)
+    return held[1]
+
+
+def _diff_rows(lines: Sequence[str], view: Hashable) -> None:
     """
     A unified diff a line to a row in ImGui's own text, in a child that fits it
     up to ``_BODY_LINES``. **Drawn under either renderer**: a diff's columns are
@@ -565,10 +591,25 @@ def _diff_rows(lines: Sequence[str]) -> None:
 
     A short diff that still needs scrolling is the thing that makes an operator
     stop reading them, so the child is no taller than its lines.
+
+    **A row is not broken, and the child says when one runs past its edge.** The
+    wheel scrolls a child sideways whether or not it has a scrollbar, so the end
+    of a long row is reachable either way; the scrollbar is what shows there is
+    an end to reach, on the row whose approve releases it. It is drawn only when
+    a row is wider than the child, and the child is then taller by the bar, so
+    that the bar does not cover a line of a diff that otherwise fits.
     """
     line_h = imgui.get_text_line_height_with_spacing()
-    body_h = min(_BODY_LINES * line_h, line_h * len(lines) + 10.0)
-    if imgui.begin_child("##body", imgui.ImVec2(-8.0, body_h), imgui.ChildFlags_.borders):
+    style = imgui.get_style()
+    inner = imgui.get_content_region_avail().x - 8.0 - 2.0 * style.window_padding.x
+    bar = style.scrollbar_size if _widest(view, lines) > inner else 0.0
+    body_h = min(_BODY_LINES * line_h, line_h * len(lines) + 10.0 + bar)
+    if imgui.begin_child(
+        "##body",
+        imgui.ImVec2(-8.0, body_h),
+        imgui.ChildFlags_.borders,
+        imgui.WindowFlags_.horizontal_scrollbar,
+    ):
         colours = {
             "add": P.diff_add,
             "remove": P.diff_remove,
@@ -766,8 +807,9 @@ def _typeset_body(state: review.ReviewState, pending: PendingApproval, key: str)
     """
     What the call would do, with its prose set through the seam: its diff, or its
     description, or failing both its arguments. Answers how many lines of it
-    this frame did not put on screen (``ViewCache.unbuilt``), which holds the
-    row's approve button.
+    this frame did not put on screen, which holds the row's approve button:
+    what the library stopped short of (``ViewCache.unbuilt``), and the end of a
+    body longer than one frame should set unasked (``_unset_tail``).
 
     **The diff is this pane's own rows** (``_diff_rows``), as it is without the
     library. **Arguments are literal text**, which the seam hands to ImGui.
@@ -789,7 +831,7 @@ def _typeset_body(state: review.ReviewState, pending: PendingApproval, key: str)
 
     lines = _diff_lines(state, pending)
     if lines:
-        _diff_rows(lines)
+        _diff_rows(lines, (key, "diff"))
         return 0
     described = describe(pending)
     if described is None:
@@ -830,15 +872,74 @@ def _typeset_body(state: review.ReviewState, pending: PendingApproval, key: str)
         # ``prose_parts`` and not markdown outright: the seam's one rule for what a
         # body somebody wrote is read as, so this body reads here as it does in
         # DETAIL, on the board and in the brief.
+        view = (key, "body")
+        more = _unset_tail(view, body)
         typeset.document(
             _VIEWS,
-            (key, "body"),
-            _parts((key, "body"), body, lambda: typeset.prose_parts(body)),
+            view,
+            _parts(view, body, lambda: typeset.prose_parts(_head(body) if more else body)),
             width=wide,
             height_cap=room,
         )
-        return _VIEWS.unbuilt((key, "body")) or 0
+        if more:
+            _offer_whole(view, more)
+        return (_VIEWS.unbuilt(view) or 0) + more
     return 0
+
+
+def _settled_rule() -> tuple[int, Callable[[str, int], tuple[str, int]]]:
+    """
+    DETAIL's bound on a document set in one frame, and its cut: one rule for both
+    panes, read from the pane that states it and measured it.
+
+    Imported at the call because ``detail`` imports this module.
+    """
+    from .detail import _SETTLED_LINES, head_lines
+
+    return _SETTLED_LINES, head_lines
+
+
+def _head(body: str) -> str:
+    """
+    The start of a body, as far as DETAIL's bound on a settled document.
+    """
+    limit, head_lines = _settled_rule()
+    return head_lines(body, limit)[0]
+
+
+def _unset_tail(view: Hashable, body: str) -> int:
+    """
+    How many lines at the end of ``body`` this row leaves unset: none under
+    DETAIL's bound, and none once the operator has asked for all of it.
+
+    A text is read and laid out whole in the frame that first draws it, so a body
+    past the bound would stall the queue on the frame the cursor reached its row,
+    unasked. Counted a line the way ``detail.head_lines`` splits one.
+    """
+    if view in _WHOLE:
+        return 0
+    limit, _ = _settled_rule()
+    return max(body.count("\n") + 1 - limit, 0)
+
+
+def _offer_whole(view: Hashable, more: int) -> None:
+    """
+    Under a body set as far as the bound: how much is not, and the button that
+    sets it.
+
+    **The rest is set here and not left to DETAIL.** DETAIL clips a call's argument
+    at a character count and offers no more of it, so this row is the one place
+    all of a long body is on screen. The lines not set are reported as not on
+    screen (``_typeset_body``), which holds the approve until they are asked for.
+    """
+    limit, _ = _settled_rule()
+    total = limit + more
+    _warning(
+        f"… {more:,} more lines not set: all {total:,} would be read and laid out in one frame"
+    )
+    if imgui.small_button(f"set all {total:,} lines"):
+        _WHOLE.add(view)
+        _PARTS.pop(view, None)
 
 
 def _editor(state: review.ReviewState, pending: object, *, wrap: bool = True) -> None:
