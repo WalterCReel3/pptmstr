@@ -26,8 +26,8 @@ figures roughly double, so compare rows of one run.
   native    the same text through ``imgui.text_unformatted`` wrapped, which is
             what a pane's own renderer costs at its cheapest.
   diff      a Write of ``--diff-lines`` lines through ``typeset.diff`` (which
-            no pane calls) and as coloured ImGui lines, the way DETAIL's own
-            diff is drawn.
+            a pane calls only where the library's columns hold) and as
+            coloured ImGui lines, the way DETAIL's own diff is drawn.
 
 Usage, with ``IMTYPESET_LIBRARY`` and ``IMTYPESET_PYTHON`` as ``make typeset-env``
 prints them:

@@ -146,7 +146,10 @@ context log set their text through `advtext` — a library on no package index,
 installed at the commit `advtext.ref` names, which draws through the native imtypeset
 library built beside the `imgui-bundle` wheel — instead of ImGui's
 own text calls: proportional prose, real italics, selectable text. An approval's diff
-is still drawn by the pane's own renderer. [pptmstr/ui/typeset/](pptmstr/ui/typeset/) is the
+is the library's diff view only where a measurement of the running library says it
+keeps a monospace column; the pinned one does not, so today each pane draws its own.
+pptmstr marks every baked font size used each frame, so ImGui discards none under a
+frame. [pptmstr/ui/typeset/](pptmstr/ui/typeset/) is the
 only package that imports it, and its docstring is the reference for what it does and
 costs.
 

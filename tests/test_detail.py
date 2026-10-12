@@ -2379,13 +2379,13 @@ def test_every_line_of_a_diff_past_this_panes_bound_can_be_brought_on_screen_her
 ) -> None:
     """
     This pane wraps a diff a line to an item, which is laid out again in every
-    frame, so it does that as far as ``_MAX_DIFF_LINES``. Past it the pane used
-    to stop, say the inbox row had the rest, and report nothing unset -- with
-    the inbox behind another tab ``a`` was sent over a diff of which 1,200
-    lines had been drawn. The arguments below do not stand in for the rest: a
-    Write's removed lines are the file's and are in no argument.
+    frame, so it does that as far as ``_MAX_DIFF_LINES``. A pane that stopped
+    there, said the inbox row had the rest and reported nothing unset would,
+    with the inbox behind another tab, let ``a`` be sent over a diff of which
+    1,200 lines had been drawn. The arguments below do not stand in for the
+    rest: a Write's removed lines are the file's and are in no argument.
 
-    A longer diff is now rows in a box that scrolls, every line of it: the
+    A longer diff is rows in a box that scrolls, every line of it: the
     last removed and the last added line are each drawn once the box is
     scrolled to them. Nothing is unset, so nothing is held, and the rule is the same
     whoever was asked first: where the library's view would draw a diff and
