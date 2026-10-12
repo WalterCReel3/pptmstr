@@ -890,36 +890,68 @@ pin's move to the renamed commit and not before.
 |---|---|---|---|
 | P34 | **The rename is a commit that changes names only, and the commit before it is named too.** And say, when it is specified: whether an `advtext` alias ships for a release, whether the GitHub repository's URL changes, and what the distribution is called to pip. | pptmstr moves its pin in two steps so that a failure can be told apart: first to the last `advtext` commit (behaviour: the diff-view work, reader options, the rest of what was built for it), suite green; then to the rename, where the only edits are names. If behaviour and names arrive in one commit a red suite does not say which. pptmstr's `bootstrap.sh` fetches by repository URL and installs by distribution name, so both are things it has to be told. | open |
 
-## Where pptmstr stands (2026-10-12, at commit `56ff0bf`)
+## Where pptmstr stands (2026-10-12, at commit `d163520`)
 
 - **Every pane sets its markdown through the library** when the library can
   draw, and draws with its own renderer when it cannot, with one sentence in
   the Text menu saying why. What is not markdown, and everything whose
-  columns are content (tool output, arguments, errors, an approval's diff),
-  is ImGui's (P21, P22). The library's diff view is wired into DETAIL, the
-  inbox and settled fences behind a measured check that today's library
-  fails (see "Correction to P22's hit-test figure"), so no pane draws with
-  it yet. No renderer of pptmstr's was deleted (P6).
-- **The gate**, by the last builder's run after all writes had stopped:
-  with the pair, lint and typecheck clean, 3550 passed, 0 skipped, 24 strict
-  xfails (21 under P9, P10, P11, P12, P13, P15, P16, P17, P19, P21; 3 that
-  predate this work), 2 failed; without the pair 3148 passed, 423 skipped for
-  want of the library, 3 xfails, 2 failed. The 2 are `tests/test_launcher.py`'s
-  and come from an uncommitted line in `pptmstr/model_catalog.py` that is not
-  this session's (an export of `HEAD` passes them).
+  columns are content (tool output, arguments, errors), is ImGui's (P21). No
+  renderer of pptmstr's was deleted (P6).
+- **The diff view is wired into DETAIL, the inbox and settled fences behind a
+  measured check of the running library** (`02dfb06`, `94e2cf1`), which the
+  pinned library fails at every pixel height, so today both panes draw diffs
+  with their own rows. A body or diff the library cut, or a library call that
+  raised, is never what an approve is decided over.
+- **pptmstr keeps every baked font size alive each frame** (`d096838`), the
+  host-side guard for ImGui's mis-sized glyphs (the notice above).
+- **The gate**, read by the last builder after all writes had stopped: with
+  the pair, lint and typecheck clean, 3738 passed, 0 skipped, 24 strict xfails
+  (21 under P9, P10, P11, P12, P13, P15, P16, P17, P19, P21; 3 that predate
+  this work), 2 failed; without the pair 3165 passed, 594 skipped for want of
+  the library, 3 xfails, 2 failed. The 2 are `tests/test_launcher.py`'s, from
+  an uncommitted line in `pptmstr/model_catalog.py` that is not this
+  session's (an export of `HEAD` passes them).
 - **The application was run** under Xvfb and llvmpipe, 720 frames, with the
-  pair (the typeset branch taken in all five panes on every frame) and without
-  (none taken), exit 0 both ways. **Nobody has looked at a picture of the new
-  core's text in pptmstr.**
+  diff override at "measured" and at "always", with the pair and without,
+  exit 0 each time. **Nobody has looked at a picture of the new core's text in
+  pptmstr**, and the user has seen it only in their own two screenshots.
 - **Built against** advtext `38f5fac` and imtypeset `c9f8902`, stand-in
-  headers, from local repositories; nothing was fetched from GitHub, and
-  `bootstrap.sh` has not been run end to end. The wheel under the library is
-  the advtext lead's venv's (see the state at the top).
-- **Re-read last** with advtext's checkout at `04a51c8` ("Move the pin to
-  imtypeset 03b5cd4") and its remote-tracking ref still `38f5fac`. pptmstr has
-  tried `3428142` (above) and nothing later; `03b5cd4` has not been built here.
-- **Not started**: the lock a Mac install is made from, an updater, CI,
-  anything on a Mac.
+  headers, from local repositories. The wheel under the library is the
+  advtext lead's venv's (see the state at the top).
+
+## The pins can move now (2026-10-12, read at pptmstr `d163520`)
+
+The lead fetched both commit pages from GitHub: the branch
+`experimental/imtypeset-adoption` is at `bb240c3` there, which contains
+`68eb18b` (the last commit named `advtext`, with the diff view's
+`cell="pixel"`) and `cd437c1` (the rename to `imscribe`); imtypeset's `main`
+is at `5077b22` there ("Lay text out from the advances the rasteriser
+bakes"), which contains `2fd705e`, the commit imscribe's `imtypeset.ref`
+names. So rule 4 of the channel no longer holds the pins.
+
+pptmstr moves in the two steps P34 asked for, each ending on a green suite:
+
+1. **To `68eb18b` and imtypeset `2fd705e`**: the build with its headers named,
+   the eleven tests the trial listed, `kind()`, `typesetter.font`, the
+   library's own knowledge of its ImGui context; then **the diff view on a
+   whole-pixel cell** (`cell="pixel"` in the view pptmstr makes and in the
+   view its check measures), which is what makes the check hold and the diff
+   appear in DETAIL and the inbox.
+2. **To the rename**: `cd437c1` and on to the pushed head, names only.
+
+After that: `ReaderOptions` in place of the private parser reach (less P35's
+two gaps), and the options that answer P11, P12, P13, P16 and P19. Requests
+are closed here as each is built against. imtypeset `5077b22` (H34 and H35
+in the core) is not what imscribe consumes yet; pptmstr takes it when
+imscribe's `imtypeset.ref` does.
+
+**What `cell="pixel"` costs, in imscribe's builder's numbers** (not
+pptmstr's yet): at an even pixel height the em grows 4.9 % and the glyphs
+come from the raster one pixel larger (at 16 px: raster 17), on pptmstr's own
+row pitch. That is the trade the lead declined for all monospace roles
+earlier (an even em); for the diff view the user has said, as imscribe's file
+quotes, "We need to get the new diff interface working in pptmstr." So it is
+taken for diffs, measured in pptmstr when built, and is the user's to look at.
 
 ## Agent decisions, awaiting the user
 
