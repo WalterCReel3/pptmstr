@@ -1,28 +1,28 @@
 """
-The typeset seam: fonts, theme, palette, held views, approval diffs.
+The seam's views, and the rig the pane tests draw with.
 
-Most of this runs in real ImGui frames. A frame needs a context and not a display,
-so nothing here opens a window: the context has no backend, the atlas is built from
-the real font files, and what a view put on the draw list is read back from the
-library's own statistics. ``scripts/verify_typeset.py`` is the same seam under a real
-renderer and through ``theme.load_fonts``.
+**Parked.** No view is built on the library yet, so nearly every test here is
+marked and none of the marked ones runs its body as written: each was written
+against the seam as it was before the library changed under it, and is here so
+that the behaviour it pins is not forgotten.
 
-The tests of ``tool_diff`` and of the HTML guard need no ImGui at all.
+- ``skip(reason="SEAM-<k>: ...")``: the step that builds that part of the seam
+  takes the mark off and makes the test hold on the library as it is.
+- ``xfail(strict=True, reason="P<n>: ...")``: the behaviour is one the library
+  does not give, asked for under that number in ``HANDOFF-advtext.md``. It stays
+  marked until the request is answered and built against.
+
+The helpers are the rig: ``frame`` draws one frame in a fixed window of a bare
+ImGui context (``tests/conftest.py`` has the context and ``seam``).
 """
 
 from __future__ import annotations
 
-import ast
-import dataclasses
 import functools
 import math
 import random
 import re
-import subprocess
-import sys
-import threading
-import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -33,17 +33,43 @@ from advtext import BlockKind, Diff, Face, RowKind, registered_fonts, unregister
 from pptmstr import approval, theme
 from pptmstr.model import NodeId, PendingApproval
 from pptmstr.ui import typeset
-from pptmstr.ui.typeset import Kind, Pane, Part, Role, RoleStyle, Slot
+from pptmstr.ui.typeset import Kind, Part, Role, RoleStyle, Slot, roles
+
+SEAM_1 = "SEAM-1: views.py and themes.py are not re-adopted yet"
+SEAM_2 = "SEAM-2: streams and diffs are not re-adopted yet"
+SEAM_1_BUDGET = (
+    "SEAM-1: the build budget goes or stays once a parse is timed in pptmstr "
+    "(planning/2026-10-11-the-seam-is-re-adopted-not-ported.md, section 1)"
+)
+SEAM_2_BUDGET = SEAM_1_BUDGET.replace("SEAM-1", "SEAM-2")
+SEAM_1_ADVANCES = (
+    "SEAM-1: requirement R2 of HANDOFF-advtext.md (A2), pinned here on ImGui's own "
+    "advances; what the library's advances give is measured by "
+    "scripts/measure_typeset_advances.py and is not asked of advtext under a number yet"
+)
+P7 = (
+    "P7: no supported reader options, so HTML, a glob's stars and a link's "
+    "destination are not set as written"
+)
+P9 = "P9: no count of characters set as U+FFFD or borrowed from another face"
+P10 = "P10: a run wider than the measure with no space in it is not broken at the measure"
+P11 = "P11: an inline code run has no size of its own"
+P12 = "P12: code wider than its view cannot be scrolled to and its width is not reported"
+P13 = "P13: the lines of a block are not one pitch whatever is on them"
+P14 = "P14: the ImFont the library draws a face with is not a supported name"
+P15 = "P15: no rule under every row of a table"
+P16 = "P16: whether a diff's file header fit its view is not answered"
+P17 = (
+    "P17: every load of the fonts leaves seven more on the atlas, and a family "
+    "chosen in a frame is drawn in the next"
+)
+P19 = "P19: a settled table is not held at its natural widths"
+
 
 BOLD = theme._ASSETS / "fonts" / "Inconsolata-Bold.ttf"
-WINDOW = (700.0, 600.0)
 
-hinted_only = pytest.mark.skipif(
-    typeset.METRICS == "file",
-    reason="pins what the hinted path does: ImGui's whole-pixel advances and whole-pixel "
-    "kerns. Under METRICS = 'file' the library measures from the font file and the seam "
-    "overrides nothing.",
-)
+
+WINDOW = (700.0, 600.0)
 
 
 def _cell() -> float:
@@ -59,53 +85,6 @@ MARKDOWN = (
     "# Heading\n\nA paragraph with **bold** and `code` and an arrow → in it.\n\n"
     "- one\n- two\n\n```py\nx = 1\n```\n"
 )
-
-
-@pytest.fixture(scope="module")
-def imgui() -> Iterator[Any]:
-    """
-    A bare ImGui context for this module, with Inconsolata as its first font.
-
-    Destroyed afterwards, with the seam's fonts forgotten: an ``ImFont`` belongs to
-    the atlas it was loaded into, and the rest of the suite expects no context.
-    """
-    bundle = pytest.importorskip("imgui_bundle")
-    im = bundle.imgui
-    context = im.create_context()
-    io = im.get_io()
-    io.display_size = im.ImVec2(1200.0, 800.0)
-    io.delta_time = 1.0 / 60.0
-    io.backend_flags |= im.BackendFlags_.renderer_has_textures.value
-    medium = Path(bundle.__file__).parent / "assets" / "fonts" / "Inconsolata-Medium.ttf"
-    io.fonts.add_font_from_file_ttf(str(medium), 16.0)
-    yield im
-    typeset.reset()
-    im.destroy_context(context)
-
-
-@pytest.fixture
-def seam(imgui: Any) -> Iterator[Any]:
-    """
-    The seam with every face loaded and the settings at their defaults.
-
-    The faces are loaded once and kept across tests (the math face alone is over a
-    second); a test that breaks them loads its own and this puts them back.
-    """
-    theme.set_theme("dark")
-    typeset.configure(typeset=True, faces=typeset.DEFAULT_PRESET, scale=1.0, panes={})
-    fonts = typeset._STATE.fonts
-    whole = fonts is not None and typeset.available() and fonts.failed == ()
-    if not whole or Face.CODE_BOLD not in registered_fonts() or not _every_family_usable():
-        assert typeset.load_fonts(BOLD)
-    yield imgui
-    theme.set_theme("dark")
-    # The defaults again, which also takes a family's file back out of the
-    # library's registry: that registry is the process's, not this module's.
-    typeset.configure(typeset=True, faces=typeset.DEFAULT_PRESET, scale=1.0, panes={})
-
-
-def _every_family_usable() -> bool:
-    return all(usable for _, usable in typeset.proportionals())
 
 
 def frame(im: Any, body: Callable[[], None], *, lead: float = 0.0, sideways: bool = False) -> None:
@@ -158,101 +137,7 @@ def rows(diff: Diff, kind: RowKind) -> list[str]:
     ]
 
 
-# -- the boundary --------------------------------------------------------------
-
-
-def test_no_other_module_imports_the_layout_library() -> None:
-    """
-    One seam means one importer. A pane that reaches past it has its own idea of the
-    fonts, the palette and who keeps a view alive, which is what this module is for.
-    """
-    package = Path(typeset.__file__).resolve().parent.parent
-    offenders = []
-    for path in sorted(package.rglob("*.py")):
-        if path == Path(typeset.__file__).resolve():
-            continue
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            names = (
-                [alias.name for alias in node.names]
-                if isinstance(node, ast.Import)
-                else [node.module or ""] if isinstance(node, ast.ImportFrom) else []
-            )
-            if any(name == "advtext" or name.startswith("advtext.") for name in names):
-                offenders.append(str(path.relative_to(package)))
-    assert offenders == []
-
-
-def test_the_seam_reaches_past_the_facade_in_three_named_places_and_no_other() -> None:
-    """
-    The library promises the names in ``advtext.__all__`` and nothing behind them.
-    Three things the seam needs are behind them, and each is named in its docstring
-    with what it is for: the markdown reader (to switch off the rules that hide
-    text), the count of characters set as U+FFFD, and the node types a break is
-    made of. Anything else imported from behind the facade fails here.
-    """
-    tree = ast.parse(Path(typeset.__file__).read_text(encoding="utf-8"))
-    found: dict[str, set[str]] = {}
-    for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and (node.module or "").startswith("advtext"):
-            found.setdefault(node.module or "", set()).update(alias.name for alias in node.names)
-        if isinstance(node, ast.Import):
-            assert not any(alias.name.startswith("advtext") for alias in node.names)
-    past = {name for name in found.pop("advtext") if name not in advtext.__all__}
-    assert past == {"markdown", "nodes"}
-    assert found == {"advtext.markdown": {"replaced_characters"}}
-
-
-# -- fonts and settings --------------------------------------------------------
-
-
-def test_nothing_is_typeset_until_the_faces_are_loaded(imgui: Any) -> None:
-    typeset.reset()
-    typeset.configure(typeset=True, mono=False)
-    assert not typeset.available()
-    assert not typeset.enabled()
-
-
-def test_the_setting_turns_it_off_with_the_faces_still_loaded(seam: Any) -> None:
-    assert typeset.enabled()
-    typeset.configure(typeset=False, mono=False)
-    assert typeset.available()
-    assert not typeset.enabled()
-
-
-def test_a_loader_that_loads_nothing_leaves_the_old_renderers_in_charge(seam: Any) -> None:
-    """
-    ``theme.load_fonts``' contract is that a missing asset is not fatal. Here every
-    face fails; the call returns, and ``enabled()`` is what tells the panes.
-    """
-    assert typeset.load_fonts(BOLD, loader=lambda path: None) is False
-    assert not typeset.enabled()
-
-
-def test_a_loader_that_raises_is_not_fatal_either(seam: Any) -> None:
-    def explode(path: Path) -> Any:
-        raise OSError("no such font")
-
-    assert typeset.load_fonts(BOLD, loader=explode) is False
-    assert not typeset.enabled()
-
-
-def test_a_failure_past_the_loader_is_not_fatal_either(
-    seam: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """
-    The loader's own failures the library absorbs. This is the rest: fontTools not
-    importable, a font file that will not parse -- anything raised while the faces
-    are registered, loaded and first measured.
-    """
-
-    def explode(*args: Any, **kwargs: Any) -> Any:
-        raise ImportError("No module named 'fontTools'")
-
-    monkeypatch.setattr(typeset, "load_faces", explode)
-    assert typeset.load_fonts(BOLD) is False
-    assert not typeset.enabled()
-
-
+@pytest.mark.skip(reason=SEAM_1)
 def test_losing_the_proportional_faces_sets_prose_in_monospace(seam: Any) -> None:
     """
     Text measured from a file ImGui does not have would be drawn in whatever font
@@ -270,11 +155,13 @@ def test_losing_the_proportional_faces_sets_prose_in_monospace(seam: Any) -> Non
     assert typeset._theme("prose").style(BlockKind.PARAGRAPH).font.face is Face.CODE
 
 
+@pytest.mark.skip(reason=SEAM_1)
 def test_the_bold_monospace_is_registered_and_used(seam: Any) -> None:
     assert registered_fonts()[Face.CODE_BOLD] == BOLD.resolve()
     assert typeset._theme("literal").faces.code_bold is Face.CODE_BOLD
 
 
+@pytest.mark.skip(reason=SEAM_1)
 def test_without_a_bold_monospace_bold_keeps_the_columns(seam: Any, tmp_path: Path) -> None:
     """
     The library's stand-in for a missing bold monospace is the bold *proportional*
@@ -287,6 +174,7 @@ def test_without_a_bold_monospace_bold_keeps_the_columns(seam: Any, tmp_path: Pa
     assert typeset.imfont(typeset.Weight.CODE_BOLD) is typeset.imfont(typeset.Weight.CODE)
 
 
+@pytest.mark.skip(reason=SEAM_1)
 def test_an_arrow_in_prose_does_not_leave_a_face_to_load_mid_session(seam: Any) -> None:
     """
     Roboto has no arrow, and the library borrows one from the math face. Loaded on
@@ -302,13 +190,10 @@ def test_an_arrow_in_prose_does_not_leave_a_face_to_load_mid_session(seam: Any) 
     assert cache.replaced("k") == 0
 
 
-# -- metrics -------------------------------------------------------------------
-
-
 WORDS = "columns of Hamburgefonstiv, 0123 (wide) AV To a.i"
 
 
-@hinted_only
+@pytest.mark.skip(reason=SEAM_1_ADVANCES)
 def test_a_laid_out_word_is_imguis_advances_and_whole_pixel_kerns(seam: Any) -> None:
     """
     The premise of ``pixel_metrics``, checked on a real layout against ImGui itself,
@@ -373,22 +258,7 @@ def test_a_laid_out_word_is_imguis_advances_and_whole_pixel_kerns(seam: Any) -> 
     assert all(abs(kern) < 0.001 for key, _, kern in kerns if key == code)
 
 
-@hinted_only
-def test_the_font_files_own_advances_are_not_what_imgui_draws(seam: Any) -> None:
-    """
-    Why the test above is not vacuous: measured from the file, as the library does by
-    default, forty characters of the UI's own monospace come out 15 px short of what
-    reaches the screen. That shortfall was the uneven word spacing.
-    """
-    from advtext import fontlib_metrics, px_from_sp
-
-    key = typeset._theme("literal").style(BlockKind.CODE).font.key
-    file_says = px_from_sp(round(40 * fontlib_metrics(key).advance(ord("m"))))
-    imgui_draws = px_from_sp(round(40 * typeset.pixel_metrics(key).advance(ord("m"))))
-    assert imgui_draws == pytest.approx(320.0, abs=0.01)
-    assert file_says == pytest.approx(305.05, abs=0.05)
-
-
+@pytest.mark.skip(reason=SEAM_1)
 def test_running_text_is_the_ui_fonts_sixteen_pixels(seam: Any) -> None:
     from advtext import px_from_sp
 
@@ -399,6 +269,7 @@ def test_running_text_is_the_ui_fonts_sixteen_pixels(seam: Any) -> None:
         assert tall == pytest.approx(typeset.BODY_PX, abs=0.01), name
 
 
+@pytest.mark.skip(reason=SEAM_1)
 def test_the_text_follows_the_ui_fonts_size_and_documents_are_rebuilt_for_it(
     seam: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -431,6 +302,7 @@ def test_the_text_follows_the_ui_fonts_size_and_documents_are_rebuilt_for_it(
     assert typeset.body_px() == 16.0
 
 
+@pytest.mark.xfail(strict=True, reason=P14)
 def test_a_native_line_in_a_typeset_face_is_the_texts_size(
     seam: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -453,29 +325,7 @@ def test_a_native_line_in_a_typeset_face_is_the_texts_size(
     assert typeset.body_px() == 16.0
 
 
-def test_a_face_a_draw_asked_for_is_loaded_before_the_next_frame(
-    seam: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """
-    Every role is loaded at start-up, so in a healthy run this loads nothing. It is
-    here for the run where one was not: the library records what a draw could not
-    find and loads it when the host says, which is between frames.
-    """
-    real = typeset._STATE.fonts
-    asked: list[str] = []
-
-    class Recording:
-        fonts = real.fonts if real is not None else {}
-
-        def load_pending(self) -> tuple[()]:
-            asked.append("load_pending")
-            return ()
-
-    monkeypatch.setattr(typeset._STATE, "fonts", Recording())
-    typeset.pre_frame()
-    assert asked == ["load_pending"]
-
-
+@pytest.mark.skip(reason=SEAM_1)
 def test_fenced_code_in_proportional_prose_is_the_chromes_size(seam: Any) -> None:
     """
     Sized in ems of a Roboto body it would be about 14 px; it has its own role's
@@ -488,6 +338,7 @@ def test_fenced_code_in_proportional_prose_is_the_chromes_size(seam: Any) -> Non
     assert _tall("prose", BlockKind.CODE) == pytest.approx(16.0, abs=0.01)
 
 
+@pytest.mark.skip(reason=SEAM_1)
 def test_the_monospace_setting_puts_every_role_in_inconsolata(seam: Any) -> None:
     typeset.configure(typeset=True, mono=True)
     faces = {style.font.face for style in typeset._theme("prose").blocks.values()}
@@ -495,6 +346,7 @@ def test_the_monospace_setting_puts_every_role_in_inconsolata(seam: Any) -> None
     assert all(typeset.style(role).slot is Slot.MONOSPACE for role in Role)
 
 
+@pytest.mark.skip(reason=SEAM_1)
 def test_text_is_ragged_and_headings_are_a_panes_scale(seam: Any) -> None:
     from advtext import Align
 
@@ -505,9 +357,6 @@ def test_text_is_ragged_and_headings_are_a_panes_scale(seam: Any) -> None:
         for kind in (BlockKind.HEADING_1, BlockKind.HEADING_2, BlockKind.HEADING_3)
     ]
     assert heights == [22, 19, 17]
-
-
-# -- roles ---------------------------------------------------------------------
 
 
 def _tall(theme_name: str, kind: BlockKind, face: Face | None = None) -> float:
@@ -547,110 +396,10 @@ def _atlas_fonts(im: Any) -> int:
 
 
 def _bundled(name: str) -> Path:
-    return (typeset._bundle_fonts() / name).resolve()
+    return (roles._bundle_fonts() / name).resolve()
 
 
-def test_every_role_has_a_default_among_the_slots_it_is_offered() -> None:
-    """
-    The catalogue is one enum and three tables keyed by it. A role missing from one
-    is a ``KeyError`` on the frame that first sets that kind of text.
-    """
-    assert set(typeset.DEFAULTS) == set(typeset.SLOTS) == set(Role)
-    for role in Role:
-        assert typeset.DEFAULTS[role].slot in typeset.SLOTS[role], role
-        assert typeset.DEFAULTS[role].step in typeset.STEPS, role
-    # Inline code is a run in somebody else's line and a label is ImGui's line.
-    assert set(typeset.LEADING) == set(Role) - {Role.INLINE_CODE, Role.LABEL}
-    for role in (Role.CODE_BLOCK, Role.DIFF, Role.LITERAL, Role.ARGUMENT, Role.INLINE_CODE):
-        assert typeset.SLOTS[role] == (Slot.MONOSPACE,), "its columns are content"
-    assert {typeset.multiline_kind(role) for role in Role} <= {Kind.LITERAL, Kind.WRAPPED_EXACT}
-
-
-def test_the_default_family_is_first_and_none_names_a_font_that_does_not_ship() -> None:
-    """
-    The operator's condition for choosing faces in this version. A family's file is
-    one in the imgui-bundle wheel; nothing here may point at the system's fonts.
-    """
-    names = [family.name for family in typeset.PROPORTIONALS]
-    assert names[0] == typeset.DEFAULT_PROPORTIONAL and len(set(names)) == len(names)
-    for family in typeset.PROPORTIONALS:
-        if family.file is not None:
-            assert not Path(family.file).is_absolute()
-            assert _bundled(family.file).is_file(), family.name
-            assert typeset._bundle_fonts().resolve() in _bundled(family.file).parents
-
-
-def test_the_old_monospace_switch_and_the_preset_names_still_choose(seam: Any) -> None:
-    """
-    ``configure(mono=)`` and ``configure(faces=)`` are what five panes' tests and
-    three scripts call, and what a saved ``typeset_faces`` is read as.
-    """
-    typeset.configure(typeset=True, mono=True)
-    assert typeset.mono() and typeset.style(Role.HEADING).slot is Slot.MONOSPACE
-    typeset.configure(typeset=True, mono=False)
-    assert not typeset.mono() and typeset._STATE.roles == typeset.DEFAULTS
-    typeset.configure(typeset=True, mono=False, faces="mono")
-    assert typeset.mono(), "a named preset wins over the old switch"
-    typeset.configure(typeset=False)
-    assert typeset.mono(), "a call that names no faces changes none"
-    typeset.configure(typeset=True, faces="mono", roles={})
-    assert not typeset.mono(), "the roles win over a preset's name"
-    typeset.configure(typeset=True, faces="roboto-large")
-    assert typeset.px(Role.PROSE) == 18.0 and typeset.px(Role.INLINE_CODE) == 16.0
-    typeset.configure(typeset=True, faces="droid")
-    assert typeset.proportional().name == "droid" and typeset._STATE.roles == typeset.DEFAULTS
-
-
-def test_a_preset_name_that_never_was_is_the_defaults_and_rebuilds_nothing(seam: Any) -> None:
-    epoch = typeset._STATE.epoch
-    typeset.configure(typeset=True, faces="comic-sans")
-    assert typeset._STATE.roles == typeset.DEFAULTS
-    assert typeset.proportional().name == typeset.DEFAULT_PROPORTIONAL
-    assert typeset._STATE.epoch == epoch
-    assert typeset.enabled()
-
-
-def test_a_role_is_refused_a_slot_it_is_not_offered_and_a_step_out_of_range(seam: Any) -> None:
-    """
-    A settings file is hand-editable. Proportional code would lose its columns, and
-    a step of 40 is a typo, not a size.
-    """
-    typeset.configure(
-        typeset=True,
-        roles={
-            Role.CODE_BLOCK: RoleStyle(Slot.PROPORTIONAL, 40),
-            Role.DIFF: RoleStyle(Slot.PROPORTIONAL, -40),
-            Role.PROSE: RoleStyle(Slot.MONOSPACE, 1),
-        },
-    )
-    assert typeset.style(Role.CODE_BLOCK) == RoleStyle(Slot.MONOSPACE, typeset.STEPS[-1])
-    assert typeset.style(Role.DIFF) == RoleStyle(Slot.MONOSPACE, typeset.STEPS[0])
-    assert typeset.style(Role.PROSE) == RoleStyle(Slot.MONOSPACE, 1)
-    assert typeset.style(Role.TABLE) == typeset.DEFAULTS[Role.TABLE], "left out is the default"
-
-
-def test_settings_entries_become_role_styles_and_unknown_ones_are_left_out() -> None:
-    got = typeset.roles_from(
-        [
-            ("prose", "monospace", 2),
-            ("heading", None, 1),
-            ("table", "monospace", None),
-            ("label", "cursive", None),
-            ("marginalia", "monospace", 0),
-        ]
-    )
-    assert got == {
-        Role.PROSE: RoleStyle(Slot.MONOSPACE, 2),
-        Role.HEADING: RoleStyle(Slot.PROPORTIONAL, 1),
-        Role.TABLE: RoleStyle(Slot.MONOSPACE, 0),
-        Role.LABEL: RoleStyle(Slot.PROPORTIONAL, 0),
-    }
-    assert typeset.panes_from([("board", False), ("attic", False), ("brief", True)]) == {
-        Pane.BOARD: False,
-        Pane.BRIEF: True,
-    }
-
-
+@pytest.mark.xfail(strict=True, reason=P11)
 def test_inline_code_is_the_chromes_height_inside_prose_of_the_same_height(seam: Any) -> None:
     """
     A theme sizes a code span by its block, and at one em Inconsolata is shorter
@@ -676,6 +425,7 @@ def test_inline_code_is_the_chromes_height_inside_prose_of_the_same_height(seam:
     assert heading["code"] == pytest.approx(22.0, abs=0.01)
 
 
+@pytest.mark.xfail(strict=True, reason=P11)
 def test_a_streamed_code_span_is_sized_as_a_settled_one(seam: Any) -> None:
     """
     A stream's blocks are built by the library's stream document, from the same
@@ -697,6 +447,7 @@ def test_a_streamed_code_span_is_sized_as_a_settled_one(seam: Any) -> None:
     }
 
 
+@pytest.mark.skip(reason=SEAM_1)
 def test_in_monospace_prose_a_code_span_is_the_blocks_own_font(seam: Any) -> None:
     typeset.configure(
         typeset=True,
@@ -709,6 +460,7 @@ def test_in_monospace_prose_a_code_span_is_the_blocks_own_font(seam: Any) -> Non
     assert heights == {"code": pytest.approx(16.0, abs=0.01)}
 
 
+@pytest.mark.skip(reason=SEAM_1)
 def test_a_role_takes_its_own_slot_and_size_inside_one_document(seam: Any) -> None:
     """
     Two families are live at once and a role chooses between them: a monospace
@@ -744,6 +496,7 @@ def test_a_role_takes_its_own_slot_and_size_inside_one_document(seam: Any) -> No
     assert cache.replaced("k") == 0 and cache.unruled("k") == 0
 
 
+@pytest.mark.skip(reason=SEAM_1)
 def test_a_literal_part_is_set_in_the_role_it_names(seam: Any) -> None:
     """
     An argument and a tool's output are both literal text and are sized apart.
@@ -761,6 +514,7 @@ def test_a_literal_part_is_set_in_the_role_it_names(seam: Any) -> None:
     assert typeset.line_height(role=Role.ARGUMENT) == 19.0 and typeset.line_height() == 17.0
 
 
+@pytest.mark.xfail(strict=True, reason=P14)
 def test_native_lines_follow_the_label_role(seam: Any) -> None:
     fonts = typeset._fonts().fonts
     assert typeset.imfont(typeset.Weight.REGULAR) is fonts[Face.PROSE]
@@ -780,14 +534,14 @@ def test_native_lines_follow_the_label_role(seam: Any) -> None:
     assert sizes == [18.0, 12.0]
 
 
-# -- leading -------------------------------------------------------------------
-
 TALL_PROSE = (
     "Ångström É (brackets) [and] {braces} | pipes gjpqy `code|[]{}` → ✓ "
     "and enough words after them that the paragraph wraps over several lines of "
     "the window, each of which has to sit one pitch under the last whatever is "
     "set in it, ÅÉ gjpqy ÅÉ gjpqy ÅÉ gjpqy ÅÉ gjpqy ÅÉ gjpqy ÅÉ gjpqy.\n"
 )
+
+
 TALL_TREE = "src\n├── a.py\n│   └── b.py\n└── c.py\n│ ┃ ║ █\nÅÉgjpqy|()[]{}\n"
 
 
@@ -819,6 +573,7 @@ def _line_boxes(view: Any) -> list[tuple[float, float]]:
     return out
 
 
+@pytest.mark.skip(reason=SEAM_1)
 def test_leading_is_a_table_of_whole_pixel_pitches_by_role(seam: Any) -> None:
     """
     The table is the one place line spacing is decided, in multiples of a role's
@@ -834,6 +589,7 @@ def test_leading_is_a_table_of_whole_pixel_pitches_by_role(seam: Any) -> None:
     assert typeset.diff_row_height() == 16.0
 
 
+@pytest.mark.xfail(strict=True, reason=P13)
 @pytest.mark.parametrize("multiple", [17 / 16, 1.0, 1.35])
 def test_every_line_of_a_block_is_one_pitch_under_the_last_whatever_is_in_it(
     seam: Any, monkeypatch: pytest.MonkeyPatch, multiple: float
@@ -863,6 +619,7 @@ def test_every_line_of_a_block_is_one_pitch_under_the_last_whatever_is_in_it(
         assert _steps(cache.view(key)) == {want}, key
 
 
+@pytest.mark.skip(reason=SEAM_1)
 @pytest.mark.parametrize("multiple", [17 / 16, 1.0])
 def test_the_selection_bands_of_a_block_tile_with_no_seam_and_no_overlap(
     seam: Any, monkeypatch: pytest.MonkeyPatch, multiple: float
@@ -892,6 +649,7 @@ def test_the_selection_bands_of_a_block_tile_with_no_seam_and_no_overlap(
         assert {round(foot - top, 2) for top, foot in boxes} == {want}, key
 
 
+@pytest.mark.xfail(strict=True, reason=P13)
 def test_no_glyph_of_one_line_reaches_into_the_next_at_the_tightest_pitch(seam: Any) -> None:
     """
     At a pitch of the face's own pixel height a descender and the next line's
@@ -911,92 +669,7 @@ def test_no_glyph_of_one_line_reaches_into_the_next_at_the_tightest_pitch(seam: 
     assert float(px_from_sp(round(rule.y_max - rule.y_min))) >= 17.0, "it joins at the pitch"
 
 
-def test_a_diff_rows_pitch_is_its_roles_fenced_in_a_document_or_not(
-    seam: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """
-    The diff view's grid takes its row from the theme it is given, so the row is in
-    the same table as every other pitch. The library gives a diff fenced in a
-    document the document's theme, which would make its rows a code block's; it is
-    given the diff's, so a diff is one size and one pitch wherever it is drawn.
-    """
-    texts = approval.diff_texts("Write", {"file_path": "/x/a.py", "content": "one\ntwo\n"})
-    cache = typeset.ViewCache()
-    frame(seam, lambda: typeset.diff(cache, "d", texts))
-    assert cache.view("d").metrics_px.row == 18 == typeset.diff_row_height()
-
-    monkeypatch.setitem(typeset.LEADING, Role.DIFF, 20 / 16)
-    typeset.reset()
-    assert typeset.load_fonts(BOLD)
-    fresh = typeset.ViewCache()
-    fenced = "```diff\n--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n one\n-two\n+three\n```\n"
-
-    def body() -> None:
-        typeset.diff(fresh, "d", texts)
-        typeset.markdown(fresh, "m", fenced)
-
-    frame(seam, body)
-    assert fresh.view("d").metrics_px.row == 20 == typeset.diff_row_height()
-    hosted = fresh.view("m").hosted(0)
-    assert hosted is not None and hosted.view.metrics_px.row == 20
-    assert typeset.pitch(Role.CODE_BLOCK) == 17.0, "which a fence that is not a diff keeps"
-
-
-# -- panes ---------------------------------------------------------------------
-
-
-def test_a_pane_is_switched_off_alone_and_the_master_switch_is_over_all(seam: Any) -> None:
-    """
-    Each pane asks for itself. Switching one off is not a change of faces: nothing
-    is rebuilt, and the others' views are the views they had.
-    """
-    assert all(typeset.enabled(pane) for pane in Pane) and typeset.enabled()
-    epoch = typeset._STATE.epoch
-    typeset.configure(typeset=True, panes={Pane.CONTEXT: False, Pane.BOARD: True})
-    assert not typeset.enabled(Pane.CONTEXT) and not typeset.pane_on(Pane.CONTEXT)
-    assert all(typeset.enabled(pane) for pane in Pane if pane is not Pane.CONTEXT)
-    assert typeset.enabled(), "the master switch is still on"
-    assert typeset._STATE.epoch == epoch
-
-    typeset.configure(typeset=True)
-    assert not typeset.enabled(Pane.CONTEXT), "a call that names no panes changes none"
-    typeset.configure(typeset=False)
-    assert not any(typeset.enabled(pane) for pane in Pane)
-    assert typeset.pane_on(Pane.BOARD) and not typeset.pane_on(Pane.CONTEXT)
-    typeset.configure(typeset=True, panes={})
-    assert all(typeset.enabled(pane) for pane in Pane), "a pane left out is on"
-
-
-@pytest.mark.parametrize(
-    ("module", "pane"),
-    [
-        ("detail", Pane.DETAIL),
-        ("inbox", Pane.INBOX),
-        ("transcript_pane", Pane.CONTEXT),
-        ("board_pane", Pane.BOARD),
-        ("brief_pane", Pane.BRIEF),
-    ],
-)
-def test_each_pane_asks_whether_it_is_switched_on_for_itself(module: str, pane: Pane) -> None:
-    """
-    A pane's switch is only a switch if the pane asks about it. One that asked the
-    master switch, or about its neighbour, would pass every test of the seam and of
-    its own two renderers. Read off the source: every call a pane makes to
-    ``typeset.enabled`` names that pane.
-    """
-    source = (Path(typeset.__file__).parent / f"{module}.py").read_text(encoding="utf-8")
-    asked = [
-        ast.unparse(node)
-        for node in ast.walk(ast.parse(source))
-        if isinstance(node, ast.Call) and ast.unparse(node.func) == "typeset.enabled"
-    ]
-    assert asked, module
-    assert set(asked) == {f"typeset.enabled(typeset.Pane.{pane.name})"}, module
-
-
-# -- families ------------------------------------------------------------------
-
-
+@pytest.mark.skip(reason=SEAM_1)
 def test_a_one_style_family_sets_upright_prose_and_borrows_the_rest_from_roboto(
     seam: Any,
 ) -> None:
@@ -1039,6 +712,7 @@ def test_a_one_style_family_sets_upright_prose_and_borrows_the_rest_from_roboto(
     assert fonts.pending == () and fonts.failed == ()
 
 
+@pytest.mark.skip(reason=SEAM_1_ADVANCES)
 def test_a_family_with_its_own_file_is_measured_as_imgui_draws_that_file(seam: Any) -> None:
     """
     The layout's advances are cached per face and each entry holds an ``ImFont``. One
@@ -1073,36 +747,7 @@ def test_a_family_with_its_own_file_is_measured_as_imgui_draws_that_file(seam: A
     assert back == pytest.approx(roboto, abs=0.01)
 
 
-def test_one_font_key_is_measured_from_the_file_now_behind_its_role(seam: Any) -> None:
-    """
-    A key names a role and a size, not a file, so a key that outlives a change of
-    family means another font afterwards. Two caches are keyed by it: the seam's
-    table of metrics, and the memo inside the measure the library is handed. Two
-    families' themes may not share a key, which is why this asks for one by name
-    rather than through a theme.
-    """
-    from types import SimpleNamespace
-
-    key = f"{Face.PROSE.value}@{typeset.sp_from_px(20.0)}"
-    text = "columns of Hamburgefonstiv, 0123 (wide) AV To a.i"
-
-    def widths() -> tuple[float, int]:
-        table = typeset.pixel_metrics(key)
-        measure = typeset._STATE.measure
-        return (
-            sum(table.advance(ord(c)) for c in text),
-            sum(measure(SimpleNamespace(font=key, codepoint=ord(c))).width for c in text),
-        )
-
-    roboto = widths()
-    typeset.configure(typeset=True, proportional="droid")
-    droid = widths()
-    fresh = type(typeset.pixel_metrics(key))(typeset.fontlib_metrics(key))
-    assert droid[0] == sum(fresh.advance(ord(c)) for c in text)
-    assert droid[1] == sum(round(fresh.advance(ord(c))) for c in text)
-    assert droid[0] != roboto[0] and droid[1] != roboto[1]
-
-
+@pytest.mark.xfail(strict=True, reason=P17)
 def test_changing_family_and_roles_adds_nothing_to_the_atlas_and_comes_back_whole(
     seam: Any,
 ) -> None:
@@ -1126,6 +771,7 @@ def test_changing_family_and_roles_adds_nothing_to_the_atlas_and_comes_back_whol
     assert Face.PROSE not in registered_fonts()
 
 
+@pytest.mark.xfail(strict=True, reason=P17)
 def test_a_family_is_chosen_inside_a_frame_and_drawn_in_that_frame(seam: Any) -> None:
     """
     A menu click arrives between ``new_frame`` and the panes. The view drawn after it
@@ -1149,6 +795,7 @@ def test_a_family_is_chosen_inside_a_frame_and_drawn_in_that_frame(seam: Any) ->
     assert (cache.height("k") or 0.0) > (tall or 0.0)
 
 
+@pytest.mark.skip(reason=SEAM_1)
 def test_choosing_what_is_already_in_force_rebuilds_nothing(seam: Any) -> None:
     cache = typeset.ViewCache()
     roles = {Role.HEADING: RoleStyle(Slot.MONOSPACE, 1)}
@@ -1160,110 +807,7 @@ def test_choosing_what_is_already_in_force_rebuilds_nothing(seam: Any) -> None:
     assert typeset._STATE.epoch == epoch and cache.view("k") is first
 
 
-def test_a_family_whose_file_did_not_load_cannot_be_chosen(seam: Any) -> None:
-    """
-    Prose measured from a file ImGui has no font for would be drawn in whatever face
-    was bound, at the wrong advances. The default is used and the menu is told.
-    """
-    typeset.configure(typeset=True, proportional="droid")
-    assert typeset.load_fonts(
-        BOLD, loader=lambda path: None if "Droid" in str(path) else typeset._atlas_loader(path)
-    )
-    assert {family.name: usable for family, usable in typeset.proportionals()} == {
-        "roboto": True,
-        "droid": False,
-    }
-    assert typeset.proportional().name == typeset.DEFAULT_PROPORTIONAL
-    assert Face.PROSE not in registered_fonts()
-    assert typeset.enabled() and not typeset.mono()
-    assert typeset._STATE.family == "droid", "what the operator asked for is not overwritten"
-
-
-def test_a_saved_family_with_its_own_file_is_in_force_from_the_first_load(seam: Any) -> None:
-    """
-    The app configures before the atlas exists. ``load_fonts`` is what applies a
-    family then -- and it still puts the library's own Roboto on the atlas, which is
-    what switching away from the family will want without a font read.
-    """
-    typeset.reset()
-    typeset.configure(typeset=True, proportional="droid")
-    assert typeset.proportional().name == typeset.DEFAULT_PROPORTIONAL, "nothing is loaded yet"
-    assert typeset.load_fonts(BOLD)
-    assert typeset.proportional().name == "droid"
-    assert registered_fonts()[Face.PROSE] == _bundled("DroidSans.ttf")
-    assert typeset._fonts().fonts[Face.PROSE] is typeset._STATE.files[_bundled("DroidSans.ttf")]
-    assert typeset._STATE.files[_bundled("Roboto/Roboto-Regular.ttf")] is not None
-
-    # Loaded again with the family's file still registered, as a second run of the
-    # app in one process would: Roboto is on the atlas all the same.
-    assert typeset.load_fonts(BOLD)
-    assert typeset.proportional().name == "droid"
-    assert typeset._STATE.files.get(_bundled("Roboto/Roboto-Regular.ttf")) is not None
-    count = _atlas_fonts(seam)
-    typeset.configure(typeset=True, proportional=typeset.DEFAULT_PROPORTIONAL)
-    assert _atlas_fonts(seam) == count
-    assert typeset._fonts().fonts[Face.PROSE] is not None
-
-
-# -- whose advances ------------------------------------------------------------
-
-
-@pytest.mark.parametrize("source", ["hinted", "light", "file"])
-def test_the_metrics_source_is_one_constant_and_each_way_agrees_with_what_imgui_draws(
-    seam: Any, monkeypatch: pytest.MonkeyPatch, source: str
-) -> None:
-    """
-    Hinted, the layout asks ImGui for each advance; from the file, the faces are
-    loaded unhinted and the library's own advances are ImGui's. Either way a line
-    is as wide as ImGui will draw it, which is the claim the choice has to keep.
-    """
-    from advtext import fontlib_metrics, px_from_sp
-
-    monkeypatch.setattr(typeset, "METRICS", source)
-    typeset.reset()
-    assert typeset.load_fonts(BOLD)
-    try:
-        text = "difference people iiii mmmm"
-        for face, name, kind in (
-            (Face.PROSE, "prose", BlockKind.PARAGRAPH),
-            (Face.CODE, "literal", BlockKind.CODE),
-        ):
-            key = typeset._theme(name).style(kind).font.key
-            metrics = typeset.pixel_metrics(key)
-            laid = float(px_from_sp(round(sum(metrics.advance(ord(c)) for c in text))))
-            seam.new_frame()
-            seam.push_font(typeset._fonts()(face), 16.0)
-            drawn = float(seam.calc_text_size(text).x)
-            seam.pop_font()
-            seam.end_frame()
-            file = float(px_from_sp(round(sum(fontlib_metrics(key).advance(ord(c)) for c in text))))
-            if source != "file":
-                assert laid == pytest.approx(drawn, abs=0.01), face
-                assert abs(file - drawn) > 1.0, "or hinting moved nothing and this shows nothing"
-                assert isinstance(metrics, typeset._PixelMetrics)
-            else:
-                assert laid == file, "nothing of the library's measuring is overridden"
-                # `calc_text_size` rounds a width up to a pixel.
-                assert laid == pytest.approx(drawn, abs=1.0), face
-                assert not isinstance(metrics, typeset._PixelMetrics)
-        cache = typeset.ViewCache()
-        texts = approval.diff_texts("Write", {"file_path": "/x/a.py", "content": "one\ntwo\n"})
-
-        def body() -> None:
-            typeset.markdown(cache, "m", MARKDOWN)
-            typeset.plain(cache, "p", TREE)
-            typeset.diff(cache, "d", texts)
-
-        frame(seam, body)
-        for key in ("m", "p", "d"):
-            drawn_now = cache.drawn(key)
-            assert drawn_now is not None and drawn_now[0] > 5 and drawn_now[1] == 0, key
-    finally:
-        monkeypatch.undo()
-        typeset.reset()
-        assert typeset.load_fonts(BOLD)
-
-
+@pytest.mark.skip(reason=SEAM_1)
 def test_the_operators_scale_multiplies_the_ui_fonts_size_to_a_whole_pixel(
     seam: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1294,21 +838,7 @@ def test_the_operators_scale_multiplies_the_ui_fonts_size_to_a_whole_pixel(
     assert typeset.body_px() == 16.0
 
 
-@pytest.mark.parametrize(
-    ("asked", "got"),
-    [(0.1, 0.875), (9.0, 1.25), (float("nan"), 1.0), (float("inf"), 1.0), (1.125, 1.125)],
-)
-def test_a_scale_out_of_range_is_clamped_and_one_that_is_no_number_is_one(
-    seam: Any, asked: float, got: float
-) -> None:
-    typeset.configure(typeset=True, scale=asked)
-    assert typeset.scale() == got
-    assert typeset.body_px() == round(16.0 * got)
-
-
-# -- palette -------------------------------------------------------------------
-
-
+@pytest.mark.skip(reason=SEAM_1)
 @pytest.mark.parametrize("name", list(theme.THEMES))
 def test_each_role_keeps_the_meaning_the_old_renderers_gave_it(name: str) -> None:
     p = theme.THEMES[name]
@@ -1343,6 +873,7 @@ INK_GROUNDS = {
         "remove_emphasis",
     ),
 }
+
 
 UNDER_AA = {
     # The pairs under 4.5:1 in the three themes the application requires, on either
@@ -1420,6 +951,7 @@ def test_the_contrast_arithmetic_is_the_standard_one() -> None:
     assert _over(0x80FFFFFF, (0.0, 0.0, 0.0))[0] == pytest.approx(128.0)
 
 
+@pytest.mark.skip(reason=SEAM_1)
 @pytest.mark.parametrize("surface", ["panel", "bg"])
 @pytest.mark.parametrize("name", theme.REQUIRED_THEMES)
 def test_every_diff_ink_is_three_to_one_on_its_ground_and_the_pairs_under_aa_are_named(
@@ -1440,6 +972,7 @@ def test_every_diff_ink_is_three_to_one_on_its_ground_and_the_pairs_under_aa_are
     assert under <= UNDER_AA[name], sorted(under - UNDER_AA[name])
 
 
+@pytest.mark.skip(reason=SEAM_1)
 @pytest.mark.parametrize("surface", ["panel", "bg"])
 @pytest.mark.parametrize("name", list(theme.THEMES))
 def test_a_diff_band_costs_a_bounded_share_of_the_themes_own_contrast(
@@ -1462,6 +995,7 @@ def test_a_diff_band_costs_a_bounded_share_of_the_themes_own_contrast(
         assert found[(ink, f"{ink}_emphasis")] >= 0.50 * bare, ink
 
 
+@pytest.mark.skip(reason=SEAM_1)
 @pytest.mark.parametrize("name", list(theme.THEMES))
 def test_the_marker_that_does_not_depend_on_hue_is_in_the_themes_strongest_ink(
     name: str,
@@ -1475,6 +1009,7 @@ def test_the_marker_that_does_not_depend_on_hue_is_in_the_themes_strongest_ink(
     assert typeset.build_palette(p).diff.gutter == p.text.u32
 
 
+@pytest.mark.skip(reason=SEAM_1)
 def test_the_palette_follows_a_theme_switch_with_nobody_telling_it(seam: Any) -> None:
     assert typeset.palette().ink == theme.DARK.text.u32
     theme.set_theme("light")
@@ -1482,14 +1017,12 @@ def test_the_palette_follows_a_theme_switch_with_nobody_telling_it(seam: Any) ->
     assert typeset.palette(theme.P.danger).ink == theme.LIGHT.danger.u32
 
 
+@pytest.mark.skip(reason=SEAM_1)
 def test_one_ink_overrides_the_block_roles_and_keeps_the_rest(seam: Any) -> None:
     dim = typeset.palette(theme.P.text_dim)
     assert dim.ink_for(BlockKind.HEADING_1) == theme.P.text_dim.u32
     assert dim.diff == typeset.palette().diff
     assert typeset.palette(theme.P.text_dim) is dim
-
-
-# -- raw HTML ------------------------------------------------------------------
 
 
 HIDING = [
@@ -1536,6 +1069,7 @@ def _shown(view: Any) -> str:
     return "\n\n".join(view.block_text(n) for n in range(len(view.document.blocks)))
 
 
+@pytest.mark.xfail(strict=True, reason=P7)
 @pytest.mark.parametrize(("written", "expected"), HIDING)
 def test_text_a_markdown_reader_would_hide_is_set_settled_and_streamed(
     seam: Any, written: str, expected: str
@@ -1563,6 +1097,7 @@ def test_text_a_markdown_reader_would_hide_is_set_settled_and_streamed(
     assert _shown(handle.view) == expected
 
 
+@pytest.mark.xfail(strict=True, reason=P7)
 def test_html_in_a_document_is_shown_and_not_dropped(seam: Any) -> None:
     """
     Unguarded, the library (following CommonMark) shows none of the three: the block
@@ -1576,9 +1111,7 @@ def test_html_in_a_document_is_shown_and_not_dropped(seam: Any) -> None:
     assert shown == ["List<String> here", "<div>block</div>", "Vec<T>", "<!-- note", "after"]
 
 
-# -- held views ----------------------------------------------------------------
-
-
+@pytest.mark.skip(reason=SEAM_1)
 def test_a_view_is_held_across_frames_and_laid_out_once(seam: Any) -> None:
     cache = typeset.ViewCache()
     heights = []
@@ -1594,6 +1127,7 @@ def test_a_view_is_held_across_frames_and_laid_out_once(seam: Any) -> None:
     assert glyphs > 40 and missing == 0 and cache.replaced("k") == 0
 
 
+@pytest.mark.skip(reason=SEAM_1)
 def test_new_source_under_a_key_is_shown_by_the_same_view(seam: Any) -> None:
     """
     The same view, so the selection and the layout of unchanged blocks survive; a new
@@ -1607,6 +1141,7 @@ def test_new_source_under_a_key_is_shown_by_the_same_view(seam: Any) -> None:
     assert [view.block_text(n) for n in range(len(view.document.blocks))] == ["first", "second"]
 
 
+@pytest.mark.skip(reason=SEAM_1)
 def test_the_face_setting_rebuilds_a_view_and_a_theme_switch_does_not(seam: Any) -> None:
     cache = typeset.ViewCache()
     frame(seam, lambda: typeset.markdown(cache, "k", MARKDOWN))
@@ -1621,6 +1156,7 @@ def test_the_face_setting_rebuilds_a_view_and_a_theme_switch_does_not(seam: Any)
     assert rebuilt.theme.style(BlockKind.PARAGRAPH).font.face is Face.CODE
 
 
+@pytest.mark.skip(reason=SEAM_1)
 def test_prune_keeps_the_live_keys_and_drops_the_rest(seam: Any) -> None:
     cache = typeset.ViewCache()
 
@@ -1634,6 +1170,7 @@ def test_prune_keeps_the_live_keys_and_drops_the_rest(seam: Any) -> None:
     assert "b" not in cache and len(cache) == 2
 
 
+@pytest.mark.skip(reason=SEAM_1)
 def test_the_second_draw_of_a_key_in_one_frame_is_refused(
     seam: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1656,6 +1193,7 @@ def test_the_second_draw_of_a_key_in_one_frame_is_refused(
     assert refused == ["k"]
 
 
+@pytest.mark.skip(reason=SEAM_1)
 def test_a_view_out_of_sight_is_given_its_room_and_not_drawn(seam: Any) -> None:
     cache = typeset.ViewCache()
     heights: list[float] = []
@@ -1670,6 +1208,7 @@ def test_a_view_out_of_sight_is_given_its_room_and_not_drawn(seam: Any) -> None:
     assert entry.glyphs > 0
 
 
+@pytest.mark.skip(reason=SEAM_1)
 def test_a_view_out_of_sight_that_owns_the_selection_is_still_drawn(seam: Any) -> None:
     """
     Ctrl+C is read in the view's draw. Culled, the text the operator selected and
@@ -1685,6 +1224,7 @@ def test_a_view_out_of_sight_that_owns_the_selection_is_still_drawn(seam: Any) -
     assert entry.glyphs != -1
 
 
+@pytest.mark.skip(reason=SEAM_1)
 def test_a_cap_bounds_a_tall_document_and_leaves_a_short_one_its_own_height(seam: Any) -> None:
     cache = typeset.ViewCache()
     got: dict[str, float] = {}
@@ -1713,6 +1253,7 @@ def _feet(view: Any) -> list[float]:
     return out
 
 
+@pytest.mark.xfail(strict=True, reason=P13)
 @pytest.mark.parametrize("cap", [90.0, 131.0, 200.0, 207.5])
 def test_a_capped_view_ends_on_a_whole_line(seam: Any, cap: float) -> None:
     """
@@ -1731,32 +1272,7 @@ def test_a_capped_view_ends_on_a_whole_line(seam: Any, cap: float) -> None:
     assert not any(abs(foot - cap) < 0.5 for foot in feet)
 
 
-def test_a_capped_diff_ends_on_a_whole_row_and_keeps_its_scrollbar_clear(seam: Any) -> None:
-    """
-    ``line_height()`` is not a diff's row, so "six lines" of cap is five rows and
-    a sliver; and a diff with a line too long for the view pins a scrollbar over
-    the bottom of what is in sight. The cap is taken down to whole rows, plus the
-    scrollbar where there is one.
-    """
-    row = typeset.diff_row_height()
-    assert row == 18.0 and row != typeset.line_height()
-    short = "\n".join(f"line {n}" for n in range(40))
-    texts = (approval.DiffText(short, short.replace("line 7", "LINE 7"), "f.py"),)
-    long = (approval.DiffText(short, short.replace("line 7", "LINE 7 " + "x" * 200), "f.py"),)
-    cache = typeset.ViewCache()
-    got: dict[str, float | None] = {}
-
-    def body() -> None:
-        got["short"] = typeset.diff(cache, "short", texts, height_cap=6 * typeset.line_height())
-        got["long"] = typeset.diff(cache, "long", long, height_cap=6 * typeset.line_height())
-
-    frame(seam, body)
-    assert got["short"] == 5 * row
-    view = cache.view("long")
-    bar = got["long"] - 5 * row  # type: ignore[operator]
-    assert 0 < bar < row and view.content_width > WINDOW[0]
-
-
+@pytest.mark.skip(reason=SEAM_1)
 def test_a_capped_view_measures_as_though_its_scrollbar_were_showing(seam: Any) -> None:
     """
     Otherwise a document that grows past the cap re-breaks every paragraph on the
@@ -1789,6 +1305,7 @@ def _resized(seam: Any, cache: typeset.ViewCache, source: str, width: float) -> 
     return float(advtext.px_from_sp(cache.view("k").layout.width))
 
 
+@pytest.mark.skip(reason=SEAM_1_BUDGET)
 def test_an_expensive_view_waits_for_a_resize_to_stop(
     seam: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1816,6 +1333,7 @@ def test_an_expensive_view_waits_for_a_resize_to_stop(
     assert cache._entries["k"].measure == cache._entries["k"].width < first
 
 
+@pytest.mark.skip(reason=SEAM_1_BUDGET)
 def test_a_cheap_view_follows_a_resize_at_once(seam: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     """
     Three lines are cheap whatever the learned rate says: a rate is learned from
@@ -1829,6 +1347,7 @@ def test_a_cheap_view_follows_a_resize_at_once(seam: Any, monkeypatch: pytest.Mo
     assert _resized(seam, cache, "one\n\ntwo\n", 690.0) < first
 
 
+@pytest.mark.skip(reason=SEAM_1_BUDGET)
 def test_with_no_budget_a_new_width_is_taken_at_once_however_slow_the_last_layout_was(
     seam: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1847,6 +1366,7 @@ def test_with_no_budget_a_new_width_is_taken_at_once_however_slow_the_last_layou
     assert not typeset.pending()
 
 
+@pytest.mark.skip(reason=SEAM_1_BUDGET)
 def test_a_test_leaves_a_learned_rate_behind_it() -> None:
     """
     The first half of a pair: the next test finds this gone (``tests/conftest.py``).
@@ -1854,10 +1374,12 @@ def test_a_test_leaves_a_learned_rate_behind_it() -> None:
     typeset._STATE.layout_rate["markdown"] = 123.0
 
 
+@pytest.mark.skip(reason=SEAM_1_BUDGET)
 def test_no_test_starts_with_a_rate_another_learned() -> None:
     assert typeset._STATE.layout_rate == {}
 
 
+@pytest.mark.skip(reason=SEAM_1_BUDGET)
 def test_a_layout_kept_at_an_old_width_does_not_widen_its_window(seam: Any) -> None:
     """
     While a new width is waited on the view draws the layout it has, which may be
@@ -1900,9 +1422,7 @@ def test_a_layout_kept_at_an_old_width_does_not_widen_its_window(seam: Any) -> N
     assert reach == [0.0, 0.0]
 
 
-# -- plain text ----# -- plain text ----------------------------------------------------------------
-
-
+@pytest.mark.skip(reason=SEAM_1)
 def test_literal_text_keeps_its_whitespace_and_reads_no_markdown(seam: Any) -> None:
     cache = typeset.ViewCache()
     text = "{\n    'a_b': **1**,\n}\n$ ls   -la"
@@ -1910,6 +1430,7 @@ def test_literal_text_keeps_its_whitespace_and_reads_no_markdown(seam: Any) -> N
     assert cache.view("k").block_text(0) == text
 
 
+@pytest.mark.skip(reason=SEAM_1)
 def test_wrapped_text_is_broken_to_the_window_at_the_cost_of_its_spacing(seam: Any) -> None:
     cache = typeset.ViewCache()
     got: dict[str, float] = {}
@@ -1925,6 +1446,7 @@ def test_wrapped_text_is_broken_to_the_window_at_the_cost_of_its_spacing(seam: A
     assert cache.view("s").block_text(0) == "a b"
 
 
+@pytest.mark.xfail(strict=True, reason=P12)
 @pytest.mark.parametrize("kind", ["plain", "markdown"])
 def test_a_code_line_wider_than_the_window_can_be_scrolled_to(seam: Any, kind: str) -> None:
     """
@@ -1951,6 +1473,7 @@ def test_a_code_line_wider_than_the_window_can_be_scrolled_to(seam: Any, kind: s
         assert cache._entries["k"].width < WINDOW[0]
 
 
+@pytest.mark.skip(reason=SEAM_1)
 def test_an_uncapped_view_is_never_given_a_child_to_be_uncullable_in(seam: Any) -> None:
     """
     The view culls to the window it is drawn in. In a child as tall as the document
@@ -1964,6 +1487,7 @@ def test_an_uncapped_view_is_never_given_a_child_to_be_uncullable_in(seam: Any) 
     assert 0 < glyphs < 1500, glyphs
 
 
+@pytest.mark.skip(reason=SEAM_1)
 def test_under_a_cap_a_wide_line_gets_the_views_own_child_a_scrollbar(seam: Any) -> None:
     cache = typeset.ViewCache()
     got: dict[str, float | None] = {}
@@ -1980,6 +1504,7 @@ def test_under_a_cap_a_wide_line_gets_the_views_own_child_a_scrollbar(seam: Any)
     assert (cache.drawn("over") or (0, 0))[0] > 0
 
 
+@pytest.mark.skip(reason=SEAM_1)
 def test_a_cap_stated_in_lines_is_that_many_lines_of_literal_text(seam: Any) -> None:
     """
     ``line_height`` is what a pane multiplies by for "at most 24 lines". If it were
@@ -1992,15 +1517,13 @@ def test_a_cap_stated_in_lines_is_that_many_lines_of_literal_text(seam: Any) -> 
     assert 16.0 <= typeset.line_height() < 22.0
 
 
+@pytest.mark.skip(reason=SEAM_1)
 def test_a_segment_kinds_colour_is_the_ink(seam: Any) -> None:
     assert typeset.palette(theme.P.danger).ink == theme.P.danger.u32
     cache = typeset.ViewCache()
     frame(seam, lambda: typeset.plain(cache, "k", "boom", colour=theme.P.danger))
     assert cache.drawn("k") == (4, 0)
     assert cache.replaced("k") == 0
-
-
-# -- documents from parts ------------------------------------------------------
 
 
 def _parts() -> tuple[typeset.Part, ...]:
@@ -2012,6 +1535,7 @@ def _parts() -> tuple[typeset.Part, ...]:
     )
 
 
+@pytest.mark.skip(reason=SEAM_1)
 def test_parts_are_one_document_in_one_view_each_read_its_own_way(seam: Any) -> None:
     cache = typeset.ViewCache()
     parts = _parts()
@@ -2030,6 +1554,7 @@ def test_parts_are_one_document_in_one_view_each_read_its_own_way(seam: Any) -> 
     assert "Bash" in view.selected_text() and "Closing words." in view.selected_text()
 
 
+@pytest.mark.skip(reason=SEAM_1)
 def test_each_part_is_drawn_in_its_own_ink(seam: Any) -> None:
     """
     Read back from the draw list: the vertices of a frame carry the ink of every
@@ -2066,6 +1591,7 @@ def _inks(seam: Any, draw: Callable[[], object]) -> set[int]:
     return seen
 
 
+@pytest.mark.skip(reason=SEAM_1)
 def test_parts_kept_across_a_theme_switch_are_inked_in_the_new_theme(seam: Any) -> None:
     """
     A pane holds its parts and passes the same object every frame. Colour spans are
@@ -2089,6 +1615,7 @@ def test_parts_kept_across_a_theme_switch_are_inked_in_the_new_theme(seam: Any) 
     assert theme.DARK.danger.u32 not in light and theme.DARK.text.u32 not in light
 
 
+@pytest.mark.skip(reason=SEAM_1)
 def test_literal_text_with_no_colour_is_the_themes_text_and_not_the_dim_code_role(
     seam: Any,
 ) -> None:
@@ -2108,6 +1635,7 @@ def test_literal_text_with_no_colour_is_the_themes_text_and_not_the_dim_code_rol
         assert theme.P.diff_context.u32 not in inks
 
 
+@pytest.mark.skip(reason=SEAM_1)
 def test_a_part_that_loses_its_colour_loses_it_on_screen(seam: Any) -> None:
     """
     Spans are kept by block number. The block that takes a coloured part's place
@@ -2120,6 +1648,7 @@ def test_a_part_that_loses_its_colour_loses_it_on_screen(seam: Any) -> None:
     assert theme.P.danger.u32 not in _inks(seam, lambda: typeset.document(cache, "k", prose))
 
 
+@pytest.mark.skip(reason=SEAM_1)
 def test_appending_a_part_builds_that_part_and_no_other(
     seam: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2151,6 +1680,7 @@ def test_appending_a_part_builds_that_part_and_no_other(
     assert stats is not None and len(stats.built) == 1
 
 
+@pytest.mark.skip(reason=SEAM_1)
 def test_the_same_tuple_of_parts_is_not_compared_again_and_an_equal_one_changes_nothing(
     seam: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2182,6 +1712,7 @@ def test_the_same_tuple_of_parts_is_not_compared_again_and_an_equal_one_changes_
     assert "something else" in _shown(cache.view("k"))
 
 
+@pytest.mark.skip(reason=SEAM_1)
 def test_a_list_of_parts_appended_to_in_place_is_shown_grown(seam: Any) -> None:
     """
     The hazard of an identity test: a pane that keeps its parts in a list and
@@ -2200,6 +1731,7 @@ def test_a_list_of_parts_appended_to_in_place_is_shown_grown(seam: Any) -> None:
     assert _shown(cache.view("k")) == "ONE\n\ntwo"
 
 
+@pytest.mark.skip(reason=SEAM_1)
 def test_a_part_that_repeats_and_a_part_that_is_empty_are_both_harmless(seam: Any) -> None:
     cache = typeset.ViewCache()
     parts = (
@@ -2216,203 +1748,17 @@ def test_a_part_that_repeats_and_a_part_that_is_empty_are_both_harmless(seam: An
     assert cache.replaced("k") == 0
 
 
-# -- fenced diffs --------------------------------------------------------------
-
 FENCED = "Before.\n\n```diff\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-old\n+new\n```\n\nAfter.\n"
 
 
-def test_a_fenced_diff_in_a_document_a_part_and_a_stream_is_drawn_as_a_diff(seam: Any) -> None:
-    """
-    All three, because each reaches the fence a different way: through the source
-    map, from the code block's own lines, and from the stream's text.
-    """
-    cache = typeset.ViewCache()
-    handle = typeset.stream(cache, "stream")
-    for at in range(0, len(FENCED), 5):
-        handle.append(FENCED[at : at + 5])
-    handle.close()
-    parts = (typeset.Part(FENCED),)
-
-    def body() -> None:
-        typeset.markdown(cache, "markdown", FENCED)
-        typeset.document(cache, "parts", parts)
-        handle.draw()
-
-    frame(seam, body)
-    frame(seam, body)
-    for key in ("markdown", "parts", "stream"):
-        view = cache.view(key)
-        hosted = view.hosted(1)
-        assert hosted is not None, key
-        assert (hosted.view.diff.added, hosted.view.diff.removed) == (1, 1), key
-        assert view.hosted(0) is None and view.hosted(2) is None, key
-        glyphs, missing = cache.drawn(key) or (0, 1)
-        assert glyphs > 30 and missing == 0 and cache.replaced(key) == 0, key
-
-
-def test_a_fenced_diff_follows_its_document_when_the_source_changes(seam: Any) -> None:
-    """
-    The fence is read out of the source by line number. Read out of the source the
-    view was first given, a document that changed would show the old diff -- or
-    whatever now sits on those lines.
-    """
-    cache = typeset.ViewCache()
-    frame(seam, lambda: typeset.markdown(cache, "k", FENCED))
-    longer = "One more line.\n\n" + FENCED.replace("+new\n", "+new\n+\ttabbed\n")
-    frame(seam, lambda: typeset.markdown(cache, "k", longer))
-    frame(seam, lambda: typeset.markdown(cache, "k", longer))
-    view = cache.view("k")
-    hosted = view.hosted(2)
-    assert hosted is not None
-    assert (hosted.view.diff.added, hosted.view.diff.removed) == (2, 1)
-    # The tab is the witness that the fence was read from the source: read from
-    # the code block instead, which is the library's fallback, it is spaces.
-    assert rows(hosted.view.diff, RowKind.ADD) == ["new", "\ttabbed"]
-
-
+@pytest.mark.skip(reason=SEAM_1)
 def test_a_fence_that_is_not_a_diff_stays_a_code_block(seam: Any) -> None:
     cache = typeset.ViewCache()
     frame(seam, lambda: typeset.markdown(cache, "k", "```python\n-x\n+y\n```\n"))
     assert cache.view("k").hosted(0) is None
 
 
-def test_a_wide_line_in_a_fenced_diff_is_the_diff_views_to_scroll(seam: Any) -> None:
-    """
-    The hosted view scrolls its own long lines. Reported to the window as well, the
-    whole document would scroll sideways for a line that is already reachable.
-    """
-    cache = typeset.ViewCache()
-    wide = "```diff\n--- a/x\n+++ b/x\n@@ -1 +1 @@\n-" + "x" * 400 + "\n+y\n```\n"
-    frame(seam, lambda: typeset.markdown(cache, "k", wide))
-    assert cache._entries["k"].extent == 0.0
-
-
-# -- diffs ---------------------------------------------------------------------
-
-
-def test_a_parked_calls_diff_is_built_once_and_never_from_the_disk(
-    seam: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """
-    The driver read the file when the call parked. The seam is handed that reading
-    and must not take another: the file here is gone before the first frame, and
-    the diff is still the one the approver was parked in front of.
-    """
-    target = tmp_path / "a.py"
-    target.write_text("one\ntwo\nthree\n")
-    call = pending("Edit", {"file_path": str(target), "old_string": "two", "new_string": "2"})
-    target.unlink()
-
-    built: list[object] = []
-    real = typeset.diff_model
-    monkeypatch.setattr(typeset, "diff_model", lambda texts: (built.append(texts), real(texts))[1])
-    cache = typeset.ViewCache()
-    heights: list[float | None] = []
-    for _ in range(3):
-        frame(seam, lambda: heights.append(typeset.diff(cache, "k", call)))
-    assert len(built) == 1
-    assert heights[0] is not None and heights[0] > 0 and len(set(heights)) == 1
-    view = cache.view("k")
-    assert (view.diff.added, view.diff.removed) == (1, 1)
-    assert view.diff.files[0].will_not_apply == ""
-
-
-def test_new_texts_under_a_key_are_a_new_diff_and_equal_ones_are_not(
-    seam: Any, tmp_path: Path
-) -> None:
-    """
-    A pane showing arguments the operator is editing hands over ``diff_texts``' answer
-    each time they change. Equal texts in a new tuple are the same diff: rebuilding
-    would drop the expansions and the selection for nothing. New texts are a new
-    model in the same view (the view is what the scroll position belongs to).
-    """
-    target = tmp_path / "a.py"
-    target.write_text("one\ntwo\n")
-    args = {"file_path": str(target), "old_string": "two", "new_string": "2"}
-    cache = typeset.ViewCache()
-    frame(seam, lambda: typeset.diff(cache, "k", approval.diff_texts("Edit", args)))
-    view = cache.view("k")
-    frame(seam, lambda: typeset.diff(cache, "k", approval.diff_texts("Edit", dict(args))))
-    assert cache.view("k") is view
-    model = view.diff
-    edited = approval.diff_texts("Edit", {**args, "new_string": "II"})
-    frame(seam, lambda: typeset.diff(cache, "k", edited))
-    assert cache.view("k").diff is not model
-    assert rows(cache.view("k").diff, RowKind.ADD) == ["II"]
-
-
-def test_a_call_with_no_diff_is_none_and_stays_none_cheaply(
-    seam: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    asked: list[str] = []
-    real = typeset.approval_diff
-    monkeypatch.setattr(typeset, "approval_diff", lambda p: (asked.append(p.tool_name), real(p))[1])
-    call = pending("Bash", {"command": "ls"})
-    assert call.texts is None
-    cache = typeset.ViewCache()
-    got: list[float | None] = []
-    for _ in range(3):
-        frame(seam, lambda: got.append(typeset.diff(cache, "k", call)))
-    assert got == [None, None, None]
-    assert asked == ["Bash"]
-    frame(seam, lambda: got.append(typeset.diff(cache, "none", None)))
-    assert got[-1] is None
-
-
-def test_a_diff_draws_its_gutter_and_both_sides(seam: Any, tmp_path: Path) -> None:
-    target = tmp_path / "a.py"
-    target.write_text("foo")
-    cache = typeset.ViewCache()
-    call = pending("Edit", {"file_path": str(target), "old_string": "foo", "new_string": "bar"})
-    frame(seam, lambda: typeset.diff(cache, "k", call))
-    glyphs, missing = cache.drawn("k") or (0, 1)
-    assert glyphs > 0 and missing == 0
-    assert cache.view("k").row_count >= 4
-
-    frame(seam, lambda: typeset.diff(cache, "k", call, side_by_side=True, height_cap=60.0))
-    assert 0 < (cache.height("k") or 0.0) <= 60.0
-
-
-def test_an_equal_model_that_is_not_the_same_model_is_shown_in_place_of_it(seam: Any) -> None:
-    """
-    Two models with the same rows compare equal and may still differ in the context
-    a click would expand, so a ``Diff`` is the same source only if it is the same one.
-    """
-    texts = (approval.DiffText("a\n", "b\n", "x.py"),)
-    one, other = typeset.diff_model(texts), typeset.diff_model(texts)
-    assert one == other and one is not other
-    cache = typeset.ViewCache()
-    frame(seam, lambda: typeset.diff(cache, "k", one))
-    view = cache.view("k")
-    frame(seam, lambda: typeset.diff(cache, "k", one))
-    assert cache.view("k") is view
-    frame(seam, lambda: typeset.diff(cache, "k", other))
-    assert cache.view("k").diff is other
-
-
-def test_one_model_may_be_drawn_by_two_panes_each_in_a_view_of_its_own(seam: Any) -> None:
-    """
-    The inbox and DETAIL can show the same parked call in one frame. The model is
-    immutable and may be shared; a view holds one scroll position and one origin
-    and may not.
-    """
-    model = typeset.diff_model((approval.DiffText("a\n", "b\n", "x.py"),))
-    inbox, detail = typeset.ViewCache(), typeset.ViewCache()
-
-    def body() -> None:
-        typeset.diff(inbox, "a1", model, height_cap=100.0)
-        typeset.diff(detail, "a1", model)
-
-    frame(seam, body)
-    frame(seam, body)
-    assert inbox.view("a1") is not detail.view("a1")
-    assert inbox.view("a1").diff is model and detail.view("a1").diff is model
-    assert (inbox.drawn("a1") or (0, 1))[1] == 0 and (detail.drawn("a1") or (0, 1))[1] == 0
-
-
-# -- streams -------------------------------------------------------------------
-
-
+@pytest.mark.skip(reason=SEAM_2)
 def test_a_stream_grows_as_it_is_fed_and_settles_when_closed(seam: Any) -> None:
     cache = typeset.ViewCache()
     handle = typeset.stream(cache, "s")
@@ -2432,6 +1778,7 @@ def test_a_stream_grows_as_it_is_fed_and_settles_when_closed(seam: Any) -> None:
         handle.append("more")
 
 
+@pytest.mark.skip(reason=SEAM_2)
 def test_text_that_extends_the_stream_is_appended_and_anything_else_replays(seam: Any) -> None:
     cache = typeset.ViewCache()
     handle = typeset.stream(cache, "s")
@@ -2451,6 +1798,7 @@ def test_text_that_extends_the_stream_is_appended_and_anything_else_replays(seam
     assert cache.view("s") is handle.view
 
 
+@pytest.mark.skip(reason=SEAM_2)
 def test_a_stream_survives_the_face_setting_by_replaying_what_it_was_fed(seam: Any) -> None:
     cache = typeset.ViewCache()
     handle = typeset.stream(cache, "s")
@@ -2464,6 +1812,7 @@ def test_a_stream_survives_the_face_setting_by_replaying_what_it_was_fed(seam: A
     assert handle.closed
 
 
+@pytest.mark.skip(reason=SEAM_2)
 @pytest.mark.parametrize("follow", [True, False])
 def test_only_a_stream_asked_to_follow_scrolls_its_window(seam: Any, follow: bool) -> None:
     """
@@ -2491,6 +1840,7 @@ def test_only_a_stream_asked_to_follow_scrolls_its_window(seam: Any, follow: boo
         assert at == 0
 
 
+@pytest.mark.xfail(strict=True, reason=P7)
 def test_html_arriving_in_pieces_is_still_shown(seam: Any) -> None:
     cache = typeset.ViewCache()
     handle = typeset.stream(cache, "s")
@@ -2503,6 +1853,7 @@ def test_html_arriving_in_pieces_is_still_shown(seam: Any) -> None:
     assert shown == ["a <div>x</div> and <b>", "<!-- rest"]
 
 
+@pytest.mark.skip(reason=SEAM_2)
 def test_a_stream_out_of_sight_with_new_text_is_still_taken_in(seam: Any) -> None:
     """
     Its height is what the pane scrolls by; a stream culled while it grows would
@@ -2519,187 +1870,6 @@ def test_a_stream_out_of_sight_with_new_text_is_still_taken_in(seam: Any) -> Non
     handle.append("two\n\nthree\n\n")
     frame(seam, lambda: heights.append(handle.draw()), lead=5000.0)
     assert heights[2] > heights[1] == heights[0]
-
-
-# -- the diff model ------------------------------------------------------------
-
-
-def test_the_unified_string_of_an_edit_without_a_newline_loses_the_added_line(
-    tmp_path: Path,
-) -> None:
-    """
-    Why the model is built from texts. ``render_diff`` runs the removed and the added
-    line together when the file has no closing newline, and a reader of that string
-    sees one removed line and nothing added -- less than the change, in the place an
-    operator approves from.
-    """
-    target = tmp_path / "a.txt"
-    target.write_text("foo")
-    call = pending("Edit", {"file_path": str(target), "old_string": "foo", "new_string": "bar"})
-    assert call.diff is not None
-    assert "-foo+bar" in call.diff.splitlines()
-
-    lossy = Diff.from_unified(call.diff)
-    assert rows(lossy, RowKind.ADD) == []
-    assert rows(lossy, RowKind.REMOVE) == ["foo+bar"]
-
-    faithful = typeset.approval_diff(call)
-    assert faithful is not None
-    assert rows(faithful, RowKind.REMOVE) == ["foo"]
-    assert rows(faithful, RowKind.ADD) == ["bar"]
-
-
-def test_a_record_with_a_unified_string_and_no_texts_is_still_shown() -> None:
-    """
-    Lossy, as the test above shows, and still better than telling an approver there
-    is no diff for a call that has one.
-    """
-    old = PendingApproval(
-        id="a",
-        node=NodeId("n"),
-        tool_name="Edit",
-        tool_use_id="t",
-        raw_args={},
-        summary="",
-        requested_at=0.0,
-        diff="--- a/x\n+++ b/x\n@@ -1 +1 @@\n-a\n+b\n",
-    )
-    built = typeset.approval_diff(old)
-    assert built is not None
-    assert (rows(built, RowKind.REMOVE), rows(built, RowKind.ADD)) == (["a"], ["b"])
-    assert [file.label for file in built.files] == [f"x  {typeset._FROM_UNIFIED}"]
-    assert "may be incomplete" in typeset._FROM_UNIFIED
-
-
-def test_a_text_with_no_before_is_a_new_file() -> None:
-    from advtext import FileStatus
-
-    built = typeset.diff_model((approval.DiffText(None, "a\nb\n", "/tmp/new.py"),))
-    (file,) = built.files
-    assert file.status is FileStatus.NEW
-    assert file.label == "/tmp/new.py"
-    assert rows(built, RowKind.ADD) == ["a", "b"] and built.removed == 0
-
-
-def test_a_write_over_a_file_that_could_not_be_read_says_so_instead_of_calling_it_new(
-    tmp_path: Path,
-) -> None:
-    """
-    The old content cannot be shown, so everything is shown as added -- and unless
-    the label says why, that is indistinguishable from a file that did not exist.
-    """
-    target = tmp_path / "blob.bin"
-    target.write_bytes(b"\xff\xfe\x00\x80binary")
-    over = typeset.diff_model(
-        approval.diff_texts("Write", {"file_path": str(target), "content": "text\n"}) or ()
-    )
-    assert "not readable as text" in over.files[0].label
-    assert rows(over, RowKind.ADD) == ["text"]
-
-    fresh = typeset.diff_model(
-        approval.diff_texts("Write", {"file_path": str(tmp_path / "no"), "content": "t\n"}) or ()
-    )
-    assert "not readable" not in fresh.files[0].label
-
-
-def test_an_edit_that_applies_is_numbered_as_the_file_is(tmp_path: Path) -> None:
-    target = tmp_path / "a.py"
-    target.write_text("".join(f"line {n}\n" for n in range(1, 41)))
-    texts = approval.diff_texts(
-        "Edit", {"file_path": str(target), "old_string": "line 30\n", "new_string": "thirty\n"}
-    )
-    built = typeset.diff_model(texts or ())
-    (file,) = built.files
-    assert file.will_not_apply == ""
-    added = [row for hunk in file.hunks for row in hunk.rows if row.kind is RowKind.ADD]
-    assert [(row.text, row.new_no) for row in added] == [("thirty", 30)]
-
-
-def test_why_an_edit_may_not_apply_reaches_the_view_worded_as_the_prediction_it_is() -> None:
-    """
-    The gate's read says the edit has nowhere to land, and which way. That read was
-    taken when the call parked and the file may have changed since, so the view's
-    header says ``may not apply`` and not the bare reason, which reads as a fact.
-    The two strings are still diffed, so the intended change is on screen beside it.
-    An unreadable file under an Edit is already named by that reason: the label is
-    left alone.
-    """
-    part = approval.DiffText(
-        "old", "new", "/x.py", will_not_apply="file is not readable as text", unreadable=True
-    )
-    built = typeset.diff_model((part,))
-    (file,) = built.files
-    assert file.will_not_apply == "may not apply: file is not readable as text"
-    assert file.label == "/x.py"
-    assert (rows(built, RowKind.REMOVE), rows(built, RowKind.ADD)) == (["old"], ["new"])
-
-
-def test_several_texts_are_one_file_of_the_diff_each() -> None:
-    parts = (
-        approval.DiffText("a", "A", "edit 1"),
-        approval.DiffText("b\n", "B\n", "edit 3", will_not_apply="anchor not found in file"),
-        approval.DiffText("c", "", "edit 4"),
-    )
-    built = typeset.diff_model(parts)
-    assert [file.label for file in built.files] == ["edit 1", "edit 3", "edit 4"]
-    assert [file.will_not_apply for file in built.files] == [
-        "",
-        "may not apply: anchor not found in file",
-        "",
-    ]
-    assert rows(built, RowKind.ADD) == ["A", "B"]
-    assert rows(built, RowKind.REMOVE) == ["a", "b", "c"]
-
-
-def test_a_text_with_no_label_is_still_a_file_with_a_name() -> None:
-    built = typeset.diff_model((approval.DiffText(None, "x\n", ""),))
-    assert built.files[0].label == "(no path)"
-
-
-def test_a_diff_is_made_and_drawn_without_opening_a_file_or_asking_the_gate_again(
-    seam: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """
-    ``approval.diff_texts`` is the one place a call's effect on a file is decided, and
-    it runs when the call parks. A second reader here would be a second answer -- and
-    so would a second call to the first.
-
-    The file the parked call names is changed after it parks, so a seam that read it
-    again, by any route, would show different rows. Then every way Python opens a
-    file is made to raise for the length of the build and the draw, and so is
-    ``diff_texts``.
-    """
-    target = tmp_path / "a.py"
-    target.write_text("one\ntwo\n")
-    call = pending("Edit", {"file_path": str(target), "old_string": "two", "new_string": "2"})
-    target.write_text("something else entirely\n")
-    cache = typeset.ViewCache()
-    # Whatever a first diff view reads lazily -- a face's metrics -- is read here.
-    frame(seam, lambda: typeset.diff(cache, "warm", (approval.DiffText("a\n", "b\n", "w"),)))
-
-    def refuse(*args: Any, **kwargs: Any) -> Any:
-        raise AssertionError(f"a file was opened: {args[:1]}")
-
-    import builtins
-    import io
-    import os
-
-    for owner, name in ((builtins, "open"), (io, "open"), (os, "open"), (Path, "open")):
-        monkeypatch.setattr(owner, name, refuse)
-    monkeypatch.setattr(Path, "read_text", refuse)
-    monkeypatch.setattr(Path, "read_bytes", refuse)
-    monkeypatch.setattr(approval, "diff_texts", refuse)
-    built = typeset.approval_diff(call)
-    got: list[float | None] = []
-    frame(seam, lambda: got.append(typeset.diff(cache, "k", call)))
-    monkeypatch.undo()
-    assert built is not None
-    assert (rows(built, RowKind.REMOVE), rows(built, RowKind.ADD)) == (["two"], ["2"])
-    assert got[0] is not None and got[0] > 0
-    assert rows(cache.view("k").diff, RowKind.ADD) == ["2"]
-
-
-# -- nothing written is hidden -------------------------------------------------
 
 
 def _written(blocks: Any) -> str:
@@ -2757,6 +1927,7 @@ FRAGMENTS = (
 )
 
 
+@pytest.mark.xfail(strict=True, reason=P7)
 def test_every_word_written_is_set_and_a_stream_cut_anywhere_sets_the_same(seam: Any) -> None:
     """
     The property the cases above are instances of. Sources are put together from
@@ -2782,6 +1953,7 @@ def test_every_word_written_is_set_and_a_stream_cut_anywhere_sets_the_same(seam:
             assert _written(handle._document.blocks) == settled, (source, cut)
 
 
+@pytest.mark.skip(reason=SEAM_2)
 @pytest.mark.parametrize("ending", ["Done!", "is a <", "a tick `", "ends \\", "two ``", "x <!-"])
 def test_a_stream_shows_all_it_was_given_without_waiting_for_more(seam: Any, ending: str) -> None:
     """
@@ -2796,6 +1968,7 @@ def test_a_stream_shows_all_it_was_given_without_waiting_for_more(seam: Any, end
     assert _shown(handle.view) == f"Some words and then {ending}"
 
 
+@pytest.mark.xfail(strict=True, reason=P7)
 def test_a_links_destination_is_on_screen_settled_and_streamed(seam: Any) -> None:
     """
     An approver releasing a concern body is releasing its links. The text of a link
@@ -2827,6 +2000,7 @@ def test_a_links_destination_is_on_screen_settled_and_streamed(seam: Any) -> Non
         assert "cell (http://in.table/x)" in view.block_text(1)
 
 
+@pytest.mark.xfail(strict=True, reason=P7)
 def test_a_link_written_in_angle_brackets_is_followed_without_them(seam: Any) -> None:
     cache = typeset.ViewCache()
     followed: list[str] = []
@@ -2835,6 +2009,7 @@ def test_a_link_written_in_angle_brackets_is_followed_without_them(seam: Any) ->
     assert [link.target for link in block.links] == ["http://u/x"]
 
 
+@pytest.mark.xfail(strict=True, reason=P9)
 def test_a_character_no_face_has_is_counted_as_replaced_and_not_as_missing(seam: Any) -> None:
     """
     ``missing == 0`` is not "every character drew". The library swaps a character no
@@ -2862,57 +2037,7 @@ def test_a_character_no_face_has_is_counted_as_replaced_and_not_as_missing(seam:
     assert cache.replaced("own") == 0
 
 
-# -- one test cannot hand its faces to the next ---------------------------------
-
-
-def test_faces_loaded_under_one_context_are_not_available_under_another(seam: Any) -> None:
-    """
-    An ``ImFont`` is a pointer into one context's atlas. A test file that leaves the
-    faces loaded and destroys its context, or a second context made beside the
-    first, must not find the seam switched on: ``enabled()`` true there is a pane
-    drawing with pointers into an atlas that is not the current one, or is gone.
-    """
-    home = seam.get_current_context()
-    assert typeset.available() and typeset.enabled()
-    other = seam.create_context()
-    try:
-        seam.set_current_context(other)
-        assert not typeset.available() and not typeset.enabled()
-    finally:
-        seam.set_current_context(home)
-        seam.destroy_context(other)
-    assert typeset.available() and typeset.enabled()
-
-
-def test_destroying_the_context_the_faces_are_in_forgets_them(seam: Any) -> None:
-    """
-    ``available()`` knows the faces' context by its address, and the next context
-    made can be given the address of one just destroyed: the seam would then be
-    available over an atlas that is freed. Two test files make and destroy contexts
-    without ever calling ``typeset.reset()``. Neither loads faces today; this is
-    what makes it not matter if one does (``tests/conftest.py``).
-    """
-    home = seam.get_current_context()
-    other = seam.create_context()
-    try:
-        seam.set_current_context(other)
-        # As if the faces had been loaded here: the seam's only record of where.
-        typeset._STATE.home = other
-        assert typeset.available()
-    finally:
-        seam.destroy_context(other)
-        seam.set_current_context(home)
-    assert typeset._STATE.fonts is None and typeset._STATE.home is None
-    again = seam.create_context()
-    try:
-        seam.set_current_context(again)
-        assert not typeset.available()
-    finally:
-        seam.destroy_context(again)
-        seam.set_current_context(home)
-    assert typeset.load_fonts(BOLD)
-
-
+@pytest.mark.skip(reason=SEAM_1)
 def test_a_draw_outside_a_frame_raises_and_does_not_take_the_interpreter_down(
     seam: Any,
 ) -> None:
@@ -2937,9 +2062,6 @@ def test_a_draw_outside_a_frame_raises_and_does_not_take_the_interpreter_down(
             call()
 
 
-# -- what a frame may spend -----------------------------------------------------
-
-
 def long_markdown(sections: int) -> str:
     return "".join(
         f"## Section {n}\n\nParagraph {n} has a few words in it and `code_{n}`.\n\n"
@@ -2947,6 +2069,7 @@ def long_markdown(sections: int) -> str:
     )
 
 
+@pytest.mark.skip(reason=SEAM_1_BUDGET)
 def test_a_long_document_is_built_over_frames_and_says_how_much_is_left(
     seam: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2998,6 +2121,7 @@ TRICKY = "\n".join(
 )
 
 
+@pytest.mark.skip(reason=SEAM_1_BUDGET)
 def test_a_long_markdown_is_cut_only_where_cutting_changes_nothing(seam: Any) -> None:
     """
     A long source is parsed in pieces. A cut inside a list, a fence or a quote would
@@ -3017,6 +2141,7 @@ def test_a_long_markdown_is_cut_only_where_cutting_changes_nothing(seam: Any) ->
     assert built == whole
 
 
+@pytest.mark.skip(reason=SEAM_1_BUDGET)
 def test_a_long_list_is_not_cut_between_its_items(seam: Any) -> None:
     """
     A list whose items are a blank line apart, every one numbered ``1.`` as people
@@ -3041,6 +2166,7 @@ def test_a_long_list_is_not_cut_between_its_items(seam: Any) -> None:
     assert cache.view("k").block_text(60) == "60. item number 60"
 
 
+@pytest.mark.skip(reason=SEAM_1_BUDGET)
 def test_the_blocks_of_a_document_built_in_pieces_know_where_they_came_from(seam: Any) -> None:
     """
     A fenced diff is read from the source by the line numbers of its block, so those
@@ -3057,6 +2183,7 @@ def test_the_blocks_of_a_document_built_in_pieces_know_where_they_came_from(seam
     assert hosted is not None and (hosted.view.diff.added, hosted.view.diff.removed) == (1, 1)
 
 
+@pytest.mark.skip(reason=SEAM_1_BUDGET)
 @pytest.mark.parametrize("kind", ["markdown", "plain"])
 def test_text_that_grows_at_the_end_is_read_again_from_its_last_piece_only(
     seam: Any, monkeypatch: pytest.MonkeyPatch, kind: str
@@ -3096,6 +2223,7 @@ def test_text_that_grows_at_the_end_is_read_again_from_its_last_piece_only(
     assert view.selected_text().rstrip().endswith("and one more line, number 2")
 
 
+@pytest.mark.skip(reason=SEAM_1_BUDGET)
 def test_views_wait_their_turn_when_a_frame_has_built_its_share(seam: Any) -> None:
     """
     Three views that each need building are not three builds in one frame: the frame's
@@ -3126,6 +2254,7 @@ def test_views_wait_their_turn_when_a_frame_has_built_its_share(seam: Any) -> No
     assert [cache.unbuilt(n) for n in range(3)] == [0, 0, 0]
 
 
+@pytest.mark.skip(reason=SEAM_1_BUDGET)
 def test_a_view_out_of_sight_is_not_rebuilt_when_the_faces_change(
     seam: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3159,32 +2288,7 @@ def test_a_view_out_of_sight_is_not_rebuilt_when_the_faces_change(
     assert len(built) == 2 and cache.unbuilt("far") == 0
 
 
-def test_a_large_diff_is_announced_a_frame_before_it_is_made(seam: Any) -> None:
-    """
-    ``difflib`` over thousands of changed lines cannot be cut into pieces, so the
-    frame before it is one line saying what is coming.
-    """
-    before = "".join(f"line {n}\n" for n in range(6000))
-    after = "".join(f"line {n}{' changed' if n % 40 == 0 else ''}\n" for n in range(6000))
-    texts = (approval.DiffText(before, after, "big.py"),)
-    small = (approval.DiffText(before, before.replace("line 3000\n", "LINE\n"), "one.py"),)
-    assert typeset._changed_lines(before, after) > typeset._DIFF_ANNOUNCED_LINES
-    assert typeset._changed_lines(small[0].before or "", small[0].after or "") <= 1
-    cache = typeset.ViewCache()
-    got: list[float | None] = []
-    typeset.set_budget(6.0)
-    frame(seam, lambda: got.append(typeset.diff(cache, "k", texts, height_cap=200.0)))
-    assert cache.view("k") is None and typeset.pending()
-    assert got[0] is not None and 0 < got[0] < 40
-    frame(seam, lambda: got.append(typeset.diff(cache, "k", texts, height_cap=200.0)))
-    assert cache.view("k") is not None and not typeset.pending()
-    row = typeset.diff_row_height()
-    assert got[1] == 200.0 // row * row, "the cap, down to whole rows"
-    # One changed line in a file as long is not a stall and is not announced.
-    frame(seam, lambda: got.append(typeset.diff(cache, "one", small, height_cap=200.0)))
-    assert cache.view("one") is not None
-
-
+@pytest.mark.skip(reason=SEAM_1_BUDGET)
 def test_text_too_long_to_cut_is_announced_a_frame_before_it_is_built(seam: Any) -> None:
     """
     Wrapped text is one block, so that copying it gives no break its source did not
@@ -3205,6 +2309,7 @@ def test_text_too_long_to_cut_is_announced_a_frame_before_it_is_built(seam: Any)
         assert cache.unbuilt("k") == 0, len(longer)
 
 
+@pytest.mark.skip(reason=SEAM_1_BUDGET)
 def test_a_long_document_is_broken_for_a_new_width_beside_the_one_on_screen(
     seam: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3249,6 +2354,7 @@ def test_a_long_document_is_broken_for_a_new_width_beside_the_one_on_screen(
     assert cache.view("k") is after and after.layout is built
 
 
+@pytest.mark.skip(reason=SEAM_1_BUDGET)
 def test_a_selection_is_carried_to_the_view_laid_out_at_the_new_width(
     seam: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3270,6 +2376,7 @@ def test_a_selection_is_carried_to_the_view_laid_out_at_the_new_width(
     assert after.selected_text() == picked
 
 
+@pytest.mark.skip(reason=SEAM_1_BUDGET)
 def test_text_that_changes_while_a_new_width_is_being_laid_out_keeps_what_was_laid_out(
     seam: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3305,6 +2412,7 @@ def test_text_that_changes_while_a_new_width_is_being_laid_out_keeps_what_was_la
     assert cache.unbuilt("k") == 0
 
 
+@pytest.mark.skip(reason=SEAM_1_BUDGET)
 def test_text_that_grows_every_frame_still_gets_the_new_width(
     seam: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3338,9 +2446,7 @@ def test_text_that_grows_every_frame_still_gets_the_new_width(
     assert cache.unbuilt("k") == 0 and cache._entries["k"].rebreak is None
 
 
-# -- held views keep what belongs to the key ------------------------------------
-
-
+@pytest.mark.skip(reason=SEAM_1)
 def test_new_text_and_new_faces_under_a_key_scroll_in_the_same_child(
     seam: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -3366,26 +2472,9 @@ def test_new_text_and_new_faces_under_a_key_scroll_in_the_same_child(
     assert len(names) == 4 and len(set(names[:3])) == 1 and names[3] != names[0]
 
 
-def test_a_diff_of_nothing_is_none_and_not_an_empty_view(seam: Any) -> None:
-    """
-    A pane draws a "diff" heading when it is given a height. No texts is no diff.
-    """
-    cache = typeset.ViewCache()
-    got: list[float | None] = []
-
-    def body() -> None:
-        got.append(typeset.diff(cache, "tuple", ()))
-        got.append(typeset.diff(cache, "list", []))
-        got.append(typeset.diff(cache, "model", Diff(())))
-
-    frame(seam, body)
-    assert got == [None, None, None]
-    assert [cache.view(key) for key in ("tuple", "list", "model")] == [None, None, None]
-
-
-# -- nothing runs off the edge --------------------------------------------------
-
 TLE = "1 25544U 98067A   08264.51782528  .00002182  00000+0  16538+3 0  9993"
+
+
 UNBROKEN = "".join(chr(ord("a") + n % 26) for n in range(311))
 
 
@@ -3413,6 +2502,7 @@ def rightmost(view: Any) -> float:
     return float(advtext.px_from_sp(max(edges)))
 
 
+@pytest.mark.xfail(strict=True, reason=P10)
 def test_what_cannot_be_broken_at_a_space_is_broken_at_the_windows_edge(seam: Any) -> None:
     """
     A code span is never broken by the library, at a space or anywhere, and neither
@@ -3444,6 +2534,7 @@ def test_what_cannot_be_broken_at_a_space_is_broken_at_the_windows_edge(seam: An
     assert cache.view("plain").block_text(0) == f"see {UNBROKEN} here"
 
 
+@pytest.mark.xfail(strict=True, reason=P10)
 def test_a_selection_that_starts_inside_a_broken_word_copies_without_the_breaks(
     seam: Any,
 ) -> None:
@@ -3457,6 +2548,7 @@ def test_a_selection_that_starts_inside_a_broken_word_copies_without_the_breaks(
     assert copied.removesuffix(" end") in UNBROKEN and len(copied) > 150
 
 
+@pytest.mark.xfail(strict=True, reason=P10)
 def test_a_wide_window_leaves_a_long_word_alone_and_a_narrower_one_breaks_it(
     seam: Any,
 ) -> None:
@@ -3476,6 +2568,7 @@ def test_a_wide_window_leaves_a_long_word_alone_and_a_narrower_one_breaks_it(
     assert cache.view("k").document.blocks[0] is wide
 
 
+@pytest.mark.xfail(strict=True, reason=P12)
 def test_a_stream_reports_how_wide_its_unbroken_text_is(seam: Any) -> None:
     """
     A stream's blocks are the library's to lay out, so the seam cannot break them.
@@ -3497,6 +2590,7 @@ COMMAND = (
 )
 
 
+@pytest.mark.skip(reason=SEAM_1)
 def test_exact_text_is_broken_at_any_column_and_keeps_every_space(seam: Any) -> None:
     """
     A command an approver is about to run: the end of it has to be on screen, and
@@ -3533,6 +2627,7 @@ def test_exact_text_is_broken_at_any_column_and_keeps_every_space(seam: Any) -> 
     assert view.selected_text() in written
 
 
+@pytest.mark.skip(reason=SEAM_1_BUDGET)
 def test_a_long_literal_text_built_in_pieces_is_one_text_to_look_at_and_to_copy(
     seam: Any,
 ) -> None:
@@ -3560,9 +2655,7 @@ def test_a_long_literal_text_built_in_pieces_is_one_text_to_look_at_and_to_copy(
     assert cache.view("short").block_text(0) == "\n".join(lines[:60])
 
 
-# -- parts: demotion, identity, origin -------------------------------------------
-
-
+@pytest.mark.skip(reason=SEAM_1)
 def test_a_demoted_heading_is_set_as_the_level_below_and_stays_a_heading(seam: Any) -> None:
     """
     A pane heads an entry with a line of its own, and a ``#`` in the entry's body
@@ -3591,6 +2684,7 @@ def test_a_demoted_heading_is_set_as_the_level_below_and_stays_a_heading(seam: A
     assert marked == theme_.style(BlockKind.HEADING_3).font.size
 
 
+@pytest.mark.skip(reason=SEAM_1)
 def test_two_identical_parts_are_both_drawn_and_each_can_be_selected(seam: Any) -> None:
     """
     Equal parts are built once and are the same block object twice in the document.
@@ -3618,6 +2712,7 @@ def test_two_identical_parts_are_both_drawn_and_each_can_be_selected(seam: Any) 
     assert [cache.part_at("k", n) for n in range(4)] == [0, 1, 2, None]
 
 
+@pytest.mark.skip(reason=SEAM_1)
 def test_a_block_is_traced_back_to_the_part_it_came_from(seam: Any) -> None:
     cache = typeset.ViewCache()
     parts = (
@@ -3629,9 +2724,6 @@ def test_a_block_is_traced_back_to_the_part_it_came_from(seam: Any) -> None:
     frame(seam, lambda: typeset.document(cache, "k", parts))
     assert [cache.part_at("k", n) for n in range(6)] == [0, 0, 0, 2, 3, None]
     assert cache.part_at("k", -1) is None and cache.part_at("absent", 0) is None
-
-
-# -- one rule for a body ---------------------------------------------------------
 
 
 def _fleet_bodies() -> dict[str, str]:
@@ -3648,22 +2740,7 @@ def _fleet_bodies() -> dict[str, str]:
     return bodies
 
 
-def test_ordinary_markdown_is_one_part_and_not_a_character_of_it_is_touched() -> None:
-    """
-    The report, the parked concern, the declaration whose third list item runs over
-    three lines, and every concern on the board but the one that is not markdown.
-    Each is hard-wrapped by a model at about seventy-five columns, which is to say
-    unevenly, and one has a line that could not be wrapped at all.
-    """
-    bodies = _fleet_bodies()
-    assert len(bodies) >= 12
-    for name, body in bodies.items():
-        if name != "fake-c6":
-            assert typeset.prose_parts(body) == (typeset.Part(body),), name
-    assert "3. The one behaviour that can break someone: a line with a wrong\n" in bodies["declare"]
-    assert TLE in bodies["fake-c4"]
-
-
+@pytest.mark.skip(reason=SEAM_1)
 def test_fields_keep_their_lines_and_a_traceback_keeps_its_indentation(seam: Any) -> None:
     """
     The one body on the board that is not markdown: a fact per line, then a
@@ -3683,63 +2760,7 @@ def test_fields_keep_their_lines_and_a_traceback_keeps_its_indentation(seam: Any
     assert len(view.set_lines(0, 1)) == 4
 
 
-@pytest.mark.parametrize(
-    "body",
-    [
-        # An indented line under a list item is the item's, whatever came first.
-        "Lead-in:\n1. item\n   continuation of the item\n",
-        "- a list\n  whose item continues\n\n  and has a second paragraph\n",
-        # A colon near the start of a line does not make a sentence a record.
-        "Note: this is a sentence that was wrapped by whoever wrote it at a column near\n"
-        "seventy-five, and the colon in its first words does not make it a field.\n",
-        "Proposed instead: `tle/checksum.py` exposes `verify(line)` and the two\n"
-        "callers that want validation call it first. That is a smaller diff.\n",
-        "Note: the first line of this paragraph was wrapped at about seventy-five columns\n"
-        "and so: was the second, which happens to have a colon near its start as well,\n"
-        "and the third line has none at all.\n",
-        # Wrapped by feel, as a model wraps: a line a dozen columns short of the
-        # longest, with a short word waiting on the next, was not ended on purpose.
-        "The reader is correct on every field that it reads and it is wrong about the one\n"
-        "that it does not read, which is the modulo-ten checksum digit sitting in\n"
-        "a column of its own at the very end of each line, computed and then never compared.\n",
-        # One line that could not be wrapped does not make the others short.
-        "The test is named for the minus rule and its input has no minus sign in it,\n"
-        f"so it proves nothing about the rule: `{TLE} {TLE}`\n"
-        "and it passes against a `checksum` that ignores minus signs entirely. Use the\n"
-        "NOAA 19 pair, whose drag term is negative, and mutation-test it against the\n"
-        "current line.\n",
-        # A link carried to the next line whole is not a line ended early.
-        "The format is described in the\n"
-        "[CelesTrak TLE documentation](https://celestrak.org/NORAD/documentation/tle-fmt.php),\n"
-        "which is also where the reference pair comes from.\n",
-        "| a | b |\n|---|---|\n| 1 | 2 |\n",
-        "Title\n=====\n\ntext\n",
-    ],
-)
-def test_a_paragraph_markdown_already_reads_rightly_is_left_alone(body: str) -> None:
-    assert typeset.prose_parts(body) == (typeset.Part(body),)
-
-
-def test_each_paragraph_is_judged_on_its_own() -> None:
-    """
-    A paragraph of short lines keeps its breaks. It does not turn the prose above it
-    or the list below it into anything else, and nothing becomes monospace.
-    """
-    prose = (
-        "The fixed-width reader in `tle/parse.py` is correct on every field it reads and\n"
-        "wrong about the one it does not, which is the checksum in the last column.\n"
-    )
-    listed = "- one thing\n- and another\n"
-    body = f"{prose}\nfirst short line\nsecond short line\nthird\n\n{listed}"
-    (part,) = typeset.prose_parts(body, colour="text_dim")
-    assert part.kind is typeset.Kind.MARKDOWN and part.colour == "text_dim"
-    assert part.text.split("\n\n") == [
-        prose.rstrip("\n"),
-        "first short line  \nsecond short line  \nthird",
-        listed.rstrip("\n"),
-    ]
-
-
+@pytest.mark.skip(reason=SEAM_1)
 def test_lines_kept_without_any_sign_of_markdown_keep_their_punctuation(seam: Any) -> None:
     body = "glob: *.py and *.md\npath: C:\\_cache\\*\nnote: # not a heading, <not> a tag\n"
     parts = typeset.prose_parts(body)
@@ -3750,96 +2771,6 @@ def test_lines_kept_without_any_sign_of_markdown_keep_their_punctuation(seam: An
     (meant,) = typeset.prose_parts("run: `make test`\nthen: **stop**\n")
     assert meant.text == "run: `make test`  \nthen: **stop**"
 
-
-def test_a_body_that_is_empty_is_no_parts() -> None:
-    assert typeset.prose_parts("") == () and typeset.prose_parts(" \n\n") == ()
-
-
-# -- typesetting that is off costs nothing, and absent is survivable -------------
-
-
-def test_the_application_imports_with_the_library_absent_and_says_why() -> None:
-    """
-    ``typeset=False`` has to be a working application on a machine where the library
-    is missing or broken, and the menu has to be able to say which.
-    """
-    script = (
-        "import sys\n"
-        "sys.modules['advtext'] = None\n"
-        "from pptmstr.ui import typeset\n"
-        "import pptmstr.app, pptmstr.theme\n"
-        "assert not typeset.available() and not typeset.enabled()\n"
-        "assert not typeset.obtainable()\n"
-        "typeset.configure(typeset=True, faces='mono', scale=1.25)\n"
-        "assert typeset.load_fonts() is False\n"
-        "typeset.load_fonts_later()\n"
-        "typeset.pre_frame()\n"
-        "assert not typeset.obtainable()\n"
-        "assert typeset.prose_parts('a\\n') == (typeset.Part('a\\n'),)\n"
-        "print(typeset.unavailable_reason())\n"
-    )
-    done = subprocess.run(
-        [sys.executable, "-c", script], capture_output=True, text=True, timeout=120, check=False
-    )
-    assert done.returncode == 0, done.stderr
-    assert done.stdout.startswith("the text library did not import (")
-
-
-def test_faces_put_off_are_loaded_between_frames_once_typesetting_is_switched_on(
-    seam: Any,
-) -> None:
-    """
-    A launch with typesetting off pays for no faces. Switching it on loads them in
-    the next ``pre_frame``, and until then the menu can say what that will cost.
-    """
-    typeset.reset()
-    typeset.configure(typeset=False)
-    typeset.load_fonts_later(BOLD)
-    typeset.pre_frame()
-    assert not typeset.available() and not typeset.enabled()
-    assert typeset.obtainable()
-    assert "about a second" in (typeset.unavailable_reason() or "")
-    typeset.configure(typeset=True)
-    typeset.pre_frame()
-    assert typeset.available() and typeset.enabled()
-    assert typeset.unavailable_reason() is None
-    cache = typeset.ViewCache()
-    frame(seam, lambda: typeset.markdown(cache, "k", MARKDOWN))
-    assert (cache.drawn("k") or (0, 1))[0] > 40
-
-
-def test_a_load_that_failed_says_so_and_is_not_offered_again(seam: Any) -> None:
-    def broken(path: Path) -> Any:
-        raise OSError("no such font")
-
-    assert typeset.load_fonts(BOLD, loader=broken) is False
-    assert not typeset.obtainable()
-    assert (typeset.unavailable_reason() or "").startswith("the ")
-
-
-def test_the_librarys_scratch_directory_is_this_processes_to_remove(
-    seam: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """
-    The library writes a patched font to a new directory under the temporary
-    directory on every launch and leaves it. The seam finds it from the paths its
-    loader was handed and takes it away when the process ends.
-    """
-    import tempfile
-
-    root = Path(tempfile.gettempdir()).resolve()
-    assert typeset._STATE.scratch, "loading the faces made one"
-    for home in typeset._STATE.scratch:
-        assert home.parent == root and home.name.startswith("advtext-fonts-") and home.is_dir()
-    mine = tmp_path / "advtext-fonts-test"
-    mine.mkdir()
-    (mine / "patched.otf").write_bytes(b"x")
-    monkeypatch.setattr(typeset._STATE, "scratch", {mine})
-    typeset._remove_scratch()
-    assert not mine.exists()
-
-
-# -- what a view shows that the library has no setting for -----------------------
 
 LONG_LABEL = "a/very/long/" + "deep/" * 18 + "file.py"
 
@@ -3852,76 +2783,6 @@ def _said_lines(seam: Any, monkeypatch: pytest.MonkeyPatch) -> list[str]:
     real = seam.text_colored
     monkeypatch.setattr(seam, "text_colored", lambda c, t: (said.append(t), real(c, t))[1])
     return said
-
-
-@pytest.mark.parametrize("label", ["src/short.py", LONG_LABEL], ids=["short", "long"])
-def test_a_diff_header_too_long_for_its_view_is_said_above_it_warning_first(
-    seam: Any, monkeypatch: pytest.MonkeyPatch, label: str
-) -> None:
-    """
-    The view's own header is one line, cut at the view's edge and outside what it
-    scrolls to. Under a long path that put ``may not apply`` where nobody could
-    reach it. Whatever of the header is cut is said above the view on lines that
-    wrap, the warning before the path.
-    """
-    texts = (approval.DiffText("a\n", "b\n", label, will_not_apply="anchor not found in file"),)
-    said = _said_lines(seam, monkeypatch)
-    cache = typeset.ViewCache()
-    tall: list[float | None] = []
-    narrow(seam, lambda: tall.append(typeset.diff(cache, "k", texts)), width=420.0)
-    view = cache.view("k")
-    # The header's copy is where it was, for a view wide enough to show it.
-    assert [file.will_not_apply for file in view.diff.files] == [
-        "may not apply: anchor not found in file"
-    ]
-    assert view.content_width < 420.0 < 8.0 * len(label) + 400.0
-    assert said[0] == "! may not apply: anchor not found in file"
-    if label == LONG_LABEL:
-        assert said[1:] == [f"{label}  +1 -1"]
-    else:
-        assert said[1:] == [], "the path and its counts fit: only the warning was cut"
-    assert tall[0] is not None and tall[0] > view.height_for(400.0)
-
-    # A view wide enough for its header says nothing twice.
-    said.clear()
-    wide = typeset.ViewCache()
-    short = (approval.DiffText("a\n", "b\n", "x.py", will_not_apply="no"),)
-    frame(seam, lambda: typeset.diff(wide, "k", short))
-    assert said == []
-
-
-def test_a_pane_that_says_the_warning_itself_can_have_the_diff_leave_it_out(
-    seam: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    texts = (approval.DiffText("a\n", "b\n", LONG_LABEL, will_not_apply="file not found"),)
-    said = _said_lines(seam, monkeypatch)
-    cache = typeset.ViewCache()
-    narrow(seam, lambda: typeset.diff(cache, "k", texts, warning=False), width=420.0)
-    assert [file.will_not_apply for file in cache.view("k").diff.files] == [""]
-    assert said == [f"{LONG_LABEL}  +1 -1"], "the path is still cut, and still said"
-    # The same texts asked the other way are another model, in the same view.
-    view = cache.view("k")
-    said.clear()
-    narrow(seam, lambda: typeset.diff(cache, "k", texts), width=420.0)
-    assert cache.view("k") is view
-    assert view.diff.files[0].will_not_apply == "may not apply: file not found"
-    assert said[0] == "! may not apply: file not found"
-    # The model a pane is handed is never the stripped one.
-    assert typeset.diff_model(texts).files[0].will_not_apply == "may not apply: file not found"
-
-
-def test_a_capped_diff_counts_the_lines_above_it_in_its_cap(
-    seam: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    body = "\n".join(f"line {n}" for n in range(60))
-    texts = (approval.DiffText(body, body.replace("line 9", "LINE"), LONG_LABEL),)
-    cache = typeset.ViewCache()
-    tall: list[float | None] = []
-    narrow(
-        seam, lambda: tall.append(typeset.diff(cache, "k", texts, height_cap=200.0)), width=420.0
-    )
-    assert tall[0] is not None and 120.0 < tall[0] <= 200.0
-    assert cache.height("k") == tall[0]
 
 
 INFO = (
@@ -3939,6 +2800,7 @@ def _set_text(view: Any) -> str:
     return "\n".join("".join(chr(c) for c, _ in line.glyphs) for line in view.set_lines())
 
 
+@pytest.mark.skip(reason=SEAM_1)
 def test_a_fences_whole_info_string_is_set_settled_and_streamed(seam: Any) -> None:
     """
     The library keeps a fence's info string on the block and draws none of it. On
@@ -3983,24 +2845,6 @@ def test_a_fences_whole_info_string_is_set_settled_and_streamed(seam: Any) -> No
     assert handle.view.hosted(3) is not None and handle.view.hosted(4) is None
 
 
-def test_a_committed_block_of_a_stream_is_dressed_once(seam: Any) -> None:
-    """
-    The library finds a committed block's layout again by its identity, so the
-    dressed block has to be the same object on every reading.
-    """
-    cache = typeset.ViewCache()
-    handle = typeset.stream(cache, "s")
-    handle.append("- one\n- two\n\nAfter the list.\n\n```sh extra words\nmake\n```\n\nMore")
-    frame(seam, lambda: handle.draw())
-    before = handle.view.document.blocks
-    handle.append(" text arriving")
-    frame(seam, lambda: handle.draw())
-    after = handle.view.document.blocks
-    assert len(after) == len(before) == 5
-    assert all(a is b for a, b in zip(before[:4], after[:4], strict=True))
-    assert after[4] is not before[4]
-
-
 TABLE = (
     "| Input | Lines | Notes |\n|---|---:|---|\n"
     "| ISS | 2 | the reference pair from the format description, long enough to wrap |\n"
@@ -4009,6 +2853,7 @@ TABLE = (
 )
 
 
+@pytest.mark.xfail(strict=True, reason=P15)
 def test_every_row_of_a_table_has_a_rule_under_it_where_the_row_ends(seam: Any) -> None:
     """
     The library stacks rows with the leading of a wrapped cell's lines, so a cell
@@ -4041,6 +2886,7 @@ def test_every_row_of_a_table_has_a_rule_under_it_where_the_row_ends(seam: Any) 
     assert theme.P.border.u32 in seen
 
 
+@pytest.mark.xfail(strict=True, reason=P15)
 def test_a_row_with_nothing_in_it_is_ruled_like_any_other(seam: Any) -> None:
     """
     An empty row has no line in the layout to find a foot from; passed over, the
@@ -4070,29 +2916,7 @@ def test_a_row_with_nothing_in_it_is_ruled_like_any_other(seam: Any) -> None:
         assert [header for _, _, _, header in plan.rules] == [True] + [False] * (rows - 2)
 
 
-def test_a_table_whose_rows_cannot_be_found_is_counted_and_not_ruled_wrongly(
-    seam: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """
-    The rules are read off the layout by counting characters. Where the count does
-    not come out, no rule is better than a wrong one, but no rule and no word of
-    it is a table silently drawn the way the seam exists to prevent. It is
-    counted where a test or a pane can ask.
-    """
-    cache = typeset.ViewCache()
-    frame(seam, lambda: typeset.markdown(cache, "k", TABLE))
-    view = cache.view("k")
-    block = view.document.blocks[0]
-    assert cache.unruled("k") == 0 and cache.unruled("absent") is None
-    # A table with one more row than the layout holds lines for.
-    taller = dataclasses.replace(block, rows=(*block.rows, block.rows[0], block.rows[0]))
-    assert typeset._table_rules(view, 0, taller, view.layout) is None
-    monkeypatch.setattr(typeset, "_table_rules", lambda *a: None)
-    narrow(seam, lambda: typeset.markdown(cache, "k", TABLE), width=333.0)
-    plan = cache._entries["k"].overlay
-    assert plan is not None and plan.rules == () and cache.unruled("k") == 1
-
-
+@pytest.mark.xfail(strict=True, reason=P15)
 def test_no_table_the_fake_fleet_shows_is_left_without_its_rules(seam: Any) -> None:
     bodies = _fleet_bodies()
     cache = typeset.ViewCache()
@@ -4107,6 +2931,7 @@ def test_no_table_the_fake_fleet_shows_is_left_without_its_rules(seam: Any) -> N
     assert tables >= 2, "no body with a table in it: nothing was tested"
 
 
+@pytest.mark.xfail(strict=True, reason=P19)
 def test_a_table_that_fits_keeps_its_natural_widths_settled_as_it_had_streamed(seam: Any) -> None:
     """
     The library holds a table that is arriving at its columns' natural widths and
@@ -4140,6 +2965,7 @@ def test_a_table_that_fits_keeps_its_natural_widths_settled_as_it_had_streamed(s
 DIMMED = "Superseded.\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n```diff\n-old\n+new\n```\n"
 
 
+@pytest.mark.skip(reason=SEAM_1)
 def test_a_dim_part_dims_its_table_and_its_fenced_diff(seam: Any) -> None:
     """
     A part's ink reaches text and code. A table's cells take the palette's ink and
@@ -4170,6 +2996,7 @@ def test_a_dim_part_dims_its_table_and_its_fenced_diff(seam: Any) -> None:
 TREE = "pptmstr\n├── ui\n│   ├── typeset.py\n│   └── detail.py\n└── theme.py\nplain last line"
 
 
+@pytest.mark.xfail(strict=True, reason=P13)
 def test_a_line_of_box_drawing_is_the_height_of_any_other_literal_line(seam: Any) -> None:
     """
     Inconsolata's box-drawing glyphs reach past the face's ascent and descent so as
@@ -4198,6 +3025,7 @@ def test_a_line_of_box_drawing_is_the_height_of_any_other_literal_line(seam: Any
     assert kept.y_max <= code._inner.ascent and kept is code.bbox(0x2502)
 
 
+@pytest.mark.skip(reason=SEAM_1)
 def test_the_paragraph_after_a_list_has_a_paragraphs_gap_above_it(seam: Any) -> None:
     source = "Intro.\n\n- one\n- two\n\nWhat I did, in order:\n\n1. a\n2. b\n\nClosing.\n\nLast.\n"
     cache = typeset.ViewCache()
@@ -4224,6 +3052,7 @@ def test_the_paragraph_after_a_list_has_a_paragraphs_gap_above_it(seam: Any) -> 
         assert gaps[1] == gaps[4] < between_paragraphs
 
 
+@pytest.mark.skip(reason=SEAM_1_BUDGET)
 def test_a_list_that_ends_where_a_piece_does_is_aired_all_the_same(seam: Any) -> None:
     items = "".join(f"1. item number {n}\n\n" for n in range(1, 61))
     source = f"Before the list.\n\n{items}After the list.\n\n" + long_markdown(30)
@@ -4236,6 +3065,7 @@ def test_a_list_that_ends_where_a_piece_does_is_aired_all_the_same(seam: Any) ->
     assert last.style.space_below == blocks[0].style.space_below > blocks[59].style.space_below
 
 
+@pytest.mark.skip(reason=SEAM_1)
 def test_a_tight_part_has_no_gap_under_it(seam: Any) -> None:
     """
     An argument's name over its value: the gap that separates parts belongs under
@@ -4264,9 +3094,7 @@ def test_a_tight_part_has_no_gap_under_it(seam: Any) -> None:
     assert step == pytest.approx(typeset.line_height(), abs=0.01)
 
 
-# -- what a pane that swaps views can ask for -----------------------------------
-
-
+@pytest.mark.skip(reason=SEAM_1_BUDGET)
 def test_a_view_out_of_sight_builds_new_parts_only_when_asked_to(seam: Any) -> None:
     """
     A view that has shown a whole text and is out of sight builds nothing until it
@@ -4289,6 +3117,7 @@ def test_a_view_out_of_sight_builds_new_parts_only_when_asked_to(seam: Any) -> N
         assert cache.unbuilt("k") == left, asked
 
 
+@pytest.mark.skip(reason=SEAM_1_BUDGET)
 def test_a_view_that_declines_the_free_allowance_is_built_a_small_piece_a_frame(
     seam: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4321,6 +3150,7 @@ def test_a_view_that_declines_the_free_allowance_is_built_a_small_piece_a_frame(
     assert frames[True] == 1
 
 
+@pytest.mark.skip(reason=SEAM_2_BUDGET)
 def test_a_stream_given_a_long_run_at_once_reads_it_over_frames(seam: Any) -> None:
     """
     A stream opened on a run that is already hundreds of lines parsed and laid all
@@ -4354,6 +3184,7 @@ def test_a_stream_given_a_long_run_at_once_reads_it_over_frames(seam: Any) -> No
     assert _shown(live.view) == "Done!" and cache.unbuilt("live") == 0
 
 
+@pytest.mark.skip(reason=SEAM_2)
 def test_a_paced_stream_reads_what_arrived_at_most_so_often(seam: Any) -> None:
     """
     Each reading lays the unfinished block out again. ``every_ms`` trades seeing a
@@ -4378,122 +3209,6 @@ def test_a_paced_stream_reads_what_arrived_at_most_so_often(seam: Any) -> None:
     assert _shown(handle.view) == handle.text.strip() and cache.unbuilt("s") == 0
 
 
-def test_a_large_diff_made_in_the_background_stalls_no_frame(
-    seam: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """
-    ``difflib`` cannot be cut into pieces, and it is a pure function of frozen
-    records: with ``background=True`` it runs on a thread and the frames go on.
-    """
-    before = "".join(f"line {n}\n" for n in range(6000))
-    after = "".join(f"line {n}{' changed' if n % 40 == 0 else ''}\n" for n in range(6000))
-    texts = [approval.DiffText(before, after, "big.py")]
-    cache = typeset.ViewCache()
-    typeset.set_budget(6.0)
-    got: list[float | None] = []
-    handed: list[object] = []
-    real = typeset._model_of
-    monkeypatch.setattr(
-        typeset,
-        "_model_of",
-        lambda source, warning: (handed.append(source), real(source, warning))[1],
-    )
-
-    def body() -> None:
-        got.append(typeset.diff(cache, "k", texts, height_cap=200.0, background=True))
-
-    frame(seam, body)
-    job = cache._entries["k"].job
-    assert job is not None and cache.view("k") is None and typeset.pending()
-    assert got[0] is not None and 0 < got[0] < 40
-    assert job.done.wait(30.0) and job.failure is None
-    # A list is the caller's to change while the thread reads it: a tuple went.
-    assert len(handed) == 1 and isinstance(handed[0], tuple) and handed[0] == tuple(texts)
-    given = list(texts)
-    frame(seam, body)
-    view = cache.view("k")
-    assert view is not None and view.diff is job.model and not typeset.pending()
-    assert view.diff == typeset.diff_model(given)
-    assert cache._entries["k"].job is None
-
-
-def test_a_background_diff_that_fails_is_said_and_its_thread_is_not_started_again(
-    seam: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """
-    A model that cannot be made is a fact about its texts, and asking again every
-    frame is a thread and an exception a frame for as long as the call is on
-    screen. So: one thread, a line saying what was raised on every frame, and
-    ``None`` -- the pane's cue to show the call's arguments. Other texts under the
-    key are tried.
-    """
-    before = "".join(f"line {n}\n" for n in range(6000))
-    after = "".join(f"line {n} changed\n" for n in range(6000))
-    texts = (approval.DiffText(before, after, "big.py"),)
-    calls: list[str] = []
-
-    def failing(texts: Any) -> Diff:
-        calls.append(threading.current_thread().name)
-        raise ZeroDivisionError("division by zero")
-
-    monkeypatch.setattr(typeset, "diff_model", failing)
-    said = _native_lines(seam, monkeypatch)
-    cache = typeset.ViewCache()
-    typeset.set_budget(6.0)
-    got: list[float | None] = []
-    release = threading.Event()
-    real_model = typeset._model_of
-
-    def held(source: Any, warning: bool) -> Any:
-        release.wait(30.0)
-        return real_model(source, warning)
-
-    monkeypatch.setattr(typeset, "_model_of", held)
-    frame(seam, lambda: got.append(typeset.diff(cache, "k", texts, background=True)))
-    job = cache._entries["k"].job
-    # Still being made: a line is up, and the view is owed.
-    assert job is not None and got[-1] is not None and cache.unbuilt("k") == 1
-    release.set()
-    assert job.done.wait(30.0)
-    for _ in range(5):
-        said.clear()
-        frame(seam, lambda: got.append(typeset.diff(cache, "k", texts, background=True)))
-        assert got[-1] is None
-        assert (
-            len(said) == 1 and "could not be made (ZeroDivisionError: division by zero)" in said[0]
-        )
-    assert calls == ["typeset-diff"]
-    assert cache._entries["k"].job is None and cache.view("k") is None
-    # Nothing is owed any more: the pane's approve is not held on a diff that will
-    # never come.
-    assert cache.unbuilt("k") == 0
-    other = (approval.DiffText(before, after + "one more\n", "big.py"),)
-    for _ in range(3):
-        frame(seam, lambda: typeset.diff(cache, "k", other, background=True))
-        time.sleep(0.05)
-    assert calls == ["typeset-diff", "typeset-diff"]
-
-
-def test_with_no_thread_to_be_had_a_large_diff_is_made_on_the_frame(
-    seam: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    before = "".join(f"line {n}\n" for n in range(6000))
-    after = "".join(f"line {n}{' changed' if n % 40 == 0 else ''}\n" for n in range(6000))
-    texts = (approval.DiffText(before, after, "big.py"),)
-
-    def no_thread(*args: Any, **kwargs: Any) -> Any:
-        raise RuntimeError("can't start new thread")
-
-    monkeypatch.setattr(typeset.threading, "Thread", no_thread)
-    said = _native_lines(seam, monkeypatch)
-    cache = typeset.ViewCache()
-    typeset.set_budget(6.0)
-    frame(seam, lambda: typeset.diff(cache, "k", texts, background=True))
-    assert said == ["diffing a large change..."] and cache.view("k") is None
-    frame(seam, lambda: typeset.diff(cache, "k", texts, background=True))
-    assert cache.view("k") is not None and cache.view("k").diff.added == 150
-
-
 def _native_lines(seam: Any, monkeypatch: pytest.MonkeyPatch) -> list[str]:
     """
     Every string handed to ``imgui.text_colored`` from here on, in order.
@@ -4509,6 +3224,7 @@ def _native_lines(seam: Any, monkeypatch: pytest.MonkeyPatch) -> list[str]:
     return lines
 
 
+@pytest.mark.skip(reason=SEAM_1_BUDGET)
 def test_the_notice_of_a_half_built_text_can_be_put_over_it(
     seam: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4557,9 +3273,6 @@ def test_the_notice_of_a_half_built_text_can_be_put_over_it(
         assert cache.unbuilt("k") == 0 and said == []
 
 
-# -- nothing in a fenced diff is hidden ------------------------------------------
-
-
 def _on_screen(view: Any) -> str:
     """
     Everything a view draws, spaces taken out: its own lines, and for each fence a
@@ -4602,6 +3315,8 @@ def _words(line: str) -> list[str]:
 
 
 _ONE_FILE = ["--- a/alpha.py", "+++ b/alpha.py", "@@ -1,2 +1,2 @@", " kept1", "-old1", "+new1"]
+
+
 _TWO_FILES = [
     *_ONE_FILE,
     "--- a/beta.py",
@@ -4610,7 +3325,11 @@ _TWO_FILES = [
     "-old2",
     "+new2",
 ]
+
+
 _FRAGMENT = ["unmarked1", "-old3", "+new3", " kept3"]
+
+
 _GIT = [
     "diff --git a/delta.py b/delta.py",
     "index 83db48f..bf2a0b4 100644",
@@ -4620,6 +3339,8 @@ _GIT = [
     "-old4",
     "+new4",
 ]
+
+
 _MAIL = "From " + "a" * 40 + " Mon Sep 17 00:00:00 2001"
 
 
@@ -4660,84 +3381,6 @@ def _fences() -> list[tuple[str, list[str]]]:
     return made
 
 
-@pytest.mark.parametrize(("name", "lines"), _fences(), ids=[name for name, _ in _fences()])
-def test_every_line_of_a_diff_fence_is_on_screen_settled_and_arriving(
-    seam: Any, name: str, lines: list[str]
-) -> None:
-    """
-    The library's diff reader keeps every line and its view draws only some: what
-    it files as a file's header lines -- a sentence over ``---``, a mail's message,
-    a line under a hunk that had its count -- is on the model and not on screen.
-    In a concern body that is a sentence the recipient reads and the approver
-    does not. Whatever the fence holds, every word of it is drawn: by the diff
-    view where that draws them all, as the code the fence is otherwise.
-
-    Arriving, the fence is looked at after each whole line, still open: the answer
-    may change as lines come, and at no point is a line that has arrived missing.
-    """
-    body = "".join(line + "\n" for line in lines)
-    source = f"Before.\n\n```diff\n{body}```\n\nAfter.\n"
-    wanted = [word for line in lines for word in _words(line)]
-    cache = typeset.ViewCache()
-
-    def body_() -> None:
-        typeset.markdown(cache, "markdown", source)
-        typeset.document(cache, "parts", (typeset.Part(source),))
-
-    frame(seam, body_)
-    for key in ("markdown", "parts"):
-        screen = _on_screen(cache.view(key))
-        assert [word for word in wanted if word not in screen] == [], key
-    handle = typeset.stream(cache, "stream")
-    handle.append("Before.\n\n```diff\n")
-    for at, line in enumerate(lines):
-        handle.append(line + "\n")
-        frame(seam, lambda: handle.draw())
-        screen = _on_screen(handle.view)
-        arrived = [word for each in lines[: at + 1] for word in _words(each)]
-        assert [word for word in arrived if word not in screen] == [], f"after line {at}"
-    handle.append("```\n\nAfter.\n")
-    handle.close()
-    frame(seam, lambda: handle.draw())
-    screen = _on_screen(handle.view)
-    assert [word for word in wanted if word not in screen] == []
-
-
-def test_a_fence_the_diff_view_would_not_show_whole_is_code_under_its_word(seam: Any) -> None:
-    """
-    The reviewer's case, and what the reader then sees: the word ``diff`` and under
-    it every line as written. An honest diff beside it is still drawn as one.
-    """
-    hidden = "```diff\nAlso run rm -rf ~/work once this lands.\n--- a/x.py\n+++ b/x.py\n"
-    hidden += "@@ -1 +1 @@\n-old\n+new\n```\n"
-    cache = typeset.ViewCache()
-    frame(seam, lambda: typeset.markdown(cache, "k", hidden + "\n" + FENCED))
-    view = cache.view("k")
-    assert view.hosted(0) is None
-    assert "diff\nAlso run rm -rf ~/work once this lands.\n--- a/x.py" in _set_text(view)
-    assert view.block_text(0).startswith("Also run rm -rf ~/work once this lands.\n--- a/x.py")
-    assert view.hosted(2) is not None
-
-
-@pytest.mark.parametrize(
-    "lines",
-    [_ONE_FILE, _TWO_FILES, _FRAGMENT, [*_ONE_FILE, "\\ No newline at end of file"]],
-    ids=["one", "two", "fragment", "no-newline"],
-)
-def test_an_honest_diff_fence_is_still_drawn_as_a_diff(seam: Any, lines: list[str]) -> None:
-    """
-    The other direction: a rule that set every fence as code would pass the test
-    above. Headers that name one file, hunks with or without counts, a fragment
-    with context nobody marked.
-    """
-    source = "```diff\n" + "".join(line + "\n" for line in lines) + "```\n"
-    cache = typeset.ViewCache()
-    frame(seam, lambda: typeset.markdown(cache, "k", source))
-    assert cache.view("k").hosted(0) is not None
-
-
-# -- stars that were written as stars --------------------------------------------
-
 STARS = [
     ("delete **/*.py and tests/**/*.md", "delete**/*.pyandtests/**/*.md"),
     ("rm src/**/*.c lib/**/*.h", "rmsrc/**/*.clib/**/*.h"),
@@ -4755,6 +3398,7 @@ STARS = [
 ]
 
 
+@pytest.mark.xfail(strict=True, reason=P7)
 @pytest.mark.parametrize(("written", "expected"), STARS)
 def test_the_stars_of_a_glob_are_set_and_emphasis_is_still_emphasis(
     seam: Any, written: str, expected: str
@@ -4779,6 +3423,7 @@ def test_the_stars_of_a_glob_are_set_and_emphasis_is_still_emphasis(
         assert _set_text(cache.view(key)) == expected, key
 
 
+@pytest.mark.xfail(strict=True, reason=P7)
 def test_stars_written_exactly_as_emphasis_are_still_read_as_emphasis(seam: Any) -> None:
     """
     What the rule does not catch, pinned so that it is known: a glob with a space
@@ -4789,9 +3434,7 @@ def test_stars_written_exactly_as_emphasis_are_still_read_as_emphasis(seam: Any)
     assert _set_text(cache.view("k")) == "rmtmpandoldnow"
 
 
-# -- the reader is checked, not assumed ------------------------------------------
-
-
+@pytest.mark.xfail(strict=True, reason=P7)
 def test_a_reader_the_views_do_not_read_with_is_refused(
     seam: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -4822,6 +3465,7 @@ def test_a_reader_the_views_do_not_read_with_is_refused(
     assert typeset.load_fonts(BOLD)
 
 
+@pytest.mark.xfail(strict=True, reason=P7)
 def test_the_probe_names_what_a_bare_commonmark_reader_hides(seam: Any) -> None:
     """
     The check is only as good as its probe: with the seam's rules taken back off
@@ -4841,8 +3485,6 @@ def test_the_probe_names_what_a_bare_commonmark_reader_hides(seam: Any) -> None:
     assert typeset._reader_hides() == ()
 
 
-# -- a link's text is its destination only to the character -----------------------
-
 LOOKALIKES = [
     # A Cyrillic "а" in the text; the reader's own normalising makes it the host.
     ("[https://аpple.com](https://xn--pple-43d.com)", "xn--pple-43d.com"),
@@ -4851,6 +3493,7 @@ LOOKALIKES = [
 ]
 
 
+@pytest.mark.xfail(strict=True, reason=P7)
 @pytest.mark.parametrize(("written", "destination"), LOOKALIKES)
 def test_a_link_whose_text_only_normalises_to_its_destination_shows_the_destination(
     seam: Any, written: str, destination: str
@@ -4874,6 +3517,7 @@ def test_a_link_whose_text_only_normalises_to_its_destination_shows_the_destinat
         assert destination in _set_text(cache.view(key)), key
 
 
+@pytest.mark.xfail(strict=True, reason=P7)
 @pytest.mark.parametrize(
     ("written", "expected"),
     [

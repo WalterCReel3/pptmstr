@@ -1,56 +1,49 @@
 """
 What every test file gets: the typeset seam cannot leak from one test into another.
 
-The seam is module state -- one atlas, one font registry, one operator setting --
-and three things about it are properties of a *process* that a test must not inherit:
+The seam is module state -- one library context, one font registry, one operator
+setting -- and two things about it are properties of a *process* that a test must
+not inherit:
 
-- **Faces loaded under an ImGui context that is gone.** ``typeset.available()`` is
-  already false once the context is not the current one, so no pane takes the
-  typeset branch with them; the fixture below also drops them, so that nothing holds
-  ``ImFont`` pointers into a destroyed atlas for the rest of the run. "Not the
-  current one" is a comparison of addresses, and a context made later can be given
-  the address of one destroyed earlier, so **destroying the context the faces are
-  in forgets them, whoever destroys it** (``_a_destroyed_context_takes_its_faces``):
-  no test file has to remember ``typeset.reset()`` for that to hold.
+- **A library context whose ImGui context is gone.** The library's own
+  ``ready()`` stays true after the ImGui context its fonts are on is destroyed,
+  and a view then draws into an atlas that is freed. ``typeset.can_draw()``
+  compares the current context with the one the fonts were loaded in, but that is
+  a comparison of addresses and a context made later can be given the address of
+  one destroyed earlier. So **destroying the context the fonts are in unloads the
+  library first, whoever destroys it** (``_a_destroyed_context_takes_its_fonts``):
+  no test file has to remember ``typeset.unload()`` for that to hold.
 - **The operator's settings.** A test that switches typesetting off, a pane off, or
   gives a role another face or size, leaves the seam as it found it: the next
   file's tests are not run with a switch somebody else threw.
-- **The build budget.** A real frame may spend a few milliseconds building views and
-  leaves the rest for the next frame, which makes what one frame shows depend on how
-  fast the machine is. Every test here runs with no budget, so one frame builds
-  everything; the tests of the budget itself set one.
-- **What layout was found to cost.** The seam learns a rate from each layout it
-  times and decides by it how much a frame under a budget may build and whether a
-  new width waits. A rate learned in one test is a fact about how fast that test
-  ran; each test starts with none and leaves none.
 
-**Which advances lay text out is the run's.** ``typeset.METRICS`` is one constant
-in code; ``PPTMSTR_TEST_METRICS=file`` sets it for a whole run of the suite, so the
-other path is tested without an edit. A test that holds under one path only says
-which, and why, where it skips.
+**With the library and without.** The library is found through
+``IMTYPESET_LIBRARY`` and ``IMTYPESET_PYTHON``; ``make test`` sets them when the
+built pair exists and ``make test IMTYPESET_LIBRARY=`` does not. A test that needs
+it asks for ``seam``, which skips with the library's own reason when it cannot
+draw, and runs otherwise.
 
 It deliberately does not switch the seam off for tests that did not ask for it: the
-files that draw panes against a mocked ``imgui`` do that themselves, and a seam call
-made outside a frame raises rather than crashing the interpreter.
+files that draw panes against a mocked ``imgui`` do that themselves.
 """
 
 from __future__ import annotations
 
-import math
-import os
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
 
+from pptmstr import theme
 from pptmstr.ui import typeset
+from pptmstr.ui.typeset import gate
 
-if os.environ.get("PPTMSTR_TEST_METRICS"):
-    typeset.METRICS = os.environ["PPTMSTR_TEST_METRICS"]
+BOLD = theme._ASSETS / "fonts" / "Inconsolata-Bold.ttf"
 
 
 @pytest.fixture(autouse=True, scope="session")
-def _a_destroyed_context_takes_its_faces() -> Iterator[None]:
+def _a_destroyed_context_takes_its_fonts() -> Iterator[None]:
     try:
         from imgui_bundle import imgui
     except Exception:
@@ -59,10 +52,10 @@ def _a_destroyed_context_takes_its_faces() -> Iterator[None]:
     real = imgui.destroy_context
 
     def destroy(context: Any = None) -> None:
-        home = typeset._STATE.home
+        home = gate._GATE.home
         doomed = imgui.get_current_context() if context is None else context
         if home is not None and doomed == home:
-            typeset.reset()
+            typeset.unload()
         if context is None:
             real()
         else:
@@ -76,14 +69,8 @@ def _a_destroyed_context_takes_its_faces() -> Iterator[None]:
 @pytest.fixture(autouse=True)
 def _typeset_does_not_leak() -> Iterator[None]:
     state = typeset._STATE
-    if state.fonts is not None and not typeset.available():
-        typeset.reset()
     settings = (state.typeset, state.scale, state.family, dict(state.roles), state.panes_off)
-    budget = typeset.set_budget(math.inf)
-    state.layout_rate.clear()
     yield
-    typeset.set_budget(budget)
-    state.layout_rate.clear()
     if (state.typeset, state.scale, state.family, state.roles, state.panes_off) != settings:
         typeset.configure(
             typeset=settings[0],
@@ -92,3 +79,44 @@ def _typeset_does_not_leak() -> Iterator[None]:
             roles=settings[3],
             panes={pane: pane not in settings[4] for pane in typeset.Pane},
         )
+
+
+@pytest.fixture(scope="module")
+def imgui() -> Iterator[Any]:
+    """
+    A bare ImGui context for a module, with Inconsolata as its first font.
+
+    A frame needs a context and not a display, so nothing opens a window: the
+    context has no backend and the atlas is built from the real font files.
+    Destroyed afterwards, the library's context first.
+    """
+    bundle = pytest.importorskip("imgui_bundle")
+    im = bundle.imgui
+    context = im.create_context()
+    io = im.get_io()
+    io.display_size = im.ImVec2(1200.0, 800.0)
+    io.delta_time = 1.0 / 60.0
+    io.backend_flags |= im.BackendFlags_.renderer_has_textures.value
+    medium = Path(bundle.__file__).parent / "assets" / "fonts" / "Inconsolata-Medium.ttf"
+    io.fonts.add_font_from_file_ttf(str(medium), 16.0)
+    yield im
+    typeset.unload()
+    im.destroy_context(context)
+
+
+@pytest.fixture
+def seam(imgui: Any) -> Iterator[Any]:
+    """
+    The seam with the library's fonts loaded and the settings at their defaults.
+
+    **Skips, with the reason, when the library cannot draw**: absent, refused, or
+    its fonts not loaded. The fonts are loaded once a module and kept across its
+    tests; a test that unloads them or loads its own has them put back here.
+    """
+    theme.set_theme("dark")
+    typeset.configure(typeset=True, faces=typeset.DEFAULT_PRESET, scale=1.0, panes={})
+    if not typeset.can_draw() and not typeset.load_fonts(BOLD):
+        pytest.skip(f"needs the typesetting library: {typeset.unavailable_reason()}")
+    yield imgui
+    theme.set_theme("dark")
+    typeset.configure(typeset=True, faces=typeset.DEFAULT_PRESET, scale=1.0, panes={})

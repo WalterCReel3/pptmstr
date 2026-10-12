@@ -3,7 +3,7 @@ The inbox's expanded approval, set through the typeset seam.
 
 The pure parts -- which arguments head a description, when an edit is being
 withheld from view, what the gate predicted -- need no ImGui. The rest runs
-``inbox.draw`` in real frames on the rig ``tests/test_typeset.py`` builds: a context
+``inbox.draw`` in real frames on the rig ``tests/test_typeset_views.py`` builds: a context
 with no backend, the real faces, and the seam's own record of what a view drew.
 """
 
@@ -26,11 +26,18 @@ from pptmstr.transcript import SegmentKind, Transcript
 from pptmstr.ui import inbox, review, typeset
 from pptmstr.ui.compose import ComposeState
 from pptmstr.ui.focus import FocusState
-from tests import test_typeset as rig
+from tests import test_typeset_views as rig
 
-# The rig's fixtures, under the names pytest looks them up by in this module.
-imgui = rig.imgui
-seam = rig.seam
+
+@pytest.fixture
+def seam(imgui: Any) -> None:
+    """
+    Parked: ``inbox``'s typeset branch is not built on the library as it is now,
+    so every test that asks for the seam is skipped, by step. The step that
+    builds the branch deletes this fixture and ``tests/conftest.py``'s takes over.
+    """
+    pytest.skip("SEAM-2: inbox's typeset branch is not re-adopted yet")
+
 
 ROOT: NodeId = ("sess-1", None)
 

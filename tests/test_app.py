@@ -478,7 +478,6 @@ def _text_menu(
     monkeypatch.setattr(app, "imgui", menu)
     monkeypatch.setattr(settings_mod, "save", lambda settings, path=None: saved.append(settings))
     monkeypatch.setattr(typeset, "available", lambda: True)
-    monkeypatch.setattr(typeset._STATE, "files", {})
     state = app.AppState(store=Store(), bridge=Bridge(), settings=settings or Settings())
     app._configure_typeset(state.settings)
     app._menus(state)

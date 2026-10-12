@@ -1,10 +1,12 @@
 # The seam is re-adopted, not ported
 
 **Dated:** 2026-10-11 ·
-**Status:** the plan the re-adoption tasks on the board work from. **Everything
-in §1 to §5 is from reading, by pptmstr's reviewer (task `SEAM-MAP`); nothing
-was run.** A builder who finds a line here false by a run corrects the line and
-says so; the run wins ·
+**Status:** the plan the re-adoption tasks on the board work from. **§1 to §5
+are from reading, by pptmstr's reviewer (task `SEAM-MAP`), except the lines
+marked "by a run"**, which the builder of step 0 (`SEAM-0`) corrected or
+settled on 2026-10-11, with advtext `38f5fac`, the pair built by `make deps`,
+headless and under Xvfb with llvmpipe. A builder who finds a line here false by
+a run corrects the line and says so; the run wins ·
 **Origin:** advtext's layout core was replaced by imtypeset under this branch
 (`HANDOFF-advtext.md`; in advtext's repository `HANDOFF-pptmstr.md`) ·
 **Read against:** advtext `38f5fac`, imtypeset `c9f8902` ·
@@ -26,7 +28,7 @@ reasoning about what a pane wants of text; its mechanism is gone).
 | `diff()` over `DiffView` | `TypesetDiffView(diff, theme, *, layout, pixel_height, px_per_inch, syntax, height_cap, expand_step, copy_removed_lines, copy_as, palette)`; opens its own capped child |
 | `diff_model`, `approval_diff` | `Diff.from_texts`, `Diff.from_unified`, unchanged |
 | fenced diffs | `TypesetDiffFences(...)` as a view's `host_for` |
-| `available`, `unavailable_reason` | `typesetter.ready()`, `reason()`, `trouble()` |
+| `available`, `unavailable_reason` | `typesetter.ready()`, `reason()`, `trouble()`. **By a run:** `ready()` stays true after the ImGui context its fonts are on is destroyed without `unload()`, and a kept view then draws without raising; the seam keeps the context the load happened in and compares (`gate.can_draw`) |
 | `load_fonts`, `reset` | `typesetter.load_fonts(faces=None)`, `typesetter.unload()` |
 | per-part ink | `view.set_colours(block, [(start, end, colour)])` |
 | selection, hit tests | `view.selected_text()`, `under_mouse`, `block_under_mouse()`, `block_text(n)` |
@@ -43,10 +45,14 @@ holder, `Weight`, and the rule for which fences are honest diffs
 **Existed for the old core and goes:** `_PixelMetrics`, `_LineMetrics`,
 `pixel_metrics`, `METRICS`, the `RoleTheme.font_for` subclass (the new reader
 calls `face_for`), the node reaches (`_nodes`, `_broken`, `_with_breaks`),
-`_held_table`, the scratch-directory bookkeeping, and the build budget with its
-pieces and width debounce. The last is conditional: its only basis is advtext's
-own 33 ms for `sample.md` ×10 under load, so it goes when a parse is timed in
-pptmstr and not before.
+`_held_table`, the scratch-directory bookkeeping, the deferred font load
+(`load_fonts_later`, `hello_loader`: **by a run** the load is 21 ms in the
+application, where it was 1.1 s, so the fonts are loaded at start-up whatever
+`Settings.typeset` says), and the build budget with its pieces and width
+debounce. The last is conditional: its only basis is advtext's own 33 ms for
+`sample.md` ×10 under load, so it goes when a parse is timed in pptmstr and not
+before. Step 0 left it unbuilt and parked its tests under the step that times a
+parse.
 
 ## 2. A view takes markdown or advtext's own blocks, not a host's description
 
@@ -82,20 +88,37 @@ as a ratio (`BlockStyle.leading`; `interline=` is a `TypeError`).
 Not expressible, each a request in `HANDOFF-advtext.md`: hinted advances (A2);
 a size for inline code runs (P11); horizontal scroll in place of wrapped code
 (P12); one line pitch whatever is on the line (P13); the `ImFont` of a face
-for native labels (P14); loading fonts again after start-up (P17).
+for native labels (P14).
+
+**By a run:** `typesetter.load_fonts()` between frames after start-up is safe
+and not free. In a hello_imgui window, called from `pre_new_frame` at frames 5,
+12 and 20 with another file registered for `Face.PROSE`: it answered true, a
+view kept across it and a view made after it both drew, 11 ms a call. Each call
+left seven more fonts on ImGui's atlas (8, 15, 22, 29) and nothing takes them
+off. The seam loads again for a change of proportional family and for nothing
+else (`gate.pre_frame`); P17 is now that cost, not whether the call is safe.
 
 To check by a run, unverified: whether `Theme.spacing` (every space one width)
-reaches the library at all; whether `typesetter.load_fonts()` is safe between
-frames after start-up.
+reaches the library at all.
 
 ## 4. The fallback
 
 Every pane decides before it draws: `typeset.enabled(pane)` false, its own
-renderer. Read as intact today in all seven places (`detail`,
-`transcript_pane`, `inbox`, `review` through `state.body_shown`, `board_pane`,
-`brief_pane`, `settings_dialog`), which the suite's 2,930 passes corroborate.
-`theme._load_typeset_faces` swallows every exception, so a reason reaches
-nobody.
+renderer. Read as intact in six places (`detail`, `transcript_pane`, `inbox`,
+`review` through `state.body_shown`, `board_pane`, `brief_pane`). **By a run,
+the seventh does not ask that question:** `settings_dialog` draws its samples
+whenever `typeset.available()` is true and the setting is on, and has no pane
+to ask about. So `available()` is the operator's question (the library can
+draw *and* some pane is adopted) and `gate.can_draw()` the library's; with no
+pane adopted the menu and the dialog offer no switch and say why.
+`theme._load_typeset_faces` hands anything raised to the gate as the reason.
+
+**Step 0 as built:** `roles.ADOPTED` names the panes whose typeset branch is
+built on the library, and is empty; `enabled(pane)` is false for a pane not in
+it. A step adds its pane after the run that shows it. The first pane added
+makes `available()` true, and the dialog's samples then call `markdown`,
+`plain`, `document` and `label` at once: all four are built before any pane is
+added, or the dialog is guarded first.
 
 **New on this layer:** a view can raise `TypesetUnavailable` from inside
 `draw()`, when the pane is already in its typeset branch with a child window
@@ -110,9 +133,9 @@ public names, so panes and `settings.py` change little:
 
 | module | holds |
 |---|---|
-| `roles.py` (no advtext import) | the role catalogue, panes, families, scales, settings readers, `enabled` |
+| `roles.py` (no advtext import) | the role catalogue, panes, families, scales, settings readers, `ADOPTED`, `enabled` |
 | `parts.py` (pure) | `Kind`, `Part`, `prose_parts`, `multiline_kind` |
-| `gate.py` | availability and its reason, font loading, unload, reader rules, `font`, `label` |
+| `gate.py` | `can_draw`, `available` and the reason, font loading, unload, `pre_frame`; later reader rules, `font`, `label` |
 | `themes.py` | role to `Theme` and `Palette`, line heights |
 | `views.py` | `ViewCache`, `markdown`, `document`, `plain`, `stream`, the catch-and-say wrapper |
 | `diffs.py` | `diff`, the models, the fence policy |

@@ -869,35 +869,28 @@ def load_fonts() -> None:
 
 def _load_typeset_faces() -> None:
     """
-    Put the text-layout library's faces on the atlas, after the two above.
+    Give the text library its faces, after the two above.
 
-    After, because of the rule in ``load_fonts``: these include a proportional face
-    and a second copy of Inconsolata without the icons merged, and either one as
-    Fonts[0] would become the font of every widget. The math face is among them and
-    costs about a second: ``typeset.load_fonts`` says why it is paid here.
+    After, and last in hello_imgui's ``load_additional_fonts``, because of the
+    rule in ``load_fonts``: the library puts a proportional face and a second copy
+    of Inconsolata without the icons on the atlas, and either one as Fonts[0]
+    would become the font of every widget. Whatever ``Settings.typeset`` says:
+    ``ui.typeset.gate`` has the measurement.
 
-    Only when the operator's setting asks for typeset text. With it off the load is
-    put off -- over a second, and a patched font written to the temporary directory,
-    for a renderer nobody is looking at -- and the seam does it between frames if
-    the setting is switched on later (``typeset.load_fonts_later``).
-
-    Imported here rather than at the top: ``ui.typeset`` imports this module for the
-    palette. A failure of any kind -- a font file missing, the library broken in a
-    way its import did not show -- is the same non-fatal degradation as a missing
-    face above: ``typeset.enabled()`` stays false and every pane draws as it did
-    before the library existed. The library being absent altogether does not reach
-    here as an exception: the seam imports without it and says so when asked.
+    Imported here rather than at the top: ``ui.typeset`` imports this module for
+    its colours. ``typeset.load_fonts`` answers false for a library that is
+    absent, refused or failing and keeps the sentence for
+    ``typeset.unavailable_reason()``; it is not meant to raise. This is
+    hello_imgui's callback all the same, where an exception that escapes takes
+    the application down, so one that does is handed to the gate as the reason:
+    the same non-fatal degradation as a missing face above, and said.
     """
-    try:
-        from .ui import typeset
+    from .ui import typeset
 
-        bold = _ASSETS / "fonts" / "Inconsolata-Bold.ttf"
-        if typeset.wanted():
-            typeset.load_fonts(bold, loader=typeset.hello_loader())
-        else:
-            typeset.load_fonts_later(bold, loader=typeset.hello_loader())
-    except Exception:
-        return
+    try:
+        typeset.load_fonts(_ASSETS / "fonts" / "Inconsolata-Bold.ttf")
+    except Exception as failure:
+        typeset.gate.failed(failure)
 
 
 def _load_face(asset: str, *, icons: bool) -> imgui.ImFont | None:

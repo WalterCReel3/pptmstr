@@ -6,7 +6,7 @@ panes. What needs a real filesystem gets one, because the memo's whole job is to
 notice a directory changing.
 
 The typeset path is drawn in real ImGui frames with no window, on the rig
-``tests/test_typeset.py`` owns: what a view set is read back from the view.
+``tests/test_typeset_views.py`` owns: what a view set is read back from the view.
 """
 
 from __future__ import annotations
@@ -22,11 +22,18 @@ from pptmstr import brief
 from pptmstr.model import AgentRecord, AgentState, NodeId, Snapshot
 from pptmstr.ui import brief_pane, typeset
 from pptmstr.ui.focus import FocusState, Scope
-from tests import test_typeset as rig
+from tests import test_typeset_views as rig
 
-# The rig's fixtures, under the names pytest finds them by.
-imgui = rig.imgui
-seam = rig.seam
+
+@pytest.fixture
+def seam(imgui: Any) -> None:
+    """
+    Parked: ``brief_pane``'s typeset branch is not built on the library as it is now,
+    so every test that asks for the seam is skipped, by step. The step that
+    builds the branch deletes this fixture and ``tests/conftest.py``'s takes over.
+    """
+    pytest.skip("SEAM-1: brief_pane's typeset branch is not re-adopted yet")
+
 
 ROOT: NodeId = ("s1", None)
 

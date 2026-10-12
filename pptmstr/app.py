@@ -756,9 +756,8 @@ def _apply_settings(state: AppState, new: settings_mod.Settings) -> None:
     restart, which for typeset text makes the comparison the switch exists for a
     comparison of two launches.
 
-    Saved at the point of mutation rather than on exit: there is no ``before_exit``
-    callback registered, and a preference that survives only a clean shutdown is
-    one that silently resets after the first crash.
+    Saved at the point of mutation rather than on exit: a preference that survives
+    only a clean shutdown is one that silently resets after the first crash.
 
     Settings equal to the ones in force do nothing at all -- no write, no
     ``configure`` -- which is what makes a control safe to draw every frame.
@@ -1352,8 +1351,8 @@ def main(argv: list[str] | None = None) -> int:
         # done or parked on the operator. AWAITING_APPROVAL counts as idle, which is
         # I8 showing up as a CPU number rather than a claim.
         snap = state.frame_snap
-        # A view still being typeset counts as work: it is built a piece a frame,
-        # and an idling loop would hand it one frame every few hundred milliseconds.
+        # A view short of its text counts as work: an idling loop would hand it
+        # one frame every few hundred milliseconds.
         working = (snap is not None and snap.any_active) or typeset.pending()
         runner.fps_idling.enable_idling = not working
 
@@ -1367,6 +1366,8 @@ def main(argv: list[str] | None = None) -> int:
     runner.callbacks.post_render_dockable_windows = guarded(
         "overlays", lambda: _draw_overlays(state)
     )
+    # The text library's context goes before the ImGui context its fonts are on.
+    runner.callbacks.before_exit = typeset.unload
 
     state.bridge.start()
     # On the loop, not on the frame loop: the frame loop is one of the things being
