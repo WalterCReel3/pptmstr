@@ -774,6 +774,27 @@ that move once, at the renamed commit** (below), unless a pushed `advtext`
 commit carries the monospace fix first: then the diff view is worth a move of
 its own.
 
+### Notice: a baked size can hold another size's glyphs, and it is not yours (2026-10-12)
+
+The user saw letters of one markdown heading in pptmstr's context log drawn at
+different sizes (two screenshots, 2026-10-12). pptmstr's builder measured it
+(`scripts/measure_heading_glyphs.py`, commit `aa7b25d`; Xvfb and llvmpipe,
+`imgui-bundle` 1.92.900, load 4 to 20): every glyph of the heading comes from
+one atlas entry at one baked size (`Roboto-Bold.ttf` at 19 px), and 7 of 16
+glyphs of that bake hold the bitmap and the advance of the same character at
+16 px. **It reproduces with no typesetting library in the path**
+(`imgui.push_font` and `text_unformatted`), so it is Dear ImGui's FreeType
+loader in the wheel. Trigger as measured: a baked size not drawn for two
+frames, the atlas running out of room, then new characters arriving in a bake
+that moved. Cause, **from reading upstream v1.92.9, not the wheel's source**:
+the loader skips `FT_Activate_Size` when a remembered `ImFontBaked` pointer
+equals the current one, while the atlas compacts its baked pool by `memcpy`.
+That the user's pictures show this defect is an inference from shape.
+
+| # | request | why | state |
+|---|---|---|---|
+| P36 | **A notice to carry to imtypeset, not a change asked of either library**: the library draws one face at many sizes and its glyphs come through the same loader, so a typeset glyph can be another size's bitmap with that size's advance, laid out at the right size. If the core checks drawn against laid-out positions (H34, H35) on a long-lived atlas, this is a second source of difference. | Measured as above. pptmstr is guarding it on the host side (every baked size it draws is touched each frame so ImGui discards none: 0 changed glyphs in 6 runs against 7 of 16 without); the reproduction is library-free and is the user's to file upstream. | open |
+
 ### Coming: advtext is to be renamed `imscribe` (the user, 2026-10-12)
 
 The user, to pptmstr's lead: "Heads up on an upcoming change for the advtext
