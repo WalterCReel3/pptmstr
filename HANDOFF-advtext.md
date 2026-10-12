@@ -184,10 +184,58 @@ run at 16 px would be 297 or 298 px, a mix of 7 and 8 px steps, 14 to 15 px
 short of ImGui's 312, so **R4 and R5 would not hold, nor R2 against the baked
 advance.**
 
-**Unknown:** R1 to R6 on the new core in pptmstr (pptmstr is measuring: see
-"Work in hand"); whether a fenced code row is one word under the width bound;
-anything at density 2, on a GPU, or on a Mac. The operator has not been shown
-the new core's text.
+**Measured on the new core, in a pptmstr-shaped window** (pptmstr's builder,
+2026-10-12, `scripts/measure_typeset_advances.py`, commit `99b8129`; advtext
+`38f5fac`, imtypeset `c9f8902` built against **stand-in headers**; Xvfb and
+llvmpipe, `imgui-bundle` 1.92.900, FreeType 2.13.3, loader flags 0, density 1;
+load average 2.7; three runs gave identical positions). Fonts loaded as
+pptmstr loads them: chrome Inconsolata as `Fonts[0]`, then
+`typesetter.load_fonts()`; text sized with `Theme.at_pixel_height`. Read from
+the draw list's vertices; no pixel was read and nobody looked at a picture.
+Inconsolata pages ("mono") are the ones R4 and R5 are about:
+
+| | mono 14 | mono 16 | mono 18 | mono 20 |
+|---|---|---|---|---|
+| R1 prose runs, drawn less laid out, px | −0.40 to +0.33 | −0.38 to +0.49 | −0.48 to +0.42 | −0.26 to +0.47 |
+| R1 spaceless runs inside a fenced row | −4.88 to +1.96 | −6.29 to +2.24 | −8.71 to +2.52 | −10.12 to +2.80 |
+| R1 40-character fenced row: drawn / laid out / ImGui's | 260 / 260.25 / 273 | 297 / 297.43 / 312 | 335 / 334.60 / 351 | 372 / 371.78 / 390 |
+| a glyph's x in a 74-character row, drawn less laid out | −16.2 to 0 | −16.9 to +0.3 | −18.0 to 0 | −18.1 to +0.1 |
+| R2 code steps equal to the baked advance (the library's own entry, and the chrome's: the same) | 100 of 158 | 92 of 158 | 84 of 158 | 77 of 158 |
+| R3 word spaces, px | 6 to 9, sd 0.58 | 7 to 10, sd 0.48 | 8 to 9, sd 0.30 | 8 to 12, sd 0.53 |
+| R4 distinct column steps; worst disagreement between rows at one column | 6 and 7; 13 px | 7 and 8; 13 px | 8 and 9; 15 px | 9 and 10; 16 px |
+| R5 typeset pen less ImGui's at characters 10, 20, 40 of 40 | −9, −13, −13 | −9, −15, −15 | −9, −16, −16 | −9, −18, −18 |
+| R6 fractional pens / quads off grid / resampled, of 466 | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 | 0 / 0 / 0 |
+
+- **R1 holds** for prose runs (within 0.5 px, also on the Roboto pages) and for
+  a whole fenced row; **it does not hold inside a fenced row**.
+- **R2 does not hold.** Every step is a whole pixel, but of two values (7 and
+  8 at mono 16). Layout uses 7.626; the library's own atlas entry bakes 8, the
+  same as the chrome's.
+- **R3 does not hold**: at mono 16, 47 spaces of 7 px, 4 of 8, 1 of 10. One
+  space is *laid out* at 4/3 width (10.168 against 7.626) although the theme
+  was `Spacing.FRENCH` (at 14, 16 and 20 px, not 18). On Roboto 16: 43 spaces
+  of 3 px and 10 of 4, laid out at 3.380 every one.
+- **R4 and R5 do not hold.** The 40th character of a row at mono 16 is 297 px
+  from the first; ImGui's is 312. Rows disagree with each other at one column
+  by up to 13 px.
+- **R6 holds.**
+- **The short steps come first**: the 40-character ruler at mono 16 is drawn
+  as fifteen steps of 7 then twenty-four of 8. So mid-row a glyph is up to
+  9.4 px (40 characters) or 16.9 px (74) left of its own laid-out rectangle.
+  Glyph against rectangle was measured; where a selection highlight or a hit
+  test lands against the drawn glyph was not.
+- **Control**: the same strings through `ImDrawList.add_text` in the library's
+  own code entry land every glyph exactly where the chrome font's do (0.000
+  over 40 and 64 glyphs, every page). So the atlas entries agree; it is the
+  typeset pens that differ.
+- Atlas entries: 2 before `typesetter.load_fonts()`, 9 after.
+  `load_fonts()` took 10.9 to 14.5 ms over four runs; the first page of a face
+  45 to 72 ms to make its views, later pages about 1 ms.
+
+Requests that follow from these numbers are P21 to P23.
+
+**Still unknown:** anything at density 2, on a GPU, or on a Mac; fork-header
+builds. The operator has not been shown the new core's text.
 
 ### A3 — fonts
 
@@ -279,12 +327,16 @@ build confirms or withdraws one.
 |---|---|---|---|
 | P20 | **Commit `imtypeset.ref`, and name it as the place pptmstr reads the ref from.** | pptmstr builds the library itself and keeps the hash in its own `imtypeset.ref`. advtext's file of that name is untracked and absent at `38f5fac`, so nothing can hold the two in step: a test here would compare them if yours were in the commit pptmstr pins. | open |
 
+P21 to P23 follow from pptmstr's measurement of the new core (A2 above).
+
+| # | request | the measurement behind it | state |
+|---|---|---|---|
+| P21 | **Monospace text set by the library keeps its columns** (R4), **and lines up with ImGui-drawn text in the same face at the same pixel height** (R5): N characters occupy N times one whole-pixel constant on every row, and that constant is the baked advance. A requirement on the result, not on how. | Mono 16: steps of 7 and 8 px mixed, rows disagree at a column by up to 13 px, the 40th character at 297 px against ImGui's 312. pptmstr sets code, diffs, tool output and arguments as monospace because "their columns are content": a table drawn in characters, `tree` output, a diff's gutters, and native labels beside typeset text. **Until this is answered pptmstr keeps code blocks, diffs and tool output on its own renderers where their columns matter** (an agent decision; the operator chose hinted advances by eye on 2026-10-08, for prose, under the old draw rule). | open |
+| P22 | **A glyph is drawn where it was laid out, or the view answers hit tests, selection and marks from where it was drawn.** | In a 74-character fenced row at mono 16 a glyph is drawn up to 16.9 px (more than two characters) left of the rectangle `span_rects` gives for it, because the short steps come first. Not measured: where a selection highlight lands. If it follows layout, a selection in code is over the wrong characters by up to two. | open |
+| P23 | **Every word space one width when the theme says `Spacing.FRENCH`**, as laid out. | With `Theme.at_pixel_height(…, spacing=Spacing.FRENCH)`, one of 52 spaces on the mono page is laid out at 10.168 px against 7.626 (at 14, 16 and 20 px; none at 18). Either the theme's spacing does not reach the library or a sentence space survives it. | open |
+
 ## Work in hand
 
-- **R1 to R6 measured on the new core** (`MEASURE-ADV`): a probe in a
-  pptmstr-shaped window, reading the vertex buffer. The numbers go under A2
-  when they exist; any request that follows from them is a `P` then, not
-  before.
 - **The seam** (`pptmstr/ui/typeset.py`) re-adopted pane by pane.
 
 ## Agent decisions, awaiting the user
