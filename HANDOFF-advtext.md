@@ -919,39 +919,80 @@ pin's move to the renamed commit and not before.
   headers, from local repositories. The wheel under the library is the
   advtext lead's venv's (see the state at the top).
 
-## The pins can move now (2026-10-12, read at pptmstr `d163520`)
+## The pins moved, and the diff view is live (2026-10-12, pptmstr `8c6a43e`)
 
-The lead fetched both commit pages from GitHub: the branch
-`experimental/imtypeset-adoption` is at `bb240c3` there, which contains
-`68eb18b` (the last commit named `advtext`, with the diff view's
-`cell="pixel"`) and `cd437c1` (the rename to `imscribe`); imtypeset's `main`
-is at `5077b22` there ("Lay text out from the advances the rasteriser
-bakes"), which contains `2fd705e`, the commit imscribe's `imtypeset.ref`
-names. So rule 4 of the channel no longer holds the pins.
+The file keeps its name; the library is `imscribe` from here on.
 
-pptmstr moves in the two steps P34 asked for, each ending on a green suite:
+| | |
+|---|---|
+| imscribe | `bb240c3db97aaef4c62382d3822913f70acfa540` (`imscribe.ref`), the head of `experimental/imtypeset-adoption` on GitHub as the lead read its commits page on 2026-10-12; no package code differs from the rename `cd437c1` |
+| imtypeset | `2fd705e2bc358c7dbfda1eb60bd9b71609869e1d` (`imtypeset.ref`), what that commit's own `imtypeset.ref` names; on GitHub's `main` |
+| how built | `make deps` from `file://` repositories; **stand-in headers by an explicit opt-in** (`IMTYPESET_BUNDLE_HEADERS=stand-in`). pptmstr's script asks for the fork's headers by default, and that default was run here once and failed cleanly for want of network; **a fork-header build has never been made by pptmstr** |
+| the move | in the two steps of P34: to `68eb18b` (`a945ed2`, `4401659`), the diff view turned on there (`da75e3d`), then across the rename (`8c6a43e`); the suite was green at each, and the rename changed four tests' count only by the four added for removing the old distribution |
 
-1. **To `68eb18b` and imtypeset `2fd705e`**: the build with its headers named,
-   the eleven tests the trial listed, `kind()`, `typesetter.font`, the
-   library's own knowledge of its ImGui context; then **the diff view on a
-   whole-pixel cell** (`cell="pixel"` in the view pptmstr makes and in the
-   view its check measures), which is what makes the check hold and the diff
-   appear in DETAIL and the inbox.
-2. **To the rename**: `cd437c1` and on to the pushed head, names only.
+**The diff view** (`da75e3d`): `cell="pixel"` in the one function that makes
+both the view pptmstr draws and the view its check measures, and in
+`TypesetDiffFences`. Measured in pptmstr's window with pptmstr's fonts (chrome
+Inconsolata with Font Awesome, the vendored bold registered; Xvfb, vertices,
+load 3.8): the check holds at every pixel height from 12 to 24; one step on
+every row, 0 px between rows at a column, pens on ImGui's at characters 10,
+20, 40 and 74, 0 of 64 quarter-point hit tests wrong, every glyph 0.00 px
+from its rectangle, tabs on the grid. With the default cell it holds at none.
+So with nothing forced, DETAIL and the inbox draw an approval's diff with
+`TypesetDiffView`, and a settled document hosts an honest `diff` fence. Cost
+as measured here: at even heights the em grows 4.9 % on the raster one pixel
+larger (at 16: a `0` of 8×11 against the chrome's 7×9, pitch 18); no printable
+ASCII glyph crosses its row at 12 to 24; U+2502 by 2 to 3 px. First frame 4 to
+10 ms, steady 0.35 ms, at 300 and 1,200 lines (load 7.3). The user has
+screenshots to look at; nobody else has looked.
 
-After that: `ReaderOptions` in place of the private parser reach (less P35's
-two gaps), and the options that answer P11, P12, P13, P16 and P19. Requests
-are closed here as each is built against. imtypeset `5077b22` (H34 and H35
-in the core) is not what imscribe consumes yet; pptmstr takes it when
-imscribe's `imtypeset.ref` does.
+**Requests closed by this move** (built against, in pptmstr's own code and
+tests): P1 (`kind()` is what pptmstr's gate reads; its own inference is
+gone), P14 (`typesetter.font`), P20, P23 (the wide space is gone from the
+probe), P24 (pptmstr's own context guard is removed), P29 (a tab is a tab; ten
+assertions flipped), P33 (after pptmstr clears the variables, `reset()` then
+`module()` loads again and a child inherits neither: a test through the entry
+point), P34, P38 (a lone surrogate is set as U+FFFD and nothing is raised),
+and **P21 and P22 for the diff view only**.
 
-**What `cell="pixel"` costs, in imscribe's builder's numbers** (not
-pptmstr's yet): at an even pixel height the em grows 4.9 % and the glyphs
-come from the raster one pixel larger (at 16 px: raster 17), on pptmstr's own
-row pitch. That is the trade the lead declined for all monospace roles
-earlier (an even em); for the diff view the user has said, as imscribe's file
-quotes, "We need to get the new diff interface working in pptmstr." So it is
-taken for diffs, measured in pptmstr when built, and is the user's to look at.
+**Still open, with what pptmstr does meanwhile:** P21 and P22 for a fence in
+a document and every other monospace role (three strict xfails; tool output,
+arguments and errors stay ImGui's; waits on imscribe consuming imtypeset
+`5077b22`). P7, P32, P35 (the private parser reach stays until `ReaderOptions`
+is adopted, next). P11, P12, P13, P19 (options exist, not yet turned on here;
+strict xfails). P16 (`headers()` exists; pptmstr still says a header above the
+view always, because `headers()` does not cover a hunk's section row and does
+not know the width under a height cap before the draw). P2 (`verdict()` not
+used: `--version` asks `module()` in a process that exits). P25 (themes are
+sized from the library now; the cost was not re-measured). P9, P10, P15, P17,
+P26, P27, P28, P30 (pptmstr keeps resting off-screen documents: 9.2 ms with
+nothing resting against 1.3 ms, 400 views, load 3), P31, P36, P37, P39.
+
+| # | request | the measurement behind it | state |
+|---|---|---|---|
+| P40 | **Under `cell="pixel"`, `grid.cell` says the whole pixel while the row is laid out a little off it**, or the layout is exact. | By a run (pptmstr's builder, `da75e3d`): the library accepts a layout within 1e-3 px of the pixel and reports the pixel; the real layout is 1.3e-6 to 2.4e-5 px a column off and accumulates, 1 px at column 100,000 and 11 px at 1,000,000. pptmstr's check had trusted `grid.cell` and answered for a million columns; it now also reads the measured row's own width and caps adoption near 45,000 columns at 16 px. A host that trusts `grid.cell` for a minified one-line file is off by a pixel or more at its far end. | open |
+| P41 | **A lone surrogate set as U+FFFD is said somewhere a host can read** (P38's other half). | At this pin the library sets it as U+FFFD with no exception and no note, so an approver reads a replacement character where the argument that will be sent holds something else, and nothing tells the host. pptmstr is escaping such characters for display before they reach any renderer; the request is for the view to say when it substituted. Belongs with P9. | open |
+
+### A4 — every imscribe name pptmstr imports (at `8c6a43e`, by an AST scan)
+
+- In `pptmstr/` (all in `pptmstr/ui/typeset/`, all `from imscribe import`):
+  `Align`, `BlockKind`, `Diff`, `DiffLayout`, `DiffPalette`, `Face`, `Faces`,
+  `FileStatus`, `MarkdownStream`, `Palette`, `Spacing`, `Theme`,
+  `TypesetDiffFences`, `TypesetDiffView`, `TypesetStreamView`,
+  `TypesetUnavailable`, `TypesetView`, `em_size_for_pixel_height`,
+  `parse_markdown`, `px_from_sp`, `register_font`, `registered_fonts`,
+  `sp_from_px`, `unregister_font`, and the modules `typesetter` and
+  `markdown_rules`.
+- Of `typesetter`: `module`, `kind`, `Kind`, `reason`, `ready`,
+  `why_not_ready`, `load_fonts`, `unload`, `trouble`, `font`, `reset`,
+  `base_style`, `FACE_ROLES`, and `module().face_has_glyph` (P39) and the
+  native module's documents for the columns check.
+- **Private:** `markdown_rules._parser` (P7, P32, P35).
+- Scripts and tests add: `DARK_PALETTE`, `Emphasis`, `RowKind`, `fontlib`,
+  `fontlib_metrics`, `imscribe.description.FACE_ROLES`,
+  `imscribe.style.fontlib_metrics`.
+
+The A4 section higher in this file is the list as it stood on `38f5fac`.
 
 ## Agent decisions, awaiting the user
 
