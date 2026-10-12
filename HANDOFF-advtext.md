@@ -713,6 +713,28 @@ followed (pptmstr's builder, 2026-10-12, commit `029cbc8`, advtext `38f5fac`).
 | P32 | **A reader option for backslash escapes set as written**, and a supported way for a host to mark punctuation it wants taken literally. Belongs with P7. | By a run, settled and streamed: `C:\_work\*.log` was set as `C:_work*.log`, `foo\.py` as `foo.py`, `\\server` as `\server`. An approver reading a path or a regex in a concern must see the backslashes. pptmstr now replaces the reader's `escape` rule in its private reach, and, because its own shaping used a backslash to protect punctuation, marks that punctuation with U+FDD0 instead: an in-band mark it would rather not own. Underscores were checked at the same time and are set as written (`__main__.py`, `__all__`). Not reached: `\|` in a table cell, a backslash in a link's destination. | open |
 | P33 | **`reset()` should not need the environment it was first given.** | pptmstr finds its own checkout's library, sets the two variables for its process, asks `typesetter.module()` once, and then removes them, because every agent session it launches would otherwise inherit them and run another worktree's tests on this checkout's library (reproduced: a child process had both). Read, not run: advtext asks the variables again when its "tried" state is reset, so a "try again" (P18) after that would find no library. Either the route taken is remembered across a reset, or a host can hand the pair to `module()` without the environment. | open |
 
+### Coming: advtext is to be renamed `imscribe` (the user, 2026-10-12)
+
+The user, to pptmstr's lead: "Heads up on an upcoming change for the advtext
+team: "advtext" is being renamed to "imscribe"". advtext's file says it is to
+be one commit on a quiet tree after the diff-view work, with no call's
+signature or behaviour changed. **Nothing in pptmstr changes until that
+commit is named there and is on GitHub.**
+
+What the rename touches here, counted on 2026-10-12 at pptmstr `a28d6e1`
+(`git grep`): 60 import lines in 17 files (four in the seam,
+`pptmstr/ui/typeset/{gate,themes,views,diffs}.py`; five scripts; eight test
+files); 52 string-keyed uses in the package, scripts, `Makefile`,
+`bootstrap.sh` and `pyproject.toml` (the distribution name pip is asked for,
+`advtext.ref`, `ADVTEXT_REPO`, `ADVTEXT_PIP_ARGS`, the default repository URL,
+`.deps/advtext`, the module names `--version` and the facade test look up);
+and this file's own name. It will be one commit of pptmstr's, made with the
+pin's move to the renamed commit and not before.
+
+| # | request | why | state |
+|---|---|---|---|
+| P34 | **The rename is a commit that changes names only, and the commit before it is named too.** And say, when it is specified: whether an `advtext` alias ships for a release, whether the GitHub repository's URL changes, and what the distribution is called to pip. | pptmstr moves its pin in two steps so that a failure can be told apart: first to the last `advtext` commit (behaviour: the diff-view work, reader options, the rest of what was built for it), suite green; then to the rename, where the only edits are names. If behaviour and names arrive in one commit a red suite does not say which. pptmstr's `bootstrap.sh` fetches by repository URL and installs by distribution name, so both are things it has to be told. | open |
+
 ## Where pptmstr stands (2026-10-12, at commit `56ff0bf`)
 
 - **Every pane sets its markdown through the library** when the library can
