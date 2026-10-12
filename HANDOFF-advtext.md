@@ -795,6 +795,45 @@ That the user's pictures show this defect is an inference from shape.
 |---|---|---|---|
 | P36 | **A notice to carry to imtypeset, not a change asked of either library**: the library draws one face at many sizes and its glyphs come through the same loader, so a typeset glyph can be another size's bitmap with that size's advance, laid out at the right size. If the core checks drawn against laid-out positions (H34, H35) on a long-lived atlas, this is a second source of difference. | Measured as above. pptmstr is guarding it on the host side (every baked size it draws is touched each frame so ImGui discards none: 0 changed glyphs in 6 runs against 7 of 16 without); the reproduction is library-free and is the user's to file upstream. | open |
 
+### Correction to P22's hit-test figure, and the diff view's adoption (2026-10-12)
+
+**The count pptmstr gave for hit tests was an artifact of how it asked.**
+"A hit test at a drawn glyph answers another character for 34 to 40 of 64
+glyphs" (above, under P22 and both trials, and the 62, 64, 61 of 64 at odd
+pixel heights) was taken at the **centre of each glyph's quad**. `hit_test`
+answers the nearest position *between* characters, so a centre lands on
+either neighbour by the glyph's bearing: at an even em, where every column is
+exact, the same method calls 15 to 64 of 64 "wrong". Asked properly (pptmstr's
+builder, commit `02dfb06`, `scripts/measure_typeset_diff.py`: a point a
+quarter of the baked advance from a glyph's pen must answer the position
+before the character, three quarters the one after):
+
+| | px 14 | px 16 | px 18 | px 20 | even em |
+|---|---|---|---|---|---|
+| glyphs of a 74-character diff row whose hit test is wrong | 55 of 64 | 54 of 64 | 53 of 64 | 53 of 64 | 0 of 64 |
+
+So P22 stands and is worse than first said at pixel heights, and the earlier
+numbers should not be quoted. The glyph-against-rectangle distances (up to
+16.9 px) were measured differently and are unaffected.
+
+**pptmstr's diff view is wired and waits on a measured fact** (commit
+`02dfb06`). DETAIL and the inbox row draw an approval's diff with
+`TypesetDiffView`, and a settled document hosts an honest `diff` fence with
+`TypesetDiffFences`, **when a check made at font load on the running library
+holds**: one 186-character row set as the diff view sets its own, drawn to
+buffers, must have (1) the view's `grid.cell` equal to the advance ImGui
+baked for the size the glyphs were drawn from, within 1e-4 px, (2) every pen
+at its index times that advance, (3) the quarter-point hit tests right. On
+`38f5fac` it is false at pixel heights 14 to 20 (155 of 156 glyphs off
+column) and true at ems 12 to 22 even, which no setting of pptmstr reaches
+(ImGui rounds the UI font to a whole pixel). So today both panes still draw
+diffs with their own renderers, and **the day a library that answers H34 and
+H35 is installed they change with no change here**. It costs 3 to 6 ms at
+load. What the check does not see: it measures a native code block styled as
+the view's rows, not the view; a library that set a row differently inside
+`TypesetDiffView` would pass it. If H34 arrives as an option a host must turn
+on, pptmstr needs to be told its name; the check only reports the result.
+
 ### Coming: advtext is to be renamed `imscribe` (the user, 2026-10-12)
 
 The user, to pptmstr's lead: "Heads up on an upcoming change for the advtext
@@ -823,8 +862,10 @@ pin's move to the renamed commit and not before.
   draw, and draws with its own renderer when it cannot, with one sentence in
   the Text menu saying why. What is not markdown, and everything whose
   columns are content (tool output, arguments, errors, an approval's diff),
-  is ImGui's (P21, P22). `typeset.diff()` is built and tested and no pane
-  calls it. No renderer of pptmstr's was deleted (P6).
+  is ImGui's (P21, P22). The library's diff view is wired into DETAIL, the
+  inbox and settled fences behind a measured check that today's library
+  fails (see "Correction to P22's hit-test figure"), so no pane draws with
+  it yet. No renderer of pptmstr's was deleted (P6).
 - **The gate**, by the last builder's run after all writes had stopped:
   with the pair, lint and typecheck clean, 3550 passed, 0 skipped, 24 strict
   xfails (21 under P9, P10, P11, P12, P13, P15, P16, P17, P19, P21; 3 that
