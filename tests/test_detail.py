@@ -1040,15 +1040,18 @@ def parked(tool: str, args: dict[str, object], pid: str = "p1") -> ApprovalNeede
     )
 
 
-def test_a_parked_write_is_the_panes_own_diff_and_an_arguments_document(seam, monkeypatch) -> None:
+def test_a_parked_write_is_the_panes_own_diff_and_an_arguments_document(
+    own_rows, monkeypatch
+) -> None:
     """
-    On the library pptmstr is built against the diff is this pane's lines
-    whichever renderer is on: a diff's columns are content, and that library
-    does not keep them (``typeset.diff_adopted`` is a measurement of it). The
-    arguments of a Write are literal, so the seam hands every part of them to
-    ImGui and holds no view. ``test_where_columns_hold_a_parked_write_is_the_
-    librarys_diff_view`` is the same call on the other answer.
+    Where the library's diff view is not what draws a diff (``own_rows``: the
+    override, since the library as it is keeps its columns), the diff is this
+    pane's lines with typeset text on as with it off. The arguments of a Write
+    are literal, so the seam hands every part of them to ImGui and holds no
+    view. ``test_where_columns_hold_a_parked_write_is_the_librarys_diff_view``
+    is the same call on the answer the product gives.
     """
+    seam = own_rows
     content = "a = 1\nb = 2\n"
     obligation = parked("Write", {"file_path": "nowhere/new.py", "content": content})
     snap = snapshot(record(), needs_you=(obligation,))
@@ -1801,7 +1804,8 @@ def test_switching_typeset_off_lets_go_of_every_view(seam, monkeypatch) -> None:
     rig = Pane(seam, monkeypatch)
     rig.focus.move(snap, 0)
     rig.frame(snap)
-    assert len(rig.pane.views) == 1
+    assert set(rig.pane.views.keys()) == {(obligation.key, "diff"), (obligation.key, "arguments")}
+    assert rig.pane.views.view((obligation.key, "diff")) is not None, "the library's diff view"
 
     typeset.configure(typeset=False, mono=False)
     rig.frame(snap)
@@ -2178,11 +2182,11 @@ def test_with_typeset_off_a_approves_once_detail_has_drawn_the_call(imgui, monke
 
 # -- where the library keeps a column, the diff is its diff view --------------------
 #
-# ``columns_hold`` (tests/conftest.py) is the one configuration in which the
-# library pptmstr is built against keeps a monospace column, so the pane takes
-# this branch by its own measurement. Each test here has a twin above, on the
-# branch the product takes today, and the pair fails if the switch is stuck
-# either way.
+# ``columns_hold`` (tests/conftest.py) is the product as it starts, held to the
+# library keeping a monospace column by the pane's own measurement, with
+# nothing faked. Each test here has a twin on ``own_rows``, the branch a pane
+# takes wherever the library's view is not what draws a diff, and the pair
+# fails if the switch is stuck either way.
 
 
 def _diff_view(rig: Pane, obligation: ApprovalNeeded):
@@ -2300,13 +2304,14 @@ def _binary(tmp_path) -> ApprovalNeeded:
 
 
 def test_a_write_over_a_file_that_is_not_text_says_so_under_either_renderer(
-    seam, monkeypatch, tmp_path
+    own_rows, monkeypatch, tmp_path
 ) -> None:
     """
     The unified diff of a Write over a binary is every line added, exactly as for
     a file being created, and so are this pane's own lines. The record knows
     the difference and the pane says it, above the diff, whoever draws it.
     """
+    seam = own_rows
     obligation = _binary(tmp_path)
     snap = snapshot(record(), needs_you=(obligation,))
     said = inbox.shown_as_new(obligation.approval.texts)
@@ -2373,7 +2378,7 @@ def _diff_box(im):
     return window
 
 
-@pytest.mark.parametrize("held", [False, True], ids=["today", "where columns hold"])
+@pytest.mark.parametrize("held", [False, True], ids=["no diff is the view's", "this one is not"])
 def test_every_line_of_a_diff_past_this_panes_bound_can_be_brought_on_screen_here(
     request, monkeypatch, tmp_path, held: bool
 ) -> None:
@@ -2392,7 +2397,7 @@ def test_every_line_of_a_diff_past_this_panes_bound_can_be_brought_on_screen_her
     declines this one (a character the code face lacks), the pane's own
     renderer is this one.
     """
-    im = request.getfixturevalue("columns_hold" if held else "seam")
+    im = request.getfixturevalue("columns_hold" if held else "own_rows")
     obligation = _long_rewrite(tmp_path, " # π" if held else "")
     snap = snapshot(record(), needs_you=(obligation,))
     everything = _every_native_line(monkeypatch, im)
@@ -2448,8 +2453,9 @@ def test_every_line_of_a_diff_past_this_panes_bound_can_be_brought_on_screen_her
 
 
 def test_a_diff_within_this_panes_bound_is_still_a_wrapped_line_to_an_item(
-    seam, monkeypatch
+    own_rows, monkeypatch
 ) -> None:
+    seam = own_rows
     lines = detail._MAX_DIFF_LINES - 10
     content = "".join(f"line_{n} = {n}\n" for n in range(lines))
     obligation = parked("Write", {"file_path": "nowhere/long.py", "content": content})
@@ -2527,10 +2533,10 @@ def test_where_columns_hold_two_columns_are_offered_only_where_there_is_room(
     assert _diff_view(roomy, obligation).layout.name == "SIDE_BY_SIDE"
 
 
-def test_with_this_panes_own_diff_no_layout_is_offered(seam, monkeypatch) -> None:
+def test_with_this_panes_own_diff_no_layout_is_offered(own_rows, monkeypatch) -> None:
     obligation = parked("Write", {"file_path": "nowhere/new.py", "content": "a = 1\n"})
     snap = snapshot(record(), needs_you=(obligation,))
-    rig = Pane(seam, monkeypatch, width=1300.0)
+    rig = Pane(own_rows, monkeypatch, width=1300.0)
     rig.focus.move(snap, 0)
     rig.frame(snap)
     assert "side by side" not in rig.widgets
@@ -2674,6 +2680,66 @@ def test_where_columns_hold_a_diff_the_library_raises_under_does_not_take_the_pa
         _press_a(rig, snap, bridge)
         assert bridge.resolved == [("p1", True)]
     assert typeset.load_fonts(theme_mod._ASSETS / "fonts" / "Inconsolata-Bold.ttf")
+
+
+def _diff_draw_answers_false(patched) -> None:
+    import advtext
+
+    real = advtext.TypesetDiffView.draw
+    patched.setattr(
+        advtext.TypesetDiffView, "draw", lambda self, **given: bool(real(self, **given)) and False
+    )
+
+
+def _diff_edit_is_cut(patched) -> None:
+    import advtext
+
+    real = advtext.TypesetDiffView.draw
+
+    def cut(self, **given) -> bool:
+        advtext.typesetter.note("a diff edit was cut: block 2: the text is longer than 16 MiB")
+        return bool(real(self, **given))
+
+    patched.setattr(advtext.TypesetDiffView, "draw", cut)
+
+
+@pytest.mark.parametrize(
+    "short",
+    [_diff_draw_answers_false, _diff_edit_is_cut],
+    ids=["draw answers false", "an edit was cut and draw answers true"],
+)
+def test_where_columns_hold_a_is_not_sent_over_a_diff_the_view_set_less_of_than_it_was_handed(
+    columns_hold, monkeypatch, short
+) -> None:
+    """
+    The diff view's two ways of saying it set less than it was handed, neither
+    an exception: a draw that answers false, and an edit the library cut and
+    noted under a draw that answers true. In that frame the reading is of
+    every changed line missing and ``a`` is not sent on it. The next frame is
+    this pane's own lines, all of them, with the library still drawing
+    everything else, and ``a`` is sent.
+    """
+    obligation = parked("Write", {"file_path": "nowhere/new.py", "content": "a = 1\nb = 2\n"})
+    snap = snapshot(record(), needs_you=(obligation,))
+    rig = Pane(columns_hold, monkeypatch)
+    rig.focus.move(snap, 0)
+    bridge = _Sent()
+    with monkeypatch.context() as patched:
+        short(patched)
+        rig.frame(snap)
+    assert review.unset_lines(rig.state, "p1") == 2
+    assert review.withheld(rig.state, obligation.approval) == review.NOT_WHOLE
+    assert "+a = 1" not in rig.said
+    _press_a(rig, snap, bridge)
+    assert bridge.resolved == []
+
+    rig.frame(snap)
+    assert typeset.enabled(typeset.Pane.DETAIL) and typeset.diff_adopted()
+    assert _diff_view(rig, obligation) is None
+    assert "+a = 1" in rig.said and "+b = 2" in rig.said
+    assert review.unset_lines(rig.state, "p1") == 0
+    _press_a(rig, snap, bridge)
+    assert bridge.resolved == [("p1", True)]
 
 
 def test_a_markdown_argument_the_library_raises_under_does_not_take_the_pane(

@@ -51,7 +51,7 @@ Usage:
     scripts/xvfb_shot.sh -- env -u IMTYPESET_LIBRARY -u IMTYPESET_PYTHON \\
         .venv/bin/python scripts/run_typeset_panes.py --out shots/seam2-without
     scripts/xvfb_shot.sh -- .venv/bin/python scripts/run_typeset_panes.py \\
-        --diffs always --out shots/diffs-always
+        --diffs never --out shots/diffs-never
 """
 
 from __future__ import annotations

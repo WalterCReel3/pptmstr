@@ -27,17 +27,46 @@ approval's diff with ``diff()`` and a fenced ``diff`` block of a settled
 document is hosted by the library's diff fences (``fence_diff``); where it is
 not, each pane draws its own rows and a fence is the code of its document.
 
-**It is not so on the library pptmstr is built against.** Measured in pptmstr
-on 2026-10-12 (``scripts/measure_typeset_diff.py``, a window under Xvfb,
-advtext ``38f5fac``, imtypeset ``c9f8902``): at a pixel height of 16 the view
-lays a column out at 7.626 px against a baked 8, draws rows in steps of 7 and
-8 px mixed, rows disagree at one column by up to 13 px, the 40th character of
-a row is 15 px left of where ImGui puts it, and a point on a drawn glyph lands
-on another character for 54 of the 64 glyphs of a 74-character row. The same
-at 14, 18 and 20. At an even **em** (14, 16, 18, 20 px: Inconsolata's advance
-is half an em) every one of those is exact, which is the configuration the
-tests draw the adopted branch in; pptmstr's roles are sized by pixel height,
-so no setting of the product reaches it.
+**It is so on the library pptmstr is built against, on a whole-pixel cell, and
+at every size the product sets a diff at; on the library's default cell it is
+so at none** (``gate.DIFF_CELL``, and ``gate.diff_view``, which makes both the
+view a pane draws and the view that is measured). Measured in pptmstr on
+2026-10-12 (``scripts/measure_typeset_diff.py``, a window under Xvfb, advtext
+``68eb18b``, imtypeset ``2fd705e``, the chrome font and the vendored bold as the
+application loads them, load average 3.8, vertices read and no pixel), with
+the diff role at each pixel height from 12 to 24, which is every text scale
+and role step there is: adjacent columns are one step apart on every row, and
+the step is the advance ImGui has baked for the chrome font at that height (6,
+6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12); rows agree at every column;
+characters 10, 20, 40 and 74 of a row are on ImGui's pens; every glyph is on
+its cell; and a point a quarter and three quarters into each of the 64 glyphs
+of a 74-character row is answered as the positions either side of it. On the
+default cell at 16: a column laid out at 7.626 px against a baked 8, steps of
+7 and 8 mixed, rows up to 13 px apart at one column, a row of 40 characters
+ending 15 px left of ImGui's, and 54 of the 64 answered as a neighbour.
+
+**What the cell costs is the size of the glyphs.** The view draws the face at
+the em whose advance is that whole pixel, on the pitch it was asked for. Same
+run, numbers and nothing about how it looks, which nobody has judged:
+
+- *The em.* At an even pixel height it is 4.9 % larger than the one asked for
+  (16 px: 15.253 becomes 16) and the glyphs come from the raster one pixel
+  taller (17). At an odd one it is the em drawn at the even height below
+  it: 3.2 % smaller than asked at 13, 2.1 at 15, 1.3 at 17, 0.6 at 19, 0.1
+  at 21 and 0.3 % larger at 23, from the raster asked for. **So two pixel
+  heights are one size of glyph** (12 and 13, 14 and 15, to 22 and 23), and
+  a step of the diff role from an even height to the next moves the pitch
+  and nothing else.
+- *A glyph's bitmap* at 14, 16, 18 and 20 px, beside the chrome font's at the
+  height asked for: ``0`` is 7 x 9, 8 x 11, 9 x 12 and 8 x 12 px against 6 x 9,
+  7 x 9, 8 x 11 and 9 x 12; ``m`` is 7 x 7, 8 x 8, 9 x 9 and 10 x 9 against
+  7 x 7, 8 x 7, 9 x 8 and 9 x 9.
+- *The pitch* is the role's (``roles.pitch``): 16, 18, 20 and 23 px. A pane's
+  own rows are the chrome font's line and the item spacing, 21 px, whatever
+  the diff role's size is: they do not follow the role.
+- *What crosses its row.* No printable ASCII glyph, at any height from 12 to
+  24. U+2502, which the code face has, reaches 1 to 4 px above its row and 1
+  to 3 below (2 and 2 at 16; 4 and 3 at 24).
 
 **What an adopted diff view is held to**, since an approval is decided over it:
 
@@ -124,13 +153,16 @@ there is no setting.
   measurement (``gate.columns``), each pane's own renderer where they do not.
 - ``"never"``: each pane's own renderer.
 - ``"always"``: the library's diff view whatever was measured, for looking at
-  it. **What that costs on the library as it is** (advtext ``38f5fac``; the
-  module docstring has the run): at a pixel height of 16 a column is laid out
-  at 7.626 px and drawn in steps of 7 and 8, so rows disagree at one column by
-  up to 13 px, a row of 40 characters ends 15 px left of the same text in
-  ImGui's, and a press on 54 of the 64 glyphs of a 74-character row selects
-  from a neighbouring character. An approver would be reading a diff whose
-  columns drift and copying text other than what the highlight covers.
+  it. It differs from ``"measured"`` only where the measurement says no, and
+  **what it costs there** is what the measurement found. On the library's
+  default cell (the module docstring has the run) that is, at a pixel height
+  of 16, rows that disagree at one column by up to 13 px, a row of 40
+  characters ending 15 px left of the same text in ImGui's, and a press on
+  54 of the 64 glyphs of a 74-character row selecting from a neighbouring
+  character: an approver reading a diff whose columns drift and copying text
+  other than what the highlight covers. Nor is a diff asked about
+  (``unfit``), so a row with a character the code face lacks is drawn off
+  its columns.
 """
 
 
@@ -175,8 +207,21 @@ def renderer() -> str | None:
     if ADOPT == "always":
         return f"diffs.ADOPT is 'always': the library {found.why}"
     if found.holds:
-        return f"diffs are the library's: it {found.why}"
+        return f"diffs are the library's: it {found.why}{_raster(found)}"
     return f"diffs are pptmstr's own rows: the library {found.why}"
+
+
+def _raster(found: gate.Columns) -> str:
+    """
+    What a whole-pixel cell did to the size of a diff's glyphs, as the end of
+    ``renderer``'s sentence: the pixel height they are rasterised at where it
+    is not the one the diff role is set to (the module docstring has why), and
+    nothing where it is.
+    """
+    asked = roles.px(Role.DIFF)
+    if not found.size or abs(found.size - asked) < 0.005:
+        return ""
+    return f", in glyphs of {found.size:g} px for the {asked:g} px the role is set to"
 
 
 def draws(pending: PendingApproval) -> bool:
@@ -200,8 +245,13 @@ def above(model: Diff) -> tuple[tuple[str, bool], ...]:
 
     A header row is one line, cut at the view's edge, and the view scrolls its
     code and not its headers, so the end of a long path and whatever warning
-    follows it can be where nothing reaches them. The library as built against
-    does not say whether a header fit (request P16), so these are said always.
+    follows it can be where nothing reaches them. **These are said always, and
+    not only where a header was cut.** The library can say whether a file's
+    header fit (``TypesetDiffView.headers``, request P16), and that answer is
+    not used: it covers a file's row and not a hunk's section; under a height
+    cap it does not know the width before the draw, since the child's
+    scrollbar narrows it; and a warning that is above the view at one width of
+    the pane and inside a row at another is one an approver has to find twice.
     For each file, warnings first: the gate's prediction where the model still
     carries it (``diff(warning=True)``), lines read as nothing, and characters
     drawn as a placeholder, in the library's own words for them. Then the
@@ -268,6 +318,11 @@ def unfit(model: Diff) -> str | None:
     ``None`` wherever the columns do not hold at all: the view is then drawn
     only because ``ADOPT`` says so, to be looked at, and no row of it is on a
     grid for these to be off.
+
+    **A lone surrogate is such a character**: ``json.loads`` makes one of
+    ``"\\udc80"`` in a tool's arguments, the library would set it as U+FFFD
+    and say nothing, and the code face has no glyph for it, so the diff is its
+    pane's own rows under a line naming it (``tests/test_typeset_diffs.py``).
     """
     found = columns()
     if not found.holds:
@@ -600,7 +655,7 @@ def diff(
     the library stopped under the diff, whatever it raised and wherever, and
     when the view's draw set less than it was handed; none otherwise.
     """
-    from advtext import Diff, DiffLayout, TypesetDiffView, TypesetUnavailable
+    from advtext import Diff, DiffLayout, TypesetUnavailable
 
     im = views._frame()
     entry = cache._held(key, "diff")
@@ -668,7 +723,7 @@ def diff(
         theme, palette = themes.diff_theme(), themes.palette()
         if view is None:
             with _MAKING:
-                view = TypesetDiffView(model, theme, layout=layout)
+                view = gate.diff_view(model, theme, layout=layout)
             entry.segments = [views._Segment((), view)]
         with _DRAWING:
             if view.layout is not layout:

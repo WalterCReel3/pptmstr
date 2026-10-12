@@ -672,7 +672,7 @@ def _preview(cache: typeset.ViewCache, role: typeset.Role) -> None:
             # As a pane draws one: the library's diff view where its columns
             # hold, and the rows as text at the role's size where they do not.
             # Fenced in markdown the sample would be a code block's size.
-            if not typeset.diff_adopted() or typeset.diff(cache, key, _DIFF) is None:
+            if not typeset.diff_adopted() or _diff_sample(cache, key) is None:
                 typeset.plain(cache, key, SAMPLES[role], role=role)
         case typeset.Role.LITERAL:
             typeset.plain(cache, key, SAMPLES[role], role=role)
@@ -682,6 +682,20 @@ def _preview(cache: typeset.ViewCache, role: typeset.Role) -> None:
             typeset.label(SAMPLES[role], weight=typeset.Weight.REGULAR)
         case _:
             assert_never(role)
+
+
+def _diff_sample(cache: typeset.ViewCache, key: tuple[str, str]) -> float | None:
+    """
+    The diff role's sample as the library's diff view, or ``None`` where that
+    view does not draw it (``typeset.diff``).
+
+    Two columns: the removed and the added line are then one row, so the
+    sample is a row shorter than the same diff unified, which with every role
+    at its largest is the difference between the dialog fitting a screen 900
+    px high and scrolling. The glyphs, the cell and the pitch are the ones a
+    pane draws either way.
+    """
+    return typeset.diff(cache, key, _DIFF, side_by_side=True)
 
 
 def _why(reason: str | None) -> None:

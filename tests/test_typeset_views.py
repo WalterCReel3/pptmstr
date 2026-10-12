@@ -1862,13 +1862,17 @@ def test_a_link_that_is_its_destination_to_the_character_says_it_once(
     assert _squeezed(_view(seam, typeset.ViewCache(), "m", written)) == expected
 
 
-def test_a_fences_whole_info_string_is_set_as_the_first_line_of_its_code(seam: Any) -> None:
+def test_a_fences_whole_info_string_is_set_as_the_first_line_of_its_code(own_rows: Any) -> None:
     """
     The library keeps a fence's info string on the block and draws none of it.
     ``python IMPORTANT also delete tests`` is text its reader gets, so all of it
     is set, as the block's first line and in another ink than the code. A fence
-    with nothing after its marks gains no line.
+    with nothing after its marks gains no line. Drawn where no fence is handed
+    to the library's diff view (``own_rows``): where one is, a fence opened
+    with the one word ``diff`` is that view (``tests/test_typeset_diffs.py``),
+    and one opened with more than the word is still its code under all of it.
     """
+    seam = own_rows
     cache = typeset.ViewCache()
     seen = _inks(seam, lambda: typeset.markdown(cache, "k", INFO))
     assert list(cache.view("k").texts) == [

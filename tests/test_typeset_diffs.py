@@ -3,12 +3,13 @@ The diff model of a parked call, who draws a diff, and which fences are honest d
 
 The model needs no window and no library context. Who draws a diff is a
 measurement of the library that is running (``gate.columns``): it is held
-here to be false at every pixel height a role reaches on the library pptmstr
-is built against, true at an even em, and to agree both ways with what a diff
-view drawn in a window does. ``diff()`` and a fenced diff are tested on both
-answers; ``columns_hold`` (``tests/conftest.py``) is the configuration the
-second is drawn in. The strict xfail under P21 is the same measurement taken
-from a window, and comes off with the request.
+here to be true at every pixel height the product sets a diff at, with the
+diff view on a whole-pixel cell (``gate.DIFF_CELL``), false at every one of
+them on the library's default cell, which is why the cell is passed, and to
+agree both ways with what a diff view drawn in a window does. ``diff()`` and
+a fenced diff are tested on both answers: ``columns_hold`` is the product as
+it starts, and ``own_rows`` and ``default_cell`` are the other answer, forced
+(``tests/conftest.py``).
 """
 
 from __future__ import annotations
@@ -33,7 +34,6 @@ from tests.test_typeset_views import (
     BOLD,
     LONG_LABEL,
     P16,
-    P21,
     WINDOW,
     _fences,
     _native_lines,
@@ -448,17 +448,22 @@ def test_a_diff_the_library_stops_under_says_so_and_reports_its_rows_missing(
     assert typeset.load_fonts(BOLD), "a load is the way back"
 
 
-@pytest.mark.xfail(strict=True, reason=P21)
+def _chrome_advance(seam: Any, tall: float) -> float:
+    """
+    The advance ImGui has baked for the chrome font, the context's first, at a
+    pixel height: the step of the same text through ``ImDrawList.add_text``.
+    """
+    return float(seam.get_io().fonts.fonts[0].get_font_baked(tall).get_char_advance(ord("m")))
+
+
 def test_a_diff_row_keeps_its_columns_at_the_advance_imgui_draws_the_face_at(seam: Any) -> None:
     """
-    Why no pane calls ``diff()`` on this library. Forty of one character on a row of the diff
+    Why a pane calls ``diff()``. Forty of one character on a row of the diff
     view are forty glyphs one step apart, and the step is the advance ImGui has
-    baked for the face: measured, they are steps of 7 and 8 px against a baked 8
-    (``scripts/measure_typeset_diff.py`` has the rest: 13 px between rows at one
-    column, and a press on a glyph answered as its neighbour).
+    baked for the chrome font at the diff role's pixel height: 8 px at 16.
     """
-    baked = typeset.face_font("CODE").get_font_baked(16.0).get_char_advance(ord("m"))
-    assert baked == 8.0
+    baked = _chrome_advance(seam, 16.0)
+    assert baked == 8.0 and typeset.px(Role.DIFF) == 16.0
     texts = (approval.DiffText("", "m" * 40 + "\n", "x"),)
     cache = typeset.ViewCache()
     lefts: list[float] = []
@@ -559,9 +564,9 @@ def test_a_diff_header_too_long_for_its_view_is_said_above_it_warning_first(
     The view's file header is one line cut at the view's edge, and the view does
     not scroll its headers (the strict xfail under P16 above): under a long path
     the end of the path and ``may not apply`` are where nothing reaches them.
-    The library pptmstr is built against cannot say whether a header fit, so
-    the seam says the header's words above the view always, the warning before
-    the path, wrapped to the view's width and so all in sight.
+    The seam says the header's words above the view always (``diffs.above``
+    says why not only where the library answers that one was cut), the warning
+    before the path, wrapped to the view's width and so all in sight.
     """
     texts = (approval.DiffText("a\n", "b\n", LONG_LABEL, will_not_apply="anchor not found"),)
     cache = typeset.ViewCache()
@@ -602,10 +607,23 @@ def test_what_is_wrong_with_a_file_is_said_above_its_diff_before_its_name(
         ("blob.bin  (existing file is not readable as text; shown as new)  (new file)", False),
         ("crlf.txt  (line endings only: CRLF -> LF)", False),
     )
+    # Drawn, a diff says those lines. The first file is left out of the
+    # drawing: U+202E is a character the code face has no glyph for, so that
+    # diff is its pane's own rows under a line naming it (``diffs.unfit``).
     cache = typeset.ViewCache()
     said = _native_lines(seam, monkeypatch)
-    frame(seam, lambda: typeset.diff(cache, "k", texts))
-    assert said == [line for line, _ in diffs.above(cache.view("k").diff)]
+    frame(seam, lambda: typeset.diff(cache, "k", texts[1:]))
+    drawn = [line for line, _ in diffs.above(cache.view("k").diff)]
+    assert said == drawn and len(drawn) == 4 and drawn[0] == "contains control characters"
+
+    got: list[float | None] = []
+    stated = _said_by_the_seam(monkeypatch)
+    frame(seam, lambda: got.append(typeset.diff(cache, "bidi", texts[:1])))
+    assert got == [None] and cache.view("bidi") is None
+    assert stated == [
+        "this diff is the pane's own rows: a row holds U+202E, which the code face "
+        "has no glyph for, and the library would set what follows off its column"
+    ]
 
 
 def test_a_model_made_from_texts_has_nothing_in_a_header_row_but_what_is_said_above(
@@ -681,11 +699,23 @@ def test_a_row_wider_than_its_view_is_not_broken_and_its_end_is_in_reach(seam: A
 
 # -- who draws a diff: a measurement of the library that is running --------------------
 
-PIXEL_HEIGHTS = (14.0, 15.0, 16.0, 17.0, 18.0, 19.0, 20.0)
+PIXEL_HEIGHTS = tuple(float(tall) for tall in range(12, 25))
 """
-Every pixel height a diff's rows are set at with the UI font at 16 and the
-operator's scale and step anywhere they go: ``roles.STEPS`` is -2 to +4.
+Every pixel height a diff's rows are set at with the UI font at 16: the
+operator's text scale takes the body from 14 to 20 (``roles.SCALES``) and the
+diff role's step is -2 to +4 on top of it (``roles.STEPS``).
 """
+
+
+def _diff_at(tall: float) -> None:
+    """
+    Set the diff role at ``tall`` pixels the way the settings dialog does: a
+    text scale and a step for the role that come to it.
+    """
+    body = min(max(tall, 14.0), 20.0)
+    style = roles.RoleStyle(roles.Slot.MONOSPACE, int(tall - body))
+    typeset.configure(typeset=True, scale=body / typeset.BODY_PX, roles={Role.DIFF: style})
+    assert typeset.px(Role.DIFF) == tall
 
 
 def _at(tall: float, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -705,47 +735,91 @@ def _em(em: float) -> float:
 
 def test_the_measurement_is_what_decides_and_nothing_has_overridden_it() -> None:
     assert diffs.ADOPT == "measured"
+    assert gate.DIFF_CELL == "pixel"
 
 
-def test_every_step_a_role_can_take_is_a_pixel_height_the_measurement_was_taken_at() -> None:
-    assert {typeset.BODY_PX + step for step in typeset.STEPS} <= set(PIXEL_HEIGHTS)
+def test_every_size_the_product_sets_a_diff_at_is_a_pixel_height_measured_here() -> None:
+    reached = set()
+    for scale in roles.SCALES:
+        body = roles._half_up(typeset.BODY_PX * scale)
+        reached |= {body + step for step in typeset.STEPS}
+    assert reached <= set(PIXEL_HEIGHTS)
+    assert {min(reached), max(reached)} == {PIXEL_HEIGHTS[0], PIXEL_HEIGHTS[-1]}
 
 
 @pytest.mark.parametrize("tall", PIXEL_HEIGHTS)
-def test_on_the_library_as_built_against_a_diffs_columns_hold_at_no_pixel_height(
-    seam: Any, monkeypatch: pytest.MonkeyPatch, tall: float
+def test_on_a_whole_pixel_cell_a_diffs_columns_hold_at_every_size_the_product_sets(
+    seam: Any, tall: float
 ) -> None:
     """
-    Requests P21 and P22 as the seam measures them, at every size the product
-    sets a diff at. The library lays a column out from the font file, where
-    ImGui draws the rasteriser's whole pixel: so the cell is not the baked
-    advance, glyphs of a long row are off their column, and a press on a drawn
-    glyph lands on a neighbour. While this holds no pane draws a diff with the
-    library. **It comes off with P21**, as the strict xfail below does: on a
-    library that keeps its columns this test fails and the panes have already
-    changed renderer.
+    Requests P21 and P22 as the seam measures them, with the diff view on the
+    cell pptmstr asks for, at every size the product sets a diff at: the cell
+    is the advance ImGui has baked, no glyph of the long row is off its column,
+    no press lands on a neighbour, and what follows a tab is on the grid. So
+    DETAIL and the inbox draw a diff with the library. And the cell is the
+    chrome font's step at the height the role is set to, which is what puts a
+    row on the pens of the same text in ImGui's.
+
+    **What it costs is pinned with it**: the glyphs are drawn at an em of two
+    cells and not the em asked for, from the raster a pixel taller where the
+    height is even (``diffs`` has the numbers).
     """
-    _at(tall, monkeypatch)
-    assert typeset.px(Role.DIFF) == tall
+    _diff_at(tall)
+    found = diffs.columns()
+    assert found.holds, found
+    assert found.baked == _chrome_advance(seam, tall) == float(int(tall) // 2)
+    assert abs(found.cell - found.baked) < gate.COLUMN_EPSILON_PX
+    assert (found.glyphs, found.off, found.mishit, found.tabs) == (156, 0, 0, True)
+    assert diffs.adopted() and typeset.diff_adopted()
+    assert found.why == f"keeps a {found.baked:g} px column: laid out, drawn and hit over a row"
+
+    grid = gate.diff_view(advtext.Diff(), diffs.themes.diff_theme()).grid
+    assert grid.cell == found.baked and grid.row == typeset.diff_row_height()
+    drawn, asked = grid.em * grid.scale, tall * advtext.em_size_for_pixel_height(
+        advtext.Face.CODE, 1.0
+    )
+    assert drawn == pytest.approx(2.0 * found.baked, abs=1e-3)
+    even = tall % 2 == 0
+    assert found.size == tall + (1.0 if even else 0.0), "the raster the glyphs came from"
+    if even:
+        assert drawn / asked == pytest.approx(1.049, abs=0.001)
+    else:
+        assert 0.967 < drawn / asked < 1.004
+
+
+@pytest.mark.parametrize("tall", PIXEL_HEIGHTS)
+def test_on_the_librarys_default_cell_a_diffs_columns_hold_at_no_size_the_product_sets(
+    default_cell: Any, tall: float
+) -> None:
+    """
+    Why ``gate.DIFF_CELL`` is passed. A host that passes nothing gets a column
+    laid out from the font file, where ImGui draws the rasteriser's whole
+    pixel: the cell is not the baked advance, glyphs of a long row are off
+    their column, and but for one height a press on a drawn glyph lands on a
+    neighbour. With that cell no pane would draw a diff with the library.
+    """
+    _diff_at(tall)
     found = diffs.columns()
     assert not found.holds
     assert found.size == tall, "the row was read from the bake it was drawn from"
     assert found.baked == float(int(found.baked)) and abs(found.cell - found.baked) > 0.009
     assert found.glyphs == 156 and found.off > 70
+    assert found.mishit > 90 or tall == 21.0
     assert not diffs.adopted() and not typeset.diff_adopted()
     assert "px column where ImGui draws" in found.why
 
 
 @pytest.mark.parametrize("em", [12.0, 14.0, 16.0, 18.0, 20.0, 22.0])
-def test_at_an_even_em_a_diffs_columns_hold_by_the_same_measurement(
-    seam: Any, monkeypatch: pytest.MonkeyPatch, em: float
+def test_on_the_default_cell_they_hold_at_an_even_em_by_the_same_measurement(
+    default_cell: Any, monkeypatch: pytest.MonkeyPatch, em: float
 ) -> None:
     """
-    The configuration in which the library as it is keeps a column: Inconsolata's
-    advance is half an em, so at an even em the cell laid out is the whole pixel
-    ImGui bakes. Every glyph of the row is then on its column and every press
-    lands on the glyph it was made on. This is where the other branch of every
-    pane is drawn by a run (``columns_hold``).
+    What the whole-pixel cell does, shown without it: Inconsolata's advance is
+    half an em, so at an even em the cell laid out from the font file is the
+    whole pixel ImGui bakes, and every glyph of the row is on its column and
+    every press lands on the glyph it was made on. No setting of the product
+    is an even em, since a role is sized by pixel height: the seam is told
+    here that the UI font is a fraction of a pixel taller than it can be.
     """
     _at(_em(em), monkeypatch)
     found = diffs.columns()
@@ -756,11 +830,70 @@ def test_at_an_even_em_a_diffs_columns_hold_by_the_same_measurement(
 
 
 @pytest.mark.parametrize("em", [13.0, 15.0, 17.0])
-def test_at_an_odd_em_they_do_not(seam: Any, monkeypatch: pytest.MonkeyPatch, em: float) -> None:
+def test_and_at_an_odd_em_they_do_not(
+    default_cell: Any, monkeypatch: pytest.MonkeyPatch, em: float
+) -> None:
     _at(_em(em), monkeypatch)
     found = diffs.columns()
     assert not found.holds and found.off and found.mishit
     assert abs(found.cell - em / 2.0) < gate.COLUMN_EPSILON_PX, "half a pixel off the grid"
+
+
+def test_the_view_a_pane_draws_and_the_view_that_is_measured_are_made_by_one_function(
+    seam: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The measurement answers for the view a pane draws only if the two are one
+    configuration, so one function makes both (``gate.diff_view``) and passes
+    the cell. Held by counting: a measurement, a diff drawn and a fence hosted
+    are each a diff view made with ``cell="pixel"``, and none is made without.
+    """
+    made: list[tuple[str, object]] = []
+    real = advtext.TypesetDiffView.__init__
+
+    def recording(self: Any, *given: Any, **named: Any) -> None:
+        made.append(("view", named.get("cell")))
+        real(self, *given, **named)
+
+    real_fences = advtext.TypesetDiffFences.__init__
+
+    def recording_fences(self: Any, *given: Any, **named: Any) -> None:
+        made.append(("fences", named.get("cell")))
+        real_fences(self, *given, **named)
+
+    monkeypatch.setattr(advtext.TypesetDiffView, "__init__", recording)
+    monkeypatch.setattr(advtext.TypesetDiffFences, "__init__", recording_fences)
+    monkeypatch.setattr(diffs.views, "_FENCES", [])
+    assert typeset.load_fonts(BOLD), "so that the measurement is taken again"
+    assert made == [("view", "pixel")], "the measurement at the load"
+    made.clear()
+    cache = typeset.ViewCache()
+    frame(seam, lambda: typeset.diff(cache, "k", _THREE))
+    assert made == [("view", "pixel")] and cache.view("k").cell == "pixel"
+    made.clear()
+    source = "Before.\n\n```diff\n-old1\n+new1\n```\n"
+    frame(seam, lambda: typeset.markdown(cache, "fenced", source))
+    assert made[0] == ("fences", "pixel") and len(made) == 2
+    (at,) = cache.view("fenced").hosts
+    assert cache.view("fenced").hosted(at).view.cell == "pixel"
+    monkeypatch.undo()
+    assert typeset.load_fonts(BOLD)
+
+
+def test_the_cell_held_to_the_bound_is_the_one_the_row_was_laid_out_at(seam: Any) -> None:
+    """
+    On a whole-pixel cell the view answers the pixel it aimed at wherever the
+    layout came within a thousandth of it. A thousandth a column is half a
+    pixel after 500, so the measured row's own width is what is held to
+    ``COLUMN_EPSILON_PX`` and what a row's reach is worked out from: at 16 the
+    view says 8 and the row was laid out at 7.999989 a character, which is
+    half a pixel after some 45,000 columns and not after a million.
+    """
+    found = diffs.columns()
+    grid = gate.diff_view(advtext.Diff(), diffs.themes.diff_theme()).grid
+    assert grid.cell == found.baked == 8.0
+    assert 5e-6 < abs(found.cell - 8.0) < 2e-5
+    assert 40_000 < found.reach < 50_000
 
 
 def test_a_row_too_short_to_show_it_is_not_enough_if_the_cell_is_not_the_baked_advance(
@@ -783,7 +916,6 @@ def test_a_row_too_short_to_show_it_is_not_enough_if_the_cell_is_not_the_baked_a
 
     monkeypatch.setattr(advtext.TypesetDiffView, "grid", property(a_thousandth_wide))
     assert typeset.load_fonts(BOLD), "so that nothing measured earlier is held"
-    _at(_em(16.0), monkeypatch)
     found = diffs.columns()
     assert (found.off, found.mishit) == (0, 0)
     assert 0.0009 < found.cell - found.baked < 0.0011 and not found.holds
@@ -797,9 +929,9 @@ def test_a_cell_that_is_the_baked_advance_is_not_enough_if_one_glyph_is_drawn_of
 ) -> None:
     """
     The three things asked are asked separately. Here the library is the one
-    that keeps its columns, at an even em, and what its draw emitted is read
-    with one glyph a pixel right of where it was drawn: the cell is still the
-    baked advance, and the columns do not hold.
+    that keeps its columns, and what its draw emitted is read with one glyph a
+    pixel right of where it was drawn: the cell is still the baked advance,
+    and the columns do not hold.
     """
     real = gate._glyph_quads
 
@@ -813,7 +945,6 @@ def test_a_cell_that_is_the_baked_advance_is_not_enough_if_one_glyph_is_drawn_of
 
     monkeypatch.setattr(gate, "_glyph_quads", nudged)
     assert typeset.load_fonts(BOLD), "so that nothing measured earlier is held"
-    _at(_em(16.0), monkeypatch)
     found = diffs.columns()
     assert abs(found.cell - found.baked) < gate.COLUMN_EPSILON_PX
     assert (found.off, found.holds) == (1, False)
@@ -839,7 +970,6 @@ def test_a_row_drawn_on_its_columns_is_not_enough_if_a_press_lands_on_a_neighbou
 
     monkeypatch.setattr(native.Document, "hit_test", shifted)
     assert typeset.load_fonts(BOLD), "so that nothing measured earlier is held"
-    _at(_em(16.0), monkeypatch)
     found = diffs.columns()
     assert abs(found.cell - found.baked) < gate.COLUMN_EPSILON_PX and found.off == 0
     assert found.mishit == 156 and not found.holds
@@ -879,9 +1009,9 @@ def _drawn_row(seam: Any, text: str) -> tuple[Any, list[float]]:
     return cache.view("k"), lefts
 
 
-@pytest.mark.parametrize("held", [False, True], ids=["pixel height 16", "em 16"])
+@pytest.mark.parametrize("held", [False, True], ids=["the default cell", "a whole-pixel cell"])
 def test_what_one_measured_row_says_is_what_a_diff_view_drawn_in_a_window_does(
-    seam: Any, monkeypatch: pytest.MonkeyPatch, held: bool
+    request: pytest.FixtureRequest, held: bool
 ) -> None:
     """
     The measurement sets a row in a document of its own and never opens a
@@ -890,14 +1020,17 @@ def test_what_one_measured_row_says_is_what_a_diff_view_drawn_in_a_window_does(
     list. Where the measurement holds they are one baked advance apart, and a
     point a quarter and three quarters into each glyph is answered by the
     view's own document as the positions either side of that character; where
-    it does not, neither is so.
+    it does not, neither is so. Both at the product's 16 px: the answer that
+    holds is the product's, and the other is the same view on the cell the
+    library has when it is passed none.
     """
-    _at(_em(16.0) if held else 16.0, monkeypatch)
+    seam = request.getfixturevalue("seam" if held else "default_cell")
     found = diffs.columns()
     assert found.holds is held
     view, lefts = _drawn_row(seam, "m" * 40)
     assert len(lefts) == 40
-    assert abs(view.grid.cell - found.cell) < 1e-9, "the row measured is the view's row"
+    assert view.cell == gate.DIFF_CELL == ("pixel" if held else "font")
+    assert abs(view.grid.cell - found.cell) < 2e-5, "the row measured is the view's row"
     steps = {b - a for a, b in zip(lefts, lefts[1:], strict=False)}
     assert (steps == {found.baked}) is held, steps
 
@@ -926,17 +1059,17 @@ def test_a_measurement_is_taken_once_for_a_size_and_again_after_a_load(
     monkeypatch.setattr(gate, "_measured_columns", lambda theme: (taken.append(1), real(theme))[1])
     roles.moved()
     for _ in range(3):
-        assert not diffs.adopted()
+        assert diffs.adopted()
         assert typeset.diff_renderer()
     assert len(taken) == 0, "the size was measured by an earlier test and is still held"
     assert typeset.load_fonts(BOLD)
     for _ in range(3):
-        assert not diffs.adopted()
+        assert diffs.adopted()
     assert len(taken) == 1
-    _at(_em(16.0), monkeypatch)
+    _diff_at(19.0)
     for _ in range(3):
         assert diffs.adopted()
-    assert len(taken) == 2
+    assert len(taken) == 2, "another size is another row"
 
 
 def test_a_row_that_cannot_be_measured_does_not_hold_and_stops_nothing(
@@ -953,7 +1086,6 @@ def test_a_row_that_cannot_be_measured_does_not_hold_and_stops_nothing(
 
     monkeypatch.setattr(gate, "_measured_columns", broken)
     assert typeset.load_fonts(BOLD), "so that nothing measured earlier is held"
-    _at(_em(16.0), monkeypatch)
     found = diffs.columns()
     assert not found.holds and "could not be measured (AttributeError" in found.why
     assert not diffs.adopted()
@@ -962,11 +1094,11 @@ def test_a_row_that_cannot_be_measured_does_not_hold_and_stops_nothing(
     assert typeset.load_fonts(BOLD)
 
 
-@pytest.mark.parametrize("held", [False, True], ids=["pixel height 16", "em 16"])
+@pytest.mark.parametrize("held", [False, True], ids=["the default cell", "a whole-pixel cell"])
 def test_one_constant_overrides_the_measurement_either_way(
-    seam: Any, monkeypatch: pytest.MonkeyPatch, held: bool
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch, held: bool
 ) -> None:
-    _at(_em(16.0) if held else 16.0, monkeypatch)
+    request.getfixturevalue("seam" if held else "default_cell")
     assert diffs.adopted() is held
     monkeypatch.setattr(diffs, "ADOPT", "always")
     assert diffs.adopted()
@@ -996,16 +1128,21 @@ def test_the_sentence_says_who_draws_a_diff_and_by_what_measurement(
     One line, for the Text menu and under the settings dialog's master switch:
     an operator cannot tell from a diff which renderer drew it, or why.
     """
+    held = "diffs are the library's: it keeps a 8 px column: laid out, drawn and hit over a row"
     assert typeset.diff_renderer() == (
-        "diffs are pptmstr's own rows: the library "
-        "lays out a 7.626 px column where ImGui draws 8 px"
+        f"{held}, in glyphs of 17 px for the 16 px the role is set to"
     )
     typeset.configure(typeset=False)
     assert typeset.diff_renderer() is None, "the switch is its own sentence"
     typeset.configure(typeset=True)
-    _at(_em(16.0), monkeypatch)
+    # At an odd height the glyphs are from the raster asked for: nothing to add.
+    _diff_at(17.0)
+    assert typeset.diff_renderer() == held
+    _diff_at(16.0)
+    monkeypatch.setattr(gate, "DIFF_CELL", "font")
     assert typeset.diff_renderer() == (
-        "diffs are the library's: it keeps a 8 px column: laid out, drawn and hit over a row"
+        "diffs are pptmstr's own rows: the library "
+        "lays out a 7.626 px column where ImGui draws 8 px"
     )
 
 
@@ -1014,22 +1151,23 @@ def test_the_sentence_says_who_draws_a_diff_and_by_what_measurement(
 
 @pytest.mark.parametrize(("name", "lines"), _fences(), ids=[name for name, _ in _fences()])
 def test_every_line_of_a_diff_fence_is_set_settled_and_arriving(
-    seam: Any, name: str, lines: list[str]
+    own_rows: Any, name: str, lines: list[str]
 ) -> None:
     """
     The library's diff reader keeps every line and its view draws only some: what
     it files as a file's header lines -- a sentence over ``---``, a mail's message,
     a line under a hunk that had its count -- is on the model and not on screen.
     In a concern body that is a sentence the recipient reads and the approver
-    does not. On the library pptmstr is built against no fence is handed to the
-    diff view (its rows do not keep their columns: ``diffs.adopted``), so
-    whatever a fence holds is the code of its document, every line of it,
-    under the word it was opened with. The test after this one draws the same
-    fences where the columns hold.
+    does not. Where a diff is not the library's (``diffs.adopted``, here by
+    the override) no fence is handed to the diff view, so whatever a fence
+    holds is the code of its document, every line of it, under the word it
+    was opened with. The test after this one draws the same fences as the
+    product does, where the columns hold.
 
     Arriving, the fence is looked at after each whole line, still open: at no
     point is a line that has arrived missing.
     """
+    seam = own_rows
     body = "".join(line + "\n" for line in lines)
     source = f"Before.\n\n```diff\n{body}```\n\nAfter.\n"
     cache = typeset.ViewCache()
@@ -1101,8 +1239,8 @@ def test_where_columns_hold_an_honest_diff_fence_is_a_diff_view_and_every_line_i
     hosted by the library's diff fences in its document's view, at the diff
     role's size, and the lines the view puts in header rows, which it cuts at
     its edge, are a code block above it. One that holds a line no view would
-    draw is the code of its document under the word it was opened with, as on
-    the library that does not keep its columns. A stream hosts none.
+    draw is the code of its document under the word it was opened with, as it
+    is where no diff is the library's. A stream hosts none.
     """
     seam = columns_hold
     # As the library's reader has a fence: a tab is a tab.
@@ -1315,18 +1453,20 @@ def test_a_diff_the_view_set_less_of_than_it_was_handed_is_unset_and_then_the_pa
     assert got[2] is not None and cache.unbuilt("k") == 0, "another diff is asked of the library"
 
 
-def test_a_diff_with_characters_no_face_has_is_set_whole(
+def test_a_diff_with_characters_no_face_has_is_set_whole_where_nothing_asks_about_it(
     seam: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """
     What a false answer does not track: a row with an emoji, CJK, Greek and a
-    control character draws true. (Where the columns hold such a row is the
-    pane's own for another reason: ``unfit``.)
+    control character draws true. So the draw's answer is no guard for such a
+    row, and it is asked about before it is handed over (``unfit``), which is
+    switched off here to reach the draw: the product's answer is the test
+    after ``unfit``'s own, the pane's own rows.
     """
     said = _said_by_the_seam(monkeypatch)
+    monkeypatch.setattr(diffs, "unfit", lambda model: None)
     texts = (approval.DiffText("a\n", "x \U0001f600 y 漢 π \x01 z\n", "x.py"),)
     cache = typeset.ViewCache()
-    assert not diffs.adopted()
     for _ in range(3):
         frame(seam, lambda: typeset.diff(cache, "k", texts))
         assert cache.unbuilt("k") == 0 and cache.view("k") is not None
@@ -1391,16 +1531,36 @@ def test_anything_else_the_library_raises_under_a_diff_is_the_library_stopping(
     assert typeset.load_fonts(BOLD)
 
 
-def test_a_lone_surrogate_in_a_diff_row_is_drawn_and_stops_nothing(
+def test_a_diff_row_with_a_lone_surrogate_is_the_panes_own_and_stops_nothing(
     seam: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # The library sets a lone surrogate as U+FFFD where it cannot encode it.
+    """
+    ``json.loads`` makes a lone surrogate of ``"\\udc80"`` in a tool's
+    arguments. The library sets one as U+FFFD, raises nothing and notes
+    nothing, so an approver would read a replacement character with no word
+    that the text holds something else. It is not handed over: the code face
+    has no glyph for it, so the diff is its pane's own rows under a line that
+    names it, and the library goes on drawing.
+    """
     said = _said_by_the_seam(monkeypatch)
     cache = typeset.ViewCache()
     texts = (approval.DiffText("a\n", "b \udc80 c\n", "x.py"),)
-    frame(seam, lambda: typeset.diff(cache, "k", texts))
-    assert said == []
-    assert cache.unbuilt("k") == 0
+    assert gate.code_lacks("b \udc80 c") == ("\udc80",)
+    got: list[float | None] = []
+    frame(seam, lambda: got.append(typeset.diff(cache, "k", texts)))
+    assert got == [None] and cache.view("k") is None and cache.unbuilt("k") == 0
+    assert said == [
+        "this diff is the pane's own rows: a row holds U+DC80, which the code face "
+        "has no glyph for, and the library would set what follows off its column"
+    ]
+    typeset.pre_frame()
+    assert typeset.can_draw()
+
+    # What the library does with it when nothing asks: U+FFFD, and no word.
+    said.clear()
+    monkeypatch.setattr(diffs, "unfit", lambda model: None)
+    frame(seam, lambda: got.append(typeset.diff(cache, "unasked", texts)))
+    assert got[1] is not None and cache.unbuilt("unasked") == 0 and said == []
     typeset.pre_frame()
     assert typeset.can_draw()
 
@@ -1433,7 +1593,7 @@ def test_a_row_with_a_character_the_code_face_lacks_is_off_its_columns_where_the
 ) -> None:
     """
     Why the rule below exists, on the library as it is. The measurement is of
-    ASCII in the code face and holds at this em. A row with U+03C0 and U+0416
+    ASCII in the code face and holds at this size. A row with U+03C0 and U+0416
     in it, drawn by the diff view in a window: the ``x`` after the first is
     2 px right of its column and the one after the second a whole column
     right of its own, because the library set each letter from the
@@ -1489,7 +1649,9 @@ def test_where_columns_hold_a_diff_with_such_a_row_is_not_given_to_the_view_and_
             "has no glyph for, and the library would set what follows off its column",
         ]
     assert cache.unbuilt("greek") == 0 and cache.unbuilt("ascii") == 0
-    assert typeset.diff_renderer() == f"diffs are the library's: it {diffs.columns().why}"
+    assert (typeset.diff_renderer() or "").startswith(
+        f"diffs are the library's: it {diffs.columns().why}"
+    ), "one diff that is the pane's own does not change who draws diffs"
 
 
 def test_context_a_click_brings_in_is_asked_about_as_the_rows_before_it_were(

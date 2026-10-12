@@ -147,7 +147,8 @@ installed at the commit `advtext.ref` names, which draws through the native imty
 library built beside the `imgui-bundle` wheel — instead of ImGui's
 own text calls: proportional prose, real italics, selectable text. An approval's diff
 is the library's diff view only where a measurement of the running library says it
-keeps a monospace column; the pinned one does not, so today each pane draws its own.
+keeps a monospace column; the pinned one does, on a whole-pixel cell, so DETAIL and
+NEEDS YOU draw a diff with it, and with their own rows for a diff it is not given.
 pptmstr marks every baked font size used each frame, so ImGui discards none under a
 frame. [pptmstr/ui/typeset/](pptmstr/ui/typeset/) is the
 only package that imports it, and its docstring is the reference for what it does and

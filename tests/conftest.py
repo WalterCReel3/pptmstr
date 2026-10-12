@@ -47,7 +47,7 @@ def _typeset_does_not_leak() -> Iterator[None]:
     live = state.live_px
     yield
     if state.live_px != live:
-        # A test told the seam the UI font was another height (``columns_hold``).
+        # A test told the seam the UI font was another height.
         state.live_px = live
         typeset.roles.moved()
     if (state.typeset, state.scale, state.family, state.roles, state.panes_off) != settings:
@@ -114,40 +114,46 @@ def seam(imgui: Any) -> Iterator[Any]:
     typeset.configure(typeset=True, faces=typeset.DEFAULT_PRESET, scale=1.0, panes={})
 
 
-EVEN_EM_PX = 16.0
-"""
-The em ``columns_hold`` sets the monospace roles at: Inconsolata's advance is
-half an em, so 8 px a column.
-"""
+@pytest.fixture
+def columns_hold(seam: Any) -> Iterator[Any]:
+    """
+    The seam, held to the branch the product takes: the library that is running
+    keeps a monospace column by pptmstr's own measurement (``gate.columns``),
+    at the settings the product starts with, so a pane draws a diff with the
+    library's diff view. Nothing is faked to get there.
+
+    Fails, and does not skip, if the measurement says the columns do not hold:
+    every test on this fixture would otherwise pass on the other branch.
+    """
+    from pptmstr.ui.typeset import diffs
+
+    found = diffs.columns()
+    assert found.holds, f"the library does not keep a column at the product's defaults: {found}"
+    assert diffs.ADOPT == "measured" and diffs.adopted()
+    yield seam
 
 
 @pytest.fixture
-def columns_hold(seam: Any, monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
+def own_rows(seam: Any, monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
     """
-    The seam where the library as it is keeps a monospace column, so that a pane
-    takes the branch that draws a diff with the library's diff view by its own
-    measurement and not because a test said so.
-
-    The library lays a column out from the font file and ImGui draws it from
-    the rasteriser's advance; the two agree where the em is even
-    (``scripts/measure_typeset_diff.py --em``). A role's size is the UI font's
-    pixel height plus whole steps, and ImGui reports a whole pixel height, so
-    no setting of the product reaches an even em: here the seam is told the UI
-    font is 16.78 px tall, which is an em of 16 in Inconsolata. Everything
-    after that is the product's: the themes, the measurement
-    (``gate.columns``), ``diffs.adopted``, the views.
-
-    Fails, and does not skip, if the measurement then says the columns do not
-    hold: every test on this fixture would otherwise pass on the other branch.
+    The seam with every diff its pane's own rows: ``diffs.ADOPT`` is ``"never"``,
+    the one override. The branch a pane takes wherever the library's diff view
+    is not what draws a diff, forced, since the library as it is keeps its
+    columns at every size the product sets.
     """
-    from advtext import Face, em_size_for_pixel_height
+    from pptmstr.ui.typeset import diffs
 
-    from pptmstr.ui.typeset import diffs, roles
+    monkeypatch.setattr(diffs, "ADOPT", "never")
+    assert not diffs.adopted()
+    yield seam
 
-    tall = EVEN_EM_PX / em_size_for_pixel_height(Face.CODE, 1.0)
-    monkeypatch.setattr(gate, "_live_font_size", lambda: tall)
-    roles.follow(tall)
-    found = diffs.columns()
-    assert found.holds, f"the library does not keep a column at an em of {EVEN_EM_PX:g}: {found}"
-    assert diffs.ADOPT == "measured" and diffs.adopted()
+
+@pytest.fixture
+def default_cell(seam: Any, monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
+    """
+    The seam with the library's diff view on the cell it has when a host passes
+    nothing (``cell="font"``): where the measurement says no of the library as
+    it is, with nothing overridden. What ``gate.DIFF_CELL`` is passed to avoid.
+    """
+    monkeypatch.setattr(gate, "DIFF_CELL", "font")
     yield seam

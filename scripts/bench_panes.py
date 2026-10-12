@@ -45,13 +45,14 @@ back to back on the same machine.
 the library as it is now, and ``--typeset on`` needs the library (``make``
 exports ``IMTYPESET_LIBRARY`` and ``IMTYPESET_PYTHON`` when the built pair
 exists). An approval's diff is the library's diff view where the library that
-is running keeps a column (``typeset.diff_adopted``, a measurement) and the
-pane's own rows where it does not, which is the case on the library pptmstr is
-built against: there an inbox row showing only a diff posts a 0 in ``seam``
-with the flag on. ``--diffs always`` hands the diff to the library whatever
-was measured, and ``--ui-px 16.784`` tells the seam the UI font is that tall,
-an em of 16 in Inconsolata, where the measurement holds; a row's size column
-says who drew its diff. ``--diff-lines`` is the lengths of the parked Write. Of the
+is running keeps a column (``typeset.diff_adopted``, a measurement), which it
+does on the library pptmstr is built against, and the pane's own rows where
+it does not. ``--diffs never`` is every diff the pane's own, for the other
+side of a comparison: there an inbox row showing only a diff posts a 0 in
+``seam`` with the flag on. ``--diffs always`` hands the diff to the library
+whatever was measured, and ``--ui-px`` tells the seam the UI font is that
+tall; a row's size column says who drew its diff. ``--diff-lines`` is the
+lengths of the parked Write. Of the
 transcript's four modes only TYPESET calls the seam; with the flag off its rows
 are WRAP under that label and say so with a 0. ``views`` is the typeset log
 alone, by how many of the library's views it holds, and is skipped with the
@@ -1157,7 +1158,7 @@ def main() -> int:
         "--ui-px",
         type=float,
         default=None,
-        help="tell the seam the UI font is this tall (16.784: an even em in Inconsolata)",
+        help="tell the seam the UI font is this tall",
     )
     args = ap.parse_args()
     if args.frames < 20:

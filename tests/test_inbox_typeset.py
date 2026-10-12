@@ -9,10 +9,12 @@ with no backend, the real faces, and what the seam was handed to set under each 
 **What is the library's and what is not.** A description's prose (a concern's
 body, a spawn's prompt, a plan) is set by the library; arguments are ImGui's
 text through the seam, because their columns are content and the library does
-not keep them. A diff is the pane's own rows for the same reason on the
-library pptmstr is built against, and the library's diff view where the one
-that is running keeps a column (``typeset.diff_adopted``, a measurement):
-both are drawn here, the second on ``columns_hold`` (``tests/conftest.py``).
+not keep them outside its diff view. A diff is the library's diff view where
+the library that is running keeps a column (``typeset.diff_adopted``, a
+measurement, which holds on the one pptmstr is built against) and the pane's
+own rows where that view is not what draws it: both are drawn here, the
+first on ``columns_hold`` and the second on ``own_rows``
+(``tests/conftest.py``).
 """
 
 from __future__ import annotations
@@ -319,13 +321,14 @@ def test_the_gates_prediction_is_each_reason_once() -> None:
 # -- drawn ---------------------------------------------------------------------
 
 
-def test_a_parked_write_is_the_panes_own_rows_under_either_renderer(seam: Any) -> None:
+def test_a_parked_write_is_the_panes_own_rows_under_either_renderer(own_rows: Any) -> None:
     """
-    A diff's columns are content and the library pptmstr is built against
-    does not keep them (``typeset.diff_adopted`` is the measurement), so the
-    row draws the unified string a line to a row with typeset text on as with
-    it off, and hands the seam nothing.
+    Where the library's diff view is not what draws a diff (``own_rows``: the
+    override, since the library as it is keeps its columns), the row draws the
+    unified string a line to a row with typeset text on as with it off, and
+    hands the seam nothing.
     """
+    seam = own_rows
     limit = cap(seam)
     call = write(400)
     pane = Pane(call)
@@ -363,11 +366,12 @@ def wide_write(lines: int, ident: str = "p1") -> PendingApproval:
 @pytest.fixture(params=["typeset", "native"])
 def either_renderer(request: pytest.FixtureRequest, imgui: Any) -> Any:
     """
-    The context with typeset text on, where the library draws, and with it off,
-    which needs no library.
+    The row's own renderer of a diff, reached both ways: with typeset text on,
+    where the library draws and no diff is its view's (``own_rows``), and with
+    it off, which needs no library.
     """
     if request.param == "typeset":
-        return request.getfixturevalue("seam")
+        return request.getfixturevalue("own_rows")
     typeset.configure(typeset=False)
     return imgui
 
@@ -579,13 +583,14 @@ LONG_PATH = (
 @pytest.mark.parametrize("on", [True, False], ids=["typeset", "native"])
 @pytest.mark.parametrize("path", ["no/such/file.py", LONG_PATH], ids=["short", "long"])
 def test_a_predicted_refusal_is_on_a_line_of_the_panes_own_under_either_renderer(
-    seam: Any, said: list[str], on: bool, path: str
+    own_rows: Any, said: list[str], on: bool, path: str
 ) -> None:
     """
     Worded as a prediction, once, on a line that wraps -- and once means in the
     whole row. The diff here is the unified string under either renderer and has
     nothing else to carry it.
     """
+    seam = own_rows
     typeset.configure(typeset=on)
     call = parked("Edit", {"file_path": path, "old_string": "a", "new_string": "b"})
     pane = Pane(call)
@@ -870,10 +875,10 @@ def test_nothing_written_in_a_concern_is_absent_from_what_the_row_can_bring_on_s
 
 # -- where the library keeps a column, the diff is its diff view --------------------
 #
-# ``columns_hold`` (tests/conftest.py) is the one configuration in which the
-# library pptmstr is built against keeps a monospace column, so the row takes
-# this branch by its own measurement. The tests above are the branch the
-# product takes today.
+# ``columns_hold`` (tests/conftest.py) is the product as it starts, held to the
+# library keeping a monospace column by the row's own measurement, with
+# nothing faked. The tests above are the branch a row takes wherever the
+# library's view is not what draws a diff (``own_rows``).
 
 
 def diff_view(call: PendingApproval) -> Any:
@@ -982,7 +987,7 @@ def test_a_write_over_a_file_that_is_not_text_says_so_above_the_diff(
     record knows the difference, and the row says it above the diff whoever
     draws the rows.
     """
-    im = request.getfixturevalue("columns_hold" if held else "seam")
+    im = request.getfixturevalue("columns_hold" if held else "own_rows")
     target = tmp_path / "blob.bin"
     target.write_bytes(b"\xff\xfe\x00\x01 not text")
     call = parked("Write", {"file_path": str(target), "content": "now text\n"})
@@ -1024,7 +1029,7 @@ def test_every_line_of_a_fenced_diff_in_a_concern_is_set_whoever_draws_a_diff(
     sentence where no diff view would draw it is code either way, and no line
     of either is missing from what the row was handed to set.
     """
-    im = request.getfixturevalue("columns_hold" if held else "seam")
+    im = request.getfixturevalue("columns_hold" if held else "own_rows")
     call = parked("mcp__pptmstr__post_concern", {"to": "lead", "subject": "s", "body": FENCED})
     pane = Pane(call)
     for _ in range(3):
@@ -2231,6 +2236,67 @@ def test_where_columns_hold_a_diff_the_library_raises_under_does_not_take_the_pa
     assert clicks[-1] is False and sent == [call.id]
     monkeypatch.undo()
     assert typeset.load_fonts(rig.BOLD)
+
+
+def _diff_draw_answers_false(patched: pytest.MonkeyPatch) -> None:
+    real = rig.advtext.TypesetDiffView.draw
+    patched.setattr(
+        rig.advtext.TypesetDiffView,
+        "draw",
+        lambda self, **given: bool(real(self, **given)) and False,
+    )
+
+
+def _diff_edit_is_cut(patched: pytest.MonkeyPatch) -> None:
+    real = rig.advtext.TypesetDiffView.draw
+
+    def cut(self: Any, **given: Any) -> bool:
+        rig.advtext.typesetter.note("a diff edit was cut: block 2: the text is longer than 16 MiB")
+        return bool(real(self, **given))
+
+    patched.setattr(rig.advtext.TypesetDiffView, "draw", cut)
+
+
+@pytest.mark.parametrize(
+    "short",
+    [_diff_draw_answers_false, _diff_edit_is_cut],
+    ids=["draw answers false", "an edit was cut and draw answers true"],
+)
+def test_where_columns_hold_a_diff_the_view_set_less_of_than_it_was_handed_holds_the_click(
+    columns_hold: Any, said: list[str], monkeypatch: pytest.MonkeyPatch, short: Any
+) -> None:
+    """
+    The diff view says it set less than it was handed in two ways, and neither
+    is an exception: its draw answers false, or the library notes an edit it
+    cut while the draw answers true. Each is made here by its signal, since a
+    real one needs a row of 16 MiB. In that frame every changed row is counted
+    as not on screen: the row says so and a click on approve sends nothing.
+    The next frame the diff is the row's own rows, every line of it, and the
+    click lands. The library is not stopped for one diff.
+    """
+    im = columns_hold
+    call = write(5)
+    pane = Pane(call)
+    sent = _sent(pane, monkeypatch)
+    clicks = request_clicks(im, monkeypatch)
+
+    with monkeypatch.context() as patched:
+        short(patched)
+        pane.draw(im)
+    assert inbox._VIEWS.unbuilt(key(call, "diff")) == 5
+    assert review.withheld(pane.state, call) == review.NOT_WHOLE
+    assert clicks == [True] and sent == []
+    assert inbox._NOT_ON_SCREEN in said
+    assert not [line for line in said if line.startswith("+line_")]
+
+    said.clear()
+    pane.draw(im)
+    assert typeset.enabled(typeset.Pane.INBOX) and typeset.diff_adopted()
+    assert diff_view(call) is None and not no_native_body(im)
+    assert len([line for line in said if line.startswith("+line_")]) == 5, "the row's own rows"
+    assert review.unset_lines(pane.state, call.id) == 0
+    assert clicks[-1] is False and sent == [call.id]
+    assert inbox._NOT_ON_SCREEN not in said
 
 
 def test_where_columns_hold_a_diff_with_a_character_the_code_face_lacks_is_the_rows_own(

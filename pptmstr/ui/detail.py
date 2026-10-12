@@ -48,8 +48,8 @@ everything else is still ImGui's**, through the seam, in views held in
 * **An approval's diff is the library's diff view where the library that is
   running keeps a column, and this pane's own lines where it does not**
   (``typeset.diff_adopted``, a measurement; ``typeset.diffs`` has the numbers,
-  and on the library pptmstr is built against the answer is no). See ``_diff``
-  for what differs between the two and what may not.
+  and on the library pptmstr is built against the answer is yes). See
+  ``_diff`` for what differs between the two and what may not.
 * **A body somebody wrote is read by ``typeset.prose_parts``**, the rule the inbox
   row, the board and the brief use, so a concern reads the same here and in its row.
 * **A turn still arriving is a stream**, bounded from its start. See ``_narration``.

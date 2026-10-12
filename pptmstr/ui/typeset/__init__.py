@@ -45,11 +45,14 @@ items in the chrome's font or the library's own atlas entry.
 
 **A diff is the library's where the library that is running keeps a column,
 and its pane's own renderer where it does not** (``diff_adopted``): the
-question is measured of the running library (``gate.columns``) and is false
-on the one pptmstr is built against, so today DETAIL and the inbox row draw
-an approval's diff themselves and a fenced diff is the code of its document.
-``diffs`` has the numbers, the rules an adopted view is held to, and the one
-constant that overrides the measurement (``diffs.ADOPT``).
+question is measured of the running library (``gate.columns``), with the diff
+view on a whole-pixel cell (``gate.DIFF_CELL``), and is true on the one
+pptmstr is built against at every size a diff is set at. So DETAIL and the
+inbox row draw an approval's diff with the library's diff view and a settled
+document hosts an honest fenced diff in one, each diff being asked about as
+well (``diffs.unfit``). ``diffs`` has the numbers, what the cell costs in
+glyph size, the rules an adopted view is held to, and the one constant that
+overrides the measurement (``diffs.ADOPT``).
 
 ## What a consumer must not do
 

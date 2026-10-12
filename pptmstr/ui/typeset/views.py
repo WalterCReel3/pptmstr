@@ -876,10 +876,8 @@ class _Fences:
     __slots__ = ("inner",)
 
     def __init__(self) -> None:
-        from advtext import TypesetDiffFences
-
         with _MAKING:
-            self.inner = TypesetDiffFences()
+            self.inner = gate.diff_fences()
 
     def __call__(self, view: Any, number: int, block: Any) -> Any:
         from . import diffs

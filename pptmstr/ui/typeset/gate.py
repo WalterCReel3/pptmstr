@@ -815,6 +815,42 @@ def face_font(face: str) -> Any:
         return None
 
 
+DIFF_CELL = "pixel"
+"""
+The cell the library's diff view is asked to lay its columns out at: the whole
+pixel ImGui has baked for the code face at the role's pixel height, and not
+the advance in the font file (the library's default, ``"font"``), which is a
+fraction of a pixel at every pixel height a role reaches and is where a column
+is lost (``columns``; ``tests/test_typeset_diffs.py`` keeps the default's
+answer as the reason this is passed). ``diffs`` says what it costs in glyph
+size.
+"""
+
+
+def diff_view(model: Any, theme: Any, **given: Any) -> Any:
+    """
+    A diff view of the library's as pptmstr makes one: on ``DIFF_CELL``.
+
+    **The one place a diff view is made**: the view a pane draws
+    (``diffs.diff``) and the view whose grid ``columns`` measures are both
+    made here, so what was measured is the configuration that is drawn.
+    Raises what the library raises.
+    """
+    from advtext import TypesetDiffView
+
+    return TypesetDiffView(model, theme, cell=DIFF_CELL, **given)
+
+
+def diff_fences() -> Any:
+    """
+    The library's hook for a fenced diff in a settled document, on the same
+    cell as ``diff_view``. Raises what the library raises.
+    """
+    from advtext import TypesetDiffFences
+
+    return TypesetDiffFences(cell=DIFF_CELL)
+
+
 def code_lacks(text: str) -> tuple[str, ...]:
     """
     The characters of ``text`` above ASCII that the library's code face has no
@@ -845,7 +881,12 @@ class Columns:
 
     ``cell`` is the advance the library lays a column out at and ``baked`` the
     advance ImGui has baked for the face at ``size``, the pixel height the row's
-    glyphs were drawn from; both 0 where the row could not be read. Of the
+    glyphs were drawn from; both 0 where the row could not be read. ``cell``
+    is the farther from ``baked`` of two readings: what the view says its cell
+    is (``TypesetDiffView.grid``), and the measured row's own width over its
+    characters. On a whole-pixel cell the first is the pixel the view aimed at
+    and the second is what the layout came to, which is what a long row adds
+    up (``COLUMN_EPSILON_PX``). Of the
     ``glyphs`` with ink, ``off`` are not drawn at their index times ``baked``
     from the row's first, and ``mishit`` are ones a point on the drawn glyph is
     answered for as another character's. ``tabs`` is whether every character
@@ -883,20 +924,23 @@ COLUMN_EPSILON_PX = 1e-4
 """
 How far the laid-out cell may be from the baked advance and still be it.
 
-The library's lengths are whole scaled points, 1/65536 pt, so a cell that is
-meant to be 8 px comes back as 7.999989 (measured at an em of 16; 6.999995 at
-14): a rounding of about 1e-5 px. The row's own pens are compared as well
-(``Columns.off``), so the bound decides only what the probe row is too short
-to show, and **what it decides is bounded by a row's length**
-(``Columns.reach``): were a glyph drawn at its laid-out pen rounded to a
-pixel, an error of e a column would move one once the row is 0.5 / e columns
-long -- 5,000 columns at this bound, 43,690 at the rounding measured, 1.3 at
-the 0.374 px a 16 px pixel height is out by today. A diff with a longer row
-than that is its pane's own rows (``diffs.unfit``); a minified file is one
-line. Measured in pptmstr on 2026-10-12 in a diff view drawn in a window at
-an em of 16: the last 40 glyphs of a row of 100,000 are 8 px apart and on the
-row's grid, so on this library the rounding does not accumulate that way and
-the reach is the bound's arithmetic, on the safe side of what was seen.
+The library's lengths are whole scaled points, 1/65536 pt, so a row laid out
+on a cell that is meant to be 8 px is 7.999989 px a character (measured at a
+pixel height of 16 on ``DIFF_CELL``; between 1.3e-6 and 2.4e-5 px out at the
+heights from 12 to 24). The view itself answers the whole pixel it aimed at
+wherever the layout came within a thousandth of it, so the row's own width is
+read as well and the farther of the two is what is held to this bound
+(``Columns.cell``). The row's pens are compared too (``Columns.off``), so the
+bound decides only what the probe row is too short to show, and **what it
+decides is bounded by a row's length** (``Columns.reach``): an error of e a
+column is half a pixel once the row is 0.5 / e columns long -- 5,000 columns
+at this bound, 44,815 at a pixel height of 16, 20,590 at 20, 1.3 at the
+0.374 px the library's default cell is out by at 16. **And it does add up**:
+measured in pptmstr on 2026-10-12 in a diff view drawn with no window at a
+pixel height of 16, the glyphs at the end of a row of 100,000 are 1 px left
+of the grid the row began on and those at the end of 1,000,000 are 11. A
+diff with a row longer than the reach is its pane's own rows
+(``diffs.unfit``); a minified file is one line.
 """
 
 _FARTHEST_COLUMN = 1_000_000
@@ -940,9 +984,10 @@ def columns(theme: Any) -> Columns:
     **What is asked** (requests P21 and P22 of ``HANDOFF-advtext.md``, as one
     answer):
 
-    - the cell the diff view lays a column out at (``TypesetDiffView.grid``)
-      is the advance ImGui has baked for the code face at the pixel height the
-      row is drawn from, within ``COLUMN_EPSILON_PX``;
+    - the cell the diff view lays a column out at -- what its grid says
+      (``diff_view(...).grid``) and what the measured row's width comes to a
+      character -- is the advance ImGui has baked for the code face at the
+      pixel height the row is drawn from, within ``COLUMN_EPSILON_PX``;
     - every glyph of ``_COLUMN_ROW`` is drawn with its pen at its index times
       that advance from the row's first, so N characters are N advances on
       this row and on any other, and the row lines up with the same text
@@ -980,7 +1025,7 @@ def columns(theme: Any) -> Columns:
     marked used.
 
     **What it costs**: one diff view made and never drawn, two documents of one
-    line laid out, three draws to buffers, 312 hit tests: 3 to 6 ms measured in
+    line laid out, four draws to buffers, 312 hit tests: 3 to 6 ms measured in
     pptmstr on 2026-10-12 (headless, load average 2.6 and 12), once for a
     code style until the fonts are loaded again, and 29 ms more the first time
     a diff view is made in a process. ``load_fonts`` takes it for the diff
@@ -1005,8 +1050,8 @@ def columns(theme: Any) -> Columns:
 
 def _columns_key(theme: Any) -> object:
     """
-    What a measurement is of: the code style the row was set in, and the
-    display's density.
+    What a measurement is of: the cell the view is made on, the code style the
+    row was set in, and the display's density.
 
     ImGui rasterises a size again for another density, and the advance it
     bakes is a whole pixel of *that* raster: a window dragged from a display
@@ -1018,7 +1063,7 @@ def _columns_key(theme: Any) -> object:
     """
     from advtext import BlockKind
 
-    return (theme.style(BlockKind.CODE).font, theme.px_per_inch, _density())
+    return (DIFF_CELL, theme.style(BlockKind.CODE).font, theme.px_per_inch, _density())
 
 
 def _density() -> tuple[float, float]:
@@ -1083,12 +1128,12 @@ def _measured(theme: Any) -> Columns:
     """
     The measurement itself: ``_measured_columns`` cleans up after it.
     """
-    from advtext import Diff, TypesetDiffView
+    from advtext import Diff
 
     typesetter = _typesetter()
     native = typesetter.module()
-    grid = TypesetDiffView(Diff(), theme).grid
-    cell = float(grid.cell)
+    grid = diff_view(Diff(), theme).grid
+    said = cell = float(grid.cell)
     base = typesetter.base_style(theme, 0)
     pitched = native.BlockStyle(Scale=grid.scale, LineHeight=grid.row / (grid.em * grid.scale))
     row = _COLUMN_ROW
@@ -1099,6 +1144,7 @@ def _measured(theme: Any) -> Columns:
         [native.Block(native.BlockKind.Code, row)], [pitched]
     ) as document:
         document.layout(wide, base)
+        laid = float(document.caret_rect((0, len(row)))[0]) / len(row)
         document.draw_to_buffers((0.0, 0.0), clip)
         quads = _glyph_quads(native, document.draw_to_buffers((0.0, 0.0), clip)[0])
         if len(quads) != len(inked):
@@ -1120,6 +1166,8 @@ def _measured(theme: Any) -> Columns:
                 glyphs=len(inked),
             )
         advance = float(baked.get_char_advance(ord("0")))
+        if abs(laid - advance) > abs(said - advance):
+            cell = laid
         middle = grid.row / 2.0
         off = mishit = 0
         first: float | None = None

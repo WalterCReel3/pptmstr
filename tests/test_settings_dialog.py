@@ -562,7 +562,7 @@ def test_the_note_under_the_master_switch_says_who_draws_a_diff_where_text_is_ty
     One note, one line: why text is not typeset, and where it is, who draws a
     diff and by what measurement. An operator cannot tell either from the text.
     """
-    measured = "diffs are pptmstr's own rows: the library lays out a 7.626 px column"
+    measured = "diffs are the library's: it keeps a 8 px column: laid out, drawn and hit over a row"
     assert build(Settings(), Facts(diffs=measured)).typeset.note == measured
     assert build(Settings(), Facts()).typeset.note == ""
     gone = build(Settings(), Facts(available=False, obtainable=False, reason=GONE, diffs=measured))
@@ -963,8 +963,8 @@ def test_every_role_shows_a_sample_and_none_is_refused(
     """
     The samples are the seam's own calls. A role the library sets has a view, and
     its glyphs reached the draw list with nothing left unset; a role ImGui draws
-    (literal text, an argument, a diff's rows) has no view and still claimed its
-    lines. What the
+    (literal text, an argument) has no view and still claimed its lines; and a
+    diff is the library's diff view, as a pane draws one. What the
     seam says on screen in place of text -- a key drawn twice in a frame, a
     library that stopped -- is said through one function, and it said nothing.
     """
@@ -982,10 +982,13 @@ def test_every_role_shows_a_sample_and_none_is_refused(
     for role in shown:
         key = ("sample", role.value)
         assert (cache.height(key) or 0.0) > 0.0 and cache.unbuilt(key) == 0, role
-        if role in (typeset.Role.LITERAL, typeset.Role.ARGUMENT, typeset.Role.DIFF):
+        if role in (typeset.Role.LITERAL, typeset.Role.ARGUMENT):
             assert cache.views(key) == (), role
             continue
         (view,) = cache.views(key)
+        if role is typeset.Role.DIFF:
+            assert view.origin is not None and view.row_count > 0, "the diff view, drawn"
+            continue
         assert view.stats.whole and view.stats.vertices > 0, (role, view.stats)
     assert said == []
     assert typeset.can_draw()
@@ -996,31 +999,26 @@ def test_the_facts_carry_the_seams_sentence_about_diffs(rig: Rig) -> None:
     known = dialog.facts()
     assert known.reason is None
     assert known.diffs == typeset.diff_renderer()
-    assert (known.diffs or "").startswith("diffs are pptmstr's own rows: the library lays out")
+    assert (known.diffs or "").startswith("diffs are the library's: it keeps a 8 px column")
     rig.open()
     rig.frames(2)
     assert build(rig.state.settings, known).typeset.note == known.diffs
 
 
 @pytest.mark.usefixtures("typeset_live")
-def test_where_columns_hold_the_diff_sample_is_the_librarys_diff_view_and_the_note_says_so(
-    rig: Rig, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_the_diff_sample_is_the_librarys_diff_view_and_the_note_says_so(rig: Rig) -> None:
     """
-    The sample follows what a pane does. On the library pptmstr is built against
-    a diff's rows are ImGui's text (the test above this pair holds that: the
-    diff sample has no view); where the library keeps a column, at an even em,
-    the sample is the diff view a pane would draw, and the dialog is still one
-    screen with it.
+    The sample follows what a pane does: the library that is running keeps a
+    column by the seam's own measurement, with nothing forced, so the sample
+    is the diff view a pane would draw, on the cell that was measured. In two
+    columns, which is a row shorter than unified (``_diff_sample`` says what
+    that buys), and nothing of it is cut: it is narrower than its cell.
     """
     import advtext
 
-    from pptmstr.ui.typeset import diffs, gate, roles
+    from pptmstr.ui.typeset import diffs
 
-    tall = 16.0 / advtext.em_size_for_pixel_height(advtext.Face.CODE, 1.0)
-    monkeypatch.setattr(gate, "_live_font_size", lambda: tall)
-    roles.follow(tall)
-    assert diffs.columns().holds and typeset.diff_adopted()
+    assert diffs.ADOPT == "measured" and diffs.columns().holds and typeset.diff_adopted()
     rig.open()
     rig.frames(3)
 
@@ -1029,10 +1027,34 @@ def test_where_columns_hold_the_diff_sample_is_the_librarys_diff_view_and_the_no
     (view,) = cache.views(key)
     assert isinstance(view, advtext.TypesetDiffView)
     assert (view.diff.added, view.diff.removed) == (1, 1) and view.origin is not None
+    assert view.cell == "pixel" and view.grid.cell == 8.0
+    assert view.layout is advtext.DiffLayout.SIDE_BY_SIDE
+    assert [view.row_info(row).kind for row in range(view.row_count)] == ["file", "hunk", "row"]
+    (header,) = view.headers()
+    assert header.fits and view.content_width <= (header.available_px or 0.0)
     assert cache.unbuilt(key) == 0
     assert (dialog.facts().diffs or "").startswith("diffs are the library's: it keeps a 8 px")
     window = rig.window()
     assert window.scroll_max.y == 0 and window.size.y <= DISPLAY[1] - CHROME
+
+
+@pytest.mark.usefixtures("typeset_live")
+def test_where_no_diff_is_the_librarys_the_diff_sample_is_its_rows_as_text(
+    rig: Rig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The other answer, by the override: the sample is the rows as ImGui's text
+    at the role's size, with no view, and the note says who draws a diff.
+    """
+    from pptmstr.ui.typeset import diffs
+
+    monkeypatch.setattr(diffs, "ADOPT", "never")
+    rig.open()
+    rig.frames(3)
+    cache = rig.dialog.previews
+    key = ("sample", "diff")
+    assert cache.views(key) == () and (cache.height(key) or 0.0) > 0.0
+    assert dialog.facts().diffs == "diffs.ADOPT is 'never': diffs are pptmstr's own rows"
 
 
 @pytest.mark.usefixtures("typeset_live")

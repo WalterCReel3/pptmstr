@@ -613,34 +613,29 @@ def _baked(im: Any) -> dict[int, list[float]]:
     }
 
 
-def _even_em(monkeypatch: pytest.MonkeyPatch) -> None:
-    tall = 16.0 / advtext.em_size_for_pixel_height(Face.CODE, 1.0)
-    monkeypatch.setattr(gate, "_live_font_size", lambda: tall)
-    roles.follow(tall)
-
-
-@pytest.mark.parametrize("even", [False, True], ids=["pixel height 16", "em 16"])
+@pytest.mark.parametrize("whole", [False, True], ids=["the default cell", "a whole-pixel cell"])
 def test_measuring_the_columns_leaves_no_baked_size_on_the_atlas(
-    seam: Any, monkeypatch: pytest.MonkeyPatch, even: bool
+    request: pytest.FixtureRequest, whole: bool
 ) -> None:
     """
     The measurement draws a row to buffers, which rasterises it at the size it
-    is set at, and looks for the size the glyphs came from. Both used to leave
-    sizes on ImGui's atlas that nothing draws from -- the code face at the
-    diff role's size from the font load on, and at an em an empty size either
-    side of it -- and ``theme.keep_baked_sizes`` keeps whatever is there until
-    the epoch moves. What a font load leaves on the atlas is nothing, and a
-    measurement taken later adds nothing to what it found.
+    is set at, and looks for the size the glyphs came from; and on a
+    whole-pixel cell the library asks ImGui for the advance at the size asked
+    for, which makes that size too (16 and 17 px at 16). Each is a size on
+    ImGui's atlas that nothing draws from, and ``theme.keep_baked_sizes``
+    keeps whatever is there until the epoch moves. What a font load leaves on
+    the atlas is nothing, and a measurement taken later adds nothing to what
+    it found.
     """
     from pptmstr.ui.typeset import themes
 
+    seam = request.getfixturevalue("seam" if whole else "default_cell")
     before = _baked(seam)
     assert typeset.load_fonts(BOLD)
     assert _baked(seam) == before, "a load, with its measurement, bakes nothing"
-    if even:
-        _even_em(monkeypatch)
     found = gate._measured_columns(themes.diff_theme())
-    assert found.glyphs == 156 and found.size > 0 and found.holds is even
+    assert found.glyphs == 156 and found.holds is whole
+    assert found.size == (17.0 if whole else 16.0)
     assert _baked(seam) == before
 
 
@@ -702,8 +697,8 @@ def test_how_long_a_row_the_columns_answer_for_follows_how_far_out_the_cell_is(
     The row measured is 186 characters and the cell is held to the baked
     advance within a bound. A cell out by ``e`` has a pen half a pixel out
     after ``0.5 / e`` columns, so the answer is for rows that long and no
-    longer: 5,000 columns at the bound itself, some 43,000 at the rounding
-    the library has at an em of 16, and none where nothing holds.
+    longer: 5,000 columns at the bound itself, some 45,000 at the rounding
+    the library has at a pixel height of 16, and none where nothing holds.
     """
     from pptmstr.ui.typeset import themes
 
@@ -712,7 +707,6 @@ def test_how_long_a_row_the_columns_answer_for_follows_how_far_out_the_cell_is(
     at_the_bound = gate.Columns(True, "", cell=8.0 - gate.COLUMN_EPSILON_PX, baked=8.0)
     assert 4_990 <= at_the_bound.reach <= 5_000
     assert gate.Columns(False, "", cell=8.0, baked=8.0).reach == 0
-    _even_em(monkeypatch)
     found = gate.columns(themes.diff_theme())
     assert found.holds and 40_000 < found.reach < 50_000, found
 
@@ -728,7 +722,6 @@ def test_what_follows_a_tab_is_held_to_the_grid_like_any_other_glyph(
     """
     from pptmstr.ui.typeset import themes
 
-    _even_em(monkeypatch)
     assert typeset.load_fonts(BOLD)
     found = gate.columns(themes.diff_theme())
     assert found.holds and found.tabs
@@ -773,9 +766,10 @@ def test_a_size_made_where_the_measurements_was_discarded_is_rasterised_as_itsel
 ) -> None:
     """
     The hazard ``theme.keep_baked_sizes`` exists for is a size at an address
-    ImGui's font loader remembers for another. The measurement makes a size of
-    the code face, which is then the last the loader made current, and
-    discards it; the next size made is put where it was. That one is made, and
+    ImGui's font loader remembers for another. The measurement makes two sizes
+    of the code face, the one asked for and the one its glyphs come from (16
+    and 17 px), the second of which is then the last the loader made current,
+    and discards them; the next size made is put where they were. That one is made, and
     not moved there, so the loader is told: its glyphs, and those of a size
     made after it and of the measured size made again, are their own -- each
     compared with the same character when its size is the only one on the
@@ -802,19 +796,20 @@ def test_a_size_made_where_the_measurements_was_discarded_is_rasterised_as_itsel
         baked.frame(seam, lambda: baked.line(seam, code, 13.0, "abc"), before)
         ahead = _baked(seam)
         found = gate._measured_columns(themes.diff_theme())
-        assert found.size == 16.0 and _baked(seam) == ahead
+        assert found.size == 17.0 and _baked(seam) == ahead
 
         def both() -> None:
             baked.line(seam, code, 19.0, chars)
+            baked.line(seam, code, 17.0, chars)
             baked.line(seam, code, 16.0, chars)
             baked.line(seam, code, 13.0, chars)
 
         for _ in range(3):
             baked.frame(seam, both, before)
-        got = {size: baked.dims(code, size, chars) for size in (19.0, 16.0, 13.0)}
+        got = {size: baked.dims(code, size, chars) for size in (19.0, 17.0, 16.0, 13.0)}
         for size, glyphs in got.items():
             assert glyphs == baked.fresh(seam, code, size, chars), size
-        assert got[19.0] != got[16.0] != got[13.0], "three sizes, told apart by the comparison"
+        assert got[19.0] != got[17.0] != got[16.0] != got[13.0], "four sizes, told apart"
     finally:
         theme._KEPT.under = was
         baked.drop_everything(seam)
