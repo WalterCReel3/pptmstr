@@ -25,7 +25,7 @@ from __future__ import annotations
 import enum
 from dataclasses import dataclass
 
-from ..model import NodeId, Obligation, Snapshot
+from ..model import CommandOwed, NodeId, Obligation, Snapshot
 
 
 class Scope(enum.Enum):
@@ -61,6 +61,20 @@ def covers(scope: Scope, node: NodeId, other: NodeId) -> bool:
     return other[0] == node[0] if scope is Scope.SESSION else other == node
 
 
+def _on_fleet(snap: Snapshot, node: NodeId) -> bool:
+    """Whether ``node`` exists and its session has not been taken off the fleet."""
+    return node in snap.nodes and not snap.off_fleet(node[0])
+
+
+def _ran_here(snap: Snapshot, node: NodeId) -> bool:
+    """
+    Whether ``node`` is the root of a session this process ran and that is on
+    the fleet: what an unchosen cursor may rest on.
+    """
+    record = snap.nodes[node]
+    return record.parent is None and record.recalled is None and not snap.off_fleet(node[0])
+
+
 @dataclass(frozen=True, slots=True)
 class OnObligation:
     """Pointed at something waiting on the operator."""
@@ -93,7 +107,49 @@ class OnNode:
     pinned: bool = False
 
 
-Target = OnObligation | OnNode
+@dataclass(frozen=True, slots=True)
+class OnDeparted:
+    """
+    Pointed at where a command's row was, and at nothing that can be answered.
+
+    The command under the cursor left the queue: its agent withdrew it, it was
+    refused, it ended. ``left`` is that obligation as the cursor last saw it,
+    so the queue can say what went.
+
+    **Nothing takes its place under the cursor.** A command's row is the one
+    row whose presses all take the mouse, so the press that follows its going
+    is a mouse button already on its way down -- and the row that slides into
+    the position, opened there, would put its own buttons under it: an
+    approval's ``approve`` where ``run it`` was. So this target names no
+    obligation, yields to nothing that arrives, and is left only by an act of
+    the operator's -- ``move``, ``to_obligation``, ``to_node``.
+
+    It is not what keeps a command from being read unasked. The cursor may come
+    to rest on a command by any route, and a command's row shows none of its
+    text until the operator opens that row (``command_view.CommandViewState``).
+
+    ``after`` is the keys of the rows that stood below it when it went, in
+    their order. Where it was is ahead of the first of them still in the queue
+    (``position``): a key and not an index, because the queue goes on changing
+    under a mark that stays.
+    """
+
+    left: Obligation
+    after: tuple[str, ...] = ()
+
+    def position(self, snap: Snapshot) -> int:
+        """
+        Where in ``snap``'s queue the row was: the index of the row it would
+        stand ahead of, and the queue's length when every row that was below
+        it has gone too.
+        """
+        below = set(self.after)
+        return next(
+            (i for i, o in enumerate(snap.needs_you) if o.key in below), len(snap.needs_you)
+        )
+
+
+Target = OnObligation | OnNode | OnDeparted
 
 
 @dataclass
@@ -102,10 +158,11 @@ class FocusState:
     Presentation state, not store state: where the operator is looking.
 
     ``_index`` is a memory of where the cursor sat in the queue, kept **only** so
-    that answering an obligation lands the cursor on whatever took its place rather
-    than dumping it at the top of the list. It is never the identity -- resolution
-    always goes through the key first, and this is consulted only once the key has
-    stopped matching anything.
+    that a row leaving from under the cursor is followed from where it was: by
+    the row that took its place, or, for a command, by a mark of what left
+    (``OnDeparted``). It is never the identity -- resolution always goes
+    through the key first, and this is consulted only once the key has stopped
+    matching anything.
     """
 
     target: Target | None = None
@@ -115,6 +172,9 @@ class FocusState:
     # obligation leaves the operator looking at the session they just dealt with,
     # instead of being thrown to the top of the tree at the moment the queue empties.
     _last_node: NodeId | None = None
+    # The obligation the cursor's key named when it was last resolved or
+    # pointed. What ``OnDeparted`` is built from once the key matches nothing.
+    _seen: Obligation | None = None
 
     # -- resolution ------------------------------------------------------------
 
@@ -128,13 +188,27 @@ class FocusState:
         """
         The node under the cursor. **Derived**, never stored alongside the
         obligation -- storing it is what let the two disagree.
+
+        Never a node of a session that is off the fleet (``Snapshot.off_fleet``),
+        whatever the target still names: every pane that follows the cursor asks
+        here, and such a session is drawn nowhere. Asked here as well as in
+        ``settle`` so that it holds for a snapshot ``settle`` has not seen.
         """
         current = self.obligation(snap)
         if current is not None:
             return current.node
-        if isinstance(self.target, OnNode) and self.target.node in snap.nodes:
+        if isinstance(self.target, OnNode) and _on_fleet(snap, self.target.node):
             return self.target.node
+        if isinstance(self.target, OnDeparted) and _on_fleet(snap, self.target.left.node):
+            # The session just dealt with, so the panes that follow the cursor
+            # stay where the operator was looking.
+            return self.target.left.node
         return None
+
+    @property
+    def departed(self) -> OnDeparted | None:
+        """Where the row under the cursor was, if it left and the operator has not moved since."""
+        return self.target if isinstance(self.target, OnDeparted) else None
 
     def index(self, snap: Snapshot) -> int | None:
         """Position in the queue, for the rendering pass. Not identity."""
@@ -159,18 +233,37 @@ class FocusState:
         Three cases, and the second is the one that makes the inbox feel right:
 
         * still valid -- remember where it sits, and leave it alone.
-        * pointed at an obligation that has just been answered -- land on whatever
-          now occupies that position, so a run of approvals can be worked without
-          the cursor jumping back to the top between each one.
+        * pointed at an obligation that has just left the queue -- land on
+          whatever now occupies that position, so a run of approvals can be
+          worked without the cursor jumping back to the top between each one.
+          **Unless a command is what left**: then the cursor rests on where
+          the row was and on no row (``OnDeparted``), until the operator moves
+          it. A command may be what is landed on: its row is closed until the
+          operator opens it.
         * pointed at nothing, with work waiting -- take the oldest.
+
+        **Nothing chooses a closed card, and nothing stays on a removed one.**
+        With no queue the cursor defaults to the first session this process ran
+        that is still on the fleet, and to nothing when there is none: a session
+        recalled from its file (``AgentRecord.recalled``) has no transcript, no
+        board and no health to show, so landing on the oldest of them at startup
+        would open every pane on "not loaded". The operator can still point at
+        one, and a click holds. A session taken off the fleet
+        (``Snapshot.off_fleet``) is dropped as a target, pinned or not: the pin
+        said "show me this" about a card that is no longer drawn. That check
+        follows the return to ``_last_node`` below, so it is also what keeps
+        the cursor from going back to one.
         """
         if isinstance(self.target, OnObligation):
             at = self.index(snap)
             if at is not None:
                 self._index = at
+                self._seen = snap.needs_you[at]
+            elif (left := self._left()) is not None:
+                self.target = OnDeparted(left, tuple(o.key for o in snap.needs_you[self._index :]))
             elif snap.needs_you:
                 self._index = min(self._index, len(snap.needs_you) - 1)
-                self.target = OnObligation(snap.needs_you[self._index].key)
+                self.to_obligation(snap.needs_you[self._index])
             else:
                 # Nothing left to answer. Stay on the session just dealt with rather
                 # than blanking, so clearing the queue does not also throw away
@@ -179,7 +272,7 @@ class FocusState:
                 self.target = OnNode(self._last_node) if self._last_node else None
 
         if isinstance(self.target, OnNode):
-            if self.target.node not in snap.nodes:
+            if not _on_fleet(snap, self.target.node):
                 self.target = None
             elif snap.needs_you and not self.target.pinned:
                 # Nothing chose this node; the queue did not exist when the cursor
@@ -200,16 +293,20 @@ class FocusState:
                 # card must not infer; see Scope.
                 node = self.target.node
                 owed = self.owed_by(snap, node, Scope.SESSION if node[1] is None else Scope.AGENT)
-                self.target = OnObligation(owed.key) if owed is not None else None
+                if owed is not None:
+                    self.to_obligation(owed)
+                else:
+                    self.target = None
                 at = self.index(snap)
                 self._index = at if at is not None else 0
 
         if self.target is None:
             if snap.needs_you:
                 self._index = 0
-                self.target = OnObligation(snap.needs_you[0].key)
-            elif snap.order:
-                self.target = OnNode(snap.order[0])
+                self.to_obligation(snap.needs_you[0])
+            else:
+                first = next((n for n in snap.order if _ran_here(snap, n)), None)
+                self.target = OnNode(first) if first is not None else None
 
         # Recorded from the resolved cursor, not from whichever branch ran, so it is
         # set however the cursor got where it is.
@@ -217,17 +314,43 @@ class FocusState:
         if resolved is not None:
             self._last_node = resolved
 
+    def _left(self) -> CommandOwed | None:
+        """
+        The command that has just gone from under the cursor, with a queue
+        left or without one; None when what went was not a command, and the
+        next row may take the cursor.
+        """
+        seen = self._seen
+        if not isinstance(seen, CommandOwed) or not isinstance(self.target, OnObligation):
+            return None
+        # A key no snapshot resolved for this cursor: nothing was on screen
+        # under it, so there is nothing to say has gone.
+        return seen if seen.key == self.target.key else None
+
     def move(self, snap: Snapshot, delta: int) -> None:
-        """Step through the queue. Clamped, not wrapped."""
+        """
+        Step through the queue. Clamped, not wrapped.
+
+        From where a row was (``OnDeparted``), a step down lands on the row
+        that took its position and a step up on the one above it -- each
+        clamped as any step is, so from where the first row was both land on
+        the first row, and from where the last was both land on the last.
+        """
         if not snap.needs_you:
             return
-        at = self.index(snap)
-        nxt = 0 if at is None else max(0, min(len(snap.needs_you) - 1, at + delta))
+        last = len(snap.needs_you) - 1
+        if isinstance(self.target, OnDeparted):
+            at = self.target.position(snap)
+            nxt = max(0, min(last, at + delta - 1 if delta > 0 else at + delta))
+        else:
+            found = self.index(snap)
+            nxt = 0 if found is None else max(0, min(last, found + delta))
         self._index = nxt
-        self.target = OnObligation(snap.needs_you[nxt].key)
+        self.to_obligation(snap.needs_you[nxt])
 
     def to_obligation(self, obligation: Obligation) -> None:
         self.target = OnObligation(obligation.key)
+        self._seen = obligation
 
     def to_node(self, snap: Snapshot, node: NodeId, *, scope: Scope) -> None:
         """

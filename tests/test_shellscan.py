@@ -14,8 +14,11 @@ the failure mode `STYLE.md` §2 names: a test asserting less than its name.
 from __future__ import annotations
 
 import dataclasses
+import functools
 import pathlib
+import subprocess
 import sys
+from types import ModuleType
 from unittest import mock
 
 import pytest
@@ -66,6 +69,32 @@ REFUSED = [
     "ls\nrm -rf /tmp/x",
     "ls\r\nrm -rf /tmp/x",
     "git status\ngit push --force",
+    # A comment, which bash stops reading at and the split does not. The first
+    # two are the strings the defect was reported with: run on /bin/bash
+    # 5.2.15, 2026-10-13, the first created `pwned` and the second printed
+    # `ONE` then `HIDDEN`. The quote inside the comment is what hides the
+    # second line; the last three carry no quote and are refused all the same,
+    # because the rule is about the comment and not about what is in it.
+    "ls # '\ntouch pwned #'",
+    "echo ONE # '\necho HIDDEN #'",
+    'ls # "\ntouch pwned #"',
+    "ls #'\ntouch pwned #'",
+    "ls;# '\ntouch pwned #'",
+    "ls -la # list the files",
+    "# what is here\nls",
+    "git status #",
+    # A backslash-newline, which bash deletes and `shlex` keeps. Run the same
+    # day: each of the first three created `pwned`, as `git log --output=pwned`.
+    "git log --out\\\nput=pwned",
+    'git log "--out\\\nput=pwned"',
+    "git log -\\\n-output=pwned",
+    "tail -\\\nf /var/log/syslog",
+    # Bash runs this one as a single `ls` with `rm` for an operand and deletes
+    # nothing. It is refused with the three above it because what separates
+    # them is which word the join lands in, and telling those apart means
+    # joining the lines the way bash does.
+    "ls \\\n rm -rf /tmp/probe/a",
+    "git log --oneline \\\n  --stat",
     # sed's write is in its script language, not in a flag.
     "sed 'w /tmp/pwned' f",
     "sed 's/a/b/w /tmp/pwned' f",
@@ -448,10 +477,15 @@ ADMITTED = [
     # unquoted forms are in `REFUSED` for having an empty segment on one side.
     "ls '|'",
     "ls ';'",
-    # A backslash-newline is a line continuation, so bash runs one command with
-    # `rm` as an operand of `ls`. Run on /bin/bash 3.2.57, 2026-09-22: it
-    # printed `ls: rm: No such file or directory` and deleted nothing.
-    "ls \\\n rm -rf /tmp/probe/a",
+    # A `#` that does not begin a word is not a comment, and neither is one
+    # inside quotes or behind a backslash. Each of these is one command to
+    # bash, with the `#` in an argument.
+    "grep -n '#include' a.c",
+    'grep "^# " README.md',
+    "grep -c '# TODO' pptmstr/app.py | head",
+    "ls a#b",
+    r"ls \#",
+    "git log --format=%h#%s -5",
     # -- discarding stderr, the one redirect this table admits ----------------
     # The two shapes from the session that motivated it, then the spacing
     # variant and a pipeline. `/dev/null` is a character device, so fd 2 going
@@ -492,6 +526,47 @@ def test_the_predicate_is_the_explanation(command: str) -> None:
 
 
 # -- the splitter, which is now the security property ---------------------------
+
+
+@functools.cache
+def _probe() -> ModuleType:
+    """
+    `scripts/verify_split_against_bash.py`, loaded as a module.
+
+    It fails rather than skips when `/bin/bash` is missing. A skipped
+    verification reads as a passed one in `-q` output, and every test that
+    calls this is one whose oracle is the shell.
+    """
+    import importlib.util
+
+    assert pathlib.Path("/bin/bash").exists(), (
+        "no /bin/bash, so a test whose oracle is the shell cannot run; "
+        "this is a failure and not a skip, because a skip reads as a pass"
+    )
+
+    probe_path = pathlib.Path(__file__).resolve().parent.parent / "scripts"
+    probe_path = probe_path / "verify_split_against_bash.py"
+    spec = importlib.util.spec_from_file_location("verify_split_against_bash", probe_path)
+    assert spec is not None and spec.loader is not None
+    probe = importlib.util.module_from_spec(spec)
+    # Registered before execution because `@dataclass(slots=True)` resolves the
+    # defining module out of `sys.modules`; `scripts/` is not a package, so this
+    # is the only way to reach the probe and it has to be done in this order.
+    sys.modules[spec.name] = probe
+    spec.loader.exec_module(probe)
+    return probe
+
+
+def _bash_argvs(command: str, tmp_path: pathlib.Path) -> list[list[str]]:
+    """
+    What /bin/bash runs for ``command``, as the probe observes it: the argument
+    vector of every command it reached, with an empty `PATH` so none of them
+    starts. Sorted, because the probe reports them in no particular order.
+    """
+    for name in ("bin", "rec", "work"):
+        (tmp_path / name).mkdir(exist_ok=True)
+    ran, _stderr = _probe().bash_ran(command, str(tmp_path))
+    return sorted(ran)
 
 
 def test_the_separator_set_is_the_one_this_corpus_was_written_against() -> None:
@@ -584,9 +659,9 @@ def test_the_split_closes_a_quote_where_bash_closes_it() -> None:
     `-`, and `_refuse_git` reads `rest` only for `--output`. So a missed `;`
     does not merely weaken the verdict, it inverts it.
 
-    Each string below is a real bash two-command sequence, confirmed by running
-    `bash -c 'set -x; ...'` and reading which commands bash executed --
-    `scripts/verify_split_against_bash.py` is that check over 25k strings.
+    Each string below is a real bash two-command sequence, and
+    `scripts/verify_split_against_bash.py` is where bash is asked: its `NAMED`
+    arm carries these shapes and reads back what bash ran.
     """
     hidden_rm = "'rm' is not in the read-only table"
 
@@ -654,39 +729,19 @@ def test_the_split_agrees_with_bash_itself_on_the_cases_anyone_thought_of() -> N
     """
     The `NAMED` arm of `scripts/verify_split_against_bash.py`, run in the suite.
 
-    Every other test here compares the splitter to a reading of bash. This one
-    compares it to bash: each candidate goes through `bash -c 'set -x'`, the
-    trace says which commands bash actually executed, and a refusal is required
-    whenever bash ran one the table refuses alone.
+    Most tests here compare the splitter to a reading of bash. This one
+    compares it to bash: each candidate goes through `/bin/bash` with nothing
+    on `PATH`, bash reports the argument vector of every command it reached,
+    and a refusal is required whenever one of those is refused alone.
 
     `NAMED` and not the whole probe, because the exhaustive and sampled arms are
     tens of thousands of subprocesses. The split is not arbitrary: `NAMED`
     carries the cases somebody worked out, it is the arm measured to catch a
     tracker that honours a backslash inside single quotes, and the random arm
-    at length 6 finds that one zero times. `make verify` runs all three.
+    at length 6 finds that one zero times. `make verify` runs every arm.
 
-    It fails rather than skips when `/bin/bash` is missing. A skipped
-    verification reads as a passed one in `-q` output, and this branch's
-    records already carry three probes whose results nobody collected.
     """
-    import importlib.util
-
-    assert pathlib.Path("/bin/bash").exists(), (
-        "no /bin/bash, so the one test here whose oracle is the shell cannot run; "
-        "this is a failure and not a skip, because a skip reads as a pass"
-    )
-
-    probe_path = pathlib.Path(__file__).resolve().parent.parent / "scripts"
-    probe_path = probe_path / "verify_split_against_bash.py"
-    spec = importlib.util.spec_from_file_location("verify_split_against_bash", probe_path)
-    assert spec is not None and spec.loader is not None
-    probe = importlib.util.module_from_spec(spec)
-    # Registered before execution because `@dataclass(slots=True)` resolves the
-    # defining module out of `sys.modules`; `scripts/` is not a package, so this
-    # is the only way to reach the probe and it has to be done in this order.
-    sys.modules[spec.name] = probe
-    spec.loader.exec_module(probe)
-
+    probe = _probe()
     result = probe.check(probe.NAMED)
     assert result.holes == [], f"bash ran a refused command and we admitted it: {result.holes}"
     # The positive control. Most of `NAMED` is written so bash reaches a command
@@ -695,6 +750,247 @@ def test_the_split_agrees_with_bash_itself_on_the_cases_anyone_thought_of() -> N
     assert result.exercised >= 10, (
         f"only {result.exercised} of {result.total} named cases reached the "
         "requirement, so this test has stopped exercising it"
+    )
+
+
+COMMENT_REFUSAL = "a `#` comment ends the line for bash and not for this scan"
+CONTINUATION_REFUSAL = "a backslash-newline joins two lines into a word tokenisation keeps apart"
+
+
+def test_a_quote_inside_a_comment_does_not_hide_the_command_on_the_next_line(
+    tmp_path: pathlib.Path,
+) -> None:
+    """
+    The reported defect, on the reported string, with bash as the witness.
+
+    Bash stops reading the first line at the `#`, so the quote after it opens
+    nothing, the newline is a separator and `touch pwned` is a command. A
+    tracker that reads on through the comment takes the quote for the start of
+    a region that runs to the quote in the second comment: one segment, named
+    `ls`, with the second line inside a quoted operand of an unrestricted row.
+
+    Both halves are asserted. That bash creates the file is what makes the
+    refusal a requirement and not a preference, and it is run here rather than
+    quoted from a record because the claim is about this machine's shell.
+    """
+    command = "ls # '\ntouch pwned #'"
+
+    done = subprocess.run(
+        ["/bin/bash", "-c", command],
+        cwd=tmp_path,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert done.returncode == 0, done.stderr
+    assert (tmp_path / "pwned").exists(), "bash did not run the second line"
+
+    # What the split still reports, and why the split is not what decides: the
+    # second line is nowhere in it as a command.
+    assert shellscan._split_segments(command) == [command]
+    assert shellscan._scan(command) == ([command], 3)
+    assert refusal(command) == COMMENT_REFUSAL
+    assert not is_read_only(command)
+
+
+def test_the_second_reported_form_runs_both_lines_and_is_refused(
+    tmp_path: pathlib.Path,
+) -> None:
+    """
+    `echo ONE # '<newline>echo HIDDEN #'`: no file, so the observation is
+    bash's output. Every row of the table is reachable this way, because the
+    hidden line never meets the table at all.
+    """
+    command = "echo ONE # '\necho HIDDEN #'"
+    done = subprocess.run(
+        ["/bin/bash", "-c", command],
+        cwd=tmp_path,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert done.stdout == "ONE\nHIDDEN\n"
+    assert shellscan._split_segments(command) == [command]
+    assert refusal(command) == COMMENT_REFUSAL
+
+
+def test_a_hash_is_a_comment_exactly_where_bash_begins_a_word(tmp_path: pathlib.Path) -> None:
+    """
+    Where `_scan` says a comment starts, against what bash ran.
+
+    Each case hides `a` on a second line behind a quote that opens after a
+    `#`. If bash read the `#` as a comment it ran `a`; if it read it as part of
+    a word, the quote is real, the second line is inside it and `a` never ran.
+    So the second column is bash's answer to "was that a comment", and
+    `_scan`'s offset has to be None exactly when it was not.
+
+    The cases that are NOT comments matter as much as the ones that are: they
+    are what distinguishes this rule from refusing every `#`, and they are the
+    cases where the segments are bash's and may be read.
+    """
+    hidden = ["a"]
+    cases: list[tuple[str, int | None]] = [
+        # At the start, after a blank, after each operator.
+        ("# '\na #'", 0),
+        ("ls # '\na #'", 3),
+        ("ls\t# '\na #'", 3),
+        ("ls #'\na #'", 3),
+        ("ls;# '\na #'", 3),
+        ("ls |# '\na #'", 4),
+        ("ls &&# '\na #'", 5),
+        # A bare `&` ends a word as well. Refused for the `&` in any case; the
+        # offset is here so the comment is found for bash's reason.
+        ("ls &# '\na #'", 4),
+        ("ls\n# '\na #'", 3),
+        # A backslash-newline is deleted before bash reads words, so the `#`
+        # after one begins a word when the character before the pair ended one.
+        ("ls \\\n# '\na #'", 5),
+        # Mid-word, after a closed quote, escaped, and after a deleted
+        # backslash-newline that leaves it mid-word.
+        ("ls a#'\na #'", None),
+        ("ls ''#'\na #'", None),
+        ("ls \"\"#'\na #'", None),
+        ("ls \\# '\na #'", None),
+        ("ls a\\\n#'\na #'", None),
+        # Inside a quoted region it is text.
+        ("ls '# ' \"# \"", None),
+    ]
+    for command, offset in cases:
+        ran = _bash_argvs(command, tmp_path)
+        assert (hidden in ran) is (offset is not None), (command, ran)
+        assert shellscan._scan(command)[1] == offset, command
+        if offset is not None:
+            assert refusal(command) in (COMMENT_REFUSAL, CONTINUATION_REFUSAL), command
+
+    # Only the first comment is reported, because past it the quote state is
+    # no longer bash's. This is one comment per line to bash.
+    assert shellscan._scan("ls # x\nls # y")[1] == 3
+
+    # A `#` is refused for being a comment and for nothing else, so a search
+    # for one is still a read.
+    assert refusal("grep -n '#include' a.c") is None
+    assert refusal("ls a#b") is None
+
+
+def test_a_backslash_newline_is_refused_because_bash_joins_what_shlex_keeps_apart(
+    tmp_path: pathlib.Path,
+) -> None:
+    """
+    No second command anywhere in these: one `git log`, and the argument bash
+    hands it is not the token the table read.
+
+    Bash deletes a backslash-newline before it forms words, outside quotes and
+    inside double quotes. `shlex` keeps the newline, so `_refuse_git` is shown
+    `--out<newline>put=x`, which does not start with `--output`. The vector
+    below is bash's own, recorded by the probe with nothing on `PATH`; run for
+    real on 2026-10-13 each of the three created the file.
+    """
+    import shlex
+
+    writes = [["git", "log", "--output=x"]]
+    for command in (
+        "git log --out\\\nput=x",
+        'git log "--out\\\nput=x"',
+        "git log -\\\n-output=x",
+    ):
+        assert _bash_argvs(command, tmp_path) == writes, command
+        assert "--output=x" not in shlex.split(command), command
+        assert refusal(command) == CONTINUATION_REFUSAL, command
+
+    # The same join making a follow flag, and a command word.
+    assert _bash_argvs("tail -\\\nf a", tmp_path) == [["tail", "-f", "a"]]
+    assert refusal("tail -\\\nf a") == CONTINUATION_REFUSAL
+    assert _bash_argvs("a\\\na", tmp_path) == [["aa"]]
+    assert refusal("l\\\ns") == CONTINUATION_REFUSAL
+
+    # Quote-blind, so the literal pair inside single quotes is refused too.
+    # Bash passes it through untouched, and that is an over-refusal.
+    assert _bash_argvs("ls 'a\\\nb'", tmp_path) == [["ls", "a\\\nb"]]
+    assert refusal("ls 'a\\\nb'") == CONTINUATION_REFUSAL
+
+    # An escaped backslash at the end of a line is not a join: the newline is
+    # a separator, and bash runs two commands. Refused anyway, for the same
+    # two adjacent characters.
+    assert _bash_argvs("ls a\\\\\na", tmp_path) == [["a"], ["ls", "a\\"]]
+    assert refusal("ls a\\\\\nls") == CONTINUATION_REFUSAL
+
+
+def test_the_constructs_the_tracker_does_not_model_are_refused_for_a_character(
+    tmp_path: pathlib.Path,
+) -> None:
+    """
+    `$'...'` and a heredoc body both end the agreement between `_scan` and
+    bash, and both hide a command the same way a comment does. Neither needs a
+    rule of its own: each takes a character `_METACHARACTERS` refuses wherever
+    it stands, in a scan that tracks no quoting and so reads the same string
+    whatever the tracker made of it.
+
+    The reason is asserted because that is the claim. A refusal for any other
+    reason would mean the hidden command was caught by something that could
+    stop catching it.
+    """
+    # `\'` does not close `$'...'`. The tracker closes at it and reads the rest
+    # as an open region to the last quote; bash runs `a`.
+    ansi = "ls $'it\\'s' ; a #'"
+    assert _bash_argvs(ansi, tmp_path) == [["a"], ["ls", "it's"]]
+    assert shellscan._split_segments(ansi) == [ansi]
+    assert refusal(ansi) == "shell metacharacter '$'"
+
+    # A quote in a heredoc body opens nothing, so the line after the body is a
+    # command. The tracker has it inside a quoted region.
+    heredoc = "cat <<EOF\n'\nEOF\na #'"
+    assert _bash_argvs(heredoc, tmp_path) == [["a"], ["cat"]]
+    assert shellscan._split_segments(heredoc) == ["cat <<EOF", "'\nEOF\na #'"]
+    assert refusal(heredoc) == "segment 1 ('cat <<EOF'): shell metacharacter '<'"
+
+    # The other direction, for contrast: a body with operators in it is five
+    # segments here and one command to bash. More segments than commands can
+    # only refuse more.
+    body = "cat <<EOF\na | b ; c\nEOF"
+    assert _bash_argvs(body, tmp_path) == [["cat"]]
+    assert len(shellscan._split_segments(body)) == 5
+    assert not is_read_only(body)
+
+
+def test_no_generated_command_runs_what_the_classifier_did_not_refuse() -> None:
+    """
+    The property, over a generated corpus weighted toward `#`, quotes, newlines
+    and backslash-newlines: whatever bash ran from an admitted string, each
+    command of it is one `refusal` admits alone, argument for argument.
+
+    Bash is the oracle and nothing a candidate spells can start: the probe
+    gives it an empty `PATH` and reads back the vectors bash tried to run.
+
+    The two controls are what make the zero mean something. Each switches one
+    rule off and requires the same sample to then show a hole, so a generator
+    that stopped producing comments, or joins, fails here instead of passing
+    quietly. `make verify` runs ten times this sample plus the exhaustive arm.
+    """
+    probe = _probe()
+    sample = probe.biased(600)
+
+    result = probe.check(sample)
+    assert result.holes == [], f"bash ran a refused command and we admitted it: {result.holes}"
+    assert result.timeouts == 0
+    assert (
+        result.exercised >= 200
+    ), f"only {result.exercised} of {result.total} candidates reached the requirement"
+
+    real_scan = shellscan._scan
+    with mock.patch.object(shellscan, "_scan", lambda command: (real_scan(command)[0], None)):
+        blind = probe.check(sample)
+    assert any("#" in candidate for _hazards, candidate in blind.holes), (
+        "with comments unreported the sample shows no hole, so it has stopped "
+        "containing the case the comment rule is for"
+    )
+
+    with mock.patch.object(shellscan, "_CONTINUATION", "\0"):
+        unjoined = probe.check(sample)
+    assert any("\\\n" in candidate for _hazards, candidate in unjoined.holes), (
+        "with a backslash-newline admitted the sample shows no hole, so it has "
+        "stopped containing the case that rule is for"
     )
 
 
@@ -1551,3 +1847,284 @@ def test_echo_is_a_label_between_reads_and_its_write_forms_are_caught_before_it(
         refusal("echo foo | tee bad.txt")
         == "segment 2 ('tee bad.txt'): 'tee' is not in the read-only table"
     )
+
+
+# -- a glob, which is a word bash rewrites from the directory --------------------
+
+
+def _glob_refusal(name: str, token: str) -> str:
+    return (
+        f"{name} argument {token!r} has a glob character, which bash expands to file "
+        f"names before {name} reads its options, so a file named like a flag becomes one"
+    )
+
+
+def _run_in(directory: pathlib.Path, command: str) -> subprocess.CompletedProcess[str]:
+    """
+    ``command`` through /bin/bash with the real `git`, `sed` and `tail` on
+    `PATH`, in ``directory``. Git is given no configuration but its own: a
+    `diff.external` in the developer's `~/.gitconfig` is a program this suite
+    would otherwise run.
+    """
+    import os
+
+    return subprocess.run(
+        ["/bin/bash", "-c", command],
+        cwd=directory,
+        env={
+            "PATH": os.environ["PATH"],
+            "HOME": str(directory.parent),
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_AUTHOR_NAME": "a",
+            "GIT_AUTHOR_EMAIL": "a@example.invalid",
+            "GIT_COMMITTER_NAME": "a",
+            "GIT_COMMITTER_EMAIL": "a@example.invalid",
+        },
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+
+
+TRACKED = "one\ntwo\nthree\n"
+
+
+@pytest.fixture
+def repository(tmp_path: pathlib.Path) -> pathlib.Path:
+    """
+    A git repository with one committed file, `a.txt`, and nothing planted.
+
+    Fails rather than skips without `git`, for the reason `_probe` does: the
+    tests that take this are the ones whose witness is the binary.
+    """
+    import shutil
+
+    assert shutil.which("git"), "no git on PATH, so the glob tests have no witness"
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "a.txt").write_text(TRACKED)
+    done = _run_in(repo, "git init -q . && git add a.txt && git commit -q -m first")
+    assert done.returncode == 0, done.stderr
+    return repo
+
+
+def test_a_planted_file_name_becomes_a_flag_through_a_glob(repository: pathlib.Path) -> None:
+    """
+    The reported defect on the reported string, with bash and git as witnesses.
+
+    `git log *` has no flag in it for `_refuse_git` to read. Bash expands the
+    glob before git starts, a file named `--output=pwned` is one of the names,
+    and git is handed the option. The file it creates is the evidence; the
+    refusal is what the scanner's own property then requires.
+    """
+    (repository / "--output=pwned").touch()
+
+    done = _run_in(repository, "git log *")
+    assert done.returncode == 0, done.stderr
+    assert (repository / "pwned").read_text().startswith("commit "), "git did not write the log"
+
+    assert refusal("git log *") == _glob_refusal("git", "*")
+    # The other two glob characters spell the same name, and the flag rule
+    # reads none of the three as `--output`.
+    for word in ("?-output=pwned", "[-]-output=pwned", "--outpu[t]=pwned"):
+        (repository / "pwned").unlink()
+        assert _run_in(repository, f"git log {word}").returncode == 0, word
+        assert (repository / "pwned").exists(), word
+        assert refusal(f"git log {word}") == _glob_refusal("git", word), word
+
+
+def test_a_glob_reaches_the_flags_sed_and_tail_are_restricted_for(
+    repository: pathlib.Path, tmp_path: pathlib.Path
+) -> None:
+    """
+    The same expansion against the other two commands whose flags are
+    restricted, and worse than a new file for one of them: `sed -i` rewrites
+    every file the glob named.
+
+    `tail -f` is observed through the probe and not run, because running it is
+    the hazard -- it does not return.
+    """
+    (repository / "-i").touch()
+    assert _run_in(repository, "sed -n 1p *").returncode == 0
+    assert (repository / "a.txt").read_text() == "one\n", "sed did not edit the file in place"
+    assert refusal("sed -n 1p *") == _glob_refusal("sed", "*")
+
+    for name in ("bin", "rec", "work"):
+        (tmp_path / name).mkdir()
+    for name in ("-f", "a.log"):
+        (tmp_path / "work" / name).touch()
+    ran, _stderr = _probe().bash_ran("tail -n 1 *", str(tmp_path))
+    assert ran == [["tail", "-n", "1", "-f", "a.log"]]
+    assert refusal("tail -n 1 -f a.log") == "tail -f is not a recognised read-only flag"
+    assert refusal("tail -n 1 *") == _glob_refusal("tail", "*")
+
+
+def test_a_double_dash_ahead_of_the_glob_keeps_a_planted_name_a_file(
+    repository: pathlib.Path,
+) -> None:
+    """
+    What `_options_end` admits, run against the binaries it is a claim about.
+
+    Behind a `--` the planted names are operands: git writes nothing, sed
+    edits nothing and tail returns. That is the whole of the reason
+    `git log -- *` may be admitted while `git log *` is not, so each admitted
+    spelling is run with the hostile name present.
+    """
+    for subcommand in sorted(shellscan._GIT_READ_SUBCOMMANDS):
+        (repository / "--output=pwned").touch()
+        command = f"git {subcommand} -- *"
+        _run_in(repository, command)
+        assert not (repository / "pwned").exists(), command
+        assert refusal(command) is None, command
+        # The expansion itself, written out: admitted for the same reason.
+        assert refusal(f"git {subcommand} -- --output=pwned a.txt") is None
+    (repository / "--output=pwned").unlink()
+
+    (repository / "-i").touch()
+    done = _run_in(repository, "sed -n 1p -- *")
+    assert (done.returncode, done.stdout) == (0, "one\n"), done.stderr
+    assert (repository / "a.txt").read_text() == TRACKED
+    assert refusal("sed -n 1p -- *") is None
+    done = _run_in(repository, "sed -- 1p -i")
+    assert done.returncode == 0 and (repository / "a.txt").read_text() == TRACKED
+    assert refusal("sed -- 1p -i") is None
+    (repository / "-i").unlink()
+
+    (repository / "-f").write_text("planted\n")
+    done = _run_in(repository, "tail -q -n 1 a.txt -- *")
+    assert (done.returncode, done.stdout) == (0, "three\nplanted\nthree\n"), done.stderr
+    assert refusal("tail -q -n 1 a.txt -- *") is None
+    assert refusal("tail -n 1 -- -f") is None
+
+
+def test_a_double_dash_an_option_takes_as_its_value_protects_nothing(
+    repository: pathlib.Path,
+) -> None:
+    """
+    Why `_options_end` looks at the word before the `--`.
+
+    `git blame -S` takes a file of revisions as its value, and takes the next
+    word for it whatever that word is. So this `--` is a file name, the options
+    have not ended, and the planted name is read as one. Blame fails -- there
+    is no file called `--` -- and the log is written first.
+    """
+    (repository / "--output=pwned").touch()
+    done = _run_in(repository, "git blame -S -- *")
+    assert done.returncode != 0
+    assert (repository / "pwned").exists(), "git did not take the planted name as an option"
+
+    assert shellscan._options_end(["blame", "-S", "--", "*"]) == 4
+    assert refusal("git blame -S -- *") == _glob_refusal("git", "*")
+    assert refusal("git blame -S -- --output=pwned") == "git --output writes a file"
+    # Every option is treated as one that might, so a `--` that does end the
+    # options parks behind one that takes no value. A revision or a value in
+    # between is what an honest command has to spare.
+    assert refusal("git log --oneline -- *.py") == _glob_refusal("git", "*.py")
+    assert refusal("git log --oneline HEAD -- *.py") is None
+    assert refusal("git log -n 5 -- *.py") is None
+    assert refusal("tail -q -- *.log") == _glob_refusal("tail", "*.log")
+    # A second `--` behind a swallowed one is not believed either.
+    assert refusal("git blame -S -- -- *") == _glob_refusal("git", "*")
+    # `sed`'s `--` ahead of the script is read as the script, as it was.
+    assert (
+        refusal("sed -n -- 1p *")
+        == "sed's script language writes with `w` and takes no flag to do it"
+    )
+
+
+def test_a_glob_is_refused_for_exactly_the_commands_whose_flags_are_restricted() -> None:
+    """
+    The rule has no list of commands of its own. A `_TABLE` row that restricts
+    no flag says every flag of the command reads, so a planted name can make it
+    do nothing the row has not admitted; a row that restricts some, and the two
+    commands with a function in place of a row, are where a flag nobody typed
+    is a flag nobody checked.
+    """
+    for name, rule in shellscan._TABLE.items():
+        expected = None if rule.allowed is None else _glob_refusal(name, "*")
+        assert refusal(f"{name} *") == expected, name
+    assert [name for name, rule in shellscan._TABLE.items() if rule.allowed is not None] == ["tail"]
+    assert refusal("git status *") == _glob_refusal("git", "*")
+    assert refusal("sed -n 1p *") == _glob_refusal("sed", "*")
+    # `cd` restricts no flag: `cd *` changes directory or fails.
+    assert refusal("cd *") is None
+
+    # What an orienting session types, and still does not ask for.
+    for command in (
+        "ls *.py",
+        "ls -la src/*",
+        "cat src/*.md",
+        "grep -r x *",
+        "grep -n 'a.*b' src/[a-c]*.py",
+        "head -n 5 *.txt",
+        "wc -l pptmstr/*.py",
+        "echo *",
+        "git log -- *.py",
+        "git diff HEAD~1 -- 'src/*.py'",
+        "git ls-files -- '*.py'",
+        "tail -n 20 -- *.log",
+        "sed -n 1,80p -- src/*.py",
+    ):
+        assert refusal(command) is None, command
+
+    # What it now asks for. The last four are over-refusals and are priced in:
+    # the token is tested after `shlex` has removed the quotes, so a pattern
+    # bash would never expand is refused with the one it would.
+    for command, name, token in (
+        ("git diff src/*.py", "git", "src/*.py"),
+        ("git show HEAD:src/a?.py", "git", "HEAD:src/a?.py"),
+        ("git blame [ab].py", "git", "[ab].py"),
+        ("tail *.log", "tail", "*.log"),
+        ("tail -n 20 *.log", "tail", "*.log"),
+        ("sed -n 1,80p src/*.py", "sed", "src/*.py"),
+        ("git ls-files '*.py'", "git", "*.py"),
+        ("git log --grep='fix.*bug'", "git", "--grep=fix.*bug"),
+        ("git log --format='[%h] %s'", "git", "--format=[%h] %s"),
+        ("git log \\*", "git", "*"),
+    ):
+        assert refusal(command) == _glob_refusal(name, token), command
+
+    # A glob cannot stand in for the command or the subcommand either, and
+    # that was true before this rule.
+    assert refusal("l? a") == "'l?' is not in the read-only table"
+    assert refusal("git *") == "git * is not in the read-only table"
+
+
+def test_no_glob_among_planted_names_runs_what_the_classifier_did_not_refuse() -> None:
+    """
+    The probe's planted arm, a seventh of it: every candidate is run by bash in
+    a directory of files named for flags the table refuses, and whatever vector
+    bash built after expanding must be one `refusal` admits alone, or the
+    candidate must have been refused.
+
+    The control switches the glob rule off and requires the same sample to show
+    holes, so a generator that stopped producing an expanding glob behind a
+    restricted command fails here. `make verify` runs all of it.
+    """
+    probe = _probe()
+    sample = probe.globbed()[::7]
+
+    result = probe.check(sample, probe.PLANTED)
+    assert result.holes == [], f"bash ran a refused command and we admitted it: {result.holes}"
+    assert result.timeouts == 0 and result.syntax == 0
+    assert result.exercised >= 150, f"only {result.exercised} of {result.total} reached it"
+    # Not vacuous in the other direction: some candidates carrying a glob were
+    # admitted with the hostile names present.
+    admitted = [c for c in sample if "*" in c and refusal(c) is None]
+    assert any(c.startswith("git log -- ") for c in admitted)
+    assert any(c.startswith("ls ") for c in admitted)
+
+    with mock.patch.object(shellscan, "_GLOB", frozenset()):
+        blind = probe.check(sample, probe.PLANTED)
+    opened = {candidate.split(" ")[0] for _hazards, candidate in blind.holes}
+    assert opened == {"git", "sed", "tail"}, (
+        "with globs admitted the planted sample does not show a hole for each "
+        f"restricted command: {sorted(opened)}"
+    )
+
+    # In an empty directory the same strings expand to nothing, which is why
+    # the other arms could not see this.
+    empty = probe.check(sample)
+    assert empty.holes == []

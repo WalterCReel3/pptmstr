@@ -67,6 +67,11 @@ smoke: venv-check gui-check   ## post-install probe: imports + a real window
 run: venv-check gui-check     ## launch the orchestrator
 	$(GUI) $(PY) -m pptmstr
 
+# Both of these start the application, and neither starts it on the operator's own
+# configuration: each script points XDG_CONFIG_HOME and CLAUDE_CONFIG_DIR at a
+# directory it makes and names before `app.main` runs. A start that is not `--fake`
+# moves board logs and recalls the fleet, and `bench` is one.
+# tests/test_scripts_stay_out_of_the_real_config.py holds every script to it.
 bench: venv-check gui-check   ## measure idling CPU and cross-thread wake latency
 	$(GUI) $(PY) scripts/bench_idle.py
 
@@ -112,10 +117,11 @@ typecheck-all: venv-check ## mypy over the application, scripts and tests
 	.venv/bin/mypy pptmstr scripts tests
 
 # The differential probe against `/bin/bash`, in full. Outside `check` because it
-# shells out tens of thousands of times; `make test` already runs its `NAMED` arm,
-# which is the 20 cases somebody worked out and the arm measured to catch a real
-# mutation. What this adds is the exhaustive and sampled arms, which cover the
-# mistakes nobody thought of.
+# shells out tens of thousands of times. `make test` already runs two of its arms:
+# all of `NAMED`, the cases somebody worked out and the arm measured to catch a
+# real mutation, and a sample of what `biased()` generates. What this
+# adds is the exhaustive and sampled arms and the rest of the biased one, which
+# cover the mistakes nobody thought of.
 #
 # Run it after any edit to `_split_segments`, `_METACHARACTERS` or `_SEPARATORS`.
 # The suite can tell you the splitter still handles the cases we know about; only

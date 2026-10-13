@@ -354,3 +354,85 @@ def test_continuation_stops_at_a_newline_boundary() -> None:
     t.append(SegmentKind.OUTPUT, "new thought")
     sync(cache, t)
     assert texts(cache) == ["finished.", "new thought"]
+
+
+# -- a session recalled from its file has no transcript loaded -----------------------
+#
+# Drawn through ``tests/test_ui_text.said_by``: what was said and which controls
+# were offered, not what it looked like.
+
+
+def _drawn(monkeypatch, snap, node, **kw):  # type: ignore[no-untyped-def]
+    from pptmstr.ui import transcript_pane
+    from tests.test_ui_text import said_by
+
+    state = TranscriptState()
+    said = said_by(
+        monkeypatch, lambda: transcript_pane.draw(snap, state, node, **kw), transcript_pane
+    )
+    return said, state
+
+
+def test_a_recalled_session_says_it_is_not_loaded_and_offers_no_controls(monkeypatch) -> None:
+    """
+    Its transcript is empty because nothing read it. The filters, the copy button
+    and "(nothing yet)" over that are a session that ran here and has not spoken.
+    """
+    from tests.test_ui_text import CLOSED_ROOT, recalled_snapshot
+
+    said, state = _drawn(monkeypatch, recalled_snapshot(), CLOSED_ROOT)
+
+    assert said.strings == ["closed — not loaded; Resume… to continue"]
+    assert not {"checkbox", "radio_button", "input_text_with_hint", "small_button"} & set(
+        said.calls
+    )
+    # And no cache: there is nothing to keep lines of.
+    assert state.caches == {}
+
+
+def test_the_closed_line_carries_the_transcripts_path_when_the_pane_is_handed_one(
+    monkeypatch,
+) -> None:
+    from tests.test_ui_text import CLOSED_ROOT, recalled_snapshot
+
+    said, _ = _drawn(
+        monkeypatch,
+        recalled_snapshot(),
+        CLOSED_ROOT,
+        closed_path="/home/u/.claude/projects/-w\n-project/sess-closed.jsonl",
+    )
+
+    assert said.strings == [
+        "closed — not loaded; Resume… to continue",
+        "transcript: /home/u/.claude/projects/-w -project/sess-closed.jsonl",
+    ]
+
+
+def test_a_recalled_session_whose_transcript_is_gone_is_not_told_to_resume(monkeypatch) -> None:
+    import dataclasses
+
+    from pptmstr.model import TranscriptPresence
+    from tests.test_ui_text import CLOSED_ROOT, FROM_FILE, recalled_snapshot
+
+    gone = dataclasses.replace(FROM_FILE, transcript=TranscriptPresence.GONE)
+    said, _ = _drawn(monkeypatch, recalled_snapshot(gone), CLOSED_ROOT)
+
+    (line,) = said.strings
+    assert "gone" in line and "Resume" not in line
+
+
+def test_a_path_is_not_drawn_for_a_session_that_ran_here(monkeypatch) -> None:
+    """
+    The control, and the other half of the parameter: a session with a transcript
+    loaded draws it, with its controls, whatever path the caller holds.
+    """
+    from pptmstr.store import Store
+    from tests.test_ui_text import RAN_ROOT, run
+
+    store = Store()
+    run(store)
+    said, state = _drawn(monkeypatch, store.snapshot(), RAN_ROOT, closed_path="/somewhere.jsonl")
+
+    assert "(nothing yet)" in said.strings and "checkbox" in said.calls
+    assert not said.has("closed —") and not said.has("/somewhere.jsonl")
+    assert RAN_ROOT in state.caches

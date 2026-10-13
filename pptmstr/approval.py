@@ -19,6 +19,7 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, assert_never
 
+from .commandtext import visible
 from .shellscan import is_read_only
 
 
@@ -116,6 +117,7 @@ class Policy(enum.Enum):
 _BUS_SERVER = "pptmstr"
 _BUS_POST = f"mcp__{_BUS_SERVER}__post_concern"
 _BUS_DECLARE = f"mcp__{_BUS_SERVER}__declare_task"
+_BUS_AMEND = f"mcp__{_BUS_SERVER}__amend_task"
 
 # Reads, searches and listings. Cheap, reversible, and they do not leave the box.
 _AUTO = frozenset(
@@ -197,6 +199,18 @@ _REVIEW = frozenset(
         # lands. That is what makes this a scoping moment rather than only a binary
         # one -- the operator sets the size, not just the yes.
         _BUS_DECLARE,
+        # An amendment is a declaration made a second time: it sets what an agent
+        # is held to, so it meets whatever a declaration meets on the same rung,
+        # by being in the same set. Parked, it is edited through updatedInput like
+        # one, and the handler drops the amender's basis from an edited call.
+        #
+        # Under ``AUTONOMOUS`` that is no review at all. This whole set is
+        # released there, so an agent's amendment lands unseen, as its declaration
+        # did. What stands on that rung is the reducer's rule and not this gate:
+        # only the agent that declared a task and never held it may amend it, it
+        # may not then claim it, and the text it replaced is kept as a version
+        # (``store._amender_refusal``, ``store._claim_refusal``).
+        _BUS_AMEND,
     }
 )
 
@@ -220,13 +234,127 @@ _AUTONOMOUS_AUTO = _REVIEW
 # premise actually holds for, in one of two shapes: bookkeeping about a task whose
 # existence the operator decided at declaration, or -- `read_inbox` -- reading
 # messages that were already reviewed at the send.
+#
+# **"Decided at declaration" and "reviewed at the send" are true of the rungs that
+# park those calls, and only of them.** `declare_task`, `amend_task` and
+# `post_concern` are in ``_REVIEW``, which ``STRICT`` and ``PERMISSIVE`` hold and
+# ``AUTONOMOUS`` releases whole. A specification an agent amended was approved at
+# the amendment as it was at the declaration, and "at declaration" below covers
+# both. Under ``AUTONOMOUS`` no operator saw the specification or the concern, and
+# every read below hands on text nobody reviewed. That is the rung's stated cost and
+# not a hole in this set: the reads carry exactly as much review as the writes were
+# given, and wherever "approved" or "reviewed" is said below it means on a rung that
+# asks.
+#
+# `read_task` is `read_board` for one row, with the texts a board read cuts, and
+# is here on `read_board`'s grounds exactly: it returns a specification approved
+# at its declaration and notes reviewed at their send, scoped to the caller's own
+# board.
+#
+# **`release_task` is bookkeeping on the caller's own claim, with one exception
+# that rides the same auto-approved name on every rung, ``STRICT`` included.** The
+# root of a session may release a claim that is not its own when the holder is an
+# agent of an earlier run of that session (`store._may_reclaim`): it puts another
+# agent's task back on the board, and no operator is asked. It is here because
+# what it undoes is a claim nothing running will ever finish or give back, it
+# gives the root nothing but the task's return to PENDING -- the root cannot
+# complete it in the holder's place -- and parking it would leave the row stuck
+# until somebody answered. Whether the root should have that release at all is
+# question 6 of
+# `planning/2026-10-12-session-control-and-the-inter-team-record-in-one-sequence.md`,
+# which the operator has not answered; it is built as the lead recommended there,
+# and taking the two lines out of the reducer's `TaskReleased` arm is the whole
+# of the other answer.
+#
+# `read_digest` is here on those grounds too, and by leaving one thing out. Three of
+# its slots are the caller's own board again: tasks approved at declaration,
+# results as `read_board` already shows them, concerns reviewed at their send. The
+# fourth, what is waiting on the operator, is drawn from the approval queue --
+# calls nobody has approved yet -- so the tool reports who is waiting and for what
+# kind of thing and never the queue row (`bus._digest_text`). With the row in it
+# this would be a read that hands one agent another's unreviewed message.
+#
+# **`complete_task` is where the premise is thinnest on every rung, and it is stated
+# rather than hidden.** A completion may carry two pieces of prose, a `result` and a
+# `not_run` list, and the board then shows both to every agent on it. Neither is
+# parked under any policy, so they are the prose on the board that no operator saw
+# before it landed even where every declaration and every concern was reviewed. It
+# stays here because what the gate would be deciding is whether work already done
+# may be recorded as done, and a parked or refused completion strands a claim and
+# everything waiting on it. Both are rendered as the claimer's own account for that
+# reason, and quoted line by line so neither can be read as a line the board wrote
+# (`bus._board_line`, `bus._quoted`).
+#
+# **The three decision tools are here because a decision is addressed to the
+# operator, and one of them is not private to the operator.** `raise_decision` puts
+# its text in the operator's own queue, and parking it would put a message for the
+# operator in front of the operator to ask whether the operator may see it: the
+# queue row is the review. `withdraw_decision` removes the asker's own row.
+#
+# The text has a second reader, and it is an agent. The root of a session reads
+# every decision raised in it (`model.Snapshot.decisions_readable_by`), and
+# `read_decisions` hands it the question, what happens if it goes unanswered, the
+# evidence and the recommendation whole -- up to four texts of
+# `model.MAX_DECISION_TEXT_CHARS` that a sub-agent wrote and no operator approved
+# before the lead could read them. So on the rungs that park `post_concern`, a
+# sub-agent's `raise_decision` is words to its lead that are not parked. It is the
+# second such text on the board beside `complete_task`'s result, and it is held
+# the same way: quoted line by line behind the asker's name, never as a line the
+# tool wrote (`bus._decision_whole`), with the operator looking at the same words
+# in the queue. No board or digest read shows a question (`bus._digest_text`), so
+# the lead is the only agent it reaches. What bounds the three is the store: an
+# agent may have `model.MAX_OPEN_DECISIONS_PER_ASKER` open, a session's sub-agents
+# `model.MAX_OPEN_SUBAGENT_DECISIONS` between them, and only the operator's own
+# intent ends one with an answer.
+#
+# **Both halves are decisions taken without the operator.** That a raise runs
+# without sign-off is question 8, and that the session root reads its workers'
+# decisions is question 4, of
+# `planning/2026-10-12-session-control-and-the-inter-team-record-in-one-sequence.md`;
+# the operator has answered neither, and each was built as recommended there. Put
+# together they open the unparked channel above, which neither question asked
+# about on its own. Moving `raise_decision` to ``_REVIEW`` closes it on the rungs
+# that review a concern, and is the whole of the other answer to question 8;
+# narrowing `decisions_readable_by` to the asker is the other answer to question 4.
+#
+# **The three command tools are here on the decision tools' grounds, and on every
+# rung.** `request_command` asks the operator to run a command outside the
+# sandbox. Its only reader before anything happens is the operator, in a row of
+# its own kind, so parking it would put a request for the operator in front of
+# the operator to ask whether the operator may see it; and the asker was told to
+# carry on, which a parked call does not let it do. The row is the review:
+# nothing runs on this call, and nothing runs at all until the operator presses
+# twice on the exact string, which only an intent naming no node can start
+# (`store._approved`). `withdraw_command` removes the asker's own row.
+#
+# `read_commands` hands text to a second reader, as `read_decisions` does: a
+# session's root reads every command asked in it
+# (`model.Snapshot.commands_readable_by`), so a sub-agent's command, reason and
+# expectation reach its lead unparked, and so does the end of what the command
+# printed -- bytes of a program the operator chose to run, which may be the
+# contents of a file an agent wrote. Each is quoted behind a mark of its own
+# and never as a line the tool wrote (`commandbus`), and what bounds them is the
+# store: `command.MAX_OPEN_PER_ASKER` open for an agent and
+# `command.MAX_OPEN_SUBAGENTS` across a session's sub-agents.
+#
+# Named here for every session and offered to a contained one alone: the server
+# of a session with no containment does not have the three (`bus.build_server`),
+# so on it these names admit a call that reaches no tool.
 _BUS_AUTO = frozenset(
     {
         f"mcp__{_BUS_SERVER}__read_inbox",
         f"mcp__{_BUS_SERVER}__read_board",
+        f"mcp__{_BUS_SERVER}__read_task",
+        f"mcp__{_BUS_SERVER}__read_digest",
         f"mcp__{_BUS_SERVER}__claim_task",
         f"mcp__{_BUS_SERVER}__complete_task",
         f"mcp__{_BUS_SERVER}__release_task",
+        f"mcp__{_BUS_SERVER}__raise_decision",
+        f"mcp__{_BUS_SERVER}__read_decisions",
+        f"mcp__{_BUS_SERVER}__withdraw_decision",
+        f"mcp__{_BUS_SERVER}__request_command",
+        f"mcp__{_BUS_SERVER}__read_commands",
+        f"mcp__{_BUS_SERVER}__withdraw_command",
     }
 )
 
@@ -410,6 +538,37 @@ def classify(
     return Disposition.REQUIRE_APPROVAL
 
 
+def command_shown(tool_name: str, key: str, value: object) -> str | None:
+    """
+    A Bash call's command as every approval surface draws it, or None when
+    ``key`` of ``tool_name`` is not one.
+
+    ``commandtext.visible`` and nothing else: a newline is the two characters
+    backslash-n followed by the break itself, so a line break in the command
+    is never drawn as a space, and never as a break the pane could have made
+    by wrapping. `ls # '` + newline + `touch pwned #'` is two commands to bash
+    (``shellscan._scan``), and flattened to `ls # ' touch pwned #'` the second
+    is comment text to the eye. Since a command carrying a comment parks, that
+    row is the one the operator approves from.
+
+    One function so that the queue row, the expanded row and the detail pane
+    cannot each have a rule: ``summarize`` flattens this to one line, where
+    the marker survives and the break does not, and the two panes draw it
+    line for line.
+
+    What it costs an ordinary command is ``visible``'s whole scheme rather
+    than its newline rule alone. A backslash is drawn doubled, so
+    `grep 'a\\.b' f` reads `grep 'a\\\\.b' f`; a tab is `\\x09`; a character
+    outside ASCII is `\\u{...}`. A command with none of those is drawn as
+    typed. Taking only the newline rule would leave a carriage return and a
+    bidirectional override drawn as nothing, and a literal backslash-n
+    indistinguishable from a marked break.
+    """
+    if tool_name != "Bash" or key != "command" or not isinstance(value, str):
+        return None
+    return visible(value)
+
+
 def summarize(tool_name: str, tool_input: Mapping[str, Any], width: int = 90) -> str:
     """
     One line naming what the call would do. This is the queue row.
@@ -428,7 +587,31 @@ def summarize(tool_name: str, tool_input: Mapping[str, Any], width: int = 90) ->
     ``"?"`` when the declared key is absent, and that is the honest row rather than
     a gap: the other key being filled in does not make it the target, and a call
     whose destination cannot be read is one the operator should open.
+
+    **A message, a declaration and an amendment say what their author said about
+    them**, in the words the board will use once they land (``board.basis_label``
+    and its neighbours, and ``model``'s reading of the raw arguments). This is the
+    row the operator signs the text off from, so a standing the board shows
+    afterwards and this row did not would be a claim approved unseen. The standing and the
+    incident marker ride ahead of the subject or title because the row is clipped
+    from the right and they are the short part. A declaration's property goes
+    last for the opposite reason: it is a whole sentence that will rarely fit, and
+    at the end a cut shows as the ellipsis it is, where in the middle it would
+    push the size off the row and still not be whole. The detail pane lists every
+    argument uncut.
     """
+    # Imported here because ``model`` imports ``Policy`` from this module, so a
+    # top-level import closes a cycle. Neither pulls in the SDK.
+    from .board import basis_label, incident_marker, property_label
+    from .model import Basis, normalised_property, stated_flag, stated_incident
+
+    def standing(raw: object) -> str:
+        try:
+            return basis_label(Basis.stated(raw))
+        except ValueError:
+            # The handler refuses this call. Shown as written, so the operator
+            # approving it knows the approval will not put anything on the board.
+            return f"basis {str(raw)!r} is not one the bus accepts"
 
     def clip(text: str, limit: int = width) -> str:
         text = " ".join(text.split())
@@ -439,7 +622,13 @@ def summarize(tool_name: str, tool_input: Mapping[str, Any], width: int = 90) ->
         path = str(tool_input.get(declared) or "?")
         return clip(f"{tool_name} {path}")
     if tool_name == "Bash":
-        return clip(str(tool_input.get("command") or ""))
+        # The one row that is not a description of the call but the call, so it
+        # is the one row where the flattening below could hide something: see
+        # `command_shown`. The count leads because the row is clipped from the
+        # right, and a second line past the cut must not read as a long first.
+        shown = command_shown(tool_name, "command", str(tool_input.get("command") or "")) or ""
+        lines = shown.count("\n") + 1
+        return clip(shown if lines == 1 else f"{lines} lines · {shown}")
     if tool_name in ("WebFetch", "WebSearch"):
         return clip(f"{tool_name} {tool_input.get('url') or tool_input.get('query') or ''}")
     if tool_name in ("Task", "Agent"):
@@ -451,7 +640,11 @@ def summarize(tool_name: str, tool_input: Mapping[str, Any], width: int = 90) ->
         # detail pane, not here.
         to = tool_input.get("to") or "?"
         subject = str(tool_input.get("subject") or "").strip()
-        return clip(f"message {to}: {subject or tool_input.get('body') or ''}")
+        marker = incident_marker(stated_incident(tool_input.get("incident")))
+        return clip(
+            f"message {to} ({standing(tool_input.get('basis'))}): "
+            f"{marker}{subject or tool_input.get('body') or ''}"
+        )
     if tool_name == _BUS_DECLARE:
         # The question at this row is "should this work exist", so it leads with the
         # claim. The specification is the diff-equivalent and belongs in the detail
@@ -460,13 +653,48 @@ def summarize(tool_name: str, tool_input: Mapping[str, Any], width: int = 90) ->
         # scoping moment and those two are what the operator would otherwise open
         # the row to find.
         title = str(tool_input.get("title") or "").strip()
-        parts = [f"declare {title or '(untitled)'}"]
+        parts = [f"declare ({standing(tool_input.get('basis'))}) {title or '(untitled)'}"]
         touches = tool_input.get("touches") or ()
         if touches:
             parts.append(f"writes {', '.join(str(p) for p in touches)}")
         depends = tool_input.get("depends_on") or ()
         if depends:
             parts.append(f"after {', '.join(str(d) for d in depends)}")
+        held_to = property_label(normalised_property(tool_input.get("property")))
+        if held_to:
+            parts.append(held_to)
+        return clip(" · ".join(parts))
+    if tool_name == _BUS_AMEND:
+        # The question at this row is "may this replace what the task is held to".
+        # Which task and how the amender stands behind the new text lead; what it
+        # does to the property follows, because that sentence is the bar and an
+        # amendment that moves or removes it is the one an operator most needs to
+        # open. The text itself is the diff-equivalent, as a declaration's is.
+        #
+        # A basis is shown only beside a text it can end up beside. With no
+        # ``detail``, or a blank one, the handler leaves the text standing and
+        # the reducer keeps the basis its author gave it, so the amender's is
+        # discarded: printed here, it would be a standing the operator signed
+        # off and the board never shows. One the bus will not accept is still
+        # shown, since that call is refused whatever else it carries.
+        task = str(tool_input.get("task_id") or "?").strip()
+        sent, raw = tool_input.get("detail"), tool_input.get("basis")
+        said = standing(raw)
+        if sent is None or not str(sent).strip():
+            try:
+                given = Basis.stated(raw)
+            except ValueError:
+                pass
+            else:
+                said = "its text stands" + (
+                    "" if given is None else "; the basis given is not kept"
+                )
+        parts = [f"amend {task} ({said})"]
+        held_to = property_label(normalised_property(tool_input.get("property")))
+        if stated_flag(tool_input.get("withdraw_property")):
+            parts.append("WITHDRAWS its property")
+        elif held_to:
+            parts.append(f"replaces its property -- {held_to}")
         return clip(" · ".join(parts))
     if not tool_input:
         return tool_name

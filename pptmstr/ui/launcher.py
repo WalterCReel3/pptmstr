@@ -23,10 +23,12 @@ from __future__ import annotations
 
 import os
 import queue
+import string
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+from enum import Enum
 from pathlib import Path
 from typing import assert_never
 
@@ -35,7 +37,7 @@ from imgui_bundle import imgui
 from .. import brief as brief_mod
 from .. import cli_version, sandbox, templates, tree
 from .. import sessions as sessions_mod
-from ..approval import Policy
+from ..approval import Disposition, Policy, classify
 from ..model import LaunchSpec
 from ..model_catalog import DEFAULT_MODEL, FALLBACK_MODELS
 from ..sessions import Overlay, SessionRow
@@ -59,9 +61,12 @@ _WIDTH = 620.0
 _TASK_HEIGHT = 132.0
 _LIST_HEIGHT = 176.0
 
-# ``###`` fixes the header's ID while its visible label changes with the pick, so
-# naming the picked session does not slam the section shut mid-read.
+# ``###`` fixes the header's ID apart from its visible label, so rewording the
+# header does not change which section a saved open state belongs to.
 _RESUME_ID = "###resume"
+# The task box's label, named because two calls have to agree on it: the widget, and
+# the lookup of that widget's text state in ``draw``.
+_TASK_ID = "##task"
 
 _MINUTE = 60.0
 _HOUR = 3600.0
@@ -106,9 +111,14 @@ def scan_sessions(cwd: str) -> tuple[tuple[SessionRow, ...], Overlay]:
     hunting for it does not think of it as a different project. The exact match is
     also unusable here for a second reason: the launcher's cwd defaults to ``"."``
     while ``SessionRow.cwd`` is the absolute path the CLI recorded, so ``same_cwd``
-    would return nothing at all for the default. This repo has no worktrees, so the
-    two have never been observed to disagree and this is a choice made on the
-    reasoning rather than on a measurement.
+    would return nothing at all for the default.
+
+    The two disagree wherever a worktree exists, this repository included:
+    ``planning/2026-10-07-a-session-can-run-in-its-own-worktree.md`` measured five
+    rows through the fold against one through the exact match. So a listing asked for
+    one directory carries rows recorded in another, each with its own ``cwd``, and the
+    directory that was scanned says nothing about where a picked row runs.
+    ``launch_directory`` is what answers that, from the row.
 
     Errors are not caught here. ``enumerate_sessions`` refuses to turn an unreadable
     transcript tree into "no sessions", and swallowing that on the way past would
@@ -117,6 +127,146 @@ def scan_sessions(cwd: str) -> tuple[tuple[SessionRow, ...], Overlay]:
     overlay = sessions_mod.load_overlay()
     rows = sessions_mod.enumerate_sessions(cwd=cwd, overlay=overlay, bookmarked_first=True)
     return rows, overlay
+
+
+@dataclass(frozen=True, slots=True)
+class FieldDirectory:
+    """
+    Nothing is picked, so the launch runs where the cwd field says. ``path`` is the
+    field as typed, with only the empty case filled in.
+    """
+
+    path: str
+
+
+@dataclass(frozen=True, slots=True)
+class RecordedDirectory:
+    """
+    A session is picked and the directory its transcript was recorded in is there.
+    The launch runs in it, whatever the cwd field says. ``path`` was its own
+    ``realpath`` when this was read: no link stood anywhere along it.
+    """
+
+    path: str
+
+
+@dataclass(frozen=True, slots=True)
+class RedirectedDirectory:
+    """
+    A session is picked and the path it was recorded under is a directory only
+    through a symbolic link: the path itself, or a component above it.
+
+    ``path`` is where the link leads, which is where the launch runs, and
+    ``recorded`` is the spelling the transcript carries. Nothing here can tell a
+    session that was recorded through the link from one whose directory was replaced
+    by a link afterwards, so neither is claimed; what is known is that the two
+    spellings differ, and the screen says both.
+    """
+
+    path: str
+    recorded: str
+
+
+@dataclass(frozen=True, slots=True)
+class GoneDirectory:
+    """
+    A session is picked and the directory it was recorded in is not a directory.
+    ``path`` is the recorded one. Nothing launches -- see ``resume_form.ResumeForm.hold``.
+    """
+
+    path: str
+
+
+@dataclass(frozen=True, slots=True)
+class UnrecordedDirectory:
+    """
+    A session is picked whose row carries no directory at all, so the cwd field is
+    the only answer there is. ``path`` is the field, as for ``FieldDirectory``; it is
+    a variant of its own because the screen has to say which of the two happened.
+    """
+
+    path: str
+
+
+# Where a launch runs. Every variant carries the one ``path`` that is in force for
+# it, so a caller that needs the directory reads ``.path`` and a caller that needs to
+# know *why* it is that directory matches on the variant.
+LaunchDirectory = (
+    FieldDirectory | RecordedDirectory | RedirectedDirectory | GoneDirectory | UnrecordedDirectory
+)
+
+
+def launch_directory(row: SessionRow | None, field: str) -> LaunchDirectory:
+    """
+    Where a launch with ``row`` picked runs, given what the cwd field holds.
+
+    **The one resolution.** The spec's ``cwd`` and ``session_base``, the brief
+    directory a pick recovers, the own-checkout refusal and the text describing the
+    sandbox's region all read this, because they are one fact: a resumed conversation
+    continues in the tree it was having the conversation about. Nothing downstream
+    enforces it. ``scan_sessions`` lists a worktree's sessions from the main checkout,
+    and the CLI accepts a resume from any directory and says nothing, so a caller
+    that reads the field for itself resumes that session *in the main checkout*.
+
+    **A recorded directory that is gone is not replaced by the field.** The field
+    names a tree the conversation was not about, and a resume there is the same
+    wrong-tree resume with nothing on screen to show it. It is returned as its own
+    variant and the launch is held on it.
+
+    **A recorded path that leads somewhere else through a link is said to.** The
+    launch runs where the link leads, because that is where the CLI would start it,
+    and it is not held: the path may always have been a link, and then nothing has
+    moved. But a path replaced by a link to another tree is the same wrong-tree
+    resume the gone case is held for, so the variant carries both spellings and the
+    line under the picker names the one the session runs in.
+
+    **A row with no directory uses the field**, and is a variant so the screen can say
+    so. Refusing would be the wrong answer here: nothing is known to be wrong, there
+    is no recorded tree to be faithful to, and a refusal would leave the session
+    unrecoverable from the one screen that exists to recover it. The SDK fills a
+    missing ``cwd`` with the project directory it found the transcript under whenever
+    it was asked about a directory, which is the only way ``scan_sessions`` asks, so
+    on the picker's own route this variant is reached only through an injected scanner.
+
+    One ``stat`` and one ``realpath`` when a row is picked and neither otherwise, so
+    a draft nobody picked a session on touches no disk. The draw calls this every
+    frame; that is the price of noticing a worktree removed, or a path relinked,
+    while the modal is open, and it is an ``lstat`` per component of one path.
+    """
+    if row is None:
+        return FieldDirectory(field)
+    if not row.cwd:
+        return UnrecordedDirectory(field)
+    if not os.path.isdir(row.cwd):
+        return GoneDirectory(row.cwd)
+    real = os.path.realpath(row.cwd)
+    # ``abspath`` and not the recorded string: a trailing separator or a ``..`` is a
+    # different spelling of the same path, and no link is involved in either.
+    if real != os.path.abspath(row.cwd):
+        return RedirectedDirectory(real, row.cwd)
+    return RecordedDirectory(real)
+
+
+def resolved_directory(directory: LaunchDirectory) -> str:
+    """
+    The directory a launch in ``directory`` is started in, as the one string the
+    session is handed.
+
+    A picked session's directory was resolved when ``launch_directory`` read it, and
+    is returned as read: resolving it again here would be a second look at a disk
+    that can have moved since the first, and the own-checkout refusal and the spawn
+    have to be about one look. The field is resolved here, because nothing has
+    looked at it yet.
+
+    Raises ``ValueError`` for a field ``realpath`` cannot take, a NUL in it.
+    """
+    match directory:
+        case RecordedDirectory(path=path) | RedirectedDirectory(path=path):
+            return path
+        case FieldDirectory(path=path) | UnrecordedDirectory(path=path) | GoneDirectory(path=path):
+            return os.path.realpath(path)
+        case _:
+            assert_never(directory)
 
 
 # What a worker hands back: rows and overlay, or the message from the failure that
@@ -129,7 +279,13 @@ Scanner = Callable[[str], tuple[tuple[SessionRow, ...], Overlay]]
 @dataclass
 class SessionPicker:
     """
-    The resume list: one cached scan, the operator's overlay, and which row is picked.
+    The list of sessions that can be resumed: one cached scan, the operator's
+    overlay, and a pick.
+
+    **New Task lists and does not pick.** A click on a row there is handed to the
+    caller of ``draw`` (``on_pick_resume``) and nothing here remembers it; a session
+    is resumed from ``ui/resume_form`` and from nowhere else. ``pick`` and what it
+    derives are kept for that form, which asks them where a session's brief is.
 
     The cache is the whole design. ``sessions.enumerate_sessions`` opens, stats and
     head/tail-reads every transcript in the project and shells out to ``git
@@ -172,7 +328,12 @@ class SessionPicker:
     # ``set_expanded``.
     expanded: bool = False
     pending_cwd: str | None = None
-    selected: str | None = None
+    # The picked row, as it read when it was picked, or None. The row and not its id,
+    # and never looked up again in ``rows``: every open rescans, a rescan can carry
+    # the same id recorded under another directory or not carry it at all, and the
+    # row the operator read and clicked is the one that says where the resume runs.
+    # A rescan is not an act of theirs.
+    picked: SessionRow | None = None
     # The brief directory the picked session wrote its premises into, if it exists.
     #
     # Recoverable, and not a guess: `brief.session_dir` is a function of cwd and
@@ -308,34 +469,564 @@ class SessionPicker:
 
     def select(self, session_id: str | None, cwd: str) -> None:
         """
-        Pick a session to resume, or clear the pick. Re-picking the current one clears.
+        Pick a session to resume by its id, or clear the pick. Re-picking the current
+        id clears.
 
-        ``cwd`` is this launch's working directory rather than the row's, because the
-        brief directory that matters is the one the resumed session will actually
-        derive -- ``app._seed_brief`` builds it from the same two values, so the two
-        agree by construction instead of by coincidence.
+        An id with no row in the listing clears the pick rather than setting one.
+        Where a resume runs is read off the row, so a pick without one would be a
+        resume with nothing to say where. An id the listing carries twice is answered
+        with the first row, which is why a click does not come through here: see
+        ``pick``.
         """
-        self.selected = None if session_id is None or session_id == self.selected else session_id
+        wanted = None if session_id is None or session_id == self.selected else session_id
+        self.pick(next((row for row in self.rows if row.session_id == wanted), None), cwd)
+
+    def is_picked(self, row: SessionRow) -> bool:
+        """
+        Whether ``row`` is the pick: the same session recorded in the same directory.
+
+        Not the id alone, because the listing can carry one id under two directories
+        and only one of those rows is where the resume runs. Not the whole row,
+        because a rescan restamps a row the operator would still call the one they
+        picked.
+        """
+        return (
+            self.picked is not None
+            and row.session_id == self.picked.session_id
+            and row.cwd == self.picked.cwd
+        )
+
+    def pick(self, row: SessionRow | None, cwd: str) -> None:
+        """
+        Pick ``row`` to resume, or clear the pick with None. Picking the row that is
+        already the pick clears it.
+
+        **The row and not its id, because the row is what was clicked.** The SDK can
+        list one id under two directories, and a lookup by id answers with the first
+        of them: a click on the second would resume in the first's directory, under a
+        line naming a directory the operator did not choose.
+
+        ``cwd`` is the cwd field, and it is only the answer for a row that recorded no
+        directory. The brief directory is derived from ``launch_directory`` -- the
+        directory the resumed session will run in -- and ``app._seed_brief`` builds it
+        from ``LaunchSpec.cwd``, which ``resume_form.press`` takes from the same call,
+        so the two agree by construction instead of by coincidence.
+        """
+        self.picked = None if row is None or self.is_picked(row) else row
         self.recovered_brief = None
-        if self.selected is None:
+        if self.picked is None:
             return
-        directory = brief_mod.session_dir(brief_mod.default_root(), cwd or ".", self.selected)
+        directory = brief_mod.session_dir(
+            brief_mod.default_root(),
+            launch_directory(self.picked, cwd or ".").path,
+            self.picked.session_id,
+        )
         # One stat, at the click. Offering a path to a directory that does not exist
         # would be the same lie as pre-filling the task.
         if directory.is_dir():
             self.recovered_brief = str(directory)
 
     @property
-    def selected_row(self) -> SessionRow | None:
-        for row in self.rows:
-            if row.session_id == self.selected:
-                return row
-        return None
+    def selected(self) -> str | None:
+        """
+        The id of the picked session, or None.
+        """
+        return None if self.picked is None else self.picked.session_id
 
 
 # ---------------------------------------------------------------------------
 # The dangerously autonomous mode, as the launcher sees it
 # ---------------------------------------------------------------------------
+
+
+def gitdir_pointer(text: str) -> str | None:
+    """
+    The path a ``.git`` *file* points at, or None when the text is not such a pointer.
+
+    Pure. The file is one line, ``gitdir: <path>``, and the path may be relative to
+    the directory holding the file -- a submodule's is.
+    """
+    first = text.split("\n", 1)[0]
+    if not first.startswith("gitdir:"):
+        return None
+    return first[len("gitdir:") :].strip() or None
+
+
+def _git_file(directory: str) -> tuple[str, str | None] | None:
+    """
+    What the ``.git`` *file* in ``directory`` says: the directory it points at,
+    resolved, and the shared git directory that one's ``commondir`` names, resolved,
+    or None for the second when it has no ``commondir``. None altogether when there
+    is no such file or it is not a readable pointer.
+
+    Total. ``ValueError`` is caught beside ``OSError`` because a pointer is bytes off
+    a disk: one with a NUL in it is refused by ``open`` with a ``ValueError``, and the
+    caller is a draw call.
+    """
+    dot_git = os.path.join(directory, ".git")
+    try:
+        if not os.path.isfile(dot_git):
+            return None
+        with open(dot_git, encoding="utf-8", errors="replace") as handle:
+            pointer = gitdir_pointer(handle.read(4096))
+        if pointer is None:
+            return None
+        # ``join`` discards ``directory`` for an absolute pointer, which is the usual
+        # kind for a worktree.
+        admin = os.path.join(directory, pointer)
+        try:
+            with open(
+                os.path.join(admin, "commondir"), encoding="utf-8", errors="replace"
+            ) as handle:
+                common = handle.read(4096).strip()
+        except OSError:
+            common = ""
+        shared = os.path.realpath(os.path.join(admin, common)) if common else None
+        return os.path.realpath(admin), shared
+    except (OSError, ValueError):
+        return None
+
+
+def shared_git_dir(directory: str) -> str | None:
+    """
+    The git directory a linked worktree at ``directory`` shares with its main
+    repository, resolved, or None when ``directory`` is not the root of one.
+
+    **Decided by the ``commondir`` file, not by the shape of the pointer.** A linked
+    worktree's ``.git`` is a file pointing at ``<git dir>/worktrees/<name>``, and so,
+    by shape, is a submodule checked out at ``worktrees/<name>`` -- its pointer ends
+    ``modules/worktrees/<name>``. What git itself keys on is that a worktree's admin
+    directory holds a ``commondir`` file naming the shared directory and nothing else's
+    does: a submodule's and a ``--separate-git-dir`` repository's have none. Measured
+    on git 2.39.5 for a worktree of an ordinary repository, of a bare one and of a
+    submodule (present, ``../..``), and for a submodule, a submodule at ``worktrees/x``
+    and a separate git dir (absent).
+
+    Blocking, and small: one ``stat`` and at most two reads of a line each, with no
+    subprocess. ``worktree.detect`` asks git and is the answer for a caller that is
+    off the draw thread; this is for the one that is on it, behind a memo.
+
+    Only the directory itself is asked about, and None is not "an ordinary
+    directory": a subdirectory of a worktree has no ``.git`` of its own and answers
+    None, and so does a pointer that cannot be read. ``git_layout`` is what says
+    which of those a launch directory is.
+    """
+    read = _git_file(directory)
+    return None if read is None else read[1]
+
+
+def _reads_as_git_dir(path: str) -> bool:
+    """
+    Whether git would take the directory ``path`` as a repository's git directory.
+
+    git asks three things of one and passes over a ``.git`` that fails any of them,
+    carrying on to the parent without a word: an ``objects`` directory, a ``refs``
+    directory, and a ``HEAD`` that is either ``ref:`` naming something under
+    ``refs/`` or a full object id. Measured on git 2.39.5, each of the three removed
+    in turn, and pinned by
+    ``test_git_passes_over_a_git_directory_the_read_passes_over``.
+
+    **Stricter than git where the two can differ, never looser.** A ``HEAD`` that is
+    a symlink is one git still accepts and this does not. Answering no for a
+    directory git would use sends the walk upward, where nothing it can find is told
+    "only"; answering yes for one git passes over is what would be.
+
+    Total, for the reason ``_git_file`` is.
+    """
+    try:
+        if not os.path.isdir(os.path.join(path, "objects")):
+            return False
+        if not os.path.isdir(os.path.join(path, "refs")):
+            return False
+        with open(os.path.join(path, "HEAD"), encoding="utf-8", errors="replace") as handle:
+            head = handle.read(4096).strip()
+    except (OSError, ValueError):
+        return False
+    if head.startswith("ref:"):
+        return head[len("ref:") :].lstrip().startswith("refs/")
+    return len(head) in (40, 64) and all(c in string.hexdigits for c in head)
+
+
+class WorktreeKind(Enum):
+    """
+    Which linked worktree a ``LinkedWorktree`` is, by where it sits and what it is a
+    worktree of. One of the four was measured.
+    """
+
+    # Outside the main checkout of an ordinary repository: the worktree
+    # ``planning/2026-10-07-a-session-can-run-in-its-own-worktree.md`` D2 ran its
+    # contained sessions in, and the only one.
+    BESIDE = "beside"
+    # Inside the main checkout's own tree, which is where the CLI's ``--worktree``
+    # puts one. D2 lists it as not tested.
+    NESTED = "nested"
+    # The main checkout's tree is inside the worktree's: a worktree added at a
+    # directory above the repository it belongs to. Its root is not under the main
+    # checkout, which is all ``NESTED`` asks, and it is not beside it either: the
+    # checkout whose files D2 saw refused from outside lies within the session's
+    # own directory here, and so does the shared git directory. No fixture.
+    AROUND = "around"
+    # The shared git directory is not a checkout's ``.git``: a worktree of a bare
+    # repository, of a submodule or of a ``--separate-git-dir`` repository. D2 had no
+    # fixture for any of them, and none of them has the main checkout its sentences
+    # are about.
+    UNORDINARY = "unordinary"
+
+
+@dataclass(frozen=True, slots=True)
+class LinkedWorktree:
+    """
+    The launch directory is a linked git worktree's root, or lies under one.
+
+    ``root`` is the worktree's root and ``shared`` the git directory it shares with
+    its main repository, both resolved. ``at_root`` is whether the launch directory
+    is ``root`` itself. A contained session was measured in one place only: at the
+    root of a worktree whose ``kind`` is ``BESIDE``.
+    """
+
+    shared: str
+    root: str
+    at_root: bool
+
+    @property
+    def main_checkout(self) -> str | None:
+        """
+        The main checkout this worktree belongs to, or None when the shared git
+        directory is not a checkout's ``.git`` and there is none to name.
+        """
+        if os.path.basename(self.shared) != ".git":
+            return None
+        return os.path.dirname(self.shared)
+
+    @property
+    def kind(self) -> WorktreeKind:
+        """
+        Derived from the two paths, which are already resolved, so it costs no read.
+
+        A bare repository that is itself a directory named ``.git`` reads as an
+        ordinary one here. What that worktree is then told is D2's wide statement,
+        which claims more reach for ``Bash`` than the unmeasured wording does and not
+        less.
+        """
+        main = self.main_checkout
+        if main is None:
+            return WorktreeKind.UNORDINARY
+        if self.root == main or self.root.startswith(main.rstrip(os.sep) + os.sep):
+            return WorktreeKind.NESTED
+        if main.startswith(self.root.rstrip(os.sep) + os.sep):
+            return WorktreeKind.AROUND
+        return WorktreeKind.BESIDE
+
+
+@dataclass(frozen=True, slots=True)
+class OutsideGit:
+    """
+    The git directory governing the launch directory lies outside it, and the layout
+    is not a linked worktree: a submodule, a ``--separate-git-dir`` repository, a
+    subdirectory of a checkout, or a pointer whose target has no ``commondir``.
+
+    ``git_dir`` is that directory, resolved.
+    """
+
+    git_dir: str
+
+
+@dataclass(frozen=True, slots=True)
+class UnreadGit:
+    """
+    A ``.git`` entry stands at or above the launch directory that is neither a git
+    directory git would use nor a readable pointer to one, and nothing above it
+    answers instead. What governs the directory is not known from here.
+
+    ``entry`` is that ``.git`` path: a file that is not a ``gitdir:`` line, or the
+    nearest directory git passes over -- see ``_reads_as_git_dir``.
+    """
+
+    entry: str
+
+
+# How git governs a launch directory, as far as it bears on what the containment
+# section may say. None is the two layouts ``scripts/verify_sandbox_gate.py`` speaks
+# for: a directory under no git at all, and a checkout or clone launched at its root
+# with its ``.git`` directory inside it.
+GitLayout = LinkedWorktree | OutsideGit | UnreadGit | None
+
+
+def git_layout(directory: str) -> GitLayout:
+    """
+    Which git layout ``directory`` is in, found by walking up to the nearest ``.git``.
+
+    **The walk is what keeps "only" off a directory nothing was measured for.**
+    ``shared_git_dir`` answers for a directory that holds its own ``.git``; git
+    answers for every directory beneath one, and a session launched in a
+    subdirectory of a worktree is as much in that worktree as one launched at its
+    root. So the nearest ``.git`` at or above ``directory`` that git would use decides,
+    the way git's own discovery does, and anything but the two measured-narrow layouts
+    is told apart from them.
+
+    **A ``.git`` directory git would not use does not answer.** git passes over one
+    that is empty or has no valid ``HEAD`` and keeps walking, so a directory holding
+    such a thing is governed from above -- by a worktree or a checkout it is merely
+    a subdirectory of -- and taking its ``.git`` at its word would tell it "only".
+    The walk passes over it as git does. When nothing above answers either, the
+    entry is reported as ``UnreadGit`` rather than as no git at all: a directory
+    with a broken repository in it is not one the narrow measurement was taken for.
+
+    A ``.git`` *file* that is not a readable pointer stops the walk, as it stops
+    git's -- git refuses the directory outright rather than looking further up.
+
+    A ``.git`` directory reached through a symlink is outside the checkout it
+    governs and is reported as such. A bare repository's own directory and a
+    repository named only by ``GIT_DIR`` have no ``.git`` entry to find and read as
+    no git at all.
+
+    Blocking, and bounded by the depth of the path: two ``stat`` calls a level, the
+    reads ``_reads_as_git_dir`` makes at a level holding a ``.git`` directory and
+    the ones ``shared_git_dir`` makes at a level holding a file, with no subprocess.
+    For the draw thread behind a memo, as that is.
+
+    Total. A directory that cannot be resolved at all answers None; no session
+    starts in one, so nothing is claimed about it by the launch that would have.
+    """
+    try:
+        start = os.path.realpath(directory)
+    except (OSError, ValueError):
+        return None
+    here = start
+    passed_over: str | None = None
+    while True:
+        dot_git = os.path.join(here, ".git")
+        if os.path.isfile(dot_git):
+            read = _git_file(here)
+            if read is None:
+                return UnreadGit(dot_git)
+            admin, shared = read
+            if shared is None:
+                return OutsideGit(admin)
+            return LinkedWorktree(shared=shared, root=here, at_root=here == start)
+        if os.path.isdir(dot_git):
+            if _reads_as_git_dir(dot_git):
+                resolved = os.path.realpath(dot_git)
+                if here == start and resolved == dot_git:
+                    return None
+                return OutsideGit(resolved)
+            if passed_over is None:
+                passed_over = dot_git
+        parent = os.path.dirname(here)
+        if parent == here:
+            return None if passed_over is None else UnreadGit(passed_over)
+        here = parent
+
+
+@dataclass(frozen=True, slots=True)
+class ContainedText:
+    """
+    What the containment section says the contained half is bounded to.
+
+    ``sandbox`` is what ``Bash`` reaches and ``gate`` is what the write tools are held
+    to; they are two mechanisms and are said apart. ``wider`` is what is known, or
+    known not to be known, about the sandbox's reach outside the session's directory;
+    None for the layouts where the measurement is that there is none.
+    """
+
+    sandbox: str
+    wider: str | None
+    gate: str
+
+
+# What ``planning/2026-10-07-a-session-can-run-in-its-own-worktree.md`` D2 measured
+# from the root of a worktree beside its main checkout, at the strength it measured
+# it. The counts are D2's and are said where a row is one run or two, so a single
+# observation does not read as a rule. The denials are the named paths that were
+# tried, and the one command, and not a boundary: D2's "What was not tested" lists
+# other routes to the same hooks and config, and the sentence has to leave them open.
+# The main checkout's files are said to be refused in the same breath as its branch
+# being movable, because the second reads as the first.
+_WORKTREE_MEASURED = (
+    "the branches, HEAD and objects there, and its index in the one run that tried. "
+    "That moves the branch the main checkout has out, and moved a second worktree's; "
+    "the main checkout's own files were refused. It also wrote a new file at the top "
+    "of that git directory (two runs, and a third by another spelling of the path), a "
+    "rebase-merge/ directory there (one run) and a file in another worktree's admin "
+    "directory (one run). Also refused, at the three paths tried: hooks/pre-commit, "
+    "config, and the worktree's own config.worktree; and git config, refused on the "
+    "config's lock in three runs. No route to the hooks or the config beyond those "
+    "four was tried. Measured on CLI 2.1.292."
+)
+
+# The one layout D2 ran a contained session in, as every sentence about a layout it
+# did not run one in names it. Both halves are load-bearing: "beside" because a
+# worktree inside its main checkout is on D2's not-tested list, and "ordinary"
+# because no fixture was a worktree of a bare repository or of a submodule.
+_MEASURED_LAYOUT = (
+    "the root of a linked worktree that sits beside the main checkout of an ordinary " "repository"
+)
+
+
+def _worktree_wider(layout: LinkedWorktree) -> str:
+    """
+    What is said about ``Bash``'s reach outside a linked worktree.
+
+    **D2's findings are stated as this directory's own for one layout**: the root of
+    a worktree whose ``kind`` is ``BESIDE``, which is where they were taken. Every
+    other way of arriving at a ``LinkedWorktree`` is shown the same findings under a
+    line saying they are not measured here, naming the layout they are from and the
+    part of them that cannot carry over -- a nested worktree's directory is inside
+    the checkout whose files were refused, a worktree around its main checkout has
+    that checkout and the shared git directory inside its own, and a worktree of a
+    bare repository or a submodule has no main checkout for the branch sentence to be
+    about.
+    """
+    subject = (
+        "that directory is a linked git worktree"
+        if layout.at_root
+        else f"that directory is inside a linked git worktree, {layout.root},"
+    )
+    match layout.kind:
+        case WorktreeKind.BESIDE:
+            where = (
+                "that directory is a linked git worktree, and Bash also writes"
+                if layout.at_root
+                else (
+                    f"that directory is inside a linked git worktree, {layout.root}. "
+                    "Nothing was measured from a directory under one; from a worktree's "
+                    "own root, Bash also writes"
+                )
+            )
+            return (
+                f"and outside it: {where} the git directory it shares with its main "
+                f"repository, {layout.shared} -- {_WORKTREE_MEASURED}"
+            )
+        case WorktreeKind.NESTED:
+            unlike = (
+                f"{subject} that lies inside its main checkout, {layout.main_checkout}, "
+                f"and shares the git directory {layout.shared} with it. No contained "
+                "session was run in a worktree placed there. What follows was measured "
+                f"from {_MEASURED_LAYOUT}, where the main checkout's files lay outside "
+                "the session's directory; here they surround it, so their refusal is "
+                "not known to hold"
+            )
+        case WorktreeKind.AROUND:
+            unlike = (
+                f"{subject} that has its main checkout, {layout.main_checkout}, inside "
+                f"it, and with it the git directory the two share, {layout.shared}. No "
+                "contained session was run in a worktree placed there. What follows was "
+                f"measured from {_MEASURED_LAYOUT}, where the main checkout's files and "
+                "that git directory lay outside the session's directory; here both lie "
+                "within it, so neither their refusal nor the refusals inside the git "
+                "directory are known to hold"
+            )
+        case WorktreeKind.UNORDINARY:
+            unlike = (
+                f"{subject} whose shared git directory, {layout.shared}, is not the "
+                ".git of an ordinary checkout -- a bare repository's, a submodule's and "
+                "a separate git directory's read this way. No contained session was run "
+                f"in a worktree of one. What follows was measured from {_MEASURED_LAYOUT}"
+                ", and what it says of a main checkout is about that repository's"
+            )
+        case _:
+            assert_never(layout.kind)
+    return (
+        f"and outside it, not measured: {unlike}. In that layout Bash also wrote the git "
+        f"directory that worktree shares with its main repository -- {_WORKTREE_MEASURED}"
+    )
+
+
+def contained_text(directory: LaunchDirectory, layout: GitLayout) -> ContainedText:
+    """
+    The contained half in words, for the directory the session will run in.
+
+    ``layout`` is ``git_layout`` of that directory, and it decides whether the section
+    may say ``Bash`` writes *only* inside it. That word is a measurement,
+    ``scripts/verify_sandbox_gate.py``'s, and it was taken for a directory git does
+    not reach outside of; it is said for that layout and for no other.
+
+    **A linked worktree gets what D2 measured and no more.**
+    ``planning/2026-10-07-a-session-can-run-in-its-own-worktree.md`` D2 measured, on
+    CLI 2.1.292, a contained session at the root of a worktree beside its main
+    checkout committing to the main repository, moving the branch its main checkout
+    has out, rewriting its ``HEAD`` and deleting refs and objects -- and being
+    refused three named paths, one ``git config`` and the main checkout's files. See
+    ``_WORKTREE_MEASURED``. Sub-agents are on D2's not-tested list, so the fan-out
+    sentence the narrow layout carries is replaced here by one saying so.
+
+    **Any other worktree, and any directory under one, is shown the same measurement
+    labelled as taken elsewhere.** Nothing was measured from there. The wide
+    statement is the nearest one there is, and the narrow one would be a guess in
+    the direction that costs. See ``_worktree_wider``.
+
+    **Any other layout whose git directory lies outside the directory is told the
+    boundary is not measured**, with that git directory named, so the operator can
+    see what the unmeasured part is about. A ``.git`` that could not be read is
+    named as that, and is not called a git directory or said to lie anywhere.
+    """
+    region = _region_phrase(directory)
+    reach = (
+        f"contained: Bash and anything it starts run in a sandbox that reaches "
+        f"{sandbox.ALLOWED_DOMAIN} and nothing else"
+    )
+    held = (
+        f"file writes are held to {region} alone by the gate rather than by the "
+        "sandbox, because Write and Edit run in the CLI process -- a target that "
+        "cannot be shown to be inside it is refused"
+    )
+    unmeasured = (
+        f"{reach}, and writes inside {region}. Whether it writes anywhere else is not "
+        "measured for this layout."
+    )
+    match layout:
+        case None:
+            return ContainedText(
+                sandbox=(
+                    f"{reach}, and writes only inside {region}. Every sub-agent gets that "
+                    "same boundary, so a fan-out reaches no further than one agent does."
+                ),
+                wider=None,
+                gate=(
+                    "file writes are held to that same directory by the gate rather than "
+                    "by the sandbox, because Write and Edit run in the CLI process -- a "
+                    "target that cannot be shown to be inside it is refused."
+                ),
+            )
+        case LinkedWorktree():
+            return ContainedText(
+                sandbox=(
+                    f"{reach}, and writes inside {region}. Whether a sub-agent gets that "
+                    "same boundary was not measured for a worktree."
+                ),
+                wider=_worktree_wider(layout),
+                gate=f"{held}, the shared git directory included.",
+            )
+        case OutsideGit(git_dir=git_dir):
+            return ContainedText(
+                sandbox=unmeasured,
+                wider=(
+                    f"not measured: the git directory governing that directory lies "
+                    f"outside it, {git_dir}, and no contained session was run in a layout "
+                    f"like that except at {_MEASURED_LAYOUT} -- where Bash also wrote "
+                    "the git directory the worktree shares with its main repository (CLI "
+                    "2.1.292). Whether Bash reaches this one, and what a sub-agent gets, "
+                    "is not known."
+                ),
+                gate=f"{held}, that git directory included.",
+            )
+        case UnreadGit(entry=entry):
+            return ContainedText(
+                sandbox=unmeasured,
+                wider=(
+                    f"not measured: {entry} could not be read as a git directory or as "
+                    "a pointer to one, so what git makes of that directory is not known "
+                    "here, and no contained session was run in one like it. The nearest "
+                    f"layout measured is {_MEASURED_LAYOUT} -- where Bash also wrote the "
+                    "git directory the worktree shares with its main repository (CLI "
+                    "2.1.292). Whether Bash writes outside this directory, and what a "
+                    "sub-agent gets, is not known."
+                ),
+                gate=f"{held}.",
+            )
+        case _:
+            assert_never(layout)
+
 
 # The tree this pptmstr is running out of. Resolved once at import because it cannot
 # move while the process does, and from the package rather than from the process's
@@ -347,25 +1038,42 @@ class SessionPicker:
 # ``approval.py`` but everything beside it that decides what the next launch does.
 OWN_CHECKOUT = tree.source_tree_of(str(Path(__file__).resolve().parents[1]))
 
+# ``{named}`` is the directory the refusal is about, in the words the modal uses for
+# it. It is a slot because that is not always the cwd field: with a session picked the
+# launch runs in the session's own directory, and a refusal that said "this
+# directory" under a field naming somewhere else would send the operator to correct
+# the one directory that is not the problem.
 _REFUSAL = (
-    "refused for this directory -- this launch will use the ordinary gate.\n"
+    "refused for {named} -- this launch will use the ordinary gate.\n"
     "it is inside pptmstr's own checkout, or it is a path that cannot be resolved at "
     "all; the check answers yes to both and cannot tell them apart.\n"
-    "under this mode the working directory is the one region an agent writes to "
-    "without being asked, and pptmstr's own approval.py is in this checkout."
+    "under this mode that directory is where an agent writes without being asked, and "
+    "pptmstr's own approval.py is in this checkout."
 )
 
 
-def refusal_for(cwd: str, *, checkout: str = OWN_CHECKOUT) -> str | None:
+def refusal_for(
+    cwd: str, *, checkout: str = OWN_CHECKOUT, named: str = "this directory"
+) -> str | None:
     """
     Why the mode cannot be used for ``cwd``, or None when it can.
 
-    The sandbox's writable region *is* the session's cwd, and its protected paths
-    cover ``.claude/**``, ``.mcp.json``, ``.git/hooks`` and ``.git/config`` -- not
-    ordinary project source. ``cwd`` defaults to ``"."``, so the default launch would
-    hand an agent that runs ``Bash`` unattended write access to the ``approval.py``
-    that gates the *next* launch. The alternative boundary is "the operator typed a
-    different directory", enforced by nothing.
+    ``named`` is how the message refers to ``cwd``. The decision does not read it.
+
+    A contained ``Bash`` writes inside the session's cwd -- and, where cwd is a linked
+    git worktree, also inside the git directory that worktree shares with its main
+    repository (``planning/2026-10-07-a-session-can-run-in-its-own-worktree.md`` D2,
+    measured on CLI 2.1.292). Three paths under that directory were tried and refused
+    -- ``hooks/pre-commit``, ``config`` and the worktree's ``config.worktree`` -- and
+    that is a statement about those three paths: D2 lists the other routes to the
+    hooks and the config as not tried. The write tools are held to cwd alone, by the
+    gate.
+
+    The sandbox's protected paths cover ``.claude/**``, ``.mcp.json``, ``.git/hooks``
+    and ``.git/config`` -- not ordinary project source. ``cwd`` defaults to ``"."``,
+    so the default launch would hand an agent that runs ``Bash`` unattended write
+    access to the ``approval.py`` that gates the *next* launch. The alternative
+    boundary is "the operator typed a different directory", enforced by nothing.
 
     **The message names two situations because the predicate cannot separate them.**
     ``tree.lies_inside_checkout`` answers yes both to a directory inside the checkout
@@ -377,10 +1085,17 @@ def refusal_for(cwd: str, *, checkout: str = OWN_CHECKOUT) -> str | None:
 
     ``checkout`` is a parameter so the decision can be exercised against a tree a test
     controls rather than against wherever this file happens to be installed.
+
+    Total, and a path the predicate cannot take at all -- one with a NUL in it raises
+    ``ValueError`` out of the resolve -- is the second of those situations, so it is
+    refused with the rest. The callers are a draw call and a press of launch, and
+    the other answer would be the mode granted for a directory nobody could name.
     """
-    if tree.lies_inside_checkout(cwd.strip() or ".", checkout):
-        return _REFUSAL
-    return None
+    try:
+        refused = tree.lies_inside_checkout(cwd.strip() or ".", checkout)
+    except ValueError:
+        refused = True
+    return _REFUSAL.format(named=named) if refused else None
 
 
 # Reading the installed CLI's version, as the gate below calls it. A parameter so the
@@ -444,10 +1159,15 @@ class VersionGate:
     and a ``poll`` called from the draw that is the only writer of these fields. The
     worker touches nothing but the queue.
 
-    **Read once per process, not once per launch.** The binary the SDK spawns cannot
-    change under a running process in a way this application would notice, and the
-    alternative puts a subprocess behind a checkbox that gets ticked and unticked while
-    the operator reads the paragraph beside it.
+    **Read once, not once per launch.** The binary the SDK spawns cannot change under
+    a running process in a way this application would notice, and the alternative puts
+    a subprocess behind a checkbox that gets ticked and unticked while the operator
+    reads the paragraph beside it.
+
+    The one thing that does count as noticing is a launch that reports back that it
+    started nothing: ``LauncherState.report_failure`` replaces the gate with an
+    unanswered one, so an answer of "fine" is not what a draft refused on the far side
+    of it is offered again under.
     """
 
     # Why the CLI cannot be trusted, or None. Only an answer once ``answered`` is true:
@@ -544,6 +1264,62 @@ def _cap_line(subagent_cap: int | None) -> str:
     return f"sub-agents are capped at {subagent_cap} -- {_CAP_REASON}."
 
 
+@dataclass(frozen=True, slots=True)
+class Draft:
+    """
+    What the operator had typed and chosen at the moment they pressed launch.
+
+    Taken before the press clears anything, and handed to the ``launch`` callback
+    beside the spec. The spec is not enough to put a draft back: it carries the task
+    stripped, the directory resolved, the policy as *granted* rather than as asked
+    for, and the template by name -- each a one-way step from what was on screen.
+    """
+
+    task: str
+    cwd: str
+    brief: str
+    model: str
+    template_index: int
+    policy: Policy
+    subagent_cap: int | None
+
+
+def left_by_launch(draft: Draft) -> Draft:
+    """
+    The fields as the press that launched ``draft`` left them.
+
+    ``LauncherState.launched`` is the press and this is its result as a value: the
+    task, the rung and the cap go, and the directory, brief, model and team
+    stay. A second spelling of those clears, pinned to the first by
+    ``test_what_a_launch_leaves_is_what_the_press_actually_left``. It is a value so
+    that "has anything been typed since that launch" is a comparison of the fields
+    against it rather than a guess from the task box alone.
+    """
+    return replace(draft, task="", policy=Policy.STRICT, subagent_cap=None)
+
+
+@dataclass(frozen=True, slots=True)
+class FailedLaunch:
+    """
+    A launch that did not start a session: where it came from, why, and its draft.
+
+    ``draft`` is None for a launch the modal did not make -- a relaunch, a fork, a
+    task named on the command line. Those have a reason to show and nothing to give
+    back. ``origin`` is the word the notice uses for it, so a reason shown above the
+    operator's own text is not read as being about that text.
+
+    ``pressed_past`` is whether a launch has been pressed from the modal while this
+    one was waiting. The modal reopens over such a press with this failure on it, and
+    a notice reading "that launch did not start" would then be read as the answer to
+    the press just made -- which has not been answered, and may have started.
+    """
+
+    draft: Draft | None
+    reason: str
+    origin: str = "launch"
+    pressed_past: bool = False
+
+
 @dataclass
 class LauncherState:
     """
@@ -551,7 +1327,8 @@ class LauncherState:
 
     The draft survives a cancel on purpose: dismissing the modal to go look up a
     directory should not cost the paragraph already typed. It is cleared on launch,
-    which is the only point at which the intent has gone somewhere.
+    which is the only point at which the intent has gone somewhere -- and a launch
+    that turns out to have gone nowhere hands it back; see ``report_failure``.
     """
 
     task: str = ""
@@ -591,9 +1368,9 @@ class LauncherState:
     # sees the previous frame's value -- which is the correct one, because the key
     # it is deciding about was pressed while that frame was on screen.
     is_open: bool = False
-    # The resume list and the pick made in it. Lives on the draft rather than beside
-    # it because a picked session is part of the intent -- it is what decides whether
-    # the task typed above starts a conversation or continues one.
+    # The list of sessions the modal offers to resume. A listing and nothing more:
+    # no field of this draft is read from it, and ``spec`` cannot name a session.
+    # See ``draw``'s ``on_pick_resume``.
     picker: SessionPicker = field(default_factory=SessionPicker)
     # An override of ``Settings.subagent_cap`` for this launch, or None to use the
     # setting. None is the untouched default, so a draft nobody edited produces the
@@ -606,20 +1383,238 @@ class LauncherState:
     subagent_cap: int | None = None
     _open_requested: bool = False
     _focus_task: bool = False
-    # The refusal computed for a cwd field value, and the value it was computed for.
-    # The draw asks every frame and the answer resolves two paths through the
-    # filesystem -- a stat per component on each -- so it is memoised against the raw
-    # field, which is the thing that changes. One resolve per directory typed rather
-    # than one per frame. ``None`` as the key means nothing has been computed yet; the
-    # field itself is never None, since ``containment_refusal`` substitutes ".".
-    _refusal_for: str | None = None
+    # The refusal computed for a launch directory, and the directory it was computed
+    # for. The draw asks every frame and the answer resolves two paths through the
+    # filesystem -- a stat per component on each -- so it is memoised against
+    # ``launch_directory()``, which carries the raw field and is the thing that
+    # changes. One resolve per directory rather than one per frame. ``None`` as the
+    # key means nothing has been computed yet.
+    #
+    # **What the screen says, and never what a launch is granted.** The key is a
+    # spelling and the answer is about the disk under it, so the answer can be stale
+    # for as long as the key is unchanged. ``begin_open`` drops it, and ``spec`` does
+    # not read it: a press asks again and writes what it found here.
+    _refusal_for: LaunchDirectory | None = None
     _refusal: str | None = None
+    # ``git_layout`` of a launch directory, and the directory it was read for.
+    # Memoised for the reason the refusal is: the read is a walk up the path and two
+    # small files, and the draw asks every frame the top rung is engaged. Keyed on the
+    # path, which says nothing about whether the disk under it has moved -- a
+    # ``git worktree add`` at a path already typed changes the answer and not the key
+    # -- so ``begin_open`` drops it, as it drops the refusal, and each open reads again.
+    _git_layout_for: str | None = None
+    _git_layout: GitLayout = None
     # The second reason the mode can be unavailable, beside the first. The two are read
     # together and they do not end the same way: a directory is wrong in a field the
     # operator is looking at, so a refused one downgrades the launch and says so; a CLI
     # below the floor cannot be corrected from this modal at all, so it holds the
     # launch instead. See ``launch_hold``.
     version_gate: VersionGate = field(default_factory=VersionGate)
+    # Launches that were pressed and started nothing, oldest first, each with the
+    # draft it was pressed from. A list and not a slot: a launch is decided on the
+    # asyncio thread some time after the press, so two can be in flight and both can
+    # fail, and the second must not replace the first's draft or its reason.
+    failures: list[FailedLaunch] = field(default_factory=list)
+    # What was in the fields when a restore replaced it, newest last. A restore is a
+    # swap and this is the other half: text the operator typed is never the price of
+    # getting a failed launch's text back. Each stays until it is brought back or the
+    # operator discards it.
+    set_aside: list[Draft] = field(default_factory=list)
+    # Set when the fields are written from outside the widgets, and consumed by the
+    # next ``draw``. A focused InputText keeps its own copy of the text and writes it
+    # back over the caller's every frame, so a task assigned under a focused box is
+    # gone one frame later unless the widget is told to read it. See ``draw``. Only
+    # the task box needs it: the load that can land under a focused widget is the
+    # automatic one, and that one writes nothing to the other text fields that they
+    # do not already hold.
+    _reload_task: bool = False
+
+    @property
+    def failure_loaded(self) -> bool:
+        """
+        Whether the oldest failed launch's draft is what the fields hold right now.
+
+        Compared, not remembered. The notice says "the draft below is that launch, as
+        it was typed" on the strength of this, and a box edited or cleared since the
+        load is not that; it gets the restore offered again instead. It is also what
+        makes a press that failure's retry -- see ``launched``.
+        """
+        return bool(self.failures) and self.failures[0].draft == self.draft()
+
+    def draft(self) -> Draft:
+        """
+        The fields as they stand, as a value that outlives the launch clearing them.
+        """
+        return Draft(
+            task=self.task,
+            cwd=self.cwd,
+            brief=self.brief,
+            model=self.model,
+            template_index=self.template_index,
+            policy=self.policy,
+            subagent_cap=self.subagent_cap,
+        )
+
+    def report_failure(self, draft: Draft | None, reason: str, origin: str = "launch") -> None:
+        """
+        A launch did not start a session. Called on the draw thread, by whoever
+        learned it. ``draft`` is what the modal was pressed from, or None for a launch
+        the modal did not make.
+
+        The modal is asked for again: it is the one surface that can put a reason in
+        front of the operator, and a failure with no window open has nowhere else to
+        be seen. The draft goes back into the fields at once when nothing has been
+        typed since its launch, which is the ordinary case -- the press cleared them
+        and the answer arrives within a frame or two. Otherwise what is there is the
+        operator's and is not this function's to replace: the failure waits behind a
+        notice with the restore on a button. See ``_settle_failures``.
+
+        The version gate is put back to unanswered. It is read once and its answer may
+        be the thing that was wrong: the launch path reads the CLI's version for
+        itself, and a refusal from there with the gate still saying "fine" would hand
+        back a top-rung draft with a live button that launches into the same refusal.
+        Unanswered, that draft is held until the gate has been read again. Done for
+        every failure rather than only that one, because a reason is prose and this
+        does not parse it; the cost is one more ``claude --version`` on a worker, and
+        only if the top rung is asked for again.
+
+        **Not from inside the ``launch`` callback ``draw`` is handed.** ``draw`` runs
+        the press's clears after that callback returns, with the pressed draft still
+        in the fields, and ``launched`` takes a failure whose draft is in the fields
+        for the one being retried: a failure reported from inside the callback would
+        be dropped by the press that produced it, and its text cleared with it.
+        ``app._launch`` decides on another thread and ``app._reap_launches`` reports
+        on a later frame, which is pinned by
+        ``test_a_launch_decided_at_once_is_still_not_reported_from_inside_the_press``.
+        """
+        self.failures.append(FailedLaunch(draft, reason, origin))
+        self.version_gate = VersionGate()
+        self.request_open()
+        self._settle_failures()
+
+    def _load(self, draft: Draft) -> None:
+        """
+        Write ``draft`` into the fields, and have the task box read it.
+        """
+        self.task = draft.task
+        self.cwd = draft.cwd
+        self.brief = draft.brief
+        self.model = draft.model
+        self.template_index = draft.template_index
+        # As asked for, the top rung included. The comment at the launch's clear is
+        # about a mode outliving the session it was set for; a draft loaded here
+        # belongs to no session, so the mode has outlived nothing, and every hold and
+        # refusal is asked again before the button goes live.
+        self.policy = draft.policy
+        self.subagent_cap = draft.subagent_cap
+        self._reload_task = True
+
+    def _set_fields_aside(self, incoming: Draft) -> None:
+        """
+        Keep what the fields hold before ``incoming`` replaces it, unless nothing
+        would be lost: they are what ``incoming``'s own launch left behind, or the
+        same draft is already held somewhere it can be got back from.
+        """
+        current = self.draft()
+        if current == incoming or current == left_by_launch(incoming):
+            return
+        if current in self.set_aside or any(f.draft == current for f in self.failures):
+            return
+        self.set_aside.append(current)
+
+    def restore_failed(self) -> None:
+        """
+        Put the oldest failed launch's draft into the fields. What it displaces is
+        set aside, not dropped; see ``restore_set_aside``.
+        """
+        if not self.failures:
+            return
+        draft = self.failures[0].draft
+        if draft is None:
+            return
+        self._set_fields_aside(draft)
+        self._load(draft)
+
+    def restore_set_aside(self) -> None:
+        """
+        Bring back the draft most recently set aside. A swap, as ``restore_failed``
+        is: what is in the fields takes its place unless it is already held, so
+        pressing this straight after a restore undoes the restore exactly.
+        """
+        if not self.set_aside:
+            return
+        draft = self.set_aside.pop()
+        self._set_fields_aside(draft)
+        self._load(draft)
+
+    def discard_set_aside(self) -> None:
+        """
+        Drop the draft most recently set aside. The one way its text goes, and it is
+        the operator's press.
+        """
+        if self.set_aside:
+            self.set_aside.pop()
+
+    def discard_failed(self) -> None:
+        """
+        Drop the oldest failed launch. The fields are left as they are: if its draft
+        is in them, the text is still the operator's to edit or clear.
+        """
+        if not self.failures:
+            return
+        del self.failures[0]
+        self._settle_failures()
+
+    def _settle_failures(self) -> None:
+        """
+        Load the oldest failed draft if nothing has been typed since its launch.
+
+        That is every field, compared against ``left_by_launch`` of the draft: the
+        task box empty, the rung and the cap back where a press puts them, *and*
+        the directory, brief, model and team still the ones that launch was pressed
+        with. Those four survive a press, so a different one is something
+        the operator chose afterwards -- as much theirs as a half-typed task, and
+        loading over it would spend it.
+        """
+        if not self.failures:
+            return
+        draft = self.failures[0].draft
+        # A failure with no draft stays a notice at the head of the list until it is
+        # dismissed, and the drafts behind it wait.
+        if draft is not None and self.draft() == left_by_launch(draft):
+            self._load(draft)
+
+    def launched(self) -> None:
+        """
+        The launch button's clears, and what they mean for a failed launch on screen.
+
+        A press with a failed draft in the fields exactly as it failed is that
+        failure's retry, so the failure goes with it -- if the retry fails too it
+        comes back as its own entry, with its own reason. Any other press leaves it
+        queued, an edited copy of the draft included: the fields are not that draft,
+        nothing has discarded it, and its text is still owed.
+
+        Every failure still queued is marked as pressed past, whichever kind of press
+        this was. Each of them predates it, and the next thing the operator sees may
+        be one of them loaded into a reopened modal.
+        """
+        if self.failure_loaded:
+            del self.failures[0]
+        self.failures[:] = [replace(failure, pressed_past=True) for failure in self.failures]
+        self.task = ""
+        # Cleared with the task. A mode left on outlives the session it was set for,
+        # and the next Ctrl+N is the one the operator types a task into without
+        # re-reading the panel above the button -- which is 08-11's "forgets it is set
+        # for the four they are not" happening inside one run rather than across two.
+        self.policy = Policy.STRICT
+        # Cleared with the task, for the same reason the mode is: a number sized for
+        # one piece of work outliving it means the next Ctrl+N silently carries a cap
+        # the operator chose for something else. Back to None is back to the setting,
+        # which is the answer they last gave deliberately.
+        self.subagent_cap = None
+        # Whatever failed behind the one just retried is next, and the fields are
+        # blank for it now.
+        self._settle_failures()
 
     def request_open(self) -> None:
         """Ask for the modal next time it draws. Safe to call when already open."""
@@ -630,7 +1625,7 @@ class LauncherState:
         """
         Consume a pending open request. The modal is up from this frame on.
 
-        The session scan starts here rather than when the resume section is expanded.
+        The session scan starts here rather than when the session list is expanded.
         It runs on a worker and never touches a draw call, so a fresh launch -- still
         the common case and still the default -- cannot feel it either way. What
         deferring it to the expand did cost was a click and a wait at the one moment
@@ -638,7 +1633,12 @@ class LauncherState:
         for. The section itself stays collapsed; only the rows behind it are ready.
 
         Every open rescans. A listing from an hour ago is not a listing of what is
-        there, and the picker is read by someone deciding which session to trust.
+        there, and the picker is read by someone deciding which session to trust. The
+        git layout of the launch directory is read again on the same ground: it words
+        the write boundary, and a worktree made at that path since the last open is
+        a wider one. So is the own-checkout refusal: it is an answer about where the
+        path leads, and a path that has become a link into pptmstr's checkout since
+        the last open is spelled exactly as it was.
 
         Returns the worker so a caller that genuinely has to wait -- a test -- can
         join it. The draw ignores it and must.
@@ -646,28 +1646,73 @@ class LauncherState:
         self._open_requested = False
         self.is_open = True
         self._focus_task = True
+        self._git_layout_for = None
+        self._refusal_for = None
         return self.picker.request_scan(self.cwd.strip() or ".", scanner=scanner)
 
     @property
     def ready(self) -> bool:
         return bool(self.task.strip())
 
+    def launch_directory(self) -> LaunchDirectory:
+        """
+        Where this draft launches: the cwd field, and nothing else.
+
+        Every launch decision on this draft that is about a directory goes through
+        here. Asked of the module-level ``launch_directory`` with no row, so it is
+        always the field's variant and no disk is touched: New Task starts a session
+        and never continues one, and the variants that carry a recorded directory
+        are a resume's, which ``resume_form`` asks for with the session's row.
+        """
+        return launch_directory(None, self.cwd.strip() or ".")
+
+    def git_layout(self) -> GitLayout:
+        """
+        ``git_layout`` of the launch directory. One read per directory per open of
+        the modal, not one per frame.
+        """
+        raw = self.launch_directory().path
+        if raw != self._git_layout_for:
+            self._git_layout = git_layout(raw)
+            self._git_layout_for = raw
+        return self._git_layout
+
     def containment_refusal(self) -> str | None:
         """
-        Why the mode cannot be used for the directory now in the field, or None.
+        Why the mode cannot be used for the directory this draft launches in, or None.
 
-        **The question is asked of the raw field, and ``spec`` resolves it differently.**
-        ``tree.lies_inside_checkout`` expands ``~``; ``os.path.realpath`` below does not,
-        so a field of ``~/x`` is measured against the home directory and launched as a
-        literal ``~`` component under this process's directory. Nothing pins the two
-        together. What keeps that from being an exposure rather than a mismatch is that
-        the launched spelling names a directory that does not exist on any machine
-        without a literal ``~`` directory in it, and a session cannot start in one.
+        **Asked of the spelling the launch is started with**, ``resolved_directory``'s,
+        which is what ``spec`` asks it of. ``tree.lies_inside_checkout`` expands ``~``
+        and ``os.path.realpath`` does not, so the raw field ``~/x`` would be measured
+        against the home directory while the session was started in a literal ``~``
+        under this process's directory; asked of the resolved spelling, the screen and
+        the press are answering about one place.
+
+        **For the screen.** Memoised against the directory as spelled, so between one
+        open of the modal and the next it can describe a disk that has since moved.
+        ``spec`` does not read it.
         """
-        raw = self.cwd.strip() or "."
-        if raw != self._refusal_for:
-            self._refusal_for = raw
-            self._refusal = refusal_for(raw)
+        directory = self.launch_directory()
+        if directory != self._refusal_for:
+            try:
+                started_in = resolved_directory(directory)
+            except ValueError:
+                # No location at all, which ``refusal_for`` refuses; it is handed the
+                # spelling that has none.
+                started_in = directory.path
+            self._read_refusal(directory, started_in)
+        return self._refusal
+
+    def _read_refusal(self, directory: LaunchDirectory, started_in: str) -> str | None:
+        """
+        Ask the own-checkout question of ``started_in`` now, and leave the answer as
+        what the screen says for ``directory``.
+        """
+        # The key is written after the answer it is the key for. Written first, a
+        # read that raised would leave the next frame holding this directory's key
+        # over the last directory's answer.
+        self._refusal = refusal_for(started_in, named=_region_phrase(directory))
+        self._refusal_for = directory
         return self._refusal
 
     @property
@@ -759,8 +1804,9 @@ class LauncherState:
         they are otherwise waiting on is still running, and because a machine that
         cannot run the mode is a once-per-machine answer while this is a per-launch one.
 
-        None whenever the mode is not engaged, which is every launch this application
-        made before the mode existed -- no read, no worker, no disabled button.
+        None whenever the mode is not engaged, and reaching that answer costs no
+        read, no worker and no disabled button: the ordinary launch pays nothing for
+        the cases that can hold one.
         """
         if not self.dangerous_engaged:
             return None
@@ -779,11 +1825,22 @@ class LauncherState:
         typechecked and a relaunched team started solo. Adding the brief to a
         positional list would be the same defect waiting on the same signature.
 
-        ``resume`` is the picked session or None, and None is the untouched default:
-        a draft nobody opened the resume section on produces exactly the spec it did
-        before the section existed.
+        **Never a resume.** ``resume`` and ``message`` are left at their defaults
+        whatever the session list holds: a spec that named a session here would
+        continue it under this modal's team, model and task as though it were new.
+        Continuing a session is ``resume_form.press``'s spec and nobody else's.
+
+        **One look at the directory, taken here, decides all of it.** The directory
+        is read once and resolved once, and the own-checkout refusal is asked of that
+        resolved string and of nothing remembered: the memo behind
+        ``containment_refusal`` is keyed on a spelling, and a path that became a link
+        into pptmstr's checkout after it was first judged is spelled the same. The
+        rung and the containment are both taken from that one answer, so they cannot
+        be halves of two different readings. What was found is left in the memo, so
+        the next frame draws the answer this press was given.
         """
-        resolved_cwd = os.path.realpath(self.cwd.strip() or ".")
+        directory = self.launch_directory()
+        resolved_cwd = resolved_directory(directory)
         # Both or neither, and the pairing is the top rung. ``AUTONOMOUS`` releases
         # every reviewed tool and the containment is the only thing bounding what a
         # released ``Bash`` reaches, so a spec carrying that rung alone is an unattended
@@ -796,7 +1853,9 @@ class LauncherState:
         # containment. What the sandbox bounds is writes and network, which that rung
         # already refuses syntactically, so pairing them would cost the operator
         # working invocations to buy the gate nothing. See ``approval.Policy``.
-        engaged = self.dangerous_engaged
+        engaged = (
+            self.policy is Policy.AUTONOMOUS and self._read_refusal(directory, resolved_cwd) is None
+        )
         return LaunchSpec(
             task=self.task.strip(),
             model=self.model,
@@ -819,9 +1878,11 @@ class LauncherState:
             session_base=tree.session_base(resolved_cwd),
             template=templates.names()[self.template_index],
             brief=self.brief.strip() or None,
-            resume=self.picker.selected,
             containment=sandbox.containment_settings() if engaged else None,
-            policy=self.granted_policy,
+            # ``granted_policy``'s rule, from this reading rather than from the memo.
+            policy=(
+                Policy.STRICT if self.policy is Policy.AUTONOMOUS and not engaged else self.policy
+            ),
             # Unconditionally, and not gated on ``engaged`` as the containment is. The
             # policy and the containment pair because the top rung without the
             # containment is an unattended agent with the whole machine; a cap is
@@ -829,6 +1890,22 @@ class LauncherState:
             # two sub-agents gets two whether or not they also reached the top rung.
             subagent_cap=self.subagent_cap,
         )
+
+    def press(self) -> LaunchSpec | None:
+        """
+        The spec a press of launch starts, or None when the press found a different
+        rung from the one on screen.
+
+        ``spec`` asks the own-checkout question afresh and the section above the
+        button was drawn from a remembered answer. When they disagree the operator
+        pressed under a description of some other launch -- "on" over a directory
+        that is now refused, or a refusal over one that is now allowed -- so nothing
+        is started: the fields are left as they are, the modal stays up, and the
+        next frame draws what this reading found.
+        """
+        shown = self.granted_policy
+        spec = self.spec()
+        return spec if spec.policy is shown else None
 
 
 def handle_shortcut(state: LauncherState) -> None:
@@ -848,16 +1925,59 @@ def handle_shortcut(state: LauncherState) -> None:
         state.request_open()
 
 
-def _session_row(picker: SessionPicker, row: SessionRow, cwd: str, now: float) -> None:
+# On the resume form when its session is one this process is running. The pool
+# takes a session submitted under a live id by ending the live run first
+# (``SessionPool.submit``), so a resume of such a session is not a message to it:
+# it stops one. The sentence says what goes with the run, because "the conversation
+# continues" is true as well and reads as the whole of it.
+_LIVE_RESUME = (
+    "this session is open in this window right now -- resuming ends its run where it "
+    "stands, mid-turn if it is in one: a tool call in flight and any approval it is "
+    "waiting on go with it, and its sub-agents end with the run: the ones still "
+    "working are cancelled. The conversation then continues in a new run. To say "
+    "something to the session as it is, cancel and send it a message instead."
+)
+
+# On a row of the listing, for the same sessions: the fact is worth having before
+# the click as well as after it.
+_LIVE_TAG = "open here now"
+
+# Under the session list. A click there leaves this modal, and the two things an
+# operator would otherwise have to find out by clicking are said first.
+_PICK_HANDS_OFF = (
+    "picking a session closes New Task and opens that session's resume form -- "
+    "what is typed here is kept"
+)
+
+
+def live_resume_line(row: SessionRow | None, live: frozenset[str]) -> str | None:
+    """
+    What the resume form says when its session is live in this process, or None
+    when it is not or there is no row.
+
+    ``live`` is the ids of the sessions this process holds that have not ended. It
+    is handed in by the caller on every draw and kept nowhere here: which sessions
+    are live is the store's fact, and a copy on a draft would be a second one to
+    keep true.
+    """
+    if row is None or row.session_id not in live:
+        return None
+    return _LIVE_RESUME
+
+
+def _session_row(picker: SessionPicker, row: SessionRow, now: float, live: frozenset[str]) -> bool:
     """
     One line: bookmark toggle, then a selectable spanning the rest of the row.
+    True on the frame the row is clicked.
 
     Label, branch and age go into a single selectable string rather than a selectable
     followed by dimmed metadata. A selectable sized to its own text leaves the branch
     and the age outside the hit box, and those are the parts an operator reads last
     and clicks from -- a dead half-row is worse than undifferentiated colour.
     """
-    imgui.push_id(row.session_id)
+    # The directory beside the id: one id listed under two directories is two rows,
+    # and two rows under one ID are one widget as far as a click is concerned.
+    imgui.push_id(f"{row.session_id}\n{row.cwd}")
     # Colour carries the state as well as the glyph. At this point size "•" and "+"
     # differ by a few pixels of ink, which is not a difference an operator scanning a
     # list of thirty rows for their own bookmarks can act on.
@@ -870,44 +1990,103 @@ def _session_row(picker: SessionPicker, row: SessionRow, cwd: str, now: float) -
     imgui.set_item_tooltip("remove bookmark" if row.bookmarked else "bookmark this session")
     imgui.same_line()
 
-    meta = "  ·  ".join(p for p in (row.git_branch, age_label(row.last_modified, now)) if p)
+    meta = "  ·  ".join(
+        p
+        for p in (
+            _LIVE_TAG if row.session_id in live else None,
+            row.git_branch,
+            age_label(row.last_modified, now),
+        )
+        if p
+    )
     tail = f"  ·  {meta}" if meta else ""
     # ``label`` can be a first prompt, which is a whole paragraph with newlines in
     # it. Flattened before measuring, or the row grows to the height of the prompt.
-    head = " ".join(row.label.split())
+    head = widgets.flat_line(row.label)
     room = imgui.get_content_region_avail().x - imgui.calc_text_size(tail).x
-    picked, _ = imgui.selectable(
-        f"{widgets.ellipsis(head, max(80.0, room))}{tail}", row.session_id == picker.selected
-    )
-    if picked:
-        picker.select(row.session_id, cwd)
+    # Never drawn as selected: nothing in this modal holds a pick, and a row that
+    # stayed lit would say one was waiting behind the launch button.
+    clicked, _ = imgui.selectable(f"{widgets.ellipsis(head, max(80.0, room))}{tail}", False)
     imgui.pop_id()
+    return bool(clicked)
 
 
-def _resume_section(state: LauncherState, *, scanner: Scanner) -> None:
+def resume_directory_line(directory: LaunchDirectory, field_resolved: str) -> str | None:
     """
-    The resume picker: collapsed until asked for, over rows already being scanned.
+    What a resume says about where its session runs, or None for a launch that
+    resumes nothing.
 
-    The header starts shut so a fresh launch looks exactly as it did before this
-    section existed, but ``LauncherState.begin_open`` put the scan in flight when the
-    modal opened -- so unless the cwd field has moved since, expanding costs a header
-    toggle and no disk read, and by the time an operator has read this far the rows
-    are usually already here. When it has moved, expanding starts a scan for the
-    directory now in the field; see ``SessionPicker.set_expanded``.
+    ``field_resolved`` is the directory the caller would otherwise have used, as the
+    directory it names. ``resume_form`` has no such field and hands in the session's
+    own, so the "NOT the working directory above" halves are never drawn there.
+
+    **The directory after "runs in" is the one the launch is started in**, for every
+    variant that launches. A recorded path that leads elsewhere through a link is
+    named second, as the spelling the transcript carries, and is never the one the
+    line says the session runs in.
+    """
+    match directory:
+        case FieldDirectory():
+            return None
+        case RedirectedDirectory(path=path, recorded=recorded):
+            where = "" if path == field_resolved else ", and NOT the working directory above"
+            return (
+                f"runs in {path} -- NOT in {recorded} as that path reads: {recorded} is "
+                "where this session was recorded, and it is a symbolic link or lies "
+                f"behind one that leads there{where}"
+            )
+        case RecordedDirectory(path=path):
+            if path == field_resolved:
+                return f"runs in {path} -- where this session was recorded"
+            return (
+                f"runs in {path} -- where this session was recorded, "
+                "NOT the working directory above"
+            )
+        case GoneDirectory(path=path):
+            return (
+                f"{path} is where this session was recorded, and it is no longer a "
+                "directory -- launch is held.\n"
+                "a resume is never moved to the working directory above: restore that "
+                "directory, pick another session, or launch fresh."
+            )
+        case UnrecordedDirectory():
+            return (
+                "this session recorded no directory -- it runs in the working directory "
+                f"above, {field_resolved}"
+            )
+        case _:
+            assert_never(directory)
+
+
+def _session_list(
+    state: LauncherState, *, scanner: Scanner, live: frozenset[str]
+) -> SessionRow | None:
+    """
+    The sessions that can be resumed: collapsed until asked for, over rows already
+    being scanned. Returns the row clicked on this frame, or None.
+
+    **A way to find a session, and not a way to resume one.** The listing reaches
+    what the fleet pane does not show -- a session removed from the fleet, one
+    another tool started -- and a click hands the row to ``draw``'s caller, which
+    opens the resume form for it. Nothing is picked here and nothing about this
+    draft changes.
+
+    The header starts shut so a fresh launch is not asked to look at it, but
+    ``LauncherState.begin_open`` put the scan in flight when the modal opened -- so
+    unless the cwd field has moved since, expanding costs a header toggle and no
+    disk read, and by the time an operator has read this far the rows are usually
+    already here. When it has moved, expanding starts a scan for the directory now
+    in the field; see ``SessionPicker.set_expanded``.
     """
     picker = state.picker
     picker.poll()
 
     imgui.spacing()
-    row = picker.selected_row
-    heading = (
-        "resume an existing session" if row is None else f"resuming: {' '.join(row.label.split())}"
-    )
     cwd = state.cwd.strip() or "."
-    expanded = imgui.collapsing_header(f"{widgets.ellipsis(heading, _WIDTH - 60.0)}{_RESUME_ID}")
+    expanded = imgui.collapsing_header(f"resume an existing session instead{_RESUME_ID}")
     picker.set_expanded(expanded, cwd, scanner=scanner)
     if not expanded:
-        return
+        return None
 
     imgui.text_disabled(f"sessions in {picker.scanned_cwd or cwd} and its git worktrees")
     if picker.error is not None:
@@ -916,42 +2095,155 @@ def _resume_section(state: LauncherState, *, scanner: Scanner) -> None:
         imgui.text_colored(P.danger.vec4, f"could not read the transcripts: {picker.error}")
 
     now = time.time()
+    clicked: SessionRow | None = None
     if imgui.begin_child("##sessions", imgui.ImVec2(-1.0, _LIST_HEIGHT), imgui.ChildFlags_.borders):
         if picker.scanning and not picker.rows:
             imgui.text_disabled("reading transcripts...")
         elif not picker.rows and picker.error is None:
             imgui.text_disabled("no sessions recorded for this directory")
         for entry in picker.rows:
-            _session_row(picker, entry, cwd, now)
+            if _session_row(picker, entry, now, live):
+                clicked = entry
     imgui.end_child()
 
     if imgui.small_button("rescan") and not picker.scanning:
         picker.request_scan(cwd, scanner=scanner)
-    if row is not None:
-        imgui.same_line()
-        if imgui.small_button("launch fresh instead"):
-            picker.select(None, cwd)
-        # The whole of what resume does and does not restore, on screen rather than
-        # in a doc. The conversation comes back; nothing that lived in an
-        # ``AgentRecord`` does, because there is no record on the far side of the CLI.
-        imgui.text_colored(
-            P.accent.vec4,
-            "the conversation comes back and the task above is sent to it as the next message",
-        )
-        imgui.text_disabled(
-            "model, team and task are this launch's -- they are not read back from the session"
-        )
-        if picker.recovered_brief is not None and picker.recovered_brief != state.brief.strip():
-            # The one exception, and only because the session id does not move:
-            # `brief.session_dir` derives the same directory it derived before.
-            if imgui.small_button("use this session's brief"):
-                state.brief = picker.recovered_brief
-            imgui.same_line()
-            # Clipped rather than allowed to run off the edge: a brief path is a
-            # project slug and a uuid and is wider than the modal on every machine.
-            imgui.text_disabled(
-                widgets.ellipsis(picker.recovered_brief, imgui.get_content_region_avail().x)
+    imgui.text_disabled(_PICK_HANDS_OFF)
+    return clicked
+
+
+def _region_phrase(directory: LaunchDirectory) -> str:
+    """
+    The directory the contained half is bounded to, as the containment section names it.
+
+    "The working directory above" is true only while a field is what the launch
+    uses. For a resume the region is the session's directory, and pointing at a
+    field would name a tree the sandbox does not cover as the one it does.
+    For a recorded path that leads elsewhere through a link it is where the link
+    leads: that is the directory the sandbox is given.
+    """
+    match directory:
+        case FieldDirectory() | UnrecordedDirectory():
+            return "the working directory above"
+        case (
+            RecordedDirectory(path=path) | RedirectedDirectory(path=path) | GoneDirectory(path=path)
+        ):
+            return f"the resumed session's directory, {path}"
+        case _:
+            assert_never(directory)
+
+
+def boundary_unstated(directory: LaunchDirectory) -> str | None:
+    """
+    Why the containment section states no boundary for ``directory``, or None when
+    it states one.
+
+    A session whose recorded directory is gone has no directory for a sandbox to be
+    given, and ``git_layout`` of a path that is not there reads as the layout the
+    narrow measurement was taken for -- so the paragraphs would say ``Bash`` writes
+    only inside a directory the line above them says does not exist. Nothing
+    launches there (``resume_form.ResumeForm.hold``), and nothing is described.
+    """
+    match directory:
+        case GoneDirectory(path=path):
+            return (
+                f"no boundary is stated: {path}, where the picked session was "
+                "recorded, is no longer a directory, so there is nothing for this "
+                "mode to be bounded to and nothing launches."
             )
+        case FieldDirectory() | RecordedDirectory() | RedirectedDirectory() | UnrecordedDirectory():
+            return None
+        case _:
+            assert_never(directory)
+
+
+# A tool name no build knows, handed to the classifier to ask what a rung does with
+# one. ``approval.classify`` parks it at every rung; asking rather than saying so
+# keeps the line under the dial a reading of the classifier, as the probes are.
+_UNKNOWN_TOOL = "pptmstr-probe-of-a-tool-no-build-knows"
+_UNKNOWN_KIND = "a tool this build has never heard of"
+
+
+@dataclass(frozen=True, slots=True)
+class DialText:
+    """
+    What is said under the gate dial. ``downgrade`` is None when the rung on the
+    dial is the rung the launch gets, and otherwise the line saying which rung the
+    two below it describe.
+    """
+
+    downgrade: str | None
+    adds: str
+    parks: str
+
+
+def dial_text(asked: Policy, granted: Policy) -> DialText:
+    """
+    The lines under the dial, for a draft that asked for ``asked`` and will be
+    launched under ``granted``.
+
+    **They describe the rung the launch gets.** The two differ where the top rung is
+    refused for the directory (``LauncherState.granted_policy``), and "adds writes,
+    spawns ..." over a refusal saying the launch uses the ordinary gate is two
+    answers to one question on one screen. The dial keeps the rung that was asked
+    for, because that is the control's value, and ``downgrade`` says in words that
+    what follows is about another one.
+
+    **The parked half always has something in it.** An unrecognised tool waits for
+    the operator at every rung, and it is listed with the probed kinds that do, so
+    the top rung -- which parks none of the probed kinds -- reads "still parks only"
+    that and not a label with nothing after it.
+    """
+    adds = widgets.gate_adds(granted)
+    parks = list(widgets.gate_parks(granted))
+    only = "" if parks else "only "
+    if classify(_UNKNOWN_TOOL, {}, granted) is Disposition.REQUIRE_APPROVAL:
+        parks.append(_UNKNOWN_KIND)
+    return DialText(
+        downgrade=(
+            None
+            if granted is asked
+            else (
+                f"{asked.value} is refused for this launch, for the reason below -- it "
+                f"runs under {granted.value}, which is what these two lines describe:"
+            )
+        ),
+        adds=f"adds {', '.join(adds)}" if adds else "nothing runs unattended",
+        parks=f"still parks {only}{', '.join(parks)}" if parks else "parks nothing",
+    )
+
+
+def modal_origin(
+    pos: tuple[float, float],
+    size: tuple[float, float],
+    area_pos: tuple[float, float],
+    area_size: tuple[float, float],
+) -> tuple[float, float] | None:
+    """
+    Where to move a window at ``pos`` of ``size`` so that it lies inside the area,
+    or None when it already does.
+
+    The modal is centred when it appears and grows downward afterwards -- the top
+    rung adds a section, an opened session list adds rows -- and a window that grows from a fixed
+    origin grows off the bottom of the display, taking the launch button with it.
+    Scrolling does not bring that back: the window scrolls its contents, and the
+    part of the window that is off the display stays off it.
+
+    On an axis where the window is larger than the area its start is put at the
+    area's, which is the end the title bar is at. ``draw`` bounds the height to the
+    area's so that case is a window being resized under it, for a frame.
+    """
+
+    def along(at: float, extent: float, low: float, room: float) -> float:
+        if extent >= room:
+            return low
+        return min(max(at, low), low + room - extent)
+
+    moved = (
+        along(pos[0], size[0], area_pos[0], area_size[0]),
+        along(pos[1], size[1], area_pos[1], area_size[1]),
+    )
+    return None if moved == pos else moved
 
 
 def _containment_section(
@@ -1012,6 +2304,13 @@ def _containment_section(
     imgui.spacing()
 
     imgui.push_text_wrap_pos(0.0)
+    unstated = boundary_unstated(state.launch_directory())
+    if unstated is not None:
+        # Ahead of the refusal and of the version read: neither question has a
+        # directory to be about, and a launch that is held asks the machine nothing.
+        imgui.text_colored(P.warn.vec4, unstated)
+        imgui.pop_text_wrap_pos()
+        return
     gate = state.version_gate
     refusal = state.containment_refusal()
     if refusal is None:
@@ -1030,20 +2329,17 @@ def _containment_section(
             "board tasks and messages its own agents without asking you. A tool this "
             "build has never heard of is still not released.",
         )
-        imgui.text_disabled(
-            f"contained: Bash and anything it starts run in a sandbox that reaches "
-            f"{sandbox.ALLOWED_DOMAIN} and nothing else, and writes only inside the working "
-            "directory above. Every sub-agent gets that same boundary, so a fan-out reaches "
-            "no further than one agent does."
-        )
-        # Named separately from the sandbox line because it is a different mechanism
-        # reaching the same region, and an operator who has to reason about a failure
-        # needs to know which one refused them.
-        imgui.text_disabled(
-            "file writes are held to that same directory by the gate rather than by the "
-            "sandbox, because Write and Edit run in the CLI process -- a target that "
-            "cannot be shown to be inside it is refused."
-        )
+        contained = contained_text(state.launch_directory(), state.git_layout())
+        imgui.text_disabled(contained.sandbox)
+        if contained.wider is not None:
+            # Warn, for the reason the uncontained edge below is: it is a line saying
+            # the boundary is not where the sentence above it would be read as putting
+            # it, or is not known, and grey is how the reassuring lines are drawn.
+            imgui.text_colored(P.warn.vec4, contained.wider)
+        # Named separately from the sandbox line because it is a different mechanism,
+        # and an operator who has to reason about a failure needs to know which one
+        # refused them.
+        imgui.text_disabled(contained.gate)
         # Warn rather than disabled grey. This is the one line that says a boundary is
         # absent, and it is the line an operator skimming greyed-out reassurance would
         # skip -- which is the reading the rest of this block invites.
@@ -1059,25 +2355,128 @@ def _containment_section(
     imgui.pop_text_wrap_pos()
 
 
+# Under the headline of a failure a launch has been pressed past. It has to stay true
+# for as long as that failure is at the head of the list, so it says "since" and not
+# "just now", and it does not say the later launch started: that is not known here
+# until it is reported, and a failure of it queues behind this one.
+_PRESSED_PAST = (
+    "a launch has been pressed since, and this notice is not about that one -- if that "
+    "one starts nothing it is reported here after this"
+)
+
+
+def _failure_notice(state: LauncherState) -> None:
+    """
+    The oldest launch that started nothing, at the top of the modal: why, and what
+    has become of its draft. Under it, any draft a restore set aside.
+
+    One failure at a time and in order. Each has a draft of its own and the fields
+    hold one, so showing two reasons over one draft would leave the operator matching
+    them up by hand.
+
+    Which of the three things is said about a failure's draft is read off the fields
+    on this frame -- ``LauncherState.failure_loaded`` compares -- so "as it was typed"
+    is not said over a box that has been edited or emptied since.
+
+    A failure a launch has been pressed past is called an earlier one and is said
+    not to be that press. The modal reopens by itself over such a press, and the
+    same words as a retry that failed again would make a launch that started look
+    like one that did not.
+    """
+    if not state.failures and not state.set_aside:
+        return
+    imgui.push_text_wrap_pos(0.0)
+    if state.failures:
+        failure = state.failures[0]
+        which = f"an earlier {failure.origin}" if failure.pressed_past else f"that {failure.origin}"
+        imgui.text_colored(P.danger.vec4, f"{which} did not start a session: {failure.reason}")
+        if failure.pressed_past:
+            imgui.text_colored(P.warn.vec4, _PRESSED_PAST)
+        if failure.draft is None:
+            imgui.text_disabled(
+                "it was not made from this window, so nothing typed below is part of it"
+            )
+            if imgui.small_button("dismiss this notice"):
+                state.discard_failed()
+        elif state.failure_loaded:
+            imgui.text_disabled(
+                "the draft below is that launch, as it was typed -- nothing was lost"
+            )
+            if imgui.small_button("dismiss this notice"):
+                state.discard_failed()
+        else:
+            imgui.text_disabled(
+                "its draft is kept. restoring it sets what is in the fields below aside, "
+                "where it can be brought back; discarding it drops that launch's text for "
+                "good"
+            )
+            if imgui.small_button("restore that draft"):
+                state.restore_failed()
+            imgui.same_line()
+            if imgui.small_button("discard it"):
+                state.discard_failed()
+        waiting = len(state.failures) - 1
+        if waiting > 0:
+            imgui.text_disabled(
+                f"{waiting} more launch(es) did not start; each is kept behind this one"
+            )
+    # Read after the buttons above, so a restore pressed on this frame shows what it
+    # set aside on this frame.
+    if state.set_aside:
+        imgui.text_disabled(
+            f"{len(state.set_aside)} draft(s) set aside by a restore are kept. bringing "
+            "the last one back swaps it with what is in the fields below"
+        )
+        # Labels of their own: two buttons reading "discard it" in one window share
+        # an ID, and the second would never fire.
+        if imgui.small_button("bring back what was set aside"):
+            state.restore_set_aside()
+        imgui.same_line()
+        if imgui.small_button("discard what was set aside"):
+            state.discard_set_aside()
+    imgui.pop_text_wrap_pos()
+    imgui.separator()
+    imgui.spacing()
+
+
 def draw(
     state: LauncherState,
     *,
     running: int,
     queued: int,
     cap: int,
-    launch: Callable[[LaunchSpec], None],
+    launch: Callable[[LaunchSpec, Draft], None],
+    on_pick_resume: Callable[[SessionRow], None],
     wrap: bool,
     scanner: Scanner = scan_sessions,
     prober: Prober = cli_version.check_installed_cli,
     subagent_cap: int | None = None,
     models: tuple[str, ...] = FALLBACK_MODELS,
+    live: frozenset[str] = frozenset(),
 ) -> None:
     """
     Draw the modal if it has been asked for.
 
+    ``on_pick_resume`` is handed the row of the session list the operator clicked.
+    **That click is the whole of what this modal does about a resume**: it closes,
+    with every field as it stood, and the caller opens the resume form for the row.
+    Required and not defaulted, because a listing whose rows did nothing when
+    clicked would be the one screen for recovering a session, not recovering it.
+
+    ``live`` is the ids of the sessions this process is running. A row of the session
+    list that is one of them says so. Empty, the default, is a caller that runs none.
+
     ``cap`` and ``subagent_cap`` are different bounds and are not interchangeable:
     ``cap`` is how many *sessions* run at once and already has a consequence on this
     screen, while ``subagent_cap`` is how many sub-agents one session may hold.
+
+    ``launch`` is handed the spec and the draft it was built from. The spec is what
+    starts a session; the draft is what the caller gives back through
+    ``LauncherState.report_failure`` if no session started, since by then the fields
+    it came from have been cleared. **It gives it back on a later frame and never
+    from inside ``launch``**: the clears run when ``launch`` returns, and a failure
+    reported before them is taken for the one this press retried. See
+    ``report_failure``.
 
     ``models`` is what the model combo offers -- ``model_catalog.Catalog.models``, which
     is the list in code until the startup probe replaces it. Defaulted rather than
@@ -1103,7 +2502,32 @@ def draw(
 
     viewport = imgui.get_main_viewport()
     imgui.set_next_window_pos(viewport.get_center(), imgui.Cond_.appearing, imgui.ImVec2(0.5, 0.5))
-    imgui.set_next_window_size(imgui.ImVec2(_WIDTH, 0.0), imgui.Cond_.appearing)
+    # One width. Auto-resize fits the height to what is drawn; left to fit the width
+    # as well, one unwrapped line widens the whole modal to its length, rightward
+    # from where it stood. Every line of text below wraps to this width instead.
+    #
+    # The height bound restates one auto-resize already applies -- Dear ImGui 1.92.8
+    # does not fit a window taller than the viewport's work area -- because the
+    # move below is only a way to the launch button while that holds: what does not
+    # fit scrolls, and a window no taller than the area can be put wholly inside it.
+    imgui.set_next_window_size_constraints(
+        imgui.ImVec2(_WIDTH, 0.0), imgui.ImVec2(_WIDTH, viewport.work_size.y)
+    )
+    # Where the last frame left it, once it has been placed. Dear ImGui keeps a
+    # closed popup's window under its name, so a window not drawn last frame is where
+    # the modal stood the last time it was open; and one that appeared last frame
+    # was drawn hidden, to be measured, with the centring above still to be applied
+    # on this one -- a position set now would take its place.
+    last = imgui.internal.find_window_by_name(TITLE)
+    if last is not None and last.was_active and not last.appearing:
+        moved = modal_origin(
+            (last.pos.x, last.pos.y),
+            (last.size.x, last.size.y),
+            (viewport.work_pos.x, viewport.work_pos.y),
+            (viewport.work_size.x, viewport.work_size.y),
+        )
+        if moved is not None:
+            imgui.set_next_window_pos(imgui.ImVec2(*moved), imgui.Cond_.always)
     opened, _ = imgui.begin_popup_modal(TITLE, None, imgui.WindowFlags_.always_auto_resize)
     if not opened:
         # Dismissed by something other than this function -- a click on the blocked
@@ -1112,9 +2536,37 @@ def draw(
         state.is_open = False
         return
 
+    # For every line of text in the modal, which is what holds it to the one width.
+    imgui.push_text_wrap_pos(0.0)
+
+    # Above everything, the task box included, and before the focus request below --
+    # ``set_keyboard_focus_here`` lands on the next widget, which has to stay the box.
+    _failure_notice(state)
+
     if state._focus_task:
         imgui.set_keyboard_focus_here()
         state._focus_task = False
+
+    # Dear ImGui's rule, measured on 1.92.8: an *active* InputText owns the text and
+    # copies its own over the caller's every frame, so a value assigned to
+    # ``state.task`` from outside is overwritten by the call below unless the widget
+    # is told to read the caller's first. A draft is assigned from outside at exactly
+    # the moment the box is most likely focused -- a failure reported a frame or two
+    # after the press, into a modal reopened with the cursor in it.
+    #
+    # Only while it is the active item, and that half is as load-bearing as the
+    # first. An inactive box reads the caller's buffer by itself, and asking it to
+    # reload trips an assertion in the word-wrapped draw (``text_end_display <=
+    # text_end``), which arrives here as a ``RuntimeError`` on the draw thread. That
+    # is the state the box is in when a restore is pressed with the mouse: the
+    # button took the focus on the way down.
+    if state._reload_task:
+        state._reload_task = False
+        task_id = imgui.get_id(_TASK_ID)
+        if imgui.internal.get_active_id() == task_id:
+            held = imgui.internal.get_input_text_state(task_id)
+            if held is not None:
+                held.reload_user_buf_and_move_to_end()
 
     # The same chord the reply boxes use: Ctrl+Enter launches, Enter breaks the
     # line. Sharing it is the point -- a task box and a reply box are both prompts,
@@ -1123,7 +2575,7 @@ def draw(
     # escape_clears_all is deliberately absent on top of it: it would eat the key
     # that dismisses the modal.
     submitted, state.task = widgets.multiline_input(
-        "##task",
+        _TASK_ID,
         state.task,
         imgui.ImVec2(-1, _TASK_HEIGHT),
         wrap=wrap,
@@ -1151,9 +2603,8 @@ def draw(
     )
     imgui.text_disabled("working directory")
 
-    # After the directory because it is scoped by it, and before the brief because it
-    # can fill the brief in -- the two fields it touches are the ones either side.
-    _resume_section(state, scanner=scanner)
+    # After the directory because the listing is scoped by it.
+    picked_row = _session_list(state, scanner=scanner, live=live)
 
     # **Not how a brief is created.** A team session writes the task above as its
     # first premise at launch, because that is where the operator's premises already
@@ -1197,9 +2648,14 @@ def draw(
     # is where the operator decides. The name of a rung is not enough to calibrate
     # against -- PERMISSIVE reads as "the gate is off" and it is not -- so what it
     # adds and what it leaves parked are both on screen at the moment of choosing.
-    adds = widgets.gate_adds(state.policy)
-    imgui.text_disabled(f"adds {', '.join(adds)}" if adds else "nothing runs unattended")
-    imgui.text_disabled(f"still parks {', '.join(widgets.gate_parks(state.policy))}")
+    #
+    # Of the rung the launch gets, which is not always the one on the dial: see
+    # ``dial_text``.
+    dial = dial_text(state.policy, state.granted_policy)
+    if dial.downgrade is not None:
+        imgui.text_colored(P.warn.vec4, dial.downgrade)
+    imgui.text_disabled(dial.adds)
+    imgui.text_disabled(dial.parks)
 
     # Here, with the ordinary launch fields, rather than inside the containment
     # section: the cap bounds fan-out under every policy and the operator asked for an
@@ -1250,6 +2706,8 @@ def draw(
     cancelled = imgui.button("cancel", imgui.ImVec2(90.0, 0.0))
 
     if hold is not None:
+        # Wrapped in the room beside the buttons, as a column that starts where the
+        # first line does.
         imgui.same_line()
         imgui.text_colored(P.warn.vec4, hold)
 
@@ -1259,39 +2717,54 @@ def draw(
     # cannot say is what happens to *this* launch, and a session that sits in
     # SPAWNING while others work looks broken to whoever just pressed the button.
     if running >= cap:
-        imgui.same_line()
+        # Beside the buttons when nothing else is, and under them when a hold reason
+        # has that place: a second ``same_line`` would start past the end of a
+        # wrapped reason, outside the modal.
+        if hold is None:
+            imgui.same_line()
         imgui.text_colored(P.warn.vec4, f"at cap - this one will queue ({queued} ahead of it)")
 
     # Escape is handled explicitly rather than left to ImGui so that the precedence
     # against the layout shortcuts is stated in one place instead of split between
     # this and NavUpdate's behaviour.
     dismissed = cancelled or imgui.is_key_pressed(imgui.Key.escape)
+    reopen = False
 
     # ``enabled`` and not ``clicked`` alone: ``begin_disabled`` greys the button and
     # does nothing to the keyboard, so Ctrl+Enter in the task box is a second way into
     # this branch and a held launch has to be held on both.
     if enabled and (clicked or submitted):
-        launch(state.spec())
-        state.task = ""
-        # Cleared with the task. A mode left on outlives the session it was set for,
-        # and the next Ctrl+N is the one the operator types a task into without
-        # re-reading the panel above the button -- which is 08-11's "forgets it is set
-        # for the four they are not" happening inside one run rather than across two.
-        state.policy = Policy.STRICT
-        # Cleared with the task, for the same reason the mode is: a number sized for
-        # one piece of work outliving it means the next Ctrl+N silently carries a cap
-        # the operator chose for something else. Back to None is back to the setting,
-        # which is the answer they last gave deliberately.
-        state.subagent_cap = None
-        # Cleared with the task, and for the same reason it is: the pick has gone
-        # somewhere. A pick that outlived its launch would silently resume the same
-        # session again on the next Ctrl+N, and the header carrying it would be
-        # collapsed while it did.
-        state.picker.select(None, state.cwd)
+        # The draft is taken before the clears and travels with the spec, so a launch
+        # that starts nothing has something to hand back. See ``report_failure``.
+        spec = state.press()
+        if spec is not None:
+            launch(spec, state.draft())
+            state.launched()
+            dismissed = True
+            reopen = state.failure_loaded
+
+    if picked_row is not None:
+        # The modal goes and the fields stay: nothing was launched, so nothing is
+        # cleared, and the draft is here on the next Ctrl+N.
         dismissed = True
+        reopen = False
 
     if dismissed:
         state.is_open = False
         imgui.close_current_popup()
+        if reopen:
+            # The press left the fields blank and another failed launch's draft went
+            # into them. The modal comes back with it rather than leaving a restored
+            # draft behind a closed window. Only then: a cancel or Escape has to be
+            # able to close a modal with a failure in it, and so does a launch made
+            # past a notice that has no draft -- the failure is there on the next
+            # Ctrl+N either way.
+            state.request_open()
 
+    imgui.pop_text_wrap_pos()
     imgui.end_popup()
+
+    if picked_row is not None:
+        # After the popup is ended, so a form the caller opens from here is asked
+        # for at the root and not inside the modal that has just been closed.
+        on_pick_resume(picked_row)

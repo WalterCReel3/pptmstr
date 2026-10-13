@@ -211,6 +211,13 @@ OBLIGATION_GLYPH: dict[ObligationKind, str] = {
     ObligationKind.APPROVAL: STATE_GLYPH[AgentState.AWAITING_APPROVAL],
     ObligationKind.QUESTION: STATE_GLYPH[AgentState.AWAITING_INPUT],
     ObligationKind.FAILURE: STATE_GLYPH[AgentState.FAILED],
+    # No state produces a decision -- its asker can be in any of them -- so it has
+    # a glyph of its own and borrows none.
+    ObligationKind.DECISION: fa.ICON_FA_SCALE_BALANCED,
+    # Nor a command, and it is not to be taken for an approval: the hand is a
+    # call the CLI will run inside the sandbox, and this is a string pptmstr
+    # will run outside it.
+    ObligationKind.COMMAND: fa.ICON_FA_TERMINAL,
 }
 
 # Open/closed, keyed by whether the thing is open. FontAwesome rather than the
@@ -227,6 +234,12 @@ _OBLIGATION_ROLE: dict[ObligationKind, str] = {
     ObligationKind.APPROVAL: "state_awaiting",
     ObligationKind.QUESTION: "state_awaiting_input",
     ObligationKind.FAILURE: "state_failed",
+    ObligationKind.DECISION: "warn",
+    # The alarm role, and on purpose: of everything in the queue this is the row
+    # where a yes runs a string as the operator, outside the sandbox. It shares
+    # the hue of a failure on palettes that draw both alike; the glyph is what
+    # tells them apart, as it is for every kind.
+    ObligationKind.COMMAND: "danger",
 }
 
 STATE_LABEL: dict[AgentState, str] = {

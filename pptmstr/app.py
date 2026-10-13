@@ -10,43 +10,95 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import concurrent.futures
+import dataclasses
 import os
+import queue
+import signal
+import threading
 import time
 import traceback
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import assert_never
 
 from imgui_bundle import hello_imgui, imgui, immapp
 
+from . import board as board_mod
+from . import (
+    boardfacts,
+    boardlog,
+    boardsync,
+    cli_version,
+    commandfile,
+    commandrun,
+    effects,
+    fleetsync,
+    layout_ini,
+    model_catalog,
+    sessionfile,
+    templates,
+    theme,
+    tree,
+)
 from . import brief as brief_mod
-from . import cli_version, model_catalog, templates, theme, tree
 from . import settings as settings_mod
-from .approval import Policy
+from .approval import Policy, requires_containment
 from .bridge import Bridge
-from .driver import AgentSession
+from .command import Command, CommandId, CommandState, End, EndUnknown, NotStarted, Survivor
+from .command import Withdrawn as CommandWithdrawnEnd
+from .driver import AgentSession, UncontainedAutonomy
 from .fake_driver import FakeDriver
-from .intents import FailureAcknowledged
+from .intents import (
+    BoardRestored,
+    CommandApproved,
+    CommandEnded,
+    CommandRefused,
+    CommandsRestored,
+    CommandStopAsked,
+    FailedSessionClosed,
+    FailureAcknowledged,
+    Intent,
+    SessionDetached,
+)
 from .log import LOG
-from .model import LaunchSpec, NodeId, Snapshot
+from .model import (
+    MAX_COMMAND_REFUSAL_CHARS,
+    AgentRecord,
+    AgentState,
+    DetachRefusal,
+    LaunchSpec,
+    NodeId,
+    Snapshot,
+    TranscriptPresence,
+)
 from .pool import SessionPool
-from .store import Store
+from .sessions import SessionRow
+from .store import Observer, Store
 from .theme import REQUIRED_THEMES, THEMES, P
 from .transcript import SegmentKind, Transcript
 from .ui import (
     board_pane,
     brief_pane,
+    command_view,
     compose,
+    decision_view,
     detail,
+    digest_pane,
     health,
     inbox,
     launcher,
     rail,
+    resume_form,
     review,
+    session_details,
+    session_menu,
     transcript_pane,
 )
 from .ui import focus as focus_mod
-from .ui.widgets import format_elapsed
+from .ui.widgets import flat_line, format_elapsed
 
 # The two arrangements of C. Same panels in both; the rail is in the same place in
 # each, and the cursor survives the switch. That shared anchor is the whole
@@ -54,6 +106,689 @@ from .ui.widgets import format_elapsed
 # arrangement alone.
 TRIAGE = "TRIAGE"
 FOCUS = "FOCUS"
+
+
+@dataclass(frozen=True, slots=True)
+class LaunchStarted:
+    """
+    The session was handed to the pool.
+    """
+
+
+@dataclass(frozen=True, slots=True)
+class LaunchRefused:
+    """
+    Nothing was handed to the pool, and why, in words fit to put in front of the
+    operator beside the draft they pressed launch on.
+    """
+
+    reason: str
+
+
+# What ``_launch``'s coroutine returns. A value and not an exception or a log line:
+# the decision is made on the asyncio thread, after the modal has closed, and the
+# only thing that travels back to the draw thread is what the coroutine returns.
+LaunchOutcome = LaunchStarted | LaunchRefused
+
+
+@dataclass(frozen=True, slots=True)
+class _InFlight:
+    """
+    A launch whose outcome has not been read yet: the future ``Bridge.submit``
+    returned for it, the draft the modal pressed it from if the modal did, and the
+    word for where it came from.
+
+    ``resumed`` is set for a launch the resume form pressed: the session it
+    resumes and the form's draft, which is where a failure of it is handed back
+    (``ResumeForms.report_failure``) instead of to the launcher.
+    """
+
+    future: concurrent.futures.Future[LaunchOutcome]
+    draft: launcher.Draft | None
+    origin: str
+    resumed: tuple[str, resume_form.Draft] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _PickRead:
+    """
+    A row picked in New Task's session list for a session the store holds no
+    record of, with what its session file said: read on a worker, taken on the
+    draw thread (``_take_resume_picks``).
+
+    ``offered`` is New Task's task box as it stood at the click.
+    """
+
+    row: SessionRow
+    found: sessionfile.Found
+    offered: str
+
+
+@dataclass(frozen=True, slots=True)
+class CommandHost:
+    """
+    What a break-glass command would be run by, as found at startup: the
+    operator's login shell, or None when nothing names one that can be run, and
+    what the runner takes out of pptmstr's environment first, in words.
+
+    ``no_shell`` is why there is none, in ``commandrun``'s words, and None when
+    there is one.
+    """
+
+    shell: str | None
+    stripped_env: tuple[str, ...]
+    no_shell: str | None = None
+
+
+def _command_host() -> CommandHost:
+    """
+    Look once for the shell and the environment a command would be given.
+
+    At startup and never in a frame: finding the shell stats a file and reads
+    the password database.
+    """
+    found = commandrun.shell_for()
+    stripped = commandrun.environment_changes()
+    if isinstance(found, commandrun.Shell):
+        return CommandHost(shell=found.path, stripped_env=stripped)
+    return CommandHost(shell=None, stripped_env=stripped, no_shell=found.reason)
+
+
+@dataclass(frozen=True, slots=True)
+class CommandFileReport:
+    """
+    What became of one record of a command: ``name`` is the file
+    (``commandfile.REQUEST_NAME``, ``END_NAME`` or ``STARTED_NAME``) and
+    ``result`` what the write answered.
+    """
+
+    command_id: CommandId
+    name: str
+    result: commandfile.Written | commandfile.Unwritten
+
+
+@dataclass(frozen=True, slots=True)
+class CommandShortfalls:
+    """
+    What reading sessions' command records back fell short by, as counts: the
+    log has each one's reason. ``unreadable`` are command directories that gave
+    no command, ``newer`` commands a later build wrote a file of, and
+    ``unlisted`` sessions whose ``commands/`` was not read whole.
+    """
+
+    unreadable: int = 0
+    newer: int = 0
+    unlisted: int = 0
+
+
+_FILES_CLOSED = "pptmstr was shutting down"
+
+_Write = Callable[[Command, Path | None], commandfile.Written | commandfile.Unwritten]
+
+
+class CommandFiles:
+    """
+    The records of a break-glass command that the runner does not write, kept
+    off the draw thread: ``request.json`` when a command is asked, and
+    ``end.json`` for an end no process came before -- refused, withdrawn, or
+    approved and never handed to a runner. ``run.json`` and every other end are
+    the runner's own, written on its command's worker.
+
+    **One worker, in the order submitted**, started by the first submit, so a
+    command's request is on disk before anything queued behind it. ``request``
+    and ``end`` queue and return; ``drain`` hands the draw thread what was
+    settled since it last asked. ``report`` may be called from any thread: the
+    runner's callback says through it that an end it wrote did not land.
+
+    It also holds which sessions have had their records read back in this
+    process (``claim_restore``), so each is read once, and what those reads
+    fell short by (``shortfalls``): both are written by the recall worker and
+    by the asyncio thread, under one lock, and ``shortfalls`` is replaced whole.
+
+    A daemon, as the other writers' workers are: a write held by a dead mount
+    must not hold the exit, and ``close`` waits a bounded time for it.
+    """
+
+    def __init__(self, root: Path | None = None) -> None:
+        self.root = root
+        self.shortfalls = CommandShortfalls()
+        self._jobs: queue.SimpleQueue[tuple[_Write, Command, str] | None] = queue.SimpleQueue()
+        self._reports: queue.SimpleQueue[CommandFileReport] = queue.SimpleQueue()
+        self._lock = threading.Lock()
+        self._worker: threading.Thread | None = None
+        self._closed = False
+        self._restored: set[str] = set()
+
+    def request(self, command: Command) -> None:
+        """Queue ``request.json`` for a command that was just asked."""
+        self._submit(commandfile.write_request, command, commandfile.REQUEST_NAME)
+
+    def end(self, command: Command) -> None:
+        """Queue ``end.json`` for a command that ended with no run recorded."""
+        self._submit(commandfile.write_end, command, commandfile.END_NAME)
+
+    def report(self, report: CommandFileReport) -> None:
+        self._reports.put(report)
+
+    def drain(self) -> tuple[CommandFileReport, ...]:
+        out: list[CommandFileReport] = []
+        while True:
+            try:
+                out.append(self._reports.get_nowait())
+            except queue.Empty:
+                return tuple(out)
+
+    def claim_restore(self, session_id: str) -> bool:
+        """
+        Whether the caller is the one to read ``session_id``'s records back:
+        True once per session, and False ever after.
+        """
+        with self._lock:
+            if session_id in self._restored:
+                return False
+            self._restored.add(session_id)
+            return True
+
+    def fell_short(self, unreadable: int, newer: int, unlisted: int) -> None:
+        with self._lock:
+            held = self.shortfalls
+            self.shortfalls = CommandShortfalls(
+                unreadable=held.unreadable + unreadable,
+                newer=held.newer + newer,
+                unlisted=held.unlisted + unlisted,
+            )
+
+    def close(self, timeout: float) -> bool:
+        """
+        Let the worker finish what is queued, for at most ``timeout`` seconds.
+        False when it had not finished. Nothing is written after this: a later
+        submit is reported unwritten.
+        """
+        with self._lock:
+            self._closed = True
+            worker = self._worker
+        if worker is None:
+            return True
+        self._jobs.put(None)
+        worker.join(timeout)
+        return not worker.is_alive()
+
+    def _submit(self, write: _Write, command: Command, name: str) -> None:
+        with self._lock:
+            closed = self._closed
+            if not closed and self._worker is None:
+                self._worker = threading.Thread(
+                    target=self._work, name="command-files", daemon=True
+                )
+                self._worker.start()
+        if closed:
+            self.report(CommandFileReport(command.id, name, commandfile.Unwritten(_FILES_CLOSED)))
+            return
+        self._jobs.put((write, command, name))
+
+    def _work(self) -> None:
+        while True:
+            job = self._jobs.get()
+            if job is None:
+                return
+            write, command, name = job
+            result: commandfile.Written | commandfile.Unwritten
+            try:
+                result = write(command, self.root)
+            except Exception as exc:  # noqa: BLE001 - one record's failure must not end the worker
+                result = commandfile.Unwritten(f"{type(exc).__name__}: {exc}")
+            self.report(CommandFileReport(command.id, name, result))
+
+
+# Why an approved command is ended at once in a process with no runner.
+_NO_RUNNER = "this build is not running commands: "
+_NO_RUNNER_FAKE = "the fake driver runs nothing on this machine"
+_NO_RUNNER_NONE = "no runner was started"
+
+# How long past its own timeout a command handed to the runner is waited for
+# before the shell ends it itself (``_check_for_overdue_commands``). The runner
+# needs, beyond the timeout, the time between its two signals, its wait for the
+# shell to be reaped, its last read of the pipe and two small writes; the rest
+# is margin for a disk that is slow and not dead.
+COMMAND_OVERDUE_S = commandrun.KILL_GRACE_S + commandrun.REAP_S + commandrun.DRAIN_S + 60.0
+
+OVERDUE = (
+    "pptmstr's runner reported no end for it within its timeout and"
+    f" {COMMAND_OVERDUE_S:.0f}s more"
+)
+
+
+def _command_ended(state: AppState) -> Callable[[commandrun.Ended], None]:
+    """
+    The runner's callback: a command's end, put on the queue as the intent that
+    closes it, and a report when the runner could not write ``end.json`` or
+    ``started.json``. What was taken out of the environment for this command's
+    directory, beyond what is taken out for every directory and shown on its
+    row, is logged: the row is drawn before the directory is looked at.
+
+    **Called on the command's worker thread.** ``Bridge.emit`` is a put on a
+    ``queue.Queue`` and is the crossing every other thread uses; the report is a
+    put on a ``SimpleQueue``. Neither blocks, and nothing here touches the store
+    or a pane. It raises nothing: the runner hands what a callback raises to
+    ``threading.excepthook``, and the intent would be lost with it.
+    """
+
+    def on_end(ended: commandrun.Ended) -> None:
+        try:
+            end = ended.command.end
+            if end is None:
+                return
+            state.bridge.emit(CommandEnded(ended.command.id, end))
+            files = state.command_files
+            if files is not None and isinstance(ended.record, commandfile.Unwritten):
+                files.report(
+                    CommandFileReport(ended.command.id, commandfile.END_NAME, ended.record)
+                )
+            if files is not None and isinstance(ended.started, commandfile.Unwritten):
+                files.report(
+                    CommandFileReport(ended.command.id, commandfile.STARTED_NAME, ended.started)
+                )
+            host = state.command_host
+            shown = () if host is None else host.stripped_env
+            for line in ended.taken_out:
+                if line not in shown:
+                    LOG.warn("command", f"{ended.command.id} was run without it: {line}")
+        except Exception as exc:  # noqa: BLE001 - see the docstring: this must not raise
+            LOG.error("command", f"a command's end was not reported: {type(exc).__name__}: {exc}")
+
+    return on_end
+
+
+def _end_unstarted(state: AppState, command: Command, reason: str) -> None:
+    """
+    End, as ``NotStarted``, a command the store ordered run and no runner took.
+    On the draw thread.
+
+    The end goes through the queue like the runner's, and is applied on the
+    next frame. Its ``end.json`` is queued here and says nothing was approved:
+    no ``run.json`` was written for it, and an end that follows a run is
+    refused without one (``commandfile.write_end``).
+    """
+    end = End(outcome=NotStarted(reason), at=time.time())
+    state.command_handed.pop(command.id, None)
+    state.bridge.emit(CommandEnded(command.id, end))
+    LOG.error("command", f"{command.id} was approved and did not start: {reason}")
+    _not_done(state, f"{command.id} was approved and did not start: {reason}")
+    files = state.command_files
+    if files is not None:
+        files.end(dataclasses.replace(command, run=None, stop_asked_at=None, end=end))
+
+
+def _run_command(state: AppState, command: Command) -> None:
+    """
+    Carry out the store's order to run ``command``: hand it to the runner, or
+    end it here. **Every order ends in one of the two**, so no command is left
+    running with nothing behind it.
+
+    ``Runner.start`` reserves a slot, starts a thread and returns: no file is
+    touched and nothing is waited for, except where no thread can be made at
+    all, which the runner answers by producing the end on this thread.
+
+    What is handed over is the record the store built from the approval, whole:
+    the string, the shell, the directory and the timeout are its ``run``'s.
+    """
+    runner = state.command_runner
+    if runner is None:
+        why = _NO_RUNNER_FAKE if state.fake else _NO_RUNNER_NONE
+        _end_unstarted(state, command, _NO_RUNNER + why)
+        return
+    try:
+        runner.start(command)
+    except Exception as exc:  # noqa: BLE001 - an order that raised is still owed an end
+        LOG.debug("command", traceback.format_exc())
+        _end_unstarted(state, command, f"the runner did not take it: {type(exc).__name__}: {exc}")
+        return
+    bound = command.run.timeout_s if command.run is not None else 0.0
+    state.command_handed[command.id] = time.monotonic() + bound + COMMAND_OVERDUE_S
+
+
+def _stop_command(state: AppState, command_id: CommandId) -> None:
+    """
+    Carry out the store's order to kill a running command. The end is the
+    runner's to report; this only asks.
+    """
+    runner = state.command_runner
+    if runner is None:
+        return
+    try:
+        runner.stop(command_id, at=time.time())
+    except Exception as exc:  # noqa: BLE001 - said to the operator, who believes it was asked
+        reason = f"{type(exc).__name__}: {exc}"
+        LOG.error("command", f"{command_id}: the cancel did not reach the runner: {reason}")
+        _not_done(
+            state,
+            f"{command_id} was not cancelled: the runner could not be asked ({reason});"
+            " its timeout still ends it",
+        )
+
+
+def _check_for_overdue_commands(state: AppState, now: float | None = None) -> None:
+    """
+    End, as ``EndUnknown``, a command that was handed to the runner and that
+    the runner has reported no end for ``COMMAND_OVERDUE_S`` past its timeout.
+
+    The runner ends everything it takes, and this is for the case where that
+    did not hold -- its worker died, or is held by a write that will not
+    return. Without it such a command is "running" for good: its row stays, its
+    session can run nothing else, and no cancel reaches a worker that is gone.
+    ``EndUnknown`` is the honest end: the process may have finished, may have
+    been killed, and may be alive. Nothing is written for it, since no
+    ``end.json`` is what that outcome means on disk. The runner is told to give
+    the command up (``_abandon_command``), and the end it records if its worker
+    ever returns is ``EndUnknown`` too.
+
+    On the monotonic clock, as the runner's timeout is: the wall clock moves
+    across a suspend and the timeout does not.
+    """
+    if not state.command_handed:
+        return
+    snap = state.frame_snap
+    if snap is None:
+        return
+    now = time.monotonic() if now is None else now
+    for command_id, due in list(state.command_handed.items()):
+        held = snap.commands.get(command_id)
+        if held is None or held.state is not CommandState.RUNNING:
+            del state.command_handed[command_id]
+        elif now >= due:
+            del state.command_handed[command_id]
+            state.bridge.emit(CommandEnded(command_id, End(outcome=EndUnknown(), at=time.time())))
+            LOG.error("command", f"{command_id}: {OVERDUE}; it is shown as ended, end unknown")
+            killed = _abandon_command(state, command_id)
+            _not_done(state, f"{command_id}: {OVERDUE}. {killed}")
+
+
+ABANDONED = (
+    "Every process group found in its shell's session was sent SIGKILL and its session"
+    " here can be given another command; whether anything of it survived was not seen"
+)
+NOT_ABANDONED = "It may still be running: the runner could not be told to give it up"
+NOT_HELD = (
+    "It may still be running: the runner no longer holds it, so there was nothing it" " could kill"
+)
+
+
+def _abandon_command(state: AppState, command_id: CommandId) -> str:
+    """
+    Have the runner give up a command the store has just ended without it, and
+    say what that did. The runner kills what it finds in the shell's session
+    from this thread and frees the session's slot (``Runner.abandon``):
+    without that the store would show the session free while the runner turned
+    every later command of it away.
+    """
+    runner = state.command_runner
+    if runner is None:
+        return NOT_ABANDONED
+    try:
+        held = runner.abandon(command_id)
+    except Exception as exc:  # noqa: BLE001 - said to the operator in the same notice
+        LOG.error("command", f"{command_id}: not abandoned: {type(exc).__name__}: {exc}")
+        return NOT_ABANDONED
+    return ABANDONED if held else NOT_HELD
+
+
+def _record_commands(state: AppState) -> Observer:
+    """
+    The commands' half of the observer: what each applied step means for a
+    command's files, queued for ``CommandFiles``, and which commands came from
+    a file.
+
+    Derived from the two snapshots and not from the intent, so a request the
+    store refused writes nothing: a command that appeared is asked, and gets
+    its ``request.json``; one that gained an end with no run was refused or
+    withdrawn, and gets its ``end.json``. A command that appeared under a
+    ``CommandsRestored`` is one a file already holds, and is only noted
+    (``AppState.command_restored``).
+
+    **It does not raise**, for the reason ``_record_board`` gives. A step it
+    could not derive is a record a command does not get, said once.
+    """
+
+    def observe(before: Snapshot, intent: Intent, after: Snapshot, now: float) -> None:
+        if after.commands is before.commands:
+            return
+        try:
+            files = state.command_files
+            from_file = isinstance(intent, CommandsRestored)
+            for command_id, command in after.commands.items():
+                was = before.commands.get(command_id)
+                if was is None:
+                    if from_file:
+                        state.command_restored.add(command_id)
+                    elif files is not None and command.state is CommandState.ASKED:
+                        state.command_pending.add(command_id)
+                        files.request(command)
+                elif (
+                    files is not None
+                    and was.end is None
+                    and command.end is not None
+                    and command.run is None
+                ):
+                    files.end(command)
+        except Exception as exc:  # noqa: BLE001 - see the docstring: this must not raise
+            reason = f"{type(exc).__name__}: {exc}"
+            if state.command_observer_failed != reason:
+                state.command_observer_failed = reason
+                LOG.error("command", f"a command's record could not be derived: {reason}")
+                LOG.debug("command", traceback.format_exc())
+
+    return observe
+
+
+_RECORD_OF = {
+    commandfile.REQUEST_NAME: "what was asked",
+    commandfile.END_NAME: "how it ended",
+    commandfile.STARTED_NAME: "which process it became",
+}
+
+
+def _read_command_reports(state: AppState) -> None:
+    """
+    Fold what ``CommandFiles`` settled since the last frame into what the rows
+    are drawn with, on the draw thread: a request that is now on disk may be
+    run, and a record that did not land is kept, in words, for its row and for
+    DETAIL. The first failure of a command is the one kept, and it is logged
+    once.
+    """
+    files = state.command_files
+    if files is None:
+        return
+    for report in files.drain():
+        if report.name == commandfile.REQUEST_NAME:
+            state.command_pending.discard(report.command_id)
+        if isinstance(report.result, commandfile.Written):
+            continue
+        if report.command_id in state.command_unrecorded:
+            continue
+        what = _RECORD_OF.get(report.name, report.name)
+        said = f"{what} is not recorded on disk: {report.result.reason}"
+        state.command_unrecorded[report.command_id] = said
+        LOG.error("command", f"{report.command_id}: {said}")
+
+
+NOT_RUN = "not run: "
+NOT_REFUSED = "not refused: "
+NOT_CANCELLED = "not cancelled: "
+NO_SESSION_DIRECTORY = (
+    "this session's record names no directory, and a command runs in its session's"
+)
+REQUEST_UNRECORDED = "nothing runs without a record of what was asked, and this command has none"
+REQUEST_PENDING = (
+    "what was asked is still being written to disk, and nothing runs before it is."
+    " Press run again"
+)
+NO_LONGER_ASKED = "it is no longer waiting for you"
+NO_LONGER_RUNNING = "it is not running"
+
+
+def _approve_command(state: AppState, command_id: CommandId, text: str, timeout_s: int) -> None:
+    """
+    The row's second press of Run: send the operator's approval, or say why
+    nothing was sent.
+
+    **The store is asked first** (``Snapshot.command_approval_refusal``), on
+    the snapshot the frame was drawn from. The reducer's arm is a silent no-op
+    for an approval it would not apply, and nobody is parked on one to be told.
+
+    The shell is the one found at startup and the directory is the session's
+    own, read off its root's record: the tool told the agent the command runs
+    in the session's directory. A command whose request is not on disk is not
+    approved here, although the runner would end it ``NotStarted`` for the same
+    reason: that would spend the asker's request on a failure this already
+    knows of, and the operator can refuse it with the reason instead.
+    """
+    snap = state.frame_snap
+    if snap is None:
+        return
+    refusal = snap.command_approval_refusal(command_id, text, timeout_s)
+    if refusal is not None:
+        _not_done(state, NOT_RUN + (_ended_first(snap, command_id) or refusal.sentence))
+        return
+    host = state.command_host
+    if host is None or host.shell is None:
+        why = "no shell was looked for" if host is None else (host.no_shell or "no usable shell")
+        _not_done(state, f"{NOT_RUN}there is no shell to give it to ({why})")
+        return
+    root = snap.nodes.get((snap.commands[command_id].session_id, None))
+    cwd = root.cwd if root is not None else None
+    if not cwd:
+        _not_done(state, NOT_RUN + NO_SESSION_DIRECTORY)
+        return
+    if command_id in state.command_unrecorded:
+        _not_done(state, f"{NOT_RUN}{REQUEST_UNRECORDED} ({state.command_unrecorded[command_id]})")
+        return
+    if command_id in state.command_pending:
+        _not_done(state, NOT_RUN + REQUEST_PENDING)
+        return
+    state.bridge.emit(
+        CommandApproved(
+            command_id=command_id,
+            text=text,
+            shell=host.shell,
+            cwd=cwd,
+            timeout_s=timeout_s,
+            at=time.time(),
+        )
+    )
+    state.command_approving.add(command_id)
+
+
+WITHDRAWN_FIRST = "its asker withdrew it before it could run"
+NOT_APPLIED = (
+    "the approval was not applied, and nothing was started. Read the row again: it"
+    " says where the command stands now"
+)
+
+
+def _ended_first(snap: Snapshot, command_id: CommandId) -> str | None:
+    """
+    Why a command the operator pressed Run on has no run, when the reason is
+    that it ended first, or None.
+    """
+    held = snap.commands.get(command_id)
+    if held is None or held.end is None or held.run is not None:
+        return None
+    if isinstance(held.end.outcome, CommandWithdrawnEnd):
+        return WITHDRAWN_FIRST
+    return None
+
+
+def _check_for_unstarted_runs(state: AppState) -> None:
+    """
+    Say so when an approval the operator sent started nothing.
+
+    The row asks the store before it sends (``_approve_command``), on the
+    snapshot the frame was drawn from, and the asker's withdrawal may already
+    be in the queue behind that snapshot. The reducer then applies the
+    withdrawal and drops the approval without a word, and the operator, who
+    pressed Run twice, would be left believing a command ran.
+
+    Called once a frame after the queue is applied, so every id here was sent
+    in an earlier frame and has been through the reducer.
+    """
+    if not state.command_approving:
+        return
+    snap = state.frame_snap
+    if snap is None:
+        return
+    sent, state.command_approving = state.command_approving, set()
+    for command_id in sorted(sent):
+        held = snap.commands.get(command_id)
+        if held is not None and held.run is not None:
+            continue
+        _not_done(state, NOT_RUN + (_ended_first(snap, command_id) or NOT_APPLIED))
+
+
+def _refuse_command(state: AppState, command_id: CommandId, reason: str) -> None:
+    """
+    The row's second press of Refuse. A reason over the store's bound is not
+    sent and not cut: the arm would drop it without a word.
+    """
+    snap = state.frame_snap
+    if snap is None:
+        return
+    held = snap.commands.get(command_id)
+    if held is None or held.state is not CommandState.ASKED:
+        _not_done(state, NOT_REFUSED + NO_LONGER_ASKED)
+        return
+    if len(reason) > MAX_COMMAND_REFUSAL_CHARS:
+        _not_done(
+            state,
+            f"{NOT_REFUSED}the reason is {len(reason) - MAX_COMMAND_REFUSAL_CHARS:,} characters"
+            f" over the {MAX_COMMAND_REFUSAL_CHARS:,} one may be. Nothing was sent",
+        )
+        return
+    state.bridge.emit(CommandRefused(command_id=command_id, reason=reason, at=time.time()))
+
+
+def _cancel_command(state: AppState, command_id: CommandId) -> None:
+    """The row's second press of Cancel, for a command that is running."""
+    snap = state.frame_snap
+    if snap is None:
+        return
+    held = snap.commands.get(command_id)
+    if held is None or held.state is not CommandState.RUNNING:
+        _not_done(state, NOT_CANCELLED + NO_LONGER_RUNNING)
+        return
+    state.bridge.emit(CommandStopAsked(command_id=command_id, at=time.time()))
+
+
+def _command_rows(state: AppState) -> inbox.CommandRows | None:
+    """
+    What the inbox and DETAIL draw a command with this frame, or None when no
+    shell was looked for.
+
+    The three presses are the operator's and reach the store as intents; what
+    the store then orders is carried out by ``apply_intents``. With no shell
+    the view offers no Run, and refuse still works.
+    """
+    host = state.command_host
+    if host is None:
+        return None
+    restored: AbstractSet[CommandId] = state.command_restored
+    return inbox.CommandRows(
+        state=state.commands,
+        shell=host.shell,
+        stripped_env=host.stripped_env,
+        actions=command_view.Actions(
+            on_run=lambda command_id, text, timeout_s: _approve_command(
+                state, command_id, text, timeout_s
+            ),
+            on_refuse=lambda command_id, reason: _refuse_command(state, command_id, reason),
+            on_stop=lambda command_id: _cancel_command(state, command_id),
+        ),
+        now=state.frame_wall,
+        wired=True,
+        unrecorded=state.command_unrecorded,
+        restored=restored,
+        on_check=lambda command_id: _check_survivor(state, command_id),
+        checked=state.command_checked,
+    )
 
 
 @dataclass
@@ -72,12 +807,62 @@ class AppState:
     review: review.ReviewState = field(default_factory=review.ReviewState)
     detail_pane_state: detail.DetailState = field(default_factory=detail.DetailState)
     compose: compose.ComposeState = field(default_factory=compose.ComposeState)
+    # The operator's unsent answers to decisions, typed at the inbox row and read
+    # by DETAIL: one object, so the two panes cannot hold different drafts.
+    decisions: decision_view.DecisionState = field(default_factory=decision_view.DecisionState)
+    # What the operator is part-way through on a break-glass command's row: an
+    # edit, a timeout, an armed press. One object for the inbox and DETAIL.
+    commands: command_view.CommandViewState = field(default_factory=command_view.CommandViewState)
+    # The shell a command would be given to and what is taken out of its
+    # environment, looked for once by ``_start``. None is a state nothing looked
+    # for, and then no pane is handed anything to draw a command with
+    # (``_command_rows``): "no usable shell" is a finding, and this is not one.
+    command_host: CommandHost | None = None
+    # The one runner of break-glass commands in this process, or None: this is
+    # the fake driver's run. With none, an order to run is ended at once
+    # (``_run_command``).
+    command_runner: commandrun.Runner | None = None
+    # The writer of the command records the runner does not write, or None
+    # under the fake driver, which records nothing.
+    command_files: CommandFiles | None = None
+    # Commands whose ``request.json`` is queued and not yet reported. Run is
+    # not sent for one of these. Draw thread only, as the three below are.
+    command_pending: set[CommandId] = field(default_factory=set)
+    # Why a command's record is not on disk, in words, by command: the first
+    # failure of each. Shown on its row and in DETAIL.
+    command_unrecorded: dict[CommandId, str] = field(default_factory=dict)
+    # The commands that reached the store from a file and not from an agent in
+    # this window. A file does not say whether the asker read the result.
+    command_restored: set[CommandId] = field(default_factory=set)
+    # When each command handed to the runner is overdue, on the monotonic
+    # clock. See ``_check_for_overdue_commands``.
+    command_handed: dict[CommandId, float] = field(default_factory=dict)
+    # The approvals sent since the queue was last applied, to be looked for in
+    # the next snapshot. See ``_check_for_unstarted_runs``.
+    command_approving: set[CommandId] = field(default_factory=set)
+    # What the last look for each command left running unsupervised found, in
+    # words, and the looks that have answered and not been read yet: a look
+    # reads ``/proc`` and a file, on a thread of its own.
+    command_checked: dict[CommandId, str] = field(default_factory=dict)
+    command_checks: queue.SimpleQueue[tuple[CommandId, str]] = field(
+        default_factory=queue.SimpleQueue
+    )
+    # The command observer's last failure, so one that fails on every step is
+    # said once. See ``_record_commands``.
+    command_observer_failed: str | None = None
     launcher: launcher.LauncherState = field(default_factory=launcher.LauncherState)
+    # Every session's resume form, and which one is up. Its own modal and not
+    # the launcher's: see ``ui/resume_form``.
+    resume: resume_form.ResumeForms = field(default_factory=resume_form.ResumeForms)
     # Which models the launcher offers. Probed once on a worker at startup and the list
     # in code until that answers, so it is readable from the first frame and there is no
     # "not yet known" state for a caller to draw.
     catalog: model_catalog.Catalog = field(default_factory=model_catalog.Catalog)
     rail: rail.RailState = field(default_factory=rail.RailState)
+    # The card menus of the fleet pane, and the two modals they open: Details and
+    # the close confirmation. One object, which is also what the frame asks
+    # whether its keys belong to an open menu (``_handle_keys``).
+    cards: session_menu.MenuState = field(default_factory=session_menu.MenuState)
     board: board_pane.BoardState = field(default_factory=board_pane.BoardState)
     brief: brief_pane.BriefState = field(default_factory=brief_pane.BriefState)
     transcripts: transcript_pane.TranscriptState = field(
@@ -92,6 +877,10 @@ class AppState:
     # and handed to every panel, so two panels can never disagree about the world.
     frame_snap: Snapshot | None = None
     frame_now: float = 0.0
+    # The wall clock, read once beside ``frame_now``. What a closed card's "3h
+    # ago" is measured against: its times are a file's, and the monotonic clock
+    # above means nothing to the process that wrote them.
+    frame_wall: float = 0.0
     # When the parked-future count first exceeded what the queue is showing.
     # None while they agree. See _check_for_lost_approvals.
     lost_since: float | None = None
@@ -106,9 +895,472 @@ class AppState:
     stall_reported: bool = False
     driver: FakeDriver | None = None
     pool: SessionPool | None = None
+    # Every launch whose outcome has not been read yet. Appended by ``_launch``, which
+    # the command line's tasks call on the asyncio thread and everything else calls on
+    # the draw thread; read and emptied by ``_reap_launches`` on the draw thread. It
+    # is unlocked, and what makes that sound is in ``_reap_launches``.
+    launches: list[_InFlight] = field(default_factory=list)
     # Layout asked for on the command line, applied once the runner is up.
     # switch_layout needs a live runner, so it cannot happen during setup.
     pending_layout: str | None = None
+    # A pane to bring to the front of its tab bar, by its label, applied at the
+    # top of the next frame after any layout switch asked for with it -- the pane
+    # may exist only in the layout being switched to.
+    pending_pane: str | None = None
+    # The one appender of board logs in this process, or None when no board is
+    # recorded: ``Settings.board_log`` is off, or this is the fake driver. None
+    # is the whole of the switch -- with no writer nothing is loaded, submitted
+    # or created. See ``_record_board``.
+    board_writer: boardsync.BoardWriter | None = None
+    # Why ``settings.board_log`` is off when that is not what the file says: what
+    # ``settings.read`` could not read at startup. None for a clean read. It is
+    # the reason the pane gives for an unrecorded board, and what ``_save`` hands
+    # ``settings.save`` so that the fail-safe value is never written back.
+    board_log_unread: settings_mod.BoardLogUnread | None = None
+    # The first save ``settings.save`` refused, kept because the operator is told
+    # of it once (``_save``) and the status bar goes on saying it. None while
+    # every save has been taken.
+    unsaved: settings_mod.Unsaved | None = None
+    # What is known of each session's log, by session id. The asyncio thread adds
+    # a session when its launch is taken by the pool and never touches the entry
+    # again; the draw thread replaces entries that exist and adds none. So no key
+    # has two writers, and it is unlocked for the reason ``launches`` is.
+    board_logs: dict[str, board_pane.LogState] = field(default_factory=dict)
+    # The addresses each restored session's log had for its earlier agents, kept
+    # because a session is read back once per process and may be relaunched more
+    # than once: every later run under the id is constructed with the same table.
+    # Read and written on the asyncio thread only.
+    restored_addresses: dict[str, dict[str, str | None]] = field(default_factory=dict)
+    # The newest session the pool took under each id. A relaunch under an id this
+    # process has already run is constructed with that run's address table
+    # (``_carried_addresses``): the store still holds the earlier run's sub-agent
+    # records and the board names them, so a driver that started an empty table
+    # would hand their names out again. Kept after the pool lets a session go,
+    # because the records are. Written on the asyncio thread only, which is the
+    # thread a session's table changes on. The draw thread reads one entry of it,
+    # in ``_held``, for the facts Details shows that only the session object has:
+    # one lookup, and attributes that are each written whole.
+    ran: dict[str, AgentSession] = field(default_factory=dict)
+    # The one writer of session files in this process. Always there, the fake
+    # driver's run included, because it is also what answers "when was this
+    # session last active" (``FleetWriter.last_active``). It writes only for a
+    # session it was told to admit, and ``fake`` is what stops the telling.
+    fleet_writer: fleetsync.FleetWriter = field(default_factory=fleetsync.FleetWriter)
+    # Whether this is the scripted driver's run. No session is admitted to the
+    # fleet writer and no fleet is recalled: a file written here would come back
+    # at the next real start as a card for a session the CLI never had.
+    fake: bool = False
+    # What ``boardsync.migrate`` did at startup, or None when it was not run:
+    # board logging is off, or this is the fake driver. Read for the reason a
+    # session's log was left at the old path (``_left_behind``).
+    migration: boardsync.Migration | None = None
+    # What the session files said the fleet was, or None until the recall worker
+    # has answered -- and for good under the fake driver. Assigned once and
+    # whole by that worker; the draw thread reads the reference.
+    fleet: fleetsync.Fleet | None = None
+    # Where the CLI's naming puts each recalled session's transcript, by session
+    # id, for the line a closed card's transcript pane draws. Worked out by the
+    # recall worker, because the naming resolves the directory, and assigned
+    # whole before the first recalled card is emitted.
+    closed_paths: dict[str, str] = field(default_factory=dict)
+    # The last refusal the store gave to taking each session off the fleet, by
+    # session id. An entry is dropped when a later ask for the session is taken.
+    # Written by ``apply_intents`` alone.
+    detach_refused: dict[str, DetachRefusal] = field(default_factory=dict)
+    # The fleet observer's last failure, so one that fails on every step is said
+    # once. See ``_record_fleet``.
+    fleet_observer_failed: str | None = None
+    # Why the recall worker ended without an answer, or None. ``fleet`` stays
+    # None then, which is also what it is before the worker has answered, so
+    # this is what tells the status bar the closed cards are not coming.
+    recall_failed: str | None = None
+    # The last text each session was handed in this window, by session id: the
+    # opening text of its latest run that reached the CLI, or a later send its
+    # client took. What the resume form's message box opens with for a session
+    # that ran here; a closed card's comes from its file (``Recalled``). Written
+    # on the asyncio thread, one whole string per key; the draw thread reads one
+    # entry when a form is opened.
+    last_sent: dict[str, str] = field(default_factory=dict)
+    # Session-file reads for rows picked in New Task's session list, from the
+    # worker that made each to the draw thread. See ``_pick_resume``.
+    resume_picks: queue.SimpleQueue[_PickRead] = field(default_factory=queue.SimpleQueue)
+    # What a card's control was asked to do and did not, in words, oldest first:
+    # a removal the store or the pool refused, a gate move the driver or the
+    # directory refused. Shown until dismissed (``_draw_not_done``). Appended
+    # and cleared on the draw thread only.
+    not_done: list[str] = field(default_factory=list)
+    # How many frames the notice for ``not_done`` has been drawn for; its keys
+    # are read from the second, as a card's confirmation reads its own.
+    not_done_frames: int = 0
+    # Held across "read or move a session's gate, then queue what the file is
+    # to say of it". Two threads do that: the draw thread moves a gate and
+    # queues the move, and the asyncio thread reads the gate a run started
+    # under and queues the launch. The writer keeps the later of two values
+    # queued for one key, so the read and its queueing must not straddle the
+    # other thread's move and its queueing, or the file keeps the older rung.
+    # Nothing blocks with it held: a queueing performs no IO.
+    gate_writes: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+
+# Why no board is recorded in a process that has no writer, for the board pane:
+# the two that are somebody's choice. The third is ``AppState.board_log_unread``.
+_LOG_SWITCHED_OFF = "switched off: board_log in settings.json"
+_LOG_FAKE = "the fake driver's boards are not logged"
+
+
+def apply_intents(state: AppState) -> None:
+    """
+    Drain the queue, apply it, answer what it asked, and hand what it did to
+    the board log and to the session files. The part of a frame that changes the
+    store, and the only production caller of ``Store.apply_all``.
+
+    **No file is touched here.** ``_record_board``, ``_record_fleet`` and
+    ``_record_commands`` derive values and queue them, and each writer's
+    ``drain`` copies a list under a lock no write holds; the writes are on the
+    writers' own threads. An order to run a command is handed to the runner,
+    which does everything for it on a thread of that command's own.
+
+    **The observer is built whether or not a board is recorded.** A session's
+    file is written with ``board_log`` off as well, and the two halves fail
+    apart: see ``_observer``.
+    """
+    writer = state.board_writer
+    # One clock for the whole batch, the same one the frame is built against, so a
+    # node's state_since and the wait times drawn from it agree to the frame.
+    settled = state.store.apply_all(
+        state.bridge.drain(), now=state.frame_now, observe=_observer(state, writer)
+    )
+    # Answered here, in the same breath as the apply that produced them. Every
+    # effect corresponds to an intent this batch applied, so nothing is replied to
+    # speculatively and nothing survives the frame -- which is what keeps a bus
+    # request from becoming a second kind of lost approval.
+    for effect in settled:
+        if isinstance(effect, effects.SessionDetachSettled):
+            # The operator's own ask and not an agent's: nobody is parked on it,
+            # so it is kept for the surface that asked and the bridge is not
+            # handed an effect it has no request for.
+            _note_detach(state, effect)
+            continue
+        if isinstance(effect, effects.CommandToRun):
+            # An order to this shell and not an answer to anybody. Handed to
+            # the bridge it would be dropped, and the command would be running
+            # with nothing behind it.
+            _run_command(state, effect.command)
+            continue
+        if isinstance(effect, effects.CommandToStop):
+            _stop_command(state, effect.command_id)
+            continue
+        state.bridge.settle(effect)
+    if writer is not None:
+        _read_board_reports(state, writer.drain())
+    _read_fleet_reports(state.fleet_writer.drain())
+    _read_command_reports(state)
+
+
+def _note_detach(state: AppState, effect: effects.SessionDetachSettled) -> None:
+    """
+    Keep what the store said to an ask to take a session off the fleet: the
+    refusal, for whichever surface shows it, or nothing once the ask was taken.
+    """
+    if effect.refusal is None:
+        state.detach_refused.pop(effect.session_id, None)
+        return
+    state.detach_refused[effect.session_id] = effect.refusal
+    LOG.warn(
+        "fleet",
+        f"{effect.session_id} was not removed from the fleet: {effect.refusal.name}",
+    )
+    # The menu greys the item while the store would refuse, so this is an ask
+    # that was good when it was drawn and not when it was applied.
+    _not_done(state, f"not removed from the fleet: {session_menu.REMOVAL_REFUSED[effect.refusal]}")
+
+
+def _not_done(state: AppState, what: str) -> None:
+    """
+    Put a control's refusal in front of the operator (``_draw_not_done``). On
+    the draw thread. The same sentence twice in a row is said once.
+    """
+    if not state.not_done or state.not_done[-1] != what:
+        state.not_done.append(what)
+
+
+def _observer(state: AppState, writer: boardsync.BoardWriter | None) -> Observer:
+    """
+    The observer one batch is applied under: the board log's half, when a board
+    is recorded, then the session files', then the commands'.
+
+    **Halves that cannot fail each other.** Each catches everything it
+    raises, for the reason ``_record_board`` gives, and each in its own handler:
+    the board half's ends every board log for the run, which is the right answer
+    to a fact that could not be derived and the wrong one to a session file that
+    could not be.
+    """
+    board = None if writer is None else _record_board(state, writer)
+    fleet = _record_fleet(state)
+    commands = _record_commands(state)
+
+    def observe(before: Snapshot, intent: Intent, after: Snapshot, now: float) -> None:
+        if board is not None:
+            board(before, intent, after, now)
+        fleet(before, intent, after, now)
+        commands(before, intent, after, now)
+
+    return observe
+
+
+def _record_fleet(state: AppState) -> Observer:
+    """
+    The session files' half of the observer: what each applied step means for a
+    session's file (``fleetsync.changes``), queued for the fleet writer.
+
+    Derived for every step and submitted for every session. Which of them have a
+    file is the writer's to know: it drops a change for a session it was never
+    told to admit, which is every session of the scripted driver.
+
+    The wall clock is read once per batch, on the first step, as the board
+    half's is.
+
+    **It does not raise, and a failure stops nothing.** The step that could not
+    be derived is one write a file does not get; the next step is derived as
+    usual, because each change says what is true after it and not what moved.
+    Said once per distinct failure and not once per step.
+    """
+    wall: list[float] = []
+
+    def observe(before: Snapshot, intent: Intent, after: Snapshot, now: float) -> None:
+        try:
+            if not wall:
+                wall.append(time.time())
+            for change in fleetsync.changes(before, intent, after, wall[0]):
+                state.fleet_writer.submit(change)
+        except Exception as exc:  # noqa: BLE001 - see the docstring: this must not raise
+            reason = f"{type(exc).__name__}: {exc}"
+            if state.fleet_observer_failed != reason:
+                state.fleet_observer_failed = reason
+                LOG.error(
+                    "fleet",
+                    f"a session file change could not be derived ({reason}); the file"
+                    " keeps what it said until that session's next change",
+                )
+                LOG.debug("fleet", traceback.format_exc())
+
+    return observe
+
+
+def _read_fleet_reports(reports: tuple[fleetsync.Report, ...]) -> None:
+    """
+    Say what the fleet writer settled since the last frame that the operator is
+    owed a line for, on the draw thread.
+
+    A session whose file is not this build's to write is said once: the writer
+    reports the latch once. A change of whether a session is on the fleet that
+    did not reach its file is said every time, because the next start will show
+    the fleet as it was before the operator changed it. Any other write that did
+    not land is the file missing a time or a cost, and is in the debug log.
+    """
+    for report in reports:
+        match report:
+            case fleetsync.Latched(session_id=session_id, reason=reason):
+                LOG.warn(
+                    "fleet",
+                    f"{session_id}: its session file is not written again in this run:"
+                    f" {reason}",
+                )
+            case fleetsync.Outcome(session_id=session_id, result=result):
+                if report.written:
+                    continue
+                assert isinstance(result, sessionfile.Unwritten)
+                if report.lost_fleet:
+                    LOG.error(
+                        "fleet",
+                        f"{session_id}: whether it is on the fleet"
+                        f" ({report.keys['in_fleet']}) did not reach its session file, so"
+                        f" the next start may show it as it was: {result.reason}",
+                    )
+                else:
+                    LOG.debug("fleet", f"{session_id}: session file not written: {result.reason}")
+            case _:
+                assert_never(report)
+
+
+def _record_board(state: AppState, writer: boardsync.BoardWriter) -> Observer:
+    """
+    The observer one batch is applied under: each applied intent's board facts,
+    queued for the log of the session they belong to.
+
+    **A restore is settled here, in the order it was applied.** The store's
+    report on a ``BoardRestored`` is the first moment anything knows whether the
+    log may be appended to (``Restore.adoptable``), and the session's own first
+    record can be the next intent in the same batch. So the log is adopted, or
+    the session marked unrecorded, on the step that applied the restore.
+
+    **Only** ``Fact.on_the_wall`` **is queued.** The record ``outcomes`` builds
+    carries the store's monotonic stamp, which counts from boot and means
+    nothing to the process that restores it. The reading it is converted with
+    is taken once per batch, on the first fact, which is after the frame's own
+    clock and so after every stamp in the batch.
+
+    **It does not raise.** ``Store.apply_all`` abandons the whole batch when its
+    observer does, and by then the intents are out of the queue: every agent
+    parked on one of them would wait on an answer nothing will send. A fact
+    that could not be derived is a hole in a log, so it ends the recording of
+    every session being recorded -- which session it was is what could not be
+    derived -- and the logs are told so.
+    """
+    reading: list[boardlog.Clock] = []
+
+    def observe(before: Snapshot, intent: Intent, after: Snapshot, now: float) -> None:
+        try:
+            if isinstance(intent, BoardRestored):
+                _settle_restore(state, writer, intent.session_id, after)
+            for fact in boardfacts.outcomes(before, intent, after, now):
+                entry = state.board_logs.get(fact.session_id)
+                if entry is None:
+                    continue
+                if entry.awaiting:
+                    # The queue's order rules this out for a session this process
+                    # launched. Were it to happen the fact is in no log, and a
+                    # log adopted afterwards would be missing it from its middle.
+                    state.board_logs[fact.session_id] = dataclasses.replace(
+                        entry,
+                        awaiting=False,
+                        why_not="its board changed before its log had been applied",
+                    )
+                    continue
+                if not entry.recording:
+                    continue
+                if not reading:
+                    reading.append(boardlog.Clock(wall=time.time(), monotonic=time.monotonic()))
+                writer.submit(fact.session_id, fact.on_the_wall(reading[0]))
+        except Exception as exc:  # noqa: BLE001 - see the docstring: this must not raise
+            reason = f"a board fact could not be derived ({type(exc).__name__}: {exc})"
+            LOG.error("board", f"{reason}; every board log is closed for this run")
+            LOG.debug("board", traceback.format_exc())
+            _stop_recording_everything(state, writer, reason)
+
+    return observe
+
+
+def _settle_restore(
+    state: AppState, writer: boardsync.BoardWriter, session_id: str, after: Snapshot
+) -> None:
+    """
+    Decide, from the store's report, whether a resumed session's log is this
+    process's to append to.
+
+    Adopted only when the read found the whole log in the session's own
+    directory and the report says a record written behind the log would come
+    from a reducer that holds everything the log says. Anything less and
+    the session runs unrecorded for the life of the process, with the reason
+    kept for the pane: appending would put a second history behind a board
+    nobody restored.
+
+    Only for a session whose restore this process is waiting on. A
+    ``BoardRestored`` for any other is not this function's to act on.
+    """
+    entry = state.board_logs.get(session_id)
+    if entry is None or not entry.awaiting:
+        return
+    # What the read already found is first: a log with records in a second
+    # place, or only at the legacy path, is not appended to whatever the store
+    # made of the half that was read (``boardsync.Found.unrecorded``).
+    why = entry.why_not or board_pane.unrecorded_reason(after.restores.get(session_id))
+    if why:
+        LOG.warn("board", f"{session_id} is running unrecorded: {why}")
+        state.board_logs[session_id] = dataclasses.replace(entry, awaiting=False, why_not=why)
+        return
+    writer.adopt(session_id)
+    state.board_logs[session_id] = dataclasses.replace(entry, awaiting=False, recording=True)
+
+
+def _stop_recording_everything(state: AppState, writer: boardsync.BoardWriter, reason: str) -> None:
+    """
+    End the recording of every session being recorded, and queue the record
+    that makes each log say so (``boardlog.RecordingStopped``).
+
+    ``marked`` starts False and is corrected when the marker's own outcome is
+    read: until then nothing on disk says the log ends early.
+    """
+    for session_id, entry in list(state.board_logs.items()):
+        if not entry.recording:
+            continue
+        state.board_logs[session_id] = dataclasses.replace(
+            entry, recording=False, stopped=True, marked=False, why_not=reason
+        )
+        writer.submit(
+            session_id,
+            boardlog.RecordingStopped(
+                at=time.time(), reason=reason[: boardsync.MARKER_REASON_CHARS]
+            ),
+        )
+
+
+def _landed(result: boardlog.Written | boardlog.Unwritten | None) -> bool | None:
+    """
+    Whether a stop marker is on disk where a restore will read it, or None when
+    none was attempted.
+    """
+    if result is None:
+        return None
+    return isinstance(result, boardlog.Written) and result.gap is None
+
+
+def _read_board_reports(state: AppState, reports: tuple[boardsync.Report, ...]) -> None:
+    """
+    Fold what the writer settled since the last frame into ``board_logs``, on
+    the draw thread.
+
+    Kept as state and not shown as events: the writer's list is emptied by the
+    read, so a line drawn from one frame's reports would be on screen for one
+    frame. A session's entry therefore counts every record of its that a
+    restore will not read back, and holds the reason its recording stopped for
+    as long as the session is on screen.
+
+    A stop is logged once, when it is read. The writer reports it once.
+    """
+    for report in reports:
+        entry = state.board_logs.get(report.session_id)
+        match report:
+            case boardsync.Stopped(reason=reason, marker=marker):
+                LOG.error(
+                    "board",
+                    f"{report.session_id} is no longer being recorded: {reason}",
+                )
+                if entry is not None:
+                    state.board_logs[report.session_id] = dataclasses.replace(
+                        entry, recording=False, stopped=True, marked=_landed(marker), why_not=reason
+                    )
+            case boardsync.Outcome(record=record, result=result):
+                if entry is None:
+                    continue
+                if isinstance(record, boardlog.RecordingStopped):
+                    # The shell's own marker (``_stop_recording_everything``).
+                    state.board_logs[report.session_id] = dataclasses.replace(
+                        entry, marked=_landed(result)
+                    )
+                elif not report.kept:
+                    state.board_logs[report.session_id] = dataclasses.replace(
+                        entry, unkept=entry.unkept + 1
+                    )
+            case _:
+                assert_never(report)
+
+
+def board_logging(state: AppState) -> board_pane.Logging:
+    """
+    What the board pane is told about the logs, for this frame.
+    """
+    if state.board_log_unread is not None:
+        # Before the two below: ``board_log`` is off here as well, and "switched
+        # off" would say the operator chose it.
+        return board_pane.Logging(
+            unread=f"{state.board_log_unread.value} ({settings_mod.settings_path()})"
+        )
+    if state.board_writer is None:
+        return board_pane.Logging(
+            off=_LOG_SWITCHED_OFF if not state.settings.board_log else _LOG_FAKE
+        )
+    return board_pane.Logging(sessions=state.board_logs)
 
 
 def begin_frame(state: AppState) -> None:
@@ -122,34 +1374,104 @@ def begin_frame(state: AppState) -> None:
     """
     state.frame += 1
     state.frame_now = time.monotonic()
+    state.frame_wall = time.time()
 
     _apply_theme_if_dirty(state)
     if state.pending_layout is not None:
         hello_imgui.switch_layout(state.pending_layout)
         state.pending_layout = None
-    # One clock for the whole batch, the same one the frame is built against, so a
-    # node's state_since and the wait times drawn from it agree to the frame.
-    effects = state.store.apply_all(state.bridge.drain(), now=state.frame_now)
-    # Answered here, in the same breath as the apply that produced them. Every
-    # effect corresponds to an intent this batch applied, so nothing is replied to
-    # speculatively and nothing survives the frame -- which is what keeps a bus
-    # request from becoming a second kind of lost approval.
-    for effect in effects:
-        state.bridge.settle(effect)
+    if state.pending_pane is not None:
+        pane, state.pending_pane = state.pending_pane, None
+        if state.runner is not None:
+            # After the switch above, so the name is looked up in the layout that
+            # is now current. A name that layout does not have is left alone.
+            state.runner.docking_params.focus_dockable_window(pane)
+    apply_intents(state)
     state.frame_snap = state.store.snapshot()
+    state.cards.prune(state.frame_snap)
     state.transcripts.prune(state.frame)
     # Before anything draws, so no pane can render a cursor pointing at an
     # obligation that was answered between frames.
     state.focus.settle(state.frame_snap)
+    _check_for_overdue_commands(state)
+    _check_for_unstarted_runs(state)
+    _read_survivor_checks(state)
     # Shortcuts are handled once per frame, before any panel draws, so they behave
     # the same whichever pane happens to have focus.
-    review.handle_keys(state.frame_snap, state.focus, state.review, state.bridge)
+    _handle_keys(state)
+
+
+def _handle_keys(state: AppState) -> None:
+    """
+    The frame's bare keys: the approval shortcuts, then the card menu's key and
+    the layout keys.
+
+    One function because the later ones need what the first decided. ``review.Hold``
+    is stepped once a frame, inside ``review.handle_keys``, and whether that step
+    let the keys through is the answer for every bare key in the application --
+    the Enter, Tab or Escape of a sentence whose text box was removed is no more a
+    layout key than its ``a`` is an approval, and its ``m`` opens no menu.
+
+    **An open card menu takes all of them.** Keyboard navigation is off, so an
+    open popup does not claim the keyboard and reads no key by itself: the menu
+    reads its own arrows, Enter and Escape as it draws. Left to this function as
+    well, the Enter that chooses an item would switch the layout and an ``a``
+    pressed over an open menu would approve a call. The hold is not stepped on
+    those frames either. A menu takes no text, so there is no typing for it to
+    miss, and a hold that was standing when the menu opened is still standing
+    when it closes. Details and the close confirmation are modal popups, which do
+    claim the keyboard, and the readers below defer to that as they do for the
+    launcher.
+    """
+    busy = state.cards.claim_keys()
+    snap = state.frame_snap
+    if snap is None or busy:
+        return
+    review.handle_keys(snap, state.focus, state.review, state.bridge)
+    if not state.review.hold.free:
+        return
+    _handle_card_key(state)
     _handle_layout_keys(state)
+
+
+# Opens the focused card's menu. A bare letter, like every other key that acts on
+# what the cursor is on, and one that ``review.SHORTCUTS`` and the layout keys do
+# not use.
+CARD_MENU_KEY = imgui.Key.m
+
+
+def _handle_card_key(state: AppState) -> None:
+    """
+    ``m`` opens the menu of the card the cursor is on. Reached only on a frame
+    whose keys ``review.Hold`` let through: see ``_handle_keys``.
+
+    Only asked for here. The fleet pane opens it, on the card it draws as
+    focused, and an ask no card takes is gone at the next frame
+    (``MenuState.claim_keys``). Not with a modifier down: Ctrl+M is not this key.
+    """
+    io = imgui.get_io()
+    if _modal_up(state) or io.want_capture_keyboard:
+        return
+    if io.key_ctrl or io.key_alt or io.key_super:
+        return
+    if imgui.is_key_pressed(CARD_MENU_KEY, False):
+        state.cards.open_from_key = True
+
+
+def _modal_up(state: AppState) -> bool:
+    """
+    Whether one of the application's own forms is up: New Task or the resume
+    form. Each is a modal whose focus can sit on a combo, where the keyboard is
+    not captured and a bare key would otherwise reach the frame as well (see
+    ``_handle_layout_keys``). Last frame's value, for the reason given there.
+    """
+    return state.launcher.is_open or state.resume.is_open
 
 
 def _handle_layout_keys(state: AppState) -> None:
     """
-    Tab triages, Enter focuses, Esc returns.
+    Tab triages, Enter focuses, Esc returns. Reached only on a frame whose keys
+    ``review.Hold`` let through: see ``_handle_keys``.
 
     Esc is shared with "cancel the edit I am in the middle of", and the edit wins:
     yanking the layout out from under someone mid-diff is the failure mode this
@@ -163,7 +1485,7 @@ def _handle_layout_keys(state: AppState) -> None:
     matches the frame the operator was looking at when they pressed the key.
     """
     snap = state.frame_snap
-    if snap is None or state.launcher.is_open or imgui.get_io().want_capture_keyboard:
+    if snap is None or _modal_up(state) or imgui.get_io().want_capture_keyboard:
         return
     current = hello_imgui.current_layout_name()
     if imgui.is_key_pressed(imgui.Key.tab) and current != TRIAGE:
@@ -287,9 +1609,15 @@ def _stalled_transcripts(snap: Snapshot) -> tuple[Transcript, ...]:
     call they are holding. When the store shows none, the drain that would have put
     them there is the thing that stopped -- so the session roots take it instead,
     and the warning is not lost for being unable to name its node.
+
+    Not a root recalled from its session file. Nothing runs behind a closed
+    card, so no approval of its can be parked, and the warning would be the only
+    text in a transcript that was never loaded.
     """
     parked = tuple(dict.fromkeys(p.node for p in snap.approvals))
-    nodes = parked or tuple(n for n in snap.order if n[1] is None)
+    nodes = parked or tuple(
+        n for n in snap.order if n[1] is None and n in snap.nodes and snap.nodes[n].recalled is None
+    )
     return tuple(snap.nodes[n].transcript for n in nodes if n in snap.nodes)
 
 
@@ -475,9 +1803,334 @@ def _containment_refusal(check: cli_version.FloorCheck) -> str | None:
             assert_never(check)
 
 
-def _launch(state: AppState, spec: LaunchSpec) -> None:
+# After the directory, in the log and in the launcher's notice. It names both things
+# ``launcher.refusal_for`` answers yes to, as that function's own message does.
+_MOVED_INSIDE = (
+    "is inside pptmstr's own checkout, or cannot be resolved at all, so a session that "
+    "writes there without asking was not started"
+)
+
+
+def _live_sessions(snap: Snapshot | None) -> frozenset[str]:
+    """
+    The ids of the sessions on screen that have not ended: every root whose state is
+    not terminal.
+
+    What New Task's session list marks and the resume form warns about, because a
+    session resumed under one of these ids ends the run that holds it. Read from the
+    snapshot and not from the pool: a root that has not ended is what the operator
+    sees as running, and the pool's own table also holds sessions whose run is over.
+
+    A walk over the node table, so it is for a frame the launcher is drawn on and
+    not for every frame.
+    """
+    if snap is None:
+        return frozenset()
+    return frozenset(
+        node[0] for node, rec in snap.nodes.items() if node[1] is None and not rec.state.is_terminal
+    )
+
+
+def _resume_ends(state: AppState) -> frozenset[str]:
+    """
+    The ids the resume form warns about: the sessions a resume would end a run
+    of. Every root that has not ended (``_live_sessions``), and the session the
+    form is showing when the pool still has a run under its id.
+
+    The second is a session that failed with its process still attached -- an
+    error result leaves the client connected -- or one closed a moment ago and
+    still being ended. Its root is terminal, so the snapshot does not call it
+    live, and pressing resume ends that process all the same
+    (``SessionPool.submit``). Asked of the pool for the one session on the
+    form and not for every card.
+    """
+    live = _live_sessions(state.frame_snap)
+    showing = state.resume.showing
+    pool = state.pool
+    if showing is None or showing in live or pool is None:
+        return live
+    return live | {showing} if pool.has_run((showing, None)) else live
+
+
+@dataclass(frozen=True, slots=True)
+class _Unreadable:
+    """A session's log could not be read at all, and why."""
+
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class _Logged:
+    """
+    What reading a resumed session's log gave, and the one reading of both
+    clocks taken when it was read (``intents.BoardRestored.clock``).
+
+    ``unrecorded`` is ``boardsync.Found.unrecorded``: why nothing may be
+    appended for the session whatever the store makes of ``board``, or None
+    when its own directory holds everything that was found for it.
+    """
+
+    board: boardlog.Board | boardsync.NoLog | _Unreadable
+    clock: boardlog.Clock
+    unrecorded: str | None = None
+
+
+def _read_log(writer: boardsync.BoardWriter, session_id: str) -> _Logged:
+    """
+    Read one session's log, from the two places ``writer`` looks. Runs on a
+    worker thread: it lists directories and reads every file in one.
+
+    ``boardsync.find`` and not ``load``: where the board was read, and whether
+    it may be appended behind, are the half of the answer this launch acts on.
+
+    Whatever the read raises is a value. A launch is worth more than its log, so
+    a log that cannot be read is a session that runs unrecorded and says so, not
+    a launch that is refused.
+    """
+    board: boardlog.Board | boardsync.NoLog | _Unreadable
+    unrecorded: str | None = None
+    try:
+        found = boardsync.find(session_id, writer.root, writer.legacy)
+        board, unrecorded = found.board, found.unrecorded
+    except Exception as exc:  # noqa: BLE001 - reported as the reason it is
+        board = _Unreadable(f"{type(exc).__name__}: {exc}")
+    return _Logged(board, boardlog.Clock(wall=time.time(), monotonic=time.monotonic()), unrecorded)
+
+
+def _left_behind(state: AppState, session_id: str) -> str | None:
+    """
+    Why the move at startup left this session's log at the old path, or None
+    when it left none there: ``boardsync.Left.reason`` for the entry of that
+    name.
+    """
+    migration = state.migration
+    if migration is None:
+        return None
+    return next((left.reason for left in migration.left if left.name == session_id), None)
+
+
+def _why_unrecorded(state: AppState, session_id: str, unrecorded: str) -> str:
+    """
+    ``boardsync.Found.unrecorded`` as the pane is given it: the reason, and
+    after it what the move at startup said of the session's old directory when
+    that is why there are two places.
+    """
+    left = _left_behind(state, session_id)
+    if left is None:
+        return unrecorded
+    return f"{unrecorded}. Log left at the old path when pptmstr started: {left}"
+
+
+def _newest(board: boardlog.Board) -> float | None:
+    """
+    The latest wall-clock time a restored board carries, or None for one that
+    carries none. What the pane calls "written up to": the board shows no later
+    fact, which is not a claim that the log holds no later record.
+    """
+    times: list[float] = []
+    for task in board.tasks:
+        times += [version.at for version in task.versions]
+        times += [at for at in (task.completed_at, task.released_at) if at is not None]
+    for concern in board.concerns:
+        times.append(concern.posted_at)
+        if concern.delivered_at is not None:
+            times.append(concern.delivered_at)
+    return max(times, default=None)
+
+
+def _addresses_of(board: boardlog.Board, session_id: str) -> dict[str, str | None]:
+    """
+    Every address a logged board has for a sub-agent of ``session_id``, with
+    the agent id it belonged to: what ``AgentSession`` is constructed with so a
+    new agent is never given an earlier agent's name.
+
+    A party an older log knows by address alone is in it with no id. Nothing can
+    be handed that address back, and nothing else may take it either.
+
+    Built by ``board.reserved``, as the board's own copy of this table is from
+    the ``Restore.parties`` the store makes of the same log (``board._addresses``):
+    the driver allocates from this one and the board names agents from that one,
+    so they have to be one table.
+    """
+    named: list[tuple[str, str | None]] = [
+        (address, node[1])
+        for node, address in board.addresses
+        if node[0] == session_id and node[1] is not None
+    ]
+
+    def bare(party: boardlog.Party | None) -> None:
+        if isinstance(party, str):
+            named.append((party, None))
+
+    for task in board.tasks:
+        for party in (task.declared_by, task.holder, *task.held_by, *task.released_by):
+            bare(party)
+        for version in task.versions:
+            bare(version.by)
+    for concern in board.concerns:
+        bare(concern.sender)
+        bare(concern.recipient)
+    return board_mod.reserved(named)
+
+
+def _carried_addresses(state: AppState, session_id: str | None) -> dict[str, str | None]:
+    """
+    The address table a session is constructed with: nothing for a new id, and
+    for a resumed one every address its earlier agents answered to -- what the
+    log read in this process names (``_addresses_of``) and what the last run of
+    it in this process had in its own table, which is the log's plus whatever
+    that run allocated.
+
+    One table and not the first that is found, because the two are different
+    facts about the same names and ``board.reserved`` is what says how they
+    combine.
+    """
+    if session_id is None:
+        return {}
+    earlier = state.ran.get(session_id)
+    tables = (
+        state.restored_addresses.get(session_id, {}),
+        {} if earlier is None else earlier.addresses(),
+    )
+    return board_mod.reserved(pair for table in tables for pair in table.items())
+
+
+def _open_board_log(state: AppState, session_id: str, logged: _Logged | None) -> None:
+    """
+    Decide how a session the pool has just taken is recorded, and hand a logged
+    board to the store. On the asyncio thread, **with no await between
+    ``pool.submit`` returning and this**.
+
+    That is the ordering guarantee. ``Bridge.to_ui`` is one queue with one
+    consumer, and a session emits a bus intent only from a handler the SDK runs
+    as a task, which cannot run until this coroutine next yields. So a
+    ``BoardRestored`` emitted here is behind the root's announce -- which
+    ``submit`` emits itself and which says nothing of a board -- and ahead of
+    everything else the session will ever say.
+
+    **After the pool's answer and not before it**, so a launch the pool refused
+    restores nothing: a board in the store with no row to show it would hold
+    its ids against every other session. A session that is taken and then fails
+    to start -- refused for its directory by ``AgentSession.run``, a CLI that
+    does not connect -- has been announced, so its row stays, failed, and the
+    board is drawn on it.
+
+    ``logged`` is None for a session that did not resume: its id was minted for
+    this launch, so no log can exist under it, and it is adopted outright.
+
+    **A log the read found in two places, or only at the legacy path, is never
+    adopted** (``_Logged.unrecorded``). What was read is still restored, so the
+    board is on screen; the session runs unrecorded with the reason, which names
+    both directories, as one whose restore came back short does.
+
+    **A session this process already has an entry for is left exactly as it is.**
+    That is a relaunch under an id this window has already run: the store holds
+    that board and is ahead of the disk by whatever the writer has queued, so
+    the log on disk is a prefix of it and this process is its only writer.
+    Reading it back would show the store a board that differs from its own, and
+    the store's refusal of that is indistinguishable from the same id open in a
+    second window. The cost is that a second window writing to that log is not
+    noticed here; the next restore reads it as contested.
+    """
+    writer = state.board_writer
+    if writer is None or session_id in state.board_logs:
+        return
+    directory = writer.directory(session_id)
+    if directory is None:
+        state.board_logs[session_id] = board_pane.LogState(
+            directory="",
+            recording=False,
+            why_not="its session id is not one directory name, so it has no log",
+        )
+        return
+    entry = board_pane.LogState(directory=str(directory))
+    board = None if logged is None else logged.board
+    unrecorded = (
+        None
+        if logged is None or logged.unrecorded is None
+        else _why_unrecorded(state, session_id, logged.unrecorded)
+    )
+    match board:
+        case None | boardsync.NoLog():
+            if unrecorded is not None:
+                LOG.warn("board", f"{session_id} is running unrecorded: {unrecorded}")
+                state.board_logs[session_id] = dataclasses.replace(
+                    entry, recording=False, why_not=unrecorded
+                )
+                return
+            writer.adopt(session_id)
+            state.board_logs[session_id] = entry
+        case _Unreadable(reason=reason):
+            LOG.warn("board", f"{session_id} is running unrecorded: {reason}")
+            state.board_logs[session_id] = dataclasses.replace(
+                entry, recording=False, why_not=f"its log could not be read ({reason})"
+            )
+        case boardlog.Board():
+            assert logged is not None
+            state.board_logs[session_id] = dataclasses.replace(
+                entry,
+                recording=False,
+                awaiting=True,
+                # Read by ``_settle_restore`` when the store has applied the
+                # board: a reason here is what keeps the log from being adopted.
+                why_not=unrecorded or "",
+                newest=_newest(board),
+                stops=tuple(stop.reason for stop in board.stopped),
+            )
+            state.bridge.emit(BoardRestored(session_id, board, logged.clock))
+        case _:
+            assert_never(board)
+
+
+def _board_log_unopened(state: AppState, session_id: str, exc: Exception) -> None:
+    """
+    Say that a session the pool has taken runs with no board log, because
+    opening one raised.
+
+    The entry is what stops the rest: no fact of the session is handed to the
+    writer, a board that was read and not handed to the store is not waited
+    for, and a relaunch under the id does not read the log back against a store
+    that never held it. The pane says why from the same entry.
+    """
+    reason = f"{type(exc).__name__}: {exc}"
+    LOG.error(
+        "board",
+        f"{session_id} started and is running unrecorded: its board log could not be "
+        f"opened ({reason})",
+    )
+    LOG.debug("board", traceback.format_exc())
+    entry = state.board_logs.get(session_id) or board_pane.LogState(directory="")
+    state.board_logs[session_id] = dataclasses.replace(
+        entry,
+        recording=False,
+        awaiting=False,
+        why_not=f"its log could not be opened ({reason})",
+    )
+
+
+def _launch(
+    state: AppState,
+    spec: LaunchSpec,
+    draft: launcher.Draft | None = None,
+    *,
+    origin: str = "launch",
+    resumed: tuple[str, resume_form.Draft] | None = None,
+) -> None:
     """
     Start a session. Safe from the UI thread; the pool is touched on the loop.
+
+    The future is kept, and ``_reap_launches`` tells the launcher if no session
+    started. ``draft`` is what the launcher modal was showing when it was pressed, so
+    that it can be handed back; a relaunch, a fork and a task from the command line
+    have none and name themselves in ``origin`` instead, which is the word the
+    launcher's notice uses for a failure that is not about the text under it.
+    ``resumed`` is the resume form's equivalent of ``draft``: the session and
+    the form's draft, so a resume that starts nothing goes back to that form.
+
+    **Every resume comes through here whatever surface pressed it**, and is
+    treated alike: the session is announced under ``spec.task`` and sent
+    ``spec.message`` when the spec has one, no brief is written for it
+    (``_seed_brief``), and it passes each check a launch passes.
 
     Takes the whole spec rather than loose arguments. ``relaunch`` and ``fork`` build
     one from an ``AgentRecord``, and row 9's defect was that they could build a
@@ -491,13 +2144,41 @@ def _launch(state: AppState, spec: LaunchSpec) -> None:
     """
     pool = state.pool
     if pool is None:
+        # Decided already, and reported the way every other outcome is so that this
+        # function touches the launcher from no thread but the one that draws it.
+        LOG.error("app", f"a {origin} in {spec.cwd} had no session pool to start in")
+        decided: concurrent.futures.Future[LaunchOutcome] = concurrent.futures.Future()
+        decided.set_result(LaunchRefused("there is no session pool to start it in"))
+        state.launches.append(_InFlight(decided, draft, origin, resumed))
         return
+    if not spec.model:
+        # A record recalled from a file that names no model. The launch is worth
+        # more than the field, and the log says which model it was given.
+        spec = dataclasses.replace(spec, model=model_catalog.DEFAULT_MODEL)
+        LOG.info("app", f"that {origin} named no model; started with {spec.model}")
     # An unknown name falls back to solo rather than refusing the launch: the task
     # the operator typed is worth more than the team shape they mistyped, and the
     # log line says which one ran.
     shape = (templates.by_name(spec.template) if spec.template else None) or templates.SOLO
 
-    async def go() -> None:
+    async def go() -> LaunchOutcome:
+        """
+        Every way this ends without a session is a ``LaunchRefused``, an unexpected
+        exception included: the caller reads a value, and an exception left on a
+        future nobody is obliged to inspect is a launch that vanished.
+        """
+        try:
+            return await start()
+        except Exception as exc:  # noqa: BLE001 - reported as the refusal it is
+            reason = f"{type(exc).__name__}: {exc}"
+            LOG.error("app", f"a {origin} in {spec.cwd} failed before it started: {reason}")
+            # Beside the one line and not in it, as ``guarded`` does for a panel:
+            # the reason is what the launcher shows the operator, and a bug on this
+            # path is only locatable from the frames.
+            LOG.debug("app", traceback.format_exc())
+            return LaunchRefused(reason)
+
+    async def start() -> LaunchOutcome:
         if spec.containment is not None:
             # Read on a worker, awaited here. ``check_installed_cli`` spawns
             # ``claude --version`` and waits up to ten seconds for it, so the two
@@ -518,7 +2199,46 @@ def _launch(state: AppState, spec: LaunchSpec) -> None:
             refusal = _containment_refusal(await asyncio.to_thread(cli_version.check_installed_cli))
             if refusal is not None:
                 LOG.error("app", f"refused a contained launch in {spec.cwd}: {refusal}")
-                return
+                return LaunchRefused(refusal)
+            # Asked again here, of the string the session is about to be started
+            # with, and after the await above rather than before it. The launcher
+            # asked when the button was pressed, and the version read can take
+            # seconds. A path that leads into pptmstr's own checkout by now starts
+            # nothing: the launcher
+            # downgrades such a draft to the ordinary gate because the operator is
+            # looking at it, and nobody is looking at this.
+            #
+            # Not the last word, and not the guarantee. The pool may queue this
+            # session at its cap or hold it behind a run that is still ending, for
+            # as long as other sessions live, so ``AgentSession.run`` asks again
+            # immediately before it spawns and that is the check a start cannot get
+            # past (``driver.OwnCheckoutRefused``, which also says what remains
+            # across the process boundary). This one is kept for what it alone can
+            # do: refuse before a session exists, so the operator gets the draft
+            # back in the launcher and not a failed row with a brief seeded for it.
+            if launcher.refusal_for(spec.cwd) is not None:
+                LOG.error("app", f"refused a contained launch in {spec.cwd}: {_MOVED_INSIDE}")
+                return LaunchRefused(f"{spec.cwd} {_MOVED_INSIDE}")
+        # Before the session exists, because it is constructed with what the log
+        # says: the addresses its earlier agents answered to. Read on a worker for
+        # the reason the version is.
+        #
+        # Only for a resume, and only for an id this process has no entry for --
+        # ``_open_board_log`` says why a known one is not read back. A session
+        # that is not resuming reads no log at all.
+        logged: _Logged | None = None
+        if spec.resume is not None:
+            writer = state.board_writer
+            if writer is not None and spec.resume not in state.board_logs:
+                logged = await asyncio.to_thread(_read_log, writer, spec.resume)
+                if isinstance(logged.board, boardlog.Board):
+                    state.restored_addresses[spec.resume] = _addresses_of(logged.board, spec.resume)
+            # Its commands too, and here for the same reason: before the pool
+            # has the session, so what its files hold is on the queue ahead of
+            # anything its run asks.
+            if state.command_files is not None:
+                await asyncio.to_thread(_restore_commands, state, spec.resume)
+        addresses = _carried_addresses(state, spec.resume)
         session = AgentSession(
             state.bridge,
             spec.task,
@@ -553,18 +2273,210 @@ def _launch(state: AppState, spec: LaunchSpec) -> None:
             # launch after the session had left it.
             policy=spec.policy,
             resume=spec.resume,
+            restored_addresses=addresses,
+            message=spec.message,
+            task_is_label=spec.task_is_label,
         )
+        # Ahead of the pool's answer, so a launch the pool then refuses leaves the
+        # directory this wrote behind it, under a session id nothing ran as. The
+        # order is fixed from the other side: ``submit`` announces, and the announce
+        # carries the path. The refusal is not asked for first because ``submit`` is
+        # the only thing that says whether the pool takes a session, and a second
+        # question put ahead of it would be the same fact with two readers to keep
+        # in step. The window is a contained launch whose version read was still
+        # out when the application began to quit.
         _seed_brief(session, shape)
-        # Here rather than beside the submit, so a launch the version check refused
-        # is not announced as one that happened. Which of the two it is is worth a
-        # word: a resumed session runs under an id that already has a transcript, so
-        # "launched" alone would leave the log unable to explain why a node appeared
-        # with history behind it.
+        # Before the pool has it: ``submit`` announces, the announce is applied
+        # on the draw thread, and a change derived from it for a session the
+        # writer has not been told of is dropped. Admitting creates nothing, so
+        # a launch the pool then refuses leaves no file.
+        if not state.fake:
+            state.fleet_writer.admit(session.session_id)
+        # What the store is not told of a run -- the text it was opened with,
+        # its gate, whether it is contained, its cap -- is said when the run
+        # has reached the CLI and not here. The pool may discard this session
+        # before it starts, and ``AgentSession.run`` may refuse it; a file that
+        # already held this launch's message would have the resume form offer a
+        # message nobody was sent, under a gate nothing ran with.
+        session.on_started = lambda: _note_started(state, spec, session)
+        if not pool.submit(session):
+            # The version read above is awaited, so a launch pressed before the
+            # window closed can arrive here after the pool has begun shutting down.
+            LOG.warn("app", f"that {origin} in {spec.cwd} started nothing: the pool is shut")
+            return LaunchRefused("the application is shutting down, so no session was started")
+        state.ran[session.session_id] = session
+        # Nothing may be awaited between the pool's answer and this call.
+        #
+        # Caught here and not left to ``go``: the pool has taken the session, so
+        # an exception from this point is not a launch that started nothing, and
+        # ``go`` would hand the launcher a refusal for a session that is running.
+        try:
+            _open_board_log(state, session.session_id, logged)
+        except Exception as exc:  # noqa: BLE001 - the session runs; say its board is unrecorded
+            _board_log_unopened(state, session.session_id, exc)
+        # Behind the pool's answer, so that the log says a launch happened only for
+        # one the pool took: a refusal by the version check, by the pool, or by an
+        # exception out of either has returned or raised above this line. Which of
+        # the two words it is is worth one: a resumed session runs under an id that
+        # already has a transcript, so "launched" alone would leave the log unable
+        # to explain why a node appeared with history behind it.
         opening = "resumed" if spec.resume else "launched"
         LOG.info("app", f"{opening} in {spec.cwd} as {shape.name}: {spec.task[:60]}")
-        pool.submit(session)
+        return LaunchStarted()
 
-    state.bridge.submit(go())
+    state.launches.append(_InFlight(state.bridge.submit(go()), draft, origin, resumed))
+
+
+def _note_started(state: AppState, spec: LaunchSpec, session: AgentSession) -> None:
+    """
+    A run reached the CLI and was handed its opening text: say in the session's
+    file what it was started with (``fleetsync.launched``), and keep the text as
+    the last thing this window sent the session.
+
+    ``AgentSession.on_started`` for every session ``_launch`` builds, so it runs
+    on the asyncio thread, once per run. The gate is the session's own at this
+    moment and not the spec's: it can have been moved between the launch and
+    the connect, and the file says what the run is under. Read and queued
+    under ``AppState.gate_writes``, so a move made on the draw thread is queued
+    wholly before this or wholly after it and the later value is the gate's.
+    """
+    state.last_sent[session.session_id] = spec.task if spec.message is None else spec.message
+    with state.gate_writes:
+        state.fleet_writer.submit(
+            fleetsync.launched(
+                spec,
+                session.session_id,
+                session.policy,
+                session_details.is_contained(session.containment),
+                time.time(),
+                subagent_cap=session.subagent_cap,
+            )
+        )
+
+
+def _why_not_started(future: concurrent.futures.Future[LaunchOutcome]) -> str | None:
+    """
+    Why a finished launch started no session, or None when it started one.
+
+    Total over the three ways a future ends. ``go`` turns its own exceptions into a
+    ``LaunchRefused``, so the other two arms are a coroutine cancelled by the loop
+    shutting down and anything that escaped regardless; neither is a session.
+    """
+    if future.cancelled():
+        return "the launch was cancelled before a session started"
+    exc = future.exception()
+    if exc is not None:
+        return f"{type(exc).__name__}: {exc}"
+    outcome = future.result()
+    match outcome:
+        case LaunchStarted():
+            return None
+        case LaunchRefused(reason=reason):
+            return reason
+        case _:
+            assert_never(outcome)
+
+
+def _reap_launches(state: AppState) -> None:
+    """
+    Read the outcome of every launch that has one, on the draw thread.
+
+    This is the crossing, and it is the one ``Bridge.submit`` already provides: the
+    concurrent future it returns "for cancellation and error reporting". The frame
+    polls it rather than blocking on it. An intent through the store is the other
+    road across and the wrong one here -- a launch that started nothing changes no
+    fact the snapshot holds, and a launcher draft is presentation state the store
+    deliberately does not own.
+
+    A started launch is dropped and nothing else happens: the session is the pool's
+    from there, and its node is where the operator sees it. A launch that started
+    nothing goes to ``LauncherState.report_failure`` with its draft, or with None and
+    the word for where it came from. The launcher is the surface for those too: it is
+    the one place that reopens itself, and a relaunch that did nothing has no row, no
+    node and no pane of its own to be shown in.
+
+    A resume pressed from the resume form goes back to that session's form
+    instead, with the form's draft (``ResumeForms.report_failure``): the text
+    belongs on the surface that resumes that session, and New Task would offer
+    a fresh one. Only when no such form exists any more is it the launcher's.
+
+    **The list is shared with the asyncio thread and is not locked.** The loop only
+    appends; this iterates a copy and removes the entries it has read, one at a time.
+    Assigning a filtered list back instead would drop an entry appended between the
+    copy and the assignment, which is a launch nobody ever reads.
+
+    Costs a truth test on an empty list on every frame that has nothing in flight.
+    """
+    if not state.launches:
+        return
+    for entry in list(state.launches):
+        if not entry.future.done():
+            continue
+        state.launches.remove(entry)
+        reason = _why_not_started(entry.future)
+        if reason is None:
+            continue
+        if entry.resumed is not None and _resume_failed(state, *entry.resumed, reason):
+            continue
+        state.launcher.report_failure(entry.draft, reason, entry.origin)
+
+
+def _form_up(state: AppState, but: str | None = None) -> bool:
+    """
+    Whether one of the application's modals other than the "Not done" notice is
+    up or has been asked for: New Task, a resume form, Details, or a card
+    menu's question. ``but`` names a session whose own resume form does not
+    count.
+
+    **What must not be opened over.** Every one of these is a popup opened at
+    the root, and Dear ImGui holds one popup per level: opening a second closes
+    the first, with whatever the operator was doing in it. Last frame's values,
+    which is what each modal's own flag is.
+    """
+    cards = state.cards
+    resume = state.resume
+    return (
+        state.launcher.is_open
+        or (resume.busy and resume.showing != but)
+        or cards.details.node is not None
+        or cards.confirming is not None
+        or cards.gating is not None
+    )
+
+
+def _resume_failed(state: AppState, session_id: str, draft: resume_form.Draft, reason: str) -> bool:
+    """
+    Tell the operator a resume pressed from the resume form started nothing, and
+    put what they typed back on that session's form. False when no such form
+    exists any more, and nothing was said.
+
+    **At once when nothing else is up**: the form is asked for again with the
+    reason over the message. **Otherwise by the "Not done" notice**, which
+    waits for whatever is up to be put away (``_draw_not_done``). The refusal
+    can arrive seconds after the press -- a contained resume reads the CLI's
+    version first -- and by then the operator may be in New Task, Details,
+    another session's form or a notice; reopening the form there would close
+    what they are in (``_form_up``), and saying nothing would leave a card that
+    stays closed for no reason on screen. The session's own form being up is
+    neither case: the failure is drawn on it.
+    """
+    resume = state.resume
+    if resume.on_screen(session_id):
+        return resume.report_failure(session_id, draft, reason)
+    in_the_way = _form_up(state) or bool(state.not_done)
+    if not resume.report_failure(session_id, draft, reason, show=not in_the_way):
+        return False
+    if in_the_way:
+        rec = state.store.snapshot().get((session_id, None))
+        name = flat_line(rec.task).strip() if rec is not None else ""
+        LOG.warn("app", f"the resume of {session_id} did not start: {reason}")
+        _not_done(
+            state,
+            f"the resume of {name[:80] or session_id} did not start: {reason}. What you "
+            f"typed is kept on its resume form: {session_menu.RESUME_LABEL} on its card, "
+            "or its row in New Task's session list.",
+        )
+    return True
 
 
 def _seed_brief(session: AgentSession, shape: templates.WorkTemplate) -> None:
@@ -587,6 +2499,14 @@ def _seed_brief(session: AgentSession, shape: templates.WorkTemplate) -> None:
     typically a fork inheriting its parent's, and seeding over it would bury the
     premises it was launched to continue.
 
+    **Nothing is written for a resume.** Its text is the next message of a
+    conversation and not the premises of one, and the directory this would
+    write to is the session's own, since a resume keeps its id: the entry would
+    be appended to the brief the session already has. A resumed team that was
+    handed no directory is given that one when it exists, by one ``is_dir``, so
+    its workers are still told where the premises are whichever surface resumed
+    it; when it does not exist the session runs with no brief, as it did.
+
     A failure does not stop the launch. The work the operator asked for is worth
     more than the seeding of it, and the log says which happened rather than
     leaving a team quietly unbriefed.
@@ -596,6 +2516,14 @@ def _seed_brief(session: AgentSession, shape: templates.WorkTemplate) -> None:
     directory = brief_mod.session_dir(
         brief_mod.default_root(), session.cwd or ".", session.session_id
     )
+    if session.resume is not None:
+        try:
+            existing = directory.is_dir()
+        except OSError:
+            existing = False
+        if existing:
+            session.brief = str(directory)
+        return
     try:
         brief_mod.write_entry(directory, session.task)
     except OSError as exc:
@@ -637,8 +2565,80 @@ def _revoke_policy(state: AppState, node: NodeId | None) -> None:
     if pool is None or node is None:
         return
     session = pool.session_for(node)
-    if session is not None:
+    if session is None:
+        return
+    with state.gate_writes:
+        before = session.policy
         session.revoke_policy()
+        if session.policy is not before:
+            # The file's gate is the one a closed card says the session last
+            # ran under, so a narrowing is written like any other move.
+            _note_gate(state, node, session)
+
+
+def _note_gate(state: AppState, node: NodeId, session: AgentSession) -> None:
+    """
+    Say in the session's file that its gate is the one ``session`` holds now
+    (``fleetsync.gate_changed``). Called with ``AppState.gate_writes`` held, by
+    the two functions that move a gate.
+
+    **Only for a session with a run.** The pool keeps the object of a session
+    whose run ended by itself, and moving that object's gate moves nothing: no
+    process is gated by it, and the next run is built from a spec. The file's
+    gate is the rung the session last *ran* under, which a closed card and the
+    resume form both show, so a move made after the run is not written.
+    """
+    pool = state.pool
+    if pool is None or not pool.has_run(node):
+        return
+    state.fleet_writer.submit(fleetsync.gate_changed(node[0], session.policy))
+
+
+def _set_policy(state: AppState, node: NodeId, rung: Policy) -> None:
+    """
+    Move a running session's gate to ``rung``, now, if the move is one that may
+    be made; say why not otherwise (``_not_done``).
+
+    On the draw thread, for ``_revoke_policy``'s reason, and called by the card
+    menu outside every ImGui begin/end pair, which is what lets it catch.
+
+    Two things can refuse, and neither is asked by the other. **The directory**:
+    a rung that requires containment is not granted to a session whose directory
+    is inside pptmstr's own checkout, or cannot be located -- the question the
+    launcher, ``_launch`` and ``AgentSession.run`` each ask before such a session
+    starts (``launcher.refusal_for``), and which ``AgentSession.set_policy``
+    does not ask at all, because until a menu could widen a live session there
+    was no way to reach the rung except by starting under it. Asked on the way
+    to such a rung and not on the way down from one. **The driver's guard**: a
+    session started with no containment cannot be given a rung that needs it
+    (``driver.UncontainedAutonomy``). The menu offers that move as a resume and
+    not as a live one, so the raise is for a menu drawn before the facts changed.
+
+    A move the driver took is written to the session's file.
+    """
+    pool = state.pool
+    session = None if pool is None else pool.session_for(node)
+    if session is None:
+        _not_done(state, f"the gate was not moved to {rung.value}: {session_menu.NOT_HELD}")
+        return
+    before = session.policy
+    if rung is before:
+        return
+    if requires_containment(rung):
+        refusal = launcher.refusal_for(session.cwd or ".", named="this session's directory")
+        if refusal is not None:
+            LOG.warn("app", f"{node[0]} was not moved to {rung.value}: {refusal}")
+            _not_done(state, f"the gate was not moved to {rung.value}: {refusal}")
+            return
+    with state.gate_writes:
+        try:
+            session.set_policy(rung)
+        except UncontainedAutonomy as exc:
+            LOG.warn("app", f"{node[0]} was not moved to {rung.value}: {exc}")
+            _not_done(state, f"the gate was not moved to {rung.value}: {exc}")
+            return
+        LOG.info("app", f"{node[0]}: gate moved from {before.value} to {session.policy.value}")
+        _note_gate(state, node, session)
 
 
 def _relaxed_count(state: AppState) -> int:
@@ -663,13 +2663,538 @@ def _session_action(state: AppState, coro_factory: Callable[[SessionPool], objec
     state.bridge.submit(coro_factory(pool))  # type: ignore[arg-type]
 
 
+# What the session controls do, once each. Every surface that offers one of these
+# -- HEALTH, the failure row and the composer in NEEDS YOU, the SESSION pane, a
+# card's menu -- is handed these functions, so no two of them can come to differ.
+
+
+def _interrupt(state: AppState, node: NodeId) -> None:
+    _session_action(state, lambda p: p.interrupt(node))
+
+
+def _close(state: AppState, node: NodeId) -> None:
+    """
+    Close a session: end its run through the pool, which reports the end.
+
+    **A session that failed and has no run left is closed in the store
+    instead** (``intents.FailedSessionClosed``). The pool has nothing to end
+    for it and would report nothing, and its root would stay in FAILED, which
+    is an end a later message undoes and so one the session can never leave the
+    fleet from. Whether a run is left is the pool's answer, read here at the
+    click (``SessionPool.has_run``), and the intent carries it.
+
+    The pool is not asked to close that one as well: it would find only the
+    ended session object, and a resume of the session racing this would be the
+    run it ended.
+    """
+    pool = state.pool
+    snap = state.frame_snap
+    root = None if snap is None else snap.get((node[0], None))
+    if (
+        pool is not None
+        and root is not None
+        and root.state is AgentState.FAILED
+        and not pool.has_run(node)
+    ):
+        state.bridge.emit(FailedSessionClosed((node[0], None), run_held=False))
+        return
+    _session_action(state, lambda p: p.close(node))
+
+
+def _detach(state: AppState, node: NodeId) -> None:
+    """
+    Take an ended session off the fleet: its card goes, and its file says so,
+    so that it is not recalled at the next start. Nothing is deleted.
+
+    **The pool is asked first, and with a run under the id nothing is asked of
+    the store.** The store's own rule covers what a snapshot holds -- every
+    agent of the session ended for good, nothing owed -- and a snapshot does not
+    hold whether a process is attached: a session that failed keeps its client,
+    and one being relaunched is announced only when the run before it has gone.
+    The store's answer comes back as an effect (``_note_detach``), and the file
+    is written from the step that took the session off (``fleetsync.changes``).
+    """
+    pool = state.pool
+    if pool is not None and pool.has_run(node):
+        _not_done(state, f"not removed from the fleet: {session_menu.RUN_ATTACHED}")
+        return
+    state.bridge.emit(SessionDetached(node[0]))
+
+
+def _from_a_label(state: AppState, spec: LaunchSpec, what: str) -> bool:
+    """
+    Whether ``spec`` would open a new session with a title for a prompt, having
+    said so if it would (``_not_done``).
+
+    Fork and Retry start ``LaunchSpec.from_record``, whose prompt is the
+    record's task, and for a session whose original task nothing recorded that
+    is the CLI's label for the conversation (``AgentRecord.titled_by_label``):
+    a paid session instructed by a summary, in one click. Asked here, of the
+    spec, because these two functions are what every surface is handed -- a
+    card's menu greys the item first, and the failure row and HEALTH's footer
+    hand a spec over with nothing asked of the record.
+    """
+    if not spec.task_is_label:
+        return False
+    _not_done(state, f"not {what}: {session_menu.TASK_NOT_RECORDED}")
+    return True
+
+
+def _fork(state: AppState, spec: LaunchSpec) -> None:
+    if not _from_a_label(state, spec, "forked"):
+        _launch(state, spec, origin="fork")
+
+
+def _fork_of(state: AppState, node: NodeId | None, spec: LaunchSpec) -> None:
+    """
+    Fork the session behind ``node``, for a surface that builds the spec from
+    the record without asking anything of it (HEALTH).
+
+    Not from a card whose title is only the CLI's label for the conversation,
+    or is empty (``session_menu.task_missing``): that string is no prompt, and
+    this would start a paid session with it in one click. The card's own menu
+    greys the item for the same reason; here it is said after the press. The
+    record is asked as well as the spec (``_from_a_label``) because an empty
+    task is a fact about the record that no spec says.
+    """
+    snap = state.frame_snap
+    root = None if snap is None or node is None else snap.get((node[0], None))
+    if root is not None and session_menu.task_missing(root):
+        _not_done(state, f"not forked: {session_menu.TASK_NOT_RECORDED}")
+        return
+    _fork(state, spec)
+
+
+def _relaunch(state: AppState, spec: LaunchSpec) -> None:
+    if not _from_a_label(state, spec, "relaunched"):
+        _launch(state, spec, origin="relaunch")
+
+
+def _dismiss(state: AppState, node: NodeId) -> None:
+    state.bridge.emit(FailureAcknowledged(node))
+
+
+def _send(state: AppState, node: NodeId, text: str) -> None:
+    """
+    Send a session the operator's message, and note it in the session's file as
+    the last thing they sent it (``fleetsync.sent``).
+
+    **Noted only for a send a client took.** ``SessionPool.send`` says whether
+    the text was handed to a connected client or dropped for want of one, and
+    that answer is the whole of the test: a session that has not connected, one
+    whose run is over, and a relaunch held behind a run that is still ending
+    all drop the text, and the last of them does it under a row that reads
+    live. The note is queued after the send has returned, so one that raised is
+    not noted either. The message box of the resume form opens with what is
+    noted here, one press from being sent again.
+    """
+
+    async def go(pool: SessionPool) -> None:
+        if await pool.send(node, text):
+            state.last_sent[node[0]] = text
+            state.fleet_writer.submit(fleetsync.sent(node[0], text, time.time()))
+
+    _session_action(state, go)
+
+
+def _open_resume(
+    state: AppState, rec: AgentRecord, rung: Policy | None = None, *, listed_cwd: str | None = None
+) -> None:
+    """
+    Open the resume form for a card's session: the menu's "Resume…", and with
+    ``rung`` its "Resume as …" and "Continue as …". Nothing is started from
+    here; the form's own button is the step that resumes.
+
+    What the form shows as facts is read here, once, from whichever of two
+    places knows the session:
+
+    - **A closed card** (``AgentRecord.recalled``): its session file's account,
+      which the recall worker put on the record. Nothing is read from disk on
+      this thread. A field the file did not have is given as not known and
+      never as the record field's default: no team recorded is
+      ``resume_form.UnknownTeam`` and not solo, no gate is
+      ``sessionfile.UnknownPolicy`` and not strict, and a title that is only
+      the CLI's label for the conversation is passed as a label
+      (``AgentRecord.titled_by_label``), so the resume announces the session
+      under the title its card has and still says it is no task.
+    - **A session this window ran**: its record, the session object for the
+      gate, containment and cap it holds now, and the last text this window
+      sent it (``AppState.last_sent``).
+
+    The gate the form opens on is strict unless ``rung`` names one, whatever
+    the session last ran under (``ResumeForms.open_for``).
+
+    ``listed_cwd`` is the directory New Task's session list gives for the
+    session, when the form is opened from a row of it. Read only where the
+    record has none: a card with no recorded directory holds its resume, and
+    the CLI's own listing is the one place that may still say where it ran.
+    """
+    session_id = rec.node_id[0]
+    recalled = rec.recalled
+    template: str | None | resume_form.UnknownTeam = rec.template or resume_form.UnknownTeam()
+    policy: Policy | sessionfile.UnknownPolicy
+    if recalled is not None:
+        policy = recalled.policy or sessionfile.UnknownPolicy()
+        contained = recalled.contained is True
+        cap = recalled.subagent_cap
+        last = recalled.last_message
+    else:
+        held = _held(state, rec.node_id)
+        session = state.ran.get(session_id)
+        policy = rec.policy if held is None else held.policy
+        contained = held is not None and held.contained
+        cap = None if session is None else session.subagent_cap
+        last = state.last_sent.get(session_id)
+    state.resume.open_for(
+        session_id=session_id,
+        cwd=rec.cwd or listed_cwd or "",
+        task=rec.task,
+        task_is_label=rec.titled_by_label,
+        template=template,
+        policy=policy,
+        contained=contained,
+        model=rec.model,
+        subagent_cap=cap,
+        brief=rec.brief,
+        last_message=last,
+        as_policy=rung,
+    )
+
+
+def _offer_message(state: AppState, session_id: str, offered: str) -> None:
+    """
+    Put what was typed in New Task's task box into a session's resume form as
+    its message, when that form holds nothing the operator typed into it.
+
+    The operator who typed a task and then picked a session meant the text for
+    that session, so it goes with them. **Over a box that holds only its
+    prefill, never over a draft of the form's own**: the prefill is the last
+    thing the session was sent and is still on record, and a draft is text
+    nobody else has. New Task's own box is not touched, so the text is there
+    for a new session if the pick turns out not to be what they wanted.
+    """
+    form = state.resume.forms.get(session_id)
+    if form is None or form.touched or not offered.strip():
+        return
+    form.message = offered
+
+
+def _open_resume_from_file(state: AppState, pick: _PickRead) -> None:
+    """
+    Open the resume form for a session known only to New Task's session list:
+    one removed from the fleet in an earlier run, or one this application never
+    ran.
+
+    **The row says where it runs and the file says the rest.** The row is what
+    the operator clicked, and one id can be listed under two directories, so
+    the directory is the row's and the file's is used only where the row
+    carries none. A session with no file, or one this build cannot read, has
+    no known team, gate, model or task: each is given as not known, and the
+    form offers the team as a choice and says why. With no task on file the
+    title is the row's label -- the CLI's summary of the conversation, which is
+    what a card recalled for the session would read -- and it is passed as a
+    label and never as the task.
+    """
+    row = pick.row
+    held = pick.found if isinstance(pick.found, sessionfile.SessionFile) else None
+    if isinstance(pick.found, sessionfile.Unreadable):
+        LOG.error(
+            "fleet",
+            f"session file of {row.session_id} could not be read ({pick.found.reason}); "
+            "its resume form shows what the transcript listing knows",
+        )
+    recorded = "" if held is None else held.task.strip()
+    state.resume.open_for(
+        session_id=row.session_id,
+        cwd=row.cwd or ("" if held is None else held.cwd),
+        task=recorded or row.label,
+        task_is_label=not recorded,
+        template=(None if held is None else held.template) or resume_form.UnknownTeam(),
+        policy=sessionfile.UnknownPolicy() if held is None else held.policy,
+        contained=held is not None and held.contained,
+        model="" if held is None else held.model,
+        subagent_cap=None if held is None else held.subagent_cap,
+        brief=None if held is None else held.brief,
+        last_message=None if held is None else held.last_message,
+    )
+
+
+def _open_picked(state: AppState, pick: _PickRead) -> None:
+    """
+    Open the resume form for a picked row, through the card menu's own opener
+    when the store has a record of the session and from its file otherwise.
+
+    Asked of the store here and not only at the click: the recall of the closed
+    fleet lands on its own worker, and a record that arrived while the file was
+    being read is the fuller account.
+    """
+    rec = state.store.snapshot().get((pick.row.session_id, None))
+    if rec is not None:
+        _open_resume(state, rec, listed_cwd=pick.row.cwd)
+    else:
+        _open_resume_from_file(state, pick)
+    _offer_message(state, pick.row.session_id, pick.offered)
+
+
+def _pick_resume(state: AppState, row: SessionRow) -> None:
+    """
+    A row was clicked in New Task's session list: open the resume form for it.
+    Nothing is started; the form's own button is the step that resumes.
+
+    A session the store has a record of -- one on the fleet, live or closed, or
+    one removed from it in this window -- opens at once, from the record. Any
+    other is known only by its transcript, and what pptmstr recorded about it
+    is in its session file: that is read on a worker, as the session list
+    itself is scanned, and the form opens on the frame the read is taken
+    (``_take_resume_picks``).
+    """
+    offered = state.launcher.task
+    rec = state.store.snapshot().get((row.session_id, None))
+    if rec is not None:
+        _open_resume(state, rec, listed_cwd=row.cwd)
+        _offer_message(state, row.session_id, offered)
+        return
+    picks = state.resume_picks
+
+    def read() -> None:
+        picks.put(_PickRead(row, sessionfile.read(row.session_id), offered))
+
+    threading.Thread(target=read, name="pptmstr-pick-read", daemon=True).start()
+
+
+def _take_resume_picks(state: AppState) -> None:
+    """Open the form for each picked row whose session file has been read."""
+    while True:
+        try:
+            pick = state.resume_picks.get_nowait()
+        except queue.Empty:
+            return
+        _open_picked(state, pick)
+
+
+def _resume_pressed(state: AppState, pressed: resume_form.Launch) -> None:
+    """
+    The resume form's button: hand its spec to ``_launch``, with the session and
+    the draft a failure is returned to.
+
+    ``pressed.spec`` carries the typed text as ``message`` and the session's own
+    task as ``task`` (``resume_form.press``), and nothing here rewrites either.
+    """
+    assert pressed.spec.resume is not None
+    _launch(state, pressed.spec, origin="resume", resumed=(pressed.spec.resume, pressed.draft))
+
+
+def _show_health(state: AppState, node: NodeId) -> None:
+    """
+    Bring HEALTH to a card's session: the cursor on that session, the layout that
+    has the pane, and the pane in front of its tab-mates.
+
+    HEALTH follows the cursor and is not pointed anywhere by itself, so moving
+    the cursor is the whole of "to that session" -- what a click on the card
+    does, through the same call. A session that owes something puts the cursor on
+    what it owes, as that click would.
+    """
+    snap = state.frame_snap
+    if snap is None:
+        return
+    state.focus.to_node(snap, (node[0], None), scope=focus_mod.Scope.SESSION)
+    if hello_imgui.current_layout_name() != FOCUS:
+        state.pending_layout = FOCUS
+    state.pending_pane = "HEALTH"
+
+
+def _card_actions(state: AppState) -> session_menu.Actions:
+    """
+    What a card's menu calls: the functions the other surfaces are handed.
+    """
+    return session_menu.Actions(
+        interrupt=lambda node: _interrupt(state, node),
+        close=lambda node: _close(state, node),
+        fork=lambda spec: _fork(state, spec),
+        revoke_policy=lambda node: _revoke_policy(state, node),
+        relaunch=lambda spec: _relaunch(state, spec),
+        dismiss=lambda node: _dismiss(state, node),
+        resume=lambda rec: _open_resume(state, rec),
+        health=lambda node: _show_health(state, node),
+        detach=lambda node: _detach(state, node),
+        resume_as=lambda rec, rung: _open_resume(state, rec, rung),
+        set_policy=lambda node, rung: _set_policy(state, node, rung),
+    )
+
+
+def _card_wiring(state: AppState) -> session_menu.Wiring:
+    """
+    What the fleet pane draws card menus with: the actions, and the three
+    things a menu asks that no record says.
+
+    ``running`` is the pool's answer to "is a run attached to this session"
+    (``SessionPool.has_run``), which is the shell's half of whether a card may
+    leave the fleet and of what Close does to a failed one. With no pool there
+    is no run. ``contained`` is ``_held``'s, the driver guard's notion.
+    """
+    pool = state.pool
+
+    def contained(node: NodeId) -> bool | None:
+        held = _held(state, node)
+        return None if held is None else held.contained
+
+    return session_menu.Wiring(
+        state=state.cards,
+        actions=_card_actions(state),
+        gate=lambda node: _policy_of(state, node),
+        snap=state.frame_snap,
+        running=lambda node: pool is not None and pool.has_run(node),
+        contained=contained,
+    )
+
+
+def _held(state: AppState, node: NodeId) -> session_details.Held | None:
+    """
+    What the session object behind a node says right now, for Details, or None
+    when this window holds none for it: the fake driver's sessions, which are
+    never in the pool, and a session recalled from its file, which this process
+    has not run. Details reads the second from the record (``AgentRecord.recalled``)
+    and says its facts are the session file's.
+
+    The pool's session while it has one, and otherwise the last one it took
+    under the id (``AppState.ran``): the object of a session closed in this
+    window still says whether it was contained and where its transcript is.
+
+    ``contained`` is the driver guard's notion and not "a settings string was
+    given": a blank one is no containment (``session_details.is_contained``).
+    """
+    pool = state.pool
+    session = None if pool is None else pool.session_for(node)
+    running = session is not None
+    if session is None:
+        session = state.ran.get(node[0])
+    if session is None:
+        return None
+    return session_details.Held(
+        policy=session.policy,
+        contained=session_details.is_contained(session.containment),
+        transcript=session.transcript_path,
+        running=running,
+    )
+
+
+def _draw_card_overlays(state: AppState) -> None:
+    """
+    The two modals a card's menu opens, at root level for the launcher's reason.
+
+    The disk is read here and once: on the frame Details is asked for, for the
+    node it was asked for (``session_details.look``). Everything else in the
+    modal is rebuilt from the frame's snapshot.
+    """
+    snap = state.frame_snap
+    if snap is None:
+        return
+    cards = state.cards
+    session_menu.draw_confirm(cards, snap, _card_actions(state))
+    details = cards.details
+    node = details.node
+    if node is None:
+        return
+    held = _held(state, node)
+    rec = snap.get(node)
+    if details.looked is None and rec is not None:
+        details.looked = session_details.look(rec, None if held is None else held.transcript)
+    shown = session_details.view(
+        snap,
+        node,
+        held=held,
+        looked=details.looked,
+        logging=board_logging(state),
+        now=state.frame_now,
+        wall_now=time.time(),
+        # The root's, which is the only activity the writer is told of. Not
+        # read for a recalled session: its row is its file's.
+        last_active=state.fleet_writer.last_active(node[0]) if node[1] is None else None,
+    )
+    session_details.draw(details, shown)
+
+
+# ``###`` keeps the window's identity whatever the words in front of it.
+NOT_DONE_TITLE = "Not done###not-done"
+_NOT_DONE_WIDTH = 520.0
+
+
+def _draw_not_done(state: AppState) -> None:
+    """
+    What a card's control was asked to do and did not, until it is dismissed.
+
+    A modal, at root level with the other things a card's menu opens. A refusal
+    here is of something the operator pressed: the menu that offered it has
+    closed, the card looks as it did, and a line in LOG is in a pane that is
+    not resident. **It waits for any other modal to be put away** (``_form_up``):
+    a refusal can arrive while the operator is in one -- a resume refused after
+    its version read, a removal the store refused -- and a popup opened at the
+    root closes the one already there. Enter or Escape dismisses, from the second frame on, for
+    the reason a card's confirmation waits one (``MenuState.confirm_frames``).
+    """
+    if not state.not_done:
+        state.not_done_frames = 0
+        return
+    if state.not_done_frames == 0:
+        if _form_up(state):
+            # Its turn comes when that is put away. Opened now it would close
+            # it, and the lines lose nothing by waiting.
+            return
+        imgui.open_popup(NOT_DONE_TITLE)
+    viewport = imgui.get_main_viewport()
+    imgui.set_next_window_pos(viewport.get_center(), imgui.Cond_.appearing, imgui.ImVec2(0.5, 0.5))
+    imgui.set_next_window_size_constraints(
+        imgui.ImVec2(_NOT_DONE_WIDTH, 0.0), imgui.ImVec2(_NOT_DONE_WIDTH, viewport.work_size.y)
+    )
+    opened, _ = imgui.begin_popup_modal(NOT_DONE_TITLE, None, imgui.WindowFlags_.always_auto_resize)
+    if not opened:
+        # Something closed it from outside. The lines are kept and asked for
+        # again: an unread refusal is the one thing this must not drop.
+        state.not_done_frames = 0
+        return
+    listening = state.not_done_frames > 0
+    state.not_done_frames += 1
+    imgui.push_text_wrap_pos(0.0)
+    for line in state.not_done:
+        imgui.text_colored(P.warn.vec4, line)
+        imgui.spacing()
+    imgui.pop_text_wrap_pos()
+    dismissed = bool(imgui.button("ok"))
+    imgui.same_line()
+    imgui.text_disabled("Enter or Esc dismisses")
+    if listening:
+        dismissed = dismissed or bool(
+            imgui.is_key_pressed(imgui.Key.enter, False)
+            or imgui.is_key_pressed(imgui.Key.keypad_enter, False)
+            or imgui.is_key_pressed(imgui.Key.escape)
+        )
+    if dismissed:
+        state.not_done.clear()
+        state.not_done_frames = 0
+        imgui.close_current_popup()
+    imgui.end_popup()
+
+
 def _menus(state: AppState) -> None:
     if imgui.begin_menu("Session"):
         # The discoverable half of Ctrl+N. A shortcut with no menu entry is a
         # shortcut nobody who did not read the README will ever press.
-        clicked, _ = imgui.menu_item("New Task...", "Ctrl+N", False)
+        clicked, _ = imgui.menu_item("New Task…", "Ctrl+N", False)
         if clicked:
             state.launcher.request_open()
+        # The discoverable half of ``m``, for the same reason. Asked for the next
+        # frame: the fleet pane has already been drawn on this one.
+        clicked, _ = imgui.menu_item("Controls for the focused card…", "M", False)
+        if clicked:
+            state.cards.ask_next_frame = True
+        imgui.separator()
+        # Here and not under "Text" or hello_imgui's own View: it is a choice
+        # about what the fleet pane lists, and this is the menu about sessions.
+        clicked, _ = imgui.menu_item(
+            "Hide ended sub-agents", "", state.settings.hide_ended_subagents
+        )
+        if clicked:
+            _switch_hide_ended(state, not state.settings.hide_ended_subagents)
         imgui.end_menu()
 
     if imgui.begin_menu("Theme"):
@@ -696,7 +3221,7 @@ def _switch_theme(state: AppState, name: str) -> None:
     theme.set_theme(name)
     state.theme_dirty = True
     state.settings = state.settings.merged(theme=name)
-    settings_mod.save(state.settings)
+    _save(state)
     LOG.info("theme", f"switched to {name}")
 
 
@@ -709,8 +3234,132 @@ def _switch_wrap(state: AppState, wrap: bool) -> None:
     shutdown is one that silently resets after the first crash.
     """
     state.settings = state.settings.merged(wrap_inputs=wrap)
-    settings_mod.save(state.settings)
+    _save(state)
     LOG.info("text", f"composer wrapping {'on' if wrap else 'off'}")
+
+
+def _switch_hide_ended(state: AppState, hide: bool) -> None:
+    """
+    Fold ended sub-agents into a count on their lead's card, or list them all,
+    persisting immediately as ``_switch_wrap`` does. What is folded is the fleet
+    pane's to decide (``ui/fleet_view``); nothing leaves the store.
+    """
+    state.settings = state.settings.merged(hide_ended_subagents=hide)
+    _save(state)
+    LOG.info("fleet", f"ended sub-agents {'hidden' if hide else 'shown'}")
+
+
+def _save(state: AppState) -> None:
+    """
+    Persist ``state.settings``, and say so when that is refused.
+
+    The only caller of ``settings.save``, so the reason a read left behind
+    reaches every save. A refusal changes nothing for the run -- the theme the
+    operator picked is on screen -- which is why it has to be said: the change
+    is gone at the next start and nothing else would show it. Logged once, at
+    the first refusal, and latched for the status bar; every later change in
+    this run is refused for the same reason.
+    """
+    refused = settings_mod.save(state.settings, unread=state.board_log_unread)
+    if refused is not None and state.unsaved is None:
+        state.unsaved = refused
+        LOG.error("settings", refused.told)
+
+
+@dataclass(frozen=True, slots=True)
+class FleetCounts:
+    """
+    What the status bar says of the fleet. ``text`` is the count; ``focusable``
+    is whether Enter has a session to go to.
+    """
+
+    text: str
+    focusable: bool
+
+
+def fleet_counts(snap: Snapshot) -> FleetCounts:
+    """
+    How many agents ran in this window and are on the fleet, and beside it how
+    many closed cards there are. Pure.
+
+    A closed card is a session this process has not run, and "5 agents" over
+    four of them reads as five things that might be working. A session the
+    operator removed is in neither number. ``focusable`` is a root among the
+    first: the cursor rests on nothing else by default (``FocusState.settle``),
+    so with only closed cards Enter would open FOCUS on no session.
+    """
+    ran = inbox.ran_here(snap)
+    closed = sum(
+        1
+        for node, rec in snap.nodes.items()
+        if rec.recalled is not None and not snap.off_fleet(node[0])
+    )
+    text = f"{len(ran)} agents" + (f" · {closed} closed" if closed else "")
+    return FleetCounts(text, any(rec.node_id[1] is None for rec in ran))
+
+
+def _count(n: int, one: str, many: str) -> str:
+    return f"{n} {one if n == 1 else many}"
+
+
+def startup_shortfalls(
+    migration: boardsync.Migration | None,
+    fleet: fleetsync.Fleet | None,
+    recall_failed: str | None = None,
+    commands: CommandShortfalls | None = None,
+) -> str | None:
+    """
+    Everything startup could not do, as one status-bar segment, or None when
+    there is nothing. Pure. Counts and kinds; the log has each one's reason.
+
+    From the board logs' move: logs left at the old path, the ones among them
+    whose session has a log at both, and a legacy directory that could not be
+    listed. From the recall: session files that are there and cannot be read, a
+    sessions directory that was not read whole, and a listing of the CLI's
+    transcripts that failed, which leaves every closed card unable to say
+    whether it can be resumed. ``recall_failed`` is a recall that gave no
+    answer at all: its worker raised, and no closed card was put back.
+    ``commands`` is what reading sessions' command records back fell short by,
+    at the recall and at each resume since.
+    """
+    parts: list[str] = []
+    if migration is not None:
+        twice = sum(1 for left in migration.left if left.twice)
+        once = len(migration.left) - twice
+        if once:
+            parts.append(_count(once, "board log", "board logs") + " left at the old path")
+        if twice:
+            parts.append(_count(twice, "board log", "board logs") + " in two places")
+        unlinked = sum(1 for moved in migration.moved if moved.unlinked is not None)
+        if unlinked:
+            parts.append(_count(unlinked, "moved board log", "moved board logs") + " not linked")
+        if migration.unlisted is not None:
+            parts.append("old board logs not listed")
+    if fleet is not None:
+        if fleet.unreadable:
+            parts.append(
+                _count(len(fleet.unreadable), "session file", "session files") + " unreadable"
+            )
+        if fleet.problem is not None:
+            parts.append("session files not all read")
+        if fleet.unlisted is not None:
+            parts.append("transcripts not listed")
+    if recall_failed is not None:
+        parts.append("closed sessions not recalled")
+    if commands is not None:
+        if commands.unreadable:
+            parts.append(
+                _count(commands.unreadable, "command record", "command records") + " unreadable"
+            )
+        if commands.newer:
+            parts.append(
+                _count(commands.newer, "command record", "command records") + " from a newer build"
+            )
+        if commands.unlisted:
+            parts.append("command records not all read")
+    if not parts:
+        return None
+    return "at startup: " + ", ".join(parts) + " (see LOG)"
 
 
 def _status_bar(state: AppState) -> None:
@@ -718,10 +3367,10 @@ def _status_bar(state: AppState) -> None:
     if snap is None:
         return
     waiting = len(snap.needs_you)
-    total = len(snap.nodes)
+    counted = fleet_counts(snap)
     active = snap.any_active
 
-    imgui.text_disabled(f"{total} agents")
+    imgui.text_disabled(counted.text)
     imgui.same_line()
     imgui.text_disabled("|")
     imgui.same_line()
@@ -739,7 +3388,7 @@ def _status_bar(state: AppState) -> None:
         imgui.text_disabled(f"(oldest {oldest})")
     else:
         imgui.text_colored(P.ok.vec4, "nothing needs you")
-        if hello_imgui.current_layout_name() == TRIAGE and snap.order:
+        if hello_imgui.current_layout_name() == TRIAGE and counted.focusable:
             # Suggest, never switch. Yanking the layout out from under someone
             # mid-diff is the failure mode a two-mode design has to avoid, and an
             # emptying queue is exactly when the operator is most likely to be
@@ -782,6 +3431,22 @@ def _status_bar(state: AppState) -> None:
         if relaxed:
             imgui.same_line()
             imgui.text_colored(P.warn.vec4, f"| {relaxed} on a widened gate")
+    if state.unsaved is not None:
+        # The log line is said once and LOG is not a resident pane; this is what
+        # is still there when the operator next looks.
+        imgui.same_line()
+        imgui.text_colored(P.warn.vec4, f"| settings not saved: {state.unsaved.why.value}")
+    short = startup_shortfalls(
+        state.migration,
+        state.fleet,
+        state.recall_failed,
+        None if state.command_files is None else state.command_files.shortfalls,
+    )
+    if short is not None:
+        # One segment for everything startup could not do, for the reason the
+        # one above is here: each was logged once, and this is what stays.
+        imgui.same_line()
+        imgui.text_colored(P.warn.vec4, f"| {short}")
 
 
 def _split(initial: str, new: str, direction: imgui.Dir, ratio: float) -> hello_imgui.DockingSplit:
@@ -805,6 +3470,15 @@ def _window(label: str, dock: str, fn: Callable[[], None]) -> hello_imgui.Dockab
     return w
 
 
+def _closed_path(state: AppState, node: NodeId | None) -> str | None:
+    """
+    Where the CLI keeps the transcript of the closed session behind ``node``,
+    for the transcript pane's line, or None. One dict lookup: the paths were
+    worked out by the recall worker (``_recall_fleet``).
+    """
+    return None if node is None else state.closed_paths.get(node[0])
+
+
 def _panels(state: AppState) -> dict[str, Callable[[], None]]:
     """
     Every pane's draw function, built once and shared by both layouts.
@@ -819,7 +3493,15 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
         # draws. Guarded anyway rather than asserted: a panel is not the place to
         # discover a callback-ordering change.
         if state.frame_snap is not None:
-            rail.draw(state.frame_snap, state.focus, state.rail, state.frame_now)
+            rail.draw(
+                state.frame_snap,
+                state.focus,
+                state.rail,
+                state.frame_now,
+                _card_wiring(state),
+                hide_ended=state.settings.hide_ended_subagents,
+                now_wall=state.frame_wall,
+            )
 
     def inbox_pane() -> None:
         if state.frame_snap is None or state.pool is None:
@@ -831,14 +3513,16 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
             state.compose,
             state.bridge,
             inbox.InboxActions(
-                send=lambda node, text: _session_action(state, lambda p: p.send(node, text)),
-                interrupt=lambda node: _session_action(state, lambda p: p.interrupt(node)),
-                close=lambda node: _session_action(state, lambda p: p.close(node)),
-                dismiss=lambda node: state.bridge.emit(FailureAcknowledged(node)),
-                relaunch=lambda spec: _launch(state, spec),
+                send=lambda node, text: _send(state, node, text),
+                interrupt=lambda node: _interrupt(state, node),
+                close=lambda node: _close(state, node),
+                dismiss=lambda node: _dismiss(state, node),
+                relaunch=lambda spec: _relaunch(state, spec),
             ),
             state.frame_now,
             wrap=state.settings.wrap_inputs,
+            decisions=state.decisions,
+            commands=_command_rows(state),
         )
 
     def context_pane() -> None:
@@ -846,8 +3530,9 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
         # is exactly what let an operator approve one agent's write while reading
         # another agent's transcript.
         if state.frame_snap is not None:
+            node = state.focus.node(state.frame_snap)
             transcript_pane.draw(
-                state.frame_snap, state.transcripts, state.focus.node(state.frame_snap)
+                state.frame_snap, state.transcripts, node, _closed_path(state, node)
             )
 
     def detail_pane() -> None:
@@ -862,6 +3547,8 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
                 state.review,
                 state.detail_pane_state,
                 state.frame_now,
+                state.decisions,
+                _command_rows(state),
             )
 
     def board_pane_fn() -> None:
@@ -869,7 +3556,14 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
         # the cursor moved would need a pointer of its own, and that second pointer
         # is what this layout deleted.
         if state.frame_snap is not None:
-            board_pane.draw(state.frame_snap, state.focus, state.board, state.bridge)
+            board_pane.draw(
+                state.frame_snap, state.focus, state.board, state.bridge, board_logging(state)
+            )
+
+    def digest_pane_fn() -> None:
+        # Follows the cursor, as BOARD does: it is that session's board, read.
+        if state.frame_snap is not None:
+            digest_pane.draw(state.frame_snap, state.focus)
 
     def brief_pane_fn() -> None:
         # Follows the cursor, like every other pane in this space. A brief belongs
@@ -885,16 +3579,18 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
         session = (node[0], None) if node else None
         avail = imgui.get_content_region_avail().y
         if imgui.begin_child("##scrollback", imgui.ImVec2(0, max(avail - 150.0, 80.0))):
-            transcript_pane.draw(state.frame_snap, state.transcripts, node)
+            transcript_pane.draw(
+                state.frame_snap, state.transcripts, node, _closed_path(state, node)
+            )
         imgui.end_child()
         imgui.separator()
         compose.draw_conversation(
             state.frame_snap,
             state.compose,
             session,
-            send=lambda n, text: _session_action(state, lambda p: p.send(n, text)),
-            interrupt=lambda n: _session_action(state, lambda p: p.interrupt(n)),
-            close=lambda n: _session_action(state, lambda p: p.close(n)),
+            send=lambda n, text: _send(state, n, text),
+            interrupt=lambda n: _interrupt(state, n),
+            close=lambda n: _close(state, n),
             wrap=state.settings.wrap_inputs,
         )
 
@@ -906,13 +3602,14 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
             state.frame_snap,
             node,
             health.HealthActions(
-                interrupt=lambda node: _session_action(state, lambda p: p.interrupt(node)),
-                close=lambda node: _session_action(state, lambda p: p.close(node)),
-                fork=lambda spec: _launch(state, spec),
+                interrupt=lambda node: _interrupt(state, node),
+                close=lambda node: _close(state, node),
+                fork=lambda spec: _fork_of(state, node, spec),
                 revoke_policy=lambda node: _revoke_policy(state, node),
             ),
             state.frame_now,
             _policy_of(state, node),
+            now_wall=state.frame_wall,
         )
 
     return {
@@ -921,6 +3618,7 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
         "CONTEXT": context_pane,
         "DETAIL": detail_pane,
         "BOARD": board_pane_fn,
+        "DIGEST": digest_pane_fn,
         "BRIEF": brief_pane_fn,
         "SESSION": session_pane,
         "HEALTH": health_pane,
@@ -938,6 +3636,12 @@ def _draw_overlays(state: AppState) -> None:
     rest of the key handling lives.
     """
     launcher.handle_shortcut(state.launcher)
+    # Ahead of the return for want of a pool: Details needs none.
+    _draw_card_overlays(state)
+    _draw_not_done(state)
+    # Ahead of the draw, so a launch that failed is on screen the frame it is known,
+    # and ahead of the return below, so one refused for want of a pool is still read.
+    _reap_launches(state)
     pool = state.pool
     if pool is None:
         return
@@ -951,7 +3655,8 @@ def _draw_overlays(state: AppState) -> None:
         running=pool.running_count,
         queued=pool.queued_count,
         cap=pool.cap,
-        launch=lambda spec: _launch(state, spec),
+        launch=lambda spec, draft: _launch(state, spec, draft),
+        on_pick_resume=lambda row: _pick_resume(state, row),
         wrap=state.settings.wrap_inputs,
         # The setting in force, which the modal both states and offers to override for
         # one launch. Without it the cap section has no number to name and the override
@@ -960,6 +3665,20 @@ def _draw_overlays(state: AppState) -> None:
         # screen at all.
         subagent_cap=state.settings.subagent_cap,
         models=state.catalog.models,
+        live=_live_sessions(state.frame_snap) if state.launcher.is_open else frozenset(),
+    )
+    # Between the two, so a row picked in the launcher on this frame has its form
+    # asked for on this frame whenever no file had to be read for it.
+    _take_resume_picks(state)
+    # Beside the launcher and under its rules: root level, and a press here
+    # reaches ``_launch`` as a press there does.
+    resume_form.draw(
+        state.resume,
+        launch=lambda pressed: _resume_pressed(state, pressed),
+        wrap=state.settings.wrap_inputs,
+        subagent_cap=state.settings.subagent_cap,
+        models=state.catalog.models,
+        live=_resume_ends(state) if state.resume.is_open else frozenset(),
     )
 
 
@@ -1001,6 +3720,10 @@ def _triage_layout(panels: dict[str, Callable[[], None]]) -> hello_imgui.Docking
         # sessions are solo, and the pane draws its own "not a team" line rather
         # than an empty table.
         _window("BOARD", "ContextSpace", panels["BOARD"]),
+        # The tab after BOARD: a reading of that board, organised with it and not
+        # in it. Declared in BOARD's space in both layouts, and ``main`` is what
+        # puts it in BOARD's node for a layout saved before it existed.
+        _window("DIGEST", "ContextSpace", panels["DIGEST"]),
         # Behind BOARD. A brief is written once and amended rarely, where the board
         # moves every few minutes -- the resident tab should be the one that changes.
         _window("BRIEF", "ContextSpace", panels["BRIEF"]),
@@ -1041,10 +3764,34 @@ def _focus_layout(panels: dict[str, Callable[[], None]]) -> hello_imgui.DockingP
         # that session in the same class as its cost and its context headroom --
         # which is why it sits with HEALTH here rather than with the queue.
         _window("BOARD", "HealthSpace", panels["BOARD"]),
+        _window("DIGEST", "HealthSpace", panels["DIGEST"]),
         _window("BRIEF", "HealthSpace", panels["BRIEF"]),
         _window("LOG", "HealthSpace", panels["LOG"]),
     ]
     return params
+
+
+def _keep_saved_layouts(ini: Path) -> None:
+    """
+    Give a layout saved before DIGEST existed an entry for it, in BOARD's node, so
+    that hello_imgui does not rebuild the operator's arrangement from code on the
+    first launch that declares the pane (``layout_ini``).
+
+    Before the runner starts, because the runner reads the file once it does. A
+    file that cannot be read or replaced is said in the log and the app starts:
+    the cost is that rebuild, which is a layout to drag back and not a session lost.
+    """
+    try:
+        done = layout_ini.keep_layout_for(ini, "DIGEST", "BOARD")
+    except (OSError, UnicodeDecodeError) as exc:
+        LOG.warn(
+            "app",
+            f"the saved layout in {ini} could not be given an entry for DIGEST"
+            f" ({type(exc).__name__}: {exc}); the layouts may come up as the default ones",
+        )
+        return
+    if done is not None:
+        LOG.info("app", done)
 
 
 def _log_panel() -> None:
@@ -1058,6 +3805,704 @@ def _log_panel() -> None:
             "ERROR": P.danger,
         }[entry.level.name]
         imgui.text_colored(colour.vec4, f"[{entry.source}] {entry.text}")
+
+
+# How much longer than the pool's own bound the draw thread waits for
+# ``SessionPool.shutdown`` to return. The pool gives up by itself and says which
+# run it gave up on; this covers the hop to the loop and back.
+_SHUTDOWN_MARGIN_S = 5.0
+
+
+def _shut_down(state: AppState) -> None:
+    """
+    End the sessions, then the loop they run on.
+
+    The bridge is stopped whatever the pool's shutdown does. ``Bridge.stop`` is
+    what releases the parked approvals and cancels whatever is left on the loop, so
+    a shutdown that times out or raises is the case that needs it most.
+    """
+    try:
+        _close_board_log(state)
+        _close_fleet(state)
+        _close_commands(state)
+        if state.driver is not None:
+            state.driver.stop()
+        if state.pool is not None:
+            # Cancel sessions before the loop dies, so no CLI subprocess outlives
+            # the window that was supervising it.
+            state.bridge.submit(state.pool.shutdown()).result(
+                timeout=state.pool.shutdown_bound_s + _SHUTDOWN_MARGIN_S
+            )
+    finally:
+        state.bridge.stop()
+
+
+def _close_board_log(state: AppState) -> None:
+    """
+    Let the writer finish what is queued, for at most ``boardsync.CLOSE_TIMEOUT``,
+    and log every record that did not reach its log.
+
+    Ahead of the pool's shutdown and not behind it. The frame loop has returned,
+    so no further fact will be derived and the queue is as long as it will get;
+    waiting behind the pool would spend the writer's seconds on a session that
+    will not end. The quit is therefore bounded by this wait plus the pool's.
+
+    It raises nothing: the pool's shutdown and ``Bridge.stop`` come after it,
+    and a failure to flush a log must not leave a CLI subprocess running.
+    """
+    writer = state.board_writer
+    if writer is None:
+        return
+    try:
+        reports = writer.close()
+    except Exception as exc:  # noqa: BLE001 - the shutdown behind this must still run
+        LOG.error("board", f"the board logs could not be closed: {type(exc).__name__}: {exc}")
+        return
+    lost: dict[str, list[str]] = {}
+    for report in reports:
+        if isinstance(report, boardsync.Outcome) and not report.kept:
+            reason = (
+                report.result.reason
+                if isinstance(report.result, boardlog.Unwritten)
+                else "written behind a break in the log"
+            )
+            lost.setdefault(report.session_id, []).append(reason)
+    for session_id, reasons in lost.items():
+        LOG.error(
+            "board",
+            f"{len(reasons)} board record(s) of {session_id} are not in its log at exit:"
+            f" {reasons[0]}",
+        )
+
+
+def _close_fleet(state: AppState) -> None:
+    """
+    Say in each live session's file that pptmstr quit with it running, let the
+    fleet writer finish for at most ``fleetsync.CLOSE_TIMEOUT``, and log every
+    write that did not land.
+
+    Beside the board log's close and ahead of the pool's shutdown, for that
+    function's reasons: the frame loop has returned, so nothing further will be
+    derived, and the wait must not be spent behind a session that will not end.
+    The live sessions are the roots the store holds that have not ended. A
+    session the pool goes on to end is not observed ending -- no frame applies
+    it -- so this is the only end its file gets.
+
+    It raises nothing, as ``_close_board_log`` does not.
+    """
+    writer = state.fleet_writer
+    try:
+        live = sorted(_live_sessions(state.store.snapshot()))
+        for change in fleetsync.shutdown(live, time.time()):
+            writer.submit(change)
+        reports = writer.close()
+    except Exception as exc:  # noqa: BLE001 - the shutdown behind this must still run
+        LOG.error("fleet", f"the session files could not be closed: {type(exc).__name__}: {exc}")
+        return
+    for report in reports:
+        if isinstance(report, fleetsync.Outcome) and not report.written:
+            assert isinstance(report.result, sessionfile.Unwritten)
+            LOG.error(
+                "fleet",
+                f"{report.session_id}: its session file was not written at exit"
+                f" ({', '.join(sorted(report.keys))}): {report.result.reason}",
+            )
+    _read_fleet_reports(tuple(r for r in reports if isinstance(r, fleetsync.Latched)))
+
+
+# How long the quit waits for command records still queued to reach the disk.
+_COMMAND_FILES_CLOSE_S = 2.0
+
+
+def _close_commands(state: AppState) -> None:
+    """
+    Kill every running command's process group and wait a bounded time for
+    their ends (``Runner.close``), and log what could not be confirmed dead.
+
+    **Quitting kills what is running; closing a session does not.** Each
+    command ends ``Cancelled(SHUTDOWN)`` in its ``end.json``, written by the
+    runner on that command's worker. The ``CommandEnded`` each one emits is
+    applied by no frame, because none follows: the file is the record, and the
+    next start reads it. A command that is only asked gets no end here and
+    reads back as lapsed.
+
+    The queued records go first, for at most ``_COMMAND_FILES_CLOSE_S``: a
+    ``request.json`` still queued is what a run's record follows. Ahead of the
+    pool's shutdown, for ``_close_board_log``'s reasons, and it raises nothing,
+    as that does not. The quit is longer by at most the two bounds.
+    """
+    try:
+        files = state.command_files
+        if files is not None and not files.close(_COMMAND_FILES_CLOSE_S):
+            LOG.error("command", "command records were still being written at exit")
+        runner = state.command_runner
+        if runner is None:
+            return
+        running = [
+            c.id
+            for c in state.store.snapshot().commands.values()
+            if c.state is CommandState.RUNNING
+        ]
+        unconfirmed = runner.close(commandrun.CLOSE_TIMEOUT)
+        if running:
+            LOG.warn(
+                "command",
+                f"{len(running)} running command(s) were killed at exit"
+                f" ({', '.join(running)}); how each ended is in its {commandfile.END_NAME}",
+            )
+        for left in unconfirmed:
+            LOG.error(
+                "command",
+                f"{left.command_id} could not be confirmed dead at exit"
+                f" (its shell's session {left.pid}): {left.reason}",
+            )
+        _record_unconfirmed(state, unconfirmed)
+    except Exception as exc:  # noqa: BLE001 - the shutdown behind this must still run
+        LOG.error("command", f"the commands could not be closed: {type(exc).__name__}: {exc}")
+
+
+def _record_unconfirmed(state: AppState, unconfirmed: Iterable[commandrun.Unconfirmed]) -> None:
+    """
+    Put on disk, beside each command's own record, that pptmstr quit without
+    seeing it end. The log this is also said to is in memory and on a standard
+    output nobody may be reading, and both are gone with the window; the next
+    start reads this (``commandfile.write_unconfirmed``).
+
+    Only for a command whose end was not recorded. One that was killed and not
+    seen to go has an ``end.json`` that says so itself.
+    """
+    files = state.command_files
+    if files is None:
+        return
+    snap = state.store.snapshot()
+    for left in unconfirmed:
+        if left.reason != commandrun.NOT_RECORDED_IN_TIME:
+            continue
+        held = snap.commands.get(left.command_id)
+        if held is None:
+            continue
+        written = commandfile.write_unconfirmed(
+            held.session_id,
+            held.id,
+            f"pptmstr quit, sent its shell's session SIGTERM, and did not see it end:"
+            f" {left.reason}",
+            time.time(),
+            left.pid,
+            files.root,
+        )
+        if isinstance(written, commandfile.Unwritten):
+            LOG.error("command", f"{held.id}: that was not recorded either: {written.reason}")
+
+
+def _look(command: Command, root: Path | None) -> commandrun.Looked | None:
+    """
+    What is alive on this machine, now, of a run nobody recorded the end of.
+    None when there is nothing to look for: the command is not such a run, no
+    ``started.json`` names its process, or a ``gone.json`` says an earlier look
+    saw that process gone. **Reads the disk and ``/proc``.**
+
+    A process seen gone is not looked for again. Its pid is handed out to
+    something else in time, and a record asked about at every start would in
+    the end be asked about a process that only has its number.
+    """
+    end = command.end
+    if end is None or end.outcome != EndUnknown():
+        return None
+    started = commandfile.read_started(command.session_id, command.id, root)
+    if started is None:
+        return None
+    if commandfile.read_gone(command.session_id, command.id, root) is not None:
+        return None
+    return commandrun.survivor(started)
+
+
+def _as_found(command: Command, found: commandrun.Looked, root: Path | None) -> Command:
+    """
+    ``command``, a run with no recorded end, as a look at the machine leaves
+    it. **Writes ``gone.json``** for a process seen gone.
+
+    A file never says a process is alive (``commandfile.read_command``); this
+    is where the machine's answer is put on the record. Found, with its shell,
+    the command is one left running unsupervised: still ended, never runnable,
+    and owed a row that says how to end it. Processes found without the shell
+    are not known to be the command's: the record says what was found
+    (``End.unconfirmed``) and names no survivor, so no row offers to kill
+    them. Gone, and not looked for, both leave it a plain ``EndUnknown``,
+    which claims nothing about what is alive.
+    """
+    end = command.end
+    assert end is not None
+    match found:
+        case Survivor():
+            outcome = EndUnknown(survivor=found)
+            return dataclasses.replace(command, end=dataclasses.replace(end, outcome=outcome))
+        case commandrun.Gone(why=why):
+            written = commandfile.write_gone(command.session_id, command.id, why, time.time(), root)
+            if (
+                isinstance(written, commandfile.Unwritten)
+                and written.reason != commandfile.ALREADY_RECORDED
+            ):
+                LOG.warn(
+                    "command",
+                    f"{command.id}: that its process is gone was not recorded, so it is"
+                    f" looked for again at the next start: {written.reason}",
+                )
+            return command
+        case commandrun.Unidentified():
+            said = commandrun.unidentified_line(found)
+            unconfirmed = said if end.unconfirmed is None else f"{end.unconfirmed}. Also: {said}"
+            return dataclasses.replace(
+                command, end=dataclasses.replace(end, unconfirmed=unconfirmed)
+            )
+        case commandrun.NotLooked():
+            return command
+        case _:
+            assert_never(found)
+
+
+STILL_THERE = "looked again: it is still there"
+GONE = (
+    "looked again: nothing is alive in its shell's session, and how it ended is not known."
+    " A process that left that session with setsid is not something pptmstr can find"
+)
+UNIDENTIFIED = (
+    "looked again: its shell is gone and what is in its session cannot be said to be this"
+    " command, so there is no kill line; its record says what was found"
+)
+NOT_LOOKED = "could not look again, so this row is as it was: "
+RECORD_UNREADABLE = "the record of its process can no longer be read"
+
+
+def _check_survivor(state: AppState, command_id: CommandId) -> None:
+    """
+    The row's 'check again' for a command left running unsupervised: look for
+    its session once more, off this thread, and put what was found on the
+    queue.
+
+    Found, the record is brought up to date. Gone, the command becomes a plain
+    ``EndUnknown``: its row leaves the queue and its session may be given
+    another command, and ``gone.json`` is written so that it is not looked for
+    again. Found without its shell, it becomes an ``EndUnknown`` whose record
+    says what is there and offers nothing to kill it with. **Not looked for --
+    ``/proc`` could not be read -- nothing is put on the queue**: the row and
+    the hold on its session stay as they were, and the line under the row says
+    why. A look that fails is not a look that found nothing.
+
+    No ``end.json`` is written by any of these: how the command ended is
+    still not known.
+    """
+    snap = state.frame_snap
+    held = None if snap is None else snap.commands.get(command_id)
+    files = state.command_files
+    if held is None or held.unsupervised is None or held.end is None:
+        return
+    root = None if files is None else files.root
+    plain = dataclasses.replace(held, end=dataclasses.replace(held.end, outcome=EndUnknown()))
+
+    def look() -> None:
+        try:
+            found = _look(plain, root) or commandrun.NotLooked(RECORD_UNREADABLE)
+            if isinstance(found, commandrun.NotLooked):
+                state.command_checks.put((command_id, NOT_LOOKED + found.reason))
+                return
+            now = _as_found(plain, found, root)
+            assert now.end is not None
+            state.bridge.emit(CommandEnded(command_id, now.end))
+            said = {Survivor: STILL_THERE, commandrun.Gone: GONE}.get(type(found), UNIDENTIFIED)
+            state.command_checks.put((command_id, said))
+        except Exception as exc:  # noqa: BLE001 - a look that failed is said, not raised
+            state.command_checks.put((command_id, f"{NOT_LOOKED}{type(exc).__name__}: {exc}"))
+
+    threading.Thread(target=look, name=f"command-check-{command_id}", daemon=True).start()
+
+
+def _read_survivor_checks(state: AppState) -> None:
+    """Take what the looks that have answered found. On the draw thread."""
+    while True:
+        try:
+            command_id, said = state.command_checks.get_nowait()
+        except queue.Empty:
+            return
+        state.command_checked[command_id] = f"{said} ({time.strftime('%H:%M:%S')})"
+
+
+def _log_look(session_id: str, command_id: CommandId, found: commandrun.Looked) -> None:
+    """
+    Say in the log what a start found of a run with no recorded end, where
+    that is something the operator has to act on or was not told.
+    """
+    match found:
+        case Survivor():
+            LOG.error(
+                "command",
+                f"{session_id}: {command_id} is STILL RUNNING with nothing holding it:"
+                f" its shell's session {found.pid}, {found.members} process(es)."
+                f" To end it: {commandrun.kill_line(found)}",
+            )
+        case commandrun.Unidentified():
+            LOG.error(
+                "command", f"{session_id}: {command_id}: {commandrun.unidentified_line(found)}"
+            )
+        case commandrun.NotLooked(reason=reason):
+            # Where nothing can ever be looked for, saying so of every record at
+            # every start says nothing.
+            if reason not in (commandrun.NO_PROC, commandrun.NOT_ON_RECORD):
+                LOG.warn(
+                    "command",
+                    f"{session_id}: {command_id} has no recorded end and could not be looked"
+                    f" for, so whether it is still running is not known: {reason}",
+                )
+        case commandrun.Gone():
+            pass
+        case _:
+            assert_never(found)
+
+
+def _restore_commands(state: AppState, session_id: str) -> None:
+    """
+    Read one session's command records back and put what they hold on the
+    queue (``intents.CommandsRestored``). **Blocks on the disk**: called on the
+    recall worker, and on a worker thread from a resume.
+
+    Once per session per process (``CommandFiles.claim_restore``): after the
+    first read this window holds everything the files do, and the store skips
+    a command it already has.
+
+    Nothing comes back open -- ``commandfile.restore`` yields only ended
+    commands, and the store refuses a batch that holds any other. A run with
+    no recorded end is looked for on this machine (``_look``), and one found
+    alive comes back ended all the same, as a command left running
+    unsupervised. What could not be read is logged here, once, and counted for
+    the status bar.
+
+    **A command this window already holds is not looked for.** A session
+    resumed in the window that is running its command has that command on disk
+    as a run with no end, and its process alive: found, it would be reported
+    as running with nothing holding it while this window's runner holds it.
+    The store skips such a record, and so does the look.
+    """
+    files = state.command_files
+    if files is None or not files.claim_restore(session_id):
+        return
+    restored = commandfile.restore(session_id, files.root)
+    if restored.commands:
+        held = state.store.snapshot().commands
+        looked = []
+        for command in restored.commands:
+            found = None if command.id in held else _look(command, files.root)
+            if found is None:
+                looked.append(command)
+                continue
+            looked.append(_as_found(command, found, files.root))
+            _log_look(session_id, command.id, found)
+        state.bridge.emit(CommandsRestored(session_id, tuple(looked)))
+    for command_id, reason in restored.unreadable:
+        LOG.warn(
+            "command",
+            f"{session_id}: the record of {command_id} cannot be read, so it is not shown"
+            f" and its files are left as they are: {reason}",
+        )
+    for command_id in restored.newer:
+        LOG.warn(
+            "command",
+            f"{session_id}: {command_id} has a file written by a newer build; it is read"
+            " from the keys this one knows",
+        )
+    if restored.problem is not None:
+        LOG.warn("command", f"{session_id}: its commands were not all read: {restored.problem}")
+    if restored.unreadable or restored.newer or restored.problem is not None:
+        files.fell_short(
+            len(restored.unreadable), len(restored.newer), int(restored.problem is not None)
+        )
+
+
+# What lists the sessions the CLI can resume, for the recall: every project's
+# transcripts. ``fleetsync.recall``'s own default, named so ``_start`` can be
+# handed another.
+Lister = Callable[[], Iterable[SessionRow]]
+
+
+# Where the README says what to do about a board log left at the old path, by
+# the heading it is under. A test holds this to a heading the README has.
+README_BOARD_LOG_HEADING = "The board is written to disk, and nothing deletes it"
+_README_BOARD_LOG = f"README, '{README_BOARD_LOG_HEADING}'"
+
+
+def _migrate_board_logs() -> boardsync.Migration:
+    """
+    Carry the board logs kept under the old path to their sessions' own
+    directories (``boardsync.migrate``), and say what was not carried.
+
+    **Synchronous, once, before the window opens and before any writer exists**:
+    a log read or appended to while this ran could be reached by either name.
+    One listing and a rename per entry, and unbounded on a mount that hangs --
+    so the line before the call is what a start that never finishes is
+    attributed to.
+    """
+    LOG.info(
+        "board",
+        f"moving board logs from {boardsync.legacy_root()} to {sessionfile.root()}"
+        " (one rename each; a start that stops here is waiting on that directory)",
+    )
+    migration = boardsync.migrate()
+    if migration.unlisted is not None:
+        LOG.error(
+            "board",
+            f"{boardsync.legacy_root()} could not be listed, so no board log was moved"
+            f" ({migration.unlisted}); a session resumed from one there runs unrecorded",
+        )
+    for moved in migration.moved:
+        if moved.unlinked is not None:
+            LOG.warn(
+                "board",
+                f"{moved.session_id}: its board log was moved to {moved.target}, and no"
+                f" link could be left at {moved.source} ({moved.unlinked}); another pptmstr"
+                " appending by the old name starts a second history there",
+            )
+    for left in migration.left:
+        LOG.warn(
+            "board",
+            f"{left.name}: its board log was left at the old path {left.source}:"
+            f" {left.reason}."
+            + (
+                " It has records in two places and runs unrecorded when resumed, until one"
+                f" history is left ({_README_BOARD_LOG})"
+                if left.twice
+                else " It is read from there and runs unrecorded when resumed, until that"
+                f" directory is moved ({_README_BOARD_LOG})"
+            ),
+        )
+    if migration.moved:
+        LOG.info("board", f"moved {len(migration.moved)} board log(s)")
+    return migration
+
+
+def _recall_fleet(state: AppState, list_sessions: Lister | None) -> None:
+    """
+    Read the session files and put each session that is on the fleet back as a
+    closed card. **The body of the recall worker**: ``fleetsync.recall`` reads a
+    file per session and then lists every transcript the CLI holds.
+
+    Each card is an intent through the bridge, so the store builds it on the
+    draw thread like any other record, in the order the files gave: most
+    recently active first. The fleet writer is told of the session before the
+    card is emitted, since removing the card is a change to that file.
+
+    Each recalled session's command records are read back behind its card
+    (``_restore_commands``), every one of them ended.
+
+    **A card is all this makes of a session.** Nothing is handed to the pool, no board log is
+    read and nothing is added to ``board_logs``: a session with an entry there
+    would have its log skipped when it is resumed (``_launch``).
+
+    Where the CLI's naming puts each transcript is worked out here, because the
+    naming resolves the directory, and assigned whole before the first card:
+    the pane that draws it looks a path up and computes none. Not for a session
+    the CLI no longer lists, whose card says the transcript is gone.
+
+    Everything that fell short is logged once, here, and ``state.fleet`` is what
+    the status bar goes on saying it from.
+    """
+    try:
+        root = state.fleet_writer.root
+        fleet = (
+            fleetsync.recall(root)
+            if list_sessions is None
+            else fleetsync.recall(root, list_sessions)
+        )
+        paths: dict[str, str] = {}
+        for card in fleet.sessions:
+            if card.cwd and card.recalled.transcript is not TranscriptPresence.GONE:
+                try:
+                    where = session_details.transcript_for(card.cwd, card.session_id)
+                    paths[card.session_id] = str(where)
+                except Exception:  # noqa: BLE001 - the card is worth more than its path
+                    continue
+        state.closed_paths = paths
+        for card in fleet.sessions:
+            state.fleet_writer.admit(card.session_id)
+            state.bridge.emit(card)
+        _say_recall(fleet)
+        # After the cards and before the answer is published: a reader that
+        # waits for ``fleet`` finds every restored command already queued.
+        for card in fleet.sessions:
+            try:
+                _restore_commands(state, card.session_id)
+            except Exception as exc:  # noqa: BLE001 - the cards are worth more than this
+                LOG.error(
+                    "command",
+                    f"{card.session_id}: its commands could not be read back:"
+                    f" {type(exc).__name__}: {exc}",
+                )
+        state.fleet = fleet
+    except Exception as exc:  # noqa: BLE001 - a worker's exception is otherwise never seen
+        reason = f"{type(exc).__name__}: {exc}"
+        LOG.error("fleet", f"the fleet could not be recalled: {reason}")
+        LOG.debug("fleet", traceback.format_exc())
+        # Kept for the status bar: the log line is said once, and ``fleet``
+        # staying None is also what a recall still on its way looks like.
+        state.recall_failed = reason
+
+
+def _say_recall(fleet: fleetsync.Fleet) -> None:
+    """
+    One line for what was recalled and one for each way the recall fell short.
+    """
+    gone = sum(1 for s in fleet.sessions if s.recalled.transcript is TranscriptPresence.GONE)
+    LOG.info(
+        "fleet",
+        f"recalled {len(fleet.sessions)} closed session(s)"
+        + (f", {gone} with no transcript left" if gone else "")
+        + (f", {len(fleet.killed)} that never recorded an end" if fleet.killed else "")
+        + (f"; {len(fleet.detached)} removed from the fleet earlier" if fleet.detached else ""),
+    )
+    for session_id, reason in fleet.unreadable:
+        LOG.warn(
+            "fleet",
+            f"{session_id}: its session file cannot be read, so it has no card and the"
+            f" file is left as it is: {reason}",
+        )
+    if fleet.problem is not None:
+        LOG.warn("fleet", f"the session files were not all read: {fleet.problem}")
+    if fleet.unlisted is not None:
+        LOG.warn(
+            "fleet",
+            "the CLI's transcripts could not be listed, so no closed card can say whether"
+            f" its session can still be resumed: {fleet.unlisted}",
+        )
+
+
+def _start(
+    args: argparse.Namespace,
+    found: settings_mod.Loaded,
+    *,
+    list_sessions: Lister | None = None,
+) -> AppState:
+    """
+    The state a process begins with: what the settings file said, the command
+    line over it, a board writer only where a board is to be recorded, and the
+    closed fleet on its way.
+
+    ``found.board_log_unread`` is kept beside the settings and not folded into
+    them. ``board_log`` is already off wherever it is set, so no writer is built;
+    the reason is what tells the pane this was not the operator's choice and
+    tells ``_save`` not to write it back.
+
+    **The order is the content.**
+
+    1. The board logs are moved, where a board is to be recorded, before any
+       writer exists and before anything can be resumed (``_migrate_board_logs``).
+    2. The state and its writers are built. Neither writer touches the disk
+       until it is handed something.
+    3. The recall worker is started, last: it emits into a bridge that exists
+       and admits to a writer that exists. Its cards arrive on whichever frame
+       follows its read; a launch that beats one wins, since a recall replaces
+       no record (``intents.SessionRecalled``).
+
+    Under the fake driver none of the three touches the disk: no move, no board
+    writer, no recall, and a fleet writer that is told of no session. Nor is
+    there a command runner or a writer of command records: a command approved
+    there is ended at once as never started.
+
+    ``list_sessions`` is the lister the recall asks; None is every transcript
+    the CLI holds, which is the operator's real ``~/.claude/projects``.
+    """
+    loaded = found.settings
+    if args.theme:
+        loaded = loaded.merged(theme=args.theme)
+    if args.fps_idle is not None:
+        loaded = loaded.merged(fps_idle=args.fps_idle)
+    if args.cap is not None:
+        loaded = loaded.merged(concurrency_cap=args.cap)
+
+    recorded = loaded.board_log and not args.fake
+    migration = _migrate_board_logs() if recorded else None
+
+    state = AppState(
+        store=Store(),
+        bridge=Bridge(),
+        settings=loaded,
+        board_log_unread=found.board_log_unread,
+        fake=bool(args.fake),
+        migration=migration,
+    )
+    state.pool = SessionPool(state.bridge, cap=state.settings.concurrency_cap)
+    if recorded:
+        # Builds nothing on disk: a session's directory is made by its first record.
+        state.board_writer = boardsync.BoardWriter()
+    state.pending_layout = args.layout
+    state.command_host = _command_host()
+    if state.command_host.no_shell is not None:
+        LOG.warn(
+            "command",
+            f"no command an agent asks for can be run from here: {state.command_host.no_shell}",
+        )
+    if not args.fake:
+        # Neither touches the disk or starts a thread until it is handed
+        # something. On the fleet writer's root, which is where a session's
+        # other files are.
+        state.command_files = CommandFiles(state.fleet_writer.root)
+        state.command_runner = commandrun.Runner(
+            _command_ended(state), root=state.fleet_writer.root
+        )
+        # A daemon, as the writers' workers are: a listing held by a dead mount
+        # must not hold the exit.
+        threading.Thread(
+            target=_recall_fleet, args=(state, list_sessions), name="fleet-recall", daemon=True
+        ).start()
+    return state
+
+
+# The signals that end pptmstr as closing its window does. Without a handler
+# ``SIGTERM`` and ``SIGHUP`` kill the process where it stands: no ``finally``, so
+# nothing closes the runner, and a running command is left with no timeout and
+# no window. ``SIGINT`` without one is Python's ``KeyboardInterrupt``, raised in
+# whichever frame callback runs next and thrown through the window loop's C++.
+EXIT_SIGNALS = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+
+
+def exit_on_signals(request_exit: Callable[[], None]) -> Callable[[], None]:
+    """
+    Have each of ``EXIT_SIGNALS`` ask the window loop to end, so that the
+    ``finally`` in ``main`` runs and ``_shut_down`` kills what is running.
+    Returns what ``main`` calls once the loop has returned.
+
+    The handler takes no lock: Python runs it on the main thread between two
+    bytecodes, which may be inside anything. The first thing it does is put the
+    default action back for **every** one of the signals, so that the second
+    signal, whichever it is, kills a shutdown that has hung -- a terminal that
+    closes sends ``SIGHUP`` and a session manager follows with ``SIGTERM``.
+    For ``SIGINT`` that is the kernel's default and not Python's.
+
+    After the loop has returned the handler asks for nothing:
+    ``request_exit`` belongs to a loop that no longer exists, and the shutdown
+    the signal wants is already under way. The first signal then only arms the
+    second.
+
+    **What this does not cover.** ``SIGKILL`` and the kernel's out-of-memory
+    killer cannot be handled, and a crash in native code runs nothing. After
+    those a command is still running; its record names its shell's session,
+    and the next start finds it (``_look``).
+    """
+    loop_over = False
+
+    def handler(signum: int, frame: object) -> None:
+        for each in EXIT_SIGNALS:
+            signal.signal(each, signal.SIG_DFL)
+        if not loop_over:
+            request_exit()
+
+    def the_loop_returned() -> None:
+        nonlocal loop_over
+        loop_over = True
+
+    for signum in EXIT_SIGNALS:
+        signal.signal(signum, handler)
+    return the_loop_returned
+
+
+def _ask_window_to_close() -> None:
+    hello_imgui.get_runner_params().app_shall_exit = True
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1088,18 +4533,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = ap.parse_args(argv)
 
-    loaded = settings_mod.load()
-    if args.theme:
-        loaded = loaded.merged(theme=args.theme)
-    if args.fps_idle is not None:
-        loaded = loaded.merged(fps_idle=args.fps_idle)
-    if args.cap is not None:
-        loaded = loaded.merged(concurrency_cap=args.cap)
-    theme.set_theme(loaded.theme)
-
-    state = AppState(store=Store(), bridge=Bridge(), settings=loaded)
-    state.pool = SessionPool(state.bridge, cap=state.settings.concurrency_cap)
-    state.pending_layout = args.layout
+    state = _start(args, settings_mod.read())
+    theme.set_theme(state.settings.theme)
 
     runner = hello_imgui.RunnerParams()
     runner.app_window_params.window_title = "pptmstr"
@@ -1121,6 +4556,10 @@ def main(argv: list[str] | None = None) -> int:
     runner.remember_selected_alternative_layout = True
     state.runner = runner
     runner.ini_folder_type = hello_imgui.IniFolderType.app_user_config_folder
+    # None is a runner that keeps no ini, and then there is no saved layout to keep.
+    ini = hello_imgui.ini_settings_location(runner)
+    if ini is not None:
+        _keep_saved_layouts(Path(ini))
 
     runner.fps_idling.enable_idling = True
     runner.fps_idling.fps_idle = state.settings.fps_idle
@@ -1183,21 +4622,18 @@ def main(argv: list[str] | None = None) -> int:
                         session_base=tree.session_base(_cli_cwd),
                         template=args.template,
                     ),
+                    origin="command-line task",
                 )
 
         state.bridge.submit(launch_initial())
         LOG.info("app", f"{len(args.task)} task(s), cap {state.settings.concurrency_cap}")
 
+    the_loop_returned = exit_on_signals(_ask_window_to_close)
     try:
         immapp.run(runner)
     finally:
-        if state.driver is not None:
-            state.driver.stop()
-        if state.pool is not None:
-            # Cancel sessions before the loop dies, so no CLI subprocess outlives
-            # the window that was supervising it.
-            state.bridge.submit(state.pool.shutdown()).result(timeout=10)
-        state.bridge.stop()
+        the_loop_returned()
+        _shut_down(state)
     return 0
 
 

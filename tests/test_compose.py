@@ -53,3 +53,50 @@ def test_awaiting_input_is_not_terminal() -> None:
     exists to serve.
     """
     assert not AgentState.AWAITING_INPUT.is_terminal
+
+
+# -- a session recalled from its file -----------------------------------------------
+
+
+def _conversation(monkeypatch, snap, node):  # type: ignore[no-untyped-def]
+    from unittest.mock import MagicMock
+
+    from pptmstr.ui import compose
+    from tests.test_ui_text import said_by
+
+    acts = {name: MagicMock() for name in ("send", "interrupt", "close")}
+    said = said_by(
+        monkeypatch,
+        lambda: compose.draw_conversation(snap, ComposeState(), node, **acts),
+        compose,
+    )
+    return said, acts
+
+
+def test_a_closed_session_is_sent_to_resume_and_given_no_composer(monkeypatch) -> None:
+    """
+    "session done - it can no longer be messaged" is two false things about a
+    recalled session: nothing here saw it finish, and it can be messaged, by
+    resuming it. The buttons under it act on a process, and there is none.
+    """
+    from tests.test_ui_text import CLOSED_ROOT, recalled_snapshot
+
+    said, _ = _conversation(monkeypatch, recalled_snapshot(), CLOSED_ROOT)
+
+    assert said.strings == ["closed — Resume… to continue"]
+    assert "button" not in said.calls and "begin_disabled" not in said.calls
+
+
+def test_a_session_that_finished_here_keeps_its_composers_own_words(monkeypatch) -> None:
+    from pptmstr.intents import AgentFinished
+    from pptmstr.store import Store
+    from tests.test_ui_text import RAN_ROOT, run
+
+    store = Store()
+    run(store)
+    store.apply(AgentFinished(RAN_ROOT, AgentState.DONE, ended_at=4.0), now=4.0)
+    said, _ = _conversation(monkeypatch, store.snapshot(), RAN_ROOT)
+
+    assert "session done - it can no longer be messaged" in said.strings
+    assert {"interrupt", "close session"} <= set(said.strings)
+    assert not said.has("closed —")

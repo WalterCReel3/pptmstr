@@ -30,6 +30,8 @@ from .intents import (
     CompactionObserved,
     ConcernPosted,
     ContextPolled,
+    DecisionAnswered,
+    DecisionRaised,
     InboxRead,
     StateChanged,
     TaskClaimRequested,
@@ -42,8 +44,10 @@ from .model import (
     AgentState,
     Concern,
     ContextSnapshot,
+    Decision,
     NodeId,
     PendingApproval,
+    Standing,
     Task,
 )
 from .transcript import SegmentKind, Transcript
@@ -282,6 +286,7 @@ class FakeDriver:
                 ),
                 touches=("tle/parse.py",),
                 declared_at=1.0,
+                property="A line that fails to parse is reported, never skipped.",
             ),
             Task(
                 id="t2",
@@ -312,7 +317,18 @@ class FakeDriver:
         # worker that did its job looks like. Not a warning, and the fixture needs
         # it precisely so that a regression putting the warning here is visible.
         self.bridge.emit(TaskClaimRequested(scout, request_id="fake-k1", task_id="t1"))
-        self.bridge.emit(TaskCompleted(scout, "t1", at=time.monotonic()))
+        # With a result and a list of what was not run, so the pane's ledger line
+        # has a row to draw. t5 below is never completed and t1 is the only
+        # finished row there is.
+        self.bridge.emit(
+            TaskCompleted(
+                scout,
+                "t1",
+                at=time.monotonic(),
+                result="Offsets are in one table; 14 parser tests pass.",
+                not_run="Nothing was tried against a real catalogue file.",
+            )
+        )
         self.bridge.emit(
             AgentFinished(scout, AgentState.DONE, ended_at=time.monotonic(), error=None)
         )
@@ -354,12 +370,74 @@ class FakeDriver:
                         # rather than an unsettable field.
                         edited=cid == "fake-c2",
                         task_id=about,
+                        # One marked row, so the marker is drawn beside two
+                        # that are not.
+                        incident=cid == "fake-c3",
                     ),
                 )
             )
         # One read, so the log shows delivered and waiting side by side rather than
         # three rows in the same state.
         self.bridge.emit(InboxRead(node_id=root, request_id="fake-r1", at=time.monotonic()))
+        self._seed_decisions(root, builder)
+
+    def _seed_decisions(self, lead: NodeId, worker: NodeId) -> None:
+        """
+        Two decisions on the team session, so the surfaces that draw one have both
+        of its lives to draw: open in the operator's queue, and answered.
+
+        The open one is the worker's, the operator's to take, not reversible, and
+        names a task on the board -- every field the queue row is composed from
+        is set. The answered one is the lead's, already taken and wanting
+        ratification, blocking nothing on the board, with reversibility left
+        unstated and an answer of more than one line, which is the text that has
+        to come back to its asker exactly.
+
+        Evidence and recommendation are both filled on both, because the reason
+        they are separate fields is only visible when a surface shows them apart.
+
+        The answer is emitted here as the operator's, with no node: this fixture
+        stands in for the person at the pane, which nothing on the bus may do.
+        """
+        now = time.monotonic()
+        asked = (
+            Decision(
+                id="fake-d1",
+                asker=worker,
+                question="The checksum is wrong on live data. Reject those lines or keep them?",
+                blocks=("t2",),
+                if_unanswered="I reject them and list each one in the result.",
+                evidence=(
+                    "Sixty lines of the sample catalogue fail modulo-10.\n"
+                    "Every one of them parses; only the last digit disagrees."
+                ),
+                recommendation="Reject. A line that fails its checksum is not data.",
+                standing=Standing.OPERATORS,
+                reversible=False,
+                raised_at=now,
+            ),
+            Decision(
+                id="fake-d2",
+                asker=lead,
+                question="I split the parser task in two rather than widen it. Keep the split?",
+                blocks=(),
+                if_unanswered="The split stands.",
+                evidence="t1 and t2 both write tle/parse.py, so the board ordered them.",
+                recommendation="Keep it: the two halves are reviewed separately.",
+                standing=Standing.TAKEN,
+                reversible=None,
+                raised_at=now,
+            ),
+        )
+        for decision in asked:
+            self.bridge.emit(DecisionRaised(decision.asker, decision, at=now))
+        self.bridge.emit(
+            DecisionAnswered(
+                "fake-d2",
+                "Keep the split.\nBut t3 waits for both halves, not only the second.",
+                at=now,
+            )
+        )
 
     def _spawn(
         self,

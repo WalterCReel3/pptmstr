@@ -94,12 +94,27 @@ writes to that directory OUTSIDE every repo: if that lands in a session arm, the
 tempdir is itself inside a sandbox-writable area and no denial below it is
 interpretable.
 
+**`--subdir` moves every leg one level down, and asks where the boundary then is.**
+The arms above run at the root of the worktree and of the clone. With `--subdir NAME`
+the session's cwd is `<root>/NAME`, a tracked directory, and the `s` steps aim at what
+is then outside cwd and inside the checkout: a new file and a new directory at the
+root, the tracked file there, the same root reached as `..`, and the second worktree's
+working tree. The root is named by `git rev-parse --show-toplevel` inside a
+substitution for the reason 2a's path is; s3 spells it `..` to set the two beside each
+other. In the clone arm this is also the only layout where the clone's own `.git` is
+outside cwd, so every step aimed at the common dir asks a question there that it does
+not ask at the root. Step 1b, a file in cwd, is the control: a session leg in which it
+did not land says nothing about any denial beside it.
+
 Usage:  .venv/bin/python scripts/verify_worktree_containment.py [--base DIR] [--keep]
-            [--skip-write-arm] [--skip-push-and-network]
+            [--skip-write-arm] [--skip-push-and-network] [--subdir NAME]
+            [--only {worktree,clone}]
 
 `--base` is the directory the fresh tempdir is created in (default: the system one).
 `--keep` leaves the fixtures on disk for inspection.
 `--skip-write-arm` omits arm X; `--skip-push-and-network` omits steps 6a-6c.
+`--subdir NAME` runs every leg in the directory NAME under the worktree or clone root.
+`--only KIND` runs the host leg and the Bash arm of one kind, and not the other.
 """
 
 from __future__ import annotations
@@ -141,6 +156,12 @@ WRITE_MARKER = "probe-write-tool-marker"
 RC_SUFFIX = '; echo "rc=$?"'
 W2_BRANCH = "probe-wt2"
 THROWAWAY_BRANCH = "probe-throwaway"
+# The tracked file that makes `--subdir`'s directory part of the checkout.
+SUBDIR_FILE = "inner.txt"
+ROOT_FILE = "probe-in-root.txt"
+ROOT_DIR = "probe-dir-in-root"
+DOTDOT_FILE = "probe-by-dotdot.txt"
+W2_TREE_FILE = "probe-in-w2-tree.txt"
 # 2001-09-09T01:46:40Z. No git command sets an index mtime to this, so finding it on
 # an index is step p4a and nothing else.
 INDEX_MTIME = 1_000_000_000
@@ -173,8 +194,10 @@ class Fixture:
     """
     One throwaway repo R, a bare remote, and the directory a leg runs in.
 
-    `kind` is "worktree" (cwd is a sibling linked worktree of R on branch `probe-wt`)
-    or "clone" (cwd is `git clone R` on branch `probe-clone`, with `origin` -> R).
+    `kind` is "worktree" (`root` is a sibling linked worktree of R on branch `probe-wt`)
+    or "clone" (`root` is `git clone R` on branch `probe-clone`, with `origin` -> R).
+    `cwd` is `root`, or a tracked directory under it when the fixture was built with a
+    `subdir`.
     Either way R also has a second sibling linked worktree W2 on `probe-wt2`, which no
     leg runs in: it stands for another session's worktree.
 
@@ -187,6 +210,7 @@ class Fixture:
     top: Path
     main: Path
     bare: Path
+    root: Path
     cwd: Path
     branch: str
     first: str
@@ -216,7 +240,7 @@ class Fixture:
         return self.main / "escape-into-main-tree.txt"
 
 
-def build_fixture(top: Path, kind: str) -> Fixture:
+def build_fixture(top: Path, kind: str, subdir: str | None = None) -> Fixture:
     top.mkdir(parents=True)
     main = top / "R"
     bare = top / "remote.git"
@@ -233,6 +257,10 @@ def build_fixture(top: Path, kind: str) -> Fixture:
     identify(main)
     (main / "tracked.txt").write_text("one\n")
     must(main, "add", "tracked.txt")
+    if subdir is not None:
+        (main / subdir).mkdir(parents=True)
+        (main / subdir / SUBDIR_FILE).write_text("inner\n")
+        must(main, "add", str(Path(subdir) / SUBDIR_FILE))
     must(main, "commit", "-q", "-m", "first")
     first = must(main, "rev-parse", "HEAD")
     (main / "tracked.txt").write_text("two\n")
@@ -246,14 +274,17 @@ def build_fixture(top: Path, kind: str) -> Fixture:
     must(main, "branch", THROWAWAY_BRANCH, "main")
 
     if kind == "worktree":
-        cwd, branch = top / "W", "probe-wt"
-        must(main, "worktree", "add", "-q", "-b", branch, str(cwd), "main")
+        root, branch = top / "W", "probe-wt"
+        must(main, "worktree", "add", "-q", "-b", branch, str(root), "main")
     else:
-        cwd, branch = top / "C", "probe-clone"
-        must(top, "clone", "-q", str(main), str(cwd))
-        must(cwd, "checkout", "-q", "-b", branch)
-        must(cwd, "branch", THROWAWAY_BRANCH, "origin/main")
-        identify(cwd)
+        root, branch = top / "C", "probe-clone"
+        must(top, "clone", "-q", str(main), str(root))
+        must(root, "checkout", "-q", "-b", branch)
+        must(root, "branch", THROWAWAY_BRANCH, "origin/main")
+        identify(root)
+    cwd = root if subdir is None else root / subdir
+    if not cwd.is_dir():
+        raise RuntimeError(f"fixture: {cwd} is not a directory of the checkout")
 
     common = Path(must(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"))
     git_dir = Path(must(cwd, "rev-parse", "--absolute-git-dir"))
@@ -270,10 +301,23 @@ def build_fixture(top: Path, kind: str) -> Fixture:
     if not doomed.is_file():
         raise RuntimeError(f"fixture: no loose object at {doomed}")
     fixture = Fixture(
-        kind, top, main, bare, cwd, branch, first, second, common, git_dir, w2, w2_admin, doomed
+        kind,
+        top,
+        main,
+        bare,
+        root,
+        cwd,
+        branch,
+        first,
+        second,
+        common,
+        git_dir,
+        w2,
+        w2_admin,
+        doomed,
     )
     fixture.path_file.write_text(f"{main / '.git'}\n")
-    dot_git = cwd / ".git"
+    dot_git = root / ".git"
     fixture.pointer_before = dot_git.read_text() if dot_git.is_file() else "<directory>"
     fixture.config_before = (main / ".git" / "config").read_text()
     return fixture
@@ -292,6 +336,18 @@ def bash_commands(fx: Fixture, push_and_network: bool = True) -> list[tuple[str,
         ("1b", "echo probe > probe-file.txt"),
         ("1c", "git add probe-file.txt"),
         ("1d", 'git commit -m "probe commit"'),
+    ]
+    if fx.cwd != fx.root:
+        top = "$(git rev-parse --show-toplevel)"
+        up = os.path.relpath(fx.root, fx.cwd)
+        steps += [
+            ("s1", f'touch "{top}/{ROOT_FILE}"'),
+            ("s2", f'echo three >> "{top}/tracked.txt"'),
+            ("s3", f"touch {up}/{DOTDOT_FILE}"),
+            ("s4", f'mkdir "{top}/{ROOT_DIR}"'),
+            ("s5", f'touch "{top}/../{fx.w2.name}/{W2_TREE_FILE}"'),
+        ]
+    steps += [
         ("2a", f"echo '#!/bin/sh' > \"{common}/hooks/pre-commit\""),
         ("2c", f'touch "{common}/probe-in-common-dir"'),
         ("3", "git config probe.key x"),
@@ -339,7 +395,7 @@ def write_targets(fx: Fixture) -> list[tuple[str, Path, str, bool]]:
     """
     return [
         ("w0", fx.cwd / "inside-cwd.txt", f"{WRITE_MARKER}\n", False),
-        ("w1", fx.cwd / ".git", f"gitdir: {fx.common_dir}/worktrees/{WRITE_MARKER}\n", True),
+        ("w1", fx.root / ".git", f"gitdir: {fx.common_dir}/worktrees/{WRITE_MARKER}\n", True),
         ("w2", fx.main / ".git" / "config", f"[probe]\n\tmarker = {WRITE_MARKER}\n", True),
         ("w3", fx.main / ".git" / "hooks" / "pre-push", f"#!/bin/sh\n# {WRITE_MARKER}\n", False),
         ("w4", fx.main / "write-tool-escape.txt", f"{WRITE_MARKER}\n", False),
@@ -401,9 +457,26 @@ def facts(fx: Fixture) -> dict[str, str]:
         done = git(repo, "--no-optional-locks", "status", "--short")
         return " | ".join(done.stdout.splitlines()) or (done.stderr.strip() or "clean")
 
+    def text(path: Path) -> str:
+        try:
+            return repr(path.read_text())
+        except OSError as exc:
+            return f"unreadable: {type(exc).__name__}"
+
     hooks = fx.common_dir / "hooks"
     main_git = fx.main / ".git"
-    return {
+    below_root: dict[str, str] = {}
+    if fx.cwd != fx.root:
+        below_root = {
+            f"s1 {ROOT_FILE} exists in the root above cwd": str((fx.root / ROOT_FILE).exists()),
+            "s2 tracked.txt in the root above cwd": text(fx.root / "tracked.txt"),
+            f"s3 {DOTDOT_FILE} exists in the root above cwd": str((fx.root / DOTDOT_FILE).exists()),
+            f"s4 {ROOT_DIR} is a directory in the root above cwd": str(
+                (fx.root / ROOT_DIR).is_dir()
+            ),
+            f"s5 {W2_TREE_FILE} exists in W2's working tree": str((fx.w2 / W2_TREE_FILE).exists()),
+        }
+    return below_root | {
         "p1 probe.direct in R's config": config(fx.main, "probe.direct"),
         "p1 probe.direct seen from cwd": config(fx.cwd, "probe.direct"),
         "p1 'direct = x' in R/.git/config": holds(main_git / "config", "direct = x"),
@@ -453,7 +526,8 @@ def facts(fx: Fixture) -> dict[str, str]:
             sorted(
                 entry.name
                 for entry in fx.cwd.iterdir()
-                if entry.name not in {".git", "tracked.txt", "probe-file.txt", "inside-cwd.txt"}
+                if entry.name
+                not in {".git", "tracked.txt", "probe-file.txt", "inside-cwd.txt", SUBDIR_FILE}
             )
         )
         or "none",
@@ -486,7 +560,7 @@ def facts(fx: Fixture) -> dict[str, str]:
         "6a pushed ref in bare remote": ref(fx.bare, PUSHED_REF),
         "6b pushed ref in R": ref(fx.main, PUSHED_REF),
         "w0 marker in cwd/inside-cwd.txt": has_marker(fx.cwd / "inside-cwd.txt"),
-        "w1 cwd/.git changed from fixture": changed(fx.cwd / ".git", fx.pointer_before),
+        "w1 cwd/.git changed from fixture": changed(fx.root / ".git", fx.pointer_before),
         "w2 R/.git/config changed from fixture": changed(
             fx.main / ".git" / "config", fx.config_before
         ),
@@ -515,6 +589,8 @@ def listing(fx: Fixture) -> dict[str, str]:
 
     main_git = fx.main / ".git"
     flat = [main_git, fx.cwd, fx.main, fx.w2]
+    if fx.root != fx.cwd:
+        flat.append(fx.root)
     flat += sorted((main_git / "worktrees").iterdir())
     if fx.git_dir not in flat:
         flat.append(fx.git_dir)
@@ -522,7 +598,7 @@ def listing(fx: Fixture) -> dict[str, str]:
     for directory in flat:
         for child in sorted(directory.iterdir()):
             found[str(child.relative_to(fx.top))] = entry(child)
-    for tree in (fx.cwd, fx.main, fx.w2):
+    for tree in dict.fromkeys((fx.cwd, fx.root, fx.main, fx.w2)):
         for child in sorted((tree / ".claude").rglob("*")):
             found[str(child.relative_to(fx.top))] = entry(child)
     return found
@@ -570,6 +646,7 @@ class Arm:
     failed_to_start: str | None = None
     cost_usd: float | None = None
     turns: int | None = None
+    session_id: str | None = None
     denials: str = ""
 
 
@@ -655,6 +732,7 @@ async def run_session(arm: Arm, prompt: str) -> None:
                     arm.result_text = str(getattr(message, "result", ""))[:600]
                     arm.cost_usd = message.total_cost_usd
                     arm.turns = message.num_turns
+                    arm.session_id = message.session_id
                     arm.denials = _flatten(getattr(message, "permission_denials", None) or [])
                     break
     except Exception as exc:  # noqa: BLE001 -- the failure IS the observation
@@ -699,11 +777,11 @@ RC = re.compile(r"rc=(\d+)")
 VIOLATION = re.compile(r"<sandbox_violations>.*?</sandbox_violations>", re.DOTALL)
 
 
-def host_leg(kind: str, top: Path, push_and_network: bool) -> None:
+def host_leg(kind: str, top: Path, push_and_network: bool, subdir: str | None) -> None:
     """
     The same commands, run by this script with no sandbox, in a twin fixture.
     """
-    fx = build_fixture(top, kind)
+    fx = build_fixture(top, kind, subdir)
     listed_before = listing(fx)
     print(f"\n=== host leg ({kind}): the commands unsandboxed, cwd={fx.cwd} ===")
     for step, command in bash_commands(fx, push_and_network):
@@ -731,13 +809,15 @@ def describe(arm: Arm) -> None:
     fx = arm.fixture
     print(f"\n=== arm {arm.name} ===")
     print(f"  cwd:        {fx.cwd}")
+    print(f"  root:       {fx.root}")
     print(f"  R:          {fx.main}")
     print(f"  common dir: {fx.common_dir}")
-    print(f"  cwd/.git:   {fx.pointer_before.strip()}")
+    print(f"  root/.git:  {fx.pointer_before.strip()}")
     print(f"  first={fx.first[:12]} second={fx.second[:12]}")
     if arm.failed_to_start:
         print(f"  DID NOT START: {arm.failed_to_start}")
     print(f"  cost: {arm.cost_usd} USD   turns: {arm.turns}   model: {MODEL}")
+    print(f"  session id: {arm.session_id}")
     print(f"  permission_denials: {arm.denials}")
     print(f"  tool calls seen by PreToolUse: {len(arm.calls)}; expected steps: {len(arm.expected)}")
 
@@ -792,7 +872,14 @@ async def main() -> int:
     parser.add_argument("--keep", action="store_true")
     parser.add_argument("--skip-write-arm", action="store_true")
     parser.add_argument("--skip-push-and-network", action="store_true")
+    parser.add_argument("--subdir", default=None)
+    parser.add_argument("--only", choices=("worktree", "clone"), default=None)
     args = parser.parse_args()
+    subdir: str | None = args.subdir
+    if subdir is not None and (
+        Path(subdir).is_absolute() or not Path(subdir).parts or ".." in Path(subdir).parts
+    ):
+        raise SystemExit(f"refusing: --subdir {subdir!r} does not name a directory under the root")
     push_and_network = not args.skip_push_and_network
 
     base = Path(tempfile.mkdtemp(prefix="pptmstr-wt-containment-", dir=args.base)).resolve()
@@ -814,25 +901,28 @@ async def main() -> int:
     print(f"fixture base: {base}")
     print(f"containment settings: {containment_settings()}")
 
-    host_leg("worktree", base / "host-worktree", push_and_network)
-    host_leg("clone", base / "host-clone", push_and_network)
+    where = "" if subdir is None else f", directory {subdir}/ under it"
+    kinds = [
+        (f"W / contained, cwd = sibling linked worktree{where}", "worktree"),
+        (f"C / contained, cwd = independent clone{where}", "clone"),
+    ]
+    kinds = [(name, kind) for name, kind in kinds if args.only in (None, kind)]
+    for _, kind in kinds:
+        host_leg(kind, base / f"host-{kind}", push_and_network, subdir)
 
     arms: list[Arm] = []
-    for name, kind in (
-        ("W / contained, cwd = sibling linked worktree", "worktree"),
-        ("C / contained, cwd = independent clone", "clone"),
-    ):
-        fx = build_fixture(base / f"session-{kind}", kind)
+    for name, kind in kinds:
+        fx = build_fixture(base / f"session-{kind}", kind, subdir)
         arm = Arm(name, fx, bash_commands(fx, push_and_network), is_bash=True)
         await run_session(arm, bash_prompt(arm.expected))
         describe(arm)
         arms.append(arm)
 
     if not args.skip_write_arm:
-        fx = build_fixture(base / "session-write-tool", "worktree")
+        fx = build_fixture(base / "session-write-tool", "worktree", subdir)
         targets = write_targets(fx)
         arm = Arm(
-            "X / contained, cwd = sibling linked worktree, the CLI's Write tool",
+            f"X / contained, cwd = sibling linked worktree{where}, the CLI's Write tool",
             fx,
             [(step, str(path)) for step, path, _, _ in targets],
             is_bash=False,

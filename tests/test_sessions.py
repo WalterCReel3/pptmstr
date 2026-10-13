@@ -19,6 +19,7 @@ import pytest
 from claude_agent_sdk import SDKSessionInfo
 
 from pptmstr import sessions as sessions_mod
+from pptmstr import settings as settings_mod
 from pptmstr.sessions import (
     SessionMark,
     bookmarked,
@@ -195,13 +196,43 @@ def test_unwritable_target_does_not_raise(tmp_path: Path) -> None:
     save_overlay(set_bookmark({}, "abc", True), blocked / "sessions.json")
 
 
+@pytest.mark.real_config_dir
 def test_the_overlay_lives_beside_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     One config convention, not two. If this drifts, the operator has bookmarks in a
     directory their settings are not in.
+
+    Marked, because the path asserted is one the real rule gives and the suite's
+    redirect would replace; it is read and nothing is written at it.
     """
     monkeypatch.setenv("XDG_CONFIG_HOME", "/custom/xdg")
     assert sessions_mod.overlay_path() == Path("/custom/xdg/pptmstr/sessions.json")
+
+
+def test_the_overlay_path_follows_a_replaced_config_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The directory is asked for when the path is, through ``settings``: a name bound
+    at import would answer with the function as it was, and the suite's redirect of
+    it -- which is this same replacement -- would not reach a bookmark write.
+    """
+    monkeypatch.setattr(settings_mod, "config_dir", lambda: tmp_path / "elsewhere")
+
+    assert sessions_mod.overlay_path() == tmp_path / "elsewhere" / "sessions.json"
+    save_overlay(set_bookmark({}, "abc", True))
+    assert load_overlay(tmp_path / "elsewhere" / "sessions.json")["abc"].bookmarked
+
+
+def test_an_overlay_saved_with_no_path_is_inside_the_suite(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+
+    save_overlay(set_bookmark({}, "abc", True))
+
+    assert sessions_mod.overlay_path().is_file()
+    assert sessions_mod.overlay_path().is_relative_to(tmp_path_factory.getbasetemp())
 
 
 # ---------------------------------------------------------------------------

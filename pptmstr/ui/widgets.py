@@ -9,12 +9,13 @@ a snapshot alone.
 from __future__ import annotations
 
 import math
+import re
 import zlib
 
 from imgui_bundle import imgui
 
 from ..approval import Disposition, Policy, classify
-from ..model import AgentState, ContextSnapshot
+from ..model import AgentRecord, AgentState, ContextSnapshot, EndedHow, TranscriptPresence
 from ..theme import STATE_GLYPH, STATE_LABEL, Color, P, faded
 
 # One representative call per class of thing an operator would ask about. The
@@ -439,9 +440,78 @@ def context_cell(ctx: ContextSnapshot | None) -> None:
     imgui.text_colored(colour, label)
 
 
+# What U+0000 is drawn as. ImGui takes its text as a C string, so everything from
+# the first one on would otherwise not be drawn and nothing would say so.
+NUL_SHOWN = "<NUL>"
+
+
+_LONE_SURROGATE = re.compile("[\ud800-\udfff]")
+
+
+def surrogate_shown(char: str) -> str:
+    """What stands in for one lone surrogate: its code point, spelled out."""
+    return f"<U+{ord(char):04X}>"
+
+
+def author_text(text: str) -> str:
+    """
+    ``text`` as it can be drawn whole: every U+0000 replaced by ``NUL_SHOWN``
+    and every lone surrogate by ``surrogate_shown``.
+
+    Total: no ``str`` makes the binding raise or stop early. A lone surrogate
+    (U+D800 to U+DFFF) is not a character and cannot be encoded as UTF-8, so
+    Dear ImGui's binding refuses the whole string with ``TypeError`` -- and a
+    row that raises while it draws is a row that can be neither read nor
+    answered. JSON can spell one (``"\\ud800"``), so a tool argument or a record
+    read from a file can hold one.
+    """
+    return _LONE_SURROGATE.sub(
+        lambda found: surrogate_shown(found.group()), text.replace("\x00", NUL_SHOWN)
+    )
+
+
+def one_line(text: str) -> str:
+    """
+    ``text`` with every line break replaced by a space, and drawable whole.
+
+    For a field a pane lays out on a line of its own making and whose spacing is
+    otherwise the author's to keep -- an id, a subject, a role name, a path, a
+    property. None is checked for line breaks where it is written, and one that
+    carries a break would end the pane's line and start the next in whatever form
+    its author chose.
+
+    The rule is ``bus._one_line``'s, spelled again because importing the bus would
+    bring the SDK into the UI layer. A test holds the two to one answer.
+    """
+    return author_text(" ".join(text.splitlines()))
+
+
+def flat_line(text: str) -> str:
+    """
+    ``text`` as one drawable line: every run of whitespace, line breaks included,
+    collapsed to a single space, and the ends trimmed.
+
+    For free text drawn in a slot one line high -- a task on a card, a topic, a
+    summary. A task is whatever was typed into a multi-line composer, and ImGui
+    draws a line break as one: the second line lands on whatever the card laid out
+    beneath the first. ``one_line`` would leave a blank line as two spaces, which in
+    a slot measured in pixels is width spent on nothing.
+
+    Everything ``str.splitlines`` breaks on is whitespace to ``str.split``, so this
+    removes every break ``one_line`` does.
+    """
+    return author_text(" ".join(text.split()))
+
+
 def ellipsis(text: str, width_px: float) -> str:
     """
-    Clip ``text`` to ``width_px``, marking the cut with an ellipsis.
+    ``text`` on one line (``flat_line``), clipped to ``width_px`` with the cut marked
+    by an ellipsis.
+
+    Flattened here rather than by each caller because a clipped string is by
+    construction one going into a one-line slot, and ``calc_text_size`` measures a
+    string with a break in it by its widest line: unflattened, the cut lands in a
+    later line and every line before it is drawn whole.
 
     Table cells clip mid-glyph and give the reader nothing to tell a clipped string
     from a short one. That matters most for the field this is mostly used on -- the
@@ -455,6 +525,7 @@ def ellipsis(text: str, width_px: float) -> str:
     """
     if width_px <= 0.0:
         return ""
+    text = flat_line(text)
     if imgui.calc_text_size(text).x <= width_px:
         return text
     lo, hi = 0, len(text)
@@ -504,3 +575,70 @@ def elapsed_cell(started_at: float, ended_at: float | None, now: float) -> None:
         imgui.text_disabled(text)
     else:
         imgui.text(text)
+
+
+# -- a session recalled from its file -------------------------------------------
+
+# The card menu's word for the act that loads a closed session
+# (``session_menu``), so a pane sending the operator there names what they will
+# find.
+RESUME_ITEM = "Resume…"
+
+_CLOSED_GONE = "closed — its transcript is gone, so it cannot be resumed, only removed"
+
+
+def closed_line(record: AgentRecord | None, unloaded: str = "not loaded") -> str | None:
+    """
+    The one line a pane draws in place of its contents for a session recalled
+    from its file (``AgentRecord.recalled``), or None for any other record.
+
+    A recalled record is the field defaults of a session nothing here observed:
+    DONE, zero usage, an empty transcript. Each of those is a pane's ordinary
+    reading of an ordinary session, so a pane that draws the record draws
+    "done", "$0.00" and an empty scrollback as though they had been measured.
+    This is what it says instead: that the session is closed, what of it the
+    pane does not hold, and the act that loads it.
+
+    ``unloaded`` is the pane's own half -- what is missing here -- and "" for a
+    pane with nothing to load. A session whose transcript the CLI no longer has
+    is not sent to a resume that cannot happen.
+    """
+    if record is None or record.recalled is None:
+        return None
+    if record.recalled.transcript is TranscriptPresence.GONE:
+        return _CLOSED_GONE
+    missing = f"{unloaded}; " if unloaded else ""
+    return f"closed — {missing}{RESUME_ITEM} to continue"
+
+
+def ago(then: float | None, now_wall: float | None) -> str:
+    """
+    How long before ``now_wall`` the wall-clock instant ``then`` was, or "not
+    known" when either is missing.
+
+    **Both are wall-clock seconds**, which is what a session file holds
+    (``model.Recalled``). Neither may be a ``time.monotonic()`` reading: the
+    difference would be a number of the right shape and no meaning. A ``then``
+    ahead of ``now_wall`` is a clock that was moved, and reads as no time ago.
+    """
+    if then is None or now_wall is None:
+        return "not known"
+    return f"{format_elapsed(now_wall - then)} ago"
+
+
+_ENDED_HOW = {
+    EndedHow.CLOSED: "it was closed",
+    EndedHow.FAILED: "it failed",
+    EndedHow.SHUTDOWN: "pptmstr was shut down under it",
+}
+
+
+def ended_how_label(how: EndedHow | None) -> str:
+    """
+    How a recalled session's last run ended, in words. None is a run that was
+    killed or a file that does not say, which the file does not tell apart, and
+    neither is "closed".
+    """
+    if how is None:
+        return "not recorded how its last run ended (killed, or the file does not say)"
+    return f"its last run ended when {_ENDED_HOW[how]}"

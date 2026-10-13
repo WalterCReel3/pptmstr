@@ -128,3 +128,56 @@ def test_grouping_never_re_sorts(tmp_path: Path) -> None:
         record(ROOT_C, cwd=str(alpha)),
     )
     assert group_roots(snap) == [("alpha", [ROOT_A, ROOT_C]), ("beta", [ROOT_B])]
+
+
+# -- a session off the fleet has no card; a closed one does -------------------------
+
+
+def test_a_session_taken_off_the_fleet_is_in_no_lane_and_a_closed_card_stays() -> None:
+    """
+    Built by the reducer, so "off the fleet" is ``Snapshot.off_fleet``'s answer and
+    not a flag this test set: the rail and the empty queue both list from here.
+    """
+    from pptmstr.store import Store
+    from tests.test_ui_text import (
+        CLOSED_ROOT,
+        RAN_ROOT,
+        REMOVED_ROOT,
+        recall,
+        run,
+        run_and_remove,
+    )
+
+    store = Store()
+    run_and_remove(store)
+    run(store)
+    recall(store)
+    snap = store.snapshot()
+
+    assert REMOVED_ROOT in snap.nodes and REMOVED_ROOT in snap.order
+    assert roots(snap) == [RAN_ROOT, CLOSED_ROOT]
+    assert [nid for _, lane in group_roots(snap) for nid in lane] == [RAN_ROOT, CLOSED_ROOT]
+
+
+def test_a_removed_session_that_comes_back_to_life_is_listed_again() -> None:
+    """
+    The flag alone is not the answer. A session whose root is announced again is
+    on the fleet, and reading ``AgentRecord.detached`` here would be one step of
+    the store away from hiding a running session.
+    """
+    import dataclasses
+
+    from pptmstr.store import Store
+    from tests.test_ui_text import REMOVED_ROOT, run_and_remove
+
+    store = Store()
+    run_and_remove(store)
+    snap = store.snapshot()
+    assert roots(snap) == []
+
+    # The stored half still says removed while something of the session is not
+    # final: the predicate, and so this list, says it is on the fleet.
+    awake = dataclasses.replace(snap.nodes[REMOVED_ROOT], state=AgentState.THINKING)
+    assert awake.detached
+    revived = dataclasses.replace(snap, nodes=MappingProxyType({**snap.nodes, REMOVED_ROOT: awake}))
+    assert roots(revived) == [REMOVED_ROOT]

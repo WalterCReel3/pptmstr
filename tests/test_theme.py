@@ -11,7 +11,7 @@ from __future__ import annotations
 import pytest
 
 from pptmstr import theme
-from pptmstr.model import AgentState, ContextPressure
+from pptmstr.model import AgentState, ContextPressure, ObligationKind
 from pptmstr.theme import (
     HIGH_CONTRAST,
     REQUIRED_THEMES,
@@ -396,3 +396,34 @@ def test_fading_out_of_range_clamps() -> None:
     base = theme.col(0x4FC1E9)
     assert theme.faded(base, -1.0) == theme.faded(base, 0.0)
     assert theme.faded(base, 5.0) == theme.faded(base, 1.0)
+
+
+# -- obligations ------------------------------------------------------------------
+
+
+def test_every_obligation_kind_has_a_glyph() -> None:
+    """
+    The inbox row indexes this inside a draw call, so a kind with no entry is a
+    ``KeyError`` on the first frame such an obligation exists.
+    """
+    assert set(theme.OBLIGATION_GLYPH) == set(ObligationKind)
+    assert all(theme.OBLIGATION_GLYPH.values())
+
+
+def test_every_obligation_kind_has_a_palette_role() -> None:
+    assert set(theme._OBLIGATION_ROLE) == set(ObligationKind)
+
+
+@pytest.mark.parametrize("palette", ALL_PALETTES, ids=PALETTE_IDS)
+def test_every_obligation_kind_resolves_to_a_colour(palette: Palette) -> None:
+    for kind in ObligationKind:
+        assert isinstance(palette.obligation(kind), Color), kind
+
+
+def test_a_decision_does_not_look_like_any_of_the_three_states_that_stop_a_node() -> None:
+    """Its asker may be working, so it borrows no state's glyph."""
+    glyphs = theme.OBLIGATION_GLYPH
+    others = {glyphs[kind] for kind in ObligationKind if kind is not ObligationKind.DECISION}
+
+    assert glyphs[ObligationKind.DECISION] not in others
+    assert glyphs[ObligationKind.DECISION] not in STATE_GLYPH.values()
