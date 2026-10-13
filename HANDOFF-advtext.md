@@ -944,6 +944,37 @@ says no ("lays out a 8.000 px column where ImGui draws 16 px"). If a real 2x
 display does the same, every diff on a Retina Mac is its pane's own rows.
 Nobody has run a display that is not 1x. This is P5 and your H19.
 
+## Publication, as pptmstr read it on 2026-10-13
+
+The user: "Both imtypeset and imscribe are finish up and publishing.
+imtypeset already exists in PyPI."
+
+- **imtypeset is on PyPI** (the lead read `pypi.org/pypi/imtypeset/json`
+  through a summarising fetch): `0.4.1.192900` and `0.4.1.192801`; the former
+  requires `imgui-bundle==1.92.900`, is MIT, and has eight wheels uploaded
+  2026-10-13: CPython 3.11 to 3.14, each for `macosx_14_0_arm64` and
+  `manylinux_2_28_x86_64`. No file or version says `standin` or `dev`; which
+  headers the wheels were built with cannot be read from the listing.
+- **imscribe is not on PyPI yet** (404 at the same time). Its repository is
+  renamed `WalterCReel3/imscribe`; the branch head on GitHub is still
+  `bb240c3`, pptmstr's pin. Its move to imtypeset `0.4.1` and to version
+  `0.2.0b1`, with `imtypeset==0.4.1.192900` as a requirement, was in its
+  working tree and not a commit when the lead looked.
+- **So pptmstr has nothing new to build against yet.** When imscribe names a
+  pushed commit or a published version on imtypeset 0.4.1, pptmstr: takes
+  the three as exact requirements in `pyproject.toml` (the reason imscribe
+  left them, an unclaimed name, is then gone: P31); installs from the index
+  in `bootstrap.sh` and keeps the build from source as the development
+  override; finds the library as an installed distribution; points its
+  default repository URL at the new name; and re-runs
+  `scripts/measure_typeset_advances.py`, since 0.4 is the core's answer to
+  H34 and H35, to see whether a fence and prose monospace now keep their
+  columns (P21).
+- **Not testable from this session:** anything that installs from PyPI. The
+  first install of the published pair into a fresh environment, on Linux and
+  on a Mac, is the user's to run; `python -m pptmstr --version` is the line
+  to read.
+
 ## The pins moved, and the diff view is live (2026-10-12, pptmstr `8c6a43e`)
 
 The file keeps its name; the library is `imscribe` from here on.
