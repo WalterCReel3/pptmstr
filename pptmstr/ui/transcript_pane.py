@@ -46,9 +46,9 @@ over the layout library). **What is markdown is the library's and what is not is
 ImGui's**: OUTPUT and REASONING runs are read as markdown and set by the
 library, wrapped, selectable and culled; every other kind -- a tool call, its
 result, an error, a system line -- is literal text whose columns are content,
-and outside its diff view the library does not keep a monospace column
-(``typeset`` has the measurement; request P21 of ``HANDOFF-advtext.md``), so
-ImGui draws it in the chrome's font, unbroken, in its ``_KIND_COLOUR``. A fence
+and ImGui draws it in the chrome's font, unbroken, in its ``_KIND_COLOUR``
+(``typeset.themes`` has where that line is drawn and the measurement of the
+library's monospace; request P21 of ``HANDOFF-advtext.md``). A fence
 inside a markdown run goes with its run and is the library's.
 
 - *closed* runs are the ``typeset.Part``s of a ``typeset.document``, which makes
@@ -211,10 +211,8 @@ within 2 ms a frame of RICH at 1,000 and at 10,000 lines **and** leaves no
 recurring frame over 30 ms in a long watch. **By measurement it now meets the
 first half outright and the second as RICH does (one full collection in a watch
 of 52,313 frames, twice), and the default has not moved**, for a reason the
-rule does not hold: nobody has looked at the library's text in this pane, and a
-fenced block inside a markdown run is set by the library, which does not keep a
-monospace column (request P21 of ``HANDOFF-advtext.md``). What an operator
-reads first is theirs to choose after seeing it.
+rule does not hold: nobody has looked at the library's text in this pane. What
+an operator reads first is theirs to choose after seeing it.
 
 Measured here on 2026-10-12 (``scripts/bench_panes.py --typeset on --only
 transcript watch``; headless, nothing rasterised, CPU ms inside this pane's

@@ -23,10 +23,12 @@ wide.
 **A pixel-height page is the view the panes draw**: the seam is told a text
 scale and a step for ``Role.DIFF`` that come to that height, and the view is
 ``gate.diff_view`` of ``themes.diff_theme()``, which is what ``diffs.diff``
-makes. ``--cell font`` makes the same view on the library's default cell, for
-the figures the option is passed to avoid; the default is the product's
-(``gate.DIFF_CELL``). An ``--em`` page is a mono theme at that em, which no
-setting of the product reaches.
+makes, with no ``cell`` passed. An ``--em`` page is a mono theme at that em,
+which no setting of the product reaches.
+
+The library is found as the application finds it (``pptmstr.pairing``): an
+installed imtypeset, or this checkout's built pair where none is installed or
+``PPTMSTR_TYPESET_DEPS=1`` asks; the header says which.
 
 ## What is read, and from what
 
@@ -80,7 +82,6 @@ Exit status 1 when the library is not drawing; 2 when a page could not be read.
 from __future__ import annotations
 
 import argparse
-import os
 import subprocess
 import sys
 from collections import Counter
@@ -90,7 +91,6 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-PAIR = ROOT / ".deps" / "imtypeset"
 ASSETS = ROOT / "pptmstr" / "assets"
 CHROME_PX = 16.0
 SIZES = (14.0, 16.0, 18.0, 20.0)
@@ -281,17 +281,12 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--px", type=_lengths, default=None, help="pixel heights, comma separated")
     ap.add_argument("--em", type=_lengths, default=(), help="em sizes in pixels, comma separated")
-    ap.add_argument(
-        "--cell",
-        choices=("pixel", "font"),
-        default=None,
-        help="the cell the view is made on; default: the product's (gate.DIFF_CELL)",
-    )
     args = ap.parse_args()
     if args.px is None:
         args.px = () if args.em else SIZES
-    os.environ.setdefault("IMTYPESET_LIBRARY", str(PAIR / "libimtypeset_bundle.so"))
-    os.environ.setdefault("IMTYPESET_PYTHON", str(PAIR / "pysnap"))
+    from pptmstr import pairing, version
+
+    pairing.adopt()
 
     from imscribe import (
         DARK_PALETTE,
@@ -317,10 +312,6 @@ def main() -> int:
     from pptmstr.ui import typeset
     from pptmstr.ui.typeset import gate
 
-    if args.cell is not None:
-        # The one name every diff view of pptmstr's is made on: the view here,
-        # and the one the seam's own measurement reads.
-        gate.DIFF_CELL = args.cell
     per_em = em_size_for_pixel_height(Face.CODE, 1.0)
     pages = [(f"em {em:g} px", em / per_em, False) for em in args.em]
     pages += [(f"{px:g} px", px, True) for px in args.px]
@@ -391,7 +382,7 @@ def main() -> int:
             baked = float(state["chrome"].get_font_baked(asked_px).get_char_advance(ord("0")))
             raster = float(own.get_font_baked(baked_px).get_char_advance(ord("0")))
             report.append(
-                f"mono {name} (pixel height {px:.3f}, cell {gate.DIFF_CELL!r}"
+                f"mono {name} (pixel height {px:.3f}"
                 f"{', the diff theme of the product' if product else ''}): grid.cell {cell:.6f}, "
                 f"grid.row {pitch:g}; rows drawn from the library's CODE entry baked at "
                 f"{baked_px:g} px, where its advance is {raster:g}; the chrome font's advance "
@@ -518,7 +509,7 @@ def main() -> int:
     print("measure_typeset_diff: positions and counts from the draw list; no pixel was read")
     print(f"  uptime before: {before}")
     print(f"  uptime after:  {uptime()}")
-    print(f"  IMTYPESET_LIBRARY={os.environ['IMTYPESET_LIBRARY']}")
+    print(f"  {version.library_line()}")
     print(f"  view: gate.diff_view, unified, {WIDTH_PX:g} px wide, every row added")
     print()
     print("\n".join(report))

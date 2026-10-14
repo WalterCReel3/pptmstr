@@ -626,29 +626,32 @@ def _baked(im: Any) -> dict[int, list[float]]:
     }
 
 
-@pytest.mark.parametrize("whole", [False, True], ids=["the default cell", "a whole-pixel cell"])
-def test_measuring_the_columns_leaves_no_baked_size_on_the_atlas(
-    request: pytest.FixtureRequest, whole: bool
-) -> None:
+def test_measuring_the_columns_leaves_no_baked_size_on_the_atlas(seam: Any) -> None:
     """
     The measurement draws a row to buffers, which rasterises it at the size it
-    is set at, and looks for the size the glyphs came from; and on a
-    whole-pixel cell the library asks ImGui for the advance at the size asked
-    for, which makes that size too (16 and 17 px at 16). Each is a size on
-    ImGui's atlas that nothing draws from, and ``theme.keep_baked_sizes``
-    keeps whatever is there until the epoch moves. What a font load leaves on
-    the atlas is nothing, and a measurement taken later adds nothing to what
-    it found.
+    is set at, and looks for the size the glyphs came from; and the library
+    asks ImGui for the code face's advance at that size to make the view's
+    grid, which makes the size where nothing has drawn from it yet (16 px at
+    16). That is a size on ImGui's atlas that nothing draws from, and
+    ``theme.keep_baked_sizes`` keeps whatever is there until the epoch moves.
+    What a font load leaves on the atlas is nothing, and a measurement taken
+    later adds nothing to what it found.
     """
     from pptmstr.ui.typeset import themes
 
-    seam = request.getfixturevalue("seam" if whole else "default_cell")
     before = _baked(seam)
     assert typeset.load_fonts(BOLD)
     assert _baked(seam) == before, "a load, with its measurement, bakes nothing"
-    found = gate._measured_columns(themes.diff_theme())
-    assert found.glyphs == 156 and found.holds is whole
-    assert found.size == (17.0 if whole else 16.0)
+    made: list[dict[int, list[float]]] = []
+    real = gate._discard_new
+    with pytest.MonkeyPatch.context() as patched:
+        patched.setattr(
+            gate, "_discard_new", lambda atlas, had: (made.append(_baked(seam)), real(atlas, had))
+        )
+        found = gate._measured_columns(themes.diff_theme())
+    assert found.glyphs == 156 and found.holds
+    assert found.size == 16.0
+    assert made and made[0] != before, "the measurement did bake, and what it baked is gone"
     assert _baked(seam) == before
 
 
@@ -747,7 +750,7 @@ def test_how_long_a_row_the_columns_answer_for_follows_how_far_out_the_cell_is(
     The row measured is 186 characters and the cell is held to the baked
     advance within a bound. A cell out by ``e`` has a pen half a pixel out
     after ``0.5 / e`` columns, so the answer is for rows that long and no
-    longer: 5,000 columns at the bound itself, some 45,000 at the rounding
+    longer: 5,000 columns at the bound itself, some 54,000 at the rounding
     the library has at a pixel height of 16, and none where nothing holds.
     """
     from pptmstr.ui.typeset import themes
@@ -758,7 +761,7 @@ def test_how_long_a_row_the_columns_answer_for_follows_how_far_out_the_cell_is(
     assert 4_990 <= at_the_bound.reach <= 5_000
     assert gate.Columns(False, "", cell=8.0, baked=8.0).reach == 0
     found = gate.columns(themes.diff_theme())
-    assert found.holds and 40_000 < found.reach < 50_000, found
+    assert found.holds and 50_000 < found.reach < 60_000, found
 
 
 def test_what_follows_a_tab_is_held_to_the_grid_like_any_other_glyph(
@@ -798,7 +801,8 @@ def test_the_code_face_is_asked_which_characters_it_has_no_glyph_for(seam: Any) 
     """
     What ``diffs.unfit`` asks of a diff's rows. The bundled code face has Latin
     with its accents, box drawing and the replacement character, and neither
-    Greek nor Cyrillic nor CJK: those are set from another face, at its advance.
+    Greek nor Cyrillic nor CJK: those are set in whole cells, from another face
+    where one has them.
     """
     assert gate.code_lacks("plain ASCII, with ~ and |") == ()
     assert gate.code_lacks("café │ � →") == ()
@@ -816,10 +820,10 @@ def test_a_size_made_where_the_measurements_was_discarded_is_rasterised_as_itsel
 ) -> None:
     """
     The hazard ``theme.keep_baked_sizes`` exists for is a size at an address
-    ImGui's font loader remembers for another. The measurement makes two sizes
-    of the code face, the one asked for and the one its glyphs come from (16
-    and 17 px), the second of which is then the last the loader made current,
-    and discards them; the next size made is put where they were. That one is made, and
+    ImGui's font loader remembers for another. The measurement makes a size of
+    the code face, the one asked for, which its glyphs come from (16 px) and
+    which is then the last the loader made current, and discards it; the next
+    size made is put where it was. That one is made, and
     not moved there, so the loader is told: its glyphs, and those of a size
     made after it and of the measured size made again, are their own -- each
     compared with the same character when its size is the only one on the
@@ -846,7 +850,7 @@ def test_a_size_made_where_the_measurements_was_discarded_is_rasterised_as_itsel
         baked.frame(seam, lambda: baked.line(seam, code, 13.0, "abc"), before)
         ahead = _baked(seam)
         found = gate._measured_columns(themes.diff_theme())
-        assert found.size == 17.0 and _baked(seam) == ahead
+        assert found.size == 16.0 and _baked(seam) == ahead
 
         def both() -> None:
             baked.line(seam, code, 19.0, chars)

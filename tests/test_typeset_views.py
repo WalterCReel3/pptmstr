@@ -51,8 +51,8 @@ P17 = (
 )
 P19 = "P19: a settled table is not held at its natural widths"
 P21 = (
-    "P21: monospace text set by the library does not keep its columns, nor line up "
-    "with ImGui's in the same face"
+    "P21: proportional text set by the library is not drawn at the advances ImGui "
+    "has baked for its file"
 )
 
 
@@ -126,15 +126,15 @@ def _bundled(name: str) -> Path:
 def test_a_streamed_code_span_is_the_chromes_height(seam: Any) -> None:
     """
     A stream's blocks are built by the library's stream, from the same theme as
-    a settled view's, and its code span is the same 109 px for sixteen
-    characters where the chrome's 16 px would lay them out at 122.
+    a settled view's, and its code span is the same 112 px for sixteen
+    characters where the chrome's 16 px would lay them out at 128.
     """
     cache = typeset.ViewCache()
     stream = typeset.stream(cache, "s")
     stream.set_text("Set `Settings.typeset` here.\n\nAnd more")
     frame(seam, lambda: stream.draw())
     ((left, _, right, _),) = stream.view.span_rects(0, 4, 20)
-    assert right - left == pytest.approx(16 * 7.626, abs=1.0)
+    assert right - left == pytest.approx(16 * 8.0, abs=0.01)
 
 
 TALL_PROSE = (
@@ -1328,13 +1328,13 @@ def _steps_drawn(seam: Any, source: str) -> list[float]:
     return [b - a for a, b in zip(lefts, lefts[1:], strict=False)]
 
 
-@pytest.mark.xfail(strict=True, reason=P21)
 def test_a_fenced_row_keeps_its_columns_at_the_advance_imgui_draws_the_face_at(seam: Any) -> None:
     """
-    Requirements R2, R4 and R5 of ``HANDOFF-advtext.md`` (A2): forty of one
-    character in a fence are forty glyphs one step apart, and the step is the
-    advance ImGui has baked for the face the library drew them from, which is
-    the chrome's.
+    Requirements R2, R4 and R5 of ``HANDOFF-advtext.md`` (A2), and request P21
+    for a fence in a document: forty of one character in a fence are forty
+    glyphs one step apart, and the step is the advance ImGui has baked for the
+    face the library drew them from, which is the chrome's. The library sets
+    code on the device's grid from imtypeset 0.4.
     """
     baked = typeset.face_font("CODE").get_font_baked(16.0).get_char_advance(ord("m"))
     assert baked == 8.0
@@ -1367,13 +1367,15 @@ def test_a_family_with_its_own_file_is_drawn_at_the_advances_imgui_has_for_that_
 def test_inline_code_is_the_chromes_height_inside_prose_of_the_same_height(seam: Any) -> None:
     """
     A theme sizes a code span by its block, and at one em Inconsolata is shorter
-    than Roboto: 14.3 px beside 16. Read from where the library put the span:
-    sixteen characters of Inconsolata at the chrome's 16 px are 122 px laid
-    out, and at the paragraph's em they are 109.
+    than Roboto: 14.3 px beside 16. Read from where the library put the span,
+    which sets a code span at the whole-pixel advance ImGui has baked for its
+    size: sixteen characters of Inconsolata at the chrome's 16 px are 128 px
+    laid out, 8 a character, and at the paragraph's em they are 112, 7 a
+    character.
     """
     view = _view(seam, typeset.ViewCache(), "k", "Set `Settings.typeset` here.")
     ((left, _, right, _),) = view.span_rects(0, 4, 20)
-    assert right - left == pytest.approx(16 * 7.626, abs=1.0)
+    assert right - left == pytest.approx(16 * 8.0, abs=0.01)
 
 
 @pytest.mark.xfail(strict=True, reason=P11)

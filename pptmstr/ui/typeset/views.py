@@ -19,9 +19,9 @@ with the theme of its ``demote``, and the blocks of the run are handed to the
 view together, so parts of different heading levels share a view.
 
 **Text that is not markdown is ImGui's**, in the chrome's font at the role's
-pixel height: a literal, wrapped or exact part, and ``plain()``. ``themes`` has
-the measurement behind that (monospace set by the library does not keep its
-columns; request P21). What it costs: such a part is an ImGui text item, so a
+pixel height: a literal, wrapped or exact part, and ``plain()``. ``themes`` says
+where that line was drawn and what has been measured since (request P21). What
+it costs: such a part is an ImGui text item, so a
 selection stops at its edges and it is not copied with the markdown around it;
 ``Kind.WRAPPED`` and ``Kind.WRAPPED_EXACT`` are both ImGui's wrap, which keeps
 every character and breaks at a space where the line has one.
@@ -880,10 +880,9 @@ class _Fences:
     first hosts it, and the height the document claims in that frame is the
     height it claims in the next.
 
-    **The cell is the gate's at every fence** (``gate.diff_fences``), for the
-    view about to be made and for one this hook made before: the library's
-    hook is kept for as long as the process runs, and the cell a view is on
-    is the one ``gate.columns`` answers for or the answer is about nothing.
+    **The hook is the gate's** (``gate.diff_fences``) and is kept for as long
+    as the process runs: a view it hosts is made as ``gate.diff_view`` makes
+    one, which is the configuration ``gate.columns`` answers for.
     """
 
     __slots__ = ("inner",)
@@ -905,8 +904,6 @@ class _Fences:
         hosted = self.inner(view, number, block)
         if hosted is None or not diffs.accounted(hosted.text, hosted.view.diff):
             return None
-        if hosted.view.cell != self.inner.cell:
-            hosted.view.cell = self.inner.cell
         hosted.view.theme = themes.diff_theme()
         return hosted
 

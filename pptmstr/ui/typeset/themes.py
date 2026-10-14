@@ -8,15 +8,20 @@ and not of a page. ``demoted(n)`` is that theme with every heading set as the
 level ``n`` below it. The palette is pptmstr's theme, role for role, and follows
 a theme switch with nobody telling it.
 
-**Which text the library sets at all is decided here** (``native``). On the
-library as it is, monospace text does not keep its columns: by pptmstr's
-measurement (``scripts/measure_typeset_advances.py``; ``HANDOFF-advtext.md``,
-A2 and request P21) a row of Inconsolata at 16 px is drawn in steps of 7 and 8
-px mixed, and rows disagree at one column by up to 13 px. So text of a role
-that is monospace by nature -- its columns are content -- and that stands on its
-own, a literal part or ``plain()``, is drawn by ImGui in the chrome's font, and
-the library sets markdown. A fenced block inside a markdown part goes with its
-document: that deviation is known and stated, and is not split out.
+**Which text the library sets at all is decided here** (``native``). Text of
+a role that is monospace by nature -- its columns are content -- and that
+stands on its own, a literal part or ``plain()``, is drawn by ImGui in the
+chrome's font, and the library sets markdown. A fenced block inside a markdown
+part goes with its document. **That split was drawn when the library did not
+keep a monospace column, and it does now**: by pptmstr's measurement on
+2026-10-13 (``scripts/measure_typeset_advances.py --faces mono``, a window
+under Xvfb, imscribe ``0.2.0b1`` on the imtypeset ``0.4.1.192900`` wheel, load
+average 3.5 to 4.4, vertices read; ``HANDOFF-advtext.md``, A2 and request
+P21), at every pixel height from 12 to 24 a fenced row and a row of prose in
+the code face are drawn in steps of ImGui's baked advance and no other, rows
+agree at every column, and characters 10, 20, 40 and 74 are on the pens of the
+same text through ``ImDrawList.add_text``. Nothing here has been moved on the
+strength of it: tool output, arguments and errors are still ImGui's.
 
 **What the library does not take from a role**, each a request in
 ``HANDOFF-advtext.md``: an inline code span has no size of its own (P11), and a

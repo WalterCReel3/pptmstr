@@ -835,21 +835,15 @@ def face_font(face: str) -> Any:
         return None
 
 
-DIFF_CELL = "pixel"
-"""
-The cell the library's diff view is asked to lay its columns out at: the whole
-pixel ImGui has baked for the code face at the role's pixel height, and not
-the advance in the font file (the library's default, ``"font"``), which is a
-fraction of a pixel at every pixel height a role reaches and is where a column
-is lost (``columns``; ``tests/test_typeset_diffs.py`` keeps the default's
-answer as the reason this is passed). ``diffs`` says what it costs in glyph
-size.
-"""
-
-
 def diff_view(model: Any, theme: Any, **given: Any) -> Any:
     """
-    A diff view of the library's as pptmstr makes one: on ``DIFF_CELL``.
+    A diff view of the library's as pptmstr makes one: with no ``cell``.
+
+    The library lays a diff out on the whole-pixel cell ImGui draws the code
+    face at when it is given nothing, and its ``cell=`` keyword is deprecated:
+    accepted, ignored, and a ``DeprecationWarning`` at the caller's line. So
+    nothing is passed, and ``columns`` measures whether what that gives keeps
+    a column.
 
     **The one place a diff view is made**: the view a pane draws
     (``diffs.diff``) and the view whose grid ``columns`` measures are both
@@ -858,28 +852,22 @@ def diff_view(model: Any, theme: Any, **given: Any) -> Any:
     """
     from imscribe import TypesetDiffView
 
-    return TypesetDiffView(model, theme, cell=DIFF_CELL, **given)
+    return TypesetDiffView(model, theme, **given)
 
 
 def diff_fences(held: Any = None) -> Any:
     """
-    The library's hook for a fenced diff in a settled document, on the same
-    cell as ``diff_view``. Raises what the library raises.
+    The library's hook for a fenced diff in a settled document, made as
+    ``diff_view`` makes a view: with no ``cell``. Raises what the library
+    raises.
 
     **Asked for each fence, with what the asking before answered** (``held``):
     the hook is one object for as long as the process runs, because what it
-    knows of a fence it has read is found through it, and the cell it hands
-    the next view it makes is put to ``DIFF_CELL`` here every time. A hook
-    that kept the cell it was made with would host a view on one cell while
-    ``columns`` answered for another.
+    knows of a fence it has read is found through it.
     """
     from imscribe import TypesetDiffFences
 
-    if held is None:
-        return TypesetDiffFences(cell=DIFF_CELL)
-    if held.cell != DIFF_CELL:
-        held.cell = DIFF_CELL
-    return held
+    return TypesetDiffFences() if held is None else held
 
 
 def code_lacks(text: str) -> tuple[str, ...]:
@@ -887,9 +875,10 @@ def code_lacks(text: str) -> tuple[str, ...]:
     The characters of ``text`` above ASCII that the library's code face has no
     glyph for, each once, in the order met.
 
-    The library sets such a character from another face at that face's
-    advance, so a row of monospace holding one is off its columns to the right
-    of it. Asked as the library's diff view asks for its own
+    The library sets such a character in whole cells from another face where
+    one has it, and two cells for some, where its diff view counts one a
+    character (``diffs.unfit`` has the measurement). Asked as the library's
+    diff view asks for its own
     ``code_face_lacks``, which is not a name the library promises: the native
     module's ``face_has_glyph`` for the code face's role, one call a distinct
     character. Of the text as given: the view asks about a row as it hands
@@ -956,23 +945,26 @@ COLUMN_EPSILON_PX = 1e-4
 """
 How far the laid-out cell may be from the baked advance and still be it.
 
-The library's lengths are whole scaled points, 1/65536 pt, so a row laid out
-on a cell that is meant to be 8 px is 7.999989 px a character (measured at a
-pixel height of 16 on ``DIFF_CELL``; between 1.3e-6 and 2.4e-5 px out at the
-heights from 12 to 24). The view itself answers the whole pixel it aimed at
-wherever the layout came within a thousandth of it, so the row's own width is
-read as well and the farther of the two is what is held to this bound
-(``Columns.cell``). The row's pens are compared too (``Columns.off``), so the
-bound decides only what the probe row is too short to show, and **what it
+The library's own answer for a cell is a float a little off the whole pixel
+(8.000008583 for 8 at a pixel height of 16), and the view answers the whole
+pixel wherever that came within a thousandth of it. So the measured row's own
+width is read as well -- where the caret after its last character is, over its
+characters -- and the farther of the two is what is held to this bound
+(``Columns.cell``): 8.000009 at 16, and between 1e-6 and 1.6e-5 px out at the
+heights from 12 to 24. The row's pens are compared too (``Columns.off``), so
+the bound decides only what the probe row is too short to show, and **what it
 decides is bounded by a row's length** (``Columns.reach``): an error of e a
 column is half a pixel once the row is 0.5 / e columns long -- 5,000 columns
-at this bound, 44,815 at a pixel height of 16, 20,590 at 20, 1.3 at the
-0.374 px the library's default cell is out by at 16. **And it does add up**:
-measured in pptmstr on 2026-10-12 in a diff view drawn with no window at a
-pixel height of 16, the glyphs at the end of a row of 100,000 are 1 px left
-of the grid the row began on and those at the end of 1,000,000 are 11. A
-diff with a row longer than the reach is its pane's own rows
-(``diffs.unfit``); a minified file is one line.
+at this bound, 54,418 at a pixel height of 16, 33,124 at 14 and 30,474 at 20,
+which is the least from 12 to 24. Measured in pptmstr on 2026-10-13 (imscribe
+``0.2.0b1``, the imtypeset ``0.4.1.192900`` wheel, a row of 1,000 set in a
+document with no window at 16 px): **the glyphs are drawn on the whole pixel,
+the last on its cell to the float, and it is the caret that is out**, 0.0088
+px right after 1,000 characters, which is what a press and a selection go by.
+A diff with a row longer than the reach is its pane's own rows
+(``diffs.unfit``); a minified file is one line. Not measured at this pin: a
+row as long as the reach in a diff view, which was 1 px out at 100,000
+columns on imtypeset 0.3.
 """
 
 _FARTHEST_COLUMN = 1_000_000
@@ -1082,8 +1074,8 @@ def columns(theme: Any) -> Columns:
 
 def _columns_key(theme: Any) -> object:
     """
-    What a measurement is of: the cell the view is made on, the code style the
-    row was set in, and the display's density.
+    What a measurement is of: the code style the row was set in, and the
+    display's density.
 
     ImGui rasterises a size again for another density, and the advance it
     bakes is a whole pixel of *that* raster: a window dragged from a display
@@ -1095,7 +1087,7 @@ def _columns_key(theme: Any) -> object:
     """
     from imscribe import BlockKind
 
-    return (DIFF_CELL, theme.style(BlockKind.CODE).font, theme.px_per_inch, _density())
+    return (theme.style(BlockKind.CODE).font, theme.px_per_inch, _density())
 
 
 def _density() -> tuple[float, float]:

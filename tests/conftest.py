@@ -305,12 +305,34 @@ def own_rows(seam: Any, monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
     yield seam
 
 
+NO_COLUMN = gate.Columns(
+    False,
+    "lays out a 7.626 px column where ImGui draws 8 px",
+    cell=7.626,
+    baked=8.0,
+    size=16.0,
+    glyphs=156,
+    off=148,
+    mishit=131,
+)
+"""
+A measurement that says no, as ``gate.columns`` gave it at 16 px of the library
+before imtypeset 0.4 with no cell passed: the font file's advance against the
+whole pixel ImGui bakes.
+"""
+
+
 @pytest.fixture
-def default_cell(seam: Any, monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
+def no_column(seam: Any, monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
     """
-    The seam with the library's diff view on the cell it has when a host passes
-    nothing (``cell="font"``): where the measurement says no of the library as
-    it is, with nothing overridden. What ``gate.DIFF_CELL`` is passed to avoid.
+    The seam with the measurement answering no (``NO_COLUMN``), stood in: the
+    library as it is keeps its columns at every size the product sets, so no
+    setting of it gives the other answer, and what a pane does with one is
+    still the product's to hold. ``own_rows`` forces the same branch by the
+    override; this is the branch taken on the measurement's word.
     """
-    monkeypatch.setattr(gate, "DIFF_CELL", "font")
+    from pptmstr.ui.typeset import diffs
+
+    monkeypatch.setattr(diffs, "columns", lambda: NO_COLUMN)
+    assert diffs.ADOPT == "measured" and not diffs.adopted()
     yield seam

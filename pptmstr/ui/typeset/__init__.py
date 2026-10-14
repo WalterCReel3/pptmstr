@@ -39,20 +39,20 @@ through the same calls.** CONTEXT's typeset branch is one of four modes of the
 log and not the one it starts in (``transcript_pane.DEFAULT_MODE``).
 
 **The library sets markdown, and ImGui draws text that is not markdown**
-(``themes.native``): monospace set by the library outside its diff view does
-not keep its columns, by pptmstr's measurement. So a literal part, ``plain()``
+(``themes.native``, which says where that line was drawn and what has been
+measured of the library's monospace since). So a literal part, ``plain()``
 and a label are ImGui items in the chrome's font or the library's own atlas
 entry.
 
 **A diff is the library's where the library that is running keeps a column,
 and its pane's own renderer where it does not** (``diff_adopted``): the
-question is measured of the running library (``gate.columns``), with the diff
-view on a whole-pixel cell (``gate.DIFF_CELL``), and is true on the one
-pptmstr is built against at every size a diff is set at. So DETAIL and the
+question is measured of the running library (``gate.columns``), with nothing
+asked of its diff view (``gate.diff_view``), and is true on the one pptmstr
+pins at every size a diff is set at. So DETAIL and the
 inbox row draw an approval's diff with the library's diff view and a settled
 document hosts an honest fenced diff in one, each diff being asked about as
-well (``diffs.unfit``). ``diffs`` has the numbers, what the cell costs in
-glyph size, the rules an adopted view is held to, and the one constant that
+well (``diffs.unfit``). ``diffs`` has the numbers, the rules an adopted view
+is held to, and the one constant that
 overrides the measurement (``diffs.ADOPT``).
 
 ## What a consumer must not do

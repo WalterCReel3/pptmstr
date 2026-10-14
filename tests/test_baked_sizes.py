@@ -454,29 +454,43 @@ def test_glyphs_the_library_loads_are_the_moved_sizes_too(kept: Any, guarded: bo
     drawing(kept)
 
 
+def _across_a_change_of_scale(kept: Any, cache: Any) -> tuple[Any, Any, Any]:
+    """
+    The document drawn at the product's scale, at a larger one, and at the
+    first again, three frames each behind the guard: what the atlas held after
+    each.
+    """
+    seen = []
+    for scale in (1.0, 1.25, 1.0):
+        typeset.configure(typeset=True, scale=scale)
+        for _ in range(3):
+            seam_frame(kept, document(cache))
+        drawing(kept)
+        seen.append(held(kept))
+    return seen[0], seen[1], seen[2]
+
+
 def test_a_document_is_drawn_from_its_own_sizes_across_a_change_of_scale(kept: Any) -> None:
     """
     The library's views through a change of the text scale: the sizes of the
     scale before leave the atlas, the document is drawn again, and every glyph
     the atlas then holds for the library's bold is its size's own.
+
+    **One size of the scale before comes back, and it is the library's doing**
+    (``test_the_atlas_at_a_scale_returned_to_holds_what_it_held_there``): the
+    code face's. It is on the atlas with the two glyphs a size is made with,
+    nothing draws from it, and the guard keeps it like any other until the
+    sizes next change, so no size is moved onto it.
     """
     cache = typeset.ViewCache()
-    for _ in range(3):
-        seam_frame(kept, document(cache))
-    drawing(kept)
-    at_one = held(kept)
-    typeset.configure(typeset=True, scale=1.25)
-    for _ in range(3):
-        seam_frame(kept, document(cache))
-    drawing(kept)
-    at_larger = held(kept)
+    at_one, at_larger, again = _across_a_change_of_scale(kept, cache)
     assert at_larger != at_one
     assert sum(map(len, at_larger.values())) <= sum(map(len, at_one.values()))
-    typeset.configure(typeset=True, scale=1.0)
-    for _ in range(3):
-        seam_frame(kept, document(cache))
-    drawing(kept)
-    assert held(kept) == at_one
+    code = list(kept.get_io().fonts.fonts).index(gate.face_font("CODE"))
+    assert {index: sizes for index, sizes in again.items() if index != code} == {
+        index: sizes for index, sizes in at_one.items() if index != code
+    }
+    assert set(at_one[code]) <= set(again[code]) <= set(at_one[code]) | set(at_larger[code])
     bold = gate.face_font("PROSE_BOLD")
     got = {}
     for size, _ in theme.baked_sizes(kept.get_io().fonts, bold):
@@ -491,6 +505,31 @@ def test_a_document_is_drawn_from_its_own_sizes_across_a_change_of_scale(kept: A
     for size, (chars, found) in got.items():
         assert found == fresh(kept, bold, size, chars), f"bold at {size:g} px"
     cache.clear()
+
+
+STALE_SIZE = (
+    "P42: a layout makes the code face's baked size of the layout before it again, "
+    "whatever the document laid out now is set at"
+)
+
+
+@pytest.mark.xfail(strict=True, reason=STALE_SIZE)
+def test_the_atlas_at_a_scale_returned_to_holds_what_it_held_there(kept: Any) -> None:
+    """
+    What ``keep_baked_sizes`` says it bounds: the atlas holds the sizes drawn
+    since the last change and no others. Measured in pptmstr on 2026-10-13
+    (imscribe ``0.2.0b1``, the imtypeset ``0.4.1.192900`` wheel, a context with
+    no backend): after every baked size is discarded, the first layout of a
+    document -- a new view, the one before it closed, with or without code in
+    it -- makes the code face's size of the layout before it again, with two
+    glyphs, inside ``Document.layout``. Back at a 16 px body from 20 the code
+    face holds 16 and 20. One size and not one for every scale tried: the one
+    before that is gone.
+    """
+    cache = typeset.ViewCache()
+    at_one, _, again = _across_a_change_of_scale(kept, cache)
+    cache.clear()
+    assert again == at_one
 
 
 def test_a_family_loaded_again_leaves_its_old_fonts_holding_nothing(kept: Any) -> None:
