@@ -1043,7 +1043,7 @@ def _installed_imscribe(
     """
     An ``imscribe`` package in a site directory of its own, with a distribution
     that records ``direct_url``, or none where it is ``None``, as an install
-    from a package index leaves it; the package's directory and the distribution.
+    by name leaves it; the package's directory and the distribution.
     """
     site = top / "site"
     package = site / "imscribe"
@@ -1068,19 +1068,25 @@ def _clone(top: Path, head: str) -> Path:
     return clone
 
 
-def test_a_copy_installed_from_a_package_index_records_no_commit_and_none_is_claimed(
+def test_a_copy_installed_by_name_records_no_origin_and_none_is_claimed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """
-    What an install of pptmstr's requirements leaves. An installer writes
-    ``direct_url.json`` for everything it did not take from an index, so its
-    absence is how such an install is known, and no ref file is compared with it.
+    What an install of pptmstr's requirements leaves: no ``direct_url.json``.
+    **That is not evidence of a package index.** Run on 2026-10-13 with pip
+    26.2.1: ``pip install --no-index --find-links DIR imscribe==0.2.0b1``
+    writes none either, so a wheel somebody built and put in a directory
+    reads the same as the one on PyPI. The line says how it was installed and
+    does not say "published"; no ref file is compared with it.
     """
     package, distribution = _installed_imscribe(tmp_path, monkeypatch, None)
-    assert version._origin(distribution, package) == (
-        None,
-        "installed from a package index, which records no commit",
+    commit, how = version._origin(distribution, package)
+    assert commit is None
+    assert how == (
+        "installed by name from an index or a directory of wheels, which records neither "
+        "that nor a commit"
     )
+    assert "published" not in how
 
 
 def test_a_copy_installed_from_a_file_names_the_file_and_its_hash(
@@ -1241,10 +1247,10 @@ def test_the_library_line_of_an_installed_imtypeset_is_the_librarys_own_answers(
 ) -> None:
     """
     No ``BUILT-FROM`` and no ref file: a wheel has neither. The version is the
-    installed distribution's against the pin, the wheel is said to be the
-    published one only where its metadata records no other origin, the commit
-    is the one its own attestation names, and the headers and the acceptance
-    are what the library says of itself.
+    installed distribution's against the pin, how it was installed is what
+    its metadata records and no more, the commit is the one its own
+    attestation names, and the headers and the acceptance are what the
+    library says of itself.
     """
     site = tmp_path / "site"
     package = site / "imtypeset"
@@ -1261,10 +1267,12 @@ def test_the_library_line_of_an_installed_imtypeset_is_the_librarys_own_answers(
     line = version._imtypeset(found, _said_of_a_distribution(package))
     assert line == (
         f"imtypeset {pairing.IMTYPESET_PIN}, the version pptmstr pins: library 0.4.1 at "
-        f"{package / pairing.LIBRARY_NAME}, found as an installed distribution, the published "
-        f"wheel, installed from a package index, which records no commit; headers fork:0123abc, "
-        f"accepted by imgui-check+probe, built for imgui-bundle=={pairing.IMGUI_BUNDLE_PIN}"
+        f"{package / pairing.LIBRARY_NAME}, found as an installed distribution, installed by "
+        f"name from an index or a directory of wheels, which records neither that nor a commit; "
+        f"headers fork:0123abc, accepted by imgui-check+probe, built for "
+        f"imgui-bundle=={pairing.IMGUI_BUNDLE_PIN}"
     )
+    assert "published" not in line
 
     (package / pairing.ATTESTATION).write_text(
         json.dumps({"attested_where": f"a build at {REF}"}), encoding="utf-8"
@@ -1273,12 +1281,18 @@ def test_the_library_line_of_an_installed_imtypeset_is_the_librarys_own_answers(
         found, _said_of_a_distribution(package)
     )
 
-    # Installed from a file somebody built: not said to be the published wheel.
+    # Installed from a file named on the command line: the file is said.
     (record / "direct_url.json").write_text(
         json.dumps({"url": "file:///tmp/built.whl", "archive_info": {}}), encoding="utf-8"
     )
     line = version._imtypeset(found, _said_of_a_distribution(package))
-    assert "the published wheel" not in line and "installed from the file /tmp/built.whl" in line
+    assert "installed from the file /tmp/built.whl" in line
+
+    # Installed and refused at import: nothing is loaded to describe.
+    assert version._imtypeset(found, {"kind": gate.REFUSED}) == (
+        f"imtypeset: not loaded (imtypeset is installed, and it did not load: the next line "
+        f"says why); pptmstr pins {pairing.IMTYPESET_PIN}"
+    )
 
     # Another version than the pin, and variables that were set and not read.
     (record / "METADATA").write_text("Name: imtypeset\nVersion: 0.5.0.192900\n", encoding="utf-8")

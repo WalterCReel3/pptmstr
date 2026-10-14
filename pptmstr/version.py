@@ -12,9 +12,12 @@ makes no ImGui context.
 version is what the installed distribution says, and only of the copy that is
 imported. A commit is claimed only by something that records one: an install
 from version control, a checkout the import is file for file, a built pair's
-``BUILT-FROM``, the attestation a wheel of imtypeset carries. A wheel from a
-package index records none, and the line says that it is one; ``imscribe.ref``
-and ``imtypeset.ref`` are compared only with something built from source.
+``BUILT-FROM``, the attestation a wheel of imtypeset carries. A wheel
+installed by name records none, **and not where it came from either**: an
+installer writes the same metadata for one from PyPI and one from a directory
+of wheels, so the line says "by name" and does not say "published".
+``imscribe.ref`` and ``imtypeset.ref`` are compared only with something built
+from source.
 
 **The library is asked first, and its own answer is what is printed**
 (``gate.pairing_said``): which library is in the process, by which route, against
@@ -103,8 +106,9 @@ def _origin(distribution: importlib.metadata.Distribution, package: Path) -> tup
     The commit an installed distribution is, when something records it, and
     how it came to be installed. ``package`` is the directory that is imported.
 
-    An install from a package index records no origin at all, which is how it
-    is known. One from a file records the file and its hash. One from a
+    An install by name records no origin at all: from an index and from a
+    directory of wheels (``--find-links``) alike, so neither is claimed. One
+    from a file named on the command line records the file and its hash. One from a
     version-control URL records the commit. One from a directory records the
     directory; if that is a checkout with a detached ``HEAD``, and the imported
     package is its working tree file for file, the commit is that ``HEAD``'s.
@@ -113,7 +117,10 @@ def _origin(distribution: importlib.metadata.Distribution, package: Path) -> tup
     """
     written = distribution.read_text("direct_url.json")
     if written is None:
-        return None, "installed from a package index, which records no commit"
+        return None, (
+            "installed by name from an index or a directory of wheels, which records "
+            "neither that nor a commit"
+        )
     record = json.loads(written or "{}")
     commit = str(record.get("vcs_info", {}).get("commit_id", ""))
     if _HASH.fullmatch(commit):
@@ -257,8 +264,6 @@ def _distribution(said: Mapping[str, str | None], found: pairing.Found) -> str:
     else:
         version = _against(distribution.version, pin)
         how = _origin(distribution, package.resolve())[1]
-        if distribution.read_text("direct_url.json") is None:
-            how = "the published wheel, " + how
     attested = _attested(package)
     line = (
         f"imtypeset {version}: library {said.get('imtypeset_version') or 'of no stated version'} "
@@ -299,6 +304,11 @@ def _imtypeset(
         return _built_pair(Path(str(said["library"])), found, said.get("imtypeset_version") or "")
     if named:
         return _built_pair(Path(named), found)
+    if found.route == pairing.ROUTE_DISTRIBUTION:
+        return (
+            f"imtypeset: not loaded ({found.why}, and it did not load: the next line says "
+            f"why); pptmstr pins {pairing.IMTYPESET_PIN}"
+        )
     why = found.why
     if found.route == pairing.ROUTE_ENVIRONMENT:
         why += f", and {pairing.LIBRARY_VARIABLE} names no library"

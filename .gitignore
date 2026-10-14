@@ -21,3 +21,8 @@ dist/
 # imscribe.ref and imtypeset.ref name, and the library built from them for this
 # checkout's interpreter. Remade by `make deps`.
 /.deps/
+
+# Wheels downloaded by hand for an install with no network
+# (`pip install --no-index --find-links .wheelhouse ...`). Somebody else's
+# published files, never this repository's to carry.
+/.wheelhouse/
