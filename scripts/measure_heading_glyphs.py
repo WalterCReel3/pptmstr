@@ -101,9 +101,11 @@ two are compared; a stream on every frame while it arrives.
     ... measure_heading_glyphs.py --paths stream --forms h2 --steps 0 \\
             --families roboto --decoys 1 --room forced --tables all
 
-``IMTYPESET_LIBRARY`` and ``IMTYPESET_PYTHON`` are taken from the environment
-(``make typeset-env`` prints them) and default to the pair under
-``.deps/imtypeset``. Scenes run in one process in the order printed, so a glyph
+The library is found as the application finds it (``pptmstr.pairing``): an
+installed imtypeset, or this checkout's built pair where none is installed or
+``PPTMSTR_TYPESET_DEPS=1`` asks; the header says which.
+
+Scenes run in one process in the order printed, so a glyph
 a later scene draws may have been baked by an earlier one: ``--paths``,
 ``--forms``, ``--steps`` and ``--families`` choose what a fresh process sees
 first. Exit status 1 when the library is not drawing, 2 when a scene could not
@@ -125,7 +127,6 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
-PAIR = ROOT / ".deps" / "imtypeset"
 sys.path.insert(0, str(ROOT))
 
 WINDOW = (1200, 900)
@@ -751,8 +752,9 @@ def fresh_glyphs(names: set[str], families: tuple[str, ...]) -> tuple[Fresh, lis
 
 def main(argv: list[str] | None = None) -> int:
     args = arguments(argv)
-    os.environ.setdefault("IMTYPESET_LIBRARY", str(PAIR / "libimtypeset_bundle.so"))
-    os.environ.setdefault("IMTYPESET_PYTHON", str(PAIR / "pysnap"))
+    from pptmstr import pairing, version
+
+    pairing.adopt()
     if args.reference is not None:
         return reference(tuple(args.reference.split("|")), args.families[0])
 
@@ -1132,15 +1134,11 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  display: {os.environ.get('DISPLAY', 'unset')};  python {sys.version.split()[0]}")
     print(f"  imscribe imported from {Path(imscribe.__file__).resolve().parent}")
     print(f"  imgui_bundle {imgui_bundle.__version__}, Dear ImGui {imgui.get_version()}")
-    print(f"  IMTYPESET_LIBRARY={os.environ['IMTYPESET_LIBRARY']}")
+    print(f"  {version.library_line()}")
     ts = typesetter.module()
     if ts is not None:
         info = ts.host_info()
         print(f"  imtypeset {info.get('imtypeset_version')}, rasteriser {info.get('rasteriser')}")
-    built = PAIR / "BUILT-FROM"
-    if built.is_file():
-        for line in built.read_text(encoding="utf-8").splitlines():
-            print(f"    BUILT-FROM {line}")
     for name, value in facts.items():
         print(f"  {name}: {value}")
     print(

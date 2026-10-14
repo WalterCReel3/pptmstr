@@ -1,5 +1,7 @@
-# The imscribe commit pptmstr installs and is tested against: a commit of the branch
-# experimental/imtypeset-adoption of https://github.com/WalterCReel3/imgui-adv-text.
+# The imscribe commit the development override installs (`make deps`): the commit of
+# https://github.com/WalterCReel3/imscribe that its tag v0.2.0b1 points at, which is what
+# the version pyproject.toml pins was published from. An install does not read this file.
 # One ref, on the first line that is neither blank nor a comment: a full 40-digit hash.
-# Read by scripts/typeset_deps.py. A bump is: this line, HANDOFF-advtext.md, `make deps`, the gate.
-bb240c3db97aaef4c62382d3822913f70acfa540
+# Read by scripts/typeset_deps.py. To work against an unpublished commit: this line,
+# imtypeset.ref if that commit's own imtypeset.ref differs, `make deps`, the gate.
+b98de0880e0496bdf096b6b0af75b62c6d73da5d

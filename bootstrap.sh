@@ -8,28 +8,18 @@
 # has no X display, so the window smoke test is wrapped in Xvfb or skipped with
 # an explanation, rather than failing for a reason unrelated to the build.
 #
-# imscribe is on no package index. Stage 3 fetches it at the commit imscribe.ref
-# names, installs that, and then builds the imtypeset library imscribe draws
-# through, from the commit imtypeset.ref names, for the interpreter in .venv
-# (scripts/typeset_deps.py; everything lands in .deps/). The sources come from
-# GitHub unless a variable names another repository -- a URL, a file:// URL or a
-# local path:
+# Everything comes from the package index, and pyproject.toml names all of it:
+# stage 3 is one install. That brings imscribe, which sets typeset text, and
+# imtypeset, the library it draws through, as wheels at exact versions beside
+# the one imgui-bundle they are built for; nothing is compiled and no variable
+# has to be set. imtypeset has wheels for CPython 3.11 to 3.14 on Linux x86-64
+# (glibc 2.28 or later) and on macOS 14 or later on arm64. Anywhere else the
+# install leaves it out, pptmstr runs, every pane draws with its own renderer,
+# and `pptmstr --version` says the library is not installed.
 #
-#   IMSCRIBE_REPO  IMTYPESET_REPO  IMGUI_BUNDLE_REPO  IMGUI_REPO
-#
-# IMSCRIBE_PIP_ARGS is added to the imscribe install and to nothing else. This
-# script as a whole needs a package index: a .venv it has just made holds
-# nothing, so imscribe's build backend and everything pyproject.toml names come
-# from one. Where there is no index, `make deps` repeats the imscribe and library
-# part alone in a .venv that already holds them, and there
-# IMSCRIBE_PIP_ARGS="--no-deps --no-index --no-build-isolation" is what it takes.
-#
-# Fetching needs git, and bootstrap stops without imscribe. The library also
-# needs a C++ compiler, Linux, and the Dear ImGui headers of the wheel's own
-# fork, fetched from github.com/pthom/imgui; without any of those bootstrap says
-# so and carries on, because pptmstr runs without the library and typeset panes
-# fall back. IMTYPESET_BUNDLE_HEADERS=stand-in builds against upstream Dear
-# ImGui's headers instead, and `pptmstr --version` then says so.
+# Building the two from source at a commit nobody has published is the
+# development override and no part of this script: `make deps`, afterwards, in
+# the .venv this leaves (the Makefile and scripts/typeset_deps.py say how).
 #
 # Usage: ./bootstrap.sh [--no-window] [--python PATH]
 set -euo pipefail
@@ -37,8 +27,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 if [ -n "${ADVTEXT_SRC:-}" ]; then
-  echo "note: ADVTEXT_SRC is set and is not read. imscribe is installed at the commit" >&2
-  echo "      in imscribe.ref; IMSCRIBE_REPO names a repository to fetch that commit from." >&2
+  echo "note: ADVTEXT_SRC is set and is not read. imscribe is installed from the package" >&2
+  echo "      index, at the version pyproject.toml pins." >&2
 fi
 
 # Keep in step with requires-python in pyproject.toml.
@@ -97,9 +87,6 @@ echo ">>> stage 2/4: virtualenv"
 if command -v uv >/dev/null 2>&1; then
   uv venv --python "$PYTHON" .venv
   INSTALL=(uv pip install --python .venv/bin/python)
-  # uv may otherwise keep its cached build of a directory whose version number
-  # did not change, which is every bump of imscribe.ref.
-  REINSTALL_IMSCRIBE="--reinstall-package imscribe"
 else
   echo "    uv not found, falling back to python -m venv"
   # Debian splits ensurepip into python3-venv, so this is the step that fails on
@@ -117,32 +104,14 @@ else
   fi
   .venv/bin/python -m pip install --quiet --upgrade pip
   INSTALL=(.venv/bin/python -m pip install)
-  REINSTALL_IMSCRIBE=""
 fi
 
 echo
 echo ">>> stage 3/4: install"
-# imscribe is installed here and by nothing else: pyproject.toml does not name
-# it, because the name is on no package index and a requirement would ask one
-# for it. Installed as a copy, not editable, so what .venv holds is the pinned
-# commit whatever happens to .deps afterwards; `verify` then holds the
-# interpreter to it, since anything ahead of site-packages on sys.path would win
-# without a word.
-.venv/bin/python scripts/typeset_deps.py imscribe
-# shellcheck disable=SC2086  # both are lists of options, possibly empty
-"${INSTALL[@]}" $REINSTALL_IMSCRIBE ${IMSCRIBE_PIP_ARGS:-} .deps/imscribe
-.venv/bin/python scripts/typeset_deps.py verify
+# One install, and nothing here names a version: pyproject.toml pins
+# imgui-bundle, imscribe and imtypeset exactly, as one unit. imscribe's is a
+# beta, which an installer takes because the pin names it.
 "${INSTALL[@]}" -e ".[dev]"
-# Again, after the last thing that installs: what that install left in .venv
-# is what runs.
-.venv/bin/python scripts/typeset_deps.py verify
-# After the install: the library is built for the imgui-bundle wheel that is now
-# in .venv. The step reports its own failures and exits 0 for them; the guard is
-# for the step itself breaking, which must not take bootstrap with it either.
-.venv/bin/python scripts/typeset_deps.py library || {
-  echo "    The imtypeset library step ended abnormally. pptmstr runs without the" >&2
-  echo "    library and typeset panes fall back; 'make deps' tries again." >&2
-}
 
 echo
 if [ "$SKIP_WINDOW" = 1 ]; then
@@ -160,3 +129,5 @@ fi
 
 echo
 echo "Ready.  Run:  make run"
+echo "What was installed, and whether the typesetting library is accepted beside it:"
+echo "    .venv/bin/python -m pptmstr --version"

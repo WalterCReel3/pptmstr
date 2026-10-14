@@ -4,7 +4,8 @@ The entry point: ``pptmstr`` and ``python -m pptmstr``.
 Three things happen here before the application is imported, and each is here
 because it has to come first:
 
-- **The text library's two variables are settled** (``pairing.adopt``), before
+- **Where the text library is found is settled** (``pairing.adopt``): an
+  installed imtypeset, a pair the two variables name, or neither. Before
   anything asks imscribe whether there is a library.
 - **``--version`` is answered** without the application: importing it is every
   pane and a second and a half, and the report is for installs where something

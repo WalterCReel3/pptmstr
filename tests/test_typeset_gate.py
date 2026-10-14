@@ -11,7 +11,6 @@ start one.
 from __future__ import annotations
 
 import ast
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -21,10 +20,10 @@ import imscribe
 import pytest
 from imscribe import Face, registered_fonts, typesetter
 
-from pptmstr import theme
+from pptmstr import pairing, theme
 from pptmstr.ui import typeset
 from pptmstr.ui.typeset import Pane, gate, roles
-from tests.conftest import BOLD
+from tests.conftest import BOLD, child_environment, refused_library
 
 PACKAGE = Path(typeset.__file__).resolve().parent
 
@@ -46,16 +45,15 @@ What the seam imports from ``imscribe`` that is not in ``imscribe.__all__``, and
 
 def _run(script: str, **env: str) -> subprocess.CompletedProcess[str]:
     """
-    ``script`` in an interpreter of its own, with the library's two variables as given.
+    ``script`` in an interpreter of its own, with what chooses the library as given and no more.
     """
-    clean = {k: v for k, v in os.environ.items() if not k.startswith("IMTYPESET_")}
     return subprocess.run(
         [sys.executable, "-c", script],
         capture_output=True,
         text=True,
         timeout=120,
         check=False,
-        env={**clean, **env},
+        env=child_environment(**env),
     )
 
 
@@ -161,13 +159,14 @@ _LOAD_IN_A_BARE_CONTEXT = (
 )
 
 
-def test_with_no_library_named_no_pane_is_typeset_and_the_menu_has_a_sentence() -> None:
+def test_with_no_library_no_pane_is_typeset_and_the_menu_has_a_sentence() -> None:
     """
-    ``IMTYPESET_LIBRARY`` unset is the ordinary state of a machine the library was
-    never built on. The application's own font callback runs, nothing is typeset,
-    and what the Text menu will say is one sentence that says *not installed*.
+    No library is the ordinary state of a machine imtypeset has no wheel for,
+    and of a run that asks for none. The application's own font callback runs,
+    nothing is typeset, and what the Text menu will say is one sentence that
+    says *not installed*.
     """
-    done = _run(_LOAD_IN_A_BARE_CONTEXT)
+    done = _run(_LOAD_IN_A_BARE_CONTEXT, **{pairing.DISABLE_VARIABLE: "1"})
     assert done.returncode == 0, done.stderr
     drawing, panes, reason = done.stdout.strip().split("\n")
     assert drawing == "False False"
@@ -175,18 +174,19 @@ def test_with_no_library_named_no_pane_is_typeset_and_the_menu_has_a_sentence() 
     assert reason == "the typesetting library is not installed (IMTYPESET_LIBRARY is not set)"
 
 
-def test_a_library_that_is_named_and_cannot_be_used_is_refused_in_its_own_words(
+def test_a_library_that_is_found_and_cannot_be_used_is_refused_in_its_own_words(
     tmp_path: Path,
 ) -> None:
     """
-    Named and unusable is a fault the operator must act on, where not named is
-    not: the sentence says *refused* and quotes what the library said.
+    Found and unusable is a fault the operator must act on, where not installed
+    is not: the sentence says *refused* and quotes what the library said.
     """
-    done = _run(_LOAD_IN_A_BARE_CONTEXT, IMTYPESET_LIBRARY=str(tmp_path / "not-there.so"))
+    done = _run(_LOAD_IN_A_BARE_CONTEXT, **refused_library(tmp_path))
     assert done.returncode == 0, done.stderr
     drawing, panes, reason = done.stdout.strip().split("\n")
     assert (drawing, panes) == ("False False", "[]")
     assert reason.startswith("the typesetting library was refused (") and reason.endswith(")")
+    assert "there is no library at " in reason
     assert "IMTYPESET_LIBRARY is not set" not in reason
 
 

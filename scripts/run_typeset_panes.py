@@ -40,15 +40,17 @@ diff is counted on both sides: ``typeset.diff`` and the library's
 the library's columns, in which frame the measurement was taken (0: at the
 font load, before any frame), and what ``diff_adopted`` answered on each frame.
 
-The library is used when ``IMTYPESET_LIBRARY`` and ``IMTYPESET_PYTHON`` name the
-built pair (``make typeset-env`` prints them) and not otherwise; the report says
-which, and the sentence the Text menu would show.
+The library is found as the application's entry point finds it
+(``pptmstr.pairing``): an installed imtypeset, or this checkout's built pair
+where none is installed or ``PPTMSTR_TYPESET_DEPS=1`` asks.
+``IMSCRIBE_NO_TYPESET=1`` is the run without it. The report says which library
+it was, and the sentence the Text menu would show.
 
 Usage:
     scripts/xvfb_shot.sh -- .venv/bin/python scripts/run_typeset_panes.py --out shots/seam2-with
     scripts/xvfb_shot.sh -- .venv/bin/python scripts/run_typeset_panes.py \\
         --context typeset --out shots/seam3-with
-    scripts/xvfb_shot.sh -- env -u IMTYPESET_LIBRARY -u IMTYPESET_PYTHON \\
+    scripts/xvfb_shot.sh -- env IMSCRIBE_NO_TYPESET=1 \\
         .venv/bin/python scripts/run_typeset_panes.py --out shots/seam2-without
     scripts/xvfb_shot.sh -- .venv/bin/python scripts/run_typeset_panes.py \\
         --diffs never --out shots/diffs-never
@@ -112,6 +114,9 @@ def main() -> int:
     from imgui_bundle import hello_imgui, imgui, immapp
 
     from pptmstr import app as pptmstr_app
+    from pptmstr import pairing, version
+
+    pairing.adopt()
     from pptmstr.ui import detail, inbox, rich_pane, transcript_pane, typeset
     from pptmstr.ui.focus import Scope
     from pptmstr.ui.typeset import diffs, gate, views
@@ -269,7 +274,7 @@ def main() -> int:
         immapp.run = real_run  # type: ignore[assignment]
 
     print(f"run_typeset_panes: {counter['n']} frames, the application's exit status {status}")
-    print(f"  IMTYPESET_LIBRARY={os.environ.get('IMTYPESET_LIBRARY') or '(unset)'}")
+    print(f"  {version.library_line()}")
     print(f"  load average: {' '.join(f'{v:.2f}' for v in os.getloadavg())}")
     print(f"  the Text menu's sentence at the last stop: {handed.get('sentence', 'not read')}")
     print(

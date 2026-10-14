@@ -19,7 +19,6 @@ with the library's own reason where it cannot draw).
 
 from __future__ import annotations
 
-import os
 import random
 import re
 from collections.abc import Callable
@@ -2667,22 +2666,23 @@ def test_text_that_runs_past_the_measure_can_be_scrolled_to(seam: Any) -> None:
 # -- when the library stops ------------------------------------------------------
 
 
-def test_a_named_library_that_cannot_draw_fails_the_tests_that_draw_and_does_not_skip_them(
+def test_a_library_that_is_found_and_cannot_draw_fails_the_tests_that_draw_and_does_not_skip_them(
     tmp_path: Path,
 ) -> None:
     """
-    The hazard of a fixture that skips: a pair that is stale and refused, or a
-    library an earlier test stopped for the rest of the process, skips every test
-    that draws and the run is green. With ``IMTYPESET_LIBRARY`` naming a library
-    the fixture fails instead, with the reason; with none named it skips.
+    The hazard of a fixture that skips: a library that is found and refused, or
+    one an earlier test stopped for the rest of the process, skips every test
+    that draws and the run is green. Where one is found the fixture fails
+    instead, with the reason; where there is none to find it skips.
     """
     import subprocess
     import sys
 
-    one = "tests/test_typeset_views.py::test_the_bold_monospace_is_registered_and_used"
-    clean = {k: v for k, v in os.environ.items() if not k.startswith("IMTYPESET_")}
+    from tests.conftest import child_environment, refused_library, without_the_library
 
-    def run(**env: str) -> subprocess.CompletedProcess[str]:
+    one = "tests/test_typeset_views.py::test_the_bold_monospace_is_registered_and_used"
+
+    def run(environ: dict[str, str]) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
             [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", one],
             capture_output=True,
@@ -2690,14 +2690,14 @@ def test_a_named_library_that_cannot_draw_fails_the_tests_that_draw_and_does_not
             timeout=120,
             check=False,
             cwd=Path(__file__).resolve().parent.parent,
-            env={**clean, **env},
+            env=environ,
         )
 
-    named = run(IMTYPESET_LIBRARY=str(tmp_path / "not-a-library.so"))
-    assert named.returncode == 1, named.stdout
-    assert "IMTYPESET_LIBRARY is set and the typesetting library cannot draw" in named.stdout
-    unnamed = run()
-    assert unnamed.returncode == 0 and "1 skipped" in unnamed.stdout, unnamed.stdout
+    found = run(child_environment(**refused_library(tmp_path)))
+    assert found.returncode == 1, found.stdout
+    assert "a typesetting library was found and cannot draw (refused)" in found.stdout
+    none = run(without_the_library())
+    assert none.returncode == 0 and "1 skipped" in none.stdout, none.stdout
 
 
 def test_a_library_that_stops_inside_a_draw_is_said_in_the_pane_and_is_off_the_next_frame(

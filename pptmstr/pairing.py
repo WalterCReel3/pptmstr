@@ -1,36 +1,58 @@
 """
 What pptmstr is built against, and where a process of it finds the text library.
 
-Typeset text is four things that belong together: pptmstr, an imscribe commit,
-the imtypeset library with its Python package from one commit, and one exact
-``imgui-bundle`` wheel. The tree names the last three -- ``imscribe.ref``,
-``imtypeset.ref``, the pin in ``pyproject.toml`` -- and this module is the rule
-for reading them and for holding what was built to them.
+Typeset text is four things that belong together: pptmstr, one ``imscribe``,
+one ``imtypeset`` (a shared library with its Python package) and one exact
+``imgui-bundle`` wheel. ``pyproject.toml`` pins the last three as published
+versions, and that is what an install is. ``imscribe.ref`` and
+``imtypeset.ref`` name the commits those versions were built from, for the
+development override: ``make deps`` builds both from source into ``.deps``,
+for working against a commit nobody has published. This module is the rule for
+reading all five and for holding what was built to them.
 
 **Standard library only, and it imports nothing of pptmstr.**
 ``scripts/typeset_deps.py`` imports it in a ``.venv`` that holds nothing yet, and
 ``pptmstr.__main__`` calls it before anything else is imported.
 
-**The library is found through two environment variables, and a source
-checkout sets them for itself** (``adopt``). imscribe looks for the library only
-when ``IMTYPESET_LIBRARY`` names it, and the Makefile exports the pair
-``make deps`` built to its recipes. A ``pptmstr`` started any other way got
-neither variable and said "not installed" beside a built library. So, once,
-before imscribe is asked anything:
+**Where the library is found** (``decide``), once, before imscribe is asked
+anything. The first line that applies:
 
-    either variable is set by the caller   nothing is added, empty or not, as
-                                           the Makefile has it: a library named
+    either variable is set by the caller   ``IMTYPESET_LIBRARY``,
+                                           ``IMTYPESET_PYTHON``: nothing is
+                                           added, empty or not. A library named
                                            from outside never meets this
-                                           checkout's package, and
-                                           ``IMTYPESET_LIBRARY=`` is how to run
-                                           without the library.
-    neither, in a source checkout          both are set when ``.deps/imtypeset``
-                                           is a whole pair, built from the
-                                           commit ``imtypeset.ref`` names, for
-                                           the environment that is running.
+                                           checkout's package. **An installed
+                                           imtypeset reads neither variable**,
+                                           so beside one they choose nothing
+                                           and ``pptmstr --version`` says they
+                                           were not read.
+    ``IMSCRIBE_NO_TYPESET`` is set         nothing: this is how to run without
+                                           the library, imscribe's own switch
+                                           for not looking for an installed
+                                           one, and pptmstr does not hand it
+                                           ``.deps`` behind that.
+    an ``imtypeset`` is installed          nothing is set: imscribe imports it
+                                           and it finds the library it
+                                           carries. What ``pip install`` of
+                                           pptmstr leaves, and the normal
+                                           route.
+    neither, in a source checkout          both variables are set when
+                                           ``.deps/imtypeset`` is a whole pair,
+                                           built from the commit
+                                           ``imtypeset.ref`` names, for the
+                                           environment that is running.
     neither, installed with no checkout    nothing: there is no ``.deps`` to
                                            look in, and a wheel must not go
                                            looking beside itself.
+
+**``PPTMSTR_TYPESET_DEPS`` asks for ``.deps`` beside an installed imtypeset**
+(``DEPS_VARIABLE``; anything but empty or ``0``). The third line is then
+skipped. Setting the two variables is not enough there: imscribe puts the
+directory ``IMTYPESET_PYTHON`` names at the END of the path, the installed
+package is found first, and that one reads no variable. So the pair's package
+directory is also put FIRST on this process's path (``Found.ahead``), where the
+built package is the one imported and reads the variable. Where the pair cannot
+be handed over the installed one runs and the reason is said.
 
 **What a checkout set for itself is its own, and is not handed on**
 (``release``). A process pptmstr launches inherits pptmstr's environment: an
@@ -41,10 +63,11 @@ once imscribe has been asked for the library the pair this process set is taken
 back out of its environment, and ``named`` still answers what it was. A pair
 the caller set is the caller's and is passed on as it came.
 
-``IMGUI_BUNDLE_PIN`` and the two variable names are spelled here as well as
-where they are decided (``pyproject.toml``; ``imscribe.typesetter``), because
-this module is read before either can be: ``tests/test_version.py`` holds each
-to its source.
+The three pins and the variable names are spelled here as well as where they
+are decided (``pyproject.toml``; ``imscribe.typesetter``), because this module
+is read before either can be: ``tests/test_version.py`` holds each to its
+source, and the three pins to what the installed distributions require of each
+other.
 """
 
 from __future__ import annotations
@@ -52,16 +75,31 @@ from __future__ import annotations
 import os
 import re
 import sys
-from collections.abc import MutableMapping
+from collections.abc import Mapping, MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
 
 PACKAGE = Path(__file__).resolve().parent
 
+# One compatible unit: the imtypeset library is linked against that one
+# imgui-bundle binary (the fourth number of its version is the wheel's line),
+# and imscribe requires exactly these two.
 IMGUI_BUNDLE_PIN = "1.92.900"
+IMSCRIBE_PIN = "0.2.0b1"
+IMTYPESET_PIN = "0.4.1.192900"
+
+IMSCRIBE_DISTRIBUTION = "imscribe"
+IMTYPESET_DISTRIBUTION = "imtypeset"
+# What a wheel of imtypeset carries beside its modules, and what is left to
+# know an installed one by where a freezer dropped the package metadata.
+ATTESTATION = "_attestation.json"
 
 LIBRARY_VARIABLE = "IMTYPESET_LIBRARY"
 PACKAGE_VARIABLE = "IMTYPESET_PYTHON"
+# imscribe's: an installed imtypeset is not looked for.
+DISABLE_VARIABLE = "IMSCRIBE_NO_TYPESET"
+# pptmstr's own: the pair in `.deps` although an imtypeset is installed.
+DEPS_VARIABLE = "PPTMSTR_TYPESET_DEPS"
 
 IMSCRIBE_REF = "imscribe.ref"
 IMTYPESET_REF = "imtypeset.ref"
@@ -76,6 +114,7 @@ PACKAGE_DIR = "pysnap"
 BUILT_FROM = "BUILT-FROM"
 
 ROUTE_ENVIRONMENT = "environment"
+ROUTE_DISTRIBUTION = "distribution"
 ROUTE_CHECKOUT = "checkout"
 ROUTE_NONE = "none"
 
@@ -241,58 +280,140 @@ def _another_environment(pair: Path, prefix: Path) -> str | None:
     )
 
 
+def asks(environ: Mapping[str, str], name: str) -> bool:
+    """
+    Whether a switch variable is on: set to anything but an empty string or ``0``.
+
+    imscribe's reading of ``IMSCRIBE_NO_TYPESET``, blanks around the value not
+    counted, and the same for pptmstr's own ``PPTMSTR_TYPESET_DEPS``.
+    """
+    return (environ.get(name) or "").strip() not in ("", "0")
+
+
+def installed() -> str | None:
+    """
+    The installed ``imtypeset`` distribution as ``imtypeset <version>``, or ``None``.
+
+    Asked the way imscribe asks, without importing the package, so that the
+    two cannot disagree about whether there is one: package metadata first, and
+    then the ``_attestation.json`` a wheel carries inside the package. A source
+    directory of imtypeset on the path -- the ``pysnap`` of a built pair -- has
+    neither and is not one. Never raises: whatever cannot be read is "none".
+    """
+    name = IMTYPESET_DISTRIBUTION
+    try:
+        from importlib import metadata
+
+        return f"{name} {metadata.distribution(name).version or ''}".strip()
+    except Exception:  # not installed, or not readable: asked the second way
+        pass
+    try:
+        import json
+        from importlib import util
+
+        spec = util.find_spec(name)
+        origin = getattr(spec, "origin", None)
+        if not origin:
+            return None
+        record = Path(origin).parent / ATTESTATION
+        if not record.is_file():
+            return None
+    except Exception:
+        return None
+    try:
+        said = json.loads(record.read_text(encoding="utf-8")).get("distribution_version")
+    except Exception:  # unreadable: the package's own gate will say so
+        said = None
+    return f"{name} {said}" if isinstance(said, str) and said else name
+
+
 @dataclass(frozen=True, slots=True)
 class Found:
     """
-    How this process came by the library's two variables, and the sentence for it.
+    How this process comes by the library, and the sentence for it.
     """
 
     route: str
     why: str
     # The variables ``decide`` set, with their values; empty on any other route.
     given: tuple[tuple[str, str], ...] = ()
+    # The directory to put first on the path so that the pair's package is the
+    # one imported beside an installed imtypeset; ``None`` wherever it is not
+    # needed. ``adopt`` does it: the path is the process's and not ``environ``'s.
+    ahead: str | None = None
 
 
 def decide(
-    environ: MutableMapping[str, str], root: Path | None, prefix: Path | None = None
+    environ: MutableMapping[str, str],
+    root: Path | None,
+    prefix: Path | None = None,
+    distribution: str | None = None,
 ) -> Found:
     """
-    Set the pair's two variables in ``environ`` when the rule in the module docstring says to.
+    Decide where the library is found, by the rule in the module docstring, and
+    set the pair's two variables in ``environ`` where the rule says to.
 
     ``root`` is the checkout (``checkout()``), ``prefix`` the running
-    environment's. Never raises: whatever goes wrong reading a pair is the
-    reason it was not taken.
+    environment's, ``distribution`` what ``installed()`` answered. Never
+    raises: whatever goes wrong reading a pair is the reason it was not taken.
     """
     named = [name for name in (LIBRARY_VARIABLE, PACKAGE_VARIABLE) if name in environ]
     if named:
         return Found(ROUTE_ENVIRONMENT, f"{' and '.join(named)} set by the caller")
-    if root is None:
+    if asks(environ, DISABLE_VARIABLE):
         return Found(
             ROUTE_NONE,
-            f"neither {LIBRARY_VARIABLE} nor {PACKAGE_VARIABLE} is set, and pptmstr is "
-            f"installed with no source checkout to look in",
+            f"{DISABLE_VARIABLE} is set, which is how to run without the library: none is "
+            f"looked for",
         )
-    pair = root / DEPS_DIR / PAIR_DIR
-    try:
-        if not pair.is_dir():
-            return Found(ROUTE_NONE, f"there is no {pair}; `make deps` builds the pair")
-        refusal = pair_refusal(pair, read_ref(root / IMTYPESET_REF)) or _another_environment(
-            pair, prefix or Path(sys.prefix)
+    wanted = asks(environ, DEPS_VARIABLE)
+    if distribution and not wanted:
+        return Found(ROUTE_DISTRIBUTION, f"{distribution} is installed")
+    pair, refusal = _pair(root, prefix)
+    if pair is None or refusal:
+        if distribution:
+            return Found(
+                ROUTE_DISTRIBUTION,
+                f"{distribution} is installed, and it is what runs although {DEPS_VARIABLE} "
+                f"asks for this checkout's pair: {refusal}",
+            )
+        return Found(
+            ROUTE_NONE,
+            f"no {IMTYPESET_DISTRIBUTION} is installed, which installing pptmstr's "
+            f"requirements brings, and {refusal}",
         )
-    except Exception as error:  # whatever it is, it is the reason
-        refusal = f"{pair} could not be checked ({type(error).__name__}: {error})"
-    if refusal:
-        return Found(ROUTE_NONE, " ".join(refusal.split()))
     given = (
         (LIBRARY_VARIABLE, str(pair / LIBRARY_NAME)),
         (PACKAGE_VARIABLE, str(pair / PACKAGE_DIR)),
     )
     environ.update(given)
+    why = f"the pair in {pair}, built from the commit {IMTYPESET_REF} names"
+    if not distribution:
+        return Found(ROUTE_CHECKOUT, why, given)
     return Found(
         ROUTE_CHECKOUT,
-        f"the pair in {pair}, built from the commit {IMTYPESET_REF} names",
+        f"{why}, asked for by {DEPS_VARIABLE} in place of the installed {distribution}",
         given,
+        ahead=str(pair / PACKAGE_DIR),
     )
+
+
+def _pair(root: Path | None, prefix: Path | None) -> tuple[Path | None, str]:
+    """
+    A checkout's pair and why it is not to be handed over; the reason is empty when it is.
+    """
+    if root is None:
+        return None, "pptmstr is installed with no source checkout to look in for a built pair"
+    pair = root / DEPS_DIR / PAIR_DIR
+    try:
+        if not pair.is_dir():
+            return pair, f"there is no {pair}; `make deps` builds a pair from source"
+        refusal = pair_refusal(pair, read_ref(root / IMTYPESET_REF)) or _another_environment(
+            pair, prefix or Path(sys.prefix)
+        )
+    except Exception as error:  # whatever it is, it is the reason
+        refusal = f"{pair} could not be checked ({type(error).__name__}: {error})"
+    return pair, " ".join((refusal or "").split())
 
 
 _FOUND: Found | None = None
@@ -308,7 +429,9 @@ def adopt() -> Found:
     """
     global _FOUND
     if _FOUND is None:
-        _FOUND = decide(os.environ, checkout())
+        _FOUND = decide(os.environ, checkout(), distribution=installed())
+        if _FOUND.ahead and _FOUND.ahead not in sys.path:
+            sys.path.insert(0, _FOUND.ahead)
     return _FOUND
 
 

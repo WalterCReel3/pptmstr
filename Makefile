@@ -20,38 +20,74 @@ else
 GUI :=
 endif
 
-# The imtypeset pair `make deps` builds (scripts/typeset_deps.py): the library and
-# the ctypes package that was built with it. imscribe looks for the library only
-# when IMTYPESET_LIBRARY names it and finds the package through IMTYPESET_PYTHON,
-# so both are exported to every recipe here -- tests, the app, the window
-# targets -- and always as a pair, because a library with another build's
-# package fails at import:
+# Where a recipe here finds the imtypeset library imscribe draws through: tests, the
+# app, the window targets. The rule is pptmstr's own (pptmstr/pairing.py), and the
+# first line that applies:
 #
-#   neither is set by the caller   both are exported if `typeset_deps.py pair`
-#                                  answers ok: the pair is whole and was built
-#                                  from the commit imtypeset.ref names. If not,
-#                                  neither is, and every recipe runs without the
-#                                  library; a pair that is there and refused is
-#                                  a warning on every run. So is a pair that is
-#                                  exported and was NOT built against the
-#                                  wheel's own Dear ImGui headers (`ok;` and
-#                                  what it was built against): a stand-in is
-#                                  not refused, and no run on one is silent
-#                                  about it.
-#   either is set by the caller    in the environment or on the command line,
-#                                  empty or not: nothing is added, so a library
-#                                  named from outside never meets this pair's
-#                                  package. `make test IMTYPESET_LIBRARY=` is how
-#                                  to run without the library.
+#   IMTYPESET_LIBRARY or IMTYPESET_PYTHON     in the environment or on the command
+#   is set by the caller                      line, empty or not: nothing is added,
+#                                             so a library named from outside never
+#                                             meets this checkout's package. AN
+#                                             INSTALLED imtypeset READS NEITHER, so
+#                                             beside one they choose nothing and
+#                                             `IMTYPESET_LIBRARY=` does not run
+#                                             without the library: a warning says so.
+#   IMSCRIBE_NO_TYPESET=1                     no library, and the one way to say so:
+#                                             `make test IMSCRIBE_NO_TYPESET=1`. It is
+#                                             imscribe's own switch, so it means the
+#                                             same to a bare pytest and to pptmstr.
+#   an imtypeset distribution is installed    nothing is exported: imscribe imports it
+#                                             and it finds the library it carries.
+#                                             What installing pptmstr's requirements
+#                                             leaves, and the normal route.
+#   otherwise, the pair `make deps` builds    both variables are exported if
+#                                             `typeset_deps.py pair` answers ok: the
+#                                             pair is whole and was built from the
+#                                             commit imtypeset.ref names. Always as
+#                                             a pair, because a library with another
+#                                             build's package fails at import. A pair
+#                                             that is there and refused is a warning
+#                                             on every run, and so is one that was
+#                                             NOT built against the wheel's own Dear
+#                                             ImGui headers (`ok;` and what it was
+#                                             built against).
+#
+# PPTMSTR_TYPESET_DEPS=1 asks for the built pair although an imtypeset is installed:
+# the development override, for a library built from a commit nobody has published.
+# The pair's package directory is then also put first on PYTHONPATH, because the
+# installed package is otherwise the one imported and it reads no variable.
 #
 # `make typeset-env` prints what a recipe gets and, on standard error, why.
 TYPESET_DIR     ?= .deps/imtypeset
 TYPESET_LIBRARY := $(TYPESET_DIR)/libimtypeset_bundle.so
 TYPESET_PACKAGE := $(TYPESET_DIR)/pysnap
 TYPESET_SET     := $(strip $(foreach v,IMTYPESET_LIBRARY IMTYPESET_PYTHON,$(if $(filter undefined,$(origin $(v))),,$(v))))
+TYPESET_OFF     := $(filter-out 0,$(strip $(IMSCRIBE_NO_TYPESET)))
+TYPESET_ASKED   := $(filter-out 0,$(strip $(PPTMSTR_TYPESET_DEPS)))
+# `imtypeset <version>` where one is installed in .venv, and empty where none is
+# (`pptmstr.pairing.installed`, which asks as imscribe does).
+ifeq ($(wildcard $(PY)),)
+TYPESET_INSTALLED :=
+else
+TYPESET_INSTALLED := $(shell $(PY) scripts/typeset_deps.py installed 2>/dev/null)
+endif
+# The built pair is looked at where no distribution is installed, and beside
+# one only when it is asked for.
+TYPESET_PAIR_WANTED := $(if $(TYPESET_INSTALLED),$(TYPESET_ASKED),yes)
 ifneq ($(TYPESET_SET),)
-TYPESET_WHY := $(TYPESET_SET) set by the caller and left exactly as set; the pair in $(TYPESET_DIR) is exported whole or not at all
-else ifeq ($(wildcard $(TYPESET_DIR)),)
+TYPESET_WHY := $(TYPESET_SET) set by the caller and left exactly as set
+ifneq ($(TYPESET_INSTALLED),)
+ifeq ($(TYPESET_OFF),)
+TYPESET_WHY := $(TYPESET_WHY); $(TYPESET_INSTALLED) is installed and reads neither variable, so it is what runs
+ifeq ($(strip $(IMTYPESET_LIBRARY)),)
+$(warning IMTYPESET_LIBRARY= does NOT run without the library here: $(TYPESET_INSTALLED) is installed and reads neither variable. IMSCRIBE_NO_TYPESET=1 is how to run without it)
+endif
+endif
+endif
+else ifneq ($(TYPESET_OFF),)
+TYPESET_WHY := IMSCRIBE_NO_TYPESET is set: no library is looked for and none is exported
+else ifneq ($(TYPESET_PAIR_WANTED),)
+ifeq ($(wildcard $(TYPESET_DIR)),)
 TYPESET_WHY := there is no $(TYPESET_DIR); 'make deps' builds the pair
 else ifeq ($(wildcard $(PY)),)
 TYPESET_WHY := there is no $(PY) to check $(TYPESET_DIR) with; 'make bootstrap' first
@@ -62,13 +98,25 @@ export IMTYPESET_LIBRARY := $(abspath $(TYPESET_LIBRARY))
 export IMTYPESET_PYTHON  := $(abspath $(TYPESET_PACKAGE))
 TYPESET_HEADERS := $(wordlist 2,$(words $(TYPESET_WHY)),$(TYPESET_WHY))
 TYPESET_WHY := the pair in $(TYPESET_DIR), built from the commit imtypeset.ref names
+ifneq ($(TYPESET_INSTALLED),)
+export PYTHONPATH := $(abspath $(TYPESET_PACKAGE))$(if $(PYTHONPATH),:$(PYTHONPATH))
+TYPESET_WHY := $(TYPESET_WHY), asked for by PPTMSTR_TYPESET_DEPS in place of the installed $(TYPESET_INSTALLED), its package first on PYTHONPATH
+endif
 ifneq ($(TYPESET_HEADERS),)
 $(warning $(TYPESET_HEADERS))
 TYPESET_WHY := $(TYPESET_WHY); $(TYPESET_HEADERS)
 endif
 else
-$(warning imtypeset is NOT exported and typeset panes fall back: $(TYPESET_WHY))
+$(warning the built imtypeset pair is NOT exported$(if $(TYPESET_INSTALLED), and the installed $(TYPESET_INSTALLED) is what runs, and typeset panes fall back): $(TYPESET_WHY))
 endif
+endif
+ifeq ($(TYPESET_INSTALLED),)
+ifeq ($(origin IMTYPESET_LIBRARY),undefined)
+TYPESET_WHY := no imtypeset is installed, which installing pptmstr's requirements brings; $(TYPESET_WHY)
+endif
+endif
+else
+TYPESET_WHY := $(TYPESET_INSTALLED) is installed, and imscribe finds it by itself
 endif
 export TYPESET_WHY
 
@@ -102,27 +150,32 @@ ifeq ($(HEADLESS),1)
 	  exit 1; }
 endif
 
-bootstrap:         ## probe, create .venv, install, smoke test
+bootstrap:         ## probe, create .venv, install from the package index, smoke test
 	./bootstrap.sh
 
-# The part of bootstrap that pins imscribe and builds the imtypeset library, on its
-# own: after a bump of imscribe.ref or imtypeset.ref, or once whatever stopped the
-# library building is dealt with. IMSCRIBE_REPO, IMTYPESET_REPO, IMGUI_BUNDLE_REPO
-# and IMGUI_REPO name where to fetch from (scripts/typeset_deps.py lists them),
-# and IMTYPESET_BUNDLE_HEADERS=stand-in asks for upstream Dear ImGui's headers
-# where the wheel's fork cannot be fetched (BUILT-FROM records which were used);
+# The development override, and no part of an install: imscribe from source at the
+# commit imscribe.ref names, in place of the published one in .venv, and the imtypeset
+# library built from the commit imtypeset.ref names, for working against a commit
+# nobody has published. IMSCRIBE_REPO, IMTYPESET_REPO, IMGUI_BUNDLE_REPO and
+# IMGUI_REPO name where to fetch from (scripts/typeset_deps.py lists them), and
+# IMTYPESET_BUNDLE_HEADERS=stand-in asks for upstream Dear ImGui's headers where the
+# wheel's fork cannot be fetched (BUILT-FROM records which were used);
 # IMSCRIBE_PIP_ARGS is added to the install, e.g. "--no-deps --no-index
 # --no-build-isolation" where no package index is reachable -- which works in a
 # .venv that already holds imscribe's build backend and what imscribe requires.
-deps: venv-check   ## imscribe at imscribe.ref, and the imtypeset library for .venv
+# Beside an installed imtypeset the pair it builds is used only when
+# PPTMSTR_TYPESET_DEPS=1 asks; `make bootstrap` puts the published imscribe back.
+deps: venv-check   ## development override: imscribe and the imtypeset library, from source
 	$(PY) scripts/typeset_deps.py imscribe
 	$(INSTALL_IMSCRIBE) $(IMSCRIBE_PIP_ARGS) .deps/imscribe
 	$(PY) scripts/typeset_deps.py verify
 	$(PY) scripts/typeset_deps.py library
 
-typeset-env:       ## the IMTYPESET_* variables a recipe here runs with
+typeset-env:       ## where a recipe here finds the imtypeset library, and why
 	@echo "IMTYPESET_LIBRARY=$${IMTYPESET_LIBRARY-}"
 	@echo "IMTYPESET_PYTHON=$${IMTYPESET_PYTHON-}"
+	@echo "IMSCRIBE_NO_TYPESET=$${IMSCRIBE_NO_TYPESET-}"
+	@echo "PYTHONPATH=$${PYTHONPATH-}"
 	@echo "# $$TYPESET_WHY" >&2
 
 probe:             ## stdlib-only environment diagnosis (no venv needed)
@@ -151,7 +204,7 @@ OUT   ?= shots/shot.png
 shot-xvfb: venv-check         ## the same on a private Xvfb: FOCUS=BOARD OUT=shots/x.png
 	scripts/xvfb_shot.sh --out $(OUT) $(if $(FOCUS),--focus $(FOCUS)) $(SHOT_ARGS)
 
-test: venv-check   ## pytest
+test: venv-check   ## pytest; IMSCRIBE_NO_TYPESET=1 runs it without the typesetting library
 	$(PY) -m pytest -q
 
 lint: venv-check   ## ruff check + black --check

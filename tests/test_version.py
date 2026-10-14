@@ -9,6 +9,14 @@ library, a library that is refused, an ``imgui-bundle`` that is not the pinned
 one, no imscribe at all. Runs of the whole report are in an interpreter of their
 own, because the report's first act is to settle the library's two variables in
 its own environment, which must not become this process's.
+
+**Three configurations, and a test says which it needs.** An imtypeset is
+installed (what installing pptmstr's requirements leaves, and how the library
+is normally found); the checkout has a built pair (the development override,
+asked for with ``PPTMSTR_TYPESET_DEPS`` where one is also installed); and
+neither. The rule itself (``pairing.decide``) is held for all three with
+stand-in directories; a run of the report is of whichever this environment is,
+and the tests of the others skip and say so.
 """
 
 from __future__ import annotations
@@ -29,6 +37,7 @@ from imscribe import typesetter
 from pptmstr import __main__ as entry
 from pptmstr import app, pairing, version
 from pptmstr.ui.typeset import gate
+from tests.conftest import child_environment, described, refused_library, without_the_library
 
 ROOT = Path(__file__).resolve().parent.parent
 REF = "a" * 40
@@ -43,9 +52,8 @@ def _pyproject() -> dict[str, Any]:
 
 def _run(*args: str, script: str | None = None, **env: str) -> subprocess.CompletedProcess[str]:
     """
-    ``python -m pptmstr ARGS``, or ``script``, with the library's variables as given and no others.
+    ``python -m pptmstr ARGS``, or ``script``, with what chooses the library as given and no more.
     """
-    clean = {k: v for k, v in os.environ.items() if not k.startswith("IMTYPESET_")}
     command = ["-c", script] if script is not None else ["-m", "pptmstr", *args]
     return subprocess.run(
         [sys.executable, *command],
@@ -54,8 +62,20 @@ def _run(*args: str, script: str | None = None, **env: str) -> subprocess.Comple
         text=True,
         timeout=120,
         check=False,
-        env={**clean, **env},
+        env=child_environment(**env),
     )
+
+
+OFF = {pairing.DISABLE_VARIABLE: "1"}
+ASKED = {pairing.DEPS_VARIABLE: "1"}
+
+needs_a_distribution = pytest.mark.skipif(
+    pairing.installed() is None, reason="no imtypeset distribution is installed here"
+)
+not_the_run_without = pytest.mark.skipif(
+    pairing.asks(os.environ, pairing.DISABLE_VARIABLE),
+    reason="this run is the one without the library",
+)
 
 
 def _lines(done: subprocess.CompletedProcess[str]) -> dict[str, str]:
@@ -83,9 +103,92 @@ def test_the_version_is_written_once_and_the_build_reads_it_from_the_package() -
     assert version._pptmstr().startswith(f"pptmstr {pptmstr.__version__} ")
 
 
-def test_the_pin_the_report_names_is_the_one_the_build_declares() -> None:
-    (spec,) = [d for d in _pyproject()["project"]["dependencies"] if d.startswith("imgui-bundle")]
-    assert spec == f"imgui-bundle=={pairing.IMGUI_BUNDLE_PIN}"
+def _pinned(name: str) -> str:
+    """
+    The requirement of ``name`` in ``pyproject.toml``, which must be there once.
+    """
+    (spec,) = [
+        d for d in _pyproject()["project"]["dependencies"] if re.split(r"[=<>;\[ ]", d)[0] == name
+    ]
+    return str(spec)
+
+
+def test_the_pins_the_report_names_are_the_ones_the_build_declares() -> None:
+    assert _pinned("imgui-bundle") == f"imgui-bundle=={pairing.IMGUI_BUNDLE_PIN}"
+    assert _pinned("imscribe") == f"imscribe=={pairing.IMSCRIBE_PIN}"
+    assert _pinned("imtypeset").split(";")[0].strip() == f"imtypeset=={pairing.IMTYPESET_PIN}"
+
+
+def _requires(distribution: str, name: str) -> str:
+    """
+    What an installed distribution requires of ``name``, as its metadata writes it.
+    """
+    (spec,) = [
+        r
+        for r in importlib.metadata.requires(distribution) or ()
+        if re.split(r"[=<>;\[ ]", r)[0] == name and "extra ==" not in r
+    ]
+    return str(spec)
+
+
+def test_the_three_pins_are_one_unit_by_what_the_installed_imscribe_requires() -> None:
+    """
+    The three move together or an install cannot resolve. Held to the imscribe
+    that is installed, whose own metadata names the other two: the same
+    imgui-bundle, and the same imtypeset under the same marker, character for
+    character -- so pptmstr asks for the library exactly where imscribe does,
+    and on a platform outside the marker installs without it as imscribe does.
+    """
+    assert importlib.metadata.version("imscribe") == pairing.IMSCRIBE_PIN
+    assert _requires("imscribe", "imgui-bundle") == _pinned("imgui-bundle")
+    assert _requires("imscribe", "imtypeset") == _pinned("imtypeset")
+    assert ";" in _pinned("imtypeset"), "under a marker"
+    # The fourth number of imtypeset's version is the wheel's line.
+    assert pairing.IMTYPESET_PIN.rsplit(".", 1)[1] == pairing.IMGUI_BUNDLE_PIN.replace(".", "")
+
+
+@needs_a_distribution
+def test_the_installed_imtypeset_is_the_pinned_one_and_requires_the_pinned_wheel() -> None:
+    assert importlib.metadata.version("imtypeset") == pairing.IMTYPESET_PIN
+    assert _requires("imtypeset", "imgui-bundle") == _pinned("imgui-bundle")
+
+
+def test_whether_an_imtypeset_is_installed_is_asked_as_imscribe_asks_it() -> None:
+    """
+    pptmstr decides before imscribe is imported, by its own asking. If the two
+    disagreed, pptmstr would set the pair's variables beside an installed
+    imtypeset that reads neither, or leave them unset beside none.
+    """
+    assert (pairing.installed() or "") == typesetter._distribution()
+    assert pairing.DISABLE_VARIABLE == typesetter.DISABLE_VARIABLE
+    assert pairing.ROUTE_DISTRIBUTION == typesetter.ROUTE_DISTRIBUTION
+    for value, on in (("1", True), ("yes", True), ("0", False), ("", False), (" 0 ", False)):
+        assert pairing.asks({pairing.DISABLE_VARIABLE: value}, pairing.DISABLE_VARIABLE) is on
+    assert not pairing.asks({}, pairing.DISABLE_VARIABLE)
+
+
+def test_an_attestation_beside_the_package_is_an_installed_imtypeset_without_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A frozen application: the dist-info dropped, the wheel's own record kept.
+    package = tmp_path / "imtypeset"
+    package.mkdir()
+    (package / "__init__.py").write_text("", encoding="utf-8")
+
+    def none(name: str) -> Any:
+        raise importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(importlib.metadata, "distribution", none)
+    monkeypatch.setattr(sys, "path", [str(tmp_path), *sys.path])
+    monkeypatch.delitem(sys.modules, "imtypeset", raising=False)
+    importlib.invalidate_caches()
+    assert pairing.installed() is None, "a source directory on the path is not one"
+    (package / pairing.ATTESTATION).write_text(
+        json.dumps({"distribution_version": "9.9.9.192900"}), encoding="utf-8"
+    )
+    assert pairing.installed() == "imtypeset 9.9.9.192900"
+    (package / pairing.ATTESTATION).write_text("not json", encoding="utf-8")
+    assert pairing.installed() == "imtypeset"
 
 
 def test_the_variables_pptmstr_sets_are_the_ones_imscribe_reads() -> None:
@@ -155,14 +258,95 @@ def test_a_checkout_with_a_whole_pair_at_the_ref_sets_both_variables(tmp_path: P
 def test_a_variable_the_caller_set_is_never_paired_with_this_checkouts(
     tmp_path: Path, mine: str, value: str
 ) -> None:
-    # Empty too: `IMTYPESET_LIBRARY=` is how the caller says "without the library".
+    # Empty too, and whatever else is so: beside an installed imtypeset, with
+    # the override asked for, and with the library switched off.
     _checkout(tmp_path)
-    environ = {mine: value}
+    for more in ({}, ASKED, OFF):
+        for distribution in (None, "imtypeset 0.4.1.192900"):
+            environ = {mine: value, **more}
 
-    found = pairing.decide(environ, tmp_path, tmp_path / "venv")
+            found = pairing.decide(environ, tmp_path, tmp_path / "venv", distribution)
 
-    assert found.route == pairing.ROUTE_ENVIRONMENT and mine in found.why
-    assert environ == {mine: value}
+            assert found.route == pairing.ROUTE_ENVIRONMENT and mine in found.why
+            assert environ == {mine: value, **more} and found.ahead is None
+
+
+def test_an_installed_imtypeset_is_what_runs_and_the_checkouts_pair_is_left_alone(
+    tmp_path: Path,
+) -> None:
+    """
+    The normal route. imscribe imports an installed imtypeset by itself and
+    that package reads neither variable, so pptmstr sets neither: beside it
+    they would choose nothing and be handed on to every process it starts.
+    """
+    _checkout(tmp_path, prefix=tmp_path / "venv")
+    environ: dict[str, str] = {"PATH": "/bin"}
+
+    found = pairing.decide(environ, tmp_path, tmp_path / "venv", "imtypeset 0.4.1.192900")
+
+    assert found.route == pairing.ROUTE_DISTRIBUTION
+    assert found.why == "imtypeset 0.4.1.192900 is installed"
+    assert environ == {"PATH": "/bin"} and found.given == () and found.ahead is None
+
+
+def test_the_checkouts_pair_is_taken_beside_an_installed_imtypeset_only_when_asked_for(
+    tmp_path: Path,
+) -> None:
+    """
+    The development override: a library built from a commit nobody has
+    published. Both variables are set, and the pair's package directory is
+    handed back to be put first on the path, because the installed package is
+    otherwise the one imported and it reads no variable.
+    """
+    pair = _checkout(tmp_path, prefix=tmp_path / "venv")
+    environ = dict(ASKED)
+
+    found = pairing.decide(environ, tmp_path, tmp_path / "venv", "imtypeset 0.4.1.192900")
+
+    assert found.route == pairing.ROUTE_CHECKOUT and pairing.DEPS_VARIABLE in found.why
+    assert environ[pairing.LIBRARY_VARIABLE] == str(pair / pairing.LIBRARY_NAME)
+    assert environ[pairing.PACKAGE_VARIABLE] == found.ahead == str(pair / pairing.PACKAGE_DIR)
+    # With none installed the pair's package is found where imscribe puts it.
+    alone = pairing.decide(dict(ASKED), tmp_path, tmp_path / "venv")
+    assert alone.route == pairing.ROUTE_CHECKOUT and alone.ahead is None
+    for off in ("0", ""):
+        environ = {pairing.DEPS_VARIABLE: off}
+        found = pairing.decide(environ, tmp_path, tmp_path / "venv", "imtypeset 0.4.1.192900")
+        assert found.route == pairing.ROUTE_DISTRIBUTION and environ == {pairing.DEPS_VARIABLE: off}
+
+
+def test_a_pair_asked_for_that_cannot_be_handed_over_leaves_the_installed_one_and_says_so(
+    tmp_path: Path,
+) -> None:
+    _checkout(tmp_path, commit=OTHER)
+    environ = dict(ASKED)
+
+    found = pairing.decide(environ, tmp_path, tmp_path / "venv", "imtypeset 0.4.1.192900")
+
+    assert found.route == pairing.ROUTE_DISTRIBUTION and environ == ASKED
+    assert "imtypeset 0.4.1.192900 is installed, and it is what runs" in found.why
+    assert pairing.DEPS_VARIABLE in found.why and OTHER in found.why
+
+
+@pytest.mark.parametrize("distribution", [None, "imtypeset 0.4.1.192900"])
+@pytest.mark.parametrize("asked", [{}, ASKED])
+def test_switched_off_nothing_is_set_whatever_is_built_or_installed(
+    tmp_path: Path, distribution: str | None, asked: dict[str, str]
+) -> None:
+    """
+    ``IMSCRIBE_NO_TYPESET`` is how to run without the library, and it is
+    imscribe's: it stops imscribe looking for an installed imtypeset and does
+    not stop a library that is named. So pptmstr must not name one behind it,
+    or a checkout with a built pair would draw through it in the run that was
+    asked to have none.
+    """
+    _checkout(tmp_path, prefix=tmp_path / "venv")
+    environ = {**OFF, **asked}
+
+    found = pairing.decide(environ, tmp_path, tmp_path / "venv", distribution)
+
+    assert found.route == pairing.ROUTE_NONE and pairing.DISABLE_VARIABLE in found.why
+    assert environ == {**OFF, **asked} and found.given == ()
 
 
 def test_an_installed_pptmstr_with_no_checkout_looks_nowhere(
@@ -183,6 +367,7 @@ def test_an_installed_pptmstr_with_no_checkout_looks_nowhere(
     found = pairing.decide(environ, pairing.checkout())
 
     assert found.route == pairing.ROUTE_NONE and "no source checkout" in found.why
+    assert "no imtypeset is installed" in found.why
     assert environ == {}
 
 
@@ -276,10 +461,11 @@ def test_the_process_decides_once_and_does_not_mistake_its_own_answer_for_the_ca
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     pair = _checkout(tmp_path, prefix=Path(sys.prefix))
-    for name in VARIABLES:
+    for name in (*VARIABLES, pairing.DISABLE_VARIABLE, pairing.DEPS_VARIABLE):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setattr(pairing, "_FOUND", None)
     monkeypatch.setattr(pairing, "checkout", lambda: tmp_path)
+    monkeypatch.setattr(pairing, "installed", lambda: None)
     try:
         first = pairing.adopt()
         assert first.route == pairing.ROUTE_CHECKOUT
@@ -291,17 +477,51 @@ def test_the_process_decides_once_and_does_not_mistake_its_own_answer_for_the_ca
             os.environ.pop(name, None)
 
 
+def test_the_process_puts_the_pair_it_was_asked_for_ahead_of_an_installed_imtypeset(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    ``decide`` only says which directory; the path is the process's. Without
+    this the override sets two variables an installed imtypeset never reads,
+    and the report would name a pair that is not the library in use.
+    """
+    pair = _checkout(tmp_path, prefix=Path(sys.prefix))
+    for name in (*VARIABLES, pairing.DISABLE_VARIABLE):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv(pairing.DEPS_VARIABLE, "1")
+    monkeypatch.setattr(pairing, "_FOUND", None)
+    monkeypatch.setattr(pairing, "checkout", lambda: tmp_path)
+    monkeypatch.setattr(pairing, "installed", lambda: "imtypeset 0.4.1.192900")
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    try:
+        found = pairing.adopt()
+        assert found.route == pairing.ROUTE_CHECKOUT
+        assert sys.path[0] == str(pair / pairing.PACKAGE_DIR)
+        pairing.adopt()
+        assert sys.path.count(str(pair / pairing.PACKAGE_DIR)) == 1
+    finally:
+        for name in VARIABLES:
+            os.environ.pop(name, None)
+
+
 # -- what a process pptmstr launches is given ------------------------------------------
 
 
 def _built_pair() -> Path | None:
     """
-    This checkout's pair when a process started here would take it, else ``None``.
+    This checkout's pair when a process started here would take it, else
+    ``None``: asked for (``ASKED``) where an imtypeset is also installed, and
+    by itself where none is, so the runs below ask.
     """
     environ: dict[str, str] = {}
     if pairing.decide(environ, ROOT).route != pairing.ROUTE_CHECKOUT:
         return None
     return Path(environ[pairing.LIBRARY_VARIABLE]).parent
+
+
+needs_a_built_pair = pytest.mark.skipif(
+    _built_pair() is None, reason="no pair built for this checkout's interpreter"
+)
 
 
 def _adopted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, environ: dict[str, str]) -> Path:
@@ -424,13 +644,12 @@ _CHILD = (
 )
 
 
-@pytest.mark.skipif(_built_pair() is None, reason="no pair built for this checkout's interpreter")
-@pytest.mark.skipif(
-    os.environ.get(pairing.LIBRARY_VARIABLE) == "", reason="this run is the one without the library"
-)
+@needs_a_built_pair
+@not_the_run_without
 def test_a_process_pptmstr_starts_is_not_given_the_pair_pptmstr_found_for_itself() -> None:
     """
-    Started with neither variable, a checkout sets both for itself; a session's
+    Started with neither variable and its pair asked for, a checkout sets both
+    for itself; a session's
     process started from it would read them as set by its caller, and another
     checkout's tests would run on this one's library. By the time the
     application runs a child is given neither, and the library that was found
@@ -438,7 +657,7 @@ def test_a_process_pptmstr_starts_is_not_given_the_pair_pptmstr_found_for_itself
     """
     pair = _built_pair()
     assert pair is not None
-    done = _run(script=_CHILD)
+    done = _run(script=_CHILD, **ASKED)
     assert done.returncode == 0, done.stderr
     seen = json.loads(done.stdout.splitlines()[-1])
     assert seen["route"] == pairing.ROUTE_CHECKOUT
@@ -475,10 +694,8 @@ _AGAIN = (
 )
 
 
-@pytest.mark.skipif(_built_pair() is None, reason="no pair built for this checkout's interpreter")
-@pytest.mark.skipif(
-    os.environ.get(pairing.LIBRARY_VARIABLE) == "", reason="this run is the one without the library"
-)
+@needs_a_built_pair
+@not_the_run_without
 def test_the_library_asked_again_is_found_again_after_its_variables_were_taken_back() -> None:
     """
     The library is asked again after a ``typesetter.reset()``: a test process
@@ -491,7 +708,7 @@ def test_the_library_asked_again_is_found_again_after_its_variables_were_taken_b
     """
     pair = _built_pair()
     assert pair is not None
-    done = _run(script=_AGAIN)
+    done = _run(script=_AGAIN, **ASKED)
     assert done.returncode == 0, done.stderr
     seen = json.loads(done.stdout.splitlines()[-1])
     assert seen["route"] == pairing.ROUTE_CHECKOUT
@@ -502,10 +719,8 @@ def test_the_library_asked_again_is_found_again_after_its_variables_were_taken_b
     assert seen["after"] == [] and seen["child"] == "[]"
 
 
-@pytest.mark.skipif(_built_pair() is None, reason="no pair built for this checkout's interpreter")
-@pytest.mark.skipif(
-    os.environ.get(pairing.LIBRARY_VARIABLE) == "", reason="this run is the one without the library"
-)
+@needs_a_built_pair
+@not_the_run_without
 def test_a_process_pptmstr_starts_is_given_the_pair_pptmstrs_caller_named() -> None:
     pair = _built_pair()
     assert pair is not None
@@ -521,10 +736,10 @@ def test_a_process_pptmstr_starts_is_given_the_pair_pptmstrs_caller_named() -> N
     assert seen["loaded"] == [True, True]
 
 
-@pytest.mark.skipif(_built_pair() is None, reason="no pair built for this checkout's interpreter")
+@needs_a_built_pair
 def test_the_report_asked_for_through_the_application_still_names_the_checkouts_pair() -> None:
     # `--fake --version` is the application's parser's, after the variables were taken back.
-    lines = _lines(_run("--fake", "--version"))
+    lines = _lines(_run("--fake", "--version", **ASKED))
     assert "found through this checkout's .deps" in lines["imtypeset"]
     assert lines["typeset"].startswith("typeset text: the library is accepted beside this wheel")
 
@@ -570,7 +785,7 @@ def test_version_is_answered_without_the_application_or_an_imgui_context() -> No
             "assert imgui.get_current_context() is None\n"
             "raise SystemExit(status)\n"
         ),
-        IMTYPESET_LIBRARY="",
+        **OFF,
     )
     assert _lines(done)["pptmstr"].startswith("pptmstr ")
 
@@ -613,23 +828,19 @@ def test_version_where_a_flag_goes_is_answered_before_the_application(
     assert entry.main(args) == 0
 
 
-def test_the_report_is_printed_to_an_output_that_cannot_encode_it() -> None:
+def test_the_report_is_printed_to_an_output_that_cannot_encode_it(tmp_path: Path) -> None:
     """
     A path with a character the terminal's encoding lacks, under a locale that
     is not UTF-8: the character is written as its escape and the rest whole.
     """
-    done = _run(
-        "--version",
-        IMTYPESET_LIBRARY="/nowhere/caf\u00e9/lib.so",
-        PYTHONIOENCODING="ascii",
-    )
+    named = refused_library(tmp_path / "caf\u00e9")
+    done = _run("--version", **named, PYTHONIOENCODING="ascii")
     lines = _lines(done)
-    assert "/nowhere/caf\\xe9/lib.so" in lines["imtypeset"]
+    assert "/caf\\xe9/" + pairing.LIBRARY_NAME in lines["imtypeset"]
 
 
 def test_the_report_into_a_pipe_nobody_reads_is_not_a_traceback() -> None:
     # `pptmstr --version | head -1`, with the reader gone before the first line.
-    clean = {k: v for k, v in os.environ.items() if not k.startswith("IMTYPESET_")}
     reading, writing = os.pipe()
     os.close(reading)
     try:
@@ -641,7 +852,7 @@ def test_the_report_into_a_pipe_nobody_reads_is_not_a_traceback() -> None:
             text=True,
             timeout=120,
             check=False,
-            env={**clean, "IMTYPESET_LIBRARY": ""},
+            env=without_the_library(),
         )
     finally:
         os.close(writing)
@@ -652,20 +863,72 @@ def test_the_report_into_a_pipe_nobody_reads_is_not_a_traceback() -> None:
 
 
 def test_with_no_library_the_report_says_not_installed_and_exits_0() -> None:
-    lines = _lines(_run("--version", IMTYPESET_LIBRARY=""))
+    lines = _lines(_run("--version", **OFF))
 
     assert lines["typeset"] == (
         "typeset text: not in use (not-installed): "
         "the typesetting library is not installed (IMTYPESET_LIBRARY is not set)"
     )
-    assert lines["imtypeset"].startswith("imtypeset: no library (IMTYPESET_LIBRARY set by")
-    assert pairing.read_ref(ROOT / pairing.IMTYPESET_REF) in lines["imtypeset"]
+    assert lines["imtypeset"] == (
+        f"imtypeset: no library ({pairing.DISABLE_VARIABLE} is set, which is how to run without "
+        f"the library: none is looked for); pptmstr pins {pairing.IMTYPESET_PIN}"
+    )
     assert lines["python"].endswith(f"({sys.executable})")
 
 
-def test_a_library_that_is_named_and_is_not_there_is_refused_in_a_sentence(
+def test_a_library_that_is_found_and_cannot_be_loaded_is_refused_in_a_sentence(
     tmp_path: Path,
 ) -> None:
+    named = refused_library(tmp_path)
+    lines = _lines(_run("--version", **named))
+
+    assert lines["typeset"].startswith(
+        "typeset text: not in use (refused): the typesetting library was refused ("
+    )
+    assert "there is no library at " in lines["typeset"]
+    assert lines["imtypeset"].startswith(
+        f"imtypeset at an unrecorded commit: {named[pairing.LIBRARY_VARIABLE]}, "
+    )
+    assert "found through the environment" in lines["imtypeset"]
+
+
+@needs_a_distribution
+def test_with_an_imtypeset_installed_the_report_names_it_its_route_and_its_headers() -> None:
+    """
+    What an install from the index is, said from the library's own answers:
+    the distribution and its version against the pin, the library it carries
+    and that library's version, that it was found as an installed
+    distribution, and the headers it says it was compiled against. No commit
+    is claimed from a ref file: a wheel records none.
+    """
+    lines = _lines(_run("--version"))
+
+    assert lines["imtypeset"].startswith(
+        f"imtypeset {pairing.IMTYPESET_PIN}, the version pptmstr pins: library "
+    )
+    assert ", found as an installed distribution" in lines["imtypeset"]
+    assert re.search(
+        r"; headers \S+, accepted by \S+, built for imgui-bundle==", lines["imtypeset"]
+    )
+    assert pairing.IMTYPESET_REF not in lines["imtypeset"]
+    assert "NOT read" not in lines["imtypeset"]
+    assert lines["typeset"].startswith("typeset text: the library is accepted beside this wheel")
+    assert lines["imscribe"].startswith(
+        f"imscribe {pairing.IMSCRIBE_PIN}, the version pptmstr pins: imported from "
+    )
+
+
+@needs_a_distribution
+def test_beside_an_installed_imtypeset_a_library_the_variables_name_is_said_not_to_be_read(
+    tmp_path: Path,
+) -> None:
+    """
+    An installed imtypeset reads neither variable. A report that went by the
+    environment would name a library that is not the one in the process, so
+    the line is of the one that loaded and says the variables chose nothing;
+    and ``IMTYPESET_LIBRARY=``, which ran without the library when the library
+    was found only through that variable, is said not to.
+    """
     lines = _lines(
         _run(
             "--version",
@@ -673,12 +936,14 @@ def test_a_library_that_is_named_and_is_not_there_is_refused_in_a_sentence(
             IMTYPESET_PYTHON=str(tmp_path / pairing.PACKAGE_DIR),
         )
     )
+    assert ", found as an installed distribution" in lines["imtypeset"]
+    assert "IMTYPESET_LIBRARY, IMTYPESET_PYTHON set and NOT read" in lines["imtypeset"]
+    assert str(tmp_path) not in lines["imtypeset"]
+    assert lines["typeset"].startswith("typeset text: the library is accepted beside this wheel")
 
-    assert lines["typeset"].startswith(
-        "typeset text: not in use (refused): the typesetting library was refused ("
-    )
-    assert lines["imtypeset"].startswith("imtypeset at an unrecorded commit: ")
-    assert "found through the environment" in lines["imtypeset"]
+    lines = _lines(_run("--version", IMTYPESET_LIBRARY=""))
+    assert ", found as an installed distribution" in lines["imtypeset"]
+    assert f"{pairing.DISABLE_VARIABLE}=1 is how to run without the library" in lines["imtypeset"]
 
 
 def test_an_imgui_bundle_that_is_not_the_pinned_one_is_a_sentence_naming_both() -> None:
@@ -689,7 +954,7 @@ def test_an_imgui_bundle_that_is_not_the_pinned_one_is_a_sentence_naming_both() 
             "imgui_bundle.__version__ = '1.0.1'\n"
             "raise SystemExit(version.main())\n"
         ),
-        IMTYPESET_LIBRARY="",
+        **OFF,
     )
     assert _lines(done)["imgui-bundle"] == (
         f"imgui-bundle 1.0.1 is running and pptmstr pins {pairing.IMGUI_BUNDLE_PIN}: the "
@@ -713,11 +978,11 @@ def test_with_imscribe_unimportable_the_report_says_so_twice_and_exits_0() -> No
             "from pptmstr import version\n"
             "raise SystemExit(version.main())\n"
         ),
-        IMTYPESET_LIBRARY="",
+        **OFF,
     )
     lines = _lines(done)
     assert lines["imscribe"].startswith("imscribe: not installed (")
-    assert pairing.read_ref(ROOT / pairing.IMSCRIBE_REF) in lines["imscribe"]
+    assert lines["imscribe"].endswith(f"pptmstr pins {pairing.IMSCRIBE_PIN}")
     assert lines["typeset"].startswith(
         "typeset text: not in use (not-installed): the text library is not installed ("
     )
@@ -738,19 +1003,21 @@ def test_a_part_that_raises_costs_its_own_line_and_no_other(
     assert len(lines) == 6 and lines[0].startswith("pptmstr ") and lines[5].endswith("not asked")
 
 
-@pytest.mark.skipif(_built_pair() is None, reason="no pair built for this checkout's interpreter")
-def test_started_with_neither_variable_a_checkout_finds_its_own_pair_and_it_is_accepted() -> None:
-    lines = _lines(_run("--version"))
+@needs_a_built_pair
+def test_a_checkout_asked_for_its_own_pair_finds_it_and_it_is_accepted() -> None:
+    lines = _lines(_run("--version", **ASKED))
 
     asked = pairing.read_ref(ROOT / pairing.IMTYPESET_REF)
-    assert lines["imtypeset"].startswith(f"imtypeset {asked}: ")
+    assert re.match(rf"imtypeset \S+ {asked}: ", lines["imtypeset"]), "its version and its commit"
     assert "found through this checkout's .deps" in lines["imtypeset"]
     assert lines["imtypeset"].endswith(f"the commit {pairing.IMTYPESET_REF} names")
     assert lines["typeset"].startswith("typeset text: the library is accepted beside this wheel")
 
 
-@pytest.mark.skipif(_built_pair() is None, reason="no pair built for this checkout's interpreter")
+@needs_a_built_pair
 def test_the_same_pair_named_by_the_caller_is_said_to_come_from_the_environment() -> None:
+    # As the Makefile names it for a recipe: the package first on the path too,
+    # which is what makes it the one imported beside an installed imtypeset.
     pair = _built_pair()
     assert pair is not None
     lines = _lines(
@@ -758,6 +1025,7 @@ def test_the_same_pair_named_by_the_caller_is_said_to_come_from_the_environment(
             "--version",
             IMTYPESET_LIBRARY=str(pair / pairing.LIBRARY_NAME),
             IMTYPESET_PYTHON=str(pair / pairing.PACKAGE_DIR),
+            PYTHONPATH=str(pair / pairing.PACKAGE_DIR),
         )
     )
     assert "found through the environment (IMTYPESET_LIBRARY and IMTYPESET_PYTHON set by" in (
@@ -770,11 +1038,12 @@ def test_the_same_pair_named_by_the_caller_is_said_to_come_from_the_environment(
 
 
 def _installed_imscribe(
-    top: Path, monkeypatch: pytest.MonkeyPatch, direct_url: dict[str, Any]
-) -> Path:
+    top: Path, monkeypatch: pytest.MonkeyPatch, direct_url: dict[str, Any] | None
+) -> tuple[Path, importlib.metadata.Distribution]:
     """
-    An ``imscribe`` package in a site directory of its own, with a distribution that
-    records ``direct_url``; the package's directory.
+    An ``imscribe`` package in a site directory of its own, with a distribution
+    that records ``direct_url``, or none where it is ``None``, as an install
+    from a package index leaves it; the package's directory and the distribution.
     """
     site = top / "site"
     package = site / "imscribe"
@@ -783,11 +1052,11 @@ def _installed_imscribe(
     record = site / "imscribe-0.1.0.dist-info"
     record.mkdir()
     (record / "METADATA").write_text("Name: imscribe\nVersion: 0.1.0\n", encoding="utf-8")
-    (record / "direct_url.json").write_text(json.dumps(direct_url), encoding="utf-8")
-    monkeypatch.setattr(
-        importlib.metadata, "distribution", lambda name: importlib.metadata.Distribution.at(record)
-    )
-    return package
+    if direct_url is not None:
+        (record / "direct_url.json").write_text(json.dumps(direct_url), encoding="utf-8")
+    distribution = importlib.metadata.Distribution.at(record)
+    monkeypatch.setattr(importlib.metadata, "distribution", lambda name: distribution)
+    return package, distribution
 
 
 def _clone(top: Path, head: str) -> Path:
@@ -799,17 +1068,50 @@ def _clone(top: Path, head: str) -> Path:
     return clone
 
 
+def test_a_copy_installed_from_a_package_index_records_no_commit_and_none_is_claimed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    What an install of pptmstr's requirements leaves. An installer writes
+    ``direct_url.json`` for everything it did not take from an index, so its
+    absence is how such an install is known, and no ref file is compared with it.
+    """
+    package, distribution = _installed_imscribe(tmp_path, monkeypatch, None)
+    assert version._origin(distribution, package) == (
+        None,
+        "installed from a package index, which records no commit",
+    )
+
+
+def test_a_copy_installed_from_a_file_names_the_file_and_its_hash(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    wheel = tmp_path / "imscribe-0.1.0-py3-none-any.whl"
+    package, distribution = _installed_imscribe(
+        tmp_path, monkeypatch, {"url": wheel.as_uri(), "archive_info": {"hash": "sha256=abc"}}
+    )
+    assert version._origin(distribution, package) == (
+        None,
+        f"installed from the file {wheel} (sha256 abc)",
+    )
+
+
 def test_a_copy_installed_from_a_checkout_is_that_checkouts_commit_only_file_for_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     clone = _clone(tmp_path, REF)
-    package = _installed_imscribe(tmp_path, monkeypatch, {"url": clone.as_uri(), "dir_info": {}})
+    package, distribution = _installed_imscribe(
+        tmp_path, monkeypatch, {"url": clone.as_uri(), "dir_info": {}}
+    )
 
-    assert version._installed_from(package) == (REF, f"file for file the checkout at {clone}")
+    assert version._origin(distribution, package) == (
+        REF,
+        f"file for file the checkout at {clone}",
+    )
 
     # The clone moved on after the install: `make deps` fetched and did not install.
     (clone / "imscribe" / "__init__.py").write_text("NAME = 'newer'\n", encoding="utf-8")
-    commit, how = version._installed_from(package)
+    commit, how = version._origin(distribution, package)
     assert commit is None and "1 file(s) differ" in how and "__init__.py" in how
 
 
@@ -817,8 +1119,10 @@ def test_a_checkout_on_a_branch_names_no_commit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     clone = _clone(tmp_path, "ref: refs/heads/main")
-    package = _installed_imscribe(tmp_path, monkeypatch, {"url": clone.as_uri(), "dir_info": {}})
-    commit, how = version._installed_from(package)
+    package, distribution = _installed_imscribe(
+        tmp_path, monkeypatch, {"url": clone.as_uri(), "dir_info": {}}
+    )
+    commit, how = version._origin(distribution, package)
     assert commit is None and "on a branch" in how
 
 
@@ -826,60 +1130,169 @@ def test_a_copy_installed_from_version_control_is_the_commit_its_record_names(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     url = "https://example.invalid/imscribe.git"
-    package = _installed_imscribe(
+    package, distribution = _installed_imscribe(
         tmp_path, monkeypatch, {"url": url, "vcs_info": {"vcs": "git", "commit_id": OTHER}}
     )
-    assert version._installed_from(package) == (OTHER, f"installed from {url}")
+    assert version._origin(distribution, package) == (OTHER, f"installed from {url}")
 
 
 def test_a_distribution_that_is_another_copy_says_nothing_of_the_one_imported(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    clone = _clone(tmp_path, REF)
-    _installed_imscribe(tmp_path, monkeypatch, {"url": clone.as_uri(), "dir_info": {}})
-    commit, how = version._installed_from(tmp_path / "elsewhere" / "imscribe")
-    assert commit is None and "another copy" in how
+    """
+    A path that reaches two site-packages can find the distribution in one and
+    the module in the other: this worktree's does. A version read from the
+    wrong one would be said of a copy that is not running.
+    """
+    package, _ = _installed_imscribe(tmp_path, monkeypatch, None)
+    assert version._installed("imscribe", package) is not None
+    assert version._installed("imscribe", tmp_path / "elsewhere" / "imscribe") is None
+
+    monkeypatch.setattr(version, "_installed", lambda name, found: None)
+    line = version._imscribe()
+    assert line.startswith("imscribe at an unrecorded version: imported from ")
+    assert f"pptmstr pins {pairing.IMSCRIBE_PIN} and nothing here says whether this is it" in line
 
 
-def test_the_imscribe_line_says_plainly_when_what_runs_is_not_what_the_tree_asks_for(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+class _Stood:
+    """
+    A distribution of one version, for the line and not for its origin.
+    """
+
+    def __init__(self, said: str) -> None:
+        self.version = said
+
+
+def test_the_imscribe_line_says_the_version_against_the_pin_and_a_commit_only_where_recorded(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     package = Path(typesetter.__file__).resolve().parent
+    pin = pairing.IMSCRIBE_PIN
     monkeypatch.setattr(version, "_asked_for", lambda name: REF)
+    monkeypatch.setattr(version, "_installed", lambda name, found: _Stood(pin))
 
-    monkeypatch.setattr(version, "_installed_from", lambda found: (REF, "as recorded"))
+    monkeypatch.setattr(version, "_origin", lambda distribution, found: (None, "from an index"))
     assert version._imscribe() == (
-        f"imscribe {REF}: imported from {package}, as recorded; the commit imscribe.ref names"
+        f"imscribe {pin}, the version pptmstr pins: imported from {package}, from an index"
     )
 
-    monkeypatch.setattr(version, "_installed_from", lambda found: (OTHER, "as recorded"))
-    line = version._imscribe()
-    assert (
-        line.startswith(f"imscribe {OTHER}: ")
-        and f"NOT the commit imscribe.ref names, which is {REF}" in line
+    monkeypatch.setattr(version, "_origin", lambda distribution, found: (REF, "as recorded"))
+    assert version._imscribe() == (
+        f"imscribe {pin}, the version pptmstr pins: imported from {package}, as recorded; "
+        f"commit {REF}, the commit imscribe.ref names"
     )
 
-    monkeypatch.setattr(version, "_installed_from", lambda found: (None, "nothing records it"))
+    monkeypatch.setattr(version, "_origin", lambda distribution, found: (OTHER, "as recorded"))
     line = version._imscribe()
-    assert line.startswith("imscribe at an unrecorded commit: ") and "nothing records it" in line
-    assert "nothing here says whether this is it" in line
+    assert f"commit {OTHER}, NOT the commit imscribe.ref names, which is {REF}" in line
+
+    monkeypatch.setattr(version, "_installed", lambda name, found: _Stood("0.1.0"))
+    assert version._imscribe().startswith(
+        f"imscribe 0.1.0 is running and pptmstr pins {pin}: imported from "
+    )
 
 
-def test_the_library_line_is_held_to_built_from_and_not_to_the_ref_file(
+def test_the_library_line_of_a_built_pair_is_held_to_built_from_and_not_to_the_ref_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     pair = _checkout(tmp_path, commit=OTHER)
-    monkeypatch.setenv(pairing.LIBRARY_VARIABLE, str(pair / pairing.LIBRARY_NAME))
+    library = str(pair / pairing.LIBRARY_NAME)
     monkeypatch.setattr(version, "_asked_for", lambda name: REF)
     found = pairing.Found(pairing.ROUTE_ENVIRONMENT, "set by the caller")
+    # The library's own answer for a pair the two variables named and it loaded.
+    said: dict[str, str | None] = {
+        "package": str(pair / pairing.PACKAGE_DIR / "imtypeset"),
+        "route": pairing.ROUTE_ENVIRONMENT,
+        "library": library,
+        "imtypeset_version": "0.4.1",
+    }
 
-    line = version._imtypeset(found)
-    assert line.startswith(f"imtypeset {OTHER}: {pair / pairing.LIBRARY_NAME}, ")
+    line = version._imtypeset(found, said)
+    assert line.startswith(f"imtypeset 0.4.1 {OTHER}: {library}, ")
     assert f"NOT the commit imtypeset.ref names, which is {REF}" in line
 
     (pair / pairing.BUILT_FROM).unlink()
-    line = version._imtypeset(found)
-    assert line.startswith("imtypeset at an unrecorded commit: ") and REF in line
+    line = version._imtypeset(found, said)
+    assert line.startswith("imtypeset 0.4.1 at an unrecorded commit: ") and REF in line
+
+    # Named and not loaded: the line is still of what was named.
+    assert version._imtypeset(found, {}, library).startswith(
+        f"imtypeset at an unrecorded commit: {library}, "
+    )
+    assert version._imtypeset(found, {}).startswith("imtypeset: no library (")
+
+
+def _said_of_a_distribution(package: Path, **more: str | None) -> dict[str, str | None]:
+    return {
+        "package": str(package),
+        "route": pairing.ROUTE_DISTRIBUTION,
+        "library": str(package / pairing.LIBRARY_NAME),
+        "imtypeset_version": "0.4.1",
+        "distribution": f"imtypeset {pairing.IMTYPESET_PIN}",
+        "headers": "fork:0123abc",
+        "accepted_by": "imgui-check+probe",
+        "built_for": f"imgui-bundle=={pairing.IMGUI_BUNDLE_PIN}",
+        **more,
+    }
+
+
+def test_the_library_line_of_an_installed_imtypeset_is_the_librarys_own_answers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    No ``BUILT-FROM`` and no ref file: a wheel has neither. The version is the
+    installed distribution's against the pin, the wheel is said to be the
+    published one only where its metadata records no other origin, the commit
+    is the one its own attestation names, and the headers and the acceptance
+    are what the library says of itself.
+    """
+    site = tmp_path / "site"
+    package = site / "imtypeset"
+    package.mkdir(parents=True)
+    record = site / f"imtypeset-{pairing.IMTYPESET_PIN}.dist-info"
+    record.mkdir()
+    (record / "METADATA").write_text(
+        f"Name: imtypeset\nVersion: {pairing.IMTYPESET_PIN}\n", encoding="utf-8"
+    )
+    distribution = importlib.metadata.Distribution.at(record)
+    monkeypatch.setattr(importlib.metadata, "distribution", lambda name: distribution)
+    found = pairing.Found(pairing.ROUTE_DISTRIBUTION, "imtypeset is installed")
+
+    line = version._imtypeset(found, _said_of_a_distribution(package))
+    assert line == (
+        f"imtypeset {pairing.IMTYPESET_PIN}, the version pptmstr pins: library 0.4.1 at "
+        f"{package / pairing.LIBRARY_NAME}, found as an installed distribution, the published "
+        f"wheel, installed from a package index, which records no commit; headers fork:0123abc, "
+        f"accepted by imgui-check+probe, built for imgui-bundle=={pairing.IMGUI_BUNDLE_PIN}"
+    )
+
+    (package / pairing.ATTESTATION).write_text(
+        json.dumps({"attested_where": f"a build at {REF}"}), encoding="utf-8"
+    )
+    assert f"; attested by a build at {REF}; headers " in version._imtypeset(
+        found, _said_of_a_distribution(package)
+    )
+
+    # Installed from a file somebody built: not said to be the published wheel.
+    (record / "direct_url.json").write_text(
+        json.dumps({"url": "file:///tmp/built.whl", "archive_info": {}}), encoding="utf-8"
+    )
+    line = version._imtypeset(found, _said_of_a_distribution(package))
+    assert "the published wheel" not in line and "installed from the file /tmp/built.whl" in line
+
+    # Another version than the pin, and variables that were set and not read.
+    (record / "METADATA").write_text("Name: imtypeset\nVersion: 0.5.0.192900\n", encoding="utf-8")
+    line = version._imtypeset(
+        pairing.Found(pairing.ROUTE_ENVIRONMENT, "IMTYPESET_LIBRARY set by the caller"),
+        _said_of_a_distribution(package, ignored_environment="IMTYPESET_LIBRARY"),
+    )
+    assert line.startswith(
+        f"imtypeset 0.5.0.192900 is running and pptmstr pins {pairing.IMTYPESET_PIN}: "
+    )
+    assert line.endswith(
+        "; IMTYPESET_LIBRARY set and NOT read: an installed imtypeset reads neither, and the "
+        "library named there is not the one in use"
+    )
 
 
 # -- the kind, asked of the library where it can say ---------------------------------
@@ -914,6 +1327,24 @@ def test_the_librarys_own_kind_is_the_answer_whatever_the_variables_say(
         "unsupported",
         "the typesetting library is not in use (unsupported: its own words)",
     )
+
+
+def test_what_the_report_reads_of_the_librarys_answer_are_keys_the_library_gives() -> None:
+    """
+    The report is built from ``typesetter.pairing()``, whose keys are imscribe's.
+    A key the report reads and imscribe does not give is a line that says "not
+    stated" of something the library did state under another name.
+    """
+    read = set(re.findall(r'said(?:\.get\(|\[)"([a-z_]+)"', _source(version)))
+    read |= set(
+        re.findall(r'said(?:\.get\(|\[)"([a-z_]+)"', _source(sys.modules[described.__module__]))
+    )
+    assert {"route", "library", "headers", "ignored_environment", "kind"} <= read
+    assert read <= set(typesetter.pairing())
+
+
+def _source(module: Any) -> str:
+    return Path(module.__file__).read_text(encoding="utf-8")
 
 
 def test_the_kinds_the_gate_names_are_the_librarys_words_for_them() -> None:
@@ -973,40 +1404,65 @@ def test_a_pair_is_noted_unless_it_was_built_against_the_wheels_own_headers(
         assert pairing.pair_refusal(tmp_path / name, REF) is None
 
 
-def test_a_test_run_says_first_what_it_ran_against(tmp_path: Path) -> None:
+def test_a_test_run_says_first_what_it_ran_against(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """
-    The lines every run of the suite opens with (``tests/conftest.py``): the
-    imscribe imported, the library named with its commit and headers, and a
-    line of its own for a stand-in, since a run "with the pair" says nothing
-    else about which pair.
+    The lines every run of the suite opens with (``tests/conftest.py``), from
+    what imscribe says of the library a process with that environment loads:
+    the imscribe imported and the library, as ``pptmstr --version`` says them,
+    and a line of its own for each thing a green run would be misread over --
+    a stand-in's headers, variables that were set and not read, no library.
     """
-    from tests.conftest import ran_against
-
+    monkeypatch.setattr(version, "_asked_for", lambda name: REF)
     stood = _built(tmp_path / "stood", "stand-in:ocornut-v1.92.9-docking")
-    lines = ran_against({pairing.LIBRARY_VARIABLE: str(stood / pairing.LIBRARY_NAME)})
+    named = {pairing.LIBRARY_VARIABLE: str(stood / pairing.LIBRARY_NAME)}
+    loaded: dict[str, Any] = {
+        "kind": gate.READY,
+        "package": str(stood / pairing.PACKAGE_DIR / "imtypeset"),
+        "route": pairing.ROUTE_ENVIRONMENT,
+        "library": named[pairing.LIBRARY_VARIABLE],
+        "imtypeset_version": "0.4.1",
+        "headers": "stand-in:ocornut-v1.92.9-docking",
+    }
+    lines = described(loaded, named)
     assert [line.split()[0] for line in lines] == ["imscribe", "imtypeset", "STAND-IN:"]
     assert REF in lines[1] and "with headers stand-in:ocornut-v1.92.9-docking" in lines[1]
     assert "NOT the wheel's own Dear ImGui headers" in lines[2]
 
-    fork = _built(tmp_path / "fork", "fork:pthom-0123abc")
-    lines = ran_against({pairing.LIBRARY_VARIABLE: str(fork / pairing.LIBRARY_NAME)})
-    assert len(lines) == 2 and "with headers fork:pthom-0123abc" in lines[1]
+    assert len(described({**loaded, "headers": "fork:pthom-0123abc"}, named)) == 2
 
-    assert ran_against({})[1].startswith("imtypeset: no library (IMTYPESET_LIBRARY is not set)")
-    assert ran_against({pairing.LIBRARY_VARIABLE: ""})[1].startswith(
-        "imtypeset: no library (IMTYPESET_LIBRARY is empty)"
+    # An installed imtypeset loaded although the variables name another library.
+    lines = described(
+        _said_of_a_distribution(
+            tmp_path / "site" / "imtypeset",
+            kind=gate.READY,
+            ignored_environment="IMTYPESET_LIBRARY",
+        ),
+        named,
     )
-    # A library named with nothing beside it is said, not raised.
-    bare = ran_against({pairing.LIBRARY_VARIABLE: str(tmp_path / "nowhere" / "lib.so")})
-    assert bare[-1].startswith("imtypeset at an unrecorded commit: ")
-    assert "nothing says what it was built from or against" in bare[-1]
+    assert [line.split()[0] for line in lines] == ["imscribe", "imtypeset", "IGNORED:"]
+    assert f"the installed imtypeset {pairing.IMTYPESET_PIN} is what every test draws" in lines[2]
+
+    none = described({"kind": gate.NOT_INSTALLED}, OFF)
+    assert none[1].startswith(f"imtypeset: no library ({pairing.DISABLE_VARIABLE} is set")
+    assert none[2] == ("NO LIBRARY (not-installed): every test that draws through it is skipped")
+    refused = described({"kind": gate.REFUSED, "reason": "its own words"}, named)
+    assert refused[-1] == (
+        "NO LIBRARY (refused): every test that draws through it FAILS (its own words)"
+    )
+    # A child that did not answer is said, not raised.
+    assert described({}, {})[-1].startswith("NO LIBRARY (imscribe did not answer)")
 
 
 @pytest.mark.parametrize("quiet", [True, False], ids=["-q, as make test runs it", "as it comes"])
 def test_the_lines_open_a_run_of_the_suite_quiet_or_not(tmp_path: Path, quiet: bool) -> None:
-    stood = _built(tmp_path / "stood", "stand-in:ocornut-v1.92.9-docking")
+    """
+    Asked of a new process with the run's own environment, here one that is
+    switched off: the same lines whatever is installed or built where this runs.
+    """
     (tmp_path / "test_nothing.py").write_text("def test_nothing():\n    pass\n", encoding="utf-8")
-    clean = {k: v for k, v in os.environ.items() if not k.startswith(("IMTYPESET_", "PYTEST_"))}
+    environ = {k: v for k, v in without_the_library().items() if not k.startswith("PYTEST_")}
     done = subprocess.run(
         [
             sys.executable,
@@ -1026,7 +1482,7 @@ def test_the_lines_open_a_run_of_the_suite_quiet_or_not(tmp_path: Path, quiet: b
             str(tmp_path / "test_nothing.py"),
         ],
         cwd=ROOT,
-        env={**clean, pairing.LIBRARY_VARIABLE: str(stood / pairing.LIBRARY_NAME)},
+        env=environ,
         capture_output=True,
         text=True,
         timeout=120,
@@ -1034,9 +1490,7 @@ def test_the_lines_open_a_run_of_the_suite_quiet_or_not(tmp_path: Path, quiet: b
     )
     assert done.returncode == 0, done.stdout + done.stderr
     out = done.stdout
-    said = [
-        line for line in out.splitlines() if line.startswith(("imscribe", "imtypeset", "STAND"))
-    ]
-    assert [line.split()[0] for line in said] == ["imscribe", "imtypeset", "STAND-IN:"]
-    assert "built against stand-in:ocornut-v1.92.9-docking, NOT" in said[2]
+    said = [line for line in out.splitlines() if line.startswith(("imscribe", "imtypeset", "NO "))]
+    assert [line.split()[0] for line in said] == ["imscribe", "imtypeset:", "NO"]
+    assert said[2] == "NO LIBRARY (not-installed): every test that draws through it is skipped"
     assert out.index(said[0]) < out.index("1 passed"), "before any result"

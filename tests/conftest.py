@@ -13,26 +13,30 @@ in, a destroyed one included (``typesetter.ready``), so a test file that
 destroys its context without ``typeset.unload()`` leaves nothing the next one
 can draw into.
 
-**With the library and without.** The library is found through
-``IMTYPESET_LIBRARY`` and ``IMTYPESET_PYTHON``; ``make test`` sets them when the
-built pair exists and ``make test IMTYPESET_LIBRARY=`` does not. A test that needs
-it asks for ``seam``, which runs where the library draws, skips with the reason
-where none was named, and **fails** where one was named and cannot draw
-(``needs_the_library``).
+**With the library and without.** imscribe finds an installed imtypeset by
+itself, which is what installing pptmstr's requirements leaves, and
+``IMSCRIBE_NO_TYPESET=1`` is the run without it: ``make test`` and ``make test
+IMSCRIBE_NO_TYPESET=1``. A test that needs the library asks for ``seam``, which
+runs where the library draws, skips with the reason where there is none to
+find, and **fails** where one was found and cannot draw (``needs_the_library``).
 
 It deliberately does not switch the seam off for tests that did not ask for it: the
 files that draw panes against a mocked ``imgui`` do that themselves.
 
 **A run says what it ran against, first** (``ran_against``): the imscribe that
-is imported, the library named and the headers it was built against, or that
-none was named. "Green with the pair" is a claim about one library, and a
-pair built against stand-in headers is handed over like any other
-(``pairing.headers_note``).
+is imported, and the library a process with this environment loads, by the
+library's own answer -- its version, the route it was found by, the headers it
+was compiled against -- or that there is none. "Green with the library" is a
+claim about one library; one built against stand-in headers is accepted like
+any other, and beside an installed imtypeset the two variables choose nothing.
 """
 
 from __future__ import annotations
 
+import json
 import os
+import subprocess
+import sys
 from collections.abc import Iterator, Mapping
 from pathlib import Path
 from typing import Any
@@ -46,39 +50,134 @@ from pptmstr.ui.typeset import gate
 BOLD = theme._ASSETS / "fonts" / "Inconsolata-Bold.ttf"
 
 
+_CHOOSING = (pairing.DISABLE_VARIABLE, pairing.DEPS_VARIABLE)
+
+
+def child_environment(**given: str) -> dict[str, str]:
+    """
+    This process's environment with nothing in it that chooses the library,
+    and then ``given``: for a test that starts an interpreter of its own.
+
+    Out go the library's two variables, ``IMSCRIBE_NO_TYPESET``, pptmstr's own
+    ``PPTMSTR_TYPESET_DEPS``, and the built pair's package directory where the
+    Makefile put it on ``PYTHONPATH`` for that last one: a child that is told
+    nothing finds what a process started by hand in this environment finds.
+    """
+    environ = {
+        name: value
+        for name, value in os.environ.items()
+        if not name.startswith("IMTYPESET_") and name not in _CHOOSING
+    }
+    ahead = os.environ.get(pairing.PACKAGE_VARIABLE)
+    if ahead and "PYTHONPATH" in environ:
+        kept = [part for part in environ["PYTHONPATH"].split(os.pathsep) if part != ahead]
+        if kept:
+            environ["PYTHONPATH"] = os.pathsep.join(kept)
+        else:
+            del environ["PYTHONPATH"]
+    return {**environ, **given}
+
+
+def without_the_library(**given: str) -> dict[str, str]:
+    """
+    ``child_environment`` for a child that is to run with no library:
+    ``IMSCRIBE_NO_TYPESET=1``, which is the one way to ask.
+    """
+    return child_environment(**{pairing.DISABLE_VARIABLE: "1"}, **given)
+
+
+def refused_library(top: Path) -> dict[str, str]:
+    """
+    The variables under which a child finds a library and has it refused,
+    whether or not an imtypeset is installed: a package of that name first on
+    the path whose import raises, as imtypeset's own does for a library that
+    is not there, and ``IMTYPESET_LIBRARY`` naming a file under ``top``.
+
+    Naming a missing file is not enough beside an installed imtypeset: that
+    package reads neither variable and loads the library it carries.
+    """
+    package = top / pairing.PACKAGE_DIR
+    (package / "imtypeset").mkdir(parents=True)
+    (package / "imtypeset" / "__init__.py").write_text(
+        "import os\n"
+        "raise ImportError('there is no library at ' + os.environ['IMTYPESET_LIBRARY'])\n",
+        encoding="utf-8",
+    )
+    return {
+        "PYTHONPATH": str(package),
+        pairing.LIBRARY_VARIABLE: str(top / pairing.LIBRARY_NAME),
+        pairing.PACKAGE_VARIABLE: str(package),
+    }
+
+
+def asked_of_a_new_process(environ: Mapping[str, str]) -> dict[str, Any]:
+    """
+    What imscribe says of the library in a process with ``environ``: its
+    ``pairing()``, asked of a child (``python -m imscribe.typesetter``, one line
+    of JSON), so that nothing is loaded here to find out. Empty where the child
+    did not answer.
+    """
+    try:
+        done = subprocess.run(
+            [sys.executable, "-P", "-m", "imscribe.typesetter"],
+            env=dict(environ),
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        said = json.loads(done.stdout.strip().splitlines()[-1])
+    except Exception:
+        return {}
+    return said if isinstance(said, dict) else {}
+
+
+def described(said: Mapping[str, Any], environ: Mapping[str, str]) -> list[str]:
+    """
+    The lines for one answer of ``asked_of_a_new_process``: the imscribe and the
+    imtypeset sentences are ``pptmstr --version``'s, and a line of its own for
+    each thing a green run would otherwise be misread over -- headers that are
+    not the wheel's, variables that were set and not read. Never raises.
+    """
+    found = pairing.decide(dict(environ), None, distribution=said.get("distribution"))
+    lines = [
+        version._said("imscribe", version._imscribe),
+        version._said(
+            "imtypeset",
+            lambda: version._imtypeset(found, said, environ.get(pairing.LIBRARY_VARIABLE)),
+        ),
+    ]
+    kind = said.get("kind")
+    if kind != gate.READY:
+        lines.append(
+            f"NO LIBRARY ({kind or 'imscribe did not answer'}): "
+            + (
+                "every test that draws through it is skipped"
+                if kind == gate.NOT_INSTALLED
+                else f"every test that draws through it FAILS ({said.get('reason')})"
+            )
+        )
+        return lines
+    headers = str(said.get("headers") or "")
+    if not headers.startswith(pairing.FORK_HEADERS):
+        lines.append(
+            f"STAND-IN: the library was built against {headers or 'headers it does not state'}, "
+            f"NOT the wheel's own Dear ImGui headers (the fork), and is accepted on "
+            f"imtypeset's field probe alone"
+        )
+    if said.get("ignored_environment"):
+        lines.append(
+            f"IGNORED: {said['ignored_environment']} set and not read; the installed "
+            f"{said.get('distribution')} is what every test draws through"
+        )
+    return lines
+
+
 def ran_against(environ: Mapping[str, str]) -> list[str]:
     """
-    What a test run with this environment draws through, a line a fact: the
-    imscribe the interpreter imports and the commit that is, the library
-    ``IMTYPESET_LIBRARY`` names with the commit and the headers its
-    ``BUILT-FROM`` records, and a line of its own where those headers are not
-    the wheel's. The imscribe sentence is ``pptmstr --version``'s. Never raises.
+    What a test run with this environment draws through, a line a fact.
     """
-    named = environ.get(pairing.LIBRARY_VARIABLE)
-    lines = [version._said("imscribe", version._imscribe)]
-    if not named:
-        return [
-            *lines,
-            f"imtypeset: no library ({pairing.LIBRARY_VARIABLE} is "
-            f"{'empty' if named == '' else 'not set'}): every test that draws through it is "
-            f"skipped",
-        ]
-    try:
-        record = pairing.built_from(Path(named).parent)
-        note = pairing.headers_note(Path(named).parent)
-    except Exception as failure:
-        return [
-            *lines,
-            f"imtypeset at an unrecorded commit: {named}, with no {pairing.BUILT_FROM} beside "
-            f"it that can be read ({type(failure).__name__}); nothing says what it was built "
-            f"from or against",
-        ]
-    lines.append(
-        f"imtypeset {record.get('commit', 'at an unrecorded commit')}: {named}, built for "
-        f"{record.get('wheel', 'an unrecorded wheel')} with headers "
-        f"{record.get('headers', 'that are not recorded')}"
-    )
-    return [*lines, f"STAND-IN: {note}"] if note else lines
+    return described(asked_of_a_new_process(environ), environ)
 
 
 def pytest_report_header(config: pytest.Config) -> list[str]:
@@ -119,10 +218,12 @@ def _typeset_does_not_leak() -> Iterator[None]:
 def needs_the_library(reason: str | None) -> None:
     """
     Stop a test that draws through the library where the library cannot draw:
-    skipped where none was named, failed where one was.
+    skipped where there is none to find (not installed and none named, or
+    ``IMSCRIBE_NO_TYPESET`` says not to look), failed where one was found.
     """
-    if os.environ.get("IMTYPESET_LIBRARY"):
-        pytest.fail(f"IMTYPESET_LIBRARY is set and the typesetting library cannot draw: {reason}")
+    kind, _ = gate.library()
+    if kind != gate.NOT_INSTALLED:
+        pytest.fail(f"a typesetting library was found and cannot draw ({kind}): {reason}")
     pytest.skip(f"needs the typesetting library: {reason}")
 
 
@@ -154,11 +255,11 @@ def seam(imgui: Any) -> Iterator[Any]:
     """
     The seam with the library's fonts loaded and the settings at their defaults.
 
-    **Skips, with the reason, where no library was named** (``IMTYPESET_LIBRARY``
-    unset or empty). **Where one was named and cannot draw, the test fails**:
-    a pair that is stale and refused, or a library some earlier test stopped
-    for the rest of the process, would otherwise skip every test that draws and
-    leave the run green. The fonts are loaded once a module and kept across its
+    **Skips, with the reason, where there is no library to find** (the
+    library's kind is not-installed). **Where one was found and cannot draw,
+    the test fails**: a library that is refused, or one some earlier test
+    stopped for the rest of the process, would otherwise skip every test that
+    draws and leave the run green. The fonts are loaded once a module and kept across its
     tests; a test that unloads them or loads its own has them put back here.
     """
     theme.set_theme("dark")

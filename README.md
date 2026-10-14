@@ -91,10 +91,12 @@ Read [STYLE.md](STYLE.md) before adding a record, an intent, or a projection.
 
 ```sh
 ./bootstrap.sh          # probe -> venv -> install -> window smoke test
-                        # fetches imscribe and imtypeset at the commits in imscribe.ref and
-                        # imtypeset.ref, and builds the imtypeset library into .deps/
-make deps               # that fetch and build alone, after a ref moves
+                        # one install from the package index: imgui-bundle, imscribe and
+                        # imtypeset come as wheels at the exact versions pyproject.toml pins
+.venv/bin/python -m pptmstr --version   # what was installed, and whether the typesetting
+                                        # library is accepted beside the wheel
 make check              # lint + typecheck + tests
+make check IMSCRIBE_NO_TYPESET=1        # the same without the typesetting library
 make run                # launch
 
 .venv/bin/python -m pptmstr                     # start empty, launch from the UI
@@ -142,13 +144,13 @@ rather than being refused, and the pool is shown in the status bar.
 ### Text is set by `imscribe`, experimentally
 
 On this branch DETAIL, the NEEDS YOU expansion, BOARD, BRIEF and one mode of the
-context log set their text through `imscribe` — a library on no package index,
-installed at the commit `imscribe.ref` names, which draws through the native imtypeset
-library built beside the `imgui-bundle` wheel — instead of ImGui's
+context log set their text through [`imscribe`](https://pypi.org/project/imscribe/),
+which draws through the native [`imtypeset`](https://pypi.org/project/imtypeset/)
+library beside the `imgui-bundle` wheel — instead of ImGui's
 own text calls: proportional prose, real italics, selectable text. An approval's diff
 is drawn by the library's diff view by default, in DETAIL and in NEEDS YOU, wherever
 the check pptmstr measures of the running library holds: that the view keeps a
-monospace column, which the pinned one does on a whole-pixel cell. Otherwise it is
+monospace column, which the pinned one does at every size a diff is set at. Otherwise it is
 the panes' own rows: where the check fails, and for a diff the check does not cover
 (a character the code face lacks, a row longer than was measured, a call that carries
 no texts, one too large to build in a frame).
@@ -170,8 +172,30 @@ change is applied and saved on the click that makes it; there is no Apply and no
 cancel. [planning/2026-10-08-settings-have-one-place.md](planning/2026-10-08-settings-have-one-place.md)
 says what is a setting and what is deliberately a constant in code.
 
+**The three are one unit and are pinned exactly**: `imgui-bundle==1.92.900`,
+`imscribe==0.2.0b1` and `imtypeset==0.4.1.192900`. The imtypeset library is linked
+against that one `imgui-bundle` binary and is refused beside any other, so they move
+together and never by `pip install -U` of one. imtypeset has wheels for CPython 3.11 to
+3.14 on Linux x86-64 (glibc 2.28 or later) and macOS 14 or later on arm64; anywhere else
+the install leaves it out, pptmstr runs, and every pane draws with its own renderer.
+`pptmstr --version` says which of each is running against its pin, how the library was
+found, and the headers it says it was compiled against.
+
+`IMSCRIBE_NO_TYPESET=1` runs without the library, for `make`, for a bare `pytest` and
+for pptmstr itself. `IMTYPESET_LIBRARY=`, which did that while the library was built
+from source, does not: an installed imtypeset reads neither of the two variables.
+
+**Building the two from source is the development override**, for working against a
+commit nobody has published: `make deps` installs imscribe at the commit `imscribe.ref`
+names over the published one and builds the imtypeset library from the commit
+`imtypeset.ref` names into `.deps/` (Linux, a C++ compiler, and the sources from
+GitHub or from the repositories `IMSCRIBE_REPO`, `IMTYPESET_REPO`, `IMGUI_BUNDLE_REPO`
+and `IMGUI_REPO` name). Beside an installed imtypeset that pair is used only where
+`PPTMSTR_TYPESET_DEPS=1` asks for it; `./bootstrap.sh` puts the published versions back.
+
 It has been run only on Xvfb with a software rasteriser, and no person has judged how
-it looks. The decisions, the measurements and what is unverified are in
+it looks. **Nothing here has been installed from the package index by this branch's
+own bootstrap**: that first install, on Linux and on a Mac, has not been run. The decisions, the measurements and what is unverified are in
 [planning/2026-10-07-advtext-sets-the-text.md](planning/2026-10-07-advtext-sets-the-text.md).
 
 ## Teams

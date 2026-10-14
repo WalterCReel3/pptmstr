@@ -29,8 +29,7 @@ figures roughly double, so compare rows of one run.
             a pane calls only where the library's columns hold) and as
             coloured ImGui lines, the way DETAIL's own diff is drawn.
 
-Usage, with ``IMTYPESET_LIBRARY`` and ``IMTYPESET_PYTHON`` as ``make typeset-env``
-prints them:
+Usage, with the library found as the application finds it (``pptmstr.pairing``):
     .venv/bin/python scripts/profile_seam.py
     .venv/bin/python scripts/profile_seam.py --lines 400 --piece 40
 """
@@ -51,7 +50,7 @@ sys.path.insert(0, str(ROOT))
 import imgui_bundle  # noqa: E402
 from imgui_bundle import imgui  # noqa: E402
 
-from pptmstr import approval, theme  # noqa: E402
+from pptmstr import approval, pairing, theme, version  # noqa: E402
 from pptmstr.ui import typeset  # noqa: E402
 
 SAMPLE = ROOT / ".deps" / "imscribe" / "demo" / "sample.md"
@@ -193,6 +192,7 @@ def main() -> int:
     parser.add_argument("--diff-lines", type=int, default=1200)
     args = parser.parse_args()
 
+    pairing.adopt()
     context = imgui.create_context()
     io = imgui.get_io()
     io.display_size = imgui.ImVec2(1200.0, 800.0)
@@ -207,7 +207,7 @@ def main() -> int:
         return 1
     print("profile_seam: CPU ms inside the seam's call, headless, no rasteriser")
     print(f"  load average at start: {_load()};  imgui_bundle {imgui_bundle.__version__}")
-    print(f"  IMTYPESET_LIBRARY={os.environ.get('IMTYPESET_LIBRARY')}")
+    print(f"  {version.library_line()}")
     print(f"  window {WINDOW[0]:g} x {WINDOW[1]:g}; text: {SAMPLE.relative_to(ROOT)} repeated")
     # A throwaway document first: the faces' first glyphs are baked by it and
     # not by the first row.

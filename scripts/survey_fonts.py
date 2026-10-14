@@ -664,7 +664,7 @@ def render_one(name: str, out: Path) -> int:
     unmapped characters of ``MARKDOWN`` are worked out here from the ``cmap``
     and printed beside what the views report.
 
-    Needs the imtypeset library (``IMTYPESET_LIBRARY``, ``IMTYPESET_PYTHON``):
+    Needs the imtypeset library (an installed one, which imscribe finds):
     the views are the library's, and without it this says why and exits 1.
 
     What it does not show: any subpixel or LCD rendering,

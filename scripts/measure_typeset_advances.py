@@ -76,9 +76,11 @@ With no option the pages are both faces at the four pixel heights and no em
 page. The header says which ``imscribe`` was imported and, where its directory
 is a git checkout, the commit.
 
-``IMTYPESET_LIBRARY`` and ``IMTYPESET_PYTHON`` are taken from the environment
-(``make typeset-env`` prints them) and default to the pair under
-``.deps/imtypeset``. Exit status 1, with the reason, when the library is not
+The library is found as the application finds it (``pptmstr.pairing``): an
+installed imtypeset, or this checkout's built pair where none is installed or
+``PPTMSTR_TYPESET_DEPS=1`` asks; the header says which.
+
+Exit status 1, with the reason, when the library is not
 drawing; 2 when a page could not be read whole.
 """
 
@@ -98,7 +100,6 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
-PAIR = ROOT / ".deps" / "imtypeset"
 ASSETS = ROOT / "pptmstr" / "assets"
 CHROME_PX = 16.0
 """
@@ -751,8 +752,9 @@ def arguments(argv: list[str] | None = None) -> argparse.Namespace:
 
 def main(argv: list[str] | None = None) -> int:
     args = arguments(argv)
-    os.environ.setdefault("IMTYPESET_LIBRARY", str(PAIR / "libimtypeset_bundle.so"))
-    os.environ.setdefault("IMTYPESET_PYTHON", str(PAIR / "pysnap"))
+    from pptmstr import pairing, version
+
+    pairing.adopt()
     for mark, text in ((MARKS[-2], RULER), (MARKS[-1], LONG)):
         assert len(text) == mark, (len(text), mark)
         assert all(not text[k - 1].isspace() for k in MARKS if k <= len(text)), text
@@ -972,15 +974,13 @@ def main(argv: list[str] | None = None) -> int:
 
     info = ts.host_info()
     bundle = info.get("bundle", {})
-    built = PAIR / "BUILT-FROM"
     print("measure_typeset_advances: positions and counts from the draw list; no pixel was read")
     print(f"  uptime before: {before}")
     print(f"  uptime after:  {after}")
     print(f"  display: {os.environ.get('DISPLAY', 'unset')};  python {sys.version.split()[0]}")
     print(f"  {provenance(imscribe)}")
     print(f"  imgui_bundle {imgui_bundle.__version__} at {Path(imgui_bundle.__file__).parent}")
-    print(f"  IMTYPESET_LIBRARY={os.environ['IMTYPESET_LIBRARY']}")
-    print(f"  IMTYPESET_PYTHON={os.environ['IMTYPESET_PYTHON']}")
+    print(f"  {version.library_line()}")
     print(
         f"  imtypeset {info.get('imtypeset_version')}, rasteriser {info.get('rasteriser')}, "
         f"built against headers {bundle.get('headers')}, accepted by {bundle.get('accepted_by')} "
@@ -989,9 +989,6 @@ def main(argv: list[str] | None = None) -> int:
         f"{bundle.get('wheel_sizeof_imguistyle')} / library "
         f"{bundle.get('library_sizeof_imguistyle')})"
     )
-    if built.is_file():
-        for line in built.read_text(encoding="utf-8").splitlines():
-            print(f"    BUILT-FROM {line}")
     for name, value in facts.items():
         print(f"  {name}: {value}")
     print(

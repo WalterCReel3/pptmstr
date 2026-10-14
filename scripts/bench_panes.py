@@ -42,9 +42,9 @@ and ended under. Compare rows of one run with each other, or two runs taken
 back to back on the same machine.
 
 **Which groups run through the seam.** Every pane's typeset branch is built on
-the library as it is now, and ``--typeset on`` needs the library (``make``
-exports ``IMTYPESET_LIBRARY`` and ``IMTYPESET_PYTHON`` when the built pair
-exists). An approval's diff is the library's diff view where the library that
+the library as it is now, and ``--typeset on`` needs the library (an installed
+imtypeset, which imscribe finds by itself; ``make typeset-env`` says what a
+recipe gets). An approval's diff is the library's diff view where the library that
 is running keeps a column (``typeset.diff_adopted``, a measurement), which it
 does on the library pptmstr is built against, and the pane's own rows where
 it does not. ``--diffs never`` is every diff the pane's own, for the other

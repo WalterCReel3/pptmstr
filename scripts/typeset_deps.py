@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """
-imscribe at the commit `imscribe.ref` names, and the imtypeset library for this interpreter.
+The development override: imscribe at the commit `imscribe.ref` names, and the
+imtypeset library built from the commit `imtypeset.ref` names, for this interpreter.
 
-Stdlib only, and run by the interpreter the result is for (`.venv/bin/python`):
-`bootstrap.sh` and `make deps` are the two callers. Everything it makes is under
-`.deps/`, which is ignored:
+An install of pptmstr takes both as published wheels, at the versions
+`pyproject.toml` pins, and runs none of this. It is for working against a commit
+nobody has published: `make deps` is the caller, in a `.venv` `bootstrap.sh` made.
+Stdlib only, and run by the interpreter the result is for (`.venv/bin/python`).
+Everything it makes is under `.deps/`, which is ignored:
 
     .deps/imscribe/           a clone checked out at the commit in imscribe.ref
     .deps/imtypeset-src/      a clone checked out at the commit in imtypeset.ref
@@ -37,11 +40,14 @@ the caller, which knows whether the installer is pip or uv, and one that reads i
               paragraph on standard error and exit status 0.
     pair      one line for the Makefile: `ok` when the pair is whole and was built
               from the commit imtypeset.ref names, and otherwise why it is not.
+    installed one line for the Makefile: the installed imtypeset distribution, or
+              nothing. Beside one the pair is used only where
+              `PPTMSTR_TYPESET_DEPS=1` asks (`pptmstr.pairing`).
 
 Where each source comes from is a variable holding anything `git fetch` accepts,
 GitHub by default:
 
-    IMSCRIBE_REPO       https://github.com/WalterCReel3/imgui-adv-text.git
+    IMSCRIBE_REPO       https://github.com/WalterCReel3/imscribe.git
     IMTYPESET_REPO      https://github.com/WalterCReel3/imtypeset.git
     IMGUI_BUNDLE_REPO   https://github.com/pthom/imgui_bundle.git
     IMGUI_REPO          https://github.com/ocornut/imgui.git
@@ -135,7 +141,7 @@ class Source:
         return os.environ.get(self.variable) or self.default
 
 
-IMSCRIBE = Source("IMSCRIBE_REPO", "https://github.com/WalterCReel3/imgui-adv-text.git")
+IMSCRIBE = Source("IMSCRIBE_REPO", "https://github.com/WalterCReel3/imscribe.git")
 IMTYPESET = Source("IMTYPESET_REPO", "https://github.com/WalterCReel3/imtypeset.git")
 IMGUI_BUNDLE = Source("IMGUI_BUNDLE_REPO", "https://github.com/pthom/imgui_bundle.git")
 IMGUI = Source("IMGUI_REPO", "https://github.com/ocornut/imgui.git")
@@ -284,9 +290,9 @@ def foreign_interpreter(environment: Path | None = None) -> str | None:
     runs under any: with another project's environment active -- the library's
     own checkout, which holds an editable install under the earlier name -- the
     removal would take that project's install out of it. So it is done only in
-    this checkout's `.venv`, which is what `bootstrap.sh` and `make deps` run
-    the script with, or in the environment `--environment` names, for a
-    checkout whose environment is somewhere else.
+    this checkout's `.venv`, which is what `make deps` runs the script with,
+    or in the environment `--environment` names, for a checkout whose
+    environment is somewhere else.
     """
     wanted = (environment or ROOT / ".venv").resolve()
     running = Path(sys.prefix).resolve()
@@ -714,6 +720,18 @@ def step_pair(pair: Path) -> int:
     return 0
 
 
+def step_installed() -> int:
+    """
+    Print the installed imtypeset distribution as `imtypeset <version>`, or nothing.
+
+    For the Makefile, which reads the line while it is being parsed: beside an
+    installed imtypeset no pair is exported (`pptmstr.pairing.installed`).
+    Always status 0.
+    """
+    print(pairing.installed() or "")
+    return 0
+
+
 def step_library(deps: Path) -> int:
     final = deps / "imtypeset"
     try:
@@ -731,10 +749,10 @@ def step_library(deps: Path) -> int:
                 f": {against}." if against else "."
             )
         print(
-            f"\nThe imtypeset library was NOT built: {cause}. pptmstr does not need it to "
-            f"run: without it imscribe cannot draw, so typeset panes fall back, and nothing "
-            f"else is affected.{kept} Once the cause is dealt with, `make deps` builds it "
-            f"without repeating the rest of bootstrap.\n",
+            f"\nThe imtypeset library was NOT built: {cause}. pptmstr does not need this "
+            f"build to run: an installed imtypeset is what draws where there is one, and "
+            f"where there is none typeset panes fall back; nothing else is affected.{kept} "
+            f"Once the cause is dealt with, `make deps` builds it.\n",
             file=sys.stderr,
         )
         return 0
@@ -756,8 +774,15 @@ def step_library(deps: Path) -> int:
     print(f"    IMTYPESET_LIBRARY={final / LIBRARY_NAME}")
     print(f"    IMTYPESET_PYTHON={final / 'pysnap'}")
     print(
-        "    (the Makefile exports both while imtypeset.ref names the commit this was built from)"
+        "    (the Makefile exports both while imtypeset.ref names the commit this was built "
+        f"from; beside an installed imtypeset, only where {pairing.DEPS_VARIABLE}=1 asks)"
     )
+    here = pairing.installed()
+    if here:
+        print(
+            f"    {here} is installed in this environment and is what runs until "
+            f"{pairing.DEPS_VARIABLE}=1 is set."
+        )
     return 0
 
 
@@ -766,7 +791,7 @@ STEPS = {"verify": step_verify, "library": step_library}
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=(__doc__ or "").strip().splitlines()[0])
-    parser.add_argument("step", choices=sorted([*STEPS, "imscribe", "pair"]))
+    parser.add_argument("step", choices=sorted([*STEPS, "imscribe", "installed", "pair"]))
     parser.add_argument(
         "--environment",
         type=Path,
@@ -779,6 +804,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     deps = args.deps.resolve()
+    if args.step == "installed":
+        return step_installed()
     if args.step == "pair":
         return step_pair(args.pair.resolve() if args.pair else deps / "imtypeset")
     try:

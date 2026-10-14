@@ -2,7 +2,8 @@
 Whether the text library can draw, its fonts, and the sentence when it cannot.
 
 The library is ``imscribe`` drawing through imtypeset, a native library built for
-one ``imgui-bundle`` wheel and found through two environment variables.
+one ``imgui-bundle`` wheel: an installed distribution that imscribe finds by
+itself, or a built pair two environment variables name (``pptmstr.pairing``).
 ``imscribe.typesetter`` is its gate; this module is pptmstr's side of that gate
 and the only place the two meet for anything but a diff model (``diffs``).
 
@@ -450,6 +451,21 @@ def library() -> tuple[str, str]:
             f"({type(failure).__name__}: {failure})",
         )
     return kind, "" if kind == READY else _unaccepted(kind, why)
+
+
+def pairing_said() -> dict[str, str | None]:
+    """
+    What the library says of itself, for ``pptmstr --version`` and for the first
+    lines of a test run: imscribe's ``typesetter.pairing()``, whose keys are
+    its own -- the route the package was found by, the library's path and
+    version, the headers it was compiled against, how its gate accepted it,
+    and the variables that were set and not read. The first call may be the
+    library's import. Empty where imscribe cannot be asked. Never raises.
+    """
+    try:
+        return dict(_typesetter().pairing())
+    except Exception:
+        return {}
 
 
 def settle() -> None:

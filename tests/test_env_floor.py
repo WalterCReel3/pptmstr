@@ -2,10 +2,11 @@
 The declared environment, held to the thing each bound exists for.
 
 `pyproject.toml` pins imgui-bundle to one version because the imtypeset library
-imscribe draws through is built against one wheel binary. A pin is a line in a
-file and the reason is the wheel that is installed; these tests hold both, so
-an environment that drifted from the pin fails here by name and not as typeset
-panes that fall back.
+imscribe draws through is built against one wheel binary, and pins imscribe
+and imtypeset to the versions that are for it. A pin is a line in a file and
+the reason is what is installed; these tests hold both, so an environment
+that drifted from a pin fails here by name and not as typeset panes that fall
+back. `tests/test_version.py` holds the three pins to each other.
 """
 
 from __future__ import annotations
@@ -54,17 +55,50 @@ def test_what_imscribe_needs_at_run_time_is_a_runtime_dependency() -> None:
     assert "fonttools" in {_name(d) for d in _dependencies()}
 
 
-def test_imscribe_is_asked_of_no_package_index() -> None:
-    # The name is unclaimed on PyPI: a requirement that names it bare installs
-    # whatever is registered under it. bootstrap.sh installs imscribe, at the
-    # commit imscribe.ref names, and nothing in the build's metadata asks for it.
-    with (ROOT / "pyproject.toml").open("rb") as handle:
-        project = tomllib.load(handle)["project"]
-    named = [*project["dependencies"]]
-    for group in project.get("optional-dependencies", {}).values():
-        named += group
-    assert [spec for spec in named if _name(spec) == "imscribe"] == []
-    assert "typeset_deps.py imscribe" in (ROOT / "bootstrap.sh").read_text(encoding="utf-8")
+def _exact(name: str) -> str:
+    """
+    The one version ``pyproject.toml`` pins ``name`` to; fails for anything but ``==`` one.
+    """
+    (spec,) = [d for d in _dependencies() if _name(d) == name]
+    match = re.fullmatch(rf"{name}==([0-9a-z.]+)", spec.split(";")[0].strip())
+    assert match, f"{spec!r} is not an exact pin of one version"
+    return match[1]
+
+
+def test_imscribe_and_imtypeset_are_requirements_pinned_to_exactly_one_version_each() -> None:
+    """
+    Both are published, so an install of pptmstr is one resolver's work and
+    brings the library: no step of ``bootstrap.sh`` builds or fetches either.
+    Exact, like the wheel's pin and for its reason; and imscribe's is a beta,
+    which an installer takes only where a requirement names it.
+    """
+    assert _exact("imscribe") and _exact("imtypeset")
+    run = [
+        line.strip()
+        for line in (ROOT / "bootstrap.sh").read_text(encoding="utf-8").splitlines()
+        if not line.lstrip().startswith("#")
+    ]
+    assert not [
+        line for line in run if "typeset_deps.py" in line or ".deps" in line
+    ], "the build from source is the developer's"
+    installs = [line for line in run if line.startswith('"${INSTALL[@]}"')]
+    assert installs == ['"${INSTALL[@]}" -e ".[dev]"'], "one install, and it names no version"
+
+
+def test_the_imscribe_that_is_imported_is_the_pinned_one() -> None:
+    # Which module is imported and which distribution the metadata finds first
+    # are two questions on a path that reaches more than one site-packages.
+    import imscribe
+
+    assert imscribe.__version__ == _exact("imscribe")
+    assert importlib.metadata.version("imscribe") == _exact("imscribe")
+    found = importlib.metadata.distribution("imscribe").locate_file("imscribe")
+    assert Path(str(found)).resolve() == Path(imscribe.__file__).resolve().parent
+
+
+def test_bootstrap_ends_by_naming_the_report_that_says_what_was_installed() -> None:
+    last = (ROOT / "bootstrap.sh").read_text(encoding="utf-8").rstrip().splitlines()[-1]
+    assert ".venv/bin/python -m pptmstr --version" in last
 
 
 def test_imscribe_and_its_metrics_library_import() -> None:

@@ -25,6 +25,8 @@ from types import ModuleType
 
 import pytest
 
+from tests.conftest import child_environment
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -532,9 +534,21 @@ def test_the_fetch_step_removes_the_earlier_name_and_names_a_variable_it_does_no
     assert capsys.readouterr().err == ""
 
 
-def test_this_interpreter_imports_the_imscribe_the_pin_names() -> None:
-    if not (deps.DEPS / "imscribe" / "imscribe").is_dir():
-        pytest.skip(".deps/imscribe is not there: `make deps` has not run in this checkout")
+def test_the_imscribe_this_interpreter_imports_is_the_commit_the_ref_names_file_for_file() -> None:
+    """
+    What ties the version ``pyproject.toml`` pins to the commit ``imscribe.ref``
+    names: with a clone at that commit in ``.deps`` (``make deps``, or its
+    first step alone), the package this interpreter imports is that commit's,
+    file for file, wherever it was installed from -- the published wheel
+    included. Skips where there is no such clone: an install from the index
+    makes none, and one left from before a bump of the ref is not evidence
+    about the commit it names now.
+    """
+    clone = deps.DEPS / "imscribe"
+    try:
+        deps.clone_is_at(clone, deps.read_ref(ROOT / "imscribe.ref"))
+    except deps.DepsError as none:
+        pytest.skip(f"no clone to hold the import to: {none}")
     assert deps.step_verify(deps.DEPS) == 0
 
 
@@ -947,8 +961,8 @@ def _make_typeset_env(
     """
     What a recipe gets, and what `make typeset-env` says on standard error about it.
     """
-    # This test may itself be running under `make test`, which exports the pair.
-    clean = {k: v for k, v in os.environ.items() if not k.startswith(("IMTYPESET_", "MAKE"))}
+    # This test may itself be running under `make test`, which exports what it found.
+    clean = {k: v for k, v in child_environment().items() if not k.startswith("MAKE")}
     done = subprocess.run(
         ["make", "--no-print-directory", "typeset-env", *make_args],
         cwd=ROOT,
@@ -957,11 +971,20 @@ def _make_typeset_env(
         capture_output=True,
         check=True,
     )
-    return dict(line.split("=", 1) for line in done.stdout.splitlines()), done.stderr
+    got = dict(line.split("=", 1) for line in done.stdout.splitlines())
+    return {name: value for name, value in got.items() if name != "PYTHONPATH" or value}, (
+        done.stderr
+    )
 
 
 def _typeset_env(*make_args: str, env: dict[str, str] | None = None) -> dict[str, str]:
     return _make_typeset_env(*make_args, env=env)[0]
+
+
+# What the Makefile reads from `typeset_deps.py installed`, given on the command
+# line, which wins over its own assignment: both configurations from any .venv.
+NONE = "TYPESET_INSTALLED="
+INSTALLED = "TYPESET_INSTALLED=imtypeset 0.4.1.192900"
 
 
 def _pair(
@@ -988,7 +1011,121 @@ def _pair(
     return top
 
 
-NOTHING = {"IMTYPESET_LIBRARY": "", "IMTYPESET_PYTHON": ""}
+NOTHING = {"IMTYPESET_LIBRARY": "", "IMTYPESET_PYTHON": "", "IMSCRIBE_NO_TYPESET": ""}
+
+
+def _exported(pair: Path) -> dict[str, str]:
+    return {
+        **NOTHING,
+        "IMTYPESET_LIBRARY": str(pair / deps.LIBRARY_NAME),
+        "IMTYPESET_PYTHON": str(pair / "pysnap"),
+    }
+
+
+def test_the_installed_step_prints_what_the_package_decides_by(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert deps.main(["installed"]) == 0
+    assert capsys.readouterr().out == f"{deps.pairing.installed() or ''}\n"
+
+
+@needs_make
+@needs_venv
+def test_beside_an_installed_imtypeset_make_exports_nothing_and_says_what_runs(
+    tmp_path: Path,
+) -> None:
+    """
+    The normal route: imscribe finds an installed imtypeset by itself, and that
+    package reads neither variable. A whole pair in ``.deps`` is left alone.
+    """
+    pair = _pair(tmp_path / "pair")
+    got, said = _make_typeset_env(f"TYPESET_DIR={pair}", INSTALLED)
+    assert got == NOTHING
+    assert said.strip() == "# imtypeset 0.4.1.192900 is installed, and imscribe finds it by itself"
+
+
+@needs_make
+@needs_venv
+def test_the_built_pair_is_exported_beside_an_installed_imtypeset_when_it_is_asked_for(
+    tmp_path: Path,
+) -> None:
+    """
+    The development override. With the two variables alone the installed
+    package is still the one imported, and it reads neither: the pair's
+    package directory goes first on ``PYTHONPATH`` as well, ahead of whatever
+    the caller had there.
+    """
+    pair = _pair(tmp_path / "pair")
+    got, said = _make_typeset_env(f"TYPESET_DIR={pair}", INSTALLED, "PPTMSTR_TYPESET_DEPS=1")
+    assert got == {**_exported(pair), "PYTHONPATH": str(pair / "pysnap")}
+    assert "asked for by PPTMSTR_TYPESET_DEPS in place of the installed imtypeset" in said
+
+    got = _typeset_env(
+        f"TYPESET_DIR={pair}", INSTALLED, "PPTMSTR_TYPESET_DEPS=1", env={"PYTHONPATH": "/theirs"}
+    )
+    assert got["PYTHONPATH"] == f"{pair / 'pysnap'}:/theirs"
+    # With none installed the pair is found where imscribe puts it: no path is touched.
+    assert _typeset_env(f"TYPESET_DIR={pair}", NONE, "PPTMSTR_TYPESET_DEPS=1") == _exported(pair)
+    assert _typeset_env(f"TYPESET_DIR={pair}", INSTALLED, "PPTMSTR_TYPESET_DEPS=0") == NOTHING
+
+    # Asked for and not to be had: the installed one runs, and every target says so.
+    stale = _pair(tmp_path / "stale", commit="e" * 40)
+    got, said = _make_typeset_env(f"TYPESET_DIR={stale}", INSTALLED, "PPTMSTR_TYPESET_DEPS=1")
+    assert got == NOTHING
+    assert "NOT exported and the installed imtypeset 0.4.1.192900 is what runs" in said
+
+
+@needs_make
+@needs_venv
+@pytest.mark.parametrize("installed", [NONE, INSTALLED])
+@pytest.mark.parametrize("asked", [(), ("PPTMSTR_TYPESET_DEPS=1",)])
+def test_switched_off_make_exports_nothing_whatever_is_built_or_installed(
+    tmp_path: Path, installed: str, asked: tuple[str, ...]
+) -> None:
+    """
+    ``make test IMSCRIBE_NO_TYPESET=1`` is the run without the library, and the
+    one way to ask for it. The variable reaches the recipe, which is what stops
+    imscribe looking for an installed imtypeset, and no pair is named behind it.
+    """
+    pair = _pair(tmp_path / "pair")
+    got, said = _make_typeset_env(f"TYPESET_DIR={pair}", installed, "IMSCRIBE_NO_TYPESET=1", *asked)
+    assert got == {**NOTHING, "IMSCRIBE_NO_TYPESET": "1"}
+    assert said.strip() == (
+        "# IMSCRIBE_NO_TYPESET is set: no library is looked for and none is exported"
+    )
+    # From the environment as from the command line; and `0` is not the switch.
+    got = _typeset_env(f"TYPESET_DIR={pair}", NONE, env={"IMSCRIBE_NO_TYPESET": "1"})
+    assert got == {**NOTHING, "IMSCRIBE_NO_TYPESET": "1"}
+    assert _typeset_env(f"TYPESET_DIR={pair}", NONE, "IMSCRIBE_NO_TYPESET=0") == {
+        **_exported(pair),
+        "IMSCRIBE_NO_TYPESET": "0",
+    }
+
+
+@needs_make
+@needs_venv
+def test_an_empty_library_variable_beside_an_installed_imtypeset_is_said_not_to_switch_it_off(
+    tmp_path: Path,
+) -> None:
+    """
+    ``make test IMTYPESET_LIBRARY=`` ran without the library while the library
+    was found only through that variable. An installed imtypeset reads neither,
+    so the same command now runs WITH it: every target says so, and names
+    the switch that does what was meant.
+    """
+    pair = _pair(tmp_path / "pair")
+    got, said = _make_typeset_env(f"TYPESET_DIR={pair}", INSTALLED, "IMTYPESET_LIBRARY=")
+    assert got == NOTHING
+    warning, why = said.strip().splitlines()
+    assert warning.startswith("Makefile:")
+    assert "IMTYPESET_LIBRARY= does NOT run without the library here" in warning
+    assert "IMSCRIBE_NO_TYPESET=1 is how to run without it" in warning
+    assert "imtypeset 0.4.1.192900 is installed and reads neither variable" in why
+    # Said once the switch is thrown as well: nothing to warn of.
+    _, said = _make_typeset_env(
+        f"TYPESET_DIR={pair}", INSTALLED, "IMTYPESET_LIBRARY=", "IMSCRIBE_NO_TYPESET=1"
+    )
+    assert "does NOT run" not in said
 
 
 @needs_make
@@ -997,10 +1134,7 @@ def test_make_exports_a_whole_pair_by_absolute_path(tmp_path: Path) -> None:
     pair = _pair(tmp_path / "pair")
     # Named relative to the Makefile, as the default is: a recipe that changes
     # directory, or a child that does, still finds the pair.
-    assert _typeset_env(f"TYPESET_DIR={os.path.relpath(pair, ROOT)}") == {
-        "IMTYPESET_LIBRARY": str(pair / deps.LIBRARY_NAME),
-        "IMTYPESET_PYTHON": str(pair / "pysnap"),
-    }
+    assert _typeset_env(f"TYPESET_DIR={os.path.relpath(pair, ROOT)}", NONE) == _exported(pair)
 
 
 def test_the_pair_step_says_ok_alone_only_of_a_pair_built_against_the_wheels_headers(
@@ -1034,28 +1168,28 @@ def test_make_exports_a_stand_in_pair_and_says_on_every_run_that_it_is_one(
     is: once as a warning every target gets, once in the reason.
     """
     pair = _pair(tmp_path / "pair", headers=headers)
-    got, said = _make_typeset_env(f"TYPESET_DIR={pair}")
-    assert got == {
-        "IMTYPESET_LIBRARY": str(pair / deps.LIBRARY_NAME),
-        "IMTYPESET_PYTHON": str(pair / "pysnap"),
-    }
+    got, said = _make_typeset_env(f"TYPESET_DIR={pair}", NONE)
+    assert got == _exported(pair)
     warning, why = said.strip().splitlines()
     against = headers or "headers its BUILT-FROM does not record"
     for line in (warning, why):
         assert f"was built against {against}, NOT the wheel's own Dear ImGui headers" in line
-    assert warning.startswith("Makefile:") and why.startswith("# the pair in ")
+    assert warning.startswith("Makefile:") and "the pair in " in why
 
     # And a pair built against the wheel's own says nothing more than it did.
     fork = _pair(tmp_path / "fork")
-    got, said = _make_typeset_env(f"TYPESET_DIR={fork}")
+    got, said = _make_typeset_env(f"TYPESET_DIR={fork}", NONE)
     assert got["IMTYPESET_LIBRARY"] == str(fork / deps.LIBRARY_NAME)
-    assert said.strip() == (f"# the pair in {fork}, built from the commit imtypeset.ref names")
+    assert said.strip() == f"# the pair in {fork}, built from the commit imtypeset.ref names"
 
 
 @needs_make
 def test_make_exports_nothing_for_half_a_pair_or_none(tmp_path: Path) -> None:
-    assert _typeset_env(f"TYPESET_DIR={_pair(tmp_path / 'half', package=False)}") == NOTHING
-    assert _typeset_env(f"TYPESET_DIR={tmp_path / 'absent'}") == NOTHING
+    half = _pair(tmp_path / "half", package=False)
+    assert _typeset_env(f"TYPESET_DIR={half}", NONE) == NOTHING
+    got, said = _make_typeset_env(f"TYPESET_DIR={tmp_path / 'absent'}", NONE)
+    assert got == NOTHING
+    assert "no imtypeset is installed" in said and "'make deps' builds the pair" in said
 
 
 @needs_make
@@ -1067,12 +1201,13 @@ def test_make_exports_nothing_from_a_pair_built_from_another_commit_and_says_why
     stale = "e" * 40
     pair = _pair(tmp_path / "pair", commit=stale)
 
-    got, said = _make_typeset_env(f"TYPESET_DIR={pair}")
+    got, said = _make_typeset_env(f"TYPESET_DIR={pair}", NONE)
 
     assert got == NOTHING
     assert stale in said and deps.read_ref(ROOT / "imtypeset.ref") in said
     # Once as the reason typeset-env gives, once as the warning every target gets.
-    assert "NOT exported" in said and len(said.strip().splitlines()) == 2
+    assert "NOT exported and typeset panes fall back" in said
+    assert len(said.strip().splitlines()) == 2
 
 
 @needs_make
@@ -1082,9 +1217,9 @@ def test_a_value_the_caller_set_is_never_paired_with_half_of_this_checkouts(
     tmp_path: Path, mine: str
 ) -> None:
     pair = _pair(tmp_path / "pair")
-    assert _typeset_env(f"TYPESET_DIR={pair}") != NOTHING
+    assert _typeset_env(f"TYPESET_DIR={pair}", NONE) != NOTHING
 
-    got, said = _make_typeset_env(f"TYPESET_DIR={pair}", env={mine: "/another/project"})
+    got, said = _make_typeset_env(f"TYPESET_DIR={pair}", NONE, env={mine: "/another/project"})
 
     assert got == {**NOTHING, mine: "/another/project"}
     assert mine in said and "set by the caller" in said
@@ -1092,13 +1227,15 @@ def test_a_value_the_caller_set_is_never_paired_with_half_of_this_checkouts(
 
 @needs_make
 @needs_venv
-def test_both_values_from_the_caller_win_and_an_empty_one_turns_the_library_off(
+def test_both_values_from_the_caller_win_and_with_none_installed_an_empty_one_is_no_library(
     tmp_path: Path,
 ) -> None:
     pair = _pair(tmp_path / "pair")
     both = {"IMTYPESET_LIBRARY": "/mine/lib.so", "IMTYPESET_PYTHON": "/mine/pysnap"}
-    assert _typeset_env(f"TYPESET_DIR={pair}", env=both) == both
-    assert _typeset_env(f"TYPESET_DIR={pair}", "IMTYPESET_LIBRARY=") == NOTHING
+    assert _typeset_env(f"TYPESET_DIR={pair}", NONE, env=both) == {**NOTHING, **both}
+    assert _typeset_env(f"TYPESET_DIR={pair}", INSTALLED, env=both) == {**NOTHING, **both}
+    got, said = _make_typeset_env(f"TYPESET_DIR={pair}", NONE, "IMTYPESET_LIBRARY=")
+    assert got == NOTHING and "does NOT run" not in said
 
 
 def test_the_default_pair_is_where_the_script_builds_it() -> None:
@@ -1123,20 +1260,18 @@ def _order(text: str, *needles: str) -> None:
         at = found + len(needle)
 
 
-def test_bootstrap_verifies_after_each_install_then_builds_and_guards_the_build() -> None:
+def test_bootstrap_installs_once_from_the_index_and_builds_nothing() -> None:
+    """
+    The published versions are requirements, so the install stage is one
+    install and the library comes with it. Nothing is fetched or compiled:
+    the build from source is ``make deps``, the development override.
+    """
     script = (ROOT / "bootstrap.sh").read_text(encoding="utf-8")
     stage = script[script.index("stage 3/4") : script.index("stage 4/4")]
-    _order(
-        stage,
-        "typeset_deps.py imscribe\n",
-        " .deps/imscribe\n",
-        "typeset_deps.py verify\n",
-        '-e ".[dev]"\n',
-        # pyproject.toml names imscribe too: the last install is the one to hold.
-        "typeset_deps.py verify\n",
-        "typeset_deps.py library || {",
-    )
-    assert "${INSTALL[@]}" not in stage[stage.rindex("typeset_deps.py verify\n") :]
+    run = [line for line in stage.splitlines()[1:] if line and not line.lstrip().startswith("#")]
+    assert run[0] == '"${INSTALL[@]}" -e ".[dev]"'
+    assert not [line for line in run if "INSTALL" in line][1:], "one install"
+    assert "typeset_deps" not in "".join(run) and ".deps" not in "".join(run)
 
 
 def test_bootstrap_help_is_the_whole_header_and_none_of_the_script() -> None:
