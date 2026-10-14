@@ -127,6 +127,25 @@ include = [
 ]
 exclude = ["**/__pycache__", "**/*.pyc"]
 
+# The release lock's targets (`make lock`, scripts/lock.py). Here and not in a
+# uv.toml because these are project settings, documented in [tool.uv] of
+# pyproject.toml, and `uv pip compile --universal` reads both: `environments`
+# limits the resolve to the two targets and the Pythons the unit has wheels for,
+# and `required-environments` fails it where a package has no wheel for one of
+# them. A marker cannot test glibc 2.28 or macOS 14; scripts/probe.py does, and
+# tests/test_lock.py holds these to its LIBRARY verdict and to lock.py's targets.
+# uv documents both for `uv lock` and `uv pip compile --universal` only;
+# bootstrap.sh's `uv pip install` and pip do not read them.
+[tool.uv]
+environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version >= '3.11' and python_version < '3.15'",
+    "sys_platform == 'darwin' and platform_machine == 'arm64' and python_version >= '3.11' and python_version < '3.15'",
+]
+required-environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
+
 # black owns formatting (CLAUDE.md); ruff is lint-only here, so its formatter is
 # never invoked and the two cannot disagree about the same file.
 [tool.black]

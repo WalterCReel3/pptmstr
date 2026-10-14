@@ -1,4 +1,4 @@
-.PHONY: help bootstrap deps typeset-env probe smoke run shot shot-xvfb test lint format format-file typecheck typecheck-all verify check clean
+.PHONY: help bootstrap lock lock-check lock-gate deps typeset-env probe smoke run shot shot-xvfb test lint format format-file typecheck typecheck-all verify check clean
 
 PY  := .venv/bin/python
 PIP := .venv/bin/python -m pip
@@ -166,8 +166,25 @@ ifeq ($(HEADLESS),1)
 	  exit 1; }
 endif
 
-bootstrap:         ## probe, create .venv, install from the package index, smoke test
+bootstrap:         ## probe, create .venv, install (from the release lock when there is one), smoke test
 	./bootstrap.sh
+
+# The release lock, requirements-dev.lock and requirements.lock (scripts/lock.py
+# says what each is). The one target here that needs the network and uv: it
+# refuses in a sentence without either, and replaces both files or neither. It
+# keeps every version the current lock holds unless UPGRADE=1. UV names a uv
+# that is not on PATH.
+UV      ?= uv
+UPGRADE ?=
+lock: venv-check   ## resolve the release lock with uv (network); UPGRADE=1 takes the newest
+	$(PY) scripts/lock.py lock --uv "$(UV)" $(if $(filter-out 0,$(strip $(UPGRADE))),--upgrade)
+
+lock-check: venv-check ## offline: the release lock agrees with pyproject.toml
+	$(PY) scripts/lock.py check
+
+# What `check` runs: the same, and a pass where no lock has been written yet.
+lock-gate: venv-check
+	@$(PY) scripts/lock.py check --if-present
 
 # The development override, and no part of an install: imscribe from source at the
 # commit imscribe.ref names, in place of the published one in .venv, and the imtypeset
@@ -272,7 +289,7 @@ typecheck-all: venv-check ## mypy over the application, scripts and tests
 verify: venv-check ## the full bash differential probe for the segment split
 	$(PY) scripts/verify_split_against_bash.py
 
-check: lint typecheck test   ## everything the CI gate would run
+check: lint typecheck lock-gate test   ## everything the CI gate would run
 
 clean:
 	rm -rf .mypy_cache .ruff_cache .pytest_cache dist

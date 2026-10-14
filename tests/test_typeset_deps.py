@@ -1264,7 +1264,8 @@ def _order(text: str, *needles: str) -> None:
 def test_bootstrap_installs_once_from_the_index_and_builds_nothing() -> None:
     """
     The published versions are requirements, so the install stage is one
-    install and the library comes with it. Nothing is fetched or compiled:
+    install of them (from the release lock, then pptmstr with no dependencies,
+    or from pyproject.toml) and the library comes with it. Nothing is fetched or compiled:
     the build from source is ``make deps``, the development override. The
     one other install is a reinstall from the index, with no dependencies,
     of what ``pptmstr.pairing.unpublished`` names (``tests/test_probe.py``
@@ -1273,9 +1274,15 @@ def test_bootstrap_installs_once_from_the_index_and_builds_nothing() -> None:
     script = (ROOT / "bootstrap.sh").read_text(encoding="utf-8")
     stage = script[script.index("stage 3/4") : script.index("stage 4/4")]
     run = [line for line in stage.splitlines()[1:] if line and not line.lstrip().startswith("#")]
-    assert run[0] == '"${INSTALL[@]}" -e ".[dev]"'
     calls = [line.strip() for line in run if line.strip().startswith('"${')]
-    assert calls == ['"${INSTALL[@]}" -e ".[dev]"', '"${REINSTALL[@]}"'], "one install"
+    # The release lock and then pptmstr with nothing else, or pyproject.toml's
+    # floors (tests/test_lock.py runs both branches); then the one reinstall.
+    assert calls == [
+        '"${INSTALL[@]}" --require-hashes --only-binary :all: -r "$LOCK"',
+        '"${INSTALL[@]}" --no-deps --no-build-isolation -e .',
+        '"${INSTALL[@]}" -e ".[dev]"',
+        '"${REINSTALL[@]}"',
+    ], "one install per branch"
     assert "typeset_deps" not in "".join(run) and ".deps" not in "".join(run)
 
 

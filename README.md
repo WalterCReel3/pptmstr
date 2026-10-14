@@ -91,11 +91,13 @@ Read [STYLE.md](STYLE.md) before adding a record, an intent, or a projection.
 
 ```sh
 ./bootstrap.sh          # probe -> venv -> install -> window smoke test
-                        # one install from the package index: imgui-bundle, imscribe and
-                        # imtypeset come as wheels at the exact versions pyproject.toml pins
+                        # from requirements-dev.lock when there is one: every version and
+                        # its hashes, wheels only; otherwise from pyproject.toml's floors,
+                        # and it says the install is unlocked (--unlocked asks for that)
 .venv/bin/python -m pptmstr --version   # what was installed, and whether the typesetting
                                         # library is accepted beside the wheel
-make check              # lint + typecheck + tests
+make lock               # resolve the release lock with uv; the one target needing the network
+make check              # lint + typecheck + lock-check (when there is a lock) + tests
 make check IMSCRIBE_NO_TYPESET=1        # the same without the typesetting library
 make run                # launch
 

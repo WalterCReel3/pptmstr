@@ -81,8 +81,13 @@ def test_imscribe_and_imtypeset_are_requirements_pinned_to_exactly_one_version_e
     assert not [
         line for line in run if "typeset_deps.py" in line or ".deps" in line
     ], "the build from source is the developer's"
+    # Locked (tests/test_lock.py runs both): the lock, then pptmstr alone; unlocked, one.
     installs = [line for line in run if line.startswith('"${INSTALL[@]}"')]
-    assert installs == ['"${INSTALL[@]}" -e ".[dev]"'], "one install, and it names no version"
+    assert installs == [
+        '"${INSTALL[@]}" --require-hashes --only-binary :all: -r "$LOCK"',
+        '"${INSTALL[@]}" --no-deps --no-build-isolation -e .',
+        '"${INSTALL[@]}" -e ".[dev]"',
+    ], "an install of the lock or of pyproject.toml, and none names a version"
 
 
 def test_the_imscribe_that_is_imported_is_the_pinned_one() -> None:
