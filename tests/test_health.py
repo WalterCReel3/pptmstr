@@ -238,9 +238,10 @@ def test_a_session_that_ran_here_is_drawn_as_it_always_was(monkeypatch) -> None:
 
 def test_healths_narrow_says_what_the_card_menus_row_for_it_says(monkeypatch) -> None:
     """
-    One lever on two surfaces. The menu's row ends on the part a button's label
-    cannot carry -- the agent's briefing still describes the rung it started
-    under -- and HEALTH's control said nothing at all.
+    One lever on two surfaces, described by one account: the menu's row keeps it
+    as its note (drawn in no menu) and HEALTH draws it under its control, ending on
+    the part a button's label cannot carry -- the agent's briefing still describes
+    the rung it started under.
     """
     from pptmstr.ui import session_menu
 
@@ -253,7 +254,8 @@ def test_healths_narrow_says_what_the_card_menus_row_for_it_says(monkeypatch) ->
         row = session_menu.find(
             session_menu.entries(root, policy), session_menu.Action.SET_GATE, Policy.STRICT
         )
-        assert row is not None and row.label == "Narrow to strict"
+        assert row is not None and row.label == "strict"
+        assert row.question == "Narrow to strict"
         note = health.narrow_note(policy)
         assert note == row.note
         assert note is not None and note.endswith(

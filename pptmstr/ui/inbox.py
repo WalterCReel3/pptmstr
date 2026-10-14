@@ -43,7 +43,15 @@ from imgui_bundle import imgui
 from ..approval import command_shown, diff_line_kind
 from ..board import role_name
 from ..bridge import Bridge
-from ..command import Command, CommandId, CommandState, Refused, Survivor, Withdrawn
+from ..command import (
+    COMMAND_TAG,
+    Command,
+    CommandId,
+    CommandState,
+    Refused,
+    Survivor,
+    Withdrawn,
+)
 from ..commandrun import environment_changes, kill_line, look_line
 from ..model import (
     AgentRecord,
@@ -67,6 +75,7 @@ from .widgets import (
     ellipsis,
     flat_line,
     format_elapsed,
+    help_mark,
     multiline_input,
     one_line,
 )
@@ -143,7 +152,9 @@ class CommandRows:
 
     ``on_check`` is the press that has a command left running unsupervised
     looked for again; None draws no such button. ``checked`` is what the last
-    look at each found, in the caller's words.
+    look at each found, in the caller's words. ``on_release`` is the second
+    press of 'release' on such a command, which lets go of the session it
+    holds and signals nothing; None draws no such button.
     """
 
     state: command_view.CommandViewState
@@ -156,6 +167,7 @@ class CommandRows:
     restored: AbstractSet[CommandId] = frozenset()
     on_check: Callable[[CommandId], None] | None = None
     checked: Mapping[CommandId, str] = field(default_factory=dict)
+    on_release: Callable[[CommandId], None] | None = None
 
 
 # What a command's row says above its body while ``CommandRows.wired`` is False.
@@ -243,6 +255,28 @@ CHECK_AGAIN = "check again"
 COPY_KILL = "copy the kill line"
 COPY_LOOK = "copy the ps line"
 
+# The one line that says what holds the session and the two ways out of it.
+WAYS_OUT = (
+    f"this holds its session: no other command runs here until it ends ('{CHECK_AGAIN}')"
+    " or you release the session"
+)
+# The two presses that let go of the session, and what stands between them.
+RELEASE = "release session..."
+CONFIRM_RELEASE = "release - leave it running"
+RELEASE_ARMED = "release? nothing is signalled; it runs on, unwatched"
+RELEASE_HELP_TITLE = "Releasing a session"
+RELEASE_HELP = (
+    "A command found running with no pptmstr holding it keeps its session from"
+    " running any other command. Two things end that: its processes ending, which"
+    f" '{CHECK_AGAIN}' sees, or you releasing the session.",
+    "Releasing sends no signal to anything. What was running keeps running, as"
+    " you, with nothing of pptmstr's bounding or watching it. Use it for a command"
+    " meant to leave something running, such as a server.",
+    "The command's record keeps that you released it and how many of its processes"
+    " were found at the last look; released.json beside it keeps the line that"
+    " shows them. It is not looked for again, and its asker is told.",
+)
+
 
 def survivor_lines(left: Survivor) -> tuple[str, ...]:
     """
@@ -252,8 +286,29 @@ def survivor_lines(left: Survivor) -> tuple[str, ...]:
 
     The two command lines are by themselves, so that each can be read, and
     copied, exactly.
+
+    With the shell there, what is counted is its session and what is said of
+    the processes outside it (``Survivor.escaped``) is one more line. With
+    the shell gone nothing is its session's by the number alone, and every
+    count is of processes that carry the command's tag.
     """
+    if not left.shell:
+        return _leaderless_lines(left)
     count = f"{left.members} process{'' if left.members == 1 else 'es'}"
+    outside = len(left.escaped)
+    escaped = (
+        (
+            f"{outside} more process{'' if outside == 1 else 'es'} of it"
+            f" {'is' if outside == 1 else 'are'} alive OUTSIDE that session (pid"
+            f" {_pids(left.escaped)}): started with its {COMMAND_TAG} in"
+            f" {'its' if outside == 1 else 'their'} environment, after its shell. No"
+            " pptmstr ends a process that has left the session; the two lines below"
+            " name them too, a whole process group only where every process in it"
+            " carries that variable.",
+        )
+        if outside
+        else ()
+    )
     return (
         "STILL RUNNING, UNSUPERVISED.",
         f"a pptmstr started this command and no end of it is on record. The session"
@@ -261,12 +316,66 @@ def survivor_lines(left: Survivor) -> tuple[str, ...]:
         " window does not hold it: no timeout and no cancel of this window's applies,"
         " and it has your credentials and network for as long as it runs.",
         HELD_ELSEWHERE,
+        *escaped,
         "to see every process in that session, and that it is this command:",
         look_line(left),
         "to end it, by every process group found in that session:",
         kill_line(left),
-        "no other command of this session can be run while it is there. when it is gone,"
-        f" '{CHECK_AGAIN}' ends this row as 'end unknown'.",
+        WAYS_OUT,
+    )
+
+
+# How many pids a sentence of a row names. The two command lines name them all.
+_MAX_PIDS_SAID = 8
+
+
+def _pids(pids: tuple[int, ...]) -> str:
+    shown = ", ".join(str(pid) for pid in pids[:_MAX_PIDS_SAID])
+    more = len(pids) - _MAX_PIDS_SAID
+    return shown if more <= 0 else f"{shown} and {more} more"
+
+
+def _leaderless_lines(left: Survivor) -> tuple[str, ...]:
+    """
+    ``survivor_lines`` for a command whose shell is gone: what is alive is
+    known by the tag in its environment and by nothing else.
+    """
+    count = f"{left.alive} process{'' if left.alive == 1 else 'es'}"
+    where = []
+    if left.marked:
+        where.append(f"{len(left.marked)} in the session it led")
+    if left.escaped:
+        where.append(f"{len(left.escaped)} outside it (pid {_pids(left.escaped)})")
+    unread = (
+        (
+            f"{left.unread} more process{'' if left.unread == 1 else 'es'} in that session"
+            f" number could not be read - {'it runs' if left.unread == 1 else 'they run'}"
+            " as another user, as under sudo, or with an empty environment, as under"
+            " env -i - and"
+            f" {'is' if left.unread == 1 else 'are'} NOT named below: pptmstr cannot tell"
+            f" whether {'it is' if left.unread == 1 else 'they are'} this command's.",
+        )
+        if left.unread
+        else ()
+    )
+    return (
+        "STILL RUNNING, UNSUPERVISED.",
+        f"a pptmstr started this command and no end of it is on record. Its shell (pid"
+        f" {left.pid}) is gone, and {count} started with its {COMMAND_TAG} in the"
+        f" environment, after that shell and in this boot, {'is' if left.alive == 1 else 'are'}"
+        f" alive: {' and '.join(where)}. This window does not hold"
+        f" {'it' if left.alive == 1 else 'them'}: no timeout and no cancel of this window's"
+        " applies, and what runs has your credentials and network for as long as it runs.",
+        HELD_ELSEWHERE,
+        *unread,
+        f"to see {'it' if left.alive == 1 else 'them'}, and that this is the command:",
+        look_line(left),
+        "to end what carries that variable - a whole process group only where every"
+        " process in it does, single processes otherwise:",
+        kill_line(left),
+        "a process of this command that was started with its environment emptied (env -i,"
+        " sudo) is not found this way and is not named.",
+        WAYS_OUT,
     )
 
 
@@ -279,6 +388,34 @@ def _clicked(label: str) -> bool:
     return bool(imgui.small_button(label)) and bool(
         imgui.is_mouse_released(imgui.MouseButton_.left)
     )
+
+
+def _release(
+    rows: CommandRows, command_id: CommandId, on_release: Callable[[CommandId], None], live: bool
+) -> None:
+    """
+    'release', as the command row's run is pressed: the first press arms, a
+    confirmation replaces it, and that answers only after
+    ``command_view.ARM_DELAY_S`` and only to a mouse release. Dead in a copy
+    that is not live, so an armed press has one place to land.
+    """
+    state = rows.state
+    if not live:
+        imgui.begin_disabled()
+    if isinstance(state.armed(command_id), command_view.Releasing):
+        imgui.text_colored(P.warn.vec4, RELEASE_ARMED)
+        if command_view._clicked(command_view.BACK):
+            state.pending = None
+        imgui.same_line()
+        if command_view._second_press(state, CONFIRM_RELEASE):
+            on_release(command_id)
+            state.pending = None
+    else:
+        if command_view._first_press(state, RELEASE):
+            command_view._arm(state, command_view.Releasing(command_id))
+        help_mark(f"release:{command_id}", RELEASE_HELP_TITLE, RELEASE_HELP)
+    if not live:
+        imgui.end_disabled()
 
 
 def _survivor(rows: CommandRows, command: Command, left: Survivor, live: bool) -> None:
@@ -309,6 +446,8 @@ def _survivor(rows: CommandRows, command: Command, left: Survivor, live: bool) -
             rows.on_check(command.id)
         if not live:
             imgui.end_disabled()
+    if rows.on_release is not None:
+        _release(rows, command.id, rows.on_release, live)
     imgui.pop_text_wrap_pos()
     imgui.pop_id()
     imgui.separator()

@@ -104,9 +104,9 @@ class Settings:
     # says (``BoardLogUnread``): on is the default only for a file or a key that
     # is not there.
     board_log: bool = True
-    # Whether the fleet folds an ended sub-agent that owes nothing and holds nothing
-    # into a count on its lead's card. A filter on what is drawn: the record stays in
-    # the store either way.
+    # Whether the fleet pane leaves out an ended sub-agent that owes nothing and holds
+    # nothing: no card, no count. This is the only switch that shows them again. A
+    # filter on what is drawn: the record stays in the store either way.
     #
     # Read like every key but ``board_log``: a value that is not a JSON ``true`` or
     # ``false`` is the default, and nothing is refused over it.

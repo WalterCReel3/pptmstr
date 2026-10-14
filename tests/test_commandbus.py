@@ -41,6 +41,7 @@ from pptmstr.command import (
     NotStarted,
     Outcome,
     Refused,
+    Released,
     RequestRefusal,
     Run,
     Survivor,
@@ -1288,6 +1289,18 @@ def _largest(over: int = 0) -> dict[str, Command]:
                 unconfirmed="\U0010ffff" * 2_000,
             ),
         ),
+        "released": Command(
+            **base,
+            run=run,
+            end=End(
+                EndUnknown(released=Released(at=4.0, alive=2 * _MOST)),
+                3.0,
+                7_199.0,
+                much,
+                tail,
+                unconfirmed="\U0010ffff" * 2_000,
+            ),
+        ),
         "left behind": Command(
             **base,
             run=run,
@@ -1299,6 +1312,7 @@ def _largest(over: int = 0) -> dict[str, Command]:
                 tail,
                 leftover=_MOST,
                 unconfirmed="\U0010ffff" * 2_000,
+                escaped=tuple(range(_MOST - 5_000, _MOST)),
             ),
             first_delivered_at=4.0,
         ),
@@ -1306,7 +1320,54 @@ def _largest(over: int = 0) -> dict[str, Command]:
             **base,
             run=run,
             stop_asked_at=2.0,
-            end=End(TimedOut(), 3.0, 7_199.0, much, tail, unconfirmed="\U0010ffff" * 2_000),
+            end=End(
+                TimedOut(),
+                3.0,
+                7_199.0,
+                much,
+                tail,
+                unconfirmed="\U0010ffff" * 2_000,
+                escaped=tuple(range(_MOST - 5_000, _MOST)),
+            ),
+            first_delivered_at=4.0,
+        ),
+        "left running, with everything a record can add": Command(
+            **base,
+            run=run,
+            stop_asked_at=2.0,
+            end=End(
+                EndUnknown(
+                    Survivor(
+                        pid=_MOST,
+                        pgid=_MOST,
+                        members=_MOST,
+                        escaped=tuple(range(_MOST - 5_000, _MOST)),
+                    )
+                ),
+                3.0,
+                7_199.0,
+                much,
+                tail,
+                unconfirmed="\U0010ffff" * 2_000,
+                escaped=tuple(range(_MOST - 5_000, _MOST)),
+                unreadable=tuple(range(_MOST - 5_000, _MOST)),
+            ),
+        ),
+        "exited, with everything a record can add": Command(
+            **base,
+            run=run,
+            stop_asked_at=2.0,
+            end=End(
+                Exited(0),
+                3.0,
+                7_199.0,
+                much,
+                tail,
+                leftover=_MOST,
+                unconfirmed="\U0010ffff" * 2_000,
+                escaped=tuple(range(_MOST - 5_000, _MOST)),
+                unreadable=tuple(range(_MOST - 5_000, _MOST)),
+            ),
             first_delivered_at=4.0,
         ),
         "refused": Command(
@@ -1676,3 +1737,119 @@ def test_the_operators_mark_does_not_say_the_operator_wrote_what_they_left_of_th
     assert "It began as your request:" in mine
     # A refusal's reason is the one thing behind the mark the operator did type.
     assert "their reason for refusing a command, which they typed" in cb.OPERATOR_LEGEND
+
+
+def test_a_reader_is_told_what_the_command_left_running_outside_its_session() -> None:
+    """
+    The command ended and part of what it started did not. An asker told only
+    "exit code 0" builds on a machine that still has its server on the port.
+    """
+    held = _largest()["killed"]
+    assert held.end is not None
+    left = dataclasses.replace(
+        held, end=dataclasses.replace(held.end, outcome=Exited(0), escaped=(4301, 4302))
+    )
+    text = cb.commands_text([left], left.id, 5e9, DEV, lambda node: "dev", lambda _: "/log")
+    assert (
+        "pptmstr's record adds: 2 processes it started are ALIVE outside its shell's session,"
+        " and pptmstr did not end them: pid 4301, 4302, as of its end. To look: ps -o"
+        " pid,pgid,sid,lstart,args -p 4301,4302." in text
+    )
+    assert "WAS STILL RUNNING at its end. Only the operator can end that." in text
+    for none in ((), None):
+        quiet = dataclasses.replace(left, end=dataclasses.replace(left.end, escaped=none))
+        said = cb.commands_text([quiet], quiet.id, 5e9, DEV, lambda node: "dev", lambda _: "/log")
+        assert "outside its shell's session" not in said and "WAS STILL RUNNING" not in said
+    # However many there were, what is said of them fits what a remark may be.
+    many = End(Exited(0), 3.0, escaped=tuple(range(_MOST - 5_000, _MOST)))
+    assert many.escaped_remark is not None
+    assert len(many.escaped_remark) <= cb._MAX_REMARK_CHARS
+    assert many.escaped_remark.endswith(f"-p {','.join(str(_MOST - 5_000 + i) for i in range(4))}")
+    assert " and 4996 more, as of its end" in many.escaped_remark
+
+
+def test_a_survivor_known_by_its_tag_is_counted_whole_for_its_asker() -> None:
+    held = _largest()["unknown"]
+    assert held.end is not None
+    found = Survivor(
+        pid=50, pgid=50, members=2, pids=(51, 58), escaped=(70,), marked=(51, 58), shell=False
+    )
+    left = dataclasses.replace(
+        held, end=dataclasses.replace(held.end, outcome=EndUnknown(survivor=found))
+    )
+    text = cb.commands_text([left], left.id, 5e9, DEV, lambda node: "dev", lambda _: "/log")
+    assert "IT IS STILL RUNNING, UNSUPERVISED" in text and "3 process(es) of it were alive" in text
+
+
+def test_what_could_not_be_read_beside_a_command_is_a_count_to_its_asker_and_no_pids() -> None:
+    """
+    The record's own sentence names pids and a ``ps`` line. An asker in a
+    sandbox can use neither, and both are on the operator's pane; the reply
+    has a bound that the sentence would not fit inside.
+    """
+    end = End(Exited(0), 3.0, 1.0, 0, "", escaped=(), unreadable=(4301, 4302))
+    assert end.unreadable_remark is not None and "4301" in end.unreadable_remark
+    said = cb._remarks(end)
+    assert said == [
+        "pptmstr's record adds: 2 process(es) started beside it could not be read, and MAY"
+        " BE PART OF IT."
+    ]
+    assert cb._remarks(End(Exited(0), 3.0, 1.0, 0, "", escaped=())) == []
+
+
+def test_a_command_found_still_running_is_not_told_twice_that_part_of_it_may_be() -> None:
+    """
+    Its outcome says all of it is running and is not to be built on. The two
+    sentences that say so of a part are for an end that otherwise reads as
+    over, and with them the largest such reply did not fit its bound.
+    """
+    left = Survivor(pid=50, pgid=50, members=1, escaped=(70,))
+    still = End(EndUnknown(left), 3.0, 1.0, 0, "", unconfirmed="why", escaped=(70,))
+    over = dataclasses.replace(still, outcome=Exited(0))
+    assert [said for said in cb._remarks(still) if said.startswith("So part")] == []
+    assert len(cb._remarks(still)) == 2 and all(
+        said.startswith("pptmstr's record adds: ") for said in cb._remarks(still)
+    )
+    assert [said for said in cb._remarks(over) if said.startswith("So part")] == [
+        "So part of what it started WAS STILL RUNNING at its end. Only the operator can end that.",
+        "So part of the command MAY STILL BE RUNNING. Do not build on it having stopped.",
+    ]
+
+
+def test_the_asker_is_told_the_operator_released_its_session_with_the_command_running() -> None:
+    """
+    After a release the asker's session can run commands again, and the
+    command it asked for may still be running: both are said, with how many
+    were found, and neither reads as the command having finished.
+    """
+    held = _largest()["unknown"]
+    assert held.end is not None
+    released = dataclasses.replace(
+        held,
+        end=dataclasses.replace(held.end, outcome=EndUnknown(released=Released(at=4.0, alive=3))),
+    )
+    text = cb.commands_text([released], released.id, 5e9, DEV, lambda n: "dev", lambda _: "/log")
+    assert "[started: left running, released by the operator]" in text
+    assert (
+        "3 process(es) of it were STILL RUNNING when THE OPERATOR RELEASED YOUR SESSION from it"
+        in text
+    )
+    assert "not signalled" in text and "Do not build on it having stopped" in text
+    assert "Other commands can run again." in text
+    assert "ITS END IS UNKNOWN" not in text and "UNSUPERVISED" not in text
+    listed = cb.commands_text([released], None, 5e9, DEV, lambda n: "dev", lambda _: "/log")
+    assert "[started: left running, released by the operator]" in listed
+    # It says itself that part of it may be running; the remark is not said again.
+    end = dataclasses.replace(released.end, unconfirmed="why")  # type: ignore[arg-type]
+    assert [said for said in cb._remarks(end) if said.startswith("So part")] == []
+
+
+def test_nothing_was_left_running_is_not_said_beside_a_record_that_says_something_was() -> None:
+    nothing = (
+        "Nothing the command started was left running: if it was meant to leave something "
+        "running, that is gone."
+    )
+    plain = End(Exited(0), 3.0, 1.0, 0, "", leftover=2, escaped=())
+    assert nothing in cb._remarks(plain)
+    for more in ({"escaped": (70,)}, {"unreadable": (70,)}, {"unconfirmed": "why"}):
+        assert nothing not in cb._remarks(dataclasses.replace(plain, **more)), more

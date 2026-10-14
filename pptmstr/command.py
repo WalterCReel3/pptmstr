@@ -416,6 +416,29 @@ class Lapsed:
     """It was still only asked when pptmstr stopped. A request does not outlive the window."""
 
 
+# The variable a command's shell is given that nobody set. Its value is made
+# for the one run and is written nowhere; a record holds a digest of it. What
+# it is for, and what it cannot see, is in ``commandrun``.
+COMMAND_TAG = "PPTMSTR_COMMAND"
+
+_DIGEST_CHARS = 64
+
+# The most of a ``/proc/<pid>/cgroup`` a record holds.
+MAX_CGROUP_CHARS = 4_096
+
+
+def is_tag_digest(s: object) -> bool:
+    """
+    Whether ``s`` has the form ``Started.tag`` has: a SHA-256, as 64 lower-case
+    hexadecimal digits.
+    """
+    return (
+        isinstance(s, str)
+        and len(s) == _DIGEST_CHARS
+        and all(char in "0123456789abcdef" for char in s)
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class Started:
     """
@@ -430,6 +453,20 @@ class Started:
     do, and are None where the platform has no ``/proc`` to read them from --
     there, nothing can tell this process from a later one with its pid, and
     nothing claims to.
+
+    ``tag`` is the SHA-256, in hexadecimal, of the value the shell's
+    environment was given under ``COMMAND_TAG``, which everything the shell
+    starts inherits: what a process of the command is known by once the shell
+    is gone or the process has left its session. **The digest and never the
+    value**: this record is a file a contained session may come to read, and
+    whoever holds the value can start a process that is taken for the
+    command's. None in a record of a command that was started without one,
+    and nothing is then looked for by it.
+
+    ``cgroup`` is the shell's ``/proc/<pid>/cgroup`` as it was started: the
+    one thing a process that cannot be read for the tag can still be tied to
+    the command by (``commandrun``). None where it could not be read, and
+    nothing is then tied.
     """
 
     pid: int
@@ -437,39 +474,113 @@ class Started:
     at: float
     start_ticks: int | None = None
     boot_id: str | None = None
+    tag: str | None = None
+    cgroup: str | None = None
 
     def __post_init__(self) -> None:
         # 1 is init, and a group id of 0 or 1 given to ``kill`` is this
         # process's own group or every process there is.
         if self.pid <= 1 or self.pgid <= 1:
             raise ValueError(f"a started process has a pid and a group: {self.pid}, {self.pgid}")
+        if self.tag is not None and not is_tag_digest(self.tag):
+            # Anything else here would be compared with a digest and never
+            # equal one, or would be the value itself, on its way to a file.
+            raise ValueError("a tag is the SHA-256 of a value, as 64 hexadecimal digits")
+        if self.cgroup is not None and not 0 < len(self.cgroup) <= MAX_CGROUP_CHARS:
+            raise ValueError(f"a cgroup is at most {MAX_CGROUP_CHARS} characters, and not none")
+
+
+def ps_line(pids: tuple[int, ...]) -> str:
+    """
+    The command that shows the processes with these pids, to copy.
+    """
+    return "ps -o pid,pgid,sid,lstart,args -p " + ",".join(str(pid) for pid in pids)
 
 
 @dataclass(frozen=True, slots=True)
 class Survivor:
     """
-    What was found alive of a command whose end nobody recorded: the group
-    ``pgid`` that ``pid`` led, and how many processes it still has.
+    What was found alive of a command whose end nobody recorded.
 
-    ``groups`` is every process group those processes were in when they were
-    looked for, ascending. The shell leads a session as well as a group, what
-    it started may have made groups of its own inside that session, and it is
-    the session ``members`` is counted over: so this is what a signal has to
-    be sent to for all of them to get it. Empty in a record nothing counted
-    the groups of, where ``pgid`` is the one known.
+    ``pid`` is the shell's, which is the number of the session and of the
+    group it led, and ``pgid`` that group. ``members`` is how many processes
+    in that session are known to be the command's: with the shell there
+    (``shell``), every live process of the session; with it gone, those that
+    carry the command's tag (``Started.tag``), whose pids are ``marked``.
+
+    ``escaped`` are the pids of processes that carry the tag and are in
+    another session: what the command started that left with ``setsid``.
+
+    ``groups`` and ``pids`` are what a signal has to be sent to for all of
+    those to get it: process groups, ascending, and single processes. With the
+    shell there, the groups of its session are all in ``groups``, whatever
+    they hold: the session is the command's. Every other process is known by
+    its tag alone, and its group is in ``groups`` only when every live process
+    of that group carries the tag; otherwise the process is in ``pids``, by
+    itself. Both empty in a record nothing counted the groups of, where
+    ``pgid`` is the one known -- which only a record with the shell there is.
+
+    ``unread`` is how many live processes of the session number, with the
+    shell gone, could not be read for the tag: not counted, not named, and not
+    known to be anyone else's. A process that could not be read and is in no
+    session of the command's is not in this number, whatever ties it.
     """
 
     pid: int
     pgid: int
     members: int
     groups: tuple[int, ...] = ()
+    pids: tuple[int, ...] = ()
+    escaped: tuple[int, ...] = ()
+    marked: tuple[int, ...] = ()
+    shell: bool = True
+    unread: int = 0
 
     def __post_init__(self) -> None:
-        if self.pid <= 1 or self.pgid <= 1 or self.members < 1:
+        if self.pid <= 1 or self.pgid <= 1 or self.members < 0 or self.unread < 0:
             raise ValueError("a survivor is a group, by its id, with something in it")
-        # As ``Started``: 0 and 1 given to ``kill`` are not a group of a command's.
-        if any(group <= 1 for group in self.groups):
-            raise ValueError(f"a survivor's groups are groups of its own: {self.groups}")
+        if self.members + len(self.escaped) < 1:
+            raise ValueError("a survivor is a group, by its id, with something in it")
+        # As ``Started``: 0 and 1 given to ``kill`` are not a group of a command's,
+        # and as a pid they are every process there is and init.
+        if any(number <= 1 for number in (*self.groups, *self.pids, *self.escaped, *self.marked)):
+            raise ValueError(
+                f"a survivor's groups and processes are its own: {self.groups}, {self.pids}"
+            )
+        if not self.shell and (len(self.marked) != self.members or not (self.groups or self.pids)):
+            # With the shell gone its pid may be anyone's, so nothing falls
+            # back on ``pgid``: what is named is what carried the tag.
+            raise ValueError("a survivor with no shell is the processes that carry its tag")
+        if self.shell and (self.marked or self.unread):
+            raise ValueError(
+                "a survivor with its shell is its session, not what was read for a tag"
+            )
+
+    @property
+    def alive(self) -> int:
+        """
+        How many processes are known to be the command's, in its session and out.
+        """
+        return self.members + len(self.escaped)
+
+
+@dataclass(frozen=True, slots=True)
+class Released:
+    """
+    The operator let go of a session that a command left running unsupervised
+    was holding, at ``at`` on the wall clock, with ``alive`` of its processes
+    found at the last look before that (``Survivor.alive``).
+
+    Nothing was signalled, and nothing is looked for afterwards: what was
+    running may still be, and from here it is the operator's alone.
+    """
+
+    at: float
+    alive: int
+
+    def __post_init__(self) -> None:
+        if self.alive < 1:
+            raise ValueError("a release lets go of something that was found running")
 
 
 @dataclass(frozen=True, slots=True)
@@ -484,9 +595,18 @@ class EndUnknown:
     own because the command is not running *here*: nothing can be approved,
     stopped or waited on through this record, which is what ended means. What
     it changes is in ``Command.unsupervised``.
+
+    ``released`` is set instead when the operator let go of the session that
+    survivor held: the record says it was released and how many were still
+    found, and it no longer holds anything or owes a row.
     """
 
     survivor: Survivor | None = None
+    released: Released | None = None
+
+    def __post_init__(self) -> None:
+        if self.survivor is not None and self.released is not None:
+            raise ValueError("a command found running holds its session, or was released")
 
 
 # A union and not a status beside optional fields: an exit code exists exactly
@@ -575,6 +695,10 @@ class Run:
             raise ValueError(f"a run is bounded: timeout_s is {self.timeout_s!r}")
 
 
+# How many pids a remark on an end names. The rest are counted.
+MAX_REMARK_PIDS = 4
+
+
 @dataclass(frozen=True, slots=True)
 class End:
     """
@@ -593,6 +717,24 @@ class End:
     ``unconfirmed`` is why nothing confirms that the command's processes are
     gone, in pptmstr's words, and None when they were seen to go. With it the
     outcome says what pptmstr did, and this says it was not seen to work.
+
+    ``escaped`` are the pids of the processes that carried the command's tag
+    (``Started.tag``) and were alive in another session than its shell's when
+    it ended: what it started that left with ``setsid``. pptmstr signals none
+    of them. Empty is "looked, and found none that could be read"; None is
+    "not looked for" -- a record written before this was, a command with no
+    tag, or a ``/proc`` that could not be read. They are pids as of ``at``: a
+    number is handed out again once its process has gone, so they are shown
+    with a line that looks and never with one that kills.
+
+    ``unreadable`` are the pids of the processes alive at the end, outside
+    the shell's session, that could not be read for the tag and that two
+    things tie to the command: each started no earlier than its shell, and
+    each was in the control group the shell was started in
+    (``Started.cgroup``). **None of them is known to be the command's.** An
+    ``ssh-agent`` it started is one, and so is anything else unreadable that
+    was started beside it in that time. Empty is "none such", and also what a
+    record written before this was looked for reads as.
     """
 
     outcome: Outcome
@@ -602,6 +744,8 @@ class End:
     tail: str = ""
     leftover: int | None = None
     unconfirmed: str | None = None
+    escaped: tuple[int, ...] | None = None
+    unreadable: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         # The annotation is not enforced at runtime, and a record read from a
@@ -620,12 +764,20 @@ class End:
             raise ValueError("leftover counts what a shell that exited by itself left behind")
         if self.unconfirmed is not None and not (ran(self.outcome) and self.unconfirmed):
             raise ValueError("unconfirmed is the reason a started process was not seen to go")
+        if self.escaped is not None and (
+            not ran(self.outcome) or any(pid <= 1 for pid in self.escaped)
+        ):
+            raise ValueError("escaped are the pids of processes a started command left")
+        if self.unreadable and (not ran(self.outcome) or any(p <= 1 for p in self.unreadable)):
+            raise ValueError("unreadable are the pids of processes beside a started command")
 
     @property
     def remarks(self) -> tuple[str, ...]:
         """
-        What ``leftover`` and ``unconfirmed`` say, one sentence each, for a
-        surface that shows how the command ended. Empty for an end with neither.
+        What ``leftover``, ``escaped``, ``unreadable`` and ``unconfirmed`` say, one sentence
+        each, for a surface that shows how the command ended. Empty for an end
+        with none of them. Each is at most ``MAX_REMARK_PIDS`` pids long
+        whatever the record holds.
         """
         said: list[str] = []
         if self.leftover:
@@ -634,9 +786,48 @@ class End:
                 "session, still running when its shell exited, "
                 f"{'was' if self.leftover == 1 else 'were'} ended with it"
             )
+        if self.escaped_remark is not None:
+            said.append(self.escaped_remark)
+        if self.unreadable_remark is not None:
+            said.append(self.unreadable_remark)
         if self.unconfirmed is not None:
             said.append(f"NOT CONFIRMED DEAD: {self.unconfirmed}")
         return tuple(said)
+
+    @property
+    def unreadable_remark(self) -> str | None:
+        """
+        What ``unreadable`` says, or None when it is empty.
+        """
+        if not self.unreadable:
+            return None
+        count = len(self.unreadable)
+        shown = self.unreadable[:MAX_REMARK_PIDS]
+        more = f" and {count - len(shown)} more" if count > len(shown) else ""
+        return (
+            f"{count} process{'' if count == 1 else 'es'} started during it, beside it"
+            f" and outside its shell's session, could not be read for its {COMMAND_TAG}"
+            f" and may be its: pid {', '.join(str(pid) for pid in shown)}{more}, as of"
+            f" its end. To look: {ps_line(shown)}"
+        )
+
+    @property
+    def escaped_remark(self) -> str | None:
+        """
+        What ``escaped`` says, or None when it is empty or was not looked for.
+        """
+        if not self.escaped:
+            return None
+        count = len(self.escaped)
+        shown = self.escaped[:MAX_REMARK_PIDS]
+        more = f" and {count - len(shown)} more" if count > len(shown) else ""
+        return (
+            f"{count} process{'' if count == 1 else 'es'} it started "
+            f"{'is' if count == 1 else 'are'} ALIVE outside its shell's session, and pptmstr"
+            f" did not end {'it' if count == 1 else 'them'}: pid "
+            f"{', '.join(str(pid) for pid in shown)}{more}, as of its end. To look: "
+            f"{ps_line(shown)}"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -721,8 +912,8 @@ class Command:
     @property
     def unsupervised(self) -> Survivor | None:
         """
-        The group this command left running with nothing of pptmstr's holding
-        it, or None.
+        What this command left running with nothing of pptmstr's holding it,
+        or None.
 
         Such a command has ended as far as this record goes, and it still does
         two things an ended command does not: it owes the operator a row,

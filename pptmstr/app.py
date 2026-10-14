@@ -47,7 +47,17 @@ from . import brief as brief_mod
 from . import settings as settings_mod
 from .approval import Policy, requires_containment
 from .bridge import Bridge
-from .command import Command, CommandId, CommandState, End, EndUnknown, NotStarted, Survivor
+from .command import (
+    COMMAND_TAG,
+    Command,
+    CommandId,
+    CommandState,
+    End,
+    EndUnknown,
+    NotStarted,
+    Released,
+    Survivor,
+)
 from .command import Withdrawn as CommandWithdrawnEnd
 from .driver import AgentSession, UncontainedAutonomy
 from .fake_driver import FakeDriver
@@ -147,21 +157,6 @@ class _InFlight:
     draft: launcher.Draft | None
     origin: str
     resumed: tuple[str, resume_form.Draft] | None = None
-
-
-@dataclass(frozen=True, slots=True)
-class _PickRead:
-    """
-    A row picked in New Task's session list for a session the store holds no
-    record of, with what its session file said: read on a worker, taken on the
-    draw thread (``_take_resume_picks``).
-
-    ``offered`` is New Task's task box as it stood at the click.
-    """
-
-    row: SessionRow
-    found: sessionfile.Found
-    offered: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -362,7 +357,8 @@ def _command_ended(state: AppState) -> Callable[[commandrun.Ended], None]:
     """
     The runner's callback: a command's end, put on the queue as the intent that
     closes it, and a report when the runner could not write ``end.json`` or
-    ``started.json``. What was taken out of the environment for this command's
+    ``started.json``. Processes it started that outlived it in a session of
+    their own are logged. What was taken out of the environment for this command's
     directory, beyond what is taken out for every directory and shown on its
     row, is logged: the row is drawn before the directory is looked at.
 
@@ -388,6 +384,8 @@ def _command_ended(state: AppState) -> Callable[[commandrun.Ended], None]:
                 files.report(
                     CommandFileReport(ended.command.id, commandfile.STARTED_NAME, ended.started)
                 )
+            if end.escaped_remark is not None:
+                LOG.warn("command", f"{ended.command.id}: {end.escaped_remark}")
             host = state.command_host
             shown = () if host is None else host.stripped_env
             for line in ended.taken_out:
@@ -504,7 +502,7 @@ def _check_for_overdue_commands(state: AppState, now: float | None = None) -> No
 
 
 ABANDONED = (
-    "Every process group found in its shell's session was sent SIGKILL and its session"
+    "Every process group found in its shell's session is being sent SIGKILL and its session"
     " here can be given another command; whether anything of it survived was not seen"
 )
 NOT_ABANDONED = "It may still be running: the runner could not be told to give it up"
@@ -516,8 +514,8 @@ NOT_HELD = (
 def _abandon_command(state: AppState, command_id: CommandId) -> str:
     """
     Have the runner give up a command the store has just ended without it, and
-    say what that did. The runner kills what it finds in the shell's session
-    from this thread and frees the session's slot (``Runner.abandon``):
+    say what that did. The runner frees the session's slot and kills what it
+    finds in the shell's session from a thread of its own (``Runner.abandon``):
     without that the store would show the session free while the runner turned
     every later command of it away.
     """
@@ -788,6 +786,7 @@ def _command_rows(state: AppState) -> inbox.CommandRows | None:
         restored=restored,
         on_check=lambda command_id: _check_survivor(state, command_id),
         checked=state.command_checked,
+        on_release=lambda command_id: _release_survivor(state, command_id),
     )
 
 
@@ -981,9 +980,6 @@ class AppState:
     # on the asyncio thread, one whole string per key; the draw thread reads one
     # entry when a form is opened.
     last_sent: dict[str, str] = field(default_factory=dict)
-    # Session-file reads for rows picked in New Task's session list, from the
-    # worker that made each to the draw thread. See ``_pick_resume``.
-    resume_picks: queue.SimpleQueue[_PickRead] = field(default_factory=queue.SimpleQueue)
     # What a card's control was asked to do and did not, in words, oldest first:
     # a removal the store or the pool refused, a gate move the driver or the
     # directory refused. Shown until dismissed (``_draw_not_done``). Appended
@@ -1831,21 +1827,22 @@ def _live_sessions(snap: Snapshot | None) -> frozenset[str]:
     )
 
 
-def _resume_ends(state: AppState) -> frozenset[str]:
+def _resume_ends(state: AppState, showing: str | None) -> frozenset[str]:
     """
-    The ids the resume form warns about: the sessions a resume would end a run
-    of. Every root that has not ended (``_live_sessions``), and the session the
-    form is showing when the pool still has a run under its id.
+    The ids a surface that resumes ``showing`` warns about: the sessions a
+    resume would end a run of. Every root that has not ended
+    (``_live_sessions``), and ``showing`` itself when the pool still has a run
+    under its id. ``showing`` is the session on the resume form, or the one
+    picked in New Task's session list; None is neither.
 
     The second is a session that failed with its process still attached -- an
     error result leaves the client connected -- or one closed a moment ago and
     still being ended. Its root is terminal, so the snapshot does not call it
     live, and pressing resume ends that process all the same
-    (``SessionPool.submit``). Asked of the pool for the one session on the
-    form and not for every card.
+    (``SessionPool.submit``). Asked of the pool for the one session about to
+    be resumed and not for every card.
     """
     live = _live_sessions(state.frame_snap)
-    showing = state.resume.showing
     pool = state.pool
     if showing is None or showing in live or pool is None:
         return live
@@ -2126,11 +2123,15 @@ def _launch(
     launcher's notice uses for a failure that is not about the text under it.
     ``resumed`` is the resume form's equivalent of ``draft``: the session and
     the form's draft, so a resume that starts nothing goes back to that form.
+    A resume pressed in New Task carries New Task's ``draft`` like any launch
+    from there, and goes back to New Task.
 
     **Every resume comes through here whatever surface pressed it**, and is
     treated alike: the session is announced under ``spec.task`` and sent
     ``spec.message`` when the spec has one, no brief is written for it
-    (``_seed_brief``), and it passes each check a launch passes.
+    (``_seed_brief``), and it passes each check a launch passes. A spec whose
+    title is only a label is given the task the session's file recorded, where
+    one did (``_recorded_title``).
 
     Takes the whole spec rather than loose arguments. ``relaunch`` and ``fork`` build
     one from an ``AgentRecord``, and row 9's defect was that they could build a
@@ -2239,9 +2240,10 @@ def _launch(
             if state.command_files is not None:
                 await asyncio.to_thread(_restore_commands, state, spec.resume)
         addresses = _carried_addresses(state, spec.resume)
+        titled = await _recorded_title(state, spec)
         session = AgentSession(
             state.bridge,
-            spec.task,
+            titled.task,
             model=spec.model,
             cwd=spec.cwd,
             # Travels with cwd: the pair is what a write is placed against, and a
@@ -2275,7 +2277,7 @@ def _launch(
             resume=spec.resume,
             restored_addresses=addresses,
             message=spec.message,
-            task_is_label=spec.task_is_label,
+            task_is_label=titled.task_is_label,
         )
         # Ahead of the pool's answer, so a launch the pool then refuses leaves the
         # directory this wrote behind it, under a session id nothing ran as. The
@@ -2298,7 +2300,7 @@ def _launch(
         # before it starts, and ``AgentSession.run`` may refuse it; a file that
         # already held this launch's message would have the resume form offer a
         # message nobody was sent, under a gate nothing ran with.
-        session.on_started = lambda: _note_started(state, spec, session)
+        session.on_started = lambda: _note_started(state, titled, session)
         if not pool.submit(session):
             # The version read above is awaited, so a launch pressed before the
             # window closed can arrive here after the pool has begun shutting down.
@@ -2321,10 +2323,35 @@ def _launch(
         # already has a transcript, so "launched" alone would leave the log unable
         # to explain why a node appeared with history behind it.
         opening = "resumed" if spec.resume else "launched"
-        LOG.info("app", f"{opening} in {spec.cwd} as {shape.name}: {spec.task[:60]}")
+        LOG.info("app", f"{opening} in {spec.cwd} as {shape.name}: {titled.task[:60]}")
         return LaunchStarted()
 
     state.launches.append(_InFlight(state.bridge.submit(go()), draft, origin, resumed))
+
+
+async def _recorded_title(state: AppState, spec: LaunchSpec) -> LaunchSpec:
+    """
+    ``spec`` under the task its session's file recorded, when ``spec`` resumes a
+    session and has only a label for a title; ``spec`` itself otherwise.
+
+    A resume pressed in New Task knows the session by a row of the CLI's
+    listing, which carries a summary of the conversation and no task
+    (``LauncherState.resumed``), and the announce puts the spec's title on the
+    card. For a session this application ran before and no longer shows -- one
+    removed from the fleet in an earlier run -- the file is the one place the
+    task still is. Read on a worker, as everything else a resume reads before
+    it starts is.
+
+    Nothing is read under ``--fake``, which writes no files, and a file that is
+    absent, unreadable or records no task leaves the label standing: the card
+    then says its title is no task, and Fork and Retry refuse it.
+    """
+    if spec.resume is None or not spec.task_is_label or state.fake:
+        return spec
+    found = await asyncio.to_thread(sessionfile.read, spec.resume)
+    if not isinstance(found, sessionfile.SessionFile) or not found.task.strip():
+        return spec
+    return dataclasses.replace(spec, task=found.task, task_is_label=False)
 
 
 def _note_started(state: AppState, spec: LaunchSpec, session: AgentSession) -> None:
@@ -2473,8 +2500,7 @@ def _resume_failed(state: AppState, session_id: str, draft: resume_form.Draft, r
         _not_done(
             state,
             f"the resume of {name[:80] or session_id} did not start: {reason}. What you "
-            f"typed is kept on its resume form: {session_menu.RESUME_LABEL} on its card, "
-            "or its row in New Task's session list.",
+            f"typed is kept on its resume form: {session_menu.RESUME_LABEL} on its card.",
         )
     return True
 
@@ -2797,13 +2823,13 @@ def _send(state: AppState, node: NodeId, text: str) -> None:
     _session_action(state, go)
 
 
-def _open_resume(
-    state: AppState, rec: AgentRecord, rung: Policy | None = None, *, listed_cwd: str | None = None
-) -> None:
+def _open_resume(state: AppState, rec: AgentRecord, rung: Policy | None = None) -> None:
     """
     Open the resume form for a card's session: the menu's "Resume…", and with
     ``rung`` its "Resume as …" and "Continue as …". Nothing is started from
-    here; the form's own button is the step that resumes.
+    here; the form's own button is the step that resumes. **The one way the
+    form opens**: a session picked in New Task's session list is resumed by New
+    Task (``_launcher_pressed``).
 
     What the form shows as facts is read here, once, from whichever of two
     places knows the session:
@@ -2823,11 +2849,6 @@ def _open_resume(
 
     The gate the form opens on is strict unless ``rung`` names one, whatever
     the session last ran under (``ResumeForms.open_for``).
-
-    ``listed_cwd`` is the directory New Task's session list gives for the
-    session, when the form is opened from a row of it. Read only where the
-    record has none: a card with no recorded directory holds its resume, and
-    the CLI's own listing is the one place that may still say where it ran.
     """
     session_id = rec.node_id[0]
     recalled = rec.recalled
@@ -2847,7 +2868,7 @@ def _open_resume(
         last = state.last_sent.get(session_id)
     state.resume.open_for(
         session_id=session_id,
-        cwd=rec.cwd or listed_cwd or "",
+        cwd=rec.cwd or "",
         task=rec.task,
         task_is_label=rec.titled_by_label,
         template=template,
@@ -2861,115 +2882,29 @@ def _open_resume(
     )
 
 
-def _offer_message(state: AppState, session_id: str, offered: str) -> None:
+def _launcher_pressed(state: AppState, spec: LaunchSpec, draft: launcher.Draft) -> None:
     """
-    Put what was typed in New Task's task box into a session's resume form as
-    its message, when that form holds nothing the operator typed into it.
+    New Task's launch button: hand its spec to ``_launch`` with the draft a
+    failure is returned to. A new session's spec goes as it is.
 
-    The operator who typed a task and then picked a session meant the text for
-    that session, so it goes with them. **Over a box that holds only its
-    prefill, never over a draft of the form's own**: the prefill is the last
-    thing the session was sent and is still on record, and a draft is text
-    nobody else has. New Task's own box is not touched, so the text is there
-    for a new session if the pick turns out not to be what they wanted.
+    **A resume's is given the title its card has.** New Task builds a resume
+    from a row of the CLI's listing, so its spec is titled by the CLI's label
+    for the conversation (``LauncherState.resumed``). The announce replaces the
+    session's record with one carrying the spec's title, so for a session the
+    store has a record of -- on the fleet, live or closed, or removed from it
+    in this window -- the label would rename the card. The record's own task
+    goes instead, with the record's word on whether it is one. A session the
+    store has no record of keeps the label here, and ``_launch`` asks its file.
+
+    The message, the directory, the gate and everything chosen in New Task are
+    the spec's and are not touched: both surfaces that resume build their spec
+    through ``launcher.resume_spec``, and this is the same ``_launch``.
     """
-    form = state.resume.forms.get(session_id)
-    if form is None or form.touched or not offered.strip():
-        return
-    form.message = offered
-
-
-def _open_resume_from_file(state: AppState, pick: _PickRead) -> None:
-    """
-    Open the resume form for a session known only to New Task's session list:
-    one removed from the fleet in an earlier run, or one this application never
-    ran.
-
-    **The row says where it runs and the file says the rest.** The row is what
-    the operator clicked, and one id can be listed under two directories, so
-    the directory is the row's and the file's is used only where the row
-    carries none. A session with no file, or one this build cannot read, has
-    no known team, gate, model or task: each is given as not known, and the
-    form offers the team as a choice and says why. With no task on file the
-    title is the row's label -- the CLI's summary of the conversation, which is
-    what a card recalled for the session would read -- and it is passed as a
-    label and never as the task.
-    """
-    row = pick.row
-    held = pick.found if isinstance(pick.found, sessionfile.SessionFile) else None
-    if isinstance(pick.found, sessionfile.Unreadable):
-        LOG.error(
-            "fleet",
-            f"session file of {row.session_id} could not be read ({pick.found.reason}); "
-            "its resume form shows what the transcript listing knows",
-        )
-    recorded = "" if held is None else held.task.strip()
-    state.resume.open_for(
-        session_id=row.session_id,
-        cwd=row.cwd or ("" if held is None else held.cwd),
-        task=recorded or row.label,
-        task_is_label=not recorded,
-        template=(None if held is None else held.template) or resume_form.UnknownTeam(),
-        policy=sessionfile.UnknownPolicy() if held is None else held.policy,
-        contained=held is not None and held.contained,
-        model="" if held is None else held.model,
-        subagent_cap=None if held is None else held.subagent_cap,
-        brief=None if held is None else held.brief,
-        last_message=None if held is None else held.last_message,
-    )
-
-
-def _open_picked(state: AppState, pick: _PickRead) -> None:
-    """
-    Open the resume form for a picked row, through the card menu's own opener
-    when the store has a record of the session and from its file otherwise.
-
-    Asked of the store here and not only at the click: the recall of the closed
-    fleet lands on its own worker, and a record that arrived while the file was
-    being read is the fuller account.
-    """
-    rec = state.store.snapshot().get((pick.row.session_id, None))
-    if rec is not None:
-        _open_resume(state, rec, listed_cwd=pick.row.cwd)
-    else:
-        _open_resume_from_file(state, pick)
-    _offer_message(state, pick.row.session_id, pick.offered)
-
-
-def _pick_resume(state: AppState, row: SessionRow) -> None:
-    """
-    A row was clicked in New Task's session list: open the resume form for it.
-    Nothing is started; the form's own button is the step that resumes.
-
-    A session the store has a record of -- one on the fleet, live or closed, or
-    one removed from it in this window -- opens at once, from the record. Any
-    other is known only by its transcript, and what pptmstr recorded about it
-    is in its session file: that is read on a worker, as the session list
-    itself is scanned, and the form opens on the frame the read is taken
-    (``_take_resume_picks``).
-    """
-    offered = state.launcher.task
-    rec = state.store.snapshot().get((row.session_id, None))
-    if rec is not None:
-        _open_resume(state, rec, listed_cwd=row.cwd)
-        _offer_message(state, row.session_id, offered)
-        return
-    picks = state.resume_picks
-
-    def read() -> None:
-        picks.put(_PickRead(row, sessionfile.read(row.session_id), offered))
-
-    threading.Thread(target=read, name="pptmstr-pick-read", daemon=True).start()
-
-
-def _take_resume_picks(state: AppState) -> None:
-    """Open the form for each picked row whose session file has been read."""
-    while True:
-        try:
-            pick = state.resume_picks.get_nowait()
-        except queue.Empty:
-            return
-        _open_picked(state, pick)
+    if spec.resume is not None:
+        rec = state.store.snapshot().get((spec.resume, None))
+        if rec is not None:
+            spec = dataclasses.replace(spec, task=rec.task, task_is_label=rec.titled_by_label)
+    _launch(state, spec, draft)
 
 
 def _resume_pressed(state: AppState, pressed: resume_form.Launch) -> None:
@@ -3190,8 +3125,10 @@ def _menus(state: AppState) -> None:
         imgui.separator()
         # Here and not under "Text" or hello_imgui's own View: it is a choice
         # about what the fleet pane lists, and this is the menu about sessions.
+        # Worded as what ticking it does: ended sub-agents are hidden unless this is
+        # ticked, and it is the only control anywhere that shows them.
         clicked, _ = imgui.menu_item(
-            "Hide ended sub-agents", "", state.settings.hide_ended_subagents
+            "Show ended sub-agents", "", not state.settings.hide_ended_subagents
         )
         if clicked:
             _switch_hide_ended(state, not state.settings.hide_ended_subagents)
@@ -3240,8 +3177,8 @@ def _switch_wrap(state: AppState, wrap: bool) -> None:
 
 def _switch_hide_ended(state: AppState, hide: bool) -> None:
     """
-    Fold ended sub-agents into a count on their lead's card, or list them all,
-    persisting immediately as ``_switch_wrap`` does. What is folded is the fleet
+    Hide ended sub-agents from the fleet pane, or draw them all, persisting
+    immediately as ``_switch_wrap`` does. Which ones are hidden is the fleet
     pane's to decide (``ui/fleet_view``); nothing leaves the store.
     """
     state.settings = state.settings.merged(hide_ended_subagents=hide)
@@ -3655,8 +3592,7 @@ def _draw_overlays(state: AppState) -> None:
         running=pool.running_count,
         queued=pool.queued_count,
         cap=pool.cap,
-        launch=lambda spec, draft: _launch(state, spec, draft),
-        on_pick_resume=lambda row: _pick_resume(state, row),
+        launch=lambda spec, draft: _launcher_pressed(state, spec, draft),
         wrap=state.settings.wrap_inputs,
         # The setting in force, which the modal both states and offers to override for
         # one launch. Without it the cap section has no number to name and the override
@@ -3665,20 +3601,24 @@ def _draw_overlays(state: AppState) -> None:
         # screen at all.
         subagent_cap=state.settings.subagent_cap,
         models=state.catalog.models,
-        live=_live_sessions(state.frame_snap) if state.launcher.is_open else frozenset(),
+        # With the picked session's own run counted, so a pick that would end a
+        # process the snapshot no longer calls live says so as the form does.
+        live=(
+            _resume_ends(state, state.launcher.picker.selected)
+            if state.launcher.is_open
+            else frozenset()
+        ),
     )
-    # Between the two, so a row picked in the launcher on this frame has its form
-    # asked for on this frame whenever no file had to be read for it.
-    _take_resume_picks(state)
     # Beside the launcher and under its rules: root level, and a press here
-    # reaches ``_launch`` as a press there does.
+    # reaches ``_launch`` as a press there does. Asked for by a card and by
+    # nothing drawn above (``_open_resume``).
     resume_form.draw(
         state.resume,
         launch=lambda pressed: _resume_pressed(state, pressed),
         wrap=state.settings.wrap_inputs,
         subagent_cap=state.settings.subagent_cap,
         models=state.catalog.models,
-        live=_resume_ends(state) if state.resume.is_open else frozenset(),
+        live=_resume_ends(state, state.resume.showing) if state.resume.is_open else frozenset(),
     )
 
 
@@ -3997,9 +3937,11 @@ def _record_unconfirmed(state: AppState, unconfirmed: Iterable[commandrun.Unconf
 def _look(command: Command, root: Path | None) -> commandrun.Looked | None:
     """
     What is alive on this machine, now, of a run nobody recorded the end of.
-    None when there is nothing to look for: the command is not such a run, no
-    ``started.json`` names its process, or a ``gone.json`` says an earlier look
-    saw that process gone. **Reads the disk and ``/proc``.**
+    None when there is nothing to look for: the command is not such a run --
+    one the operator released (``released.json``) is not, since that is read
+    into its outcome -- no ``started.json`` names its process, or a
+    ``gone.json`` says an earlier look saw that process gone. **Reads the disk
+    and ``/proc``.**
 
     A process seen gone is not looked for again. Its pid is handed out to
     something else in time, and a record asked about at every start would in
@@ -4022,13 +3964,14 @@ def _as_found(command: Command, found: commandrun.Looked, root: Path | None) -> 
     it. **Writes ``gone.json``** for a process seen gone.
 
     A file never says a process is alive (``commandfile.read_command``); this
-    is where the machine's answer is put on the record. Found, with its shell,
-    the command is one left running unsupervised: still ended, never runnable,
-    and owed a row that says how to end it. Processes found without the shell
-    are not known to be the command's: the record says what was found
-    (``End.unconfirmed``) and names no survivor, so no row offers to kill
-    them. Gone, and not looked for, both leave it a plain ``EndUnknown``,
-    which claims nothing about what is alive.
+    is where the machine's answer is put on the record. Found -- with its
+    shell, or by the tag its processes carry -- the command is one left
+    running unsupervised: still ended, never runnable, and owed a row that
+    says how to end it. Processes found in its session number with no shell
+    and no tag are not known to be the command's: the record says what was
+    found (``End.unconfirmed``) and names no survivor, so no row offers to
+    kill them. Gone, and not looked for, both leave it a plain
+    ``EndUnknown``, which claims nothing about what is alive.
     """
     end = command.end
     assert end is not None
@@ -4061,10 +4004,10 @@ def _as_found(command: Command, found: commandrun.Looked, root: Path | None) -> 
 
 
 STILL_THERE = "looked again: it is still there"
-GONE = (
-    "looked again: nothing is alive in its shell's session, and how it ended is not known."
-    " A process that left that session with setsid is not something pptmstr can find"
-)
+GONE = "looked again: it was not found, and how it ended is not known: "
+# After a ``Gone`` of a record with no tag, which is found by its session alone.
+GONE_UNTAGGED = ". A process that left that session with setsid is not something pptmstr can find"
+
 UNIDENTIFIED = (
     "looked again: its shell is gone and what is in its session cannot be said to be this"
     " command, so there is no kill line; its record says what was found"
@@ -4082,8 +4025,9 @@ def _check_survivor(state: AppState, command_id: CommandId) -> None:
     Found, the record is brought up to date. Gone, the command becomes a plain
     ``EndUnknown``: its row leaves the queue and its session may be given
     another command, and ``gone.json`` is written so that it is not looked for
-    again. Found without its shell, it becomes an ``EndUnknown`` whose record
-    says what is there and offers nothing to kill it with. **Not looked for --
+    again. Found without its shell and without a process that carries its tag,
+    it becomes an ``EndUnknown`` whose record says what is there and offers
+    nothing to kill it with. **Not looked for --
     ``/proc`` could not be read -- nothing is put on the queue**: the row and
     the hold on its session stay as they were, and the line under the row says
     why. A look that fails is not a look that found nothing.
@@ -4108,12 +4052,76 @@ def _check_survivor(state: AppState, command_id: CommandId) -> None:
             now = _as_found(plain, found, root)
             assert now.end is not None
             state.bridge.emit(CommandEnded(command_id, now.end))
-            said = {Survivor: STILL_THERE, commandrun.Gone: GONE}.get(type(found), UNIDENTIFIED)
-            state.command_checks.put((command_id, said))
+            state.command_checks.put((command_id, _looked_again(found)))
         except Exception as exc:  # noqa: BLE001 - a look that failed is said, not raised
             state.command_checks.put((command_id, f"{NOT_LOOKED}{type(exc).__name__}: {exc}"))
 
     threading.Thread(target=look, name=f"command-check-{command_id}", daemon=True).start()
+
+
+def _release_survivor(state: AppState, command_id: CommandId) -> None:
+    """
+    The row's second press of 'release' on a command left running
+    unsupervised: the operator lets go of the session it holds, and leaves
+    what is running to run. **Nothing is signalled**, and nothing is looked
+    for again.
+
+    What is recorded is what the operator was shown: the count of the last
+    look (``Released.alive``) and, in ``released.json``, the line that finds
+    those processes. Not a fresh look -- a look now could find something
+    other than what the operator decided on. The file is written before the
+    store is told, off this thread, and a file that could not be written is
+    logged and released all the same: the session is let go of in this
+    window, and the next start raises the row again.
+    """
+    snap = state.frame_snap
+    held = None if snap is None else snap.commands.get(command_id)
+    left = None if held is None else held.unsupervised
+    if held is None or left is None or held.end is None:
+        return
+    released = Released(at=time.time(), alive=left.alive)
+    end = dataclasses.replace(held.end, outcome=EndUnknown(released=released))
+    look = commandrun.look_line(left)
+    files = state.command_files
+    session_id = held.session_id
+
+    def record() -> None:
+        try:
+            if files is not None:
+                written = commandfile.write_released(
+                    session_id, command_id, released, look, files.root
+                )
+                if isinstance(written, commandfile.Unwritten):
+                    LOG.error(
+                        "command",
+                        f"{command_id}: its release was not recorded, so the next start shows"
+                        f" it again: {written.reason}",
+                    )
+            LOG.warn(
+                "command",
+                f"{session_id}: {command_id} released by the operator with {left.alive}"
+                f" process(es) still running, not signalled and no longer watched: {look}",
+            )
+        finally:
+            state.bridge.emit(CommandEnded(command_id, end))
+
+    threading.Thread(target=record, name=f"command-release-{command_id}", daemon=True).start()
+
+
+def _looked_again(found: Survivor | commandrun.Gone | commandrun.Unidentified) -> str:
+    """
+    What the line under a row says a second look found.
+    """
+    match found:
+        case Survivor():
+            return STILL_THERE
+        case commandrun.Gone(why=why):
+            tagged = why.endswith(commandrun.NONE_TAGGED) or why == commandrun.ANOTHER_BOOT
+            return GONE + why + ("" if tagged else GONE_UNTAGGED)
+        case commandrun.Unidentified():
+            return UNIDENTIFIED
+        case _:
+            assert_never(found)
 
 
 def _read_survivor_checks(state: AppState) -> None:
@@ -4133,11 +4141,17 @@ def _log_look(session_id: str, command_id: CommandId, found: commandrun.Looked) 
     """
     match found:
         case Survivor():
+            outside = f", and {len(found.escaped)} outside it" if found.escaped else ""
+            what = (
+                f"its shell's session {found.pid}, {found.members} process(es){outside}"
+                if found.shell
+                else f"its shell (pid {found.pid}) is gone and {found.alive} process(es)"
+                f" started with its {COMMAND_TAG} are alive"
+            )
             LOG.error(
                 "command",
                 f"{session_id}: {command_id} is STILL RUNNING with nothing holding it:"
-                f" its shell's session {found.pid}, {found.members} process(es)."
-                f" To end it: {commandrun.kill_line(found)}",
+                f" {what}. To end it: {commandrun.kill_line(found)}",
             )
         case commandrun.Unidentified():
             LOG.error(

@@ -381,6 +381,24 @@ def test_a_rung_the_directory_is_refused_for_holds_and_says_why(own: str) -> Non
     assert "autonomous" in outcome.reason
 
 
+def test_the_refusal_behind_the_mark_says_the_resume_is_held_and_not_downgraded(
+    own: str,
+) -> None:
+    """
+    A resume the rung is refused for is held (``launcher.resume_gate_hold``), so
+    the refusal's sentence about what becomes of it says held; the ordinary gate
+    is what a new session in New Task is given, and is not what happens here.
+    """
+    inside = Path(own) / "pptmstr"
+    reading = resume_form.read(
+        _open(ResumeForms(), inside, as_policy=Policy.AUTONOMOUS).facts, checkout=own
+    )
+    assert reading.refusal is not None
+    assert launcher.REFUSAL_HOLDS in reading.refusal
+    assert launcher.REFUSAL_DOWNGRADES not in reading.refusal
+    assert reading.refusal.startswith("refused for this session's directory")
+
+
 def test_the_refusal_is_about_the_rung_and_not_the_directory(own: str) -> None:
     """Inside the checkout the ordinary gate still resumes: the way past is the dial."""
     inside = Path(own) / "pptmstr"
@@ -849,12 +867,14 @@ def test_in_dear_imgui_only_a_rung_that_needs_containment_reads_the_cli_version(
     assert frames.launched[0].spec.containment == sandbox.containment_settings()
 
 
-def test_in_dear_imgui_the_buttons_do_not_move_and_the_window_stays_on_screen(
+def test_in_dear_imgui_the_window_grows_with_what_it_holds_and_stays_on_screen(
     frames: _Frames, own: str
 ) -> None:
     """
     Across the states that add the most lines above the buttons: a live session's
-    warning, the top rung, a failure notice.
+    warning, the top rung, a failure notice. The form is as tall as what it holds,
+    so it grows and the buttons go down with it; it stays on the display, with the
+    buttons inside it.
     """
     before = dict(frames.at)
     window = frames.window()
@@ -865,10 +885,12 @@ def test_in_dear_imgui_the_buttons_do_not_move_and_the_window_stays_on_screen(
     form.failed(form.draft(), "a reason long enough to wrap " * 6)
     frames.frame(4)
 
-    assert frames.at["resume"] == before["resume"]
-    assert frames.at["cancel"] == before["cancel"]
-    assert frames.window() == window
-    x, y, width, height = window
+    x, y, width, height = frames.window()
+    assert height > window[3], "it grew"
+    assert frames.at["resume"][1] > before["resume"][1], "and the buttons with it"
+    # Three more lines and a row of buttons, not three paragraphs.
+    assert height - window[3] < 4.0 * 2.0 * real_imgui.get_text_line_height_with_spacing() + 30.0
     assert x >= 0.0 and y >= 0.0
     assert x + width <= 1280.0 and y + height <= 900.0
     assert frames.at["resume"][1] < y + height
+    assert frames.at["cancel"][1] == frames.at["resume"][1]

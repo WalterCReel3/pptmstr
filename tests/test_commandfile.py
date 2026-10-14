@@ -34,6 +34,7 @@ from pptmstr.command import (
     NotStarted,
     Outcome,
     Refused,
+    Released,
     Run,
     Started,
     TimedOut,
@@ -735,7 +736,7 @@ def test_a_required_key_missing_or_mistyped_makes_that_file_unreadable(tmp_path:
     serial = itertools.count(1)
     checked = 0
     for name, keys in _REQUIRED.items():
-        optional = {"format", "stop_asked_at", "leftover", "unconfirmed"}
+        optional = {"format", "stop_asked_at", "leftover", "unconfirmed", "escaped", "unreadable"}
         assert set(originals[name]) - optional == set(keys), "the table is the file's keys"
         for key in keys:
             good_type = type(originals[name][key])
@@ -1156,3 +1157,159 @@ def test_a_gone_record_that_cannot_be_read_stops_nothing(tmp_path: Path, spoiled
     (_dir(tmp_path) / "gone.json").write_text(spoiled % CID if "%s" in spoiled else spoiled)
     assert cf.read_gone(SID, CID, tmp_path) is None
     assert cf.read_gone("no-such-session", CID, tmp_path) is None
+
+
+def test_a_release_is_recorded_once_beside_a_started_run_and_read_into_its_outcome(
+    tmp_path: Path,
+) -> None:
+    """
+    ``released.json`` is what keeps a released session released across a
+    restart: read back, the command's outcome says the operator released it
+    and with how many found, and it is no longer one to look for.
+    """
+    running = dataclasses.replace(ASKED, run=RUN)
+    released = Released(at=1600.0, alive=3)
+    look = "ps -o pid,pgid,lstart,args -s 4242"
+    _written(cf.write_request(ASKED, tmp_path))
+    _written(cf.write_run(running, tmp_path))
+    refused = cf.write_released(SID, CID, released, look, tmp_path)
+    assert isinstance(refused, Unwritten) and "started.json" in refused.reason
+    assert cf.read_released(SID, CID, tmp_path) is None
+    _written(cf.write_started(SID, CID, STARTED, tmp_path))
+
+    assert cf.write_released(SID, CID, released, look, tmp_path) == Written(
+        _dir(tmp_path) / cf.RELEASED_NAME
+    )
+    again = cf.write_released(SID, CID, Released(at=1.0, alive=1), "x", tmp_path)
+    assert again == Unwritten(cf.ALREADY_RECORDED)
+    assert cf.read_released(SID, CID, tmp_path) == released
+    obj = json.loads((_dir(tmp_path) / cf.RELEASED_NAME).read_text())
+    assert obj == {"format": cf.FORMAT, "id": CID, "at": 1600.0, "alive": 3, "look": look}
+
+    read = cf.read_command(SID, CID, tmp_path)
+    assert read == dataclasses.replace(
+        running, end=End(EndUnknown(released=released), at=RUN.started_at)
+    )
+    (restored,) = cf.restore(SID, tmp_path).commands
+    assert restored == read
+
+
+def test_a_release_is_not_recorded_beside_an_end(tmp_path: Path) -> None:
+    """With ``end.json`` the command's end is recorded: nothing of it was left to release."""
+    ended = dataclasses.replace(ASKED, run=RUN, end=End(Exited(0), at=1610.0))
+    _record_all(ended, tmp_path)
+    _written(cf.write_started(SID, CID, STARTED, tmp_path))
+    said = cf.write_released(SID, CID, Released(at=1.0, alive=1), "x", tmp_path)
+    assert isinstance(said, Unwritten) and "end.json" in said.reason
+    assert not (_dir(tmp_path) / cf.RELEASED_NAME).exists()
+
+
+@pytest.mark.parametrize(
+    "spoiled",
+    [
+        "{ not json",
+        '{"format": 1, "id": "cmd-20261013T101500Z-0000000000ff", "at": 1.0, "alive": 1}',
+        '{"format": 1, "id": "%s", "at": 1.0, "alive": 0}',
+        '{"format": 1, "id": "%s", "at": 1.0, "alive": true}',
+        '{"format": 1, "id": "%s", "alive": 2}',
+    ],
+)
+def test_a_release_record_that_cannot_be_read_is_read_as_absent(
+    tmp_path: Path, spoiled: str
+) -> None:
+    """
+    And the command reads as a plain run with no end, which is then looked
+    for: the answer that cannot hide a process that is alive.
+    """
+    running = dataclasses.replace(ASKED, run=RUN)
+    _written(cf.write_request(ASKED, tmp_path))
+    _written(cf.write_run(running, tmp_path))
+    (_dir(tmp_path) / cf.RELEASED_NAME).write_text(spoiled % CID if "%s" in spoiled else spoiled)
+    assert cf.read_released(SID, CID, tmp_path) is None
+    assert cf.read_command(SID, CID, tmp_path) == dataclasses.replace(
+        running, end=End(EndUnknown(), at=RUN.started_at)
+    )
+    assert cf.read_released("no-such-session", CID, tmp_path) is None
+
+
+# -- the tag a command's processes carry, and what was seen outside its session ----
+
+
+def test_the_tag_and_what_left_the_session_round_trip(tmp_path: Path) -> None:
+    running = dataclasses.replace(ASKED, run=RUN)
+    _record_all(running, tmp_path)
+    tagged = dataclasses.replace(STARTED, tag="0f" * 32, cgroup="0::/user.slice/a.scope")
+    _written(cf.write_started(SID, CID, tagged, tmp_path))
+    held = json.loads((_dir(tmp_path) / cf.STARTED_NAME).read_text())
+    assert (held["tag"], held["cgroup"]) == (tagged.tag, tagged.cgroup)
+    assert cf.read_started(SID, CID, tmp_path) == tagged
+
+    beside = End(Exited(0), at=1020.0, duration_s=1.0, escaped=(), unreadable=(4401, 4402))
+    root = tmp_path / "beside"
+    _record_all(dataclasses.replace(running, end=beside), root)
+    assert json.loads((_dir(root) / cf.END_NAME).read_text())["unreadable"] == [4401, 4402]
+    assert _command(cf.read_command(SID, CID, root)).end == beside
+
+    for escaped in ((), (4301, 4302), None):
+        root = tmp_path / f"end-{escaped}"
+        end = End(Exited(0), at=1020.0, duration_s=1.0, escaped=escaped)
+        command = dataclasses.replace(running, end=end)
+        _record_all(command, root)
+        held = json.loads((_dir(root) / cf.END_NAME).read_text())["escaped"]
+        assert held == (None if escaped is None else list(escaped))
+        assert _command(cf.read_command(SID, CID, root)).end == end
+
+
+def test_records_written_before_there_was_a_tag_read_as_having_none(tmp_path: Path) -> None:
+    """
+    A command started by a build that set no tag has processes that carry
+    none. Read as tagged, every one of them would be "not this command's".
+    """
+    running = dataclasses.replace(ASKED, run=RUN)
+    _record_all(running, tmp_path)
+    _written(cf.write_started(SID, CID, STARTED, tmp_path))
+    path = _dir(tmp_path) / cf.STARTED_NAME
+    obj = json.loads(path.read_text())
+    assert obj.pop("tag") is None
+    path.unlink()
+    _put(path, obj)
+    assert cf.read_started(SID, CID, tmp_path) == STARTED and STARTED.tag is None
+    # A tag that is not text makes the file one this build cannot read.
+    for wrong in (7, ["0f" * 32]):
+        path.unlink()
+        _put(path, {**obj, "tag": wrong})
+        assert cf.read_started(SID, CID, tmp_path) is None, wrong
+    # Text that is not a digest is no tag, and the rest of the record stands:
+    # the entry a build before this one wrote there is known to whoever can
+    # list the directory, so a process that carries it is not known to be the
+    # command's. The command is then found by its shell's session, as one
+    # with no tag is, and not lost by its record being thrown away.
+    for wrong in ("", f"PPTMSTR_COMMAND={CID}", "0f" * 31, "0F" * 32, "0f" * 32 + "\n"):
+        path.unlink()
+        _put(path, {**obj, "tag": wrong})
+        assert cf.read_started(SID, CID, tmp_path) == STARTED, wrong
+    # Nor is a group this build would not have written one to tie anything by.
+    for wrong_group in ("", "x" * 4097):
+        path.unlink()
+        _put(path, {**obj, "tag": "0f" * 32, "cgroup": wrong_group})
+        assert cf.read_started(SID, CID, tmp_path) == dataclasses.replace(STARTED, tag="0f" * 32)
+    path.unlink()
+    _put(path, {**obj, "tag": "0f" * 32})
+    assert cf.read_started(SID, CID, tmp_path) == dataclasses.replace(STARTED, tag="0f" * 32)
+
+    root = tmp_path / "end"
+    command = dataclasses.replace(
+        running, end=End(Exited(0), at=1020.0, duration_s=1.0, escaped=(4301,))
+    )
+    _record_all(command, root)
+    path = _dir(root) / cf.END_NAME
+    obj = json.loads(path.read_text())
+    assert obj.pop("escaped") == [4301]
+    path.unlink()
+    _put(path, obj)
+    read = _command(cf.read_command(SID, CID, root))
+    assert read.end is not None and read.end.escaped is None
+    for wrong in (3, "4301", [4301, "x"], [True], [1], {"pid": 4301}):
+        path.unlink()
+        _put(path, {**obj, "escaped": wrong})
+        assert isinstance(cf.read_command(SID, CID, root), Unreadable), wrong

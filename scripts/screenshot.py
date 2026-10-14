@@ -472,6 +472,16 @@ def _open_launcher(state: Any) -> Steps:
     yield from _frames()
 
 
+def _launcher_body() -> Any:
+    """
+    The scrolling child New Task's fields are drawn in. The session list's header
+    is an item of it, and it is what scrolls: the modal itself does not.
+    """
+    from pptmstr.ui import launcher
+
+    return _window(f"{launcher.TITLE}/{launcher.BODY_ID}")
+
+
 def _close_launcher(state: Any) -> Steps:
     from imgui_bundle import imgui
 
@@ -482,11 +492,9 @@ def _close_launcher(state: Any) -> Steps:
 
 def _resume(state: Any, fixtures: Path) -> Steps:
     """
-    The resume section: the list, and the line under the header for each kind of
-    picked row.
+    The resume section: the list, and what New Task says under the header for each
+    kind of picked row, with the message for the session in the task box.
     """
-    from imgui_bundle import imgui
-
     from pptmstr.ui import launcher
 
     layouts = _layouts(fixtures)
@@ -500,11 +508,12 @@ def _resume(state: Any, fixtures: Path) -> Steps:
     )
     draft = state.launcher
     draft.cwd = layouts["repo-root"]
+    draft.task = "Carry on from the checksum: the fixed-width fields are next."
     yield from _open_launcher(state)
     yield from _until("the session scan", lambda: bool(draft.picker.rows))
     yield "01-launcher-as-opened"
 
-    modal = imgui.internal.find_window_by_name(launcher.TITLE)
+    modal = _launcher_body()
     _set_open(modal, launcher._RESUME_ID, True)
     yield from _frames()
     yield "02-resume-list-nothing-picked"
@@ -543,17 +552,14 @@ def _containment(state: Any, fixtures: Path) -> Steps:
     modal that was opened on the ordinary rung first -- which is the order an
     operator meets it in, since a launch puts the dial back.
     """
-    from imgui_bundle import imgui
-
     from pptmstr.approval import Policy
-    from pptmstr.ui import launcher
 
     layouts = _layouts(fixtures)
     draft = state.launcher
     draft.task = _TWO_LINE_TASK
     draft.cwd = layouts["no-git"]
     yield from _open_launcher(state)
-    modal = imgui.internal.find_window_by_name(launcher.TITLE)
+    modal = _launcher_body()
     yield "10-gate-strict-before-the-dial-is-turned"
     draft.policy = Policy.AUTONOMOUS
     yield from _frames(3)

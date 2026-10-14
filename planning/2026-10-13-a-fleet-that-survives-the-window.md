@@ -146,3 +146,55 @@ concerns are fine. Especially closing the failed card. That was an annoyance bug
 ## Not decided
 
 **(O)** Whether the existing `sessions.json` (bookmark, title) folds into `session.json`.
+
+## Corrected after the operator used the build
+
+**D9.** Three things were built differently from what was said, and the operator called each
+out on 2026-10-13. The plan relayed to the builders carried the lead's and the planner's
+elaborations as though they were the request, and nobody building could see anything drawn.
+
+- **Hiding sub-agents.** Said (D1): "a need to 'hide' inactive subagents as well (a settings
+  config)". Built: a count on the lead's card that opens a fold. The operator: "ignored an even
+  more straightforward request to completely hide them, full stop, with a global toggle setting
+  to display them." So: with the setting on, a hidden sub-agent draws nothing and nothing counts
+  it; the setting is the only way to see them. Which sub-agents are exempt (D6) stands.
+  Two things the builder settled, the session being unattended. **The collapsed marker counts
+  only what would be drawn** (`N subs` was every sub-agent, which is a count of the hidden
+  ones), so a session whose sub-agents are all hidden has no marker and nothing to open; the
+  operator's open/closed choice is kept, and the group is open again when one is woken. This
+  departs from "the collapsed marker still counts every sub-agent" in the plan. **The cursor
+  keeps nothing drawn.** It can be on a sub-agent that then becomes hidden (the operator
+  clicked its card and it ended, or answered the last thing it owed); the cursor is not moved
+  and the lead's card lights for it, as it does for every member of a collapsed group. The
+  other panes still show that sub-agent, which is where the operator left the cursor.
+- **The resume form.** Said (D6): resume from a closed card. Built: the launcher also hands a
+  resume picked in its own list to the short form. The operator: "That is incorrect. That
+  should have only been for an inactive card." So: the short form opens from a closed card
+  and nowhere else; a resume picked in the launcher is finished in the launcher.
+- **Air.** Said (the dogfooding record's D2): "Some margin or 'air' for the dialogs." Built:
+  edge padding on the resume form alone. The operator: "a lot of margin _around the edges_ but
+  the UI elements were still crowded ... and it wasn't applied to _both_ launchers". So: one
+  dialog style, used by both, that spaces the controls from each other.
+
+**D10 (2026-10-14).** On the dialogs and the card's menu, after looking at them:
+
+- "Why are the stylings of the launchers so incredibly different? ... there's suddenly a dark
+  gray in the 'Resume session' dialog. I think that color has a potential function to
+  distinguish text entry fields from the rest of the dialog but its application feels
+  incomplete." Cause (read): the resume form's body is a child window and shows the docks'
+  panel colour; popups and input frames share the other. So: one dialog surface, entry fields
+  as wells in a second colour, both from `widgets.dialog_style()`.
+- "there are so many overwhelmingly verbose disclaimers all over the launchers. If we have
+  notices then we may simply have a question mark that expands a modal explanation. But even
+  putting that verbosity in the right-click context of the fleet card is an, interesting
+  decision." So: no paragraph of explanation in a launcher unless a `?` was pressed for it; at
+  most one short line under a control.
+- Whether the autonomous warning stays visible: "_That_ one should be a bit loud, yes."
+- Whether the card's menu gets a `?`: "No `?` at all. That is more of user-guide / help
+  document issue in the future." So the menu is labels, a few words on a greyed item saying
+  why, and the confirmations that already exist; its explanations are not drawn anywhere yet.
+
+Screenshots work in a contained session through `scripts/with_display.sh` (an Xvfb over TCP in
+a user namespace, the recipe `../imgui-adv-text` documents). The lead's "no display" finding
+had tried only the unix-socket form; every "not seen drawn" in these records dates from before
+this.

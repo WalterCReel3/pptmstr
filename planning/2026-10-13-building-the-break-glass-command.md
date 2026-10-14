@@ -269,3 +269,27 @@ before it was fixed. `make check` by the lead on the still tree afterwards: **91
 
 Not covered: a click in flight when rows shift opens whichever row is now under it (it opens,
 it does not run); these two fix rounds are again read by nobody but their builders.
+
+## A hold the operator can end (2026-10-13)
+
+A reviewer found, and a builder confirmed, that a command found alive at restart held its
+session with no way out but its processes going away; a command meant to leave a server
+running held its session for good. **Every hold a command puts on a session now has an
+operator action that ends it:** *release session* on the survivor row, two presses (the
+run's pattern: arm, confirm, mouse release only, `ARM_DELAY_S`), which signals nothing.
+
+- **Representation:** `EndUnknown(released=Released(at, alive))` in place of the survivor,
+  through the existing `CommandEnded` arm that already lets a look replace a survivor's end.
+  No new Outcome and no new Intent. The reducer refuses a release for a command that is not
+  unsupervised. Rejected: a new `CommandReleased` intent (two more exhaustive arms in
+  `boardfacts`/`fleetsync` for a fact that is an end), and keeping the survivor beside a
+  released flag (every `EndUnknown(survivor=left)` match would read it as still holding).
+- **What is recorded is what the operator was shown:** the last look's count, not a fresh
+  look at the press, which could find something other than what was decided on.
+- **On disk:** `released.json` (at, alive, the `ps` line), write-once, refused without
+  `started.json` or beside `end.json`, read into the outcome at restore, so it is not
+  looked for again and the row does not come back. A file that could not be written is
+  logged and the session is released in this window anyway; the next start shows the row.
+- **The row** says the hold and both ways out in one line (`inbox.WAYS_OUT`); what a release
+  does is behind its question mark. The asker's reply says the operator released its session
+  with N processes still running and that other commands can run again.

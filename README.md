@@ -108,7 +108,28 @@ hanging.
 Start a session with `Ctrl+N`, or **Session ▸ New Task…**, from either layout. Each
 carries its own working directory and model, so one window can drive work across
 several projects. `Ctrl+Enter` launches; `Enter` breaks a line in the task box;
-`Esc` dismisses without discarding the draft.
+`Esc` dismisses without discarding the draft. The fields scroll and the **launch** and
+**cancel** buttons stay under them, on screen, however long the body grows.
+
+Under each control is at most one line. The explanations are behind a small **(?)**
+beside the line they explain: it opens a window over the dialog with the whole of
+it, which `Esc` or **close** puts away and leaves the dialog as it was. What is on
+screen without asking is the line under the gate — what the rung adds, or, on
+`autonomous`, a red band saying the session will write files and run commands
+without asking — and a line for each thing that changes what the button does: a
+rung refused for the directory, a held launch and why in a few words, where a
+picked session runs.
+
+**Resume an existing session instead**, under the working directory, lists the
+sessions the CLI recorded for that directory and its git worktrees. Picking one keeps
+New Task open and makes it a resume: the task box is the message the session is sent,
+and the session runs in the directory it was recorded in, which the line under the
+list names when it is not the working directory above. Picking it fills the model,
+team and sub-agent cap from the session's own record where it has one; they stay
+yours to change, and a session with no record leaves them as they were. The gate is
+the one on New Task's dial. A gate the session's directory is refused for holds the resume, where a new session
+would be started under `strict`; *launch fresh instead* undoes the pick. A resume that
+starts nothing comes back to New Task with the message and the pick.
 
 The review loop is keyboard-driven: `j`/`k` to move, `a` approve, `r` reject with a
 reason the agent sees, `e` edit the arguments and approve the corrected call,
@@ -284,9 +305,11 @@ apart, as `N agents · M closed`.
 
 **A card's controls are on the card.** Right-click it, or press `m` with the cursor
 on it (also **Session ▸ Controls for the focused card…**); arrows move, `Enter`
-chooses, `Esc` closes. An item that cannot act is greyed with the reason beside it.
+chooses, `Esc` closes. The menu is labels: an item that cannot act is greyed with a
+few words of why beside it, and nothing is explained under an item.
 
-- **Resume…** opens a short form of its own, not New Task: the session, its directory
+- **Resume…** opens a short form of its own, not New Task, and a card is the only
+  thing that opens it: the session, its directory
   and its team are shown as facts and cannot be changed; you choose the message, the
   gate, the model and the sub-agent cap. The message box opens with the last message
   you sent that session, and a message is required. The gate opens on `strict`
@@ -297,24 +320,25 @@ chooses, `Esc` closes. An item that cannot act is greyed with the reason beside 
   have put it away, with what you typed kept on the session's form. Resuming a
   session that is running here, or one that failed with its process still attached,
   ends that process, and the form says so first.
-- **Gate** lists the rungs. On a running session, narrowing acts at once, and so does
-  widening to a rung that needs no containment. Widening to one that does acts after a
-  confirmation, only where the session was started contained, and never for a session
-  whose directory is inside pptmstr's own checkout. Where it was not started contained
-  the row reads *Continue as …* and opens the resume form after the same confirmation,
-  since containment is fixed when the CLI process starts. On an ended card each row is
-  *Resume as …* and opens the form under that rung. Every change the driver takes is
+- **Gate** lists the rungs by name, the current one marked *(now)* — *(last run)* on
+  an ended card. On a running session, narrowing acts at once. Widening is a row
+  ending in *…* and acts after a confirmation that says in one sentence what it
+  releases; to a rung that needs containment, only where the session was started
+  contained, and never for a session whose directory is inside pptmstr's own
+  checkout. Where it was not started contained the row reads *restart…* and opens the
+  resume form after the same confirmation, since containment is fixed when the CLI
+  process starts. On an ended card each row opens the form under that rung. Every change the driver takes is
   written to `session.json`; a move on a session whose run is over is not, since the
   file's gate is the one it last ran under. HEALTH's *narrow to strict* is the same
-  lever as the menu's row and says the same thing under it: the agent's briefing
-  still describes the rung it started under.
+  lever as the menu's row; a move made on a running session does not reach the
+  agent's briefing, which still describes the rung it started under.
 - **Remove from fleet** is offered on an ended card that owes you nothing and has no
   process attached. The card goes and is not recalled at the next start; the session
   is still in New Task's resume picker, and resuming it puts it back.
 - **A failed card** has **Close** as well. A session that failed is not over until it
   is closed — its next message would revive it — so Remove is refused until then.
   Close ends the process if one is still attached, and otherwise marks the session
-  ended; the line under the item says which. Closing changes how the file describes
+  ended. Closing changes how the file describes
   the end and nothing else: when it failed and what it said are kept, and Details
   shows *closed, after it had failed* with the error.
 - A closed card whose session predates `session.json` is titled from the CLI's own
@@ -327,10 +351,12 @@ chooses, `Esc` closes. An item that cannot act is greyed with the reason beside 
 When a control is refused after you pressed it, a **Not done** notice says why. It
 waits for any form that is up to be put away, and never opens over one.
 
-**Ended sub-agents are folded** into a count on their lead's card (`N ended`, which
-opens) once they owe nothing and hold no task. `Session > Hide ended sub-agents`
-turns that off and on, and it is `"hide_ended_subagents"` in `settings.json`, on by
-default. It changes what the pane lists and nothing else: every agent is still there.
+**Ended sub-agents are hidden** once they owe nothing and hold no task: no card, and
+no count of them anywhere on the fleet pane. `Session > Show ended sub-agents` is the
+one switch that shows them again, for every session at once; unticked, it is
+`"hide_ended_subagents"` in `settings.json`, on by default. It changes what the pane
+lists and nothing else: every agent is still there, and one its lead wakes is drawn
+again.
 
 ### A contained agent can ask you to run a command, and pptmstr runs it as you
 
@@ -428,6 +454,16 @@ your password entry — as `<shell> -l -c '<the string>'`, in the session's dire
   are. The row lists what is removed whatever the directory is; **what is removed
   because of this session's directory is not on the row yet** — it is applied when the
   command runs and written to the LOG when it ends.
+- **One variable is set that you did not set: `PPTMSTR_COMMAND`, to a random value
+  made for that one run.** Everything the command starts inherits it, and it is how
+  pptmstr tells what a command left running once the shell that started it is gone
+  (*The tag*, below). pptmstr shows and records the value nowhere — whoever holds it
+  can start a process that is taken for the command's — and where the command's own
+  output holds it, the log and the tail have
+  `<--------- PPTMSTR_COMMAND value, withheld by pptmstr --------->` in its place.
+  The row lists the variable with the changes above. If pptmstr itself was started
+  with one — from a command of another pptmstr — it is overwritten, and the row says
+  that, without saying what it was.
 - **Your shell profile runs first, in the session's directory**, because the shell is
   a login shell. pptmstr cannot see what it does. A profile hook that reads files from
   the current directory — direnv, mise, a dotenv plugin, a version manager's shims —
@@ -462,9 +498,15 @@ left" always means nothing left in that session**: see `setsid` below.
   (*N leftover processes of its session … were ended with it*). A command that is
   meant to leave something running has to say so in the string you read — `setsid`, or
   `nohup … &` under `setsid`.
-- A process that leaves the session — one that calls `setsid` or daemonises — is not
-  signalled, not counted and not looked for, and outlives the command's end, the
-  timeout, a cancel, and pptmstr.
+- A process that leaves the session — one that calls `setsid` or daemonises — is
+  **never signalled by pptmstr**, and outlives the command's end, the timeout, a
+  cancel, and pptmstr. It is looked for, once, when the command ends, by the tag: the
+  record then says *N processes it started are ALIVE outside its shell's session, and
+  pptmstr did not end them*, with their pids and a `ps` line, and the asker is told the
+  same. The pids are as of that moment and there is no kill line beside them: a
+  number is handed out again once its process has gone. An ended command with such a
+  process owes no row and does not hold its session — leaving a server running this
+  way is what `setsid` in the string is for.
 - Where `/proc` cannot be read — there is none, or the read failed — the session
   cannot be listed: only the shell's own process group is signalled, and the record
   says *NOT CONFIRMED DEAD* with that as the reason, on every command.
@@ -485,24 +527,37 @@ left" always means nothing left in that session**: see `setsid` below.
   crash — leaves the command running with no timeout**, out of the terminal's reach.
   Nothing prevents that. What there is: the shell's pid, which is its session's
   number, is on disk the moment the process exists (`started.json`), and at the next
-  start pptmstr looks for that session. **Found with its shell still there**, it is a
+  start pptmstr looks for that session, and for every process that carries the
+  command's tag. **Found with its shell still there**, it is a
   row in NEEDS YOU that says **STILL RUNNING, UNSUPERVISED**, with the
   `ps -o pid,pgid,lstart,args -s <session>` line that shows every process in the
   session, with the group each is in, and the `kill -- -<group> …` line that
-  signals every process group found in it. pptmstr does not kill it for you: it no
+  signals every process group found in it. **Found with its shell gone**, it is the
+  same row for the processes that carry its tag — in the session number the shell led
+  or anywhere else — and only for those: the `ps` line names them by pid, and the kill
+  line names a process group only where every process in the group carries the tag,
+  and single pids otherwise. pptmstr does not kill it for you: it no
   longer holds the process, and a number read from a file is yours to check. No other
-  command of that session can be run while it is there; *check again* looks once more.
+  command of that session can be run while it is there; *check again* looks once more,
+  and *release session* (two presses) lets go of the session and leaves what runs
+  running: nothing is signalled, the record and `released.json` keep that you released
+  it and how many processes the last look found, it is not looked for again, and its
+  asker is told.
   What a look can answer:
   - *still there* — the row stays, with the lines brought up to date.
-  - *gone* — nothing is alive in the session; the command reads *end unknown*, and
+  - *gone* — nothing is alive in the session and no process that could be read
+    carries the tag; the command reads *end unknown*, and
     `gone.json` is written so that no later start looks for it again. A pid is handed
     out again in time, and a record asked about for ever would in the end be asked
     about some other process.
-  - *cannot be said to be this command* — processes are in a session of that number
-    and the shell is gone. They are what the command left, or another program's that
-    was given the number later; nothing on record tells the two apart. **No row and no
+  - *cannot be said to be this command* — processes are in a session of that number,
+    the shell is gone, and none of them that could be read carries the tag. They are
+    what the command left — started with an emptied environment, or as another user —
+    or another program's that was given the number later. **No row and no
     kill line**: the command reads *end unknown — NOT CONFIRMED DEAD*, with what was
-    found and the `ps` line to look with, and its session is not held.
+    found, how many could not be read, and the `ps` line to look with, and its session
+    is not held. A command started by a build that set no tag is always answered this
+    way once its shell is gone.
   - *could not look* — `/proc` could not be read. The row and the hold on the session
     stay exactly as they were, and the line under the row says why. A look that failed
     is never read as *gone*.
@@ -519,6 +574,59 @@ left" always means nothing left in that session**: see `setsid` below.
   command is shown as *end unknown*, every process group found in its shell's session
   is sent `SIGKILL`, and a notice says so.
 
+**The tag, and what it cannot see.** A process is taken to be a command's by its tag
+when `/proc/<pid>/environ` holds `PPTMSTR_COMMAND` with the value that command's
+shell was given — `started.json` holds a SHA-256 of the value, never the value, and
+what is read is digested and compared — and the
+process started in the same boot as the command's shell and no earlier than it.
+pptmstr prints a kill line, and counts a process as a command's, only for what it has
+identified that way or by the session of a shell that is still there. What it could
+not read it calls unread — never gone, and never somebody else's. It sends no signal
+to anything it knows only by the tag.
+
+- **`env -i` and `sudo` strip it.** A process started with an emptied environment —
+  `sudo` resets it by default — does not carry the tag and is not found by it. In the
+  session of a shell that is still there it is found all the same; past that it is
+  one of the processes pptmstr *cannot say is this command*.
+- **An environment that cannot be read is unread, not absent.** `environ` is readable
+  by the process's own user. A child running as another user (`sudo`, a setuid
+  program), and one that has made itself unreadable (`ssh-agent` does), is counted as
+  *could not be read* when it is in the session number the shell led. Outside it,
+  it is counted only while it is still in the control group the shell was started in
+  — `setsid`, `sudo` and going undumpable do not take it out of that — and then as
+  *could not be read, may be its*, with a `ps` line and no kill line; such a command
+  is never read as *gone* while one is there. That is a tie and not an
+  identification: anything else unreadable started from the same terminal in that
+  time is counted too. One moved to another control group (`systemd-run`, a new login
+  session) is not seen at all, and *gone* says so. So is one whose environment is empty
+  (`env -i`): a process also reads as empty for an instant while it execs, so empty
+  is read twice and then taken as unread, never as "not this command's".
+- **`environ` is what the process was started with.** A process can overwrite that
+  block in its own memory, and a program that removes the variable before starting
+  children hides them.
+- **Linux only.** Elsewhere there is no `/proc/<pid>/environ` and nothing is looked
+  for.
+- **Whoever holds the value can set it.** The value is random and is in no record,
+  so a contained agent that lists another session's command directories — or its own
+  — finds nothing to start a process with: the command's id, and the digest in
+  `started.json`, are not the tag. What is left:
+  - A command that prints its tag in another form (`env | base64`) puts it in its own
+    output, which its asker reads. The asker can then start a process that is counted
+    as *that* command's — its own — and no other's.
+  - A command you approve runs as you, outside the sandbox, and can read another
+    running command's environment in `/proc`. That is in the text you approve.
+  - A pptmstr that is itself running inside a command has that command's value in its
+    own environment, and so do the sessions it starts.
+  - A contained agent can make a process of its own unreadable. Started while another
+    session's command runs, it is counted beside that command as *could not be read,
+    may be its* — never as the command's, so no row, no hold and no kill line come of
+    it.
+- **A contained session's sandboxed commands cannot read the records at all**:
+  `~/.config/pptmstr/sessions` is denied to them whole, the session's own directory
+  included, so the output log path `read_commands` names is one a sandboxed `cat`
+  cannot open. The CLI's own `Read`, `Grep` and `Glob` are not bounded by the sandbox
+  and can still read it.
+
 **Where it is kept.** Each command has a directory,
 `~/.config/pptmstr/sessions/<session id>/commands/<command id>/`:
 
@@ -526,7 +634,7 @@ left" always means nothing left in that session**: see `setsid` below.
 |---|---|
 | `request.json` | what was asked, by whom, and when |
 | `run.json` | what you approved: the string, the shell, the directory, the timeout |
-| `started.json` | the process that came of it: pid (its session's number and its group's), and what tells it from a later process with the same pid |
+| `started.json` | the process that came of it: pid (its session's number and its group's), what tells it from a later process with the same pid, a SHA-256 of the tag value its environment was given (never the value), and the control group it was started in |
 | `end.json` | how it ended — exit code, timed out, cancelled, refused, withdrawn, never started — and the end of its output |
 | `unconfirmed.json` | only when pptmstr quit without seeing the command end: why |
 | `gone.json` | only when a later pptmstr looked for the process of a command with no recorded end and saw it gone: when, and what showed it |

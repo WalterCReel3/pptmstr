@@ -138,6 +138,44 @@ def test_every_row_says_what_choosing_it_does_on_one_line(
         assert row.consequence.endswith(".")
 
 
+@pytest.mark.parametrize("case", EVERY_CASE, ids=lambda c: f"{c[0].value}-{c[1]}-{c[2]}")
+def test_a_rows_menu_line_is_its_rung_and_a_suffix_where_it_does_not_switch_at_once(
+    case: tuple[Policy, bool, bool],
+) -> None:
+    """
+    The menu draws ``short`` and nothing else of a row: the rung's name, a word
+    on the rung in force, and a suffix on a row that does something other than
+    switch at once -- a question first, or the resume form, or a restart.
+    """
+    _, _, live = case
+    for row in menu(*case):
+        name = row.rung.value
+        match row.kind:
+            case Kind.CURRENT:
+                assert row.short == name + (gate_menu.NOW if live else gate_menu.LAST_RUN)
+            case Kind.NARROW_LIVE:
+                assert row.short == name
+            case Kind.WIDEN_LIVE:
+                assert row.short == name + gate_menu.ASKS
+            case Kind.CONTINUE_AS:
+                assert row.short == name + (gate_menu.RESTARTS if live else gate_menu.ASKS)
+
+
+@pytest.mark.parametrize("case", EVERY_CASE, ids=lambda c: f"{c[0].value}-{c[1]}-{c[2]}")
+def test_a_rows_one_sentence_is_one_sentence_of_what_it_says_at_length(
+    case: tuple[Policy, bool, bool],
+) -> None:
+    """
+    What the question in front of a move shows is one sentence, and it is taken
+    from the whole account rather than written beside it, so the two cannot come
+    to say different things.
+    """
+    for row in menu(*case):
+        assert row.sentence.endswith("."), row
+        assert ". " not in row.sentence, row
+        assert row.sentence in row.consequence, row
+
+
 def test_a_live_widen_says_what_it_adds_when_it_starts_and_what_it_leaves() -> None:
     (row,) = [r for r in menu(S, True, True) if r.rung is P]
 

@@ -16,14 +16,22 @@ does.** That table is held against a real ``AgentSession``: a row it calls a liv
 is one the driver accepts, and a row it calls a resume is one the driver would refuse.
 This module turns each row into a line and adds nothing to the question.
 
+**A menu is labels.** A line is an item's name, and for one that cannot act a few
+words of why (``Reason.words``). No sentence is drawn under a line and there is no
+question mark in a menu: what an item does at length is ``Item.note``, which is kept
+for a guide to be written from and is drawn nowhere. The one place a sentence is
+drawn is the question a consequential choice opens (``draw_confirm``), and it is
+one sentence.
+
 **Pure above the line, Dear ImGui below it.** ``entries`` says what a card offers and
 why an item cannot act; ``choose`` says what choosing one calls. Neither touches
 imgui. ``draw_popup`` and ``draw_confirm`` are the thin half.
 
 **An item that cannot act is drawn greyed with its reason, never left out.** A lever
 that is missing reads as one this card does not have, and a lever that is present and
-does nothing reads as a broken application. The reason is on the item's own line and
-not in a tooltip: the menu is reachable from the keyboard, and a tooltip is not.
+does nothing reads as a broken application. The reason, in a few words, is on the
+item's own line and not in a tooltip: the menu is reachable from the keyboard, and a
+tooltip is not.
 
 **The keys inside the menu are read here.** The application runs Dear ImGui with
 keyboard navigation off (``tests/test_review.py`` pins it and says why), so a popup
@@ -43,7 +51,7 @@ from typing import assert_never
 
 from imgui_bundle import imgui
 
-from ..approval import Policy, requires_containment
+from ..approval import Policy
 from ..model import (
     AgentRecord,
     AgentState,
@@ -70,9 +78,30 @@ KEYS_HINT = "arrows move, Enter chooses, Esc closes"
 
 _HEAD_WIDTH = 300.0
 _CONFIRM_WIDTH = 460.0
-# How wide the line under a Gate row is wrapped: a consequence is two or three
-# sentences, and unwrapped it would make the popup as wide as the longest one.
-_NOTE_WIDTH = 440.0
+# The most words of a reason a menu line carries beside its label.
+FEW_WORDS = 6
+
+
+class Reason(str):
+    """
+    Why an item cannot act, or a line has nothing to offer: the sentence, which
+    is this string, and ``words`` -- the few of it a menu line has room for.
+
+    A ``str`` so that everything outside the menu that quotes a reason (a notice
+    that something was not done, a log line) goes on quoting the sentence.
+    """
+
+    words: str
+
+    def __new__(cls, sentence: str, words: str) -> Reason:
+        made = super().__new__(cls, sentence)
+        made.words = words
+        return made
+
+
+def few_words(reason: str) -> str:
+    """What a menu line draws of ``reason``: its few words, where it has them."""
+    return reason.words if isinstance(reason, Reason) else reason
 
 
 class Action(enum.Enum):
@@ -121,9 +150,10 @@ class Item:
 
     ``refused`` is the reason it cannot act right now, and None when it can.
     ``grouped`` is whether it sits under the ``Heading`` before it. ``rung`` is
-    set on a Gate row and on nothing else. ``note`` is drawn dim under the line:
-    for a Gate row, what choosing it will change and what it will not.
-    ``asks`` is whether choosing it opens a question instead of acting.
+    set on a Gate row and on nothing else. ``note`` is what choosing it does, at
+    length; it is not drawn. ``asks`` is whether choosing it opens a question
+    instead of acting, and ``question`` and ``sentence`` are what that question
+    shows: the act in words, and its one consequence.
     """
 
     action: Action
@@ -133,6 +163,8 @@ class Item:
     rung: Policy | None = None
     note: str = ""
     asks: bool = False
+    question: str = ""
+    sentence: str = ""
 
     @property
     def enabled(self) -> bool:
@@ -144,8 +176,13 @@ class Item:
 
     @property
     def text(self) -> str:
-        """The line as drawn: the label, and the reason beside it when refused."""
-        return self.label if self.refused is None else f"{self.label}  -  {self.refused}"
+        """
+        The line as drawn: the label, and beside it a few words of the reason
+        when refused.
+        """
+        if self.refused is None:
+            return self.label
+        return f"{self.label}  -  {few_words(self.refused)}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,12 +196,18 @@ class Heading:
 class Line:
     """
     Something the menu says and nobody chooses: the rung a session is on now, or
-    why a group has no rows. ``note`` is drawn dim under it, as an item's is.
+    why a group has no rows. ``note`` is the rest of it, which is not drawn, as an
+    item's is not.
     """
 
     label: str
     note: str = ""
     grouped: bool = True
+
+    @property
+    def text(self) -> str:
+        """The line as drawn: the label, in its few words where it is a reason."""
+        return few_words(self.label)
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,9 +220,11 @@ Entry = Item | Heading | Line | Rule
 # Why an item that acts on a running session cannot: nothing this window holds is
 # running it. Every such lever is a lookup in the pool by session id, and a lookup
 # that misses does nothing and says nothing.
-NOT_HELD = "no running session is held for this card"
+NOT_HELD = Reason("no running session is held for this card", "no running session held")
 # Why an item whose callable ``Actions`` was built without cannot act.
-NOT_WIRED = "not wired in this build"
+NOT_WIRED = Reason("not wired in this build", "not wired in this build")
+NO_TURN = Reason("no turn is under way", "no turn under way")
+ALREADY_DISMISSED = Reason("already dismissed from NEEDS YOU", "already dismissed")
 
 # The words for Resume's own item, which the lines that send the operator to it
 # repeat: ``widgets.RESUME_ITEM``, the name every pane's closed line uses for it.
@@ -189,31 +234,49 @@ RESUME_LABEL = RESUME_ITEM
 CLOSE_ASKS_LABEL = "Close…"
 # Why Fork and Retry cannot start a session from a card: the record's title is
 # not the task the session was launched with (``task_missing``).
-TASK_NOT_RECORDED = f"its original task is not recorded — {RESUME_LABEL} instead"
-# Under Close on a failed session, by whether a process is still attached.
+TASK_NOT_RECORDED = Reason(
+    f"its original task is not recorded — {RESUME_LABEL} instead",
+    f"task not recorded, {RESUME_LABEL} instead",
+)
+# What Close does on a failed session, by whether a process is still attached.
 CLOSE_FAILED_RUN = "a process is still attached to it: closing ends that process"
 CLOSE_FAILED_NO_RUN = "its run is over: closing marks it ended, after which it can be removed"
-GATE_NOT_HELD = f"gate not known - {NOT_HELD}"
-GATE_NOT_KNOWN = f"gate not known - {RESUME_LABEL} to choose"
+GATE_NOT_HELD = Reason(f"gate not known - {NOT_HELD}", f"not known, {NOT_HELD.words}")
+GATE_NOT_KNOWN = Reason(
+    f"gate not known - {RESUME_LABEL} to choose", f"not known, {RESUME_LABEL} to choose"
+)
 # Said under the rows of a running session whose containment nobody reported.
 # The rows are then the ones for a session with none: a rung that needs it is
 # offered as a resume, which is right for either answer, and never as a live
 # move, which is refused for one of them.
-CONTAINMENT_NOT_KNOWN = "containment not known - the rows are those of a session without it"
+CONTAINMENT_NOT_KNOWN = Reason(
+    "containment not known - the rows are those of a session without it",
+    "containment not known",
+)
 
 REMOVE_LABEL = "Remove from fleet"
 # Why a session cannot leave the fleet yet, by the store's reason for refusing.
 # ``FAILED_NOT_CLOSED`` names closing without naming a control: the session's
 # run may be over with nothing left on screen that closes it.
 REMOVAL_REFUSED = {
-    DetachRefusal.NO_SUCH_SESSION: "the store holds no session under this id",
-    DetachRefusal.NOT_ENDED: "an agent of this session is still running",
-    DetachRefusal.FAILED_NOT_CLOSED: "it failed and has not been closed — close it first",
-    DetachRefusal.OWES: "it still needs you — answer or dismiss its rows first",
+    DetachRefusal.NO_SUCH_SESSION: Reason(
+        "the store holds no session under this id", "no such session"
+    ),
+    DetachRefusal.NOT_ENDED: Reason(
+        "an agent of this session is still running", "an agent is still running"
+    ),
+    DetachRefusal.FAILED_NOT_CLOSED: Reason(
+        "it failed and has not been closed — close it first", "close it first"
+    ),
+    DetachRefusal.OWES: Reason(
+        "it still needs you — answer or dismiss its rows first", "it still needs you"
+    ),
 }
-STORE_NOT_ASKED = "not known whether anything of it is still running or owed"
-RUN_ATTACHED = "a process is still attached to it"
-RUN_NOT_KNOWN = "not known whether a process is still attached"
+STORE_NOT_ASKED = Reason(
+    "not known whether anything of it is still running or owed", "not known yet"
+)
+RUN_ATTACHED = Reason("a process is still attached to it", "a process is still attached")
+RUN_NOT_KNOWN = Reason("not known whether a process is still attached", "process state not known")
 
 # The rung ``Actions.revoke_policy`` narrows to. A Gate row for it is that
 # lever, which HEALTH also has, and not ``Actions.set_policy``.
@@ -309,10 +372,11 @@ def entries(
 def _live_root(rec: AgentRecord, policy: Policy | None, facts: Facts) -> tuple[Entry, ...]:
     held = policy is not None
     turn = mid_turn(rec)
+    interrupt: Reason | None
     if not held:
         interrupt = NOT_HELD
     elif not turn:
-        interrupt = "no turn is under way"
+        interrupt = NO_TURN
     else:
         interrupt = None
     return (
@@ -348,7 +412,7 @@ def _ended_root(rec: AgentRecord, policy: Policy | None, facts: Facts) -> tuple[
             Item(
                 Action.DISMISS,
                 "Dismiss",
-                "already dismissed from NEEDS YOU" if rec.acknowledged else None,
+                ALREADY_DISMISSED if rec.acknowledged else None,
             ),
             _close_failed(facts),
         ]
@@ -377,8 +441,8 @@ def _close_failed(facts: Facts) -> Item:
     and one that is not over for good cannot be removed from the fleet.
 
     What closing does depends on whether a process is still attached, which is
-    the shell's to say, and the line under the item says which it will be: with
-    one, the process is ended; with none, the session is marked ended
+    the shell's to say, and the item's note says which it will be: with one, the
+    process is ended; with none, the session is marked ended
     (``intents.FailedSessionClosed``). Where nobody said, the item cannot act:
     the two are different acts and it does not guess between them.
     """
@@ -425,7 +489,7 @@ def _gate_entry(row: gate_menu.Row, facts: Facts, *, live: bool) -> Entry:
     kind = row.kind
     match kind:
         case gate_menu.Kind.CURRENT:
-            return Line(row.label, row.consequence)
+            return Line(row.short, row.consequence)
         case gate_menu.Kind.NARROW_LIVE | gate_menu.Kind.WIDEN_LIVE:
             action = Action.SET_GATE
             wired = row.rung is _REVOKED_TO or action in facts.wired
@@ -434,28 +498,24 @@ def _gate_entry(row: gate_menu.Row, facts: Facts, *, live: bool) -> Entry:
             wired = action in facts.wired
         case _:
             assert_never(kind)
-    # A rung that needs containment releases every reviewed tool, so reaching it
-    # on a running session takes a second step. A narrowing never does: it
+    # A move that releases something on a running session takes a second step,
+    # and so does one that ends its run: the menu line is a rung's name, and the
+    # question is where what the move does is said. A narrowing never asks: it
     # releases nothing. Nor does a resume of a session that has ended: the row
     # opens the resume form, which shows the rung and starts nothing until its
     # own button is pressed, and a question in front of that form would be a
     # confirmation of a confirmation.
-    asks = (
-        kind is not gate_menu.Kind.NARROW_LIVE
-        and requires_containment(row.rung)
-        and (live or action is not Action.RESUME_AS)
-    )
-    label = row.label
-    if asks and not label.endswith("…"):
-        label += "…"
+    asks = kind is gate_menu.Kind.WIDEN_LIVE or (kind is gate_menu.Kind.CONTINUE_AS and live)
     return Item(
         action,
-        label,
+        row.short,
         None if wired else NOT_WIRED,
         grouped=True,
         rung=row.rung,
         note=row.consequence,
         asks=asks,
+        question=row.label,
+        sentence=row.sentence,
     )
 
 
@@ -582,10 +642,11 @@ class GateAsk:
     """
     A Gate row that was chosen and is waiting on its second step.
 
-    ``label`` and ``consequence`` are the row's own, as it stood when it was
-    chosen: the question shows what the operator read before choosing. ``live``
-    is whether the session was running then; a question asked of a session that
-    has since ended, or started, is about a row that is no longer in its menu.
+    ``label`` is the act in words and ``consequence`` its one sentence
+    (``gate_menu.Row.label`` and ``.sentence``), as the row stood when it was
+    chosen. ``live`` is whether the session was running then; a question asked
+    of a session that has since ended, or started, is about a row that is no
+    longer in its menu.
     """
 
     node: NodeId
@@ -702,7 +763,12 @@ def choose(
                 return
             if item.asks:
                 state.gating = GateAsk(
-                    node, action, item.rung, item.label, item.note, not rec.state.is_terminal
+                    node,
+                    action,
+                    item.rung,
+                    item.question,
+                    item.sentence,
+                    not rec.state.is_terminal,
                 )
                 state.gating_frames = 0
             else:
@@ -757,21 +823,21 @@ def gate_ask_stands(ask: GateAsk, rec: AgentRecord | None) -> bool:
 
 def confirm_text(rec: AgentRecord) -> str:
     """
-    What the close confirmation says about the session it is about to end.
+    What the close confirmation says about the session it is about to end: one
+    sentence, the consequence.
 
     Re-read each frame, because the turn it was asked over can finish while the
     question is on screen, and then the sentence about a turn is no longer true.
     """
     if mid_turn(rec):
         return (
-            f"This session is mid-turn ({STATE_LABEL[rec.state]}). Closing ends its run "
-            "where it stands: the turn is not finished, and a tool call in flight or an "
-            "approval it is waiting on goes with it. Interrupt stops the turn and keeps "
-            "the session."
+            f"This session is mid-turn ({STATE_LABEL[rec.state]}): closing ends its run "
+            "where it stands, and a tool call in flight or an approval it is waiting on "
+            "goes with it."
         )
     return (
-        "The turn this was asked over has ended since, and the session is waiting for "
-        "you. Closing ends the session and frees its slot."
+        "The turn this was asked over has ended since: closing ends the session and "
+        "frees its slot."
     )
 
 
@@ -876,8 +942,7 @@ def draw_popup(
             case Line():
                 if entry.grouped:
                     imgui.indent()
-                imgui.text_disabled(entry.label)
-                _note(entry.note)
+                imgui.text_disabled(entry.text)
                 if entry.grouped:
                     imgui.unindent()
             case Item():
@@ -892,7 +957,6 @@ def draw_popup(
                 )
                 if not entry.enabled:
                     imgui.end_disabled()
-                _note(entry.note)
                 if entry.grouped:
                     imgui.unindent()
                 if clicked:
@@ -912,15 +976,6 @@ def draw_popup(
     # the end would leave the frame unbalanced for the rest of its draw.
     if chosen is not None:
         choose(chosen.action, rec, policy, state, wiring.actions, rung=chosen.rung, facts=facts)
-
-
-def _note(text: str) -> None:
-    """The dim line under a menu line, wrapped, and nothing for an empty one."""
-    if not text:
-        return
-    imgui.push_text_wrap_pos(imgui.get_cursor_pos_x() + _NOTE_WIDTH)
-    imgui.text_disabled(text)
-    imgui.pop_text_wrap_pos()
 
 
 def _headline(rec: AgentRecord) -> str:
@@ -1014,11 +1069,12 @@ def gate_confirm_button(ask: GateAsk) -> str:
 
 def _confirm_gate(state: MenuState, snap: Snapshot, actions: Actions) -> None:
     """
-    The second step of a Gate row that reaches a rung which needs containment.
+    The second step of a Gate row that ``asks``: a widening of a running
+    session's gate, or a move that ends its run.
 
-    It shows the row as it was chosen and nothing newer: the line and the
-    consequence the operator read. A session that has ended since, or started,
-    no longer has that row, and the question goes away unanswered.
+    It shows the row as it was chosen and nothing newer: the act, and the one
+    sentence of what it does. A session that has ended since, or started, no
+    longer has that row, and the question goes away unanswered.
 
     Enter confirms and Escape cancels, from the second frame on, as for a close.
     The lever is pulled after the popup is closed out, for the reason

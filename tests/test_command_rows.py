@@ -1474,7 +1474,7 @@ def test_the_row_of_a_command_left_running_says_how_to_find_it_and_end_it() -> N
     )
     several = Survivor(pid=4242, pgid=4242, members=3, groups=(4242, 4250))
     assert "kill -- -4242 -4250" in inbox.survivor_lines(several)
-    assert "no other command of this session can be run" in lines[-1]
+    assert lines[-1] == inbox.WAYS_OUT
     one = inbox.survivor_lines(Survivor(pid=7, pgid=9, members=1))
     assert "still has 1 process." in one[1] and "kill -- -9" in one
     # The session is named by the shell that leads it, and looked at by that number.
@@ -1498,6 +1498,7 @@ class _Survivors:
         self.snap = _left_running()
         self.command = self.snap.commands[cid(1)]
         self.checked: list[str] = []
+        self.released: list[str] = []
         self.copied: list[str] = []
         self.texts: list[str] = []
         self.enabled = enabled
@@ -1505,6 +1506,7 @@ class _Survivors:
             rows(wired=True, opened=cid(1)),
             on_check=self.checked.append,
             checked={cid(1): "looked: there"},
+            on_release=self.released.append,
         )
         self.at: dict[str, tuple[float, float]] = {}
         imgui = real_imgui
@@ -1528,6 +1530,12 @@ class _Survivors:
                 at[label] = ((low.x + high.x) / 2.0, (low.y + high.y) / 2.0)
                 return bool(pressed)
 
+            def button(self, label: str) -> bool:
+                pressed = imgui.button(label)
+                low, high = imgui.get_item_rect_min(), imgui.get_item_rect_max()
+                at[label] = ((low.x + high.x) / 2.0, (low.y + high.y) / 2.0)
+                return bool(pressed)
+
             def set_clipboard_text(self, text: str) -> None:
                 copied.append(text)
 
@@ -1540,6 +1548,7 @@ class _Survivors:
                 imgui.text_unformatted(text)
 
         monkeypatch.setattr(inbox, "imgui", Noting())
+        monkeypatch.setattr(command_view, "imgui", Noting())
 
     def close(self) -> None:
         real_imgui.destroy_context(self._context)
@@ -1595,6 +1604,7 @@ def test_in_dear_imgui_the_row_of_a_command_left_running_is_drawn_and_only_a_cli
             survivors.io.add_key_event(key, False)
             survivors.frame(2)
     assert survivors.checked == [] and survivors.copied == [], "a key acted on a command's row"
+    assert survivors.released == [] and survivors.rows.state.pending is None
 
     survivors.click(inbox.CHECK_AGAIN)
     assert survivors.checked == [cid(1)]
@@ -1610,6 +1620,54 @@ def test_in_details_dead_copy_the_lines_can_be_copied_and_nothing_looks_again(
     survivors.click(inbox.CHECK_AGAIN)
     survivors.click(inbox.COPY_KILL)
     assert survivors.checked == [] and survivors.copied == ["kill -- -4242"]
+    survivors.frame(40)
+    survivors.click(inbox.RELEASE)
+    assert survivors.rows.state.pending is None and inbox.CONFIRM_RELEASE not in survivors.at
+    assert survivors.released == []
+
+
+def test_in_dear_imgui_releasing_a_session_takes_two_presses_and_the_second_waits(
+    survivors: _Survivors,
+) -> None:
+    """
+    As the run of a command: the first press arms and a confirmation takes
+    its place, which answers nothing for ``ARM_DELAY_S``, so the two clicks of
+    a double-click are not the two presses.
+    """
+    assert inbox.WAYS_OUT in survivors.texts
+    assert inbox.RELEASE in survivors.at and inbox.CONFIRM_RELEASE not in survivors.at
+    survivors.frame(40)  # past the delay after the row was opened
+    survivors.click(inbox.RELEASE)
+    assert survivors.released == [], "one press released the session"
+    assert survivors.rows.state.pending == command_view.Releasing(cid(1))
+    assert inbox.RELEASE_ARMED in survivors.texts and inbox.CONFIRM_RELEASE in survivors.at
+
+    survivors.click(inbox.CONFIRM_RELEASE)
+    assert survivors.released == [], "the second press answered inside the arm delay"
+    survivors.frame(40)
+    survivors.click(inbox.CONFIRM_RELEASE)
+    assert survivors.released == [cid(1)] and survivors.rows.state.pending is None
+
+    # Back disarms, and nothing is released.
+    survivors.click(inbox.RELEASE)
+    survivors.frame(40)
+    survivors.click(command_view.BACK)
+    assert survivors.rows.state.pending is None and survivors.released == [cid(1)]
+
+
+def test_what_holds_the_session_and_the_ways_out_are_one_short_line() -> None:
+    """The operator's rule: at most one short line; the explanation is behind its mark."""
+    for left in (
+        _LEFT,
+        Survivor(pid=50, pgid=50, members=0, groups=(70,), escaped=(70,), shell=False),
+    ):
+        lines = inbox.survivor_lines(left)
+        assert [line for line in lines if inbox.CHECK_AGAIN in line] == [inbox.WAYS_OUT]
+        assert lines[-1] == inbox.WAYS_OUT
+    assert "\n" not in inbox.WAYS_OUT and len(inbox.WAYS_OUT) <= 110
+    assert "release" in inbox.WAYS_OUT
+    assert not any(inbox.WAYS_OUT in p for p in inbox.RELEASE_HELP)
+    assert any("sends no signal" in p for p in inbox.RELEASE_HELP)
 
 
 def test_what_the_operators_profile_may_read_is_said_once_among_the_standing_lines(
@@ -2618,3 +2676,77 @@ def test_the_row_notes_the_sessions_directory_written_out_in_full(
     inbox.draw_command(snap, rows(wired=True, opened=cid(1)), command)
 
     assert sentence in said
+
+
+# -- a command left running that is known by its tag -------------------------------
+
+
+def test_the_row_of_a_command_whose_shell_is_gone_names_only_what_carries_its_tag() -> None:
+    """
+    The shell's pid may be another program's by now. A row that said "the
+    session its shell leads" and killed that session's groups would be about
+    whoever has the number.
+    """
+    left = Survivor(
+        pid=4242,
+        pgid=4242,
+        members=2,
+        groups=(58, 70),
+        pids=(51, 60),
+        escaped=(60, 70, 71),
+        marked=(51, 58),
+        shell=False,
+        unread=1,
+    )
+    lines = inbox.survivor_lines(left)
+    assert lines[0] == "STILL RUNNING, UNSUPERVISED." and lines[2] == inbox.HELD_ELSEWHERE
+    assert "Its shell (pid 4242) is gone, and 5 processes started with its PPTMSTR_COMMAND" in (
+        lines[1]
+    )
+    assert "after that shell and in this boot, are alive" in lines[1]
+    assert "2 in the session it led and 3 outside it (pid 60, 70, 71)" in lines[1]
+    assert "The session its shell leads" not in " ".join(lines)
+    # What could not be read is said, as not known either way, and is in neither line.
+    assert lines[3].startswith("1 more process in that session number could not be read")
+    assert "is NOT named below" in lines[3] and "cannot tell whether it is" in lines[3]
+    assert "ps -o pid,pgid,sid,lstart,args -p 51,58,60,70,71" in lines
+    assert "kill -- -58 -70 51 60" in lines
+    assert not any("-4242" in line or "-s 4242" in line for line in lines)
+    assert "a whole process group only where every process in it does" in (
+        lines[lines.index(commandrun.kill_line(left)) - 1]
+    )
+    assert "env -i" in lines[-2] and lines[-1] == inbox.WAYS_OUT
+
+    one = inbox.survivor_lines(
+        Survivor(pid=7, pgid=7, members=1, pids=(9,), marked=(9,), shell=False)
+    )
+    assert "and 1 process started with its PPTMSTR_COMMAND" in one[1]
+    assert "is alive: 1 in the session it led." in one[1] and "outside" not in one[1]
+    assert "This window does not hold it" in one[1]
+    assert not any("could not be read" in line for line in one)
+    assert "kill -- 9" in one and "ps -o pid,pgid,sid,lstart,args -p 9" in one
+    two = inbox.survivor_lines(
+        Survivor(pid=7, pgid=7, members=1, pids=(9,), marked=(9,), shell=False, unread=2)
+    )
+    assert two[3].startswith("2 more processes in that session number could not be read")
+    assert "are NOT named below" in two[3] and "whether they are this command's" in two[3]
+
+
+def test_the_row_of_a_command_with_its_shell_says_what_left_its_session() -> None:
+    plain = inbox.survivor_lines(_LEFT)
+    left = dataclasses.replace(_LEFT, groups=(4242, 70), pids=(60,), escaped=(60, 70, 71))
+    lines = inbox.survivor_lines(left)
+    assert lines[:3] == plain[:3] and len(lines) == len(plain) + 1
+    assert lines[3].startswith(
+        "3 more processes of it are alive OUTSIDE that session (pid 60, 70, 71): started"
+        " with its PPTMSTR_COMMAND in their environment"
+    )
+    assert "No pptmstr ends a process that has left the session" in lines[3]
+    assert "ps -o pid,pgid,lstart,args -s 4242 -p 60,70,71" in lines
+    assert "kill -- -70 -4242 60" in lines or "kill -- -4242 -70 60" in lines
+    many = dataclasses.replace(left, escaped=tuple(range(100, 120)))
+    said = inbox.survivor_lines(many)[3]
+    assert "(pid 100, 101, 102, 103, 104, 105, 106, 107 and 12 more)" in said
+    one = inbox.survivor_lines(dataclasses.replace(left, escaped=(60,)))[3]
+    assert one.startswith("1 more process of it is alive OUTSIDE that session (pid 60)")
+    assert "in its environment" in one

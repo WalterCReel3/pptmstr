@@ -20,7 +20,15 @@ through keeps running after a narrow, and a call already waiting for the operato
 waiting after a widen. It also does not reach what the agents were told. The system
 prompt and the worker prompts read the rung once, when the run builds its options, so
 they go on describing the rung the session started under; a resume is what delivers a
-new briefing. Every live row says both, because neither is visible from the rung's name.
+new briefing. Every live row's ``consequence`` says both, because neither is visible
+from the rung's name.
+
+**A row is three things, and the menu draws the shortest.** ``short`` is the line in
+the menu: the rung's name, a word after it where it is the rung in force, and a
+suffix where choosing it does something other than switch at once. ``sentence`` is the one
+sentence the question in front of a move shows. ``consequence`` is the whole of what
+choosing the row changes and what it does not, which ``sentence`` is part of; nothing
+draws it, and it is what a guide to this menu would be written from.
 
 **Rung order is ``Policy``'s definition order**, lowest first, which that enum documents
 as ordered by how much is released. Nothing here names a rung.
@@ -43,12 +51,22 @@ from dataclasses import dataclass
 
 from ..approval import Policy, requires_containment
 
-__all__ = ["Kind", "Row", "rows"]
+__all__ = ["ASKS", "LAST_RUN", "NOW", "RESTARTS", "Kind", "Row", "rows"]
 
 # What a rung lets run unattended, as short labels: ``widgets.gate_adds``.
 Adds = Callable[[Policy], tuple[str, ...]]
 
 _BRIEFING = "The agent's briefing still describes the rung it started under."
+
+# After the rung a running session is on.
+NOW = " (now)"
+# After the current row of a session that is not running: the rung is the one its
+# last run had, and nothing is in force.
+LAST_RUN = " (last run)"
+# After a rung that is not switched to at once: a question or a form comes first.
+ASKS = "…"
+# After a rung the running process cannot take: reaching it ends this run.
+RESTARTS = "  restart…"
 
 
 class Kind(enum.Enum):
@@ -68,17 +86,20 @@ class Kind(enum.Enum):
 @dataclass(frozen=True, slots=True)
 class Row:
     """
-    One rung, and what the menu says about choosing it.
+    One rung, and what is said about choosing it.
 
-    ``label`` is the menu item and ``consequence`` the line under it. Each is one
-    line, and the consequence is written to be read before the click: it says what
-    will change and what will not.
+    ``short`` is the menu's line. ``label`` names the act in words, for the
+    question asked before it. ``sentence`` is the one sentence of ``consequence``
+    that question shows: what the move does to the session. ``consequence`` is
+    the whole account, and is drawn nowhere.
     """
 
     rung: Policy
     kind: Kind
     label: str
     consequence: str
+    short: str
+    sentence: str
 
     @property
     def acts(self) -> bool:
@@ -114,53 +135,84 @@ def _direction(index: int, here: int) -> int:
 def _row(rung: Policy, now: Policy, direction: int, contained: bool, live: bool, adds: Adds) -> Row:
     name = rung.value
     if direction == 0:
-        return Row(rung, Kind.CURRENT, *_current(rung, live, adds))
+        return _current(rung, live, adds)
     if not live:
+        sentence = f"Opens the resume form under {name}; nothing starts until you send from it."
         return Row(
             rung,
             Kind.CONTINUE_AS,
             f"Resume as {name}…",
-            f"Opens the resume form under {name}; nothing starts until you send from it. "
-            f"{_standing(rung, adds)}",
+            f"{sentence} {_standing(rung, adds)}",
+            f"{name}{ASKS}",
+            sentence,
         )
     if direction < 0:
         returned = _without(adds(now), adds(rung))
         back = f"{_listed(returned)} wait for you again" if returned else f"{name} is in force"
+        sentence = (
+            f"From the next tool call the gate judges, {back}; a call already let through "
+            "is not stopped."
+        )
         return Row(
             rung,
             Kind.NARROW_LIVE,
             f"Narrow to {name}",
-            f"From the next tool call the gate judges, {back}; a call already let through "
-            f"is not stopped. {_BRIEFING}",
+            f"{sentence} {_BRIEFING}",
+            f"{name}",
+            sentence,
         )
     if requires_containment(rung) and not contained:
+        sentence = (
+            "Opens the resume form; resuming ends the running "
+            "session where it stands -- a turn in flight is not finished, and a tool call "
+            f"or an approval it is waiting on goes with it -- and starts it under {name} "
+            "with a briefing for that rung."
+        )
         return Row(
             rung,
             Kind.CONTINUE_AS,
             f"Continue as {name}…",
             f"This process was started without the containment {name} requires, so it "
-            "cannot be moved there. Opens the resume form; resuming ends the running "
-            "session where it stands -- a turn in flight is not finished, and a tool call "
-            f"or an approval it is waiting on goes with it -- and starts it under {name} "
-            "with a briefing for that rung.",
+            f"cannot be moved there. {sentence}",
+            f"{name}{RESTARTS}",
+            sentence,
         )
     added = _without(adds(rung), adds(now))
     more = f"{_listed(added)} run without asking" if added else f"{name} is in force"
+    sentence = (
+        f"From the next tool call the gate judges, {more}; a call already waiting for "
+        "you still waits."
+    )
     return Row(
         rung,
         Kind.WIDEN_LIVE,
         f"Widen to {name}",
-        f"From the next tool call the gate judges, {more}; a call already waiting for "
-        f"you still waits. {_BRIEFING}",
+        f"{sentence} {_BRIEFING}",
+        # A widening is asked about before it is made (``session_menu``), which
+        # is the second step the suffix promises.
+        f"{name}{ASKS}",
+        sentence,
     )
 
 
-def _current(rung: Policy, live: bool, adds: Adds) -> tuple[str, str]:
+def _current(rung: Policy, live: bool, adds: Adds) -> Row:
+    standing = _standing(rung, adds)
     if live:
-        return f"{rung.value} (now)", f"The gate this session answers with. {_standing(rung, adds)}"
-    return (
+        return Row(
+            rung,
+            Kind.CURRENT,
+            f"{rung.value} (now)",
+            f"The gate this session answers with. {standing}",
+            f"{rung.value}{NOW}",
+            standing,
+        )
+    return Row(
+        rung,
+        Kind.CURRENT,
         f"{rung.value} (as last granted)",
-        f"The gate this session last ran under; it is not running. {_standing(rung, adds)}",
+        f"The gate this session last ran under; it is not running. {standing}",
+        f"{rung.value}{LAST_RUN}",
+        standing,
     )
 
 

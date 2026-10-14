@@ -2,14 +2,16 @@
 A break-glass command on disk: ``sessions/<session id>/commands/<command id>/``.
 
 **The layout.** One directory per command, named by its id, holding at most
-eight files, each of which is written once::
+nine files, each of which is written once::
 
     request.json      what the agent asked, and when
     run.json          what the operator approved: the string, the shell, the bound
-    started.json      the process that came of it: its pid, its group, when it began
+    started.json      the process that came of it: its pid, its group, when it began,
+                      and the environment entry everything it starts carries
     end.json          how it ended, and the end of what it printed
     unconfirmed.json  pptmstr quit before it saw the end, and why it did not see it
     gone.json         a later pptmstr looked for the process and saw it was not there
+    released.json     the operator let go of the session a process found running held
     output.log        what the process wrote, from the start, up to MAX_LOG_BYTES
     output.tail       the last MAX_TAIL_FILE_BYTES of it, only when the log was cut
 
@@ -17,7 +19,8 @@ The state of a command is which of ``request.json``, ``run.json`` and
 ``end.json`` exist. There is no status key to disagree with them, and no file is
 a later version of another.
 
-``started.json``, ``unconfirmed.json`` and ``gone.json`` change no state. The
+``started.json``, ``unconfirmed.json``, ``gone.json`` and ``released.json``
+change no state. The
 first exists because ``run.json`` is on disk before the process is, and so
 cannot name it: it is what lets a process that outlived pptmstr be found from
 its record. The second is what a quitting pptmstr leaves for a command it could
@@ -26,9 +29,12 @@ written after it is the better account. The third is what stops the looking:
 a pid is handed out again once its process has gone, so a record that is
 looked for at every start would sooner or later be matched against a process
 that only has its number, and a process seen gone once stays gone. It is not an
-end -- how the command ended is as unknown as it was. None of the three is
-needed to read a command, so one that cannot be read is read as absent and
-makes nothing unreadable.
+end -- how the command ended is as unknown as it was. The fourth stops the
+looking too, and is read into the outcome (``EndUnknown.released``): the
+operator saw the process alive and chose to leave it running, so it holds the
+session no longer and is not raised again, and what was found then is kept for
+whoever asks later. None of the four is needed to read a command, so one
+that cannot be read is read as absent and makes nothing unreadable.
 
 **Every file is created once and nothing is overwritten or deleted.** A JSON file
 is written whole to a temp name in the command's directory, flushed to the device,
@@ -86,6 +92,7 @@ from typing import Any, assert_never
 
 from . import sessionfile
 from .command import (
+    MAX_CGROUP_CHARS,
     Cancelled,
     CancelledBy,
     Command,
@@ -96,10 +103,12 @@ from .command import (
     NotStarted,
     Outcome,
     Refused,
+    Released,
     Run,
     Started,
     TimedOut,
     Withdrawn,
+    is_tag_digest,
     is_valid_id,
 )
 
@@ -113,6 +122,7 @@ END_NAME = "end.json"
 STARTED_NAME = "started.json"
 UNCONFIRMED_NAME = "unconfirmed.json"
 GONE_NAME = "gone.json"
+RELEASED_NAME = "released.json"
 LOG_NAME = "output.log"
 TAIL_NAME = "output.tail"
 
@@ -253,6 +263,12 @@ def _number(value: object) -> Any:
 
 def _whole(value: object) -> Any:
     return value if isinstance(value, int) and not isinstance(value, bool) else _BAD
+
+
+def _pids(value: object) -> Any:
+    if isinstance(value, list) and all(_whole(pid) is not _BAD for pid in value):
+        return tuple(value)
+    return _BAD
 
 
 def _node(value: object) -> Any:
@@ -445,22 +461,41 @@ def _end(doc: _Doc, command_id: str) -> tuple[End, float | None]:
         duration_s=_need(doc.obj, "duration_s", _number),
         output_bytes=_need(doc.obj, "output_bytes", _whole),
         tail=_need(doc.obj, "tail", _text),
-        # Absent from a record written before either was kept, and None then.
+        # Absent from a record written before each was kept, and None then.
         leftover=_optional(doc.obj, "leftover", _whole),
         unconfirmed=_optional(doc.obj, "unconfirmed", _text),
+        escaped=_optional(doc.obj, "escaped", _pids),
+        unreadable=_optional(doc.obj, "unreadable", _pids) or (),
     )
     stop = doc.obj.get("stop_asked_at")
     return end, (None if stop is None else _need(doc.obj, "stop_asked_at", _number))
 
 
-def _missing_end(asked_at: float, run: Run | None, unconfirmed: str | None) -> End:
+def _missing_end(
+    asked_at: float, run: Run | None, unconfirmed: str | None, released: Released | None = None
+) -> End:
     """
     What the absence of ``end.json`` means. The time is the last one the files
     state: nothing recorded when pptmstr stopped looking.
     """
     if run is None:
         return End(outcome=Lapsed(), at=asked_at)
-    return End(outcome=EndUnknown(), at=run.started_at, unconfirmed=unconfirmed)
+    outcome = EndUnknown(released=released)
+    return End(outcome=outcome, at=run.started_at, unconfirmed=unconfirmed)
+
+
+def _released(directory: Path, command_id: str) -> Released | None:
+    """
+    What ``released.json`` says, or None when there is none that can be read.
+    """
+    try:
+        doc = _doc(directory, RELEASED_NAME)
+        if doc is None:
+            return None
+        _own_id(doc, command_id)
+        return Released(at=_need(doc.obj, "at", _number), alive=_need(doc.obj, "alive", _whole))
+    except (OSError, ValueError, RuntimeError):
+        return None
 
 
 def _left_unconfirmed(directory: Path, command_id: str) -> str | None:
@@ -530,7 +565,10 @@ def _read(session_id: str, command_id: str, root: Path | None) -> tuple[Command 
         end_doc = docs[END_NAME]
         if end_doc is None:
             end = _missing_end(
-                asked_at, run, None if run is None else _left_unconfirmed(directory, command_id)
+                asked_at,
+                run,
+                None if run is None else _left_unconfirmed(directory, command_id),
+                None if run is None else _released(directory, command_id),
             )
         else:
             try:
@@ -588,6 +626,14 @@ def read_started(session_id: str, command_id: str, root: Path | None = None) -> 
     """
     The process a command's run became, as ``started.json`` states it, or None
     when there is no such file or it cannot be read. Never raises, never waits.
+
+    **A ``tag`` that is not a digest reads as no tag** (``is_tag_digest``), and
+    the rest of the record is read all the same. A build before this one wrote
+    the entry itself there, ``PPTMSTR_COMMAND=<command id>``, which is a value
+    anything that can list this directory knows: a process found by it is not
+    known to be the command's, so nothing is looked for by it. Such a command
+    is then found by its shell's session or not at all, as one with no tag is.
+    A ``cgroup`` that is not text of a record's length reads as none.
     """
     try:
         directory = command_dir(session_id, command_id, root)
@@ -597,12 +643,17 @@ def read_started(session_id: str, command_id: str, root: Path | None = None) -> 
         if doc is None:
             return None
         _own_id(doc, command_id)
+        # Each absent from the record of a command started without it.
+        tag = _optional(doc.obj, "tag", _text)
+        cgroup = _optional(doc.obj, "cgroup", _text)
         return Started(
             pid=_need(doc.obj, "pid", _whole),
             pgid=_need(doc.obj, "pgid", _whole),
             at=_need(doc.obj, "at", _number),
             start_ticks=_optional(doc.obj, "start_ticks", _whole),
             boot_id=_optional(doc.obj, "boot_id", _text),
+            tag=tag if is_tag_digest(tag) else None,
+            cgroup=cgroup if cgroup and len(cgroup) <= MAX_CGROUP_CHARS else None,
         )
     except (OSError, ValueError, RuntimeError):
         return None
@@ -623,6 +674,21 @@ def read_gone(session_id: str, command_id: str, root: Path | None = None) -> str
             return None
         _own_id(doc, command_id)
         return _need(doc.obj, "why", _text) or None
+    except (OSError, ValueError, RuntimeError):
+        return None
+
+
+def read_released(session_id: str, command_id: str, root: Path | None = None) -> Released | None:
+    """
+    The operator's release of the session a command found running held, as
+    ``released.json`` states it, or None when there is no such file or it
+    cannot be read. Never raises, never waits.
+    """
+    try:
+        directory = command_dir(session_id, command_id, root)
+        if directory is None or not _is_real_dir(directory):
+            return None
+        return _released(directory, command_id)
     except (OSError, ValueError, RuntimeError):
         return None
 
@@ -898,6 +964,8 @@ def write_end(command: Command, root: Path | None = None) -> Written | Unwritten
                 "stop_asked_at": command.stop_asked_at,
                 "leftover": end.leftover,
                 "unconfirmed": end.unconfirmed,
+                "escaped": None if end.escaped is None else list(end.escaped),
+                "unreadable": list(end.unreadable),
             }
         )
         return _create(directory, END_NAME, data)
@@ -932,6 +1000,8 @@ def write_started(
                 "at": started.at,
                 "start_ticks": started.start_ticks,
                 "boot_id": started.boot_id,
+                "tag": started.tag,
+                "cgroup": started.cgroup,
             }
         )
         return _create(directory, STARTED_NAME, data)
@@ -960,6 +1030,47 @@ def write_gone(
             return Unwritten(refusal)
         data = _encoded({"format": FORMAT, "id": command_id, "why": why, "at": at})
         return _create(directory, GONE_NAME, data)
+    except _WRITE_ERRORS as exc:
+        return _failed(exc)
+
+
+def write_released(
+    session_id: str,
+    command_id: str,
+    released: Released,
+    look: str,
+    root: Path | None = None,
+) -> Written | Unwritten:
+    """
+    Record that the operator let go of the session this command's process,
+    found running with no end on record, was holding; how many of its
+    processes the last look found (``Released.alive``); and ``look``, the line
+    that showed them, for whoever later asks what was left running. Never
+    raises.
+
+    Refused without a ``started.json``, since nothing could have been found
+    running, and when there is an ``end.json``: the command's end is then
+    recorded and nothing of it was left to release.
+    """
+    try:
+        directory = command_dir(session_id, command_id, root)
+        if directory is None:
+            return Unwritten(_no_directory(session_id, command_id))
+        refusal = _refusal_to_add(directory, STARTED_NAME)
+        if refusal is not None:
+            return Unwritten(refusal)
+        if os.path.lexists(directory / END_NAME):
+            return Unwritten(f"{END_NAME} is there: its end was recorded")
+        data = _encoded(
+            {
+                "format": FORMAT,
+                "id": command_id,
+                "at": released.at,
+                "alive": released.alive,
+                "look": look,
+            }
+        )
+        return _create(directory, RELEASED_NAME, data)
     except _WRITE_ERRORS as exc:
         return _failed(exc)
 

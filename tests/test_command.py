@@ -169,6 +169,8 @@ def test_the_state_and_the_edit_are_read_off_the_parts_and_not_stored() -> None:
         "tail",
         "leftover",
         "unconfirmed",
+        "escaped",
+        "unreadable",
     }
     assert {f.name for f in dataclasses.fields(Run)} == {
         "text",
@@ -587,6 +589,34 @@ def test_a_survivor_makes_an_ended_command_owe_a_row_and_never_makes_it_open() -
     assert exited.unsupervised is None and not exited.owes_row
 
 
+def test_a_released_command_owes_no_row_holds_nothing_and_was_found_running() -> None:
+    """
+    A release is of something found running, and it replaces the survivor
+    rather than standing beside it: a record that held both would be holding
+    its session and released from it at once.
+    """
+    run = c.Run(text="make", shell="/bin/sh", cwd="/w", timeout_s=600, started_at=2.0)
+    found = c.Survivor(pid=4242, pgid=4242, members=2)
+    released = c.Released(at=9.0, alive=found.alive)
+    held = Command(
+        id="cmd-20261013T101500Z-0123456789ab",
+        asker=("s", None),
+        asked="make",
+        reason="",
+        expects="",
+        asked_at=1.0,
+        run=run,
+        end=End(c.EndUnknown(released=released), at=2.0),
+    )
+    assert held.unsupervised is None and not held.owes_row and c.ran(held.end.outcome)  # type: ignore[union-attr]
+    assert c.EndUnknown(released=released) != c.EndUnknown()
+    with pytest.raises(ValueError):
+        c.EndUnknown(survivor=found, released=released)
+    for alive in (0, -1):
+        with pytest.raises(ValueError):
+            c.Released(at=9.0, alive=alive)
+
+
 @pytest.mark.parametrize("pid, pgid, members", [(1, 9, 1), (9, 1, 1), (9, 0, 1), (9, 9, 0)])
 def test_a_survivor_names_a_group_of_its_own_with_something_in_it(
     pid: int, pgid: int, members: int
@@ -871,3 +901,114 @@ def test_a_reason_or_an_expectation_that_cannot_be_encoded_is_refused(
     assert request_refusal("", reason, expects) is RequestRefusal.EMPTY
     if expected is None:
         (reason + expects).encode("utf-8")
+
+
+# -- a command's tag, and what is known by it --------------------------------------
+
+
+_DIGEST = "0f" * 32
+
+
+@pytest.mark.parametrize(
+    "tag",
+    [
+        "",
+        "PPTMSTR_COMMAND=cmd-20261013T101500Z-0123456789ab",
+        "0f" * 31,
+        "0f" * 33,
+        "0F" * 32,
+        "0g" * 32,
+        "0f" * 31 + "0\n",
+    ],
+)
+def test_a_tag_on_a_record_is_a_digest_and_nothing_else(tag: str) -> None:
+    """
+    The record is a file a contained session may read. What it holds is
+    compared with a digest of what a process carries; a field that would take
+    the value itself, or the entry a build before this one wrote, would be
+    the way the value came to be on disk.
+    """
+    assert not c.is_tag_digest(tag)
+    with pytest.raises(ValueError, match="tag"):
+        c.Started(pid=9, pgid=9, at=1.0, tag=tag)
+
+
+def test_a_started_record_may_have_no_tag_or_a_digest_and_no_group_or_one() -> None:
+    assert c.Started(pid=9, pgid=9, at=1.0).tag is None
+    assert c.is_tag_digest(_DIGEST) and not c.is_tag_digest(None) and not c.is_tag_digest(7)
+    held = c.Started(pid=9, pgid=9, at=1.0, tag=_DIGEST, cgroup="0::/a")
+    assert (held.tag, held.cgroup) == (_DIGEST, "0::/a")
+    for wrong in ("", "x" * (c.MAX_CGROUP_CHARS + 1)):
+        with pytest.raises(ValueError, match="cgroup"):
+            c.Started(pid=9, pgid=9, at=1.0, cgroup=wrong)
+
+
+def test_an_end_says_what_could_not_be_read_beside_it_and_names_at_most_four() -> None:
+    end = c.End(c.Exited(0), at=1.0, escaped=(), unreadable=(70, 71, 72, 73, 74))
+    assert end.remarks == (
+        "5 processes started during it, beside it and outside its shell's session, could not"
+        " be read for its PPTMSTR_COMMAND and may be its: pid 70, 71, 72, 73 and 1 more, as"
+        " of its end. To look: ps -o pid,pgid,sid,lstart,args -p 70,71,72,73",
+    )
+    one = c.End(c.Exited(0), at=1.0, unreadable=(70,)).remarks
+    assert one[0].startswith("1 process started during it,") and "pid 70, as of" in one[0]
+    assert c.End(c.Exited(0), at=1.0).remarks == ()
+    for outcome, pids in ((c.Refused("no"), (70,)), (c.Exited(0), (1,))):
+        with pytest.raises(ValueError, match="unreadable"):
+            c.End(outcome, at=1.0, unreadable=pids)
+
+
+def test_a_survivor_with_no_shell_is_only_what_carried_its_tag() -> None:
+    """
+    With the shell gone its pid is anybody's. A record that fell back on the
+    shell's own group for its kill line would name whoever has it now.
+    """
+    found = c.Survivor(
+        pid=50, pgid=50, members=2, pids=(51,), groups=(58,), marked=(51, 58), shell=False
+    )
+    assert found.alive == 2
+    outside = c.Survivor(pid=50, pgid=50, members=0, groups=(70,), escaped=(70,), shell=False)
+    assert outside.alive == 1
+    assert c.Survivor(pid=50, pgid=50, members=2, groups=(50,), escaped=(70, 71)).alive == 4
+    for wrong in (
+        # Nothing to aim at.
+        {"members": 1, "marked": (51,), "shell": False},
+        # Counted, and not listed.
+        {"members": 2, "marked": (51,), "pids": (51,), "shell": False},
+        # Nothing alive at all, in the session or out.
+        {"members": 0, "shell": False, "groups": (70,)},
+        {"members": 0},
+        # What only a look by tag finds, on a record of a session.
+        {"members": 1, "marked": (51,)},
+        {"members": 1, "unread": 1},
+        {"members": 1, "unread": -1, "shell": False, "marked": (51,), "pids": (51,)},
+        # Numbers that are not a process's or a group's own.
+        {"members": 1, "pids": (1,)},
+        {"members": 1, "escaped": (0,)},
+        {"members": 1, "marked": (1,), "pids": (51,), "shell": False},
+    ):
+        with pytest.raises(ValueError):
+            c.Survivor(pid=50, pgid=50, **wrong)  # type: ignore[arg-type]
+
+
+def test_what_left_the_session_is_said_with_a_line_that_looks_and_none_that_kills() -> None:
+    assert End(c.Exited(0), at=1.0).escaped is None
+    assert End(c.Exited(0), at=1.0, escaped=()).remarks == ()
+    assert End(c.Exited(0), at=1.0, escaped=()).escaped_remark is None
+    (one,) = End(c.TimedOut(), at=1.0, escaped=(4301,)).remarks
+    assert one == (
+        "1 process it started is ALIVE outside its shell's session, and pptmstr did not end"
+        " it: pid 4301, as of its end. To look: ps -o pid,pgid,sid,lstart,args -p 4301"
+    )
+    end = End(c.Exited(0), at=1.0, leftover=2, unconfirmed="why", escaped=(7, 8, 9, 10, 11))
+    assert [remark.split()[0] for remark in end.remarks] == ["2", "5", "NOT"]
+    assert "5 processes it started are ALIVE" in end.remarks[1]
+    assert "did not end them: pid 7, 8, 9, 10 and 1 more, as of" in end.remarks[1]
+    assert end.remarks[1].endswith("-p 7,8,9,10") and "kill" not in end.remarks[1]
+    assert c.ps_line((7, 8)) == "ps -o pid,pgid,sid,lstart,args -p 7,8"
+    for outcome in (c.NotStarted("x"), c.Refused("x"), c.Withdrawn(), c.Lapsed()):
+        with pytest.raises(ValueError, match="escaped"):
+            End(outcome, at=1.0, escaped=())
+    for pid in (0, 1):
+        with pytest.raises(ValueError, match="escaped"):
+            End(c.Exited(0), at=1.0, escaped=(pid,))

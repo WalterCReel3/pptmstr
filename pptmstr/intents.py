@@ -937,7 +937,9 @@ class CommandEnded:
     (``Command.unsupervised``), which has an end already, an ``EndUnknown``
     that names what was found alive. For that command an ``EndUnknown`` is
     applied in its place: the shell looked again, and the new one names what is
-    there now, or nothing. No other end replaces one.
+    there now, or nothing; or the operator released the session it held, and
+    the new one says so (``EndUnknown.released``), which only such a command
+    may be given. No other end replaces one.
     """
 
     command_id: CommandId

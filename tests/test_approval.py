@@ -1419,3 +1419,794 @@ def test_a_command_tool_has_no_queue_row_of_its_own_wording() -> None:
     said = summarize("mcp__pptmstr__request_command", {"command": "make install"})
 
     assert said == "mcp__pptmstr__request_command command='make install'"
+
+
+# -- another session's records ---------------------------------------------------
+#
+# Every test here builds the adversarial path and asks `classify`, because the
+# property is about the gate's answer and not about a helper's. `settings.config_dir`
+# is the suite's redirected one, so the records root is under the temporary tree.
+
+MINE = "11111111-aaaa-4bbb-8ccc-000000000001"
+THEIRS = "22222222-aaaa-4bbb-8ccc-000000000002"
+
+EVERY_RUNG = pytest.mark.parametrize("policy", list(Policy))
+
+
+def _records_root() -> Path:
+    from pptmstr import sessionfile
+
+    return sessionfile.root()
+
+
+def _their_log() -> Path:
+    """
+    Another session's command output, made on disk so that a symlink or a glob
+    has something real to reach.
+    """
+    log = _records_root() / THEIRS / "commands" / "c1" / "output.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("token: hunter2\n", encoding="utf-8")
+    return log
+
+
+def _my_log() -> Path:
+    log = _records_root() / MINE / "commands" / "c1" / "output.log"
+    log.parent.mkdir(parents=True, exist_ok=True)
+    log.write_text("mine\n", encoding="utf-8")
+    return log
+
+
+def _gate(
+    tool: str,
+    tool_input: Mapping[str, Any],
+    policy: Policy = Policy.STRICT,
+    *,
+    cwd: Path | None = None,
+    session_id: str | None = MINE,
+) -> Disposition:
+    return classify(
+        tool, tool_input, policy, session_id=session_id, cwd=None if cwd is None else str(cwd)
+    )
+
+
+def test_the_record_roots_are_the_two_the_writers_use() -> None:
+    """
+    `approval` spells the two directory names rather than importing the modules
+    that own them, which would close an import cycle. This is what holds the
+    spelling to them.
+    """
+    from pptmstr import boardsync, sessionfile, settings
+
+    assert tuple(settings.config_dir() / name for name in approval._RECORD_ROOTS) == (
+        sessionfile.root(),
+        boardsync.legacy_root(),
+    )
+
+
+def _reads_of(target: Path) -> list[tuple[str, dict[str, Any]]]:
+    return [
+        ("Read", {"file_path": str(target)}),
+        ("NotebookRead", {"notebook_path": str(target)}),
+        ("Glob", {"pattern": "**/*.log", "path": str(target.parent)}),
+        ("Glob", {"pattern": f"{target.parent}/*.log"}),
+        ("Grep", {"pattern": "token", "path": str(target)}),
+        ("Grep", {"pattern": "token", "path": str(target.parent), "glob": "*.log"}),
+    ]
+
+
+@EVERY_RUNG
+def test_no_rung_admits_a_read_of_another_sessions_records(policy: Policy, tmp_path: Path) -> None:
+    """
+    The property. Each call names another session's command output by its
+    absolute path, which is the plain case, on every rung.
+    """
+    for tool, tool_input in _reads_of(_their_log()):
+        assert _gate(tool, tool_input, policy, cwd=tmp_path) is Disposition.REQUIRE_APPROVAL, tool
+
+
+@EVERY_RUNG
+def test_a_session_reads_its_own_records_as_it_did(policy: Policy, tmp_path: Path) -> None:
+    """
+    The bus reply to `read_commands` names the asker's own `output.log`, and
+    reading it is not a second decision.
+    """
+    for tool, tool_input in _reads_of(_my_log()):
+        assert _gate(tool, tool_input, policy, cwd=tmp_path) is Disposition.AUTO_APPROVE, tool
+
+
+@EVERY_RUNG
+def test_with_no_session_named_no_records_are_the_callers_own(
+    policy: Policy, tmp_path: Path
+) -> None:
+    """
+    A caller that does not say which session is asking gets nothing under the
+    root, its own directory included: the alternative is a default that makes
+    every session's records the caller's.
+    """
+    for tool, tool_input in _reads_of(_my_log()):
+        got = _gate(tool, tool_input, policy, cwd=tmp_path, session_id=None)
+        assert got is Disposition.REQUIRE_APPROVAL, tool
+
+
+@pytest.mark.parametrize("session_id", ["", ".", "..", f"{THEIRS}/..", f"../sessions/{THEIRS}"])
+def test_an_id_that_is_not_one_directory_name_owns_nothing(session_id: str) -> None:
+    """
+    `..` as an id would make the whole configuration directory the caller's
+    own, and `<theirs>/..` the root.
+    """
+    read = {"file_path": str(_their_log())}
+
+    assert _gate("Read", read, session_id=session_id) is Disposition.REQUIRE_APPROVAL
+    listing = {"pattern": "*", "path": str(_records_root())}
+    assert _gate("Glob", listing, session_id=session_id) is Disposition.REQUIRE_APPROVAL
+
+
+def test_a_link_at_the_callers_name_does_not_make_anothers_directory_its_own() -> None:
+    _their_log()
+    (_records_root() / MINE).symlink_to(_records_root() / THEIRS)
+    through = _records_root() / MINE / "commands" / "c1" / "output.log"
+
+    assert _gate("Read", {"file_path": str(through)}) is Disposition.REQUIRE_APPROVAL
+
+
+def test_a_link_at_the_callers_name_to_a_directory_of_that_name_is_not_its_own() -> None:
+    """
+    The name matches; where it leads is inside another session's directory.
+    """
+    nested = _records_root() / THEIRS / MINE
+    nested.mkdir(parents=True)
+    (_records_root() / MINE).symlink_to(nested)
+
+    assert _gate("Read", {"file_path": str(nested / "x")}) is Disposition.REQUIRE_APPROVAL
+
+
+def test_the_root_itself_is_not_the_callers() -> None:
+    """
+    Listing it names every other session, and the name is the directory the
+    other session's output is under.
+    """
+    _my_log()
+    root = _records_root()
+
+    assert _gate("Glob", {"pattern": "*", "path": str(root)}) is Disposition.REQUIRE_APPROVAL
+    assert _gate("Grep", {"pattern": "x", "path": str(root)}) is Disposition.REQUIRE_APPROVAL
+    assert _gate("Glob", {"pattern": f"{root}/*/commands/*"}) is Disposition.REQUIRE_APPROVAL
+
+
+def test_a_relative_path_is_measured_from_the_sessions_directory(tmp_path: Path) -> None:
+    """
+    The same spelling is two files from two directories, and only the session's
+    directory says which.
+    """
+    log = _their_log()
+    inside = log.parent.parent
+    relative = {"file_path": "c1/output.log"}
+
+    assert _gate("Read", relative, cwd=inside) is Disposition.REQUIRE_APPROVAL
+    assert _gate("Read", relative, cwd=tmp_path) is Disposition.AUTO_APPROVE
+
+
+def test_a_path_that_climbs_out_of_the_callers_directory_is_followed() -> None:
+    _their_log()
+    mine = _my_log()
+    climbing = f"{mine.parent}/../../../{THEIRS}/commands/c1/output.log"
+
+    assert _gate("Read", {"file_path": climbing}) is Disposition.REQUIRE_APPROVAL
+    out_of_path = {"pattern": f"../../../{THEIRS}/**", "path": str(mine.parent)}
+    assert _gate("Glob", out_of_path) is Disposition.REQUIRE_APPROVAL
+    in_cwd = {"pattern": f"../{THEIRS}/**/*.log"}
+    assert _gate("Glob", in_cwd, cwd=_records_root() / MINE) is Disposition.REQUIRE_APPROVAL
+
+
+def test_a_symlink_in_the_sessions_directory_is_followed(tmp_path: Path) -> None:
+    """
+    The spelling is a file in the working tree. Where it leads is what is read.
+    """
+    log = _their_log()
+    (tmp_path / "notes.txt").symlink_to(log)
+    (tmp_path / "shortcut").symlink_to(_records_root())
+
+    assert _gate("Read", {"file_path": "notes.txt"}, cwd=tmp_path) is Disposition.REQUIRE_APPROVAL
+    through = {"file_path": f"shortcut/{THEIRS}/commands/c1/output.log"}
+    assert _gate("Read", through, cwd=tmp_path) is Disposition.REQUIRE_APPROVAL
+    search = {"pattern": "token", "path": "shortcut"}
+    assert _gate("Grep", search, cwd=tmp_path) is Disposition.REQUIRE_APPROVAL
+    own = {"file_path": f"shortcut/{MINE}/commands/c1/output.log"}
+    assert _gate("Read", own, cwd=tmp_path) is Disposition.AUTO_APPROVE
+
+
+def test_a_tilde_is_the_home_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    assert _records_root() == tmp_path / ".config" / "pptmstr" / "sessions"
+    work = tmp_path / "Source"
+    work.mkdir()
+
+    theirs = {"file_path": f"~/.config/pptmstr/sessions/{THEIRS}/session.json"}
+    assert _gate("Read", theirs, cwd=work) is Disposition.REQUIRE_APPROVAL
+    mine = {"file_path": f"~/.config/pptmstr/sessions/{MINE}/session.json"}
+    assert _gate("Read", mine, cwd=work) is Disposition.AUTO_APPROVE
+
+
+@pytest.mark.parametrize("above", ["~", "~/.config", "~/.config/pptmstr", "/"])
+def test_a_search_rooted_above_the_records_is_a_read_of_them(
+    above: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    `Grep` over the home directory returns every session's command output with
+    no path in the call that mentions pptmstr at all.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    work = tmp_path / "Source"
+    work.mkdir()
+
+    for tool in ("Grep", "Glob"):
+        search = {"pattern": "**/output.log", "path": above}
+        assert _gate(tool, search, cwd=work) is Disposition.REQUIRE_APPROVAL, tool
+    assert _gate("Glob", {"pattern": f"{above}/**/output.log"}, cwd=work) is (
+        Disposition.REQUIRE_APPROVAL
+    )
+    # One file above the records is not a search of what is beside it.
+    assert _gate("Read", {"file_path": above}, cwd=work) is Disposition.AUTO_APPROVE
+
+
+def test_a_session_running_above_the_records_searches_them_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    With no `path` both search tools start in the session's directory. A `Glob`
+    whose pattern begins with fixed components is a search of those and is
+    admitted; the price of the rule is the search that names none.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    (tmp_path / "Source").mkdir()
+
+    assert _gate("Grep", {"pattern": "x"}, cwd=tmp_path) is Disposition.REQUIRE_APPROVAL
+    assert _gate("Glob", {"pattern": "**/*.py"}, cwd=tmp_path) is Disposition.REQUIRE_APPROVAL
+    assert _gate("Glob", {"pattern": "*.py"}, cwd=tmp_path) is Disposition.REQUIRE_APPROVAL
+    assert _gate("Glob", {"pattern": "Source/**/*.py"}, cwd=tmp_path) is Disposition.AUTO_APPROVE
+    assert _gate("Grep", {"pattern": "x", "path": "Source"}, cwd=tmp_path) is (
+        Disposition.AUTO_APPROVE
+    )
+    reaching = {"pattern": ".config/pptmstr/sess*/**"}
+    assert _gate("Glob", reaching, cwd=tmp_path) is Disposition.REQUIRE_APPROVAL
+    braces = {"pattern": "{Source,.config}/**"}
+    assert _gate("Glob", braces, cwd=tmp_path) is Disposition.REQUIRE_APPROVAL
+
+
+def test_a_padded_path_is_read_both_ways(tmp_path: Path) -> None:
+    """
+    `Path(" /x")` is relative. A reader that strips the padding opens the
+    absolute file, so both readings are judged.
+    """
+    padded = f" {_their_log()}"
+
+    assert _gate("Read", {"file_path": padded}, cwd=tmp_path) is Disposition.REQUIRE_APPROVAL
+    assert _gate("Grep", {"pattern": "x", "path": padded + " "}, cwd=tmp_path) is (
+        Disposition.REQUIRE_APPROVAL
+    )
+
+
+def test_a_path_that_cannot_be_placed_is_not_admitted(tmp_path: Path) -> None:
+    """
+    Staying out of the records cannot be shown for any of these, and each is a
+    call the tool would fail anyway.
+    """
+    (tmp_path / "a").symlink_to(tmp_path / "b")
+    (tmp_path / "b").symlink_to(tmp_path / "a")
+
+    for tool, tool_input in [
+        ("Read", {"file_path": "a/x"}),
+        ("Read", {"file_path": "x\0y"}),
+        ("Read", {"file_path": ["/etc/hostname"]}),
+        ("NotebookRead", {"notebook_path": 7}),
+        ("Grep", {"pattern": "x", "path": ["/"]}),
+        ("Glob", {"pattern": ["**"]}),
+        ("Glob", {"pattern": "*", "path": "x\0y"}),
+    ]:
+        got = _gate(tool, tool_input, cwd=tmp_path)
+        assert got is Disposition.REQUIRE_APPROVAL, (tool, tool_input)
+
+
+def test_a_directory_that_cannot_be_placed_admits_no_relative_read() -> None:
+    assert (
+        classify("Grep", {"pattern": "x"}, session_id=MINE, cwd="x\0y")
+        is Disposition.REQUIRE_APPROVAL
+    )
+
+
+def test_ordinary_reads_are_admitted_as_they_were(tmp_path: Path) -> None:
+    """
+    The other direction, so that a gate refusing every read does not pass this
+    section. A name that merely resembles the root is beside it, not in it.
+    """
+    beside = _records_root().parent / "sessions-notes" / "x.md"
+    for tool, tool_input in [
+        ("Read", {"file_path": "/etc/hostname"}),
+        ("Read", {"file_path": "pptmstr/approval.py"}),
+        ("Read", {"file_path": str(beside)}),
+        ("Read", {"file_path": str(_records_root().parent / "settings.json")}),
+        ("NotebookRead", {"notebook_path": "nb.ipynb"}),
+        ("Glob", {"pattern": "**/*.py"}),
+        ("Glob", {"pattern": "**/*.py", "path": str(tmp_path)}),
+        ("Grep", {"pattern": "sessions"}),
+        ("Grep", {"pattern": "x", "path": "/etc", "glob": "*.conf"}),
+    ]:
+        assert _gate(tool, tool_input, cwd=tmp_path) is Disposition.AUTO_APPROVE, (tool, tool_input)
+
+
+def test_the_legacy_boards_directory_is_a_records_root() -> None:
+    """
+    A log `boardsync.migrate` left where it was is still another session's
+    board, and the link it leaves for a moved one reaches the same files.
+    """
+    from pptmstr import boardsync
+
+    legacy = boardsync.legacy_root()
+    (legacy / THEIRS).mkdir(parents=True)
+    (legacy / MINE).mkdir()
+
+    def read(name: str) -> Disposition:
+        return _gate("Read", {"file_path": str(legacy / name / "000001.json")})
+
+    assert read(THEIRS) is Disposition.REQUIRE_APPROVAL
+    assert read(MINE) is Disposition.AUTO_APPROVE
+    assert _gate("Glob", {"pattern": "*", "path": str(legacy)}) is Disposition.REQUIRE_APPROVAL
+
+
+def test_a_moved_boards_link_is_followed_to_the_session_it_belongs_to() -> None:
+    from pptmstr import boardsync
+
+    legacy = boardsync.legacy_root()
+    legacy.mkdir(parents=True)
+    for name in (MINE, THEIRS):
+        (_records_root() / name / "board").mkdir(parents=True)
+        (legacy / name).symlink_to(Path("..") / "sessions" / name / "board")
+
+    def read(name: str) -> Disposition:
+        return _gate("Read", {"file_path": str(legacy / name / "000001.json")})
+
+    assert read(THEIRS) is Disposition.REQUIRE_APPROVAL
+    assert read(MINE) is Disposition.AUTO_APPROVE
+
+
+def test_a_root_reached_through_a_link_is_a_root_under_both_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    A configuration directory that is a symlink, as a dotfiles checkout makes
+    it: the records are where the link leads, and a search above the link is a
+    search that may follow it.
+    """
+    real = tmp_path / "dotfiles" / "config"
+    (real / "pptmstr" / "sessions" / THEIRS).mkdir(parents=True)
+    (tmp_path / "home").mkdir()
+    (tmp_path / "home" / ".config").symlink_to(real)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+
+    direct = {"file_path": str(real / "pptmstr" / "sessions" / THEIRS / "session.json")}
+    assert _gate("Read", direct, cwd=tmp_path) is Disposition.REQUIRE_APPROVAL
+    for above in (tmp_path / "home", tmp_path / "dotfiles"):
+        search = {"pattern": "x", "path": str(above)}
+        assert _gate("Grep", search, cwd=tmp_path) is Disposition.REQUIRE_APPROVAL, above
+
+
+# -- the same, for the shell reads PERMISSIVE admits -----------------------------
+
+
+def _shell(command: str, *, cwd: Path, policy: Policy = Policy.PERMISSIVE) -> Disposition:
+    assert is_read_only(command), f"not a command the rung admits at all: {command!r}"
+    return _gate("Bash", {"command": command}, policy, cwd=cwd)
+
+
+def test_an_admitted_shell_read_does_not_reach_another_sessions_records(tmp_path: Path) -> None:
+    """
+    Every command here passes `shellscan` and was admitted unasked. An
+    uncontained session has no sandbox to deny them.
+    """
+    log = _their_log()
+    root = _records_root()
+    (tmp_path / "shortcut").symlink_to(root)
+
+    for command in [
+        f"cat {log}",
+        f"tail -n 20 {log}",
+        f"sed -n 1,20p {log}",
+        f"head -c 100 '{log}'",
+        f"ls {root}",
+        f"ls -R {root.parent}",
+        f"du -a {root.parent.parent}",
+        f"grep -r token {root.parent}",
+        f"grep -rtoken --include=*.log {root}",
+        f"grep --file={log} /etc/hostname",
+        f"grep -f{log} /etc/hostname",
+        f"wc --files0-from={log}",
+        f"cat {root}/*/commands/*/output.log",
+        f"cat {root.parent}/sess*/{THEIRS}/session.json",
+        f"git diff --no-index {log} /etc/hostname",
+        f"git log -- {root}/*",
+        f"cat shortcut/{THEIRS}/commands/c1/output.log",
+        f"echo ===; cat {log} | head -n 3",
+    ]:
+        assert _shell(command, cwd=tmp_path) is Disposition.REQUIRE_APPROVAL, command
+
+
+def test_a_shell_read_is_followed_through_its_cd(tmp_path: Path) -> None:
+    """
+    No word after the `cd` mentions the records. A `cd` in a pipeline runs in a
+    subshell, so the directory before it is still one the next command may be
+    in, and both are measured.
+    """
+    _their_log()
+    root = _records_root()
+    inside = root / THEIRS / "commands"
+    (tmp_path / "c1").mkdir()
+
+    for command in [
+        f"cd {root} && cat {THEIRS}/commands/c1/output.log",
+        f"cd {root.parent}; cd sessions; cd {THEIRS}; cat session.json",
+        f"cd {inside} && cat c1/output.log",
+        f"cd {root} && ls",
+        f"cd {root.parent.parent} && grep -r token",
+        "cd - && cat x",
+        "cd - && ls",
+        "cd -; cd /etc; grep -r x",
+        f"cd -P {inside} && cat c1/output.log",
+    ]:
+        assert _shell(command, cwd=tmp_path) is Disposition.REQUIRE_APPROVAL, command
+
+    # A `cd -` alone, or followed only by absolute paths, has placed everything.
+    assert _shell("cd - && cat /etc/hostname", cwd=tmp_path) is Disposition.AUTO_APPROVE
+
+    # The subshell: `cd` did not happen for the `cat`, which reads from where
+    # the session is.
+    piped = "cd /etc | cat c1/output.log"
+    assert _shell(piped, cwd=inside) is Disposition.REQUIRE_APPROVAL
+    assert _shell(piped, cwd=tmp_path) is Disposition.AUTO_APPROVE
+
+
+def test_a_cd_is_read_the_way_bash_reads_it_as_well(tmp_path: Path) -> None:
+    """
+    Bash drops `link/..` from the spelling before it follows the link, so
+    `cd <theirs>/link/..` is `<theirs>`; the kernel follows the link first and
+    lands beside its target. Only the first reading is in the records.
+    """
+    _their_log()
+    theirs = _records_root() / THEIRS
+    (tmp_path / "far" / "deep").mkdir(parents=True)
+    (theirs / "link").symlink_to(tmp_path / "far" / "deep")
+
+    command = f"cd {theirs}/link/.. && cat session.json"
+
+    assert (theirs / "link" / "..").resolve() == tmp_path / "far"
+    assert _shell(command, cwd=tmp_path) is Disposition.REQUIRE_APPROVAL
+
+
+def test_a_cd_that_follows_the_link_first_is_read_that_way_too(tmp_path: Path) -> None:
+    """
+    `cd -P` is the kernel's reading: through a link into the records and up one
+    is in them, where the spelling says it is back in the working tree.
+    """
+    _their_log()
+    (tmp_path / "link").symlink_to(_records_root() / THEIRS / "commands")
+
+    command = "cd -P link/.. && cat session.json"
+
+    assert _shell(command, cwd=tmp_path) is Disposition.REQUIRE_APPROVAL
+
+
+def test_a_session_running_above_the_records_has_no_admitted_shell_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    `grep -r token` names no path and reads the records from there. Which
+    commands descend is the binary's knowledge, so none is admitted.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    work = tmp_path / "Source"
+    work.mkdir()
+
+    for command in ["grep -r token", "ls", "git status", "cat *"]:
+        assert _shell(command, cwd=tmp_path) is Disposition.REQUIRE_APPROVAL, command
+        assert _shell(command, cwd=work) is Disposition.AUTO_APPROVE, command
+    assert _shell("ls ..", cwd=work) is Disposition.REQUIRE_APPROVAL
+    assert _shell("cd .. && ls", cwd=work) is Disposition.REQUIRE_APPROVAL
+    assert _shell("cat ../*/x", cwd=work) is Disposition.REQUIRE_APPROVAL
+
+
+def test_a_shell_read_of_the_sessions_own_records_is_admitted(tmp_path: Path) -> None:
+    mine = _my_log()
+    _their_log()
+
+    for command in [
+        f"cat {mine}",
+        f"tail -n 5 {mine} 2>/dev/null",
+        f"cd {mine.parent} && cat output.log",
+        f"ls {mine.parent.parent}/*",
+    ]:
+        assert _shell(command, cwd=tmp_path) is Disposition.AUTO_APPROVE, command
+    assert _shell(f"cd {mine.parent}/../../.. && ls", cwd=tmp_path) is Disposition.REQUIRE_APPROVAL
+
+
+def test_too_many_directories_to_follow_is_not_admitted(tmp_path: Path) -> None:
+    for index in range(8):
+        (tmp_path / f"d{index}").mkdir()
+    few = "; ".join(f"cd d{index}" for index in range(3))
+    many = "cd " + " ".join(f"d{index}" for index in range(8))
+    wide = " | ".join([many] * 2)
+
+    assert _shell(few, cwd=tmp_path) is Disposition.AUTO_APPROVE
+    assert _shell(wide, cwd=tmp_path) is Disposition.REQUIRE_APPROVAL
+
+
+@pytest.mark.parametrize("command", ADMITTED)
+def test_the_admitted_corpus_is_still_admitted_where_no_records_are(
+    command: str, tmp_path: Path
+) -> None:
+    """
+    The whole of `shellscan`'s admitted corpus, from a directory with nothing to
+    do with the records: the rule must cost a session that is not near them
+    nothing, apart from the commands that name a directory above them.
+    """
+    above = approval.records_read("Bash", {"command": command}, session_id=MINE, cwd=str(tmp_path))
+
+    got = _gate("Bash", {"command": command}, Policy.PERMISSIVE, cwd=tmp_path)
+
+    assert got is (Disposition.AUTO_APPROVE if above is None else Disposition.REQUIRE_APPROVAL)
+    if above is not None:
+        assert "reads everything under" in above, (command, above)
+
+
+def test_the_rung_that_does_not_read_a_command_is_not_asked_about_it(tmp_path: Path) -> None:
+    """
+    `AUTONOMOUS` releases `Bash` by name, to a sandbox that denies the records
+    directory whole. Pinned so that the gate is not taken to bound it: the same
+    string is a read `PERMISSIVE` parks and `STRICT` parks as it parks any.
+    """
+    command = {"command": f"cat {_their_log()}"}
+
+    assert _gate("Bash", command, Policy.AUTONOMOUS, cwd=tmp_path) is Disposition.AUTO_APPROVE
+    assert _gate("Bash", command, Policy.PERMISSIVE, cwd=tmp_path) is Disposition.REQUIRE_APPROVAL
+    assert _gate("Bash", command, Policy.STRICT, cwd=tmp_path) is Disposition.REQUIRE_APPROVAL
+
+
+def test_the_reason_says_whose_records_and_where_the_callers_are(tmp_path: Path) -> None:
+    log = _their_log()
+    _my_log()
+    read = {"file_path": str(log)}
+
+    known = approval.records_read("Read", read, session_id=MINE, cwd=str(tmp_path))
+    unknown = approval.records_read("Read", read, cwd=str(tmp_path))
+    above = approval.records_read(
+        "Grep", {"pattern": "x", "path": str(_records_root().parent)}, session_id=MINE
+    )
+
+    assert known is not None and unknown is not None and above is not None
+    assert "another session's records" in known
+    assert str(log) in known and str(_records_root() / MINE) in known
+    assert "another session's" not in unknown and "a session's records" in unknown
+    assert "not known to the gate" in unknown
+    assert f"everything under {_records_root().parent}" in above
+    assert approval.records_read("Read", {"file_path": "/etc/hostname"}) is None
+    assert approval.records_read("Write", {"file_path": str(log)}) is None
+
+
+def test_the_queue_row_leads_with_whose_records_a_read_reaches(tmp_path: Path) -> None:
+    """
+    Through a symlink the path on the row is a file in the working tree, so the
+    row is the only place the operator is told what approving it reads.
+    """
+    (tmp_path / "notes.txt").symlink_to(_their_log())
+    read = {"file_path": "notes.txt"}
+
+    marked = summarize("Read", read, session_id=MINE, cwd=str(tmp_path))
+    unnamed = summarize("Read", read, cwd=str(tmp_path))
+    narrow = summarize("Read", read, 30, session_id=MINE, cwd=str(tmp_path))
+
+    assert marked == "another session's records · Read file_path='notes.txt'"
+    assert unnamed == "a session's records · Read file_path='notes.txt'"
+    assert len(narrow) == 30 and narrow.startswith("another session's records")
+    assert summarize("Read", {"file_path": "/etc/hostname"}) == "Read file_path='/etc/hostname'"
+    shell = summarize("Bash", {"command": f"cat {tmp_path}/notes.txt"}, 200, session_id=MINE)
+    assert shell.startswith("another session's records · cat ")
+    above = str(_records_root().parent)
+    assert summarize("Grep", {}, session_id=MINE, cwd=above) == "another session's records · Grep"
+
+
+def test_a_configuration_directory_that_cannot_be_located_admits_no_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    `Path.home()` raises with no home to name. The records are then nowhere
+    this can see, so nothing can be shown to be outside them.
+    """
+    from pptmstr import settings
+
+    def nowhere() -> Path:
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.setattr(settings, "config_dir", nowhere)
+
+    assert classify("Read", {"file_path": "/etc/hostname"}) is Disposition.REQUIRE_APPROVAL
+    assert classify("Read", {}) is Disposition.AUTO_APPROVE
+
+
+def test_a_command_the_shell_table_refuses_is_not_read_for_paths() -> None:
+    """
+    Its words are not known to be its arguments -- `$X` is not the text that
+    runs -- so nothing is claimed about where it reads, in either direction. It
+    parks on every rung that reads commands anyway.
+    """
+    command = {"command": f"cat $X {_their_log()}"}
+
+    assert approval.records_read("Bash", command, session_id=MINE) is None
+    assert classify("Bash", command, Policy.PERMISSIVE) is Disposition.REQUIRE_APPROVAL
+
+
+# -- writes into the records -----------------------------------------------------
+#
+# pptmstr reads what is under the roots back as what happened, so a write there
+# from a tool call is a forged record. Every session's directory counts, the
+# caller's own included.
+
+
+def _writes_of(target: str) -> list[tuple[str, dict[str, Any]]]:
+    return [
+        ("Write", {"file_path": target, "content": "{}"}),
+        ("Edit", {"file_path": target, "old_string": "a", "new_string": "b"}),
+        ("MultiEdit", {"file_path": target, "edits": []}),
+        ("NotebookEdit", {"notebook_path": target, "new_source": ""}),
+    ]
+
+
+def _record_files() -> dict[str, Path]:
+    from pptmstr import boardsync
+
+    root, legacy = _records_root(), boardsync.legacy_root()
+    return {
+        "own end": root / MINE / "commands" / "x" / "end.json",
+        "own session": root / MINE / "session.json",
+        "other gone": root / THEIRS / "commands" / "x" / "gone.json",
+        "other board": root / THEIRS / "board" / "000001.json",
+        "root": root,
+        "legacy other": legacy / THEIRS / "000001.json",
+        "legacy own": legacy / MINE / "000001.json",
+    }
+
+
+@EVERY_RUNG
+@pytest.mark.parametrize("where", ["home", "project"])
+def test_no_rung_admits_a_write_into_any_sessions_records(
+    policy: Policy, where: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The session's own directory is not exempt, as it is for a read: nothing an
+    agent does needs to write a record pptmstr reads back as the truth.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    project = tmp_path / "Source" / "proj"
+    project.mkdir(parents=True)
+    cwd = tmp_path if where == "home" else project
+
+    for name, target in _record_files().items():
+        for tool, tool_input in _writes_of(str(target)):
+            got = _gate(tool, tool_input, policy, cwd=cwd)
+            assert got is Disposition.REQUIRE_APPROVAL, (name, tool)
+
+
+def test_a_write_into_the_records_is_placed_as_a_read_is(tmp_path: Path) -> None:
+    """
+    Relative to the session's directory, through `..`, through a symlink in the
+    working tree, through `~`, and under both readings of a padded spelling.
+    """
+    _my_log()
+    (tmp_path / "shortcut").symlink_to(_records_root())
+    (tmp_path / "notes.json").symlink_to(_records_root() / MINE / "session.json")
+    inside = _records_root() / MINE / "commands"
+
+    for spelled, cwd in [
+        ("c1/end.json", inside),
+        (f"{tmp_path}/../{tmp_path.name}/shortcut/{THEIRS}/end.json", tmp_path),
+        (f"shortcut/{MINE}/session.json", tmp_path),
+        ("notes.json", tmp_path),
+        (f" {_records_root() / MINE / 'end.json'}", tmp_path),
+    ]:
+        for tool, tool_input in _writes_of(spelled):
+            got = _gate(tool, tool_input, Policy.AUTONOMOUS, cwd=cwd)
+            assert got is Disposition.REQUIRE_APPROVAL, (spelled, tool)
+
+
+def test_a_tilde_write_reaches_the_records(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    own = {"file_path": f"~/.config/pptmstr/sessions/{MINE}/commands/x/end.json", "content": ""}
+
+    assert _gate("Write", own, Policy.AUTONOMOUS, cwd=tmp_path) is Disposition.REQUIRE_APPROVAL
+
+
+def test_a_write_target_that_cannot_be_placed_waits(tmp_path: Path) -> None:
+    """
+    A write naming no target at all is not one of these: it opens nothing, and
+    the driver's write bound refuses it where it would be released.
+    """
+    (tmp_path / "a").symlink_to(tmp_path / "b")
+    (tmp_path / "b").symlink_to(tmp_path / "a")
+
+    for tool_input in [
+        {"file_path": "a/x", "content": ""},
+        {"file_path": "x\0y", "content": ""},
+    ]:
+        got = _gate("Write", tool_input, Policy.AUTONOMOUS, cwd=tmp_path)
+        assert got is Disposition.REQUIRE_APPROVAL, tool_input
+    for cwd in ("x\0y", "~no-such-user-pptmstr"):
+        unplaced_cwd = classify("Write", {"file_path": "x"}, Policy.AUTONOMOUS, cwd=cwd)
+        assert unplaced_cwd is Disposition.REQUIRE_APPROVAL, cwd
+
+
+def test_a_write_cannot_be_placed_without_a_configuration_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pptmstr import settings
+
+    def nowhere() -> Path:
+        raise RuntimeError("Could not determine home directory.")
+
+    monkeypatch.setattr(settings, "config_dir", nowhere)
+    write = {"file_path": str(tmp_path / "x"), "content": ""}
+
+    assert classify("Write", write, Policy.AUTONOMOUS, cwd=str(tmp_path)) is (
+        Disposition.REQUIRE_APPROVAL
+    )
+
+
+def test_ordinary_writes_are_released_as_they_were(tmp_path: Path) -> None:
+    """
+    The other direction, so a gate that parks every write does not pass this
+    section. A name that resembles a root is beside it, and the configuration
+    directory beside the roots is not records.
+    """
+    beside = _records_root().parent / "sessions-notes" / "x.md"
+    for target in [
+        tmp_path / "x.py",
+        beside,
+        _records_root().parent / "settings.json",
+        Path("relative.py"),
+    ]:
+        for tool, tool_input in _writes_of(str(target)):
+            got = _gate(tool, tool_input, Policy.AUTONOMOUS, cwd=tmp_path)
+            assert got is Disposition.AUTO_APPROVE, (target, tool)
+
+
+def test_records_written_answers_for_the_write_tools_alone(tmp_path: Path) -> None:
+    """
+    A read of the caller's own records stays admitted, and a non-writing tool
+    naming a record is `records_read`'s question.
+    """
+    own = str(_my_log())
+
+    assert approval.records_written("Read", {"file_path": own}) is None
+    assert approval.records_written("Bash", {"command": f"echo > {own}"}) is None
+    assert _gate("Read", {"file_path": own}, Policy.AUTONOMOUS, cwd=tmp_path) is (
+        Disposition.AUTO_APPROVE
+    )
+    said = approval.records_written("Write", {"file_path": own}, cwd=str(tmp_path))
+    assert said is not None
+    assert "pptmstr's own records" in said and own in said and str(_records_root()) in said
+
+
+def test_the_queue_row_says_a_write_reaches_pptmstrs_own_records(tmp_path: Path) -> None:
+    (tmp_path / "notes.json").symlink_to(_records_root() / MINE / "session.json")
+    write = {"file_path": "notes.json", "content": ""}
+
+    assert summarize("Write", write, session_id=MINE, cwd=str(tmp_path)) == (
+        "pptmstr's own records · Write notes.json"
+    )
+    assert summarize("Write", {"file_path": str(tmp_path / "x")}, cwd=str(tmp_path)) == (
+        f"Write {tmp_path / 'x'}"
+    )

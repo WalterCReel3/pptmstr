@@ -26,9 +26,10 @@ rail re-flows at the model's pace only inside the groups the operator asked to o
 
 **Two things are filtered at the draw and nowhere else.** A session off the fleet
 has no card and is in no count, because ``projects.roots`` does not list it. An
-ended sub-agent nothing is waiting on is folded into one row under its group
-(``fleet_view.fold``) when the caller asks for that. Neither touches the snapshot or
-the cursor.
+ended sub-agent nothing is waiting on has no card, is in no count and is named
+nowhere (``fleet_view.fold``) when the caller asks for that, and no control here
+brings it back: the caller's setting is the only switch. Neither touches the snapshot
+or the cursor.
 
 **A closed card is not an ended one.** A session recalled from its file
 (``AgentRecord.recalled``) was not run by this process, so its card says what the
@@ -109,12 +110,6 @@ class RailState:
     and cannot be opened, so the only thing that opens is the group the cards live
     in. It never enters the store (design §6), for the same reason ``DetailState``
     and ``TranscriptState`` do not.
-
-    ``unfolded`` holds **root** ids: the sessions whose folded sub-agents the
-    operator asked to see. It is what ``fleet_view.fold`` takes as ``opened``, and a
-    second set rather than a meaning of ``expanded`` because the two answer
-    different questions -- whether the group is open, and whether an open group
-    also shows the members nothing is waiting on.
     """
 
     # A one-shot, armed by ``arm_scroll`` and spent by the focused card. Not a
@@ -125,7 +120,6 @@ class RailState:
     # fit on screen; a card taller than the pane cannot be read past the fold.
     scroll_to_focus: bool = True
     expanded: set[str] = field(default_factory=set)
-    unfolded: set[NodeId] = field(default_factory=set)
     _scrolled_to: NodeId | None = None
 
     def toggle(self, session: str) -> None:
@@ -144,18 +138,6 @@ class RailState:
             self.expanded.discard(session)
         else:
             self.expanded.add(session)
-
-    def toggle_ended(self, root: NodeId) -> None:
-        """
-        Show or fold one session's ended sub-agents.
-
-        The only thing that changes ``unfolded``. Nothing folds a session again on
-        its own, for the reason nothing closes a group on its own (``toggle``).
-        """
-        if root in self.unfolded:
-            self.unfolded.discard(root)
-        else:
-            self.unfolded.add(root)
 
     def arm_scroll(self, cursor: NodeId | None) -> None:
         """
@@ -179,7 +161,6 @@ class RailState:
         asked for.
         """
         self.expanded &= {node[0] for node in snap.order}
-        self.unfolded &= set(snap.order)
 
 
 def _small() -> None:
@@ -591,10 +572,10 @@ def draw(
     it calls and the live gate reading (``session_menu.Wiring``). None draws cards
     that have no menu.
 
-    ``hide_ended`` folds each open group's ended sub-agents that nothing is waiting
-    on into one row (``fleet_view.fold``). ``now_wall`` is ``time.time()`` as the
-    frame read it, and is what a closed card's age is measured against; ``now`` is
-    monotonic and cannot be.
+    ``hide_ended`` leaves out every ended sub-agent that nothing is waiting on
+    (``fleet_view.fold``): no card, no count, no mention. ``now_wall`` is
+    ``time.time()`` as the frame read it, and is what a closed card's age is measured
+    against; ``now`` is monotonic and cannot be.
     """
     # Before the empty-rail return, not after: an empty snapshot is the one case
     # where every id in the set is stale.
@@ -698,26 +679,33 @@ def _group(
     cards rather than a new kind of motion -- and it only reaches a group the operator
     opened, which is what makes it the operator's own pace rather than the model's.
 
-    **With ``hide_ended``, an ended member nothing is waiting on leaves the group for
-    one row that counts it** (``fleet_view.fold`` is the rule; ``_fold_row`` the row).
-    So an open group also shrinks at the model's pace, one card at a time, and that
-    is the operator's decision over the argument above for this one kind of member
-    (``planning/2026-10-13-a-fleet-that-survives-the-window.md``, D6 and D8): a fleet
-    that survives the window fills with finished sub-agents, and a card that owes
-    nothing, holds nothing and can be had back with one click is the cheapest thing
-    on the pane to give up. It is a filter on this function's loop and nothing else.
-    Membership is as append-only as it was, which is what the collapse rule rests on
-    (``planning/2026-08-13-an-expansion-outgrows-its-pane.md``): the collapsed
-    marker still counts every sub-agent, and a member that is woken is drawn again on
-    the next frame because nothing here remembers having folded it. The card under
-    the cursor is never folded, so the row cannot take away what the operator is on.
+    **With ``hide_ended``, an ended member nothing is waiting on is not a member
+    here at all** (``fleet_view.fold`` is the rule). Everything below is computed from
+    the members that are left, so such a sub-agent has no card, the collapsed marker
+    does not count it, and a session whose every sub-agent is hidden draws as a
+    session that has none: no marker, nothing to open. So an open group also shrinks
+    at the model's pace, one card at a time, and that is the operator's decision over
+    the argument above for this one kind of member
+    (``planning/2026-10-13-a-fleet-that-survives-the-window.md``, D6, D8 and D9): a
+    fleet that survives the window fills with finished sub-agents, and one that owes
+    nothing and holds nothing is the cheapest thing on the pane to give up. The
+    store's membership is as append-only as it was, and a member that is woken is
+    drawn again on the next frame because nothing here remembers having hidden it.
+
+    **The cursor does not keep a card.** It can be on a sub-agent that is hidden --
+    the operator was on the card when it ended -- and the root's card lights for it
+    (``_lit``), as it does for every member while the group is collapsed. Nothing
+    here moves the cursor.
     """
-    subs = snap.subagents_of(rec.node_id)
-    # A session with nothing in it cannot be open, whatever the set says. Membership
-    # is not pruned on the 1->0 transition because there is no such transition:
-    # sub-agents are never reaped. This guards the case where a session is expanded
-    # by a relaunch reusing its id before it has spawned anything.
+    shown = set(fleet_view.fold(snap, rec.node_id, cursor, hide_ended).drawn)
+    subs = [sub for sub in snap.subagents_of(rec.node_id) if sub.node_id in shown]
+    # A session with nothing to draw in it cannot be open, whatever the set says.
+    # The set is left alone: a session whose members were all hidden opens again
+    # when one is woken, and one expanded by a relaunch reusing its id before it
+    # has spawned anything opens when it does.
     expanded = bool(subs) and rec.node_id[0] in state.expanded
+    if expanded:
+        cursor = _lit(cursor, rec.node_id, shown)
     left = imgui.get_cursor_screen_pos().x
 
     # One scope for the root's card, and everything it does follows from it: which
@@ -754,12 +742,8 @@ def _group(
     if not expanded:
         return
 
-    folded = fleet_view.fold(snap, rec.node_id, cursor, hide_ended, state.unfolded)
-    shown = set(folded.drawn)
     bottom = root_bottom
     for sub in subs:
-        if sub.node_id not in shown:
-            continue
         bottom = _card(
             snap,
             focus,
@@ -775,51 +759,21 @@ def _group(
             indent=_GROUP_INDENT,
             menu=menu,
         )
-    if folded.count:
-        bottom = _fold_row(state, rec.node_id, folded)
     _bracket(left, root_bottom, bottom)
 
 
-def fold_label(folded: fleet_view.Folded) -> str:
-    """What the fold row reads: how many are folded, and whether they are shown."""
-    return f"{folded.count} ended, shown" if folded.opened else f"{folded.count} ended"
-
-
-def _fold_row(state: RailState, root: NodeId, folded: fleet_view.Folded) -> float:
+def _lit(cursor: NodeId | None, root: NodeId, shown: set[NodeId]) -> NodeId | None:
     """
-    The row that stands for a group's folded sub-agents. Returns its bottom edge.
+    The node whose card the cursor lights in the open group of ``root``.
 
-    A control and not a card: clicking it shows or folds them and does nothing
-    else. It has no context menu, by pointer or by key, and it never takes the
-    cursor -- it stands for agents nothing is waiting on, and the cursor is what
-    an approval key answers for.
-
-    Drawn after the members and at their indent, so it sits inside the bracket
-    where the cards it replaced were. The count is ``Folded.count`` open or
-    closed: opening changes what is drawn above it, not what it counts.
+    The cursor itself, unless it is on a sub-agent of this session that has no
+    card: then the root, whose card is the only surface that sub-agent has. So the
+    cursor is never on something the pane does not show, and the menu key has a
+    card to open on. ``shown`` is the sub-agents drawn.
     """
-    line_h = imgui.get_text_line_height_with_spacing()
-    outer = imgui.get_cursor_screen_pos()
-    origin = imgui.ImVec2(outer.x + _GROUP_INDENT, outer.y)
-    width = max(imgui.get_content_region_avail().x - _GROUP_INDENT, 40.0)
-    imgui.set_cursor_screen_pos(origin)
-
-    # The root card's scope, which is closed by now, and a label of its own: no
-    # agent id can collide with it.
-    imgui.push_id(f"{root[0]}:")
-    imgui.invisible_button("##fold", imgui.ImVec2(width, line_h))
-    if imgui.is_item_hovered():
-        imgui.set_mouse_cursor(imgui.MouseCursor_.hand)
-    if imgui.is_item_clicked():
-        state.toggle_ended(root)
-    imgui.pop_id()
-
-    imgui.set_cursor_screen_pos(imgui.ImVec2(origin.x + _PAD + 4.0, origin.y + 1.0))
-    _small()
-    imgui.text_colored(P.text_dim.vec4, f"{DISCLOSURE_GLYPH[folded.opened]} {fold_label(folded)}")
-    _normal()
-    _end(outer.x, origin.y, line_h)
-    return origin.y + line_h
+    if cursor is None or cursor[0] != root[0] or cursor == root or cursor in shown:
+        return cursor
+    return root
 
 
 def _bracket(left: float, top: float, bottom: float) -> None:

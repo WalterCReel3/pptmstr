@@ -116,6 +116,12 @@ class Palette:
     bg: Color
     panel: Color
     panel_alt: Color
+    # What a field the operator types or picks a value in is filled with where it
+    # stands on ``panel_alt`` -- a modal's surface. On most palettes this is the
+    # value of ``panel``, and that is a choice per palette and not a definition:
+    # the two are held to different floors (tests/test_theme.py), and a palette
+    # whose docks are not what its fields should look like says so here.
+    well: Color
     border: Color
     selection: Color
 
@@ -264,6 +270,7 @@ DARK = Palette(
     bg=col(0x14161C),
     panel=col(0x1A1D26),
     panel_alt=col(0x21242F),
+    well=col(0x1A1D26),
     border=col(0x323848),
     selection=col(0x2B3550),
     text=col(0xC9CEDC),
@@ -301,6 +308,7 @@ LIGHT = Palette(
     bg=col(0xF4F5F8),
     panel=col(0xFFFFFF),
     panel_alt=col(0xEBEDF2),
+    well=col(0xFFFFFF),
     border=col(0xC4C9D4),
     selection=col(0xD3E2F7),
     text=col(0x1F232C),
@@ -342,6 +350,7 @@ HIGH_CONTRAST = Palette(
     bg=col(0x000000),
     panel=col(0x000000),
     panel_alt=col(0x101010),
+    well=col(0x000000),
     border=col(0xFFFFFF),
     selection=col(0x0050B3),
     text=col(0xFFFFFF),
@@ -382,6 +391,7 @@ GHOST = Palette(
     bg=col(0x0B1216),
     panel=col(0x0F1A20),
     panel_alt=col(0x14242C),
+    well=col(0x0F1A20),
     border=col(0x1F3E49),
     selection=col(0x12333D),
     text=col(0xA8D8D0),
@@ -432,6 +442,7 @@ XTERM = Palette(
     bg=col(0xE8E6DC),
     panel=col(0xF2F0E6),
     panel_alt=col(0xDCD9CC),
+    well=col(0xF2F0E6),
     border=col(0x9A9686),
     selection=col(0xC8C4B0),
     text=col(0x1C1B18),
@@ -474,6 +485,7 @@ CDE = Palette(
     bg=col(0x8F94AB),
     panel=col(0xAEB2C3),
     panel_alt=col(0xC2C6D4),
+    well=col(0xAEB2C3),
     border=col(0x4E5065),
     selection=col(0x8892AD),
     text=col(0x0B0C12),
@@ -509,7 +521,8 @@ CDE = Palette(
 # it is 4.4:1, just under the AA floor, and lifting it is cheaper than giving up
 # black text), and the selection fill is a navy *tint* rather than #000080 --
 # ImGui draws the same P.text over a selected row as an unselected one, so a
-# true navy fill would swallow it.
+# true navy fill would swallow it. The well is the white an edit control had on
+# that chassis, and not the chassis grey its docks are.
 WIN311 = Palette(
     name="win311",
     display_name="Windows 3.11",
@@ -517,6 +530,7 @@ WIN311 = Palette(
     bg=col(0x74A0A0),
     panel=col(0xC0C0C0),
     panel_alt=col(0xCFCFCF),
+    well=col(0xFFFFFF),
     border=col(0x808080),
     selection=col(0xA8B4D8),
     text=col(0x000000),
@@ -559,6 +573,7 @@ KITTY = Palette(
     bg=col(0xFBDCE8),
     panel=col(0xFFF4F8),
     panel_alt=col(0xFFE7F1),
+    well=col(0xFFF4F8),
     border=col(0xF2A8C4),
     selection=col(0xFFD0E2),
     text=col(0x3A2A33),
@@ -601,6 +616,7 @@ TURBO = Palette(
     bg=col(0x000078),
     panel=col(0x0000A8),
     panel_alt=col(0x0000C8),
+    well=col(0x0000A8),
     border=col(0x00A8A8),
     selection=col(0x00728C),
     text=col(0xFFFF54),
@@ -799,6 +815,62 @@ def apply_style() -> None:
     s(c.nav_cursor, P.focus.vec4)
     s(c.docking_preview, dim(P.accent, 0.5))
     s(c.docking_empty_bg, P.bg.vec4)
+
+
+# How far a well moves toward the accent under the pointer, and while it is held.
+# The fractions ``apply_style`` gives the docks' frames, which are an accent drawn
+# translucent over whatever is behind the frame. A well's are mixed here instead
+# and drawn opaque: behind a well is the modal's surface and not the well, so a
+# translucent accent there would be a tint of the surface, and a field would lose
+# its fill at the moment it is pointed at.
+_WELL_HOVERED = 0.18
+_WELL_ACTIVE = 0.28
+
+_DIALOG_COLORS: dict[str, tuple[tuple[int, imgui.ImVec4], ...]] = {}
+
+
+def mixed(base: Color, over: Color, alpha: float) -> imgui.ImVec4:
+    """
+    What ``over`` at ``alpha`` shows as when it is drawn on ``base``, opaque.
+    """
+    b, o = base.vec4, over.vec4
+    return imgui.ImVec4(
+        b.x + (o.x - b.x) * alpha,
+        b.y + (o.y - b.y) * alpha,
+        b.z + (o.z - b.z) * alpha,
+        1.0,
+    )
+
+
+def dialog_colors() -> tuple[tuple[int, imgui.ImVec4], ...]:
+    """
+    The colours a modal form is drawn under where they are not the docks', as
+    ``(slot, colour)`` to push: one surface, and wells in a second colour.
+
+    A child window is given no fill, and nor is the track of a scrollbar, so what
+    shows through both is the popup they are in and a scrolling body is not a
+    second surface. Every frame -- a text box, a
+    combo, the field of a stepper -- is a well. A button is not a frame and is
+    left as the docks draw it: the surface's own colour inside a border, which is
+    what tells it from a well, and the same in every modal because the surface
+    is.
+
+    Built once per palette and not per frame, for the reason at the top of this
+    module.
+    """
+    palette = _CURRENT
+    found = _DIALOG_COLORS.get(palette.name)
+    if found is None:
+        c = imgui.Col_
+        found = (
+            (int(c.child_bg), imgui.ImVec4(0.0, 0.0, 0.0, 0.0)),
+            (int(c.scrollbar_bg), imgui.ImVec4(0.0, 0.0, 0.0, 0.0)),
+            (int(c.frame_bg), palette.well.vec4),
+            (int(c.frame_bg_hovered), mixed(palette.well, palette.accent, _WELL_HOVERED)),
+            (int(c.frame_bg_active), mixed(palette.well, palette.accent, _WELL_ACTIVE)),
+        )
+        _DIALOG_COLORS[palette.name] = found
+    return found
 
 
 class Face(enum.Enum):

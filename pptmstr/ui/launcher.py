@@ -35,14 +35,15 @@ from typing import assert_never
 from imgui_bundle import imgui
 
 from .. import brief as brief_mod
-from .. import cli_version, sandbox, templates, tree
+from .. import cli_version, sandbox, sessionfile, templates, tree
 from .. import sessions as sessions_mod
-from ..approval import Disposition, Policy, classify
+from ..approval import Disposition, Policy, classify, requires_containment
 from ..model import LaunchSpec
 from ..model_catalog import DEFAULT_MODEL, FALLBACK_MODELS
 from ..sessions import Overlay, SessionRow
 from ..theme import P
 from . import widgets
+from .widgets import Help, Notice, Tone
 
 TITLE = "New Task"
 
@@ -57,13 +58,16 @@ POLICIES: tuple[Policy, ...] = tuple(Policy)
 # chord is built from int() -- ``imgui.Key.mod_ctrl | imgui.Key.n`` raises.
 CHORD = int(imgui.Key.mod_ctrl) | int(imgui.Key.n)
 
-_WIDTH = 620.0
+_WIDTH = widgets.DIALOG_WIDTH
 _TASK_HEIGHT = 132.0
 _LIST_HEIGHT = 176.0
 
 # ``###`` fixes the header's ID apart from its visible label, so rewording the
 # header does not change which section a saved open state belongs to.
 _RESUME_ID = "###resume"
+# The scrolling child everything above the buttons is drawn in. Named because the
+# window ImGui makes for it is found by this label (``scripts/screenshot.py``).
+BODY_ID = "##body"
 # The task box's label, named because two calls have to agree on it: the widget, and
 # the lookup of that widget's text state in ``draw``.
 _TASK_ID = "##task"
@@ -171,7 +175,8 @@ class RedirectedDirectory:
 class GoneDirectory:
     """
     A session is picked and the directory it was recorded in is not a directory.
-    ``path`` is the recorded one. Nothing launches -- see ``resume_form.ResumeForm.hold``.
+    ``path`` is the recorded one. Nothing launches -- see ``LauncherState.launch_hold``
+    and ``resume_form.ResumeForm.hold``.
     """
 
     path: str
@@ -269,6 +274,41 @@ def resolved_directory(directory: LaunchDirectory) -> str:
             assert_never(directory)
 
 
+@dataclass(frozen=True, slots=True)
+class Recorded:
+    """
+    What a session's own file says it ran as, for the three things New Task would
+    otherwise choose for it. Each is as the file has it: an empty ``model``, a
+    ``template`` of None and a ``subagent_cap`` of None are a file that does not
+    say, and are not solo, the default model or the setting.
+    """
+
+    model: str
+    template: str | None
+    subagent_cap: int | None
+
+
+# Reading a session's record by its id, as a click on its row calls it. A
+# parameter for the reason ``Scanner`` is one: the answer is on a disk a test
+# should not depend on.
+Recorder = Callable[[str], Recorded | None]
+
+
+def read_recorded(session_id: str) -> Recorded | None:
+    """
+    The session's file (``sessionfile.read``), or None where there is none that
+    can be read: a session older than the build that writes one, or one another
+    tool started.
+
+    One small file, read at the click that picks the row and never from a draw
+    that did not pick one; ``sessionfile.read`` neither raises nor waits.
+    """
+    found = sessionfile.read(session_id)
+    if not isinstance(found, sessionfile.SessionFile):
+        return None
+    return Recorded(found.model, found.template, found.subagent_cap)
+
+
 # What a worker hands back: rows and overlay, or the message from the failure that
 # stopped it. Exactly one side is populated.
 _ScanResult = tuple[tuple[SessionRow, ...] | None, Overlay | None, str | None]
@@ -282,10 +322,11 @@ class SessionPicker:
     The list of sessions that can be resumed: one cached scan, the operator's
     overlay, and a pick.
 
-    **New Task lists and does not pick.** A click on a row there is handed to the
-    caller of ``draw`` (``on_pick_resume``) and nothing here remembers it; a session
-    is resumed from ``ui/resume_form`` and from nowhere else. ``pick`` and what it
-    derives are kept for that form, which asks them where a session's brief is.
+    **A click on a row in New Task is a pick, and New Task resumes it.** The modal
+    stays up with the row lit, the task box becomes the message the session is sent,
+    and the launch button starts ``LauncherState.press``'s resume of it. The resume
+    form (``ui/resume_form``) is a closed card's and never opens from here; it asks
+    ``pick`` only where a session's brief is.
 
     The cache is the whole design. ``sessions.enumerate_sessions`` opens, stats and
     head/tail-reads every transcript in the project and shells out to ``git
@@ -509,8 +550,9 @@ class SessionPicker:
         ``cwd`` is the cwd field, and it is only the answer for a row that recorded no
         directory. The brief directory is derived from ``launch_directory`` -- the
         directory the resumed session will run in -- and ``app._seed_brief`` builds it
-        from ``LaunchSpec.cwd``, which ``resume_form.press`` takes from the same call,
-        so the two agree by construction instead of by coincidence.
+        from ``LaunchSpec.cwd``, which ``LauncherState.resumed`` and
+        ``resume_form.press`` take from the same call, so the two agree by
+        construction instead of by coincidence.
         """
         self.picked = None if row is None or self.is_picked(row) else row
         self.recovered_brief = None
@@ -821,7 +863,7 @@ def git_layout(directory: str) -> GitLayout:
 @dataclass(frozen=True, slots=True)
 class ContainedText:
     """
-    What the containment section says the contained half is bounded to.
+    What the gate's explanation says the contained half is bounded to.
 
     ``sandbox`` is what ``Bash`` reaches and ``gate`` is what the write tools are held
     to; they are two mechanisms and are said apart. ``wider`` is what is known, or
@@ -1043,8 +1085,11 @@ OWN_CHECKOUT = tree.source_tree_of(str(Path(__file__).resolve().parents[1]))
 # launch runs in the session's own directory, and a refusal that said "this
 # directory" under a field naming somewhere else would send the operator to correct
 # the one directory that is not the problem.
+#
+# ``{consequence}`` is what the refusal does to the launch, which is not one thing
+# either: a new session is started under the ordinary gate, and a resume is held.
 _REFUSAL = (
-    "refused for {named} -- this launch will use the ordinary gate.\n"
+    "refused for {named} -- {consequence}.\n"
     "it is inside pptmstr's own checkout, or it is a path that cannot be resolved at "
     "all; the check answers yes to both and cannot tell them apart.\n"
     "under this mode that directory is where an agent writes without being asked, and "
@@ -1052,13 +1097,22 @@ _REFUSAL = (
 )
 
 
+REFUSAL_DOWNGRADES = "this launch will use the ordinary gate"
+REFUSAL_HOLDS = "the resume is held: choose another gate to launch it"
+
+
 def refusal_for(
-    cwd: str, *, checkout: str = OWN_CHECKOUT, named: str = "this directory"
+    cwd: str,
+    *,
+    checkout: str = OWN_CHECKOUT,
+    named: str = "this directory",
+    consequence: str = REFUSAL_DOWNGRADES,
 ) -> str | None:
     """
     Why the mode cannot be used for ``cwd``, or None when it can.
 
-    ``named`` is how the message refers to ``cwd``. The decision does not read it.
+    ``named`` is how the message refers to ``cwd`` and ``consequence`` what it says
+    becomes of the launch. The decision reads neither.
 
     A contained ``Bash`` writes inside the session's cwd -- and, where cwd is a linked
     git worktree, also inside the git directory that worktree shares with its main
@@ -1095,7 +1149,7 @@ def refusal_for(
         refused = tree.lies_inside_checkout(cwd.strip() or ".", checkout)
     except ValueError:
         refused = True
-    return _REFUSAL.format(named=named) if refused else None
+    return _REFUSAL.format(named=named, consequence=consequence) if refused else None
 
 
 # Reading the installed CLI's version, as the gate below calls it. A parameter so the
@@ -1226,21 +1280,157 @@ class VersionGate:
         self.refusal = floor_refusal(check)
 
 
-# Beside the launch button, where the two words have to explain a greyed-out control.
-# The reason in full is in the containment section the operator ticked the box in.
+# Why the launch button is held. Each is behind the question mark of the line
+# drawn beside the button (``hold_notice``).
 _HOLD_CHECKING = "confirming this machine's CLI can contain the session"
 _HOLD_REFUSED = "this CLI cannot contain the session -- untick the mode to launch"
 _HOLD_THIN = "the task box is this session's whole brief -- give it more than one line"
-# In the containment section, under the description of what the mode grants: the mode
-# is asked for and the directory allows it, and only the machine is still unanswered.
+# Behind the gate's question mark, after the description of what the mode grants:
+# the mode is asked for and the directory allows it, and only the machine is still
+# unanswered.
 _HOLD_LINE = (
     "confirming the installed CLI is new enough to honour those keys -- launch is held "
     "until it answers"
 )
 
+# Why a resume is held, in the words drawn beside or under its button. New Task's
+# picked session and the resume form say the same thing for the same reason, so the
+# strings live with the function that chooses between them (``resume_gate_hold``).
+#
+# ``{rung}`` is the rung on the dial. The two situations are named together because
+# ``refusal_for`` cannot tell them apart; see its docstring.
+RESUME_HOLD_REFUSED = (
+    "{rung} is refused here: the directory is inside pptmstr's own checkout, or cannot "
+    "be resolved at all -- choose another gate to resume"
+)
+RESUME_HOLD_CHECKING = _HOLD_CHECKING
+RESUME_HOLD_CLI = "this CLI cannot contain the session -- choose another gate to resume"
+# New Task's own, for a picked session. The form's sentence for the same directory
+# has no list to send the operator back to.
+_HOLD_GONE = "the picked session's directory is gone -- pick another, or launch fresh"
+
+# What is drawn beside a held button: one line for each reason above, which is
+# then the explanation behind that line's question mark. Keyed by the reason and
+# not parsed out of it. ``_HELD`` is for a reason with no line of its own.
+_HELD = "held"
+HOLD_LINES: dict[str, str] = {
+    _HOLD_CHECKING: "held: checking this machine's CLI",
+    _HOLD_REFUSED: "held: this CLI cannot contain it",
+    _HOLD_THIN: "held: the task is one line",
+    RESUME_HOLD_CLI: "held: this CLI cannot contain it",
+    _HOLD_GONE: "held: its directory is gone",
+    **{
+        RESUME_HOLD_REFUSED.format(rung=rung.value): f"held: {rung.value} is refused here"
+        for rung in Policy
+    },
+}
+
+
+def hold_notice(
+    reason: str, *, what: str = "launch", lines: dict[str, str] | None = None
+) -> Notice:
+    """
+    A held button's reason as the one line beside it, with the reason in full
+    behind its question mark. ``what`` is the button's word for what is held and
+    ``lines`` a surface's own reasons, read before ``HOLD_LINES``.
+    """
+    line = (lines or {}).get(reason) or HOLD_LINES.get(reason, _HELD)
+    return Notice(line, Tone.WARN, Help("hold", f"why {what} is held", (reason,)))
+
+
+def resume_gate_hold(policy: Policy, refusal: str | None, gate: VersionGate) -> str | None:
+    """
+    Why a resume under ``policy`` may not start, as far as its gate goes, or None.
+
+    ``refusal`` is ``refusal_for``'s answer for the directory the resume is started
+    in and ``gate`` the reading of this machine's CLI. Neither is consulted for a
+    rung that needs no containment.
+
+    **A rung the directory is refused for holds a resume and does not downgrade
+    it**, which is where a resume departs from a new session. ``LauncherState.spec``
+    downgrades because the directory is a field on screen, one keystroke from
+    correct. A resumed session's directory is the one it was recorded in, so there
+    is nothing to correct, and the way past is the dial: a lower rung is a decision
+    the operator makes and it is not made for them.
+
+    **The one place this is decided.** New Task's picked session and the resume
+    form both ask here (``LauncherState.launch_hold``, ``ResumeForm.hold``), and
+    ``resume_spec`` asks again before it builds anything.
+    """
+    if not requires_containment(policy):
+        return None
+    if refusal is not None:
+        return RESUME_HOLD_REFUSED.format(rung=policy.value)
+    if not gate.answered:
+        return RESUME_HOLD_CHECKING
+    return RESUME_HOLD_CLI if gate.refusal is not None else None
+
+
+@dataclass(frozen=True, slots=True)
+class ResumeHeld:
+    """A resume that starts nothing, and the reason in the words drawn by its button."""
+
+    reason: str
+
+
+def resume_spec(
+    *,
+    session_id: str,
+    cwd: str,
+    policy: Policy,
+    refusal: str | None,
+    gate: VersionGate,
+    task: str,
+    task_is_label: bool,
+    message: str,
+    model: str,
+    template: str | None,
+    brief: str | None,
+    subagent_cap: int | None,
+) -> LaunchSpec | ResumeHeld:
+    """
+    The spec that continues ``session_id`` in ``cwd`` under ``policy``, or why
+    nothing is started.
+
+    **Every resume's spec is built here, whichever surface pressed it**, so the
+    rung and the containment are a pair on all of them: both or neither, and the
+    pair is granted by ``resume_gate_hold`` on the ``refusal`` and ``gate`` the
+    caller read at its press. A caller cannot be handed a contained spec for a
+    directory it was refused for by forgetting to ask first.
+
+    ``cwd`` is the directory as the session is started in it, already resolved
+    (``resolved_directory``); whether a resume starts in that directory at all is
+    the caller's question, because the two surfaces answer it differently for a
+    session that recorded none.
+
+    **The message does not become the session's title.** ``task`` is what the
+    announce puts on the record, so it is the title the card has, with
+    ``task_is_label`` saying when that is only the CLI's label for the
+    conversation, and ``message`` is what the session is sent
+    (``AgentSession.run``).
+    """
+    held = resume_gate_hold(policy, refusal, gate)
+    if held is not None:
+        return ResumeHeld(held)
+    return LaunchSpec(
+        task=task,
+        task_is_label=task_is_label,
+        model=model,
+        cwd=cwd,
+        session_base=tree.session_base(cwd),
+        template=template,
+        brief=brief,
+        resume=session_id,
+        containment=sandbox.containment_settings() if requires_containment(policy) else None,
+        policy=policy,
+        subagent_cap=subagent_cap,
+        message=message,
+    )
+
+
 # Why the cap is on this screen at all: once spawns auto-approve it is the only bound
 # on fan-out the policy cannot widen, because `driver._gate_tool_use` denies at cap
-# *before* it calls `classify`. Every other bound in the paragraph above is something
+# *before* it calls `classify`. Every other bound the gate's explanation names is something
 # the mode relaxes; this one it cannot reach.
 _CAP_REASON = (
     "once spawns run unattended that is the only bound left on fan-out, and it is the "
@@ -1273,6 +1463,11 @@ class Draft:
     beside the spec. The spec is not enough to put a draft back: it carries the task
     stripped, the directory resolved, the policy as *granted* rather than as asked
     for, and the template by name -- each a one-way step from what was on screen.
+
+    ``picked`` is the session the press resumed, as the row that was clicked, or
+    None for a new session. It travels because the press clears the pick: a failed
+    resume put back without it would be its message in the task box of a draft
+    that starts a new session.
     """
 
     task: str
@@ -1282,6 +1477,7 @@ class Draft:
     template_index: int
     policy: Policy
     subagent_cap: int | None
+    picked: SessionRow | None = None
 
 
 def left_by_launch(draft: Draft) -> Draft:
@@ -1289,13 +1485,13 @@ def left_by_launch(draft: Draft) -> Draft:
     The fields as the press that launched ``draft`` left them.
 
     ``LauncherState.launched`` is the press and this is its result as a value: the
-    task, the rung and the cap go, and the directory, brief, model and team
-    stay. A second spelling of those clears, pinned to the first by
+    task, the rung, the cap and the picked session go, and the directory, brief,
+    model and team stay. A second spelling of those clears, pinned to the first by
     ``test_what_a_launch_leaves_is_what_the_press_actually_left``. It is a value so
     that "has anything been typed since that launch" is a comparison of the fields
     against it rather than a guess from the task box alone.
     """
-    return replace(draft, task="", policy=Policy.STRICT, subagent_cap=None)
+    return replace(draft, task="", policy=Policy.STRICT, subagent_cap=None, picked=None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1368,15 +1564,15 @@ class LauncherState:
     # sees the previous frame's value -- which is the correct one, because the key
     # it is deciding about was pressed while that frame was on screen.
     is_open: bool = False
-    # The list of sessions the modal offers to resume. A listing and nothing more:
-    # no field of this draft is read from it, and ``spec`` cannot name a session.
-    # See ``draw``'s ``on_pick_resume``.
+    # The list of sessions the modal offers to resume, and the one picked in it.
+    # With a pick this draft is a resume: the task box is the message, the session
+    # runs where its row says, and ``press`` builds ``resumed``'s spec.
     picker: SessionPicker = field(default_factory=SessionPicker)
     # An override of ``Settings.subagent_cap`` for this launch, or None to use the
     # setting. None is the untouched default, so a draft nobody edited produces the
     # spec it produced before the control existed.
     #
-    # Not mode-specific, and the control is not inside ``_containment_section``: the
+    # Not mode-specific, and the control is drawn under every rung: the
     # cap bounds fan-out under every policy, and the operator asked for an override at
     # launch rather than an override under the dangerous mode. What the mode changes is
     # only how much rests on it -- see ``_CAP_REASON``.
@@ -1428,6 +1624,10 @@ class LauncherState:
     # automatic one, and that one writes nothing to the other text fields that they
     # do not already hold.
     _reload_task: bool = False
+    # How tall the buttons and the lines beside them were on the last frame they
+    # were drawn, or zero before the first. The body above them is bounded to what
+    # that leaves of the display; see ``_modal``.
+    _footer_height: float = 0.0
 
     @property
     def failure_loaded(self) -> bool:
@@ -1453,6 +1653,7 @@ class LauncherState:
             template_index=self.template_index,
             policy=self.policy,
             subagent_cap=self.subagent_cap,
+            picked=self.picker.picked,
         )
 
     def report_failure(self, draft: Draft | None, reason: str, origin: str = "launch") -> None:
@@ -1507,6 +1708,9 @@ class LauncherState:
         # refusal is asked again before the button goes live.
         self.policy = draft.policy
         self.subagent_cap = draft.subagent_cap
+        # Cleared first: ``pick`` of the row already picked is how a pick is undone.
+        self.picker.pick(None, draft.cwd)
+        self.picker.pick(draft.picked, draft.cwd)
         self._reload_task = True
 
     def _set_fields_aside(self, incoming: Draft) -> None:
@@ -1612,6 +1816,10 @@ class LauncherState:
         # the operator chose for something else. Back to None is back to the setting,
         # which is the answer they last gave deliberately.
         self.subagent_cap = None
+        # Cleared with the task, because the message has gone to that session: a
+        # pick that outlived its launch would send the next thing typed here to the
+        # same conversation, under a box the operator reads as a new task.
+        self.picker.pick(None, self.cwd)
         # Whatever failed behind the one just retried is next, and the fields are
         # blank for it now.
         self._settle_failures()
@@ -1654,17 +1862,51 @@ class LauncherState:
     def ready(self) -> bool:
         return bool(self.task.strip())
 
+    def pick_session(self, row: SessionRow, *, recorder: Recorder = read_recorded) -> None:
+        """
+        A click on ``row`` in the session list: ``SessionPicker.pick`` of it, and
+        on a pick the model, the team and the sub-agent cap are set to what the
+        session's own record says it ran as.
+
+        **So a resume from here continues the session as what it was**, unless
+        the operator says otherwise: the three combos are New Task's, they start
+        at solo and the default model, and a resume built from them as they stood
+        would restart a team as one agent with nothing on screen saying so.
+
+        **Each is set only where the record states it.** A session with no
+        record, or a record that does not name a team this build has, leaves the
+        control as it was; nothing is put back to a default. The controls stay
+        the operator's after the pick, and a click that clears the pick changes
+        none of them.
+
+        ``recorder`` is called once, here, and not at all for a click that clears.
+        """
+        self.picker.pick(row, self.cwd.strip() or ".")
+        picked = self.picker.picked
+        if picked is None:
+            return
+        recorded = recorder(picked.session_id)
+        if recorded is None:
+            return
+        if recorded.model:
+            self.model = recorded.model
+        names = templates.names()
+        if recorded.template in names:
+            self.template_index = names.index(recorded.template)
+        if recorded.subagent_cap is not None:
+            self.subagent_cap = recorded.subagent_cap
+
     def launch_directory(self) -> LaunchDirectory:
         """
-        Where this draft launches: the cwd field, and nothing else.
+        Where this draft launches: the picked session's recorded directory, or the
+        cwd field when nothing is picked.
 
         Every launch decision on this draft that is about a directory goes through
-        here. Asked of the module-level ``launch_directory`` with no row, so it is
-        always the field's variant and no disk is touched: New Task starts a session
-        and never continues one, and the variants that carry a recorded directory
-        are a resume's, which ``resume_form`` asks for with the session's row.
+        here, so the line under the session list, the gate's explanation and the
+        spec cannot name different places. With nothing picked it is the field's
+        variant and no disk is touched.
         """
-        return launch_directory(None, self.cwd.strip() or ".")
+        return launch_directory(self.picker.picked, self.cwd.strip() or ".")
 
     def git_layout(self) -> GitLayout:
         """
@@ -1707,11 +1949,19 @@ class LauncherState:
         """
         Ask the own-checkout question of ``started_in`` now, and leave the answer as
         what the screen says for ``directory``.
+
+        The answer says what a refusal does to the launch, and that follows from
+        whether a session is picked (``resume_gate_hold``). A pick changes the
+        directory's variant, so the memo's key already tells the two apart.
         """
         # The key is written after the answer it is the key for. Written first, a
         # read that raised would leave the next frame holding this directory's key
         # over the last directory's answer.
-        self._refusal = refusal_for(started_in, named=_region_phrase(directory))
+        self._refusal = refusal_for(
+            started_in,
+            named=_region_phrase(directory),
+            consequence=REFUSAL_DOWNGRADES if self.picker.picked is None else REFUSAL_HOLDS,
+        )
         self._refusal_for = directory
         return self._refusal
 
@@ -1737,7 +1987,13 @@ class LauncherState:
         distance is deliberate -- an operator who reached the top rung was not asking
         for the middle one, and quietly seating them one rung down would be a gate
         nobody chose. The refusal is on screen; the launch is the one it describes.
+
+        Never for a picked session: a resume the rung is refused for is held, not
+        seated lower (``resume_gate_hold``), so the rung asked for is the only one
+        it can run under.
         """
+        if self.picker.picked is not None:
+            return self.policy
         if self.policy is Policy.AUTONOMOUS and not self.dangerous_engaged:
             return Policy.STRICT
         return self.policy
@@ -1768,8 +2024,11 @@ class LauncherState:
         protects, and what it is protecting them from is a habit rather than an
         intention. A bar whose job is to be noticed is done when it is noticed, and an
         unforgeable one here would buy nothing and cost every legitimate two-line launch.
+
+        **Never of a picked session.** The box is then a message, and the session's
+        premises are its conversation and its brief.
         """
-        if self.brief.strip():
+        if self.picker.picked is not None or self.brief.strip():
             return False
         return "\n" not in self.task.strip()
 
@@ -1783,8 +2042,8 @@ class LauncherState:
         CLI below the floor is not correctable from this modal, and its answer arrives
         on a worker *after* the press would have cleared the draft -- so downgrading
         would spend the operator's paragraph on a launch refused somewhere they cannot
-        see. The button holds, the reason is in the section above it, and unticking the
-        box is the way past.
+        see. The button holds, the reason is on the line beside it, and a lower rung
+        on the dial is the way past.
 
         **Fail-closed before the answer lands.** A mode that has not been confirmed is
         not a mode that may start: the window between ticking the box and the read
@@ -1807,7 +2066,17 @@ class LauncherState:
         None whenever the mode is not engaged, and reaching that answer costs no
         read, no worker and no disabled button: the ordinary launch pays nothing for
         the cases that can hold one.
+
+        **A picked session is held by a resume's rules and not by these.** Its
+        recorded directory being gone holds it under every rung, since the field
+        is not where that conversation was; and whether its rung may run contained
+        is ``resume_gate_hold``'s answer, which holds where a new session would be
+        downgraded and is the answer the resume form gives.
         """
+        if self.picker.picked is not None:
+            if isinstance(self.launch_directory(), GoneDirectory):
+                return _HOLD_GONE
+            return resume_gate_hold(self.policy, self.containment_refusal(), self.version_gate)
         if not self.dangerous_engaged:
             return None
         if self.premise_is_thin:
@@ -1818,17 +2087,18 @@ class LauncherState:
 
     def spec(self) -> LaunchSpec:
         """
-        The draft as the value the driver is handed. Empty cwd means the repo root.
+        The draft as the value the driver is handed, for a draft that starts a new
+        session. Empty cwd means the repo root.
 
         A ``LaunchSpec`` rather than a tuple of strings, which is the correction row
         9 paid for: the callback took four loose positionals, so dropping one still
         typechecked and a relaunched team started solo. Adding the brief to a
         positional list would be the same defect waiting on the same signature.
 
-        **Never a resume.** ``resume`` and ``message`` are left at their defaults
-        whatever the session list holds: a spec that named a session here would
-        continue it under this modal's team, model and task as though it were new.
-        Continuing a session is ``resume_form.press``'s spec and nobody else's.
+        **Refuses a draft with a session picked**, by ``ValueError``. That draft's
+        spec is ``resumed``'s, and one built here would be a new session whose task
+        is the message meant for the picked one, downgraded where a resume is held.
+        ``press`` is what chooses between the two.
 
         **One look at the directory, taken here, decides all of it.** The directory
         is read once and resolved once, and the own-checkout refusal is asked of that
@@ -1839,6 +2109,8 @@ class LauncherState:
         be halves of two different readings. What was found is left in the memo, so
         the next frame draws the answer this press was given.
         """
+        if self.picker.picked is not None:
+            raise ValueError("a session is picked: this draft's spec is resumed()'s")
         directory = self.launch_directory()
         resolved_cwd = resolved_directory(directory)
         # Both or neither, and the pairing is the top rung. ``AUTONOMOUS`` releases
@@ -1891,21 +2163,80 @@ class LauncherState:
             subagent_cap=self.subagent_cap,
         )
 
+    def resumed(self) -> LaunchSpec | ResumeHeld:
+        """
+        The spec that continues the picked session, or why nothing is started.
+        ``ValueError`` when nothing is picked.
+
+        **The task box is the message and never the title.** The title is the
+        row's label, the CLI's name for the conversation, and is passed as a label:
+        a row carries no task. ``app._launcher_pressed`` puts the session's own
+        task there when the store has a record of it.
+
+        **The directory is the row's**, by ``launch_directory``, and the field
+        answers only for a row that recorded none. One look at it, taken here,
+        decides the rest as it does in ``spec``: the own-checkout refusal is asked
+        of that resolved string and left in the memo for the next frame to draw.
+
+        **The model, the team and the brief are this modal's fields.** A click on
+        the row set the first two, and the cap, from the session's record where it
+        has one (``pick_session``), and they are the operator's to change after
+        it. A team whose brief field is empty is given the session's own brief
+        directory, where there is one, by ``app._seed_brief``.
+        The spec itself, and whether its rung may run contained, is
+        ``resume_spec``'s, as it is for that form.
+        """
+        row = self.picker.picked
+        if row is None:
+            raise ValueError("no session is picked: this draft's spec is spec()'s")
+        directory = self.launch_directory()
+        if isinstance(directory, GoneDirectory):
+            return ResumeHeld(_HOLD_GONE)
+        resolved_cwd = resolved_directory(directory)
+        return resume_spec(
+            session_id=row.session_id,
+            cwd=resolved_cwd,
+            policy=self.policy,
+            refusal=self._read_refusal(directory, resolved_cwd),
+            gate=self.version_gate,
+            task=row.label,
+            task_is_label=True,
+            message=self.task.strip(),
+            model=self.model,
+            template=templates.names()[self.template_index],
+            brief=self.brief.strip() or None,
+            subagent_cap=self.subagent_cap,
+        )
+
     def press(self) -> LaunchSpec | None:
         """
         The spec a press of launch starts, or None when the press found a different
-        rung from the one on screen.
+        launch from the one on screen.
 
-        ``spec`` asks the own-checkout question afresh and the section above the
-        button was drawn from a remembered answer. When they disagree the operator
-        pressed under a description of some other launch -- "on" over a directory
+        ``spec`` asks the own-checkout question afresh and the line under the dial
+        was drawn from a remembered answer. When they disagree the operator
+        pressed under a description of some other launch -- the alarm over a directory
         that is now refused, or a refusal over one that is now allowed -- so nothing
         is started: the fields are left as they are, the modal stays up, and the
         next frame draws what this reading found.
+
+        With a session picked the spec is ``resumed``'s and the rule is the same
+        one. A resume that reading holds starts nothing, and neither does one
+        under a rung that needs containment when the directory or the refusal
+        that was remembered for it is not what was found. What is remembered is
+        what ``launch_hold`` last read for the button, so a press nothing was drawn
+        for has nothing to agree with and starts nothing either.
         """
-        shown = self.granted_policy
-        spec = self.spec()
-        return spec if spec.policy is shown else None
+        if self.picker.picked is None:
+            shown = self.granted_policy
+            spec = self.spec()
+            return spec if spec.policy is shown else None
+        remembered = (self._refusal_for, self._refusal)
+        outcome = self.resumed()
+        if isinstance(outcome, ResumeHeld):
+            return None
+        found = (self._refusal_for, self._refusal)
+        return outcome if found == remembered or outcome.containment is None else None
 
 
 def handle_shortcut(state: LauncherState) -> None:
@@ -1925,7 +2256,8 @@ def handle_shortcut(state: LauncherState) -> None:
         state.request_open()
 
 
-# On the resume form when its session is one this process is running. The pool
+# Under a session picked in New Task, and on the resume form, when the session is
+# one this process is running. The pool
 # takes a session submitted under a live id by ending the live run first
 # (``SessionPool.submit``), so a resume of such a session is not a message to it:
 # it stops one. The sentence says what goes with the run, because "the conversation
@@ -1942,18 +2274,63 @@ _LIVE_RESUME = (
 # the click as well as after it.
 _LIVE_TAG = "open here now"
 
-# Under the session list. A click there leaves this modal, and the two things an
-# operator would otherwise have to find out by clicking are said first.
-_PICK_HANDS_OFF = (
-    "picking a session closes New Task and opens that session's resume form -- "
-    "what is typed here is kept"
+# One line that is not cut holds this many characters with a question mark
+# beside it, at the dialog's width in the body face. A line that quotes a path
+# gives the path what its own words leave of this.
+LINE_CHARS = 64
+
+# Behind the question mark beside "launch fresh instead", once a row is picked:
+# what the launch button now does, and what the pick did to the controls below.
+_PICKED_SENDS = "the conversation comes back and the text above is sent to it as its next message"
+_PICKED_CHOSEN_HERE = (
+    "model, team and sub-agent cap were filled in from the session's own record where it "
+    "has one, and are yours to change; a session with no record leaves them as they "
+    "were. A team left with no brief directory is given the session's own."
 )
+_UNPICK = "launch fresh instead"
+
+# Under the task box. What the box is for follows from whether a session is picked.
+_TASK_CAPTION = "what should a new session do?  Ctrl+Enter launches, Enter breaks"
+_MESSAGE_CAPTION = "sent to the picked session.  Ctrl+Enter launches, Enter breaks"
+# Behind the task box's question mark when the team has roles: it changes what
+# the box is for, since this text is then the premises every worker is told to
+# read and not only the lead's opening message. Not of a message to a picked
+# session, which is written into no brief (``app._seed_brief``).
+_TEAM_PREMISES = "on a team, this also becomes the premises every worker reads"
+
+# Under the session list for a picked session that this process is running.
+_LIVE_LINE = "open in this window now — resuming ends its run"
+
+
+def task_notice(*, resuming: bool, team: bool) -> Notice:
+    """The one line under the task box."""
+    if resuming:
+        return Notice(_MESSAGE_CAPTION)
+    if team:
+        return Notice(
+            _TASK_CAPTION, Tone.QUIET, Help("task", "the task box, on a team", (_TEAM_PREMISES,))
+        )
+    return Notice(_TASK_CAPTION)
+
+
+def live_notice(row: SessionRow | None, live: frozenset[str]) -> Notice | None:
+    """
+    The line for a session to be resumed that this process is running, or None:
+    ``live_resume_line`` behind a question mark, under one line saying what a
+    press ends.
+    """
+    said = live_resume_line(row, live)
+    if said is None:
+        return None
+    return Notice(
+        _LIVE_LINE, Tone.WARN, Help("live", "resuming a session that is open here", (said,))
+    )
 
 
 def live_resume_line(row: SessionRow | None, live: frozenset[str]) -> str | None:
     """
-    What the resume form says when its session is live in this process, or None
-    when it is not or there is no row.
+    What is said of a session to be resumed when it is live in this process, or
+    None when it is not or there is no row.
 
     ``live`` is the ids of the sessions this process holds that have not ended. It
     is handed in by the caller on every draw and kept nowhere here: which sessions
@@ -1967,8 +2344,8 @@ def live_resume_line(row: SessionRow | None, live: frozenset[str]) -> str | None
 
 def _session_row(picker: SessionPicker, row: SessionRow, now: float, live: frozenset[str]) -> bool:
     """
-    One line: bookmark toggle, then a selectable spanning the rest of the row.
-    True on the frame the row is clicked.
+    One line: bookmark toggle, then a selectable spanning the rest of the row,
+    lit when the row is the pick. True on the frame the row is clicked.
 
     Label, branch and age go into a single selectable string rather than a selectable
     followed by dimmed metadata. A selectable sized to its own text leaves the branch
@@ -2004,9 +2381,9 @@ def _session_row(picker: SessionPicker, row: SessionRow, now: float, live: froze
     # it. Flattened before measuring, or the row grows to the height of the prompt.
     head = widgets.flat_line(row.label)
     room = imgui.get_content_region_avail().x - imgui.calc_text_size(tail).x
-    # Never drawn as selected: nothing in this modal holds a pick, and a row that
-    # stayed lit would say one was waiting behind the launch button.
-    clicked, _ = imgui.selectable(f"{widgets.ellipsis(head, max(80.0, room))}{tail}", False)
+    clicked, _ = imgui.selectable(
+        f"{widgets.ellipsis(head, max(80.0, room))}{tail}", picker.is_picked(row)
+    )
     imgui.pop_id()
     return bool(clicked)
 
@@ -2017,8 +2394,9 @@ def resume_directory_line(directory: LaunchDirectory, field_resolved: str) -> st
     resumes nothing.
 
     ``field_resolved`` is the directory the caller would otherwise have used, as the
-    directory it names. ``resume_form`` has no such field and hands in the session's
-    own, so the "NOT the working directory above" halves are never drawn there.
+    directory it names: New Task's cwd field. ``resume_form`` has no such field and
+    hands in the session's own, so the "NOT the working directory above" halves are
+    never drawn there.
 
     **The directory after "runs in" is the one the launch is started in**, for every
     variant that launches. A recorded path that leads elsewhere through a link is
@@ -2058,18 +2436,76 @@ def resume_directory_line(directory: LaunchDirectory, field_resolved: str) -> st
             assert_never(directory)
 
 
+_RUNS_ELSEWHERE = ", NOT the working directory above"
+_RUNS_BY_LINK = ", through a link"
+RUNS_GONE = "its recorded directory is gone — launch is held"
+RUNS_UNRECORDED = "recorded no directory — runs in the working directory above"
+
+
+def _runs_in(path: str, after: str = "") -> str:
+    """``runs in <path><after>``, the path cut from its start to what the line has left."""
+    return f"runs in {widgets.path_tail(path, LINE_CHARS - len('runs in ') - len(after))}{after}"
+
+
+def directory_notice(directory: LaunchDirectory, field_resolved: str) -> Notice | None:
+    """
+    Where a picked session runs, as one line, with ``resume_directory_line``'s
+    sentence for it behind the question mark. None for a launch that resumes
+    nothing.
+
+    The colour says how far the directory is from what the cwd field would lead
+    an operator to expect: the field's own is quiet, another one warns, and one
+    that is gone is the danger it is -- nothing launches.
+    """
+    said = resume_directory_line(directory, field_resolved)
+    if said is None:
+        return None
+    explained = Help("runs-in", "where this session runs", (said,))
+    match directory:
+        case FieldDirectory():
+            return None
+        case RecordedDirectory(path=path):
+            if path == field_resolved:
+                return Notice(_runs_in(path), Tone.QUIET, explained)
+            return Notice(_runs_in(path, _RUNS_ELSEWHERE), Tone.WARN, explained)
+        case RedirectedDirectory(path=path):
+            return Notice(_runs_in(path, _RUNS_BY_LINK), Tone.WARN, explained)
+        case GoneDirectory():
+            return Notice(RUNS_GONE, Tone.DANGER, explained)
+        case UnrecordedDirectory():
+            return Notice(RUNS_UNRECORDED, Tone.WARN, explained)
+        case _:
+            assert_never(directory)
+
+
+def scan_notices(scanned: str, error: str | None) -> tuple[Notice, ...]:
+    """
+    Over the session list: which directory it is a listing for, and a scan that
+    failed. The failure is loud and never a silently empty list -- someone
+    reading this screen has already lost work once -- and what it said is whole
+    behind its question mark.
+    """
+    listing = Notice(f"sessions in {widgets.path_tail(scanned, 36)} and its git worktrees")
+    if error is None:
+        return (listing,)
+    failed = f"could not read the transcripts: {error}"
+    return (
+        listing,
+        Notice(failed, Tone.DANGER, Help("scan", "the transcripts could not be read", (failed,))),
+    )
+
+
 def _session_list(
-    state: LauncherState, *, scanner: Scanner, live: frozenset[str]
-) -> SessionRow | None:
+    state: LauncherState, *, scanner: Scanner, live: frozenset[str], recorder: Recorder
+) -> None:
     """
     The sessions that can be resumed: collapsed until asked for, over rows already
-    being scanned. Returns the row clicked on this frame, or None.
+    being scanned. A click on a row picks it, and a click on the pick clears it.
 
-    **A way to find a session, and not a way to resume one.** The listing reaches
-    what the fleet pane does not show -- a session removed from the fleet, one
-    another tool started -- and a click hands the row to ``draw``'s caller, which
-    opens the resume form for it. Nothing is picked here and nothing about this
-    draft changes.
+    **The pick is made and kept here, and this modal is what resumes it.** The
+    listing reaches what the fleet pane does not show -- a session removed from the
+    fleet, one another tool started -- and with a row picked the launch button
+    continues that session (``LauncherState.press``). Nothing else is opened.
 
     The header starts shut so a fresh launch is not asked to look at it, but
     ``LauncherState.begin_open`` put the scan in flight when the modal opened -- so
@@ -2077,44 +2513,82 @@ def _session_list(
     disk read, and by the time an operator has read this far the rows are usually
     already here. When it has moved, expanding starts a scan for the directory now
     in the field; see ``SessionPicker.set_expanded``.
+
+    The header names the picked session and ``_picked_lines`` is drawn under it
+    whether or not it is open: a pick behind a shut header is still what the launch
+    button does.
     """
     picker = state.picker
     picker.poll()
 
-    imgui.spacing()
+    widgets.dialog_field()
     cwd = state.cwd.strip() or "."
-    expanded = imgui.collapsing_header(f"resume an existing session instead{_RESUME_ID}")
+    heading = (
+        "resume an existing session instead"
+        if picker.picked is None
+        else f"resuming: {widgets.flat_line(picker.picked.label)}"
+    )
+    # Cut to the header's own width, less the arrow: a label is a first prompt as
+    # often as a summary, and a header does not wrap.
+    room = imgui.get_content_region_avail().x - 3.0 * imgui.get_font_size()
+    expanded = imgui.collapsing_header(f"{widgets.ellipsis(heading, room)}{_RESUME_ID}")
     picker.set_expanded(expanded, cwd, scanner=scanner)
-    if not expanded:
-        return None
+    if expanded:
+        for said in scan_notices(picker.scanned_cwd or cwd, picker.error):
+            widgets.notice(said)
 
-    imgui.text_disabled(f"sessions in {picker.scanned_cwd or cwd} and its git worktrees")
-    if picker.error is not None:
-        # Loud, and never a silently empty list. Someone reading this screen has
-        # already lost work once.
-        imgui.text_colored(P.danger.vec4, f"could not read the transcripts: {picker.error}")
+        now = time.time()
+        clicked: SessionRow | None = None
+        if imgui.begin_child(
+            "##sessions", imgui.ImVec2(-1.0, _LIST_HEIGHT), imgui.ChildFlags_.borders
+        ):
+            if picker.scanning and not picker.rows:
+                imgui.text_disabled("reading transcripts...")
+            elif not picker.rows and picker.error is None:
+                imgui.text_disabled("no sessions recorded for this directory")
+            for entry in picker.rows:
+                if _session_row(picker, entry, now, live):
+                    clicked = entry
+        imgui.end_child()
+        # After the rows, so every row of this frame was drawn against one pick.
+        if clicked is not None:
+            state.pick_session(clicked, recorder=recorder)
 
-    now = time.time()
-    clicked: SessionRow | None = None
-    if imgui.begin_child("##sessions", imgui.ImVec2(-1.0, _LIST_HEIGHT), imgui.ChildFlags_.borders):
-        if picker.scanning and not picker.rows:
-            imgui.text_disabled("reading transcripts...")
-        elif not picker.rows and picker.error is None:
-            imgui.text_disabled("no sessions recorded for this directory")
-        for entry in picker.rows:
-            if _session_row(picker, entry, now, live):
-                clicked = entry
-    imgui.end_child()
+        if imgui.small_button("rescan") and not picker.scanning:
+            picker.request_scan(cwd, scanner=scanner)
+    _picked_lines(state, cwd, live)
 
-    if imgui.small_button("rescan") and not picker.scanning:
-        picker.request_scan(cwd, scanner=scanner)
-    imgui.text_disabled(_PICK_HANDS_OFF)
-    return clicked
+
+def _picked_lines(state: LauncherState, cwd: str, live: frozenset[str]) -> None:
+    """
+    Under the session list when a session is picked: one line for where the
+    session runs (``directory_notice``, against the cwd field as the directory it
+    names), one for what resuming it ends if it is running here, and the way back
+    to a new session -- with what the launch button now does, and what the pick
+    did to the controls below, behind the question mark beside it.
+    """
+    picked = state.picker.picked
+    if picked is None:
+        return
+    widgets.dialog_caption()
+    directory = state.launch_directory()
+    try:
+        field_resolved = os.path.realpath(cwd)
+    except ValueError:
+        # A field ``realpath`` cannot take names no directory; as typed, it is
+        # equal to none.
+        field_resolved = cwd
+    for said in (directory_notice(directory, field_resolved), live_notice(picked, live)):
+        if said is not None:
+            widgets.notice(said)
+    if imgui.small_button(_UNPICK):
+        state.picker.pick(None, cwd)
+    widgets.help_mark("picked", "resuming a picked session", (_PICKED_SENDS, _PICKED_CHOSEN_HERE))
 
 
 def _region_phrase(directory: LaunchDirectory) -> str:
     """
-    The directory the contained half is bounded to, as the containment section names it.
+    The directory the contained half is bounded to, as the gate's explanation names it.
 
     "The working directory above" is true only while a field is what the launch
     uses. For a resume the region is the session's directory, and pointing at a
@@ -2135,14 +2609,15 @@ def _region_phrase(directory: LaunchDirectory) -> str:
 
 def boundary_unstated(directory: LaunchDirectory) -> str | None:
     """
-    Why the containment section states no boundary for ``directory``, or None when
+    Why the gate's explanation states no boundary for ``directory``, or None when
     it states one.
 
     A session whose recorded directory is gone has no directory for a sandbox to be
     given, and ``git_layout`` of a path that is not there reads as the layout the
     narrow measurement was taken for -- so the paragraphs would say ``Bash`` writes
     only inside a directory the line above them says does not exist. Nothing
-    launches there (``resume_form.ResumeForm.hold``), and nothing is described.
+    launches there (``LauncherState.launch_hold``, ``resume_form.ResumeForm.hold``),
+    and nothing is described.
     """
     match directory:
         case GoneDirectory(path=path):
@@ -2167,9 +2642,9 @@ _UNKNOWN_KIND = "a tool this build has never heard of"
 @dataclass(frozen=True, slots=True)
 class DialText:
     """
-    What is said under the gate dial. ``downgrade`` is None when the rung on the
-    dial is the rung the launch gets, and otherwise the line saying which rung the
-    two below it describe.
+    What is said of the gate dial. ``downgrade`` is None when the rung on the
+    dial is the rung the launch gets, and otherwise the line saying which rung it
+    gets instead, which is the rung ``adds`` and ``parks`` are about.
     """
 
     downgrade: str | None
@@ -2186,8 +2661,8 @@ def dial_text(asked: Policy, granted: Policy) -> DialText:
     refused for the directory (``LauncherState.granted_policy``), and "adds writes,
     spawns ..." over a refusal saying the launch uses the ordinary gate is two
     answers to one question on one screen. The dial keeps the rung that was asked
-    for, because that is the control's value, and ``downgrade`` says in words that
-    what follows is about another one.
+    for, because that is the control's value, and ``downgrade`` says in words
+    which one the launch runs under.
 
     **The parked half always has something in it.** An unrecognised tool waits for
     the operator at every rung, and it is listed with the probed kinds that do, so
@@ -2203,10 +2678,7 @@ def dial_text(asked: Policy, granted: Policy) -> DialText:
         downgrade=(
             None
             if granted is asked
-            else (
-                f"{asked.value} is refused for this launch, for the reason below -- it "
-                f"runs under {granted.value}, which is what these two lines describe:"
-            )
+            else REFUSED_RUNS_LOWER.format(asked=asked.value, granted=granted.value)
         ),
         adds=f"adds {', '.join(adds)}" if adds else "nothing runs unattended",
         parks=f"still parks {only}{', '.join(parks)}" if parks else "parks nothing",
@@ -2226,7 +2698,7 @@ def modal_origin(
     The modal is centred when it appears and grows downward afterwards -- the top
     rung adds a section, an opened session list adds rows -- and a window that grows from a fixed
     origin grows off the bottom of the display, taking the launch button with it.
-    Scrolling does not bring that back: the window scrolls its contents, and the
+    Scrolling does not bring that back: the body scrolls inside the window, and the
     part of the window that is off the display stays off it.
 
     On an axis where the window is larger than the area its start is put at the
@@ -2246,113 +2718,164 @@ def modal_origin(
     return None if moved == pos else moved
 
 
-def _containment_section(
-    state: LauncherState, *, prober: Prober, subagent_cap: int | None = None
-) -> None:
+# The one line under the gate dial where the rung asked for is not the rung, or
+# not the launch, the operator gets. Each changes what a press does, so each is
+# on screen without being asked for; why is behind its question mark.
+REFUSED_RUNS_LOWER = "{asked} is refused for this directory — this launch runs {granted}"
+REFUSED_HOLDS_RESUME = "{rung} is refused for this directory — the resume is held"
+CLI_HOLDS = "this machine's CLI cannot contain {rung} — {what} is held"
+NO_BOUNDARY = "no boundary: the session's directory is gone — nothing starts"
+# The alarm: the one sentence under a dial that is on the top rung and granted.
+LOUD_LINE = "this session will write files and run commands without asking"
+
+_ON = (
+    "on -- this session writes files, runs commands, spawns sub-agents, declares "
+    "board tasks and messages its own agents without asking you. A tool this "
+    "build has never heard of is still not released."
+)
+# The one paragraph that says a boundary is absent.
+_NOT_CONTAINED = (
+    "not contained: WebFetch and WebSearch run inside the CLI process, which the "
+    "sandbox does not wrap, so they reach whatever host the session names. Released "
+    "anyway -- an unattended agent that cannot read documentation is the worse trade."
+)
+_GATE_MARK = "gate"
+
+
+def gate_notice(
+    asked: Policy,
+    *,
+    resuming: bool,
+    directory: LaunchDirectory,
+    refusal: str | None,
+    gate: VersionGate,
+    layout: Callable[[], GitLayout],
+    subagent_cap: int | None,
+    launches: bool = True,
+    also: tuple[str, ...] = (),
+) -> Notice:
     """
-    What the top rung costs, and the refusals where it cannot go. Drawn only when the
-    dial is on ``AUTONOMOUS``; the rung itself is chosen above, on the one dial.
+    The one line under the gate dial, and everything else there is to say about
+    the rung behind its question mark. New Task's dial and the resume form's are
+    both this.
 
-    On the modal rather than as a follow-up because ``planning/2026-08-22`` D3 --
-    "displaying the dial is part of shipping the dial, not a follow-up" -- binds
-    harder here than at any lower rung: an operator who cannot see that a session is
-    under-gated cannot supervise it.
+    **A rung that needs no containment gets what it adds**, quietly, and what it
+    still parks behind the mark.
 
-    **The word carries the danger, not the colour.** Hue is never the only channel on
-    this screen (design §6.1), and on ``high_contrast`` the danger role moves toward
-    the text role -- so this block spells the cost out in text that survives every
-    palette, and the colour only makes it findable. The rung's own name on the dial
-    carries the first half of that: it is "autonomous" rather than anything reassuring,
-    per ``approval.Policy``'s rule that a rung names the posture and never the
-    permission.
+    **The top rung, granted, gets the alarm** (``LOUD_LINE``, ``Tone.LOUD``): the
+    session will act without asking, which an operator who cannot see it cannot
+    supervise. Behind its mark is what the rung costs, at the strength it was
+    measured (``contained_text``): what is released, what the sandbox bounds and
+    what it does not, what the gate holds file writes to, the uncontained edge --
+    ``WebFetch`` and ``WebSearch`` run in the CLI process, which the sandbox does
+    not wrap -- and the sub-agent cap, the one bound the rung cannot widen. The
+    credential denials are not claimed: ``sandbox.credentials`` binds sandboxed
+    ``Bash`` only.
 
-    **The released set is every tool the gate would otherwise have held**, so this
-    names the kinds rather than one tool: a line that said only ``Bash`` would
-    understate what the rung grants, and understating it is worse than saying nothing.
+    **The top rung, not granted, gets the line that says what a press does
+    instead**, and the reason behind the mark. Asked in the order the launch
+    path asks: a session whose recorded directory is gone has nothing for the
+    rung to be bounded to (``boundary_unstated``); a directory the rung is
+    refused for runs a new session one rung down and holds a resume
+    (``refusal``, ``refusal_for``'s answer); and a CLI that cannot be trusted
+    with the sandbox keys holds either (``gate``).
 
-    What the contained half claims is limited to what has been measured, and the
-    measurements are per tool rather than per mode. ``scripts/verify_sandbox_gate.py``
-    established the egress allowlist and the writable region for a root session's
-    ``Bash``; ``scripts/verify_nested_sandbox.py`` established that a sub-agent's
-    ``Bash`` gets the same region and the same allowlist, which is what lets this
-    screen describe a fan-out in the same sentence as a solo run. The credential
-    denials are deliberately not claimed -- ``sandbox.credentials`` binds sandboxed
-    ``Bash`` only, so a line telling the operator their keys are denied would be false
-    for every tool that runs in the CLI process.
-
-    **The uncontained edge is on screen rather than only in the record.**
-    ``WebFetch``/``WebSearch`` are released and run inside the CLI process, which the
-    sandbox does not wrap, so no allowlist reaches them. That is a cost the operator
-    chose in exchange for an unattended agent that can read documentation, and a
-    chosen cost is exactly the kind that has to be visible at the moment of choosing.
-
-    **Two things can refuse the mode and this is where both of them are said.** The
-    directory is asked first and the machine only if the directory allowed it: a launch
-    the directory already refused is not a contained launch, so reading the CLI's
-    version for it would spawn a subprocess to answer a question nothing asks.
+    ``layout`` reads the launch directory's git layout and is called only for the
+    alarm, the one case that words a boundary. ``launches`` is False for a resume
+    with no directory to start in, which is held whatever the rung and is told so
+    elsewhere; ``also`` is a surface's own paragraphs, last behind the mark.
+    Reads nothing and starts nothing itself: whoever draws this polls ``gate``.
     """
-    # Nothing at all for the rungs that do not ask for containment, rather than a
-    # disabled block saying so. The dial above already prints what the chosen rung adds
-    # and what it still parks, so a second "off" line here would be the same fact in
-    # weaker words -- and drawing a containment heading under ``PERMISSIVE`` would
-    # suggest that rung has a contained and an uncontained form. It has one.
-    if state.policy is not Policy.AUTONOMOUS:
-        return
-
-    imgui.spacing()
-    imgui.separator()
-    imgui.spacing()
-
-    imgui.push_text_wrap_pos(0.0)
-    unstated = boundary_unstated(state.launch_directory())
+    name = asked.value
+    unstated = boundary_unstated(directory)
+    if not requires_containment(asked) or (unstated is None and not launches):
+        dial = dial_text(asked, asked)
+        return Notice(
+            dial.adds,
+            Tone.QUIET,
+            Help(_GATE_MARK, f"the {name} gate", (dial.adds, dial.parks, *also)),
+        )
     if unstated is not None:
-        # Ahead of the refusal and of the version read: neither question has a
-        # directory to be about, and a launch that is held asks the machine nothing.
-        imgui.text_colored(P.warn.vec4, unstated)
-        imgui.pop_text_wrap_pos()
-        return
+        return Notice(
+            NO_BOUNDARY,
+            Tone.WARN,
+            Help(_GATE_MARK, f"why {name} states no boundary", (unstated, *also)),
+        )
+    what = "the resume" if resuming else "launch"
+    if refusal is not None:
+        if resuming:
+            return Notice(
+                REFUSED_HOLDS_RESUME.format(rung=name),
+                Tone.WARN,
+                Help(_GATE_MARK, f"why {name} is refused", (refusal, *also)),
+            )
+        lower = dial_text(asked, Policy.STRICT)
+        assert lower.downgrade is not None
+        return Notice(
+            lower.downgrade,
+            Tone.WARN,
+            Help(_GATE_MARK, f"why {name} is refused", (refusal, lower.adds, lower.parks, *also)),
+        )
+    if gate.refusal is not None:
+        return Notice(
+            CLI_HOLDS.format(rung=name, what=what),
+            Tone.WARN,
+            Help(_GATE_MARK, f"why {name} is held", (gate.refusal, *also)),
+        )
+    dial = dial_text(asked, asked)
+    contained = contained_text(directory, layout())
+    return Notice(
+        LOUD_LINE,
+        Tone.LOUD,
+        Help(
+            _GATE_MARK,
+            f"what {name} releases, and what bounds it",
+            (
+                _ON,
+                contained.sandbox,
+                *(() if contained.wider is None else (contained.wider,)),
+                # Said apart from the sandbox paragraph because it is a different
+                # mechanism, and an operator reasoning about a failure needs to
+                # know which one refused them.
+                contained.gate,
+                _NOT_CONTAINED,
+                _cap_line(subagent_cap),
+                dial.adds,
+                dial.parks,
+                *(() if gate.answered else (_HOLD_LINE,)),
+                *also,
+            ),
+        ),
+    )
+
+
+def _gate_notice(state: LauncherState, *, prober: Prober, subagent_cap: int | None) -> Notice:
+    """
+    ``gate_notice`` for this draft, and the one place the draw starts the read of
+    the installed CLI's version.
+
+    **Started from the draw and only for a top rung the directory allows**, so an
+    uncontained launch never spawns the subprocess, and neither does one the
+    directory already refused: that is not a contained launch, and reading the
+    CLI's version for it would answer a question nothing asks. Both calls are
+    no-ops once the read has landed.
+    """
+    needs = requires_containment(state.policy)
+    directory = state.launch_directory()
+    refusal = state.containment_refusal() if needs else None
     gate = state.version_gate
-    refusal = state.containment_refusal()
-    if refusal is None:
-        # Started from the draw and only from here, so an uncontained launch never
-        # spawns the subprocess. Both calls are no-ops once the read has landed, so
-        # after the first frame this costs two bool reads and a failed queue get.
+    if needs and refusal is None and boundary_unstated(directory) is None:
         gate.poll()
         gate.request(prober=prober)
-        refusal = gate.refusal
-    if refusal is not None:
-        imgui.text_colored(P.danger.vec4, refusal)
-    else:
-        imgui.text_colored(
-            P.danger.vec4,
-            "on -- this session writes files, runs commands, spawns sub-agents, declares "
-            "board tasks and messages its own agents without asking you. A tool this "
-            "build has never heard of is still not released.",
-        )
-        contained = contained_text(state.launch_directory(), state.git_layout())
-        imgui.text_disabled(contained.sandbox)
-        if contained.wider is not None:
-            # Warn, for the reason the uncontained edge below is: it is a line saying
-            # the boundary is not where the sentence above it would be read as putting
-            # it, or is not known, and grey is how the reassuring lines are drawn.
-            imgui.text_colored(P.warn.vec4, contained.wider)
-        # Named separately from the sandbox line because it is a different mechanism,
-        # and an operator who has to reason about a failure needs to know which one
-        # refused them.
-        imgui.text_disabled(contained.gate)
-        # Warn rather than disabled grey. This is the one line that says a boundary is
-        # absent, and it is the line an operator skimming greyed-out reassurance would
-        # skip -- which is the reading the rest of this block invites.
-        imgui.text_colored(
-            P.warn.vec4,
-            "not contained: WebFetch and WebSearch run inside the CLI process, which the "
-            "sandbox does not wrap, so they reach whatever host the session names. Released "
-            "anyway -- an unattended agent that cannot read documentation is the worse trade.",
-        )
-        imgui.text_disabled(_cap_line(subagent_cap))
-        if not gate.answered:
-            imgui.text_disabled(_HOLD_LINE)
-    imgui.pop_text_wrap_pos()
+    return gate_notice(
+        state.policy,
+        resuming=state.picker.picked is not None,
+        directory=directory,
+        refusal=refusal,
+        gate=gate,
+        layout=state.git_layout,
+        subagent_cap=subagent_cap,
+    )
 
 
 # Under the headline of a failure a launch has been pressed past. It has to stay true
@@ -2365,68 +2888,99 @@ _PRESSED_PAST = (
 )
 
 
-def _failure_notice(state: LauncherState) -> None:
+_FAILED_NOT_HERE = "it was not made from this window, so nothing typed below is part of it"
+_FAILED_LOADED = "the draft below is that launch, as it was typed -- nothing was lost"
+_FAILED_KEPT = (
+    "its draft is kept. restoring it sets what is in the fields below aside, "
+    "where it can be brought back; discarding it drops that launch's text for "
+    "good"
+)
+
+
+def failure_notice(failure: FailedLaunch, *, loaded: bool, waiting: int) -> Notice:
     """
-    The oldest launch that started nothing, at the top of the modal: why, and what
-    has become of its draft. Under it, any draft a restore set aside.
+    The oldest launch that started nothing, as one line: that it did not start,
+    how many more are behind it, and as much of the reason as the row holds.
+    Behind its question mark, the reason whole and what has become of its draft.
 
-    One failure at a time and in order. Each has a draft of its own and the fields
-    hold one, so showing two reasons over one draft would leave the operator matching
-    them up by hand.
-
-    Which of the three things is said about a failure's draft is read off the fields
-    on this frame -- ``LauncherState.failure_loaded`` compares -- so "as it was typed"
-    is not said over a box that has been edited or emptied since.
+    ``loaded`` is ``LauncherState.failure_loaded`` on this frame, so "as it was
+    typed" is not said over a box that has been edited or emptied since.
 
     A failure a launch has been pressed past is called an earlier one and is said
     not to be that press. The modal reopens by itself over such a press, and the
     same words as a retry that failed again would make a launch that started look
     like one that did not.
     """
+    which = f"an earlier {failure.origin}" if failure.pressed_past else f"that {failure.origin}"
+    headline = f"{which} did not start a session"
+    if failure.draft is None:
+        draft = _FAILED_NOT_HERE
+    elif loaded:
+        draft = _FAILED_LOADED
+    else:
+        draft = _FAILED_KEPT
+    behind = f"{waiting} more launch(es) did not start; each is kept behind this one"
+    return Notice(
+        f"{headline}{f' ({waiting} more behind it)' if waiting else ''}: {failure.reason}",
+        Tone.DANGER,
+        Help(
+            "failure",
+            f"why {which} did not start",
+            (
+                f"{headline}: {failure.reason}",
+                *((_PRESSED_PAST,) if failure.pressed_past else ()),
+                draft,
+                *((behind,) if waiting else ()),
+            ),
+        ),
+    )
+
+
+def set_aside_notice(count: int) -> Notice:
+    """The drafts a restore set aside, as one line over the two buttons for them."""
+    return Notice(
+        f"{count} draft(s) set aside by a restore are kept",
+        Tone.QUIET,
+        Help(
+            "set-aside",
+            "drafts set aside by a restore",
+            (
+                f"{count} draft(s) set aside by a restore are kept. bringing "
+                "the last one back swaps it with what is in the fields below",
+            ),
+        ),
+    )
+
+
+def _failure_notice(state: LauncherState) -> None:
+    """
+    At the top of the modal: ``failure_notice`` for the oldest launch that started
+    nothing, over the buttons for its draft, and under it ``set_aside_notice``
+    over the buttons for a draft a restore set aside.
+
+    One failure at a time and in order. Each has a draft of its own and the fields
+    hold one, so showing two reasons over one draft would leave the operator matching
+    them up by hand.
+    """
     if not state.failures and not state.set_aside:
         return
-    imgui.push_text_wrap_pos(0.0)
     if state.failures:
         failure = state.failures[0]
-        which = f"an earlier {failure.origin}" if failure.pressed_past else f"that {failure.origin}"
-        imgui.text_colored(P.danger.vec4, f"{which} did not start a session: {failure.reason}")
-        if failure.pressed_past:
-            imgui.text_colored(P.warn.vec4, _PRESSED_PAST)
-        if failure.draft is None:
-            imgui.text_disabled(
-                "it was not made from this window, so nothing typed below is part of it"
-            )
-            if imgui.small_button("dismiss this notice"):
-                state.discard_failed()
-        elif state.failure_loaded:
-            imgui.text_disabled(
-                "the draft below is that launch, as it was typed -- nothing was lost"
-            )
+        loaded = state.failure_loaded
+        widgets.notice(failure_notice(failure, loaded=loaded, waiting=len(state.failures) - 1))
+        if failure.draft is None or loaded:
             if imgui.small_button("dismiss this notice"):
                 state.discard_failed()
         else:
-            imgui.text_disabled(
-                "its draft is kept. restoring it sets what is in the fields below aside, "
-                "where it can be brought back; discarding it drops that launch's text for "
-                "good"
-            )
             if imgui.small_button("restore that draft"):
                 state.restore_failed()
             imgui.same_line()
             if imgui.small_button("discard it"):
                 state.discard_failed()
-        waiting = len(state.failures) - 1
-        if waiting > 0:
-            imgui.text_disabled(
-                f"{waiting} more launch(es) did not start; each is kept behind this one"
-            )
     # Read after the buttons above, so a restore pressed on this frame shows what it
     # set aside on this frame.
     if state.set_aside:
-        imgui.text_disabled(
-            f"{len(state.set_aside)} draft(s) set aside by a restore are kept. bringing "
-            "the last one back swaps it with what is in the fields below"
-        )
+        widgets.notice(set_aside_notice(len(state.set_aside)))
         # Labels of their own: two buttons reading "discard it" in one window share
         # an ID, and the second would never fire.
         if imgui.small_button("bring back what was set aside"):
@@ -2434,9 +2988,7 @@ def _failure_notice(state: LauncherState) -> None:
         imgui.same_line()
         if imgui.small_button("discard what was set aside"):
             state.discard_set_aside()
-    imgui.pop_text_wrap_pos()
-    imgui.separator()
-    imgui.spacing()
+    widgets.dialog_group()
 
 
 def draw(
@@ -2446,25 +2998,32 @@ def draw(
     queued: int,
     cap: int,
     launch: Callable[[LaunchSpec, Draft], None],
-    on_pick_resume: Callable[[SessionRow], None],
     wrap: bool,
     scanner: Scanner = scan_sessions,
     prober: Prober = cli_version.check_installed_cli,
     subagent_cap: int | None = None,
     models: tuple[str, ...] = FALLBACK_MODELS,
     live: frozenset[str] = frozenset(),
+    recorder: Recorder = read_recorded,
 ) -> None:
     """
     Draw the modal if it has been asked for.
 
-    ``on_pick_resume`` is handed the row of the session list the operator clicked.
-    **That click is the whole of what this modal does about a resume**: it closes,
-    with every field as it stood, and the caller opens the resume form for the row.
-    Required and not defaulted, because a listing whose rows did nothing when
-    clicked would be the one screen for recovering a session, not recovering it.
+    **A session picked in the session list is resumed from here.** The click picks
+    the row and the modal stays as it is; ``launch`` is then handed the spec that
+    continues that session, with what is in the task box as its message
+    (``LauncherState.resumed``). Nothing in this module opens the resume form.
+    ``recorder`` reads the picked session's own record, which that click fills the
+    model, the team and the cap from (``LauncherState.pick_session``).
+
+    **Under a control there is one line, and an explanation is behind a question
+    mark** (``widgets.notice``, ``widgets.help_mark``). What is on screen without
+    a press is a caption, the alarm for a session that will act without asking,
+    and a line for each thing that changes what the launch button does.
 
     ``live`` is the ids of the sessions this process is running. A row of the session
-    list that is one of them says so. Empty, the default, is a caller that runs none.
+    list that is one of them says so, and picking it says what resuming it ends.
+    Empty, the default, is a caller that runs none.
 
     ``cap`` and ``subagent_cap`` are different bounds and are not interchangeable:
     ``cap`` is how many *sessions* run at once and already has a consequence on this
@@ -2500,6 +3059,76 @@ def draw(
     if not state.is_open:
         return
 
+    # From before the window begins, which is when it reads its padding, to after it
+    # ends: the one scope the resume form is drawn under as well.
+    with widgets.dialog_style():
+        _modal(
+            state,
+            running=running,
+            queued=queued,
+            cap=cap,
+            launch=launch,
+            wrap=wrap,
+            scanner=scanner,
+            prober=prober,
+            subagent_cap=subagent_cap,
+            models=models,
+            live=live,
+            recorder=recorder,
+        )
+
+
+def body_room(work_height: float, top: float, padding: float, footer: float) -> float:
+    """
+    How tall the modal's scrolling body may be for the buttons under it to be on
+    the display: what is left of ``work_height`` after the ``top`` of the window
+    (its title bar and the padding under it), the ``padding`` at its bottom and the
+    ``footer`` the buttons take.
+
+    Never less than ``_BODY_FLOOR``. On a display too short for both, a body with
+    no height would be a window of buttons over nothing, and the floor leaves the
+    task box in reach by scrolling. ``widgets.dialog_body_room`` with this modal's
+    floor.
+    """
+    return widgets.dialog_body_room(work_height, top, padding, footer, _BODY_FLOOR)
+
+
+# The least the body is given: the task box and its caption.
+_BODY_FLOOR = _TASK_HEIGHT + 40.0
+
+
+def _modal(
+    state: LauncherState,
+    *,
+    running: int,
+    queued: int,
+    cap: int,
+    launch: Callable[[LaunchSpec, Draft], None],
+    wrap: bool,
+    scanner: Scanner,
+    prober: Prober,
+    subagent_cap: int | None,
+    models: tuple[str, ...],
+    live: frozenset[str],
+    recorder: Recorder,
+) -> None:
+    """
+    The open modal, begun and ended here. ``draw`` documents the arguments.
+
+    **A scrolling body and, under it, the buttons.** The body is a child that fits
+    what is drawn in it up to ``body_room`` and scrolls past that
+    (``widgets.begin_dialog_body``), so the launch and cancel buttons are items of
+    the window itself: they stay where they are and on the display however long
+    an opened session list makes the body.
+
+    The groups of the body, each set off from the next by ``widgets.dialog_group``:
+    what the session is to do, where it runs, who runs it, and the gate it runs
+    under. The one line under a control is drawn after ``widgets.dialog_caption``,
+    which is what puts it nearer the control it describes than the one below.
+    """
+    # Before anything is drawn: the Escape that closes an explanation is not also
+    # this modal's (``widgets.help_showing``).
+    explaining = widgets.help_showing()
     viewport = imgui.get_main_viewport()
     imgui.set_next_window_pos(viewport.get_center(), imgui.Cond_.appearing, imgui.ImVec2(0.5, 0.5))
     # One width. Auto-resize fits the height to what is drawn; left to fit the width
@@ -2508,8 +3137,8 @@ def draw(
     #
     # The height bound restates one auto-resize already applies -- Dear ImGui 1.92.8
     # does not fit a window taller than the viewport's work area -- because the
-    # move below is only a way to the launch button while that holds: what does not
-    # fit scrolls, and a window no taller than the area can be put wholly inside it.
+    # move below is only a way to the launch button while that holds: a window no
+    # taller than the area can be put wholly inside it.
     imgui.set_next_window_size_constraints(
         imgui.ImVec2(_WIDTH, 0.0), imgui.ImVec2(_WIDTH, viewport.work_size.y)
     )
@@ -2536,7 +3165,13 @@ def draw(
         state.is_open = False
         return
 
-    # For every line of text in the modal, which is what holds it to the one width.
+    # The body fits its content up to the room the display leaves it, and scrolls
+    # past that. The footer's height is last frame's: it is drawn after the body
+    # it bounds.
+    widgets.begin_dialog_body(BODY_ID, state._footer_height, _BODY_FLOOR)
+
+    # For every line of text in the body, which is what holds it to the one width.
+    # The wrap position is the window's own, so the footer sets it again.
     imgui.push_text_wrap_pos(0.0)
 
     # Above everything, the task box included, and before the focus request below --
@@ -2581,16 +3216,15 @@ def draw(
         wrap=wrap,
         flags=widgets.CTRL_ENTER_SUBMITS,
     )
-    imgui.text_disabled("what should a new session do?  Ctrl+Enter launches, Enter for a new line")
-    # Said here rather than left to be discovered, because it changes what the box is
-    # for: on a team, this text is the premises every worker is told to read, not
-    # just the lead's opening message.
-    if templates.BUILT_IN[state.template_index].roles:
-        imgui.text_disabled("on a team, this also becomes the premises every worker reads")
+    widgets.dialog_caption()
+    widgets.notice(
+        task_notice(
+            resuming=state.picker.picked is not None,
+            team=bool(templates.BUILT_IN[state.template_index].roles),
+        )
+    )
 
-    imgui.spacing()
-    imgui.separator()
-    imgui.spacing()
+    widgets.dialog_group()
 
     # The working directory is the field worth the label. An orchestrator whose
     # agents all share the launching shell's cwd cannot run work across projects,
@@ -2601,10 +3235,11 @@ def draw(
     _, state.cwd = imgui.input_text_with_hint(
         "##cwd", "working directory (agents run here)", state.cwd
     )
+    widgets.dialog_caption()
     imgui.text_disabled("working directory")
 
     # After the directory because the listing is scoped by it.
-    picked_row = _session_list(state, scanner=scanner, live=live)
+    _session_list(state, scanner=scanner, live=live, recorder=recorder)
 
     # **Not how a brief is created.** A team session writes the task above as its
     # first premise at launch, because that is where the operator's premises already
@@ -2613,15 +3248,16 @@ def draw(
     # so a session told to continue a brief does not bury it under a new one.
     #
     # Empty is the common case and must stay cheap to leave empty.
-    imgui.spacing()
+    widgets.dialog_field()
     imgui.set_next_item_width(-1)
     _, state.brief = imgui.input_text_with_hint(
         "##brief", "continue an existing brief (optional) -- leave empty for a new one", state.brief
     )
+    widgets.dialog_caption()
     imgui.text_disabled("brief directory")
 
-    imgui.spacing()
-    imgui.set_next_item_width(240.0)
+    widgets.dialog_group()
+    imgui.set_next_item_width(widgets.DIALOG_FIELD_WIDTH)
     # A pick the offered list does not contain is kept and shown rather than corrected:
     # it is what ``--model`` was given, or what a probe offered on an earlier run and no
     # longer does. Dropping it would relaunch on a model the operator did not choose,
@@ -2632,64 +3268,64 @@ def draw(
     changed, chosen = imgui.combo("model", options.index(state.model), options)
     if changed:
         state.model = options[chosen]
+    imgui.set_next_item_width(widgets.DIALOG_FIELD_WIDTH)
     _, state.template_index = imgui.combo("team", state.template_index, list(templates.names()))
     # The shape is not obvious from a one-word name, and picking the wrong one is
     # only visible several turns later when workers start appearing -- so the
     # description is on screen rather than a tooltip away.
-    imgui.text_disabled(templates.BUILT_IN[state.template_index].description)
+    widgets.dialog_caption()
+    widgets.notice(Notice(templates.BUILT_IN[state.template_index].description))
 
     # The rung, above both of the controls below because each is read against it: the
     # cap bounds fan-out under every rung, and the containment block is the top rung's
     # own precondition rather than a control in its own right.
+    widgets.dialog_group()
+    imgui.set_next_item_width(widgets.DIALOG_FIELD_WIDTH)
     changed, picked = imgui.combo("gate", POLICIES.index(state.policy), [p.value for p in POLICIES])
     if changed:
         state.policy = POLICIES[picked]
-    # Both halves, derived from the classifier rather than described, because this
-    # is where the operator decides. The name of a rung is not enough to calibrate
-    # against -- PERMISSIVE reads as "the gate is off" and it is not -- so what it
-    # adds and what it leaves parked are both on screen at the moment of choosing.
-    #
-    # Of the rung the launch gets, which is not always the one on the dial: see
-    # ``dial_text``.
-    dial = dial_text(state.policy, state.granted_policy)
-    if dial.downgrade is not None:
-        imgui.text_colored(P.warn.vec4, dial.downgrade)
-    imgui.text_disabled(dial.adds)
-    imgui.text_disabled(dial.parks)
-
-    # Here, with the ordinary launch fields, rather than inside the containment
-    # section: the cap bounds fan-out under every policy and the operator asked for an
-    # override at launch, not an override under the dangerous mode. What the mode
-    # changes is how much rests on the number, which is what `_CAP_REASON` says beside
-    # it down there.
-    #
-    # Drawn only when the caller supplied the setting in force, because without one
-    # there is no number to offer an override *of* -- and seeding the box from
-    # `DEFAULT_SUBAGENT_CAP` would put a figure on screen that is wrong for exactly the
-    # operator who changed the setting. `_cap_line` already argues that case.
+    # The number in force for *this* launch: the override when there is one, and
+    # otherwise the caller's setting. None when the caller supplied no setting,
+    # and then there is no override control either -- seeding the box from
+    # `DEFAULT_SUBAGENT_CAP` would put a figure on screen that is wrong for
+    # exactly the operator who changed the setting. `_cap_line` argues that case.
     effective_cap = subagent_cap if state.subagent_cap is None else state.subagent_cap
+    # One line, of the rung the launch gets and not always the one on the dial
+    # (``dial_text``): what it adds, or the alarm, or what a press does instead.
+    # The name of a rung is not enough to calibrate against -- PERMISSIVE reads as
+    # "the gate is off" and it is not -- so what it adds is on screen at the
+    # moment of choosing, derived from the classifier rather than described.
+    widgets.dialog_caption()
+    widgets.notice(_gate_notice(state, prober=prober, subagent_cap=effective_cap))
+
+    # Here, with the ordinary launch fields, and not under the top rung only: the
+    # cap bounds fan-out under every policy and the operator asked for an override
+    # at launch, not an override under the dangerous mode. What the mode changes
+    # is how much rests on the number, which `_CAP_REASON` says behind the gate's
+    # question mark.
     if effective_cap is not None:
-        imgui.set_next_item_width(240.0)
+        widgets.dialog_field()
+        imgui.set_next_item_width(widgets.DIALOG_FIELD_WIDTH)
         changed, typed = imgui.input_int("sub-agents", effective_cap)
         if changed:
             # Clamped, not refused. A negative cap is a drag past the end of a
             # spinner rather than an intention worth a message on screen, and zero is
             # kept because zero is a session that may not spawn at all.
             state.subagent_cap = max(0, typed)
-            effective_cap = state.subagent_cap
         # Inside the guard with the control it labels. Left outside, a caller that
         # supplied no setting got the caption without the spinner -- a screen
         # describing a control that is not there, and asserting a per-launch cap when
         # nothing is overriding anything.
-        imgui.text_disabled("sub-agents one session may run at once, for this launch only")
+        widgets.dialog_caption()
+        widgets.notice(Notice("sub-agents one session may run at once, for this launch only"))
 
-    # The number in force for *this* launch, so the containment section cannot end up
-    # naming a different one from the box above it.
-    _containment_section(state, prober=prober, subagent_cap=effective_cap)
+    imgui.pop_text_wrap_pos()
+    imgui.end_child()
 
-    imgui.spacing()
-    imgui.separator()
-    imgui.spacing()
+    # The footer: items of the modal itself, under the child and outside its scroll.
+    footer_top = imgui.get_cursor_pos().y
+    imgui.push_text_wrap_pos(0.0)
+    widgets.dialog_group()
 
     # Two separate reasons the button can be dead, kept apart because only one of them
     # has something worth printing: an empty task box explains itself, and a mode the
@@ -2705,29 +3341,28 @@ def draw(
     imgui.same_line()
     cancelled = imgui.button("cancel", imgui.ImVec2(90.0, 0.0))
 
+    # Beside the buttons, on their row, so a reason coming or going moves nothing.
     if hold is not None:
-        # Wrapped in the room beside the buttons, as a column that starts where the
-        # first line does.
         imgui.same_line()
-        imgui.text_colored(P.warn.vec4, hold)
-
-    # Only at cap, and only as a consequence. The running/cap counter itself is in
-    # the status bar, which stays visible behind the modal -- repeating it here
-    # would be the same duplication the omnibox was carrying. What the status bar
-    # cannot say is what happens to *this* launch, and a session that sits in
-    # SPAWNING while others work looks broken to whoever just pressed the button.
-    if running >= cap:
-        # Beside the buttons when nothing else is, and under them when a hold reason
-        # has that place: a second ``same_line`` would start past the end of a
-        # wrapped reason, outside the modal.
-        if hold is None:
-            imgui.same_line()
-        imgui.text_colored(P.warn.vec4, f"at cap - this one will queue ({queued} ahead of it)")
+        imgui.align_text_to_frame_padding()
+        widgets.notice(hold_notice(hold))
+    elif running >= cap:
+        # Only at cap, and only as a consequence. The running/cap counter itself is
+        # in the status bar, which stays visible behind the modal -- repeating it
+        # here would be the same duplication the omnibox was carrying. What the
+        # status bar cannot say is what happens to *this* launch, and a session
+        # that sits in SPAWNING while others work looks broken to whoever just
+        # pressed the button. Not beside a hold: a launch that is held does not
+        # queue.
+        imgui.same_line()
+        imgui.align_text_to_frame_padding()
+        widgets.notice(Notice(f"at cap — this one queues ({queued} ahead of it)", Tone.WARN))
 
     # Escape is handled explicitly rather than left to ImGui so that the precedence
     # against the layout shortcuts is stated in one place instead of split between
-    # this and NavUpdate's behaviour.
-    dismissed = cancelled or imgui.is_key_pressed(imgui.Key.escape)
+    # this and NavUpdate's behaviour. Not while an explanation is up: that Escape
+    # closes the explanation.
+    dismissed = cancelled or (not explaining and imgui.is_key_pressed(imgui.Key.escape))
     reopen = False
 
     # ``enabled`` and not ``clicked`` alone: ``begin_disabled`` greys the button and
@@ -2743,12 +3378,6 @@ def draw(
             dismissed = True
             reopen = state.failure_loaded
 
-    if picked_row is not None:
-        # The modal goes and the fields stay: nothing was launched, so nothing is
-        # cleared, and the draft is here on the next Ctrl+N.
-        dismissed = True
-        reopen = False
-
     if dismissed:
         state.is_open = False
         imgui.close_current_popup()
@@ -2762,9 +3391,5 @@ def draw(
             state.request_open()
 
     imgui.pop_text_wrap_pos()
+    state._footer_height = imgui.get_cursor_pos().y - footer_top
     imgui.end_popup()
-
-    if picked_row is not None:
-        # After the popup is ended, so a form the caller opens from here is asked
-        # for at the root and not inside the modal that has just been closed.
-        on_pick_resume(picked_row)

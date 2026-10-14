@@ -10,7 +10,7 @@ every lookup the queue row makes for an obligation has an answer for a decision.
 The cards and rows themselves are drawn by imgui and are not drawn here.
 
 The second half is the persisted fleet on the rail: a closed card, a session off
-the fleet, and the fold of ended sub-agents. Those snapshots are built by the real
+the fleet, and ended sub-agents that are hidden. Those snapshots are built by the real
 reducer and drawn through ``rail.draw`` against the stub ``test_inbox_rail`` keeps,
 so what is asserted is the strings and buttons the pane submitted. No pixel of it
 has been looked at.
@@ -31,8 +31,12 @@ from pptmstr.intents import (
     AgentFinished,
     AgentResumed,
     AgentSpawned,
+    ApprovalRequested,
     SessionDetached,
     SessionRecalled,
+    TaskClaimRequested,
+    TaskDeclared,
+    TaskReleased,
 )
 from pptmstr.model import (
     AgentRecord,
@@ -52,11 +56,12 @@ from pptmstr.model import (
     SessionFailed,
     Snapshot,
     Standing,
+    Task,
     TranscriptPresence,
 )
 from pptmstr.store import Store
 from pptmstr.theme import DISCLOSURE_GLYPH, STATE_GLYPH
-from pptmstr.ui import detail, fleet_view, inbox, rail
+from pptmstr.ui import detail, inbox, rail
 from pptmstr.ui.focus import FocusState, OnNode
 from tests.test_inbox_rail import Drawn, _collect, _stub_imgui
 
@@ -441,10 +446,6 @@ class Frame:
         return next(c.args[0] for c in self.fake.text_colored.call_args_list if c.args[1] == text)
 
 
-def fold_rows(frame: Frame) -> list[str]:
-    return [line for line in frame.text if "ended" in line]
-
-
 # -- a closed card ----------------------------------------------------------------------
 
 
@@ -706,133 +707,176 @@ def test_a_removed_session_that_comes_to_owe_is_drawn_again(
     assert "reconcile disagreeing TLE sets" in Frame(monkeypatch, store.snapshot()).text
 
 
-# -- the fold ---------------------------------------------------------------------------
+# -- hiding ended sub-agents ---------------------------------------------------------------
 
 
-def test_nothing_is_folded_unless_the_caller_asks(monkeypatch: pytest.MonkeyPatch) -> None:
-    snap = team(A, B).snapshot()
+def without(*absent: NodeId) -> Store:
+    """``team()`` as it would be had the sub-agents named never been spawned."""
+    store = Store()
+    store.apply(launch(LEAD))
+    for node, role in ((A, "scout"), (B, "builder"), (C, "skeptic")):
+        if node not in absent:
+            store.apply(launch(node, LEAD, role=role))
+    return store
 
-    frame = Frame(monkeypatch, snap, state=opened())
 
-    assert len(frame.out.cards) == 4
-    assert fold_rows(frame) == []
-    assert {"scout", "builder", "skeptic"} <= set(frame.text)
+def same_frame(one: Frame, other: Frame) -> bool:
+    """Whether two frames submitted the same strings, buttons and rectangles."""
+    return (
+        one.text == other.text
+        and one.out.cards == other.out.cards
+        and one.out.origins == other.out.origins
+        and one.out.fills == other.out.fills
+        and one.out.marks == other.out.marks
+        and one.menus == other.menus
+    )
 
 
-def test_ended_sub_agents_fold_into_one_row_that_counts_them(
-    monkeypatch: pytest.MonkeyPatch,
+def lit(frame: Frame) -> list[float]:
+    """The top edge of every card drawn with the focused outline."""
+    return [m[0].y for m in frame.out.marks if m[4] == 2.0]
+
+
+def test_with_the_setting_off_every_sub_agent_is_drawn(monkeypatch: pytest.MonkeyPatch) -> None:
+    for store in (team(A, B), team(A, B, C)):
+        frame = Frame(monkeypatch, store.snapshot(), state=opened(), hide_ended=False)
+
+        assert len(frame.out.cards) == 4
+        assert {"scout", "builder", "skeptic"} <= set(frame.text)
+
+    assert any("3 subs" in line for line in Frame(monkeypatch, team(A, B, C).snapshot()).text)
+    # Unasked is off: the pane hides nothing a caller did not ask it to.
+    assert len(Frame(monkeypatch, team(A, B).snapshot(), state=opened()).out.cards) == 4
+
+
+@pytest.mark.parametrize("is_open", [True, False], ids=["group open", "group collapsed"])
+def test_a_hidden_sub_agent_has_no_row_and_nothing_counts_or_names_it(
+    monkeypatch: pytest.MonkeyPatch, is_open: bool
 ) -> None:
-    store = team(A, B)
-    snap = store.snapshot()
+    """
+    The whole property in one comparison: the pane submits for a session with two
+    hidden sub-agents exactly what it submits for a session that never had them.
+    """
 
-    frame = Frame(monkeypatch, snap, state=opened(), hide_ended=True)
+    def frame(store: Store) -> Frame:
+        state = opened() if is_open else rail.RailState()
+        return Frame(monkeypatch, store.snapshot(), state=state, hide_ended=True)
 
-    assert "skeptic" in frame.text
-    assert "scout" not in frame.text and "builder" not in frame.text
-    assert fold_rows(frame) == [f"{DISCLOSURE_GLYPH[False]} 2 ended"]
-    # The root, the one still working, and the row.
-    assert len(frame.out.cards) == 3
-    # Drawn after the members and at their indent, inside the bracket.
-    assert frame.out.origins[2][0] == frame.out.origins[1][0] > frame.out.origins[0][0]
-    assert frame.out.origins[2][1] > frame.out.origins[1][1]
+    hidden = frame(team(A, B))
+
+    assert same_frame(hidden, frame(without(A, B)))
+    assert "scout" not in hidden.text and "builder" not in hidden.text
+    assert not any("ended" in line or "3 sub" in line or "2 " in line for line in hidden.text)
+    assert len(hidden.out.cards) == (2 if is_open else 1)
+    if not is_open:
+        assert f"{DISCLOSURE_GLYPH[False]} 1 sub" in hidden.text
 
 
-def test_the_fold_leaves_the_snapshot_and_the_cursor_as_they_were(
+@pytest.mark.parametrize("is_open", [True, False], ids=["group open", "group collapsed"])
+def test_a_session_whose_every_sub_agent_is_hidden_draws_as_one_that_has_none(
+    monkeypatch: pytest.MonkeyPatch, is_open: bool
+) -> None:
+    state = opened() if is_open else rail.RailState()
+
+    hidden = Frame(monkeypatch, team(A, B, C).snapshot(), state=state, hide_ended=True)
+    alone = Frame(monkeypatch, without(A, B, C).snapshot(), state=state, hide_ended=True)
+
+    assert same_frame(hidden, alone)
+    assert len(hidden.out.cards) == 1
+    assert not any("sub" in line or DISCLOSURE_GLYPH[True] in line for line in hidden.text)
+    # Not closed by the draw: the operator's choice stands for when one comes back.
+    assert state.expanded == ({"live"} if is_open else set())
+
+
+def test_no_click_brings_a_hidden_sub_agent_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    snap = team(A, B).snapshot()
+    state = opened()
+
+    for button in range(4):
+        Frame(monkeypatch, snap, state=state, hide_ended=True, clicked=button)
+        again = Frame(monkeypatch, snap, state=state, hide_ended=True)
+        assert "scout" not in again.text and "builder" not in again.text
+        assert len(again.out.cards) <= 2
+
+
+def test_hiding_leaves_the_snapshot_and_the_cursor_as_they_were(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     store = team(A, B)
     snap = store.snapshot()
     nodes, order = dict(snap.nodes), snap.order
 
-    frame = Frame(monkeypatch, snap, state=opened(), cursor=C, hide_ended=True, clicked=2)
+    frame = Frame(monkeypatch, snap, state=opened(), cursor=C, hide_ended=True)
 
-    assert frame.state.unfolded == {LEAD}, "the click did not reach the row"
     assert store.snapshot() is snap
     assert dict(snap.nodes) == nodes and snap.order == order
     assert frame.focus.target is frame.target
     assert frame.focus.node(snap) == C
 
 
-def test_the_fold_row_opens_and_stays_open_across_frames(monkeypatch: pytest.MonkeyPatch) -> None:
-    snap = team(A, B, C).snapshot()
-    state = opened()
+def test_an_ended_sub_agent_the_operator_owes_is_drawn(monkeypatch: pytest.MonkeyPatch) -> None:
+    store = team(A, B)
+    store.apply(
+        ApprovalRequested(
+            A,
+            PendingApproval(
+                id="p1",
+                node=A,
+                tool_name="Write",
+                tool_use_id="tu",
+                raw_args={},
+                summary="Write x",
+                requested_at=6.0,
+            ),
+        )
+    )
+    snap = store.snapshot()
+    assert snap.nodes[A].state is AgentState.DONE and [o.node for o in snap.needs_you] == [A]
 
-    closed = Frame(monkeypatch, snap, state=state, hide_ended=True)
-    assert len(closed.out.cards) == 2
-    assert fold_rows(closed) == [f"{DISCLOSURE_GLYPH[False]} 3 ended"]
+    frame = Frame(monkeypatch, snap, state=opened(), hide_ended=True)
 
-    Frame(monkeypatch, snap, state=state, hide_ended=True, clicked=1)
-    assert state.unfolded == {LEAD}
-
-    for _ in range(2):
-        shown = Frame(monkeypatch, snap, state=state, hide_ended=True)
-        assert state.unfolded == {LEAD}
-        assert {"scout", "builder", "skeptic"} <= set(shown.text)
-        assert fold_rows(shown) == [f"{DISCLOSURE_GLYPH[True]} 3 ended, shown"]
-        assert len(shown.out.cards) == 5
-
-    # The row is the last button now that the members are drawn above it.
-    Frame(monkeypatch, snap, state=state, hide_ended=True, clicked=4)
-    assert state.unfolded == set()
-    assert len(Frame(monkeypatch, snap, state=state, hide_ended=True).out.cards) == 2
+    assert "scout" in frame.text and "builder" not in frame.text
+    assert len(frame.out.cards) == 3
+    collapsed = Frame(monkeypatch, snap, hide_ended=True)
+    assert f"{DISCLOSURE_GLYPH[False]} 2 subs · 1 waiting" in collapsed.text
 
 
-def test_the_fold_row_is_not_a_card(monkeypatch: pytest.MonkeyPatch) -> None:
-    """
-    Clicked and hovered -- which the stub also reports as a right button released
-    over it -- it selects nothing, opens no menu and is never the menu key's card.
-    """
-    snap = team(A, B).snapshot()
+def test_an_ended_sub_agent_holding_a_claim_is_drawn_until_it_lets_go(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = team()
+    store.apply(TaskDeclared(Task(id="t1", title="one"), node_id=LEAD))
+    store.apply(TaskClaimRequested(B, request_id="k1", task_id="t1"))
+    store.apply(AgentFinished(A, AgentState.DONE, ended_at=5.0))
+    store.apply(AgentFinished(B, AgentState.DONE, ended_at=5.0))
+    assert store.snapshot().tasks["t1"].claimed_by == B
 
-    frame = Frame(monkeypatch, snap, state=opened(), cursor=C, hide_ended=True, clicked=2)
+    holding = Frame(monkeypatch, store.snapshot(), state=opened(), hide_ended=True)
+    assert "builder" in holding.text and "scout" not in holding.text
+    assert len(holding.out.cards) == 3
 
-    assert frame.menus == [LEAD, C]
-    assert frame.focus.target is frame.target
-    # One focused outline, and it is the cursor's card, not the row.
-    assert [m[0].y for m in frame.out.marks if m[4] == 2.0] == [frame.out.origins[1][1]]
-    assert len(frame.out.marks) == 2
+    store.apply(TaskReleased(B, "t1"))
+    released = Frame(monkeypatch, store.snapshot(), state=opened(), hide_ended=True)
+    assert "builder" not in released.text
+    assert len(released.out.cards) == 2
 
 
 def test_a_sub_agent_that_is_woken_is_drawn_again(monkeypatch: pytest.MonkeyPatch) -> None:
-    store = team(A, B)
+    store = team(A, B, C)
     state = opened()
-    assert "scout" not in Frame(monkeypatch, store.snapshot(), state=state, hide_ended=True).text
+    assert len(Frame(monkeypatch, store.snapshot(), state=state, hide_ended=True).out.cards) == 1
 
     store.apply(AgentResumed(A, at=9.0))
     frame = Frame(monkeypatch, store.snapshot(), state=state, hide_ended=True)
 
+    # The group was open when its last member was hidden, and is open again.
     assert "scout" in frame.text
-    assert fold_rows(frame) == [f"{DISCLOSURE_GLYPH[False]} 1 ended"]
+    assert "builder" not in frame.text and "skeptic" not in frame.text
+    assert len(frame.out.cards) == 2
+    assert f"{DISCLOSURE_GLYPH[True]}" in frame.text
 
 
-def test_the_card_under_the_cursor_is_not_folded_until_the_cursor_leaves(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    snap = team(A, B).snapshot()
-    state = opened()
-
-    on_it = Frame(monkeypatch, snap, state=state, cursor=A, hide_ended=True)
-    assert "scout" in on_it.text
-    assert fold_rows(on_it) == [f"{DISCLOSURE_GLYPH[False]} 1 ended"]
-
-    left = Frame(monkeypatch, snap, state=state, cursor=C, hide_ended=True)
-    assert "scout" not in left.text
-    assert fold_rows(left) == [f"{DISCLOSURE_GLYPH[False]} 2 ended"]
-
-
-def test_a_collapsed_group_has_no_fold_row_and_still_counts_every_sub_agent(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    snap = team(A, B).snapshot()
-
-    frame = Frame(monkeypatch, snap, hide_ended=True)
-
-    assert len(frame.out.cards) == 1
-    assert fold_rows(frame) == []
-    assert any("3 subs" in line for line in frame.text)
-
-
-def test_a_group_with_nothing_to_fold_has_no_row_and_draws_as_it_does_unasked(
+def test_a_group_with_nothing_to_hide_draws_as_it_does_unasked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     snap = team().snapshot()
@@ -840,33 +884,63 @@ def test_a_group_with_nothing_to_fold_has_no_row_and_draws_as_it_does_unasked(
     asked = Frame(monkeypatch, snap, state=opened(), hide_ended=True, now_wall=WALL)
     unasked = Frame(monkeypatch, snap, state=opened())
 
-    assert asked.text == unasked.text
-    assert asked.out.cards == unasked.out.cards and asked.out.origins == unasked.out.origins
-    assert asked.out.fills == unasked.out.fills and asked.out.marks == unasked.out.marks
+    assert same_frame(asked, unasked)
 
 
-def test_the_bracket_runs_to_the_bottom_of_the_fold_row(monkeypatch: pytest.MonkeyPatch) -> None:
-    snap = team(A, B, C).snapshot()
-
-    frame = Frame(monkeypatch, snap, state=opened(), hide_ended=True)
-
-    row_top = frame.out.origins[1][1]
-    bracket = frame.out.fills[-1]
-    assert bracket[1].y == row_top + 18.0
+# -- the cursor on a sub-agent that has no card ---------------------------------------------
 
 
-def test_the_row_reads_what_the_fold_counted() -> None:
+@pytest.mark.parametrize("is_open", [True, False], ids=["group open", "group collapsed"])
+def test_the_cursor_does_not_keep_a_hidden_sub_agent_drawn_and_lights_its_lead(
+    monkeypatch: pytest.MonkeyPatch, is_open: bool
+) -> None:
+    snap = team(A, B).snapshot()
+    state = opened() if is_open else rail.RailState()
+
+    frame = Frame(monkeypatch, snap, state=state, cursor=A, hide_ended=True)
+
+    assert "scout" not in frame.text
+    assert len(frame.out.cards) == (2 if is_open else 1)
+    # One outline, and it is on the lead's card: the first one drawn.
+    assert lit(frame) == [frame.out.origins[0][1]]
+    assert frame.out.scrolls == 1
+    # The pane moved nothing. The cursor is where the operator left it.
+    assert frame.focus.target is frame.target
+    assert frame.focus.node(snap) == A
+
+
+def test_the_cursor_on_a_drawn_sub_agent_lights_that_card_and_not_its_lead(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     snap = team(A, B).snapshot()
 
-    assert rail.fold_label(fleet_view.fold(snap, LEAD, None, True)) == "2 ended"
-    assert rail.fold_label(fleet_view.fold(snap, LEAD, None, True, {LEAD})) == "2 ended, shown"
+    hiding = Frame(monkeypatch, snap, state=opened(), cursor=C, hide_ended=True)
+    assert lit(hiding) == [hiding.out.origins[1][1]]
+
+    # With the setting off the ended one has a card, and that card is the cursor's.
+    showing = Frame(monkeypatch, snap, state=opened(), cursor=A)
+    assert lit(showing) == [showing.out.origins[1][1]]
 
 
-def test_an_opened_fold_is_forgotten_with_its_session() -> None:
-    state = rail.RailState(unfolded={LEAD, OLD})
-    store = Store()
-    store.apply(launch(LEAD))
+def test_a_hidden_sub_agent_under_the_cursor_lights_no_other_sessions_card(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = team(A, B)
+    store.apply(launch(("second", None)))
+    store.apply(launch(("second", "agent-z"), ("second", None), role="scout"))
+    state = rail.RailState(expanded={"live", "second"})
 
-    state.prune(store.snapshot())
+    frame = Frame(monkeypatch, store.snapshot(), state=state, cursor=A, hide_ended=True)
 
-    assert state.unfolded == {LEAD}
+    assert lit(frame) == [frame.out.origins[0][1]]
+
+
+def test_which_card_the_cursor_lights_in_an_open_group() -> None:
+    drawn = {C}
+
+    assert rail._lit(None, LEAD, drawn) is None
+    assert rail._lit(LEAD, LEAD, drawn) == LEAD
+    assert rail._lit(C, LEAD, drawn) == C
+    assert rail._lit(A, LEAD, drawn) == LEAD
+    assert rail._lit(OLD, LEAD, drawn) == OLD
+    assert rail._lit(("old", "agent-a"), LEAD, drawn) == ("old", "agent-a")

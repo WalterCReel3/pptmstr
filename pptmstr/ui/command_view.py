@@ -67,6 +67,7 @@ from imgui_bundle import imgui
 
 from .. import commandtext
 from ..command import (
+    COMMAND_TAG,
     DEFAULT_TIMEOUT_S,
     ID_HEX_CHARS,
     MAX_REASON_CHARS,
@@ -83,6 +84,8 @@ from ..command import (
     Lapsed,
     NotStarted,
     Refused,
+    Released,
+    Survivor,
     TimedOut,
     Withdrawn,
     command_refusal,
@@ -155,7 +158,14 @@ class Stopping:
     command_id: CommandId
 
 
-Pending = FrozenRun | Refusing | Stopping
+@dataclass(frozen=True, slots=True)
+class Releasing:
+    """Release was pressed once on this command left running unsupervised."""
+
+    command_id: CommandId
+
+
+Pending = FrozenRun | Refusing | Stopping | Releasing
 
 
 def refusal_of_edit(text: str) -> str:
@@ -290,6 +300,8 @@ class CommandViewState:
                 return command.state is CommandState.ASKED
             case Stopping():
                 return command.state is CommandState.RUNNING and command.stop_asked_at is None
+            case Releasing():
+                return command.unsupervised is not None
             case _:
                 assert_never(pending)
 
@@ -570,7 +582,7 @@ NO_SHELL = (
     " your account names none -- so this cannot be run from here"
 )
 ENVIRONMENT_WHOLE = "its environment is pptmstr's, with nothing removed"
-ENVIRONMENT_CHANGED = "its environment is pptmstr's, with this taken out before the shell starts:"
+ENVIRONMENT_CHANGED = "its environment is pptmstr's, with this changed before the shell starts:"
 
 # Names a login shell that reads a command line the way the breakdown assumes.
 _POSIX_SHELLS = frozenset({"sh", "bash", "dash", "ksh", "mksh", "ash", "zsh"})
@@ -587,7 +599,8 @@ def standing_lines(shell: str | None, stripped_env: Sequence[str], cwd: str) -> 
     command: fixed sentences, and the shell, directory and environment by name.
 
     ``stripped_env`` is ``commandrun.environment_changes``'s answer, a line
-    for each thing the runner takes out, and each is given a line here.
+    for each thing the runner takes out and one for the variable it sets, and
+    each is given a line here.
     """
     lines = [Line(RUNS_AS_YOU, Tone.WARN), Line(RULES_DO_NOT_APPLY, Tone.WARN)]
     if shell is None:
@@ -700,15 +713,32 @@ LAPSED = "lapsed - asked before pptmstr last closed and never run"
 END_UNKNOWN = "end unknown - was running when pptmstr last closed; whether it finished is not known"
 
 
-def still_running(members: int, session: int) -> str:
+def still_running(left: Survivor) -> str:
     """
     How a command left running unsupervised is said to stand. Not "end
-    unknown": what is known of it is that it has not ended. ``session`` is the
-    session its shell led, which is the shell's pid.
+    unknown": what is known of it is that it has not ended. With its shell
+    there, the session is named by the shell's pid, which is its number; with
+    the shell gone, what is counted is what carries the command's tag.
     """
+    if not left.shell:
+        return (
+            "STILL RUNNING, UNSUPERVISED - no end was recorded, its shell is gone, and"
+            f" {left.alive} process{'' if left.alive == 1 else 'es'} started with its"
+            f" {COMMAND_TAG} {'is' if left.alive == 1 else 'are'} alive"
+        )
+    outside = f", and {len(left.escaped)} more outside it" if left.escaped else ""
     return (
         "STILL RUNNING, UNSUPERVISED - no end was recorded and its shell's session"
-        f" {session} still has {members} process{'' if members == 1 else 'es'}"
+        f" {left.pid} still has {left.members} process{'' if left.members == 1 else 'es'}"
+        f"{outside}"
+    )
+
+
+def released_line(alive: int) -> str:
+    """How a command whose session the operator released is said to stand."""
+    return (
+        f"released by you, {alive} process{'' if alive == 1 else 'es'} still running then -"
+        " not signalled, and no longer watched"
     )
 
 
@@ -799,10 +829,12 @@ def _how_ended(command: Command, end: End) -> Line:
             return Line(WITHDRAWN, Tone.DIM)
         case Lapsed():
             return Line(LAPSED, Tone.DIM)
+        case EndUnknown(released=Released(alive=alive)):
+            return Line(released_line(alive), Tone.WARN)
         case EndUnknown(survivor=left):
             if left is None:
                 return Line(END_UNKNOWN, Tone.WARN)
-            return Line(still_running(left.members, left.pid), Tone.ALARM)
+            return Line(still_running(left), Tone.ALARM)
         case _:
             assert_never(outcome)
 

@@ -38,6 +38,7 @@ from pptmstr.command import (
     Lapsed,
     NotStarted,
     Refused,
+    Released,
     RequestRefusal,
     Run,
     Survivor,
@@ -6686,6 +6687,25 @@ def test_a_command_left_running_unsupervised_is_ended_and_still_owes_a_row() -> 
     assert "its shell's session 4242 is alive and nothing bounds it" in owed.summary
     assert "make install" not in owed.summary
 
+    # Known by its tag, with the shell gone, there is no session to name.
+    for found, said in (
+        (
+            Survivor(pid=4242, pgid=4242, members=1, pids=(51,), marked=(51,), shell=False),
+            "its shell is gone, 1 of its processes is alive and nothing bounds it",
+        ),
+        (
+            Survivor(pid=4242, pgid=4242, members=0, groups=(7, 8), escaped=(7, 8), shell=False),
+            "its shell is gone, 2 of its processes are alive and nothing bounds them",
+        ),
+    ):
+        by_tag = Store()
+        by_tag.apply_all([spawn(C_ROOT), spawn(C_ASKER, C_ROOT)], now=5.0)
+        left = _on_disk(1, C_ASKER, EndUnknown(survivor=found))
+        by_tag.apply_all([CommandsRestored(CS, (left,))], now=9.0)
+        (owed,) = [o for o in by_tag.snapshot().needs_you if o.key == f"command:{cid(1)}"]
+        assert said in owed.summary and "4242" not in owed.summary
+        assert by_tag.snapshot().unsupervised_command(CS) == left
+
 
 def test_nothing_is_approved_in_a_session_beside_a_command_left_running() -> None:
     snap, _ = _left_running()
@@ -6708,6 +6728,58 @@ def test_a_command_left_running_is_no_request_of_its_askers_under_the_cap() -> N
     refused, effects = step(snap, CommandRequested(C_ASKER, handed(9), "rq", 100.0))
     assert effects == (CommandSettled("rq", cid(9), CommandRefusal.TOO_MANY_OPEN),)
     assert refused.commands == snap.commands
+
+
+def test_a_release_lets_go_of_the_session_a_command_left_running_holds() -> None:
+    """
+    The operator's way out that does not wait on the process: released, the
+    command owes no row and holds nothing, and its record says it was released
+    and with how many found. Then it is an ended command like any other.
+    """
+    snap, left = _left_running()
+    assert left.end is not None
+    snap = asked_by(snap, C_ASKER, 2)
+    assert snap.command_approval_refusal(cid(2), "make install", 600) is not None
+    released = Released(at=310.0, alive=_LEFT.alive)
+
+    after, effects = step(
+        snap,
+        CommandEnded(cid(1), dataclasses.replace(left.end, outcome=EndUnknown(released=released))),
+    )
+
+    assert effects == ()
+    held = after.commands[cid(1)]
+    assert held.end == dataclasses.replace(left.end, outcome=EndUnknown(released=released))
+    assert held.unsupervised is None and not held.owes_row
+    assert after.unsupervised_command(CS) is None
+    assert [o.key for o in after.needs_you if o.key.startswith("command:")] == [f"command:{cid(2)}"]
+    assert after.command_approval_refusal(cid(2), "make install", 600) is None
+
+    # Released is final: no later look puts the row or the hold back.
+    for intent in (
+        ended(1, EndUnknown(survivor=_LEFT)),
+        ended(1, EndUnknown()),
+        ended(1, EndUnknown(released=Released(at=320.0, alive=1))),
+    ):
+        again, effects = step(after, intent)
+        assert again is after and effects == (), intent
+
+
+def test_only_a_command_left_running_unsupervised_can_be_released() -> None:
+    """
+    A release says something of its own was found running and let go. Of a
+    command this window runs, or one that merely ended, or from an agent, it is
+    not applied.
+    """
+    released = EndUnknown(released=Released(at=310.0, alive=1))
+    running, _ = step(asked_by(command_world(), C_ASKER, 1), approve(1))
+    assert running.commands[cid(1)].state is CommandState.RUNNING
+    after, effects = step(running, ended(1, released))
+    assert after is running and effects == ()
+
+    snap, _ = _left_running()
+    after, effects = step(snap, ended(1, released, who=C_ASKER))
+    assert after is snap and effects == ()
 
 
 def test_only_another_look_replaces_the_end_of_a_command_left_running() -> None:

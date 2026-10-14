@@ -60,6 +60,8 @@ from .approval import (
     Policy,
     classify,
     inherits_to_subagents,
+    records_read,
+    records_written,
     render_diff,
     requires_containment,
     summarize,
@@ -1873,7 +1875,17 @@ class AgentSession:
         # call, both reached from the dial. See the docstrings there for what
         # that costs: nothing here bounds a relaxed session's length except the
         # allowlist itself and the operator noticing it is on.
-        disposition = classify(tool_name, tool_input, self._policy_for(agent_id))
+        # The session's id and directory are this object's and not the payload's,
+        # for the reason `_write_region` gives: `classify` uses them to tell this
+        # session's own records from another's, and a bound taken from the side
+        # the request came from is not a bound.
+        disposition = classify(
+            tool_name,
+            tool_input,
+            self._policy_for(agent_id),
+            session_id=self.session_id,
+            cwd=self._write_region(),
+        )
         if disposition is Disposition.AUTO_APPROVE:
             # Behind classify, and on this branch only. The at-cap deny above sits
             # *ahead* of classify so that no policy can widen it; this one cannot be
@@ -1900,7 +1912,8 @@ class AgentSession:
             return _deny(tool_name, f"{tool_name} is not permitted by policy")
         unreviewable = self._no_reviewer_reason(tool_name, agent_id)
         if unreviewable is not None:
-            return _deny(tool_name, unreviewable)
+            foreign = self._records_refusal(tool_name, tool_input, agent_id)
+            return _deny(tool_name, unreviewable if foreign is None else foreign)
 
         return await self._park(tool_name, tool_input, tool_use_id, node, spawn=spawn)
 
@@ -1985,6 +1998,36 @@ class AgentSession:
         request is not a bound.
         """
         return self.cwd or "."
+
+    def _records_refusal(
+        self, tool_name: str, tool_input: Mapping[str, Any], agent_id: str | None
+    ) -> str | None:
+        """
+        Why a read of another session's records, or a write into any session's,
+        will not run with nobody to ask, or None for a call that is neither.
+
+        Its own sentence because ``_no_reviewer_reason``'s would send the agent
+        the wrong way under ``AUTONOMOUS``: that one says the tool is one this
+        build does not recognise and to use a tool it does, and here the tool is
+        ``Read`` and the path is what was refused. ``approval.records_read`` says
+        which path and where the session's own records are; this adds only why
+        nobody was asked, in ``_no_reviewer_reason``'s two cases and its order.
+        """
+        region = self._write_region()
+        foreign = records_read(tool_name, tool_input, session_id=self.session_id, cwd=region)
+        written = records_written(tool_name, tool_input, cwd=region)
+        if foreign is None and written is None:
+            return None
+        if self._policy_for(agent_id) is Policy.AUTONOMOUS:
+            nobody = (
+                "this session is running unattended by choice, so no operator will be "
+                "asked and retrying will not change that"
+            )
+        else:
+            nobody = "no operator is attached"
+        if written is not None:
+            return f"{written}. Only pptmstr writes its records, and {nobody}."
+        return f"{foreign}. That is read only with the operator's say, and {nobody}."
 
     def _no_reviewer_reason(self, tool_name: str, agent_id: str | None = None) -> str | None:
         """
@@ -2158,7 +2201,9 @@ class AgentSession:
             tool_name=tool_name,
             tool_use_id=tool_use_id,
             raw_args=dict(tool_input),
-            summary=summarize(tool_name, tool_input),
+            summary=summarize(
+                tool_name, tool_input, session_id=self.session_id, cwd=self._write_region()
+            ),
             # Monotonic, like every other instant a wait is measured from -- see
             # PendingApproval.requested_at for why an epoch reading here renders the
             # oldest park in the queue as "0s" and sorts it last.

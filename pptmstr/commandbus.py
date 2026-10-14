@@ -88,6 +88,7 @@ from .command import (
     Lapsed,
     NotStarted,
     Refused,
+    Released,
     RequestRefusal,
     TimedOut,
     Withdrawn,
@@ -162,14 +163,14 @@ MAX_OUTPUT_REPLY_CHARS = 4_600
 #   expects         3 x 1,000 + 2   =  3,002
 #   refusal reason  3 x 1,000 + 2   =  3,002
 #   output                          =  4,600
-#   this                            =  4,300
-#                                     29,910  <=  30,000
+#   this                            =  4,380
+#                                     29,990  <=  30,000
 #
 # It is an over-count on purpose: no command has both a string that ran and a
 # reason it was refused. The sum does not lean on that.
 # tests/test_commandbus.py computes the sum from the constants and builds the
 # largest reply of each kind.
-_COMMAND_FRAME_CHARS = 4_300
+_COMMAND_FRAME_CHARS = 4_380
 
 # How much of a command a list shows, on one line.
 _MAX_COMMAND_LINE_CHARS = 120
@@ -325,6 +326,8 @@ def _state_said(command: Command) -> str:
             return "withdrawn, NOT run"
         case Lapsed():
             return "lapsed, NOT run"
+        case EndUnknown(released=Released()):
+            return "started: left running, released by the operator"
         case EndUnknown(survivor=None):
             return "started: end unknown"
         case EndUnknown():
@@ -454,18 +457,44 @@ def _remarks(end: End) -> list[str]:
     """
     What the record of an end says beyond its outcome (``End.remarks``), each
     as a sentence of this tool's with what it means for the reader: processes
-    the command left behind that were ended with its shell, and an end that
-    was not seen to take.
+    the command left behind that were ended with its shell, processes it
+    started that left its session and were not ended, and an end that was not
+    seen to take.
+
+    What could not be read beside it (``End.unreadable``) is said in this
+    tool's words alone, as a count: the record's sentence names pids and a
+    line to look with, which are the operator's to use and are on their pane.
+
+    Of a command found still running (``EndUnknown.survivor``), or released
+    while it was (``EndUnknown.released``), only what the record adds is
+    given. That part of it may be running, and is not to be built on, is what
+    its outcome has just said of all of it.
     """
+    still = isinstance(end.outcome, EndUnknown) and (
+        end.outcome.survivor is not None or end.outcome.released is not None
+    )
     said: list[str] = []
     for remark in end.remarks:
+        if remark == end.unreadable_remark:
+            continue
         said.append(f"pptmstr's record adds: {visible(_one_line(remark))[:_MAX_REMARK_CHARS]}.")
-    if end.leftover:
+    # Not beside a record that says something of it was, or may be, running.
+    if end.leftover and not (end.escaped or end.unreadable or end.unconfirmed is not None):
         said.append(
             "Nothing the command started was left running: if it was meant to leave "
             "something running, that is gone."
         )
-    if end.unconfirmed is not None:
+    if end.escaped and not still:
+        said.append(
+            "So part of what it started WAS STILL RUNNING at its end. Only the operator "
+            "can end that."
+        )
+    if end.unreadable:
+        said.append(
+            f"pptmstr's record adds: {len(end.unreadable)} process(es) started beside it"
+            " could not be read, and MAY BE PART OF IT."
+        )
+    if end.unconfirmed is not None and not still:
         said.append(
             "So part of the command MAY STILL BE RUNNING. Do not build on it having " "stopped."
         )
@@ -613,6 +642,13 @@ def _command_whole(command: Command, now: float, asker: str | None, where: str |
                 "It LAPSED: it was still only asked when pptmstr stopped, and a request "
                 "does not outlive the window. Nothing ran. Ask again if it still matters."
             )
+        case EndUnknown(released=Released(alive=alive)):
+            lines.append(
+                f"It was started and no end of it was recorded. {alive} process(es) of it "
+                f"were STILL RUNNING when THE OPERATOR RELEASED YOUR SESSION from it: they "
+                f"were not signalled and nothing of pptmstr's bounds or watches them now. "
+                f"Do not build on it having stopped. Other commands can run again."
+            )
         case EndUnknown(survivor=None):
             lines.append(
                 "It was started and ITS END IS UNKNOWN: pptmstr stopped without "
@@ -624,12 +660,11 @@ def _command_whole(command: Command, now: float, asker: str | None, where: str |
             assert left is not None
             lines.append(
                 f"It was started and IT IS STILL RUNNING, UNSUPERVISED: no end of it "
-                f"was recorded, and when this pptmstr last looked {left.members} "
-                f"process(es) of it were alive. This pptmstr does not hold it, so no "
-                f"timeout and no cancel of this pptmstr's applies and it runs until it "
-                f"exits or the operator ends it; the operator's pane says so. It has "
-                f"NOT finished: do not build on what it was expected to change. No "
-                f"other command of your session can be run while it is there."
+                f"was recorded, and at pptmstr's last look {left.alive} process(es) of "
+                f"it were alive. No timeout and no cancel of pptmstr's applies: it runs "
+                f"until it exits or the operator ends it. It has NOT finished: do not "
+                f"build on what it was expected to change. No other command of your "
+                f"session can be run while it is there."
             )
         case _:  # pragma: no cover - mypy's exhaustiveness check, not a runtime path
             assert_never(outcome)

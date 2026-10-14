@@ -3467,9 +3467,9 @@ def _spy_on_classify(monkeypatch) -> list[tuple[str, Policy]]:
     seen: list[tuple[str, Policy]] = []
     real = driver_mod.classify
 
-    def spy(tool_name, tool_input, policy=Policy.STRICT):
+    def spy(tool_name, tool_input, policy=Policy.STRICT, **scope):
         seen.append((tool_name, policy))
-        return real(tool_name, tool_input, policy)
+        return real(tool_name, tool_input, policy, **scope)
 
     monkeypatch.setattr(driver_mod, "classify", spy)
     return seen

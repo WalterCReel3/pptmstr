@@ -1169,10 +1169,19 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
             # A running command ends, once. The one end that is replaced is
             # that of a command left running unsupervised, by another account
             # of the same kind: it was looked for again and found, or found
-            # gone. Nothing else is said twice about a command.
+            # gone, or the operator released its session. Nothing else is said
+            # twice about a command.
             looked_again = running.unsupervised is not None and isinstance(
                 intent.end.outcome, EndUnknown
             )
+            # A release lets go of what a survivor held, so only a command
+            # found running unsupervised can be released.
+            if (
+                isinstance(intent.end.outcome, EndUnknown)
+                and intent.end.outcome.released is not None
+                and running.unsupervised is None
+            ):
+                return snap, ()
             if running.state is not CommandState.RUNNING and not looked_again:
                 return snap, ()
             over = _closed(running, intent.end)
@@ -2251,7 +2260,16 @@ def _command_summary(world: Snapshot, command: Command) -> str:
     left = command.unsupervised
     if left is not None:
         # Before the size: it is the one row of this kind that is an alarm.
-        parts.insert(0, f"its shell's session {left.pid} is alive and nothing bounds it")
+        parts.insert(
+            0,
+            (
+                f"its shell's session {left.pid} is alive and nothing bounds it"
+                if left.shell
+                else f"its shell is gone, {left.alive} of its processes"
+                f" {'is' if left.alive == 1 else 'are'} alive and nothing bounds"
+                f" {'it' if left.alive == 1 else 'them'}"
+            ),
+        )
         return f"command STILL RUNNING, unsupervised, from {who}: " + "; ".join(parts)
     state = _COMMAND_STATE_TEXT.get(command.state, command.state.value)
     return f"command {state} from {who}: " + "; ".join(parts)

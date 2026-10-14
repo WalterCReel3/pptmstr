@@ -410,6 +410,19 @@ def test_every_change_the_runner_makes_to_the_environment_has_a_line_of_its_own(
     for name in ("VIRTUAL_ENV", "BASH_ENV", "ENV (", "PATH"):
         assert any(name in text for text in texts), name
     assert command_view.ENVIRONMENT_WHOLE not in texts
+    # The one thing that is set and not taken out is under a heading that is
+    # true of it: the operator is told the command runs with a variable they
+    # did not set.
+    assert f"  - {commandrun.TAG_SET}" in texts
+    assert "changed before the shell starts" in command_view.ENVIRONMENT_CHANGED
+    assert "taken out" not in command_view.ENVIRONMENT_CHANGED
+    bare = [
+        line.text
+        for line in command_view.standing_lines(
+            "/bin/bash", commandrun.environment_changes({"PATH": "/usr/bin"}), "/work"
+        )
+    ]
+    assert command_view.ENVIRONMENT_CHANGED in bare and f"  - {commandrun.TAG_SET}" in bare
 
 
 # -- freezing -------------------------------------------------------------------------
@@ -2142,3 +2155,71 @@ def test_in_dear_imgui_a_command_as_long_as_one_may_be_and_full_of_percent_signs
         frames.frame(3)
 
         assert frames.blocks == [asked[: c.MAX_COMMAND_CHARS]]
+
+
+def test_a_command_known_only_by_its_tag_is_not_said_to_have_a_session() -> None:
+    """
+    With the shell gone the session's number may be another program's. What
+    is counted is what carries the tag, wherever it is.
+    """
+    by_tag = Survivor(
+        pid=4242, pgid=4242, members=2, pids=(51, 58), escaped=(70,), marked=(51, 58), shell=False
+    )
+    said = command_view.row_state(ended(EndUnknown(by_tag)), now=300.0)
+    assert said.tone is Tone.ALARM
+    assert said.text == (
+        "STILL RUNNING, UNSUPERVISED - no end was recorded, its shell is gone, and 3"
+        " processes started with its PPTMSTR_COMMAND are alive"
+    )
+    one = Survivor(pid=4242, pgid=4242, members=0, groups=(70,), escaped=(70,), shell=False)
+    assert command_view.still_running(one).endswith(
+        "and 1 process started with its PPTMSTR_COMMAND is alive"
+    )
+    with_shell = Survivor(pid=4242, pgid=4242, members=3, groups=(4242, 70), escaped=(70, 71))
+    assert command_view.still_running(with_shell).endswith(
+        "its shell's session 4242 still has 3 processes, and 2 more outside it"
+    )
+
+
+def test_what_a_command_left_outside_its_session_is_on_the_line_that_says_how_it_ended() -> None:
+    held = ended(Exited(0), end=End(outcome=Exited(0), at=200.0, duration_s=62.0, escaped=(4301,)))
+    said = command_view.row_state(held, now=300.0)
+    assert said.tone is Tone.WARN and said.text.startswith("exit code 0")
+    assert "1 process it started is ALIVE outside its shell's session" in said.text
+    assert "ps -o pid,pgid,sid,lstart,args -p 4301" in said.text and "kill" not in said.text
+
+
+def test_a_released_session_is_said_on_the_line_that_says_how_it_ended() -> None:
+    """Neither 'still running' with its alarm, nor a bare 'end unknown'."""
+    for alive, count in ((1, "1 process"), (3, "3 processes")):
+        held = ended(c.EndUnknown(released=c.Released(at=250.0, alive=alive)))
+        said = command_view.row_state(held, now=300.0)
+        assert said.tone is Tone.WARN
+        assert said.text == command_view.released_line(alive)
+        assert said.text.startswith(f"released by you, {count} still running then")
+        assert "not signalled" in said.text and command_view.END_UNKNOWN not in said.text
+        assert not held.owes_row
+
+
+def test_an_armed_release_lasts_only_while_its_command_holds_its_session() -> None:
+    """
+    Released by another way -- the processes ended and a look saw it -- the
+    second press would release nothing, and is dropped.
+    """
+    left = Survivor(pid=4242, pgid=4242, members=2)
+    holding = ended(c.EndUnknown(survivor=left))
+    pending = command_view.Releasing(CID)
+
+    state = CommandViewState(pending=pending, opened=CID)
+    state.attend({CID: holding}, CID, 10)
+    assert state.pending == pending
+
+    for after in (ended(c.EndUnknown()), ended(c.EndUnknown(released=c.Released(1.0, 2)))):
+        state = CommandViewState(pending=pending, opened=CID)
+        state.attend({CID: after}, CID, 10)
+        assert state.pending is None, after
+
+    # Nor does it follow the cursor to another row.
+    state = CommandViewState(pending=pending, opened=CID)
+    state.attend({CID: holding, OTHER: holding}, OTHER, 10)
+    assert state.pending is None

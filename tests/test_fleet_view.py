@@ -1,5 +1,5 @@
 """
-The fold: which sub-agents of a session are drawn and which become a count.
+The fold: which sub-agents of a session are drawn and which are hidden.
 
 Every snapshot here is built by the real reducer, so a clause is tested against the
 shape the store actually gives the fact it reads -- an obligation as ``needs_you``
@@ -110,8 +110,6 @@ def test_an_ended_sub_agent_that_owes_and_holds_nothing_is_folded() -> None:
 
     assert view.folded == (A, B)
     assert view.drawn == ()
-    assert view.count == 2
-    assert view.opened is False
 
 
 @pytest.mark.parametrize("state", [AgentState.DONE, AgentState.CANCELLED])
@@ -242,19 +240,17 @@ def test_an_ended_sub_agent_with_mail_waiting_is_drawn_until_it_reads_it() -> No
     assert folded_of(store).folded == (A, B)
 
 
-def test_the_node_under_the_cursor_is_drawn() -> None:
-    store = ended_pair()
+@pytest.mark.parametrize("cursor", [None, A, B, ROOT, OTHER])
+def test_the_cursor_keeps_nothing_drawn(cursor: NodeId | None) -> None:
+    view = folded_of(ended_pair(), cursor=cursor)
 
-    assert folded_of(store, cursor=B).drawn == (B,)
-    assert folded_of(store, cursor=B).folded == (A,)
-    assert folded_of(store, cursor=ROOT).folded == (A, B)
-    assert folded_of(store, cursor=OTHER).folded == (A, B)
+    assert view.drawn == () and view.folded == (A, B)
 
 
 def test_a_parked_approval_on_an_ended_sub_agent_keeps_it_drawn() -> None:
     """
     An approval that lands on a node whose end was declared is filed and the node
-    stays ended, so "ended" alone would fold a row the operator has to answer.
+    stays ended, so "ended" alone would hide a card the operator has to answer on.
     """
     store = ended_pair()
     store.apply(
@@ -294,7 +290,7 @@ def nested() -> Store:
     return store
 
 
-def test_a_whole_ended_subtree_folds_and_is_counted_node_by_node() -> None:
+def test_a_whole_ended_subtree_is_hidden_node_by_node() -> None:
     store = nested()
     assert store.snapshot().order == (ROOT, A, A1, B)
 
@@ -324,11 +320,10 @@ def test_a_drawn_parent_does_not_keep_its_ended_child_drawn() -> None:
     assert view.folded == (A1, B)
 
 
-def test_the_cursor_on_a_grandchild_keeps_its_parent_drawn() -> None:
+def test_the_cursor_on_a_grandchild_keeps_neither_it_nor_its_parent_drawn() -> None:
     view = folded_of(nested(), cursor=A1)
 
-    assert view.drawn == (A, A1)
-    assert view.folded == (B,)
+    assert view.drawn == () and view.folded == (A, A1, B)
 
 
 def test_three_levels_deep_the_whole_chain_above_a_live_node_is_drawn() -> None:
@@ -342,39 +337,16 @@ def test_three_levels_deep_the_whole_chain_above_a_live_node_is_drawn() -> None:
     assert view.folded == (B,)
 
 
-# -- the setting, the opened fold, other sessions --------------------------------
+# -- the setting, other sessions --------------------------------
 
 
-def test_with_the_setting_off_nothing_is_folded_or_counted() -> None:
+def test_with_the_setting_off_every_sub_agent_is_drawn() -> None:
     snap = nested().snapshot()
 
     view = fold(snap, ROOT, None, False)
 
     assert view.drawn == (A, A1, B)
     assert view.folded == ()
-    assert view.count == 0
-
-
-def test_an_opened_fold_draws_everything_and_still_counts() -> None:
-    store = nested()
-    store.apply(AgentResumed(B, at=6.0))
-    snap = store.snapshot()
-
-    closed = fold(snap, ROOT, None, True)
-    opened = fold(snap, ROOT, None, True, opened={ROOT})
-
-    assert closed.drawn == (B,)
-    assert opened.drawn == (A, A1, B)
-    assert opened.folded == closed.folded == (A, A1)
-    assert (closed.opened, opened.opened) == (False, True)
-
-
-def test_another_roots_opened_fold_opens_nothing_here() -> None:
-    snap = nested().snapshot()
-
-    view = fold(snap, ROOT, None, True, opened={OTHER})
-
-    assert view.drawn == () and view.opened is False
 
 
 def test_a_session_is_folded_on_its_own_facts() -> None:
@@ -393,14 +365,14 @@ def test_a_session_is_folded_on_its_own_facts() -> None:
     snap = store.snapshot()
 
     assert fold(snap, ROOT, None, True).folded == (A, B)
-    assert fold(snap, OTHER, None, True) == Folded(drawn=(OTHER_A,), folded=(), opened=False)
+    assert fold(snap, OTHER, None, True) == Folded(drawn=(OTHER_A,), folded=())
 
 
 def test_a_root_the_snapshot_does_not_hold_has_nothing_to_draw() -> None:
     snap = ended_pair().snapshot()
 
-    assert fold(snap, ("nowhere", None), None, True) == Folded((), (), False)
-    assert fold(Snapshot.empty(), ROOT, A, True) == Folded((), (), False)
+    assert fold(snap, ("nowhere", None), None, True) == Folded((), ())
+    assert fold(Snapshot.empty(), ROOT, A, True) == Folded((), ())
 
 
 # -- reviving --------------------------------------------------------------------
@@ -468,15 +440,13 @@ def test_folding_changes_nothing_and_answers_the_same_twice() -> None:
     store.apply(DecisionRaised(A1, decision("d-1", A1)))
     snap = store.snapshot()
     before = _facts(snap)
-    opened = frozenset({ROOT})
 
-    first = fold(snap, ROOT, A, True, opened)
-    second = fold(snap, ROOT, A, True, opened)
+    first = fold(snap, ROOT, A, True)
+    second = fold(snap, ROOT, A, True)
 
     assert first == second
     assert store.snapshot() is snap
     assert _facts(snap) == before
-    assert opened == frozenset({ROOT})
 
 
 def _facts(snap: Snapshot) -> tuple[Any, ...]:
@@ -495,7 +465,7 @@ def _facts(snap: Snapshot) -> tuple[Any, ...]:
 # -- generated --------------------------------------------------------------------
 
 
-def _reason_drawn(snap: Snapshot, node: NodeId, cursor: NodeId | None) -> str | None:
+def _reason_drawn(snap: Snapshot, node: NodeId) -> str | None:
     """
     Which clause of the property keeps ``node`` out of the fold, on its own facts
     alone -- or None when none does. Asked of the snapshot's own readers
@@ -514,8 +484,6 @@ def _reason_drawn(snap: Snapshot, node: NodeId, cursor: NodeId | None) -> str | 
         for d in snap.decisions_of(node)
     ):
         return "unread answer"
-    if node == cursor:
-        return "under the cursor"
     return None
 
 
@@ -589,11 +557,11 @@ def test_no_generated_fold_breaks_a_clause_and_none_draws_without_a_reason() -> 
 
         folded = set(view.folded)
         for node in view.folded:
-            assert _reason_drawn(snap, node, cursor) is None, (node, snap.nodes[node])
+            assert _reason_drawn(snap, node) is None, (node, snap.nodes[node])
             beneath = [n for n in snap.order if snap.nodes[n].parent == node]
             assert set(beneath) <= folded, "folded above something that is drawn"
         for node in view.drawn:
-            own = _reason_drawn(snap, node, cursor)
+            own = _reason_drawn(snap, node)
             below = any(snap.nodes[n].parent == node for n in view.drawn)
             assert own is not None or below, f"{node} is drawn and nothing says why"
             if own is not None:
@@ -602,9 +570,8 @@ def test_no_generated_fold_breaks_a_clause_and_none_draws_without_a_reason() -> 
                 seen_drawn_ended += 1
         seen_folded += len(view.folded)
 
-        opened = fold(snap, ROOT, cursor, True, opened={ROOT})
-        assert opened.folded == view.folded
-        assert list(opened.drawn) == nodes_in_order(snap)
+        assert fold(snap, ROOT, None, True) == view, "the cursor changed what is hidden"
+        assert list(fold(snap, ROOT, cursor, False).drawn) == nodes_in_order(snap)
 
     # The generator has to reach what the assertions are about, or they pass idle.
     assert seen_folded > 100 and seen_drawn_ended > 100
@@ -614,7 +581,6 @@ def test_no_generated_fold_breaks_a_clause_and_none_draws_without_a_reason() -> 
         "holds a claim",
         "mail waiting",
         "unread answer",
-        "under the cursor",
     }
 
 

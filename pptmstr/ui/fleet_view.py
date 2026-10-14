@@ -1,18 +1,21 @@
 """
-Which sub-agents of a session are drawn, and which are folded into a count.
+Which sub-agents of a session are drawn, and which are hidden.
 
 A filter on what is drawn and never a removal from the store. ``Snapshot.left_behind``
 reads "has no record" as "never had one in this process", so taking a finished
 sub-agent's record away would make it an agent of another process and hand its claims
-to the session's root. Folding takes a snapshot and gives back two tuples of ids; the
+to the session's root. ``fold`` takes a snapshot and gives back two tuples of ids; the
 snapshot is the one it was given.
 
-**A sub-agent is folded only when nothing about it is waiting on anyone.** It has
+**A hidden sub-agent is not drawn, not counted and not named**, and nothing on the
+pane brings one back: the setting (``Settings.hide_ended_subagents``) is the only
+switch, and it is the whole fleet's.
+
+**A sub-agent is hidden only when nothing about it is waiting on anyone.** It has
 ended, the operator owes it nothing, it holds no task, nothing is waiting in its inbox,
 no answer to a decision it raised and no result of a command it asked for is
-waiting for it to read, everything beneath it is folded too, and the cursor is not
-on it. Each of those is read from where the store
-keeps it, not from a second notion kept here:
+waiting for it to read, and everything beneath it is hidden too. Each of those is read
+from where the store keeps it, not from a second notion kept here:
 
 ==========================  ===========================================================
 ended                       ``AgentState.is_terminal``
@@ -23,7 +26,7 @@ an open command             a ``Command`` it asked that is asked or running
                             (``Snapshot.commands_awaiting``). Asked of the records as
                             well as of ``needs_you``, as ``Snapshot.detach_refusal``
                             asks: what can still run on the operator's machine is
-                            not folded away on the strength of a row being drawn
+                            not hidden on the strength of a row being drawn
 holds a task                a ``Task`` in ``CLAIMED`` whose ``claimed_by`` it is
 mail waiting                a ``Concern`` in ``POSTED`` addressed to it, which is what
                             ``Snapshot.inbox_of`` returns
@@ -36,9 +39,15 @@ beneath it                  ``AgentRecord.parent``, over ``Snapshot.subagents_of
 ==========================  ===========================================================
 
 **Reviving is not a case.** A woken sub-agent is ``THINKING`` (``intents.AgentResumed``),
-which is not terminal, so the next call draws it. Nothing here remembers what it folded
+which is not terminal, so the next call draws it. Nothing here remembers what it hid
 last time, and that is what makes the answer to "does a revived sub-agent reappear" yes
 without an arm to keep it true.
+
+**The cursor is not a case either.** What is hidden is a function of the snapshot and
+the setting, so a card does not come and go as the operator moves. The cursor can
+rest on a hidden sub-agent -- the operator was on its card when it ended, or answered
+the last thing it owed -- and it stays there: ``rail`` lights the lead's card for it,
+which is the surface a sub-agent with no card has.
 
 **A withdrawn decision is not an unread answer.** The asker withdrew it itself and
 nothing stamps ``first_delivered_at`` on one, so counting it would keep every sub-agent
@@ -51,7 +60,6 @@ Imports no imgui, so the rule is testable without a GL context.
 
 from __future__ import annotations
 
-from collections.abc import Collection
 from dataclasses import dataclass
 
 from ..command import Withdrawn as CommandWithdrawn
@@ -63,71 +71,51 @@ __all__ = ["Folded", "fold"]
 @dataclass(frozen=True, slots=True)
 class Folded:
     """
-    One session's sub-agents, split into the ones to draw and the ones that fold.
+    One session's sub-agents, split into the ones to draw and the ones hidden.
 
-    ``folded`` is every sub-agent the rule folds, whether or not the fold is open:
-    opening one changes what is drawn and not what is counted, so the row can say
-    "3 ended" closed and "3 ended, shown" open from the same field.
+    Both tuples are in tree order (``Snapshot.order``), every sub-agent is in exactly
+    one, and ``drawn`` holds a node's ancestors whenever it holds the node: a node is
+    hidden only when everything beneath it is.
 
-    Both tuples are in tree order (``Snapshot.order``), and ``drawn`` holds a node's
-    ancestors whenever it holds the node: a node is folded only when everything
-    beneath it is.
+    The pane reads ``drawn`` alone. ``folded`` is the rule's answer said the other way
+    round, which is the form a test of one clause asks for.
     """
 
     drawn: tuple[NodeId, ...]
     folded: tuple[NodeId, ...]
-    # Whether the operator has this root's fold open. Carried so the row's wording
-    # and the drawn list cannot be computed from two different readings of it.
-    opened: bool
-
-    @property
-    def count(self) -> int:
-        return len(self.folded)
 
 
-def fold(
-    snap: Snapshot,
-    root: NodeId,
-    cursor: NodeId | None,
-    hide_ended: bool,
-    opened: Collection[NodeId] = frozenset(),
-) -> Folded:
+def fold(snap: Snapshot, root: NodeId, cursor: NodeId | None, hide_ended: bool) -> Folded:
     """
-    The sub-agents of the session ``root`` to draw, and the ones folded away.
+    The sub-agents of the session ``root`` to draw, and the ones hidden.
 
-    ``cursor`` is the node the operator is on, or None. A cursor on an obligation
-    needs no translating: the node that obligation names is drawn for owing it.
+    ``cursor`` is not read: where the operator is does not change what is hidden (the
+    module docstring says what stands in for a card the cursor has none of).
 
-    ``opened`` is the caller's: the roots whose fold the operator expanded. An open
-    fold draws everything and still reports what would fold.
-
-    With ``hide_ended`` off nothing folds and nothing is counted, so no row appears.
+    With ``hide_ended`` off nothing is hidden.
 
     A root the snapshot does not hold has no sub-agents, and the answer is empty.
     """
-    is_open = root in opened
     members = tuple(rec.node_id for rec in snap.subagents_of(root))
     if not hide_ended or not members:
-        return Folded(drawn=members, folded=(), opened=is_open)
+        return Folded(drawn=members, folded=())
 
-    session = root[0]
-    kept = _kept(snap, session)
-    if cursor is not None:
-        kept.add(cursor)
+    kept = _kept(snap, root[0])
 
     # ``members`` is a pre-order walk, so reversed it reaches every node after all of
-    # its descendants and one pass settles "everything beneath it is folded".
-    unfolded: set[NodeId] = set()
+    # its descendants and one pass settles "everything beneath it is hidden".
+    drawn: set[NodeId] = set()
     for nid in reversed(members):
         rec = snap.nodes[nid]
-        if nid in unfolded or nid in kept or not rec.state.is_terminal:
-            unfolded.add(nid)
+        if nid in drawn or nid in kept or not rec.state.is_terminal:
+            drawn.add(nid)
             if rec.parent is not None:
-                unfolded.add(rec.parent)
+                drawn.add(rec.parent)
 
-    folded = tuple(nid for nid in members if nid not in unfolded)
-    drawn = members if is_open else tuple(nid for nid in members if nid in unfolded)
-    return Folded(drawn=drawn, folded=folded, opened=is_open)
+    return Folded(
+        drawn=tuple(nid for nid in members if nid in drawn),
+        folded=tuple(nid for nid in members if nid not in drawn),
+    )
 
 
 def _kept(snap: Snapshot, session: str) -> set[NodeId]:

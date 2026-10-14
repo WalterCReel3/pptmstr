@@ -130,22 +130,34 @@ def _called(actions: session_menu.Actions) -> dict[str, list[tuple[object, ...]]
     return out
 
 
-def _consequence(now: Policy, rung: Policy, *, live: bool, contained: bool = False) -> str:
-    """The line ``gate_menu`` puts under ``rung``'s row for a session on ``now``."""
+def _gate_row(now: Policy, rung: Policy, *, live: bool, contained: bool = False) -> gate_menu.Row:
+    """``gate_menu``'s row for ``rung``, of a session on ``now``."""
     (row,) = [r for r in gate_menu.rows(now, contained, live, adds=gate_adds) if r.rung is rung]
-    return row.consequence
+    return row
+
+
+def _consequence(now: Policy, rung: Policy, *, live: bool, contained: bool = False) -> str:
+    """What ``gate_menu`` says at length of ``rung``'s row for a session on ``now``."""
+    return _gate_row(now, rung, live=live, contained=contained).consequence
 
 
 def _row(action: Action, label: str, now: Policy, rung: Policy, refused: str | None) -> Item:
-    """A Gate row of a running session nobody said the containment of."""
+    """
+    A Gate row of a running session nobody said the containment of. ``label`` is
+    the line as the menu draws it, written out; a line that ends in an ellipsis is
+    one that asks first.
+    """
+    row = _gate_row(now, rung, live=True)
     return Item(
         action,
         label,
         refused,
         grouped=True,
         rung=rung,
-        note=_consequence(now, rung, live=True),
-        asks=action is Action.RESUME_AS,
+        note=row.consequence,
+        asks=label.endswith("…"),
+        question=row.label,
+        sentence=row.sentence,
     )
 
 
@@ -163,19 +175,19 @@ _GATE_UNTOLD: dict[Policy | None, tuple[session_menu.Entry, ...]] = {
     None: (Line(session_menu.GATE_NOT_HELD),),
     _S: (
         _now(_S),
-        _row(Action.SET_GATE, "Widen to permissive", _S, _P, session_menu.NOT_WIRED),
-        _row(Action.RESUME_AS, "Continue as autonomous…", _S, _A, session_menu.NOT_WIRED),
+        _row(Action.SET_GATE, "permissive…", _S, _P, session_menu.NOT_WIRED),
+        _row(Action.RESUME_AS, "autonomous  restart…", _S, _A, session_menu.NOT_WIRED),
         _UNSAID,
     ),
     _P: (
-        _row(Action.SET_GATE, "Narrow to strict", _P, _S, None),
+        _row(Action.SET_GATE, "strict", _P, _S, None),
         _now(_P),
-        _row(Action.RESUME_AS, "Continue as autonomous…", _P, _A, session_menu.NOT_WIRED),
+        _row(Action.RESUME_AS, "autonomous  restart…", _P, _A, session_menu.NOT_WIRED),
         _UNSAID,
     ),
     _A: (
-        _row(Action.SET_GATE, "Narrow to strict", _A, _S, None),
-        _row(Action.SET_GATE, "Narrow to permissive", _A, _P, session_menu.NOT_WIRED),
+        _row(Action.SET_GATE, "strict", _A, _S, None),
+        _row(Action.SET_GATE, "permissive", _A, _P, session_menu.NOT_WIRED),
         _now(_A),
         _UNSAID,
     ),
@@ -250,17 +262,19 @@ def test_an_ended_roots_card_offers_resume_fork_and_details_and_a_failed_one_its
         Item(Action.RESUME, "Resume…"),
         Item(Action.FORK, "Fork"),
         Heading("Gate"),
-        Line("strict (as last granted)", _consequence(Policy.STRICT, Policy.STRICT, live=False)),
+        Line("strict (last run)", _consequence(Policy.STRICT, Policy.STRICT, live=False)),
         *(
             Item(
                 Action.RESUME_AS,
-                f"Resume as {rung.value}…",
+                f"{rung.value}…",
                 why,
                 grouped=True,
                 rung=rung,
                 note=_consequence(Policy.STRICT, rung, live=False),
                 # The resume form is the confirmation: no question in front of it.
                 asks=False,
+                question=f"Resume as {rung.value}…",
+                sentence=_gate_row(Policy.STRICT, rung, live=False).sentence,
             )
             for rung in (Policy.PERMISSIVE, Policy.AUTONOMOUS)
         ),
@@ -289,6 +303,59 @@ def test_a_refused_item_is_drawn_with_its_reason_on_its_own_line() -> None:
     assert not refused.enabled
     assert refused.text == "Close  -  already closed"
     assert Item(Action.FORK, "Fork").text == "Fork"
+
+
+def test_a_refused_item_is_drawn_with_a_few_words_of_its_reason_and_keeps_the_sentence() -> None:
+    """
+    The sentence is what a notice or a log quotes, and it is what the item is
+    compared by; the line in the menu carries the few words.
+    """
+    why = session_menu.NOT_HELD
+    refused = Item(Action.INTERRUPT, "Interrupt", why)
+    assert refused.refused == "no running session is held for this card"
+    assert refused.text == "Interrupt  -  no running session held"
+    assert f"not done: {why}" == "not done: no running session is held for this card"
+    assert Line(session_menu.CONTAINMENT_NOT_KNOWN).text == "containment not known"
+
+
+def _reasons() -> list[session_menu.Reason]:
+    """Every reason the module names, the ones in its table of removals included."""
+    named = [v for v in vars(session_menu).values() if isinstance(v, session_menu.Reason)]
+    return [*named, *session_menu.REMOVAL_REFUSED.values()]
+
+
+def test_every_reason_a_menu_can_draw_is_a_few_words() -> None:
+    reasons = _reasons()
+    assert len(reasons) >= 12, "the module's reasons were not found"
+    for reason in reasons:
+        assert 0 < len(reason.words.split()) <= session_menu.FEW_WORDS, reason
+        assert "\n" not in reason.words
+
+
+def test_no_menu_draws_a_line_longer_than_a_label_and_a_few_words() -> None:
+    """
+    Over every state, gate and fact: a line nobody chooses is a few words, an
+    item that cannot act says why with a reason that has its few words, and no
+    line is the sentence kept as its note.
+    """
+    seen = 0
+    for state, policy, contained, held, wired in itertools.product(
+        AgentState, GATES, SAID, SAID, [frozenset(), ALL_WIRED]
+    ):
+        facts = Facts(contained=contained, run_held=held, wired=wired)
+        for node in (ROOT, BUILDER):
+            for entry in session_menu.entries(record(node, state), policy, facts):
+                if isinstance(entry, Line):
+                    assert len(entry.text.split()) <= session_menu.FEW_WORDS, entry
+                    assert entry.note not in entry.text or not entry.note
+                elif isinstance(entry, Item):
+                    seen += 1
+                    assert entry.refused is None or isinstance(
+                        entry.refused, session_menu.Reason
+                    ), entry
+                    assert entry.note not in entry.text or not entry.note
+                    assert len(entry.label.split()) <= 5, entry
+    assert seen
 
 
 @pytest.mark.parametrize("state", list(AgentState))
@@ -1123,8 +1190,8 @@ def test_a_right_click_on_a_card_opens_that_cards_menu(fleet: _Fleet) -> None:
     assert list(fleet.items) == [
         "Interrupt",
         "Fork",
-        "Narrow to strict",
-        f"Continue as autonomous…  -  {session_menu.NOT_WIRED}",
+        "strict",
+        f"autonomous  restart…  -  {session_menu.NOT_WIRED.words}",
         "Details",
         "Health",
         "Close…",
@@ -1152,7 +1219,7 @@ def test_a_menu_is_the_card_it_was_opened_on_not_the_one_the_cursor_is_on(
     fleet.gate[ROOT] = Policy.STRICT
     fleet.gate[OTHER] = Policy.AUTONOMOUS
     fleet.click(fleet.cards[1], button=1)
-    fleet.click(fleet.items["Narrow to strict"])
+    fleet.click(fleet.items["strict"])
 
     assert fleet.called() == {"revoke_policy": [(OTHER,)]}
 
@@ -1170,7 +1237,7 @@ def test_a_refused_item_is_on_screen_with_its_reason_and_a_click_on_it_does_noth
 ) -> None:
     fleet.gate[ROOT] = Policy.STRICT
     fleet.click(fleet.cards[0], button=1)
-    refused = f"Widen to permissive  -  {session_menu.NOT_WIRED}"
+    refused = f"permissive…  -  {session_menu.NOT_WIRED.words}"
     assert refused in fleet.items
 
     fleet.click(fleet.items[refused])
@@ -1185,9 +1252,10 @@ def test_a_card_no_session_is_held_for_refuses_every_lever_that_needs_one(
     fleet.gate[ROOT] = None
     fleet.click(fleet.cards[0], button=1)
 
-    why = session_menu.NOT_HELD
+    why = session_menu.NOT_HELD.words
     assert f"Interrupt  -  {why}" in fleet.items
-    assert session_menu.GATE_NOT_HELD in fleet.dim
+    assert session_menu.GATE_NOT_HELD.words in fleet.dim
+    assert session_menu.GATE_NOT_HELD not in fleet.dim, "the sentence is not drawn"
     assert not [label for label in fleet.items if "strict" in label], "and no row to choose"
     assert f"Close…  -  {why}" in fleet.items
     fleet.click(fleet.items[f"Close…  -  {why}"])
@@ -1209,7 +1277,7 @@ def test_a_right_click_on_another_card_moves_the_menu_to_it(fleet: _Fleet) -> No
     fleet.click(second, button=1)
 
     assert fleet.open
-    fleet.click(fleet.items["Narrow to strict"])
+    fleet.click(fleet.items["strict"])
     assert fleet.called() == {"revoke_policy": [(OTHER,)]}
 
 
@@ -1227,16 +1295,16 @@ def test_an_ended_cards_menu_resumes_through_the_action_and_ends_nothing(
 ) -> None:
     with _Fleet(monkeypatch, _store(AgentState.FAILED), "TRIAGE") as fleet:
         fleet.click(fleet.cards[0], button=1)
-        why = session_menu.NOT_WIRED
+        why = session_menu.NOT_WIRED.words
         assert list(fleet.items) == [
             "Resume…",
             "Fork",
-            f"Resume as strict…  -  {why}",
-            f"Resume as autonomous…  -  {why}",
+            f"strict…  -  {why}",
+            f"autonomous…  -  {why}",
             "Details",
             "Retry in a new session",
             "Dismiss",
-            f"Close  -  {session_menu.RUN_NOT_KNOWN}",
+            f"Close  -  {session_menu.RUN_NOT_KNOWN.words}",
             f"Remove from fleet  -  {why}",
         ]
         fleet.click(fleet.items["Resume…"])
@@ -1571,6 +1639,12 @@ def test_what_the_question_says_follows_the_session() -> None:
     assert "has ended since" in session_menu.confirm_text(record(ROOT, AgentState.AWAITING_INPUT))
 
 
+@pytest.mark.parametrize("state", [AgentState.THINKING, AgentState.AWAITING_INPUT])
+def test_the_close_question_is_one_sentence(state: AgentState) -> None:
+    said = session_menu.confirm_text(record(ROOT, state))
+    assert said.endswith(".") and ". " not in said
+
+
 # -- Details, from the menu ------------------------------------------------------------
 
 
@@ -1695,13 +1769,17 @@ def test_the_gate_group_is_gate_menus_rows_one_line_a_rung_and_nothing_of_its_ow
     assert len(lines) == len(rows) == len(Policy)
     for entry, row in zip(lines, rows, strict=True):
         if row.kind is gate_menu.Kind.CURRENT:
-            assert entry == Line(row.label, row.consequence)
+            assert entry == Line(row.short, row.consequence)
             continue
         assert isinstance(entry, Item)
         live_move = row.kind in (gate_menu.Kind.NARROW_LIVE, gate_menu.Kind.WIDEN_LIVE)
         assert entry.action is (Action.SET_GATE if live_move else Action.RESUME_AS)
         assert (entry.rung, entry.note, entry.grouped) == (row.rung, row.consequence, True)
-        assert entry.label in (row.label, row.label + "…")
+        assert (entry.label, entry.question, entry.sentence) == (
+            row.short,
+            row.label,
+            row.sentence,
+        )
         assert entry.enabled
     # Nobody said whether a running process is contained: the rows are the ones
     # for one that is not, and the group says so. An ended one is not asked.
@@ -1769,8 +1847,8 @@ def test_a_narrowed_sessions_rows_are_measured_from_the_rung_it_is_on_now() -> N
 
     assert group[0] == _now(Policy.STRICT)
     assert [e.label for e in group[1:] if isinstance(e, Item)] == [
-        "Widen to permissive",
-        "Widen to autonomous…",
+        "permissive…",
+        "autonomous…",
     ]
 
 
@@ -1799,9 +1877,9 @@ def test_a_closed_cards_rows_are_measured_from_the_rung_its_file_recorded() -> N
     group = _gate_group(session_menu.entries(rec, None, Facts(wired=ALL_WIRED)))
 
     assert [e.label for e in group] == [
-        "Resume as strict…",
-        "permissive (as last granted)",
-        "Resume as autonomous…",
+        "strict…",
+        "permissive (last run)",
+        "autonomous…",
     ]
 
 
@@ -1820,9 +1898,15 @@ def test_a_closed_card_whose_file_names_no_rung_has_no_gate_rows_and_says_why(
 @pytest.mark.parametrize(
     ("policy", "contained", "live"), list(itertools.product(Policy, SAID, [True, False]))
 )
-def test_a_row_that_reaches_a_rung_needing_containment_asks_first_and_a_narrowing_never_does(
+def test_a_row_that_widens_a_running_sessions_gate_asks_first_and_a_narrowing_never_does(
     policy: Policy, contained: bool | None, live: bool
 ) -> None:
+    """
+    The line in the menu is a rung's name, so the question is where a move that
+    releases something says what it releases -- every widening of a running
+    session, to a rung that needs containment or not, and the move that ends its
+    run to get there.
+    """
     rec, reading = _card(policy, live)
     facts = Facts(contained=contained, wired=ALL_WIRED)
     items = [
@@ -1835,7 +1919,7 @@ def test_a_row_that_reaches_a_rung_needing_containment_asks_first_and_a_narrowin
         widens = ladder.index(item.rung) > ladder.index(policy)
         # Asked only of a running session: for one that has ended the row opens
         # the resume form, which is itself the step before anything starts.
-        assert item.asks is (requires_containment(item.rung) and widens and live)
+        assert item.asks is (widens and live)
         assert item.label.endswith("…") is (item.asks or item.action is Action.RESUME_AS)
 
         actions, state = _wired(), session_menu.MenuState()
@@ -1843,8 +1927,11 @@ def test_a_row_that_reaches_a_rung_needing_containment_asks_first_and_a_narrowin
         if item.asks:
             assert _called(actions) == {}, "nothing moves at the first step"
             assert state.gating == session_menu.GateAsk(
-                ROOT, item.action, item.rung, item.label, item.note, live
+                ROOT, item.action, item.rung, item.question, item.sentence, live
             )
+            # One sentence, and it is part of the whole account.
+            assert item.sentence and item.sentence in item.note
+            assert item.sentence != item.note
         else:
             assert state.gating is None
             if item.action is Action.RESUME_AS:
@@ -2113,23 +2200,59 @@ def _told(monkeypatch: pytest.MonkeyPatch, fleet: _Fleet, **said: object) -> Non
     fleet.frame(2)
 
 
-def test_each_gate_row_is_drawn_with_what_choosing_it_will_do_under_it(fleet: _Fleet) -> None:
+def test_a_gate_row_is_drawn_as_its_rung_and_no_sentence_is_drawn_under_it(fleet: _Fleet) -> None:
     fleet.click(fleet.cards[0], button=1)
 
+    drawn = [*fleet.dim, *fleet.said, *fleet.items]
     for row in gate_menu.rows(Policy.PERMISSIVE, False, True, adds=gate_adds):
-        assert row.consequence in fleet.dim, row.label
+        assert row.consequence not in drawn and row.sentence not in drawn, row.label
     assert "permissive (now)" in fleet.dim and "permissive (now)" not in fleet.items
-    assert session_menu.CONTAINMENT_NOT_KNOWN in fleet.dim
+    assert session_menu.CONTAINMENT_NOT_KNOWN.words in fleet.dim
+    assert session_menu.CONTAINMENT_NOT_KNOWN not in fleet.dim
 
 
-def test_a_live_widen_that_needs_no_containment_moves_the_gate_at_the_click(
+def test_what_a_menu_draws_dim_is_its_headings_its_lines_and_the_keys_and_nothing_else(
+    fleet: _Fleet,
+) -> None:
+    """
+    The property the menu is held to: nothing is drawn in it but labels. Dim text
+    is where a sentence under an item was drawn, so everything dim is accounted
+    for: the card's title, a heading, a line nobody chooses, the keys.
+    """
+    for card, node in ((0, ROOT), (1, OTHER)):
+        fleet.click(fleet.cards[card], button=1)
+        assert fleet.open
+        rec = fleet.store.snapshot().nodes[node]
+        offered = session_menu.entries(rec, fleet.gate[node], Facts())
+        allowed = {session_menu.KEYS_HINT, rec.task}
+        allowed |= {e.label for e in offered if isinstance(e, Heading)}
+        allowed |= {e.text for e in offered if isinstance(e, Line)}
+        assert set(fleet.dim) <= allowed, set(fleet.dim) - allowed
+        assert not fleet.said, "and nothing in a colour"
+        assert not [text for text in fleet.dim if "(?)" in text]
+        assert not [label for label in fleet.items if "(?)" in label]
+        fleet.click((900.0, 700.0))
+
+
+def test_a_live_widen_that_needs_no_containment_asks_first_too_with_what_it_releases(
     monkeypatch: pytest.MonkeyPatch, fleet: _Fleet
 ) -> None:
+    """
+    The menu line is "permissive…" and says nothing of what the rung releases, so
+    the question is the one place the move is described before it is made.
+    """
     _told(monkeypatch, fleet)
     fleet.gate[ROOT] = Policy.STRICT
     fleet.click(fleet.cards[0], button=1)
-    fleet.click(fleet.items["Widen to permissive"])
+    fleet.click(fleet.items["permissive…"])
 
+    assert fleet.called() == {}, "nothing moves at the click"
+    row = _gate_row(Policy.STRICT, Policy.PERMISSIVE, live=True)
+    assert "shell reads run without asking" in row.sentence
+    assert row.sentence in fleet.said and "Widen to permissive" in fleet.said
+    assert row.consequence not in fleet.said, "one sentence, not the whole account"
+
+    fleet.click(fleet.items["move to permissive"])
     assert fleet.called() == {"set_policy": [(ROOT, Policy.PERMISSIVE)]}
     assert fleet.state.cards.gating is None and not fleet.open
 
@@ -2139,15 +2262,14 @@ def test_a_widen_to_a_rung_that_needs_containment_asks_first_and_moves_on_the_an
 ) -> None:
     _told(monkeypatch, fleet, contained=lambda node: True)
     fleet.click(fleet.cards[0], button=1)
-    assert "Continue as autonomous…" not in fleet.items, "a contained process can be moved"
-    fleet.click(fleet.items["Widen to autonomous…"])
+    assert "autonomous  restart…" not in fleet.items, "a contained process can be moved"
+    fleet.click(fleet.items["autonomous…"])
 
     assert fleet.called() == {}
     asked = fleet.state.cards.gating
     assert asked is not None and (asked.node, asked.action) == (ROOT, Action.SET_GATE)
-    assert (
-        _consequence(Policy.PERMISSIVE, Policy.AUTONOMOUS, live=True, contained=True) in fleet.said
-    )
+    row = _gate_row(Policy.PERMISSIVE, Policy.AUTONOMOUS, live=True, contained=True)
+    assert row.sentence in fleet.said and row.consequence not in fleet.said
 
     fleet.click(fleet.items["move to autonomous"])
     assert fleet.called() == {"set_policy": [(ROOT, Policy.AUTONOMOUS)]}
@@ -2161,11 +2283,13 @@ def test_continuing_as_a_rung_the_process_cannot_take_asks_first_then_opens_the_
 ) -> None:
     _told(monkeypatch, fleet, contained=lambda node: False)
     fleet.click(fleet.cards[0], button=1)
-    assert "Widen to autonomous…" not in fleet.items, "the driver would refuse it"
-    fleet.click(fleet.items["Continue as autonomous…"])
+    assert "autonomous…" not in fleet.items, "the driver would refuse it"
+    fleet.click(fleet.items["autonomous  restart…"])
 
     assert fleet.called() == {}
-    assert _consequence(Policy.PERMISSIVE, Policy.AUTONOMOUS, live=True) in fleet.said
+    row = _gate_row(Policy.PERMISSIVE, Policy.AUTONOMOUS, live=True)
+    assert "ends the running session where it stands" in row.sentence
+    assert row.sentence in fleet.said and row.consequence not in fleet.said
 
     fleet.click(fleet.items["open the resume form"])
     rec = fleet.store.snapshot().nodes[ROOT]
@@ -2178,7 +2302,7 @@ def test_cancelling_the_gate_question_moves_nothing(
 ) -> None:
     _told(monkeypatch, fleet, contained=lambda node: True)
     fleet.click(fleet.cards[0], button=1)
-    fleet.click(fleet.items["Widen to autonomous…"])
+    fleet.click(fleet.items["autonomous…"])
     fleet.click(fleet.items["cancel"])
 
     assert fleet.called() == {}
@@ -2194,7 +2318,7 @@ def test_the_enter_that_chose_a_gate_row_is_not_the_enter_that_confirms_it(
     fleet.click(fleet.cards[0], button=1)
     for _ in range(4):
         fleet.key(imgui.Key.down_arrow)
-    assert [line for line in fleet.said if line.startswith("> ")] == ["> Widen to autonomous…"]
+    assert [line for line in fleet.said if line.startswith("> ")] == ["> autonomous…"]
 
     fleet.io.add_key_event(imgui.Key.enter, True)
     fleet.frame(40)
@@ -2213,7 +2337,7 @@ def test_escape_cancels_the_gate_question_and_a_key_over_it_approves_nothing(
 ) -> None:
     _told(monkeypatch, fleet, contained=lambda node: True)
     fleet.click(fleet.cards[0], button=1)
-    fleet.click(fleet.items["Widen to autonomous…"])
+    fleet.click(fleet.items["autonomous…"])
 
     fleet.key(imgui.Key.a, "a")
     assert fleet.approved() == []
@@ -2227,7 +2351,7 @@ def test_a_session_that_ends_while_the_gate_question_is_up_takes_the_question_wi
 ) -> None:
     _told(monkeypatch, fleet, contained=lambda node: True)
     fleet.click(fleet.cards[0], button=1)
-    fleet.click(fleet.items["Widen to autonomous…"])
+    fleet.click(fleet.items["autonomous…"])
     assert "move to autonomous" in fleet.items
 
     fleet.store.apply(AgentFinished(ROOT, AgentState.DONE, 9.0), now=9.0)
@@ -2274,7 +2398,7 @@ def test_an_ended_card_is_removed_through_the_action_once_the_shell_says_no_run_
         fleet.gate[ROOT] = None
         _told(monkeypatch, fleet, snap=store.snapshot())
         fleet.click(fleet.cards[0], button=1)
-        unknown = "Remove from fleet  -  not known whether a process is still attached"
+        unknown = f"Remove from fleet  -  {session_menu.RUN_NOT_KNOWN.words}"
         assert unknown in fleet.items
         fleet.click(fleet.items[unknown])
         assert fleet.called() == {}
@@ -2323,7 +2447,7 @@ def test_the_menu_calls_resume_what_every_pane_that_points_at_it_calls_it() -> N
 
 def test_an_item_that_leads_to_a_second_step_ends_in_the_one_ellipsis() -> None:
     labels = _every_label()
-    assert {"Resume…", "Close…", "Continue as autonomous…", "Resume as autonomous…"} <= labels
+    assert {"Resume…", "Close…", "autonomous  restart…", "autonomous…", "permissive…"} <= labels
     assert not [label for label in labels if "..." in label]
 
 
@@ -2334,8 +2458,8 @@ def test_a_failed_card_offers_close_and_says_which_of_two_acts_it_will_be(
     """
     A failed session stays on the fleet until it is closed, so the control that
     closes it has to be on its card. With a process attached Close ends it; with
-    none it marks the session ended. The line under the item is the only thing
-    that tells the operator which, and both reach the one ``close`` action.
+    none it marks the session ended. The item's note says which, and is not
+    drawn; both reach the one ``close`` action.
     """
     rec = record(ROOT, AgentState.FAILED, acknowledged=acknowledged)
     for held, note in (
@@ -2479,13 +2603,13 @@ def test_a_failed_session_with_a_process_attached_is_given_a_running_sessions_ga
     assert group[0] == _now(_S)
     assert not [e for e in group if "it is not running" in e.note]
     assert [e.label for e in group if isinstance(e, Item)] == [
-        "Widen to permissive",
-        "Continue as autonomous…",
+        "permissive…",
+        "autonomous  restart…",
     ]
 
     on_permissive = _gate_group(session_menu.entries(launched_under, _P, attached))
     narrow = on_permissive[0]
-    assert isinstance(narrow, Item) and narrow.label == "Narrow to strict" and narrow.enabled
+    assert isinstance(narrow, Item) and narrow.label == "strict" and narrow.enabled
     actions = _wired()
     session_menu.choose(
         Action.SET_GATE,
@@ -2507,7 +2631,7 @@ def test_a_failed_session_with_a_process_attached_is_given_a_running_sessions_ga
     ):
         assert not session_menu.process_attached(reading, facts)
         group = _gate_group(session_menu.entries(launched_under, reading, facts))
-        assert Line("permissive (as last granted)", _consequence(_P, _P, live=False)) in group, (
+        assert Line("permissive (last run)", _consequence(_P, _P, live=False)) in group, (
             facts,
             reading,
         )

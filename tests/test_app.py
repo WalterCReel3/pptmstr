@@ -16,6 +16,7 @@ version shortfall and a session the operator believes is contained.
 
 from __future__ import annotations
 
+import functools
 import os
 import signal
 import threading
@@ -3671,7 +3672,7 @@ def test_the_fold_setting_is_a_menu_item_that_persists_and_is_refused_like_any_o
     assert file.read_text() == broken and unread.unsaved is not None
 
     menus = inspect.getsource(app._menus)
-    assert '"Hide ended sub-agents", "", state.settings.hide_ended_subagents' in menus
+    assert '"Show ended sub-agents", "", not state.settings.hide_ended_subagents' in menus
     assert "_switch_hide_ended(state, not state.settings.hide_ended_subagents)" in menus
 
 
@@ -4898,7 +4899,7 @@ def test_a_card_whose_transcript_is_gone_can_always_be_removed(
     assert _file(session_id).in_fleet is False
 
 
-# -- a row picked in New Task opens the resume form ---------------------------------
+# -- a session picked in New Task is resumed by New Task ----------------------------
 
 
 def _picked_row(session_id: str, cwd: str | None) -> object:
@@ -4916,32 +4917,24 @@ def _picked_row(session_id: str, cwd: str | None) -> object:
     )
 
 
-class _Picking:
+class _Overlays:
     """
     ``app._draw_overlays`` with the two modals' draws replaced by recorders, so
-    what is under test is the callback the app hands New Task and what a frame
-    does with a pick -- and not either modal's drawing.
+    what is under test is what the app hands New Task and what it does with a
+    press -- and not either modal's drawing.
     """
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch, store: Store) -> None:
-        from pptmstr import app, sessionfile
+        from pptmstr import app
         from pptmstr.ui import launcher, resume_form
 
         self.app = app
         self.handed: list[dict[str, object]] = []
-        self.read_on: list[str] = []
-        real_read = sessionfile.read
-
-        def read(session_id: str, *a: object, **k: object) -> object:
-            self.read_on.append(threading.current_thread().name)
-            return real_read(session_id, *a, **k)  # type: ignore[arg-type]
-
-        monkeypatch.setattr(sessionfile, "read", read)
         monkeypatch.setattr(launcher, "handle_shortcut", lambda state: None)
         monkeypatch.setattr(launcher, "draw", lambda state, **kw: self.handed.append(kw))
         monkeypatch.setattr(resume_form, "draw", lambda state, **kw: None)
-        self.launched: list[object] = []
-        monkeypatch.setattr(app, "_launch", lambda *a, **k: self.launched.append(a))
+        self.launched: list[tuple[tuple[object, ...], dict[str, object]]] = []
+        monkeypatch.setattr(app, "_launch", lambda *a, **k: self.launched.append((a, k)))
 
         class _IdlePool:
             running_count = 0
@@ -4951,6 +4944,9 @@ class _Picking:
             def session_for(self, node: object) -> None:
                 return None
 
+            def has_run(self, node: object) -> bool:
+                return False
+
         self.state = app.AppState(store=store, bridge=Bridge(), settings=Settings())
         self.state.pool = _IdlePool()  # type: ignore[assignment]
         self.state.frame_snap = store.snapshot()
@@ -4958,348 +4954,228 @@ class _Picking:
     def frame(self) -> None:
         self.app._draw_overlays(self.state)
 
-    def pick(self, row: object) -> None:
-        """A click on ``row``, as ``launcher.draw`` reports it: through what it was handed."""
+    def press(self, picked: object, message: str = "carry on", **fields: object) -> LaunchSpec:
+        """
+        New Task's launch button with ``picked`` picked and ``message`` in the box,
+        as ``launcher.draw`` makes the press: the state's own spec and draft through
+        the callback the frame handed it. Returns what reached ``_launch``.
+        """
+        draft = self.state.launcher
+        draft.task = message
+        for name, value in fields.items():
+            setattr(draft, name, value)
+        draft.picker.pick(None, draft.cwd)
+        draft.picker.pick(picked, draft.cwd)  # type: ignore[arg-type]
         self.frame()
-        self.handed[-1]["on_pick_resume"](row)  # type: ignore[operator]
-
-    def land(self) -> None:
-        """Frames until a pick's file read has been taken, or the test fails."""
-        import time
-
-        for _ in range(500):
-            self.frame()
-            if self.state.resume.form is not None:
-                return
-            time.sleep(0.01)
-        pytest.fail("the picked row's resume form never opened")
+        assert draft.launch_hold() is None
+        spec = draft.press()
+        assert spec is not None
+        self.handed[-1]["launch"](spec, draft.draft())  # type: ignore[operator]
+        args, kwargs = self.launched[-1]
+        assert args[0] is self.state and args[2] == draft.draft()
+        assert kwargs == {}, "a press in New Task is New Task's, and fails back to it"
+        sent = args[1]
+        assert isinstance(sent, LaunchSpec)
+        return sent
 
 
-def test_a_picked_session_that_ran_here_opens_the_form_the_card_menu_opens(
-    monkeypatch: pytest.MonkeyPatch,
+def test_new_task_is_handed_no_way_to_open_the_resume_form(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """
-    A session in the store, picked from New Task's list: the same opener the card's
-    Resume… uses, at once, with nothing read from disk and nothing started.
+    The property: the resume form opens from a closed card and from nowhere else.
+    The frame hands New Task a launch callback and nothing a pick could be
+    reported through, and nothing in the frame opens a form for a pick made on
+    the launcher's state.
     """
-    from pptmstr.intents import AgentSpawned, StateChanged
-    from pptmstr.model import AgentState
+    import inspect
+
+    run = _Overlays(monkeypatch, Store())
+    run.frame()
+    assert "launch" in run.handed[-1]
+    assert not [name for name in run.handed[-1] if "pick" in name or "resume" in name]
+
+    run.state.launcher.picker.pick(_picked_row("s-1", str(tmp_path)), ".")  # type: ignore[arg-type]
+    for _ in range(3):
+        run.frame()
+    assert run.state.resume.form is None and not run.state.resume.busy
+    assert run.launched == []
+
+    # And every way the form is asked for is a card's.
+    openers = [
+        name
+        for name, member in inspect.getmembers(run.app, inspect.isfunction)
+        if "resume.open_for(" in inspect.getsource(member)
+    ]
+    assert openers == ["_open_resume"]
+    callers = sorted(
+        name
+        for name, member in inspect.getmembers(run.app, inspect.isfunction)
+        if "_open_resume(" in inspect.getsource(member) and name != "_open_resume"
+    )
+    assert callers and all("card" in name or "gate" in name for name in callers), callers
+
+
+def test_a_resume_pressed_in_new_task_reaches_launch_with_the_typed_message(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """
+    A session the store has no record of: the spec is the launcher's, untouched.
+    The id and directory are the row's, the box is the message, and the title is
+    the row's label, said to be one.
+    """
+    run = _Overlays(monkeypatch, Store())
+
+    sent = run.press(_picked_row("s-foreign", str(tmp_path)), "  carry on from the tests ")
+
+    assert (sent.resume, sent.message) == ("s-foreign", "carry on from the tests")
+    assert sent.cwd == str(tmp_path.resolve())
+    assert (sent.task, sent.task_is_label) == ("what the CLI calls this conversation", True)
+    assert run.state.resume.form is None
+
+
+def test_a_resume_pressed_in_new_task_keeps_the_title_its_card_has(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """
+    The announce replaces the session's record with one titled by the spec, and
+    the launcher titles a resume by the CLI's label because a row carries no task.
+    For a session with a card that would rename the card. The record's task goes
+    instead, with the record's word on whether it is a task at all; the message
+    and everything chosen in New Task are left alone.
+    """
+    from pptmstr.intents import AgentSpawned, SessionRecalled, StateChanged
+    from pptmstr.model import AgentState, Recalled
 
     store = Store()
     store.apply(
-        AgentSpawned(
-            ("s-ran", None),
-            None,
-            "build the thing",
-            "claude-opus-5",
-            0.0,
-            template="feature",
-            brief="/briefs/s-ran",
-            cwd="/srv/ran",
-        ),
+        AgentSpawned(("s-ran", None), None, "build the thing", "claude-opus-5", 0.0, cwd="/srv"),
         now=0.0,
     )
     store.apply(StateChanged(("s-ran", None), AgentState.DONE), now=1.0)
-    run = _Picking(monkeypatch, store)
-    run.state.last_sent["s-ran"] = "the last thing it was sent"
-    opened: list[object] = []
-    real_open = run.app._open_resume
-    monkeypatch.setattr(
-        run.app,
-        "_open_resume",
-        lambda state, rec, *a, **kw: (opened.append(rec), real_open(state, rec, *a, **kw)),
-    )
-
-    run.pick(_picked_row("s-ran", "/somewhere/the/listing/said"))
-
-    form = run.state.resume.form
-    assert form is not None and run.state.resume.showing == "s-ran"
-    assert run.state.resume._open_requested
-    assert opened == [store.snapshot().nodes[("s-ran", None)]]
-    facts = form.facts
-    assert (facts.task, facts.template, facts.model) == (
-        "build the thing",
-        "feature",
-        "claude-opus-5",
-    )
-    assert (facts.cwd, facts.brief) == ("/srv/ran", "/briefs/s-ran"), "the record's, not the row's"
-    assert form.message == "the last thing it was sent"
-    assert form.policy is Policy.STRICT
-    assert run.read_on == [] and run.launched == []
-
-
-def test_a_picked_closed_card_opens_its_form_with_what_its_file_said(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A recalled session: the record the recall built is the account, read once already."""
-    from pptmstr import sessionfile
-    from pptmstr.intents import SessionRecalled
-    from pptmstr.model import Recalled
-
-    said = Recalled(
-        policy=Policy.PERMISSIVE,
-        contained=False,
-        last_message="and then the tests",
-        subagent_cap=3,
-        task_recorded=True,
-    )
-    store = Store()
     store.apply_all(
         [
-            SessionRecalled(
-                "s-1", "build it", "claude-opus-5", said, cwd="/tmp", template="feature"
-            ),
-            SessionRecalled(
-                "s-old", "A summary of it", "", Recalled(task_recorded=False), cwd="/tmp"
-            ),
+            SessionRecalled("s-closed", "port the parser", "m", Recalled(task_recorded=True)),
+            SessionRecalled("s-labelled", "a summary", "m", Recalled(task_recorded=False)),
         ],
-        now=1.0,
+        now=2.0,
     )
-    run = _Picking(monkeypatch, store)
+    run = _Overlays(monkeypatch, store)
 
-    run.pick(_picked_row("s-1", "/tmp"))
+    for session_id, title, is_label in (
+        ("s-ran", "build the thing", False),
+        ("s-closed", "port the parser", False),
+        ("s-labelled", "a summary", True),
+    ):
+        sent = run.press(
+            _picked_row(session_id, str(tmp_path)), "carry on", policy=Policy.PERMISSIVE
+        )
+        assert (sent.task, sent.task_is_label) == (title, is_label), session_id
+        assert (sent.resume, sent.message) == (session_id, "carry on")
+        assert sent.cwd == str(tmp_path.resolve()) and sent.policy is Policy.PERMISSIVE
 
-    form = run.state.resume.form
-    assert form is not None and run.state.resume.showing == "s-1"
-    facts = form.facts
-    assert (facts.task, facts.template, facts.policy) == ("build it", "feature", Policy.PERMISSIVE)
-    assert (facts.last_message, facts.subagent_cap) == ("and then the tests", 3)
-    assert form.message == "and then the tests" and form.policy is Policy.STRICT
-
-    # And one whose file said nothing claims nothing, as from its card.
-    run.pick(_picked_row("s-old", "/tmp"))
-    old = run.state.resume.form
-    assert old is not None and run.state.resume.showing == "s-old"
-    assert (old.facts.task, old.facts.task_is_label) == ("A summary of it", True)
-    assert not old.team_known
-    assert old.facts.policy == sessionfile.UnknownPolicy()
-    assert run.read_on == [] and run.launched == []
-
-
-def test_a_session_known_only_to_the_list_opens_from_its_file_read_off_the_draw_thread(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """
-    A session removed from the fleet in an earlier run: no record, a transcript, and
-    a session file. The file is what says its team and its last message, and it is
-    read on a worker -- the draw thread only takes the answer. Where it runs is the
-    row's, because the row is what was clicked.
-    """
-    from pptmstr import sessionfile
-
-    written = sessionfile.update(
-        "s-removed",
-        {
-            "in_fleet": False,
-            "task": "port the parser",
-            "model": "claude-opus-5",
-            "cwd": "/the/file/says",
-            "template": "feature",
-            "brief": "/briefs/s-removed",
-            "policy": "autonomous",
-            "contained": True,
-            "subagent_cap": 2,
-            "last_message": "carry on from the tests",
-        },
-    )
-    assert isinstance(written, sessionfile.Written)
-    run = _Picking(monkeypatch, Store())
-    here = threading.current_thread().name
-
-    run.pick(_picked_row("s-removed", str(tmp_path)))
-    assert run.state.resume.form is None or run.read_on, "nothing opens ahead of the read"
-    run.land()
-
-    assert run.read_on and here not in run.read_on
-    form = run.state.resume.form
-    assert form is not None and run.state.resume.showing == "s-removed"
-    assert run.state.resume._open_requested
-    facts = form.facts
-    assert facts.cwd == str(tmp_path), "the row that was clicked says where it runs"
-    assert (facts.task, facts.template, facts.model) == (
-        "port the parser",
-        "feature",
-        "claude-opus-5",
-    )
-    assert (facts.policy, facts.contained, facts.subagent_cap) == (Policy.AUTONOMOUS, True, 2)
-    assert facts.brief == "/briefs/s-removed"
-    assert form.team_known and form.message == "carry on from the tests"
-    assert form.policy is Policy.STRICT, "the rung is chosen on the form, whatever the file says"
-    assert run.launched == []
+    # A new session's spec has no record to be titled by, whatever the store holds.
+    fresh = LaunchSpec(task="s-ran", model="m", cwd=str(tmp_path))
+    run.app._launcher_pressed(run.state, fresh, run.state.launcher.draft())
+    assert run.launched[-1][0][1] is fresh
 
 
-def test_a_session_with_no_file_opens_a_form_that_claims_no_team_gate_or_task(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """
-    A session another tool started. The row's label is the CLI's summary and is not
-    its task; nothing says its team, so the form offers the choice.
-    """
-    from pptmstr import sessionfile
-    from pptmstr.ui import resume_form
-
-    run = _Picking(monkeypatch, Store())
-
-    run.pick(_picked_row("s-foreign", str(tmp_path)))
-    run.land()
-
-    form = run.state.resume.form
-    assert form is not None
-    facts = form.facts
-    assert facts.session_id == "s-foreign" and facts.cwd == str(tmp_path)
-    # The listing's label is the title a card for this session would read, and
-    # it is passed as a label: never as the task, and never left for the typed
-    # message to stand in for.
-    assert (facts.task, facts.task_is_label) == ("what the CLI calls this conversation", True)
-    assert isinstance(facts.template, resume_form.UnknownTeam) and not form.team_known
-    assert facts.policy == sessionfile.UnknownPolicy() and facts.contained is False
-    assert (facts.model, facts.subagent_cap, facts.last_message) == ("", None, None)
-    assert form.message == "" and form.model, "an empty box, and a model to offer"
-    assert sessionfile.read("s-foreign") == sessionfile.Absent(), "and nothing was written"
-
-
-def test_a_file_that_cannot_be_read_is_logged_and_the_form_opens_on_the_row_alone(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    from pptmstr import sessionfile
-    from pptmstr.ui import resume_form
-
-    path = sessionfile.file_path("s-torn")
-    assert path is not None
-    path.parent.mkdir(parents=True)
-    path.write_text("{ not json")
-    run = _Picking(monkeypatch, Store())
-    mark = LOG.snapshot()[1]
-
-    run.pick(_picked_row("s-torn", str(tmp_path)))
-    run.land()
-
-    form = run.state.resume.form
-    assert form is not None and isinstance(form.facts.template, resume_form.UnknownTeam)
-    entries, revision = LOG.snapshot()
-    recent = [e.text for e in entries[len(entries) - (revision - mark) :]]
-    assert any("s-torn" in text and "could not be read" in text for text in recent)
-    assert path.read_text() == "{ not json"
-
-
-def test_a_record_that_arrived_while_the_file_was_read_is_what_the_form_opens_from(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """
-    The recall of the closed fleet lands on its own worker. A pick made before it
-    and taken after it opens from the record, which is the fuller account.
-    """
-    from pptmstr.intents import SessionRecalled
-    from pptmstr.model import Recalled
-    from pptmstr.sessionfile import Absent
-
-    run = _Picking(monkeypatch, Store())
-    row = _picked_row("s-late", str(tmp_path))
-    run.state.store.apply(
-        SessionRecalled(
-            "s-late", "build it", "m", Recalled(task_recorded=True), cwd="/rec", template="feature"
-        ),
-        now=1.0,
-    )
-
-    run.state.resume_picks.put(run.app._PickRead(row, Absent(), ""))  # type: ignore[arg-type]
-    run.frame()
-
-    form = run.state.resume.form
-    assert form is not None and form.facts.template == "feature" and form.facts.cwd == "/rec"
-
-
-def test_what_was_typed_in_new_task_goes_with_the_pick_and_stays_where_it_was(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    """
-    The decision, both halves. The task box's text is offered to the form as its
-    message -- over a prefill, which is only the last thing the session was sent --
-    and New Task keeps it, for the operator who picked the wrong row.
-    """
-    from pptmstr.intents import SessionRecalled
-    from pptmstr.model import Recalled
-
-    store = Store()
-    store.apply(
-        SessionRecalled(
-            "s-1",
-            "build it",
-            "m",
-            Recalled(last_message="the last send", task_recorded=True),
-            cwd="/tmp",
-            template="solo",
-        ),
-        now=1.0,
-    )
-    run = _Picking(monkeypatch, store)
-    run.state.launcher.task = "  look at the parser\nagain  "
-    run.state.launcher.cwd = "/a/field"
-    before = run.state.launcher.draft()
-
-    run.pick(_picked_row("s-1", "/tmp"))
-    form = run.state.resume.form
-    assert form is not None
-    assert form.message == "  look at the parser\nagain  " and form.touched
-    assert run.state.launcher.draft() == before, "New Task's draft is untouched"
-
-    # Known only to the list: the text travels with the read and lands with it.
-    run.state.resume.showing = None
-    run.pick(_picked_row("s-foreign", str(tmp_path)))
-    run.state.launcher.task = "typed after the click"
-    run.land()
-    foreign = run.state.resume.forms["s-foreign"]
-    assert foreign.message == "  look at the parser\nagain  "
-    assert run.state.launcher.task == "typed after the click"
-
-
-def test_a_form_that_holds_a_draft_of_its_own_is_not_written_over_by_new_tasks_text(
+def test_a_resume_titled_by_a_label_is_given_the_task_its_file_recorded(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from pptmstr.intents import SessionRecalled
-    from pptmstr.model import Recalled
+    """
+    A session removed from the fleet in an earlier run: no record, a transcript and
+    a session file. New Task knows it by the CLI's label; the file knows its task,
+    and that is what the session is announced under. The read is off the asyncio
+    loop, and only a resume that has nothing but a label pays for it.
+    """
+    import dataclasses
 
-    store = Store()
-    store.apply(
-        SessionRecalled(
-            "s-1",
-            "build it",
-            "m",
-            Recalled(last_message="the last send", task_recorded=True),
-            cwd="/tmp",
-            template="solo",
-        ),
-        now=1.0,
-    )
-    run = _Picking(monkeypatch, store)
-    row = _picked_row("s-1", "/tmp")
+    from pptmstr import sessionfile
 
-    # Nothing typed in New Task: the prefill stands.
-    run.state.launcher.task = "   "
-    run.pick(row)
-    form = run.state.resume.form
-    assert form is not None and form.message == "the last send" and not form.touched
+    written = sessionfile.update("s-removed", {"in_fleet": False, "task": "port the parser"})
+    assert isinstance(written, sessionfile.Written)
+    read_on: list[str] = []
+    real_read = sessionfile.read
 
-    # The operator types on the form, closes it, and picks the row again with a
-    # task typed in New Task: the form's text is theirs and is kept.
-    form.message = "what I was going to say to it"
-    run.state.resume.close()
-    run.state.launcher.task = "a new task"
-    run.pick(row)
-    assert run.state.resume.form is form
-    assert form.message == "what I was going to say to it"
-    assert run.state.launcher.task == "a new task"
+    def read(session_id: str, *a: object, **k: object) -> object:
+        read_on.append(threading.current_thread().name)
+        return real_read(session_id, *a, **k)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(sessionfile, "read", read)
+
+    def resume(session_id: str, **kw: object) -> AgentSession:
+        spec = dataclasses.replace(_spec(resume=session_id, message="carry on"), **kw)  # type: ignore[arg-type]
+        out = _run_launch(spec, monkeypatch)
+        (session,) = out.sessions
+        assert out.pool_thread is not None and out.pool_thread.name not in read_on
+        return session
+
+    session = resume("s-removed", task="the CLI's label", task_is_label=True)
+    assert (session.task, session.task_is_label) == ("port the parser", False)
+    assert (session.resume, session.message) == ("s-removed", "carry on")
+    assert len(read_on) == 1
+
+    # No file, or a file with no task: the label stands and is still called one.
+    session = resume("s-foreign", task="the CLI's label", task_is_label=True)
+    assert (session.task, session.task_is_label) == ("the CLI's label", True)
+    assert isinstance(sessionfile.update("s-blank", {"in_fleet": True}), sessionfile.Written)
+    session = resume("s-blank", task="the CLI's label", task_is_label=True)
+    assert (session.task, session.task_is_label) == ("the CLI's label", True)
+
+    # A title that is a task is not second-guessed, and a new session reads nothing.
+    before = len(read_on)
+    session = resume("s-removed", task="what its card says")
+    assert (session.task, session.task_is_label) == ("what its card says", False)
+    out = _run_launch(_spec(task_is_label=True), monkeypatch)
+    assert [s.task for s in out.sessions] == ["do a thing"]
+    assert len(read_on) == before
 
 
-def test_in_dear_imgui_new_task_goes_down_and_the_resume_form_comes_up(
+def test_a_resume_from_new_task_that_starts_nothing_comes_back_to_new_task_as_that_resume(
+    tmp_path: Path,
+) -> None:
+    """
+    The press clears the box and the pick. A refusal read on a later frame puts
+    both back, in New Task and not on a resume form: the modal that was pressed is
+    the one that says why, and a retry from it resumes the same session.
+    """
+    from pptmstr import app
+
+    row = _picked_row("s-1", str(tmp_path))
+    # No pool: the refusal ``_launch`` makes without constructing a session.
+    state = app.AppState(store=Store(), bridge=Bridge(), settings=Settings())
+    draft = state.launcher
+    draft.cwd, draft.task = str(tmp_path), "carry on"
+    draft.picker.pick(row, draft.cwd)  # type: ignore[arg-type]
+    assert draft.launch_hold() is None
+    spec = draft.press()
+    assert spec is not None and spec.resume == "s-1"
+
+    app._launcher_pressed(state, spec, draft.draft())
+    draft.launched()
+    assert draft.picker.picked is None and draft.task == ""
+    app._reap_launches(state)
+
+    assert draft.task == "carry on" and draft.picker.picked == row
+    assert [failure.reason for failure in draft.failures] == [
+        "there is no session pool to start it in"
+    ]
+    assert draft._open_requested, "New Task is what comes back up"
+    assert state.resume.form is None and not state.resume.busy
+    again = draft.press()
+    assert again is not None and (again.resume, again.message) == ("s-1", "carry on")
+
+
+def test_in_dear_imgui_a_session_picked_in_new_task_is_resumed_there_and_no_form_opens(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """
-    Both modals, drawn by ``_draw_overlays`` in a real Dear ImGui context. The pick
-    closes one popup and asks for another on one frame; what is pinned is that the
-    second one is actually up afterwards and the first is actually down, which no
-    recorder standing in for either draw can show. The click itself is supplied:
-    ``tests/test_launcher.py`` presses a row with the mouse.
+    The operator's correction, end to end: both modals drawn by ``_draw_overlays``
+    in a real Dear ImGui context. With a session picked New Task stays up and the
+    resume form does not come up, on that frame or any after it; Ctrl+Enter then
+    resumes that session with what is in the box, and the form still has not been
+    asked for. The click that makes the pick is ``tests/test_launcher.py``'s.
     """
     from imgui_bundle import imgui
 
@@ -5316,14 +5192,13 @@ def test_in_dear_imgui_new_task_goes_down_and_the_resume_form_comes_up(
         now=1.0,
     )
     row = _picked_row("s-1", str(tmp_path))
-    clicks: list[object] = []
     monkeypatch.setattr(launcher, "handle_shortcut", lambda state: None)
     monkeypatch.setattr(
-        launcher, "_session_list", lambda state, **kw: clicks.pop() if clicks else None
+        launcher, "draw", functools.partial(launcher.draw, scanner=lambda cwd: ((row,), {}))
     )
-    monkeypatch.setattr(launcher, "scan_sessions", lambda cwd: ((), {}))
     monkeypatch.setattr(cli_version, "check_installed_cli", lambda *a, **k: _MEETS)
-    monkeypatch.setattr(app, "_launch", lambda *a, **k: pytest.fail("a pick launched something"))
+    launched: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    monkeypatch.setattr(app, "_launch", lambda *a, **k: launched.append((a, k)))
 
     class _IdlePool:
         running_count = 0
@@ -5370,18 +5245,33 @@ def test_in_dear_imgui_new_task_goes_down_and_the_resume_form_comes_up(
         state.launcher.request_open()
         frames(3)
         assert drawn(launcher.TITLE) and not drawn(resume_form.TITLE)
-        assert state.launcher.is_open and not state.resume.is_open
 
-        clicks.append(row)
+        state.launcher.picker.pick(row, state.launcher.cwd)  # type: ignore[arg-type]
+        frames(5)
+
+        assert open_popups[launcher.TITLE] and drawn(launcher.TITLE)
+        assert state.launcher.is_open, "New Task stays open with the session picked"
+        assert not open_popups[resume_form.TITLE] and not drawn(resume_form.TITLE)
+        assert state.resume.form is None and not state.resume.busy
+        assert state.launcher.task == "half a thought" and launched == []
+
+        keys = (imgui.Key.mod_ctrl, imgui.Key.left_ctrl, imgui.Key.enter)
+        for key in keys:
+            io.add_key_event(key, True)
+        frames(1)
+        for key in reversed(keys):
+            io.add_key_event(key, False)
         frames(3)
 
-        assert not open_popups[launcher.TITLE], "the popup is closed, not only undrawn"
-        assert not drawn(launcher.TITLE) and not state.launcher.is_open
-        assert drawn(resume_form.TITLE) and state.resume.is_open
-        assert state.resume.showing == "s-1"
-        assert state.launcher.task == "half a thought"
-        form = state.resume.form
-        assert form is not None and form.message == "half a thought"
+        ((args, kwargs),) = launched
+        spec = args[1]
+        assert isinstance(spec, LaunchSpec)
+        assert (spec.resume, spec.message) == ("s-1", "half a thought")
+        assert (spec.task, spec.task_is_label) == ("build it", False), "the card's title"
+        assert spec.cwd == str(tmp_path.resolve())
+        assert kwargs == {}
+        assert not state.launcher.is_open and state.launcher.picker.picked is None
+        assert state.resume.form is None and not drawn(resume_form.TITLE)
     finally:
         imgui.destroy_context(context)
 
@@ -5758,19 +5648,21 @@ def test_the_resume_form_warns_of_a_failed_session_whose_process_is_still_attach
         session_id = run.session_id
         state = run.state
         state.frame_snap = state.store.snapshot()
-        assert run.app._resume_ends(state) == frozenset({session_id}), "live: the snapshot says"
+        assert run.app._resume_ends(state, None) == frozenset({session_id}), "the snapshot says"
 
         _fails(run, "HTTP 529: overloaded")
         state.frame_snap = state.store.snapshot()
         failed = state.frame_snap.nodes[(session_id, None)]
         assert run.app._live_sessions(state.frame_snap) == frozenset()
-        # No form on the session, nothing to warn on.
-        assert run.app._resume_ends(state) == frozenset()
+        # No form on the session and no pick of it, nothing to warn on.
+        assert run.app._resume_ends(state, state.resume.showing) == frozenset()
+        # Picked in New Task, it is warned about there as it is on the form.
+        assert run.app._resume_ends(state, session_id) == frozenset({session_id})
 
         run.app._open_resume(state, failed)
         form = state.resume.form
         assert form is not None
-        ends = run.app._resume_ends(state)
+        ends = run.app._resume_ends(state, state.resume.showing)
         assert ends == frozenset({session_id})
         line = launcher.live_resume_line(form_row(form.facts), ends)
         # The sentence as it stands today: sub-agents end with the run.
@@ -5779,8 +5671,11 @@ def test_the_resume_form_warns_of_a_failed_session_whose_process_is_still_attach
 
         # Its process gone, a resume ends nothing and the form says nothing.
         run.running.discard(session_id)
-        assert run.app._resume_ends(state) == frozenset()
-    assert "live=_resume_ends(state)" in inspect.getsource(run.app._draw_overlays)
+        assert run.app._resume_ends(state, state.resume.showing) == frozenset()
+        assert run.app._resume_ends(state, session_id) == frozenset()
+    overlays = inspect.getsource(run.app._draw_overlays)
+    assert "live=_resume_ends(state, state.resume.showing)" in overlays
+    assert "_resume_ends(state, state.launcher.picker.selected)" in overlays
 
 
 def test_a_gate_moved_while_the_launch_write_is_being_made_is_what_the_file_ends_on(
@@ -5856,14 +5751,14 @@ def test_a_gate_moved_on_a_session_whose_run_is_over_is_not_written_to_its_file(
         assert _file(run.session_id).policy is Policy.PERMISSIVE
 
 
-def test_a_card_with_no_recorded_directory_is_resumed_from_its_row_in_the_session_list(
+def test_a_card_with_no_recorded_directory_is_resumed_from_its_row_in_new_task(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """
-    The card's own Resume… has nowhere to start it and holds. The session list is
-    the CLI's listing, which says where the conversation ran: picked there, the
-    form opens on the row's directory and can resume. A record that does say
-    where it ran is not overridden by the row.
+    The card's own Resume… has nowhere to start it and holds, and says where it
+    can be resumed. New Task's session list is the CLI's listing, which says where
+    the conversation ran: picked there, New Task resumes it in the row's directory,
+    and in its own working directory field for a row that says nowhere.
     """
     from pptmstr import app
     from pptmstr.intents import SessionRecalled
@@ -5871,16 +5766,10 @@ def test_a_card_with_no_recorded_directory_is_resumed_from_its_row_in_the_sessio
     from pptmstr.ui import launcher, resume_form
 
     store = Store()
-    store.apply_all(
-        [
-            SessionRecalled("s-nowhere", "build it", "m", Recalled(task_recorded=True)),
-            SessionRecalled(
-                "s-here", "build it", "m", Recalled(task_recorded=True), cwd="/srv/recorded"
-            ),
-        ],
-        now=1.0,
+    store.apply(
+        SessionRecalled("s-nowhere", "build it", "m", Recalled(task_recorded=True)), now=1.0
     )
-    run = _Picking(monkeypatch, store)
+    run = _Overlays(monkeypatch, store)
     nowhere = store.snapshot().nodes[("s-nowhere", None)]
 
     app._card_actions(run.state).resume(nowhere)
@@ -5890,20 +5779,18 @@ def test_a_card_with_no_recorded_directory_is_resumed_from_its_row_in_the_sessio
     form.refresh()
     held = resume_form.press(form, launcher.VersionGate())
     assert held == resume_form.Hold(resume_form.HOLD_UNRECORDED)
-    assert "New Task's session list" in resume_form.HOLD_UNRECORDED
+    assert "New Task's session list can resume it" in resume_form.HOLD_UNRECORDED
+    run.state.resume.close()
 
-    run.pick(_picked_row("s-nowhere", str(tmp_path)))
-    form = run.state.resume.form
-    assert form is not None and form.facts.cwd == str(tmp_path)
-    form.message = "carry on"
-    form.refresh()
-    pressed = resume_form.press(form, launcher.VersionGate())
-    assert isinstance(pressed, resume_form.Launch) and pressed.spec.resume == "s-nowhere"
-    assert pressed.spec.cwd == str(tmp_path.resolve())
+    sent = run.press(_picked_row("s-nowhere", str(tmp_path)))
+    assert (sent.resume, sent.cwd) == ("s-nowhere", str(tmp_path.resolve()))
+    assert (sent.task, sent.task_is_label) == ("build it", False)
 
-    run.pick(_picked_row("s-here", str(tmp_path)))
-    form = run.state.resume.form
-    assert form is not None and form.facts.cwd == "/srv/recorded"
+    elsewhere = tmp_path / "typed"
+    elsewhere.mkdir()
+    sent = run.press(_picked_row("s-nowhere", None), cwd=str(elsewhere))
+    assert (sent.resume, sent.cwd) == ("s-nowhere", str(elsewhere.resolve()))
+    assert run.state.resume.forms.keys() == {"s-nowhere"}, "no form was opened by either"
 
 
 # -- break-glass commands: the shell runs what the store orders -------------------------
@@ -7153,12 +7040,12 @@ def test_a_look_that_could_not_read_proc_leaves_the_row_and_the_hold_and_says_so
         found = commands.held(old).unsupervised
         assert isinstance(found, Survivor)
 
-        real = commandrun._session
+        real = commandrun._alive
 
-        def unreadable(sid: int) -> None:
+        def unreadable() -> None:
             raise OSError(errno.EMFILE, "Too many open files")
 
-        monkeypatch.setattr(commandrun, "_session", unreadable)
+        monkeypatch.setattr(commandrun, "_alive", unreadable)
         said = _looked(commands, old)
         assert said.startswith(commands.app.NOT_LOOKED) and "Too many open files" in said
         assert commands.held(old).unsupervised == found
@@ -7172,7 +7059,7 @@ def test_a_look_that_could_not_read_proc_leaves_the_row_and_the_hold_and_says_so
         ]
 
         # A record of its process that can no longer be read is the same answer.
-        monkeypatch.setattr(commandrun, "_session", real)
+        monkeypatch.setattr(commandrun, "_alive", real)
         monkeypatch.setattr(commandfile, "read_started", lambda *args, **kwargs: None)
         said = _looked(commands, old)
         assert said.startswith(commands.app.NOT_LOOKED + commands.app.RECORD_UNREADABLE)
@@ -7184,7 +7071,7 @@ def test_a_look_that_could_not_read_proc_leaves_the_row_and_the_hold_and_says_so
         # At a start it is the same answer: no row to press, the record a plain
         # end unknown, which claims nothing about what is alive -- and it is
         # said, where a look that found nothing says nothing.
-        monkeypatch.setattr(commandrun, "_session", unreadable)
+        monkeypatch.setattr(commandrun, "_alive", unreadable)
         mark = LOG.snapshot()[1]
         later = _later_window(commands, command_mark)
         later.app._restore_commands(later.state, _CS)
@@ -7682,7 +7569,9 @@ def test_a_sigterm_or_sighup_closes_the_runner_and_without_the_handler_orphans_t
             read = commandfile.read_command("s", command_id, sessions)
             if handled:
                 assert code == 0
-                assert commandrun.survivor(started) == commandrun.Gone(commandrun.NOTHING_ALIVE)
+                assert commandrun.survivor(started) == commandrun.Gone(
+                    commandrun.NOTHING_ALIVE + commandrun.NONE_TAGGED
+                )
                 assert read.end.outcome == Cancelled(CancelledBy.SHUTDOWN)  # type: ignore[union-attr]
             else:
                 assert code == -signum
@@ -7702,3 +7591,331 @@ def test_a_sigterm_or_sighup_closes_the_runner_and_without_the_handler_orphans_t
             deadline = time.monotonic() + 3
             while _marked(command_mark) and time.monotonic() < deadline:
                 time.sleep(0.02)
+
+
+# -- a command known by the tag its processes carry --------------------------------
+
+
+def _tagged_orphan(commands: _Commands, command_mark: str, script: str, old: str):  # type: ignore[no-untyped-def]
+    """
+    ``_orphan`` as this build's runner leaves one: the shell was started with
+    a value made for the run in its environment, and its record holds the
+    digest of that.
+    """
+    import subprocess
+
+    from pptmstr import commandfile, commandrun
+    from pptmstr.command import Command, Run
+    from tests.test_commandrun import MARK
+
+    value = commandrun.mint_tag()
+    orphan = subprocess.Popen(
+        ["/bin/sh", "-c", script],
+        start_new_session=True,
+        stdout=subprocess.PIPE,
+        env={**os.environ, MARK: command_mark, commandrun.COMMAND_TAG: value},
+    )
+    record = Command(
+        id=old,
+        asker=_CROOT,
+        asked="make install",
+        reason="",
+        expects="",
+        asked_at=1.0,
+        run=Run("make install", str(commands.shell), str(commands.cwd), 600, 2.0),
+    )
+    assert isinstance(commandfile.write_request(record, commands.root), commandfile.Written)
+    assert isinstance(commandfile.write_run(record, commands.root), commandfile.Written)
+    started = commandrun.started_now(orphan.pid, at=2.5, tag=commandrun.tag_digest(value))
+    assert isinstance(
+        commandfile.write_started(_CS, old, started, commands.root), commandfile.Written
+    )
+    assert orphan.stdout is not None
+    child = int(orphan.stdout.readline().split()[1])
+    orphan.stdout.close()
+    return orphan, started, child
+
+
+def test_a_command_whose_shell_died_owes_a_row_and_holds_its_session_by_its_tag(
+    commands: _Commands, command_mark: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The shell killed and what it started alive, found at a start. Reported
+    and not named, the session would be given a second command beside it.
+    """
+    import subprocess
+
+    from pptmstr import commandfile, commandrun
+    from pptmstr.command import EndUnknown, Exited, Survivor
+    from pptmstr.model import CommandRefusal
+    from pptmstr.ui import inbox
+
+    old = "cmd-20261012T101500Z-0000000dea11"
+    orphan, started, child = _tagged_orphan(
+        commands, command_mark, "sleep 1000 & echo child $!; wait", old
+    )
+    mark = LOG.snapshot()[1]
+    try:
+        os.kill(orphan.pid, signal.SIGKILL)
+        orphan.wait()
+        commands.app._restore_commands(commands.state, _CS)
+        commands.frame()
+
+        found = Survivor(
+            pid=orphan.pid,
+            pgid=orphan.pid,
+            members=1,
+            groups=(orphan.pid,),
+            marked=(child,),
+            shell=False,
+        )
+        held = commands.held(old)
+        assert held.end.outcome == EndUnknown(survivor=found) and held.end.unconfirmed is None
+        (owed,) = _owed_rows(commands)
+        assert owed.command.id == old and "its shell is gone, 1 of its processes" in owed.summary
+        assert f"kill -- -{orphan.pid}" in inbox.survivor_lines(found)
+        said_in_log = [text for _, text in _fleet_log_since(mark, "command")]
+        assert any(
+            old in text
+            and f"its shell (pid {orphan.pid}) is gone and 1 process(es) started with its"
+            " PPTMSTR_COMMAND are alive" in text
+            and text.endswith(f"To end it: kill -- -{orphan.pid}")
+            for text in said_in_log
+        ), said_in_log
+
+        blocked = commands.ask()
+        commands.run(blocked, "echo beside")
+        assert commands.held(blocked).run is None
+        assert commands.state.not_done == [
+            commands.app.NOT_RUN + CommandRefusal.ALREADY_RUNNING_IN_SESSION.sentence
+        ]
+        assert _looked(commands, old).startswith(commands.app.STILL_THERE)
+
+        kill = commandrun.kill_line(found)
+        assert subprocess.run(["/bin/sh", "-c", kill], check=False).returncode == 0
+        commands.until(lambda: commandrun.session_members(orphan.pid) == ())
+        said = _looked(commands, old)
+        why = commandrun.NOTHING_ALIVE + commandrun.NONE_TAGGED
+        assert said.startswith(commands.app.GONE + why + " (")
+        assert "setsid" not in said
+        commands.frame()
+        assert commands.held(old).unsupervised is None
+        assert [o.command.id for o in _owed_rows(commands)] == [blocked]
+        commands.run(blocked, "echo beside")
+        assert commands.ended(blocked).outcome == Exited(0)
+        assert commandfile.read_gone(_CS, old, commands.root) == why
+
+        # Seen gone, it is not looked for again, by its session or by its tag.
+        asked: list[object] = []
+        monkeypatch.setattr(commandrun, "survivor", lambda started: asked.append(started))
+        later = _later_window(commands, command_mark)
+        try:
+            later.app._restore_commands(later.state, _CS)
+            later.frame()
+            assert later.held(old).end.outcome == EndUnknown() and asked == []
+        finally:
+            later.close()
+    finally:
+        _end_orphan(orphan, command_mark)
+
+
+def test_a_command_with_only_a_process_outside_its_session_left_is_a_row_and_a_hold(
+    commands: _Commands, command_mark: str
+) -> None:
+    """
+    No end on record and something the command started still alive: it is
+    running unsupervised wherever that process went. Said as a remark on an
+    ended command, the session would be given another beside it.
+    """
+    from pptmstr.command import EndUnknown, Survivor
+    from pptmstr.ui import inbox
+
+    old = "cmd-20261012T101500Z-0000000dea12"
+    orphan, started, out = _tagged_orphan(
+        commands, command_mark, "setsid sleep 1000 >/dev/null 2>&1 & echo out $!", old
+    )
+    try:
+        orphan.wait()
+        commands.until(lambda: os.getsid(out) == out)
+        commands.app._restore_commands(commands.state, _CS)
+        commands.frame()
+        found = Survivor(
+            pid=orphan.pid, pgid=orphan.pid, members=0, groups=(out,), escaped=(out,), shell=False
+        )
+        assert commands.held(old).end.outcome == EndUnknown(survivor=found)
+        assert [o.command.id for o in _owed_rows(commands)] == [old]
+        lines = inbox.survivor_lines(found)
+        assert f"kill -- -{out}" in lines and f"1 outside it (pid {out})" in lines[1]
+        assert "gone.json" not in commands.files(old)
+    finally:
+        _end_orphan(orphan, command_mark)
+
+
+def test_a_look_that_found_nothing_says_what_it_could_not_have_found() -> None:
+    """
+    The line under a row after 'check again'. A record with no tag is found
+    by its session alone, and what left that session is then not looked for.
+    """
+    from pptmstr import app, commandrun
+
+    tagged = commandrun.Gone(commandrun.NUMBER_REUSED + commandrun.NONE_TAGGED)
+    assert app._looked_again(tagged) == app.GONE + tagged.why
+    untagged = commandrun.Gone(commandrun.NOTHING_ALIVE)
+    assert app._looked_again(untagged) == app.GONE + untagged.why + app.GONE_UNTAGGED
+    assert "setsid" in app.GONE_UNTAGGED
+    rebooted = commandrun.Gone(commandrun.ANOTHER_BOOT)
+    assert app._looked_again(rebooted) == app.GONE + commandrun.ANOTHER_BOOT
+    assert app._looked_again(commandrun.Unidentified(5, 1)) == app.UNIDENTIFIED
+    left = commandrun.Survivor(pid=5, pgid=5, members=1)
+    assert app._looked_again(left) == app.STILL_THERE
+
+
+def test_what_a_command_left_outside_its_session_is_logged_when_it_ends(
+    commands: _Commands,
+) -> None:
+    import dataclasses
+
+    from pptmstr import commandfile, commandrun
+    from pptmstr.command import End, Exited
+
+    first = commands.ask()
+    commands.run(first, "true")
+    commands.ended(first)
+    held = commands.held(first)
+    mark = LOG.snapshot()[1]
+    for escaped in ((4301,), (), None):
+        end = End(Exited(0), at=3.0, escaped=escaped)
+        commands.app._command_ended(commands.state)(
+            commandrun.Ended(
+                dataclasses.replace(held, end=end), commandfile.Written(Path("/end.json"))
+            )
+        )
+    said = [text for _, text in _fleet_log_since(mark, "command") if "ALIVE outside" in text]
+    assert said == [f"{first}: {End(Exited(0), at=3.0, escaped=(4301,)).escaped_remark}"]
+
+
+def test_the_row_is_handed_the_line_that_says_the_command_is_given_its_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    What the row lists is what was found at startup. A change made in the
+    runner and not found there is one the operator approves without seeing.
+    """
+    from pptmstr import app, commandrun
+
+    monkeypatch.delenv(commandrun.COMMAND_TAG, raising=False)
+    assert app._command_host().stripped_env[-1] == commandrun.TAG_SET
+    monkeypatch.setenv(commandrun.COMMAND_TAG, "cmd-outer")
+    assert app._command_host().stripped_env[-1] == commandrun.TAG_OVERWRITTEN
+    assert "cmd-outer" not in "".join(app._command_host().stripped_env)
+
+
+def _released(commands: _Commands, command_id: str) -> None:
+    """Press 'release' on a held row, as its second press does, and wait for it to apply."""
+    rows = commands.app._command_rows(commands.state)
+    assert rows.on_release is not None, "a held session has no way out but /proc"
+    rows.on_release(command_id)
+    commands.until(lambda: commands.held(command_id).unsupervised is None)
+
+
+def test_the_operator_can_release_a_session_a_live_command_holds_and_nothing_is_signalled(
+    commands: _Commands, command_mark: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    A command that started a server on purpose, from a pptmstr that died: the
+    operator wants it left running. Before this, only its processes ending let
+    go of the session. Released, the session runs another command, the
+    processes are untouched, the record says the operator released it and how
+    many were still found, and a later window neither raises the row nor looks.
+    """
+    import dataclasses
+
+    from pptmstr import commandfile, commandrun
+    from pptmstr.command import EndUnknown, Exited, Released
+
+    old, orphan, started = _orphan(commands, command_mark, "sleep 1000 & wait")
+    sent: list[tuple[int, int]] = []
+    try:
+        commands.until(lambda: len(commandrun.session_members(orphan.pid) or ()) == 2)
+        commands.app._restore_commands(commands.state, _CS)
+        commands.frame()
+        before = commands.held(old)
+        assert before.unsupervised is not None and before.unsupervised.alive == 2
+
+        monkeypatch.setattr(os, "kill", lambda pid, sig: sent.append((pid, sig)))
+        monkeypatch.setattr(os, "killpg", lambda pid, sig: sent.append((pid, sig)))
+        _released(commands, old)
+        monkeypatch.undo()
+
+        assert sent == []
+        assert len(commandrun.session_members(orphan.pid) or ()) == 2, "nothing was signalled"
+        end = commands.held(old).end
+        assert isinstance(end.outcome, EndUnknown) and end.outcome.survivor is None
+        released = end.outcome.released
+        assert isinstance(released, Released) and released.alive == 2
+        assert end == dataclasses.replace(before.end, outcome=EndUnknown(released=released))
+        assert _owed_rows(commands) == []
+        assert commands.files(old) == [
+            "released.json",
+            "request.json",
+            "run.json",
+            "started.json",
+        ]
+        assert commandfile.read_released(_CS, old, commands.root) == released
+
+        beside = commands.ask()
+        commands.run(beside, "echo beside")
+        assert commands.ended(beside).outcome == Exited(0)
+
+        later = _later_window(commands, command_mark)
+        try:
+
+            def no_look(_: object) -> object:
+                raise AssertionError("a released command is not looked for again")
+
+            monkeypatch.setattr(commandrun, "survivor", no_look)
+            later.app._restore_commands(later.state, _CS)
+            later.frame()
+            assert later.held(old).end.outcome == EndUnknown(released=released)
+            assert _owed_rows(later) == []
+        finally:
+            later.close()
+    finally:
+        try:
+            os.killpg(orphan.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        orphan.wait()
+
+
+def test_a_session_held_only_by_what_left_it_is_released_the_same_way(
+    commands: _Commands, command_mark: str
+) -> None:
+    """
+    The shell is gone and the one process left alive left its session: still
+    a row and a hold, and the same press lets go of it without touching it.
+    """
+    from pptmstr.command import EndUnknown
+
+    old = "cmd-20261012T101500Z-0000000dea13"
+    orphan, started, out = _tagged_orphan(
+        commands, command_mark, "setsid sleep 1000 >/dev/null 2>&1 & echo out $!", old
+    )
+    try:
+        orphan.wait()
+        commands.until(lambda: os.getsid(out) == out)
+        commands.app._restore_commands(commands.state, _CS)
+        commands.frame()
+        left = commands.held(old).unsupervised
+        assert left is not None and left.members == 0 and left.escaped == (out,)
+
+        _released(commands, old)
+
+        outcome = commands.held(old).end.outcome
+        assert isinstance(outcome, EndUnknown) and outcome.released is not None
+        assert outcome.released.alive == 1 and _owed_rows(commands) == []
+        assert commands.state.store.snapshot().unsupervised_command(_CS) is None
+        os.kill(out, 0)  # still there
+        assert "released.json" in commands.files(old) and "gone.json" not in commands.files(old)
+    finally:
+        _end_orphan(orphan, command_mark)

@@ -23,7 +23,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from pptmstr import cli_version, sandbox
+from pptmstr import cli_version, sandbox, templates
 from pptmstr.approval import Policy
 from pptmstr.model import LaunchSpec
 from pptmstr.model_catalog import DEFAULT_MODEL, FALLBACK_MODELS
@@ -639,13 +639,11 @@ def test_toggling_a_bookmark_does_not_move_the_row(
     assert [row.session_id for row in picker.rows] == ["a", "b", "c"]
 
 
-def _every_draft(tmp_path: Path) -> list[LauncherState]:
+def _unpicked_drafts(tmp_path: Path) -> list[LauncherState]:
     """
-    Every kind of ``LauncherState`` this file can build that has had anything to do
-    with a session: nothing listed, rows listed, a row picked on the picker by id
-    and by row, a pick whose directory is gone, one with no directory, one live in
-    this window's terms, a draft loaded back from a failed launch, and each of those
-    under every rung.
+    Every kind of ``LauncherState`` this file can build with no session picked:
+    nothing listed, rows listed, a pick made and undone, and a draft loaded back
+    from a failed launch, each under every rung.
     """
     there = tmp_path / "there"
     there.mkdir(exist_ok=True)
@@ -663,32 +661,28 @@ def _every_draft(tmp_path: Path) -> list[LauncherState]:
             listed.picker = _loaded(*rows)
             drafts += [bare, listed]
             for row in rows:
-                by_row = LauncherState(task=task, cwd=str(tmp_path), policy=policy)
-                by_row.picker = _loaded(*rows)
-                by_row.picker.pick(row, by_row.cwd)
-                by_id = LauncherState(task=task, cwd=str(tmp_path), policy=policy, brief="/b")
-                by_id.picker = _loaded(*rows)
-                by_id.picker.select(row.session_id, by_id.cwd)
-                assert by_row.picker.selected == by_id.picker.selected == row.session_id
+                undone = LauncherState(task=task, cwd=str(tmp_path), policy=policy)
+                undone.picker = _loaded(*rows)
+                undone.picker.pick(row, undone.cwd)
+                undone.picker.pick(row, undone.cwd)
                 restored = LauncherState(cwd=str(tmp_path))
                 restored.picker = _loaded(*rows)
-                restored.picker.pick(row, restored.cwd)
-                restored.report_failure(by_row.draft(), "it did not start")
+                restored.report_failure(bare.draft(), "it did not start")
                 assert restored.task == task
-                drafts += [by_row, by_id, restored]
+                drafts += [undone, restored]
     return drafts
 
 
-def test_no_draft_this_modal_can_hold_builds_a_spec_that_resumes(tmp_path: Path) -> None:
+def test_a_draft_with_nothing_picked_never_resumes_whatever_the_list_holds(
+    tmp_path: Path,
+) -> None:
     """
-    The property the resume form rests on: there is one way to resume a session and
-    this modal is not it. A spec from here that named a session would continue it
-    under New Task's team, model and task as though it were new -- so neither
-    ``spec`` nor ``press`` can produce one, whatever the session list holds and
-    whatever was picked on it, and the launch runs where the field says.
+    A listing is not a pick, and neither is a pick that was undone. Such a draft
+    starts a new session where the field says, and asking it for a resume is
+    refused and not answered with a guess.
     """
     field = str(tmp_path.resolve())
-    drafts = _every_draft(tmp_path)
+    drafts = _unpicked_drafts(tmp_path)
     assert len(drafts) > 50
 
     for state in drafts:
@@ -698,23 +692,333 @@ def test_no_draft_this_modal_can_hold_builds_a_spec_that_resumes(tmp_path: Path)
         assert state.launch_directory() == launcher.FieldDirectory(str(tmp_path))
         pressed = state.press()
         assert pressed is None or (pressed.resume is None and pressed.message is None)
+        with pytest.raises(ValueError):
+            state.resumed()
 
 
-def test_the_draft_handed_out_with_a_launch_has_nowhere_to_carry_a_session(
+def _picked(
+    tmp_path: Path, row: SessionRow, *, task: str = "  carry on  ", **fields: object
+) -> LauncherState:
+    """A draft with ``row`` picked, its field naming ``tmp_path``, and a CLI that answered."""
+    state = LauncherState(task=task, cwd=str(tmp_path), **fields)  # type: ignore[arg-type]
+    state.picker = _loaded(row)
+    state.picker.pick(row, state.cwd)
+    _settled(state)
+    return state
+
+
+def test_a_picked_session_is_resumed_from_new_task_with_the_box_as_its_message(
     tmp_path: Path,
 ) -> None:
     """
-    The draft is what a failed launch is restored from, so a session named on it
-    would come back into the fields behind a notice. It has no such field.
+    The route the operator asked for: the session picked in New Task is continued
+    by New Task's own launch. The box is the message and never the title, the
+    directory is the row's and not the field's, and the model, team, brief and cap
+    are the ones on this modal.
     """
-    import dataclasses
+    main, worktree = _two_trees(tmp_path)
+    state = LauncherState(
+        task="  carry on\nfrom the lexer  ",
+        cwd=main,
+        brief=" /some/brief ",
+        model=FALLBACK_MODELS[1],
+        template_index=1,
+        policy=Policy.PERMISSIVE,
+        subagent_cap=2,
+    )
+    row = _row("sess-42", cwd=worktree)
+    state.picker = _loaded(row)
+    state.picker.pick(row, state.cwd)
+    from pptmstr import templates
 
-    names = {f.name for f in dataclasses.fields(launcher.Draft)}
-    assert names == {"task", "cwd", "brief", "model", "template_index", "policy", "subagent_cap"}
-    for state in _every_draft(tmp_path):
-        assert not any(
-            isinstance(value, SessionRow) for value in dataclasses.astuple(state.draft())
-        )
+    assert state.launch_hold() is None
+    spec = state.press()
+
+    assert spec == LaunchSpec(
+        task="summary for sess-42",
+        task_is_label=True,
+        message="carry on\nfrom the lexer",
+        resume="sess-42",
+        cwd=worktree,
+        session_base=worktree,
+        model=FALLBACK_MODELS[1],
+        template=templates.names()[1],
+        brief="/some/brief",
+        policy=Policy.PERMISSIVE,
+        containment=None,
+        subagent_cap=2,
+    )
+    assert state.resumed() == spec
+
+
+def test_a_picked_draft_has_no_new_session_spec(tmp_path: Path) -> None:
+    """
+    ``spec`` is a new session's. Built for a picked draft it would start one whose
+    task is the message meant for the picked session, so it refuses.
+    """
+    main, worktree = _two_trees(tmp_path)
+    state = _picked(Path(main), _row("a", cwd=worktree))
+    with pytest.raises(ValueError):
+        state.spec()
+    pressed = state.press()
+    assert pressed is not None and pressed.resume == "a"
+
+
+def test_a_picked_session_whose_directory_is_gone_is_held_under_every_rung(
+    tmp_path: Path,
+) -> None:
+    """
+    The field names a tree the conversation was not about. Nothing is started
+    there, and nothing is started at all.
+    """
+    for policy in launcher.POLICIES:
+        state = _picked(tmp_path, _row("a", cwd=str(tmp_path / "gone")), policy=policy)
+        assert state.launch_hold() == launcher._HOLD_GONE
+        assert state.resumed() == launcher.ResumeHeld(launcher._HOLD_GONE)
+        assert state.press() is None
+
+
+def test_a_picked_session_that_recorded_no_directory_runs_where_the_field_says(
+    tmp_path: Path,
+) -> None:
+    """
+    The one screen that can recover such a session does not refuse it: there is no
+    recorded tree to be faithful to, and the field is on screen to be read.
+    """
+    state = _picked(tmp_path, _row("a", cwd=None))
+    assert state.launch_directory() == launcher.UnrecordedDirectory(str(tmp_path))
+    assert state.launch_hold() is None
+    pressed = state.press()
+    assert pressed is not None
+    assert (pressed.resume, pressed.cwd) == ("a", str(tmp_path.resolve()))
+
+
+def test_a_refused_rung_holds_a_picked_session_and_is_never_downgraded(
+    tmp_path: Path,
+) -> None:
+    """
+    A new session in pptmstr's own checkout is started under the ordinary gate and
+    told so. A resume there is held: its directory is not a field to correct, so
+    the lower rung is the operator's to choose. Either way nothing is contained
+    in that directory.
+    """
+    row = _row("a", cwd=INSIDE_THE_CHECKOUT)
+    held = _picked(tmp_path, row, task=A_PREMISE, policy=Policy.AUTONOMOUS)
+    refused = launcher.RESUME_HOLD_REFUSED.format(rung="autonomous")
+
+    assert held.granted_policy is Policy.AUTONOMOUS, "asked for, and not seated lower"
+    assert held.launch_hold() == refused
+    assert held.resumed() == launcher.ResumeHeld(refused)
+    assert held.press() is None
+    shown = held.containment_refusal()
+    assert shown is not None and launcher.REFUSAL_HOLDS in shown
+    assert launcher.REFUSAL_DOWNGRADES not in shown
+
+    # The same directory under a rung that needs no containment is resumed.
+    for policy in (Policy.STRICT, Policy.PERMISSIVE):
+        plain = _picked(tmp_path, row, policy=policy)
+        assert plain.launch_hold() is None
+        pressed = plain.press()
+        assert pressed is not None and pressed.containment is None
+        assert pressed.policy is policy and pressed.resume == "a"
+
+    # And the new session beside it, for the contrast the rule is about.
+    fresh = LauncherState(task=A_PREMISE, cwd=INSIDE_THE_CHECKOUT, policy=Policy.AUTONOMOUS)
+    _settled(fresh)
+    downgraded = fresh.press()
+    assert downgraded is not None
+    assert downgraded.policy is Policy.STRICT and downgraded.containment is None
+    told = fresh.containment_refusal()
+    assert told is not None and launcher.REFUSAL_DOWNGRADES in told
+
+
+def test_a_picked_session_under_the_top_rung_is_contained_and_waits_for_the_cli(
+    tmp_path: Path,
+) -> None:
+    """
+    Both or neither: the top rung is granted with the containment or not at all.
+    A one-line message is enough, which a new session's task is not.
+    """
+    main, worktree = _two_trees(tmp_path)
+    row = _row("a", cwd=worktree)
+    state = LauncherState(task="carry on", cwd=main, policy=Policy.AUTONOMOUS)
+    state.picker = _loaded(row)
+    state.picker.pick(row, state.cwd)
+
+    assert not state.premise_is_thin
+    assert state.launch_hold() == launcher.RESUME_HOLD_CHECKING
+    assert state.press() is None
+
+    _settled(state)
+    assert state.launch_hold() is None
+    pressed = state.press()
+    assert pressed is not None and pressed.policy is Policy.AUTONOMOUS
+    assert pressed.containment == sandbox.containment_settings()
+    assert (pressed.resume, pressed.cwd, pressed.message) == ("a", worktree, "carry on")
+
+    below = LauncherState(task="carry on", cwd=main, policy=Policy.AUTONOMOUS)
+    below.picker = _loaded(row)
+    below.picker.pick(row, below.cwd)
+    worker = below.version_gate.request(prober=_below)
+    assert worker is not None
+    worker.join(timeout=5.0)
+    below.version_gate.poll()
+    assert below.launch_hold() == launcher.RESUME_HOLD_CLI
+    assert below.press() is None
+
+
+def test_a_contained_resume_pressed_under_another_reading_starts_nothing(
+    tmp_path: Path,
+) -> None:
+    """
+    The section above the button was drawn from a remembered answer about the
+    directory. A press that finds a different one was made under a description of
+    some other resume -- and a press nothing was drawn for agrees with nothing.
+    """
+    main, worktree = _two_trees(tmp_path)
+    row = _row("a", cwd=worktree)
+
+    unread = LauncherState(task="carry on", cwd=main, policy=Policy.AUTONOMOUS)
+    unread.picker = _loaded(row)
+    unread.picker.pick(row, unread.cwd)
+    _settled(unread)
+    assert unread.press() is None, "nothing was remembered, so nothing was shown"
+    assert unread.press() is not None, "and that press left its reading to agree with"
+
+    moved = _picked(Path(main), row, policy=Policy.AUTONOMOUS)
+    assert moved.launch_hold() is None
+    moved._refusal = "what the screen said, and no longer what is found"
+    assert moved.press() is None
+    assert moved.containment_refusal() is None, "the next frame draws what the press found"
+
+    # An uncontained resume asks the directory nothing it could have misread.
+    plain = LauncherState(task="carry on", cwd=main)
+    plain.picker = _loaded(row)
+    plain.picker.pick(row, plain.cwd)
+    assert plain.press() is not None
+
+
+def test_the_one_rule_for_a_resumes_rung_is_what_both_surfaces_ask() -> None:
+    """
+    ``resume_gate_hold`` and ``resume_spec`` are the only places a resume's rung is
+    granted, and the resume form reaches its spec through them: read off the two
+    modules' source, so a second ``LaunchSpec(resume=...)`` built beside them, or a
+    form that stopped asking, fails here.
+    """
+    import ast
+    import inspect
+
+    from pptmstr.ui import resume_form
+
+    def builders(module: object) -> list[str]:
+        """The functions of ``module`` that construct a ``LaunchSpec`` naming a resume."""
+        found = []
+        for node in ast.walk(ast.parse(inspect.getsource(module))):  # type: ignore[arg-type]
+            if not isinstance(node, ast.FunctionDef):
+                continue
+            for call in ast.walk(node):
+                if (
+                    isinstance(call, ast.Call)
+                    and isinstance(call.func, ast.Name)
+                    and call.func.id == "LaunchSpec"
+                    and any(k.arg == "resume" for k in call.keywords)
+                ):
+                    found.append(node.name)
+        return found
+
+    assert builders(launcher) == ["resume_spec"]
+    assert builders(resume_form) == []
+    form = inspect.getsource(resume_form)
+    assert "launcher.resume_spec(" in inspect.getsource(resume_form.press)
+    assert "launcher.resume_gate_hold(" in inspect.getsource(resume_form.ResumeForm.hold)
+    assert "containment_settings" not in form
+    for user in (LauncherState.launch_hold, launcher.resume_spec):
+        assert "resume_gate_hold(" in inspect.getsource(user)
+    assert "resume_spec(" in inspect.getsource(LauncherState.resumed)
+
+    # And the rule itself, over every rung and every answer.
+    answered, unanswered = launcher.VersionGate(), launcher.VersionGate()
+    worker = answered.request(prober=_meets)
+    assert worker is not None
+    worker.join(timeout=5.0)
+    answered.poll()
+    cannot = launcher.VersionGate()
+    worker = cannot.request(prober=_below)
+    assert worker is not None
+    worker.join(timeout=5.0)
+    cannot.poll()
+    for policy in launcher.POLICIES:
+        needs = policy is Policy.AUTONOMOUS
+        refused = launcher.RESUME_HOLD_REFUSED.format(rung=policy.value)
+        hold = launcher.resume_gate_hold
+        assert hold(policy, None, answered) is None
+        assert hold(policy, "no", answered) == (refused if needs else None)
+        assert hold(policy, "no", unanswered) == (refused if needs else None)
+        assert hold(policy, None, unanswered) == (launcher.RESUME_HOLD_CHECKING if needs else None)
+        assert hold(policy, None, cannot) == (launcher.RESUME_HOLD_CLI if needs else None)
+        for refusal, gate in (("no", answered), (None, unanswered), (None, cannot)):
+            built = launcher.resume_spec(
+                session_id="a",
+                cwd="/srv/repo",
+                policy=policy,
+                refusal=refusal,
+                gate=gate,
+                task="t",
+                task_is_label=False,
+                message="m",
+                model=DEFAULT_MODEL,
+                template=None,
+                brief=None,
+                subagent_cap=None,
+            )
+            if needs:
+                assert isinstance(built, launcher.ResumeHeld)
+            else:
+                assert isinstance(built, LaunchSpec) and built.containment is None
+
+
+def test_a_failed_resume_comes_back_as_a_resume_of_the_same_session(
+    tmp_path: Path,
+) -> None:
+    """
+    The press clears the pick with the task. A failure handed back without it
+    would put the message into the box of a draft that starts a new session, so
+    the draft carries the row and the restore picks it again.
+    """
+    main, worktree = _two_trees(tmp_path)
+    row = _row("a", cwd=worktree)
+    state = _picked(Path(main), row, task="carry on")
+    pressed = state.press()
+    draft = state.draft()
+    assert pressed is not None and draft.picked == row
+
+    state.launched()
+    assert state.picker.picked is None and state.task == ""
+    assert state.draft() == launcher.left_by_launch(draft)
+    after = state.press()
+    assert after is not None and after.resume is None
+
+    state.report_failure(draft, "it did not start")
+    assert state.task == "carry on" and state.picker.picked == row
+    assert state.failure_loaded
+    again = state.press()
+    assert again is not None and (again.resume, again.message) == ("a", "carry on")
+
+    # Restored over fields that already have that session picked, it stays picked:
+    # picking the row that is the pick is how a pick is undone, and a restore is not.
+    state.failures.clear()
+    state.task = "something typed since"
+    assert state.picker.picked == row
+    state.report_failure(draft, "nor this time")
+    state.restore_failed()
+    assert state.task == "carry on" and state.picker.picked == row
+
+    # A new session's failure restored over a pick clears it: the draft is whole.
+    fresh = LauncherState(task="a new task", cwd=main).draft()
+    state.failures.clear()
+    state.report_failure(fresh, "nor did that")
+    state.restore_failed()
+    assert state.task == "a new task" and state.picker.picked is None
 
 
 def test_picking_nothing_leaves_todays_fresh_launch_spec_untouched(tmp_path: Path) -> None:
@@ -1001,6 +1305,21 @@ def _counted(answer: Callable[[], cli_version.FloorCheck]) -> tuple[launcher.Pro
     return prober, calls
 
 
+def _measures(fake: MagicMock) -> None:
+    """
+    The numbers the modal does arithmetic on: how tall the display is and where the
+    cursor stands. ``draw`` bounds its body with them, and a bare mock compares
+    with nothing.
+    """
+    fake.FLT_MAX = 3.0e38
+    fake.get_main_viewport.return_value.work_size.y = 900.0
+    fake.get_cursor_pos.return_value.y = 0.0
+    fake.get_style.return_value.window_padding.y = 8.0
+    fake.get_style.return_value.display_safe_area_padding.y = 3.0
+    fake.get_style.return_value.item_spacing.y = 4.0
+    fake.get_frame_height_with_spacing.return_value = 24.0
+
+
 def _run_draw(
     monkeypatch: pytest.MonkeyPatch,
     state: LauncherState,
@@ -1016,7 +1335,7 @@ def _run_draw(
     live: frozenset[str] = frozenset(),
     expand: bool = False,
     click_row: int | None = None,
-    picks: list[SessionRow] | None = None,
+    recorder: launcher.Recorder = lambda session_id: None,
 ) -> tuple[MagicMock, list[LaunchSpec]]:
     """
     Run ``draw`` against a fake imgui and hand back the fake and what was launched.
@@ -1038,9 +1357,8 @@ def _run_draw(
     ``submit`` is Ctrl+Enter in the task box, which reaches the launch branch without
     going through the button at all.
 
-    ``expand`` opens the session list, ``click_row`` is the index of the row in it
-    that answers as clicked, and ``picks`` collects what ``on_pick_resume`` is
-    handed. A pick with nowhere to be collected fails the test that caused it.
+    ``expand`` opens the session list and ``click_row`` is the index of the row in
+    it that answers as clicked.
     """
     if settle:
         worker = state.version_gate.request(prober=prober)
@@ -1067,6 +1385,7 @@ def _run_draw(
     # No window from an earlier frame, so ``draw`` has nothing to move back into
     # view; a bare mock here would be a window whose position cannot be compared.
     fake.internal.find_window_by_name.return_value = None
+    _measures(fake)
 
     fake_widgets = MagicMock()
     fake_widgets.ellipsis.side_effect = lambda text, width: text
@@ -1080,6 +1399,14 @@ def _run_draw(
     # rung's grant is named would have passed against every rung equally.
     fake_widgets.gate_adds.side_effect = widgets.gate_adds
     fake_widgets.gate_parks.side_effect = widgets.gate_parks
+    # The values a draw builds are the real ones, so what was said can be read off
+    # the calls; the drawing of them is recorded and not done.
+    fake_widgets.Help = widgets.Help
+    fake_widgets.Notice = widgets.Notice
+    fake_widgets.Tone = widgets.Tone
+    fake_widgets.path_tail.side_effect = widgets.path_tail
+    fake_widgets.help_showing.return_value = False
+    fake.widgets = fake_widgets
 
     monkeypatch.setattr(launcher, "imgui", fake)
     monkeypatch.setattr(launcher, "widgets", fake_widgets)
@@ -1091,10 +1418,6 @@ def _run_draw(
         if drafts is not None:
             drafts.append(draft)
 
-    def on_pick_resume(row: SessionRow) -> None:
-        assert picks is not None, f"a row was handed over that no test asked for: {row}"
-        picks.append(row)
-
     state.is_open = True
     launcher.draw(
         state,
@@ -1102,22 +1425,43 @@ def _run_draw(
         queued=0,
         cap=4,
         launch=launch,
-        on_pick_resume=on_pick_resume,
         wrap=True,
         scanner=lambda cwd: ((), {}),
         prober=prober,
         subagent_cap=subagent_cap,
         live=live,
+        recorder=recorder,
     )
     return fake, launched
 
 
 def _lines(fake: MagicMock) -> list[str]:
-    """Everything the frame put into words, whatever colour it used to do it."""
+    """
+    Everything the frame put into words on screen, whatever colour it used to do
+    it: what is drawn without a question mark being pressed.
+    """
     lines = [str(a) for call in fake.text_colored.call_args_list for a in call.args[1:]]
     lines += [str(a) for call in fake.text_disabled.call_args_list for a in call.args]
     lines += [str(call.args[0]) for call in fake.checkbox.call_args_list]
+    lines += [call.args[0].line for call in fake.widgets.notice.call_args_list]
     return lines
+
+
+def _notices(fake: MagicMock) -> list[widgets.Notice]:
+    """Every one line the frame drew through ``widgets.notice``, as the value it was."""
+    return [call.args[0] for call in fake.widgets.notice.call_args_list]
+
+
+def _helps(fake: MagicMock) -> list[widgets.Help]:
+    """Every explanation the frame put behind a question mark."""
+    helps = [said.help for said in _notices(fake) if said.help is not None]
+    helps += [widgets.Help(*call.args) for call in fake.widgets.help_mark.call_args_list]
+    return helps
+
+
+def _behind(fake: MagicMock) -> list[str]:
+    """Every paragraph behind a question mark on the frame: one press away."""
+    return [paragraph for said in _helps(fake) for paragraph in said.paragraphs]
 
 
 def _drawn(
@@ -1140,6 +1484,40 @@ def _drawn(
         subagent_cap=subagent_cap,
     )
     return _lines(fake), launched
+
+
+def _explained(
+    monkeypatch: pytest.MonkeyPatch,
+    state: LauncherState,
+    *,
+    prober: launcher.Prober = _meets,
+    settle: bool = True,
+    subagent_cap: int | None = None,
+) -> tuple[list[str], list[str]]:
+    """
+    What one frame draws, as ``_drawn`` has it, and beside it what is behind the
+    frame's question marks.
+    """
+    fake, _ = _run_draw(monkeypatch, state, prober=prober, settle=settle, subagent_cap=subagent_cap)
+    return _lines(fake), _behind(fake)
+
+
+def _told(
+    monkeypatch: pytest.MonkeyPatch,
+    state: LauncherState,
+    *,
+    prober: launcher.Prober = _meets,
+    settle: bool = True,
+    subagent_cap: int | None = None,
+) -> tuple[list[str], list[LaunchSpec]]:
+    """
+    What the operator is told on one frame by pressing its question marks: the
+    paragraphs behind them, in place of what ``_drawn`` says is on the screen.
+    """
+    fake, launched = _run_draw(
+        monkeypatch, state, prober=prober, settle=settle, subagent_cap=subagent_cap
+    )
+    return _behind(fake), launched
 
 
 # -- what the draft turns into -----------------------------------------------------
@@ -1315,11 +1693,19 @@ def test_the_dial_is_drawn_whether_or_not_it_is_on(
     here, and on ``high_contrast`` the danger role moves toward the text role.
     """
     for rung in Policy:
-        fake, _ = _run_draw(monkeypatch, LauncherState(task="t", cwd=str(tmp_path), policy=rung))
+        fake, _ = _run_draw(
+            monkeypatch, LauncherState(task=A_PREMISE, cwd=str(tmp_path), policy=rung)
+        )
         assert "gate" in [call.args[0] for call in fake.combo.call_args_list], rung
-        # Not the control alone: what the chosen rung still holds is beside it at every
-        # rung, so the posture is readable without working it out from a one-word name.
-        assert any("still parks" in line for line in _lines(fake)), rung
+        # Not the control alone: what the chosen rung adds is the line under it, and
+        # the top rung's is the alarm, so the posture is readable without working it
+        # out from a one-word name. What it still holds is one press away.
+        under = (
+            launcher.LOUD_LINE if rung is Policy.AUTONOMOUS else launcher.dial_text(rung, rung).adds
+        )
+        assert under in _lines(fake), rung
+        assert any("still parks" in paragraph for paragraph in _behind(fake)), rung
+        assert not any("still parks" in line for line in _lines(fake)), rung
 
 
 def test_the_dial_does_not_understate_what_the_top_rung_grants(
@@ -1331,17 +1717,20 @@ def test_the_dial_does_not_understate_what_the_top_rung_grants(
     and been given every tool the gate would have held. ``AUTONOMOUS`` releases the
     whole of ``approval._REVIEW``, so the screen has to name more than one kind.
 
-    Asserted against the line drawn *beside the dial*, which is read at the moment of
-    choosing, rather than against the containment detail below it, which is read after.
-    That line is derived from the classifier by ``widgets.gate_adds`` rather than
-    written out, which is what stops it understating a rung that later grows: the
-    former hand-written label could be widened by an edit to ``approval.py`` alone.
+    The line under the dial is the alarm, and it names two kinds -- files written
+    and commands run -- in one sentence the operator cannot miss. The whole of what
+    the rung adds is behind its question mark, derived from the classifier by
+    ``widgets.gate_adds`` rather than written out, which is what stops it
+    understating a rung that later grows: the former hand-written label could be
+    widened by an edit to ``approval.py`` alone.
     """
-    lines, _ = _drawn(
+    lines, behind = _explained(
         monkeypatch,
         LauncherState(task=A_PREMISE, cwd=str(tmp_path), policy=Policy.AUTONOMOUS),
     )
-    adds = next(line for line in lines if line.startswith("adds "))
+    assert launcher.LOUD_LINE in lines
+    assert "write files" in launcher.LOUD_LINE and "run commands" in launcher.LOUD_LINE
+    adds = next(paragraph for paragraph in behind if paragraph.startswith("adds "))
     # More than one kind, and none of them the single tool the old label named.
     assert "writes" in adds and "spawns" in adds and "messages" in adds
 
@@ -1357,12 +1746,12 @@ def test_the_middle_rung_is_not_described_as_the_top_one(
     The shell probes are the discriminating pair: a rung that admitted both would be
     admitting commands that act, which is the claim ``shellscan`` exists to refuse.
     """
-    lines, _ = _drawn(
+    lines, behind = _explained(
         monkeypatch,
         LauncherState(task=A_PREMISE, cwd=str(tmp_path), policy=Policy.PERMISSIVE),
     )
     adds = next(line for line in lines if line.startswith("adds "))
-    parks = next(line for line in lines if line.startswith("still parks "))
+    parks = next(paragraph for paragraph in behind if paragraph.startswith("still parks "))
     assert "shell reads" in adds
     assert "shell that writes" in parks
     for held in ("writes", "spawns", "messages", "the web"):
@@ -1383,14 +1772,15 @@ def test_an_engaged_mode_says_what_it_releases_and_what_it_does_not(
     ``WebFetch``, all of which run in the CLI process. The absence is asserted because a
     reassurance is the kind of line that gets added back by someone filling out a screen.
     """
-    lines, _ = _drawn(
+    lines, behind = _explained(
         monkeypatch, LauncherState(task=A_PREMISE, cwd=str(tmp_path), policy=Policy.AUTONOMOUS)
     )
-    released = next(line for line in lines if "without asking" in line)
+    assert launcher.LOUD_LINE in lines
+    released = next(paragraph for paragraph in behind if paragraph.startswith("on -- "))
     assert "writes files" in released and "spawns sub-agents" in released
     assert "never heard of is still not released" in released
-    assert any(sandbox.ALLOWED_DOMAIN in line for line in lines)
-    assert not any("credential" in line for line in lines)
+    assert any(sandbox.ALLOWED_DOMAIN in paragraph for paragraph in behind)
+    assert not any("credential" in line for line in [*lines, *behind])
 
 
 def test_the_engaged_mode_names_the_boundary_the_released_tools_do_not_get(
@@ -1406,10 +1796,10 @@ def test_the_engaged_mode_names_the_boundary_the_released_tools_do_not_get(
     containment and omits the hole in it, which reads as a stronger guarantee than the
     one being offered.
     """
-    lines, _ = _drawn(
+    _, behind = _explained(
         monkeypatch, LauncherState(task=A_PREMISE, cwd=str(tmp_path), policy=Policy.AUTONOMOUS)
     )
-    uncontained = [line for line in lines if "not contained" in line]
+    uncontained = [paragraph for paragraph in behind if "not contained" in paragraph]
     assert len(uncontained) == 1
     assert "WebFetch" in uncontained[0] and "WebSearch" in uncontained[0]
     assert "CLI process" in uncontained[0]
@@ -1428,12 +1818,12 @@ def test_the_two_boundaries_are_named_as_two_mechanisms(
     fail differently and one of them is a ``PreToolUse`` decision they can see in the
     transcript.
     """
-    lines, _ = _drawn(
-        monkeypatch, LauncherState(task="t", cwd=str(tmp_path), policy=Policy.AUTONOMOUS)
+    _, behind = _explained(
+        monkeypatch, LauncherState(task=A_PREMISE, cwd=str(tmp_path), policy=Policy.AUTONOMOUS)
     )
-    sandboxed = next(line for line in lines if "contained:" in line and "Bash" in line)
+    sandboxed = next(p for p in behind if "contained:" in p and "Bash" in p)
     assert sandbox.ALLOWED_DOMAIN in sandboxed
-    gated = next(line for line in lines if "held to that same directory" in line)
+    gated = next(p for p in behind if "held to that same directory" in p)
     assert "CLI process" in gated and "refused" in gated
 
 
@@ -1445,8 +1835,8 @@ def test_the_uncontained_edge_is_not_said_when_the_mode_is_off(
     to warn about -- the operator is the bound. A warning shown at every policy would
     train the eye past it by the time it means something.
     """
-    lines, _ = _drawn(monkeypatch, LauncherState(task="t", cwd=str(tmp_path)))
-    assert not any("not contained" in line for line in lines)
+    lines, behind = _explained(monkeypatch, LauncherState(task="t", cwd=str(tmp_path)))
+    assert not any("not contained" in line for line in [*lines, *behind])
 
 
 # -- the cap, which is the only bound the mode cannot widen -------------------------
@@ -1462,12 +1852,12 @@ def test_the_cap_in_force_is_on_screen_when_the_mode_is_engaged(
     ``driver._gate_tool_use``, which is what makes it the one bound the policy cannot
     widen, and that is the part of it worth a sentence rather than just a figure.
     """
-    lines, _ = _drawn(
+    _, behind = _explained(
         monkeypatch,
         LauncherState(task=A_PREMISE, cwd=str(tmp_path), policy=Policy.AUTONOMOUS),
         subagent_cap=8,
     )
-    capped = next(line for line in lines if "sub-agents are capped" in line)
+    capped = next(p for p in behind if "sub-agents are capped" in p)
     assert "8" in capped
     assert "cannot widen" in capped
 
@@ -1497,8 +1887,10 @@ def test_the_cap_is_not_shown_for_a_launch_that_is_not_taking_the_mode(
     chrome on the launch an operator makes a hundred times, and the point of putting it
     here is that it is surprising.
     """
-    lines, _ = _drawn(monkeypatch, LauncherState(task="t", cwd=str(tmp_path)), subagent_cap=8)
-    assert not any("sub-agents are capped" in line for line in lines)
+    lines, behind = _explained(
+        monkeypatch, LauncherState(task="t", cwd=str(tmp_path)), subagent_cap=8
+    )
+    assert not any("sub-agents are capped" in line for line in [*lines, *behind])
 
 
 # -- the cap an operator may resize for one launch ---------------------------------
@@ -1548,13 +1940,13 @@ def test_the_cap_on_screen_is_the_one_this_launch_would_get(
     and the operator cannot tell which is in force. The line has to follow the
     override, because the override is what the session will actually get.
     """
-    lines, _ = _drawn(
+    _, behind = _explained(
         monkeypatch,
         LauncherState(task=A_PREMISE, cwd=str(tmp_path), policy=Policy.AUTONOMOUS, subagent_cap=2),
         subagent_cap=8,
     )
 
-    capped = next(line for line in lines if "sub-agents are capped" in line)
+    capped = next(p for p in behind if "sub-agents are capped" in p)
     assert "2" in capped
     assert "8" not in capped
 
@@ -1712,13 +2104,15 @@ def test_a_refused_directory_says_so_where_the_dial_is(
     """
     A refusal the operator cannot see is a control that looks broken, and they will
     fight it -- ticking the box again, or concluding the feature does not work. The
-    reason is on screen beside the box that was ticked.
+    refusal is the line under the dial, and why is behind its question mark.
     """
-    lines, _ = _drawn(
+    lines, behind = _explained(
         monkeypatch,
         LauncherState(task=A_PREMISE, cwd=INSIDE_THE_CHECKOUT, policy=Policy.AUTONOMOUS),
     )
-    assert any("refused" in line and "checkout" in line for line in lines)
+    assert launcher.REFUSED_RUNS_LOWER.format(asked="autonomous", granted="strict") in lines
+    assert any("refused" in p and "checkout" in p for p in behind)
+    assert not any("checkout" in line for line in lines)
 
 
 def test_the_modal_launches_the_mode_it_was_showing(
@@ -1843,22 +2237,19 @@ def test_a_cli_below_the_floor_holds_the_launch_and_keeps_the_draft(
     state = LauncherState(task=A_PREMISE, cwd=str(tmp_path), policy=Policy.AUTONOMOUS)
 
     fake, launched = _run_draw(monkeypatch, state, click_launch=True, prober=_below)
-    lines = _lines(fake)
+    lines, behind = _lines(fake), _behind(fake)
 
     assert launched == []
     assert state.task == A_PREMISE
     # And the mode is still ticked, so correcting the machine does not also mean
     # remembering what was asked for.
     assert state.policy is Policy.AUTONOMOUS
-    assert any("2.1.9" in line and cli_version.SANDBOX_FLOOR in line for line in lines)
+    assert launcher.CLI_HOLDS.format(rung="autonomous", what="launch") in lines
+    assert any("2.1.9" in p and cli_version.SANDBOX_FLOOR in p for p in behind)
     # Both halves of the refusal: the button is visibly dead, and something beside it
     # says why a press did nothing.
     assert fake.begin_disabled.called
-    assert any(
-        launcher._HOLD_REFUSED in str(a)
-        for call in fake.text_colored.call_args_list
-        for a in call.args[1:]
-    )
+    assert launcher.hold_notice(launcher._HOLD_REFUSED) in _notices(fake)
 
 
 def test_a_cli_whose_version_cannot_be_read_is_refused_as_readily(
@@ -1873,11 +2264,11 @@ def test_a_cli_whose_version_cannot_be_read_is_refused_as_readily(
     """
     state = LauncherState(task=A_PREMISE, cwd=str(tmp_path), policy=Policy.AUTONOMOUS)
 
-    lines, launched = _drawn(monkeypatch, state, click_launch=True, prober=_unreadable)
+    fake, launched = _run_draw(monkeypatch, state, click_launch=True, prober=_unreadable)
 
     assert launched == []
     assert state.task == A_PREMISE
-    assert any("could not be read" in line and "no claude on PATH" in line for line in lines)
+    assert any("could not be read" in p and "no claude on PATH" in p for p in _behind(fake))
 
 
 def test_a_cli_that_clears_the_floor_launches_the_mode_it_was_showing(
@@ -1889,12 +2280,13 @@ def test_a_cli_that_clears_the_floor_launches_the_mode_it_was_showing(
     """
     state = LauncherState(task=A_PREMISE, cwd=str(tmp_path), policy=Policy.AUTONOMOUS)
 
-    lines, launched = _drawn(monkeypatch, state, click_launch=True, prober=_meets)
+    fake, launched = _run_draw(monkeypatch, state, click_launch=True, prober=_meets)
+    said = [*_lines(fake), *_behind(fake)]
 
     assert [s.policy for s in launched] == [Policy.AUTONOMOUS]
     assert launched[0].containment == sandbox.containment_settings()
-    assert not any("refused on this machine" in line for line in lines)
-    assert not any(launcher._HOLD_LINE in line for line in lines)
+    assert not any("refused on this machine" in line for line in said)
+    assert not any(launcher._HOLD_LINE in line for line in said)
 
 
 def test_the_launch_is_held_until_the_version_has_been_read(
@@ -1915,14 +2307,16 @@ def test_the_launch_is_held_until_the_version_has_been_read(
 
     state = LauncherState(task=A_PREMISE, cwd=str(tmp_path), policy=Policy.AUTONOMOUS)
     try:
-        lines, launched = _drawn(monkeypatch, state, click_launch=True, prober=slow, settle=False)
+        fake, launched = _run_draw(monkeypatch, state, click_launch=True, prober=slow, settle=False)
 
         assert launched == []
         assert state.task == A_PREMISE
         assert state.launch_hold() == launcher._HOLD_CHECKING
-        # Not silence: the section says what is being waited on, and says the launch is
-        # waiting for it rather than leaving a dead button unexplained.
-        assert any(launcher._HOLD_LINE in line for line in lines)
+        # Not silence: the line beside the button says the launch is waiting, and
+        # what it is waiting on is behind the marks of that line and the alarm's.
+        assert launcher.HOLD_LINES[launcher._HOLD_CHECKING] in _lines(fake)
+        assert launcher._HOLD_CHECKING in _behind(fake)
+        assert any(launcher._HOLD_LINE in p for p in _behind(fake))
     finally:
         release.set()
 
@@ -1963,9 +2357,12 @@ def test_the_check_is_started_and_landed_by_the_draw_alone(
     prober, calls = _counted(_below)
     state = LauncherState(task=A_PREMISE, cwd=str(tmp_path), policy=Policy.AUTONOMOUS)
 
-    lines: list[str] = []
+    behind: list[str] = []
     for _ in range(400):
-        lines, launched = _drawn(monkeypatch, state, click_launch=True, prober=prober, settle=False)
+        fake, launched = _run_draw(
+            monkeypatch, state, click_launch=True, prober=prober, settle=False
+        )
+        behind = _behind(fake)
         assert launched == []
         if state.version_gate.answered:
             break
@@ -1973,7 +2370,7 @@ def test_the_check_is_started_and_landed_by_the_draw_alone(
 
     assert calls == [1]
     assert state.version_gate.answered
-    assert any("2.1.9" in line for line in lines)
+    assert any("2.1.9" in p for p in behind)
 
 
 def test_the_version_is_read_once_and_not_once_a_frame(
@@ -2191,27 +2588,71 @@ def test_a_resume_in_the_directory_it_is_compared_with_is_not_flagged_as_differi
     assert "NOT the working directory above" in other
 
 
-def test_new_task_says_nothing_about_where_a_session_runs_or_what_resuming_ends(
+def test_a_picked_session_says_where_it_runs_and_what_resuming_it_ends(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """
-    Those sentences are the resume form's. Under New Task's fields they would be
-    about a launch this modal cannot make -- and that holds with a row picked on the
-    picker and the session live, which is every way the old section used to speak.
+    What the launch button does has changed, and the lines that say so are drawn
+    whether or not the list is open: a pick behind a shut header is still what the
+    button does. With nothing picked none of them is drawn.
     """
     main, worktree = _two_trees(tmp_path)
     state = LauncherState(task="t", cwd=main)
     state.picker = _loaded(_row("a", cwd=worktree))
-    state.picker.pick(state.picker.rows[0], state.cwd)
 
     for expand in (False, True):
         fake, launched = _run_draw(monkeypatch, state, live=frozenset({"a"}), expand=expand)
-        lines = _lines(fake)
-        assert not any("runs in" in line or "was recorded" in line for line in lines)
-        assert launcher._LIVE_RESUME not in lines
-        assert not any("is sent to it as the next message" in line for line in lines)
+        said = [*_lines(fake), *_behind(fake)]
+        assert not any("runs in" in line or "was recorded" in line for line in said)
+        assert launcher._LIVE_RESUME not in said and launcher._PICKED_SENDS not in said
+        assert launcher._TASK_CAPTION in said and launcher._MESSAGE_CAPTION not in said
         assert launched == []
-    assert launcher.resume_directory_line(state.launch_directory(), main) is None
+
+    state.picker.pick(state.picker.rows[0], state.cwd)
+    where = (
+        f"runs in {worktree} -- where this session was recorded, NOT the working directory above"
+    )
+    for expand in (False, True):
+        fake, launched = _run_draw(monkeypatch, state, live=frozenset({"a"}), expand=expand)
+        lines, behind = _lines(fake), _behind(fake)
+        # One line each for where it runs and for what resuming it ends, with the
+        # sentences behind their marks; what the button now does, and what the
+        # pick set, behind the mark beside "launch fresh instead".
+        assert launcher.directory_notice(launcher.RecordedDirectory(worktree), main) in _notices(
+            fake
+        )
+        assert any(line.endswith(", NOT the working directory above") for line in lines)
+        assert where in behind and where not in lines
+        assert launcher._LIVE_LINE in lines
+        assert launcher._LIVE_RESUME in behind and launcher._LIVE_RESUME not in lines
+        assert launcher._PICKED_SENDS in behind and launcher._PICKED_CHOSEN_HERE in behind
+        assert launcher._PICKED_SENDS not in lines and launcher._PICKED_CHOSEN_HERE not in lines
+        assert launcher._MESSAGE_CAPTION in lines and launcher._TASK_CAPTION not in lines
+        assert launched == []
+        (header,) = [str(call.args[0]) for call in fake.collapsing_header.call_args_list[:1]]
+        assert header == f"resuming: summary for a{launcher._RESUME_ID}"
+
+    # Not live: the directory is still said and the ending of a run is not.
+    fake, _ = _run_draw(monkeypatch, state)
+    assert where in _behind(fake) and launcher._LIVE_RESUME not in _behind(fake)
+    assert launcher._LIVE_LINE not in _lines(fake)
+
+
+def test_a_message_to_a_picked_session_is_not_called_a_teams_premises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """
+    Nothing is written into a brief for a resume, so the line that says the box
+    becomes every worker's premises is a new session's only.
+    """
+    premises = "on a team, this also becomes the premises every worker reads"
+    state = LauncherState(task="t", cwd=str(tmp_path), template_index=1)
+    state.picker = _loaded(_row("a", cwd=str(tmp_path)))
+    fake, _ = _run_draw(monkeypatch, state)
+    assert premises in _behind(fake) and premises not in _lines(fake)
+    state.picker.pick(state.picker.rows[0], state.cwd)
+    fake, _ = _run_draw(monkeypatch, state)
+    assert premises not in [*_lines(fake), *_behind(fake)]
 
 
 def test_a_session_recorded_through_a_symlink_has_one_brief_directory(
@@ -2258,8 +2699,8 @@ def test_a_draft_stats_nothing_to_find_its_directory(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """
-    The draw asks every frame. The directory is the field's and there is no recorded
-    one to look for, so looking costs nothing.
+    The draw asks every frame. With nothing picked the directory is the field's and
+    there is no recorded one to look for, so looking costs nothing.
     """
 
     def _no_stat(path: object) -> bool:
@@ -2267,8 +2708,6 @@ def test_a_draft_stats_nothing_to_find_its_directory(
 
     state = LauncherState(task="t", cwd=str(tmp_path))
     state.picker = _loaded(_row("a"), _row("b"))
-    # A pick on the picker is not a pick on the draft: no field reads it.
-    state.picker.pick(state.picker.rows[0], state.cwd)
     expected = state.spec()
     monkeypatch.setattr(os.path, "isdir", _no_stat)
 
@@ -2294,10 +2733,10 @@ def test_the_contained_region_is_named_as_the_resumed_sessions_directory(
     assert "the working directory above" not in contained
 
     # And New Task's is about its field.
-    lines, _ = _drawn(
+    _, behind = _explained(
         monkeypatch, LauncherState(task=A_PREMISE, cwd=main, policy=Policy.AUTONOMOUS)
     )
-    contained = next(line for line in lines if line.startswith("contained:"))
+    contained = next(p for p in behind if p.startswith("contained:"))
     assert "writes only inside the working directory above." in contained
 
 
@@ -2415,6 +2854,9 @@ class _RealFrames:
         self.open_list = False
         self.popup_open = False
         self.buttons: dict[str, tuple[float, float]] = {}
+        # For ``button``: the rectangle it was given, top and bottom, and the name
+        # of the window it was drawn in.
+        self.placed: dict[str, tuple[float, float, str]] = {}
         self._monkeypatch = monkeypatch
 
     def __enter__(self) -> _RealFrames:
@@ -2445,6 +2887,13 @@ class _RealFrames:
                 buttons[label] = ((low.x + high.x) / 2.0, (low.y + high.y) / 2.0)
                 return answer
 
+            def button(self, label: str, size: object) -> bool:
+                pressed = imgui.button(label, size)  # type: ignore[arg-type]
+                low, high = imgui.get_item_rect_min(), imgui.get_item_rect_max()
+                buttons[label] = ((low.x + high.x) / 2.0, (low.y + high.y) / 2.0)
+                outer.placed[label] = (low.y, high.y, imgui.internal.get_current_window().name)
+                return bool(pressed)
+
             def collapsing_header(self, label: str) -> bool:
                 if outer.open_list:
                     imgui.set_next_item_open(True)
@@ -2465,7 +2914,6 @@ class _RealFrames:
                 queued=0,
                 cap=4,
                 launch=lambda spec, draft: self.launched.append((spec, draft)),
-                on_pick_resume=self.picked.append,
                 wrap=True,
                 scanner=self.scanner,
                 prober=_meets,
@@ -2507,6 +2955,16 @@ class _RealFrames:
         drawn = window is not None and bool(window.active)
         assert drawn == self.popup_open, "the popup and its window disagree"
         return drawn
+
+    def body(self) -> object:
+        """The scrolling child the modal's fields are drawn in, as Dear ImGui holds it."""
+        prefix = f"{launcher.TITLE}/{launcher.BODY_ID}"
+        (found,) = [
+            window
+            for window in self.imgui.get_current_context().windows
+            if window.name.startswith(prefix) and window.name.count("/") == 1
+        ]
+        return found
 
     def task_box_is_focused(self) -> bool:
         active = self.imgui.internal.get_active_id()
@@ -2622,10 +3080,13 @@ def test_a_failed_launch_reopens_the_modal_with_the_reason_on_it(
     state.report_failure(draft, "the CLI reports 2.1.9, below the floor")
 
     assert state._open_requested
-    lines, launched = _drawn(monkeypatch, state)
+    fake, launched = _run_draw(monkeypatch, state)
     assert launched == []
-    assert any("did not start a session" in line and "2.1.9" in line for line in lines)
-    assert any("nothing was lost" in line for line in lines)
+    # On screen, one line with the start of the reason; behind its mark, the reason
+    # whole and what became of the draft.
+    assert any("did not start a session" in line and "2.1.9" in line for line in _lines(fake))
+    assert any("nothing was lost" in p for p in _behind(fake))
+    assert not any("nothing was lost" in line for line in _lines(fake))
 
 
 def test_a_launch_that_started_leaves_no_notice_and_no_draft_behind(
@@ -2669,10 +3130,10 @@ def test_a_failure_does_not_overwrite_what_the_operator_typed_since(
     assert state.draft() == typed
     assert not state.failure_loaded
     assert _failed_tasks(state.failures) == ["the first task"]
-    lines, _ = _drawn(monkeypatch, state)
+    lines, behind = _explained(monkeypatch, state)
     assert any("no such base ref" in line for line in lines)
-    assert any("its draft is kept" in line for line in lines)
-    assert not any("set aside by a restore" in line for line in lines)
+    assert any("its draft is kept" in p for p in behind)
+    assert not any("set aside by a restore" in line for line in [*lines, *behind])
 
     # The restore is the operator's press, it is wired to the button, and it is a
     # swap: the frame that restores says where the displaced draft went.
@@ -2848,23 +3309,23 @@ def test_the_notice_stops_saying_as_it_was_typed_once_the_box_is_not(
     state = LauncherState(task="carry on", cwd=str(tmp_path))
     _, draft = _press_launch(monkeypatch, state)
     state.report_failure(draft, "reason")
-    lines, _ = _drawn(monkeypatch, state)
-    assert any("nothing was lost" in line for line in lines)
+    _, behind = _explained(monkeypatch, state)
+    assert any("nothing was lost" in p for p in behind)
 
     for emptied_or_edited in ("", "carry on, differently"):
         state.task = emptied_or_edited
         fake, _ = _run_draw(monkeypatch, state)
-        lines = _lines(fake)
-        assert not any("nothing was lost" in line for line in lines)
-        assert any("its draft is kept" in line for line in lines)
+        behind = _behind(fake)
+        assert not any("nothing was lost" in p for p in behind)
+        assert any("its draft is kept" in p for p in behind)
         assert any(
             call.args[0] == "restore that draft" for call in fake.small_button.call_args_list
         )
 
     _run_draw(monkeypatch, state, press="restore that draft")
     assert state.task == "carry on"
-    lines, _ = _drawn(monkeypatch, state)
-    assert any("nothing was lost" in line for line in lines)
+    _, behind = _explained(monkeypatch, state)
+    assert any("nothing was lost" in p for p in behind)
 
 
 def test_an_edited_retry_does_not_take_the_failed_draft_with_it(
@@ -2924,10 +3385,11 @@ def test_two_failed_launches_each_keep_their_own_draft_and_reason(
         ("task two", "reason two"),
     ]
     assert state.task == "task one" and state.failure_loaded
-    lines, _ = _drawn(monkeypatch, state)
+    lines, behind = _explained(monkeypatch, state)
     assert any("reason one" in line for line in lines)
-    assert not any("reason two" in line for line in lines)
-    assert any("1 more launch" in line for line in lines)
+    assert not any("reason two" in line for line in [*lines, *behind])
+    assert any("(1 more behind it)" in line for line in lines)
+    assert any("1 more launch" in p for p in behind)
 
     # The retry of the first. It takes its failure with it and the second loads.
     spec, _ = _press_launch(monkeypatch, state)
@@ -3041,12 +3503,14 @@ def test_a_failure_the_modal_did_not_launch_is_shown_without_touching_the_fields
 
     assert state._open_requested
     assert state.task == "" and not state.failure_loaded
-    lines, _ = _drawn(monkeypatch, state)
+    lines, behind = _explained(monkeypatch, state)
     assert any(
         "that relaunch did not start a session" in line and "2.1.9" in line for line in lines
     )
-    assert any("not made from this window" in line for line in lines)
-    assert not any("nothing was lost" in line or "its draft is kept" in line for line in lines)
+    assert any("not made from this window" in p for p in behind)
+    assert not any(
+        "nothing was lost" in line or "its draft is kept" in line for line in [*lines, *behind]
+    )
 
     # Typing and launching past it neither drops it nor reopens the modal over it.
     state.task = "something else"
@@ -3068,8 +3532,9 @@ def test_a_draftless_failure_does_not_hide_the_drafts_behind_it(
     state.report_failure(first, "reason one")
 
     assert state.task == "" and not state.failure_loaded
-    lines, _ = _drawn(monkeypatch, state)
-    assert any("1 more launch" in line for line in lines)
+    lines, behind = _explained(monkeypatch, state)
+    assert any("(1 more behind it)" in line for line in lines)
+    assert any("1 more launch" in p for p in behind)
 
     state.discard_failed()
 
@@ -3323,7 +3788,7 @@ def test_a_linked_worktree_is_not_told_bash_writes_only_inside_it(
     state = LauncherState(task=A_PREMISE, cwd=worktree, policy=Policy.AUTONOMOUS)
 
     fake, launched = _run_draw(monkeypatch, state)
-    lines = _lines(fake)
+    lines = _behind(fake)
 
     assert not any("writes only inside" in line for line in lines)
     assert not any("held to that same directory" in line for line in lines)
@@ -3333,7 +3798,7 @@ def test_a_linked_worktree_is_not_told_bash_writes_only_inside_it(
     assert "HEAD" in wider and "branches" in wider
     assert "2.1.292" in wider
     # Drawn as a warning and not as greyed reassurance.
-    assert any(wider in call.args[1:] for call in fake.text_colored.call_args_list)
+    assert wider not in _lines(fake)
     gate = next(line for line in lines if line.startswith("file writes are held to"))
     assert "alone" in gate and "shared git directory included" in gate
     assert launched == []
@@ -3351,7 +3816,7 @@ def test_the_worktree_line_denies_only_the_paths_that_were_tried(
     so. Sub-agents were not measured in a worktree at all.
     """
     worktree, _ = _linked_worktree(tmp_path)
-    lines, _ = _drawn(
+    lines, _ = _told(
         monkeypatch, LauncherState(task=A_PREMISE, cwd=worktree, policy=Policy.AUTONOMOUS)
     )
     wider = next(line for line in lines if "linked git worktree" in line)
@@ -3391,7 +3856,7 @@ def test_a_directory_that_is_not_a_worktree_reads_exactly_as_it_did(
     checkout = tmp_path / "checkout"
     _git_dir(checkout / ".git")
     for directory in (str(tmp_path), str(checkout)):
-        lines, _ = _drawn(
+        lines, _ = _told(
             monkeypatch, LauncherState(task=A_PREMISE, cwd=directory, policy=Policy.AUTONOMOUS)
         )
         assert (
@@ -3471,7 +3936,7 @@ def test_a_layout_nothing_was_measured_for_is_not_told_only(
         fake, _ = _run_draw(
             monkeypatch, LauncherState(task=A_PREMISE, cwd=directory, policy=Policy.AUTONOMOUS)
         )
-        lines = _lines(fake)
+        lines = _behind(fake)
 
         assert not any("writes only inside" in line for line in lines), name
         assert not any("linked git worktree" in line for line in lines), name
@@ -3482,7 +3947,7 @@ def test_a_layout_nothing_was_measured_for_is_not_told_only(
         assert git_dir in unmeasured, name
         assert "is not known" in unmeasured, name
         # A warning, not greyed reassurance.
-        assert any(unmeasured in call.args[1:] for call in fake.text_colored.call_args_list)
+        assert unmeasured not in _lines(fake)
         gate = next(line for line in lines if line.startswith("file writes are held to"))
         assert "alone" in gate and "that git directory included" in gate, name
 
@@ -3503,7 +3968,7 @@ def test_a_directory_under_a_worktree_is_shown_the_worktrees_boundary_as_unmeasu
         shared=git_dir, root=worktree, at_root=False
     )
 
-    lines, _ = _drawn(
+    lines, _ = _told(
         monkeypatch, LauncherState(task=A_PREMISE, cwd=str(deeper), policy=Policy.AUTONOMOUS)
     )
 
@@ -3605,12 +4070,12 @@ def test_a_worktree_made_while_the_modal_was_shut_is_seen_when_it_opens(
     worktree = tmp_path / "wt"
     worktree.mkdir()
     state = LauncherState(task=A_PREMISE, cwd=str(worktree), policy=Policy.AUTONOMOUS)
-    lines, _ = _drawn(monkeypatch, state)
+    lines, _ = _told(monkeypatch, state)
     assert any("writes only inside" in line for line in lines)
 
     _, git_dir = _linked_worktree(tmp_path / "later", at=worktree)
     # Still open: the answer is the one read for this open.
-    lines, _ = _drawn(monkeypatch, state)
+    lines, _ = _told(monkeypatch, state)
     assert any("writes only inside" in line for line in lines)
 
     state.is_open = False
@@ -3619,7 +4084,7 @@ def test_a_worktree_made_while_the_modal_was_shut_is_seen_when_it_opens(
     assert worker is not None
     worker.join(timeout=5.0)
 
-    lines, _ = _drawn(monkeypatch, state)
+    lines, _ = _told(monkeypatch, state)
     assert not any("writes only inside" in line for line in lines)
     assert any("linked git worktree" in line and git_dir in line for line in lines)
 
@@ -3663,11 +4128,11 @@ def test_the_worktree_read_happens_once_a_directory_and_not_once_a_frame(
     state = LauncherState(task=A_PREMISE, cwd=worktree, policy=Policy.AUTONOMOUS)
 
     for _ in range(3):
-        _drawn(monkeypatch, state)
+        _told(monkeypatch, state)
     assert asked == [worktree]
 
     state.cwd = str(tmp_path)
-    lines, _ = _drawn(monkeypatch, state)
+    lines, _ = _told(monkeypatch, state)
     assert asked == [worktree, str(tmp_path)]
     # And the answer followed the directory rather than staying the first one's.
     assert not any("linked git worktree" in line for line in lines)
@@ -3687,8 +4152,8 @@ def test_a_launch_that_is_not_taking_the_mode_never_reads_for_a_worktree(
 
     monkeypatch.setattr(launcher, "git_layout", never)
 
-    _drawn(monkeypatch, LauncherState(task=A_PREMISE, cwd=worktree, policy=Policy.STRICT))
-    _drawn(
+    _told(monkeypatch, LauncherState(task=A_PREMISE, cwd=worktree, policy=Policy.STRICT))
+    _told(
         monkeypatch,
         LauncherState(task=A_PREMISE, cwd=INSIDE_THE_CHECKOUT, policy=Policy.AUTONOMOUS),
     )
@@ -3702,7 +4167,7 @@ def test_a_refusal_names_the_directory_it_is_about_in_the_modals_word_for_it(
     recorded directory names that directory: "this directory" there would point at
     the one directory that is not the problem.
     """
-    lines, _ = _drawn(
+    lines, _ = _told(
         monkeypatch,
         LauncherState(task=A_PREMISE, cwd=INSIDE_THE_CHECKOUT, policy=Policy.AUTONOMOUS),
     )
@@ -3763,7 +4228,7 @@ def test_a_worktree_d2_had_no_fixture_for_is_not_told_its_findings_as_its_own(
         fake, _ = _run_draw(
             monkeypatch, LauncherState(task=A_PREMISE, cwd=worktree, policy=Policy.AUTONOMOUS)
         )
-        lines = _lines(fake)
+        lines = _behind(fake)
 
         assert not any(_AS_ITS_OWN in line for line in lines), name
         assert not any("Bash also writes" in line for line in lines), name
@@ -3775,7 +4240,7 @@ def test_a_worktree_d2_had_no_fixture_for_is_not_told_its_findings_as_its_own(
         assert shared in wider, name
         # The findings themselves are still there to be read.
         assert launcher._WORKTREE_MEASURED in wider, name
-        assert any(wider in call.args[1:] for call in fake.text_colored.call_args_list), name
+        assert wider not in _lines(fake), name
 
 
 def test_each_unmeasured_worktree_is_told_what_does_not_carry_over(
@@ -3788,7 +4253,7 @@ def test_each_unmeasured_worktree_is_told_what_does_not_carry_over(
     """
     wider = {}
     for name, (worktree, _, _) in _other_worktrees(tmp_path).items():
-        lines, _ = _drawn(
+        lines, _ = _told(
             monkeypatch, LauncherState(task=A_PREMISE, cwd=worktree, policy=Policy.AUTONOMOUS)
         )
         wider[name] = next(line for line in lines if "linked git worktree" in line)
@@ -3809,7 +4274,7 @@ def test_a_directory_under_an_unmeasured_worktree_is_unmeasured_twice_over(
     deeper = Path(worktree) / "src"
     deeper.mkdir()
 
-    lines, _ = _drawn(
+    lines, _ = _told(
         monkeypatch, LauncherState(task=A_PREMISE, cwd=str(deeper), policy=Policy.AUTONOMOUS)
     )
 
@@ -3847,7 +4312,7 @@ def test_the_unmeasured_text_names_the_measured_layout_in_full(
     repository's, as measured. The exception is the one layout that was.
     """
     for name, (directory, _) in _unmeasured_layouts(tmp_path).items():
-        lines, _ = _drawn(
+        lines, _ = _told(
             monkeypatch, LauncherState(task=A_PREMISE, cwd=directory, policy=Policy.AUTONOMOUS)
         )
         unmeasured = next(line for line in lines if line.startswith("not measured:"))
@@ -3963,7 +4428,7 @@ def test_an_empty_git_directory_does_not_earn_only(
 
     for name, directory in under.items():
         assert launcher.git_layout(str(directory)) == expected[name], name
-        lines, _ = _drawn(
+        lines, _ = _told(
             monkeypatch,
             LauncherState(task=A_PREMISE, cwd=str(directory), policy=Policy.AUTONOMOUS),
         )
@@ -4006,7 +4471,7 @@ def test_a_git_entry_that_cannot_be_read_is_not_called_a_git_directory_outside(
             monkeypatch,
             LauncherState(task=A_PREMISE, cwd=str(directory), policy=Policy.AUTONOMOUS),
         )
-        lines = _lines(fake)
+        lines = _behind(fake)
 
         assert not any("writes only inside" in line for line in lines)
         assert not any("lies outside it" in line for line in lines)
@@ -4019,7 +4484,7 @@ def test_a_git_entry_that_cannot_be_read_is_not_called_a_git_directory_outside(
         )
         assert f"The nearest layout measured is {_MEASURED_AT} --" in unmeasured
         assert "is not known" in unmeasured
-        assert any(unmeasured in call.args[1:] for call in fake.text_colored.call_args_list)
+        assert unmeasured not in _lines(fake)
         gate = next(line for line in lines if line.startswith("file writes are held to"))
         assert gate.endswith("a target that cannot be shown to be inside it is refused.")
 
@@ -4060,18 +4525,18 @@ def test_a_retry_that_started_does_not_look_like_a_retry_that_failed_again(
     assert failed_again.failure_loaded and started.failure_loaded
     assert failed_again._open_requested and started._open_requested
 
-    again, _ = _drawn(monkeypatch, failed_again)
-    behind, _ = _drawn(monkeypatch, started)
-    assert again != behind
+    again, again_explained = _explained(monkeypatch, failed_again)
+    past, past_explained = _explained(monkeypatch, started)
+    assert again != past
 
     assert _THAT in again and _EARLIER not in again
-    assert launcher._PRESSED_PAST not in again
-    assert _EARLIER in behind and _THAT not in behind
-    assert launcher._PRESSED_PAST in behind
+    assert launcher._PRESSED_PAST not in again_explained
+    assert _EARLIER in past and _THAT not in past
+    assert launcher._PRESSED_PAST in past_explained
     assert "not about that one" in launcher._PRESSED_PAST
     # No text lost on either: what is said about the draft is said on both.
     kept = "the draft below is that launch, as it was typed -- nothing was lost"
-    assert kept in again and kept in behind
+    assert kept in again_explained and kept in past_explained
 
 
 def test_every_failure_still_queued_at_a_press_is_an_earlier_one(
@@ -4090,14 +4555,14 @@ def test_every_failure_still_queued_at_a_press_is_an_earlier_one(
     state.report_failure(second, "reason two")
     assert [f.pressed_past for f in state.failures] == [False, False]
     lines, _ = _drawn(monkeypatch, state)
-    assert _THAT in lines
+    assert "that launch did not start a session (1 more behind it): reason" in lines
 
     _, retry = _press_launch(monkeypatch, state)
     assert retry.task == "task one"
     assert [(f.reason, f.pressed_past) for f in state.failures] == [("reason two", True)]
-    lines, _ = _drawn(monkeypatch, state)
+    lines, behind = _explained(monkeypatch, state)
     assert "an earlier launch did not start a session: reason two" in lines
-    assert launcher._PRESSED_PAST in lines
+    assert launcher._PRESSED_PAST in behind
 
     state.report_failure(retry, "reason three")
     assert [(f.reason, f.pressed_past) for f in state.failures] == [
@@ -4116,10 +4581,10 @@ def test_a_draftless_failure_pressed_past_is_an_earlier_one_too(
 
     _press_launch(monkeypatch, state)
 
-    lines, _ = _drawn(monkeypatch, state)
+    lines, behind = _explained(monkeypatch, state)
     assert "an earlier relaunch did not start a session: reason" in lines
-    assert launcher._PRESSED_PAST in lines
-    assert "it was not made from this window, so nothing typed below is part of it" in lines
+    assert launcher._PRESSED_PAST in behind
+    assert "it was not made from this window, so nothing typed below is part of it" in behind
 
 
 def test_a_launch_decided_at_once_is_still_not_reported_from_inside_the_press() -> None:
@@ -4193,13 +4658,13 @@ def _click_row(
     )
 
 
-def test_a_click_on_a_row_is_reported_and_picks_nothing(
+def test_a_rows_draw_reports_the_click_and_lights_the_pick(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """
-    The row's draw says it was clicked and that is all it does: nothing is picked
-    on the picker, so no row is ever drawn lit as though a resume were waiting
-    behind the launch button.
+    The row's draw says it was clicked; the list makes the pick once every row of
+    the frame has been drawn. The picked row is lit, and of two rows under one id
+    only the one that was picked.
     """
     first, second = _listed_twice(tmp_path)
     picker = _loaded(first, second)
@@ -4207,33 +4672,34 @@ def test_a_click_on_a_row_is_reported_and_picks_nothing(
     ids, selected, said = _click_row(monkeypatch, picker, 1)
 
     assert said == [False, True]
-    assert picker.picked is None and picker.selected is None
+    assert picker.picked is None, "the row reports; the list picks"
     assert selected == [False, False]
     # Two rows, two widgets: under one ID the second selectable is the first's.
     assert len(set(ids)) == 2
 
-    # A pick made on the picker by something else is not drawn either.
     picker.pick(second, ".")
     _, selected, said = _click_row(monkeypatch, picker, -1)
-    assert selected == [False, False] and said == [False, False]
+    assert selected == [False, True] and said == [False, False]
 
 
-def test_a_click_on_the_second_row_of_one_id_hands_over_the_second_row(
+def test_a_click_on_the_second_row_of_one_id_picks_the_second_row(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """
     A lookup by id answers with the first row carrying it. The click is on a row,
-    the row says where the resume runs, and it is the row that reaches the caller.
+    the row says where the resume runs, and it is the row that is picked and
+    resumed.
     """
     first, second = _listed_twice(tmp_path)
     assert first.session_id == second.session_id and first.cwd != second.cwd
     state = LauncherState(task="t", cwd=str(tmp_path))
     state.picker = _loaded(first, second)
-    picks: list[SessionRow] = []
 
-    _run_draw(monkeypatch, state, expand=True, click_row=1, picks=picks)
+    _run_draw(monkeypatch, state, expand=True, click_row=1)
 
-    assert picks == [second] and picks[0].cwd == second.cwd
+    assert state.picker.picked == second
+    _, launched = _run_draw(monkeypatch, state, click_launch=True)
+    assert [(spec.resume, spec.cwd) for spec in launched] == [("a", second.cwd)]
 
 
 def _typed_draft(tmp_path: Path) -> LauncherState:
@@ -4251,87 +4717,102 @@ def _typed_draft(tmp_path: Path) -> LauncherState:
     return state
 
 
-def test_a_click_on_a_row_closes_the_modal_and_hands_the_row_over_and_launches_nothing(
+def test_a_click_on_a_row_picks_it_and_new_task_stays_open_with_its_fields(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """
-    The whole of what New Task does about a resume. The row reaches the caller,
-    once; the modal goes; nothing was launched, so nothing is cleared -- the press's
-    clears are what a launch costs, and this was not one.
+    The operator's correction, at the modal: a session picked in New Task is
+    resumed from New Task. The click picks the row and does nothing else -- the
+    modal is not closed, nothing is launched, and every field is as it stood.
     """
     state = _typed_draft(tmp_path)
     before = state.draft()
-    picks: list[SessionRow] = []
+    clicked = state.picker.rows[1]
 
-    fake, launched = _run_draw(monkeypatch, state, expand=True, click_row=1, picks=picks)
+    fake, launched = _run_draw(monkeypatch, state, expand=True, click_row=1)
 
-    assert picks == [state.picker.rows[1]]
+    assert state.picker.picked == clicked
+    assert state.is_open and not state._open_requested
+    fake.close_current_popup.assert_not_called()
     assert launched == []
-    assert not state.is_open and not state._open_requested
-    fake.close_current_popup.assert_called_once_with()
-    # Every field as it stood, and nothing queued as though a launch had failed.
-    assert state.draft() == before
+    assert state.draft() == replace(before, picked=clicked)
     assert state.failures == [] and state.set_aside == []
-    assert state.picker.picked is None
+
+    # A click on the pick is the way back out.
+    again = _typed_draft(tmp_path)
+    again.picker.pick(clicked, again.cwd)
+    _run_draw(monkeypatch, again, expand=True, click_row=1)
+    assert again.picker.picked is None and again.is_open
 
 
-def test_the_row_is_handed_over_after_the_modal_has_been_ended(
+def test_the_launch_after_a_pick_resumes_that_session_with_what_was_typed(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """
-    The caller opens another modal from the callback. Called between this modal's
-    begin and end, that request would be made inside the popup being closed.
+    The press that follows: the session id of the row, the box as the message,
+    through the same callback a new session goes through. Then the press's clears,
+    the pick among them, so the next thing typed is not sent to that conversation.
     """
     state = _typed_draft(tmp_path)
-    order: list[str] = []
+    clicked = state.picker.rows[1]
+    _run_draw(monkeypatch, state, expand=True, click_row=1)
+    drafts: list[launcher.Draft] = []
 
-    class _Picks(list[SessionRow]):
-        def append(self, row: SessionRow) -> None:
-            order.append("handed")
+    fake, launched = _run_draw(monkeypatch, state, click_launch=True, drafts=drafts)
 
-    worker = state.version_gate.request(prober=_meets)
-    assert worker is not None
-    worker.join(timeout=5.0)
-    state.version_gate.poll()
-    fake = MagicMock()
-    fake.begin_popup_modal.side_effect = lambda *a, **k: (True, True)
-    fake.collapsing_header.side_effect = lambda *a, **k: True
-    fake.checkbox.side_effect = lambda label, value: (False, value)
-    fake.combo.side_effect = lambda label, index, items: (False, index)
-    fake.input_text_with_hint.side_effect = lambda label, hint, value: (False, value)
-    fake.input_int.side_effect = lambda label, value, *a, **k: (False, value)
-    fake.button.side_effect = lambda *a, **k: False
-    fake.small_button.side_effect = lambda *a, **k: False
-    fake.is_key_pressed.side_effect = lambda *a, **k: False
-    fake.selectable.side_effect = lambda *a, **k: (True, False)
-    fake.get_content_region_avail.return_value.x = 400.0
-    fake.calc_text_size.return_value.x = 100.0
-    fake.internal.find_window_by_name.return_value = None
-    fake.close_current_popup.side_effect = lambda: order.append("closed")
-    fake.end_popup.side_effect = lambda: order.append("ended")
-    fake_widgets = MagicMock()
-    fake_widgets.ellipsis.side_effect = lambda text, width: text
-    fake_widgets.flat_line.side_effect = widgets.flat_line
-    fake_widgets.multiline_input.side_effect = lambda *a, **k: (False, state.task)
-    fake_widgets.gate_adds.side_effect = widgets.gate_adds
-    fake_widgets.gate_parks.side_effect = widgets.gate_parks
-    monkeypatch.setattr(launcher, "imgui", fake)
-    monkeypatch.setattr(launcher, "widgets", fake_widgets)
-    state.is_open = True
+    (spec,) = launched
+    assert spec.resume == "b" and spec.message == "a new task\nhalf typed"
+    assert spec.task == "summary for b" and spec.task_is_label
+    assert spec.cwd == str(tmp_path.resolve())
+    assert [draft.picked for draft in drafts] == [clicked]
+    fake.close_current_popup.assert_called_once_with()
+    assert state.picker.picked is None and state.task == "" and not state.is_open
 
-    launcher.draw(
-        state,
-        running=0,
-        queued=0,
-        cap=4,
-        launch=lambda spec, draft: order.append("launched"),
-        on_pick_resume=_Picks().append,
-        wrap=True,
-        scanner=lambda cwd: ((), {}),
-        prober=_meets,
-    )
+    # Ctrl+Enter in the box is the same press.
+    again = _typed_draft(tmp_path)
+    again.picker.pick(again.picker.rows[0], again.cwd)
+    _, launched = _run_draw(monkeypatch, again, submit=True)
+    assert [(spec.resume, spec.message) for spec in launched] == [("a", "a new task\nhalf typed")]
 
-    assert order == ["closed", "ended", "handed"]
+
+def test_a_held_resume_is_not_started_by_the_button_or_by_ctrl_enter(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    state = _typed_draft(tmp_path)
+    gone = _row("g", cwd=str(tmp_path / "gone"))
+    state.picker = _loaded(gone)
+    state.picker.pick(gone, state.cwd)
+
+    for how in ({"click_launch": True}, {"submit": True}):
+        fake, launched = _run_draw(monkeypatch, state, **how)  # type: ignore[arg-type]
+        assert launched == [] and state.is_open and state.picker.picked == gone
+        assert launcher.hold_notice(launcher._HOLD_GONE) in _notices(fake)
+        assert launcher._HOLD_GONE in _behind(fake)
+        fake.begin_disabled.assert_called()
+
+
+def test_draw_has_no_way_to_hand_a_picked_row_to_anything_else() -> None:
+    """
+    The resume form opens from a closed card and from nowhere else. ``draw`` takes
+    no callback for a pick, so there is nothing a caller could open one from.
+    """
+    import ast
+    import inspect
+
+    parameters = inspect.signature(launcher.draw).parameters
+    assert "on_pick_resume" not in parameters
+    callbacks = [
+        name for name, parameter in parameters.items() if "Callable" in str(parameter.annotation)
+    ]
+    assert callbacks == ["launch"]
+    # And the module cannot reach the form to open it: it imports nothing of it.
+    imported = {
+        alias.name
+        for node in ast.walk(ast.parse(inspect.getsource(launcher)))
+        if isinstance(node, (ast.Import, ast.ImportFrom))
+        for alias in node.names
+    }
+    assert "widgets" in imported and "resume_form" not in imported
 
 
 def test_a_row_cannot_be_picked_while_the_list_is_shut_or_without_a_click(
@@ -4339,60 +4820,46 @@ def test_a_row_cannot_be_picked_while_the_list_is_shut_or_without_a_click(
 ) -> None:
     for expand, click_row in ((False, 0), (True, None), (True, 7)):
         state = _typed_draft(tmp_path)
-        picks: list[SessionRow] = []
-        fake, launched = _run_draw(
-            monkeypatch, state, expand=expand, click_row=click_row, picks=picks
-        )
-        assert picks == [] and launched == [] and state.is_open
+        fake, launched = _run_draw(monkeypatch, state, expand=expand, click_row=click_row)
+        assert state.picker.picked is None and launched == [] and state.is_open
         fake.close_current_popup.assert_not_called()
 
 
-def test_the_list_offers_no_way_to_resume_from_inside_new_task(
+def test_the_way_back_to_a_new_session_is_under_the_pick_and_nowhere_else(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """
-    What the section used to carry for a resume made here: a way back to a fresh
-    launch, the session's brief on a button, and a line saying the task above would
-    be sent to it. Each would describe a launch this modal no longer makes. What it
-    says instead is where a click leads and that the draft is kept.
+    With a row picked there is one more button, and it undoes the pick. Nothing on
+    the modal says a click closes it: it does not.
     """
     state = _typed_draft(tmp_path)
-    state.picker.pick(state.picker.rows[0], state.cwd)
-    state.picker.recovered_brief = "/a/brief"
 
     fake, _ = _run_draw(monkeypatch, state, expand=True)
-
     buttons = {str(call.args[0]) for call in fake.small_button.call_args_list}
     assert buttons == {"+", "rescan"}
-    lines = _lines(fake)
-    assert launcher._PICK_HANDS_OFF in lines
-    assert "resume form" in launcher._PICK_HANDS_OFF and "is kept" in launcher._PICK_HANDS_OFF
-    assert not any("this launch's" in line or "/a/brief" in line for line in lines)
-    assert state.brief == " /some/brief "
-    # The header names the list and not a session: there is no pick to name.
     (header,) = [str(call.args[0]) for call in fake.collapsing_header.call_args_list[:1]]
     assert header == f"resume an existing session instead{launcher._RESUME_ID}"
 
+    state = _typed_draft(tmp_path)
+    state.picker.pick(state.picker.rows[0], state.cwd)
+    fake, _ = _run_draw(monkeypatch, state, expand=True)
+    buttons = {str(call.args[0]) for call in fake.small_button.call_args_list}
+    assert buttons == {"+", "rescan", launcher._UNPICK}
+    assert not any("closes New Task" in line or "resume form" in line for line in _lines(fake))
+    assert state.brief == " /some/brief "
 
-def test_the_callback_is_not_optional() -> None:
-    """
-    A default would be a listing whose rows did nothing when clicked, on the one
-    screen that exists to find a session.
-    """
-    import inspect
-
-    parameter = inspect.signature(launcher.draw).parameters["on_pick_resume"]
-    assert parameter.default is inspect.Parameter.empty
-    assert parameter.kind is inspect.Parameter.KEYWORD_ONLY
+    # Under a shut header too, where it is the only way out on screen.
+    fake, launched = _run_draw(monkeypatch, state, press=launcher._UNPICK)
+    assert state.picker.picked is None and launched == [] and state.is_open
 
 
-def test_in_dear_imgui_a_row_clicked_with_the_mouse_leaves_new_task_with_its_draft(
+def test_in_dear_imgui_a_row_clicked_with_the_mouse_is_resumed_from_new_task(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """
-    The click as Dear ImGui delivers it: a selectable in a child window of a popup
-    modal. The popup is closed for real, the row arrives once, and what was typed
-    is in the box when the modal is opened again.
+    The click as Dear ImGui delivers it: a selectable in a child of the modal's
+    scrolling body. The popup stays up with what was typed in the box, the row is
+    the pick, and the launch button then resumes that session with that text.
     """
     rows = (_row("a", cwd=str(tmp_path)), _row("b", cwd=str(tmp_path)))
     state = LauncherState(cwd=str(tmp_path))
@@ -4401,7 +4868,7 @@ def test_in_dear_imgui_a_row_clicked_with_the_mouse_leaves_new_task_with_its_dra
         real.scanner = lambda cwd: (rows, {})
         real.open_list = True
         real.frame(3)
-        real.type("a task for a new session")
+        real.type("carry on from here")
         for _ in range(200):
             if state.picker.rows:
                 break
@@ -4414,16 +4881,20 @@ def test_in_dear_imgui_a_row_clicked_with_the_mouse_leaves_new_task_with_its_dra
 
         real.click(label)
 
-        assert real.picked == [rows[1]]
-        assert not state.is_open and not real.modal_was_drawn()
-        assert real.launched == []
-        assert state.task == "a task for a new session"
-
-        state.request_open()
-        real.frame(3)
+        assert state.picker.picked == rows[1]
         assert state.is_open and real.modal_was_drawn()
-        assert state.task == "a task for a new session"
-        assert real.picked == [rows[1]], "reopening does not hand the row over again"
+        assert real.launched == []
+        assert state.task == "carry on from here"
+
+        # The lines under the pick make the body taller; the child, the window and
+        # the move back onto the display each follow a frame behind the last.
+        real.frame(3)
+        real.click("launch")
+
+        ((spec, draft),) = real.launched
+        assert (spec.resume, spec.message) == ("b", "carry on from here")
+        assert draft.picked == rows[1]
+        assert not state.is_open and state.picker.picked is None
 
 
 def test_everything_the_resume_form_takes_from_this_module_is_still_here() -> None:
@@ -4458,10 +4929,10 @@ def test_everything_the_resume_form_takes_from_this_module_is_still_here() -> No
         "launch_directory",
         "resolved_directory",
         "refusal_for",
-        "live_resume_line",
+        "live_notice",
         "resume_directory_line",
-        "contained_text",
-        "boundary_unstated",
+        "gate_notice",
+        "hold_notice",
         "git_layout",
         "SessionPicker",
         "OWN_CHECKOUT",
@@ -4563,14 +5034,16 @@ def test_a_press_that_finds_another_rung_than_the_screen_showed_starts_nothing(
     state, typed = _judged_outside(tmp_path)
     _relinked(typed, INSIDE_THE_CHECKOUT)
 
-    lines, launched = _drawn(monkeypatch, state, click_launch=True)
+    fake, launched = _run_draw(monkeypatch, state, click_launch=True)
 
     assert launched == []
     assert state.task == A_PREMISE and state.policy is Policy.AUTONOMOUS
     assert state.is_open
-    assert not any(line.startswith("refused for") for line in lines)
-    lines, launched = _drawn(monkeypatch, state)
-    assert any(line.startswith("refused for") for line in lines)
+    assert launcher.LOUD_LINE in _lines(fake)
+    assert not any(p.startswith("refused for") for p in _behind(fake))
+    fake, launched = _run_draw(monkeypatch, state)
+    assert launcher.LOUD_LINE not in _lines(fake)
+    assert any(p.startswith("refused for") for p in _behind(fake))
 
     # And the press after that is the one the screen now describes.
     _, launched = _drawn(monkeypatch, state, click_launch=True)
@@ -4848,9 +5321,10 @@ def test_the_modal_stays_on_the_display_when_it_grows_after_opening(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """
-    The order an operator meets it in: the modal opens on the ordinary rung, centred
-    at that height, and the dial is turned afterwards. What the top rung adds is
-    taller than the room left under a centred window.
+    The order an operator meets it in: the modal opens with the session list shut,
+    centred at that height, and the list is opened afterwards. What the list adds
+    is taller than the room left under a centred window, so the window is moved,
+    and its buttons with it.
     """
     state = LauncherState(task=A_PREMISE, cwd=str(tmp_path))
     _settled(state)
@@ -4860,35 +5334,72 @@ def test_the_modal_stays_on_the_display_when_it_grows_after_opening(
         real.frame(4)
         _, top_before, _, height_before, _ = _modal_rect(real)
 
-        state.policy = Policy.AUTONOMOUS
+        real.open_list = True
         real.frame(6)
         left, top, width, height, _ = _modal_rect(real)
 
-        assert height > height_before + 100.0, "the top rung no longer grows the modal"
+        assert height > height_before + 100.0, "opening the list no longer grows the modal"
         # The fixture has to be the hazard: grown from where it stood, it overhangs.
         assert top_before + height > 720.0
         assert top >= 0.0 and top + height <= 720.0
         assert left >= 0.0 and left + width <= 1280.0
+        for label in ("launch", "cancel"):
+            assert top <= real.placed[label][0] and real.placed[label][1] <= top + height
 
 
-def test_what_does_not_fit_the_display_is_reached_by_scrolling(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+@pytest.mark.parametrize("policy", list(Policy))
+@pytest.mark.parametrize("picked", [False, True], ids=["new", "resume"])
+@pytest.mark.parametrize("height", [700.0, 480.0])
+def test_the_buttons_are_under_a_scrolling_body_and_on_the_display_on_every_rung(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, policy: Policy, picked: bool, height: float
 ) -> None:
     """
-    A display shorter than the modal's contents: the window is held to the display's
-    height and the rest scrolls, which is only a way to the launch button while the
-    whole window is on the display.
+    What does not fit scrolls, and the launch and cancel buttons are not part of
+    what scrolls: they are items of the modal itself, under the child the fields
+    are in, so they are on the display at every rung, with the session list open
+    and a session picked, on a work area 700 pixels tall and on one much shorter.
     """
-    state = LauncherState(task=A_PREMISE, cwd=str(tmp_path), policy=Policy.AUTONOMOUS)
+    row = _row("a", cwd=str(tmp_path))
+    state = LauncherState(task=A_PREMISE, cwd=str(tmp_path), policy=policy)
+    if picked:
+        state.picker.pick(row, state.cwd)
     _settled(state)
     state.request_open()
     with _RealFrames(monkeypatch, state) as real:
-        real.io.display_size = real.imgui.ImVec2(1280.0, 480.0)
+        real.scanner = lambda cwd: ((row,), {})
+        real.open_list = True
+        real.io.display_size = real.imgui.ImVec2(1280.0, height)
         real.frame(6)
-        _, top, _, height, scroll_max = _modal_rect(real)
+        _, top, _, tall, modal_scroll = _modal_rect(real)
+        body = real.body()
 
-        assert top >= 0.0 and top + height <= 480.0
-        assert scroll_max > 0.0
+        assert top >= 0.0 and top + tall <= height
+        assert modal_scroll == 0.0, "the window itself scrolls, and its buttons with it"
+        for label in ("launch", "cancel"):
+            low, high, window = real.placed[label]
+            assert window == launcher.TITLE, f"{label} is drawn inside {window}"
+            assert body.pos.y + body.size.y <= low, f"{label} overlaps the body"  # type: ignore[attr-defined]
+            assert top <= low and high <= top + tall
+            assert 0.0 <= low and high <= height
+        if policy is Policy.AUTONOMOUS or height < 700.0:
+            # The fixture has to be the hazard: there is more than fits.
+            assert body.scroll_max.y > 0.0  # type: ignore[attr-defined]
+
+        # Scrolled to its end, the body moves and the buttons do not.
+        before = dict(real.placed)
+        real.imgui.internal.set_scroll_y(body, body.scroll_max.y)  # type: ignore[attr-defined]
+        real.frame(3)
+        assert {k: v[:2] for k, v in real.placed.items()} == {k: v[:2] for k, v in before.items()}
+
+
+def test_the_body_is_given_what_the_display_leaves_and_never_nothing() -> None:
+    assert launcher.body_room(900.0, 30.0, 12.0, 58.0) == 800.0
+    assert launcher.body_room(700.0, 30.0, 12.0, 58.0) == 600.0
+    # A taller footer -- a hold reason wrapped under the buttons -- comes off the body.
+    assert launcher.body_room(700.0, 30.0, 12.0, 98.0) == 560.0
+    # A display too short for both still leaves the task box in reach.
+    assert launcher.body_room(200.0, 30.0, 12.0, 58.0) == launcher._BODY_FLOOR
+    assert launcher._BODY_FLOOR > launcher._TASK_HEIGHT
 
 
 def test_no_line_of_text_widens_the_modal(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -4905,13 +5416,17 @@ def test_no_line_of_text_widens_the_modal(monkeypatch: pytest.MonkeyPatch, tmp_p
     with _RealFrames(monkeypatch, state) as real:
         real.frame(4)
         modal = real.imgui.internal.find_window_by_name(launcher.TITLE)
-        modal.state_storage.set_int(modal.get_id(launcher._RESUME_ID), 1)
+        # The header is an item of the body, so its open flag is the body's to keep.
+        body = real.body()
+        body.state_storage.set_int(body.get_id(launcher._RESUME_ID), 1)  # type: ignore[attr-defined]
         real.frame(4)
         assert state.picker.expanded
         _, _, width, _, _ = _modal_rect(real)
         assert width == launcher._WIDTH
-        # Held to the width by wrapping and not by being cut off at it.
+        # Held to the width by wrapping and not by being cut off at it, in the body
+        # and in the footer the hold reason is drawn in.
         assert modal.content_size.x <= width
+        assert body.content_size.x <= body.size.x <= width  # type: ignore[attr-defined]
 
 
 def test_a_reopened_modal_is_centred_and_not_put_where_the_last_one_stood(
@@ -4975,13 +5490,15 @@ def test_a_refused_directory_is_not_described_as_granted_under_the_dial(
     refusal's side.
     """
     state = LauncherState(task=A_PREMISE, cwd=INSIDE_THE_CHECKOUT, policy=Policy.AUTONOMOUS)
-    lines, launched = _drawn(monkeypatch, state, click_launch=True)
+    fake, launched = _run_draw(monkeypatch, state, click_launch=True)
+    lines, behind = _lines(fake), _behind(fake)
 
-    assert any("refused" in line and "ordinary gate" in line for line in lines)
-    assert not any(line.startswith("adds ") for line in lines)
-    assert "nothing runs unattended" in lines
-    assert any("runs under strict" in line for line in lines)
-    assert any(line.startswith("still parks ") and "writes" in line for line in lines)
+    assert "autonomous is refused for this directory — this launch runs strict" in lines
+    assert launcher.LOUD_LINE not in lines
+    assert not any(line.startswith("adds ") for line in [*lines, *behind])
+    assert any("refused" in p and "ordinary gate" in p for p in behind)
+    assert "nothing runs unattended" in behind
+    assert any(p.startswith("still parks ") and "writes" in p for p in behind)
     # And the launch is the one those lines describe.
     assert [spec.policy for spec in launched] == [Policy.STRICT]
 
@@ -5039,3 +5556,85 @@ def test_a_worktree_whose_root_holds_its_main_checkout_is_not_the_measured_one()
         assert text.wider.startswith("and outside it, not measured:")
         assert "Bash also writes" not in text.wider
         assert "/a/b/main" in text.wider and _MEASURED_AT in text.wider
+
+
+# ---------------------------------------------------------------------------
+# A pick continues the session as what it was
+# ---------------------------------------------------------------------------
+
+
+def _record(
+    model: str = "claude-opus-5", template: str | None = "feature", cap: int | None = 2
+) -> tuple[launcher.Recorder, list[str]]:
+    asked: list[str] = []
+
+    def recorder(session_id: str) -> launcher.Recorded | None:
+        asked.append(session_id)
+        return launcher.Recorded(model, template, cap)
+
+    return recorder, asked
+
+
+def test_a_pick_sets_model_team_and_cap_from_the_sessions_record(tmp_path: Path) -> None:
+    """
+    New Task's combos start at the default model and solo, so a resume built from
+    them as they stood restarted a team as one agent. The click is where the
+    session's own answer is put in them; they are the operator's after it.
+    """
+    state = LauncherState(task="t", cwd=str(tmp_path))
+    state.picker = _loaded(_row("a", cwd=str(tmp_path)))
+    recorder, asked = _record()
+
+    state.pick_session(state.picker.rows[0], recorder=recorder)
+
+    assert asked == ["a"]
+    assert state.model == "claude-opus-5"
+    assert templates.names()[state.template_index] == "feature"
+    assert state.subagent_cap == 2
+    outcome = state.resumed()
+    assert isinstance(outcome, LaunchSpec)
+    assert (outcome.model, outcome.template, outcome.subagent_cap) == (
+        "claude-opus-5",
+        "feature",
+        2,
+    )
+
+    # Changed afterwards, they stay changed; a click that clears the pick reads
+    # nothing and puts nothing back.
+    state.template_index = 0
+    state.pick_session(state.picker.rows[0], recorder=recorder)
+    assert state.picker.picked is None and asked == ["a"]
+    assert state.template_index == 0 and state.model == "claude-opus-5"
+
+
+@pytest.mark.parametrize(
+    "recorded",
+    [None, launcher.Recorded("", None, None), launcher.Recorded("", "no-such-team", None)],
+    ids=["no record", "a record that says nothing", "a team this build does not have"],
+)
+def test_what_the_record_does_not_say_is_left_as_it_was(
+    tmp_path: Path, recorded: launcher.Recorded | None
+) -> None:
+    state = LauncherState(task="t", cwd=str(tmp_path), model="claude-sonnet-5", template_index=2)
+    state.subagent_cap = 5
+    state.picker = _loaded(_row("a", cwd=str(tmp_path)))
+
+    state.pick_session(state.picker.rows[0], recorder=lambda session_id: recorded)
+
+    assert state.picker.picked is not None
+    assert (state.model, state.template_index, state.subagent_cap) == ("claude-sonnet-5", 2, 5)
+
+
+def test_a_click_on_a_row_in_the_drawn_list_fills_the_combos_from_its_record(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The wiring: the list's click is what asks the recorder ``draw`` was handed."""
+    state = LauncherState(task="t", cwd=str(tmp_path))
+    state.picker = _loaded(_row("a", cwd=str(tmp_path)))
+    recorder, asked = _record(template="research", cap=None)
+
+    _run_draw(monkeypatch, state, expand=True, click_row=0, recorder=recorder)
+
+    assert state.picker.selected == "a" and asked == ["a"]
+    assert templates.names()[state.template_index] == "research"
+    assert state.subagent_cap is None

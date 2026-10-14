@@ -1,6 +1,11 @@
 """
-Resuming a session: a short form of its own, not the New Task modal with fields
-filled in.
+Resuming a closed card's session: a short form of its own, not the New Task modal
+with fields filled in.
+
+**Opened from a card and from nowhere else**: its menu's Resume…, the key for
+that, and the gate menu's "Resume as …" and "Continue as …". A session picked in
+New Task's session list is resumed there, by New Task, with New Task's fields
+(``launcher.LauncherState.resumed``).
 
 A resume differs from a launch in what is already settled. The session, the
 directory it runs in and (where a record of it exists) its team are facts about a
@@ -12,13 +17,16 @@ the sub-agent cap.
 **Every check is the launcher's, asked through the launcher's functions.** Where the
 session runs is ``launcher.launch_directory``'s answer, whether the top rung may be
 used there is ``launcher.refusal_for``'s, and whether this machine's CLI can contain
-it is ``launcher.VersionGate``'s. What this module owns is what a resume does with
-the answers, and it differs from New Task in one place: **a rung the directory is
-refused for holds the resume instead of downgrading it.** The launcher downgrades
-because the field that caused the refusal is on screen and one keystroke from
-correct. Here the directory is not a field, so there is nothing to correct, and the
-way past is the dial: choosing a lower rung is a decision the operator makes, and
-it is not made for them.
+it is ``launcher.VersionGate``'s. Whether a rung may run contained given those
+answers is ``launcher.resume_gate_hold``'s, and the spec is
+``launcher.resume_spec``'s: the two New Task's own resume goes through, so a
+resume is held or granted by one rule whichever surface pressed it. **A rung the
+directory is refused for holds the resume instead of downgrading it**, which is
+where a resume differs from a new session; ``resume_gate_hold`` says why.
+
+What this module owns is the form: the facts drawn as facts, and one hold New Task
+does not have. A session that recorded no directory is not resumed from here,
+because this form has no field to say where; New Task falls back to its own.
 
 **The message does not become the session's title.** ``LaunchSpec.task`` is what
 ``announce`` puts on the record, so a resume that carried "ok, carry on" there
@@ -47,13 +55,12 @@ from typing import assert_never
 
 from imgui_bundle import imgui
 
-from .. import cli_version, sandbox, templates, tree
+from .. import cli_version, templates
 from ..approval import Policy, requires_containment
 from ..model import LaunchSpec
 from ..model_catalog import DEFAULT_MODEL, FALLBACK_MODELS
 from ..sessionfile import UnknownPolicy
 from ..sessions import SessionRow
-from ..theme import P
 from . import launcher, widgets
 from .launcher import (
     FieldDirectory,
@@ -64,6 +71,7 @@ from .launcher import (
     UnrecordedDirectory,
     VersionGate,
 )
+from .widgets import Help, Notice, Tone
 
 __all__ = [
     "TITLE",
@@ -77,46 +85,57 @@ __all__ = [
     "ResumeForms",
     "UnknownTeam",
     "directory_line",
+    "directory_notice",
     "draw",
+    "failure_notice",
+    "gate_notice",
     "press",
     "task_fact",
 ]
 
 TITLE = "Resume session"
 
-_WIDTH = 600.0
-_HEIGHT = 560.0
+_WIDTH = widgets.DIALOG_WIDTH
 _MESSAGE_HEIGHT = 120.0
-_LABEL_COLUMN = 92.0
-# Window padding for this modal only: the default is sized for docked panes, and a
-# form read top to bottom wants room between its text and its frame.
-_PADDING = (20.0, 16.0)
+_LABEL_COLUMN = widgets.DIALOG_LABEL_COLUMN
+# The least the body is given on a display too short for it: the message box and
+# its caption.
+_BODY_FLOOR = _MESSAGE_HEIGHT + 40.0
+# The scrolling child everything above the buttons is drawn in.
+BODY_ID = "##body"
 
 _MESSAGE_ID = "##message"
 
 HOLD_EMPTY = "type the message this session is resumed with"
 HOLD_GONE = "this session's directory is gone -- restore it to resume"
-# Says the one other way in, and that there may be none: a card opens this form
-# from its record, and New Task's session list opens it with the directory the
-# CLI's own listing gives for the row (``app._open_picked``).
+# Says the one other way in: New Task resumes a row of its session list where the
+# CLI's own listing says the session ran, and in its working directory field for a
+# row that says nowhere (``launcher.launch_directory``).
 HOLD_UNRECORDED = (
     "this session recorded no directory, and a resume is not started in a guessed one. "
-    "Its row in New Task's session list resumes it where the CLI ran it, if the CLI "
-    "recorded that; if this form was opened from that row, nothing here can resume it"
+    "New Task's session list can resume it: picked there it runs where the CLI ran it, "
+    "or in the working directory typed there if the CLI recorded none"
 )
 HOLD_MOVED = (
     "what this form showed about the directory is not what was found at the press -- "
     "read it again before resuming"
 )
 HOLD_UNREAD = "the directory has not been read yet"
-HOLD_CHECKING = "confirming this machine's CLI can contain the session"
-HOLD_CLI = "this CLI cannot contain the session -- choose another gate to resume"
-# ``{rung}`` is the rung on the dial. The two situations are named together because
-# ``launcher.refusal_for`` cannot tell them apart; see its docstring.
-HOLD_REFUSED = (
-    "{rung} is refused here: the directory is inside pptmstr's own checkout, or cannot "
-    "be resolved at all -- choose another gate to resume"
-)
+# The three ``launcher.resume_gate_hold`` chooses between, under the names this
+# form's callers know them by. ``HOLD_REFUSED`` has a ``{rung}`` slot.
+HOLD_CHECKING = launcher.RESUME_HOLD_CHECKING
+HOLD_CLI = launcher.RESUME_HOLD_CLI
+HOLD_REFUSED = launcher.RESUME_HOLD_REFUSED
+
+# The line beside a held button for each of this form's own reasons; the
+# launcher's are ``launcher.HOLD_LINES``. See ``launcher.hold_notice``.
+HOLD_LINES: dict[str, str] = {
+    HOLD_EMPTY: "held: type a message first",
+    HOLD_GONE: "held: its directory is gone",
+    HOLD_UNRECORDED: "held: no directory was recorded",
+    HOLD_MOVED: "held: the directory changed",
+    HOLD_UNREAD: "held: the directory is not read yet",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -271,7 +290,14 @@ def read(facts: Facts, *, checkout: str = launcher.OWN_CHECKOUT) -> Reading:
         return Reading(directory, None)
     return Reading(
         directory,
-        launcher.refusal_for(launcher.resolved_directory(directory), checkout=checkout),
+        launcher.refusal_for(
+            launcher.resolved_directory(directory),
+            checkout=checkout,
+            named="this session's directory",
+            # A resume the rung is refused for is held and never seated one rung
+            # down (``launcher.resume_gate_hold``), and the refusal says so.
+            consequence=launcher.REFUSAL_HOLDS,
+        ),
     )
 
 
@@ -381,10 +407,10 @@ class ResumeForm:
 
     def hold(self, reading: Reading, gate: VersionGate) -> str | None:
         """
-        Why a resume under ``reading`` is held, or None. The launcher's holds in the
-        launcher's order -- the directory first, under every rung, then the machine
-        for a rung that needs containment -- with the refused rung between them,
-        which the launcher downgrades and this form does not.
+        Why a resume under ``reading`` is held, or None. The directory first,
+        under every rung, and then whether the rung may run contained, which is
+        ``launcher.resume_gate_hold``'s answer here as it is for a session picked
+        in New Task.
 
         The launcher's thin-premise hold is not here. It asks whether the task box
         is a whole brief, and a resumed session's premises are its conversation.
@@ -398,13 +424,7 @@ class ResumeForm:
                 pass
             case _:
                 assert_never(reading.directory)
-        if not requires_containment(self.policy):
-            return None
-        if reading.refusal is not None:
-            return HOLD_REFUSED.format(rung=self.policy.value)
-        if not gate.answered:
-            return HOLD_CHECKING
-        return HOLD_CLI if gate.refusal is not None else None
+        return launcher.resume_gate_hold(self.policy, reading.refusal, gate)
 
     @property
     def failure_loaded(self) -> bool:
@@ -495,6 +515,9 @@ class ResumeForms:
     version_gate: VersionGate = field(default_factory=VersionGate)
     _open_requested: bool = False
     _focus: bool = False
+    # How tall the buttons were on the last frame they were drawn, or zero before
+    # the first. The body above them is bounded to what that leaves of the display.
+    _footer_height: float = 0.0
 
     def open_for(
         self,
@@ -648,27 +671,27 @@ def press(
     if fresh != shown:
         return Hold(HOLD_MOVED)
     facts = form.facts
-    resolved = launcher.resolved_directory(fresh.directory)
-    # Both or neither, as on the launcher: past ``hold``, a rung that requires
-    # containment was granted by this reading.
-    contained = requires_containment(form.policy)
-    spec = LaunchSpec(
+    # The rung and the containment are a pair, and ``resume_spec`` is what pairs
+    # them, from this press's reading. Past ``hold`` it has nothing left to refuse.
+    spec = launcher.resume_spec(
+        session_id=facts.session_id,
+        cwd=launcher.resolved_directory(fresh.directory),
+        policy=form.policy,
+        refusal=fresh.refusal,
+        gate=gate,
         # The title the card has, and whether it is only a label. Never the
         # message: the announce puts ``task`` on the record, and Fork and Retry
         # start a new session from what is there.
         task=facts.title,
         task_is_label=facts.title_is_label,
+        message=message,
         model=form.model,
-        cwd=resolved,
-        session_base=tree.session_base(resolved),
         template=form.template,
         brief=form.brief,
-        resume=facts.session_id,
-        containment=sandbox.containment_settings() if contained else None,
-        policy=form.policy,
         subagent_cap=form.subagent_cap,
-        message=message,
     )
+    if isinstance(spec, launcher.ResumeHeld):
+        return Hold(spec.reason)
     return Launch(spec, message, form.draft())
 
 
@@ -712,14 +735,11 @@ def directory_line(directory: LaunchDirectory) -> str:
             assert_never(directory)
 
 
-_PRESSED_HINT = "Ctrl+Enter resumes, Enter for a new line"
+_FILLED_CAPTION = "your last message to it -- edit or replace.  Ctrl+Enter resumes"
+_MESSAGE_CAPTION = "sent to the session as its next message.  Ctrl+Enter resumes"
 _TEAM_UNKNOWN = (
     "not known -- this session has no record from this build, so the team is this "
     "resume's to choose"
-)
-_NOT_CONTAINED = (
-    "not contained: WebFetch and WebSearch run inside the CLI process, which the "
-    "sandbox does not wrap."
 )
 _NO_THIN_HOLD = (
     "a one-line message is enough here: this session's premises are its conversation "
@@ -727,11 +747,95 @@ _NO_THIN_HOLD = (
 )
 _BRIEFING = "the resumed session is given a briefing for the gate chosen here."
 
+# Under the directory, where the session does not simply run where it was
+# recorded. The sentence for each is behind the line's question mark.
+RUNS_BY_LINK = "runs where a link leads, not where its recorded path reads"
+RUNS_GONE = "its recorded directory is gone — the resume is held"
+RUNS_UNRECORDED = "recorded no directory — the resume is held"
 
-def _fact(label: str, value: str) -> None:
+_FAILED_LOADED = "the message below is that resume, as it was typed"
+_FAILED_KEPT = "its message is kept; restoring it sets what is below aside"
+
+
+def _directory_help(directory: LaunchDirectory) -> Help:
+    return Help("runs-in", "where this session runs", (directory_line(directory),))
+
+
+def directory_notice(directory: LaunchDirectory) -> Notice | None:
+    """
+    The line under the directory, or None for a session that runs where it was
+    recorded: that one's sentence is behind a question mark on the directory
+    itself, and there is nothing to warn of.
+    """
+    explained = _directory_help(directory)
+    match directory:
+        case RecordedDirectory():
+            return None
+        case RedirectedDirectory():
+            return Notice(RUNS_BY_LINK, Tone.WARN, explained)
+        case GoneDirectory():
+            return Notice(RUNS_GONE, Tone.DANGER, explained)
+        case UnrecordedDirectory() | FieldDirectory():
+            return Notice(RUNS_UNRECORDED, Tone.DANGER, explained)
+        case _:
+            assert_never(directory)
+
+
+def failure_notice(failure: Failed, *, loaded: bool) -> Notice:
+    """
+    The oldest resume that started nothing, as one line with as much of the
+    reason as the row holds; behind its question mark, the reason whole and what
+    has become of its message.
+    """
+    said = f"that resume did not start: {failure.reason}"
+    return Notice(
+        said,
+        Tone.DANGER,
+        Help(
+            "failure",
+            "why that resume did not start",
+            (said, _FAILED_LOADED if loaded else _FAILED_KEPT),
+        ),
+    )
+
+
+def gate_notice(
+    form: ResumeForm, reading: Reading, gate: VersionGate, subagent_cap: int | None
+) -> Notice:
+    """
+    The one line under the dial and what is behind its question mark:
+    ``launcher.gate_notice``, as a resume. A rung the directory is refused for
+    holds the resume, and the line and the reason both say held.
+    """
+    needs = requires_containment(form.policy)
+    launches = _launches(reading.directory)
+    return launcher.gate_notice(
+        form.policy,
+        resuming=True,
+        directory=reading.directory,
+        refusal=reading.refusal if needs else None,
+        gate=gate,
+        layout=lambda: form.git_layout(reading.directory),
+        subagent_cap=subagent_cap,
+        launches=launches,
+        also=(_BRIEFING, *((_NO_THIN_HOLD,) if needs and launches else ())),
+    )
+
+
+def _fact(label: str, value: str, explained: Help | None = None) -> None:
+    """
+    One settled thing about the session: its name in the label column and its
+    value on the rest of the row, cut to fit, with a question mark after it when
+    there is more to say.
+    """
     imgui.text_disabled(label)
     imgui.same_line(_LABEL_COLUMN)
-    imgui.text(widgets.ellipsis(widgets.flat_line(value), imgui.get_content_region_avail().x))
+    room = imgui.get_content_region_avail().x
+    if explained is not None:
+        room -= widgets.help_mark_width()
+    imgui.text(widgets.ellipsis(widgets.flat_line(value), room))
+    if explained is not None:
+        widgets.help_mark(explained.mark, explained.title, explained.paragraphs)
 
 
 def _last_gate(facts: Facts) -> str:
@@ -749,59 +853,55 @@ def _facts_block(form: ResumeForm, reading: Reading, live: frozenset[str]) -> No
     facts = form.facts
     _fact("session", facts.session_id)
     label, value, note = task_fact(facts)
-    _fact(label, value)
-    if note is not None:
-        imgui.text_disabled(note)
-    _fact("directory", reading.directory.path or "not recorded")
-    line = directory_line(reading.directory)
-    match reading.directory:
-        case RecordedDirectory():
-            imgui.text_disabled(line)
-        case RedirectedDirectory():
-            imgui.text_colored(P.warn.vec4, line)
-        case _:
-            imgui.text_colored(P.danger.vec4, line)
+    _fact(label, value, None if note is None else Help("title", "this session's title", (note,)))
+    under = directory_notice(reading.directory)
+    _fact(
+        "directory",
+        reading.directory.path or "not recorded",
+        _directory_help(reading.directory) if under is None else None,
+    )
+    if under is not None:
+        widgets.notice(under)
     if form.team_known:
         _fact("team", form.template or templates.names()[0])
     else:
+        # The label on the combo's own baseline, as a fact's is on its value's.
+        imgui.align_text_to_frame_padding()
         imgui.text_disabled("team")
         imgui.same_line(_LABEL_COLUMN)
-        imgui.set_next_item_width(160.0)
+        imgui.set_next_item_width(widgets.DIALOG_FIELD_WIDTH)
         _, form.template_index = imgui.combo("##team", form.template_index, list(templates.names()))
-        imgui.text_colored(P.warn.vec4, _TEAM_UNKNOWN)
+        widgets.help_mark("team", "this session's team", (_TEAM_UNKNOWN,))
     _fact("brief", form.brief or "none")
     _fact("last gate", _last_gate(facts))
-    live_line = launcher.live_resume_line(_row(facts), live)
+    live_line = launcher.live_notice(_row(facts), live)
     if live_line is not None:
-        imgui.text_colored(P.warn.vec4, live_line)
+        widgets.notice(live_line)
 
 
 def _failure_notice(form: ResumeForm) -> None:
     if not form.failures and not form.set_aside:
         return
     if form.failures:
-        failure = form.failures[0]
-        imgui.text_colored(P.danger.vec4, f"that resume did not start: {failure.reason}")
-        if form.failure_loaded:
-            imgui.text_disabled("the message below is that resume, as it was typed")
+        loaded = form.failure_loaded
+        widgets.notice(failure_notice(form.failures[0], loaded=loaded))
+        if loaded:
             if imgui.small_button("dismiss this notice"):
                 form.discard_failed()
         else:
-            imgui.text_disabled("its message is kept; restoring it sets what is below aside")
             if imgui.small_button("restore that message"):
                 form.restore_failed()
             imgui.same_line()
             if imgui.small_button("discard it"):
                 form.discard_failed()
     if form.set_aside:
-        imgui.text_disabled(f"{len(form.set_aside)} message(s) set aside by a restore are kept")
+        widgets.notice(Notice(f"{len(form.set_aside)} message(s) set aside by a restore are kept"))
         if imgui.small_button("bring back what was set aside"):
             form.restore_set_aside()
         imgui.same_line()
         if imgui.small_button("discard what was set aside"):
             form.discard_set_aside()
-    imgui.separator()
-    imgui.spacing()
+    widgets.dialog_group()
 
 
 def _gate_rows(
@@ -810,53 +910,25 @@ def _gate_rows(
     gate: VersionGate,
     *,
     prober: launcher.Prober,
+    subagent_cap: int | None,
 ) -> None:
     """
-    The dial, one line saying what the chosen rung does here, and the launcher's
-    paragraphs for it behind a disclosure.
+    The dial, and under it the one line ``gate_notice`` has for the chosen rung
+    here.
     """
     rungs = launcher.POLICIES
-    imgui.set_next_item_width(200.0)
+    imgui.set_next_item_width(widgets.DIALOG_FIELD_WIDTH)
     changed, picked = imgui.combo("gate", rungs.index(form.policy), [p.value for p in rungs])
     if changed:
         form.policy = rungs[picked]
     needs = requires_containment(form.policy)
-    asks_machine = needs and _launches(reading.directory) and reading.refusal is None
-    if asks_machine:
+    if needs and _launches(reading.directory) and reading.refusal is None:
         # Started from the draw and only under a rung that needs it, as on the
         # launcher, so a resume under the ordinary gate spawns no subprocess.
         gate.poll()
         gate.request(prober=prober)
-    dial = launcher.dial_text(form.policy, form.policy)
-    if needs and _launches(reading.directory) and reading.refusal is not None:
-        imgui.text_colored(P.danger.vec4, HOLD_REFUSED.format(rung=form.policy.value))
-    elif needs:
-        imgui.text_colored(P.danger.vec4, f"runs without asking you, contained: {dial.adds}")
-    else:
-        imgui.text_disabled(dial.adds)
-    if not imgui.tree_node("details##gate"):
-        return
-    imgui.text_disabled(dial.parks)
-    imgui.text_disabled(_BRIEFING)
-    if needs:
-        unstated = launcher.boundary_unstated(reading.directory)
-        if unstated is not None:
-            imgui.text_colored(P.warn.vec4, unstated)
-        elif reading.refusal is not None:
-            imgui.text_colored(P.danger.vec4, reading.refusal)
-        elif gate.refusal is not None:
-            imgui.text_colored(P.danger.vec4, gate.refusal)
-        elif _launches(reading.directory):
-            contained = launcher.contained_text(
-                reading.directory, form.git_layout(reading.directory)
-            )
-            imgui.text_disabled(contained.sandbox)
-            if contained.wider is not None:
-                imgui.text_colored(P.warn.vec4, contained.wider)
-            imgui.text_disabled(contained.gate)
-            imgui.text_colored(P.warn.vec4, _NOT_CONTAINED)
-            imgui.text_disabled(_NO_THIN_HOLD)
-    imgui.tree_pop()
+    widgets.dialog_caption()
+    widgets.notice(gate_notice(form, reading, gate, subagent_cap))
 
 
 def draw(
@@ -882,9 +954,12 @@ def draw(
     ``live`` the ids of the sessions this process is running, each as
     ``launcher.draw`` takes them.
 
-    A fixed size with the facts and controls in a scrolling body and the buttons in
-    a footer under it: the body's height changes with the gate and its disclosure,
-    and the buttons do not move when it does.
+    Sized to what it holds, up to the display, as the launcher is: the facts and
+    controls are a body that scrolls past that, and the buttons are a footer under
+    it that does not.
+
+    Under a control there is one line, and an explanation is behind a question
+    mark, as in the launcher (``widgets.notice``, ``widgets.help_mark``).
     """
     form = state.form
     if form is None:
@@ -898,11 +973,50 @@ def draw(
     if not state.is_open:
         return
 
+    # The launcher's scope, from before the window begins -- which is when it reads
+    # its padding -- to after it ends.
+    with widgets.dialog_style():
+        _modal(
+            state,
+            form,
+            launch=launch,
+            wrap=wrap,
+            prober=prober,
+            subagent_cap=subagent_cap,
+            models=models,
+            live=live,
+            checkout=checkout,
+        )
+
+
+def _modal(
+    state: ResumeForms,
+    form: ResumeForm,
+    *,
+    launch: Callable[[Launch], None],
+    wrap: bool,
+    prober: launcher.Prober,
+    subagent_cap: int | None,
+    models: tuple[str, ...],
+    live: frozenset[str],
+    checkout: str,
+) -> None:
+    """
+    The open form, begun and ended here. ``draw`` documents the arguments.
+
+    The groups, each set off from the next by ``widgets.dialog_group``: what is
+    settled about the session, the message, the gate, and what runs it; the buttons
+    are the footer.
+    """
+    # Before anything is drawn: the Escape that closes an explanation is not also
+    # this form's (``widgets.help_showing``).
+    explaining = widgets.help_showing()
     viewport = imgui.get_main_viewport()
     imgui.set_next_window_pos(viewport.get_center(), imgui.Cond_.appearing, imgui.ImVec2(0.5, 0.5))
-    imgui.set_next_window_size(
-        imgui.ImVec2(min(_WIDTH, viewport.work_size.x), min(_HEIGHT, viewport.work_size.y)),
-        imgui.Cond_.always,
+    # One width, and a height that fits what is drawn up to the work area's: the
+    # launcher's window, for its reasons.
+    imgui.set_next_window_size_constraints(
+        imgui.ImVec2(_WIDTH, 0.0), imgui.ImVec2(_WIDTH, viewport.work_size.y)
     )
     last = imgui.internal.find_window_by_name(TITLE)
     if last is not None and last.was_active and not last.appearing:
@@ -914,9 +1028,7 @@ def draw(
         )
         if moved is not None:
             imgui.set_next_window_pos(imgui.ImVec2(*moved), imgui.Cond_.always)
-    imgui.push_style_var(imgui.StyleVar_.window_padding, imgui.ImVec2(*_PADDING))
-    opened, _ = imgui.begin_popup_modal(TITLE, None, imgui.WindowFlags_.no_resize)
-    imgui.pop_style_var()
+    opened, _ = imgui.begin_popup_modal(TITLE, None, imgui.WindowFlags_.always_auto_resize)
     if not opened:
         state.is_open = False
         return
@@ -927,17 +1039,13 @@ def draw(
     # label: under the session's id each has its own, with its own edit state.
     imgui.push_id(form.facts.session_id)
 
-    line = imgui.get_text_line_height_with_spacing()
-    footer = imgui.get_frame_height_with_spacing() + 2.0 * line + imgui.get_style().item_spacing.y
-    imgui.begin_child("##body", imgui.ImVec2(0.0, -footer))
+    widgets.begin_dialog_body(BODY_ID, state._footer_height, _BODY_FLOOR)
     imgui.push_text_wrap_pos(0.0)
 
     _failure_notice(form)
     _facts_block(form, reading, live)
 
-    imgui.spacing()
-    imgui.separator()
-    imgui.spacing()
+    widgets.dialog_group()
 
     if state._focus:
         imgui.set_keyboard_focus_here()
@@ -962,16 +1070,15 @@ def draw(
         flags=widgets.CTRL_ENTER_SUBMITS,
     )
     filled = form.facts.last_message is not None and not form.touched
-    imgui.text_disabled(
-        f"the last message you sent this session -- edit or replace it.  {_PRESSED_HINT}"
-        if filled
-        else f"sent to the session as its next message.  {_PRESSED_HINT}"
-    )
+    widgets.dialog_caption()
+    widgets.notice(Notice(_FILLED_CAPTION if filled else _MESSAGE_CAPTION))
 
-    imgui.spacing()
-    _gate_rows(form, reading, gate, prober=prober)
+    effective = subagent_cap if form.subagent_cap is None else form.subagent_cap
+    widgets.dialog_group()
+    _gate_rows(form, reading, gate, prober=prober, subagent_cap=effective)
 
-    imgui.set_next_item_width(200.0)
+    widgets.dialog_group()
+    imgui.set_next_item_width(widgets.DIALOG_FIELD_WIDTH)
     options = list(models)
     if form.model not in options:
         options.insert(0, form.model)
@@ -979,9 +1086,8 @@ def draw(
     if changed:
         form.model = options[chosen]
 
-    effective = subagent_cap if form.subagent_cap is None else form.subagent_cap
     if effective is not None:
-        imgui.set_next_item_width(200.0)
+        imgui.set_next_item_width(widgets.DIALOG_FIELD_WIDTH)
         changed, typed = imgui.input_int("sub-agents", effective)
         if changed:
             form.subagent_cap = max(0, typed)
@@ -989,7 +1095,9 @@ def draw(
     imgui.pop_text_wrap_pos()
     imgui.end_child()
 
-    imgui.separator()
+    # The footer: items of the window itself, under the body and outside its scroll.
+    footer_top = imgui.get_cursor_pos().y
+    widgets.dialog_group()
     held = form.hold(reading, gate)
     enabled = form.ready and held is None
     if not enabled:
@@ -1000,7 +1108,8 @@ def draw(
     imgui.same_line()
     cancelled = imgui.button("cancel", imgui.ImVec2(90.0, 0.0))
 
-    dismissed = cancelled or imgui.is_key_pressed(imgui.Key.escape)
+    # Not while an explanation is up: that Escape closes the explanation.
+    dismissed = cancelled or (not explaining and imgui.is_key_pressed(imgui.Key.escape))
     # ``enabled`` and not the click alone: a disabled button does nothing to the
     # keyboard, and Ctrl+Enter in the box is a second way in.
     if enabled and (clicked or submitted):
@@ -1014,13 +1123,13 @@ def draw(
                 held = reason
             case _:
                 assert_never(outcome)
-    # Under the buttons, in room the footer always keeps, so a reason appearing
-    # does not move them.
+    # Beside the buttons, on their row, so a reason appearing moves nothing.
     if held is not None:
-        imgui.push_text_wrap_pos(0.0)
-        imgui.text_colored(P.warn.vec4, held)
-        imgui.pop_text_wrap_pos()
+        imgui.same_line()
+        imgui.align_text_to_frame_padding()
+        widgets.notice(launcher.hold_notice(held, what="the resume", lines=HOLD_LINES))
 
+    state._footer_height = imgui.get_cursor_pos().y - footer_top
     imgui.pop_id()
     if dismissed:
         state.close()
