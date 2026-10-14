@@ -28,7 +28,8 @@ BODY_PX = 16.0
 """
 The pixel height of running text until a frame says otherwise: ``theme._FONT_SIZE``.
 
-The live value is ``body_px()``, read from ImGui between frames (``gate.pre_frame``).
+The live value is ``body_px()``: the size ImGui draws the UI font at inside a
+frame, taken between frames (``gate.pre_frame``).
 """
 
 
@@ -292,7 +293,7 @@ class _State:
     family: str = DEFAULT_PROPORTIONAL
     panes_off: frozenset[Pane] = frozenset()
     scale: float = 1.0
-    # The UI font's size as ImGui last reported it; see `gate.pre_frame`.
+    # The size ImGui draws the UI font at inside a frame; see `gate.pre_frame`.
     live_px: float = BODY_PX
     # Goes up whenever a document built before would be wrong now: a role's
     # style, the family or the scale changed, the UI font's size did, or the
@@ -377,7 +378,7 @@ def moved() -> None:
 
 def follow(size: float) -> None:
     """
-    Take the UI font's size as ImGui reports it between frames (``gate.pre_frame``).
+    Take the size ImGui draws the UI font at inside a frame (``gate.pre_frame``).
 
     A change moves the epoch: a document holds advances for the size it was
     built at.

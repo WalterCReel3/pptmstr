@@ -125,6 +125,8 @@ it is drawn with (``literal_columns``, ``literal_view``).
 
 from __future__ import annotations
 
+import math
+import os
 import struct
 import traceback
 from collections.abc import Callable, Iterator
@@ -421,10 +423,44 @@ def _unaccepted(kind: str, why: str) -> str:
     The sentence for a library that is not accepted, quoting its own words for why.
     """
     if kind == NOT_INSTALLED:
-        return f"the typesetting library is not installed ({why})"
+        return not_installed(why)
     if kind == REFUSED:
         return f"the typesetting library was refused ({why})"
     return f"the typesetting library is not in use ({kind}: {why})"
+
+
+def not_installed(why: str) -> str:
+    """
+    The sentence for a library imscribe calls not installed, worded from what
+    pptmstr knows that imscribe does not say. ``why`` is imscribe's reason.
+
+    The one place it is worded: the Text menu, the settings dialog, the
+    ``typeset text:`` line of ``pptmstr --version`` and a test's skip reason
+    all reach it (``_unaccepted``). imscribe gives one reason for every way of
+    having no library, "IMTYPESET_LIBRARY is not set" (its request P43 is
+    open), which is untrue of a run switched off with a library installed. So:
+
+    - ``IMSCRIBE_NO_TYPESET`` on: it is switched off, with the value it is on at;
+    - no imtypeset installed, no pair built in this checkout's ``.deps`` and
+      neither variable naming one: not installed, with nothing more to say;
+    - anything else: imscribe's own reason, quoted.
+
+    Never raises.
+    """
+    try:
+        if pairing.asks(os.environ, pairing.DISABLE_VARIABLE):
+            value = os.environ[pairing.DISABLE_VARIABLE].strip()
+            return f"typeset text is switched off ({pairing.DISABLE_VARIABLE}={value})"
+        named = any(
+            pairing.named(name) for name in (pairing.LIBRARY_VARIABLE, pairing.PACKAGE_VARIABLE)
+        )
+        root = pairing.checkout()
+        built = root is not None and (root / pairing.DEPS_DIR / pairing.PAIR_DIR).is_dir()
+        if not named and not built and pairing.installed() is None:
+            return "the typesetting library is not installed"
+    except Exception:
+        pass
+    return f"the typesetting library is not installed ({why})"
 
 
 def library() -> tuple[str, str]:
@@ -1415,8 +1451,9 @@ def pre_frame() -> None:
 
     **The size of running text follows the UI font.** The library draws at the
     size its theme names and not at ImGui's current font size, and
-    ``hello_imgui`` scales the UI font for the display, so the size is read from
-    what ImGui reports. A change moves the epoch.
+    ``hello_imgui`` scales the UI font for the display, so the size is the one
+    ImGui will draw the chrome at inside the coming frame, its two style scales
+    applied (``_live_font_size``). A change moves the epoch.
 
     **So does a change of the display's density.** A view keeps the grid it
     worked out, and a diff view's whole-pixel cell is a pixel of the raster
@@ -1462,16 +1499,76 @@ def epoch() -> int:
 
 def _live_font_size() -> float | None:
     """
-    The UI font's size as ImGui has it between frames, or ``None`` before the first.
+    The size the chrome's text is drawn at inside the next frame, or ``None``
+    before the first frame.
 
-    Between frames the font stack is empty, so this is the default font's size with
-    the display scale applied and never a size some pane had pushed.
+    **Computed from the style, as ImGui computes it, and not read.** Between
+    frames ``get_font_size()`` is the base size with neither of the style's
+    scales applied -- measured headless on imgui 1.92.9, 2026-10-14: 16 px
+    between frames and 18 px inside one at ``font_scale_dpi`` 1.1 -- and this
+    runs before ``new_frame``, so a reading taken inside a frame would be one
+    frame late on every change. ``font_scale_dpi`` is what hello_imgui sets
+    from the display's DPI on Windows and Linux (on macOS it is 1 and the
+    framebuffer's 2x is a rasteriser density, ``_density``).
+    ``tests/test_typeset_gate.py`` holds this to the in-frame size over a sweep
+    of bases and both scales. The base is filled in by the first ``new_frame``,
+    so there is no answer before it.
     """
     im = _imgui()
     if im.get_current_context() is None or im.get_frame_count() < 1:
         return None
-    size = float(im.get_font_size())
-    return size if size >= 1.0 else None
+    style = im.get_style()
+    return drawn_size(style.font_size_base, style.font_scale_main, style.font_scale_dpi)
+
+
+def drawn_size(base: float, main: float, dpi: float) -> float | None:
+    """
+    ImGui's ``UpdateCurrentFontSize`` for a top-level window, which every pane
+    is: ``base × main × dpi`` in single precision, ``IM_ROUND``-ed, clamped to
+    ImGui's 1 to ``IMGUI_FONT_SIZE_MAX`` (512). ``None`` for a base under 1,
+    which ImGui has not filled in yet, and for a product that is not a number:
+    a hand-set NaN scale is not a reason to stop the library.
+
+    The wheel is built without ImGui's obsolete functions (it has no
+    ``io.font_global_scale`` and no ``ImFont.scale``), so the two legacy
+    factors ImGui would also multiply by are not there to read.
+    """
+    if not base >= 1.0:
+        return None
+    size = _single(_single(_single(base) * _single(main)) * _single(dpi))
+    if not math.isfinite(size):
+        return None
+    return min(max(1.0, float(math.floor(_single(size + 0.5)))), 512.0)
+
+
+def pushed(px: float) -> float:
+    """
+    The size to hand ``imgui.push_font`` for text ImGui is to draw ``px`` pixels high.
+
+    **The seam's sizes and ``push_font``'s are not in one unit.** A role's size
+    is the pixel height text is drawn at, which is what the library's themes
+    name (``_live_font_size``); ``push_font`` takes a base that ImGui then
+    multiplies by both style scales (``drawn_size``), so a role's size handed
+    to it as it is would be scaled twice. ``px`` divided by the two scales
+    comes back to ``px`` through ImGui's rounding for every whole ``px``,
+    which every role's size is. ``px`` as it is with no context, or with a
+    scale that is not a positive number.
+    """
+    im = _imgui()
+    if im.get_current_context() is None:
+        return px
+    style = im.get_style()
+    scale = _single(style.font_scale_main) * _single(style.font_scale_dpi)
+    if not (math.isfinite(scale) and scale > 0.0):
+        return px
+    return px / scale
+
+
+def _single(value: float) -> float:
+    """
+    ``value`` as the nearest single-precision float, which is what ImGui holds it as.
+    """
+    return float(struct.unpack("<f", struct.pack("<f", value))[0])
 
 
 roles.bind(can_draw)

@@ -1106,7 +1106,9 @@ def _native_font(im: Any, part: Part) -> Iterator[None]:
     face otherwise, at the role's pixel height.
     """
     proportional = roles.style(part.role).slot is Slot.PROPORTIONAL
-    im.push_font(gate.face_font("PROSE") if proportional else None, roles.px(part.role))
+    im.push_font(
+        gate.face_font("PROSE") if proportional else None, gate.pushed(roles.px(part.role))
+    )
     try:
         yield
     finally:
@@ -1649,7 +1651,8 @@ def font(weight: Weight, size: float | None = None) -> Iterator[None]:
 
     What a pane uses when the honest layout is a native table with cells in the
     document's faces. Text drawn this way is an ImGui item: not selectable, and
-    wrapped by ImGui if at all.
+    wrapped by ImGui if at all. ``size`` is the pixel height drawn, as a role's
+    is, and not ``push_font``'s base (``gate.pushed``).
 
     **A native line has one font and no fallback.** A typeset view borrows a
     character its face lacks from another face; ImGui does not, and draws its
@@ -1658,7 +1661,7 @@ def font(weight: Weight, size: float | None = None) -> Iterator[None]:
     ``Weight.CODE``.
     """
     im = _frame()
-    im.push_font(imfont(weight), roles.px(Role.LABEL) if size is None else size)
+    im.push_font(imfont(weight), gate.pushed(roles.px(Role.LABEL) if size is None else size))
     try:
         yield
     finally:

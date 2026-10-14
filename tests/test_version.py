@@ -863,12 +863,12 @@ def test_the_report_into_a_pipe_nobody_reads_is_not_a_traceback() -> None:
 # -- the report, each wrong thing a sentence ------------------------------------------
 
 
-def test_with_no_library_the_report_says_not_installed_and_exits_0() -> None:
+def test_switched_off_the_report_says_so_and_not_that_nothing_is_installed_and_exits_0() -> None:
     lines = _lines(_run("--version", **OFF))
 
     assert lines["typeset"] == (
         "typeset text: not in use (not-installed): "
-        "the typesetting library is not installed (IMTYPESET_LIBRARY is not set)"
+        "typeset text is switched off (IMSCRIBE_NO_TYPESET=1)"
     )
     assert lines["imtypeset"] == (
         f"imtypeset: no library ({pairing.DISABLE_VARIABLE} is set, which is how to run without "
@@ -1318,7 +1318,10 @@ def test_the_librarys_own_kind_is_the_answer_whatever_the_variables_say(
 ) -> None:
     # A library found with neither variable set, one named and refused once
     # its variable was taken back, and a platform the library does not serve.
+    # Not switched off, whatever the run is: that sentence is pptmstr's own
+    # (``gate.not_installed``).
     monkeypatch.delenv(pairing.LIBRARY_VARIABLE, raising=False)
+    monkeypatch.delenv(pairing.DISABLE_VARIABLE, raising=False)
     monkeypatch.setattr(typesetter, "reason", lambda: "its own words")
 
     monkeypatch.setattr(typesetter, "kind", lambda: typesetter.Kind.READY)

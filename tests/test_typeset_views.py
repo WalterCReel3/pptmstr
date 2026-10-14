@@ -1058,8 +1058,9 @@ def test_the_text_follows_the_ui_fonts_size_and_documents_are_rebuilt_for_it(
 ) -> None:
     """
     ``hello_imgui`` scales the UI font for the display and the library draws at the
-    size its theme names, so the theme is sized from what ImGui reports between
-    frames. A document built at the old size holds the old advances: it is stale.
+    size its theme names, so the theme is sized at the size ImGui draws the
+    chrome at (``gate._live_font_size``). A document built at the old size holds
+    the old advances: it is stale.
     """
     cache = typeset.ViewCache()
     first = _view(seam, cache, "k", MARKDOWN)

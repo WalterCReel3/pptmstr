@@ -568,6 +568,38 @@ def test_the_typeset_entry_is_offered_only_when_it_can_work_and_says_why_when_it
     assert under == ([] if reason is None else [f"  {reason}"])
 
 
+def test_switched_off_the_text_menu_says_so_and_not_that_nothing_is_installed(
+    monkeypatch: pytest.MonkeyPatch, typeset_state: object
+) -> None:
+    """
+    Under ``IMSCRIBE_NO_TYPESET`` imscribe answers "not installed
+    (IMTYPESET_LIBRARY is not set)" with a library installed. The menu's
+    sentence is the seam's, unstubbed, from the library's answer as it gives
+    it there: switched off.
+    """
+    from imscribe import typesetter
+
+    from pptmstr import app, pairing
+    from pptmstr.ui import typeset
+    from pptmstr.ui.typeset import gate
+
+    monkeypatch.setenv(pairing.DISABLE_VARIABLE, "1")
+    monkeypatch.setattr(typesetter, "kind", lambda: typesetter.Kind.NOT_INSTALLED)
+    monkeypatch.setattr(typesetter, "reason", lambda: "IMTYPESET_LIBRARY is not set")
+    monkeypatch.setattr(typesetter, "module", lambda: None)
+    for name, value in (("asked", True), ("loaded", False), ("accepted", False)):
+        monkeypatch.setattr(gate._GATE, name, value)
+    monkeypatch.setattr(gate._GATE, "failure", None)
+    menu = _Menu("")
+    monkeypatch.setattr(app, "imgui", menu)
+    monkeypatch.setattr(typeset, "configure", lambda **kwargs: None)
+    app._menus(app.AppState(store=Store(), bridge=Bridge(), settings=Settings()))
+    assert menu.items["Typeset text"] == (False, False)
+    assert [text for text in menu.said if text.startswith("  ")] == [
+        "  typeset text is switched off (IMSCRIBE_NO_TYPESET=1)"
+    ]
+
+
 def test_the_overlays_give_the_dialog_the_settings_in_force_and_the_one_way_to_change_them(
     monkeypatch: pytest.MonkeyPatch, typeset_state: object
 ) -> None:

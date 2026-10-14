@@ -13,6 +13,8 @@ from __future__ import annotations
 import ast
 import subprocess
 import sys
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -22,7 +24,7 @@ from imscribe import Face, registered_fonts, typesetter
 
 from pptmstr import pairing, theme
 from pptmstr.ui import typeset
-from pptmstr.ui.typeset import Pane, gate, roles
+from pptmstr.ui.typeset import Pane, Role, gate, roles
 from tests.conftest import BOLD, child_environment, refused_library
 
 PACKAGE = Path(typeset.__file__).resolve().parent
@@ -164,14 +166,94 @@ def test_with_no_library_no_pane_is_typeset_and_the_menu_has_a_sentence() -> Non
     No library is the ordinary state of a machine imtypeset has no wheel for,
     and of a run that asks for none. The application's own font callback runs,
     nothing is typeset, and what the Text menu will say is one sentence that
-    says *not installed*.
+    says it is *switched off*, whatever is installed where this runs: imscribe's
+    own reason there is that ``IMTYPESET_LIBRARY`` is not set.
     """
     done = _run(_LOAD_IN_A_BARE_CONTEXT, **{pairing.DISABLE_VARIABLE: "1"})
     assert done.returncode == 0, done.stderr
     drawing, panes, reason = done.stdout.strip().split("\n")
     assert drawing == "False False"
     assert panes == "[]"
-    assert reason == "the typesetting library is not installed (IMTYPESET_LIBRARY is not set)"
+    assert reason == "typeset text is switched off (IMSCRIBE_NO_TYPESET=1)"
+
+
+IMSCRIBES = "IMTYPESET_LIBRARY is not set"
+"""
+imscribe's reason for every way of having no library (its request P43 is open).
+"""
+
+
+@pytest.mark.parametrize(
+    ("switch", "distribution", "pair", "variable", "said"),
+    [
+        (
+            "1",
+            "imtypeset 0.4.1.192900",
+            True,
+            False,
+            "typeset text is switched off (IMSCRIBE_NO_TYPESET=1)",
+        ),
+        (" yes ", None, False, False, "typeset text is switched off (IMSCRIBE_NO_TYPESET=yes)"),
+        (None, None, False, False, "the typesetting library is not installed"),
+        ("0", None, False, False, "the typesetting library is not installed"),
+        (
+            None,
+            "imtypeset 0.4.1.192900",
+            False,
+            False,
+            f"the typesetting library is not installed ({IMSCRIBES})",
+        ),
+        (None, None, True, False, f"the typesetting library is not installed ({IMSCRIBES})"),
+        (None, None, False, True, f"the typesetting library is not installed ({IMSCRIBES})"),
+    ],
+    ids=[
+        "switched off, a library installed",
+        "switched off, nothing installed",
+        "nothing installed, built or named",
+        "the switch at 0 is not on",
+        "a distribution installed",
+        "a pair built in .deps",
+        "a library named",
+    ],
+)
+def test_no_library_is_said_from_what_pptmstr_knows_and_not_only_imscribes_reason(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    switch: str | None,
+    distribution: str | None,
+    pair: bool,
+    variable: bool,
+    said: str,
+) -> None:
+    """
+    imscribe says "not installed (IMTYPESET_LIBRARY is not set)" for a run
+    switched off with a library installed, and for one with nothing anywhere.
+    pptmstr knows which: the switch, the distribution, this checkout's pair and
+    the two variables. One function words it, and both the running
+    application's sentence and ``pptmstr --version``'s come through it.
+    """
+    for name in (pairing.DISABLE_VARIABLE, pairing.LIBRARY_VARIABLE, pairing.PACKAGE_VARIABLE):
+        monkeypatch.delenv(name, raising=False)
+    if switch is not None:
+        monkeypatch.setenv(pairing.DISABLE_VARIABLE, switch)
+    if variable:
+        monkeypatch.setenv(pairing.LIBRARY_VARIABLE, str(tmp_path / "lib.so"))
+    if pair:
+        (tmp_path / pairing.DEPS_DIR / pairing.PAIR_DIR).mkdir(parents=True)
+    monkeypatch.setattr(pairing, "_FOUND", None)
+    monkeypatch.setattr(pairing, "checkout", lambda: tmp_path)
+    monkeypatch.setattr(pairing, "installed", lambda: distribution)
+
+    assert gate.not_installed(IMSCRIBES) == said
+    monkeypatch.setattr(typesetter, "kind", lambda: typesetter.Kind.NOT_INSTALLED)
+    monkeypatch.setattr(typesetter, "reason", lambda: IMSCRIBES)
+    assert gate.library() == (gate.NOT_INSTALLED, said), "pptmstr --version's sentence"
+    monkeypatch.setattr(typesetter, "module", lambda: None)
+    monkeypatch.setattr(gate._GATE, "asked", True)
+    monkeypatch.setattr(gate._GATE, "loaded", False)
+    monkeypatch.setattr(gate._GATE, "accepted", False)
+    monkeypatch.setattr(gate._GATE, "failure", None)
+    assert typeset.unavailable_reason() == said, "the Text menu's and the dialog's"
 
 
 def test_a_library_that_is_found_and_cannot_be_used_is_refused_in_its_own_words(
@@ -434,8 +516,8 @@ def test_the_body_size_follows_the_ui_font_between_frames(
 ) -> None:
     """
     ``hello_imgui`` scales the UI font for the display and the library draws at the
-    size its theme names, so the size is read from what ImGui reports between
-    frames. A document built at the old size is stale.
+    size its theme names, so the size is taken between frames, as the size ImGui
+    will draw the chrome at. A document built at the old size is stale.
     """
     monkeypatch.setattr(typeset._STATE, "live_px", 16.0)
     epoch = typeset._STATE.epoch
@@ -444,6 +526,128 @@ def test_the_body_size_follows_the_ui_font_between_frames(
     assert typeset.body_px() == 24.0 and typeset._STATE.epoch == epoch + 1
     typeset.pre_frame()
     assert typeset._STATE.epoch == epoch + 1
+
+
+SCALES = ((1.0, 1.1), (1.0, 1.25), (1.0, 1.5), (1.25, 1.0), (1.2, 1.25), (0.9, 1.5))
+"""
+``(style.font_scale_main, style.font_scale_dpi)`` pairs: hello_imgui's display
+scaling at 110, 125 and 150 %, an application scale alone, and both at once.
+"""
+
+
+@contextmanager
+def _scaled(im: Any, main: float, dpi: float, base: float | None = None) -> Iterator[Any]:
+    style = im.get_style()
+    was = (style.font_size_base, style.font_scale_main, style.font_scale_dpi)
+    try:
+        if base is not None:
+            style.font_size_base = base
+        style.font_scale_main, style.font_scale_dpi = main, dpi
+        yield style
+    finally:
+        style.font_size_base, style.font_scale_main, style.font_scale_dpi = was
+
+
+def _in_a_frame(im: Any, body: Callable[[], Any]) -> Any:
+    im.new_frame()
+    im.begin("##scaled")
+    try:
+        return body()
+    finally:
+        im.end()
+        im.render()
+
+
+def test_the_size_taken_between_frames_is_the_one_imgui_draws_the_chrome_at(imgui: Any) -> None:
+    """
+    Between frames ``get_font_size()`` leaves both style scales out (16 where a
+    frame at ``font_scale_dpi`` 1.1 draws 18), so the seam works the size out as
+    ImGui does (``gate.drawn_size``). That is a copy of ImGui's arithmetic, held
+    here to ImGui's own answer inside a frame over bases, both scales and the
+    halves its rounding goes up at; and ``gate.pushed`` is held to come back to
+    a whole pixel height through ``push_font`` at each of them.
+    """
+    _in_a_frame(imgui, lambda: None)
+    off: list[tuple[float, float, float, float, float | None]] = []
+    unpushed: list[tuple[float, float, float, float]] = []
+    for base in (13.0, 16.0, 17.0, 20.0):
+        for main in (0.8, 0.9, 1.0, 1.1, 1.15625, 1.25, 1.5, 2.0):
+            for dpi in (1.0, 1.03125, 1.1, 1.15625, 1.25, 1.333, 1.5, 1.75, 2.0):
+                with _scaled(imgui, main, dpi, base):
+                    drawn = float(_in_a_frame(imgui, imgui.get_font_size))
+                    if gate._live_font_size() != drawn:
+                        off.append((base, main, dpi, drawn, gate._live_font_size()))
+
+                    def through_push() -> list[tuple[float, float]]:
+                        out = []
+                        for px in (9.0, 12.0, 16.0, 18.0, 23.0, 40.0):
+                            imgui.push_font(None, gate.pushed(px))
+                            out.append((px, float(imgui.get_font_size())))
+                            imgui.pop_font()
+                        return out
+
+                    unpushed += [
+                        (main, dpi, px, got)
+                        for px, got in _in_a_frame(imgui, through_push)
+                        if got != px
+                    ]
+    assert not off, f"(base, main, dpi, ImGui's, the seam's): {off}"
+    assert not unpushed, f"(main, dpi, asked, drawn): {unpushed}"
+    assert gate.drawn_size(0.0, 1.0, 1.0) is None, "a base ImGui has not filled in yet"
+    assert gate.drawn_size(16.0, float("nan"), 1.0) is None
+
+
+@pytest.mark.parametrize(("main", "dpi"), SCALES)
+def test_at_a_display_scale_typeset_text_and_the_chrome_are_one_pixel_height(
+    seam: Any, main: float, dpi: float
+) -> None:
+    """
+    ``hello_imgui`` sets ``font_scale_dpi`` from the display (110 to 150 % on
+    Windows and Linux desktops) and ImGui draws the chrome at the scaled size;
+    the library draws at the size its theme names and scales nothing. So the
+    prose the library draws is rasterised at the chrome's pixel height and at
+    no other, a native line in a typeset face is that height and not scaled a
+    second time, the epoch moves once and the baked sizes of the size before
+    are let go, and the diff role's columns still hold at the size it is now.
+    Under a context with no backend: **nobody has looked at this on a display
+    scaled so**.
+    """
+    from pptmstr.ui.typeset import diffs
+
+    io = seam.get_io()
+    cache = typeset.ViewCache()
+
+    def drawn() -> tuple[float, float]:
+        typeset.pre_frame()
+        theme.keep_baked_sizes(gate.epoch())
+
+        def body() -> tuple[float, float]:
+            chrome = float(seam.get_font_size())
+            typeset.markdown(cache, "k", "A paragraph of prose.\n")
+            with typeset.font(typeset.Weight.REGULAR):
+                native = float(seam.get_font_size())
+            return chrome, native
+
+        return _in_a_frame(seam, body)
+
+    drawn()
+    epoch = gate.epoch()
+    try:
+        with _scaled(seam, main, dpi):
+            for _ in range(3):
+                chrome, native = drawn()
+            assert chrome != 16.0, "the scale is one ImGui draws the chrome bigger at"
+            assert gate.epoch() == epoch + 1, "moved once, at the change"
+            assert typeset.body_px() == chrome
+            assert native == chrome
+            prose = typeset.face_font("PROSE")
+            assert [size for size, _ in theme.baked_sizes(io.fonts, prose)] == [chrome]
+            found = diffs.columns()
+            assert found.holds, found
+            assert found.size == roles.px(Role.DIFF)
+    finally:
+        drawn()
+    assert typeset.body_px() == 16.0
 
 
 def test_unloading_stops_the_library_drawing_and_loading_starts_it_again(seam: Any) -> None:
