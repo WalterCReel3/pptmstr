@@ -975,6 +975,21 @@ imtypeset already exists in PyPI."
   on a Mac, is the user's to run; `python -m pptmstr --version` is the line
   to read.
 
+## From reviewing the move to the published packages (2026-10-14, pptmstr `324b715`)
+
+| # | request | the measurement behind it | state |
+|---|---|---|---|
+| P46 | **An install on a platform imtypeset has no wheel for either succeeds without the library or fails with a sentence**, not with pip's "no matching distribution". | By pip's resolver against the published wheels (pptmstr's builder, `pip install --dry-run --only-binary=:all: --platform …`): the requirement resolves for `manylinux_2_28_x86_64` and `macosx_14_0_arm64` and fails for `manylinux_2_17`, `musllinux_1_2` and `macosx_13_0_arm64`, while imscribe's marker evaluates true on all three: a marker cannot test the glibc or macOS version, and imtypeset has no sdist. So on macOS 13 on Apple Silicon, or Linux with glibc before 2.28, `pip install imscribe` (and pptmstr) fails outright. pptmstr's `bootstrap.sh` now checks the platform first and stops with one sentence; a host that installs imscribe directly gets pip's error. An sdist of imtypeset that fails with a sentence, or an extra (`imscribe[typeset]`) that a host can leave out, are two shapes; yours to choose with imtypeset. | open |
+| P47 | **The size typeset text is asked at includes the display scale ImGui applies inside a frame.** | Read and run headless by pptmstr's builder, not seen on a display: between frames ImGui's font size leaves out `style.font_scale_dpi` (at 1.1: 18 inside a frame, 16 between), and pptmstr reads the size between frames to size its themes; so at 110 % to 150 % display scaling on Windows or Linux typeset text would likely be set smaller than the chrome. pptmstr will read the size inside a frame; the request is for imscribe to say which size its themes expect, since the same question meets every host. | open |
+
+Also measured in the same round, for the record: ImGui draws a tab as four
+spaces wherever it falls, the library to the next stop of four cells (`ab\tc`:
+column 6 and 4); pptmstr now gives ImGui's literal text tabs as spaces to the
+stop, for display only, so both renderers agree. And the library draws
+variation selectors and other marks the code face lacks (U+FE0F, U+034F,
+U+180B, U+20DD …) as nothing, where ImGui draws its fallback glyph; pptmstr
+keeps such text on ImGui.
+
 ## The published pair, run by the user (2026-10-13)
 
 Both are on PyPI: `imscribe` 0.2.0b1 (read from PyPI's JSON by the lead:
