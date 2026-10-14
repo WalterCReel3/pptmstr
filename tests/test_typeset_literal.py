@@ -420,3 +420,162 @@ def test_a_library_that_raises_under_a_literal_view_is_the_library_stopping(
         typeset.pre_frame()
         assert not typeset.can_draw()
     assert typeset.load_fonts(theme._ASSETS / "fonts" / "Inconsolata-Bold.ttf")
+
+
+def _column_of_last(seam: Any, text: str, literal: bool) -> tuple[bool, float]:
+    """
+    Where the last inked character of ``text`` is drawn, in cells from where
+    an ``a`` alone is drawn by the same renderer; and whether the library drew.
+    """
+    cell = typeset.face_font("CODE").get_font_baked(16.0).get_char_advance(ord("0"))
+    cache, alone = typeset.ViewCache(), typeset.ViewCache()
+    for _ in range(2):
+        drawn = _glyphs(seam, lambda: typeset.plain(cache, "k", text, literal=literal))
+        start = _glyphs(seam, lambda: typeset.plain(alone, "k", "a", literal=literal))
+    assert cache.texts("k") == (text,)
+    return bool(cache.views("k")), (drawn[-1][0] - start[0][0]) / cell
+
+
+TABS = [
+    ("ab\tc", 4),
+    ("\tx", 4),
+    ("abcd\te", 8),
+    ("é\tz", 4),
+    ("abć\td", 4),
+    ("a\tb\tc", 8),
+    ("abc\td\nabcde\tf", 8),
+]
+
+
+@pytest.mark.parametrize(("written", "column"), TABS)
+def test_a_tab_puts_the_next_character_on_the_same_stop_in_either_renderer(
+    seam: Any, written: str, column: int
+) -> None:
+    """
+    The library sets a tab to the next stop of four cells, as a terminal does;
+    ImGui draws one as four spaces wherever it is. Literal text ImGui draws is
+    given its tabs as spaces to the stop, so the log (the library) and DETAIL's
+    arguments (ImGui) line the same output up the same; what is held is the
+    text as written.
+    """
+    assert views.literal_unfit(Part(written, Kind.LITERAL)) is None
+    library, there = _column_of_last(seam, written, literal=True)
+    imgui, here = _column_of_last(seam, written, literal=False)
+    assert library and not imgui
+    assert there == here == column
+
+
+FIT_AS_WRITTEN = ["a b", "a b", "a b", "a　b", "aㅤb", "áb"]
+
+
+@pytest.mark.parametrize("written", FIT_AS_WRITTEN)
+def test_spaces_and_marks_the_library_sets_in_imgui_s_columns_are_the_library_s(
+    seam: Any, written: str
+) -> None:
+    """
+    Measured: a no-break, an em, a narrow no-break or an ideographic space, a
+    Hangul filler and a combining mark the code face has are set by the library
+    in the column ImGui draws them in, and copied as written.
+    """
+    assert views.literal_unfit(Part(written, Kind.LITERAL)) is None
+    library, there = _column_of_last(seam, written, literal=True)
+    imgui, here = _column_of_last(seam, written, literal=False)
+    assert library and there == here
+    cache = typeset.ViewCache()
+    frame(seam, lambda: typeset.plain(cache, "k", written, literal=True))
+    (view,) = cache.views("k")
+    view.select_all()
+    assert view.selected_text() == written
+
+
+@pytest.mark.parametrize("mark", ["️", "︀", "\U000e0100", "͏", "᠋", "⃝"])
+def test_a_mark_the_code_face_lacks_is_imgui_s(seam: Any, mark: str) -> None:
+    """
+    Measured: the library sets each as nothing and in no cell, where ImGui
+    draws its fallback glyph a cell wide; such a part stays ImGui's.
+    """
+    part = Part(f"a{mark}b", Kind.LITERAL)
+    said = views.literal_unfit(part)
+    assert said is not None and "combining mark" in said
+    cache = typeset.ViewCache()
+    frame(seam, lambda: typeset.document(cache, "k", (part,), literal=True))
+    assert cache.views("k") == ()
+
+
+@pytest.mark.parametrize("written", ["out\n   ", "out\n \t ", "out\nx  "])
+def test_a_last_line_of_spaces_is_set_and_copied_as_written(seam: Any, written: str) -> None:
+    cache = typeset.ViewCache()
+    for _ in range(2):
+        frame(seam, lambda: typeset.plain(cache, "k", written, literal=True))
+    (view,) = cache.views("k")
+    assert len(view.set_lines(0, 1)) == 2
+    view.select_all()
+    assert view.selected_text() == written
+    assert cache.height("k") == 2 * themes.literal_line(Role.LITERAL)
+
+
+def test_a_fractional_ui_font_size_reaches_the_seam_as_whole_pixels(seam: Any) -> None:
+    """
+    ``themes.literal_line`` tests a pixel height for 4k + 2 and is given
+    ImGui's font size unrounded at a scale of 1. ImGui 1.92 draws a font at a
+    whole pixel size, and reports that: a base of 17.6 px is 18.
+    """
+    style = seam.get_style()
+    base = style.font_size_base
+    try:
+        style.font_size_base = 17.6
+        for _ in range(2):
+            frame(seam, lambda: None)
+        assert typeset.roles.body_px() == 18.0
+        assert themes.literal_line(Role.LITERAL) == 19.0
+    finally:
+        style.font_size_base = base
+        for _ in range(2):
+            frame(seam, lambda: None)
+
+
+def test_a_literal_line_of_fifteen_thousand_characters_keeps_its_grid_to_its_end(
+    seam: Any,
+) -> None:
+    """
+    Measured at 16 px: scrolled to the end of a 15,000-character line, every
+    glyph drawn is on a whole cell and the last is on column 14,999, and the
+    width the view claims is the line's to within a quarter of a pixel.
+    """
+    count = 15_000
+    line = ("0123456789" * (count // 10))[:count]
+    text = line + "\nshort"
+    assert views.literal_unfit(Part(text, Kind.LITERAL)) is None
+    cell = typeset.face_font("CODE").get_font_baked(16.0).get_char_advance(ord("0"))
+    cache = typeset.ViewCache()
+    origin: list[float] = []
+    lefts: list[float] = []
+
+    def body(scroll: float | None) -> None:
+        if scroll is not None:
+            seam.set_scroll_x(scroll)
+        buffer = seam.get_window_draw_list().vtx_buffer
+        white = seam.get_font_tex_uv_white_pixel()
+        before = buffer.size()
+        origin.append(float(seam.get_cursor_screen_pos().x))
+        typeset.plain(cache, "k", text, literal=True)
+        origin.append(float(seam.get_scroll_max_x()))
+        corners = [
+            buffer[n]
+            for n in range(before, buffer.size())
+            if (buffer[n].uv.x, buffer[n].uv.y) != (white.x, white.y)
+        ]
+        lefts[:] = [
+            min(v.pos.x for v in corners[at : at + 4]) for at in range(0, len(corners) - 3, 4)
+        ]
+
+    for _ in range(2):
+        frame(seam, lambda: body(None), sideways=True)
+    (view,) = cache.views("k")
+    assert view.content_width == pytest.approx(count * cell, abs=0.25)
+    end = origin[-1]
+    for _ in range(2):
+        frame(seam, lambda: body(end), sideways=True)
+    columns = [(x - origin[-2]) / cell for x in lefts]
+    assert columns and all(abs(c - round(c)) <= 0.125 for c in columns)
+    assert round(columns[-1]) == count - 1

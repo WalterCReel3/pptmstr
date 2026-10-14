@@ -40,12 +40,16 @@ dependencies = [
     # The library imscribe draws through. imscribe requires it already; it is
     # named here so that the unit is three lines in one place and an install
     # of pptmstr cannot resolve to another. The marker is imscribe's own,
-    # character for character: where imtypeset has a wheel (CPython 3.11 to
-    # 3.14; Linux x86-64 with glibc 2.28 or later, macOS 14 or later on arm64).
-    # Anywhere else it is false, the install succeeds without the library,
-    # every pane draws with its own renderer, and `pptmstr --version` says
-    # the library is not installed. What no marker can say: Linux on musl has
-    # no wheel and is Linux on x86-64, so the install fails there at this line.
+    # character for character. imtypeset has wheels for CPython 3.11 to 3.14 on
+    # Linux x86-64 with glibc 2.28 or later and on macOS 14 or later on arm64,
+    # and no source distribution. A marker cannot test the macOS version or the
+    # libc, so it is TRUE on macOS 13 on arm64 and on Linux x86-64 below glibc
+    # 2.28 or on musl: no wheel matches and the whole install fails here. Where
+    # it is false (an Intel Mac, CPython 3.15, Linux aarch64), the library is
+    # left out, but only Linux aarch64 has an imgui-bundle wheel for the rest
+    # to install from; elsewhere pip compiles imgui-bundle from source.
+    # scripts/probe.py (`install_outlook`) says which before bootstrap.sh makes
+    # a virtualenv, and stops where the install would fail or compile.
     "imtypeset==0.4.1.192900; python_version >= '3.11' and python_version < '3.15' and ((sys_platform == 'linux' and platform_machine == 'x86_64') or (sys_platform == 'darwin' and platform_machine == 'arm64'))",
     # Bundles its own Claude Code CLI binary, which is why there is no Node
     # dependency here -- see check_agent_cli() in scripts/probe.py.

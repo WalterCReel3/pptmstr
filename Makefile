@@ -55,7 +55,10 @@ endif
 # PPTMSTR_TYPESET_DEPS=1 asks for the built pair although an imtypeset is installed:
 # the development override, for a library built from a commit nobody has published.
 # The pair's package directory is then also put first on PYTHONPATH, because the
-# installed package is otherwise the one imported and it reads no variable.
+# installed package is otherwise the one imported and it reads no variable. That is
+# exported to tests and scripts, which do not go through pptmstr's entry point, and
+# NOT to `make run`: pptmstr sets the pair and the path for its own process and
+# takes them back before a session starts, so no session inherits them.
 #
 # `make typeset-env` prints what a recipe gets and, on standard error, why.
 TYPESET_DIR     ?= .deps/imtypeset
@@ -74,18 +77,25 @@ endif
 # The built pair is looked at where no distribution is installed, and beside
 # one only when it is asked for.
 TYPESET_PAIR_WANTED := $(if $(TYPESET_INSTALLED),$(TYPESET_ASKED),yes)
+# The PYTHONPATH the caller gave, before the pair's package may be put first on it.
+TYPESET_CALLER_PYTHONPATH := $(PYTHONPATH)
+TYPESET_CALLER_HAS_PYTHONPATH := $(filter-out undefined,$(origin PYTHONPATH))
+ifneq ($(TYPESET_OFF),)
+TYPESET_WHY := IMSCRIBE_NO_TYPESET is set: no library is looked for and none is exported
 ifneq ($(TYPESET_SET),)
+# imscribe still loads a library IMTYPESET_LIBRARY names under its switch; pptmstr
+# and the test run take both out of their own environment (pptmstr.pairing.withhold).
+TYPESET_WHY := $(TYPESET_WHY); $(TYPESET_SET) set as well, and taken out of the environment of pptmstr and of a test run, so no library is loaded
+$(warning IMSCRIBE_NO_TYPESET is set and so is $(TYPESET_SET): pptmstr and the test run take $(TYPESET_SET) out of their own environment, so no library is loaded. A script under scripts/ that does not call pptmstr.pairing.adopt() is not covered: unset $(TYPESET_SET) for it)
+endif
+else ifneq ($(TYPESET_SET),)
 TYPESET_WHY := $(TYPESET_SET) set by the caller and left exactly as set
 ifneq ($(TYPESET_INSTALLED),)
-ifeq ($(TYPESET_OFF),)
 TYPESET_WHY := $(TYPESET_WHY); $(TYPESET_INSTALLED) is installed and reads neither variable, so it is what runs
 ifeq ($(strip $(IMTYPESET_LIBRARY)),)
 $(warning IMTYPESET_LIBRARY= does NOT run without the library here: $(TYPESET_INSTALLED) is installed and reads neither variable. IMSCRIBE_NO_TYPESET=1 is how to run without it)
 endif
 endif
-endif
-else ifneq ($(TYPESET_OFF),)
-TYPESET_WHY := IMSCRIBE_NO_TYPESET is set: no library is looked for and none is exported
 else ifneq ($(TYPESET_PAIR_WANTED),)
 ifeq ($(wildcard $(TYPESET_DIR)),)
 TYPESET_WHY := there is no $(TYPESET_DIR); 'make deps' builds the pair
@@ -98,9 +108,15 @@ export IMTYPESET_LIBRARY := $(abspath $(TYPESET_LIBRARY))
 export IMTYPESET_PYTHON  := $(abspath $(TYPESET_PACKAGE))
 TYPESET_HEADERS := $(wordlist 2,$(words $(TYPESET_WHY)),$(TYPESET_WHY))
 TYPESET_WHY := the pair in $(TYPESET_DIR), built from the commit imtypeset.ref names
+# `make run` is given none of what is exported here (RUN_ENV): pptmstr's entry
+# point does the same for its own process and takes it back out before a session
+# starts (pptmstr.pairing.adopt, release), where an exported value would be
+# inherited by every session as the caller's.
+RUN_ENV := -u IMTYPESET_LIBRARY -u IMTYPESET_PYTHON
 ifneq ($(TYPESET_INSTALLED),)
 export PYTHONPATH := $(abspath $(TYPESET_PACKAGE))$(if $(PYTHONPATH),:$(PYTHONPATH))
-TYPESET_WHY := $(TYPESET_WHY), asked for by PPTMSTR_TYPESET_DEPS in place of the installed $(TYPESET_INSTALLED), its package first on PYTHONPATH
+RUN_ENV += $(if $(TYPESET_CALLER_HAS_PYTHONPATH),PYTHONPATH=$(TYPESET_CALLER_PYTHONPATH),-u PYTHONPATH)
+TYPESET_WHY := $(TYPESET_WHY), asked for by PPTMSTR_TYPESET_DEPS in place of the installed $(TYPESET_INSTALLED), its package first on PYTHONPATH (for tests and scripts; `make run` leaves it to pptmstr)
 endif
 ifneq ($(TYPESET_HEADERS),)
 $(warning $(TYPESET_HEADERS))
@@ -164,7 +180,9 @@ bootstrap:         ## probe, create .venv, install from the package index, smoke
 # --no-build-isolation" where no package index is reachable -- which works in a
 # .venv that already holds imscribe's build backend and what imscribe requires.
 # Beside an installed imtypeset the pair it builds is used only when
-# PPTMSTR_TYPESET_DEPS=1 asks; `make bootstrap` puts the published imscribe back.
+# PPTMSTR_TYPESET_DEPS=1 asks. `make bootstrap` puts the published imscribe back: it
+# keeps an existing .venv, and reinstalls from the index an imscribe or imtypeset in
+# it that was not installed by name (`pptmstr.pairing.unpublished`).
 deps: venv-check   ## development override: imscribe and the imtypeset library, from source
 	$(PY) scripts/typeset_deps.py imscribe
 	$(INSTALL_IMSCRIBE) $(IMSCRIBE_PIP_ARGS) .deps/imscribe
@@ -185,7 +203,7 @@ smoke: venv-check gui-check   ## post-install probe: imports + a real window
 	@$(PY) scripts/probe.py --stage post
 
 run: venv-check gui-check     ## launch the orchestrator
-	$(GUI) $(PY) -m pptmstr
+	$(GUI) $(if $(RUN_ENV),env $(RUN_ENV)) $(PY) -m pptmstr
 
 bench: venv-check gui-check   ## measure idling CPU and cross-thread wake latency
 	$(GUI) $(PY) scripts/bench_idle.py

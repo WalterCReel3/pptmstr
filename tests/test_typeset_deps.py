@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import ast
 import importlib.util
+import json
 import os
 import re
 import shutil
@@ -1264,13 +1265,17 @@ def test_bootstrap_installs_once_from_the_index_and_builds_nothing() -> None:
     """
     The published versions are requirements, so the install stage is one
     install and the library comes with it. Nothing is fetched or compiled:
-    the build from source is ``make deps``, the development override.
+    the build from source is ``make deps``, the development override. The
+    one other install is a reinstall from the index, with no dependencies,
+    of what ``pptmstr.pairing.unpublished`` names (``tests/test_probe.py``
+    runs it with stand-ins).
     """
     script = (ROOT / "bootstrap.sh").read_text(encoding="utf-8")
     stage = script[script.index("stage 3/4") : script.index("stage 4/4")]
     run = [line for line in stage.splitlines()[1:] if line and not line.lstrip().startswith("#")]
     assert run[0] == '"${INSTALL[@]}" -e ".[dev]"'
-    assert not [line for line in run if "INSTALL" in line][1:], "one install"
+    calls = [line.strip() for line in run if line.strip().startswith('"${')]
+    assert calls == ['"${INSTALL[@]}" -e ".[dev]"', '"${REINSTALL[@]}"'], "one install"
     assert "typeset_deps" not in "".join(run) and ".deps" not in "".join(run)
 
 
@@ -1306,3 +1311,83 @@ def test_make_deps_runs_the_same_steps_in_the_same_order() -> None:
         "typeset_deps.py verify\n",
         "typeset_deps.py library\n",
     )
+
+
+@needs_make
+@needs_venv
+def test_switched_off_with_the_variables_set_make_warns_that_they_are_taken_out(
+    tmp_path: Path,
+) -> None:
+    pair = _pair(tmp_path / "pair")
+    named = {"IMTYPESET_LIBRARY": "/left/over/lib.so", "IMTYPESET_PYTHON": "/left/over/pysnap"}
+    for installed in (NONE, INSTALLED):
+        got, said = _make_typeset_env(
+            f"TYPESET_DIR={pair}", installed, "IMSCRIBE_NO_TYPESET=1", env=named
+        )
+        assert got == {**NOTHING, "IMSCRIBE_NO_TYPESET": "1", **named}
+        warning, why = said.strip().splitlines()
+        assert "IMSCRIBE_NO_TYPESET is set and so is IMTYPESET_LIBRARY IMTYPESET_PYTHON" in warning
+        assert "taken out of the environment of pptmstr and of a test run" in why
+
+
+@needs_make
+@needs_venv
+def test_a_pair_built_for_another_environment_is_not_exported(tmp_path: Path) -> None:
+    pair = _pair(tmp_path / "pair")
+    with (pair / "BUILT-FROM").open("a", encoding="utf-8") as record:
+        record.write("for: /another/project/.venv/bin/python\n")
+    got, said = _make_typeset_env(f"TYPESET_DIR={pair}", NONE)
+    assert got == NOTHING
+    assert "was built for /another/project/.venv/bin/python" in said
+
+
+RUN_STAND_IN = """#!/bin/sh
+case "$*" in
+  *typeset_deps.py\\ pair*) echo ok; exit 0 ;;
+  *typeset_deps.py*) exit 0 ;;
+esac
+exec {python} -c 'import json, os; print(json.dumps({{k: os.environ.get(k) for k in \
+  ("IMTYPESET_LIBRARY", "IMTYPESET_PYTHON", "PYTHONPATH", "PPTMSTR_TYPESET_DEPS")}}))'
+"""
+
+
+@needs_make
+@needs_venv
+@pytest.mark.parametrize("caller_path", [None, "/the/callers/own"])
+@pytest.mark.parametrize("installed", [NONE, INSTALLED])
+def test_make_run_hands_pptmstr_none_of_what_it_exports_for_the_pair(
+    tmp_path: Path, caller_path: str | None, installed: str
+) -> None:
+    """
+    ``make run PPTMSTR_TYPESET_DEPS=1`` with a whole pair: the Makefile exports
+    the two variables (and, beside an installed imtypeset, the pair's package
+    first on PYTHONPATH) for tests and scripts, and pptmstr, which sets them for
+    its own process and takes them back before a session starts, is given none
+    of them; the caller's own PYTHONPATH reaches it as the caller gave it.
+    """
+    pair = _pair(tmp_path / "pair")
+    python = tmp_path / "python"
+    python.write_text(RUN_STAND_IN.format(python=sys.executable), encoding="utf-8")
+    python.chmod(0o755)
+    clean = {k: v for k, v in child_environment().items() if not k.startswith("MAKE")}
+    clean.pop("PYTHONPATH", None)
+    if caller_path is not None:
+        clean["PYTHONPATH"] = caller_path
+    make = ["make", "--no-print-directory", f"PY={python}", f"TYPESET_DIR={pair}", installed]
+    exported = _make_typeset_env(f"TYPESET_DIR={pair}", installed, "PPTMSTR_TYPESET_DEPS=1")[0]
+    assert exported["IMTYPESET_LIBRARY"] == str(pair / deps.LIBRARY_NAME)
+    done = subprocess.run(
+        [*make, "PPTMSTR_TYPESET_DEPS=1", "HEADLESS=0", "GUI=", "run"],
+        cwd=ROOT,
+        env=clean,
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    seen = json.loads(done.stdout.strip().splitlines()[-1])
+    assert seen == {
+        "IMTYPESET_LIBRARY": None,
+        "IMTYPESET_PYTHON": None,
+        "PYTHONPATH": caller_path,
+        "PPTMSTR_TYPESET_DEPS": "1",
+    }

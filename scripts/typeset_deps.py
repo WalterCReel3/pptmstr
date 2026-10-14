@@ -689,9 +689,11 @@ def pair_refusal(pair: Path) -> str | None:
     """
     Why the pair in `pair` is not to be handed to a process; None when it is.
 
-    `pptmstr.pairing.pair_refusal`, against the commit `imtypeset.ref` names now.
+    `pptmstr.pairing.pair_refusal`, against the commit `imtypeset.ref` names now
+    and for the environment this interpreter runs in: the one the Makefile
+    exports the pair to, since it asks with `.venv/bin/python`.
     """
-    return pairing.pair_refusal(pair, read_ref(ROOT / "imtypeset.ref"))
+    return pairing.pair_refusal(pair, read_ref(ROOT / "imtypeset.ref"), Path(sys.prefix))
 
 
 def step_pair(pair: Path) -> int:

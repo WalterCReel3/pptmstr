@@ -17,6 +17,16 @@ reading all five and for holding what was built to them.
 **Where the library is found** (``decide``), once, before imscribe is asked
 anything. The first line that applies:
 
+    ``IMSCRIBE_NO_TYPESET`` is set         nothing, whatever else is set: this
+                                           is how to run without the library.
+                                           It is imscribe's switch for not
+                                           LOOKING for an installed one, and a
+                                           library ``IMTYPESET_LIBRARY`` names
+                                           still loads under it; so pptmstr
+                                           takes both variables out of its own
+                                           environment (``withhold``) before
+                                           imscribe is asked, does not hand it
+                                           ``.deps``, and says so.
     either variable is set by the caller   ``IMTYPESET_LIBRARY``,
                                            ``IMTYPESET_PYTHON``: nothing is
                                            added, empty or not. A library named
@@ -26,11 +36,6 @@ anything. The first line that applies:
                                            so beside one they choose nothing
                                            and ``pptmstr --version`` says they
                                            were not read.
-    ``IMSCRIBE_NO_TYPESET`` is set         nothing: this is how to run without
-                                           the library, imscribe's own switch
-                                           for not looking for an installed
-                                           one, and pptmstr does not hand it
-                                           ``.deps`` behind that.
     an ``imtypeset`` is installed          nothing is set: imscribe imports it
                                            and it finds the library it
                                            carries. What ``pip install`` of
@@ -52,7 +57,8 @@ directory ``IMTYPESET_PYTHON`` names at the END of the path, the installed
 package is found first, and that one reads no variable. So the pair's package
 directory is also put FIRST on this process's path (``Found.ahead``), where the
 built package is the one imported and reads the variable. Where the pair cannot
-be handed over the installed one runs and the reason is said.
+be handed over the installed one runs, and ``pptmstr --version`` and the
+first lines of a test run say that it was refused and why (``Found.refused``).
 
 **What a checkout set for itself is its own, and is not handed on**
 (``release``). A process pptmstr launches inherits pptmstr's environment: an
@@ -181,13 +187,14 @@ def built_from(pair: Path) -> dict[str, str]:
     return record
 
 
-def pair_refusal(pair: Path, ref: str) -> str | None:
+def pair_refusal(pair: Path, ref: str, prefix: Path | None = None) -> str | None:
     """
     Why the pair in ``pair`` is not to be handed to a process; ``None`` when it is.
 
     Whole, and built from the commit ``ref``, which is what ``imtypeset.ref``
     names now: a pair left from before a bump of the ref is a library nobody
-    pinned.
+    pinned. And, where ``prefix`` is given, built for that environment
+    (``_another_environment``).
     """
     parts = (Path(LIBRARY_NAME), Path(PACKAGE_DIR) / "imtypeset" / "__init__.py", Path(BUILT_FROM))
     missing = [str(part) for part in parts if not (pair / part).is_file()]
@@ -204,7 +211,7 @@ def pair_refusal(pair: Path, ref: str) -> str | None:
             f"{pair} was built from {built} and {IMTYPESET_REF} names {ref}; "
             f"`make deps` builds that one"
         )
-    return None
+    return _another_environment(pair, prefix) if prefix is not None else None
 
 
 FORK_HEADERS = "fork:"
@@ -327,6 +334,79 @@ def installed() -> str | None:
     return f"{name} {said}" if isinstance(said, str) and said else name
 
 
+def not_by_name(name: str, search: list[str] | None = None) -> str | None:
+    """
+    Why the installed distribution ``name`` is not one installed by name, or
+    ``None`` when it is, or when there is none.
+
+    For ``bootstrap.sh``, over a ``.venv`` that already holds one: an exact pin
+    is satisfied by a source build of the same version (``make deps``
+    installs imscribe from a directory), so an install of the requirements
+    leaves it. Installed by name, from an index or a directory of wheels, an
+    installer writes no ``direct_url.json``; anything else writes one. And an
+    imtypeset whose package carries a ``BUILT-FROM`` was built from source.
+    ``search`` is the path to look on (``sys.path`` when ``None``).
+    """
+    from importlib import metadata
+
+    try:
+        found = list(
+            metadata.distributions(name=name)
+            if search is None
+            else metadata.distributions(name=name, path=search)
+        )
+    except Exception:
+        return None
+    if not found:
+        return None
+    distribution = found[0]
+    label = f"{name} {distribution.version}"
+    written = distribution.read_text("direct_url.json")
+    if written is not None:
+        try:
+            import json
+
+            url = json.loads(written).get("url") or "a direct URL"
+        except Exception:
+            url = "a direct URL"
+        return f"{label} was installed from {url}, not by name"
+    if Path(str(distribution.locate_file(name))).joinpath(BUILT_FROM).is_file():
+        return f"{label} carries a {BUILT_FROM}: it was built from source"
+    return None
+
+
+def unpublished(search: list[str] | None = None) -> list[tuple[str, str]]:
+    """
+    The exact requirement of imscribe and of imtypeset (``imscribe==0.2.0b1``)
+    for each installed that was not installed by name, with why
+    (``not_by_name``): what ``bootstrap.sh`` reinstalls from the index.
+    """
+    pins = ((IMSCRIBE_DISTRIBUTION, IMSCRIBE_PIN), (IMTYPESET_DISTRIBUTION, IMTYPESET_PIN))
+    found = []
+    for name, pin in pins:
+        why = not_by_name(name, search)
+        if why:
+            found.append((f"{name}=={pin}", why))
+    return found
+
+
+def main(argv: list[str] | None = None) -> int:
+    """
+    ``python -m pptmstr.pairing unpublished``, for ``bootstrap.sh``: the
+    requirements ``unpublished`` names on one line, and why on standard
+    error, one line each; nothing when there is none. Always 0.
+    """
+    args = sys.argv[1:] if argv is None else argv
+    if args != ["unpublished"]:
+        print("usage: python -m pptmstr.pairing unpublished", file=sys.stderr)
+        return 2
+    found = unpublished()
+    for _, why in found:
+        print(f"    {why}", file=sys.stderr)
+    print(" ".join(requirement for requirement, _ in found))
+    return 0
+
+
 @dataclass(frozen=True, slots=True)
 class Found:
     """
@@ -341,6 +421,38 @@ class Found:
     # one imported beside an installed imtypeset; ``None`` wherever it is not
     # needed. ``adopt`` does it: the path is the process's and not ``environ``'s.
     ahead: str | None = None
+    # Why ``DEPS_VARIABLE`` asked for this checkout's pair and did not get it,
+    # where an installed imtypeset runs instead; empty otherwise.
+    refused: str = ""
+    # The variables ``withhold`` took out of ``environ`` under ``DISABLE_VARIABLE``.
+    withheld: tuple[str, ...] = ()
+
+
+def withhold(environ: MutableMapping[str, str]) -> tuple[str, ...]:
+    """
+    Take the pair's two variables out of ``environ``, and say which were there.
+
+    For ``IMSCRIBE_NO_TYPESET``: imscribe stops looking for an installed
+    imtypeset under it and still loads a library ``IMTYPESET_LIBRARY`` names,
+    so a run asked to have no library would otherwise have one wherever a
+    variable was left over in the shell. ``decide`` does it for pptmstr's
+    process and ``tests/conftest.py`` for a test run's. Children inherit the
+    switch as well, so taking the variables away from them too loses nothing
+    they could use.
+    """
+    withheld = tuple(name for name in (LIBRARY_VARIABLE, PACKAGE_VARIABLE) if name in environ)
+    for name in withheld:
+        del environ[name]
+    return withheld
+
+
+def _withheld_sentence(withheld: tuple[str, ...]) -> str:
+    names = " and ".join(withheld)
+    return (
+        f"{names} {'were' if len(withheld) > 1 else 'was'} set as well and "
+        f"{'are' if len(withheld) > 1 else 'is'} taken out of this process's environment, "
+        f"so no library is loaded"
+    )
 
 
 def decide(
@@ -357,16 +469,26 @@ def decide(
     environment's, ``distribution`` what ``installed()`` answered. Never
     raises: whatever goes wrong reading a pair is the reason it was not taken.
     """
+    if asks(environ, DISABLE_VARIABLE):
+        withheld = withhold(environ)
+        why = (
+            f"{DISABLE_VARIABLE} is set, which is how to run without the library: none is "
+            f"looked for"
+        )
+        if withheld:
+            why += f", and {_withheld_sentence(withheld)}"
+        return Found(ROUTE_NONE, why, withheld=withheld)
+    wanted = asks(environ, DEPS_VARIABLE)
     named = [name for name in (LIBRARY_VARIABLE, PACKAGE_VARIABLE) if name in environ]
     if named:
+        mine = root is not None and _names_this_pair(environ, root / DEPS_DIR / PAIR_DIR)
+        if wanted and mine:
+            return Found(
+                ROUTE_ENVIRONMENT,
+                f"{' and '.join(named)} name this checkout's pair in {DEPS_DIR}, as the "
+                f"Makefile exports them for a test or a script where {DEPS_VARIABLE} asks",
+            )
         return Found(ROUTE_ENVIRONMENT, f"{' and '.join(named)} set by the caller")
-    if asks(environ, DISABLE_VARIABLE):
-        return Found(
-            ROUTE_NONE,
-            f"{DISABLE_VARIABLE} is set, which is how to run without the library: none is "
-            f"looked for",
-        )
-    wanted = asks(environ, DEPS_VARIABLE)
     if distribution and not wanted:
         return Found(ROUTE_DISTRIBUTION, f"{distribution} is installed")
     pair, refusal = _pair(root, prefix)
@@ -376,6 +498,7 @@ def decide(
                 ROUTE_DISTRIBUTION,
                 f"{distribution} is installed, and it is what runs although {DEPS_VARIABLE} "
                 f"asks for this checkout's pair: {refusal}",
+                refused=refusal,
             )
         return Found(
             ROUTE_NONE,
@@ -398,6 +521,15 @@ def decide(
     )
 
 
+def _names_this_pair(environ: Mapping[str, str], pair: Path) -> bool:
+    """
+    Whether the two variables name exactly the pair in ``pair``, as the Makefile exports it.
+    """
+    return environ.get(LIBRARY_VARIABLE) == str(pair / LIBRARY_NAME) and environ.get(
+        PACKAGE_VARIABLE
+    ) == str(pair / PACKAGE_DIR)
+
+
 def _pair(root: Path | None, prefix: Path | None) -> tuple[Path | None, str]:
     """
     A checkout's pair and why it is not to be handed over; the reason is empty when it is.
@@ -408,9 +540,7 @@ def _pair(root: Path | None, prefix: Path | None) -> tuple[Path | None, str]:
     try:
         if not pair.is_dir():
             return pair, f"there is no {pair}; `make deps` builds a pair from source"
-        refusal = pair_refusal(pair, read_ref(root / IMTYPESET_REF)) or _another_environment(
-            pair, prefix or Path(sys.prefix)
-        )
+        refusal = pair_refusal(pair, read_ref(root / IMTYPESET_REF), prefix or Path(sys.prefix))
     except Exception as error:  # whatever it is, it is the reason
         refusal = f"{pair} could not be checked ({type(error).__name__}: {error})"
     return pair, " ".join((refusal or "").split())
@@ -461,3 +591,7 @@ def named(name: str) -> str | None:
     if name in os.environ:
         return os.environ[name]
     return dict(_FOUND.given).get(name) if _FOUND is not None else None
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

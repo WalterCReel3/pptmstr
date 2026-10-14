@@ -12,10 +12,13 @@
 # stage 3 is one install. That brings imscribe, which sets typeset text, and
 # imtypeset, the library it draws through, as wheels at exact versions beside
 # the one imgui-bundle they are built for; nothing is compiled and no variable
-# has to be set. imtypeset has wheels for CPython 3.11 to 3.14 on Linux x86-64
-# (glibc 2.28 or later) and on macOS 14 or later on arm64. Anywhere else the
-# install leaves it out, pptmstr runs, every pane draws with its own renderer,
-# and `pptmstr --version` says the library is not installed.
+# has to be set. That is CPython 3.11 to 3.14 on macOS 14 or later on Apple
+# Silicon, or on Linux x86-64 with glibc 2.28 or later. On Linux aarch64 the
+# install leaves the library out and every pane draws with its own renderer.
+# Anywhere else pip either fails (macOS 13, glibc below 2.28, musl: imtypeset's
+# requirement is on and no wheel of it matches) or compiles imgui-bundle from
+# source (an Intel Mac, CPython 3.15), so stage 1 says which, in one sentence,
+# and this script stops before it makes a virtualenv.
 #
 # Building the two from source at a commit nobody has published is the
 # development override and no part of this script: `make deps`, afterwards, in
@@ -84,9 +87,21 @@ echo ">>> stage 1/4: pre-install probe (using $PYTHON)"
 
 echo
 echo ">>> stage 2/4: virtualenv"
+# An existing .venv is kept, and said so before anything touches it: uv 0.8 and
+# later asks before deleting one (and declining stops this script) or deletes it
+# unasked where nothing can answer, and `python -m venv` keeps what is in it. So
+# the one behaviour is to keep it, and stage 3 replaces what it holds that an
+# install of the pins would otherwise leave.
+if [ -e .venv ]; then
+  echo "    .venv exists and is kept as it is: stage 3 installs pyproject.toml's pins into it,"
+  echo "    and reinstalls from the index an imscribe or imtypeset in it that was not installed"
+  echo "    by name. For a clean one:  rm -rf .venv  and run this again."
+fi
 if command -v uv >/dev/null 2>&1; then
-  uv venv --python "$PYTHON" .venv
+  uv venv --allow-existing --python "$PYTHON" .venv
   INSTALL=(uv pip install --python .venv/bin/python)
+  REINSTALL=(uv pip install --python .venv/bin/python --no-deps)
+  REINSTALL_EACH="--reinstall-package"
 else
   echo "    uv not found, falling back to python -m venv"
   # Debian splits ensurepip into python3-venv, so this is the step that fails on
@@ -104,6 +119,8 @@ else
   fi
   .venv/bin/python -m pip install --quiet --upgrade pip
   INSTALL=(.venv/bin/python -m pip install)
+  REINSTALL=(.venv/bin/python -m pip install --no-deps --force-reinstall)
+  REINSTALL_EACH=""
 fi
 
 echo
@@ -112,6 +129,20 @@ echo ">>> stage 3/4: install"
 # imgui-bundle, imscribe and imtypeset exactly, as one unit. imscribe's is a
 # beta, which an installer takes because the pin names it.
 "${INSTALL[@]}" -e ".[dev]"
+# An exact pin is met by a source build of the same version (`make deps` installs
+# imscribe from a directory), and the install above keeps it. Each one named here
+# is replaced by the published wheel, and the reason is printed above the names.
+REPLACE="$(.venv/bin/python -m pptmstr.pairing unpublished)"
+if [ -n "$REPLACE" ]; then
+  echo "    not installed by name, so reinstalled from the package index: $REPLACE"
+  for requirement in $REPLACE; do
+    if [ -n "$REINSTALL_EACH" ]; then
+      REINSTALL+=("$REINSTALL_EACH" "${requirement%%==*}")
+    fi
+    REINSTALL+=("$requirement")
+  done
+  "${REINSTALL[@]}"
+fi
 
 echo
 if [ "$SKIP_WINDOW" = 1 ]; then

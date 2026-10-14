@@ -287,6 +287,11 @@ def _distribution(said: Mapping[str, str | None], found: pairing.Found) -> str:
         )
     elif found.route != pairing.ROUTE_DISTRIBUTION:
         line += f"; pptmstr had decided otherwise ({found.why})"
+    if found.refused:
+        line += (
+            f"; {pairing.DEPS_VARIABLE} asked for .deps and it was refused: {found.refused}; "
+            f"the installed library runs"
+        )
     return line
 
 

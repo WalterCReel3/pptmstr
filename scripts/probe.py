@@ -374,6 +374,224 @@ def check_glibc(r: Report) -> None:
         r.ok("libc", f"glibc {version} — manylinux_2_28 wheels are installable")
 
 
+# --------------------------------------------------------------------------
+# What the install will do here
+#
+# imtypeset's requirement carries imscribe's marker, and a marker can test the
+# interpreter, the OS and the machine but not the macOS version or the libc. So
+# on macOS 13 on arm64, or Linux x86-64 below glibc 2.28 or on musl, the
+# requirement is on, no wheel matches, imtypeset publishes no source
+# distribution, and the WHOLE `pip install` fails with "No matching
+# distribution". Where imgui-bundle 1.92.900 has no wheel (an Intel Mac,
+# CPython 3.15, glibc below 2.28) pip compiles it from source, which is not a
+# supported install either. Both are told here, before a virtualenv is made,
+# in one sentence naming what will not install, and bootstrap stops.
+#
+# The wheel sets are PyPI's file lists for imgui-bundle 1.92.900 and imtypeset
+# 0.4.1.192900, read 2026-10-13; they move only with the pins in pyproject.toml.
+# --------------------------------------------------------------------------
+
+LIBRARY_PYTHONS = ((3, 11), (3, 14))  # inclusive: both projects' cp311..cp314 wheels
+MIN_MACOS = (14, 0)  # macosx_14_0_arm64, both projects
+
+LIBRARY = "library"  # the install brings the typesetting library
+WITHOUT_LIBRARY = "without-library"  # it succeeds, and every pane draws by itself
+UNSUPPORTED = "unsupported"  # it fails, or compiles imgui-bundle: stop
+
+
+@dataclass(frozen=True)
+class PlatformFacts:
+    system: str  # sys.platform: "linux", "darwin", ...
+    machine: str  # platform.machine()
+    implementation: str  # platform.python_implementation()
+    python: tuple[int, int]
+    macos: tuple[int, ...] | None  # None off macOS, or when it cannot be read
+    glibc: tuple[int, ...] | None  # None off Linux, on musl, or when it cannot be read
+
+
+@dataclass(frozen=True)
+class Outlook:
+    verdict: str  # LIBRARY, WITHOUT_LIBRARY or UNSUPPORTED
+    sentence: str
+
+
+def _version_tuple(text: str) -> tuple[int, ...] | None:
+    parts: list[int] = []
+    for piece in text.strip().split("."):
+        if not piece.isdigit():
+            break
+        parts.append(int(piece))
+    return tuple(parts) or None
+
+
+def _dotted(version: tuple[int, ...]) -> str:
+    return ".".join(str(p) for p in version)
+
+
+def macos_version() -> tuple[int, ...] | None:
+    """
+    The macOS version as pip will see it.
+
+    An interpreter built against an SDK older than 11 is told "10.16" for any
+    later macOS unless SYSTEM_VERSION_COMPAT=0; pip's tag code (packaging) asks
+    again that way, so this does too.
+    """
+    version = _version_tuple(platform.mac_ver()[0])
+    if version is not None and version[:2] == (10, 16):
+        try:
+            out = subprocess.run(
+                [sys.executable, "-sS", "-c", "import platform; print(platform.mac_ver()[0])"],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=True,
+                env={**os.environ, "SYSTEM_VERSION_COMPAT": "0"},
+            ).stdout
+        except (subprocess.SubprocessError, OSError):
+            return version
+        return _version_tuple(out) or version
+    return version
+
+
+def glibc_version() -> tuple[int, ...] | None:
+    """
+    The glibc version, read the way pip reads it; ``None`` on musl or when unknown.
+    """
+    try:
+        said = os.confstr("CS_GNU_LIBC_VERSION")  # "glibc 2.36"
+    except (AttributeError, OSError, ValueError):
+        said = None
+    if said:
+        name, _, version = said.partition(" ")
+        return _version_tuple(version) if name == "glibc" else None
+    name, version = platform.libc_ver()
+    return _version_tuple(version) if name == "glibc" else None
+
+
+def platform_facts() -> PlatformFacts:
+    return PlatformFacts(
+        system=sys.platform,
+        machine=platform.machine(),
+        implementation=platform.python_implementation(),
+        python=(sys.version_info.major, sys.version_info.minor),
+        macos=macos_version() if sys.platform == "darwin" else None,
+        glibc=glibc_version() if sys.platform.startswith("linux") else None,
+    )
+
+
+def install_outlook(facts: PlatformFacts) -> Outlook:
+    """
+    What installing pptmstr's requirements does on this platform, in one sentence.
+
+    Supported, with the library: CPython 3.11 to 3.14 on macOS 14 or later on
+    arm64, or on Linux x86-64 with glibc 2.28 or later. Supported without it:
+    the same interpreters on Linux aarch64 (glibc 2.28 or later, or musl), where
+    imgui-bundle has a wheel and imtypeset's marker is off. Everything else is
+    UNSUPPORTED, because pip either fails at imtypeset or compiles imgui-bundle.
+    """
+    low, high = LIBRARY_PYTHONS
+    py = _dotted(facts.python)
+    if facts.implementation != "CPython":
+        return Outlook(
+            UNSUPPORTED,
+            f"{facts.implementation} is not CPython: imgui-bundle 1.92.900 and imtypeset "
+            f"0.4.1.192900 publish CPython wheels only, so neither will install from a wheel",
+        )
+    if not low <= facts.python <= high:
+        return Outlook(
+            UNSUPPORTED,
+            f"CPython {py} is outside {_dotted(low)} to {_dotted(high)}: imgui-bundle "
+            f"1.92.900 publishes no wheel for it (pip would compile it from source) and "
+            f"imtypeset 0.4.1.192900 none at all",
+        )
+    if facts.system == "darwin":
+        if facts.machine != "arm64":
+            return Outlook(
+                UNSUPPORTED,
+                f"macOS on {facts.machine} is not supported: imgui-bundle 1.92.900 publishes "
+                f"no wheel for an Intel Mac (pip would compile it from source) and imtypeset "
+                f"0.4.1.192900 none at all",
+            )
+        if facts.macos is None:
+            return Outlook(
+                UNSUPPORTED,
+                "the macOS version cannot be read, and imgui-bundle 1.92.900 and imtypeset "
+                "0.4.1.192900 publish wheels for macOS 14 or later only",
+            )
+        if facts.macos < MIN_MACOS:
+            return Outlook(
+                UNSUPPORTED,
+                f"macOS {_dotted(facts.macos)} is below 14: imtypeset 0.4.1.192900 has no "
+                f"wheel for it and no source distribution, so the whole install fails, and "
+                f"imgui-bundle 1.92.900 would be compiled from source",
+            )
+        return Outlook(
+            LIBRARY,
+            f"macOS {_dotted(facts.macos)} on arm64 with CPython {py}: imgui-bundle, imscribe "
+            f"and imtypeset install as wheels",
+        )
+    if facts.system.startswith("linux"):
+        glibc = facts.glibc
+        floor = _dotted(MIN_GLIBC)
+        if facts.machine == "x86_64":
+            if glibc is None:
+                return Outlook(
+                    UNSUPPORTED,
+                    "Linux x86-64 without glibc (musl, or a libc that cannot be read): "
+                    "imtypeset 0.4.1.192900 has no wheel for it and no source distribution, "
+                    "so the whole install fails",
+                )
+            if glibc < MIN_GLIBC:
+                return Outlook(
+                    UNSUPPORTED,
+                    f"glibc {_dotted(glibc)} is below {floor}: imtypeset 0.4.1.192900 has no "
+                    f"wheel for it and no source distribution, so the whole install fails, "
+                    f"and imgui-bundle 1.92.900 would be compiled from source",
+                )
+            return Outlook(
+                LIBRARY,
+                f"Linux x86-64, glibc {_dotted(glibc)}, CPython {py}: imgui-bundle, imscribe "
+                f"and imtypeset install as wheels",
+            )
+        if facts.machine == "aarch64":
+            if glibc is not None and glibc < MIN_GLIBC:
+                return Outlook(
+                    UNSUPPORTED,
+                    f"glibc {_dotted(glibc)} is below {floor}: imgui-bundle 1.92.900 has no "
+                    f"wheel for it, so pip would compile it from source",
+                )
+            return Outlook(
+                WITHOUT_LIBRARY,
+                "Linux aarch64: imtypeset 0.4.1.192900 has no wheel here and is not "
+                "required, so the install leaves the typesetting library out and every "
+                "pane draws with its own renderer",
+            )
+        return Outlook(
+            UNSUPPORTED,
+            f"Linux on {facts.machine} is not supported: imgui-bundle 1.92.900 publishes no "
+            f"wheel for it (pip would compile it from source)",
+        )
+    return Outlook(
+        UNSUPPORTED,
+        f"{facts.system} is not a platform bootstrap.sh installs on",
+    )
+
+
+def check_install(r: Report, facts: PlatformFacts | None = None) -> None:
+    outlook = install_outlook(facts or platform_facts())
+    if outlook.verdict == LIBRARY:
+        r.ok("install", outlook.sentence)
+    elif outlook.verdict == WITHOUT_LIBRARY:
+        r.warn("install", outlook.sentence)
+    else:
+        r.fail(
+            "install",
+            f"pptmstr will not install here: {outlook.sentence}. Supported: CPython 3.11 to "
+            f"3.14 on macOS 14 or later on Apple Silicon, or on Linux x86-64 with glibc 2.28 "
+            f"or later",
+        )
+
+
 def check_venv_module(r: Report, mgr: PkgMgr | None) -> None:
     """Debian's classic bootstrap failure.
 
@@ -602,6 +820,8 @@ def run_pre() -> int:
     print("=== pptmstr probe: pre-install ===")
     r = Report()
     if IS_MAC:
+        # First, so that a platform the install fails on is the diagnosis.
+        check_install(r)
         check_architecture_mac(r)
         check_python(r)
         prefix = check_homebrew(r)
@@ -609,6 +829,7 @@ def run_pre() -> int:
         check_display_mac(r)
     elif IS_LINUX:
         mgr = detect_pkg_mgr()
+        check_install(r)
         check_distro(r, mgr)
         check_architecture_linux(r, mgr)
         check_python(r, mgr)

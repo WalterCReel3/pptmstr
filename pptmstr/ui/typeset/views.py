@@ -131,6 +131,7 @@ views are then 0.9 to 1.6 ms.
 
 from __future__ import annotations
 
+import unicodedata
 from collections.abc import Callable, Collection, Hashable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
@@ -812,6 +813,13 @@ def literal_unfit(part: Part) -> str | None:
       pptmstr on 2026-10-13: the library sets ESC, BEL, BS, DEL, U+200B and
       U+202E as nothing, and a lone carriage return as a line break; ImGui
       draws each as its own glyph or as none, as it always did;
+    - with no combining mark the code face has no glyph for (``_UNSET_MARKS``).
+      Measured in pptmstr on 2026-10-14: the library sets U+FE00, U+FE0E,
+      U+FE0F, U+E0100, U+034F, U+180B, U+17B4 and U+20DD as nothing, in no
+      cell, where ImGui draws its fallback glyph a cell wide; a mark the face
+      has (U+0300, U+0301) both draw in no cell of their own, and a space
+      the face lacks (U+2000 to U+2006, U+202F, U+3000) the library sets as
+      a blank cell where ImGui draws its fallback glyph, in the same column;
     - not ending in a line break, which the library sets as nothing and a
       copy leaves out;
     - no line longer than the measured row answers for (``Columns.reach``),
@@ -840,7 +848,51 @@ def literal_unfit(part: Part) -> str | None:
         return f"is set where the library {measured.why}"
     if 2 * max(len(line) for line in text.split("\n")) > measured.reach:
         return "has a line longer than the measured columns answer for"
+    if not text.isascii():
+        marks = "".join(c for c in set(text) if unicodedata.category(c) in _UNSET_MARKS)
+        if marks and gate.code_lacks(marks):
+            return "holds a combining mark the code face has no glyph for"
     return None
+
+
+# Unicode's nonspacing and enclosing marks: set as nothing by the library where
+# the code face has no glyph for one (``literal_unfit``).
+_UNSET_MARKS = ("Mn", "Me")
+
+TAB_CELLS = 4
+"""
+Where a tab puts the next character in literal text: the next multiple of this
+many cells from the start of the line, as the library sets it in a code block
+(P29) and as a terminal's stops do. Measured in pptmstr on 2026-10-14 at 16 px:
+``ab\tc`` puts ``c`` at column 4 in the library and at 6 in ImGui, which draws
+a tab as a fixed four spaces; so ImGui is given the tab as spaces to the stop
+(``at_tab_stops``) and the same text lines up the same in either renderer.
+"""
+
+
+def at_tab_stops(im: Any, text: str) -> str:
+    """
+    ``text`` with each tab replaced by the spaces that reach the next stop of
+    ``TAB_CELLS`` cells, by ImGui's own pen in the font that is pushed: for
+    display only, since a copy is of the text as written.
+
+    The pen and not a count of characters, so that a mark drawn in no cell of
+    its own, or a glyph wider than a cell, puts the stop where ImGui will draw.
+    """
+    if "\t" not in text:
+        return text
+    cell = float(im.calc_text_size(" ").x) or 1.0
+    lines = []
+    for line in text.split("\n"):
+        if "\t" in line:
+            pieces = line.split("\t")
+            built = pieces[0]
+            for piece in pieces[1:]:
+                column = round(float(im.calc_text_size(built).x) / cell)
+                built += " " * (TAB_CELLS - column % TAB_CELLS) + piece
+            line = built
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def _literal_segment(index: int, part: Part, kept: list[Any]) -> _Segment:
@@ -1066,13 +1118,18 @@ def _native(im: Any, part: Part, wide: float) -> None:
     One part that is not markdown, drawn by ImGui exactly as written.
 
     ``Kind.LITERAL`` is never broken: the window scrolls sideways to a long line
-    if it was opened to.
+    if it was opened to. In a monospace role its tabs are drawn to the stops
+    the library sets them to (``at_tab_stops``).
     """
     with _native_font(im, part):
+        literal = part.kind is Kind.LITERAL
+        text = part.text
+        if literal and "\t" in text and roles.style(part.role).slot is Slot.MONOSPACE:
+            text = at_tab_stops(im, text)
         im.push_style_color(im.Col_.text.value, (_colour(part.colour) or ui_theme.P.text).vec4)
-        im.push_text_wrap_pos(-1.0 if part.kind is Kind.LITERAL else im.get_cursor_pos_x() + wide)
+        im.push_text_wrap_pos(-1.0 if literal else im.get_cursor_pos_x() + wide)
         try:
-            im.text_unformatted(part.text)
+            im.text_unformatted(text)
         finally:
             im.pop_text_wrap_pos()
             im.pop_style_color()

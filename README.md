@@ -175,14 +175,20 @@ says what is a setting and what is deliberately a constant in code.
 **The three are one unit and are pinned exactly**: `imgui-bundle==1.92.900`,
 `imscribe==0.2.0b1` and `imtypeset==0.4.1.192900`. The imtypeset library is linked
 against that one `imgui-bundle` binary and is refused beside any other, so they move
-together and never by `pip install -U` of one. imtypeset has wheels for CPython 3.11 to
-3.14 on Linux x86-64 (glibc 2.28 or later) and macOS 14 or later on arm64; anywhere else
-the install leaves it out, pptmstr runs, and every pane draws with its own renderer.
+together and never by `pip install -U` of one. **The install is supported on CPython
+3.11 to 3.14 on macOS 14 or later on Apple Silicon, and on Linux x86-64 with glibc 2.28 or
+later.** On Linux aarch64 it leaves imtypeset out and every pane draws with its own
+renderer. Anywhere else it does not fall back, it fails: on macOS 13, below glibc 2.28 or
+on musl imtypeset's requirement is on and no wheel of it matches, and on an Intel Mac or
+CPython 3.15 pip would compile `imgui-bundle` from source. `./bootstrap.sh` says which
+before it makes a virtualenv, and stops.
 `pptmstr --version` says which of each is running against its pin, how the library was
 found, and the headers it says it was compiled against.
 
 `IMSCRIBE_NO_TYPESET=1` runs without the library, for `make`, for a bare `pytest` and
-for pptmstr itself. `IMTYPESET_LIBRARY=`, which did that while the library was built
+for pptmstr itself, whatever else is set: imscribe still loads a library
+`IMTYPESET_LIBRARY` names under its switch, so pptmstr and the test run take both
+variables out of their own environment and say so. `IMTYPESET_LIBRARY=`, which did that while the library was built
 from source, does not: an installed imtypeset reads neither of the two variables.
 
 **Building the two from source is the development override**, for working against a
@@ -191,7 +197,8 @@ names over the published one and builds the imtypeset library from the commit
 `imtypeset.ref` names into `.deps/` (Linux, a C++ compiler, and the sources from
 GitHub or from the repositories `IMSCRIBE_REPO`, `IMTYPESET_REPO`, `IMGUI_BUNDLE_REPO`
 and `IMGUI_REPO` name). Beside an installed imtypeset that pair is used only where
-`PPTMSTR_TYPESET_DEPS=1` asks for it; `./bootstrap.sh` puts the published versions back.
+`PPTMSTR_TYPESET_DEPS=1` asks for it; `./bootstrap.sh` keeps an existing `.venv` and
+reinstalls from the index an imscribe or imtypeset in it that was not installed by name.
 
 It has been run only on Xvfb with a software rasteriser, and no person has judged how
 it looks. **Nothing here has been installed from the package index by this branch's

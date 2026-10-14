@@ -49,6 +49,14 @@ from pptmstr.ui.typeset import gate
 
 BOLD = theme._ASSETS / "fonts" / "Inconsolata-Bold.ttf"
 
+# ``IMSCRIBE_NO_TYPESET=1`` is a run with no library whatever else is set: imscribe
+# still loads a library ``IMTYPESET_LIBRARY`` names under its switch, so the two
+# variables are taken out of this process's environment before anything asks it.
+# Nothing has asked yet: the seam asks imscribe for the library on first use.
+WITHHELD = (
+    pairing.withhold(os.environ) if pairing.asks(os.environ, pairing.DISABLE_VARIABLE) else ()
+)
+
 
 _CHOOSING = (pairing.DISABLE_VARIABLE, pairing.DEPS_VARIABLE)
 
@@ -139,7 +147,10 @@ def described(said: Mapping[str, Any], environ: Mapping[str, str]) -> list[str]:
     each thing a green run would otherwise be misread over -- headers that are
     not the wheel's, variables that were set and not read. Never raises.
     """
-    found = pairing.decide(dict(environ), None, distribution=said.get("distribution"))
+    given = dict(environ)
+    found = pairing.decide(
+        given, pairing.checkout(), Path(sys.prefix), distribution=said.get("distribution")
+    )
     lines = [
         version._said("imscribe", version._imscribe),
         version._said(
@@ -147,6 +158,14 @@ def described(said: Mapping[str, Any], environ: Mapping[str, str]) -> list[str]:
             lambda: version._imtypeset(found, said, environ.get(pairing.LIBRARY_VARIABLE)),
         ),
     ]
+    if found.given:
+        # ``decide`` would hand the pair over, and nothing here does: a test run
+        # is given it only by the Makefile, which exports it.
+        lines.append(
+            f"NOT HANDED OVER: {pairing.DEPS_VARIABLE} asks for {found.why.split(',')[0]}, "
+            f"and only `make` and pptmstr's entry point hand it to a process; this run "
+            f"draws through what the line above names"
+        )
     kind = said.get("kind")
     if kind != gate.READY:
         lines.append(
@@ -177,7 +196,13 @@ def ran_against(environ: Mapping[str, str]) -> list[str]:
     """
     What a test run with this environment draws through, a line a fact.
     """
-    return described(asked_of_a_new_process(environ), environ)
+    lines = described(asked_of_a_new_process(environ), environ)
+    if WITHHELD:
+        lines.append(
+            f"WITHHELD: {' and '.join(WITHHELD)} set with {pairing.DISABLE_VARIABLE}, and taken "
+            f"out of this run's environment: no library is loaded"
+        )
+    return lines
 
 
 def pytest_report_header(config: pytest.Config) -> list[str]:

@@ -258,10 +258,11 @@ def test_a_checkout_with_a_whole_pair_at_the_ref_sets_both_variables(tmp_path: P
 def test_a_variable_the_caller_set_is_never_paired_with_this_checkouts(
     tmp_path: Path, mine: str, value: str
 ) -> None:
-    # Empty too, and whatever else is so: beside an installed imtypeset, with
-    # the override asked for, and with the library switched off.
+    # Empty too, and whatever else is so: beside an installed imtypeset and
+    # with the override asked for. Switched off, a variable is taken out
+    # (``test_switched_off_the_two_variables_are_taken_out_and_said``).
     _checkout(tmp_path)
-    for more in ({}, ASKED, OFF):
+    for more in ({}, ASKED):
         for distribution in (None, "imtypeset 0.4.1.192900"):
             environ = {mine: value, **more}
 
@@ -1508,3 +1509,197 @@ def test_the_lines_open_a_run_of_the_suite_quiet_or_not(tmp_path: Path, quiet: b
     assert [line.split()[0] for line in said] == ["imscribe", "imtypeset:", "NO"]
     assert said[2] == "NO LIBRARY (not-installed): every test that draws through it is skipped"
     assert out.index(said[0]) < out.index("1 passed"), "before any result"
+
+
+# -- IMSCRIBE_NO_TYPESET is no library, whatever else is set ------------------------
+
+
+def test_switched_off_the_two_variables_are_taken_out_and_said(tmp_path: Path) -> None:
+    """
+    imscribe still loads a library ``IMTYPESET_LIBRARY`` names under its switch,
+    so a left-over variable would put the library in a run asked to have none.
+    """
+    _checkout(tmp_path, prefix=tmp_path / "venv")
+    named = {name: f"/left/over/{name}" for name in VARIABLES}
+    environ = {**OFF, **ASKED, **named, "PATH": "/bin"}
+
+    found = pairing.decide(environ, tmp_path, tmp_path / "venv", "imtypeset 0.4.1.192900")
+
+    assert found.route == pairing.ROUTE_NONE and found.given == ()
+    assert found.withheld == VARIABLES
+    assert environ == {**OFF, **ASKED, "PATH": "/bin"}
+    assert "IMTYPESET_LIBRARY and IMTYPESET_PYTHON were set as well" in found.why
+    line = version._imtypeset(found, {}, pairing.named(pairing.LIBRARY_VARIABLE))
+    assert line.startswith("imtypeset: no library (IMSCRIBE_NO_TYPESET is set")
+    assert "taken out of this process's environment" in line
+
+
+def _a_real_library() -> dict[str, str]:
+    """
+    Both variables naming a library that loads here: this checkout's pair where
+    it is whole and this environment's, or else the installed imtypeset's own.
+    """
+    pair = ROOT / pairing.DEPS_DIR / pairing.PAIR_DIR
+    try:
+        whole = pair.is_dir() and not pairing.pair_refusal(
+            pair, pairing.read_ref(ROOT / pairing.IMTYPESET_REF), Path(sys.prefix)
+        )
+    except Exception:
+        whole = False
+    if whole:
+        return {
+            pairing.LIBRARY_VARIABLE: str(pair / pairing.LIBRARY_NAME),
+            pairing.PACKAGE_VARIABLE: str(pair / pairing.PACKAGE_DIR),
+        }
+    from tests.conftest import asked_of_a_new_process
+
+    said = asked_of_a_new_process(child_environment())
+    if said.get("kind") != gate.READY or not said.get("library"):
+        pytest.skip("no library loads here to name")
+    library = Path(str(said["library"]))
+    return {
+        pairing.LIBRARY_VARIABLE: str(library),
+        pairing.PACKAGE_VARIABLE: str(library.parent.parent),
+    }
+
+
+def test_switched_off_a_named_library_that_loads_is_not_loaded_by_pptmstr() -> None:
+    named = _a_real_library()
+    # The hazard is real: without pptmstr, imscribe loads the named library.
+    from tests.conftest import asked_of_a_new_process
+
+    assert asked_of_a_new_process(child_environment(**OFF, **named)).get("kind") == gate.READY
+
+    lines = _lines(_run("--version", **OFF, **named))
+
+    assert "taken out of this process's environment" in lines["imtypeset"]
+    assert lines["typeset"].startswith("typeset text: not in use (not-installed)")
+
+
+def test_switched_off_a_named_library_that_loads_skips_the_seams_tests() -> None:
+    named = _a_real_library()
+    done = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            "tests/test_typeset_literal.py::"
+            "test_literal_text_a_caller_asks_for_is_one_host_code_block_of_the_librarys",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+        env=child_environment(**OFF, **named),
+    )
+    assert "1 skipped" in done.stdout, done.stdout + done.stderr
+    assert "WITHHELD: IMTYPESET_LIBRARY and IMTYPESET_PYTHON" in done.stdout
+
+
+# -- PPTMSTR_TYPESET_DEPS: a refusal is said, and nothing reaches a session ---------
+
+
+def test_a_refused_deps_request_beside_an_installed_imtypeset_is_said(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _checkout(tmp_path, commit=OTHER, prefix=tmp_path / "venv")
+    environ = dict(ASKED)
+
+    found = pairing.decide(environ, tmp_path, tmp_path / "venv", "imtypeset 0.4.1.192900")
+
+    assert found.route == pairing.ROUTE_DISTRIBUTION and OTHER in found.refused
+    said = {
+        "package": str(tmp_path / "site" / "imtypeset"),
+        "route": pairing.ROUTE_DISTRIBUTION,
+        "library": "/somewhere/libimtypeset_bundle.so",
+        "distribution": "imtypeset 0.4.1.192900",
+    }
+    line = version._imtypeset(found, said)
+    assert (
+        f"; PPTMSTR_TYPESET_DEPS asked for .deps and it was refused: {found.refused}; "
+        f"the installed library runs"
+    ) in line
+    # And in the first lines of a test run, which ask the same way.
+    monkeypatch.setattr(pairing, "checkout", lambda: tmp_path)
+    assert any("asked for .deps and it was refused" in row for row in described(said, ASKED))
+
+
+def test_a_pair_built_for_another_environment_is_refused_by_the_make_step_too(
+    tmp_path: Path,
+) -> None:
+    pair = _checkout(tmp_path, prefix=tmp_path / "another-venv")
+    assert pairing.pair_refusal(pair, REF) is None
+    said = pairing.pair_refusal(pair, REF, tmp_path / "venv")
+    assert said is not None and "another-venv" in said
+    assert pairing.pair_refusal(pair, REF, tmp_path / "another-venv") is None
+
+
+def test_the_test_header_finds_this_checkout_and_does_not_say_there_is_none() -> None:
+    """
+    ``described`` decides with this checkout, so with ``PPTMSTR_TYPESET_DEPS``
+    the header does not say pptmstr is installed with no checkout to look in.
+    """
+    rows = described({"distribution": "imtypeset 0.4.1.192900"}, ASKED)
+    assert not any("no source checkout" in row for row in rows)
+
+
+def test_the_header_names_the_pair_the_makefile_exports_as_the_makefiles(tmp_path: Path) -> None:
+    pair = _checkout(tmp_path)
+    exported = {
+        **ASKED,
+        pairing.LIBRARY_VARIABLE: str(pair / pairing.LIBRARY_NAME),
+        pairing.PACKAGE_VARIABLE: str(pair / pairing.PACKAGE_DIR),
+    }
+    found = pairing.decide(dict(exported), tmp_path, distribution="imtypeset 0.4.1.192900")
+    assert found.route == pairing.ROUTE_ENVIRONMENT and "as the Makefile exports them" in found.why
+    other = {**exported, pairing.LIBRARY_VARIABLE: "/elsewhere/lib.so"}
+    found = pairing.decide(other, tmp_path, distribution="imtypeset 0.4.1.192900")
+    assert found.why.endswith("set by the caller")
+
+
+SESSION_SEES = """
+import json, os, sys
+from pptmstr import pairing
+from pptmstr.ui.typeset import gate
+pairing.adopt()
+gate.settle()
+print(json.dumps({
+    "route": pairing.adopt().route,
+    "ahead": pairing.adopt().ahead,
+    "environ": {
+        k: os.environ.get(k) for k in ("IMTYPESET_LIBRARY", "IMTYPESET_PYTHON", "PYTHONPATH")
+    },
+}))
+"""
+
+
+@needs_a_distribution
+def test_a_session_launched_under_deps_inherits_none_of_the_pair() -> None:
+    """
+    What pptmstr's entry point does before it launches anything (``adopt``,
+    then ``gate.settle``): under ``PPTMSTR_TYPESET_DEPS=1`` with a whole pair,
+    the pair is this process's, and a session's process, which the SDK starts
+    with ``os.environ`` as it is then, is given neither variable and no
+    ``PYTHONPATH``. ``make run`` gives pptmstr none of the three either
+    (``tests/test_typeset_deps.py``).
+    """
+    pair = ROOT / pairing.DEPS_DIR / pairing.PAIR_DIR
+    if not pair.is_dir() or pairing.pair_refusal(
+        pair, pairing.read_ref(ROOT / pairing.IMTYPESET_REF), Path(sys.prefix)
+    ):
+        pytest.skip("this checkout has no whole pair for this environment in .deps")
+    done = _run(script=SESSION_SEES, **ASKED)
+    assert done.returncode == 0, done.stderr
+    seen = json.loads(done.stdout.strip().splitlines()[-1])
+    assert seen["route"] == pairing.ROUTE_CHECKOUT and seen["ahead"]
+    assert seen["environ"] == {
+        "IMTYPESET_LIBRARY": None,
+        "IMTYPESET_PYTHON": None,
+        # As it was given: pptmstr puts the pair's package first on its own
+        # ``sys.path`` and never on ``PYTHONPATH``.
+        "PYTHONPATH": child_environment().get("PYTHONPATH"),
+    }
