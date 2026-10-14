@@ -1054,6 +1054,90 @@ further: under an all-mono page word spaces are one value at every height.
 | P42 | **After every baked size is let go, a new document's first layout uses the code face's size from the layout before it.** | pptmstr's builder, `70f2c9b`, a strict xfail in `tests/test_baked_sizes.py`; reproduces with imscribe's view alone: discard every baked size (pptmstr does this when the fonts, the UI size or the density change, as its guard against ImGui's mis-sized glyphs), make a new document: its first layout re-makes one size from the previous layout. One stale size on the atlas. Bears on H48. | open |
 | P43 | **`reason()` with no library says which thing is missing.** | It reads `IMTYPESET_LIBRARY is not set` when the wheel is absent and under `IMSCRIBE_NO_TYPESET=1`, where no variable is the remedy. pptmstr words its own sentence from `kind()` meanwhile. You list it as known and open. | open |
 
+## Literal text is the library's where its columns hold (2026-10-13, PYPI-B)
+
+**Measured first, with pptmstr's fonts and role themes** (pptmstr's builder,
+2026-10-13 22:53, `scripts/measure_typeset_advances.py --pptmstr`: chrome
+Inconsolata with Font Awesome as `Fonts[0]` and the library's faces by
+`pptmstr.theme.load_fonts()`, documents themed by `roles.configure` and
+`themes.document_theme()`; imscribe 0.2.0b1 on the imtypeset 0.4.1.192900
+wheel, fork headers; Xvfb and llvmpipe, density 1, load average 1.6; vertices
+read, no pixel, nobody looked). 56 pages: prose in Roboto or in the code face,
+at each body size the settings offer (14, 16, 18, 20) and each step from -2
+to +4 of the code-block, literal and inline-code roles together, so code at
+every pixel height from 12 to 24. The chrome beside each is pptmstr's UI font
+at the role's pixel height, from the row's first pen. Beside the table at
+the top of A2 (the old core, which held none of R2, R4 and R5):
+
+| at every one of the 56 pages | R2: steps equal to the chrome's baked advance | R4: rows apart at one column | R5: pen less chrome's at characters 1, 10, 20, 30, 40, 74 | glyph against its rectangle | R6: fractional pens | hit a quarter and three quarters into a glyph |
+|---|---|---|---|---|---|---|
+| a fence in a Roboto document, at the code-block role's size | 158 of 158 | 0 px | +0 at each | 0.00 px | 0 | 174 of 180 (below) |
+| a fence in an all-monospace document | 158 of 158 | 0 px | +0 | 0.00 px | 0 | 174 of 180 |
+| prose rows in the code face | 93 of 93 at the body's size; every word space one cell | | | | | |
+| a host's `MarkdownCode` in the literal role's style, `code_overflow="grow"`, `fixed_line_height=True` | 162 of 162 | 0 px | +0 | 0.00 px | 0 | 181 of 188; tabs at columns 4, 8, 12, 20; a selection's fill on the pens of its first character and the one after its last, +0 and +0 |
+| inline code in Roboto prose | whole-pixel steps, from the **paragraph's** em: sixteen characters 112 px at a body of 16, the chrome's 128 (P11: the role's size does not reach a span) | | | | | |
+
+The raster drawn from is the role's pixel height for the fence and the host
+block at every page. **The misses in the hit test are each line's last
+character**: three quarters into it answers the start of the next line, one
+position too far, where the row of `gate.columns` (one line) has no next
+line to answer. P44 below.
+
+**A character the code face lacks, in a code block**: `xπxЖx` at 16 px has
+its glyphs at 0, 8, 24, 32, 48 (two cells a Greek or Cyrillic letter), ten
+`Ж` reach 158 px of ink, the lines 160, and `content_width` is 160. **A code
+block claims the cells it drew**, so its end can be scrolled to; A7's defect
+is the diff view's and not the code block's. CJK and an emoji take one cell.
+
+**Also measured, of a host's code block** (pptmstr's builder, the same
+session, headless): every character is in `texts` and in a copy; ESC, BEL,
+BS, DEL, U+200B and U+202E draw nothing, a lone carriage return is a line
+break, and a line break at the end is neither drawn nor copied.
+
+**What moved, behind a measurement of the running library**
+(`gate.literal_columns`: the same questions as `gate.columns`, asked through
+`gate.literal_view` and the block literal text is drawn with): a literal part
+whose caller asks (`document(literal=True)`, `plain(literal=True)`) and that
+holds none of the characters above, does not end in a line break, is not
+wrapped, and has no line past the measured reach, is one `TypesetView` of one
+`MarkdownCode`. The callers are **the context log's tool calls, results and
+errors** (closed runs and the open one) **and DETAIL's error**. Its line is
+the role's pixel height, as ImGui's is, **but one pixel more at 14, 18 and 22
+px**: under `fixed_line_height` the library puts a baseline three quarters
+down the line, so a line of 4k + 2 px is a baseline on a half pixel, and
+which way each row is rounded then depends on where the block is on the
+screen. Measured (eight rows at 60 heights down a window, every pixel
+height 12 to 24, lines of that height and one and two more): 49 of 60
+placements put a row a pixel off at every 4k + 2 line and none at any
+other. P45 below. Not moved:
+everything wrapped, single-line errors, the inbox, and **an approval's
+arguments** in DETAIL and the inbox (below).
+
+**An approval's arguments stay ImGui's** (an agent decision). Shown on the
+literal path: a cut and a raise under a literal view report every line unset
+through `ViewCache.unbuilt`, which is what the approve holds read
+(`tests/test_typeset_literal.py`). Not shown: any of the approve holds
+themselves (`review.withheld`, the 2,000-line bound, a pane that failed to
+draw) over arguments set this way, since nothing in DETAIL or the inbox sets
+them this way; that is the next task's to build and prove, pane by pane. A
+hidden or bidirectional character keeps a part ImGui's (`views.literal_unfit`).
+A prose argument's `prose_parts` gives literal parts of `Role.LITERAL`, so the
+opt-in is per call and not per role, and the same test file reads which
+functions pass it.
+
+**Costs** (`scripts/bench_panes.py --typeset on --only literal`, headless,
+300 frames, four runs at load averages from 1.5 to 7.3, first frames within 6 % of each other): DETAIL's error
+of 300 lines 5.5 ms first and 0.12 steady, ImGui 0.27 and 0.07 (an error is
+cut at 20,000 characters, so 5,000 lines is the same); the log's tool result
+of 300 lines 6.6 / 0.19 ms, ImGui 1.3 / 0.13; of 5,000 lines under the log's
+bound (399 held) 24 / 0.19, ImGui 3.8 / 0.13; with every line held 95 to
+100 / 0.19, ImGui 5.2 / 0.16.
+
+| # | request | the measurement behind it | state |
+|---|---|---|---|
+| P45 | **Under `fixed_line_height`, every row of a block on its line wherever the block is drawn.** | Above: a line of 14, 18 or 22 px puts the baseline at 10.5, 13.5 or 16.5 px into the line, and one row of eight is drawn a pixel off its line at 49 of 60 positions down a window (none at a line of any other height). pptmstr sets such lines a pixel taller meanwhile (`themes.literal_line`). | open |
+| P44 | **A point past the middle of a line's last character is answered as the end of that line, not the start of the next.** | Above: in a code block of seven lines, three quarters into the last character of each of the first six answers position k+2. A press there puts the caret on the next line and a drag to the end of a line takes its line break. | open |
+
 ## The pins moved, and the diff view is live (2026-10-12, pptmstr `8c6a43e`)
 
 The file keeps its name; the library is `imscribe` from here on.
@@ -1115,6 +1199,7 @@ nothing resting against 1.3 ms, 400 views, load 3), P31, P36, P37, P39.
   `FileStatus`, `MarkdownStream`, `Palette`, `Spacing`, `Theme`,
   `TypesetDiffFences`, `TypesetDiffView`, `TypesetStreamView`,
   `TypesetUnavailable`, `TypesetView`, `em_size_for_pixel_height`,
+  `MarkdownCode` (from PYPI-B, 2026-10-13),
   `parse_markdown`, `px_from_sp`, `register_font`, `registered_fonts`,
   `sp_from_px`, `unregister_font`, and the modules `typesetter` and
   `markdown_rules`.

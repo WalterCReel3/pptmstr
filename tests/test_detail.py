@@ -1522,6 +1522,26 @@ def test_a_failure_is_literal_text_and_never_markdown(seam, monkeypatch) -> None
     rig.frame(snap)
 
     key = (obligation.key, "error")
+    assert rig.pane.views.texts(key) == (error,)
+    # The library's, as a host's code block: nothing in it is read.
+    (view,) = rig.pane.views.views(key)
+    assert [type(block).__name__ for block in view.blocks] == ["MarkdownCode"]
+
+
+def test_a_failure_holding_a_terminal_escape_is_imgui_s_text(seam, monkeypatch) -> None:
+    """
+    The library sets ESC as nothing (``typeset.views.literal_unfit``); ImGui
+    draws it as a glyph of its own, as it always did here.
+    """
+    error = "Traceback:\n  File x.py\n\x1b[31mValueError\x1b[0m"
+    obligation = SessionFailed(node=ROOT, since=1.0, summary="died", error=error)
+    snap = snapshot(record(), needs_you=(obligation,))
+    rig = Pane(seam, monkeypatch)
+    rig.focus.move(snap, 0)
+
+    rig.frame(snap)
+
+    key = (obligation.key, "error")
     assert rig.pane.views.texts(key) == (error,) and rig.pane.views.views(key) == ()
 
 

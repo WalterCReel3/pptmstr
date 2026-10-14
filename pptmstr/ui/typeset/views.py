@@ -19,12 +19,23 @@ with the theme of its ``demote``, and the blocks of the run are handed to the
 view together, so parts of different heading levels share a view.
 
 **Text that is not markdown is ImGui's**, in the chrome's font at the role's
-pixel height: a literal, wrapped or exact part, and ``plain()``. ``themes`` says
-where that line was drawn and what has been measured since (request P21). What
-it costs: such a part is an ImGui text item, so a
-selection stops at its edges and it is not copied with the markdown around it;
-``Kind.WRAPPED`` and ``Kind.WRAPPED_EXACT`` are both ImGui's wrap, which keeps
-every character and breaks at a space where the line has one.
+pixel height: a literal, wrapped or exact part, and ``plain()``. What it costs:
+such a part is an ImGui text item, so a selection stops at its edges and it is
+not copied with the markdown around it; ``Kind.WRAPPED`` and
+``Kind.WRAPPED_EXACT`` are both ImGui's wrap, which keeps every character and
+breaks at a space where the line has one.
+
+**Except a literal part whose caller asks** (``document(literal=True)``,
+``plain(literal=True)``) **and that ``literal_unfit`` finds nothing against**:
+that is a view of the library's of its own, holding one host code block
+(``MarkdownCode``) of the part's text in ``themes.literal_style``, made as
+``gate.literal_view`` makes one (code runs on and the window scrolls to it;
+every line one height under the last). Nothing in it is read as markdown and
+a copy of it is its text. It is asked for by the log's tool calls, results
+and errors and by DETAIL's error, and **by no approval surface**: an
+approval's arguments are literal parts of the same roles, and they stay
+ImGui's until every hold on an approve is shown on this path as well
+(``tests/test_typeset_literal.py`` reads the callers).
 
 So ``document`` is one view only where every part is markdown.
 ``ViewCache.views(key)`` has every view of a key, in order.
@@ -178,6 +189,8 @@ class _Segment:
     # What the view's last draw answered: false when something in view could
     # not be set as asked.
     whole: bool = True
+    # Whether the view is of one literal part, set as a host's code block.
+    literal: bool = False
 
 
 @dataclass
@@ -212,6 +225,8 @@ class _Entry:
     resting: bool = False
     # Whether each markdown part has a view of its own (``document``).
     apart: bool = False
+    # Whether a literal part may be set by the library (``document``).
+    literal: bool = False
     # Source lines handed over that the last draw did not put on screen: all of
     # them when the library stopped inside it or set less than all of them,
     # none otherwise.
@@ -710,7 +725,12 @@ def _open(entry: _Entry, parts: tuple[Part, ...], on_link: Callable[[str], None]
     from . import diffs
 
     hosting = diffs.adopted()
-    kept = [segment.view for segment in entry.segments if segment.view is not None]
+    kept = [
+        segment.view
+        for segment in entry.segments
+        if segment.view is not None and not segment.literal
+    ]
+    kept_literal = [segment.view for segment in entry.segments if segment.literal]
     read: dict[tuple[str, int, bool], tuple[Any, ...]] = {}
     segments: list[_Segment] = []
     run: list[int] = []
@@ -759,7 +779,10 @@ def _open(entry: _Entry, parts: tuple[Part, ...], on_link: Callable[[str], None]
             run.append(index)
         else:
             close_run()
-            segments.append(_Segment((index,)))
+            if entry.literal and literal_unfit(part) is None:
+                segments.append(_literal_segment(index, part, kept_literal))
+            else:
+                segments.append(_Segment((index,)))
     close_run()
     entry.parts = parts
     entry.segments = segments
@@ -768,6 +791,74 @@ def _open(entry: _Entry, parts: tuple[Part, ...], on_link: Callable[[str], None]
     entry.natural = None
     entry.unset = None
     entry.written = ()
+
+
+def literal_unfit(part: Part) -> str | None:
+    """
+    Why a literal part is not set by the library, as the words after "ImGui
+    draws it because it", or ``None`` for one the library sets
+    (``document(literal=True)``). Asked when the parts are read.
+
+    The library sets such a part as a host's code block: never read as
+    markdown, every character in it, one source line a line (``views`` module
+    docstring). It is given one only where that is the text as written **and
+    its columns are measured to hold** (``gate.literal_columns``):
+
+    - unbroken (``Kind.LITERAL``). A part ImGui wraps stays ImGui's: the
+      library hangs a wrapped code line by two ems, and a text block sets
+      every run of white space as one;
+    - in a monospace role;
+    - with no control or invisible character (``diffs._hides``). Measured in
+      pptmstr on 2026-10-13: the library sets ESC, BEL, BS, DEL, U+200B and
+      U+202E as nothing, and a lone carriage return as a line break; ImGui
+      draws each as its own glyph or as none, as it always did;
+    - not ending in a line break, which the library sets as nothing and a
+      copy leaves out;
+    - no line longer than the measured row answers for (``Columns.reach``),
+      counting two columns a character as the library sets a letter the code
+      face lacks.
+    """
+    from . import diffs
+
+    if part.kind is not Kind.LITERAL:
+        return "is broken at the window"
+    if roles.style(part.role).slot is not Slot.MONOSPACE:
+        return "is in a proportional face"
+    if part.text.endswith("\n"):
+        return "ends in a line break"
+    text = part.text
+    if not text.isascii() or not text.isprintable():
+        if any(diffs._hides(char) for char in set(text) if char not in "\t\n"):
+            return "holds a control or invisible character"
+    try:
+        with _MAKING:
+            theme, style = themes.document_theme(), themes.literal_style(part.role)
+    except Exception:
+        return "could not be given a style"
+    measured = gate.literal_columns(theme, style)
+    if not measured.holds:
+        return f"is set where the library {measured.why}"
+    if 2 * max(len(line) for line in text.split("\n")) > measured.reach:
+        return "has a line longer than the measured columns answer for"
+    return None
+
+
+def _literal_segment(index: int, part: Part, kept: list[Any]) -> _Segment:
+    """
+    One literal part as a view of the library's holding one host code block,
+    keeping a view the part's entry already had (``gate.literal_view``).
+    """
+    from imscribe import MarkdownCode
+
+    view: Any = kept.pop(0) if kept else None
+    if view is None:
+        with _MAKING:
+            view = gate.literal_view(themes.document_theme())
+    with _HANDING:
+        view.on_link = None
+        view.host_for = None
+        view.set_document([MarkdownCode(themes.literal_style(part.role), part.text)])
+    return _Segment((index,), view, (index,), literal=True)
 
 
 def _short(entry: _Entry, noted: object) -> str | None:
@@ -941,6 +1032,9 @@ def _ink(entry: _Entry) -> None:
                 # A diff view's inks are its own.
                 continue
             ink = _colour(entry.parts[index].colour)
+            if ink is None and segment.literal:
+                # The text's own ink, as ImGui draws it, and not the code role's.
+                ink = ui_theme.P.text
             # A fence's info string is told from its code by ink.
             said = segment.captions.get(block, 0)
             spans = [(0, said, ui_theme.P.accent.u32)] if said else []
@@ -1006,6 +1100,8 @@ def _show(
         else:
             foot = _show_view(im, segment, wide, palette, on_link)
             right = max(right, wide, segment.reach[2] if segment.reach else 0.0)
+            if segment.literal and entry.parts[segment.parts[0]].tight:
+                im.set_cursor_pos_y(im.get_cursor_pos_y() - im.get_style().item_spacing.y)
         segment.band = (top, foot)
     entry.shown = (wide, right, ui_theme.current())
     entry.resting = False
@@ -1143,7 +1239,8 @@ def _estimate(im: Any, entry: _Entry, wide: float) -> float:
         if segment.view is not None:
             with _ASKING:
                 tall += float(segment.view.layout_for(wide))
-            under = gap
+            literal = segment.literal and entry.parts[segment.parts[0]].tight
+            under = 0.0 if literal else gap
             continue
         part = (entry.written or entry.parts)[segment.parts[0]]
         with _native_font(im, part):
@@ -1202,6 +1299,7 @@ def _draw(
     on_link: Callable[[str], None] | None = None,
     rests: bool = False,
     apart: bool = False,
+    literal: bool = False,
 ) -> float:
     """
     Draw what is held under ``key`` for ``parts``, building what changed. The
@@ -1226,6 +1324,7 @@ def _draw(
             given = parts if isinstance(parts, tuple) else tuple(parts)
             if given != entry.parts:
                 entry.apart = apart
+                entry.literal = literal
                 _open(entry, given, on_link)
             entry.token = given
         if entry.inked is not ui_theme.current():
@@ -1301,6 +1400,7 @@ def document(
     on_link: Callable[[str], None] | None = None,
     rests: bool = False,
     apart: bool = False,
+    literal: bool = False,
 ) -> float:
     """
     Several parts in sequence under one key, each read its own way and in its own
@@ -1332,6 +1432,13 @@ def document(
     when it was drawn alone, so it does not move when it becomes a part. The
     price is the selection, which then ends with each part. Taken when the
     parts are read: the same for every call under a key.
+
+    ``literal`` lets the library set a ``Kind.LITERAL`` part, as a code block of
+    its own, where ``literal_unfit`` finds nothing against it; every other
+    literal part, and every one without it, is ImGui's. **A caller asks for it,
+    and no role brings it**: an approval's arguments are literal parts of the
+    same roles and do not ask (the module docstring). Taken when the parts are
+    read, as ``apart`` is.
     """
     return _draw(
         cache,
@@ -1343,6 +1450,7 @@ def document(
         on_link=on_link,
         rests=rests,
         apart=apart,
+        literal=literal,
     )
 
 
@@ -1358,11 +1466,14 @@ def plain(
     width: float | None = None,
     height_cap: float | None = None,
     role: Role = Role.LITERAL,
+    literal: bool = False,
 ) -> float:
     """
     Text that is not markdown, set exactly as written: an asterisk is an asterisk.
 
-    Drawn by ImGui (the module docstring says why), so it is not selectable.
+    Drawn by ImGui (the module docstring says why), so it is not selectable,
+    unless ``literal`` asks for the library and the library is measured to keep
+    its columns.
 
     - ``wrap=False`` (the default): every source line is one line, spacing and
       indentation kept to the column. A line longer than the window is not
@@ -1373,7 +1484,9 @@ def plain(
 
     ``colour`` is the ink; the default is the theme's text. ``role`` is whose
     size the text is set in; ``mono=False`` with ``wrap`` is ``Role.PROSE``, in
-    the proportional face.
+    the proportional face. ``literal`` is ``document``'s: with ``wrap=False`` the
+    library sets the text where ``literal_unfit`` finds nothing against it, and
+    it is then selectable.
     """
     if wrap and not exact:
         kind = Kind.WRAPPED
@@ -1388,6 +1501,7 @@ def plain(
         (Part(text, kind, colour, tight=True, role=role),),
         width=width,
         height_cap=height_cap,
+        literal=literal,
     )
 
 

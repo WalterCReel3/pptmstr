@@ -82,6 +82,27 @@ installed imtypeset, or this checkout's built pair where none is installed or
 
 Exit status 1, with the reason, when the library is not
 drawing; 2 when a page could not be read whole.
+
+## ``--pptmstr``: pptmstr's own fonts and role themes
+
+    scripts/xvfb_shot.sh -- .venv/bin/python scripts/measure_typeset_advances.py --pptmstr
+    ... --pptmstr --bodies 16 --families roboto
+
+Fonts are loaded by ``pptmstr.theme.load_fonts`` itself, and every page's
+documents are themed by ``roles.configure`` and ``themes.document_theme``: a
+family (prose in Roboto, or in the code face), a body size, and one step for
+the code-block, literal and inline-code roles together, from -2 to +4, so code
+at every pixel height from 12 to 24 over the default four bodies. Each page
+reads a document as pptmstr reads one (a paragraph holding a code span, the
+ruler and the long row as prose, and a fence of the code rows), a host's own
+``MarkdownCode`` in ``themes.literal_style`` in a ``gate.literal_view``, and
+another such block of rows holding characters the code face lacks. It prints,
+per page, R2, R4, R5 and R6 of the fence and of the host block against the
+chrome font at the role's pixel height, each glyph against its rectangle, a
+hit test a quarter and three quarters into every glyph, the drawn pitch, the
+tab row's columns, where a selection's fill is against the pens, the code
+span's advance and raster, and how far the wide block's ink, lines and
+``content_width`` reach.
 """
 
 from __future__ import annotations
@@ -819,14 +840,19 @@ def main(argv: list[str] | None = None) -> int:
         return {"theme": theme, "prose": prose, "code": code}
 
     def candidates(sizes: dict[str, float]) -> list[Any]:
-        fonts = imgui.get_io().fonts.fonts
-        low = math.floor(min(sizes.values())) - 1
-        high = math.ceil(max(sizes.values())) + 1
+        # Every size the atlas holds for the entry, and not whole pixels near the
+        # theme's: a Roboto page's prose is drawn from a size that is no whole
+        # pixel, and a range of whole ones found nothing of it.
+        from pptmstr.theme import baked_sizes
+
+        atlas = imgui.get_io().fonts
+        fonts = atlas.fonts
         out = []
         for role in ("PROSE", "CODE"):
             index = ts.font_atlas_index(FACE_ROLES[role])
             if index is not None and 0 <= index < len(fonts):
-                out.append((role, fonts[index], range(low, high + 1)))
+                held = [size for size, _ in baked_sizes(atlas, fonts[index])]
+                out.append((role, fonts[index], held))
         return out
 
     def describe_atlas() -> None:
@@ -1012,5 +1038,533 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+# ---------------------------------------------------------------------------
+# --pptmstr: pptmstr's own fonts and role themes
+# ---------------------------------------------------------------------------
+
+PPTMSTR_BODIES = (14.0, 16.0, 18.0, 20.0)
+"""
+The body sizes the settings dialog offers at a 16 px UI font (``roles.SCALES``).
+"""
+PPTMSTR_STEPS = (-2, -1, 0, 1, 2, 3, 4)
+"""
+``roles.STEPS``: so a role is set at every pixel height from 12 to 24.
+"""
+SPAN = RULER[:16]
+INLINE = f"A code span `{SPAN}` in a sentence of prose."
+TAB_ROW = "\ta\tbc\tdefg\th"
+HOST_ROWS = (*CODE_ROWS, TAB_ROW)
+WIDE_ROWS = ("xπxЖx", "Ж" * 10, "x中x\U0001f600x", "plain")
+"""
+A host block's rows holding characters the code face lacks: Greek and Cyrillic,
+which the prose face has, and a CJK character and an emoji, which no face has.
+"""
+WIDE_PX = 80.0
+SELECTED = (10, 40)
+"""
+Characters of the 74-character host row a selection is made over: its fill is
+read against the pens of the first and of the one after the last.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class RolePage:
+    """
+    pptmstr's roles at one body size, with the code, literal and inline-code
+    roles all at one step, and prose in its family's slot.
+    """
+
+    family: str
+    body: float
+    step: int
+
+    @property
+    def code_px(self) -> float:
+        return self.body + self.step
+
+    @property
+    def label(self) -> str:
+        return f"{self.family} {self.body:g}{self.step:+d}"
+
+
+@dataclass(frozen=True, slots=True)
+class Ink:
+    """
+    One inked character of a view and the quad that drew it, attributed to an
+    atlas entry and a baked size by the quad's uv rectangle.
+    """
+
+    char: str
+    block: int
+    index: int
+    quad: tuple[float, float, float, float]
+    font: int
+    baked_px: float
+    pen: float
+    pen_y: float
+    advance: float
+
+
+def white_quads(draw_list: Any, start: int, stop: int, white: Any) -> list[tuple[float, ...]]:
+    """
+    The fills among vertices ``[start, stop)``: quads whose uv is the white pixel.
+    """
+    buffer = draw_list.vtx_buffer
+    flat = []
+    for i in range(start, stop):
+        vertex = buffer[i]
+        if abs(vertex.uv.x - white.x) <= 1e-9 and abs(vertex.uv.y - white.y) <= 1e-9:
+            flat.append((vertex.pos.x, vertex.pos.y))
+    out = []
+    for at in range(0, len(flat) - 3, 4):
+        xs, ys = zip(*flat[at : at + 4], strict=True)
+        out.append((min(xs), min(ys), max(xs), max(ys)))
+    return out
+
+
+def read_inks(
+    view: Any, draw_list: Any, start: int, stop: int, white: Any, fonts: list[tuple[int, Any]]
+) -> list[Ink]:
+    """
+    Every inked character of ``view`` with its quad, each attributed on its own:
+    a paragraph holding a code span is drawn from two entries. Raises ``Unread``
+    when the counts differ or a quad matches no glyph of any entry's sizes.
+    """
+    from imgui_bundle import imgui
+
+    from pptmstr.theme import baked_sizes
+
+    atlas = imgui.get_io().fonts
+    quads = glyph_quads(draw_list, start, stop, white)
+    inked = [
+        (block, index, char)
+        for block, text in enumerate(view.texts)
+        for index, char in enumerate(text)
+        if not char.isspace()
+    ]
+    if len(quads) != len(inked):
+        raise Unread(f"{len(quads)} glyph quads for {len(inked)} characters with ink")
+    sized = [
+        (number, font, held_bake(font, size))
+        for number, font in fonts
+        for size, _ in baked_sizes(atlas, font)
+    ]
+    out = []
+    for (block, index, char), quad in zip(inked, quads, strict=True):
+        found = None
+        for number, _, baked in sized:
+            if baked is None or not baked.is_glyph_loaded(ord(char)):
+                continue
+            glyph = baked.find_glyph(ord(char))
+            uv = (glyph.u0, glyph.v0, glyph.u1, glyph.v1)
+            if all(abs(a - b) < 1e-7 for a, b in zip(uv, quad[4:], strict=True)):
+                found = (number, baked, glyph)
+                break
+        if found is None:
+            raise Unread(f"block {block} character {index} {char!r}: no glyph has its quad's uv")
+        number, baked, glyph = found
+        out.append(
+            Ink(
+                char,
+                block,
+                index,
+                (quad[0], quad[1], quad[2], quad[3]),
+                number,
+                float(baked.size),
+                quad[0] - float(glyph.x0),
+                quad[1] - float(glyph.y0),
+                float(baked.get_char_advance(ord(char))),
+            )
+        )
+    return out
+
+
+def _lines_of(view: Any, block: int) -> list[Any]:
+    return [line for line in view.set_lines(block, block + 1)]
+
+
+def code_numbers(
+    view: Any,
+    block: int,
+    inks: list[Ink],
+    rows: tuple[str, ...],
+    chrome: Any,
+    px: float,
+) -> dict[str, str]:
+    """
+    R2, R4, R5 and R6 of one code block's rows, glyph against rectangle, hit
+    tests a quarter and three quarters into every glyph, and the drawn pitch.
+    ``px`` is the pixel height the chrome font is set at beside it: the role's.
+    """
+    origin = view.origin
+    lines = _lines_of(view, block)
+    text = view.texts[block]
+    mine = [ink for ink in inks if ink.block == block]
+    baked = chrome.get_font_baked(px)
+    adv = float(baked.get_char_advance(ord("0")))
+    by_line: dict[int, list[Ink]] = {}
+    starts: dict[int, int] = {}
+    for line in lines:
+        starts[line.line] = line.start
+        by_line[line.line] = [ink for ink in mine if line.start <= ink.index < line.end]
+    out: dict[str, str] = {}
+    out["lines"] = f"{len(lines)}/{len(rows)}"
+    out["drawn px"] = "/".join(f"{v:g}" for v in sorted({ink.baked_px for ink in mine}))
+    steps = [
+        b.pen - a.pen
+        for row in by_line.values()
+        for a, b in pairwise(row)
+        if b.index == a.index + 1
+    ]
+    out["steps"] = _tally(steps)
+    out["r2 chrome"] = f"{sum(1 for s in steps if abs(s - adv) < EPS)}/{len(steps)}"
+    columns: dict[int, list[float]] = {}
+    for number, row in by_line.items():
+        if "\t" in text[starts[number] : starts[number] + len(TAB_ROW)] and row:
+            continue
+        for ink in row:
+            columns.setdefault(ink.index - starts[number], []).append(ink.pen)
+    first = min((ink.pen for ink in mine), default=0.0)
+    drift = max((max(p) - min(p) for p in columns.values()), default=0.0)
+    off = sum(
+        1
+        for column, pens in columns.items()
+        for pen in pens
+        if abs(pen - first - column * adv) > 0.01
+    )
+    out["r4 drift"] = f"{drift:g}"
+    # R5: the chrome font's pens for the same row from the same x.
+    r5 = []
+    for wanted in (RULER, LONG):
+        number = next(
+            (
+                n
+                for n, line in enumerate(lines)
+                if text[line.start : line.end].rstrip("\n") == wanted
+            ),
+            None,
+        )
+        if number is None:
+            r5.append("absent")
+            continue
+        row = by_line[lines[number].line]
+        at = row[0].pen
+        pens = []
+        for char in wanted:
+            pens.append(at)
+            at += float(baked.get_char_advance(ord(char)))
+        placed = {ink.index - lines[number].start: ink for ink in row}
+        r5.append(
+            " ".join(f"{placed[k - 1].pen - pens[k - 1]:+g}" for k in MARKS if k <= len(wanted))
+        )
+    out["r5 40"], out["r5 74"] = r5
+    # Glyph against rectangle, and the hit test, in the document's coordinates.
+    doc = view.native_document
+    rect_off = 0.0
+    mishit = 0
+    missed: list[str] = []
+    tops = {line.line: (line.top + line.bottom) / 2.0 for line in lines}
+    for number, row in by_line.items():
+        for ink in row:
+            rects = view.span_rects(block, ink.index, ink.index + 1)
+            if len(rects) == 1:
+                rect_off = max(rect_off, abs(origin[0] + rects[0][0] - ink.pen))
+            x = ink.pen - origin[0]
+            y = tops[number]
+            before = tuple(doc.hit_test((x + 0.25 * adv, y)).position)
+            after = tuple(doc.hit_test((x + 0.75 * adv, y)).position)
+            if before != (block, ink.index) or after != (block, ink.index + 1):
+                mishit += 1
+                if len(missed) < 4:
+                    missed.append(f"{ink.char!r}@{ink.index}->{before[1]},{after[1]}")
+    out["rect"] = f"{rect_off:.2f}"
+    out["hits"] = f"{mishit}/{len(mine)} {' '.join(missed)}"
+    out["r6"] = f"{sum(1 for ink in mine if ink.pen != math.floor(ink.pen))}"
+    pens_y = [row[0].pen_y for row in by_line.values() if row]
+    out["pitch"] = _tally([b - a for a, b in pairwise(pens_y)])
+    out["row baselines"] = ",".join(f"{y:g}" for y in pens_y)
+    out["laid baselines"] = f"origin {origin[1]:g}: " + ",".join(
+        f"{line.baseline:.4f}" for line in lines
+    )
+    out["off"] = str(off)
+    if TAB_ROW in text:
+        number = next(
+            n for n, line in enumerate(lines) if text[line.start : line.end].rstrip("\n") == TAB_ROW
+        )
+        row = by_line[lines[number].line]
+        columns_in = [(ink.pen - first) / adv for ink in row]
+        out["tabs"] = ",".join(f"{c:g}" for c in columns_in)
+    return out
+
+
+def pptmstr_main(args: argparse.Namespace) -> int:
+    """
+    The ``--pptmstr`` pages: pptmstr's fonts loaded by ``pptmstr.theme.load_fonts``
+    (the chrome, then ``gate.load_fonts``), and pptmstr's role themes
+    (``themes.document_theme`` after ``roles.configure``), at every body size the
+    settings dialog offers and every step: the code, literal and inline-code
+    roles from 12 to 24 px.
+
+    Each page draws three views: a document read as pptmstr reads one (a prose
+    paragraph with a code span, a paragraph of the ruler and the long row, and
+    a fence of the code rows), a host-made ``MarkdownCode`` of the code rows and
+    a tab row in the literal role's style under ``code_overflow="grow"`` and
+    ``fixed_line_height=True``, and another such block of rows holding
+    characters the code face lacks. The chrome is the application's own UI
+    font at the role's pixel height.
+    """
+    from pptmstr import pairing, version
+
+    pairing.adopt()
+    import imgui_bundle
+    import imscribe
+    from imgui_bundle import hello_imgui, imgui, immapp
+    from imscribe import MarkdownCode, TypesetView, typesetter
+
+    from pptmstr import theme as ui_theme
+    from pptmstr.ui.typeset import gate, roles, themes
+    from pptmstr.ui.typeset.roles import Role, RoleStyle, Slot
+
+    pages = [
+        RolePage(family, body, step)
+        for family in args.families
+        for body in args.bodies
+        for step in PPTMSTR_STEPS
+    ]
+    state: dict[str, Any] = {"page": 0, "shown": 0, "views": None}
+    rows_out: list[tuple[RolePage, dict[str, str]]] = []
+    failed: list[str] = []
+    facts: dict[str, str] = {}
+    before = uptime()
+
+    def configure(page: RolePage) -> None:
+        mono = Slot.MONOSPACE
+        given = {
+            Role.CODE_BLOCK: RoleStyle(mono, page.step),
+            Role.LITERAL: RoleStyle(mono, page.step),
+            Role.INLINE_CODE: RoleStyle(mono, page.step),
+        }
+        if page.family == "mono":
+            given[Role.PROSE] = RoleStyle(mono)
+        roles.configure(typeset=True, scale=page.body / CHROME_PX, roles=given)
+
+    def literal_style(theme: Any) -> Any:
+        # The product's own: what a literal part the library sets is drawn in.
+        return themes.literal_style(Role.LITERAL)
+
+    def views_for(page: RolePage) -> dict[str, Any]:
+        configure(page)
+        theme = themes.document_theme()
+        source = "\n\n".join(
+            (
+                INLINE,
+                f"{RULER}  \n{LONG}",
+                "```\n" + "\n".join(CODE_ROWS) + "\n```",
+            )
+        )
+        doc = TypesetView(theme=theme, palette=themes.palette())
+        doc.set_document(gate.read(source, theme).blocks)
+        style = literal_style(theme)
+        host = TypesetView(
+            theme=theme, palette=themes.palette(), code_overflow="grow", fixed_line_height=True
+        )
+        host.set_document([MarkdownCode(style, "\n".join(HOST_ROWS))])
+        wide = TypesetView(
+            theme=theme, palette=themes.palette(), code_overflow="grow", fixed_line_height=True
+        )
+        wide.set_document([MarkdownCode(style, "\n".join(WIDE_ROWS))])
+        long = HOST_ROWS.index(LONG)
+        offset = sum(len(row) + 1 for row in HOST_ROWS[:long])
+        host.select(((0, offset + SELECTED[0]), (0, offset + SELECTED[1])))
+        return {"theme": theme, "doc": doc, "host": host, "wide": wide}
+
+    def gui() -> None:
+        if failed or state["page"] >= len(pages):
+            hello_imgui.get_runner_params().app_shall_exit = True
+            return
+        page = pages[state["page"]]
+        io = imgui.get_io()
+        imgui.set_next_window_pos(imgui.ImVec2(0.0, 0.0))
+        imgui.set_next_window_size(io.display_size)
+        imgui.begin(
+            "measure",
+            None,
+            imgui.WindowFlags_.no_decoration.value
+            | imgui.WindowFlags_.no_saved_settings.value
+            | imgui.WindowFlags_.horizontal_scrollbar.value,
+        )
+        try:
+            if not gate.can_draw():
+                failed.append(gate.unavailable_reason() or "the library is not drawing")
+                return
+            if state["views"] is None:
+                state["views"] = views_for(page)
+                state["shown"] = 0
+            views = state["views"]
+            draw_list = imgui.get_window_draw_list()
+            white = imgui.get_font_tex_uv_white_pixel()
+            spans = {}
+            for name, width in (("doc", 1200.0), ("host", 1200.0), ("wide", WIDE_PX)):
+                start = draw_list.vtx_buffer.size()
+                views[name].draw(palette=themes.palette(), width_px=width)
+                spans[name] = (start, draw_list.vtx_buffer.size())
+            state["shown"] += 1
+            if state["shown"] < SETTLE_FRAMES:
+                return
+            atlas = io.fonts
+            fonts = list(enumerate(atlas.fonts))
+            chrome = ui_theme.face(ui_theme.Face.BODY)
+            px = page.code_px
+            code_entry = typesetter.module().font_atlas_index(
+                __import__("imscribe.description", fromlist=["FACE_ROLES"]).FACE_ROLES["CODE"]
+            )
+            brief: dict[str, str] = {}
+            # The document: inline code, then the fence.
+            doc = views["doc"]
+            inks = read_inks(doc, draw_list, *spans["doc"], white, fonts)
+            span = [ink for ink in inks if ink.block == 0 and ink.font == code_entry]
+            span_steps = [b.pen - a.pen for a, b in pairwise(span)]
+            chrome_at_body = float(chrome.get_font_baked(page.body).get_char_advance(ord("0")))
+            chrome_at_role = float(chrome.get_font_baked(px).get_char_advance(ord("0")))
+            brief["inline"] = (
+                f"{len(span)}ch {span[-1].pen + span[-1].advance - span[0].pen:g}px "
+                f"steps {_tally(span_steps)} drawn "
+                f"{'/'.join(f'{v:g}' for v in sorted({i.baked_px for i in span}))}; "
+                f"chrome x16 @{page.body:g} {16 * chrome_at_body:g} @{px:g} {16 * chrome_at_role:g}"
+            )
+            fence = len(doc.texts) - 1
+            numbers = code_numbers(doc, fence, inks, CODE_ROWS, chrome, px)
+            brief.update({f"fence {k}": v for k, v in numbers.items()})
+            # Prose rows (the ruler and the long row as a paragraph with a hard break).
+            prose_rows = [ink for ink in inks if ink.block == 1]
+            prose_steps = [b.pen - a.pen for a, b in pairwise(prose_rows) if b.index == a.index + 1]
+            same = sum(1 for s in prose_steps if abs(s - chrome_at_body) < EPS)
+            brief["prose rows chrome"] = f"{same}/{len(prose_steps)}"
+            spaces = [
+                b.pen - a.pen - a.advance
+                for a, b in pairwise(ink for ink in inks if ink.block == 0)
+                if b.index == a.index + 2
+            ]
+            brief["spaces"] = _tally(spaces)
+            # The host block.
+            host = views["host"]
+            hinks = read_inks(host, draw_list, *spans["host"], white, fonts)
+            numbers = code_numbers(host, 0, hinks, HOST_ROWS, chrome, px)
+            brief.update({f"host {k}": v for k, v in numbers.items()})
+            long = HOST_ROWS.index(LONG)
+            offset = sum(len(row) + 1 for row in HOST_ROWS[:long])
+            by_index = {ink.index: ink for ink in hinks}
+            fills = white_quads(draw_list, *spans["host"], white)
+            want = (by_index[offset + SELECTED[0]].pen, by_index[offset + SELECTED[1]].pen)
+            brief["host fill"] = (
+                "none"
+                if not fills
+                else " ".join(f"{f[0] - want[0]:+g}/{f[2] - want[1]:+g}" for f in fills)
+            )
+            brief["host texts"] = str(host.texts[0] == "\n".join(HOST_ROWS))
+            brief["host width"] = f"{host.content_width:g}"
+            # The wide block: where each row's glyphs are, against what the view claims.
+            wide = views["wide"]
+            wquads = glyph_quads(draw_list, *spans["wide"], white)
+            wlines = _lines_of(wide, 0)
+            origin = wide.origin
+            text = wide.texts[0]
+            inked = [i for i, c in enumerate(text) if not c.isspace()]
+            row_of = {}
+            for line in wlines:
+                for i in range(line.start, line.end):
+                    row_of[i] = line.line
+            per_row: dict[int, list[float]] = {}
+            right = 0.0
+            for i, quad in zip(inked, wquads, strict=False):
+                per_row.setdefault(row_of.get(i, -1), []).append(quad[0] - origin[0])
+                right = max(right, quad[2] - origin[0])
+            brief["wide quads"] = f"{len(wquads)}/{len(inked)}"
+            brief["wide lefts"] = " | ".join(
+                ",".join(f"{v:g}" for v in lefts) for _, lefts in sorted(per_row.items())
+            )
+            brief["wide right"] = (
+                f"ink {right:g} lines {max(line.right for line in wlines):g} "
+                f"content_width {wide.content_width:g} cell {chrome_at_role:g} "
+                f"cells {max(len(r) for r in WIDE_ROWS)}"
+            )
+            rows_out.append((page, brief))
+            for name in ("doc", "host", "wide"):
+                views[name].close()
+            state["views"] = None
+            state["page"] += 1
+            state["tries"] = 0
+        except Unread as exc:
+            # A glyph baked later in the frame can move the atlas under quads
+            # already emitted: the page is drawn again, a few times at most.
+            state["tries"] = state.get("tries", 0) + 1
+            if state["tries"] > 8:
+                failed.append(f"{page.label}: {exc}")
+        finally:
+            imgui.end()
+
+    def load() -> None:
+        ui_theme.load_fonts()
+        facts["fonts"] = (
+            f"pptmstr.theme.load_fonts(): {len(imgui.get_io().fonts.fonts)} atlas entries; "
+            f"gate.can_draw() {gate.can_draw()}"
+        )
+
+    params = hello_imgui.RunnerParams()
+    params.app_window_params.window_title = "pptmstr: typeset advances, pptmstr's roles"
+    params.app_window_params.window_geometry.size = WINDOW
+    params.imgui_window_params.default_imgui_window_type = (
+        hello_imgui.DefaultImGuiWindowType.no_default_window
+    )
+    params.ini_disable = True
+    params.callbacks.load_additional_fonts = load
+    params.callbacks.show_gui = gui
+    params.callbacks.before_exit = gate.unload
+    immapp.run(params)
+    after = uptime()
+    print(
+        "measure_typeset_advances --pptmstr: positions and counts from the draw list; no pixel read"
+    )
+    print(f"  uptime before: {before}")
+    print(f"  uptime after:  {after}")
+    print(f"  {provenance(imscribe)}")
+    print(f"  imgui_bundle {imgui_bundle.__version__}")
+    print(f"  {version.library_line()}")
+    for name, value in facts.items():
+        print(f"  {name}: {value}")
+    print(
+        "  pages: family, body px, and the step of the code-block, literal and inline-code "
+        "roles; the chrome is pptmstr's UI font at body+step"
+    )
+    print()
+    for page, brief in rows_out:
+        print(page.label)
+        for key, value in brief.items():
+            print(f"  {key}: {value}")
+    if failed:
+        for reason in failed:
+            print(f"NOT READ: {reason}", file=sys.stderr)
+        return 2
+    return 0
+
+
+def _main(argv: list[str] | None = None) -> int:
+    given = sys.argv[1:] if argv is None else argv
+    if "--pptmstr" not in given:
+        return main(given)
+    parser = argparse.ArgumentParser(description="pptmstr's role themes")
+    parser.add_argument("--pptmstr", action="store_true")
+    parser.add_argument(
+        "--bodies", type=_lengths, default=PPTMSTR_BODIES, help="body pixel heights"
+    )
+    parser.add_argument(
+        "--families",
+        type=lambda text: tuple(p.strip() for p in text.split(",") if p.strip()),
+        default=("roboto", "mono"),
+        help="roboto (prose proportional), mono (prose in the code face), or both",
+    )
+    return pptmstr_main(parser.parse_args(given))
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(_main())

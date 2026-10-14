@@ -964,6 +964,13 @@ def draw(im: Any, snap: Snapshot, state: TranscriptState) -> None:
     rig.frame(im, lambda: transcript_pane.draw(snap, state, ROOT))
 
 
+def is_literal(view: Any) -> bool:
+    """
+    Whether a view of the library's holds one literal run: one host code block.
+    """
+    return len(view.blocks) == 1 and isinstance(view.blocks[0], rig.imscribe.MarkdownCode)
+
+
 def block_texts(feed: TypesetFeed) -> list[str]:
     """
     What the feed's views were handed to set, top to bottom: each block of a view
@@ -1022,9 +1029,12 @@ def test_the_settled_report_is_one_document_and_the_open_run_and_shows_all_of_it
     assert feed.skipped == 0
     for key in feed.views.keys():
         assert feed.views.unbuilt(key) == 0, key
-    # Markdown runs are the library's, and the runs between them are not.
+    # Every run is a view of its own: a markdown run's, and a literal run's as
+    # one host code block wherever the library keeps its columns.
     literal = [run for run in held.runs if run.part.kind is typeset.Kind.LITERAL]
-    assert literal and 0 < len(feed.views.views(held.key)) <= len(held.runs) - len(literal)
+    fit = [run for run in literal if typeset.views.literal_unfit(run.part) is None]
+    assert fit and len(feed.views.views(held.key)) == len(held.runs) - len(literal) + len(fit)
+    assert sum(is_literal(view) for view in feed.views.views(held.key)) == len(fit)
     text = "\n".join(block_texts(feed))
     for needle in ("<lead>", "Optional<int>", "<!--", "<details>", LAST_LINE):
         assert needle in text, needle
@@ -1549,7 +1559,7 @@ def test_two_identical_runs_are_both_drawn_and_each_can_be_selected(seam: Any) -
         "Read(file_path=same.py)",
     )
     assert [transcript_pane._typeset_run(feed, held.key, n, True) for n in range(4)] == [0, 1, 2, 3]
-    first, second = feed.views.views(held.key)
+    first, second = [view for view in feed.views.views(held.key) if not is_literal(view)]
     assert first is not second and first.origin[1] < second.origin[1]
     assert [feed.views.part_at(held.key, 0, view) for view in (first, second)] == [0, 2]
     try:
@@ -1565,8 +1575,8 @@ def test_an_open_literal_run_is_set_as_it_arrives_and_keeps_its_unfinished_line(
     seam: Any,
 ) -> None:
     """
-    A result arriving a token at a time is ImGui's text, whole lines and the line
-    still arriving alike, under one key.
+    A result arriving a token at a time is one host code block of the
+    library's, whole lines and the line still arriving alike, under one key.
     """
     transcript = Transcript()
     state = typeset_state()
@@ -1588,7 +1598,8 @@ def test_an_open_literal_run_is_set_as_it_arrives_and_keeps_its_unfinished_line(
         "row one, first half and second\nrow two, more",
         "row one, first half and second\nrow two, more\nrow 3",
     ]
-    assert feed.views.views(("open", 1)) == (), "a literal run is not the library's"
+    (view,) = feed.views.views(("open", 1))
+    assert is_literal(view) and tuple(view.texts) == (seen[-1],)
     assert block_texts(feed) == ["Looking.", seen[-1]]
 
     transcript.append(SegmentKind.OUTPUT, "Done.")
@@ -1678,23 +1689,34 @@ def test_a_markdown_run_under_another_does_not_move_when_it_closes(seam: Any) ->
     assert thought.origin[1] < said.origin[1]
 
 
+@pytest.mark.parametrize("who", ["library", "imgui"])
 def test_a_literal_run_that_closes_stays_where_it_was(
-    seam: Any, monkeypatch: pytest.MonkeyPatch
+    seam: Any, monkeypatch: pytest.MonkeyPatch, who: str
 ) -> None:
     """
     Open, a literal run is the last thing in the pane; closed, a part of a
-    document with more under it. Its lines are at the same height in both.
+    document with more under it. Its lines are at the same height in both,
+    whoever sets them: the library, or ImGui where the library is not asked to.
     """
     rows = "row one\nrow two\nrow three"
     at: list[float] = []
+    if who == "imgui":
+        monkeypatch.setattr(typeset.views, "literal_unfit", lambda part: "is refused here")
     real = seam.text_unformatted
+    real_view = rig.imscribe.TypesetView.draw
 
     def text_unformatted(text: str) -> None:
         if text == rows:
             at.append(seam.get_cursor_screen_pos().y)
         real(text)
 
+    def view_draw(self: Any, **given: Any) -> bool:
+        if who == "library" and tuple(self.texts) == (rows,):
+            at.append(seam.get_cursor_screen_pos().y)
+        return bool(real_view(self, **given))
+
     monkeypatch.setattr(seam, "text_unformatted", text_unformatted)
+    monkeypatch.setattr(rig.imscribe.TypesetView, "draw", view_draw)
     transcript = Transcript()
     transcript.append(SegmentKind.OUTPUT, "Looking.\n")
     transcript.append(SegmentKind.TOOL_RESULT, rows)

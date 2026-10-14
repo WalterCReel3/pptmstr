@@ -119,12 +119,16 @@ of code drawn on ImGui's grid", so one row is set in a document of the native
 module's, as the diff view sets a row, and read back: where it was laid out,
 the vertices a draw of it would emit, what a hit test answers on them. Through
 ``typesetter.module()`` and ``typesetter.base_style``, here and nowhere else.
+The same questions are asked of literal text through the view and the block
+it is drawn with (``literal_columns``, ``literal_view``).
 """
 
 from __future__ import annotations
 
 import struct
 import traceback
+from collections.abc import Callable, Iterator
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
@@ -786,6 +790,8 @@ def load_fonts(bold: Path | None = None) -> bool:
         try:
             theme = themes.diff_theme()
             _COLUMNS[_columns_key(theme)] = _measured_columns(theme)
+            # And literal text's, which the log asks of its first tool result.
+            literal_columns(themes.document_theme(), themes.literal_style(roles.Role.LITERAL))
         except Exception:
             pass
     return can_draw()
@@ -1108,10 +1114,19 @@ def _measured_columns(theme: Any) -> Columns:
     Every baked size the measurement makes on ImGui's atlas is discarded
     before this returns (``_discard_new``), whatever it answers or raises.
     """
+    return _without_new_sizes(lambda: _measured(theme))
+
+
+def _without_new_sizes(measure: Callable[[], Columns]) -> Columns:
+    """
+    What ``measure`` answers, with every baked size it made on ImGui's atlas
+    discarded before this returns (``_discard_new``), whatever it answers or
+    raises.
+    """
     atlas = _imgui().get_io().fonts
     before = [(font, ui_theme.baked_sizes(atlas, font)) for font in atlas.fonts]
     try:
-        return _measured(theme)
+        return measure()
     finally:
         _discard_new(atlas, before)
 
@@ -1150,25 +1165,49 @@ def _held_bake(atlas: Any, font: Any, size: float) -> Any:
 
 def _measured(theme: Any) -> Columns:
     """
-    The measurement itself: ``_measured_columns`` cleans up after it.
+    The measurement of a diff view's row: ``_measured_columns`` cleans up after it.
+
+    The row is one Code block of a document of the native module's, styled as the
+    diff view styles its own (its grid gives the scale and the pitch).
     """
     from imscribe import Diff
 
     typesetter = _typesetter()
     native = typesetter.module()
     grid = diff_view(Diff(), theme).grid
-    said = cell = float(grid.cell)
+    said = float(grid.cell)
     base = typesetter.base_style(theme, 0)
     pitched = native.BlockStyle(Scale=grid.scale, LineHeight=grid.row / (grid.em * grid.scale))
+    wide = float(len(_COLUMN_ROW) + 8) * max(said, 1.0) * 2.0
+
+    @contextmanager
+    def laid(row: str) -> Iterator[tuple[Any, float]]:
+        with native.Document.from_blocks(
+            [native.Block(native.BlockKind.Code, row)], [pitched]
+        ) as document:
+            document.layout(wide, base)
+            yield document, grid.row / 2.0
+
+    return _row_columns(laid, said, (-16.0, -16.0, wide, 4.0 * grid.row))
+
+
+def _row_columns(
+    laid: Callable[[str], AbstractContextManager[tuple[Any, float]]],
+    said: float | None,
+    clip: tuple[float, float, float, float],
+) -> Columns:
+    """
+    ``columns``' questions of a row of code, wherever it was set: ``laid(row)``
+    gives a native document holding the row as its one block, laid out, with
+    the y of the row's middle. ``said`` is the cell the setter says it lays a
+    column out at, or ``None`` where it says none.
+    """
+    native = _typesetter().module()
     row = _COLUMN_ROW
     inked = [index for index, char in enumerate(row) if not char.isspace()]
-    wide = float(len(row) + 8) * max(cell, 1.0) * 2.0
-    clip = (-16.0, -16.0, wide, 4.0 * grid.row)
-    with native.Document.from_blocks(
-        [native.Block(native.BlockKind.Code, row)], [pitched]
-    ) as document:
-        document.layout(wide, base)
-        laid = float(document.caret_rect((0, len(row)))[0]) / len(row)
+    with laid(row) as (document, middle):
+        laid_cell = float(document.caret_rect((0, len(row)))[0]) / len(row)
+        cell = laid_cell if said is None else said
         document.draw_to_buffers((0.0, 0.0), clip)
         quads = _glyph_quads(native, document.draw_to_buffers((0.0, 0.0), clip)[0])
         if len(quads) != len(inked):
@@ -1190,9 +1229,8 @@ def _measured(theme: Any) -> Columns:
                 glyphs=len(inked),
             )
         advance = float(baked.get_char_advance(ord("0")))
-        if abs(laid - advance) > abs(said - advance):
-            cell = laid
-        middle = grid.row / 2.0
+        if abs(laid_cell - advance) > abs(cell - advance):
+            cell = laid_cell
         off = mishit = 0
         first: float | None = None
         for index, quad in zip(inked, quads, strict=True):
@@ -1205,10 +1243,7 @@ def _measured(theme: Any) -> Columns:
             after = document.hit_test((pen + 0.75 * advance, middle)).position[1]
             if (int(before), int(after)) != (index, index + 1):
                 mishit += 1
-    with native.Document.from_blocks(
-        [native.Block(native.BlockKind.Code, _TAB_ROW)], [pitched]
-    ) as document:
-        document.layout(wide, base)
+    with laid(_TAB_ROW) as (document, _):
         document.draw_to_buffers((0.0, 0.0), clip)
         quads = _glyph_quads(native, document.draw_to_buffers((0.0, 0.0), clip)[0])
         after_tabs = [char for char in _TAB_ROW if not char.isspace()]
@@ -1231,6 +1266,72 @@ def _measured(theme: Any) -> Columns:
         why = f"keeps a {advance:g} px column: laid out, drawn and hit over a row"
     holds = abs(cell - advance) <= COLUMN_EPSILON_PX and not off and not mishit and tabs
     return Columns(holds, why, cell, advance, size, len(inked), off, mishit, tabs)
+
+
+def literal_view(theme: Any) -> Any:
+    """
+    A view of the library's that literal text is set in, as pptmstr makes one:
+    a code line runs on past the measure and the view claims its width
+    (``code_overflow="grow"``), and every line is one pitch under the last
+    (``fixed_line_height``).
+
+    **The one place such a view is made**: the views a pane draws literal text
+    with (``views``) and the view ``literal_columns`` measures are both made
+    here, so what was measured is the configuration that is drawn. Raises what
+    the library raises.
+    """
+    from imscribe import TypesetView
+
+    return TypesetView(theme=theme, code_overflow="grow", fixed_line_height=True)
+
+
+def literal_columns(theme: Any, style: Any) -> Columns:
+    """
+    ``columns`` for literal text: whether a row set as a host's own code block
+    in ``style``, in a ``literal_view`` of ``theme``, keeps its columns and is
+    hit where it is drawn. The same questions of the same row, through the
+    view and the block literal text is drawn with, and no diff view. Never
+    raises; kept as ``columns`` keeps its answers.
+
+    Measured in pptmstr on 2026-10-13 (``scripts/measure_typeset_advances.py
+    --pptmstr``): at every pixel height from 12 to 24 the row's steps are
+    ImGui's baked advance, rows agree at every column, pens are on the
+    chrome's, and every glyph is on its rectangle.
+    """
+    try:
+        key = ("literal", style.font, style.leading, theme.px_per_inch, _density())
+    except Exception as failure:
+        return Columns(False, f"was given a style it cannot read ({type(failure).__name__})")
+    held = _COLUMNS.get(key)
+    if held is None:
+        if not can_draw():
+            return Columns(False, "is not drawing")
+        try:
+            held = _without_new_sizes(lambda: _measured_literal(theme, style))
+        except Exception as failure:
+            held = Columns(False, f"could not be measured ({type(failure).__name__}: {failure})")
+        _COLUMNS[key] = held
+    return held
+
+
+def _measured_literal(theme: Any, style: Any) -> Columns:
+    from imscribe import MarkdownCode, px_from_sp
+
+    tall = float(px_from_sp(style.font.size))
+    wide = float(len(_COLUMN_ROW) + 8) * max(tall, 1.0)
+
+    @contextmanager
+    def laid(row: str) -> Iterator[tuple[Any, float]]:
+        view = literal_view(theme)
+        try:
+            view.set_document([MarkdownCode(style, row)])
+            view.layout_for(wide)
+            (line,) = view.set_lines(0, 1)
+            yield view.native_document, (line.top + line.bottom) / 2.0
+        finally:
+            view.close()
+
+    return _row_columns(laid, None, (-16.0, -16.0, wide, 4.0 * tall))
 
 
 def _glyph_quads(native: Any, vertices: bytes) -> list[tuple[float, float, float, float]]:

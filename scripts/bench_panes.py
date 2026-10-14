@@ -96,7 +96,13 @@ from pptmstr.intents import (  # noqa: E402
     ApprovalRequested,
     SubagentDelivered,
 )
-from pptmstr.model import AgentState, NodeId, PendingApproval, Snapshot  # noqa: E402
+from pptmstr.model import (  # noqa: E402
+    AgentState,
+    NodeId,
+    PendingApproval,
+    SessionFailed,
+    Snapshot,
+)
 from pptmstr.store import Store  # noqa: E402
 from pptmstr.transcript import SegmentKind, Transcript  # noqa: E402
 from pptmstr.ui import (  # noqa: E402
@@ -113,7 +119,7 @@ from pptmstr.ui import (  # noqa: E402
 from pptmstr.ui.compose import ComposeState  # noqa: E402
 from pptmstr.ui.focus import FocusState, Scope  # noqa: E402
 from pptmstr.ui.transcript_pane import RenderMode, TranscriptState  # noqa: E402
-from pptmstr.ui.typeset import diffs, gate  # noqa: E402
+from pptmstr.ui.typeset import diffs, gate, views  # noqa: E402
 
 WARMUP_FRAMES = 20
 FRAME_S = 1.0 / 60.0
@@ -840,6 +846,97 @@ def _diff_by(seam_key: bool) -> str:
     return "the library's diff view" if seam_key else "the pane's own rows"
 
 
+def tool_output(lines: int) -> str:
+    """
+    ``lines`` lines of a tool's output, no two alike: a listing in columns.
+    """
+    return "\n".join(
+        f"{n:6d}  -rw-r--r--  {n * 37 % 9973:6d}  src/module_{n % 97:02d}/file_{n}.py"
+        for n in range(lines)
+    )
+
+
+def bench_literal(harness: Harness, frames: int, sizes: Sequence[int]) -> list[Row]:
+    """
+    Literal text, the library's against ImGui's, back to back: DETAIL's error
+    and the log's tool result, at each of ``sizes`` lines. ImGui's is the same
+    pane with ``views.literal_unfit`` answering no for every part, which is the
+    branch a part the library would not set as written takes. The log's own
+    bound (``_TYPESET_WINDOW``) holds what one frame takes in, so its rows say
+    what the feed held; ``every line held`` lifts it.
+    """
+    rows: list[Row] = []
+    honest = views.literal_unfit
+    bounds = (transcript_pane._TYPESET_WINDOW, transcript_pane._TYPESET_KEEP)
+    for lines in sizes:
+        text = tool_output(lines)
+        for who in ("library", "imgui"):
+            views.literal_unfit = honest if who == "library" else (lambda part: "forced")
+            try:
+                store = spawned()
+                failure = SessionFailed(node=ROOT_NODE, since=1.0, summary="died", error=text)
+                snap = replace(store.snapshot(), needs_you=(failure,))
+                focus = FocusState()
+                focus.to_obligation(failure)
+                review_state = review.ReviewState()
+                pane = detail.DetailState()
+
+                def draw(
+                    snap: Snapshot = snap,
+                    focus: FocusState = focus,
+                    review_state: review.ReviewState = review_state,
+                    pane: detail.DetailState = pane,
+                ) -> None:
+                    detail.draw(snap, focus, review_state, pane, time.monotonic())
+
+                row = measure(
+                    harness, "literal", f"DETAIL error, {who}", f"{lines:,} lines", draw, frames
+                )
+                drawn = sum(len(pane.views.views(key)) for key in pane.views.keys())
+                rows.append(replace(row, size=f"{row.size}, {drawn} library views"))
+
+                for held in (False, True):
+                    transcript = Transcript()
+                    transcript.append(SegmentKind.OUTPUT, "Listing the tree.\n")
+                    transcript.append(SegmentKind.TOOL_RESULT, text + "\n")
+                    transcript.append(SegmentKind.OUTPUT, "Done.")
+                    log_snap = spawned(transcript).snapshot()
+                    state = TranscriptState(mode=RenderMode.TYPESET)
+                    tick = itertools.count(1)
+
+                    def draw_log(
+                        state: TranscriptState = state,
+                        snap: Snapshot = log_snap,
+                        tick: Iterator[int] = tick,
+                    ) -> None:
+                        state.prune(next(tick))
+                        transcript_pane.draw(snap, state, ROOT_NODE)
+
+                    if held:
+                        transcript_pane._TYPESET_WINDOW = transcript_pane._TYPESET_KEEP = 10**9
+                    try:
+                        row = measure(
+                            harness,
+                            "literal",
+                            f"log tool result, {who}{', every line held' if held else ''}",
+                            f"{lines:,} lines",
+                            draw_log,
+                            frames,
+                        )
+                    finally:
+                        transcript_pane._TYPESET_WINDOW, transcript_pane._TYPESET_KEEP = bounds
+                    feed = state.feeds.get(ROOT_NODE)
+                    keys = () if feed is None else feed.views.keys()
+                    drawn = sum(len(feed.views.views(key)) for key in keys) if feed else 0
+                    fed = feed.held if feed is not None else 0
+                    rows.append(
+                        replace(row, size=f"{row.size}, {fed:,} held, {drawn} library views")
+                    )
+            finally:
+                views.literal_unfit = honest
+    return rows
+
+
 def bench_detail(harness: Harness, frames: int, diff_lines: Sequence[int]) -> list[Row]:
     rows: list[Row] = []
     for lines in diff_lines:
@@ -1096,6 +1193,7 @@ def _load() -> str:
 
 GROUPS = (
     "transcript",
+    "literal",
     "views",
     "watch",
     "prune",
@@ -1147,6 +1245,13 @@ def main() -> int:
         nargs="+",
         default=[60, 5000],
         help="lines of the parked Write (detail, inbox)",
+    )
+    ap.add_argument(
+        "--literal-lines",
+        type=int,
+        nargs="+",
+        default=[300, 5000],
+        help="lines of tool output (literal)",
     )
     ap.add_argument(
         "--diffs",
@@ -1201,6 +1306,11 @@ def main() -> int:
             rows += bench_watch(harness, args.watch_lines)
         if "prune" in args.only:
             rows += bench_prune(harness, args.prune_lines)
+        if "literal" in args.only:
+            if want:
+                rows += bench_literal(harness, args.frames, args.literal_lines)
+            else:
+                print("  .. literal: skipped, it compares the library with ImGui", file=sys.stderr)
         if "detail" in args.only:
             rows += bench_detail(harness, args.frames, args.diff_lines)
         if "inbox" in args.only:

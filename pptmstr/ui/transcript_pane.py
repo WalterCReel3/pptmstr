@@ -42,14 +42,16 @@ seam is on, RICH is what the pane shows until the operator picks a mode
 (``DEFAULT_MODE``, which has the measurements that decided it).
 
 **Typesetting.** ``RenderMode.TYPESET`` sets the log through ``typeset`` (the seam
-over the layout library). **What is markdown is the library's and what is not is
-ImGui's**: OUTPUT and REASONING runs are read as markdown and set by the
-library, wrapped, selectable and culled; every other kind -- a tool call, its
-result, an error, a system line -- is literal text whose columns are content,
-and ImGui draws it in the chrome's font, unbroken, in its ``_KIND_COLOUR``
-(``typeset.themes`` has where that line is drawn and the measurement of the
-library's monospace; request P21 of ``HANDOFF-advtext.md``). A fence
-inside a markdown run goes with its run and is the library's.
+over the layout library). OUTPUT and REASONING runs are read as markdown and set
+by the library, wrapped, selectable and culled; every other kind -- a tool call,
+its result, an error, a system line -- is literal text whose columns are content,
+set unbroken in its ``_KIND_COLOUR`` and never read as markdown. **The library
+sets a literal run too, as a code block of its own, where it is measured to keep
+its columns** (``typeset.views.literal_unfit``: every character of the run
+drawn as it is, a column that is ImGui's advance, ``gate.literal_columns``), and
+it is then selectable; a run holding a control character such as a terminal's
+colour escape, and every run where the measurement says no, is ImGui's, in the
+chrome's font, as it was. A fence inside a markdown run goes with its run.
 
 - *closed* runs are the ``typeset.Part``s of a ``typeset.document``, which makes
   one view of the library's for each markdown run. A document holds one
@@ -62,7 +64,7 @@ inside a markdown run goes with its run and is the library's.
 - the *open* run -- the last one, which can still grow -- is a ``typeset.stream``
   when it is markdown, so text already committed is laid out once and what
   arrived is read in the frame that draws it, and ``typeset.plain`` when it is
-  literal (``_draw_run``).
+  literal (``_draw_run``), which the library sets as a closed literal run is set.
 - a run that *closes* is a part of its document in the frame it closes. The
   seam reads and lays out what it is handed in the call that draws it, so there
   is no frame in which the run is in neither place or in both.
@@ -75,8 +77,8 @@ What the mode costs is on ``DEFAULT_MODE``, and where it is bounded on
 ``_TYPESET_WINDOW`` and ``_TYPESET_KEEP``.
 
 What the split costs: a selection is inside one of the library's views, so it
-ends with its run, and a literal run is copied whole from the context menu and
-not by dragging. A table changes its columns' widths in the
+ends with its run; a literal run ImGui draws is copied whole from the context
+menu and not by dragging. A table changes its columns' widths in the
 frame its run closes (request P19).
 
 A search demotes this mode to the line path as it does RICH: nothing here marks
@@ -986,13 +988,14 @@ def _run_key(run: int) -> tuple[str, int]:
 def _draw_run(views: typeset.ViewCache, run: OpenRun, live: list[Hashable]) -> None:
     """
     The open run in a view of its own: a stream for markdown, which lays out once
-    what is committed and reads what arrived, and ImGui's text for the rest.
+    what is committed and reads what arrived, and literal text for the rest,
+    the library's where it keeps the run's columns (``typeset.plain``).
     """
     ink = getattr(P, _KIND_COLOUR[run.kind])
     key = _run_key(run.run)
     live.append(key)
     if run.kind not in _MARKDOWN_KINDS:
-        typeset.plain(views, key, run.literal, colour=ink)
+        typeset.plain(views, key, run.literal, colour=ink, literal=True)
         return
     stream = typeset.stream(views, key)
     text = run.text
@@ -1101,7 +1104,7 @@ def _draw_generation(
     parts = generation.parts(show)
     if parts:
         live.append(generation.key)
-        typeset.document(feed.views, generation.key, parts, rests=True, apart=True)
+        typeset.document(feed.views, generation.key, parts, rests=True, apart=True, literal=True)
     generation.extent = imgui.get_cursor_pos_y() - start
 
 

@@ -189,6 +189,9 @@ em at one height differs by face (Roboto 13.65 px, Inconsolata 15.25 px at 16).
 A heading's is of its own size (22 px at h1), which is where a wrapped heading's
 lines go. A diff's rows are the library's grid and take the number rounded up.
 Inline code has no line of its own, and a label is ImGui's line: neither is here.
+Literal text and arguments are set a line of their pixel height whoever sets
+them (``themes.literal_line`` has the exception and why), so their entries are
+what a pitch of theirs would be and set no line on screen.
 """
 
 
@@ -547,10 +550,12 @@ pane not named here draws with its own renderer.
 A pane is added by the change that builds its branch and shows it by a run.
 BRIEF and BOARD were, on 2026-10-12: the application under Xvfb with the fake
 fleet, each pane's cache holding the library's views of what it showed. DETAIL
-and INBOX were the same day, for their markdown: every literal text in them
-stays ImGui's, and an approval's diff is the library's only where the library
-that is running keeps a column (``diffs.adopted``). CONTEXT was the same day, for the markdown
-runs of the log's TYPESET mode. That is every pane, and the set stays: a pane
+and INBOX were the same day, for their markdown, and an approval's diff is the
+library's only where the library that is running keeps a column
+(``diffs.adopted``). CONTEXT was the same day, for the markdown runs of the
+log's TYPESET mode. The log's literal runs and DETAIL's error were on
+2026-10-13, where the library keeps their columns (``views.literal_unfit``);
+an approval's arguments are ImGui's in both panes. That is every pane, and the set stays: a pane
 added to ``Pane`` is typeset from the change that names it here.
 """
 

@@ -11,17 +11,24 @@ a theme switch with nobody telling it.
 **Which text the library sets at all is decided here** (``native``). Text of
 a role that is monospace by nature -- its columns are content -- and that
 stands on its own, a literal part or ``plain()``, is drawn by ImGui in the
-chrome's font, and the library sets markdown. A fenced block inside a markdown
-part goes with its document. **That split was drawn when the library did not
-keep a monospace column, and it does now**: by pptmstr's measurement on
-2026-10-13 (``scripts/measure_typeset_advances.py --faces mono``, a window
-under Xvfb, imscribe ``0.2.0b1`` on the imtypeset ``0.4.1.192900`` wheel, load
-average 3.5 to 4.4, vertices read; ``HANDOFF-advtext.md``, A2 and request
-P21), at every pixel height from 12 to 24 a fenced row and a row of prose in
-the code face are drawn in steps of ImGui's baked advance and no other, rows
-agree at every column, and characters 10, 20, 40 and 74 are on the pens of the
-same text through ``ImDrawList.add_text``. Nothing here has been moved on the
-strength of it: tool output, arguments and errors are still ImGui's.
+chrome's font unless its caller asks for the library and the library is
+measured to keep its columns there (``views.literal_unfit``,
+``gate.literal_columns``); the library sets markdown. A fenced block inside a
+markdown part goes with its document. By pptmstr's measurement on 2026-10-13
+(``scripts/measure_typeset_advances.py --pptmstr``, a window under Xvfb,
+imscribe ``0.2.0b1`` on the imtypeset ``0.4.1.192900`` wheel, load average 1.6,
+vertices read; ``HANDOFF-advtext.md``, A2 and request P21), with pptmstr's
+fonts and role themes at every body size the settings offer and every step,
+so at every pixel height from 12 to 24: a fence in a Roboto document, a fence
+and prose in an all-monospace one, and a host's own code block in the
+literal role's style are drawn in steps of ImGui's baked advance and no
+other, rows agree at every column, characters 1 to 74 are on the pens of the
+same text through ``ImDrawList.add_text`` in the chrome's font, every glyph
+is on its rectangle, and a point a quarter and three quarters into a glyph is
+answered as the character drawn there (but at a line's last character, whose
+three-quarter point answers the start of the next line). **What moved on the
+strength of it**: the log's tool calls, results and errors, and DETAIL's
+error (``literal_style``). An approval's arguments did not.
 
 **What the library does not take from a role**, each a request in
 ``HANDOFF-advtext.md``: an inline code span has no size of its own (P11), and a
@@ -86,6 +93,7 @@ class _Kept:
     epoch: int = -1
     themes: dict[int, Any] = field(default_factory=dict)
     diff: Any = None
+    literal: dict[Role, Any] = field(default_factory=dict)
     palette_of: object = None
     palettes: dict[int | None, Any] = field(default_factory=dict)
 
@@ -95,8 +103,9 @@ _KEPT = _Kept()
 
 def native(role: Role) -> bool:
     """
-    Whether text of a role that stands on its own is drawn by ImGui and not set
-    by the library: every role that is monospace by nature (``roles.SLOTS``).
+    Whether text of a role that stands on its own is drawn by ImGui unless a
+    caller asks for the library: every role that is monospace by nature
+    (``roles.SLOTS``).
 
     The module docstring has the measurement this rests on. A role the operator
     merely *chose* monospace for -- prose, a heading, a table -- is not one: its
@@ -109,8 +118,10 @@ def line_height(role: Role) -> float:
     """
     The pitch of one line of a role's text as it is drawn, in pixels.
 
-    ImGui's line for a role it draws (``native``): the font's pixel height. The
-    role's own pitch (``roles.pitch``) for one the library sets.
+    ImGui's line for a role it draws (``native``): the font's pixel height,
+    which is the line of such a role's text where the library sets it too but
+    at three heights (``literal_line``). The role's own pitch (``roles.pitch``)
+    for one the library sets as markdown.
     """
     return roles.px(role) if native(role) else roles.pitch(role)
 
@@ -183,6 +194,49 @@ def diff_theme() -> Any:
     return hit
 
 
+def literal_line(role: Role) -> float:
+    """
+    How far apart the lines of a role's literal text are where the library sets
+    it (``literal_style``): the role's pixel height, ImGui's own line for the
+    same text, **and one pixel more where that height is two more than a
+    multiple of four** (14, 18 and 22 px).
+
+    Under ``fixed_line_height`` the library puts a line's baseline three
+    quarters of the line down and rounds it to draw, and a line of 4k + 2
+    pixels puts every baseline on a half pixel: which way each row is rounded
+    then depends on where the block is on the screen, through the float the
+    position is held in. Measured in pptmstr on 2026-10-13, eight rows drawn
+    at 60 heights down a window from y 47 to 460, at every pixel height from
+    12 to 24 and lines of that height and one and two more: 49 of the 60
+    placements put a row a pixel off its line at every line of 4k + 2 px, and
+    none at any other.
+    """
+    tall = roles.px(role)
+    return tall + 1.0 if tall % 4 == 2 else tall
+
+
+def literal_style(role: Role) -> Any:
+    """
+    The block style literal text of ``role`` is set in when the library sets it
+    (``views``): the code face at the role's pixel height, nothing above or
+    below it and no indent, and one line every ``literal_line(role)``, which is
+    ImGui's own line for the same text at every height but three. So the block
+    stands where ImGui's lines of it would.
+
+    The leading is the line in the library's unit, which is within 1e-5 px of
+    it: half a pixel after some 50,000 lines.
+    """
+    demoted(0)
+    hit = _KEPT.literal.get(role)
+    if hit is None:
+        from imscribe import BlockKind, Face
+
+        line = literal_line(role)
+        code = _sized(demoted(0).blocks[BlockKind.CODE], Face.CODE, roles.px(role), line)
+        hit = _KEPT.literal[role] = replace(code, space_above=0, space_below=0, left_indent=0)
+    return hit
+
+
 def demoted(levels: int) -> Any:
     """
     The document theme with each heading set as the one ``levels`` below it; past
@@ -192,6 +246,7 @@ def demoted(levels: int) -> Any:
         _KEPT.epoch = roles._STATE.epoch
         _KEPT.themes.clear()
         _KEPT.diff = None
+        _KEPT.literal.clear()
     levels = min(max(int(levels), 0), 6)
     hit = _KEPT.themes.get(levels)
     if hit is None:

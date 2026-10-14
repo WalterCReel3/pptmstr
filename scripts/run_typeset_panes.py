@@ -32,6 +32,14 @@ looked at the pictures unless they say so.**
 ``typeset`` is the log's markdown runs through the library, and with the
 library absent the pane's own wrapped lines.
 
+**Literal text** is counted by who drew each part, each frame: ``library``
+for a literal part the library set as a code block of its own, ``imgui`` for
+one ImGui drew (by its ``Kind``), and why the seam left each one it was asked
+for with ImGui (``views.literal_unfit``'s answers). ``--traceback`` draws
+DETAIL's failure with a traceback of several lines in place of the fake
+fleet's one-line error, stood in at ``detail._failure`` and said so in the
+report, so that DETAIL shows literal text that is not an approval's.
+
 ``--diffs`` sets who draws a diff for the run (``typeset.diffs.ADOPT``:
 ``measured``, which is the product's, ``always`` or ``never``). An approval's
 diff is counted on both sides: ``typeset.diff`` and the library's
@@ -108,6 +116,11 @@ def main() -> int:
         default="measured",
         help="who draws a diff: typeset.diffs.ADOPT for this run",
     )
+    ap.add_argument(
+        "--traceback",
+        action="store_true",
+        help="DETAIL's failure with a traceback of several lines in place of the fleet's error",
+    )
     ap.add_argument("--argv", nargs=argparse.REMAINDER, default=[])
     args = ap.parse_args()
 
@@ -172,6 +185,48 @@ def main() -> int:
             handed["log"] = f"{state.shown_mode().value}, {held} of the library's views held"
 
     transcript_pane.draw = log_draw  # type: ignore[assignment]
+    literal: Counter[str] = Counter()
+    real_native, real_show_view, real_unfit = views._native, views._show_view, views.literal_unfit
+
+    def native(im: Any, part: Any, wide: float) -> None:
+        literal[f"imgui {part.kind.value}"] += 1
+        real_native(im, part, wide)
+
+    def show_view(im: Any, segment: Any, *rest: Any) -> float:
+        if segment.literal:
+            literal["library literal"] += 1
+        return float(real_show_view(im, segment, *rest))
+
+    def unfit(part: Any) -> str | None:
+        said = real_unfit(part)
+        if said is not None:
+            literal[f"left with ImGui: {said}"] += 1
+        return said
+
+    views._native = native  # type: ignore[assignment]
+    views._show_view = show_view  # type: ignore[assignment]
+    views.literal_unfit = unfit  # type: ignore[assignment]
+    if args.traceback:
+        import dataclasses
+
+        real_failure = detail._failure
+        traceback_text = (
+            "Traceback (most recent call last):\n"
+            '  File "tle/parse.py", line 88, in parse_line_1\n'
+            "    checksum = _checksum(line[:68])\n"
+            '  File "tle/parse.py", line 41, in _checksum\n'
+            "    total += int(char) if char.isdigit() else (1 if char == '-' else 0)\n"
+            "    |        |    |           |                  |\n"
+            "    0        9    18          30                 49\n"
+            "ValueError: invalid literal for int() with base 10: '*'\n"
+            "\tat column 62 of\t'1 25544U 98067A   08264.51782528 -.00002182  00000-0'\n"
+            "exit status 1"
+        )
+
+        def failure(pane: Any, obligation: Any) -> None:
+            real_failure(pane, dataclasses.replace(obligation, error=traceback_text))
+
+        detail._failure = failure  # type: ignore[assignment]
     try:
         import imscribe
 
@@ -236,8 +291,15 @@ def main() -> int:
                 held = sorted({str(key[1]) for key in inbox._VIEWS.keys()})
                 where = handed.pop("where", "a row of the queue")
                 log = handed.get("log", "not drawn")
+                snap, focus = handed.get("snap"), handed.get("focus")
+                under = None if snap is None or focus is None else focus.obligation(snap)
+                on = "nothing owed" if under is None else under.kind.value
+                drew = literal["library literal"] - handed.get("literal_at", 0)
+                handed["literal_at"] = literal["library literal"]
                 stops.append(
-                    f"stop {stop} ({where}): {out}; inbox holds {held or 'nothing'}; log {log}"
+                    f"stop {stop} ({where}): {out}; DETAIL on {on}; inbox holds "
+                    f"{held or 'nothing'}; log {log}; literal parts the library drew "
+                    f"since the stop before {drew}"
                 )
                 handed["sentence"] = typeset.unavailable_reason() or "(none: text is typeset)"
 
@@ -290,6 +352,12 @@ def main() -> int:
     print(f"  seam calls, by caller: {dict(sorted(seam.items())) or 'none'}")
     print(f"  the library's views drawn: {dict(sorted(library.items())) or 'none'}")
     print(f"  the panes' own renderers: {dict(sorted(own.items())) or 'none'}")
+    print(
+        "  literal parts drawn, part-frames by who drew them: "
+        f"{dict(sorted(literal.items())) or 'none'}"
+    )
+    if args.traceback:
+        print("  DETAIL's failure was drawn with a stood-in traceback (--traceback)")
     print(
         f"  frames the context log drew a session, by mode: {dict(sorted(shown.items())) or 'none'}"
     )

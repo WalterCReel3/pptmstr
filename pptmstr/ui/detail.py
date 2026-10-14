@@ -869,7 +869,11 @@ def _failure(pane: DetailState, obligation: SessionFailed) -> None:
         # an underscore in a path is an underscore. A traceback is set as its
         # lines are and the pane scrolls sideways to the end of a long one, like
         # an argument of several lines; one line is broken at the pane's edge.
+        # Not an approval: the library sets the lines where it keeps their
+        # columns (``typeset.views.literal_unfit``), so the line breaks that end
+        # a captured stream, which neither renderer shows, are left off.
         text, omitted = clip(obligation.error or "no detail recorded", _MAX_ERROR_CHARS)
+        text = text.rstrip("\n") or text
         kind = literal_kind(text, typeset.Role.LITERAL)
         typeset.plain(
             pane.views,
@@ -878,6 +882,7 @@ def _failure(pane: DetailState, obligation: SessionFailed) -> None:
             wrap=kind is not typeset.Kind.LITERAL,
             exact=kind is not typeset.Kind.WRAPPED,
             colour=P.danger,
+            literal=True,
         )
         if omitted:
             imgui.text_colored(P.warn.vec4, f"… {omitted:,} more characters not shown")

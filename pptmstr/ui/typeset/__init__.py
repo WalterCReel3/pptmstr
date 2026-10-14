@@ -42,7 +42,9 @@ log and not the one it starts in (``transcript_pane.DEFAULT_MODE``).
 (``themes.native``, which says where that line was drawn and what has been
 measured of the library's monospace since). So a literal part, ``plain()``
 and a label are ImGui items in the chrome's font or the library's own atlas
-entry.
+entry, **but for a literal part a caller asks the library for**, which the
+library sets as a code block of its own where it is measured to keep the
+part's columns (``views.literal_unfit``). No approval surface asks.
 
 **A diff is the library's where the library that is running keeps a column,
 and its pane's own renderer where it does not** (``diff_adopted``): the
