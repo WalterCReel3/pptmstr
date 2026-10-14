@@ -975,6 +975,23 @@ imtypeset already exists in PyPI."
   on a Mac, is the user's to run; `python -m pptmstr --version` is the line
   to read.
 
+## The published pair, run by the user (2026-10-13)
+
+Both are on PyPI: `imscribe` 0.2.0b1 (read from PyPI's JSON by the lead:
+requires `imgui-bundle==1.92.900` and, under a marker, `imtypeset==0.4.1.192900`).
+**The user ran it**, on Linux x86-64, CPython 3.11, in a fresh venv made by
+`pip install imscribe==0.2.0b1`: `python -m imscribe.typesetter` exited 0 and
+printed `"kind": "ready"`, `"route": "distribution"`,
+`"imtypeset_route": "installed"`, `"distribution": "imtypeset 0.4.1.192900"`,
+`"headers": "fork:c9a0a84f8a4ddae794a9e1acf6a93afce73d5057"`,
+`"accepted_by": "imgui-check+probe"`, `"ignored_environment": null`. So the
+published wheel is a fork-header build that Dear ImGui's own check accepts:
+the first such library pptmstr will have run on. The user also put the two
+published files in this worktree (`.wheelhouse/`, untracked), so pptmstr's
+move to the published packages is tested here against those files and not
+against a source build. Not yet run by anyone pptmstr knows of: the same on
+macOS.
+
 ## The pins moved, and the diff view is live (2026-10-12, pptmstr `8c6a43e`)
 
 The file keeps its name; the library is `imscribe` from here on.
