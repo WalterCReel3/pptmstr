@@ -11,10 +11,10 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import os
 import time
 from collections.abc import Iterator
 
-import mcp.types as mcp_types
 import pytest
 
 from pptmstr.bridge import Bridge
@@ -34,6 +34,7 @@ from pptmstr.intents import (
 )
 from pptmstr.model import Concern, ConcernState, NodeId, Task, TaskRefusal, TaskState
 from pptmstr.store import Store
+from tests.mcp_wire import call_tool, list_tools
 
 LEAD: NodeId = ("sess-1", None)
 QA: NodeId = ("sess-1", "agent-qa")
@@ -133,9 +134,7 @@ class _Bus:
 
     def __init__(self, bridge: Bridge, brief: str | None = None) -> None:
         self.bridge = bridge
-        self.handler = build_server(_Session(bridge, brief))["instance"].request_handlers[  # type: ignore[arg-type]
-            mcp_types.CallToolRequest
-        ]
+        self.server = build_server(_Session(bridge, brief))["instance"]  # type: ignore[arg-type]
 
     def call(
         self,
@@ -148,16 +147,9 @@ class _Bus:
     ) -> str:
         """The text the calling agent reads. Fails if the tool reports an error."""
         pending = self.bridge.submit(
-            self.handler(
-                mcp_types.CallToolRequest(
-                    method="tools/call",
-                    # The gate's stamp, as the CLI delivers it: a list, because the
-                    # arguments survive a JSON round trip and JSON has no tuples.
-                    params=mcp_types.CallToolRequestParams(
-                        name=name, arguments={**args, FROM_KEY: list(sender)}
-                    ),
-                )
-            )
+            # The gate's stamp, as the CLI delivers it: a list, because the
+            # arguments survive a JSON round trip and JSON has no tuples.
+            call_tool(self.server, name, {**args, FROM_KEY: list(sender)})
         )
         deadline = time.monotonic() + timeout
         while not pending.done():
@@ -166,8 +158,8 @@ class _Bus:
                 raise AssertionError(f"{name} was never answered")
             time.sleep(0.002)
         answer = pending.result(timeout=timeout)
-        assert not answer.root.isError, answer.root.content
-        return str(answer.root.content[0].text)
+        assert not answer.is_error, answer.content
+        return answer.text
 
     def pump(self, store: Store) -> None:
         """One frame's worth of the loop in ``app.begin_frame``."""
@@ -1208,11 +1200,11 @@ def test_the_stamp_survives_a_json_round_trip() -> None:
 # would still pass. That is how ``claim_task()`` came to answer
 # "'task_id' is a required property" to the call its description asks for.
 #
-# jsonschema below is the validator a real call meets, not a stand-in for one:
-# ``mcp.server.lowlevel.Server.call_tool`` validates arguments against the tool's
-# announced ``inputSchema`` before dispatching to the handler. It is not a direct
-# dependency and does not need to be -- mcp requires it, claude-agent-sdk requires
-# mcp, and pptmstr requires the SDK.
+# jsonschema below is the validator a real call meets, not a stand-in for one: the
+# server ``create_sdk_mcp_server`` builds validates arguments against the tool's
+# announced ``inputSchema`` with jsonschema before dispatching to the handler, under
+# either mcp major. It is not a direct dependency and does not need to be -- mcp and
+# claude-agent-sdk both require it, and pptmstr requires the SDK.
 
 
 def _announced_schemas() -> dict[str, dict[str, object]]:
@@ -1220,8 +1212,6 @@ def _announced_schemas() -> dict[str, dict[str, object]]:
     The ``inputSchema`` for each tool as the CLI is handed it, from the real server.
     """
     import asyncio
-
-    import mcp.types as mcp_types
 
     from pptmstr.bridge import Bridge
     from pptmstr.bus import build_server
@@ -1231,9 +1221,7 @@ def _announced_schemas() -> dict[str, dict[str, object]]:
             self.bridge = bridge
 
     server = build_server(_Session(Bridge()))["instance"]  # type: ignore[arg-type]
-    handler = server.request_handlers[mcp_types.ListToolsRequest]
-    listed = asyncio.run(handler(mcp_types.ListToolsRequest(method="tools/list")))
-    return {t.name: t.inputSchema for t in listed.root.tools}
+    return asyncio.run(list_tools(server))
 
 
 # The smallest call each tool's own description says is enough, with the sentence
@@ -1257,6 +1245,27 @@ DOCUMENTED_CALLS: dict[str, dict[str, object]] = {
     "complete_task": {"task_id": "t1"},
     "release_task": {"task_id": "t1"},
 }
+
+
+def test_the_wire_lists_every_tool_the_gate_stamps() -> None:
+    """
+    The helper reaches the server the product builds, under whichever mcp major is
+    installed: what ``tools/list`` answers over the SDK's bridge is the set
+    ``BUS_TOOLS`` names, so a helper that silently listed nothing could not pass.
+    """
+    from pptmstr.bus import BUS_TOOLS, qualified
+
+    assert {qualified(name) for name in _announced_schemas()} == BUS_TOOLS
+
+
+def test_a_run_says_which_mcp_and_sdk_it_ran_against() -> None:
+    from importlib.metadata import version
+
+    from tests.conftest import ran_against
+
+    line = next(line for line in ran_against(os.environ) if line.startswith("bus: "))
+    assert f"mcp {version('mcp')} " in line
+    assert f"claude-agent-sdk {version('claude-agent-sdk')}" in line
 
 
 def test_every_tool_accepts_the_call_its_own_description_documents() -> None:
@@ -1300,8 +1309,6 @@ def test_a_claim_with_no_task_id_asks_for_anything_claimable() -> None:
     schema and then asking for the task named "" would be the same defect one
     layer in.
     """
-    import mcp.types as mcp_types
-
     from pptmstr.bridge import Bridge
     from pptmstr.bus import FROM_KEY, build_server
 
@@ -1313,19 +1320,9 @@ def test_a_claim_with_no_task_id_asks_for_anything_claimable() -> None:
     bridge.start()  # claim_task parks on a future, so this one needs the loop
     try:
         server = build_server(_Session(bridge))["instance"]  # type: ignore[arg-type]
-        handler = server.request_handlers[mcp_types.CallToolRequest]
-        call = handler(
-            mcp_types.CallToolRequest(
-                method="tools/call",
-                params=mcp_types.CallToolRequestParams(
-                    name="claim_task",
-                    # The stamp and nothing else: exactly what the CLI would deliver
-                    # for a `claim_task()` the gate has stamped.
-                    arguments={FROM_KEY: list(DEV)},
-                ),
-            )
-        )
-        result = bridge.submit(call)
+        # The stamp and nothing else: exactly what the CLI would deliver for a
+        # `claim_task()` the gate has stamped.
+        result = bridge.submit(call_tool(server, "claim_task", {FROM_KEY: list(DEV)}))
 
         intents: list[object] = []
         for _ in range(200):
@@ -1345,8 +1342,8 @@ def test_a_claim_with_no_task_id_asks_for_anything_claimable() -> None:
     finally:
         bridge.stop()
 
-    assert not answered.root.isError, answered.root.content
-    assert "t1" in answered.root.content[0].text
+    assert not answered.is_error, answered.content
+    assert "t1" in answered.text
 
 
 def test_a_declaration_the_board_refused_is_not_reported_as_success() -> None:
@@ -1526,14 +1523,10 @@ def test_a_board_write_the_store_never_saw_is_not_reported_as_success() -> None:
     try:
         bus = _Bus(bridge)
         pending = bridge.submit(
-            bus.handler(
-                mcp_types.CallToolRequest(
-                    method="tools/call",
-                    params=mcp_types.CallToolRequestParams(
-                        name="declare_task",
-                        arguments={"task_id": "t1", "title": "do t1", FROM_KEY: list(LEAD)},
-                    ),
-                )
+            call_tool(
+                bus.server,
+                "declare_task",
+                {"task_id": "t1", "title": "do t1", FROM_KEY: list(LEAD)},
             )
         )
         # Parked, and deliberately never applied: this is the frame loop dying
@@ -1545,12 +1538,12 @@ def test_a_board_write_the_store_never_saw_is_not_reported_as_success() -> None:
         assert bridge.asking_count == 1, "the write did not park on a future at all"
 
         bridge.abandon_all_requests()
-        answered = pending.result(timeout=5).root
+        answered = pending.result(timeout=5)
     finally:
         bridge.stop()
 
-    assert not answered.isError, answered.content
-    text = answered.content[0].text
+    assert not answered.is_error, answered.content
+    text = answered.text
     assert "NOT on the board" in text and "shutting down" in text
 
 
@@ -2546,22 +2539,13 @@ def test_a_task_read_is_stamped_or_it_is_refused() -> None:
     bridge.start()
     try:
         bus = _Bus(bridge)
-        pending = bridge.submit(
-            bus.handler(
-                mcp_types.CallToolRequest(
-                    method="tools/call",
-                    params=mcp_types.CallToolRequestParams(
-                        name="read_task", arguments={"task_id": "t1"}
-                    ),
-                )
-            )
-        )
+        pending = bridge.submit(call_tool(bus.server, "read_task", {"task_id": "t1"}))
         answer = pending.result(timeout=5.0)
     finally:
         bridge.stop()
 
-    assert answer.root.isError
-    assert "no authenticated sender" in str(answer.root.content[0].text)
+    assert answer.is_error
+    assert "no authenticated sender" in answer.text
     assert not bridge.drain()
 
 

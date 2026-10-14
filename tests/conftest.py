@@ -29,6 +29,8 @@ library's own answer -- its version, the route it was found by, the headers it
 was compiled against -- or that there is none. "Green with the library" is a
 claim about one library; one built against stand-in headers is accepted like
 any other, and beside an installed imtypeset the two variables choose nothing.
+Then the mcp and claude-agent-sdk the bus is served through: the SDK allows
+either mcp major, and a fresh install resolves the newest.
 """
 
 from __future__ import annotations
@@ -46,6 +48,7 @@ import pytest
 from pptmstr import pairing, theme, version
 from pptmstr.ui import typeset
 from pptmstr.ui.typeset import gate
+from tests.mcp_wire import versions_line
 
 BOLD = theme._ASSETS / "fonts" / "Inconsolata-Bold.ttf"
 
@@ -196,7 +199,7 @@ def ran_against(environ: Mapping[str, str]) -> list[str]:
     """
     What a test run with this environment draws through, a line a fact.
     """
-    lines = described(asked_of_a_new_process(environ), environ)
+    lines = [*described(asked_of_a_new_process(environ), environ), versions_line()]
     if WITHHELD:
         lines.append(
             f"WITHHELD: {' and '.join(WITHHELD)} set with {pairing.DISABLE_VARIABLE}, and taken "
