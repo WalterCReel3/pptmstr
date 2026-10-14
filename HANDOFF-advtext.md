@@ -992,6 +992,68 @@ move to the published packages is tested here against those files and not
 against a source build. Not yet run by anyone pptmstr knows of: the same on
 macOS.
 
+## pptmstr requires the published packages (2026-10-13, pptmstr `40e8586`)
+
+`pyproject.toml` now names `imgui-bundle==1.92.900`, `imscribe==0.2.0b1` and
+`imtypeset==0.4.1.192900` (under imscribe's marker, character for character);
+tests hold the three to each other and to what the installed imscribe
+requires. `bootstrap.sh` installs from the index and **has not been run by
+anyone**; the build from source (`make deps`, the ref files: `imscribe.ref`
+`b98de08`, `imtypeset.ref` `e6160c0`) is the development override.
+
+**What was exercised here, and with whose install** (pptmstr's builder):
+imscribe is the user's downloaded wheel, installed in this worktree's venv
+and held file for file to the tag's commit. imtypeset is the published wheel
+**as installed in the imscribe checkout's venv**, reached through this
+worktree's composite path; its cached download is byte for byte the file the
+user downloaded. The same wheel installed into this worktree's own venv is
+`refused`, `imtypeset_kind` `layout` ("imtypeset and imgui-bundle are
+installed in two different places…"), because this venv borrows its
+`imgui_bundle`. That is this venv's fault and the wheel's rule working.
+
+**How pptmstr finds the library**, first that applies, and `--version` says
+which: a variable the caller set (ignored beside an installed imtypeset, and
+said so); `IMSCRIBE_NO_TYPESET=1` (none; pptmstr hands over nothing behind
+it); an installed imtypeset; this checkout's `.deps`, only where no
+distribution is installed or `PPTMSTR_TYPESET_DEPS=1` asks (pptmstr then puts
+the built package first on the path, because the two variables alone are
+ignored there: its own choice, where your documented way is to uninstall the
+wheel).
+
+**Gate at `40e8586`**, by `make check`: with the installed library (fork
+headers) 3936 passed, 0 skipped, 23 strict xfails, 2 failed (the two not
+ours); `IMSCRIBE_NO_TYPESET=1` 3305 passed, 651 skipped, 3 xfails, 2 failed.
+
+### Answers to A6 and A7
+
+**A6, done** (`70f2c9b`): no `cell` is passed anywhere; a test scans for the
+keyword. pptmstr's own check, with pptmstr's fonts, holds at every pixel
+height from 12 to 24 with nothing passed: 0 of 156 glyphs off their column,
+0 mishit. The glyphs are now the chrome's own (at 16: em 15.253 asked and
+drawn, raster 16, a `0` of 7×9 in the view and in the chrome; pitch 18). The
+17 px raster is gone and so is pptmstr's sentence about it. The measured cell
+is 8.000009 at 16; pptmstr answers for 54,418 columns there and 30,474 at 20.
+
+**A7: it matters, and pptmstr is not blocked by it.** A diff is what an
+approver signs, and its last column has to be reachable. Measured here at
+16 px in the diff view: `xπxЖx` has glyph lefts 0, 8, 24, 32, 48;
+`content_width` is 152 px for `x π x Ж x`, whose text ends at cell 11; ten
+`Ж` claim 160 px for 20 cells of text. pptmstr sends any diff with a
+character the code face lacks to its pane's own rows, with a line saying so,
+and will go on doing that until the view counts the cells it draws. Then
+such diffs can be the library's too. The same question for a code block in a
+document is being measured now, because tool output may hold any script.
+
+**Closed by this move:** P21 and P22 for a fenced row (158 of 158 baked
+steps at 12 to 24, 0 px between rows, pens on ImGui's; one strict xfail
+turned and is a plain pass), P31 (a name pptmstr can require), P4. **P23**
+further: under an all-mono page word spaces are one value at every height.
+
+| # | request | the measurement behind it | state |
+|---|---|---|---|
+| P42 | **After every baked size is let go, a new document's first layout uses the code face's size from the layout before it.** | pptmstr's builder, `70f2c9b`, a strict xfail in `tests/test_baked_sizes.py`; reproduces with imscribe's view alone: discard every baked size (pptmstr does this when the fonts, the UI size or the density change, as its guard against ImGui's mis-sized glyphs), make a new document: its first layout re-makes one size from the previous layout. One stale size on the atlas. Bears on H48. | open |
+| P43 | **`reason()` with no library says which thing is missing.** | It reads `IMTYPESET_LIBRARY is not set` when the wheel is absent and under `IMSCRIBE_NO_TYPESET=1`, where no variable is the remedy. pptmstr words its own sentence from `kind()` meanwhile. You list it as known and open. | open |
+
 ## The pins moved, and the diff view is live (2026-10-12, pptmstr `8c6a43e`)
 
 The file keeps its name; the library is `imscribe` from here on.
