@@ -419,11 +419,11 @@ def accounted(feed: TypesetFeed) -> int:
     return feed.skipped + feed.held + (feed.open.lines if feed.open is not None else 0)
 
 
-def test_prose_and_prompts_are_markdown_and_everything_else_is_literal_in_its_role() -> None:
+def test_prose_is_markdown_a_prompt_is_as_written_and_everything_else_is_literal() -> None:
     """
     A tool result is full of ``_`` and ``*``. Read as markdown it would lose them
-    and gain emphasis nobody wrote. A prompt is prose somebody wrote, and keeps
-    the ``>`` that marks it as the operator's as a character.
+    and gain emphasis nobody wrote. A prompt is what was sent, in the prose role:
+    every character of it, the ``>`` that marks it as the operator's included.
     """
     feed, _, _ = fed(
         (SegmentKind.REASONING, "thinking *hard*\n"),
@@ -442,10 +442,12 @@ def test_prose_and_prompts_are_markdown_and_everything_else_is_literal_in_its_ro
         (typeset.Kind.LITERAL, "accent"),
         (typeset.Kind.LITERAL, "diff_context"),
         (typeset.Kind.LITERAL, "danger"),
-        (typeset.Kind.MARKDOWN, "text_dim"),
+        (typeset.Kind.WRAPPED_EXACT, "text_dim"),
         (typeset.Kind.LITERAL, "warn"),
     ]
-    assert parts[5].text == typeset.parts.AS_WRITTEN + "> again"
+    assert parts[5] == typeset.Part(
+        "> again", typeset.Kind.WRAPPED_EXACT, "text_dim", role=typeset.Role.PROSE
+    )
     # Literal text is exactly what was written, less the newlines around it.
     assert parts[2].text == "Read(file_path=a_b.py)"
     assert parts[3].text == '{"__init__": "*x*"}'
@@ -2264,24 +2266,86 @@ def test_without_the_library_a_long_prompt_is_broken_at_the_panes_width_too(
     assert_set_as_prose(drawn_narrow(imgui, monkeypatch, session(prompted()), state))
 
 
-def test_a_prompt_is_the_librarys_prose_marked_and_set_as_written(seam: Any) -> None:
+def handed(im: Any, monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, float]]:
     """
-    Read as markdown, by the seam's reader: a paragraph and not a code block, the
-    mark a character in front of it and not a quote's rule, and every character
-    sent on screen -- the glob's stars, the tag, the entity and the backslashes.
+    Every text ImGui is handed to draw whole from here on, with the screen height
+    it was drawn at.
     """
+    seen: list[tuple[str, float]] = []
+    real = im.text_unformatted
+
+    def text_unformatted(text: str, *args: Any) -> None:
+        seen.append((text, float(im.get_cursor_screen_pos().y)))
+        real(text, *args)
+
+    monkeypatch.setattr(im, "text_unformatted", text_unformatted)
+    return seen
+
+
+def test_a_prompt_is_every_character_sent_in_the_prose_face_and_no_view_of_the_librarys(
+    seam: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    No reader sees a prompt: what ImGui is handed is the mark and what was sent,
+    the glob's stars, the tag, the entity and the backslashes as they were, and
+    the library holds no view of it.
+    """
+    seen = handed(seam, monkeypatch)
     state = typeset_state()
     draw(seam, session(prompted()), state)
     feed = state.feeds[ROOT]
     (held,) = feed.generations
-    (prompt,) = feed.views.views(held.key)
-    assert not is_literal(prompt) and [block.kind for block in prompt.blocks] == [
-        rig.imscribe.BlockKind.PARAGRAPH
-    ]
-    (text,) = prompt.texts
-    assert text.startswith("> Glob **/*.py for every caller of <b>parse_line</b>")
-    assert "".join(text.split()) == "".join(HELD.split())
+    assert feed.views.texts(held.key)[0] == HELD
+    assert feed.views.views(held.key) == ()
+    assert [text for text, _ in seen if text.startswith("> ")] == [HELD]
     assert feed.visible_text(True).startswith(HELD)
+
+
+AS_SENT = [
+    "# Plan\n\nThen go.",
+    "- step\n- another step",
+    "1. one\n2. two",
+    "> quoted",
+    "run `code` first",
+    "see [a](b) for it",
+    "**bold** as typed",
+    "    ",
+    "above\n      \nbelow, and   three spaces",
+    "glob **/*.py and <b>tags</b>",
+]
+"""
+Prompts a markdown reader would take structure from, and a line of only spaces.
+"""
+
+
+@pytest.mark.parametrize("sent", AS_SENT)
+def test_typeset_and_rich_set_every_character_of_a_prompt_and_the_same_ones(
+    seam: Any, monkeypatch: pytest.MonkeyPatch, sent: str
+) -> None:
+    """
+    A prompt reads as it was written in every mode: TYPESET hands ImGui the
+    mark and what was sent, character for character, and RICH lays out the same
+    lines -- no heading, list, quote, code span, link or emphasis taken from
+    the operator's own text, and no space lost.
+    """
+    logged = "> " + sent
+    seen = handed(seam, monkeypatch)
+    draw(seam, session(prompted(sent)), typeset_state())
+    typeset_set = [text for text, _ in seen if text.startswith(">")]
+    assert typeset_set == [logged]
+
+    rows: list[str] = []
+    real = rich_pane._draw_rows
+
+    def draw_rows(dl: Any, start: Any, laid: Any, size: float, base: int) -> float:
+        if base == P.text_dim.u32:
+            rows.extend(row.text for row in laid)
+        return float(real(dl, start, laid, size, base))
+
+    monkeypatch.setattr(rich_pane, "_draw_rows", draw_rows)
+    draw(seam, session(prompted(sent)), TranscriptState(mode=RenderMode.RICH))
+    assert [row for row in rows if row] == [line for line in logged.split("\n") if line]
+    assert "".join(rows) == "".join(typeset_set[0].split("\n"))
 
 
 def test_a_prompt_keeps_the_lines_it_was_sent_with_and_its_mark_in_rich_and_wrap(
@@ -2352,7 +2416,9 @@ def test_a_long_tool_result_beside_a_prompt_is_still_one_unbroken_line(
     assert literal and all(lines == (result,) for lines in literal)
 
 
-def test_a_prompt_that_closes_stays_where_it_was(seam: Any) -> None:
+def test_a_prompt_that_closes_stays_where_it_was(
+    seam: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """
     Open, a prompt is the last thing in the log, a document of its own; closed,
     a part of the generation's. It is at the same place in both, and set the same.
@@ -2362,17 +2428,18 @@ def test_a_prompt_that_closes_stays_where_it_was(seam: Any) -> None:
     transcript.append(SegmentKind.SYSTEM, f"\n> {PROMPT}\n")
     state = typeset_state(follow_tail=False)
     snap = session(transcript)
+    seen = handed(seam, monkeypatch)
     for _ in range(2):
         draw(seam, snap, state)
     feed = state.feeds[ROOT]
-    (open_view,) = feed.views.views(("open", 1))
-    was = (open_view.origin, tuple(open_view.texts))
-    assert was[1][0].startswith("> Glob")
+    assert feed.views.texts(("open", 1)) == (HELD,)
+    was = [drawn for drawn in seen if drawn[0] == HELD][-1]
 
     transcript.append(SegmentKind.OUTPUT, "Reading.")
+    seen.clear()
     for _ in range(2):
         draw(seam, snap, state)
     (held,) = feed.generations
-    _, prompt = feed.views.views(held.key)
-    assert (prompt.origin, tuple(prompt.texts)) == was
+    assert feed.views.texts(held.key)[-1] == HELD
+    assert [drawn for drawn in seen if drawn[0] == HELD][-1] == was
     assert ("open", 1) not in feed.views

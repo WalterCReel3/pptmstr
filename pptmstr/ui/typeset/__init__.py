@@ -11,7 +11,8 @@ those answers live here once.
   sizes and scales, the pane switches, the settings read into them, and
   ``enabled(pane)``. No library import.
 - ``parts``: ``Kind``, ``Part``, ``prose_parts``, the one rule for whether a
-  body is markdown, and ``prompt_parts``, a prompt in a log by that rule. Pure.
+  body is markdown, and ``prompt_parts``, a prompt in a log, which no rule
+  reads: it is set exactly as sent. Pure.
 - ``gate``: whether the library can draw and the sentence when it cannot; its
   fonts; ``unload``.
 - ``themes``: a role's face, size and leading as the library's theme, pptmstr's

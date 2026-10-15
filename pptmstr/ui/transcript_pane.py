@@ -43,18 +43,17 @@ seam is on, RICH is what the pane shows until the operator picks a mode
 
 **Prompts.** A SYSTEM run is a prompt: ``AgentSession.send`` writes every one, the
 opening text included, as ``> `` and what was sent, and nothing else writes the
-kind. It is what the operator wrote, so every mode sets it as it sets the agent's
-prose, broken at the pane's width, in the dim ink and behind the ``>`` that marks
-it as the operator's: WRAP's wrapped lines, RICH's prose layout with each line the
-operator ended kept (``rich_pane``), and in TYPESET markdown by the rule every body
-somebody wrote is read by, the mark set as the character it is
-(``typeset.prompt_parts``). Nothing a prompt holds is read as markup by a reader
-that would drop it: RICH lays it out without reading it, and the seam's reader
-keeps what CommonMark would hide (``gate.read``).
+kind. It is what an agent was given, so every mode shows every character of it
+and reads no markup out of it -- a ``#``, a ``- ``, a backtick is what was typed --
+broken at the pane's width in the prose face, in the dim ink and behind the ``>``
+that marks it as the operator's: WRAP's wrapped lines, RICH's prose layout with
+each line the operator ended kept (``rich_pane``), and in TYPESET ImGui's wrapped
+text in the library's prose face (``typeset.prompt_parts`` says why it is not the
+library's), outside any selection of the library's.
 
 **Typesetting.** ``RenderMode.TYPESET`` sets the log through ``typeset`` (the seam
 over the layout library). OUTPUT and REASONING runs are read as markdown and set
-by the library, wrapped, selectable and culled, and a prompt as above; every
+by the library, wrapped, selectable and culled; a prompt is set as above; every
 other kind -- a tool call, its result, an error -- is literal text whose columns are content,
 set unbroken in its ``_KIND_COLOUR`` and never read as markdown. **The library
 sets a literal run too, as a code block of its own, where it is measured to keep
@@ -297,8 +296,8 @@ class ClosedRun:
 
     ``run`` is its index in ``NodeTranscript.run_starts`` and ``lines`` how many of
     the transcript's lines it holds. ``text`` is the run as it is set, and what
-    is copied of it; ``parts`` is how: one part, but for a prompt, which is
-    as many as the body of one is (``typeset.prompt_parts``).
+    is copied of it; ``parts`` is how: one part, or none for a prompt with
+    nothing in it (``typeset.prompt_parts``).
     """
 
     run: int
@@ -440,8 +439,8 @@ def _closed(run: OpenRun) -> ClosedRun:
 
 def _prompt(text: str) -> tuple[typeset.Part, ...]:
     """
-    A prompt as the log sets it: prose, in its kind's ink, behind the mark the
-    log wrote (``typeset.prompt_parts``).
+    A prompt as the log sets it: every character of it, the mark the log wrote
+    included, in the prose face and its kind's ink (``typeset.prompt_parts``).
     """
     return typeset.prompt_parts(_literal(text), colour=_KIND_COLOUR[SegmentKind.SYSTEM])
 

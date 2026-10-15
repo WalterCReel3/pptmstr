@@ -2060,44 +2060,6 @@ def test_a_draw_outside_a_frame_raises_and_does_not_take_the_interpreter_down(se
 # -- a prompt in a log -----------------------------------------------------------
 
 DIM = "text_dim"
-MARK = Part(typeset.parts.AS_WRITTEN + ">", colour=DIM)
-AS = typeset.parts.AS_WRITTEN
-
-
-@pytest.mark.parametrize(
-    ("logged", "expected"),
-    [
-        ("> plain words", (Part(AS + "> plain words", colour=DIM),)),
-        # Two short lines were ended on purpose, and keep the break (``prose_parts``).
-        ("> two lines\nend early", (Part(AS + "> two lines  \nend early", colour=DIM),)),
-        ("> # Plan\n\nThen go.", (MARK, Part("# Plan\n\nThen go.", colour=DIM))),
-        ("> - one\n- two", (MARK, Part("- one\n- two", colour=DIM))),
-        ("> ```py\nx = 1\n```", (MARK, Part("```py\nx = 1\n```", colour=DIM))),
-        ("> | a | b |\n|---|---|", (MARK, Part("| a | b |\n|---|---|", colour=DIM))),
-        (">     x = 1", (MARK, Part("    x = 1", colour=DIM))),
-        (
-            '>   File "a.py", line 1\n    raise X',
-            (Part('>   File "a.py", line 1\n    raise X', Kind.LITERAL, DIM),),
-        ),
-        ("> ", (MARK,)),
-    ],
-)
-def test_a_prompt_is_read_as_a_body_with_its_mark_set_as_a_character(
-    logged: str, expected: tuple[Part, ...]
-) -> None:
-    """
-    Read as markdown, ``> `` opens a quote. In front of a paragraph the mark is a
-    character of it; in front of a block of its own the mark would make that
-    block a paragraph, so it is a part above it; and an indented paste is set as
-    it was written, the mark with it.
-    """
-    assert typeset.prompt_parts(logged, colour=DIM) == expected
-
-
-def test_text_without_the_mark_is_a_body_like_any_other() -> None:
-    body = "run: make check\nthen: git status"
-    assert typeset.prompt_parts(body, colour=DIM) == typeset.prose_parts(body, colour=DIM)
-
 
 PROMPTS = [
     "glob **/*.py and tests/**/*.md for callers",
@@ -2108,26 +2070,86 @@ PROMPTS = [
     "a NUL is \\u0000 and a typed one \\u005cu0000",
     "run: make check\nthen: **/*.py\nlast: <b> & C:\\_work\\*.log",
     "a paragraph\n\nand a second with 2*3*4 and _private and __init__",
+    "# Plan\n\nThen go.",
+    "- step\n- another step",
+    "1. one\n2. two",
+    "> quoted",
+    "run `code` first",
+    "see [a](b) for it",
+    "**bold** as typed",
+    "    ",
+    "above\n      \nbelow, and   three spaces",
+    "```py\nx = 1\n```",
+    '  File "a.py", line 1\n    raise X',
 ]
+"""
+What an operator sends: what a markdown reader would hide or turn into a block,
+and a line of nothing but spaces.
+"""
 
 
 @pytest.mark.parametrize("written", PROMPTS)
-def test_every_character_of_a_prompt_is_set_with_its_mark(seam: Any, written: str) -> None:
+def test_a_prompt_is_one_part_of_exactly_what_was_sent_in_the_prose_role(written: str) -> None:
+    logged = "> " + written
+    assert typeset.prompt_parts(logged, colour=DIM) == (
+        Part(logged, Kind.WRAPPED_EXACT, DIM, role=Role.PROSE),
+    )
+
+
+def test_a_prompt_of_nothing_is_no_part_and_text_without_the_mark_is_kept_too() -> None:
+    assert typeset.prompt_parts("", colour=DIM) == ()
+    assert typeset.prompt_parts("\n \n") == ()
+    assert typeset.prompt_parts("# no mark") == (
+        Part("# no mark", Kind.WRAPPED_EXACT, role=Role.PROSE),
+    )
+
+
+@pytest.mark.parametrize("written", PROMPTS)
+def test_every_character_of_a_prompt_is_handed_to_imgui_in_the_prose_face(
+    seam: Any, monkeypatch: pytest.MonkeyPatch, written: str
+) -> None:
     """
-    A prompt must show what was sent: the glob's stars, a tag, an entity, the
-    backslashes, the escape a NUL is held as. What was set, less its spaces, is
-    the mark and what was written, less its spaces.
+    A prompt must show what was sent, so no reader sees it: the library would
+    make a run of spaces one space and a ``#`` a heading. Every character,
+    the spaces included, goes to ImGui as one text, in the face the library
+    sets prose in, broken at the window's edge.
     """
     cache = typeset.ViewCache()
-    parts = typeset.prompt_parts("> " + written, colour=DIM)
+    logged = "> " + written
+    parts = typeset.prompt_parts(logged, colour=DIM)
+    texts: list[str] = []
+    fonts: list[Any] = []
+    wraps: list[float] = []
+    real_text, real_font, real_wrap = (
+        seam.text_unformatted,
+        seam.push_font,
+        seam.push_text_wrap_pos,
+    )
+
+    def text_unformatted(text: str, *args: Any) -> None:
+        texts.append(text)
+        real_text(text, *args)
+
+    def push_font(font: Any, size: float) -> None:
+        fonts.append(font)
+        real_font(font, size)
+
+    def push_text_wrap_pos(at: float = 0.0) -> None:
+        wraps.append(at)
+        real_wrap(at)
+
+    monkeypatch.setattr(seam, "text_unformatted", text_unformatted)
+    monkeypatch.setattr(seam, "push_font", push_font)
+    monkeypatch.setattr(seam, "push_text_wrap_pos", push_text_wrap_pos)
 
     def body() -> None:
         typeset.document(cache, "prompt", parts, apart=True, literal=True)
 
     frame(seam, body)
-    assert _characters("".join(cache.texts("prompt"))) == _characters("> " + written)
-    blocks = [block for view in cache.views("prompt") for block in view.blocks]
-    assert blocks and not any(isinstance(block, imscribe.MarkdownCode) for block in blocks)
+    assert texts == [logged]
+    assert cache.texts("prompt") == (logged,) and cache.views("prompt") == ()
+    assert fonts == [gate.face_font("PROSE")] and fonts[0] is not None
+    assert wraps and all(at > 0.0 for at in wraps)
 
 
 # -- text ImGui draws ------------------------------------------------------------
