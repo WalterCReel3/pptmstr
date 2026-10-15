@@ -2244,6 +2244,19 @@ def _environ_of(pid: int) -> list[bytes]:
     return Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
 
 
+def _execed_environ_of(pid: int) -> list[bytes]:
+    """
+    A just-started process's environment, once it has one: ``Popen`` returns as
+    the child begins to exec, and until the exec has set up the new image the
+    process reads as having no environment at all.
+    """
+    deadline = time.monotonic() + 5
+    while (environ := _environ_of(pid)) == [b""]:
+        assert time.monotonic() < deadline, f"{pid} still reads as having no environment"
+        time.sleep(0.01)
+    return environ
+
+
 def _tagged_shell(script: str, mark: str, command_id: str) -> tuple[subprocess.Popen[bytes], Any]:
     """
     A shell as the runner starts one -- its own session, the command's tag in
@@ -2492,7 +2505,7 @@ def test_a_process_started_with_what_the_records_hold_is_not_taken_for_the_comma
     ]
     try:
         for each, value in zip(forged, known, strict=True):
-            assert f"PPTMSTR_COMMAND={value}".encode() in _environ_of(each.pid)
+            assert f"PPTMSTR_COMMAND={value}".encode() in _execed_environ_of(each.pid)
         assert commandrun.escaped(started) == ()
         found = commandrun.survivor(started)
         assert isinstance(found, Survivor) and found.escaped == () and found.shell
@@ -2508,6 +2521,7 @@ def test_a_process_started_with_what_the_records_hold_is_not_taken_for_the_comma
             env={**os.environ, MARK: mark, commandrun.COMMAND_TAG: _VALUES[command_id]},
         )
         forged.append(real)
+        _execed_environ_of(real.pid)
         assert commandrun.escaped(started) == (real.pid,)
     finally:
         for each in forged:
