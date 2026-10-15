@@ -692,18 +692,23 @@ def _board(state: Any, fixtures: Path) -> Steps:
     can have and an incident, and the DIGEST pane docked with it, with the lead's
     mark part-way down it.
 
+    The digest leads with the decisions taken without the operator: the fake
+    fleet's answered one and an open one filed here, so both of its lines are
+    drawn. Its folded rest is shot shut, as it starts, and once open.
+
     Everything on the board gets there as an intent on the bridge.
     """
     from imgui_bundle import hello_imgui
 
     from pptmstr.intents import (
         ConcernPosted,
+        DecisionRaised,
         DigestRead,
         TaskClaimRequested,
         TaskCompleted,
         TaskDeclared,
     )
-    from pptmstr.model import Basis, Concern, Task, TaskState
+    from pptmstr.model import Basis, Concern, Decision, Standing, Task, TaskState
     from pptmstr.ui.focus import Scope
 
     yield from _until("the fake team's board", lambda: _team(state) is not None)
@@ -795,6 +800,28 @@ def _board(state: Any, fixtures: Path) -> Steps:
         basis=Basis.READ,
         not_run="",
     )
+    emit(
+        DecisionRaised(
+            builder,
+            Decision(
+                id="shot-d3",
+                asker=builder,
+                question=(
+                    "I kept the old fixtures beside the renamed ones rather than delete "
+                    "them.\nTwo tests still import from the old path. Keep them for now?"
+                ),
+                blocks=(),
+                if_unanswered="They stay until those tests move.",
+                evidence="tests/test_columns.py and tests/test_verify.py import from fixtures/.",
+                recommendation="Keep them; t10's rename is done either way.",
+                standing=Standing.TAKEN,
+                reversible=True,
+                raised_at=0.0,
+            ),
+            at=time.monotonic(),
+        )
+    )
+    yield from _until("the taken decision", lambda: "shot-d3" in state.frame_snap.decisions)
     yield from _frames(3)
 
     def show(label: str) -> Steps:
@@ -821,6 +848,7 @@ def _board(state: Any, fixtures: Path) -> Steps:
     yield from show_board()
     yield from _pages(_window("BOARD/##board"), "40-board-triage-every-row-closed")
     yield from digest("41-digest-triage")
+    yield from _click_taken(state, show)
     yield from opened("t1", "t6")
     yield from _pages(_window("BOARD/##board"), "42-board-triage-t1-t6-open")
     yield from opened("t7", "t8", "t10")
@@ -840,6 +868,42 @@ def _board(state: Any, fixtures: Path) -> Steps:
     yield from opened("t6", "t7")
     yield from _pages(_window("BOARD/##board"), "47-board-focus-t6-t7-open")
     yield from digest("48-digest-focus")
+
+    from pptmstr.ui import digest_pane
+
+    yield from show("DIGEST")
+    _set_open(_window("DIGEST/##digest"), f"###{digest_pane.rest_id(root[0])}", True)
+    yield from _frames()
+    yield from _pages(_window("DIGEST/##digest"), "49-digest-focus-rest-open")
+
+
+def _click_taken(state: Any, show: Callable[[str], Steps]) -> Steps:
+    """
+    A real click, through ImGui's input queue, on the first line under the
+    digest's heading -- the open decision taken without the operator -- and the
+    NEEDS YOU row it opens. Fails the run if the cursor did not land on it.
+    Leaves BOARD in front, as ``digest`` does.
+    """
+    from imgui_bundle import imgui
+
+    yield from show("DIGEST")
+    pane = _window("DIGEST/##digest")
+    io = imgui.get_io()
+    x = pane.inner_rect.min.x + 40.0
+    y = pane.inner_rect.min.y + imgui.get_text_line_height_with_spacing() * 1.5
+    io.add_mouse_pos_event(x, y)
+    yield None
+    io.add_mouse_button_event(0, True)
+    yield None
+    io.add_mouse_button_event(0, False)
+    yield from _frames()
+    owed = state.focus.obligation(state.frame_snap)
+    if owed is None or owed.key != "decision:shot-d3":
+        raise RuntimeError(f"the click on the taken decision left the cursor on {owed!r}")
+    yield "41-digest-triage-clicked-taken"
+    io.add_mouse_pos_event(-1.0, -1.0)
+    # The board back in front, for the shots after this one.
+    yield from show("BOARD")
 
 
 SCENARIOS: dict[str, Callable[[Any, Path], Steps]] = {

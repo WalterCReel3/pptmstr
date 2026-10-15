@@ -48,7 +48,9 @@ nothing about the wall clock, so no slot renders one as a time of day.
 **A decision awaiting the operator is in *waiting* like everything else owed.**
 It is an obligation in ``needs_you``, so it arrives as an ``Owed`` with its kind
 and its asker; its ``summary`` is the store's own row and holds none of the
-asker's sentences.
+asker's sentences. One its asker filed as already taken is also listed, open or
+ended, by ``taken_decisions``, which the operator's pane leads with and the
+lead's text does not carry.
 
 **So is a break-glass command that is asked or running**, and it is the one
 kind whose ``Owed`` says which of two states it is in (``Owed.command``): an
@@ -90,8 +92,10 @@ from .model import (
     Basis,
     CommandOwed,
     ConcernState,
+    Decision,
     ObligationKind,
     Snapshot,
+    Standing,
     TaskId,
     TaskState,
 )
@@ -299,6 +303,28 @@ def digest_mark(snap: Snapshot, session_id: str) -> float | None:
     """
     record = snap.get((session_id, None))
     return None if record is None else record.digest_read_at
+
+
+def taken_decisions(snap: Snapshot, session_id: str) -> tuple[Decision, ...]:
+    """
+    Every decision of ``session_id`` its asker filed as already taken
+    (``Standing.TAKEN``): the open ones oldest first, then the ended ones oldest
+    first.
+
+    Not a slot of ``Digest``, because the lead's report does not carry it: the
+    operator's pane reads it beside the digest. Open ones lead because each is
+    work an agent went on from that nobody has ratified, and an answer that
+    disagrees grows more costly the longer it waits.
+    """
+    taken = sorted(
+        (
+            d
+            for d in snap.decisions.values()
+            if d.session_id == session_id and d.standing is Standing.TAKEN
+        ),
+        key=lambda d: (d.raised_at, d.id),
+    )
+    return (*(d for d in taken if d.is_open), *(d for d in taken if not d.is_open))
 
 
 def first_line(text: str) -> str:

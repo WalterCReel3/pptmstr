@@ -597,6 +597,28 @@ def author(text: str, colour: Color | None = None) -> None:
     )
 
 
+def author_inline(text: str, colour: Color | None = None) -> None:
+    """
+    ``author`` for a text that finishes a line the pane began: the same bar in the
+    same gutter, ahead of the text, at the cursor and not at the indent.
+
+    ``text`` must already be one line that fits what is left of the row
+    (``widgets.ellipsis``). Nothing here wraps, so a text that did not fit would
+    run past the pane's edge rather than onto a line without the bar.
+    """
+    gutter = imgui.get_font_size() * _GUTTER_EMS
+    top = imgui.get_cursor_screen_pos()
+    imgui.set_cursor_screen_pos(imgui.ImVec2(top.x + gutter, top.y))
+    imgui.text_colored((P.text if colour is None else colour).vec4, author_text(text))
+    x = top.x + gutter * 0.35
+    imgui.get_window_draw_list().add_line(
+        imgui.ImVec2(x, top.y),
+        imgui.ImVec2(x, imgui.get_item_rect_max().y),
+        P.accent.u32,
+        _BAR_THICKNESS,
+    )
+
+
 def _amend_editor(row: BoardTask, pane: BoardState, bridge: Bridge) -> None:
     """
     The operator rewriting a task's specification in place.

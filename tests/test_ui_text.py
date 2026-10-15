@@ -321,6 +321,10 @@ def said_by(monkeypatch: pytest.MonkeyPatch, draw: Callable[[], None], *modules:
         if hasattr(module, "ellipsis") and module is not widgets:
             # The real one measures text, and a mock's width compares to nothing.
             monkeypatch.setattr(module, "ellipsis", lambda text, width: widgets.flat_line(text))
+        if hasattr(module, "ellipsis_by") and module is not widgets:
+            monkeypatch.setattr(
+                module, "ellipsis_by", lambda text, width, measure: widgets.flat_line(text)
+            )
     draw()
     strings = [a for call in fake.mock_calls for a in call.args if isinstance(a, str)]
     return Said(strings, [call[0] for call in fake.mock_calls])
@@ -382,7 +386,7 @@ def _every_pane(monkeypatch: pytest.MonkeyPatch, snap: Snapshot, node: NodeId) -
             lambda: board_pane.draw(snap, focus, board_pane.BoardState(), Bridge()),
             (board_pane,),
         ),
-        "digest": (lambda: digest_pane.draw(snap, focus), (digest_pane, board_pane)),
+        "digest": (lambda: digest_pane.draw(snap, focus, 0.0), (digest_pane, board_pane)),
         "transcript": (
             lambda: transcript_pane.draw(snap, transcript_pane.TranscriptState(), selected),
             (transcript_pane,),
@@ -417,6 +421,7 @@ _DEFAULTS_AS_FACTS = (
     "(nothing yet)",
     "can no longer be messaged",
     "WAITING ON YOU",
+    "nothing taken without you",
 )
 
 
@@ -475,5 +480,5 @@ def test_the_same_panes_still_say_those_things_about_a_session_that_ran(
     assert panes["compose"].has("can no longer be messaged")
     assert panes["transcript"].has("(nothing yet)") and "checkbox" in panes["transcript"].calls
     assert panes["board"].has("no tasks declared yet")
-    assert panes["digest"].has("WAITING ON YOU")
+    assert panes["digest"].has("nothing taken without you")
     assert not any(s.startswith("closed — ") for said in panes.values() for s in said.strings)

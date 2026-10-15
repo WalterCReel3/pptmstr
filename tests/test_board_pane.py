@@ -2506,14 +2506,16 @@ def test_the_board_pane_draws_no_line_of_the_digest(monkeypatch, seed: int) -> N
     focus.to_node(snap, (S1, None), scope=Scope.SESSION)
     spoken = {line.text for line in _spoken(monkeypatch, snap, focus)}
 
-    rows = digest_pane.digest_rows(digest(snap, S1), digest_mark(snap, S1))
+    mark = digest_mark(snap, S1)
+    rows = digest_pane.rest_rows(digest(snap, S1), mark)
     composed = {row.text for row in rows if row.tone is not board_pane.Tone.AUTHOR}
+    composed |= {item.text for item in digest_pane.incident_items(digest(snap, S1, mark), mark)}
     assert len(composed) > 6 and digest_pane.DIGEST_MARK in composed
     assert composed & spoken == set()
     assert not any(text.startswith(("digest", "CHANGED", "WAITING ON YOU")) for text in spoken)
     # The board itself was drawn: this is not a pane that said "not a team".
     assert any(text.endswith("  completed") for text in spoken)
-    assert not hasattr(board_pane, "digest_rows") and not hasattr(board_pane, "_digest")
+    assert not hasattr(board_pane, "rest_rows") and not hasattr(board_pane, "_digest")
 
 
 # -- a closed card shows no board, and a removed session's is not drawn --------------

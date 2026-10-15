@@ -3500,7 +3500,7 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
     def digest_pane_fn() -> None:
         # Follows the cursor, as BOARD does: it is that session's board, read.
         if state.frame_snap is not None:
-            digest_pane.draw(state.frame_snap, state.focus)
+            digest_pane.draw(state.frame_snap, state.focus, state.frame_now)
 
     def brief_pane_fn() -> None:
         # Follows the cursor, like every other pane in this space. A brief belongs

@@ -127,3 +127,41 @@ needs air.**
 
 None of this is built. It wants the operator's eye on a rendering before and after, which the
 session writing this record does not have.
+
+## Left for the operator's redesign (2026-10-14)
+
+The operator: "I'm going to do a redesign task later." Open when that was said, none built:
+
+- **The Digest pane.** It draws the text `read_digest` returns to a lead, wrapped in a narrow
+  column: no hierarchy, what waits on the operator below sixteen "declared" lines, nothing
+  links to BOARD or NEEDS YOU, and its unverified lines repeat BOARD's. Unanswered: whether
+  the operator opens it for "what happened while I was away" or "exactly what the lead was
+  told". Shots: `dist/shots/digest/41-digest-triage*.png` (regenerate with
+  `scripts/with_display.sh python scripts/screenshot.py --scenario board --focus DIGEST`).
+- **Input wells** in dialogs are faint in the dark theme (1.09:1 against the surface);
+  `well` in `theme.py`.
+- **Closing a failed card with a process attached** lost its only warning when the card menu
+  became labels; no confirmation exists for it.
+- The rest of the survivor row, the BOARD pane's wrapped status sentences, and the fleet
+  card's state line overprinting its cost ("1 answer unread" on the ORBITAL card).
+
+**Asked 2026-10-14:** "I think the digest has veered heavily from being board with the
+sessions outstanding questions for the user. Did those turn into parked items?" Answer, from
+the code: an agent's question for the operator is a decision (`raise_decision`), a NEEDS YOU
+row of its own kind (`ObligationKind.DECISION`), not a parked call -- the asker carries on.
+The digest's "waiting" slot is a copy of `Snapshot.needs_you` for the session. `digest.py`
+was written as the lead's end-of-round report (four slots: changed, waiting, unverified,
+incidents) and the pane draws that report as is; so the pane answers "what would the lead be
+told", not "where does this session stand and what does it need from me".
+
+**D (2026-10-14), for the redesign:** "I've realized that the most important information for
+me in the digest are the decisions made _unilaterally_. Then after that might be incidents.
+The rest, right now, feel like noise." In the model the nearest record is a decision filed
+with `Standing.TAKEN` -- one the agent already took and went on from, asking ratification
+(the lead's reading; to confirm). An agent that decides without filing anything leaves no
+record a digest could show; the briefing's "settle it, record the decision" is the only thing
+that asks for one.
+
+**D (2026-10-14):** the decision row's two-press send stays ("Let's leave the confirmation in
+but tighten up the warning text so that it's not so jarring in the UI"); finality was the
+lead's ruling in the 2026-10-12 run and is now kept by the operator.

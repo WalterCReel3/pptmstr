@@ -2663,8 +2663,8 @@ def test_the_digest_tab_draws_the_digest_pane_for_the_frames_snapshot_and_cursor
 ) -> None:
     """
     The wiring: the function registered under DIGEST is the pane's draw, handed
-    the frame's one snapshot and the one cursor, and it draws nothing before a
-    snapshot exists. The board tab is handed no digest to draw.
+    the frame's one snapshot, the one cursor and the frame's clock, and it draws
+    nothing before a snapshot exists. The board tab is handed no digest to draw.
     """
     from pptmstr import app
     from pptmstr.ui import board_pane, digest_pane
@@ -2680,7 +2680,7 @@ def test_the_digest_tab_draws_the_digest_pane_for_the_frames_snapshot_and_cursor
 
     state.frame_snap = state.store.snapshot()
     panels["DIGEST"]()
-    assert handed == [("digest", state.frame_snap, state.focus)]
+    assert handed == [("digest", state.frame_snap, state.focus, state.frame_now)]
     panels["BOARD"]()
     assert handed[-1][0] == "board" and len(handed) == 2
 

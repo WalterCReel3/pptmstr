@@ -147,10 +147,15 @@ def _keeps_draft(snap: Snapshot, decision_id: DecisionId) -> bool:
 
 @dataclass(frozen=True, slots=True)
 class Line:
-    """One line in this application's own voice. ``warn`` picks the colour."""
+    """
+    One line in this application's own voice. ``warn`` picks the warning colour,
+    and is kept for a line that tells the operator something they would not
+    otherwise know; ``dim`` the colour of a line that states an absence.
+    """
 
     text: str
     warn: bool = False
+    dim: bool = False
 
 
 NOTHING_WRITTEN = "(its asker left this empty)"
@@ -186,15 +191,15 @@ def reversible_line(reversible: bool | None) -> Line:
     """
     Whether it can be undone, as its asker states it.
 
-    "Did not say" is the warning colour beside "cannot": an asker that left it
-    out has not said the decision is safe, and a neutral line would read as if
-    it had.
+    Only "cannot" is the warning colour: it is the one of the three that changes
+    how carefully an answer has to be read. "Did not say" is dim rather than
+    plain, so it does not read as the reassuring statement beside it.
     """
     if reversible is True:
         return Line("its asker says this can be undone")
     if reversible is False:
         return Line("its asker says this cannot be undone", warn=True)
-    return Line("its asker did not say whether this can be undone", warn=True)
+    return Line("its asker did not say whether this can be undone", dim=True)
 
 
 def fate_line(fate: AskerFate) -> Line | None:
@@ -419,39 +424,62 @@ def too_long_hint(draft: str) -> str:
     made here, before the first press, where the operator can still shorten it.
     """
     return (
-        f"this is {len(draft) - MAX_ANSWER_CHARS:,} characters over the {MAX_ANSWER_CHARS:,}"
-        " an answer may be, and is not sent until it is shorter"
+        f"{len(draft) - MAX_ANSWER_CHARS:,} characters over the {MAX_ANSWER_CHARS:,} limit;"
+        " shorten it to send"
     )
 
 
-FINAL_HINT = "an answer is final: once sent it cannot be changed or taken back"
-EMPTY_HINT = "an empty answer is not sent. dismiss closes this without one"
-YOUR_ANSWER = "you answered -- final, exactly as sent:"
+EMPTY_HINT = "type an answer to send, or dismiss without one"
+YOUR_ANSWER = "your answer:"
 EMPTY_ANSWER = "(the answer on record is empty)"
 ANSWER_FROM_ROW = "answer or dismiss from its row in the inbox"
 
 SEND = "send answer..."
 DISMISS = "dismiss..."
-CONFIRM = {Act.SEND: "send it - final", Act.DISMISS: "dismiss it - final"}
+CONFIRM = {Act.SEND: "send", Act.DISMISS: "dismiss"}
 BACK = "keep editing"
 
 
-def confirm_line(act: Act, role: str, draft: str, fate: AskerFate) -> str:
-    """What the second press is about to do, in full."""
+def fate_clause(fate: AskerFate, role: str) -> str | None:
+    """
+    What an answer or a dismissal will meet, said at the second press in one
+    short clause. None when its asker is running, which is the case where an
+    answer is read as soon as it is sent.
+
+    Shorter than ``fate_line``, which says the same thing among the facts and
+    may have scrolled out of the row's body by the time the operator presses.
+    """
+    match fate:
+        case AskerFate.LIVE:
+            return None
+        case AskerFate.IDLE:
+            return f"{role} has ended its turn and reads this only once you prompt it"
+        case AskerFate.STOPPED:
+            return f"{role} has stopped and reads this only if it is woken"
+        case AskerFate.UNANNOUNCED:
+            return f"{role} has not been reported as started, and may not read this"
+        case AskerFate.FAILED:
+            return f"{role} failed, and may never read this"
+        case AskerFate.GONE:
+            return f"{role}'s session is closed, and nothing will read this"
+        case _:
+            assert_never(fate)
+
+
+def confirm_lines(act: Act, role: str, fate: AskerFate) -> tuple[Line, ...]:
+    """
+    What the second press is about to do: one line, in the text colour.
+
+    The finality is said here and nowhere before the first press. A second line,
+    in the warning colour, only when the asker is not running -- that is the one
+    thing at this step the operator may not already know.
+    """
     if act is Act.SEND:
-        text = (
-            f"send the {len(draft):,} characters above to {role}, exactly as they stand?"
-            " you cannot change the answer afterwards."
-        )
-        unread = fate_line(fate)
-        return text if unread is None else f"{text} {unread.text}."
-    text = (
-        f"close this without an answer? {role} is told it was dismissed,"
-        " and it cannot be reopened."
-    )
-    if draft:
-        text += f" your draft ({len(draft):,} characters) is discarded."
-    return text
+        ask = Line(f"send this to {role}? answers can't be changed.")
+    else:
+        ask = Line(f"dismiss without answering? {role} is told.")
+    news = fate_clause(fate, role)
+    return (ask,) if news is None else (ask, Line(news, warn=True))
 
 
 def draft_line(draft: str) -> str:
@@ -520,7 +548,8 @@ def closed_text(snap: Snapshot, decision: Decision, now: float) -> list[str]:
 
 
 def _line(line: Line) -> None:
-    imgui.text_colored((P.warn if line.warn else P.text).vec4, line.text)
+    colour = P.warn if line.warn else P.text_dim if line.dim else P.text
+    imgui.text_colored(colour.vec4, line.text)
 
 
 def _authored(text: str, limit: int, rest: str, empty: str = NOTHING_WRITTEN) -> None:
@@ -629,14 +658,17 @@ def draw_answer_box(
         imgui.same_line()
         if imgui.button(DISMISS):
             state.confirming = (decision.id, Act.DISMISS)
-        if ready:
-            imgui.text_disabled(FINAL_HINT)
-        elif draft.strip():
+        # Nothing under a sendable draft: that an answer is final is said once,
+        # at the second press. Under one that is not, why send is greyed.
+        if not ready and draft.strip():
             imgui.text_colored(P.warn.vec4, too_long_hint(draft))
-        else:
+        elif not ready:
             imgui.text_disabled(EMPTY_HINT)
     else:
-        imgui.text_colored(P.warn.vec4, confirm_line(pending, role, draft, owed.asker))
+        # Above the buttons and not beside them: the second press's button is
+        # never where the first press's was, so a double click is one press.
+        for line in confirm_lines(pending, role, owed.asker):
+            _line(line)
         if imgui.button(CONFIRM[pending]):
             # node_id stays None on both: that is what marks them as the
             # operator's, and the store applies neither from anybody else.

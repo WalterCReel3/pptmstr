@@ -452,6 +452,50 @@ def _asked(did: str, question: str) -> Decision:
     )
 
 
+def taken_round() -> Store:
+    """
+    ``_round`` with five decisions in S1 and one in S2, raised at the times in
+    their ids' order: d1 taken and answered, d2 taken and open, d3 the
+    operator's and open, d4 taken and dismissed, d5 taken and open, d6 taken and
+    withdrawn by its asker; and x1 taken, open, in another session.
+    """
+    from pptmstr.intents import DecisionDismissed, DecisionWithdrawn
+
+    store = _round()
+    team(store, S2)
+    for at, did, standing, asker in (
+        (1.0, "d1", Standing.TAKEN, DEV),
+        (2.0, "d2", Standing.TAKEN, DEV),
+        (3.0, "d3", Standing.OPERATORS, DEV),
+        (4.0, "d4", Standing.TAKEN, LEAD),
+        (5.0, "d5", Standing.TAKEN, LEAD),
+        (6.0, "d6", Standing.TAKEN, DEV),
+        (0.5, "x1", Standing.TAKEN, OTHER_LEAD),
+    ):
+        decision = dataclasses.replace(_asked(did, f"q {did}"), asker=asker, standing=standing)
+        if asker[0] != S1:
+            decision = dataclasses.replace(decision, blocks=())
+        store.apply(DecisionRaised(asker, decision, at=at))
+    store.apply(DecisionAnswered("d1", "keep it", at=7.0))
+    store.apply(DecisionDismissed("d4", at=8.0))
+    store.apply(DecisionWithdrawn(DEV, "d6", at=9.0))
+    return store
+
+
+def test_taken_decisions_are_the_sessions_taken_ones_open_first_each_part_oldest_first() -> None:
+    """
+    Every decision filed as already taken, however it ended, and none the
+    operator was asked to take; another session's is not this one's.
+    """
+    from pptmstr.digest import taken_decisions
+
+    snap = taken_round().snapshot()
+    assert len(snap.decisions) == 7
+    assert [d.id for d in taken_decisions(snap, S1)] == ["d2", "d5", "d1", "d4", "d6"]
+    assert [d.id for d in taken_decisions(snap, S2)] == ["x1"]
+    assert taken_decisions(_round().snapshot(), S1) == ()
+
+
 def test_an_open_decision_is_counted_in_the_waiting_slot_by_kind_and_asker() -> None:
     """
     Until it is answered, and then not. The slot's summary is the store's row,

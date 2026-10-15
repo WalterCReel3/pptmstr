@@ -50,6 +50,7 @@ from pptmstr.model import (
     Withdrawn,
 )
 from pptmstr.store import Store
+from pptmstr.theme import P
 from pptmstr.ui import board_pane, decision_view
 from pptmstr.ui.decision_view import Act, DecisionState, Line
 
@@ -132,17 +133,18 @@ def test_every_standing_has_a_line() -> None:
 
 
 @pytest.mark.parametrize(
-    ("reversible", "text", "warn"),
+    ("reversible", "line"),
     [
-        (True, "its asker says this can be undone", False),
-        (False, "its asker says this cannot be undone", True),
-        (None, "its asker did not say whether this can be undone", True),
+        (True, Line("its asker says this can be undone")),
+        (False, Line("its asker says this cannot be undone", warn=True)),
+        (None, Line("its asker did not say whether this can be undone", dim=True)),
     ],
 )
 def test_reversibility_is_three_statements_and_unstated_is_not_the_reassuring_one(
-    reversible: bool | None, text: str, warn: bool
+    reversible: bool | None, line: Line
 ) -> None:
-    assert decision_view.reversible_line(reversible) == Line(text, warn)
+    """Only "cannot" is a warning; "did not say" is drawn apart from "can"."""
+    assert decision_view.reversible_line(reversible) == line
 
 
 def test_only_an_asker_that_is_running_gets_no_line_about_who_will_read_the_answer() -> None:
@@ -332,20 +334,37 @@ def test_a_draft_with_anything_to_read_in_it_is_sendable(draft: str) -> None:
     assert decision_view.sendable(draft)
 
 
-def test_the_second_press_is_told_what_it_does_and_that_it_is_final() -> None:
-    send = decision_view.confirm_line(Act.SEND, "builder", "  yes ", AskerFate.LIVE)
-    assert "6 characters" in send and "builder" in send and "cannot change" in send
-    # The draft is counted and never quoted: the box above it is the quotation.
-    assert "yes" not in send
+def test_the_second_press_is_told_in_one_plain_line_what_it_does_and_that_it_is_final() -> None:
+    assert decision_view.confirm_lines(Act.SEND, "builder", AskerFate.LIVE) == (
+        Line("send this to builder? answers can't be changed."),
+    )
+    assert decision_view.confirm_lines(Act.DISMISS, "builder", AskerFate.LIVE) == (
+        Line("dismiss without answering? builder is told."),
+    )
 
-    dead = decision_view.confirm_line(Act.SEND, "builder", "yes", AskerFate.STOPPED)
-    stopped = decision_view.fate_line(AskerFate.STOPPED)
-    assert stopped is not None and stopped.text in dead
 
-    bare = decision_view.confirm_line(Act.DISMISS, "builder", "", AskerFate.LIVE)
-    held = decision_view.confirm_line(Act.DISMISS, "builder", "half an answer", AskerFate.LIVE)
-    assert "without an answer" in bare and "cannot be reopened" in bare
-    assert "discarded" not in bare and "14 characters) is discarded" in held
+@pytest.mark.parametrize("act", list(Act))
+def test_an_asker_that_is_not_running_adds_one_warning_clause_at_the_second_press(
+    act: Act,
+) -> None:
+    for fate in AskerFate:
+        lines = decision_view.confirm_lines(act, "builder", fate)
+        clause = decision_view.fate_clause(fate, "builder")
+        assert lines[0] == decision_view.confirm_lines(act, "builder", AskerFate.LIVE)[0]
+        if fate is AskerFate.LIVE:
+            assert clause is None and len(lines) == 1
+        else:
+            assert clause is not None and lines[1:] == (Line(clause, warn=True),)
+
+
+def test_each_asker_that_is_not_running_is_a_different_clause_naming_it() -> None:
+    clauses = {
+        fate: decision_view.fate_clause(fate, "builder")
+        for fate in AskerFate
+        if fate is not AskerFate.LIVE
+    }
+    assert all(c is not None and c.startswith("builder") for c in clauses.values())
+    assert len(set(clauses.values())) == len(clauses)
 
 
 def test_both_acts_have_a_second_press_label() -> None:
@@ -559,6 +578,25 @@ def test_every_text_the_asker_wrote_is_drawn_behind_the_bar_and_nowhere_else(
     assert screen.own().count("its asker did not say whether this can be undone") == 1
 
 
+def test_an_unstated_reversibility_is_drawn_dim_and_a_stated_cannot_in_the_warning_colour(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = team()
+    raised(store, "d-1", reversible=None)
+    raised(store, "d-2", reversible=False)
+    snap = store.snapshot()
+    colours: dict[str, object] = {}
+    for did in ("d-1", "d-2"):
+        screen = Screen(monkeypatch)
+        decision_view.draw_body(snap, owed(snap, did), limit=100, rest="elsewhere")
+        colours.update(
+            {str(c.args[1]): c.args[0] for c in screen.imgui.text_colored.call_args_list}
+        )
+
+    assert colours["its asker did not say whether this can be undone"] == P.text_dim.vec4
+    assert colours["its asker says this cannot be undone"] == P.warn.vec4
+
+
 def test_the_recommendation_is_drawn_in_a_block_of_its_own_after_a_rule(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -632,7 +670,6 @@ def test_the_inbox_row_draws_the_body_and_then_the_answer_box(
     assert [(label, value) for label, value, _ in screen.boxes] == [("##answer", "so far")]
     labels = [line.text for line in screen.said if line.how == "button"]
     assert labels == [decision_view.SEND, decision_view.DISMISS]
-    assert decision_view.FINAL_HINT in screen.own()
 
 
 # -- the answer box, against the recording imgui --------------------------------------
@@ -707,7 +744,8 @@ def test_the_second_press_sends_the_draft_byte_for_byte_as_the_operators(
     assert isinstance(intent, DecisionAnswered) and intent.node_id is None
     assert state.confirming is None
     # The second press is told what it does before it is made.
-    assert decision_view.confirm_line(Act.SEND, "builder", AS_TYPED, AskerFate.LIVE) in screen.own()
+    (asked,) = decision_view.confirm_lines(Act.SEND, "builder", AskerFate.LIVE)
+    assert asked.text in screen.own()
     # The draft is not cleared here: the store clearing it is what says it landed.
     assert state.drafts["d-1"] == AS_TYPED
 
@@ -769,21 +807,69 @@ def test_an_empty_answer_is_not_sent_even_if_the_greyed_button_reports_a_click(
 
     assert outbox.sent == [] and state.confirming is None
     assert decision_view.EMPTY_HINT in screen.own()
-    assert decision_view.FINAL_HINT not in screen.own()
     assert screen.imgui.begin_disabled.call_count == 1
     assert screen.imgui.end_disabled.call_count == 1
     # Judged on a copy: the draft itself is as it was.
     assert state.drafts["d-1"] == draft
 
 
-def test_a_sendable_draft_is_told_an_answer_is_final_before_the_first_press(
+def test_a_sendable_draft_has_its_two_buttons_and_no_line_under_them(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """That an answer is final is said once, at the second press."""
     _, snap = _snap_with_one()
     screen = _box(monkeypatch, snap, DecisionState(drafts={"d-1": "no"}), _Outbox())
 
-    assert decision_view.FINAL_HINT in screen.own()
+    assert [(line.how, line.text) for line in screen.said] == [
+        ("button", decision_view.SEND),
+        ("button", decision_view.DISMISS),
+    ]
     assert screen.imgui.begin_disabled.call_count == 0
+
+
+def _warned(screen: Screen) -> list[str]:
+    return [
+        str(call.args[1])
+        for call in screen.imgui.text_colored.call_args_list
+        if call.args[0] == P.warn.vec4
+    ]
+
+
+@pytest.mark.parametrize("act", list(Act))
+def test_the_second_press_of_a_running_asker_is_one_line_and_none_of_it_a_warning(
+    monkeypatch: pytest.MonkeyPatch, act: Act
+) -> None:
+    _, snap = _snap_with_one()
+    assert owed(snap).asker is AskerFate.LIVE
+    state, outbox = DecisionState(drafts={"d-1": "no"}), _Outbox()
+    first = decision_view.SEND if act is Act.SEND else decision_view.DISMISS
+    _box(monkeypatch, snap, state, outbox, press=frozenset({first}))
+
+    screen = _box(monkeypatch, snap, state, outbox)
+
+    assert [line.how for line in screen.said] == ["text", "button", "button"]
+    assert [line.text for line in screen.said[1:]] == [
+        decision_view.CONFIRM[act],
+        decision_view.BACK,
+    ]
+    assert screen.imgui.text_colored.call_args_list[0].args[0] == P.text.vec4
+    assert _warned(screen) == []
+
+
+def test_the_second_press_of_a_stopped_asker_warns_of_that_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    store = team()
+    raised(store)
+    store.apply(AgentFinished(BUILDER, AgentState.DONE, ended_at=7.0), now=7.0)
+    snap = store.snapshot()
+    state, outbox = DecisionState(drafts={"d-1": "no"}), _Outbox()
+    _box(monkeypatch, snap, state, outbox, press=frozenset({decision_view.SEND}))
+
+    screen = _box(monkeypatch, snap, state, outbox)
+
+    assert _warned(screen) == [decision_view.fate_clause(AskerFate.STOPPED, "builder")]
+    assert [line.how for line in screen.said] == ["text", "text", "button", "button"]
 
 
 def test_dismiss_is_two_presses_and_closes_it_with_no_answer(
@@ -800,7 +886,7 @@ def test_dismiss_is_two_presses_and_closes_it_with_no_answer(
     )
 
     assert outbox.sent == [DecisionDismissed(decision_id="d-1")]
-    assert any("14 characters) is discarded" in line for line in screen.own())
+    assert "dismiss without answering? builder is told." in screen.own()
     store.apply_all(outbox.sent, now=9.0)
     ended = store.snapshot().decisions["d-1"]
     assert isinstance(ended.outcome, Dismissed) and ended.answer is None
@@ -1182,7 +1268,6 @@ def test_a_draft_that_is_too_long_cannot_be_armed_and_is_told_by_how_much(
 
     assert state.confirming is None and outbox.sent == []
     assert any("12 characters over" in line for line in screen.own())
-    assert decision_view.FINAL_HINT not in screen.own()
 
 
 def test_detail_says_a_draft_exists_without_drawing_it_and_offers_no_control(

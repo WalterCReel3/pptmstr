@@ -14,7 +14,7 @@ import math
 import os
 import re
 import zlib
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 
@@ -951,15 +951,20 @@ def ellipsis(text: str, width_px: float) -> str:
     a string that has not changed. Valid because glyph advances are non-negative, so
     width is monotonic in prefix length.
     """
+    return ellipsis_by(text, width_px, lambda s: float(imgui.calc_text_size(s).x))
+
+
+def ellipsis_by(text: str, width_px: float, measure: Callable[[str], float]) -> str:
+    """``ellipsis`` with the measure passed in, for a caller laying out a row before drawing it."""
     if width_px <= 0.0:
         return ""
     text = flat_line(text)
-    if imgui.calc_text_size(text).x <= width_px:
+    if measure(text) <= width_px:
         return text
     lo, hi = 0, len(text)
     while lo < hi:
         mid = (lo + hi + 1) // 2
-        if imgui.calc_text_size(text[:mid] + "…").x <= width_px:
+        if measure(text[:mid] + "…") <= width_px:
             lo = mid
         else:
             hi = mid - 1
