@@ -94,10 +94,10 @@ Reached past ``imscribe.__all__``: the module ``imscribe.typesetter`` itself, fo
 ``module``, ``trouble``, ``unload``, ``font`` and ``why_not_ready``, which the
 module lists as its own (``typesetter.__all__``) and the facade does not; and
 the module ``imscribe.markdown_rules``, for its private ``_parser``, as said
-below. A test reads this package's imports and holds them to those two names.
-Two reaches are on neither list: the native module's ``face_has_glyph`` with
-``typesetter.FACE_ROLES`` (``code_lacks``), and the native module's documents
-(``columns``).
+below; and ``code_face_lacks`` from the module ``imscribe.ui.typeset_diff_view``,
+which lists it and which imscribe names the supported way to ask it (P39). A
+test reads this package's imports and holds them to those three. One reach is on
+no list: the native module's documents (``columns``).
 
 **The markdown reader is told to hide nothing, and then asked whether it does**
 (``_reader``, ``reader_hides``). A CommonMark reader shows nothing for raw HTML
@@ -436,9 +436,10 @@ def not_installed(why: str) -> str:
 
     The one place it is worded: the Text menu, the settings dialog, the
     ``typeset text:`` line of ``pptmstr --version`` and a test's skip reason
-    all reach it (``_unaccepted``). imscribe gives one reason for every way of
-    having no library, "IMTYPESET_LIBRARY is not set" (its request P43 is
-    open), which is untrue of a run switched off with a library installed. So:
+    all reach it (``_unaccepted``). imscribe says which of two ways there is
+    no library (``typesetter.ABSENT_REASON``, ``SWITCHED_OFF_REASON``; P43),
+    in sentences about the variables; pptmstr knows the value of the switch
+    and whether this checkout built a pair. So:
 
     - ``IMSCRIBE_NO_TYPESET`` on: it is switched off, with the value it is on at;
     - no imtypeset installed, no pair built in this checkout's ``.deps`` and
@@ -918,23 +919,20 @@ def code_lacks(text: str) -> tuple[str, ...]:
     glyph for, each once, in the order met.
 
     The library sets such a character in whole cells from another face where
-    one has it, and two cells for some, where its diff view counts one a
-    character (``diffs.unfit`` has the measurement). Asked as the library's
-    diff view asks for its own
-    ``code_face_lacks``, which is not a name the library promises: the native
-    module's ``face_has_glyph`` for the code face's role, one call a distinct
-    character. Of the text as given: the view asks about a row as it hands
-    the row over, with a placeholder where a control or an invisible
-    character was, and ``diffs.unfit`` puts the placeholder there before it
-    asks. Raises what the library raises.
+    one has it, two for some, and its diff view counts the cells it draws
+    (``diffs.unfit`` has the measurement). The library's own answer,
+    ``code_face_lacks`` of its diff view's module, which it names as the
+    supported way to ask (pptmstr's P39): one call into the library a distinct
+    character. Of the text as handed to the view, where a control or an
+    invisible character is a placeholder, which ``diffs.unfit`` puts there
+    before it asks. Raises what the library raises: ``TypesetUnavailable``
+    where it cannot be asked, before its fonts are loaded among them.
     """
     if text.isascii():
         return ()
-    typesetter = _typesetter()
-    native = typesetter.module()
-    face = typesetter.FACE_ROLES["CODE"]
-    distinct = dict.fromkeys(char for char in text if char > "~")
-    return tuple(char for char in distinct if not native.face_has_glyph(face, ord(char)))
+    from imscribe.ui.typeset_diff_view import code_face_lacks
+
+    return tuple(code_face_lacks(text))
 
 
 @dataclass(frozen=True, slots=True)

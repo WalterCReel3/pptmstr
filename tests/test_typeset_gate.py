@@ -11,6 +11,7 @@ start one.
 from __future__ import annotations
 
 import ast
+import importlib
 import subprocess
 import sys
 from collections.abc import Callable, Iterator
@@ -42,6 +43,17 @@ What the seam imports from ``imscribe`` that is not in ``imscribe.__all__``, and
   of ``HANDOFF-advtext.md``), and without them a pane hides what was written:
   HTML, an image, the stars of a glob, where a link goes. ``tests/
   test_typeset_views.py`` has the probe that fails when the reach stops working.
+"""
+
+BEHIND_THE_FACADE = {("imscribe.ui.typeset_diff_view", "code_face_lacks")}
+"""
+What the seam imports from a module of ``imscribe`` other than the facade, and why.
+
+- ``code_face_lacks``, in ``gate.code_lacks``: on its module's ``__all__`` and
+  named by imscribe as the supported way to ask which characters the code face
+  has no glyph for (pptmstr's P39, answered in 0.2.0). The facade does not
+  re-export it, and the alternative is the native module's ``face_has_glyph``
+  with a face index of pptmstr's own, which nothing promises.
 """
 
 
@@ -107,11 +119,16 @@ def test_the_seam_imports_the_librarys_facade_and_one_named_module_past_it() -> 
     Every import the package makes is ``from imscribe import <name>``, the name is
     on that list or is one ``PAST_THE_FACADE`` gives a reason for, and each of
     those is in fact imported -- a reason for a reach nobody makes is a stale list.
+    The one import from a module behind the facade is ``BEHIND_THE_FACADE``'s, of
+    a name that module lists as its own.
     """
     found = [each for path in sorted(PACKAGE.glob("*.py")) for each in _imscribe_imports(path)]
     assert found, "the package no longer imports the library at all"
-    assert {module for module, _ in found} == {LIBRARY}, "a module behind the facade"
-    past = {name for _, name in found if name not in imscribe.__all__}
+    behind = {each for each in found if each[0] != LIBRARY}
+    assert behind == BEHIND_THE_FACADE, "a module behind the facade"
+    for module, name in behind:
+        assert name in importlib.import_module(module).__all__, f"{module} no longer lists {name}"
+    past = {name for module, name in found if module == LIBRARY and name not in imscribe.__all__}
     assert past == PAST_THE_FACADE
 
 
@@ -177,9 +194,9 @@ def test_with_no_library_no_pane_is_typeset_and_the_menu_has_a_sentence() -> Non
     assert reason == "typeset text is switched off (IMSCRIBE_NO_TYPESET=1)"
 
 
-IMSCRIBES = "IMTYPESET_LIBRARY is not set"
+IMSCRIBES = typesetter.ABSENT_REASON
 """
-imscribe's reason for every way of having no library (its request P43 is open).
+imscribe's reason where no imtypeset is installed and no variable names one (P43).
 """
 
 
@@ -226,10 +243,9 @@ def test_no_library_is_said_from_what_pptmstr_knows_and_not_only_imscribes_reaso
     said: str,
 ) -> None:
     """
-    imscribe says "not installed (IMTYPESET_LIBRARY is not set)" for a run
-    switched off with a library installed, and for one with nothing anywhere.
-    pptmstr knows which: the switch, the distribution, this checkout's pair and
-    the two variables. One function words it, and both the running
+    imscribe's reasons name its variables and not the switch's value or a pair
+    this checkout built; pptmstr knows those: the switch, the distribution,
+    this checkout's pair and the two variables. One function words it, and both the running
     application's sentence and ``pptmstr --version``'s come through it.
     """
     for name in (pairing.DISABLE_VARIABLE, pairing.LIBRARY_VARIABLE, pairing.PACKAGE_VARIABLE):
