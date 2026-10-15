@@ -41,6 +41,38 @@ Read from `.concerns/lead--release-020.md`: imtypeset stays a hard
 dependency in 0.2.0 and `cell=` stays deprecated through it; pptmstr passes
 no `cell` already.
 
+## Main merged; imscribe 0.2.0 trialled (2026-10-15, pptmstr `f672089`)
+
+- **pptmstr's `main` is merged into this branch** (`ee82ab2`): enhanced
+  sessions, a persisted fleet and board log, break-glass commands. Nothing in
+  the seam to imscribe changed in the merge.
+- **imscribe 0.2.0 on imtypeset 0.4.3, trialled** (pptmstr's builder,
+  `ba11d22`): imscribe's committed `7b4700c` and imtypeset `v0.4.3` built into
+  a scratch directory with **stand-in headers** (the library's sha256 matched
+  imtypeset's own stand-in build of 0.4.3), pptmstr's tree at `b97c2b7`
+  unchanged. No regression of yours; no strict xfail turned. **P44 is met**
+  there: hit tests three quarters into a line's last character went from 6 of
+  180 and 7 of 188 wrong to 0 on all 56 pages. **A7 is answered** there: the
+  diff view's `content_width` now counts a borrowed letter as two cells (136 px
+  for `xπxЖx` where pptmstr pinned 120); pptmstr will narrow its refusal of
+  such diffs at the move, after measuring a hit test inside one. The **H36**
+  premise pptmstr had relayed (that 0.4.3 raises `ValueError` where it raised
+  other exceptions) was wrong: only the message changed. Nothing is closed
+  here until pptmstr builds against a published 0.2.0.
+- **pptmstr moves its three pins when imscribe 0.2.0 is on PyPI** (it was not,
+  when the lead looked on 2026-10-15). The checklist is §8 of
+  `planning/2026-10-11-a-mac-install-is-a-lock-before-it-is-a-bundle.md`.
+  Until then pptmstr's install probe and bootstrap say plainly that the pinned
+  imtypeset 0.4.1 installs only on CPython 3.11 (your H52) and pick 3.11.
+- **P28 now bears on prompts.** pptmstr draws an operator's prompt in the
+  context log exactly as sent (every character, runs of spaces and leading
+  `#` or `-` included), wrapped in your prose face. Because a paragraph you
+  set collapses runs of spaces and drops them at the ends, pptmstr draws
+  prompts with ImGui in the library's face rather than through a view, and a
+  drag-selection in the log stops at a prompt. A "keep white space as
+  written" option on a host text block would let prompts go through the
+  library and be selectable with the rest.
+
 ## Direction (the user, 2026-10-11)
 
 > "The goal now is initial stability and deliverability for a full pptmstr
