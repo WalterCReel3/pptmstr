@@ -81,17 +81,18 @@ how it looks, which nobody has judged:
 
 **And adoption is per diff as well as per library** (``unfit``). The
 measurement is of a row of ASCII no longer than itself, and two things a diff
-can hold are outside it: a character the code face lacks, which the library
-sets in whole cells borrowed from another face, two for a Greek or a Cyrillic
-letter, while its view counts one cell a character, so the end of such a row
-is past what the view scrolls to (imscribe's A7, open on its side); and a row
-longer than the measured cell is known to hold for
-(``gate.Columns.reach``). A diff with either is its pane's own rows, under one
-line saying which. The first is also where the two renderers differ in what
-they show: for U+0430 in a path the library draws the Cyrillic letter from the
-proportional face, a lookalike of ``a``, and the chrome's font, which has no
-Cyrillic, draws its replacement glyph (measured 2026-10-12). Tabs are the
-library's question and are measured with the columns: stops every four cells.
+can hold are outside it: a combining mark the code face lacks, which the
+library's view sets as nothing; and a row longer than the measured cell is
+known to hold for (``gate.Columns.reach``), counting two columns for a
+character the code face lacks, which the library sets in whole cells borrowed
+from another face, two for a Greek or a Cyrillic letter, and which its view
+counts as drawn (imscribe's A7, answered in 0.2.0). A diff with either is its
+pane's own rows, under one line saying which. A letter the face lacks is also
+where the two renderers differ in what they show: for U+0430 in a path the
+library draws the Cyrillic letter from the proportional face, a lookalike of
+``a``, and the chrome's font, which has no Cyrillic, draws its replacement
+glyph (measured 2026-10-12). Tabs are the library's question and are measured
+with the columns: stops every four cells.
 
 **A character that draws as nothing, or reorders what is beside it, is named
 by its code point over the diff, whoever draws the diff** (``hidden``,
@@ -135,6 +136,7 @@ the package imports without it.
 from __future__ import annotations
 
 import re
+import unicodedata
 from collections.abc import Hashable, Iterable, Iterator, Sequence
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
@@ -255,7 +257,9 @@ def above(model: Diff) -> tuple[tuple[str, bool], ...]:
     the pane and inside a row at another is one an approver has to find twice.
     For each file, warnings first, and first of them the characters the view
     draws as a placeholder, by code point (``hidden_warning``), with any such
-    character in the file's label, which the library does not ask about; then the
+    character in the file's label, which the library does not ask about; then
+    the letters it draws from a face other than the code face
+    (``borrowed_warning``); then the
     gate's prediction where the model still carries it
     (``diff(warning=True)``) and lines read as nothing, in the library's own
     words for them. Then the file's label with its state. A hunk's section is a header row too and
@@ -281,9 +285,13 @@ def above(model: Diff) -> tuple[tuple[str, bool], ...]:
             lines = tuple(_lines(file)) if file.control_characters else ()
             label, status, endings = str(file.label), file.status, str(file.line_endings)
             sections = [str(hunk.section) for hunk in file.hunks if hunk.section]
+            rows = [label, *_lines(file)]
         marked = hidden_warning((label, *lines))
         if marked is not None:
             out.append((marked, True))
+        borrowed = borrowed_warning(rows)
+        if borrowed is not None:
+            out.append((borrowed, True))
         if refusal:
             out.append((refusal, True))
         if unread:
@@ -418,6 +426,41 @@ def hidden_warning(lines: Iterable[str]) -> str | None:
     return "contains " + "; and ".join(said)
 
 
+def borrowed_warning(lines: Iterable[str]) -> str | None:
+    """
+    The sentence that says some lines of a diff the library's view draws hold
+    characters the code face has no glyph for, and which, by code point:
+    ``None`` where they hold none.
+
+    The view draws such a letter from the proportional face, on its two cells,
+    and it reads as what it is in that face: U+0430 in a path is a Cyrillic
+    letter drawn as a lookalike of ``a``. A pane's own rows draw it as the
+    chrome font's replacement glyph, which is not a lookalike. The view is
+    given such a diff (``unfit``), so what an approver is shown is the letter
+    in another face and, above it, which characters those are by code point.
+    Combining marks are not named here: a diff holding one the face lacks is
+    not the view's.
+
+    One call into the library for the distinct characters above ASCII; none
+    for ASCII. Raises what the library raises.
+    """
+    seen: set[str] = set()
+    for line in lines:
+        if not line.isascii():
+            seen.update(line)
+    asked = {PLACEHOLDER if _hides(char) else char for char in seen}
+    asked.discard(PLACEHOLDER)
+    if not asked:
+        return None
+    lacking = sorted(gate.code_lacks("".join(sorted(asked))))
+    if not lacking:
+        return None
+    named = ", ".join(f"U+{ord(char):04X}" for char in lacking[:_NAMED])
+    if len(lacking) > _NAMED:
+        named += f" and {len(lacking) - _NAMED} more"
+    return f"contains characters the code face has no glyph for, drawn from another face: {named}"
+
+
 def own_rows_warning(pending: PendingApproval) -> str | None:
     """
     ``hidden_warning`` of a parked call's unified diff, which is what a pane's
@@ -467,21 +510,33 @@ def unfit(model: Diff) -> str | None:
     The columns were measured over a row of ASCII (``gate.columns``), and that
     answers for a diff only as far as its rows are like that one:
 
-    - *A row holding a character the code face lacks.* The library sets it
-      in whole cells, and not always one: measured at a pixel height of 16
-      (cell 8 px) in ``xπxЖx``, U+03C0 and U+0416, borrowed from the prose
-      face, take two cells each, so the ``x`` after the first is at cell 3
-      and the last at cell 6, while the view counts one cell a character for
-      its width and its scroll; U+4E2D and U+1F600, which no bundled face has,
-      take one. So such a row is on the grid and reaches further right than
-      the view allows for. Asked of the library (``gate.code_lacks``) about
-      the row as the view is handed it: **a control or an invisible character
-      is asked about as the placeholder the view sets for it** (``hidden``,
-      ``PLACEHOLDER``), which the code face has and which is one cell on the
-      grid, so a diff is not refused for one. It is named above the view
-      instead (``above``).
+    - *A row holding a combining mark the code face lacks.* The view sets it
+      as nothing, in no cell, so the row on screen is not the row in the
+      file. Measured in pptmstr on 2026-10-15 (imscribe 0.2.0, the imtypeset
+      0.4.3.192900 wheel, 16 px): in ``xa\\uFE0Fx`` and ``x\\u20DDx`` the
+      marks draw no quad and the ``x`` after each is one cell on.
     - *A row holding a lone surrogate.* Refused on its own account, below.
-    - *A row longer than the measured cell holds for* (``gate.Columns.reach``).
+    - *A row longer than the measured cell holds for* (``gate.Columns.reach``),
+      **counting two columns for each character the code face lacks**, as
+      ``views.literal_unfit`` does: the library sets such a character in whole
+      cells from another face, two for U+03C0 and U+0416 and one for U+4E2D,
+      which no bundled face has. Asked of the library (``gate.code_lacks``)
+      about the row as the view is handed it: a control or an invisible
+      character is asked about as the placeholder the view sets for it
+      (``hidden``, ``PLACEHOLDER``), which the code face has and which is one
+      cell, and it is named above the view instead (``above``).
+
+    **A two-cell letter is not refused** (imscribe's A7, answered in 0.2.0).
+    The view counts the cells it draws. Measured in pptmstr on 2026-10-15,
+    same pair, in a window under Xvfb at pixel heights 14, 15, 16, 17, 20 and
+    21, over ``x π x Ж x``, ``xπxЖx`` and ten ``Ж``: every glyph's left edge
+    is on a whole cell, π and Ж two cells each; ``content_width`` holds the
+    drawn ink (the farthest right edge is at most the cells it counts); a
+    point a quarter and three quarters into every cell answers the caret
+    nearest it, so the first cell of a two-cell letter answers the caret
+    before it and the second the caret after; and a selection of π or Ж
+    alone fills exactly its two cells and copies the one letter
+    (``tests/test_typeset_diffs.py`` holds this at 16 and 17 px).
 
     Of the rows the model holds: what a click on collapsed context brings in
     is another model, and ``diff()`` asks again of that one. One pass over the
@@ -506,14 +561,17 @@ def unfit(model: Diff) -> str | None:
         return None
     reach = found.reach
     longest = 0
+    wide: list[str] = []
     above_ascii: set[str] = set()
     with _READING:
         for file in model.files:
             for hunk in file.hunks:
                 for row in hunk.rows:
                     text = row.text
-                    longest = max(longest, len(text))
-                    if not text.isascii():
+                    if text.isascii():
+                        longest = max(longest, len(text))
+                    else:
+                        wide.append(text)
                         above_ascii.update(text)
     lone = sorted(char for char in above_ascii if "\ud800" <= char <= "\udfff")
     if lone:
@@ -525,14 +583,17 @@ def unfit(model: Diff) -> str | None:
         )
     asked = {PLACEHOLDER if _hides(char) else char for char in above_ascii}
     with _READING:
-        lacking = gate.code_lacks("".join(sorted(asked)))
-    if lacking:
-        named = ", ".join(f"U+{ord(char):04X}" for char in lacking[:4])
-        more = f" and {len(lacking) - 4} more" if len(lacking) > 4 else ""
+        lacking = set(gate.code_lacks("".join(sorted(asked))))
+    marks = sorted(c for c in lacking if unicodedata.category(c) in views.UNSET_MARKS)
+    if marks:
+        named = ", ".join(f"U+{ord(char):04X}" for char in marks[:4])
+        more = f" and {len(marks) - 4} more" if len(marks) > 4 else ""
         return (
-            f"a row holds {named}{more}, which the code face has no glyph for, "
-            "and the library's view would count one cell for a character it may set two wide"
+            f"a row holds {named}{more}, a combining mark the code face has no glyph "
+            "for, which the library's view sets as nothing"
         )
+    for text in wide:
+        longest = max(longest, len(text) + sum(char in lacking for char in text))
     if longest > reach:
         return (
             f"a row is {longest:,} columns and the library's columns were measured "

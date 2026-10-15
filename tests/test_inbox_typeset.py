@@ -2332,17 +2332,39 @@ def test_where_columns_hold_a_diff_the_view_set_less_of_than_it_was_handed_holds
     assert inbox._NOT_ON_SCREEN not in said
 
 
-def test_where_columns_hold_a_diff_with_a_character_the_code_face_lacks_is_the_rows_own(
-    columns_hold: Any, said: list[str], monkeypatch: pytest.MonkeyPatch
+def test_where_columns_hold_a_diff_with_a_letter_the_code_face_lacks_is_the_views(
+    columns_hold: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """
-    The measurement answers for ASCII in the code face. A Write with a Greek
-    letter in it is drawn by the row's own child, under one line saying why,
-    with the menu's sentence about the library unchanged; every row is on
-    screen, so the click lands on the first frame it can.
+    The library sets a Greek letter in the two cells its diff view counts, so
+    a Write with one in it is drawn by the view, and nothing says it is the
+    row's own.
     """
     im = columns_hold
     call = parked("Write", {"file_path": "no/such/dir/area.py", "content": "area = π * r\n"})
+    pane = Pane(call)
+    drawn: list[str] = []
+    real = im.text_unformatted
+    monkeypatch.setattr(im, "text_unformatted", lambda text: (drawn.append(text), real(text))[1])
+
+    for _ in range(2):
+        pane.draw(im)
+    assert diff_view(call) is not None and no_native_body(im)
+    assert not [line for line in drawn if line.startswith("this diff is the pane's own rows")]
+
+
+def test_where_columns_hold_a_diff_with_a_mark_the_code_face_lacks_is_the_rows_own(
+    columns_hold: Any, said: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The library's diff view sets a combining mark the code face lacks as
+    nothing. A Write with one in it is drawn by the row's own child, under
+    one line saying why, with the menu's sentence about the library
+    unchanged; every row is on screen, so the click lands on the first frame
+    it can.
+    """
+    im = columns_hold
+    call = parked("Write", {"file_path": "no/such/dir/area.py", "content": "area = a\u20dd * r\n"})
     pane = Pane(call)
     sent = _sent(pane, monkeypatch)
     clicks = request_clicks(im, monkeypatch)
@@ -2353,9 +2375,9 @@ def test_where_columns_hold_a_diff_with_a_character_the_code_face_lacks_is_the_r
     pane.draw(im)
     assert typeset.diff_adopted() and typeset.diff_renderer().startswith("diffs are the library's")
     assert diff_view(call) is None and not no_native_body(im)
-    assert "+area = π * r" in said
+    assert "+area = a\u20dd * r" in said
     (why,) = [line for line in drawn if line.startswith("this diff is the pane's own rows")]
-    assert "U+03C0" in why
+    assert "U+20DD" in why
     assert review.unset_lines(pane.state, call.id) == 0
     assert clicks == [False] and sent == [call.id]
 
@@ -2457,7 +2479,7 @@ def hidden_call(route: str, monkeypatch: pytest.MonkeyPatch) -> PendingApproval:
 
     if route == "typeset off":
         typeset.configure(typeset=False)
-    content = HIDDEN + ("area = π * r\n" if route == "a diff the view is not given" else "")
+    content = HIDDEN + ("area = a\u20dd * r\n" if route == "a diff the view is not given" else "")
     call = parked("Write", {"file_path": "no/such/dir/file.py", "content": content})
     if route == "a call with no texts":
         call = dataclasses.replace(call, texts=None)

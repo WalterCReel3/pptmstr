@@ -813,7 +813,7 @@ def literal_unfit(part: Part) -> str | None:
       pptmstr on 2026-10-13: the library sets ESC, BEL, BS, DEL, U+200B and
       U+202E as nothing, and a lone carriage return as a line break; ImGui
       draws each as its own glyph or as none, as it always did;
-    - with no combining mark the code face has no glyph for (``_UNSET_MARKS``).
+    - with no combining mark the code face has no glyph for (``UNSET_MARKS``).
       Measured in pptmstr on 2026-10-14: the library sets U+FE00, U+FE0E,
       U+FE0F, U+E0100, U+034F, U+180B, U+17B4 and U+20DD as nothing, in no
       cell, where ImGui draws its fallback glyph a cell wide; a mark the face
@@ -849,15 +849,15 @@ def literal_unfit(part: Part) -> str | None:
     if 2 * max(len(line) for line in text.split("\n")) > measured.reach:
         return "has a line longer than the measured columns answer for"
     if not text.isascii():
-        marks = "".join(c for c in set(text) if unicodedata.category(c) in _UNSET_MARKS)
+        marks = "".join(c for c in set(text) if unicodedata.category(c) in UNSET_MARKS)
         if marks and gate.code_lacks(marks):
             return "holds a combining mark the code face has no glyph for"
     return None
 
 
 # Unicode's nonspacing and enclosing marks: set as nothing by the library where
-# the code face has no glyph for one (``literal_unfit``).
-_UNSET_MARKS = ("Mn", "Me")
+# the code face has no glyph for one (``literal_unfit``, ``diffs.unfit``).
+UNSET_MARKS = ("Mn", "Me")
 
 TAB_CELLS = 4
 """

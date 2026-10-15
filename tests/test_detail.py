@@ -2468,11 +2468,11 @@ def test_every_line_of_a_diff_past_this_panes_bound_can_be_brought_on_screen_her
     last removed and the last added line are each drawn once the box is
     scrolled to them. Nothing is unset, so nothing is held, and the rule is the same
     whoever was asked first: where the library's view would draw a diff and
-    declines this one (a character the code face lacks), the pane's own
+    declines this one (a combining mark the code face lacks), the pane's own
     renderer is this one.
     """
     im = request.getfixturevalue("columns_hold" if held else "own_rows")
-    obligation = _long_rewrite(tmp_path, " # π" if held else "")
+    obligation = _long_rewrite(tmp_path, " # a\u20dd" if held else "")
     snap = snapshot(record(), needs_you=(obligation,))
     everything = _every_native_line(monkeypatch, im)
     rig = Pane(im, monkeypatch)
@@ -2488,7 +2488,7 @@ def test_every_line_of_a_diff_past_this_panes_bound_can_be_brought_on_screen_her
         f"{total:,} lines is more than this pane wraps ({detail._MAX_DIFF_LINES:,}): "
         "every line is in the box below, which scrolls"
     ) in rig.said
-    last_removed = f"-old_{LONG_WRITE - 1} = {LONG_WRITE - 1}" + (" # π" if held else "")
+    last_removed = f"-old_{LONG_WRITE - 1} = {LONG_WRITE - 1}" + (" # a\u20dd" if held else "")
     last_added = f"+line_{LONG_WRITE - 1} = {LONG_WRITE - 1}"
     assert last_removed not in everything and last_added not in everything
     assert last_removed.lstrip("-") not in "\n".join(
@@ -2637,7 +2637,7 @@ def _hidden_call(route: str, monkeypatch) -> ApprovalNeeded:
     if route.startswith("typeset off"):
         typeset.configure(typeset=False)
     if route == "a diff the view is not given":
-        content += "area = π * r\n"
+        content += "area = a\u20dd * r\n"
     if route == "typeset off, past the lines this pane wraps":
         content += "".join(f"line_{n} = {n}\n" for n in range(detail._MAX_DIFF_LINES))
     obligation = parked("Write", {"file_path": "nowhere/new.py", "content": content})

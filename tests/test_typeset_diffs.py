@@ -732,19 +732,18 @@ def test_a_diff_handed_back_to_its_pane_is_first_said_to_hold_what_cannot_be_see
     columns_hold: Any, monkeypatch: pytest.MonkeyPatch, name: str
 ) -> None:
     """
-    The finding this closes. Beside five Cyrillic letters, which the code face
-    lacks, the diff is the pane's own rows, and the line saying why names four
-    letters and counts the rest: the control was the count. ImGui draws it
-    there with the glyph it draws any letter it lacks with, so the diff is
-    said to hold it, in the sentence the view would have been under, before
-    the line that hands it back; and the reason given is the letters, which
-    it is true of, and not the control, which the view would have set on its
-    column.
+    The finding this closes. Beside five combining marks the code face lacks,
+    the diff is the pane's own rows, and the line saying why names four marks
+    and counts the rest: the control was the count. ImGui draws it there with
+    the glyph it draws any letter it lacks with, so the diff is said to hold
+    it, in the sentence the view would have been under, before the line that
+    hands it back; and the reason given is the marks, which it is true of,
+    and not the control, which the view would have set on its column.
     """
     text, words = HIDDEN[name]
     said = _said_by_the_seam(monkeypatch)
     cache = typeset.ViewCache()
-    texts = _one_row(f"{text}  # абвгд")
+    texts = _one_row(f"{text}  # a\u034f\u20dd\ufe00\ufe0e\ufe0f")
     got: list[float | None] = []
     for _ in range(2):
         said.clear()
@@ -752,9 +751,9 @@ def test_a_diff_handed_back_to_its_pane_is_first_said_to_hold_what_cannot_be_see
         assert got[-1] is None and cache.view("k") is None
         assert said == [
             f"contains {words}",
-            "this diff is the pane's own rows: a row holds U+0430, U+0431, U+0432, U+0433 "
-            "and 1 more, which the code face has no glyph for, and the library's view would "
-            "count one cell for a character it may set two wide",
+            "this diff is the pane's own rows: a row holds U+034F, U+20DD, U+FE00, U+FE0E "
+            "and 1 more, a combining mark the code face has no glyph for, which the library's "
+            "view sets as nothing",
         ]
     assert said[0] == diffs.above(typeset.diff_model(texts))[0][0], "one sentence on either"
 
@@ -1796,21 +1795,18 @@ def _one_row(text: str) -> tuple[approval.DiffText, ...]:
     return (approval.DiffText("", text + "\n", "x.py"),)
 
 
-def test_a_row_with_a_character_the_code_face_lacks_is_off_its_columns_where_they_hold(
-    columns_hold: Any, monkeypatch: pytest.MonkeyPatch
+def test_a_row_with_a_character_the_code_face_lacks_is_on_its_columns_where_they_hold(
+    columns_hold: Any,
 ) -> None:
     """
-    Why the rule below exists, on the library as it is. The measurement is of
-    ASCII in the code face and holds at this size. A row with U+03C0 and U+0416
-    in it, drawn by the diff view in a window: every glyph is on the grid, and
-    the ``x`` after the first letter is one cell right of where a cell a
-    character puts it and the one after the second two, because the library
-    set each letter from the proportional face in two cells. The view counts
-    one cell a character, so the row ends two cells past the width it claims
-    (imscribe's A7). A character no bundled face has takes one cell. A tab
-    lands on the grid.
+    A row with U+03C0 and U+0416 in it, drawn by the diff view in a window:
+    every glyph is on the grid, and the ``x`` after the first letter is one
+    cell right of where a cell a character puts it and the one after the
+    second two, because the library sets each letter from the proportional
+    face in two cells. The view counts the cells it draws (imscribe's A7,
+    answered in 0.2.0): its width is that of seven cells of ASCII. A
+    character no bundled face has takes one cell. A tab lands on the grid.
     """
-    monkeypatch.setattr(diffs, "unfit", lambda model: None)
     assert diffs.columns().holds
     _, plain = _drawn_row(columns_hold, "xxxxxxxxxx")
     assert {b - a for a, b in zip(plain, plain[1:], strict=False)} == {8.0}
@@ -1825,52 +1821,196 @@ def test_a_row_with_a_character_the_code_face_lacks_is_off_its_columns_where_the
     # The third and fifth characters: two and four cells in by a count of
     # characters, 16 and 32 px, and drawn at three and six.
     assert [left - lefts[0] for left in lefts] == [0.0, 8.0, 24.0, 32.0, 48.0], lefts
-    # Seven cells of text in a view that claims five, with its ten of gutter.
-    assert view.content_width == (5 + 10) * 8.0
+    ascii_view, _ = _drawn_row(columns_hold, "x" * 7)
+    assert view.content_width == ascii_view.content_width, "seven cells, as drawn"
 
     _, lefts = _drawn_row(columns_hold, "x中x😀x")
     assert [left - lefts[0] for left in lefts] == [0.0, 8.0, 16.0, 24.0, 32.0], lefts
 
 
-def test_where_columns_hold_a_diff_with_such_a_row_is_not_given_to_the_view_and_says_why(
+TWO_CELLS = "πЖ"
+"""
+The letters the bundled code face lacks and the library sets in two cells
+(``_character_cells`` of imscribe's diff view, and the test above).
+"""
+
+
+def _quads(seam: Any, text: str, select: tuple[int, int] | None = None) -> dict[str, Any]:
+    """
+    A one-row diff drawn by the diff view in a window, with characters
+    ``select`` of its row selected when given: the view, and the row's quads
+    from the window's draw list, each as its left and right edge, split into
+    glyphs (a quad whose corners sample different texels) and fills (one
+    texel, with its colour).
+    """
+    texts = _one_row(text)
+    cache = typeset.ViewCache()
+    out: dict[str, Any] = {}
+
+    def body() -> None:
+        buffer = seam.get_window_draw_list().vtx_buffer
+        before = buffer.size()
+        typeset.diff(cache, "k", texts)
+        view = cache.view("k")
+        top = view.origin[1] + (view.row_count - 1) * view.grid.row
+        glyphs, fills = [], []
+        for n in range(before, buffer.size() - 3, 4):
+            quad = [buffer[n + k] for k in range(4)]
+            if not all(top <= v.pos.y <= top + view.grid.row for v in quad):
+                continue
+            left, right = min(v.pos.x for v in quad), max(v.pos.x for v in quad)
+            if len({(v.uv.x, v.uv.y) for v in quad}) > 1:
+                glyphs.append((left, right))
+            else:
+                fills.append((left, right, int(quad[0].col)))
+        out.update(view=view, glyphs=sorted(glyphs), fills=fills)
+
+    frame(seam, body)
+    if select is not None:
+        view = out["view"]
+        info = view.row_info(view.row_count - 1)
+        row = (info.file, info.hunk, info.right)
+        view.select((*row, select[0]), (*row, select[1]))
+        frame(seam, body)
+    return out
+
+
+@pytest.mark.parametrize("tall", [16.0, 17.0])
+@pytest.mark.parametrize("text", ["x π x Ж x", "Ж" * 10], ids=["mixed", "ten"])
+def test_a_two_cell_letter_is_pointed_at_and_selected_in_its_two_cells(
+    columns_hold: Any, monkeypatch: pytest.MonkeyPatch, tall: float, text: str
+) -> None:
+    """
+    What narrowing ``diffs.unfit`` rests on, at an even and an odd pixel
+    height. The row is given to the view; its glyphs start on the cells a
+    count of two a letter puts them at; its ink ends inside the cells the
+    view's width counts, which is the width of as many cells of ASCII; a
+    point a quarter and three quarters into every cell is answered with the
+    caret nearest it, so a letter's first cell answers the caret before it
+    and its second the caret after; and a selection of the first letter alone
+    fills its two cells and copies that letter. Above the view, the letters
+    are named as not the code face's.
+    """
+    _diff_at(tall)
+    assert diffs.columns().holds
+    assert diffs.unfit(typeset.diff_model(_one_row(text))) is None
+    spans, at = [], 0
+    for char in text:
+        width = 2 if char in TWO_CELLS else 1
+        spans.append((at, at + width))
+        at += width
+    cells = at
+
+    lines = _native_lines(columns_hold, monkeypatch)
+    drawn = _quads(columns_hold, text)
+    assert lines == [
+        "contains characters the code face has no glyph for, drawn from another face: "
+        + ", ".join(f"U+{ord(char):04X}" for char in sorted(set(TWO_CELLS) & set(text))),
+        "x.py",
+    ], "said over the view"
+    monkeypatch.undo()
+    view = drawn["view"]
+    cell = view.grid.cell
+    inked = [span for char, span in zip(text, spans, strict=True) if char != " "]
+    glyphs = drawn["glyphs"][-len(inked) :]
+    first = glyphs[0][0]
+    assert [(left - first) / cell for left, _ in glyphs] == [a for a, _ in inked]
+    assert max(right for _, right in glyphs) - first <= cells * cell
+    assert view.content_width == _quads(columns_hold, "x" * cells)["view"].content_width
+
+    code = view.native_documents[1]
+    middle = (view.row_count - 0.5) * view.grid.row
+    base = int(code.hit_test((0.5, middle)).position[1])
+    answered, expected = [], []
+    for quarter in range(2 * cells):
+        x = (quarter + 0.5) * cell / 2
+        answered.append(int(code.hit_test((x, middle)).position[1]) - base)
+        index = next(n for n, (a, b) in enumerate(spans) if a * cell <= x < b * cell)
+        a, b = spans[index]
+        expected.append(index if x < (a + b) * cell / 2 else index + 1)
+    assert answered == expected
+
+    letter = next(n for n, char in enumerate(text) if char in TWO_CELLS)
+    chosen = _quads(columns_hold, text, (letter, letter + 1))
+    shown = chosen["view"]
+    assert shown.selected_text() == text[letter]
+    first = chosen["glyphs"][-len(inked)][0]
+    lit = [
+        ((left - first) / cell, (right - first) / cell)
+        for left, right, colour in chosen["fills"]
+        if colour == int(shown.palette.highlight)
+    ]
+    assert lit == [spans[letter]]
+
+
+def test_where_columns_hold_a_diff_with_a_letter_the_code_face_lacks_is_the_views(
     columns_hold: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """
-    Adoption is per diff as well as per library. A model with a row holding a
-    character the code face has no glyph for is answered ``None``, which is a
-    pane's cue for its own rows, under one line naming the characters; it
-    holds no view and reports nothing unset, since the pane's rows are the
-    diff. ASCII, an accent the face has, and a tab are given to the view.
+    Adoption is per diff as well as per library. A letter the code face has no
+    glyph for is set in whole cells the view counts, so a diff holding one is
+    given to the view like ASCII, an accent the face has, and a tab. A
+    combining mark the face lacks is set as nothing, in no cell, and a diff
+    with one is answered ``None``, which is a pane's cue for its own rows,
+    under one line naming the marks; it holds no view and reports nothing
+    unset, since the pane's rows are the diff.
     """
     said = _said_by_the_seam(monkeypatch)
     cache = typeset.ViewCache()
     got: dict[str, float | None] = {}
+    given = {
+        "greek": "area = π * r ** 2  # Ж",
+        "path": "open('src/pаth.py')",
+        "ascii": "area = 3 * r ** 2",
+        "accent": "café = '→'\tcolumn",
+        "cjk": "name = '中'",
+    }
 
     def body() -> None:
-        got["greek"] = typeset.diff(cache, "greek", _one_row("area = π * r ** 2  # Ж"))
-        got["path"] = typeset.diff(cache, "path", _one_row("open('src/pаth.py')"))
-        got["ascii"] = typeset.diff(cache, "ascii", _one_row("area = 3 * r ** 2"))
-        got["accent"] = typeset.diff(cache, "accent", _one_row("café = '→'\tcolumn"))
+        for key, text in given.items():
+            got[key] = typeset.diff(cache, key, _one_row(text))
+        got["mark"] = typeset.diff(cache, "mark", _one_row("ok = 'a\u20dd'  # \ufe0f"))
 
     for _ in range(2):
         said.clear()
         frame(columns_hold, body)
-        assert got["greek"] is None and got["path"] is None
-        assert got["ascii"] is not None and got["accent"] is not None
-        assert cache.view("greek") is None and cache.view("path") is None
-        assert cache.view("ascii") is not None and cache.view("accent") is not None
+        assert got["mark"] is None and cache.view("mark") is None
+        for key in given:
+            assert got[key] is not None and cache.view(key) is not None, key
         assert said == [
-            "this diff is the pane's own rows: a row holds U+03C0, U+0416, which the code face "
-            "has no glyph for, and the library's view would count one cell for a character it "
-            "may set two wide",
-            "this diff is the pane's own rows: a row holds U+0430, which the code face "
-            "has no glyph for, and the library's view would count one cell for a character it "
-            "may set two wide",
+            "this diff is the pane's own rows: a row holds U+20DD, U+FE0F, a combining mark "
+            "the code face has no glyph for, which the library's view sets as nothing",
         ]
-    assert cache.unbuilt("greek") == 0 and cache.unbuilt("ascii") == 0
+    assert cache.unbuilt("mark") == 0 and cache.unbuilt("greek") == 0
+    borrowed = "contains characters the code face has no glyph for, drawn from another face: "
+    for key, named in (("greek", "U+03C0, U+0416"), ("path", "U+0430"), ("cjk", "U+4E2D")):
+        said_above = diffs.above(typeset.diff_model(_one_row(given[key])))
+        assert said_above == ((borrowed + named, True), ("x.py", False)), key
+    for key in ("ascii", "accent"):
+        assert diffs.above(typeset.diff_model(_one_row(given[key]))) == (("x.py", False),), key
     assert (typeset.diff_renderer() or "").startswith(
         f"diffs are the library's: it {diffs.columns().why}"
     ), "one diff that is the pane's own does not change who draws diffs"
+
+
+def test_a_letter_the_code_face_lacks_is_two_columns_of_the_reach(
+    columns_hold: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The reach is in columns, and a letter set in two cells is two of them:
+    half the reach of ``Ж`` is the view's and one more is the pane's own.
+    """
+    said = _said_by_the_seam(monkeypatch)
+    reach = diffs.columns().reach
+    half = reach // 2
+    assert diffs.unfit(typeset.diff_model(_one_row("Ж" * half))) is None
+    assert diffs.unfit(typeset.diff_model(_one_row("x" * (reach - 2 * half) + "Ж" * half))) is None
+    past = diffs.unfit(typeset.diff_model(_one_row("x" * (reach - 2 * half + 1) + "Ж" * half)))
+    assert past == (
+        f"a row is {reach + 1:,} columns and the library's columns were measured "
+        f"to hold for {reach:,}"
+    )
+    assert said == []
 
 
 def test_context_a_click_brings_in_is_asked_about_as_the_rows_before_it_were(
@@ -1879,11 +2019,11 @@ def test_context_a_click_brings_in_is_asked_about_as_the_rows_before_it_were(
     """
     The rows of a model are what is asked about, and a click on collapsed
     context makes another model with more rows. A line of the file that was
-    not a row, and holds a character the code face lacks, is one once it is
-    expanded into view: the next frame the diff is the pane's own rows.
+    not a row, and holds a combining mark the code face lacks, is one once it
+    is expanded into view: the next frame the diff is the pane's own rows.
     """
     said = _said_by_the_seam(monkeypatch)
-    before = ["# π is defined here"] + [f"line_{n} = {n}" for n in range(1, 40)]
+    before = ["# a\u20dd is defined here"] + [f"line_{n} = {n}" for n in range(1, 40)]
     after = list(before)
     after[30] = "line_30 = 'changed'"
     texts = (approval.DiffText("\n".join(before) + "\n", "\n".join(after) + "\n", "x.py"),)
@@ -1893,10 +2033,10 @@ def test_context_a_click_brings_in_is_asked_about_as_the_rows_before_it_were(
     view = cache.view("k")
     assert got == [got[0]] and got[0] is not None and view is not None and said == []
     view.expand(0, 0, 100)
-    assert "# π is defined here" in rows(view.diff, RowKind.CONTEXT)
+    assert "# a\u20dd is defined here" in rows(view.diff, RowKind.CONTEXT)
     frame(columns_hold, lambda: got.append(typeset.diff(cache, "k", texts)))
     assert got[1] is None and cache.view("k") is None
-    assert len(said) == 1 and "U+03C0" in said[0]
+    assert len(said) == 1 and "U+20DD" in said[0]
 
 
 def test_where_columns_hold_a_row_longer_than_they_were_measured_for_is_the_panes_own(
@@ -1930,7 +2070,8 @@ def test_where_columns_hold_a_fenced_diff_with_such_a_row_is_the_code_of_its_doc
 ) -> None:
     honest = "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-area = 3\n+area = 4\n"
     assert diffs.fence_diff("diff", honest) is not None
-    assert diffs.fence_diff("diff", honest.replace("4", "π")) is None
+    assert diffs.fence_diff("diff", honest.replace("4", "π")) is not None
+    assert diffs.fence_diff("diff", honest.replace("4", "a\u20dd")) is None
 
 
 # -- a parked call's model is made once, for every pane that draws it ------------------
