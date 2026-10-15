@@ -480,3 +480,143 @@ def test_an_install_by_name_is_not_replaced_and_one_from_a_file_or_a_build_is(
             "imscribe 1.0 was installed from file:///x, not by name",
         )
     ]
+
+
+# -- which interpreter bootstrap.sh takes, with stand-ins ----------------------------
+#
+# Never this worktree's own bootstrap. Each stand-in is named for a CPython minor
+# and runs this interpreter, with sys.version_info reporting that minor, so the
+# real probe in a scratch copy decides; after stage 1 it stops bootstrap, so no
+# virtualenv is made. PATH holds only the stand-ins and the one tool bootstrap
+# needs before stage 1, so no interpreter of this machine is taken.
+
+FAKE_VERSION = """
+import sys
+
+
+class _Version(tuple):
+    major = property(lambda self: self[0])
+    minor = property(lambda self: self[1])
+    micro = property(lambda self: self[2])
+    releaselevel = property(lambda self: self[3])
+    serial = property(lambda self: self[4])
+
+
+sys.version_info = _Version((3, {minor}, 0, "final", 0))
+"""
+
+MINOR_STAND_IN = """#!/bin/sh
+echo "python3.{minor} $*" >> "$STANDIN_LOG"
+[ "$1" = -c ] && exit 0
+PYTHONPATH="{fake}" "{real}" "$@"
+[ "$2" = --stage ] && exit 1
+exit 0
+"""
+
+
+def test_the_probe_names_the_library_pythons_newest_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert probe.library_pythons() == [
+        f"python3.{minor}"
+        for minor in range(probe.IMTYPESET_PYTHONS[1][1], probe.IMTYPESET_PYTHONS[0][1] - 1, -1)
+    ]
+    monkeypatch.setattr(probe, "IMTYPESET_PYTHONS", ((3, 11), (3, 14)))
+    assert probe.library_pythons() == ["python3.14", "python3.13", "python3.12", "python3.11"]
+
+
+def _choose(
+    tmp_path: Path,
+    minors: list[int],
+    pythons: tuple[tuple[int, int], tuple[int, int]],
+    *args: str,
+) -> tuple[subprocess.CompletedProcess[str], list[str], Path]:
+    work = tmp_path / "checkout"
+    (work / "scripts").mkdir(parents=True)
+    shutil.copy2(ROOT / "bootstrap.sh", work / "bootstrap.sh")
+    source = (ROOT / "scripts" / "probe.py").read_text(encoding="utf-8")
+    line = next(s for s in source.splitlines() if s.startswith("IMTYPESET_PYTHONS = "))
+    (work / "scripts" / "probe.py").write_text(
+        source.replace(line, f"IMTYPESET_PYTHONS = {pythons!r}"), encoding="utf-8"
+    )
+    stubs = tmp_path / "bin"
+    stubs.mkdir()
+    dirname = shutil.which("dirname")
+    assert dirname is not None
+    (stubs / "dirname").symlink_to(dirname)
+    for minor in minors:
+        fake = tmp_path / "fake" / str(minor)
+        fake.mkdir(parents=True)
+        (fake / "sitecustomize.py").write_text(FAKE_VERSION.format(minor=minor), encoding="utf-8")
+        _stand_in(
+            stubs / f"python3.{minor}",
+            MINOR_STAND_IN.format(minor=minor, fake=fake, real=sys.executable),
+        )
+    log = tmp_path / "log"
+    log.touch()
+    env = {"PATH": str(stubs), "HOME": str(tmp_path), "STANDIN_LOG": str(log)}
+    bash = shutil.which("bash")
+    assert bash is not None
+    done = subprocess.run(
+        [bash, str(work / "bootstrap.sh"), "--no-window", *args],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=tmp_path,
+        timeout=120,
+    )
+    assert "stage 2/4" not in done.stdout, done.stdout + done.stderr
+    assert not (work / ".venv").exists()
+    return done, log.read_text(encoding="utf-8").splitlines(), stubs
+
+
+def _staged(log: list[str]) -> list[str]:
+    return [line.split()[0] for line in log if "scripts/probe.py --stage pre" in line]
+
+
+@needs_bash
+def test_bootstrap_takes_the_newest_python_the_pinned_imtypeset_installs_on(
+    tmp_path: Path,
+) -> None:
+    done, log, stubs = _choose(tmp_path, [13, 11], ((3, 11), (3, 11)))
+    assert _staged(log) == ["python3.11"]
+    assert (
+        f"python: {stubs / 'python3.11'}, the newest on PATH that the pinned imtypeset "
+        "installs on (python3.11)"
+    ) in done.stdout
+    assert f"(using {stubs / 'python3.11'})" in done.stdout
+
+
+@needs_bash
+def test_bootstrap_takes_the_newest_on_the_floor_when_none_is_in_range_and_stage_1_stops(
+    tmp_path: Path,
+) -> None:
+    done, log, stubs = _choose(tmp_path, [13], ((3, 11), (3, 11)))
+    assert _staged(log) == ["python3.13"]
+    assert (
+        f"python: {stubs / 'python3.13'}, the newest on PATH on the 3.11 floor: none that the "
+        "pinned imtypeset installs on (python3.11) is on PATH and runs"
+    ) in done.stdout
+    assert "installs only on CPython 3.11" in done.stdout
+    assert "imscribe requires it on CPython 3.13" in done.stdout
+    assert done.returncode != 0
+
+
+@needs_bash
+def test_bootstrap_takes_the_python_it_is_given(tmp_path: Path) -> None:
+    given = str(tmp_path / "bin" / "python3.13")
+    done, log, _ = _choose(tmp_path, [13, 11], ((3, 11), (3, 11)), "--python", given)
+    assert _staged(log) == ["python3.13"]
+    assert f"python: {given}, given by --python" in done.stdout
+    assert not any("--pythons" in line for line in log)
+
+
+@needs_bash
+def test_bootstrap_takes_the_newest_of_a_wider_range(tmp_path: Path) -> None:
+    """
+    The move to an imtypeset whose wheels admit 3.11 to 3.14 widens the probe's
+    range, and bootstrap follows it with no change of its own.
+    """
+    done, log, stubs = _choose(tmp_path, [14, 13, 11], ((3, 11), (3, 14)))
+    assert _staged(log) == ["python3.14"]
+    assert "installs on (python3.14 python3.13 python3.12 python3.11)" in done.stdout
+    _, log, _ = _choose(tmp_path / "narrow", [14, 13, 11], ((3, 11), (3, 11)))
+    assert _staged(log) == ["python3.11"]

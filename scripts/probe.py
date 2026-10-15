@@ -452,6 +452,15 @@ def _span(pythons: tuple[tuple[int, int], tuple[int, int]]) -> str:
     return _dotted(low) if low == high else f"{_dotted(low)} to {_dotted(high)}"
 
 
+def library_pythons() -> list[str]:
+    """
+    The interpreter names bootstrap.sh tries first, newest first: one per minor in
+    ``IMTYPESET_PYTHONS``, so a machine with several takes one the install works on.
+    """
+    (major, low), (_, high) = IMTYPESET_PYTHONS
+    return [f"python{major}.{minor}" for minor in range(high, low - 1, -1)]
+
+
 def library_coverage() -> str:
     """
     Where the install brings the library, as one phrase: what a LIBRARY verdict covers.
@@ -1069,7 +1078,15 @@ def main() -> int:
         "--smoke",
         default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "smoke_test.py"),
     )
+    ap.add_argument(
+        "--pythons",
+        action="store_true",
+        help="print the interpreter names the pinned imtypeset installs on, newest first",
+    )
     args = ap.parse_args()
+    if args.pythons:
+        print("\n".join(library_pythons()))
+        return 0
     return run_pre() if args.stage == "pre" else run_post(args.smoke)
 
 

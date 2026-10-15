@@ -12,7 +12,8 @@
 # stage 3 is one install. That brings imscribe, which sets typeset text, and
 # imtypeset, the library it draws through, as wheels at exact versions beside
 # the one imgui-bundle they are built for; nothing is compiled and no variable
-# has to be set. That is CPython 3.11 to 3.14 on macOS 14 or later on Apple
+# has to be set. That is CPython in the range the pinned imtypeset's wheels
+# admit (scripts/probe.py's IMTYPESET_PYTHONS) on macOS 14 or later on Apple
 # Silicon, or on Linux x86-64 with glibc 2.28 or later. On Linux aarch64 the
 # install leaves the library out and every pane draws with its own renderer.
 # Anywhere else pip either fails (macOS 13, glibc below 2.28, musl: imtypeset's
@@ -69,8 +70,8 @@ meets_floor() {
     >/dev/null 2>&1
 }
 
-find_python() {
-  for p in python3.14 python3.13 python3.12 python3.11 python3; do
+first_usable() {
+  for p in "$@"; do
     if command -v "$p" >/dev/null 2>&1 && meets_floor "$p"; then
       command -v "$p"
       return 0
@@ -79,12 +80,31 @@ find_python() {
   return 1
 }
 
+find_python() {
+  first_usable python3.14 python3.13 python3.12 python3.11 python3
+}
+
 if [ -n "$PYTHON" ]; then
   meets_floor "$PYTHON" || {
     echo "$PYTHON does not meet the Python ${MIN_MAJOR}.${MIN_MINOR}+ floor" >&2
     exit 1
   }
-elif ! PYTHON="$(find_python)"; then
+  PYTHON_WHY="given by --python"
+elif FLOOR_PYTHON="$(find_python)"; then
+  # The newest on the floor can still be one the pinned imtypeset has no wheel
+  # for, and stage 1 would stop on it. The probe names the ones it has, newest
+  # first, so the range is spelled once; any interpreter on the floor can say it.
+  IN_RANGE="$("$FLOOR_PYTHON" scripts/probe.py --pythons 2>/dev/null || true)"
+  IN_RANGE="${IN_RANGE//$'\n'/ }"
+  # shellcheck disable=SC2086
+  if [ -n "$IN_RANGE" ] && PYTHON="$(first_usable $IN_RANGE)"; then
+    PYTHON_WHY="the newest on PATH that the pinned imtypeset installs on ($IN_RANGE)"
+  else
+    PYTHON="$FLOOR_PYTHON"
+    PYTHON_WHY="the newest on PATH on the ${MIN_MAJOR}.${MIN_MINOR} floor: none that the pinned imtypeset"
+    PYTHON_WHY+=" installs on (${IN_RANGE:-the probe named none}) is on PATH and runs, and stage 1 says what to do"
+  fi
+else
   # No usable interpreter at all: run the probe anyway so the diagnosis and the
   # platform-appropriate install command come from one place.
   echo "No Python ${MIN_MAJOR}.${MIN_MINOR}+ found on PATH."
@@ -93,6 +113,8 @@ elif ! PYTHON="$(find_python)"; then
   exit 1
 fi
 
+echo "python: $PYTHON, $PYTHON_WHY"
+echo
 echo ">>> stage 1/4: pre-install probe (using $PYTHON)"
 "$PYTHON" scripts/probe.py --stage pre
 if [ "$UNLOCKED" = 1 ]; then
