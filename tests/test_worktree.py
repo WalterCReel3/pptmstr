@@ -131,6 +131,33 @@ def made_at(repo: Path) -> str:
     return git(repo, "rev-parse", "main").stdout.strip()
 
 
+@pytest.fixture(autouse=True)
+def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """
+    ``place`` puts a worktree under the home directory, and the tests below create
+    what it places: without this, one in the operator's ``~/.pptmstr``.
+    """
+    directory = tmp_path.resolve() / "home"
+    monkeypatch.setenv("HOME", str(directory))
+    return directory
+
+
+def worktrees_of(repository: str) -> Path:
+    """
+    Where ``place`` puts a worktree of the repository named ``repository``.
+    """
+    return Path(os.path.expanduser("~")) / ".pptmstr" / "worktrees" / repository
+
+
+def link_worktrees_of(repository: str, real: Path) -> None:
+    """
+    Make the directory ``place`` puts ``repository``'s worktrees in a symlink to ``real``.
+    """
+    spelled = worktrees_of(repository)
+    spelled.parent.mkdir(parents=True, exist_ok=True)
+    spelled.symlink_to(real)
+
+
 def placed(directory: Path, branch: str) -> Placement:
     checkout = detect(str(directory))
     assert isinstance(checkout, MainCheckout | LinkedWorktree), checkout
@@ -473,7 +500,7 @@ def test_a_main_checkout_inside_its_own_worktree_has_no_sibling_to_place_beside(
 
     forced = place(LinkedWorktree(root=str(linked), main_root=str(decoy)), "probe")
     assert isinstance(forced, Placement)
-    assert forced.path == str(linked / "decoy-worktrees" / "probe")
+    assert forced.path == str(worktrees_of("decoy") / "probe")
     assert isinstance(create(forced, "HEAD"), Created)
     assert "committed" in (linked / "decoy-ran").read_text()
 
@@ -894,41 +921,43 @@ def test_sanitised_is_the_sdks_own_transcript_slug_up_to_the_limit() -> None:
     assert theirs.startswith(sanitised(past)[: worktree._SLUG_LIMIT] + "-")
 
 
-def test_a_worktree_goes_beside_the_main_checkout_from_either_kind_of_checkout() -> None:
-    from_main = place(MainCheckout("/src/pptmstr"), "feat/x")
+def test_a_worktree_goes_under_the_home_from_either_kind_of_checkout() -> None:
+    from_main = place(MainCheckout("/src/pptmstr"), "feat/x", home="/home/w")
     assert from_main == Placement(
         run_in="/src/pptmstr",
         main_root="/src/pptmstr",
         branch="feat/x",
-        path="/src/pptmstr-worktrees/feat-x",
+        path="/home/w/.pptmstr/worktrees/pptmstr/feat-x",
     )
     from_linked = place(
-        LinkedWorktree(root="/src/pptmstr-worktrees/a", main_root="/src/pptmstr"), "feat/x"
+        LinkedWorktree(root="/home/w/.pptmstr/worktrees/pptmstr/a", main_root="/src/pptmstr"),
+        "feat/x",
+        home="/home/w",
     )
     assert isinstance(from_linked, Placement)
-    assert from_linked.path == "/src/pptmstr-worktrees/feat-x"
+    assert from_linked.path == "/home/w/.pptmstr/worktrees/pptmstr/feat-x"
     # git runs where the request came from: HEAD is per worktree.
-    assert from_linked.run_in == "/src/pptmstr-worktrees/a"
+    assert from_linked.run_in == "/home/w/.pptmstr/worktrees/pptmstr/a"
+
+
+def test_the_home_is_the_users_when_none_is_given(home: Path) -> None:
+    got = place(MainCheckout("/src/pptmstr"), "feat")
+    assert isinstance(got, Placement)
+    assert got.path == str(home / ".pptmstr" / "worktrees" / "pptmstr" / "feat")
 
 
 def test_a_branch_with_nothing_nameable_is_its_own_answer() -> None:
     assert place(MainCheckout("/src/pptmstr"), "///") == NothingToName("///")
 
 
-def test_a_dotted_or_underscored_path_is_placed_and_names_its_odd_components() -> None:
+def test_a_dotted_or_underscored_repository_is_placed_under_its_own_name() -> None:
     """
-    Not refused: a repository under such a path could otherwise have no worktree. The
-    parts are the warning.
+    A brief is keyed by session id, so no character in the path parts a session's
+    briefs from its transcripts and nothing here is a warning.
     """
-    got = place(MainCheckout("/home/w.r/my_src/pptmstr"), "feat")
+    got = place(MainCheckout("/home/w.r/my_src/my.project"), "feat", home="/home/w.r")
     assert isinstance(got, Placement)
-    assert got.path == "/home/w.r/my_src/pptmstr-worktrees/feat"
-    assert got.unsanitary == ("w.r", "my_src")
-    dotted_repo = place(MainCheckout("/src/pptmstr.git"), "feat")
-    assert isinstance(dotted_repo, Placement)
-    assert dotted_repo.unsanitary == ("pptmstr.git-worktrees",)
-    clean = place(MainCheckout("/src/pptmstr"), "feat.x")
-    assert isinstance(clean, Placement) and clean.unsanitary == ()
+    assert got.path == "/home/w.r/.pptmstr/worktrees/my.project/feat"
 
 
 def _placement(path: str) -> Placement:
@@ -1050,7 +1079,7 @@ def test_a_base_that_is_not_a_commit_is_reported_as_the_base(repo: Path, base: s
 def test_anything_at_the_path_is_path_exists(repo: Path, kind: str) -> None:
     where = placed(repo, "feat")
     target = Path(where.path)
-    target.parent.mkdir()
+    target.parent.mkdir(parents=True)
     if kind == "empty-dir":
         target.mkdir()
     elif kind == "file":
@@ -1079,7 +1108,7 @@ def test_a_registered_path_reached_through_a_symlink_is_still_registered(
     """
     real_parent = tmp_path / "elsewhere"
     real_parent.mkdir()
-    (repo.parent / "repo-worktrees").symlink_to(real_parent)
+    link_worktrees_of("repo", real_parent)
     where = placed(repo, "feat")
     git(repo, "worktree", "add", "-q", "-b", "earlier", where.path, "main")
     listed = list_worktrees(str(repo))
@@ -1096,7 +1125,7 @@ def test_a_slug_taken_through_a_symlink_names_the_path_that_was_asked_about(
 ) -> None:
     real_parent = tmp_path / "elsewhere"
     real_parent.mkdir()
-    (repo.parent / "repo-worktrees").symlink_to(real_parent)
+    link_worktrees_of("repo", real_parent)
     where = placed(repo, "feat-x")
     by_hand = str(real_parent / "feat_x")
     git(repo, "worktree", "add", "-q", "-b", "feat_x", by_hand, "main")
@@ -1220,7 +1249,7 @@ def test_create_makes_the_worktree_on_a_new_branch_at_the_base(repo: Path) -> No
     got = create(where, first)
 
     assert got == Created(where.path, "feat/x", first)
-    assert where.path == str(repo.parent / "repo-worktrees" / "feat-x")
+    assert where.path == str(worktrees_of("repo") / "feat-x")
     assert detect(where.path) == LinkedWorktree(root=where.path, main_root=str(repo))
     assert git(Path(where.path), "rev-parse", "HEAD").stdout.strip() == first
     assert git(Path(where.path), "symbolic-ref", "HEAD").stdout.strip() == "refs/heads/feat/x"
@@ -1253,8 +1282,8 @@ def test_head_as_a_base_is_the_launching_worktrees_head(repo: Path) -> None:
     got = create(placed(linked, "on-top"), "HEAD")
 
     assert isinstance(got, Created) and got.commit == ahead
-    # Beside the main checkout, not beside the worktree it was asked from.
-    assert got.path == str(repo.parent / "repo-worktrees" / "on-top")
+    # Named after the main checkout, not after the worktree it was asked from.
+    assert got.path == str(worktrees_of("repo") / "on-top")
 
 
 def test_a_refused_create_makes_nothing(repo: Path) -> None:
@@ -1320,7 +1349,7 @@ def stuck(repo: Path) -> Iterator[Placement]:
         pytest.skip("root writes through directory permissions")
     where = placed(repo, "feat")
     parent = Path(where.path).parent
-    parent.mkdir()
+    parent.mkdir(parents=True)
     parent.chmod(stat.S_IRUSR | stat.S_IXUSR)
     try:
         yield where
@@ -1568,7 +1597,7 @@ def test_a_worktree_left_behind_a_symlinked_parent_is_still_this_calls(
     """
     real_parent = tmp_path / "elsewhere"
     real_parent.mkdir()
-    (repo.parent / "repo-worktrees").symlink_to(real_parent)
+    link_worktrees_of("repo", real_parent)
     _hook(repo, "exit 3")
     where = placed(repo, "feat")
 
@@ -1736,7 +1765,7 @@ def test_git_runs_the_launching_worktrees_hook_for_the_cleanup_of_a_failed_add(
     _hooks_in(linked, log)
     where = placed(linked, "feat")
     parent = Path(where.path).parent
-    parent.mkdir()
+    parent.mkdir(parents=True)
     parent.chmod(stat.S_IRUSR | stat.S_IXUSR)
     steps = _logged_by_step(monkeypatch, log)
 

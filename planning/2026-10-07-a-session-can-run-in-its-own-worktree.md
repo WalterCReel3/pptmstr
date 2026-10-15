@@ -256,10 +256,16 @@ An undocumented `CLAUDE_CODE_HOST_WORKTREE` / `_FENCE` pair exists in the binary
 for this arrangement. It appears in no fetched doc and was never observed acting. A lead, not a
 finding.
 
-## D4 — Placement: a sibling directory outside the repo, named from the branch slug (D)
+## D4 — Placement: `~/.pptmstr/worktrees/<repo>/<slug>` (D)
 
-Decided: outside the repository; the directory named from the feature-branch slug; no dots
-anywhere in the path; slug restricted to `[A-Za-z0-9-]` and unique *after* that restriction.
+**Rewritten 2026-10-15.** Decided: outside the repository, under one home for every repository's
+worktrees, `<repo>` the main checkout's directory name and `<slug>` named from the feature
+branch; slug restricted to `[A-Za-z0-9-]` and unique *after* that restriction. The operator, on
+2026-10-15: "If a worktree home off of an apps config path works for Claude it should work for
+us. Full stop." This is the convention
+`notes/2026-10-07-a-linked-worktree-as-the-clone-substitute.md` proposed the same day as the
+first version of this decision, and the tree that note records,
+`~/.pptmstr/worktrees/pptmstr/adv-text-experiment`, is at it.
 
 - **Not nested.** A session launched at the repo root has the nested worktree inside its write
   region and can write into another session's tree. On the git side the task said "`git clean` in
@@ -267,28 +273,32 @@ anywhere in the path; slug restricted to `[A-Za-z0-9-]` and unique *after* that 
   repository"; only the doubled force, `git clean -ndffx`, reports "Would remove" (G 836-842, dry
   runs, n=1). What a nested worktree does do unprompted is show as untracked in the main
   checkout's `git status`, and `git add -A` there warns "adding embedded git repository"
-  (G 814-834).
-- **No dots.** `brief.session_dir` (`brief.py:129`) turns only the path separator into `-`; the
-  CLI and SDK turn every non-alphanumeric into `-` (`_sanitize_path`, S 580-590). On a dotted path
-  a session's briefs do not sit beside its transcripts —
-  [`2026-09-21-what-is-left-on-the-gate-policy-branch.md`](2026-09-21-what-is-left-on-the-gate-policy-branch.md)
-  l.115-120, unfixed. Run on 2026-10-07: for `/home/wreel/Source/pptmstr-worktrees/feat-a` the two
-  functions agree; they would also agree for a path with `_` only by accident of there being none.
+  (G 814-834). It is also refused by `launcher.refusal_for` for pptmstr's own repository, which
+  is how the CLI's `.claude/worktrees/<name>` met this on 2026-10-15: an autonomous launch into
+  one was refused (run 2026-10-15, `refusal_for` on the nested path and on both outside
+  placements: refused, allowed, allowed).
 - **Unique after restriction.** `feat-x`, `feat.x`, `feat_x` sanitise to one transcript directory
   (run 2026-10-07: `_sanitize_path` equal for all three). Uniqueness has to be checked on the
-  sanitised form, not on the branch name.
+  sanitised form, not on the branch name. `worktree.collision` and `preflight` do.
 
-**(R) The parent path: `<parent of repo>/<repo>-worktrees/<slug>`.** Proposed by the lead, not
-agreed. Nothing above depends on it beyond "sibling, dotless".
+**What the first version got wrong.** It required "no dots anywhere in the path", and that rule's
+only ground was a defect of our own: `brief.session_dir` turned only the path separator into `-`
+where the CLI turns every non-alphanumeric, so on a dotted path a session's briefs were filed
+apart from its transcripts
+([`2026-09-21-what-is-left-on-the-gate-policy-branch.md`](2026-09-21-what-is-left-on-the-gate-policy-branch.md)
+l.115-120). The record called that defect unfixed and placed around it, and its parent path,
+`<parent of repo>/<repo>-worktrees/<slug>`, was a lead proposal nothing depended on beyond
+"sibling, dotless". The defect is now gone at its cause rather than avoided:
+briefs are keyed by session id under `<config>/briefs/<id>/`
+([`archive/2026-10-15-a-brief-is-keyed-by-its-session.md`](archive/2026-10-15-a-brief-is-keyed-by-its-session.md)),
+so no path a session runs in has a character that can part its brief from anything.
 
-**A worktree already exists that this decision rules out.**
-`notes/2026-10-07-a-linked-worktree-as-the-clone-substitute.md` (staged the same day) records
-`~/.pptmstr/worktrees/pptmstr/adv-text-experiment`, created by hand on branch
-`adv-text-experiment`, and proposes `~/.pptmstr/worktrees/<repo>/<name>` as a convention.
-`git worktree list` confirms it. That path has a dot, is not a sibling, and its branch carries no
-prefix. The note calls itself undecided, so this is not a contradiction between decisions — but
-the tree is real, the brief-slug defect applies to it today, and cleanup as scoped below (filter
-on the branch prefix) will not list it.
+**Built 2026-10-15.** `worktree.place` (no caller yet) and `scripts/worktree.py`'s
+`worktree_path`; the `unsanitary` warning both carried, which existed only for the brief defect, is
+gone. **Accepted:** two repositories with one directory name share `<repo>`, so one slug in
+each is one path; `preflight` and `scripts/worktree.py create` refuse a path that exists, which is
+where that shows. **Not measured:** the sandbox with a cwd under a dotted directory in `$HOME`.
+Every D2 fixture sat under `/tmp`, and D2's arms have not been re-run at this placement.
 
 ## D5 — The rail lane is the feature-branch name, with no new "repo" fact (D)
 
@@ -342,8 +352,10 @@ own tree and linted, and `make check` passed in `enhanced-sessions` on an enviro
 built. Not run: `make run` or any window from a borrowed environment, and any session, contained
 or not, launched into one. What borrowing costs otherwise is in the script's docstring.
 
-`enhanced-sessions` is the first tree at D4's placement, `…/pptmstr-worktrees/enhanced-sessions`,
-on a branch with no prefix.
+`enhanced-sessions` was the first tree the script made, `…/pptmstr-worktrees/enhanced-sessions`,
+on a branch with no prefix. That is D4's first placement; the script has made trees at
+`~/.pptmstr/worktrees/<repo>/<slug>` since D4 was rewritten on 2026-10-15, and the tree was left
+where it is.
 
 ## D7 — Fork is left exactly as it is (D)
 

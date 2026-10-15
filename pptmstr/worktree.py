@@ -373,7 +373,7 @@ class Unclassified:
     git would not take as a repository, and a linked worktree whose main repository
     is one of those. A caller that needs "main" or
     "linked" to place a worktree has neither here, and that is the point -- none of
-    these has a main checkout to put a sibling beside.
+    these has a main checkout to name a worktree after.
     """
 
     reason: str
@@ -812,22 +812,12 @@ class Placement:
     git call for this placement runs. Refs are shared by every worktree of a
     repository and ``HEAD`` is not, so a base of ``HEAD`` means the launching
     checkout's -- the same reading ``scripts/worktree.py`` gives it.
-
-    ``unsanitary`` **is a warning the caller has to show.** It lists the components of
-    ``path`` holding a character outside ``[A-Za-z0-9-]``. They come from where the
-    main checkout lives -- the slug never has one -- so no branch name avoids them.
-    D4 asks for a path with none; ``brief.session_dir`` turns only the separator into
-    ``-`` and the CLI turns every such character into one, so a session in such a path
-    keeps its briefs in a different directory from its transcripts. The worktree is
-    placed all the same, as ``scripts/worktree.py`` does, because the alternative is
-    that a repository under ``~/src/my.project`` can have none.
     """
 
     run_in: str
     main_root: str
     branch: str
     path: str
-    unsanitary: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -843,34 +833,37 @@ class NothingToName:
 Placed = Placement | NothingToName
 
 
-def place(checkout: MainCheckout | LinkedWorktree, branch: str) -> Placed:
+def place(
+    checkout: MainCheckout | LinkedWorktree, branch: str, *, home: str | None = None
+) -> Placed:
     """
-    The directory a worktree for ``branch`` goes in. Pure: no filesystem, no git.
+    The directory a worktree for ``branch`` goes in. No filesystem, no git; ``home``
+    is the user's, from the environment, when it is not given.
 
-    ``<parent of the main checkout>/<its name>-worktrees/<slug>`` -- a sibling of the
-    repository and never inside it (D4), from whichever of its worktrees the request
-    came. The answer is final as text before anything exists on disk, which is what
-    lets a launch resolve its cwd from it ahead of the directory being made.
+    ``<home>/.pptmstr/worktrees/<repository's directory name>/<slug>`` -- outside
+    every repository, under one home for all of them (D4), from whichever of its
+    worktrees the request came. The answer is final as text before anything exists
+    on disk, which is what lets a launch resolve its cwd from it ahead of the
+    directory being made.
 
     "The repository" is whatever ``checkout`` says it is. For a ``LinkedWorktree``
     that is ``main_root``, a claim made by the directory that was asked about and
-    not a defence: the sibling is a sibling of the repository the worktree's
-    ``.git`` file names, and ``Placement.main_root`` carries the same claim on.
-    Nothing here can tell that repository from the one the operator means.
+    not a defence: the name is the name of the repository the worktree's ``.git``
+    file names, and ``Placement.main_root`` carries the same claim on. Nothing here
+    can tell that repository from the one the operator means.
 
-    Whether the directory is free is not asked here; that needs the disk and the
-    worktree list, and is ``preflight``'s.
+    Two repositories with one directory name share ``<repository>``, so a branch of
+    each with one slug is one path. Whether the directory is free is not asked here;
+    that needs the disk and the worktree list, and is ``preflight``'s, which refuses
+    a path that exists.
     """
     slug = slug_for(branch)
     if not slug:
         return NothingToName(branch)
     main_root = checkout.root if isinstance(checkout, MainCheckout) else checkout.main_root
-    parent = os.path.dirname(main_root)
-    path = os.path.join(parent, f"{os.path.basename(main_root)}-worktrees", slug)
-    odd = tuple(part for part in path.split(os.sep) if _NOT_SLUG.search(part))
-    return Placement(
-        run_in=checkout.root, main_root=main_root, branch=branch, path=path, unsanitary=odd
-    )
+    base = os.path.expanduser("~") if home is None else home
+    path = os.path.join(base, ".pptmstr", "worktrees", os.path.basename(main_root), slug)
+    return Placement(run_in=checkout.root, main_root=main_root, branch=branch, path=path)
 
 
 @dataclass(frozen=True, slots=True)
