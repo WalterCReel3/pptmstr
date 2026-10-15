@@ -249,3 +249,36 @@ def test_an_entry_written_by_anything_else_is_picked_up(tmp_path: Path) -> None:
     brief.write_entry(tmp_path, "b")
 
     assert len(pane.entries(tmp_path)) == 2
+
+
+def test_a_closed_card_says_it_is_closed_and_its_brief_directory_is_never_listed(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """
+    A closed card holds the cursor for as long as the operator leaves it there,
+    and the pane lists the brief directory on every frame it draws one: disk on
+    the draw thread, for a session nobody resumed.
+    """
+    from pptmstr.model import Recalled
+
+    brief.write_entry(tmp_path, "the premises")
+    closed = record(brief_path=str(tmp_path)).with_(state=AgentState.DONE, recalled=Recalled())
+    snap = Snapshot(
+        seq=1,
+        nodes=MappingProxyType({ROOT: closed}),
+        order=(ROOT,),
+        needs_you=(),
+        any_active=False,
+    )
+    pane = brief_pane.BriefState()
+    listed: list[Path] = []
+    monkeypatch.setattr(pane, "entries", lambda directory: listed.append(directory) or ())
+
+    said = drawn(monkeypatch, snap, pane)
+
+    assert said == ["closed — its brief is not read; Resume… to continue"]
+    assert listed == []
+    # The same record once it has been resumed is drawn from its directory.
+    live = snapshot(brief_path=str(tmp_path))
+    drawn(monkeypatch, live, pane)
+    assert listed == [tmp_path]

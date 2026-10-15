@@ -34,14 +34,21 @@ CPU comes from resource.getrusage, which is stdlib and counts every thread in th
 process. It does not count the compositor, so treat the absolute numbers as
 this-process-only; the ratio between phases is the point.
 
+Every run is against a configuration directory made for it and named on the first
+line of output, never the operator's: see ``_scratch_config``. So the settings are
+the defaults and the layout is the coded one, which is one more thing held still
+between runs.
+
 Usage:  .venv/bin/python scripts/bench_idle.py [--seconds 4] [--layout TRIAGE] [--no-wake]
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import resource
 import sys
+import tempfile
 import threading
 import time
 from dataclasses import dataclass, field
@@ -49,6 +56,44 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
+
+
+def _scratch_config() -> Path:
+    """
+    Point this process at a configuration nobody owns, and say where it is.
+
+    ``app.main`` is run here without ``--fake``, because the first two phases need
+    a fleet that is empty and the fake driver seeds one. A start like that moves
+    every board log under the configuration directory and recalls the fleet from
+    it (``app._start``), which on the operator's own is a change to their data
+    made by a benchmark.
+
+    Three things are moved, and all three before ``pptmstr.app`` is asked for
+    anything: ``XDG_CONFIG_HOME``, which ``settings.config_dir`` and hello_imgui's
+    ini both resolve from; ``CLAUDE_CONFIG_DIR``, which is where the SDK lists
+    transcripts; and ``brief.default_root``, which is derived from the home
+    directory and reads neither variable. An ``XDG_CONFIG_HOME`` already set is
+    replaced like an unset one: nothing here can tell a disposable directory from
+    the one the operator keeps.
+
+    The directory is left behind, since the ini and whatever a run recorded are
+    the evidence of what it did.
+    """
+    from pptmstr import brief
+
+    scratch = Path(tempfile.mkdtemp(prefix="pptmstr-bench-"))
+    config, claude = scratch / "config", scratch / "claude"
+    config.mkdir()
+    (claude / "projects").mkdir(parents=True)
+    os.environ["XDG_CONFIG_HOME"] = str(config)
+    os.environ["CLAUDE_CONFIG_DIR"] = str(claude)
+    brief.default_root = lambda: claude / "projects"
+    print(
+        f"configuration for this run is under {scratch}, left in place:"
+        " XDG_CONFIG_HOME, CLAUDE_CONFIG_DIR and the brief root all point there",
+        flush=True,
+    )
+    return scratch
 
 
 def cpu_seconds() -> float:
@@ -119,6 +164,7 @@ def main() -> int:
         help="skip the cross-thread wake probe, so the idle phase is undisturbed",
     )
     args = ap.parse_args()
+    _scratch_config()
 
     from imgui_bundle import hello_imgui, immapp
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 import threading
 import time
 from collections.abc import Callable
+from pathlib import Path
 
 import pytest
 
@@ -1183,9 +1184,9 @@ def _watch_policies(monkeypatch: pytest.MonkeyPatch) -> list[Policy]:
     """
     seen: list[Policy] = []
 
-    def spy(tool_name, tool_input, policy=Policy.STRICT):  # type: ignore[no-untyped-def]
+    def spy(tool_name, tool_input, policy=Policy.STRICT, **scope):  # type: ignore[no-untyped-def]
         seen.append(policy)
-        return classify(tool_name, tool_input, policy)
+        return classify(tool_name, tool_input, policy, **scope)
 
     monkeypatch.setattr(driver_module, "classify", spy)
     return seen
@@ -1213,12 +1214,12 @@ def _permissive_admits_bash(monkeypatch: pytest.MonkeyPatch) -> None:
     file's job, and a second copy is a copy to keep true.
     """
 
-    def stub(tool_name, tool_input, policy=Policy.STRICT):  # type: ignore[no-untyped-def]
+    def stub(tool_name, tool_input, policy=Policy.STRICT, **scope):  # type: ignore[no-untyped-def]
         if policy is Policy.PERMISSIVE and tool_name == "Bash":
             if str(tool_input.get("command") or "") == UNVERIFIABLE_BASH:
                 return Disposition.REQUIRE_APPROVAL
             return Disposition.AUTO_APPROVE
-        return classify(tool_name, tool_input, policy)
+        return classify(tool_name, tool_input, policy, **scope)
 
     monkeypatch.setattr(driver_module, "classify", stub)
 
@@ -1505,3 +1506,344 @@ def test_the_operator_can_widen_the_policy_at_any_time(
 
     assert _bash(bridge, session) == "allow"
     assert Policy.PERMISSIVE in seen
+
+
+# -- another session's records ---------------------------------------------------
+
+
+def _another_sessions_log() -> str:
+    from pptmstr import sessionfile
+
+    return str(sessionfile.root() / "22222222-aaaa-4bbb-8ccc-000000000002" / "output.log")
+
+
+@pytest.mark.parametrize(
+    ("tool", "arguments"),
+    [
+        ("Read", lambda log: {"file_path": log}),
+        ("NotebookRead", lambda log: {"notebook_path": log}),
+        ("Grep", lambda log: {"pattern": "token", "path": log}),
+        ("Glob", lambda log: {"pattern": log.replace("output.log", "*")}),
+    ],
+)
+def test_a_read_of_another_sessions_records_waits_for_the_operator(
+    bridge: Bridge, tool: str, arguments: Callable[[str], dict[str, object]]
+) -> None:
+    """
+    The wiring: the hook a real call arrives at parks it, the row the operator
+    answers from says what it reads, and the operator's yes is still a yes.
+    """
+    store = Store()
+    session = AgentSession(bridge, "task")
+    session.announce()
+
+    waiting = bridge.submit(
+        session._pre_tool_use(hook_input(tool, **arguments(_another_sessions_log())), None, {})
+    )
+    pump(store, bridge, lambda: bool(store.snapshot().approvals))
+
+    pending = store.snapshot().approvals[0]
+    assert pending.tool_name == tool
+    assert "session's records · " in pending.summary
+    bridge.resolve(pending.id, Decision(approved=True))
+    assert decision_of(waiting.result(timeout=TIMEOUT)) == "allow"
+
+
+@pytest.mark.parametrize("policy", list(Policy))
+def test_a_read_of_another_sessions_records_is_refused_where_nobody_is_asked(
+    bridge: Bridge, policy: Policy
+) -> None:
+    """
+    On every rung, the unattended one included: with no operator to ask, the
+    read does not run.
+    """
+    session = AgentSession(bridge, "task", interactive=False, policy=policy)
+
+    out = bridge.submit(
+        session._pre_tool_use(hook_input("Read", file_path=_another_sessions_log()), None, {})
+    ).result(timeout=TIMEOUT)
+
+    assert decision_of(out) == "deny"
+    assert bridge.parked_count == 0
+
+
+def test_a_permissive_shell_read_of_another_sessions_records_parks(bridge: Bridge) -> None:
+    """
+    An uncontained session has no sandbox, so this gate is all there is between
+    an admitted `cat` and the file.
+    """
+    store = Store()
+    session = AgentSession(bridge, "task", policy=Policy.PERMISSIVE)
+    session.announce()
+    assert _bash(bridge, session) == "allow"
+
+    waiting = bridge.submit(
+        session._pre_tool_use(
+            hook_input("Bash", command=f"cat {_another_sessions_log()}"), None, {}
+        )
+    )
+    pump(store, bridge, lambda: bool(store.snapshot().approvals))
+
+    assert "session's records · cat " in store.snapshot().approvals[0].summary
+    bridge.resolve(store.snapshot().approvals[0].id, Decision(approved=False, reason="no"))
+    assert decision_of(waiting.result(timeout=TIMEOUT)) == "deny"
+
+
+def _own_log(session: AgentSession) -> str:
+    from pptmstr import sessionfile
+
+    return str(sessionfile.root() / session.session_id / "commands" / "c1" / "output.log")
+
+
+@pytest.mark.parametrize("policy", list(Policy))
+def test_a_session_reads_its_own_records_without_being_asked(
+    bridge: Bridge, policy: Policy
+) -> None:
+    """
+    The gate tells the session's directory from another's by the id the driver
+    holds, so this is the test that the driver hands it over: without it nothing
+    under the root is the caller's, and the log `read_commands` names would park.
+    """
+    session = AgentSession(bridge, "task", interactive=False, policy=policy)
+
+    out = bridge.submit(
+        session._pre_tool_use(hook_input("Read", file_path=_own_log(session)), None, {})
+    ).result(timeout=TIMEOUT)
+
+    assert decision_of(out) == "allow"
+
+
+def test_a_relative_read_is_measured_from_the_sessions_directory_not_the_payloads(
+    bridge: Bridge, tmp_path: Path
+) -> None:
+    """
+    `hook_input` says the call came from `/tmp`. The session was launched in
+    another session's records, which is where `output.log` is read from.
+    """
+    from pptmstr import sessionfile
+
+    theirs = sessionfile.root() / "22222222-aaaa-4bbb-8ccc-000000000002"
+    theirs.mkdir(parents=True)
+    inside = AgentSession(bridge, "task", interactive=False, cwd=str(theirs))
+    outside = AgentSession(bridge, "task", interactive=False, cwd=str(tmp_path))
+
+    def read(session: AgentSession) -> str:
+        call = session._pre_tool_use(hook_input("Read", file_path="output.log"), None, {})
+        return decision_of(bridge.submit(call).result(timeout=TIMEOUT))
+
+    assert read(inside) == "deny"
+    assert read(outside) == "allow"
+
+
+@pytest.mark.parametrize(
+    ("policy", "nobody"),
+    [
+        (Policy.STRICT, "no operator is attached"),
+        (Policy.PERMISSIVE, "no operator is attached"),
+        (Policy.AUTONOMOUS, "unattended by choice"),
+    ],
+)
+def test_the_refusal_names_the_records_and_not_an_unrecognised_tool(
+    bridge: Bridge, policy: Policy, nobody: str
+) -> None:
+    """
+    Under the unattended rung the standing reason tells the agent to use a tool
+    this build recognises. The tool here is `Read`; what was refused is the path.
+    """
+    session = AgentSession(bridge, "task", interactive=False, policy=policy)
+
+    out = bridge.submit(
+        session._pre_tool_use(hook_input("Read", file_path=_another_sessions_log()), None, {})
+    ).result(timeout=TIMEOUT)
+
+    reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+    assert decision_of(out) == "deny"
+    assert "another session's records" in reason and nobody in reason
+    assert session.session_id in reason
+    assert "does not recognise" not in reason
+
+
+def test_the_parked_row_says_another_sessions_once_the_driver_names_its_own(
+    bridge: Bridge,
+) -> None:
+    store = Store()
+    session = AgentSession(bridge, "task")
+    session.announce()
+
+    waiting = bridge.submit(
+        session._pre_tool_use(hook_input("Read", file_path=_another_sessions_log()), None, {})
+    )
+    pump(store, bridge, lambda: bool(store.snapshot().approvals))
+
+    pending = store.snapshot().approvals[0]
+    assert pending.summary.startswith("another session's records · Read ")
+    bridge.resolve(pending.id, Decision(approved=False, reason="no"))
+    waiting.result(timeout=TIMEOUT)
+
+
+# -- writes into the records -----------------------------------------------------
+#
+# pptmstr reads its records back as the truth about a session: a forged `end.json`
+# changes what the operator is shown and what a restart restores. So no rung lets a
+# write under either records root through unasked, the writer's own directory
+# included. Under the unattended rung "asked" is nobody, and the write is refused.
+
+THEIRS = "22222222-aaaa-4bbb-8ccc-000000000002"
+
+_WRITES: list[tuple[str, Callable[[str], dict[str, object]]]] = [
+    ("Write", lambda path: {"file_path": path, "content": "{}"}),
+    ("Edit", lambda path: {"file_path": path, "old_string": "a", "new_string": "b"}),
+    ("MultiEdit", lambda path: {"file_path": path, "edits": []}),
+    ("NotebookEdit", lambda path: {"notebook_path": path, "new_source": ""}),
+]
+
+
+def _record_targets(session: AgentSession) -> dict[str, str]:
+    from pptmstr import boardsync, sessionfile
+
+    root = sessionfile.root()
+    return {
+        "own": str(root / session.session_id / "commands" / "x" / "end.json"),
+        "other": str(root / THEIRS / "commands" / "x" / "end.json"),
+        "legacy": str(boardsync.legacy_root() / THEIRS / "000001.json"),
+        "own legacy": str(boardsync.legacy_root() / session.session_id / "000001.json"),
+    }
+
+
+@pytest.mark.parametrize("policy", list(Policy))
+@pytest.mark.parametrize("where", ["home", "project"])
+def test_no_rung_lets_a_write_into_the_records_through_unasked(
+    bridge: Bridge,
+    policy: Policy,
+    where: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A session started in the home directory has the records inside the
+    directory its writes are bounded to, so the write bound alone lets the
+    unattended rung write any session's `end.json`, its own among them.
+    """
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    project = tmp_path / "Source" / "proj"
+    project.mkdir(parents=True)
+    cwd = tmp_path if where == "home" else project
+    session = AgentSession(bridge, "task", interactive=False, policy=policy, cwd=str(cwd))
+
+    for target, path in _record_targets(session).items():
+        for tool, arguments in _WRITES:
+            out = bridge.submit(
+                session._pre_tool_use(hook_input(tool, **arguments(path)), None, {})
+            ).result(timeout=TIMEOUT)
+            assert decision_of(out) == "deny", (target, tool)
+    assert bridge.parked_count == 0
+
+
+def test_a_write_into_the_records_parks_with_the_row_saying_whose_they_are(
+    bridge: Bridge,
+) -> None:
+    """
+    The wiring: the hook hands `classify` and `summarize` the session's own
+    directory, the write parks, and the operator's yes is still a yes.
+    """
+    store = Store()
+    session = AgentSession(bridge, "task")
+    session.announce()
+    own = _record_targets(session)["own"]
+
+    waiting = bridge.submit(
+        session._pre_tool_use(hook_input("Write", file_path=own, content="{}"), None, {})
+    )
+    pump(store, bridge, lambda: bool(store.snapshot().approvals))
+
+    pending = store.snapshot().approvals[0]
+    assert pending.summary.startswith("pptmstr's own records · Write ")
+    bridge.resolve(pending.id, Decision(approved=True))
+    assert decision_of(waiting.result(timeout=TIMEOUT)) == "allow"
+
+
+# -- the dial's probes -----------------------------------------------------------
+
+
+def test_the_kept_probe_answers_are_the_classifiers_on_every_rung(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from pptmstr.ui import widgets
+
+    monkeypatch.chdir(tmp_path)
+    widgets._gate_answers.cache_clear()
+    for policy in Policy:
+        kept = widgets._gate_answers(policy)
+        for (label, tool, arguments), (kept_label, got) in zip(
+            widgets._GATE_PROBES, kept, strict=True
+        ):
+            assert kept_label == label
+            assert got is classify(tool, arguments, policy), (policy, label)
+            assert got is classify(tool, arguments, policy, cwd=widgets._PROBE_CWD)
+        assert widgets._gate_answers(policy) is kept
+
+
+def test_the_probes_do_not_depend_on_where_pptmstr_was_started(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Started in the home directory, this process's directory contains the
+    records, and an admitted shell read run there is a read of them.
+    """
+    from pptmstr.ui import widgets
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.chdir(tmp_path)
+    widgets._gate_answers.cache_clear()
+
+    assert classify("Bash", {"command": "git status"}, Policy.PERMISSIVE) is (
+        Disposition.REQUIRE_APPROVAL
+    )
+    assert widgets.gate_adds(Policy.PERMISSIVE) == ("shell reads",)
+    widgets._gate_answers.cache_clear()
+
+
+def test_the_probes_ask_the_classifier_once_per_rung(monkeypatch: pytest.MonkeyPatch) -> None:
+    from pptmstr.ui import widgets
+
+    asked: list[Policy] = []
+
+    def counted(tool: str, arguments: object, policy: Policy, **kw: object) -> Disposition:
+        asked.append(policy)
+        return classify(tool, arguments, policy, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(widgets, "classify", counted)
+    widgets._gate_answers.cache_clear()
+    for _frame in range(3):
+        widgets.gate_adds(Policy.PERMISSIVE)
+        widgets.gate_parks(Policy.PERMISSIVE)
+
+    assert asked == [Policy.PERMISSIVE] * len(widgets._GATE_PROBES)
+    widgets._gate_answers.cache_clear()
+
+
+@pytest.mark.parametrize(
+    ("policy", "nobody"),
+    [
+        (Policy.STRICT, "no operator is attached"),
+        (Policy.AUTONOMOUS, "unattended by choice"),
+    ],
+)
+def test_a_refused_write_into_the_records_names_them_and_not_an_unrecognised_tool(
+    bridge: Bridge, policy: Policy, nobody: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    session = AgentSession(bridge, "task", interactive=False, policy=policy, cwd=str(tmp_path))
+    own = _record_targets(session)["own"]
+
+    out = bridge.submit(
+        session._pre_tool_use(hook_input("Write", file_path=own, content="{}"), None, {})
+    ).result(timeout=TIMEOUT)
+
+    reason = out["hookSpecificOutput"]["permissionDecisionReason"]
+    assert decision_of(out) == "deny"
+    assert "pptmstr's own records" in reason and nobody in reason and own in reason
+    assert "does not recognise" not in reason

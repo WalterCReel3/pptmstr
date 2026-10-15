@@ -17,11 +17,14 @@ import dataclasses
 from types import MappingProxyType
 from unittest.mock import MagicMock
 
+import pytest
+
 from pptmstr.board import BoardConcern, BoardTask
 from pptmstr.bridge import Bridge
 from pptmstr.model import (
     AgentRecord,
     AgentState,
+    Basis,
     Concern,
     ConcernState,
     NodeId,
@@ -29,6 +32,7 @@ from pptmstr.model import (
     Task,
     TaskState,
 )
+from pptmstr.theme import P
 from pptmstr.ui import board_pane
 from pptmstr.ui.focus import FocusState, Scope
 
@@ -62,6 +66,7 @@ def board_task(
     missing: tuple[str, ...] = (),
     touches: tuple[str, ...] = (),
     concerns: tuple[str, ...] = (),
+    result: str = "",
 ) -> BoardTask:
     return BoardTask(
         id=tid,
@@ -74,6 +79,7 @@ def board_task(
         missing=missing,
         touches=touches,
         concerns=concerns,
+        result=result,
     )
 
 
@@ -127,6 +133,8 @@ def at_root(snap: Snapshot) -> FocusState:
 def drawn(monkeypatch, snap: Snapshot, focus: FocusState | None = None) -> list[str]:
     """Every string the pane passed to imgui, so a bound's announcement is checkable."""
     fake = MagicMock()
+    # Every task row opens: what a row draws is asserted here.
+    fake.tree_node_ex.return_value = True
     monkeypatch.setattr(board_pane, "imgui", fake)
     monkeypatch.setattr(board_pane, "section", MagicMock())
     board_pane.draw(
@@ -337,12 +345,12 @@ def test_one_reason_is_not_pluralised() -> None:
 
 def test_a_waiting_concern_reads_as_waiting() -> None:
     label = board_pane.concern_label(board_concern())
-    assert label == "reviewer -> lead  (waiting)"
+    assert label == "reviewer -> lead  (waiting; basis unstated)"
 
 
 def test_a_delivered_concern_says_it_was_delivered() -> None:
     label = board_pane.concern_label(board_concern(state=ConcernState.DELIVERED))
-    assert label == "reviewer -> lead  (delivered)"
+    assert label == "reviewer -> lead  (delivered; basis unstated)"
 
 
 def test_a_concern_the_operator_rewrote_says_so() -> None:
@@ -351,7 +359,67 @@ def test_a_concern_the_operator_rewrote_says_so() -> None:
     else in the UI records that once the approval is gone.
     """
     label = board_pane.concern_label(board_concern(state=ConcernState.DELIVERED, edited=True))
-    assert label == "reviewer -> lead  (delivered, edited by you)"
+    assert label == "reviewer -> lead  (delivered, edited by you; basis unstated)"
+
+
+def test_waiting_mail_to_a_party_that_is_not_running_says_so_in_place_of_waiting() -> None:
+    from pptmstr.board import UNDELIVERABLE
+
+    stuck = dataclasses.replace(board_concern(), undeliverable=True)
+
+    assert board_pane.concern_label(stuck) == (
+        f"reviewer -> lead  ({UNDELIVERABLE}; basis unstated)"
+    )
+    assert "waiting" not in board_pane.concern_label(stuck)
+
+
+def _concern_colours(monkeypatch, *, undeliverable: bool) -> dict[str, object]:
+    """The colour each line of the concern log was drawn in."""
+    fake = MagicMock()
+    monkeypatch.setattr(board_pane, "imgui", fake)
+    monkeypatch.setattr(board_pane, "section", MagicMock())
+    row = dataclasses.replace(board_concern(), undeliverable=undeliverable)
+    board_pane._concerns((row,))
+    return {str(call.args[1]): call.args[0] for call in fake.text_colored.call_args_list}
+
+
+def test_an_undeliverable_concern_is_drawn_in_the_warning_colour_and_a_waiting_one_is_not(
+    monkeypatch,
+) -> None:
+    from pptmstr.board import UNDELIVERABLE
+
+    stuck = _concern_colours(monkeypatch, undeliverable=True)
+    waiting = _concern_colours(monkeypatch, undeliverable=False)
+
+    assert stuck[f"reviewer -> lead  ({UNDELIVERABLE}; basis unstated)"] == P.warn.vec4
+    assert waiting["reviewer -> lead  (waiting; basis unstated)"] == P.text_dim.vec4
+    assert P.warn.vec4 != P.text_dim.vec4
+
+
+def test_a_concern_the_board_marks_undeliverable_reaches_the_pane_marked(monkeypatch) -> None:
+    """
+    Through ``board_concerns`` and ``draw``, so the mark is the board's own and
+    not one this file set: mail posted to a party a restored log named and
+    nothing in this process answers to.
+    """
+    from pptmstr.board import UNDELIVERABLE, board_concerns
+    from pptmstr.model import Restore
+
+    gone: NodeId = ("s1", "agent-old")
+    note = Concern(id="c1", sender=ROOT, recipient=gone, subject="for you", body="b", posted_at=1.0)
+    snap = dataclasses.replace(
+        board_snapshot(concerns=(note,)),
+        restores=MappingProxyType(
+            {"s1": Restore("s1", at=1.0, parties=MappingProxyType({gone: "builder-2"}))}
+        ),
+    )
+    (row,) = board_concerns(snap, "s1")
+    assert row.undeliverable
+
+    lines = drawn(monkeypatch, snap)
+
+    assert any(UNDELIVERABLE in line for line in lines)
+    assert not any("(waiting" in line for line in lines)
 
 
 def test_every_concern_state_has_a_label() -> None:
@@ -610,9 +678,8 @@ def _amend_run(monkeypatch, snap: Snapshot, pane: board_pane.BoardState, clicks:
     fake.small_button.side_effect = lambda label, *a, **k: label in clicks
     monkeypatch.setattr(board_pane, "imgui", fake)
     monkeypatch.setattr(board_pane, "section", MagicMock())
-    monkeypatch.setattr(
-        board_pane, "multiline_input", lambda *a, **k: (False, pane.drafts.get("t1", ""))
-    )
+    # Each box hands back the text it was drawn with: nothing was typed this frame.
+    monkeypatch.setattr(board_pane, "multiline_input", lambda label, value, *a, **k: (False, value))
     board_pane.draw(snap, at_root(snap), pane, _Bridge())  # type: ignore[arg-type]
     return emitted
 
@@ -727,3 +794,1849 @@ def test_the_operator_reads_the_finding_the_agents_read(monkeypatch) -> None:
 
     assert any("checksum ignored in sixty places" in line for line in lines)
     assert any("tle/parse.py never validates before use" in line for line in lines)
+
+
+# -- what a finished task reported --------------------------------------------------
+
+
+def _finished(result: str) -> Snapshot:
+    return board_snapshot(
+        Task(
+            id="t1",
+            title="do t1",
+            detail="the specification",
+            state=TaskState.COMPLETED,
+            claimed_by=QA,
+            declared_by=ROOT,
+            result=result,
+        )
+    )
+
+
+def test_a_result_is_introduced_as_its_claimers_account() -> None:
+    row = board_task(owner="builder-2", result="ran it")
+    assert board_pane.result_heading(row) == "result, as builder-2 reported it (basis unstated):"
+    assert board_pane.result_heading(board_task(result="ran it")) == "result (basis unstated):"
+
+
+def test_the_operator_reads_the_result_the_agents_read(monkeypatch) -> None:
+    """
+    From the record to the screen, not from a hand-built row: a result the store
+    holds and the pane does not draw is one the operator -- the first person who
+    could ever review it -- never sees.
+    """
+    lines = drawn(monkeypatch, _finished("ran 12 tests; lint NOT run"))
+
+    assert "ran 12 tests; lint NOT run" in lines
+    assert any(line.startswith("result, as ") for line in lines)
+    # Ahead of the specification: a finished row is opened for what happened.
+    assert lines.index("ran 12 tests; lint NOT run") < lines.index("the specification")
+
+
+def test_a_task_with_no_result_draws_no_result_heading(monkeypatch) -> None:
+    lines = drawn(monkeypatch, _finished(""))
+
+    assert "the specification" in lines
+    assert not any(line.startswith("result") for line in lines)
+
+
+def test_a_long_result_is_bounded_in_the_pane_and_says_so(monkeypatch) -> None:
+    lines = drawn(monkeypatch, _finished("r" * (board_pane._MAX_RESULT_CHARS + 7)))
+
+    assert "r" * board_pane._MAX_RESULT_CHARS in lines
+    assert "... 7 more character(s) not shown" in lines
+
+
+def test_a_result_stays_on_screen_while_the_specification_is_being_amended(monkeypatch) -> None:
+    """
+    The editor replaces the specification and nothing else. An operator rewriting
+    what was asked is usually doing it because of what was reported.
+    """
+    fake = MagicMock()
+    fake.small_button.return_value = False
+    monkeypatch.setattr(board_pane, "imgui", fake)
+    monkeypatch.setattr(board_pane, "section", MagicMock())
+    monkeypatch.setattr(board_pane, "multiline_input", lambda *a, **k: (False, "draft"))
+    snap = _finished("what was reported")
+    pane = board_pane.BoardState(editing="t1", drafts={"t1": "draft"})
+    board_pane.draw(snap, at_root(snap), pane, Bridge())
+    lines = [str(a) for call in fake.text_colored.call_args_list for a in call.args[1:]]
+
+    assert "what was reported" in lines
+    assert "the specification" not in lines
+
+
+# -- how an author says it knows ----------------------------------------------------
+
+
+def test_every_text_on_a_row_is_drawn_beside_what_its_author_said_of_it(monkeypatch) -> None:
+    """
+    From the records to the screen, with a different member on each of the three
+    texts so a heading reading the wrong field cannot pass: the declarer relayed
+    the specification, the claimer ran the result, the reviewer read the finding.
+    """
+    from pptmstr.model import Basis
+
+    task = dataclasses.replace(
+        _finished("what was reported").tasks["t1"],
+        basis=Basis.RELAYED,
+        result_basis=Basis.RUN,
+    )
+    note = Concern(
+        id="c1",
+        sender=QA,
+        recipient=ROOT,
+        subject="the finding",
+        body="its reasoning",
+        posted_at=1.0,
+        task_id="t1",
+        basis=Basis.READ,
+    )
+    lines = drawn(monkeypatch, board_snapshot(task, concerns=(note,)))
+
+    assert "specification (says: relayed):" in lines
+    assert lines.index("specification (says: relayed):") + 1 == lines.index("the specification")
+    assert any(line.endswith("reported it (says: run):") for line in lines)
+    assert "reason (says: read): the finding" in lines
+    assert any(line.endswith("(waiting; says: read)") for line in lines)
+
+
+def test_an_unmarked_row_is_drawn_as_unstated_and_never_as_a_member(monkeypatch) -> None:
+    note = Concern(
+        id="c1",
+        sender=QA,
+        recipient=ROOT,
+        subject="the finding",
+        body="its reasoning",
+        posted_at=1.0,
+        task_id="t1",
+    )
+    lines = drawn(monkeypatch, board_snapshot(_finished("r").tasks["t1"], concerns=(note,)))
+
+    assert "specification (basis unstated):" in lines
+    assert "reason (basis unstated): the finding" in lines
+    assert sum("basis unstated" in line for line in lines) == 4
+    assert not any("says:" in line for line in lines)
+
+
+# -- a property, what was not run, and an incident ----------------------------------
+
+_HELD = "A row is never dropped to make the board fit."
+
+
+def test_a_property_is_drawn_under_the_title_of_a_row_nobody_opened(monkeypatch) -> None:
+    """
+    On the closed row, whole, and first among its qualifiers. The operator ranks a
+    row's notes against it, and behind the triangle it would be read only by
+    someone who already knew to look.
+    """
+    held = "p" * 300
+    snap = board_snapshot(
+        Task(id="t1", title="do t1", detail="the specification", declared_by=ROOT, property=held)
+    )
+    fake = MagicMock()
+    fake.tree_node_ex.return_value = False
+    monkeypatch.setattr(board_pane, "imgui", fake)
+    monkeypatch.setattr(board_pane, "section", MagicMock())
+    board_pane.draw(snap, at_root(snap), board_pane.BoardState(), Bridge())
+    lines = [str(a) for call in fake.text_colored.call_args_list for a in call.args[1:]]
+
+    assert lines.index("do t1") + 1 == lines.index(f"must not break: {held}")
+    assert "the specification" not in lines
+
+
+def test_a_row_with_no_property_draws_no_line_for_one(monkeypatch) -> None:
+    lines = drawn(monkeypatch, _spec_snapshot())
+    assert not any("must not break" in line for line in lines)
+
+
+def _row_lines(monkeypatch, task: Task, *, opened: bool) -> list[str]:
+    """What one row draws with its triangle open or, as it ships, closed."""
+    snap = board_snapshot(task)
+    fake = MagicMock()
+    fake.tree_node_ex.return_value = opened
+    monkeypatch.setattr(board_pane, "imgui", fake)
+    monkeypatch.setattr(board_pane, "section", MagicMock())
+    board_pane.draw(snap, at_root(snap), board_pane.BoardState(), Bridge())
+    return [str(a) for call in fake.text_colored.call_args_list for a in call.args[1:]]
+
+
+_STANDINGS = [
+    # result, its basis, not_run -> what the closed row says of each
+    ("ran it", Basis.RUN, None, "result says: run", "not run: unstated"),
+    ("ran it", None, "", "result basis unstated", "says nothing was left unrun"),
+    ("ran it", Basis.READ, "the probe", "result says: read", "says what was not run"),
+    ("", None, None, "no result reported", "not run: unstated"),
+    ("", None, "the probe", "no result reported", "says what was not run"),
+]
+
+
+@pytest.mark.parametrize(("result", "basis", "not_run", "said", "unrun"), _STANDINGS)
+def test_a_finished_row_nobody_opened_says_its_basis_and_where_it_stands_on_not_run(
+    monkeypatch, result: str, basis: Basis | None, not_run: str | None, said: str, unrun: str
+) -> None:
+    """
+    Rows ship closed, so the closed row is the one the operator reads. Silence on
+    it is read as "run": nobody said otherwise. Drawn through ``draw`` with the
+    triangle reporting closed, and the opened body's own lines must be absent or
+    this is asserting the wrong row.
+    """
+    task = Task(
+        id="t1",
+        title="do t1",
+        detail="the specification",
+        state=TaskState.COMPLETED,
+        claimed_by=QA,
+        declared_by=ROOT,
+        result=result,
+        result_basis=basis,
+        not_run=not_run,
+    )
+    lines = _row_lines(monkeypatch, task, opened=False)
+
+    assert "the specification" not in lines
+    assert not any(line.startswith("result, as ") for line in lines)
+    assert f"{said} · {unrun}" in lines
+
+
+def test_a_finished_row_with_nothing_else_under_its_title_still_says_where_it_stands(
+    monkeypatch,
+) -> None:
+    """No owner, no property, no dependency, no note: the standing is the only line."""
+    task = Task(id="t1", title="do t1", state=TaskState.COMPLETED, declared_by=ROOT)
+    lines = _row_lines(monkeypatch, task, opened=False)
+
+    assert lines[lines.index("do t1") + 1] == "no result reported · not run: unstated"
+
+
+@pytest.mark.parametrize("state", [TaskState.PENDING, TaskState.CLAIMED])
+def test_a_row_that_is_not_finished_says_nothing_about_a_result_it_does_not_have(
+    monkeypatch, state: TaskState
+) -> None:
+    task = Task(id="t1", title="do t1", state=state, claimed_by=QA, declared_by=ROOT)
+    for opened in (False, True):
+        lines = _row_lines(monkeypatch, task, opened=opened)
+        assert not any("not run" in line or "result" in line for line in lines)
+
+
+@pytest.mark.parametrize(("result", "basis", "not_run", "said", "unrun"), _STANDINGS)
+def test_an_opened_finished_row_carries_the_same_standing_in_its_headings(
+    monkeypatch, result: str, basis: Basis | None, not_run: str | None, said: str, unrun: str
+) -> None:
+    """
+    Opening a row must not lose what the closed row said, and must not say it
+    twice: the headings over the result and the list carry it there.
+    """
+    task = Task(
+        id="t1",
+        title="do t1",
+        state=TaskState.COMPLETED,
+        claimed_by=QA,
+        declared_by=ROOT,
+        result=result,
+        result_basis=basis,
+        not_run=not_run,
+    )
+    lines = _row_lines(monkeypatch, task, opened=True)
+
+    assert f"{said} · {unrun}" not in lines
+    if result:
+        said_of = said.removeprefix("result ")
+        assert any(line.startswith("result, as ") and f"({said_of})" in line for line in lines)
+    if not_run:
+        assert any(line.startswith("not run, as ") for line in lines)
+        assert not_run in lines
+    else:
+        assert unrun in lines
+
+
+def _row_colours(
+    monkeypatch, task: Task, *, opened: bool, concerns: tuple[Concern, ...] = ()
+) -> dict[str, object]:
+    """Each line one row draws, against the colour it was drawn in."""
+    snap = board_snapshot(task, concerns=concerns)
+    fake = MagicMock()
+    fake.tree_node_ex.return_value = opened
+    monkeypatch.setattr(board_pane, "imgui", fake)
+    monkeypatch.setattr(board_pane, "section", MagicMock())
+    board_pane.draw(snap, at_root(snap), board_pane.BoardState(), Bridge())
+    return {str(call.args[1]): call.args[0] for call in fake.text_colored.call_args_list}
+
+
+def _done(**said: object) -> Task:
+    return Task(
+        id="t1",
+        title="do t1",
+        state=TaskState.COMPLETED,
+        claimed_by=QA,
+        declared_by=ROOT,
+        **said,  # type: ignore[arg-type]
+    )
+
+
+@pytest.mark.parametrize(
+    ("result", "basis", "not_run", "reassuring"),
+    [
+        ("ran it", Basis.RUN, "", True),
+        ("ran it", Basis.READ, "", True),
+        # The row the screenshot caught: nothing left unrun, by a claimer that did
+        # not say how it knows.
+        ("ran it", None, "", False),
+        ("ran it", Basis.RUN, None, False),
+        ("ran it", Basis.RUN, "the probe", False),
+        ("ran it", None, None, False),
+        ("", None, None, False),
+        ("", None, "the probe", False),
+    ],
+)
+def test_a_closed_rows_standing_is_reassuring_only_when_both_halves_are_stated(
+    monkeypatch, result: str, basis: Basis | None, not_run: str | None, reassuring: bool
+) -> None:
+    """
+    One line, two statements, one colour. Dim is what this pane draws a line in
+    when nothing on it wants the operator, so it is earned by both halves: a
+    stated basis, and a stated "nothing was left unrun". An unstated half in that
+    colour reads as settled on the strength of the other.
+    """
+    task = _done(result=result, result_basis=basis, not_run=not_run)
+    lines = _row_colours(monkeypatch, task, opened=False)
+
+    # The summary above the rows is joined the same way, and is not a row's line.
+    (standing,) = [line for line in lines if " · " in line and "task(s)" not in line]
+    assert lines[standing] == (P.text_dim.vec4 if reassuring else P.warn.vec4)
+    # A basis and "nothing left unrun" with no result under them: the reducer does
+    # not store this, and a row built another way must not read as settled either.
+    hollow = dataclasses.replace(
+        board_task(state=TaskState.COMPLETED), result_basis=Basis.RUN, not_run=""
+    )
+    assert board_pane.settled(hollow) is False
+
+
+@pytest.mark.parametrize(
+    ("stated", "spec", "result"),
+    [
+        (Basis.RUN, P.text_dim.vec4, P.accent.vec4),
+        (Basis.RELAYED, P.text_dim.vec4, P.accent.vec4),
+        (None, P.warn.vec4, P.warn.vec4),
+    ],
+)
+def test_an_opened_rows_headings_draw_an_unstated_basis_as_a_warning(
+    monkeypatch, stated: Basis | None, spec: object, result: object
+) -> None:
+    """The same rule behind the triangle, on each heading that carries a basis."""
+    task = _done(detail="the spec", basis=stated, result="ran it", result_basis=stated)
+    said = "basis unstated" if stated is None else f"says: {stated.value}"
+    lines = _row_colours(monkeypatch, task, opened=True)
+
+    assert lines[f"specification ({said}):"] == spec
+    (heading,) = [line for line in lines if line.startswith("result, as ")]
+    assert heading.endswith(f"({said}):") and lines[heading] == result
+
+
+@pytest.mark.parametrize(
+    ("basis", "incident", "colour"),
+    [
+        (Basis.RUN, False, P.accent.vec4),
+        (None, False, P.warn.vec4),
+        # The colour an incident has in the log below, on the row it explains too.
+        (Basis.RUN, True, P.warn.vec4),
+        (None, True, P.warn.vec4),
+    ],
+)
+def test_a_reason_is_drawn_as_a_warning_when_it_is_an_incident_or_states_no_basis(
+    monkeypatch, basis: Basis | None, incident: bool, colour: object
+) -> None:
+    note = Concern(
+        id="c1",
+        sender=QA,
+        recipient=ROOT,
+        subject="wrote outside touches",
+        body="store.py",
+        posted_at=1.0,
+        task_id="t1",
+        basis=basis,
+        incident=incident,
+    )
+    lines = _row_colours(monkeypatch, _done(result="r"), opened=True, concerns=(note,))
+
+    said = "basis unstated" if basis is None else f"says: {basis.value}"
+    mark = "INCIDENT " if incident else ""
+    assert lines[f"reason ({said}): {mark}wrote outside touches"] == colour
+    # The log's own lines for the same concern, which is where the colour comes
+    # from: the marker is the pane's and the subject is the sender's.
+    assert lines["wrote outside touches"] == (P.warn.vec4 if incident else P.text.vec4)
+    assert lines.get("INCIDENT") == (P.warn.vec4 if incident else None)
+
+
+def test_an_opened_finished_row_with_no_result_says_so_as_the_closed_row_does(
+    monkeypatch,
+) -> None:
+    """
+    The opened row is the fuller reading, so it may not say less: a finished row
+    nobody reported on draws that, above where it stands on what was not run.
+    """
+    closed = _row_colours(monkeypatch, _done(), opened=False)
+    opened = _row_colours(monkeypatch, _done(), opened=True)
+
+    assert "no result reported · not run: unstated" in closed
+    lines = list(opened)
+    assert lines.index("no result reported") + 1 == lines.index("not run: unstated")
+    assert opened["no result reported"] == P.warn.vec4
+    # Not on a row with a result, and not on a row that is not finished.
+    assert "no result reported" not in _row_colours(monkeypatch, _done(result="r"), opened=True)
+    waiting = Task(id="t1", title="do t1", declared_by=ROOT)
+    assert "no result reported" not in _row_colours(monkeypatch, waiting, opened=True)
+
+
+@pytest.mark.parametrize(
+    ("basis", "line", "colour"),
+    [
+        (Basis.READ, "no specification text (says: read)", P.text_dim.vec4),
+        (None, None, None),
+    ],
+)
+def test_a_basis_declared_with_no_specification_text_is_still_shown(
+    monkeypatch, basis: Basis | None, line: str | None, colour: object
+) -> None:
+    """
+    A declarer can state how it knows and write no detail. The basis is stored, so
+    a pane that hangs the marker off the text shows it nowhere. A row with neither
+    draws no line for a specification it does not have.
+    """
+    task = Task(id="t1", title="do t1", declared_by=ROOT, basis=basis)
+    lines = _row_colours(monkeypatch, task, opened=True)
+
+    if line is None:
+        assert not any("specification" in drawn_line for drawn_line in lines)
+    else:
+        assert lines[line] == colour
+
+
+def test_the_unrun_heading_names_each_standing_and_is_empty_for_an_unfinished_row() -> None:
+    """
+    The heading an opened finished row draws, over its three standings and the row
+    with no result at all -- and nothing for a row that is not finished, where
+    "not run" would be a statement about work nobody has claimed to have done.
+    """
+    done = TaskState.COMPLETED
+
+    def row(not_run: str | None, *, state: TaskState = done, result: str = "r") -> BoardTask:
+        return dataclasses.replace(
+            board_task(owner="builder", state=state, result=result), not_run=not_run
+        )
+
+    assert board_pane.unrun_heading(row(None)) == "not run: unstated"
+    assert board_pane.unrun_heading(row(None, result="")) == "not run: unstated"
+    assert board_pane.unrun_heading(row("")) == "says nothing was left unrun"
+    assert board_pane.unrun_heading(row("the probe")) == "not run, as builder states it:"
+    assert board_pane.unrun_heading(row(None, state=TaskState.CLAIMED, result="")) == ""
+    assert board_pane.unrun_heading(row(None, state=TaskState.PENDING, result="")) == ""
+
+
+def test_the_operator_is_shown_what_a_claimer_did_not_run(monkeypatch) -> None:
+    """
+    From the record to the screen: an unstated row draws the absence, and a listed
+    one draws the claimer's list under its heading and does not also draw the
+    absence.
+    """
+    unsaid = drawn(monkeypatch, _finished("ran it"))
+    listed = drawn(
+        monkeypatch,
+        board_snapshot(dataclasses.replace(_finished("ran it").tasks["t1"], not_run="the probe")),
+    )
+
+    assert "not run: unstated" in unsaid
+    assert "not run: unstated" not in listed
+    heading = next(i for i, line in enumerate(listed) if line.startswith("not run, as "))
+    assert listed[heading + 1] == "the probe"
+
+
+def _noted(*, incident: bool) -> Snapshot:
+    note = Concern(
+        id="c1",
+        sender=QA,
+        recipient=ROOT,
+        subject="wrote outside touches",
+        body="store.py",
+        posted_at=1.0,
+        task_id="t1",
+        incident=incident,
+    )
+    return board_snapshot(_finished("r").tasks["t1"], concerns=(note,))
+
+
+def test_an_incident_is_marked_on_the_row_it_explains_and_in_the_log(monkeypatch) -> None:
+    marked = drawn(monkeypatch, _noted(incident=True))
+    plain = drawn(monkeypatch, _noted(incident=False))
+
+    assert "reason (basis unstated): INCIDENT wrote outside touches" in marked
+    # In the log the marker is a line of the pane's own, over the sender's subject.
+    assert marked[marked.index("wrote outside touches") - 1] == "INCIDENT"
+    assert "reason (basis unstated): wrote outside touches" in plain
+    assert "wrote outside touches" in plain
+    assert not any("incident" in line.lower() for line in plain)
+
+
+def _held_snapshot() -> Snapshot:
+    return board_snapshot(
+        Task(id="t1", title="do t1", detail="the spec", declared_by=ROOT, property=_HELD)
+    )
+
+
+def test_opening_the_editor_seeds_the_property_draft_from_the_declared_one(monkeypatch) -> None:
+    pane = board_pane.BoardState()
+    _amend_run(monkeypatch, _held_snapshot(), pane, {"amend##t1"})
+
+    assert pane.property_drafts["t1"] == _HELD
+
+
+def test_amending_only_the_specification_sends_no_property(monkeypatch) -> None:
+    """
+    The property box was drawn holding the declared sentence and was not touched,
+    so the amendment says nothing about it and the reducer leaves it standing.
+    Sending it back unchanged would work today and would make every amendment a
+    rewrite of a sentence the operator never looked at.
+    """
+    pane = board_pane.BoardState(editing="t1", drafts={"t1": "a new spec"})
+    emitted = _amend_run(monkeypatch, _held_snapshot(), pane, {"amend##apply-t1"})
+
+    assert emitted == [board_pane.TaskAmended(task_id="t1", detail="a new spec", property=None)]
+
+
+def test_amending_only_the_property_leaves_the_declarers_basis_on_the_board(monkeypatch) -> None:
+    """
+    From the button to the record. The editor sends the specification box as it
+    was drawn, so what keeps the basis is the reducer seeing the same words -- and
+    a rewritten specification from the same editor still drops it.
+    """
+    from pptmstr.intents import TaskDeclared
+    from pptmstr.store import Store
+
+    def amended(**drafts: str) -> Task:
+        store = Store()
+        store.apply(
+            TaskDeclared(
+                Task(
+                    id="t1", title="do t1", detail="the spec", basis=Basis.RELAYED, property=_HELD
+                ),
+                node_id=ROOT,
+            )
+        )
+        pane = board_pane.BoardState(
+            editing="t1",
+            drafts={"t1": drafts.get("detail", "the spec")},
+            property_drafts={"t1": drafts.get("held_to", _HELD)},
+        )
+        snap = dataclasses.replace(board_snapshot(), tasks=store.snapshot().tasks)
+        for intent in _amend_run(monkeypatch, snap, pane, {"amend##apply-t1"}):
+            store.apply(intent)
+        return store.snapshot().tasks["t1"]
+
+    only_property = amended(held_to="A different sentence.")
+    assert (only_property.property, only_property.basis) == (
+        "A different sentence.",
+        Basis.RELAYED,
+    )
+    assert amended().basis is Basis.RELAYED
+    assert amended(detail="a new spec").basis is None
+
+
+def test_a_rewritten_property_is_sent_as_one_line_and_an_emptied_one_withdraws_it(
+    monkeypatch,
+) -> None:
+    for typed, sent in (("  never lose\n a claim. ", "never lose a claim."), ("  ", "")):
+        pane = board_pane.BoardState(
+            editing="t1", drafts={"t1": "the spec"}, property_drafts={"t1": typed}
+        )
+        emitted = _amend_run(monkeypatch, _held_snapshot(), pane, {"amend##apply-t1"})
+
+        assert emitted == [board_pane.TaskAmended(task_id="t1", detail="the spec", property=sent)]
+        assert "t1" not in pane.property_drafts
+
+
+def test_a_property_past_the_limit_is_not_applied_and_the_editor_says_why(monkeypatch) -> None:
+    """
+    The reducer refuses nothing, and every surface shows a property whole, so the
+    editor is the only bound on one the operator writes. Nothing is emitted, the
+    draft is kept, and the reason is on screen.
+    """
+    from pptmstr.model import MAX_PROPERTY_CHARS
+
+    typed = "x" * (MAX_PROPERTY_CHARS + 5)
+    pane = board_pane.BoardState(
+        editing="t1", drafts={"t1": "the spec"}, property_drafts={"t1": typed}
+    )
+    emitted = _amend_run(monkeypatch, _held_snapshot(), pane, {"amend##apply-t1"})
+    fake_lines = [
+        str(a) for call in board_pane.imgui.text_colored.call_args_list for a in call.args[1:]
+    ]
+
+    assert emitted == []
+    assert pane.editing == "t1" and pane.property_drafts["t1"] == typed
+    assert any(f"5 over the {MAX_PROPERTY_CHARS}" in line for line in fake_lines)
+    assert board_pane.property_overrun_label("x" * MAX_PROPERTY_CHARS) == ""
+
+
+def test_a_draft_property_does_not_outlive_its_task() -> None:
+    pane = board_pane.BoardState(drafts={"gone": "d"}, property_drafts={"gone": "p", "t1": "p"})
+    board_pane._prune(pane, {"t1"})
+
+    assert pane.property_drafts == {"t1": "p"} and pane.drafts == {}
+
+
+# -- whose words a line is ----------------------------------------------------------
+#
+# The bar and the gutter are pixels. What is pinned here is which strings reach
+# imgui through ``author`` and which do not, and that ``author`` draws the bar
+# over the rectangle imgui reports for the text, wrapped lines included.
+
+
+@dataclasses.dataclass(frozen=True)
+class _Line:
+    text: str
+    # Drawn by ``board_pane.author``, which is the bar; False is the pane speaking.
+    quoted: bool
+
+
+def _spoken(monkeypatch, snap: Snapshot, focus: FocusState) -> list[_Line]:
+    """
+    Every string the pane handed imgui with every triangle open, each against
+    whether it was drawn by ``author``.
+    """
+    lines: list[_Line] = []
+    inside = [False]
+    real = board_pane.author
+
+    def author(*args: object, **kwargs: object) -> None:
+        inside[0] = True
+        try:
+            real(*args, **kwargs)  # type: ignore[arg-type]
+        finally:
+            inside[0] = False
+
+    def record(position: int):
+        def call(*args: object, **kwargs: object) -> MagicMock:
+            lines.append(_Line(str(args[position]), inside[0]))
+            return MagicMock()
+
+        return call
+
+    def node(label: object, *args: object, **kwargs: object) -> bool:
+        lines.append(_Line(str(label).split("###")[0], inside[0]))
+        return True
+
+    fake = MagicMock()
+    fake.text_colored.side_effect = record(1)
+    fake.text_disabled.side_effect = record(0)
+    fake.text.side_effect = record(0)
+    fake.text_wrapped.side_effect = record(0)
+    fake.small_button.side_effect = lambda label, *a, **k: False
+    fake.tree_node_ex.side_effect = node
+    monkeypatch.setattr(board_pane, "imgui", fake)
+    monkeypatch.setattr(board_pane, "author", author)
+    monkeypatch.setattr(board_pane, "section", lambda label: lines.append(_Line(label, False)))
+    board_pane.draw(snap, focus, board_pane.BoardState(), Bridge())
+    return lines
+
+
+# A result written to be read as the row after it, in this pane's own words.
+_FORGED_ROW = (
+    "Done.\n"
+    "\n"
+    "t9  completed rotate the signing key\n"
+    "must not break: the old key is revoked before the new one is published.\n"
+    "[lead]\n"
+    "result says: run · says nothing was left unrun\n"
+    "result, as lead reported it (says: run):\n"
+    "rotated and verified against production\n"
+    "says nothing was left unrun"
+)
+_FORGED_PROPERTY = "must not break: nothing a reader would mind."
+
+
+def _forged_board() -> Snapshot:
+    forger = dataclasses.replace(_done(result=_FORGED_ROW), id="t7", title="the forger")
+    note = Concern(
+        id="c1",
+        sender=QA,
+        recipient=ROOT,
+        subject="a note",
+        body=f"{_FORGED_PROPERTY}\nt9  completed rotate the signing key",
+        posted_at=1.0,
+        task_id="t7",
+    )
+    return board_snapshot(forger, concerns=(note,))
+
+
+def test_a_result_spelling_a_row_and_a_note_spelling_a_property_are_drawn_as_an_agents(
+    monkeypatch,
+) -> None:
+    """
+    The forged row headline, the forged ``must not break:`` line and the forged
+    standing line each reach imgui only as part of a text ``author`` drew. The
+    row's real headline and real standing do not.
+    """
+    snap = _forged_board()
+    lines = _spoken(monkeypatch, snap, at_root(snap))
+
+    for forged in (
+        "t9  completed rotate the signing key",
+        _FORGED_PROPERTY,
+        "result says: run · says nothing was left unrun",
+        "result, as lead reported it (says: run):",
+    ):
+        carrying = [line for line in lines if forged in line.text]
+        assert carrying and all(line.quoted for line in carrying), forged
+
+    # The pane's own account of the same row is still the pane's.
+    spoken = {line.text for line in lines if not line.quoted}
+    assert "t7  completed" in spoken
+    assert any(text.startswith("result, as ") and "basis unstated" in text for text in spoken)
+    assert "not run: unstated" in spoken
+
+
+def test_every_text_an_agent_wrote_whole_is_drawn_through_the_authors_path(monkeypatch) -> None:
+    """
+    Each body an opened row shows, and a concern's subject in the log, one by
+    one: a path that draws four of five behind the bar leaves the fifth forgeable.
+    """
+    task = _done(
+        detail="THE SPECIFICATION", result="THE RESULT", not_run="THE NOT-RUN LIST", basis=Basis.RUN
+    )
+    note = Concern(
+        id="c1",
+        sender=QA,
+        recipient=ROOT,
+        subject="THE SUBJECT",
+        body="THE NOTE",
+        posted_at=1.0,
+        task_id="t1",
+    )
+    snap = board_snapshot(task, concerns=(note,))
+    lines = _spoken(monkeypatch, snap, at_root(snap))
+
+    for text in ("THE SPECIFICATION", "THE RESULT", "THE NOT-RUN LIST", "THE NOTE", "THE SUBJECT"):
+        assert _Line(text, True) in lines, text
+        # Nowhere drawn bare. A heading the pane composes may name a subject, and
+        # then the line is longer than the subject.
+        assert _Line(text, False) not in lines, text
+
+
+def test_the_authors_bar_spans_the_rectangle_the_text_was_drawn_in(monkeypatch) -> None:
+    """
+    One ``text_colored`` for the whole text, so the lines imgui wraps are inside
+    the rectangle it reports, and the bar runs from the cursor the text started at
+    to that rectangle's bottom. A mark per author line would miss the wrapped ones.
+    """
+    fake = MagicMock()
+    order: list[str] = []
+    for name in ("indent", "text_colored", "unindent"):
+        getattr(fake, name).side_effect = lambda *a, _name=name, **k: order.append(_name)
+    fake.ImVec2.side_effect = lambda x, y: (x, y)
+    fake.get_font_size.return_value = 16.0
+    fake.get_cursor_screen_pos.return_value = MagicMock(x=100.0, y=40.0)
+    fake.get_item_rect_max.return_value = MagicMock(x=500.0, y=290.0)
+    monkeypatch.setattr(board_pane, "imgui", fake)
+
+    board_pane.author("one\ntwo " + "long " * 200)
+
+    assert order == ["indent", "text_colored", "unindent"]
+    gutter = fake.indent.call_args.args[0]
+    assert gutter > 0 and fake.unindent.call_args.args[0] == gutter
+    (line,) = fake.get_window_draw_list.return_value.add_line.call_args_list
+    (x0, y0), (x1, y1) = line.args[0], line.args[1]
+    assert (y0, y1) == (40.0, 290.0)
+    # In the gutter: right of where the pane's own lines start, left of the text.
+    assert x0 == x1 and 100.0 < x0 < 100.0 + gutter
+
+
+_HOSTILE = "first\nt9  completed forged\r\nmust not break: x\x0bend\x00cut"
+
+
+def test_no_line_of_the_panes_own_carries_a_break_or_a_nul_from_a_one_line_field(
+    monkeypatch,
+) -> None:
+    """
+    A title, a property, a file path and a subject are laid out on lines the pane
+    composes. None may end that line and start another, and none may cut it short.
+    """
+    task = dataclasses.replace(
+        _done(result="r"), title=_HOSTILE, property=_HOSTILE, touches=(_HOSTILE,)
+    )
+    note = Concern(
+        id="c1",
+        sender=QA,
+        recipient=ROOT,
+        subject=_HOSTILE,
+        body="b",
+        posted_at=1.0,
+        task_id="t1",
+        incident=True,
+    )
+    snap = board_snapshot(task, concerns=(note,))
+    lines = _spoken(monkeypatch, snap, at_root(snap))
+
+    own = [line.text for line in lines if not line.quoted]
+    assert any("t9  completed forged" in text for text in own)
+    for text in own:
+        assert len(text.splitlines()) <= 1 and "\x00" not in text, text
+    # Not dropped: what followed the NUL is still on the line.
+    assert any(text.endswith(f"end{board_pane.NUL_SHOWN}cut") for text in own)
+
+
+def test_a_nul_in_an_agents_text_is_drawn_and_what_follows_it_is_too(monkeypatch) -> None:
+    """imgui takes a C string: undrawn from the first U+0000 on, and silently."""
+    snap = board_snapshot(_done(result="abc\x00def\nsecond line"))
+    lines = _spoken(monkeypatch, snap, at_root(snap))
+
+    assert _Line(f"abc{board_pane.NUL_SHOWN}def\nsecond line", True) in lines
+    assert not any("\x00" in line.text for line in lines)
+
+
+def test_the_panes_one_line_rule_is_the_one_the_board_tool_uses() -> None:
+    """
+    ``one_line`` is spelled twice, here and in the bus, so the UI does not import
+    the SDK. The two must call the same things a line break.
+    """
+    from pptmstr import bus
+
+    for text in (
+        "plain",
+        "a\nb",
+        "a\r\nb",
+        "a\rb",
+        "a\x0bb\x0cc",
+        "a\x1cb\x1dc\x1ed",
+        "a\x85b\u2028c\u2029d",
+        "trailing\n",
+        "\n\nleading",
+        "",
+    ):
+        assert board_pane.one_line(text) == bus._one_line(text), repr(text)
+
+
+def test_amending_a_second_row_abandons_the_draft_left_on_the_first(monkeypatch) -> None:
+    """
+    One editor. A draft left behind when the operator moved to another row would
+    come back, unasked, the next time the first row is amended.
+    """
+    snap = board_snapshot(
+        Task(id="t1", title="do t1", detail="the first spec", declared_by=ROOT),
+        Task(id="t2", title="do t2", detail="the second spec", declared_by=ROOT),
+    )
+    pane = board_pane.BoardState(
+        editing="t1", drafts={"t1": "half a thought"}, property_drafts={"t1": "half a sentence"}
+    )
+
+    _amend_run(monkeypatch, snap, pane, {"amend##t2"})
+    assert pane.editing == "t2"
+    assert pane.drafts == {"t2": "the second spec"} and pane.property_drafts == {"t2": ""}
+
+    _amend_run(monkeypatch, snap, pane, {"amend##t1"})
+    assert pane.editing == "t1" and pane.drafts == {"t1": "the first spec"}
+
+
+# -- a replaced specification, on the row --------------------------------------------
+#
+# Verified through the labels and the recorded draw calls only: nothing drawn by
+# these lines has been seen on a screen.
+
+
+def _replaced(**said: object) -> Task:
+    from pptmstr.model import TaskVersion
+
+    return Task(
+        id="t1",
+        title="do t1",
+        detail="second",
+        declared_by=ROOT,
+        claimed_by=QA,
+        held_by=(QA,),
+        claimed_version=1,
+        superseded=(TaskVersion("first", "", None, replaced_at=1.0, replaced_by=None),),
+        **said,  # type: ignore[arg-type]
+    )
+
+
+@pytest.mark.parametrize("opened", [True, False])
+@pytest.mark.parametrize(
+    ("state", "stale"),
+    [
+        (TaskState.CLAIMED, "its holder was handed v1 and has not been shown v2"),
+        (TaskState.COMPLETED, "result written against v1; the specification is now v2"),
+    ],
+)
+def test_a_row_draws_its_version_and_what_is_behind_it_open_or_closed(
+    monkeypatch, opened: bool, state: TaskState, stale: str
+) -> None:
+    """
+    Both are facts about the row and not a reading of its text, so neither waits
+    behind the triangle. The stale line is in the warning colour: it is the row an
+    operator should not read as settled.
+    """
+    colours = _row_colours(monkeypatch, _replaced(state=state), opened=opened)
+
+    assert colours["specification v2, replaced by the operator"] == P.text_dim.vec4
+    assert colours[stale] == P.warn.vec4
+
+
+@pytest.mark.parametrize("opened", [True, False])
+def test_a_row_on_its_declared_specification_draws_no_version_line(
+    monkeypatch, opened: bool
+) -> None:
+    task = Task(id="t1", title="do t1", detail="first", declared_by=ROOT, claimed_by=QA)
+    lines = _row_lines(
+        monkeypatch, dataclasses.replace(task, state=TaskState.CLAIMED), opened=opened
+    )
+
+    assert not any("specification v" in line or "handed" in line for line in lines)
+
+
+def test_a_holder_shown_the_current_specification_draws_the_version_and_no_warning(
+    monkeypatch,
+) -> None:
+    current = dataclasses.replace(_replaced(state=TaskState.CLAIMED), claimed_version=2)
+    lines = _row_lines(monkeypatch, current, opened=False)
+
+    assert "specification v2, replaced by the operator" in lines
+    assert not any("handed" in line or "written against" in line for line in lines)
+
+
+# -- what the board's log vouches for ------------------------------------------------
+
+
+def _restore(**fields: object):  # type: ignore[no-untyped-def]
+    from pptmstr.model import Restore
+
+    return Restore(session_id="s1", **{"at": 5.0, "tasks": 2, "concerns": 1, **fields})  # type: ignore[arg-type]
+
+
+def _held() -> Task:
+    return Task(id="t1", title="held from before", declared_at=1.0, declared_by=ROOT)
+
+
+def _log(**fields: object) -> board_pane.LogState:
+    return board_pane.LogState(directory="/cfg/boards/s1", **fields)  # type: ignore[arg-type]
+
+
+def test_a_session_nothing_was_restored_for_has_no_restore_line() -> None:
+    assert board_pane.restore_line(None, _log()) is None
+    assert board_pane.restore_line(None, None) is None
+
+
+def test_a_whole_restore_says_what_came_back_and_how_recent_the_log_was() -> None:
+    line = board_pane.restore_line(_restore(), _log(newest=1_760_000_000.0))
+
+    assert line is not None and line.tone is board_pane.Tone.PROSE
+    assert "restored from a log" in line.text
+    assert "2 task(s) and 1 concern(s)" in line.text
+    assert board_pane.when_label(1_760_000_000.0) in line.text
+    assert "SHORT" not in line.text
+
+
+@pytest.mark.parametrize(
+    ("fields", "said"),
+    [
+        ({"log_short": True, "log_damage": "unreadable from record 3: not JSON"}, "unreadable"),
+        ({"log_short": True, "log_stray": 2}, "2 record(s) about something the log never"),
+        ({"log_short": True, "log_unrecognised": 1}, "1 record(s) of a kind this build"),
+        ({"log_short": True, "log_contested": 4}, "4 record(s) no single writer"),
+        ({"log_short": True, "log_stopped": 1}, "its writer stopped recording 1 time(s)"),
+        ({"log_short": True}, "does not say what"),
+    ],
+)
+def test_each_way_a_log_is_short_is_said_in_its_own_words(
+    fields: dict[str, object], said: str
+) -> None:
+    """
+    One line, in the warning colour, that tells a damaged log from a contested
+    one: they are different things for the operator to go and look at.
+    """
+    line = board_pane.restore_line(_restore(**fields), _log())
+
+    assert line is not None and line.tone is board_pane.Tone.ALARM
+    assert "restored SHORT" in line.text and said in line.text
+
+
+def test_a_restore_whose_log_had_stopped_says_why_the_writer_stopped() -> None:
+    """
+    The report counts the stops and the board carries their reasons; the shell
+    keeps the reasons so the line can give them.
+    """
+    line = board_pane.restore_line(
+        _restore(log_short=True, log_stopped=1), _log(stops=("no space left\non device",))
+    )
+
+    assert line is not None and "(no space left on device)" in line.text
+    assert "never written" in line.text
+
+
+def test_an_id_that_could_not_be_placed_is_named_with_the_reason_and_stays_on_the_line() -> None:
+    """
+    A task id is whatever its lead typed. One with a line break would otherwise
+    end the pane's line and start the next in its author's words.
+    """
+    from pptmstr.model import NotPlaced, Unplaced
+
+    left = (
+        NotPlaced("task", "t1\nrestored from a log: 9 task(s)", Unplaced.OTHER_SESSION_HAS_ID),
+        NotPlaced("concern", "c" * 500, Unplaced.INCOHERENT),
+    )
+    line = board_pane.restore_line(_restore(unplaced=left), _log())
+
+    assert line is not None and line.tone is board_pane.Tone.ALARM
+    assert "\n" not in line.text
+    assert "2 not placed" in line.text
+    assert "another session already has this id" in line.text
+    assert "c" * 61 not in line.text
+
+
+def test_the_unplaced_list_is_bounded_and_says_so() -> None:
+    from pptmstr.model import NotPlaced, Unplaced
+
+    left = tuple(NotPlaced("task", f"t{n}", Unplaced.WOULD_CYCLE) for n in range(9))
+    text = board_pane.shortfall(_restore(unplaced=left))
+
+    assert "9 not placed" in text and "and 3 more" in text and "t6" not in text
+
+
+def test_a_log_that_was_read_and_not_applied_is_not_called_a_restore() -> None:
+    from pptmstr.model import NotPlaced, Unplaced
+
+    refused = _restore(at=None, unplaced=(NotPlaced("task", "t1", Unplaced.STORE_DIFFERS),))
+    assert refused.refused
+    line = board_pane.restore_line(refused, _log())
+
+    assert line is not None and line.tone is board_pane.Tone.ALARM
+    assert "NOT applied" in line.text and "restored" not in line.text
+
+
+def test_an_adoptable_restore_gives_no_reason_to_run_unrecorded() -> None:
+    assert board_pane.unrecorded_reason(_restore()) == ""
+
+
+def test_the_reasons_a_log_is_not_appended_to_tell_the_mistakes_apart() -> None:
+    from pptmstr.model import NotPlaced, Unplaced
+
+    refused = _restore(unplaced=(NotPlaced("task", "t1", Unplaced.STORE_ONLY),))
+    short = _restore(log_short=True, log_stray=1)
+
+    assert "another pptmstr window" in board_pane.unrecorded_reason(refused)
+    assert "short log" in board_pane.unrecorded_reason(short)
+    assert "another pptmstr window" not in board_pane.unrecorded_reason(short)
+    assert board_pane.unrecorded_reason(None) != ""
+
+
+def test_a_recorded_board_says_where_and_that_nothing_deletes_it() -> None:
+    line = board_pane.recording_line(None, _log())
+
+    assert line is not None and line.tone is board_pane.Tone.PROSE
+    assert "/cfg/boards/s1" in line.text and "until you delete it" in line.text
+
+
+def test_a_board_that_stopped_being_recorded_says_why_and_what_the_log_will_claim() -> None:
+    stopped = _log(recording=False, stopped=True, why_not="OSError: disk full", unkept=3)
+
+    said = board_pane.recording_line(None, dataclasses.replace(stopped, marked=True))
+    unsaid = board_pane.recording_line(None, dataclasses.replace(stopped, marked=False))
+
+    assert said is not None and unsaid is not None
+    assert said.tone is board_pane.Tone.ALARM
+    assert "no longer being recorded: OSError: disk full" in said.text
+    assert "3 record(s)" in said.text and "will restore as short" in said.text
+    assert "does NOT say so" in unsaid.text and "as though it were whole" in unsaid.text
+
+
+def test_a_session_never_adopted_is_said_to_be_running_unrecorded_and_why() -> None:
+    line = board_pane.recording_line(None, _log(recording=False, why_not="its log is short"))
+
+    assert line is not None and line.tone is board_pane.Tone.ALARM
+    assert "running UNRECORDED: its log is short" in line.text
+    assert "will survive a restart" in line.text
+
+
+def test_a_board_not_recorded_by_choice_says_so_without_alarm() -> None:
+    line = board_pane.recording_line("switched off: board_log in settings.json", _log())
+
+    assert line is not None and line.tone is board_pane.Tone.PROSE
+    assert line.text == "not recorded (switched off: board_log in settings.json)"
+
+
+def test_a_board_not_recorded_because_the_switch_could_not_be_read_is_an_alarm() -> None:
+    """
+    The same outcome as the choice above and the opposite standing: nobody asked
+    for it. Read before ``off`` and before a log entry, so neither can say
+    "switched off" or "recorded" over it.
+    """
+    line = board_pane.recording_line(
+        "switched off: board_log in settings.json", _log(), "settings could not be read (/c/s.json)"
+    )
+
+    assert line is not None and line.tone is board_pane.Tone.ALARM
+    assert line.text == "not recorded: settings could not be read (/c/s.json)"
+
+
+def test_the_pane_draws_the_unread_reason_for_any_session(monkeypatch) -> None:
+    logging = board_pane.Logging(unread="board_log in settings.json is not true or false")
+
+    lines = _drawn_with(monkeypatch, board_snapshot(_held()), logging)
+
+    assert "not recorded: board_log in settings.json is not true or false" in lines
+
+
+def test_a_session_with_no_log_entry_is_not_passed_off_as_recorded() -> None:
+    line = board_pane.recording_line(None, None)
+
+    assert line is not None and line.tone is board_pane.Tone.ALARM
+    assert "not being recorded" in line.text
+
+
+def test_nothing_is_said_about_recording_while_a_restore_is_still_being_applied() -> None:
+    assert board_pane.recording_line(None, _log(recording=False, awaiting=True)) is None
+
+
+def test_records_behind_a_break_are_counted_on_a_board_still_being_recorded() -> None:
+    line = board_pane.recording_line(None, _log(unkept=2))
+
+    assert line is not None and line.tone is board_pane.Tone.ALARM
+    assert "2 record(s)" in line.text and "will not be read back" in line.text
+
+
+def _drawn_with(monkeypatch, snap: Snapshot, logging: board_pane.Logging | None) -> list[str]:
+    fake = MagicMock()
+    fake.tree_node_ex.return_value = False
+    monkeypatch.setattr(board_pane, "imgui", fake)
+    monkeypatch.setattr(board_pane, "section", MagicMock())
+    board_pane.draw(snap, at_root(snap), board_pane.BoardState(), Bridge(), logging)
+    return [str(a) for call in fake.text_colored.call_args_list for a in call.args[1:]] + [
+        str(a) for call in fake.text_disabled.call_args_list for a in call.args
+    ]
+
+
+def test_the_pane_draws_both_lines_for_the_session_under_the_cursor(monkeypatch) -> None:
+    """
+    The wiring: the labels above are worth nothing if ``draw`` does not ask for
+    them, or asks about another session's entry.
+    """
+    snap = dataclasses.replace(
+        board_snapshot(_held()),
+        restores=MappingProxyType({"s1": _restore(log_short=True, log_stray=1)}),
+    )
+    logging = board_pane.Logging(
+        sessions={
+            "s1": _log(recording=False, why_not="its log is short"),
+            "s2": _log(recording=False, stopped=True, why_not="somebody else's"),
+        }
+    )
+
+    lines = _drawn_with(monkeypatch, snap, logging)
+
+    assert any("restored SHORT" in line for line in lines)
+    assert any("running UNRECORDED: its log is short" in line for line in lines)
+    assert not any("somebody else's" in line for line in lines)
+
+
+def test_a_caller_with_nothing_to_say_about_logs_draws_no_recording_line(monkeypatch) -> None:
+    lines = _drawn_with(monkeypatch, board_snapshot(_held()), None)
+
+    assert not any("record" in line for line in lines)
+
+
+def test_a_solo_session_holding_board_facts_has_them_drawn_and_says_why(monkeypatch) -> None:
+    """
+    A team session resumed under the solo template. Its restored claim is in the
+    store and holds its id; "this session is not a team" over it would hide a
+    held task behind a statement about the launcher.
+    """
+    snap = board_snapshot(_held(), template="solo")
+
+    lines = _drawn_with(monkeypatch, snap, None)
+
+    assert not any(line == "this session is not a team" for line in lines)
+    assert board_pane.NOT_A_TEAM_WITH_A_BOARD in lines
+    assert board_pane.shows_board(False, 1, 0) and board_pane.shows_board(False, 0, 1)
+    assert board_pane.shows_board(True, 0, 0) and not board_pane.shows_board(False, 0, 0)
+
+
+# -- the operator closes a task -----------------------------------------------------
+
+
+def _close_run(monkeypatch, snap: Snapshot, pane: board_pane.BoardState, clicks: set[str]):
+    """
+    ``_amend_run`` for the close box, handing back what was emitted and what was drawn.
+    """
+    emitted: list[object] = []
+
+    class _Bridge:
+        def emit(self, intent: object) -> None:
+            emitted.append(intent)
+
+    fake = MagicMock()
+    fake.small_button.side_effect = lambda label, *a, **k: label in clicks
+    boxes: list[str] = []
+
+    def box(label: str, value: str, *a: object, **k: object) -> tuple[bool, str]:
+        boxes.append(label)
+        return False, value
+
+    monkeypatch.setattr(board_pane, "imgui", fake)
+    monkeypatch.setattr(board_pane, "section", MagicMock())
+    monkeypatch.setattr(board_pane, "multiline_input", box)
+    board_pane.draw(snap, at_root(snap), pane, _Bridge())  # type: ignore[arg-type]
+    buttons = [str(call.args[0]) for call in fake.small_button.call_args_list]
+    said = [str(a) for call in fake.text_colored.call_args_list for a in call.args[1:]]
+    return emitted, buttons, boxes, said
+
+
+def _claimed_snapshot() -> Snapshot:
+    return board_snapshot(
+        Task(
+            id="t1",
+            title="do t1",
+            detail="the spec",
+            declared_by=ROOT,
+            state=TaskState.CLAIMED,
+            claimed_by=QA,
+        )
+    )
+
+
+@pytest.mark.parametrize("state", [TaskState.PENDING, TaskState.CLAIMED])
+def test_an_unfinished_row_offers_to_close_and_a_finished_one_does_not(
+    monkeypatch, state: TaskState
+) -> None:
+    open_row = board_snapshot(Task(id="t1", title="x", declared_by=ROOT, state=state))
+    done = board_snapshot(
+        Task(id="t1", title="x", declared_by=ROOT, state=TaskState.COMPLETED, completed_at=1.0)
+    )
+
+    _, offered, _, _ = _close_run(monkeypatch, open_row, board_pane.BoardState(), set())
+    _, finished, _, _ = _close_run(monkeypatch, done, board_pane.BoardState(), set())
+
+    assert "close...##close-t1" in offered
+    assert not any("close" in label for label in finished)
+    assert board_pane.closable(board_task(state=state))
+    assert not board_pane.closable(board_task(state=TaskState.COMPLETED))
+
+
+def test_opening_the_close_box_closes_nothing_and_abandons_an_amendment(monkeypatch) -> None:
+    """
+    One editor at a time, both ways. The first press only opens a box, and it
+    says what closing means before a reason is typed.
+    """
+    pane = board_pane.BoardState(editing="t1", drafts={"t1": "half an amendment"})
+    pane.editing = None  # the amend editor is not open; its draft is what must not survive
+
+    emitted, _, _, _ = _close_run(monkeypatch, _claimed_snapshot(), pane, {"close...##close-t1"})
+    _, _, boxes, said = _close_run(monkeypatch, _claimed_snapshot(), pane, set())
+
+    assert emitted == []
+    assert (pane.closing, pane.close_confirming) == ("t1", False)
+    assert pane.drafts == {} and pane.property_drafts == {}
+    assert boxes == ["##close-reason-t1"], "and not the amend boxes"
+    assert board_pane.CLOSE_MEANS in said
+
+    _close_run(monkeypatch, _claimed_snapshot(), pane, {"cancel##close-cancel-t1"})
+    _amend_run(monkeypatch, _claimed_snapshot(), pane, {"amend##t1"})
+    pane.close_reasons["t1"] = "left over"
+    assert pane.editing == "t1"
+    _close_run(monkeypatch, _claimed_snapshot(), pane, {"cancel##t1"})
+    assert pane.close_reasons == {"t1": "left over"}, "cancelling an amendment is not a close"
+
+
+def test_closing_takes_two_presses_and_sends_the_reason_as_typed(monkeypatch) -> None:
+    """
+    The first press asks; it emits nothing and takes the box away, so the reason
+    on screen is the reason that will be sent. The second names the task and
+    emits the operator's intent -- no node, the reason untouched.
+    """
+    reason = "  superseded\nby t9 "
+    pane = board_pane.BoardState(closing="t1", close_reasons={"t1": reason})
+
+    first, _, _, _ = _close_run(monkeypatch, _claimed_snapshot(), pane, {"close##close-apply-t1"})
+    assert first == [] and pane.close_confirming and pane.closing == "t1"
+
+    idle, buttons, boxes, _ = _close_run(monkeypatch, _claimed_snapshot(), pane, set())
+    assert idle == [] and boxes == []
+    assert "close t1 for good##close-confirm-t1" in buttons
+    assert "close##close-apply-t1" not in buttons
+
+    second, _, _, _ = _close_run(
+        monkeypatch, _claimed_snapshot(), pane, {"close t1 for good##close-confirm-t1"}
+    )
+    assert second == [board_pane.TaskClosed(task_id="t1", reason=reason)]
+    assert second[0].node_id is None  # type: ignore[attr-defined]
+    assert (pane.closing, pane.close_reasons, pane.close_confirming) == (None, {}, False)
+
+
+def test_the_close_box_promises_only_what_a_close_does() -> None:
+    """
+    The sentence the operator reads while deciding whether closing a HELD task
+    is safe. The arm finishes the row, lets go of what waited and mails the
+    holder; it interrupts nobody, and the box may not say or imply that it does.
+    """
+    said = board_pane.CLOSE_MEANS
+
+    for claim in ("taken off", "is stopped.", "stops the agent", "released from"):
+        assert claim not in said
+    for fact in (
+        "finished as closed by the operator",
+        "cannot be reopened",
+        "stops waiting",
+        "NOT stopped",
+        "reads its inbox",
+        "may go on writing those files",
+    ):
+        assert fact in said
+
+
+@pytest.mark.parametrize("confirming", [False, True], ids=["first press", "second press"])
+def test_a_reason_over_the_bound_is_closed_by_neither_press_and_the_box_says_why(
+    monkeypatch, confirming: bool
+) -> None:
+    """
+    The reducer does not apply such a close and has nobody to tell, so a press
+    that emitted it would look like a close that silently did nothing.
+    """
+    from pptmstr.model import MAX_CLOSE_REASON_CHARS
+
+    reason = "x" * (MAX_CLOSE_REASON_CHARS + 7)
+    pane = board_pane.BoardState(
+        closing="t1", close_reasons={"t1": reason}, close_confirming=confirming
+    )
+    press = "close t1 for good##close-confirm-t1" if confirming else "close##close-apply-t1"
+
+    emitted, buttons, _, said = _close_run(monkeypatch, _claimed_snapshot(), pane, {press})
+
+    assert press in buttons, "the press was offered, so it is the guard that held"
+    assert emitted == []
+    assert (pane.closing, pane.close_confirming) == ("t1", confirming)
+    assert board_pane.close_reason_overrun_label(reason) in said
+    assert "7 over" in board_pane.close_reason_overrun_label(reason)
+    assert board_pane.close_reason_overrun_label("x" * MAX_CLOSE_REASON_CHARS) == ""
+
+
+def test_the_first_press_alone_never_closes_however_often_it_is_drawn(monkeypatch) -> None:
+    pane = board_pane.BoardState(closing="t1", close_reasons={"t1": "x"})
+
+    for _ in range(3):
+        emitted, _, _, _ = _close_run(
+            monkeypatch, _claimed_snapshot(), pane, {"close##close-apply-t1"}
+        )
+        assert emitted == []
+
+
+@pytest.mark.parametrize(
+    "click", ["keep editing##close-back-t1", "cancel##close-cancel-t1"], ids=["back", "cancel"]
+)
+def test_backing_out_after_the_first_press_closes_nothing(monkeypatch, click: str) -> None:
+    pane = board_pane.BoardState(closing="t1", close_reasons={"t1": "x"}, close_confirming=True)
+
+    emitted, _, _, _ = _close_run(monkeypatch, _claimed_snapshot(), pane, {click})
+
+    assert emitted == [] and not pane.close_confirming
+    if click.startswith("keep"):
+        assert (pane.closing, pane.close_reasons) == ("t1", {"t1": "x"})
+    else:
+        assert (pane.closing, pane.close_reasons) == (None, {})
+
+
+@pytest.mark.parametrize("confirming", [False, True], ids=["typing", "one press in"])
+@pytest.mark.parametrize("fate", ["finished", "gone"])
+def test_a_row_that_finishes_or_leaves_under_the_close_box_takes_the_box_with_it(
+    monkeypatch, confirming: bool, fate: str
+) -> None:
+    """
+    The holder completes the task while the operator is typing why to close it.
+    The box is for a task that can no longer be closed: it goes, the reason goes
+    with it, and a press already aimed at either button reaches nothing -- not
+    this row, and not the next one a close box is opened on.
+    """
+    done = Task(
+        id="t1",
+        title="do t1",
+        declared_by=ROOT,
+        state=TaskState.COMPLETED,
+        claimed_by=QA,
+        completed_at=2.0,
+        result="3/3 pass",
+    )
+    other = Task(id="t2", title="do t2", declared_by=ROOT, declared_at=1.0)
+    after = board_snapshot(done, other) if fate == "finished" else board_snapshot(other)
+    pane = board_pane.BoardState(
+        closing="t1", close_reasons={"t1": "half a reason"}, close_confirming=confirming
+    )
+    every_press = {
+        "close##close-apply-t1",
+        "close t1 for good##close-confirm-t1",
+        "close##close-apply-t2",
+        "close t2 for good##close-confirm-t2",
+    }
+
+    emitted, buttons, boxes, _ = _close_run(monkeypatch, after, pane, every_press)
+
+    assert emitted == [] and boxes == []
+    assert (pane.closing, pane.close_reasons, pane.close_confirming) == (None, {}, False)
+    assert not any("close-apply" in b or "close-confirm" in b for b in buttons)
+
+    _close_run(monkeypatch, after, pane, {"close...##close-t2"})
+    assert (pane.closing, pane.close_reasons.get("t2", "")) == ("t2", "")
+
+
+def _closed_row() -> BoardTask:
+    return dataclasses.replace(
+        board_task(state=TaskState.COMPLETED, result="closed by the operator: superseded"),
+        closed_by_operator=True,
+    )
+
+
+def test_a_row_the_operator_closed_reads_as_closed_and_not_as_an_unverified_result() -> None:
+    """
+    Closed or opened, the row says who ended it and that no work is reported, in
+    the board's words. It does not say "basis unstated" or "not run: unstated":
+    those are a claimer's two silences, and there was no claimer.
+    """
+    row = _closed_row()
+    label = "closed by the operator -- not finished by an agent, and no work is reported"
+
+    assert board_pane.standing_label(row) == label
+    assert board_pane.result_heading(row) == f"{label}:"
+    assert board_pane.unrun_heading(row) == ""
+    assert board_pane.settled(row)
+
+
+def test_a_result_that_only_says_it_was_closed_is_still_drawn_as_its_claimers() -> None:
+    forged = board_task(
+        state=TaskState.COMPLETED, owner="builder", result="closed by the operator: trust me"
+    )
+
+    assert board_pane.standing_label(forged) == "result basis unstated · not run: unstated"
+    assert board_pane.result_heading(forged) == "result, as builder reported it (basis unstated):"
+    assert not board_pane.settled(forged)
+
+
+def test_a_closed_task_reaches_the_pane_from_the_store_marked_closed(monkeypatch) -> None:
+    """
+    The wiring: the reducer's close, through ``board_tasks``, to the drawn line.
+    """
+    from pptmstr.intents import TaskClosed
+    from pptmstr.store import _apply
+
+    snap, _ = _apply(_claimed_snapshot(), TaskClosed("t1", "superseded"), 5.0)
+
+    said = drawn(monkeypatch, snap)
+
+    assert "closed by the operator -- not finished by an agent, and no work is reported:" in said
+    assert "closed by the operator: superseded" in said
+    assert not any("basis unstated" in line and "result" in line for line in said)
+    assert not any(line.startswith("[") for line in said), "no owner on a closed row"
+
+
+def test_a_wait_on_another_sessions_id_is_named_as_that_and_says_what_ends_it(monkeypatch) -> None:
+    """
+    "never declared" would send the lead to declare an id that is refused. The
+    cell says whose it is and the row carries the board's sentence, flattened like
+    every other one-line field so an id cannot break it into lines of its own.
+    """
+    row = dataclasses.replace(
+        board_task(blocked_on=("t1", "typo", "build"), missing=("typo", "build")),
+        held_elsewhere=("build",),
+    )
+    assert board_pane.blocked_label(row) == (
+        "blocked on t1, typo (never declared), build (another session's)"
+    )
+    assert board_pane.flat_task(
+        dataclasses.replace(row, held_elsewhere=("bu\nild",))
+    ).held_elsewhere == (board_pane.one_line("bu\nild"),)
+
+    theirs = Task(id="build", title="theirs", declared_by=("s2", None))
+    gate = Task(id="gate", title="G", depends_on=("build",), declared_by=ROOT, declared_at=1.0)
+    said = drawn(monkeypatch, board_snapshot(theirs, gate))
+
+    assert (
+        "waits on build, which another session in this window holds -- it cannot be declared "
+        "here; ask the operator to close this task and declare it again, under a new id, "
+        "without that dependency"
+    ) in said
+    assert "blocked on build (another session's)" in said
+
+
+# -- Dear ImGui itself ----------------------------------------------------------------
+#
+# A context with a display size and no backend, as ``tests/test_decision_view.py``
+# does it: nothing is rendered and nothing here says how the box looks. What it
+# shows and a recording imgui cannot is what the widget does with typed text, and
+# what the keyboard is doing on the frame the box goes away.
+
+
+class _CloseFrames:
+    """
+    The whole pane drawn in real frames over a store, with every row opened.
+    """
+
+    def __init__(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from pptmstr.intents import AgentSpawned, TaskClaimRequested, TaskDeclared
+        from pptmstr.store import Store
+
+        self.store = Store()
+        for node, parent, agent_type in ((ROOT, None, None), (QA, ROOT, "builder")):
+            self.store.apply(
+                AgentSpawned(
+                    node_id=node,
+                    parent=parent,
+                    task="",
+                    model="m",
+                    started_at=0.0,
+                    agent_type=agent_type,
+                    template="feature" if parent is None else None,
+                )
+            )
+        self.store.apply(TaskDeclared(Task(id="t1", title="do t1"), ROOT))
+        self.store.apply(TaskDeclared(Task(id="t2", title="do t2", declared_at=1.0), ROOT))
+        self.store.apply(TaskClaimRequested(QA, request_id="k", task_id="t1"))
+        self.pane = board_pane.BoardState()
+        self.sent: list[object] = []
+        self.at: dict[str, tuple[float, float]] = {}
+        self._monkeypatch = monkeypatch
+
+    def emit(self, intent: object) -> None:
+        self.sent.append(intent)
+
+    def __enter__(self) -> _CloseFrames:
+        from imgui_bundle import imgui
+
+        self.imgui = imgui
+        self._context = imgui.create_context()
+        self.io = imgui.get_io()
+        self.io.display_size = imgui.ImVec2(1280.0, 900.0)
+        self.io.delta_time = 1.0 / 60.0
+        self.io.backend_flags |= imgui.BackendFlags_.renderer_has_textures
+        self.io.set_ini_filename("")
+        self.io.add_focus_event(True)
+        at = self.at
+
+        def note(label: str) -> None:
+            low, high = imgui.get_item_rect_min(), imgui.get_item_rect_max()
+            at[label] = ((low.x + high.x) / 2.0, (low.y + high.y) / 2.0)
+
+        class Noting:
+            def __getattr__(self, name: str) -> object:
+                return getattr(imgui, name)
+
+            def small_button(self, label: str) -> bool:
+                pressed = imgui.small_button(label)
+                note(label)
+                return bool(pressed)
+
+            def tree_node_ex(self, label: str, flags: int = 0) -> bool:
+                # Rows ship closed; every one is opened.
+                imgui.set_next_item_open(True)
+                return bool(imgui.tree_node_ex(label, flags))
+
+        real_box = board_pane.multiline_input
+
+        def box(label: str, value: str, size: object, *, wrap: bool, flags: int = 0):  # type: ignore[no-untyped-def]
+            result = real_box(label, value, size, wrap=wrap, flags=flags)  # type: ignore[arg-type]
+            note(label)
+            return result
+
+        self._monkeypatch.setattr(board_pane, "imgui", Noting())
+        self._monkeypatch.setattr(board_pane, "multiline_input", box)
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.imgui.destroy_context(self._context)
+
+    def frame(self, count: int = 1) -> None:
+        imgui = self.imgui
+        for _ in range(count):
+            self.store.apply_all(self.sent, now=50.0)  # type: ignore[arg-type]
+            self.sent.clear()
+            snap = self.store.snapshot()
+            self.at.clear()
+            imgui.new_frame()
+            imgui.set_next_window_pos(imgui.ImVec2(0.0, 0.0))
+            imgui.set_next_window_size(imgui.ImVec2(1000.0, 800.0))
+            imgui.begin("board")
+            board_pane.draw(snap, at_root(snap), self.pane, self)  # type: ignore[arg-type]
+            imgui.end()
+            imgui.end_frame()
+
+    def click(self, label: str) -> None:
+        x, y = self.at[label]
+        self.io.add_mouse_pos_event(x, y)
+        self.frame(2)
+        self.io.add_mouse_button_event(0, True)
+        self.frame()
+        self.io.add_mouse_button_event(0, False)
+        self.frame(3)
+
+    def type(self, text: str) -> None:
+        self.io.add_input_characters_utf8(text)
+        self.frame(2)
+
+    def enter(self) -> None:
+        self.io.add_key_event(self.imgui.Key.enter, True)
+        self.frame()
+        self.io.add_key_event(self.imgui.Key.enter, False)
+        self.frame()
+
+
+@pytest.fixture
+def close_frames(monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyped-def]
+    with _CloseFrames(monkeypatch) as real:
+        real.frame(3)
+        yield real
+
+
+def test_in_dear_imgui_the_reason_typed_is_the_reason_stored_behind_the_label(
+    close_frames: _CloseFrames,
+) -> None:
+    """
+    Through the real widget and the real reducer: what was typed, blanks and the
+    line break included, is what the board holds behind "closed by the operator".
+    """
+    frames = close_frames
+    frames.click("close...##close-t1")
+    assert frames.pane.closing == "t1"
+    frames.click("##close-reason-t1")
+    frames.type("  superseded ")
+    frames.enter()
+    frames.type("by t9  ")
+
+    frames.click("close##close-apply-t1")
+    assert frames.pane.close_confirming
+    assert frames.store.snapshot().tasks["t1"].state is TaskState.CLAIMED
+    assert "##close-reason-t1" not in frames.at, "the box is gone while the second press waits"
+
+    frames.click("close t1 for good##close-confirm-t1")
+
+    task = frames.store.snapshot().tasks["t1"]
+    assert task.state is TaskState.COMPLETED and task.closed_by_operator
+    assert task.result == "closed by the operator:   superseded \nby t9  "
+    assert task.claimed_by is None
+    assert frames.pane.closing is None and frames.pane.close_reasons == {}
+    assert not any(label.startswith("close") and "t1" in label for label in frames.at)
+    assert "close...##close-t2" in frames.at
+
+
+def test_in_dear_imgui_a_row_finished_under_the_typist_leaves_keys_that_act_on_nothing(
+    close_frames: _CloseFrames,
+) -> None:
+    """
+    The holder completes ``t1`` while the operator is mid-sentence in its close
+    box. The box is gone on the next frame and the keyboard is free -- which is
+    the moment a letter of the sentence would otherwise be a shortcut. Nothing
+    here turns the rest of the sentence into anything: no intent is emitted, no
+    box takes it, the other row is untouched, and the application's one rule for
+    a vanished text box (``review.Hold``) reads this box like any other and holds
+    the keys.
+    """
+    from pptmstr.intents import TaskCompleted
+    from pptmstr.ui.review import Hold
+
+    frames = close_frames
+    hold = Hold()
+    frames.click("close...##close-t1")
+    frames.click("##close-reason-t1")
+    frames.type("because the hold")
+    assert frames.io.want_text_input
+    assert not hold.step(text_input=bool(frames.io.want_text_input), gesture=False)
+
+    frames.store.apply(TaskCompleted(QA, "t1", at=40.0, result="3/3 pass"))
+    frames.frame(3)
+    assert (frames.pane.closing, frames.pane.close_reasons) == (None, {})
+    assert not frames.io.want_text_input
+
+    frames.type("er will not finish a j k")
+    frames.enter()
+    frames.frame(3)
+
+    assert not hold.step(text_input=bool(frames.io.want_text_input), gesture=False)
+    assert hold.held, "the keys are dead until Escape or a click, as after any text box"
+    assert frames.sent == []
+    snap = frames.store.snapshot()
+    assert snap.tasks["t1"].result == "3/3 pass" and not snap.tasks["t1"].closed_by_operator
+    assert snap.tasks["t2"].state is TaskState.PENDING
+    assert (frames.pane.closing, frames.pane.editing, frames.pane.close_reasons) == (None, None, {})
+    assert not any("close" in label and "t1" in label for label in frames.at)
+
+
+def test_in_dear_imgui_typing_after_the_first_press_changes_nothing_that_is_sent(
+    close_frames: _CloseFrames,
+) -> None:
+    frames = close_frames
+    frames.click("close...##close-t2")
+    frames.click("##close-reason-t2")
+    frames.type("not wanted")
+    frames.click("close##close-apply-t2")
+
+    frames.type(" -- and a late addition")
+    frames.frame(3)
+    assert frames.pane.close_reasons == {"t2": "not wanted"}
+
+    frames.click("keep editing##close-back-t2")
+    assert "##close-reason-t2" in frames.at and not frames.pane.close_confirming
+    frames.click("close##close-apply-t2")
+    frames.click("close t2 for good##close-confirm-t2")
+
+    assert frames.store.snapshot().tasks["t2"].result == "closed by the operator: not wanted"
+
+
+# -- the digest is not this pane's ---------------------------------------------------
+
+
+@pytest.mark.parametrize("seed", [3, 7])
+def test_the_board_pane_draws_no_line_of_the_digest(monkeypatch, seed: int) -> None:
+    """
+    The digest is the DIGEST pane's. With every triangle open, nothing this pane
+    hands imgui is a line the digest composes -- a heading, the lead's mark, an
+    item or an alarm row -- and no triangle is the digest's. The bodies the digest
+    quotes are not counted: a result and a note are on the board's own rows too.
+    """
+    from pptmstr.digest import digest, digest_mark
+    from pptmstr.intents import DigestRead
+    from pptmstr.ui import digest_pane
+    from tests.test_digest import S1, generated_round
+
+    store = generated_round(seed)
+    store.apply(DigestRead((S1, None), request_id="g1", at=9.0))
+    snap = store.snapshot()
+    focus = FocusState()
+    focus.to_node(snap, (S1, None), scope=Scope.SESSION)
+    spoken = {line.text for line in _spoken(monkeypatch, snap, focus)}
+
+    mark = digest_mark(snap, S1)
+    rows = digest_pane.rest_rows(digest(snap, S1), mark)
+    composed = {row.text for row in rows if row.tone is not board_pane.Tone.AUTHOR}
+    composed |= {item.text for item in digest_pane.incident_items(digest(snap, S1, mark), mark)}
+    assert len(composed) > 6 and digest_pane.DIGEST_MARK in composed
+    assert composed & spoken == set()
+    assert not any(text.startswith(("digest", "CHANGED", "WAITING ON YOU")) for text in spoken)
+    # The board itself was drawn: this is not a pane that said "not a team".
+    assert any(text.endswith("  completed") for text in spoken)
+    assert not hasattr(board_pane, "rest_rows") and not hasattr(board_pane, "_digest")
+
+
+# -- a closed card shows no board, and a removed session's is not drawn --------------
+#
+# Snapshots from the reducer (``tests/test_ui_text``).
+
+
+def test_a_recalled_team_session_says_its_board_is_not_loaded(monkeypatch) -> None:
+    """
+    Not "not a team", which is what the pane says of a session with no board and
+    is false of this one, and not an empty board with "no tasks declared yet".
+    """
+    from tests.test_ui_text import CLOSED_ROOT, pointed_at, recalled_snapshot
+
+    snap = recalled_snapshot(template="feature")
+    lines = drawn(monkeypatch, snap, pointed_at(snap, CLOSED_ROOT))
+
+    assert lines == [board_pane.CLOSED_BOARD]
+    assert headings(monkeypatch, snap) == []
+
+
+def test_a_recalled_session_with_no_transcript_is_not_promised_a_resume(monkeypatch) -> None:
+    from pptmstr.model import TranscriptPresence
+    from tests.test_ui_text import CLOSED_ROOT, FROM_FILE, pointed_at, recalled_snapshot
+
+    gone = dataclasses.replace(FROM_FILE, transcript=TranscriptPresence.GONE)
+    snap = recalled_snapshot(gone)
+    (line,) = drawn(monkeypatch, snap, pointed_at(snap, CLOSED_ROOT))
+
+    assert line.startswith("closed — ") and "gone" in line and "until" not in line
+
+
+def test_a_removed_sessions_board_is_not_drawn_as_a_launch_that_is_not_a_team(monkeypatch) -> None:
+    """
+    Its tasks stay in the store, holding their ids, and ``has_board`` is false for
+    it. Without the line of its own those two together are the solo-resume case:
+    the rows, under "this launch is not a team". The cursor does not rest on a
+    removed session, so the node is handed over the way a caller that skipped
+    ``FocusState.node`` would.
+    """
+    from pptmstr.store import Store
+    from tests.test_ui_text import REMOVED, REMOVED_ROOT, run_and_remove
+
+    store = Store()
+    run_and_remove(store, declares=("t1",))
+    snap = store.snapshot()
+    assert "t1" in snap.tasks
+    assert board_pane.absent_line(snap, REMOVED) == board_pane.OFF_FLEET_BOARD
+
+    focus = MagicMock()
+    focus.node.return_value = REMOVED_ROOT
+    lines = drawn(monkeypatch, snap, focus)
+
+    assert lines == [board_pane.OFF_FLEET_BOARD]
+
+
+def test_a_session_on_the_fleet_has_no_line_in_place_of_its_board() -> None:
+    from pptmstr.store import Store
+    from tests.test_ui_text import RAN, run
+
+    store = Store()
+    run(store)
+
+    assert board_pane.absent_line(store.snapshot(), RAN) is None
+    assert board_pane.absent_line(store.snapshot(), "no-such-session") is None
+
+
+def _blocked_by_a_removed_session(monkeypatch) -> tuple[Snapshot, list[str]]:
+    """
+    A session on the fleet whose restore left out ``t1`` because the removed
+    session's board has it. The report is written by hand -- it is what
+    ``store._restore`` records -- and whether its holder is off the fleet is the
+    reducer's.
+    """
+    from pptmstr.model import NotPlaced, Unplaced
+    from pptmstr.store import Store
+    from tests.test_ui_text import RAN, RAN_ROOT, REMOVED, pointed_at, run, run_and_remove
+
+    store = Store()
+    run_and_remove(store, declares=("t1",))
+    run(store)
+    left = (
+        NotPlaced("task", "t1", Unplaced.OTHER_SESSION_HAS_ID, holder=REMOVED),
+        NotPlaced("task", "t2", Unplaced.OTHER_SESSION_HAS_ID, holder=RAN),
+        NotPlaced("task", "t3", Unplaced.OTHER_SESSION_HAS_ID),
+    )
+    snap = dataclasses.replace(
+        store.snapshot(),
+        restores=MappingProxyType(
+            {RAN: dataclasses.replace(_restore(unplaced=left), session_id=RAN)}
+        ),
+    )
+    return snap, drawn(monkeypatch, snap, pointed_at(snap, RAN_ROOT))
+
+
+def test_an_id_held_by_a_removed_session_is_named_as_that(monkeypatch) -> None:
+    """
+    "Another session already has this id" sends the operator to look for a card,
+    and this session has none. Only the holder that is off the fleet is called
+    removed: one on the fleet, and one the report does not name, keep the reason's
+    own words.
+    """
+    snap, lines = _blocked_by_a_removed_session(monkeypatch)
+    (line,) = [text for text in lines if "not placed" in text]
+
+    assert "task t1: held by a session you removed from the fleet (sess-removed)" in line
+    assert "task t2: another session already has this id" in line
+    assert "task t3: another session already has this id" in line
+
+
+def test_whether_a_holder_is_removed_is_asked_when_the_line_is_drawn() -> None:
+    from pptmstr.model import NotPlaced, Unplaced
+
+    left = NotPlaced("task", "t1", Unplaced.OTHER_SESSION_HAS_ID, holder="s\n9" + "x" * 90)
+
+    assert board_pane.unplaced_reason(left) == Unplaced.OTHER_SESSION_HAS_ID.value
+    assert board_pane.unplaced_reason(left, lambda sid: False) == left.why.value
+    removed = board_pane.unplaced_reason(left, lambda sid: sid == left.holder)
+    # A session id is a string from a file: one line, and bounded.
+    assert removed.startswith("held by a session you removed from the fleet (s 9xxx")
+    assert "\n" not in removed and len(removed) < 120
+    # Only this reason has a holder to be removed.
+    other = NotPlaced("task", "t1", Unplaced.INCOHERENT, holder="s9")
+    assert board_pane.unplaced_reason(other, lambda sid: True) == Unplaced.INCOHERENT.value

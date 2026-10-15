@@ -15,7 +15,7 @@ and ``approval.py``'s docstring commits it to being a small policy file.
 on 2026-09-21, for a reason the record could not have had: measured against
 2335 real Bash calls, separator support takes the admit rate from 3.51% to
 4.84%, and it multiplies rather than adds against any later widening of the
-table. The quoting edge cases are real and ``_split_segments`` answers them the
+table. The quoting edge cases are real and ``_scan`` answers them the
 way bash does rather than by over-rejecting, which is a widening and is
 checked against bash itself -- see that function and
 ``scripts/verify_split_against_bash.py``. Over-rejection is still the rule
@@ -41,7 +41,7 @@ shell does every time they run it. The row stays; the clause is here so that the
 next reader who discovers the write does not assume something worse of the rest
 of the table.
 
-Three rules that are easy to read past:
+Six rules that are easy to read past:
 
 - The command is **split into segments first**, on the separators bash uses to
   sequence one command into the next, and then every segment is put through the
@@ -57,6 +57,20 @@ Three rules that are easy to read past:
   command the scan exists to stop.
 - ``argv[0]`` is matched literally, so ``/bin/ls`` is refused. A path is not the
   command it resembles, and resolving one would mean reading the filesystem.
+- **A comment is refused, not skipped.** Bash stops reading a line at a `#`
+  that begins a word, and neither `_scan` nor ``shlex`` does, so everything
+  from there on is text the two read differently -- a quote inside the comment
+  opens a region for this module that bash never opens, and the newline that
+  ends the comment is swallowed by it along with the command on the next line.
+  See `_scan`.
+- **A backslash-newline is refused, not joined.** Bash deletes the pair and
+  reads one word across it; ``shlex`` keeps the newline in the token, so the
+  word the table checks is not the word that runs. See `_CONTINUATION`.
+- **A glob is refused where a flag could be.** Bash replaces `*` with the
+  names in the working directory before the command starts, so the tokens the
+  flag rules read are not the arguments that run, and a file named `-f` is
+  one of them. Only for a command whose flags are restricted, and only ahead
+  of a `--` that ends its options. See `_GLOB`.
 
 This table and the corpus in ``tests/test_shellscan.py`` move together. A row
 added here without an adversarial case there is a widening that nobody checked.
@@ -68,7 +82,7 @@ import re
 import shlex
 from dataclasses import dataclass
 
-# The separators bash uses to run one command after another. `_split_segments`
+# The separators bash uses to run one command after another. `_scan`
 # matches this at a cursor it has tracked quoting with, so one of these is
 # consumed only where bash would read it as an operator: outside quotes and
 # unescaped. Every segment is then checked as if it had been typed on its own.
@@ -117,7 +131,7 @@ _MAX_SEGMENTS = 8
 # Those two are the only characters the split is allowed to launder, and the
 # quote-blindness here is what keeps the rest out of reach.
 #
-# `$'...'` is bash's third quoting form and `_split_segments` does not track
+# `$'...'` is bash's third quoting form and `_scan` does not track
 # it. It does not need to, and not because this scan is blind: the `$` of
 # `$'...'` sits *outside* the quoted region -- at an index the splitter's own
 # state machine reports as unquoted -- so it is refused as an ordinary
@@ -140,6 +154,71 @@ _METACHARACTERS = frozenset("&<>`$(){}")
 # the hole the newline rule was written for. Pinned by
 # `test_a_carriage_return_is_caught_before_tokenisation`.
 _CARRIAGE_RETURN = "\r"
+
+# Bash removes a backslash-newline before it forms words, outside quotes and
+# inside double quotes alike, so `git log --out\<newline>put=f` runs
+# `git log --output=f` and creates `f`. `shlex` keeps the newline, hands
+# `_refuse_git` the token `--out\nput=f`, and that token does not start with
+# `--output`. Run on /bin/bash 5.2.15, 2026-10-13: all three of
+# `git log --out\<nl>put=f`, `git log "--out\<nl>put=f"` and
+# `git log -\<nl>-output=f` created the file.
+#
+# Refused wherever the two characters are adjacent, quoted or not. Inside
+# single quotes the pair is literal and the refusal is an over-refusal; one
+# `\\` followed by a real newline is another. Both cost an approval. Joining
+# the lines the way bash does would admit the honest multi-line read this
+# refuses, and would need the quote state to be right at the join, which is the
+# thing this rule exists not to depend on.
+_CONTINUATION = "\\\n"
+
+# The characters besides whitespace and a `_SEPARATORS` operator that end a
+# word in bash, so that a `#` directly after one begins a comment. Every one of
+# them is in `_METACHARACTERS` and refuses the command on its own account; they
+# are listed so that `_scan` says where a comment starts for bash's reason and
+# does not lean on that.
+_WORD_BREAKS = frozenset("&()<>")
+
+# The characters bash expands a word on by matching it against file names. The
+# expansion happens before the command starts, so a word carrying one is not
+# the argument the command receives: in a directory holding a file named
+# `--output=pwned`, `git log *` is `git log --output=pwned`. Run on /bin/bash
+# 5.2.15 with git 2.39.5, GNU sed 4.9 and GNU tail 9.1, 2026-10-13, each in a
+# directory holding the one planted name:
+#
+#   git log *        `--output=pwned`   created `pwned`; so did `git diff *`,
+#                                       `git show *` and `git blame *`
+#   git log ?-output=pwned              created it, and so did `[-]-output=pwned`
+#                                       and `--outpu[t]=pwned`
+#   sed -n 1p *      `-i`               rewrote every other file in the
+#                                       directory to its first line
+#   tail -n 1 *      `-f`               never returned
+#
+# Planting the name takes a write, which a session has after one approved
+# `Write` and a contained autonomous session has from the start.
+#
+# Refused only for a command whose flags this module restricts -- a `_TABLE`
+# row with an `allowed` set, `git` and `sed` -- because that restriction is the
+# statement that some flag of the command does more than read. A row with
+# `allowed=None` says every flag reads, so a planted name can make `ls *` or
+# `grep -r x *` do nothing its row has not already admitted, and those stay
+# admitted. There is no second list of commands here: the rule reads the same
+# table that says which flags are refused.
+#
+# Tested against the token `shlex` produced and not against the raw segment,
+# so it is quote-blind: `git ls-files '*.py'` hands git a literal `*.py`, bash
+# expands nothing, and it is refused anyway. Telling the two apart needs the
+# quote state of each word, which is the dependency every rule but `_scan`
+# declines.
+#
+# `{` and `~` also expand a word and are refused for their own reasons above.
+# `extglob` patterns need a `(`, which is refused too.
+_GLOB = frozenset("*?[")
+
+# The word after which a command reads no more options, so a glob behind it
+# expands to operands whatever the names are. Measured the same day, with the
+# same planted names: `git log -- *`, `sed -n 1p -- *` and `tail -n 1 -- *`
+# each read the planted file as a file.
+_END_OF_OPTIONS = "--"
 
 # `~` is the one character in 08-11 §2's list that is not special everywhere,
 # so it is refused in the three places bash actually expands it and admitted in
@@ -474,7 +553,7 @@ _SED_PRINT_RANGE = re.compile(r"^[0-9,]+p$")
 #   both    A quote character is not a boundary, so `grep "2>/dev/null" f`
 #           does not match and parks on its `>`. That is how the strip stays
 #           quote-blind without a second quote parser, which is the property
-#           `_split_segments` deliberately does not share with this scan.
+#           `_scan` deliberately does not share with this scan.
 #
 # The replacement is a single space, and it is not what makes the rule safe.
 # Both anchors already put whitespace or a segment edge on each side of the
@@ -511,13 +590,23 @@ def _refuse_sed(args: list[str]) -> str | None:
     in this module uses. The first non-flag token is the script and must be a
     print range; every non-flag token after it is a file operand and sed does
     not read those as further script, so nothing past the first is checked.
+
+    A token behind `_options_end` is never a flag, so it is the script if
+    there has not been one and a file otherwise. A `--` that does not end the
+    options is read as it always was: as the script, or as a file.
     """
+    end = _options_end(["sed", *args]) - 1
     script: str | None = None
-    for token in args:
-        if token.startswith("-") and token not in ("-", "--"):
-            if token.split("=", 1)[0] not in _SED_ALLOWED_FLAGS:
-                return f"sed {token} is not a recognised read-only flag"
+    for index, token in enumerate(args):
+        if index == end:
             continue
+        if index < end:
+            if _globs(token):
+                return _glob_refusal("sed", token)
+            if token.startswith("-") and token not in ("-", "--"):
+                if token.split("=", 1)[0] not in _SED_ALLOWED_FLAGS:
+                    return f"sed {token} is not a recognised read-only flag"
+                continue
         if script is None:
             script = token
             if not _SED_PRINT_RANGE.match(script):
@@ -541,10 +630,10 @@ def _refuse_cd(args: list[str]) -> str | None:
     return None
 
 
-def _split_segments(command: str) -> list[str]:
+def _scan(command: str) -> tuple[list[str], int | None]:
     """
-    ``command`` cut where bash would read a `_SEPARATORS` operator, and nowhere
-    else.
+    ``command`` cut where bash would read a `_SEPARATORS` operator and nowhere
+    else, and the offset of the first `#` bash would read as starting a comment.
 
     Quote-aware because bash's own operators are: `grep 'a|b' f` is one command
     whose pattern contains a literal pipe, and cutting it there produces a
@@ -569,35 +658,81 @@ def _split_segments(command: str) -> list[str]:
     no skip-to-the-end-of-the-quoted-region step: an off-by-one there swallows
     the operator in `cat "a"|rm -rf /tmp/x` and the `rm` becomes an operand of
     an unrestricted row.
+
+    **The segments are bash's only when there is no comment.** That state
+    machine is not the whole of bash's reading: a `#` that begins a word ends
+    the line for bash, and this cursor walks on through the comment's text
+    toggling on any quote it finds there. `ls # '<newline>touch f #'` is one
+    segment here and two commands to bash, the second of them unread by
+    anything. So the comment is reported and `refusal` refuses on it, and the
+    report is sound for the *first* one only, which is all a refusal needs: up
+    to the first construct the two read differently they have read the same
+    characters the same way, so the quote state at that `#` is bash's. Past it
+    the segments are a reading bash does not share.
+
+    The other constructs that end the agreement -- `$'...'`, where `\\'` does
+    not close; a heredoc body, which is not shell text at all; `$(...)`, a
+    backtick, `<(...)` -- each need a character `_METACHARACTERS` refuses
+    wherever it appears, in a scan that tracks no quoting and so cannot be
+    desynchronised by them. A comment is the one that needs no such character,
+    which is why it is the one this function has to see for itself.
+
+    A `#` begins a comment only where a word would begin: at the start, after
+    whitespace, after an operator. `a#b`, `'a'#b` and `\\#` are words. A
+    backslash-newline neither begins nor ends a word, because bash deletes it
+    before it reads one, so `ls \\<newline># x` carries a comment and
+    `a\\<newline>#b` does not.
     """
     segments: list[str] = []
     start = index = 0
-    single = double = False
+    single = double = in_word = False
+    comment: int | None = None
     while index < len(command):
         char = command[index]
         if char == "\\" and not single:
+            if not command.startswith(_CONTINUATION, index):
+                in_word = True
             index += 2
             continue
         if char == "'" and not double:
             single = not single
+            in_word = True
         elif char == '"' and not single:
             double = not double
+            in_word = True
         elif not single and not double:
             operator = _SEPARATORS.match(command, index)
             if operator is not None:
                 segments.append(command[start:index])
                 start = index = operator.end()
+                in_word = False
                 continue
+            if char == "#" and not in_word and comment is None:
+                comment = index
+            in_word = not (char.isspace() or char in _WORD_BREAKS)
         index += 1
     segments.append(command[start:])
-    return segments
+    return segments, comment
+
+
+def _split_segments(command: str) -> list[str]:
+    """
+    The segments half of `_scan`, for a caller describing a command rather than
+    deciding about one.
+
+    Blind to comments, as `_scan` says: on a command that carries one, what is
+    returned here past the `#` is not what bash runs. `refusal` does not use
+    this -- it takes both halves, so it cannot read the segments without having
+    been told about the comment.
+    """
+    return _scan(command)[0]
 
 
 def refusal(command: str) -> str | None:
     """
     None when ``command`` only reads; otherwise why it still needs a human.
 
-    ``command`` is split by `_split_segments` and every segment must pass on
+    ``command`` is split by `_scan` and every segment must pass on
     its own, so a sequence is admitted only when each of its commands would
     have been admitted alone. The first failing segment decides, and the reason
     names it -- a pipeline refused for its fourth command is otherwise
@@ -608,11 +743,21 @@ def refusal(command: str) -> str | None:
     gate working. And a test that can only assert "refused" cannot tell a rule
     that fired from one that never ran -- every entry in the adversarial corpus
     would pass against a function that refused everything.
+
+    A comment and a backslash-newline are decided here, over the whole command
+    and ahead of the segments, because both are cases where the segments are
+    not what bash will run. Refusing a segment for one would be reading the
+    split to decide whether the split can be read.
     """
     if not command.strip():
         return "empty command"
 
-    segments = _split_segments(command)
+    if _CONTINUATION in command:
+        return "a backslash-newline joins two lines into a word tokenisation keeps apart"
+
+    segments, comment = _scan(command)
+    if comment is not None:
+        return "a `#` comment ends the line for bash and not for this scan"
     if len(segments) > _MAX_SEGMENTS:
         return (
             f"{len(segments)} segments is more than the {_MAX_SEGMENTS} an "
@@ -689,11 +834,52 @@ def _refuse_segment(command: str) -> str | None:
     rule = _TABLE.get(name)
     if rule is None:
         return f"{name!r} is not in the read-only table"
-    for token in argv[1:]:
+    if rule.allowed is None:
+        return None
+    for token in argv[1 : _options_end(argv)]:
+        if _globs(token):
+            return _glob_refusal(name, token)
         unrecognised = _unrecognised_flag(token, rule)
         if unrecognised is not None:
             return f"{name} {unrecognised} is not a recognised read-only flag"
     return None
+
+
+def _options_end(argv: list[str]) -> int:
+    """
+    The index of the `--` after which ``argv`` holds operands only, or
+    ``len(argv)`` when it has none. ``argv[0]`` is the word the options belong
+    to: the command, or git's subcommand.
+
+    Everything from that index on is outside the flag rules and outside
+    `_GLOB`, so this is an admission and it is the narrow one. A `--` counts
+    only when the word before it does not begin with `-`, because an option
+    that takes a value takes the next word whatever it is: run 2026-10-13,
+    `git blame -S -- *` read `--` as the name of a revisions file and then
+    `--output=pwned` as an option, and created the file. Which options take a
+    value is the binary's knowledge and not this module's, so every option is
+    treated as one that might.
+
+    That parks `git log --oneline -- *.py`, whose `--` does end the options,
+    and admits `git log --oneline HEAD -- *.py`. No option of a command this
+    is called for takes two separate values, which is what the one-word
+    lookbehind relies on.
+    """
+    for index in range(1, len(argv)):
+        if argv[index] == _END_OF_OPTIONS and not argv[index - 1].startswith("-"):
+            return index
+    return len(argv)
+
+
+def _globs(token: str) -> bool:
+    return not _GLOB.isdisjoint(token)
+
+
+def _glob_refusal(name: str, token: str) -> str:
+    return (
+        f"{name} argument {token!r} has a glob character, which bash expands to file "
+        f"names before {name} reads its options, so a file named like a flag becomes one"
+    )
 
 
 def is_read_only(command: str) -> bool:
@@ -762,7 +948,13 @@ def _refuse_git(args: list[str]) -> str | None:
         return f"git global option {subcommand!r} ahead of the subcommand"
 
     rest = args[1:]
-    for token in rest:
+    # Up to the `--` that ends the options and no further: behind it git reads
+    # a path, so `git log -- --output=x` asks about a file of that name.
+    # `branch` and `remote` below still read the whole of `rest`, because for
+    # them a path-shaped argument is the thing refused.
+    for token in args[1 : _options_end(args)]:
+        if _globs(token):
+            return _glob_refusal("git", token)
         if token.startswith("--output"):
             # Verified by execution 2026-09-17: `git log --output=FILE` and
             # `git diff --output=FILE` both create FILE. It is a diff option,

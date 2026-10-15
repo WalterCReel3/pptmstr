@@ -9,9 +9,10 @@ nothing checks is one that quietly stops being true.
 from __future__ import annotations
 
 import pytest
+from imgui_bundle import imgui
 
 from pptmstr import theme
-from pptmstr.model import AgentState, ContextPressure
+from pptmstr.model import AgentState, ContextPressure, ObligationKind
 from pptmstr.theme import (
     HIGH_CONTRAST,
     REQUIRED_THEMES,
@@ -171,6 +172,86 @@ def test_pressure_steps_differ_in_lightness_not_only_hue(palette: Palette) -> No
     lums = [theme.relative_luminance(palette.pressure(p)) for p in ContextPressure]
     spread = max(lums) - min(lums)
     assert spread >= 0.05, f"{palette.name} pressure colours span only {spread:.3f} luminance"
+
+
+# -- a modal's surface and its wells ---------------------------------------------
+#
+# ``theme.dialog_colors`` draws a modal on ``panel_alt`` and fills every field in it
+# with ``well``. Neither surface is held by the floors above, which are taken against
+# ``bg`` and ``panel``.
+#
+# The separation floor is measured and not chosen: the thinnest is dark, where the
+# well is 1.088:1 from the surface, and kitty at 1.089. A fill is not text and has a
+# border around it besides, so this is the floor under "a second colour" and not a
+# legibility one -- it fails a palette whose well has been tuned into its surface.
+WELL_SEPARATION = 1.08
+# Under the pointer a well moves toward the accent; the thinnest step is cde's, 1.245:1.
+WELL_POINTED_AT = 1.2
+
+
+def _opaque(colour: imgui.ImVec4) -> Color:
+    """An ``ImVec4`` as a ``Color``, for the ratios; its alpha is not carried."""
+    r, g, b = (round(c * 255.0) for c in (colour.x, colour.y, colour.z))
+    return theme.col((r << 16) | (g << 8) | b)
+
+
+@pytest.mark.parametrize("palette", ALL_PALETTES, ids=PALETTE_IDS)
+def test_a_well_is_a_second_colour_on_a_modals_surface(palette: Palette) -> None:
+    ratio = contrast_ratio(palette.well, palette.panel_alt)
+    assert ratio >= WELL_SEPARATION, f"{palette.name}: a well is {ratio:.3f}:1 from the surface"
+
+
+@pytest.mark.parametrize("palette", ALL_PALETTES, ids=PALETTE_IDS)
+def test_text_is_legible_on_a_modals_surface_and_in_a_well(palette: Palette) -> None:
+    """
+    What is typed is body text, 4.5:1. A caption on the surface and the hint in an
+    empty field are ``text_dim``, held to the 3:1 it is held to on ``bg``.
+    """
+    for surface in (palette.panel_alt, palette.well):
+        assert contrast_ratio(palette.text, surface) >= 4.5
+        assert contrast_ratio(palette.text_dim, surface) >= 3.0
+
+
+@pytest.mark.parametrize("palette", ALL_PALETTES, ids=PALETTE_IDS)
+def test_a_well_pointed_at_is_seen_to_change_and_its_text_stays_legible(
+    palette: Palette,
+) -> None:
+    theme.set_theme(palette.name)
+    slots = dict(theme.dialog_colors())
+    c = imgui.Col_
+    assert _opaque(slots[int(c.frame_bg)]).u32 == palette.well.u32
+    hovered = _opaque(slots[int(c.frame_bg_hovered)])
+    active = _opaque(slots[int(c.frame_bg_active)])
+
+    assert contrast_ratio(hovered, palette.well) >= WELL_POINTED_AT
+    assert contrast_ratio(active, palette.well) > contrast_ratio(hovered, palette.well)
+    for fill in (hovered, active):
+        assert contrast_ratio(palette.text, fill) >= 4.5
+
+
+def test_mixing_is_the_base_at_nothing_and_the_other_colour_at_everything() -> None:
+    base, over = theme.col(0x102030), theme.col(0xF0E0D0)
+    none, half, whole = (theme.mixed(base, over, alpha) for alpha in (0.0, 0.5, 1.0))
+    assert (none.x, none.y, none.z) == base.rgb
+    assert (whole.x, whole.y, whole.z) == pytest.approx(over.rgb)
+    assert (half.x, half.y, half.z) == pytest.approx(tuple(0x80 / 255 for _ in range(3)))
+    assert none.w == half.w == whole.w == 1.0
+
+
+def test_a_modals_colours_are_built_once_for_a_palette_and_not_shared_between_two() -> None:
+    """
+    Read every frame a modal is open, so not rebuilt on each read -- and kept by
+    palette, so a switch is not answered with the palette that was read first.
+    """
+    theme.set_theme("dark")
+    dark = theme.dialog_colors()
+    assert theme.dialog_colors() is dark
+    theme.set_theme("light")
+    light = theme.dialog_colors()
+    assert light is not dark
+    assert dict(light)[int(imgui.Col_.frame_bg)] is theme.LIGHT.well.vec4
+    theme.set_theme("dark")
+    assert theme.dialog_colors() is dark
 
 
 # -- the splash's raster line --------------------------------------------------
@@ -396,3 +477,34 @@ def test_fading_out_of_range_clamps() -> None:
     base = theme.col(0x4FC1E9)
     assert theme.faded(base, -1.0) == theme.faded(base, 0.0)
     assert theme.faded(base, 5.0) == theme.faded(base, 1.0)
+
+
+# -- obligations ------------------------------------------------------------------
+
+
+def test_every_obligation_kind_has_a_glyph() -> None:
+    """
+    The inbox row indexes this inside a draw call, so a kind with no entry is a
+    ``KeyError`` on the first frame such an obligation exists.
+    """
+    assert set(theme.OBLIGATION_GLYPH) == set(ObligationKind)
+    assert all(theme.OBLIGATION_GLYPH.values())
+
+
+def test_every_obligation_kind_has_a_palette_role() -> None:
+    assert set(theme._OBLIGATION_ROLE) == set(ObligationKind)
+
+
+@pytest.mark.parametrize("palette", ALL_PALETTES, ids=PALETTE_IDS)
+def test_every_obligation_kind_resolves_to_a_colour(palette: Palette) -> None:
+    for kind in ObligationKind:
+        assert isinstance(palette.obligation(kind), Color), kind
+
+
+def test_a_decision_does_not_look_like_any_of_the_three_states_that_stop_a_node() -> None:
+    """Its asker may be working, so it borrows no state's glyph."""
+    glyphs = theme.OBLIGATION_GLYPH
+    others = {glyphs[kind] for kind in ObligationKind if kind is not ObligationKind.DECISION}
+
+    assert glyphs[ObligationKind.DECISION] not in others
+    assert glyphs[ObligationKind.DECISION] not in STATE_GLYPH.values()

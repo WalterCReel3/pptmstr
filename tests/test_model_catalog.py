@@ -10,8 +10,13 @@ by calling those directly.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from pptmstr import model_catalog
+
+# Read when the module is collected, before any fixture has run, so it is the path the
+# application ships with and not the one the suite puts in its place.
+_SHIPPED_CREDENTIAL_PATH = Path(model_catalog.CREDENTIAL_PATH).expanduser()
 
 
 def _credential(
@@ -192,3 +197,26 @@ def test_polling_an_empty_inbox_leaves_the_list_alone() -> None:
 
     assert gate.models == model_catalog.FALLBACK_MODELS
     assert not gate.answered
+
+
+def test_a_probe_started_by_a_test_never_reads_the_operators_credential() -> None:
+    """
+    ``app._draw_launcher`` starts the probe on a default ``Catalog``, so any test that
+    draws a frame with a pool starts one too. With the shipped path that worker reads
+    the token of whoever ran the suite and opens a TLS connection to the API with it --
+    and the test passes either way, because the fallback list is drawable.
+
+    The suite-wide fixture in ``conftest.py`` is what makes this hold; this is the test
+    that fails if it is removed.
+    """
+    gate = model_catalog.Catalog()
+
+    worker = gate.request()
+    assert worker is not None
+    worker.join(timeout=10)
+    gate.poll()
+
+    assert Path(model_catalog.CREDENTIAL_PATH).expanduser() != _SHIPPED_CREDENTIAL_PATH
+    assert gate.answered
+    assert gate.detail is not None and gate.detail.startswith("no usable credential")
+    assert gate.models == model_catalog.FALLBACK_MODELS

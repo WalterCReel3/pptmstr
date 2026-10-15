@@ -52,7 +52,7 @@ from typing import Any, Protocol
 
 from claude_agent_sdk import SDKSessionInfo, list_sessions
 
-from pptmstr.settings import config_dir
+from pptmstr import settings
 
 
 @dataclass(frozen=True, slots=True)
@@ -133,7 +133,7 @@ class Lister(Protocol):
 
 
 def overlay_path() -> Path:
-    return config_dir() / "sessions.json"
+    return settings.config_dir() / "sessions.json"
 
 
 def load_overlay(path: Path | None = None) -> Overlay:

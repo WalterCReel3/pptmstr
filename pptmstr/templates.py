@@ -40,10 +40,29 @@ BUS_TOOL_NAMES = (
     "mcp__pptmstr__post_concern",
     "mcp__pptmstr__read_inbox",
     "mcp__pptmstr__read_board",
+    "mcp__pptmstr__read_task",
+    "mcp__pptmstr__read_digest",
     "mcp__pptmstr__claim_task",
     "mcp__pptmstr__declare_task",
+    "mcp__pptmstr__amend_task",
     "mcp__pptmstr__complete_task",
     "mcp__pptmstr__release_task",
+    "mcp__pptmstr__raise_decision",
+    "mcp__pptmstr__read_decisions",
+    "mcp__pptmstr__withdraw_decision",
+)
+
+# The three a role gets beside those where the session is contained, and nowhere
+# else: they are on a contained session's server and on no other
+# (``bus.COMMAND_TOOLS``, which a test holds this spelling to). A restricted role
+# is given them as well. Asking moves nothing by itself -- the operator reads
+# the exact string and is the one that runs it -- so a role that cannot edit
+# still cannot edit, and a role left without them would be briefed on a tool
+# it does not have.
+COMMAND_TOOL_NAMES = (
+    "mcp__pptmstr__request_command",
+    "mcp__pptmstr__read_commands",
+    "mcp__pptmstr__withdraw_command",
 )
 
 # Enough to inspect a codebase without changing it. Used by the review roles, whose
@@ -82,9 +101,18 @@ class Role:
     tools: tuple[str, ...] | None = None
     model: str | None = None
 
-    def tool_list(self) -> list[str] | None:
+    def tool_list(self, contained: bool = False) -> list[str] | None:
+        """
+        The names this role is restricted to, or None for "inherit".
+
+        ``contained`` is whether the session's CLI process was started with
+        containment (``driver.AgentSession.contained``), and adds the command
+        tools, which exist on that session's server and no other.
+        """
         if self.tools is None:
             return None
+        if contained:
+            return [*self.tools, *BUS_TOOL_NAMES, *COMMAND_TOOL_NAMES]
         return [*self.tools, *BUS_TOOL_NAMES]
 
 
@@ -196,7 +224,7 @@ def _concern_audience_lines(policy: Policy) -> list[str]:
     assert_never(policy)
 
 
-def _unattended_lines(policy: Policy) -> list[str]:
+def _unattended_lines(policy: Policy, contained: bool = False) -> list[str]:
     """
     What is true of a team nobody is watching, in the words every role is given.
 
@@ -213,7 +241,24 @@ def _unattended_lines(policy: Policy) -> list[str]:
     third mode added to ``Policy`` and not described here would otherwise ship as a
     mode whose agents are told an operator is reading, which is the belief that
     makes an agent wait.
+
+    ``contained`` changes one sentence: what to do with a step the sandbox
+    denies. Where the session has ``request_command`` the step is asked for
+    (``_command_lines`` says how); where it does not, the step is recorded as
+    blocked, and the tool is not named.
     """
+    if contained:
+        denied = [
+            "readable. The work is otherwise bounded to that directory, and a step",
+            "needing something outside it is a step to ask the operator to run — the next",
+            "section says how — rather than to attempt another way.",
+        ]
+    else:
+        denied = [
+            "readable. The work is otherwise bounded to that directory, and a step",
+            "needing something outside it is a step to record as blocked, naming what it",
+            "needed, rather than to attempt another way.",
+        ]
     match policy:
         # ``PERMISSIVE`` is not an unattended session and says nothing here. Writes,
         # spawns and messages all still park at a person under it, so an agent told
@@ -235,7 +280,9 @@ def _unattended_lines(policy: Policy) -> list[str]:
                 "decision and the reason where the next reader will meet it — the task's",
                 "detail on the board, a concern to the agent it affects, or wherever this",
                 "tree records decisions — and carry on. A question raised and left is work",
-                "stopped rather than work paused.",
+                "stopped rather than work paused. `raise_decision` is still there, and",
+                "nobody may be at the pane to answer it: what you write in `if_unanswered`",
+                "is then what happens, so write what you will do and do it.",
                 "",
                 "The premises this session was launched with are the whole of what the",
                 "operator said. They were written before the work began and nothing is added",
@@ -247,9 +294,7 @@ def _unattended_lines(policy: Policy) -> list[str]:
                 "this session itself runs on. `WebFetch` and `WebSearch` are not bounded that",
                 "way — the sandbox wraps a Bash command and its children, and those tools",
                 "are performed by the CLI process outside it — so documentation is still",
-                "readable. The work is otherwise bounded to that directory, and a step",
-                "needing something outside it is a step to record as blocked, naming what it",
-                "needed, rather than to attempt another way.",
+                *denied,
                 "",
                 "`subagent_cap` bounds how many agents run at once. A spawn refused at the cap",
                 "is an answer about capacity rather than about the call — the same spawn",
@@ -259,7 +304,58 @@ def _unattended_lines(policy: Policy) -> list[str]:
     assert_never(policy)
 
 
-def lead_briefing(template: WorkTemplate, policy: Policy = Policy.STRICT) -> str:
+# The heading ``_command_lines`` stands under.
+COMMAND_HEADING = "## A step your sandbox denies"
+
+
+def _command_lines(contained: bool) -> list[str]:
+    """
+    How to ask the operator to run a command, in the words every role is given,
+    and nothing where the session has no such tool.
+
+    Keyed on containment and not on the policy, because the tool is: a contained
+    session has ``request_command`` on every rung, and its containment is fixed
+    for its life while its rung can be narrowed under a briefing already sent.
+    An uncontained session's prompt never names the tool -- a tool briefed and
+    absent costs an agent turns trying to call it.
+
+    **The instruction is to ask and carry on.** The operator's decision was that
+    asking must not become another way to make a session synchronous
+    (``planning/2026-10-13-a-break-glass-command-the-operator-runs.md``, D4), and
+    the call returns before anybody has read the row. So this never says to
+    wait, and says what to do when the work ends first: the step is still
+    blocked, and the result says so.
+
+    One block for the lead and the workers, on ``_unattended_lines``' grounds.
+    """
+    if not contained:
+        return []
+    return [
+        "",
+        COMMAND_HEADING,
+        "",
+        "This session's Bash commands run inside a sandbox. When a step needs what the",
+        "sandbox denies — an install, a push, a fetch from the network — ask the",
+        "operator to run it: `request_command(command, reason, expects)`, giving the",
+        "exact command line, why you need it, and what it should change. Nothing runs",
+        "when you call it. The operator is shown the string as you wrote it and runs it",
+        "themselves, outside the sandbox, and may refuse it or change it first. Nobody",
+        "may be at the pane.",
+        "",
+        "**Ask, then carry on.** The call returns an id at once. Go on with the work",
+        "that does not need the command. Do not end your turn to wait for it, and do",
+        "not call `read_commands` in a loop. Nothing tells you when a command ends, so",
+        "call `read_commands(command_id)` when you reach the work that needs it, and",
+        "again before you finish. Do not ask twice for the same thing: a command you",
+        "asked for stays in front of the operator until `read_commands` says it ended.",
+        "If it has not run by the time you finish, the step is blocked — record it as",
+        "blocked in your result, naming the command you asked for and its id.",
+    ]
+
+
+def lead_briefing(
+    template: WorkTemplate, policy: Policy = Policy.STRICT, contained: bool = False
+) -> str:
     """
     What the lead is told, on top of its ordinary system prompt.
 
@@ -272,6 +368,9 @@ def lead_briefing(template: WorkTemplate, policy: Policy = Policy.STRICT) -> str
     ``policy`` selects what the briefing says about who is watching and nothing
     else, and it defaults to ``STRICT`` so a caller that does not pass it reads
     exactly what it read before the mode existed.
+
+    ``contained`` is whether the session has the command tools
+    (``_command_lines``), and defaults to the answer that names none of them.
     """
     if not template.roles:
         return template.lead_prompt.strip()
@@ -329,16 +428,80 @@ def lead_briefing(template: WorkTemplate, policy: Policy = Policy.STRICT) -> str
         "  the launch directory and to nothing else. A dependency the board added is",
         "  not advisory: leave it in place, and where the overlap is wrong, narrow the",
         "  `touches` of a task rather than dropping the edge.",
+        "- `amend_task(task_id, detail, property)` replaces the specification of a",
+        "  task you declared and have never held; leave `detail` out to change the",
+        "  property and keep the text. The text it replaces is kept as an",
+        "  earlier version and the board shows which version a row is on. Amend when",
+        "  what you asked for was wrong; to tell a holder something that does not",
+        "  change what it is held to, `post_concern` instead. Nothing interrupts the",
+        "  holder: it sees the new text when it next reads the task, and if it",
+        "  completes first its result is recorded against the version it was handed,",
+        "  which the board shows. Post it a concern as well when it should stop and",
+        "  read now. Once you have amended a task you cannot claim it yourself.",
         "- Workers call `claim_task()` to take the oldest unblocked item, one at a",
         "  time. Declare the work and let them claim it rather than assigning it by",
         "  hand; another agent in the same role is how the board drains faster.",
         "- `read_board()` shows the board to you and to them. A worker asking what",
         "  is on it no longer has to ask you, so route them to it rather than",
         "  relaying the state yourself — your copy goes stale and the board does not.",
+        "- `read_task(task_id)` returns a task: its specification, always whole,",
+        "  then its result and every note on it. `read_board()` cuts each row so the",
+        "  whole board fits in a reply, and this is where the rest is — for you",
+        "  reading back a specification you wrote, and for a worker you would",
+        "  otherwise have to relay it to. A task too large for a reply is cut as",
+        "  well, everything but its specification, and each cut names the",
+        "  `read_task(task_id, part)` call that returns that text whole.",
+        "- A worker finishes with `complete_task(task_id, result)`. The result — what",
+        "  was done, what was run, what was not — stays on the task, so the worker",
+        "  that builds on it and the operator can read it there. What a worker",
+        "  returns to you through the `Agent` tool reaches you and nobody else; read",
+        "  the board's results before you synthesise, and send a worker asking what",
+        "  another did to `read_task`.",
+        "- `declare_task`, `post_concern` and `complete_task` take a `basis` — `run`,",
+        "  `read` or `relayed` — which is how the author says it knows what the text",
+        "  asserts, and the board shows it beside the text. A claim marked `read` or",
+        "  `relayed`, or not marked, is a finding to check before it is built on;",
+        "  when you put such a claim into a `detail`, give the declaration that basis",
+        "  and do not restate it as settled.",
+        "- Give `declare_task` a `property`: a sentence naming what the work may not",
+        "  break. It is for ranking — the builder learns what it cannot trade away and",
+        "  a reviewer which findings matter — and the board shows it whole on every",
+        "  read.",
+        "- A finished task shows what its worker said it did not run. `not run:",
+        "  unstated` is not `nothing`: treat that work as unverified. A concern",
+        "  marked `INCIDENT` reports something that went wrong; a concern without",
+        "  the mark does not say nothing did.",
+        "- `read_digest()` is your report to the operator: what changed since you",
+        "  last read it, what is waiting on them, what nobody said was run, and",
+        "  what went wrong. Report from it at the end of a round, not at each",
+        "  worker's return, and pass on its UNVERIFIED and INCIDENTS slots in full.",
+        "- `release_task(task_id)` gives back a task you hold. You can also release a",
+        "  task whose holder is an agent of an earlier run of this session — from",
+        "  before pptmstr was restarted or the session was resumed — and is not",
+        "  running: `read_board()` says so on such a row, and it puts the task back",
+        "  for another agent to claim. No other claim is yours to release.",
+        "- The operator can close a task no agent's call can move, from their board",
+        "  pane. It then reads completed and `closed by the operator`, with their",
+        "  reason and no result: the work was not done, what waited on it becomes",
+        "  claimable, and work still wanted is declared again under a new id.",
+        "- `raise_decision(question, standing, if_unanswered, blocks, evidence,",
+        "  recommendation, reversible)` puts a decision in front of the operator, who",
+        "  answers it in their own pane. Use it for what the operator alone can",
+        "  settle; for what another agent can answer, post a concern. Work continues",
+        "  while it waits — nothing is parked. `if_unanswered` is required, and",
+        "  `blocks` is a list of task ids from the board and nothing else.",
+        "  `read_decisions()` lists every decision raised in your session, your",
+        "  workers' included, each marked with who raised it;",
+        "  `read_decisions(decision_id)` returns that decision with the operator's",
+        "  answer in their words. Read a worker's answer there rather than from the",
+        "  worker's account of it. Nothing tells you when an answer arrives, and a",
+        "  decision is withdrawn by the agent that raised it and by no other.",
+        *_lead_command_lines(contained),
         "- `post_concern(to, subject, body)` sends a message to a role by name, or to",
         "  `lead` for you. `read_inbox()` collects what has been sent to you.",
         *_concern_audience_lines(policy),
-        *_unattended_lines(policy),
+        *_unattended_lines(policy, contained),
+        *_command_lines(contained),
         "",
         "## Your job",
         "",
@@ -377,7 +540,45 @@ def lead_briefing(template: WorkTemplate, policy: Policy = Policy.STRICT) -> str
     return "\n".join(lines)
 
 
-def worker_prompt(role: Role, brief: str | None = None, policy: Policy = Policy.STRICT) -> str:
+def _lead_command_lines(contained: bool) -> list[str]:
+    """
+    Who is told what became of a command, as the lead is told it.
+
+    The asker reads its own outcome and nothing interrupts anybody, so a lead
+    that expects to hear waits for news that does not come; what it has is a
+    read of every command asked in its session.
+    """
+    if not contained:
+        return []
+    return [
+        "- `request_command(command, reason, expects)` asks the operator to run a",
+        "  command outside the sandbox; a section below says how. The outcome is read",
+        "  by the agent that asked. `read_commands()` lists every command asked in",
+        "  your session, your workers' included, each marked with who asked, and",
+        "  `read_commands(command_id)` returns that command with how it ended. You are",
+        "  not told when a worker's command ends, and a command is withdrawn by the",
+        "  agent that asked for it and by no other.",
+    ]
+
+
+def _worker_command_lines(contained: bool) -> list[str]:
+    """Who is told what became of a command, as a worker is told it."""
+    if not contained:
+        return []
+    return [
+        "",
+        "What became of a command you asked for is yours to read; your lead can read",
+        "it and is not told when it ends. Say in your result what you asked for and",
+        "how it ended.",
+    ]
+
+
+def worker_prompt(
+    role: Role,
+    brief: str | None = None,
+    policy: Policy = Policy.STRICT,
+    contained: bool = False,
+) -> str:
     """
     A role's own prompt, plus the part every worker needs.
 
@@ -416,12 +617,17 @@ def worker_prompt(role: Role, brief: str | None = None, policy: Policy = Policy.
     is not read by anybody else: a worker is the agent that meets the write-region
     denial, and a worker is the agent that posts a concern and waits. It carries the
     same block the lead gets, and it defaults to ``STRICT``.
+
+    ``contained`` is ``lead_briefing``'s: whether this session has the command
+    tools, which a worker is then told how to use in the lead's own words.
     """
     return "\n".join(
         [
             role.prompt.strip(),
             *_brief_lines(brief),
-            *_unattended_lines(policy),
+            *_unattended_lines(policy, contained),
+            *_command_lines(contained),
+            *_worker_command_lines(contained),
             "",
             "## Working with the team",
             "",
@@ -434,11 +640,59 @@ def worker_prompt(role: Role, brief: str | None = None, policy: Policy = Policy.
             "about to act on a claim about another task — the board is the shared",
             "state, and it is current in a way your own transcript is not.",
             "",
-            "Take work with `claim_task()`; call `complete_task(task_id)` when it is",
-            "done, or `release_task(task_id)` if you cannot proceed, so somebody else",
-            "can. Do not work on something you have not claimed — the board is shared,",
-            "another agent may be working in the same role as you, and the item you",
-            "claimed is the only one that is yours.",
+            "`read_task(task_id)` returns one task — its specification, always whole,",
+            "then its result and every note on it. `read_board()` cuts each row so the",
+            "whole board fits in one reply; when a row says text was cut, this is where",
+            "the rest is, and it is how you re-read the specification of a task you hold.",
+            "A task too large for a reply is cut as well, everything but its",
+            "specification, and each cut names the `read_task(task_id, part)` call that",
+            "returns that text whole.",
+            "",
+            "A task's specification can be replaced while you hold it, and nothing",
+            "interrupts you when it is. The board shows `specification v2` or later",
+            "on such a row; `read_task` it before you finish. A `complete_task` is",
+            "never turned away for this: your result is recorded against the version",
+            "you were handed, and the reply shows you the current one so you can say",
+            "in a concern if your work does not meet it. If a specification is wrong,",
+            "do not rewrite it — `amend_task` is for the agent that declared the task",
+            "— post a concern to that agent, naming the task.",
+            "",
+            "`raise_decision(question, standing, if_unanswered, ...)` puts a decision",
+            "in front of the operator. Use it for what the operator alone can settle",
+            "— a tradeoff the task did not decide, a choice you took and want",
+            "ratified — and post a concern for what another agent can answer. Keep",
+            "working while it waits: nothing is parked and nothing tells you when the",
+            "answer arrives, so call `read_decisions(decision_id)` with the id it",
+            "gave you when you reach the work it blocks. The answer is handed to",
+            "you; your lead can read it and is not told when it arrives.",
+            "",
+            "Take work with `claim_task()`; call `complete_task(task_id, result)` when",
+            "it is done, or `release_task(task_id)` if you cannot proceed, so somebody",
+            "else can. Do not work on something you have not claimed — the board is",
+            "shared, another agent may be working in the same role as you, and the item",
+            "you claimed is the only one that is yours.",
+            "",
+            "**Give `complete_task` a `result`**: what you did, what you ran, and what",
+            "you did not run. What you return when you finish reaches only the agent",
+            "that started you. The result stays on the task, where the next worker to",
+            "build on your work and the operator will read it, and neither of them was",
+            "in your transcript. Before you build on a finished task, `read_task` it.",
+            "",
+            "**Say how you know.** `post_concern`, `complete_task` and `declare_task`",
+            "take a `basis`: `run` if you executed something and are reporting its",
+            "output, `read` if you established it by reading, `relayed` if you are",
+            "passing on what another agent or a record said — the weakest that applies",
+            "to anything in the text. The board shows it beside your text as your own",
+            "statement. Text marked `read` or `relayed`, or not marked at all, is a",
+            "finding to check before you build on it.",
+            "",
+            "**Say what you did not run, and mark what went wrong.** Give",
+            "`complete_task` a `not_run` — the script written and never executed, the",
+            "path no test reaches — or `all_run=true` if nothing was left; without",
+            "either the board shows `not run: unstated`. Post a rule you broke or a",
+            "file you wrote outside your task with `post_concern(incident=true)`, so",
+            "it is counted and not buried in a result. The `must not break` line under",
+            "a task's title is the one property to hold whatever else you trade away.",
             "",
             "**Confirm a reported defect still exists before you fix it.** A finding is",
             "a claim about the tree at the moment it was read, and by the time it",

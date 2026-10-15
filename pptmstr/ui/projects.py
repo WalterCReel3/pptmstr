@@ -65,8 +65,18 @@ def _derive(cwd: str) -> str:
 
 
 def roots(snap: Snapshot) -> list[NodeId]:
-    """Root sessions, in spawn order. Sub-agents are pips on a card, never cards."""
-    return [nid for nid in snap.order if snap.nodes[nid].parent is None]
+    """
+    Root sessions on the fleet, in spawn order. Sub-agents are pips on a card,
+    never cards.
+
+    A session the operator took off the fleet (``Snapshot.off_fleet``) is not
+    one: its records stay in the store and it is listed nowhere. A session
+    recalled from its file is on the fleet and is listed, after everything this
+    process launched (``Snapshot.order``).
+    """
+    return [
+        nid for nid in snap.order if snap.nodes[nid].parent is None and not snap.off_fleet(nid[0])
+    ]
 
 
 def group_roots(snap: Snapshot) -> list[tuple[str, list[NodeId]]]:

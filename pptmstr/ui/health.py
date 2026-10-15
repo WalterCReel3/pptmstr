@@ -25,10 +25,20 @@ from dataclasses import dataclass
 from imgui_bundle import imgui
 
 from ..approval import Policy
-from ..model import AgentState, LaunchSpec, NodeId, Snapshot
+from ..model import AgentRecord, AgentState, EndedHow, LaunchSpec, NodeId, Snapshot
 from ..theme import STATE_GLYPH, STATE_LABEL, Color, P
-from . import projects
-from .widgets import context_cell, ellipsis, format_elapsed, gate_adds, short_model
+from . import gate_menu, projects, session_details, session_menu
+from .widgets import (
+    ago,
+    closed_line,
+    context_cell,
+    ellipsis,
+    ended_how_label,
+    flat_line,
+    format_elapsed,
+    gate_adds,
+    short_model,
+)
 
 _SMALL_FONT = 12.5
 
@@ -72,6 +82,125 @@ def gate_line(policy: Policy | None) -> tuple[str, Color] | None:
     return f"gate: {policy.value}", P.text_dim if policy is Policy.STRICT else P.warn
 
 
+# In place of a title the session file did not record.
+NO_TASK = "(task not recorded)"
+NO_MODEL = "its session file records no model, so there is nothing to fork it on"
+
+
+def narrow_note(policy: Policy | None) -> str | None:
+    """
+    What "narrow to strict" does to a session answering with ``policy``, or None
+    where the control is not drawn.
+
+    **The card menu's sentence for the same move, by asking for that row**
+    (``gate_menu.rows``), so the two controls cannot come to describe one lever
+    differently. It ends on the part a button's label cannot carry: the agent's
+    briefing goes on describing the rung it started under. Whether the process
+    is contained is not asked, because no narrowing depends on it.
+    """
+    lowest = tuple(Policy)[0]
+    if policy is None or policy is lowest:
+        return None
+    return next(
+        row.consequence
+        for row in gate_menu.rows(policy, False, True, adds=gate_adds)
+        if row.rung is lowest
+    )
+
+
+def fork_refusal(root: AgentRecord) -> str | None:
+    """
+    Why Fork is greyed on a closed session, or None when it may be pressed.
+
+    Fork launches ``LaunchSpec.from_record`` in one step, with the record's task
+    as the new session's prompt. Whether that task is one is the card menu's
+    question and is asked through its predicate (``session_menu.task_missing``),
+    in its words, so the two surfaces grey the same cards for the same reason: a
+    title that is only the CLI's label for the conversation is not a task.
+    """
+    if session_menu.task_missing(root):
+        return session_menu.TASK_NOT_RECORDED
+    if not root.model.strip():
+        return NO_MODEL
+    return None
+
+
+def recalled_lines(root: AgentRecord, now_wall: float | None) -> tuple[str, ...]:
+    """
+    Everything HEALTH says about a session recalled from its file, below the
+    title, one line each. () for any other record.
+
+    **Only what the file said, each under its own name.** The record beside it
+    is field defaults -- DONE, a start at zero on the store's clock, zero usage,
+    no context reading -- and the ordinary pane draws those as "done", a
+    duration since boot, "$0.00" and "0 in". So there is no state label, no
+    duration, no context cell and no token line here; the cost is the file's
+    estimate or is left out; and the gate is the rung the file last recorded
+    (``AgentRecord.granted_policy``), "not known" when it recorded none this
+    build knows. ``now_wall`` is the wall clock, or None when the caller has
+    none, and then the age is said to be not known.
+    """
+    recalled = root.recalled
+    if recalled is None:
+        return ()
+    lines = [
+        closed_line(root) or "",
+        f"last active: {ago(recalled.last_active, now_wall)}",
+        ended_how_label(recalled.ended_how),
+    ]
+    if recalled.ended_how is EndedHow.FAILED and recalled.error:
+        lines.append(f"it said: {flat_line(recalled.error)}")
+    elif session_details.failed_then_closed(recalled):
+        lines.append(f"it had failed before it was closed: {flat_line(recalled.error or '')}")
+    lines.append(short_model(root.model) if root.model else "model not known")
+    lines.append(flat_line(root.cwd) if root.cwd else "directory not known")
+    granted = root.granted_policy
+    lines.append(
+        "gate: not known"
+        if granted is None
+        else f"gate: {granted.value}, as the session file last recorded"
+    )
+    if recalled.cost_usd is not None:
+        lines.append(
+            f"${recalled.cost_usd:,.2f} as the session file recorded, an estimate; "
+            "it may double-count across resumes"
+        )
+    return tuple(lines)
+
+
+def _recalled(root: AgentRecord, actions: HealthActions, now_wall: float | None) -> None:
+    """
+    HEALTH for a closed session: what its file said, and Fork.
+
+    Fork is the one lever that needs no process: it starts a new session from
+    the task and directory on the record. Interrupt, close and narrowing act on
+    a run, and there is none. It is greyed, with the reason, where the record
+    has nothing to start a session from (``fork_refusal``).
+    """
+    title = root.task if root.task.strip() else NO_TASK
+    imgui.text_colored(P.text_strong.vec4, ellipsis(title, imgui.get_content_region_avail().x))
+    _small()
+    imgui.text_colored(P.text_dim.vec4, projects.project_key(root.cwd))
+    _normal()
+    imgui.separator()
+    imgui.spacing()
+    imgui.push_text_wrap_pos(0.0)
+    for line in recalled_lines(root, now_wall):
+        imgui.text_disabled(line)
+    imgui.pop_text_wrap_pos()
+    imgui.spacing()
+    imgui.separator()
+    imgui.spacing()
+    refusal = fork_refusal(root)
+    if refusal is not None:
+        imgui.begin_disabled()
+    if imgui.button("fork") and refusal is None:
+        actions.fork(LaunchSpec.from_record(root))
+    if refusal is not None:
+        imgui.end_disabled()
+        imgui.text_disabled(refusal)
+
+
 def _fmt_tokens(count: int) -> str:
     if count >= 1_000_000:
         return f"{count / 1_000_000:.1f}M"
@@ -86,6 +215,7 @@ def draw(
     actions: HealthActions,
     now: float,
     policy: Policy | None = None,
+    now_wall: float | None = None,
 ) -> None:
     """
     Health for the session under the cursor. Never independently selectable.
@@ -95,6 +225,12 @@ def draw(
     something read off the record because the record does not carry it: the policy
     moves inside the session after launch, and the only value that is not a guess
     is the one the session is answering with right now.
+
+    ``now`` is the store's clock and ``now_wall`` the wall clock, both read once
+    by the shell for the frame. The second is used only for a session recalled
+    from its file, whose times are wall-clock (``model.Recalled``); None draws
+    its age as not known, which is what a caller that passes no wall clock
+    knows. This pane reads no clock of its own.
     """
     if node is None or (record := snap.get(node)) is None:
         imgui.text_disabled("nothing selected")
@@ -104,6 +240,10 @@ def draw(
     # window and the bill. Showing a separate reading would invent three numbers.
     session: NodeId = (node[0], None)
     root = snap.get(session) or record
+
+    if root.recalled is not None:
+        _recalled(root, actions, now_wall)
+        return
 
     imgui.text_colored(P.text_strong.vec4, ellipsis(root.task, imgui.get_content_region_avail().x))
     _small()
@@ -164,7 +304,7 @@ def draw(
         for sub in subs:
             imgui.text_colored(P.state(sub.state).vec4, f"  {STATE_GLYPH[sub.state]}")
             imgui.same_line()
-            imgui.text_colored(P.text.vec4, sub.agent_type or sub.task)
+            imgui.text_colored(P.text.vec4, flat_line(sub.agent_type or sub.task))
             imgui.same_line()
             imgui.text_disabled(STATE_LABEL[sub.state])
 
@@ -204,6 +344,11 @@ def draw(
             actions.revoke_policy(session)
 
     _small()
+    note = narrow_note(policy)
+    if note is not None:
+        imgui.push_text_wrap_pos(0.0)
+        imgui.text_colored(P.text_dim.vec4, note)
+        imgui.pop_text_wrap_pos()
     if root.state is AgentState.AWAITING_INPUT:
         imgui.text_colored(P.text_dim.vec4, "this session holds a slot until it is closed")
     elif root.state is AgentState.SUPERVISING:
