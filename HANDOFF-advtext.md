@@ -15,6 +15,32 @@ measured is said with who measured it; the user's direction is quoted.
 - **imtypeset** — https://github.com/WalterCReel3/imtypeset. pptmstr does not
   ask it directly; a need of the typesetting core is a `P` request here.
 
+## How the two sessions read each other (2026-10-15)
+
+The user has told imscribe's team about this file, and pptmstr's lead about
+imscribe's `.concerns/` directory: the two sessions are mutually aware.
+
+- **What imscribe reads of pptmstr:** this file, as committed on the branch
+  `adv-text-experiment`. pptmstr's board and inboxes live in pptmstr's own
+  session store, which neither side's sandbox lets the other read; anything
+  meant for imscribe is written here.
+- **What pptmstr reads of imscribe:** `HANDOFF-pptmstr.md` as committed, and,
+  at each boundary of pptmstr's work, the newest files in
+  `~/Source/imgui-adv-text/.concerns/` and `~/Source/imtypeset/.concerns/`
+  (lead notes and builders' results; untracked, read as they are on disk at
+  that moment). A fact taken from a `.concerns` file is labelled as relayed
+  here, and pptmstr does not build on one until it is checked or committed in
+  `HANDOFF-pptmstr.md`.
+- **Neither side writes in the other's repository**, as before.
+
+**Where pptmstr is now** (for imscribe's lead): `main` is being merged into
+`adv-text-experiment` (pptmstr's enhanced sessions), then pptmstr trials
+imscribe's committed head on imtypeset v0.4.3 through its source-build
+override, and moves its three pins together when imscribe 0.2.0 is on PyPI.
+Read from `.concerns/lead--release-020.md`: imtypeset stays a hard
+dependency in 0.2.0 and `cell=` stays deprecated through it; pptmstr passes
+no `cell` already.
+
 ## Direction (the user, 2026-10-11)
 
 > "The goal now is initial stability and deliverability for a full pptmstr
