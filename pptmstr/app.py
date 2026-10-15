@@ -15,6 +15,7 @@ import dataclasses
 import os
 import queue
 import signal
+import tempfile
 import threading
 import time
 import traceback
@@ -2376,7 +2377,7 @@ def _launch(
         # question put ahead of it would be the same fact with two readers to keep
         # in step. The window is a contained launch whose version read was still
         # out when the application began to quit.
-        _seed_brief(session, shape)
+        _seed_brief(session, shape, scratch=state.fake)
         # Before the pool has it: ``submit`` announces, the announce is applied
         # on the draw thread, and a change derived from it for a session the
         # writer has not been told of is dropped. Admitting creates nothing, so
@@ -2595,7 +2596,9 @@ def _resume_failed(state: AppState, session_id: str, draft: resume_form.Draft, r
     return True
 
 
-def _seed_brief(session: AgentSession, shape: templates.WorkTemplate) -> None:
+def _seed_brief(
+    session: AgentSession, shape: templates.WorkTemplate, *, scratch: bool = False
+) -> None:
     """
     Write the launch text as the session's first premise, for a team.
 
@@ -2619,9 +2622,14 @@ def _seed_brief(session: AgentSession, shape: templates.WorkTemplate) -> None:
     conversation and not the premises of one, and the directory this would
     write to is the session's own, since a resume keeps its id: the entry would
     be appended to the brief the session already has. A resumed team that was
-    handed no directory is given that one when it exists, by one ``is_dir``, so
-    its workers are still told where the premises are whichever surface resumed
-    it; when it does not exist the session runs with no brief, as it did.
+    handed no directory is given that one when it exists (``brief.existing_dir``,
+    which also finds one written under the legacy layout), so its workers are
+    still told where the premises are whichever surface resumed it; when neither
+    exists the session runs with no brief, as it did.
+
+    ``scratch`` is ``--fake``'s: the brief is written under a new temporary
+    directory and a resume looks for none, because that run writes nothing into
+    the configuration directory and reads nothing a real run left there.
 
     A failure does not stop the launch. The work the operator asked for is worth
     more than the seeding of it, and the log says which happened rather than
@@ -2629,16 +2637,17 @@ def _seed_brief(session: AgentSession, shape: templates.WorkTemplate) -> None:
     """
     if not shape.roles or session.brief or not session.task.strip():
         return
-    directory = brief_mod.session_dir(
-        brief_mod.default_root(), session.cwd or ".", session.session_id
-    )
     if session.resume is not None:
-        try:
-            existing = directory.is_dir()
-        except OSError:
-            existing = False
-        if existing:
-            session.brief = str(directory)
+        existing = (
+            None if scratch else brief_mod.existing_dir(session.session_id, session.cwd or ".")
+        )
+        if existing is not None:
+            session.brief = str(existing)
+        return
+    root = Path(tempfile.mkdtemp(prefix="pptmstr-fake-briefs-")) if scratch else None
+    directory = brief_mod.session_dir(session.session_id, root)
+    if directory is None:
+        LOG.warn("app", f"no brief seeded: {session.session_id!r} is not a session id")
         return
     try:
         brief_mod.write_entry(directory, session.task)

@@ -422,7 +422,7 @@ def test_the_derived_path_is_where_the_sdk_finds_the_sessions_transcript(
 
     config = tmp_path / "claude"
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
-    monkeypatch.setattr(brief, "default_root", lambda: config / "projects")
+    monkeypatch.setattr(brief, "legacy_root", lambda: config / "projects")
     work = tmp_path / "some work" / "tree_1"
     work.mkdir(parents=True)
     session_id = "0b5f3a0e-6a3c-4b53-9c62-0d0f4f6f8d11"
@@ -444,7 +444,7 @@ def _rec(store: Store, node: NodeId = ROOT) -> object:
 def test_the_look_reads_the_directorys_git_layout_and_whether_the_transcript_is_there(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(brief, "default_root", lambda: tmp_path / "projects")
+    monkeypatch.setattr(brief, "legacy_root", lambda: tmp_path / "projects")
     work = tmp_path / "work"
     work.mkdir()
     store = _store(cwd=str(work))
@@ -577,7 +577,7 @@ def test_the_look_finds_a_sub_agents_transcript_beside_the_one_the_cli_reported(
     Under the reported transcript when there is one: that is where the file is,
     and the derived path is only where the naming says it should be.
     """
-    monkeypatch.setattr(brief, "default_root", lambda: tmp_path / "projects")
+    monkeypatch.setattr(brief, "legacy_root", lambda: tmp_path / "projects")
     work = tmp_path / "work"
     work.mkdir()
     store = _store(cwd=str(work))
@@ -840,7 +840,7 @@ class _Modal:
 @pytest.fixture
 def modal(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[_Modal]:
     """Details open on a session in a real directory, with its board being recorded."""
-    monkeypatch.setattr(brief, "default_root", lambda: tmp_path / "projects")
+    monkeypatch.setattr(brief, "legacy_root", lambda: tmp_path / "projects")
     work = tmp_path / "work"
     work.mkdir()
     with _Modal(monkeypatch, _store(cwd=str(work), brief_dir=str(tmp_path / "brief"))) as real:
@@ -1348,7 +1348,7 @@ def test_copy_on_each_of_the_sessions_own_paths_puts_that_path_on_the_clipboard(
 def test_the_modal_for_a_closed_session_reads_its_files_once_and_copies_its_gate(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr(brief, "default_root", lambda: tmp_path / "projects")
+    monkeypatch.setattr(brief, "legacy_root", lambda: tmp_path / "projects")
     old = boardlog.session_dir(boardsync.legacy_root(), "s1")
     assert old is not None
     _record("s1", old)

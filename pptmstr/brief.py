@@ -43,6 +43,8 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import boardlog, settings
+
 # The first entry, and the only one that is not an amendment. Named rather than
 # numbered at the call site so "is this the premises" is one comparison.
 PREMISES = "premises"
@@ -99,35 +101,96 @@ class DerivedEntry:
         return bool(self.superseded_by)
 
 
+_BRIEFS = "briefs"
+
+
 def default_root() -> Path:
     """
-    Where briefs live when the operator did not name a directory.
+    Where briefs live when the operator did not name a directory:
+    ``<config>/briefs``. Does not create it.
 
-    Beside the CLI's own per-project state rather than under this application's
-    config, because a brief explains a session and the session's transcript is
-    already there -- the 08-14 record measured 149 of them for this repository.
-    Splitting the two would mean answering "what did this worker act on" from two
-    directories that agree by convention.
+    **Keyed by session id alone, so nothing about the working directory enters the
+    name.** A resume runs in whatever directory it is launched from
+    (``planning/2026-10-07-a-session-can-run-in-its-own-worktree.md`` D3), so a name
+    derived from the directory is a different name for the same session; and the
+    CLI's transcript slug cannot be reproduced past 200 characters, where it carries
+    a hash the CLI and the SDK compute differently.
+
+    **A root of its own, not ``sessions/<id>/brief``.** ``sandbox`` denies the whole
+    ``sessions`` tree to a contained ``Bash`` command, the session's own directory
+    included, and ``approval.records_read`` denies one session another's directory
+    there. A worker lists and reads its premises, and a fork reads its parent's,
+    so either denial would cut a team off from its brief.
+
+    Outside the working tree for the reason the 08-17 record gives: in the tree,
+    every launch dirties the working directory, and a contained session could
+    rewrite the premises it is acting on.
+
+    Through ``settings`` at call time, as ``sessionfile`` reaches its root, so a
+    redirected configuration directory redirects this too.
+    """
+    return settings.config_dir() / _BRIEFS
+
+
+def session_dir(session_id: str, root: Path | None = None) -> Path | None:
+    """
+    Where a session's brief is written: ``<root>/<session id>/``, or None for an id
+    that is not one directory name (``boardlog.session_dir`` has the rule).
+
+    Only a default -- ``LaunchSpec.brief`` carries whatever path the operator gave,
+    which is what lets a fork inherit its parent's brief instead of deriving an
+    empty one.
+    """
+    return boardlog.session_dir(default_root() if root is None else root, session_id)
+
+
+def legacy_root() -> Path:
+    """
+    The CLI's per-project directory, ``~/.claude/projects``, where briefs were
+    written as ``<cwd slug>/briefs/<session id>/`` and are still read from for a
+    resume (``existing_dir``). Nothing is written here.
+
+    Also where the CLI keeps transcripts, which is what ``session_details`` asks it
+    for.
     """
     return Path.home() / ".claude" / "projects"
 
 
-def session_dir(root: Path, cwd: str, session_id: str) -> Path:
+def legacy_session_dir(cwd: str, session_id: str, root: Path | None = None) -> Path:
     """
-    Where a session's brief lives: ``<root>/<cwd-slug>/briefs/<session-id>/``.
-
-    Beside the transcripts that explain it rather than in the working tree, which
-    the 08-14 record measured as where this project's durable state already is. In
-    the tree it would dirty the working directory on every launch, straight into the
-    untracked-file trap that cost a teammate's work once already.
-
-    The slug is the CLI's own: absolute path with separators turned into dashes. It
-    is reproduced rather than imported because nothing exposes it, and it is only a
-    default -- ``LaunchSpec.brief`` carries whatever path the operator gave, which is
-    what lets a fork inherit its parent's brief instead of deriving an empty one.
+    Where a brief for ``session_id`` launched in ``cwd`` was written under
+    ``legacy_root``. The slug is that layout's: the resolved path with only the
+    separator turned into ``-``, which is not the CLI's own slug for any path with
+    another non-alphanumeric character in it.
     """
     slug = str(Path(cwd).resolve()).replace(os.sep, "-")
-    return root / slug / "briefs" / session_id
+    return (legacy_root() if root is None else root) / slug / _BRIEFS / session_id
+
+
+def existing_dir(
+    session_id: str, cwd: str, *, root: Path | None = None, legacy: Path | None = None
+) -> Path | None:
+    """
+    The brief directory a session already has, or None: its own under ``root`` if
+    that is a directory, else the legacy one for ``cwd`` if that is.
+
+    For a resume, which keeps its id and so its brief. The legacy lookup takes the
+    resume's ``cwd``, so a session resumed from a different directory than it was
+    launched in finds no legacy brief; only the briefs written before the move to
+    ``default_root`` have that limit.
+
+    Two ``is_dir`` calls at most. An ``OSError`` from either reads as absent.
+    """
+    candidates = (session_dir(session_id, root), legacy_session_dir(cwd, session_id, legacy))
+    for candidate in candidates:
+        if candidate is None:
+            continue
+        try:
+            if candidate.is_dir():
+                return candidate
+        except OSError:
+            continue
+    return None
 
 
 def write_entry(

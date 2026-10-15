@@ -855,9 +855,7 @@ class FakeDriver:
         outside the working tree: an entry in the tree would dirty it on every
         launch (``brief.session_dir``).
         """
-        directory = brief.session_dir(
-            pathlib.Path(tempfile.mkdtemp(prefix="pptmstr-fake-")), "/x/orbital", "sess-fake"
-        )
+        directory = pathlib.Path(tempfile.mkdtemp(prefix="pptmstr-fake-")) / "sess-fake"
         # The seed a real launch writes: the operator's launch text, verbatim.
         brief.write_entry(
             directory,

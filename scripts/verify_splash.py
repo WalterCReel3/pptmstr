@@ -134,10 +134,10 @@ def _scratch_config() -> Path:
     Three things are moved, and all three before ``pptmstr.app`` is asked for
     anything: ``XDG_CONFIG_HOME``, which ``settings.config_dir`` and hello_imgui's
     ini both resolve from; ``CLAUDE_CONFIG_DIR``, which is where the SDK lists
-    transcripts; and ``brief.default_root``, which is derived from the home
-    directory and reads neither variable. An ``XDG_CONFIG_HOME`` already set is
-    replaced like an unset one: nothing here can tell a disposable directory from
-    the one the operator keeps.
+    transcripts; and ``brief.legacy_root``, the CLI's projects directory, which is
+    derived from the home directory and reads neither variable. An
+    ``XDG_CONFIG_HOME`` already set is replaced like an unset one: nothing here can
+    tell a disposable directory from the one the operator keeps.
 
     The directory is left behind, since the ini and whatever a run recorded are
     the evidence of what it did.
@@ -150,10 +150,10 @@ def _scratch_config() -> Path:
     (claude / "projects").mkdir(parents=True)
     os.environ["XDG_CONFIG_HOME"] = str(config)
     os.environ["CLAUDE_CONFIG_DIR"] = str(claude)
-    brief.default_root = lambda: claude / "projects"
+    brief.legacy_root = lambda: claude / "projects"
     print(
         f"configuration for this run is under {scratch}, left in place:"
-        " XDG_CONFIG_HOME, CLAUDE_CONFIG_DIR and the brief root all point there",
+        " XDG_CONFIG_HOME, CLAUDE_CONFIG_DIR and the CLI projects root all point there",
         flush=True,
     )
     return scratch

@@ -377,7 +377,7 @@ class SessionPicker:
     picked: SessionRow | None = None
     # The brief directory the picked session wrote its premises into, if it exists.
     #
-    # Recoverable, and not a guess: `brief.session_dir` is a function of cwd and
+    # Recoverable, and not a guess: `brief.session_dir` is a function of the
     # session id, and resume continues under the same id. It is the one thing about
     # the original session that does come back -- `task`, `model` and `template` do
     # not, because there is no `AgentRecord` on the far side of the CLI.
@@ -548,24 +548,22 @@ class SessionPicker:
         line naming a directory the operator did not choose.
 
         ``cwd`` is the cwd field, and it is only the answer for a row that recorded no
-        directory. The brief directory is derived from ``launch_directory`` -- the
-        directory the resumed session will run in -- and ``app._seed_brief`` builds it
-        from ``LaunchSpec.cwd``, which ``LauncherState.resumed`` and
-        ``resume_form.press`` take from the same call, so the two agree by
-        construction instead of by coincidence.
+        directory. A brief written under the legacy layout is found from
+        ``launch_directory`` -- the directory the resumed session will run in -- and
+        ``app._seed_brief`` looks from ``LaunchSpec.cwd``, which
+        ``LauncherState.resumed`` and ``resume_form.press`` take from the same call,
+        so the two agree by construction instead of by coincidence.
         """
         self.picked = None if row is None or self.is_picked(row) else row
         self.recovered_brief = None
         if self.picked is None:
             return
-        directory = brief_mod.session_dir(
-            brief_mod.default_root(),
-            launch_directory(self.picked, cwd or ".").path,
-            self.picked.session_id,
+        # Two stats at most, at the click. Offering a path to a directory that does
+        # not exist would be the same lie as pre-filling the task.
+        directory = brief_mod.existing_dir(
+            self.picked.session_id, launch_directory(self.picked, cwd or ".").path
         )
-        # One stat, at the click. Offering a path to a directory that does not exist
-        # would be the same lie as pre-filling the task.
-        if directory.is_dir():
+        if directory is not None:
             self.recovered_brief = str(directory)
 
     @property

@@ -196,10 +196,9 @@ def transcript_for(cwd: str, session_id: str) -> Path:
 
     The key is the SDK's own (``project_key_for_directory``), which resolves the
     directory -- so this is IO, and is called from ``look``. The projects directory
-    is ``brief.default_root``, the one a brief is written beside its transcript
-    under.
+    is ``brief.legacy_root``, the CLI's own.
     """
-    return brief_mod.default_root() / project_key_for_directory(cwd) / f"{session_id}.jsonl"
+    return brief_mod.legacy_root() / project_key_for_directory(cwd) / f"{session_id}.jsonl"
 
 
 def look(rec: AgentRecord, reported: str | None) -> Looked:

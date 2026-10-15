@@ -323,11 +323,12 @@ def test_the_top_rung_and_its_containment_travel_together(work: Path, own: str) 
 def test_a_session_with_no_recorded_brief_gets_its_canonical_one_if_it_exists(
     work: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, own: str
 ) -> None:
-    root = tmp_path / "projects"
+    root = tmp_path / "briefs"
     monkeypatch.setattr(brief_mod, "default_root", lambda: root)
     assert _open(ResumeForms(), work, brief=None).brief is None
 
-    canonical = brief_mod.session_dir(root, os.path.realpath(work), SESSION)
+    canonical = brief_mod.session_dir(SESSION)
+    assert canonical is not None and canonical.parent == root
     canonical.mkdir(parents=True)
     form = _shown(_open(ResumeForms(), work, brief=None), own)
     assert form.brief == str(canonical)

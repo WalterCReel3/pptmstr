@@ -118,6 +118,9 @@ Four commits, all in `pptmstr/shellscan.py`, each with an adversarial corpus blo
   `(cwd -> dirname)` pairs, `[^A-Za-z0-9] -> -` matches all nine, **but the sample contains
   no `_` or space so it cannot discriminate that rule from the narrower `/` and `.`**.
   Migration is the harder half — briefs already exist under the wrong slug.
+  **Resolved 2026-10-15** by removing the slug rather than matching it: briefs are keyed by
+  session id under `<config>/briefs/<id>/`, and the old location is read, not moved
+  ([`archive/2026-10-15-a-brief-is-keyed-by-its-session.md`](archive/2026-10-15-a-brief-is-keyed-by-its-session.md)).
 
 ## The numbers, and what they are worth
 

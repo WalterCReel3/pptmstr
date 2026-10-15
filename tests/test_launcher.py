@@ -2655,15 +2655,15 @@ def test_a_message_to_a_picked_session_is_not_called_a_teams_premises(
     assert premises not in [*_lines(fake), *_behind(fake)]
 
 
-def test_a_session_recorded_through_a_symlink_has_one_brief_directory(
+def test_a_legacy_brief_recorded_through_a_symlink_has_one_directory(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """
     A resume's spec carries the recorded directory resolved (``resolved_directory``
     of ``launch_directory``, which is what ``resume_form.press`` takes) and the pick
-    derives the brief from the same reading. ``app._seed_brief`` builds the brief
-    directory from the spec's, so the two have to name one place or a resumed team
-    reads a brief the pick did not find.
+    looks for a legacy brief from the same reading. ``app._seed_brief`` looks from
+    the spec's, so the two have to name one place or a resumed team reads a brief
+    the pick did not find.
     """
     from pptmstr import brief as brief_mod
 
@@ -2676,12 +2676,34 @@ def test_a_session_recorded_through_a_symlink_has_one_brief_directory(
 
     started_in = launcher.resolved_directory(launcher.launch_directory(row, str(tmp_path)))
     assert started_in == str(real.resolve()) != str(link)
-    seeded = brief_mod.session_dir(brief_mod.default_root(), started_in, "a")
+    seeded = brief_mod.legacy_session_dir(started_in, "a")
     seeded.mkdir(parents=True)
 
     picker = SessionPicker()
     picker.pick(row, str(tmp_path))
     assert picker.recovered_brief == str(seeded)
+
+
+def test_the_pick_finds_a_brief_by_id_whatever_directory_the_row_names(
+    tmp_path: Path,
+) -> None:
+    """
+    The brief is keyed by the session id alone, so a row recorded under another
+    directory than the one the session was launched in still finds it -- and it is
+    preferred over a legacy one for the same id.
+    """
+    from pptmstr import brief as brief_mod
+
+    own = brief_mod.session_dir("a")
+    assert own is not None
+    own.mkdir(parents=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    brief_mod.legacy_session_dir(str(elsewhere), "a").mkdir(parents=True)
+
+    picker = SessionPicker()
+    picker.pick(_row("a", cwd=str(elsewhere)), str(tmp_path))
+    assert picker.recovered_brief == str(own)
 
 
 def test_an_id_the_listing_does_not_carry_is_not_a_pick() -> None:

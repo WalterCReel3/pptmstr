@@ -377,6 +377,14 @@ _BUS_AUTO = frozenset(
 # ``sessionfile.root()`` and ``boardsync.legacy_root()``.
 _RECORD_ROOTS = ("sessions", "boards")
 
+# Where briefs are written (``brief.default_root``), spelled here for the same
+# reason: ``brief`` imports ``boardlog``, which imports ``model``, which imports
+# this module. A root for ``records_written`` and not for ``records_read``: a
+# worker reads its premises and a fork reads its parent's, and only pptmstr
+# appends to them, so a tool call that writes one has rewritten what a session
+# acted on. tests/test_approval.py holds it to ``brief.default_root()``.
+_WRITE_ONLY_ROOTS = ("briefs",)
+
 # The tools that read one file, by the argument that names it.
 _FILE_READS: Mapping[str, str] = {"Read": "file_path", "NotebookRead": "notebook_path"}
 
@@ -464,7 +472,7 @@ def _configuration() -> Path:
     return settings.config_dir()
 
 
-def _records(session_id: str | None) -> _Records | None:
+def _records(session_id: str | None, names: tuple[str, ...] = _RECORD_ROOTS) -> _Records | None:
     """
     The records roots and the caller's own directories under them, or None when
     the configuration directory cannot be located.
@@ -484,9 +492,11 @@ def _records(session_id: str | None) -> _Records | None:
 
     With no ``session_id`` nothing is the caller's, so everything under a root is
     somebody else's.
+
+    ``names`` are the roots, beneath the configuration directory.
     """
     try:
-        spelled = [_configuration() / name for name in _RECORD_ROOTS]
+        spelled = [_configuration() / name for name in names]
     except (OSError, RuntimeError):
         return None
     roots: list[Path] = []
@@ -782,13 +792,17 @@ def records_written(
     tool call, so **every** session's directory counts here, the caller's own
     included, and ``classify`` admits no write that names one on any rung.
 
+    **Briefs are a root here and not in ``records_read``.** They are premises a
+    session acts on and are read by it, and pptmstr is their only writer
+    (``_WRITE_ONLY_ROOTS``).
+
     The four write tools only, and their target is the one ``model.written_path``
     reads, which is the argument the write bound and the ledger read. It is placed
     as ``records_read`` places a path -- from ``cwd``, with ``~``, ``..`` and
     symlinks followed, both spellings of a padded one -- against the same roots,
-    the legacy ``boards`` directory among them. A target that cannot be placed and
-    a configuration directory that cannot be located are each treated as a write
-    into the records. A write tool that names no target is not: it opens nothing,
+    the legacy ``boards`` directory among them, and the briefs root. A target that
+    cannot be placed and a configuration directory that cannot be located are each
+    treated as a write into the records. A write tool that names no target is not: it opens nothing,
     and where it would be released the driver's write bound refuses it for that
     (``driver._escapes_write_region``).
 
@@ -815,7 +829,7 @@ def records_written(
         base = Path(os.path.abspath(Path(cwd or ".").expanduser()))
     except (OSError, RuntimeError, ValueError):
         return unplaced
-    records = _records(None)
+    records = _records(None, _RECORD_ROOTS + _WRITE_ONLY_ROOTS)
     if records is None:
         return unplaced
     for spelling in _spellings(raw):

@@ -2183,6 +2183,53 @@ def test_ordinary_writes_are_released_as_they_were(tmp_path: Path) -> None:
             assert got is Disposition.AUTO_APPROVE, (target, tool)
 
 
+def test_the_write_only_root_is_where_briefs_are_written() -> None:
+    """
+    Spelled here for the import cycle `_RECORD_ROOTS` is; this holds the spelling.
+    """
+    from pptmstr import brief, settings
+
+    assert tuple(settings.config_dir() / name for name in approval._WRITE_ONLY_ROOTS) == (
+        brief.default_root(),
+    )
+
+
+@EVERY_RUNG
+def test_no_rung_admits_a_write_into_any_sessions_brief(policy: Policy, tmp_path: Path) -> None:
+    """
+    pptmstr is a brief's only writer. A tool call that writes one has rewritten the
+    premises a session acted on, its own included.
+    """
+    from pptmstr import brief
+
+    for session in (MINE, THEIRS):
+        target = brief.session_dir(session)
+        assert target is not None
+        for tool, tool_input in _writes_of(str(target / "001-amendment.md")):
+            got = _gate(tool, tool_input, policy, cwd=tmp_path)
+            assert got is Disposition.REQUIRE_APPROVAL, (session, tool)
+
+
+def test_a_brief_is_read_like_any_file_its_parents_by_a_fork_included(tmp_path: Path) -> None:
+    """
+    The briefs root is not a records root for reading: a worker reads its premises,
+    and a fork is handed its parent's path. Listing them is the same.
+    """
+    from pptmstr import brief
+
+    theirs = brief.session_dir(THEIRS)
+    assert theirs is not None
+    for tool, tool_input in [
+        ("Read", {"file_path": str(theirs / "000-premises.md")}),
+        ("Glob", {"pattern": "*.md", "path": str(theirs)}),
+        ("Grep", {"pattern": "x", "path": str(theirs)}),
+    ]:
+        assert approval.records_read(tool, tool_input, session_id=MINE) is None, tool
+        assert _gate(tool, tool_input, Policy.AUTONOMOUS, cwd=tmp_path) is (
+            Disposition.AUTO_APPROVE
+        ), tool
+
+
 def test_records_written_answers_for_the_write_tools_alone(tmp_path: Path) -> None:
     """
     A read of the caller's own records stays admitted, and a non-writing tool

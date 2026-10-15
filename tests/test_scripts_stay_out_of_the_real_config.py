@@ -251,7 +251,7 @@ def operator(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     own = tmp_path / "operator"
     monkeypatch.setenv("XDG_CONFIG_HOME", str(own / "config"))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(own / "claude"))
-    monkeypatch.setattr(brief, "default_root", lambda: own / "claude" / "projects")
+    monkeypatch.setattr(brief, "legacy_root", lambda: own / "claude" / "projects")
     monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
     return own
 
@@ -273,6 +273,7 @@ def test_the_arrangement_moves_everything_the_application_resolves(
         sessionfile.root(),
         boardsync.legacy_root(),
         brief.default_root(),
+        brief.legacy_root(),
         Path(hello_imgui.ini_folder_location(hello_imgui.IniFolderType.app_user_config_folder)),
     ):
         assert resolved.is_relative_to(scratch), resolved
@@ -304,7 +305,8 @@ def test_a_capture_of_a_real_session_keeps_the_cli_directory_and_says_so_first(
     first = capsys.readouterr().out.splitlines()[0]
     assert "REAL SESSION" in first and "credentials" in first
     assert os.environ["CLAUDE_CONFIG_DIR"] == str(operator / "claude")
-    assert brief.default_root() == operator / "claude" / "projects"
+    assert brief.legacy_root() == operator / "claude" / "projects"
+    assert brief.default_root().is_relative_to(scratch)
     assert settings.config_dir().is_relative_to(scratch)
     assert sessionfile.root().is_relative_to(scratch)
 
