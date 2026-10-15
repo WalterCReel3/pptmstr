@@ -564,7 +564,9 @@ class ResumeForms:
             last_message=last_message,
             task_is_label=task_is_label,
         )
-        prefill = last_message or ""
+        # The message is held as it was sent, and a box is a text call: what it
+        # cannot take is written out, and what is sent is what the box shows.
+        prefill = widgets.author_text(last_message or "")
         form = self.forms.get(session_id)
         if form is None:
             form = ResumeForm(

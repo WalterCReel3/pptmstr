@@ -43,7 +43,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from typing import Any, Protocol, assert_never
 
-from . import commandfile
+from . import commandfile, drawable
 from .bridge import Bridge
 
 # The marks, the helpers that lay a text out behind one, and the bound every
@@ -743,7 +743,26 @@ def commands_text(
     Both forms fit ``bus._MAX_BOARD_CHARS``: the read by id by what it may hold
     (``_COMMAND_FRAME_CHARS``), and the list by being filled against the bound
     and saying what it left out.
+
+    **Always a reply that can be sent.** It is serialized as UTF-8, and a lone
+    surrogate anywhere in it fails the read. A command's texts are refused one as
+    they are asked and as they are read from a file (``commandfile``), and its
+    output is quoted through ``visible``; what is left -- a refusal's reason in an
+    edited file, a log path under a directory that is not UTF-8 -- is written out
+    by ``drawable`` here, at the one door, only when it has to be.
     """
+    reply = _commands_text(shown, wanted, now, reader, role_of, where)
+    return drawable.text(reply) if drawable.undrawable(reply) else reply
+
+
+def _commands_text(
+    shown: Sequence[Command],
+    wanted: str | None,
+    now: float,
+    reader: NodeId,
+    role_of: Callable[[NodeId], str],
+    where: Callable[[Command], str | None],
+) -> str:
     root = reader[1] is None
 
     def asker(command: Command) -> str | None:

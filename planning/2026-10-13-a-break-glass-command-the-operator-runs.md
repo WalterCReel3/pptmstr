@@ -83,6 +83,11 @@ draws the same warnings and body with no button, as it draws a Bash approval. Bu
 `ui/command_view.py` and `ui/inbox.py`; the lead's decision on the confirmation and the
 builder's on one-press refuse, which the user may overturn.
 
+**2026-10-15, the lead's decision:** Run is not held by a pane that failed to draw elsewhere
+(DETAIL), as an approval is, and that stands — its press is reachable only from the row that
+drew the frozen, bounded string in that same frame, so the operator has read what the button
+runs wherever else failed.
+
 **What pptmstr does.** **(D4)** The operator's login shell runs it (`$SHELL -lc`), in the
 session's directory. **(R)** Off the draw thread; stdin closed; its own process group; a
 timeout that kills the group, and a cancel that does the same; one running command per session.

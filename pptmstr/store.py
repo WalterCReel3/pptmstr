@@ -144,6 +144,7 @@ from .model import (
     Obligation,
     PendingApproval,
     QuestionPending,
+    Recalled,
     Restore,
     SessionFailed,
     Snapshot,
@@ -284,25 +285,43 @@ def _clock(now: float | None) -> float:
     return time.monotonic() if now is None else now
 
 
-# What ``_drawable`` leaves exactly as it arrived, because it is acted on and not
-# only read: the arguments a parked call's editor opens on, which approve sends back
-# to the tool, and the directories a session is launched, forked and measured in --
-# a recalled one's too, since its resume is launched in them.
+# What ``_drawable`` leaves exactly as it arrived: what something is *run* with,
+# *reused* for, or *written back* to pptmstr's own files from. ``drawable.text`` is
+# not idempotent, so a field held drawable and then reused or written back is
+# escaped again the next time it comes in; and a field run with its escape is run
+# with something nobody asked for. Every one of them is drawn and sent only
+# through a helper that takes any ``str`` -- ``widgets.author_text`` and the
+# helpers built on it, ``commandtext.visible`` -- and ``tests/test_verbatim_drawn.py``
+# draws every pane over them and reads ``pptmstr/ui`` for a raw draw of one.
 #
-# A break-glass command is run as the string it was asked or approved as, in the
-# shell and directory approved, and what the operator wrote back -- an answer, a
-# reason for refusing a command -- is handed to its asker byte for byte. A command's
-# texts are also held to a refusal the reducer asks of them
-# (``command.request_refusal``, ``Snapshot.command_approval_refusal``), which has to
-# see a NUL or a lone surrogate to refuse it. None of these needs a drawable twin:
-# every pane draws them through ``commandtext.visible`` or ``widgets.author_text``,
-# which are total over ``str``.
+# - The arguments a parked call's editor opens on, which approve sends back to
+#   the tool (with the drawable twin ``PendingApproval.args`` beside them).
+# - A session's launch: its directories, task, team and brief. A relaunch and a
+#   fork start from them (``LaunchSpec.from_record``), and its session file is
+#   written from them -- a recalled one's too, since its resume is launched in
+#   them and writes them back.
+# - How a run failed, which its session file is written from; the obligation
+#   that shows it holds it drawable (``_needs_you``).
+# - The message a resume form opens on, which is sent as it stands.
+# - A break-glass command: the string asked or approved, run in the shell and
+#   directory approved; the operator's answer or reason, handed to its asker byte
+#   for byte; and what the command wrote, which is shown and sent through
+#   ``commandtext.visible`` and whose ``\x00`` is only right of the bytes
+#   themselves. A command's texts are also held to a refusal the reducer asks of
+#   them (``command.request_refusal``, ``Snapshot.command_approval_refusal``), which
+#   has to see a NUL or a lone surrogate to refuse it.
+#
+# A board log is not here because no field of it is: it is the store's own board,
+# written drawable and read back so (``_drawable``).
 _VERBATIM: drawable.Verbatim = {
     PendingApproval: frozenset({"raw_args", "shown_args"}),
-    AgentSpawned: frozenset({"cwd", "session_base"}),
-    SessionRecalled: frozenset({"cwd", "session_base"}),
+    AgentSpawned: frozenset({"cwd", "session_base", "task", "template", "brief"}),
+    SessionRecalled: frozenset({"cwd", "session_base", "task", "template", "brief"}),
+    Recalled: frozenset({"last_message"}),
+    AgentFinished: frozenset({"error"}),
     Command: frozenset({"asked", "reason", "expects"}),
     Run: frozenset({"text", "shell", "cwd"}),
+    End: frozenset({"tail"}),
     CommandApproved: frozenset({"text", "shell", "cwd"}),
     DecisionAnswered: frozenset({"answer"}),
     Answered: frozenset({"text"}),
@@ -330,7 +349,17 @@ def _drawable(intent: Intent) -> Intent:
 
     A parked call keeps ``raw_args`` as the agent made them and gains the drawable
     form beside them where the two differ (``PendingApproval.args``).
+
+    **A board restore is the one intent left whole.** Its board is a log the store's
+    own board was written to, so its text is drawable already, and a second pass
+    would write each backslash ``text`` wrote once more: the board would read as
+    nothing an agent wrote, and over the store that wrote it, as a different board
+    (``Unplaced.STORE_DIFFERS``), withholding the whole restore. A log that holds
+    what the store never writes is checked for where it is placed
+    (``Unplaced.UNDRAWABLE``).
     """
+    if isinstance(intent, BoardRestored):
+        return intent
     intent = drawable.shown(intent, _VERBATIM)
     if isinstance(intent, ApprovalRequested):
         pending = intent.pending
@@ -1958,7 +1987,10 @@ def _needs_you(
             )
 
         elif rec.state is AgentState.FAILED and not rec.acknowledged:
-            first_line = (rec.error or "").strip().splitlines()
+            # The record holds how the run failed as it was said, for its session
+            # file (``_VERBATIM``); the queue row draws it.
+            error = None if rec.error is None else drawable.text(rec.error)
+            first_line = (error or "").strip().splitlines()
             out.append(
                 SessionFailed(
                     node=nid,
@@ -1967,7 +1999,7 @@ def _needs_you(
                     # a record that reached FAILED some other way.
                     since=rec.ended_at if rec.ended_at is not None else rec.state_since,
                     summary=first_line[0][:120] if first_line else "session failed",
-                    error=rec.error,
+                    error=error,
                 )
             )
 
@@ -2545,7 +2577,13 @@ def _restored(
     """
     session_id, board, clock = intent.session_id, intent.board, intent.clock
     prior = snap.restores.get(session_id)
-    known = dict(board.addresses)
+    # A name the log holds that no store wrote is no name: the party is placed as
+    # one the board had no name for.
+    known = {
+        node: address
+        for node, address in board.addresses
+        if not drawable.undrawable((node, address))
+    }
     parties: dict[NodeId, str] = {}
     # Strictly before the reading, so "before the restore" is a comparison with
     # one instant: a record the wall clock puts in the future is clamped to the
@@ -2578,6 +2616,10 @@ def _restored(
 
     logged: set[str] = set()
     for restored_task in board.tasks:
+        if drawable.undrawable(restored_task):
+            logged.add(restored_task.id)
+            unplaced.append(NotPlaced("task", _said_id(restored_task.id), Unplaced.UNDRAWABLE))
+            continue
         if restored_task.id in logged:
             unplaced.append(NotPlaced("task", restored_task.id, Unplaced.REPEATED))
             continue
@@ -2613,6 +2655,12 @@ def _restored(
 
     filed: set[str] = set()
     for restored_concern in board.concerns:
+        if drawable.undrawable(restored_concern):
+            filed.add(restored_concern.id)
+            unplaced.append(
+                NotPlaced("concern", _said_id(restored_concern.id), Unplaced.UNDRAWABLE)
+            )
+            continue
         if restored_concern.id in filed:
             unplaced.append(NotPlaced("concern", restored_concern.id, Unplaced.REPEATED))
             continue
@@ -2706,13 +2754,23 @@ def _as_declared(tasks: dict[TaskId, Task], task: Task) -> Task:
     )
 
 
+def _said_id(logged: str) -> str:
+    """
+    The id of a logged task or concern that is not placed for holding what no store
+    writes, as its report names it: drawable, since the id may be what held it.
+    """
+    return drawable.text(logged) if drawable.undrawable(logged) else logged
+
+
 def _damage_text(board: Board) -> str | None:
     """``Board.damage`` as the one line a reader is shown, or None for no damage."""
     damage = board.damage
     if damage is None:
         return None
     behind = f", {damage.unread} record(s) behind it unread" if damage.unread else ""
-    return f"unreadable from record {damage.ordinal}: {damage.reason}{behind}"
+    # Said by the log's reader, of a file: drawn, and made drawable here because a
+    # board restore is the one intent ``_drawable`` leaves whole.
+    return drawable.text(f"unreadable from record {damage.ordinal}: {damage.reason}{behind}")
 
 
 def _stated(text: str | None) -> Basis | None:

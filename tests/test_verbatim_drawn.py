@@ -56,7 +56,7 @@ from pptmstr.pool import SessionPool
 from pptmstr.settings import Settings
 from pptmstr.store import _VERBATIM, Store
 from pptmstr.transcript import Transcript
-from pptmstr.ui import focus, session_details, typeset
+from pptmstr.ui import focus, session_details, typeset, widgets
 
 LOW = json.loads('"\\udc80"')
 NUL = "\x00"
@@ -133,8 +133,13 @@ def _store() -> Store:
                     reason="to see",
                     expects="nothing",
                     asked_at=1.0,
-                    run=Run(text="echo \\u0000", shell="/bin/bash", cwd=HOME, timeout_s=60.0,
-                            started_at=2.0),
+                    run=Run(
+                        text="echo \\u0000",
+                        shell="/bin/bash",
+                        cwd=HOME,
+                        timeout_s=60.0,
+                        started_at=2.0,
+                    ),
                     end=End(Exited(0), at=3.0, duration_s=1.0, output_bytes=len(tail), tail=tail),
                 ),
             ),
@@ -210,7 +215,7 @@ def test_every_pane_draws_a_session_whose_verbatim_fields_no_text_call_takes(
     state.frame_snap = snap
     state.frame_now = 6.0
     state.frame_wall = 30.0
-    state.focus.to_node(snap, node, scope=focus.Scope.NODE)
+    state.focus.to_node(snap, node, scope=focus.Scope.AGENT)
     panels = app._panels(state)
     guarded = {name: app.guarded(name, draw) for name, draw in panels.items()}
 
@@ -228,6 +233,9 @@ def test_every_pane_draws_a_session_whose_verbatim_fields_no_text_call_takes(
 
     assert app._PANEL_ERRORS == {}
     assert not [s for s in handed if NUL in s]
+    # And the fields were drawn, not left out: the directory, and the task.
+    assert any("CAF<U+DCE9>" in s for s in handed)
+    assert any(f"task a{widgets.NUL_SHOWN}b<U+DC80>c" in s for s in handed)
 
 
 @pytest.mark.parametrize("node", [LIVE, CLOSED], ids=["live", "recalled"])
@@ -249,7 +257,7 @@ def test_every_copy_in_session_details_reaches_the_clipboard(
     )
     assert shown is not None
     copies = [row.copy for section in shown.sections for row in section.rows if row.copy]
-    assert any(LOW in copy for copy in copies)
+    assert any(HOME in copy for copy in copies)
     monkeypatch.setattr(im, "small_button", lambda label: True)
     state = session_details.DetailsState()
     state.ask(node)
@@ -260,7 +268,7 @@ def test_every_copy_in_session_details_reaches_the_clipboard(
         finally:
             im.render()
 
-    clipped = [s for s in handed if s in {session_details.author_text(c) for c in copies}]
+    clipped = [s for s in handed if s in {widgets.author_text(c) for c in copies}]
     assert clipped
     assert not [s for s in handed if NUL in s]
 
@@ -282,9 +290,24 @@ HELPERS = frozenset(
         "asker_value",
         "_authored",
         "_marked",
-        "shown_path",
+        # Read the field and answer something else: a count, a yes or no.
         "len",
         "bool",
+        "output_heading",
+    }
+)
+
+# ``drawable.text`` is a helper as well; it is matched by its module, since
+# ``imgui.text`` is not.
+QUALIFIED_HELPERS = frozenset({("drawable", "text")})
+
+# Calls the check flags and that draw no field of a record: the launcher's own
+# boxes, which hold what the operator typed into them and what a failed launch of
+# those same boxes hands back (``LauncherState._load``), and nothing a record held.
+NOT_A_RECORD = frozenset(
+    {
+        ("launcher.py", "input_text_with_hint", ".cwd"),
+        ("launcher.py", "input_text_with_hint", ".brief"),
     }
 )
 
@@ -306,10 +329,22 @@ def _raw_uses(node: ast.AST, tainted: set[str]) -> list[str]:
     found: list[str] = []
 
     def walk(at: ast.AST) -> None:
+        if isinstance(at, ast.Compare):
+            return
+        if isinstance(at, ast.IfExp):
+            # The test is a yes or no; what is drawn is one of the two branches.
+            walk(at.body)
+            walk(at.orelse)
+            return
         if isinstance(at, ast.Call):
             func = at.func
-            name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", None)
-            if name in HELPERS:
+            if isinstance(func, ast.Attribute):
+                owner = func.value.id if isinstance(func.value, ast.Name) else None
+                if (owner, func.attr) in QUALIFIED_HELPERS:
+                    return
+                if func.attr in HELPERS and owner != "imgui":
+                    return
+            elif isinstance(func, ast.Name) and func.id in HELPERS:
                 return
         if isinstance(at, ast.Attribute) and at.attr in VERBATIM_NAMES:
             found.append(f".{at.attr}")
@@ -346,6 +381,8 @@ def _violations(path: Path) -> list[str]:
                 continue
             for argument in [*call.args, *(k.value for k in call.keywords)]:
                 for use in _raw_uses(argument, tainted):
+                    if (path.name, call.func.attr, use) in NOT_A_RECORD:
+                        continue
                     out.append(f"{path.name}:{call.lineno} imgui.{call.func.attr}(... {use} ...)")
     return out
 
@@ -365,8 +402,42 @@ def test_the_source_check_sees_a_raw_draw_and_passes_one_through_a_helper(tmp_pa
         "    imgui.text(one_line(rec.cwd))\n"
         "    shown = flat_line(rec.task)\n"
         "    imgui.text(shown)\n"
+        "    imgui.text(one_line(rec.cwd) if rec.cwd else 'none')\n"
+        "    imgui.text(drawable.text(rec.cwd))\n"
+        "    imgui.text(rec.brief if rec.cwd != rec.brief else 'x')\n"
     )
     assert _violations(source) == [
         "pane.py:2 imgui.text(... .cwd ...)",
         "pane.py:4 imgui.text_colored(... title ...)",
+        "pane.py:10 imgui.text(... .brief ...)",
     ]
+
+
+def test_a_resume_box_opens_on_the_message_written_out_where_no_box_takes_it(
+    tmp_path: Path,
+) -> None:
+    """
+    The box is an ``input_text``, which raises on a lone surrogate and keeps a
+    string to its first NUL. It opens on what it can show, and what is sent is
+    what it shows; a message every box takes is opened on as it was sent.
+    """
+    from pptmstr.approval import Policy
+    from pptmstr.ui.resume_form import ResumeForms
+
+    def opened(message: str) -> str:
+        form = ResumeForms().open_for(
+            session_id="sess-r",
+            cwd=str(tmp_path),
+            task="t",
+            template="solo",
+            policy=Policy.STRICT,
+            contained=False,
+            model="claude-opus-5",
+            subagent_cap=None,
+            brief=None,
+            last_message=message,
+        )
+        return form.message
+
+    assert opened(f"go {ODD}") == widgets.author_text(f"go {ODD}")
+    assert opened("go \\u0000 on") == "go \\u0000 on"

@@ -43,6 +43,14 @@ sessions on disk (``sessions.merge_overlay``). Not at the calls that draw, which
 several hundred, and not on the way out: what a tool is run with is never read
 from here (``PendingApproval.raw_args``).
 
+**Once, and never to its own answer.** ``text`` of a text it answered is not that
+text: the backslash it wrote is written again. So what leaves the store already
+drawable and comes back to it -- a board log, written from the store's board -- is
+read back as it was written and not handed to ``text`` a second time, and a field
+something is run with, reused for or written back from is held as it arrived and
+never handed to it at all (``store._VERBATIM``). ``undrawable`` is how a text that
+claims to be drawable already is checked.
+
 No import from ``pptmstr``: the transcript, the log and the model all sit below
 anything that could otherwise hold this.
 """
@@ -95,6 +103,33 @@ def original(written: str) -> str:
     and merges nothing, kept beside it so that the two are changed together.
     """
     return _WRITTEN.sub(lambda match: chr(int(match[1], 16)), written)
+
+
+_UNTAKEN = re.compile(r"[\x00\ud800-\udfff]")
+
+
+def undrawable(value: object) -> bool:
+    """
+    Whether any string in ``value`` -- reached as ``shown`` reaches them -- holds
+    a code unit no text call takes: a NUL or a lone surrogate.
+
+    Never true of what ``text`` answered, which writes both out. So it is the test
+    of a text that is said to have been made drawable already and is not to be
+    made so again.
+    """
+    if isinstance(value, str):
+        return _UNTAKEN.search(value) is not None
+    if isinstance(value, tuple | list | frozenset | set):
+        return any(undrawable(item) for item in value)
+    if isinstance(value, Mapping):
+        return any(undrawable(key) or undrawable(item) for key, item in value.items())
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return any(
+            undrawable(getattr(value, field.name))
+            for field in dataclasses.fields(value)
+            if field.init
+        )
+    return False
 
 
 def shown(value: T, verbatim: Verbatim | None = None) -> T:

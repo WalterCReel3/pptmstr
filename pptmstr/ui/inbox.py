@@ -78,6 +78,7 @@ from .compose import ComposeState, wants_send
 from .focus import FocusState
 from .widgets import (
     CTRL_ENTER_SUBMITS,
+    author_text,
     ellipsis,
     flat_line,
     format_elapsed,
@@ -1055,8 +1056,10 @@ def identity(snap: Snapshot, obligation: Obligation) -> tuple[str, str]:
     session: NodeId = (obligation.node[0], None)
     root = snap.nodes.get(session)
     node = snap.nodes.get(obligation.node)
-    title = (root.task if root else None) or "session"
-    project = projects.project_key(root.cwd if root else None)
+    # Both are drawn, and both come from fields held as they arrived (a task and a
+    # directory are relaunched with): made drawable here, once, for every caller.
+    title = author_text(root.task if root else "") or "session"
+    project = author_text(projects.project_key(root.cwd if root else None))
     if obligation.node == session:
         return title, project
     sub = (node.agent_type if node else None) or "sub-agent"
@@ -2125,7 +2128,7 @@ def _expand_failure(snap: Snapshot, actions: InboxActions, obligation: SessionFa
     record = snap.nodes.get(obligation.node)
     if imgui.begin_child("##body", imgui.ImVec2(-8.0, 70.0), imgui.ChildFlags_.borders):
         imgui.push_text_wrap_pos(imgui.get_content_region_avail().x)
-        imgui.text_colored(P.danger.vec4, obligation.error or "no detail recorded")
+        imgui.text_colored(P.danger.vec4, author_text(obligation.error or "no detail recorded"))
         imgui.pop_text_wrap_pos()
     imgui.end_child()
 

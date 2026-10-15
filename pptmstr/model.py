@@ -2464,7 +2464,7 @@ class Unplaced(enum.Enum):
     """
     Why something a board log holds is not in the store as the log has it.
 
-    The first five are about one task or concern, and everything else the log
+    The first six are about one task or concern, and everything else the log
     held was placed around it. The last three are a restore that placed nothing:
     the store already had a board for the session and it was not the log's.
     """
@@ -2481,6 +2481,10 @@ class Unplaced(enum.Enum):
     # that has neither.
     INCOHERENT = "no step of the store produces it"
     WOULD_CYCLE = "its dependencies would close a cycle"
+    # It holds a NUL or a lone surrogate, which the board a log is written from
+    # never does: the store writes both out. The log was edited, or written by
+    # something that was not this store, and its text is not drawn from.
+    UNDRAWABLE = "it holds a NUL or a lone surrogate, which no board pptmstr logs holds"
     # The board handed over names the id more than once; the first was taken.
     REPEATED = "named more than once"
     # The store holds it for this session and holds it differently.

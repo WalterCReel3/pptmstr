@@ -90,7 +90,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, assert_never
 
-from . import sessionfile
+from . import drawable, sessionfile
 from .command import (
     MAX_CGROUP_CHARS,
     Cancelled,
@@ -282,6 +282,26 @@ def _node(value: object) -> Any:
     return _BAD
 
 
+def _asked(obj: dict[str, Any], key: str) -> str:
+    """
+    A text of the request or the run: what an agent asked, why, what it expects,
+    and the string approved. Each is held as it is written, and the bus and the
+    approval refuse a NUL and a lone surrogate in every one of them, so a file that
+    holds either was edited or written by something else. Refused here, before
+    anything draws it or quotes it in a reply that could not be sent.
+
+    The directory and the shell are not read with this: a directory whose name is
+    not UTF-8 is a lone surrogate in a ``str``, and is a directory.
+    """
+    text: str = _need(obj, key, _text)
+    if drawable.undrawable(text):
+        raise ValueError(
+            f"{key!r} holds a NUL or a lone surrogate, which nothing pptmstr asks or "
+            "runs holds: the file was edited, or written by something that is not pptmstr"
+        )
+    return text
+
+
 def _need(obj: dict[str, Any], key: str, read: Callable[[object], Any]) -> Any:
     """
     A required key's value. ``ValueError`` when it is missing or not of its type.
@@ -441,7 +461,7 @@ def _own_id(doc: _Doc, command_id: str) -> None:
 def _run(doc: _Doc, command_id: str) -> Run:
     _own_id(doc, command_id)
     return Run(
-        text=_need(doc.obj, "text", _text),
+        text=_asked(doc.obj, "text"),
         shell=_need(doc.obj, "shell", _text),
         cwd=_need(doc.obj, "cwd", _text),
         timeout_s=_need(doc.obj, "timeout_s", _number),
@@ -546,9 +566,9 @@ def _read(session_id: str, command_id: str, root: Path | None) -> tuple[Command 
             asker = _need(request.obj, "asker", _node)
             if asker[0] != session_id:
                 raise ValueError(f"'asker' is of session {_shown(asker[0])}, not this one")
-            asked = _need(request.obj, "asked", _text)
-            reason = _need(request.obj, "reason", _text)
-            expects = _need(request.obj, "expects", _text)
+            asked = _asked(request.obj, "asked")
+            reason = _asked(request.obj, "reason")
+            expects = _asked(request.obj, "expects")
             asked_at = _need(request.obj, "asked_at", _number)
         except ValueError as exc:
             raise _in_file(REQUEST_NAME, request, exc) from None

@@ -475,7 +475,7 @@ def _nothing_selected(
 
     imgui.push_text_wrap_pos(0.0)
     imgui.text_colored(P.text_dim.vec4, "nothing waiting on you from")
-    imgui.text_colored(P.text.vec4, record.task or "this session")
+    imgui.text_colored(P.text.vec4, widgets.author_text(record.task) or "this session")
     imgui.pop_text_wrap_pos()
 
     # Above what the session is saying and not below it: the narration takes
@@ -954,7 +954,7 @@ def _failure(pane: DetailState, obligation: SessionFailed) -> None:
         if omitted:
             imgui.text_colored(P.warn.vec4, f"… {omitted:,} more characters not shown")
         return
-    imgui.text_colored(P.danger.vec4, obligation.error or "no detail recorded")
+    imgui.text_colored(P.danger.vec4, widgets.author_text(obligation.error or "no detail recorded"))
 
 
 # -- break-glass commands ---------------------------------------------------------

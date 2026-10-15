@@ -339,15 +339,22 @@ def test_what_a_session_wrote_is_drawable_wherever_the_store_keeps_it() -> None:
     held.apply(AgentFinished(CHILD, AgentState.FAILED, 2.0, error=f"boom{LOW}"))
 
     snap = held.snapshot()
+    # A task is launched again from and a failure written back to a session file
+    # from, so both are as they arrived (``store._VERBATIM``) and are left out here.
+    child = snap.nodes[CHILD]
+    assert (child.task, child.error) == (f"audit{LOW}", f"boom{LOW}")
+    kept = {f"audit{LOW}", f"boom{LOW}"}
     found = [
         text
         for record in (*snap.nodes.values(), *snap.concerns.values(), *snap.tasks.values())
         for text in strings(record)
+        if text not in kept
     ]
     found += [text for obligation in snap.needs_you for text in strings(obligation)]
     assert not [text for text in found if not takes(text)]
-    # The control: the walk above did read the fields that were dirty.
-    for written in ("audit\\udc80", "builder\\ud800", "s\\udc80", "b\\udc80\\u0000", "boom\\udc80"):
+    # The control: the walk above did read the fields that were dirty, and the
+    # failure the queue draws is the drawable form of the one the record holds.
+    for written in ("builder\\ud800", "s\\udc80", "b\\udc80\\u0000", "boom\\udc80"):
         assert written in found, written
     assert "T\\udc80" in snap.tasks and snap.tasks["T\\udc80"].title == "t\\ud800"
 
@@ -492,8 +499,12 @@ def test_the_operators_reason_for_refusing_a_command_is_kept_as_typed() -> None:
     assert end is not None and end.outcome == Refused(reason=typed)
 
 
-def test_what_a_command_wrote_is_drawable_in_the_store() -> None:
-    """Output is read, and never run: it is not among the exemptions."""
+def test_what_a_command_wrote_is_held_as_it_wrote_it() -> None:
+    """
+    Output is never run, and is still exempt: it is shown and sent through
+    ``commandtext.visible``, whose ``\\x00`` is the NUL only when it is handed
+    the NUL, and a ``\\u0000`` the store wrote would read there as a backslash.
+    """
     held = Store()
     held.apply(spawn(ROOT))
     held.apply(spawn(CHILD, ROOT))
@@ -504,7 +515,7 @@ def test_what_a_command_wrote_is_drawable_in_the_store() -> None:
     held.apply(CommandEnded(command.id, end))
 
     finished = held.snapshot().commands[command.id].end
-    assert finished is not None and finished.tail == "a\\u0000b\\udc80"
+    assert finished is not None and finished.tail == f"a\x00b{LOW}"
 
 
 def test_a_path_measured_from_an_approved_call_is_drawable_in_the_ledger() -> None:

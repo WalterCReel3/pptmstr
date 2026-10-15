@@ -64,7 +64,7 @@ from ..model import Snapshot
 from ..theme import P
 from . import typeset
 from .focus import FocusState
-from .widgets import CTRL_ENTER_SUBMITS, closed_line, multiline_input, section
+from .widgets import CTRL_ENTER_SUBMITS, author_text, closed_line, multiline_input, section
 
 # One entry's body in the pane. Generous -- premises are the thing this surface
 # exists to show -- and announced when it bites, like every other bound here.
@@ -201,7 +201,7 @@ def _summary(derived: tuple[brief.DerivedEntry, ...], directory: Path) -> None:
     imgui.text_colored(P.text_dim.vec4, summary_label(derived))
     # The path, because a worker is told to read this directory and the operator has
     # to be able to check that the two are the same place.
-    imgui.text_colored(P.text_dim.vec4, str(directory))
+    imgui.text_colored(P.text_dim.vec4, author_text(str(directory)))
     imgui.pop_text_wrap_pos()
 
 
@@ -237,7 +237,8 @@ def _composer(pane: BriefState, directory: Path) -> None:
     imgui.text_disabled(compose_hint(pane.supersedes))
 
     if pane.error:
-        imgui.text_colored(P.danger.vec4, pane.error)
+        # It can quote the directory, which is held as the record has it.
+        imgui.text_colored(P.danger.vec4, author_text(pane.error))
 
     ready = bool(pane.draft.strip())
     if not ready:

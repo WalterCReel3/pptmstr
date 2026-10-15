@@ -26,13 +26,14 @@ override, which every text call takes and must be left alone.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from pptmstr import boardlog, commandbus, commandfile, drawable, fleetsync, sessionfile
+from pptmstr import boardlog, commandbus, commandfile, fleetsync, sessionfile
 from pptmstr.boardfacts import Fact, outcomes
 from pptmstr.boardlog import Clock
 from pptmstr.command import Command, End, Exited, Run
@@ -40,7 +41,6 @@ from pptmstr.intents import (
     AgentFinished,
     AgentSpawned,
     BoardRestored,
-    CommandEnded,
     CommandsRestored,
     ConcernPosted,
     Intent,
@@ -146,7 +146,7 @@ def board_texts(snap: Snapshot) -> list[str]:
 
 def saved(facts: list[Fact]) -> list[str]:
     """The log ``facts`` are written to, a line to a record."""
-    return [boardlog.encode(fact.on_the_wall(CLOCK).record) for fact in facts]
+    return [boardlog.encode(fact.on_the_wall(CLOCK)) for fact in facts]
 
 
 def read_back(lines: list[str]) -> boardlog.Board:
@@ -183,9 +183,11 @@ def _as_logged(snap: Snapshot) -> list[Any]:
     task = snap.tasks["t-1"]
     concern = snap.concerns["c-1"]
     return [
-        boardlog.Declared(at=0.0, task_id=task.id, title=task.title, detail=task.detail),
+        boardlog.Declared(
+            at=0.0, task_id=task.id, title=task.title, declared_by="lead", detail=task.detail
+        ),
         boardlog.Completed(at=0.0, task_id=task.id, by="builder", result=task.result),
-        boardlog.Filed(
+        boardlog.Posted(
             at=0.0,
             concern_id=concern.id,
             sender="builder",
@@ -223,7 +225,7 @@ def test_a_log_holding_what_no_store_wrote_is_refused_by_the_task_with_the_reaso
     and its text is not put on a board that would be drawn from it.
     """
     wrote, facts = worked("plain")
-    records = [fact.on_the_wall(CLOCK).record for fact in facts]
+    records = [fact.on_the_wall(CLOCK) for fact in facts]
     declared = records[0]
     assert isinstance(declared, boardlog.Declared)
     records[0] = boardlog.Declared(
@@ -355,13 +357,16 @@ def test_a_session_file_is_the_same_after_a_resume_that_changed_nothing(
     store = Store()
     store.apply(_recalled(tmp_path))
     record = store.snapshot().nodes[LEAD]
-    resumed = LaunchSpec.from_record(record)
+    # The resume form opens on the message the file holds, and sends it.
+    assert record.recalled is not None
+    resumed = dataclasses.replace(
+        LaunchSpec.from_record(record), message=record.recalled.last_message, resume=S
+    )
     _run_once(resumed, f"error {given}", tmp_path)
     after = json.loads(path.read_bytes())
 
     text_keys = ("task", "cwd", "session_base", "template", "brief", "error", "last_message")
     assert {k: after[k] for k in text_keys} == {k: before[k] for k in text_keys}
-    assert path.read_bytes() == path.read_bytes()
 
 
 @EVERY_TEXT
@@ -422,14 +427,22 @@ def test_a_restored_command_is_written_again_as_the_bytes_it_was_read_from(
 
 
 @pytest.mark.parametrize("bad", [NUL, LOW], ids=["NUL", "U+DC80"])
-@pytest.mark.parametrize("field", ["asked", "reason", "expects"])
+@pytest.mark.parametrize(
+    ("name", "field"),
+    [
+        (commandfile.REQUEST_NAME, "asked"),
+        (commandfile.REQUEST_NAME, "reason"),
+        (commandfile.REQUEST_NAME, "expects"),
+        (commandfile.RUN_NAME, "text"),
+    ],
+)
 def test_a_request_no_build_could_have_written_is_refused_with_a_sentence(
-    field: str, bad: str, tmp_path: Path
+    name: str, field: str, bad: str, tmp_path: Path
 ) -> None:
     _write_command(_command("echo x", "out\n"), tmp_path)
     directory = commandfile.command_dir(S, CMD, tmp_path)
     assert directory is not None
-    request = directory / commandfile.REQUEST_NAME
+    request = directory / name
     obj = json.loads(request.read_bytes())
     obj[field] = f"echo {bad}"
     request.chmod(0o600)
@@ -448,25 +461,37 @@ def test_every_reply_about_a_restored_command_can_be_sent(tmp_path: Path) -> Non
     """
     An MCP reply is serialized as UTF-8 and refuses a lone surrogate
     (``TextContent(type="text", text="\\udc80").model_dump_json()`` raises
-    ``PydanticSerializationError``), so no reply may quote one.
+    ``PydanticSerializationError``), so no reply may quote one: not from a
+    request a file holds, and not from what a command wrote.
     """
     from mcp.types import TextContent
 
-    weird = f"echo {TEXTS['written-out']} {RLO}"
-    _write_command(_command(weird, f"a{NUL}b{LOW}c\n"), tmp_path)
+    _write_command(_command(f"echo {TEXTS['written-out']} {RLO}", f"a{NUL}b{LOW}c\n"), tmp_path)
+    other = "cmd-20261015T120001Z-0123456789ab"
+    directory = commandfile.command_dir(S, CMD, tmp_path)
+    assert directory is not None
+    edited = directory.parent / other
+    edited.mkdir(mode=0o700)
+    obj = json.loads((directory / commandfile.REQUEST_NAME).read_bytes())
+    obj.update(id=other, asked=f"echo {LOW}")
+    (edited / commandfile.REQUEST_NAME).write_bytes(json.dumps(obj).encode("ascii"))
+
     store = Store()
     store.apply(CommandsRestored(S, commandfile.restore(S, tmp_path).commands))
     shown = tuple(store.snapshot().commands.values())
 
-    for wanted in (None, CMD):
+    for wanted in (None, CMD, other):
         reply = commandbus.commands_text(shown, wanted, 10.0, B1, lambda node: "builder")
         TextContent(type="text", text=reply).model_dump_json()
 
 
-def test_a_nul_a_command_wrote_reads_as_the_nul_wherever_its_output_is_shown() -> None:
+def test_a_nul_a_command_wrote_reads_as_the_nul_wherever_its_output_is_shown(
+    imgui: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """
     ``commandtext.visible`` writes a NUL as ``\\x00`` and a backslash as two. The
-    output is the program's bytes, so it is held as they were and spelled once.
+    output is the program's bytes, so it is held as they were and spelled once:
+    in the row, in DETAIL's copy and in the asker's reply.
     """
     from pptmstr.ui import command_view, detail
 
@@ -475,10 +500,48 @@ def test_a_nul_a_command_wrote_reads_as_the_nul_wherever_its_output_is_shown() -
     held = store.snapshot().commands[CMD]
     assert held.end is not None
 
+    drawn: list[str] = []
+    real = imgui.text_colored
+
+    def recording(colour: Any, text: str) -> None:
+        drawn.append(text)
+        real(colour, text)
+
+    monkeypatch.setattr(imgui, "text_colored", recording)
+    imgui.new_frame()
+    imgui.begin("output")
+    try:
+        command_view.process_output(held.end.tail)
+    finally:
+        imgui.end()
+        imgui.render()
     lines, _ = commandbus._output_lines(held.end.tail)
     copied = detail.command_text(held, "builder")
-    rows = command_view.output_rows(held.end.tail)
 
-    for said in ("\n".join(lines), "\n".join(copied), "\n".join(rows)):
+    for said in ("\n".join(drawn), "\n".join(lines), "\n".join(copied)):
         assert "a\\x00b" in said, said
         assert "\\\\" not in said, said
+
+
+def test_a_reply_quoting_what_no_reply_can_carry_is_still_sent() -> None:
+    """
+    What the file reads do not refuse -- the operator's reason for refusing, in an
+    edited ``end.json`` -- is written out at the reply's one door.
+    """
+    from mcp.types import TextContent
+
+    from pptmstr.command import Refused
+
+    refused = Command(
+        id=CMD,
+        asker=B1,
+        asked="echo x",
+        reason="to see",
+        expects="nothing",
+        asked_at=1.0,
+        end=End(outcome=Refused(reason=f"no {LOW}"), at=3.0),
+    )
+    reply = commandbus.commands_text((refused,), CMD, 10.0, B1, lambda node: "builder")
+
+    TextContent(type="text", text=reply).model_dump_json()
+    assert "no \\udc80" in reply

@@ -950,5 +950,7 @@ def _rows(section: int, rows: tuple[Row, ...]) -> None:
         imgui.pop_text_wrap_pos()
         imgui.table_next_column()
         if row.copy is not None and imgui.small_button(f"copy##{section}-{at}"):
-            imgui.set_clipboard_text(row.copy)
+            # The clipboard is a text call like any other, and a row copies a field
+            # held as it arrived; it copies what the row shows.
+            imgui.set_clipboard_text(author_text(row.copy))
     imgui.end_table()
