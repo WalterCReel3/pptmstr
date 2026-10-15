@@ -5617,14 +5617,11 @@ def test_a_session_resumed_under_a_label_says_so_when_it_announces() -> None:
 
 def _served_tools(session: AgentSession) -> set[str]:
     """The tool names the session's own bus server announces to its CLI."""
-    import mcp.types as mcp_types
-
     from pptmstr.bus import SERVER_NAME
+    from tests.mcp_wire import list_tools
 
     server = session._mcp_servers()[SERVER_NAME]["instance"]
-    handler = server.request_handlers[mcp_types.ListToolsRequest]
-    listed = asyncio.run(handler(mcp_types.ListToolsRequest(method="tools/list")))
-    return {tool.name for tool in listed.root.tools}
+    return set(asyncio.run(list_tools(server)))
 
 
 _COMMAND_NAMES = {"request_command", "read_commands", "withdraw_command"}
