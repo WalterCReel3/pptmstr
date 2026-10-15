@@ -93,6 +93,12 @@ PACKAGE = Path(__file__).resolve().parent
 IMGUI_BUNDLE_PIN = "1.92.900"
 IMSCRIBE_PIN = "0.2.0b1"
 IMTYPESET_PIN = "0.4.1.192900"
+# The CPython minors, inclusive, that IMTYPESET_PIN's wheels declare in their
+# Requires-Python: where the install brings the library. Where it is narrower
+# than imscribe's marker on imtypeset (3.11 to 3.14), the whole install fails
+# on the difference. scripts/probe.py spells it again (tests/test_probe.py holds
+# the two equal) and scripts/lock.py takes it from there.
+IMTYPESET_PYTHONS = ((3, 11), (3, 11))
 
 IMSCRIBE_DISTRIBUTION = "imscribe"
 IMTYPESET_DISTRIBUTION = "imtypeset"

@@ -340,8 +340,29 @@ def test_linux_aarch64_is_refused_by_the_lock_and_told_the_way_on() -> None:
     assert refusal.endswith(
         "./bootstrap.sh --unlocked installs from pyproject.toml's floors instead"
     )
-    supported = probe.install_outlook(_facts("darwin", "arm64", (3, 14)))
+    supported = probe.install_outlook(_facts("darwin", "arm64", probe.IMTYPESET_PYTHONS[1]))
     assert lock.covers_refusal(supported.verdict, supported.sentence) is None
+
+
+@pytest.mark.parametrize("minor", [11, 12, 13, 14])
+def test_the_lock_covers_exactly_the_pythons_the_pinned_imtypeset_installs_on(minor: int) -> None:
+    """
+    bootstrap with a lock asks `covers` before a virtualenv: where the pinned
+    imtypeset's Requires-Python excludes the interpreter the lock is refused, and
+    lock.TARGET_PYTHONS (what lock-check holds a lock to) does not name it.
+    """
+    low, high = probe.IMTYPESET_PYTHONS
+    inside = low <= (3, minor) <= high
+    assert (f"3.{minor}" in lock.TARGET_PYTHONS) == inside
+    for system, machine in (("linux", "x86_64"), ("darwin", "arm64")):
+        outlook = probe.install_outlook(_facts(system, machine, (3, minor)))
+        refusal = lock.covers_refusal(outlook.verdict, outlook.sentence)
+        if inside:
+            assert refusal is None
+        else:
+            assert refusal is not None
+            assert f"installs only on CPython {probe._span(probe.IMTYPESET_PYTHONS)}" in refusal
+    assert lock.COVERAGE.startswith(f"CPython {probe._span(probe.IMTYPESET_PYTHONS)} on macOS 14")
 
 
 # --- lock-check, run ---------------------------------------------------------------
@@ -805,5 +826,5 @@ def test_the_real_covers_refuses_where_the_probe_says_without_the_library(tmp_pa
     env["PYTHONPATH"] = str(fake)
     done = _run("covers", cwd=tmp_path, env=env)
     assert done.returncode == 1
-    assert "the release lock covers CPython 3.11 to 3.14" in done.stdout
+    assert f"the release lock covers {lock.COVERAGE}, and" in done.stdout
     assert "(Linux aarch64:" in done.stdout

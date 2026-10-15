@@ -22,6 +22,8 @@ from types import ModuleType
 
 import pytest
 
+from pptmstr import pairing
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -42,7 +44,7 @@ def facts(**changes: object) -> object:
         system="linux",
         machine="x86_64",
         implementation="CPython",
-        python=(3, 12),
+        python=pairing.IMTYPESET_PYTHONS[0],
         macos=None,
         glibc=(2, 36),
     )
@@ -60,12 +62,131 @@ def mac(version: tuple[int, ...] | None, machine: str = "arm64") -> object:
         mac((14, 0)),
         mac((15, 6, 1)),
         facts(glibc=(2, 28)),
-        facts(python=(3, 11)),
-        facts(python=(3, 14)),
+        facts(python=pairing.IMTYPESET_PYTHONS[0]),
+        facts(python=pairing.IMTYPESET_PYTHONS[1]),
     ],
 )
 def test_the_supported_floor_installs_the_library(case: object) -> None:
     assert probe.install_outlook(case).verdict == probe.LIBRARY
+
+
+# What each imtypeset pin's wheels declare as Requires-Python, as CPython minors:
+# 0.4.1.192900 from PyPI's JSON for every one of its eight wheels ("==3.11.*",
+# read 2026-10-15); 0.4.2 and later declare ">=3.11,<3.15" (imscribe's H52, relayed).
+DECLARED_PYTHONS = {
+    "0.4.1.192900": ((3, 11), (3, 11)),
+    "0.4.3.192900": ((3, 11), (3, 14)),
+}
+
+
+def test_the_supported_pythons_are_what_the_pinned_imtypeset_declares() -> None:
+    """
+    The one constant moves with the pin: a pin this table does not know is a
+    Requires-Python somebody has to read before the probe can be believed.
+    """
+    assert pairing.IMTYPESET_PIN in DECLARED_PYTHONS, pairing.IMTYPESET_PIN
+    assert pairing.IMTYPESET_PYTHONS == DECLARED_PYTHONS[pairing.IMTYPESET_PIN]
+
+
+@pytest.mark.parametrize("name", ["IMGUI_BUNDLE_PIN", "IMTYPESET_PIN", "IMTYPESET_PYTHONS"])
+def test_the_probe_spells_pairings_pins_and_pythons_alike(name: str) -> None:
+    """
+    The probe cannot import pptmstr.pairing (``test_the_probe_runs_without_pptmstr``).
+    """
+    assert getattr(probe, name) == getattr(pairing, name)
+
+
+def test_the_probe_runs_without_pptmstr(tmp_path: Path) -> None:
+    """
+    Stage 1 runs under bootstrap's interpreter before any virtualenv: loaded in
+    an isolated interpreter whose working directory is empty, the probe answers
+    and has imported nothing of pptmstr, although this interpreter could.
+    """
+    script = (
+        "import importlib.util, sys\n"
+        "spec = importlib.util.spec_from_file_location('probe', sys.argv[1])\n"
+        "module = importlib.util.module_from_spec(spec)\n"
+        "sys.modules['probe'] = module\n"
+        "spec.loader.exec_module(module)\n"
+        "print(sorted(m for m in sys.modules if m.split('.')[0] == 'pptmstr'))\n"
+        "print(module.install_outlook(module.platform_facts()).verdict)\n"
+    )
+    done = subprocess.run(
+        [sys.executable, "-I", "-c", script, str(ROOT / "scripts" / "probe.py")],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.splitlines()[0] == "[]"
+
+
+@pytest.mark.parametrize("minor", [11, 12, 13, 14])
+@pytest.mark.parametrize("platform", ["linux", "darwin"])
+def test_the_library_installs_only_on_the_pythons_the_pinned_imtypeset_declares(
+    minor: int, platform: str
+) -> None:
+    """
+    imscribe requires imtypeset on CPython 3.11 to 3.14 here, and pip takes no
+    wheel whose Requires-Python excludes the interpreter: outside the pin's
+    range the whole install fails, and the sentence says so and what to do.
+    """
+    case = mac((14, 0)) if platform == "darwin" else facts()
+    case = probe.PlatformFacts(**{**case.__dict__, "python": (3, minor)})
+    outlook = probe.install_outlook(case)
+    low, high = pairing.IMTYPESET_PYTHONS
+    if low <= (3, minor) <= high:
+        assert outlook.verdict == probe.LIBRARY
+        assert "install as wheels" in outlook.sentence
+        return
+    span = probe._span(pairing.IMTYPESET_PYTHONS)
+    assert outlook.verdict == probe.UNSUPPORTED
+    assert outlook.sentence.startswith(
+        f"imtypeset {pairing.IMTYPESET_PIN}, which pptmstr pins, installs only on CPython {span}"
+    )
+    assert f"imscribe requires it on CPython 3.{minor}, so the whole install fails" in (
+        outlook.sentence
+    )
+    assert f"./bootstrap.sh --python python3.{low[1]}" in outlook.sentence
+    assert "a pptmstr that pins imtypeset 0.4.2 or later" in outlook.sentence
+    assert "install as wheels" not in outlook.sentence
+
+
+@pytest.mark.parametrize("minor", [12, 14])
+def test_today_cpython_3_12_and_3_14_are_told_the_install_fails(
+    minor: int, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """
+    At imtypeset 0.4.1.192900, the pin this was written against: the DIAGNOSIS
+    line of stage 1, which stops bootstrap before a virtualenv, and the
+    Supported line names only what does install.
+    """
+    monkeypatch.setattr(probe, "IMTYPESET_PIN", "0.4.1.192900")
+    monkeypatch.setattr(probe, "IMTYPESET_PYTHONS", DECLARED_PYTHONS["0.4.1.192900"])
+    monkeypatch.setattr(probe, "platform_facts", lambda: facts(python=(3, minor)))
+    r = probe.Report()
+    probe.check_install(r)
+    out = capsys.readouterr().out
+    assert r.fatal and r.fatal[0].startswith(
+        "install: pptmstr will not install here: imtypeset 0.4.1.192900, which pptmstr "
+        "pins, installs only on CPython 3.11 "
+    )
+    assert "Run bootstrap with CPython 3.11 (./bootstrap.sh --python python3.11)" in out
+    assert out.rstrip().endswith(
+        "Supported: CPython 3.11 on macOS 14 or later on Apple Silicon, or on Linux x86-64 "
+        "with glibc 2.28 or later"
+    )
+
+
+def test_linux_aarch64_needs_no_imtypeset_on_any_python_imgui_bundle_has() -> None:
+    """
+    The marker is off there, so the pin's Requires-Python is never asked.
+    """
+    for minor in (11, 12, 14):
+        outlook = probe.install_outlook(facts(machine="aarch64", python=(3, minor)))
+        assert outlook.verdict == probe.WITHOUT_LIBRARY, minor
 
 
 @pytest.mark.parametrize(

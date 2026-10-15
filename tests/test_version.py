@@ -1517,21 +1517,33 @@ def test_the_lines_open_a_run_of_the_suite_quiet_or_not(tmp_path: Path, quiet: b
 # -- IMSCRIBE_NO_TYPESET is no library, whatever else is set ------------------------
 
 
-def test_switched_off_the_two_variables_are_taken_out_and_said(tmp_path: Path) -> None:
+def test_switched_off_the_two_variables_are_taken_out_and_said(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """
     imscribe still loads a library ``IMTYPESET_LIBRARY`` names under its switch,
     so a left-over variable would put the library in a run asked to have none.
+
+    In this process's own environment, set here, because ``pairing.named`` reads
+    that one: whatever the test run was started with (``make test
+    PPTMSTR_TYPESET_DEPS=1`` exports the pair) is replaced for the test, and no
+    decision an earlier ``adopt`` made is consulted.
     """
     _checkout(tmp_path, prefix=tmp_path / "venv")
-    named = {name: f"/left/over/{name}" for name in VARIABLES}
-    environ = {**OFF, **ASKED, **named, "PATH": "/bin"}
+    monkeypatch.setattr(pairing, "_FOUND", None)
+    for name, value in {**OFF, **ASKED}.items():
+        monkeypatch.setenv(name, value)
+    for name in VARIABLES:
+        monkeypatch.setenv(name, f"/left/over/{name}")
 
-    found = pairing.decide(environ, tmp_path, tmp_path / "venv", "imtypeset 0.4.1.192900")
+    found = pairing.decide(os.environ, tmp_path, tmp_path / "venv", "imtypeset 0.4.1.192900")
 
     assert found.route == pairing.ROUTE_NONE and found.given == ()
     assert found.withheld == VARIABLES
-    assert environ == {**OFF, **ASKED, "PATH": "/bin"}
+    assert [name for name in VARIABLES if name in os.environ] == []
+    assert all(os.environ[name] == value for name, value in {**OFF, **ASKED}.items())
     assert "IMTYPESET_LIBRARY and IMTYPESET_PYTHON were set as well" in found.why
+    assert pairing.named(pairing.LIBRARY_VARIABLE) is None
     line = version._imtypeset(found, {}, pairing.named(pairing.LIBRARY_VARIABLE))
     assert line.startswith("imtypeset: no library (IMSCRIBE_NO_TYPESET is set")
     assert "taken out of this process's environment" in line

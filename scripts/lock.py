@@ -65,19 +65,34 @@ UNIT = ("imgui-bundle", "imscribe", "imtypeset")
 # installed with --no-build-isolation, so both have to be in it.
 EDITABLE_EXTRA = ("editables",)
 
+
+def _probe() -> ModuleType:
+    """
+    scripts/probe.py, which knows the platform's facts a marker cannot test.
+    """
+    if "probe" not in sys.modules:
+        spec = importlib.util.spec_from_file_location("probe", Path(__file__).parent / "probe.py")
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["probe"] = module
+        spec.loader.exec_module(module)
+    return sys.modules["probe"]
+
+
 # What the lock covers, as marker environments. pyproject.toml's
 # [tool.uv].environments says the same in markers, and probe.install_outlook's
 # LIBRARY verdict says it from the platform's facts; tests/test_lock.py holds the
 # three to each other. A marker cannot test glibc 2.28 or macOS 14; the probe can.
+# The Pythons are the probe's IMTYPESET_PYTHONS (pairing's, held equal by
+# tests/test_probe.py): the lock covers no interpreter the pinned library does
+# not install on.
 TARGET_PLATFORMS = (
     {"sys_platform": "linux", "platform_system": "Linux", "platform_machine": "x86_64"},
     {"sys_platform": "darwin", "platform_system": "Darwin", "platform_machine": "arm64"},
 )
-TARGET_PYTHONS = ("3.11", "3.12", "3.13", "3.14")
-COVERAGE = (
-    "CPython 3.11 to 3.14 on Linux x86-64 with glibc 2.28 or later and on macOS 14 or later "
-    "on Apple Silicon"
-)
+_LOW, _HIGH = _probe().IMTYPESET_PYTHONS
+TARGET_PYTHONS = tuple(f"{_LOW[0]}.{minor}" for minor in range(_LOW[1], _HIGH[1] + 1))
+COVERAGE = _probe().library_coverage()
 
 DEFAULT_INDEX = "https://pypi.org/simple/"
 _HASH = re.compile(r"sha256:[0-9a-f]{64}")
@@ -357,19 +372,6 @@ def run_check(root: Path, if_present: bool) -> int:
 
 
 # --- the platform -------------------------------------------------------------
-
-
-def _probe() -> ModuleType:
-    """
-    scripts/probe.py, which knows the platform's facts a marker cannot test.
-    """
-    if "probe" not in sys.modules:
-        spec = importlib.util.spec_from_file_location("probe", Path(__file__).parent / "probe.py")
-        assert spec is not None and spec.loader is not None
-        module = importlib.util.module_from_spec(spec)
-        sys.modules["probe"] = module
-        spec.loader.exec_module(module)
-    return sys.modules["probe"]
 
 
 def covers_refusal(verdict: str, sentence: str) -> str | None:

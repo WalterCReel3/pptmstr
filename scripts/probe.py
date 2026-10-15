@@ -182,7 +182,9 @@ class Report:
 
 def python_remedy(mgr: PkgMgr | None = None) -> str:
     if IS_MAC:
-        return "brew install python@3.13"
+        # The newest the pinned imtypeset installs on: any other is told the
+        # install fails (install_outlook).
+        return f"brew install python@{_dotted(IMTYPESET_PYTHONS[1])}"
     if IS_LINUX:
         # A distro older than the floor cannot fix this from its own repos, so
         # name the escape hatch alongside the package.
@@ -382,16 +384,30 @@ def check_glibc(r: Report) -> None:
 # on macOS 13 on arm64, or Linux x86-64 below glibc 2.28 or on musl, the
 # requirement is on, no wheel matches, imtypeset publishes no source
 # distribution, and the WHOLE `pip install` fails with "No matching
-# distribution". Where imgui-bundle 1.92.900 has no wheel (an Intel Mac,
-# CPython 3.15, glibc below 2.28) pip compiles it from source, which is not a
-# supported install either. Both are told here, before a virtualenv is made,
-# in one sentence naming what will not install, and bootstrap stops.
+# distribution". The same happens on an interpreter the marker admits and the
+# pinned imtypeset's wheels do not: their Requires-Python is a narrower range
+# than the marker's, and pip skips a wheel whose Requires-Python excludes the
+# interpreter. Where imgui-bundle has no wheel (an Intel Mac, CPython 3.15,
+# glibc below 2.28) pip compiles it from source, which is not a supported
+# install either. Each is told here, before a virtualenv is made, in one
+# sentence naming what will not install, and bootstrap stops.
 #
 # The wheel sets are PyPI's file lists for imgui-bundle 1.92.900 and imtypeset
-# 0.4.1.192900, read 2026-10-13; they move only with the pins in pyproject.toml.
+# 0.4.1.192900, read 2026-10-13, and imtypeset's Requires-Python, read
+# 2026-10-15; they move only with the pins in pyproject.toml.
 # --------------------------------------------------------------------------
 
-LIBRARY_PYTHONS = ((3, 11), (3, 14))  # inclusive: both projects' cp311..cp314 wheels
+# pptmstr/pairing.py's, spelled again because this module cannot import it: it
+# runs under whatever interpreter bootstrap.sh was given, before any virtualenv,
+# including one below the floor it is there to diagnose, and pairing needs 3.10
+# (dataclass slots). tests/test_probe.py holds the three equal to pairing's.
+IMGUI_BUNDLE_PIN = "1.92.900"
+IMTYPESET_PIN = "0.4.1.192900"
+IMTYPESET_PYTHONS = ((3, 11), (3, 11))  # inclusive: what the pin's Requires-Python admits
+
+# Inclusive: imgui-bundle's cp311..cp314 wheels, which is also the interpreter
+# range of imscribe's marker on imtypeset (python_version >= '3.11' and < '3.15').
+BUNDLE_PYTHONS = ((3, 11), (3, 14))
 MIN_MACOS = (14, 0)  # macosx_14_0_arm64, both projects
 
 LIBRARY = "library"  # the install brings the typesetting library
@@ -426,6 +442,24 @@ def _version_tuple(text: str) -> tuple[int, ...] | None:
 
 def _dotted(version: tuple[int, ...]) -> str:
     return ".".join(str(p) for p in version)
+
+
+def _span(pythons: tuple[tuple[int, int], tuple[int, int]]) -> str:
+    """
+    An inclusive range of interpreters as a sentence says it: "3.11", or "3.11 to 3.14".
+    """
+    low, high = pythons
+    return _dotted(low) if low == high else f"{_dotted(low)} to {_dotted(high)}"
+
+
+def library_coverage() -> str:
+    """
+    Where the install brings the library, as one phrase: what a LIBRARY verdict covers.
+    """
+    return (
+        f"CPython {_span(IMTYPESET_PYTHONS)} on macOS 14 or later on Apple Silicon, or on "
+        f"Linux x86-64 with glibc {_dotted(MIN_GLIBC)} or later"
+    )
 
 
 def macos_version() -> tuple[int, ...] | None:
@@ -483,53 +517,51 @@ def install_outlook(facts: PlatformFacts) -> Outlook:
     """
     What installing pptmstr's requirements does on this platform, in one sentence.
 
-    Supported, with the library: CPython 3.11 to 3.14 on macOS 14 or later on
-    arm64, or on Linux x86-64 with glibc 2.28 or later. Supported without it:
-    the same interpreters on Linux aarch64 (glibc 2.28 or later, or musl), where
-    imgui-bundle has a wheel and imtypeset's marker is off. Everything else is
-    UNSUPPORTED, because pip either fails at imtypeset or compiles imgui-bundle.
+    Supported, with the library: CPython in ``IMTYPESET_PYTHONS`` on macOS 14 or
+    later on arm64, or on Linux x86-64 with glibc 2.28 or later. Supported
+    without it: CPython in ``BUNDLE_PYTHONS`` on Linux aarch64 (glibc 2.28 or
+    later, or musl), where imgui-bundle has a wheel and imtypeset's marker is
+    off. Everything else is UNSUPPORTED, because pip either fails at imtypeset or
+    compiles imgui-bundle.
     """
-    low, high = LIBRARY_PYTHONS
+    low, high = BUNDLE_PYTHONS
     py = _dotted(facts.python)
+    bundle, typeset = f"imgui-bundle {IMGUI_BUNDLE_PIN}", f"imtypeset {IMTYPESET_PIN}"
     if facts.implementation != "CPython":
         return Outlook(
             UNSUPPORTED,
-            f"{facts.implementation} is not CPython: imgui-bundle 1.92.900 and imtypeset "
-            f"0.4.1.192900 publish CPython wheels only, so neither will install from a wheel",
+            f"{facts.implementation} is not CPython: {bundle} and {typeset} "
+            f"publish CPython wheels only, so neither will install from a wheel",
         )
     if not low <= facts.python <= high:
         return Outlook(
             UNSUPPORTED,
-            f"CPython {py} is outside {_dotted(low)} to {_dotted(high)}: imgui-bundle "
-            f"1.92.900 publishes no wheel for it (pip would compile it from source) and "
-            f"imtypeset 0.4.1.192900 none at all",
+            f"CPython {py} is outside {_dotted(low)} to {_dotted(high)}: {bundle} "
+            f"publishes no wheel for it (pip would compile it from source) and "
+            f"{typeset} none at all",
         )
     if facts.system == "darwin":
         if facts.machine != "arm64":
             return Outlook(
                 UNSUPPORTED,
-                f"macOS on {facts.machine} is not supported: imgui-bundle 1.92.900 publishes "
-                f"no wheel for an Intel Mac (pip would compile it from source) and imtypeset "
-                f"0.4.1.192900 none at all",
+                f"macOS on {facts.machine} is not supported: {bundle} publishes "
+                f"no wheel for an Intel Mac (pip would compile it from source) and "
+                f"{typeset} none at all",
             )
         if facts.macos is None:
             return Outlook(
                 UNSUPPORTED,
-                "the macOS version cannot be read, and imgui-bundle 1.92.900 and imtypeset "
-                "0.4.1.192900 publish wheels for macOS 14 or later only",
+                f"the macOS version cannot be read, and {bundle} and {typeset} "
+                f"publish wheels for macOS 14 or later only",
             )
         if facts.macos < MIN_MACOS:
             return Outlook(
                 UNSUPPORTED,
-                f"macOS {_dotted(facts.macos)} is below 14: imtypeset 0.4.1.192900 has no "
+                f"macOS {_dotted(facts.macos)} is below 14: {typeset} has no "
                 f"wheel for it and no source distribution, so the whole install fails, and "
-                f"imgui-bundle 1.92.900 would be compiled from source",
+                f"{bundle} would be compiled from source",
             )
-        return Outlook(
-            LIBRARY,
-            f"macOS {_dotted(facts.macos)} on arm64 with CPython {py}: imgui-bundle, imscribe "
-            f"and imtypeset install as wheels",
-        )
+        return _with_library(f"macOS {_dotted(facts.macos)} on arm64", facts.python)
     if facts.system.startswith("linux"):
         glibc = facts.glibc
         floor = _dotted(MIN_GLIBC)
@@ -537,43 +569,64 @@ def install_outlook(facts: PlatformFacts) -> Outlook:
             if glibc is None:
                 return Outlook(
                     UNSUPPORTED,
-                    "Linux x86-64 without glibc (musl, or a libc that cannot be read): "
-                    "imtypeset 0.4.1.192900 has no wheel for it and no source distribution, "
-                    "so the whole install fails",
+                    f"Linux x86-64 without glibc (musl, or a libc that cannot be read): "
+                    f"{typeset} has no wheel for it and no source distribution, "
+                    f"so the whole install fails",
                 )
             if glibc < MIN_GLIBC:
                 return Outlook(
                     UNSUPPORTED,
-                    f"glibc {_dotted(glibc)} is below {floor}: imtypeset 0.4.1.192900 has no "
+                    f"glibc {_dotted(glibc)} is below {floor}: {typeset} has no "
                     f"wheel for it and no source distribution, so the whole install fails, "
-                    f"and imgui-bundle 1.92.900 would be compiled from source",
+                    f"and {bundle} would be compiled from source",
                 )
-            return Outlook(
-                LIBRARY,
-                f"Linux x86-64, glibc {_dotted(glibc)}, CPython {py}: imgui-bundle, imscribe "
-                f"and imtypeset install as wheels",
-            )
+            return _with_library(f"Linux x86-64, glibc {_dotted(glibc)},", facts.python)
         if facts.machine == "aarch64":
             if glibc is not None and glibc < MIN_GLIBC:
                 return Outlook(
                     UNSUPPORTED,
-                    f"glibc {_dotted(glibc)} is below {floor}: imgui-bundle 1.92.900 has no "
+                    f"glibc {_dotted(glibc)} is below {floor}: {bundle} has no "
                     f"wheel for it, so pip would compile it from source",
                 )
             return Outlook(
                 WITHOUT_LIBRARY,
-                "Linux aarch64: imtypeset 0.4.1.192900 has no wheel here and is not "
-                "required, so the install leaves the typesetting library out and every "
-                "pane draws with its own renderer",
+                f"Linux aarch64: {typeset} has no wheel here and is not "
+                f"required, so the install leaves the typesetting library out and every "
+                f"pane draws with its own renderer",
             )
         return Outlook(
             UNSUPPORTED,
-            f"Linux on {facts.machine} is not supported: imgui-bundle 1.92.900 publishes no "
+            f"Linux on {facts.machine} is not supported: {bundle} publishes no "
             f"wheel for it (pip would compile it from source)",
         )
     return Outlook(
         UNSUPPORTED,
         f"{facts.system} is not a platform bootstrap.sh installs on",
+    )
+
+
+def _with_library(where: str, python: tuple[int, int]) -> Outlook:
+    """
+    The outlook on a platform imtypeset's marker is on for and its wheels are built for.
+
+    Whether it installs is then the interpreter alone: imscribe requires the
+    pinned imtypeset on the whole of ``BUNDLE_PYTHONS``, and pip takes none of
+    its wheels where their Requires-Python (``IMTYPESET_PYTHONS``) excludes it.
+    """
+    py = _dotted(python)
+    low, high = IMTYPESET_PYTHONS
+    if not low <= python <= high:
+        return Outlook(
+            UNSUPPORTED,
+            f"imtypeset {IMTYPESET_PIN}, which pptmstr pins, installs only on CPython "
+            f"{_span(IMTYPESET_PYTHONS)} (its wheels' Requires-Python), and imscribe requires "
+            f"it on CPython {py}, so the whole install fails. Run bootstrap with CPython "
+            f"{_span(IMTYPESET_PYTHONS)} (./bootstrap.sh --python python{_dotted(low)}), or take a "
+            f"pptmstr that pins imtypeset 0.4.2 or later, which installs on 3.11 to 3.14",
+        )
+    return Outlook(
+        LIBRARY,
+        f"{where} with CPython {py}: imgui-bundle, imscribe and imtypeset install as wheels",
     )
 
 
@@ -586,9 +639,7 @@ def check_install(r: Report, facts: PlatformFacts | None = None) -> None:
     else:
         r.fail(
             "install",
-            f"pptmstr will not install here: {outlook.sentence}. Supported: CPython 3.11 to "
-            f"3.14 on macOS 14 or later on Apple Silicon, or on Linux x86-64 with glibc 2.28 "
-            f"or later",
+            f"pptmstr will not install here: {outlook.sentence}. Supported: {library_coverage()}",
         )
 
 
