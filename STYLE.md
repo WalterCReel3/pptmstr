@@ -194,11 +194,13 @@ first and stops reading at the second, so one such call took the queue and DETAI
 the screen while the batch approve still sent it. Session text is made drawable once,
 where it enters (`drawable`, applied in `store._apply`, `Transcript.append`, the log
 and the session listing), and the store holds the drawable form. The exceptions are
-the fields something is *run* with — `PendingApproval.raw_args`, a session's `cwd` —
-which stay exactly as they arrived, are listed in `store._VERBATIM`, and are not
-drawn: a pane reads `PendingApproval.args`, and a test fails if one reads `raw_args`.
-A new field that is acted on goes in that table; anything else is drawable by
-default.
+the fields something is *run* with — `PendingApproval.raw_args`, a session's `cwd`, a
+break-glass command's string — and the operator's own words handed back to an agent,
+which stay exactly as they arrived, are listed in `store._VERBATIM`, and are never
+drawn as they are: a pane reads `PendingApproval.args`, and a test fails if one reads
+`raw_args` other than through `commandtext.visible`; a command and an answer are drawn
+through `commandtext.visible` or `widgets.author_text`, which take any `str`. A new
+field that is acted on goes in that table; anything else is drawable by default.
 
 **A channel that duplicates a path the model already has.** The first team run used
 the message bus zero times, because a sub-agent's result already returns to its lead

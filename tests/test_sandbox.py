@@ -21,7 +21,7 @@ from typing import Any
 import pytest
 
 from pptmstr.brief import default_root
-from pptmstr.sandbox import ALLOWED_DOMAIN, containment_settings
+from pptmstr.sandbox import ALLOWED_DOMAIN, containment_settings, denied_records
 
 
 def _sandbox() -> dict[str, Any]:
@@ -128,14 +128,46 @@ def test_every_credential_entry_is_a_denial() -> None:
     for denials while granting one.
     """
     files = _sandbox()["credentials"]["files"]
-    assert len(files) == 4
+    assert len(files) == 5
     assert all(entry["mode"] == "deny" for entry in files)
     assert {entry["path"] for entry in files} == {
         "~/.ssh",
         "~/.aws",
         "~/.claude/.credentials.json",
         "~/.claude.json",
+        "~/.config/pptmstr/sessions",
     }
+
+
+@pytest.mark.real_config_dir
+def test_no_session_reads_another_sessions_records_from_a_sandboxed_command(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """
+    The denied directory is the one the records are written under, wherever that
+    is: ``denied_records`` spells ``settings.config_dir``'s rule a second time, and
+    a deny at the default place while ``XDG_CONFIG_HOME`` put the records elsewhere
+    would be a containment that reads as on. Every session's directory, and every
+    command's log in it, is under what is denied; nothing re-opens any part of it.
+    """
+    from pptmstr import commandfile, sessionfile, settings
+
+    for xdg in (None, str(tmp_path / "xdg"), "relative/is/unset"):
+        if xdg is None:
+            monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        else:
+            monkeypatch.setenv("XDG_CONFIG_HOME", xdg)
+        sandbox = _sandbox()
+        denied = [posixpath.expanduser(e["path"]) for e in sandbox["credentials"]["files"]]
+        # What ``sessionfile.root()`` is where no test has moved it.
+        root = settings.config_dir() / sessionfile._SESSIONS
+        assert posixpath.expanduser(denied_records()) == str(root)
+        assert str(root) in denied
+        log = commandfile.command_dir("some-session", "cmd-20260101T000000Z-0123456789ab", root)
+        assert log is not None and root in log.parents
+        assert set(sandbox["filesystem"]) == {"denyWrite"}
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    assert denied_records() == str(tmp_path / "xdg" / "pptmstr" / "sessions")
 
 
 def test_no_command_is_excluded_from_the_sandbox() -> None:
@@ -160,9 +192,11 @@ def test_no_key_outside_the_record_is_invented() -> None:
         "allowUnsandboxedCommands",
         "autoAllowBashIfSandboxed",
         "network",
+        "filesystem",
         "credentials",
     }
     assert set(sandbox["network"]) == {"strictAllowlist", "allowedDomains"}
+    assert set(sandbox["filesystem"]) == {"denyWrite"}
     assert set(sandbox["credentials"]) == {"files"}
 
 
@@ -201,3 +235,23 @@ def test_it_reads_nothing_from_the_environment(monkeypatch: Any) -> None:
     under_a_different_home = containment_settings()
     monkeypatch.setenv("HOME", "/somewhere/else")
     assert containment_settings() == under_a_different_home
+
+
+@pytest.mark.real_config_dir
+def test_no_sandboxed_command_writes_either_records_root(monkeypatch: Any, tmp_path: Path) -> None:
+    """
+    The write region is the session's directory, and one started in the home
+    directory has the records inside it. ``credentials.files`` denies reads only.
+    """
+    from pptmstr import sessionfile, settings
+
+    for xdg in (None, str(tmp_path / "xdg")):
+        if xdg is None:
+            monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+        else:
+            monkeypatch.setenv("XDG_CONFIG_HOME", xdg)
+        denied = [posixpath.expanduser(p) for p in _sandbox()["filesystem"]["denyWrite"]]
+        assert denied == [
+            str(settings.config_dir() / sessionfile._SESSIONS),
+            str(settings.config_dir() / "boards"),
+        ]

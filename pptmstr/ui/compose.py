@@ -75,6 +75,14 @@ def draw_conversation(
         imgui.text_disabled("talk to the session that spawned this one.")
         return
 
+    closed = widgets.closed_line(record, unloaded="")
+    if closed is not None:
+        # No box and no buttons. There is no process to message, interrupt or
+        # close, and a disabled composer under "done" reads as a session that
+        # ran here and finished.
+        imgui.text_disabled(closed)
+        return
+
     waiting = record.state is AgentState.AWAITING_INPUT
     if waiting:
         imgui.text_colored(P.state_awaiting_input.vec4, "this session is waiting for you")

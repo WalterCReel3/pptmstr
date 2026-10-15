@@ -58,7 +58,9 @@ def saved(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[Settings]:
     """
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
     record: list[Settings] = []
-    monkeypatch.setattr(settings_mod, "save", lambda settings, path=None: record.append(settings))
+    monkeypatch.setattr(
+        settings_mod, "save", lambda settings, path=None, *, unread: record.append(settings)
+    )
     return record
 
 
@@ -70,7 +72,7 @@ def choices(model: Model) -> list[Choice]:
 
 
 def toggles(model: Model) -> list[Toggle]:
-    return [model.typeset, model.wrap, *model.pane_switches]
+    return [model.typeset, model.wrap, model.ended, *model.pane_switches]
 
 
 def choice(model: Model, key: str) -> Choice:
@@ -475,6 +477,33 @@ def test_admitted_connectors_are_listed_and_the_dialog_says_where_they_are_edite
     assert all(
         changed(held, each).admitted_connectors == held.admitted_connectors for each in offered
     )
+
+
+def test_board_recording_is_shown_and_no_change_the_dialog_offers_reaches_it() -> None:
+    """
+    ``board_log`` is set by hand in the file and read once at startup. A row, or a
+    ``defaults`` that put it back, would switch recording on over that edit.
+    """
+    for held in (Settings(board_log=False), Settings(board_log=True)):
+        model = build(held, Facts(path="/home/op/.config/pptmstr/settings.json"))
+        said = "off" if not held.board_log else "on"
+        assert model.board_log_note.startswith(f"recording {said} - ")
+        assert "board_log in /home/op/.config/pptmstr/settings.json" in model.board_log_note
+        offered = [option.change for each in choices(model) for option in each.options]
+        offered += [each.flip for each in toggles(model)]
+        offered += [model.appearance.restore, model.text.restore]
+        offered += [model.panes.restore, model.sessions.restore]
+        assert all(changed(held, each).board_log == held.board_log for each in offered)
+        assert changed(held, FieldSet("board_log", not held.board_log)) == held
+
+
+def test_ended_sub_agents_are_one_switch_in_sessions_worded_as_the_menu_has_it() -> None:
+    hidden = build(Settings())
+    assert not hidden.ended.on and hidden.ended.label == "show ended sub-agents"
+    shown_now = changed(Settings(), hidden.ended.flip)
+    assert shown_now == Settings(hide_ended_subagents=False)
+    assert build(shown_now).ended.on and not build(shown_now).sessions.at_default
+    assert changed(shown_now, build(shown_now).sessions.restore) == Settings()
 
 
 # -- a change reaches the settings, the file and the seam ------------------------------

@@ -410,3 +410,19 @@ def test_the_fake_cli_helper_really_runs(tmp_path: Path):
     proc = subprocess.run([cli], capture_output=True, text=True, timeout=10)
     assert proc.returncode == 0
     assert proc.stdout.strip() == "hello"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="/bin/sh")
+def test_the_cli_is_asked_its_version_in_the_environment_as_it_stands_then(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The entry point takes the library's variables back out of ``os.environ``
+    (``pairing.release``); the CLI started here inherits what is left at the
+    moment it starts, and not a copy taken earlier.
+    """
+    cli = _fake_cli(tmp_path, "claude", 'echo "2.1.251 ${IMTYPESET_PROBE-unset}"')
+    monkeypatch.setenv("IMTYPESET_PROBE", "set")
+    assert read_cli_version(cli).text == "2.1.251 set"
+    monkeypatch.delenv("IMTYPESET_PROBE")
+    assert read_cli_version(cli).text == "2.1.251 unset"

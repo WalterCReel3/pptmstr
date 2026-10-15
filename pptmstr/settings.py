@@ -22,6 +22,7 @@ import json
 import os
 import tempfile
 from dataclasses import asdict, dataclass, fields, replace
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -162,6 +163,30 @@ class Settings:
     # `approval.classify`'s fail-closed fallthrough and parks in front of the
     # operator at every policy, `AUTONOMOUS` included.
     admitted_connectors: tuple[McpConnector, ...] = ()
+    # Whether a team session's board is written to disk as it changes and read
+    # back when the session is resumed (``boardsync``).
+    #
+    # On, a session's log is the files of ``config_dir() / "boards" / <session
+    # id>``: every specification, result and concern body its board has held, as
+    # plain text. **Nothing in pptmstr ever deletes one**, so they outlive the
+    # CLI's own transcript of the session, which the CLI removes on a retention
+    # schedule this does not follow. Off, nothing is read, written or created.
+    #
+    # Read once, when the application starts, and edited only in this file: a
+    # log begun part-way through a session would restore as a board missing
+    # everything before the switch with nothing in it to say so.
+    #
+    # The one key ``read`` does not default when it cannot tell what the file
+    # says (``BoardLogUnread``): on is the default only for a file or a key that
+    # is not there.
+    board_log: bool = True
+    # Whether the fleet pane leaves out an ended sub-agent that owes nothing and holds
+    # nothing: no card, no count. This is the only switch that shows them again. A
+    # filter on what is drawn: the record stays in the store either way.
+    #
+    # Read like every key but ``board_log``: a value that is not a JSON ``true`` or
+    # ``false`` is the default, and nothing is refused over it.
+    hide_ended_subagents: bool = True
 
     def merged(self, **changes: Any) -> Settings:
         return replace(self, **changes)
@@ -196,7 +221,7 @@ def _connectors(value: Any) -> tuple[McpConnector, ...] | None:
     Entries missing a field or carrying a non-string are dropped rather than
     refused: the rest of the file is still good, and a session that silently loses
     one hand-edited connector is a smaller failure than one that starts with the
-    default theme because of it. ``load`` swallows a corrupt file for the same
+    default theme because of it. ``read`` swallows a corrupt file for the same
     reason.
     """
     if not isinstance(value, list):
@@ -268,27 +293,104 @@ def settings_path() -> Path:
     return config_dir() / "settings.json"
 
 
-def load(path: Path | None = None) -> Settings:
+class BoardLogUnread(Enum):
     """
-    Read settings, falling back to defaults on anything unreadable.
+    Why ``board_log`` is off although the file does not say ``false``: something
+    was there and what it says about recording could not be read.
+
+    Each value is the reason as the board pane gives it after "not recorded:".
+    Three, because they are different mistakes with different repairs -- a file
+    that is not JSON, one that is and spells the switch's value as something
+    other than a bool, and one that spells the switch's name wrong.
+    """
+
+    FILE = "settings could not be read"
+    VALUE = "board_log in settings.json is not true or false"
+    KEY = "settings.json has a key that is board_log misspelled"
+
+
+def _misspells_board_log(key: str) -> bool:
+    """
+    Whether ``key`` is not ``board_log`` and has its letters: the same once case
+    and everything that is not a letter or a digit are taken out.
+
+    ``board-log``, ``boardlog``, ``Board_Log`` and ``board_log`` with a space
+    after it. The switch is set by hand and by nothing else, so a key like this
+    is an operator who meant it. Nothing further off is guessed at -- a dropped
+    letter, another word -- and such a file records, which is the part of this
+    that cannot be closed from here.
+    """
+    return key != "board_log" and "".join(c for c in key.lower() if c.isalnum()) == "boardlog"
+
+
+@dataclass(frozen=True, slots=True)
+class Loaded:
+    """
+    What ``read`` found: the settings to run with, and why ``board_log`` is off
+    when that is not because the file says so.
+
+    The reason rides beside ``Settings`` and not in it. ``save`` writes every
+    field of ``Settings``, and a reason written back would be read by the next
+    start as a key somebody set.
+    """
+
+    settings: Settings
+    board_log_unread: BoardLogUnread | None = None
+
+
+def read(path: Path | None = None) -> Loaded:
+    """
+    Read settings, falling back to defaults on anything unreadable -- for every
+    key but ``board_log``.
 
     A corrupt or hand-edited config must not stop the app from starting -- losing a
     theme preference is a nuisance, refusing to launch over it is a bug. Unknown
     keys are ignored rather than rejected so that a file written by a later version
     still loads here.
+
+    **``board_log`` is the exception, and it fails the other way.** Its default
+    is on, it has no menu entry, and switching it off is a hand edit of this
+    file. Defaulting it would turn a trailing comma, or ``"false"`` typed with
+    quotes, into a board written to disk for an operator who asked for none; for
+    every other key the fallback loses a preference, and for this one it would
+    reverse a choice about what is kept. So the default applies to exactly two
+    findings -- no file, and a file with no such key -- and anything else that
+    is not a JSON ``true`` or ``false`` is off for this run, with the reason in
+    ``Loaded.board_log_unread``. "No such key" does not cover the key
+    misspelled (``_misspells_board_log``): that is off too, whatever it is set
+    to and whatever a correctly spelled key beside it says.
+
+    The cost is the operator who never touched the switch and broke the file
+    some other way: nothing is recorded for that run either. It stops at the
+    run, because ``save`` refuses to write these values back (``Unsaved``). That
+    is the cheaper of the two mistakes -- a board not kept can be switched back
+    on, and one written cannot be unwritten by the program that never deletes
+    one.
     """
     target = path or settings_path()
+    off = Settings(board_log=False)
     try:
-        raw = json.loads(target.read_text(encoding="utf-8"))
+        text = target.read_text(encoding="utf-8")
+    except (FileNotFoundError, NotADirectoryError):
+        # Nothing is there, which is what a first launch finds.
+        return Loaded(Settings())
     except (OSError, ValueError):
-        return Settings()
+        # Something is there and it cannot be opened, or is not text.
+        return Loaded(off, BoardLogUnread.FILE)
+    try:
+        raw = json.loads(text)
+    except ValueError:
+        return Loaded(off, BoardLogUnread.FILE)
     if not isinstance(raw, dict):
-        return Settings()
+        return Loaded(off, BoardLogUnread.FILE)
 
     known = {f.name: f.type for f in fields(Settings)}
     clean: dict[str, Any] = {}
+    unread: BoardLogUnread | None = None
+    misspelled = False
     for key, value in raw.items():
         if key not in known:
+            misspelled = misspelled or _misspells_board_log(key)
             continue
         # Guard the types the constructor would otherwise accept silently: a string
         # in fps_idle would survive construction and fail much later, inside a
@@ -297,6 +399,13 @@ def load(path: Path | None = None) -> Settings:
             decoded = _DECODERS[key](value)
             if decoded is not None:
                 clean[key] = decoded
+            continue
+        if key == "board_log" and not isinstance(value, bool):
+            # Not skipped like the other keys: skipping is the default, and the
+            # default is on. No spelling is guessed at either way -- "true" is
+            # refused with "false", since a rule for which strings mean on is a
+            # rule a string can satisfy by accident.
+            clean[key], unread = False, BoardLogUnread.VALUE
             continue
         default = getattr(Settings(), key)
         if isinstance(default, bool) and not isinstance(value, bool):
@@ -314,7 +423,11 @@ def load(path: Path | None = None) -> Settings:
             clean.update(legacy_faces(old))
         elif raw.get("typeset_mono") is True:
             clean.update(legacy_faces("mono"))
-    return Settings(**clean)
+    if misspelled:
+        # After the loop, so the answer does not turn on which key the file
+        # lists first. A value that could not be read keeps its own reason.
+        clean["board_log"], unread = False, unread or BoardLogUnread.KEY
+    return Loaded(Settings(**clean), unread)
 
 
 _DECODERS: dict[str, Any] = {
@@ -346,19 +459,78 @@ def encoded(settings: Settings) -> dict[str, Any]:
     return out
 
 
-def save(settings: Settings, path: Path | None = None) -> None:
+def load(path: Path | None = None) -> Settings:
     """
-    Write settings atomically.
+    ``read`` without the reason, for a caller that only needs the values.
+
+    The values decide on their own: ``board_log`` is already off wherever
+    ``read`` could not tell what the file says about it, so a caller that never
+    asks why still records nothing.
+    """
+    return read(path).settings
+
+
+@dataclass(frozen=True, slots=True)
+class Unsaved:
+    """
+    A ``save`` that was refused: nothing was written, and the file at ``path``
+    is as it was.
+
+    ``why`` is what could not be read -- of the file there now, or of the one
+    the run started from.
+    """
+
+    path: Path
+    why: BoardLogUnread
+
+    @property
+    def told(self) -> str:
+        """
+        The refusal as the operator is told it, once: which file, what is wrong
+        with it, and what ends it.
+        """
+        return (
+            f"settings are not being saved: {self.why.value} ({self.path}). The file is"
+            " left as it is, and what you change here lasts for this run only -- repair"
+            " the file and restart"
+        )
+
+
+def save(
+    settings: Settings, path: Path | None = None, *, unread: BoardLogUnread | None
+) -> Unsaved | None:
+    """
+    Write settings atomically, or refuse and say why. None is not a refusal.
 
     Written to a temporary file in the same directory and renamed over the target,
     so an interrupted write leaves the previous file intact instead of a truncated
     one. rename(2) is atomic within a filesystem, which is why the temp file cannot
     just go in /tmp.
 
-    Failures are swallowed: this is called from the UI thread on a theme change, and
-    a read-only config directory must not take down a frame.
+    **Refused in two cases, and both are about ``board_log``.** The file is
+    written whole from ``settings``, so a save is the one place a value nobody
+    chose could become a value the file states.
+
+    - ``unread`` is ``Loaded.board_log_unread`` of the read ``settings`` came
+      from. When it is not None the ``board_log`` in hand is ``read``'s fail-safe
+      and not anything the file said, and writing it would switch recording off
+      for good on the strength of a typo. It has no default: a caller that left
+      it out would be claiming the values were read cleanly.
+    - The file there now is read again, and refused the same way if it cannot
+      be told what it says. It may have been broken, or hand-edited to something
+      that is not a bool, since the run started; either is somebody's text this
+      would replace with a file that parses and says something else.
+
+    A refusal for the first reason lasts the run: repairing the file does not
+    make the values in memory the operator's.
+
+    Failures of the write itself are swallowed: this is called from the UI thread
+    on a theme change, and a read-only config directory must not take down a frame.
     """
     target = path or settings_path()
+    why = unread or read(target).board_log_unread
+    if why is not None:
+        return Unsaved(target, why)
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=str(target.parent), prefix=".settings-", suffix=".json")
@@ -372,4 +544,5 @@ def save(settings: Settings, path: Path | None = None) -> None:
                 os.unlink(tmp)
             raise
     except OSError:
-        return
+        pass
+    return None

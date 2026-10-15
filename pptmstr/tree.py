@@ -109,9 +109,15 @@ def lies_inside_checkout(candidate: str, checkout: str) -> bool:
     """
     Whether ``candidate`` has to be treated as lying inside the ``checkout`` tree.
 
-    The sandbox's writable region *is* the session's cwd, and its protected paths
+    The sandbox's writable region includes the session's cwd, and its protected paths
     cover ``.claude/**``, ``.mcp.json``, ``.git/hooks`` and ``.git/config`` -- not
-    ordinary project source. ``LaunchSpec.cwd`` defaults to ``"."``, so the default
+    ordinary project source. The region is not *only* cwd when cwd is a linked
+    worktree: ``planning/2026-10-07-a-session-can-run-in-its-own-worktree.md`` D2
+    measured, on CLI 2.1.292, that ``Bash`` there can also write the main repository's
+    git directory, less ``hooks/``, ``config`` and ``config.worktree``. That reaches
+    the checkout's refs, ``HEAD`` and index and none of its working files, so a sibling
+    worktree of ``checkout`` answers no here and the answer is about source files
+    alone. ``LaunchSpec.cwd`` defaults to ``"."``, so the default
     launch would make pptmstr's own source the region an unattended agent may write,
     and ``approval.py`` for the next launch is inside it. This is the question that
     notices. What is done about a yes -- refuse the mode, or clone first -- is the

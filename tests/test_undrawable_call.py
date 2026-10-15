@@ -8,7 +8,9 @@ command is approved undrawn. Two things are held here, apart, because one is a
 cause and the other must hold whatever the cause:
 
 - **Such a call is drawn**, in both panes that show a parked call and under either
-  renderer, with each such code unit written out as ``\\uXXXX``, and **what
+  renderer, with each such code unit written out: as ``\\uXXXX`` (``drawable``)
+  in a file's text, and in a Bash command as every approval surface spells a
+  command (``approval.command_shown``: ``\\x00``, ``\\u{DC80}``), and **what
   approve releases is the call as the agent made it**: the gate's own answer is
   read back off the real park.
 - **Nothing is approved over a pane that failed to draw**, by key, click or batch,
@@ -45,10 +47,13 @@ ROOT: NodeId = ("sess-1", None)
 INBOX, DETAIL = "NEEDS YOU", "DETAIL"
 
 # What a tool's arguments can hold that ImGui cannot draw, by name, and how each is
-# written where it is drawn. The surrogates are made the way one arrives.
+# written where it is drawn: in a file's text by ``drawable``, and in a Bash command
+# by ``commandtext.visible``, which is how the queue row, the expanded row and DETAIL
+# all spell a command. The surrogates are made the way one arrives.
 LOW = json.loads('"\\udc80"')
 HIGH = json.loads('"\\ud800"')
 UNDRAWABLE = {"U+DC80": (LOW, "\\udc80"), "U+D800": (HIGH, "\\ud800"), "NUL": ("\x00", "\\u0000")}
+COMMANDED = {"U+DC80": "\\u{DC80}", "U+D800": "\\u{D800}", "NUL": "\\x00"}
 
 
 def parked(tool_name: str, raw_args: Mapping[str, Any], ident: str = "p1") -> PendingApproval:
@@ -115,6 +120,13 @@ def im(request: pytest.FixtureRequest) -> Iterator[Any]:
     io.config_error_recovery = True
     io.config_error_recovery_enable_assert = False
     io.config_error_recovery_enable_tooltip = False
+    # The context is the module's. A reason box an earlier test left with the
+    # keyboard would start this one mid-typing, and ``review.Hold`` holds keys then;
+    # ``want_text_input`` is the last frame's, so a frame passes with the box let go.
+    context.internal.clear_active_id()
+    typeset.pre_frame()
+    context.new_frame()
+    context.render()
     caches = (inbox._VIEWS, inbox._PARTS, inbox._PREVIEWS, inbox._WIDTHS, inbox._WHOLE)
     for cache in caches:
         cache.clear()
@@ -266,6 +278,8 @@ def test_a_call_holding_what_imgui_cannot_draw_is_drawn_whole_in_both_panes(
     im: Any, handed: list[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tool: str, bad: str
 ) -> None:
     char, written = UNDRAWABLE[bad]
+    if tool == "Bash":
+        written = COMMANDED[bad]
     desk = Desk(monkeypatch, call_holding(tool, char, tmp_path))
 
     desk.frame(im)
@@ -310,7 +324,8 @@ def test_a_row_the_cursor_is_not_on_is_drawn_and_so_is_every_row_after_it(
     A closed row is its summary, which for a Bash call is the command: the one line
     of the queue every frame draws, whichever call the cursor is on.
     """
-    char, written = UNDRAWABLE[bad]
+    char, _ = UNDRAWABLE[bad]
+    written = COMMANDED[bad]
     desk = Desk(monkeypatch, clean("p1"), call_holding("Bash", char, tmp_path, "p2"), clean("p3"))
 
     desk.frame(im)
@@ -326,7 +341,8 @@ def test_a_sequence_written_out_in_a_call_is_not_drawn_as_the_code_unit_it_spell
 ) -> None:
     """
     ``printf '\\udc80'`` with a backslash and five characters is another command
-    than one holding the code unit, and the two are approved from what is drawn.
+    than one holding the code unit, and the two are approved from what is drawn:
+    the typed backslash is drawn doubled, and the code unit as ``\\u{DC80}``.
     """
     spelled = parked("Bash", {"command": "printf 'x\\udc80y' > out"}, "p1")
     held = call_holding("Bash", LOW, tmp_path, "p2")
@@ -335,8 +351,8 @@ def test_a_sequence_written_out_in_a_call_is_not_drawn_as_the_code_unit_it_spell
     desk.frame(im)
 
     rows = [text for text in handed if text.startswith("printf")]
-    assert [text for text in rows if "x\\u005cudc80y" in text]
-    assert [text for text in rows if "x\\udc80y" in text]
+    assert [text for text in rows if "x\\\\udc80y" in text]
+    assert [text for text in rows if "x\\u{DC80}y" in text]
     assert len({text for text in rows}) >= 2
 
 
@@ -372,7 +388,8 @@ def test_an_approved_call_runs_with_the_arguments_the_agent_sent(bad: str) -> No
     runs on the input the CLI already holds; and the gate did not alter the
     mapping it was handed on the way.
     """
-    char, written = UNDRAWABLE[bad]
+    char, _ = UNDRAWABLE[bad]
+    written = COMMANDED[bad]
     command = f"printf 'x{char}y' > out"
     tool_input = {"command": command}
     seen: list[PendingApproval] = []

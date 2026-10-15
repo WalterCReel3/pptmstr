@@ -30,20 +30,29 @@ from claude_agent_sdk import SDKSessionInfo
 
 from pptmstr import drawable, sessions, store
 from pptmstr.approval import DiffText
+from pptmstr.command import Command, End, Exited, Refused, Run
+from pptmstr.effects import CommandToRun
 from pptmstr.intents import (
     AgentFinished,
     AgentSpawned,
     ApprovalRequested,
     ApprovalResolved,
+    CommandApproved,
+    CommandEnded,
+    CommandRefused,
+    CommandRequested,
+    CommandsRestored,
     ConcernPosted,
+    SessionRecalled,
     SubagentDelivered,
     TaskClaimRequested,
     TaskDeclared,
 )
 from pptmstr.log import Log
-from pptmstr.model import AgentState, Concern, NodeId, PendingApproval, Task
+from pptmstr.model import AgentState, Concern, NodeId, PendingApproval, Recalled, Task
 from pptmstr.store import Store
 from pptmstr.transcript import SegmentKind, Transcript
+from pptmstr.ui import review
 
 ROOT: NodeId = ("s1", None)
 CHILD: NodeId = ("s1", "a1")
@@ -373,6 +382,131 @@ def test_a_directory_is_kept_as_it_was_given() -> None:
     assert record.cwd == f"/x/pro{LOW}j" and record.session_base == f"/x/pro{LOW}j"
 
 
+def test_a_recalled_sessions_directory_is_kept_as_its_file_gave_it() -> None:
+    """Its resume is launched there (``app._open_resume`` reads ``AgentRecord.cwd``)."""
+    held = Store()
+    held.apply(
+        SessionRecalled(
+            session_id="s9",
+            task="port the parser",
+            model="m",
+            recalled=Recalled(),
+            cwd=f"/x/pro{LOW}j",
+            session_base=f"/x/pro{LOW}j",
+        )
+    )
+    (record,) = held.snapshot().nodes.values()
+    assert record.cwd == f"/x/pro{LOW}j" and record.session_base == f"/x/pro{LOW}j"
+
+
+def _command(n: int, asked: str = "make", **fields: Any) -> Command:
+    return Command(
+        **{
+            "id": f"cmd-20261013T000000Z-{n:012x}",
+            "asker": CHILD,
+            "asked": asked,
+            "reason": "the build needs it",
+            "expects": "a wheel under dist/",
+            "asked_at": 1.0,
+            **fields,
+        }
+    )
+
+
+def test_a_command_that_spells_an_escape_is_held_and_run_as_it_was_asked() -> None:
+    """
+    ``drawable`` writes a backslash that spells ``\\u0000`` as ``\\u005c``, so a
+    command passed through it would be shown, drafted and run as another command.
+    The asker's string is what the run's draft opens on, and the approved string
+    is what the shell is handed.
+    """
+    asked = r"printf '\u0000\\udc80'"
+    held = Store()
+    held.apply(spawn(ROOT))
+    held.apply(spawn(CHILD, ROOT))
+    command = _command(1, asked, reason=r"it spells \u0000", expects=r"\ printed")
+    held.apply(CommandRequested(CHILD, command, "rq", 1.0))
+
+    kept = held.snapshot().commands[command.id]
+    assert (kept.asked, kept.reason, kept.expects) == (asked, command.reason, command.expects)
+
+    edited = r"printf '\ud800'"
+    cwd = f"/x/pro{LOW}j"
+    effects = held.apply(CommandApproved(command.id, edited, "/bin/sh", cwd, 600, 2.0))
+
+    (order,) = (effect for effect in effects if isinstance(effect, CommandToRun))
+    assert order.command.run is not None
+    assert (order.command.run.text, order.command.run.shell, order.command.run.cwd) == (
+        edited,
+        "/bin/sh",
+        cwd,
+    )
+    assert order.command.asked == asked
+    assert held.snapshot().commands[command.id].run == order.command.run
+
+
+@pytest.mark.parametrize(("field", "refusal"), [("asked", "nul"), ("reason", "reason_nul")])
+def test_a_command_holding_a_nul_is_refused_and_not_written_into_one_that_is_not(
+    field: str, refusal: str
+) -> None:
+    """The refusal reads the asker's own string; an escaped one would pass it."""
+    held = Store()
+    held.apply(spawn(ROOT))
+    held.apply(spawn(CHILD, ROOT))
+    command = _command(1, **{"asked": "make", field: "a\x00b"})
+    effects = held.apply(CommandRequested(CHILD, command, "rq", 1.0))
+
+    assert held.snapshot().commands == {}
+    assert [getattr(e.refusal, "value", None) for e in effects] == [refusal]
+
+
+def test_a_restored_command_says_what_was_asked_and_run_as_its_file_does() -> None:
+    """A closed command read back from its session's files is the same record."""
+    held = Store()
+    held.apply(spawn(ROOT))
+    run = Run(
+        text=r"printf '\u0000'", shell="/bin/sh", cwd=f"/x/pro{LOW}j", timeout_s=600, started_at=2.0
+    )
+    command = dataclasses.replace(
+        _command(1, r"printf '\u0000'", asker=ROOT),
+        run=run,
+        end=End(outcome=Exited(code=0), at=3.0),
+    )
+    held.apply(CommandsRestored("s1", (command,)))
+
+    kept = held.snapshot().commands[command.id]
+    assert (kept.asked, kept.run) == (command.asked, run)
+
+
+def test_the_operators_reason_for_refusing_a_command_is_kept_as_typed() -> None:
+    """It is handed to the asker as the operator's words (``commandbus``)."""
+    held = Store()
+    held.apply(spawn(ROOT))
+    held.apply(spawn(CHILD, ROOT))
+    command = _command(1)
+    held.apply(CommandRequested(CHILD, command, "rq", 1.0))
+    typed = r"not \u0000 again"
+    held.apply(CommandRefused(command.id, typed, 2.0))
+
+    end = held.snapshot().commands[command.id].end
+    assert end is not None and end.outcome == Refused(reason=typed)
+
+
+def test_what_a_command_wrote_is_drawable_in_the_store() -> None:
+    """Output is read, and never run: it is not among the exemptions."""
+    held = Store()
+    held.apply(spawn(ROOT))
+    held.apply(spawn(CHILD, ROOT))
+    command = _command(1, "make")
+    held.apply(CommandRequested(CHILD, command, "rq", 1.0))
+    held.apply(CommandApproved(command.id, "make", "/bin/sh", "/w", 600, 2.0))
+    end = End(outcome=Exited(code=0), at=3.0, output_bytes=6, tail=f"a\x00b{LOW}")
+    held.apply(CommandEnded(command.id, end))
+
+    finished = held.snapshot().commands[command.id].end
+    assert finished is not None and finished.tail == "a\\u0000b\\udc80"
+
+
 def test_a_path_measured_from_an_approved_call_is_drawable_in_the_ledger() -> None:
     """
     The reducer reads the arguments of a call it resolves and keeps the path it
@@ -397,11 +531,30 @@ def test_every_exemption_names_a_field_its_record_has() -> None:
         assert names <= {field.name for field in dataclasses.fields(record)}, record
 
 
+@pytest.mark.parametrize("held", ["\x00", LOW, HIGH, "\\u0000", "\t‮"])
+def test_the_command_a_pane_draws_from_the_arguments_as_sent_is_printable_ascii(
+    held: str,
+) -> None:
+    held_store = Store()
+    held_store.apply(spawn(ROOT))
+    held_store.apply(spawn(CHILD, ROOT))
+    held_store.apply(ApprovalRequested(CHILD, parked({"command": f"ls {held}\nrm x"})))
+    (pending,) = held_store.snapshot().nodes[CHILD].pending
+    shown = review.shown_command(pending)
+
+    assert shown is not None and takes(shown)
+    assert all(" " <= char <= "~" or char == "\n" for char in shown), shown
+    assert review.shown_command(parked({"file_path": "a"}, tool="Write")) is None
+
+
 def test_no_pane_reads_the_arguments_as_sent_except_to_open_the_editor_on_them() -> None:
     """
     ``raw_args`` can hold what no text call takes, and nothing but this stands
     between a new line of pane code and a queue that does not draw. The one reader
-    is the editor's draft, which is JSON and is what approve sends back.
+    is the editor's draft, which is JSON and is what approve sends back. The
+    other is a Bash command as every approval surface draws it, which is
+    ``commandtext.visible`` of the command sent: printable ASCII and newline only,
+    and drawn, never sent.
     """
     readers: list[str] = []
     for path in sorted((PACKAGE / "ui").rglob("*.py")):
@@ -412,7 +565,7 @@ def test_no_pane_reads_the_arguments_as_sent_except_to_open_the_editor_on_them()
             for node in ast.walk(function):
                 if isinstance(node, ast.Attribute) and node.attr == "raw_args":
                     readers.append(f"{path.relative_to(PACKAGE)}:{function.name}")
-    assert readers == ["ui/review.py:pretty_args"]
+    assert readers == ["ui/review.py:pretty_args", "ui/review.py:shown_command"]
 
 
 # -- the transcript's door ----------------------------------------------------------

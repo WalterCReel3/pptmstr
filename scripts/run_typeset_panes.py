@@ -69,6 +69,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import tempfile
 from collections import Counter
 from pathlib import Path
 from typing import Any
@@ -78,6 +79,44 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from screenshot import _grab  # noqa: E402
+
+
+def _scratch_config() -> Path:
+    """
+    Point this process at a configuration nobody owns, and say where it is.
+
+    ``app.main`` reads ``settings.json`` and hands hello_imgui an ini under the
+    user's configuration directory before it looks at ``--fake``, and an ``--argv``
+    without ``--fake`` also moves every board log there and recalls the fleet
+    (``app._start``). So a run counts the renderers at the default settings and the
+    coded layout, whoever runs it, and what it should differ in goes through
+    ``--argv`` and this script's own flags.
+
+    Three things are moved, and all three before ``pptmstr.app`` is asked for
+    anything: ``XDG_CONFIG_HOME``, which ``settings.config_dir`` and hello_imgui's
+    ini both resolve from; ``CLAUDE_CONFIG_DIR``, which is where the SDK lists
+    transcripts; and ``brief.default_root``, which is derived from the home
+    directory and reads neither variable. A real session started through
+    ``--argv`` therefore finds no credentials: this script is for the fake fleet.
+
+    The directory is left behind, since the ini and whatever a run recorded are
+    the evidence of what it did.
+    """
+    from pptmstr import brief
+
+    scratch = Path(tempfile.mkdtemp(prefix="pptmstr-panes-"))
+    config, claude = scratch / "config", scratch / "claude"
+    config.mkdir()
+    (claude / "projects").mkdir(parents=True)
+    os.environ["XDG_CONFIG_HOME"] = str(config)
+    os.environ["CLAUDE_CONFIG_DIR"] = str(claude)
+    brief.default_root = lambda: claude / "projects"
+    print(
+        f"configuration for this run is under {scratch}, left in place:"
+        " XDG_CONFIG_HOME, CLAUDE_CONFIG_DIR and the brief root all point there",
+        flush=True,
+    )
+    return scratch
 
 
 def counted(owner: Any, name: str, tally: Counter[str], label: str, by_caller: bool) -> None:
@@ -123,6 +162,7 @@ def main() -> int:
     )
     ap.add_argument("--argv", nargs=argparse.REMAINDER, default=[])
     args = ap.parse_args()
+    _scratch_config()
 
     from imgui_bundle import hello_imgui, imgui, immapp
 
@@ -174,10 +214,12 @@ def main() -> int:
     shown: Counter[str] = Counter()
     real_log = transcript_pane.draw
 
-    def log_draw(snap: Any, state: Any, selected: Any, *, start_in: Any = None) -> None:
+    def log_draw(
+        snap: Any, state: Any, selected: Any, closed_path: Any = None, *, start_in: Any = None
+    ) -> None:
         if args.context is not None:
             start_in = transcript_pane.RenderMode(args.context)
-        real_log(snap, state, selected, start_in=start_in)
+        real_log(snap, state, selected, closed_path, start_in=start_in)
         if selected is not None:
             feed = state.feeds.get(selected)
             held = 0 if feed is None else sum(len(feed.views.views(k)) for k in feed.views.keys())

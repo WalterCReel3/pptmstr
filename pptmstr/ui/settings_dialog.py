@@ -1,7 +1,7 @@
 """
 The settings dialog: everything the operator can persist, on one screen.
 
-A modal over whichever layout is up, opened by ``Ctrl+,`` or **Text > Settings...**.
+A modal over whichever layout is up, opened by ``Ctrl+,`` or **Text > Settings…**.
 It exists because the choices outgrew a menu -- a face and a size for each of nine
 roles, a switch per pane -- and it is deliberately *not* a preferences wizard: one
 screen, no tabs, no Apply. Every field of ``Settings`` is either a control here or
@@ -119,18 +119,27 @@ SECTIONS: dict[str, tuple[str, ...]] = {
     APPEARANCE: ("theme", "typeset_scale"),
     TEXT: ("typeset", "typeset_family", "typeset_roles"),
     PANES: ("typeset_panes", "context_mode"),
-    SESSIONS: ("wrap_inputs", "concurrency_cap", "subagent_cap", "fps_idle"),
+    SESSIONS: (
+        "wrap_inputs",
+        "hide_ended_subagents",
+        "concurrency_cap",
+        "subagent_cap",
+        "fps_idle",
+    ),
 }
 """
 Which fields of ``Settings`` each section owns: what its ``defaults`` button restores
 and what its rows edit. Every field is in exactly one section or in ``READ_ONLY``.
 """
 
-READ_ONLY: tuple[str, ...] = ("admitted_connectors",)
+READ_ONLY: tuple[str, ...] = ("admitted_connectors", "board_log")
 """
-Fields the dialog shows and does not edit. MCP connectors are records -- a name, a
-URL and an account identifier -- and admitting one decides what every session can
-reach, so it stays a deliberate hand-edit of the file; the dialog says where.
+Fields the dialog shows and does not edit, and that no ``defaults`` button restores.
+MCP connectors are records -- a name, a URL and an account identifier -- and
+admitting one decides what every session can reach, so it stays a deliberate
+hand-edit of the file; the dialog says where. ``board_log`` is edited only in the
+file too, and is read once at startup: a ``defaults`` that restored it would switch
+board recording back on over the operator's hand edit.
 """
 
 _SCALARS = frozenset(name for owned in SECTIONS.values() for name in owned) - {
@@ -294,9 +303,11 @@ class Model:
     context_mode: Choice
     sessions: Section
     wrap: Toggle
+    ended: Toggle
     caps: tuple[Choice, ...]
     connectors: tuple[str, ...]
     connectors_note: str
+    board_log_note: str
 
 
 TEXT_OFF = "typeset text is switched off"
@@ -551,9 +562,20 @@ def build(settings: Settings, known: Facts | None = None) -> Model:
             on=settings.wrap_inputs,
             flip=FieldSet("wrap_inputs", not settings.wrap_inputs),
         ),
+        # Worded as the Session menu's entry is, which is the same switch.
+        ended=Toggle(
+            key="ended",
+            label="show ended sub-agents",
+            on=not settings.hide_ended_subagents,
+            flip=FieldSet("hide_ended_subagents", not settings.hide_ended_subagents),
+        ),
         caps=tuple(caps),
         connectors=tuple(f"{each.name}  {each.url}" for each in settings.admitted_connectors),
         connectors_note=f"edit admitted_connectors in {known.path or 'settings.json'}",
+        board_log_note=(
+            f"recording {'on' if settings.board_log else 'off'} - edit board_log in"
+            f" {known.path or 'settings.json'}"
+        ),
     )
 
 
@@ -856,13 +878,15 @@ def _body(model: Model, cache: typeset.ViewCache, picked: list[Change]) -> None:
     imgui.spacing()
     _heading(model.sessions, picked)
     _toggle(model.wrap, picked)
+    imgui.same_line(0.0, _GAP)
+    _toggle(model.ended, picked)
     for cap in model.caps:
         imgui.same_line(0.0, _GAP)
         _choice(cap, picked, 70.0)
         _why(cap.note)
 
     imgui.spacing()
-    _title("MCP CONNECTORS")
+    _title("MCP CONNECTORS AND BOARD RECORDING")
     imgui.same_line()
     imgui.text_disabled("read-only here")
     imgui.separator()
@@ -870,6 +894,7 @@ def _body(model: Model, cache: typeset.ViewCache, picked: list[Change]) -> None:
         imgui.text_unformatted(line)
     none = "" if model.connectors else "none admitted - "
     imgui.text_disabled(f"{none}{model.connectors_note}")
+    imgui.text_disabled(model.board_log_note)
 
 
 def _kept_in_view(viewport: imgui.Viewport) -> tuple[float, float] | None:

@@ -38,12 +38,17 @@ capture path can produce: ``Makefile``'s ``shot`` target and
 ``scripts/screenshot.py``'s ``args.argv or ["--fake"]`` both install the FakeDriver,
 whose ``run()`` seeds a tree, so the no-sessions branch never renders. Captures are
 written outside the repo and are not checked in.
+
+The capture's configuration is a directory made for the run and named on the first
+line of output, never the operator's: see ``_scratch_config``.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -114,6 +119,44 @@ def _resize_sweep(n_rows: int, n_cols: int) -> tuple[list[str], list[str]]:
         f"and the art is never drawn larger than the region ({len(failures)} violations)"
     ]
     return notes, failures
+
+
+def _scratch_config() -> Path:
+    """
+    Point this process at a configuration nobody owns, and say where it is.
+
+    ``_capture`` runs ``app.main`` without ``--fake``, because the splash draws only
+    on an empty fleet and the fake driver seeds one. A start like that moves every
+    board log under the configuration directory and recalls the fleet from it
+    (``app._start``), which on the operator's own is a change to their data made
+    by a screenshot.
+
+    Three things are moved, and all three before ``pptmstr.app`` is asked for
+    anything: ``XDG_CONFIG_HOME``, which ``settings.config_dir`` and hello_imgui's
+    ini both resolve from; ``CLAUDE_CONFIG_DIR``, which is where the SDK lists
+    transcripts; and ``brief.default_root``, which is derived from the home
+    directory and reads neither variable. An ``XDG_CONFIG_HOME`` already set is
+    replaced like an unset one: nothing here can tell a disposable directory from
+    the one the operator keeps.
+
+    The directory is left behind, since the ini and whatever a run recorded are
+    the evidence of what it did.
+    """
+    from pptmstr import brief
+
+    scratch = Path(tempfile.mkdtemp(prefix="pptmstr-splash-"))
+    config, claude = scratch / "config", scratch / "claude"
+    config.mkdir()
+    (claude / "projects").mkdir(parents=True)
+    os.environ["XDG_CONFIG_HOME"] = str(config)
+    os.environ["CLAUDE_CONFIG_DIR"] = str(claude)
+    brief.default_root = lambda: claude / "projects"
+    print(
+        f"configuration for this run is under {scratch}, left in place:"
+        " XDG_CONFIG_HOME, CLAUDE_CONFIG_DIR and the brief root all point there",
+        flush=True,
+    )
+    return scratch
 
 
 def main() -> int:
@@ -343,6 +386,7 @@ def _capture(out: Path) -> int:
     tree is not the state this panel renders in. Without ``--task`` no session is
     launched, so the real driver is selected and never used.
     """
+    _scratch_config()
     import screenshot  # scripts/ is sys.path[0] when this file is run directly
     from imgui_bundle import hello_imgui, immapp
 

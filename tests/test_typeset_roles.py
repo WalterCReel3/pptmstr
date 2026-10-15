@@ -240,17 +240,23 @@ def test_a_family_whose_file_is_not_there_cannot_be_chosen(
 ) -> None:
     """
     The default is used and the menu is told; what the operator asked for is kept.
+
+    The fonts directory is put back before the cached paths are dropped, inside the
+    test: ``monkeypatch`` is set up by the autouse fixtures ahead of ``seam``, so it
+    is undone after ``seam``'s teardown, which asks for the family and would cache
+    this test's missing file for every test after it.
     """
-    monkeypatch.setattr(roles, "_bundle_fonts", lambda: tmp_path)
     roles.prose_path.cache_clear()
     try:
-        typeset.configure(typeset=True, proportional="droid")
-        assert {family.name: usable for family, usable in typeset.proportionals()} == {
-            "roboto": True,
-            "droid": False,
-        }
-        assert typeset.proportional().name == typeset.DEFAULT_PROPORTIONAL
-        assert typeset._STATE.family == "droid"
+        with monkeypatch.context() as patched:
+            patched.setattr(roles, "_bundle_fonts", lambda: tmp_path)
+            typeset.configure(typeset=True, proportional="droid")
+            assert {family.name: usable for family, usable in typeset.proportionals()} == {
+                "roboto": True,
+                "droid": False,
+            }
+            assert typeset.proportional().name == typeset.DEFAULT_PROPORTIONAL
+            assert typeset._STATE.family == "droid"
     finally:
         roles.prose_path.cache_clear()
 

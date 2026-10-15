@@ -17,6 +17,8 @@ from pptmstr import templates
 from pptmstr.approval import Policy
 from pptmstr.templates import (
     BUS_TOOL_NAMES,
+    COMMAND_HEADING,
+    COMMAND_TOOL_NAMES,
     FEATURE,
     RESEARCH,
     SOLO,
@@ -129,10 +131,11 @@ def _counted_clauses(text: str) -> list[str]:
     return [c.strip() for c in re.split(r"[.;—]", flat) if _COUNT_WORD.search(c.lower())]
 
 
+@pytest.mark.parametrize("contained", [False, True])
 @pytest.mark.parametrize("policy", list(Policy))
 @pytest.mark.parametrize("template", [FEATURE, RESEARCH])
 def test_a_lead_is_not_told_to_drain_a_parallelisable_board_through_one_worker(
-    template: WorkTemplate, policy: Policy
+    template: WorkTemplate, policy: Policy, contained: bool
 ) -> None:
     """
     The hazard is a lead that declares four independent tasks, starts one agent of
@@ -148,9 +151,10 @@ def test_a_lead_is_not_told_to_drain_a_parallelisable_board_through_one_worker(
     each policy generates a different one. The unattended text talks about a cap
     on how many agents run at once, which is exactly the subject matter this
     excludes -- it is allowed to say what the cap is and not allowed to turn that
-    into an instruction about fan-out.
+    into an instruction about fan-out. A contained session's briefing is a
+    different body again, with the command tools in it.
     """
-    briefing = lead_briefing(template, policy)
+    briefing = lead_briefing(template, policy, contained)
     assert "several agents in the same role" in briefing
     assert "one per independent task, not one per role" in briefing
     assert "independent" in briefing
@@ -321,9 +325,28 @@ def test_review_roles_cannot_edit(template: WorkTemplate) -> None:
 def test_the_bus_names_in_templates_match_the_bus() -> None:
     # templates.py is SDK-free and spells the tool names rather than importing
     # them from bus.py, which is not. This keeps the two copies honest.
-    from pptmstr.bus import BUS_TOOLS
+    from pptmstr.bus import BUS_TOOLS, COMMAND_TOOLS
 
     assert set(BUS_TOOL_NAMES) == set(BUS_TOOLS)
+    assert set(COMMAND_TOOL_NAMES) == set(COMMAND_TOOLS)
+    assert not set(COMMAND_TOOL_NAMES) & set(BUS_TOOL_NAMES)
+
+
+def test_a_restricted_role_has_the_command_tools_where_the_session_has_them() -> None:
+    """
+    The command tools are on a contained session's server and no other, so a
+    restricted role is given their names there and nowhere else. Without them a
+    role would be briefed on a tool its tool list leaves out; with them on an
+    uncontained session it would be listed a tool that does not exist.
+    """
+    role = Role(name="r", description="d", prompt="p", tools=("Read",))
+    without, with_ = role.tool_list(), role.tool_list(contained=True)
+
+    assert without is not None and with_ is not None
+    assert without == role.tool_list(contained=False)
+    assert not set(COMMAND_TOOL_NAMES) & set(without)
+    assert with_ == [*without, *COMMAND_TOOL_NAMES]
+    assert Role(name="r", description="d", prompt="p").tool_list(contained=True) is None
 
 
 # -- worker prompts ---------------------------------------------------------------
@@ -844,17 +867,76 @@ The first agent in a role is addressed by the bare role name, the second as
   the launch directory and to nothing else. A dependency the board added is
   not advisory: leave it in place, and where the overlap is wrong, narrow the
   `touches` of a task rather than dropping the edge.
+- `amend_task(task_id, detail, property)` replaces the specification of a
+  task you declared and have never held; leave `detail` out to change the
+  property and keep the text. The text it replaces is kept as an
+  earlier version and the board shows which version a row is on. Amend when
+  what you asked for was wrong; to tell a holder something that does not
+  change what it is held to, `post_concern` instead. Nothing interrupts the
+  holder: it sees the new text when it next reads the task, and if it
+  completes first its result is recorded against the version it was handed,
+  which the board shows. Post it a concern as well when it should stop and
+  read now. Once you have amended a task you cannot claim it yourself.
 - Workers call `claim_task()` to take the oldest unblocked item, one at a
   time. Declare the work and let them claim it rather than assigning it by
   hand; another agent in the same role is how the board drains faster.
 - `read_board()` shows the board to you and to them. A worker asking what
   is on it no longer has to ask you, so route them to it rather than
   relaying the state yourself — your copy goes stale and the board does not.
-- `read_task(task_id)` returns a task whole. The board cuts a long
-  specification and a long note, and the claim reply is the other place a
-  specification arrives in full — so a worker asking you for the rest of
-  another task's row is asking for this, and it is open to every agent on
-  the board. Send them there rather than re-sending the text.
+- `read_task(task_id)` returns a task: its specification, always whole,
+  then its result and every note on it. `read_board()` cuts each row so the
+  whole board fits in a reply, and this is where the rest is — for you
+  reading back a specification you wrote, and for a worker you would
+  otherwise have to relay it to. A task too large for a reply is cut as
+  well, everything but its specification, and each cut names the
+  `read_task(task_id, part)` call that returns that text whole. It is
+  open to every agent on the board, so send a worker asking you for the
+  rest of another task's row there rather than re-sending the text.
+- A worker finishes with `complete_task(task_id, result)`. The result — what
+  was done, what was run, what was not — stays on the task, so the worker
+  that builds on it and the operator can read it there. What a worker
+  returns to you through the `Agent` tool reaches you and nobody else; read
+  the board's results before you synthesise, and send a worker asking what
+  another did to `read_task`.
+- `declare_task`, `post_concern` and `complete_task` take a `basis` — `run`,
+  `read` or `relayed` — which is how the author says it knows what the text
+  asserts, and the board shows it beside the text. A claim marked `read` or
+  `relayed`, or not marked, is a finding to check before it is built on;
+  when you put such a claim into a `detail`, give the declaration that basis
+  and do not restate it as settled.
+- Give `declare_task` a `property`: a sentence naming what the work may not
+  break. It is for ranking — the builder learns what it cannot trade away and
+  a reviewer which findings matter — and the board shows it whole on every
+  read.
+- A finished task shows what its worker said it did not run. `not run:
+  unstated` is not `nothing`: treat that work as unverified. A concern
+  marked `INCIDENT` reports something that went wrong; a concern without
+  the mark does not say nothing did.
+- `read_digest()` is your report to the operator: what changed since you
+  last read it, what is waiting on them, what nobody said was run, and
+  what went wrong. Report from it at the end of a round, not at each
+  worker's return, and pass on its UNVERIFIED and INCIDENTS slots in full.
+- `release_task(task_id)` gives back a task you hold. You can also release a
+  task whose holder is an agent of an earlier run of this session — from
+  before pptmstr was restarted or the session was resumed — and is not
+  running: `read_board()` says so on such a row, and it puts the task back
+  for another agent to claim. No other claim is yours to release.
+- The operator can close a task no agent's call can move, from their board
+  pane. It then reads completed and `closed by the operator`, with their
+  reason and no result: the work was not done, what waited on it becomes
+  claimable, and work still wanted is declared again under a new id.
+- `raise_decision(question, standing, if_unanswered, blocks, evidence,
+  recommendation, reversible)` puts a decision in front of the operator, who
+  answers it in their own pane. Use it for what the operator alone can
+  settle; for what another agent can answer, post a concern. Work continues
+  while it waits — nothing is parked. `if_unanswered` is required, and
+  `blocks` is a list of task ids from the board and nothing else.
+  `read_decisions()` lists every decision raised in your session, your
+  workers' included, each marked with who raised it;
+  `read_decisions(decision_id)` returns that decision with the operator's
+  answer in their words. Read a worker's answer there rather than from the
+  worker's account of it. Nothing tells you when an answer arrives, and a
+  decision is withdrawn by the agent that raised it and by no other.
 - `post_concern(to, subject, body)` sends a message to a role by name, or to
   `lead` for you. `read_inbox()` collects what has been sent to you.
 - Messages between agents are reviewed by the operator before they arrive, so
@@ -893,3 +975,489 @@ usually the part you did not know to ask about.
 
 Then synthesise the result yourself. That synthesis is your output, not a
 list of what each worker said."""
+
+
+# -- the two board tools a prompt has to explain ------------------------------------
+
+
+def test_a_worker_is_told_what_a_result_is_for_and_who_reads_it() -> None:
+    """
+    A worker's result already returns to the agent that started it, so a prompt
+    that only lists ``complete_task(task_id, result)`` describes a second route to
+    the same reader and the argument goes unused (STYLE.md §3). What it has to say
+    is who the first route does not reach.
+    """
+    prompt = _flat(worker_prompt(Role(name="w", description="d", prompt="p")))
+
+    assert "`complete_task(task_id, result)`" in prompt
+    assert "reaches only the agent that started you" in prompt
+    assert "the next worker to build on your work and the operator" in prompt
+    assert "what you did not run" in prompt
+
+
+def _reads_a_cut_part(text: str) -> bool:
+    """
+    Whether a briefing says what ``read_task`` does with a task too large for a
+    reply: it is cut, the specification is not, and ``part`` is where a cut
+    text is whole. "Returns a task whole" was true before there was a ceiling.
+    """
+    return (
+        "A task too large for a reply is cut as well, everything but its specification, "
+        "and each cut names the `read_task(task_id, part)` call that returns that "
+        "text whole."
+    ) in text
+
+
+def test_a_worker_is_told_where_the_rest_of_a_cut_row_is() -> None:
+    prompt = _flat(worker_prompt(Role(name="w", description="d", prompt="p")))
+
+    assert "`read_task(task_id)` returns one task — its specification, always whole" in prompt
+    assert "returns one task whole" not in prompt
+    assert _reads_a_cut_part(prompt)
+    assert "when a row says text was cut, this is where the rest is" in prompt
+    assert "re-read the specification of a task you hold" in prompt
+
+
+@pytest.mark.parametrize("policy", list(Policy))
+@pytest.mark.parametrize("template", [FEATURE, RESEARCH])
+def test_a_lead_is_told_what_the_two_board_reads_save_it_relaying(
+    template: WorkTemplate, policy: Policy
+) -> None:
+    """
+    The lead is the participant the board was routing around and failing to: it
+    relayed specification tails by hand and collected every result as a concern.
+    """
+    briefing = _flat(lead_briefing(template, policy))
+
+    assert "`read_task(task_id)` returns a task: its specification, always whole" in briefing
+    assert "returns a task whole" not in briefing
+    assert _reads_a_cut_part(briefing)
+    assert "a worker you would otherwise have to relay it to" in briefing
+    assert "`complete_task(task_id, result)`" in briefing
+    assert "reaches you and nobody else" in briefing
+    assert "read the board's results before you synthesise" in briefing
+
+
+# -- the marker a prompt has to explain ---------------------------------------------
+
+
+def test_a_worker_is_told_what_each_basis_means_and_what_an_unchecked_one_is() -> None:
+    """
+    The field is the structure and the prompt is short on purpose
+    (`a-task-reaches-the-board-without-a-decision.md`, on prose as the weakest
+    mechanism). What it cannot leave out is the consequence: a marker nobody reads
+    as "check this first" is a label.
+    """
+    prompt = _flat(worker_prompt(Role(name="w", description="d", prompt="p")))
+
+    for member in ("`run`", "`read`", "`relayed`"):
+        assert member in prompt, member
+    # Each member with what it means, not only its name: the two weaker ones are
+    # named again in the consequence, so a name check alone survives a definition
+    # being deleted.
+    assert "`run` if you executed something and are reporting its output" in prompt
+    assert "`read` if you established it by reading" in prompt
+    assert "`relayed` if you are passing on what another agent or a record said" in prompt
+    assert "the weakest that applies to anything in the text" in prompt
+    assert "as your own statement" in prompt
+    assert "or not marked at all, is a finding to check before you build on it" in prompt
+
+
+@pytest.mark.parametrize("policy", list(Policy))
+@pytest.mark.parametrize("template", [FEATURE, RESEARCH])
+def test_a_lead_is_told_not_to_restate_an_unchecked_claim_as_settled(
+    template: WorkTemplate, policy: Policy
+) -> None:
+    """
+    The lead is where an observation becomes a specification, and a relayed
+    inference written into `detail` is how a builder inherited "changes every
+    frame" as established and found 0 of 81 frames changed.
+    """
+    briefing = _flat(lead_briefing(template, policy))
+
+    for member in ("`run`", "`read`", "`relayed`"):
+        assert member in briefing, member
+    assert "or not marked, is a finding to check before it is built on" in briefing
+    assert "give the declaration that basis and do not restate it as settled" in briefing
+
+
+def test_the_prompts_name_exactly_the_members_the_enum_has() -> None:
+    """
+    templates.py spells the three values rather than importing the enum's, the way
+    it spells the tool names. A fourth member, or a renamed one, has to reach the
+    prose an author reads before choosing.
+    """
+    from pptmstr.model import Basis
+
+    prompt = worker_prompt(Role(name="w", description="d", prompt="p"))
+    paragraph = prompt.split("**Say how you know.**", 1)[1].split("\n\n", 1)[0]
+    named = set(re.findall(r"`([a-z_]+)`", paragraph))
+
+    assert {b.value for b in Basis} <= named
+    assert named - {b.value for b in Basis} == {
+        "post_concern",
+        "complete_task",
+        "declare_task",
+        "basis",
+    }
+
+
+# -- three fields a prompt has to say the purpose of ---------------------------------
+
+
+def test_a_worker_is_told_what_not_run_and_an_incident_are_for() -> None:
+    """
+    Listing an argument does not get it used (STYLE.md §3); saying what its absence
+    shows does. The worker is the only author of all three statements, so its
+    prompt carries the consequence of each: the unstated label, the count, and the
+    line under the title it is held to.
+    """
+    prompt = _flat(worker_prompt(Role(name="w", description="d", prompt="p")))
+
+    assert "Give `complete_task` a `not_run`" in prompt
+    assert "or `all_run=true` if nothing was left" in prompt
+    assert "without either the board shows `not run: unstated`" in prompt
+    assert "`post_concern(incident=true)`, so it is counted and not buried in a result" in prompt
+    assert "The `must not break` line under a task's title" in prompt
+
+
+@pytest.mark.parametrize("policy", list(Policy))
+@pytest.mark.parametrize("template", [FEATURE, RESEARCH])
+def test_a_lead_is_told_what_a_property_is_for_and_how_to_read_the_absences(
+    template: WorkTemplate, policy: Policy
+) -> None:
+    """
+    The lead declares the property and reads the other two, so it is told what the
+    first buys and that neither absence is good news.
+    """
+    briefing = _flat(lead_briefing(template, policy))
+
+    assert "Give `declare_task` a `property`" in briefing
+    assert "It is for ranking" in briefing
+    assert "`not run: unstated` is not `nothing`: treat that work as unverified" in briefing
+    assert "a concern without the mark does not say nothing did" in briefing
+
+
+def test_the_prompts_spell_the_labels_the_board_renders() -> None:
+    """
+    templates.py spells the board's labels instead of importing them, as it spells
+    the tool names. A label reworded in ``board.py`` has to reach the sentence
+    that tells an agent what the label means.
+    """
+    from pptmstr.board import incident_marker, not_run_label, property_label
+
+    worker = worker_prompt(Role(name="w", description="d", prompt="p"))
+    lead = _flat(lead_briefing(FEATURE))
+
+    assert f"`{not_run_label(None)}`" in _flat(worker)
+    assert f"`{not_run_label(None)}`" in lead
+    assert f"`{incident_marker(True).strip()}`" in lead
+    assert f"`{property_label('x').split(':')[0]}`" in worker
+
+
+def test_a_lead_is_told_to_report_from_the_digest_at_the_end_of_a_round() -> None:
+    """
+    The behaviour this replaces was a report to the operator at every worker's
+    return. The briefing says when instead, and which two slots are not to be
+    summarised.
+    """
+    briefing = _flat(lead_briefing(FEATURE))
+
+    assert "`read_digest()` is your report to the operator" in briefing
+    assert "at the end of a round, not at each worker's return" in briefing
+    assert "pass on its UNVERIFIED and INCIDENTS slots in full" in briefing
+
+
+def test_the_digest_is_the_leads_instruction_and_every_role_can_still_call_it() -> None:
+    """
+    Lead only in the prose, because a worker has no operator to report to; on
+    every role's tool list, because the bus names are one list.
+    """
+    assert "read_digest" not in worker_prompt(Role(name="w", description="d", prompt="p"))
+    assert "mcp__pptmstr__read_digest" in BUS_TOOL_NAMES
+
+
+def test_the_briefing_names_the_slots_as_the_digest_heads_them() -> None:
+    from pptmstr.digest import Digest, incidents_heading, unverified_heading
+
+    briefing = lead_briefing(FEATURE)
+    empty = Digest(since=None, changed=(), waiting=(), unverified=(), incidents=())
+
+    assert unverified_heading(empty.unverified).split(" (")[0] in briefing
+    assert incidents_heading(empty).split(" (")[0] in briefing
+
+
+# -- a specification that is replaced, and who is told what about it ------------------
+
+
+@pytest.mark.parametrize("policy", list(Policy))
+@pytest.mark.parametrize("template", [FEATURE, RESEARCH])
+def test_a_lead_is_told_when_to_amend_and_that_the_holder_is_not_interrupted(
+    template: WorkTemplate, policy: Policy
+) -> None:
+    """
+    Listing a tool does not get it used well (STYLE.md §3). What only this prose
+    can carry is which of two tools a correction belongs in, and that an amendment
+    reaches a working holder late unless the lead also says so.
+    """
+    briefing = _flat(lead_briefing(template, policy))
+
+    assert "`amend_task(task_id, detail, property)` replaces the specification" in briefing
+    assert "a task you declared and have never held" in briefing
+    assert "leave `detail` out to change the property and keep the text" in briefing
+    assert "Amend when what you asked for was wrong" in briefing
+    assert "does not change what it is held to, `post_concern` instead" in briefing
+    assert "Nothing interrupts the holder" in briefing
+    assert "Once you have amended a task you cannot claim it yourself" in briefing
+
+
+@pytest.mark.parametrize("policy", list(Policy))
+def test_a_worker_is_told_a_replaced_specification_does_not_turn_its_completion_away(
+    policy: Policy,
+) -> None:
+    """
+    A worker that expects a refusal holds its result back for a second call that
+    is never needed. It is told the completion lands and against which version,
+    and that amending is not its own remedy.
+    """
+    prompt = _flat(worker_prompt(Role(name="w", description="d", prompt="p"), None, policy))
+
+    assert "A task's specification can be replaced while you hold it" in prompt
+    assert "A `complete_task` is never turned away for this" in prompt
+    assert "your result is recorded against the version you were handed" in prompt
+    assert "turned away and shows you" not in prompt
+    assert "`amend_task` is for the agent that declared the task" in prompt
+
+
+@pytest.mark.parametrize("policy", list(Policy))
+def test_every_agent_is_told_when_to_raise_a_decision_and_that_work_goes_on(
+    policy: Policy,
+) -> None:
+    """
+    A tool listed and not explained is a tool not used (STYLE.md §3). Both
+    prompts say what a decision is for that a concern is not, that nothing waits
+    on it, and who is handed the answer -- the worker that asked, with its lead
+    able to read the record and told to read that and not the worker's account.
+    """
+    worker = _flat(worker_prompt(Role(name="w", description="d", prompt="p"), None, policy))
+    lead = _flat(lead_briefing(FEATURE, policy))
+
+    for prompt in (worker, lead):
+        assert "for what the operator alone can settle" in prompt
+        assert "nothing is parked" in prompt
+        assert "`read_decisions(decision_id)`" in prompt
+        assert "if_unanswered" in prompt
+    assert "post a concern for what another agent can answer" in worker
+    assert "The answer is handed to you; your lead can read it and is not told" in worker
+    assert "for what another agent can answer, post a concern" in lead
+    assert "`read_decisions()` lists every decision raised in your session" in lead
+    assert "rather than from the worker's account of it" in lead
+    assert "`blocks` is a list of task ids from the board and nothing else." in lead
+
+
+def test_an_unattended_team_is_told_what_an_unanswered_decision_comes_to() -> None:
+    """
+    ``raise_decision`` is briefed on every rung, beside a paragraph that says
+    this session parks nothing at a person. With nobody at the pane the tool
+    still files the question, so the one thing that makes raising one honest is
+    saying that ``if_unanswered`` is then what happens -- and only where it is
+    true.
+    """
+    said = "what you write in `if_unanswered` is then what happens"
+    role = Role(name="w", description="d", prompt="p")
+
+    for policy in Policy:
+        for prompt in (lead_briefing(FEATURE, policy), worker_prompt(role, None, policy)):
+            assert (said in _flat(prompt)) is (policy is Policy.AUTONOMOUS), policy
+            if policy is Policy.AUTONOMOUS:
+                assert "nobody may be at the pane to answer it" in _flat(prompt)
+    for name in ("raise_decision", "read_decisions", "withdraw_decision"):
+        assert f"mcp__pptmstr__{name}" in BUS_TOOL_NAMES
+
+
+@pytest.mark.parametrize("policy", list(Policy))
+def test_a_lead_is_told_which_claim_it_may_release_that_is_not_its_own(policy: Policy) -> None:
+    """
+    The store lets a session's lead release a claim held by an agent of an
+    earlier run of the session -- another process's, or this one's from before
+    the session was resumed (``Snapshot.of_earlier_run``).
+    A power nobody is told of is one nobody uses, and one described too widely is
+    a call that gets refused -- so the briefing names the one case, and a worker's
+    prompt does not mention it.
+    """
+    lead = _flat(lead_briefing(FEATURE, policy))
+    worker = _flat(worker_prompt(Role(name="w", description="d", prompt="p"), None, policy))
+
+    assert (
+        "release a task whose holder is an agent of an earlier run of this session — from "
+        "before pptmstr was restarted or the session was resumed — and is not running"
+    ) in lead
+    assert "No other claim is yours to release." in lead
+    assert "earlier run" not in worker and "restarted" not in worker
+
+
+@pytest.mark.parametrize("policy", list(Policy))
+def test_a_lead_is_told_what_a_task_the_operator_closed_is(policy: Policy) -> None:
+    """
+    The bus sends an agent to the operator's close for every task no call of an
+    agent's can move, and a closed row reads "completed". A lead that was never
+    told what a close is builds on it as finished work.
+    """
+    lead = _flat(lead_briefing(FEATURE, policy))
+
+    assert (
+        "The operator can close a task no agent's call can move, from their board pane. "
+        "It then reads completed and `closed by the operator`, with their reason and no "
+        "result: the work was not done, what waited on it becomes claimable, and work "
+        "still wanted is declared again under a new id."
+    ) in lead
+
+
+# -- the command tools: named where they exist, and nowhere else -----------------------------
+
+_COMMAND_WORDS = ("request_command", "read_commands", "withdraw_command", "outside the sandbox")
+
+
+def _command_block(text: str) -> str:
+    """The command section of a prompt, or "" when the prompt has none."""
+    if COMMAND_HEADING not in text:
+        return ""
+    return text.split(COMMAND_HEADING, 1)[1].split("\n## ", 1)[0]
+
+
+@pytest.mark.parametrize("contained", [False, True])
+@pytest.mark.parametrize("policy", list(Policy))
+@pytest.mark.parametrize("template", [FEATURE, RESEARCH])
+def test_a_prompt_names_the_command_tool_exactly_where_the_session_has_it(
+    template: WorkTemplate, policy: Policy, contained: bool
+) -> None:
+    """
+    The tool is on a contained session's server and no other, on every rung. A
+    prompt that names it where it is absent costs an agent turns calling nothing;
+    one silent where it exists leaves a step recorded as blocked that could have
+    been asked for. Every role's prompt and the lead's, at every rung.
+    """
+    prompts = [lead_briefing(template, policy, contained)] + [
+        worker_prompt(role, "/briefs/s1", policy, contained) for role in template.roles
+    ]
+    for prompt in prompts:
+        for word in _COMMAND_WORDS[:2]:
+            assert (f"`{word}" in prompt) is contained, (word, policy)
+        assert (COMMAND_HEADING in prompt) is contained
+        if not contained:
+            assert not any(word in prompt for word in _COMMAND_WORDS)
+
+
+@pytest.mark.parametrize("policy", list(Policy))
+def test_a_session_that_does_not_say_it_is_contained_is_briefed_as_uncontained(
+    policy: Policy,
+) -> None:
+    """The default names no tool, so a caller that forgets the argument cannot brief one."""
+    role = Role(name="w", description="d", prompt="p")
+
+    assert lead_briefing(FEATURE, policy) == lead_briefing(FEATURE, policy, False)
+    assert worker_prompt(role, "/b", policy) == worker_prompt(role, "/b", policy, False)
+
+
+@pytest.mark.parametrize("policy", list(Policy))
+def test_an_agent_is_told_to_ask_and_carry_on_and_never_to_wait(policy: Policy) -> None:
+    """
+    The operator's decision: asking must not become another way to make a
+    session synchronous. So the prompt says what to give, that nothing runs on
+    the call, to go on with other work, when to read the outcome, not to ask
+    twice, and what the step is if the work ends first -- still blocked, and said
+    so in the result. Every sentence that mentions waiting is one that forbids it.
+    """
+    role = Role(name="w", description="d", prompt="p")
+    for prompt in (
+        lead_briefing(FEATURE, policy, True),
+        worker_prompt(role, None, policy, True),
+    ):
+        block = _flat(_command_block(prompt))
+        assert "`request_command(command, reason, expects)`, giving the exact command line" in block
+        assert "why you need it, and what it should change" in block
+        assert "Nothing runs when you call it." in block
+        assert "**Ask, then carry on.** The call returns an id at once." in block
+        assert "Go on with the work that does not need the command." in block
+        assert "Do not end your turn to wait for it" in block
+        assert "do not call `read_commands` in a loop" in block
+        assert "when you reach the work that needs it, and again before you finish" in block
+        assert "Do not ask twice for the same thing" in block
+        assert "record it as blocked in your result" in block
+        for sentence in re.split(r"(?<=[.:]) ", block):
+            if re.search(r"\b(wait|waits|waiting|poll|loop)\b", sentence.lower()):
+                assert re.search(r"\b(do not|not)\b", sentence.lower()), sentence
+
+
+@pytest.mark.parametrize("template", [FEATURE, RESEARCH])
+def test_an_unattended_team_with_the_tool_asks_and_one_without_it_records_the_step_blocked(
+    template: WorkTemplate,
+) -> None:
+    """
+    The one sentence of the unattended block that containment changes. Without
+    the tool the step is recorded as blocked, in the words it always was; with
+    it the step is asked for, and the old instruction is gone and not left
+    beside the new one to be chosen between.
+    """
+    for role in template.roles:
+        for contained, prompt in (
+            (False, worker_prompt(role, "/briefs/s1", Policy.AUTONOMOUS, False)),
+            (True, worker_prompt(role, "/briefs/s1", Policy.AUTONOMOUS, True)),
+        ):
+            block = _flat(_unattended_block(prompt))
+            old = "a step to record as blocked, naming what it needed, rather than"
+            new = "a step to ask the operator to run — the next section says how — rather than"
+            assert (old in block) is not contained
+            assert (new in block) is contained
+            assert "`WebFetch` and `WebSearch` are not bounded that way" in block
+    # The section the sentence points at is the next one, in both prompts.
+    for prompt in (
+        lead_briefing(template, Policy.AUTONOMOUS, True),
+        worker_prompt(template.roles[0], None, Policy.AUTONOMOUS, True),
+    ):
+        after = prompt.split(_UNATTENDED_HEADING, 1)[1]
+        assert after.split("\n## ", 2)[1].startswith(COMMAND_HEADING.removeprefix("## "))
+
+
+@pytest.mark.parametrize("policy", list(Policy))
+@pytest.mark.parametrize("template", [FEATURE, RESEARCH])
+def test_the_lead_and_its_workers_are_told_the_same_thing_about_asking(
+    template: WorkTemplate, policy: Policy
+) -> None:
+    """
+    One block for both, on the unattended block's grounds, and what follows it
+    in a worker's prompt is the worker's own: who reads the outcome.
+    """
+    lead = _command_block(lead_briefing(template, policy, True))
+    assert lead.strip()
+    for role in template.roles:
+        worker = _command_block(worker_prompt(role, "/briefs/s1", policy, True))
+        assert worker.startswith(lead.rstrip("\n")), role.name
+        assert _flat(worker.removeprefix(lead.rstrip("\n"))) == (
+            "What became of a command you asked for is yours to read; your lead can "
+            "read it and is not told when it ends. Say in your result what you asked "
+            "for and how it ended."
+        )
+
+
+@pytest.mark.parametrize("policy", list(Policy))
+def test_a_lead_is_told_who_reads_a_commands_outcome_and_that_nobody_is_told(
+    policy: Policy,
+) -> None:
+    """
+    Nothing interrupts anybody when a command ends. A lead that expects to hear
+    waits for news that does not come, so it is told what it has instead: a read
+    of every command asked in its session.
+    """
+    lead = _flat(lead_briefing(FEATURE, policy, True))
+
+    assert (
+        "- `request_command(command, reason, expects)` asks the operator to run a "
+        "command outside the sandbox; a section below says how. The outcome is read "
+        "by the agent that asked. `read_commands()` lists every command asked in your "
+        "session, your workers' included, each marked with who asked, and "
+        "`read_commands(command_id)` returns that command with how it ended. You are "
+        "not told when a worker's command ends, and a command is withdrawn by the "
+        "agent that asked for it and by no other."
+    ) in lead
+    assert lead.index("a section below says how") < lead.index(_flat(COMMAND_HEADING))

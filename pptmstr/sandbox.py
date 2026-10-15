@@ -3,8 +3,9 @@ The containment configuration, as a value.
 
 ``planning/2026-09-03-a-dangerously-autonomous-mode.md`` §8 fixes the settings that
 make the dangerously-autonomous mode contained rather than merely under-gated. This
-module builds them and does nothing else: no IO, no clock, no launch. A caller hands
-the result to ``ClaudeAgentOptions.settings``.
+module builds them and does nothing else: no IO, no clock, no launch, and one variable
+of the environment read (``denied_records``). A caller hands the result to
+``ClaudeAgentOptions.settings``.
 
 **Why a hand-built JSON string rather than the SDK's typed field.** The installed
 ``SandboxSettings`` TypedDict declares exactly seven keys -- ``enabled``,
@@ -29,9 +30,17 @@ the reasoning for it is not visible.
 from __future__ import annotations
 
 import json
+import os
+import posixpath
 from typing import Any
 
-__all__ = ["ALLOWED_DOMAIN", "DENIED_CREDENTIAL_FILES", "containment_settings"]
+__all__ = [
+    "ALLOWED_DOMAIN",
+    "DENIED_CREDENTIAL_FILES",
+    "containment_settings",
+    "denied_record_writes",
+    "denied_records",
+]
 
 # One entry, and the reason is not thrift. §8b.4: the sandbox proxy allows on the
 # client-supplied hostname and does not terminate TLS by default, so domain fronting is
@@ -48,6 +57,40 @@ DENIED_CREDENTIAL_FILES = (
     "~/.claude/.credentials.json",
     "~/.claude.json",
 )
+
+
+def denied_records() -> str:
+    """
+    The directory every session's records are in, as a sandbox path: what
+    ``sessionfile.root()`` names, with the home directory left as ``~``.
+
+    The rule is ``settings.config_dir``'s, spelled again so that this module imports
+    nothing of pptmstr's and expands no ``~``: an absolute ``XDG_CONFIG_HOME`` is where
+    the directory is, and anything else is ``~/.config``. That variable is read here,
+    and it is this process's that is the right one to read: the records are wherever
+    *this* process writes them. ``tests/test_sandbox.py`` holds the two spellings to
+    one answer.
+    """
+    raw = os.environ.get("XDG_CONFIG_HOME", "")
+    base = raw if raw.startswith("/") else "~/.config"
+    return posixpath.join(base, "pptmstr", "sessions")
+
+
+def denied_record_writes() -> tuple[str, str]:
+    """
+    Both directories pptmstr keeps sessions' records under, as sandbox paths: the
+    sessions root and the legacy ``boards`` directory ``boardsync.migrate`` moves
+    logs out of at startup.
+
+    For ``filesystem.denyWrite``, because ``credentials.files`` is a read
+    restriction -- upstream documents a ``deny`` entry there as "the same
+    restriction that ``filesystem.denyRead`` applies" -- and the sandbox's write
+    region is the session's directory. A session started in the home directory has
+    both roots inside that region, and pptmstr reads what is under them back as
+    what happened in a session.
+    """
+    sessions = denied_records()
+    return sessions, posixpath.join(posixpath.dirname(sessions), "boards")
 
 
 def containment_settings() -> str:
@@ -105,6 +148,29 @@ def containment_settings() -> str:
     stops a ``Bash`` command reading the token -- it does not make the session
     un-credentialed.
 
+    **The directory of every session's records is denied whole** (``denied_records``),
+    the session's own among them. What is under it is other sessions' command output,
+    the operator's reasons for refusing them and their boards, none of which a
+    contained session is given by any tool; and a command's output can hold what lets
+    a process be taken for that command's (``commandrun``, on the tag). It is one more
+    entry of ``credentials.files`` and not a ``filesystem.denyRead``: upstream documents
+    the two as the same restriction, and this is the key whose four entries are seen
+    to be applied (a contained session's own sandbox lists exactly them as denied).
+
+    A session's own directory is not re-opened inside it. ``filesystem.allowRead`` can
+    express that -- upstream documents the narrower path as winning -- but its
+    directory is named by the session's id, a new session's id is made by the driver
+    after this string is built, and this function takes no parameter for the reason
+    the module gives. The cost is that a sandboxed command cannot read the log of the
+    session's own command at the path ``read_commands`` names.
+
+    **This bounds a ``Bash`` command and nothing else.** The CLI's ``Read``, ``Grep``
+    and ``Glob`` run in the CLI's own process and follow permission rules; upstream
+    says in so many words that a ``denyRead`` entry does not stop the ``Read`` tool.
+    What stands in front of those is the gate: ``approval.records_read`` takes a
+    read of another session's records off the allowlist on every rung, and leaves
+    the session's own readable, which this entry does not.
+
     **There is no ``excludedCommands`` key.** Upstream suggests excluding ``git``
     because ``git merge`` and ``git checkout`` can fail under the sandbox; excluding it
     would remove containment for ``git`` including ``git push``, which is the exact
@@ -124,8 +190,12 @@ def containment_settings() -> str:
                 "strictAllowlist": True,
                 "allowedDomains": [ALLOWED_DOMAIN],
             },
+            "filesystem": {"denyWrite": list(denied_record_writes())},
             "credentials": {
-                "files": [{"path": path, "mode": "deny"} for path in DENIED_CREDENTIAL_FILES]
+                "files": [
+                    {"path": path, "mode": "deny"}
+                    for path in (*DENIED_CREDENTIAL_FILES, denied_records())
+                ]
             },
         }
     }

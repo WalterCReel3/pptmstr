@@ -770,16 +770,36 @@ def draw(
     snap: Snapshot,
     state: TranscriptState,
     selected: NodeId | None,
+    closed_path: str | None = None,
     *,
     start_in: RenderMode | None = None,
 ) -> None:
     """
+    One agent's transcript, or one line for a session that has none loaded.
+
+    A session recalled from its file (``AgentRecord.recalled``) has an empty
+    transcript because nothing read it, and the filters, the copy button and
+    "(nothing yet)" over that would say a session ran here and has not spoken.
+    It gets the closed line and no controls. ``closed_path`` is where the CLI
+    keeps that conversation, for the operator who wants to read it without
+    resuming: a value the shell read once and hands over, since working it out
+    here would be a directory listing per frame. None draws the line alone.
+
     ``start_in`` is the mode the operator's settings start the log in
     (``mode_named(Settings.context_mode)``); left out, it is ``DEFAULT_MODE``.
     """
     state.start_in = start_in
     if selected is None or (record := snap.get(selected)) is None:
         imgui.text_disabled("select an agent to read its transcript")
+        return
+
+    closed = widgets.closed_line(snap.get((selected[0], None)))
+    if closed is not None:
+        imgui.push_text_wrap_pos(0.0)
+        imgui.text_disabled(closed)
+        if closed_path:
+            imgui.text_disabled(f"transcript: {widgets.one_line(closed_path)}")
+        imgui.pop_text_wrap_pos()
         return
 
     cache = state.cache_for(selected)

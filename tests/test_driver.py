@@ -9,10 +9,12 @@ that without spending tokens or waiting on a CLI.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import contextlib
 import json
 import time
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -30,11 +32,12 @@ from claude_agent_sdk import (
     UserMessage,
 )
 
-from pptmstr.approval import Policy
+from pptmstr.approval import Policy, requires_containment
 from pptmstr.bridge import Bridge
-from pptmstr.driver import AgentSession, Translator, _tool_topic
+from pptmstr.driver import AgentSession, Translator, UncontainedAutonomy, _tool_topic
 from pptmstr.intents import (
     AgentFinished,
+    AgentSpawned,
     CompactionObserved,
     StateChanged,
     SubagentDelivered,
@@ -936,14 +939,15 @@ def test_the_launcher_hands_a_session_the_operators_subagent_cap() -> None:
     built without it falls back to the module default, which looks identical from
     every other test and ignores whatever the operator configured.
     """
-    from pptmstr.app import AppState, _launch
+    from pptmstr.app import AppState, _launch, _why_not_started
     from pptmstr.settings import Settings
 
     started: list[AgentSession] = []
 
     class _RecordingPool:
-        def submit(self, session: AgentSession) -> None:
+        def submit(self, session: AgentSession) -> bool:
             started.append(session)
+            return True
 
     bridge = Bridge()
     bridge.start()
@@ -951,17 +955,18 @@ def test_the_launcher_hands_a_session_the_operators_subagent_cap() -> None:
         state = AppState(store=Store(), bridge=bridge, settings=Settings(subagent_cap=6))
         state.pool = _RecordingPool()  # type: ignore[assignment]
         _launch(state, LaunchSpec(task="do a thing", model="claude-sonnet-5", cwd="/tmp"))
-        for _ in range(200):
-            if started:
-                break
-            time.sleep(0.005)
+        [launch] = state.launches
+        reason = _why_not_started(_settled(launch.future))
     finally:
         bridge.stop()
 
+    assert reason is None
     assert [s.subagent_cap for s in started] == [6]
 
 
-def test_relaunching_a_team_session_relaunches_a_team() -> None:
+def test_relaunching_a_team_session_relaunches_a_team(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """
     ``relaunch`` and ``fork`` exist to re-run work, and both dropped the template
     on the way to ``_launch`` -- so the two verbs whose whole purpose is repeating a
@@ -972,14 +977,20 @@ def test_relaunching_a_team_session_relaunches_a_team() -> None:
     is not a session root. That None is resolved here rather than at each caller, so
     the fallback is one rule instead of two that have to agree.
     """
-    from pptmstr.app import AppState, _launch
+    from pptmstr import brief as brief_mod
+    from pptmstr.app import AppState, _launch, _why_not_started
     from pptmstr.settings import Settings
+
+    # A team launch seeds a brief, and the default root is the operator's real
+    # `~/.claude/projects`.
+    monkeypatch.setattr(brief_mod, "default_root", lambda: tmp_path)
 
     started: list[AgentSession] = []
 
     class _RecordingPool:
-        def submit(self, session: AgentSession) -> None:
+        def submit(self, session: AgentSession) -> bool:
             started.append(session)
+            return True
 
     bridge = Bridge()
     bridge.start()
@@ -995,15 +1006,16 @@ def test_relaunching_a_team_session_relaunches_a_team() -> None:
                     task="do a thing", model="claude-sonnet-5", cwd="/tmp", template=template
                 ),
             )
-        for _ in range(200):
-            if len(started) == 3:
-                break
-            time.sleep(0.005)
+        reasons = [_why_not_started(_settled(launch.future)) for launch in state.launches]
     finally:
         bridge.stop()
 
+    assert reasons == [None, None, None]
     assert [s.template.name for s in started] == ["feature", "solo", "solo"]
     assert started[0].template.roles, "a team template with no roles is a solo session"
+    # The redirect above is only worth having if the seed went through it.
+    assert started[0].brief is not None
+    assert tmp_path in Path(started[0].brief).parents
 
 
 async def _fire_stop(session, agent_id: str, answer: str = "") -> None:
@@ -2054,6 +2066,158 @@ def test_the_briefing_is_appended_not_substituted() -> None:
     assert "**builder**" in options.system_prompt["append"]
 
 
+# -- which launch's system prompt a resumed session answers to ---------------------
+
+_RESUMED_ID = "11111111-2222-3333-4444-555555555555"
+
+
+def test_a_fresh_launch_leaves_the_snapshot_key_off() -> None:
+    """
+    A fresh session records the prompt it starts with, which is this launch's, so
+    there is nothing for the key to correct and the options stay what they were.
+    """
+    from pptmstr.templates import FEATURE
+
+    prompt = AgentSession(Bridge(), task="t", template=FEATURE)._options().system_prompt
+
+    assert isinstance(prompt, dict)
+    assert "snapshot" not in prompt
+
+
+def test_a_resumed_launch_asks_for_its_own_briefing_and_not_the_recorded_one() -> None:
+    """
+    Omitted, the key acts as True and the CLI sends the prompt the session recorded
+    on its first request: the role text, the template and the premises path of the
+    launch being resumed, with this launch's on argv and unread.
+    """
+    from pptmstr.templates import FEATURE, lead_briefing
+
+    session = AgentSession(Bridge(), task="t", template=FEATURE, resume=_RESUMED_ID)
+    prompt = session._options().system_prompt
+
+    assert isinstance(prompt, dict)
+    assert prompt["type"] == "preset"
+    assert prompt["append"] == lead_briefing(FEATURE, session.policy)
+    # `is False`, not falsy: the SDK forwards the key only when it is a bool, so a
+    # None here is the omitted key under another spelling.
+    assert prompt["snapshot"] is False
+
+
+def test_a_resumed_launch_with_no_briefing_still_drops_the_recorded_one() -> None:
+    """
+    The hazard is a session started with a team and resumed solo. This launch builds
+    no append and configures no agents, and with the key omitted the model would go
+    on answering to a team briefing naming roles nothing can spawn.
+    """
+    resumed = AgentSession(Bridge(), task="t", resume=_RESUMED_ID)._options().system_prompt
+
+    assert isinstance(resumed, dict)
+    assert resumed["snapshot"] is False
+    # The empty custom prompt is what a fresh solo launch's None becomes on argv
+    # (`--system-prompt ""`); only the snapshot key may differ between the two.
+    assert resumed["type"] == "custom"
+    assert resumed["prompt"] == ""
+    assert AgentSession(Bridge(), task="t")._options().system_prompt is None
+
+
+@pytest.mark.parametrize("version", ["2.1.257", "2.1.292 (Claude Code)", "2.2", "3.0.1"])
+def test_a_cli_at_or_above_the_snapshot_floor_owes_no_notice(version: str) -> None:
+    from pptmstr.driver import resume_briefing_notice
+
+    assert resume_briefing_notice(version) is None
+
+
+@pytest.mark.parametrize("version", ["2.1.256", "2.1.99", "2.0.300", "1.9"])
+def test_a_cli_below_the_snapshot_floor_is_told_its_briefing_did_not_arrive(version: str) -> None:
+    """
+    2.1.99 is the case a string comparison gets backwards.
+    """
+    from pptmstr.driver import RESUME_BRIEFING_FLOOR, resume_briefing_notice
+
+    notice = resume_briefing_notice(version)
+
+    assert notice is not None
+    assert version in notice
+    assert RESUME_BRIEFING_FLOOR in notice
+    assert "could not be read" not in notice
+
+
+@pytest.mark.parametrize("reported", [None, "", "nightly", 2, ["2.1.292"]])
+def test_an_unreadable_cli_version_is_a_different_notice_from_too_old(reported: object) -> None:
+    """
+    "Too old" says the briefing did not arrive; "could not tell" must not say that,
+    and must not say nothing either.
+    """
+    from pptmstr.driver import RESUME_BRIEFING_FLOOR, resume_briefing_notice
+
+    notice = resume_briefing_notice(reported)
+
+    assert notice is not None
+    assert "could not be read" in notice
+    assert RESUME_BRIEFING_FLOOR in notice
+
+
+def _init(session_id: str, version: object = None) -> SystemMessage:
+    data: dict[str, object] = {"type": "system", "subtype": "init", "session_id": session_id}
+    if version is not None:
+        data["claude_code_version"] = version
+    return SystemMessage(subtype="init", data=data)
+
+
+def _errors_after_running(session: AgentSession, init: SystemMessage, monkeypatch) -> str:
+    monkeypatch.setattr("pptmstr.driver.ClaudeSDKClient", lambda **_: _FakeClient([init]))
+    monkeypatch.setattr("pptmstr.driver.tag_session", lambda *a, **k: None)
+    asyncio.run(session.run())
+    transcript = session.transcript
+    return "".join(
+        transcript.read(seg.start, seg.end)
+        for seg in transcript.segments()
+        if seg.kind is SegmentKind.ERROR
+    )
+
+
+def test_a_resume_on_a_cli_below_the_floor_says_so_where_the_operator_is_looking(
+    monkeypatch,
+) -> None:
+    """
+    The wiring: the notice is worth nothing as a function nobody calls.
+    """
+    from pptmstr.driver import resume_briefing_notice
+
+    session = AgentSession(Bridge(), task="carry on", resume=_RESUMED_ID)
+    shown = _errors_after_running(session, _init(_RESUMED_ID, "2.1.200"), monkeypatch)
+
+    notice = resume_briefing_notice("2.1.200")
+    assert notice is not None
+    assert shown.count(notice) == 1
+
+
+def test_a_resume_whose_cli_names_no_version_says_it_cannot_tell(monkeypatch) -> None:
+    session = AgentSession(Bridge(), task="carry on", resume=_RESUMED_ID)
+    shown = _errors_after_running(session, _init(_RESUMED_ID), monkeypatch)
+
+    assert "could not be read" in shown
+
+
+def test_a_resume_on_a_current_cli_is_shown_no_notice(monkeypatch) -> None:
+    session = AgentSession(Bridge(), task="carry on", resume=_RESUMED_ID)
+    shown = _errors_after_running(session, _init(_RESUMED_ID, "2.1.292"), monkeypatch)
+
+    assert "snapshot" not in shown
+    assert "briefing" not in shown
+
+
+def test_a_fresh_launch_on_an_old_cli_is_shown_no_notice(monkeypatch) -> None:
+    """
+    A fresh session records this launch's prompt whatever the CLI knows about the
+    key, so there is nothing to warn about and the notice would be noise.
+    """
+    session = AgentSession(Bridge(), task="start")
+    shown = _errors_after_running(session, _init(session.session_id, "2.1.200"), monkeypatch)
+
+    assert shown == ""
+
+
 def test_an_unstarted_role_is_a_different_error_from_an_unknown_one() -> None:
     """
     The wake-path probe's worker retried the same wrong name because the refusal
@@ -2741,16 +2905,26 @@ def test_a_subagent_that_said_nothing_delivers_nothing() -> None:
 # -- the brief travels with the launch (row 5, step 1) -----------------------------
 
 
+def _settled(future: concurrent.futures.Future[Any]) -> concurrent.futures.Future[Any]:
+    """
+    A launch's future once it is decided, unread: ``exception`` waits and raises
+    nothing the coroutine raised.
+    """
+    future.exception(timeout=5.0)
+    return future
+
+
 def _recording_launch(spec: LaunchSpec) -> list[AgentSession]:
     """Run `_launch` against a pool that only records, and hand back what it built."""
-    from pptmstr.app import AppState, _launch
+    from pptmstr.app import AppState, _launch, _why_not_started
     from pptmstr.settings import Settings
 
     started: list[AgentSession] = []
 
     class _RecordingPool:
-        def submit(self, session: AgentSession) -> None:
+        def submit(self, session: AgentSession) -> bool:
             started.append(session)
+            return True
 
     bridge = Bridge()
     bridge.start()
@@ -2758,12 +2932,13 @@ def _recording_launch(spec: LaunchSpec) -> list[AgentSession]:
         state = AppState(store=Store(), bridge=bridge, settings=Settings())
         state.pool = _RecordingPool()  # type: ignore[assignment]
         _launch(state, spec)
-        for _ in range(200):
-            if started:
-                break
-            time.sleep(0.005)
+        # The outcome and not a poll of ``started``: the fake is handed the session
+        # before ``_launch`` has decided what to call the launch.
+        [launch] = state.launches
+        reason = _why_not_started(_settled(launch.future))
     finally:
         bridge.stop()
+    assert reason is None, f"the pool took the session and the launch was refused: {reason}"
     return started
 
 
@@ -2929,7 +3104,7 @@ def test_a_worker_launched_without_a_brief_is_told_about_none() -> None:
 def _launched(spec: LaunchSpec, monkeypatch, root) -> AgentSession:
     """Run `_launch` against a recording pool, with briefs rooted in a temp dir."""
     from pptmstr import brief as brief_mod
-    from pptmstr.app import AppState, _launch
+    from pptmstr.app import AppState, _launch, _why_not_started
     from pptmstr.settings import Settings
 
     monkeypatch.setattr(brief_mod, "default_root", lambda: root)
@@ -2937,8 +3112,9 @@ def _launched(spec: LaunchSpec, monkeypatch, root) -> AgentSession:
     started: list[AgentSession] = []
 
     class _RecordingPool:
-        def submit(self, session: AgentSession) -> None:
+        def submit(self, session: AgentSession) -> bool:
             started.append(session)
+            return True
 
     bridge = Bridge()
     bridge.start()
@@ -2946,12 +3122,11 @@ def _launched(spec: LaunchSpec, monkeypatch, root) -> AgentSession:
         state = AppState(store=Store(), bridge=bridge, settings=Settings())
         state.pool = _RecordingPool()  # type: ignore[assignment]
         _launch(state, spec)
-        for _ in range(200):
-            if started:
-                break
-            time.sleep(0.005)
+        [launch] = state.launches
+        reason = _why_not_started(_settled(launch.future))
     finally:
         bridge.stop()
+    assert reason is None, f"the pool took the session and the launch was refused: {reason}"
     assert started, "the pool was never handed a session"
     return started[0]
 
@@ -3303,9 +3478,9 @@ def _spy_on_classify(monkeypatch) -> list[tuple[str, Policy]]:
     seen: list[tuple[str, Policy]] = []
     real = driver_mod.classify
 
-    def spy(tool_name, tool_input, policy=Policy.STRICT):
+    def spy(tool_name, tool_input, policy=Policy.STRICT, **scope):
         seen.append((tool_name, policy))
-        return real(tool_name, tool_input, policy)
+        return real(tool_name, tool_input, policy, **scope)
 
     monkeypatch.setattr(driver_mod, "classify", spy)
     return seen
@@ -3753,19 +3928,24 @@ def _briefing_spy(monkeypatch) -> dict[str, list]:
     to make the same text for both policies -- it does exactly that for a template
     with no roles -- and a test comparing outputs would then pass against a session
     that passed the wrong policy, or none.
+
+    Whether the session said it is contained is recorded beside it, under
+    ``contained``: one entry for each call of either builder, in call order.
     """
     from pptmstr import driver as driver_mod
 
-    seen: dict[str, list] = {"lead": [], "worker": []}
+    seen: dict[str, list] = {"lead": [], "worker": [], "contained": []}
     real_lead, real_worker = driver_mod.lead_briefing, driver_mod.worker_prompt
 
-    def lead(template, policy=Policy.STRICT):
+    def lead(template, policy=Policy.STRICT, contained=False):
         seen["lead"].append(policy)
-        return real_lead(template, policy)
+        seen["contained"].append(contained)
+        return real_lead(template, policy, contained)
 
-    def worker(role, brief=None, policy=Policy.STRICT):
+    def worker(role, brief=None, policy=Policy.STRICT, contained=False):
         seen["worker"].append(policy)
-        return real_worker(role, brief, policy)
+        seen["contained"].append(contained)
+        return real_worker(role, brief, policy, contained)
 
     monkeypatch.setattr(driver_mod, "lead_briefing", lead)
     monkeypatch.setattr(driver_mod, "worker_prompt", worker)
@@ -3884,10 +4064,14 @@ def test_an_uncontained_autonomous_session_refuses_to_start(monkeypatch) -> None
     assert "no containment" in session.transcript.text()
 
 
-def test_a_contained_autonomous_session_is_not_refused(monkeypatch) -> None:
+def test_a_contained_autonomous_session_is_not_refused(monkeypatch, tmp_path: Path) -> None:
     """
     The other direction, which the refusal alone cannot distinguish from a guard
     that refuses the policy outright. This one reaches the client.
+
+    Given a directory of its own: with none, the session's directory is this
+    process's, which is pptmstr's checkout whenever the suite is run from it, and
+    that is refused for its own reason.
     """
     reached: list[bool] = []
 
@@ -3896,11 +4080,173 @@ def test_a_contained_autonomous_session_is_not_refused(monkeypatch) -> None:
         raise RuntimeError("stop here")
 
     monkeypatch.setattr("pptmstr.driver.ClaudeSDKClient", explode)
-    session = AgentSession(Bridge(), "t", policy=Policy.AUTONOMOUS, containment="{}")
+    session = AgentSession(
+        Bridge(), "t", policy=Policy.AUTONOMOUS, containment="{}", cwd=str(tmp_path)
+    )
 
     asyncio.run(session.run())
 
     assert reached == [True]
+
+
+# -- the own-checkout refusal, asked at the start and not only at the launch --------
+
+
+def _spawn_recorder(monkeypatch) -> list[bool]:
+    """
+    Stand in for the SDK client, whose construction is the spawn.
+    """
+    spawned: list[bool] = []
+
+    def client(**_):
+        spawned.append(True)
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr("pptmstr.driver.ClaudeSDKClient", client)
+    return spawned
+
+
+def _stand_in_checkout(tmp_path: Path, monkeypatch) -> Path:
+    checkout = tmp_path / "pptmstr-src"
+    (checkout / "pptmstr").mkdir(parents=True)
+    monkeypatch.setattr("pptmstr.driver.OWN_CHECKOUT", str(checkout))
+    return checkout
+
+
+def _started_state(session: AgentSession) -> tuple[AgentState, str]:
+    asyncio.run(session.run())
+    store = Store()
+    store.apply_all(session.bridge.drain())
+    record = store.snapshot().nodes[session.node_id]
+    return record.state, record.error or ""
+
+
+def test_the_drivers_own_checkout_is_the_one_the_launcher_refuses() -> None:
+    """
+    Two derivations of one directory, on purpose: the driver may not import the
+    launcher. If they part, the launcher refuses one tree and the start another.
+    """
+    from pptmstr import driver
+    from pptmstr.ui import launcher
+
+    assert driver.OWN_CHECKOUT == launcher.OWN_CHECKOUT
+
+
+@pytest.mark.parametrize("where", ["root", "below", "link", "link-below"])
+def test_an_autonomous_session_does_not_start_inside_pptmstrs_own_checkout(
+    where: str, tmp_path: Path, monkeypatch
+) -> None:
+    """
+    Every spelling that leads in, the symlink being the one a string comparison
+    answers no to. Refused as a failure the operator can read, and not started
+    under some other rung.
+    """
+    checkout = _stand_in_checkout(tmp_path, monkeypatch)
+    link = tmp_path / "proj"
+    link.symlink_to(checkout, target_is_directory=True)
+    cwd = {
+        "root": checkout,
+        "below": checkout / "pptmstr",
+        "link": link,
+        "link-below": link / "pptmstr",
+    }[where]
+    spawned = _spawn_recorder(monkeypatch)
+    session = AgentSession(Bridge(), "t", policy=Policy.AUTONOMOUS, containment="{}", cwd=str(cwd))
+
+    state, error = _started_state(session)
+
+    assert spawned == []
+    assert state is AgentState.FAILED
+    assert "own checkout" in error and str(cwd) in error
+    assert "own checkout" in session.transcript.text()
+    assert session.policy is Policy.AUTONOMOUS
+
+
+def test_an_autonomous_session_with_no_directory_is_judged_by_this_processs(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """
+    No cwd is the default launch and the CLI inherits this process's directory, so
+    that is the directory the question is about.
+    """
+    checkout = _stand_in_checkout(tmp_path, monkeypatch)
+    monkeypatch.chdir(checkout)
+    spawned = _spawn_recorder(monkeypatch)
+
+    state, _ = _started_state(
+        AgentSession(Bridge(), "t", policy=Policy.AUTONOMOUS, containment="{}")
+    )
+
+    assert spawned == []
+    assert state is AgentState.FAILED
+
+
+def test_an_autonomous_session_whose_directory_cannot_be_located_does_not_start(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _stand_in_checkout(tmp_path, monkeypatch)
+    loop = tmp_path / "loop"
+    loop.symlink_to(loop)
+    spawned = _spawn_recorder(monkeypatch)
+
+    state, error = _started_state(
+        AgentSession(Bridge(), "t", policy=Policy.AUTONOMOUS, containment="{}", cwd=str(loop))
+    )
+
+    assert spawned == []
+    assert state is AgentState.FAILED
+    assert "cannot be resolved" in error
+
+
+def test_a_sibling_named_after_the_checkout_is_not_refused(tmp_path: Path, monkeypatch) -> None:
+    checkout = _stand_in_checkout(tmp_path, monkeypatch)
+    sibling = checkout.with_name(checkout.name + "-scratch")
+    sibling.mkdir()
+    spawned = _spawn_recorder(monkeypatch)
+
+    asyncio.run(
+        AgentSession(
+            Bridge(), "t", policy=Policy.AUTONOMOUS, containment="{}", cwd=str(sibling)
+        ).run()
+    )
+
+    assert spawned == [True]
+
+
+def test_a_session_that_parks_its_writes_may_start_inside_the_checkout(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """
+    Working on pptmstr with pptmstr is the ordinary case and every write there is
+    put to the operator. Only the rung that stops asking is refused, contained or
+    not.
+    """
+    checkout = _stand_in_checkout(tmp_path, monkeypatch)
+    spawned = _spawn_recorder(monkeypatch)
+
+    asyncio.run(AgentSession(Bridge(), "t", cwd=str(checkout)).run())
+    asyncio.run(AgentSession(Bridge(), "t", cwd=str(checkout), containment="{}").run())
+
+    assert spawned == [True, True]
+
+
+def test_the_directory_is_resolved_afresh_each_time_it_is_asked_about(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """
+    The hazard is an answer kept from before the directory moved. One session, one
+    string, asked before and after the string is re-pointed.
+    """
+    checkout = _stand_in_checkout(tmp_path, monkeypatch)
+    sub = tmp_path / "proj" / "sub"
+    sub.mkdir(parents=True)
+    session = AgentSession(Bridge(), "t", policy=Policy.AUTONOMOUS, containment="{}", cwd=str(sub))
+    assert session._own_checkout_refusal() is None
+
+    sub.rmdir()
+    sub.symlink_to(checkout, target_is_directory=True)
+
+    assert session._own_checkout_refusal() is not None
 
 
 def test_a_padded_path_cannot_smuggle_an_absolute_target_into_the_region(
@@ -4113,3 +4459,1287 @@ def test_a_session_with_no_admitted_connectors_carries_only_the_bus() -> None:
     options = AgentSession(Bridge(), task="lead")._options()
 
     assert list(options.mcp_servers) == [SERVER_NAME]
+
+
+# -- a live policy change cannot produce the pair `run` refuses ---------------
+
+
+def test_an_uncontained_session_cannot_be_widened_to_the_autonomous_rung() -> None:
+    """
+    The live route to the arrangement `run` refuses. The session is built the way
+    every attended one is -- no containment -- and then asked for the rung whose
+    Bash only the sandbox bounds. The refusal has to leave the policy where it
+    was: a raise that came after the assignment would report the hazard and
+    produce it in the same call.
+    """
+    for started_under in (Policy.STRICT, Policy.PERMISSIVE):
+        session = AgentSession(Bridge(), "t", policy=started_under)
+
+        with pytest.raises(UncontainedAutonomy, match="no containment"):
+            session.set_policy(Policy.AUTONOMOUS)
+
+        assert session.policy is started_under
+
+
+def test_the_live_refusal_asks_the_rung_and_not_its_name() -> None:
+    """
+    The same predicate the start path uses, `approval.requires_containment`, so a
+    rung added later is refused or admitted here by the answer it already had to
+    give there. Every rung is tried on an uncontained session and on a contained
+    one; the contained column is what makes this a check on the pair rather than
+    a ban on the rung.
+    """
+    for rung in Policy:
+        uncontained = AgentSession(Bridge(), "t")
+        if requires_containment(rung):
+            with pytest.raises(UncontainedAutonomy):
+                uncontained.set_policy(rung)
+            assert uncontained.policy is Policy.STRICT
+        else:
+            uncontained.set_policy(rung)
+            assert uncontained.policy is rung
+
+        contained = AgentSession(Bridge(), "t", containment="{}")
+        contained.set_policy(rung)
+        assert contained.policy is rung
+
+
+def test_narrowing_is_never_refused_whatever_the_session_was_started_with() -> None:
+    """
+    The guard is on one direction only. An operator reaching for "narrow to
+    strict" must get it on every session, including the one arrangement the guard
+    exists to prevent: an uncontained autonomous session is constructible (it is
+    `run` that refuses it), and the way out of it cannot be behind the same check.
+    """
+    for policy in Policy:
+        for containment in (None, "{}"):
+            session = AgentSession(Bridge(), "t", policy=policy, containment=containment)
+
+            session.revoke_policy()
+
+            assert session.policy is Policy.STRICT
+
+
+def test_an_empty_containment_string_is_no_containment() -> None:
+    """
+    The edge of the type. `containment` is a string and the SDK's transport adds
+    `--settings` only for a truthy one, so `""` builds the same argv as `None`: no
+    sandbox on the process. A guard that asked `is None` would pass it on both
+    paths and the top rung would run uncontained with every check satisfied.
+
+    The argv is read off the transport rather than assumed, so an SDK that began
+    passing the empty string through would fail the first half here instead of
+    leaving the second half pinning a refusal with no reason behind it.
+    """
+    from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
+
+    def argv(containment: str | None) -> list[str]:
+        session = AgentSession(Bridge(), "t", policy=Policy.AUTONOMOUS, containment=containment)
+        transport = SubprocessCLITransport(prompt="t", options=session._options())
+        transport._cli_path = "claude"
+        return transport._build_command()
+
+    assert "--settings" not in argv(None)
+    assert "--settings" not in argv("")
+    assert argv("{}")[argv("{}").index("--settings") + 1] == "{}"
+
+    launched = AgentSession(Bridge(), "t", policy=Policy.AUTONOMOUS, containment="")
+    assert launched._uncontained_autonomy()
+
+    live = AgentSession(Bridge(), "t", containment="")
+    with pytest.raises(UncontainedAutonomy, match="no containment"):
+        live.set_policy(Policy.AUTONOMOUS)
+    assert live.policy is Policy.STRICT
+
+    # Narrowing and the rung that asks for no sandbox are untouched by the edge.
+    live.set_policy(Policy.PERMISSIVE)
+    assert live.policy is Policy.PERMISSIVE
+    assert AgentSession(Bridge(), "t", containment="")._uncontained_autonomy() is None
+
+
+@pytest.mark.parametrize("blank", [" ", "\n", "\t \r\n", "\u00a0"])
+def test_a_containment_string_of_only_whitespace_is_no_containment(blank: str) -> None:
+    """
+    The other edge of the type, and the one the transport does not cover. A blank
+    string is truthy, so the SDK does put `--settings` on argv with it -- read off
+    the transport here, since that is the whole reason the guard cannot borrow the
+    transport's test -- and a flag whose value names no settings is not a sandbox.
+    Both paths refuse it as they refuse `""`.
+    """
+    from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
+
+    launched = AgentSession(Bridge(), "t", policy=Policy.AUTONOMOUS, containment=blank)
+    transport = SubprocessCLITransport(prompt="t", options=launched._options())
+    transport._cli_path = "claude"
+    command = transport._build_command()
+    assert command[command.index("--settings") + 1] == blank
+
+    assert launched._unpaired(Policy.AUTONOMOUS) is True
+    assert launched._uncontained_autonomy()
+
+    live = AgentSession(Bridge(), "t", containment=blank)
+    with pytest.raises(UncontainedAutonomy, match="no containment"):
+        live.set_policy(Policy.AUTONOMOUS)
+    assert live.policy is Policy.STRICT
+
+    # The rungs that ask for no sandbox are not refused over it.
+    live.set_policy(Policy.PERMISSIVE)
+    assert live.policy is Policy.PERMISSIVE
+    assert AgentSession(Bridge(), "t", containment=blank)._uncontained_autonomy() is None
+
+
+def test_a_contained_session_narrowed_from_the_top_rung_can_be_widened_back_live() -> None:
+    """
+    Pins an admission, not a refusal. Launched contained under the top rung,
+    narrowed, and asked for the top rung again: the guard lets it through, because
+    the sandbox it checks for is still on the process. So the top rung is reachable
+    live for exactly the contained case, and nothing here says it is not -- whether
+    it should be is the operator's question and this test only makes changing the
+    answer a deliberate act.
+    """
+    session = AgentSession(Bridge(), "t", policy=Policy.AUTONOMOUS, containment="{}")
+
+    session.revoke_policy()
+    assert session.policy is Policy.STRICT
+
+    session.set_policy(Policy.AUTONOMOUS)
+    assert session.policy is Policy.AUTONOMOUS
+    assert session._uncontained_autonomy() is None
+
+
+def test_containment_has_no_setter_under_its_public_name() -> None:
+    """
+    The guard judges what the process is started with, and that holds only while
+    the two are one value. `--settings` is argv: a session whose options went out
+    with none has no sandbox whatever its attribute is later made to say, and a
+    guard answered by the later value would admit the top rung onto it.
+
+    What is established is the public name and no more. The field behind it is an
+    ordinary attribute, which Python will assign for anyone who spells the
+    underscore; the two tests below say what stands in for a lock on it.
+    """
+    session = AgentSession(Bridge(), "t")
+    assert session._options().settings is None
+
+    with pytest.raises(AttributeError):
+        session.containment = "{}"  # type: ignore[misc]
+
+    assert session.containment is None
+    with pytest.raises(UncontainedAutonomy):
+        session.set_policy(Policy.AUTONOMOUS)
+    assert session.policy is Policy.STRICT
+
+
+def test_the_field_behind_containment_is_assignable_and_the_guard_would_believe_it() -> None:
+    """
+    Pins the limit, not a protection. An assignment to `_containment` after
+    construction is admitted by the language and answers the guard, so the top
+    rung is then granted to a session whose process may have started with no
+    sandbox. Nothing at runtime stops it; what stops it is that nothing in the
+    application does it, which
+    `test_nothing_in_the_application_assigns_the_field_behind_containment` holds
+    the tree to.
+    """
+    session = AgentSession(Bridge(), "t")
+
+    session._containment = "{}"
+
+    assert session.containment == "{}"
+    session.set_policy(Policy.AUTONOMOUS)
+    assert session.policy is Policy.AUTONOMOUS
+
+
+def test_nothing_in_the_application_assigns_the_field_behind_containment() -> None:
+    """
+    The one write is in `AgentSession.__init__`. Read off the syntax tree of every
+    module in the package and every script, so a second write -- an assignment, an
+    augmented one, a `setattr` or a `__dict__` update naming the field -- fails
+    here instead of quietly making the guard answerable by a value the process
+    never received.
+    """
+    import ast
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    writes: list[str] = []
+    named: list[str] = []
+    for source in sorted([*(root / "pptmstr").rglob("*.py"), *(root / "scripts").rglob("*.py")]):
+        tree = ast.parse(source.read_text(), filename=str(source))
+        owner: dict[ast.AST, str] = {}
+        for outer in ast.walk(tree):
+            if isinstance(outer, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                for inner in ast.walk(outer):
+                    owner.setdefault(inner, outer.name)
+        for node in ast.walk(tree):
+            where = f"{source.relative_to(root)}:{getattr(node, 'lineno', 0)}"
+            if (
+                isinstance(node, ast.Attribute)
+                and node.attr == "_containment"
+                and isinstance(node.ctx, (ast.Store, ast.Del))
+            ):
+                writes.append(f"{where} in {owner.get(node, '<module>')}")
+            if isinstance(node, ast.Constant) and node.value == "_containment":
+                named.append(where)
+
+    assert writes == [next(w for w in writes if w.endswith(" in __init__"))], writes
+    assert writes[0].startswith("pptmstr/driver.py:")
+    # No `setattr(session, "_containment", ...)` and no `__dict__["_containment"]`.
+    assert named == []
+
+
+def test_the_guard_reads_the_value_the_options_carry() -> None:
+    """
+    The other half of the same claim: the string the guard counts as present is
+    the one that reaches `ClaudeAgentOptions.settings`, not a second field that
+    happens to agree with it.
+    """
+    session = AgentSession(Bridge(), "t", containment='{"sandbox": {}}')
+
+    assert session._options().settings is session.containment
+    assert session._unpaired(Policy.AUTONOMOUS) is False
+
+
+def test_a_rung_that_starts_requiring_containment_is_refused_on_both_paths(monkeypatch) -> None:
+    """
+    Asking the rung and naming it give the same answers on the ladder as it
+    stands, because exactly one rung says yes. So the ladder is changed under the
+    guard: `PERMISSIVE` is made the rung that requires containment and
+    `AUTONOMOUS` one that does not. A guard that names `AUTONOMOUS` gets every
+    line here backwards.
+    """
+    monkeypatch.setattr(
+        "pptmstr.driver.requires_containment", lambda policy: policy is Policy.PERMISSIVE
+    )
+
+    live = AgentSession(Bridge(), "t")
+    with pytest.raises(UncontainedAutonomy):
+        live.set_policy(Policy.PERMISSIVE)
+    assert live.policy is Policy.STRICT
+    live.set_policy(Policy.AUTONOMOUS)
+    assert live.policy is Policy.AUTONOMOUS
+
+    assert AgentSession(Bridge(), "t", policy=Policy.PERMISSIVE)._uncontained_autonomy()
+    assert AgentSession(Bridge(), "t", policy=Policy.AUTONOMOUS)._uncontained_autonomy() is None
+
+
+def test_an_uncontained_session_built_at_the_top_rung_narrows_to_the_one_below() -> None:
+    """
+    `revoke_policy` covers the move to `STRICT`; this is the other narrowing, to
+    the rung that asks for no sandbox, from the one arrangement `run` refuses.
+    """
+    session = AgentSession(Bridge(), "t", policy=Policy.AUTONOMOUS)
+
+    session.set_policy(Policy.PERMISSIVE)
+
+    assert session.policy is Policy.PERMISSIVE
+    assert session._uncontained_autonomy() is None
+
+
+# -- what the gate's write region does and does not exclude -------------------
+
+
+@pytest.mark.parametrize(
+    "rel",
+    [".git/hooks/pre-commit", ".git/config", ".claude/settings.local.json", ".mcp.json"],
+)
+def test_the_gate_allows_a_write_to_a_path_under_cwd_that_the_sandbox_protects(
+    tmp_path: Path, rel: str
+) -> None:
+    """
+    States what the gate does, not what it should do. Its one test of a target is
+    whether it lies inside the session's directory, and these four do: git's hooks
+    and config, the CLI's own project settings, and the project's MCP server list.
+    They are the paths `planning/2026-09-03` §8 lists as the sandbox's protected
+    ones, so under the top rung the gate's region is not contained in the region
+    `Bash` is held to.
+
+    Whether the CLI's own `Write` refuses any of them after the gate has allowed
+    is unmeasured, so an allow here is the gate's answer and is not evidence that
+    the write lands. A carve-out added to the gate turns this test red, which is
+    the point of keeping it.
+    """
+    target = tmp_path / rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    spec = _gate(_autonomous(tmp_path), "Write", {"file_path": str(target), "content": "x"})
+
+    assert spec["permissionDecision"] == "allow"
+
+
+# -- a cancel delivered while the sub-agent drain is cleaning up -------------------
+
+
+def test_a_cancel_that_lands_while_the_subagent_drain_is_cleaning_up_is_not_absorbed(
+    monkeypatch,
+) -> None:
+    """
+    The drain cancels its own pending read on the way out and waits for it to die.
+    A cancellation of the session arriving during that wait is the pool's one cancel
+    and must come out the other side -- after the read has finished dying, not
+    instead of it.
+    """
+    monkeypatch.setattr("pptmstr.driver.SUBAGENT_POLL_S", 0.01)
+    session = AgentSession(Bridge(), task="lead", interactive=False)
+
+    async def scenario() -> tuple[bool, bool]:
+        dying = asyncio.Event()
+        dead = asyncio.Event()
+
+        class Client:
+            def receive_messages(self):
+                async def stream():
+                    try:
+                        await asyncio.Event().wait()
+                    except asyncio.CancelledError:
+                        dying.set()
+                        await asyncio.sleep(0.05)  # the read takes a moment to die
+                        dead.set()
+                        raise
+                    yield None
+
+                return stream()
+
+        session._live_subagents.add("a")
+        session._subagent_seen_at["a"] = time.monotonic()
+        drain = asyncio.ensure_future(
+            session._await_subagents(  # type: ignore[arg-type]
+                Client(), Translator(session.node_id, session.transcript)
+            )
+        )
+        await asyncio.sleep(0.03)  # the read is parked, a few quiet ticks pass
+        session._live_subagents.clear()  # what SubagentStop does
+        await dying.wait()  # the drain is now waiting on the read in its finally
+        drain.cancel()  # what SessionPool._retire does
+        try:
+            await drain
+        except asyncio.CancelledError:
+            return True, dead.is_set()
+        return False, dead.is_set()
+
+    assert asyncio.run(scenario()) == (True, True)
+
+
+def test_a_read_that_fails_while_it_is_abandoned_fails_nobody(monkeypatch) -> None:
+    """
+    What the abandoned read ends up holding is discarded, an exception included: it
+    is neither the session's failure nor something left for asyncio to report as
+    never retrieved when the task is collected.
+    """
+    import gc
+
+    monkeypatch.setattr("pptmstr.driver.SUBAGENT_POLL_S", 0.01)
+    session = AgentSession(Bridge(), task="lead", interactive=False)
+    reported: list[str] = []
+
+    async def scenario() -> None:
+        asyncio.get_running_loop().set_exception_handler(
+            lambda loop, context: reported.append(str(context.get("message")))
+        )
+
+        class Client:
+            def receive_messages(self):
+                async def stream():
+                    try:
+                        await asyncio.Event().wait()
+                    except asyncio.CancelledError:
+                        raise RuntimeError("the transport went first") from None
+                    yield None
+
+                return stream()
+
+        session._live_subagents.add("a")
+        session._subagent_seen_at["a"] = time.monotonic()
+        drain = asyncio.ensure_future(
+            session._await_subagents(  # type: ignore[arg-type]
+                Client(), Translator(session.node_id, session.transcript)
+            )
+        )
+        await asyncio.sleep(0.03)
+        session._live_subagents.clear()
+        await asyncio.wait_for(drain, timeout=2.0)
+        del drain
+        gc.collect()
+        await asyncio.sleep(0)
+        gc.collect()
+
+    asyncio.run(scenario())
+    assert reported == []
+
+
+def test_a_message_sent_before_the_session_has_a_client_is_dropped_without_a_trace() -> None:
+    """
+    A measurement of what is lost, not a property worth having: no intent and no
+    transcript line, only the log. A relaunch held behind an ending run is in this
+    state for the length of that run's teardown.
+    """
+    bridge = Bridge()
+    session = AgentSession(bridge, task="t", interactive=False)
+    before = session.transcript.text()
+    asyncio.run(session.send("are you there"))
+    assert bridge.drain() == []
+    assert session.transcript.text() == before
+
+
+def test_the_gate_stamps_an_amendment_and_says_when_the_operator_edited_it() -> None:
+    """
+    ``amend_task`` reads two things only the gate can know: who is amending, which
+    the reducer's whole rule is asked of, and whether the operator rewrote the
+    call, which decides if the amender's basis is kept. A tool on the server and
+    missing from the stamp list gets neither -- ``_stamp_bus_call`` answers None
+    for it. The input carries a forged edit stamp and a forged sender, since a
+    stamp that is only added proves nothing about one that is already there.
+    """
+    from pptmstr.bridge import Bridge
+    from pptmstr.bus import EDITED_KEY, FROM_KEY, qualified
+    from pptmstr.driver import AgentSession
+
+    session = AgentSession(Bridge(), "task")
+    forged = {"task_id": "t1", "detail": "x", EDITED_KEY: True, FROM_KEY: ["s9", None]}
+    node = ("s1", "agent-7")
+
+    plain = session._stamp_bus_call(qualified("amend_task"), forged, node)
+    edited = session._stamp_bus_call(qualified("amend_task"), forged, node, edited=True)
+
+    assert plain is not None and edited is not None
+    assert (list(plain[FROM_KEY]), plain[EDITED_KEY]) == (["s1", "agent-7"], False)
+    assert edited[EDITED_KEY] is True
+
+
+# -- addresses from an earlier run of the session ------------------------------------
+
+
+def _resumed_with(addresses: dict[str, str | None]):  # type: ignore[no-untyped-def]
+    from pptmstr.bridge import Bridge
+    from pptmstr.driver import AgentSession
+    from pptmstr.templates import FEATURE
+
+    return AgentSession(
+        Bridge(), task="t", template=FEATURE, resume="s-old", restored_addresses=addresses
+    )
+
+
+def _start(session, *agents: tuple[str, str]) -> None:  # type: ignore[no-untyped-def]
+    import asyncio
+
+    async def all_of_them() -> None:
+        for agent_id, agent_type in agents:
+            await session._subagent_start(_start_hook_input(agent_id, agent_type), None, None)
+
+    asyncio.run(all_of_them())
+
+
+def test_a_new_agent_is_never_given_an_address_the_restored_board_names() -> None:
+    """
+    The board the session resumed holds a claim by ``builder-2``. This process
+    has started no builder, and its first two would be ``builder`` and
+    ``builder-2`` again -- the second reading the old claim as its own.
+    """
+    session = _resumed_with({"builder": "old-1", "builder-2": "old-2"})
+
+    _start(session, ("new-1", "builder"), ("new-2", "builder"))
+
+    assert session.role_of((session.session_id, "new-1")) == "builder-3"
+    assert session.role_of((session.session_id, "new-2")) == "builder-4"
+    # Nothing is running under the old names, so nothing is routed to them.
+    assert session.resolve_role("builder-2") is None
+    assert session.known_roles() == ("lead", "builder-3", "builder-4")
+
+
+def test_an_agent_that_starts_under_its_original_id_gets_its_address_back() -> None:
+    """
+    If the CLI wakes an earlier agent under the id it had, it is that agent: the
+    claims the board holds under ``builder-2`` are its own, wherever in the
+    spawn order it comes back.
+    """
+    session = _resumed_with({"builder": "old-1", "builder-2": "old-2"})
+
+    _start(session, ("old-2", "builder"), ("new-1", "builder"))
+
+    assert session.resolve_role("builder-2") == (session.session_id, "old-2")
+    assert session.role_of((session.session_id, "new-1")) == "builder-3"
+
+
+def test_an_agent_that_comes_back_under_a_new_id_is_a_new_agent() -> None:
+    """
+    The other answer to the unmeasured question. Nothing is guessed from the
+    role: an id the table does not hold never inherits an address.
+    """
+    session = _resumed_with({"builder": "old-1"})
+
+    _start(session, ("not-old-1", "builder"))
+
+    assert session.role_of((session.session_id, "not-old-1")) == "builder-2"
+    assert session.resolve_role("builder") is None
+
+
+def test_an_address_the_log_knows_with_no_id_is_reserved_and_handed_to_nobody() -> None:
+    session = _resumed_with({"reviewer": None})
+
+    _start(session, ("r-1", "reviewer"))
+
+    assert session.role_of((session.session_id, "r-1")) == "reviewer-2"
+
+
+def test_a_restored_address_is_matched_as_the_driver_writes_them() -> None:
+    session = _resumed_with({" Builder ": "old-1"})
+
+    _start(session, ("new-1", "builder"))
+
+    assert session.role_of((session.session_id, "new-1")) == "builder-2"
+
+
+def test_a_session_given_no_table_allocates_as_it_always_did() -> None:
+    session = _resumed_with({})
+
+    _start(session, ("a-1", "builder"), ("a-2", "builder"))
+
+    assert session.known_roles() == ("lead", "builder", "builder-2")
+
+
+def test_an_address_from_before_the_resume_is_not_reported_as_a_spelling_mistake() -> None:
+    """
+    A third mistake beside timing and counting: the name is right and the agent
+    is from the earlier run. "has not been started yet" would have the lead
+    start a builder and expect it to be the one holding the claim.
+    """
+    session = _resumed_with({"builder": "old-1"})
+
+    said = session.role_status("builder")
+
+    assert "before it was resumed" in said and "not been started" not in said
+    _start(session, ("old-1", "builder"))
+    assert session.resolve_role("builder") == (session.session_id, "old-1")
+
+
+def test_a_sender_from_the_earlier_run_is_named_as_the_board_names_it() -> None:
+    """
+    ``read_inbox`` renders a sender with ``role_of``. Mail an earlier agent
+    posted is from ``builder, from an earlier run`` -- the board's words for it
+    -- and not from nobody in particular; replying to that name is answered
+    with why, not as a misspelling.
+    """
+    from pptmstr.model import BEFORE_RESTART, restored_party
+
+    session = _resumed_with({"builder": "old-1", "reviewer": None})
+    sid = session.session_id
+
+    assert session.role_of((sid, "old-1")) == f"builder, {BEFORE_RESTART}"
+    assert session.resolve_role(f"builder, {BEFORE_RESTART}") is None
+    assert "before it was resumed" in session.role_status(f"Builder, {BEFORE_RESTART}")
+    # No id, no name: the stand-in the store made for it is not an agent's id.
+    assert session.role_of(restored_party(sid, "reviewer")) is None
+    assert session.role_of((sid, "never-heard-of")) is None
+    assert session.role_of(("another-session", "old-1")) is None
+
+    _start(session, ("old-1", "builder"))
+    assert session.role_of((sid, "old-1")) == "builder"
+
+
+def test_the_table_a_relaunch_is_given_is_everything_this_run_decided_from() -> None:
+    session = _resumed_with({"builder": "old-1", "reviewer": None})
+
+    _start(session, ("new-1", "builder"), ("old-1", "builder"))
+
+    assert session.addresses() == {"builder": "old-1", "builder-2": "new-1", "reviewer": None}
+    again = _resumed_with(session.addresses())
+    _start(again, ("new-2", "builder"), ("new-1", "builder"))
+    assert again.addresses() == {**session.addresses(), "builder-3": "new-2"}
+
+
+# -- the end of a run settles every sub-agent that has not stopped ----------------
+
+
+@pytest.mark.parametrize(
+    ("asked", "ends_as"),
+    [(True, AgentState.CANCELLED), (False, AgentState.FAILED)],
+    ids=["a teardown somebody asked for", "any other end"],
+)
+def test_the_end_of_a_run_ends_the_live_the_given_up_and_not_the_stopped(
+    asked: bool, ends_as: AgentState
+) -> None:
+    """
+    Four sub-agents when the run ends: one working, one this session gave up on
+    for its silence, one given up on and since woken, one that stopped. A
+    given-up agent's record is FAILED, which a later word from it turns back
+    into running in the store while this session no longer counts it -- so it is
+    ended again, for the reason it was given up on. The woken one is live again
+    and ends for the run's reason, and a stopped one is left as it stopped.
+    """
+    bridge = Bridge()
+    session = AgentSession(bridge, task="lead", interactive=False)
+    sid = session.session_id
+
+    async def scene() -> list[object]:
+        for agent_id in ("working", "quiet", "woken", "stopped"):
+            await _fire_start(session, agent_id)
+        for agent_id in ("quiet", "woken"):
+            session._settle_subagent(agent_id, "no sign of life for 600s", time.monotonic())
+        await _fire_start(session, "woken")
+        await _fire_stop(session, "stopped", "done")
+        bridge.drain()
+        session.teardown_requested = asked
+        session._settle_subagents_at_run_end("its session died")
+        return bridge.drain()
+
+    ends = asyncio.run(scene())
+
+    assert all(isinstance(end, AgentFinished) for end in ends)
+    assert {end.node_id: end.state for end in ends} == {  # type: ignore[attr-defined]
+        (sid, "working"): ends_as,
+        (sid, "quiet"): ends_as,
+        (sid, "woken"): ends_as,
+    }
+    reasons = {end.node_id[1]: end.error for end in ends}  # type: ignore[attr-defined]
+    assert reasons == (
+        dict.fromkeys(("working", "quiet", "woken"))
+        if asked
+        else {
+            "working": "its session died",
+            "quiet": "no sign of life for 600s",
+            "woken": "its session died",
+        }
+    )
+    assert session._outstanding_subagents() == 0
+    assert session._given_up == {} and session._subagent_seen_at == {}
+
+
+def test_a_given_up_subagent_that_stops_or_starts_again_is_not_ended_with_the_run() -> None:
+    bridge = Bridge()
+    session = AgentSession(bridge, task="lead", interactive=False)
+
+    async def scene() -> list[object]:
+        for agent_id in ("stops-late", "woken"):
+            await _fire_start(session, agent_id)
+            session._settle_subagent(agent_id, "quiet", time.monotonic())
+        await _fire_stop(session, "stops-late", "an answer after all")
+        await _fire_start(session, "woken")
+        await _fire_stop(session, "woken", "woken and done")
+        bridge.drain()
+        session._settle_subagents_at_run_end("its session died")
+        return bridge.drain()
+
+    assert asyncio.run(scene()) == []
+
+
+# -- one line of the CLI's output that is over the transport's limit ---------------
+
+
+class _ExitedProcess:
+    returncode = 0
+
+    async def wait(self) -> int:
+        return 0
+
+    def terminate(self) -> None:
+        return None
+
+    def kill(self) -> None:
+        return None
+
+
+def _fed_client(frames: list[dict[str, Any]], on_prompt: Any = None) -> Any:
+    """
+    A real ``ClaudeSDKClient`` over the SDK's own subprocess transport, with the
+    subprocess replaced by a script: the handshake is answered, and the first
+    prompt is answered with ``frames``, written as the CLI writes them -- one JSON
+    line each, in the 64 KiB chunks a pipe read returns -- and then end of
+    stream. Everything that frames, bounds and parses a line is the SDK's.
+    """
+    import anyio
+    from claude_agent_sdk import ClaudeSDKClient
+    from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
+
+    class _Scripted(SubprocessCLITransport):
+        def __init__(self, options: Any) -> None:
+            super().__init__(prompt="", options=options)
+            self._to_stdout, self._from_cli = anyio.create_memory_object_stream[str](4096)
+
+        async def connect(self) -> None:
+            self._process = _ExitedProcess()  # type: ignore[assignment]
+            self._stdout_stream = self._from_cli  # type: ignore[assignment]
+            self._ready = True
+
+        async def write(self, data: str) -> None:
+            sent = json.loads(data)
+            if sent.get("type") == "control_request":
+                known = sent["request"]["subtype"] == "initialize"
+                reply = {"request_id": sent["request_id"]} | (
+                    {"subtype": "success", "response": {}}
+                    if known
+                    else {"subtype": "error", "error": "not scripted"}
+                )
+                line = json.dumps({"type": "control_response", "response": reply})
+                await self._to_stdout.send(line + "\n")
+            elif sent.get("type") == "user":
+                if on_prompt is not None:
+                    await on_prompt()
+                for frame in frames:
+                    line = json.dumps(frame) + "\n"
+                    for at in range(0, len(line), 65536):
+                        await self._to_stdout.send(line[at : at + 65536])
+                await self._to_stdout.aclose()
+
+        async def end_input(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            # A pipe is closed by its process exiting; this stream has no process.
+            await self._to_stdout.aclose()
+            await self._from_cli.aclose()
+            await super().close()
+
+    return lambda options: ClaudeSDKClient(options=options, transport=_Scripted(options))
+
+
+# The line that ended the operator's session twice: a Read of six PDF pages, each
+# page a base64 JPEG inside the one tool result.
+_SIX_PDF_PAGES = 1_287_886
+
+
+def _tool_result_frame(session_id: str, size: int) -> dict[str, Any]:
+    """
+    A ``user`` frame carrying one tool result, ``size`` characters long as a line.
+    """
+    image = {"type": "base64", "media_type": "image/jpeg", "data": ""}
+    frame: dict[str, Any] = {
+        "type": "user",
+        "session_id": session_id,
+        "parent_tool_use_id": None,
+        "message": {
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_read",
+                    "content": [
+                        {"type": "text", "text": "PDF pages extracted"},
+                        {"type": "image", "source": image},
+                    ],
+                }
+            ],
+        },
+    }
+    image["data"] = "A" * (size - len(json.dumps(frame)))
+    assert len(json.dumps(frame)) == size
+    return frame
+
+
+def _run_fed(
+    monkeypatch, session: AgentSession, frames: list[dict[str, Any]], subagents: tuple[str, ...]
+) -> Snapshot:
+    async def working_subagents() -> None:
+        for agent_id in subagents:
+            await _fire_start(session, agent_id)
+
+    monkeypatch.setattr("pptmstr.driver.ClaudeSDKClient", _fed_client(frames, working_subagents))
+    monkeypatch.setattr("pptmstr.driver.tag_session", lambda *a, **k: None)
+    store = Store()
+    asyncio.run(session.run())
+    store.apply_all(session.bridge.drain())
+    return store.snapshot()
+
+
+def _turn(session_id: str, size: int) -> list[dict[str, Any]]:
+    return [
+        {"type": "system", "subtype": "init", "session_id": session_id},
+        _tool_result_frame(session_id, size),
+        {
+            "type": "result",
+            "subtype": "success",
+            "duration_ms": 1,
+            "duration_api_ms": 1,
+            "is_error": False,
+            "num_turns": 1,
+            "session_id": session_id,
+        },
+    ]
+
+
+@pytest.mark.parametrize(
+    "size",
+    [_SIX_PDF_PAGES, 16 * 1024 * 1024],
+    ids=["six PDF pages, as seen", "several times the twenty a Read allows"],
+)
+def test_a_tool_result_far_over_the_sdks_default_limit_is_delivered(monkeypatch, size: int) -> None:
+    """
+    The session reads on past the frame: the turn's result, which is the line
+    after it, is what moves the root to waiting for the operator.
+    """
+    session = AgentSession(Bridge(), task="read the datasheet", interactive=False)
+    seen: list[int] = []
+    handle = Translator.handle
+
+    def measuring(self: Translator, message: object) -> list[Any]:
+        if isinstance(message, UserMessage) and isinstance(message.content, list):
+            seen.extend(
+                len(part["source"]["data"])
+                for block in message.content
+                if isinstance(block, ToolResultBlock) and isinstance(block.content, list)
+                for part in block.content
+                if part.get("type") == "image"
+            )
+        return handle(self, message)
+
+    monkeypatch.setattr(Translator, "handle", measuring)
+
+    snap = _run_fed(monkeypatch, session, _turn(session.session_id, size), ())
+
+    assert len(seen) == 1 and seen[0] > size - 1024, "the whole result reached the driver"
+    root = snap.nodes[session.node_id]
+    assert (root.state, root.error) == (AgentState.DONE, None)
+    assert snap.needs_you == ()
+    assert "CLIJSONDecodeError" not in session.transcript.text()
+
+
+def test_the_stream_limit_is_what_the_cli_is_launched_with_and_clears_the_api_request_cap() -> None:
+    """
+    A tool result has to fit one Messages request to reach the model, and that is
+    32 MB. A limit under it is a limit a usable result can exceed.
+    """
+    from pptmstr.driver import MAX_STREAM_FRAME
+
+    session = AgentSession(Bridge(), task="t", interactive=False)
+
+    assert session._options().max_buffer_size == MAX_STREAM_FRAME
+    assert MAX_STREAM_FRAME >= 2 * 32 * 1024 * 1024
+
+
+def test_a_line_over_the_limit_is_one_failure_row_that_says_what_was_too_big(monkeypatch) -> None:
+    """
+    The session dies, as it must: the transport raises and nothing skips a frame.
+    What the operator is owed is one row, the root's, leading with what was too
+    large and what to do, with the SDK's own error kept after it -- and not a row
+    for each sub-agent that was working when it happened.
+    """
+    monkeypatch.setattr("pptmstr.driver.MAX_STREAM_FRAME", 1024 * 1024)
+    session = AgentSession(Bridge(), task="lead", interactive=False)
+    sid = session.session_id
+
+    snap = _run_fed(
+        monkeypatch, session, _turn(sid, _SIX_PDF_PAGES), subagents=("reviewer", "builder")
+    )
+
+    (owed,) = snap.needs_you
+    assert isinstance(owed, SessionFailed) and owed.node == session.node_id
+    assert owed.summary.startswith(
+        "one message from this session's CLI was larger than pptmstr's 1 MB stream limit"
+    )
+    told, raw = (owed.error or "").split("\n")
+    assert "PDF pages or images" in told and "reads fewer" in told
+    assert raw.startswith("CLIJSONDecodeError: ") and "1048576" in raw
+    assert told in session.transcript.text()
+
+    from pptmstr.model import ENDED_WITH_SESSION_TOPIC
+
+    assert snap.nodes[session.node_id].state is AgentState.FAILED
+    for agent_id in ("reviewer", "builder"):
+        worker = snap.nodes[(sid, agent_id)]
+        assert (worker.state, worker.topic) == (AgentState.CANCELLED, ENDED_WITH_SESSION_TOPIC)
+        assert worker.error == f"its session died: {owed.error}"
+    assert not snap.any_active
+
+
+def test_a_line_that_is_not_json_is_not_reported_as_one_that_was_too_long() -> None:
+    """
+    The transport raises one type for both, and only the cause tells them apart.
+    """
+    from claude_agent_sdk import CLIJSONDecodeError
+    from claude_agent_sdk._internal.transport.subprocess_cli import _parse_stdout_line
+
+    from pptmstr.driver import death_reason, frame_over_limit
+
+    with pytest.raises(CLIJSONDecodeError) as corrupt:
+        _parse_stdout_line('{"type": "user", "mess')
+
+    assert not frame_over_limit(corrupt.value)
+    assert death_reason(corrupt.value) == f"CLIJSONDecodeError: {corrupt.value}"
+    assert death_reason(RuntimeError("boom")) == "RuntimeError: boom"
+
+
+def test_a_subagent_given_up_on_before_its_session_failed_keeps_its_own_failure() -> None:
+    """
+    ``session_failed`` speaks for the sub-agents that were working until the
+    session died, and for no other: one that had already gone quiet stopped for a
+    reason of its own, which the root's row does not carry.
+    """
+    bridge = Bridge()
+    session = AgentSession(bridge, task="lead", interactive=False)
+    sid = session.session_id
+
+    async def scene() -> list[object]:
+        for agent_id in ("working", "quiet"):
+            await _fire_start(session, agent_id)
+        session._settle_subagent("quiet", "no sign of life for 600s", time.monotonic())
+        bridge.drain()
+        session._settle_subagents_at_run_end("its session died", session_failed=True)
+        return bridge.drain()
+
+    ends = [end for end in asyncio.run(scene()) if isinstance(end, AgentFinished)]
+
+    assert {end.node_id: (end.state, end.error) for end in ends} == {
+        (sid, "working"): (AgentState.CANCELLED, "its session died"),
+        (sid, "quiet"): (AgentState.FAILED, "no sign of life for 600s"),
+    }
+    assert session._outstanding_subagents() == 0 and session._given_up == {}
+
+
+# -- the opening text of a run: the task, or a resume's message ------------------------
+
+
+class _HearingClient(_FakeClient):
+    """
+    A fake client that keeps what it was sent.
+    """
+
+    def __init__(self, messages: list[object], heard: list[object], **kwargs: object) -> None:
+        super().__init__(messages, **kwargs)  # type: ignore[arg-type]
+        self._heard = heard
+
+    async def query(self, prompt: object, session_id: str = "default") -> None:
+        self._heard.append(prompt)
+
+
+def _run_hearing(session: AgentSession, messages: list[object], monkeypatch) -> list[object]:
+    heard: list[object] = []
+    monkeypatch.setattr(
+        "pptmstr.driver.ClaudeSDKClient", lambda **_: _HearingClient(messages, heard)
+    )
+    monkeypatch.setattr("pptmstr.driver.tag_session", lambda *a, **k: None)
+    asyncio.run(session.run())
+    return heard
+
+
+def _announced(bridge: Bridge) -> list[AgentSpawned]:
+    return [i for i in bridge.drain() if isinstance(i, AgentSpawned) and i.node_id[1] is None]
+
+
+def test_a_fresh_session_is_sent_its_task_and_announced_under_it(monkeypatch) -> None:
+    bridge = Bridge()
+    session = AgentSession(bridge, task="build the parser")
+
+    heard = _run_hearing(session, [result(terminal_reason="completed")], monkeypatch)
+
+    assert heard == ["build the parser"]
+    assert {spawn.task for spawn in _announced(bridge)} == {"build the parser"}
+
+
+def test_a_resume_is_sent_its_message_once_and_keeps_the_title_it_had(monkeypatch) -> None:
+    """
+    The hazard is a resume that re-sends the session its first task, or one that
+    renames the session after the message. The session is built as the resume
+    form's spec builds it: the session's own task, and the typed text beside it.
+    What the client hears is the text and only the text; what the store is told,
+    by the pool's announce and by the run's own, is the task.
+    """
+    bridge = Bridge()
+    session = AgentSession(
+        bridge, task="build the parser", resume="sess-old", message="ok, carry on with step 3"
+    )
+    session.announce()
+
+    heard = _run_hearing(session, [_init("sess-old"), result(session_id="sess-old")], monkeypatch)
+
+    assert heard == ["ok, carry on with step 3"]
+    announced = _announced(bridge)
+    assert len(announced) == 2
+    assert {spawn.task for spawn in announced} == {"build the parser"}
+    said = "".join(
+        session.transcript.read(seg.start, seg.end) for seg in session.transcript.segments()
+    )
+    assert "> ok, carry on with step 3" in said and "build the parser" not in said
+
+
+def test_an_empty_message_is_still_the_message_and_not_the_task(monkeypatch) -> None:
+    """
+    ``None`` is "no message"; a message that happens to be empty is not the task.
+    """
+    session = AgentSession(Bridge(), task="build the parser", message="")
+
+    assert _run_hearing(session, [result()], monkeypatch) == [""]
+
+
+def test_a_run_says_it_started_once_and_only_after_the_opening_text_was_handed_over(
+    monkeypatch,
+) -> None:
+    session = AgentSession(Bridge(), task="build the parser")
+    heard: list[object] = []
+    seen: list[list[object]] = []
+    session.on_started = lambda: seen.append(list(heard))
+    monkeypatch.setattr(
+        "pptmstr.driver.ClaudeSDKClient",
+        lambda **_: _HearingClient([result(), result()], heard),
+    )
+
+    asyncio.run(session.run())
+
+    assert seen == [["build the parser"]]
+
+
+def test_a_run_refused_before_it_connects_never_says_it_started(monkeypatch) -> None:
+    """
+    What the session's file is written from. A session built at the rung that
+    needs containment, with none, is refused by ``run`` ahead of the client: it
+    was announced, it sent nothing, and it must not report a start.
+    """
+    bridge = Bridge()
+    session = AgentSession(bridge, task="t", policy=Policy.AUTONOMOUS)
+    started: list[bool] = []
+    session.on_started = lambda: started.append(True)
+
+    heard = _run_hearing(session, [result()], monkeypatch)
+
+    assert heard == [] and started == []
+    ends = [i for i in bridge.drain() if isinstance(i, AgentFinished)]
+    assert [end.state for end in ends] == [AgentState.FAILED]
+
+
+def test_a_start_callback_that_raises_does_not_end_the_run(monkeypatch) -> None:
+    bridge = Bridge()
+    session = AgentSession(bridge, task="build the parser")
+
+    def told() -> None:
+        raise OSError("the disk is full")
+
+    session.on_started = told
+    store = Store()
+    heard = _run_hearing(session, [result(terminal_reason="completed")], monkeypatch)
+    store.apply_all(bridge.drain())
+
+    assert heard == ["build the parser"]
+    assert store.snapshot().nodes[session.node_id].state is AgentState.DONE
+
+
+def test_send_says_whether_a_client_took_the_text() -> None:
+    """
+    False is a text that was dropped: nothing was connected. The caller records
+    "the last message this session was sent" from the answer, and a dropped one
+    is not that.
+    """
+    session = AgentSession(Bridge(), task="t")
+
+    async def both() -> tuple[bool, bool]:
+        before = await session.send("too early")
+        session._client = _FakeClient([])  # type: ignore[assignment]
+        return before, await session.send("now")
+
+    assert asyncio.run(both()) == (False, True)
+
+
+class _RefusesItsText(_FakeClient):
+    """A client that connects and whose ``query`` raises: the pipe was closed."""
+
+    async def query(self, prompt: object, session_id: str = "default") -> None:
+        raise BrokenPipeError("the CLI closed its stdin")
+
+
+def test_a_run_whose_opening_send_raised_is_never_said_to_have_reached_the_cli(
+    monkeypatch,
+) -> None:
+    """
+    A root leaving SPAWNING is what the shell reads as "a run reached the CLI",
+    and it is what lets the session's file be created (``fleetsync.changes``).
+    Said before the text was handed over, a ``query`` that raised leaves a file
+    holding an end and nothing of a launch -- an untitled card at the next start
+    for a session that was never given anything.
+    """
+    from pptmstr import fleetsync
+
+    bridge = Bridge()
+    session = AgentSession(bridge, task="build the parser")
+    started: list[bool] = []
+    session.on_started = lambda: started.append(True)
+    monkeypatch.setattr("pptmstr.driver.ClaudeSDKClient", lambda **_: _RefusesItsText([]))
+    monkeypatch.setattr("pptmstr.driver.tag_session", lambda *a, **k: None)
+
+    asyncio.run(session.run())
+
+    intents = bridge.drain()
+    assert not [i for i in intents if isinstance(i, StateChanged) and i.node_id == session.node_id]
+    (end,) = [i for i in intents if isinstance(i, AgentFinished)]
+    assert end.state is AgentState.FAILED and "stdin" in (end.error or "")
+    assert started == []
+
+    # And what the shell derives from those steps creates no file.
+    store = Store()
+    derived = []
+    for intent in intents:
+        before = store.snapshot()
+        store.apply(intent, now=1.0)
+        derived += fleetsync.changes(before, intent, store.snapshot(), 100.0)
+    assert derived and not [change for change in derived if change.started]
+
+
+def test_a_message_is_said_to_be_read_only_once_the_client_has_taken_it() -> None:
+    """The order inside ``send``, for a message sent mid-conversation as well."""
+    bridge = Bridge()
+    session = AgentSession(bridge, task="t")
+    seen: list[int] = []
+
+    class Client:
+        async def query(self, prompt: object, session_id: str = "default") -> None:
+            seen.append(len([i for i in bridge.drain() if isinstance(i, StateChanged)]))
+
+    session._client = Client()  # type: ignore[assignment]
+    assert asyncio.run(session.send("and then the tests")) is True
+    assert seen == [0], "nothing was said while the text was still ours"
+    (said,) = [i for i in bridge.drain() if isinstance(i, StateChanged)]
+    assert said.state is AgentState.THINKING
+
+
+def test_a_session_resumed_under_a_label_says_so_when_it_announces() -> None:
+    """
+    The store builds the root's record from the announce and from nothing else,
+    so a title that is only the CLI's label has to be said there or the record
+    passes it off as the task: Fork and Retry start new sessions from that field.
+    """
+    bridge = Bridge()
+    session = AgentSession(
+        bridge, task="A summary of it", resume="sess-old", message="ok", task_is_label=True
+    )
+    session.announce()
+    plain = AgentSession(bridge, task="build the parser")
+    plain.announce()
+
+    store = Store()
+    store.apply_all(bridge.drain())
+    snap = store.snapshot()
+    labelled = snap.nodes[session.node_id]
+    assert (labelled.task, labelled.task_is_label, labelled.titled_by_label) == (
+        "A summary of it",
+        True,
+        True,
+    )
+    assert not snap.nodes[plain.node_id].titled_by_label
+
+
+# -- the command tools follow the session's containment, and not its rung ---------------
+
+
+def _served_tools(session: AgentSession) -> set[str]:
+    """The tool names the session's own bus server announces to its CLI."""
+    import mcp.types as mcp_types
+
+    from pptmstr.bus import SERVER_NAME
+
+    server = session._mcp_servers()[SERVER_NAME]["instance"]
+    handler = server.request_handlers[mcp_types.ListToolsRequest]
+    listed = asyncio.run(handler(mcp_types.ListToolsRequest(method="tools/list")))
+    return {tool.name for tool in listed.root.tools}
+
+
+_COMMAND_NAMES = {"request_command", "read_commands", "withdraw_command"}
+
+
+@pytest.mark.parametrize("containment", [None, "", " ", "\n\t", "{}", " {} ", "x"])
+def test_contained_is_the_guards_own_reading_of_the_settings_string(
+    containment: str | None,
+) -> None:
+    """
+    One predicate. ``_unpaired`` refuses a rung by it and the bus offers the
+    command tools by it, so a string the guard calls absent can never be a
+    session that is offered a way to run a command outside a sandbox it does
+    not have.
+    """
+    session = AgentSession(Bridge(), "t", containment=containment)
+    needing = [rung for rung in Policy if requires_containment(rung)]
+
+    assert needing
+    for rung in needing:
+        assert session.contained is not session._unpaired(rung)
+    assert session.contained is bool((containment or "").strip())
+
+
+@pytest.mark.parametrize("policy", list(Policy))
+@pytest.mark.parametrize("containment", [None, "", " ", "{}"])
+def test_a_session_has_the_command_tools_exactly_when_its_process_is_contained(
+    policy: Policy, containment: str | None
+) -> None:
+    """
+    Against a real session's own server, at every rung it can be constructed on.
+    Keyed on the containment and not on the gate: a contained session at STRICT
+    has the three, and no rung gives them to a session with no sandbox.
+    """
+    contained = bool((containment or "").strip())
+    if requires_containment(policy) and not contained:
+        # The arrangement the driver refuses to start; it is still constructible,
+        # and its server must not have the tools either.
+        assert AgentSession(Bridge(), "t", policy=policy, containment=containment)._unpaired(policy)
+    session = AgentSession(Bridge(), "t", policy=policy, containment=containment)
+
+    assert bool(_COMMAND_NAMES & _served_tools(session)) is contained
+    assert (_COMMAND_NAMES <= _served_tools(session)) is contained
+
+
+def test_narrowing_a_contained_session_does_not_take_the_command_tools_away() -> None:
+    """The sandbox is still on the process after the rung moves, so the tools are still its."""
+    from pptmstr.bus import qualified
+
+    session = AgentSession(Bridge(), "t", policy=Policy.AUTONOMOUS, containment="{}")
+    session.set_policy(Policy.STRICT)
+
+    assert session.contained and _COMMAND_NAMES <= _served_tools(session)
+    assert session._stamp_bus_call(qualified("request_command"), {}, ("s1", None)) is not None
+
+
+def test_the_gate_stamps_a_command_tool_for_a_contained_session_and_for_no_other() -> None:
+    """
+    The stamp list is the session's own server's list. A contained session's
+    request carries the sender the gate authenticated over one the model wrote;
+    an uncontained session has no such tool, and a call naming it is left alone
+    to be answered by the CLI as a tool that does not exist.
+    """
+    from pptmstr.bus import EDITED_KEY, FROM_KEY, qualified
+
+    forged = {"command": "make install", FROM_KEY: ["s9", None], EDITED_KEY: True}
+    node = ("s1", "agent-7")
+    for name in sorted(_COMMAND_NAMES):
+        stamped = AgentSession(Bridge(), "t", containment="{}")._stamp_bus_call(
+            qualified(name), forged, node
+        )
+        assert stamped is not None
+        assert (list(stamped[FROM_KEY]), stamped[EDITED_KEY]) == (["s1", "agent-7"], False)
+        for absent in (None, "", " "):
+            session = AgentSession(Bridge(), "t", containment=absent)
+            assert session._stamp_bus_call(qualified(name), forged, node) is None
+    # The tools every session has are stamped for both.
+    for containment in (None, "{}"):
+        session = AgentSession(Bridge(), "t", containment=containment)
+        assert session._stamp_bus_call(qualified("read_board"), {}, node) is not None
+
+
+@pytest.mark.parametrize("containment", [None, "{}"])
+def test_the_prompts_and_the_tool_lists_are_built_from_the_sessions_containment(
+    containment: str | None, monkeypatch
+) -> None:
+    """
+    The briefing names the command tools only where the server has them, so both
+    prompt builders and every restricted role's tool list are handed the one
+    fact the server was built from -- and a role told about the tool has it.
+    """
+    from pptmstr.templates import COMMAND_TOOL_NAMES
+
+    seen = _briefing_spy(monkeypatch)
+    template = WorkTemplate(
+        name="t",
+        description="d",
+        lead_prompt="p",
+        roles=(
+            Role(name="builder", description="d", prompt="p"),
+            Role(name="reviewer", description="d", prompt="p", tools=("Read",)),
+        ),
+    )
+    session = AgentSession(Bridge(), task="lead", template=template, containment=containment)
+
+    prompt = session._system_prompt()
+    team = session._team()
+
+    assert seen["contained"] == [session.contained] * 3
+    assert prompt is not None and team is not None
+    assert ("request_command" in str(prompt)) is session.contained
+    assert team["builder"].tools is None
+    restricted = team["reviewer"].tools
+    assert restricted is not None
+    assert (set(COMMAND_TOOL_NAMES) <= set(restricted)) is session.contained
+    assert bool(set(COMMAND_TOOL_NAMES) & set(restricted)) is session.contained
+    for definition in team.values():
+        assert ("request_command" in definition.prompt) is session.contained

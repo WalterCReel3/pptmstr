@@ -13,6 +13,7 @@ single source of truth.
 
 from __future__ import annotations
 
+import builtins
 import dataclasses
 import enum
 import posixpath
@@ -22,6 +23,14 @@ from types import MappingProxyType
 from typing import Any, ClassVar
 
 from .approval import DiffText, Policy
+from .command import (
+    TIMEOUT_CHOICES_S,
+    Command,
+    CommandId,
+    CommandState,
+    RequestRefusal,
+    command_refusal,
+)
 from .transcript import Transcript
 
 # (session_id, agent_id). Root sessions have agent_id None; sub-agents carry the
@@ -99,9 +108,45 @@ class AgentState(enum.Enum):
         """Whether no further transition is expected without operator action."""
         return self in _TERMINAL_STATES
 
+    @property
+    def is_final(self) -> bool:
+        """
+        Whether this is an end an ordinary status update cannot undo
+        (``FINAL_STATES``). Narrower than ``is_terminal``: FAILED is terminal and
+        not final.
+        """
+        return self in FINAL_STATES
+
 
 _ACTIVE_STATES = frozenset({AgentState.THINKING, AgentState.CALLING_TOOL, AgentState.RUNNING_TOOL})
 _TERMINAL_STATES = frozenset({AgentState.DONE, AgentState.FAILED, AgentState.CANCELLED})
+
+# The ends that cannot be undone by an ordinary status update.
+#
+# A narrower question than ``AgentState.is_terminal``, and deliberately not the
+# same set. ``is_terminal`` asks whether another transition is expected without
+# the operator; this asks who is allowed to contradict the end, and only
+# ``AgentFinished`` and ``AgentResumed`` are.
+#
+# FAILED is absent on purpose. A session that errored and then answered is an
+# ordinary session again (see the store's StateChanged arm), and that recovery
+# arrives as a plain StateChanged because nothing announces it -- the driver
+# re-asserts a standing failure afterwards rather than suppressing the recovery.
+# The driver reports an error result as FAILED with its client still connected,
+# so a FAILED root is not evidence that its process has gone.
+#
+# DONE and CANCELLED make the opposite statement: somebody ended this agent. A
+# sub-agent's SubagentStop fires once, and the wake that can follow it comes in as
+# a second SubagentStart, which the driver translates to ``AgentResumed`` -- so
+# nothing legitimate reaches a finished sub-agent through StateChanged. What does
+# reach it is its own last AssistantMessage: the message stream is buffered while
+# the control frame carrying the stop is dispatched straight away, so the answer
+# translates into a THINKING that lands after the end it preceded.
+#
+# Here and not in the store because two questions are asked of it outside the
+# reducer's arms: whether a session may leave the fleet
+# (``Snapshot.detach_refusal``) and what has become of a decision's asker.
+FINAL_STATES = frozenset({AgentState.DONE, AgentState.CANCELLED})
 
 # The two topics a turn ending lands on. An interrupted turn is not a terminal
 # state -- interrupt is the recoverable lever, so the session stays messageable --
@@ -121,6 +166,17 @@ INTERRUPTED_TOPIC = "interrupted - waiting for you"
 # ``compose`` tells the operator they can do about it. Two spellings of the same
 # situation is how a row and a pane end up contradicting each other.
 SUPERVISING_TOPIC = "supervising its sub-agents - you can send now"
+
+# What a sub-agent was last doing when its session failed under it. It is ended
+# CANCELLED and owes the operator nothing of its own -- the root's failure is the
+# session's one row (``driver.AgentSession._settle_subagents_at_run_end``) -- so
+# this is what tells it from a sub-agent of a session somebody closed.
+ENDED_WITH_SESSION_TOPIC = "ended with its session"
+
+# The topic of a record recalled from a session file: a session this process has
+# not run. One word, because the card says how and how long ago from
+# ``Recalled`` and a second account of that here could disagree with it.
+RECALLED_TOPIC = "closed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -320,17 +376,26 @@ class PendingApproval:
 
 class ObligationKind(enum.Enum):
     """
-    The three ways an agent can be waiting on its operator.
+    The five things the operator can owe an agent.
 
     Named as a closed set on purpose. The whole defect this exists to fix is that
     "waiting on you" had two unrelated implementations and one of them had no
     surface at all, so the count in the status bar was true about approvals and
     silently wrong about everything else.
+
+    The first three are read off a node's state, and a node in one of them has
+    stopped. ``DECISION`` is not like that: it is a record an agent filed, the
+    agent that filed it may be working, and one node can have several open beside
+    any of the other three. ``COMMAND`` is a record too -- a break-glass command
+    an agent asked the operator to run -- and its asker carries on in the same
+    way.
     """
 
     APPROVAL = "approval"
     QUESTION = "question"
     FAILURE = "failure"
+    DECISION = "decision"
+    COMMAND = "command"
 
 
 def _node_key(kind: ObligationKind, node: NodeId) -> str:
@@ -410,11 +475,392 @@ class SessionFailed:
         return _node_key(self.kind, self.node)
 
 
-# A tagged union, not a base class with three subclasses: the inbox renders one row
-# shape for all three (glyph, identity, wait, summary) and three different bodies
-# when a row expands, and `match` over a union is what makes the store's own
+# -- decisions awaiting the operator ----------------------------------------------
+
+DecisionId = str
+
+# How many decisions one agent may have open at once. Raising one parks nothing in
+# front of the operator on any rung -- the queue row is the review -- so this is
+# the bound on what one looping agent can put in ``needs_you``, which the status
+# bar counts. Small enough to read in one screen of the queue.
+#
+# Per asker, so that no agent's allowance is spent by another: the root of a
+# session is refused a raise only for what it has open itself.
+MAX_OPEN_DECISIONS_PER_ASKER = 8
+
+# How many the sub-agents of one session may have open between them. A second
+# bound, because a lead can start any number of workers and each has the allowance
+# above. It never turns the root away, and a decision whose asker has ended for
+# good -- stopped, failed, or gone -- is not counted in it: that decision waits on
+# the operator's dismissal, and nothing a working agent can do would free its
+# place.
+MAX_OPEN_SUBAGENT_DECISIONS = 24
+
+# Each text an asker writes on a decision: the question, what happens if it goes
+# unanswered, the evidence and the recommendation. A decision is a question and
+# not a document; the long form belongs in a file the text names.
+#
+# These three and ``MAX_ANSWER_CHARS`` are sized together. ``read_decisions``
+# returns one decision with all of them whole, and that reply has to fit the
+# bound the bus holds every board read to. tests/test_bus.py holds the sum to it.
+MAX_DECISION_TEXT_CHARS = 1_000
+
+# How many tasks a decision may name as blocked.
+MAX_BLOCKED_TASKS = 8
+
+# The operator's answer. Refused past this by the ``DecisionAnswered`` arm, and
+# never cut: an answer is stored byte for byte or not at all. A surface that
+# takes the answer reads this to refuse a longer draft before it is sent, with
+# the count, because the arm's refusal has nobody to reply to.
+MAX_ANSWER_CHARS = 4_000
+
+
+class Standing(enum.Enum):
+    """
+    Whose decision it is, as its asker states it.
+
+    ``OPERATORS`` is one nobody has taken: the work it blocks is waiting for the
+    answer. ``TAKEN`` is one the agent already took and went on from, and is
+    asking to have ratified -- an answer that disagrees means work to undo, which
+    is why the two are never drawn alike.
+    """
+
+    OPERATORS = "operators"
+    TAKEN = "taken"
+
+
+@dataclass(frozen=True, slots=True)
+class Answered:
+    """
+    The operator answered. ``text`` is what they typed, byte for byte: never
+    stripped, cut, or put on one line. The record exists because a paraphrase
+    passed between agents drifts, and an answer tidied here has already begun to.
+    """
+
+    text: str
+    at: float
+
+
+@dataclass(frozen=True, slots=True)
+class Dismissed:
+    """The operator closed it without answering. No answer exists."""
+
+    at: float
+
+
+@dataclass(frozen=True, slots=True)
+class Withdrawn:
+    """Its asker took it back. No answer exists."""
+
+    at: float
+
+
+# How a decision ended. A union and not an ``answer`` field beside a state: an
+# answer exists exactly when the operator gave one, and with one value for both
+# there is no dismissed decision carrying an answer to be explained.
+DecisionOutcome = Answered | Dismissed | Withdrawn
+
+
+class DecisionRefusal(enum.Enum):
+    """
+    Why an agent's write to a decision did not take effect.
+
+    ``TOO_MANY_OPEN``, ``SESSION_FULL``, ``UNKNOWN_TASK`` and ``ALREADY_RAISED``
+    turn a raise away. The first two are apart because what the asker can do next
+    differs: ``TOO_MANY_OPEN`` is its own allowance, which it frees by withdrawing
+    one of its own, and ``SESSION_FULL`` is the sub-agents' shared one, which it
+    may hold none of. ``UNKNOWN_TASK`` is a ``blocks`` naming something that is
+    not a task on the asker's board.
+
+    The other three turn a withdrawal away, and are apart for the reason
+    ``TaskRefusal`` gives -- a mistyped id, somebody else's decision, and one
+    that has already ended are three different things to do next.
+
+    ``NOT_APPLIED`` is the member ``_apply`` never returns: the fallback for a
+    request the store never saw, as on ``TaskRefusal``.
+    """
+
+    TOO_MANY_OPEN = "too_many_open"
+    SESSION_FULL = "session_full"
+    UNKNOWN_TASK = "unknown_task"
+    ALREADY_RAISED = "already_raised"
+    NO_SUCH_DECISION = "no_such_decision"
+    NOT_THE_ASKER = "not_the_asker"
+    ALREADY_ENDED = "already_ended"
+    NOT_APPLIED = "not_applied"
+
+
+@dataclass(frozen=True, slots=True)
+class Decision:
+    """
+    Something an agent wants the operator to decide, as a record rather than a
+    sentence in a transcript.
+
+    Every text field is the asker's and none is the store's: ``question``, what
+    happens ``if_unanswered``, the ``evidence``, and the ``recommendation``.
+    **The last two are separate fields and are never joined** -- the point of
+    holding them apart is that the operator can read what is known before reading
+    what the asker wants done with it.
+
+    ``blocks`` is not a text. It is the ids of the tasks on the asker's board
+    that wait for the answer, each one checked against that board when the
+    decision is filed, and it may be empty. Empty is the statement "this blocks
+    nothing on the board" and every surface says so in those words: prose here
+    would have to be searched for task ids, and a sentence saying a task is NOT
+    held up names that task as surely as one saying it is.
+
+    ``reversible`` is three-valued and has no default. None is "the asker did not
+    say", which is a different statement from either answer, and a default would
+    put one of them in the asker's mouth.
+
+    ``asker`` is the node the gate authenticated and ``raised_at`` the instant the
+    reducer filed it; the ``DecisionRaised`` arm writes both, whatever the record
+    it was handed says. ``outcome`` and ``first_delivered_at`` are written only by
+    the arms for the operator's answer and dismissal, the asker's withdrawal, and
+    the asker's read.
+
+    ``first_delivered_at`` is when the asker was first handed the operator's
+    answer or dismissal: its own read of this decision by id, which is the one
+    reply that carries the answer. A read by the session's root of a decision
+    another agent raised does not set it, and neither does a list of decisions,
+    which shows no answer. A fact for the pane. Nothing reads it to decide
+    whether to hand the answer over again: the asker is given it on every read.
+
+    Not in the board log. A decision does not survive a restart of pptmstr.
+    """
+
+    id: DecisionId
+    asker: NodeId
+    question: str
+    blocks: tuple[TaskId, ...]
+    if_unanswered: str
+    evidence: str
+    recommendation: str
+    standing: Standing
+    reversible: bool | None
+    raised_at: float
+    outcome: DecisionOutcome | None = None
+    first_delivered_at: float | None = None
+
+    @property
+    def session_id(self) -> str:
+        """The session it was raised in, which is its asker's."""
+        return self.asker[0]
+
+    @property
+    def is_open(self) -> bool:
+        return self.outcome is None
+
+    @property
+    def answer(self) -> str | None:
+        """The operator's words, or None when there are none. ``""`` is an answer."""
+        return self.outcome.text if isinstance(self.outcome, Answered) else None
+
+    @property
+    def answered_at(self) -> float | None:
+        return self.outcome.at if isinstance(self.outcome, Answered) else None
+
+
+class AskerFate(enum.Enum):
+    """
+    What has become of the agent a decision is for, read off its record.
+
+    The question each member answers is whether an answer given now will be
+    read, and by what.
+
+    ``LIVE`` is an agent in a turn: it reads the answer when it next asks.
+    ``IDLE`` is one whose turn has ended with its session still connected
+    (``AgentState.AWAITING_INPUT``). Nothing wakes it when a decision is answered,
+    so the answer sits unread until the operator sends that session a prompt --
+    and this is the ordinary state of an agent that asked and stopped to wait.
+
+    ``STOPPED`` is an agent whose run ended; a sub-agent in it can still be woken,
+    so an answer may yet be read. ``FAILED`` is one whose session died.
+
+    ``UNANNOUNCED`` is a sub-agent the store has no record of while its session's
+    root has one: it called the bus before its start was reported, and it may be
+    working. ``GONE`` is an asker nothing in a run that is going now can wake: an
+    agent of an earlier run of its session (``Snapshot.of_earlier_run``) --
+    another process's, which has no record here, or this process's from before
+    the session was started again, which has one and whose session is still in
+    the store -- and an asker whose session is not in the store at all, a root
+    with no record or a sub-agent whose root has none. Nothing will read an
+    answer to it.
+
+    ``has_ended`` is what the count of a session's open decisions reads.
+    """
+
+    LIVE = "live"
+    IDLE = "idle"
+    STOPPED = "stopped"
+    FAILED = "failed"
+    UNANNOUNCED = "unannounced"
+    GONE = "gone"
+
+    @property
+    def has_ended(self) -> bool:
+        """
+        Whether the asker has finished for good as far as its own session can
+        tell: nothing it does will withdraw the decision or free its place.
+        """
+        return self in (AskerFate.STOPPED, AskerFate.FAILED, AskerFate.GONE)
+
+
+@dataclass(frozen=True, slots=True)
+class DecisionOwed:
+    """
+    A decision nobody has answered, dismissed or withdrawn.
+
+    ``summary`` is composed by the store from structure -- the id, the asker's
+    role, the standing, the reversibility, the tasks it blocks, what became of
+    the asker -- and holds none of the asker's sentences. The queue draws a
+    summary in its own voice beside ``approval.summarize``'s, so a question shown
+    there would be an agent's text reading as the queue's. The texts are on
+    ``decision``, for a surface that marks them as authored.
+
+    ``node`` is the asker. Unlike the other three kinds it does not say the node
+    has stopped.
+    """
+
+    node: NodeId
+    since: float
+    summary: str
+    decision: Decision
+    asker: AskerFate
+
+    kind: ClassVar[ObligationKind] = ObligationKind.DECISION
+
+    @property
+    def key(self) -> str:
+        """Per decision: one node can have several open at once."""
+        return f"{self.kind.value}:{self.decision.id}"
+
+
+@dataclass(frozen=True, slots=True)
+class CommandOwed:
+    """
+    A break-glass command that is asked or running.
+
+    Both states owe a row. An asked one waits to be read and run or refused; a
+    running one is listed because stopping it is the operator's and has to stay
+    reachable whatever has become of its asker.
+
+    ``summary`` is composed by the store from structure -- the state, the
+    asker's role, how many lines and characters the string has, the id -- and
+    holds nothing of the string, the reason or the expectation, for the reason
+    ``DecisionOwed.summary`` holds none of a question. The texts are on
+    ``command``, for a surface that marks each as its author's.
+
+    ``since`` is on the store's clock like every other obligation's, and is
+    not ``command.asked_at``, which is a wall-clock time
+    (``Snapshot.command_since``).
+
+    ``node`` is the asker, and it has not stopped: it was told to carry on.
+    """
+
+    node: NodeId
+    since: float
+    summary: str
+    command: Command
+    asker: AskerFate
+
+    kind: ClassVar[ObligationKind] = ObligationKind.COMMAND
+
+    @property
+    def key(self) -> str:
+        """Per command: one node can have several open at once."""
+        return f"{self.kind.value}:{self.command.id}"
+
+
+# A tagged union, not a base class with five subclasses: the inbox renders one row
+# shape for all of them (glyph, identity, wait, summary) and a different body for
+# each when a row expands, and `match` over a union is what makes the store's own
 # exhaustiveness trick available to that second half.
-Obligation = ApprovalNeeded | QuestionPending | SessionFailed
+Obligation = ApprovalNeeded | QuestionPending | SessionFailed | DecisionOwed | CommandOwed
+
+
+# -- break-glass commands ----------------------------------------------------------
+#
+# The records are ``command.py``'s and are not declared again here. What is here
+# is what the store says about one: why it turned a write away.
+
+# The operator's reason for refusing a command. Past this the ``CommandRefused``
+# arm applies nothing, and never cuts: the asker reads the reason back whole, in
+# a reply the bus bounds. A surface that takes the reason reads this to refuse a
+# longer draft first, as with ``MAX_ANSWER_CHARS``.
+MAX_COMMAND_REFUSAL_CHARS = 1_000
+
+
+class CommandRefusal(enum.Enum):
+    """
+    Why a write to a break-glass command did not take effect, where the reason
+    is the store's and not the command string's (``command.RequestRefusal`` is
+    that half, and a settled write carries one or the other).
+
+    ``BAD_ID``, ``ALREADY_ASKED``, ``TOO_MANY_OPEN`` and ``SESSION_FULL`` turn a
+    request away. The last two are apart for the reason they are on
+    ``DecisionRefusal``: one is the asker's own allowance, the other the
+    sub-agents' shared one.
+
+    ``NO_SUCH_COMMAND``, ``NOT_THE_ASKER`` and ``NOT_ASKED`` turn a withdrawal
+    away. ``NOT_ASKED`` is a command that is no longer only asked: the operator
+    has approved it, or it has ended.
+
+    ``NO_SUCH_COMMAND``, ``NOT_ASKED``, ``BAD_TIMEOUT`` and
+    ``ALREADY_RUNNING_IN_SESSION`` turn the operator's approval away
+    (``Snapshot.command_approval_refusal``). Nobody is parked on an approval,
+    so the surface that offers it asks first and says which.
+
+    ``NOT_APPLIED`` is the member ``_apply`` never returns: the fallback for a
+    request the store never saw, as on ``TaskRefusal``.
+
+    The value is the stable name; ``sentence`` is what is said.
+    """
+
+    BAD_ID = "bad_id"
+    ALREADY_ASKED = "already_asked"
+    TOO_MANY_OPEN = "too_many_open"
+    SESSION_FULL = "session_full"
+    NO_SUCH_COMMAND = "no_such_command"
+    NOT_THE_ASKER = "not_the_asker"
+    NOT_ASKED = "not_asked"
+    BAD_TIMEOUT = "bad_timeout"
+    ALREADY_RUNNING_IN_SESSION = "already_running_in_session"
+    NOT_APPLIED = "not_applied"
+
+    @property
+    def sentence(self) -> str:
+        return _COMMAND_REFUSAL_SENTENCES[self]
+
+
+_COMMAND_REFUSAL_SENTENCES = {
+    CommandRefusal.BAD_ID: "The command's id does not have the form of a command id.",
+    CommandRefusal.ALREADY_ASKED: (
+        "A command with that id has already been asked. It stands as it was asked."
+    ),
+    CommandRefusal.TOO_MANY_OPEN: (
+        "You already have as many commands waiting on the operator as one agent "
+        "may. Withdraw one that is still only asked, or wait for one to end."
+    ),
+    CommandRefusal.SESSION_FULL: (
+        "The sub-agents of this session already have as many commands waiting on "
+        "the operator as they may between them. Wait for one to end."
+    ),
+    CommandRefusal.NO_SUCH_COMMAND: "There is no command with that id.",
+    CommandRefusal.NOT_THE_ASKER: (
+        "That command was asked by another agent. Only its asker may withdraw it."
+    ),
+    CommandRefusal.NOT_ASKED: (
+        "That command is no longer only asked: the operator has acted on it, or " "it has ended."
+    ),
+    CommandRefusal.BAD_TIMEOUT: "The timeout is not one of the bounds a command may run under.",
+    CommandRefusal.ALREADY_RUNNING_IN_SESSION: (
+        "Another command of this session is running. One runs at a time."
+    ),
+    CommandRefusal.NOT_APPLIED: (
+        "The request was not applied: pptmstr stopped before it was read."
+    ),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -529,6 +975,27 @@ class LaunchSpec:
     # rather than the one that happened to be in force when the session first ran.
     # Re-reading it is the behaviour a relaunch wants.
     subagent_cap: int | None = None
+    # What the session is sent first, when that is not ``task``: the operator's
+    # message on a resume. None sends ``task``, which is every fresh launch.
+    #
+    # Separate from ``task`` because ``task`` is also what the session's root is
+    # announced with -- the card's title, and what ``from_record`` relaunches
+    # from. A resume that carried "ok, carry on" there would retitle the session
+    # and make Fork and Retry start a new one with it.
+    #
+    # Not carried by ``from_record``: a fork or a relaunch starts a conversation
+    # from the task, and this is one message of the conversation it is not
+    # continuing.
+    message: str | None = None
+    # Whether ``task`` is only a title: the CLI's label for a conversation
+    # whose original task nothing recorded (``AgentRecord.titled_by_label``).
+    #
+    # A resume carries it so the announce can say it of the record it builds,
+    # and the card keeps both its title and the fact about it. ``from_record``
+    # carries it too, and there it is a refusal in waiting: a fork or a
+    # relaunch has only ``task`` to open the new conversation with, and the
+    # shell starts nothing from a spec that says its task is no prompt.
+    task_is_label: bool = False
 
     @classmethod
     def from_record(cls, record: AgentRecord) -> LaunchSpec:
@@ -551,7 +1018,110 @@ class LaunchSpec:
             session_base=record.session_base,
             template=record.template,
             brief=record.brief,
+            task_is_label=record.titled_by_label,
         )
+
+
+class TranscriptPresence(enum.Enum):
+    """
+    Whether the CLI still has the conversation a session file describes.
+
+    Three answers and not a flag: the listing that would say can itself fail,
+    and "could not look" read as either of the others is a card offering a
+    resume that cannot happen or refusing one that can.
+    """
+
+    PRESENT = "present"
+    GONE = "gone"
+    UNKNOWN = "unknown"
+
+
+class EndedHow(enum.Enum):
+    """
+    How a session's last run under pptmstr ended, as its session file has it.
+    The values are the file's spellings.
+    """
+
+    CLOSED = "closed"
+    FAILED = "failed"
+    SHUTDOWN = "shutdown"
+
+
+@dataclass(frozen=True, slots=True)
+class Recalled:
+    """
+    What a session file knew about a session this process has not run.
+
+    Its presence on a root's record (``AgentRecord.recalled``) is the statement
+    "nothing here was observed by this process": there is no CLI process behind
+    the record, no transcript was read, and nothing was spent.
+
+    **Every time here is wall-clock seconds, and none of them may be put in the
+    record's own time fields.** Those are ``time.monotonic()`` and exist to be
+    subtracted from each other. A wall time converted to that clock is negative
+    for anything before this boot, and falls behind by every suspend after the
+    conversion, so "closed three hours ago" has to be worked out from
+    ``last_active`` against a wall clock at the moment it is drawn.
+
+    **None means the file did not say**, for every field. A reader shows the
+    value or shows that it is not known; it does not show the default of the
+    record field beside it. ``AgentRecord.policy`` on a recalled record is the
+    case that matters: it holds ``STRICT`` because the field has no other way
+    to say nothing, and the rung the session was granted is ``policy`` here
+    (``AgentRecord.granted_policy`` answers for both kinds of record).
+    """
+
+    transcript: TranscriptPresence = TranscriptPresence.UNKNOWN
+    # First launch under pptmstr, and the last turn end, end or launch.
+    created_at: float | None = None
+    last_active: float | None = None
+    # None is a session that was killed, or one whose file does not say: the two
+    # are not told apart by the file.
+    ended_how: EndedHow | None = None
+    # The rung as last granted, live changes included, or None when the file
+    # names none this build knows.
+    policy: Policy | None = None
+    contained: bool | None = None
+    # An estimate, for display. Never added to a total: it was not spent by this
+    # process, and ``AgentRecord.usage`` on the same record is zero for that
+    # reason.
+    cost_usd: float | None = None
+    # What the session's failure said, when it ended in one. Here and not in
+    # ``AgentRecord.error``, which is the failure of a run this process saw.
+    error: str | None = None
+    # The last thing the operator sent the session, as the file has it: what
+    # the resume form's message box opens with. None when the file holds none,
+    # which includes a message too long for a file to keep.
+    last_message: str | None = None
+    # The sub-agent cap the session's last run was given.
+    subagent_cap: int | None = None
+    # Whether ``AgentRecord.task`` is the task the session was first launched
+    # with. False for a session whose file records none -- one first run under
+    # a build that wrote no file -- where the record's ``task`` is the CLI's own
+    # label for the conversation: a title, and not a prompt to start a new
+    # session from. ``created_at`` is then when this build first saw the
+    # session and not when it began. None, like every field here, is that
+    # nothing said; a reader acts on False.
+    task_recorded: bool | None = None
+
+
+class DetachRefusal(enum.Enum):
+    """
+    Why a session may not be taken off the fleet (``Snapshot.detach_refusal``).
+
+    The first two are different mistakes and are told apart for that reason: one
+    is a session still doing something, the other is one the operator sees as
+    over and that is not.
+    """
+
+    NO_SUCH_SESSION = "no session under that id"
+    # An agent of it is in a state that is not an end at all.
+    NOT_ENDED = "an agent of it has not ended"
+    # FAILED is an end a status update undoes: the driver reports an error
+    # result with its client still connected, and the session's next message
+    # makes it an ordinary session again. Closing it is what makes it final.
+    FAILED_NOT_CLOSED = "it failed and has not been closed, so it can still answer"
+    OWES = "something of it is waiting on you"
 
 
 @dataclass(frozen=True, slots=True)
@@ -678,6 +1248,61 @@ class AgentRecord:
     # sub-agent's node -- the reason this comes from the hook rather than from the
     # message stream.
     deliverable: str | None = None
+    # When this node last read a digest (``digest.py``), or None if it never has.
+    #
+    # The mark a round is counted from, and it is here for the reason a delivered
+    # concern carries ``delivered_at``: "since I last asked" kept in the bus
+    # handler would be state the snapshot cannot see, lost on the handler's next
+    # construction and invisible to the pane that draws the mark as a divider.
+    #
+    # Stored, not derived: nothing else in the snapshot records that a read
+    # happened. Monotonic, like every stamp it is compared with.
+    digest_read_at: float | None = None
+    # Set on the root of a session recalled from its session file and not run by
+    # this process; None on every record a run announced. See ``Recalled``.
+    #
+    # Such a record is DONE, the one state that owes nothing, idles and cannot be
+    # moved by a status update. Its ``started_at`` is 0.0 and its ``ended_at``
+    # None, which is how a record says it holds no time: the wall times are in
+    # the value here. ``usage`` is zero, ``context`` None and the transcript
+    # empty because this process observed none of them.
+    #
+    # ``AgentSpawned`` for the id builds a fresh record, so a resume clears this
+    # by construction.
+    recalled: Recalled | None = None
+    # The operator took this session off the fleet. On a root only, and it is the
+    # stored half of the answer: **ask** ``Snapshot.off_fleet``, which also
+    # requires that nothing of the session can act or is owed. The store clears
+    # it on any step after which that stops holding, so it never outlives a
+    # session's being over.
+    detached: bool = False
+    # The announce said ``task`` is the CLI's label for the conversation and
+    # not the task the session was launched with: a session first run under a
+    # build that recorded none, resumed in this window. Ask
+    # ``titled_by_label``, which answers for a recalled record as well.
+    task_is_label: bool = False
+
+    @property
+    def titled_by_label(self) -> bool:
+        """
+        Whether ``task`` is only a title -- a summary, a first prompt or the bare
+        id -- and not a prompt a new session can be started from. A closed card
+        says so through its file's account (``Recalled.task_recorded``), and the
+        record a resume of it announces through ``task_is_label``, so the answer
+        does not change when the card is resumed.
+        """
+        if self.recalled is not None:
+            return self.recalled.task_recorded is False
+        return self.task_is_label
+
+    @property
+    def granted_policy(self) -> Policy | None:
+        """
+        The rung this node was last known to be gated by, or None when nothing
+        says: the record's own for a node a run announced, the session file's for
+        a recalled one.
+        """
+        return self.policy if self.recalled is None else self.recalled.policy
 
     def with_(self, **changes: Any) -> AgentRecord:
         """Copy with fields replaced."""
@@ -690,6 +1315,133 @@ TaskId = str
 
 def _empty_map() -> Mapping[Any, Any]:
     return MappingProxyType({})
+
+
+class Basis(enum.Enum):
+    """
+    How the author of a text says they know what it asserts.
+
+    Three members and no more. They are the three ways a claim arrives at a board:
+    its author executed something and is reporting the output; its author
+    established it by reading code or records and executed nothing; or its author
+    is passing on what another agent or a record said and checked neither. This
+    repository already treats the first line as the one between a result and a
+    guess (STYLE.md §2), and the second is the relay a lead performs every time an
+    observation becomes a specification.
+
+    **It is the author's statement and nothing else.** A sender cannot be wrong
+    about who it is -- the gate establishes that -- and it can be wrong about this.
+    Nothing checks it and nothing could: whether a suite was run is not a fact the
+    snapshot holds. So every surface that shows a member shows it as said, never as
+    found.
+
+    **Unstated is ``None``, and there is deliberately no member for it and no
+    default.** A text that arrived without one was not run, read or relayed as far
+    as the board knows; it is unmarked, and filling in the likeliest member would
+    put a claim in an author's mouth (STYLE.md §3, a default where the honest answer
+    is a refusal). The fields below are ``Basis | None`` for that reason, and a
+    reader of ``None`` is told the standing was not stated.
+
+    No ordering is defined. A text of mixed standing is asked to carry the weakest
+    that applies to anything in it, which is a rule for authors and is said to them
+    in prose; nothing in the store compares two members.
+    """
+
+    RUN = "run"
+    READ = "read"
+    RELAYED = "relayed"
+
+    @classmethod
+    def stated(cls, raw: object) -> Basis | None:
+        """
+        The member an author's own spelling names, None when it named none, and
+        ``ValueError`` when it named something that is not one.
+
+        Absent and empty are both "did not say": a model handed an optional string
+        fills it with ``""`` often enough that treating that as a mistake would
+        refuse calls whose author meant to omit it. Case and surrounding space are
+        forgiven, because ``READ`` is what agents write by hand. Nothing else is.
+
+        Here rather than in ``bus.py`` because two readers apply it to the same
+        arguments -- the handler that stores the basis and the approval row an
+        operator signs it off from -- and a second spelling of the rule would let
+        the row show a standing the handler then refuses.
+        """
+        if raw is None or not str(raw).strip():
+            return None
+        return cls(str(raw).strip().lower())
+
+
+# The longest property a task may state.
+#
+# The property is one sentence and every surface shows it whole -- it is the one
+# piece of a row's prose the board's budget never cuts -- so its length is paid in
+# full by every board read, once per row, and has to be bounded where it is written
+# instead. 300 is a judgement with two measurements behind it: the sentences this
+# was built from ran 119 and 137 characters, so the limit is twice the longest with
+# room to spare; and forty rows at the limit cost 12,000 characters, which leaves
+# more than half of ``bus._MAX_BOARD_CHARS`` for everything that is not a property.
+MAX_PROPERTY_CHARS = 300
+
+
+def normalised_property(raw: object) -> str:
+    """
+    A stated property as one line: runs of whitespace collapsed, ends trimmed.
+
+    A property is a sentence shown under a title, and a newline inside one would
+    break the row it sits on in every surface that lays it out. Absent and blank
+    both come back empty, which is "none was stated".
+
+    Does not enforce ``MAX_PROPERTY_CHARS``. A refusal needs words and somebody to
+    read them, so each writer measures with ``property_overrun`` and says so in its
+    own voice; this is the spelling they all measure.
+    """
+    return " ".join(str(raw or "").split())
+
+
+def property_overrun(text: str) -> int:
+    """How many characters a normalised property is past the limit, or 0."""
+    return max(0, len(text) - MAX_PROPERTY_CHARS)
+
+
+# Spellings of "no" an author gives a flag it meant to leave unset.
+_UNSET_FLAG = frozenset({"", "false", "no", "0", "none", "null"})
+
+
+def stated_flag(raw: object) -> bool | None:
+    """
+    A boolean argument as its author gave it: True, False, or None when the value
+    is not recognisably either.
+
+    A JSON boolean is taken as it is. A string is read past its case, because a
+    model fills a boolean with ``"true"`` and a tool that only knew ``True`` would
+    drop the statement in silence. None is returned for anything else rather than a
+    guess, and the two callers resolve it in opposite directions on purpose -- see
+    ``stated_incident`` and ``bus.complete_task``.
+    """
+    if raw is None or raw is False:
+        return False
+    if raw is True:
+        return True
+    word = str(raw).strip().lower()
+    if word in _UNSET_FLAG:
+        return False
+    if word in ("true", "yes", "1"):
+        return True
+    return None
+
+
+def stated_incident(raw: object) -> bool:
+    """
+    Whether a concern's sender marked it as an incident.
+
+    **Anything that is not a plain "no" is a yes.** ``incident="touched a file
+    outside touches"`` is a sender saying something went wrong in the wrong
+    argument, and reading it as unmarked would file a reported slip as ordinary
+    mail. A concern wrongly carrying the marker costs a reader one look; one
+    wrongly missing it is the uncounted incident the marker exists to end.
+    """
+    return stated_flag(raw) is not False
 
 
 class ConcernState(enum.Enum):
@@ -755,6 +1507,21 @@ class Concern:
     # The projection reports the dangling reference instead, the way ``missing``
     # already does for a dependency that was never declared.
     task_id: TaskId | None = None
+    # How the sender says it knows what ``body`` asserts, or None when it did not
+    # say. The sender's claim about the text as it wrote it: an operator's edit in
+    # flight changes ``body`` and sets ``edited``, and leaves this alone, so the two
+    # are read together.
+    basis: Basis | None = None
+    # The sender marked this as a report of something that went wrong: a rule
+    # broken, a file written outside ``touches``, a harness that restored over a
+    # live tree. The sender's own statement, like ``basis``, and nothing acts on
+    # it -- delivery, the gate and the inbox treat a marked concern exactly as an
+    # unmarked one. It exists so that slips are countable instead of being a
+    # sentence inside somebody's result.
+    #
+    # False is "not marked", which is not "nothing went wrong": most slips are
+    # reported in prose by an agent that did not think to set this.
+    incident: bool = False
 
 
 class TaskState(enum.Enum):
@@ -795,6 +1562,20 @@ class TaskRefusal(enum.Enum):
     ``WOULD_CYCLE`` is a name collision against a dependency graph the declarer has
     to redraw.
 
+    ``NOT_THE_DECLARER`` and ``AMENDER_HELD_IT`` are the two ways an agent's
+    amendment is turned away, apart for the same reason: the first is asking the
+    wrong agent's question -- the declarer or the operator can make the change --
+    and the second is the right agent asking for the one thing it may not have,
+    whose recovery is the operator and not a retry. ``CLAIMER_AMENDED_IT`` is the
+    second seen from the other side, on a claim: the task is there and is ready,
+    and this agent is the one that may not take it.
+
+    ``CLOSED_BY_OPERATOR`` is ``ALREADY_COMPLETE`` for a task the operator closed
+    (``intents.TaskClosed``), apart because the agent that held it is in a
+    different place from one finishing a task twice: it did not finish this, what
+    it sent was not kept, and the files it was writing may be another agent's now.
+    "Nothing is left to do" is the wrong thing to tell it.
+
     ``NOT_APPLIED`` is the one member ``_apply`` never returns. It is the answer the
     Bridge hands back when the store never got to see the intent at all -- shutdown,
     mainly -- and it exists because the alternative fallback is reporting a success
@@ -807,7 +1588,40 @@ class TaskRefusal(enum.Enum):
     NOT_CLAIMED = "not_claimed"
     NOT_YOURS = "not_yours"
     ALREADY_COMPLETE = "already_complete"
+    CLOSED_BY_OPERATOR = "closed_by_operator"
+    NOT_THE_DECLARER = "not_the_declarer"
+    AMENDER_HELD_IT = "amender_held_it"
+    CLAIMER_AMENDED_IT = "claimer_amended_it"
     NOT_APPLIED = "not_applied"
+
+
+class ClaimRefusal(enum.Enum):
+    """
+    Why a claim won no task.
+
+    Its own enum and not more members of ``TaskRefusal``, because a claim is
+    turned away for reasons no board write is: the task is there and is waiting
+    on another, or the asker already has it. The members are apart for
+    ``TaskRefusal``'s reason -- each has a different recovery, and "was not
+    claimed" covering all of them sends an agent to read the board to find out
+    which mistake it made.
+
+    ``NOT_ON_YOUR_BOARD`` is one answer for an id nothing has and an id another
+    session's board has. The asker can do the same thing about both, and telling
+    them apart would report what is on a board it was never shown.
+
+    ``NOTHING_CLAIMABLE`` is the only answer to a claim that named no task. It is
+    not a mistake: the board is empty, or what is left is blocked, held, or
+    something this agent gave back or wrote the specification of.
+    """
+
+    NOTHING_CLAIMABLE = "nothing_claimable"
+    NOT_ON_YOUR_BOARD = "not_on_your_board"
+    HELD = "held"
+    ALREADY_YOURS = "already_yours"
+    COMPLETE = "complete"
+    WAITING = "waiting"
+    AMENDED_BY_YOU = "amended_by_you"
 
 
 def normalised_touches(paths: Iterable[str]) -> tuple[str, ...]:
@@ -1155,6 +1969,31 @@ def approved_write(
 
 
 @dataclass(frozen=True, slots=True)
+class TaskVersion:
+    """
+    A specification a task used to have, and who replaced it when.
+
+    Only ever a *prior* text: the one a task has now is on the task
+    (``Task.detail``, ``Task.property``, ``Task.basis``), so a history that also
+    held it would be a second copy to keep in step. ``Task.superseded`` is these in
+    the order they stood.
+
+    ``replaced_by`` is None for the operator, the way
+    ``intents.TaskAmended.node_id`` is. It is also who wrote the text that came
+    *next*, which is what makes every version's author readable without a second
+    field: version one is the declarer's, and version n+1 is by whoever replaced
+    version n.
+    """
+
+    detail: str
+    property: str
+    # The standing its own author gave this text, which left the task with it.
+    basis: Basis | None
+    replaced_at: float
+    replaced_by: NodeId | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class Task:
     """
     A unit of work an agent can claim.
@@ -1234,6 +2073,153 @@ class Task:
     # a task whose every write was a ``Bash`` heredoc both report zero, and nothing
     # here distinguishes them because nothing in the snapshot can.
     writes: ApprovedWrites = ApprovedWrites()
+    # What the claimer said about the work when it finished: what was done, what was
+    # run, what was not. Empty when it said nothing, which is an ordinary completion.
+    #
+    # Stored, and checked against STYLE.md §1 first: the only other place this text
+    # exists is the transcript of the agent that wrote it, which no other agent can
+    # read and no snapshot holds. A sub-agent's answer to its lead
+    # (``AgentRecord.deliverable``) is a different fact with a different reader -- it is
+    # about a node, it goes to one parent, and a worker that completes three tasks
+    # has one of those and three of these.
+    #
+    # Written by ``TaskCompleted``, from the node holding the claim, and by
+    # ``TaskClosed``, which composes the operator's closing words
+    # (``closing_result``; ``closed_by_operator`` says which it was). Nothing
+    # clears it and nothing has to: COMPLETED is terminal (a finished task can be
+    # neither released nor claimed), so there is no later owner for a result to be
+    # stale against. ``TaskAmended`` leaves it alone for the reason it leaves the
+    # claim alone -- it rewrites what was asked, not what was reported.
+    result: str = ""
+    # How the author of ``detail`` says it knows what it asserts, or None when it
+    # did not say. Replaced with the text by ``TaskAmended``: an amended ``detail``
+    # is its amender's, so it carries the standing the amender gave it -- none, for
+    # the operator -- and never the one the previous author gave other words.
+    basis: Basis | None = None
+    # The same statement about ``result``, by the claimer that wrote it. Its own
+    # field rather than one shared with ``basis`` because the two texts have
+    # different authors and are written at different times -- a specification
+    # relayed from a reviewer is routinely completed by a builder that ran it.
+    # None whenever ``result`` is empty: there is no text for it to be about.
+    result_basis: Basis | None = None
+    # The one property the work may not break, as one line, or empty when the
+    # declarer stated none. Part of the specification: the operator signs it off
+    # with the declaration, a claimer is handed it with ``detail``, and
+    # ``TaskAmended`` is the only thing that changes it afterwards. Its own field
+    # rather than a sentence inside ``detail`` because it is the part a reviewer
+    # ranks findings against, and prose inside a specification is cut with the
+    # specification on a crowded board.
+    property: str = ""
+    # What the claimer says its completion did NOT execute. Three values, and the
+    # type is what keeps them apart:
+    #
+    # - ``None``: it did not say. The ordinary case, and never shown as "nothing".
+    # - text: what was written and not run, in its words.
+    # - ``""``: it stated that nothing its result names was left unrun -- the list
+    #   of unrun things, given and empty.
+    #
+    # Written by the ``TaskCompleted`` arm with ``result``, and by nothing else.
+    # The empty statement is kept only beside a result, because "everything I
+    # named was run" names nothing when there is no result; text is kept either
+    # way, since it says something on its own.
+    not_run: str | None = None
+    # When this task was last given back, or None if it never was.
+    #
+    # Stored because nothing implies it: a release clears ``claimed_by`` and adds
+    # to ``released_by``, which is the set of agents that ever declined the task
+    # and carries neither an order in time nor a time. A digest needs to say a
+    # task came back during a round, and without this a released task and one
+    # never claimed are the same record.
+    released_at: float | None = None
+    # Every specification this task had before the one it has now, oldest first.
+    # Empty for a task that was never amended.
+    #
+    # Stored because an amendment overwrites ``detail`` and ``property``, and after
+    # it nothing else in the snapshot holds what a claimer was working to or what
+    # a finished result was a result of. Written by one arm, ``TaskAmended``, and
+    # appended to only when the specification actually changed.
+    superseded: tuple[TaskVersion, ...] = ()
+    # The version the claimer was handed when it took the task, or None when
+    # nobody holds it. ``claim_task`` copies the specification into the claimer's
+    # context once, so this is the one version the board knows that agent has read.
+    #
+    # Stored because nothing implies it: a claim leaves no time behind, so it
+    # cannot be placed among the amendments afterwards. Set by the claim, moved
+    # forward by ``TaskVersionHanded`` when the holder is shown a later text,
+    # cleared by a release and by the operator's close, and left alone by an
+    # amendment and by the completion
+    # -- which is what makes ``completed_version`` the text the result was written
+    # against and not whatever stood on the board when the result arrived. Only
+    # a reply that carries the text whole to its holder counts as a showing
+    # (``intents.TaskVersionHanded`` names them); a holder that met a later
+    # version in a listing is credited with the earlier one, which errs toward a
+    # reader checking, never away from it.
+    claimed_version: int | None = None
+    # Every agent that has claimed this task, once each, in the order they first
+    # did. Whoever holds it now or finished it is in here, and so is everyone who
+    # gave it back.
+    #
+    # Stored, and not the same fact as ``released_by`` plus ``claimed_by``: an
+    # amendment empties ``released_by`` because a declined offer no longer
+    # exists, and "this agent has worked to this task's specification" has to
+    # outlive exactly that. It is what the rule that an agent may not replace a
+    # specification it has been bound by is asked of (``store._amender_refusal``).
+    # Written by the claim arm and by nothing else; nothing clears it.
+    held_by: tuple[NodeId, ...] = ()
+    # The operator closed this task (``intents.TaskClosed``): it is COMPLETED
+    # because the operator said to stop waiting for it, and no agent finished it.
+    #
+    # Stored, and not read off ``result``, which opens with
+    # ``CLOSED_BY_OPERATOR`` on such a task: a claimer can type those words into
+    # its own result, and who ended a task is the one thing about it that must
+    # not be something an agent can write. Nor off "COMPLETED with no holder",
+    # which a task built by hand also is. Written by one arm and never cleared.
+    closed_by_operator: bool = False
+
+    # ``builtins.property`` by its full name below: inside this class the bare name
+    # is the ``property`` field above.
+
+    @builtins.property
+    def version(self) -> int:
+        """
+        Which specification this is, counting the declaration as one.
+        """
+        return len(self.superseded) + 1
+
+    @builtins.property
+    def amended_at(self) -> float | None:
+        """
+        When the specification was last replaced, or None if it never was.
+        """
+        return self.superseded[-1].replaced_at if self.superseded else None
+
+    @builtins.property
+    def amended_by(self) -> NodeId | None:
+        """
+        Who last replaced the specification. None is the operator -- or nobody,
+        which ``amended_at`` tells apart.
+        """
+        return self.superseded[-1].replaced_by if self.superseded else None
+
+    @builtins.property
+    def completed_version(self) -> int | None:
+        """
+        The version the result was written against, or None when there is no
+        completion or the claim behind it recorded no version.
+
+        Derived: a completion keeps ``claimed_version``, so a field of its own
+        would be a copy of it on every finished task.
+        """
+        return self.claimed_version if self.state is TaskState.COMPLETED else None
+
+    def was_amended_by(self, node: NodeId) -> bool:
+        """
+        Whether ``node`` wrote any version of this task after the first.
+
+        Read off the history. An amendment that changed nothing added no version
+        and does not count: nothing was rewritten.
+        """
+        return any(prior.replaced_by == node for prior in self.superseded)
 
     def wrote_outside_declaration(self) -> tuple[str, ...]:
         """
@@ -1305,8 +2291,9 @@ class Task:
 
         A dependency naming a task that does not exist is unsatisfied, not absent
         -- same rule as ``is_claimable``, and the reason a typo'd id shows as
-        blocked. Whether such an id was ever declared is a further question, and
-        one only the caller's ``tasks`` map can answer: `d not in tasks`.
+        blocked. So is one naming a task of another session's board
+        (``dependency``). Whether such an id was ever declared on this board is
+        a further question, and ``dependency`` returning None is its answer.
 
         Answered for a task in any state. A CLAIMED or COMPLETED task normally has
         none outstanding, but nothing in the store enforces that -- a task can be
@@ -1316,8 +2303,293 @@ class Task:
         return tuple(
             d
             for d in self.depends_on
-            if (dep := tasks.get(d)) is None or dep.state is not TaskState.COMPLETED
+            if (dep := self.dependency(tasks, d)) is None or dep.state is not TaskState.COMPLETED
         )
+
+    def dependency(self, tasks: Mapping[TaskId, Task], task_id: TaskId) -> Task | None:
+        """
+        The task ``task_id`` names on this task's own board, or None when that
+        board has no such task.
+
+        **An id only another session's board has is not on this one.** ``tasks``
+        is one map for every session, so an id written into ``depends_on`` can be
+        answered by a stranger's task -- by a lead's own choice of id, or because
+        a restore left this board's task of that name out for the collision. A
+        task waiting on that would be waiting on work its board does not show,
+        and would be released by a completion nobody on it made. It reads as
+        missing instead: unsatisfied, and said to be.
+
+        A task with no recorded declarer is on no board (``belongs_to``), so
+        there is none to scope its dependencies to and the id is looked up as it
+        is. Nothing in the application produces one.
+        """
+        other = tasks.get(task_id)
+        if other is None or self.declared_by is None:
+            return other
+        return other if other.belongs_to(self.declared_by[0]) else None
+
+
+# What an agent of an earlier run of its session is called on every surface, after
+# its address (``Snapshot.of_earlier_run``). ``board.FOREIGN`` is the same
+# qualifier in space; this one is in time.
+#
+# It says "run" and not "restart" because two things end a run and only one of
+# them is pptmstr restarting: a session resumed inside one window starts a new
+# run too, and nothing was restarted.
+EARLIER_RUN = "from an earlier run"
+# The name the qualifier is imported under by the modules that write it into what
+# an agent reads. One value, so a board row and a bus reply cannot call one agent
+# two things.
+BEFORE_RESTART = EARLIER_RUN
+
+# What leads the result of a task the operator closed (``intents.TaskClosed``).
+CLOSED_BY_OPERATOR = "closed by the operator"
+
+
+def closing_result(reason: str) -> str:
+    """
+    The result of a task the operator closed: ``CLOSED_BY_OPERATOR``, and behind
+    it the operator's reason exactly as typed. A reason of nothing but
+    whitespace is no reason, and the label stands alone.
+
+    Composed here, once, because two things write it and must agree to the
+    character: the reducer's arm, and a board log reading the close back.
+    """
+    return f"{CLOSED_BY_OPERATOR}: {reason}" if reason.strip() else CLOSED_BY_OPERATOR
+
+
+# The operator's reason for closing a task. A close whose reason is longer is not
+# applied (the ``TaskClosed`` arm), and is never cut: the reason becomes the
+# task's result and the body of what its holder is told, byte for byte, and a
+# pasted file there is a board record no log will take. The box that takes the
+# reason reads this to refuse a longer one with the count, since the arm's
+# refusal has nobody to reply to. The size of an operator's answer to a decision,
+# which is the same kind of text.
+MAX_CLOSE_REASON_CHARS = MAX_ANSWER_CHARS
+
+# The agent id of the node standing for the operator as the sender of a concern
+# (``operator_party``). The ``/`` is there for the reason ``_ADDRESS_ONLY`` has
+# one: no id the CLI hands an agent contains it.
+_OPERATOR_PARTY = "operator/"
+
+
+def operator_party(session_id: str) -> NodeId:
+    """
+    The node a concern from the operator is sent by, on ``session_id``'s board.
+
+    A concern has a sender and a board is scoped by its sender's session, so
+    the operator's mail needs a node in the session it is about. Not an agent
+    and never one: nothing spawns under it, it has no record and no address,
+    and no bus call can be stamped with it -- the gate stamps a caller with the
+    id the CLI gave it. So a concern from this node was filed by the store, on
+    the operator's action, and by nothing else.
+
+    Deliberately not the session's root. A message the lead did not write,
+    shown as the lead's, is the one misattribution a reader would never think
+    to doubt.
+    """
+    return (session_id, _OPERATOR_PARTY)
+
+
+def is_operator(node: NodeId) -> bool:
+    """Whether ``node`` is ``operator_party``'s stand-in for the operator."""
+    return node[1] == _OPERATOR_PARTY
+
+
+# What the id of a ``closing_notice`` begins with, ahead of its task's id.
+_CLOSING_NOTICE = f"{_OPERATOR_PARTY}closed/"
+
+
+def is_closing_notice(concern_id: ConcernId) -> bool:
+    """
+    Whether a concern's id is one ``closing_notice`` made.
+
+    For a reader that has a concern's projection and not its sender's node. A
+    concern an agent posts is given its id by the bus, which mints none of this
+    form, so the id says as much as the sender does.
+    """
+    return concern_id.startswith(_CLOSING_NOTICE)
+
+
+def closing_notice(task: Task, holder: NodeId, reason: str, at: float) -> Concern:
+    """
+    What the holder of a task is sent when the operator closes it under them: a
+    concern from the operator (``operator_party``) about that task, whose body
+    is the reason exactly as typed and nothing else.
+
+    The reason alone, because a body is one author's text: what a close does,
+    and what the holder should do about it, are the words of whichever surface
+    hands this over (``bus`` for an agent's inbox), said outside the quotation.
+
+    The id is the task's. A task is closed once and ids are the store's keys,
+    so there is one notice per task and a replay of the close cannot file a
+    second.
+    """
+    return Concern(
+        id=f"{_CLOSING_NOTICE}{task.id}",
+        sender=operator_party(task.declared_by[0] if task.declared_by else holder[0]),
+        recipient=holder,
+        subject=f"the operator closed {task.id}, which you held",
+        body=reason,
+        posted_at=at,
+        task_id=task.id,
+    )
+
+
+# Ahead of the address in the agent id of a party a log names by address alone.
+# The ``/`` is the point: the CLI keeps a sub-agent's transcript in a file named
+# for its agent id, so an id it hands out is one path component and this is not.
+# That is read off the CLI's documentation and is not measured here.
+_ADDRESS_ONLY = "restored/"
+
+
+def restored_party(session_id: str, address: str) -> NodeId:
+    """
+    The node standing for a party a board log knows by address and not by id.
+
+    Not an agent and never one: nothing spawns under it, so it has no record,
+    holds whatever the log says it held, and reads no inbox. The store checks
+    when it builds one that nothing in the snapshot already has the id;
+    ``_ADDRESS_ONLY`` says why nothing later should.
+    """
+    return (session_id, f"{_ADDRESS_ONLY}{address}")
+
+
+def is_address_only(node: NodeId) -> bool:
+    """Whether ``node`` is a ``restored_party`` stand-in and not an agent's id."""
+    return node[1] is not None and node[1].startswith(_ADDRESS_ONLY)
+
+
+class Unplaced(enum.Enum):
+    """
+    Why something a board log holds is not in the store as the log has it.
+
+    The first five are about one task or concern, and everything else the log
+    held was placed around it. The last three are a restore that placed nothing:
+    the store already had a board for the session and it was not the log's.
+    """
+
+    # Another session's board already has a task or concern under this id. Ids
+    # are fleet-wide, and placing this one would have replaced theirs.
+    OTHER_SESSION_HAS_ID = "another session already has this id"
+    # The log says another session declared or sent it, so it is not this
+    # session's to restore.
+    NOT_THIS_SESSIONS = "the log attributes it to another session"
+    # No step of the store leaves a task like this: finished with nobody having
+    # held it, claimed by nobody or by another session's agent, amended by an
+    # agent that may not amend it, or carrying a holder or a result in a state
+    # that has neither.
+    INCOHERENT = "no step of the store produces it"
+    WOULD_CYCLE = "its dependencies would close a cycle"
+    # The board handed over names the id more than once; the first was taken.
+    REPEATED = "named more than once"
+    # The store holds it for this session and holds it differently.
+    STORE_DIFFERS = "the store already holds it, differently"
+    # The store holds it for this session and the log has never heard of it.
+    STORE_ONLY = "the store holds it and the log does not"
+    # Nothing wrong with it; the restore it was part of placed nothing.
+    WITHHELD = "not placed: the store's board is not the log's"
+
+
+@dataclass(frozen=True, slots=True)
+class NotPlaced:
+    """One task or concern a restore left out, or found out of step, and why."""
+
+    # "task" or "concern".
+    what: str
+    id: str
+    why: Unplaced
+    # For ``OTHER_SESSION_HAS_ID``, the session whose board has the id, when the
+    # record under it names one; None for every other reason. Who holds an id
+    # does not change while the record stands. Whether that session is one the
+    # operator can see does, so it is asked when the report is read
+    # (``Snapshot.off_fleet``) and is not kept here.
+    holder: str | None = None
+
+
+_REFUSED = frozenset({Unplaced.STORE_DIFFERS, Unplaced.STORE_ONLY, Unplaced.WITHHELD})
+
+
+@dataclass(frozen=True, slots=True)
+class Restore:
+    """
+    What became of one session's logged board when it was handed to the store.
+
+    Kept on the snapshot (``Snapshot.restores``) and not returned as an effect:
+    nobody is parked on it, three readers want it at different times -- the shell
+    deciding whether to append behind the log, the pane, the digest -- and a
+    party's name on the board is read from it for as long as the board is shown.
+
+    **States what the store holds, never what one application did**, so the same
+    board handed over twice leaves the same value: ``tasks`` and ``concerns``
+    count what is in the store as the log has it, whether this application put
+    it there or found it.
+
+    **Ask** ``adoptable`` **before appending behind the log**, and ``short``
+    before treating the board as the whole of what was logged.
+    """
+
+    session_id: str
+    # The instant, on the store's clock, the log was read for the board the
+    # store holds; every time that board carries is before it. None when nothing
+    # from a log has entered the store for this session.
+    at: float | None = None
+    tasks: int = 0
+    concerns: int = 0
+    unplaced: tuple[NotPlaced, ...] = ()
+    # ``boardlog.Board.short`` as the board handed over answered it: the log
+    # holds more than its tasks and concerns show. Carried as the answer and not
+    # worked out again from the fields below, which are some of the reasons and
+    # need not be all of them.
+    log_short: bool = False
+    # ``boardlog.Board.damage`` in words, and how many records the log holds as
+    # stray, of a kind this build does not define, and contested, and how many
+    # times its writer stopped recording.
+    log_damage: str | None = None
+    log_stray: int = 0
+    log_unrecognised: int = 0
+    log_contested: int = 0
+    log_stopped: int = 0
+    # Every sub-agent of this session the board handed over names, under the
+    # address the log last had for it -- empty where it had none. Named by
+    # anything on that board, a task or concern this report lists as unplaced
+    # included: the agent existed before the restart whether or not what it
+    # touched could be placed. A restore that was refused whole adds none. A
+    # node in here with no record in the snapshot is a party from before the
+    # restart (``Snapshot.left_behind``).
+    parties: Mapping[NodeId, str] = field(default_factory=_empty_map)
+
+    @builtins.property
+    def refused(self) -> bool:
+        """
+        Whether the last board handed over was applied not at all, because the
+        store's board for the session was not the log's.
+        """
+        return any(left.why in _REFUSED for left in self.unplaced)
+
+    @builtins.property
+    def short(self) -> bool:
+        """
+        Whether the log says anything the store's board for this session does
+        not: something unplaced here, or something the log could not give.
+        """
+        return bool(self.unplaced) or self.log_short
+
+    @builtins.property
+    def adoptable(self) -> bool:
+        """
+        Whether a record appended behind this log would come from a reducer that
+        holds everything the log says: a board from it is in the store, nothing
+        was left out, and the log gave all it had.
+
+        The strict reading, on purpose. A log that is short stays short, so a
+        session whose log has one stray record is never appended to again by a
+        process that restored it. The other reading appends records the next
+        restore will mark contested or never reach, behind a board the operator
+        was shown as whole. Loosening it is dropping ``log_short`` from this
+        line.
+        """
+        return self.at is not None and not self.short
 
 
 @dataclass(frozen=True, slots=True)
@@ -1336,10 +2608,15 @@ class Snapshot:
     # Tree pre-order: each parent immediately followed by its descendants. The UI
     # renders this list directly and indents by record.depth, so it never walks the
     # tree itself.
+    #
+    # Roots that ran in this process come first, in the order they were launched;
+    # recalled roots (``AgentRecord.recalled``) follow, in the order they were
+    # recalled. A fleet recalled at startup would otherwise sit above everything
+    # launched after it for the life of the process.
     order: tuple[NodeId, ...]
     # Everything waiting on the operator, across every agent, oldest first.
     #
-    # One projection over all three obligation kinds, not three lists that agree by
+    # One projection over every obligation kind, not one list per kind that agree by
     # convention. This replaced a queue of approvals alone, which is why the status
     # bar could read "nothing awaiting review" while a session sat on an unanswered
     # question and another had crashed -- two of the three things the operator owed
@@ -1373,6 +2650,33 @@ class Snapshot:
     # time" is prose in ``templates.py`` that ``_pick_claim`` does not enforce, and
     # this is what makes a breach of it visible instead of silent.
     unattributed_writes: int = 0
+    # What became of each session's logged board, by session id: one entry per
+    # session a ``BoardRestored`` was applied for, refused ones included.
+    #
+    # Stored because nothing implies it. A restored task is an ordinary task, so
+    # afterwards the tasks and concerns say nothing of having come from a log,
+    # of what the log held that is not among them, or of which of the nodes they
+    # name were agents of an earlier process.
+    restores: Mapping[str, Restore] = field(default_factory=_empty_map)
+    # Every decision an agent has raised in this process, ended ones included: an
+    # answer has to stay where its asker can read it again.
+    decisions: Mapping[DecisionId, Decision] = field(default_factory=_empty_map)
+    # Every break-glass command asked in this process or restored from a
+    # session's files, ended ones included: what ran changed the operator's
+    # machine, and its asker reads the result back later.
+    commands: Mapping[CommandId, Command] = field(default_factory=_empty_map)
+    # When each open command was asked, on the clock every obligation's
+    # ``since`` is read from: the reducer's ``now`` at the step that filed it.
+    #
+    # Stored because nothing implies it. ``Command.asked_at`` is a wall-clock
+    # time -- it is written to the command's files and read back by another
+    # process -- and the queue sorts and ages its rows on a monotonic one. The
+    # two have different origins, so a wall reading among the others would sort
+    # last and show as the newest row in the queue.
+    #
+    # Only open commands have an entry: an ended one owes no row, and a
+    # restored one is never open.
+    command_since: Mapping[CommandId, float] = field(default_factory=_empty_map)
 
     @staticmethod
     def empty() -> Snapshot:
@@ -1429,8 +2733,309 @@ class Snapshot:
         """
         return tuple(o.approval for o in self.needs_you if isinstance(o, ApprovalNeeded))
 
+    def decisions_of(self, node: NodeId) -> tuple[Decision, ...]:
+        """
+        Every decision ``node`` raised, open or ended, oldest first.
+
+        The asker's own and nobody else's: these are the ones ``node`` may
+        withdraw, and the ones whose answer is the operator's words to it.
+        """
+        return tuple(
+            sorted(
+                (d for d in self.decisions.values() if d.asker == node),
+                key=lambda d: d.raised_at,
+            )
+        )
+
+    def decisions_readable_by(self, node: NodeId) -> tuple[Decision, ...]:
+        """
+        Every decision ``node`` may read, open or ended, oldest first: its own,
+        and for the root of a session every decision raised in that session.
+
+        The root reads them all because an answer is a record of what the
+        operator decided for the session's work, and the agent that plans that
+        work is its lead. A sub-agent's answer that reached the lead only when
+        the sub-agent passed it on would arrive as an agent's paraphrase. Reading
+        is all this widens: only the asker withdraws, and only the operator
+        answers.
+        """
+        if node[1] is not None:
+            return self.decisions_of(node)
+        return tuple(
+            sorted(
+                (d for d in self.decisions.values() if d.session_id == node[0]),
+                key=lambda d: d.raised_at,
+            )
+        )
+
+    def commands_of(self, node: NodeId) -> tuple[Command, ...]:
+        """
+        Every command ``node`` asked for, open or ended, oldest first: the ones
+        it may withdraw while they are only asked.
+        """
+        return tuple(
+            sorted(
+                (c for c in self.commands.values() if c.asker == node),
+                key=lambda c: c.asked_at,
+            )
+        )
+
+    def commands_readable_by(self, node: NodeId) -> tuple[Command, ...]:
+        """
+        Every command ``node`` may read, open or ended, oldest first: its own,
+        and for the root of a session every command asked in that session.
+
+        The root reads them all for the reason it reads every decision
+        (``decisions_readable_by``): what the operator ran for the session is a
+        fact its lead plans around. Reading is all this widens. Only the asker
+        withdraws, and only the operator approves, refuses or stops.
+        """
+        if node[1] is not None:
+            return self.commands_of(node)
+        return tuple(
+            sorted(
+                (c for c in self.commands.values() if c.session_id == node[0]),
+                key=lambda c: c.asked_at,
+            )
+        )
+
+    def commands_awaiting(self, session_id: str | None = None) -> tuple[Command, ...]:
+        """
+        Every command that is asked, running, or left running unsupervised,
+        oldest first: the ones that owe the operator a row
+        (``Command.owes_row``). Of one session when ``session_id`` is given,
+        and of every session when it is None.
+
+        Running ones are among them because stopping one is the operator's and
+        has to stay reachable, whatever has become of the asker. One left
+        running by a pptmstr that is gone is among them because nothing but the
+        operator can end it; it has ended as a record (``Command.is_open`` is
+        False) and nothing here makes it runnable.
+        """
+        return tuple(
+            sorted(
+                (
+                    c
+                    for c in self.commands.values()
+                    if c.owes_row and (session_id is None or c.session_id == session_id)
+                ),
+                key=lambda c: c.asked_at,
+            )
+        )
+
+    def unsupervised_command(self, session_id: str) -> Command | None:
+        """
+        A command of ``session_id`` whose shell's session was found alive with no
+        pptmstr holding it (``Command.unsupervised``), or None. The oldest when
+        there are several.
+
+        Not ``running_command``: nothing here can stop it, and a surface that
+        offered a cancel for it would offer one that does nothing.
+        """
+        for held in self.commands_awaiting(session_id):
+            if held.unsupervised is not None:
+                return held
+        return None
+
+    def running_command(self, session_id: str) -> Command | None:
+        """
+        The command of ``session_id`` that is running, or None. There is at most
+        one: an approval is not applied while there is one
+        (``command_approval_refusal``).
+        """
+        for held in self.commands.values():
+            if held.session_id == session_id and held.state is CommandState.RUNNING:
+                return held
+        return None
+
+    def command_approval_refusal(
+        self, command_id: CommandId, text: str, timeout_s: float
+    ) -> CommandRefusal | RequestRefusal | None:
+        """
+        Why the operator's approval of ``command_id``, to run ``text`` under
+        ``timeout_s``, would not be applied -- or None if it would.
+
+        **This is the definition, and the reducer asks it here**
+        (``intents.CommandApproved``). Nobody is parked on an approval to be
+        told it was turned away, so the surface that offers Run asks first, with
+        the draft it is about to send.
+
+        ``text`` is the string that would run, the operator's edit or the
+        asker's own, and it is held to ``command.command_refusal`` either way:
+        an edit reaches the same shell. Only a command that is still only asked
+        is approved, so one is approved at most once.
+        """
+        held = self.commands.get(command_id)
+        if held is None:
+            return CommandRefusal.NO_SUCH_COMMAND
+        if held.state is not CommandState.ASKED:
+            return CommandRefusal.NOT_ASKED
+        unrunnable = command_refusal(text)
+        if unrunnable is not None:
+            return unrunnable
+        if timeout_s not in TIMEOUT_CHOICES_S:
+            return CommandRefusal.BAD_TIMEOUT
+        if self.running_command(held.session_id) is not None:
+            return CommandRefusal.ALREADY_RUNNING_IN_SESSION
+        if self.unsupervised_command(held.session_id) is not None:
+            # One command of a session at a time is the bound, and a process
+            # nothing supervises is the case it matters most for.
+            return CommandRefusal.ALREADY_RUNNING_IN_SESSION
+        return None
+
     def get(self, node_id: NodeId) -> AgentRecord | None:
         return self.nodes.get(node_id)
+
+    def left_behind(self, node: NodeId) -> str | None:
+        """
+        The address a restored board had for ``node`` when ``node`` is a party
+        from before the restart, and None when it is not one.
+
+        **This is what "gone" means wherever the store acts on it**: the node is
+        named by its session's restored board and has no record in this process.
+        Both halves are needed. A sub-agent that finished its turn has a record
+        and can be woken, so it is not gone, however long it has been quiet. A
+        node with no record that no log named is one that has not announced
+        itself yet, and it may be working.
+
+        The address is empty for a party the log had no name for, which is still
+        not None.
+
+        **"Has no record" is read as "never had one in this process", and that
+        holds only while nothing takes a record away.** ``intents.AgentRemoved``
+        does, and nothing emits it. An emitter that removed a restored party
+        which had since been woken and had finished its turn would make that
+        agent gone again here, and ``store._may_reclaim`` would hand its claim
+        to the root -- the reading of "gone" that function's docstring rules
+        out. Whatever starts emitting it has to settle that first.
+        """
+        if node in self.nodes:
+            return None
+        restore = self.restores.get(node[0])
+        return None if restore is None else restore.parties.get(node)
+
+    def of_earlier_run(self, node: NodeId) -> bool:
+        """
+        Whether ``node`` is an agent of an earlier run of its session: one whose
+        claims and mail are not waiting on anything in the run that is going now.
+
+        **This is the definition, and every reader asks it here** -- the store
+        deciding whether a session's root may release a claim
+        (``store._may_reclaim``), the board naming the agent and marking mail to
+        it, the log recording a reclaim. A run of a session is one CLI process
+        driving it. A run ends when pptmstr exits, and also when the session is
+        resumed or relaunched inside one window; an agent is of an earlier run
+        when either holds:
+
+        - **Another process's.** ``left_behind``: the session's restored board
+          names it and this process has no record of it.
+        - **This process's, before the session was started again.** It is a
+          sub-agent, its record is terminal, and it was spawned before the
+          session's root was last announced (``started_at`` strictly less than
+          the root's). ``AgentSpawned`` replaces a record whole and restamps
+          ``started_at``, and a session announces its root again each time it is
+          launched -- twice per launch, both before it connects and so before
+          any sub-agent of that launch can start, which is why a repeat changes
+          nothing here.
+
+        **The second rule asks for both, and each half guards a different
+        mistake.** The start stamp is what keeps a root from taking work from an
+        agent of the run that is going now. The ended record is what keeps it from
+        taking work from an agent that may still be writing: a stamp says when an
+        agent began and nothing about whether it has stopped, and it is the
+        ordering of announces, which is the pool's to keep, that would otherwise
+        be the only thing standing between a relaunch and a live holder. So an
+        earlier run's sub-agent has to be *made* terminal, and the driver does
+        that: every path out of ``AgentSession.run`` ends each sub-agent that has
+        not stopped, ahead of the root's own end
+        (``driver.AgentSession._settle_subagents_at_run_end``). A run whose task
+        is destroyed without unwinding says none of that, and what it held stays
+        held until the operator closes it (``intents.TaskClosed``).
+
+        **An agent of the run that is going now is not one, however long it has
+        been quiet.** A sub-agent that finished its turn was spawned after the
+        root's announce; it can be woken and may be holding a task across a
+        wait. And an earlier run's agent that the CLI starts again stops being
+        one: a new run's driver has not seen its id, so it is announced with
+        ``AgentSpawned`` and restamped, and until it ends it is not terminal
+        either.
+
+        A root is never one by the second rule: the session's own lead is the
+        run.
+        """
+        if self.left_behind(node) is not None:
+            return True
+        record = self.nodes.get(node)
+        root = self.nodes.get((node[0], None))
+        return (
+            node[1] is not None
+            and record is not None
+            and root is not None
+            and record.state.is_terminal
+            and record.started_at < root.started_at
+        )
+
+    def detach_refusal(self, session_id: str) -> DetachRefusal | None:
+        """
+        Why ``session_id`` may not be taken off the fleet, or None if it may.
+
+        **A session may leave only when nothing of it can act and nothing of it
+        is owed**: its root is in a final state (``AgentState.is_final``), every
+        sub-agent under the id is terminal, no obligation names one of its
+        nodes, and no command asked in it is still asked or running. "Terminal"
+        is not enough for the root. FAILED is terminal, the driver reports it with the
+        client still connected, and the next message revives the record, so a
+        failed session leaves only after it has been closed.
+
+        **It is enough for a sub-agent.** A sub-agent has no process of its own:
+        what could revive a failed one is its session's run, and a root in a
+        final state is a run that has ended -- which the shell also asks the
+        pool, below. A run that ends leaves the
+        sub-agents it had given up on in FAILED for good, and nothing closes a
+        sub-agent, so asking them to be final would keep every such session on
+        the fleet with no way off. Should one be revived all the same, it is no
+        longer terminal and this refuses again, which is what puts the session
+        back (``off_fleet``).
+
+        Asked of every record under the id and not of the root's subtree, so a
+        sub-agent whose parent link is missing still counts.
+
+        **This is the store's half.** Whether the pool still has a run under the
+        id is not in a snapshot, and a caller that takes a session off the fleet
+        asks the pool as well (``intents.SessionDetached``).
+        """
+        if (session_id, None) not in self.nodes:
+            return DetachRefusal.NO_SUCH_SESSION
+        states = [rec.state for nid, rec in self.nodes.items() if nid[0] == session_id]
+        if any(not state.is_terminal for state in states):
+            return DetachRefusal.NOT_ENDED
+        if not self.nodes[(session_id, None)].state.is_final:
+            return DetachRefusal.FAILED_NOT_CLOSED
+        if any(owed.node[0] == session_id for owed in self.needs_you):
+            return DetachRefusal.OWES
+        if self.commands_awaiting(session_id):
+            # Asked here of the records and not of ``needs_you``: a command
+            # that is asked or running is owed whether or not a row is drawn
+            # for it.
+            return DetachRefusal.OWES
+        return None
+
+    def off_fleet(self, session_id: str) -> bool:
+        """
+        Whether ``session_id`` is off the fleet: the operator removed it, and it
+        is still a session nothing of which can act or is owed.
+
+        **This is the definition, and every reader asks it here** and not
+        ``AgentRecord.detached``. The flag records that the operator asked; this
+        adds that the asking still holds (``detach_refusal``), so a session that
+        has come back to life or come to owe something is on the fleet whatever
+        the flag says. The store clears the flag on the same condition, and this
+        does not rely on it having done so.
+
+        False for an id the store has no root for.
+        """
+        root = self.nodes.get((session_id, None))
+        return root is not None and root.detached and self.detach_refusal(session_id) is None
 
     def children_of(self, node_id: NodeId | None) -> tuple[NodeId, ...]:
         return tuple(n for n in self.order if self.nodes[n].parent == node_id)

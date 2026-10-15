@@ -466,6 +466,11 @@ def test_reject_and_edit_ask_nothing_of_the_body(frame: None) -> None:
         assert review.withheld(state, queue().approvals[0]) is not None
         _, _, after = press(imgui.Key.r, state=state)
         assert after.focus_reason
+        # r opened a box, so the next letter is prose until the operator shows
+        # they stopped typing (``review.Hold``); the click that does it is the
+        # hold's own test, and a fresh hold stands in for it here.
+        assert state.hold.typing
+        state.hold = review.Hold()
         _, _, after = press(imgui.Key.e, state=state)
         assert after.editing == "p1"
         bridge = RecordingBridge()

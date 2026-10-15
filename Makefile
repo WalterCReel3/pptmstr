@@ -1,4 +1,4 @@
-.PHONY: help bootstrap lock lock-check lock-gate deps typeset-env probe smoke run shot shot-xvfb test lint format format-file typecheck typecheck-all verify check clean
+.PHONY: help bootstrap worktree lock lock-check lock-gate deps typeset-env probe smoke run shot shot-xvfb test lint format format-file typecheck typecheck-all verify check clean
 
 PY  := .venv/bin/python
 PIP := .venv/bin/python -m pip
@@ -154,8 +154,13 @@ help:              ## this list
 	@echo
 	@echo "display: HEADLESS=$(HEADLESS)$(if $(GUI), — window targets run under: $(GUI))"
 
+# The second line is for a worktree made by `make worktree`, whose .venv borrows the
+# packages of the checkout it was made from. It fails once this tree's pyproject.toml
+# declares different dependencies from that checkout's, which is the one case where a
+# borrowed environment gives wrong answers quietly. Silent for an installed .venv.
 venv-check:
 	@test -x $(PY) || { echo "no ./.venv — run 'make bootstrap' first"; exit 1; }
+	@$(PY) scripts/worktree.py check
 
 gui-check:
 ifeq ($(HEADLESS),1)
@@ -213,6 +218,15 @@ typeset-env:       ## where a recipe here finds the imtypeset library, and why
 	@echo "PYTHONPATH=$${PYTHONPATH-}"
 	@echo "# $$TYPESET_WHY" >&2
 
+# A sibling checkout on BRANCH with a .venv that borrows this one's packages, so it
+# costs no install. BASE defaults to this checkout's HEAD. scripts/worktree.py says
+# what borrowing costs and when to run ./bootstrap.sh there instead.
+BRANCH ?=
+BASE   ?=
+worktree: venv-check   ## a linked worktree for a feature: BRANCH=name [BASE=ref]
+	@test -n "$(BRANCH)" || { echo "usage: make worktree BRANCH=name [BASE=ref]"; exit 2; }
+	@$(PY) scripts/worktree.py create "$(BRANCH)" $(if $(BASE),--base "$(BASE)")
+
 probe:             ## stdlib-only environment diagnosis (no venv needed)
 	@python3 scripts/probe.py --stage pre
 
@@ -222,6 +236,11 @@ smoke: venv-check gui-check   ## post-install probe: imports + a real window
 run: venv-check gui-check     ## launch the orchestrator
 	$(GUI) $(if $(RUN_ENV),env $(RUN_ENV)) $(PY) -m pptmstr
 
+# Both of these start the application, and neither starts it on the operator's own
+# configuration: each script points XDG_CONFIG_HOME and CLAUDE_CONFIG_DIR at a
+# directory it makes and names before `app.main` runs. A start that is not `--fake`
+# moves board logs and recalls the fleet, and `bench` is one.
+# tests/test_scripts_stay_out_of_the_real_config.py holds every script to it.
 bench: venv-check gui-check   ## measure idling CPU and cross-thread wake latency
 	$(GUI) $(PY) scripts/bench_idle.py
 
@@ -278,10 +297,11 @@ typecheck-all: venv-check ## mypy over the application, scripts and tests
 	.venv/bin/mypy pptmstr scripts tests
 
 # The differential probe against `/bin/bash`, in full. Outside `check` because it
-# shells out tens of thousands of times; `make test` already runs its `NAMED` arm,
-# which is the 20 cases somebody worked out and the arm measured to catch a real
-# mutation. What this adds is the exhaustive and sampled arms, which cover the
-# mistakes nobody thought of.
+# shells out tens of thousands of times. `make test` already runs two of its arms:
+# all of `NAMED`, the cases somebody worked out and the arm measured to catch a
+# real mutation, and a sample of what `biased()` generates. What this
+# adds is the exhaustive and sampled arms and the rest of the biased one, which
+# cover the mistakes nobody thought of.
 #
 # Run it after any edit to `_split_segments`, `_METACHARACTERS` or `_SEPARATORS`.
 # The suite can tell you the splitter still handles the cases we know about; only

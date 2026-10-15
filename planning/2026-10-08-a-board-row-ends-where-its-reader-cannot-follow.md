@@ -232,3 +232,37 @@ relying on it.
   answer. Recorded as left undone in the 08-13 archive record, where the fix is said to
   belong in `effects.py`; this adds a second tool with the smell and no new argument
   about it.
+
+---
+
+## Amendment, 2026-10-14 — main's `read_task` replaced this design
+
+`main` built a `read_task` of its own (`a6b3dea`) while this branch built the one
+described above (`b0b0ba7`). The two cannot both be the tool: one name, two `part`
+schemas, and main's board and digest text already send readers to main's part names.
+The merge of `main` into `adv-text-experiment` takes main's `bus.py` whole, so
+**integer paging by `part` is gone**, along with `_paged`, `_part_number` and the
+`read_task("t1") has all of it` notice. What a reader gets now:
+
+- `read_task(task_id)` returns the task with its specification whole, and every other
+  text that fits; a text cut from it names the call that returns it alone, by part:
+  `part="result"`, `"not_run"`, `"note:<id>"`, `"version:<n>"`.
+- A cut board row names the call by id: `read_task(task_id="t1") returns it whole`.
+
+What this record decided and still holds, under main's spelling: any agent on the
+board reads any task on it whole, without holding or claiming it; a note is read with
+its task, so no `read_note`; a task another session declared is refused in the words
+an id never declared is (`bus._NOT_ON_BOARD`), and nothing of it is shown; a read
+changes nothing in the store. The tests kept from this branch for those, and the two
+added in the merge (a cut note whole in a task read, a read on an empty board), are
+under "read_task, as the board's cut rows send a reader to it" in `tests/test_bus.py`.
+
+What is lost: paging **one** text longer than a reply. Main bounds every text an agent
+hands the bus at `bus.MAX_TEXT_CHARS` (24,000), under `_MAX_BOARD_CHARS`, so no agent
+can produce one (a completion past it is stored cut, with a line saying so). Only the
+operator's hand can write a longer text, and `bus._part_text` returns that whole all
+the same, in a reply over the ceiling, rather than paging it.
+
+The "Marking the abandoned answer" item under "Not doing" is done in main: a read the
+store never answered says it was not read, and not that the board is empty
+(`test_a_read_the_store_never_saw_is_not_reported_as_a_missing_task`).

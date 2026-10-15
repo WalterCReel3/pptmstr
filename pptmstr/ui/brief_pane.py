@@ -64,7 +64,7 @@ from ..model import Snapshot
 from ..theme import P
 from . import typeset
 from .focus import FocusState
-from .widgets import CTRL_ENTER_SUBMITS, multiline_input, section
+from .widgets import CTRL_ENTER_SUBMITS, closed_line, multiline_input, section
 
 # One entry's body in the pane. Generous -- premises are the thing this surface
 # exists to show -- and announced when it bites, like every other bound here.
@@ -159,6 +159,13 @@ def draw(snap: Snapshot, focus: FocusState, pane: BriefState) -> None:
     """Render the brief of the session under the cursor. Never reads the store."""
     node = focus.node(snap)
     record = snap.nodes.get((node[0], None)) if node is not None else None
+    closed = closed_line(record, "its brief is not read")
+    if closed is not None:
+        # Ahead of the directory: a closed card is a session this process has
+        # not run, and listing its brief on every frame it has the cursor is
+        # disk read on the draw thread for something nobody resumed.
+        imgui.text_disabled(closed)
+        return
     if record is None or not record.brief:
         imgui.text_disabled("this session was launched without a brief")
         return

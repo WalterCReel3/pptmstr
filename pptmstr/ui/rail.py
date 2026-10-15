@@ -23,6 +23,17 @@ A group is always top-level, always present, and collapsed by default. Collapsed
 its sub-agents are one bounded marker on the root's card: a count and the state with
 the strongest claim. Opened, they are cards bracketed and indented under it. So the
 rail re-flows at the model's pace only inside the groups the operator asked to open.
+
+**Two things are filtered at the draw and nowhere else.** A session off the fleet
+has no card and is in no count, because ``projects.roots`` does not list it. An
+ended sub-agent nothing is waiting on has no card, is in no count and is named
+nowhere (``fleet_view.fold``) when the caller asks for that, and no control here
+brings it back: the caller's setting is the only switch. Neither touches the snapshot
+or the cursor.
+
+**A closed card is not an ended one.** A session recalled from its file
+(``AgentRecord.recalled``) was not run by this process, so its card says what the
+file recorded and none of what the record's own fields default to: see ``_closed``.
 """
 
 from __future__ import annotations
@@ -33,9 +44,19 @@ from typing import assert_never
 
 from imgui_bundle import imgui
 
-from ..model import AgentRecord, AgentState, NodeId, Obligation, ObligationKind, Snapshot
+from ..model import (
+    AgentRecord,
+    AgentState,
+    EndedHow,
+    NodeId,
+    Obligation,
+    ObligationKind,
+    Recalled,
+    Snapshot,
+    TranscriptPresence,
+)
 from ..theme import DISCLOSURE_GLYPH, OBLIGATION_GLYPH, STATE_GLYPH, STATE_LABEL, P
-from . import projects
+from . import decision_view, fleet_view, projects, session_menu
 from .focus import FocusState, Scope, covers
 from .widgets import (
     RAIN_WIDTH,
@@ -57,6 +78,7 @@ from .widgets import (
 #
 # Nothing here keys on sub-agent count, so a *collapsed* group's height never steps
 # when its first sub-agent appears -- see _group for what an open one costs.
+# A closed card (``AgentRecord.recalled``) is always "ended": see _density.
 _LINES = {"blocked": 3.0, "active": 2.0, "ended": 1.0}
 
 _PAD = 6.0
@@ -168,10 +190,44 @@ def _by_session(snap: Snapshot) -> dict[str, list[Obligation]]:
     return out
 
 
-def _density(rec: AgentRecord, owed: list[Obligation]) -> str:
-    if owed:
+def _stopped_on(owed: Sequence[Obligation]) -> list[Obligation]:
+    """
+    The obligations that mean their node has stopped until the operator acts.
+
+    Every kind but a decision and a command. An approval, a question and a
+    failure are read off a node that is parked or dead; a decision and a command
+    are records their asker filed, and the asker was told to carry on and may be
+    working while either waits.
+    """
+    return [o for o in owed if o.kind not in _ASKER_CARRIES_ON]
+
+
+# The kinds that are a record an agent filed and not a state its node is in.
+_ASKER_CARRIES_ON = frozenset({ObligationKind.DECISION, ObligationKind.COMMAND})
+
+
+def _density(rec: AgentRecord, owed: list[Obligation], *, unread: int = 0) -> str:
+    """
+    Which of the three heights a card is drawn at.
+
+    A card that owes only decisions and commands is not "blocked": nothing on it
+    has stopped. It is not "ended" either, whatever its state, because the
+    one-line height has no badge and a finished agent's open decision, or a
+    command of its that is still running, would then show on no card.
+
+    ``unread`` is the answers this card's agents have not read, and it keeps a
+    finished card off the one-line height for the same reason: that height has
+    nowhere to say so, and an agent that finished before reading its answer is
+    the case the mark is for.
+    """
+    if rec.recalled is not None:
+        # Nothing is owed for a recalled record -- one that comes to owe stops
+        # being recalled in the store -- and the taller classes draw a spend, a
+        # context ring and an elapsed time, none of which this process observed.
+        return "ended"
+    if _stopped_on(owed):
         return "blocked"
-    if rec.state in (AgentState.DONE, AgentState.CANCELLED):
+    if rec.state in (AgentState.DONE, AgentState.CANCELLED) and not owed and not unread:
         return "ended"
     return "active"
 
@@ -189,6 +245,66 @@ def _title(rec: AgentRecord) -> str:
     if rec.node_id[1] is not None:
         return rec.agent_type or rec.task
     return rec.task
+
+
+def _ago(seconds: float) -> str:
+    """
+    How long ago, in one unit. Truncated, so it never overstates the age.
+
+    Not ``format_elapsed``: that is a running duration read to the second, and
+    this is the age of something that may be weeks old.
+    """
+    total = int(max(0.0, seconds))
+    if total < 60:
+        return "<1m ago"
+    if total < 3600:
+        return f"{total // 60}m ago"
+    if total < 86400:
+        return f"{total // 3600}h ago"
+    return f"{total // 86400}d ago"
+
+
+# What a closed card says when the conversation its file describes is gone.
+TRANSCRIPT_GONE = "transcript gone — can only be removed"
+
+
+def _closed(recalled: Recalled, now_wall: float | None) -> tuple[str, bool]:
+    """
+    The one line a closed card carries, and whether it is a warning.
+
+    Everything in it is what the session file recorded. The record's own state is
+    DONE and its usage is zero because those fields cannot say nothing, so neither
+    is read here: "done" and "$0.00" would both be statements about a run this
+    process never saw.
+
+    **How it ended is said in the file's terms.** ``ended_how`` None is a session
+    that was killed or whose file does not say, and that is not "closed". A session
+    that had failed comes back as an ordinary closed card owing nothing, so its
+    line says what happened and takes no alarm colour.
+
+    **The age is against a wall clock handed in**, never the frame's monotonic
+    ``now``: ``last_active`` is wall seconds (``model.Recalled``). Without both
+    readings the age is said to be unknown rather than left off, so a card with no
+    age is told apart from one whose age was never asked for.
+
+    A transcript that is gone replaces the line. The session can be neither
+    resumed nor forked, and how long ago it closed is no longer what the operator
+    needs from the card.
+    """
+    if recalled.transcript is TranscriptPresence.GONE:
+        return TRANSCRIPT_GONE, True
+    match recalled.ended_how:
+        case EndedHow.CLOSED | EndedHow.SHUTDOWN:
+            how = "closed"
+        case EndedHow.FAILED:
+            how = "failed, then closed"
+        case None:
+            how = "ended without closing"
+        case _:
+            assert_never(recalled.ended_how)
+    if recalled.last_active is None or now_wall is None:
+        return f"{how} · last active not known", False
+    return f"{how} · {_ago(now_wall - recalled.last_active)}", False
 
 
 def _health(rec: AgentRecord) -> None:
@@ -215,9 +331,78 @@ def _health(rec: AgentRecord) -> None:
     imgui.same_line()
 
 
-def _badge_kind(owed: list[Obligation]) -> ObligationKind:
-    kinds = {o.kind for o in owed}
-    return kinds.pop() if len(kinds) == 1 else ObligationKind.APPROVAL
+# The order a card's badges are drawn in, left to right: what stops work first --
+# a parked call, then a dead session, then a turn that ended, then a decision its
+# asker may be working past, then a command, which stops nothing either and is
+# said again in words under the title (``commands_mark``).
+_BADGE_ORDER = (
+    ObligationKind.APPROVAL,
+    ObligationKind.FAILURE,
+    ObligationKind.QUESTION,
+    ObligationKind.DECISION,
+    ObligationKind.COMMAND,
+)
+
+
+def _badges(owed: Sequence[Obligation]) -> tuple[tuple[ObligationKind, int], ...]:
+    """
+    What a card's badges say: each kind it owes with how many, in ``_BADGE_ORDER``.
+
+    One badge per kind and not one number under one glyph. A parked call and
+    three decisions under the approval mark reads as four calls waiting to be
+    approved, and the count is the part of a badge that is acted on.
+    """
+    return tuple(
+        (kind, count) for kind in _BADGE_ORDER if (count := sum(1 for o in owed if o.kind is kind))
+    )
+
+
+# Between two badges on one card, and between the last badge and the title.
+_BADGE_GAP = 3.0
+_BADGE_PAD = 5.0
+
+
+def _badge_text(kind: ObligationKind, count: int) -> str:
+    return f"{OBLIGATION_GLYPH[kind]} {count}"
+
+
+def _draw_unread(unread: int) -> None:
+    """
+    Beside the state label, that an answer the operator sent has not been read.
+
+    On this line and not among the badges: a badge is what the operator owes,
+    and this is the reverse. The topic is drawn after it and is the string that
+    gives way.
+    """
+    if not unread:
+        return
+    imgui.same_line()
+    imgui.text_colored(P.warn.vec4, decision_view.unread_mark(unread))
+
+
+def commands_waiting(owed: Sequence[Obligation]) -> int:
+    """How many of a card's obligations are commands, asked or running."""
+    return sum(1 for o in owed if o.kind is ObligationKind.COMMAND)
+
+
+def commands_mark(count: int) -> str:
+    """What a card says, in words, of the commands waiting on the operator."""
+    return f"{count} command{'' if count == 1 else 's'} waiting"
+
+
+def _draw_commands(count: int) -> None:
+    """
+    Beside the state label, that a command asked from this card is waiting.
+
+    In words as well as a badge, and in the alarm colour: the badge is a glyph
+    and a number among up to four others, and this is the one thing on a card
+    that asks the operator to run something as themselves. The topic is drawn
+    after it and is the string that gives way.
+    """
+    if not count:
+        return
+    imgui.same_line()
+    imgui.text_colored(P.obligation(ObligationKind.COMMAND).vec4, commands_mark(count))
 
 
 def _claim(state: AgentState) -> int:
@@ -283,7 +468,7 @@ def _subs_signal(
     """
     if not subs:
         return None
-    owed_nodes = [o.node for o in owed]
+    owed_nodes = [o.node for o in _stopped_on(owed)]
     waiting = sum(1 for sub in subs if sub.node_id in owed_nodes)
     worst = max(subs, key=lambda sub: _claim(sub.state)).state
     if expanded:
@@ -370,12 +555,38 @@ class _Box:
     height: float
 
 
-def draw(snap: Snapshot, focus: FocusState, state: RailState, now: float) -> None:
-    """Build the rail from one snapshot. Never reads the store."""
+def draw(
+    snap: Snapshot,
+    focus: FocusState,
+    state: RailState,
+    now: float,
+    menu: session_menu.Wiring | None = None,
+    *,
+    hide_ended: bool = False,
+    now_wall: float | None = None,
+) -> None:
+    """
+    Build the rail from one snapshot. Never reads the store.
+
+    ``menu`` is what a card's context menu is drawn with -- its state, the actions
+    it calls and the live gate reading (``session_menu.Wiring``). None draws cards
+    that have no menu.
+
+    ``hide_ended`` leaves out every ended sub-agent that nothing is waiting on
+    (``fleet_view.fold``): no card, no count, no mention. ``now_wall`` is
+    ``time.time()`` as the frame read it, and is what a closed card's age is measured
+    against; ``now`` is monotonic and cannot be.
+    """
     # Before the empty-rail return, not after: an empty snapshot is the one case
     # where every id in the set is stale.
     state.prune(snap)
-    if not snap.order:
+    # The one source for everything here that iterates or counts roots, so the
+    # empty text, a header's count and the cards cannot disagree. It leaves out
+    # sessions off the fleet (``projects.roots``), and a project with none left.
+    fleet = projects.group_roots(snap)
+    # Keyed on what is drawn and not on ``snap.order``: a fleet whose every session
+    # was removed has records and no card, and would otherwise be a blank pane.
+    if not fleet:
         imgui.text_disabled("no sessions")
         imgui.spacing()
         imgui.text_disabled("start one from the launcher below.")
@@ -385,7 +596,7 @@ def draw(snap: Snapshot, focus: FocusState, state: RailState, now: float) -> Non
     cursor = focus.node(snap)
     state.arm_scroll(cursor)
 
-    for project, roots in projects.group_roots(snap):
+    for project, roots in fleet:
         _project_header(snap, project, roots, owed_by_session)
         for root in roots:
             _group(
@@ -396,7 +607,26 @@ def draw(snap: Snapshot, focus: FocusState, state: RailState, now: float) -> Non
                 owed=owed_by_session.get(root[0], []),
                 cursor=cursor,
                 now=now,
+                menu=menu,
+                hide_ended=hide_ended,
+                now_wall=now_wall,
             )
+
+
+def header_counts(snap: Snapshot, roots: Sequence[NodeId]) -> str:
+    """
+    A project's count of sessions, with the closed ones counted apart.
+
+    A closed card is a session this process has not run, and "3 sessions" over two
+    of them reads as three things that might be working.
+    """
+    closed = sum(1 for root in roots if snap.nodes[root].recalled is not None)
+    ran = len(roots) - closed
+    if not closed:
+        return f"{ran} sessions"
+    if not ran:
+        return f"{closed} closed"
+    return f"{ran} sessions · {closed} closed"
 
 
 def _project_header(
@@ -409,7 +639,7 @@ def _project_header(
     _small()
     imgui.text_colored(P.text_strong.vec4, project.upper())
     imgui.same_line()
-    imgui.text_colored(P.text_dim.vec4, f"{len(roots)} sessions")
+    imgui.text_colored(P.text_dim.vec4, header_counts(snap, roots))
     # The union, not the approvals. See _by_session.
     waiting = sum(len(owed_by_session.get(root[0], ())) for root in roots)
     if waiting:
@@ -428,36 +658,54 @@ def _group(
     owed: list[Obligation],
     cursor: NodeId | None,
     now: float,
+    menu: session_menu.Wiring | None = None,
+    hide_ended: bool = False,
+    now_wall: float | None = None,
 ) -> None:
     """
     One session: the root's card, and -- when open -- a card per sub-agent under it.
 
-    **What an open group costs, stated plainly.** Its height is the sum of its
-    members' heights, so it is still monotone in sub-agent *count* -- nothing reaps a
-    terminal sub-agent, ``Snapshot.subagents_of`` applies no state filter, and
-    ``snap.order`` is append-only, so members are only ever added and never reordered.
-    It is **not** monotone in sub-agent *state*, and the motion that costs is larger
-    than a line. Density classes apply per card, so a member parking on an approval
-    promotes its own card a whole class -- ``active`` to ``blocked``, two lines to
-    three -- and a member finishing demotes it to ``ended`` and takes two away. Every
-    card below the one that moved, in this group and in every group and project under
-    it, moves with it. A group of five can therefore breathe by ten lines over its
-    life without a single sub-agent being added or removed.
+    **What an open group costs, stated plainly.** Its membership is append-only --
+    nothing reaps a terminal sub-agent, ``Snapshot.subagents_of`` applies no state
+    filter, and ``snap.order`` is never reordered -- but its height is the sum of the
+    cards drawn, and that moves with sub-agent *state*. Density classes apply per
+    card, so a member parking on an approval promotes its own card a whole class --
+    ``active`` to ``blocked``, two lines to three -- and a member finishing demotes it
+    to ``ended`` and takes two away. Every card below the one that moved, in this
+    group and in every group and project under it, moves with it.
 
     That is accepted rather than worked around. ``_LINES`` already does exactly this
     every time a root changes state, so it is the existing behaviour applied to more
     cards rather than a new kind of motion -- and it only reaches a group the operator
     opened, which is what makes it the operator's own pace rather than the model's.
-    Capping the member list or dropping terminal sub-agents would buy back some of it
-    and cost the append-only property the whole collapse rule rests on; see
-    ``planning/2026-08-13-an-expansion-outgrows-its-pane.md``.
+
+    **With ``hide_ended``, an ended member nothing is waiting on is not a member
+    here at all** (``fleet_view.fold`` is the rule). Everything below is computed from
+    the members that are left, so such a sub-agent has no card, the collapsed marker
+    does not count it, and a session whose every sub-agent is hidden draws as a
+    session that has none: no marker, nothing to open. So an open group also shrinks
+    at the model's pace, one card at a time, and that is the operator's decision over
+    the argument above for this one kind of member
+    (``planning/2026-10-13-a-fleet-that-survives-the-window.md``, D6, D8 and D9): a
+    fleet that survives the window fills with finished sub-agents, and one that owes
+    nothing and holds nothing is the cheapest thing on the pane to give up. The
+    store's membership is as append-only as it was, and a member that is woken is
+    drawn again on the next frame because nothing here remembers having hidden it.
+
+    **The cursor does not keep a card.** It can be on a sub-agent that is hidden --
+    the operator was on the card when it ended -- and the root's card lights for it
+    (``_lit``), as it does for every member while the group is collapsed. Nothing
+    here moves the cursor.
     """
-    subs = snap.subagents_of(rec.node_id)
-    # A session with nothing in it cannot be open, whatever the set says. Membership
-    # is not pruned on the 1->0 transition because there is no such transition:
-    # sub-agents are never reaped. This guards the case where a session is expanded
-    # by a relaunch reusing its id before it has spawned anything.
+    shown = set(fleet_view.fold(snap, rec.node_id, cursor, hide_ended).drawn)
+    subs = [sub for sub in snap.subagents_of(rec.node_id) if sub.node_id in shown]
+    # A session with nothing to draw in it cannot be open, whatever the set says.
+    # The set is left alone: a session whose members were all hidden opens again
+    # when one is woken, and one expanded by a relaunch reusing its id before it
+    # has spawned anything opens when it does.
     expanded = bool(subs) and rec.node_id[0] in state.expanded
+    if expanded:
+        cursor = _lit(cursor, rec.node_id, shown)
     left = imgui.get_cursor_screen_pos().x
 
     # One scope for the root's card, and everything it does follows from it: which
@@ -488,6 +736,8 @@ def _group(
         cursor=cursor,
         scope=scope,
         indent=0.0,
+        menu=menu,
+        now_wall=now_wall,
     )
     if not expanded:
         return
@@ -507,8 +757,23 @@ def _group(
             cursor=cursor,
             scope=Scope.AGENT,
             indent=_GROUP_INDENT,
+            menu=menu,
         )
     _bracket(left, root_bottom, bottom)
+
+
+def _lit(cursor: NodeId | None, root: NodeId, shown: set[NodeId]) -> NodeId | None:
+    """
+    The node whose card the cursor lights in the open group of ``root``.
+
+    The cursor itself, unless it is on a sub-agent of this session that has no
+    card: then the root, whose card is the only surface that sub-agent has. So the
+    cursor is never on something the pane does not show, and the menu key has a
+    card to open on. ``shown`` is the sub-agents drawn.
+    """
+    if cursor is None or cursor[0] != root[0] or cursor == root or cursor in shown:
+        return cursor
+    return root
 
 
 def _bracket(left: float, top: float, bottom: float) -> None:
@@ -543,9 +808,14 @@ def _card(
     cursor: NodeId | None,
     scope: Scope,
     indent: float,
+    menu: session_menu.Wiring | None = None,
+    now_wall: float | None = None,
 ) -> float:
     """
     One agent, root or sub-agent, drawn the same way. Returns its bottom edge.
+
+    A closed card -- a root recalled from its session file -- is the one-line
+    height with ``_closed``'s line where the state and the spend would be.
 
     ``scope`` decides both whether this card is the cursor's and what clicking it
     selects, from the one value its group handed down -- see ``focus.Scope``.
@@ -559,7 +829,10 @@ def _card(
     """
     is_sub = rec.node_id[1] is not None
     focused = cursor is not None and covers(scope, rec.node_id, cursor)
-    density = _density(rec, owed)
+    # The same scope as everything else on the card: collapsed, a root's card
+    # speaks for its sub-agents' unread answers as it does for their parked calls.
+    unread = decision_view.unread_answers(snap, lambda asker: covers(scope, rec.node_id, asker))
+    density = _density(rec, owed, unread=unread)
 
     draw = imgui.get_window_draw_list()
     line_h = imgui.get_text_line_height_with_spacing()
@@ -577,6 +850,10 @@ def _card(
     # means something different from a click on the card, and the disclosure's box is
     # not known until it has been drawn.
     clicked = imgui.is_item_clicked()
+    # The context menu opens on the release, as Dear ImGui's own do. A press over
+    # a card under another card's open menu closes that menu, so by the release
+    # this card is hoverable again and the second menu opens in one gesture.
+    asked = hovered and imgui.is_mouse_released(imgui.MouseButton_.right)
     marker: tuple[float, float, float, float] | None = None
 
     lo = imgui.ImVec2(origin.x, origin.y)
@@ -614,7 +891,9 @@ def _card(
 
     inner_x = origin.x + _PAD + 4.0
     y = origin.y + _PAD
-    colour = P.state(rec.state)
+    # A recalled record is DONE because the field cannot say nothing, and the
+    # colour of a finished run on it would be that default speaking.
+    colour = P.text_dim if rec.recalled is not None else P.state(rec.state)
 
     # Glyph, then the throbber for anything genuinely working. It rides beside the
     # state glyph rather than in the badge slot on the right because that slot is the
@@ -631,40 +910,75 @@ def _card(
     imgui.same_line()
 
     if density == "ended":
-        # One line, and no model on it: the two slots an ended card has left are what
-        # it became and what it cost. A model that no longer runs anything is history,
-        # and this is the one density with no room to spare for it.
-        imgui.text_colored(
-            P.text_dim.vec4, ellipsis(_title(rec), width - 150.0 - _subs_width(signal))
-        )
-        marker = _draw_subs(signal)
-        _small()
-        imgui.set_cursor_screen_pos(imgui.ImVec2(hi.x - 96.0, y + 2.0))
-        imgui.text_colored(P.text_dim.vec4, STATE_LABEL[rec.state])
-        imgui.same_line()
-        imgui.text_colored(P.text_dim.vec4, _money(rec.usage.total_cost_usd))
-        _normal()
+        if rec.recalled is not None:
+            # The file's account, right-aligned, and the title in what is left. No
+            # spend: the file's figure is an estimate of a run this process did not
+            # see, and Details is where it is shown with that said beside it.
+            fact, warns = _closed(rec.recalled, now_wall)
+            _small()
+            fact_w = imgui.calc_text_size(fact).x
+            _normal()
+            # A file that recorded no task still has the one name nothing else has.
+            title = _title(rec) or rec.node_id[0]
+            imgui.text_colored(
+                P.text_dim.vec4,
+                ellipsis(title, width - 54.0 - _PAD - fact_w - _subs_width(signal)),
+            )
+            marker = _draw_subs(signal)
+            _small()
+            imgui.set_cursor_screen_pos(imgui.ImVec2(hi.x - _PAD - fact_w, y + 2.0))
+            imgui.text_colored((P.warn if warns else P.text_dim).vec4, fact)
+            _normal()
+        else:
+            # One line, and no model on it: the two slots an ended card has left are
+            # what it became and what it cost. A model that no longer runs anything is
+            # history, and this is the one density with no room to spare for it.
+            imgui.text_colored(
+                P.text_dim.vec4, ellipsis(_title(rec), width - 150.0 - _subs_width(signal))
+            )
+            marker = _draw_subs(signal)
+            _small()
+            imgui.set_cursor_screen_pos(imgui.ImVec2(hi.x - 96.0, y + 2.0))
+            imgui.text_colored(P.text_dim.vec4, STATE_LABEL[rec.state])
+            imgui.same_line()
+            imgui.text_colored(P.text_dim.vec4, _money(rec.usage.total_cost_usd))
+            _normal()
         return _tail(
-            snap, focus, state, rec, box, marker, scope=scope, hovered=hovered, clicked=clicked
+            snap,
+            focus,
+            state,
+            rec,
+            box,
+            marker,
+            scope=scope,
+            hovered=hovered,
+            clicked=clicked,
+            menu=menu,
+            asked=asked,
+            focused=focused,
         )
 
-    title_room = width - (_PAD * 2 + 30.0) - (52.0 if owed else 42.0)
+    badges = [(kind, _badge_text(kind, count)) for kind, count in _badges(owed)]
+    widths = [imgui.calc_text_size(text).x + _BADGE_PAD * 2 for _, text in badges]
+    badges_w = sum(widths) + _BADGE_GAP * max(len(badges) - 1, 0)
+    # What one badge took, as a floor: a card with one kind is laid out as it was.
+    title_room = width - (_PAD * 2 + 30.0) - (max(52.0, badges_w + 16.0) if owed else 42.0)
     if working:
         title_room -= _RAIN_GAP + RAIN_WIDTH
     imgui.text_colored(P.text_strong.vec4, ellipsis(_title(rec), title_room))
 
-    if owed:
-        badge = f"{OBLIGATION_GLYPH[_badge_kind(owed)]} {len(owed)}"
-        badge_w = imgui.calc_text_size(badge).x + 10.0
-        bx = hi.x - _PAD - badge_w
-        draw.add_rect_filled(
-            imgui.ImVec2(bx, y - 1.0),
-            imgui.ImVec2(bx + badge_w, y + line_h - 3.0),
-            P.obligation(_badge_kind(owed)).u32,
-            2.0,
-        )
-        imgui.set_cursor_screen_pos(imgui.ImVec2(bx + 5.0, y))
-        imgui.text_colored(P.bg.vec4, badge)
+    if badges:
+        bx = hi.x - _PAD - badges_w
+        for (kind, text), badge_w in zip(badges, widths, strict=True):
+            draw.add_rect_filled(
+                imgui.ImVec2(bx, y - 1.0),
+                imgui.ImVec2(bx + badge_w, y + line_h - 3.0),
+                P.obligation(kind).u32,
+                2.0,
+            )
+            imgui.set_cursor_screen_pos(imgui.ImVec2(bx + _BADGE_PAD, y))
+            imgui.text_colored(P.bg.vec4, text)
+            bx += badge_w + _BADGE_GAP
     else:
         elapsed = format_elapsed(
             (rec.ended_at if rec.ended_at is not None else now) - rec.started_at
@@ -693,6 +1007,8 @@ def _card(
         _small()
         imgui.text_colored(colour.vec4, STATE_LABEL[rec.state])
         marker = _draw_subs(signal)
+        _draw_commands(commands_waiting(owed))
+        _draw_unread(unread)
         imgui.same_line()
         spend_w = imgui.calc_text_size(spend).x
         model_w = imgui.calc_text_size(model).x + 6.0 if is_sub else 0.0
@@ -707,7 +1023,18 @@ def _card(
         imgui.text_colored(P.text_dim.vec4, spend)
         _normal()
         return _tail(
-            snap, focus, state, rec, box, marker, scope=scope, hovered=hovered, clicked=clicked
+            snap,
+            focus,
+            state,
+            rec,
+            box,
+            marker,
+            scope=scope,
+            hovered=hovered,
+            clicked=clicked,
+            menu=menu,
+            asked=asked,
+            focused=focused,
         )
 
     y += line_h
@@ -715,6 +1042,8 @@ def _card(
     _small()
     imgui.text_colored(colour.vec4, STATE_LABEL[rec.state])
     marker = _draw_subs(signal)
+    _draw_commands(commands_waiting(owed))
+    _draw_unread(unread)
     imgui.same_line()
     avail = width - (_PAD * 2 + 8.0) - (imgui.get_cursor_screen_pos().x - inner_x)
     imgui.text_colored(topic_colour.vec4, ellipsis(rec.topic, avail))
@@ -733,7 +1062,18 @@ def _card(
     _normal()
 
     return _tail(
-        snap, focus, state, rec, box, marker, scope=scope, hovered=hovered, clicked=clicked
+        snap,
+        focus,
+        state,
+        rec,
+        box,
+        marker,
+        scope=scope,
+        hovered=hovered,
+        clicked=clicked,
+        menu=menu,
+        asked=asked,
+        focused=focused,
     )
 
 
@@ -748,10 +1088,14 @@ def _tail(
     scope: Scope,
     hovered: bool,
     clicked: bool,
+    menu: session_menu.Wiring | None = None,
+    asked: bool = False,
+    focused: bool = False,
 ) -> float:
     """
     What every density class does once it has drawn its own reading: resolve the
-    frame's click, close the card out, and report where it ended.
+    frame's click, draw the card's menu if it is open, close the card out, and
+    report where it ended.
 
     Two targets share this card's one ``invisible_button`` -- the disclosure and
     everything else -- so the click is resolved in one place and they are mutually
@@ -773,6 +1117,21 @@ def _tail(
             # The same scope the highlight was derived from, so the card that
             # lights and the card that was clicked are the same card by construction.
             focus.to_node(snap, rec.node_id, scope=scope)
+
+    if menu is not None:
+        # Inside the card's ID scope, so each card's popup is its own. The menu
+        # acts on the card it was opened on and does not move the cursor: the
+        # cursor is what an approval key answers for, and a right-click that
+        # moved it would retarget that key as a side effect of looking.
+        session_menu.draw_popup(
+            menu,
+            rec,
+            by_mouse=asked,
+            focused=focused,
+            # Under the card's first line, inset past the focus bar: a menu the
+            # key opened is beside the card it belongs to wherever the pointer is.
+            anchor=(box.origin.x + 24.0, box.origin.y + imgui.get_text_line_height() + _PAD),
+        )
 
     _end(box.outer_x, box.origin.y, box.height)
     imgui.pop_id()

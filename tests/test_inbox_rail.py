@@ -28,7 +28,7 @@ from pptmstr.model import (
     Snapshot,
 )
 from pptmstr.theme import DISCLOSURE_GLYPH
-from pptmstr.ui import inbox, rail, splash
+from pptmstr.ui import decision_view, inbox, rail, splash, widgets
 
 _ImVec2 = _real_imgui.ImVec2
 
@@ -359,6 +359,7 @@ def _row_text(monkeypatch, snap: Snapshot, obligation: Any) -> list[str]:
         MagicMock(),
         MagicMock(),
         MagicMock(),
+        MagicMock(),
         obligation=obligation,
         expanded=False,
         now=100.0,
@@ -405,6 +406,7 @@ def test_the_summary_keeps_the_width_the_marker_did_not_take(monkeypatch) -> Non
 
     inbox._row(
         snap,
+        MagicMock(),
         MagicMock(),
         MagicMock(),
         MagicMock(),
@@ -483,10 +485,10 @@ def test_a_card_counts_every_kind_its_session_owes() -> None:
     assert len(by_session["s2"]) == 1
 
 
-def test_a_mixed_badge_does_not_claim_one_kind() -> None:
+def test_a_mixed_card_has_a_badge_for_each_kind_with_its_own_count() -> None:
     mixed = [approval(ROOT), QuestionPending(node=ROOT, since=2.0, summary="x")]
-    assert rail._badge_kind(mixed) is ObligationKind.APPROVAL
-    assert rail._badge_kind([SessionFailed(ROOT, 1.0, "died")]) is ObligationKind.FAILURE
+    assert rail._badges(mixed) == ((ObligationKind.APPROVAL, 1), (ObligationKind.QUESTION, 1))
+    assert rail._badges([SessionFailed(ROOT, 1.0, "died")]) == ((ObligationKind.FAILURE, 1),)
 
 
 # -- the sub-agent marker ------------------------------------------------------
@@ -1323,13 +1325,24 @@ def _splash_branch(monkeypatch, snap: Snapshot) -> list[str]:
     taken: list[str] = []
     monkeypatch.setattr(inbox, "imgui", MagicMock())
     monkeypatch.setattr(inbox, "_splash", lambda now: taken.append("splash"))
+    monkeypatch.setattr(inbox, "_header", MagicMock())
     monkeypatch.setattr(inbox, "_zero_state", lambda snap, now: taken.append("zero"))
     monkeypatch.setattr(inbox, "_row", lambda *a, **k: taken.append("row"))
     monkeypatch.setattr(inbox, "_batch_controls", MagicMock())
 
     focus = MagicMock()
     focus.obligation.return_value = None
-    inbox.draw(snap, focus, MagicMock(), MagicMock(), MagicMock(), MagicMock(), 100.0)
+    focus.departed = None
+    inbox.draw(
+        snap,
+        focus,
+        MagicMock(),
+        MagicMock(),
+        MagicMock(),
+        MagicMock(),
+        100.0,
+        decisions=decision_view.DecisionState(),
+    )
     return taken
 
 
@@ -1646,3 +1659,755 @@ def test_the_composer_stops_telling_a_supervising_lead_to_wait() -> None:
     arm = body.split("AgentState.SUPERVISING", 1)[1].split("elif", 1)[0]
     assert "read now" in arm
     assert "after this turn" not in arm
+
+
+# -- a decision row ------------------------------------------------------------------
+#
+# Built through the store, so the summary under test is the one the store composes
+# and not a string this file made up.
+
+_FORGED = "Bash  git push --force   (approved)"
+
+
+def _team_with_a_decision():  # type: ignore[no-untyped-def]
+    from pptmstr.intents import AgentSpawned, DecisionRaised, StateChanged
+    from pptmstr.model import Decision, Standing
+    from pptmstr.store import Store
+
+    store = Store()
+    for node, parent in ((ROOT, None), (CHILD, ROOT)):
+        store.apply(
+            AgentSpawned(
+                node_id=node,
+                parent=parent,
+                task="rotate the signing key",
+                model="claude-opus-5",
+                started_at=0.0,
+                agent_type=None if parent is None else "builder",
+            ),
+            now=1.0,
+        )
+        store.apply(StateChanged(node, AgentState.THINKING), now=1.0)
+    store.apply(
+        DecisionRaised(
+            CHILD,
+            Decision(
+                id="d-1",
+                asker=CHILD,
+                question=_FORGED,
+                blocks=(),
+                if_unanswered=_FORGED,
+                evidence=_FORGED,
+                recommendation=_FORGED,
+                standing=Standing.OPERATORS,
+                reversible=False,
+                raised_at=0.0,
+            ),
+        ),
+        now=5.0,
+    )
+    return store
+
+
+def test_a_decision_row_draws_the_stores_summary_and_none_of_the_askers_text(
+    monkeypatch,
+) -> None:
+    from pptmstr.theme import OBLIGATION_GLYPH
+
+    snap = _team_with_a_decision().snapshot()
+    (owed,) = snap.needs_you
+
+    drawn = _row_text(monkeypatch, snap, owed)
+
+    assert owed.summary in drawn
+    # Whatever order the store composes it in: this pane draws it and adds nothing.
+    assert "d-1" in owed.summary and "builder" in owed.summary
+    assert OBLIGATION_GLYPH[ObligationKind.DECISION] in drawn
+    assert not any("push" in text or "approved" in text for text in drawn)
+
+
+def _expanded(monkeypatch, snap: Snapshot, obligation: Any, decisions: object) -> list[tuple]:
+    """Which body an expanded row drew, each stubbed to say it was called."""
+    from unittest.mock import MagicMock
+
+    bodies: list[tuple] = []
+    _stub_row_imgui(monkeypatch)
+    for name in ("_expand_approval", "_expand_question", "_expand_failure"):
+        monkeypatch.setattr(inbox, name, lambda *a, _name=name, **k: bodies.append((_name,)))
+    monkeypatch.setattr(
+        inbox.decision_view,
+        "draw_row",
+        lambda snap, state, bridge, owed, *, wrap: bodies.append(("decision", state, owed, wrap)),
+    )
+    inbox._row(
+        snap,
+        MagicMock(),
+        MagicMock(),
+        MagicMock(),
+        MagicMock(),
+        MagicMock(),
+        decisions,  # type: ignore[arg-type]
+        obligation=obligation,
+        expanded=True,
+        now=100.0,
+        wrap=False,
+    )
+    return bodies
+
+
+def test_an_expanded_decision_row_draws_the_decision_body_with_the_drafts_it_was_handed(
+    monkeypatch,
+) -> None:
+    """The wiring: a body nothing calls leaves every one of its own tests green."""
+    snap = _team_with_a_decision().snapshot()
+    (owed,) = snap.needs_you
+    drafts = decision_view.DecisionState()
+
+    (body,) = _expanded(monkeypatch, snap, owed, drafts)
+
+    # Identity and not equality: two empty draft states compare equal, and a fresh
+    # one handed to the row each frame is the box that forgets.
+    assert body[0] == "decision" and body[1] is drafts
+    assert body[2:] == (owed, False)
+
+
+def test_an_expanded_approval_row_does_not_draw_a_decision_body(monkeypatch) -> None:
+    parked = approval(ROOT)
+    snap = snapshot(record(ROOT), needs_you=(parked,))
+
+    assert _expanded(monkeypatch, snap, parked, decision_view.DecisionState()) == [
+        ("_expand_approval",)
+    ]
+
+
+def test_the_inbox_keeps_a_draft_across_frames_and_rows_and_drops_it_once_answered(
+    monkeypatch,
+) -> None:
+    """
+    ``inbox.draw`` is what calls ``attend``. Unhooked, an answered decision's draft
+    stays for the life of the process and an armed send outlives its row.
+    """
+    from unittest.mock import MagicMock
+
+    from pptmstr.intents import DecisionAnswered
+    from pptmstr.ui.focus import FocusState
+
+    store = _team_with_a_decision()
+    drafts = decision_view.DecisionState(
+        drafts={"d-1": "  half an answer "}, confirming=("d-1", decision_view.Act.SEND)
+    )
+    monkeypatch.setattr(inbox, "imgui", MagicMock())
+    monkeypatch.setattr(inbox, "_header", MagicMock())
+    monkeypatch.setattr(inbox, "_row", MagicMock())
+    monkeypatch.setattr(inbox, "_zero_state", MagicMock())
+    monkeypatch.setattr(inbox, "_batch_controls", MagicMock())
+
+    def frame(focus: FocusState) -> None:
+        inbox.draw(
+            store.snapshot(),
+            focus,
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+            100.0,
+            decisions=drafts,
+        )
+
+    on_it = FocusState()
+    on_it.settle(store.snapshot())
+    frame(on_it)
+    frame(on_it)
+    assert drafts.drafts == {"d-1": "  half an answer "}
+    assert drafts.confirming == ("d-1", decision_view.Act.SEND)
+
+    # The cursor leaves the row: the draft stays, the armed send does not.
+    elsewhere = FocusState()
+    frame(elsewhere)
+    assert drafts.drafts == {"d-1": "  half an answer "} and drafts.confirming is None
+
+    store.apply(DecisionAnswered("d-1", "  half an answer "), now=9.0)
+    frame(on_it)
+    assert drafts.drafts == {}
+
+
+@pytest.mark.parametrize("shift", [False, True])
+def test_the_approval_keys_do_nothing_on_a_decision_row(monkeypatch, shift: bool) -> None:
+    """
+    ``a`` on a decision must not approve, answer or dismiss anything -- and with
+    an approval waiting beside it, must not approve *that* either.
+    """
+    from unittest.mock import MagicMock
+
+    from pptmstr.intents import ApprovalRequested
+    from pptmstr.ui import review
+    from pptmstr.ui.focus import FocusState, OnObligation
+
+    store = _team_with_a_decision()
+    store.apply(ApprovalRequested(ROOT, approval(ROOT, at=6.0).approval), now=6.0)
+    snap = store.snapshot()
+    assert {o.kind for o in snap.needs_you} == {ObligationKind.DECISION, ObligationKind.APPROVAL}
+    owed = next(o for o in snap.needs_you if o.kind is ObligationKind.DECISION)
+    focus = FocusState(target=OnObligation(owed.key))
+
+    fake = MagicMock()
+    fake.Key = _real_imgui.Key
+    fake.get_io.return_value.want_capture_keyboard = False
+    fake.get_io.return_value.want_text_input = False
+    fake.is_mouse_clicked.return_value = False
+    fake.get_io.return_value.key_shift = shift
+    # A mock's attributes are truthy: unset, every key would read as a chord.
+    fake.get_io.return_value.key_ctrl = False
+    fake.get_io.return_value.key_alt = False
+    fake.get_io.return_value.key_super = False
+    action_keys = {_real_imgui.Key.a, _real_imgui.Key.r, _real_imgui.Key.e}
+    fake.is_key_pressed.side_effect = lambda key: key in action_keys
+    monkeypatch.setattr(review, "imgui", fake)
+    bridge = MagicMock()
+    state = review.ReviewState()
+
+    review.handle_keys(snap, focus, state, bridge)
+
+    assert bridge.mock_calls == []
+    assert state.editing is None and not state.focus_reason and state.edits == {}
+    assert focus.target == OnObligation(owed.key)
+
+    # The same keys on the approval beside it do act, so the fake is pressing them.
+    parked = next(o for o in snap.needs_you if o.kind is ObligationKind.APPROVAL)
+    review.handle_keys(snap, FocusState(target=OnObligation(parked.key)), state, bridge)
+    assert bridge.resolve.call_count >= 1 or state.editing is not None
+
+
+# -- a card's badges, and an answer nobody has read -------------------------------------
+
+
+def _a_decision(node: NodeId, did: str, **fields: Any) -> Any:
+    from pptmstr.model import Decision, DecisionOwed, Standing
+
+    base: dict[str, Any] = dict(
+        id=did,
+        asker=node,
+        question="q",
+        blocks=(),
+        if_unanswered="",
+        evidence="",
+        recommendation="",
+        standing=Standing.OPERATORS,
+        reversible=None,
+        raised_at=1.0,
+    )
+    made = Decision(**{**base, **fields})
+    from pptmstr.model import AskerFate
+
+    return DecisionOwed(
+        node=node, since=1.0, summary="a decision", decision=made, asker=AskerFate.LIVE
+    )
+
+
+def test_one_parked_call_and_three_decisions_draw_as_two_badges_not_as_four_calls(
+    monkeypatch,
+) -> None:
+    from pptmstr.theme import OBLIGATION_GLYPH
+
+    owed = [approval(ROOT), *(_a_decision(ROOT, f"d-{n}") for n in range(3))]
+    root = record(ROOT, state=AgentState.AWAITING_APPROVAL)
+    out = _draw_group(monkeypatch, snapshot(root, needs_you=tuple(owed)), root, owed)
+
+    assert f"{OBLIGATION_GLYPH[ObligationKind.APPROVAL]} 1" in out.text
+    assert f"{OBLIGATION_GLYPH[ObligationKind.DECISION]} 3" in out.text
+    assert not any(line.endswith(" 4") for line in out.text)
+    # Side by side, the call first, and neither drawn over the other.
+    badges = [fill for fill in out.fills if len(fill) == 4 and fill[3] == 2.0]
+    assert len(badges) == 2
+    assert badges[0][1].x < badges[1][0].x
+    assert badges[1][1].x <= 10.0 + 300.0
+
+
+def _answered(snap: Snapshot, node: NodeId, did: str, *, read: bool = False) -> Snapshot:
+    import dataclasses
+
+    from pptmstr.model import Answered
+
+    made = dataclasses.replace(
+        _a_decision(node, did).decision,
+        outcome=Answered("no", 5.0),
+        first_delivered_at=9.0 if read else None,
+    )
+    return dataclasses.replace(snap, decisions={**snap.decisions, did: made})
+
+
+def test_an_answer_its_asker_has_not_read_is_said_on_that_agents_card(monkeypatch) -> None:
+    """
+    Nothing wakes an agent for an answer. This is the one place that says it is
+    sitting there without the operator opening anything.
+    """
+    snap, root = _expandable((AgentState.DONE, AgentState.THINKING, AgentState.THINKING))
+    snap = _answered(snap, ("s1", ROLES[0]), "d-1")
+
+    shut = _group_text(monkeypatch, snap, root, [])
+    assert shut.count("1 answer unread") == 1
+
+    opened = _draw_group(monkeypatch, snap, root, [], state=_open())
+    assert opened.text.count("1 answer unread") == 1, "on the asker's card and not the root's too"
+
+
+def test_a_finished_session_with_an_unread_answer_is_not_drawn_at_the_height_with_no_room(
+    monkeypatch,
+) -> None:
+    root = record(ROOT, state=AgentState.DONE)
+    quiet = _draw_group(monkeypatch, snapshot(root), root, [])
+    waiting = _draw_group(monkeypatch, _answered(snapshot(root), ROOT, "d-1"), root, [])
+
+    assert "1 answer unread" not in quiet.text
+    assert quiet.cards[0][1] == 18.0 * rail._LINES["ended"] + rail._PAD * 2
+    assert "1 answer unread" in waiting.text
+    assert waiting.cards[0][1] == 18.0 * rail._LINES["active"] + rail._PAD * 2
+
+
+def test_an_answer_that_has_been_read_or_belongs_to_another_session_marks_no_card(
+    monkeypatch,
+) -> None:
+    root = record(ROOT)
+    snap = _answered(_answered(snapshot(root, record(OTHER)), ROOT, "d-1", read=True), OTHER, "d-2")
+
+    assert not any("unread" in line for line in _group_text(monkeypatch, snap, root, []))
+
+
+# -- free text in a one-line slot ------------------------------------------------
+#
+# A task is typed into a multi-line composer and a topic or a summary is whatever an
+# agent said. ImGui draws a line break as one, and a card's lines are placed by
+# cursor arithmetic: the second line of a title lands on the state line under it.
+# These walk the draws themselves, with the real ``ellipsis`` put back -- the stubs
+# above replace it with identity, and it is what the one-line rule rides on.
+
+THREE_LINE_TASK = "Where are we at with this?\n\nBTW this session is also dogfooding"
+BROKEN_TOPIC = "supervising\nits sub-agents\x00 now"
+
+
+def _real_ellipsis(monkeypatch, module, fake) -> None:
+    monkeypatch.setattr(widgets, "imgui", fake)
+    monkeypatch.setattr(module, "ellipsis", widgets.ellipsis)
+
+
+def _broken(node: NodeId, parent: NodeId | None = None, **fields: Any) -> AgentRecord:
+    import dataclasses
+
+    return dataclasses.replace(
+        record(node, parent, task=THREE_LINE_TASK, **fields), topic=BROKEN_TOPIC
+    )
+
+
+def _card_text(monkeypatch, snap: Snapshot, rec: AgentRecord, owed: list, **kw: Any) -> list[str]:
+    from unittest.mock import MagicMock
+
+    fake, ring = _stub_imgui(monkeypatch, hovered=None, clicked=None, mouse=(0.0, 0.0))
+    _real_ellipsis(monkeypatch, rail, fake)
+    rail._group(
+        snap,
+        MagicMock(),
+        kw.get("state", rail.RailState()),
+        rec=rec,
+        owed=owed,
+        cursor=None,
+        now=100.0,
+    )
+    return _collect(fake, ring).text
+
+
+@pytest.mark.parametrize(
+    ("state", "owes", "density"),
+    [
+        (AgentState.THINKING, False, "active"),
+        (AgentState.FAILED, True, "blocked"),
+        (AgentState.DONE, False, "ended"),
+    ],
+)
+def test_a_card_draws_a_three_line_task_and_a_broken_topic_on_one_line_each(
+    monkeypatch, state: AgentState, owes: bool, density: str
+) -> None:
+    root = _broken(ROOT, state=state)
+    owed = [SessionFailed(node=ROOT, since=1.0, summary="died", error="died")] if owes else []
+    assert rail._density(root, owed) == density, "the three layouts a card has"
+
+    drawn = _card_text(monkeypatch, snapshot(root, needs_you=tuple(owed)), root, owed)
+
+    assert any(line.startswith("Where are we") for line in drawn), "the title was drawn"
+    assert density == "ended" or any(line.startswith("supervising its") for line in drawn)
+    assert [line for line in drawn if "\n" in line or "\x00" in line] == []
+    assert not any(line.startswith("BTW") for line in drawn), "the task's third line, alone"
+
+
+def test_a_sub_agent_card_titled_by_its_task_is_one_line_too(monkeypatch) -> None:
+    """A sub-agent with no role falls back to its task (``rail._title``)."""
+    root = record(ROOT)
+    child = _broken(CHILD, ROOT)
+    assert child.agent_type is None
+
+    drawn = _card_text(monkeypatch, snapshot(root, child), root, [], state=_open())
+
+    assert sum(line.startswith("Where are we") for line in drawn) == 1
+    assert [line for line in drawn if "\n" in line or "\x00" in line] == []
+
+
+def test_an_inbox_row_draws_its_title_qualifier_and_summary_on_one_line_each(
+    monkeypatch,
+) -> None:
+    """
+    The row is one line high and the expanded body is placed under it by the
+    cursor, so a second line of any of the three is drawn over that body.
+    """
+    from unittest.mock import MagicMock
+
+    failure = SessionFailed(
+        node=CHILD, since=3.0, summary="its session died:\nCLIJSONDecodeError", error="died"
+    )
+    snap = snapshot(
+        _broken(ROOT), record(CHILD, ROOT, agent_type="build\ner"), needs_you=(failure,)
+    )
+    fake = _stub_row_imgui(monkeypatch)
+    _real_ellipsis(monkeypatch, inbox, fake)
+    inbox._row(
+        snap,
+        MagicMock(),
+        MagicMock(),
+        MagicMock(),
+        MagicMock(),
+        MagicMock(),
+        MagicMock(),
+        obligation=failure,
+        expanded=False,
+        now=100.0,
+    )
+    drawn = [str(c.args[1]) for c in fake.text_colored.call_args_list if len(c.args) > 1]
+
+    assert any(line.startswith("Where are we") for line in drawn)
+    assert "orbital / build er" in drawn
+    assert "its session died: CLIJSONDecodeError" in drawn
+    assert [line for line in drawn if "\n" in line] == []
+
+
+def test_the_empty_queue_lists_each_session_on_one_line(monkeypatch) -> None:
+    from unittest.mock import MagicMock
+
+    fake = MagicMock()
+    fake.calc_text_size.side_effect = lambda t: _ImVec2(7.0 * len(str(t)), 14.0)
+    monkeypatch.setattr(inbox, "imgui", fake)
+    _real_ellipsis(monkeypatch, inbox, fake)
+
+    inbox._zero_state(snapshot(_broken(ROOT)), 100.0)
+    drawn = [str(c.args[1]) for c in fake.text_colored.call_args_list if len(c.args) > 1]
+
+    assert any(line.startswith("Where are we") for line in drawn)
+    assert f"- supervising its sub-agents{widgets.NUL_SHOWN} now" in drawn
+    assert [line for line in drawn if "\n" in line or "\x00" in line] == []
+
+
+# -- the header's key hint at the pane's width -------------------------------------
+
+
+def _header_rects(
+    width: float, obligation: Any, *, held: bool
+) -> tuple[list[tuple[str, float, float, float, float]], float]:
+    """
+    ``inbox._header`` drawn in a real window ``width`` wide: each string with the
+    rectangle ImGui gave it, and the x the window's content ends at.
+
+    A real context because the claim is about where ImGui puts wrapped text, which
+    no stub of it can answer. No GL: laying out and measuring need the font atlas's
+    metrics and not its texture.
+    """
+    context = _real_imgui.create_context()
+    try:
+        io = _real_imgui.get_io()
+        io.display_size = _ImVec2(1600.0, 900.0)
+        io.delta_time = 1.0 / 60.0
+        io.backend_flags |= _real_imgui.BackendFlags_.renderer_has_textures
+        io.set_ini_filename("")
+        rects: list[tuple[str, float, float, float, float]] = []
+
+        class Noting:
+            def __getattr__(self, name: str) -> object:
+                return getattr(_real_imgui, name)
+
+            @staticmethod
+            def _note(text: str) -> None:
+                low, high = _real_imgui.get_item_rect_min(), _real_imgui.get_item_rect_max()
+                rects.append((text, low.x, low.y, high.x, high.y))
+
+            def text_colored(self, colour: Any, text: str) -> None:
+                _real_imgui.text_colored(colour, text)
+                self._note(text)
+
+            def text_disabled(self, text: str) -> None:
+                _real_imgui.text_disabled(text)
+                self._note(text)
+
+        snap = snapshot(record(ROOT), needs_you=(obligation,))
+        edge = 0.0
+        saved = inbox.imgui
+        inbox.imgui = Noting()  # type: ignore[assignment]
+        try:
+            # Twice: a window's size is settled on the frame after it first appears.
+            for _ in range(2):
+                rects.clear()
+                _real_imgui.new_frame()
+                _real_imgui.set_next_window_pos(_ImVec2(0.0, 0.0))
+                _real_imgui.set_next_window_size(_ImVec2(width, 600.0))
+                _real_imgui.begin("needs you")
+                edge = _real_imgui.get_cursor_screen_pos().x + (
+                    _real_imgui.get_content_region_avail().x
+                )
+                inbox._header(snap, obligation, 100.0, held=held)
+                _real_imgui.end()
+                _real_imgui.end_frame()
+        finally:
+            inbox.imgui = saved
+        return rects, edge
+    finally:
+        _real_imgui.destroy_context(context)
+
+
+_FAILED = SessionFailed(node=ROOT, since=3.0, summary="died", error="died")
+
+
+@pytest.mark.parametrize("held", [False, True])
+@pytest.mark.parametrize("width", [120.0, 260.0, 420.0, 700.0, 1500.0])
+def test_no_part_of_the_header_is_drawn_past_the_panes_edge(width: float, held: bool) -> None:
+    """
+    The hint for a failed row ran off the pane's edge mid-word, with nothing to say
+    there was more of it. Widths here are in the context's built-in font and not
+    the app's, so which of them wrap is not the point: none may overrun.
+    """
+    rects, edge = _header_rects(width, _FAILED, held=held)
+    hint = inbox.KEYS_HELD if held else inbox.keys_hint(_FAILED)
+
+    assert hint in rects[-1][0], "the whole sentence is handed to ImGui"
+    assert rects[-1][3] <= edge + 0.5
+
+
+@pytest.mark.parametrize("held", [False, True])
+def test_a_key_hint_that_does_not_fit_beside_the_count_wraps_under_it(held: bool) -> None:
+    rects, _ = _header_rects(260.0, _FAILED, held=held)
+    count, hinted = rects[0], rects[-1]
+
+    assert not hinted[0].startswith("·"), "nothing precedes it on its line to separate it from"
+    assert hinted[2] >= count[4], "under the count's line"
+    assert hinted[1] == count[1], "from the pane's left edge"
+    assert hinted[4] - hinted[2] > (count[4] - count[2]) * 1.5, "on more than one line"
+
+
+def test_the_key_hint_rides_the_counts_line_when_the_pane_has_room() -> None:
+    rects, edge = _header_rects(1500.0, _FAILED, held=False)
+    count, hinted = rects[0], rects[-1]
+
+    assert hinted[0] == f"· {inbox.header_hint(_FAILED)}"
+    assert hinted[2] == count[2] and hinted[4] == count[4], "one line, the count's"
+    assert hinted[3] <= edge
+
+
+# -- closed cards and removed sessions are not "a fleet", and are not counted --------
+#
+# Snapshots from the reducer (``tests/test_ui_text``).
+
+
+def _reduced(*, ran: bool = False, closed: bool = False, removed: bool = False) -> Snapshot:
+    from pptmstr.store import Store
+    from tests.test_ui_text import recall, run, run_and_remove
+
+    store = Store()
+    if removed:
+        run_and_remove(store)
+    if closed:
+        recall(store)
+    if ran:
+        run(store)
+    return store.snapshot()
+
+
+@pytest.mark.parametrize(
+    "fleet",
+    [{"closed": True}, {"removed": True}, {"closed": True, "removed": True}],
+    ids=["closed-only", "removed-only", "both"],
+)
+def test_a_window_where_nothing_on_the_fleet_ran_gets_the_splash(monkeypatch, fleet) -> None:
+    """
+    Closed cards are in the node table from the first frame of every start after
+    the first, so "no nodes" would retire the cold start for anyone with a
+    history and hand them "nothing is running either" over a list of nobody.
+    """
+    snap = _reduced(**fleet)
+    assert snap.nodes
+
+    assert _splash_branch(monkeypatch, snap) == ["splash"]
+
+
+def test_one_session_that_ran_here_keeps_the_empty_queue_over_closed_cards(monkeypatch) -> None:
+    assert _splash_branch(monkeypatch, _reduced(ran=True, closed=True, removed=True)) == ["zero"]
+
+
+def test_something_owed_is_drawn_whoever_owes_it(monkeypatch) -> None:
+    """
+    The splash is asked of the queue as well as of the fleet. The store does not
+    let a recalled or removed session owe anything; if a snapshot ever said one
+    did, the row is what the operator has to see.
+    """
+    import dataclasses
+
+    from tests.test_ui_text import CLOSED_ROOT
+
+    snap = dataclasses.replace(_reduced(closed=True), needs_you=(approval(CLOSED_ROOT),))
+
+    assert _splash_branch(monkeypatch, snap) == ["row"]
+
+
+def test_the_run_total_counts_what_ran_here_and_is_on_the_fleet() -> None:
+    """
+    A closed card is not an agent of this run, and neither it nor a removed
+    session is in the count. The spend is everything this process spent, the
+    removed session's 5.00 included, and the line says the two differ.
+    """
+    from tests.test_ui_text import RAN_ROOT, REMOVED_ROOT
+
+    snap = _reduced(ran=True, closed=True, removed=True)
+    assert len(snap.nodes) == 4
+
+    assert [rec.node_id for rec in inbox.ran_here(snap)] == [RAN_ROOT]
+    assert inbox.run_total(snap) == "1 agents this run, 2 more removed from the fleet · $7.00"
+    assert REMOVED_ROOT in snap.nodes
+
+    plain = _reduced(ran=True, closed=True)
+    assert inbox.run_total(plain) == "1 agents this run · $2.00"
+
+
+def test_the_empty_queue_draws_the_run_total_and_lists_no_closed_card(monkeypatch) -> None:
+    """The wiring: ``_zero_state`` draws ``run_total`` and lists from the fleet."""
+    from unittest.mock import MagicMock
+
+    fake = MagicMock()
+    monkeypatch.setattr(inbox, "imgui", fake)
+    monkeypatch.setattr(inbox, "ellipsis", lambda text, width: text)
+    snap = _reduced(ran=True, closed=True, removed=True)
+
+    inbox._zero_state(snap, 100.0)
+    drawn = [str(c.args[1]) for c in fake.text_colored.call_args_list if len(c.args) > 1]
+
+    assert inbox.run_total(snap) in drawn
+    assert "the task of sess-ran" in drawn
+    assert not any("port the" in line or "sess-removed" in line for line in drawn)
+    assert not any("4 agents" in line for line in drawn)
+
+
+def test_the_header_names_the_key_that_opens_the_sessions_controls_and_it_is_the_apps_key() -> None:
+    """
+    A shortcut nobody is told of is one nobody presses. The header says it after
+    the open row's own keys, on every kind of row, and not while the keys are
+    off; and the letter it names is the one the frame listens for.
+    """
+    from imgui_bundle import imgui
+
+    from pptmstr import app
+
+    assert app.CARD_MENU_KEY == imgui.Key.m
+    assert inbox.MENU_KEY_HINT.startswith("m ")
+    for current in (None, _FAILED):
+        said = inbox.header_hint(current)
+        assert said == f"{inbox.keys_hint(current)} · {inbox.MENU_KEY_HINT}"
+    rects, _ = _header_rects(1500.0, _FAILED, held=False)
+    assert inbox.MENU_KEY_HINT in rects[-1][0]
+    rects, _ = _header_rects(1500.0, _FAILED, held=True)
+    assert inbox.MENU_KEY_HINT not in rects[-1][0], "a key that is off is not offered"
+
+
+# -- a command in the expanded row ---------------------------------------------
+
+
+def _bash_approval(command: str, **more: Any) -> ApprovalNeeded:
+    args = {"command": command, **more}
+    return ApprovalNeeded(
+        node=("s1",),
+        since=1.0,
+        summary=summarize("Bash", args),
+        approval=PendingApproval(
+            id="p1",
+            node=("s1",),
+            tool_name="Bash",
+            tool_use_id="tu-p1",
+            raw_args=args,
+            summary=summarize("Bash", args),
+            requested_at=1.0,
+        ),
+    )
+
+
+def test_a_command_is_one_row_for_every_line_of_it() -> None:
+    """
+    The expanded row is where the three decisions are, so it is a rendering
+    the operator approves from. One ``repr`` row puts the second command of
+    `ls # '` + newline + `touch pwned #'` wherever the first ends, in a body
+    that does not wrap.
+
+    Any other string is itself (``inbox.argument_text``), as the typeset branch
+    sets it: a ``repr`` escapes its quotes, and a break in a description changes
+    nothing that runs.
+    """
+    rows = inbox.argument_rows(
+        "Bash", {"command": "ls # '\ntouch pwned #'", "description": "list\nthem"}
+    )
+    assert rows == [
+        "  command =",
+        "    ls # '\\n",
+        "    touch pwned #'",
+        "  description = list\nthem",
+    ]
+    assert inbox.argument_rows("Bash", {"command": "pytest -q"}) == ["  command =", "    pytest -q"]
+    # Only the Bash command: a tool that merely has an argument of that name
+    # keeps the one-item form every other argument has.
+    assert inbox.argument_rows("Mystery", {"command": "a\nb"}) == ["  command = a\nb"]
+    assert inbox.argument_rows("Bash", {}) == []
+
+
+def test_the_expanded_approval_draws_those_rows_and_no_other_form_of_the_command(
+    monkeypatch,
+) -> None:
+    """
+    Through ``_expand_approval`` against a recording imgui: what reaches the
+    screen is ``argument_rows``, each on a call of its own, and the body is as
+    tall as the rows and no taller than the diff's cap.
+    """
+    from unittest.mock import MagicMock
+
+    from pptmstr.ui import review
+
+    fake = MagicMock()
+    fake.ImVec2 = _ImVec2
+    fake.get_text_line_height_with_spacing.return_value = 10.0
+    # The body is sized by what each row wraps to: one line each, at this width.
+    fake.get_text_line_height.return_value = 10.0
+    fake.get_content_region_avail.return_value = _ImVec2(400.0, 400.0)
+    fake.get_style.return_value.item_spacing = _ImVec2(0.0, 0.0)
+    fake.get_style.return_value.window_padding = _ImVec2(0.0, 5.0)
+    fake.calc_text_size.return_value = _ImVec2(100.0, 10.0)
+    fake.input_text_with_hint.return_value = (False, "")
+    fake.button.return_value = False
+    monkeypatch.setattr(inbox, "imgui", fake)
+
+    command = "ls # '\ntouch pwned #'"
+    parked = _bash_approval(command)
+    inbox._expand_approval(review.ReviewState(), MagicMock(), parked)
+
+    drawn = [str(call.args[1]) for call in fake.text_colored.call_args_list]
+    rows = inbox.argument_rows("Bash", parked.approval.raw_args)
+    assert drawn[1 : 1 + len(rows)] == rows
+    assert "    touch pwned #'" in drawn
+    assert not any("touch" in text and "ls" in text for text in drawn), drawn
+    assert not any("\n" in text for text in drawn), drawn
+    size = fake.begin_child.call_args.args[1]
+    assert size.y == 10.0 * (len(rows) + 1) + 10.0
+
+    fake.reset_mock()
+    long = _bash_approval("\n".join(f"echo {n}" for n in range(60)))
+    inbox._expand_approval(review.ReviewState(), MagicMock(), long)
+    assert fake.begin_child.call_args.args[1].y == 240.0
+    drawn = [str(call.args[1]) for call in fake.text_colored.call_args_list]
+    assert "    echo 59" in drawn, "a line past the cap was not drawn for the child to scroll to"

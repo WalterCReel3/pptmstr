@@ -30,7 +30,7 @@ from pptmstr.intents import AgentSpawned, ApprovalRequested, ApprovalResolved, S
 from pptmstr.model import AgentState, NodeId, PendingApproval, QuestionPending, Snapshot
 from pptmstr.store import Store
 from pptmstr.transcript import SegmentKind, Transcript
-from pptmstr.ui import detail, inbox, review, typeset
+from pptmstr.ui import decision_view, detail, inbox, review, typeset
 from pptmstr.ui.compose import ComposeState
 from pptmstr.ui.focus import FocusState
 from tests import test_typeset_views as rig
@@ -110,6 +110,7 @@ class Pane:
         self.focus = FocusState()
         self.state = review.ReviewState()
         self.compose = ComposeState()
+        self.decisions = decision_view.DecisionState()
         self.bridge = Bridge()
         snap = self.snap
         if snap.needs_you:
@@ -127,7 +128,16 @@ class Pane:
 
         def body() -> None:
             before = im.get_cursor_pos().y
-            inbox.draw(self.snap, self.focus, self.state, self.compose, self.bridge, ACTIONS, 1.0)
+            inbox.draw(
+                self.snap,
+                self.focus,
+                self.state,
+                self.compose,
+                self.bridge,
+                ACTIONS,
+                1.0,
+                decisions=self.decisions,
+            )
             self.height = im.get_cursor_pos().y - before
             if extra is not None:
                 extra()
@@ -656,9 +666,11 @@ def test_a_command_of_several_lines_keeps_its_lines_and_its_spaces(seam: Any) ->
     command = "set -e\ncd /srv   &&   rm -rf  ./build\n\n    make  all"
     call = parked("Bash", {"command": command, "timeout": 600, "description": ""})
     Pane(call).draw(seam)
+    # As every approval surface spells a command: each break the command makes is
+    # marked, so it cannot be taken for one the window made.
     assert inbox._VIEWS.texts(key(call, "arguments")) == (
         "command",
-        command,
+        "set -e\\n\ncd /srv   &&   rm -rf  ./build\\n\n\\n\n    make  all",
         "timeout",
         "600",
         "description",
@@ -677,7 +689,7 @@ def test_a_command_longer_than_the_cap_scrolls_in_a_view_no_taller_than_it(seam:
     pane = Pane(long)
     pane.draw(seam)
     assert short_h < pane.height <= short_h + limit
-    assert shown(long, "arguments").rstrip().endswith("echo 399")
+    assert shown(long, "arguments").rstrip().endswith("echo 399\\n")
 
 
 def test_with_typeset_off_a_command_is_the_string_wrapped_and_all_in_its_block(
@@ -693,7 +705,7 @@ def test_with_typeset_off_a_command_is_the_string_wrapped_and_all_in_its_block(
     # Twice: a window knows how far it scrolls from the frame before.
     pane.draw(seam)
     pane.draw(seam)
-    assert f"  command = {BASH_COMMAND}" in said
+    assert "  command =" in said and f"    {BASH_COMMAND}" in said
     assert not [line for line in said if "\\'" in line]
     body = native_body(seam)
     line = seam.get_text_line_height()
@@ -1460,7 +1472,16 @@ def press(pane: Pane, im: Any, *keys: Any) -> None:
         assert all(im.is_key_down(key) for key in keys)
         assert not io.want_capture_keyboard
         review.handle_keys(pane.snap, pane.focus, pane.state, pane.bridge)
-        inbox.draw(pane.snap, pane.focus, pane.state, pane.compose, pane.bridge, ACTIONS, 1.0)
+        inbox.draw(
+            pane.snap,
+            pane.focus,
+            pane.state,
+            pane.compose,
+            pane.bridge,
+            ACTIONS,
+            1.0,
+            decisions=pane.decisions,
+        )
 
     rig.frame(im, body)
     for key in keys:
@@ -1597,9 +1618,19 @@ def test_reject_and_edit_are_never_held_by_a_short_body(
     assert review.withheld(pane.state, call) == review.NOT_WHOLE
 
     # The keys alone, with no pane drawn after them: the reading is still of a
-    # body that was not on screen when the rejection is sent.
+    # body that was not on screen when the rejection is sent. ``r`` opens a box,
+    # and a click is what tells ``review.Hold`` the operator stopped typing in it.
     io = seam.get_io()
     for letter in (seam.Key.r, seam.Key.e):
+        if letter == seam.Key.e:
+            assert pane.state.hold.typing
+            io.add_mouse_button_event(0, True)
+            seam.new_frame()
+            review.handle_keys(pane.snap, pane.focus, pane.state, pane.bridge)
+            seam.render()
+            io.add_mouse_button_event(0, False)
+            seam.new_frame()
+            seam.render()
         io.add_key_event(letter, True)
         seam.new_frame()
         assert seam.is_key_pressed(letter) and not io.want_capture_keyboard

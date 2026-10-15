@@ -1,7 +1,10 @@
 """
 Classification and presentation for the approval gate.
 
-Pure functions: no SDK, no UI, no IO except reading the file an edit would change.
+No SDK and no UI. Two things here touch the filesystem and nothing else does:
+the diff builder reads the file an edit would change, and ``records_read``
+resolves the paths a reading call names, because where a path leads is a fact
+about the disk and not about its spelling. Neither writes.
 Everything here decides *whether* a tool call needs a human and *what the human
 should be shown* -- the parking and awaiting live in the driver and the Bridge.
 
@@ -15,12 +18,16 @@ from __future__ import annotations
 
 import difflib
 import enum
-from collections.abc import Mapping
+import os
+import shlex
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, assert_never
 
-from .shellscan import is_read_only
+from . import settings
+from .commandtext import visible
+from .shellscan import _split_segments, is_read_only
 
 
 class Disposition(enum.Enum):
@@ -117,8 +124,11 @@ class Policy(enum.Enum):
 _BUS_SERVER = "pptmstr"
 _BUS_POST = f"mcp__{_BUS_SERVER}__post_concern"
 _BUS_DECLARE = f"mcp__{_BUS_SERVER}__declare_task"
+_BUS_AMEND = f"mcp__{_BUS_SERVER}__amend_task"
 
 # Reads, searches and listings. Cheap, reversible, and they do not leave the box.
+# The four that name a path are admitted by name and then measured by
+# ``records_read``, which is where one of them stops being admitted.
 _AUTO = frozenset(
     {
         "Read",
@@ -198,6 +208,18 @@ _REVIEW = frozenset(
         # lands. That is what makes this a scoping moment rather than only a binary
         # one -- the operator sets the size, not just the yes.
         _BUS_DECLARE,
+        # An amendment is a declaration made a second time: it sets what an agent
+        # is held to, so it meets whatever a declaration meets on the same rung,
+        # by being in the same set. Parked, it is edited through updatedInput like
+        # one, and the handler drops the amender's basis from an edited call.
+        #
+        # Under ``AUTONOMOUS`` that is no review at all. This whole set is
+        # released there, so an agent's amendment lands unseen, as its declaration
+        # did. What stands on that rung is the reducer's rule and not this gate:
+        # only the agent that declared a task and never held it may amend it, it
+        # may not then claim it, and the text it replaced is kept as a version
+        # (``store._amender_refusal``, ``store._claim_refusal``).
+        _BUS_AMEND,
     }
 )
 
@@ -220,19 +242,594 @@ _AUTONOMOUS_AUTO = _REVIEW
 # approved, and nothing had ever approved it. The ones that remain are the ones the
 # premise actually holds for, in one of two shapes: bookkeeping about a task whose
 # existence the operator decided at declaration, or -- `read_inbox` -- reading
-# messages that were already reviewed at the send. `read_task` is both at once and
-# nothing else: a specification reviewed when it was declared, and the notes on it
-# reviewed when they were sent.
+# messages that were already reviewed at the send.
+#
+# **"Decided at declaration" and "reviewed at the send" are true of the rungs that
+# park those calls, and only of them.** `declare_task`, `amend_task` and
+# `post_concern` are in ``_REVIEW``, which ``STRICT`` and ``PERMISSIVE`` hold and
+# ``AUTONOMOUS`` releases whole. A specification an agent amended was approved at
+# the amendment as it was at the declaration, and "at declaration" below covers
+# both. Under ``AUTONOMOUS`` no operator saw the specification or the concern, and
+# every read below hands on text nobody reviewed. That is the rung's stated cost and
+# not a hole in this set: the reads carry exactly as much review as the writes were
+# given, and wherever "approved" or "reviewed" is said below it means on a rung that
+# asks.
+#
+# `read_task` is `read_board` for one row, with the texts a board read cuts, and
+# is here on `read_board`'s grounds exactly: it returns a specification approved
+# at its declaration and notes reviewed at their send, scoped to the caller's own
+# board.
+#
+# **`release_task` is bookkeeping on the caller's own claim, with one exception
+# that rides the same auto-approved name on every rung, ``STRICT`` included.** The
+# root of a session may release a claim that is not its own when the holder is an
+# agent of an earlier run of that session (`store._may_reclaim`): it puts another
+# agent's task back on the board, and no operator is asked. It is here because
+# what it undoes is a claim nothing running will ever finish or give back, it
+# gives the root nothing but the task's return to PENDING -- the root cannot
+# complete it in the holder's place -- and parking it would leave the row stuck
+# until somebody answered. Whether the root should have that release at all is
+# question 6 of
+# `planning/2026-10-12-session-control-and-the-inter-team-record-in-one-sequence.md`,
+# which the operator has not answered; it is built as the lead recommended there,
+# and taking the two lines out of the reducer's `TaskReleased` arm is the whole
+# of the other answer.
+#
+# `read_digest` is here on those grounds too, and by leaving one thing out. Three of
+# its slots are the caller's own board again: tasks approved at declaration,
+# results as `read_board` already shows them, concerns reviewed at their send. The
+# fourth, what is waiting on the operator, is drawn from the approval queue --
+# calls nobody has approved yet -- so the tool reports who is waiting and for what
+# kind of thing and never the queue row (`bus._digest_text`). With the row in it
+# this would be a read that hands one agent another's unreviewed message.
+#
+# **`complete_task` is where the premise is thinnest on every rung, and it is stated
+# rather than hidden.** A completion may carry two pieces of prose, a `result` and a
+# `not_run` list, and the board then shows both to every agent on it. Neither is
+# parked under any policy, so they are the prose on the board that no operator saw
+# before it landed even where every declaration and every concern was reviewed. It
+# stays here because what the gate would be deciding is whether work already done
+# may be recorded as done, and a parked or refused completion strands a claim and
+# everything waiting on it. Both are rendered as the claimer's own account for that
+# reason, and quoted line by line so neither can be read as a line the board wrote
+# (`bus._board_line`, `bus._quoted`).
+#
+# **The three decision tools are here because a decision is addressed to the
+# operator, and one of them is not private to the operator.** `raise_decision` puts
+# its text in the operator's own queue, and parking it would put a message for the
+# operator in front of the operator to ask whether the operator may see it: the
+# queue row is the review. `withdraw_decision` removes the asker's own row.
+#
+# The text has a second reader, and it is an agent. The root of a session reads
+# every decision raised in it (`model.Snapshot.decisions_readable_by`), and
+# `read_decisions` hands it the question, what happens if it goes unanswered, the
+# evidence and the recommendation whole -- up to four texts of
+# `model.MAX_DECISION_TEXT_CHARS` that a sub-agent wrote and no operator approved
+# before the lead could read them. So on the rungs that park `post_concern`, a
+# sub-agent's `raise_decision` is words to its lead that are not parked. It is the
+# second such text on the board beside `complete_task`'s result, and it is held
+# the same way: quoted line by line behind the asker's name, never as a line the
+# tool wrote (`bus._decision_whole`), with the operator looking at the same words
+# in the queue. No board or digest read shows a question (`bus._digest_text`), so
+# the lead is the only agent it reaches. What bounds the three is the store: an
+# agent may have `model.MAX_OPEN_DECISIONS_PER_ASKER` open, a session's sub-agents
+# `model.MAX_OPEN_SUBAGENT_DECISIONS` between them, and only the operator's own
+# intent ends one with an answer.
+#
+# **Both halves are decisions taken without the operator.** That a raise runs
+# without sign-off is question 8, and that the session root reads its workers'
+# decisions is question 4, of
+# `planning/2026-10-12-session-control-and-the-inter-team-record-in-one-sequence.md`;
+# the operator has answered neither, and each was built as recommended there. Put
+# together they open the unparked channel above, which neither question asked
+# about on its own. Moving `raise_decision` to ``_REVIEW`` closes it on the rungs
+# that review a concern, and is the whole of the other answer to question 8;
+# narrowing `decisions_readable_by` to the asker is the other answer to question 4.
+#
+# **The three command tools are here on the decision tools' grounds, and on every
+# rung.** `request_command` asks the operator to run a command outside the
+# sandbox. Its only reader before anything happens is the operator, in a row of
+# its own kind, so parking it would put a request for the operator in front of
+# the operator to ask whether the operator may see it; and the asker was told to
+# carry on, which a parked call does not let it do. The row is the review:
+# nothing runs on this call, and nothing runs at all until the operator presses
+# twice on the exact string, which only an intent naming no node can start
+# (`store._approved`). `withdraw_command` removes the asker's own row.
+#
+# `read_commands` hands text to a second reader, as `read_decisions` does: a
+# session's root reads every command asked in it
+# (`model.Snapshot.commands_readable_by`), so a sub-agent's command, reason and
+# expectation reach its lead unparked, and so does the end of what the command
+# printed -- bytes of a program the operator chose to run, which may be the
+# contents of a file an agent wrote. Each is quoted behind a mark of its own
+# and never as a line the tool wrote (`commandbus`), and what bounds them is the
+# store: `command.MAX_OPEN_PER_ASKER` open for an agent and
+# `command.MAX_OPEN_SUBAGENTS` across a session's sub-agents.
+#
+# Named here for every session and offered to a contained one alone: the server
+# of a session with no containment does not have the three (`bus.build_server`),
+# so on it these names admit a call that reaches no tool.
 _BUS_AUTO = frozenset(
     {
         f"mcp__{_BUS_SERVER}__read_inbox",
         f"mcp__{_BUS_SERVER}__read_board",
         f"mcp__{_BUS_SERVER}__read_task",
+        f"mcp__{_BUS_SERVER}__read_digest",
         f"mcp__{_BUS_SERVER}__claim_task",
         f"mcp__{_BUS_SERVER}__complete_task",
         f"mcp__{_BUS_SERVER}__release_task",
+        f"mcp__{_BUS_SERVER}__raise_decision",
+        f"mcp__{_BUS_SERVER}__read_decisions",
+        f"mcp__{_BUS_SERVER}__withdraw_decision",
+        f"mcp__{_BUS_SERVER}__request_command",
+        f"mcp__{_BUS_SERVER}__read_commands",
+        f"mcp__{_BUS_SERVER}__withdraw_command",
     }
 )
+
+
+# -- another session's records ----------------------------------------------------
+
+# The two directories pptmstr keeps sessions' records under, as names beneath
+# ``settings.config_dir()``. Spelled here rather than imported: ``sessionfile``
+# imports ``Policy`` from this module and ``boardsync`` imports ``sessionfile``,
+# so either import closes a cycle. tests/test_approval.py holds both to
+# ``sessionfile.root()`` and ``boardsync.legacy_root()``.
+_RECORD_ROOTS = ("sessions", "boards")
+
+# The tools that read one file, by the argument that names it.
+_FILE_READS: Mapping[str, str] = {"Read": "file_path", "NotebookRead": "notebook_path"}
+
+# The tools that read a tree: everything their ``path`` holds may come back, so a
+# ``path`` that contains the records is a read of them.
+_TREE_READS = frozenset({"Glob", "Grep"})
+
+# What makes a word a pattern over file names rather than one name: to bash, and
+# to the CLI's ``Glob``, which reads braces as well.
+_PATTERN_CHARS = frozenset("*?[{")
+
+# The admitted commands that read the files they are handed and nothing else.
+# Handed a directory each fails or reports on the directory itself, and with no
+# operand each reads standard input or nothing, so none of them reads a tree and
+# none reads the working directory. Every other command ``shellscan`` admits --
+# ``ls``, ``du``, ``grep``, ``git``, and any row added after this was written --
+# is taken to read the whole of every directory it names and of the one it runs
+# in, because which flags make one descend is the binary's knowledge.
+_READS_ONLY_ITS_OPERANDS = frozenset(
+    {"cat", "head", "tail", "wc", "nl", "sed", "stat", "echo", "pwd", "df", "which", "cd"}
+)
+
+# The most directories a command may be running in before ``records_read`` stops
+# following it. Every ``cd`` can double the count, since a ``cd`` in a pipeline or
+# behind ``||`` may not have happened, and ``shellscan`` admits eight segments.
+_MAX_DIRECTORIES = 64
+
+
+@dataclass(frozen=True, slots=True)
+class _Records:
+    """
+    Where sessions' records are, and which of those directories is the caller's.
+
+    Every path is one ``_place`` produced, so a comparison here is between two
+    locations and never between two spellings.
+    """
+
+    roots: tuple[Path, ...]
+    own: tuple[Path, ...]
+
+    def holding(self, place: Path) -> Path | None:
+        """
+        The records root ``place`` is in, the root itself included, or None when it
+        is in none or is in the caller's own directory.
+
+        The root counts because listing it names every other session, and a session
+        id is the directory another session's command output is under.
+        """
+        if any(place == mine or mine in place.parents for mine in self.own):
+            return None
+        return next((r for r in self.roots if place == r or r in place.parents), None)
+
+    def beneath(self, place: Path) -> Path | None:
+        """
+        The records root somewhere under ``place``, or None.
+        """
+        return next((r for r in self.roots if place in r.parents), None)
+
+
+def _place(raw: str, base: Path) -> Path | None:
+    """
+    ``raw`` as one absolute path with its symlinks followed, measured from ``base``
+    when it is relative, or None when the filesystem cannot say where it is.
+
+    ``driver._located`` is the same function for the write bound and gives the same
+    reasons: None for a symlink loop, a ``~user`` with no home or an embedded NUL,
+    and never a raise, because every string here came from a model and an exception
+    would run up through ``PreToolUse`` into the CLI.
+    """
+    try:
+        return (base / Path(raw).expanduser()).resolve()
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _configuration() -> Path:
+    """
+    The directory the records roots are named under.
+
+    Through the module and at call time, as ``sessionfile._under`` does and for its
+    reason: a test redirects ``settings.config_dir``. A function of its own, taking
+    nothing, so that tests/test_settings.py finds it and holds what it answers
+    inside the suite's temporary tree.
+    """
+    return settings.config_dir()
+
+
+def _records(session_id: str | None) -> _Records | None:
+    """
+    The records roots and the caller's own directories under them, or None when
+    the configuration directory cannot be located.
+
+    Each root is given twice when it is reached through a symlink, as it is spelled
+    and as it resolves: a search rooted above the spelled one is as much a read of
+    the records as one rooted above where they are.
+
+    A session's own directory is ``<root>/<session id>`` only when that is a real
+    entry of the root under that exact name. An id that is not one directory name
+    -- empty, ``..``, one with a separator -- has no directory, which is
+    ``boardlog.session_dir``'s rule reached by resolving rather than by listing
+    the spellings. A symlink at that name is not the caller's either: what it
+    leads to is judged as wherever it leads, which is what makes the link
+    ``boardsync.migrate`` leaves at ``boards/<id>`` readable for the session it
+    belongs to and for no other.
+
+    With no ``session_id`` nothing is the caller's, so everything under a root is
+    somebody else's.
+    """
+    try:
+        spelled = [_configuration() / name for name in _RECORD_ROOTS]
+    except (OSError, RuntimeError):
+        return None
+    roots: list[Path] = []
+    for directory in spelled:
+        resolved = _place(str(directory), Path("/"))
+        if resolved is None:
+            return None
+        roots.extend(r for r in (resolved, Path(os.path.abspath(directory))) if r not in roots)
+    own: list[Path] = []
+    for root in roots:
+        mine = _place(session_id, root) if session_id else None
+        if mine is not None and mine.parent == root and mine.name == session_id:
+            own.append(mine)
+    return _Records(tuple(roots), tuple(own))
+
+
+def _spellings(raw: str) -> tuple[str, ...]:
+    """
+    ``raw`` and, when it differs, ``raw`` without the whitespace around it.
+
+    ``Path(" /x")`` is relative, so a padded absolute path is one name to this
+    module and may be another to the tool that opens it. A write is refused over
+    that disagreement (``driver._escapes_write_region``); a read is judged under
+    both readings, and either one landing in the records is enough.
+    """
+    return (raw,) if raw == raw.strip() else (raw, raw.strip())
+
+
+def _fixed_part(pattern: str) -> str:
+    """
+    The directory a pattern cannot match outside of: its leading components up to
+    the first that carries a pattern character, or all of it when none does.
+    """
+    cut = next((i for i, char in enumerate(pattern) if char in _PATTERN_CHARS), None)
+    if cut is None:
+        return pattern
+    return pattern[: pattern.rfind("/", 0, cut) + 1] or "."
+
+
+def _names_in(word: str) -> Iterator[str]:
+    """
+    Every string in one shell word that the command might read as a path: the word,
+    what follows an ``=`` in it, and what follows the letter of a short option.
+
+    Which options take a file is the binary's knowledge, so all three are offered
+    for every word. A word that was never a path resolves to a name under the
+    working directory that does not exist, which is in nobody's records.
+    """
+    yield word
+    if "=" in word:
+        yield word.split("=", 1)[1]
+    if word.startswith("-") and not word.startswith("--"):
+        yield word[2:]
+
+
+def _shell_places(command: str, start: Path) -> list[tuple[Path, bool]] | None:
+    """
+    Every place a ``shellscan``-admitted command reads, each with whether it is
+    read as a tree, or None when one of them cannot be placed.
+
+    Only for a command ``shellscan.is_read_only`` passed. That is what makes the
+    words the arguments: such a command carries no ``$``, no substitution, no
+    brace and no unquoted leading ``~``, so the only thing bash does to a word
+    after ``shlex`` has read it is match a glob against file names, and
+    ``_fixed_part`` is the directory that matching cannot leave. A word with a
+    glob in it is therefore a tree, whatever command it is handed to.
+
+    **A command reads its working directory, as a tree, unless it is one of
+    ``_READS_ONLY_ITS_OPERANDS``.** ``grep -r token`` and ``ls -R`` name no path.
+
+    **A command is followed through its ``cd``s, into every directory it may be
+    in.** A ``cd`` in a pipeline runs in a subshell and one behind ``||`` may not
+    run, so the directories before it stay candidates beside the ones after, and
+    every later word is placed from each. Bash's ``cd`` drops a ``..`` from the
+    spelling before it follows a symlink and the kernel does the opposite for
+    every other command, so a ``cd`` adds both readings. A ``cd`` reads nothing
+    itself. ``cd -`` goes to a directory only the shell knows: after one, nothing
+    that depends on the working directory can be placed.
+
+    Not followed: ``CDPATH``, which sends a relative ``cd`` somewhere this cannot
+    see, and a symlink a recursive command walks through under a directory that
+    is itself outside the records.
+    """
+    spelled = [start]
+    lost = False
+    places: list[tuple[Path, bool]] = []
+    for segment in _split_segments(command):
+        try:
+            argv = shlex.split(segment)
+        except ValueError:
+            return None
+        if not argv:
+            continue
+        moving = argv[0] == "cd"
+        descends = argv[0] not in _READS_ONLY_ITS_OPERANDS
+        if descends:
+            if lost:
+                return None
+            for directory in spelled:
+                here = _place(".", directory)
+                if here is None:
+                    return None
+                places.append((here, True))
+        arrived: list[Path] = []
+        for word in argv[1:]:
+            if moving and word == "-":
+                lost = True
+                continue
+            for name in _names_in(word):
+                fixed = _fixed_part(name)
+                try:
+                    relative = not Path(fixed).expanduser().is_absolute()
+                except (OSError, RuntimeError, ValueError):
+                    return None
+                if lost and relative:
+                    return None
+                for directory in spelled:
+                    placed = _place(fixed, directory)
+                    if placed is None:
+                        return None
+                    if moving:
+                        dotted = os.path.normpath(directory / Path(fixed).expanduser())
+                        arrived.extend((placed, Path(dotted)))
+                    else:
+                        places.append((placed, descends or fixed != name))
+        spelled.extend(p for p in dict.fromkeys(arrived) if p not in spelled)
+        if len(spelled) > _MAX_DIRECTORIES:
+            return None
+    return places
+
+
+def _named_places(
+    tool_name: str, tool_input: Mapping[str, Any], base: Path
+) -> list[tuple[Path, bool]] | None:
+    """
+    The places a reading call names, each with whether it is read as a tree, or
+    None when one of them cannot be placed. An empty list is a call that names
+    nothing this function reads.
+    """
+
+    def placed(raw: object, origins: list[Path]) -> list[Path] | None:
+        if not isinstance(raw, str):
+            return None
+        found: list[Path] = []
+        for spelling in _spellings(raw):
+            for origin in origins:
+                place = _place(spelling, origin)
+                if place is None:
+                    return None
+                found.append(place)
+        return found
+
+    if tool_name in _FILE_READS:
+        raw = tool_input.get(_FILE_READS[tool_name])
+        # No path is a call the tool refuses for want of one, and reads nothing.
+        if raw is None:
+            return []
+        files = placed(raw, [base])
+        return None if files is None else [(place, False) for place in files]
+
+    if tool_name in _TREE_READS:
+        # An absent ``path`` is the working directory, to both tools.
+        trees = placed(tool_input.get("path") or ".", [base])
+        pattern = tool_input.get("pattern")
+        if trees is not None and tool_name == "Glob" and pattern is not None:
+            # A pattern may climb out of ``path`` or be absolute, so where it can
+            # match is measured from each place ``path`` may be. ``Grep``'s
+            # pattern is a regular expression over contents and names no file;
+            # its ``glob`` filters names under ``path`` and does not widen it.
+            trees = placed(_fixed_part(pattern) if isinstance(pattern, str) else pattern, trees)
+        return None if trees is None else [(place, True) for place in trees]
+
+    if tool_name == "Bash":
+        command = tool_input.get("command")
+        # A command ``shellscan`` does not vouch for is one whose words are not
+        # known to be its arguments, and no rung admits it on its words.
+        if not isinstance(command, str) or not is_read_only(command):
+            return []
+        return _shell_places(command, base)
+
+    return []
+
+
+def records_read(
+    tool_name: str,
+    tool_input: Mapping[str, Any],
+    *,
+    session_id: str | None = None,
+    cwd: str | None = None,
+) -> str | None:
+    """
+    Why this call would read another session's records, or None when it would not.
+
+    pptmstr keeps what it knows of every session under one directory: the
+    commands a session asked the operator to run and what they printed, the
+    operator's reasons for refusing them, and its board. ``sandbox`` denies that
+    directory to a contained ``Bash`` command and to nothing else -- ``Read``,
+    ``Glob``, ``Grep`` and ``NotebookRead`` run in the CLI's own process, and an
+    uncontained session's ``Bash`` has no sandbox -- so this is what stands
+    between those and the records. ``classify`` asks it of every call it would
+    otherwise admit by one of those names.
+
+    **The rule is about where a path leads.** Each named path is resolved from
+    ``cwd`` with ``~``, ``..`` and symlinks followed, and the call reads the
+    records when one of them is under a records root and not under
+    ``<root>/<session_id>``. The root itself is not the caller's. The legacy
+    ``boards`` directory is a root on the same terms, and the link left there for
+    a moved log is followed to the session it belongs to.
+
+    **A search is a read of everything under where it starts.** ``Glob``,
+    ``Grep``, a shell word with a glob in it, and every admitted shell command
+    outside ``_READS_ONLY_ITS_OPERANDS`` are treated as reading the whole of each
+    directory they name, so one that names a directory *containing* a records
+    root -- ``~``, ``~/.config``, ``/`` -- reads the records. A pattern is
+    narrowed to its leading components without a pattern character first, so
+    ``Source/**/*.py`` from the home directory is a search of ``Source``. The
+    price is every search rooted above the configuration directory, and for a
+    shell command it is wider than it sounds: ``ls /`` lists one level and is
+    treated as ``ls -R /`` would be. A session whose own ``cwd`` contains the
+    records has no admitted ``ls``, ``du``, ``grep`` or ``git`` and no admitted
+    glob that starts in it, and no ``Glob`` or ``Grep`` without a ``path``.
+
+    **What cannot be placed is treated as a read.** A path with an embedded NUL,
+    a symlink loop, an argument that is not text, a relative path behind a
+    ``cd -``, or a configuration directory that cannot be located: each is a
+    case where staying out of the records cannot be shown.
+
+    **``session_id`` and ``cwd`` are the driver's, never the call's.** With no
+    ``session_id`` no directory is the caller's and everything under a root is
+    another session's. With no ``cwd`` a relative path is measured from this
+    process's directory, which is where a session that named none runs
+    (``driver.AgentSession._write_region``) and is the wrong base for any other.
+
+    **Decided before the call runs**, as the write bound is: a component that
+    becomes a symlink between this answer and the read is not seen. Not covered at
+    all: a hard link, an MCP tool that reads files, ``WebFetch`` of a ``file:``
+    URL, and ``Bash`` under ``AUTONOMOUS``, where the command is not one
+    ``shellscan`` read and the sandbox is the bound.
+    """
+    if tool_name not in _FILE_READS and tool_name not in _TREE_READS and tool_name != "Bash":
+        return None
+    whose = "another session's" if session_id else "a session's"
+    unplaced = (
+        f"{tool_name} names a path this build cannot place, so it cannot be shown to "
+        f"stay out of {whose} records, which pptmstr keeps apart from every other session"
+    )
+    try:
+        base = Path(os.path.abspath(Path(cwd or ".").expanduser()))
+    except (OSError, RuntimeError, ValueError):
+        return unplaced
+    places = _named_places(tool_name, tool_input, base)
+    if places is None:
+        return unplaced
+    if not places:
+        return None
+    records = _records(session_id)
+    if records is None:
+        return unplaced
+    mine = (
+        f"this session's own are under {records.own[0]}"
+        if records.own
+        else "which directory under it is this session's is not known to the gate"
+    )
+    for place, tree in places:
+        root = records.holding(place)
+        if root is not None:
+            return (
+                f"{tool_name} reads {place}, which is in {whose} records: pptmstr "
+                f"keeps every session's command output, board and refusals under "
+                f"{root}, and {mine}"
+            )
+        root = records.beneath(place) if tree else None
+        if root is not None:
+            return (
+                f"{tool_name} reads everything under {place}, and {whose} records are "
+                f"under it: pptmstr keeps every session's command output, board and "
+                f"refusals in {root}, and {mine}. Name a directory that does not "
+                f"contain it"
+            )
+    return None
+
+
+def records_written(
+    tool_name: str, tool_input: Mapping[str, Any], *, cwd: str | None = None
+) -> str | None:
+    """
+    Why this call would write under a records root, or None when it would not.
+
+    pptmstr reads what is under the roots back as what happened: a session's
+    ``session.json``, its board log, and a command's ``started.json``, ``end.json``
+    and ``gone.json`` decide what the operator is shown and what a restart
+    restores. Only pptmstr writes them, from its own process and never through a
+    tool call, so **every** session's directory counts here, the caller's own
+    included, and ``classify`` admits no write that names one on any rung.
+
+    The four write tools only, and their target is the one ``model.written_path``
+    reads, which is the argument the write bound and the ledger read. It is placed
+    as ``records_read`` places a path -- from ``cwd``, with ``~``, ``..`` and
+    symlinks followed, both spellings of a padded one -- against the same roots,
+    the legacy ``boards`` directory among them. A target that cannot be placed and
+    a configuration directory that cannot be located are each treated as a write
+    into the records. A write tool that names no target is not: it opens nothing,
+    and where it would be released the driver's write bound refuses it for that
+    (``driver._escapes_write_region``).
+
+    ``Bash`` is not asked. ``PERMISSIVE`` admits only a command ``shellscan`` says
+    writes nothing, and ``AUTONOMOUS`` hands the command to the sandbox, whose
+    write region is the session's directory: what keeps a contained command out
+    of the records when that directory contains them is the sandbox's own
+    configuration (``sandbox.containment_settings``), not this gate.
+
+    Decided before the call runs, with ``records_read``'s limits: a component that
+    becomes a symlink afterwards, and a hard link, are not seen.
+    """
+    # Imported here because ``model`` imports ``Policy`` from this module.
+    from .model import written_path
+
+    raw = written_path(tool_name, tool_input)
+    if raw is None:
+        return None
+    unplaced = (
+        f"{tool_name} names a target this build cannot place, so it cannot be shown "
+        f"to stay out of pptmstr's own records"
+    )
+    try:
+        base = Path(os.path.abspath(Path(cwd or ".").expanduser()))
+    except (OSError, RuntimeError, ValueError):
+        return unplaced
+    records = _records(None)
+    if records is None:
+        return unplaced
+    for spelling in _spellings(raw):
+        place = _place(spelling, base)
+        if place is None:
+            return unplaced
+        root = records.holding(place)
+        if root is not None:
+            return (
+                f"{tool_name} writes {place}, which is in pptmstr's own records under "
+                f"{root}: pptmstr reads them back as what happened in a session, so "
+                f"no agent writes there unasked, this session's own directory included"
+            )
+    return None
 
 
 # The whole of ``PERMISSIVE``'s widening: one tool, decided per command
@@ -377,6 +974,9 @@ def classify(
     tool_name: str,
     tool_input: Mapping[str, Any],
     policy: Policy = Policy.STRICT,
+    *,
+    session_id: str | None = None,
+    cwd: str | None = None,
 ) -> Disposition:
     """
     Whether a tool call may run unattended, under the caller's policy.
@@ -401,9 +1001,34 @@ def classify(
     ``_REVIEW`` check and may not touch the final ``REQUIRE_APPROVAL``, which is
     reached at every policy: the tool this build has never heard of is the one that
     must not run unreviewed, whatever the operator asked for (2026-09-03 §6.1).
-    Under ``AUTONOMOUS`` that final arm is the only way to reach
-    ``REQUIRE_APPROVAL`` at all.
+    Under ``AUTONOMOUS`` that final arm, a read of another session's records and
+    a write into any session's are the only ways to reach ``REQUIRE_APPROVAL``.
+
+    **No rung admits a read of another session's records.** ``records_read`` is
+    asked of the reading tools ahead of the allowlist, and of a ``Bash`` command
+    under ``PERMISSIVE``, the one rung that admits a command on what it says. A
+    call it names is not admitted: it takes whatever a call that needs approval
+    takes on its rung, which is the operator where one is asked and a refusal
+    where none is. ``session_id`` and ``cwd`` are passed through to it and mean
+    what they mean there; left out, no directory under the records is the
+    caller's own.
+
+    ``Bash`` under ``AUTONOMOUS`` is not asked, because that rung does not read
+    the command: what bounds it there is the sandbox, which denies the records
+    directory whole (``sandbox.denied_records``).
+
+    **No rung admits a write into any session's records, the caller's own
+    included.** ``records_written`` is asked of the four write tools ahead of
+    everything else, and ``cwd`` is what a relative target is measured from. The
+    driver's write bound cannot stand in for it: a session whose directory
+    contains the configuration directory has the records inside its region.
     """
+    if records_written(tool_name, tool_input, cwd=cwd) is not None:
+        return Disposition.REQUIRE_APPROVAL
+    reads = tool_name in _FILE_READS or tool_name in _TREE_READS
+    if reads or (tool_name == "Bash" and policy is Policy.PERMISSIVE):
+        if records_read(tool_name, tool_input, session_id=session_id, cwd=cwd) is not None:
+            return Disposition.REQUIRE_APPROVAL
     if tool_name in _AUTO or tool_name in _BUS_AUTO:
         return Disposition.AUTO_APPROVE
     if _policy_admits(policy, tool_name, tool_input):
@@ -414,7 +1039,45 @@ def classify(
     return Disposition.REQUIRE_APPROVAL
 
 
-def summarize(tool_name: str, tool_input: Mapping[str, Any], width: int = 90) -> str:
+def command_shown(tool_name: str, key: str, value: object) -> str | None:
+    """
+    A Bash call's command as every approval surface draws it, or None when
+    ``key`` of ``tool_name`` is not one.
+
+    ``commandtext.visible`` and nothing else: a newline is the two characters
+    backslash-n followed by the break itself, so a line break in the command
+    is never drawn as a space, and never as a break the pane could have made
+    by wrapping. `ls # '` + newline + `touch pwned #'` is two commands to bash
+    (``shellscan._scan``), and flattened to `ls # ' touch pwned #'` the second
+    is comment text to the eye. Since a command carrying a comment parks, that
+    row is the one the operator approves from.
+
+    One function so that the queue row, the expanded row and the detail pane
+    cannot each have a rule: ``summarize`` flattens this to one line, where
+    the marker survives and the break does not, and the two panes draw it
+    line for line.
+
+    What it costs an ordinary command is ``visible``'s whole scheme rather
+    than its newline rule alone. A backslash is drawn doubled, so
+    `grep 'a\\.b' f` reads `grep 'a\\\\.b' f`; a tab is `\\x09`; a character
+    outside ASCII is `\\u{...}`. A command with none of those is drawn as
+    typed. Taking only the newline rule would leave a carriage return and a
+    bidirectional override drawn as nothing, and a literal backslash-n
+    indistinguishable from a marked break.
+    """
+    if tool_name != "Bash" or key != "command" or not isinstance(value, str):
+        return None
+    return visible(value)
+
+
+def summarize(
+    tool_name: str,
+    tool_input: Mapping[str, Any],
+    width: int = 90,
+    *,
+    session_id: str | None = None,
+    cwd: str | None = None,
+) -> str:
     """
     One line naming what the call would do. This is the queue row.
 
@@ -432,10 +1095,48 @@ def summarize(tool_name: str, tool_input: Mapping[str, Any], width: int = 90) ->
     ``"?"`` when the declared key is absent, and that is the honest row rather than
     a gap: the other key being filled in does not make it the target, and a call
     whose destination cannot be read is one the operator should open.
+
+    **A message, a declaration and an amendment say what their author said about
+    them**, in the words the board will use once they land (``board.basis_label``
+    and its neighbours, and ``model``'s reading of the raw arguments). This is the
+    row the operator signs the text off from, so a standing the board shows
+    afterwards and this row did not would be a claim approved unseen. The standing and the
+    incident marker ride ahead of the subject or title because the row is clipped
+    from the right and they are the short part. A declaration's property goes
+    last for the opposite reason: it is a whole sentence that will rarely fit, and
+    at the end a cut shows as the ellipsis it is, where in the middle it would
+    push the size off the row and still not be whole. The detail pane lists every
+    argument uncut.
+
+    **A call that reads a session's records says so ahead of everything else.**
+    ``records_read`` decides it, from the ``session_id`` and ``cwd`` it is given
+    here, and the row leads with whose records they are: the path that reaches
+    them may be a relative one or a symlink, and then nothing else on the row
+    says why a read is waiting. "Another session's" only when the caller's own
+    directory was known and this is not in it. A write into any session's
+    records leads with "pptmstr's own records", from ``records_written``.
     """
+    # Imported here because ``model`` imports ``Policy`` from this module, so a
+    # top-level import closes a cycle. Neither pulls in the SDK.
+    from .board import basis_label, incident_marker, property_label
+    from .model import Basis, normalised_property, stated_flag, stated_incident
+
+    def standing(raw: object) -> str:
+        try:
+            return basis_label(Basis.stated(raw))
+        except ValueError:
+            # The handler refuses this call. Shown as written, so the operator
+            # approving it knows the approval will not put anything on the board.
+            return f"basis {str(raw)!r} is not one the bus accepts"
+
+    mark = ""
+    if records_read(tool_name, tool_input, session_id=session_id, cwd=cwd) is not None:
+        mark = f"{'another' if session_id else 'a'} session's records · "
+    elif records_written(tool_name, tool_input, cwd=cwd) is not None:
+        mark = "pptmstr's own records · "
 
     def clip(text: str, limit: int = width) -> str:
-        text = " ".join(text.split())
+        text = mark + " ".join(text.split())
         return text if len(text) <= limit else text[: limit - 3] + "..."
 
     if tool_name in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
@@ -443,7 +1144,13 @@ def summarize(tool_name: str, tool_input: Mapping[str, Any], width: int = 90) ->
         path = str(tool_input.get(declared) or "?")
         return clip(f"{tool_name} {path}")
     if tool_name == "Bash":
-        return clip(str(tool_input.get("command") or ""))
+        # The one row that is not a description of the call but the call, so it
+        # is the one row where the flattening below could hide something: see
+        # `command_shown`. The count leads because the row is clipped from the
+        # right, and a second line past the cut must not read as a long first.
+        shown = command_shown(tool_name, "command", str(tool_input.get("command") or "")) or ""
+        lines = shown.count("\n") + 1
+        return clip(shown if lines == 1 else f"{lines} lines · {shown}")
     if tool_name in ("WebFetch", "WebSearch"):
         return clip(f"{tool_name} {tool_input.get('url') or tool_input.get('query') or ''}")
     if tool_name in ("Task", "Agent"):
@@ -455,7 +1162,11 @@ def summarize(tool_name: str, tool_input: Mapping[str, Any], width: int = 90) ->
         # detail pane, not here.
         to = tool_input.get("to") or "?"
         subject = str(tool_input.get("subject") or "").strip()
-        return clip(f"message {to}: {subject or tool_input.get('body') or ''}")
+        marker = incident_marker(stated_incident(tool_input.get("incident")))
+        return clip(
+            f"message {to} ({standing(tool_input.get('basis'))}): "
+            f"{marker}{subject or tool_input.get('body') or ''}"
+        )
     if tool_name == _BUS_DECLARE:
         # The question at this row is "should this work exist", so it leads with the
         # claim. The specification is the diff-equivalent and belongs in the detail
@@ -464,16 +1175,51 @@ def summarize(tool_name: str, tool_input: Mapping[str, Any], width: int = 90) ->
         # scoping moment and those two are what the operator would otherwise open
         # the row to find.
         title = str(tool_input.get("title") or "").strip()
-        parts = [f"declare {title or '(untitled)'}"]
+        parts = [f"declare ({standing(tool_input.get('basis'))}) {title or '(untitled)'}"]
         touches = tool_input.get("touches") or ()
         if touches:
             parts.append(f"writes {', '.join(str(p) for p in touches)}")
         depends = tool_input.get("depends_on") or ()
         if depends:
             parts.append(f"after {', '.join(str(d) for d in depends)}")
+        held_to = property_label(normalised_property(tool_input.get("property")))
+        if held_to:
+            parts.append(held_to)
+        return clip(" · ".join(parts))
+    if tool_name == _BUS_AMEND:
+        # The question at this row is "may this replace what the task is held to".
+        # Which task and how the amender stands behind the new text lead; what it
+        # does to the property follows, because that sentence is the bar and an
+        # amendment that moves or removes it is the one an operator most needs to
+        # open. The text itself is the diff-equivalent, as a declaration's is.
+        #
+        # A basis is shown only beside a text it can end up beside. With no
+        # ``detail``, or a blank one, the handler leaves the text standing and
+        # the reducer keeps the basis its author gave it, so the amender's is
+        # discarded: printed here, it would be a standing the operator signed
+        # off and the board never shows. One the bus will not accept is still
+        # shown, since that call is refused whatever else it carries.
+        task = str(tool_input.get("task_id") or "?").strip()
+        sent, raw = tool_input.get("detail"), tool_input.get("basis")
+        said = standing(raw)
+        if sent is None or not str(sent).strip():
+            try:
+                given = Basis.stated(raw)
+            except ValueError:
+                pass
+            else:
+                said = "its text stands" + (
+                    "" if given is None else "; the basis given is not kept"
+                )
+        parts = [f"amend {task} ({said})"]
+        held_to = property_label(normalised_property(tool_input.get("property")))
+        if stated_flag(tool_input.get("withdraw_property")):
+            parts.append("WITHDRAWS its property")
+        elif held_to:
+            parts.append(f"replaces its property -- {held_to}")
         return clip(" · ".join(parts))
     if not tool_input:
-        return tool_name
+        return clip(tool_name)
     key = next(iter(tool_input))
     return clip(f"{tool_name} {key}={tool_input[key]!r}")
 

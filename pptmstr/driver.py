@@ -17,11 +17,11 @@ nothing else, which is I8 satisfied structurally rather than by convention.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import time
 import uuid
-from collections.abc import Mapping, Sequence
-from contextlib import suppress
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, cast
@@ -31,6 +31,7 @@ from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
     ClaudeSDKClient,
+    CLIJSONDecodeError,
     HookContext,
     HookInput,
     HookJSONOutput,
@@ -52,7 +53,7 @@ from claude_agent_sdk import (
     UserMessage,
     tag_session,
 )
-from claude_agent_sdk.types import SystemPromptPreset
+from claude_agent_sdk.types import SystemPromptCustom, SystemPromptPreset
 
 from .approval import (
     Disposition,
@@ -60,12 +61,16 @@ from .approval import (
     classify,
     diff_texts,
     inherits_to_subagents,
+    records_read,
+    records_written,
     render_texts,
     requires_containment,
     summarize,
 )
+from .board import ROOT_NAMES, address_for
 from .bridge import Bridge
-from .bus import BUS_TOOLS, EDITED_KEY, FROM_KEY, SERVER_NAME, build_server
+from .bus import EDITED_KEY, FROM_KEY, SERVER_NAME, build_server, offered_tools
+from .cli_version import BelowFloor, MeetsFloor, Unreadable, VersionRead, check_floor
 from .intents import (
     AgentFinished,
     AgentResumed,
@@ -84,6 +89,8 @@ from .intents import (
 from .log import LOG
 from .model import (
     AWAITING_TOPIC,
+    BEFORE_RESTART,
+    ENDED_WITH_SESSION_TOPIC,
     INTERRUPTED_TOPIC,
     SUPERVISING_TOPIC,
     WRITING_TOOLS,
@@ -97,7 +104,7 @@ from .model import (
 from .settings import McpConnector
 from .templates import SOLO, WorkTemplate, lead_briefing, worker_prompt
 from .transcript import SegmentKind, Transcript
-from .tree import lies_inside_checkout
+from .tree import lies_inside_checkout, source_tree_of
 
 # Hours, not minutes. HookMatcher.timeout defaults to 60s and the CLI enforces it
 # with a per-hook abort, which would kill any review that took longer than a coffee
@@ -108,6 +115,29 @@ APPROVAL_TIMEOUT_S = 6 * 60 * 60
 # Slow on purpose: get_context_usage is a control request, not a push, and the
 # number it returns moves on the scale of turns rather than frames.
 CONTEXT_POLL_S = 20.0
+
+# The longest single line of the CLI's output the transport will take, passed as
+# ``ClaudeAgentOptions.max_buffer_size``. One line is one message, and a line over
+# the limit is fatal to the session: the transport raises from its reader and
+# nothing skips the frame. The SDK's own default is 1 MiB, which a Read of six PDF
+# pages exceeds -- each page arrives as a base64 JPEG of 190-280 KB inside one
+# tool result, so six are 1.3 MB and the twenty the tool allows per call are about
+# 5 MB.
+#
+# Sized from what bounds a tool result rather than from the largest one seen. A
+# result is of use only if it can be sent to the model, and the Messages API
+# refuses a request over 32 MB, so no result the CLI can go on to use is larger
+# than that. Twice that, because a frame may carry a result a second time (the
+# stream's ``tool_use_result`` beside the message content).
+#
+# A ceiling on one buffered line and not an allocation: the framer holds what has
+# arrived of the line in progress and nothing more, so a session whose frames are
+# small costs what it did. What the ceiling still buys is that a CLI writing
+# without a newline stops at 64 MiB of this process's memory instead of all of it.
+#
+# The transport compares it with ``len`` of decoded text, so it is characters; the
+# frames that reach it are JSON carrying base64, where the two are the same.
+MAX_STREAM_FRAME = 64 * 1024 * 1024
 
 # How often the post-result read loop wakes to re-examine its sub-agents. A poll
 # interval and nothing else: a tick that finds every sub-agent still alive costs one
@@ -182,8 +212,64 @@ SESSION_TAG = "pptmstr"
 
 # The names that mean the root session, and so can never be allocated to a
 # sub-agent. A worker calls the agent that gave it the job by whichever of these
-# comes to mind, and all three have to land on the same node.
-ROOT_ADDRESSES = ("lead", "main", "root")
+# comes to mind, and all three have to land on the same node. The board's own
+# tuple, because ``board.address_for`` is what steps over them.
+ROOT_ADDRESSES = ROOT_NAMES
+
+# pptmstr's own source tree, which a session that writes unattended is never started
+# in. The same derivation as ``ui.launcher.OWN_CHECKOUT`` and deliberately not an
+# import of it: the launcher depends on the driver's side of the tree and not the
+# other way round. A test holds the two equal.
+OWN_CHECKOUT = source_tree_of(str(Path(__file__).resolve().parent))
+
+# The first CLI that reads the system prompt's `snapshot` key, from the docstring of
+# `claude_agent_sdk.types.SystemPromptPreset.snapshot` (SDK 0.2.164): "Requires
+# Claude Code CLI 2.1.257 or later". The key travels in the initialize request and
+# the SDK's own note on it is that "older CLIs ignore unknown initialize fields", so
+# below this a resumed session keeps the prompt it recorded and nothing on the wire
+# says so. No CLI older than this has been run against pptmstr; the number is the
+# SDK's documentation and not a measurement.
+RESUME_BRIEFING_FLOOR = "2.1.257"
+
+
+def resume_briefing_notice(reported: object) -> str | None:
+    """
+    What a resumed session owes the operator about its briefing, given the version
+    the CLI's ``init`` frame reported, or None when it owes nothing.
+
+    A resuming launch asks the CLI to rebuild the system prompt rather than send
+    the one the session recorded (``AgentSession._system_prompt``). A CLI too old
+    to know the key ignores it silently, and the launcher has already told the
+    operator that the model, team and task are this launch's. So the launch says
+    which it was, and "too old" and "could not tell" are different sentences
+    because they are different facts: one says the briefing did not arrive, the
+    other that nobody knows.
+
+    Pure. ``reported`` is ``object`` because it is read out of the frame's untyped
+    ``data``; anything that is not a version string is "could not tell".
+    """
+    text = reported.strip() if isinstance(reported, str) else ""
+    detail = f"the CLI reported {text!r}" if text else "the CLI's init frame named no version"
+    check = check_floor(VersionRead(text or None, detail), RESUME_BRIEFING_FLOOR)
+    match check:
+        case MeetsFloor():
+            return None
+        case BelowFloor(version=version, floor=floor):
+            return (
+                f"this session was resumed on Claude Code CLI {version}, which is "
+                f"older than {floor}, the first that rebuilds a resumed session's "
+                "system prompt when asked. The session is still answering to the "
+                "system prompt of the launch that started it: this launch's "
+                "briefing -- its role text, template and premises -- was passed "
+                "and not applied."
+            )
+        case Unreadable(detail=why, floor=floor):
+            return (
+                f"the CLI version could not be read ({why}), so whether this "
+                "resumed session is answering to this launch's briefing or to the "
+                f"one it was started with is not established. Claude Code CLI "
+                f"{floor} is the first that applies a resuming launch's."
+            )
 
 
 class SessionIdentityError(RuntimeError):
@@ -202,7 +288,16 @@ class SessionIdentityError(RuntimeError):
 
 class UncontainedAutonomy(RuntimeError):
     """
-    The session would release every reviewed tool with no sandbox under it.
+    The session would release every reviewed tool with no containment settings
+    on its CLI process.
+
+    **What the raise establishes is narrower than its name.** The guard,
+    ``AgentSession._unpaired``, refuses a rung that requires containment when no
+    non-empty ``--settings`` string reaches the CLI's argv. It does not read the
+    string, so its passing says that settings were sent and does not say that
+    they describe a sandbox, that the CLI accepted them, or that the sandbox
+    came up. The paragraphs below argue why the pair matters; "sandbox" in them
+    names what the settings are for, and the check itself is on their presence.
 
     ``Policy.AUTONOMOUS`` and the containment settings are one arrangement and not
     two options. The policy releases the tools; the sandbox is what bounds what a
@@ -212,21 +307,58 @@ class UncontainedAutonomy(RuntimeError):
     **not separable**, and an unpaired session is also one whose agents are told in
     their own prompt that Bash reaches no host but the API, which would be false.
 
+    Raised at the two moments the pair can come apart, and from one predicate,
+    ``AgentSession._unpaired``. ``run`` raises it ahead of the client, for a session
+    constructed with the policy and no settings. ``set_policy`` raises it for a live
+    widening onto a session that has none: the policy is a field and moves at any
+    time, while containment is ``--settings`` on the CLI's argv and cannot be added
+    to a process that is already running, so the dial is able to produce half the
+    arrangement and a launch is the only thing able to produce the other half.
+
     Raised at start rather than at construction. The hazard is a session that
     *runs*: one built to exercise the gate and never started spawns no CLI, and
     making the pair unconstructible would oblige every such test to declare a
     sandbox it has nothing to say about.
 
-    Raised rather than downgraded to ``STRICT``. A launch that quietly does
-    something other than what it was asked for is the failure
-    ``app._containment_refusal`` and ``launcher.floor_refusal`` were both written
-    to avoid, and the operator who ticked the box is owed the refusal.
+    Raised rather than downgraded to ``STRICT``, or on the live path left as a
+    silent no-op. A launch that quietly does something other than what it was asked
+    for is the failure ``app._containment_refusal`` and ``launcher.floor_refusal``
+    were both written to avoid, and the operator who ticked the box is owed the
+    refusal. A dial move that quietly did nothing is the same failure one frame
+    later: the caller that asked for the rung would go on to draw it.
 
-    Nothing a user can do reaches this today: ``ui/launcher`` sets both fields from
-    one checkbox, ``app._launch`` is the only place in the tree that constructs an
-    ``AgentSession``, and ``LaunchSpec.from_record`` carries neither field, so a
-    fork or relaunch drops both together. This guards the next call site rather
-    than an existing one.
+    Nothing a user can do reaches either raise today. ``ui/launcher`` sets both
+    fields from one checkbox, ``app._launch`` is the only place in the tree that
+    constructs an ``AgentSession``, and ``LaunchSpec.from_record`` carries neither
+    field, so a fork or relaunch drops both together; and the only live policy
+    change any surface makes is ``revoke_policy``, which narrows. This guards the
+    next call site rather than an existing one.
+    """
+
+
+class OwnCheckoutRefused(RuntimeError):
+    """
+    A session at a rung that requires containment was about to start in pptmstr's
+    own checkout, or in a directory that cannot be located at all.
+
+    The launcher and ``app._launch`` both ask this before a launch is handed to the
+    pool, and neither is the last point pptmstr controls: the pool can queue a
+    session at its cap, or hold it behind a run that is still ending, for as long
+    as other sessions live, and a directory judged then is a string that may lead
+    somewhere else by the time the slot frees. ``AgentSession.run`` is what every
+    start goes through -- immediate, queued, held, relaunched -- so it asks there,
+    of the string as it resolves at that moment.
+
+    Raised rather than started under ``STRICT``. The operator asked for a session
+    that runs unattended; one that quietly runs attended instead sits parked on its
+    first tool call with nobody expecting to be asked.
+
+    **What this does not close.** The answer is a ``realpath`` taken in this
+    process a few lines before the SDK spawns the CLI. The CLI is handed the same
+    string and resolves it again in its own process, and nothing holds the
+    directory still between the two. Closing that needs the spawn to be given
+    something that cannot be re-pointed -- an open directory, or enforcement inside
+    the sandbox -- and neither is something this side of the process boundary has.
     """
 
 
@@ -404,12 +536,22 @@ def _escapes_write_region(tool_name: str, tool_input: Mapping[str, Any], region:
     **The replacement bound for the write tools.** ``planning/2026-09-03`` §9 defers
     cwd-containment in the gate because "§4 supersedes the need for it under this
     mode" -- §4 being the CLI's Bash sandbox, whose writable region is the session's
-    cwd. That supersession holds only while ``Bash`` is the only tool a policy
-    releases: ``Write``, ``Edit``, ``MultiEdit`` and ``NotebookEdit`` run inside the
+    cwd and, when that cwd is a linked worktree, the main repository's git directory
+    as well (``planning/2026-10-07-a-session-can-run-in-its-own-worktree.md`` D2,
+    measured on CLI 2.1.292).
+
+    That supersession holds only while ``Bash`` is the only tool a policy releases:
+    ``Write``, ``Edit``, ``MultiEdit`` and ``NotebookEdit`` run inside the
     CLI process, which the sandbox does not cover, so a policy that releases them
-    without this reaches the whole filesystem. What this buys is parity of region --
-    a released write tool reaches what a released ``Bash`` reaches and no more -- and
+    without this reaches the whole filesystem. What this buys is a bound of region
+    -- a released write tool names nothing outside the session's directory -- and
     not the process boundary §4 has.
+
+    **The one test is whether the resolved target lies inside the resolved
+    region.** Nothing under the region is excluded, so this is not a statement
+    that a released write tool reaches no more than a released ``Bash`` does:
+    neither region contains the other, and ``_write_region`` says where each
+    exceeds the other and what is unmeasured about it.
 
     §3 closed content-classification of ``Bash`` on the ground that the parser
     becomes the security property. That objection does not reach here: these four
@@ -915,9 +1057,24 @@ class AgentSession:
         policy: Policy = Policy.STRICT,
         resume: str | None = None,
         connectors: Sequence[McpConnector] = (),
+        restored_addresses: Mapping[str, str | None] | None = None,
+        message: str | None = None,
+        task_is_label: bool = False,
     ) -> None:
         self.bridge = bridge
         self.task = task
+        # ``task`` is the CLI's label for a conversation whose original task
+        # nothing recorded (``LaunchSpec.task_is_label``). ``announce`` says so,
+        # which is how the record keeps a title without it passing for a prompt.
+        self.task_is_label = task_is_label
+        # What ``run`` sends first when it is not the task: a resume's message
+        # (``LaunchSpec.message``). ``announce`` never reads it, so the record's
+        # title stays the task.
+        self.message = message
+        # Called once, by ``run``, when the opening text has been handed to a
+        # connected client: the first moment this run is known to have reached
+        # the CLI. Set by whoever constructs the session, before it is started.
+        self.on_started: Callable[[], None] | None = None
         # The team shape, or None for a lone agent. Held rather than unpacked at
         # construction because resolve_role needs the role names for a role that has
         # not spawned yet -- "part of this team, not started" and "no such role" are
@@ -948,9 +1105,10 @@ class AgentSession:
         # §8's containment configuration as the JSON string ``settings`` takes -- what
         # ``sandbox.containment_settings`` returns -- or None for a launch that is not
         # contained. Carried as text rather than as anything structured because three of
-        # §8's keys have no slot in the SDK's ``SandboxSettings``; ``_options`` is the
-        # only reader, and the comment there says why the typed field must stay unset.
-        self.containment = containment
+        # §8's keys have no slot in the SDK's ``SandboxSettings``; the comment in
+        # ``_options`` says why the typed field must stay unset. Read through the
+        # ``containment`` property, which has no setter.
+        self._containment = containment
         # The claude.ai connectors the operator admitted, from `Settings`. Held as the
         # persisted records rather than as the CLI's dicts because `_options` is the
         # only place the wire shape is needed and building it early would put a
@@ -1028,6 +1186,13 @@ class AgentSession:
         # after it has already stopped, so a set that a stop empties would call
         # that wake a spawn.
         self._seen_subagents: set[str] = set()
+        # agent_id -> why this session gave up on it, for the sub-agents it settled
+        # itself and has heard no stop or start from since. Given up on is not
+        # known dead: FAILED is an end an ordinary status update contradicts, so
+        # one that speaks again is running again in the store while this session
+        # no longer counts it. The end of the run is the one moment that is
+        # settled either way, and it reads this to say so.
+        self._given_up: dict[str, str] = {}
         # agent_id -> when that sub-agent last gave a sign of life, and how many of
         # its tool calls are still outstanding. Both are per agent because liveness
         # is: one sub-agent thinking says nothing about whether its sibling has died,
@@ -1064,6 +1229,17 @@ class AgentSession:
         # agents may hold it at once. One address names one agent for the session's
         # life, so a concern cannot retarget mid-run.
         self._roles: dict[str, str] = {}
+        # address -> the agent id that answered to it in an earlier run of this
+        # session, or None where only the address is known: what the session's
+        # board log names (``boardlog.Board.addresses``) and, for a relaunch in
+        # the same process, what the run before this one had allocated. Beside
+        # ``_roles`` and not in it: nothing here is running, so ``resolve_role``
+        # routes to none of it. An entry stays when its agent starts again and
+        # ``_roles`` gains the same pair.
+        self._restored: dict[str, str | None] = {
+            address.strip().lower(): agent_id
+            for address, agent_id in (restored_addresses or {}).items()
+        }
         self._client: ClaudeSDKClient | None = None
         # Whether the cancellation this session is about to receive was asked for.
         # Set by SessionPool.close and SessionPool.shutdown before they cancel; read
@@ -1077,6 +1253,53 @@ class AgentSession:
         # states it rather than run() inferring it from the exception.
         self.teardown_requested = False
         self.transcript_path: str | None = None
+
+    # -- what the process is started with ---------------------------------------
+
+    @property
+    def containment(self) -> str | None:
+        """
+        The settings string this session's CLI process is started with, or None.
+
+        A property with no setter, so the value ``_options`` puts on argv and the
+        value ``_unpaired`` judges are one value for the session's whole life.
+        ``--settings`` is fixed when the process starts; a field that could be
+        assigned afterwards would let the guard be answered by a string the
+        process never received, and ``set_policy`` would then admit the top rung
+        onto a CLI with no sandbox on it.
+
+        A property rather than a record of what ``_options`` sent, because the
+        guard is asked before there is anything sent: ``run`` calls
+        ``_uncontained_autonomy`` ahead of ``_options``, and ``set_policy`` is
+        callable on a session that has not started. Fixing the input at
+        construction answers both without a third "not started yet" state. It is
+        also the shape the neighbouring field already has -- ``policy`` is a
+        property over ``_policy`` -- with the difference that this one has no
+        writer at all.
+
+        What this does not stop is an assignment to ``_containment`` itself,
+        which the guard would then believe. Nothing at runtime refuses one. The
+        one write is in ``__init__``, and
+        ``test_nothing_in_the_application_assigns_the_field_behind_containment``
+        fails on a second.
+        """
+        return self._containment
+
+    @property
+    def contained(self) -> bool:
+        """
+        Whether this session's CLI process is started with containment: the
+        settings string has something in it besides whitespace.
+
+        The one reading of ``containment`` everything in this process takes:
+        ``_unpaired`` refuses a rung by it, ``bus.build_server`` offers the
+        command tools by it, and the briefings name those tools by it.
+        ``_unpaired`` says why a blank string counts as none, and what a string
+        that passes does not establish -- a sandbox that works is not shown by
+        this. It is a fact about the process and not about the rung, so it does
+        not change when ``set_policy`` narrows the session.
+        """
+        return bool((self.containment or "").strip())
 
     # -- the gate's policy -----------------------------------------------------
 
@@ -1097,6 +1320,32 @@ class AgentSession:
         """
         Set this session's root policy directly, in either direction.
 
+        Raises ``UncontainedAutonomy``, leaving the policy as it was, when the rung
+        asked for requires containment and this session has none -- the arrangement
+        ``run`` refuses to start, reached by the dial instead. See that class for
+        why it is a raise and not a no-op. The check is ahead of the assignment
+        because the asyncio thread reads ``_policy`` on every call: a policy set
+        and then taken back would be live for whatever the gate classified in
+        between. Narrowing never raises, on any session, since no rung below the
+        one that needs the sandbox asks for it.
+
+        Callers run on the UI thread, so a surface that offers a widening has to
+        catch this and show it, and it catches it outside its ImGui begin/end pair:
+        a raise from between the two skips the end, and the frame stays unbalanced
+        for the rest of its draw even though ``app.guarded`` keeps the window
+        alive. The control records what was asked for inside the pair and makes
+        this call once the pair is closed. ``revoke_policy`` does not need the
+        catch: ``STRICT`` cannot be refused.
+
+        A contained session is admitted at every rung at any time, so one launched
+        under the top rung, narrowed, and widened back reaches it live. The
+        settings it was started with are still on that process's argv, which is
+        all this guard asks. What a move here
+        does not reach is what the agents were told: the system prompt and the
+        worker prompts read ``self.policy`` once, when ``run`` builds the options,
+        so they describe the rung the session started under whichever way it has
+        moved since.
+
         The only writer, now that nothing narrows or widens on its own -- see the
         comment at ``self._policy``'s assignment in ``__init__`` for why the
         automatic revoke this method replaces was removed on 2026-09-21, and the
@@ -1108,6 +1357,15 @@ class AgentSession:
         because a control the operator can act on twice must behave the same way
         on the second click as on the first.
         """
+        if self._unpaired(policy):
+            raise UncontainedAutonomy(
+                f"this session cannot be moved to the {policy.value} policy: it was "
+                "launched with no containment configured, and containment is fixed "
+                "when the CLI process starts. The policy releases every reviewed tool "
+                "to run unattended and the sandbox is what bounds where a released "
+                f"Bash reaches. The session stays under {self._policy.value}; a "
+                f"session under {policy.value} has to be launched as one."
+            )
         self._policy = policy
 
     def revoke_policy(self) -> None:
@@ -1208,12 +1466,24 @@ class AgentSession:
         The instance address, not the role's type: ``bus.py`` puts this in front of
         a model that will reply to it, so it has to be a name ``resolve_role``
         accepts and routes back to this same node.
+
+        An agent of an earlier run that has not started in this one is
+        ``builder, from an earlier run``, as the board names it
+        (``board.role_name``), and that is deliberately not a name anything
+        routes: a reply to it is answered by ``role_status``, which says why.
+        None for a node this session has no name for at all, which includes a
+        party the log knew by address and not by id.
         """
         if node == self.node_id:
             return "lead"
+        if node[0] != self.session_id or node[1] is None:
+            return None
         for address, agent_id in self._roles.items():
-            if (self.session_id, agent_id) == node:
+            if agent_id == node[1]:
                 return address
+        for address, held_before in self._restored.items():
+            if held_before == node[1]:
+                return f"{address}, {BEFORE_RESTART}"
         return None
 
     def known_roles(self) -> tuple[str, ...]:
@@ -1239,7 +1509,13 @@ class AgentSession:
         times over. Anything else is *spelling*. The probe's worker retried the same
         wrong name because one message covered two of these.
         """
-        key = name.strip().lower()
+        key = name.strip().lower().removesuffix(f", {BEFORE_RESTART}").strip()
+        if key in self._restored and key not in self._roles:
+            return (
+                f"{key!r} was an agent of this session before it was resumed, and "
+                "nothing is running under that name now. A new agent is never given "
+                "the name, so what the board says of it is about that earlier agent."
+            )
         base, _ordinal = _split_address(key)
         running = self._addresses_in_role(base)
         if running:
@@ -1258,39 +1534,41 @@ class AgentSession:
         known = ", ".join(self.known_roles())
         return f"No agent known as {name!r}. Reachable now: {known}."
 
+    def addresses(self) -> dict[str, str | None]:
+        """
+        Every address of this session that is spoken for, with the agent id it
+        belongs to: the ones an earlier run's log names and the ones this run
+        has allocated. What ``_address_for`` decides from, and what a session
+        relaunched under this id is constructed with so that its table carries
+        on from this one.
+        """
+        return {**self._restored, **self._roles}
+
     def _address_for(self, agent_id: str, agent_type: str) -> str:
         """
         The address a sub-agent answers to, allocated once and never moved.
 
-        The first agent of a type takes the bare role name and later ones take
-        ``builder-2``, ``builder-3`` -- the convention ``templates.lead_briefing``
-        hands the lead, so the two must not drift.
+        Decided by ``board.address_for`` over ``addresses()``, which is the
+        function and the table the board names the same agent from: the name
+        mail is routed by and the name every board read shows are one answer.
 
         Idempotent per agent_id: ``SubagentStart`` fires again when a sibling wakes a
         finished sub-agent (§2.3), and an address that moved mid-run would send every
         concern already written to it to a sibling instead.
 
-        A candidate another role in the template answers to, or one of the root's own
-        names, is skipped rather than taken. A template may define a role literally
-        called ``builder-2``, and two agents at one address is the failure this table
-        exists to prevent.
+        **An address from an earlier run of this session belongs to the agent id
+        that had it, and to nobody else.** A resumed session's board names its
+        earlier agents by address -- a claim held by ``builder-2`` -- so an
+        address in ``_restored`` is stepped over for every other id, and an
+        agent that starts under the id the address belonged to is given it back.
+
+        Whether the CLI reports a sub-agent woken after a restart under its
+        original agent id is not measured. Neither answer is relied on: under the
+        original id the agent gets its old address and its claims are its own
+        again; under a new id it is a new agent with a new address, and the old
+        one stays the earlier agent's.
         """
-        for address, held in self._roles.items():
-            if held == agent_id:
-                return address
-        base = agent_type.strip().lower() or "agent"
-        declared = self.template.role_names()
-        ordinal = 1
-        while True:
-            candidate = base if ordinal == 1 else f"{base}-{ordinal}"
-            spoken_for = (
-                candidate in self._roles
-                or candidate in ROOT_ADDRESSES
-                or (candidate != base and candidate in declared)
-            )
-            if not spoken_for:
-                return candidate
-            ordinal += 1
+        return address_for(agent_id, agent_type, self.addresses(), self.template.role_names())
 
     # -- hooks -------------------------------------------------------------------
 
@@ -1336,6 +1614,7 @@ class AgentSession:
         resumed = agent_id in self._seen_subagents
         self._seen_subagents.add(agent_id)
         self._live_subagents.add(agent_id)
+        self._given_up.pop(agent_id, None)
         self._note_subagent_activity(agent_id)
         self._roles[self._address_for(agent_id, agent_type)] = agent_id
 
@@ -1398,6 +1677,7 @@ class AgentSession:
             self.bridge.emit(SubagentDelivered(node, answer))
         self.bridge.emit(AgentFinished(node, AgentState.DONE, time.monotonic()))
         self._live_subagents.discard(agent_id)
+        self._given_up.pop(agent_id, None)
         # Liveness bookkeeping ends with the agent it describes. Left behind, a stale
         # timestamp would be read by the next wake under this id -- which resumes from
         # the same transcript and keeps the same id -- and hand the resumed agent a
@@ -1438,6 +1718,16 @@ class AgentSession:
 
         An allow leaves the call open for `_post_tool_use` to close, which is the point:
         the tool has not run yet when this returns.
+
+        **An allow is not a promise that a closing hook comes.** The CLI has a
+        permission layer of its own behind this one, and a call this gate allowed and
+        that layer then refused fired neither PostToolUse nor PostToolUseFailure:
+        measured for a root session's `Write` to four protected paths under
+        `permission_mode="dontAsk"` (scripts/verify_gate_hook_write.py, one run, CLI
+        2.1.292). No sub-agent call was in that run. If the same holds for one, its
+        bracket is opened here on the allow and never closed, and it then vouches for
+        that agent until SUBAGENT_CALL_VETO_S ages it out -- which is inferred from
+        this code and the root observation, and has not been observed.
         """
         data = cast(PreToolUseHookInput, hook_input)
         # agent_id is present only when the call comes from inside a sub-agent, and
@@ -1586,7 +1876,17 @@ class AgentSession:
         # call, both reached from the dial. See the docstrings there for what
         # that costs: nothing here bounds a relaxed session's length except the
         # allowlist itself and the operator noticing it is on.
-        disposition = classify(tool_name, tool_input, self._policy_for(agent_id))
+        # The session's id and directory are this object's and not the payload's,
+        # for the reason `_write_region` gives: `classify` uses them to tell this
+        # session's own records from another's, and a bound taken from the side
+        # the request came from is not a bound.
+        disposition = classify(
+            tool_name,
+            tool_input,
+            self._policy_for(agent_id),
+            session_id=self.session_id,
+            cwd=self._write_region(),
+        )
         if disposition is Disposition.AUTO_APPROVE:
             # Behind classify, and on this branch only. The at-cap deny above sits
             # *ahead* of classify so that no policy can widen it; this one cannot be
@@ -1613,7 +1913,8 @@ class AgentSession:
             return _deny(tool_name, f"{tool_name} is not permitted by policy")
         unreviewable = self._no_reviewer_reason(tool_name, agent_id)
         if unreviewable is not None:
-            return _deny(tool_name, unreviewable)
+            foreign = self._records_refusal(tool_name, tool_input, agent_id)
+            return _deny(tool_name, unreviewable if foreign is None else foreign)
 
         return await self._park(tool_name, tool_input, tool_use_id, node, spawn=spawn)
 
@@ -1623,11 +1924,61 @@ class AgentSession:
 
         ``self.cwd`` rather than ``self.session_base``, and the two are the same
         directory for a session launched today. ``cwd`` is what the CLI is actually
-        run in, so it is the region the sandbox bounds ``Bash`` to, and parity with
-        ``Bash`` is what this bound is for. ``session_base`` is a reporting base --
-        resolved once at launch and carried so a write can be named in the units a
-        declaration uses -- and measuring containment against it would let a
-        book-keeping choice decide what may be written.
+        run in, so it is the working tree the sandbox's region is built on, and
+        this bound holds the four CLI-process write tools to that tree.
+        ``session_base`` is a reporting base -- resolved once at launch and carried
+        so a write can be named in the units a declaration uses -- and measuring
+        containment against it would let a book-keeping choice decide what may be
+        written.
+
+        **The gate's region and the sandbox's are different regions, and neither
+        contains the other.** The gate's is everything under ``cwd`` with nothing
+        taken out: ``_escapes_write_region`` asks whether the resolved target lies
+        inside it and asks nothing else.
+
+        The sandbox's is wider in one place. When ``cwd`` is a linked worktree a
+        contained ``Bash`` also writes the main repository's git directory --
+        refs, ``HEAD``, the index, objects, another worktree's admin directory
+        (``planning/2026-10-07-a-session-can-run-in-its-own-worktree.md`` D2,
+        measured on CLI 2.1.292). The gate does not follow it there: a write tool
+        naming a path in that git directory is outside ``cwd`` and is refused.
+
+        The sandbox's is narrower in another. ``planning/2026-09-03`` §8 gives its
+        protected paths as ``.claude/**``, ``.mcp.json``, ``.git/hooks`` and
+        ``.git/config``, and those sit under ``cwd`` for an ordinary checkout or
+        a clone. The gate allows a write tool all four --
+        ``<cwd>/.git/hooks/pre-commit``, ``<cwd>/.git/config``,
+        ``<cwd>/.claude/settings.local.json`` and ``<cwd>/.mcp.json`` each come
+        back ``allow`` under the top rung. What D2 measured of the sandbox's side
+        is denials at the paths tried and not at directories: one hook path
+        (``hooks/pre-commit``, n=4), ``config`` (n=1) and a worktree's
+        ``config.worktree`` (n=1), on CLI 2.1.292, with the clone arm reported as
+        holding the same hooks and config denials. It records no count for
+        ``.claude/**`` or ``.mcp.json``.
+
+        **What stops a ``Write`` to those four paths is the CLI, after this gate
+        has allowed it, and that is measured once.**
+        ``scripts/verify_gate_hook_write.py`` ran one contained ``AUTONOMOUS``
+        session through this class (Haiku, CLI 2.1.292, a plain ``git init`` cwd):
+        the gate answered ``allow`` to ``Write`` at each of the four paths named
+        above, the CLI then refused each one, and a read from the host found no
+        probe text at any of them, while a ``Write`` to an ordinary file in ``cwd``
+        landed before and after. The refusal the model was shown says ``Write`` was
+        denied because the CLI is running in "don't ask" mode, which reads as the
+        CLI wanting to ask about those paths and ``permission_mode="dontAsk"``
+        turning the question into a no; that reading is from the refusal's text
+        and was not tested by launching under another mode. D2 separately records
+        the CLI refusing ``Write`` a linked worktree's ``.git`` pointer file (n=2).
+
+        The limits are the whole of what may be leaned on. It is one session and
+        four exact paths, not the directories around them; ``Write`` only, with
+        ``Edit``, ``MultiEdit`` and ``NotebookEdit`` not tried; one CLI build and
+        one layout. This gate takes nothing out of the region, so nothing in
+        pptmstr refuses those writes and no test here pins that anything does:
+        the protection is the CLI's, and a CLI that stops asking leaves an
+        ``allow`` from this gate as a write that lands. Nothing may read this
+        function as a statement of what ``Bash`` can reach, or of what a write
+        tool cannot.
 
         ``"."`` for a session that named no directory, because that is where its
         agent runs: an absent ``ClaudeAgentOptions.cwd`` gives the CLI this
@@ -1648,6 +1999,36 @@ class AgentSession:
         request is not a bound.
         """
         return self.cwd or "."
+
+    def _records_refusal(
+        self, tool_name: str, tool_input: Mapping[str, Any], agent_id: str | None
+    ) -> str | None:
+        """
+        Why a read of another session's records, or a write into any session's,
+        will not run with nobody to ask, or None for a call that is neither.
+
+        Its own sentence because ``_no_reviewer_reason``'s would send the agent
+        the wrong way under ``AUTONOMOUS``: that one says the tool is one this
+        build does not recognise and to use a tool it does, and here the tool is
+        ``Read`` and the path is what was refused. ``approval.records_read`` says
+        which path and where the session's own records are; this adds only why
+        nobody was asked, in ``_no_reviewer_reason``'s two cases and its order.
+        """
+        region = self._write_region()
+        foreign = records_read(tool_name, tool_input, session_id=self.session_id, cwd=region)
+        written = records_written(tool_name, tool_input, cwd=region)
+        if foreign is None and written is None:
+            return None
+        if self._policy_for(agent_id) is Policy.AUTONOMOUS:
+            nobody = (
+                "this session is running unattended by choice, so no operator will be "
+                "asked and retrying will not change that"
+            )
+        else:
+            nobody = "no operator is attached"
+        if written is not None:
+            return f"{written}. Only pptmstr writes its records, and {nobody}."
+        return f"{foreign}. That is read only with the operator's say, and {nobody}."
 
     def _no_reviewer_reason(self, tool_name: str, agent_id: str | None = None) -> str | None:
         """
@@ -1781,7 +2162,9 @@ class AgentSession:
         handler building a record from the rewritten arguments alone cannot tell
         them from what the sender wrote.
         """
-        if tool_name not in BUS_TOOLS:
+        # The names this session's own server offers: the command tools are on
+        # a contained session's and on no other (``bus.offered_tools``).
+        if tool_name not in offered_tools(self.contained):
             return None
         stamped = dict(tool_input)
         # A list, not the NodeId tuple: this crosses to the CLI as JSON and comes
@@ -1820,7 +2203,9 @@ class AgentSession:
             tool_name=tool_name,
             tool_use_id=tool_use_id,
             raw_args=dict(tool_input),
-            summary=summarize(tool_name, tool_input),
+            summary=summarize(
+                tool_name, tool_input, session_id=self.session_id, cwd=self._write_region()
+            ),
             # Monotonic, like every other instant a wait is measured from -- see
             # PendingApproval.requested_at for why an epoch reading here renders the
             # oldest park in the queue as "0s" and sorts it last.
@@ -1933,8 +2318,8 @@ class AgentSession:
         return {
             role.name: AgentDefinition(
                 description=role.description,
-                prompt=worker_prompt(role, self.brief, self.policy),
-                tools=role.tool_list(),
+                prompt=worker_prompt(role, self.brief, self.policy, self.contained),
+                tools=role.tool_list(self.contained),
                 # "inherit" rather than self.model: a role that does not ask for a
                 # model should run on whatever the session was launched with, not on
                 # the SDK's default, or the launcher's model choice would silently
@@ -1944,7 +2329,7 @@ class AgentSession:
             for role in self.template.roles
         }
 
-    def _system_prompt(self) -> SystemPromptPreset | None:
+    def _system_prompt(self) -> SystemPromptPreset | SystemPromptCustom | None:
         """
         The lead's briefing, appended to Claude Code's own system prompt.
 
@@ -1957,11 +2342,39 @@ class AgentSession:
         messages reach a person writes for an audience that does not exist and can
         wait for a reply nobody will prompt -- so the gate's answer and the prompt's
         account of it have to come from the same value.
+
+        **A resuming launch sets ``snapshot`` to False, and a fresh one leaves it
+        off.** Omitted, the key acts as True: the CLI sends the prompt the session
+        recorded on its first request "including after resume, ... so changing
+        ``append`` has no effect" (``SystemPromptPreset.snapshot``). A resume is the
+        one launch whose briefing differs from the recorded one -- the launcher
+        builds it from this launch's template, policy and premises -- so it is the
+        one launch that has to ask. False means the prompt is rebuilt on every
+        request for the life of this process, which is the documented price; a fresh
+        launch has nothing to correct and does not pay it.
+
+        A resume with no briefing asks too. Without it a session started with a
+        team and resumed solo goes on answering to a briefing that names roles this
+        launch configured no agents for. The empty custom prompt is the shape that
+        can carry the key and still puts on argv exactly what None does
+        (``--system-prompt ""``).
+
+        A CLI below ``RESUME_BRIEFING_FLOOR`` ignores the key; ``run`` says so from
+        the version in the ``init`` frame.
         """
-        briefing = lead_briefing(self.template, self.policy)
+        briefing = lead_briefing(self.template, self.policy, self.contained)
+        if self.resume is None:
+            if not briefing:
+                return None
+            return {"type": "preset", "preset": "claude_code", "append": briefing}
         if not briefing:
-            return None
-        return {"type": "preset", "preset": "claude_code", "append": briefing}
+            return {"type": "custom", "prompt": "", "snapshot": False}
+        return {
+            "type": "preset",
+            "preset": "claude_code",
+            "append": briefing,
+            "snapshot": False,
+        }
 
     def _stderr_line(self, line: str) -> None:
         """
@@ -2037,7 +2450,10 @@ class AgentSession:
             # §8's containment, or None. None is not a value the transport can see:
             # `_build_settings_value` branches on `settings is not None` and returns
             # early, so `--settings` is absent from argv and an uncontained launch is
-            # built exactly as it was before this field existed.
+            # built exactly as it was before this field existed. The empty string
+            # is absent from argv too -- the transport appends the flag under
+            # `if settings_value:` -- and `_unpaired` reads it as none, along with
+            # the blank string the transport does pass through.
             settings=self.containment,
             #
             # `sandbox` is deliberately absent, and not merely because None is its
@@ -2061,6 +2477,7 @@ class AgentSession:
             # property a gate needs.
             permission_mode="dontAsk",
             include_partial_messages=True,
+            max_buffer_size=MAX_STREAM_FRAME,
             # display="summarized" is load-bearing, not decoration. Every model in
             # the launcher except Haiku defaults to display="omitted", which still
             # emits thinking blocks and thinking deltas -- with an empty string in
@@ -2145,6 +2562,7 @@ class AgentSession:
                 # already implements on the gate's side.
                 policy=self.policy,
                 transcript=self.transcript,
+                task_is_label=self.task_is_label,
             )
         )
 
@@ -2184,6 +2602,31 @@ class AgentSession:
                 "nothing else uses"
             )
         self._identity_confirmed = True
+
+    def _note_briefing_floor(self, message: object) -> None:
+        """
+        Say so, once, when a resumed session's CLI is not known to have applied
+        this launch's briefing.
+
+        Read from the ``init`` frame rather than from ``claude --version``: the
+        frame is the process that is actually running reporting on itself, it costs
+        no subprocess, and it arrives once per connection. It arrives after the
+        prompt was built, which is all a notice needs -- nothing here could have
+        refused the launch, and a resume whose briefing did not apply is still the
+        conversation the operator asked to continue.
+
+        Written to the transcript directly, as ``_stderr_line`` does and for the
+        same reason: this is where the operator is looking.
+        """
+        if self.resume is None:
+            return
+        if not (isinstance(message, SystemMessage) and message.subtype == "init"):
+            return
+        notice = resume_briefing_notice(message.data.get("claude_code_version"))
+        if notice is None:
+            return
+        LOG.warn("driver", notice)
+        self.transcript.append(SegmentKind.ERROR, f"{notice}\n")
 
     def _start_tagging(self) -> None:
         """
@@ -2240,24 +2683,59 @@ class AgentSession:
             # loop that owns it.
             task.cancel()
 
-    def _uncontained_autonomy(self) -> str | None:
+    def _unpaired(self, policy: Policy) -> bool:
         """
-        Why this session may not start, or None when it may. See
-        ``UncontainedAutonomy`` for the argument; this is the predicate, kept apart
-        from the raise so the three combinations can be exercised without starting
-        anything.
+        Whether this session under ``policy`` would be the half-arrangement
+        ``UncontainedAutonomy`` names: a rung that requires containment, and no
+        settings string for the process to be started with.
 
-        The test is for containment being absent rather than for it being
-        well-formed. Whether the CLI honours the keys inside it is a different
-        question, already asked at a different layer: ``app._launch`` refuses a
-        contained launch whose CLI version cannot be confirmed to support them, and
-        §8a.2's failure mode -- a CLI that warns on stderr and runs unsandboxed
-        anyway -- is not visible from here at all.
+        One predicate for both moments the pair is checked -- ``run``, through
+        ``_uncontained_autonomy``, and ``set_policy`` -- so the launch path and the
+        live path cannot come to disagree about what they refuse.
+
+        **What is enforced is that a settings string with something in it reaches
+        argv, and nothing more than that.** ``None`` and the empty string are
+        absent the way the transport measures it: ``--settings`` is appended under
+        ``if settings_value:``, so either leaves the flag off argv and is the same
+        uncontained process. A string of only whitespace is absent here and is
+        *not* absent there -- it is truthy, so the flag goes out with a value that
+        names no settings -- which is why this strips rather than borrowing the
+        transport's test. What the CLI makes of ``--settings " "`` is not
+        measured; refusing the rung does not depend on the answer. Any other
+        string reaches the CLI as the flag's value and counts as present here.
+
+        Only ``app._launch`` supplies the value and it supplies
+        ``sandbox.containment_settings()`` or ``None``, so neither blank reaches
+        this from the application: the edge is the guard's own, not a route in.
+
+        So this does not establish a working sandbox, or a sandbox at all. The
+        string is not parsed: ``"{}"`` passes, as would a string that is not JSON
+        or one whose JSON names no sandbox key. That the string is the one
+        ``sandbox.containment_settings`` builds is a property of the single call
+        site that supplies it, ``app._launch``, and not of this check.
+
+        Whether the CLI honours the keys inside it is a different question again,
+        asked at a different layer: ``app._launch`` refuses a contained launch
+        whose CLI version cannot be confirmed to support them, and §8a.2's failure
+        mode -- a CLI that warns on stderr and runs unsandboxed anyway -- is not
+        visible from here at all.
+
+        ``self.containment`` is what the process is started with: the property
+        has no setter, and ``_options`` passes the same value as ``settings``.
         """
         # The rung is asked rather than named, so that a rung added later cannot
         # reach this line without having answered the question. ``PERMISSIVE`` says
         # False deliberately and is not an omission -- see ``requires_containment``.
-        if requires_containment(self.policy) and self.containment is None:
+        return requires_containment(policy) and not self.contained
+
+    def _uncontained_autonomy(self) -> str | None:
+        """
+        Why this session may not start, or None when it may. See
+        ``UncontainedAutonomy`` for the argument; this is the start path's reason,
+        kept apart from the raise so the three combinations can be exercised
+        without starting anything.
+        """
+        if self._unpaired(self.policy):
             return (
                 f"this session is under the {self.policy.value} policy with no "
                 "containment configured. The policy releases every reviewed tool to "
@@ -2269,9 +2747,47 @@ class AgentSession:
             )
         return None
 
+    def _own_checkout_refusal(self) -> str | None:
+        """
+        Why this session may not start where it is, or None when it may. See
+        ``OwnCheckoutRefused``.
+
+        Asked of ``_write_region()``, the directory the CLI will be given, and of
+        the live policy rather than of whether a containment string is set: the
+        rung is what releases writes from review, and a session whose rung was
+        withdrawn while it waited parks like any other and has nothing to be
+        refused for.
+
+        Nothing is remembered between calls. The whole point is the answer at the
+        moment of asking; the cost is two ``realpath`` walks, once per start.
+
+        A path the resolver cannot take at all -- a NUL in it raises ``ValueError``
+        -- is refused with the unlocatable ones, as ``launcher.refusal_for`` does.
+        """
+        if not requires_containment(self.policy):
+            return None
+        region = self._write_region()
+        try:
+            inside = lies_inside_checkout(region, OWN_CHECKOUT)
+        except ValueError:
+            inside = True
+        if not inside:
+            return None
+        return (
+            f"{region!r} is inside pptmstr's own checkout, or cannot be resolved at "
+            f"all, and this session is under the {self.policy.value} policy, which "
+            "writes there without asking. It was not that when the launch was "
+            "accepted, or it would not have been; the directory is asked about "
+            "again at the moment a session starts, and this one was not started."
+        )
+
     async def run(self) -> None:
         """
-        Connect, send the opening task, then stay connected for further turns.
+        Connect, send the opening text, then stay connected for further turns.
+
+        The opening text is the task, or ``message`` when the session was built
+        with one: a resume is sent what the operator typed for it, and is still
+        announced under the task it has always had.
 
         The session does **not** end when a turn does. A turn ending means the agent
         stopped talking, which happens both when it has finished the job and when it
@@ -2298,9 +2814,16 @@ class AgentSession:
             uncontained = self._uncontained_autonomy()
             if uncontained is not None:
                 raise UncontainedAutonomy(uncontained)
+            # The last thing before the client, which is the spawn: nothing
+            # between this line and the transport starting awaits or resolves the
+            # directory again.
+            moved = self._own_checkout_refusal()
+            if moved is not None:
+                raise OwnCheckoutRefused(moved)
             async with ClaudeSDKClient(options=self._options()) as client:
                 self._client = client
-                await self.send(self.task)
+                await self.send(self.task if self.message is None else self.message)
+                self._say_started()
                 await self._poll_context()
 
                 last_poll = time.monotonic()
@@ -2322,6 +2845,7 @@ class AgentSession:
                     # callback for this session, and nothing before the first message
                     # suspends it today.
                     self._check_identity(message)
+                    self._note_briefing_floor(message)
                     self._sync_subagent_map(translator)
                     for intent in translator.handle(message):
                         if (
@@ -2409,6 +2933,10 @@ class AgentSession:
                 # the root. Emitting nothing here would leave a session whose
                 # subprocess is gone reading as rate-limited or thinking -- no
                 # obligation, no error text, and `any_active` never settling.
+                self._settle_subagents_at_run_end(
+                    "the session stream closed while it was running",
+                    session_failed=failure is not None,
+                )
                 if failure is not None:
                     self.bridge.emit(failure)
                 else:
@@ -2431,6 +2959,9 @@ class AgentSession:
             # be the same silent loss of a failure signal this arm's neighbour exists
             # to prevent; reporting nothing would leave the record wherever its last
             # StateChanged put it, which is that neighbour's own defect.
+            self._settle_subagents_at_run_end(
+                "its session was cancelled without being closed", session_failed=True
+            )
             if self.teardown_requested:
                 self.bridge.emit(AgentFinished(self.node_id, AgentState.DONE, time.monotonic()))
             elif failure is not None:
@@ -2448,38 +2979,65 @@ class AgentSession:
         except Exception as exc:
             # The session dying must not take the asyncio thread with it: other
             # agents keep running and the UI has to be told why this one stopped.
-            LOG.error("agent", f"{type(exc).__name__}: {exc}")
-            self.transcript.append(SegmentKind.ERROR, f"\n{type(exc).__name__}: {exc}\n")
+            why = death_reason(exc)
+            LOG.error("agent", why)
+            self.transcript.append(SegmentKind.ERROR, f"\n{why}\n")
+            self._settle_subagents_at_run_end(f"its session died: {why}", session_failed=True)
             self.bridge.emit(
-                AgentFinished(
-                    self.node_id,
-                    AgentState.FAILED,
-                    time.monotonic(),
-                    error=f"{type(exc).__name__}: {exc}",
-                )
+                AgentFinished(self.node_id, AgentState.FAILED, time.monotonic(), error=why)
             )
         finally:
             await self._finish_tagging()
             self._client = None
 
-    async def send(self, text: str) -> None:
+    def _say_started(self) -> None:
         """
-        Send a prompt on the live session. The opening task uses this too.
+        Tell whoever asked (``on_started``) that this run reached the CLI.
+
+        Whatever the callback raises is logged and goes no further: it is the
+        caller's bookkeeping, and the session it is about is running.
+        """
+        told = self.on_started
+        if told is None:
+            return
+        try:
+            told()
+        except Exception as exc:  # noqa: BLE001 - the run is worth more than its bookkeeping
+            LOG.error("agent", f"on_started raised: {type(exc).__name__}: {exc}")
+
+    async def send(self, text: str) -> bool:
+        """
+        Send a prompt on the live session. The opening text uses this too.
+
+        True when the text was handed to a connected client, and False when
+        there was none to hand it to and it was dropped: a session that has not
+        connected, or whose run is over. True says the client took it, and not
+        that the model has read it.
 
         Safe to call while the message loop is iterating: query() writes to the
         subprocess's stdin while the loop reads its stdout, so the two do not
         contend. This is the whole point of holding a connected client rather than
         a one-shot query.
+
+        **The session is said to be reading the message once the client has
+        taken it, and not before.** For the opening text this is the first
+        thing that moves the root off SPAWNING -- nothing is read from the CLI
+        until ``run`` enters its loop, which is after this returns -- and a root
+        leaving SPAWNING is what the shell takes as a run having reached the
+        CLI: it is what lets a session's file be created (``fleetsync``). Said
+        ahead of the hand-over, a ``query`` that raised would leave a file for a
+        run that was never given its text.
         """
         client = self._client
         if client is None:
             LOG.warn("agent", "cannot send: session is not connected")
-            return
+            return False
         self.transcript.append(SegmentKind.SYSTEM, f"\n> {text}\n")
+        await client.query(text)
         self.bridge.emit(
             StateChanged(self.node_id, AgentState.THINKING, topic="reading your message")
         )
-        await client.query(text)
+        return True
 
     def _sync_subagent_map(self, translator: Translator) -> None:
         """
@@ -2562,12 +3120,35 @@ class AgentSession:
             # goes to exactly one receiver. A read left in flight would take that
             # loop's next message.
             pending.cancel()
-            # Whatever the abandoned read ended up holding is discarded, an exception
-            # included: on the closed-stream path it is already finished carrying
-            # StopAsyncIteration, and letting that escape a coroutine would surface as
-            # the session's own failure.
-            with suppress(BaseException):
-                await pending
+            # Waited for rather than awaited. Whatever the abandoned read ended up
+            # holding is discarded, an exception included: on the closed-stream path
+            # it is already finished carrying StopAsyncIteration, and letting that
+            # escape a coroutine would surface as the session's own failure. But
+            # awaiting the read would raise its CancelledError here, where it cannot
+            # be told from a cancellation of this task. `SessionPool.close` cancels
+            # a run once and cannot reach it again, and this is mid-run: a cancel
+            # swallowed here with the read's leaves the session live, its slot
+            # given up and its row unclosable, until `SessionPool.shutdown`
+            # cancels it a second time at quit. `wait` raises nothing of the
+            # read's, which leaves this task's own cancellation the only thing that
+            # can come out of it.
+            #
+            # `_finish_tagging` does absorb a cancel delivered to it, and is not
+            # this hazard: it is the last await in `run`, reached after the
+            # session has said its own end, so the run returns instead of raising
+            # and is over either way.
+            try:
+                await asyncio.wait({pending})
+            except asyncio.CancelledError:
+                # Cancelled while the read was still dying. The read is seen out
+                # all the same, so it is not left unwinding on a stream the client
+                # is about to close, and then the cancellation carries on.
+                await asyncio.wait({pending})
+                raise
+            finally:
+                if pending.done() and not pending.cancelled():
+                    # Read, so that asyncio does not report it as never retrieved.
+                    pending.exception()
 
     def _settle_silent_subagents(self) -> None:
         """
@@ -2613,6 +3194,73 @@ class AgentSession:
         for agent_id in list(self._live_subagents):
             self._settle_subagent(agent_id, reason, now)
 
+    def _settle_subagents_at_run_end(self, reason: str, *, session_failed: bool = False) -> None:
+        """
+        End every sub-agent that has not stopped, because the run they belong to
+        is over. Called on each path out of ``run``, ahead of the root's own end.
+
+        A sub-agent is a task inside this session's CLI process, so none outlives
+        the run, and nothing else says so: a run that is cancelled, raises or
+        loses its stream mid-turn gets no SubagentStop for the workers it had, and
+        ``_await_subagents`` is not on any of those paths. A record left live
+        holds the render loop awake and reads as an agent at work to everything
+        that asks -- the fleet, a decision's asker, and the lead of the session's
+        next run, which may give back a claim only when its holder's record has
+        ended (``Snapshot.of_earlier_run``).
+
+        That is the ones still live and the ones in ``_given_up``, whose records
+        may have gone back to running since.
+
+        A teardown somebody asked for is CANCELLED: the operator closed, relaunched
+        or resumed over the session, which ended its workers with it, and FAILED
+        would put one unacknowledged failure in the operator's queue per worker of
+        a session they have just dismissed.
+
+        ``session_failed`` says the root is about to be ended FAILED by the same
+        path, and a sub-agent that was working until then is CANCELLED too, with
+        ``reason`` kept as its error and ``ENDED_WITH_SESSION_TOPIC`` as what it
+        was last doing. Nothing happened to it that did not happen to the session,
+        the root's failure is the one row the operator is owed for that, and a
+        second and third row for the same event each offer a retry of the same
+        session. It is the caller's to say because only the caller knows how the
+        root ends: a stream that closes with no failure standing ends the root
+        DONE, and then a worker cut off mid-task is the only record that anything
+        went wrong.
+
+        Any other end is FAILED -- with ``reason``, or, for one this session had
+        already given up on, with the reason it was given up for. That one stopped
+        on its own before the session did, so it keeps its own failure whatever
+        the root does.
+
+        Ahead of the root's end and not after it, so the store never holds a
+        finished session with a worker still running, and so a successor's
+        announce -- which the pool holds until this run's task has ended -- is
+        stamped after every one of these.
+        """
+        now = time.monotonic()
+        unstopped = {agent_id: reason for agent_id in self._live_subagents} | self._given_up
+        for agent_id, why in unstopped.items():
+            if self.teardown_requested:
+                LOG.info("agent", f"sub-agent {agent_id} ended with its session")
+                self.bridge.emit(
+                    AgentFinished((self.session_id, agent_id), AgentState.CANCELLED, now)
+                )
+                self._forget_subagent_liveness(agent_id)
+            elif session_failed and agent_id in self._live_subagents:
+                LOG.info("agent", f"sub-agent {agent_id} ended with its session: {why}")
+                node = (self.session_id, agent_id)
+                self.bridge.emit(TopicChanged(node, ENDED_WITH_SESSION_TOPIC))
+                self.bridge.emit(AgentFinished(node, AgentState.CANCELLED, now, error=why))
+                self._forget_subagent_liveness(agent_id)
+            else:
+                self._settle_subagent(agent_id, why, now)
+        self._given_up.clear()
+
+    def _forget_subagent_liveness(self, agent_id: str) -> None:
+        self._live_subagents.discard(agent_id)
+        self._subagent_seen_at.pop(agent_id, None)
+        self._subagent_in_flight.pop(agent_id, None)
+
     def _settle_subagent(self, agent_id: str, reason: str, ended_at: float) -> None:
         """
         End one sub-agent that this session has given up on.
@@ -2633,9 +3281,8 @@ class AgentSession:
                 error=reason,
             )
         )
-        self._live_subagents.discard(agent_id)
-        self._subagent_seen_at.pop(agent_id, None)
-        self._subagent_in_flight.pop(agent_id, None)
+        self._forget_subagent_liveness(agent_id)
+        self._given_up[agent_id] = reason
 
     def _forget_pending_spawns(self) -> None:
         """
@@ -2677,6 +3324,43 @@ class AgentSession:
         client = self._client
         if client is not None:
             await client.interrupt()
+
+
+def frame_over_limit(exc: BaseException) -> bool:
+    """
+    Whether ``exc`` is the transport refusing a line longer than its limit.
+
+    Told by type and not by the message. The transport raises
+    ``CLIJSONDecodeError`` for two things: a line that is not JSON, whose cause is
+    the ``json.JSONDecodeError`` from parsing it, and a line over
+    ``max_buffer_size``, whose cause is a plain ``ValueError`` it builds itself.
+    ``JSONDecodeError`` is a ``ValueError`` too, which is why it is excluded by
+    name.
+    """
+    if not isinstance(exc, CLIJSONDecodeError):
+        return False
+    cause = exc.original_error
+    return isinstance(cause, ValueError) and not isinstance(cause, json.JSONDecodeError)
+
+
+def death_reason(exc: BaseException) -> str:
+    """
+    Why a session died, as its failure row and its transcript say it.
+
+    The raw error is all that is known about most deaths. A line over the stream
+    limit is the exception: the SDK words it as a JSON decoding failure, which is
+    neither what happened nor anything the operator can act on, so what was too
+    big and what to do about it come first and the raw error is kept after them.
+    """
+    raw = f"{type(exc).__name__}: {exc}"
+    if not frame_over_limit(exc):
+        return raw
+    return (
+        "one message from this session's CLI was larger than pptmstr's "
+        f"{MAX_STREAM_FRAME // (1024 * 1024)} MB stream limit -- most often the result of an "
+        "agent reading many PDF pages or images in one call; retrying will repeat it unless "
+        f"the agent reads fewer at a time\n{raw}"
+    )
 
 
 def _context_from(usage: Mapping[str, Any], fallback_model: str) -> ContextSnapshot:
