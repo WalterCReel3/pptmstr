@@ -12,10 +12,11 @@ that answers it. Every decision is made here, at the row, so there is never a di
 on screen belonging to a different agent than the one an ``a`` would approve.
 
 **A break-glass command is the exception: the cursor does not open it.** Its row
-under the cursor says which command it is and how it stands, and shows the string
-whole and escaped only once the operator has clicked that row or pressed
-``OPEN_KEY`` on it (``command_view``): the cursor arrives on a row by routes the
-operator did not choose, and this is the one row whose text runs as them.
+reads as a Bash approval's (``command_summary``, ``command_view``), and under the
+cursor it says which command it is and that it is closed; its body and its presses
+are drawn only once the operator has clicked that row or pressed ``OPEN_KEY`` on
+it: the cursor arrives on a row by routes the operator did not choose, and this is
+the one row whose text runs as them.
 
 Everything in a row is clipped -- fixed columns, ``ellipsis``, fixed-height bodies
 -- because this pane is scanned rather than read. The unclipped, wrapped rendering
@@ -42,6 +43,7 @@ from typing import Any, assert_never
 
 from imgui_bundle import imgui
 
+from .. import approval
 from ..approval import DiffText, command_shown, diff_line_kind
 from ..board import role_name
 from ..bridge import Bridge
@@ -289,6 +291,45 @@ NO_COMMAND_ROWS = "this pane was given nothing to draw a command with"
 UNRECORDED = "not recorded on disk - "
 # What a session with no directory on its record is said to run in.
 NO_DIRECTORY = "(this session's record names no directory)"
+
+
+# Ahead of a command's summary on its queue row, by how it stands. A Bash
+# approval's row is the command; this one is too, said to run outside.
+OUTSIDE = "outside the sandbox · "
+RUNNING_OUTSIDE = "running outside the sandbox · "
+CANCEL_ASKED = "cancel asked · "
+UNSUPERVISED = "STILL RUNNING, unsupervised · "
+
+
+def command_summary(command: Command) -> str:
+    """
+    A command's queue row: ``approval.summarize`` of it as a Bash call, which
+    is how a Bash approval's row is made, behind how it stands. The string is
+    the one that would run or is running.
+
+    Not ``CommandOwed.summary``, which the store composes from structure alone
+    and the digest and the rail read: on this row the command is drawn as a
+    Bash command is, through ``commandtext.visible`` and flattened, and the
+    row's body has it whole.
+    """
+    run = command.run
+    said = approval.summarize("Bash", {"command": command.asked if run is None else run.text})
+    if command.unsupervised is not None:
+        return UNSUPERVISED + said
+    if run is None:
+        return OUTSIDE + said
+    stopping = CANCEL_ASKED if command.stop_asked_at is not None else ""
+    return RUNNING_OUTSIDE + stopping + said
+
+
+def row_summary(obligation: Obligation) -> str:
+    """
+    The summary column of a queue row: a command's own (``command_summary``),
+    and the store's for every other kind.
+    """
+    if isinstance(obligation, CommandOwed):
+        return command_summary(obligation.command)
+    return obligation.summary
 
 
 def command_role(snap: Snapshot, command: Command) -> str:
@@ -583,9 +624,10 @@ def draw_command(
     neither: ``command_view.draw_row`` draws its closed lines, which say how
     it stands, and nothing of the command.
 
-    ``enabled`` False draws the same body with every control dead. DETAIL
-    passes it: the row is where the operator acts, and two live copies of one
-    armed press would be two places a second press could land.
+    ``enabled`` False draws the same body with no button and no box of the
+    command's own, and the survivor's dead. DETAIL passes it: the row is where
+    the operator acts, and two copies of one armed press would be two places a
+    second press could land.
     """
     if rows is None:
         imgui.text_disabled(NO_COMMAND_ROWS)
@@ -611,6 +653,7 @@ def draw_command(
         wrap=wrap,
         among=among(snap, rows, command),
         restored=command.id in rows.restored,
+        presses=enabled,
     )
     if not live:
         imgui.end_disabled()
@@ -956,9 +999,8 @@ def keys_hint(current: Obligation | None) -> str:
 # refuses, edits or cancels a command. Each of those is a button that answers a
 # mouse release and nothing else, and run, refuse and cancel take two.
 COMMAND_KEYS = (
-    "j/k move · o or a click on the row opens it · no key acts on a command: run,"
-    " edit, refuse and cancel are buttons and take the mouse, two presses for all"
-    " but edit"
+    "j/k move · o or a click on the row opens it · no key acts on a command: its"
+    " buttons take the mouse, and run and cancel take two presses"
 )
 
 # Opens the command row the cursor is on. A bare letter, as every key that acts
@@ -1147,7 +1189,7 @@ def _row(
 
     imgui.set_cursor_screen_pos(imgui.ImVec2(origin.x + summary_x, origin.y + 3.0))
     imgui.text_colored(
-        P.text.vec4, ellipsis(obligation.summary, max(width - summary_x - 12.0, 40.0))
+        P.text.vec4, ellipsis(row_summary(obligation), max(width - summary_x - 12.0, 40.0))
     )
 
     imgui.set_cursor_screen_pos(imgui.ImVec2(origin.x, hi.y))

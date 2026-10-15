@@ -7,13 +7,20 @@ caller hands over a ``command.Command`` and three callables, and holds one
 ``CommandViewState``. The decisions this draws are in
 ``planning/2026-10-13-a-break-glass-command-the-operator-runs.md``.
 
+**It reads as a Bash approval does** (that record's D5): a few one-line
+warnings (``warnings``), a bordered body that names ``command``, ``reason`` and
+``expects`` as a Bash body names ``command`` and ``description``, and the Bash
+row's button line -- a reason box, run, refuse, edit. What is longer than a
+line is behind the row's question mark (``explanations``) and nowhere else.
+
 **What is confirmed is what runs.** The command runs outside the sandbox as the
 operator, and the operator reading the exact string is the only gate on it. So
 the first press of run builds a ``FrozenRun`` from the string then on screen --
-as asked, or as edited -- and the view that follows draws *that value's* text
-through ``commandtext.visible``, with the breakdown and the hidden-character
-sentence made again from it. The raw edit box is not drawn there. The second
-press hands the callable that same value's text and nothing else.
+as asked, or as edited -- closes the edit box, and from then the body draws
+*that value's* text through ``commandtext.visible``, with the warnings made
+again from it, while the button reads ``CONFIRM_RUN`` in run's place. The
+second press hands the callable that same value's text and nothing else. The
+confirmation lasts ``CONFIRM_FOR_S`` and is then dropped.
 
 **Whose words a line is.** Four hands write on this row and each has one way
 onto the screen:
@@ -21,13 +28,10 @@ onto the screen:
 - this application's own lines (``Line``), which hold no sentence of anybody's;
 - the command, drawn only by ``command_block`` -- escaped, numbered in a gutter,
   cut into rows by ``wrap_shown`` and never by Dear ImGui;
-- the asker's reason and expectation, drawn only by ``board_pane.author``;
+- the asker's reason and expectation, only as the value on the body's
+  ``reason =`` and ``expects =`` lines, inside the body's border;
 - a program's output, drawn only by ``process_output``, under a legend that says
   it is nobody's instruction.
-
-The breakdown's segments are pieces of the command, so they go through
-``command_block`` too, and ``commandtext.ADVISORY`` follows them every time: the
-breakdown is quote-blind and a note missing from it proves nothing.
 
 **No key acts.** Dear ImGui's keyboard navigation activates a focused button on
 Space and on Enter, so every button here answers a mouse release only
@@ -37,24 +41,25 @@ Space and on Enter, so every button here answers a mouse release only
 **A row is closed until the operator opens it.** The cursor comes to rest on a
 command by routes the operator did not choose -- the row above was answered, a
 row left, this one arrived -- and its asker picks the moment. So resting there
-draws ``closed_lines`` and nothing else: which command it is and how it stands,
-in this application's words, and none of its text. The block, the breakdown,
-the asker's texts and every press are drawn only for the one command
-``CommandViewState.opened`` names, which is set by a click on that row or the
-open key with the cursor on it and by nothing else. It names a command by id,
-so it cannot pass to another, and it is dropped when the cursor leaves the row.
+draws ``CLOSED`` and nothing else under the queue's summary line. The body and
+every press are drawn only for the one command ``CommandViewState.opened``
+names, which is set by a click on that row or the open key with the cursor on
+it and by nothing else. It names a command by id, so it cannot pass to another,
+and it is dropped when the cursor leaves the row.
 
 **A second press is a second gesture.** An armed act is dropped when the cursor
 leaves its row, when the command is no longer in the state the act belongs to,
-and when a frame went by in which the row was not drawn
-(``CommandViewState.attend``). It answers nothing for ``ARM_DELAY_S`` after the
-first press, so the two clicks of a double-click are not the two presses; and
-the first presses answer nothing for as long after the row was opened, so the
-click that opened it is not one of them either.
+when a frame went by in which the row was not drawn
+(``CommandViewState.attend``), and ``CONFIRM_FOR_S`` after it was armed. It
+answers nothing for ``ARM_DELAY_S`` after the first press, so the two clicks of
+a double-click are not the two presses; and the first presses answer nothing
+for as long after the row was opened, so the click that opened it is not one of
+them either.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import enum
 import functools
 import posixpath
@@ -94,12 +99,18 @@ from ..command import (
 from ..commandrun import PROFILE_WARNING
 from ..theme import Color, P
 from . import board_pane
-from .widgets import format_elapsed, multiline_input, one_line
+from .widgets import author_text, format_elapsed, help_mark, multiline_input, one_line
 
 # Seconds, on Dear ImGui's own clock, before an armed act answers its second
 # press, and before a row just opened answers a first one. Longer than the
 # double-click interval, which is what it is for.
 ARM_DELAY_S = 0.6
+
+# Seconds, on the same clock, an armed run or cancel waits for its second press
+# before the button is run or cancel again. A press is answered in the moment
+# it was asked for: a confirmation left standing is one a later click, made
+# for something else, can land on.
+CONFIRM_FOR_S = 5.0
 
 # Seconds a command is marked ``NEW`` after it was asked, on the wall clock
 # ``Command.asked_at`` is on. Long enough to be met by an eye already on the
@@ -112,7 +123,8 @@ NEW_FOR_S = 5.0
 MIN_COLUMNS = 24
 
 _EDIT_BOX_HEIGHT = 96.0
-_REASON_BOX_HEIGHT = 56.0
+# The reason box on the button line, as wide as a Bash row's.
+_REASON_WIDTH = 360.0
 # One of the asker's texts as drawn. Past the bound either is accepted at, so
 # this only ever cuts a record that came from a file.
 _ASKER_CHARS = 4_000
@@ -145,13 +157,6 @@ class FrozenRun:
 
 
 @dataclass(frozen=True, slots=True)
-class Refusing:
-    """The refusal box is open on this command, and its second press is armed."""
-
-    command_id: CommandId
-
-
-@dataclass(frozen=True, slots=True)
 class Stopping:
     """Cancel was pressed once on this running command."""
 
@@ -165,7 +170,7 @@ class Releasing:
     command_id: CommandId
 
 
-Pending = FrozenRun | Refusing | Stopping | Releasing
+Pending = FrozenRun | Stopping | Releasing
 
 
 def refusal_of_edit(text: str) -> str:
@@ -210,7 +215,7 @@ class CommandViewState:
     editing: CommandId | None = None
     # The timeout picked at the row. Absent means the default.
     timeouts: dict[CommandId, int] = field(default_factory=dict)
-    # The reason typed for a refusal, kept across closing the box.
+    # The reason typed for a refusal, kept while the cursor is elsewhere.
     reasons: dict[CommandId, str] = field(default_factory=dict)
     # The act that has had its first press, and when on Dear ImGui's clock.
     pending: Pending | None = None
@@ -296,7 +301,7 @@ class CommandViewState:
         if command is None:
             return False
         match pending:
-            case FrozenRun() | Refusing():
+            case FrozenRun():
                 return command.state is CommandState.ASKED
             case Stopping():
                 return command.state is CommandState.RUNNING and command.stop_asked_at is None
@@ -304,6 +309,15 @@ class CommandViewState:
                 return command.unsupervised is not None
             case _:
                 assert_never(pending)
+
+    def expire(self, now: float) -> None:
+        """
+        Drop an armed run or cancel whose second press has not come within
+        ``CONFIRM_FOR_S`` of the first. ``now`` is Dear ImGui's clock. A
+        release keeps its own confirmation, which has a back button.
+        """
+        if isinstance(self.pending, FrozenRun | Stopping) and now - self.armed_at > CONFIRM_FOR_S:
+            self.pending = None
 
     def candidate(self, command: Command) -> str:
         """The string run would freeze: the operator's edit, or what was asked."""
@@ -495,97 +509,30 @@ def block_rows(text: str, width: int) -> tuple[Row, ...]:
     return _rows(commandtext.visible(text), width, lambda index: str(index + 1))
 
 
-def segment_rows(line: Line, width: int) -> tuple[Row, ...]:
-    """
-    One segment of the breakdown as rows. Only its first row has its gutter: a
-    newline inside a segment is inside a quote, and starts no new segment.
-    """
-    return _rows(line.text, width, lambda index: line.gutter if index == 0 else CONTINUES)
-
-
 @functools.lru_cache(maxsize=64)
 def hidden_sentence(text: str) -> str:
     """What ``visible`` had to spell out in ``text``, as one sentence; "" for nothing."""
     return commandtext.describe(commandtext.invisibles(text))
 
 
-def _shown_separator(separator: str) -> str:
-    return commandtext.visible(separator).rstrip("\n")
+# -- the warnings: one line each, and each said only where it is true ---------------
 
+RUNS_OUTSIDE = "Runs outside the sandbox, as you: your credentials and network."
+NOT_CHECKED = "Not checked by your Claude Code permission rules or hooks."
+EDITED = "Edited: the agent will be told what actually ran."
+NO_SHELL = "No usable shell was found: this cannot be run from here."
+NOT_SPLIT = "pptmstr could not cut it into commands: read it whole."
+NEW = "New: asked a moment ago."
 
-@functools.lru_cache(maxsize=64)
-def breakdown_lines(text: str) -> tuple[Line, ...]:
-    """
-    The breakdown, top to bottom: ``HEADING``, every segment whole, every flag's
-    sentence, and ``ADVISORY`` -- last, and always.
-
-    A segment is shown as the block shows those same characters: escaped as
-    ``visible`` escapes them *in the command*, so whitespace before ``&&`` is a
-    space here as it is there, and whitespace before a newline is ``\\x20`` in
-    both. Its gutter is its number, after the operator that stands before it.
-
-    The flags here are all but ``commandtext.RUNS_FROM_THE_TREE``, which
-    ``tree_lines`` holds.
-    """
-    found = commandtext.breakdown(text)
-    lines = [Line(commandtext.HEADING, Tone.DIM)]
-    for index, segment in enumerate(found.segments):
-        before = _shown_separator(found.separators[index - 1]) + " " if index else ""
-        if index < len(found.separators):
-            # Escaped with what follows it, then cut back: whether a blank ends
-            # a line depends on the character after it.
-            separator = found.separators[index]
-            shown = commandtext.visible(segment + separator)
-            shown = shown[: len(shown) - len(commandtext.visible(separator))]
-        else:
-            shown = commandtext.visible(segment)
-        lines.append(Line(shown, Tone.SEGMENT, gutter=f"{before}{index + 1}"))
-    lines += [
-        Line(flag.sentence, Tone.WARN)
-        for flag in found.flags
-        if flag.kind not in commandtext.RUNS_FROM_THE_TREE
-    ]
-    lines.append(Line(commandtext.ADVISORY, Tone.WARN))
-    return tuple(lines)
-
-
-@functools.lru_cache(maxsize=64)
-def tree_lines(text: str, roots: tuple[str, ...] = ()) -> tuple[Line, ...]:
-    """
-    What in the session's directory ``text`` would run beyond its own string,
-    a sentence for each program it names that is known to run files from
-    there (``commandtext.RUNS_FROM_THE_TREE``). Drawn above the breakdown and
-    not among its flags, which are about how the text was cut. ``roots`` is
-    that directory as a command might write it out (``Where.roots``).
-
-    Empty is not "nothing in the directory runs": the scan knows a handful of
-    programs by name. ``ADVISORY`` stands under the breakdown either way.
-    """
-    return tuple(
-        Line(flag.sentence, Tone.WARN)
-        for flag in commandtext.breakdown(text, roots).flags
-        if flag.kind in commandtext.RUNS_FROM_THE_TREE
-    )
-
-
-RUNS_AS_YOU = (
-    "this runs as you, outside the sandbox, with your credentials and your network,"
-    " and may execute files this session wrote"
-)
-RULES_DO_NOT_APPLY = (
-    "your Claude Code allow and deny rules and hooks do not apply to it: pptmstr"
-    " starts it and the CLI never sees it"
-)
-NO_TERMINAL = "no terminal: a prompt waits until the timeout"
-NO_SHELL = (
-    "no usable shell was found -- $SHELL is not the absolute path of a program and"
-    " your account names none -- so this cannot be run from here"
-)
-ENVIRONMENT_WHOLE = "its environment is pptmstr's, with nothing removed"
-ENVIRONMENT_CHANGED = "its environment is pptmstr's, with this changed before the shell starts:"
-
-# Names a login shell that reads a command line the way the breakdown assumes.
+# Names a login shell that reads a command line the way the warnings assume.
 _POSIX_SHELLS = frozenset({"sh", "bash", "dash", "ksh", "mksh", "ash", "zsh"})
+
+# A word that sets a variable for the command after it, and is not the command.
+_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+
+# The longest a program's name is said in a warning; a longer word is cut and
+# marked. The block has the word whole.
+_NAME_CHARS = 32
 
 
 def posix_looking(shell: str) -> bool:
@@ -593,40 +540,154 @@ def posix_looking(shell: str) -> bool:
     return posixpath.basename(shell) in _POSIX_SHELLS
 
 
-def standing_lines(shell: str | None, stripped_env: Sequence[str], cwd: str) -> tuple[Line, ...]:
+def where_line(shell: str | None, cwd: str, timeout_s: float | None = None) -> Line:
     """
-    What is different about this from the CLI's own Bash, said before the
-    command: fixed sentences, and the shell, directory and environment by name.
-
-    ``stripped_env`` is ``commandrun.environment_changes``'s answer, a line
-    for each thing the runner takes out and one for the variable it sets, and
-    each is given a line here.
+    What runs the command and where, in one line; ``NO_SHELL`` where nothing
+    can. ``timeout_s`` is a running command's own, and makes the line its.
     """
-    lines = [Line(RUNS_AS_YOU, Tone.WARN), Line(RULES_DO_NOT_APPLY, Tone.WARN)]
     if shell is None:
-        lines.append(Line(NO_SHELL, Tone.ALARM))
-    else:
-        lines.append(
-            Line(f"{one_line(shell)} runs it - login shell: your profile runs first", Tone.WARN)
+        return Line(NO_SHELL, Tone.ALARM)
+    if timeout_s is not None:
+        return Line(
+            f"Running in {one_line(cwd)} by {one_line(shell)} -l; killed after"
+            f" {timeout_label(timeout_s)}.",
+            Tone.WARN,
         )
-    lines.append(Line(f"in {one_line(cwd)}", Tone.WARN))
-    if shell is not None:
-        lines.append(Line(PROFILE_WARNING, Tone.WARN))
-    if stripped_env:
-        lines.append(Line(ENVIRONMENT_CHANGED, Tone.WARN))
-        lines += [Line(f"  - {one_line(change)}", Tone.WARN) for change in stripped_env]
-    else:
-        lines.append(Line(ENVIRONMENT_WHOLE, Tone.WARN))
-    lines.append(Line(NO_TERMINAL, Tone.WARN))
-    if shell is not None and not posix_looking(shell):
+    return Line(
+        f"Runs in {one_line(cwd)} by {one_line(shell)} -l: your profile first, no terminal.",
+        Tone.WARN,
+    )
+
+
+def program_name(segment: str) -> str:
+    """
+    The word a segment starts with that is not a variable being set, escaped as
+    the block escapes it. A name, not a reading: ``env``, ``sudo`` and ``xargs``
+    are the name of what they run.
+    """
+    words = segment.split()
+    word = next((w for w in words if not _ASSIGNMENT.match(w)), words[0] if words else "")
+    shown = commandtext.visible(word) or "''"
+    return shown if len(shown) <= _NAME_CHARS else shown[: _NAME_CHARS - 3] + "..."
+
+
+@functools.lru_cache(maxsize=64)
+def text_warnings(text: str, roots: tuple[str, ...] = ()) -> tuple[Line, ...]:
+    """
+    What the string itself holds that its reader must not miss, a line for
+    each that is so: characters ``visible`` had to spell out, programs known to
+    run files from the session's directory (``commandtext.RUNS_FROM_THE_TREE``),
+    what else the scan noted, and the commands it is a sequence of where it is
+    more than one. ``roots`` is that directory as a command might write it out
+    (``Where.roots``).
+
+    Every line but the first is the quote-blind scan's reading, and one missing
+    proves nothing; ``explanations`` says so behind the question mark.
+    """
+    lines: list[Line] = []
+    hidden = hidden_sentence(text)
+    if hidden:
+        lines.append(Line(hidden, Tone.ALARM))
+    found = commandtext.breakdown(text, roots)
+    kinds = [flag.kind for flag in found.flags]
+    tree = [kind.value for kind in kinds if kind in commandtext.RUNS_FROM_THE_TREE]
+    if tree:
+        named = ", ".join(dict.fromkeys(tree))
+        lines.append(Line(f"May run files this session can write: {named}.", Tone.WARN))
+    noted = [
+        kind.value
+        for kind in kinds
+        if kind not in commandtext.RUNS_FROM_THE_TREE and kind is not commandtext.FlagKind.NOT_SPLIT
+    ]
+    if noted:
+        lines.append(Line(f"Uses {', '.join(dict.fromkeys(noted))}.", Tone.WARN))
+    if commandtext.FlagKind.NOT_SPLIT in kinds:
+        lines.append(Line(NOT_SPLIT, Tone.WARN))
+    elif len(found.segments) > 1:
+        names = ", ".join(program_name(segment) for segment in found.segments)
+        lines.append(Line(f"{len(found.segments)} commands in sequence: {names}.", Tone.WARN))
+    return tuple(lines)
+
+
+def warnings(
+    command: Command,
+    text: str,
+    where: Where,
+    role: str,
+    among: Among | None = None,
+    *,
+    timeout_s: float | None = None,
+) -> tuple[Line, ...]:
+    """
+    Every warning the row says over ``text``, the string that would run or is
+    running, one line each: the two that are always true, what runs it and
+    where (``where_line``; ``timeout_s`` for a running command), what the
+    string holds (``text_warnings``), that it is not what was asked, and that
+    it is new or not its asker's only one.
+    """
+    lines = [Line(RUNS_OUTSIDE, Tone.WARN), Line(NOT_CHECKED, Tone.WARN)]
+    lines.append(where_line(where.shell, where.cwd, timeout_s))
+    if where.shell is not None and not posix_looking(where.shell):
         lines.append(
             Line(
-                f"{one_line(posixpath.basename(shell))} is not a shell pptmstr knows to read a"
-                " command as bash does: the breakdown below is bash's reading, not this shell's",
+                f"{one_line(posixpath.basename(where.shell))} may not read it as bash does:"
+                " what is said here is bash's reading.",
+                Tone.WARN,
+            )
+        )
+    if text != command.asked:
+        lines.append(Line(EDITED, Tone.WARN))
+    lines += text_warnings(text, where.roots)
+    if among is not None and among.new:
+        lines.append(Line(NEW, Tone.ALARM))
+    if among is not None and among.others_waiting:
+        count = among.others_waiting
+        lines.append(
+            Line(
+                f"{role} has {count} other command{'' if count == 1 else 's'} waiting:"
+                " read each one.",
                 Tone.WARN,
             )
         )
     return tuple(lines)
+
+
+# What stands behind the row's question mark: the warnings said in full.
+RUNS_AS_YOU = (
+    "This runs as you, outside the sandbox, with your credentials and your network, and"
+    " may execute files this session wrote."
+)
+RULES_DO_NOT_APPLY = (
+    "Your Claude Code allow and deny rules and hooks do not apply to it: pptmstr starts it"
+    " and the CLI never sees it."
+)
+NO_TERMINAL = "There is no terminal: anything that prompts waits until the timeout."
+ENVIRONMENT_WHOLE = "Its environment is pptmstr's, with nothing removed."
+ENVIRONMENT_CHANGED = "Its environment is pptmstr's, with this changed before the shell starts:"
+EXPLAINED = "Running outside the sandbox"
+
+
+def explanations(text: str, where: Where) -> tuple[str, ...]:
+    """
+    The paragraphs behind the row's question mark: what each warning is short
+    for, what the runner changes in the environment, every note the scan made
+    of ``text`` in its own sentence, and ``commandtext.ADVISORY`` last.
+    """
+    if where.stripped_env:
+        changes = "; ".join(one_line(change) for change in where.stripped_env)
+        environment = f"{ENVIRONMENT_CHANGED} {changes}."
+    else:
+        environment = ENVIRONMENT_WHOLE
+    flags = commandtext.breakdown(text, where.roots).flags
+    return (
+        RUNS_AS_YOU,
+        RULES_DO_NOT_APPLY,
+        PROFILE_WARNING,
+        NO_TERMINAL,
+        environment,
+        *(flag.sentence for flag in flags),
+        commandtext.ADVISORY,
+    )
 
 
 _ORDINAL_SUFFIX = {1: "st", 2: "nd", 3: "rd"}
@@ -647,9 +708,6 @@ def id_tail(command_id: CommandId) -> str:
     return one_line(command_id)[-ID_HEX_CHARS:]
 
 
-NEW = "NEW - this command was asked a moment ago"
-
-
 def is_new(command: Command, now: float) -> bool:
     """
     Whether ``command`` was asked within ``NEW_FOR_S`` of ``now``, on the
@@ -659,41 +717,26 @@ def is_new(command: Command, now: float) -> bool:
     return now - command.asked_at < NEW_FOR_S
 
 
-def identity_lines(
-    command: Command, role: str, among: Among | None, now: float
-) -> tuple[Line, ...]:
+def identity_line(command: Command, role: str, among: Among | None, now: float) -> Line:
     """
-    Which command this is, in this application's words, for above its block:
-    how long ago it was asked, which of its session's it is and which of its
-    asker's, and the tail of its id -- things that differ between two commands
-    whose text does not, or barely does. Then that it is new, and that its
-    asker has others waiting, where either is so.
+    Which command this is, in this application's words, for above its body:
+    whose, which of its session's and of its asker's, the tail of its id, and
+    how long ago it was asked -- things that differ between two commands whose
+    text does not, or barely does.
 
     ``now`` is on the clock ``Command.asked_at`` was read from. ``among`` is
     None for a caller that counted nothing, and then no count is claimed.
     """
-    parts = [f"asked {format_elapsed(max(0.0, now - command.asked_at))} ago"]
-    if among is not None:
-        parts.append(
-            f"{ordinal(among.in_session)} command asked in this session,"
-            f" {ordinal(among.ordinal)} from {role}"
-        )
+    if among is None:
+        parts = [f"from {role}"]
     else:
-        parts.append(f"from {role}")
+        parts = [
+            f"{ordinal(among.in_session)} command in this session,"
+            f" {ordinal(among.ordinal)} from {role}"
+        ]
     parts.append(id_tail(command.id))
-    lines = [Line(" \u00b7 ".join(parts), Tone.PLAIN)]
-    if among is not None and among.new:
-        lines.append(Line(NEW, Tone.ALARM))
-    if among is not None and among.others_waiting:
-        count = among.others_waiting
-        lines.append(
-            Line(
-                f"{role} has {count} other command{'' if count == 1 else 's'} waiting"
-                " - read each one: they are not this one",
-                Tone.WARN,
-            )
-        )
-    return tuple(lines)
+    parts.append(f"asked {format_elapsed(max(0.0, now - command.asked_at))} ago")
+    return Line(" \u00b7 ".join(parts), Tone.DIM)
 
 
 def timeout_label(seconds: float) -> str:
@@ -744,26 +787,20 @@ def released_line(alive: int) -> str:
 
 STOP_ASKED = "cancel asked: waiting for every process in its shell's session to die"
 
-# The last line of a row that is not open. Said the same in the queue and in
-# DETAIL's copy, so it names the row and not "here".
-CLOSED = (
-    "closed: none of its text is shown until you open it - click its row in NEEDS YOU,"
-    " or press o with the cursor on it"
-)
+# What a row that is not open says under the queue's summary line. Said the
+# same in the queue and in DETAIL's copy, so it names the row and not "here".
+CLOSED = "closed: click its row in NEEDS YOU, or press o on it, to open it"
 
 
 def closed_lines(command: Command, role: str, among: Among | None, now: float) -> tuple[Line, ...]:
     """
     Everything a command's row says while it is not open: which command it is
-    (``identity_lines``), how it stands (``row_state``), and how to open it.
-    Every word is this application's. Nothing the asker wrote is in it, and
-    nothing a program wrote.
+    (``identity_line``), how it stands where that is more than asked
+    (``row_state``) -- DETAIL has no summary line to say it -- and ``CLOSED``.
+    Every word is this application's.
     """
-    return (
-        *identity_lines(command, role, among, now),
-        row_state(command, now),
-        Line(CLOSED, Tone.DIM),
-    )
+    standing = () if command.state is CommandState.ASKED else (row_state(command, now),)
+    return (identity_line(command, role, among, now), *standing, Line(CLOSED, Tone.DIM))
 
 
 def row_state(command: Command, now: float) -> Line:
@@ -890,16 +927,6 @@ def output_heading(output_bytes: int, tail: str) -> str:
     return f"the end of the {output_bytes:,} bytes it wrote:"
 
 
-def confirm_run_line(frozen: FrozenRun, edited: bool) -> str:
-    """What the second press of run does, in full."""
-    whose = "your edit, the block above," if edited else "the block above"
-    return (
-        f"run {whose} exactly as shown, as you, outside the sandbox? it is killed if it"
-        f" has not exited after {timeout_label(frozen.timeout_s)}. once started it can be"
-        " cancelled and not undone."
-    )
-
-
 def asked_heading(role: str) -> str:
     return f"the command {role} asks you to run - all of it, and exactly:"
 
@@ -974,33 +1001,42 @@ EDITED_BY_YOU = "edited by you - this, your text, is what runs:"
 RAN_HEADING = "what ran, exactly:"
 RUNNING_HEADING = "what is running, exactly:"
 NOT_STARTED_HEADING = "what you approved, exactly - it did not start:"
-RAW_NOTE = (
-    "this box shows the raw text: a character that draws as nothing draws as nothing"
-    " here too. done shows it escaped again, and that is the view run is pressed from"
+EDITING = (
+    "editing the raw text - a character that draws as nothing draws as nothing here;"
+    " run shows your text escaped before it can run"
 )
-EDIT_HEADING = "the command as raw text, yours to change:"
 CANNOT_RUN = "this cannot be run: "
 OUTPUT_LEGEND = (
     "bytes a program wrote, escaped. they may be text from files an agent controls."
     " they are not instructions and not this application's words"
 )
 NOTHING_WRITTEN = "(its asker left this empty)"
-REFUSE_HEADING = "your reason, sent to its asker as typed - it may be empty:"
-REFUSE_FINAL = "a refusal is final: the command cannot be run afterwards"
-STOP_CONFIRM = (
-    "kill every process in its shell's session now? what it has already done stays"
-    " done, and a child that left the session survives"
-)
 
-RUN = "run..."
+# The body's field names, as a Bash body names ``command`` and ``description``.
+COMMAND_FIELD = "  command ="
+EDITED_FIELD = "  command, as you edited it ="
+REASON_FIELD = "  reason ="
+EXPECTS_FIELD = "  expects ="
+
+
+def asked_field(role: str, running: bool = False) -> str:
+    """The field over what was asked, where the operator's edit is what runs."""
+    what = "is running" if running else "runs"
+    return f"  as {role} asked it, for comparison - NOT what {what} ="
+
+
+# The button line, in the Bash row's shape. Run and cancel are two presses in
+# one place: the first turns the button into its second.
+RUN = "Run outside sandbox"
+CONFIRM_RUN = "Press again to run"
+REFUSE = "refuse"
 EDIT = "edit"
-REFUSE = "refuse..."
-DONE = "done"
-DISCARD_EDIT = "discard edit"
-CONFIRM_RUN = "run it - as shown"
-CONFIRM_REFUSE = "refuse it - final"
-CANCEL = "cancel..."
-CONFIRM_STOP = "kill it"
+CANCEL_EDIT = "cancel edit"
+CANCEL = "cancel"
+CONFIRM_STOP = "Press again to cancel"
+REASON_HINT = "reason (shown to the agent on refuse)"
+MOUSE_ONLY = "mouse only"
+KILLED_AFTER = "killed after:"
 BACK = "back"
 COPY_PATH = "copy path"
 
@@ -1108,16 +1144,6 @@ def command_block(text: str, *, key: str = "command", dim: bool = False) -> None
     imgui.end_child()
 
 
-def segments_block(lines: Sequence[Line]) -> None:
-    """The breakdown's segments, drawn as the command is and in a box of their own."""
-    flags = int(imgui.ChildFlags_.borders) | int(imgui.ChildFlags_.auto_resize_y)
-    if imgui.begin_child("##segments", imgui.ImVec2(-8.0, 0.0), flags):
-        reserved = max(len(CONTINUES), *(len(line.gutter) for line in lines)) + 2
-        width = _columns(reserved)
-        _draw_rows([row for line in lines for row in segment_rows(line, width)], P.text)
-    imgui.end_child()
-
-
 def process_output(text: str) -> None:
     """
     The one place a program's output is drawn: escaped by ``visible``, dimmed,
@@ -1137,17 +1163,6 @@ def process_output(text: str) -> None:
     for offset in (0.25, 0.6):
         x = top.x + gutter * offset
         draw_list.add_line(imgui.ImVec2(x, top.y), imgui.ImVec2(x, bottom), P.text_dim.u32, 1.5)
-
-
-def _breakdown(text: str, roots: tuple[str, ...]) -> None:
-    for line in tree_lines(text, roots):
-        _line(line)
-    lines = breakdown_lines(text)
-    segments = [line for line in lines if line.tone is Tone.SEGMENT]
-    _line(lines[0])
-    segments_block(segments)
-    for line in lines[1 + len(segments) :]:
-        _line(line)
 
 
 def _hidden(text: str) -> None:
@@ -1191,6 +1206,51 @@ def _asker_texts(command: Command, role: str) -> None:
     _authored(command.expects)
 
 
+def asker_value(text: str) -> str:
+    """
+    One of the asker's texts as the body's value: whole up to ``_ASKER_CHARS``
+    and marked where cut, drawable whatever it holds (``author_text``), and
+    ``''`` where it is blank, as a Bash body shows an empty argument.
+    """
+    if not text.strip():
+        return repr(text)
+    shown, dropped = board_pane.clip(text, _ASKER_CHARS)
+    more = f" ... {dropped:,} more characters not shown" if dropped else ""
+    return author_text(shown) + more
+
+
+def _body(command: Command, text: str, role: str, *, running: bool = False) -> None:
+    """
+    The body of a run, as a Bash approval's body is drawn: a bordered box with
+    each argument under its name. ``text`` is the string that would run or is
+    running, in its block; where it is not what was asked, what was asked is
+    under it, dimmed and named as not what runs. Then the asker's reason and
+    expectation, each the value of its line and nothing else.
+    """
+    flags = int(imgui.ChildFlags_.borders) | int(imgui.ChildFlags_.auto_resize_y)
+    if imgui.begin_child("##body", imgui.ImVec2(-8.0, 0.0), flags):
+        # A child is a window of its own, and starts with no wrap.
+        imgui.push_text_wrap_pos(0.0)
+        edited = text != command.asked
+        imgui.text_colored(P.text_dim.vec4, EDITED_FIELD if edited else COMMAND_FIELD)
+        command_block(text)
+        if edited:
+            imgui.text_colored(P.text_dim.vec4, asked_field(role, running))
+            command_block(command.asked, key="asked", dim=True)
+        imgui.text_colored(P.text.vec4, f"{REASON_FIELD} {asker_value(command.reason)}")
+        imgui.text_colored(P.text.vec4, f"{EXPECTS_FIELD} {asker_value(command.expects)}")
+        imgui.pop_text_wrap_pos()
+    imgui.end_child()
+
+
+def _warnings(lines: Sequence[Line], key: str, paragraphs: Sequence[str]) -> None:
+    """The warnings, the first with the question mark that has them in full."""
+    for index, line in enumerate(lines):
+        _line(line)
+        if index == 0:
+            help_mark(key, EXPLAINED, paragraphs)
+
+
 def draw_row(
     state: CommandViewState,
     command: Command,
@@ -1203,22 +1263,25 @@ def draw_row(
     log_path: str | None = None,
     among: Among | None = None,
     restored: bool = False,
+    presses: bool = True,
 ) -> None:
     """
-    The row for a command, whatever state it is in: ``closed_lines`` and
-    nothing else unless ``state`` says the operator opened it, and then all of
-    it.
+    The row for a command, whatever state it is in: ``CLOSED`` under its
+    identity and nothing else unless ``state`` says the operator opened it,
+    and then all of it.
 
     The state is read off ``command`` on every call, so a command withdrawn or
     started since the last frame is drawn as what it now is and offers none of
     the presses it offered before. ``role`` is what to call the asker.
 
     ``among`` is where the command stands among its session's and its asker's
-    (``identity_lines``), and ``restored`` whether its record came from a file
-    (``delivery_line``).
+    (``identity_line``), and ``restored`` whether its record came from a file
+    (``delivery_line``). ``presses`` False draws the body and no button and no
+    box: DETAIL's copy, which is read and not acted from.
     """
     role = one_line(role)
     state.lapse(int(imgui.get_frame_count()))
+    state.expire(float(imgui.get_time()))
     imgui.push_id(f"command:{command.id}")
     imgui.push_text_wrap_pos(0.0)
     if not state.is_open(command.id):
@@ -1229,9 +1292,9 @@ def draw_row(
         return
     match command.state:
         case CommandState.ASKED:
-            _asked(state, command, role, where, actions, wrap, among, now)
+            _asked(state, command, role, where, actions, wrap, among, now, presses)
         case CommandState.RUNNING:
-            _running(state, command, role, actions, now, among)
+            _running(state, command, role, where, actions, now, among, presses)
         case CommandState.ENDED:
             _ended(command, role, now, log_path, restored)
         case _:
@@ -1249,67 +1312,109 @@ def _asked(
     wrap: bool,
     among: Among | None,
     now: float,
+    presses: bool,
 ) -> None:
-    for line in standing_lines(where.shell, where.stripped_env, where.cwd):
-        _line(line)
-    imgui.spacing()
-    # Above the edit box as well: which command is being edited is the same
-    # question as which is being read.
-    for line in identity_lines(command, role, among, now):
-        _line(line)
-    if state.editing == command.id:
-        _edit_box(state, command, wrap)
-        return
     frozen = state.frozen_run(command.id)
     text = state.candidate(command) if frozen is None else frozen.text
-    _command(command, text, role, asked_heading(role))
-    _breakdown(text, where.roots)
-    if frozen is not None:
-        _confirm_run(state, command, frozen, actions)
-        return
-    _asker_texts(command, role)
-    imgui.spacing()
-    if isinstance(state.armed(command.id), Refusing):
-        _refuse_box(state, command, actions, wrap)
+    _line(identity_line(command, role, among, now))
+    _warnings(
+        warnings(command, text, where, role, among),
+        f"glass:{command.id}",
+        explanations(text, where),
+    )
+    if presses and state.editing == command.id:
+        _edit_box(state, command, wrap)
+        # What the box holds now, which is what run would freeze this frame.
+        text = state.candidate(command)
     else:
-        _choices(state, command, where, text)
+        _body(command, text, role)
+    if presses:
+        imgui.spacing()
+        _choices(state, command, where, actions, text)
 
 
-def _choices(state: CommandViewState, command: Command, where: Where, text: str) -> None:
-    """The timeout, and the first presses."""
-    picked = state.timeout_s(command.id)
-    imgui.text_colored(P.text_dim.vec4, "killed if it has not exited after:")
-    for seconds in TIMEOUT_CHOICES_S:
-        imgui.same_line()
-        chosen = imgui.radio_button(timeout_label(seconds), picked == seconds)
-        if chosen and imgui.is_mouse_released(imgui.MouseButton_.left):
-            state.timeouts[command.id] = seconds
-            picked = seconds
+def _choices(
+    state: CommandViewState, command: Command, where: Where, actions: Actions, text: str
+) -> None:
+    """
+    The Bash row's button line: the reason box, run, refuse, edit. Then the
+    timeout, and why run or refuse is not offered where it is not.
+    """
+    frozen = state.frozen_run(command.id)
+    reason = state.reasons.get(command.id, "")
+    imgui.set_next_item_width(_REASON_WIDTH)
+    _, typed = imgui.input_text_with_hint("##reason", REASON_HINT, reason)
+    # Escape in a text box hands back what it held when the caret entered it;
+    # that frame's value is not the operator's.
+    if typed != reason and not imgui.is_key_pressed(imgui.Key.escape):
+        reason = state.reasons[command.id] = typed
     refusal = refusal_of_edit(text)
     runnable = not refusal and where.shell is not None
-    if refusal:
-        imgui.text_colored(P.warn.vec4, CANNOT_RUN + refusal)
-    if not runnable:
+    imgui.same_line()
+    if frozen is not None:
+        if _second_press(state, CONFIRM_RUN):
+            actions.on_run(frozen.command_id, frozen.text, frozen.timeout_s)
+            state.pending = None
+    else:
+        if not runnable:
+            imgui.begin_disabled()
+        # ``runnable`` and not the click alone: the rule does not rest on what a
+        # greyed button reports.
+        if _first_press(state, RUN) and runnable:
+            _arm(state, freeze(command.id, text, state.timeout_s(command.id)))
+            state.editing = None
+        if not runnable:
+            imgui.end_disabled()
+    imgui.same_line()
+    sendable = refusable(reason)
+    if not sendable:
         imgui.begin_disabled()
-    # ``runnable`` and not the click alone: the rule does not rest on what a
-    # greyed button reports.
-    if _first_press(state, RUN) and runnable:
-        _arm(state, freeze(command.id, text, picked))
-    if not runnable:
+    if _first_press(state, REFUSE) and sendable:
+        actions.on_refuse(command.id, reason)
+        state.pending = None
+    if not sendable:
         imgui.end_disabled()
     imgui.same_line()
-    if _clicked(EDIT):
+    if state.editing == command.id:
+        if _clicked(CANCEL_EDIT):
+            state.edits.pop(command.id, None)
+            state.editing = None
+    elif _clicked(EDIT):
         state.edits.setdefault(command.id, command.asked)
         state.editing = command.id
         state.pending = None
     imgui.same_line()
-    if _first_press(state, REFUSE):
-        _arm(state, Refusing(command.id))
+    imgui.text_colored(P.text_dim.vec4, MOUSE_ONLY)
+    _timeouts(state, command, frozen)
+    if refusal:
+        imgui.text_colored(P.warn.vec4, CANNOT_RUN + refusal)
+    if not sendable:
+        imgui.text_colored(P.warn.vec4, reason_too_long(reason))
+
+
+def _timeouts(state: CommandViewState, command: Command, frozen: FrozenRun | None) -> None:
+    """
+    The timeout, one line. Fixed while a run is armed: the run frozen is the one
+    on screen, its timeout included.
+    """
+    picked = state.timeout_s(command.id) if frozen is None else frozen.timeout_s
+    imgui.text_colored(P.text_dim.vec4, KILLED_AFTER)
+    if frozen is not None:
+        imgui.begin_disabled()
+    for seconds in TIMEOUT_CHOICES_S:
+        imgui.same_line()
+        chosen = imgui.radio_button(timeout_label(seconds), picked == seconds)
+        if chosen and frozen is None and imgui.is_mouse_released(imgui.MouseButton_.left):
+            state.timeouts[command.id] = seconds
+            picked = seconds
+    if frozen is not None:
+        imgui.end_disabled()
 
 
 def _edit_box(state: CommandViewState, command: Command, wrap: bool) -> None:
+    """In the body's place, as a Bash row's editor is: the raw text, to change."""
     draft = state.edits.get(command.id, command.asked)
-    imgui.text_colored(P.text_strong.vec4, EDIT_HEADING)
+    imgui.text_colored(P.warn.vec4, EDITING)
     _, typed = multiline_input(
         "##edit",
         draft,
@@ -1317,99 +1422,43 @@ def _edit_box(state: CommandViewState, command: Command, wrap: bool) -> None:
         wrap=wrap,
         flags=int(imgui.InputTextFlags_.allow_tab_input),
     )
-    # Escape in a text box hands back what it held when the caret entered it;
-    # that frame's value is not the operator's edit.
     if not imgui.is_key_pressed(imgui.Key.escape):
-        draft = typed
-        state.edits[command.id] = draft
-    imgui.text_colored(P.warn.vec4, RAW_NOTE)
-    refusal = refusal_of_edit(draft)
-    if refusal:
-        imgui.text_colored(P.warn.vec4, CANNOT_RUN + refusal)
-    if _clicked(DONE):
-        state.editing = None
-    imgui.same_line()
-    if _clicked(DISCARD_EDIT):
-        del state.edits[command.id]
-        state.editing = None
-
-
-def _confirm_run(
-    state: CommandViewState, command: Command, frozen: FrozenRun, actions: Actions
-) -> None:
-    imgui.spacing()
-    imgui.text_colored(P.warn.vec4, confirm_run_line(frozen, frozen.text != command.asked))
-    # ``back`` first, so it is what stands nearest to where ``run...`` was.
-    if _clicked(BACK):
-        state.pending = None
-    imgui.same_line()
-    if _second_press(state, CONFIRM_RUN):
-        actions.on_run(frozen.command_id, frozen.text, frozen.timeout_s)
-        state.pending = None
-
-
-def _refuse_box(state: CommandViewState, command: Command, actions: Actions, wrap: bool) -> None:
-    reason = state.reasons.get(command.id, "")
-    imgui.text_colored(P.text_dim.vec4, REFUSE_HEADING)
-    _, typed = multiline_input(
-        "##reason",
-        reason,
-        imgui.ImVec2(-8.0, _REASON_BOX_HEIGHT),
-        wrap=wrap,
-        flags=int(imgui.InputTextFlags_.allow_tab_input),
-    )
-    if not imgui.is_key_pressed(imgui.Key.escape):
-        reason = typed
-        state.reasons[command.id] = reason
-    sendable = refusable(reason)
-    if sendable:
-        imgui.text_disabled(REFUSE_FINAL)
-    else:
-        imgui.text_colored(P.warn.vec4, reason_too_long(reason))
-    if _clicked(BACK):
-        state.pending = None
-    imgui.same_line()
-    if not sendable:
-        imgui.begin_disabled()
-    if _second_press(state, CONFIRM_REFUSE) and sendable:
-        actions.on_refuse(command.id, reason)
-        state.pending = None
-    if not sendable:
-        imgui.end_disabled()
+        state.edits[command.id] = typed
 
 
 def _running(
     state: CommandViewState,
     command: Command,
     role: str,
+    where: Where,
     actions: Actions,
     now: float,
     among: Among | None,
+    presses: bool,
 ) -> None:
     run = command.run
     if run is None:
         return
     _line(row_state(command, now))
-    for line in identity_lines(command, role, among, now):
-        _line(line)
-    imgui.text_colored(
-        P.text_dim.vec4,
-        f"{one_line(run.shell)} -l -c, in {one_line(run.cwd)}; killed if it has not exited"
-        f" after {timeout_label(run.timeout_s)}",
+    _line(identity_line(command, role, among, now))
+    ran_in = dataclasses.replace(where, shell=run.shell, cwd=run.cwd)
+    _warnings(
+        warnings(command, run.text, ran_in, role, timeout_s=run.timeout_s),
+        f"glass:{command.id}",
+        explanations(run.text, ran_in),
     )
-    _command(command, run.text, role, RUNNING_HEADING)
-    if command.stop_asked_at is not None:
+    _body(command, run.text, role, running=True)
+    if not presses or command.stop_asked_at is not None:
         return
+    imgui.spacing()
     if isinstance(state.armed(command.id), Stopping):
-        imgui.text_colored(P.warn.vec4, STOP_CONFIRM)
-        if _clicked(BACK):
-            state.pending = None
-        imgui.same_line()
         if _second_press(state, CONFIRM_STOP):
             actions.on_stop(command.id)
             state.pending = None
     elif _first_press(state, CANCEL):
         _arm(state, Stopping(command.id))
+    imgui.same_line()
+    imgui.text_colored(P.text_dim.vec4, MOUSE_ONLY)
 
 
 def draw_ended(

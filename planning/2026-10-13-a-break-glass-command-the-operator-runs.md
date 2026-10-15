@@ -29,6 +29,10 @@ with another mechanism to turn the session synchronous."; commands granted in ad
 unattended runs — "Leave for second."; whether the operator may change the command before it
 runs — "Editable, yes."; which environment it runs in — "Login shell."
 
+**D5.** (2026-10-15, after the feature was built and merged) "If you could also make the
+break-glass interaction less verbose, that would be helpful. I feel it should mirror any other
+bash request but with a few more warnings (but without them being full paragraphs)."
+
 ## Why not a second team, and why not a model at all
 
 Recorded because D3 drops the angle and the reasons should not have to be found again.
@@ -61,6 +65,23 @@ this runs as you, outside the sandbox, with your credentials and network, and ma
 this session wrote; the agent's reason behind the author bar. Actions: run (two presses, no
 shortcut key, under the same keystroke hold as the answer box); refuse, with a reason;
 **(D4)** edit, then run — recorded as edited, and the asker is told what actually ran.
+
+**Superseded in part, 2026-10-15, by D5.** "Never drawn as an approval" and the standing
+paragraphs are withdrawn: the row now reads as a Bash approval does — the queue's summary line is
+`approval.summarize` of the command, as a Bash row's is, behind "outside the sandbox · "; the
+opened row is one-line warnings, a bordered body naming `command`, `reason` and `expects` as a
+Bash body names `command` and `description`, and the Bash row's button line (reason box,
+run, refuse, edit). What stays, because they are properties and not wording: the command is
+drawn whole through `commandtext.visible` in its numbered block, never cut by Dear ImGui; the
+string run is the frozen draft the operator saw; no key runs, edits or refuses; the row is
+closed until the operator opens it; edit-then-run is recorded as edited. Run keeps a
+confirmation in the Bash button's place — "Run outside sandbox" turns into "Press again to
+run" for a few seconds — while refuse is one press, as a Bash reject is, with what the
+row's reason box holds; the segment breakdown is one line of names, and the full sentences
+(every flag, the advisory, the profile, the environment) are behind the row's `(?)`. DETAIL
+draws the same warnings and body with no button, as it draws a Bash approval. Built in
+`ui/command_view.py` and `ui/inbox.py`; the lead's decision on the confirmation and the
+builder's on one-press refuse, which the user may overturn.
 
 **What pptmstr does.** **(D4)** The operator's login shell runs it (`$SHELL -lc`), in the
 session's directory. **(R)** Off the draw thread; stdin closed; its own process group; a

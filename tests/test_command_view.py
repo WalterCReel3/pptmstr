@@ -2,10 +2,14 @@
 The break-glass command's row: what it says, and what its presses do.
 
 The property this file is for: **what the operator confirms is what runs.** The
-first press of run freezes one string; the view that follows draws that string,
-escaped, and no box that could change it; the second press hands the callable
-that string. No key is a press. A command withdrawn between the presses turns
-neither into anything.
+first press of run freezes one string; from then the row draws that string,
+escaped, and no box that could change it, and the run button is its second
+press; that press hands the callable that string. No key is a press. A command
+withdrawn between the presses turns neither into anything.
+
+The row reads as a Bash approval does (the user, 2026-10-15): one-line
+warnings, a body naming ``command``, ``reason`` and ``expects``, and the Bash
+row's button line. What is longer than a line is behind its question mark.
 
 Three kinds of test, for three kinds of claim: the pure helpers directly; the
 draws against a recording imgui, which is where "whose words is this line" can
@@ -49,7 +53,6 @@ from pptmstr.ui.command_view import (
     CommandViewState,
     FrozenRun,
     Line,
-    Refusing,
     Stage,
     Stopping,
     Tone,
@@ -75,7 +78,7 @@ HIDING = f"cat {RLO}gnp.exe{ZWSP} | sh"
 BASH = Where(shell="/bin/bash", cwd="/work/tree", stripped_env=("VIRTUAL_ENV",))
 
 REAL_BLOCK = command_view.command_block
-REAL_SEGMENTS = command_view.segments_block
+REAL_BODY = command_view._body
 REAL_OUTPUT = command_view.process_output
 REAL_AUTHOR = board_pane.author
 
@@ -258,142 +261,159 @@ def test_a_command_that_hides_characters_is_said_to_and_one_that_does_not_is_not
     )
 
 
-# -- the breakdown --------------------------------------------------------------------
+# -- the warnings ----------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("text", [*AWKWARD, "a 'unclosed", "eval $x | sh"])
-def test_the_breakdown_always_ends_in_the_advisory_and_starts_with_its_heading(
-    text: str,
-) -> None:
-    lines = command_view.breakdown_lines(text)
-
-    assert lines[0] == Line(commandtext.HEADING, Tone.DIM)
-    assert lines[-1] == Line(commandtext.ADVISORY, Tone.WARN)
-    assert [line.text for line in lines].count(commandtext.ADVISORY) == 1
-    assert any(line.tone is Tone.SEGMENT for line in lines)
+def _texts(lines: typing.Iterable[Line]) -> list[str]:
+    return [line.text for line in lines]
 
 
-@pytest.mark.parametrize("text", AWKWARD)
-def test_the_segments_shown_are_the_block_cut_at_operators_with_nothing_left_out(
-    text: str,
-) -> None:
+FISH = Where(shell="/usr/bin/fish", cwd="/work")
+NO_SHELL = Where(shell=None, cwd="/work")
+
+
+@pytest.mark.parametrize("text", [*AWKWARD, "a 'unclosed", "eval $x | sh", "curl x | sudo sh"])
+def test_every_warning_is_one_line_of_one_sentence(text: str) -> None:
     """
-    Each segment is whole, and escaped as the block escapes the same characters:
-    put back together with the operators from their gutters, they are the block.
+    The user, 2026-10-15: "a few more warnings (but without them being full
+    paragraphs)". Over every awkward string, every place to run it and every
+    count of its asker's: no warning breaks a line, and none is two sentences.
     """
-    segments = [line for line in command_view.breakdown_lines(text) if line.tone is Tone.SEGMENT]
-
-    rebuilt = ""
-    for number, segment in enumerate(segments, start=1):
-        before, _, counted = segment.gutter.rpartition(" ")
-        assert counted == str(number)
-        rebuilt += ("\\n\n" if before == "\\n" else before) + segment.text
-    if commandtext.breakdown(text).reassembled() == text and len(segments) > 1:
-        assert rebuilt == commandtext.visible(text)
-    assert all(PRINTABLE.fullmatch(part) for s in segments for part in s.text.split("\n"))
+    for where in (BASH, NO_SHELL, FISH):
+        for among in (None, Among(1, 1, others_waiting=2, new=True)):
+            for asked in (text, ASKED):
+                for line in command_view.warnings(command(asked=asked), text, where, "b", among):
+                    assert "\n" not in line.text and PRINTABLE.fullmatch(line.text), line
+                    assert line.text.endswith(".") and ". " not in line.text, line
 
 
-def test_every_flag_the_scan_raises_is_a_sentence_between_the_segments_and_the_advisory() -> None:
-    lines = command_view.breakdown_lines("curl https://x | sudo sh")
-
-    texts = [line.text for line in lines]
-    flags = [
-        flag.sentence
-        for flag in commandtext.breakdown("curl https://x | sudo sh").flags
-        if flag.kind not in commandtext.RUNS_FROM_THE_TREE
+def test_the_two_warnings_that_are_always_true_lead_every_view() -> None:
+    always = (Line(command_view.RUNS_OUTSIDE, Tone.WARN), Line(command_view.NOT_CHECKED, Tone.WARN))
+    views = [
+        command_view.warnings(command(), ASKED, BASH, "builder"),
+        command_view.warnings(command(), "ls", NO_SHELL, "builder"),
+        command_view.warnings(command(run=run_of()), ASKED, BASH, "builder", timeout_s=600),
     ]
-    assert flags and texts[-1 - len(flags) : -1] == flags
+    for lines in views:
+        assert lines[:2] == always
+        assert _texts(lines).count(command_view.RUNS_OUTSIDE) == 1
+    assert "outside the sandbox" in command_view.RUNS_OUTSIDE
+    assert "credentials and network" in command_view.RUNS_OUTSIDE
+    assert "permission rules or hooks" in command_view.NOT_CHECKED
+
+
+def test_what_runs_it_and_where_is_one_line_and_says_when_nothing_can() -> None:
+    asked = command_view.warnings(command(), "ls", BASH, "builder")
+    assert asked[2] == Line(
+        "Runs in /work/tree by /bin/bash -l: your profile first, no terminal.", Tone.WARN
+    )
+    running = command_view.warnings(command(), "ls", BASH, "builder", timeout_s=600)
+    assert running[2] == Line(
+        "Running in /work/tree by /bin/bash -l; killed after 10 minutes.", Tone.WARN
+    )
+    none = command_view.warnings(command(), "ls", NO_SHELL, "builder")
+    assert Line(command_view.NO_SHELL, Tone.ALARM) in none
+    assert not any(text.startswith("Runs in") for text in _texts(none))
+    fish = _texts(command_view.warnings(command(), "ls", FISH, "builder"))
+    zsh = _texts(command_view.warnings(command(), "ls", Where("/usr/bin/zsh", "/w"), "b"))
+    assert any("fish" in text and "bash's reading" in text for text in fish)
+    assert not any("bash's reading" in text for text in zsh)
+
+
+def test_edited_is_said_exactly_where_the_string_is_not_what_was_asked() -> None:
+    edited = Line(command_view.EDITED, Tone.WARN)
+    assert edited in command_view.warnings(command(), ASKED + " ", BASH, "builder")
+    assert edited not in command_view.warnings(command(), ASKED, BASH, "builder")
+    running = command(run=run_of("make -n"))
+    assert edited in command_view.warnings(running, "make -n", BASH, "builder", timeout_s=600)
+    assert "told what actually ran" in command_view.EDITED
+
+
+def test_hidden_characters_are_said_in_the_alarm_colour_exactly_where_there_are_some() -> None:
+    hiding = command_view.warnings(command(asked=HIDING), HIDING, BASH, "builder")
+    assert Line(command_view.hidden_sentence(HIDING), Tone.ALARM) in hiding
+    assert command_view.hidden_sentence(ASKED) == ""
+    plain = command_view.warnings(command(), ASKED, BASH, "builder")
+    assert not any(line.tone is Tone.ALARM for line in plain)
 
 
 @pytest.mark.parametrize(
-    ("text", "kinds"),
+    ("text", "said"),
     [
-        ("git push", {commandtext.FlagKind.RUNS_GIT}),
-        ("make install", {commandtext.FlagKind.RUNS_MAKE}),
+        ("git push", "May run files this session can write: git."),
+        ("make install", "May run files this session can write: make."),
         (
             "pip install -e . && ./scripts/post.sh",
-            {commandtext.FlagKind.RUNS_PYTHON_BUILD, commandtext.FlagKind.RUNS_RELATIVE_PATH},
+            "May run files this session can write: python build, relative path.",
         ),
-        ("ls -la", set()),
+        ("ls -la", None),
     ],
 )
-def test_what_in_the_directory_a_command_runs_is_said_apart_from_the_breakdown(
-    text: str, kinds: set[commandtext.FlagKind]
+def test_what_in_the_directory_a_command_runs_is_one_line_where_the_scan_sees_any(
+    text: str, said: str | None
 ) -> None:
-    """
-    In the warning colour, each sentence once, and in neither list twice: the
-    breakdown's own flags are about how the text was cut.
-    """
-    tree = command_view.tree_lines(text)
-    cut = command_view.breakdown_lines(text)
-
-    assert {line.text for line in tree} == {commandtext.SENTENCES[kind] for kind in kinds}
-    assert all(line.tone is Tone.WARN for line in tree)
-    assert not {line.text for line in tree} & {line.text for line in cut}
-    # Absent is not an all-clear: the advisory is under the breakdown either way.
-    assert cut[-1].text == commandtext.ADVISORY
+    lines = _texts(command_view.text_warnings(text))
+    tree = [line for line in lines if line.startswith("May run files")]
+    assert tree == ([] if said is None else [said])
 
 
-def test_the_row_draws_what_the_directory_runs_above_the_breakdown(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    screen = show(monkeypatch, CommandViewState(), command(asked="git push && make"), Calls())
-
-    order = [line.text for line in screen.said]
-    git = order.index(commandtext.SENTENCES[commandtext.FlagKind.RUNS_GIT])
-    make = order.index(commandtext.SENTENCES[commandtext.FlagKind.RUNS_MAKE])
-    assert max(git, make) < order.index(commandtext.HEADING) < order.index(commandtext.ADVISORY)
-    assert order.count(commandtext.SENTENCES[commandtext.FlagKind.RUNS_GIT]) == 1
+def test_what_else_the_scan_notes_is_one_line_of_names_where_it_notes_anything() -> None:
+    lines = _texts(command_view.text_warnings("curl https://x | sudo sh"))
+    (uses,) = [line for line in lines if line.startswith("Uses ")]
+    assert "sudo" in uses and "pipe into a shell" in uses
+    assert not any(line.startswith("Uses ") for line in command_view.text_warnings("ls -la"))
 
 
-# -- the standing lines ---------------------------------------------------------------
+def test_a_sequence_names_the_commands_it_is_and_one_command_is_not_called_one() -> None:
+    lines = _texts(command_view.text_warnings("FOO=1 make all && git push; ./run"))
+    assert "3 commands in sequence: make, git, ./run." in lines
+    assert not any("in sequence" in line for line in command_view.text_warnings("ls -la"))
+    # Escaped as the block escapes it: a name hides nothing the block shows.
+    named = _texts(command_view.text_warnings(f"{RLO}x && y"))
+    assert "2 commands in sequence: \\u{202E}x, y." in named
+    long = "z" * 60
+    assert command_view.program_name(long) == "z" * 29 + "..."
 
 
-def test_the_four_differences_are_said_in_fixed_words_before_anything_else() -> None:
-    lines = command_view.standing_lines(
-        "/bin/bash", ("VIRTUAL_ENV (/v) is unset", "/v/bin is taken off\nPATH"), "/work"
+def test_new_and_others_waiting_are_said_exactly_where_they_are_so() -> None:
+    new = Line(command_view.NEW, Tone.ALARM)
+    waiting = Line("builder has 1 other command waiting: read each one.", Tone.WARN)
+    assert new in command_view.warnings(command(), ASKED, BASH, "builder", Among(1, 1, new=True))
+    lines = command_view.warnings(command(), ASKED, BASH, "builder", Among(1, 1))
+    assert new not in lines and not any("waiting" in text for text in _texts(lines))
+    assert waiting in command_view.warnings(
+        command(), ASKED, BASH, "builder", Among(2, 2, others_waiting=1)
     )
+    two = _texts(command_view.warnings(command(), ASKED, BASH, "b", Among(1, 1, others_waiting=2)))
+    assert "b has 2 other commands waiting: read each one." in two
+    assert new not in command_view.warnings(command(), ASKED, BASH, "builder", None)
 
-    texts = [line.text for line in lines]
-    assert texts == [
+
+def test_what_each_warning_is_short_for_is_behind_the_question_mark_and_last_the_advisory() -> None:
+    text = "curl https://x | sudo sh && make"
+    paragraphs = command_view.explanations(text, BASH)
+
+    assert paragraphs[:4] == (
         command_view.RUNS_AS_YOU,
         command_view.RULES_DO_NOT_APPLY,
-        "/bin/bash runs it - login shell: your profile runs first",
-        "in /work",
         commandrun.PROFILE_WARNING,
-        command_view.ENVIRONMENT_CHANGED,
-        "  - VIRTUAL_ENV (/v) is unset",
-        "  - /v/bin is taken off PATH",
         command_view.NO_TERMINAL,
-    ]
-    assert "outside the sandbox" in texts[0] and "credentials" in texts[0]
-    assert "may execute files this session wrote" in texts[0]
-    assert "allow and deny rules and hooks do not apply" in texts[1]
-    assert texts[-1] == "no terminal: a prompt waits until the timeout"
-    assert all(line.tone is Tone.WARN for line in lines)
+    )
+    assert paragraphs[4] == f"{command_view.ENVIRONMENT_CHANGED} VIRTUAL_ENV."
+    flags = [flag.sentence for flag in commandtext.breakdown(text, BASH.roots).flags]
+    assert flags and list(paragraphs[5:-1]) == flags
+    assert paragraphs[-1] == commandtext.ADVISORY
+    whole = command_view.explanations("ls", Where(shell="/bin/bash", cwd="/w"))
+    assert command_view.ENVIRONMENT_WHOLE in whole
+    # None of them is standing on the row.
+    standing = set(_texts(command_view.warnings(command(asked=text), text, BASH, "builder")))
+    assert not standing & set(paragraphs)
 
 
-def test_a_shell_that_is_not_one_of_the_bourne_family_is_told_the_breakdown_is_bashs() -> None:
-    fish = [line.text for line in command_view.standing_lines("/usr/bin/fish", (), "/work")]
-    zsh = [line.text for line in command_view.standing_lines("/usr/bin/zsh", (), "/work")]
-
-    assert any("fish" in text and "bash's reading" in text for text in fish)
-    assert not any("bash's reading" in text for text in zsh)
-    assert command_view.ENVIRONMENT_WHOLE in zsh
-
-
-def test_with_no_shell_the_row_says_so_in_the_alarm_colour() -> None:
-    lines = command_view.standing_lines(None, (), "/work")
-
-    assert Line(command_view.NO_SHELL, Tone.ALARM) in lines
-    # No shell, no profile: the sentence about one would be about nothing.
-    assert commandrun.PROFILE_WARNING not in [line.text for line in lines]
-
-
-def test_every_change_the_runner_makes_to_the_environment_has_a_line_of_its_own() -> None:
+def test_every_change_the_runner_makes_to_the_environment_is_behind_the_question_mark() -> None:
     """
     From ``commandrun.environment_changes`` itself, so a removal added there is
-    on the row without anybody remembering to list it here.
+    explained without anybody remembering to list it here.
     """
     environ = {
         "VIRTUAL_ENV": "/v",
@@ -402,27 +422,15 @@ def test_every_change_the_runner_makes_to_the_environment_has_a_line_of_its_own(
         "ENV": "/tmp/env.sh",
     }
     changes = commandrun.environment_changes(environ)
-    texts = [line.text for line in command_view.standing_lines("/bin/bash", changes, "/work")]
+    where = Where(shell="/bin/bash", cwd="/work", stripped_env=changes)
+    (said,) = [p for p in command_view.explanations("ls", where) if "environment" in p]
 
     assert len(changes) >= 5
     for change in changes:
-        assert f"  - {change}" in texts
-    for name in ("VIRTUAL_ENV", "BASH_ENV", "ENV (", "PATH"):
-        assert any(name in text for text in texts), name
-    assert command_view.ENVIRONMENT_WHOLE not in texts
-    # The one thing that is set and not taken out is under a heading that is
-    # true of it: the operator is told the command runs with a variable they
-    # did not set.
-    assert f"  - {commandrun.TAG_SET}" in texts
+        assert widgets.one_line(change) in said
+    assert commandrun.TAG_SET in said
+    assert said.startswith(command_view.ENVIRONMENT_CHANGED)
     assert "changed before the shell starts" in command_view.ENVIRONMENT_CHANGED
-    assert "taken out" not in command_view.ENVIRONMENT_CHANGED
-    bare = [
-        line.text
-        for line in command_view.standing_lines(
-            "/bin/bash", commandrun.environment_changes({"PATH": "/usr/bin"}), "/work"
-        )
-    ]
-    assert command_view.ENVIRONMENT_CHANGED in bare and f"  - {commandrun.TAG_SET}" in bare
 
 
 # -- freezing -------------------------------------------------------------------------
@@ -660,7 +668,7 @@ def test_a_string_approved_as_asked_is_headed_by_what_became_of_it(
 # -- which command this is --------------------------------------------------------------
 
 
-def test_two_commands_that_differ_by_two_letters_differ_in_the_line_above_the_block() -> None:
+def test_two_commands_that_differ_by_two_letters_differ_in_the_line_above_the_body() -> None:
     """
     The swap: ``pip install requests`` and ``pip install reqeusts``, asked a
     second apart by one agent. The blocks are one glance apart; the line above
@@ -669,26 +677,15 @@ def test_two_commands_that_differ_by_two_letters_differ_in_the_line_above_the_bl
     first = command(CID, asked="pip install requests", asked_at=100.0)
     second = command(OTHER, asked="pip install reqeusts", asked_at=101.0)
 
-    one = command_view.identity_lines(first, "builder", Among(4, 1, others_waiting=1), now=162.0)
-    two = command_view.identity_lines(second, "builder", Among(5, 2, others_waiting=1), now=162.0)
+    one = command_view.identity_line(first, "builder", Among(4, 1, others_waiting=1), now=162.0)
+    two = command_view.identity_line(second, "builder", Among(5, 2, others_waiting=1), now=162.0)
 
-    assert one[0].text == (
-        "asked 1m02s ago \u00b7 4th command asked in this session, 1st from builder"
-        " \u00b7 0123456789ab"
+    assert one == Line(
+        "4th command in this session, 1st from builder · 0123456789ab · asked 1m02s ago",
+        Tone.DIM,
     )
-    assert two[0].text == (
-        "asked 1m01s ago \u00b7 5th command asked in this session, 2nd from builder"
-        " \u00b7 ba9876543210"
-    )
-    assert (
-        one[1]
-        == two[1]
-        == Line(
-            "builder has 1 other command waiting - read each one: they are not this one", Tone.WARN
-        )
-    )
-    assert "2 other commands waiting" in (
-        command_view.identity_lines(first, "builder", Among(1, 1, others_waiting=2), 162.0)[1].text
+    assert two.text == (
+        "5th command in this session, 2nd from builder · ba9876543210 · asked 1m01s ago"
     )
 
 
@@ -701,25 +698,17 @@ def test_two_askers_first_commands_do_not_read_as_one_command() -> None:
     mine = command(CID, asked_at=100.0)
     theirs = command(OTHER, asked_at=100.0)
 
-    one = command_view.identity_lines(mine, "builder", Among(1, 1), now=162.0)[0].text
-    two = command_view.identity_lines(theirs, "builder-2", Among(2, 1), now=162.0)[0].text
+    one = command_view.identity_line(mine, "builder", Among(1, 1), now=162.0).text
+    two = command_view.identity_line(theirs, "builder-2", Among(2, 1), now=162.0).text
 
-    assert "1st command asked in this session, 1st from builder \u00b7" in one
-    assert "2nd command asked in this session, 1st from builder-2 \u00b7" in two
+    assert one.startswith("1st command in this session, 1st from builder ·")
+    assert two.startswith("2nd command in this session, 1st from builder-2 ·")
 
 
-def test_a_command_just_asked_says_so_in_the_alarm_colour_and_an_old_one_does_not() -> None:
-    cmd = command()
-    new = command_view.identity_lines(cmd, "builder", Among(1, 1, new=True), now=162.0)
-    old = command_view.identity_lines(cmd, "builder", Among(1, 1), now=162.0)
-
-    assert Line(command_view.NEW, Tone.ALARM) in new and command_view.NEW.startswith("NEW")
-    assert len(old) == 1 and old[0].tone is Tone.PLAIN
-    # A caller that counted nothing claims no count, and the id is still there.
-    bare = command_view.identity_lines(cmd, "builder", None, now=162.0)
-    assert [line.text for line in bare] == [
-        "asked 2m32s ago \u00b7 from builder \u00b7 0123456789ab"
-    ]
+def test_a_caller_that_counted_nothing_claims_no_count_and_the_id_is_still_there() -> None:
+    bare = command_view.identity_line(command(), "builder", None, now=162.0)
+    assert bare == Line("from builder · 0123456789ab · asked 2m32s ago", Tone.DIM)
+    assert command_view.NEW.startswith("New")
 
 
 @pytest.mark.parametrize(
@@ -761,7 +750,7 @@ def test_a_command_is_new_for_a_few_seconds_after_it_was_asked_and_never_again()
     assert not hasattr(CommandViewState(), "placed")
 
 
-def test_the_row_says_which_command_it_is_above_the_block_in_every_state_that_owes_a_row(
+def test_the_row_says_which_command_it_is_above_the_body_in_every_state_that_owes_a_row(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     among = Among(3, 2, others_waiting=1, new=True)
@@ -775,13 +764,10 @@ def test_the_row_says_which_command_it_is_above_the_block_in_every_state_that_ow
         )
         return [line.text for line in shown.said]
 
-    identity = (
-        "asked 2m32s ago \u00b7 3rd command asked in this session, 2nd from builder"
-        " \u00b7 0123456789ab"
-    )
+    identity = command_view.identity_line(command(), "builder", among, now=162.0).text
     asked = drawn(command(), CommandViewState())
-    assert asked.index(identity) < asked.index(command_view.asked_heading("builder"))
-    assert asked.index(command_view.NO_TERMINAL) < asked.index(identity)
+    assert asked.index(identity) < asked.index(command_view.RUNS_OUTSIDE)
+    assert asked.index(command_view.RUNS_OUTSIDE) < asked.index(command_view.COMMAND_FIELD)
     assert command_view.NEW in asked
     assert any("1 other command waiting" in text for text in asked)
 
@@ -790,11 +776,12 @@ def test_the_row_says_which_command_it_is_above_the_block_in_every_state_that_ow
 
     confirming = CommandViewState()
     confirming.pending = command_view.freeze(CID, ASKED, c.DEFAULT_TIMEOUT_S)
+    confirming.armed_at = 100.0
     confirm = drawn(command(), confirming)
-    assert confirm.index(identity) < confirm.index(command_view.asked_heading("builder"))
+    assert confirm.index(identity) < confirm.index(command_view.COMMAND_FIELD)
 
     running = drawn(command(run=run_of()), CommandViewState())
-    assert running.index(identity) < running.index(command_view.RUNNING_HEADING)
+    assert running.index(identity) < running.index(command_view.COMMAND_FIELD)
 
 
 def test_a_result_its_asker_has_not_read_says_so_in_the_warning_colour() -> None:
@@ -854,7 +841,7 @@ def test_nothing_typed_for_a_command_outlives_its_being_asked(now: Command | Non
     """
     With no act armed, too: the pruning is not behind the check of ``pending``.
     """
-    for pending in (None, command_view.freeze(CID, "ls -la", 120), Refusing(CID)):
+    for pending in (None, command_view.freeze(CID, "ls -la", 120), Stopping(CID)):
         state = _busy(pending)
 
         state.attend({} if now is None else {CID: now}, CID, 1)
@@ -862,7 +849,7 @@ def test_nothing_typed_for_a_command_outlives_its_being_asked(now: Command | Non
         assert state == CommandViewState()
 
 
-@pytest.mark.parametrize("pending", [command_view.freeze(CID, "ls", 600), Refusing(CID)])
+@pytest.mark.parametrize("pending", [command_view.freeze(CID, "ls", 600)])
 def test_an_armed_act_is_dropped_when_the_cursor_leaves_its_row(
     pending: command_view.Pending,
 ) -> None:
@@ -904,7 +891,7 @@ def test_a_frozen_run_is_only_ever_the_one_on_its_own_command() -> None:
 
     assert state.frozen_run(OTHER) is None
     assert state.frozen_run(CID) == FrozenRun(CID, "ls", 600)
-    assert CommandViewState(pending=Refusing(CID)).frozen_run(CID) is None
+    assert CommandViewState(pending=Stopping(CID)).frozen_run(CID) is None
 
 
 # -- a row is closed until the operator opens it ---------------------------------------
@@ -993,18 +980,18 @@ def test_what_a_closed_row_says_is_which_command_how_it_stands_and_how_to_open_i
     lines = command_view.closed_lines(cmd, "builder", among, now=162.0)
 
     assert lines == (
-        *command_view.identity_lines(cmd, "builder", among, now=162.0),
-        Line(command_view.ASKED_STATE),
+        command_view.identity_line(cmd, "builder", among, now=162.0),
         Line(command_view.CLOSED, Tone.DIM),
     )
     first = lines[0].text
     # Age, which of the session's and of the asker's, the asker, and the id's tail.
-    for part in ("asked 1m02s ago", "3rd command asked", "2nd from builder", "0123456789ab"):
+    for part in ("asked 1m02s ago", "3rd command in", "2nd from builder", "0123456789ab"):
         assert part in first
     assert "click its row" in command_view.CLOSED and "press o" in command_view.CLOSED
     said = "\n".join(line.text for line in lines)
     assert not any(word in said for word in ("make install", "REASON-MARK", "EXPECTS-MARK"))
-    # How it stands is the record's: running, and left running in the alarm colour.
+    # How it stands, where that is more than asked: running, and left running
+    # in the alarm colour. DETAIL has no summary line to say so.
     assert (
         "running for" in command_view.closed_lines(command(run=run_of()), "b", None, 162.0)[1].text
     )
@@ -1036,19 +1023,22 @@ def test_a_row_that_is_not_open_draws_no_word_of_the_command_and_nothing_to_pres
             command_view.EDIT,
             command_view.REFUSE,
             command_view.CONFIRM_RUN,
-            command_view.CONFIRM_REFUSE,
+            command_view.CANCEL_EDIT,
             command_view.CANCEL,
             command_view.CONFIRM_STOP,
         }
     )
-    for pending in (None, command_view.freeze(CID, ASKED, 600), Refusing(CID), Stopping(CID)):
-        state = CommandViewState(pending=pending, edits={CID: "rm -rf /"}, editing=CID)
+    for pending in (None, command_view.freeze(CID, ASKED, 600), Stopping(CID)):
+        state = CommandViewState(
+            pending=pending, edits={CID: "rm -rf /"}, editing=CID, armed_at=499.0
+        )
 
         screen = show(monkeypatch, state, cmd, calls, opened=False, press=every, time=500.0)
 
         expected = command_view.closed_lines(cmd, "builder", None, now=162.0)
         assert [said.text for said in screen.said] == [line.text for line in expected]
         assert screen.buttons() == [] and screen.boxes == [] and screen.children == []
+        assert screen.inputs == [] and screen.explained == []
         assert calls.nothing and state.pending is None and not state.is_open(CID)
         assert "make" not in screen.everything() and "rm -rf" not in screen.everything()
 
@@ -1075,7 +1065,7 @@ def test_a_first_press_answers_nothing_until_the_click_that_opened_the_row_is_ov
     """
     Opening is a click on the row, and the row redraws under the mouse with
     its buttons where the click was. The second click of a double-click is
-    not the first press of run.
+    not the first press of run, nor a refusal.
     """
     state = CommandViewState()
     state.open(CID, at=50.0)
@@ -1095,7 +1085,10 @@ def test_a_first_press_answers_nothing_until_the_click_that_opened_the_row_is_ov
         time=50.0 + command_view.ARM_DELAY_S,
         opened=False,
     )
-    assert state.pending is not None and calls.nothing
+    if label == command_view.RUN:
+        assert state.pending is not None and calls.nothing
+    else:
+        assert calls.refused == [(CID, "")] and state.pending is None and not calls.ran
 
 
 def test_cancel_answers_nothing_until_the_click_that_opened_the_row_is_over(
@@ -1113,9 +1106,7 @@ def test_cancel_answers_nothing_until_the_click_that_opened_the_row_is_over(
     assert state.pending == Stopping(CID)
 
 
-@pytest.mark.parametrize(
-    "pending", [command_view.freeze(CID, ASKED, 600), Refusing(CID), Stopping(CID)]
-)
+@pytest.mark.parametrize("pending", [command_view.freeze(CID, ASKED, 600), Stopping(CID)])
 def test_an_armed_act_does_not_outlive_a_frame_the_queue_was_not_drawn_in(
     pending: command_view.Pending,
 ) -> None:
@@ -1162,7 +1153,10 @@ def test_the_row_asks_whether_a_frame_went_by_before_it_draws_an_armed_press(
     """
     The wiring: ``draw_row`` calls ``lapse`` with Dear ImGui's frame count.
     """
-    state = CommandViewState(pending=command_view.freeze(CID, ASKED, 600), opened=CID)
+    # Armed a moment ago, so it is the frame gone by and not the clock that drops it.
+    state = CommandViewState(
+        pending=command_view.freeze(CID, ASKED, 600), opened=CID, armed_at=499.0
+    )
     state.attend({CID: command()}, CID, 10)
     screen = Screen(monkeypatch, press=frozenset({command_view.CONFIRM_RUN}), time=500.0)
     command_view.imgui.get_frame_count.return_value = 12  # type: ignore[attr-defined]
@@ -1182,7 +1176,8 @@ def test_the_row_asks_whether_a_frame_went_by_before_it_draws_an_armed_press(
 @dataclasses.dataclass(frozen=True)
 class Said:
     text: str
-    # Which of the four hands drew it: "pane" is this application's own voice.
+    # Which of the hands drew it: "pane" is this application's own voice, and
+    # "body" its field names with the asker's texts as their values.
     where: str
     how: str = "text"
 
@@ -1191,9 +1186,10 @@ class Screen:
     """
     A recording imgui under ``command_view`` and ``board_pane``.
 
-    ``press`` is the buttons that report a click this frame; ``typed`` is what a
-    text box returns in place of the value it was handed. ``time`` is Dear
-    ImGui's clock. ``released`` is whether the left mouse button came up.
+    ``press`` is the buttons that report a click this frame; ``typed`` is what
+    the edit box returns in place of the value it was handed, and ``reason``
+    what the reason box does. ``escape`` is whether Escape went down. ``time``
+    is Dear ImGui's clock. ``released`` is whether the left mouse button came up.
     """
 
     def __init__(
@@ -1202,13 +1198,17 @@ class Screen:
         *,
         press: frozenset[str] = frozenset(),
         typed: str | None = None,
+        reason: str | None = None,
+        escape: bool = False,
         time: float = 100.0,
         released: bool = True,
     ) -> None:
         self.said: list[Said] = []
         self.clipboard: list[str] = []
         self.boxes: list[tuple[str, str]] = []
+        self.inputs: list[tuple[str, str]] = []
         self.children: list[str] = []
+        self.explained: list[tuple[str, ...]] = []
         hand = ["pane"]
 
         def through(name: str, real):  # type: ignore[no-untyped-def]
@@ -1240,6 +1240,14 @@ class Screen:
             self.boxes.append((label, value))
             return False, (value if typed is None else typed)
 
+        def line(label: str, hint: str, value: str):  # type: ignore[no-untyped-def]
+            self.inputs.append((label, value))
+            return False, (value if reason is None else reason)
+
+        def explain(key: str, title: str, paragraphs: typing.Sequence[str]) -> bool:
+            self.explained.append(tuple(paragraphs))
+            return False
+
         fake = MagicMock()
         for name in ("ImVec2", "InputTextFlags_", "ChildFlags_", "MouseButton_", "Key"):
             setattr(fake, name, getattr(real_imgui, name))
@@ -1250,9 +1258,11 @@ class Screen:
         fake.small_button.side_effect = button
         fake.radio_button.side_effect = button
         fake.begin_child.side_effect = child
-        fake.is_key_pressed.return_value = False
+        fake.input_text_with_hint.side_effect = line
+        fake.is_key_pressed.return_value = escape
         fake.is_mouse_released.return_value = released
         fake.get_time.return_value = time
+        fake.get_frame_count.return_value = 1
         fake.get_font_size.return_value = 13.0
         fake.calc_text_size.side_effect = lambda text: real_imgui.ImVec2(7.0 * len(text), 13.0)
         fake.get_content_region_avail.return_value = real_imgui.ImVec2(700.0, 0.0)
@@ -1263,9 +1273,10 @@ class Screen:
         monkeypatch.setattr(board_pane, "imgui", fake)
         monkeypatch.setattr(board_pane, "author", through("author", REAL_AUTHOR))
         monkeypatch.setattr(command_view, "command_block", through("block", REAL_BLOCK))
-        monkeypatch.setattr(command_view, "segments_block", through("segments", REAL_SEGMENTS))
+        monkeypatch.setattr(command_view, "_body", through("body", REAL_BODY))
         monkeypatch.setattr(command_view, "process_output", through("process", REAL_OUTPUT))
         monkeypatch.setattr(command_view, "multiline_input", box)
+        monkeypatch.setattr(command_view, "help_mark", explain)
 
     def by(self, where: str) -> list[str]:
         return [line.text for line in self.said if line.where == where and line.how == "text"]
@@ -1290,6 +1301,7 @@ def show(
     focused: str | None = CID,
     attend: bool = True,
     opened: bool = True,
+    presses: bool = True,
     **screen: typing.Any,
 ) -> Screen:
     """
@@ -1303,7 +1315,14 @@ def show(
     if attend:
         state.attend({cmd.id: cmd}, focused, 1)
     command_view.draw_row(
-        state, cmd, role="builder", where=where, actions=calls.actions, now=162.0, log_path=None
+        state,
+        cmd,
+        role="builder",
+        where=where,
+        actions=calls.actions,
+        now=162.0,
+        log_path=None,
+        presses=presses,
     )
     return shown
 
@@ -1319,43 +1338,45 @@ def _block_text(screen: Screen, where: str = "block") -> list[str]:
     return [text for text in screen.by(where) if not gutters.fullmatch(text)]
 
 
-def test_the_asked_row_reads_top_to_bottom_standing_command_breakdown_asker_presses(
+RADIOS = ["2 minutes", "10 minutes", "30 minutes", "2 hours"]
+
+
+def test_the_asked_row_reads_as_a_bash_row_identity_warnings_body_presses(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     screen = show(monkeypatch, CommandViewState(), command(), Calls())
 
     order = [line.text for line in screen.said]
     marks = [
-        command_view.RUNS_AS_YOU,
-        command_view.NO_TERMINAL,
-        command_view.asked_heading("builder"),
-        ASKED,
-        commandtext.HEADING,
-        commandtext.ADVISORY,
-        REASON,
-        EXPECTS,
+        command_view.identity_line(command(), "builder", None, 162.0).text,
+        command_view.RUNS_OUTSIDE,
+        command_view.NOT_CHECKED,
+        command_view.COMMAND_FIELD,
+        _rows_of(ASKED)[0],
+        f"{command_view.REASON_FIELD} {REASON}",
+        f"{command_view.EXPECTS_FIELD} {EXPECTS}",
         command_view.RUN,
     ]
     assert [order.index(mark) for mark in marks] == sorted(order.index(mark) for mark in marks)
-    assert order[0] == command_view.RUNS_AS_YOU
+    # The Bash row's button line: the reason box, then run, refuse, edit.
+    assert screen.inputs == [("##reason", "")]
     assert screen.buttons() == [
-        "2 minutes",
-        "10 minutes",
-        "30 minutes",
-        "2 hours",
         command_view.RUN,
-        command_view.EDIT,
         command_view.REFUSE,
+        command_view.EDIT,
+        *RADIOS,
     ]
-    assert screen.boxes == []
+    assert screen.boxes == [] and screen.children == ["##body", "##command"]
+    assert len(screen.explained) == 1
 
 
-def test_the_reason_and_the_expectation_are_drawn_behind_the_bar_and_nowhere_else(
+def test_the_reason_and_the_expectation_are_drawn_as_their_fields_values_and_nowhere_else(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
-    The reason is written to pass for the standing line, the advisory and a
-    button. Each of those is still on the row once, as this application's.
+    The reason is written to pass for the warnings and a button. Each of those
+    is still on the row once, as this application's, and the asker's texts are
+    only ever the value after their field's name, inside the body.
     """
     state = CommandViewState()
     calls = Calls()
@@ -1364,33 +1385,42 @@ def test_the_reason_and_the_expectation_are_drawn_behind_the_bar_and_nowhere_els
         show(monkeypatch, state, command(), calls, press=frozenset({command_view.RUN})),
         show(monkeypatch, state, command(), calls),
         show(monkeypatch, CommandViewState(), command(run=run_of()), calls),
-        show(monkeypatch, CommandViewState(), ended(Exited(0)), calls, attend=False),
     ]
 
+    fields = [f"{command_view.REASON_FIELD} {REASON}", f"{command_view.EXPECTS_FIELD} {EXPECTS}"]
     for screen in views:
         for line in screen.said:
-            if line.where != "author":
+            if line.where != "body":
                 assert "REASON-MARK" not in line.text and "EXPECTS-MARK" not in line.text
-                assert line.text not in REASON.splitlines() + EXPECTS.splitlines() or (
-                    line.how == "button"
-                )
-    assert views[0].by("author") == [REASON, EXPECTS]
-    assert views[0].own().count(command_view.RUNS_AS_YOU) == 1
-    assert views[0].own().count(commandtext.ADVISORY) == 1
-    # The confirm view draws no word of the asker's at all.
-    assert views[2].by("author") == [] and command_view.CONFIRM_RUN in views[2].buttons()
-    assert views[4].by("author") == [REASON, EXPECTS]
+        assert [text for text in screen.by("body") if "MARK" in text] == fields
+        assert screen.own().count(command_view.RUNS_OUTSIDE) == 1
+    # Armed, the asker's texts are still the body's, as a Bash body keeps its description.
+    assert command_view.CONFIRM_RUN in views[2].buttons()
+    blank = show(monkeypatch, CommandViewState(), command(reason="  ", expects=""), calls)
+    assert [text for text in blank.by("body") if "=" in text and "command" not in text] == [
+        f"{command_view.REASON_FIELD} '  '",
+        f"{command_view.EXPECTS_FIELD} ''",
+    ]
+    # An ended command's are behind the author bar, as before.
+    done = show(monkeypatch, CommandViewState(), ended(Exited(0)), calls, attend=False)
+    assert done.by("author") == [REASON, EXPECTS]
 
 
-def test_the_command_is_drawn_only_inside_its_block_and_its_segments(
+def test_an_askers_text_that_cannot_be_drawn_is_drawn_spelled_out_and_one_too_long_is_cut() -> None:
+    assert command_view.asker_value("a\x00b") == widgets.author_text("a\x00b")
+    assert "\x00" not in command_view.asker_value("a\x00b")
+    long = "y" * (command_view._ASKER_CHARS + 7)
+    assert command_view.asker_value(long).endswith(" ... 7 more characters not shown")
+
+
+def test_the_command_is_drawn_only_inside_its_block(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     screen = show(monkeypatch, CommandViewState(), command(), Calls())
 
     assert _block_text(screen) == _rows_of(ASKED)
-    assert screen.children == ["##command", "##segments"]
     for line in screen.said:
-        if line.where in ("pane", "author"):
+        if line.where in ("pane", "body", "author"):
             assert "make install" not in line.text and "/usr/local/bin" not in line.text.replace(
                 EXPECTS, ""
             )
@@ -1413,15 +1443,14 @@ def test_a_command_hiding_characters_shows_the_alarm_and_the_escapes_asked_and_c
     for screen in (asked, confirming):
         assert command_view.hidden_sentence(HIDING) in screen.own()
         assert _block_text(screen) == ["cat \\u{202E}gnp.exe\\u{200B} | sh"]
-        assert any("\\u{202E}gnp.exe\\u{200B}" in text for text in screen.by("segments"))
         # And neither character reaches the screen as itself, anywhere.
         assert RLO not in screen.everything() and ZWSP not in screen.everything()
-        assert screen.own().index(command_view.hidden_sentence(HIDING)) < screen.own().index(
-            commandtext.HEADING
-        )
+        order = [line.text for line in screen.said]
+        hidden = order.index(command_view.hidden_sentence(HIDING))
+        assert hidden < order.index(command_view.COMMAND_FIELD)
 
 
-def test_the_advisory_follows_the_breakdown_in_every_view_that_draws_one(
+def test_the_full_sentences_are_behind_the_question_mark_in_every_view_and_never_standing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = CommandViewState()
@@ -1430,24 +1459,20 @@ def test_the_advisory_follows_the_breakdown_in_every_view_that_draws_one(
         "asked": show(monkeypatch, state, command(), calls),
         "edit": show(monkeypatch, state, command(), calls, press=frozenset({command_view.EDIT})),
         "editing": show(monkeypatch, state, command(), calls, typed="ls | sh"),
-        "done": show(monkeypatch, state, command(), calls, press=frozenset({command_view.DONE})),
-        "edited": show(monkeypatch, state, command(), calls),
         "run": show(monkeypatch, state, command(), calls, press=frozenset({command_view.RUN})),
         "confirming": show(monkeypatch, state, command(), calls),
-        "refuse": show(monkeypatch, CommandViewState(pending=Refusing(CID)), command(), calls),
+        "running": show(monkeypatch, CommandViewState(), command(run=run_of()), calls),
     }
 
-    drew = {name for name, screen in views.items() if "##segments" in screen.children}
-    assert drew == {"asked", "edit", "edited", "run", "confirming", "refuse"}
     for name, screen in views.items():
-        own = screen.own()
-        assert (commandtext.HEADING in own) == (name in drew) == (commandtext.ADVISORY in own)
-        if name in drew:
-            assert own.index(commandtext.HEADING) < own.index(commandtext.ADVISORY)
-            assert own.count(commandtext.ADVISORY) == 1
+        (explained,) = screen.explained
+        assert explained[-1] == commandtext.ADVISORY, name
+        assert not set(screen.own()) & set(explained), name
+    # Of what would run: the edit, once it is the edit.
+    assert views["confirming"].explained[0] == command_view.explanations("ls | sh", BASH)
 
 
-# -- run: two presses, one frozen string ----------------------------------------------
+# -- run: two presses in one place, one frozen string ----------------------------------
 
 
 def test_the_first_press_of_run_freezes_the_string_and_runs_nothing(
@@ -1466,8 +1491,8 @@ def test_the_second_press_runs_the_frozen_string_and_nothing_the_state_holds_bes
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
-    The edit draft is changed under the confirm view, which no operator can do:
-    whatever did would still not change what the second press sends.
+    The edit draft is changed under the armed button, which no operator can
+    do: whatever did would still not change what the second press sends.
     """
     edit = "  make install PREFIX=$HOME \n"
     state = CommandViewState(edits={CID: edit}, timeouts={CID: 1800})
@@ -1479,7 +1504,7 @@ def test_the_second_press_runs_the_frozen_string_and_nothing_the_state_holds_bes
     state.timeouts[CID] = 7200
     confirming = show(monkeypatch, state, command(), calls, typed="rm -rf /", time=101.0)
     assert calls.nothing
-    assert _block_text(confirming) == [*_rows_of(ASKED), *_rows_of(edit)]
+    assert _block_text(confirming) == [*_rows_of(edit), *_rows_of(ASKED)]
     assert confirming.boxes == []
 
     show(
@@ -1497,16 +1522,57 @@ def test_the_second_press_runs_the_frozen_string_and_nothing_the_state_holds_bes
     assert state.pending is None
 
 
-def test_the_confirm_view_draws_no_box_and_no_way_to_change_what_is_frozen(
+def test_armed_the_run_button_is_its_second_press_and_nothing_can_change_what_is_frozen(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = CommandViewState(pending=command_view.freeze(CID, ASKED, 600))
+    """
+    The Bash row's shape: the same place as run, its label changed, and no
+    confirm view or paragraph. The timeout shown is the frozen one and a click
+    on another changes nothing.
+    """
+    state = CommandViewState(pending=command_view.freeze(CID, ASKED, 600), armed_at=99.0)
 
-    screen = show(monkeypatch, state, command(), Calls())
+    screen = show(monkeypatch, state, command(), Calls(), press=frozenset({"2 hours"}))
 
     assert screen.boxes == []
-    assert screen.buttons() == [command_view.BACK, command_view.CONFIRM_RUN]
-    assert command_view.confirm_run_line(FrozenRun(CID, ASKED, 600), False) in screen.own()
+    assert screen.buttons() == [
+        command_view.CONFIRM_RUN,
+        command_view.REFUSE,
+        command_view.EDIT,
+        *RADIOS,
+    ]
+    assert command_view.RUN not in screen.buttons()
+    assert state.pending == FrozenRun(CID, ASKED, 600) and CID not in state.timeouts
+
+
+def test_an_armed_run_or_cancel_lasts_a_few_seconds_and_is_then_the_first_press_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = Calls()
+    for cmd, pending, first, second in (
+        (
+            command(),
+            command_view.freeze(CID, ASKED, 600),
+            command_view.RUN,
+            command_view.CONFIRM_RUN,
+        ),
+        (command(run=run_of()), Stopping(CID), command_view.CANCEL, command_view.CONFIRM_STOP),
+    ):
+        state = CommandViewState(pending=pending, armed_at=100.0)
+        held = show(monkeypatch, state, cmd, calls, time=100.0 + command_view.CONFIRM_FOR_S)
+        assert state.pending == pending and second in held.buttons()
+
+        press = frozenset({second})
+        late = show(
+            monkeypatch, state, cmd, calls, press=press, time=100.1 + command_view.CONFIRM_FOR_S
+        )
+        assert state.pending is None and calls.nothing
+        assert first in late.buttons() and second not in late.buttons()
+    # A release keeps its own confirmation, which has a back button.
+    releasing = CommandViewState(pending=command_view.Releasing(CID), armed_at=0.0)
+    releasing.expire(1000.0)
+    assert releasing.pending == command_view.Releasing(CID)
+    assert 2.0 <= command_view.CONFIRM_FOR_S <= 10.0
 
 
 def test_the_two_clicks_of_a_double_click_are_not_the_two_presses(
@@ -1524,9 +1590,7 @@ def test_the_two_clicks_of_a_double_click_are_not_the_two_presses(
     assert calls.ran == [(CID, ASKED, c.DEFAULT_TIMEOUT_S)]
 
 
-@pytest.mark.parametrize(
-    "label", [command_view.RUN, command_view.CONFIRM_RUN, command_view.CONFIRM_REFUSE]
-)
+@pytest.mark.parametrize("label", [command_view.RUN, command_view.CONFIRM_RUN, command_view.REFUSE])
 def test_a_button_activated_by_a_key_is_not_a_press(
     monkeypatch: pytest.MonkeyPatch, label: str
 ) -> None:
@@ -1534,12 +1598,8 @@ def test_a_button_activated_by_a_key_is_not_a_press(
     Dear ImGui reports a button activated by Space or Enter as pressed. The
     mouse was not released on that frame, and that is what the row goes by.
     """
-    armed = {
-        command_view.RUN: None,
-        command_view.CONFIRM_RUN: command_view.freeze(CID, ASKED, 600),
-        command_view.CONFIRM_REFUSE: Refusing(CID),
-    }[label]
-    state = CommandViewState(pending=armed)
+    armed = command_view.freeze(CID, ASKED, 600) if label == command_view.CONFIRM_RUN else None
+    state = CommandViewState(pending=armed, armed_at=99.0)
     calls = Calls()
 
     show(monkeypatch, state, command(), calls, press=frozenset({label}), released=False)
@@ -1547,17 +1607,19 @@ def test_a_button_activated_by_a_key_is_not_a_press(
     assert calls.nothing and state.pending == armed
 
 
-def test_back_runs_nothing_and_returns_to_the_row_as_it_was(
+def test_edit_drops_an_armed_run_and_opens_the_box_on_the_string_as_it_was(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = CommandViewState(edits={CID: "ls"}, pending=command_view.freeze(CID, "ls", 600))
+    state = CommandViewState(
+        edits={CID: "ls"}, pending=command_view.freeze(CID, "ls", 600), armed_at=99.0
+    )
     calls = Calls()
 
-    show(monkeypatch, state, command(), calls, press=frozenset({command_view.BACK}))
+    show(monkeypatch, state, command(), calls, press=frozenset({command_view.EDIT}))
     after = show(monkeypatch, state, command(), calls)
 
     assert calls.nothing and state.pending is None and state.edits == {CID: "ls"}
-    assert command_view.RUN in after.buttons()
+    assert after.boxes == [("##edit", "ls")] and command_view.RUN in after.buttons()
 
 
 def test_the_timeout_picked_at_the_row_is_the_one_frozen(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1607,7 +1669,7 @@ def test_a_command_that_stops_being_asked_between_the_presses_is_not_run(
     assert isinstance(state.pending, FrozenRun)
 
     confirm = frozenset({command_view.CONFIRM_RUN, command_view.RUN})
-    screen = show(monkeypatch, state, now, calls, press=confirm, time=200.0)
+    screen = show(monkeypatch, state, now, calls, press=confirm, time=101.0)
 
     assert calls.nothing
     assert state.pending is None
@@ -1621,7 +1683,7 @@ def test_a_stale_frozen_run_is_not_sent_by_a_draw_nobody_attended_first(
     ``attend`` is the caller's to call. A row drawn without it, for a command
     withdrawn since the first press, still offers nothing to press.
     """
-    state = CommandViewState(pending=command_view.freeze(CID, ASKED, 600))
+    state = CommandViewState(pending=command_view.freeze(CID, ASKED, 600), armed_at=199.0)
     calls = Calls()
     press = frozenset({command_view.CONFIRM_RUN, command_view.RUN, command_view.CONFIRM_STOP})
 
@@ -1637,7 +1699,7 @@ def test_a_stale_frozen_run_is_not_sent_by_a_draw_nobody_attended_first(
 # -- the edit -------------------------------------------------------------------------
 
 
-def test_edit_opens_a_box_holding_the_asked_string_and_says_the_box_is_raw(
+def test_edit_opens_a_box_holding_the_asked_string_in_the_bodys_place_and_says_it_is_raw(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     state = CommandViewState()
@@ -1648,13 +1710,33 @@ def test_edit_opens_a_box_holding_the_asked_string_and_says_the_box_is_raw(
     editing = show(monkeypatch, state, cmd, calls)
 
     assert editing.boxes == [("##edit", HIDING)]
-    assert command_view.RAW_NOTE in editing.own()
-    assert editing.buttons() == [command_view.DONE, command_view.DISCARD_EDIT]
+    assert command_view.EDITING in editing.own()
+    assert editing.buttons() == [
+        command_view.RUN,
+        command_view.REFUSE,
+        command_view.CANCEL_EDIT,
+        *RADIOS,
+    ]
     assert editing.children == []
     assert state.candidate(cmd) == HIDING and calls.nothing
 
 
-def test_an_edited_command_is_drawn_under_its_marker_with_what_was_asked_dimmed_above(
+def test_run_from_the_box_freezes_what_it_holds_and_shows_that_escaped_in_its_place(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = CommandViewState(edits={CID: ASKED}, editing=CID)
+    calls = Calls()
+    edit = f"ls{RLO}"
+
+    show(monkeypatch, state, command(), calls, typed=edit, press=frozenset({command_view.RUN}))
+    assert state.pending == FrozenRun(CID, edit, c.DEFAULT_TIMEOUT_S) and state.editing is None
+
+    armed = show(monkeypatch, state, command(), calls, typed="rm -rf ~")
+    assert armed.boxes == [] and _block_text(armed) == ["ls\\u{202E}", *_rows_of(ASKED)]
+    assert command_view.EDITED in armed.own() and calls.nothing
+
+
+def test_an_edited_command_is_drawn_as_your_edit_with_what_was_asked_dimmed_under_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     edit = "make install PREFIX=$HOME/.local"
@@ -1662,14 +1744,15 @@ def test_an_edited_command_is_drawn_under_its_marker_with_what_was_asked_dimmed_
 
     screen = show(monkeypatch, state, command(), Calls())
 
-    own = screen.own()
-    assert own.index(command_view.edited_heading("builder")) < own.index(command_view.EDITED_BY_YOU)
-    assert command_view.asked_heading("builder") not in own
-    assert screen.children == ["##asked", "##command", "##segments"]
-    assert _block_text(screen) == [*_rows_of(ASKED), *_rows_of(edit)]
-    # The breakdown is of the edit, which is what would run.
-    assert any("PREFIX" in text for text in screen.by("segments"))
-    assert not any("sudo" in text for text in screen.by("segments"))
+    body = screen.by("body")
+    assert body.index(command_view.EDITED_FIELD) < body.index(command_view.asked_field("builder"))
+    assert command_view.COMMAND_FIELD not in body
+    assert command_view.EDITED in screen.own()
+    assert screen.children == ["##body", "##command", "##asked"]
+    assert _block_text(screen) == [*_rows_of(edit), *_rows_of(ASKED)]
+    # The warnings are of the edit, which is what would run.
+    assert any(text.startswith("Uses ") and "expansion" in text for text in screen.own())
+    assert not any("sudo" in text for text in screen.own())
 
 
 def test_an_edit_that_changes_nothing_is_not_called_an_edit(
@@ -1677,8 +1760,9 @@ def test_an_edit_that_changes_nothing_is_not_called_an_edit(
 ) -> None:
     screen = show(monkeypatch, CommandViewState(edits={CID: ASKED}), command(), Calls())
 
-    assert command_view.EDITED_BY_YOU not in screen.own()
-    assert screen.children == ["##command", "##segments"]
+    assert command_view.EDITED_FIELD not in screen.by("body")
+    assert command_view.EDITED not in screen.own()
+    assert screen.children == ["##body", "##command"]
 
 
 @pytest.mark.parametrize("edit", ["-rf /", "", "+x", "x" * (c.MAX_COMMAND_CHARS + 1)])
@@ -1696,11 +1780,11 @@ def test_an_edit_the_record_would_refuse_is_not_frozen_by_run_and_the_row_says_w
     assert command_view.refusal_of_edit(edit)
 
 
-def test_discarding_an_edit_returns_to_what_was_asked(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cancelling_an_edit_returns_to_what_was_asked(monkeypatch: pytest.MonkeyPatch) -> None:
     state = CommandViewState(edits={CID: "ls"}, editing=CID)
     cmd = command()
 
-    show(monkeypatch, state, cmd, Calls(), press=frozenset({command_view.DISCARD_EDIT}))
+    show(monkeypatch, state, cmd, Calls(), press=frozenset({command_view.CANCEL_EDIT}))
 
     assert state.edits == {} and state.editing is None and state.candidate(cmd) == ASKED
 
@@ -1708,36 +1792,42 @@ def test_discarding_an_edit_returns_to_what_was_asked(monkeypatch: pytest.Monkey
 # -- refuse ---------------------------------------------------------------------------
 
 
-def test_refuse_is_two_presses_and_sends_the_reason_as_typed(
+def test_refuse_is_one_press_and_sends_the_reason_as_typed_in_the_rows_box(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """As a Bash row's reject: one press, with what the reason box holds."""
     reason = "  not until the branch is rebased \n"
     state = CommandViewState()
     calls = Calls()
 
-    show(monkeypatch, state, command(), calls, press=frozenset({command_view.REFUSE}), time=10.0)
-    assert state.pending == Refusing(CID) and calls.nothing
-    box = show(monkeypatch, state, command(), calls, typed=reason, time=10.1)
-    assert box.boxes == [("##reason", "")] and calls.nothing
-    assert box.buttons() == [command_view.BACK, command_view.CONFIRM_REFUSE]
+    typing_it = show(monkeypatch, state, command(), calls, reason=reason, time=10.0)
+    assert typing_it.inputs == [("##reason", "")] and calls.nothing
+    assert state.reasons == {CID: reason}
 
-    confirm = frozenset({command_view.CONFIRM_REFUSE})
-    show(monkeypatch, state, command(), calls, press=confirm, time=11.0)
+    show(monkeypatch, state, command(), calls, press=frozenset({command_view.REFUSE}), time=11.0)
 
     assert calls.refused == [(CID, reason)] and not calls.ran
     assert state.pending is None
+
+
+def test_escape_in_the_reason_box_is_not_taken_for_what_was_typed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = CommandViewState(reasons={CID: "typed"})
+
+    show(monkeypatch, state, command(), Calls(), reason="", escape=True)
+
+    assert state.reasons == {CID: "typed"}
 
 
 def test_a_reason_longer_than_an_askers_may_be_is_not_sent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     reason = "n" * (c.MAX_REASON_CHARS + 5)
-    state = CommandViewState(reasons={CID: reason}, pending=Refusing(CID))
+    state = CommandViewState(reasons={CID: reason})
     calls = Calls()
 
-    screen = show(
-        monkeypatch, state, command(), calls, press=frozenset({command_view.CONFIRM_REFUSE})
-    )
+    screen = show(monkeypatch, state, command(), calls, press=frozenset({command_view.REFUSE}))
 
     assert calls.nothing
     assert command_view.reason_too_long(reason) in screen.own() and "5 characters over" in (
@@ -1748,7 +1838,7 @@ def test_a_reason_longer_than_an_askers_may_be_is_not_sent(
 # -- running, and ended ---------------------------------------------------------------
 
 
-def test_a_running_command_shows_what_is_running_and_cancel_is_two_presses(
+def test_a_running_command_shows_what_is_running_and_cancel_is_two_presses_in_one_place(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     edit = "make install PREFIX=/opt"
@@ -1757,15 +1847,20 @@ def test_a_running_command_shows_what_is_running_and_cancel_is_two_presses(
     calls = Calls()
 
     first = show(monkeypatch, state, running, calls, press=frozenset({command_view.CANCEL}))
-    assert _block_text(first) == [*_rows_of(ASKED), *_rows_of(edit)]
-    assert command_view.edited_by_you(Stage.RUNNING) in first.own()
-    assert command_view.edited_heading("builder", Stage.RUNNING) in first.own()
-    assert command_view.EDITED_BY_YOU not in first.own()
+    assert _block_text(first) == [*_rows_of(edit), *_rows_of(ASKED)]
+    assert command_view.EDITED_FIELD in first.by("body")
+    assert command_view.asked_field("builder", running=True) in first.by("body")
     assert "running for 1m02s - cancel kills it" in first.own()
+    assert any(text.startswith("Running in /work/tree") for text in first.own())
     assert state.pending == Stopping(CID) and calls.nothing
+    assert first.inputs == [] and first.boxes == []
 
+    armed = show(monkeypatch, state, running, calls, time=100.3)
+    assert command_view.CONFIRM_STOP in armed.buttons() and command_view.CANCEL not in (
+        armed.buttons()
+    )
     kill = frozenset({command_view.CONFIRM_STOP})
-    show(monkeypatch, state, running, calls, press=kill, time=200.0)
+    show(monkeypatch, state, running, calls, press=kill, time=101.0)
 
     assert calls.stopped == [CID] and not calls.ran and state.pending is None
 
@@ -1778,10 +1873,35 @@ def test_a_command_already_asked_to_stop_offers_no_second_cancel(
     press = frozenset({command_view.CANCEL, command_view.CONFIRM_STOP})
 
     screen = show(
-        monkeypatch, CommandViewState(pending=Stopping(CID)), stopping, calls, press=press
+        monkeypatch,
+        CommandViewState(pending=Stopping(CID), armed_at=99.0),
+        stopping,
+        calls,
+        press=press,
     )
 
     assert screen.buttons() == [] and calls.nothing
+
+
+@pytest.mark.parametrize("cmd", [command(), command(run=run_of())], ids=["asked", "running"])
+def test_details_copy_is_the_body_with_no_press_and_no_box(
+    monkeypatch: pytest.MonkeyPatch, cmd: Command
+) -> None:
+    """
+    As DETAIL draws a Bash approval: the warnings and the body, and nothing
+    to press or type in. An edit in progress is drawn escaped there.
+    """
+    every = frozenset({command_view.RUN, command_view.REFUSE, command_view.CANCEL})
+    state = CommandViewState(edits={CID: "ls -la"}, editing=CID)
+    calls = Calls()
+
+    screen = show(monkeypatch, state, cmd, calls, presses=False, press=every)
+
+    assert screen.buttons() == [] and screen.inputs == [] and screen.boxes == []
+    assert command_view.RUNS_OUTSIDE in screen.own() and screen.children[0] == "##body"
+    assert calls.nothing and state.pending is None
+    if cmd.run is None:
+        assert _block_text(screen) == [*_rows_of("ls -la"), *_rows_of(ASKED)]
 
 
 # Written to pass for this application's lines and the asker's bar, with a
@@ -1872,7 +1992,7 @@ def test_a_role_name_with_a_line_break_cannot_end_a_heading(
         )
 
     assert not any("\n" in text for text in screen.own())
-    assert screen.own().count(command_view.RUNS_AS_YOU) == 1
+    assert screen.own().count(command_view.RUNS_OUTSIDE) == 1
 
 
 # -- Dear ImGui itself ----------------------------------------------------------------
@@ -1923,6 +2043,11 @@ class Frames:
                 pressed = imgui.radio_button(label, active)
                 note(label)
                 return bool(pressed)
+
+            def input_text_with_hint(self, label: str, hint: str, value: str) -> object:
+                result = imgui.input_text_with_hint(label, hint, value)
+                note(label)
+                return result
 
         def box(label: str, value: str, size: object, *, wrap: bool, flags: int = 0):  # type: ignore[no-untyped-def]
             result = widgets.multiline_input(label, value, size, wrap=wrap, flags=flags)  # type: ignore[arg-type]
@@ -1993,18 +2118,17 @@ def frames(monkeypatch: pytest.MonkeyPatch) -> Iterator[Frames]:
 def test_in_dear_imgui_what_is_typed_frozen_and_confirmed_is_what_runs(frames: Frames) -> None:
     frames.click(command_view.EDIT)
     frames.click("##edit")
-    frames.type(" EDITED\u202e ")
-    frames.click(command_view.DONE)
+    frames.type(" EDITED‮ ")
     edit = frames.state.edits[CID]
-    assert sorted(edit) == sorted(ASKED + " EDITED\u202e ") and edit != ASKED
+    assert sorted(edit) == sorted(ASKED + " EDITED‮ ") and edit != ASKED
 
     frames.click(command_view.RUN)
     frozen = frames.state.pending
     assert frozen == FrozenRun(CID, edit, c.DEFAULT_TIMEOUT_S)
     assert frames.calls.nothing
-    # The confirm view: the frozen string in the block, what was asked above it,
-    # no text box, and the hidden character named.
-    assert frames.blocks == [ASKED, edit] and frames.boxes == []
+    # Armed: the frozen string in the block, what was asked under it, no text
+    # box, and the hidden character named.
+    assert frames.blocks == [edit, ASKED] and frames.boxes == []
     assert command_view.hidden_sentence(edit)
 
     frames.wait()
@@ -2015,11 +2139,10 @@ def test_in_dear_imgui_what_is_typed_frozen_and_confirmed_is_what_runs(frames: F
     assert frames.state.pending is None
 
 
-def test_in_dear_imgui_typing_under_the_confirm_view_changes_nothing(frames: Frames) -> None:
+def test_in_dear_imgui_typing_while_run_is_armed_changes_nothing(frames: Frames) -> None:
     frames.click(command_view.EDIT)
     frames.click("##edit")
     frames.type("; true")
-    frames.click(command_view.DONE)
     edit = frames.state.edits[CID]
     frames.click(command_view.RUN)
 
@@ -2042,9 +2165,10 @@ def test_in_dear_imgui_an_untouched_edit_box_hands_back_the_asked_string(
         frames.click(command_view.EDIT)
         frames.click("##edit")
         frames.frame(5)
-        frames.click(command_view.DONE)
+        frames.click(command_view.RUN)
 
         assert frames.state.edits[CID] == asked
+        assert frames.state.pending == FrozenRun(CID, asked, c.DEFAULT_TIMEOUT_S)
         assert frames.blocks == [asked]
 
 
@@ -2069,12 +2193,17 @@ def _every_key(frames: Frames) -> None:
         frames.type("a")
 
 
+def _but_the_reason(state: CommandViewState) -> CommandViewState:
+    """The state with what the reason box holds left out: typing there is not an act."""
+    return dataclasses.replace(state, reasons={})
+
+
 def test_in_dear_imgui_no_key_presses_run_with_the_row_focused(frames: Frames) -> None:
-    untouched = dataclasses.replace(frames.state)
+    untouched = _but_the_reason(frames.state)
 
     _every_key(frames)
 
-    assert frames.state == untouched and frames.state.pending is None
+    assert _but_the_reason(frames.state) == untouched and frames.state.pending is None
     assert frames.calls.nothing
 
 
@@ -2100,6 +2229,28 @@ def test_in_dear_imgui_a_second_click_made_at_once_does_not_run(frames: Frames) 
     frames.wait()
     frames.click(command_view.CONFIRM_RUN)
     assert frames.calls.ran == [(CID, ASKED, c.DEFAULT_TIMEOUT_S)]
+
+
+def test_in_dear_imgui_the_second_press_is_in_the_first_ones_place(frames: Frames) -> None:
+    """
+    No view opens between the presses: the button the operator pressed is the
+    one that now asks to be pressed again, where it was.
+    """
+    where = frames.at[command_view.RUN]
+    frames.click(command_view.RUN)
+    frames.wait()
+
+    x, y = frames.at[command_view.CONFIRM_RUN]
+    assert abs(y - where[1]) < 1.0 and abs(x - where[0]) < 20.0
+
+
+def test_in_dear_imgui_an_armed_run_left_alone_lapses(frames: Frames) -> None:
+    frames.click(command_view.RUN)
+    frames.frame(int(command_view.CONFIRM_FOR_S * 60) + 12)
+
+    assert frames.state.pending is None
+    assert command_view.RUN in frames.at and command_view.CONFIRM_RUN not in frames.at
+    assert frames.calls.nothing
 
 
 def test_in_dear_imgui_a_withdrawal_between_the_presses_runs_nothing(frames: Frames) -> None:
@@ -2137,11 +2288,9 @@ def test_in_dear_imgui_the_cursor_leaving_the_row_disarms_it(frames: Frames) -> 
 
 
 def test_in_dear_imgui_refusing_sends_what_the_box_held(frames: Frames) -> None:
-    frames.click(command_view.REFUSE)
     frames.click("##reason")
     frames.type("not on main ")
-    frames.wait()
-    frames.click(command_view.CONFIRM_REFUSE)
+    frames.click(command_view.REFUSE)
 
     assert frames.calls.refused == [(CID, "not on main ")]
     assert not frames.calls.ran
