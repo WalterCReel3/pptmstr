@@ -998,7 +998,7 @@ def keys_hint(current: Obligation | None) -> str:
 
 # Over a command's row. One key opens it and none does more: no key runs,
 # refuses, edits or cancels a command. Each of those is a button that answers a
-# mouse release and nothing else, and run, refuse and cancel take two.
+# mouse release and nothing else, and run and cancel take two.
 COMMAND_KEYS = (
     "j/k move · o or a click on the row opens it · no key acts on a command: its"
     " buttons take the mouse, and run and cancel take two presses"
