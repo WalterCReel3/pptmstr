@@ -238,10 +238,9 @@ resolution, limited and required environments, minimum libc version, pre-release
 
 **Origin:** the user, 2026-10-15: *"imtypeset 0.4.3 is published. Working on
 publishing imscribe 0.2.0"* and *"prepare for imtypeset 0.4.3 with imscribe
-0.2.0"*. **Status: trialled, not made.** The pins move when imscribe 0.2.0 is
-on PyPI: pptmstr cannot require imtypeset 0.4.3 beside imscribe 0.2.0b1, whose
-own requirement is `imtypeset==0.4.1.192900`. By pptmstr's builder (task
-PREP-020). What is marked *run* was run by it, on Linux x86-64, CPython 3.11.2,
+0.2.0"*. **Status: made on 2026-10-15** (task MOVE-020; §8.6), after the
+user's *"imscribe 0.2.0 landed."* Sections 8.1 to 8.5 are the trial and the
+plan as PREP-020's builder wrote them before the release, by that builder. What is marked *run* was run by it, on Linux x86-64, CPython 3.11.2,
 Xvfb and llvmpipe; the rest is from reading imscribe's and imtypeset's
 repositories at the commits named, and says so.
 
@@ -372,34 +371,34 @@ itself.
 
 When `pip index versions imscribe` (or PyPI's JSON) shows 0.2.0:
 
-- [ ] Read 0.2.0's Requires-Dist from the published wheel; it should be §8.1's.
-- [ ] `pyproject.toml`: `imscribe==0.2.0`, `imtypeset==0.4.3.192900` under the
+- [x] Read 0.2.0's Requires-Dist from the published wheel; it should be §8.1's.
+- [x] `pyproject.toml`: `imscribe==0.2.0`, `imtypeset==0.4.3.192900` under the
       same marker; the comments that say 0.2.0b1 is a beta.
-- [ ] `pptmstr/pairing.py`: `IMSCRIBE_PIN = "0.2.0"`, `IMTYPESET_PIN =
+- [x] `pptmstr/pairing.py`: `IMSCRIBE_PIN = "0.2.0"`, `IMTYPESET_PIN =
       "0.4.3.192900"`, and the docstring naming `imscribe==0.2.0b1`.
-- [ ] `imscribe.ref`: `git rev-parse "v0.2.0^{commit}"` of imscribe, and its
+- [x] `imscribe.ref`: `git rev-parse "v0.2.0^{commit}"` of imscribe, and its
       comment (tag v0.2.0). `imtypeset.ref`: `0bac06608be358aec7cf9a3ee72c6abc623146e3`
       (v0.4.3), and its comment.
-- [ ] The tests that name the old versions as data: `tests/test_version.py`,
+- [x] The tests that name the old versions as data: `tests/test_version.py`,
       `test_typeset_deps.py`, `test_typeset_gate.py`, `test_lock.py`,
       `test_probe.py` (each a string `imtypeset 0.4.1.192900`, `0.4.1` or
       `imscribe==0.2.0b1`). Most are labels a test hands in and would pass
       unchanged; move them so the tree says one version.
-- [ ] `scripts/probe.py`: the eight sentences naming `0.4.1.192900`, and its
+- [x] `scripts/probe.py`: the eight sentences naming `0.4.1.192900`, and its
       "read 2026-10-13" line, after rereading PyPI's file lists for the two
       new versions.
-- [ ] `diffs.unfit` narrowed and its three tests moved (§8.3, first row).
-- [ ] `tests/test_typeset_gate.py`: `IMSCRIBES` to `typesetter.ABSENT_REASON`;
+- [x] `diffs.unfit` narrowed and its three tests moved (§8.3, first row).
+- [x] `tests/test_typeset_gate.py`: `IMSCRIBES` to `typesetter.ABSENT_REASON`;
       `gate.not_installed`'s docstring.
-- [ ] The docstrings that quote a measurement "on imscribe 0.2.0b1 and the
+- [x] The docstrings that quote a measurement "on imscribe 0.2.0b1 and the
       0.4.1.192900 wheel" (`diffs.py`, `gate.py`, `themes.py`,
       `test_baked_sizes.py`) stay as the record of when they were measured,
       or are re-measured; not rewritten to a version they were not taken on.
-- [ ] `README.md`'s install paragraph.
+- [x] `README.md`'s install paragraph.
 - [ ] `bootstrap.sh` into a fresh `.venv` on 3.11 and on a later CPython
       (the move is what makes 3.12 to 3.14 installable), then `make check`
       both ways: expected green, with the strict xfails as they are.
-- [ ] `HANDOFF-advtext.md`: close P44 (§8.2's measurement), and A7 as
+- [x] `HANDOFF-advtext.md`: close P44 (§8.2's measurement), and A7 as
       answered by R3-WIDE once `diffs.unfit` is narrowed; P39, P41, P43 and
       P47 as built against.
 - [ ] Then the lock, below.
@@ -421,3 +420,43 @@ The published imscribe 0.2.0 (it does not exist yet); the fork's headers
 (not fetchable here); CPython 3.12 to 3.14; macOS; a GPU; a display whose
 density is not 1; anyone looking at the pictures `run_typeset_panes.py`
 wrote. imscribe's `7b4700c` is not necessarily the commit that will be tagged.
+
+### 8.6 The move, as made (2026-10-15)
+
+By pptmstr's builder (task MOVE-020), on the same machine. Commits `1d987a4`
+(pins, refs, probe, README, test labels), `924ad9c` (A7), `4f30c1d` (P39,
+P43), then the records.
+
+- **The published files.** imscribe 0.2.0's Requires-Dist on PyPI is §8.1's,
+  the marker in double quotes. The wheel `imscribe-0.2.0-py3-none-any.whl` was
+  downloaded by the user into `.wheelhouse/` on request, sha256 `6e543999…`,
+  the digest PyPI lists. Its `imscribe/` is file for file the tree at
+  `af06f77`. imtypeset 0.4.3.192900's eight wheels all declare
+  `Requires-Python >=3.11,<3.15`. So `IMTYPESET_PYTHONS` is `(3, 11)` to
+  `(3, 14)` in `pairing` and in the probe, and `[tool.uv].environments` is
+  back to `< '3.15'`.
+- **A7 measured, and the refusal narrowed rather than dropped** (`diffs.unfit`
+  has the numbers). Still refused: a lone surrogate, and a combining mark the
+  code face lacks, which the view sets as nothing. The reach counts two
+  columns a lacking letter. **Decided here, and not in the checklist:** the
+  view now says above itself which characters are drawn from another face
+  (`diffs.borrowed_warning`). The refusal was the one place an approver was
+  told that a Cyrillic `а` in a path is not `a`. In the view the letter is a
+  lookalike. On the pane's own rows it is a replacement glyph.
+- **P44 had no strict xfail** to turn; a test now holds it
+  (`test_typeset_literal.py`, `..._last_character_is_that_line_s_end`). §8.4's
+  "with the strict xfails as they are" holds: 23 and 3, and none XPASSed.
+- **`make check`, final tree** (*run*): with the library 11367 passed, 0
+  skipped, 23 xfailed; `IMSCRIBE_NO_TYPESET=1` 10602 passed, 785 skipped, 3
+  xfailed; lint and mypy clean. Before that run `~/Source/imgui-adv-text/.venv`
+  had gone, which this worktree's composite `.venv` drew `imgui-bundle` and
+  imtypeset from: the published `imgui-bundle` 1.92.900 and imtypeset
+  0.4.3.192900 wheels were installed into `.venv` itself and the `.deps` pair
+  rebuilt against them (`typeset_deps.py library`).
+- **Dated measurements left dated**: `diffs.py`'s module docstring
+  (2026-10-13), `gate.py`, `themes.py` and `test_baked_sizes.py` still name
+  0.2.0b1 and 0.4.1.192900, which is what they were taken on.
+- **Not done here:** `bootstrap.sh` into a fresh `.venv` (it is the user's to
+  run, and this worktree's `.venv` is a composite), CPython 3.12 to 3.14 (not
+  on this machine), macOS, and the lock, which is next.
+

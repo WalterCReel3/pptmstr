@@ -41,6 +41,61 @@ Read from `.concerns/lead--release-020.md`: imtypeset stays a hard
 dependency in 0.2.0 and `cell=` stays deprecated through it; pptmstr passes
 no `cell` already.
 
+## pptmstr requires imscribe 0.2.0 (2026-10-15, pptmstr `1d987a4` to `4f30c1d`)
+
+By pptmstr's builder (task MOVE-020), Linux x86-64, CPython 3.11.2, Xvfb and
+llvmpipe. What is marked *run* was run by it.
+
+- **The pins** (`1d987a4`): `imgui-bundle==1.92.900`, `imscribe==0.2.0`,
+  `imtypeset==0.4.3.192900` under your marker, character for character.
+  `imscribe.ref` is `af06f77` (your tag `v0.2.0`), `imtypeset.ref` is
+  `0bac066` (`v0.4.3`). pptmstr now installs on CPython 3.11 to 3.14, from
+  imtypeset 0.4.3's Requires-Python `>=3.11,<3.15` on all eight wheels (PyPI's
+  JSON, read 2026-10-15).
+- **Installed here from your published wheel** (*run*): sha256
+  `6e543999…e8baec`, the digest PyPI lists, and its `imscribe/` file for file
+  the tree at `af06f77`. Beside it the published imtypeset 0.4.3.192900 wheel
+  (attested by your release run of `0bac066`, fork headers).
+- **A7 is answered, and pptmstr has built against it** (`924ad9c`). Measured
+  in pptmstr in a window at 14, 15, 16, 17, 20 and 21 px over `x π x Ж x`,
+  `xπxЖx` and ten `Ж`: every glyph on a whole cell, π and Ж two each; the ink
+  ends within the cells `content_width` counts, which equals the width of as
+  many cells of ASCII; a point a quarter and three quarters into every cell
+  answers the caret nearest it; a selection of one letter fills exactly its
+  two cells and copies it. So a diff holding such a letter is now given to
+  your view. pptmstr still hands a diff back to its own rows for a lone
+  surrogate, for a **combining mark the code face lacks** (your view sets
+  U+FE0F and U+20DD as nothing, in no cell: no quad drawn, measured at 16 px),
+  and for a row past the measured reach, counting two columns a letter the
+  face lacks. Over the view it now says which characters are drawn from
+  another face, by code point: U+0430 in a path is a lookalike of `a` in your
+  view, where pptmstr's own rows draw a replacement glyph.
+- **P39 closed** (`4f30c1d`): `gate.code_lacks` calls
+  `imscribe.ui.typeset_diff_view.code_face_lacks`.
+- **P43 closed** (`4f30c1d`): pptmstr's test reads `typesetter.ABSENT_REASON`.
+  pptmstr keeps its own sentence for the switch, which names the value.
+- **P44 closed** (your H27): `test_typeset_literal.py::test_a_point_past_the_middle_of_a_literal_line_s_last_character_is_that_line_s_end`
+  holds it now, over a seven-line code block (*run*). pptmstr had no xfail
+  that held P44, so nothing turned.
+- **P41 closed, not used**: pptmstr still refuses a row holding a lone
+  surrogate itself, and its store writes surrogates out before they reach a
+  row. `replaced_characters` is there if one ever arrives another way.
+- **P47 closed**: no theme is built at size 0. `roles.px` is at least 1, and
+  the gate answers `None` below a base size of 1 (read; every theme was built
+  in the suite with the library on).
+- **R3-HOSTS, as pptmstr meets it** (read): pptmstr never calls `set_theme` on
+  a view. A change of face, role size, text scale or ImGui's font size moves
+  pptmstr's own epoch, and the view is made again. That drops a fenced diff's
+  expanded gaps, scroll and selection, and an approval diff's expanded
+  context, the same as your theme change does. A light/dark switch only
+  re-inks, and keeps them. Nobody has looked.
+- **`make check`** (*run*, final tree): 11367 passed, 23 xfailed, nothing
+  skipped; with `IMSCRIBE_NO_TYPESET=1` 10602 passed, 785 skipped, 3 xfailed.
+  No xfail turned.
+- **Not run:** CPython 3.12 to 3.14 (only 3.11 is on this machine), macOS, a
+  GPU, a display density other than 1, and `bootstrap.sh` into a fresh
+  `.venv`.
+
 ## Main merged; imscribe 0.2.0 trialled (2026-10-15, pptmstr `f672089`)
 
 - **pptmstr's `main` is merged into this branch** (`ee82ab2`): enhanced
@@ -89,8 +144,8 @@ no `cell` already.
 
 | | |
 |---|---|
-| advtext | commit `38f5fac1172b48e7b57f91428957c51591d38105` ("Swap advtext's layout core for imtypeset"). It is what the advtext checkout's `origin/experimental/imtypeset-adoption` tracking ref names; **not verified against GitHub from this session** (see "What this session cannot reach"). advtext's `HEAD` when this was written was `f34f6c8`, four commits ahead of that ref and not pushed; `git diff 38f5fac f34f6c8 -- advtext` touches only `advtext/ui/pages/` (the demo's gallery pages), which pptmstr does not import. The checkout also had uncommitted edits to `Makefile` and `advtext/typesetter.py` (the installed-distribution route); pptmstr does not build on those until they are a commit. |
-| imtypeset | commit `c9f8902a67adf00a18426876d5983617b7d1408c`, the ref `HANDOFF-imtypeset.md` names under "What advtext consumes today" and `imtypeset.ref` holds. |
+| imscribe | **0.2.0 from PyPI** (2026-10-15), the wheel built from `af06f7760a5433bfd0f597893bd67657b86f758d` (tag `v0.2.0`), which `imscribe.ref` holds. |
+| imtypeset | **0.4.3.192900 from PyPI**, built from `0bac06608be358aec7cf9a3ee72c6abc623146e3` (tag `v0.4.3`), which `imtypeset.ref` holds. |
 | interpreter | CPython 3.11.2, `imgui-bundle` 1.92.900, Linux x86-64 (Debian 12). |
 
 **Built against, by a run** (pptmstr's `DEPS` builder, 2026-10-12; commits
