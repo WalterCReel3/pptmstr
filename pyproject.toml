@@ -34,9 +34,8 @@ dependencies = [
     "imgui-bundle==1.92.900",
     # Sets typeset text: markdown, streaming and diff views, met in one
     # package (pptmstr/ui/typeset/). It requires the two pins beside it
-    # itself. EXACT also because 0.2.0b1 is a beta: an installer takes a
-    # pre-release only where a requirement names it, which a range would not.
-    "imscribe==0.2.0b1",
+    # itself.
+    "imscribe==0.2.0",
     # The library imscribe draws through. imscribe requires it already; it is
     # named here so that the unit is three lines in one place and an install
     # of pptmstr cannot resolve to another. The marker is imscribe's own,
@@ -50,7 +49,7 @@ dependencies = [
     # to install from; elsewhere pip compiles imgui-bundle from source.
     # scripts/probe.py (`install_outlook`) says which before bootstrap.sh makes
     # a virtualenv, and stops where the install would fail or compile.
-    "imtypeset==0.4.1.192900; python_version >= '3.11' and python_version < '3.15' and ((sys_platform == 'linux' and platform_machine == 'x86_64') or (sys_platform == 'darwin' and platform_machine == 'arm64'))",
+    "imtypeset==0.4.3.192900; python_version >= '3.11' and python_version < '3.15' and ((sys_platform == 'linux' and platform_machine == 'x86_64') or (sys_platform == 'darwin' and platform_machine == 'arm64'))",
     # Bundles its own Claude Code CLI binary, which is why there is no Node
     # dependency here -- see check_agent_cli() in scripts/probe.py.
     # The floor is the first release whose bundled CLI (2.1.280) knows
@@ -139,8 +138,8 @@ exclude = ["**/__pycache__", "**/*.pyc"]
 # bootstrap.sh's `uv pip install` and pip do not read them.
 [tool.uv]
 environments = [
-    "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version >= '3.11' and python_version < '3.12'",
-    "sys_platform == 'darwin' and platform_machine == 'arm64' and python_version >= '3.11' and python_version < '3.12'",
+    "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version >= '3.11' and python_version < '3.15'",
+    "sys_platform == 'darwin' and platform_machine == 'arm64' and python_version >= '3.11' and python_version < '3.15'",
 ]
 required-environments = [
     "sys_platform == 'linux' and platform_machine == 'x86_64'",

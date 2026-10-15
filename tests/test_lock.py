@@ -213,7 +213,7 @@ def test_a_unit_member_pyproject_stops_pinning_exactly_is_a_problem() -> None:
         "project": {
             **PYPROJECT["project"],
             "dependencies": [
-                "imscribe>=0.2.0b1" if r.startswith("imscribe==") else r
+                "imscribe>=0.2.0" if r.startswith("imscribe==") else r
                 for r in PYPROJECT["project"]["dependencies"]
             ],
         },
@@ -413,7 +413,7 @@ def test_no_lock_passes_the_gate_only_and_half_a_lock_fails_both(tmp_path: Path)
 def test_subset_gives_the_locks_own_lines_with_their_hashes(tmp_path: Path) -> None:
     path = tmp_path / "l.lock"
     path.write_text(GOOD_DEV, encoding="utf-8")
-    done = _run("subset", str(path), "imscribe==0.2.0b1", "imtypeset==0.4.1.192900", cwd=tmp_path)
+    done = _run("subset", str(path), "imscribe==0.2.0", "imtypeset==0.4.3.192900", cwd=tmp_path)
     assert done.returncode == 0, done.stderr
     lines = done.stdout.splitlines()
     assert [line.split("==")[0] for line in lines] == ["imscribe", "imtypeset"]
@@ -620,7 +620,7 @@ case "$1" in
       exit 0
     fi
     if [ "$2" = subset ]; then
-      echo "imscribe==0.2.0b1 --hash=sha256:aa"
+      echo "imscribe==0.2.0 --hash=sha256:aa"
       exit 0
     fi ;;
   -m) if [ "$2" = venv ]; then
@@ -786,10 +786,10 @@ def test_locked_what_was_not_installed_by_name_is_replaced_from_the_locks_own_li
     tmp_path: Path, uv: bool
 ) -> None:
     _no_system_uv(uv)
-    done, log, work = _bootstrap(tmp_path, uv=uv, locked=True, replace="imscribe==0.2.0b1")
+    done, log, work = _bootstrap(tmp_path, uv=uv, locked=True, replace="imscribe==0.2.0")
     assert done.returncode == 0, done.stdout + done.stderr
     assert any(
-        "scripts/lock.py subset requirements-dev.lock imscribe==0.2.0b1" in line for line in log
+        "scripts/lock.py subset requirements-dev.lock imscribe==0.2.0" in line for line in log
     )
     again = log[-1]
     if uv:
@@ -803,7 +803,7 @@ def test_locked_what_was_not_installed_by_name_is_replaced_from_the_locks_own_li
             "--require-hashes -r .venv/pptmstr-reinstall.lock"
         )
     assert (work / ".venv" / "pptmstr-reinstall.lock").read_text(encoding="utf-8") == (
-        "imscribe==0.2.0b1 --hash=sha256:aa\n"
+        "imscribe==0.2.0 --hash=sha256:aa\n"
     )
 
 

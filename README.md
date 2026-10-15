@@ -197,16 +197,14 @@ cancel. [planning/2026-10-08-settings-have-one-place.md](planning/2026-10-08-set
 says what is a setting and what is deliberately a constant in code.
 
 **The three are one unit and are pinned exactly**: `imgui-bundle==1.92.900`,
-`imscribe==0.2.0b1` and `imtypeset==0.4.1.192900`. The imtypeset library is linked
+`imscribe==0.2.0` and `imtypeset==0.4.3.192900`. The imtypeset library is linked
 against that one `imgui-bundle` binary and is refused beside any other, so they move
 together and never by `pip install -U` of one. **The install is supported on CPython
-3.11 on macOS 14 or later on Apple Silicon, and on Linux x86-64 with glibc 2.28 or
-later**: the pinned imtypeset's wheels install on 3.11 only. On Linux aarch64 (3.11 to
-3.14) it leaves imtypeset out and every pane draws with its own
-renderer. Anywhere else it does not fall back, it fails: on CPython 3.12 to 3.14 on those
-two platforms, on macOS 13, below glibc 2.28 or
-on musl imtypeset's requirement is on and no wheel of it matches, and on an Intel Mac or
-CPython 3.15 pip would compile `imgui-bundle` from source. `./bootstrap.sh` says which
+3.11 to 3.14 on macOS 14 or later on Apple Silicon, and on Linux x86-64 with glibc 2.28
+or later.** On Linux aarch64 (3.11 to 3.14) it leaves imtypeset out and every pane
+draws with its own renderer. Anywhere else it does not fall back, it fails: on macOS 13,
+below glibc 2.28 or on musl imtypeset's requirement is on and no wheel of it matches,
+and on an Intel Mac or CPython 3.15 pip would compile `imgui-bundle` from source. `./bootstrap.sh` says which
 before it makes a virtualenv, and stops.
 `pptmstr --version` says which of each is running against its pin, how the library was
 found, and the headers it says it was compiled against.

@@ -417,10 +417,10 @@ def test_bootstrap_keeps_an_existing_venv_and_says_so_first(tmp_path: Path, uv: 
 def test_bootstrap_reinstalls_what_was_not_installed_by_name(tmp_path: Path, uv: bool) -> None:
     if not uv and shutil.which("uv", path="/usr/bin:/bin"):
         pytest.skip("a uv in /usr/bin or /bin would be taken where the pip branch is under test")
-    out, log, _ = _bootstrap(tmp_path, uv=uv, replace="imscribe==0.2.0b1 imtypeset==0.4.1.192900")
+    out, log, _ = _bootstrap(tmp_path, uv=uv, replace="imscribe==0.2.0 imtypeset==0.4.3.192900")
     assert (
         "not installed by name, so reinstalled from the package index: "
-        "imscribe==0.2.0b1 imtypeset==0.4.1.192900"
+        "imscribe==0.2.0 imtypeset==0.4.3.192900"
     ) in out
     first = next(n for n, line in enumerate(log) if line.endswith("-e .[dev]"))
     asked = next(n for n, line in enumerate(log) if "pptmstr.pairing unpublished" in line)
@@ -429,12 +429,12 @@ def test_bootstrap_reinstalls_what_was_not_installed_by_name(tmp_path: Path, uv:
     if uv:
         assert again == (
             "uv pip install --python .venv/bin/python --no-deps --reinstall-package imscribe "
-            "imscribe==0.2.0b1 --reinstall-package imtypeset imtypeset==0.4.1.192900"
+            "imscribe==0.2.0 --reinstall-package imtypeset imtypeset==0.4.3.192900"
         )
     else:
         assert again == (
             "venv-python -m pip install --no-deps --force-reinstall "
-            "imscribe==0.2.0b1 imtypeset==0.4.1.192900"
+            "imscribe==0.2.0 imtypeset==0.4.3.192900"
         )
 
 

@@ -263,7 +263,7 @@ def test_a_variable_the_caller_set_is_never_paired_with_this_checkouts(
     # (``test_switched_off_the_two_variables_are_taken_out_and_said``).
     _checkout(tmp_path)
     for more in ({}, ASKED):
-        for distribution in (None, "imtypeset 0.4.1.192900"):
+        for distribution in (None, "imtypeset 0.4.3.192900"):
             environ = {mine: value, **more}
 
             found = pairing.decide(environ, tmp_path, tmp_path / "venv", distribution)
@@ -283,10 +283,10 @@ def test_an_installed_imtypeset_is_what_runs_and_the_checkouts_pair_is_left_alon
     _checkout(tmp_path, prefix=tmp_path / "venv")
     environ: dict[str, str] = {"PATH": "/bin"}
 
-    found = pairing.decide(environ, tmp_path, tmp_path / "venv", "imtypeset 0.4.1.192900")
+    found = pairing.decide(environ, tmp_path, tmp_path / "venv", "imtypeset 0.4.3.192900")
 
     assert found.route == pairing.ROUTE_DISTRIBUTION
-    assert found.why == "imtypeset 0.4.1.192900 is installed"
+    assert found.why == "imtypeset 0.4.3.192900 is installed"
     assert environ == {"PATH": "/bin"} and found.given == () and found.ahead is None
 
 
@@ -302,7 +302,7 @@ def test_the_checkouts_pair_is_taken_beside_an_installed_imtypeset_only_when_ask
     pair = _checkout(tmp_path, prefix=tmp_path / "venv")
     environ = dict(ASKED)
 
-    found = pairing.decide(environ, tmp_path, tmp_path / "venv", "imtypeset 0.4.1.192900")
+    found = pairing.decide(environ, tmp_path, tmp_path / "venv", "imtypeset 0.4.3.192900")
 
     assert found.route == pairing.ROUTE_CHECKOUT and pairing.DEPS_VARIABLE in found.why
     assert environ[pairing.LIBRARY_VARIABLE] == str(pair / pairing.LIBRARY_NAME)
@@ -312,7 +312,7 @@ def test_the_checkouts_pair_is_taken_beside_an_installed_imtypeset_only_when_ask
     assert alone.route == pairing.ROUTE_CHECKOUT and alone.ahead is None
     for off in ("0", ""):
         environ = {pairing.DEPS_VARIABLE: off}
-        found = pairing.decide(environ, tmp_path, tmp_path / "venv", "imtypeset 0.4.1.192900")
+        found = pairing.decide(environ, tmp_path, tmp_path / "venv", "imtypeset 0.4.3.192900")
         assert found.route == pairing.ROUTE_DISTRIBUTION and environ == {pairing.DEPS_VARIABLE: off}
 
 
@@ -322,14 +322,14 @@ def test_a_pair_asked_for_that_cannot_be_handed_over_leaves_the_installed_one_an
     _checkout(tmp_path, commit=OTHER)
     environ = dict(ASKED)
 
-    found = pairing.decide(environ, tmp_path, tmp_path / "venv", "imtypeset 0.4.1.192900")
+    found = pairing.decide(environ, tmp_path, tmp_path / "venv", "imtypeset 0.4.3.192900")
 
     assert found.route == pairing.ROUTE_DISTRIBUTION and environ == ASKED
-    assert "imtypeset 0.4.1.192900 is installed, and it is what runs" in found.why
+    assert "imtypeset 0.4.3.192900 is installed, and it is what runs" in found.why
     assert pairing.DEPS_VARIABLE in found.why and OTHER in found.why
 
 
-@pytest.mark.parametrize("distribution", [None, "imtypeset 0.4.1.192900"])
+@pytest.mark.parametrize("distribution", [None, "imtypeset 0.4.3.192900"])
 @pytest.mark.parametrize("asked", [{}, ASKED])
 def test_switched_off_nothing_is_set_whatever_is_built_or_installed(
     tmp_path: Path, distribution: str | None, asked: dict[str, str]
@@ -492,7 +492,7 @@ def test_the_process_puts_the_pair_it_was_asked_for_ahead_of_an_installed_imtype
     monkeypatch.setenv(pairing.DEPS_VARIABLE, "1")
     monkeypatch.setattr(pairing, "_FOUND", None)
     monkeypatch.setattr(pairing, "checkout", lambda: tmp_path)
-    monkeypatch.setattr(pairing, "installed", lambda: "imtypeset 0.4.1.192900")
+    monkeypatch.setattr(pairing, "installed", lambda: "imtypeset 0.4.3.192900")
     monkeypatch.setattr(sys, "path", list(sys.path))
     try:
         found = pairing.adopt()
@@ -1211,16 +1211,16 @@ def test_the_library_line_of_a_built_pair_is_held_to_built_from_and_not_to_the_r
         "package": str(pair / pairing.PACKAGE_DIR / "imtypeset"),
         "route": pairing.ROUTE_ENVIRONMENT,
         "library": library,
-        "imtypeset_version": "0.4.1",
+        "imtypeset_version": "0.4.3",
     }
 
     line = version._imtypeset(found, said)
-    assert line.startswith(f"imtypeset 0.4.1 {OTHER}: {library}, ")
+    assert line.startswith(f"imtypeset 0.4.3 {OTHER}: {library}, ")
     assert f"NOT the commit imtypeset.ref names, which is {REF}" in line
 
     (pair / pairing.BUILT_FROM).unlink()
     line = version._imtypeset(found, said)
-    assert line.startswith("imtypeset 0.4.1 at an unrecorded commit: ") and REF in line
+    assert line.startswith("imtypeset 0.4.3 at an unrecorded commit: ") and REF in line
 
     # Named and not loaded: the line is still of what was named.
     assert version._imtypeset(found, {}, library).startswith(
@@ -1234,7 +1234,7 @@ def _said_of_a_distribution(package: Path, **more: str | None) -> dict[str, str 
         "package": str(package),
         "route": pairing.ROUTE_DISTRIBUTION,
         "library": str(package / pairing.LIBRARY_NAME),
-        "imtypeset_version": "0.4.1",
+        "imtypeset_version": "0.4.3",
         "distribution": f"imtypeset {pairing.IMTYPESET_PIN}",
         "headers": "fork:0123abc",
         "accepted_by": "imgui-check+probe",
@@ -1267,7 +1267,7 @@ def test_the_library_line_of_an_installed_imtypeset_is_the_librarys_own_answers(
 
     line = version._imtypeset(found, _said_of_a_distribution(package))
     assert line == (
-        f"imtypeset {pairing.IMTYPESET_PIN}, the version pptmstr pins: library 0.4.1 at "
+        f"imtypeset {pairing.IMTYPESET_PIN}, the version pptmstr pins: library 0.4.3 at "
         f"{package / pairing.LIBRARY_NAME}, found as an installed distribution, installed by "
         f"name from an index or a directory of wheels, which records neither that nor a commit; "
         f"headers fork:0123abc, accepted by imgui-check+probe, built for "
@@ -1440,7 +1440,7 @@ def test_a_test_run_says_first_what_it_ran_against(
         "package": str(stood / pairing.PACKAGE_DIR / "imtypeset"),
         "route": pairing.ROUTE_ENVIRONMENT,
         "library": named[pairing.LIBRARY_VARIABLE],
-        "imtypeset_version": "0.4.1",
+        "imtypeset_version": "0.4.3",
         "headers": "stand-in:ocornut-v1.92.9-docking",
     }
     lines = described(loaded, named)
@@ -1536,7 +1536,7 @@ def test_switched_off_the_two_variables_are_taken_out_and_said(
     for name in VARIABLES:
         monkeypatch.setenv(name, f"/left/over/{name}")
 
-    found = pairing.decide(os.environ, tmp_path, tmp_path / "venv", "imtypeset 0.4.1.192900")
+    found = pairing.decide(os.environ, tmp_path, tmp_path / "venv", "imtypeset 0.4.3.192900")
 
     assert found.route == pairing.ROUTE_NONE and found.given == ()
     assert found.withheld == VARIABLES
@@ -1624,14 +1624,14 @@ def test_a_refused_deps_request_beside_an_installed_imtypeset_is_said(
     _checkout(tmp_path, commit=OTHER, prefix=tmp_path / "venv")
     environ = dict(ASKED)
 
-    found = pairing.decide(environ, tmp_path, tmp_path / "venv", "imtypeset 0.4.1.192900")
+    found = pairing.decide(environ, tmp_path, tmp_path / "venv", "imtypeset 0.4.3.192900")
 
     assert found.route == pairing.ROUTE_DISTRIBUTION and OTHER in found.refused
     said = {
         "package": str(tmp_path / "site" / "imtypeset"),
         "route": pairing.ROUTE_DISTRIBUTION,
         "library": "/somewhere/libimtypeset_bundle.so",
-        "distribution": "imtypeset 0.4.1.192900",
+        "distribution": "imtypeset 0.4.3.192900",
     }
     line = version._imtypeset(found, said)
     assert (
@@ -1658,7 +1658,7 @@ def test_the_test_header_finds_this_checkout_and_does_not_say_there_is_none() ->
     ``described`` decides with this checkout, so with ``PPTMSTR_TYPESET_DEPS``
     the header does not say pptmstr is installed with no checkout to look in.
     """
-    rows = described({"distribution": "imtypeset 0.4.1.192900"}, ASKED)
+    rows = described({"distribution": "imtypeset 0.4.3.192900"}, ASKED)
     assert not any("no source checkout" in row for row in rows)
 
 
@@ -1669,10 +1669,10 @@ def test_the_header_names_the_pair_the_makefile_exports_as_the_makefiles(tmp_pat
         pairing.LIBRARY_VARIABLE: str(pair / pairing.LIBRARY_NAME),
         pairing.PACKAGE_VARIABLE: str(pair / pairing.PACKAGE_DIR),
     }
-    found = pairing.decide(dict(exported), tmp_path, distribution="imtypeset 0.4.1.192900")
+    found = pairing.decide(dict(exported), tmp_path, distribution="imtypeset 0.4.3.192900")
     assert found.route == pairing.ROUTE_ENVIRONMENT and "as the Makefile exports them" in found.why
     other = {**exported, pairing.LIBRARY_VARIABLE: "/elsewhere/lib.so"}
-    found = pairing.decide(other, tmp_path, distribution="imtypeset 0.4.1.192900")
+    found = pairing.decide(other, tmp_path, distribution="imtypeset 0.4.3.192900")
     assert found.why.endswith("set by the caller")
 
 

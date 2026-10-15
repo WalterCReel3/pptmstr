@@ -91,14 +91,14 @@ PACKAGE = Path(__file__).resolve().parent
 # imgui-bundle binary (the fourth number of its version is the wheel's line),
 # and imscribe requires exactly these two.
 IMGUI_BUNDLE_PIN = "1.92.900"
-IMSCRIBE_PIN = "0.2.0b1"
-IMTYPESET_PIN = "0.4.1.192900"
+IMSCRIBE_PIN = "0.2.0"
+IMTYPESET_PIN = "0.4.3.192900"
 # The CPython minors, inclusive, that IMTYPESET_PIN's wheels declare in their
 # Requires-Python: where the install brings the library. Where it is narrower
 # than imscribe's marker on imtypeset (3.11 to 3.14), the whole install fails
 # on the difference. scripts/probe.py spells it again (tests/test_probe.py holds
 # the two equal) and scripts/lock.py takes it from there.
-IMTYPESET_PYTHONS = ((3, 11), (3, 11))
+IMTYPESET_PYTHONS = ((3, 11), (3, 14))
 
 IMSCRIBE_DISTRIBUTION = "imscribe"
 IMTYPESET_DISTRIBUTION = "imtypeset"
@@ -383,7 +383,7 @@ def not_by_name(name: str, search: list[str] | None = None) -> str | None:
 
 def unpublished(search: list[str] | None = None) -> list[tuple[str, str]]:
     """
-    The exact requirement of imscribe and of imtypeset (``imscribe==0.2.0b1``)
+    The exact requirement of imscribe and of imtypeset (``imscribe==0.2.0``)
     for each installed that was not installed by name, with why
     (``not_by_name``): what ``bootstrap.sh`` reinstalls from the index.
     """

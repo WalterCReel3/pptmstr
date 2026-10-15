@@ -188,7 +188,7 @@ imscribe's reason for every way of having no library (its request P43 is open).
     [
         (
             "1",
-            "imtypeset 0.4.1.192900",
+            "imtypeset 0.4.3.192900",
             True,
             False,
             "typeset text is switched off (IMSCRIBE_NO_TYPESET=1)",
@@ -198,7 +198,7 @@ imscribe's reason for every way of having no library (its request P43 is open).
         ("0", None, False, False, "the typesetting library is not installed"),
         (
             None,
-            "imtypeset 0.4.1.192900",
+            "imtypeset 0.4.3.192900",
             False,
             False,
             f"the typesetting library is not installed ({IMSCRIBES})",

@@ -985,7 +985,7 @@ def _typeset_env(*make_args: str, env: dict[str, str] | None = None) -> dict[str
 # What the Makefile reads from `typeset_deps.py installed`, given on the command
 # line, which wins over its own assignment: both configurations from any .venv.
 NONE = "TYPESET_INSTALLED="
-INSTALLED = "TYPESET_INSTALLED=imtypeset 0.4.1.192900"
+INSTALLED = "TYPESET_INSTALLED=imtypeset 0.4.3.192900"
 
 
 def _pair(
@@ -1042,7 +1042,7 @@ def test_beside_an_installed_imtypeset_make_exports_nothing_and_says_what_runs(
     pair = _pair(tmp_path / "pair")
     got, said = _make_typeset_env(f"TYPESET_DIR={pair}", INSTALLED)
     assert got == NOTHING
-    assert said.strip() == "# imtypeset 0.4.1.192900 is installed, and imscribe finds it by itself"
+    assert said.strip() == "# imtypeset 0.4.3.192900 is installed, and imscribe finds it by itself"
 
 
 @needs_make
@@ -1073,7 +1073,7 @@ def test_the_built_pair_is_exported_beside_an_installed_imtypeset_when_it_is_ask
     stale = _pair(tmp_path / "stale", commit="e" * 40)
     got, said = _make_typeset_env(f"TYPESET_DIR={stale}", INSTALLED, "PPTMSTR_TYPESET_DEPS=1")
     assert got == NOTHING
-    assert "NOT exported and the installed imtypeset 0.4.1.192900 is what runs" in said
+    assert "NOT exported and the installed imtypeset 0.4.3.192900 is what runs" in said
 
 
 @needs_make
@@ -1121,7 +1121,7 @@ def test_an_empty_library_variable_beside_an_installed_imtypeset_is_said_not_to_
     assert warning.startswith("Makefile:")
     assert "IMTYPESET_LIBRARY= does NOT run without the library here" in warning
     assert "IMSCRIBE_NO_TYPESET=1 is how to run without it" in warning
-    assert "imtypeset 0.4.1.192900 is installed and reads neither variable" in why
+    assert "imtypeset 0.4.3.192900 is installed and reads neither variable" in why
     # Said once the switch is thrown as well: nothing to warn of.
     _, said = _make_typeset_env(
         f"TYPESET_DIR={pair}", INSTALLED, "IMTYPESET_LIBRARY=", "IMSCRIBE_NO_TYPESET=1"

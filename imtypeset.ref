@@ -1,8 +1,8 @@
 # The imtypeset commit the development override builds the library from (`make deps`): a
 # commit of https://github.com/WalterCReel3/imtypeset, the one the imscribe commit in
-# imscribe.ref names in its own imtypeset.ref, and the commit its tag v0.4.1 points at,
+# imscribe.ref names in its own imtypeset.ref, and the commit its tag v0.4.3 points at,
 # which the wheel pyproject.toml pins says it was built from (the `attested_where` of the
 # `_attestation.json` inside it). An install does not read this file.
 # One ref, on the first line that is neither blank nor a comment: a full 40-digit hash.
 # Read by scripts/typeset_deps.py. A bump is: this line with imscribe.ref, `make deps`, the gate.
-e6160c0f83bbb6c7c41dba62ff0736a956ba7d9b
+0bac06608be358aec7cf9a3ee72c6abc623146e3

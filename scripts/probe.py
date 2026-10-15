@@ -393,8 +393,8 @@ def check_glibc(r: Report) -> None:
 # sentence naming what will not install, and bootstrap stops.
 #
 # The wheel sets are PyPI's file lists for imgui-bundle 1.92.900 and imtypeset
-# 0.4.1.192900, read 2026-10-13, and imtypeset's Requires-Python, read
-# 2026-10-15; they move only with the pins in pyproject.toml.
+# 0.4.3.192900, with imtypeset's Requires-Python (">=3.11,<3.15" on all eight),
+# read 2026-10-15; they move only with the pins in pyproject.toml.
 # --------------------------------------------------------------------------
 
 # pptmstr/pairing.py's, spelled again because this module cannot import it: it
@@ -402,8 +402,8 @@ def check_glibc(r: Report) -> None:
 # including one below the floor it is there to diagnose, and pairing needs 3.10
 # (dataclass slots). tests/test_probe.py holds the three equal to pairing's.
 IMGUI_BUNDLE_PIN = "1.92.900"
-IMTYPESET_PIN = "0.4.1.192900"
-IMTYPESET_PYTHONS = ((3, 11), (3, 11))  # inclusive: what the pin's Requires-Python admits
+IMTYPESET_PIN = "0.4.3.192900"
+IMTYPESET_PYTHONS = ((3, 11), (3, 14))  # inclusive: what the pin's Requires-Python admits
 
 # Inclusive: imgui-bundle's cp311..cp314 wheels, which is also the interpreter
 # range of imscribe's marker on imtypeset (python_version >= '3.11' and < '3.15').
