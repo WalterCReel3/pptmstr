@@ -199,6 +199,49 @@ def prose_parts(text: str, *, colour: Color | str | None = None) -> tuple[Part, 
     return tuple(parts)
 
 
+PROMPT_MARK = "> "
+"""
+What a log writes in front of a prompt (``AgentSession.send``): the mark that
+says the operator wrote this and the agent did not.
+"""
+
+
+def prompt_parts(text: str, *, colour: Color | str | None = None) -> tuple[Part, ...]:
+    """
+    A prompt as a log holds it -- ``PROMPT_MARK`` and what was sent -- as the parts
+    of one ``document``: what was sent is a body somebody wrote, read by
+    ``prose_parts``, and the mark is set as the characters it is.
+
+    Read as markdown, the mark would open a block quote and be drawn as a rule
+    beside the first paragraph only. So it is put in front of the first part as
+    text (``AS_WRITTEN``), where that part is a paragraph of markdown, and in front
+    of a literal part as it is. Where the prompt begins with a block of its own --
+    a heading, a list, a quote, a table, a fence, an indent -- text in front of
+    its first line would make that block a paragraph, and the mark is a part of
+    its own above it.
+    """
+    if not text.startswith(PROMPT_MARK):
+        return prose_parts(text, colour=colour)
+    body = text[len(PROMPT_MARK) :]
+    mark = Part(AS_WRITTEN + PROMPT_MARK.rstrip(), colour=colour)
+    parts = prose_parts(body, colour=colour)
+    if not parts:
+        return (mark,)
+    first = parts[0]
+    line = body.split("\n", 1)[0]
+    if first.kind is Kind.LITERAL:
+        return (Part(PROMPT_MARK + first.text, Kind.LITERAL, colour), *parts[1:])
+    opens_a_block = (
+        line[:1].isspace()
+        or _BODY_BLOCK.match(line)
+        or _BODY_FENCE.match(line)
+        or _BODY_RULE.match(line)
+    )
+    if opens_a_block:
+        return (mark, *parts)
+    return (Part(AS_WRITTEN + PROMPT_MARK + first.text, colour=colour), *parts[1:])
+
+
 def _paragraphs(text: str) -> list[tuple[list[str], bool]]:
     """
     The paragraphs of a body: runs of lines between blank ones, and whether each

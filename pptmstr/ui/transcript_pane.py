@@ -41,10 +41,21 @@ fence into disconnected rows if rich rendering tried to honour it too. While the
 seam is on, RICH is what the pane shows until the operator picks a mode
 (``DEFAULT_MODE``, which has the measurements that decided it).
 
+**Prompts.** A SYSTEM run is a prompt: ``AgentSession.send`` writes every one, the
+opening text included, as ``> `` and what was sent, and nothing else writes the
+kind. It is what the operator wrote, so every mode sets it as it sets the agent's
+prose, broken at the pane's width, in the dim ink and behind the ``>`` that marks
+it as the operator's: WRAP's wrapped lines, RICH's prose layout with each line the
+operator ended kept (``rich_pane``), and in TYPESET markdown by the rule every body
+somebody wrote is read by, the mark set as the character it is
+(``typeset.prompt_parts``). Nothing a prompt holds is read as markup by a reader
+that would drop it: RICH lays it out without reading it, and the seam's reader
+keeps what CommonMark would hide (``gate.read``).
+
 **Typesetting.** ``RenderMode.TYPESET`` sets the log through ``typeset`` (the seam
 over the layout library). OUTPUT and REASONING runs are read as markdown and set
-by the library, wrapped, selectable and culled; every other kind -- a tool call,
-its result, an error, a system line -- is literal text whose columns are content,
+by the library, wrapped, selectable and culled, and a prompt as above; every
+other kind -- a tool call, its result, an error -- is literal text whose columns are content,
 set unbroken in its ``_KIND_COLOUR`` and never read as markdown. **The library
 sets a literal run too, as a code block of its own, where it is measured to keep
 its columns** (``typeset.views.literal_unfit``: every character of the run
@@ -285,12 +296,15 @@ class ClosedRun:
     A run that can no longer grow, as the typeset view shows it.
 
     ``run`` is its index in ``NodeTranscript.run_starts`` and ``lines`` how many of
-    the transcript's lines it holds.
+    the transcript's lines it holds. ``text`` is the run as it is set, and what
+    is copied of it; ``parts`` is how: one part, but for a prompt, which is
+    as many as the body of one is (``typeset.prompt_parts``).
     """
 
     run: int
     kind: SegmentKind
-    part: typeset.Part
+    text: str
+    parts: tuple[typeset.Part, ...]
     lines: int
 
 
@@ -308,6 +322,7 @@ class OpenRun:
     pieces: list[str] = field(default_factory=list)
     lines: int = 0
     _literal: tuple[str, str] = ("", "")
+    _prompt: tuple[str, tuple[typeset.Part, ...]] = ("", ())
 
     def add(self, text: str) -> None:
         self.pieces.append(text)
@@ -333,6 +348,17 @@ class OpenRun:
             self._literal = (text, _literal(text))
         return self._literal[1]
 
+    @property
+    def prompt(self) -> tuple[typeset.Part, ...]:
+        """
+        The text as a prompt is set (``_prompt``); the same tuple until more
+        arrives, which is what lets the seam compare nothing.
+        """
+        text = self.text
+        if self._prompt[0] is not text:
+            self._prompt = (text, _prompt(text))
+        return self._prompt[1]
+
 
 @dataclass
 class Generation:
@@ -352,6 +378,7 @@ class Generation:
     _revision: int = 0
     _shown: tuple[ClosedRun, ...] = ()
     _parts: tuple[typeset.Part, ...] = ()
+    _owners: tuple[ClosedRun, ...] = ()
     _parts_for: tuple[int, bool] | None = None
 
     @property
@@ -365,10 +392,17 @@ class Generation:
 
     def shown(self, show_reasoning: bool) -> tuple[ClosedRun, ...]:
         """
-        The runs the reasoning filter lets through, one for each of ``parts``.
+        The runs the reasoning filter lets through.
         """
         self._filter(show_reasoning)
         return self._shown
+
+    def owners(self, show_reasoning: bool) -> tuple[ClosedRun, ...]:
+        """
+        The run each of ``parts`` is of, one for each.
+        """
+        self._filter(show_reasoning)
+        return self._owners
 
     def parts(self, show_reasoning: bool) -> tuple[typeset.Part, ...]:
         """
@@ -384,17 +418,32 @@ class Generation:
             self._shown = tuple(
                 run for run in self.runs if show_reasoning or run.kind is not SegmentKind.REASONING
             )
-            self._parts = tuple(run.part for run in self._shown)
+            self._parts = tuple(part for run in self._shown for part in run.parts)
+            self._owners = tuple(run for run in self._shown for _ in run.parts)
             self._parts_for = want
 
 
-def _part(kind: SegmentKind, text: str) -> typeset.Part:
+def _closed(run: OpenRun) -> ClosedRun:
+    kind = run.kind
+    if kind is SegmentKind.SYSTEM:
+        text = run.literal
+        return ClosedRun(run.run, kind, text, run.prompt, run.lines)
     if kind is SegmentKind.OUTPUT:
         # No colour: markdown keeps the palette's role inks for headings, code and links.
-        return typeset.Part(text)
-    if kind in _MARKDOWN_KINDS:
-        return typeset.Part(text, colour=_KIND_COLOUR[kind])
-    return typeset.Part(_literal(text), typeset.Kind.LITERAL, colour=_KIND_COLOUR[kind])
+        part = typeset.Part(run.text)
+    elif kind in _MARKDOWN_KINDS:
+        part = typeset.Part(run.text, colour=_KIND_COLOUR[kind])
+    else:
+        part = typeset.Part(run.literal, typeset.Kind.LITERAL, colour=_KIND_COLOUR[kind])
+    return ClosedRun(run.run, kind, part.text, (part,), run.lines)
+
+
+def _prompt(text: str) -> tuple[typeset.Part, ...]:
+    """
+    A prompt as the log sets it: prose, in its kind's ink, behind the mark the
+    log wrote (``typeset.prompt_parts``).
+    """
+    return typeset.prompt_parts(_literal(text), colour=_KIND_COLOUR[SegmentKind.SYSTEM])
 
 
 def _literal(text: str) -> str:
@@ -500,7 +549,7 @@ class TypesetFeed:
         if run is None:
             return
         self.open = None
-        closed = ClosedRun(run.run, run.kind, _part(run.kind, run.text), run.lines)
+        closed = _closed(run)
         newest = self.generations[-1] if self.generations else None
         if newest is None or newest.lines >= _GENERATION_LINES:
             newest = self._generation()
@@ -556,9 +605,7 @@ class TypesetFeed:
         What the typeset view shows, as source text, for the copy button.
         """
         texts = [
-            part.text
-            for generation in self.generations
-            for part in generation.parts(show_reasoning)
+            run.text for generation in self.generations for run in generation.shown(show_reasoning)
         ]
         shown = self.shown_open(show_reasoning)
         if shown is not None:
@@ -1008,12 +1055,16 @@ def _run_key(run: int) -> tuple[str, int]:
 def _draw_run(views: typeset.ViewCache, run: OpenRun, live: list[Hashable]) -> None:
     """
     The open run in a view of its own: a stream for markdown, which lays out once
-    what is committed and reads what arrived, and literal text for the rest,
-    the library's where it keeps the run's columns (``typeset.plain``).
+    what is committed and reads what arrived, a prompt as the parts it is set as
+    closed, and literal text for the rest, the library's where it keeps the
+    run's columns (``typeset.plain``).
     """
     ink = getattr(P, _KIND_COLOUR[run.kind])
     key = _run_key(run.run)
     live.append(key)
+    if run.kind is SegmentKind.SYSTEM:
+        typeset.document(views, key, run.prompt, apart=True, literal=True)
+        return
     if run.kind not in _MARKDOWN_KINDS:
         typeset.plain(views, key, run.literal, colour=ink, literal=True)
         return
@@ -1154,7 +1205,7 @@ def _typeset_run(feed: TypesetFeed, key: Hashable, part: int, show: bool) -> int
     if generation is None:
         # The open run's view, which is keyed by the run.
         return key[1] if isinstance(key, tuple) and isinstance(key[1], int) else None
-    runs = generation.shown(show)
+    runs = generation.owners(show)
     return runs[part].run if 0 <= part < len(runs) else None
 
 

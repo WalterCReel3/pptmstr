@@ -14,12 +14,13 @@ from typing import Any
 
 import pytest
 
-from pptmstr import fake_driver
+from pptmstr import drawable, fake_driver
 from pptmstr.intents import AgentSpawned
 from pptmstr.model import NodeId, Snapshot
 from pptmstr.store import Store
+from pptmstr.theme import P
 from pptmstr.transcript import SegmentKind, Transcript
-from pptmstr.ui import transcript_pane, typeset
+from pptmstr.ui import rich_pane, transcript_pane, typeset
 from pptmstr.ui.transcript_pane import (
     NodeTranscript,
     RenderMode,
@@ -402,7 +403,7 @@ def fed(*pairs: tuple[SegmentKind, str]) -> tuple[TypesetFeed, NodeTranscript, T
 
 def shown(feed: TypesetFeed) -> list[tuple[SegmentKind, str]]:
     """Every run the feed holds, closed then open, as (kind, text as fed)."""
-    runs = [(run.kind, run.part.text) for run in feed.runs]
+    runs = [(run.kind, run.text) for run in feed.runs]
     if feed.open is not None:
         runs.append((feed.open.kind, feed.open.text))
     return runs
@@ -418,10 +419,11 @@ def accounted(feed: TypesetFeed) -> int:
     return feed.skipped + feed.held + (feed.open.lines if feed.open is not None else 0)
 
 
-def test_model_prose_is_markdown_and_everything_else_is_literal_in_its_role() -> None:
+def test_prose_and_prompts_are_markdown_and_everything_else_is_literal_in_its_role() -> None:
     """
     A tool result is full of ``_`` and ``*``. Read as markdown it would lose them
-    and gain emphasis nobody wrote.
+    and gain emphasis nobody wrote. A prompt is prose somebody wrote, and keeps
+    the ``>`` that marks it as the operator's as a character.
     """
     feed, _, _ = fed(
         (SegmentKind.REASONING, "thinking *hard*\n"),
@@ -440,9 +442,10 @@ def test_model_prose_is_markdown_and_everything_else_is_literal_in_its_role() ->
         (typeset.Kind.LITERAL, "accent"),
         (typeset.Kind.LITERAL, "diff_context"),
         (typeset.Kind.LITERAL, "danger"),
-        (typeset.Kind.LITERAL, "text_dim"),
+        (typeset.Kind.MARKDOWN, "text_dim"),
         (typeset.Kind.LITERAL, "warn"),
     ]
+    assert parts[5].text == typeset.parts.AS_WRITTEN + "> again"
     # Literal text is exactly what was written, less the newlines around it.
     assert parts[2].text == "Read(file_path=a_b.py)"
     assert parts[3].text == '{"__init__": "*x*"}'
@@ -1031,8 +1034,8 @@ def test_the_settled_report_is_one_document_and_the_open_run_and_shows_all_of_it
         assert feed.views.unbuilt(key) == 0, key
     # Every run is a view of its own: a markdown run's, and a literal run's as
     # one host code block wherever the library keeps its columns.
-    literal = [run for run in held.runs if run.part.kind is typeset.Kind.LITERAL]
-    fit = [run for run in literal if typeset.views.literal_unfit(run.part) is None]
+    literal = [run for run in held.runs if run.parts[0].kind is typeset.Kind.LITERAL]
+    fit = [run for run in literal if typeset.views.literal_unfit(run.parts[0]) is None]
     assert fit and len(feed.views.views(held.key)) == len(held.runs) - len(literal) + len(fit)
     assert sum(is_literal(view) for view in feed.views.views(held.key)) == len(fit)
     text = "\n".join(block_texts(feed))
@@ -2146,3 +2149,230 @@ def test_a_path_is_not_drawn_for_a_session_that_ran_here(monkeypatch) -> None:
     assert "(nothing yet)" in said.strings and "checkbox" in said.calls
     assert not said.has("closed —") and not said.has("/somewhere.jsonl")
     assert RAN_ROOT in state.caches
+
+
+# -- a prompt is set as prose ------------------------------------------------------
+#
+# A prompt is the SYSTEM run ``AgentSession.send`` writes: ``> `` and what was sent.
+# What a frame drew is read from the vertices of the log's own child window: a
+# glyph is one quad there, in the run's ink, and ImGui leaves out a glyph that is
+# outside the window's clip rect, so a line cut off at the pane's edge is a
+# glyph short and a line that runs past it is a glyph to the right of it.
+
+PROMPT = (
+    "Glob **/*.py for every caller of <b>parse_line</b> and keep R&amp;D's note in view: "
+    "the logs are under C:\\_work\\*.log,\tone tab in, and a NUL arrived as \x00 in one "
+    "and as \\u0000 in the last of them, so read every one of them before you change anything."
+)
+HELD = drawable.text("> " + PROMPT)
+"""
+The prompt as the log holds it: the NUL as ``\\u0000``, and the ``\\u0000`` typed
+as ``\\u005cu0000`` so the two are told apart (``drawable``).
+"""
+NARROW = 360.0
+
+
+def prompted(prompt: str = PROMPT, *after: tuple[SegmentKind, str]) -> Transcript:
+    """A session that was sent ``prompt``, as ``AgentSession.send`` writes it."""
+    transcript = Transcript()
+    transcript.append(SegmentKind.SYSTEM, f"\n> {prompt}\n")
+    transcript.append(SegmentKind.OUTPUT, "Reading them now.\n")
+    for kind, text in after:
+        transcript.append(kind, text)
+    return transcript
+
+
+def glyphs(text: str) -> int:
+    """How many glyphs ``text`` is drawn with: one for each character but a space."""
+    return len("".join(text.split()))
+
+
+def drawn_narrow(
+    im: Any, monkeypatch: pytest.MonkeyPatch, snap: Snapshot, state: TranscriptState
+) -> dict[str, Any]:
+    """
+    The log drawn in a dock ``NARROW`` pixels wide, for the frame after the first:
+    of its own child window, how far it scrolls sideways, its right edge, and the
+    quads drawn in a prompt's ink, each as its left, right and top.
+    """
+    ink = P.text_dim.u32
+    seen: list[dict[str, Any]] = []
+    real = im.end_child
+
+    def end_child() -> None:
+        buffer = im.get_window_draw_list().vtx_buffer
+        quads = []
+        for at in range(0, buffer.size() - 3, 4):
+            corners = [buffer[at + n] for n in range(4)]
+            if all(corner.col == ink for corner in corners):
+                xs = [corner.pos.x for corner in corners]
+                quads.append((min(xs), max(xs), min(corner.pos.y for corner in corners)))
+        seen.append(
+            {
+                "scroll_x": im.get_scroll_max_x(),
+                "right": im.get_window_pos().x + im.get_window_size().x,
+                "quads": quads,
+            }
+        )
+        real()
+
+    def dock() -> None:
+        im.begin_child("##narrow-dock", im.ImVec2(NARROW, 500.0))
+        transcript_pane.draw(snap, state, ROOT)
+        im.end_child()
+
+    monkeypatch.setattr(im, "end_child", end_child)
+    for _ in range(2):
+        seen.clear()
+        rig.frame(im, dock)
+    monkeypatch.setattr(im, "end_child", real)
+    # The log's own child closes first, inside the dock.
+    return seen[0]
+
+
+def assert_set_as_prose(drawn: dict[str, Any]) -> None:
+    """
+    Every glyph of the prompt and its mark is drawn, none past the pane's edge,
+    on more lines than one, and the log has nothing to scroll to sideways.
+    """
+    quads = drawn["quads"]
+    assert drawn["scroll_x"] == 0.0
+    assert len(quads) == glyphs(HELD)
+    assert max(right for _, right, _ in quads) <= drawn["right"]
+    assert len({round(top) for _, _, top in quads}) >= 4
+
+
+@pytest.mark.parametrize("mode", [RenderMode.TYPESET, RenderMode.RICH, RenderMode.WRAP])
+def test_a_long_prompt_is_broken_at_the_panes_width_and_every_glyph_drawn(
+    seam: Any, monkeypatch: pytest.MonkeyPatch, mode: RenderMode
+) -> None:
+    """
+    The operator's words, drawn as the agent's are: TYPESET set them as one
+    unbroken code line the log scrolled sideways to, and RICH drew them on one
+    line cut off at the pane's edge.
+    """
+    state = TranscriptState(mode=mode)
+    assert_set_as_prose(drawn_narrow(seam, monkeypatch, session(prompted()), state))
+    assert state.shown_mode() is mode
+
+
+@pytest.mark.parametrize("mode", [RenderMode.RICH, RenderMode.WRAP])
+def test_without_the_library_a_long_prompt_is_broken_at_the_panes_width_too(
+    imgui: Any, monkeypatch: pytest.MonkeyPatch, mode: RenderMode
+) -> None:
+    state = TranscriptState(mode=mode)
+    assert_set_as_prose(drawn_narrow(imgui, monkeypatch, session(prompted()), state))
+
+
+def test_a_prompt_is_the_librarys_prose_marked_and_set_as_written(seam: Any) -> None:
+    """
+    Read as markdown, by the seam's reader: a paragraph and not a code block, the
+    mark a character in front of it and not a quote's rule, and every character
+    sent on screen -- the glob's stars, the tag, the entity and the backslashes.
+    """
+    state = typeset_state()
+    draw(seam, session(prompted()), state)
+    feed = state.feeds[ROOT]
+    (held,) = feed.generations
+    (prompt,) = feed.views.views(held.key)
+    assert not is_literal(prompt) and [block.kind for block in prompt.blocks] == [
+        rig.imscribe.BlockKind.PARAGRAPH
+    ]
+    (text,) = prompt.texts
+    assert text.startswith("> Glob **/*.py for every caller of <b>parse_line</b>")
+    assert "".join(text.split()) == "".join(HELD.split())
+    assert feed.visible_text(True).startswith(HELD)
+
+
+def test_a_prompt_keeps_the_lines_it_was_sent_with_and_its_mark_in_rich_and_wrap(
+    imgui: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    RICH lays a prompt out as its prose, without reading it: an operator's line
+    break is kept, the stars of a glob are not taken for bold, and the mark is the
+    first thing on the first line. WRAP's wrapped line starts with it too.
+    """
+    sent = "glob **/*.py and **/*.md\nthen stop\n\n- and say *what* you found"
+    rows: list[str] = []
+    real = rich_pane._draw_rows
+
+    def draw_rows(dl: Any, start: Any, laid: Any, size: float, base: int) -> float:
+        if base == P.text_dim.u32:
+            rows.extend(row.text for row in laid)
+        return float(real(dl, start, laid, size, base))
+
+    monkeypatch.setattr(rich_pane, "_draw_rows", draw_rows)
+    wrapped: list[str] = []
+    real_wrapped = imgui.text_wrapped
+
+    def text_wrapped(text: str) -> None:
+        wrapped.append(text)
+        real_wrapped(text)
+
+    monkeypatch.setattr(imgui, "text_wrapped", text_wrapped)
+    snap = session(prompted(sent))
+    rig.frame(
+        imgui, lambda: transcript_pane.draw(snap, TranscriptState(mode=RenderMode.RICH), ROOT)
+    )
+    assert rows == ["", "> glob **/*.py and **/*.md", "then stop", "", "- and say *what* you found"]
+
+    rig.frame(
+        imgui, lambda: transcript_pane.draw(snap, TranscriptState(mode=RenderMode.WRAP), ROOT)
+    )
+    assert "> glob **/*.py and **/*.md" in wrapped
+
+
+def test_a_long_tool_result_beside_a_prompt_is_still_one_unbroken_line(
+    seam: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Only the prompt became prose. A tool's output keeps its columns: one line of
+    a code block of the library's that the log scrolls sideways to, and in RICH
+    one line, cut at the edge as it was.
+    """
+    result = "Read -> " + "|".join(f"col{n:03}" for n in range(60))
+    snap = session(prompted("short", (SegmentKind.TOOL_RESULT, f"{result}\n")))
+    state = typeset_state()
+    drawn = drawn_narrow(seam, monkeypatch, snap, state)
+    assert drawn["scroll_x"] > 0.0
+    feed = state.feeds[ROOT]
+    tool = [view for view in feed.views.views(feed.generations[0].key) if is_literal(view)]
+    tool += [view for view in feed.views.views(("open", 2)) if is_literal(view)]
+    assert [tuple(view.texts) for view in tool] == [(result,)]
+
+    literal: list[tuple[str, ...]] = []
+    real = rich_pane._draw_literal
+
+    def draw_literal(dl: Any, start: Any, block: Any) -> float:
+        literal.append(block.lines)
+        return float(real(dl, start, block))
+
+    monkeypatch.setattr(rich_pane, "_draw_literal", draw_literal)
+    drawn_narrow(seam, monkeypatch, snap, TranscriptState(mode=RenderMode.RICH))
+    assert literal and all(lines == (result,) for lines in literal)
+
+
+def test_a_prompt_that_closes_stays_where_it_was(seam: Any) -> None:
+    """
+    Open, a prompt is the last thing in the log, a document of its own; closed,
+    a part of the generation's. It is at the same place in both, and set the same.
+    """
+    transcript = Transcript()
+    transcript.append(SegmentKind.OUTPUT, "Asked for more.\n")
+    transcript.append(SegmentKind.SYSTEM, f"\n> {PROMPT}\n")
+    state = typeset_state(follow_tail=False)
+    snap = session(transcript)
+    for _ in range(2):
+        draw(seam, snap, state)
+    feed = state.feeds[ROOT]
+    (open_view,) = feed.views.views(("open", 1))
+    was = (open_view.origin, tuple(open_view.texts))
+    assert was[1][0].startswith("> Glob")
+
+    transcript.append(SegmentKind.OUTPUT, "Reading.")
+    for _ in range(2):
+        draw(seam, snap, state)
+    (held,) = feed.generations
+    _, prompt = feed.views.views(held.key)
+    assert (prompt.origin, tuple(prompt.texts)) == was
+    assert ("open", 1) not in feed.views

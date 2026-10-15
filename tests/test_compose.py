@@ -1,12 +1,15 @@
 """
 The send rule shared by the two reply composers.
 
-Drawing needs a GL context, so what is pinned here is the decision the draw makes
-from the two signals it has -- the widget's submit flag and the button -- plus the
-draft pruning that keeps the state from growing a key per dead session.
+Most of what is pinned here is the decision the draw makes from the two signals it
+has -- the widget's submit flag and the button -- plus the draft pruning that keeps
+the state from growing a key per dead session. The last section draws the composer
+in a frame of a bare context, which needs no GL.
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 import pytest
 
@@ -100,3 +103,50 @@ def test_a_session_that_finished_here_keeps_its_composers_own_words(monkeypatch)
     assert "session done - it can no longer be messaged" in said.strings
     assert {"interrupt", "close session"} <= set(said.strings)
     assert not said.has("closed —")
+
+
+# -- the reply box, drawn ------------------------------------------------------------
+
+
+@pytest.mark.parametrize("wrap", [True, False])
+def test_the_reply_box_asks_this_imgui_to_wrap_a_draft_unless_told_not_to(
+    imgui: Any, monkeypatch: pytest.MonkeyPatch, wrap: bool
+) -> None:
+    """
+    A prompt being written wraps as it will in the log once sent. Drawn in a real
+    frame, so the flag is one this ImGui has and accepts on a multi-line box:
+    ImGui asserts on ``word_wrap`` anywhere else. ``wrap`` is
+    ``settings.wrap_inputs``, on by default, and SESSION passes it.
+    """
+    from pptmstr import settings
+    from pptmstr.store import Store
+    from pptmstr.ui import compose
+    from tests import test_typeset_views as rig
+    from tests.test_ui_text import RAN_ROOT, run
+
+    store = Store()
+    run(store)
+    flags: list[int] = []
+    real = imgui.input_text_multiline
+
+    def boxed(label: str, value: str, size: Any, given: int = 0) -> Any:
+        flags.append(given)
+        return real(label, value, size, given)
+
+    monkeypatch.setattr(imgui, "input_text_multiline", boxed)
+    state = ComposeState(replies={RAN_ROOT: "glob **/*.py for its callers, " * 20})
+    rig.frame(
+        imgui,
+        lambda: compose.draw_conversation(
+            store.snapshot(),
+            state,
+            RAN_ROOT,
+            send=lambda *_: None,
+            interrupt=lambda *_: None,
+            close=lambda *_: None,
+            wrap=wrap,
+        ),
+    )
+    word_wrap = int(imgui.InputTextFlags_.word_wrap)
+    assert len(flags) == 1 and bool(flags[0] & word_wrap) is wrap
+    assert settings.Settings().wrap_inputs is True

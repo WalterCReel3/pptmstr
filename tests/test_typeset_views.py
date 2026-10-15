@@ -2057,6 +2057,79 @@ def test_a_draw_outside_a_frame_raises_and_does_not_take_the_interpreter_down(se
             draw()
 
 
+# -- a prompt in a log -----------------------------------------------------------
+
+DIM = "text_dim"
+MARK = Part(typeset.parts.AS_WRITTEN + ">", colour=DIM)
+AS = typeset.parts.AS_WRITTEN
+
+
+@pytest.mark.parametrize(
+    ("logged", "expected"),
+    [
+        ("> plain words", (Part(AS + "> plain words", colour=DIM),)),
+        # Two short lines were ended on purpose, and keep the break (``prose_parts``).
+        ("> two lines\nend early", (Part(AS + "> two lines  \nend early", colour=DIM),)),
+        ("> # Plan\n\nThen go.", (MARK, Part("# Plan\n\nThen go.", colour=DIM))),
+        ("> - one\n- two", (MARK, Part("- one\n- two", colour=DIM))),
+        ("> ```py\nx = 1\n```", (MARK, Part("```py\nx = 1\n```", colour=DIM))),
+        ("> | a | b |\n|---|---|", (MARK, Part("| a | b |\n|---|---|", colour=DIM))),
+        (">     x = 1", (MARK, Part("    x = 1", colour=DIM))),
+        (
+            '>   File "a.py", line 1\n    raise X',
+            (Part('>   File "a.py", line 1\n    raise X', Kind.LITERAL, DIM),),
+        ),
+        ("> ", (MARK,)),
+    ],
+)
+def test_a_prompt_is_read_as_a_body_with_its_mark_set_as_a_character(
+    logged: str, expected: tuple[Part, ...]
+) -> None:
+    """
+    Read as markdown, ``> `` opens a quote. In front of a paragraph the mark is a
+    character of it; in front of a block of its own the mark would make that
+    block a paragraph, so it is a part above it; and an indented paste is set as
+    it was written, the mark with it.
+    """
+    assert typeset.prompt_parts(logged, colour=DIM) == expected
+
+
+def test_text_without_the_mark_is_a_body_like_any_other() -> None:
+    body = "run: make check\nthen: git status"
+    assert typeset.prompt_parts(body, colour=DIM) == typeset.prose_parts(body, colour=DIM)
+
+
+PROMPTS = [
+    "glob **/*.py and tests/**/*.md for callers",
+    "wrap it in <b>bold</b> or a <details> block",
+    "R&amp;D and &lt;T&gt; are written as entities",
+    "the logs are C:\\_work\\*.log and \\\\server\\share",
+    "one\ttab\tand\tanother",
+    "a NUL is \\u0000 and a typed one \\u005cu0000",
+    "run: make check\nthen: **/*.py\nlast: <b> & C:\\_work\\*.log",
+    "a paragraph\n\nand a second with 2*3*4 and _private and __init__",
+]
+
+
+@pytest.mark.parametrize("written", PROMPTS)
+def test_every_character_of_a_prompt_is_set_with_its_mark(seam: Any, written: str) -> None:
+    """
+    A prompt must show what was sent: the glob's stars, a tag, an entity, the
+    backslashes, the escape a NUL is held as. What was set, less its spaces, is
+    the mark and what was written, less its spaces.
+    """
+    cache = typeset.ViewCache()
+    parts = typeset.prompt_parts("> " + written, colour=DIM)
+
+    def body() -> None:
+        typeset.document(cache, "prompt", parts, apart=True, literal=True)
+
+    frame(seam, body)
+    assert _characters("".join(cache.texts("prompt"))) == _characters("> " + written)
+    blocks = [block for view in cache.views("prompt") for block in view.blocks]
+    assert blocks and not any(isinstance(block, imscribe.MarkdownCode) for block in blocks)
+
+
 # -- text ImGui draws ------------------------------------------------------------
 
 

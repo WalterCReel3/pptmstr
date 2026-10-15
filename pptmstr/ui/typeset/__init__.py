@@ -10,8 +10,8 @@ those answers live here once.
 - ``roles``: pptmstr's own policy. The role catalogue, the two family slots,
   sizes and scales, the pane switches, the settings read into them, and
   ``enabled(pane)``. No library import.
-- ``parts``: ``Kind``, ``Part``, and ``prose_parts``, the one rule for whether a
-  body is markdown. Pure.
+- ``parts``: ``Kind``, ``Part``, ``prose_parts``, the one rule for whether a
+  body is markdown, and ``prompt_parts``, a prompt in a log by that rule. Pure.
 - ``gate``: whether the library can draw and the sentence when it cannot; its
   fonts; ``unload``.
 - ``themes``: a role's face, size and leading as the library's theme, pptmstr's
@@ -89,7 +89,7 @@ from .gate import (
     unavailable_reason,
     unload,
 )
-from .parts import _MULTILINE, Kind, Part, multiline_kind, prose_parts
+from .parts import _MULTILINE, PROMPT_MARK, Kind, Part, multiline_kind, prompt_parts, prose_parts
 from .roles import (
     _LEGACY,
     _STATE,
@@ -151,6 +151,7 @@ __all__ = [
     "DEFAULT_PROPORTIONAL",
     "LEADING",
     "PANE_LABELS",
+    "PROMPT_MARK",
     "PROPORTIONALS",
     "ROLE_LABELS",
     "SCALES",
@@ -206,6 +207,7 @@ __all__ = [
     "pitch",
     "plain",
     "pre_frame",
+    "prompt_parts",
     "prose_parts",
     "proportional",
     "proportionals",
