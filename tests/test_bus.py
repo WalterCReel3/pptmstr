@@ -11,10 +11,10 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import os
 import time
 from collections.abc import Iterator
 
-import mcp.types as mcp_types
 import pytest
 
 from pptmstr import boardlog
@@ -47,6 +47,7 @@ from pptmstr.model import (
     TaskState,
 )
 from pptmstr.store import Store
+from tests.mcp_wire import call_tool, list_tools
 
 # What every call that looks up an id says of one the caller's board does not
 # list. Spelled out here, not imported: the account is one an agent reads from
@@ -160,9 +161,9 @@ class _Bus:
 
     def __init__(self, bridge: Bridge, brief: str | None = None, contained: bool = False) -> None:
         self.bridge = bridge
-        self.handler = build_server(_Session(bridge, brief, contained))[  # type: ignore[arg-type]
+        self.server = build_server(_Session(bridge, brief, contained))[  # type: ignore[arg-type]
             "instance"
-        ].request_handlers[mcp_types.CallToolRequest]
+        ]
 
     def call(
         self,
@@ -175,16 +176,9 @@ class _Bus:
     ) -> str:
         """The text the calling agent reads. Fails if the tool reports an error."""
         pending = self.bridge.submit(
-            self.handler(
-                mcp_types.CallToolRequest(
-                    method="tools/call",
-                    # The gate's stamp, as the CLI delivers it: a list, because the
-                    # arguments survive a JSON round trip and JSON has no tuples.
-                    params=mcp_types.CallToolRequestParams(
-                        name=name, arguments={**args, FROM_KEY: list(sender)}
-                    ),
-                )
-            )
+            # The gate's stamp, as the CLI delivers it: a list, because the
+            # arguments survive a JSON round trip and JSON has no tuples.
+            call_tool(self.server, name, {**args, FROM_KEY: list(sender)})
         )
         deadline = time.monotonic() + timeout
         while not pending.done():
@@ -193,8 +187,8 @@ class _Bus:
                 raise AssertionError(f"{name} was never answered")
             time.sleep(0.002)
         answer = pending.result(timeout=timeout)
-        assert not answer.root.isError, answer.root.content
-        return str(answer.root.content[0].text)
+        assert not answer.is_error, answer.content
+        return answer.text
 
     def pump(self, store: Store) -> None:
         """One frame's worth of the loop in ``app.begin_frame``."""
@@ -1276,11 +1270,22 @@ def test_the_stamp_survives_a_json_round_trip() -> None:
 # would still pass. That is how ``claim_task()`` came to answer
 # "'task_id' is a required property" to the call its description asks for.
 #
-# jsonschema below is the validator a real call meets, not a stand-in for one:
-# ``mcp.server.lowlevel.Server.call_tool`` validates arguments against the tool's
-# announced ``inputSchema`` before dispatching to the handler. It is not a direct
-# dependency and does not need to be -- mcp requires it, claude-agent-sdk requires
-# mcp, and pptmstr requires the SDK.
+# jsonschema below is the validator a real call meets, not a stand-in for one: the
+# server ``create_sdk_mcp_server`` builds validates arguments against the tool's
+# announced ``inputSchema`` with jsonschema before dispatching to the handler, under
+# either mcp major. It is not a direct dependency and does not need to be -- mcp and
+# claude-agent-sdk both require it, and pptmstr requires the SDK.
+
+
+async def listed_tools(server: object) -> dict[str, dict[str, object]]:
+    """
+    Each tool as ``tools/list`` hands it to the CLI, by name: the whole wire entry,
+    description and ``inputSchema`` both.
+    """
+    from tests.mcp_wire import _request
+
+    listed = await _request(server, "tools/list", {})  # type: ignore[arg-type]
+    return {tool["name"]: tool for tool in listed["tools"]}
 
 
 def _announced_schemas(contained: bool = False) -> dict[str, dict[str, object]]:
@@ -1289,8 +1294,6 @@ def _announced_schemas(contained: bool = False) -> dict[str, dict[str, object]]:
     of a session that is or is not contained.
     """
     import asyncio
-
-    import mcp.types as mcp_types
 
     from pptmstr.bridge import Bridge
     from pptmstr.bus import build_server
@@ -1301,9 +1304,7 @@ def _announced_schemas(contained: bool = False) -> dict[str, dict[str, object]]:
             self.contained = contained
 
     server = build_server(_Session(Bridge()))["instance"]  # type: ignore[arg-type]
-    handler = server.request_handlers[mcp_types.ListToolsRequest]
-    listed = asyncio.run(handler(mcp_types.ListToolsRequest(method="tools/list")))
-    return {t.name: t.inputSchema for t in listed.root.tools}
+    return asyncio.run(list_tools(server))
 
 
 def _announced_descriptions() -> dict[str, str]:
@@ -1317,9 +1318,8 @@ def _announced_descriptions() -> dict[str, str]:
             self.bridge = bridge
 
     server = build_server(_Session(Bridge()))["instance"]  # type: ignore[arg-type]
-    handler = server.request_handlers[mcp_types.ListToolsRequest]
-    listed = asyncio.run(handler(mcp_types.ListToolsRequest(method="tools/list")))
-    return {t.name: t.description or "" for t in listed.root.tools}
+    listed = asyncio.run(listed_tools(server))
+    return {name: str(tool.get("description") or "") for name, tool in listed.items()}
 
 
 # The smallest call each tool's own description says is enough, with the sentence
@@ -1379,6 +1379,27 @@ COMMAND_CALLS: dict[str, dict[str, object]] = {
 }
 
 
+def test_the_wire_lists_every_tool_the_gate_stamps() -> None:
+    """
+    The helper reaches the server the product builds, under whichever mcp major is
+    installed: what ``tools/list`` answers over the SDK's bridge is the set
+    ``BUS_TOOLS`` names, so a helper that silently listed nothing could not pass.
+    """
+    from pptmstr.bus import BUS_TOOLS, qualified
+
+    assert {qualified(name) for name in _announced_schemas()} == BUS_TOOLS
+
+
+def test_a_run_says_which_mcp_and_sdk_it_ran_against() -> None:
+    from importlib.metadata import version
+
+    from tests.conftest import ran_against
+
+    line = next(line for line in ran_against(os.environ) if line.startswith("bus: "))
+    assert f"mcp {version('mcp')} " in line
+    assert f"claude-agent-sdk {version('claude-agent-sdk')}" in line
+
+
 def test_every_tool_accepts_the_call_its_own_description_documents() -> None:
     import jsonschema
 
@@ -1431,8 +1452,6 @@ def test_a_claim_with_no_task_id_asks_for_anything_claimable() -> None:
     schema and then asking for the task named "" would be the same defect one
     layer in.
     """
-    import mcp.types as mcp_types
-
     from pptmstr.bridge import Bridge
     from pptmstr.bus import FROM_KEY, build_server
 
@@ -1446,19 +1465,9 @@ def test_a_claim_with_no_task_id_asks_for_anything_claimable() -> None:
     bridge.start()  # claim_task parks on a future, so this one needs the loop
     try:
         server = build_server(_Session(bridge))["instance"]  # type: ignore[arg-type]
-        handler = server.request_handlers[mcp_types.CallToolRequest]
-        call = handler(
-            mcp_types.CallToolRequest(
-                method="tools/call",
-                params=mcp_types.CallToolRequestParams(
-                    name="claim_task",
-                    # The stamp and nothing else: exactly what the CLI would deliver
-                    # for a `claim_task()` the gate has stamped.
-                    arguments={FROM_KEY: list(DEV)},
-                ),
-            )
-        )
-        result = bridge.submit(call)
+        # The stamp and nothing else: exactly what the CLI would deliver for a
+        # `claim_task()` the gate has stamped.
+        result = bridge.submit(call_tool(server, "claim_task", {FROM_KEY: list(DEV)}))
 
         intents: list[object] = []
         for _ in range(200):
@@ -1478,8 +1487,8 @@ def test_a_claim_with_no_task_id_asks_for_anything_claimable() -> None:
     finally:
         bridge.stop()
 
-    assert not answered.root.isError, answered.root.content
-    assert "t1" in answered.root.content[0].text
+    assert not answered.is_error, answered.content
+    assert "t1" in answered.text
 
 
 def test_a_declaration_the_board_refused_is_not_reported_as_success() -> None:
@@ -1660,14 +1669,10 @@ def test_a_board_write_the_store_never_saw_is_not_reported_as_success() -> None:
     try:
         bus = _Bus(bridge)
         pending = bridge.submit(
-            bus.handler(
-                mcp_types.CallToolRequest(
-                    method="tools/call",
-                    params=mcp_types.CallToolRequestParams(
-                        name="declare_task",
-                        arguments={"task_id": "t1", "title": "do t1", FROM_KEY: list(LEAD)},
-                    ),
-                )
+            call_tool(
+                bus.server,
+                "declare_task",
+                {"task_id": "t1", "title": "do t1", FROM_KEY: list(LEAD)},
             )
         )
         # Parked, and deliberately never applied: this is the frame loop dying
@@ -1679,12 +1684,12 @@ def test_a_board_write_the_store_never_saw_is_not_reported_as_success() -> None:
         assert bridge.asking_count == 1, "the write did not park on a future at all"
 
         bridge.abandon_all_requests()
-        answered = pending.result(timeout=5).root
+        answered = pending.result(timeout=5)
     finally:
         bridge.stop()
 
-    assert not answered.isError, answered.content
-    text = answered.content[0].text
+    assert not answered.is_error, answered.content
+    text = answered.text
     assert "NOT on the board" in text and "shutting down" in text
 
 
@@ -2774,21 +2779,14 @@ def test_a_read_the_store_never_saw_is_not_reported_as_a_missing_task() -> None:
     """
     with _live_bus() as bus:
         pending = bus.bridge.submit(
-            bus.handler(
-                mcp_types.CallToolRequest(
-                    method="tools/call",
-                    params=mcp_types.CallToolRequestParams(
-                        name="read_task", arguments={"task_id": "t1", FROM_KEY: list(DEV)}
-                    ),
-                )
-            )
+            call_tool(bus.server, "read_task", {"task_id": "t1", FROM_KEY: list(DEV)})
         )
         deadline = time.monotonic() + 5.0
         while bus.bridge.asking_count == 0:
             assert time.monotonic() < deadline, "read_task never parked"
             time.sleep(0.002)
         bus.bridge.abandon_all_requests()
-        text = str(pending.result(timeout=5.0).root.content[0].text)
+        text = pending.result(timeout=5.0).text
 
     assert "NOT read" in text and "shutting down" in text
     assert "No task with the id" not in text
@@ -3701,22 +3699,13 @@ def test_a_digest_the_store_never_saw_is_reported_as_not_read() -> None:
     bridge.start()
     try:
         bus = _Bus(bridge)
-        pending = bridge.submit(
-            bus.handler(
-                mcp_types.CallToolRequest(
-                    method="tools/call",
-                    params=mcp_types.CallToolRequestParams(
-                        name="read_digest", arguments={FROM_KEY: list(LEAD)}
-                    ),
-                )
-            )
-        )
+        pending = bridge.submit(call_tool(bus.server, "read_digest", {FROM_KEY: list(LEAD)}))
         deadline = time.monotonic() + 5.0
         while not bridge.drain():
             assert time.monotonic() < deadline, "read_digest never parked"
             time.sleep(0.002)
         bridge.abandon_all_requests()
-        text = str(pending.result(timeout=5.0).root.content[0].text)
+        text = pending.result(timeout=5.0).text
     finally:
         bridge.stop()
 
@@ -3747,16 +3736,7 @@ def test_a_release_through_the_tool_is_stamped_on_the_clock_a_digest_mark_is() -
     _claimed(store)
 
     def emitted(bus: _Bus, name: str, args: dict[str, object]) -> object:
-        bus.bridge.submit(
-            bus.handler(
-                mcp_types.CallToolRequest(
-                    method="tools/call",
-                    params=mcp_types.CallToolRequestParams(
-                        name=name, arguments={**args, FROM_KEY: list(DEV)}
-                    ),
-                )
-            )
-        )
+        bus.bridge.submit(call_tool(bus.server, name, {**args, FROM_KEY: list(DEV)}))
         deadline = time.monotonic() + 5.0
         while True:
             queued = bus.bridge.drain()
@@ -5166,22 +5146,13 @@ def _abandoned(name: str, args: dict[str, object], sender: NodeId = DEV) -> str:
     bridge.start()
     try:
         bus = _Bus(bridge)
-        pending = bridge.submit(
-            bus.handler(
-                mcp_types.CallToolRequest(
-                    method="tools/call",
-                    params=mcp_types.CallToolRequestParams(
-                        name=name, arguments={**args, FROM_KEY: list(sender)}
-                    ),
-                )
-            )
-        )
+        pending = bridge.submit(call_tool(bus.server, name, {**args, FROM_KEY: list(sender)}))
         deadline = time.monotonic() + 5.0
         while not bridge.drain():
             assert time.monotonic() < deadline, f"{name} never parked"
             time.sleep(0.002)
         bridge.abandon_all_requests()
-        return str(pending.result(timeout=5.0).root.content[0].text)
+        return pending.result(timeout=5.0).text
     finally:
         bridge.stop()
 
@@ -7464,12 +7435,10 @@ def test_the_command_tools_are_announced_as_their_own_module_describes_them() ->
             self.bridge = bridge
 
     server = build_server(_Contained(Bridge()))["instance"]  # type: ignore[arg-type]
-    handler = server.request_handlers[mcp_types.ListToolsRequest]
-    listed = asyncio.run(handler(mcp_types.ListToolsRequest(method="tools/list")))
-    announced = {t.name: t for t in listed.root.tools}
+    announced = asyncio.run(listed_tools(server))
     for spec in commandbus.TOOLS:
-        assert announced[spec.name].description == spec.description
-        assert announced[spec.name].inputSchema == spec.schema
+        assert announced[spec.name]["description"] == spec.description
+        assert announced[spec.name]["inputSchema"] == spec.schema
 
 
 def test_a_session_that_cannot_say_whether_it_is_contained_is_not_given_a_server() -> None:
@@ -7522,21 +7491,12 @@ def test_a_command_tool_called_without_the_gates_stamp_is_refused_and_files_noth
     store = Store()
     _team(store)
     with _live_bus(contained=True) as bus:
-        pending = bus.bridge.submit(
-            bus.handler(
-                mcp_types.CallToolRequest(
-                    method="tools/call",
-                    params=mcp_types.CallToolRequestParams(
-                        name="request_command", arguments=dict(_COMMAND_ASKED)
-                    ),
-                )
-            )
-        )
+        pending = bus.bridge.submit(call_tool(bus.server, "request_command", dict(_COMMAND_ASKED)))
         answer = pending.result(timeout=5.0)
         bus.pump(store)
 
-    assert answer.root.isError
-    assert "no authenticated sender" in str(answer.root.content[0].text)
+    assert answer.is_error
+    assert "no authenticated sender" in answer.text
     assert not store.snapshot().commands
 
 
@@ -7575,3 +7535,136 @@ def test_a_digest_says_where_a_command_stands_and_not_that_its_asker_is_waiting(
     ) in text
     assert "\n- command: reviewer asked the operator to run it; it is running\n" in text
     assert "is waiting" not in text and "SECRET" not in text
+
+
+# -- read_task, as the board's cut rows send a reader to it ---------------------------
+#
+# What a reader who follows a cut row is owed, whichever spelling the notice uses:
+# the whole specification, from its own session's board only, with nothing in the
+# store changed by the read and nothing answered without the gate's stamp.
+
+
+def _prose(words: int, stem: str = "clause") -> str:
+    """
+    Text in which every position is distinguishable from every other.
+
+    A run of one repeated character cannot tell a reply that carries a specification
+    whole from one that carries the right number of characters from the wrong place,
+    and it cannot show that pages meet without a gap or an overlap.
+    """
+    return " ".join(f"{stem}-{i}" for i in range(words))
+
+
+def test_a_spec_the_board_cuts_is_whole_in_a_task_read() -> None:
+    from pptmstr.bus import _MAX_DETAIL_CHARS
+
+    spec = _prose(520)
+    assert len(spec) > 5000 > _MAX_DETAIL_CHARS
+    store = Store()
+    store.apply(TaskDeclared(Task(id="t1", title="do t1", detail=spec), node_id=LEAD))
+
+    with _live_bus() as bus:
+        listed = bus.call(store, "read_board", {}, sender=QA)
+        whole = bus.call(store, "read_task", {"task_id": "t1"}, sender=QA)
+
+    assert spec not in listed and "clause-519" not in listed
+    assert spec in whole
+    assert "more character(s)" not in whole
+
+
+def test_a_task_read_does_not_reach_another_sessions_board() -> None:
+    """
+    The scoping the board read already has, at the narrower tool. The refusal says
+    the board is scoped rather than only that the id is absent, because an id
+    carried over from another session is a different mistake from a misspelling and
+    retyping it will never work.
+    """
+    other: NodeId = ("sess-2", None)
+    store = Store()
+    store.apply(declared("ours"))
+    store.apply(TaskDeclared(Task(id="theirs", title="their work", detail="THEIR SPEC"), other))
+
+    with _live_bus() as bus:
+        refused = bus.call(store, "read_task", {"task_id": "theirs"}, sender=QA)
+        granted = bus.call(store, "read_task", {"task_id": "theirs"}, sender=other)
+
+    assert "THEIR SPEC" not in refused and "their work" not in refused
+    assert "another session" in refused
+    assert "THEIR SPEC" in granted
+
+
+def test_a_note_the_board_cuts_is_whole_in_a_task_read() -> None:
+    from pptmstr.bus import _MAX_CONCERN_CHARS
+
+    body = _prose(260, "finding")
+    assert len(body) > _MAX_CONCERN_CHARS
+    store = Store()
+    store.apply(declared("t1"))
+    store.apply(ConcernPosted(DEV, _about("c1", "t1", body=body)))
+
+    with _live_bus() as bus:
+        listed = bus.call(store, "read_board", {}, sender=QA)
+        whole = bus.call(store, "read_task", {"task_id": "t1"}, sender=QA)
+
+    assert "finding-259" not in listed
+    assert 'read_task(task_id="t1") returns it whole' in listed
+    assert f"| {body}" in whole
+    assert "more character(s)" not in whole
+
+
+def test_a_task_read_on_an_empty_board_is_refused_by_name() -> None:
+    """Nothing declared is a board with no such task, and is said in the same words."""
+    with _live_bus() as bus:
+        text = bus.call(Store(), "read_task", {"task_id": "t1"}, sender=QA)
+
+    assert "No task with the id 't1' is on your board" in text
+    assert "read_board lists" in text
+
+
+def test_a_task_that_fits_in_one_reply_is_not_paged() -> None:
+    store = Store()
+    store.apply(TaskDeclared(Task(id="t1", title="do t1", detail=_prose(520)), node_id=LEAD))
+
+    with _live_bus() as bus:
+        text = bus.call(store, "read_task", {"task_id": "t1"}, sender=QA)
+
+    assert "part 1 of" not in text and "part=" not in text
+
+
+def test_a_task_read_is_stamped_or_it_is_refused() -> None:
+    """
+    The wiring rather than the unit: `_sender` refusing an unstamped call is
+    covered above, and is worth nothing for a tool whose handler never asks.
+    """
+    from pptmstr.bus import BUS_TOOLS, qualified
+
+    assert qualified("read_task") in BUS_TOOLS
+
+    bridge = Bridge()
+    bridge.start()
+    try:
+        bus = _Bus(bridge)
+        pending = bridge.submit(call_tool(bus.server, "read_task", {"task_id": "t1"}))
+        answer = pending.result(timeout=5.0)
+    finally:
+        bridge.stop()
+
+    assert answer.is_error
+    assert "no authenticated sender" in answer.text
+    assert not bridge.drain()
+
+
+def test_a_task_read_changes_nothing() -> None:
+    store = Store()
+    store.apply(declared("t1"))
+    store.apply(ConcernPosted(DEV, _about("c1", "t1")))
+    before = store.snapshot()
+
+    with _live_bus() as bus:
+        bus.call(store, "read_task", {"task_id": "t1"}, sender=QA)
+
+    after = store.snapshot()
+    assert after.tasks == before.tasks
+    # A note read off a task is not a message collected: the recipient's inbox
+    # still owes it to them.
+    assert after.concerns == before.concerns

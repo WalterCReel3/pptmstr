@@ -1560,6 +1560,26 @@ def test_the_default_environment_is_this_processes(monkeypatch: pytest.MonkeyPat
     assert len(commandrun.environment_changes()) == 3
 
 
+def test_a_runner_built_as_the_application_builds_one_reads_the_environment_at_each_start(
+    h: Harness, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    ``app._start`` gives the runner no ``environ``, and the entry point takes the
+    library's variables back out of ``os.environ`` (``pairing.release``) after
+    modules are imported. A runner that copied the environment when it was made
+    would hand every command the checkout's own pair.
+    """
+    monkeypatch.setenv(MARK, h.environ[MARK])
+    monkeypatch.setenv("ARGV_OUT", h.environ["ARGV_OUT"])
+    monkeypatch.setenv("IMTYPESET_PROBE", "the checkout's own")
+    assert h.runner.close(10.0) == ()
+    h.runner = Runner(h._on_end, root=h.root, grace_s=0.4, drain_s=0.3)
+    monkeypatch.delenv("IMTYPESET_PROBE")
+
+    ended = h.run("printf '%s' \"${IMTYPESET_PROBE-unset}\"")
+    assert _end(ended).tail == "unset"
+
+
 # -- the property: nothing the command started in its session is left --------------
 #
 # The shell's process group is not the command: ``timeout`` and a job-control
@@ -2224,6 +2244,19 @@ def _environ_of(pid: int) -> list[bytes]:
     return Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
 
 
+def _execed_environ_of(pid: int) -> list[bytes]:
+    """
+    A just-started process's environment, once it has one: ``Popen`` returns as
+    the child begins to exec, and until the exec has set up the new image the
+    process reads as having no environment at all.
+    """
+    deadline = time.monotonic() + 5
+    while (environ := _environ_of(pid)) == [b""]:
+        assert time.monotonic() < deadline, f"{pid} still reads as having no environment"
+        time.sleep(0.01)
+    return environ
+
+
 def _tagged_shell(script: str, mark: str, command_id: str) -> tuple[subprocess.Popen[bytes], Any]:
     """
     A shell as the runner starts one -- its own session, the command's tag in
@@ -2472,7 +2505,7 @@ def test_a_process_started_with_what_the_records_hold_is_not_taken_for_the_comma
     ]
     try:
         for each, value in zip(forged, known, strict=True):
-            assert f"PPTMSTR_COMMAND={value}".encode() in _environ_of(each.pid)
+            assert f"PPTMSTR_COMMAND={value}".encode() in _execed_environ_of(each.pid)
         assert commandrun.escaped(started) == ()
         found = commandrun.survivor(started)
         assert isinstance(found, Survivor) and found.escaped == () and found.shell
@@ -2488,6 +2521,7 @@ def test_a_process_started_with_what_the_records_hold_is_not_taken_for_the_comma
             env={**os.environ, MARK: mark, commandrun.COMMAND_TAG: _VALUES[command_id]},
         )
         forged.append(real)
+        _execed_environ_of(real.pid)
         assert commandrun.escaped(started) == (real.pid,)
     finally:
         for each in forged:

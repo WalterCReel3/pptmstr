@@ -682,21 +682,12 @@ def _run_handler(session, arguments: dict) -> None:
     """Feed the gate's approved arguments to the real post_concern handler."""
     import asyncio
 
-    import mcp.types as mcp_types
-
     from pptmstr.bus import build_server
+    from tests.mcp_wire import call_tool
 
     server = build_server(session)["instance"]
-    handler = server.request_handlers[mcp_types.CallToolRequest]
-    result = asyncio.run(
-        handler(
-            mcp_types.CallToolRequest(
-                method="tools/call",
-                params=mcp_types.CallToolRequestParams(name="post_concern", arguments=arguments),
-            )
-        )
-    )
-    assert not result.root.isError, result.root.content
+    result = asyncio.run(call_tool(server, "post_concern", arguments))
+    assert not result.is_error, result.content
 
 
 def _approved_args(bridge: Bridge, store: Store, session, decision: Decision) -> dict:

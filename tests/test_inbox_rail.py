@@ -1856,6 +1856,10 @@ def test_the_approval_keys_do_nothing_on_a_decision_row(monkeypatch, shift: bool
     fake.get_io.return_value.want_text_input = False
     fake.is_mouse_clicked.return_value = False
     fake.get_io.return_value.key_shift = shift
+    # A mock's attributes are truthy: unset, every key would read as a chord.
+    fake.get_io.return_value.key_ctrl = False
+    fake.get_io.return_value.key_alt = False
+    fake.get_io.return_value.key_super = False
     action_keys = {_real_imgui.Key.a, _real_imgui.Key.r, _real_imgui.Key.e}
     fake.is_key_pressed.side_effect = lambda key: key in action_keys
     monkeypatch.setattr(review, "imgui", fake)
@@ -2342,6 +2346,10 @@ def test_a_command_is_one_row_for_every_line_of_it() -> None:
     the operator approves from. One ``repr`` row puts the second command of
     `ls # '` + newline + `touch pwned #'` wherever the first ends, in a body
     that does not wrap.
+
+    Any other string is itself (``inbox.argument_text``), as the typeset branch
+    sets it: a ``repr`` escapes its quotes, and a break in a description changes
+    nothing that runs.
     """
     rows = inbox.argument_rows(
         "Bash", {"command": "ls # '\ntouch pwned #'", "description": "list\nthem"}
@@ -2350,12 +2358,12 @@ def test_a_command_is_one_row_for_every_line_of_it() -> None:
         "  command =",
         "    ls # '\\n",
         "    touch pwned #'",
-        "  description = 'list\\nthem'",
+        "  description = list\nthem",
     ]
     assert inbox.argument_rows("Bash", {"command": "pytest -q"}) == ["  command =", "    pytest -q"]
     # Only the Bash command: a tool that merely has an argument of that name
-    # keeps the one-row form every other argument has.
-    assert inbox.argument_rows("Mystery", {"command": "a\nb"}) == ["  command = 'a\\nb'"]
+    # keeps the one-item form every other argument has.
+    assert inbox.argument_rows("Mystery", {"command": "a\nb"}) == ["  command = a\nb"]
     assert inbox.argument_rows("Bash", {}) == []
 
 
@@ -2374,6 +2382,12 @@ def test_the_expanded_approval_draws_those_rows_and_no_other_form_of_the_command
     fake = MagicMock()
     fake.ImVec2 = _ImVec2
     fake.get_text_line_height_with_spacing.return_value = 10.0
+    # The body is sized by what each row wraps to: one line each, at this width.
+    fake.get_text_line_height.return_value = 10.0
+    fake.get_content_region_avail.return_value = _ImVec2(400.0, 400.0)
+    fake.get_style.return_value.item_spacing = _ImVec2(0.0, 0.0)
+    fake.get_style.return_value.window_padding = _ImVec2(0.0, 5.0)
+    fake.calc_text_size.return_value = _ImVec2(100.0, 10.0)
     fake.input_text_with_hint.return_value = (False, "")
     fake.button.return_value = False
     monkeypatch.setattr(inbox, "imgui", fake)

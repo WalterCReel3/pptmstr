@@ -9,17 +9,25 @@ which exists so a sixty-row board can be read without being read.
 Drawing is exercised with ``imgui`` replaced by a ``MagicMock``: it cannot say what
 anything looked like, but it can say what was drawn, in what order, and whether a
 bound announced itself. The parts that need pixels are noted where they arise.
+
+The typeset path is at the end and runs in real ImGui frames on the rig in
+``test_typeset``. Every test above it runs with the seam off, whatever an earlier
+test left loaded.
 """
 
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Collection
 from types import MappingProxyType
+from typing import Any
 from unittest.mock import MagicMock
 
+import imscribe
 import pytest
+from imgui_bundle import icons_fontawesome_6 as fa
 
-from pptmstr.board import BoardConcern, BoardTask
+from pptmstr.board import BoardConcern, BoardTask, board_concerns, board_tasks
 from pptmstr.bridge import Bridge
 from pptmstr.model import (
     AgentRecord,
@@ -33,8 +41,23 @@ from pptmstr.model import (
     TaskState,
 )
 from pptmstr.theme import P
-from pptmstr.ui import board_pane
+from pptmstr.ui import board_pane, typeset
 from pptmstr.ui.focus import FocusState, Scope
+from pptmstr.ui.typeset import Kind, Part
+from tests import test_typeset_views as rig
+
+
+@pytest.fixture(autouse=True)
+def old_renderer(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    The seam off for every test that did not ask for it.
+
+    The faces stay loaded from the first typeset test to the end of the module, and
+    a mocked ``imgui`` has no frame for the seam to draw in.
+    """
+    if "seam" not in request.fixturenames:
+        monkeypatch.setattr(typeset, "enabled", lambda pane=None: False)
+
 
 ROOT: NodeId = ("s1", None)
 QA: NodeId = ("s1", "agent-qa")
@@ -794,6 +817,615 @@ def test_the_operator_reads_the_finding_the_agents_read(monkeypatch) -> None:
 
     assert any("checksum ignored in sixty places" in line for line in lines)
     assert any("tle/parse.py never validates before use" in line for line in lines)
+
+
+# -- how a body is read ------------------------------------------------------------
+
+
+def test_a_body_is_read_by_the_seams_rule_and_no_other(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    The wiring. Whether a body is markdown is ``typeset.prose_parts``' to say, so that
+    a concern reads the same here, in DETAIL and in the inbox; this pane hands it the
+    text it kept and adds nothing but the note of what it dropped.
+    """
+    seen: list[str] = []
+    answer = (Part("as the seam read it", Kind.LITERAL),)
+    monkeypatch.setattr(typeset, "prose_parts", lambda text: seen.append(text) or answer)
+
+    assert board_pane.clipped_parts("first line\nsecond line", 40) is answer
+    assert seen == ["first line\nsecond line"]
+    clipped = board_pane.clipped_parts("first line\nsecond line", 12)
+    assert seen[1:] == ["first line"]
+    assert clipped[:-1] == answer and clipped[-1].colour == "text_dim"
+
+
+def test_one_fact_a_line_and_a_pasted_traceback_keep_their_lines() -> None:
+    """
+    The fixture concern ``fake-c6``, which is not markdown. As markdown its four
+    facts are one paragraph and its traceback loses the indentation that pairs a
+    frame with its line.
+    """
+    body = rig._fleet_bodies()["fake-c6"]
+    facts, trace = body.split("\n\n")
+    assert len(body) < board_pane._MAX_CONCERN_CHARS
+
+    first, second = board_pane.clipped_parts(body, board_pane._MAX_CONCERN_CHARS)
+
+    assert first.kind is Kind.MARKDOWN
+    # Each fact ends in markdown's hard break, bar the last.
+    assert [line.endswith("  ") for line in first.text.split("\n")] == [True, True, True, False]
+    assert second == Part(trace, Kind.LITERAL)
+    assert facts.startswith("ran: pytest") and '\n  File "tests/test_parse.py"' in trace
+
+
+def test_a_markdown_body_is_one_part_and_is_not_rewritten() -> None:
+    body = (
+        "`tle/parse.py` computes the checksum and never compares it.\n\n"
+        "1. inside the parser, or\n2. beside it.\n\n"
+        "```python\nwhile True:\n\n    retry()\n```\n"
+    )
+    (part,) = board_pane.clipped_parts(body, board_pane._MAX_CONCERN_CHARS)
+    assert part.text is body
+    assert part.kind is Kind.MARKDOWN
+
+
+def test_an_empty_body_is_no_parts() -> None:
+    assert board_pane.clipped_parts(" \n\n", 40) == ()
+
+
+def test_the_cut_falls_back_to_the_end_of_a_line() -> None:
+    text = "first line\nsecond `li" + "ne` continues"
+    assert board_pane.clip_lines(text, 21) == ("first line", len(text) - 10)
+    assert board_pane.clip_lines(text, len(text)) == (text, 0)
+
+
+def test_one_long_line_is_cut_where_the_limit_falls() -> None:
+    assert board_pane.clip_lines("x" * 50, 20) == ("x" * 20, 30)
+    # A newline too far back would give away most of what the bound allows.
+    assert board_pane.clip_lines("ab\n" + "x" * 50, 20) == ("ab\n" + "x" * 17, 33)
+
+
+def test_a_clipped_body_says_so_as_its_last_part() -> None:
+    parts = board_pane.clipped_parts("word " * 100, 40)
+    assert parts[-1] == Part("... 460 more character(s) not shown", Kind.WRAPPED, "text_dim")
+    assert len(parts[0].text) == 40
+    assert board_pane.clipped_parts("short", 40) == (Part("short"),)
+
+
+# -- state as a glyph ----------------------------------------------------------------
+
+
+def test_each_condition_a_row_can_be_in_has_its_glyph() -> None:
+    glyph = board_pane.task_glyph
+    assert glyph(board_task(state=TaskState.COMPLETED, owner="b")) == (fa.ICON_FA_CHECK, "ok")
+    assert glyph(board_task(state=TaskState.CLAIMED, owner="b")) == (
+        fa.ICON_FA_GEARS,
+        "state_running",
+    )
+    assert glyph(board_task()) == (fa.ICON_FA_CIRCLE, "text_dim")
+    assert glyph(board_task(blocked_on=("t0",))) == (fa.ICON_FA_LOCK, "text_dim")
+
+
+def test_the_two_conditions_nothing_clears_share_the_warning() -> None:
+    stuck = (fa.ICON_FA_TRIANGLE_EXCLAMATION, "warn")
+    stranded = board_task(state=TaskState.CLAIMED, owner="b", owner_gone=True)
+    undeclared = board_task(blocked_on=("t9",), missing=("t9",))
+    assert board_pane.task_glyph(stranded) == stuck
+    assert board_pane.task_glyph(undeclared) == stuck
+
+
+def test_a_finished_task_is_finished_whatever_became_of_its_owner() -> None:
+    done = board_task(state=TaskState.COMPLETED, owner="b", owner_gone=True)
+    assert board_pane.task_glyph(done)[0] == fa.ICON_FA_CHECK
+
+
+def test_a_closed_concern_says_a_word_only_when_something_happened() -> None:
+    mark = board_pane.concern_mark
+    assert mark(board_concern(state=ConcernState.DELIVERED)) == ""
+    assert mark(board_concern(state=ConcernState.POSTED)) == "waiting"
+    assert mark(board_concern(state=ConcernState.WITHDRAWN)) == "withdrawn"
+    assert mark(board_concern(state=ConcernState.DELIVERED, edited=True)) == "edited"
+    assert mark(board_concern(state=ConcernState.POSTED, edited=True)) == "waiting, edited"
+
+
+def test_an_edited_concern_is_inked_apart_from_one_delivered_as_written() -> None:
+    plain = board_pane.concern_glyph(board_concern(state=ConcernState.DELIVERED))
+    edited = board_pane.concern_glyph(board_concern(state=ConcernState.DELIVERED, edited=True))
+    assert plain == (fa.ICON_FA_CHECK, "text_dim")
+    assert edited == (fa.ICON_FA_CHECK, "accent")
+
+
+# -- the typeset path, in real frames ----------------------------------------------
+
+LONG = "a title that goes on " * 12
+SPEC = "Builder task. `tle/parse.py` only.\n\n- one\n- two\n"
+
+
+def concern(
+    cid: str, *, subject: str = "why", body: str = "", task_id: str | None = None
+) -> Concern:
+    return Concern(
+        id=cid,
+        sender=QA,
+        recipient=ROOT,
+        subject=subject,
+        body=body,
+        posted_at=1.0,
+        task_id=task_id,
+    )
+
+
+class Frames:
+    """
+    The pane drawn in real frames, with chosen rows held open and every native
+    string and every row's height written down.
+    """
+
+    def __init__(self, im: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.im = im
+        self.pane = board_pane.BoardState()
+        self.opened: Collection[str] = ()
+        self.strings: list[str] = []
+        self.heights: dict[str, float] = {}
+
+        tree_node_ex = im.tree_node_ex
+        text_colored = im.text_colored
+        task_row = board_pane._typeset_task_row
+        concern_row = board_pane._typeset_concern_row
+
+        def tree(label: str, *args: Any) -> bool:
+            im.set_next_item_open(label.split("###")[-1] in self.opened)
+            return bool(tree_node_ex(label, *args))
+
+        def text(colour: Any, string: str) -> None:
+            self.strings.append(string)
+            text_colored(colour, string)
+
+        def measured(inner: Any) -> Any:
+            def row(first: Any, *args: Any) -> None:
+                before = im.get_cursor_pos_y()
+                inner(first, *args)
+                self.heights[first.id] = im.get_cursor_pos_y() - before
+
+            return row
+
+        monkeypatch.setattr(im, "tree_node_ex", tree)
+        monkeypatch.setattr(im, "text_colored", text)
+        monkeypatch.setattr(board_pane, "_typeset_task_row", measured(task_row))
+        monkeypatch.setattr(board_pane, "_typeset_concern_row", measured(concern_row))
+
+    def draw(
+        self,
+        snap: Snapshot,
+        *opened: str,
+        focus: FocusState | None = None,
+        width: float | None = None,
+    ) -> list[str]:
+        """
+        One frame. ``width`` docks the pane that wide, as a layout does.
+        """
+        self.opened = opened
+        self.strings.clear()
+        where = at_root(snap) if focus is None else focus
+        im = self.im
+
+        def body() -> None:
+            if width is None:
+                board_pane.draw(snap, where, self.pane, Bridge())
+                return
+            im.begin_child("##docked", im.ImVec2(width, 0.0))
+            board_pane.draw(snap, where, self.pane, Bridge())
+            im.end_child()
+
+        rig.frame(im, body)
+        return list(self.strings)
+
+    def shown(self, key: object) -> str:
+        return "\n\n".join(self.pane.views.texts(key))
+
+    def people(self, snap: Snapshot) -> str:
+        (row,) = board_concerns(snap, "s1")
+        return board_pane.participants_label(row)
+
+    def line(self) -> float:
+        im = self.im
+        im.new_frame()
+        height = float(im.get_text_line_height_with_spacing())
+        im.render()
+        return height
+
+
+@pytest.fixture
+def frames(seam: Any, monkeypatch: pytest.MonkeyPatch) -> Frames:
+    return Frames(seam, monkeypatch)
+
+
+def test_with_the_seam_off_the_pane_makes_no_view(
+    seam: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    typeset.configure(typeset=False, mono=False)
+    pane = board_pane.BoardState()
+    snap = board_snapshot(Task(id="t1", title="do t1", detail=SPEC, declared_by=ROOT))
+    seen: list[str] = []
+    monkeypatch.setattr(board_pane, "_task_row", lambda row, *_: seen.append(row.id))
+
+    rig.frame(seam, lambda: board_pane.draw(snap, at_root(snap), pane, Bridge()))
+
+    assert seen == ["t1"]
+    assert len(pane.views) == 0
+
+
+def test_a_closed_board_is_rows_and_no_views(frames: Frames) -> None:
+    snap = board_snapshot(
+        Task(id="t1", title="do t1", detail=SPEC, declared_by=ROOT),
+        concerns=(concern("c1", body="a finding", task_id="t1"),),
+    )
+    strings = frames.draw(snap)
+
+    assert len(frames.pane.views) == 0
+    assert "do t1" in strings
+    assert "s1 -> agent-qa" not in strings  # roles, not node ids
+    assert any("->" in s for s in strings)
+    assert "why" in strings
+
+
+def test_state_is_a_native_glyph_and_then_its_word(frames: Frames) -> None:
+    """
+    The glyph goes through ImGui in the UI font. In a typeset view it would be set
+    in a face without the icons, as U+FFFD.
+    """
+    snap = board_snapshot(Task(id="t1", title="do t1", detail=SPEC, declared_by=ROOT))
+    strings = frames.draw(snap, "t1")
+
+    at = strings.index(fa.ICON_FA_CIRCLE)
+    assert strings[at + 1 : at + 4] == ["pending", "t1", "do t1"]
+    assert fa.ICON_FA_CIRCLE not in frames.shown(("s1", "spec", "t1"))
+
+
+def test_an_opened_task_sets_its_specification_as_markdown(frames: Frames) -> None:
+    snap = board_snapshot(Task(id="t1", title="do t1", detail=SPEC, declared_by=ROOT))
+    strings = frames.draw(snap, "t1")
+
+    assert frames.pane.views.keys() == (("s1", "spec", "t1"),)
+    shown = frames.shown(("s1", "spec", "t1"))
+    assert "Builder task. tle/parse.py only." in shown
+    assert "`" not in shown
+    assert not any("Builder task" in s for s in strings)
+    # Four vertices a glyph: the text reached the draw list.
+    (view,) = frames.pane.views.views(("s1", "spec", "t1"))
+    assert view.stats.vertices > 4 * 20
+
+
+def test_a_concern_is_drawn_under_its_task_and_in_the_log_as_two_views(frames: Frames) -> None:
+    snap = board_snapshot(
+        Task(id="t1", title="do t1", detail=SPEC, declared_by=ROOT),
+        concerns=(concern("c1", subject="checksum ignored", body="the *finding*", task_id="t1"),),
+    )
+    strings = frames.draw(snap, "t1", "concern-c1")
+
+    assert set(frames.pane.views.keys()) == {
+        ("s1", "spec", "t1"),
+        ("s1", "reason", "t1", "c1"),
+        ("s1", "concern", "c1"),
+    }
+    assert not any("drawn twice" in s for s in strings)
+    assert "reason (basis unstated): checksum ignored" in strings
+    assert frames.shown(("s1", "reason", "t1", "c1")) == "the finding"
+    assert frames.shown(("s1", "concern", "c1")) == "the finding"
+
+
+def test_a_pasted_traceback_reaches_the_view_line_for_line(frames: Frames) -> None:
+    """
+    ``fake-c6`` as the pane sets it: what is on screen is what was written, a fact a
+    line with its punctuation as typed and the traceback with its indentation.
+    """
+    body = rig._fleet_bodies()["fake-c6"]
+    snap = board_snapshot(
+        Task(id="t1", title="do t1", declared_by=ROOT),
+        concerns=(concern("c6", body=body),),
+    )
+    frames.draw(snap, "concern-c6")
+
+    assert frames.shown(("s1", "concern", "c6")) == body
+
+
+def test_a_closed_row_is_one_line_however_long_its_title(frames: Frames) -> None:
+    """
+    The density rule. The renderer before this one wraps a long title onto as many
+    lines as it takes.
+    """
+    snap = board_snapshot(
+        Task(id="t1", title=LONG, detail=SPEC, declared_by=ROOT),
+        Task(id="t2", title="short", declared_by=ROOT),
+        concerns=(concern("c1", subject=LONG, body="a finding\n\nin two paragraphs"),),
+    )
+    strings = frames.draw(snap)
+
+    line = frames.line()
+    assert frames.heights == {"t1": line, "t2": line, "c1": line}
+    assert LONG not in strings
+    assert sum(1 for s in strings if s.endswith("…") and LONG.startswith(s[:-1])) == 2
+
+
+def test_a_closed_row_out_of_sight_keeps_its_line_and_draws_nothing(frames: Frames) -> None:
+    tasks = [Task(id=f"t{n}", title=f"title {n}", declared_by=ROOT) for n in range(100)]
+    strings = frames.draw(board_snapshot(*tasks))
+
+    assert "title 0" in strings
+    assert "title 99" not in strings
+    assert set(frames.heights.values()) == {frames.line()}
+
+
+def test_an_opened_row_gives_back_the_title_it_cut(frames: Frames) -> None:
+    snap = board_snapshot(
+        Task(id="t1", title=LONG, declared_by=ROOT),
+        Task(id="t2", title="short", declared_by=ROOT),
+        concerns=(concern("c1", subject=LONG), concern("c2", subject="brief")),
+    )
+    strings = frames.draw(snap, "t1", "t2", "concern-c1", "concern-c2")
+
+    assert strings.count(LONG) == 2
+    assert strings.count("short") == 1
+    assert strings.count("brief") == 1
+
+
+def test_a_closed_row_keeps_its_second_line_for_what_is_scanned_for(frames: Frames) -> None:
+    held = dataclasses.replace(
+        Task(id="t1", title="do t1", declared_by=ROOT),
+        state=TaskState.CLAIMED,
+        claimed_by=QA,
+    )
+    snap = board_snapshot(held, Task(id="t2", title="do t2", depends_on=("t9",), declared_by=ROOT))
+    strings = frames.draw(snap)
+
+    line = frames.line()
+    assert frames.heights == {"t1": 2 * line, "t2": 2 * line}
+    assert any(s.startswith("[") and "stopped" in s for s in strings)
+    assert "blocked on t9 (never declared)" in strings
+    assert fa.ICON_FA_TRIANGLE_EXCLAMATION in strings
+
+
+def test_a_concern_about_a_task_nobody_declared_says_so_while_closed(frames: Frames) -> None:
+    snap = board_snapshot(
+        Task(id="t1", title="do t1", declared_by=ROOT),
+        concerns=(concern("c1", task_id="t12"), concern("c2", task_id="t1")),
+    )
+    strings = frames.draw(snap)
+
+    assert "about t12 (never declared)" in strings
+    assert "about t1" not in strings
+    assert frames.heights["c1"] == 2 * frames.heights["c2"]
+
+
+def test_an_opened_concern_says_where_it_got_to_and_what_it_is_about(frames: Frames) -> None:
+    edited = dataclasses.replace(
+        concern("c1", body="said", task_id="t1"), state=ConcernState.DELIVERED, edited=True
+    )
+    snap = board_snapshot(Task(id="t1", title="do t1", declared_by=ROOT), concerns=(edited,))
+
+    assert "edited" in frames.draw(snap)
+    opened = frames.draw(snap, "concern-c1")
+    said = board_pane.basis_label(edited.basis)
+    assert f"{frames.people(snap)} · delivered, edited by you · {said} · about t1" in opened
+
+
+def test_a_view_is_held_while_its_row_is_open_and_let_go_when_it_closes(frames: Frames) -> None:
+    snap = board_snapshot(Task(id="t1", title="do t1", detail=SPEC, declared_by=ROOT))
+    frames.draw(snap, "t1")
+    view = frames.pane.views.view(("s1", "spec", "t1"))
+    parts = frames.pane.parts[("s1", "spec", "t1")][1]
+
+    frames.draw(snap, "t1")
+    assert frames.pane.views.view(("s1", "spec", "t1")) is view
+    assert frames.pane.parts[("s1", "spec", "t1")][1] is parts
+
+    frames.draw(snap)
+    assert len(frames.pane.views) == 0
+    assert frames.pane.parts == {}
+
+
+def test_an_amended_specification_is_what_the_view_shows_next(frames: Frames) -> None:
+    before = board_snapshot(Task(id="t1", title="do t1", detail=SPEC, declared_by=ROOT))
+    after = board_snapshot(Task(id="t1", title="do t1", detail="Rewritten.", declared_by=ROOT))
+    frames.draw(before, "t1")
+    frames.draw(after, "t1")
+
+    assert frames.shown(("s1", "spec", "t1")) == "Rewritten."
+
+
+OTHER: NodeId = ("s2", None)
+
+
+def sessions(*tasks: Task, **templates: str) -> Snapshot:
+    """
+    ``board_snapshot`` with a root per keyword: ``s2="solo"`` beside ``s1``, a team.
+    """
+    snap = board_snapshot(*tasks)
+    roots = {(sid, None): record((sid, None), template=name) for sid, name in templates.items()}
+    nodes = {**snap.nodes, **roots}
+    return dataclasses.replace(snap, nodes=MappingProxyType(nodes), order=tuple(nodes))
+
+
+def at(snap: Snapshot, session_id: str) -> FocusState:
+    focus = FocusState()
+    focus.to_node(snap, (session_id, None), scope=Scope.SESSION)
+    return focus
+
+
+def test_a_cursor_that_passes_over_a_session_with_no_board_lays_nothing_out_again(
+    frames: Frames, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    j and k through a queue that mixes teams with solo sessions. The frame the
+    cursor comes back on shows the views it left, and builds no text.
+    """
+    snap = sessions(Task(id="t1", title="do t1", detail=SPEC, declared_by=ROOT), s2="solo")
+    frames.draw(snap, "t1")
+    view = frames.pane.views.view(("s1", "spec", "t1"))
+    parts = frames.pane.parts[("s1", "spec", "t1")][1]
+    read: list[str] = []
+    parse = imscribe.parse_markdown
+    monkeypatch.setattr(
+        imscribe,
+        "parse_markdown",
+        lambda text, *rest, **kw: read.append(text) or parse(text, *rest, **kw),
+    )
+    revision = view.revision
+
+    assert "do t1" not in frames.draw(snap, "t1", focus=at(snap, "s2"))
+    assert frames.pane.views.view(("s1", "spec", "t1")) is view
+    frames.draw(snap, "t1", focus=FocusState())
+    assert "do t1" in frames.draw(snap, "t1")
+
+    assert frames.pane.views.view(("s1", "spec", "t1")) is view
+    assert frames.pane.parts[("s1", "spec", "t1")][1] is parts
+    assert read == [] and view.revision == revision
+    assert "Builder task." in frames.shown(("s1", "spec", "t1"))
+
+
+def test_a_row_closed_under_the_cursor_is_let_go_and_another_teams_is_not(frames: Frames) -> None:
+    snap = sessions(
+        Task(id="t1", title="do t1", detail=SPEC, declared_by=ROOT),
+        Task(id="t2", title="do t2", detail="Theirs.", declared_by=OTHER),
+        s2="feature",
+    )
+    frames.draw(snap, "t1")
+    frames.draw(snap, "t2", focus=at(snap, "s2"))
+    assert set(frames.pane.views.keys()) == {("s1", "spec", "t1"), ("s2", "spec", "t2")}
+
+    frames.draw(snap, focus=at(snap, "s2"))
+
+    assert frames.pane.views.keys() == (("s1", "spec", "t1"),)
+    assert set(frames.pane.parts) == {("s1", "spec", "t1")}
+
+
+def test_views_are_let_go_when_their_session_stops_being_a_team(frames: Frames) -> None:
+    snap = board_snapshot(Task(id="t1", title="do t1", detail=SPEC, declared_by=ROOT))
+    frames.draw(snap, "t1")
+    assert len(frames.pane.views) == 1
+
+    solo = board_snapshot(template="solo")
+    frames.draw(solo, "t1")
+    assert len(frames.pane.views) == 0
+    assert frames.pane.parts == {} and frames.pane.held == []
+
+
+def test_views_are_let_go_when_their_session_leaves_the_snapshot(frames: Frames) -> None:
+    """
+    The rule that survives a cursor move has to end somewhere: a session that is
+    gone is one nobody can come back to.
+    """
+    snap = sessions(Task(id="t1", title="do t1", detail=SPEC, declared_by=ROOT), s2="solo")
+    frames.draw(snap, "t1")
+    gone = dataclasses.replace(
+        snap, nodes=MappingProxyType({OTHER: snap.nodes[OTHER]}), order=(OTHER,)
+    )
+
+    frames.draw(gone, "t1", focus=at(gone, "s2"))
+
+    assert len(frames.pane.views) == 0
+    assert frames.pane.parts == {} and frames.pane.held == []
+
+
+def test_the_teams_whose_views_are_held_are_the_ones_shown_latest(frames: Frames) -> None:
+    count = board_pane._HELD_BOARDS + 2
+    tasks = [
+        Task(id=f"t{n}", title=f"do t{n}", detail=SPEC, declared_by=(f"s{n}", None))
+        for n in range(1, count + 1)
+    ]
+    snap = sessions(*tasks, **{f"s{n}": "feature" for n in range(2, count + 1)})
+    for n in range(1, count + 1):
+        frames.draw(snap, f"t{n}", focus=at(snap, f"s{n}"))
+    # Back to one of the kept: it becomes the latest, and nothing is dropped for it.
+    frames.draw(snap, "t3", focus=at(snap, "s3"))
+
+    kept = [f"s{n}" for n in range(4, count + 1)] + ["s3"]
+    assert frames.pane.held == kept
+    assert {key[0] for key in frames.pane.views.keys()} == set(kept)
+    assert set(frames.pane.parts) == set(frames.pane.views.keys())
+
+
+# -- who a concern's line names --------------------------------------------------
+
+
+def test_the_participants_column_gives_way_to_the_subject() -> None:
+    share = board_pane._PEOPLE_SHARE
+    cell = board_pane.people_cell
+    assert cell(120.0, 55.0, 120.0 / share) == (board_pane._People.BOTH, 120.0)
+    assert cell(120.0, 55.0, 120.0 / share - 1.0) == (board_pane._People.SENDER, 55.0)
+    assert cell(120.0, 55.0, 55.0 / share - 1.0) == (board_pane._People.NOBODY, 0.0)
+
+
+def test_a_narrow_pane_names_the_sender_and_gives_the_subject_the_rest(frames: Frames) -> None:
+    """
+    FOCUS docks the pane about this wide. The line keeps its sender and loses its
+    recipient, whole and not cut to "revi…", and the subject has the room.
+    """
+    subject = "checksum ignored"
+    snap = board_snapshot(
+        Task(id="t1", title="do t1", declared_by=ROOT),
+        concerns=(concern("c1", subject=subject, body="a finding"),),
+    )
+    both = frames.people(snap)
+    sender = both.split(" -> ")[0]
+
+    wide = frames.draw(snap)
+    assert both in wide and sender not in wide
+
+    narrow = frames.draw(snap, width=300.0)
+    assert sender in narrow and both not in narrow
+    assert not any(s.endswith("…") for s in narrow), narrow
+    assert subject in narrow
+    assert frames.heights["c1"] == frames.line()
+
+
+def test_an_opened_concern_names_both_ends_however_narrow_the_pane(frames: Frames) -> None:
+    snap = board_snapshot(
+        Task(id="t1", title="do t1", declared_by=ROOT),
+        concerns=(concern("c1", body="a finding"),),
+    )
+    opened = frames.draw(snap, "concern-c1", width=120.0)
+
+    said = board_pane.basis_label(None)
+    assert f"{frames.people(snap)} · waiting · {said}" in opened
+
+
+def test_the_bound_on_a_specification_is_said_inside_its_view(frames: Frames) -> None:
+    long = "one line of the specification\n" * 400
+    snap = board_snapshot(Task(id="t1", title="do t1", detail=long, declared_by=ROOT))
+    frames.draw(snap, "t1")
+
+    kept = board_pane._MAX_DETAIL_CHARS // 30 * 30
+    shown = frames.shown(("s1", "spec", "t1"))
+    assert f"... {len(long) - kept + 1} more character(s) not shown" in shown
+    assert shown.count("one line of the specification") == kept // 30
+
+
+def test_a_long_specification_scrolls_in_its_own_room(frames: Frames) -> None:
+    """
+    The cap. Without it a view is as tall as its text and the rest of the board is
+    that far away.
+    """
+    long = "\n\n".join(f"paragraph {n} of the specification" for n in range(80))
+    snap = board_snapshot(Task(id="t1", title="do t1", detail=long, declared_by=ROOT))
+    frames.draw(snap, "t1")
+
+    cap = board_pane._SPEC_LINES * typeset.line_height(mono=False)
+    assert frames.heights["t1"] < cap + 4 * frames.line()
+    assert (frames.pane.views.height(("s1", "spec", "t1")) or 0.0) > cap
+
+
+def test_the_editor_takes_the_place_of_the_typeset_specification(
+    frames: Frames, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    snap = board_snapshot(Task(id="t1", title="do t1", detail=SPEC, declared_by=ROOT))
+    edited: list[str] = []
+    monkeypatch.setattr(board_pane, "_amend_editor", lambda row, *_: edited.append(row.id))
+    frames.pane.editing = "t1"
+    frames.draw(snap, "t1")
+
+    assert edited == ["t1"]
+    assert len(frames.pane.views) == 0
 
 
 # -- what a finished task reported --------------------------------------------------
@@ -2640,3 +3272,93 @@ def test_whether_a_holder_is_removed_is_asked_when_the_line_is_drawn() -> None:
     # Only this reason has a holder to be removed.
     other = NotPlaced("task", "t1", Unplaced.INCOHERENT, holder="s9")
     assert board_pane.unplaced_reason(other, lambda sid: True) == Unplaced.INCOHERENT.value
+
+
+# -- one board under either renderer --------------------------------------------
+
+
+def _a_board_with_everything_a_row_says() -> Snapshot:
+    """
+    A finished task with a property, a result, a not-run list and a specification
+    of stated bases, an open one beside it, and an incident filed against the
+    first: every line ``_task_row`` draws that only a finished or noted row has.
+    """
+    done = Task(
+        id="t1",
+        title="do t1",
+        detail="the specification",
+        state=TaskState.COMPLETED,
+        claimed_by=QA,
+        declared_by=ROOT,
+        basis=Basis.RELAYED,
+        property="never drop a row",
+        result="what was reported",
+        result_basis=Basis.RUN,
+        not_run="the probe",
+    )
+    still = Task(id="t2", title="do t2", detail="more", declared_by=ROOT)
+    note = Concern(
+        id="c1",
+        sender=QA,
+        recipient=ROOT,
+        subject="wrote outside touches",
+        body="store.py",
+        posted_at=1.0,
+        task_id="t1",
+        basis=Basis.READ,
+        incident=True,
+    )
+    return board_snapshot(done, still, concerns=(note,))
+
+
+@pytest.mark.parametrize("set_by_library", [False, True], ids=["native", "typeset"])
+def test_a_row_says_the_same_things_and_offers_the_same_controls_under_either_renderer(
+    frames: Frames, monkeypatch: pytest.MonkeyPatch, set_by_library: bool
+) -> None:
+    """
+    The typeset branch is drawn wherever the library can draw, so a line or a
+    control only the native row has is one the operator loses for the library
+    being there: a result, what was not run, the basis of each text, an incident,
+    and closing a task.
+    """
+    typeset.configure(typeset=set_by_library, mono=False)
+    assert typeset.enabled(typeset.Pane.BOARD) is set_by_library
+    buttons: list[str] = []
+    small_button = frames.im.small_button
+
+    def pressed(label: str) -> bool:
+        buttons.append(label)
+        return bool(small_button(label))
+
+    monkeypatch.setattr(frames.im, "small_button", pressed)
+    snap = _a_board_with_everything_a_row_says()
+    done, still = board_tasks(snap, "s1")
+
+    closed = frames.draw(snap)
+    assert board_pane.property_label("never drop a row") in closed
+    assert board_pane.standing_label(done) in closed
+
+    del buttons[:]
+    opened = frames.draw(snap, "t1", "t2", "concern-c1")
+    heading = board_pane.result_heading(done)
+    assert heading.endswith("(says: run):")
+    for line in (
+        board_pane.property_label("never drop a row"),
+        "reason (says: read): INCIDENT wrote outside touches",
+        heading,
+        board_pane.unrun_heading(done),
+        "specification (says: relayed):",
+        "INCIDENT",
+    ):
+        assert line in opened, line
+    assert board_pane.standing_label(done) not in opened
+    bodies = ("what was reported", "the probe", "the specification", "store.py")
+    if set_by_library:
+        shown = {frames.shown(key) for key in frames.pane.views.keys()}
+        assert set(bodies) <= shown, shown
+    else:
+        assert set(bodies) <= set(opened)
+    assert f"amend##{done.id}" in buttons and f"amend##{still.id}" in buttons
+    # Closing is offered on the row that is not finished, and only there.
+    assert f"{board_pane.CLOSE}##close-{still.id}" in buttons
+    assert f"{board_pane.CLOSE}##close-{done.id}" not in buttons

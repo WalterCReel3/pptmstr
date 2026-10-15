@@ -1,6 +1,8 @@
 [project]
 name = "pptmstr"
-version = "0.1.0"
+# Read from `__version__` in pptmstr/__init__.py ([tool.hatch.version]), which
+# is what `pptmstr --version` prints.
+dynamic = ["version"]
 description = "Puppet Master — a multi-agent LLM orchestrator with an immediate-mode UI"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -15,11 +17,39 @@ dependencies = [
     # Those are not Python packages and cannot be declared here;
     # scripts/probe.py checks for them by soname and prints the install line.
     #
-    # The floor is 1.92, not the 1.6 that would satisfy a naive import test:
-    # style.set_color_(), imgui.SortDirection, imgui.Col_.nav_cursor and the
-    # ImPlot Spec API all postdate 1.6, and a too-low floor turns a clear
-    # install-time failure into an AttributeError on the first theme switch.
-    "imgui-bundle>=1.92",
+    # THREE EXACT PINS THAT ARE ONE UNIT: this line and the two below it.
+    # imscribe draws through imtypeset, a shared library that is linked against
+    # this wheel's own extension module and refused at import beside any other,
+    # so one build of the library is for one wheel binary. A range on any of
+    # the three would promise versions the library was never built for, and the
+    # failure would arrive as typeset panes falling back, not at install.
+    # They move together or not at all, and never as a side effect of
+    # `pip install -U`: the fourth number of imtypeset's version is this
+    # wheel's line (192900 is 1.92.900), and `pip install -U imtypeset` alone
+    # takes the newest line and replaces imgui-bundle under the application.
+    # pptmstr/pairing.py spells the three again for `pptmstr --version`;
+    # tests/test_version.py holds those to these lines and the three to what
+    # the installed distributions require of each other, and
+    # tests/test_env_floor.py holds what is installed to them.
+    "imgui-bundle==1.92.900",
+    # Sets typeset text: markdown, streaming and diff views, met in one
+    # package (pptmstr/ui/typeset/). It requires the two pins beside it
+    # itself.
+    "imscribe==0.2.0",
+    # The library imscribe draws through. imscribe requires it already; it is
+    # named here so that the unit is three lines in one place and an install
+    # of pptmstr cannot resolve to another. The marker is imscribe's own,
+    # character for character. imtypeset has wheels for CPython 3.11 to 3.14 on
+    # Linux x86-64 with glibc 2.28 or later and on macOS 14 or later on arm64,
+    # and no source distribution. A marker cannot test the macOS version or the
+    # libc, so it is TRUE on macOS 13 on arm64 and on Linux x86-64 below glibc
+    # 2.28 or on musl: no wheel matches and the whole install fails here. Where
+    # it is false (an Intel Mac, CPython 3.15, Linux aarch64), the library is
+    # left out, but only Linux aarch64 has an imgui-bundle wheel for the rest
+    # to install from; elsewhere pip compiles imgui-bundle from source.
+    # scripts/probe.py (`install_outlook`) says which before bootstrap.sh makes
+    # a virtualenv, and stops where the install would fail or compile.
+    "imtypeset==0.4.3.192900; python_version >= '3.11' and python_version < '3.15' and ((sys_platform == 'linux' and platform_machine == 'x86_64') or (sys_platform == 'darwin' and platform_machine == 'arm64'))",
     # Bundles its own Claude Code CLI binary, which is why there is no Node
     # dependency here -- see check_agent_cli() in scripts/probe.py.
     # The floor is the first release whose bundled CLI (2.1.280) knows
@@ -37,6 +67,13 @@ dependencies = [
     # (MarkdownIt.parseInline) -- block structure is our own segmenter
     # (pptmstr/ui/blocks.py), not this library's.
     "markdown-it-py>=3.0",
+    # imscribe reads the faces it sets through fontTools at run time: a theme
+    # sizes each face from its file's ascent and descent
+    # (pptmstr/ui/typeset/themes.py, through imscribe's own calls). Nothing in
+    # the pptmstr package imports it; its scripts and tests read font files
+    # with it (scripts/rank_glyphs.py, scripts/survey_fonts.py and
+    # tests/test_splash_art.py among them).
+    "fonttools>=4.50",
 ]
 
 [project.optional-dependencies]
@@ -50,26 +87,33 @@ dev = [
     "black>=24.1",
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
-    # Only scripts/screenshot.py imports this, for the glReadPixels grab.
+    # scripts/screenshot.py and scripts/mock_cards.py import this, for the
+    # glReadPixels grab.
     "pyopengl>=3.1",
-    # scripts/rank_glyphs.py reads glyph outlines out of Inconsolata-Medium to
-    # rank the splash art by ink. Dev-only on purpose: the ranking it produces is
-    # a checked-in literal in pptmstr/ui/splash_art.py, so nothing at runtime
-    # opens a font file. tests/test_splash_art.py recomputes the table when this
-    # is installed and skips when it is not, which is the only thing holding the
-    # literal to the face it was measured from.
-    "fonttools>=4.50",
 ]
 
 [project.scripts]
-pptmstr = "pptmstr.app:main"
+# Not `pptmstr.app:main`: the entry settles where the text library is found and
+# answers --version before the application is imported.
+pptmstr = "pptmstr.__main__:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.version]
+path = "pptmstr/__init__.py"
+
 [tool.hatch.build.targets.wheel]
 packages = ["pptmstr"]
+
+# The two commits the pinned versions were published from, inside the package,
+# so an installed pptmstr can say which source its development override builds
+# (pptmstr/pairing.py reads them from the root of a checkout and from here in a
+# wheel).
+[tool.hatch.build.targets.wheel.force-include]
+"imscribe.ref" = "pptmstr/imscribe.ref"
+"imtypeset.ref" = "pptmstr/imtypeset.ref"
 
 # Listed explicitly rather than inferred: hatchling falls back to parsing
 # .gitignore when not told otherwise, which silently couples what ships to what
@@ -78,9 +122,29 @@ packages = ["pptmstr"]
 include = [
     "/pptmstr", "/scripts", "/tests", "/planning", "/LICENSE", "/README.md",
     "/CLAUDE.md", "/orchestrator-design.md", "/Makefile", "/bootstrap.sh",
-    "/pyproject.toml",
+    "/pyproject.toml", "/imscribe.ref", "/imtypeset.ref",
 ]
 exclude = ["**/__pycache__", "**/*.pyc"]
+
+# The release lock's targets (`make lock`, scripts/lock.py). Here and not in a
+# uv.toml because these are project settings, documented in [tool.uv] of
+# pyproject.toml, and `uv pip compile --universal` reads both: `environments`
+# limits the resolve to the two targets and the Pythons the pinned imtypeset
+# installs on (its wheels' Requires-Python; pptmstr/pairing.py IMTYPESET_PYTHONS),
+# and `required-environments` fails it where a package has no wheel for one of
+# them. A marker cannot test glibc 2.28 or macOS 14; scripts/probe.py does, and
+# tests/test_lock.py holds these to its LIBRARY verdict and to lock.py's targets.
+# uv documents both for `uv lock` and `uv pip compile --universal` only;
+# bootstrap.sh's `uv pip install` and pip do not read them.
+[tool.uv]
+environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64' and python_version >= '3.11' and python_version < '3.15'",
+    "sys_platform == 'darwin' and platform_machine == 'arm64' and python_version >= '3.11' and python_version < '3.15'",
+]
+required-environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+    "sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
 
 # black owns formatting (CLAUDE.md); ruff is lint-only here, so its formatter is
 # never invoked and the two cannot disagree about the same file.

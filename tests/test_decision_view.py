@@ -383,7 +383,8 @@ def test_the_clipboard_marks_every_line_the_asker_wrote_and_none_of_its_own() ->
 
     for text in (QUESTION, *BLOCKS, IF_UNANSWERED):
         assert f"| {text}" in lines
-    assert "| one<NUL>two" in lines
+    # Written out where it entered the store (``store._drawable``).
+    assert "| one\\u0000two" in lines
     # The operator's mark is on no line of a decision nobody has answered.
     assert not any(line.startswith("> ") for line in lines)
     own = [line for line in lines if not line.startswith("| ")]
@@ -654,7 +655,8 @@ def test_a_nul_in_an_askers_text_is_drawn_and_does_not_end_the_text(
 
     decision_view.draw_body(snap, owed(snap), limit=100, rest="elsewhere")
 
-    assert "before<NUL>after" in screen.quoted()
+    # Written out where it entered the store (``store._drawable``).
+    assert "before\\u0000after" in screen.quoted()
 
 
 def test_the_inbox_row_draws_the_body_and_then_the_answer_box(

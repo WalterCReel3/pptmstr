@@ -1900,6 +1900,17 @@ def test_the_operators_edit_cannot_change_who_sent_it() -> None:
 # -- work templates ---------------------------------------------------------------
 
 
+def test_a_sessions_process_is_given_pptmstrs_environment_and_nothing_of_the_drivers() -> None:
+    """
+    The SDK starts the CLI with ``os.environ`` under ``options.env``, and nothing
+    in ``options.env`` can take a variable away. So what a session's process is
+    given is settled where pptmstr's own environment is (``pairing.release``),
+    and holds only while the driver adds none of its own.
+    """
+    options = AgentSession(Bridge(), task="t")._options()
+    assert options.env == {}
+
+
 def test_a_lone_agent_configures_no_team() -> None:
     from pptmstr.bridge import Bridge
     from pptmstr.driver import AgentSession
@@ -5606,14 +5617,11 @@ def test_a_session_resumed_under_a_label_says_so_when_it_announces() -> None:
 
 def _served_tools(session: AgentSession) -> set[str]:
     """The tool names the session's own bus server announces to its CLI."""
-    import mcp.types as mcp_types
-
     from pptmstr.bus import SERVER_NAME
+    from tests.mcp_wire import list_tools
 
     server = session._mcp_servers()[SERVER_NAME]["instance"]
-    handler = server.request_handlers[mcp_types.ListToolsRequest]
-    listed = asyncio.run(handler(mcp_types.ListToolsRequest(method="tools/list")))
-    return {tool.name for tool in listed.root.tools}
+    return set(asyncio.run(list_tools(server)))
 
 
 _COMMAND_NAMES = {"request_command", "read_commands", "withdraw_command"}

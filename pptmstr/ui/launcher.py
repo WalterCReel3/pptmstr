@@ -35,7 +35,7 @@ from typing import assert_never
 from imgui_bundle import imgui
 
 from .. import brief as brief_mod
-from .. import cli_version, sandbox, sessionfile, templates, tree
+from .. import cli_version, drawable, sandbox, sessionfile, templates, tree
 from .. import sessions as sessions_mod
 from ..approval import Disposition, Policy, classify, requires_containment
 from ..model import LaunchSpec
@@ -2354,7 +2354,10 @@ def _session_row(picker: SessionPicker, row: SessionRow, now: float, live: froze
     """
     # The directory beside the id: one id listed under two directories is two rows,
     # and two rows under one ID are one widget as far as a click is concerned.
-    imgui.push_id(f"{row.session_id}\n{row.cwd}")
+    # ``row.cwd`` is the directory as the CLI recorded it, which a resume runs in,
+    # and an id is a text call too: written out one to one, so two directories stay
+    # two ids.
+    imgui.push_id(drawable.text(f"{row.session_id}\n{row.cwd}"))
     # Colour carries the state as well as the glyph. At this point size "•" and "+"
     # differ by a few pixels of ink, which is not a difference an operator scanning a
     # list of thirty rows for their own bookmarks can act on.

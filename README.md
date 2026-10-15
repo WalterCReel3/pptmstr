@@ -91,7 +91,14 @@ Read [STYLE.md](STYLE.md) before adding a record, an intent, or a projection.
 
 ```sh
 ./bootstrap.sh          # probe -> venv -> install -> window smoke test
-make check              # lint + typecheck + tests
+                        # from requirements-dev.lock when there is one: every version and
+                        # its hashes, wheels only; otherwise from pyproject.toml's floors,
+                        # and it says the install is unlocked (--unlocked asks for that)
+.venv/bin/python -m pptmstr --version   # what was installed, and whether the typesetting
+                                        # library is accepted beside the wheel
+make lock               # resolve the release lock with uv; the one target needing the network
+make check              # lint + typecheck + lock-check (when there is a lock) + tests
+make check IMSCRIBE_NO_TYPESET=1        # the same without the typesetting library
 make run                # launch
 
 .venv/bin/python -m pptmstr                     # start empty, launch from the UI
@@ -157,6 +164,70 @@ The transcript pane styles output by kind — reasoning, output, tool calls, res
 errors, compaction boundaries — with toggles for reasoning, wrapping and follow-tail,
 plus a filter. Concurrency is bounded by `concurrency_cap`; over-cap sessions queue
 rather than being refused, and the pool is shown in the status bar.
+
+### Text is set by `imscribe`, experimentally
+
+On this branch DETAIL, the NEEDS YOU expansion, BOARD, BRIEF and one mode of the
+context log set their text through [`imscribe`](https://pypi.org/project/imscribe/),
+which draws through the native [`imtypeset`](https://pypi.org/project/imtypeset/)
+library beside the `imgui-bundle` wheel — instead of ImGui's
+own text calls: proportional prose, real italics, selectable text. An approval's diff
+is drawn by the library's diff view by default, in DETAIL and in NEEDS YOU, wherever
+the check pptmstr measures of the running library holds: that the view keeps a
+monospace column, which the pinned one does at every size a diff is set at. Otherwise it is
+the panes' own rows: where the check fails, and for a diff the check does not cover
+(a character the code face lacks, a row longer than was measured, a call that carries
+no texts, one too large to build in a frame).
+pptmstr marks every baked font size used each frame, so ImGui discards none under a
+frame. [pptmstr/ui/typeset/](pptmstr/ui/typeset/) is the
+only package that imports it, and its docstring is the reference for what it does and
+costs.
+
+**Text ▸ Typeset text** switches it off, and off is every pane as it was before: the
+hand-rolled markdown renderer is kept, both as the comparison and as what the
+application falls back to when the library or its faces are missing. With typesetting
+on the context log still opens in that older markdown renderer (RICH), with the typeset
+mode one radio button away; with it off the log opens in WRAP, as it did before.
+
+Everything else that persists is in one dialog: `Ctrl+,`, or **Text ▸ Settings…**. The
+proportional family, a face and a size for each role of typeset text with a sample
+of each, a switch per pane, where the context log starts, the theme, the caps. A
+change is applied and saved on the click that makes it; there is no Apply and no
+cancel. [planning/2026-10-08-settings-have-one-place.md](planning/2026-10-08-settings-have-one-place.md)
+says what is a setting and what is deliberately a constant in code.
+
+**The three are one unit and are pinned exactly**: `imgui-bundle==1.92.900`,
+`imscribe==0.2.0` and `imtypeset==0.4.3.192900`. The imtypeset library is linked
+against that one `imgui-bundle` binary and is refused beside any other, so they move
+together and never by `pip install -U` of one. **The install is supported on CPython
+3.11 to 3.14 on macOS 14 or later on Apple Silicon, and on Linux x86-64 with glibc 2.28
+or later.** On Linux aarch64 (3.11 to 3.14) it leaves imtypeset out and every pane
+draws with its own renderer. Anywhere else it does not fall back, it fails: on macOS 13,
+below glibc 2.28 or on musl imtypeset's requirement is on and no wheel of it matches,
+and on an Intel Mac or CPython 3.15 pip would compile `imgui-bundle` from source. `./bootstrap.sh` says which
+before it makes a virtualenv, and stops.
+`pptmstr --version` says which of each is running against its pin, how the library was
+found, and the headers it says it was compiled against.
+
+`IMSCRIBE_NO_TYPESET=1` runs without the library, for `make`, for a bare `pytest` and
+for pptmstr itself, whatever else is set: imscribe still loads a library
+`IMTYPESET_LIBRARY` names under its switch, so pptmstr and the test run take both
+variables out of their own environment and say so. `IMTYPESET_LIBRARY=`, which did that while the library was built
+from source, does not: an installed imtypeset reads neither of the two variables.
+
+**Building the two from source is the development override**, for working against a
+commit nobody has published: `make deps` installs imscribe at the commit `imscribe.ref`
+names over the published one and builds the imtypeset library from the commit
+`imtypeset.ref` names into `.deps/` (Linux, a C++ compiler, and the sources from
+GitHub or from the repositories `IMSCRIBE_REPO`, `IMTYPESET_REPO`, `IMGUI_BUNDLE_REPO`
+and `IMGUI_REPO` name). Beside an installed imtypeset that pair is used only where
+`PPTMSTR_TYPESET_DEPS=1` asks for it; `./bootstrap.sh` keeps an existing `.venv` and
+reinstalls from the index an imscribe or imtypeset in it that was not installed by name.
+
+It has been run only on Xvfb with a software rasteriser, and no person has judged how
+it looks. **Nothing here has been installed from the package index by this branch's
+own bootstrap**: that first install, on Linux and on a Mac, has not been run. The decisions, the measurements and what is unverified are in
+[planning/2026-10-07-advtext-sets-the-text.md](planning/2026-10-07-advtext-sets-the-text.md).
 
 ## Teams
 
@@ -366,19 +437,32 @@ expect it to change. Asking does not stop the agent — it gets an id back and r
 outcome later. Nothing runs until you say so at the row, and nothing an agent wrote
 decides that for you.
 
-**The row** is in NEEDS YOU, of its own kind. **It is closed until you open it.**
-With the cursor on it, it says which command it is and how it stands — *asked 45s ago
-· 3rd command asked in this session, 2nd from builder · 0123456789ab*, then *asked:
-nothing has run* — and shows none of the command. **A click on the row, or `o` with
+**The row** is in NEEDS YOU and reads as a Bash approval does: its summary is the
+command as a Bash row summarises one, behind *outside the sandbox ·*. **Its body is
+closed until you open it.** With the cursor on it, it says which command it is —
+*3rd command in this session, 2nd from builder · 0123456789ab · asked 45s ago* — and
+how to open it. **A click on the row, or `o` with
 the cursor on it, opens it**, and nothing else does: not `j` or `k` arriving there,
 not the row above being answered, not the command being asked. Open is of that one
 command, by its id, and ends when the cursor leaves the row. No key acts on an open
-row: every control takes a mouse click, and run, refuse and cancel each take two.
-The first of those answers nothing for 0.6 s after the row opens, and the second
-nothing for 0.6 s after the first, so no two clicks of a double-click are two of the
-three.
+row: every control takes a mouse click, and run and cancel take two in one place —
+**Run outside sandbox** becomes **Press again to run** for five seconds. A first
+press answers nothing for 0.6 s after the row opens, and the second nothing for 0.6 s
+after the first, so no two clicks of a double-click are both.
 
-- The command is shown whole, in its own block, escaped: anything outside printable
+- **One-line warnings, each only where it is true**: always that it runs outside the
+  sandbox as you and that your permission rules and hooks do not check it; the
+  directory and the shell that run it; that the string is your edit and not what was
+  asked; the characters it had to spell out; that it may run files this session can
+  write (`git`, `make`, package scripts, an interpreter, a path in the session's
+  directory and their like — the list is names, and a missing line proves nothing);
+  what else pptmstr's reading of it sees (`sudo`, a redirection, a pipe into a shell);
+  how many commands it sequences and which; that it is new, or that its asker has
+  others waiting. Each in full, the environment and the note that this reading is
+  **advisory** are behind the **(?)** after the first. Read the block; the warnings
+  are a second look and not the gate.
+- Under them, in a bordered body, `command =` and the command shown whole, in its
+  own block, escaped: anything outside printable
   ASCII is spelled out (`\u{202E}`, `\x1B`, a trailing space as `\x20`), so a
   character that draws as nothing cannot hide in it. **A command is at most 2,000
   characters and 8 lines, with no blank line in it**, and is bounded as it is drawn
@@ -388,32 +472,12 @@ three.
   expects are **8 lines** each. Anything past a bound is refused where it is asked
   and never reaches you, and your own edit is held to the same. Together they keep
   the block of the largest command there can be to 36 rows in a pane a hundred
-  characters wide; the breakdown, the flags and the asker's two texts are under it,
-  so the buttons of such a command are still more than a screen down.
-- **Above the block, which command this is**: how long ago it was asked, which of its
-  session's commands it is and which of its asker's (*3rd command asked in this
-  session, 2nd from builder*) and the last twelve characters of its id — things that
-  differ between two commands whose text barely does. A command asked in the last few
-  seconds says **NEW**, and one whose asker has others waiting says how many.
-- **The string is not always the whole of what runs.** Where the command names `git`,
-  `make`, `npm`/`yarn`/`pnpm`/`bun`, `pip`/`uv`/`poetry`, an interpreter, a tool that
-  does what the directory's files tell it to (`cargo`, `go`, `docker`, `rake`, `just`,
-  `gradle`, `mvn`, `eslint`, `mypy`, `gh` and their like), or a path inside the
-  session's directory — `./x`, `bin/x`, `$PWD/x`, or the directory written out in
-  full — a line says what in that directory it will run: hooks and config, the
-  Makefile, package scripts, `setup.py`, the script itself, all of which the session
-  can write. `nohup`, `exec`, `env`, `xargs`, `command` and `FOO=1` ahead of a
-  program do not hide it. The list is names and a missing line proves nothing:
-  anything with a config file or a plugin does the same.
-- Under it, the segments as bash would sequence them, with flags for what that reading
-  does not see through (substitutions, `eval`, `sh -c`, a heredoc, `&`). **This is
-  advisory.** Read the block; the breakdown is a second look and not the gate.
-- The shell, the directory, what is taken out of the environment, and the standing
-  lines below. The agent's reason and what it expects are behind the author bar.
+  characters wide. The agent's `reason =` and `expects =` are under it, then the
+  buttons.
 - **Run** runs the string as shown. **Edit** lets you change it first; what ran is
   recorded beside what was asked, and the asker is told the string was yours.
-  **Refuse** takes a reason, which the asker reads as you typed it, and is final.
-  While it runs the row stays, with **cancel**.
+  **Refuse** sends the reason in the box beside it, which the asker reads as you
+  typed it, in one press, and is final. While it runs the row stays, with **cancel**.
 
 **A command never opens itself.** An agent can withdraw a command at any time and ask
 for another that differs by two letters, and it picks the moment. So the second is
@@ -451,7 +515,7 @@ your password entry — as `<shell> -l -c '<the string>'`, in the session's dire
   or none at all, becomes `/bin:/usr/bin`: a shell reads an empty one as the current
   directory, and bash with none searches a default that ends in `.`. Variables that
   name one thing and that only you set — `LD_PRELOAD`, `ZDOTDIR` — are passed as they
-  are. The row lists what is removed whatever the directory is; **what is removed
+  are. The row's (?) lists what is removed whatever the directory is; **what is removed
   because of this session's directory is not on the row yet** — it is applied when the
   command runs and written to the LOG when it ends.
 - **One variable is set that you did not set: `PPTMSTR_COMMAND`, to a random value
@@ -727,6 +791,7 @@ Read [orchestrator-design.md](orchestrator-design.md) §1 (invariants) and §3
 | [pptmstr/pool.py](pptmstr/pool.py) | Bounded concurrency; over-cap sessions queue |
 | [pptmstr/approval.py](pptmstr/approval.py) | Classification, summaries and diffs for the gate |
 | [pptmstr/ui/](pptmstr/ui/) | Fleet rail, inbox, detail, health, transcript pane, launcher, shared widgets |
+| [pptmstr/ui/typeset/](pptmstr/ui/typeset/) | The one package that imports `imscribe`: the gate, fonts, roles, themes, held views, the diff model |
 | [pptmstr/theme.py](pptmstr/theme.py) | Semantic colour roles; light, dark, high-contrast, and six discretionary |
 | [pptmstr/driver.py](pptmstr/driver.py) | One `ClaudeSDKClient` per session, translated into intents |
 | [pptmstr/app.py](pptmstr/app.py) | Runner, docking layout, and the frame loop |

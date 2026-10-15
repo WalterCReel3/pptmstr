@@ -1,16 +1,47 @@
 """
-Transcript pane: the incremental line cache and the filters.
+Transcript pane: the incremental line cache, the filters, and the typeset feed.
 
-No ImGui here. The cache is where a transcript pane gets slow or wrong, and it is
-plain data -- so it can be tested properly rather than eyeballed in a screenshot.
+No ImGui until the last section. The cache and the feed are where a transcript pane
+gets slow or wrong, and they are plain data -- so they can be tested properly rather
+than eyeballed in a screenshot. The last section draws the pane in real frames on
+the rig ``tests/test_typeset_views.py`` builds: a context, an atlas, no window.
 """
 
 from __future__ import annotations
 
 import time
+from typing import Any
 
+import pytest
+
+from pptmstr import drawable, fake_driver
+from pptmstr.intents import AgentSpawned
+from pptmstr.model import NodeId, Snapshot
+from pptmstr.store import Store
+from pptmstr.theme import P
 from pptmstr.transcript import SegmentKind, Transcript
-from pptmstr.ui.transcript_pane import NodeTranscript, TranscriptState, _visible, copy_text
+from pptmstr.ui import rich_pane, transcript_pane, typeset
+from pptmstr.ui.transcript_pane import (
+    NodeTranscript,
+    RenderMode,
+    TranscriptState,
+    TypesetFeed,
+    _visible,
+    copy_text,
+    open_fence,
+)
+from tests import test_typeset_views as rig
+
+
+@pytest.fixture(autouse=True)
+def old_renderer(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    The seam off for every test that did not ask for it.
+
+    The faces stay loaded from the first typeset test to the end of the module.
+    """
+    if "seam" not in request.fixturenames:
+        monkeypatch.setattr(typeset, "enabled", lambda pane=None: False)
 
 
 def sync(cache: NodeTranscript, transcript: Transcript) -> None:
@@ -271,13 +302,13 @@ def test_caches_are_pruned_when_unused() -> None:
     session becomes a memory leak.
     """
     state = TranscriptState()
-    state.frame = 1
+    state.prune(1, now=0.0)
     state.cache_for(("a", None))
     state.cache_for(("b", None))
     assert len(state.caches) == 2
 
     for frame in range(2, 200):
-        state.prune(frame)
+        state.prune(frame, now=frame / 60.0)
         state.cache_for(("a", None))
 
     assert ("a", None) in state.caches
@@ -286,9 +317,9 @@ def test_caches_are_pruned_when_unused() -> None:
 
 def test_prune_keeps_recently_touched_caches() -> None:
     state = TranscriptState()
-    state.frame = 1
+    state.prune(1, now=0.0)
     state.cache_for(("a", None))
-    state.prune(5)
+    state.prune(5, now=4.0 / 60.0)
     assert ("a", None) in state.caches
 
 
@@ -354,6 +385,1690 @@ def test_continuation_stops_at_a_newline_boundary() -> None:
     t.append(SegmentKind.OUTPUT, "new thought")
     sync(cache, t)
     assert texts(cache) == ["finished.", "new thought"]
+
+
+# -- the typeset feed: plain data ------------------------------------------------
+
+
+def fed(*pairs: tuple[SegmentKind, str]) -> tuple[TypesetFeed, NodeTranscript, Transcript]:
+    t = Transcript()
+    for kind, text in pairs:
+        t.append(kind, text)
+    cache = NodeTranscript()
+    sync(cache, t)
+    feed = TypesetFeed()
+    feed.advance(cache)
+    return feed, cache, t
+
+
+def shown(feed: TypesetFeed) -> list[tuple[SegmentKind, str]]:
+    """Every run the feed holds, closed then open, as (kind, text as fed)."""
+    runs = [(run.kind, run.text) for run in feed.runs]
+    if feed.open is not None:
+        runs.append((feed.open.kind, feed.open.text))
+    return runs
+
+
+def parts_of(feed: TypesetFeed, show_reasoning: bool = True) -> list[typeset.Part]:
+    """The parts of every generation, oldest first."""
+    return [part for held in feed.generations for part in held.parts(show_reasoning)]
+
+
+def accounted(feed: TypesetFeed) -> int:
+    """Every line the feed says it has passed: skipped, held closed, or open."""
+    return feed.skipped + feed.held + (feed.open.lines if feed.open is not None else 0)
+
+
+def test_prose_is_markdown_a_prompt_is_as_written_and_everything_else_is_literal() -> None:
+    """
+    A tool result is full of ``_`` and ``*``. Read as markdown it would lose them
+    and gain emphasis nobody wrote. A prompt is what was sent, in the prose role:
+    every character of it, the ``>`` that marks it as the operator's included.
+    """
+    feed, _, _ = fed(
+        (SegmentKind.REASONING, "thinking *hard*\n"),
+        (SegmentKind.OUTPUT, "# Title\n"),
+        (SegmentKind.TOOL_CALL, "\nRead(file_path=a_b.py)\n"),
+        (SegmentKind.TOOL_RESULT, '{"__init__": "*x*"}\n'),
+        (SegmentKind.ERROR, "boom\n"),
+        (SegmentKind.SYSTEM, "> again\n"),
+        (SegmentKind.COMPACTION, "compacted\n"),
+        (SegmentKind.OUTPUT, "tail"),
+    )
+    parts = parts_of(feed)
+    assert [(part.kind, part.colour) for part in parts] == [
+        (typeset.Kind.MARKDOWN, "text_dim"),
+        (typeset.Kind.MARKDOWN, None),
+        (typeset.Kind.LITERAL, "accent"),
+        (typeset.Kind.LITERAL, "diff_context"),
+        (typeset.Kind.LITERAL, "danger"),
+        (typeset.Kind.WRAPPED_EXACT, "text_dim"),
+        (typeset.Kind.LITERAL, "warn"),
+    ]
+    assert parts[5] == typeset.Part(
+        "> again", typeset.Kind.WRAPPED_EXACT, "text_dim", role=typeset.Role.PROSE
+    )
+    # Literal text is exactly what was written, less the newlines around it.
+    assert parts[2].text == "Read(file_path=a_b.py)"
+    assert parts[3].text == '{"__init__": "*x*"}'
+    assert feed.open is not None and feed.open.kind is SegmentKind.OUTPUT
+    assert feed.open.text == "tail"
+
+
+def test_a_kind_change_closes_the_open_run_and_an_open_fence_with_it() -> None:
+    """
+    One unbalanced fence in a model message must not style the rest of the session
+    as code: the fence ends with the run it was opened in.
+    """
+    feed, _, _ = fed(
+        (SegmentKind.OUTPUT, "before\n```py\nx = 1\n"),
+        (SegmentKind.TOOL_CALL, "Bash(ls)\n"),
+        (SegmentKind.OUTPUT, "after the tool, *prose* again\n"),
+    )
+    assert [part.text for part in parts_of(feed)] == ["before\n```py\nx = 1\n", "Bash(ls)"]
+    assert feed.open is not None
+    assert feed.open.text == "after the tool, *prose* again\n"
+    assert open_fence(feed.open.text.split("\n")) is None
+
+
+def test_the_feed_is_the_same_however_the_bytes_were_chunked() -> None:
+    script = [
+        (SegmentKind.REASONING, "plan\nmore plan\n"),
+        (SegmentKind.OUTPUT, "# Title\n\nSome *prose* here\nand more.\n\n```py\nx = 1\n```\n"),
+        (SegmentKind.TOOL_CALL, "Read(x)\n"),
+        (SegmentKind.OUTPUT, "the end, with no newline"),
+    ]
+    whole, _, _ = fed(*script)
+
+    t = Transcript()
+    cache = NodeTranscript()
+    feed = TypesetFeed()
+    for kind, text in script:
+        for start in range(0, len(text), 3):
+            t.append(kind, text[start : start + 3])
+            sync(cache, t)
+            feed.advance(cache)
+            # A frame with nothing new in between, as most frames are.
+            feed.advance(cache)
+    assert shown(feed) == shown(whole)
+    # A closed literal run is held without the newlines around it.
+    assert shown(feed) == [script[0], script[1], (SegmentKind.TOOL_CALL, "Read(x)"), script[3]]
+    assert [run.lines for run in feed.runs] == [2, 8, 1]
+    assert accounted(feed) == feed.next_line == 11
+
+
+def test_a_line_left_open_by_a_kind_change_is_ended() -> None:
+    """
+    The next run starts a new line whether or not this one ended in a newline, so
+    the run that is closing gets the newline its last line never had.
+    """
+    t = Transcript()
+    cache = NodeTranscript()
+    feed = TypesetFeed()
+    t.append(SegmentKind.OUTPUT, "half a li")
+    sync(cache, t)
+    feed.advance(cache)
+    assert feed.open is not None and feed.open.text == "half a li"
+    t.append(SegmentKind.OUTPUT, "ne")
+    t.append(SegmentKind.ERROR, "boom")
+    sync(cache, t)
+    feed.advance(cache)
+    assert shown(feed) == [(SegmentKind.OUTPUT, "half a line\n"), (SegmentKind.ERROR, "boom")]
+
+
+def test_the_parts_are_one_object_until_a_run_closes_or_the_filter_moves() -> None:
+    """
+    The seam compares nothing when it is handed the same sequence, and compares
+    every part when it is not. A new tuple a frame would be the second, every frame.
+    """
+    t = Transcript()
+    cache = NodeTranscript()
+    feed = TypesetFeed()
+    t.append(SegmentKind.REASONING, "plan\n")
+    t.append(SegmentKind.TOOL_CALL, "Read(x)\n")
+    t.append(SegmentKind.OUTPUT, "answer ")
+    sync(cache, t)
+    feed.advance(cache)
+    (held,) = feed.generations
+    first = held.parts(True)
+    assert len(first) == 2
+
+    for token in ("is ", "forty ", "two\n"):
+        t.append(SegmentKind.OUTPUT, token)
+        sync(cache, t)
+        feed.advance(cache)
+        assert held.parts(True) is first
+
+    without = held.parts(False)
+    assert [part.text for part in without] == ["Read(x)"]
+    assert held.parts(False) is without
+    # One run for each part, so a block can be traced to the run it came from.
+    assert [run.run for run in held.shown(False)] == [1]
+
+    t.append(SegmentKind.TOOL_CALL, "Bash(ls)\n")
+    sync(cache, t)
+    feed.advance(cache)
+    assert feed.generations == [held]
+    grown = held.parts(True)
+    assert grown is not first and len(grown) == 3
+    # The parts that were there are the same objects: the seam finds them built.
+    assert all(a is b for a, b in zip(grown, first, strict=False))
+
+
+def test_hidden_reasoning_is_left_out_closed_or_open() -> None:
+    feed, _, _ = fed(
+        (SegmentKind.REASONING, "first thought\n"),
+        (SegmentKind.OUTPUT, "said\n"),
+        (SegmentKind.REASONING, "second thought, still arriving"),
+    )
+    assert feed.shown_open(True) is feed.open
+    assert feed.shown_open(False) is None
+    assert feed.visible_text(True) == "first thought\nsaid\nsecond thought, still arriving"
+    assert feed.visible_text(False) == "said"
+
+
+def test_a_long_transcript_is_typeset_from_its_last_window_and_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Layout is paid per line on the frame a node is first shown. Unbounded, that
+    frame is seconds on a long session; bounded silently, the operator cannot know
+    there is more.
+    """
+    monkeypatch.setattr(transcript_pane, "_TYPESET_WINDOW", 5)
+    pairs = [(SegmentKind.OUTPUT, f"paragraph {n}\n") for n in range(8)]
+    pairs.insert(4, (SegmentKind.TOOL_CALL, "Read(x)\n"))
+    feed, cache, _ = fed(*pairs)
+    assert len(cache.lines) == 9
+    assert feed.skipped == 4
+    # The last five lines: the tool call, then paragraphs 4 to 7.
+    assert shown(feed) == [
+        (SegmentKind.TOOL_CALL, "Read(x)"),
+        (SegmentKind.OUTPUT, "paragraph 4\nparagraph 5\nparagraph 6\nparagraph 7\n"),
+    ]
+    assert accounted(feed) == 9
+
+
+def test_a_window_that_starts_inside_a_fence_reopens_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Cut inside a fence, the code would be set as prose and the closing fence would
+    open one over everything after it.
+    """
+    monkeypatch.setattr(transcript_pane, "_TYPESET_WINDOW", 3)
+    feed, _, _ = fed(
+        (SegmentKind.OUTPUT, "intro\n```python\na = 1\nb = 2\nc = 3\n```\nafter\n"),
+    )
+    assert feed.skipped == 4
+    assert feed.open is not None
+    assert feed.open.text == "```python\nc = 3\n```\nafter\n"
+    assert open_fence(feed.open.text.split("\n")) is None
+    # The line put back to open the fence is not one of the transcript's.
+    assert feed.open.lines == 3
+
+
+def test_a_window_that_starts_outside_a_fence_adds_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(transcript_pane, "_TYPESET_WINDOW", 2)
+    feed, _, _ = fed((SegmentKind.OUTPUT, "```sh\nls\n```\none\ntwo\n"))
+    assert feed.open is not None and feed.open.text == "one\ntwo\n"
+
+
+def test_a_burst_larger_than_the_window_restarts_the_feed_at_its_end(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A sub-agent's whole message arrives at once. What is skipped must be above
+    everything shown, so the row that announces it is true: nothing typeset before
+    the burst is kept with a hole after it.
+    """
+    monkeypatch.setattr(transcript_pane, "_TYPESET_WINDOW", 4)
+    feed, cache, t = fed((SegmentKind.OUTPUT, "early\n"), (SegmentKind.TOOL_CALL, "Read(x)\n"))
+    assert feed.skipped == 0 and len(feed.runs) == 1
+    t.append(SegmentKind.TOOL_RESULT, "".join(f"row {n}\n" for n in range(10)))
+    sync(cache, t)
+    feed.advance(cache)
+    assert feed.skipped == 8
+    assert shown(feed) == [(SegmentKind.TOOL_RESULT, "row 6\nrow 7\nrow 8\nrow 9\n")]
+    assert feed.generations == []
+
+
+@pytest.mark.parametrize(
+    ("lines", "opener"),
+    [
+        (["text", "```py", "x"], "```py"),
+        (["```py", "x", "```", "after"], None),
+        (["~~~", "```", "still code"], "~~~"),
+        (["````", "```", "still code"], "````"),
+        (["```a`b", "not a fence: a backtick in the info string"], None),
+        (["    ```", "indented four: code, not a fence"], None),
+        (["```", "x", "``` trailing", "an info string cannot close"], "```"),
+    ],
+)
+def test_open_fence(lines: list[str], opener: str | None) -> None:
+    assert open_fence(lines) == opener
+
+
+# -- the typeset feed: what it holds ---------------------------------------------
+
+
+def alternating(runs: int) -> list[tuple[SegmentKind, str]]:
+    """``runs`` runs, two lines of prose and one of tool call by turns."""
+    return [
+        (
+            (SegmentKind.OUTPUT, f"Paragraph {n}, first line.\nIts second line.\n")
+            if n % 2 == 0
+            else (SegmentKind.TOOL_CALL, f"Read(file_{n}.py)\n")
+        )
+        for n in range(runs)
+    ]
+
+
+def test_closed_runs_fill_one_generation_and_then_start_the_next(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A generation is what the feed can drop whole, so it must not be the whole feed.
+    """
+    monkeypatch.setattr(transcript_pane, "_GENERATION_LINES", 6)
+    feed, _, _ = fed(*alternating(13))
+    # Three lines a pair of runs: a generation takes runs until it holds six.
+    assert [[run.run for run in held.runs] for held in feed.generations] == [
+        [0, 1, 2, 3],
+        [4, 5, 6, 7],
+        [8, 9, 10, 11],
+    ]
+    assert [held.lines for held in feed.generations] == [6, 6, 6]
+    assert len({held.key for held in feed.generations}) == 3
+    assert feed.held == 18 and accounted(feed) == feed.next_line == 20
+
+
+def test_the_oldest_generation_is_dropped_past_the_bound_and_its_lines_counted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    The window bounds one ``advance``. Without a bound on the feed, a transcript
+    watched while it streams holds every run it was ever shown.
+    """
+    monkeypatch.setattr(transcript_pane, "_GENERATION_LINES", 6)
+    monkeypatch.setattr(transcript_pane, "_TYPESET_KEEP", 12)
+    feed, _, _ = fed(*alternating(13))
+    oldest = feed.generations[0]
+    oldest.extent = 77.0
+    # One a call, and not below the bound.
+    assert transcript_pane._trim(feed) == 77.0
+    assert feed.skipped == 6 and feed.held == 12
+    assert oldest not in feed.generations
+    assert transcript_pane._trim(feed) == 0.0
+    assert len(feed.generations) == 2
+    assert accounted(feed) == feed.next_line
+
+
+def test_a_generation_on_screen_is_kept_until_the_feed_holds_twice_the_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Dropping the oldest lines takes them from under an operator who scrolled up to
+    read them. That is put off, and not for ever.
+    """
+    monkeypatch.setattr(transcript_pane, "_GENERATION_LINES", 6)
+    monkeypatch.setattr(transcript_pane, "_TYPESET_KEEP", 8)
+    feed, _, _ = fed(*alternating(9))
+    assert feed.held == 12
+    feed.generations[0].in_sight = True
+    assert transcript_pane._trim(feed) == 0.0 and feed.skipped == 0
+
+    monkeypatch.setattr(transcript_pane, "_TYPESET_KEEP", 5)
+    feed.generations[0].extent = 40.0
+    assert transcript_pane._trim(feed) == 40.0 and feed.skipped == 6
+
+
+def test_the_only_generation_is_never_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(transcript_pane, "_TYPESET_KEEP", 2)
+    feed, _, _ = fed(*alternating(5))
+    assert len(feed.generations) == 1 and feed.held > 2
+    assert transcript_pane._trim(feed) == 0.0
+    assert len(feed.generations) == 1
+
+
+# -- the typeset feed: lifetime --------------------------------------------------
+
+
+def test_a_feed_outlives_its_line_cache_and_is_not_fed_the_same_text_twice() -> None:
+    """
+    The line cache is dropped two seconds after a node was last shown and built
+    again on return. A feed whose cursor went back to zero with it would hand every
+    line to a run that already has them.
+    """
+    t = Transcript()
+    t.append(SegmentKind.TOOL_CALL, "Read(x)\n")
+    t.append(SegmentKind.OUTPUT, "one\ntwo\nthr")
+    node: NodeId = ("a", None)
+    state = TranscriptState()
+    state.prune(1, now=100.0)
+    cache = state.cache_for(node)
+    sync(cache, t)
+    feed = state.feed_for(node)
+    feed.advance(cache)
+    assert feed.open is not None and feed.open.text == "one\ntwo\nthr"
+
+    state.prune(2, now=100.0 + transcript_pane._CACHE_KEEP_S + 0.1)
+    assert node not in state.caches
+    assert state.feeds[node] is feed
+
+    t.append(SegmentKind.OUTPUT, "ee\nfour\n")
+    rebuilt = state.cache_for(node)
+    assert rebuilt is not cache
+    sync(rebuilt, t)
+    again = state.feed_for(node)
+    assert again is feed
+    again.advance(rebuilt)
+    assert feed.open.text == "one\ntwo\nthree\nfour\n"
+    assert len(feed.runs) == 1
+
+
+@pytest.mark.parametrize("fps", [9.0, 60.0, 144.0])
+def test_a_feed_and_a_line_cache_are_kept_for_seconds_whatever_the_frame_rate(fps: float) -> None:
+    """
+    The application idles at nine frames a second and works at sixty. A lifetime
+    counted in frames is a minute at one rate and nearly seven at the other.
+    """
+    state = TranscriptState()
+    state.prune(0, now=50.0)
+    state.cache_for(("a", None))
+    state.feed_for(("a", None))
+    gone: dict[str, float] = {}
+    frame = 0
+    while len(gone) < 2:
+        frame += 1
+        elapsed = frame / fps
+        state.prune(frame, now=50.0 + elapsed)
+        if ("a", None) not in state.caches:
+            gone.setdefault("cache", elapsed)
+        if ("a", None) not in state.feeds:
+            gone.setdefault("feed", elapsed)
+        assert elapsed < 600.0
+    assert gone["cache"] == pytest.approx(transcript_pane._CACHE_KEEP_S, abs=2.0 / fps)
+    assert gone["feed"] == pytest.approx(transcript_pane._FEED_KEEP_S, abs=2.0 / fps)
+
+
+def test_a_node_being_shown_keeps_its_feed_and_one_that_is_not_loses_it() -> None:
+    state = TranscriptState()
+    state.prune(1, now=10.0)
+    state.feed_for(("a", None))
+    state.feed_for(("b", None))
+    horizon = transcript_pane._FEED_KEEP_S
+    state.prune(2, now=10.0 + horizon - 1.0)
+    state.feed_for(("a", None))
+    state.prune(3, now=10.0 + horizon)
+    assert set(state.feeds) == {("a", None), ("b", None)}
+    state.prune(4, now=10.0 + horizon + 0.5)
+    assert set(state.feeds) == {("a", None)}
+
+
+def test_the_clock_is_the_monotonic_one_when_none_is_passed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    The application passes a frame number and no clock. The wiring: with the real
+    clock a cache shown this frame is kept and one last shown long ago is not.
+    """
+    state = TranscriptState()
+    state.prune(1)
+    assert state.now == pytest.approx(time.monotonic(), abs=1.0)
+    state.cache_for(("a", None))
+    state.caches[("b", None)] = NodeTranscript(last_shown=state.now - 3600.0)
+    state.prune(2)
+    assert set(state.caches) == {("a", None)}
+
+
+def test_a_feed_ahead_of_its_lines_starts_again() -> None:
+    """
+    Fewer lines than were fed is another transcript under the same node. Nothing
+    from the old one may stay on screen above the new one.
+    """
+    feed, _, _ = fed((SegmentKind.OUTPUT, "a\nb\nc\n"), (SegmentKind.TOOL_CALL, "Read(x)\n"))
+    assert feed.next_line == 4
+    other = Transcript()
+    other.append(SegmentKind.OUTPUT, "new\n")
+    cache = NodeTranscript()
+    sync(cache, other)
+    feed.advance(cache)
+    assert shown(feed) == [(SegmentKind.OUTPUT, "new\n")]
+    assert feed.skipped == 0
+
+
+# -- the mode --------------------------------------------------------------------
+
+
+def test_the_log_is_markdown_by_default_with_the_seam_and_wrapped_lines_without(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Until the operator picks a mode the pane picks one, and with the seam off it is
+    the one the pane had before there was a seam.
+    """
+    state = TranscriptState()
+    assert state.mode is None
+    assert state.shown_mode() is RenderMode.WRAP
+    monkeypatch.setattr(typeset, "enabled", lambda pane=None: True)
+    assert state.shown_mode() is transcript_pane.DEFAULT_MODE
+    assert transcript_pane.DEFAULT_MODE in (RenderMode.RICH, RenderMode.TYPESET)
+    assert state.mode is None, "the default is derived and never written back"
+
+
+def test_the_log_starts_in_the_mode_the_settings_name_until_the_pane_is_told_another(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    ``Settings.context_mode`` is where the pane starts, not a lock on it: the
+    pane's own buttons still choose for the session, and a name this build does
+    not have is the build's default rather than an error.
+    """
+    assert transcript_pane.mode_named("raw") is RenderMode.RAW
+    assert transcript_pane.mode_named("") is None
+    assert transcript_pane.mode_named("hologram") is None
+
+    state = TranscriptState(start_in=RenderMode.RAW)
+    assert state.shown_mode() is RenderMode.RAW, "with the seam off too: RAW needs none"
+    monkeypatch.setattr(typeset, "enabled", lambda pane=None: True)
+    assert state.shown_mode() is RenderMode.RAW
+    state.mode = RenderMode.RICH
+    assert state.shown_mode() is RenderMode.RICH, "a pick in the pane wins for the session"
+
+    # TYPESET to start in falls back as a picked TYPESET does.
+    state = TranscriptState(start_in=RenderMode.TYPESET)
+    assert state.shown_mode() is RenderMode.TYPESET
+    monkeypatch.setattr(typeset, "enabled", lambda pane=None: False)
+    assert state.shown_mode() is RenderMode.WRAP
+
+
+def test_a_draw_is_what_tells_the_pane_where_the_settings_start_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    The pane keeps no copy of the setting: every draw writes it, a draw that names
+    none puts the default back, and it is written before the early return for a
+    pane with nothing selected.
+    """
+    state = TranscriptState()
+    snap = Store().snapshot()
+    monkeypatch.setattr(transcript_pane.imgui, "text_disabled", lambda text: None)
+
+    transcript_pane.draw(snap, state, None, start_in=RenderMode.RAW)
+    assert state.start_in is RenderMode.RAW and state.shown_mode() is RenderMode.RAW
+    transcript_pane.draw(snap, state, None)
+    assert state.start_in is None and state.mode is None
+
+
+def test_a_chosen_mode_is_drawn_and_typeset_only_while_the_seam_can_draw(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Without the seam TYPESET is WRAP. The operator's choice is not overwritten by
+    that, so the seam coming back returns them to it.
+    """
+    state = TranscriptState(mode=RenderMode.TYPESET)
+    assert state.shown_mode() is RenderMode.WRAP
+    monkeypatch.setattr(typeset, "enabled", lambda pane=None: True)
+    assert state.shown_mode() is RenderMode.TYPESET
+    assert state.mode is RenderMode.TYPESET
+    for chosen in (RenderMode.RAW, RenderMode.WRAP, RenderMode.RICH):
+        state.mode = chosen
+        assert state.shown_mode() is chosen
+        monkeypatch.setattr(typeset, "enabled", lambda pane=None: False)
+        assert state.shown_mode() is chosen
+        monkeypatch.setattr(typeset, "enabled", lambda pane=None: True)
+
+
+# -- the pane, drawn -------------------------------------------------------------
+
+ROOT: NodeId = ("s1", None)
+LAST_LINE = "should that stay with its caller?"
+STOPPED = "imtypeset stopped: the library said no"
+
+
+def session(transcript: Transcript) -> Snapshot:
+    """One root session."""
+    store = Store()
+    store.apply(
+        AgentSpawned(
+            node_id=ROOT,
+            parent=None,
+            task="the session the test draws",
+            model="claude-sonnet-5",
+            started_at=0.0,
+            cwd="/x",
+            transcript=transcript,
+        )
+    )
+    return store.snapshot()
+
+
+def typeset_state(**fields: Any) -> TranscriptState:
+    return TranscriptState(mode=RenderMode.TYPESET, **fields)
+
+
+def open_stream(state: TranscriptState) -> Any:
+    feed = state.feeds[ROOT]
+    assert feed.open is not None
+    return typeset.stream(feed.views, ("open", feed.open.run))
+
+
+def report() -> Transcript:
+    """The fake fleet's settled session: every kind, and the markdown report."""
+    transcript = Transcript()
+    for kind, text in fake_driver._REPORT_SCRIPT:
+        transcript.append(kind, text)
+    return transcript
+
+
+def draw(im: Any, snap: Snapshot, state: TranscriptState) -> None:
+    rig.frame(im, lambda: transcript_pane.draw(snap, state, ROOT))
+
+
+def is_literal(view: Any) -> bool:
+    """
+    Whether a view of the library's holds one literal run: one host code block.
+    """
+    return len(view.blocks) == 1 and isinstance(view.blocks[0], rig.imscribe.MarkdownCode)
+
+
+def block_texts(feed: TypesetFeed) -> list[str]:
+    """
+    What the feed's views were handed to set, top to bottom: each block of a view
+    of the library's and each literal run whole, the generations and then the
+    open run.
+    """
+    keys = [held.key for held in feed.generations if held.key in feed.views]
+    if feed.open is not None and ("open", feed.open.run) in feed.views:
+        keys.append(("open", feed.open.run))
+    assert set(keys) == set(feed.views.keys()), "a view nothing draws is held"
+    return [text for key in keys for text in feed.views.texts(key)]
+
+
+def paragraphs(count: int, tag: str) -> str:
+    """``count`` paragraphs of three source lines each, no two alike."""
+    return "".join(
+        f"Paragraph {n} of {tag}, long enough to be broken over more than one line of the pane.\n"
+        f"Its second line says a little more about {tag} and about {n}.\n\n"
+        for n in range(count)
+    )
+
+
+def library_views_drawn(monkeypatch: pytest.MonkeyPatch) -> set[int]:
+    """
+    Every view of the library's that is drawn from here on, by ``id``: a stream
+    view's draw goes through a settled view's.
+    """
+    drawn: set[int] = set()
+    for kind in (rig.imscribe.TypesetView, rig.imscribe.TypesetStreamView):
+        real = kind.draw
+
+        def spy(self: Any, _real: Any = real, **given: Any) -> bool:
+            drawn.add(id(self))
+            return bool(_real(self, **given))
+
+        monkeypatch.setattr(kind, "draw", spy)
+    return drawn
+
+
+def test_the_settled_report_is_one_document_and_the_open_run_and_shows_all_of_it(
+    seam: Any,
+) -> None:
+    """
+    Closed runs under one key, the open run under another: not a key per run.
+    And nothing a markdown reader would hide is hidden: the report has a tag, a
+    generic, an unclosed comment opener and a ``<details>`` line with more below it.
+    """
+    state = typeset_state()
+    snap = session(report())
+    draw(seam, snap, state)
+    draw(seam, snap, state)
+    feed = state.feeds[ROOT]
+    (held,) = feed.generations
+    assert feed.open is not None
+    assert set(feed.views.keys()) == {held.key, ("open", feed.open.run)}
+    assert feed.skipped == 0
+    for key in feed.views.keys():
+        assert feed.views.unbuilt(key) == 0, key
+    # Every run is a view of its own: a markdown run's, and a literal run's as
+    # one host code block wherever the library keeps its columns.
+    literal = [run for run in held.runs if run.parts[0].kind is typeset.Kind.LITERAL]
+    fit = [run for run in literal if typeset.views.literal_unfit(run.parts[0]) is None]
+    assert fit and len(feed.views.views(held.key)) == len(held.runs) - len(literal) + len(fit)
+    assert sum(is_literal(view) for view in feed.views.views(held.key)) == len(fit)
+    text = "\n".join(block_texts(feed))
+    for needle in ("<lead>", "Optional<int>", "<!--", "<details>", LAST_LINE):
+        assert needle in text, needle
+    assert text.rstrip().endswith(LAST_LINE)
+
+
+def test_identifiers_keep_their_underscores_and_dollars_are_not_math(seam: Any) -> None:
+    """
+    ``__init__`` set as a bold "init" is the defect the old renderer disabled
+    underscore emphasis to avoid, and ``$PATH=$HOME`` is a shell line, not a formula.
+    """
+    state = typeset_state()
+    draw(seam, session(report()), state)
+    text = "\n".join(block_texts(state.feeds[ROOT]))
+    for needle in ("__init__", "__post_init__", "foo_bar_baz", "parse_line_1", "$PATH=$HOME/bin"):
+        assert needle in text, needle
+
+
+def test_a_report_streamed_a_token_a_frame_ends_as_the_settled_one(seam: Any) -> None:
+    """
+    The same blocks, once each, whether the report was there on the first frame or
+    arrived in pieces across four hundred of them.
+    """
+    settled = typeset_state()
+    draw(seam, session(report()), settled)
+
+    transcript = Transcript()
+    snap = session(transcript)
+    streamed = typeset_state()
+    for kind, text in fake_driver._REPORT_SCRIPT:
+        step = 23 if kind in (SegmentKind.OUTPUT, SegmentKind.REASONING) else len(text)
+        for start in range(0, len(text), step):
+            transcript.append(kind, text[start : start + step])
+            draw(seam, snap, streamed)
+    feed = streamed.feeds[ROOT]
+    assert block_texts(feed) == block_texts(settled.feeds[ROOT])
+    assert LAST_LINE in block_texts(feed)[-1]
+    assert accounted(feed) == feed.next_line
+
+
+def test_returning_to_a_pruned_node_keeps_its_views_and_feeds_nothing_twice(seam: Any) -> None:
+    state = typeset_state()
+    snap = session(report())
+    state.prune(1, now=5.0)
+    draw(seam, snap, state)
+    feed = state.feeds[ROOT]
+    before = block_texts(feed)
+    held = {key: feed.views.views(key) for key in feed.views.keys()}
+    assert all(held.values())
+
+    state.prune(2, now=5.0 + transcript_pane._CACHE_KEEP_S + 0.1)
+    assert ROOT not in state.caches
+    draw(seam, snap, state)
+    assert state.feeds[ROOT] is feed
+    assert {key: feed.views.views(key) for key in feed.views.keys()} == held
+    assert block_texts(feed) == before
+
+
+def test_the_stream_does_not_scroll_the_pane_follow_has_one_owner(seam: Any) -> None:
+    """
+    ``widgets.follow_tail`` pins the pane and lets go on an upward wheel. A stream
+    that also followed would pull the view back on the frame the pane let go.
+    """
+    state = typeset_state()
+    draw(seam, session(report()), state)
+    assert open_stream(state).view is not None
+    assert open_stream(state).following is False
+
+
+def test_hiding_reasoning_redraws_without_it_and_shows_all_of_it_again(seam: Any) -> None:
+    """
+    An open reasoning run that is hidden has no view. Shown again, it is set
+    with everything that arrived meanwhile.
+    """
+    transcript = Transcript()
+    transcript.append(SegmentKind.REASONING, "A closed thought.\n")
+    transcript.append(SegmentKind.OUTPUT, "Said aloud.\n")
+    transcript.append(SegmentKind.REASONING, "An open thou")
+    snap = session(transcript)
+    state = typeset_state(show_reasoning=False)
+    draw(seam, snap, state)
+    feed = state.feeds[ROOT]
+    assert block_texts(feed) == ["Said aloud."]
+
+    transcript.append(SegmentKind.REASONING, "ght, finished.\n")
+    draw(seam, snap, state)
+    assert block_texts(feed) == ["Said aloud."]
+    state.show_reasoning = True
+    draw(seam, snap, state)
+    assert block_texts(feed) == ["A closed thought.", "Said aloud.", "An open thought, finished."]
+
+
+def test_a_search_demotes_the_typeset_log_to_lines(
+    seam: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The seam has no find. A filter that changed nothing on screen would read as
+    "no matches hidden"; the line path is the one that can honour it.
+    """
+    calls: list[str] = []
+
+    def spy(name: str) -> Any:
+        real = getattr(typeset, name)
+
+        def called(*args: Any, **kwargs: Any) -> Any:
+            calls.append(name)
+            return real(*args, **kwargs)
+
+        return called
+
+    for name in ("document", "stream", "plain"):
+        monkeypatch.setattr(typeset, name, spy(name))
+    state = typeset_state(search="checksum")
+    snap = session(report())
+    draw(seam, snap, state)
+    assert calls == [] and state.feeds == {}
+    state.search = ""
+    draw(seam, snap, state)
+    assert "document" in calls and "stream" in calls
+
+
+def test_with_the_seam_off_the_pane_draws_as_it_did(
+    imgui: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The other half of the wiring: nothing reaches the seam, no feed is made, and
+    the mode drawn is WRAP, for a state nobody chose a mode in and for one left in
+    TYPESET.
+    """
+    calls: list[str] = []
+    for name in ("document", "stream", "plain"):
+        monkeypatch.setattr(typeset, name, lambda *a, _name=name, **k: calls.append(_name))
+    wrapped: list[str] = []
+    real = imgui.text_wrapped
+
+    def text_wrapped(text: str) -> None:
+        wrapped.append(text)
+        real(text)
+
+    monkeypatch.setattr(imgui, "text_wrapped", text_wrapped)
+    for state in (TranscriptState(), typeset_state()):
+        wrapped.clear()
+        draw(imgui, session(report()), state)
+        assert calls == [] and state.feeds == {}
+        assert state.shown_mode() is RenderMode.WRAP
+        assert any(LAST_LINE in text for text in wrapped)
+
+
+def test_a_feed_does_not_outlive_the_seam(seam: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    A feed holds the library's views. Switched off, the pane lets them go in its
+    next frame and does not wait the minute a feed is kept for; switched on again
+    the lines are set again, all of them.
+    """
+    state = typeset_state()
+    snap = session(report())
+    draw(seam, snap, state)
+    before = block_texts(state.feeds[ROOT])
+    with monkeypatch.context() as off:
+        off.setattr(typeset, "enabled", lambda pane=None: False)
+        draw(seam, snap, state)
+        assert state.feeds == {}
+    draw(seam, snap, state)
+    assert block_texts(state.feeds[ROOT]) == before
+
+
+def test_the_frame_the_library_stops_in_says_so_and_the_next_is_wrapped_lines(
+    seam: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The library can stop inside a draw, with the pane already in its typeset
+    branch. That frame says why where the text would be; the next is the pane's
+    own renderer with every line, and no view of the stopped library is kept.
+    """
+    from imscribe import typesetter
+
+    state = typeset_state()
+    snap = session(report())
+    draw(seam, snap, state)
+    assert state.shown_mode() is RenderMode.TYPESET
+
+    said: list[str] = []
+    wrapped: list[str] = []
+    with monkeypatch.context() as stop:
+        down: list[bool] = []
+
+        def stopped(self: Any, **given: Any) -> bool:
+            # As the library does it: switched off, and then the view raises.
+            down.append(True)
+            raise rig.imscribe.TypesetUnavailable(STOPPED)
+
+        ready = typesetter.ready
+        stop.setattr(typesetter, "ready", lambda: not down and ready())
+        for kind in (rig.imscribe.TypesetView, rig.imscribe.TypesetStreamView):
+            stop.setattr(kind, "draw", stopped)
+        unformatted, text_wrapped = seam.text_unformatted, seam.text_wrapped
+        stop.setattr(
+            seam, "text_unformatted", lambda text: (said.append(text), unformatted(text))[1]
+        )
+        stop.setattr(
+            seam, "text_wrapped", lambda text: (wrapped.append(text), text_wrapped(text))[1]
+        )
+
+        draw(seam, snap, state)
+        assert f"typeset text stopped: {STOPPED}" in said
+        assert wrapped == [], "half of each renderer in one frame"
+
+        draw(seam, snap, state)
+        assert not typeset.enabled(typeset.Pane.CONTEXT)
+        assert state.shown_mode() is RenderMode.WRAP and state.mode is RenderMode.TYPESET
+        assert state.feeds == {}
+        assert any(LAST_LINE in text for text in wrapped)
+    assert typeset.load_fonts(rig.BOLD), "a load is the way back"
+    draw(seam, snap, state)
+    assert state.shown_mode() is RenderMode.TYPESET
+    assert LAST_LINE in block_texts(state.feeds[ROOT])[-1]
+
+
+def test_a_right_click_offers_the_block_and_the_run_under_the_mouse_and_the_selection(
+    seam: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The menu is built from what the seam says is under the mouse, latched while the
+    popup is closed: opening it moves the hover onto the popup. The run is copied
+    from the lines, whole, as the line modes copy it.
+    """
+    state = typeset_state(follow_tail=False)
+    snap = session(report())
+    io = seam.get_io()
+    offered: list[str] = []
+    copied: list[str] = []
+    monkeypatch.setattr(seam, "set_clipboard_text", copied.append)
+    selecting: Any = None
+    try:
+        io.add_mouse_pos_event(80.0, 140.0)
+        for _ in range(3):
+            draw(seam, snap, state)
+        feed = state.feeds[ROOT]
+        (held,) = feed.generations
+        assert state.typeset_target is not None
+        run, pointed = state.typeset_target
+        assert run is not None and pointed
+        cache = state.caches[ROOT]
+        start, end = cache.run_bounds(run)
+        assert pointed.split()[0] in cache.run_text(run)
+        assert not any(pointed.split()[0] in cache.run_text(n) for n in range(run))
+        kind = cache.lines[start].kind.value.replace("_", " ")
+        run_item = f"copy {kind} ({end - start} line{'' if end - start == 1 else 's'})"
+
+        selecting = feed.views.views(held.key)[0]
+        selecting.select_all()
+        io.add_mouse_button_event(1, True)
+        draw(seam, snap, state)
+        io.add_mouse_button_event(1, False)
+        draw(seam, snap, state)
+
+        def labelled(pick: str | None = None) -> None:
+            real = seam.menu_item_simple
+
+            def item(label: str) -> bool:
+                offered.append(label)
+                return bool(real(label)) or label == pick
+
+            seam.menu_item_simple = item
+            try:
+                transcript_pane.draw(snap, state, ROOT)
+            finally:
+                seam.menu_item_simple = real
+
+        rig.frame(seam, labelled)
+        assert offered == ["copy selection", "copy block", run_item, "copy visible"]
+        # Latched: the target is the block that was clicked, not the popup's hover.
+        assert state.typeset_target == (run, pointed)
+        for pick in ("copy selection", "copy block", run_item):
+            rig.frame(seam, lambda pick=pick: labelled(pick))
+        assert copied == [selecting.selected_text(), pointed, cache.run_text(run)]
+        assert copied[0], "nothing was selected: the first item copied nothing"
+    finally:
+        io.add_mouse_button_event(1, False)
+        io.add_mouse_pos_event(-1.0, -1.0)
+        if selecting is not None:
+            selecting.clear_selection()
+        # A popup nobody submits is closed by ImGui; later tests start without one.
+        for _ in range(2):
+            rig.frame(seam, lambda: None)
+
+
+def test_the_library_stopping_under_an_open_menu_leaves_the_menu_and_the_frame_whole(
+    seam: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The menu reads the selection between the popup's begin and its end, inside
+    the log's child, and reading it is a call into the library. If the library
+    has stopped, the menu offers no selection and everything else it had, the
+    popup and the child are closed, and the next frame is wrapped lines.
+    """
+    state = typeset_state(follow_tail=False)
+    snap = session(report())
+    io = seam.get_io()
+    offered: list[str] = []
+    selecting: Any = None
+
+    def stopped() -> str:
+        raise rig.imscribe.TypesetUnavailable(STOPPED)
+
+    def labelled() -> None:
+        real = seam.menu_item_simple
+        outer = seam.internal.get_current_window().name
+        seam.menu_item_simple = lambda label: (offered.append(label), real(label))[1]
+        try:
+            transcript_pane.draw(snap, state, ROOT)
+        finally:
+            seam.menu_item_simple = real
+        assert seam.internal.get_current_window().name == outer, "a window was left open"
+
+    try:
+        io.add_mouse_pos_event(80.0, 140.0)
+        for _ in range(3):
+            draw(seam, snap, state)
+        (held,) = state.feeds[ROOT].generations
+        selecting = state.feeds[ROOT].views.views(held.key)[0]
+        selecting.select_all()
+        io.add_mouse_button_event(1, True)
+        draw(seam, snap, state)
+        io.add_mouse_button_event(1, False)
+        draw(seam, snap, state)
+        rig.frame(seam, labelled)
+        assert offered[0] == "copy selection" and offered[-1] == "copy visible"
+
+        offered.clear()
+        with monkeypatch.context() as stop:
+            stop.setattr(selecting, "selected_text", stopped)
+            rig.frame(seam, labelled)
+        assert "copy selection" not in offered and offered[-1] == "copy visible"
+
+        draw(seam, snap, state)
+        assert not typeset.enabled(typeset.Pane.CONTEXT)
+        assert state.shown_mode() is RenderMode.WRAP
+    finally:
+        io.add_mouse_button_event(1, False)
+        io.add_mouse_pos_event(-1.0, -1.0)
+        if selecting is not None:
+            selecting.clear_selection()
+        for _ in range(2):
+            rig.frame(seam, lambda: None)
+        assert typeset.load_fonts(rig.BOLD), "a load is the way back"
+
+
+@pytest.mark.parametrize(
+    ("kind", "text"),
+    [
+        (SegmentKind.TOOL_RESULT, "total 3\ndrwxr-xr-x  a\n-rw-r--r--  b"),
+        (SegmentKind.OUTPUT, "A paragraph that is said aloud."),
+    ],
+)
+def test_the_run_under_the_mouse_is_found_whoever_draws_it_open_or_closed(
+    seam: Any, kind: SegmentKind, text: str
+) -> None:
+    """
+    A literal run is ImGui's text and a markdown run the library's, and a right
+    click means the same over either. A literal run is found across the whole
+    width of the pane, so a line of two characters is not a sliver to aim at.
+    """
+    transcript = Transcript()
+    transcript.append(kind, text + "\n")
+    snap = session(transcript)
+    state = typeset_state(follow_tail=False)
+    io = seam.get_io()
+    tops: list[float] = []
+    real = transcript_pane._draw_typeset
+
+    def spy(*args: Any) -> None:
+        tops.append(seam.get_cursor_screen_pos().y)
+        real(*args)
+
+    try:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(transcript_pane, "_draw_typeset", spy)
+            draw(seam, snap, state)
+        # A few pixels into the first line; far to the right of a literal one.
+        x = 500.0 if kind is not SegmentKind.OUTPUT else 60.0
+        io.add_mouse_pos_event(x, tops[-1] + 12.0)
+        for _ in range(2):
+            draw(seam, snap, state)
+        assert state.typeset_target == (0, text)
+
+        other = SegmentKind.TOOL_CALL if kind is SegmentKind.OUTPUT else SegmentKind.OUTPUT
+        transcript.append(other, "And then something else.\n")
+        for _ in range(2):
+            draw(seam, snap, state)
+        assert [run.run for run in state.feeds[ROOT].runs] == [0]
+        assert state.typeset_target == (0, text)
+    finally:
+        io.add_mouse_pos_event(-1.0, -1.0)
+        rig.frame(seam, lambda: None)
+
+
+def test_a_block_is_traced_to_its_run_through_the_reasoning_filter(seam: Any) -> None:
+    """
+    The document holds only the parts the filter lets through, so its part numbers
+    are not the generation's run numbers.
+    """
+    transcript = Transcript()
+    transcript.append(SegmentKind.REASONING, "A thought.\n")
+    transcript.append(SegmentKind.OUTPUT, "Said aloud.\n")
+    transcript.append(SegmentKind.TOOL_CALL, "Read(x)\n")
+    transcript.append(SegmentKind.OUTPUT, "open")
+    state = typeset_state(show_reasoning=False)
+    snap = session(transcript)
+    draw(seam, snap, state)
+    feed = state.feeds[ROOT]
+    (held,) = feed.generations
+    assert feed.views.texts(held.key) == ("Said aloud.", "Read(x)")
+    assert transcript_pane._typeset_run(feed, held.key, 0, False) == 1
+    assert transcript_pane._typeset_run(feed, held.key, 1, False) == 2
+    assert transcript_pane._typeset_run(feed, held.key, 7, False) is None
+    assert transcript_pane._typeset_run(feed, ("open", 3), 0, False) == 3
+    state.show_reasoning = True
+    draw(seam, snap, state)
+    assert feed.views.texts(held.key) == ("A thought.", "Said aloud.", "Read(x)")
+    assert transcript_pane._typeset_run(feed, held.key, 0, True) == 0
+
+
+def test_an_open_run_shows_its_last_character_and_is_not_closed(seam: Any) -> None:
+    """
+    A turn ends on "All done!" and the session then waits, for as long as it waits.
+    The stream is left open -- the same run can go on -- and shows all of it.
+    """
+    for said in ("All done!", "see <", "a `"):
+        transcript = Transcript()
+        transcript.append(SegmentKind.OUTPUT, said)
+        state = typeset_state()
+        snap = session(transcript)
+        for _ in range(3):
+            draw(seam, snap, state)
+        assert not open_stream(state).closed
+        assert block_texts(state.feeds[ROOT]) == [said]
+
+
+def test_a_run_that_goes_on_after_a_pause_is_appended_to_and_never_set_again(
+    seam: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Setting a stream again is its whole layout again. An open run is only ever
+    appended to, however long it sat.
+    """
+    again: list[int] = []
+    real = typeset.Stream._forget
+    monkeypatch.setattr(typeset.Stream, "_forget", lambda self: (again.append(1), real(self))[1])
+    transcript = Transcript()
+    state = typeset_state()
+    snap = session(transcript)
+    transcript.append(SegmentKind.OUTPUT, "First sentence!")
+    for _ in range(30):
+        draw(seam, snap, state)
+    handle = open_stream(state)
+    view = handle.view
+    transcript.append(SegmentKind.OUTPUT, " Second sentence.\n\nA new paragraph")
+    draw(seam, snap, state)
+    assert open_stream(state) is handle and handle.view is view
+    assert handle.text == "First sentence! Second sentence.\n\nA new paragraph"
+    assert block_texts(state.feeds[ROOT]) == ["First sentence! Second sentence.", "A new paragraph"]
+    transcript.append(SegmentKind.TOOL_CALL, "Read(x)\n")
+    draw(seam, snap, state)
+    assert again == []
+    assert block_texts(state.feeds[ROOT]) == [
+        "First sentence! Second sentence.",
+        "A new paragraph",
+        "Read(x)",
+    ]
+
+
+def test_what_arrives_is_on_screen_in_the_frame_it_is_drawn(seam: Any) -> None:
+    """
+    Nothing is paced: each frame's view holds every word the transcript had when
+    the frame began, for a token a frame and for a tail that is long on the first.
+    """
+    transcript = Transcript()
+    transcript.append(SegmentKind.OUTPUT, "Word 0")
+    state = typeset_state()
+    snap = session(transcript)
+    draw(seam, snap, state)
+    feed = state.feeds[ROOT]
+    for n in range(1, 31):
+        transcript.append(SegmentKind.OUTPUT, f" {n}")
+        draw(seam, snap, state)
+        assert block_texts(feed) == ["Word 0 " + " ".join(str(m) for m in range(1, n + 1))]
+        assert feed.views.unbuilt(("open", 0)) == 0
+
+    transcript = Transcript()
+    transcript.append(SegmentKind.OUTPUT, paragraphs(60, "the tail"))
+    state = typeset_state()
+    draw(seam, session(transcript), state)
+    texts = block_texts(state.feeds[ROOT])
+    assert [text.startswith(f"Paragraph {n} of the tail") for n, text in enumerate(texts)] == [
+        True
+    ] * 60
+
+
+def test_two_identical_runs_are_both_drawn_and_each_can_be_selected(seam: Any) -> None:
+    """
+    An agent reads the same file twice and says the same sentence twice. The seam
+    reads equal parts once; the log still has two of each, each with its own
+    place and its own selection.
+    """
+    transcript = Transcript()
+    said = "The same sentence, said again.\n"
+    for _ in range(2):
+        transcript.append(SegmentKind.OUTPUT, said)
+        transcript.append(SegmentKind.TOOL_CALL, "Read(file_path=same.py)\n")
+    transcript.append(SegmentKind.OUTPUT, "the end")
+    state = typeset_state(follow_tail=False)
+    snap = session(transcript)
+    for _ in range(2):
+        draw(seam, snap, state)
+    feed = state.feeds[ROOT]
+    (held,) = feed.generations
+    assert feed.views.texts(held.key) == (
+        "The same sentence, said again.",
+        "Read(file_path=same.py)",
+        "The same sentence, said again.",
+        "Read(file_path=same.py)",
+    )
+    assert [transcript_pane._typeset_run(feed, held.key, n, True) for n in range(4)] == [0, 1, 2, 3]
+    first, second = [view for view in feed.views.views(held.key) if not is_literal(view)]
+    assert first is not second and first.origin[1] < second.origin[1]
+    assert [feed.views.part_at(held.key, 0, view) for view in (first, second)] == [0, 2]
+    try:
+        second.select_all()
+        assert second.selected_text() == "The same sentence, said again."
+        assert feed.views.selected(held.key) == "The same sentence, said again."
+        assert not first.owns_selection
+    finally:
+        second.clear_selection()
+
+
+def test_an_open_literal_run_is_set_as_it_arrives_and_keeps_its_unfinished_line(
+    seam: Any,
+) -> None:
+    """
+    A result arriving a token at a time is one host code block of the
+    library's, whole lines and the line still arriving alike, under one key.
+    """
+    transcript = Transcript()
+    state = typeset_state()
+    snap = session(transcript)
+    transcript.append(SegmentKind.OUTPUT, "Looking.\n")
+    seen: list[str] = []
+    for token in ("\nrow one, ", "first half", " and second\n", "row two", ", more", "\n", "row 3"):
+        transcript.append(SegmentKind.TOOL_RESULT, token)
+        draw(seam, snap, state)
+        (text,) = state.feeds[ROOT].views.texts(("open", 1))
+        seen.append(text)
+    feed = state.feeds[ROOT]
+    assert seen == [
+        "row one, ",
+        "row one, first half",
+        "row one, first half and second",
+        "row one, first half and second\nrow two",
+        "row one, first half and second\nrow two, more",
+        "row one, first half and second\nrow two, more",
+        "row one, first half and second\nrow two, more\nrow 3",
+    ]
+    (view,) = feed.views.views(("open", 1))
+    assert is_literal(view) and tuple(view.texts) == (seen[-1],)
+    assert block_texts(feed) == ["Looking.", seen[-1]]
+
+    transcript.append(SegmentKind.OUTPUT, "Done.")
+    draw(seam, snap, state)
+    assert block_texts(feed) == ["Looking.", seen[-1], "Done."]
+    assert ("open", 1) not in feed.views
+
+
+# -- the pane, drawn: a run that closes --------------------------------------------
+
+
+def run_tops(monkeypatch: pytest.MonkeyPatch, seam: Any) -> dict[int, list[float]]:
+    """
+    Where the open run's view is drawn, on screen, frame by frame: by run.
+    """
+    tops: dict[int, list[float]] = {}
+    real = transcript_pane._draw_run
+
+    def spy(views: Any, run: Any, live: Any) -> None:
+        tops.setdefault(run.run, []).append(seam.get_cursor_screen_pos().y)
+        real(views, run, live)
+
+    monkeypatch.setattr(transcript_pane, "_draw_run", spy)
+    return tops
+
+
+def test_a_markdown_run_that_closes_is_in_its_document_that_frame_where_it_was(
+    seam: Any,
+) -> None:
+    """
+    The seam reads and lays out a part in the call that draws it, so a run that
+    closes has no frame in which it is neither its own view nor in the document,
+    and none in which it is both. Nothing on screen moves for it.
+    """
+    transcript = Transcript()
+    transcript.append(SegmentKind.OUTPUT, "A few words first.\n")
+    transcript.append(SegmentKind.TOOL_CALL, "Read(x)\n")
+    transcript.append(SegmentKind.OUTPUT, paragraphs(40, "the long run"))
+    transcript.append(SegmentKind.OUTPUT, "```py\nnever_closed = 1\n")
+    # Not following: the pane stays at its top.
+    state = typeset_state(follow_tail=False)
+    snap = session(transcript)
+    for _ in range(2):
+        draw(seam, snap, state)
+    feed = state.feeds[ROOT]
+    (held,) = feed.generations
+    was = open_stream(state).view.origin
+    assert not open_stream(state).closed
+
+    transcript.append(SegmentKind.TOOL_CALL, "Bash(ls)\n")
+    draw(seam, snap, state)
+    assert feed.generations == [held] and [run.run for run in held.runs] == [0, 1, 2]
+    assert set(feed.views.keys()) == {held.key, ("open", 3)}
+    assert feed.views.views(held.key)[-1].origin == was
+    texts = block_texts(feed)
+    # A fence the run left open ends with the run.
+    assert sum("never_closed = 1" in text for text in texts) == 1
+    assert sum(text.startswith("Paragraph 39 of the long run") for text in texts) == 1
+    assert texts[-1] == "Bash(ls)"
+
+
+def test_a_markdown_run_under_another_does_not_move_when_it_closes(seam: Any) -> None:
+    """
+    What a model says straight after it thinks: two markdown runs with nothing
+    between them. Set as blocks of one view they would be the library's block
+    gap apart, and the second was ImGui's item spacing under the first while it
+    was arriving: it would step down as it closed, at every such turn.
+    """
+    transcript = Transcript()
+    transcript.append(SegmentKind.REASONING, "A thought, closed.\n")
+    transcript.append(SegmentKind.OUTPUT, "Said aloud, still open")
+    state = typeset_state(follow_tail=False)
+    snap = session(transcript)
+    for _ in range(2):
+        draw(seam, snap, state)
+    feed = state.feeds[ROOT]
+    stream = open_stream(state).view
+    was = (stream.origin, stream.set_lines()[0].baseline)
+
+    transcript.append(SegmentKind.TOOL_CALL, "Read(x)\n")
+    for _ in range(2):
+        draw(seam, snap, state)
+    (held,) = feed.generations
+    thought, said = feed.views.views(held.key)
+    assert list(said.texts) == ["Said aloud, still open"]
+    assert (said.origin, said.set_lines()[0].baseline) == was
+    assert thought.origin[1] < said.origin[1]
+
+
+@pytest.mark.parametrize("who", ["library", "imgui"])
+def test_a_literal_run_that_closes_stays_where_it_was(
+    seam: Any, monkeypatch: pytest.MonkeyPatch, who: str
+) -> None:
+    """
+    Open, a literal run is the last thing in the pane; closed, a part of a
+    document with more under it. Its lines are at the same height in both,
+    whoever sets them: the library, or ImGui where the library is not asked to.
+    """
+    rows = "row one\nrow two\nrow three"
+    at: list[float] = []
+    if who == "imgui":
+        monkeypatch.setattr(typeset.views, "literal_unfit", lambda part: "is refused here")
+    real = seam.text_unformatted
+    real_view = rig.imscribe.TypesetView.draw
+
+    def text_unformatted(text: str) -> None:
+        if text == rows:
+            at.append(seam.get_cursor_screen_pos().y)
+        real(text)
+
+    def view_draw(self: Any, **given: Any) -> bool:
+        if who == "library" and tuple(self.texts) == (rows,):
+            at.append(seam.get_cursor_screen_pos().y)
+        return bool(real_view(self, **given))
+
+    monkeypatch.setattr(seam, "text_unformatted", text_unformatted)
+    monkeypatch.setattr(rig.imscribe.TypesetView, "draw", view_draw)
+    transcript = Transcript()
+    transcript.append(SegmentKind.OUTPUT, "Looking.\n")
+    transcript.append(SegmentKind.TOOL_RESULT, rows)
+    state = typeset_state(follow_tail=False)
+    snap = session(transcript)
+    for _ in range(2):
+        draw(seam, snap, state)
+    transcript.append(SegmentKind.OUTPUT, "Done.")
+    for _ in range(2):
+        draw(seam, snap, state)
+    assert len(at) == 4 and len(set(at)) == 1
+
+
+def test_runs_closing_every_frame_leave_one_view_of_their_own_and_their_room(
+    seam: Any,
+) -> None:
+    """
+    Each run that closes is in its document in the frame it closes, wherever the
+    document is: the only key that is not a generation's is the open run's.
+    """
+    transcript = Transcript()
+    transcript.append(SegmentKind.OUTPUT, "A few words first.\n")
+    transcript.append(SegmentKind.TOOL_CALL, "Read(x)\n")
+    transcript.append(SegmentKind.OUTPUT, paragraphs(40, "the tall run"))
+    state = typeset_state()
+    snap = session(transcript)
+    for _ in range(3):
+        draw(seam, snap, state)
+    feed = state.feeds[ROOT]
+    own: list[int] = []
+    extents: list[float] = []
+    for kind, text in alternating(24)[1:]:
+        transcript.append(kind, text)
+        draw(seam, snap, state)
+        (held,) = feed.generations
+        own.append(len(feed.views) - len(feed.generations))
+        extents.append(held.extent)
+    assert max(own) == 1
+    assert all(later > earlier for earlier, later in zip(extents, extents[1:], strict=False))
+
+
+def test_a_hidden_reasoning_run_is_never_drawn_open_or_closed(
+    seam: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tops = run_tops(monkeypatch, seam)
+    transcript = Transcript()
+    transcript.append(SegmentKind.OUTPUT, "Said first.\n")
+    transcript.append(SegmentKind.REASONING, "A thought nobody asked to see")
+    state = typeset_state(show_reasoning=False)
+    snap = session(transcript)
+    draw(seam, snap, state)
+    feed = state.feeds[ROOT]
+    assert ("open", 1) not in feed.views and 1 not in tops
+    transcript.append(SegmentKind.REASONING, ", and more of it.\n")
+    transcript.append(SegmentKind.OUTPUT, "Said after.")
+    for _ in range(2):
+        draw(seam, snap, state)
+        assert 1 not in tops
+    assert block_texts(feed) == ["Said first.", "Said after."]
+
+
+# -- the pane, drawn: a watched transcript -----------------------------------------
+
+
+def watched(seam: Any, state: TranscriptState, runs: int) -> tuple[Snapshot, Transcript]:
+    """A transcript drawn as each of ``runs`` runs arrives, and twice more."""
+    transcript = Transcript()
+    snap = session(transcript)
+    for kind, text in alternating(runs):
+        transcript.append(kind, text)
+        draw(seam, snap, state)
+    for _ in range(2):
+        draw(seam, snap, state)
+    return snap, transcript
+
+
+def test_a_transcript_watched_while_it_streams_stays_bounded_and_says_what_it_dropped(
+    seam: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(transcript_pane, "_GENERATION_LINES", 12)
+    monkeypatch.setattr(transcript_pane, "_TYPESET_KEEP", 60)
+    said: list[str] = []
+    real = seam.text_disabled
+    monkeypatch.setattr(seam, "text_disabled", lambda text: (said.append(text), real(text))[1])
+    state = typeset_state()
+    held: list[int] = []
+    keys: list[int] = []
+    transcript = Transcript()
+    snap = session(transcript)
+    for kind, text in alternating(200):
+        transcript.append(kind, text)
+        draw(seam, snap, state)
+        feed = state.feeds[ROOT]
+        held.append(feed.held)
+        keys.append(len(feed.views))
+    # Never twice the bound, and the bound itself once the oldest lines have
+    # scrolled out of the pane.
+    assert max(held) <= 2 * 60
+    assert max(held[100:]) <= 60 + 2
+    # A key for each generation and one for the open run: what was dropped took
+    # its views with it.
+    assert len(feed.generations) <= 62 // 12 + 1
+    assert max(keys) <= 2 * 60 // 12 + 2 and keys[-1] == len(feed.generations) + 1
+    assert feed.skipped >= 300 - 62
+    assert accounted(feed) == feed.next_line == 300
+    assert said[-1] == f"{feed.skipped:,} earlier lines: switch to raw"
+    # What is left is the end of the transcript, in order and once.
+    texts = block_texts(feed)
+    assert texts[-1] == "Read(file_199.py)"
+    numbers = [int(text.split()[1].rstrip(",")) for text in texts if text.startswith("Paragraph")]
+    assert numbers == list(range(numbers[0], 200, 2)) and len(numbers) >= 8
+
+
+def test_generations_out_of_the_window_are_not_drawn_and_take_the_room_they_took(
+    seam: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The scrollback is most of a log and a generation is a view for every markdown
+    run in it. One that is out of the window and as it was is left alone, and the
+    pane is as tall as if every one had been drawn.
+    """
+    monkeypatch.setattr(transcript_pane, "_GENERATION_LINES", 12)
+    tall: list[float] = []
+    real = transcript_pane._handle_scroll
+    monkeypatch.setattr(
+        transcript_pane,
+        "_handle_scroll",
+        lambda state: (tall.append(seam.get_cursor_pos_y()), real(state))[1],
+    )
+    state = typeset_state()
+    snap, _ = watched(seam, state, 61)
+    feed = state.feeds[ROOT]
+    assert len(feed.generations) >= 5
+    held = sum(len(feed.views.views(key)) for key in feed.views.keys())
+
+    drawn = library_views_drawn(monkeypatch)
+    draw(seam, snap, state)
+    resting = [each for each in feed.generations if not each.in_sight]
+    assert len(resting) >= 2, "everything is in the pane: nothing would be tested"
+    assert len(drawn) == held - sum(len(feed.views.views(each.key)) for each in resting)
+    rested = tall[-1]
+
+    # Every document drawn, as a pane that did not let them rest would.
+    document = typeset.document
+    monkeypatch.setattr(
+        typeset, "document", lambda *args, **given: document(*args, **{**given, "rests": False})
+    )
+    drawn.clear()
+    draw(seam, snap, state)
+    assert len(drawn) == held
+    assert tall[-1] == rested
+
+
+@pytest.mark.parametrize("following", [True, False])
+def test_dropping_a_generation_moves_nothing_on_screen(
+    seam: Any, monkeypatch: pytest.MonkeyPatch, following: bool
+) -> None:
+    """
+    The dropped lines are above the pane and take their room with them. The scroll
+    position a frame is drawn at is the last frame's, so for one frame everything
+    below would sit that much too high: a blink, each time.
+    """
+    monkeypatch.setattr(transcript_pane, "_GENERATION_LINES", 12)
+    state = typeset_state()
+    snap, _ = watched(seam, state, 61)
+    feed = state.feeds[ROOT]
+    assert len(feed.generations) >= 5 and feed.skipped == 0
+
+    if not following:
+        # Scrolled up to somewhere in the middle, and left there.
+        state.follow_tail = False
+        real = transcript_pane._handle_scroll
+        monkeypatch.setattr(
+            transcript_pane,
+            "_handle_scroll",
+            lambda state: seam.set_scroll_y(seam.get_scroll_max_y() * 0.6),
+        )
+        draw(seam, snap, state)
+        monkeypatch.setattr(transcript_pane, "_handle_scroll", real)
+        for _ in range(2):
+            draw(seam, snap, state)
+        assert state.follow_tail is False
+        assert not feed.generations[0].in_sight
+
+    tops = run_tops(monkeypatch, seam)
+    for _ in range(2):
+        draw(seam, snap, state)
+    monkeypatch.setattr(transcript_pane, "_TYPESET_KEEP", feed.held - 1)
+    for _ in range(4):
+        draw(seam, snap, state)
+    assert feed.skipped > 0 and len(feed.generations) >= 3
+    (open_run,) = tops
+    assert len(tops[open_run]) == 6
+    assert tops[open_run] == pytest.approx([tops[open_run][0]] * 6, abs=0.01)
+    assert state.follow_tail is following
+
+
+def test_a_generation_dropped_as_a_line_arrives_leaves_the_tail_pinned(
+    seam: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Following, the end of the text sits at the bottom of the pane one frame after
+    it grows. A drop in the frame it grew must not cost a second one.
+    """
+    monkeypatch.setattr(transcript_pane, "_GENERATION_LINES", 12)
+    state = typeset_state()
+    snap, transcript = watched(seam, state, 61)
+    feed = state.feeds[ROOT]
+    ends: list[float] = []
+    real = transcript_pane._handle_scroll
+    monkeypatch.setattr(
+        transcript_pane,
+        "_handle_scroll",
+        lambda state: (ends.append(seam.get_cursor_screen_pos().y), real(state))[1],
+    )
+    for _ in range(2):
+        draw(seam, snap, state)
+    transcript.append(SegmentKind.OUTPUT, "\nA paragraph more.\n\nAnd another.\n")
+    monkeypatch.setattr(transcript_pane, "_TYPESET_KEEP", feed.held - 1)
+    for _ in range(3):
+        draw(seam, snap, state)
+    assert feed.skipped > 0
+    pinned, _, grown, after, later = ends
+    assert grown > pinned + 20.0, "the text did not grow in the frame of the drop"
+    assert after == later == pinned
+
+
+# -- the pane, drawn: the controls -------------------------------------------------
+
+
+def sub_agent(transcript: Transcript) -> tuple[Snapshot, NodeId]:
+    """A root session and one sub-agent of it, whose transcript this is."""
+    store = Store()
+    node: NodeId = ("s1", "agent-1")
+    for node_id, parent in ((ROOT, None), (node, ROOT)):
+        store.apply(
+            AgentSpawned(
+                node_id=node_id,
+                parent=parent,
+                task="the session the test draws",
+                model="claude-sonnet-5",
+                started_at=0.0,
+                cwd="/x",
+                transcript=transcript if parent is not None else Transcript(),
+            )
+        )
+    return store.snapshot(), node
+
+
+def said_at(
+    im: Any, monkeypatch: pytest.MonkeyPatch, state: TranscriptState, snap: Snapshot, node: NodeId
+) -> dict[str, float]:
+    """Every dim or coloured native line of one frame, and how far in it started."""
+    notes: dict[str, float] = {}
+    disabled, coloured = im.text_disabled, im.text_colored
+    monkeypatch.setattr(
+        im,
+        "text_disabled",
+        lambda text: (notes.setdefault(text, im.get_cursor_pos_x()), disabled(text))[1],
+    )
+    monkeypatch.setattr(
+        im,
+        "text_colored",
+        lambda ink, text: (notes.setdefault(text, im.get_cursor_pos_x()), coloured(ink, text))[1],
+    )
+    rig.frame(im, lambda: transcript_pane.draw(snap, state, node))
+    monkeypatch.setattr(im, "text_disabled", disabled)
+    monkeypatch.setattr(im, "text_colored", coloured)
+    return notes
+
+
+SUB_AGENT_NOTE = "sub-agent: complete messages only, not live"
+RICH_NOTE = "(rich: search falls back to raw lines)"
+
+
+@pytest.mark.parametrize("mode", [RenderMode.RICH, RenderMode.TYPESET])
+def test_with_the_seam_on_the_notes_have_rows_of_their_own(
+    seam: Any, monkeypatch: pytest.MonkeyPatch, mode: RenderMode
+) -> None:
+    """
+    The filter takes what is left of the controls' row, so a note put after it is
+    clipped at the pane's edge: the one that says a quiet sub-agent is not a stuck
+    one, and the one that says a filtered log is not the log as the mode sets it.
+    """
+    transcript = Transcript()
+    transcript.append(SegmentKind.OUTPUT, "A checksum, and a line without one.\n")
+    snap, node = sub_agent(transcript)
+    state = TranscriptState(mode=mode)
+    plain = said_at(seam, monkeypatch, state, snap, node)
+    left = min(plain.values())
+    assert plain[SUB_AGENT_NOTE] == left
+    assert RICH_NOTE not in plain and not any(note.startswith("filtering") for note in plain)
+
+    state.search = "checksum"
+    filtered = said_at(seam, monkeypatch, state, snap, node)
+    assert filtered[f"filtering: raw lines ({mode.value} has no find)"] == left
+    assert filtered[SUB_AGENT_NOTE] == left
+
+
+def test_in_a_narrow_dock_a_note_is_broken_and_not_cut_off(
+    seam: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    "sub-agent: co" is what a 290 pixel dock showed of the note, and "not live" is
+    the half of it that matters.
+    """
+    transcript = Transcript()
+    transcript.append(SegmentKind.OUTPUT, "A checksum, and a line without one.\n")
+    snap, node = sub_agent(transcript)
+    state = typeset_state(search="checksum")
+    rects: dict[str, tuple[float, float]] = {}
+    edge: list[float] = []
+    disabled, coloured = seam.text_disabled, seam.text_colored
+
+    def measured(text: str) -> None:
+        rects[text] = (seam.get_item_rect_max().x, seam.get_item_rect_size().y)
+
+    monkeypatch.setattr(seam, "text_disabled", lambda text: (disabled(text), measured(text))[1])
+    monkeypatch.setattr(
+        seam, "text_colored", lambda ink, text: (coloured(ink, text), measured(text))[1]
+    )
+
+    def narrow() -> None:
+        seam.begin_child("##narrow-dock", seam.ImVec2(250.0, 500.0))
+        edge.append(seam.get_window_pos().x + seam.get_window_size().x)
+        transcript_pane.draw(snap, state, node)
+        seam.end_child()
+
+    rig.frame(seam, narrow)
+    line = seam.get_text_line_height()
+    for note in (SUB_AGENT_NOTE, "filtering: raw lines (typeset has no find)"):
+        right, tall = rects[note]
+        assert right <= edge[0], note
+        assert tall >= 2 * line, note
+
+
+def test_with_the_seam_off_the_notes_are_where_they_were(
+    imgui: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    transcript = Transcript()
+    transcript.append(SegmentKind.OUTPUT, "A checksum, and a line without one.\n")
+    snap, node = sub_agent(transcript)
+    state = TranscriptState(mode=RenderMode.RICH, search="checksum")
+    notes = said_at(imgui, monkeypatch, state, snap, node)
+    # After the copy button, on the controls' row, and no row about filtering.
+    assert notes[RICH_NOTE] > 300.0 and notes[SUB_AGENT_NOTE] > notes[RICH_NOTE]
+    assert not any(note.startswith("filtering") for note in notes)
 
 
 # -- a session recalled from its file has no transcript loaded -----------------------
@@ -436,3 +2151,295 @@ def test_a_path_is_not_drawn_for_a_session_that_ran_here(monkeypatch) -> None:
     assert "(nothing yet)" in said.strings and "checkbox" in said.calls
     assert not said.has("closed —") and not said.has("/somewhere.jsonl")
     assert RAN_ROOT in state.caches
+
+
+# -- a prompt is set as prose ------------------------------------------------------
+#
+# A prompt is the SYSTEM run ``AgentSession.send`` writes: ``> `` and what was sent.
+# What a frame drew is read from the vertices of the log's own child window: a
+# glyph is one quad there, in the run's ink, and ImGui leaves out a glyph that is
+# outside the window's clip rect, so a line cut off at the pane's edge is a
+# glyph short and a line that runs past it is a glyph to the right of it.
+
+PROMPT = (
+    "Glob **/*.py for every caller of <b>parse_line</b> and keep R&amp;D's note in view: "
+    "the logs are under C:\\_work\\*.log,\tone tab in, and a NUL arrived as \x00 in one "
+    "and as \\u0000 in the last of them, so read every one of them before you change anything."
+)
+HELD = drawable.text("> " + PROMPT)
+"""
+The prompt as the log holds it: the NUL as ``\\u0000``, and the ``\\u0000`` typed
+as ``\\u005cu0000`` so the two are told apart (``drawable``).
+"""
+NARROW = 360.0
+
+
+def prompted(prompt: str = PROMPT, *after: tuple[SegmentKind, str]) -> Transcript:
+    """A session that was sent ``prompt``, as ``AgentSession.send`` writes it."""
+    transcript = Transcript()
+    transcript.append(SegmentKind.SYSTEM, f"\n> {prompt}\n")
+    transcript.append(SegmentKind.OUTPUT, "Reading them now.\n")
+    for kind, text in after:
+        transcript.append(kind, text)
+    return transcript
+
+
+def glyphs(text: str) -> int:
+    """How many glyphs ``text`` is drawn with: one for each character but a space."""
+    return len("".join(text.split()))
+
+
+def drawn_narrow(
+    im: Any, monkeypatch: pytest.MonkeyPatch, snap: Snapshot, state: TranscriptState
+) -> dict[str, Any]:
+    """
+    The log drawn in a dock ``NARROW`` pixels wide, for the frame after the first:
+    of its own child window, how far it scrolls sideways, its right edge, and the
+    quads drawn in a prompt's ink, each as its left, right and top.
+    """
+    ink = P.text_dim.u32
+    seen: list[dict[str, Any]] = []
+    real = im.end_child
+
+    def end_child() -> None:
+        buffer = im.get_window_draw_list().vtx_buffer
+        quads = []
+        for at in range(0, buffer.size() - 3, 4):
+            corners = [buffer[at + n] for n in range(4)]
+            if all(corner.col == ink for corner in corners):
+                xs = [corner.pos.x for corner in corners]
+                quads.append((min(xs), max(xs), min(corner.pos.y for corner in corners)))
+        seen.append(
+            {
+                "scroll_x": im.get_scroll_max_x(),
+                "right": im.get_window_pos().x + im.get_window_size().x,
+                "quads": quads,
+            }
+        )
+        real()
+
+    def dock() -> None:
+        im.begin_child("##narrow-dock", im.ImVec2(NARROW, 500.0))
+        transcript_pane.draw(snap, state, ROOT)
+        im.end_child()
+
+    monkeypatch.setattr(im, "end_child", end_child)
+    for _ in range(2):
+        seen.clear()
+        rig.frame(im, dock)
+    monkeypatch.setattr(im, "end_child", real)
+    # The log's own child closes first, inside the dock.
+    return seen[0]
+
+
+def assert_set_as_prose(drawn: dict[str, Any]) -> None:
+    """
+    Every glyph of the prompt and its mark is drawn, none past the pane's edge,
+    on more lines than one, and the log has nothing to scroll to sideways.
+    """
+    quads = drawn["quads"]
+    assert drawn["scroll_x"] == 0.0
+    assert len(quads) == glyphs(HELD)
+    assert max(right for _, right, _ in quads) <= drawn["right"]
+    assert len({round(top) for _, _, top in quads}) >= 4
+
+
+@pytest.mark.parametrize("mode", [RenderMode.TYPESET, RenderMode.RICH, RenderMode.WRAP])
+def test_a_long_prompt_is_broken_at_the_panes_width_and_every_glyph_drawn(
+    seam: Any, monkeypatch: pytest.MonkeyPatch, mode: RenderMode
+) -> None:
+    """
+    The operator's words, drawn as the agent's are: TYPESET set them as one
+    unbroken code line the log scrolled sideways to, and RICH drew them on one
+    line cut off at the pane's edge.
+    """
+    state = TranscriptState(mode=mode)
+    assert_set_as_prose(drawn_narrow(seam, monkeypatch, session(prompted()), state))
+    assert state.shown_mode() is mode
+
+
+@pytest.mark.parametrize("mode", [RenderMode.RICH, RenderMode.WRAP])
+def test_without_the_library_a_long_prompt_is_broken_at_the_panes_width_too(
+    imgui: Any, monkeypatch: pytest.MonkeyPatch, mode: RenderMode
+) -> None:
+    state = TranscriptState(mode=mode)
+    assert_set_as_prose(drawn_narrow(imgui, monkeypatch, session(prompted()), state))
+
+
+def handed(im: Any, monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, float]]:
+    """
+    Every text ImGui is handed to draw whole from here on, with the screen height
+    it was drawn at.
+    """
+    seen: list[tuple[str, float]] = []
+    real = im.text_unformatted
+
+    def text_unformatted(text: str, *args: Any) -> None:
+        seen.append((text, float(im.get_cursor_screen_pos().y)))
+        real(text, *args)
+
+    monkeypatch.setattr(im, "text_unformatted", text_unformatted)
+    return seen
+
+
+def test_a_prompt_is_every_character_sent_in_the_prose_face_and_no_view_of_the_librarys(
+    seam: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    No reader sees a prompt: what ImGui is handed is the mark and what was sent,
+    the glob's stars, the tag, the entity and the backslashes as they were, and
+    the library holds no view of it.
+    """
+    seen = handed(seam, monkeypatch)
+    state = typeset_state()
+    draw(seam, session(prompted()), state)
+    feed = state.feeds[ROOT]
+    (held,) = feed.generations
+    assert feed.views.texts(held.key)[0] == HELD
+    assert feed.views.views(held.key) == ()
+    assert [text for text, _ in seen if text.startswith("> ")] == [HELD]
+    assert feed.visible_text(True).startswith(HELD)
+
+
+AS_SENT = [
+    "# Plan\n\nThen go.",
+    "- step\n- another step",
+    "1. one\n2. two",
+    "> quoted",
+    "run `code` first",
+    "see [a](b) for it",
+    "**bold** as typed",
+    "    ",
+    "above\n      \nbelow, and   three spaces",
+    "glob **/*.py and <b>tags</b>",
+]
+"""
+Prompts a markdown reader would take structure from, and a line of only spaces.
+"""
+
+
+@pytest.mark.parametrize("sent", AS_SENT)
+def test_typeset_and_rich_set_every_character_of_a_prompt_and_the_same_ones(
+    seam: Any, monkeypatch: pytest.MonkeyPatch, sent: str
+) -> None:
+    """
+    A prompt reads as it was written in every mode: TYPESET hands ImGui the
+    mark and what was sent, character for character, and RICH lays out the same
+    lines -- no heading, list, quote, code span, link or emphasis taken from
+    the operator's own text, and no space lost.
+    """
+    logged = "> " + sent
+    seen = handed(seam, monkeypatch)
+    draw(seam, session(prompted(sent)), typeset_state())
+    typeset_set = [text for text, _ in seen if text.startswith(">")]
+    assert typeset_set == [logged]
+
+    rows: list[str] = []
+    real = rich_pane._draw_rows
+
+    def draw_rows(dl: Any, start: Any, laid: Any, size: float, base: int) -> float:
+        if base == P.text_dim.u32:
+            rows.extend(row.text for row in laid)
+        return float(real(dl, start, laid, size, base))
+
+    monkeypatch.setattr(rich_pane, "_draw_rows", draw_rows)
+    draw(seam, session(prompted(sent)), TranscriptState(mode=RenderMode.RICH))
+    assert [row for row in rows if row] == [line for line in logged.split("\n") if line]
+    assert "".join(rows) == "".join(typeset_set[0].split("\n"))
+
+
+def test_a_prompt_keeps_the_lines_it_was_sent_with_and_its_mark_in_rich_and_wrap(
+    imgui: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    RICH lays a prompt out as its prose, without reading it: an operator's line
+    break is kept, the stars of a glob are not taken for bold, and the mark is the
+    first thing on the first line. WRAP's wrapped line starts with it too.
+    """
+    sent = "glob **/*.py and **/*.md\nthen stop\n\n- and say *what* you found"
+    rows: list[str] = []
+    real = rich_pane._draw_rows
+
+    def draw_rows(dl: Any, start: Any, laid: Any, size: float, base: int) -> float:
+        if base == P.text_dim.u32:
+            rows.extend(row.text for row in laid)
+        return float(real(dl, start, laid, size, base))
+
+    monkeypatch.setattr(rich_pane, "_draw_rows", draw_rows)
+    wrapped: list[str] = []
+    real_wrapped = imgui.text_wrapped
+
+    def text_wrapped(text: str) -> None:
+        wrapped.append(text)
+        real_wrapped(text)
+
+    monkeypatch.setattr(imgui, "text_wrapped", text_wrapped)
+    snap = session(prompted(sent))
+    rig.frame(
+        imgui, lambda: transcript_pane.draw(snap, TranscriptState(mode=RenderMode.RICH), ROOT)
+    )
+    assert rows == ["", "> glob **/*.py and **/*.md", "then stop", "", "- and say *what* you found"]
+
+    rig.frame(
+        imgui, lambda: transcript_pane.draw(snap, TranscriptState(mode=RenderMode.WRAP), ROOT)
+    )
+    assert "> glob **/*.py and **/*.md" in wrapped
+
+
+def test_a_long_tool_result_beside_a_prompt_is_still_one_unbroken_line(
+    seam: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Only the prompt became prose. A tool's output keeps its columns: one line of
+    a code block of the library's that the log scrolls sideways to, and in RICH
+    one line, cut at the edge as it was.
+    """
+    result = "Read -> " + "|".join(f"col{n:03}" for n in range(60))
+    snap = session(prompted("short", (SegmentKind.TOOL_RESULT, f"{result}\n")))
+    state = typeset_state()
+    drawn = drawn_narrow(seam, monkeypatch, snap, state)
+    assert drawn["scroll_x"] > 0.0
+    feed = state.feeds[ROOT]
+    tool = [view for view in feed.views.views(feed.generations[0].key) if is_literal(view)]
+    tool += [view for view in feed.views.views(("open", 2)) if is_literal(view)]
+    assert [tuple(view.texts) for view in tool] == [(result,)]
+
+    literal: list[tuple[str, ...]] = []
+    real = rich_pane._draw_literal
+
+    def draw_literal(dl: Any, start: Any, block: Any) -> float:
+        literal.append(block.lines)
+        return float(real(dl, start, block))
+
+    monkeypatch.setattr(rich_pane, "_draw_literal", draw_literal)
+    drawn_narrow(seam, monkeypatch, snap, TranscriptState(mode=RenderMode.RICH))
+    assert literal and all(lines == (result,) for lines in literal)
+
+
+def test_a_prompt_that_closes_stays_where_it_was(
+    seam: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Open, a prompt is the last thing in the log, a document of its own; closed,
+    a part of the generation's. It is at the same place in both, and set the same.
+    """
+    transcript = Transcript()
+    transcript.append(SegmentKind.OUTPUT, "Asked for more.\n")
+    transcript.append(SegmentKind.SYSTEM, f"\n> {PROMPT}\n")
+    state = typeset_state(follow_tail=False)
+    snap = session(transcript)
+    seen = handed(seam, monkeypatch)
+    for _ in range(2):
+        draw(seam, snap, state)
+    feed = state.feeds[ROOT]
+    assert feed.views.texts(("open", 1)) == (HELD,)
+    was = [drawn for drawn in seen if drawn[0] == HELD][-1]
+
+    transcript.append(SegmentKind.OUTPUT, "Reading.")
+    seen.clear()
+    for _ in range(2):
+        draw(seam, snap, state)
+    (held,) = feed.generations
+    assert feed.views.texts(held.key)[-1] == HELD
+    assert [drawn for drawn in seen if drawn[0] == HELD][-1] == was
+    assert ("open", 1) not in feed.views

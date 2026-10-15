@@ -320,6 +320,34 @@ def _draw_literal(dl: imgui.ImDrawList, start: imgui.ImVec2, block: Block) -> fl
     return y - start.y
 
 
+def prompt_tokens(block: Block) -> tuple[InlineToken, ...]:
+    """
+    A prompt's lines as text to lay out, unread: a line break wherever the
+    operator ended a line, and nothing in a line taken for markup.
+
+    A prompt is what was sent, and this renderer's inline reader would set the
+    stars of ``**/*.py`` as bold and drop them.
+    """
+    tokens: list[InlineToken] = []
+    for number, line in enumerate(block.lines):
+        if number:
+            tokens.append(InlineToken("hardbreak"))
+        tokens.append(InlineToken("text", line))
+    return tuple(tokens)
+
+
+def _draw_prompt(
+    dl: imgui.ImDrawList, start: imgui.ImVec2, width: float, block: Block, size: float
+) -> float:
+    """
+    A prompt (``SegmentKind.SYSTEM``) as prose is laid out: broken at the pane's
+    width, in the body face, in its kind's ink.
+    """
+    rows = _layout(prompt_tokens(block), width, size)
+    color = getattr(P, _KIND_COLOUR[SegmentKind.SYSTEM]).u32
+    return _draw_rows(dl, start, rows, size, color)
+
+
 def _draw_thematic_break(dl: imgui.ImDrawList, start: imgui.ImVec2, width: float) -> float:
     line_h = _line_advance()
     y = start.y + line_h * 0.5
@@ -403,6 +431,8 @@ def _draw_one(index: int, rich: RichState, block: Block, width: float, size: flo
         height = _draw_thematic_break(dl, start, width)
     elif block.kind is BlockKind.FENCE:
         height = _draw_fence(dl, start, block)
+    elif block.kind is BlockKind.LITERAL and block.segment_kind is SegmentKind.SYSTEM:
+        height = _draw_prompt(dl, start, width, block, size)
     elif block.kind is BlockKind.LITERAL:
         height = _draw_literal(dl, start, block)
     elif block.kind in _PROSE_KINDS:

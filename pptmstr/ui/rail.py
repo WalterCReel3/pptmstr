@@ -64,6 +64,7 @@ from .widgets import (
     context_cell,
     ellipsis,
     format_elapsed,
+    one_line,
     phase_seed,
     short_model,
 )
@@ -637,7 +638,8 @@ def _project_header(
 ) -> None:
     imgui.spacing()
     _small()
-    imgui.text_colored(P.text_strong.vec4, project.upper())
+    # The key is a directory's name, held as the directory is (a session's ``cwd``).
+    imgui.text_colored(P.text_strong.vec4, one_line(project.upper()))
     imgui.same_line()
     imgui.text_colored(P.text_dim.vec4, header_counts(snap, roots))
     # The union, not the approvals. See _by_session.

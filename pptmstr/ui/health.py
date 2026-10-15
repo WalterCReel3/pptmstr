@@ -37,6 +37,7 @@ from .widgets import (
     flat_line,
     format_elapsed,
     gate_adds,
+    one_line,
     short_model,
 )
 
@@ -180,7 +181,7 @@ def _recalled(root: AgentRecord, actions: HealthActions, now_wall: float | None)
     title = root.task if root.task.strip() else NO_TASK
     imgui.text_colored(P.text_strong.vec4, ellipsis(title, imgui.get_content_region_avail().x))
     _small()
-    imgui.text_colored(P.text_dim.vec4, projects.project_key(root.cwd))
+    imgui.text_colored(P.text_dim.vec4, one_line(projects.project_key(root.cwd)))
     _normal()
     imgui.separator()
     imgui.spacing()
@@ -247,7 +248,7 @@ def draw(
 
     imgui.text_colored(P.text_strong.vec4, ellipsis(root.task, imgui.get_content_region_avail().x))
     _small()
-    imgui.text_colored(P.text_dim.vec4, projects.project_key(root.cwd))
+    imgui.text_colored(P.text_dim.vec4, one_line(projects.project_key(root.cwd)))
     _normal()
     imgui.separator()
     imgui.spacing()
@@ -259,7 +260,7 @@ def draw(
     imgui.text_disabled(format_elapsed((root.ended_at or now) - root.started_at))
 
     imgui.text_disabled(short_model(root.model))
-    imgui.text_disabled(root.cwd or "(the orchestrator's directory)")
+    imgui.text_disabled(one_line(root.cwd) if root.cwd else "(the orchestrator's directory)")
     gate = gate_line(policy)
     if gate is not None:
         imgui.text_colored(gate[1].vec4, gate[0])

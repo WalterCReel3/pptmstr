@@ -479,6 +479,97 @@ def test_fading_out_of_range_clamps() -> None:
     assert theme.faded(base, 5.0) == theme.faded(base, 1.0)
 
 
+# -- the typeset faces ---------------------------------------------------------
+
+
+def _fake_runner(monkeypatch) -> None:
+    """
+    Stand in for the two things ``load_fonts`` asks of a live ``hello_imgui`` runner.
+    """
+    import types
+
+    from imgui_bundle import hello_imgui
+
+    params = types.SimpleNamespace(callbacks=types.SimpleNamespace(default_icon_font=None))
+    monkeypatch.setattr(hello_imgui, "add_assets_search_path", lambda path: None)
+    monkeypatch.setattr(hello_imgui, "get_runner_params", lambda: params)
+    monkeypatch.setattr(theme, "_FACES", {})
+
+
+def test_the_typeset_faces_are_loaded_after_the_ui_font(monkeypatch) -> None:
+    """
+    Fonts[0] is ImGui's default. The layout library's faces include a proportional
+    one; loaded first, it would become the font of every widget in the application.
+    """
+    from pptmstr.ui import typeset
+
+    order: list[str] = []
+    _fake_runner(monkeypatch)
+    monkeypatch.setattr(
+        theme, "_load_face", lambda asset, *, icons: order.append(asset.rsplit("/", 1)[-1]) or 1
+    )
+    monkeypatch.setattr(typeset, "load_fonts", lambda bold=None: order.append(f"typeset:{bold}"))
+    theme.load_fonts()
+    bold = theme._ASSETS / "fonts" / "Inconsolata-Bold.ttf"
+    assert order == ["Inconsolata-Medium.ttf", "Inconsolata-Bold.ttf", f"typeset:{bold}"]
+
+
+def test_a_failure_loading_the_typeset_faces_is_not_fatal(monkeypatch) -> None:
+    """
+    ``load_fonts``' own contract, extended to the faces it now also loads: the app
+    starts, the panes keep the renderers they had, and the menu can say why.
+    """
+    from pptmstr.ui import typeset
+
+    def explode(bold=None):
+        raise RuntimeError("no fontTools")
+
+    _fake_runner(monkeypatch)
+    monkeypatch.setattr(theme, "_load_face", lambda asset, *, icons: object())
+    monkeypatch.setattr(typeset, "load_fonts", explode)
+    try:
+        theme.load_fonts()
+        assert not typeset.available() and not typeset.enabled()
+        assert typeset.unavailable_reason() == (
+            "the typesetting library failed and is not in use (RuntimeError: no fontTools)"
+        )
+    finally:
+        typeset.gate._GATE.failure = None
+
+
+def test_without_a_ui_font_the_typeset_faces_are_not_loaded_at_all(monkeypatch) -> None:
+    """
+    A missing Inconsolata is survivable: ImGui's built-in font takes over. Loading
+    the layout library's faces behind nothing would put Roboto in Fonts[0] instead,
+    and the whole application would be set in it.
+    """
+    from pptmstr.ui import typeset
+
+    called: list[object] = []
+    _fake_runner(monkeypatch)
+    monkeypatch.setattr(theme, "_load_face", lambda asset, *, icons: None)
+    monkeypatch.setattr(typeset, "load_fonts", lambda bold=None: called.append(1))
+    theme.load_fonts()
+    assert called == []
+
+
+def test_with_typesetting_switched_off_the_faces_are_loaded_all_the_same(monkeypatch) -> None:
+    """
+    The load is some twenty milliseconds, so a launch with ``Settings.typeset`` off
+    pays it too, and switching the setting on mid-session is a setting and not a
+    load into an atlas that is in use.
+    """
+    from pptmstr.ui import typeset
+
+    calls: list[str] = []
+    _fake_runner(monkeypatch)
+    monkeypatch.setattr(theme, "_load_face", lambda asset, *, icons: object())
+    monkeypatch.setattr(typeset, "load_fonts", lambda bold=None: calls.append(bold.name))
+    monkeypatch.setattr(typeset, "wanted", lambda: False)
+    theme.load_fonts()
+    assert calls == ["Inconsolata-Bold.ttf"]
+
+
 # -- obligations ------------------------------------------------------------------
 
 

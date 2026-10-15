@@ -25,6 +25,7 @@ from unittest.mock import MagicMock
 import pytest
 from imgui_bundle import imgui as real_imgui
 
+from pptmstr import approval as policy
 from pptmstr import bus, commandbus, commandfile, commandrun, commandtext, digest, theme
 from pptmstr.bridge import Bridge
 from pptmstr.command import (
@@ -415,9 +416,15 @@ def test_an_ended_command_is_not_waiting() -> None:
 # -- the queue row ------------------------------------------------------------------------
 
 
-def test_the_queue_row_draws_the_stores_summary_its_glyph_and_nothing_an_agent_wrote(
+def test_the_queue_row_draws_the_command_as_a_bash_row_does_behind_where_it_runs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """
+    The user, 2026-10-15: it "should mirror any other bash request". The
+    summary is ``approval.summarize`` of it as a Bash call, escaped and
+    flattened as a Bash row's is; the store's own summary, built from
+    structure, is the digest's and the rail's and not this row's.
+    """
     store = team()
     request(store, 1, now=5.0)
     snap = store.snapshot()
@@ -425,9 +432,58 @@ def test_the_queue_row_draws_the_stores_summary_its_glyph_and_nothing_an_agent_w
 
     drawn = _row_text(monkeypatch, snap, row)
 
-    assert row.summary in drawn
+    said = policy.summarize("Bash", {"command": ASKED})
+    assert inbox.OUTSIDE + said in drawn
+    assert said.startswith("2 lines · make ZQX-install")
+    assert row.summary not in drawn
     assert OBLIGATION_GLYPH[ObligationKind.COMMAND] in drawn
-    assert not any(MARK in text or "push" in text for text in drawn)
+    # The command, flattened, is the one thing on the row an agent wrote.
+    assert [text for text in drawn if MARK in text] == [inbox.OUTSIDE + said]
+
+
+def test_a_change_to_how_a_bash_row_is_summarised_is_a_change_to_a_command_row_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    One function, so the two rows cannot drift: the gate parks a Bash call
+    with ``approval.summarize`` as its row, and a command's row is that same
+    function of it. Here the Bash form inside it is changed, and a Bash call's
+    row and a command's row both come out in the new form.
+    """
+    from pptmstr import driver, fake_driver
+
+    assert driver.summarize is policy.summarize and fake_driver.summarize is policy.summarize
+    real = policy.command_shown
+
+    def shouting(tool_name: str, key: str, value: object) -> str | None:
+        shown = real(tool_name, key, value)
+        return None if shown is None else f"BASH<{shown.upper()}>"
+
+    monkeypatch.setattr(policy, "command_shown", shouting)
+    store = team()
+    request(store, 1, now=5.0, text="make install")
+    snap = store.snapshot()
+    (row,) = snap.needs_you
+
+    drawn = _row_text(monkeypatch, snap, row)
+
+    assert driver.summarize("Bash", {"command": "make install"}) == "BASH<MAKE INSTALL>"
+    assert inbox.OUTSIDE + "BASH<MAKE INSTALL>" in drawn
+
+
+def test_a_running_command_and_one_left_running_say_so_ahead_of_the_command() -> None:
+    store = team()
+    request(store, 1, now=5.0, text="sleep 60")
+    approve(store, 1, now=6.0, text="sleep 60")
+    running = store.snapshot().commands[cid(1)]
+    assert inbox.command_summary(running) == inbox.RUNNING_OUTSIDE + "sleep 60"
+    store.apply(CommandStopAsked(cid(1), WALL + 7.0), now=7.0)
+    stopping = store.snapshot().commands[cid(1)]
+    assert inbox.command_summary(stopping) == (
+        inbox.RUNNING_OUTSIDE + inbox.CANCEL_ASKED + "sleep 60"
+    )
+    left = _left_running().commands[cid(1)]
+    assert inbox.command_summary(left).startswith(inbox.UNSUPERVISED)
 
 
 def _expanded(
@@ -489,7 +545,8 @@ def test_an_expanded_command_row_is_drawn_by_the_command_view_with_what_it_was_h
     assert body["disabled"] == 0 and fake.begin_disabled.call_count == 0
     drawn = [str(c.args[1]) for c in fake.text_colored.call_args_list if len(c.args) > 1]
     assert inbox.NOT_WIRED not in drawn
-    assert not any(MARK in text for text in drawn)
+    # The summary is the one line of the row's own that holds the command.
+    assert [text for text in drawn if MARK in text] == [inbox.command_summary(row.command)]
 
 
 def test_until_it_is_wired_the_row_says_so_and_its_body_is_drawn_disabled(
@@ -650,6 +707,10 @@ def test_the_approval_keys_do_nothing_on_a_command_row(
     fake.get_io.return_value.want_text_input = False
     fake.is_mouse_clicked.return_value = False
     fake.get_io.return_value.key_shift = shift
+    # A mock's attributes are truthy: unset, every key would read as a chord.
+    fake.get_io.return_value.key_ctrl = False
+    fake.get_io.return_value.key_alt = False
+    fake.get_io.return_value.key_super = False
     pressed = {
         real_imgui.Key.a,
         real_imgui.Key.r,
@@ -786,15 +847,28 @@ def frames(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> I
 PRESSES = (command_view.RUN, command_view.EDIT, command_view.REFUSE)
 
 
-@pytest.mark.parametrize(
-    "frames", [(False, True), (True, False)], ids=["not-wired", "detail"], indirect=True
-)
+@pytest.mark.parametrize("frames", [(True, False)], ids=["detail"], indirect=True)
+def test_in_dear_imgui_details_copy_draws_no_press_and_no_key_acts_on_it(
+    frames: Frames,
+) -> None:
+    """
+    DETAIL's copy of a wired row, as DETAIL draws a Bash approval: the body,
+    and no button of the command's own to click.
+    """
+    assert not set(PRESSES) & set(frames.at)
+    untouched = dataclasses.replace(frames.state)
+    frames.every_key()
+    assert frames.state == untouched and frames.state.pending is None
+    assert frames.called == []
+
+
+@pytest.mark.parametrize("frames", [(False, True)], ids=["not-wired"], indirect=True)
 def test_in_dear_imgui_nothing_on_a_dead_row_answers_the_mouse_or_any_key(
     frames: Frames,
 ) -> None:
     """
-    Not wired, and DETAIL's copy of a wired row: every button is drawn, and a
-    click on each and every key that presses changes nothing and calls nothing.
+    Not wired: every button is drawn, and a click on each and every key that
+    presses changes nothing and calls nothing.
     """
     assert set(PRESSES) <= set(frames.at)
     untouched = dataclasses.replace(frames.state)
@@ -846,7 +920,16 @@ def _detail(
         command_view,
         "draw_row",
         lambda state, command, **kw: reached.append(
-            ("row", state, command.id, kw["role"], kw["now"], kw["actions"], _depth(fake))
+            (
+                "row",
+                state,
+                command.id,
+                kw["role"],
+                kw["now"],
+                kw["actions"],
+                _depth(fake),
+                kw["presses"],
+            )
         ),
     )
     monkeypatch.setattr(
@@ -876,13 +959,14 @@ def _history() -> Store:
     return store
 
 
-def test_a_focused_command_shows_the_rows_body_with_every_control_dead(
+def test_a_focused_command_shows_the_rows_body_with_no_press_of_its_own(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
     The same state object the row draws from, so the two panes cannot show
-    different edits -- and disabled even when the row is wired, so a second
-    press has one place it can land.
+    different edits -- disabled even when the row is wired, and drawn with no
+    press at all, as DETAIL draws a Bash approval: a second press has one
+    place it can land.
     """
     store = _history()
     snap = store.snapshot()
@@ -891,7 +975,16 @@ def test_a_focused_command_shows_the_rows_body_with_every_control_dead(
 
     reached = _detail(monkeypatch, snap, FocusState(target=OnObligation(row.key)), given)
 
-    assert reached[0] == ("row", given.state, cid(1), "builder", WALL + 50.0, given.actions, 1)
+    assert reached[0] == (
+        "row",
+        given.state,
+        cid(1),
+        "builder",
+        WALL + 50.0,
+        given.actions,
+        1,
+        False,
+    )
     assert reached[0][1] is given.state
 
 
@@ -1210,6 +1303,8 @@ def test_the_shell_is_looked_for_once_at_startup_and_never_in_a_frame(
     state.pool = MagicMock()
     state.frame_snap = state.store.snapshot()
     state.frame_wall = WALL + 12.0
+    # _reviewing reads ImGui's frame count, and there is no context here.
+    monkeypatch.setattr(app.imgui, "get_frame_count", lambda: 1)
     panels = app._panels(state)
     for _ in range(3):
         panels["NEEDS YOU"]()
@@ -1670,18 +1765,21 @@ def test_what_holds_the_session_and_the_ways_out_are_one_short_line() -> None:
     assert any("sends no signal" in p for p in inbox.RELEASE_HELP)
 
 
-def test_what_the_operators_profile_may_read_is_said_once_among_the_standing_lines(
+def test_what_the_operators_profile_may_read_is_said_once_behind_the_question_mark(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
-    One home: ``command_view.standing_lines``, which only an asked command's
-    row draws. This pane says it nowhere, so it is not said twice.
+    One home: ``command_view.explanations``, behind the row's question mark;
+    the row's own line says only that the profile runs first. This pane says
+    it nowhere, so it is not said twice.
     """
     store = team()
     request(store, 1, now=5.0)
+    explained: list[str] = []
 
     def drawn(snap: Snapshot) -> list[str]:
         said: list[str] = []
+        explained.clear()
         fake = MagicMock()
         fake.text_colored.side_effect = lambda colour, text: said.append(str(text))
         for name in ("ImVec2", "InputTextFlags_", "ChildFlags_", "MouseButton_", "Key"):
@@ -1693,16 +1791,20 @@ def test_what_the_operators_profile_may_read_is_said_once_among_the_standing_lin
         fake.radio_button.return_value = False
         monkeypatch.setattr(inbox, "imgui", fake)
         monkeypatch.setattr(command_view, "imgui", fake)
-        monkeypatch.setattr(command_view, "_asker_texts", lambda *a, **k: None)
+        fake.input_text_with_hint.side_effect = lambda label, hint, value: (False, value)
+        monkeypatch.setattr(
+            command_view, "help_mark", lambda key, title, paragraphs: explained.extend(paragraphs)
+        )
         monkeypatch.setattr(command_view, "multiline_input", MagicMock())
         inbox.draw_command(snap, rows(wired=True, opened=cid(1)), snap.commands[cid(1)])
         return said
 
-    assert drawn(store.snapshot()).count(commandrun.PROFILE_WARNING) == 1
+    said = drawn(store.snapshot())
+    assert commandrun.PROFILE_WARNING not in said
+    assert explained.count(commandrun.PROFILE_WARNING) == 1
+    assert any("your profile first" in text for text in said)
     assert "direnv, mise, a dotenv plugin" in commandrun.PROFILE_WARNING
     assert "PROFILE_WARNING" not in inspect.getsource(inbox)
-    approve(store, 1, now=6.0)
-    assert commandrun.PROFILE_WARNING not in drawn(store.snapshot())
 
 
 def test_what_an_end_left_is_said_in_detail_and_on_the_clipboard() -> None:
@@ -2434,6 +2536,82 @@ def test_an_armed_run_is_gone_when_the_queue_comes_back_from_a_frame_it_was_not_
     assert queue.ran == []
 
 
+def test_run_it_sends_nothing_on_a_frame_the_row_could_not_draw_the_string_it_runs(
+    queue: Queue, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The second press is in the row, under the frozen string, and the string is
+    drawn first: a row that raises drawing it never reaches the press. Clicked
+    where ``run it`` stood while that is so, nothing runs; and once the row
+    draws again the same click does run, so the press was not dead for another
+    reason. ``review.withheld`` is not on this route (the row is its own hold).
+    """
+    request(queue.store, 1, now=5.0, text="make install")
+    queue.frame(3)
+    queue.click_row(f"command:{cid(1)}")
+    queue.wait()
+    queue.click(command_view.RUN)
+    queue.wait()
+    assert isinstance(queue.state.pending, FrozenRun) and command_view.CONFIRM_RUN in queue.at
+    where = queue.at[command_view.CONFIRM_RUN]
+
+    io = queue.io
+    io.config_error_recovery = True
+    io.config_error_recovery_enable_assert = False
+    io.config_error_recovery_enable_tooltip = False
+    shown = command_view.command_block
+    raised: list[str] = []
+
+    def unshowable(text: str, **kwargs: Any) -> None:
+        if text == "make install":
+            raised.append(text)
+            raise RuntimeError("the frozen string could not be drawn")
+        shown(text, **kwargs)
+
+    def frame() -> None:
+        snap = queue.snap
+        queue.focus.settle(snap)
+        review.handle_keys(snap, queue.focus, queue.review, MagicMock())
+        real_imgui.new_frame()
+        real_imgui.set_next_window_pos(real_imgui.ImVec2(0.0, 0.0))
+        real_imgui.set_next_window_size(real_imgui.ImVec2(1000.0, 1900.0))
+        real_imgui.begin("needs you")
+        try:
+            inbox.draw(
+                snap,
+                queue.focus,
+                queue.review,
+                queue.compose,
+                MagicMock(),
+                MagicMock(),
+                100.0,
+                decisions=queue.decisions,
+                commands=queue.rows,
+            )
+        except RuntimeError:
+            pass
+        real_imgui.end()
+        real_imgui.end_frame()
+
+    with monkeypatch.context() as patched:
+        patched.setattr(command_view, "command_block", unshowable)
+        io.add_mouse_pos_event(*where)
+        frame()
+        frame()
+        io.add_mouse_button_event(0, True)
+        frame()
+        io.add_mouse_button_event(0, False)
+        frame()
+        frame()
+    assert raised, "the row did try to draw the string"
+    assert queue.ran == []
+
+    queue.frame(2)
+    queue.wait()
+    queue.click(command_view.CONFIRM_RUN)
+    assert queue.ran == [(cid(1), "make install", 600)]
+
+
 def test_the_open_key_is_a_shortcut_only_while_the_keys_are_the_operators(
     queue: Queue,
 ) -> None:
@@ -2602,9 +2780,9 @@ def test_a_search_path_entry_inside_the_sessions_directory_is_listed_on_its_row(
     assert added not in commandrun.environment_changes()
     # What the runner is given for that directory is without it.
     assert str(inside) not in commandrun.environment(cwd=str(tree))["PATH"]
-    # And the standing lines of the row carry it.
-    lines = command_view.standing_lines(found.shell, found.stripped_env, found.cwd)
-    assert any(str(inside) in line.text for line in lines)
+    # And what is behind the row's question mark carries it.
+    explained = command_view.explanations(snap.commands[cid(1)].asked, found)
+    assert any(str(inside) in paragraph for paragraph in explained)
 
     # Elsewhere, nothing is added to what the caller found.
     other = tmp_path / "elsewhere"
@@ -2657,8 +2835,10 @@ def test_the_row_notes_the_sessions_directory_written_out_in_full(
     assert under.roots == commandtext.spellings("/home/op/tree", "/home/op")
     assert "~/tree" in under.roots
     sentence = commandtext.SENTENCES[commandtext.FlagKind.RUNS_SESSION_PATH]
-    assert sentence in [line.text for line in command_view.tree_lines(command.asked, found.roots)]
-    assert sentence not in [line.text for line in command_view.tree_lines(command.asked)]
+    line = "May run files this session can write: session path."
+    assert line in [said.text for said in command_view.text_warnings(command.asked, found.roots)]
+    assert line not in [said.text for said in command_view.text_warnings(command.asked)]
+    assert sentence in command_view.explanations(command.asked, found)
 
     said: list[str] = []
     fake = MagicMock()
@@ -2672,10 +2852,14 @@ def test_the_row_notes_the_sessions_directory_written_out_in_full(
     fake.radio_button.return_value = False
     monkeypatch.setattr(inbox, "imgui", fake)
     monkeypatch.setattr(command_view, "imgui", fake)
-    monkeypatch.setattr(command_view, "_asker_texts", lambda *a, **k: None)
+    fake.input_text_with_hint.side_effect = lambda label, hint, value: (False, value)
+    explained: list[str] = []
+    monkeypatch.setattr(
+        command_view, "help_mark", lambda key, title, paragraphs: explained.extend(paragraphs)
+    )
     inbox.draw_command(snap, rows(wired=True, opened=cid(1)), command)
 
-    assert sentence in said
+    assert line in said and sentence in explained and sentence not in said
 
 
 # -- a command left running that is known by its tag -------------------------------

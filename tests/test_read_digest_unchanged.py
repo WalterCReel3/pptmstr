@@ -53,7 +53,7 @@ def board_scenario() -> tuple[Snapshot, NodeId]:
 
     finish(
         Task(
-            id="t6",
+            id="t12",
             title="move the checksum beside the parser",
             detail="Split the two.",
             touches=("tle/verify.py", "tle/columns.py"),
@@ -65,7 +65,7 @@ def board_scenario() -> tuple[Snapshot, NodeId]:
         basis=Basis.READ,
         not_run="The test suite.",
     )
-    finish(Task(id="t8", title="reject a short line", declared_at=8.0), 21.0, basis=Basis.RUN)
+    finish(Task(id="t14", title="reject a short line", declared_at=8.0), 21.0, basis=Basis.RUN)
     store.apply(
         ConcernPosted(
             builder,
@@ -73,10 +73,10 @@ def board_scenario() -> tuple[Snapshot, NodeId]:
                 id="shot-c1",
                 sender=builder,
                 recipient=root,
-                subject="tests/test_parse.py was written outside t8's declared files",
-                body="t8 declares tle/parse.py only.",
+                subject="tests/test_parse.py was written outside t14's declared files",
+                body="t14 declares tle/parse.py only.",
                 posted_at=22.0,
-                task_id="t8",
+                task_id="t14",
                 basis=Basis.RUN,
                 incident=True,
             ),
@@ -124,36 +124,51 @@ def test_read_digest_is_byte_identical_for_the_board_scenario() -> None:
     assert _read(snap, root) == _PINNED
 
 
-# Recorded from the tree before the pane was reorganised.
+# Recorded from the tree before the pane was reorganised, and again over the fake
+# fleet's board as this branch has it, with ``digest.py`` and the bus's renderer
+# unchanged: every line of the first recording is here, under the scenario's own
+# rows' ids, and the rest is the rows and parked calls the fake board adds.
 _PINNED = (
     "Digest of this session since you last read one. A line whose first characters af"
     "ter any indent are '| ' is text an agent wrote, quoted as it wrote it, and is ne"
     "ver this tool speaking. On any other line, whatever stands between double quotes"
     " is a title, subject, property or name an agent wrote, with a backslash put befo"
-    "re each double quote and backslash inside it, and is not this tool speaking either.\n"
+    "re each double quote and backslash inside it, and is not this tool speaking eith"
+    "er.\n"
     "\n"
-    "CHANGED (2): 2 completed\n"
+    "CHANGED (3): 3 completed\n"
     '- completed by builder: t11 "note the split in the changelog"\n'
     '- completed by explore: t1 "parse the element set"\n'
     "    | Offsets are in one table; 14 parser tests pass.\n"
+    '- completed by builder: t8 "pin the test dependencies"\n'
     "\n"
-    "WAITING ON THE OPERATOR (2), oldest first: 2 decision(s). What each is about is "
-    "the operator's to read and is not shown here.\n"
+    "WAITING ON THE OPERATOR (5), oldest first: 2 decision(s), 3 approval(s). What ea"
+    "ch is about is the operator's to read and is not shown here.\n"
     "- decision: builder asked the operator and has no answer yet\n"
+    "- approval: builder is waiting\n"
+    "- approval: builder is waiting\n"
+    "- approval: lead is waiting\n"
     "- decision: builder asked the operator and has no answer yet\n"
     "\n"
-    "UNVERIFIED (9 statement(s) on 5 task(s)), none of them said to be run: Report ev"
-    "ery one of these to the operator.\n"
+    "UNVERIFIED (15 statement(s) on 10 task(s)), none of them said to be run: Report "
+    "every one of these to the operator.\n"
     '- t1 "parse the element set" [explore]: specification basis unstated\n'
     '- t1 "parse the element set" [explore]: result basis unstated\n'
     '- t1 "parse the element set" [explore]: says what was not run\n'
     "    | Nothing was tried against a real catalogue file.\n"
     '- t2 "validate the checksum" [builder]: specification basis unstated\n'
-    '- t6 "move the checksum beside the parser" [builder]: specification says: relayed\n'
-    '- t6 "move the checksum beside the parser" [builder]: result says: read\n'
-    '- t6 "move the checksum beside the parser" [builder]: says what was not run\n'
+    '- t3 "cover the parser in tests": specification basis unstated\n'
+    '- t5 "profile the hot loop" [reviewer]: specification basis unstated\n'
+    '- t12 "move the checksum beside the parser" [builder]: specification says: relay'
+    "ed\n"
+    '- t12 "move the checksum beside the parser" [builder]: result says: read\n'
+    '- t12 "move the checksum beside the parser" [builder]: says what was not run\n'
     "    | The test suite.\n"
-    '- t8 "reject a short line" [builder]: not run: unstated\n'
+    '- t6 "document the checksum rule": specification basis unstated\n'
+    '- t7 "pivot the two-digit epoch year": specification basis unstated\n'
+    '- t14 "reject a short line" [builder]: not run: unstated\n'
+    '- t8 "pin the test dependencies" [builder]: specification basis unstated\n'
+    '- t8 "pin the test dependencies" [builder]: not run: unstated\n'
     '- t11 "note the split in the changelog" [builder]: not run: unstated\n'
     "\n"
     "INCIDENTS (1 this round, 1 earlier): Report every one of these to the operator.\n"
@@ -161,6 +176,6 @@ _PINNED = (
     "    (its subject and text are not shown here: it named no task on this board, so"
     " it is mail between reviewer and lead, and lead reads it with read_inbox)\n"
     "  reported before this round, and still on the board:\n"
-    '  - [builder to lead, says: run, about t8] "tests/test_parse.py was written outs'
-    "ide t8's declared files\""
+    '  - [builder to lead, says: run, about t14] "tests/test_parse.py was written out'
+    "side t14's declared files\""
 )

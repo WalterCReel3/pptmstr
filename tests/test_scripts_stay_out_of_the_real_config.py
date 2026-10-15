@@ -50,7 +50,7 @@ ARRANGEMENT = "_scratch_config"
 
 # The scripts known to start the application. The walk is held to finding at
 # least these, since a walk that finds nothing passes every script.
-STARTS_THE_APP = ("bench_idle.py", "screenshot.py", "verify_splash.py")
+STARTS_THE_APP = ("bench_idle.py", "run_typeset_panes.py", "screenshot.py", "verify_splash.py")
 
 
 def _is_app(node: ast.expr, modules: set[str]) -> bool:

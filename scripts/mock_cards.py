@@ -1045,12 +1045,21 @@ def main() -> int:
 
     counter = {"n": 0}
 
+    # The grab reads the back buffer before the swap, the one moment its contents
+    # are specified. The front buffer is readable only where the window system keeps
+    # one for the client, and Xvfb with Mesa's software rasteriser returns it black.
+    def before_swap() -> None:
+        # `counter` is the number of frames already swapped, so this is the
+        # `--frames`-th frame, still in the back buffer.
+        if counter["n"] == args.frames - 1:
+            _grab(args.out)
+
     def after_swap() -> None:
         counter["n"] += 1
         if counter["n"] == args.frames:
-            _grab(args.out)
             hello_imgui.get_runner_params().app_shall_exit = True
 
+    runner.callbacks.before_swap = before_swap
     runner.callbacks.after_swap = after_swap
     immapp.run(runner)
     return 0
@@ -1063,7 +1072,7 @@ def _grab(out: Path) -> None:
     width = int(io.display_size.x * io.display_framebuffer_scale.x)
     height = int(io.display_size.y * io.display_framebuffer_scale.y)
     GL.glPixelStorei(GL.GL_PACK_ALIGNMENT, 1)
-    GL.glReadBuffer(GL.GL_FRONT)
+    GL.glReadBuffer(GL.GL_BACK)
     data = GL.glReadPixels(0, 0, width, height, GL.GL_RGB, GL.GL_UNSIGNED_BYTE)
     if not isinstance(data, bytes):
         data = bytes(data)

@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 
 from imgui_bundle import imgui
 
+from ..approval import command_shown
 from ..bridge import Bridge, Decision
 from ..model import ApprovalNeeded, NodeId, PendingApproval, Snapshot
 from .focus import FocusState
@@ -36,6 +37,59 @@ SHORTCUTS: tuple[tuple[str, str], ...] = (
     ("A", "approve all from this agent"),
     ("esc", "cancel edit / confirm; after typing, makes these keys act again"),
 )
+
+# How many lines of one text a pane puts on screen unasked; past it the pane sets
+# the head and offers the rest (``head_lines``). A text handed to the typesetting
+# library is read and laid out whole in the frame that first draws it, 33 ms for
+# each thousand lines of markdown (``scripts/profile_seam.py``): four frames at
+# this bound, once, and a stall the operator did not ask for past it -- so they
+# are asked.
+#
+# Here, and not in either pane that applies it: DETAIL and the inbox row show one
+# parked call and must cut its body at one place, ``detail`` imports ``inbox``, and
+# what the cut costs is this module's -- the lines a pane leaves unset are what it
+# reports to ``ReviewState.body_shown``, and ``withheld`` holds the approve on them.
+SETTLED_LINES = 2000
+
+# The two panes that show a parked call, as each names itself to ``body_shown`` and
+# ``pane_drew``.
+INBOX, DETAIL = "inbox", "detail"
+
+NOT_DRAWN = "not sent - this call's body had not been drawn when approve was asked for; ask again"
+NOT_WHOLE = (
+    "not sent - this call's body was not all on screen when approve was asked for; "
+    "ask again once it is"
+)
+# Said above a parked call's body by each pane that draws it, where the arguments
+# drawn are not character for character the ones sent (``PendingApproval.args``).
+# ``printf '\\udc80'`` is a command a shell understands, so the escape alone would
+# read as something the agent typed.
+ESCAPED = (
+    "not all of this is text: the arguments hold a code unit that is no character "
+    "(a lone surrogate, a NUL), or a backslash that spells the escape of one. A "
+    "Bash command spells each out as its row does (a NUL \\x00, a lone surrogate "
+    "\\u{DC80}, a backslash doubled); any other argument draws each as \\uXXXX, "
+    "and such a backslash as \\u005c. Approve sends the call as the agent made it."
+)
+# Said of an approve by any route, a batch included, and worded for all of them.
+PANE_FAILED = (
+    "not sent - a pane that shows parked calls failed to draw when approve was asked "
+    "for, and nothing is approved over one; reject still works"
+)
+
+
+@dataclass(frozen=True, slots=True)
+class Refusal:
+    """
+    An approve that was asked for and not sent: the pending ids it covered, and why.
+
+    Worded in the past tense on purpose. It is a record of one request, shown on the
+    rows it covered until a decision is sent or it is cancelled, and it stays true
+    after the body it was refused over is on screen.
+    """
+
+    asked: frozenset[str]
+    text: str
 
 
 @dataclass
@@ -141,6 +195,14 @@ class ReviewState:
     edits: dict[str, str] = field(default_factory=dict)
     # Diff text split into lines, cached per pending id. Pruned with the rest.
     diff_lines: dict[str, list[str]] = field(default_factory=dict)
+    # A parked call's diff as the typeset seam holds it (``typeset.ParkedDiff``),
+    # per pending id: one for every pane that draws the call, so that the model
+    # behind it is made once and not once a pane. Opaque here; ``inbox.
+    # library_diff`` makes and reads it.
+    diffs: dict[str, object] = field(default_factory=dict)
+    # The calls whose diff the operator asked to have made past the bound
+    # (``inbox.library_diff``).
+    diff_whole: set[str] = field(default_factory=set)
     editing: str | None = None
     edit_error: str | None = None
     focus_reason: bool = False
@@ -152,6 +214,37 @@ class ReviewState:
     # Whether the keys are shortcuts yet. Here and not in ``handle_keys``' caller
     # because the inbox header says when they are not, and reads it from this.
     hold: Hold = field(default_factory=Hold)
+    # What each pane last saw of each parked call's body: pending id -> pane ->
+    # (the ImGui frame it drew the body in, source lines of it that frame did not
+    # put on screen). A reading and not a fact: it is as old as the pane's last
+    # draw of that body, and ``handle_keys`` runs before any pane draws, so the
+    # newest it can be is the frame before. Nothing in the snapshot implies it --
+    # whether a text was set is the seam's and differs between two panes showing
+    # one call -- so it is held here, written by ``body_shown`` and read only by
+    # ``unset_lines``.
+    bodies: dict[str, dict[str, tuple[int, int]]] = field(default_factory=dict)
+    # How each pane that shows parked calls last came out of its draw: pane ->
+    # (the ImGui frame, whether it drew to its end). Written by ``pane_drew`` on
+    # every frame the pane is drawn, and as old as ``bodies`` is, for the same
+    # reason. Read only by ``failed_panes``.
+    panes: dict[str, tuple[int, bool]] = field(default_factory=dict)
+    refusal: Refusal | None = None
+
+    def body_shown(self, pane: str, pending_id: str, unbuilt: int, frame: int) -> None:
+        """
+        A pane drew this call's body in ``frame`` with ``unbuilt`` source lines of it
+        not on screen: the lines past ``SETTLED_LINES`` that have not been asked
+        for, under either renderer, and every line of a text the typesetting
+        library stopped under (``typeset.ViewCache.unbuilt``).
+        """
+        self.bodies.setdefault(pending_id, {})[pane] = (frame, unbuilt)
+
+    def pane_drew(self, pane: str, frame: int, whole: bool) -> None:
+        """
+        A pane that shows parked calls was drawn in ``frame``, to its end or --
+        ``whole`` false -- as far as whatever it raised.
+        """
+        self.panes[pane] = (frame, whole)
 
     def prune(self, live_ids: set[str]) -> None:
         for stale in [k for k in self.reasons if k not in live_ids]:
@@ -160,9 +253,135 @@ class ReviewState:
             del self.edits[stale]
         for stale in [k for k in self.diff_lines if k not in live_ids]:
             del self.diff_lines[stale]
+        for stale in [k for k in self.diffs if k not in live_ids]:
+            del self.diffs[stale]
+        self.diff_whole &= live_ids
+        for stale in [k for k in self.bodies if k not in live_ids]:
+            del self.bodies[stale]
+        if self.refusal is not None and not (self.refusal.asked & live_ids):
+            self.refusal = None
         if self.editing is not None and self.editing not in live_ids:
             self.editing = None
             self.edit_error = None
+
+
+def head_lines(text: str, limit: int) -> tuple[str, int]:
+    """
+    The first ``limit`` lines of a text, and how many follow them.
+
+    For text that is read from the top. The count is what a pane says it left
+    unset, and what holds an approve when the text is a parked call's body.
+    """
+    if text.count("\n") < limit:
+        return text, 0
+    lines = text.split("\n")
+    return "\n".join(lines[:limit]), len(lines) - limit
+
+
+def unset_lines(state: ReviewState, pending_id: str) -> int | None:
+    """
+    How much of this call's body was missing when it was last on screen: ``None``
+    when no pane has drawn it, zero when every pane showing it had all of it.
+
+    The most any pane read, among the panes that drew it in the newest frame any of
+    them did or the one before. Two panes show one call in views of their own, and
+    one being whole does not make the other so; a pane that has stopped drawing
+    the call -- its tab is behind another, the layout changed -- has a reading
+    that says nothing about what is on screen now, and is passed over. The frame
+    before counts because a click is settled part-way through a frame, after one
+    pane has drawn and before the other has.
+    """
+    seen = state.bodies.get(pending_id)
+    if not seen:
+        return None
+    newest = max(frame for frame, _ in seen.values())
+    return max(unbuilt for frame, unbuilt in seen.values() if frame >= newest - 1)
+
+
+def failed_panes(state: ReviewState) -> tuple[str, ...]:
+    """
+    The panes showing parked calls whose last draw raised, among those drawn in the
+    newest frame any of them was or the one before.
+
+    The same window ``unset_lines`` reads a body by, and for its reasons: the keys
+    are read before any pane draws, a click is settled part-way through a frame,
+    and a pane that is no longer drawn -- its tab went behind another while it was
+    failing -- says nothing about what is on screen now.
+    """
+    if not state.panes:
+        return ()
+    newest = max(frame for frame, _ in state.panes.values())
+    return tuple(
+        pane
+        for pane, (frame, whole) in sorted(state.panes.items())
+        if not whole and frame >= newest - 1
+    )
+
+
+def withheld(state: ReviewState, pending: PendingApproval, *, unread: bool = False) -> str | None:
+    """
+    Why this call may not be approved yet, or ``None`` when it may. Every approve
+    path asks here and nowhere else.
+
+    **A pane that shows parked calls failed to draw** (``failed_panes``), and then
+    nothing is approved, this call or another, read or not. What such a pane had
+    on screen when it raised is not known: a reading it made before raising is of
+    a body that may have been drawn over by the failure notice or cut off under
+    it, a call further down its queue was not drawn at all, and the batch forms
+    count on a list that was not finished. So it is not asked which call the
+    failure was under.
+
+    Two things can stand between a call and its approver's eyes. **Its body was
+    never drawn**: the keys are read before the panes draw, so on the frame the
+    cursor lands on a row there is no reading for it, and "no reading" must not
+    mean "nothing missing". **Its body was drawn and is not on screen**: a pane
+    sets a body past ``SETTLED_LINES`` only that far until it is asked for the
+    rest, and the typesetting library can stop inside a draw, when the pane
+    shows a sentence where the text would be. So a call is approved only once
+    every pane showing it had all of its body on screen the last time it drew it.
+
+    ``unread`` is the batch forms' question. They approve calls nobody opened, by
+    design and behind a count, so for them a body never drawn is not a reason; a
+    body known not to have been on screen still is.
+    """
+    if failed_panes(state):
+        return PANE_FAILED
+    unset = unset_lines(state, pending.id)
+    if unset is None:
+        return None if unread else NOT_DRAWN
+    return NOT_WHOLE if unset > 0 else None
+
+
+def refusal_for(state: ReviewState, pending_id: str) -> str | None:
+    """
+    What to say on this call's row about an approve that was not sent, if one was.
+    """
+    refusal = state.refusal
+    return refusal.text if refusal is not None and pending_id in refusal.asked else None
+
+
+def _approve_batch(bridge: Bridge, state: ReviewState, batch: list[PendingApproval]) -> int:
+    """
+    Send all of ``batch`` or none of it. Returns how many were sent.
+
+    None, when any body in it is known not to have been on screen: a batch that
+    went out without that one call would leave the operator believing the agent's
+    queue was cleared, and the refusal names the calls that held it. None, too,
+    while a pane that shows parked calls is failing to draw.
+    """
+    if batch and failed_panes(state):
+        state.refusal = Refusal(frozenset(p.id for p in batch), PANE_FAILED)
+        return 0
+    short = [p for p in batch if withheld(state, p, unread=True) is not None]
+    if short:
+        names = "; ".join(p.summary for p in short)
+        state.refusal = Refusal(
+            frozenset(p.id for p in batch),
+            f"none sent - {len(short)} of these {len(batch)} calls had a body that was not "
+            f"all on screen when approve all was asked for ({names}); open it, then ask again",
+        )
+        return 0
+    return sum(resolve(bridge, state, p, approved=True, unread=True) for p in batch)
 
 
 def approve_all_for_node(bridge: Bridge, snap: Snapshot, state: ReviewState, node: NodeId) -> int:
@@ -173,12 +392,7 @@ def approve_all_for_node(bridge: Bridge, snap: Snapshot, state: ReviewState, nod
     queue is usually one coherent piece of work, and the operator has just been
     reading its diffs. Returns how many were sent.
     """
-    sent = 0
-    for pending in snap.approvals:
-        if pending.node == node:
-            resolve(bridge, state, pending, approved=True)
-            sent += 1
-    return sent
+    return _approve_batch(bridge, state, [p for p in snap.approvals if p.node == node])
 
 
 def approve_everything(bridge: Bridge, snap: Snapshot, state: ReviewState) -> int:
@@ -191,28 +405,39 @@ def approve_everything(bridge: Bridge, snap: Snapshot, state: ReviewState) -> in
     gated behind an explicit confirmation showing the count because the failure mode
     is silent and unrecoverable.
     """
-    sent = 0
-    for pending in snap.approvals:
-        resolve(bridge, state, pending, approved=True)
-        sent += 1
+    sent = _approve_batch(bridge, state, list(snap.approvals))
     state.confirming_global = False
     return sent
 
 
 def resolve(
-    bridge: Bridge, state: ReviewState, pending: PendingApproval, *, approved: bool
-) -> None:
+    bridge: Bridge,
+    state: ReviewState,
+    pending: PendingApproval,
+    *,
+    approved: bool,
+    unread: bool = False,
+) -> bool:
     """
-    Send the decision. The store is not touched here -- the gate emits
-    ApprovalResolved once the agent has actually been released, so the queue never
-    shows an approval the agent did not receive.
+    Send the decision, and answer whether it was sent. The store is not touched
+    here -- the gate emits ApprovalResolved once the agent has actually been
+    released, so the queue never shows an approval the agent did not receive.
+
+    An approval is not sent while ``withheld`` has a reason, and the reason is left
+    in ``state.refusal`` for the panes to say. A rejection is always sent: refusing
+    a call does not need its body whole.
     """
+    if approved:
+        reason = withheld(state, pending, unread=unread)
+        if reason is not None:
+            state.refusal = Refusal(frozenset({pending.id}), reason)
+            return False
     edited = None
     if approved and pending.id in state.edits:
         parsed = _parse_edit(state.edits[pending.id])
         if parsed is None:
             state.edit_error = "arguments are not valid JSON - not sent"
-            return
+            return False
         edited = parsed
     bridge.resolve(
         pending.id,
@@ -223,6 +448,8 @@ def resolve(
         ),
     )
     state.edit_error = None
+    state.refusal = None
+    return True
 
 
 def _parse_edit(text: str) -> dict[str, object] | None:
@@ -252,21 +479,44 @@ def handle_keys(snap: Snapshot, focus: FocusState, state: ReviewState, bridge: B
     surface at all. The action keys below then do nothing on a row that is not an
     approval, which is the right kind of nothing: the cursor is still where the
     operator put it, and the expanded row shows what it *can* do.
+
+    The letters are bindings for the bare key only. ``want_capture_keyboard`` says
+    whether an ImGui *item* has the keyboard, and a view that handles its own
+    chords without submitting one -- select-all and copy over a diff -- leaves it
+    false, so Ctrl+A would otherwise arrive here as ``a`` and approve what was
+    being selected. Shift is not a chord in this sense: it is the difference
+    between ``a`` and ``A``. Escape is exempt because cancelling is the safe
+    direction and should not depend on which modifiers happen to be down.
+
+    This runs before any pane draws, so ``a`` is answered from what the panes showed
+    up to the frame before (``withheld``): a body that was not on screen, or one
+    never drawn -- the row the cursor reached on this very frame -- is not approved.
+    ``r`` and ``e`` ask nothing of the body.
+
+    ``r`` asks for a reason, in the field on the inbox row, and the row's button
+    sends it. Where the inbox failed to draw there is no field and no button, and
+    a call that cannot be refused is an agent parked until its session is closed:
+    there ``r`` sends the rejection itself, with whatever reason was already typed.
     """
     io = imgui.get_io()
     free = state.hold.step(text_input=bool(io.want_text_input), gesture=_stopped_typing())
     if not free or io.want_capture_keyboard:
         return
+    chord = io.key_ctrl or io.key_alt or io.key_super
 
-    if imgui.is_key_pressed(imgui.Key.j):
+    def letter(key: imgui.Key) -> bool:
+        return not chord and imgui.is_key_pressed(key)
+
+    if letter(imgui.Key.j):
         focus.move(snap, 1)
-    if imgui.is_key_pressed(imgui.Key.k):
+    if letter(imgui.Key.k):
         focus.move(snap, -1)
 
     if imgui.is_key_pressed(imgui.Key.escape):
         state.editing = None
         state.confirming_global = False
         state.edit_error = None
+        state.refusal = None
 
     current = focus.obligation(snap)
     if not isinstance(current, ApprovalNeeded):
@@ -275,12 +525,16 @@ def handle_keys(snap: Snapshot, focus: FocusState, state: ReviewState, bridge: B
 
     # The keys that open a text box come first and end the frame's shortcuts:
     # what is typed next is for the box, and an ``a`` that shares the frame with
-    # one of them is the start of it (``Hold.begin``).
+    # one of them is the start of it (``Hold.begin``). ``r`` where the inbox failed
+    # to draw opens no box -- it sends the rejection -- and ends them too.
     opened = False
-    if imgui.is_key_pressed(imgui.Key.r):
+    if letter(imgui.Key.r):
+        if INBOX in failed_panes(state):
+            resolve(bridge, state, pending, approved=False)
+            return
         state.focus_reason = True
         opened = True
-    if imgui.is_key_pressed(imgui.Key.e):
+    if letter(imgui.Key.e):
         state.editing = pending.id
         state.edits.setdefault(pending.id, pretty_args(pending))
         opened = True
@@ -288,11 +542,11 @@ def handle_keys(snap: Snapshot, focus: FocusState, state: ReviewState, bridge: B
         state.hold.begin()
         return
 
-    if imgui.is_key_pressed(imgui.Key.a):
+    if letter(imgui.Key.a):
         # Shift+A is the batch form, scoped to the focused agent. Tested as one
         # branch rather than two ifs: an unguarded pair fires both, so Shift+A
         # would approve the focused call *and* everything beside it.
-        if imgui.get_io().key_shift:
+        if io.key_shift:
             approve_all_for_node(bridge, snap, state, pending.node)
         else:
             resolve(bridge, state, pending, approved=True)
@@ -312,3 +566,19 @@ def pretty_args(pending: PendingApproval) -> str:
     import json
 
     return json.dumps(dict(pending.raw_args), indent=2, sort_keys=True)
+
+
+def shown_command(pending: PendingApproval) -> str | None:
+    """
+    A Bash call's command as every approval surface draws it, or ``None`` for a
+    call that has none: ``approval.command_shown`` of the command as the agent
+    sent it, which is what the queue row's summary is made from.
+
+    Of ``raw_args`` and not of the drawable twin, and the one reader of it that
+    draws. ``commandtext.visible`` emits printable ASCII and newline only, so
+    what it returns is drawable whatever the command held. Made from the twin
+    it would escape twice: a lone surrogate the twin spells ``\\udc80`` would be
+    drawn ``\\\\udc80``, which is how the row spells a backslash the agent typed,
+    and two surfaces would show one string for two commands.
+    """
+    return command_shown(pending.tool_name, "command", pending.raw_args.get("command"))

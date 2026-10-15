@@ -12,6 +12,33 @@ premise silently vanish, so the log would exist and nobody reading it could tell
 anything had changed. An overturned premise is shown struck through in the reader's
 attention rather than removed, labelled with the entry that overturned it.
 
+**With the typeset seam on, an entry is one key of the seam: its heading and its
+body.** One ``typeset.document`` per entry rather than one over the whole brief,
+because each entry is followed by a checkbox and a widget cannot sit inside a
+view. The heading and the markdown of the body are one view, so the heading wraps
+at the pane's width and is copied with the body it heads; a paragraph that is not
+markdown (a pasted traceback) is drawn by ImGui between views, and a selection
+stops at it as it stops at an entry's edge. Nothing is capped: the pane's own
+child scrolls, each view culls to it, and a second scrollbar inside an entry
+would hide premises behind a gesture. The child scrolls sideways too: a line set
+as written is never broken and neither is a word with no space in it, and one
+longer than the pane has to be reachable.
+
+**Nothing in a body outranks the line that heads its entry.** The entry's own line
+is set as a second-level heading and every heading in the body ``_BODY_DEMOTE``
+levels down, so a body's ``#`` is one size under it and anything deeper is bold at
+the body's size. A body that opens with a title would otherwise read as the start
+of the entry and its "000 premises" as a caption.
+
+**An overturned entry is told apart by its heading's words, and dimmed as well.**
+"-- superseded by 003" is what says it; the dim ink is only a second cue, since
+contrast alone is not something every reader or every display carries. The library
+has no strike-through to add.
+
+**A body is not assumed to be markdown.** An entry is whatever an operator or a
+lead wrote, and ``typeset.prose_parts`` is the rule for reading it, the same one
+every pane showing a body applies: one item per line stays one item per line.
+
 **Appending is the only write, and it never edits.** There is no "edit entry" here
 and there will not be one: free mutation is what destroys the forensic value of
 putting premises on disk at all -- *what did this worker act on* and *what did the
@@ -27,7 +54,7 @@ and the frame loop's whole premise is that building a frame touches no IO.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from imgui_bundle import imgui
@@ -35,12 +62,18 @@ from imgui_bundle import imgui
 from .. import brief
 from ..model import Snapshot
 from ..theme import P
+from . import typeset
 from .focus import FocusState
-from .widgets import CTRL_ENTER_SUBMITS, closed_line, multiline_input, section
+from .widgets import CTRL_ENTER_SUBMITS, author_text, closed_line, multiline_input, section
 
 # One entry's body in the pane. Generous -- premises are the thing this surface
 # exists to show -- and announced when it bites, like every other bound here.
 _MAX_BODY_CHARS = 6000
+
+# The level an entry's own line is set at, and how far down that puts a heading in
+# its body: a body's ``#`` lands one level under the entry's line.
+_ENTRY_LEVEL = 2
+_BODY_DEMOTE = _ENTRY_LEVEL
 
 
 @dataclass
@@ -59,6 +92,12 @@ class BriefState:
     # (directory, entry filenames) the memo below was built from. None until read.
     _key: tuple[str, tuple[str, ...]] | None = None
     _derived: tuple[brief.DerivedEntry, ...] = ()
+    # The typeset view of each entry, and the parts each was built from, both by
+    # the entry's path: unique where an ordinal written by hand need not be, and
+    # different in another directory. The parts are held because the seam compares
+    # nothing for a sequence it was handed last frame.
+    views: typeset.ViewCache = field(default_factory=typeset.ViewCache)
+    _parts: dict[str, tuple[typeset.Part, ...]] = field(default_factory=dict)
     # Set when a write failed, and shown until the next successful one. A failed
     # append is invisible otherwise -- the operator would believe a premise landed.
     error: str | None = None
@@ -86,12 +125,30 @@ class BriefState:
             names = tuple(sorted(p.name for p in directory.iterdir()))
         except OSError:
             self._key, self._derived = None, ()
+            self._hold(())
             return ()
         key = (str(directory), names)
         if key != self._key:
             self._key = key
             self._derived = brief.derive(brief.read_entries(directory))
+            self._hold(self._derived)
         return self._derived
+
+    def _hold(self, derived: tuple[brief.DerivedEntry, ...]) -> None:
+        """
+        Build the parts for what is now on disk and let go of every other view.
+
+        An entry that was just overturned gets new parts with the same text, so its
+        view is re-inked and not laid out again.
+        """
+        self._parts = {str(item.entry.path): entry_parts(item) for item in derived}
+        self.views.prune(self._parts.keys())
+
+    def parts(self, item: brief.DerivedEntry) -> tuple[typeset.Part, ...]:
+        """
+        The parts of one entry this state last read: the same object every frame.
+        """
+        return self._parts[str(item.entry.path)]
 
     def invalidate(self) -> None:
         """Force the next read. Called after a write, whose mtime may match."""
@@ -117,8 +174,17 @@ def draw(snap: Snapshot, focus: FocusState, pane: BriefState) -> None:
     derived = pane.entries(directory)
     _summary(derived, directory)
 
-    if imgui.begin_child("##brief"):
-        imgui.push_text_wrap_pos(0.0)
+    typeset_on = typeset.enabled(typeset.Pane.BRIEF)
+    # A line set as written is never broken, nor a word with no space in it, so
+    # under the seam the child scrolls sideways to the end of one. A window that
+    # scrolls sideways wraps native text at its widest content rather than at its
+    # edge, hence the explicit wrap position.
+    flags = imgui.WindowFlags_.horizontal_scrollbar.value if typeset_on else 0
+    if imgui.begin_child("##brief", window_flags=flags):
+        wrap_at = 0.0
+        if typeset_on:
+            wrap_at = imgui.get_cursor_pos_x() + imgui.get_content_region_avail().x
+        imgui.push_text_wrap_pos(wrap_at)
         if not derived:
             imgui.text_colored(
                 P.text_dim.vec4, "no premises written yet -- append the first one below"
@@ -135,19 +201,21 @@ def _summary(derived: tuple[brief.DerivedEntry, ...], directory: Path) -> None:
     imgui.text_colored(P.text_dim.vec4, summary_label(derived))
     # The path, because a worker is told to read this directory and the operator has
     # to be able to check that the two are the same place.
-    imgui.text_colored(P.text_dim.vec4, str(directory))
+    imgui.text_colored(P.text_dim.vec4, author_text(str(directory)))
     imgui.pop_text_wrap_pos()
 
 
 def _entry(item: brief.DerivedEntry, pane: BriefState) -> None:
     entry = item.entry
     imgui.spacing()
-    imgui.text_colored((P.text_dim if item.is_superseded else P.accent).vec4, entry_label(item))
-
     body, dropped = clip(entry.body, _MAX_BODY_CHARS)
-    # A superseded premise is dimmed rather than hidden: still readable, visibly not
-    # current. Removing it is what obligation 1 forbids.
-    imgui.text_colored((P.text_dim if item.is_superseded else P.text).vec4, body)
+    if typeset.enabled(typeset.Pane.BRIEF):
+        typeset.document(pane.views, str(entry.path), pane.parts(item))
+    else:
+        imgui.text_colored((P.text_dim if item.is_superseded else P.accent).vec4, entry_label(item))
+        # A superseded premise is dimmed rather than hidden: still readable, visibly
+        # not current. Removing it is what obligation 1 forbids.
+        imgui.text_colored((P.text_dim if item.is_superseded else P.text).vec4, body)
     if dropped:
         imgui.text_colored(P.text_dim.vec4, f"... {dropped} more character(s) not shown")
 
@@ -169,7 +237,8 @@ def _composer(pane: BriefState, directory: Path) -> None:
     imgui.text_disabled(compose_hint(pane.supersedes))
 
     if pane.error:
-        imgui.text_colored(P.danger.vec4, pane.error)
+        # It can quote the directory, which is held as the record has it.
+        imgui.text_colored(P.danger.vec4, author_text(pane.error))
 
     ready = bool(pane.draft.strip())
     if not ready:
@@ -236,6 +305,24 @@ def entry_label(item: brief.DerivedEntry) -> str:
     if item.is_superseded:
         head += f" -- superseded by {', '.join(f'{o:03d}' for o in item.superseded_by)}"
     return head
+
+
+def entry_parts(item: brief.DerivedEntry) -> tuple[typeset.Part, ...]:
+    """
+    One entry as the seam sets it: its heading, then its body under that heading.
+
+    The heading is written as a markdown heading unescaped. ``entry_label`` is built
+    from ordinals and a kind ``brief`` only accepts as ``[a-z0-9-]+``, so it holds
+    nothing markdown reads.
+
+    The inks are named by role, so a theme switch re-inks parts that are held.
+    """
+    body, _ = clip(item.entry.body, _MAX_BODY_CHARS)
+    dim = "text_dim" if item.is_superseded else None
+    return (
+        typeset.Part(f"{'#' * _ENTRY_LEVEL} {entry_label(item)}", colour=dim or "accent"),
+        *(replace(part, demote=_BODY_DEMOTE) for part in typeset.prose_parts(body, colour=dim)),
+    )
 
 
 def compose_hint(supersedes: set[int]) -> str:

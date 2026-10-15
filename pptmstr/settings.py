@@ -51,6 +51,51 @@ class McpConnector:
 
 
 @dataclass(frozen=True, slots=True)
+class RoleChoice:
+    """
+    What the operator chose for one role of typeset text, by the seam's names.
+
+    ``role`` is a ``ui.typeset.Role`` value (``"prose"``, ``"heading"``, ...), ``slot``
+    a ``ui.typeset.Slot`` value (``"proportional"``, ``"monospace"``) and ``step`` a
+    size in pixels relative to the body. ``None`` is "the seam's default", so a
+    choice that only changes a size does not pin the face as well. Strings, so this
+    module stays free of the UI; the seam drops a name it does not know.
+    """
+
+    role: str
+    slot: str | None = None
+    step: int | None = None
+
+
+LEGACY_FACES: dict[str, tuple[str, tuple[RoleChoice, ...]]] = {
+    "roboto": ("roboto", ()),
+    "mono": (
+        "roboto",
+        tuple(RoleChoice(role, "monospace") for role in ("heading", "label", "prose", "table")),
+    ),
+    "roboto-large": ("roboto", (RoleChoice("prose", "proportional", 2),)),
+    "droid": ("droid", ()),
+}
+"""
+What each named face preset of the build before roles means: the family in the
+proportional slot, and the roles that differ from the defaults. ``mono`` was every
+role in Inconsolata, ``roboto-large`` prose at 18 px beside 16 px chrome.
+
+Spelled here rather than imported from ``ui.typeset`` (its ``_LEGACY``) so this
+module stays free of the UI; a test holds the two together.
+"""
+
+
+def legacy_faces(name: str) -> dict[str, Any]:
+    """
+    The settings a preset's name stands for, as changes for ``Settings.merged``.
+    A name that was never a preset is the defaults.
+    """
+    family, roles = LEGACY_FACES.get(name, LEGACY_FACES["roboto"])
+    return {"typeset_family": family, "typeset_roles": roles}
+
+
+@dataclass(frozen=True, slots=True)
 class Settings:
     """Everything that must survive a restart."""
 
@@ -77,6 +122,37 @@ class Settings:
     # wrapping BETA (caret and selection across wrapped rows are the under-tested
     # part), which is the reason this is a setting at all and not just the default.
     wrap_inputs: bool = True
+    # Set text through the layout library (`ui/typeset/`) instead of the renderers
+    # each pane had before it. Off is not a degraded mode: every pane keeps its old
+    # path whole, which is what makes this the instrument for comparing the two.
+    typeset: bool = True
+    # Which family typeset text's proportional faces are: the name of one of
+    # `ui.typeset.PROPORTIONALS`, all from fonts that already ship. Not validated
+    # here: the seam owns the names and falls back to its default for one it does
+    # not know, so a file written by a later build keeps its choice through this
+    # one. The default is spelled rather than imported so this module stays free of
+    # the UI; a test holds the two together.
+    typeset_family: str = "roboto"
+    # The roles of typeset text the operator set apart from the seam's defaults:
+    # which of the two live families a role is in, and its size. Only what was
+    # chosen, so a default that changes in a later build reaches every role nobody
+    # touched. A setting because the question it answers -- does proportional prose
+    # beside monospace chrome read as polish or as a foreign body -- is one for
+    # whoever is looking at it. Line spacing is deliberately not here: it is a
+    # table in the seam (`ui.typeset.LEADING`).
+    typeset_roles: tuple[RoleChoice, ...] = ()
+    # Which panes set their text through the seam, by `ui.typeset.Pane` value. A
+    # pane not named is on; `typeset` above is the switch over all of them.
+    typeset_panes: tuple[tuple[str, bool], ...] = ()
+    # Typeset text's size as a multiple of the UI font's, which it still follows.
+    # The seam clamps it.
+    typeset_scale: float = 1.0
+    # Which rendering the context log starts in, by `ui.transcript_pane.RenderMode`
+    # value. Empty is "whatever this build starts in" (`transcript_pane.DEFAULT_MODE`,
+    # which has the measurements behind it), so a build that changes its default
+    # reaches everyone who never chose one. A name this build does not know reads
+    # as empty. The pane's own buttons still choose for the session.
+    context_mode: str = ""
     # The MCP servers a session may reach, and the whole of them. `driver` passes
     # these alongside the in-process bus under `strict_mcp_config=True`, so a server
     # the operator has not named here is one no session loads -- which is what keeps
@@ -115,6 +191,28 @@ class Settings:
     def merged(self, **changes: Any) -> Settings:
         return replace(self, **changes)
 
+    def with_role(self, role: str, *, slot: str | None = None, step: int | None = None) -> Settings:
+        """
+        These settings with one role's choice changed, the rest of it kept: a
+        ``slot`` or a ``step`` left out is whatever was chosen before. Kept in
+        order of role, as ``load`` reads them, so equal choices are equal settings.
+        """
+        held = next((each for each in self.typeset_roles if each.role == role), RoleChoice(role))
+        made = RoleChoice(
+            role, held.slot if slot is None else slot, held.step if step is None else step
+        )
+        others = tuple(each for each in self.typeset_roles if each.role != role)
+        return replace(
+            self, typeset_roles=tuple(sorted((*others, made), key=lambda each: each.role))
+        )
+
+    def with_pane(self, pane: str, on: bool) -> Settings:
+        """
+        These settings with one pane switched.
+        """
+        others = tuple(each for each in self.typeset_panes if each[0] != pane)
+        return replace(self, typeset_panes=tuple(sorted((*others, (pane, on)))))
+
 
 def _connectors(value: Any) -> tuple[McpConnector, ...] | None:
     """
@@ -136,6 +234,46 @@ def _connectors(value: Any) -> tuple[McpConnector, ...] | None:
         if isinstance(name, str) and isinstance(url, str) and isinstance(ident, str):
             out.append(McpConnector(name=name, url=url, id=ident))
     return tuple(out)
+
+
+def _roles(value: Any) -> tuple[RoleChoice, ...] | None:
+    """
+    Decode the persisted role choices -- ``{"prose": {"slot": "monospace", "step":
+    2}}`` -- or None when it is not a mapping at all. An entry of the wrong shape
+    is dropped and a field of the wrong type is "the default", for the reason
+    ``_connectors`` gives.
+    """
+    if not isinstance(value, dict):
+        return None
+    out: list[RoleChoice] = []
+    for role, choice in value.items():
+        if not isinstance(role, str) or not isinstance(choice, dict):
+            continue
+        slot, step = choice.get("slot"), choice.get("step")
+        out.append(
+            RoleChoice(
+                role,
+                slot if isinstance(slot, str) else None,
+                step if isinstance(step, int) and not isinstance(step, bool) else None,
+            )
+        )
+    return tuple(sorted(out, key=lambda each: each.role))
+
+
+def _panes(value: Any) -> tuple[tuple[str, bool], ...] | None:
+    """
+    Decode the persisted pane switches -- ``{"context": false}`` -- or None when it
+    is not a mapping. An entry that is not a name and a boolean is dropped.
+    """
+    if not isinstance(value, dict):
+        return None
+    return tuple(
+        sorted(
+            (pane, on)
+            for pane, on in value.items()
+            if isinstance(pane, str) and isinstance(on, bool)
+        )
+    )
 
 
 def config_dir() -> Path:
@@ -257,8 +395,8 @@ def read(path: Path | None = None) -> Loaded:
         # Guard the types the constructor would otherwise accept silently: a string
         # in fps_idle would survive construction and fail much later, inside a
         # comparison in the frame loop.
-        if key == "admitted_connectors":
-            decoded = _connectors(value)
+        if key in _DECODERS:
+            decoded = _DECODERS[key](value)
             if decoded is not None:
                 clean[key] = decoded
             continue
@@ -277,11 +415,48 @@ def read(path: Path | None = None) -> Loaded:
         if isinstance(default, str) and not isinstance(value, str):
             continue
         clean[key] = value
+    # `typeset_faces` named a preset and `typeset_mono` was the switch before it.
+    # A file that says nothing about roles or the family keeps what either said.
+    if "typeset_roles" not in clean and "typeset_family" not in clean:
+        old = raw.get("typeset_faces")
+        if isinstance(old, str):
+            clean.update(legacy_faces(old))
+        elif raw.get("typeset_mono") is True:
+            clean.update(legacy_faces("mono"))
     if misspelled:
         # After the loop, so the answer does not turn on which key the file
         # lists first. A value that could not be read keeps its own reason.
         clean["board_log"], unread = False, unread or BoardLogUnread.KEY
     return Loaded(Settings(**clean), unread)
+
+
+_DECODERS: dict[str, Any] = {
+    "admitted_connectors": _connectors,
+    "typeset_roles": _roles,
+    "typeset_panes": _panes,
+}
+"""
+The fields that are not a scalar in the file, each with what reads it back.
+"""
+
+
+def encoded(settings: Settings) -> dict[str, Any]:
+    """
+    Settings as the file holds them: ``asdict``, with the role choices and the pane
+    switches as mappings by name, which is what a person editing the file expects
+    and what ``load`` reads.
+    """
+    out = asdict(settings)
+    out["typeset_roles"] = {
+        each.role: {
+            key: value
+            for key, value in (("slot", each.slot), ("step", each.step))
+            if value is not None
+        }
+        for each in settings.typeset_roles
+    }
+    out["typeset_panes"] = dict(settings.typeset_panes)
+    return out
 
 
 def load(path: Path | None = None) -> Settings:
@@ -361,7 +536,7 @@ def save(
         fd, tmp = tempfile.mkstemp(dir=str(target.parent), prefix=".settings-", suffix=".json")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump(asdict(settings), handle, indent=2, sort_keys=True)
+                json.dump(encoded(settings), handle, indent=2, sort_keys=True)
                 handle.write("\n")
             os.replace(tmp, target)
         except BaseException:

@@ -4,18 +4,25 @@ BRIEF: the pane's labels and the memo that keeps directory IO off the frame path
 Drawing is exercised with ``imgui`` replaced by a ``MagicMock``, like the other
 panes. What needs a real filesystem gets one, because the memo's whole job is to
 notice a directory changing.
+
+The typeset path is drawn in real ImGui frames with no window, on the rig
+``tests/test_typeset_views.py`` owns: what a view set is read back from the view.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 from types import MappingProxyType
+from typing import Any
 from unittest.mock import MagicMock
+
+import pytest
 
 from pptmstr import brief
 from pptmstr.model import AgentRecord, AgentState, NodeId, Snapshot
-from pptmstr.ui import brief_pane
+from pptmstr.ui import brief_pane, typeset
 from pptmstr.ui.focus import FocusState, Scope
+from tests import test_typeset_views as rig
 
 ROOT: NodeId = ("s1", None)
 
@@ -52,7 +59,23 @@ def at_root(snap: Snapshot) -> FocusState:
 
 
 def drawn(monkeypatch, snap: Snapshot, pane: brief_pane.BriefState) -> list[str]:
+    return drawn_with(monkeypatch, snap, pane)[2]
+
+
+def drawn_with(
+    monkeypatch, snap: Snapshot, pane: brief_pane.BriefState, *, seam_on: bool = False
+) -> tuple[Any, Any, list[str]]:
+    """
+    The ``imgui`` double the pane drew into, the seam's double, and the text handed
+    to the first.
+
+    The seam is a double either way: the real one draws into the real ImGui, and
+    whether it is enabled is whatever the last test that loaded its faces left.
+    """
     fake = MagicMock()
+    seam_double = MagicMock()
+    seam_double.enabled.return_value = seam_on
+    monkeypatch.setattr(brief_pane, "typeset", seam_double)
     # imgui.checkbox returns (changed, value); a bare MagicMock does not unpack.
     fake.checkbox.side_effect = lambda *a, **k: (False, False)
     monkeypatch.setattr(brief_pane, "imgui", fake)
@@ -61,7 +84,7 @@ def drawn(monkeypatch, snap: Snapshot, pane: brief_pane.BriefState) -> list[str]
     brief_pane.draw(snap, at_root(snap), pane)
     coloured = [str(a) for call in fake.text_colored.call_args_list for a in call.args[1:]]
     disabled = [str(a) for call in fake.text_disabled.call_args_list for a in call.args]
-    return coloured + disabled
+    return fake, seam_double, coloured + disabled
 
 
 def derived(tmp_path: Path) -> tuple[brief.DerivedEntry, ...]:
@@ -249,6 +272,271 @@ def test_an_entry_written_by_anything_else_is_picked_up(tmp_path: Path) -> None:
     brief.write_entry(tmp_path, "b")
 
     assert len(pane.entries(tmp_path)) == 2
+
+
+# -- how a body is read -------------------------------------------------------------
+
+
+def test_a_body_is_read_by_the_seams_rule_and_no_other(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """
+    The wiring. Whether a body is markdown is ``typeset.prose_parts``' to say, so that
+    an entry reads here as a concern or a task detail quoting it reads elsewhere.
+    """
+    seen: list[tuple[str, object]] = []
+    answer = (typeset.Part("prose"), typeset.Part("  as written", typeset.Kind.LITERAL))
+
+    def prose_parts(text: str, *, colour: object = None) -> tuple[typeset.Part, ...]:
+        seen.append((text, colour))
+        return answer
+
+    monkeypatch.setattr(typeset, "prose_parts", prose_parts)
+    brief.write_entry(tmp_path, "apples\npears\nplums")
+    (item,) = brief.derive(brief.read_entries(tmp_path))
+
+    head, *body = brief_pane.entry_parts(item)
+
+    assert seen == [(item.entry.body, None)]
+    assert head.text.lstrip("#") == " 000 premises"
+    assert [(part.text, part.kind) for part in body] == [(p.text, p.kind) for p in answer]
+
+
+def test_an_overturned_entry_asks_the_rule_for_dim_parts(tmp_path: Path) -> None:
+    brief.write_entry(tmp_path, "ran: make test\nexit: 1\n\nTraceback:\n  File x\n    y()")
+    brief.write_entry(tmp_path, "that was wrong", supersedes=(0,))
+    old, _ = brief.derive(brief.read_entries(tmp_path))
+
+    parts = brief_pane.entry_parts(old)
+
+    assert [part.kind for part in parts[1:]] == [typeset.Kind.MARKDOWN, typeset.Kind.LITERAL]
+    assert {part.colour for part in parts} == {"text_dim"}
+
+
+def test_a_heading_in_a_body_is_set_under_the_entrys_own(seam: Any, tmp_path: Path) -> None:
+    """
+    A body that opens with ``# Title`` is not the start of the entry. Its title is a
+    size under the line that says which entry this is, and nothing in it is over.
+    """
+    brief.write_entry(tmp_path, "# Title\n\n## Section\n\nwords\n")
+    pane = brief_pane.BriefState()
+
+    typeset_frame(seam, tmp_path, pane)
+
+    view = pane.views.view(str(tmp_path / "000-premises.md"))
+    assert list(view.texts) == ["000 premises", "Title", "Section", "words"]
+    entry, title, section, words = (block.style.font.size for block in view.blocks)
+    assert entry > title > section == words
+    # And on screen, not only in what the view was told: the height of each
+    # heading's line.
+    tall = [line.bottom - line.top for line in view.set_lines()]
+    assert tall[0] > tall[1] > tall[2]
+
+
+# -- the typeset path -------------------------------------------------------------
+
+
+def typeset_frame(im: Any, directory: Path, pane: brief_pane.BriefState) -> None:
+    snap = snapshot(brief_path=str(directory))
+    rig.frame(im, lambda: brief_pane.draw(snap, at_root(snap), pane))
+
+
+def shown(pane: brief_pane.BriefState, directory: Path, name: str) -> list[str]:
+    """
+    The text of each block the entry's view set, a list item with its marker.
+    """
+    view = pane.views.view(str(directory / name))
+    return [
+        f"{getattr(block, 'marker', '')} {text}".strip()
+        for block, text in zip(view.blocks, view.texts, strict=True)
+    ]
+
+
+def test_with_the_seam_off_the_seam_is_not_drawn_through(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    brief.write_entry(tmp_path, "the board is per-session")
+    pane = brief_pane.BriefState()
+
+    _, seam_double, lines = drawn_with(monkeypatch, snapshot(brief_path=str(tmp_path)), pane)
+
+    assert "000 premises" in lines and "the board is per-session" in lines
+    seam_double.document.assert_not_called()
+
+
+def test_an_entry_is_set_as_its_heading_and_its_markdown_body(seam: Any, tmp_path: Path) -> None:
+    brief.write_entry(tmp_path, "# Title\n\nA **bold** claim.\n\n- one\n- two")
+    pane = brief_pane.BriefState()
+
+    typeset_frame(seam, tmp_path, pane)
+
+    assert shown(pane, tmp_path, "000-premises.md") == [
+        "000 premises",
+        "Title",
+        "A bold claim.",
+        "• one",
+        "• two",
+    ]
+    # Four vertices a glyph: the text reached the draw list.
+    drawn = pane.views.view(str(tmp_path / "000-premises.md")).stats.vertices
+    assert drawn >= 4 * len("000premisesTitleAboldclaim.onetwo")
+
+
+def test_a_body_of_one_item_a_line_is_drawn_on_as_many_lines(seam: Any, tmp_path: Path) -> None:
+    """
+    The lines are in what the view set, not only in the parts the rule returned.
+    """
+    brief.write_entry(tmp_path, "apples\npears\nplums")
+    pane = brief_pane.BriefState()
+
+    typeset_frame(seam, tmp_path, pane)
+
+    assert shown(pane, tmp_path, "000-premises.md")[1] == "apples\npears\nplums"
+
+
+def test_an_overturned_entry_is_said_to_be_in_words_and_dimmed(seam: Any, tmp_path: Path) -> None:
+    """
+    Obligation 1 under the seam. The words are the channel; a dim ink with no words
+    is a difference in contrast only, which not every reader or display carries.
+    """
+    brief.write_entry(tmp_path, "the board is per-session")
+    brief.write_entry(tmp_path, "that was wrong", supersedes=(0,))
+    pane = brief_pane.BriefState()
+
+    typeset_frame(seam, tmp_path, pane)
+
+    assert shown(pane, tmp_path, "000-premises.md") == [
+        "000 premises -- superseded by 001",
+        "the board is per-session",
+    ]
+    old, new = pane.entries(tmp_path)
+    assert [part.colour for part in pane.parts(old)] == ["text_dim", "text_dim"]
+    assert [part.colour for part in pane.parts(new)] == ["accent", None]
+
+
+def test_the_parts_are_the_same_object_from_frame_to_frame(seam: Any, tmp_path: Path) -> None:
+    """
+    The seam compares nothing for a sequence it was handed last frame, and compares
+    every part's text for one it was not.
+    """
+    brief.write_entry(tmp_path, "a")
+    pane = brief_pane.BriefState()
+    typeset_frame(seam, tmp_path, pane)
+    (item,) = pane.entries(tmp_path)
+    held = pane.parts(item)
+    view = pane.views.view(str(item.entry.path))
+    revision, edits = view.revision, dict(view.edits)
+
+    typeset_frame(seam, tmp_path, pane)
+
+    assert pane.parts(pane.entries(tmp_path)[0]) is held
+    assert pane.views.view(str(item.entry.path)) is view
+    assert (view.revision, view.edits) == (revision, edits)
+
+
+def test_an_entry_overturned_later_keeps_its_view(seam: Any, tmp_path: Path) -> None:
+    """
+    Being overturned changes an entry's heading and its ink, and not which view it
+    is: the operator's scroll and selection survive the append they just made.
+    """
+    brief.write_entry(tmp_path, "the board is per-session")
+    pane = brief_pane.BriefState()
+    typeset_frame(seam, tmp_path, pane)
+    view = pane.views.view(str(tmp_path / "000-premises.md"))
+
+    pane.draft, pane.supersedes = "that was wrong", {0}
+    brief_pane._append(pane, tmp_path)
+    typeset_frame(seam, tmp_path, pane)
+
+    assert pane.views.view(str(tmp_path / "000-premises.md")) is view
+    assert shown(pane, tmp_path, "000-premises.md")[0] == "000 premises -- superseded by 001"
+    assert len(pane.views) == 2
+
+
+def test_views_of_another_directory_are_let_go(seam: Any, tmp_path: Path) -> None:
+    first, second = tmp_path / "one", tmp_path / "two"
+    brief.write_entry(first, "a")
+    brief.write_entry(first, "b")
+    brief.write_entry(second, "c")
+    pane = brief_pane.BriefState()
+    typeset_frame(seam, first, pane)
+    assert len(pane.views) == 2
+
+    typeset_frame(seam, second, pane)
+
+    assert pane.views.keys() == (str(second / "000-premises.md"),)
+
+
+def test_views_are_let_go_when_the_directory_disappears(seam: Any, tmp_path: Path) -> None:
+    brief.write_entry(tmp_path / "one", "a")
+    pane = brief_pane.BriefState()
+    typeset_frame(seam, tmp_path / "one", pane)
+
+    pane.entries(tmp_path / "gone")
+
+    assert len(pane.views) == 0
+
+
+def test_two_files_claiming_one_ordinal_are_two_views(seam: Any, tmp_path: Path) -> None:
+    """
+    ``write_entry`` never makes this and a hand can. Keyed by ordinal the second
+    would be the same key drawn twice in a frame, which the seam refuses.
+    """
+    (tmp_path / "000-premises.md").write_text("mine\n", encoding="utf-8")
+    (tmp_path / "000-also.md").write_text("theirs\n", encoding="utf-8")
+    pane = brief_pane.BriefState()
+
+    typeset_frame(seam, tmp_path, pane)
+
+    assert shown(pane, tmp_path, "000-premises.md") == ["000 premises", "mine"]
+    assert shown(pane, tmp_path, "000-also.md") == ["000 also", "theirs"]
+
+
+def test_a_clipped_body_is_clipped_in_the_view_too(seam: Any, tmp_path: Path) -> None:
+    brief.write_entry(tmp_path, "x" * (brief_pane._MAX_BODY_CHARS + 7))
+    pane = brief_pane.BriefState()
+
+    typeset_frame(seam, tmp_path, pane)
+
+    assert shown(pane, tmp_path, "000-premises.md")[1] == "x" * brief_pane._MAX_BODY_CHARS
+
+
+def test_the_child_scrolls_sideways_only_under_the_seam(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """
+    Under the seam a line set as written is never broken, so one longer than the
+    pane is reachable only if the child scrolls to it; native text in that child is then
+    wrapped at a stated position, not at "the window's end", which has moved. With
+    the seam off both are what they always were.
+    """
+    brief.write_entry(tmp_path, "a")
+    snap = snapshot(brief_path=str(tmp_path))
+
+    off, _, _ = drawn_with(monkeypatch, snap, brief_pane.BriefState())
+    assert off.begin_child.call_args.kwargs == {"window_flags": 0}
+    off.push_text_wrap_pos.assert_called_with(0.0)
+
+    on, _, _ = drawn_with(monkeypatch, snap, brief_pane.BriefState(), seam_on=True)
+    assert on.begin_child.call_args.kwargs == {
+        "window_flags": on.WindowFlags_.horizontal_scrollbar.value
+    }
+    assert on.push_text_wrap_pos.call_args.args != (0.0,)
+
+
+def test_the_bound_is_announced_on_the_typeset_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    brief.write_entry(tmp_path, "x" * (brief_pane._MAX_BODY_CHARS + 7))
+    pane = brief_pane.BriefState()
+
+    _, seam_double, lines = drawn_with(
+        monkeypatch, snapshot(brief_path=str(tmp_path)), pane, seam_on=True
+    )
+
+    assert "... 7 more character(s) not shown" in lines
+    assert "x" * brief_pane._MAX_BODY_CHARS not in lines
+    seam_double.document.assert_called_once()
 
 
 def test_a_closed_card_says_it_is_closed_and_its_brief_directory_is_never_listed(

@@ -119,14 +119,15 @@ def test_a_closed_session_that_had_failed_says_what_it_said(monkeypatch) -> None
     said, _ = _drawn(monkeypatch, recalled_snapshot(failed), CLOSED_ROOT)
 
     assert "its last run ended when it failed" in said.strings
-    assert "it said: the API said<NUL> no" in said.strings
+    # The NUL is written out where the record entered the store (``store._drawable``).
+    assert "it said: the API said\\u0000 no" in said.strings
 
     # Closed after it failed: the file's end reads closed and keeps the text.
     # Both are said, or the pane calls a session that died an ordinary close.
     closed = dataclasses.replace(failed, ended_how=EndedHow.CLOSED)
     said, _ = _drawn(monkeypatch, recalled_snapshot(closed), CLOSED_ROOT)
     assert "its last run ended when it was closed" in said.strings
-    assert "it had failed before it was closed: the API said<NUL> no" in said.strings
+    assert "it had failed before it was closed: the API said\\u0000 no" in said.strings
     assert not said.has("it said")
 
     # An error beside an end that is neither is not that run's failure.

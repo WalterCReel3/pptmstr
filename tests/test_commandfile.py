@@ -152,9 +152,9 @@ def test_text_no_file_name_could_hold_round_trips(tmp_path: Path) -> None:
     command = dataclasses.replace(
         ASKED,
         asked="echo '‮\x1b[2K\r' 😀 é \\ \"",
-        reason="line one\nline two\ttab \ud800 lone",
+        reason="line one\nline two\ttab lone",
         expects="",
-        end=End(Refused("no\x00"), at=1001.0),
+        end=End(Refused("no\x00 \ud800"), at=1001.0),
     )
     _record_all(command, tmp_path)
     assert cf.read_command(SID, CID, tmp_path) == command

@@ -24,6 +24,8 @@ import enum
 import threading
 from dataclasses import dataclass
 
+from . import drawable
+
 
 class SegmentKind(enum.Enum):
     REASONING = "reasoning"
@@ -85,7 +87,9 @@ class Transcript:
         would otherwise produce one segment per token and make every read a walk over
         thousands of entries.
         """
-        data = text.encode("utf-8")
+        # A lone surrogate has no UTF-8, and a NUL ends the string at whichever
+        # text call is handed it: both are written out before the bytes are made.
+        data = drawable.text(text).encode("utf-8")
         with self._lock:
             if self._open_kind is kind:
                 self._buf.extend(data)
@@ -96,7 +100,9 @@ class Transcript:
                 self._open_kind = kind
                 self._open_start = len(self._buf)
                 self._buf.extend(data)
-                self._segments.append(Segment(kind, self._open_start, len(self._buf), meta))
+                self._segments.append(
+                    Segment(kind, self._open_start, len(self._buf), drawable.shown(meta))
+                )
             # Published last, after the bytes are in: a reader that sees this length
             # is guaranteed the bytes below it exist.
             self._published_len = len(self._buf)

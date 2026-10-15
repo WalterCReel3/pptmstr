@@ -60,6 +60,56 @@ gates on the same ``shows_board``. It borrows ``Line``, ``tone_colour`` and
 ``author`` from here so that a quoted body looks the same in both.
 
 Bounded like every other pane here, and it announces every bound when it bites.
+
+## With the typeset seam on
+
+**A native table with typeset bodies, not one typeset document.** The library is a
+text engine: it breaks lines, it does not align cells or open a row on a click. So
+the rows stay ImGui items -- a tree node with its cells hand-placed at column
+offsets measured once a frame, in the seam's faces -- and only what is prose goes
+through a view: a specification, the concerns that explain a row, a concern's body.
+
+**A collapsed row is one line and its title is cut, not wrapped.** The cut is
+marked with an ellipsis, the whole title is on hover and is the first thing in the
+opened row. A row with an owner, a wait or a concern keeps its second line, as it
+has without the seam: those are what an operator scans for, and nothing that fits
+in a pane this narrow carries them beside a title.
+
+**State is a glyph and then its word**, both in one ink. The glyph is drawn by
+ImGui in the UI font, which is the only face with the icons merged; inside typeset
+text it would be U+FFFD.
+
+**A concern is one line until it is opened**: participants, subject, and a word at
+the right edge only when its state is not the ordinary one. A body is typeset only
+for an open row, so eighty concerns are eighty lines and not eighty views.
+
+**The subject has the line and the participants what is left of it** (``people_cell``).
+A subject is what tells one concern from the next; who sent it to whom is the same
+few role names down the column. So the column is "sender -> recipient" only where
+that leaves the subject ``1 - _PEOPLE_SHARE`` of the line, the sender alone where it
+does not, and nothing in a pane too narrow for that. It is decided for the column
+and not per row, so subjects start at one offset. An opened row says both names
+whatever its line showed, and so does the hover of a line that left one out.
+
+**A body is not assumed to be markdown.** ``typeset.prose_parts`` is the rule, the
+same one every pane showing a body applies; this module only bounds what it is
+handed (``clipped_parts``).
+
+**The character bounds stay.** A capped view bounds what is drawn; what a long body
+costs is the parse and the first layout, which are linear in its length and land on
+the frame the row is opened. The cut falls on a line end and says how much it
+dropped, inside the view.
+
+**Under the cursor, views are kept only for what was drawn this frame.** Which rows
+are open is ImGui's to know, so the set of live views is collected as they are drawn
+and everything else is let go; a row reopened is laid out again.
+
+**A team the cursor has left keeps its views.** The pane follows the cursor, and the
+cursor passes over sessions that are not teams on its way through a mixed queue.
+Laying every open row out again on the way back is the cost of a first frame paid
+on a keystroke. So a view is keyed by its session and outlives the cursor's absence
+for as long as that session is a team in the snapshot, for the ``_HELD_BOARDS`` teams
+shown most recently. A view that is not drawn costs nothing a frame.
 """
 
 from __future__ import annotations
@@ -71,6 +121,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TypeVar, assert_never
 
+from imgui_bundle import icons_fontawesome_6 as fa
 from imgui_bundle import imgui
 
 from ..board import (
@@ -107,8 +158,10 @@ from ..model import (
     property_overrun,
 )
 from ..theme import Color, P
+from . import typeset
 from .focus import FocusState
-from .widgets import CTRL_ENTER_SUBMITS, closed_line, multiline_input, section
+from .typeset import Kind, Part, Weight
+from .widgets import CTRL_ENTER_SUBMITS, closed_line, ellipsis, multiline_input, section
 
 # The one-line rules live with the other shared drawing helpers. Re-exported under
 # this module's name because the decision view and the tests reach them through it.
@@ -144,6 +197,27 @@ _MAX_NOT_RUN_CHARS = 1500
 _GUTTER_EMS = 0.75
 _BAR_THICKNESS = 2.0
 
+# Lines of typeset text an opened row's specification shows before the view scrolls
+# on its own: a little over half of the pane at its default size, so one long
+# specification does not put the rest of the board two screens away.
+_SPEC_LINES = 24
+# The same for one concern's body, and set past what ``_MAX_CONCERN_CHARS`` comes to
+# at the width this pane docks at. It is not there to cut a note short. A capped
+# view is the only one that scrolls sideways, and a pasted traceback is wider than
+# the pane.
+_NOTE_LINES = 40
+# Characters of a task id in its column. Ids are a lead's to choose, and one long
+# one would otherwise take the title's room on every row.
+_MAX_ID_CELLS = 14
+# The most of a concern's line its participants may take from its subject. Both
+# coded layouts dock this pane narrower than "sender -> recipient" fits in at this
+# share, so there the column is the sender; a pane dragged wider gets both.
+_PEOPLE_SHARE = 0.3
+# Teams whose open rows keep their views while the cursor is somewhere else. A view
+# holds its document and a layout for every width it was drawn at, and a finished
+# team stays in the snapshot, so "every team ever looked at" has no bound of its own.
+_HELD_BOARDS = 6
+
 _CONCERN_STATE_LABEL: dict[ConcernState, str] = {
     ConcernState.POSTED: "waiting",
     ConcernState.DELIVERED: "delivered",
@@ -153,6 +227,9 @@ _CONCERN_STATE_LABEL: dict[ConcernState, str] = {
 # Only ever a row type from .board; named so bound_rows can serve both tables and
 # the id lists without three copies of the same slice.
 _T = TypeVar("_T")
+
+# What names a held view: its session, what it is of, and the ids of that.
+_Key = tuple[str, ...]
 
 
 @dataclass
@@ -169,6 +246,14 @@ class BoardState:
     # The task whose specification is open for editing, or None.
     editing: str | None = None
     drafts: dict[str, str] = field(default_factory=dict)
+    # The typeset views of the rows that are open, the parts each was built from
+    # beside the text they were made of, and the keys drawn in the current frame.
+    # A key starts with its session's id.
+    views: typeset.ViewCache = field(default_factory=typeset.ViewCache)
+    parts: dict[_Key, tuple[str, tuple[Part, ...]]] = field(default_factory=dict)
+    shown: set[_Key] = field(default_factory=set)
+    # The teams this pane has shown, the latest last: whose views ``_release`` keeps.
+    held: list[str] = field(default_factory=list)
     # The property of the task being amended, as typed so far. Beside ``drafts``
     # and not inside it because the two are amended separately: one left as it
     # was found is not part of the amendment.
@@ -285,12 +370,14 @@ def draw(
     """
     node = focus.node(snap)
     if node is None:
+        _release(pane, snap, None)
         imgui.text_disabled("no session under the cursor")
         return
 
     session_id = node[0]
     absent = absent_line(snap, session_id)
     if absent is not None:
+        _release(pane, snap, None)
         imgui.push_text_wrap_pos(0.0)
         imgui.text_disabled(absent)
         imgui.pop_text_wrap_pos()
@@ -299,6 +386,7 @@ def draw(
     rows = tuple(flat_task(r) for r in board_tasks(snap, session_id))
     concerns = tuple(flat_concern(c) for c in board_concerns(snap, session_id))
     if not shows_board(team, len(rows), len(concerns)):
+        _release(pane, snap, None)
         imgui.text_disabled("this session is not a team")
         return
 
@@ -319,8 +407,14 @@ def draw(
 
     if imgui.begin_child("##board"):
         imgui.push_text_wrap_pos(0.0)
-        _tasks(rows, {c.id: c for c in concerns}, pane, bridge)
-        _concerns(concerns)
+        pane.shown = set()
+        if typeset.enabled(typeset.Pane.BOARD):
+            _typeset_tasks(session_id, rows, {c.id: c for c in concerns}, pane, bridge)
+            _typeset_concerns(session_id, concerns, pane)
+        else:
+            _tasks(rows, {c.id: c for c in concerns}, pane, bridge)
+            _concerns(concerns)
+        _release(pane, snap, session_id)
         imgui.pop_text_wrap_pos()
     imgui.end_child()
 
@@ -331,6 +425,24 @@ def _prune(pane: BoardState, live: set[str]) -> None:
             del drafts[task_id]
     if pane.editing is not None and pane.editing not in live:
         pane.editing = None
+
+
+def _release(pane: BoardState, snap: Snapshot, shown: str | None) -> None:
+    """
+    Let go of the views nothing will draw again, and of the parts they were built from.
+
+    ``shown`` is the team drawn this frame, if one was: of its views, the ones not
+    drawn belong to rows that have closed. Every other team's are kept as they are
+    while it is still a team in ``snap`` and among the ``_HELD_BOARDS`` shown latest.
+    """
+    holding = {key[0] for key in pane.parts}
+    if shown is not None:
+        pane.held = [s for s in pane.held if s != shown] + [shown]
+    pane.held = [s for s in pane.held if s in holding and has_board(snap, s)][-_HELD_BOARDS:]
+    live = {k for k in pane.parts if k[0] in pane.held and (k[0] != shown or k in pane.shown)}
+    pane.views.prune(live)
+    for key in [k for k in pane.parts if k not in live]:
+        del pane.parts[key]
 
 
 def _summary(c: BoardCounts) -> None:
@@ -835,6 +947,379 @@ def _concerns(rows: Sequence[BoardConcern]) -> None:
         imgui.unindent()
     if dropped:
         imgui.text_colored(P.text_dim.vec4, f"... {dropped} earlier concern(s) not shown")
+
+
+# -- the same board through the typeset seam -----------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _Columns:
+    """
+    The widths of a task row's cells, measured once for the rows of one frame.
+    """
+
+    glyph: float
+    state: float
+    ident: float
+    gap: float
+
+
+def _gap() -> float:
+    return float(imgui.calc_text_size(" ").x)
+
+
+def _under_headline(opened: bool) -> None:
+    """
+    Move the cursor to where a row's first cell starts, for a line beneath it.
+
+    An open node has pushed a tree indent that everything after it inherits and a
+    closed one has not, so the distance still to go depends on which this is. A
+    plain ``indent`` would also stop short: it is the tree's step, and the first
+    cell sits past the arrow and an item spacing.
+    """
+    lead = imgui.get_tree_node_to_label_spacing() + imgui.get_style().item_spacing.x
+    if opened:
+        lead -= imgui.get_style().indent_spacing
+    imgui.set_cursor_pos_x(imgui.get_cursor_pos_x() + lead)
+
+
+def _task_columns(rows: Sequence[BoardTask]) -> _Columns:
+    glyph = max(imgui.calc_text_size(g).x for g in _TASK_GLYPHS)
+    with typeset.font(Weight.REGULAR):
+        state = max((imgui.calc_text_size(s.value).x for s in {r.state for r in rows}), default=0.0)
+    with typeset.font(Weight.CODE):
+        cells = min(max((len(r.id) for r in rows), default=0), _MAX_ID_CELLS)
+        ident = cells * imgui.calc_text_size("0").x
+    return _Columns(glyph=glyph, state=state, ident=ident, gap=_gap())
+
+
+def _typeset_tasks(
+    session_id: str,
+    rows: Sequence[BoardTask],
+    by_id: Mapping[ConcernId, BoardConcern],
+    pane: BoardState,
+    bridge: Bridge,
+) -> None:
+    shown, dropped = bound_rows(rows, _MAX_BOARD_TASKS)
+    columns = _task_columns(shown)
+    for row in shown:
+        _typeset_task_row(row, session_id, by_id, columns, pane, bridge)
+    if dropped:
+        typeset.label(
+            f"... {dropped} more task(s) not shown", weight=Weight.REGULAR, colour=P.text_dim
+        )
+
+
+def _typeset_task_row(
+    row: BoardTask,
+    session_id: str,
+    by_id: Mapping[ConcernId, BoardConcern],
+    columns: _Columns,
+    pane: BoardState,
+    bridge: Bridge,
+) -> None:
+    """
+    One task: glyph, state, id and title on a line, and the rest behind the triangle.
+
+    The node has no label of its own. Its cells are drawn over it at the frame's
+    column offsets, so a state reads down a column and a title starts where every
+    other title starts.
+    """
+    reasons = row_reasons(row, by_id)
+    opened = imgui.tree_node_ex(f"###{row.id}", int(imgui.TreeNodeFlags_.span_avail_width))
+    title = row.title or "(untitled)"
+    # A closed row out of sight keeps its line and draws nothing on it. An open one
+    # is always measured: whether its title was cut decides a line of its body.
+    cut = (opened or imgui.is_item_visible()) and _task_headline(row, title, columns)
+
+    held_to = property_label(row.property)
+    if held_to:
+        # First under the headline and never cut, as on the native row: one bounded
+        # sentence the operator ranks a row's notes against without opening it.
+        # ImGui's own font, which has a fallback: it is an agent's sentence.
+        _under_headline(opened)
+        imgui.text_colored(P.text.vec4, held_to)
+    owner = owner_label(row)
+    blocked = blocked_label(row)
+    if owner or blocked or reasons:
+        _under_headline(opened)
+        if owner:
+            typeset.label(
+                owner, weight=Weight.REGULAR, colour=P.warn if row.owner_gone else P.text_dim
+            )
+        if blocked:
+            if owner:
+                imgui.same_line()
+            typeset.label(
+                blocked, weight=Weight.REGULAR, colour=P.warn if row.missing else P.text_dim
+            )
+        if reasons:
+            if owner or blocked:
+                imgui.same_line()
+            typeset.label(reasons_marker(reasons), weight=Weight.REGULAR, colour=P.accent)
+    # The native row's other lines, in its words and colours (``_task_row``): a
+    # wait nothing here can end, which specification this is and whether its
+    # holder has seen it, and on the closed row where a finished one stands.
+    for text, colour in _standing_lines(row, opened):
+        _under_headline(opened)
+        imgui.text_colored(colour.vec4, text)
+
+    if not opened:
+        return
+
+    if cut:
+        typeset.label(title, colour=P.text)
+    if row.touches:
+        typeset.label(touches_label(row), weight=Weight.CODE, colour=P.text_dim)
+    for reason in reasons:
+        alarming = reason.incident or reason.basis is None
+        imgui.text_colored((P.warn if alarming else P.accent).vec4, reason_heading(reason))
+        if reason.body:
+            # Keyed by the row as well: the same concern is drawn again in the log
+            # below, and one view cannot be in two places.
+            _note(pane, (session_id, "reason", row.id, reason.id), reason.body)
+    if row.result:
+        heading_colour = (
+            P.text_dim if row.closed_by_operator else _basis_colour(row.result_basis, P.accent)
+        )
+        imgui.text_colored(heading_colour.vec4, result_heading(row))
+        _authored(pane, (session_id, "result", row.id), row.result, _MAX_RESULT_CHARS, _SPEC_LINES)
+    elif row.state is TaskState.COMPLETED:
+        imgui.text_colored(P.warn.vec4, NO_RESULT)
+    unrun = unrun_heading(row)
+    if unrun:
+        imgui.text_colored((P.text_dim if row.not_run == "" else P.warn).vec4, unrun)
+        if row.not_run:
+            _note(pane, (session_id, "not-run", row.id), row.not_run, _MAX_NOT_RUN_CHARS)
+    if pane.closing == row.id:
+        _close_editor(row, pane, bridge)
+    elif pane.editing == row.id:
+        _amend_editor(row, pane, bridge)
+    else:
+        heading = spec_heading(row)
+        if heading:
+            imgui.text_colored(_basis_colour(row.basis, P.text_dim).vec4, heading)
+        if row.detail:
+            _authored(
+                pane, (session_id, "spec", row.id), row.detail, _MAX_DETAIL_CHARS, _SPEC_LINES
+            )
+        _row_controls(row, pane)
+    imgui.tree_pop()
+
+
+def _standing_lines(row: BoardTask, opened: bool) -> list[tuple[str, Color]]:
+    """
+    The lines a task row draws under its owner line, each with its colour: a
+    wait nothing on this board can end, which specification this is, whether its
+    holder or its result is working to an earlier one, and -- on the closed row
+    only -- where a finished row stands. The typeset row's copy of ``_task_row``'s
+    choices; a test holds the two branches to one set of lines.
+    """
+    lines: list[tuple[str, Color]] = []
+    foreign = foreign_wait_label(row)
+    if foreign:
+        lines.append((foreign, P.warn))
+    replaced = one_line(version_label(row))
+    if replaced:
+        lines.append((replaced, P.text_dim))
+    stale = one_line(stale_label(row))
+    if stale:
+        lines.append((stale, P.warn))
+    standing = "" if opened else standing_label(row)
+    if standing:
+        lines.append((standing, P.text_dim if settled(row) else P.warn))
+    return lines
+
+
+def _row_controls(row: BoardTask, pane: BoardState) -> None:
+    """
+    The amend button and, on a row that is not finished, the close button: the
+    native row's (``_task_row``), with its one-editor rule.
+    """
+    if imgui.small_button(f"amend##{row.id}"):
+        pane.editing = row.id
+        pane.drafts = {row.id: row.detail}
+        pane.property_drafts = {row.id: row.property}
+        pane.stop_closing()
+    if closable(row):
+        imgui.same_line()
+        if imgui.small_button(f"{CLOSE}##close-{row.id}"):
+            pane.stop_closing()
+            pane.closing = row.id
+            pane.editing = None
+            pane.drafts = {}
+            pane.property_drafts = {}
+
+
+def _task_headline(row: BoardTask, title: str, columns: _Columns) -> bool:
+    """
+    The cells of a task's line. Returns whether the title had to be cut to fit.
+    """
+    imgui.same_line()
+    x = imgui.get_cursor_pos_x()
+    glyph, role = task_glyph(row)
+    ink: Color = getattr(P, role)
+    imgui.text_colored(ink.vec4, glyph)
+    x += columns.glyph + columns.gap
+    imgui.same_line(x)
+    typeset.label(row.state.value, weight=Weight.REGULAR, colour=ink)
+    x += columns.state + columns.gap
+    imgui.same_line(x)
+    with typeset.font(Weight.CODE):
+        imgui.text_colored(P.text_dim.vec4, ellipsis(row.id, columns.ident))
+    x += columns.ident + columns.gap
+    imgui.same_line(x)
+    return _fitted(title, imgui.get_content_region_avail().x)
+
+
+def _fitted(text: str, width: float, *, whole: str = "", colour: Color | None = None) -> bool:
+    """
+    A strong line cut to ``width``, whole on hover. Returns whether it was cut.
+
+    ``whole`` is what the hover says of a line that left something out without
+    being cut, and says in place of ``text`` when it was.
+    """
+    with typeset.font(Weight.BOLD):
+        fitted = ellipsis(text, width)
+        imgui.text_colored((P.text if colour is None else colour).vec4, fitted)
+    cut = fitted != text
+    if (cut or whole) and imgui.is_item_hovered():
+        imgui.set_tooltip(whole or text)
+    return cut
+
+
+def _typeset_concerns(session_id: str, rows: Sequence[BoardConcern], pane: BoardState) -> None:
+    if not rows:
+        return
+    shown, dropped = bound_rows(rows, _MAX_BOARD_CONCERNS, tail=True)
+    section("concerns")
+    glyph = max(imgui.calc_text_size(g).x for g in _CONCERN_GLYPHS)
+    with typeset.font(Weight.REGULAR):
+        people = (
+            max(imgui.calc_text_size(participants_label(r)).x for r in shown),
+            max(imgui.calc_text_size(r.sender).x for r in shown),
+        )
+    for row in shown:
+        _typeset_concern_row(row, session_id, glyph, people, pane)
+    if dropped:
+        typeset.label(
+            f"... {dropped} earlier concern(s) not shown", weight=Weight.REGULAR, colour=P.text_dim
+        )
+
+
+def _typeset_concern_row(
+    row: BoardConcern, session_id: str, glyph: float, people: tuple[float, float], pane: BoardState
+) -> None:
+    """
+    One concern: who to whom and the subject on a line, the finding behind the triangle.
+
+    ``people`` is the width of the widest "sender -> recipient" among the rows, and
+    of the widest sender.
+
+    A concern about a task nobody declared says so on a line of its own even when
+    closed. It is the one qualifier here that nothing clears, and it is rare enough
+    that the line is paid only where it is owed.
+    """
+    opened = imgui.tree_node_ex(f"###concern-{row.id}", int(imgui.TreeNodeFlags_.span_avail_width))
+    subject = row.subject or "(no subject)"
+    cut = (opened or imgui.is_item_visible()) and _concern_headline(row, subject, glyph, people)
+    if row.task_missing:
+        _under_headline(opened)
+        typeset.label(about_label(row), weight=Weight.REGULAR, colour=P.warn)
+    if not opened:
+        return
+
+    if row.incident:
+        imgui.text_colored(P.warn.vec4, incident_marker(True).strip())
+    if cut:
+        typeset.label(subject, colour=P.warn if row.incident else P.text)
+    about = "" if row.task_missing else about_label(row)
+    said = (participants_label(row), concern_state_label(row), basis_label(row.basis), about)
+    typeset.label(
+        " · ".join(part for part in said if part),
+        weight=Weight.REGULAR,
+        colour=P.text_dim,
+    )
+    if row.body:
+        _note(pane, (session_id, "concern", row.id), row.body)
+    imgui.tree_pop()
+
+
+def _concern_headline(
+    row: BoardConcern, subject: str, glyph_width: float, people: tuple[float, float]
+) -> bool:
+    """
+    The cells of a concern's line. Returns whether the subject had to be cut to fit.
+    """
+    gap = _gap()
+    imgui.same_line()
+    x = imgui.get_cursor_pos_x()
+    glyph, role = concern_glyph(row)
+    imgui.text_colored(getattr(P, role).vec4, glyph)
+    x += glyph_width + gap
+    imgui.same_line(x)
+    right = x + imgui.get_content_region_avail().x
+    who, room = people_cell(*people, right - x)
+    if who is not _People.NOBODY:
+        said = participants_label(row) if who is _People.BOTH else row.sender
+        with typeset.font(Weight.REGULAR):
+            imgui.text_colored(P.text_dim.vec4, said)
+        x += room + gap
+    mark = concern_mark(row)
+    end = right
+    if mark:
+        with typeset.font(Weight.REGULAR):
+            end = right - imgui.calc_text_size(mark).x
+    imgui.same_line(x)
+    whole = "" if who is _People.BOTH else f"{participants_label(row)}  {subject}"
+    ink = P.warn if row.incident else P.text
+    cut = _fitted(subject, (end - gap if mark else end) - x, whole=whole, colour=ink)
+    if mark:
+        imgui.same_line(end)
+        typeset.label(
+            mark, weight=Weight.REGULAR, colour=P.warn if row.incident else getattr(P, role)
+        )
+    return cut
+
+
+def _note(pane: BoardState, key: _Key, body: str, limit: int = _MAX_CONCERN_CHARS) -> None:
+    _authored(pane, key, body, limit, _NOTE_LINES)
+
+
+def _authored(pane: BoardState, key: _Key, text: str, limit: int, lines: int) -> None:
+    """
+    ``_body`` for a text an agent wrote, behind the bar ``author`` draws beside
+    one on the native row: in the same gutter, from the top of the view to its
+    foot. A line without the bar is the pane speaking, under either renderer.
+    """
+    gutter = imgui.get_font_size() * _GUTTER_EMS
+    top = imgui.get_cursor_screen_pos()
+    imgui.indent(gutter)
+    _body(pane, key, text, limit, lines)
+    imgui.unindent(gutter)
+    foot = imgui.get_cursor_screen_pos().y - imgui.get_style().item_spacing.y
+    if foot > top.y:
+        x = top.x + gutter * 0.35
+        imgui.get_window_draw_list().add_line(
+            imgui.ImVec2(x, top.y), imgui.ImVec2(x, foot), P.accent.u32, _BAR_THICKNESS
+        )
+
+
+def _body(pane: BoardState, key: _Key, text: str, limit: int, lines: int) -> None:
+    """
+    The typeset view of one body: bounded to ``limit`` characters, capped at ``lines``.
+
+    The parts are built when the text changes and are otherwise the tuple the view
+    was last given, which is what lets the seam skip comparing them.
+    """
+    held = pane.parts.get(key)
+    if held is None or held[0] != text:
+        held = (text, clipped_parts(text, limit))
+        pane.parts[key] = held
+    pane.shown.add(key)
+    if held[1]:
+        cap = lines * typeset.line_height(mono=False)
+        typeset.document(pane.views, key, held[1], height_cap=cap)
 
 
 # -- pure helpers, testable without a GL context -------------------------------
@@ -1476,10 +1961,139 @@ def concern_label(row: BoardConcern) -> str:
     A concern waiting for a party that is not running says that in place of
     "waiting" (``board.UNDELIVERABLE``): nothing will deliver it.
     """
+    return f"{participants_label(row)}  ({concern_state_label(row)}; {basis_label(row.basis)})"
+
+
+def participants_label(row: BoardConcern) -> str:
+    return f"{row.sender} -> {row.recipient}"
+
+
+def concern_state_label(row: BoardConcern) -> str:
+    """
+    Where a concern got to, as its line says it: a wait for a party that is not
+    running is ``board.UNDELIVERABLE`` and not "waiting".
+    """
     state = UNDELIVERABLE if row.undeliverable else _CONCERN_STATE_LABEL[row.state]
+    return state + ", edited by you" if row.edited else state
+
+
+class _People(enum.Enum):
+    """
+    What a closed concern's line says of who sent it to whom.
+    """
+
+    BOTH = "both"
+    SENDER = "sender"
+    NOBODY = "nobody"
+
+
+def people_cell(both: float, sender: float, line: float) -> tuple[_People, float]:
+    """
+    What the participants' column holds on a line ``line`` pixels wide, and its width.
+
+    ``both`` and ``sender`` are the widths of the widest "sender -> recipient" and
+    of the widest sender among the rows, so the answer is one for the column. The
+    most that fits in ``_PEOPLE_SHARE`` of the line is what is shown, whole: a name
+    cut to make room reads as another name.
+    """
+    room = line * _PEOPLE_SHARE
+    if both <= room:
+        return _People.BOTH, both
+    if sender <= room:
+        return _People.SENDER, sender
+    return _People.NOBODY, 0.0
+
+
+def concern_mark(row: BoardConcern) -> str:
+    """
+    The word a closed concern carries at its right edge, or nothing.
+
+    Nothing for the ordinary case, delivered as written, so that the rows that say
+    something are the ones where something happened: still waiting to be read,
+    withdrawn, or rewritten by the operator on its way through -- and first, one
+    its sender marked an incident (``board.incident_marker``).
+    """
+    parts = [incident_marker(True).strip().lower()] if row.incident else []
+    if row.state is not ConcernState.DELIVERED:
+        parts.append(UNDELIVERABLE if row.undeliverable else _CONCERN_STATE_LABEL[row.state])
     if row.edited:
-        state += ", edited by you"
-    return f"{row.sender} -> {row.recipient}  ({state}; {basis_label(row.basis)})"
+        parts.append("edited")
+    return ", ".join(parts)
+
+
+_TASK_DONE = (fa.ICON_FA_CHECK, "ok")
+_TASK_HELD = (fa.ICON_FA_GEARS, "state_running")
+_TASK_OPEN = (fa.ICON_FA_CIRCLE, "text_dim")
+_TASK_WAITING = (fa.ICON_FA_LOCK, "text_dim")
+_TASK_STUCK = (fa.ICON_FA_TRIANGLE_EXCLAMATION, "warn")
+_TASK_GLYPHS = tuple(
+    glyph for glyph, _ in (_TASK_DONE, _TASK_HELD, _TASK_OPEN, _TASK_WAITING, _TASK_STUCK)
+)
+
+_CONCERN_GLYPH: dict[ConcernState, tuple[str, str]] = {
+    ConcernState.POSTED: (fa.ICON_FA_CLOCK, "accent"),
+    ConcernState.DELIVERED: (fa.ICON_FA_CHECK, "text_dim"),
+    ConcernState.WITHDRAWN: (fa.ICON_FA_BAN, "text_dim"),
+}
+_CONCERN_GLYPHS = tuple(glyph for glyph, _ in _CONCERN_GLYPH.values())
+
+
+def task_glyph(row: BoardTask) -> tuple[str, str]:
+    """
+    A task's state as a glyph and the palette role it is inked in.
+
+    Five glyphs for three states, because the two conditions nothing clears are
+    derived and are the ones worth seeing down a column: a claim whose owner has
+    stopped and a wait on a task nobody declared share the warning triangle. A
+    pending row that is merely waiting is a lock, one that can be claimed a dot.
+    The word beside the glyph is still the stored state.
+    """
+    if row.state is TaskState.COMPLETED:
+        return _TASK_DONE
+    if row.owner_gone or row.missing:
+        return _TASK_STUCK
+    if row.state is TaskState.CLAIMED:
+        return _TASK_HELD
+    return _TASK_WAITING if row.blocked_on else _TASK_OPEN
+
+
+def concern_glyph(row: BoardConcern) -> tuple[str, str]:
+    """
+    A concern's state as a glyph and the palette role it is inked in.
+
+    An edited concern takes the accent whatever its state, so the glyph and the
+    word at the far edge of its line are one colour.
+    """
+    glyph, role = _CONCERN_GLYPH[row.state]
+    return glyph, "accent" if row.edited else role
+
+
+def clip_lines(text: str, limit: int) -> tuple[str, int]:
+    """
+    ``clip``, with the cut moved back to the end of a line when there is one near.
+
+    A cut in the middle of a line can land inside a code span or an emphasis and
+    change how everything before it on that line is read. A text that is one long
+    line is cut where the limit falls.
+    """
+    if len(text) <= limit:
+        return text, 0
+    at = text.rfind("\n", limit // 2, limit + 1)
+    if at < 0:
+        at = limit
+    return text[:at], len(text) - at
+
+
+def clipped_parts(text: str, limit: int) -> tuple[Part, ...]:
+    """
+    A body as parts, bounded, with the bound said in the view when it bites.
+    """
+    kept, dropped = clip_lines(text, limit)
+    parts = typeset.prose_parts(kept)
+    if dropped:
+        note = f"... {dropped} more character(s) not shown"
+        parts += (Part(note, Kind.WRAPPED, "text_dim"),)
+    return parts
 
 
 def clip(text: str, limit: int) -> tuple[str, int]:

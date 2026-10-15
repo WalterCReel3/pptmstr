@@ -46,6 +46,7 @@ from pptmstr.model import (
     Snapshot,
     TranscriptPresence,
 )
+from pptmstr.pool import SessionPool
 from pptmstr.settings import Settings
 from pptmstr.store import Store
 from pptmstr.ui import gate_menu, health, inbox, launcher, rail, session_details, session_menu
@@ -759,6 +760,8 @@ def test_the_menu_is_handed_the_functions_the_other_panes_are_handed(
     monkeypatch.setattr(app.imgui, "end_child", lambda: None)
     monkeypatch.setattr(app.imgui, "separator", lambda: None)
     monkeypatch.setattr(app.imgui, "get_content_region_avail", lambda: imgui.ImVec2(400.0, 400.0))
+    # _reviewing reads ImGui's frame count, and there is no context here.
+    monkeypatch.setattr(app.imgui, "get_frame_count", lambda: 1)
     panels = app._panels(state)  # type: ignore[arg-type]
     for name in ("HEALTH", "NEEDS YOU", "SESSION"):
         panels[name]()
@@ -1002,6 +1005,9 @@ class _Fleet:
         self.layouts = _Layouts(shown)
         monkeypatch.setattr(app, "hello_imgui", self.layouts)
         self.state = app.AppState(store=store, bridge=MagicMock(), settings=Settings())
+        # The queue draws only for a host with a pool. An empty one: the sessions
+        # here are the store's, and no action reaches the pool (``_actions``).
+        self.state.pool = SessionPool(self.state.bridge, cap=1)
         self.actions = _actions()
         self.gate: dict[NodeId, Policy | None] = {ROOT: Policy.PERMISSIVE, OTHER: Policy.STRICT}
         monkeypatch.setattr(app, "_card_actions", lambda state: self.actions)
@@ -1106,6 +1112,13 @@ class _Fleet:
             imgui.set_next_window_size(imgui.ImVec2(320.0, 880.0))
             imgui.begin("FLEET")
             self.app._panels(state)["FLEET"]()
+            imgui.end()
+            # The queue, as it is docked beside the fleet: a key approves only a
+            # call a pane that shows parked calls drew whole (``review.withheld``).
+            imgui.set_next_window_pos(imgui.ImVec2(720.0, 0.0))
+            imgui.set_next_window_size(imgui.ImVec2(460.0, 880.0))
+            imgui.begin("NEEDS YOU")
+            self.app._panels(state)["NEEDS YOU"]()
             imgui.end()
             imgui.set_next_window_pos(imgui.ImVec2(400.0, 0.0))
             imgui.set_next_window_size(imgui.ImVec2(300.0, 200.0))

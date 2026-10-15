@@ -695,6 +695,20 @@ def test_no_repository_variable_reaches_a_child(monkeypatch: pytest.MonkeyPatch)
     assert env["LC_ALL"] == "C" and "LANGUAGE" not in env
 
 
+def test_a_git_child_is_given_the_environment_as_it_stands_when_it_starts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    The entry point takes the library's variables back out of ``os.environ``
+    (``pairing.release``) after this module is imported, so what a git child is
+    given is read at each start.
+    """
+    monkeypatch.setenv("IMTYPESET_PROBE", "set")
+    assert worktree._child_env()["IMTYPESET_PROBE"] == "set"
+    monkeypatch.delenv("IMTYPESET_PROBE")
+    assert "IMTYPESET_PROBE" not in worktree._child_env()
+
+
 def test_an_inherited_index_file_does_not_become_the_new_worktrees_index(
     repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

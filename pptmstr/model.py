@@ -22,7 +22,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, ClassVar
 
-from .approval import Policy
+from .approval import DiffText, Policy
 from .command import (
     TIMEOUT_CHOICES_S,
     Command,
@@ -324,6 +324,7 @@ class PendingApproval:
     node: NodeId
     tool_name: str
     tool_use_id: str
+    # The call exactly as the agent made it. Not for drawing: see ``args``.
     raw_args: Mapping[str, Any]
     summary: str
     # ``time.monotonic()``, never ``time.time()``. This is the ``since`` an
@@ -338,6 +339,39 @@ class PendingApproval:
     # Unified diff for file-mutating tools; None when the tool has no diff to show
     # (Bash, network calls) and the summary carries the whole story.
     diff: str | None = None
+    # The before/after texts ``diff`` was rendered from; None exactly when the tool
+    # has nothing diff-shaped. Both are carried although one follows from the other:
+    # ``diff`` is ``approval.render_texts`` of this, and deriving it on read would put
+    # ``difflib`` over a whole file on the frame path for as long as the call is
+    # parked. Built from one ``approval.diff_texts`` call at the construction site,
+    # so the two cannot describe different reads of the file.
+    #
+    # Holds the file's whole text, twice for a whole-file Edit, in every snapshot
+    # until the approval settles -- about what ``diff`` already costs for a Write
+    # that replaces a file, and more than it for a one-line Edit to a large one. In
+    # memory only: nothing persists a ``PendingApproval``.
+    texts: tuple[DiffText, ...] | None = None
+    # ``raw_args`` as a pane may draw them (``drawable``), where that is another
+    # mapping; None where the arguments are drawable as they are, which is nearly
+    # always. Read through ``args``. Set by the reducer when the call enters the
+    # store, and held rather than derived on read because the panes key their views
+    # on the identity of what they are handed: a derivation per frame would be a
+    # new mapping per frame for exactly the calls that have one.
+    shown_args: Mapping[str, Any] | None = None
+
+    @property
+    def args(self) -> Mapping[str, Any]:
+        """
+        The arguments for anything that draws, measures or copies them as text.
+
+        ``raw_args`` is the call exactly as the agent made it, and can hold what no
+        text call takes: a lone surrogate raises in every one of ImGui's, and a NUL
+        ends the string there. It is read where the call is *acted on* -- the
+        editor's draft, which approve sends back to the tool -- and nowhere a
+        string is drawn. Every other record field that holds session text is
+        drawable as stored.
+        """
+        return self.raw_args if self.shown_args is None else self.shown_args
 
 
 class ObligationKind(enum.Enum):
@@ -2430,7 +2464,7 @@ class Unplaced(enum.Enum):
     """
     Why something a board log holds is not in the store as the log has it.
 
-    The first five are about one task or concern, and everything else the log
+    The first six are about one task or concern, and everything else the log
     held was placed around it. The last three are a restore that placed nothing:
     the store already had a board for the session and it was not the log's.
     """
@@ -2447,6 +2481,10 @@ class Unplaced(enum.Enum):
     # that has neither.
     INCOHERENT = "no step of the store produces it"
     WOULD_CYCLE = "its dependencies would close a cycle"
+    # It holds a NUL or a lone surrogate, which the board a log is written from
+    # never does: the store writes both out. The log was edited, or written by
+    # something that was not this store, and its text is not drawn from.
+    UNDRAWABLE = "it holds a NUL or a lone surrogate, which no board pptmstr logs holds"
     # The board handed over names the id more than once; the first was taken.
     REPEATED = "named more than once"
     # The store holds it for this session and holds it differently.

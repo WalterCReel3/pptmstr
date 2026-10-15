@@ -190,8 +190,8 @@ def test_the_rest_is_folded_by_default_and_its_line_counts_each_slot() -> None:
     """
     snap, root = board_scenario()
     whole = digest(snap, root[0])
-    assert (len(whole.changed), len(whole.waiting), len(whole.unverified)) == (12, 2, 9)
-    assert digest_pane.rest_label(whole) == "12 changes · 2 waiting · 9 unverified"
+    assert (len(whole.changed), len(whole.waiting), len(whole.unverified)) == (17, 5, 15)
+    assert digest_pane.rest_label(whole) == "17 changes · 5 waiting · 15 unverified"
     one = dataclasses.replace(whole, changed=whole.changed[:1], waiting=(), unverified=())
     assert digest_pane.rest_label(one) == "1 change · 0 waiting · 0 unverified"
     assert digest_pane.rest_id("a") != digest_pane.rest_id("b")
@@ -595,8 +595,10 @@ def test_no_line_of_the_pane_carries_a_break_or_a_nul_from_a_one_line_field(
         if line.quoted and line not in carrying:
             continue
         assert len(line.text.splitlines()) <= 1 and "\x00" not in line.text, line
-    # Not dropped: what followed the NUL is still on the line.
-    assert all(f"end{board_pane.NUL_SHOWN}cut" in line.text for line in carrying)
+    # Not dropped: what followed the NUL is still on the line. The store holds a
+    # session's text in its drawable form (``store._drawable``), so the NUL is
+    # written out there, before any pane is handed it.
+    assert all("end\\u0000cut" in line.text for line in carrying)
 
 
 def test_a_long_question_is_cut_to_the_row_and_marked_cut(monkeypatch) -> None:

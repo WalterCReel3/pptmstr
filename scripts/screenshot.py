@@ -7,6 +7,14 @@ immediate-mode UI is the only way to check that a change did what it claimed.
 It runs the same code paths as a normal launch; it only adds a frame-count exit
 and a glReadPixels.
 
+The grab reads the back buffer in `before_swap`, which is the one moment its
+contents are specified: the frame has been rendered into it and it has not yet
+been exchanged. After the swap the back buffer is undefined, and the front
+buffer is only readable where the window system keeps one for the client --
+Xvfb with Mesa's software rasteriser returns it all black.
+
+With no reachable display, `scripts/xvfb_shot.sh` runs this on an Xvfb.
+
 ``--scenario`` reaches the states a bare ``--fake`` run never shows: the launcher
 modal and an opened board. A scenario is a generator advanced once per frame. It
 moves the application by the route an operator's input takes -- the launcher's own
@@ -135,7 +143,7 @@ def _starts_a_session(argv: list[str]) -> bool:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--out", type=Path, default=ROOT / "shot.png")
+    ap.add_argument("--out", type=Path, default=ROOT / "shots" / "shot.png")
     ap.add_argument("--frames", type=int, default=120)
     ap.add_argument("--focus", default=None, help="dockable window to bring to front")
     ap.add_argument("--scenario", choices=sorted(SCENARIOS), default=None)
@@ -143,6 +151,8 @@ def main() -> int:
     ap.add_argument("--base", type=Path, default=None, help="where a scenario builds fixtures")
     ap.add_argument("--argv", nargs=argparse.REMAINDER, default=[])
     args = ap.parse_args()
+    if args.frames < 1:
+        ap.error("--frames must be at least 1")
     if args.scenario and (args.out_dir is None):
         ap.error("--scenario needs --out-dir")
     argv = args.argv or ["--fake"]
@@ -157,7 +167,23 @@ def main() -> int:
     run = _install(args.scenario, args.out_dir, args.base) if args.scenario else None
 
     def patched_run(runner: object, *rest: object) -> object:
+        user_before = runner.callbacks.before_swap  # type: ignore[attr-defined]
         user_after = runner.callbacks.after_swap  # type: ignore[attr-defined]
+
+        def before_swap() -> None:
+            if user_before:
+                user_before()
+            # The frame is rendered and still in the back buffer. A scenario's shot
+            # was named while this frame was drawn, so it is this frame.
+            if run is not None:
+                if run.shot is not None:
+                    _grab(args.out_dir / f"{run.shot}.png")
+                    run.shot = None
+                return
+            # `counter` is the number of frames already swapped, so this is the
+            # `--frames`-th frame.
+            if counter["n"] == args.frames - 1:
+                _grab(args.out)
 
         def after_swap() -> None:
             if user_after:
@@ -166,16 +192,13 @@ def main() -> int:
             if args.focus and counter["n"] == 2:
                 hello_imgui.get_runner_params().docking_params.focus_dockable_window(args.focus)
             if run is not None:
-                if run.shot is not None:
-                    _grab(args.out_dir / f"{run.shot}.png")
-                    run.shot = None
                 if run.done or time.monotonic() > run.deadline:
                     hello_imgui.get_runner_params().app_shall_exit = True
                 return
             if counter["n"] == args.frames:
-                _grab(args.out)
                 hello_imgui.get_runner_params().app_shall_exit = True
 
+        runner.callbacks.before_swap = before_swap  # type: ignore[attr-defined]
         runner.callbacks.after_swap = after_swap  # type: ignore[attr-defined]
         # Idling would make the frame count take wall-clock time proportional to the
         # idle rate, and a screenshot run has no operator to wake it.
@@ -207,23 +230,16 @@ def _grab(out: Path) -> None:
     height = int(io.display_size.y * io.display_framebuffer_scale.y)
 
     GL.glPixelStorei(GL.GL_PACK_ALIGNMENT, 1)
-    # This runs after the swap, so the frame is in the front buffer -- except under
-    # Xvfb with Mesa's software rasteriser, where the front buffer reads back as all
-    # zero and the back buffer still holds what was just presented. A frame of this
-    # application is never all zero, so that reading is what picks the other buffer.
-    data = b""
-    for buffer in (GL.GL_FRONT, GL.GL_BACK):
-        GL.glReadBuffer(buffer)
-        data = GL.glReadPixels(0, 0, width, height, GL.GL_RGB, GL.GL_UNSIGNED_BYTE)
-        if not isinstance(data, bytes):
-            data = bytes(data)
-        if any(data):
-            break
+    GL.glReadBuffer(GL.GL_BACK)
+    data = GL.glReadPixels(0, 0, width, height, GL.GL_RGB, GL.GL_UNSIGNED_BYTE)
+    if not isinstance(data, bytes):
+        data = bytes(data)
 
     stride = width * 3
     # OpenGL's origin is bottom-left and PNG's is top-left, so the rows come out
     # upside down unless reversed here.
     rows = [data[y * stride : (y + 1) * stride] for y in range(height - 1, -1, -1)]
+    out.parent.mkdir(parents=True, exist_ok=True)
     write_png(out, width, height, rows)
     print(f"wrote {out} ({width}x{height})")
 
@@ -728,7 +744,7 @@ def _board(state: Any, fixtures: Path) -> Steps:
 
     finish(
         Task(
-            id="t6",
+            id="t12",
             title="move the checksum beside the parser",
             detail=(
                 "The parser validates as it reads, so it cannot be reused on a record "
@@ -752,12 +768,12 @@ def _board(state: Any, fixtures: Path) -> Steps:
         ),
     )
     finish(
-        Task(id="t7", title="pin the column table", declared_at=7.0, basis=Basis.READ),
+        Task(id="t13", title="pin the column table", declared_at=7.0, basis=Basis.READ),
         result="The offsets are asserted against the format document, field by field.",
         not_run="",
     )
     finish(
-        Task(id="t8", title="reject a short line", declared_at=8.0),
+        Task(id="t14", title="reject a short line", declared_at=8.0),
         result="A 68-character line is reported with its line number; 3 new tests pass.",
         basis=Basis.RUN,
     )
@@ -769,13 +785,13 @@ def _board(state: Any, fixtures: Path) -> Steps:
                 id="shot-c1",
                 sender=builder,
                 recipient=root,
-                subject="tests/test_parse.py was written outside t8's declared files",
+                subject="tests/test_parse.py was written outside t14's declared files",
                 body=(
-                    "t8 declares tle/parse.py only. The three new tests went into "
+                    "t14 declares tle/parse.py only. The three new tests went into "
                     "tests/test_parse.py, which t3 owns and nobody holds."
                 ),
                 posted_at=time.monotonic(),
-                task_id="t8",
+                task_id="t14",
                 basis=Basis.RUN,
                 incident=True,
             ),
@@ -785,7 +801,7 @@ def _board(state: Any, fixtures: Path) -> Steps:
         "the added rows to finish",
         lambda: all(
             state.frame_snap.tasks[t].state is TaskState.COMPLETED
-            for t in ("t6", "t7", "t8", "t10")
+            for t in ("t12", "t13", "t14", "t10")
             if t in state.frame_snap.tasks
         )
         and "t10" in state.frame_snap.tasks,
@@ -841,7 +857,7 @@ def _board(state: Any, fixtures: Path) -> Steps:
 
     def opened(*labels: str) -> Steps:
         pane = _window("BOARD/##board")
-        for label in ("t1", "t2", "t5", "t6", "t7", "t8", "t10", "t11"):
+        for label in ("t1", "t2", "t5", "t6", "t7", "t8", "t10", "t11", "t12", "t13", "t14"):
             _set_open(pane, f"###{label}", label in labels)
         yield from _frames()
 
@@ -849,15 +865,15 @@ def _board(state: Any, fixtures: Path) -> Steps:
     yield from _pages(_window("BOARD/##board"), "40-board-triage-every-row-closed")
     yield from digest("41-digest-triage")
     yield from _click_taken(state, show)
-    yield from opened("t1", "t6")
-    yield from _pages(_window("BOARD/##board"), "42-board-triage-t1-t6-open")
-    yield from opened("t7", "t8", "t10")
-    yield from _pages(_window("BOARD/##board"), "43-board-triage-t7-t8-t10-open")
+    yield from opened("t1", "t12")
+    yield from _pages(_window("BOARD/##board"), "42-board-triage-t1-t12-open")
+    yield from opened("t13", "t14", "t10")
+    yield from _pages(_window("BOARD/##board"), "43-board-triage-t13-t14-t10-open")
     yield from opened("t2")
     yield "44-board-triage-t2-open-with-its-concern"
-    state.board.editing = "t6"
-    yield from opened("t6")
-    yield "45-board-triage-t6-amend-editor"
+    state.board.editing = "t12"
+    yield from opened("t12")
+    yield "45-board-triage-t12-amend-editor"
     state.board.editing = None
 
     yield from opened()
@@ -865,8 +881,8 @@ def _board(state: Any, fixtures: Path) -> Steps:
     yield from _frames()
     yield from show_board()
     yield from _pages(_window("BOARD/##board"), "46-board-focus-every-row-closed")
-    yield from opened("t6", "t7")
-    yield from _pages(_window("BOARD/##board"), "47-board-focus-t6-t7-open")
+    yield from opened("t12", "t13")
+    yield from _pages(_window("BOARD/##board"), "47-board-focus-t12-t13-open")
     yield from digest("48-digest-focus")
 
     from pptmstr.ui import digest_pane

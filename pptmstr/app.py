@@ -20,7 +20,7 @@ import time
 import traceback
 from collections.abc import Callable, Iterable
 from collections.abc import Set as AbstractSet
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import assert_never
 
@@ -34,6 +34,7 @@ from . import (
     cli_version,
     commandfile,
     commandrun,
+    drawable,
     effects,
     fleetsync,
     layout_ini,
@@ -45,6 +46,7 @@ from . import (
 )
 from . import brief as brief_mod
 from . import settings as settings_mod
+from . import version as version_mod
 from .approval import Policy, requires_containment
 from .bridge import Bridge
 from .command import (
@@ -105,7 +107,9 @@ from .ui import (
     review,
     session_details,
     session_menu,
+    settings_dialog,
     transcript_pane,
+    typeset,
 )
 from .ui import focus as focus_mod
 from .ui.widgets import flat_line, format_elapsed
@@ -850,6 +854,9 @@ class AppState:
     # said once. See ``_record_commands``.
     command_observer_failed: str | None = None
     launcher: launcher.LauncherState = field(default_factory=launcher.LauncherState)
+    settings_dialog: settings_dialog.DialogState = field(
+        default_factory=settings_dialog.DialogState
+    )
     # Every session's resume form, and which one is up. Its own modal and not
     # the launcher's: see ``ui/resume_form``.
     resume: resume_form.ResumeForms = field(default_factory=resume_form.ResumeForms)
@@ -1373,6 +1380,10 @@ def begin_frame(state: AppState) -> None:
     state.frame_wall = time.time()
 
     _apply_theme_if_dirty(state)
+    # Between frames: the only place the atlas is added to, and the only moment
+    # ImGui's font size is the UI font's and not one a pane pushed.
+    typeset.pre_frame()
+    _keep_baked_sizes()
     if state.pending_layout is not None:
         hello_imgui.switch_layout(state.pending_layout)
         state.pending_layout = None
@@ -1430,6 +1441,26 @@ def _handle_keys(state: AppState) -> None:
     _handle_layout_keys(state)
 
 
+def _keep_baked_sizes() -> None:
+    """
+    Keep every font size ImGui has rasterised from being discarded and moved
+    (``theme.keep_baked_sizes`` says why), after the seam's turn: a change of
+    family or of size is known by then, and is what lets go of the old sizes.
+
+    Whatever it raises is logged once and the frame goes on. This runs ahead of
+    the intents, and a frame that applies none is worse than one whose glyphs
+    may come out at the wrong size.
+    """
+    try:
+        theme.keep_baked_sizes(typeset.gate.epoch())
+    except Exception as exc:
+        detail = f"{type(exc).__name__}: {exc}"
+        if _PANEL_ERRORS.get("baked sizes") != detail:
+            _PANEL_ERRORS["baked sizes"] = detail
+            LOG.error("ui", f"baked sizes: {detail}")
+            LOG.debug("ui", traceback.format_exc())
+
+
 # Opens the focused card's menu. A bare letter, like every other key that acts on
 # what the cursor is on, and one that ``review.SHORTCUTS`` and the layout keys do
 # not use.
@@ -1456,12 +1487,13 @@ def _handle_card_key(state: AppState) -> None:
 
 def _modal_up(state: AppState) -> bool:
     """
-    Whether one of the application's own forms is up: New Task or the resume
-    form. Each is a modal whose focus can sit on a combo, where the keyboard is
-    not captured and a bare key would otherwise reach the frame as well (see
-    ``_handle_layout_keys``). Last frame's value, for the reason given there.
+    Whether one of the application's own forms is up: New Task, the resume
+    form or the settings dialog. Each is a modal whose focus can sit on a combo,
+    where the keyboard is not captured and a bare key would otherwise reach the
+    frame as well (see ``_handle_layout_keys``). Last frame's value, for the
+    reason given there.
     """
-    return state.launcher.is_open or state.resume.is_open
+    return state.launcher.is_open or state.resume.is_open or state.settings_dialog.is_open
 
 
 def _handle_layout_keys(state: AppState) -> None:
@@ -1474,14 +1506,23 @@ def _handle_layout_keys(state: AppState) -> None:
     whole two-mode design has to avoid, and an operator pressing Esc over an open
     argument editor means the editor.
 
-    The launcher modal wins over both. ``want_capture_keyboard`` covers the usual
-    case -- its task box has the keyboard -- but not a modal whose focus sits on the
-    model combo, where Esc would otherwise dismiss the modal *and* change layout in
-    the same frame. ``is_open`` here is last frame's value, which is the one that
-    matches the frame the operator was looking at when they pressed the key.
+    A modal wins over both: any of ``_modal_up``'s.
+    ``want_capture_keyboard`` covers the usual case -- the launcher's task box has
+    the keyboard -- but not a modal whose focus sits on a combo, where Esc would
+    otherwise dismiss the modal *and* change layout in the same frame. ``is_open``
+    here is last frame's value, which is the one that matches the frame the
+    operator was looking at when they pressed the key.
+
+    A chord is not one of these keys. Ctrl+Tab is ImGui's own window switcher and
+    Ctrl+Enter sends a prompt; neither captures the keyboard while the mouse is over
+    a typeset view, which submits no item, so with only the capture guard both would
+    also change the layout. The same rule as ``review.handle_keys``.
     """
     snap = state.frame_snap
-    if snap is None or _modal_up(state) or imgui.get_io().want_capture_keyboard:
+    io = imgui.get_io()
+    if snap is None or _modal_up(state) or io.want_capture_keyboard:
+        return
+    if io.key_ctrl or io.key_alt or io.key_super:
         return
     current = hello_imgui.current_layout_name()
     if imgui.is_key_pressed(imgui.Key.tab) and current != TRIAGE:
@@ -1513,13 +1554,20 @@ def guarded(name: str, draw: Callable[[], None]) -> Callable[[], None]:
     and with recovery asserts on that aborts the process -- trading one crash for
     another. With recovery on, ImGui unwinds the stack itself and logs what was
     left open. Verified before relying on it.
+
+    What was raised is drawn through ``drawable``: an exception can quote the very
+    text a text call refused, and this is the one place a second raise has nothing
+    above it to catch it.
+
+    A pane that shows parked calls says more than that it failed (``_reviewing``):
+    what it had on screen is not known, so nothing is approved until it draws.
     """
 
     def wrapper() -> None:
         try:
             draw()
         except Exception as exc:
-            detail = f"{type(exc).__name__}: {exc}"
+            detail = drawable.text(f"{type(exc).__name__}: {exc}")
             if _PANEL_ERRORS.get(name) != detail:
                 _PANEL_ERRORS[name] = detail
                 LOG.error("ui", f"{name}: {detail}")
@@ -1527,6 +1575,47 @@ def guarded(name: str, draw: Callable[[], None]) -> Callable[[], None]:
             imgui.text_colored(P.danger.vec4, f"{name} failed to draw")
             imgui.text_wrapped(detail)
             imgui.text_disabled("the rest of the app, and every running agent, is unaffected")
+            if name in _REVIEW_PANES:
+                imgui.push_text_wrap_pos(0.0)
+                imgui.text_colored(P.warn.vec4, _APPROVE_HELD)
+                imgui.pop_text_wrap_pos()
+
+    return wrapper
+
+
+# The panes that show a parked call, by the label each is docked under, and the
+# name each reports to the review state by. A draw of one of these that raises
+# holds every approve (``review.withheld``).
+_REVIEW_PANES = {"NEEDS YOU": review.INBOX, "DETAIL": review.DETAIL}
+
+_APPROVE_HELD = (
+    "nothing is approved while this pane cannot draw: a, A and the approve buttons "
+    "send nothing. r rejects the call under the cursor at once when it is the queue "
+    "that cannot draw, and closing a session ends its parked calls."
+)
+
+
+def _reviewing(state: AppState, label: str, draw: Callable[[], None]) -> Callable[[], None]:
+    """
+    A pane that shows parked calls, telling the review state how each draw of it
+    came out, and raising what the pane raised for ``guarded`` to say.
+
+    Here, around the pane's own function, and not in ``guarded``: that one wraps
+    every callback the runner has and holds no state, and this is the wiring of
+    two particular panes to the state that decides an approve. A draw that returns
+    is one that reached its end, which is all "whole" means here -- how much of a
+    body it set is the pane's own report (``ReviewState.body_shown``).
+    """
+    pane = _REVIEW_PANES[label]
+
+    def wrapper() -> None:
+        frame = int(imgui.get_frame_count())
+        try:
+            draw()
+        except Exception:
+            state.review.pane_drew(pane, frame, False)
+            raise
+        state.review.pane_drew(pane, frame, True)
 
     return wrapper
 
@@ -2451,9 +2540,9 @@ def _reap_launches(state: AppState) -> None:
 def _form_up(state: AppState, but: str | None = None) -> bool:
     """
     Whether one of the application's modals other than the "Not done" notice is
-    up or has been asked for: New Task, a resume form, Details, or a card
-    menu's question. ``but`` names a session whose own resume form does not
-    count.
+    up or has been asked for: New Task, a resume form, Details, a card menu's
+    question, or the settings dialog. ``but`` names a session whose own resume
+    form does not count.
 
     **What must not be opened over.** Every one of these is a popup opened at
     the root, and Dear ImGui holds one popup per level: opening a second closes
@@ -2468,6 +2557,7 @@ def _form_up(state: AppState, but: str | None = None) -> bool:
         or cards.details.node is not None
         or cards.confirming is not None
         or cards.gating is not None
+        or state.settings_dialog.is_open
     )
 
 
@@ -3151,28 +3241,166 @@ def _menus(state: AppState) -> None:
         clicked, _ = imgui.menu_item("Wrap composers", "", state.settings.wrap_inputs)
         if clicked:
             _switch_wrap(state, not state.settings.wrap_inputs)
+        imgui.separator()
+        # Offered only while the faces are there to draw with, or will be once it
+        # is switched on: a ticked entry that changes nothing on screen would read
+        # as a broken switch. Why it is not offered, or what switching it on will
+        # cost, is said under it rather than left to be guessed.
+        can_typeset = typeset.available()
+        offered = can_typeset or typeset.obtainable()
+        clicked, _ = imgui.menu_item(
+            "Typeset text", "", state.settings.typeset and can_typeset, offered
+        )
+        if clicked:
+            _switch_typeset(state, typeset_on=not state.settings.typeset)
+        # One sentence: why text is not typeset, or, where it is, who draws a
+        # diff and by what measurement of the library that is running.
+        reason = typeset.unavailable_reason() or typeset.diff_renderer()
+        if reason is not None:
+            imgui.text_disabled(f"  {reason}")
+        imgui.separator()
+        # Everything else about text -- the family, a face and a size per role,
+        # a switch per pane -- is in the dialog, with the rest of what persists.
+        # The two entries above stay because each is one click here.
+        clicked, _ = imgui.menu_item("Settings…", settings_dialog.CHORD_LABEL, False)
+        if clicked:
+            state.settings_dialog.request_open()
         imgui.end_menu()
 
 
-def _switch_theme(state: AppState, name: str) -> None:
-    theme.set_theme(name)
-    state.theme_dirty = True
-    state.settings = state.settings.merged(theme=name)
+_TYPESET_FIELDS = (
+    "typeset",
+    "typeset_family",
+    "typeset_roles",
+    "typeset_panes",
+    "typeset_scale",
+)
+"""
+The settings the seam is told. A change to any of them is one ``configure``.
+"""
+
+
+def _apply_settings(state: AppState, new: settings_mod.Settings) -> None:
+    """
+    Make ``new`` the settings: save them, and carry out what the difference means.
+
+    **The one place a setting changes after start-up.** The menu and the settings
+    dialog both end here, so a setting cannot be saved by one of them and applied
+    by the other. What has to happen is read off the difference between the two
+    values rather than passed in by the caller: a caller that had to say "and tell
+    the seam" is a caller that can forget to, and the setting would then hold until
+    restart, which for typeset text makes the comparison the switch exists for a
+    comparison of two launches.
+
+    Saved at the point of mutation rather than on exit: a preference that survives
+    only a clean shutdown is one that silently resets after the first crash.
+
+    Settings equal to the ones in force do nothing at all -- no write, no
+    ``configure`` -- which is what makes a control safe to draw every frame.
+    """
+    old = state.settings
+    if new == old:
+        return
+    state.settings = new
     _save(state)
-    LOG.info("theme", f"switched to {name}")
+    moved = [
+        each.name for each in fields(new) if getattr(new, each.name) != getattr(old, each.name)
+    ]
+    if "theme" in moved:
+        theme.set_theme(new.theme)
+        state.theme_dirty = True
+    if any(name in moved for name in _TYPESET_FIELDS):
+        _configure_typeset(new)
+    if "concurrency_cap" in moved:
+        cap = new.concurrency_cap
+
+        async def resize(pool: SessionPool) -> None:
+            # On the loop, where every other mutation of the pool happens. Raising
+            # it starts queued sessions; lowering it stops nothing that is running.
+            pool.set_cap(cap)
+
+        _session_action(state, resize)
+    if "fps_idle" in moved and state.runner is not None:
+        state.runner.fps_idling.fps_idle = new.fps_idle
+    if "context_mode" in moved:
+        # The pane's own buttons choose for the session and would otherwise hide
+        # this change until the next launch.
+        state.transcripts.mode = None
+    LOG.info("settings", _described(new, moved))
+
+
+def _described(settings: settings_mod.Settings, moved: list[str]) -> str:
+    """
+    One log line for a change: each field that moved and what it is now, with the
+    structured ones summarised rather than printed.
+    """
+    said = []
+    for name in moved:
+        match name:
+            case "typeset_roles":
+                said.append(f"{len(settings.typeset_roles)} role(s) set apart")
+            case "typeset_panes":
+                off = ", ".join(pane for pane, on in settings.typeset_panes if not on)
+                said.append(f"panes off: {off or 'none'}")
+            case "admitted_connectors":
+                said.append(f"{len(settings.admitted_connectors)} connector(s)")
+            case _:
+                said.append(f"{name} {getattr(settings, name)!r}")
+    return ", ".join(said)
+
+
+def _switch_theme(state: AppState, name: str) -> None:
+    _apply_settings(state, state.settings.merged(theme=name))
 
 
 def _switch_wrap(state: AppState, wrap: bool) -> None:
-    """
-    Toggle composer wrapping, persisting immediately.
+    _apply_settings(state, state.settings.merged(wrap_inputs=wrap))
 
-    Saved at the point of mutation rather than on exit, as the theme is: there is no
-    ``before_exit`` callback registered, and a preference that survives only a clean
-    shutdown is one that silently resets after the first crash.
+
+def _switch_typeset(
+    state: AppState,
+    *,
+    typeset_on: bool | None = None,
+    scale: float | None = None,
+    family: str | None = None,
+    role: tuple[str, str | None, int | None] | None = None,
+    pane: tuple[str, bool] | None = None,
+) -> None:
     """
-    state.settings = state.settings.merged(wrap_inputs=wrap)
-    _save(state)
-    LOG.info("text", f"composer wrapping {'on' if wrap else 'off'}")
+    Change how text is set: the menu's switch, and what a test or a script reaches
+    for. ``_apply_settings`` saves it and tells the seam in the same breath.
+
+    ``role`` is a role's name with the slot and the step to give it, either left
+    ``None`` to keep what it has; ``pane`` is a pane's name and whether it is on.
+    """
+    changed = state.settings
+    if typeset_on is not None:
+        changed = changed.merged(typeset=typeset_on)
+    if scale is not None:
+        changed = changed.merged(typeset_scale=scale)
+    if family is not None:
+        changed = changed.merged(typeset_family=family)
+    if role is not None:
+        changed = changed.with_role(role[0], slot=role[1], step=role[2])
+    if pane is not None:
+        changed = changed.with_pane(*pane)
+    _apply_settings(state, changed)
+
+
+def _configure_typeset(settings: settings_mod.Settings) -> None:
+    """
+    Hand the seam everything the settings say about typeset text. The settings keep
+    names; the seam owns what they mean and drops one it does not know.
+    """
+    typeset.configure(
+        typeset=settings.typeset,
+        scale=settings.typeset_scale,
+        proportional=settings.typeset_family,
+        roles=typeset.roles_from(
+            (each.role, each.slot, each.step) for each in settings.typeset_roles
+        ),
+        panes=typeset.panes_from(settings.typeset_panes),
+    )
 
 
 def _switch_hide_ended(state: AppState, hide: bool) -> None:
@@ -3181,9 +3409,7 @@ def _switch_hide_ended(state: AppState, hide: bool) -> None:
     immediately as ``_switch_wrap`` does. Which ones are hidden is the fleet
     pane's to decide (``ui/fleet_view``); nothing leaves the store.
     """
-    state.settings = state.settings.merged(hide_ended_subagents=hide)
-    _save(state)
-    LOG.info("fleet", f"ended sub-agents {'hidden' if hide else 'shown'}")
+    _apply_settings(state, state.settings.merged(hide_ended_subagents=hide))
 
 
 def _save(state: AppState) -> None:
@@ -3469,7 +3695,11 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
         if state.frame_snap is not None:
             node = state.focus.node(state.frame_snap)
             transcript_pane.draw(
-                state.frame_snap, state.transcripts, node, _closed_path(state, node)
+                state.frame_snap,
+                state.transcripts,
+                node,
+                _closed_path(state, node),
+                start_in=transcript_pane.mode_named(state.settings.context_mode),
             )
 
     def detail_pane() -> None:
@@ -3517,7 +3747,11 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
         avail = imgui.get_content_region_avail().y
         if imgui.begin_child("##scrollback", imgui.ImVec2(0, max(avail - 150.0, 80.0))):
             transcript_pane.draw(
-                state.frame_snap, state.transcripts, node, _closed_path(state, node)
+                state.frame_snap,
+                state.transcripts,
+                node,
+                _closed_path(state, node),
+                start_in=transcript_pane.mode_named(state.settings.context_mode),
             )
         imgui.end_child()
         imgui.separator()
@@ -3551,9 +3785,9 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
 
     return {
         "FLEET": rail_pane,
-        "NEEDS YOU": inbox_pane,
+        "NEEDS YOU": _reviewing(state, "NEEDS YOU", inbox_pane),
         "CONTEXT": context_pane,
-        "DETAIL": detail_pane,
+        "DETAIL": _reviewing(state, "DETAIL", detail_pane),
         "BOARD": board_pane_fn,
         "DIGEST": digest_pane_fn,
         "BRIEF": brief_pane_fn,
@@ -3570,9 +3804,22 @@ def _draw_overlays(state: AppState) -> None:
     The launcher lives here rather than in a panel for two reasons: a popup opened
     inside a docked window is scoped to that window, and the shortcut that opens it
     has to be evaluated inside a frame, which rules out ``begin_frame`` where the
-    rest of the key handling lives.
+    rest of the key handling lives. The settings dialog is here for both reasons
+    too, and ahead of the pool check: it needs no pool.
     """
     launcher.handle_shortcut(state.launcher)
+    # Not over another modal (``_form_up``) or the "Not done" notice: two modals
+    # opened from the root replace each other. The dialog itself being up does not
+    # block the chord, which closes it again.
+    settings_dialog.handle_shortcut(
+        state.settings_dialog,
+        blocked=not state.settings_dialog.is_open and (_form_up(state) or bool(state.not_done)),
+    )
+    settings_dialog.draw(
+        state.settings_dialog,
+        state.settings,
+        lambda change: _apply_settings(state, settings_dialog.changed(state.settings, change)),
+    )
     # Ahead of the return for want of a pool: Details needs none.
     _draw_card_overlays(state)
     _draw_not_done(state)
@@ -4519,8 +4766,38 @@ def _ask_window_to_close() -> None:
     hello_imgui.get_runner_params().app_shall_exit = True
 
 
+def _text_overrides(
+    args: argparse.Namespace, loaded: settings_mod.Settings
+) -> settings_mod.Settings:
+    """
+    The command line's say over how text is set, for this run and not saved, as
+    ``_start`` gives it the say over the theme, the idle rate and the cap.
+
+    Apart from ``_start`` because only ``main``'s parser declares these four: a
+    caller of ``_start`` that builds its own command line names none of them.
+    """
+    if args.typeset is not None:
+        loaded = loaded.merged(typeset=args.typeset == "on")
+    if args.prose is not None:
+        loaded = loaded.merged(
+            **settings_mod.legacy_faces("mono" if args.prose == "mono" else "roboto")
+        )
+    if args.faces is not None:
+        loaded = loaded.merged(**settings_mod.legacy_faces(args.faces))
+    if args.text_scale is not None:
+        loaded = loaded.merged(typeset_scale=args.text_scale)
+    return loaded
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="pptmstr - multi-agent orchestrator")
+    # Answered by `pptmstr.__main__` before this module is imported; declared
+    # here so that --help lists it and a caller of this function gets the same.
+    ap.add_argument(
+        "--version",
+        action="store_true",
+        help="print what is running and what the tree pins, open no window, and exit",
+    )
     ap.add_argument("--theme", default=None, help="override the persisted theme")
     ap.add_argument("--fake", action="store_true", help="run the fake driver (no SDK, no cost)")
     ap.add_argument(
@@ -4539,6 +4816,33 @@ def main(argv: list[str] | None = None) -> int:
         help="team shape for --task sessions",
     )
     ap.add_argument("--fps-idle", type=float, default=None)
+    # Like --theme: overrides for this run, not saved. A screenshot run has a
+    # throwaway HOME and reads nobody's settings, so comparing the two renderers
+    # from the command line needs a way to say which one.
+    ap.add_argument(
+        "--typeset",
+        choices=("on", "off"),
+        default=None,
+        help="set text through the layout library, or with the renderers before it",
+    )
+    ap.add_argument(
+        "--prose",
+        choices=("proportional", "mono"),
+        default=None,
+        help="typeset prose proportional, or every role monospace (--faces mono)",
+    )
+    ap.add_argument(
+        "--faces",
+        choices=tuple(settings_mod.LEGACY_FACES),
+        default=None,
+        help="a named set of role choices, as a saved typeset_faces is read; wins over --prose",
+    )
+    ap.add_argument(
+        "--text-scale",
+        type=float,
+        default=None,
+        help="typeset text's size as a multiple of the UI font's",
+    )
     ap.add_argument(
         "--layout",
         default=None,
@@ -4546,9 +4850,13 @@ def main(argv: list[str] | None = None) -> int:
         help=f"start in {TRIAGE} (the queue) or {FOCUS} (one conversation)",
     )
     args = ap.parse_args(argv)
+    if args.version:
+        return version_mod.main()
 
     state = _start(args, settings_mod.read())
+    state.settings = _text_overrides(args, state.settings)
     theme.set_theme(state.settings.theme)
+    _configure_typeset(state.settings)
 
     runner = hello_imgui.RunnerParams()
     runner.app_window_params.window_title = "pptmstr"
@@ -4595,7 +4903,8 @@ def main(argv: list[str] | None = None) -> int:
         # done or parked on the operator. AWAITING_APPROVAL counts as idle, which is
         # I8 showing up as a CPU number rather than a claim.
         snap = state.frame_snap
-        runner.fps_idling.enable_idling = not (snap is not None and snap.any_active)
+        working = snap is not None and snap.any_active
+        runner.fps_idling.enable_idling = not working
 
     runner.callbacks.load_additional_fonts = theme.load_fonts
     runner.callbacks.post_init = post_init
@@ -4605,8 +4914,10 @@ def main(argv: list[str] | None = None) -> int:
     runner.callbacks.show_menus = guarded("menu", lambda: _menus(state))
     runner.callbacks.show_status = guarded("status bar", lambda: _status_bar(state))
     runner.callbacks.post_render_dockable_windows = guarded(
-        "launcher", lambda: _draw_overlays(state)
+        "overlays", lambda: _draw_overlays(state)
     )
+    # The text library's context goes before the ImGui context its fonts are on.
+    runner.callbacks.before_exit = typeset.unload
 
     state.bridge.start()
     # On the loop, not on the frame loop: the frame loop is one of the things being

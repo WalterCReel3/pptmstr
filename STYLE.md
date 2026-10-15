@@ -188,6 +188,35 @@ agent" covered both a misspelled role and a role that simply had not started yet
 one is a spelling problem, the other a timing problem the lead can fix. A worker
 retried the same wrong name because the refusal did not say which it had made.
 
+**A record field that is both drawn and acted on.** A tool argument can hold a lone
+surrogate or a NUL (`json.loads('"\\udc80"')`); every ImGui text call raises on the
+first and stops reading at the second, so one such call took the queue and DETAIL off
+the screen while the batch approve still sent it. Session text is made drawable once,
+where it enters (`drawable`, applied in `store._apply`, `Transcript.append`, the log
+and the session listing), and the store holds the drawable form.
+
+**Text pptmstr runs, reuses, or writes back to its own files is stored as it arrived;
+text is made drawable where it is drawn or sent, never twice.** (The lead's decision,
+2026-10-15.) `drawable.text` is not idempotent — it tells `\u0000` written out from a
+NUL by writing the backslash again — so a field held drawable and then written to a
+file pptmstr reads back gained a layer per resume, and one held drawable and then
+relaunched ran with text nobody typed: a board log restored over the store that wrote
+it was a different board and withheld the whole restore, a fork of a task holding
+`\u0000` launched `\u0000`, and a NUL in a command's output read `\\u0000`. So
+every such field is in `store._VERBATIM`, each with its reason: a parked call's
+arguments, a session's directories, task, team and brief, how a run failed, the
+message a resume opens on, and a break-glass command's texts and output. They are
+drawn and sent only through a helper that takes any `str` — `widgets.author_text`
+and the three built on it, `commandtext.visible` — or a drawable twin
+(`PendingApproval.args`, the failure obligation's `error`). `tests/test_verbatim_drawn.py`
+draws every pane over a session whose verbatim fields hold both characters and reads
+`pptmstr/ui` for an ImGui call handed one raw. What leaves the store drawable and
+comes back — the board log, written from the store's board — is read back as written
+and not escaped again, and a file that holds what no build of pptmstr writes there (a
+NUL or lone surrogate in a board log, or in a command's request or run string) is
+refused with the reason, never drawn. A new field that is acted on goes in that table;
+anything else is drawable by default.
+
 **A channel that duplicates a path the model already has.** The first team run used
 the message bus zero times, because a sub-agent's result already returns to its lead
 through the `Agent` tool. Listing a tool in a prompt does not make it used; saying
