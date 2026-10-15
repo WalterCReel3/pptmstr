@@ -238,6 +238,31 @@ def test_the_end_of_a_literal_line_of_letters_the_code_face_lacks_can_be_reached
     assert view.width >= right or view.content_width >= right
 
 
+def test_a_point_past_the_middle_of_a_literal_line_s_last_character_is_that_line_s_end(
+    seam: Any,
+) -> None:
+    """
+    P44, met by imtypeset's H27: three quarters into the last character of a
+    line answers the caret at that line's end, before its line break, so a
+    press there stays on the line and a drag to it copies no line break.
+    """
+    rows = ["one", "two two", "three", "x", "four four", "five", "last"]
+    cache = typeset.ViewCache()
+    for _ in range(2):
+        frame(seam, lambda: typeset.plain(cache, "k", "\n".join(rows), literal=True))
+    (view,) = cache.views("k")
+    lines = view.set_lines(0, 1)
+    assert len(lines) == len(rows)
+    cell = typeset.face_font("CODE").get_font_baked(16.0).get_char_advance(ord("x"))
+    code = view.native_document
+    answered, expected = [], []
+    for line, row in zip(lines, rows, strict=True):
+        x = line.left + (len(row) - 0.25) * cell
+        answered.append(tuple(code.hit_test((x, (line.top + line.bottom) / 2)).position))
+        expected.append((0, line.start + len(row)))
+    assert answered == expected
+
+
 UNFIT = [
     (Part("x\x1b[31mred\x1b[0m", Kind.LITERAL), "control"),
     (Part("progress\r100%", Kind.LITERAL), "control"),
