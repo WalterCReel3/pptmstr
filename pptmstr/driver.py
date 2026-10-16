@@ -139,6 +139,29 @@ CONTEXT_POLL_S = 20.0
 # frames that reach it are JSON carrying base64, where the two are the same.
 MAX_STREAM_FRAME = 64 * 1024 * 1024
 
+# The CLI's git-status section of the system prompt, switched off for every session
+# (notes/2026-10-15-the-cli-runs-git-in-its-cwd.md). To build that section the CLI
+# runs ``git status`` in its working directory, in its own process, before the first
+# turn and outside any sandbox -- so a tree whose ``.git`` names a session-forged
+# repository has that repository's clean filter run as the operator. Measured on the
+# bundled 2.1.301.
+#
+# The environment variable and not ``includeGitInstructions: false`` through
+# ``--settings``, because of how the CLI reads the two: it consults the variable
+# first and the setting only when the variable is undefined (2.1.301's bundle:
+# ``let e=<env>.CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS; if(e!==void 0) return !e;
+# return <settings>.includeGitInstructions ?? true``). A setting therefore loses to
+# any value of the variable the operator's shell exports, while ``options.env`` is
+# merged over the inherited environment by the transport and so replaces that value.
+# The setting would also have to be spliced into ``sandbox.containment_settings``'s
+# string and would give an uncontained launch a ``--settings`` flag it does not have.
+#
+# What this does not reach: a settings file's own ``env`` block, which the CLI applies
+# to its process environment after launch. Whether that can override a variable the
+# spawning host set is the CLI's to decide, and is measured by
+# ``scripts/probe_cli_git_status.py``'s ``g-pptmstr-vs-settings-env`` arm.
+GIT_STATUS_OFF = {"CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS": "1"}
+
 # How often the post-result read loop wakes to re-examine its sub-agents. A poll
 # interval and nothing else: a tick that finds every sub-agent still alive costs one
 # set comparison and goes back to waiting, so this is short enough to keep the loop
@@ -2436,6 +2459,10 @@ class AgentSession:
             # `if settings_value:` -- and `_unpaired` reads it as none, along with
             # the blank string the transport does pass through.
             settings=self.containment,
+            # On every launch -- new, resumed, forked, contained or not -- and with
+            # nothing else in it (GIT_STATUS_OFF says why this channel). A copy, so
+            # the transport's options cannot reach the module's value.
+            env=dict(GIT_STATUS_OFF),
             #
             # `sandbox` is deliberately absent, and not merely because None is its
             # default. `_build_settings_value` ASSIGNS rather than merges --

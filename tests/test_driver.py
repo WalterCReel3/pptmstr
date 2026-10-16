@@ -1905,10 +1905,13 @@ def test_a_sessions_process_is_given_pptmstrs_environment_and_nothing_of_the_dri
     The SDK starts the CLI with ``os.environ`` under ``options.env``, and nothing
     in ``options.env`` can take a variable away. So what a session's process is
     given is settled where pptmstr's own environment is (``pairing.release``),
-    and holds only while the driver adds none of its own.
+    and holds only while the driver adds nothing of its own but the one switch
+    ``GIT_STATUS_OFF`` names, which carries no value of pptmstr's.
     """
+    from pptmstr.driver import GIT_STATUS_OFF
+
     options = AgentSession(Bridge(), task="t")._options()
-    assert options.env == {}
+    assert options.env == GIT_STATUS_OFF == {"CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS": "1"}
 
 
 def test_a_lone_agent_configures_no_team() -> None:
@@ -5887,3 +5890,152 @@ def test_a_result_whose_is_error_is_unset_is_a_result_not_an_error() -> None:
     entry = transcript.tool_entry("t1")
     assert entry is not None and entry.result is not None and entry.result.is_error is False
     assert transcript.segments()[-1].kind is SegmentKind.TOOL_RESULT
+
+
+# -- the CLI's git-status prompt section, switched off ------------------------------
+#
+# The CLI builds that section by running ``git status`` in its working directory, in
+# its own unsandboxed process, before the first turn
+# (notes/2026-10-15-the-cli-runs-git-in-its-cwd.md). ``driver.GIT_STATUS_OFF`` is the
+# switch. These hold that every shape of launch carries it, that it is the only thing
+# it changes, and that a value the operator's environment exports the other way does
+# not reach the CLI.
+
+_GIT_SWITCH = "CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS"
+_GIT_RESUMED = "11111111-1111-4111-8111-111111111111"
+
+# The options fields each launch set to something other than the SDK's default before
+# the switch existed, read off ``_options()`` on the tree the switch was added to. The
+# switch adds ``env`` to each and nothing else.
+_FIELDS_BEFORE_SWITCH = {
+    "hooks",
+    "include_partial_messages",
+    "max_buffer_size",
+    "mcp_servers",
+    "model",
+    "permission_mode",
+    "stderr",
+    "strict_mcp_config",
+    "thinking",
+}
+
+
+def _git_launches() -> dict[str, tuple[dict[str, Any], set[str]]]:
+    """
+    A fork is a fresh launch of a recorded spec (``app._fork`` -> ``_launch``), so it
+    is the new-session shape with a cwd; it is listed so the claim covers it by name.
+    """
+    from pptmstr.sandbox import containment_settings
+
+    before = _FIELDS_BEFORE_SWITCH
+    return {
+        "new": ({}, before | {"session_id"}),
+        "fork": ({"cwd": "/srv/tree"}, before | {"session_id", "cwd"}),
+        "resume": ({"resume": _GIT_RESUMED}, before | {"resume", "system_prompt"}),
+        "contained": ({"containment": containment_settings()}, before | {"session_id", "settings"}),
+        "contained resume": (
+            {"containment": containment_settings(), "resume": _GIT_RESUMED},
+            before | {"resume", "system_prompt", "settings"},
+        ),
+    }
+
+
+_GIT_LAUNCH_NAMES = ["new", "fork", "resume", "contained", "contained resume"]
+
+
+@pytest.mark.parametrize("launch", _GIT_LAUNCH_NAMES)
+def test_every_launch_carries_the_git_status_switch(launch: str) -> None:
+    kwargs, _ = _git_launches()[launch]
+    assert AgentSession(Bridge(), task="t", **kwargs)._options().env == {_GIT_SWITCH: "1"}
+
+
+@pytest.mark.parametrize("launch", _GIT_LAUNCH_NAMES)
+def test_the_git_status_switch_is_the_only_field_it_adds(launch: str) -> None:
+    import dataclasses
+
+    from claude_agent_sdk import ClaudeAgentOptions
+
+    kwargs, before = _git_launches()[launch]
+    options = AgentSession(Bridge(), task="t", **kwargs)._options()
+    default = ClaudeAgentOptions()
+
+    changed = {
+        f.name
+        for f in dataclasses.fields(options)
+        if getattr(options, f.name) != getattr(default, f.name)
+    }
+    assert changed == before | {"env"}
+
+
+@pytest.mark.parametrize("launch", _GIT_LAUNCH_NAMES)
+def test_the_git_status_switch_leaves_the_argv_as_it_was(launch: str) -> None:
+    """
+    The environment is the switch's whole channel. An uncontained launch in particular
+    still has no ``--settings``: the other switch would have given it one.
+    """
+    import dataclasses
+
+    from claude_agent_sdk import ClaudeAgentOptions
+    from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
+
+    kwargs, _ = _git_launches()[launch]
+    options = AgentSession(Bridge(), task="t", **kwargs)._options()
+
+    def argv(opts: ClaudeAgentOptions) -> list[str]:
+        transport = SubprocessCLITransport("", opts)
+        transport._cli_path = "claude"
+        return transport._build_command()
+
+    assert argv(options) == argv(dataclasses.replace(options, env={}))
+    if "containment" not in kwargs:
+        assert "--settings" not in argv(options)
+
+
+def test_the_git_status_switch_the_options_carry_is_a_copy() -> None:
+    from pptmstr.driver import GIT_STATUS_OFF
+
+    AgentSession(Bridge(), task="t")._options().env[_GIT_SWITCH] = "0"
+    assert GIT_STATUS_OFF == {_GIT_SWITCH: "1"}
+    assert AgentSession(Bridge(), task="t")._options().env == {_GIT_SWITCH: "1"}
+
+
+@pytest.mark.parametrize("exported", ["0", "", "false"])
+def test_the_operators_environment_cannot_switch_git_status_back_on(
+    exported: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Through the transport's real merge rather than by reading it: ``connect`` builds
+    the spawn environment from ``os.environ`` and ``options.env``, and the CLI reads
+    the variable before ``includeGitInstructions``, so what lands here is what decides.
+    The spawn is replaced by a capture that starts nothing.
+    """
+    import dataclasses
+
+    import anyio
+    from claude_agent_sdk import CLIConnectionError
+    from claude_agent_sdk._internal.transport import subprocess_cli
+
+    monkeypatch.setenv(_GIT_SWITCH, exported)
+    monkeypatch.setenv("CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK", "1")
+    seen: dict[str, str] = {}
+
+    class _Spawned(Exception):
+        pass
+
+    async def capture(*_args: Any, env: dict[str, str], **_kwargs: Any) -> Any:
+        seen.update(env)
+        raise _Spawned
+
+    # The transport calls ``anyio.open_process`` through the module, so this is it.
+    monkeypatch.setattr(anyio, "open_process", capture)
+    options = dataclasses.replace(
+        AgentSession(Bridge(), task="t")._options(), cli_path="/nonexistent/claude"
+    )
+
+    # The transport wraps whatever the spawn raised; the cause is checked so that a
+    # failure before the spawn cannot pass for one at it.
+    with pytest.raises(CLIConnectionError) as raised:
+        asyncio.run(subprocess_cli.SubprocessCLITransport("", options).connect())
+    assert isinstance(raised.value.__cause__, _Spawned)
+
+    assert seen[_GIT_SWITCH] == "1"
