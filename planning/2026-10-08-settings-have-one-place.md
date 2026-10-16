@@ -29,6 +29,15 @@ added one setting (§3) and exposed no constant.
 
 `Ctrl+,` or **Text ▸ Settings…** opens it. One screen, no tabs, no Apply, no cancel.
 
+**Amended 2026-10-15:** "one screen, no tabs" no longer holds. The sections are pages
+behind a left-side navigation list, at the operator's request
+([`2026-10-15-ui-rework.md`](2026-10-15-ui-rework.md), "Settings Dialog"). Everything
+else in this record stands: no Apply, no cancel, apply and save on click, a defaults
+button per section, every field either a control or listed read-only. The same day,
+`context_mode` (below) stopped being a control: the render mode is no longer chosen
+(U2 of that record), the field is still loaded and saved so older files round-trip,
+and nothing reads it. Reasoning is a setting, `show_reasoning`, on the Panes page.
+
 | Section | Rows | Field |
 |---|---|---|
 | Appearance | theme; text size | `theme`, `typeset_scale` |

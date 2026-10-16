@@ -147,12 +147,13 @@ class Settings:
     # Typeset text's size as a multiple of the UI font's, which it still follows.
     # The seam clamps it.
     typeset_scale: float = 1.0
-    # Which rendering the context log starts in, by `ui.transcript_pane.RenderMode`
-    # value. Empty is "whatever this build starts in" (`transcript_pane.DEFAULT_MODE`,
-    # which has the measurements behind it), so a build that changes its default
-    # reaches everyone who never chose one. A name this build does not know reads
-    # as empty. The pane's own buttons still choose for the session.
+    # Retired: the context log has no choice of rendering any more (typeset, and
+    # wrapped lines where the seam is off), and nothing decides anything by this.
+    # Still read and written, so a file that names a mode loads and saves as it
+    # was; it goes with the RAW and RICH renderers (`settings_dialog.RETIRED`).
     context_mode: str = ""
+    # Whether the context log and the session pane show the model's reasoning.
+    show_reasoning: bool = True
     # The MCP servers a session may reach, and the whole of them. `driver` passes
     # these alongside the in-process bus under `strict_mcp_config=True`, so a server
     # the operator has not named here is one no session loads -- which is what keeps

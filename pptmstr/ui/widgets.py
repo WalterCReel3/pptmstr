@@ -544,6 +544,11 @@ def follow_tail(following: bool) -> bool:
     Scrolling up is an intent to read something, and yanking the view back on the
     next token is the single most annoying thing a streaming pane can do.
 
+    A window with nothing to scroll is at its foot. A wheel over text that fits
+    asks to read nothing that is not on screen, and neither pane has another way
+    back to following than scrolling to the foot: counted as not there, one notch
+    over a short log would leave it unfollowed, at its top, once it grew.
+
     Must be called inside the window or child it scrolls, after its content.
     """
     hovered = imgui.is_window_hovered()
@@ -555,9 +560,8 @@ def follow_tail(following: bool) -> bool:
         imgui.set_scroll_here_y(1.0)
         return True
 
-    if imgui.get_scroll_max_y() > 0.0 and imgui.get_scroll_y() >= imgui.get_scroll_max_y() - 1.0:
-        return True
-    return False
+    most = imgui.get_scroll_max_y()
+    return most <= 0.0 or imgui.get_scroll_y() >= most - 1.0
 
 
 def multiline_input(

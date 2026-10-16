@@ -1446,17 +1446,6 @@ def test_the_menu_bars_entry_opens_the_focused_cards_menu_on_the_next_frame(
     assert fleet.open
 
 
-def test_the_menu_bar_names_the_key_the_handler_reads() -> None:
-    """A key with no menu entry is a key nobody finds, and one that names another lies."""
-    import inspect
-
-    from pptmstr import app
-
-    assert app.CARD_MENU_KEY is imgui.Key.m
-    assert '"Controls for the focused card…", "M"' in inspect.getsource(app._menus)
-    assert "cards.ask_next_frame = True" in inspect.getsource(app._menus)
-
-
 # -- the keys while a menu is open ----------------------------------------------------
 
 

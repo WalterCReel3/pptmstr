@@ -478,7 +478,7 @@ def test_the_same_panes_still_say_those_things_about_a_session_that_ran(
     assert panes["health"].has("$0.00") and panes["health"].has(" in · ")
     assert STATE_LABEL[AgentState.DONE] in panes["health"].strings
     assert panes["compose"].has("can no longer be messaged")
-    assert panes["transcript"].has("(nothing yet)") and "checkbox" in panes["transcript"].calls
+    assert panes["transcript"].has("(nothing yet)") and "small_button" in panes["transcript"].calls
     assert panes["board"].has("no tasks declared yet")
     assert panes["digest"].has("nothing taken without you")
     assert not any(s.startswith("closed — ") for said in panes.values() for s in said.strings)

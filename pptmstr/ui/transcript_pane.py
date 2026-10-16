@@ -18,10 +18,10 @@ not have them. Wrapping also cannot be combined with per-line colour and selecta
 text -- that is a real gap in ImGui, not a workaround failing. WRAP is what the pane
 shows with the seam off anyway, because prose is what the operator reads, and it
 pays a price for that: with no clipper only the last ``_WRAP_WINDOW`` lines are
-drawn, so scrollback beyond them is unreachable until the mode is switched. RAW is
-the way to reach it -- uniform rows and a clipper keep the *drawing* flat, and the
-per-frame filter and join above are what a long one costs there: 0.14 ms a frame
-idle at 1k lines, 0.9 ms at 10k, 14 ms at 100k.
+drawn, and the lines above them are reached through the earlier-lines view: RAW,
+the one renderer that draws every line. Uniform rows and a clipper keep its
+*drawing* flat, and the per-frame filter and join above are what a long one costs
+there: 0.14 ms a frame idle at 1k lines, 0.9 ms at 10k, 14 ms at 100k.
 
 **Liveness.** Root sessions stream token by token. Sub-agents do not -- their output
 arrives in complete messages only (§2.5.1). The pane says which it is looking at
@@ -31,15 +31,14 @@ rather than letting the operator infer that a quiet sub-agent is a stuck one.
 than dragged over. That is a better unit than a selection anyway: no partial first
 line, no dropped trailing newline, and it round-trips into an issue.
 
-**Rendering.** ``RenderMode.RICH`` (planning/archive/2026-08-10-transcript-markdown.md,
-step 5) draws markdown structure instead of literal lines, via ``rich_pane`` --
-imported as a module rather than name-by-name, since ``rich_pane`` needs
-``Block``/``BlockCursor`` types this module also owns and a symbol-level import
-either direction risks a cycle as both grow. Search demotes RICH back to the line
-path: ``_visible()`` filters at line granularity, which would shred a multi-line
-fence into disconnected rows if rich rendering tried to honour it too. While the
-seam is on, RICH is what the pane shows until the operator picks a mode
-(``DEFAULT_MODE``, which has the measurements that decided it).
+**Rendering.** There is no choice of renderer: the log is TYPESET while the seam
+can draw it and WRAP while it cannot (``TranscriptState.shown_mode``). RAW is the
+earlier-lines view, shown while the operator reads what the other two left out,
+and left again by the pane's ``latest`` button. ``RenderMode.RICH``
+(planning/archive/2026-08-10-transcript-markdown.md, step 5) draws markdown
+structure via ``rich_pane`` and nothing in the pane chooses it any more; it is
+drawn for a state whose ``mode`` names it, which only a script does, and goes
+when the operator has reviewed the rest of the rework.
 
 **Prompts.** A SYSTEM run is a prompt: ``AgentSession.send`` writes every one, the
 opening text included, as ``> `` and what was sent, and nothing else writes the
@@ -91,15 +90,23 @@ ends with its run; a literal run ImGui draws is copied whole from the context
 menu and not by dragging. A table changes its columns' widths in the
 frame its run closes (request P19).
 
-A search demotes this mode to the line path as it does RICH: nothing here marks
-or scrolls to a match in typeset text. REASONING is a dimmed markdown part, left
-out of the parts when the checkbox is off. Follow-the-tail has one owner,
-``widgets.follow_tail``: the stream is made with the seam's ``follow`` off.
+**Find.** ``Ctrl+F`` over the pane opens a find row (``FindBar``). In typeset text
+it searches the library's views (``typeset.find_matches``), marks every
+match with ``TypesetView.set_marks`` and brings the current one into view with
+``scroll_to``; text ImGui draws in this mode -- a prompt, a literal run the library
+does not set -- is not searched, and nor are the lines above the typeset window.
+On the line paths it searches the lines drawn, every line in RAW and the last
+``_WRAP_WINDOW`` in WRAP, and scrolls to the line. REASONING is a dimmed markdown
+part, left out of the parts when ``Settings.show_reasoning`` is off.
+
+**Following.** On while the view is at its foot, off from an upward wheel or a
+drag of the scrollbar, on again at the foot (``_handle_scroll``); a match brought
+into view turns it off. ``widgets.follow_tail`` owns it: the stream is made with the
+seam's ``follow`` off.
 
 **When the library stops.** A view can stop inside its draw. That frame says why
 where the text would be (the seam's sentence); from the next the seam is off and
-the pane is in WRAP, with the operator's choice of mode kept for the day it is
-back. The feeds are dropped with it (``draw``).
+the pane is in WRAP until it is back. The feeds are dropped with it (``draw``).
 """
 
 from __future__ import annotations
@@ -109,6 +116,7 @@ import re
 import time
 from collections.abc import Callable, Hashable, Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 from imgui_bundle import imgui
 
@@ -127,37 +135,51 @@ _TYPESET_WINDOW = 400
 How many lines one ``TypesetFeed.advance`` will typeset; older ones are skipped.
 
 A text is read and laid out in the frame that first draws it, once, and that is
-the frame this bounds: the first on a node, and a sub-agent's whole message.
-Measured here (``scripts/bench_panes.py --typeset on``, headless, load average 3
-to 10, a pane of 900 by 700): the first frame on a session of 1,080 to 10,080
-lines is 23 to 71 ms with this window, against RICH's 25 and 227; on 400 turns
-of three runs each it is 26 to 93 ms for the last 400 lines (50 views) and 176
-to 362 ms with every one of 3,199 lines taken in (400 views), 593 once with the
-machine at other work. About half of it is reading the markdown, a part at a
-time.
+the frame this bounds: the first on a node, and a sub-agent's whole message. The
+first on a node is met on every j/k to a session not shown in the last
+``_FEED_KEEP_S`` -- CONTEXT follows the cursor -- so it is a stall felt often,
+and the rule it is set by is the stall the operator has used the pane with: the
+one at 400, which this was before 2026-10-15.
 
-400 is ten panes' worth of scrollback in a first frame no longer than RICH's.
-The pane says how many lines it left out and where to read them (RAW). The
-bound is on what one advance takes in, not on what the feed holds: lines that
-arrive while the node is watched are added as they come, up to
+Measured on 2026-10-15 by ``scripts/bench_typeset_window.py`` (its 10,000-line
+log, headless, a pane of 900 by 700, load average about 0.7, the library warmed
+first; the median first frame of three or five passes): 22 ms at 100 lines, 37 at
+250, 53 at 400, 74 at 600, 97 to 114 at 800, 116 to 117 at 1,000, 190 at 1,500,
+199 at 2,000, 322 at 3,000, and 1,149 ms with all 10,000 taken in. Up to 1,000
+that is about 12 ms that do not depend on the window and about 10.5 ms for every
+100 lines that do, so the window is most of the first frame: 400 lines is about
+two and a half frames at sixty a second over the fixed part, and every 100 more
+is about another two thirds of a frame.
+
+The pane says how many lines it left out on a button that shows them, in the
+earlier-lines view (RAW), which draws every line, until the output viewer takes
+that over. The bound is on what one advance takes in, not on what the feed
+holds: lines that arrive while the node is watched are added as they come, up to
 ``_TYPESET_KEEP``.
 """
 
-_TYPESET_KEEP = 1000
+_TYPESET_KEEP = 1500
 """
 How many lines of closed runs a ``TypesetFeed`` holds before it drops its oldest
 ``Generation``.
 
 The window above bounds one advance, so a transcript watched while it streams
 would otherwise hold every run it was ever shown, each markdown run a view of
-the library's. What a held line costs a frame is small, because a generation out
-of the pane is not drawn: on 400 turns the idle frame is 0.6 to 1.1 ms holding
-399 lines in 50 views and 0.9 to 1.6 ms holding 3,199 in 400 (same runs). What it
-costs to hold is memory, and the first frame at another width, when every
-generation is laid out again whether or not it is in sight. A thousand is two
-and a half windows of scrollback.
+the library's. Holding is cheap while the width stands still, because a
+generation out of the pane is not drawn: the idle frame is 0.81 ms holding 400
+lines, 1.12 at 1,000, 1.17 at 1,500, 1.24 at 2,000 and 3.38 at 10,000 (same
+runs as above; Python's own allocations 3.2, 5.2, 7.3, 8.5 and 37 MB, the
+library's not counted).
 
-The lines dropped are counted in the row that says where to read them.
+**What sets it is a frame at another width**, when every generation held is laid
+out again whether or not it is in sight: a frame of a splitter drag is 8 ms
+holding 400 lines, 20 at 1,000, 30 at 1,500, 40 at 2,000, 60 at 3,000 and 198 at
+10,000, against RICH's 3. 1,500 keeps that frame within two of sixty a second;
+the ten thousand lines of planning/2026-10-15-ui-rework.md U3 would make a drag
+five frames a second. Lines past the bound are in the earlier-lines view, which
+draws every line for 0.9 ms a frame at 10,000 (the module docstring).
+
+The lines dropped are counted on the earlier-lines button, and shown by it.
 """
 
 _GENERATION_LINES = 250
@@ -212,19 +234,17 @@ class Line:
     run: int
 
 
-DEFAULT_MODE = RenderMode.RICH
+DEFAULT_MODE = RenderMode.TYPESET
 """
-What the pane shows until the operator picks a mode, while the seam is on. With
-the seam off it is WRAP, the pane as it was before there was a seam.
+What the pane shows while the seam is on; with it off, WRAP, the pane as it was
+before there was a seam. The only renderer offered: the operator chose it
+(planning/2026-10-15-ui-rework.md, U2).
 
-The log is markdown by default, and TYPESET is one radio button away. The rule
-recorded for moving it there is about cost: TYPESET is the default if it streams
+The rule recorded for making TYPESET the default was about cost: it streams
 within 2 ms a frame of RICH at 1,000 and at 10,000 lines **and** leaves no
-recurring frame over 30 ms in a long watch. **By measurement it now meets the
-first half outright and the second as RICH does (one full collection in a watch
-of 52,313 frames, twice), and the default has not moved**, for a reason the
-rule does not hold: nobody has looked at the library's text in this pane. What
-an operator reads first is theirs to choose after seeing it.
+recurring frame over 30 ms in a long watch. By measurement it meets the first
+half outright and the second as RICH does (one full collection in a watch of
+52,313 frames, twice).
 
 Measured here on 2026-10-12 (``scripts/bench_panes.py --typeset on --only
 transcript watch``; headless, nothing rasterised, CPU ms inside this pane's
@@ -253,8 +273,9 @@ draw, a pane of 900 by 700, text that does not repeat, load average 3 to 10):
 
 def mode_named(name: str) -> RenderMode | None:
     """
-    The mode a setting names (``Settings.context_mode``), or ``None`` for an empty
-    name and for one this build does not have: both mean ``DEFAULT_MODE``.
+    The mode a name stands for, or ``None`` for an empty name and for one this
+    build does not have. ``Settings.context_mode`` is retired and the pane reads no
+    mode from it; this is what still spells one.
     """
     try:
         return RenderMode(name)
@@ -374,6 +395,9 @@ class Generation:
     lines: int = 0
     extent: float = 0.0
     in_sight: bool = False
+    # Where it started in the window's content, for a find that has to bring a
+    # generation the window is not drawing into view before its view can.
+    top: float = 0.0
     _revision: int = 0
     _shown: tuple[ClosedRun, ...] = ()
     _parts: tuple[typeset.Part, ...] = ()
@@ -702,6 +726,109 @@ class NodeTranscript:
         return copy_text(self.lines[start:end])
 
 
+def line_matches(lines: Sequence[Line], needle: str) -> list[int]:
+    """
+    The index in ``lines`` of every line that holds ``needle``, ignoring case, once
+    for each time it holds it, in order. An empty needle finds nothing.
+    """
+    if not needle:
+        return []
+    wanted = needle.casefold()
+    found: list[int] = []
+    for index, line in enumerate(lines):
+        found += [index] * line.text.casefold().count(wanted)
+    return found
+
+
+@dataclass
+class FindBar:
+    """
+    The find row over the pane: what is looked for, which match is current, and
+    what the next draw owes it. ``count`` is how many matches the last draw found.
+
+    The matches themselves are not kept: they are found again by every draw from
+    what it draws (``_typeset_matches``, ``line_matches``), so a run that grows or a
+    generation that is dropped can never leave one pointing at text that moved.
+    """
+
+    open: bool = False
+    needle: str = ""
+    current: int = 0
+    count: int = 0
+    # Bring the current match into view in the next draw: a new needle, Enter.
+    reveal: bool = False
+    # Give the field the keyboard in the next draw.
+    focus: bool = False
+    # Whether the field had the keyboard when the last frame ended.
+    active: bool = False
+    # Which views were handed marks, and the marks handed, by ``id``.
+    marked: dict[int, tuple[Any, tuple[Any, ...]]] = field(default_factory=dict)
+    # The ImGui frame whose Escape closed the row, or -1, and whether that press
+    # has been seen held since (``spent_escape``).
+    escaped_in: int = -1
+    escape_held: bool = False
+
+    def show(self) -> None:
+        self.open = True
+        self.focus = True
+        self.reveal = True
+
+    def close(self) -> None:
+        """
+        Close the row. The needle is kept for the next ``Ctrl+F``; the marks go with
+        the next draw.
+        """
+        self.open = False
+        self.focus = self.reveal = self.active = False
+
+    def escape(self, frame: int) -> None:
+        """
+        Close the row on the Escape of ImGui frame ``frame``, which is then the row's.
+        """
+        self.close()
+        self.escaped_in = frame
+        self.escape_held = True
+
+    def spent_escape(self, frame: int, down: bool) -> bool:
+        """
+        Whether Escape on ImGui frame ``frame`` is the row's: the press that closed
+        the row, on its own frame or on any repeat of it while it is held. ``down``
+        is whether Escape is down on ``frame``. The application's key readers ask
+        this (``app._handle_keys``), once a frame and on every frame, because asking
+        is also what lets the press go: the first frame the key is seen up ends it,
+        and the next press is nobody's but its reader's.
+
+        Not ``open``: the application reads its keys between frames, after the pane
+        has drawn, so the row is already closed when the key is read. The frame is
+        tested as well as the hold so that a press and its release that reach one
+        frame are still the row's.
+        """
+        if not down:
+            self.escape_held = False
+        return frame == self.escaped_in or self.escape_held
+
+    def step(self, by: int) -> None:
+        """
+        The match ``by`` places on, wrapping at both ends, brought into view.
+        """
+        if self.count:
+            self.current = (self.current + by) % self.count
+            self.reveal = True
+
+    def found(self, count: int) -> None:
+        """
+        What the draw found: the current match is kept where there are still that
+        many, and the last one where there are fewer.
+        """
+        self.count = count
+        self.current = min(self.current, max(count - 1, 0))
+
+    def status(self) -> str:
+        if not self.needle:
+            return ""
+        return f"{self.current + 1} of {self.count}" if self.count else "no matches"
+
+
 @dataclass
 class TranscriptState:
     """Presentation state for the pane. Never enters the store (design §6)."""
@@ -710,16 +837,26 @@ class TranscriptState:
     # What RenderMode.TYPESET draws for a node, made by the first draw in that mode
     # and kept longer than the node's line cache; see _FEED_KEEP_S.
     feeds: dict[NodeId, TypesetFeed] = field(default_factory=dict)
+    # ``Settings.show_reasoning`` as the last ``draw`` was told it.
     show_reasoning: bool = True
-    # What the operator chose, or None until they choose. What is drawn is
-    # ``shown_mode()``.
+    # RAW while the earlier-lines view is up, and None otherwise; nothing in the
+    # pane sets another (a script may). What is drawn is ``shown_mode()``.
     mode: RenderMode | None = None
-    # The mode the operator's settings start the pane in, as the last ``draw`` was
-    # told it: written by every draw and by nothing else, so it is the setting and
-    # never a copy of it that could go stale.
-    start_in: RenderMode | None = None
+    # The line of the visible ones the earlier-lines view opens on, consumed by
+    # the draw that brings it into view.
+    raw_from: int | None = None
     follow_tail: bool = True
-    search: str = ""
+    # Following held off until the operator scrolls: the pane moved the view for
+    # them (a match brought into view, the earlier-lines view opened), and the
+    # foot it may have moved them to is not them asking to follow.
+    held: bool = False
+    find: FindBar = field(default_factory=FindBar)
+    # The node the last ``draw`` was handed, once one has been; see ``switched_to``.
+    node: NodeId | None = None
+    drawn: bool = False
+    # Whether each pane's log overflowed last frame, by the id of its child: the
+    # context log and the session pane are two children with one state.
+    overflowing: dict[int, bool] = field(default_factory=dict)
     frame: int = 0
     # When the frame being drawn began, on the clock ``prune`` was given.
     now: float = 0.0
@@ -738,21 +875,42 @@ class TranscriptState:
 
     def shown_mode(self) -> RenderMode:
         """
-        The mode drawn this frame: the one chosen in the pane, or until one is the
-        one the settings start it in (``start_in``), or with neither the default
-        (``DEFAULT_MODE``, and WRAP with the seam off).
+        The mode drawn this frame: ``mode`` while one is set (the earlier-lines
+        view), and otherwise ``DEFAULT_MODE``, which is WRAP with the seam off.
 
         TYPESET needs the seam, and without it the pane is in WRAP. Derived each
         frame and never written back, so switching the seam off and on again
-        returns the operator to what they had chosen.
+        returns the pane to TYPESET.
         """
         seam = typeset.enabled(typeset.Pane.CONTEXT)
-        wanted = self.start_in if self.mode is None else self.mode
-        if wanted is None:
-            return DEFAULT_MODE if seam else RenderMode.WRAP
+        wanted = DEFAULT_MODE if self.mode is None else self.mode
         if wanted is RenderMode.TYPESET and not seam:
             return RenderMode.WRAP
         return wanted
+
+    def switched_to(self, node: NodeId | None) -> None:
+        """
+        The pane is handed another node: it opens at that node's latest text,
+        following, in the log as it is set.
+
+        What the operator did to the last node's view -- the earlier-lines view, a
+        scroll off the foot, a match brought into view -- was about that node, and
+        none of it is kept for a return to it: the log is one child for every
+        node, so ImGui keeps one scroll position for all of them, and an
+        earlier-lines view or a hold given back at another node's offset would
+        open on nothing the operator had chosen. The find row stays open with its
+        needle, which is about what is looked for and not where; its place starts
+        again at the first match of this node's, and is not brought into view
+        until the operator steps to it.
+        """
+        self.node = node
+        if self.mode is RenderMode.RAW:
+            self.mode = None
+        self.raw_from = None
+        self.follow_tail = True
+        self.held = False
+        self.find.current = 0
+        self.find.reveal = False
 
     def cache_for(self, node_id: NodeId) -> NodeTranscript:
         cache = self.caches.get(node_id)
@@ -819,22 +977,29 @@ def draw(
     closed_path: str | None = None,
     *,
     start_in: RenderMode | None = None,
+    show_reasoning: bool | None = None,
 ) -> None:
     """
     One agent's transcript, or one line for a session that has none loaded.
 
     A session recalled from its file (``AgentRecord.recalled``) has an empty
-    transcript because nothing read it, and the filters, the copy button and
+    transcript because nothing read it, and the controls, the copy button and
     "(nothing yet)" over that would say a session ran here and has not spoken.
     It gets the closed line and no controls. ``closed_path`` is where the CLI
     keeps that conversation, for the operator who wants to read it without
     resuming: a value the shell read once and hands over, since working it out
     here would be a directory listing per frame. None draws the line alone.
 
-    ``start_in`` is the mode the operator's settings start the log in
-    (``mode_named(Settings.context_mode)``); left out, it is ``DEFAULT_MODE``.
+    ``show_reasoning`` is ``Settings.show_reasoning``; left out, the pane keeps
+    what it was last told, which starts as shown. ``start_in`` is not read: the
+    log has no renderer to start in, and the setting that named one is retired.
     """
-    state.start_in = start_in
+    if show_reasoning is not None:
+        state.show_reasoning = show_reasoning
+    if not state.drawn:
+        state.node, state.drawn = selected, True
+    elif selected != state.node:
+        state.switched_to(selected)
     if selected is None or (record := snap.get(selected)) is None:
         imgui.text_disabled("select an agent to read its transcript")
         return
@@ -853,6 +1018,7 @@ def draw(
     # the asyncio thread keeps appending (I7).
     pinned = record.transcript.published_length
     cache.sync(record.transcript, pinned)
+    _find_keys(state.find)
 
     mode = state.shown_mode()
     if state.feeds and not typeset.enabled(typeset.Pane.CONTEXT):
@@ -862,110 +1028,181 @@ def draw(
         # them again in one frame if it does.
         state.feeds.clear()
 
-    # RICH and TYPESET demote to the line path while a search filter is active --
-    # see the module docstring's "Rendering" section for why block-level filtering
-    # does not compose with _visible()'s line-granular one.
-    if mode is RenderMode.TYPESET and not state.search:
+    bar = state.find
+    if mode is RenderMode.TYPESET:
         feed = state.feed_for(selected)
         feed.advance(cache)
+        # Found in the views the last frame drew, before this one draws them, so
+        # the marks and a scroll are this frame's.
+        found = _typeset_matches(feed, state.show_reasoning, bar.needle) if bar.open else []
+        bar.found(len(found))
         # Joined when the button is pressed: unlike the line modes' value, this one
         # is not needed to draw anything.
-        _draw_controls(state, record.node_id, lambda: feed.visible_text(state.show_reasoning), mode)
+        _draw_controls(state, record.node_id, lambda: feed.visible_text(state.show_reasoning))
         imgui.separator()
-        _draw_typeset(state, feed, cache)
+        _draw_typeset(state, feed, cache, found)
         return
 
-    if mode is RenderMode.RICH and not state.search:
+    if mode is RenderMode.RICH:
         stable = len(cache.lines) - (1 if cache.open_line else 0)
         cache.block_cursor.feed(cache.lines[:stable])
         live = cache.block_cursor.live_block(cache.lines)
         shown = rich_pane.windowed(cache.block_cursor.blocks)
         copy_value = rich_pane.block_copy_text(shown + ([live] if live is not None else []))
-        _draw_controls(state, record.node_id, lambda: copy_value, mode)
+        bar.found(0)
+        _draw_controls(state, record.node_id, lambda: copy_value)
         imgui.separator()
         _draw_rich(state, cache, live)
         return
 
     visible = _visible(state, cache)
+    drawn = visible if mode is RenderMode.RAW else visible[-_WRAP_WINDOW:]
+    found_lines = line_matches(drawn, bar.needle) if bar.open else []
+    bar.found(len(found_lines))
     visible_text = copy_text(visible)
-    _draw_controls(state, record.node_id, lambda: visible_text, mode)
+    _draw_controls(state, record.node_id, lambda: visible_text)
     imgui.separator()
-    _draw_lines(state, cache, visible, mode)
+    _draw_lines(state, cache, visible, mode, found_lines)
 
 
-def _draw_controls(
-    state: TranscriptState, node_id: NodeId, copy_value: Callable[[], str], shown: RenderMode
-) -> None:
-    changed, state.show_reasoning = imgui.checkbox("reasoning", state.show_reasoning)
-    imgui.same_line()
-    # Four modes fill a docked pane's first row. With the seam on, a control that
-    # does not fit starts a second row rather than sitting off the right edge,
-    # where the filter cannot be reached at all, and the filter gives up width
-    # before it takes a third.
-    flows = typeset.enabled(typeset.Pane.CONTEXT)
-    scale = imgui.get_font_size() / 16.0
-    style = imgui.get_style()
-    gap = style.item_spacing.x
-    box = imgui.get_frame_height() + style.item_inner_spacing.x
-    copy_width = imgui.calc_text_size("copy").x + 2 * style.frame_padding.x
-    filter_width = 200 * scale
+FIND_CHORD = int(imgui.Key.mod_ctrl) | int(imgui.Key.f)
+"""
+The chord ``_find_keys`` opens the find row on, and the one the Session menu's
+Find item shows (``main_menu``). Its exact modifiers: Ctrl+Shift+F is not it.
+"""
 
-    def flow(width: float) -> None:
-        if flows and imgui.get_content_region_avail().x < width:
-            imgui.new_line()
+# ``FIND_CHORD`` as ``main_menu.chord_label`` spells it.
+FIND_LABEL = "Ctrl+F"
 
-    for mode in RenderMode:
-        if mode is RenderMode.TYPESET and not flows:
-            continue
-        flow(box + imgui.calc_text_size(mode.value).x)
-        if imgui.radio_button(mode.value, shown is mode):
-            state.mode = mode
+
+def _find_keys(bar: FindBar) -> None:
+    """
+    ``FIND_CHORD`` over the pane opens the find row, and Escape over the pane closes
+    it.
+
+    Only while the pane, or a window inside it, has the focus, and not while any
+    item is active: a composer being typed in keeps ``Ctrl+F``, and so does the
+    find field itself, which is the open row already. Escape while the field has
+    the keyboard is the field's (``_draw_find``).
+    """
+    if not imgui.is_window_focused(imgui.FocusedFlags_.child_windows):
+        return
+    if bar.open and not bar.active and imgui.is_key_pressed(imgui.Key.escape, False):
+        bar.escape(imgui.get_frame_count())
+        return
+    if imgui.is_any_item_active():
+        return
+    # Not on a repeat, and with exactly the chord's modifiers down.
+    if imgui.is_key_chord_pressed(FIND_CHORD):
+        bar.show()
+
+
+_SUB_AGENT_NOTE = "sub-agent: complete messages only, not live"
+
+
+def _draw_controls(state: TranscriptState, node_id: NodeId, copy_value: Callable[[], str]) -> None:
+    if state.mode is RenderMode.RAW:
+        # The earlier-lines view: the way back to the log as it is set, at its foot.
+        if imgui.small_button("back to latest"):
+            state.mode = None
+            state.follow_tail = True
+            state.held = False
         imgui.same_line()
-    flow(box + imgui.calc_text_size("follow").x + 80 * scale + copy_width + 2 * gap)
-    _, state.follow_tail = imgui.checkbox("follow", state.follow_tail)
-    imgui.same_line()
-    if flows:
-        room = imgui.get_content_region_avail().x - copy_width - gap
-        filter_width = max(80 * scale, min(filter_width, room))
-    imgui.set_next_item_width(filter_width)
-    _, state.search = imgui.input_text_with_hint("##search", "filter", state.search)
-    imgui.same_line()
-    # Copies what is on screen, filters included -- the button sits next to the
-    # filters that decide its contents. Right-clicking a run (or block) copies
-    # that run/block whole, unfiltered; the two affordances are deliberately
+    # Copies what is on screen, reasoning as it is shown. Right-clicking a run (or
+    # block) copies that run/block whole; the two affordances are deliberately
     # different units.
     if imgui.small_button("copy") and (copied := copy_value()):
         imgui.set_clipboard_text(copied)
-
-    if shown is RenderMode.RICH and not flows:
+    if state.find.open:
         imgui.same_line()
-        imgui.text_disabled("(rich: search falls back to raw lines)")
-
-    if flows:
-        # With the seam on the filter has taken the rest of the controls' row, so
-        # a note has a row of its own, and a second in a dock narrower than it is.
-        imgui.push_text_wrap_pos(0.0)
+        _draw_find(state.find)
     if node_id[1] is not None:
         # Sub-agent output does not stream (§2.5.1). Saying so beats letting a quiet
-        # row be read as a stuck one.
-        if not flows:
-            imgui.same_line()
-        imgui.text_colored(P.warn.vec4, "sub-agent: complete messages only, not live")
-    if flows and state.search and shown in (RenderMode.RICH, RenderMode.TYPESET):
-        # The only sign that what is below is not the log as the mode sets it.
-        imgui.text_disabled(f"filtering: raw lines ({shown.value} has no find)")
-    if flows:
+        # row be read as a stuck one. A row of its own, broken in a narrow dock.
+        imgui.push_text_wrap_pos(0.0)
+        imgui.text_colored(P.warn.vec4, _SUB_AGENT_NOTE)
         imgui.pop_text_wrap_pos()
 
 
+def _draw_find(bar: FindBar) -> None:
+    """
+    The find field, how many it found, and its close button. Enter is the next
+    match and Shift+Enter the one before; Escape in the field closes the row.
+    """
+    if bar.focus:
+        imgui.set_keyboard_focus_here()
+        bar.focus = False
+    imgui.set_next_item_width(200.0 * imgui.get_font_size() / 16.0)
+    entered, needle = imgui.input_text_with_hint(
+        "##find", "find", bar.needle, imgui.InputTextFlags_.enter_returns_true
+    )
+    active = imgui.is_item_active()
+    escaped = (active or bar.active) and imgui.is_key_pressed(imgui.Key.escape, False)
+    # ImGui's Escape hands back what the field held when it took the keyboard; what
+    # was typed is the needle kept for the next Ctrl+F.
+    if needle != bar.needle and not escaped:
+        bar.needle = needle
+        bar.current = 0
+        bar.reveal = True
+    if entered:
+        bar.step(-1 if imgui.get_io().key_shift else 1)
+        # Enter gives the keyboard up, and the next match is one more Enter.
+        bar.focus = True
+    bar.active = active
+    imgui.same_line()
+    imgui.text_disabled(bar.status() or " ")
+    imgui.same_line()
+    clicked = imgui.small_button("x##find")
+    if escaped:
+        bar.escape(imgui.get_frame_count())
+    elif clicked:
+        bar.close()
+
+
 def _visible(state: TranscriptState, cache: NodeTranscript) -> list[Line]:
-    needle = state.search.lower()
     return [
         line
         for line in cache.lines
-        if (state.show_reasoning or line.kind is not SegmentKind.REASONING)
-        and (not needle or needle in line.text.lower())
+        if state.show_reasoning or line.kind is not SegmentKind.REASONING
     ]
+
+
+def _visible_before(state: TranscriptState, cache: NodeTranscript, line: int) -> int:
+    """
+    How many of the visible lines come before the transcript's line ``line``.
+    """
+    if state.show_reasoning:
+        return min(line, len(cache.lines))
+    return sum(1 for each in cache.lines[:line] if each.kind is not SegmentKind.REASONING)
+
+
+def _earlier(state: TranscriptState, count: int, first: int) -> None:
+    """
+    The lines the pane left out, as a button that shows them: RAW, which draws
+    every line, opened on the last of them (``first`` of the visible lines is the
+    first one the pane drew) and left by ``back to latest``.
+    """
+    if imgui.small_button(f"{count:,} earlier lines##earlier"):
+        state.mode = RenderMode.RAW
+        state.raw_from = first
+        state.follow_tail = False
+
+
+# A line holding a match, and the current one: ImU32, A in the top byte. The
+# library's find marks behind the text; these are over it, so fainter.
+_HIT_INK = 0x4039B3E8
+_CURRENT_INK = 0x701A7AF2
+
+
+def _mark_line(current: bool) -> None:
+    """
+    The last line drawn marked as holding a match, the whole width of the pane.
+    """
+    low, high = imgui.get_item_rect_min(), imgui.get_item_rect_max()
+    right = imgui.get_window_pos().x + imgui.get_window_size().x
+    imgui.get_window_draw_list().add_rect_filled(
+        low, imgui.ImVec2(right, high.y), _CURRENT_INK if current else _HIT_INK
+    )
 
 
 def _draw_lines(
@@ -973,14 +1210,21 @@ def _draw_lines(
     cache: NodeTranscript,
     lines: list[Line],
     mode: RenderMode | None = None,
+    found: Sequence[int] = (),
 ) -> None:
+    """
+    ``lines`` as RAW or WRAP draws them. ``found`` is where the find row's matches
+    are, as indices into the lines drawn: every line in RAW, the last
+    ``_WRAP_WINDOW`` in WRAP.
+    """
     if mode is None:
         mode = state.shown_mode()
     if not lines:
-        imgui.text_disabled("(nothing yet)" if not cache.lines else "(no matching lines)")
+        imgui.text_disabled("(nothing yet)")
         return
 
-    if not imgui.begin_child("##transcript"):
+    log = _begin_log(state, imgui.get_font_size())
+    if log is None:
         imgui.end_child()
         return
 
@@ -1004,15 +1248,39 @@ def _draw_lines(
         if live and top <= mouse_y < row_top:
             hovered = line.run
 
+    bar = state.find
+    marked = set(found)
+    current = found[bar.current] if found else None
+    reveal = bar.reveal and current is not None
+    # The view is moved for the operator this frame, so it is not following.
+    moved = reveal
     if mode is RenderMode.WRAP:
+        drawn = lines[-_WRAP_WINDOW:]
+        if len(drawn) < len(lines):
+            _earlier(state, len(lines) - len(drawn), len(lines) - len(drawn))
         # No clipper: wrapped rows have no uniform height for it to work from. The
         # window bound is what keeps that affordable.
-        for line in lines[-_WRAP_WINDOW:]:
+        for index, line in enumerate(drawn):
             imgui.push_style_color(imgui.Col_.text, getattr(P, _KIND_COLOUR[line.kind]).vec4)
             imgui.text_wrapped(line.text or " ")
             imgui.pop_style_color()
             track(line)
+            if index in marked:
+                _mark_line(index == current)
+                if reveal and index == current:
+                    imgui.set_scroll_here_y(1.0 / 3.0)
     else:
+        row = imgui.get_text_line_height_with_spacing()
+        top = imgui.get_cursor_pos_y()
+        high = imgui.get_window_height()
+        if reveal and current is not None:
+            imgui.set_scroll_y(max(0.0, top + current * row - high / 3.0))
+        if state.raw_from is not None:
+            # The last line left out at the foot of the view, the one above it
+            # above that: where the other renderer's top was.
+            imgui.set_scroll_y(max(0.0, top + state.raw_from * row - high + row))
+            state.raw_from = None
+            moved = True
         clipper = imgui.ListClipper()
         clipper.begin(len(lines))
         while clipper.step():
@@ -1020,13 +1288,104 @@ def _draw_lines(
                 line = lines[index]
                 imgui.text_colored(getattr(P, _KIND_COLOUR[line.kind]).vec4, line.text or " ")
                 track(line)
+                if index in marked:
+                    _mark_line(index == current)
         clipper.end()
+    if reveal:
+        bar.reveal = False
 
     if not imgui.is_popup_open(_CONTEXT_ID):
         state.context_run = hovered
     _draw_context_menu(state, cache, lines)
 
+    if moved:
+        state.follow_tail = False
+        state.held = True
     _handle_scroll(state)
+    _end_log(state, log)
+
+
+def margin_px(text_px: float) -> float:
+    """
+    The log's side margin for text ``text_px`` tall: about one en dash, which is
+    half an em, in whole pixels.
+    """
+    return float(round(text_px / 2.0))
+
+
+def log_sides(text_px: float, gutter: float) -> tuple[float, float]:
+    """
+    The padding of the log's child, left and right, for text ``text_px`` tall and a
+    scrollbar gutter ``gutter`` wide.
+
+    The gutter is always kept and is part of the right-hand margin, so the margin
+    seen either side is ``margin_px`` or the gutter, whichever is wider, and the
+    right is padded only by what the gutter leaves of it.
+    """
+    side = max(margin_px(text_px), gutter)
+    return side, side - gutter
+
+
+# What an overflow-less log draws its scrollbar in: nothing, over the gutter kept.
+_UNSEEN = (
+    imgui.Col_.scrollbar_bg,
+    imgui.Col_.scrollbar_grab,
+    imgui.Col_.scrollbar_grab_hovered,
+    imgui.Col_.scrollbar_grab_active,
+)
+
+
+def _begin_log(state: TranscriptState, text_px: float, flags: int = 0) -> int | None:
+    """
+    Open the log's child: the same margin either side of the text, and a vertical
+    scrollbar that is seen only while the text overflows, down or across. Returns
+    the child's id, for ``_end_log``, or ``None`` when ImGui has it clipped.
+
+    The scrollbar is always *there*, so that the measure does not change, and every
+    paragraph re-break, on the frame the text first outgrows the pane: what goes is
+    its ink while there is nothing to scroll. Whether there is, is the last frame's
+    answer (``TranscriptState.overflowing``) to a question ImGui answers from the
+    frame before that, so the bar shows two frames after the text first overflows,
+    and never moves the text.
+
+    The margins are ``log_sides``: the child's own padding, which a child without a
+    border is not given by ImGui, on the right, and that and an indent on the left,
+    where there is no gutter.
+    """
+    ident = imgui.get_id("##transcript")
+    unseen = not state.overflowing.get(ident, False)
+    gutter = imgui.get_style().scrollbar_size
+    left, right = log_sides(text_px, gutter)
+    imgui.push_style_var(imgui.StyleVar_.window_padding, imgui.ImVec2(right, 0.0))
+    if unseen:
+        for colour in _UNSEEN:
+            imgui.push_style_color(colour, imgui.ImVec4(0.0, 0.0, 0.0, 0.0))
+    opened = imgui.begin_child(
+        "##transcript",
+        imgui.ImVec2(0.0, 0.0),
+        imgui.ChildFlags_.always_use_window_padding,
+        flags | imgui.WindowFlags_.always_vertical_scrollbar.value,
+    )
+    if unseen:
+        imgui.pop_style_color(len(_UNSEEN))
+    imgui.pop_style_var()
+    if not opened:
+        return None
+    if left > right:
+        # The child's own, and gone with its end: ImGui starts a window's indent
+        # again at every Begin.
+        imgui.indent(left - right)
+    return ident
+
+
+def _end_log(state: TranscriptState, ident: int) -> None:
+    """
+    Close the log's child, noting whether its text overflowed for the next frame.
+
+    Either way: the two scrollbars are drawn in the same colours, and a literal
+    line wider than a log that fits is reached only by the one along the bottom.
+    """
+    state.overflowing[ident] = imgui.get_scroll_max_y() > 0.0 or imgui.get_scroll_max_x() > 0.0
     imgui.end_child()
 
 
@@ -1077,15 +1436,15 @@ def _draw_run(views: typeset.ViewCache, run: OpenRun, live: list[Hashable]) -> N
     stream.draw(ink=None if run.kind is SegmentKind.OUTPUT else ink)
 
 
-def _draw_typeset(state: TranscriptState, feed: TypesetFeed, cache: NodeTranscript) -> None:
-    # The scrollbar is always there so that the measure does not change, and every
-    # paragraph re-break, on the frame the text first outgrows the pane. Literal
-    # runs are never broken, hence the horizontal one.
-    flags = (
-        imgui.WindowFlags_.always_vertical_scrollbar.value
-        | imgui.WindowFlags_.horizontal_scrollbar.value
-    )
-    if not imgui.begin_child("##transcript", imgui.ImVec2(0, 0), 0, flags):
+def _draw_typeset(
+    state: TranscriptState,
+    feed: TypesetFeed,
+    cache: NodeTranscript,
+    found: Sequence[tuple[Hashable, Any, Any]] = (),
+) -> None:
+    # Literal runs are never broken, hence the horizontal scrollbar.
+    log = _begin_log(state, typeset.body_px(), imgui.WindowFlags_.horizontal_scrollbar.value)
+    if log is None:
         imgui.end_child()
         return
 
@@ -1097,7 +1456,7 @@ def _draw_typeset(state: TranscriptState, feed: TypesetFeed, cache: NodeTranscri
     lost = _trim(feed)
     top = imgui.get_cursor_pos_y()
     if feed.skipped:
-        imgui.text_disabled(f"{feed.skipped:,} earlier lines: switch to raw")
+        _earlier(state, feed.skipped, _visible_before(state, cache, feed.skipped))
     if lost:
         if not announced:
             lost = max(0.0, lost - (imgui.get_cursor_pos_y() - top))
@@ -1106,6 +1465,8 @@ def _draw_typeset(state: TranscriptState, feed: TypesetFeed, cache: NodeTranscri
         # that much too high.
         imgui.set_cursor_pos_y(imgui.get_cursor_pos_y() + lost)
 
+    _hand_marks(state.find, found)
+    moved = _reveal(state, feed, found)
     shown = feed.shown_open(show)
     if not feed.generations and shown is None and not feed.skipped:
         imgui.text_disabled("(nothing yet)")
@@ -1121,6 +1482,9 @@ def _draw_typeset(state: TranscriptState, feed: TypesetFeed, cache: NodeTranscri
     _draw_typeset_menu(state, feed, cache)
 
     end = imgui.get_cursor_pos_y()
+    if moved:
+        state.follow_tail = False
+        state.held = True
     following = state.follow_tail
     _handle_scroll(state)
     if lost:
@@ -1132,7 +1496,7 @@ def _draw_typeset(state: TranscriptState, feed: TypesetFeed, cache: NodeTranscri
         base = imgui.get_scroll_max_y() + end - feed.end if pinned else imgui.get_scroll_y()
         imgui.set_scroll_y(max(0.0, base - lost))
     feed.end = end - lost
-    imgui.end_child()
+    _end_log(state, log)
 
 
 def _trim(feed: TypesetFeed) -> float:
@@ -1167,6 +1531,7 @@ def _draw_generation(
     a generation is twenty views or more, and the scrollback is most of the log.
     """
     start = imgui.get_cursor_pos_y()
+    generation.top = start
     wide = max(1.0, imgui.get_content_region_avail().x)
     generation.in_sight = generation.extent > 0.0 and imgui.is_rect_visible(
         imgui.ImVec2(wide, generation.extent)
@@ -1176,6 +1541,73 @@ def _draw_generation(
         live.append(generation.key)
         typeset.document(feed.views, generation.key, parts, rests=True, apart=True, literal=True)
     generation.extent = imgui.get_cursor_pos_y() - start
+
+
+def _typeset_matches(
+    feed: TypesetFeed, show_reasoning: bool, needle: str
+) -> list[tuple[Hashable, Any, Any]]:
+    """
+    Every match of ``needle`` in the library's views of the feed, in reading order,
+    as the key of the view, the view, and the library's match in it
+    (``typeset.find_matches``).
+
+    The views are the ones the last frame drew. Text ImGui draws here has no view
+    and is not searched, and the lines above the window are not in any view. The
+    log's views hold no block a host draws: a literal run is a code block.
+    """
+    keys = [generation.key for generation in feed.generations]
+    shown = feed.shown_open(show_reasoning)
+    if shown is not None:
+        keys.append(_run_key(shown.run))
+    return typeset.find_matches(feed.views, keys, needle)
+
+
+def _hand_marks(bar: FindBar, found: Sequence[tuple[Hashable, Any, Any]]) -> None:
+    """
+    Give each view the marks of its matches, the current one stronger, and take
+    them from a view that has none now. A view is handed marks only when they
+    changed: it packs them for the library each time.
+    """
+    grouped: dict[int, tuple[Any, list[Any], int | None]] = {}
+    for number, (_, view, match) in enumerate(found):
+        held, matches, current = grouped.get(id(view), (view, [], None))
+        if number == bar.current:
+            current = len(matches)
+        matches.append(match)
+        grouped[id(view)] = (held, matches, current)
+    handed: dict[int, tuple[Any, tuple[Any, ...]]] = {}
+    for ident, (view, matches, current) in grouped.items():
+        marks = typeset.find_marks(matches, current)
+        if bar.marked.get(ident, (None, ()))[1] != marks:
+            view.set_marks(marks)
+        handed[ident] = (view, marks)
+    for ident, (view, _) in bar.marked.items():
+        if ident not in handed:
+            view.set_marks(None)
+    bar.marked = handed
+
+
+def _reveal(
+    state: TranscriptState, feed: TypesetFeed, found: Sequence[tuple[Hashable, Any, Any]]
+) -> bool:
+    """
+    Bring the current match into view if the find row asked for it. Returns whether
+    it did.
+
+    The view's own ``scroll_to`` does it, in the view's next draws. A generation
+    that was out of the window last frame is not drawn (``_draw_generation``), so
+    the window is first scrolled to where that generation starts.
+    """
+    bar = state.find
+    if not bar.reveal or not found:
+        return False
+    bar.reveal = False
+    key, view, match = found[bar.current]
+    generation = feed.generation(key)
+    if generation is not None and not generation.in_sight:
+        imgui.set_scroll_y(max(0.0, generation.top - imgui.get_window_height() / 3.0))
+    view.scroll_to(match.block, match.start, align=1.0 / 3.0)
+    return True
 
 
 def _typeset_pointed(
@@ -1262,11 +1694,28 @@ def _draw_context_menu(state: TranscriptState, cache: NodeTranscript, visible: l
 
 def _handle_scroll(state: TranscriptState) -> None:
     """
-    Follow the tail until the operator scrolls away from it.
+    Follow the tail until the operator scrolls away from it, and again from when
+    they are back at its foot.
 
     The behaviour, and the reason position cannot drive the disengage, live in
     ``widgets.follow_tail`` -- DETAIL's narration needs the same thing, and the two
     panes drifting apart on it would be invisible until one of them felt wrong.
-    Here the flag is additionally re-enabled by the pane's own checkbox.
+    Two things are added here. A drag of the scrollbar lets go as an upward wheel
+    does: with no checkbox it is the other way to leave the foot, and while
+    following the view is put back at the foot every frame. And while ``held``,
+    nothing follows until the operator scrolls.
     """
+    window = imgui.internal.get_current_window()
+    dragging = imgui.internal.get_active_id() == imgui.internal.get_window_scrollbar_id(
+        window, imgui.internal.Axis.y
+    )
+    if state.held:
+        wheel = imgui.is_window_hovered() and imgui.get_io().mouse_wheel != 0.0
+        if not (wheel or dragging):
+            state.follow_tail = False
+            return
+        state.held = False
+    if state.follow_tail and dragging:
+        state.follow_tail = False
+        return
     state.follow_tail = widgets.follow_tail(state.follow_tail)

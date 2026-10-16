@@ -340,20 +340,32 @@ def test_hand_edited_role_choices_and_pane_switches_lose_only_what_is_malformed(
     assert load(path) == Settings()
 
 
-def test_where_the_context_log_starts_survives_a_restart(tmp_path: Path) -> None:
+def test_the_retired_context_mode_survives_a_restart_as_it_was(tmp_path: Path) -> None:
     """
-    Kept as a name, and empty for "this build's": a build that changes its default
-    then reaches every file that never chose. A value that is not a string is not
-    a name.
+    Nothing reads it any more, and a file that names a mode -- one this build
+    still has, or ``rich`` -- loads and saves with it unchanged. A value that is
+    not a string is not a name.
     """
     path = tmp_path / "settings.json"
     assert Settings().context_mode == ""
-    save(Settings(context_mode="typeset"), path, unread=None)
-    assert json.loads(path.read_text())["context_mode"] == "typeset"
-    assert load(path).context_mode == "typeset"
+    for named in ("typeset", "rich", "raw"):
+        save(Settings(context_mode=named), path, unread=None)
+        assert json.loads(path.read_text())["context_mode"] == named
+        assert load(path).context_mode == named
 
     path.write_text(json.dumps({"context_mode": 3, "theme": "light"}))
     assert load(path) == Settings(theme="light")
+
+
+def test_reasoning_is_shown_by_default_and_a_choice_survives_a_restart(tmp_path: Path) -> None:
+    path = tmp_path / "settings.json"
+    assert Settings().show_reasoning is True
+    save(Settings(show_reasoning=False), path, unread=None)
+    assert json.loads(path.read_text())["show_reasoning"] is False
+    assert load(path).show_reasoning is False
+
+    path.write_text(json.dumps({"show_reasoning": "no", "theme": "light"}))
+    assert load(path) == Settings(theme="light"), "not a boolean is the default"
 
 
 def test_a_text_switch_that_is_not_a_boolean_falls_back_to_its_default(tmp_path: Path) -> None:

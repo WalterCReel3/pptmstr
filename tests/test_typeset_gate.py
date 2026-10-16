@@ -45,7 +45,12 @@ What the seam imports from ``imscribe`` that is not in ``imscribe.__all__``, and
   test_typeset_views.py`` has the probe that fails when the reach stops working.
 """
 
-BEHIND_THE_FACADE = {("imscribe.ui.typeset_diff_view", "code_face_lacks")}
+BEHIND_THE_FACADE = {
+    ("imscribe.ui.typeset_diff_view", "code_face_lacks"),
+    ("imscribe.typeset_find", "marks_for"),
+    ("imscribe.description", "KIND_CODE"),
+    ("imscribe.description", "KIND_PARAGRAPH"),
+}
 """
 What the seam imports from a module of ``imscribe`` other than the facade, and why.
 
@@ -54,6 +59,16 @@ What the seam imports from a module of ``imscribe`` other than the facade, and w
   has no glyph for (pptmstr's P39, answered in 0.2.0). The facade does not
   re-export it, and the alternative is the native module's ``face_has_glyph``
   with a face index of pptmstr's own, which nothing promises.
+- ``marks_for``, in ``find.marks``: the marks of a list of matches with one
+  current. The facade's ``Finder`` makes them only for a needle over one
+  document of its own, and a pane's current match runs across all its views;
+  ``typeset_find``'s docstring says the rest of find is reached from there.
+  The alternative is building the library's mark tuples here, its colours and
+  placement constants copied.
+- ``KIND_CODE`` and ``KIND_PARAGRAPH``, in ``find._described``: the block kinds
+  ``FindIndex.of`` (facade) reads to tell code, where a line break is not a
+  space, from prose. The facade's ``BlockKind`` is the theme's enum and not a
+  description's kind.
 """
 
 
@@ -119,8 +134,8 @@ def test_the_seam_imports_the_librarys_facade_and_one_named_module_past_it() -> 
     Every import the package makes is ``from imscribe import <name>``, the name is
     on that list or is one ``PAST_THE_FACADE`` gives a reason for, and each of
     those is in fact imported -- a reason for a reach nobody makes is a stale list.
-    The one import from a module behind the facade is ``BEHIND_THE_FACADE``'s, of
-    a name that module lists as its own.
+    The imports from modules behind the facade are ``BEHIND_THE_FACADE``'s, each
+    of a name that module lists as its own.
     """
     found = [each for path in sorted(PACKAGE.glob("*.py")) for each in _imscribe_imports(path)]
     assert found, "the package no longer imports the library at all"

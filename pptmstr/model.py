@@ -864,6 +864,30 @@ _COMMAND_REFUSAL_SENTENCES = {
 
 
 @dataclass(frozen=True, slots=True)
+class NewWorktree:
+    """
+    A linked worktree a launch makes before its session exists. Always a new one:
+    a launch never continues in a worktree already there (W3 as revised on wt-fix-2).
+
+    ``run_in`` is the checkout the launcher read, where every git call for it runs;
+    ``base`` is the object id that checkout's ``HEAD`` named when it was read and
+    the modal showed (``planning/2026-10-15-ui-rework.md`` W1), so the branch is made
+    at the commit the operator saw and not at whatever ``HEAD`` is when the worktree
+    is made. ``path`` is final text before anything is on disk, and it is the
+    launch's ``cwd``. ``uncommitted_accepted`` is True when an earlier press of this
+    draft was held because ``run_in`` had uncommitted changes, and the operator
+    pressed again: the worktree is then made without asking a second time.
+    """
+
+    run_in: str
+    main_root: str
+    branch: str
+    path: str
+    base: str
+    uncommitted_accepted: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class LaunchSpec:
     """
     Everything an operator settles before a session exists.
@@ -996,6 +1020,23 @@ class LaunchSpec:
     # relaunch has only ``task`` to open the new conversation with, and the
     # shell starts nothing from a spec that says its task is no prompt.
     task_is_label: bool = False
+    # The worktree ``cwd`` is to be, made by ``app._launch`` before the session is
+    # built, or None for a launch into a directory that already exists.
+    #
+    # Not carried by ``from_record``: a record's ``cwd`` is the worktree once it has
+    # been made, so a fork or a relaunch starts there as it would in any directory
+    # (the 2026-10-07 worktree record's D7), and a spec that asked again would meet
+    # its own branch and be refused. A resume is built from the recorded directory
+    # and never carries one either.
+    worktree: NewWorktree | None = None
+
+    def __post_init__(self) -> None:
+        # The session is started in ``cwd`` and the worktree is made at
+        # ``worktree.path``; two spellings would make one and start in the other.
+        if self.worktree is not None and self.worktree.path != self.cwd:
+            raise ValueError(
+                f"a launch into a worktree at {self.worktree.path} names {self.cwd} as its cwd"
+            )
 
     @classmethod
     def from_record(cls, record: AgentRecord) -> LaunchSpec:

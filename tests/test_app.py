@@ -479,19 +479,34 @@ def test_a_text_switch_is_saved_and_takes_effect_without_a_restart(
 
 class _Menu:
     """
-    The five ImGui calls ``app._menus`` makes, with one entry that reports a click.
+    The ImGui calls ``main_menu.draw`` makes, with one entry that reports a click.
 
-    A disabled menu does not open and a disabled entry cannot be clicked, as in ImGui.
+    A disabled entry cannot be clicked, as in ImGui. Every item is hovered, so
+    ``tips`` holds what each one says on hover.
     """
+
+    DRAWS = (
+        "begin_menu",
+        "end_menu",
+        "menu_item",
+        "is_item_hovered",
+        "set_tooltip",
+        "separator",
+        "separator_text",
+        "text_disabled",
+        "indent",
+        "unindent",
+    )
 
     def __init__(self, click: str) -> None:
         self.click = click
-        self.menus: dict[str, bool] = {}
+        self.menus: list[str] = []
         self.items: dict[str, tuple[bool, bool]] = {}
-        self.said: list[str] = []
+        self.tips: dict[str, str] = {}
+        self._last = ""
 
     def begin_menu(self, label: str, enabled: bool = True) -> bool:
-        self.menus[label] = enabled
+        self.menus.append(label)
         return enabled
 
     def end_menu(self) -> None:
@@ -500,14 +515,59 @@ class _Menu:
     def menu_item(
         self, label: str, shortcut: str, selected: bool, enabled: bool = True
     ) -> tuple[bool, bool]:
-        self.items[label] = (selected, enabled)
-        return (enabled and label == self.click, selected)
+        self._last = label.split("##")[0]
+        self.items[self._last] = (selected, enabled)
+        return (enabled and self._last == self.click, selected)
+
+    def is_item_hovered(self, flags: int = 0) -> bool:
+        return True
+
+    def set_tooltip(self, text: str) -> None:
+        self.tips[self._last] = text
 
     def separator(self) -> None:
         pass
 
+    def separator_text(self, text: str) -> None:
+        pass
+
     def text_disabled(self, text: str) -> None:
-        self.said.append(text)
+        pass
+
+    def indent(self) -> None:
+        pass
+
+    def unindent(self) -> None:
+        pass
+
+
+def _runner() -> types.SimpleNamespace:
+    """``hello_imgui`` as far as the menu bar reads it: no panes, the status bar on."""
+    from pptmstr import app
+
+    params = types.SimpleNamespace(
+        docking_params=types.SimpleNamespace(dockable_windows=[], layout_reset=False),
+        imgui_window_params=types.SimpleNamespace(show_status_bar=True),
+    )
+    return types.SimpleNamespace(
+        get_runner_params=lambda: params, current_layout_name=lambda: app.TRIAGE
+    )
+
+
+def _draw_menus(monkeypatch: pytest.MonkeyPatch, state: Any, click: str) -> _Menu:
+    """
+    ``app._menus`` run once, as the frame runs it, against a stand-in ImGui with
+    one entry clicked: the facts read, the bar built and drawn, the choice carried out.
+    """
+    from pptmstr import app
+    from pptmstr.ui import main_menu
+
+    menu = _Menu(click)
+    for name in _Menu.DRAWS:
+        monkeypatch.setattr(main_menu.imgui, name, getattr(menu, name))
+    monkeypatch.setattr(app, "hello_imgui", _runner())
+    app._menus(state)
+    return menu
 
 
 def _text_menu(
@@ -520,16 +580,14 @@ def _text_menu(
     from pptmstr import settings as settings_mod
     from pptmstr.ui import typeset
 
-    menu = _Menu(click)
     saved: list[Settings] = []
-    monkeypatch.setattr(app, "imgui", menu)
     monkeypatch.setattr(
         settings_mod, "save", lambda settings, path=None, *, unread: saved.append(settings)
     )
     monkeypatch.setattr(typeset, "available", lambda: True)
     state = app.AppState(store=Store(), bridge=Bridge(), settings=settings or Settings())
     app._configure_typeset(state.settings)
-    app._menus(state)
+    menu = _draw_menus(monkeypatch, state, click)
     return menu, state, saved
 
 
@@ -546,9 +604,13 @@ def test_the_text_menu_keeps_its_two_switches_and_opens_the_dialog_for_the_rest(
 
     menu, state, saved = _text_menu(monkeypatch, "Settings…")
 
-    assert set(menu.menus) == {"Session", "Theme", "Text"}
-    text = [label for label in menu.items if label not in {"New Task..."}]
-    assert text[-3:] == ["Wrap composers", "Typeset text", "Settings…"]
+    assert menu.menus == ["Session", "View", "Text", "Theme"]
+    text = list(menu.items)
+    assert text[text.index("Wrap composers") :][:3] == [
+        "Wrap composers",
+        "Typeset text",
+        "Settings…",
+    ]
     assert state.settings_dialog._open_requested, "the entry asks for the modal"
     assert not state.settings_dialog.is_open, "which is opened by the frame that draws it"
     assert saved == [] and state.settings == Settings(), "and changes nothing by itself"
@@ -601,22 +663,20 @@ def test_the_typeset_entry_is_offered_only_when_it_can_work_and_says_why_when_it
     from pptmstr import settings as settings_mod
     from pptmstr.ui import typeset
 
-    menu = _Menu("Typeset text")
     saved: list[Settings] = []
-    monkeypatch.setattr(app, "imgui", menu)
     monkeypatch.setattr(
         settings_mod, "save", lambda settings, path=None, *, unread: saved.append(settings)
     )
     monkeypatch.setattr(typeset, "available", lambda: available)
     monkeypatch.setattr(typeset, "obtainable", lambda: obtainable)
     monkeypatch.setattr(typeset, "unavailable_reason", lambda: reason)
+    monkeypatch.setattr(typeset, "diff_renderer", lambda: None)
     monkeypatch.setattr(typeset, "configure", lambda **kwargs: None)
     state = app.AppState(store=Store(), bridge=Bridge(), settings=Settings(typeset=False))
-    app._menus(state)
+    menu = _draw_menus(monkeypatch, state, "Typeset text")
     assert menu.items["Typeset text"] == (False, offered)
     assert state.settings.typeset is offered, "a click on an entry that is offered is taken"
-    under = [text for text in menu.said if text.startswith("  ")]
-    assert under == ([] if reason is None else [f"  {reason}"])
+    assert menu.tips.get("Typeset text") == reason
 
 
 def test_switched_off_the_text_menu_says_so_and_not_that_nothing_is_installed(
@@ -641,14 +701,12 @@ def test_switched_off_the_text_menu_says_so_and_not_that_nothing_is_installed(
     for name, value in (("asked", True), ("loaded", False), ("accepted", False)):
         monkeypatch.setattr(gate._GATE, name, value)
     monkeypatch.setattr(gate._GATE, "failure", None)
-    menu = _Menu("")
-    monkeypatch.setattr(app, "imgui", menu)
     monkeypatch.setattr(typeset, "configure", lambda **kwargs: None)
-    app._menus(app.AppState(store=Store(), bridge=Bridge(), settings=Settings()))
+    menu = _draw_menus(
+        monkeypatch, app.AppState(store=Store(), bridge=Bridge(), settings=Settings()), ""
+    )
     assert menu.items["Typeset text"] == (False, False)
-    assert [text for text in menu.said if text.startswith("  ")] == [
-        "  typeset text is switched off (IMSCRIBE_NO_TYPESET=1)"
-    ]
+    assert menu.tips["Typeset text"] == "typeset text is switched off (IMSCRIBE_NO_TYPESET=1)"
 
 
 def test_the_overlays_give_the_dialog_the_settings_in_force_and_the_one_way_to_change_them(
@@ -843,48 +901,6 @@ async def _nothing() -> None:
     return None
 
 
-def test_the_context_log_is_drawn_in_the_mode_the_settings_start_it_in(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """
-    Both panes that draw the log -- CONTEXT in TRIAGE, SESSION in FOCUS -- read the
-    setting each frame. A pane that did not would start in the build's mode
-    whatever the dialog said.
-    """
-    from pptmstr import app
-    from pptmstr.ui import compose, transcript_pane
-
-    started: list[object] = []
-    monkeypatch.setattr(
-        transcript_pane,
-        "draw",
-        lambda snap, state, node, closed_path=None, *, start_in=None: started.append(start_in),
-    )
-    monkeypatch.setattr(compose, "draw_conversation", lambda *args, **kwargs: None)
-    monkeypatch.setattr(
-        app,
-        "imgui",
-        types.SimpleNamespace(
-            get_content_region_avail=lambda: types.SimpleNamespace(y=400.0),
-            begin_child=lambda *args: True,
-            end_child=lambda: None,
-            separator=lambda: None,
-            ImVec2=lambda x, y: (x, y),
-        ),
-    )
-    state = app.AppState(store=Store(), bridge=Bridge(), settings=Settings(context_mode="raw"))
-    state.frame_snap = state.store.snapshot()
-    panels = app._panels(state)
-
-    panels["CONTEXT"]()
-    panels["SESSION"]()
-    assert started == [transcript_pane.RenderMode.RAW] * 2
-
-    state.settings = Settings()
-    panels["CONTEXT"]()
-    assert started[-1] is None, "an empty name is the build's own default"
-
-
 def test_escape_over_the_settings_dialog_does_not_also_leave_the_layout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -929,6 +945,167 @@ def test_escape_over_the_settings_dialog_does_not_also_leave_the_layout(
 
     assert escape(dialog_open=False) == [app.TRIAGE]
     assert escape(dialog_open=True) == []
+
+
+def _escape_over_the_find_row(
+    monkeypatch: pytest.MonkeyPatch, *, row_open: bool, editing: bool, held: int = 0
+) -> tuple[list[str], tuple[list[str], str | None, dict[str, str]]]:
+    """
+    Escape pressed over the SESSION log, in the order the runner keeps: the pane
+    draws in one frame, and the frame's keys are read before the next frame starts
+    (``pre_new_frame``, ``app._handle_keys``), by when a row the Escape closed is
+    already closed. ``row_open`` opens the find row first, its field given up as a
+    click in the log gives it up; ``editing`` has the operator part way through
+    editing a parked call's arguments; ``held`` keeps the key down that many
+    frames past the press, long enough for ImGui to repeat it. A second press,
+    after the release, follows. Returns every layout switched to, and the layouts
+    switched to, the edit open and the edits kept as the first press was released.
+    """
+    from imgui_bundle import imgui
+
+    from pptmstr import app
+    from pptmstr.intents import AgentSpawned, ApprovalRequested
+    from pptmstr.model import PendingApproval
+    from pptmstr.transcript import SegmentKind, Transcript
+    from pptmstr.ui import transcript_pane, typeset
+    from pptmstr.ui.focus import OnObligation
+
+    monkeypatch.setattr(typeset, "enabled", lambda pane=None: False)
+    switched: list[str] = []
+    monkeypatch.setattr(
+        app,
+        "hello_imgui",
+        types.SimpleNamespace(current_layout_name=lambda: app.FOCUS, switch_layout=switched.append),
+    )
+    node = ("s1", None)
+    transcript = Transcript()
+    transcript.append(SegmentKind.OUTPUT, "".join(f"line {n} checksum\n" for n in range(20)))
+    store = Store()
+    store.apply(
+        AgentSpawned(
+            node_id=node,
+            parent=None,
+            task="t",
+            model="m",
+            started_at=0.0,
+            cwd="/x",
+            transcript=transcript,
+        )
+    )
+    state = app.AppState(store=store, bridge=Bridge(), settings=Settings())
+    if editing:
+        parked = PendingApproval(
+            id="p1",
+            node=node,
+            tool_name="Write",
+            tool_use_id="tu-p1",
+            raw_args={"path": "a"},
+            summary="Write a",
+            requested_at=1.0,
+        )
+        store.apply(ApprovalRequested(node, parked), now=1.0)
+        state.focus.target = OnObligation(f"approval:{parked.id}")
+        state.review.editing = parked.id
+        state.review.edits[parked.id] = '{"path": "edited"}'
+    state.frame_snap = store.snapshot()
+    bar = state.transcripts.find
+
+    context = imgui.create_context()
+    try:
+        io = imgui.get_io()
+        io.set_ini_filename("")
+        io.display_size = imgui.ImVec2(800, 600)
+        io.delta_time = 1 / 60
+        io.backend_flags |= imgui.BackendFlags_.renderer_has_textures
+        io.fonts.add_font_default()
+
+        repeats = 0
+
+        def frame() -> None:
+            nonlocal repeats
+            imgui.new_frame()
+            imgui.set_next_window_focus()
+            imgui.begin("##pane")
+            transcript_pane.draw(state.frame_snap, state.transcripts, node)
+            imgui.end()
+            imgui.render()
+            repeats += bool(imgui.is_key_pressed(imgui.Key.escape))
+            app._handle_keys(state)
+
+        for _ in range(2):
+            frame()
+        if row_open:
+            bar.open, bar.needle = True, "checksum"
+            frame()
+            assert bar.open and not bar.active and not io.want_capture_keyboard
+        io.add_key_event(imgui.Key.escape, True)
+        frame()
+        assert not bar.open
+        repeats = 0
+        for _ in range(held):
+            frame()
+        # The hold is long enough that the key repeated: the case is reached.
+        assert bool(repeats) == bool(held)
+        io.add_key_event(imgui.Key.escape, False)
+        frame()
+        first = (list(switched), state.review.editing, dict(state.review.edits))
+        io.add_key_event(imgui.Key.escape, True)
+        frame()
+        io.add_key_event(imgui.Key.escape, False)
+        frame()
+    finally:
+        imgui.destroy_context(context)
+    return switched, first
+
+
+@pytest.mark.parametrize("row_open", [False, True], ids=["no find row", "find row open"])
+def test_the_escape_that_closes_the_find_row_does_not_also_leave_focus(
+    monkeypatch: pytest.MonkeyPatch, row_open: bool
+) -> None:
+    """
+    The Escape that closes the row is the row's, and FOCUS stays; the next one,
+    with no row to close, returns to TRIAGE. With no row open the first Escape
+    returns at once, which is what shows the probe can see a switch at all.
+    """
+    from pptmstr import app
+
+    switched, first = _escape_over_the_find_row(monkeypatch, row_open=row_open, editing=False)
+    assert first[0] == ([] if row_open else [app.TRIAGE])
+    assert switched[:1] == [app.TRIAGE]
+
+
+@pytest.mark.parametrize("row_open", [False, True], ids=["no find row", "find row open"])
+def test_the_escape_that_closes_the_find_row_keeps_the_argument_edit(
+    monkeypatch: pytest.MonkeyPatch, row_open: bool
+) -> None:
+    """
+    An argument edit is cancelled by Escape, and the operator's edited text with
+    it. The Escape that closes the find row is aimed at the row: the edit stays
+    open with what was typed in it. With no row open the same Escape cancels the
+    edit, which shows the probe reaches ``review.handle_keys`` at all.
+    """
+    _, (_, editing, edits) = _escape_over_the_find_row(monkeypatch, row_open=row_open, editing=True)
+    if row_open:
+        assert editing == "p1"
+        assert edits == {"p1": '{"path": "edited"}'}
+    else:
+        assert editing is None and edits == {}
+
+
+def test_a_held_escape_that_closed_the_find_row_does_not_leave_focus_on_its_repeats(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    The pane reads Escape without repeat and the layout keys with it, so a press
+    the row took that is held past ``key_repeat_delay`` would return to TRIAGE on
+    a repeat frame. The press is the row's until it is released; the press after
+    the release is not, and returns.
+    """
+    from pptmstr import app
+
+    switched, first = _escape_over_the_find_row(monkeypatch, row_open=True, editing=False, held=30)
+    assert first[0] == []
+    assert switched == [app.TRIAGE]
 
 
 def test_a_chord_over_a_typeset_view_does_not_change_the_layout(
@@ -4417,8 +4594,6 @@ def test_details_is_handed_when_the_writer_last_saw_a_session_active(
 def test_the_fold_setting_is_a_menu_item_that_persists_and_is_refused_like_any_other_save(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import inspect
-
     from pptmstr import app
     from pptmstr import settings as settings_mod
 
@@ -4438,9 +4613,12 @@ def test_the_fold_setting_is_a_menu_item_that_persists_and_is_refused_like_any_o
     assert unread.settings.hide_ended_subagents is False
     assert file.read_text() == broken and unread.unsaved is not None
 
-    menus = inspect.getsource(app._menus)
-    assert '"Show ended sub-agents", "", not state.settings.hide_ended_subagents' in menus
-    assert "_switch_hide_ended(state, not state.settings.hide_ended_subagents)" in menus
+    menu = _draw_menus(monkeypatch, state, "Show ended sub-agents")
+    assert menu.items["Show ended sub-agents"] == (True, True), "ticked while they are shown"
+    assert state.settings.hide_ended_subagents is True, "and a click hides them"
+    assert settings_mod.load().hide_ended_subagents is True
+    menu = _draw_menus(monkeypatch, state, "")
+    assert menu.items["Show ended sub-agents"] == (False, True)
 
 
 def test_main_starts_with_the_real_lister_and_start_moves_before_it_builds_or_recalls() -> None:
@@ -6046,30 +6224,35 @@ def test_in_dear_imgui_a_session_picked_in_new_task_is_resumed_there_and_no_form
         imgui.destroy_context(context)
 
 
-def test_the_menu_bar_spells_a_second_step_the_way_the_card_menu_does() -> None:
+def test_the_menu_bar_spells_a_second_step_the_way_the_card_menu_does(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """
     An item that opens something more ends in the ellipsis character: the card
     menu's ``Resume…`` is ``widgets.RESUME_ITEM``, which five panes point at, and
-    the menu bar's two such items are spelled with the same character and not with
-    three dots.
+    the menu bar's own such items, and a closed card's as the bar shows them, are
+    spelled with the same character, at the end, and not with three dots.
     """
-    import ast
-    import inspect
-
     from pptmstr import app
+    from pptmstr.intents import AgentFinished, AgentSpawned
+    from pptmstr.model import AgentState
     from pptmstr.ui import session_menu, widgets
+    from pptmstr.ui.focus import OnNode
 
     assert session_menu.RESUME_LABEL == widgets.RESUME_ITEM == "Resume…"
-    tree = ast.parse(inspect.getsource(app._menus))
-    labels = [
-        node.args[0].value
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "menu_item"
-        and isinstance(node.args[0], ast.Constant)
-    ]
-    assert "New Task…" in labels and "Controls for the focused card…" in labels
+    root = ("s1", None)
+    store = Store()
+    store.apply(
+        AgentSpawned(node_id=root, parent=None, task="t", model="m", started_at=0.0, cwd="/x"),
+        now=1.0,
+    )
+    store.apply(AgentFinished(root, AgentState.DONE, 2.0), now=2.0)
+    state = app.AppState(store=store, bridge=Bridge(), settings=Settings())
+    state.frame_snap = store.snapshot()
+    state.focus.target = OnNode(root, pinned=True)
+
+    labels = list(_draw_menus(monkeypatch, state, "").items)
+    assert {"New task…", "Settings…", "Resume…"} <= set(labels)
     assert not [label for label in labels if "..." in label]
     assert all(label.endswith("…") == ("…" in label) for label in labels)
 

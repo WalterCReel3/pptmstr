@@ -90,7 +90,7 @@ from .model import (
 from .pool import SessionPool
 from .sessions import SessionRow
 from .store import Observer, Store
-from .theme import REQUIRED_THEMES, THEMES, P
+from .theme import P
 from .transcript import SegmentKind, Transcript
 from .ui import (
     board_pane,
@@ -103,6 +103,7 @@ from .ui import (
     health,
     inbox,
     launcher,
+    main_menu,
     rail,
     resume_form,
     review,
@@ -111,6 +112,7 @@ from .ui import (
     settings_dialog,
     transcript_pane,
     typeset,
+    widgets,
 )
 from .ui import focus as focus_mod
 from .ui.widgets import flat_line, format_elapsed
@@ -121,6 +123,9 @@ from .ui.widgets import flat_line, format_elapsed
 # arrangement alone.
 TRIAGE = "TRIAGE"
 FOCUS = "FOCUS"
+# The key that switches to each layout: read by ``_handle_layout_keys`` and shown
+# beside the layout in the View menu (``main_menu``), so the two cannot disagree.
+LAYOUT_KEYS: dict[str, int] = {TRIAGE: int(imgui.Key.tab), FOCUS: int(imgui.Key.enter)}
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,10 +145,22 @@ class LaunchRefused:
     reason: str
 
 
+@dataclass(frozen=True, slots=True)
+class LaunchHeldOnChanges:
+    """
+    Nothing was handed to the pool because the checkout a worktree was to be made
+    from has uncommitted changes, or ``status`` could not say (``launcher.
+    UncommittedFound``), and for no other reason. The draft goes back accepting
+    them, so the operator's next press of it launches.
+    """
+
+    reason: str
+
+
 # What ``_launch``'s coroutine returns. A value and not an exception or a log line:
 # the decision is made on the asyncio thread, after the modal has closed, and the
 # only thing that travels back to the draw thread is what the coroutine returns.
-LaunchOutcome = LaunchStarted | LaunchRefused
+LaunchOutcome = LaunchStarted | LaunchRefused | LaunchHeldOnChanges
 
 
 @dataclass(frozen=True, slots=True)
@@ -808,6 +825,8 @@ class AppState:
     # One cursor. It is either on an obligation or on a node, and whichever it is
     # on, the other is derived -- see ui/focus.py for why two were unfixable.
     focus: focus_mod.FocusState = field(default_factory=focus_mod.FocusState)
+    # The card an open Session menu was opened for; None while it is closed.
+    menu_latch: main_menu.Latch | None = None
     review: review.ReviewState = field(default_factory=review.ReviewState)
     detail_pane_state: detail.DetailState = field(default_factory=detail.DetailState)
     compose: compose.ComposeState = field(default_factory=compose.ComposeState)
@@ -875,6 +894,11 @@ class AppState:
     transcripts: transcript_pane.TranscriptState = field(
         default_factory=transcript_pane.TranscriptState
     )
+    # How tall SESSION's composer and the separator above it were last frame,
+    # which is what the scrollback above them leaves room for (``_scrollback_height``).
+    # Until a frame has measured it, a little more than the one measured at the
+    # defaults: 152 px of composer and 11 of separator at 1500x900.
+    composer_room: float = 170.0
     frame: int = 0
     # Set when the palette changes; consumed at the top of the next frame. See
     # _apply_theme_if_dirty for why this cannot simply happen in post_init.
@@ -1420,6 +1444,12 @@ def _handle_keys(state: AppState) -> None:
     the Enter, Tab or Escape of a sentence whose text box was removed is no more a
     layout key than its ``a`` is an approval, and its ``m`` opens no menu.
 
+    **An Escape the find row took is not theirs**, on the frame it closed the row
+    or on a repeat of that press while it is held (``FindBar.spent_escape``): it
+    was aimed at the row, and read here it would also cancel an argument edit,
+    dropping what was typed, or leave FOCUS. One answer, asked once, for every
+    reader below.
+
     **An open card menu takes all of them.** Keyboard navigation is off, so an
     open popup does not claim the keyboard and reads no key by itself: the menu
     reads its own arrows, Enter and Escape as it draws. Left to this function as
@@ -1431,15 +1461,20 @@ def _handle_keys(state: AppState) -> None:
     claim the keyboard, and the readers below defer to that as they do for the
     launcher.
     """
+    # Before anything returns: asking is what lets a press the find row took go
+    # once it is released (``FindBar.spent_escape``).
+    spent = state.transcripts.find.spent_escape(
+        imgui.get_frame_count(), imgui.is_key_down(imgui.Key.escape)
+    )
     busy = state.cards.claim_keys()
     snap = state.frame_snap
     if snap is None or busy:
         return
-    review.handle_keys(snap, state.focus, state.review, state.bridge)
+    review.handle_keys(snap, state.focus, state.review, state.bridge, escape_spent=spent)
     if not state.review.hold.free:
         return
     _handle_card_key(state)
-    _handle_layout_keys(state)
+    _handle_layout_keys(state, escape_spent=spent)
 
 
 def _keep_baked_sizes() -> None:
@@ -1497,7 +1532,7 @@ def _modal_up(state: AppState) -> bool:
     return state.launcher.is_open or state.resume.is_open or state.settings_dialog.is_open
 
 
-def _handle_layout_keys(state: AppState) -> None:
+def _handle_layout_keys(state: AppState, *, escape_spent: bool = False) -> None:
     """
     Tab triages, Enter focuses, Esc returns. Reached only on a frame whose keys
     ``review.Hold`` let through: see ``_handle_keys``.
@@ -1514,6 +1549,9 @@ def _handle_layout_keys(state: AppState) -> None:
     here is last frame's value, which is the one that matches the frame the
     operator was looking at when they pressed the key.
 
+    ``escape_spent`` is an Escape the find row took (``_handle_keys``): not one
+    that returns.
+
     A chord is not one of these keys. Ctrl+Tab is ImGui's own window switcher and
     Ctrl+Enter sends a prompt; neither captures the keyboard while the mouse is over
     a typeset view, which submits no item, so with only the capture guard both would
@@ -1526,12 +1564,15 @@ def _handle_layout_keys(state: AppState) -> None:
     if io.key_ctrl or io.key_alt or io.key_super:
         return
     current = hello_imgui.current_layout_name()
-    if imgui.is_key_pressed(imgui.Key.tab) and current != TRIAGE:
+    if imgui.is_key_pressed(imgui.Key(LAYOUT_KEYS[TRIAGE])) and current != TRIAGE:
         hello_imgui.switch_layout(TRIAGE)
-    elif imgui.is_key_pressed(imgui.Key.enter) and current != FOCUS:
+    elif imgui.is_key_pressed(imgui.Key(LAYOUT_KEYS[FOCUS])) and current != FOCUS:
         hello_imgui.switch_layout(FOCUS)
     elif (
-        imgui.is_key_pressed(imgui.Key.escape) and current == FOCUS and state.review.editing is None
+        imgui.is_key_pressed(imgui.Key.escape)
+        and current == FOCUS
+        and state.review.editing is None
+        and not escape_spent
     ):
         hello_imgui.switch_layout(TRIAGE)
 
@@ -2310,6 +2351,29 @@ def _launch(
             if launcher.refusal_for(spec.cwd) is not None:
                 LOG.error("app", f"refused a contained launch in {spec.cwd}: {_MOVED_INSIDE}")
                 return LaunchRefused(f"{spec.cwd} {_MOVED_INSIDE}")
+        # The worktree ``spec.cwd`` names, made before the session exists: the
+        # session, its brief and its announce all read the cwd before any process
+        # does. After the containment checks, so a launch they refuse makes nothing.
+        # On a worker for the reason the version read is: ``git worktree add`` checks
+        # out every file and runs the operator's hooks.
+        #
+        # A refusal holds the launch with git's reason and the draft goes back; the
+        # session is never started anywhere else instead.
+        if spec.worktree is not None:
+            if state.fake:
+                return LaunchRefused("--fake makes no worktrees; clear the branch to launch")
+            made = await asyncio.to_thread(launcher.make_worktree, spec.worktree)
+            match made:
+                case None:
+                    LOG.info("app", f"worktree at {spec.cwd} on {spec.worktree.branch} is ready")
+                case launcher.WorktreeRefused(reason=reason):
+                    LOG.error("app", f"refused a launch into a worktree at {spec.cwd}: {reason}")
+                    return LaunchRefused(reason)
+                case launcher.UncommittedFound(reason=reason):
+                    LOG.warn("app", f"held a launch into a worktree at {spec.cwd}: {reason}")
+                    return LaunchHeldOnChanges(reason)
+                case _:
+                    assert_never(made)
         # Before the session exists, because it is constructed with what the log
         # says: the addresses its earlier agents answered to. Read on a worker for
         # the reason the version is.
@@ -2471,27 +2535,40 @@ def _note_started(state: AppState, spec: LaunchSpec, session: AgentSession) -> N
         )
 
 
-def _why_not_started(future: concurrent.futures.Future[LaunchOutcome]) -> str | None:
+def _launch_ended(
+    future: concurrent.futures.Future[LaunchOutcome],
+) -> LaunchRefused | LaunchHeldOnChanges | None:
     """
     Why a finished launch started no session, or None when it started one.
 
     Total over the three ways a future ends. ``go`` turns its own exceptions into a
     ``LaunchRefused``, so the other two arms are a coroutine cancelled by the loop
-    shutting down and anything that escaped regardless; neither is a session.
+    shutting down and anything that escaped regardless; neither is a session, and
+    both are refusals. The outcome is handed on as its variant, not as its words:
+    what the launcher does with it depends on which it is.
     """
     if future.cancelled():
-        return "the launch was cancelled before a session started"
+        return LaunchRefused("the launch was cancelled before a session started")
     exc = future.exception()
     if exc is not None:
-        return f"{type(exc).__name__}: {exc}"
+        return LaunchRefused(f"{type(exc).__name__}: {exc}")
     outcome = future.result()
     match outcome:
         case LaunchStarted():
             return None
-        case LaunchRefused(reason=reason):
-            return reason
+        case LaunchRefused() | LaunchHeldOnChanges():
+            return outcome
         case _:
             assert_never(outcome)
+
+
+def _why_not_started(future: concurrent.futures.Future[LaunchOutcome]) -> str | None:
+    """
+    ``_launch_ended``'s words alone, or None for a launch that started a session.
+    For saying and for tests; nothing decides on it.
+    """
+    ended = _launch_ended(future)
+    return None if ended is None else ended.reason
 
 
 def _reap_launches(state: AppState) -> None:
@@ -2530,12 +2607,19 @@ def _reap_launches(state: AppState) -> None:
         if not entry.future.done():
             continue
         state.launches.remove(entry)
-        reason = _why_not_started(entry.future)
-        if reason is None:
-            continue
+        ended = _launch_ended(entry.future)
+        match ended:
+            case None:
+                continue
+            case LaunchRefused(reason=reason):
+                accept = False
+            case LaunchHeldOnChanges(reason=reason):
+                accept = True
+            case _:
+                assert_never(ended)
         if entry.resumed is not None and _resume_failed(state, *entry.resumed, reason):
             continue
-        state.launcher.report_failure(entry.draft, reason, entry.origin)
+        state.launcher.report_failure(entry.draft, reason, entry.origin, accept_uncommitted=accept)
 
 
 def _form_up(state: AppState, but: str | None = None) -> bool:
@@ -3210,71 +3294,165 @@ def _draw_not_done(state: AppState) -> None:
 
 
 def _menus(state: AppState) -> None:
-    if imgui.begin_menu("Session"):
-        # The discoverable half of Ctrl+N. A shortcut with no menu entry is a
-        # shortcut nobody who did not read the README will ever press.
-        clicked, _ = imgui.menu_item("New Task…", "Ctrl+N", False)
-        if clicked:
+    """
+    The menu bar: built from the frame's facts (``main_menu``), and what was
+    chosen carried out after every menu is closed.
+
+    **An open menu takes the frame's bare keys**, as an open card menu does, and
+    through the same flag (``MenuState.shown``, read by ``claim_keys``): the
+    Session menu holds the focused card's items, and a ``k`` that moved the cursor
+    under it would rebuild it for another card, which the next click would then
+    act on. Any menu, not only Session: an ``a`` pressed over an open Theme menu
+    approves nothing either.
+
+    **An open Session menu is the card's it was opened for** (``state.menu_latch``),
+    not the cursor's: the cursor also moves with no key pressed -- work arriving
+    in another session takes an unpinned cursor to it (``FocusState.settle``) --
+    and a menu that followed it would put that session's Interrupt under a
+    pointer aimed at this one's. Latched on the frame the bar is first seen
+    open, from the facts that frame was drawn with; it cannot be clicked earlier,
+    since the click that opens it is not also one on an item. Held while any
+    menu is open, not only Session: the pointer sliding along an open bar to
+    View and back reopens Session with no click, and that is the same opening
+    (``main_menu.opening`` carries it over the frame ImGui yields between the
+    two, with neither drawn). Let go when the bar has no menu open, so each
+    opening is for the card the cursor is on then.
+    """
+    facts = _menu_facts(state)
+    menus = main_menu.build(facts)
+    drawn = main_menu.draw(menus)
+    held = drawn.open is not None or (state.menu_latch is not None and main_menu.opening(menus))
+    state.menu_latch = main_menu.Latch(facts.card) if held else None
+    if drawn.open is not None:
+        state.cards.shown = True
+    if drawn.chosen is not None:
+        _perform(state, drawn.chosen)
+
+
+def _menu_facts(state: AppState) -> main_menu.Facts:
+    """
+    What the menu bar is built from, read each frame: a pane added to the runner
+    after setup is listed as soon as it is there.
+
+    The card is the latched one while the bar is open (``_menus``), the cursor's
+    otherwise. A latched card that has left the fleet is still the card -- the
+    record last read -- with every item refused, rather than whichever card
+    the cursor fell to. Find opens the row of the log the panes draw, and they
+    follow the cursor, so it is refused while the cursor is off the latched card.
+    """
+    runner = hello_imgui.get_runner_params()
+    windows = tuple(
+        main_menu.Window(window.label, window.is_visible)
+        for window in runner.docking_params.dockable_windows
+        if window.include_in_view_menu and window.can_be_closed
+    )
+    card = None
+    find_refused = None
+    snap = state.frame_snap
+    latch = state.menu_latch
+    if latch is None:
+        node = state.focus.node(snap) if snap is not None else None
+    else:
+        node = None if latch.card is None else latch.card.record.node_id
+    record = snap.get(node) if snap is not None and node is not None else None
+    if snap is not None and record is not None and snap.off_fleet(record.node_id[0]):
+        record = None
+    if latch is not None and latch.card is not None and record is None:
+        card = dataclasses.replace(latch.card, gone=main_menu.CARD_GONE)
+        find_refused = main_menu.CARD_GONE
+    elif snap is not None and record is not None:
+        wiring = _card_wiring(state)
+        card = main_menu.Card(
+            record,
+            session_menu.entries(record, wiring.gate(record.node_id), wiring.facts(record.node_id)),
+        )
+        if latch is not None and state.focus.node(snap) != record.node_id:
+            find_refused = main_menu.FIND_NOT_SHOWN
+        else:
+            find_refused = _find_refused(runner, snap, record)
+    return main_menu.Facts(
+        settings=state.settings,
+        layout=hello_imgui.current_layout_name(),
+        layouts=tuple(LAYOUT_KEYS.items()),
+        windows=windows,
+        status_bar=runner.imgui_window_params.show_status_bar,
+        card=card,
+        typeset_available=typeset.available(),
+        typeset_obtainable=typeset.obtainable(),
+        typeset_reason=typeset.unavailable_reason() or typeset.diff_renderer(),
+        find_refused=find_refused,
+    )
+
+
+_LOG_PANES = ("CONTEXT", "SESSION")
+"""The panes that draw the focused card's log with its find row."""
+
+
+def _find_refused(
+    runner: hello_imgui.RunnerParams, snap: Snapshot, record: AgentRecord
+) -> str | None:
+    """
+    Why no pane can take a find for ``record`` now, or None. The log panes follow
+    the cursor, so a find asked for is the focused card's; it is drawn where the
+    pane draws the log, which it does not for a session recalled from its file
+    (``widgets.closed_line``), and nowhere when neither log pane is shown.
+    """
+    if widgets.closed_line(snap.get((record.node_id[0], None))) is not None:
+        return main_menu.FIND_NO_LOG
+    shown = {window.label for window in runner.docking_params.dockable_windows if window.is_visible}
+    if not shown.intersection(_LOG_PANES):
+        return main_menu.FIND_NO_PANE
+    return None
+
+
+def _perform(state: AppState, act: main_menu.Act) -> None:
+    """
+    What choosing a menu item does: each the function its other control calls.
+    """
+    match act:
+        case main_menu.NewTask():
             state.launcher.request_open()
-        # The discoverable half of ``m``, for the same reason. Asked for the next
-        # frame: the fleet pane has already been drawn on this one.
-        clicked, _ = imgui.menu_item("Controls for the focused card…", "M", False)
-        if clicked:
-            state.cards.ask_next_frame = True
-        imgui.separator()
-        # Here and not under "Text" or hello_imgui's own View: it is a choice
-        # about what the fleet pane lists, and this is the menu about sessions.
-        # Worded as what ticking it does: ended sub-agents are hidden unless this is
-        # ticked, and it is the only control anywhere that shows them.
-        clicked, _ = imgui.menu_item(
-            "Show ended sub-agents", "", not state.settings.hide_ended_subagents
-        )
-        if clicked:
-            _switch_hide_ended(state, not state.settings.hide_ended_subagents)
-        imgui.end_menu()
-
-    if imgui.begin_menu("Theme"):
-        for name, palette in THEMES.items():
-            required = name in REQUIRED_THEMES
-            label = palette.display_name if required else f"{palette.display_name} *"
-            clicked, _ = imgui.menu_item(label, "", state.settings.theme == name)
-            if clicked:
-                _switch_theme(state, name)
-        imgui.separator()
-        imgui.text_disabled("* discretionary")
-        imgui.end_menu()
-
-    # Named "Text" rather than "View" -- hello_imgui owns a built-in View menu for
-    # docking and layout, and a second one would be two menus with one name.
-    if imgui.begin_menu("Text"):
-        clicked, _ = imgui.menu_item("Wrap composers", "", state.settings.wrap_inputs)
-        if clicked:
-            _switch_wrap(state, not state.settings.wrap_inputs)
-        imgui.separator()
-        # Offered only while the faces are there to draw with, or will be once it
-        # is switched on: a ticked entry that changes nothing on screen would read
-        # as a broken switch. Why it is not offered, or what switching it on will
-        # cost, is said under it rather than left to be guessed.
-        can_typeset = typeset.available()
-        offered = can_typeset or typeset.obtainable()
-        clicked, _ = imgui.menu_item(
-            "Typeset text", "", state.settings.typeset and can_typeset, offered
-        )
-        if clicked:
-            _switch_typeset(state, typeset_on=not state.settings.typeset)
-        # One sentence: why text is not typeset, or, where it is, who draws a
-        # diff and by what measurement of the library that is running.
-        reason = typeset.unavailable_reason() or typeset.diff_renderer()
-        if reason is not None:
-            imgui.text_disabled(f"  {reason}")
-        imgui.separator()
-        # Everything else about text -- the family, a face and a size per role,
-        # a switch per pane -- is in the dialog, with the rest of what persists.
-        # The two entries above stay because each is one click here.
-        clicked, _ = imgui.menu_item("Settings…", settings_dialog.CHORD_LABEL, False)
-        if clicked:
+        case main_menu.OpenSettings():
             state.settings_dialog.request_open()
-        imgui.end_menu()
+        case main_menu.SwitchLayout(name=name):
+            # At the next frame's start, where every other switch is made.
+            state.pending_layout = name
+        case main_menu.ResetLayout():
+            hello_imgui.get_runner_params().docking_params.layout_reset = True
+        case main_menu.ShowWindow(label=label, visible=visible):
+            for window in hello_imgui.get_runner_params().docking_params.dockable_windows:
+                if window.label == label:
+                    window.is_visible = visible
+        case main_menu.ShowStatusBar(visible=visible):
+            hello_imgui.get_runner_params().imgui_window_params.show_status_bar = visible
+        case main_menu.CardChoice(node=node, action=action, rung=rung):
+            record = state.frame_snap.get(node) if state.frame_snap is not None else None
+            if record is None:
+                return
+            wiring = _card_wiring(state)
+            session_menu.choose(
+                action,
+                record,
+                wiring.gate(node),
+                state.cards,
+                wiring.actions,
+                rung=rung,
+                facts=wiring.facts(node),
+            )
+        case main_menu.ShowEndedSubagents(shown=shown):
+            _switch_hide_ended(state, not shown)
+        case main_menu.FindText():
+            # The pane opens the row, and gives its field the keyboard, as it
+            # draws: what the pane's own Ctrl+F does.
+            state.transcripts.find.show()
+        case main_menu.SetTheme(name=name):
+            _switch_theme(state, name)
+        case main_menu.WrapComposers(on=on):
+            _switch_wrap(state, on)
+        case main_menu.TypesetText(on=on):
+            _switch_typeset(state, typeset_on=on)
+        case _:
+            assert_never(act)
 
 
 _TYPESET_FIELDS = (
@@ -3634,12 +3812,26 @@ def _split(initial: str, new: str, direction: imgui.Dir, ratio: float) -> hello_
     return s
 
 
-def _window(label: str, dock: str, fn: Callable[[], None]) -> hello_imgui.DockableWindow:
+def _window(
+    label: str, dock: str, fn: Callable[[], None], flags: int = 0
+) -> hello_imgui.DockableWindow:
     w = hello_imgui.DockableWindow()
     w.label = label
     w.dock_space_name = dock
     w.gui_function = guarded(label, fn)
+    w.imgui_window_flags = flags
     return w
+
+
+SESSION_FLAGS = int(imgui.WindowFlags_.no_scrollbar)
+"""
+SESSION's own window flags. Its scrollback is a child that scrolls, sized to
+leave the composer the rest, so the pane itself never has anything to scroll by
+a bar. It can hold more than its room for the frame the composer grows in,
+because the composer is measured a frame late (``_scrollback_height``); a bar
+of the pane's own shown for that would narrow the scrollback, and every line of
+the log would be set again, twice, as it came and went.
+"""
 
 
 def _closed_path(state: AppState, node: NodeId | None) -> str | None:
@@ -3649,6 +3841,24 @@ def _closed_path(state: AppState, node: NodeId | None) -> str | None:
     worked out by the recall worker (``_recall_fleet``).
     """
     return None if node is None else state.closed_paths.get(node[0])
+
+
+_SCROLLBACK_FLOOR = 80.0
+
+
+def _scrollback_height(avail: float, composer_room: float) -> float:
+    """
+    How tall SESSION's scrollback is: the room the pane has, less what its composer
+    took last frame, and never less than a few lines.
+
+    Measured and not a constant, because the composer is as tall as what it says:
+    two lines for a sub-agent, one for a session that ended, the reply box and its
+    buttons for one that runs. A fixed reserve under the real height is what made
+    the pane overflow and scroll. Last frame's height cannot move this one's: the
+    composer's height does not depend on how tall the scrollback is, so the two do
+    not chase each other.
+    """
+    return max(avail - composer_room, _SCROLLBACK_FLOOR)
 
 
 def _panels(state: AppState) -> dict[str, Callable[[], None]]:
@@ -3709,6 +3919,7 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
                 node,
                 _closed_path(state, node),
                 start_in=transcript_pane.mode_named(state.settings.context_mode),
+                show_reasoning=state.settings.show_reasoning,
             )
 
     def detail_pane() -> None:
@@ -3753,16 +3964,18 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
             return
         node = state.focus.node(state.frame_snap)
         session = (node[0], None) if node else None
-        avail = imgui.get_content_region_avail().y
-        if imgui.begin_child("##scrollback", imgui.ImVec2(0, max(avail - 150.0, 80.0))):
+        height = _scrollback_height(imgui.get_content_region_avail().y, state.composer_room)
+        if imgui.begin_child("##scrollback", imgui.ImVec2(0, height)):
             transcript_pane.draw(
                 state.frame_snap,
                 state.transcripts,
                 node,
                 _closed_path(state, node),
                 start_in=transcript_pane.mode_named(state.settings.context_mode),
+                show_reasoning=state.settings.show_reasoning,
             )
         imgui.end_child()
+        below = imgui.get_content_region_avail().y
         imgui.separator()
         compose.draw_conversation(
             state.frame_snap,
@@ -3773,6 +3986,7 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
             close=lambda n: _close(state, n),
             wrap=state.settings.wrap_inputs,
         )
+        state.composer_room = below - imgui.get_content_region_avail().y
 
     def health_pane() -> None:
         if state.frame_snap is None:
@@ -3949,7 +4163,7 @@ def _focus_layout(panels: dict[str, Callable[[], None]]) -> hello_imgui.DockingP
     ]
     params.dockable_windows = [
         _window("FLEET", "RailSpace", panels["FLEET"]),
-        _window("SESSION", "MainDockSpace", panels["SESSION"]),
+        _window("SESSION", "MainDockSpace", panels["SESSION"], SESSION_FLAGS),
         _window("HEALTH", "HealthSpace", panels["HEALTH"]),
         # Behind HEALTH here, in front of CONTEXT in TRIAGE. The pane is the same
         # object either way; what differs is what the arrangement is for. FOCUS is
@@ -4873,7 +5087,9 @@ def main(argv: list[str] | None = None) -> int:
     runner.app_window_params.restore_previous_geometry = True
     runner.imgui_window_params.show_menu_bar = True
     runner.imgui_window_params.show_menu_app = False
-    runner.imgui_window_params.show_menu_view = True
+    # Our own View, drawn by ``_menus``: hello_imgui's is drawn first whatever is
+    # asked, and its labels and items are not ours to choose (``main_menu``).
+    runner.imgui_window_params.show_menu_view = False
     runner.imgui_window_params.show_menu_view_themes = False
     runner.imgui_window_params.show_status_bar = True
     runner.imgui_window_params.show_status_fps = False

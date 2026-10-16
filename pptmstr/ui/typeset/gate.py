@@ -95,9 +95,13 @@ Reached past ``imscribe.__all__``: the module ``imscribe.typesetter`` itself, fo
 module lists as its own (``typesetter.__all__``) and the facade does not; and
 the module ``imscribe.markdown_rules``, for its private ``_parser``, as said
 below; and ``code_face_lacks`` from the module ``imscribe.ui.typeset_diff_view``,
-which lists it and which imscribe names the supported way to ask it (P39). A
-test reads this package's imports and holds them to those three. One reach is on
-no list: the native module's documents (``columns``).
+which lists it and which imscribe names the supported way to ask it (P39). The
+session pane's find reaches three more, from ``find``: ``marks_for`` from
+``imscribe.typeset_find`` and ``KIND_CODE`` and ``KIND_PARAGRAPH`` from
+``imscribe.description``, each on its module's own list; ``find``'s docstring
+says why. A test reads this package's imports and holds them to exactly these
+(``PAST_THE_FACADE`` and ``BEHIND_THE_FACADE`` in ``tests/test_typeset_gate.py``).
+One reach is on no list: the native module's documents (``columns``).
 
 **The markdown reader is told to hide nothing, and then asked whether it does**
 (``_reader``, ``reader_hides``). A CommonMark reader shows nothing for raw HTML
