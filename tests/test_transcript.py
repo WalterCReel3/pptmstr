@@ -9,7 +9,15 @@ from __future__ import annotations
 
 import threading
 
-from pptmstr.transcript import SegmentKind, Transcript
+from pptmstr.transcript import (
+    OUTPUT_CAP,
+    SegmentKind,
+    ToolEntry,
+    Transcript,
+    cap_output,
+    tool_call_line,
+    tool_result_line,
+)
 
 
 def test_append_and_read() -> None:
@@ -268,3 +276,157 @@ def test_turn_prose_respects_the_published_length() -> None:
 
 def test_turn_prose_on_an_empty_transcript() -> None:
     assert Transcript().turn_prose() == ""
+
+
+# -- tool entries --------------------------------------------------------------
+
+
+def test_an_output_under_the_cap_is_kept_whole() -> None:
+    text = "x" * OUTPUT_CAP
+    assert cap_output(text) == (text, 0)
+
+
+def test_an_output_over_the_cap_is_cut_and_says_by_how_much() -> None:
+    kept, dropped = cap_output("x" * (OUTPUT_CAP + 5))
+    assert (len(kept), dropped) == (OUTPUT_CAP, 5)
+
+
+def test_the_cap_counts_utf8_bytes_and_never_splits_a_character() -> None:
+    """
+    The cap is a memory bound, so it is measured in bytes, and a cut that halved a
+    character would leave a string that no longer decodes to what the tool said.
+    """
+    # Three bytes each: the cap lands one byte into the last character that fits.
+    text = "\u2500" * ((OUTPUT_CAP // 3) + 10)
+    kept, dropped = cap_output(text)
+    assert kept == "\u2500" * (OUTPUT_CAP // 3)
+    assert len(kept.encode()) + dropped == len(text.encode())
+    assert len(kept.encode()) <= OUTPUT_CAP
+
+
+def test_the_cap_measures_a_lone_surrogate_rather_than_failing_on_it() -> None:
+    text = "\udc80" * (OUTPUT_CAP // 3 + 1)
+    kept, dropped = cap_output(text)
+    assert kept == "\udc80" * (OUTPUT_CAP // 3) and dropped == 3
+
+
+def test_a_result_over_the_cap_is_held_cut_and_draws_the_line_it_always_did() -> None:
+    t = Transcript()
+    t.append_tool_call("t1", "Bash", {"command": "yes"})
+    t.append_tool_result("t1", "Bash", "y\n" * OUTPUT_CAP, is_error=False)
+    entry = t.tool_entry("t1")
+    assert entry is not None and entry.result is not None
+    assert entry.result.truncated and entry.result.dropped_bytes == OUTPUT_CAP
+    assert len(entry.result.output) == OUTPUT_CAP
+    assert t.text().endswith("Bash -> " + "y\n" * 148 + "y...\n")
+
+
+def test_a_non_text_result_is_held_as_the_text_its_line_was_cut_from() -> None:
+    content = [{"type": "text", "text": "A page."}]
+    output, dropped = cap_output(content)
+    assert (output, dropped) == (repr(content), 0)
+    assert cap_output(None) == ("None", 0)
+
+
+def test_coalesced_calls_each_find_their_own_entry() -> None:
+    """
+    Two calls in one message are one TOOL_CALL segment -- adjacent lines of a kind
+    coalesce -- so a renderer looking up the segment must get both, in order.
+    """
+    t = Transcript()
+    t.append_tool_call("a", "Read", {"file_path": "a.py"})
+    t.append_tool_call("b", "Read", {"file_path": "b.py"})
+    t.append_tool_result("a", "Read", "1 line", is_error=False)
+    t.append_tool_result("b", "Read", "2 lines", is_error=False)
+    calls, results = t.segments()
+    assert (calls.kind, results.kind) == (SegmentKind.TOOL_CALL, SegmentKind.TOOL_RESULT)
+    ids = [e.tool_use_id for e in t.tool_entries(calls.start, calls.end)]
+    assert ids == ["a", "b"]
+    ids = [e.tool_use_id for e in t.tool_entries(results.start, results.end)]
+    assert ids == ["a", "b"]
+    whole = t.tool_entries(0, t.published_length)
+    assert [e.tool_use_id for e in whole] == ["a", "b"]
+    assert all(e.result is not None for e in whole)
+
+
+def test_an_entry_span_is_the_bytes_of_its_line() -> None:
+    t = Transcript()
+    t.append(SegmentKind.OUTPUT, "before\n")
+    t.append_tool_call("a", "Bash", {"command": "ls \u00e9"})
+    t.append_tool_result("a", "Bash", "x\x00", is_error=True)
+    entry = t.tool_entry("a")
+    assert entry is not None and entry.call is not None and entry.result is not None
+    assert t.read(*entry.call) == tool_call_line("Bash", {"command": "ls \u00e9"})
+    assert t.read(entry.result.start, entry.result.end) == "Bash -> x\\u0000\n"
+    assert t.segments()[-1].kind is SegmentKind.ERROR
+
+
+def test_a_range_outside_every_line_finds_nothing() -> None:
+    t = Transcript()
+    t.append(SegmentKind.OUTPUT, "prose\n")
+    t.append_tool_call("a", "Bash", {})
+    assert t.tool_entries(0, 6) == ()
+    assert t.tool_entries(t.published_length, t.published_length + 100) == ()
+
+
+def test_a_reused_id_is_a_new_entry_and_the_earlier_line_keeps_its_call() -> None:
+    t = Transcript()
+    t.append_tool_call("a", "Read", {"file_path": "one"})
+    first_end = t.published_length
+    t.append(SegmentKind.OUTPUT, "between\n")
+    t.append_tool_call("a", "Read", {"file_path": "two"})
+    t.append_tool_result("a", "Read", "ok", is_error=False)
+    (earlier,) = t.tool_entries(0, first_end)
+    assert earlier.input == {"file_path": "one"} and earlier.result is None
+    latest = t.tool_entry("a")
+    assert latest is not None and latest.input == {"file_path": "two"}
+    assert latest.result is not None
+
+
+def test_an_entry_cannot_be_changed_through_the_arguments_it_was_given() -> None:
+    args = {"command": "ls"}
+    t = Transcript()
+    t.append_tool_call("a", "Bash", args)
+    args["command"] = "rm -rf /"
+    entry = t.tool_entry("a")
+    assert entry is not None and entry.input == {"command": "ls"}
+
+
+def test_the_line_helpers_are_what_the_segments_hold() -> None:
+    t = Transcript()
+    t.append_tool_call("a", "Grep", {"pattern": "x"})
+    t.append_tool_result("a", "Grep", "3 matches", is_error=False)
+    assert t.text() == tool_call_line("Grep", {"pattern": "x"}) + tool_result_line(
+        "Grep", "3 matches"
+    )
+
+
+def test_a_reader_never_sees_an_entry_whose_line_is_unpublished() -> None:
+    """
+    I7 for entries: the line and the entry land under one lock, so every entry a
+    reader can find has its span inside the published length, and every published
+    call line has its entry.
+    """
+    t = Transcript()
+    stop = threading.Event()
+    bad: list[ToolEntry] = []
+
+    def reader() -> None:
+        while not stop.is_set():
+            published = t.published_length
+            for entry in t.tool_entries(0, 1 << 62):
+                if entry.call is not None and entry.call[1] > t.published_length:
+                    bad.append(entry)
+            calls = [s for s in t.segments(published) if s.kind is SegmentKind.TOOL_CALL]
+            if calls and not t.tool_entries(calls[-1].start, calls[-1].end):
+                bad.append(ToolEntry("missing", "", None, None))
+
+    thread = threading.Thread(target=reader)
+    thread.start()
+    for i in range(2000):
+        t.append_tool_call(f"t{i}", "Bash", {"command": str(i)})
+        t.append_tool_result(f"t{i}", "Bash", "ok", is_error=False)
+    stop.set()
+    thread.join()
+    assert not bad
+    assert len(t.tool_entries(0, t.published_length)) == 2000

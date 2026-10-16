@@ -791,11 +791,7 @@ class Translator:
             elif isinstance(block, ToolUseBlock):
                 self._tool_names[block.id] = block.name
                 self._note_task(block)
-                transcript.append(
-                    SegmentKind.TOOL_CALL,
-                    f"\n{block.name}({_compact_args(block.input)})\n",
-                    meta=(("tool", block.name), ("tool_use_id", block.id)),
-                )
+                transcript.append_tool_call(block.id, block.name, block.input)
                 topic = self._topic_for(block)
 
         if msg.usage:
@@ -883,8 +879,9 @@ class Translator:
             if isinstance(block, ToolResultBlock):
                 self._bind_task_id(block)
                 name = self._tool_names.get(block.tool_use_id, "tool")
-                kind = SegmentKind.ERROR if block.is_error else SegmentKind.TOOL_RESULT
-                transcript.append(kind, f"{name} -> {_compact_result(block.content)}\n")
+                transcript.append_tool_result(
+                    block.tool_use_id, name, block.content, is_error=bool(block.is_error)
+                )
         return [StateChanged(node, AgentState.THINKING)]
 
     def _result(self, msg: ResultMessage) -> list[Intent]:
@@ -992,22 +989,6 @@ def _usage_from(usage: Mapping[str, Any]) -> UsageRollup:
         cache_creation_input_tokens=count("cache_creation_input_tokens"),
         cache_read_input_tokens=count("cache_read_input_tokens"),
     )
-
-
-def _compact_args(args: dict[str, Any], limit: int = 160) -> str:
-    parts = []
-    for key, value in args.items():
-        text = value if isinstance(value, str) else repr(value)
-        if len(text) > 60:
-            text = text[:57] + "..."
-        parts.append(f"{key}={text}")
-    joined = ", ".join(parts)
-    return joined if len(joined) <= limit else joined[: limit - 3] + "..."
-
-
-def _compact_result(content: object, limit: int = 300) -> str:
-    text = content if isinstance(content, str) else repr(content)
-    return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
 class AgentSession:

@@ -5740,3 +5740,150 @@ def test_the_prompts_and_the_tool_lists_are_built_from_the_sessions_containment(
     assert bool(set(COMMAND_TOOL_NAMES) & set(restricted)) is session.contained
     for definition in team.values():
         assert ("request_command" in definition.prompt) is session.contained
+
+
+# -- tool entries --------------------------------------------------------------
+
+# Each case: a call and its result as the SDK delivers them, and the two lines the
+# transcript held for them before tool calls became entries -- literals, computed
+# once from the formatting code the lines have always come from, so a change to the
+# derivation shows up here as a byte difference rather than agreeing with itself.
+_TOOL_LINE_CASES: dict[str, tuple[str, dict[str, Any], object, bool, str, str]] = {
+    "bash": (
+        "Bash",
+        {
+            "command": "cd /home/me/project && .venv/bin/python -m pytest -q "
+            "tests/test_transcript.py -k entries",
+            "description": "Run the transcript tests",
+            "timeout": 120000,
+        },
+        "".join(f"PASSED tests/test_transcript.py::test_{i}\n" for i in range(12)),
+        False,
+        "\nBash(command=cd /home/me/project && .venv/bin/python -m pytest -q test..., "
+        "description=Run the transcript tests, timeout=120000)\n",
+        "Bash -> PASSED tests/test_transcript.py::test_0\nPASSED tests/test_transcript.py"
+        "::test_1\nPASSED tests/test_transcript.py::test_2\nPASSED tests/test_transcript.py"
+        "::test_3\nPASSED tests/test_transcript.py::test_4\nPASSED tests/test_transcript.py"
+        "::test_5\nPASSED tests/test_transcript.py::test_6\nPASSED tests/test...\n",
+    ),
+    "edit": (
+        "Edit",
+        {
+            "file_path": "/home/me/project/pptmstr/transcript.py",
+            "old_string": "def a():\n    return 1\n" * 4,
+            "new_string": "def a():\n    return 2\n",
+            "replace_all": False,
+        },
+        "The file has been updated.",
+        False,
+        "\nEdit(file_path=/home/me/project/pptmstr/transcript.py, old_string=def a():\n"
+        "    return 1\ndef a():\n    return 1\ndef a():\n    ..., new_string=def a():\n"
+        "    return 2\n,...)\n",
+        "Edit -> The file has been updated.\n",
+    ),
+    "read": (
+        "Read",
+        {"file_path": "/a/b.py", "offset": 10, "limit": 50},
+        "".join(f"{i:>6}\tline {i}\n" for i in range(40)),
+        False,
+        "\nRead(file_path=/a/b.py, offset=10, limit=50)\n",
+        "Read ->      0\tline 0\n     1\tline 1\n     2\tline 2\n     3\tline 3\n"
+        "     4\tline 4\n     5\tline 5\n     6\tline 6\n     7\tline 7\n     8\tline 8\n"
+        "     9\tline 9\n    10\tline 10\n    11\tline 11\n    12\tline 12\n"
+        "    13\tline 13\n    14\tline 14\n    15\tline 15\n    16\tline 16\n"
+        "    17\tline 17\n    18\tline 18\n    19\tline 19\n    20\t...\n",
+    ),
+    "webfetch": (
+        "WebFetch",
+        {"url": "https://example.com/docs/a/very/long/path/that/goes/on/and/on", "prompt": "Sum"},
+        [{"type": "text", "text": "A page."}],
+        False,
+        "\nWebFetch(url=https://example.com/docs/a/very/long/path/that/goes/on/an..., "
+        "prompt=Sum)\n",
+        "WebFetch -> [{'type': 'text', 'text': 'A page.'}]\n",
+    ),
+    "error": (
+        "Bash",
+        {"command": "false"},
+        "Exit code 1",
+        True,
+        "\nBash(command=false)\n",
+        "Bash -> Exit code 1\n",
+    ),
+    "undrawable": (
+        "Bash",
+        {"command": "printf 'a\x00b\udc80'"},
+        "a\x00b\udc80 \\u0000 done",
+        False,
+        "\nBash(command=printf 'a\\u0000b\\udc80')\n",
+        "Bash -> a\\u0000b\\udc80 \\u005cu0000 done\n",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_TOOL_LINE_CASES))
+def test_a_tool_call_and_result_draw_the_lines_they_always_drew(case: str) -> None:
+    """
+    The lines are derived from the entry now, and every pane draws them: a byte of
+    difference here is a byte of difference on screen.
+    """
+    name, args, content, is_error, call_line, result_line = _TOOL_LINE_CASES[case]
+    tr, transcript = make()
+    tr.handle(AssistantMessage(content=[ToolUseBlock(id="t1", name=name, input=args)], model="m"))
+    tr.handle(
+        UserMessage(
+            content=[ToolResultBlock(tool_use_id="t1", content=content, is_error=is_error)]  # type: ignore[arg-type]
+        )
+    )
+    assert transcript.text() == call_line + result_line
+    kinds = [s.kind for s in transcript.segments()]
+    assert kinds == [
+        SegmentKind.TOOL_CALL,
+        SegmentKind.ERROR if is_error else SegmentKind.TOOL_RESULT,
+    ]
+    assert transcript.segments()[0].meta == (("tool", name), ("tool_use_id", "t1"))
+    assert transcript.segments()[1].meta == ()
+
+
+@pytest.mark.parametrize("case", sorted(_TOOL_LINE_CASES))
+def test_a_tool_entry_holds_what_the_line_was_cut_from(case: str) -> None:
+    """
+    Every argument whole, the output whole, as the SDK delivered them -- a NUL and a
+    lone surrogate included, since an output viewer copies what the tool returned.
+    """
+    name, args, content, is_error, _, _ = _TOOL_LINE_CASES[case]
+    tr, transcript = make()
+    tr.handle(AssistantMessage(content=[ToolUseBlock(id="t1", name=name, input=args)], model="m"))
+    tr.handle(
+        UserMessage(
+            content=[ToolResultBlock(tool_use_id="t1", content=content, is_error=is_error)]  # type: ignore[arg-type]
+        )
+    )
+    entry = transcript.tool_entry("t1")
+    assert entry is not None and entry.result is not None
+    assert entry.name == name
+    assert dict(entry.input or {}) == args
+    assert entry.result.output == (content if isinstance(content, str) else repr(content))
+    assert entry.result.is_error is is_error
+    assert entry.result.dropped_bytes == 0
+    call, result_seg = transcript.segments()
+    assert transcript.tool_entries(call.start, call.end) == (entry,)
+    assert transcript.tool_entries(result_seg.start, result_seg.end) == (entry,)
+
+
+def test_a_result_for_a_call_never_seen_is_kept_under_the_name_the_line_gives() -> None:
+    tr, transcript = make()
+    tr.handle(UserMessage(content=[ToolResultBlock(tool_use_id="gone", content="ok")]))
+    assert transcript.text() == "tool -> ok\n"
+    entry = transcript.tool_entry("gone")
+    assert entry is not None and entry.result is not None
+    assert (entry.name, entry.input, entry.call, entry.result.output) == ("tool", None, None, "ok")
+
+
+def test_a_result_whose_is_error_is_unset_is_a_result_not_an_error() -> None:
+    tr, transcript = make()
+    tr.handle(AssistantMessage(content=[ToolUseBlock(id="t1", name="Read", input={})], model="m"))
+    tr.handle(UserMessage(content=[ToolResultBlock(tool_use_id="t1", content="x", is_error=None)]))
+    entry = transcript.tool_entry("t1")
+    assert entry is not None and entry.result is not None and entry.result.is_error is False
+    assert transcript.segments()[-1].kind is SegmentKind.TOOL_RESULT
