@@ -95,13 +95,15 @@ def test_inside_the_scope_a_child_window_has_no_fill_of_its_own(context: None) -
 
 def test_inside_the_scope_a_frame_is_a_well_and_not_the_surface(context: None) -> None:
     """
-    The docks' frame is the popup's own colour, so a field on a bare popup has a
-    border and no fill. Inside the scope it is the palette's well, opaque.
+    The docks' frame is ``dock_well``, a step off a dock's pane, which is not the
+    surface a modal's fields stand on. Inside the scope it is the palette's well,
+    opaque and not the popup's own colour.
     """
     dock = _colours()
-    assert dock[imgui.Col_.frame_bg] == dock[imgui.Col_.popup_bg]
+    assert dock[imgui.Col_.frame_bg] == _rgba(theme.P.dock_well.vec4)
 
     scope = _in_scope()
+    assert scope[imgui.Col_.frame_bg] != dock[imgui.Col_.frame_bg]
     assert scope[imgui.Col_.frame_bg] == _rgba(theme.P.well.vec4)
     assert scope[imgui.Col_.frame_bg] != scope[imgui.Col_.popup_bg]
 

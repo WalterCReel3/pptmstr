@@ -55,7 +55,7 @@ from .. import settings as settings_mod
 from .. import theme as theme_mod
 from ..approval import DiffText
 from ..settings import Settings
-from . import typeset
+from . import typeset, widgets
 
 TITLE = "Settings"
 
@@ -907,13 +907,12 @@ def _heading(section: Section, picked: list[Change]) -> None:
     A section's title, with its ``defaults`` button at the right edge of the line.
     """
     _title(section.title.upper())
-    style = imgui.get_style()
-    wide = imgui.calc_text_size("defaults").x + 2 * style.frame_padding.x
+    wide = widgets.small_button_width("defaults")
     imgui.same_line()
     imgui.set_cursor_pos_x(imgui.get_cursor_pos_x() + imgui.get_content_region_avail().x - wide)
     if section.at_default:
         imgui.begin_disabled()
-    if imgui.small_button(f"defaults##{section.key}"):
+    if widgets.small_button(f"defaults##{section.key}"):
         picked.append(section.restore)
     if section.at_default:
         imgui.end_disabled()

@@ -30,7 +30,7 @@ from pptmstr.intents import AgentSpawned, ApprovalRequested, ApprovalResolved, S
 from pptmstr.model import AgentState, NodeId, PendingApproval, QuestionPending, Snapshot
 from pptmstr.store import Store
 from pptmstr.transcript import SegmentKind, Transcript
-from pptmstr.ui import decision_view, detail, inbox, review, typeset
+from pptmstr.ui import decision_view, detail, inbox, review, typeset, widgets
 from pptmstr.ui.compose import ComposeState
 from pptmstr.ui.focus import FocusState
 from tests import test_typeset_views as rig
@@ -1288,7 +1288,7 @@ def setting_all(monkeypatch: pytest.MonkeyPatch, seam: Any) -> list[str]:
     it returns holds ``"click"``.
     """
     drawn: list[str] = []
-    real = seam.small_button
+    real = widgets.small_button
 
     def small_button(label: str) -> bool:
         pressed = bool(real(label))
@@ -1298,7 +1298,7 @@ def setting_all(monkeypatch: pytest.MonkeyPatch, seam: Any) -> list[str]:
         drawn.append(label)
         return clicked
 
-    monkeypatch.setattr(seam, "small_button", small_button)
+    monkeypatch.setattr(widgets, "small_button", small_button)
     return drawn
 
 
@@ -2406,8 +2406,10 @@ def test_where_columns_hold_a_diff_past_the_bound_is_the_rows_own_until_the_view
         lambda texts, **how: (built.append(texts), real(texts, **how))[1],
     )
     asked: list[str] = []
-    button = im.small_button
-    monkeypatch.setattr(im, "small_button", lambda label: bool(button(label)) or label in asked)
+    button = widgets.small_button
+    monkeypatch.setattr(
+        widgets, "small_button", lambda label: bool(button(label)) or label in asked
+    )
 
     pane.draw(im)
     notice = (

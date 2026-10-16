@@ -888,7 +888,9 @@ def test_in_dear_imgui_the_window_grows_with_what_it_holds_and_stays_on_screen(
 
     x, y, width, height = frames.window()
     assert height > window[3], "it grew"
-    assert frames.at["resume"][1] > before["resume"][1], "and the buttons with it"
+    # Down the window, which is measured from its top: a form that reaches the
+    # display's foot is moved up whole, so on the display the buttons may not move.
+    assert frames.at["resume"][1] - y > before["resume"][1] - window[1], "and the buttons with it"
     # Three more lines and a row of buttons, not three paragraphs.
     assert height - window[3] < 4.0 * 2.0 * real_imgui.get_text_line_height_with_spacing() + 30.0
     assert x >= 0.0 and y >= 0.0

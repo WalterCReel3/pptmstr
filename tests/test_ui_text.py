@@ -316,6 +316,9 @@ def said_by(monkeypatch: pytest.MonkeyPatch, draw: Callable[[], None], *modules:
     fake.get_font_size.return_value = 16.0
     monkeypatch.setattr(widgets, "multiline_input", lambda label, text, *a, **k: (False, text))
     monkeypatch.setattr(widgets, "follow_tail", lambda following: following)
+    # The panes' small buttons are ``widgets.small_button``; noted as the call it
+    # stands for, so "no live controls" still counts them.
+    monkeypatch.setattr(widgets, "small_button", fake.small_button)
     for module in (*modules, widgets):
         monkeypatch.setattr(module, "imgui", fake)
         if hasattr(module, "ellipsis") and module is not widgets:

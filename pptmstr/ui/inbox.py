@@ -71,9 +71,9 @@ from ..model import (
     SessionFailed,
     Snapshot,
 )
-from ..theme import OBLIGATION_GLYPH, STATE_GLYPH, Face, P, face, faded
+from ..theme import OBLIGATION_GLYPH, STATE_GLYPH, Face, P, face, faded, hint_colour
 from ..transcript import Transcript
-from . import command_view, decision_view, projects, review, splash, splash_art, typeset
+from . import command_view, decision_view, projects, review, splash, splash_art, typeset, widgets
 from .compose import ComposeState, wants_send
 from .focus import FocusState
 from .widgets import (
@@ -535,7 +535,7 @@ def _clicked(label: str) -> bool:
     a command's row does (``command_view``): with keyboard navigation on, Space
     and Enter press a focused button, and no key acts on this row.
     """
-    return bool(imgui.small_button(label)) and bool(
+    return bool(widgets.small_button(label)) and bool(
         imgui.is_mouse_released(imgui.MouseButton_.left)
     )
 
@@ -1273,9 +1273,10 @@ def _expand_approval(
         imgui.set_keyboard_focus_here()
         state.focus_reason = False
     imgui.set_next_item_width(360.0)
-    changed, reason = imgui.input_text_with_hint(
-        "##reason", "reason (shown to the agent on reject)", state.reasons.get(pending.id, "")
-    )
+    with hint_colour(imgui):
+        changed, reason = imgui.input_text_with_hint(
+            "##reason", "reason (shown to the agent on reject)", state.reasons.get(pending.id, "")
+        )
     if changed:
         state.reasons[pending.id] = reason
 
@@ -1791,7 +1792,7 @@ def library_diff(state: review.ReviewState, pending: PendingApproval) -> typeset
             f"this diff is the pane's own rows: the library's view of it would match "
             f"{held.work:,} changed lines in one frame"
         )
-        if imgui.small_button("use the library's view"):
+        if widgets.small_button("use the library's view"):
             state.diff_whole.add(pending.id)
         return None
     return held
@@ -1832,7 +1833,7 @@ def _offer_whole(view: Hashable, more: int) -> None:
     _warning(
         f"… {more:,} more lines not set: all {total:,} would be read and laid out in one frame"
     )
-    if imgui.small_button(f"set all {total:,} lines"):
+    if widgets.small_button(f"set all {total:,} lines"):
         _WHOLE.add(view)
         _PARTS.pop(view, None)
 

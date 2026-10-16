@@ -205,6 +205,16 @@ def test_syntax_brings_in_neither_the_library_nor_imgui_when_run() -> None:
         "module = importlib.util.module_from_spec(spec)\n"
         "spec.loader.exec_module(module)\n"
         "assert module.block_spans('python\\nx = 1', 6, 1, None, None) == ((0, 6, 1),)\n"
+        # Through every gate to the lexer, with inks of its fields' names: the
+        # path that colours is the one a run-time import would be added on.
+        "from collections import namedtuple\n"
+        "fields = 'keyword string comment number function operator default'\n"
+        "inks = namedtuple('Inks', fields)(2, 3, 4, 5, 6, 7, 8)\n"
+        "text = 'python\\nif x == 1: pass'\n"
+        "assert module.needs_lex(text, 6, None, inks)\n"
+        "spans = module.block_spans(text, 6, 1, None, inks)\n"
+        "assert (7, 9, 2) in spans and (15, 16, 5) in spans, spans\n"
+        "assert not module.needs_lex(text, 6, None, inks)\n"
         "print(sorted(name for name in sys.modules if name.split('.')[0] in "
         f"({LIBRARY!r}, 'imgui_bundle', 'pptmstr')))\n"
     )

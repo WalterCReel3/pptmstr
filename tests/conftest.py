@@ -53,7 +53,7 @@ import pytest
 
 from pptmstr import boardsync, brief, model_catalog, pairing, sessionfile, settings, theme, version
 from pptmstr.ui import typeset
-from pptmstr.ui.typeset import gate
+from pptmstr.ui.typeset import gate, views
 from tests.mcp_wire import versions_line
 
 BOLD = theme._ASSETS / "fonts" / "Inconsolata-Bold.ttf"
@@ -269,11 +269,23 @@ def imgui() -> Iterator[Any]:
     A frame needs a context and not a display, so nothing opens a window: the
     context has no backend and the atlas is built from the real font files.
     Destroyed afterwards, the library's context first.
+
+    **No ini file.** ImGui's default is ``imgui.ini`` in the working directory,
+    read on the first frame and written as windows move, so docking state (a
+    tab bar's order) would carry from one module and one run to the next. A
+    test that wants one sets its own path under ``tmp_path``.
+
+    **The frame's lexing budget starts unspent** (``views._LEXING``): it is
+    kept by frame number, and each module's context counts its frames from
+    zero again, so a number the module before ended on would start with that
+    frame's budget already spent.
     """
     bundle = pytest.importorskip("imgui_bundle")
     im = bundle.imgui
     context = im.create_context()
     io = im.get_io()
+    io.set_ini_filename(None)
+    views._LEXING.frame, views._LEXING.spent = -1, 0.0
     io.display_size = im.ImVec2(1200.0, 800.0)
     io.delta_time = 1.0 / 60.0
     io.backend_flags |= im.BackendFlags_.renderer_has_textures.value

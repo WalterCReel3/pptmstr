@@ -31,7 +31,7 @@ from pptmstr.bridge import Bridge
 from pptmstr.settings import McpConnector, RoleChoice, Settings
 from pptmstr.store import Store
 from pptmstr.ui import settings_dialog as dialog
-from pptmstr.ui import typeset
+from pptmstr.ui import typeset, widgets
 from pptmstr.ui.settings_dialog import (
     Choice,
     Facts,
@@ -693,10 +693,19 @@ class Rig:
             monkeypatch.setattr(imgui, name, wrapped)
 
         noting("checkbox")
-        noting("small_button")
         noting("button")
         noting("selectable")
         noting("begin_combo", opens=True)
+
+        # A section's "defaults" is the pane-row button, drawn through ``widgets``.
+        real_small = widgets.small_button
+
+        def small_button(label: str) -> bool:
+            out = real_small(label)
+            self.rects[label] = centre()
+            return out
+
+        monkeypatch.setattr(widgets, "small_button", small_button)
 
     def apply(self, change: dialog.Change) -> None:
         self.changes.append(change)

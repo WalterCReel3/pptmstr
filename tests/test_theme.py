@@ -8,6 +8,8 @@ nothing checks is one that quietly stops being true.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+
 import pytest
 from imgui_bundle import imgui
 
@@ -204,8 +206,8 @@ def test_a_well_is_a_second_colour_on_a_modals_surface(palette: Palette) -> None
 @pytest.mark.parametrize("palette", ALL_PALETTES, ids=PALETTE_IDS)
 def test_text_is_legible_on_a_modals_surface_and_in_a_well(palette: Palette) -> None:
     """
-    What is typed is body text, 4.5:1. A caption on the surface and the hint in an
-    empty field are ``text_dim``, held to the 3:1 it is held to on ``bg``.
+    What is typed is body text, 4.5:1. A caption on the surface is ``text_dim``,
+    held to the 3:1 it is held to on ``bg``; the hint in a field is held below.
     """
     for surface in (palette.panel_alt, palette.well):
         assert contrast_ratio(palette.text, surface) >= 4.5
@@ -254,6 +256,340 @@ def test_a_modals_colours_are_built_once_for_a_palette_and_not_shared_between_tw
     assert theme.dialog_colors() is dark
 
 
+# -- a dock's wells, buttons and tool block ----------------------------------------
+#
+# The operator's pick takes the outline off every frame but high_contrast's, so on a
+# dock a field is told from its pane by ``dock_well`` alone, and a button by its tint.
+# planning/2026-10-15-ui-style-probe.md, "Per-theme values", settles both.
+#
+# Every floor here is measured on the palettes as they stand, not chosen. The well's is
+# turbo's, 1.136:1, the thinnest; the operator called a dock's well at 1.02:1 lost.
+DOCK_WELL_SEPARATION = 1.13
+# The hint in an empty field is ``Palette.hint``, held to body text's 4.5:1 in a dock's
+# well and in a modal's, on every palette (the operator's "(c)": a hint colour of its own).
+HINT_IN_A_WELL = 4.5
+# How far a hint may be from ``text_dim`` toward ``text``, in the steps it is found by.
+HINT_STEPS = 1000
+# Secondary text against body text, measured on each palette's ``text_dim``: the
+# hierarchy the operator kept by giving hints their own colour. A grey moved toward
+# ``text`` fails here. The thinnest is cde's 1.64:1 on its mid-tone pane, and then
+# high_contrast's 1.81.
+DIM_UNDER_TEXT = {
+    "dark": 2.40,
+    "light": 2.72,
+    "high_contrast": 1.81,
+    "ghost": 2.79,
+    "xterm": 2.24,
+    "cde": 1.64,
+    "win311": 2.17,
+    "kitty": 2.51,
+    "turbo": 2.22,
+}
+# The thinnest button on its pane is kitty's, 1.170:1.
+BUTTON_ON_THE_PANE = 1.165
+# Rest to hovered, and hovered to held: the thinnest step is kitty's, 1.228:1.
+BUTTON_STEP_SEEN = 1.2
+# A button's label under the pointer and while held, as the tint's steps leave it. The
+# thinnest are ghost's, 4.48:1 hovered and 3.09:1 held, where today's translucent accent
+# was 3.61:1 held: a held label is read for the length of a click, and is held to the
+# 3:1 of large text and not body text's 4.5.
+BUTTON_TEXT_HOVERED = 4.45
+BUTTON_TEXT_HELD = 3.0
+
+# How far a dock's well is from ``bg`` toward ``text``, as the record's table gives it.
+DOCK_WELL_STEP = {"light": 0.08}
+DOCK_WELL_STEP_ELSEWHERE = 0.10
+# How far a tool block's ground is from ``bg``, and toward what, by how bright the
+# pane is (``Palette.terminal_bg``); tests/test_tool_block.py holds the inks on it.
+TERMINAL_STEPS = (
+    (0.001, "text", 0.10),
+    (0.05, "black", 0.60),
+    (0.5, "white", 0.20),
+    (1.01, "text", 0.06),
+)
+
+
+# A block is seen off its pane and is not a slab on it: tool-proofs' band. The thinnest
+# is ghost's 1.07:1 and the widest cde's 1.29. The log a block is drawn in is ``panel``,
+# where only the floor is held: kitty's block is 1.32:1 there and turbo's 1.50.
+TERMINAL_OFF_THE_PANE = (1.05, 1.3)
+
+
+def _mixed8(base: Color, over: Color, alpha: float) -> Color:
+    """``theme.mixed``, as the 8-bit colour a palette literal holds."""
+    return _opaque(theme.mixed(base, over, alpha))
+
+
+@pytest.mark.parametrize("palette", ALL_PALETTES, ids=PALETTE_IDS)
+def test_a_docks_well_is_a_step_from_its_pane_toward_its_text(palette: Palette) -> None:
+    step = DOCK_WELL_STEP.get(palette.name, DOCK_WELL_STEP_ELSEWHERE)
+    assert palette.dock_well.u32 == _mixed8(palette.bg, palette.text, step).u32
+
+
+@pytest.mark.parametrize("palette", ALL_PALETTES, ids=PALETTE_IDS)
+def test_a_docks_well_is_seen_on_its_pane_and_what_is_in_it_is_legible(palette: Palette) -> None:
+    well = palette.dock_well
+    ratio = contrast_ratio(well, palette.bg)
+    assert ratio >= DOCK_WELL_SEPARATION, f"{palette.name}: the well is {ratio:.3f}:1 off the pane"
+    assert contrast_ratio(palette.text, well) >= 4.5
+    for surface in (palette.dock_well, palette.well):
+        hint = contrast_ratio(palette.hint, surface)
+        assert hint >= HINT_IN_A_WELL, f"{palette.name}: the hint is {hint:.3f}:1 in a well"
+
+
+@pytest.mark.parametrize("palette", ALL_PALETTES, ids=PALETTE_IDS)
+def test_a_hint_is_the_least_step_from_dim_text_that_reads_in_every_well(
+    palette: Palette,
+) -> None:
+    """
+    So a hint keeps as much of the dim grey's recession as the floor allows, and is
+    ``text_dim`` itself where that already reads.
+    """
+
+    def reads(colour: Color) -> bool:
+        return all(
+            contrast_ratio(colour, well) >= HINT_IN_A_WELL
+            for well in (palette.dock_well, palette.well)
+        )
+
+    step = next(
+        n
+        for n in range(HINT_STEPS + 1)
+        if reads(_mixed8(palette.text_dim, palette.text, n / HINT_STEPS))
+    )
+    assert palette.hint.u32 == _mixed8(palette.text_dim, palette.text, step / HINT_STEPS).u32
+
+
+def _calls_hint_colour(expr: object) -> bool:
+    """``hint_colour(...)`` or ``theme.hint_colour(...)``."""
+    import ast
+
+    if not isinstance(expr, ast.Call):
+        return False
+    func = expr.func
+    name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
+    return name == "hint_colour"
+
+
+def _hint_fields_outside_hint_colour() -> tuple[list[str], int]:
+    """
+    Every ``input_text_with_hint`` call in ``pptmstr/`` that is not inside a
+    ``with hint_colour(...)`` block, as ``file:line``, and how many calls there are.
+    """
+    import ast
+    from pathlib import Path
+
+    root = Path(theme.__file__).parent
+    missed: list[str] = []
+    calls = 0
+    for path in sorted(root.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        covered: set[int] = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.With) and any(
+                _calls_hint_colour(item.context_expr) for item in node.items
+            ):
+                covered.update(id(inner) for inner in ast.walk(node))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "input_text_with_hint"
+            ):
+                calls += 1
+                if id(node) not in covered:
+                    missed.append(f"{path.relative_to(root)}:{node.lineno}")
+    return missed, calls
+
+
+def test_every_field_with_a_hint_is_drawn_in_the_hint_colour() -> None:
+    """
+    Outside ``hint_colour`` a hint is drawn in ``text_dim``, which is under 4.5:1 in
+    a well on five palettes. Found by reading the source, so a new field is held too.
+    """
+    missed, calls = _hint_fields_outside_hint_colour()
+    assert calls >= 6
+    assert missed == []
+
+
+@pytest.mark.parametrize("palette", ALL_PALETTES, ids=PALETTE_IDS)
+def test_dim_text_keeps_its_distance_from_body_text(palette: Palette) -> None:
+    ratio = contrast_ratio(palette.text, palette.text_dim)
+    floor = DIM_UNDER_TEXT[palette.name]
+    assert ratio >= floor, f"{palette.name}: dim text is {ratio:.3f}:1 from body text"
+
+
+def test_a_field_drawn_in_the_hint_colour_leaves_dim_text_as_it_was(styled: object) -> None:
+    """
+    ImGui draws a hint in ``text_disabled``, which is every ``imgui.text_disabled``
+    call's colour too, so the hint is pushed around a field and popped after it.
+    """
+    theme.set_theme("cde")
+    theme.apply_style()
+    slot = int(imgui.Col_.text_disabled)
+    assert _slot(slot).u32 == theme.CDE.text_dim.u32
+    with theme.hint_colour(imgui):
+        assert _slot(slot).u32 == theme.CDE.hint.u32
+    assert _slot(slot).u32 == theme.CDE.text_dim.u32
+
+
+@pytest.mark.parametrize("palette", ALL_PALETTES, ids=PALETTE_IDS)
+def test_the_tool_blocks_ground_and_inks(palette: Palette) -> None:
+    """
+    The theme's own terminal, never one shared near-black: a step from the pane
+    whose direction the pane's brightness picks, in the palette's own inks. On a
+    light pane it is a smaller step than a dock's well, so it does not read as one.
+    """
+    lum = theme.relative_luminance(palette.bg)
+    bound, toward, step = next(row for row in TERMINAL_STEPS if lum < row[0])
+    over = {"text": palette.text, "black": theme.col(0x000000), "white": theme.col(0xFFFFFF)}
+    assert palette.terminal_bg.u32 == _mixed8(palette.bg, over[toward], step).u32
+    assert palette.terminal_outline is (bound == TERMINAL_STEPS[0][0])
+    assert palette.terminal_text.u32 == palette.text.u32
+    assert palette.terminal_dim.u32 == theme.terminal_ink(palette.text_dim, palette).u32
+    off = contrast_ratio(palette.terminal_bg, palette.bg)
+    low, high = TERMINAL_OFF_THE_PANE
+    assert low <= off <= high, f"{palette.name}: the block is {off:.3f}:1 off the pane"
+    in_the_log = contrast_ratio(palette.terminal_bg, palette.panel)
+    assert in_the_log >= low, f"{palette.name}: the block is {in_the_log:.3f}:1 in the log"
+    if bound == TERMINAL_STEPS[-1][0]:
+        assert off < contrast_ratio(palette.dock_well, palette.bg)
+    assert contrast_ratio(palette.terminal_text, palette.terminal_bg) >= theme.TERMINAL_FLOOR
+    assert contrast_ratio(palette.terminal_dim, palette.terminal_bg) >= theme.TERMINAL_FLOOR
+
+
+@pytest.fixture
+def styled() -> Iterator[object]:
+    """A context with no frame begun, for ``apply_style`` to write the style of."""
+    made = imgui.create_context()
+    yield made
+    imgui.destroy_context(made)
+
+
+def _slot(slot: int) -> Color:
+    return _opaque(imgui.get_style().color_(slot))
+
+
+@pytest.mark.parametrize("palette", ALL_PALETTES, ids=PALETTE_IDS)
+def test_the_style_is_the_operators_pick(styled: object, palette: Palette) -> None:
+    theme.set_theme(palette.name)
+    theme.apply_style()
+    style = imgui.get_style()
+    pairs = {
+        "frame_padding": (9.0, 6.0),
+        "item_spacing": (8.0, 6.0),
+    }
+    for name, (x, y) in pairs.items():
+        value = getattr(style, name)
+        assert (value.x, value.y) == (x, y), name
+    scalars = {
+        "frame_rounding": 5.0,
+        "grab_rounding": 5.0,
+        "tab_rounding": 5.0,
+        "popup_rounding": 4.0,
+        "popup_border_size": 1.0 if palette.name == "high_contrast" else 0.0,
+        "scrollbar_size": 16.0,
+        "scrollbar_rounding": 8.0,
+        "scrollbar_padding": 3.0,
+    }
+    for name, value in scalars.items():
+        assert getattr(style, name) == value, name
+
+
+@pytest.mark.parametrize("palette", ALL_PALETTES, ids=PALETTE_IDS)
+def test_only_high_contrast_keeps_its_frames_and_popups_outline(
+    styled: object, palette: Palette
+) -> None:
+    """
+    The operator: "keep the frame on high-contrast". A popup there is #101010 on
+    black, 1.1:1, so it keeps its outline too.
+    """
+    theme.set_theme(palette.name)
+    theme.apply_style()
+    style = imgui.get_style()
+    expected = 1.0 if palette.name == "high_contrast" else 0.0
+    assert style.frame_border_size == expected
+    assert style.popup_border_size == expected
+    if palette.name == "high_contrast":
+        border = _slot(int(imgui.Col_.border))
+        assert contrast_ratio(border, palette.dock_well) >= 7.0
+        assert contrast_ratio(border, _slot(int(imgui.Col_.popup_bg))) >= 7.0
+
+
+@pytest.mark.parametrize("palette", ALL_PALETTES, ids=PALETTE_IDS)
+def test_a_docks_wells_and_buttons_are_what_the_palette_says(
+    styled: object, palette: Palette
+) -> None:
+    theme.set_theme(palette.name)
+    theme.apply_style()
+    c = imgui.Col_
+    assert _slot(int(c.frame_bg)).u32 == palette.dock_well.u32
+    tint = palette.button_tint
+    rest, hovered, held = (
+        _slot(int(slot)) for slot in (c.button, c.button_hovered, c.button_active)
+    )
+    for got, alpha in ((rest, tint), (hovered, tint + 0.16), (held, tint + 0.32)):
+        assert got.u32 == _mixed8(palette.panel_alt, palette.accent, alpha).u32
+    for slot in (c.button, c.button_hovered, c.button_active):
+        assert imgui.get_style().color_(int(slot)).w == 1.0
+    ratio = contrast_ratio(rest, palette.bg)
+    assert ratio >= BUTTON_ON_THE_PANE, f"{palette.name}: a button is {ratio:.3f}:1 on the pane"
+    # Each step is seen to change the button, though not always away from the pane:
+    # on cde's mid-tone pane the hovered button is 1.06:1 from it, and is told from
+    # the pane by its hue.
+    assert contrast_ratio(hovered, rest) >= BUTTON_STEP_SEEN
+    assert contrast_ratio(held, hovered) >= BUTTON_STEP_SEEN
+    assert contrast_ratio(palette.text, rest) >= 4.5
+    assert contrast_ratio(palette.text, hovered) >= BUTTON_TEXT_HOVERED
+    assert contrast_ratio(palette.text, held) >= BUTTON_TEXT_HELD
+
+
+def test_light_tints_its_buttons_further_than_the_others() -> None:
+    """At the others' 0.20 light's buttons are 1.41:1 on the pane; dark's are 1.75."""
+    assert theme.LIGHT.button_tint == 0.36
+    assert {p.button_tint for p in ALL_PALETTES if p.name != "light"} == {0.20}
+
+
+# -- the pane tabs ------------------------------------------------------------------
+
+# How far an unselected tab's label stays from the selected tab's ``text``, so it
+# reads as the secondary one. cde's ``text_dim`` is 1.64:1 from its text and is
+# what its tabs draw in.
+TAB_INK_FROM_TEXT = 1.5
+
+
+@pytest.mark.parametrize("palette", ALL_PALETTES, ids=PALETTE_IDS)
+def test_an_unselected_tabs_label_reads_at_aa_on_the_tab(palette: Palette) -> None:
+    """
+    ``Col_.tab`` is ``panel``. Measured: dark 4.51 (its ``text_dim`` is 4.45),
+    ghost 4.56 (4.04); every other palette's ``text_dim`` already reads and is used.
+    """
+    assert contrast_ratio(theme.tab_ink(palette), palette.panel) >= theme.TAB_INK_FLOOR == 4.5
+
+
+@pytest.mark.parametrize("palette", ALL_PALETTES, ids=PALETTE_IDS)
+def test_an_unselected_tabs_label_is_the_least_step_from_dim_toward_text(
+    palette: Palette,
+) -> None:
+    def reads(colour: Color) -> bool:
+        return contrast_ratio(colour, palette.panel) >= theme.TAB_INK_FLOOR
+
+    steps = theme._TAB_INK_STEPS
+    step = next(
+        n for n in range(steps + 1) if reads(_mixed8(palette.text_dim, palette.text, n / steps))
+    )
+    assert theme.tab_ink(palette).u32 == _mixed8(palette.text_dim, palette.text, step / steps).u32
+
+
+@pytest.mark.parametrize("palette", ALL_PALETTES, ids=PALETTE_IDS)
+def test_an_unselected_tabs_label_stays_secondary_to_the_selected_ones(
+    palette: Palette,
+) -> None:
+    ink = theme.tab_ink(palette)
+    assert contrast_ratio(ink, palette.text) >= TAB_INK_FROM_TEXT
+    assert contrast_ratio(palette.text, palette.panel) > contrast_ratio(ink, palette.panel)
+
+
 # -- the splash's raster line --------------------------------------------------
 #
 # ``splash.RASTER_ROWS_PER_SECOND = 16.0`` is sound only under
@@ -274,7 +610,9 @@ def test_a_modals_colours_are_built_once_for_a_palette_and_not_shared_between_tw
 # where text_dim is #C0C0C0 and TRAIL is white at 212/255 over black) and 1.196:1 (cde,
 # TRAIL to RASTER). 1.19 is the tightest floor both clear, so a regression in the
 # triple or in any palette trips this while the shipping choice passes with no room to
-# spare on cde.
+# spare on cde. It is why a field's hint is ``Palette.hint`` and
+# not a raised ``text_dim``: on cde and win311 a grey that reads at 4.5:1 in a well
+# would take DIM under this floor.
 #
 # It is cde that sets the floor, and cde provably cannot do better. Its entire ink range
 # against its own bg spans 3.96:1 (text_dim) to 6.99:1 (text_strong), a total of

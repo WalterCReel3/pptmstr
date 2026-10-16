@@ -163,6 +163,44 @@ deciding input; this recommendation is only a default.
   neither face;
 - mutation testing.
 
+## Decisions answered in the operator's pane (2026-10-16)
+
+- **Placeholder text (dq-a64871cda0f5):** the lead raised each theme's dim colour so that a hint
+  reads at 4.5:1 inside the lighter wells, and offered (a) a darker well, (b) accepting
+  sub-4.5 hints, or (c) a hint colour used only inside wells. Operator: "Let's go with (c)."
+  So hints get their own colour, held to 4.5:1 in each theme's well. The dim colour that
+  apply-theme raised goes back to its earlier value, so secondary text keeps its contrast with
+  body text on every theme (on win311 the raised dim had read almost as dark as body text).
+- **Text on the pixel grid (dq-b621bece1e75):** the font-raster probe measured FreeType's
+  default hinting landing Inconsolata's strokes on whole pixels only at 15 and 18 px. Offered:
+  the auto-hinter app-wide, or tabs at 15 or 18 px. Operator: "At this point I'm considering
+  that the font just wants to be 15px. Use that in this instance and keep default rendering
+  (meaning just change the size). We'll revisit". So tab text is drawn at 15 px, with default
+  rasterisation, and the rest of the tab pick stands. This replaces "text 1.10×".
+- **The CLI's git-status switch, wider cost (dq-7d239cda014c):** "Ratified."
+
+## What was built from those decisions, and the lead's calls on the way (2026-10-16)
+
+The board tasks theme-fix, tabs and tool-block carry the detail. These are the lead's
+decisions, made while the operator was not asked, and each one is open to revision:
+- **high_contrast keeps a popup outline as well as its frame outline.** Without it, popups sit at
+  1.1:1 on black. The operator's "keep the frame on high-contrast" was about visibility on that
+  theme. Every other theme has neither outline.
+- **The hint colour** is a new palette field. It is pushed only around the six fields that show a
+  hint, because ImGui draws hints in the same slot (`text_disabled`) as roughly 100 dim-text
+  calls. A test fails if a hint field is drawn outside it.
+- **Dialogs get their own hint colour** (board task theme-fix-2). On win311 the single hint is
+  near-black on a white dialog field, darker than the field's caption, so an empty field reads
+  filled. That defeats the reason the operator chose (c).
+- **cde and win311's terminal ground** is the pane 20% toward white, not tool-block's 60%. Blocks
+  sit on the log's `panel`, and 0.20 is the largest step that stays 1.05–1.3:1 off both the
+  pane and the log. A cost: block buttons need their own colour (board task tool-block-fix).
+- **Tab labels stay uppercase underneath; the painter draws them lowercase.** Measured: `###`
+  labels make hello_imgui rebuild the saved layout on every launch. Floating-window title bars
+  and the View menu still read uppercase.
+- **Unselected tabs get their own ink** (board task tabs-fix). Restoring the dim colour put them
+  at 4.45:1 on dark and 4.04:1 on ghost.
+
 ## After the preview (2026-10-15)
 
 The operator looked at the preview on every theme: "This is looking fantastic although, I'm

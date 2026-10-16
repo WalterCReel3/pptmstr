@@ -51,7 +51,7 @@ from pptmstr.model import (
 )
 from pptmstr.store import Store
 from pptmstr.theme import P
-from pptmstr.ui import board_pane, decision_view
+from pptmstr.ui import board_pane, decision_view, widgets
 from pptmstr.ui.decision_view import Act, DecisionState, Line
 
 ROOT: NodeId = ("s1", None)
@@ -546,6 +546,7 @@ class Screen:
         fake.set_clipboard_text.side_effect = self.clipboard.append
         self.imgui = fake
         monkeypatch.setattr(decision_view, "imgui", fake)
+        monkeypatch.setattr(widgets, "small_button", fake.small_button)
         monkeypatch.setattr(board_pane, "imgui", fake)
         monkeypatch.setattr(board_pane, "author", author)
         monkeypatch.setattr(decision_view, "multiline_input", box)

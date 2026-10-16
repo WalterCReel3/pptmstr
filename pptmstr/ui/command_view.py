@@ -97,8 +97,8 @@ from ..command import (
     ran,
 )
 from ..commandrun import PROFILE_WARNING
-from ..theme import Color, P
-from . import board_pane
+from ..theme import Color, P, hint_colour
+from . import board_pane, widgets
 from .widgets import author_text, format_elapsed, help_mark, multiline_input, one_line
 
 # Seconds, on Dear ImGui's own clock, before an armed act answers its second
@@ -1343,7 +1343,8 @@ def _choices(
     frozen = state.frozen_run(command.id)
     reason = state.reasons.get(command.id, "")
     imgui.set_next_item_width(_REASON_WIDTH)
-    _, typed = imgui.input_text_with_hint("##reason", REASON_HINT, reason)
+    with hint_colour(imgui):
+        _, typed = imgui.input_text_with_hint("##reason", REASON_HINT, reason)
     # Escape in a text box hands back what it held when the caret entered it;
     # that frame's value is not the operator's.
     if typed != reason and not imgui.is_key_pressed(imgui.Key.escape):
@@ -1511,5 +1512,5 @@ def _ended(
             process_output(shown)
     if log_path is not None:
         imgui.text_colored(P.text_dim.vec4, f"all of it is in {one_line(log_path)}")
-        if imgui.small_button(COPY_PATH):
+        if widgets.small_button(COPY_PATH):
             imgui.set_clipboard_text(log_path)

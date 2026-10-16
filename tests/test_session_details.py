@@ -39,7 +39,7 @@ from pptmstr.model import (
 )
 from pptmstr.settings import Settings
 from pptmstr.store import Store
-from pptmstr.ui import board_pane, launcher, session_details
+from pptmstr.ui import board_pane, launcher, session_details, widgets
 from pptmstr.ui.session_details import NOT_KNOWN, Held, Looked, Row, View
 
 ROOT: NodeId = ("s1", None)
@@ -785,12 +785,6 @@ class _Modal:
                 imgui.text_colored(colour, text)  # type: ignore[arg-type]
 
             @staticmethod
-            def small_button(label: str) -> bool:
-                pressed = imgui.small_button(label)
-                at[labels[-1]] = middle()
-                return pressed
-
-            @staticmethod
             def button(label: str) -> bool:
                 pressed = imgui.button(label)
                 at[label] = middle()
@@ -802,7 +796,15 @@ class _Modal:
             def set_clipboard_text(text: str) -> None:
                 clipboard.append(text)
 
+        real_small_button = widgets.small_button
+
+        def small_button(label: str) -> bool:
+            pressed = real_small_button(label)
+            at[labels[-1]] = middle()
+            return pressed
+
         self._monkeypatch.setattr(session_details, "imgui", Noting())
+        self._monkeypatch.setattr(widgets, "small_button", small_button)
         return self
 
     def __exit__(self, *exc: object) -> None:
@@ -848,7 +850,9 @@ def modal(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[_Modal]:
         real.state.board_logs["s1"] = board_pane.LogState(directory=str(tmp_path / "logs" / "s1"))
         real.work = work  # type: ignore[attr-defined]
         real.state.cards.details.ask(ROOT)
-        real.frame(3)
+        # Four: the body is a child that fits its rows a frame after the window
+        # appears, and the window is moved onto the display the frame after that.
+        real.frame(4)
         yield real
 
 
@@ -1345,6 +1349,35 @@ def test_copy_on_each_of_the_sessions_own_paths_puts_that_path_on_the_clipboard(
     assert modal.clipboard == [str(directory), str(directory / "session.json")]
 
 
+def test_the_close_button_is_on_the_display_when_the_rows_are_taller_than_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """
+    A closed session's rows are taller than a 900-pixel display. They scroll in
+    the body; the close button under them stays inside the window and on the
+    display, and it closes.
+    """
+    monkeypatch.setattr(brief, "legacy_root", lambda: tmp_path / "projects")
+    old = boardlog.session_dir(boardsync.legacy_root(), "s1")
+    assert old is not None
+    _record("s1", old)
+    with _Modal(monkeypatch, _closed()) as modal:
+        modal.state.cards.details.ask(ROOT)
+        modal.frame(4)
+        assert modal.window is not None
+        x, y, width, height = modal.window
+        assert y + height <= 900.0
+        assert y < modal.at["close"][1] < y + height
+        (body,) = [
+            window
+            for window in imgui.get_current_context().windows
+            if window.name.startswith(f"{session_details.TITLE}/{session_details.BODY_ID}")
+        ]
+        assert body.scroll_max.y > 0.0, "the rows scroll: this is the case under test"
+        modal.click("close")
+        assert not modal.open
+
+
 def test_the_modal_for_a_closed_session_reads_its_files_once_and_copies_its_gate(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1354,9 +1387,15 @@ def test_the_modal_for_a_closed_session_reads_its_files_once_and_copies_its_gate
     _record("s1", old)
     with _Modal(monkeypatch, _closed()) as modal:
         modal.state.cards.details.ask(ROOT)
-        modal.frame(3)
+        modal.frame(4)
         assert modal.open
-        for label in ("gate", "legacy board log", "board log"):
+        modal.click("gate")
+        # The logs are the last rows of a body taller than the display: scrolled to,
+        # with the wheel over the body, as an operator reaches them.
+        modal.io.add_mouse_pos_event(*modal.at["gate"])
+        modal.io.add_mouse_wheel_event(0.0, -50.0)
+        modal.frame(3)
+        for label in ("legacy board log", "board log"):
             modal.click(label)
         for label in ("cost", "tokens", "context", "sub-agents", "contained"):
             assert label not in modal.at

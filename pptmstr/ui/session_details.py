@@ -51,7 +51,7 @@ from ..model import (
     TranscriptPresence,
 )
 from ..theme import STATE_LABEL, P
-from . import board_pane, launcher
+from . import board_pane, launcher, widgets
 from .widgets import author_text, flat_line, format_elapsed, one_line
 
 TITLE = "Session details###session-details"
@@ -59,7 +59,13 @@ NOT_KNOWN = "not known"
 
 _WIDTH = 760.0
 _LABEL_W = 150.0
-_COPY_W = 44.0
+# The copy column is as wide as its button, measured as the button is drawn, so
+# it holds the button at any scale.
+_COPY = "copy"
+# The body scrolls below this height rather than push the close button off a short
+# display: a few rows, so it is never a window of one button over nothing.
+_BODY_FLOOR = 120.0
+BODY_ID = "##details-body"
 
 
 @dataclass(frozen=True, slots=True)
@@ -171,18 +177,22 @@ class DetailsState:
     _opening: bool = False
     # How many frames it has been drawn for. Escape is read from the second.
     _frames: int = 0
+    # How tall the close button's row was on the last frame it was drawn.
+    _footer_height: float = 0.0
 
     def ask(self, node: NodeId) -> None:
         self.node = node
         self.looked = None
         self._opening = True
         self._frames = 0
+        self._footer_height = 0.0
 
     def close(self) -> None:
         self.node = None
         self.looked = None
         self._opening = False
         self._frames = 0
+        self._footer_height = 0.0
 
     def prune(self, snap: Snapshot) -> None:
         if self.node is not None and self.node not in snap.nodes:
@@ -901,7 +911,9 @@ def draw(state: DetailsState, shown: View | None) -> None:
     Escape closes it, read here because keyboard navigation is off and Dear ImGui
     closes nothing on Escape without it. Kept inside the viewport by the
     launcher's rule (``launcher.modal_origin``): it is as wide as the launcher and
-    can be taller.
+    can be taller. The rows are a body that scrolls (``widgets.begin_dialog_body``)
+    and the close button is under it, so the button stays on the display however
+    many rows a session has.
     """
     if state.node is None:
         return
@@ -934,6 +946,7 @@ def draw(state: DetailsState, shown: View | None) -> None:
     listening = state._frames > 0
     state._frames += 1
 
+    widgets.begin_dialog_body(BODY_ID, state._footer_height, _BODY_FLOOR)
     imgui.push_text_wrap_pos(0.0)
     imgui.text_colored(P.text_strong.vec4, author_text(shown.title))
     imgui.pop_text_wrap_pos()
@@ -942,12 +955,15 @@ def draw(state: DetailsState, shown: View | None) -> None:
         imgui.separator()
         imgui.text_colored(P.text_dim.vec4, section.title)
         _rows(at, section.rows)
+    imgui.end_child()
 
+    footer_top = imgui.get_cursor_pos().y
     imgui.spacing()
     imgui.separator()
     dismissed = bool(imgui.button("close"))
     imgui.same_line()
     imgui.text_disabled("Esc closes")
+    state._footer_height = imgui.get_cursor_pos().y - footer_top
     if listening and imgui.is_key_pressed(imgui.Key.escape):
         dismissed = True
     if dismissed:
@@ -966,7 +982,9 @@ def _rows(section: int, rows: tuple[Row, ...]) -> None:
         return
     imgui.table_setup_column("label", imgui.TableColumnFlags_.width_fixed, _LABEL_W)
     imgui.table_setup_column("value", imgui.TableColumnFlags_.width_stretch)
-    imgui.table_setup_column("copy", imgui.TableColumnFlags_.width_fixed, _COPY_W)
+    imgui.table_setup_column(
+        "copy", imgui.TableColumnFlags_.width_fixed, widgets.small_button_width(_COPY)
+    )
     for at, row in enumerate(rows):
         imgui.table_next_row()
         imgui.table_next_column()
@@ -981,7 +999,7 @@ def _rows(section: int, rows: tuple[Row, ...]) -> None:
             imgui.text_disabled(author_text(row.note))
         imgui.pop_text_wrap_pos()
         imgui.table_next_column()
-        if row.copy is not None and imgui.small_button(f"copy##{section}-{at}"):
+        if row.copy is not None and widgets.small_button(f"{_COPY}##{section}-{at}"):
             # The clipboard is a text call like any other, and a row copies a field
             # held as it arrived; it copies what the row shows.
             imgui.set_clipboard_text(author_text(row.copy))

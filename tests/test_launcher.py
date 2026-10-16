@@ -1409,6 +1409,8 @@ def _run_draw(
     fake.widgets = fake_widgets
 
     monkeypatch.setattr(launcher, "imgui", fake)
+    # The small buttons are drawn through ``widgets``: the fake answers for them.
+    fake_widgets.small_button = fake.small_button
     monkeypatch.setattr(launcher, "widgets", fake_widgets)
 
     launched: list[LaunchSpec] = []
@@ -2897,12 +2899,6 @@ class _RealFrames:
             def __getattr__(self, name: str) -> object:
                 return getattr(imgui, name)
 
-            def small_button(self, label: str) -> bool:
-                pressed = imgui.small_button(label)
-                low, high = imgui.get_item_rect_min(), imgui.get_item_rect_max()
-                buttons[label] = ((low.x + high.x) / 2.0, (low.y + high.y) / 2.0)
-                return bool(pressed)
-
             def selectable(self, label: str, selected: bool) -> tuple[bool, bool]:
                 answer = imgui.selectable(label, selected)
                 low, high = imgui.get_item_rect_min(), imgui.get_item_rect_max()
@@ -2921,7 +2917,16 @@ class _RealFrames:
                     imgui.set_next_item_open(True)
                 return bool(imgui.collapsing_header(label))
 
+        real_small_button = widgets.small_button
+
+        def small_button(label: str) -> bool:
+            pressed = real_small_button(label)
+            low, high = imgui.get_item_rect_min(), imgui.get_item_rect_max()
+            buttons[label] = ((low.x + high.x) / 2.0, (low.y + high.y) / 2.0)
+            return pressed
+
         self._monkeypatch.setattr(launcher, "imgui", Noting())
+        self._monkeypatch.setattr(widgets, "small_button", small_button)
         return self
 
     def __exit__(self, *exc: object) -> None:
@@ -4671,6 +4676,8 @@ def _click_row(
     fake_widgets.ellipsis.side_effect = lambda text, width: text
     fake_widgets.flat_line.side_effect = widgets.flat_line
     monkeypatch.setattr(launcher, "imgui", fake)
+    # The small buttons are drawn through ``widgets``: the fake answers for them.
+    fake_widgets.small_button = fake.small_button
     monkeypatch.setattr(launcher, "widgets", fake_widgets)
     said = [launcher._session_row(picker, row, 0.0, frozenset()) for row in picker.rows]
     return (
@@ -5259,6 +5266,8 @@ def test_a_live_session_is_marked_on_its_row_before_it_is_clicked(
     fake_widgets.ellipsis.side_effect = lambda text, width: text
     fake_widgets.flat_line.side_effect = widgets.flat_line
     monkeypatch.setattr(launcher, "imgui", fake)
+    # The small buttons are drawn through ``widgets``: the fake answers for them.
+    fake_widgets.small_button = fake.small_button
     monkeypatch.setattr(launcher, "widgets", fake_widgets)
     picker = _loaded(_row("a"), _row("b"))
 
@@ -5286,6 +5295,8 @@ def test_a_session_labelled_by_a_prompt_typed_on_several_lines_is_one_row(
     fake_widgets.ellipsis.side_effect = lambda text, width: text
     fake_widgets.flat_line.side_effect = widgets.flat_line
     monkeypatch.setattr(launcher, "imgui", fake)
+    # The small buttons are drawn through ``widgets``: the fake answers for them.
+    fake_widgets.small_button = fake.small_button
     monkeypatch.setattr(launcher, "widgets", fake_widgets)
     typed = replace(_row("a"), summary=None, first_prompt="where are we?\n\nBTW  also this")
     picker = _loaded(typed)

@@ -156,3 +156,133 @@ exposure.
 - reviewer-16 reads Claude Code's env-vars doc as saying the variable also removes the
   built-in commit and PR workflow instructions, not only the git-status snapshot. The
   operator approved "Every session" knowing only the git-status cost.
+
+## What a forged tree's own settings can make the CLI run through pptmstr's launch
+
+Task `cli-trust-probe`. This is a measurement. It proposes no fix, and the fix waits
+for its result. The arms are in `scripts/probe_cli_git_status.py` behind `--pptmstr`
+(e0 is added there) and `--trust` (p1, p2, k1). Every arm builds its own fixture.
+
+### What the docs say (read 2026-10-16; not measured)
+
+- **`setting_sources`.** The SDK reference (code.claude.com/docs/en/agent-sdk/python,
+  `ClaudeAgentOptions`) says: "`None` (CLI defaults: all sources)", and "When
+  `setting_sources` is omitted or `None` and `skills` is not set, `query()` loads the
+  same filesystem settings as the Claude Code CLI: user, project, and local."
+  `AgentSession._options` sets neither field, so a session in P loads
+  `P/.claude/settings.json` and `P/.claude/settings.local.json`.
+- **Precedence** (code.claude.com/docs/en/settings, "Settings files and precedence"):
+  managed, then command line (`--settings`), then project local
+  (`.claude/settings.local.json`), then shared project (`.claude/settings.json`), then
+  user. "Environment variables aren't a level in this stack ... An `env` block inside
+  a settings file is an ordinary key and follows the levels above."
+- **Which variables project and local settings may set**
+  (code.claude.com/docs/en/settings-reference, "Variables Claude Code ignores in
+  `env`"). They "can't set variables that a checked-out repository shouldn't
+  control". The list covers the config, temp and home directories, telemetry
+  exporters, process wrapper and sync, dialog timers, attachments and file mentions,
+  and some launch-environment-only variables. `CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS`
+  is **not** on it. Per "How `env` values interact with your shell", "A value here
+  overwrites the same variable exported in your shell". The exception is that "When
+  the Claude Desktop app or a self-hosted environment runner starts the session, the
+  launch environment it builds takes precedence instead". "When Claude Code applies
+  `env` values" says project and local values apply "after you trust the workspace, or
+  at startup in `-p` mode, which never shows the trust dialog".
+- **Workspace trust in SDK mode** (code.claude.com/docs/en/permissions, "What runs
+  before you trust a folder"). In the column "`claude -p` or the SDK, folder never
+  trusted", "Hooks in settings files, the `env` block and helper commands such as
+  `apiKeyHelper`" are **Used**. `permissions.allow` and `additionalDirectories` are
+  "Not used". "Servers in `.mcp.json`" are "Connected without asking, approved or
+  not. The SDK loads them only when `settingSources` includes project settings."
+  pptmstr passes `--strict-mcp-config`, which this note has not checked against that
+  row.
+- **Hooks and the sandbox** (code.claude.com/docs/en/sandboxing, "What runs outside the
+  sandbox"): "The sandbox covers shell commands only. Claude's file tools, MCP
+  servers, and hooks run outside it", and "command hooks ... run with your full
+  access". code.claude.com/docs/en/hooks: SessionStart fires "When a session begins or
+  resumes" (matchers `startup`, `resume`, `clear`, `compact`, `fork`), and
+  UserPromptSubmit fires "When a prompt is submitted, before Claude processes it".
+  The hooks page does not say outright whether SessionStart fires under `-p` or
+  stream-json. The k1 controls answer that.
+- **Default sandbox writes** (sandboxing, "Default write behavior"): the working
+  directory, directories added with `--add-dir`, and "the per-user temp directory that
+  `$TMPDIR` points to". That is why the hook's outside marker has to sit outside both.
+  The probe flags a contained k1 arm whose fixture lies under `/tmp/claude-<uid>` or
+  `$CLAUDE_CODE_TMPDIR`.
+
+The docs therefore predict YES for p1, p2 and every k1 arm, inside and outside the
+sandbox. The probe measures whether that holds for the bundled 2.1.301 through
+pptmstr's own option building.
+
+### The arms
+
+| arm | launch | planted in P | expect |
+|---|---|---|---|
+| e0-pptmstr-env-cleared | `AgentSession._options()` with `env={}` | nothing | YES |
+| p1-project-env | `_options()` (switch on) | `.claude/settings.json` `{"env":{"…":""}}` | no |
+| p1-control | CLI direct, variable removed | same file | YES |
+| p1-neutral | `_options()` | `.claude/settings.json` `{"env":{"PPTMSTR_PROBE_NEUTRAL":"1"}}` | no |
+| p2-local-env, p2-control, p2-neutral | as p1 | `.claude/settings.local.json` | no / YES / no |
+| k1-sessionstart-uncontained | `_options()` | `.claude/settings.json` SessionStart hook: touch `P/HOOK_MARKER_IN`, then `<top>/HOOK_MARKER_OUT` | no |
+| k1-sessionstart-contained | `_options()` with `containment_settings()` | same | no |
+| k1-sessionstart-control | CLI direct | same | YES |
+| k1-userprompt-{uncontained,contained,control} | as above | UserPromptSubmit hook | no / no / YES |
+
+The neutral arms were not asked for. They were added because loading a local
+settings file may make the CLI run git itself: the permissions doc says it "runs git
+to tell the two apart", meaning a tracked local file from an untracked one. That git
+run could fire the decoy and give p2 a YES that the variable did not cause. A neutral
+arm that reads no excludes that.
+
+**Inconclusive is printed as such.** A marker that is missing from an arm whose CLI did
+not finish reads `inconclusive`, never `no`. That covers SDK exit `-`, and a non-zero
+exit from a direct CLI. A marker that is present is YES whatever the exit.
+
+### What each outcome would mean
+
+- **e0 YES**: pptmstr's own launch shape runs `git status`. Then e's and f's "no"
+  above show that the switch works. **e0 no** (with a finished CLI): that path never
+  ran git, so e and f prove nothing about the switch.
+- **p1 YES with p1-control YES and p1-neutral no**: a forged tree's committed
+  `.claude/settings.json` turns the git section, and the decoy's filter, back on over
+  pptmstr's variable. The environment variable alone does not meet cli-git-off's
+  must-not-break property in the case that motivated it. **p1 no with p1-control
+  YES**: the project tier cannot override the host-spawned variable, and g's YES is
+  specific to the flag tier, which only pptmstr and the operator write. **p1-control
+  no**: an empty value from the project tier does not re-enable the section, so p1
+  says nothing. **p1-neutral YES**: loading the file runs git by itself, so p1's YES
+  is not attributable to the variable.
+- **p2**: the same readings for the local tier.
+- **k1 uncontained, hook-in YES**: a tree's own hook runs as the operator when pptmstr
+  launches into it. That is a wider channel than git status, since it is an arbitrary
+  command, and the git switch does nothing about it. **k1 contained, hook-out YES**
+  (no caveat printed): the hook ran outside the Bash sandbox, as the docs say.
+  **hook-in YES, hook-out no**: the hook ran under a write boundary. **k1 no with its
+  control YES**: pptmstr's launch path does not run project hooks for that event.
+  **k1-control no**: the event does not fire under `-p`, so that k1 row says nothing.
+  SessionStart and UserPromptSubmit are reported separately because the first fires
+  at startup and the second needs a prompt to have been sent.
+
+### Results (operator-run; not yet run)
+
+Command (handed to lead as a concern; not run by the builder):
+`.venv/bin/python scripts/probe_cli_git_status.py --pptmstr --trust --base "$(mktemp -d /tmp/pptmstr-cli-trust.XXXXXX)"`
+
+| arm | expect | exit | filter | fsmonitor | hook-in | hook-out |
+|---|---|---|---|---|---|---|
+| e0-pptmstr-env-cleared | YES | not yet run | not yet run | not yet run | | |
+| p1-project-env | no | not yet run | not yet run | not yet run | | |
+| p1-control | YES | not yet run | not yet run | not yet run | | |
+| p1-neutral | no | not yet run | not yet run | not yet run | | |
+| p2-local-env | no | not yet run | not yet run | not yet run | | |
+| p2-control | YES | not yet run | not yet run | not yet run | | |
+| p2-neutral | no | not yet run | not yet run | not yet run | | |
+| k1-sessionstart-uncontained | no | not yet run | not yet run | not yet run | not yet run | not yet run |
+| k1-sessionstart-contained | no | not yet run | not yet run | not yet run | not yet run | not yet run |
+| k1-sessionstart-control | YES | not yet run | not yet run | not yet run | not yet run | not yet run |
+| k1-userprompt-uncontained | no | not yet run | not yet run | not yet run | not yet run | not yet run |
+| k1-userprompt-contained | no | not yet run | not yet run | not yet run | not yet run | not yet run |
+| k1-userprompt-control | YES | not yet run | not yet run | not yet run | not yet run | not yet run |
+
+The same command also re-runs a–h. If any of them differs from the table above, that
+is recorded here too.

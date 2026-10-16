@@ -42,7 +42,7 @@ from ..approval import Disposition, Policy, classify, requires_containment
 from ..model import LaunchSpec, NewWorktree
 from ..model_catalog import DEFAULT_MODEL, FALLBACK_MODELS
 from ..sessions import Overlay, SessionRow
-from ..theme import P
+from ..theme import P, hint_colour
 from . import widgets
 from .widgets import Help, Notice, Tone
 
@@ -3183,7 +3183,7 @@ def _session_row(picker: SessionPicker, row: SessionRow, now: float, live: froze
     # list of thirty rows for their own bookmarks can act on.
     if row.bookmarked:
         imgui.push_style_color(imgui.Col_.text, P.accent.vec4)
-    if imgui.small_button("*" if row.bookmarked else "+"):
+    if widgets.small_button("*" if row.bookmarked else "+"):
         picker.toggle_bookmark(row)
     if row.bookmarked:
         imgui.pop_style_color()
@@ -3377,7 +3377,7 @@ def _session_list(
         if clicked is not None:
             state.pick_session(clicked, recorder=recorder)
 
-        if imgui.small_button("rescan") and not picker.scanning:
+        if widgets.small_button("rescan") and not picker.scanning:
             picker.request_scan(cwd, scanner=scanner)
     _picked_lines(state, cwd, live)
 
@@ -3404,7 +3404,7 @@ def _picked_lines(state: LauncherState, cwd: str, live: frozenset[str]) -> None:
     for said in (directory_notice(directory, field_resolved), live_notice(picked, live)):
         if said is not None:
             widgets.notice(said)
-    if imgui.small_button(_UNPICK):
+    if widgets.small_button(_UNPICK):
         state.picker.pick(None, cwd)
     widgets.help_mark("picked", "resuming a picked session", (_PICKED_SENDS, _PICKED_CHOSEN_HERE))
 
@@ -3792,13 +3792,13 @@ def _failure_notice(state: LauncherState) -> None:
         loaded = state.failure_loaded
         widgets.notice(failure_notice(failure, loaded=loaded, waiting=len(state.failures) - 1))
         if failure.draft is None or loaded:
-            if imgui.small_button("dismiss this notice"):
+            if widgets.small_button("dismiss this notice"):
                 state.discard_failed()
         else:
-            if imgui.small_button("restore that draft"):
+            if widgets.small_button("restore that draft"):
                 state.restore_failed()
             imgui.same_line()
-            if imgui.small_button("discard it"):
+            if widgets.small_button("discard it"):
                 state.discard_failed()
     # Read after the buttons above, so a restore pressed on this frame shows what it
     # set aside on this frame.
@@ -3806,10 +3806,10 @@ def _failure_notice(state: LauncherState) -> None:
         widgets.notice(set_aside_notice(len(state.set_aside)))
         # Labels of their own: two buttons reading "discard it" in one window share
         # an ID, and the second would never fire.
-        if imgui.small_button("bring back what was set aside"):
+        if widgets.small_button("bring back what was set aside"):
             state.restore_set_aside()
         imgui.same_line()
-        if imgui.small_button("discard what was set aside"):
+        if widgets.small_button("discard what was set aside"):
             state.discard_set_aside()
     widgets.dialog_group()
 
@@ -3921,16 +3921,18 @@ def _branch_field(state: LauncherState, *, reader: CheckoutReader) -> None:
     state.checkout.poll()
     picked = state.picker.picked is not None
     widgets.dialog_field()
-    if picked:
-        imgui.begin_disabled()
-    imgui.set_next_item_width(-1)
-    _, state.branch = imgui.input_text_with_hint(
-        "##branch",
-        "new branch, to run in a new worktree (optional) -- leave empty to run in the directory",
-        state.branch,
-    )
-    if picked:
-        imgui.end_disabled()
+    with hint_colour(imgui):
+        if picked:
+            imgui.begin_disabled()
+        imgui.set_next_item_width(-1)
+        _, state.branch = imgui.input_text_with_hint(
+            "##branch",
+            "new branch, to run in a new worktree (optional)"
+            " -- leave empty to run in the directory",
+            state.branch,
+        )
+        if picked:
+            imgui.end_disabled()
     widgets.dialog_caption()
     imgui.text_disabled("worktree branch")
     if not state.wants_worktree:
@@ -4098,9 +4100,10 @@ def _modal(
     # typo does not fail, it quietly files the session under a project that does
     # not exist.
     imgui.set_next_item_width(-1)
-    _, state.cwd = imgui.input_text_with_hint(
-        "##cwd", "working directory (agents run here)", state.cwd
-    )
+    with hint_colour(imgui):
+        _, state.cwd = imgui.input_text_with_hint(
+            "##cwd", "working directory (agents run here)", state.cwd
+        )
     widgets.dialog_caption()
     imgui.text_disabled("working directory")
 
@@ -4118,9 +4121,12 @@ def _modal(
     # Empty is the common case and must stay cheap to leave empty.
     widgets.dialog_field()
     imgui.set_next_item_width(-1)
-    _, state.brief = imgui.input_text_with_hint(
-        "##brief", "continue an existing brief (optional) -- leave empty for a new one", state.brief
-    )
+    with hint_colour(imgui):
+        _, state.brief = imgui.input_text_with_hint(
+            "##brief",
+            "continue an existing brief (optional) -- leave empty for a new one",
+            state.brief,
+        )
     widgets.dialog_caption()
     imgui.text_disabled("brief directory")
 

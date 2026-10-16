@@ -402,6 +402,7 @@ def _header_text(monkeypatch, snap: Snapshot, obligation: object) -> list[str]:
     """Every string ``_header`` drew, with the pixels stubbed out."""
     fake = MagicMock()
     monkeypatch.setattr(detail, "imgui", fake)
+    monkeypatch.setattr(widgets, "small_button", fake.small_button)
     detail._header(snap, obligation, 10.0)  # type: ignore[arg-type]
     return [str(c.args[1]) for c in fake.text_colored.call_args_list if len(c.args) > 1]
 
@@ -1037,11 +1038,14 @@ class Pane:
                 outer.widgets.append(label)
                 return im.checkbox(label, value)
 
-            def small_button(self, label: str) -> bool:
-                outer.widgets.append(label)
-                return bool(im.small_button(label)) or label in outer.clicks
-
         monkeypatch.setattr(detail, "imgui", Spy())
+        real_small_button = widgets.small_button
+
+        def small_button(label: str) -> bool:
+            outer.widgets.append(label)
+            return real_small_button(label) or label in outer.clicks
+
+        monkeypatch.setattr(widgets, "small_button", small_button)
         real_section = detail.widgets.section
 
         def section(label: str) -> None:
@@ -3153,6 +3157,7 @@ def test_an_answer_is_still_readable_in_detail_after_its_row_has_left_the_queue(
     fake.tree_node_ex.side_effect = lambda label, *a: "###closed-decisions" in label
     for module in (detail, decision_view, board_pane):
         monkeypatch.setattr(module, "imgui", fake)
+    monkeypatch.setattr(widgets, "small_button", fake.small_button)
     monkeypatch.setattr(detail.widgets, "section", MagicMock())
     monkeypatch.setattr(detail, "_narration", MagicMock())
     monkeypatch.setattr(board_pane, "author", lambda text, colour=None: quoted.append(text))

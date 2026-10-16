@@ -23,6 +23,13 @@ Two checks, because each misses what the other sees:
   the source, so it covers branches no frame here reaches, and it is only as good as
   that reading: a field carried in another record, or returned from a function,
   is not followed.
+
+A tool call's entry is the other verbatim surface: ``ToolEntry.name``, ``.input``
+and ``ToolResult.output`` are held as the SDK sent them (``transcript``'s
+docstring), and the session pane draws them as blocks (``ui.tool_block``). The
+live session's transcript holds calls whose name, arguments and output carry both
+characters, so the frames draw those blocks; and the three are fields the source
+check knows by name.
 """
 
 from __future__ import annotations
@@ -55,7 +62,7 @@ from pptmstr.model import (
 from pptmstr.pool import SessionPool
 from pptmstr.settings import Settings
 from pptmstr.store import _VERBATIM, Store
-from pptmstr.transcript import Transcript
+from pptmstr.transcript import SegmentKind, Transcript
 from pptmstr.ui import focus, session_details, typeset, widgets
 
 LOW = json.loads('"\\udc80"')
@@ -67,6 +74,36 @@ LIVE: NodeId = ("sess-live", None)
 SUB: NodeId = ("sess-live", "a1")
 CLOSED: NodeId = ("sess-closed", None)
 CMD = "cmd-20261015T120000Z-0123456789ab"
+
+
+def _tool_calls() -> Transcript:
+    """
+    A transcript holding tool calls the way the driver writes them, every field of
+    each entry carrying a lone surrogate and a NUL: a done call with a long output,
+    an error, one with no result, an MCP call, and a call of a tool with no block of
+    its own.
+    """
+    transcript = Transcript()
+    transcript.append(SegmentKind.OUTPUT, "Looking.\n")
+    long = "".join(f"line {n} {ODD}\n" for n in range(40)) + ODD * 200
+    calls: tuple[tuple[str, str, dict[str, Any], object, bool | None], ...] = (
+        ("t1", "Bash", {"command": f"ls {ODD}", "description": f"list {ODD}"}, long, False),
+        ("t2", "Read", {"file_path": f"{HOME}/a.py"}, f"     1\t{ODD}\n", True),
+        ("t3", "Edit", {"file_path": HOME, "old_string": ODD, "new_string": f"{ODD}!"}, None, None),
+        (
+            "t4",
+            "mcp__pptmstr__post_concern",
+            {"to": ODD, "body": ODD},
+            [{"type": "text", "text": ODD}],
+            False,
+        ),
+        ("t5", f"Frob{ODD}", {f"k{ODD}": ODD}, ODD, False),
+    )
+    for tool_use_id, name, args, output, failed in calls:
+        transcript.append_tool_call(tool_use_id, name, args)
+        if failed is not None:
+            transcript.append_tool_result(tool_use_id, name, output, is_error=failed)
+    return transcript
 
 
 def _store() -> Store:
@@ -82,7 +119,7 @@ def _store() -> Store:
             brief=f"{HOME}/brief",
             cwd=HOME,
             session_base=HOME,
-            transcript=Transcript(),
+            transcript=_tool_calls(),
         ),
         now=0.0,
     )
@@ -94,7 +131,7 @@ def _store() -> Store:
             model="claude-haiku-5",
             started_at=1.0,
             agent_type="builder",
-            transcript=Transcript(),
+            transcript=_tool_calls(),
         ),
         now=1.0,
     )
@@ -258,7 +295,18 @@ def test_every_copy_in_session_details_reaches_the_clipboard(
     assert shown is not None
     copies = [row.copy for section in shown.sections for row in section.rows if row.copy]
     assert any(HOME in copy for copy in copies)
-    monkeypatch.setattr(im, "small_button", lambda label: True)
+    # Every copy is pressed through the wrapper the rows draw it with.
+    monkeypatch.setattr(widgets, "small_button", lambda label: True)
+    # What reaches the clipboard, apart from what ``handed`` also notes for the rows'
+    # values: a row draws the same text it copies.
+    clipped: list[str] = []
+    through = im.set_clipboard_text
+
+    def copying(text: str) -> None:
+        clipped.append(text)
+        through(text)
+
+    monkeypatch.setattr(im, "set_clipboard_text", copying)
     state = session_details.DetailsState()
     state.ask(node)
     for _ in range(2):
@@ -268,8 +316,7 @@ def test_every_copy_in_session_details_reaches_the_clipboard(
         finally:
             im.render()
 
-    clipped = [s for s in handed if s in {widgets.author_text(c) for c in copies}]
-    assert clipped
+    assert set(clipped) == {widgets.author_text(c) for c in copies}
     assert not [s for s in handed if NUL in s]
 
 
@@ -316,7 +363,10 @@ NOT_A_RECORD = frozenset(
 # drawable, and a check that flagged them all would be ignored; those are left to
 # the frames above.
 GENERIC = frozenset({"text", "reason", "answer", "shell"})
-VERBATIM_NAMES = frozenset(
+# A tool call's entry: ``ToolEntry.name`` and ``.input``, and ``ToolResult.output``
+# (rv-tool-entries, item 1). Not store fields, so named here.
+TOOL_ENTRY = frozenset({"name", "input", "output"})
+VERBATIM_NAMES = TOOL_ENTRY | frozenset(
     name for fields in _VERBATIM.values() for name in fields if name not in GENERIC
 )
 
@@ -405,11 +455,19 @@ def test_the_source_check_sees_a_raw_draw_and_passes_one_through_a_helper(tmp_pa
         "    imgui.text(one_line(rec.cwd) if rec.cwd else 'none')\n"
         "    imgui.text(drawable.text(rec.cwd))\n"
         "    imgui.text(rec.brief if rec.cwd != rec.brief else 'x')\n"
+        "    imgui.text(entry.result.output)\n"
+        "    command = entry.input['command']\n"
+        "    imgui.text_colored(c, command)\n"
+        "    imgui.set_item_tooltip(entry.name)\n"
+        "    imgui.text(drawable.text(entry.result.output))\n"
     )
     assert _violations(source) == [
         "pane.py:2 imgui.text(... .cwd ...)",
         "pane.py:4 imgui.text_colored(... title ...)",
         "pane.py:10 imgui.text(... .brief ...)",
+        "pane.py:11 imgui.text(... .output ...)",
+        "pane.py:13 imgui.text_colored(... command ...)",
+        "pane.py:14 imgui.set_item_tooltip(... .name ...)",
     ]
 
 

@@ -110,6 +110,7 @@ from .ui import (
     session_details,
     session_menu,
     settings_dialog,
+    tabs,
     transcript_pane,
     typeset,
     widgets,
@@ -4023,7 +4024,13 @@ def _draw_overlays(state: AppState) -> None:
     has to be evaluated inside a frame, which rules out ``begin_frame`` where the
     rest of the key handling lives. The settings dialog is here for both reasons
     too, and ahead of the pool check: it needs no pool.
+
+    The pane tabs are painted first, into each dock's host window: every modal
+    drawn below is a later window and covers them (``tabs``). Under a guard of
+    their own, since the overlays' guard wraps this whole function: a painter that
+    raises leaves ImGui's own tabs showing, and every modal below still drawn.
     """
+    guarded("pane tabs", tabs.draw)()
     launcher.handle_shortcut(state.launcher)
     # Not over another modal (``_form_up``) or the "Not done" notice: two modals
     # opened from the root replace each other. The dialog itself being up does not

@@ -68,7 +68,7 @@ from pptmstr.model import (
 from pptmstr.settings import Settings
 from pptmstr.store import Store
 from pptmstr.theme import OBLIGATION_GLYPH, STATE_GLYPH
-from pptmstr.ui import command_view, detail, fleet_view, inbox, rail, review
+from pptmstr.ui import command_view, detail, fleet_view, inbox, rail, review, widgets
 from pptmstr.ui.command_view import Actions, CommandViewState, FrozenRun
 from pptmstr.ui.focus import FocusState, OnObligation, Scope
 from tests.test_inbox_rail import _collect, _row_text, _stub_imgui, _stub_row_imgui, approval
@@ -911,6 +911,7 @@ def _detail(
     fake.tree_node_ex.return_value = True
     fake.small_button.return_value = False
     monkeypatch.setattr(detail, "imgui", fake)
+    monkeypatch.setattr(widgets, "small_button", fake.small_button)
     monkeypatch.setattr(inbox, "imgui", fake)
     monkeypatch.setattr(detail, "_header", MagicMock())
     monkeypatch.setattr(detail.widgets, "section", MagicMock())
@@ -1424,6 +1425,7 @@ def test_a_command_read_back_from_a_file_is_not_said_to_be_unread_by_its_asker(
     fake.tree_node_ex.return_value = True
     fake.small_button.return_value = False
     monkeypatch.setattr(detail, "imgui", fake)
+    monkeypatch.setattr(widgets, "small_button", fake.small_button)
     detail.draw_ended_commands(snap, given, S)
     assert told[cid(2)] is True and told[cid(3)] is False
 
@@ -1619,12 +1621,6 @@ class _Survivors:
             def __getattr__(self, name: str) -> object:
                 return getattr(imgui, name)
 
-            def small_button(self, label: str) -> bool:
-                pressed = imgui.small_button(label)
-                low, high = imgui.get_item_rect_min(), imgui.get_item_rect_max()
-                at[label] = ((low.x + high.x) / 2.0, (low.y + high.y) / 2.0)
-                return bool(pressed)
-
             def button(self, label: str) -> bool:
                 pressed = imgui.button(label)
                 low, high = imgui.get_item_rect_min(), imgui.get_item_rect_max()
@@ -1644,6 +1640,15 @@ class _Survivors:
 
         monkeypatch.setattr(inbox, "imgui", Noting())
         monkeypatch.setattr(command_view, "imgui", Noting())
+        real_small_button = widgets.small_button
+
+        def small_button(label: str) -> bool:
+            pressed = real_small_button(label)
+            low, high = imgui.get_item_rect_min(), imgui.get_item_rect_max()
+            at[label] = ((low.x + high.x) / 2.0, (low.y + high.y) / 2.0)
+            return pressed
+
+        monkeypatch.setattr(widgets, "small_button", small_button)
 
     def close(self) -> None:
         real_imgui.destroy_context(self._context)
@@ -1791,6 +1796,7 @@ def test_what_the_operators_profile_may_read_is_said_once_behind_the_question_ma
         fake.radio_button.return_value = False
         monkeypatch.setattr(inbox, "imgui", fake)
         monkeypatch.setattr(command_view, "imgui", fake)
+        monkeypatch.setattr(widgets, "small_button", fake.small_button)
         fake.input_text_with_hint.side_effect = lambda label, hint, value: (False, value)
         monkeypatch.setattr(
             command_view, "help_mark", lambda key, title, paragraphs: explained.extend(paragraphs)
@@ -2732,6 +2738,7 @@ def test_the_survivor_block_is_part_of_the_open_row_and_the_closed_one_still_say
     fake.small_button.return_value = False
     monkeypatch.setattr(inbox, "imgui", fake)
     monkeypatch.setattr(command_view, "imgui", fake)
+    monkeypatch.setattr(widgets, "small_button", fake.small_button)
     monkeypatch.setattr(command_view, "_ended", MagicMock())
 
     inbox.draw_command(snap, rows(wired=True), command)
@@ -2852,6 +2859,7 @@ def test_the_row_notes_the_sessions_directory_written_out_in_full(
     fake.radio_button.return_value = False
     monkeypatch.setattr(inbox, "imgui", fake)
     monkeypatch.setattr(command_view, "imgui", fake)
+    monkeypatch.setattr(widgets, "small_button", fake.small_button)
     fake.input_text_with_hint.side_effect = lambda label, hint, value: (False, value)
     explained: list[str] = []
     monkeypatch.setattr(

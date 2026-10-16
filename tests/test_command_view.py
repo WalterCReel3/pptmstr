@@ -1270,6 +1270,7 @@ class Screen:
         fake.get_item_rect_max.return_value = real_imgui.ImVec2(0.0, 0.0)
         fake.set_clipboard_text.side_effect = self.clipboard.append
         monkeypatch.setattr(command_view, "imgui", fake)
+        monkeypatch.setattr(widgets, "small_button", fake.small_button)
         monkeypatch.setattr(board_pane, "imgui", fake)
         monkeypatch.setattr(board_pane, "author", through("author", REAL_AUTHOR))
         monkeypatch.setattr(command_view, "command_block", through("block", REAL_BLOCK))

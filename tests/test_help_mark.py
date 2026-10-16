@@ -73,6 +73,10 @@ def _row(session_id: str, cwd: str | None) -> SessionRow:
     )
 
 
+# The wrapper itself, kept before a test puts ``_Drawn.small_button`` in its place.
+_REAL_SMALL_BUTTON = widgets.small_button
+
+
 class _Drawn:
     """
     Dear ImGui, for ``widgets`` and for the dialog drawing through it, noting every
@@ -103,7 +107,7 @@ class _Drawn:
         imgui.text_colored(colour, text)
 
     def small_button(self, label: str) -> bool:
-        pressed = bool(imgui.small_button(label))
+        pressed = _REAL_SMALL_BUTTON(label)
         low, high = imgui.get_item_rect_min(), imgui.get_item_rect_max()
         self.buttons[label] = ((low.x + high.x) / 2.0, (low.y + high.y) / 2.0)
         if self.press == label:
@@ -138,6 +142,7 @@ class _Frames:
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch, draw: Callable[[], None]) -> None:
         self.drawn = _Drawn()
+        monkeypatch.setattr(widgets, "small_button", self.drawn.small_button)
         self._draw = draw
         for module in (widgets, launcher, resume_form):
             monkeypatch.setattr(module, "imgui", self.drawn)
@@ -357,6 +362,7 @@ def test_a_notice_is_one_row_however_long_its_line(
     line high, with its mark on the same row.
     """
     heights: list[float] = []
+    advances: list[float] = []
     tops: list[float] = []
     drawn = _Drawn()
 
@@ -364,13 +370,16 @@ def test_a_notice_is_one_row_however_long_its_line(
         imgui.set_next_window_size(imgui.ImVec2(300.0, 200.0))
         imgui.begin("w")
         imgui.push_text_wrap_pos(0.0)
+        before = imgui.get_cursor_pos_y()
         widgets.notice(Notice("word " * 60, Tone.WARN, Help("x", "t", ("p",))))
         heights.append(imgui.get_item_rect_size().y)
+        advances.append(imgui.get_cursor_pos_y() - before)
         tops.append(imgui.get_item_rect_min().y)
         imgui.pop_text_wrap_pos()
         imgui.end()
 
     monkeypatch.setattr(widgets, "imgui", drawn)
+    monkeypatch.setattr(widgets, "small_button", drawn.small_button)
     for _ in range(2):
         drawn.said.clear()
         imgui.new_frame()
@@ -379,7 +388,11 @@ def test_a_notice_is_one_row_however_long_its_line(
 
     (line,) = [text for text in drawn.said if text.startswith("word")]
     assert line.endswith("…") and "\n" not in line
-    assert heights[-1] == imgui.get_text_line_height(), "the mark's row, one line high"
+    # The mark is the row's last item and its tallest: the row is one mark high,
+    # and the cursor moves down by that row and nothing more.
+    mark = widgets.SMALL_BUTTON_TEXT_PX + 2.0 * widgets.SMALL_BUTTON_PADDING[1]
+    assert heights[-1] == mark, "the mark's row"
+    assert advances[-1] == mark + imgui.get_style().item_spacing.y, "one row high"
     assert f"{widgets.HELP_MARK}##x" in drawn.buttons
 
 

@@ -122,6 +122,111 @@ def section(label: str) -> None:
     imgui.spacing()
 
 
+# The pane-row button: a copy, "N earlier lines", a filter chip, a card's action.
+# ImGui's own ``small_button`` forces frame_padding.y to 0, so no style value can
+# give it room; this draws ``imgui.button`` under its own padding, rounding and
+# text size instead (the operator's "variant D", planning/2026-10-15-ui-style-probe.md).
+#
+# The text is pushed as a size and not scaled: ImGui 1.92 rasterises a face at the
+# whole pixel a pushed size comes to, so 14 is a 14 px bake drawn one to one. It is
+# a base like every ``push_font`` size here, so the DPI scale multiplies it as it
+# does the 16 px UI font. Height at scale 1: 14 + 2 x 4 = 22 px.
+SMALL_BUTTON_PADDING = (8.0, 4.0)
+SMALL_BUTTON_ROUNDING = 5.0
+SMALL_BUTTON_TEXT_PX = 14.0
+
+
+def small_button(label: str) -> bool:
+    """
+    ``imgui.small_button``'s replacement: the same label, hence the same id, and
+    the same answer -- true on the frame it is clicked. ``begin_disabled`` reaches
+    it as it reaches any button. Everything pushed is popped before it returns.
+
+    Its label sits on the baseline of the text it shares a line with, as
+    ``imgui.small_button``'s did (``_on_the_line``).
+    """
+    line_ascent = imgui.get_font_baked().ascent
+    imgui.push_font(None, SMALL_BUTTON_TEXT_PX)
+    imgui.push_style_var(imgui.StyleVar_.frame_padding, imgui.ImVec2(*SMALL_BUTTON_PADDING))
+    imgui.push_style_var(imgui.StyleVar_.frame_rounding, SMALL_BUTTON_ROUNDING)
+    try:
+        return _on_the_line(label, line_ascent)
+    finally:
+        imgui.pop_style_var(2)
+        imgui.pop_font()
+
+
+def _on_the_line(label: str, line_ascent: float) -> bool:
+    """
+    The button, moved down so its label's baseline is the line's text baseline.
+
+    ``align_text_base_line`` is ``imgui.small_button``'s flag: it lowers a button
+    until its label's top meets the line's text top (the window's
+    ``curr_line_text_base_offset``). Meeting tops is meeting baselines only for one
+    face size; the label here is 14 px beside 16 px text, whose ascent is ``lift``
+    larger, so the offset the flag reads is raised by ``lift`` for this one button.
+
+    ``ItemSize`` then ends the line and keeps its offset in
+    ``prev_line_text_base_offset``, where ``same_line`` takes it back for the next
+    item. That is set to where a line-face text top lands on the label's baseline,
+    so text after the button meets the label too.
+
+    The flag only moves a button down. Text drawn at the very top of a line has
+    its baseline above the label's wherever the pad is more than ``lift``, and the
+    button cannot rise above the line to meet it: such a line begins with
+    ``small_button_line`` instead, which sets its text down to the label.
+    """
+    dc = imgui.internal.get_current_window().dc
+    held = float(dc.curr_line_text_base_offset)
+    lift = float(line_ascent) - float(imgui.get_font_baked().ascent)
+    dc.curr_line_text_base_offset = held + lift
+    try:
+        return bool(
+            imgui.internal.button_ex(
+                label,
+                imgui.ImVec2(0.0, 0.0),
+                imgui.internal.ButtonFlagsPrivate_.align_text_base_line,
+            )
+        )
+    finally:
+        dc.prev_line_text_base_offset = max(held, float(imgui.get_style().frame_padding.y) - lift)
+
+
+def small_button_width(text: str) -> float:
+    """
+    The width ``small_button`` draws ``text`` at, measured at its own text size and
+    padding: what a caller lays a line out with before drawing one.
+    """
+    imgui.push_font(None, SMALL_BUTTON_TEXT_PX)
+    try:
+        return float(imgui.calc_text_size(text).x) + 2.0 * SMALL_BUTTON_PADDING[0]
+    finally:
+        imgui.pop_font()
+
+
+def small_button_line() -> float:
+    """
+    Begin a line of text that a ``small_button`` will end: the text is set down
+    by the room between a button's top and its label's baseline, less the text's
+    larger ascent, so the button can stay at the line's top and still meet it.
+    What ``align_text_to_frame_padding`` is to a framed widget, at this button's
+    padding and not the dock's, so the line stays one button tall.
+
+    Answers how far the text is set down, for a caller that places the line
+    itself.
+    """
+    line_ascent = float(imgui.get_font_baked().ascent)
+    imgui.push_font(None, SMALL_BUTTON_TEXT_PX)
+    try:
+        lift = line_ascent - float(imgui.get_font_baked().ascent)
+    finally:
+        imgui.pop_font()
+    down = max(0.0, SMALL_BUTTON_PADDING[1] - lift)
+    dc = imgui.internal.get_current_window().dc
+    dc.curr_line_text_base_offset = max(float(dc.curr_line_text_base_offset), down)
+    return down
+
+
 # A modal's spacing, in ems of the font in force when the scope is entered, each
 # pair (x, y). The docks are set in ``theme.apply_style`` and are denser on every
 # one of these: at the 16px body face they are item spacing (8, 5), frame padding
@@ -365,8 +470,7 @@ def help_mark_width() -> float:
     The room a question mark takes on a line, the gap before it included: what a
     caller leaves when it cuts text to fit beside one.
     """
-    style = imgui.get_style()
-    return imgui.calc_text_size(HELP_MARK).x + 2.0 * style.frame_padding.x + style.item_spacing.x
+    return small_button_width(HELP_MARK) + imgui.get_style().item_spacing.x
 
 
 def help_mark(mark: str, title: str, paragraphs: Sequence[str]) -> bool:
@@ -389,7 +493,7 @@ def help_mark(mark: str, title: str, paragraphs: Sequence[str]) -> bool:
     """
     name = f"{title}###{_HELP_TAG}{mark}"
     imgui.same_line()
-    if imgui.small_button(f"{HELP_MARK}##{mark}"):
+    if small_button(f"{HELP_MARK}##{mark}"):
         imgui.open_popup(name)
     if not imgui.is_popup_open(name):
         return False
@@ -467,6 +571,8 @@ def notice(said: Notice) -> None:
         _loud(said, room)
         return
     text = ellipsis(said.line, room)
+    if said.help is not None:
+        small_button_line()
     match said.tone:
         case Tone.QUIET:
             imgui.text_disabled(text)
@@ -497,7 +603,10 @@ def _loud(said: Notice, room: float) -> None:
         origin, imgui.ImVec2(origin.x + _LOUD_BAR, origin.y + height), P.danger.u32
     )
     inset = _LOUD_BAR + pad.x
-    imgui.set_cursor_screen_pos(imgui.ImVec2(origin.x + inset, origin.y + pad.y))
+    # The text stays on the band's middle; with a mark, the line starts above it by
+    # as much as the text is set down to the mark's label.
+    down = small_button_line() if said.help is not None else 0.0
+    imgui.set_cursor_screen_pos(imgui.ImVec2(origin.x + inset, origin.y + pad.y - down))
     imgui.text_colored(P.danger.vec4, ellipsis(said.line, room - inset - pad.x))
     if said.help is not None:
         help_mark(said.help.mark, said.help.title, said.help.paragraphs)
@@ -529,6 +638,51 @@ def path_tail(path: str, chars: int) -> str:
     return "…/" + "/".join(kept)
 
 
+def wheels_here() -> bool:
+    """
+    Whether a vertical wheel now would scroll the current window: the pointer is
+    over it, or over a child of it (at any depth) none of which, between the
+    pointer and this window, scrolls vertically itself.
+
+    ``is_window_hovered()`` alone is false over any child, and a child that cannot
+    scroll -- a block sized to what it holds -- hands the wheel to its parent
+    (ImGui's ``FindBestWheelingWindow``), so the window scrolls while it is told
+    it is not hovered. A child that can scroll keeps the wheel, and this window
+    is then not the one being scrolled.
+    """
+    if not imgui.is_window_hovered(imgui.HoveredFlags_.child_windows):
+        return False
+    here = imgui.internal.get_current_window().id_
+    window = imgui.get_current_context().hovered_window
+    no_wheel = imgui.WindowFlags_.no_scroll_with_mouse.value
+    while window is not None and window.id_ != here:
+        if window.scroll_max.y > 0.0 and not window.flags & no_wheel:
+            return False
+        window = window.parent_window
+    return True
+
+
+def log_hovered() -> bool:
+    """
+    Whether the pointer is over the current window or any child of it, a popup
+    over it allowed: what a context menu over the window opens on.
+    """
+    return imgui.is_window_hovered(
+        imgui.HoveredFlags_.child_windows | imgui.HoveredFlags_.allow_when_blocked_by_popup
+    )
+
+
+def begin_context_menu(ident: str) -> bool:
+    """
+    ``begin_popup_context_window`` for a right-click anywhere over the current
+    window, its children included; ImGui's own opens only over the window
+    itself. Close it with ``imgui.end_popup`` when it returns True.
+    """
+    if imgui.is_mouse_released(imgui.MouseButton_.right) and log_hovered():
+        imgui.open_popup(ident, imgui.PopupFlags_.mouse_button_right)
+    return imgui.begin_popup(ident)
+
+
 def follow_tail(following: bool) -> bool:
     """
     Pin the current window to its bottom until the operator scrolls away.
@@ -550,8 +704,10 @@ def follow_tail(following: bool) -> bool:
     over a short log would leave it unfollowed, at its top, once it grew.
 
     Must be called inside the window or child it scrolls, after its content.
+    The pointer counts as over the window when it is over a child that does not
+    scroll itself (``wheels_here``): a tool block in the log is part of the log.
     """
-    hovered = imgui.is_window_hovered()
+    hovered = wheels_here()
     wheel = imgui.get_io().mouse_wheel
 
     if following:

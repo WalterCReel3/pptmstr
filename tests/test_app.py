@@ -336,6 +336,40 @@ def test_the_version_read_runs_off_both_the_frame_loop_and_the_asyncio_loop(
 # -- the typeset seam is told what the operator set --------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _no_tab_paint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    Stand in for ``_draw_overlays``' paint of the pane tabs in every test here: it
+    reads ImGui's dock nodes, and no test in this file drives a dock. Its wiring is
+    ``test_the_overlays_paint_the_pane_tabs_first``.
+    """
+    from pptmstr.ui import tabs
+
+    monkeypatch.setattr(tabs, "draw", lambda: None)
+
+
+def test_the_overlays_paint_the_pane_tabs_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    The tabs are painted ahead of every modal, so each modal is a later window and
+    covers them.
+    """
+    from pptmstr import app
+    from pptmstr.ui import launcher, tabs
+
+    calls: list[str] = []
+    monkeypatch.setattr(tabs, "draw", lambda: calls.append("tabs"))
+
+    def stop(state: object) -> None:
+        calls.append("launcher shortcut")
+        raise _Reached
+
+    monkeypatch.setattr(launcher, "handle_shortcut", stop)
+    state = app.AppState(store=Store(), bridge=Bridge(), settings=Settings())
+    with pytest.raises(_Reached):
+        app._draw_overlays(state)
+    assert calls == ["tabs", "launcher shortcut"]
+
+
 def _no_settings_dialog(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     Stand in for the settings dialog's two calls in ``_draw_overlays``, beside a

@@ -21,7 +21,7 @@ from pptmstr.model import NodeId, Snapshot
 from pptmstr.store import Store
 from pptmstr.theme import P
 from pptmstr.transcript import SegmentKind, Transcript
-from pptmstr.ui import transcript_pane, typeset
+from pptmstr.ui import transcript_pane, typeset, widgets
 from pptmstr.ui.transcript_pane import (
     NodeTranscript,
     RenderMode,
@@ -1613,9 +1613,9 @@ def run_tops(monkeypatch: pytest.MonkeyPatch, seam: Any) -> dict[int, list[float
     tops: dict[int, list[float]] = {}
     real = transcript_pane._draw_run
 
-    def spy(views: Any, run: Any, live: Any) -> None:
+    def spy(views: Any, run: Any, live: Any, *rest: Any) -> None:
         tops.setdefault(run.run, []).append(seam.get_cursor_screen_pos().y)
-        real(views, run, live)
+        real(views, run, live, *rest)
 
     monkeypatch.setattr(transcript_pane, "_draw_run", spy)
     return tops
@@ -1794,8 +1794,8 @@ def test_a_transcript_watched_while_it_streams_stays_bounded_and_says_what_it_dr
     monkeypatch.setattr(transcript_pane, "_GENERATION_LINES", 12)
     monkeypatch.setattr(transcript_pane, "_TYPESET_KEEP", 60)
     said: list[str] = []
-    real = seam.small_button
-    monkeypatch.setattr(seam, "small_button", lambda text: (said.append(text), real(text))[1])
+    real = widgets.small_button
+    monkeypatch.setattr(widgets, "small_button", lambda text: (said.append(text), real(text))[1])
     state = typeset_state()
     held: list[int] = []
     keys: list[int] = []
@@ -2401,7 +2401,7 @@ class Pane:
         self.composer_active = False
         self.node = ROOT
         real_button, real_scroll, real_coloured = (
-            im.small_button,
+            widgets.small_button,
             transcript_pane._handle_scroll,
             im.text_colored,
         )
@@ -2422,7 +2422,7 @@ class Pane:
             self.raw.append(text)
             real_coloured(ink, text)
 
-        monkeypatch.setattr(im, "small_button", small_button)
+        monkeypatch.setattr(widgets, "small_button", small_button)
         monkeypatch.setattr(transcript_pane, "_handle_scroll", handle_scroll)
         monkeypatch.setattr(im, "text_colored", text_colored)
 

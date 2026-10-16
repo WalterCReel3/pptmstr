@@ -43,11 +43,18 @@ CODE = 'def f(x):\n\t"""ünïcode é"""  # cömment ✓\n\treturn x + 0x1F\n\t\t
 
 @pytest.fixture(autouse=True)
 def _fresh_cache() -> Iterator[None]:
-    syntax._classes.cache_clear()
-    syntax._coloured.cache_clear()
+    syntax._LEXED.clear()
+    syntax._SPANS.clear()
     yield
-    syntax._classes.cache_clear()
-    syntax._coloured.cache_clear()
+    syntax._LEXED.clear()
+    syntax._SPANS.clear()
+
+
+def _kept() -> tuple[int, int]:
+    """
+    How many blocks each cache holds: ``block_spans``' spans, and the lexed runs.
+    """
+    return len(syntax._SPANS), len(syntax._LEXED)
 
 
 def _plain_as_before(length: int, said: int, accent: int, ink: int | None) -> list[Any]:
@@ -583,63 +590,77 @@ def test_an_open_fence_is_neither_lexed_nor_kept_across_arrivals(
         handle.append(f"x{n} = {n}\n")
         frame(seam, lambda: handle.draw())
     assert lexed == []
-    assert syntax._coloured.cache_info().currsize == 0
-    assert syntax._classes.cache_info().currsize == 0
+    assert _kept() == (0, 0)
     handle.append("```\n")
     frame(seam, lambda: handle.draw())
     assert len(lexed) == 1
-    assert syntax._coloured.cache_info().currsize == 1
+    assert _kept() == (1, 1)
 
 
-@pytest.mark.parametrize("closer", ["```", "````", "  ```  "])
-def test_a_fence_shut_with_no_line_end_after_it_is_coloured(seam: Any, closer: str) -> None:
+@pytest.mark.parametrize("pieces", [["```"], ["`", "`", "`"], ["````"], ["  ``", "`  "]])
+def test_a_closing_line_with_no_line_end_is_not_a_close(
+    seam: Any, monkeypatch: pytest.MonkeyPatch, pieces: list[str]
+) -> None:
     """
-    No pane closes its stream, and the library commits a fence once its
-    closing line ends: a message that ends on its closing marks is coloured
-    all the same.
+    Marks that may be the start of an info string still arriving leave the
+    fence open: nothing is lexed or kept, and the closing line is not in the
+    block's text. The line end that closes it lexes it once.
     """
+    lexed = _counting(monkeypatch)
     cache = typeset.ViewCache()
     handle = typeset.stream(cache, "s")
     handle.append("Prose.\n\n```python\ndef f(x):\n\treturn x\n")
     frame(seam, lambda: handle.draw())
-    for piece in closer:
+    for piece in pieces:
         handle.append(piece)
         frame(seam, lambda: handle.draw())
     view = handle.view
+    block = _code_block(view)
+    assert str(view.texts[block]) == "python\ndef f(x):\n\treturn x"
+    assert [tuple(s[:3]) for s in view._colours[block]] == [(0, 6, theme.P.accent.u32)]
+    assert lexed == [] and _kept() == (0, 0)
+    handle.append("\n")
+    frame(seam, lambda: handle.draw())
+    frame(seam, lambda: handle.draw())
+    text = str(view.texts[_code_block(view)])
+    keyword = themes.syntax_inks().keyword
+    spans = view._colours[_code_block(view)]
+    assert {"def", "return"} <= {text[s:e] for s, e, c, *_ in spans if c == keyword}
+    assert lexed == ["def f(x):\n\treturn x"] and _kept() == (1, 1)
+
+
+@pytest.mark.parametrize("marks", [["```"], ["``", "`"], ["`", "`", "`"]])
+def test_marks_inside_an_open_fence_never_lex_it(
+    seam: Any, monkeypatch: pytest.MonkeyPatch, marks: list[str]
+) -> None:
+    """
+    A ```markdown fence quoting a ```python one: the inner opener arrives as
+    marks that, for a frame, are all its line holds.
+    """
+    lexed = _counting(monkeypatch)
+    handle = typeset.stream(typeset.ViewCache(), "s")
+    for piece in ["Prose.\n\n```markdown\nUse:\n", *marks, "python\nx = 1\n"]:
+        handle.append(piece)
+        frame(seam, lambda: handle.draw())
+    assert lexed == [] and _kept() == (0, 0)
     assert len(handle._source.committed) == 1
+
+
+def test_a_stream_closed_on_its_closing_marks_is_coloured(seam: Any) -> None:
+    handle = typeset.stream(typeset.ViewCache(), "s")
+    handle.append("Prose.\n\n```python\ndef f(x):\n\treturn x\n")
+    frame(seam, lambda: handle.draw())
+    handle.append("```")
+    handle.close()
+    frame(seam, lambda: handle.draw())
+    view = handle.view
     block = _code_block(view)
     text = str(view.texts[block])
     keyword = themes.syntax_inks().keyword
     assert {"def", "return"} <= {text[s:e] for s, e, c, *_ in view._colours[block] if c == keyword}
 
 
-@pytest.mark.parametrize(
-    ("fence", "shut"),
-    [
-        ("```python\nx\n```", True),
-        ("```python\n```", True),
-        ("```python\nx\n`````", True),
-        ("   ```python\nx\n   ```\t ", True),
-        ("~~~python\nx\n~~~", True),
-        ("```python\nx\n```\n", False),
-        ("```python\nx\n``", False),
-        ("````python\nx\n```", False),
-        ("```python\nx\n~~~", False),
-        ("~~~python\nx\n```", False),
-        ("```python\nx\n    ```", False),
-        ("```python\nx\n``` y", False),
-        ("```python", False),
-        ("    ```python\nx\n```", False),
-        ("- ```python\nx\n```", False),
-    ],
-)
-def test_what_reads_as_a_shut_fence(fence: str, shut: bool) -> None:
-    from pptmstr.ui.typeset import views
-
-    assert views._shut(fence) is shut
-
-
-def test_a_fence_in_a_list_is_not_read_as_shut(seam: Any) -> None:
+def test_a_fence_in_a_list_is_not_coloured_before_it_closes(seam: Any) -> None:
     cache = typeset.ViewCache()
     handle = typeset.stream(cache, "s")
     handle.append("- item\n\n  ```python\n  def f(x):\n  ```")
@@ -649,3 +670,426 @@ def test_a_fence_in_a_list_is_not_read_as_shut(seam: Any) -> None:
     assert all(
         c != keyword for spans in view._colours.values() for _, _, c, *_ in spans
     ), "a list's fence was coloured before it committed"
+
+
+# -- what is kept ---------------------------------------------------------------
+
+
+@pytest.mark.parametrize("language", ["nosuchlang", "text", "output"])
+def test_a_language_that_is_not_coloured_keeps_nothing(language: str) -> None:
+    text, said = _captioned(language, "x = 1\n")
+    assert syntax.block_spans(text, said, ACCENT, None, INKS) == ((0, said, ACCENT),)
+    assert not syntax.needs_lex(text, said, None, INKS, accent=ACCENT)
+    assert _kept() == (0, 0)
+
+
+def test_the_caches_drop_the_least_recently_used_by_size() -> None:
+    kept = syntax._Kept(10)
+    kept.put("a", 4, 1)
+    kept.put("b", 4, 2)
+    assert kept.get("a") == 1  # "b" is now the least recently used
+    kept.put("c", 4, 3)
+    assert "b" not in kept and "a" in kept and "c" in kept and kept.held == 8
+    kept.put("big", 11, 4)
+    assert "big" not in kept and kept.held == 8
+    kept.put("a", 2, 5)
+    assert kept.get("a") == 5 and kept.held == 6
+
+
+def test_needs_lex_says_whether_block_spans_would_lex(monkeypatch: pytest.MonkeyPatch) -> None:
+    lexed = _counting(monkeypatch)
+    text, said = _captioned("python", CODE)
+    assert syntax.needs_lex(text, said, None, INKS, accent=ACCENT)
+    assert not syntax.needs_lex(text, said, ACCENT, INKS, accent=ACCENT)
+    assert not syntax.needs_lex(text, said, None, None, accent=ACCENT)
+    syntax.block_spans(text, said, ACCENT, None, INKS)
+    assert len(lexed) == 1
+    assert not syntax.needs_lex(text, said, None, INKS, accent=ACCENT)
+    other = themes.SyntaxInks(*(ink + 16 for ink in INKS.__dict__.values()))
+    assert not syntax.needs_lex(text, said, None, other, accent=ACCENT)
+    syntax.block_spans(text, said, ACCENT, None, other)
+    assert len(lexed) == 1
+
+
+# -- what a frame spends lexing -------------------------------------------------
+
+
+def _python(n: int) -> str:
+    return f"def f{n}(x):\n    return x + {n}\n"
+
+
+def _fences(count: int) -> str:
+    return "".join(f"Fence {n}.\n\n```python\n{_python(n)}```\n\n" for n in range(count))
+
+
+@pytest.fixture
+def ticking(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """
+    Every lex costs 3 ms on the budget's clock, so a frame lexes three blocks
+    (0, 3 and 6 ms are under the 8 ms budget; 9 is not).
+    """
+    from pptmstr.ui.typeset import views
+
+    lexed = _counting(monkeypatch)
+    now = [0.0]
+    real = syntax._lex
+
+    def lex(lexer: Any, code: str) -> Any:
+        now[0] += 0.003
+        return real(lexer, code)
+
+    monkeypatch.setattr(syntax, "_lex", lex)
+    monkeypatch.setattr(views._LEXING, "clock", lambda: now[0])
+    return lexed
+
+
+def _keyworded(view: Any) -> int:
+    keyword = themes.syntax_inks().keyword
+    return sum(1 for spans in view._colours.values() if any(c == keyword for _, _, c, *_ in spans))
+
+
+def test_a_document_of_many_fences_is_coloured_over_frames(seam: Any, ticking: list[str]) -> None:
+    cache = typeset.ViewCache()
+    parts = (Part(_fences(8)),)
+    seen = []
+    for _ in range(4):
+        frame(seam, lambda: typeset.document(cache, "k", parts))
+        seen.append((len(ticking), _keyworded(cache.view("k"))))
+    assert seen == [(3, 3), (6, 6), (8, 8), (8, 8)]
+    assert sorted(ticking) == sorted(_python(n).rstrip("\n") for n in range(8))
+    assert not cache._entries["k"].pending
+
+
+def test_a_block_left_for_later_draws_as_an_uncoloured_one(seam: Any, ticking: list[str]) -> None:
+    cache = typeset.ViewCache()
+    frame(seam, lambda: typeset.document(cache, "k", (Part(_fences(4)),)))
+    view = cache.view("k")
+    (left,) = [n for n, text in enumerate(view.texts) if "def f3" in str(text)]
+    assert [tuple(s[:3]) for s in view._colours[left]] == [(0, 6, theme.P.accent.u32)]
+
+
+def test_the_budget_is_the_frames_across_every_view(seam: Any, ticking: list[str]) -> None:
+    cache = typeset.ViewCache()
+    one, two = (Part(_fences(2)),), (Part(_fences(4)[len(_fences(2)) :]),)
+
+    def both() -> None:
+        typeset.document(cache, "a", one)
+        typeset.document(cache, "b", two)
+
+    frame(seam, both)
+    assert len(ticking) == 3
+    assert (_keyworded(cache.view("a")), _keyworded(cache.view("b"))) == (2, 1)
+    frame(seam, both)
+    assert len(ticking) == 4 and _keyworded(cache.view("b")) == 2
+
+
+def test_a_theme_switch_while_blocks_are_left_inks_them_all(seam: Any, ticking: list[str]) -> None:
+    cache = typeset.ViewCache()
+    parts = (Part(_fences(5)),)
+    frame(seam, lambda: typeset.document(cache, "k", parts))
+    theme.set_theme("light")
+    try:
+        for _ in range(3):
+            frame(seam, lambda: typeset.document(cache, "k", parts))
+        view = cache.view("k")
+        keyword = themes.build_syntax_inks(theme.LIGHT).keyword
+        assert (
+            sum(1 for spans in view._colours.values() if any(c == keyword for _, _, c, *_ in spans))
+            == 5
+        )
+        assert len(ticking) == 5
+    finally:
+        theme.set_theme("dark")
+
+
+def test_a_stream_past_the_budget_colours_its_fences_on_later_frames(
+    seam: Any, ticking: list[str]
+) -> None:
+    handle = typeset.stream(typeset.ViewCache(), "s")
+    handle.append(_fences(5))
+    frame(seam, lambda: handle.draw())
+    assert len(ticking) == 3 and _keyworded(handle.view) == 3
+    frame(seam, lambda: handle.draw())
+    assert len(ticking) == 5 and _keyworded(handle.view) == 5
+    frame(seam, lambda: handle.draw())
+    assert len(ticking) == 5
+
+
+# -- the note on a fence too long to colour ------------------------------------
+
+
+def test_a_part_with_an_ink_of_its_own_is_not_told_it_is_too_long(seam: Any) -> None:
+    code = _long(syntax.BOUND + 1).rstrip("\n") + "\nreturn x"
+    cache = typeset.ViewCache()
+    part = Part(_fenced("python", code + "\n"), colour="text_dim")
+    frame(seam, lambda: typeset.document(cache, "k", (part,)))
+    view = cache.view("k")
+    assert str(view.texts[_code_block(view)]) == f"python\n{code}"
+    frame(seam, lambda: typeset.document(cache, "k", (Part(part.text),)))
+    assert str(view.texts[_code_block(view)]).startswith("python" + syntax.TOO_LONG + "\n")
+
+
+def test_a_stream_with_an_ink_of_its_own_is_not_told_it_is_too_long(seam: Any) -> None:
+    code = _long(syntax.BOUND + 1).rstrip("\n") + "\nreturn x"
+    cache = typeset.ViewCache()
+    dim = typeset.stream(cache, "d")
+    dim.set_text(_fenced("python", code + "\n"))
+    frame(seam, lambda: dim.draw(ink=theme.P.text_dim))
+    assert str(dim.view.texts[_code_block(dim.view)]) == f"python\n{code}"
+    plain = typeset.stream(cache, "p")
+    plain.set_text(_fenced("python", code + "\n"))
+    frame(seam, lambda: plain.draw())
+    assert str(plain.view.texts[_code_block(plain.view)]).startswith("python" + syntax.TOO_LONG)
+
+
+def test_a_block_already_lexed_is_coloured_on_a_frame_whose_budget_is_spent(
+    seam: Any, ticking: list[str]
+) -> None:
+    cache = typeset.ViewCache()
+    known = (Part(_fences(2)),)
+    frame(seam, lambda: typeset.document(cache, "a", known))
+    assert len(ticking) == 2
+    fresh = (Part(_fences(6)[len(_fences(2)) :]),)
+
+    def both() -> None:
+        typeset.document(cache, "b", fresh)
+        typeset.document(cache, "c", known)
+
+    frame(seam, both)
+    assert len(ticking) == 5
+    assert _keyworded(cache.view("c")) == 2
+
+
+def test_a_later_frame_inks_only_the_blocks_left(
+    seam: Any, ticking: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cache = typeset.ViewCache()
+    parts = (Part(_fences(5)),)
+    frame(seam, lambda: typeset.document(cache, "k", parts))
+    asked: list[str] = []
+    real = syntax.block_spans
+
+    def spy(text: str, *rest: Any) -> Any:
+        asked.append(text)
+        return real(text, *rest)
+
+    monkeypatch.setattr(syntax, "block_spans", spy)
+    frame(seam, lambda: typeset.document(cache, "k", parts))
+    assert len(asked) == 2 and all("def f3" in t or "def f4" in t for t in asked)
+
+
+# -- the two caches agree --------------------------------------------------------
+
+
+def test_a_block_whose_spans_are_kept_needs_no_lex_once_its_runs_are_gone() -> None:
+    text, said = _captioned("python", CODE)
+    syntax.block_spans(text, said, ACCENT, None, INKS)
+    syntax._LEXED.clear()
+    assert not syntax.needs_lex(text, said, None, INKS, accent=ACCENT)
+    other = themes.SyntaxInks(*(ink + 16 for ink in INKS.__dict__.values()))
+    assert syntax.needs_lex(text, said, None, other, accent=ACCENT)
+    assert syntax.needs_lex(text, said, None, INKS, accent=ACCENT + 1)
+    # Without the accent only the runs are asked of, and they are gone.
+    assert syntax.needs_lex(text, said, None, INKS)
+
+
+def test_a_streamed_fence_stays_coloured_after_its_runs_are_let_go(seam: Any) -> None:
+    """
+    A committed fence inked again at every revision is answered from
+    ``_SPANS`` and never touches ``_LEXED``, which may let it go. On a frame
+    whose budget an earlier view spent, it is coloured as it was.
+    """
+    from pptmstr.ui.typeset import views
+
+    handle = typeset.stream(typeset.ViewCache(), "s")
+    handle.append("Prose.\n\n```python\ndef f(x):\n    return x\n```\n\nmore ")
+    frame(seam, lambda: handle.draw())
+    view = handle.view
+    before = view._colours[_code_block(view)]
+    assert _keyworded(view) == 1
+    syntax._LEXED.clear()
+    views._LEXING.frame, views._LEXING.spent = seam.get_frame_count() + 1, 1.0
+    handle.append("x\n")
+    frame(seam, lambda: handle.draw())
+    assert view._colours[_code_block(view)] == before
+    assert handle._inked is not None
+
+
+# -- what the caches hold ---------------------------------------------------------
+
+_SHELL = (
+    "for f in *.py; do\n"
+    '  grep -n \'def \' "$f" | sort -u > "$TMP/$f.txt" && echo ok || exit 1\n'
+    "done\n"
+)
+_JSON = "".join(f'  "key{n}": [{n}, {n}.5, "s{n}", null, true, {{"n": {n}}}],\n' for n in range(60))
+_FENCES = {
+    "python": ("python", CODE * 30),
+    "json": ("json", "{\n" + _JSON + "}\n"),
+    "bash": ("bash", _SHELL * 30),
+    "one line": ("python", "x = 1\n"),
+}
+
+
+@pytest.mark.parametrize("cache", ["_SPANS", "_LEXED"])
+@pytest.mark.parametrize("fence", list(_FENCES))
+def test_what_a_cache_holds_is_at_most_what_it_weighs(
+    fence: str, cache: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Filled past its limit, a cache holds no more memory, measured, than its
+    weights say, and not less than half of it, for fences of many tokens and
+    for one of a line: the weights are what bounds it, and not a guess. The
+    other cache keeps nothing meanwhile, so that what is measured is this one.
+    """
+    import gc
+    import tracemalloc
+
+    limit = 2**20
+    language, code = _FENCES[fence]
+    syntax.block_spans(*_captioned(language, code), ACCENT, None, INKS)  # the lexer, loaded
+    kept = syntax._Kept(limit)
+    other = "_LEXED" if cache == "_SPANS" else "_SPANS"
+    monkeypatch.setattr(syntax, cache, kept)
+    monkeypatch.setattr(syntax, other, syntax._Kept(0))
+    gc.collect()
+    tracemalloc.start()
+    try:
+        base = tracemalloc.get_traced_memory()[0]
+        n = 0
+        while len(kept) == n or n < 10:
+            syntax.block_spans(*_captioned(language, f"{n}\n{code}"), ACCENT, None, INKS)
+            n += 1
+        gc.collect()
+        held = tracemalloc.get_traced_memory()[0] - base
+    finally:
+        tracemalloc.stop()
+    assert len(getattr(syntax, other)) == 0 and kept.held <= limit
+    assert kept.held / 2 <= held <= kept.held, (held, kept.held)
+
+
+def test_the_caches_together_are_held_under_fifty_mebibytes() -> None:
+    assert syntax._SPANS.limit == syntax._LEXED.limit == syntax._KEPT
+    assert 2 * syntax._KEPT <= 50 * 2**20
+
+
+# -- one ink for a whole document ---------------------------------------------------
+
+
+def test_markdown_in_one_ink_colours_no_token(seam: Any) -> None:
+    cache = typeset.ViewCache()
+    source = _fenced("python")
+    frame(seam, lambda: typeset.markdown(cache, "k", source, ink=theme.P.text_dim))
+    view = cache.view("k")
+    assert [tuple(s[:3]) for s in view._colours[_code_block(view)]] == [(0, 6, theme.P.accent.u32)]
+    frame(seam, lambda: typeset.markdown(cache, "k", source))
+    assert _keyworded(view) == 1
+    frame(seam, lambda: typeset.markdown(cache, "k", source, ink=theme.P.text_dim))
+    assert _keyworded(view) == 0
+
+
+def test_markdown_in_one_ink_is_not_told_a_fence_is_too_long(seam: Any) -> None:
+    code = _long(syntax.BOUND + 1).rstrip("\n") + "\nreturn x"
+    cache = typeset.ViewCache()
+    source = _fenced("python", code + "\n")
+    frame(seam, lambda: typeset.markdown(cache, "k", source, ink=theme.P.text_dim))
+    view = cache.view("k")
+    assert str(view.texts[_code_block(view)]) == f"python\n{code}"
+    frame(seam, lambda: typeset.markdown(cache, "k", source))
+    assert str(cache.view("k").texts[_code_block(cache.view("k"))]).startswith(
+        "python" + syntax.TOO_LONG + "\n"
+    )
+
+
+# -- the shared ImGui context -------------------------------------------------------
+
+
+def _modules_in_a_child(tmp_path: Any, modules: dict[str, str]) -> str:
+    """
+    Run ``modules``, written into ``tmp_path`` under their names, in a pytest
+    of their own with this suite's ``conftest`` and ``tmp_path`` as its
+    working directory, in name order. What it printed; it must pass.
+    """
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    from tests.conftest import child_environment
+
+    for name, source in modules.items():
+        (tmp_path / name).write_text(source, encoding="utf-8")
+    root = str(Path(__file__).resolve().parent.parent)
+    environ = child_environment()
+    environ["PYTHONPATH"] = os.pathsep.join(filter(None, [root, environ.get("PYTHONPATH")]))
+    done = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "tests.conftest", "-p", "no:cacheprovider"]
+        + ["--rootdir", str(tmp_path), *sorted(modules)],
+        cwd=tmp_path,
+        env=environ,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    assert done.returncode == 0 and f"{len(modules)} passed" in done.stdout, done.stdout[-2000:]
+    return done.stdout
+
+
+_PLACED = "[Window][##placed]\nPos=123,45\nSize=200,100\n"
+
+_DRAWS_THE_PLACED_WINDOW = """
+def test_the_placed_window_is_where_imgui_puts_a_new_one(imgui):
+    imgui.new_frame()
+    imgui.begin("##placed")
+    at = imgui.get_window_pos()
+    imgui.end()
+    imgui.render()
+    assert (at.x, at.y) != (123.0, 45.0)
+"""
+
+
+def test_the_shared_context_reads_and_writes_no_ini_file(tmp_path: Any) -> None:
+    """
+    An ``imgui.ini`` in the working directory that places a window is not
+    read by the context a module shares, and is not written over when the
+    context is destroyed, which is when ImGui saves to one it was given.
+    """
+    (tmp_path / "imgui.ini").write_text(_PLACED, encoding="utf-8")
+    _modules_in_a_child(tmp_path, {"test_placed.py": _DRAWS_THE_PLACED_WINDOW})
+    assert (tmp_path / "imgui.ini").read_text(encoding="utf-8") == _PLACED
+
+
+_SPENT_AT_ITS_END = """
+from pptmstr.ui.typeset import views
+
+
+def test_ends_on_a_spent_frame(imgui):
+    views._LEXING.frame, views._LEXING.spent = 1, 1.0
+"""
+
+_COLOURED_ON_ITS_FIRST_FRAME = """
+from pptmstr.ui import typeset
+from pptmstr.ui.typeset import Part, themes
+from tests.test_typeset_views import frame
+
+
+def test_coloured_on_the_first_frame(seam):
+    cache = typeset.ViewCache()
+    part = Part("```python\\ndef f():\\n    pass\\n```\\n")
+    frame(seam, lambda: typeset.document(cache, "k", (part,)))
+    keyword = themes.syntax_inks().keyword
+    view = cache.view("k")
+    assert any(c == keyword for spans in view._colours.values() for _, _, c, *_ in spans)
+"""
+
+
+def test_a_module_starts_with_the_frames_lexing_budget_unspent(tmp_path: Any) -> None:
+    """
+    Each module's context counts its frames from one again, so the lexing
+    budget the module before left spent on frame 1 is not this module's.
+    """
+    _modules_in_a_child(
+        tmp_path,
+        {"test_a_first.py": _SPENT_AT_ITS_END, "test_b_then.py": _COLOURED_ON_ITS_FIRST_FRAME},
+    )

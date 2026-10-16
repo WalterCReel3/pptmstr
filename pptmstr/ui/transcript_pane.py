@@ -74,9 +74,11 @@ chrome's font, as it was. A fence inside a markdown run goes with its run.
   is no frame in which the run is in neither place or in both.
 
 A kind change closes the open run, so a fence a model left open ends with its run
-instead of styling the rest of the session. Nothing else closes it: an open stream
-shows everything it was given, and a turn that ends on a run leaves it open for
-the next one to go on. ``TypesetFeed`` is the part of this that needs no ImGui.
+instead of styling the rest of the session. An open stream shows everything it
+was given; once the node's turn is over its stream is closed too, so a message
+that ends on a fence's closing marks with no line end has that fence closed and
+coloured (``_draw_run``). The run itself stays open, and a stream closed early
+is read again, open, if more arrives. ``TypesetFeed`` is the part of this that needs no ImGui.
 What the mode costs is on ``DEFAULT_MODE``, and where it is bounded on
 ``_TYPESET_WINDOW`` and ``_TYPESET_KEEP``.
 
@@ -106,6 +108,7 @@ the pane is in WRAP until it is back. The feeds are dropped with it (``draw``).
 
 from __future__ import annotations
 
+import dataclasses
 import enum
 import re
 import time
@@ -115,10 +118,11 @@ from typing import Any
 
 from imgui_bundle import imgui
 
-from ..model import NodeId, Snapshot
-from ..theme import P
-from ..transcript import SegmentKind, Transcript
-from . import typeset, widgets
+from ..model import AgentState, NodeId, Snapshot
+from ..theme import P, hint_colour
+from ..transcript import SegmentKind, ToolEntry, Transcript
+from . import tool_block, typeset, widgets
+from .typeset.views import Hosted
 
 # How many lines to draw when wrapping is on and the clipper cannot be used.
 # Without a bound, turning wrap on over a large transcript stalls the frame.
@@ -267,6 +271,27 @@ draw, a pane of 900 by 700, text that does not repeat, load average 3 to 10):
 
 _MARKDOWN_KINDS = frozenset({SegmentKind.OUTPUT, SegmentKind.REASONING})
 
+_TOOL_KINDS = frozenset({SegmentKind.TOOL_CALL, SegmentKind.TOOL_RESULT, SegmentKind.ERROR})
+"""
+The kinds a tool's call and result are written as: a run of them that holds an
+entry's line is drawn as blocks (``_Blocks``).
+"""
+
+_IN_TURN = frozenset(
+    {
+        AgentState.SPAWNING,
+        AgentState.THINKING,
+        AgentState.CALLING_TOOL,
+        AgentState.AWAITING_APPROVAL,
+        AgentState.RUNNING_TOOL,
+    }
+)
+"""
+The states in which a node's turn is going on, so a call of that turn with no
+result yet can still be running. In any other a call with no result has none
+coming: its turn ended under it.
+"""
+
 _CLOSED_KEY = "closed"
 
 _FENCE_RE = re.compile(r" {0,3}(`{3,}|~{3,})(.*)")
@@ -325,6 +350,7 @@ class OpenRun:
     lines: int = 0
     _literal: tuple[str, str] = ("", "")
     _prompt: tuple[str, tuple[typeset.Part, ...]] = ("", ())
+    _hosted: tuple[str, tuple[typeset.Part, ...]] = ("", ())
 
     def add(self, text: str) -> None:
         self.pieces.append(text)
@@ -360,6 +386,17 @@ class OpenRun:
         if self._prompt[0] is not text:
             self._prompt = (text, _prompt(text))
         return self._prompt[1]
+
+    @property
+    def hosted(self) -> tuple[typeset.Part, ...]:
+        """
+        The run as the blocks a host draws (``_hosted``); the same tuple until more
+        arrives, as ``prompt`` is.
+        """
+        literal = self.literal
+        if self._hosted[0] is not literal:
+            self._hosted = (literal, _hosted(literal, self.kind))
+        return self._hosted[1]
 
 
 @dataclass
@@ -428,11 +465,17 @@ class Generation:
             self._parts_for = want
 
 
-def _closed(run: OpenRun) -> ClosedRun:
+def _closed(run: OpenRun, hosted: bool = False) -> ClosedRun:
+    """
+    ``run`` as it is held once it can no longer grow. ``hosted`` is whether its
+    lines hold a tool entry's, so that it is drawn as blocks.
+    """
     kind = run.kind
     if kind is SegmentKind.SYSTEM:
         text = run.literal
         return ClosedRun(run.run, kind, text, run.prompt, run.lines)
+    if hosted and kind in _TOOL_KINDS:
+        return ClosedRun(run.run, kind, run.literal, run.hosted, run.lines)
     if kind is SegmentKind.OUTPUT:
         # No colour: markdown keeps the palette's role inks for headings, code and links.
         part = typeset.Part(run.text)
@@ -441,6 +484,15 @@ def _closed(run: OpenRun) -> ClosedRun:
     else:
         part = typeset.Part(run.literal, typeset.Kind.LITERAL, colour=_KIND_COLOUR[kind])
     return ClosedRun(run.run, kind, part.text, (part,), run.lines)
+
+
+def _hosted(literal: str, kind: SegmentKind) -> tuple[typeset.Part, ...]:
+    """
+    A run of tool lines as the one part a host draws: its blocks
+    (``_Blocks.draw_run``), and where it draws none of them its lines, set as the
+    literal part it also is.
+    """
+    return (Hosted(literal, typeset.Kind.LITERAL, colour=_KIND_COLOUR[kind]),)
 
 
 def _prompt(text: str) -> tuple[typeset.Part, ...]:
@@ -531,7 +583,7 @@ class TypesetFeed:
             line = lines[index]
             complete = index < last or not source.open_line
             if self.open is None or self.open.run != line.run:
-                self._close()
+                self._close(source)
                 self.open = OpenRun(line.run, line.kind)
                 if preamble:
                     self.open.add(preamble)
@@ -546,7 +598,7 @@ class TypesetFeed:
             else:
                 self.partial = len(line.text)
 
-    def _close(self) -> None:
+    def _close(self, source: NodeTranscript) -> None:
         """
         Put the open run at the end of the newest generation, or start one for it.
         """
@@ -554,7 +606,7 @@ class TypesetFeed:
         if run is None:
             return
         self.open = None
-        closed = _closed(run)
+        closed = _closed(run, run.run in source.hosted)
         newest = self.generations[-1] if self.generations else None
         if newest is None or newest.lines >= _GENERATION_LINES:
             newest = self._generation()
@@ -640,6 +692,15 @@ class NodeTranscript:
     # is not representable at line granularity, but a kind change always falls on a
     # line boundary -- so a run is what the operator sees, one coloured span of text.
     run_starts: list[int] = field(default_factory=list)
+    # The byte span of each run in the transcript, [start, end): what a run's tool
+    # entries are looked up by (``Transcript.tool_entries``). A run starts at a
+    # segment's start, since only a segment changes the kind.
+    run_spans: list[list[int]] = field(default_factory=list)
+    # The runs of tool kinds whose bytes hold an entry's line: drawn as blocks.
+    hosted: set[int] = field(default_factory=set)
+    # Where the last prompt (a SYSTEM run) starts: a call before it is of a turn
+    # that has ended.
+    last_prompt: int = -1
     # Whether the last line can still be extended -- true when the bytes so far did
     # not end on a newline. Tracking this explicitly, rather than inferring it from
     # the next chunk, is what keeps a streamed token appending to the line it
@@ -679,7 +740,15 @@ class NodeTranscript:
                 else:
                     if not self.lines or self.lines[-1].kind is not segment.kind:
                         self.run_starts.append(len(self.lines))
+                        self.run_spans.append([start, segment.end])
+                        if segment.kind is SegmentKind.SYSTEM:
+                            self.last_prompt = start
                     self.lines.append(Line(segment.kind, piece, len(self.run_starts) - 1))
+            # Every piece of a segment is in the last run: a run changes only with
+            # the kind, which only a segment can change.
+            self.run_spans[-1][1] = segment.end
+            if segment.kind in _TOOL_KINDS and transcript.tool_entries(start, segment.end):
+                self.hosted.add(len(self.run_starts) - 1)
 
             self.open_line = not ends_with_newline
         self.consumed = limit
@@ -847,6 +916,25 @@ class TranscriptState:
     # rather than as a place in a view: a run can close while the menu is open,
     # and what is copied is what was clicked.
     typeset_target: tuple[int | None, str] | None = None
+    # The line paths' "copy block": the text of the tool block right-clicked, or
+    # "" where the menu was opened over no block. Latched as context_run is.
+    context_block: str = ""
+    # The tool blocks the operator opened the viewer of, by node and by where the
+    # block is in its transcript (``_Blocks``).
+    expanded: set[tuple[NodeId, int]] = field(default_factory=set)
+    # What the blocks drawn lately were built into, kept while they are drawn: a
+    # block is laid out once and not every frame (``_Blocks``). ``block_frames`` is
+    # the ImGui frame each was last drawn in: the log and CONTEXT draw with this
+    # one state, and each keeps what the other drew in the same frame.
+    layouts: dict[Hashable, tool_block.Layout] = field(default_factory=dict)
+    viewers: dict[Hashable, tuple[tool_block.Row, ...]] = field(default_factory=dict)
+    block_frames: dict[Hashable, int] = field(default_factory=dict)
+    # When each layout was last drawn, on the clock ``prune`` keeps (``_Blocks.prune``).
+    block_seen: dict[Hashable, float] = field(default_factory=dict)
+    # Each block's find matches, by its key, with the needle they are of.
+    block_hits: dict[Hashable, tuple[str, list[tool_block.Hit]]] = field(default_factory=dict)
+    # The block the find is bringing into view, by node and anchor, until it is drawn.
+    block_reveal: tuple[NodeId, int] | None = None
 
     def shown_mode(self) -> RenderMode:
         """
@@ -934,6 +1022,284 @@ def copy_text(lines: Sequence[Line]) -> str:
     return "\n".join(line.text for line in lines)
 
 
+@dataclass(frozen=True, slots=True)
+class BlockHit:
+    """
+    A find's match in a run of tool lines: the run, where in it (a block's anchor,
+    or the start of bytes drawn as text), the viewer row it is in (``None`` for
+    text), and whether the collapsed block draws it.
+    """
+
+    run: int
+    anchor: int
+    row: int | None
+    shown: bool
+
+
+@dataclass
+class _Blocks:
+    """
+    The tool blocks of one node's log in one frame: what a run of tool lines is
+    drawn as, on both line paths that are not RAW.
+
+    **Where a block goes.** A call's block is drawn where its call line is, and
+    holds its result as well; the result's line, in the run after, then draws
+    nothing of it. A result whose call is not on screen -- above what the pane
+    took in (``floor``), or never in this transcript (a resumed session, a call
+    written to another node's buffer) -- is drawn where its own line is. Bytes of
+    a tool run that are no entry's line (an error that is not a tool's, a line
+    a writer appended by hand) are drawn as they were before there were blocks,
+    in their kind's ink. So every line of a tool run is in exactly one place.
+
+    In TYPESET a run of tool lines is a ``Hosted`` part of its generation's
+    document, so its blocks scroll in the one window with the runs the library
+    sets, and a generation out of sight rests as it did. In WRAP a run is drawn
+    where its first line falls.
+
+    ``pinned`` is the frame's published length (I7): a result whose line is past
+    it is treated as not arrived, as its line is not drawn.
+    """
+
+    state: TranscriptState
+    node: NodeId
+    transcript: Transcript
+    cache: NodeTranscript
+    pinned: int
+    in_turn: bool
+    text_px: float
+    floor: int = 0
+    # The block under the pointer this frame, as the run it was drawn in and the
+    # lines it covers (what "copy block" copies), or None.
+    pointed: tuple[int | None, str] | None = None
+    # The find's matches in blocks this frame (``find``): the anchors that hold
+    # one, the current match where it is a block's, and whether it is brought
+    # into view this frame.
+    marked: frozenset[int] = frozenset()
+    current: BlockHit | None = None
+    reveal: bool = False
+
+    def find(self, found: Sequence[Any], current: int) -> None:
+        """
+        Take the find's matches for this frame's draw: ``found`` as the pane
+        merged them, ``found[current]`` the current one. The current one is
+        brought into view by the draw that reaches it while the pane's
+        ``block_reveal`` names it, which may be a later frame than the step to
+        it: a generation at rest draws no block.
+        """
+        self.marked = frozenset(hit.anchor for hit in found if isinstance(hit, BlockHit))
+        held = found[current] if 0 <= current < len(found) else None
+        self.current = held if isinstance(held, BlockHit) else None
+        target = self.state.block_reveal
+        self.reveal = (
+            self.current is not None
+            and target is not None
+            and target == (self.node, self.current.anchor)
+        )
+
+    def faces(self) -> tool_block.Faces:
+        px = self.text_px
+        small = float(round(px * 0.8))
+        return tool_block.Faces(
+            mono=lambda: typeset.font(typeset.Weight.CODE, px),
+            prose=lambda: typeset.font(typeset.Weight.REGULAR, px),
+            caption=lambda: typeset.font(typeset.Weight.REGULAR, small),
+        )
+
+    def draw_run(self, run: int) -> bool | None:
+        """
+        A run's blocks and the rest of its bytes, in buffer order, as one item.
+        ``False`` where none of the run is an entry's (it is drawn as its lines),
+        ``None`` where every entry in it is drawn at its call, elsewhere.
+        """
+        if not 0 <= run < len(self.cache.run_spans) or run not in self.cache.hosted:
+            return False
+        start, end = self.cache.run_spans[run]
+        pieces = self._pieces(start, end)
+        if not pieces:
+            return None
+        imgui.begin_group()
+        kind = self.cache.lines[self.cache.run_starts[run]].kind
+        ink = getattr(P, _KIND_COLOUR[kind]).vec4
+        faces = self.faces()
+        for anchor, entry, text in pieces:
+            if entry is None:
+                self._bring(anchor)
+                imgui.text_colored(ink, text)
+                if anchor in self.marked:
+                    _mark_line(self.current is not None and self.current.anchor == anchor)
+            else:
+                self._block(run, anchor, entry, faces)
+        imgui.end_group()
+        return True
+
+    def _pieces(self, start: int, end: int) -> list[tuple[int, ToolEntry | None, str]]:
+        """
+        What the bytes ``[start, end)`` are drawn as: each block at its anchor, and
+        every span of bytes no entry's line covers, as text.
+        """
+        drawn: list[tuple[int, ToolEntry | None, str]] = []
+        covered: list[tuple[int, int]] = []
+        for entry in self.transcript.tool_entries(start, end):
+            entry = self._as_pinned(entry)
+            call, result = entry.call, entry.result
+            if call is not None and start <= call[0] < end:
+                covered.append(call)
+            if result is not None and start <= result.start < end:
+                covered.append((result.start, result.end))
+            if call is not None and start <= call[0] < end:
+                drawn.append((call[0], entry, ""))
+            elif result is not None and start <= result.start < end:
+                # The call is drawn at its own line when it is on screen.
+                if call is None or call[0] < self.floor:
+                    drawn.append((result.start, entry, ""))
+        at = start
+        for low, high in sorted(covered):
+            if low > at:
+                drawn += self._uncovered(at, low)
+            at = max(at, high)
+        if at < end:
+            drawn += self._uncovered(at, end)
+        drawn.sort(key=lambda piece: piece[0])
+        return drawn
+
+    def _uncovered(self, low: int, high: int) -> list[tuple[int, ToolEntry | None, str]]:
+        text = self.transcript.read(low, min(high, self.pinned)).strip("\n")
+        return [(low, None, text)] if text else []
+
+    def _as_pinned(self, entry: ToolEntry) -> ToolEntry:
+        """``entry`` as this frame has it: a result whose line is past ``pinned`` is not yet."""
+        result = entry.result
+        if result is not None and result.start >= self.pinned:
+            return dataclasses.replace(entry, result=None)
+        return entry
+
+    def _covered(self, entry: ToolEntry) -> str:
+        """The lines of the transcript a block stands for: its call's and its result's."""
+        spans = [entry.call] if entry.call is not None else []
+        if entry.result is not None:
+            spans.append((entry.result.start, entry.result.end))
+        return "\n".join(
+            self.transcript.read(low, min(high, self.pinned)).strip("\n") for low, high in spans
+        )
+
+    def _live(self, entry: ToolEntry) -> bool:
+        """Whether a call with no result can still be running: its turn is going on."""
+        return (
+            self.in_turn
+            and entry.result is None
+            and (entry.call is None or entry.call[0] >= self.cache.last_prompt)
+        )
+
+    def _key(self, anchor: int, entry: ToolEntry) -> tuple[Hashable, bool]:
+        """What a block's layout is kept under, and whether its call is live."""
+        live = self._live(entry)
+        result = entry.result
+        key = (
+            self.node,
+            id(self.transcript),
+            anchor,
+            entry.tool_use_id,
+            None if result is None else (result.start, result.end),
+            live,
+        )
+        return key, live
+
+    def _layout(self, key: Hashable, entry: ToolEntry, live: bool) -> tool_block.Layout:
+        self.state.block_seen[key] = self.state.now
+        block = self.state.layouts.get(key)
+        if block is None:
+            block = self.state.layouts[key] = tool_block.layout(entry, live)
+        return block
+
+    def hits(self, run: int, needle: str) -> list[BlockHit]:
+        """
+        Every match of ``needle`` in what a run of tool lines is drawn as, in
+        buffer order: in each block's entry (``tool_block.find``), and in the
+        bytes of the run that are drawn as text. Empty for a run that is not a
+        hosted one.
+
+        A block's matches are kept by its key and the needle (``block_hits``),
+        so a frame with nothing new finds nothing again.
+        """
+        if not needle or not 0 <= run < len(self.cache.run_spans) or run not in self.cache.hosted:
+            return []
+        wanted = needle.casefold()
+        found: list[BlockHit] = []
+        for anchor, entry, text in self._pieces(*self.cache.run_spans[run]):
+            if entry is None:
+                found += [BlockHit(run, anchor, None, True)] * text.casefold().count(wanted)
+                continue
+            key, live = self._key(anchor, entry)
+            kept = self.state.block_hits.get(key)
+            if kept is None or kept[0] != needle:
+                block = self._layout(key, entry, live)
+                kept = self.state.block_hits[key] = (needle, tool_block.find(entry, block, needle))
+            found += [BlockHit(run, anchor, hit.row, hit.shown) for hit in kept[1]]
+        return found
+
+    def _mark(self, anchor: int) -> tool_block.Mark | None:
+        """The find's mark on the block or text at ``anchor``, or None."""
+        if anchor not in self.marked:
+            return None
+        current = self.current
+        if current is None or current.anchor != anchor:
+            return tool_block.Mark(_HIT_INK)
+        row = None if current.shown else current.row
+        return tool_block.Mark(_CURRENT_INK, row, self.reveal)
+
+    def _bring(self, anchor: int) -> None:
+        """Scroll the log to what is drawn next if it is the find's to bring into view."""
+        if self.reveal and self.current is not None and self.current.anchor == anchor:
+            imgui.set_scroll_here_y(1.0 / 3.0)
+            self.state.block_reveal = None
+
+    def _block(self, run: int, anchor: int, entry: ToolEntry, faces: tool_block.Faces) -> None:
+        key, live = self._key(anchor, entry)
+        self.state.block_frames[key] = imgui.get_frame_count()
+        block = self._layout(key, entry, live)
+        opened = (self.node, anchor) in self.state.expanded
+        mark = self._mark(anchor)
+        self._bring(anchor)
+
+        def viewer() -> tuple[tool_block.Row, ...]:
+            rows = self.state.viewers.get(key)
+            if rows is None:
+                rows = self.state.viewers[key] = tool_block.viewer_rows(entry)
+            return rows
+
+        pressed = tool_block.draw(
+            block, key=str(anchor), faces=faces, expanded=opened, viewer=viewer, mark=mark
+        )
+        if widgets.log_hovered() and imgui.is_mouse_hovering_rect(
+            imgui.get_item_rect_min(), imgui.get_item_rect_max(), False
+        ):
+            self.pointed = (run, self._covered(entry))
+        if pressed:
+            self.state.expanded ^= {(self.node, anchor)}
+
+    def prune(self) -> None:
+        """
+        Let go of a viewer's rows once no block drew them this frame or the last,
+        and of a layout once its block has not been drawn for ``_FEED_KEEP_S``.
+
+        A layout is a few rows, and a block goes out of sight whenever its
+        generation rests, so it is kept as long as the feed that would draw it
+        again is (``_FEED_KEEP_S``): a scroll back up does not lay out again. A
+        viewer's rows are the whole entry, up to a mebibyte, and are made again
+        on the next expansion.
+        """
+        frame = imgui.get_frame_count()
+        state = self.state
+        for key in [k for k, at in state.block_frames.items() if at < frame - 1]:
+            del state.block_frames[key]
+            state.viewers.pop(key, None)
+        stale = state.now - _FEED_KEEP_S
+        for key in [k for k, at in state.block_seen.items() if at < stale]:
+            del state.block_seen[key]
+            state.layouts.pop(key, None)
+            state.block_hits.pop(key, None)
+
+
 _KIND_COLOUR = {
     SegmentKind.REASONING: "text_dim",
     SegmentKind.OUTPUT: "text",
@@ -1002,28 +1368,75 @@ def draw(
         state.feeds.clear()
 
     bar = state.find
+    blocks = _Blocks(
+        state,
+        selected,
+        record.transcript,
+        cache,
+        pinned,
+        record.state in _IN_TURN,
+        typeset.body_px() if mode is RenderMode.TYPESET else imgui.get_font_size(),
+    )
     if mode is RenderMode.TYPESET:
         feed = state.feed_for(selected)
         feed.advance(cache)
         # Found in the views the last frame drew, before this one draws them, so
         # the marks and a scroll are this frame's.
-        found = _typeset_matches(feed, state.show_reasoning, bar.needle) if bar.open else []
+        found = (
+            _typeset_found(feed, cache, blocks, state.show_reasoning, bar.needle)
+            if bar.open
+            else []
+        )
         bar.found(len(found))
         # Joined when the button is pressed: unlike the line modes' value, this one
         # is not needed to draw anything.
         _draw_controls(state, record.node_id, lambda: feed.visible_text(state.show_reasoning))
         imgui.separator()
-        _draw_typeset(state, feed, cache, found)
+        _draw_typeset(state, feed, cache, found, blocks)
+        blocks.prune()
         return
 
     visible = _visible(state, cache)
     drawn = visible if mode is RenderMode.RAW else visible[-_WRAP_WINDOW:]
-    found_lines = line_matches(drawn, bar.needle) if bar.open else []
+    found_lines: list[int | BlockHit] = []
+    if bar.open and mode is RenderMode.WRAP:
+        found_lines = _wrap_found(drawn, cache, blocks, bar.needle)
+    elif bar.open:
+        found_lines = list(line_matches(drawn, bar.needle))
     bar.found(len(found_lines))
     visible_text = copy_text(visible)
     _draw_controls(state, record.node_id, lambda: visible_text)
     imgui.separator()
-    _draw_lines(state, cache, visible, mode, found_lines)
+    _draw_lines(state, cache, visible, mode, found_lines, blocks)
+    blocks.prune()
+
+
+def _in_block(cache: NodeTranscript, line: Line) -> bool:
+    """Whether ``line`` is drawn as part of a tool block rather than as itself."""
+    return line.kind in _TOOL_KINDS and line.run in cache.hosted
+
+
+def _wrap_found(
+    drawn: Sequence[Line], cache: NodeTranscript, blocks: _Blocks, needle: str
+) -> list[int | BlockHit]:
+    """
+    WRAP's matches in the order drawn: a line's as its index in ``drawn``, once
+    each time it holds the needle, and a run of tool lines' as its blocks and its
+    text hold them (``_Blocks.hits``), where the run is drawn, at its first line.
+    """
+    wanted = needle.casefold()
+    if not wanted:
+        return []
+    found: list[int | BlockHit] = []
+    done: int | None = None
+    for index, line in enumerate(drawn):
+        if _in_block(cache, line):
+            if line.run != done:
+                done = line.run
+                found += blocks.hits(line.run, needle)
+            continue
+        found += [index] * line.text.casefold().count(wanted)
+    return found
 
 
 FIND_CHORD = int(imgui.Key.mod_ctrl) | int(imgui.Key.f)
@@ -1061,7 +1474,7 @@ _SUB_AGENT_NOTE = "sub-agent: complete messages only, not live"
 def _draw_controls(state: TranscriptState, node_id: NodeId, copy_value: Callable[[], str]) -> None:
     if state.mode is RenderMode.RAW:
         # The earlier-lines view: the way back to the log as it is set, at its foot.
-        if imgui.small_button("back to latest"):
+        if widgets.small_button("back to latest"):
             state.mode = None
             state.follow_tail = True
             state.held = False
@@ -1069,7 +1482,7 @@ def _draw_controls(state: TranscriptState, node_id: NodeId, copy_value: Callable
     # Copies what is on screen, reasoning as it is shown. Right-clicking a run (or
     # block) copies that run/block whole; the two affordances are deliberately
     # different units.
-    if imgui.small_button("copy") and (copied := copy_value()):
+    if widgets.small_button("copy") and (copied := copy_value()):
         imgui.set_clipboard_text(copied)
     if state.find.open:
         imgui.same_line()
@@ -1091,9 +1504,10 @@ def _draw_find(bar: FindBar) -> None:
         imgui.set_keyboard_focus_here()
         bar.focus = False
     imgui.set_next_item_width(200.0 * imgui.get_font_size() / 16.0)
-    entered, needle = imgui.input_text_with_hint(
-        "##find", "find", bar.needle, imgui.InputTextFlags_.enter_returns_true
-    )
+    with hint_colour(imgui):
+        entered, needle = imgui.input_text_with_hint(
+            "##find", "find", bar.needle, imgui.InputTextFlags_.enter_returns_true
+        )
     active = imgui.is_item_active()
     escaped = (active or bar.active) and imgui.is_key_pressed(imgui.Key.escape, False)
     # ImGui's Escape hands back what the field held when it took the keyboard; what
@@ -1110,7 +1524,7 @@ def _draw_find(bar: FindBar) -> None:
     imgui.same_line()
     imgui.text_disabled(bar.status() or " ")
     imgui.same_line()
-    clicked = imgui.small_button("x##find")
+    clicked = widgets.small_button("x##find")
     if escaped:
         bar.escape(imgui.get_frame_count())
     elif clicked:
@@ -1140,7 +1554,7 @@ def _earlier(state: TranscriptState, count: int, first: int) -> None:
     every line, opened on the last of them (``first`` of the visible lines is the
     first one the pane drew) and left by ``back to latest``.
     """
-    if imgui.small_button(f"{count:,} earlier lines##earlier"):
+    if widgets.small_button(f"{count:,} earlier lines##earlier"):
         state.mode = RenderMode.RAW
         state.raw_from = first
         state.follow_tail = False
@@ -1168,12 +1582,14 @@ def _draw_lines(
     cache: NodeTranscript,
     lines: list[Line],
     mode: RenderMode | None = None,
-    found: Sequence[int] = (),
+    found: Sequence[int | BlockHit] = (),
+    blocks: _Blocks | None = None,
 ) -> None:
     """
     ``lines`` as RAW or WRAP draws them. ``found`` is where the find row's matches
     are, as indices into the lines drawn: every line in RAW, the last
-    ``_WRAP_WINDOW`` in WRAP.
+    ``_WRAP_WINDOW`` in WRAP. In WRAP a run of tool lines is drawn as ``blocks``
+    draws it, where its first line falls; RAW draws every line as it is.
     """
     if mode is None:
         mode = state.shown_mode()
@@ -1194,7 +1610,8 @@ def _draw_lines(
     # inter-row spacing to the row below it. Using the item rect at both ends instead
     # leaves a few dead pixels between every line -- a gutter that swallows a
     # right-click and answers with a menu that has lost its target.
-    live = imgui.is_window_hovered()
+    # Over a block too: a block is a child of the log, and part of it.
+    live = widgets.log_hovered()
     mouse_y = imgui.get_io().mouse_pos.y
     hovered: int | None = None
     row_top: float | None = None
@@ -1207,18 +1624,38 @@ def _draw_lines(
             hovered = line.run
 
     bar = state.find
-    marked = set(found)
-    current = found[bar.current] if found else None
-    reveal = bar.reveal and current is not None
+    marked = {at for at in found if isinstance(at, int)}
+    held = found[bar.current] if found else None
+    reveal = bar.reveal and held is not None
+    current = held if isinstance(held, int) else None
+    if reveal:
+        state.block_reveal = None
+        if isinstance(held, BlockHit):
+            _reveal_block(state, held)
+    if blocks is not None:
+        blocks.find(found, bar.current)
     # The view is moved for the operator this frame, so it is not following.
     moved = reveal
     if mode is RenderMode.WRAP:
         drawn = lines[-_WRAP_WINDOW:]
         if len(drawn) < len(lines):
             _earlier(state, len(lines) - len(drawn), len(lines) - len(drawn))
+        if blocks is not None and drawn:
+            blocks.floor = cache.run_spans[drawn[0].run][0]
+        # The run whose blocks were drawn at its first line, and whose lines are not.
+        done: int | None = None
         # No clipper: wrapped rows have no uniform height for it to work from. The
         # window bound is what keeps that affordable.
         for index, line in enumerate(drawn):
+            if line.run == done:
+                continue
+            if blocks is not None and _in_block(cache, line):
+                drew = blocks.draw_run(line.run)
+                if drew is not False:
+                    done = line.run
+                    if drew:
+                        track(line)
+                    continue
             imgui.push_style_color(imgui.Col_.text, getattr(P, _KIND_COLOUR[line.kind]).vec4)
             imgui.text_wrapped(line.text or " ")
             imgui.pop_style_color()
@@ -1254,6 +1691,8 @@ def _draw_lines(
 
     if not imgui.is_popup_open(_CONTEXT_ID):
         state.context_run = hovered
+        pointed = None if blocks is None else blocks.pointed
+        state.context_block = "" if pointed is None else pointed[1]
     _draw_context_menu(state, cache, lines)
 
     if moved:
@@ -1354,12 +1793,14 @@ def _run_key(run: int) -> tuple[str, int]:
     return ("open", run)
 
 
-def _draw_run(views: typeset.ViewCache, run: OpenRun, live: list[Hashable]) -> None:
+def _draw_run(
+    views: typeset.ViewCache, run: OpenRun, live: list[Hashable], blocks: _Blocks | None = None
+) -> None:
     """
     The open run in a view of its own: a stream for markdown, which lays out once
     what is committed and reads what arrived, a prompt as the parts it is set as
-    closed, and literal text for the rest, the library's where it keeps the
-    run's columns (``typeset.plain``).
+    closed, a run of tool lines as its blocks (``_Blocks``), and literal text for
+    the rest, the library's where it keeps the run's columns (``typeset.plain``).
     """
     ink = getattr(P, _KIND_COLOUR[run.kind])
     key = _run_key(run.run)
@@ -1367,16 +1808,37 @@ def _draw_run(views: typeset.ViewCache, run: OpenRun, live: list[Hashable]) -> N
     if run.kind is SegmentKind.SYSTEM:
         typeset.document(views, key, run.prompt, apart=True, literal=True)
         return
+    if blocks is not None and run.kind in _TOOL_KINDS and run.run in blocks.cache.hosted:
+        number = run.run
+        typeset.document(
+            views,
+            key,
+            run.hosted,
+            apart=True,
+            literal=True,
+            host=lambda index, part: blocks.draw_run(number),
+        )
+        return
     if run.kind not in _MARKDOWN_KINDS:
         typeset.plain(views, key, run.literal, colour=ink, literal=True)
         return
     stream = typeset.stream(views, key)
     text = run.text
+    over = blocks is not None and not blocks.in_turn
+    if stream.closed and (not over or len(stream.text) < len(text)):
+        # More arrived after the turn was taken as over, or a turn began: read
+        # again from the start, open.
+        stream.set_text(text)
     # By length and not by what was last handed over: a stream made again (the
     # reasoning shown after being hidden, a feed kept across a stop) is given
     # everything, and one that has it all is given nothing.
     if len(stream.text) < len(text):
         stream.append(text[len(stream.text) :])
+    if over and not stream.closed:
+        # The message is over with its turn, so its last line is finished: a
+        # fence ending on its closing marks with no line end is closed, and
+        # coloured (``Stream._ink``).
+        stream.close()
     stream.draw(ink=None if run.kind is SegmentKind.OUTPUT else ink)
 
 
@@ -1384,7 +1846,8 @@ def _draw_typeset(
     state: TranscriptState,
     feed: TypesetFeed,
     cache: NodeTranscript,
-    found: Sequence[tuple[Hashable, Any, Any]] = (),
+    found: Sequence[Any] = (),
+    blocks: _Blocks | None = None,
 ) -> None:
     # Literal runs are never broken, hence the horizontal scrollbar.
     log = _begin_log(state, typeset.body_px(), imgui.WindowFlags_.horizontal_scrollbar.value)
@@ -1411,18 +1874,29 @@ def _draw_typeset(
 
     _hand_marks(state.find, found)
     moved = _reveal(state, feed, found)
+    if blocks is not None:
+        blocks.find(found, state.find.current)
     shown = feed.shown_open(show)
     if not feed.generations and shown is None and not feed.skipped:
         imgui.text_disabled("(nothing yet)")
+    if blocks is not None:
+        first = feed.generations[0].runs[0].run if feed.generations else None
+        if first is None and feed.open is not None:
+            first = feed.open.run
+        if first is not None and first < len(cache.run_spans):
+            blocks.floor = cache.run_spans[first][0]
     for generation in feed.generations:
-        _draw_generation(feed, generation, show, live)
+        _draw_generation(feed, generation, show, live, blocks)
     if shown is not None:
-        _draw_run(feed.views, shown, live)
+        _draw_run(feed.views, shown, live, blocks)
     feed.views.prune(live)
 
     if not imgui.is_popup_open(_CONTEXT_ID):
-        hovered = imgui.is_window_hovered()
-        state.typeset_target = _typeset_pointed(feed, live, show) if hovered else None
+        hovered = widgets.log_hovered()
+        pointed = _typeset_pointed(feed, live, show) if hovered else None
+        if pointed is None and hovered and blocks is not None:
+            pointed = blocks.pointed
+        state.typeset_target = pointed
     _draw_typeset_menu(state, feed, cache)
 
     end = imgui.get_cursor_pos_y()
@@ -1461,11 +1935,17 @@ def _trim(feed: TypesetFeed) -> float:
 
 
 def _draw_generation(
-    feed: TypesetFeed, generation: Generation, show: bool, live: list[Hashable]
+    feed: TypesetFeed,
+    generation: Generation,
+    show: bool,
+    live: list[Hashable],
+    blocks: _Blocks | None = None,
 ) -> None:
     """
     One generation, as one document. A run that closed is in it from the frame it
     closed: the seam reads and lays out what it is handed in the call that draws it.
+    A run of tool lines is a part the document hands back to be drawn
+    (``typeset.views.Hosted``): its blocks, by ``blocks``.
     Each run is a view of its own (``apart``), as it was while it was open, so it
     is where it was: joined to a markdown run above it, it would be set the
     library's block gap under that run and not ImGui's item spacing, 2.1 px
@@ -1483,7 +1963,20 @@ def _draw_generation(
     parts = generation.parts(show)
     if parts:
         live.append(generation.key)
-        typeset.document(feed.views, generation.key, parts, rests=True, apart=True, literal=True)
+        owners = generation.owners(show)
+
+        def host(index: int, part: typeset.Part) -> bool | None:
+            return False if blocks is None else blocks.draw_run(owners[index].run)
+
+        typeset.document(
+            feed.views,
+            generation.key,
+            parts,
+            rests=True,
+            apart=True,
+            literal=True,
+            host=host,
+        )
     generation.extent = imgui.get_cursor_pos_y() - start
 
 
@@ -1506,14 +1999,74 @@ def _typeset_matches(
     return typeset.find_matches(feed.views, keys, needle)
 
 
-def _hand_marks(bar: FindBar, found: Sequence[tuple[Hashable, Any, Any]]) -> None:
+def _typeset_found(
+    feed: TypesetFeed,
+    cache: NodeTranscript,
+    blocks: _Blocks | None,
+    show_reasoning: bool,
+    needle: str,
+) -> list[Any]:
+    """
+    Every match in TYPESET, in run order: the library's in its views
+    (``_typeset_matches``, as ``(key, view, match)``) and each hosted run's in its
+    blocks (``_Blocks.hits``, as ``BlockHit``).
+    """
+    ordered: list[tuple[int, int, Any]] = []
+    for item in _typeset_matches(feed, show_reasoning, needle):
+        ordered.append((_match_run(feed, item, show_reasoning), len(ordered), item))
+    if blocks is not None and needle:
+        hosted = [
+            run.run
+            for generation in feed.generations
+            for run in generation.shown(show_reasoning)
+            if run.kind in _TOOL_KINDS and run.run in cache.hosted
+        ]
+        shown = feed.shown_open(show_reasoning)
+        if shown is not None and shown.kind in _TOOL_KINDS and shown.run in cache.hosted:
+            hosted.append(shown.run)
+        for run in hosted:
+            ordered += [(run, len(ordered), hit) for hit in blocks.hits(run, needle)]
+    ordered.sort(key=lambda each: (each[0], each[1]))
+    return [item for _, _, item in ordered]
+
+
+def _match_run(feed: TypesetFeed, item: tuple[Hashable, Any, Any], show: bool) -> int:
+    """The run a match of the library's is in: what orders it among the blocks'."""
+    key, view, match = item
+    generation = feed.generation(key)
+    if generation is None:
+        return key[1] if isinstance(key, tuple) and isinstance(key[1], int) else -1
+    owners = generation.owners(show)
+    part = feed.views.part_at(key, match.block, view)
+    if part is None or not 0 <= part < len(owners):
+        return owners[0].run if owners else -1
+    return owners[part].run
+
+
+def _reveal_block(state: TranscriptState, hit: BlockHit) -> None:
+    """
+    Bring a block's match into view: the block, from where it is drawn, and its
+    viewer opened at the row where the collapsed block does not draw the match.
+    """
+    node = state.node
+    if node is None:
+        return
+    state.block_reveal = (node, hit.anchor)
+    if not hit.shown and hit.row is not None:
+        state.expanded.add((node, hit.anchor))
+
+
+def _hand_marks(bar: FindBar, found: Sequence[Any]) -> None:
     """
     Give each view the marks of its matches, the current one stronger, and take
     them from a view that has none now. A view is handed marks only when they
     changed: it packs them for the library each time.
     """
     grouped: dict[int, tuple[Any, list[Any], int | None]] = {}
-    for number, (_, view, match) in enumerate(found):
+    for number, item in enumerate(found):
+        if isinstance(item, BlockHit):
+            continue
+        _, view, match = item
         held, matches, current = grouped.get(id(view), (view, [], None))
         if number == bar.current:
             current = len(matches)
@@ -1531,9 +2084,7 @@ def _hand_marks(bar: FindBar, found: Sequence[tuple[Hashable, Any, Any]]) -> Non
     bar.marked = handed
 
 
-def _reveal(
-    state: TranscriptState, feed: TypesetFeed, found: Sequence[tuple[Hashable, Any, Any]]
-) -> bool:
+def _reveal(state: TranscriptState, feed: TypesetFeed, found: Sequence[Any]) -> bool:
     """
     Bring the current match into view if the find row asked for it. Returns whether
     it did.
@@ -1546,7 +2097,17 @@ def _reveal(
     if not bar.reveal or not found:
         return False
     bar.reveal = False
-    key, view, match = found[bar.current]
+    item = found[bar.current]
+    state.block_reveal = None
+    if isinstance(item, BlockHit):
+        _reveal_block(state, item)
+        for held in feed.generations:
+            if any(run.run == item.run for run in held.runs):
+                if not held.in_sight:
+                    imgui.set_scroll_y(max(0.0, held.top - imgui.get_window_height() / 3.0))
+                break
+        return True
+    key, view, match = item
     generation = feed.generation(key)
     if generation is not None and not generation.in_sight:
         imgui.set_scroll_y(max(0.0, generation.top - imgui.get_window_height() / 3.0))
@@ -1592,7 +2153,7 @@ def _draw_typeset_menu(state: TranscriptState, feed: TypesetFeed, cache: NodeTra
     lines, so a run the window cut short at the top is copied from its first line.
     A selection is inside one of the library's views, so it ends with its run.
     """
-    if not imgui.begin_popup_context_window(_CONTEXT_ID, imgui.PopupFlags_.mouse_button_right):
+    if not widgets.begin_context_menu(_CONTEXT_ID):
         return
 
     for key in feed.views.keys():
@@ -1625,9 +2186,12 @@ def _copy_run_item(cache: NodeTranscript, run: int) -> None:
 
 
 def _draw_context_menu(state: TranscriptState, cache: NodeTranscript, visible: list[Line]) -> None:
-    if not imgui.begin_popup_context_window(_CONTEXT_ID, imgui.PopupFlags_.mouse_button_right):
+    if not widgets.begin_context_menu(_CONTEXT_ID):
         return
 
+    if state.context_block:
+        if imgui.menu_item_simple("copy block"):
+            imgui.set_clipboard_text(state.context_block)
     if state.context_run is not None:
         _copy_run_item(cache, state.context_run)
 
@@ -1654,7 +2218,7 @@ def _handle_scroll(state: TranscriptState) -> None:
         window, imgui.internal.Axis.y
     )
     if state.held:
-        wheel = imgui.is_window_hovered() and imgui.get_io().mouse_wheel != 0.0
+        wheel = widgets.wheels_here() and imgui.get_io().mouse_wheel != 0.0
         if not (wheel or dragging):
             state.follow_tail = False
             return

@@ -646,7 +646,7 @@ def _offer_rest(pane: DetailState, key: Hashable, more: int, total: int) -> None
         f"… {more:,} more lines not set: all {total:,} would be read and laid out in one frame",
     )
     imgui.pop_text_wrap_pos()
-    if imgui.small_button(f"set all {total:,} lines"):
+    if widgets.small_button(f"set all {total:,} lines"):
         pane.whole = key
 
 
@@ -675,7 +675,7 @@ def _header(
     imgui.same_line()
     imgui.text_disabled(f"· {format_elapsed(now - obligation.since)}")
     imgui.same_line()
-    if imgui.small_button("copy"):
+    if widgets.small_button("copy"):
         imgui.set_clipboard_text(plain_text(snap, obligation, restored))
 
     imgui.push_text_wrap_pos(0.0)
@@ -1061,7 +1061,7 @@ def draw_ended_commands(snap: Snapshot, rows: inbox.CommandRows | None, session_
         if opened:
             role = inbox.command_role(snap, command)
             restored = rows is not None and command.id in rows.restored
-            if imgui.small_button(ENDED_COPY):
+            if widgets.small_button(ENDED_COPY):
                 imgui.set_clipboard_text("\n".join(command_text(command, role, restored=restored)))
             said = inbox.unrecorded_line(rows, command)
             if said is not None:

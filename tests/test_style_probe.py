@@ -259,11 +259,21 @@ def test_the_middle_button_steps_are_softs_own_values() -> None:
         assert middle["frame_rounding"] == soft["frame_rounding"]
 
 
-def test_the_middle_dropdown_is_the_base_as_it_stands(styled: Any) -> None:
+def test_the_middle_dropdown_is_the_base_but_for_the_popup_outline_the_pick_took_off(
+    styled: Any,
+) -> None:
+    """
+    Sheet 4's middle cell is the base it was drawn over, and the operator's pick
+    differs from it only in the popup's outline: ``apply_style`` draws popups at
+    rounding 4 with no outline (but on high_contrast), where the framed cell keeps
+    one. Its arrow is the base's button colour, which the pick tints.
+    """
     probe.apply(probe.SOFT_WELLS)
     style = styled.get_style()
     for name, value in probe.DROPDOWNS[1].scalars:
-        assert getattr(style, name) == pytest.approx(value), name
+        expected = 0.0 if name == "popup_border_size" else value
+        assert getattr(style, name) == pytest.approx(expected), name
+    assert dict(probe.DROPDOWNS[1].scalars)["popup_border_size"] == 1.0
     assert probe.DROPDOWNS[1].colors == ()
 
 

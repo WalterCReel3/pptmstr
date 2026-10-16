@@ -40,16 +40,25 @@ ink (``_classes``).
 Lexed once per language and code (``_classes``, kept by value), so a view
 inked again for a theme switch or a stream revision that left a block as it
 was does not lex it again; a view is inked only when its parts or the theme
-change, never per frame. A block that is not coloured is answered without
-either cache, so a stream's open fence, inked again at every arrival, keeps
-nothing (``views.Stream._ink`` says when a streamed fence is coloured).
+change, never per frame. A block that is not coloured, its language unknown
+included, is answered without either cache, so a stream's open fence, inked
+again at every arrival, keeps nothing (``views.Stream._ink`` says when a
+streamed fence is coloured).
+
+What a lex costs is bounded per block here (``BOUND``) and per frame by the
+caller: ``needs_lex`` says, without lexing, whether ``block_spans`` would lex,
+and ``views`` lexes no more on a frame than its budget allows
+(``views._Lexing``).
 """
 
 from __future__ import annotations
 
 import functools
-from collections.abc import Iterable
-from typing import TYPE_CHECKING, Any
+import sys
+from array import array
+from collections import OrderedDict
+from collections.abc import Hashable, Iterable
+from typing import TYPE_CHECKING, Any, TypeAlias, cast
 
 from pygments.token import Comment, Keyword, Name, Number, Operator, String
 
@@ -59,6 +68,15 @@ if TYPE_CHECKING:
 Span = tuple[int, int, int]
 """
 A half-open range of a block's text and the packed ink it is drawn in.
+"""
+
+_Runs: TypeAlias = "array[int] | None"
+"""
+What ``_classes`` answers: the coloured runs of a block's code, three numbers a
+run (where it begins, where it ends, and its class's index in ``_CLASSES``), or
+``None``. Packed and not a tuple a run: a tuple of three is some 120 bytes and
+the three numbers here are 12, so ``_LEXED`` holds some seven times the
+blocks in the same memory, and a block it holds is never lexed again.
 """
 
 _CLASSES = (
@@ -74,10 +92,43 @@ The coloured classes, each a field of ``SyntaxInks``, and the Pygments token
 tree each one covers.
 """
 
-_KEPT = 512
+_KEPT = 24 * 2**20
 """
-How many lexed blocks are kept. A transcript's code blocks, a few hundred
-characters to a few thousand each, are well inside it.
+How many bytes each of the two caches keeps (``_Kept``), the least recently
+used going first: both together are at most 48 MiB. An entry weighs what it
+holds (``_weight``): its text, its key and entry, and its answer, which goes
+with the block's tokens and not its characters. Measured 2026-10-16 with
+tracemalloc, the caches filled to 4 Mi characters of 3,000-character fences
+when each answer was a tuple a token held 58 MB for Python, 92 for JSON and
+128 for shell, some 110 bytes a token. Filled past this limit with the same
+fences, they hold 42 MiB for each of the three, against 48 weighed;
+``tests/test_typeset_syntax.py`` holds the weights to what is measured.
+
+The working set is what one re-ink walks: on a theme switch, every coloured
+fence a pane holds. The log holds some 1,750 lines
+(``transcript_pane._TYPESET_KEEP`` and a generation) and a fence needs three to
+be coloured, so at most some 580 fences; DETAIL some 670 more
+(``review.SETTLED_LINES``). A theme switch misses ``_SPANS``, whose answers
+carry the theme's inks, and builds them from ``_LEXED``, which lexes nothing it
+holds: a 3,000-character fence of shell is some 7 KB there, so some 3,600 of
+them fit (5,000 of Python), where it is some 75 KB in ``_SPANS``, which holds
+some 330. A working set past ``_LEXED``, a pane of fences each near ``BOUND``,
+is lexed again on the switch, within the frame budget, and the switch
+completes.
+"""
+
+_ENTRY_BYTES = 320
+"""
+What an entry costs besides its text and its answer: its key, the cache's link
+to it, and the pair of weight and answer. Measured with tracemalloc for a fence
+of one line, where it is most of what is held.
+"""
+
+_SPAN_BYTES = 120
+"""
+What one span costs in ``_SPANS`` besides its slot in the answer: a tuple of
+three, 64 bytes, and its two offsets, 28 bytes each. The ink is a number every
+span of that class shares.
 """
 
 BOUND = 32_768
@@ -116,8 +167,8 @@ def too_long(caption: str, code: str) -> bool:
     """
     Whether a fence would be coloured but for its size: its language has a
     lexer that colours and its code is more than ``BOUND`` characters. Asked
-    of a fence whatever its part's ink, which is not known where its caption
-    is made, so an inked part's long fence says so too.
+    only of a fence whose part has no ink of its own (``views._captioned``):
+    one that is never coloured is not told it is too long.
     """
     return len(code) > BOUND and _lexer(language_of(caption)) is not None
 
@@ -136,38 +187,132 @@ def block_spans(
     and is answered without a cache: those spans cost a tuple of two, and a
     stream's open fence would otherwise keep a copy of itself per arrival.
     """
-    start = said + 1
-    if (
-        not said
-        or ink is not None
-        or inks is None
-        or len(text) <= start
-        or len(text) - start > BOUND
-    ):
+    if inks is None or not _colours(text, said, ink, inks):
         return tuple(_plain(len(text), said, accent, ink))
-    return _coloured(text, said, accent, inks)
+    key = (text, said, accent, inks)
+    spans = cast("tuple[Span, ...] | None", _SPANS.get(key))
+    if spans is None:
+        spans = _coloured(text, said, accent, inks)
+        _SPANS.put(key, _weight(text, sys.getsizeof(spans) + _SPAN_BYTES * len(spans)), spans)
+    return spans
 
 
-@functools.lru_cache(maxsize=_KEPT)
+def needs_lex(
+    text: str, said: int, ink: int | None, inks: SyntaxInks | None, *, accent: int | None = None
+) -> bool:
+    """
+    Whether ``block_spans`` of this block would lex it: it is coloured and its
+    code's runs are not kept, nor, given the caption's ``accent`` it would be
+    called with, its spans. Answered without lexing, so a caller can leave a
+    block plain for a frame and colour it on a later one.
+
+    **A caller that draws passes ``accent``**: a block inked again and again
+    is answered from ``_SPANS`` and never touches ``_LEXED``, which may have
+    let it go, and without the accent this answers that it would lex a block
+    ``block_spans`` answers from ``_SPANS``.
+    """
+    if not _colours(text, said, ink, inks):
+        return False
+    if accent is not None and (text, said, accent, inks) in _SPANS:
+        return False
+    return (language_of(text[:said]), text, said + 1) not in _LEXED
+
+
+def _weight(text: str, answer: int) -> int:
+    """
+    What an entry for ``text`` holds, in bytes, its answer being ``answer``
+    bytes: the text counted in each cache that holds it, though the two share
+    it, so that the weights are never less than what is held.
+    """
+    return sys.getsizeof(text) + _ENTRY_BYTES + answer
+
+
+def _colours(text: str, said: int, ink: int | None, inks: SyntaxInks | None) -> bool:
+    """
+    Whether a block is coloured by token: every gate of the module docstring,
+    its language's lexer the last of them.
+    """
+    start = said + 1
+    return bool(
+        said
+        and ink is None
+        and inks is not None
+        and len(text) > start
+        and len(text) - start <= BOUND
+        and _lexer(language_of(text[:said])) is not None
+    )
+
+
+class _Kept:
+    """
+    The least recently used entries dropped first once their weights, the
+    bytes each one holds (``_weight``), sum past ``_KEPT``. A block over the
+    whole of it is answered and not kept.
+    """
+
+    def __init__(self, limit: int) -> None:
+        self.limit = limit
+        self.held = 0
+        self._entries: OrderedDict[Hashable, tuple[int, Any]] = OrderedDict()
+
+    def __contains__(self, key: Hashable) -> bool:
+        return key in self._entries
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def get(self, key: Hashable) -> Any:
+        found = self._entries.get(key)
+        if found is None:
+            return None
+        self._entries.move_to_end(key)
+        return found[1]
+
+    def put(self, key: Hashable, weight: int, value: Any) -> None:
+        if key in self._entries:
+            self.held -= self._entries.pop(key)[0]
+        if weight <= self.limit:
+            self._entries[key] = (weight, value)
+            self.held += weight
+            while self.held > self.limit:
+                self.held -= self._entries.popitem(last=False)[1][0]
+
+    def clear(self) -> None:
+        self._entries.clear()
+        self.held = 0
+
+
+_SPANS = _Kept(_KEPT)
+"""
+``block_spans`` of every coloured block, by its text, caption, accent and
+token inks: a stream inks every committed fence again at each revision, and
+building a 500-line block's spans again is some 130 microseconds.
+"""
+
+_LEXED = _Kept(_KEPT)
+"""
+``_classes`` of every block lexed, by language, text and where its code
+starts: a theme carries no part of the answer, so a switch lexes no block
+still kept.
+"""
+
+
 def _coloured(text: str, said: int, accent: int, inks: SyntaxInks) -> tuple[Span, ...]:
     """
-    ``block_spans`` of a block it colours if its language lexes. Kept, as
-    ``_classes`` is: a stream inks every committed fence again at each
-    revision, and building a 500-line block's spans again is some 130
-    microseconds.
+    ``block_spans`` of a block it colours.
     """
     start = said + 1
     lexed = _classes(language_of(text[:said]), text, start)
     if lexed is None:
         return tuple(_plain(len(text), said, accent, None))
     spans: list[Span] = [(0, said, accent)]
+    by_class = [getattr(inks, name) for name, _ in _CLASSES]
     at = start
-    for begin, end, name in lexed:
-        begin += start
-        end += start
+    for n in range(0, len(lexed), 3):
+        begin, end = lexed[n] + start, lexed[n + 1] + start
         if begin > at:
             spans.append((at, begin, inks.default))
-        spans.append((begin, end, getattr(inks, name)))
+        spans.append((begin, end, by_class[lexed[n + 2]]))
         at = end
     if at < len(text):
         spans.append((at, len(text), inks.default))
@@ -185,19 +330,30 @@ def _plain(length: int, said: int, accent: int, ink: int | None) -> list[Span]:
     return spans
 
 
-@functools.lru_cache(maxsize=_KEPT)
-def _classes(language: str, text: str, start: int) -> tuple[tuple[int, int, str], ...] | None:
+def _classes(language: str, text: str, start: int) -> _Runs:
+    """
+    ``_lex_classes``, kept (``_LEXED``).
+    """
+    key = (language, text, start)
+    if key in _LEXED:
+        return cast("_Runs", _LEXED.get(key))
+    runs = _lex_classes(language, text, start)
+    _LEXED.put(key, _weight(text, 0 if runs is None else sys.getsizeof(runs)), runs)
+    return runs
+
+
+def _lex_classes(language: str, text: str, start: int) -> _Runs:
     """
     The coloured runs of ``text[start:]``, the code, in ``language``:
     half-open ranges into the code and the ``SyntaxInks`` field each is drawn
-    in, neighbours of one class joined. ``None`` where the code is not
-    coloured at all: no lexer by that name, a plain-text one, or a lexer that
-    raised. Empty where it lexed and no token is of a coloured class.
+    in (``_Runs``), neighbours of one class joined. ``None`` where the code is
+    not coloured at all: no lexer by that name, a plain-text one, or a lexer
+    that raised. Empty where it lexed and no token is of a coloured class.
 
-    Kept by value and not by block: a theme carries no part of the answer.
-    Keyed by the block's whole text and where its code starts, and not by the
-    code cut from it: the two caches then hold the one string ``_coloured``
-    was called with, where a key of the code would be a second copy of it.
+    Kept (``_classes``) by the block's whole text and where its code starts,
+    and not by the code cut from it: the two caches then hold the one string
+    ``block_spans`` was called with, where a key of the code would be a second
+    copy of it.
     """
     lexer = _lexer(language)
     code = text[start:]
@@ -209,7 +365,7 @@ def _classes(language: str, text: str, start: int) -> tuple[tuple[int, int, str]
         # A lexer's bug, met on whatever an agent wrote, costs the colour and
         # not the frame it would be raised into.
         return None
-    runs: list[tuple[int, int, str]] = []
+    runs: list[int] = []
     at = 0
     for index, kind, value in tokens:
         if not value or index < at or not code.startswith(value, index):
@@ -218,14 +374,14 @@ def _classes(language: str, text: str, start: int) -> tuple[tuple[int, int, str]
             # colour would land on other characters.
             continue
         end = at = index + len(value)
-        name = _class_of(kind)
-        if name is None:
+        found = _class_of(kind)
+        if found is None:
             continue
-        if runs and runs[-1][1] == index and runs[-1][2] == name:
-            runs[-1] = (runs[-1][0], end, name)
+        if runs and runs[-2] == index and runs[-1] == found:
+            runs[-2] = end
         else:
-            runs.append((index, end, name))
-    return tuple(runs)
+            runs += (index, end, found)
+    return array("I", runs)
 
 
 def _lex(lexer: Any, code: str) -> Iterable[tuple[int, Any, str]]:
@@ -259,13 +415,13 @@ def _lexer(language: str) -> Any:
     return None if isinstance(lexer, (TextLexer, OutputLexer)) else lexer
 
 
-def _class_of(kind: Any) -> str | None:
+def _class_of(kind: Any) -> int | None:
     """
-    Which ``SyntaxInks`` field a token type is drawn in, or ``None`` for the
-    code's default ink. A subtype is its parent's: ``Keyword.Constant`` is a
-    keyword and ``String.Doc`` a string.
+    Which ``SyntaxInks`` field a token type is drawn in, as its index in
+    ``_CLASSES``, or ``None`` for the code's default ink. A subtype is its
+    parent's: ``Keyword.Constant`` is a keyword and ``String.Doc`` a string.
     """
-    for name, tree in _CLASSES:
+    for found, (_, tree) in enumerate(_CLASSES):
         if kind in tree:
-            return name
+            return found
     return None

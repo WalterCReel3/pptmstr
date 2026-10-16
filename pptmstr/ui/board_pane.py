@@ -167,7 +167,7 @@ from ..model import (
     property_overrun,
 )
 from ..theme import Color, P
-from . import typeset
+from . import typeset, widgets
 from .focus import FocusState
 from .typeset import Kind, Part, Weight
 from .widgets import CTRL_ENTER_SUBMITS, closed_line, ellipsis, multiline_input, section
@@ -518,19 +518,18 @@ def _filter_chips(pane: BoardState) -> None:
     One toggle per ``RowKind``, on as many lines as the pane's width needs. A
     hidden kind is drawn dim and without its frame.
     """
-    padding = float(imgui.get_style().frame_padding.x)
     right = float(imgui.get_cursor_screen_pos().x) + float(imgui.get_content_region_avail().x)
     for at, kind in enumerate(RowKind):
         if at:
             imgui.same_line()
-            width = float(imgui.calc_text_size(kind.value).x) + 2 * padding
+            width = widgets.small_button_width(kind.value)
             if float(imgui.get_cursor_screen_pos().x) + width > right:
                 imgui.new_line()
         hidden = kind in pane.hidden
         if hidden:
             imgui.push_style_color(imgui.Col_.text, P.text_dim.vec4)
             imgui.push_style_color(imgui.Col_.button, imgui.ImVec4(0.0, 0.0, 0.0, 0.0))
-        if imgui.small_button(f"{kind.value}##board-filter"):
+        if widgets.small_button(f"{kind.value}##board-filter"):
             pane.hidden ^= {kind}
         if hidden:
             imgui.pop_style_color(2)
@@ -701,7 +700,7 @@ def _task_row(
             author(body)
             if dropped:
                 imgui.text_colored(P.text_dim.vec4, f"... {dropped} more character(s) not shown")
-        if imgui.small_button(f"amend##{row.id}"):
+        if widgets.small_button(f"amend##{row.id}"):
             # One editor, so one draft: opening this row's abandons whatever was
             # half-typed on another, which would otherwise come back the next time
             # that row is amended, as text the operator had walked away from.
@@ -711,7 +710,7 @@ def _task_row(
             pane.stop_closing()
         if closable(row):
             imgui.same_line()
-            if imgui.small_button(f"{CLOSE}##close-{row.id}"):
+            if widgets.small_button(f"{CLOSE}##close-{row.id}"):
                 # The same one-editor rule from the other side: a half-written
                 # amendment does not sit behind the close box to be sent later.
                 pane.stop_closing()
@@ -833,9 +832,9 @@ def _amend_editor(row: BoardTask, pane: BoardState, bridge: Bridge) -> None:
     )
     imgui.text_disabled("Ctrl+Enter amends, Enter for a new line")
 
-    applied = (imgui.small_button(f"amend##apply-{row.id}") or submitted) and not too_long
+    applied = (widgets.small_button(f"amend##apply-{row.id}") or submitted) and not too_long
     imgui.same_line()
-    cancelled = imgui.small_button(f"cancel##{row.id}")
+    cancelled = widgets.small_button(f"cancel##{row.id}")
 
     if applied:
         # node_id stays None: this is the operator's, and the store reads that as
@@ -940,10 +939,10 @@ def _close_editor(row: BoardTask, pane: BoardState, bridge: Bridge) -> None:
         too_long = close_reason_overrun_label(reason)
         if too_long:
             imgui.text_colored(P.warn.vec4, too_long)
-        pressed = imgui.small_button(f"{confirm_close_label(row)}##close-confirm-{row.id}")
+        pressed = widgets.small_button(f"{confirm_close_label(row)}##close-confirm-{row.id}")
         closed = pressed and not too_long
         imgui.same_line()
-        if imgui.small_button(f"keep editing##close-back-{row.id}"):
+        if widgets.small_button(f"keep editing##close-back-{row.id}"):
             pane.close_confirming = False
     else:
         imgui.text_disabled(
@@ -957,10 +956,10 @@ def _close_editor(row: BoardTask, pane: BoardState, bridge: Bridge) -> None:
         too_long = close_reason_overrun_label(reason)
         if too_long:
             imgui.text_colored(P.warn.vec4, too_long)
-        if imgui.small_button(f"close##close-apply-{row.id}") and not too_long:
+        if widgets.small_button(f"close##close-apply-{row.id}") and not too_long:
             pane.close_confirming = True
     imgui.same_line()
-    cancelled = imgui.small_button(f"cancel##close-cancel-{row.id}")
+    cancelled = widgets.small_button(f"cancel##close-cancel-{row.id}")
 
     if closed:
         bridge.emit(TaskClosed(task_id=row.id, reason=reason))
@@ -1190,14 +1189,14 @@ def _row_controls(row: BoardTask, pane: BoardState) -> None:
     The amend button and, on a row that is not finished, the close button: the
     native row's (``_task_row``), with its one-editor rule.
     """
-    if imgui.small_button(f"amend##{row.id}"):
+    if widgets.small_button(f"amend##{row.id}"):
         pane.editing = row.id
         pane.drafts = {row.id: row.detail}
         pane.property_drafts = {row.id: row.property}
         pane.stop_closing()
     if closable(row):
         imgui.same_line()
-        if imgui.small_button(f"{CLOSE}##close-{row.id}"):
+        if widgets.small_button(f"{CLOSE}##close-{row.id}"):
             pane.stop_closing()
             pane.closing = row.id
             pane.editing = None

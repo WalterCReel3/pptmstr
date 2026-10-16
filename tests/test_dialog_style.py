@@ -80,8 +80,12 @@ def _frame(body: Callable[[], None], *, size: float = theme._FONT_SIZE) -> None:
 
 def test_inside_the_scope_items_and_frames_have_more_room_than_the_docks(context: None) -> None:
     """
-    By the ratios chosen, at the size the body face is loaded at. The window's edge
-    is the one value held down: an em at most, and no taller than it is wide.
+    At the size the body face is loaded at. The window's edge is the one value held
+    down: an em at most, and no taller than it is wide.
+
+    A frame's vertical padding is the one value that is not more: the docks' 9x6,
+    the operator's pick, is as tall as the modal's 0.375 em, so a modal's field is
+    as tall as a dock's and only wider.
     """
     seen: list[Style] = []
     dock = _style()
@@ -94,8 +98,9 @@ def test_inside_the_scope_items_and_frames_have_more_room_than_the_docks(context
     spacing, frame, inner, edge = seen[0]
     dock_spacing, dock_frame, dock_inner, dock_edge = dock
 
-    assert spacing[1] / dock_spacing[1] == pytest.approx(1.6)
-    assert frame[1] / dock_frame[1] == pytest.approx(1.5)
+    assert dock_spacing == (8.0, 6.0) and dock_frame == (9.0, 6.0)
+    assert spacing[1] > dock_spacing[1]
+    assert frame[1] == dock_frame[1]
     assert spacing[0] > dock_spacing[0] and frame[0] > dock_frame[0]
     assert inner[0] > dock_inner[0] and inner[1] > dock_inner[1]
     assert dock_edge[0] < edge[0] <= theme._FONT_SIZE
@@ -237,6 +242,7 @@ class _Noting:
     )
 
     def __init__(self) -> None:
+        self.internal = _NotingInternal(self)
         self.at_begin: list[Style] = []
         self.at_button: list[Style] = []
         # This frame's items: what names each, its top edge and its bottom edge.
@@ -269,8 +275,10 @@ class _Noting:
             return False, None
         return imgui.begin_popup_modal(*args)  # type: ignore[arg-type]
 
-    def button(self, label: str, size: object) -> bool:
-        self.at_button.append(_style())
+    def button(self, label: str, size: object = None) -> bool:
+        # A dialog's own buttons, each given a size.
+        if size is not None:
+            self.at_button.append(_style())
         pressed = bool(imgui.button(label, size))  # type: ignore[arg-type]
         self.note(label)
         return pressed
@@ -292,6 +300,25 @@ class _Noting:
         """The room between the item named and the one drawn after it."""
         at = self._at(name)
         return self.items[at + 1][1] - self.items[at][2]
+
+
+class _NotingInternal:
+    """
+    ``imgui.internal``, noting the item ``widgets.small_button`` draws through it.
+    That button is drawn under its own padding, not the scope's, so no style is
+    noted at it.
+    """
+
+    def __init__(self, noting: _Noting) -> None:
+        self.noting = noting
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(imgui.internal, name)
+
+    def button_ex(self, label: str, *args: Any) -> bool:
+        pressed = bool(imgui.internal.button_ex(label, *args))
+        self.noting.note(label)
+        return pressed
 
 
 class _Dialog:
@@ -519,6 +546,23 @@ def _ruled() -> float:
     return 2.0 * _px(widgets._DIALOG_GROUP_EMS) + imgui.get_style().separator_size
 
 
+def _set_down() -> float:
+    """
+    How far a line ending in a question mark sets its text down to the mark's
+    label, at the dialogs' face: its row starts where a line's would, its text that
+    much lower.
+    """
+    down: list[float] = []
+
+    def body() -> None:
+        imgui.begin("set down")
+        down.append(widgets.small_button_line())
+        imgui.end()
+
+    _frame(body)
+    return down[0]
+
+
 def _distances() -> tuple[float, float, float, float]:
     """A caption's, an item's, a field's and a ruled group's, smallest first."""
     caption = _px(widgets._DIALOG_CAPTION_EMS)
@@ -557,7 +601,7 @@ def test_the_launcher_is_five_groups_and_each_caption_is_under_its_own_control(
     assert dialog.noting.after("team") == caption
     # The gate: one line under the dial, and what the rung still parks is not drawn.
     assert room("gate") == ruled
-    assert room(dial.adds) == caption
+    assert room(dial.adds) == caption + _set_down()
     assert dial.parks not in [name for name, _, _ in dialog.noting.items]
     assert room("sub-agents") == field
     assert room("sub-agents one session may run at once") == caption
@@ -583,7 +627,14 @@ def test_the_top_rung_adds_one_line_under_the_dial_and_no_section(
     # Its start: this face is wider than the application's, and the line is cut
     # to the row rather than wrapped.
     assert room(launcher.LOUD_LINE[:24]) == caption + pad
-    assert room("sub-agents") == field + pad
+    # Its foot: the band is the frame's padding under its line, and the next field
+    # a field's distance under that. The question mark on the line is held inside
+    # the band.
+    items = dialog.noting.items
+    _, top, foot = items[dialog.noting._at(launcher.LOUD_LINE[:24])]
+    assert items[dialog.noting._at("sub-agents")][1] - foot == pad + field
+    _, mark_top, mark_foot = items[dialog.noting._at(f"{widgets.HELP_MARK}##")]
+    assert top - pad <= mark_top and mark_foot <= foot + pad
     assert dialog.noting.after("sub-agents one session may run at once") == ruled
     (body,) = [
         window
@@ -621,7 +672,7 @@ def test_the_resume_form_is_four_groups_and_each_caption_is_under_its_own_contro
     assert room("sent to the session as its next message") == caption
     # The gate.
     assert room("gate") == ruled
-    assert room(dial.adds) == caption
+    assert room(dial.adds) == caption + _set_down()
     # What runs it.
     assert room("model") == ruled
     assert room("sub-agents") == item
@@ -730,7 +781,7 @@ def test_the_resume_forms_buttons_are_inside_a_window_too_short_for_its_body(
     places: dict[str, float] = {}
     real_button = dialog.noting.button
 
-    def button(label: str, size: object) -> bool:
+    def button(label: str, size: object = None) -> bool:
         pressed = real_button(label, size)
         places[label] = imgui.get_item_rect_max().y
         return pressed

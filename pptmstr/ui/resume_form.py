@@ -888,20 +888,20 @@ def _failure_notice(form: ResumeForm) -> None:
         loaded = form.failure_loaded
         widgets.notice(failure_notice(form.failures[0], loaded=loaded))
         if loaded:
-            if imgui.small_button("dismiss this notice"):
+            if widgets.small_button("dismiss this notice"):
                 form.discard_failed()
         else:
-            if imgui.small_button("restore that message"):
+            if widgets.small_button("restore that message"):
                 form.restore_failed()
             imgui.same_line()
-            if imgui.small_button("discard it"):
+            if widgets.small_button("discard it"):
                 form.discard_failed()
     if form.set_aside:
         widgets.notice(Notice(f"{len(form.set_aside)} message(s) set aside by a restore are kept"))
-        if imgui.small_button("bring back what was set aside"):
+        if widgets.small_button("bring back what was set aside"):
             form.restore_set_aside()
         imgui.same_line()
-        if imgui.small_button("discard what was set aside"):
+        if widgets.small_button("discard what was set aside"):
             form.discard_set_aside()
     widgets.dialog_group()
 
