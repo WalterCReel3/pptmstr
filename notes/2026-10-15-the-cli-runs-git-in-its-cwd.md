@@ -57,11 +57,27 @@ that runs plain `git status` in `P` and confirms the marker — proof the decoy 
 - **d-control-no-cli** — exit 0, filter marker: **no**, fsmonitor marker: **no**. The
   fixture does not fire on its own.
 
-### Operator-run, outside the sandbox — NOT YET RUN
+### Operator-run, outside the sandbox (2026-10-16, command cmd-20261016T015757Z-3d6fe79b71b1)
 
-- **a-default** — exit: _not yet run_; filter marker: _not yet run_; fsmonitor: _not yet run_.
-- **b-disable-env** — exit: _not yet run_; filter marker: _not yet run_; fsmonitor: _not yet run_.
-- **c-settings-false** — exit: _not yet run_; filter marker: _not yet run_; fsmonitor: _not yet run_.
+Run by the operator exactly as asked, `.venv/bin/python scripts/probe_cli_git_status.py`,
+exit 0 in 10.6 s. The CLI was the SDK's bundled binary, version 2.1.301
+(`.venv/.../claude_agent_sdk/_bundled/claude`), which is what pptmstr launches.
+
+| arm | exit | filter | fsmonitor |
+|---|---|---|---|
+| self-check (git status) | 0 | YES | YES |
+| d-control-no-cli | 0 | no | no |
+| **a-default** | 0 | **YES** | no |
+| b-disable-env | 0 | no | no |
+| c-settings-false | 0 | no | no |
+
+**The claim is confirmed.** Started in a tree whose `.git` names a decoy repository, the
+CLI ran the decoy's configured clean filter as the operator, outside any sandbox, before
+the model ran a turn. It did not run the decoy's fsmonitor, so its git call disables or
+bypasses that channel and not the filter. Either documented switch stops it:
+`CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS=1` in the environment, or `includeGitInstructions:
+false` in settings. builder-20's caveat about a "no" in arm a does not apply, because arm a
+answered yes.
 
 ## What each outcome would mean
 
@@ -74,4 +90,8 @@ that runs plain `git status` in `P` and confirms the marker — proof the decoy 
 - **b / c YES while a is YES** means that suppression knob does not actually suppress the
   git run; **no** means it does.
 
-No fix is proposed here (memory: defer the fix until the measurement names it).
+The measurement names the cause and two switches that remove it. What switching it off
+costs: a session's system prompt loses its git-status section (branch, recent commits,
+working-tree status). An agent can still run `git status` itself, inside its own sandbox
+where one applies. Choosing the scope — every session, or only sessions launched into a
+worktree or a directory a session may have written — is the operator's call.

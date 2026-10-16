@@ -5,6 +5,242 @@ the same day, and nothing is applied to `theme.py` yet · **Answers:**
 U10 and the prototype half of U9 in `2026-10-15-ui-rework.md`, against the operator's notes
 under "Cohesion and UI workshopping" in that record
 
+## After the preview (2026-10-15)
+
+The operator looked at the preview on every theme: "This is looking fantastic although, I'm
+not sure what happened but the tab text is now fuzzy. Should be a simple fix-up though."
+Then: "Small button D looks great!", which is the wrapper at `frame_padding 8x4`, rounding
+5, text 14 px, height 22 px. And: "Composer does get lost. Can we shade it lighter?" That
+replaces the round-two fill choice for wells with a fill *lighter* than the pane, which none
+of the sheets drew.
+
+### The fix-ups (task `preview-fixups`)
+
+Images are under `shots/style-preview/fixups/`. They are gitignored and rendered locally with
+`.venv/bin/python scripts/style_probe.py --fixups`. The earlier preview is left as it was.
+
+| image | what it is |
+|---|---|
+| `tab-text.png` | One tab label drawn three ways: the preview's call, the fix, and the 16 px UI font as reference. Each has its pixels at 4x (nearest neighbour) beside it, read back from `tab-text-raw.png`, with the measurement. |
+| `tab-text-4x.png` | The same crops at 4x, one under another. |
+| `wells-light.png` | All 9 themes against the pick as previewed and the three well steps. Each cell shows a composer, a filter showing only its hint, an unchecked checkbox, small button D and a button, with the cell's measurements. |
+| `picked-wells-<t>/<theme>/{focus,settings}.png` | The real screens at each step `t` in 0.06, 0.10 and 0.15, for dark, light and high_contrast. |
+| `dark/<screen>.png` | The pick's six screens on dark, with the tab fix and small button D. |
+
+**Tab text: the cause, measured.**
+- `draw_inset_tabs` drew labels with `dl.add_text(font, font_size_base * 1.10, ...)`, which is 17.6.
+- ImGui 1.92.900 binds and bakes a font only at whole pixels. Measured in a bare context with
+  `renderer_has_textures`: `push_font(None, 17.6)` binds 18 px, and 17.4 binds 17. The app's
+  backend reports `renderer_has_textures True` and font scales of 1 (on the sheet).
+- `add_text` with a size that is not baked draws the nearest bake, scaled. So 17.6 drew the
+  18 px bitmap at 0.978. The glyph quads land between pixels (vertex y 107.933, 111.844 for
+  a label at y 105), and the bilinear sampling smears every horizontal stroke over two rows.
+- Measurement: a pixel counts as inked at 0.15 of the way from the tab fill to the label's ink,
+  and as solid at 0.85.
+
+| label | inked px | solid px | edge share |
+|---|---|---|---|
+| preview, focused tab | 284 | 21 | 93% |
+| fix, focused tab | 270 | 111 | 59% |
+| 16 px reference | 197 | 61 | 69% |
+
+On the real dock bar, dark `focus.png` `session` tab:
+
+| render | solid px | edge share |
+|---|---|---|
+| preview | 25 | 91% |
+| fix | 111 | 59% |
+
+**The call the app's tab drawing must use:** `imgui.push_font(None, style.font_size_base *
+scale)`, then draw with `imgui.get_font_size()`, the bound size, and `pop_font()`. Never pass
+`add_text` a size computed by hand. Pass `font_size_base` and not `get_font_size()` to
+`push_font`, or the global scale factors apply twice (the binding's own note). The probe's
+`tab_text_px` does exactly this, and `draw_inset_tabs` uses it.
+
+**Side findings on the tabs:**
+- "Text 1.10×" is 18 px, not 17.6. 1.15× is also 18 px.
+- Round two's tabs sheet sized its text through `push_font`, so it drew both of those cells at
+  18 px. That is why the sheet looked crisp and the preview did not.
+- The lane at 18 px is 1 + 18 + 8 = 27, still inside the 28 px dock bar.
+
+**Wells lighter than the pane.**
+- Each step sets `Col_.frame_bg = mix(bg, text, t)`, for `t` in 0.06, 0.10 and 0.15. A dock well
+  sits on `window_bg`, which is `bg`.
+- On a dark palette this is lighter. On a light one, where `bg` is at or near white and nothing
+  lighter is left, it is darker.
+- `text` is the direction because every palette already holds it furthest from `bg`. So one
+  `t` moves every well visibly off its pane, and text in the well loses contrast smoothly as
+  `t` grows.
+- `mix(panel, text_dim, t)` was rejected because it starts from `panel`. That is the same as
+  `bg` on high_contrast but far from it on cde and win311, so the step would mean something
+  different per theme.
+- `frame_border_size` stays 0.
+- Modal wells (settings, launcher) are `theme.dialog_colors`' `palette.well` and do not move
+  with `t`, so `settings.png` changes only in its buttons and tabs.
+
+Measured (WCAG 2.1 ratios of the 8-bit colours drawn, from `wells-light.png`). Each cell gives
+the well on the pane, then text in the well:
+
+| theme | pick (soft's fill) | t 0.06 | t 0.10 | t 0.15 |
+|---|---|---|---|---|
+| dark | 1.02 / 11.26 | 1.13 / 10.22 | 1.23 / 9.35 | 1.41 / 8.16 |
+| light | 1.03 / 14.92 | 1.12 / 12.85 | 1.21 / 11.92 | 1.35 / 10.73 |
+| high_contrast | 1.00 / 21.00 | 1.10 / 19.17 | 1.21 / 17.40 | 1.39 / 15.13 |
+| ghost | 1.02 / 11.78 | 1.11 / 10.83 | 1.22 / 9.88 | 1.38 / 8.70 |
+| xterm | 1.03 / 14.15 | 1.12 / 12.29 | 1.21 / 11.36 | 1.34 / 10.25 |
+| cde | 1.14 / 7.42 | 1.11 / 5.86 | 1.20 / 5.43 | 1.31 / 4.98 |
+| win311 | 1.18 / 8.58 | 1.13 / 6.45 | 1.22 / 5.98 | 1.35 / 5.41 |
+| kitty | 1.06 / 11.21 | 1.11 / 9.52 | 1.19 / 8.88 | 1.31 / 8.09 |
+| turbo | 1.07 / 14.46 | 1.06 / 14.58 | 1.14 / 13.63 | 1.26 / 12.25 |
+
+- **Text** in the well stays at or above 4.5:1 on every theme at every step. The lowest is cde
+  at 0.15, at 4.98.
+- **The hint** (`text_dim`, the placeholder) does not. On win311 it is 2.97 at 0.06, 2.75 at
+  0.10 and 2.49 at 0.15. On cde it is 3.57, 3.30 and 3.03. Already at the pick it is 3.95 on
+  win311.
+- **A button against a well** (CIE76 dE, where about 2.3 is just noticeable), lowest per step:
+  kitty at 9 (0.06), kitty and light at 9 to 10 (0.10), and light at 9 (0.15).
+  - On light at 0.15 the button and the well are 1.05:1 in luminance, so only their hue tells
+    them apart.
+  - At 0.06 cde and win311 move toward the pane rather than away from it: soft's fill was
+    already 1.14 and 1.18 there.
+- **Recommendation (builder's, not the operator's): t 0.10.**
+  - On dark it is 1.23:1, the first step where the composer reads at a glance on
+    `picked-wells-0.10/dark/focus.png`. On high_contrast it is 1.21, where the pick made the
+    composer invisible.
+  - 0.15 starts to read as a raised panel rather than a recessed field on dark, and costs
+    win311 and cde their hint contrast.
+- **Not handled:** `frame_bg_hovered` and `frame_bg_active` are still `apply_style`'s
+  translucent accent over the pane. On a lighter well, hovering it may read *darker* than the
+  well at rest. No image shows hover.
+
+**Small button D is now part of `picked`.**
+- `Variant.micro` makes every `imgui.small_button` call in the probe's process draw as
+  wrapper D. `install_micro` patches the attribute on the `imgui` module, which every call
+  site reads when it calls; `pptmstr/` is untouched.
+- `dark/<screen>.png` shows it: the copy button, the board's filter chips, and the rows that
+  hold them grow to 22 px.
+- The wrapper sheet's "small_button today" row still draws ImGui's own small_button
+  (`real_small_button`).
+
+**What was run and what was not (fix-ups)**
+- **Ran.** All of these were rendered from the working tree, which drew without error, so no
+  `git archive` export was needed:
+  - `--tab-text` and `--wells`
+  - `--preview picked-wells-<t>` on dark, light and high_contrast, at each step
+  - `--preview picked --theme dark`
+  - `pytest tests/test_style_probe.py`: 190 passed
+  - ruff, mypy and black on both files: clean
+  - Three hand mutations, each killed by the new tests: the old tab size, a `panel`-based
+    well, and an `uninstall_micro` that does not restore.
+- **Not run:**
+  - `--fixups` end to end. Its parts were run one by one, with the same arguments.
+  - Real hover or press on a lighter well.
+  - Any size but 1500x900 (the sheets are 1500x1300 and 1600x1720).
+  - DPI scaling, where `font_scale_dpi` is not 1 and the bound size differs.
+  - `make check` and the rest of the suite.
+- **Looked at:** tab-text, wells-light, dark focus and board with D, dark and high_contrast at
+  0.10. The other step screens were checked by exit code and file count only.
+
+### Per-theme values (the operator's "keep the frame on high-contrast and fix light and xterm")
+
+`final` is the pick with dock wells at `mix(bg, text, 0.10)` on every theme, plus the values a
+theme needs of its own (`THEME_TUNING` in `scripts/style_probe.py`, built by `final_for`).
+
+- **Images:** `shots/style-preview/fixups/final/<theme>/<screen>.png`, all six screens, for
+  dark, light, xterm and high_contrast.
+- **Regenerate:** `style_probe.py --final` renders them. `style_probe.py --quirks` prints the
+  measured table below.
+
+**What `apply-style` copies into `theme.py`:**
+
+| value | dark, xterm (and the other five) | light | high_contrast | where it goes in `theme.py` |
+|---|---|---|---|---|
+| `style.frame_border_size` | 0 | 0 | **1** | `apply_style`, as `child_border_size` already special-cases `high_contrast`. No new field. |
+| dock well `Col_.frame_bg` | `mix(bg, text, 0.10)` | **`mix(bg, text, 0.08)`** = #e3e4e8 | `mix(bg, text, 0.10)` = #1a1a1a | `apply_style` sets it from `panel_alt` today. **New field needed:** `Palette.well` is the modal well, held to its own floor, so this needs a separate role, for example `dock_well`, or a per-palette `t`. Dark: #26282f; xterm: #d4d2c8. |
+| `Col_.button` / `_hovered` / `_active` | `mix(panel_alt, accent, 0.20 / 0.36 / 0.52)` (soft's) | **`mix(panel_alt, accent, 0.36 / 0.52 / 0.68)`** = #9bbfd4 / #77abc6 / #5397b9 | soft's | `apply_style` sets `panel_alt` and a translucent accent today. **New field needed:** a per-palette tint, for example `button_tint` = 0.20, or 0.36 on light. |
+| tool block ground / text / dim | the mock's near-black #0b0b0c, #c7c7c7, #8c8c91 | **`mix(bg, text, 0.06)`** = #e7e8ec, `text`, `text_dim` | as dark | **New fields needed** (`terminal_bg`, `terminal_text`, `terminal_dim`); xterm takes light's derivation (#dcdad0). The real tool block is not in the app yet, so this is for whoever builds it. |
+
+Why light's well is 0.08 and not 0.10: at 0.10 the hint (`text_dim`) in a light well is 4.38:1,
+under AA. At 0.08 it is 4.55:1, and the well is still 1.17:1 off the pane, against 1.03 at the
+pick.
+
+**The quirks, measured** (`--quirks`). Each cell gives the pick, then `final` where the value
+moved, then the colour drawn and its CIE76 dE.
+
+| what | dark | light | xterm | high_contrast |
+|---|---|---|---|---|
+| dock well on the pane | 1.02 -> 1.23 | 1.03 -> 1.17 | 1.03 -> 1.21 | 1.00 -> 1.21 (+ white outline) |
+| text in the well | 11.26 -> 9.35 | 14.92 -> 12.38 | 14.15 -> 11.36 | 21.00 -> 17.40 |
+| hint in the well | 4.68 -> **3.89** | 5.48 -> 4.55 | 6.32 -> 5.07 | 11.54 -> 9.57 |
+| button on the pane | 1.75 | **1.41 -> 1.78** | 1.72 | 1.72 |
+| button text on the button | 6.58 | 10.26 -> 8.09 | 8.00 | 12.23 |
+| hovered button on the pane | 2.54 | 1.78 -> 2.29 | 2.52 | 2.77 |
+| button against the well | 1.71 -> 1.42 (dE 15) | 1.45 -> 1.53 (dE 21) | 1.77 -> 1.42 (dE 24) | 1.72 -> 1.42 (dE 20) |
+| selected tab on the lane | 1.09 | 1.17 | 1.24 | 1.10 |
+| unselected tab text | 4.45 | 5.78 | 6.73 | 11.54 |
+| focused tab's accent rule | 7.46 | 4.79 | 8.26 | 12.37 |
+| scrollbar grab on its track | 1.95 | 1.89 | 2.00 | 2.86 |
+| separator on the pane | 1.55 | 1.52 | 2.37 | 21.00 |
+| tool block on the pane | 1.09 | **18.05 -> 1.12** | **15.72 -> 1.12** | 1.07 |
+| tool block text | 11.64 | 11.64 -> 12.85 | 11.64 -> 12.29 | 11.64 |
+| tool block dim text | 5.88 | 5.88 -> 4.72 | 5.88 -> 5.48 | 5.88 |
+
+**What read worse than dark on light and xterm, and what was done:**
+- **Light's buttons** were 1.41:1 on the pane against dark's 1.75. Tuned to 1.78.
+- **The tool block's near-black** was a slab on both: 18.05:1 on light and 15.72:1 on xterm.
+  Tuned to a soft slab at 1.12:1, which is below the well's step so it does not read as a
+  field, with the palette's own inks. The fixed greys it had would draw at 1.38:1 and 2.73:1 on that ground,
+  so the inks had to change with the ground.
+- **The light wells** are described above.
+- **No worse than dark, so left alone:**
+  - The scrollbar grab: 1.89 and 2.00 against 1.95.
+  - Separators: 1.52 and 2.37 against 1.55.
+  - The selected tab on its lane: 1.17 and 1.24 against 1.09.
+  - On light the selected tab is *darker* than both the white lane and the pane, so it does
+    not join the pane. On dark it is lighter than both and does not join either. The two are
+    the same shape, so nothing was proposed.
+- **Lower than dark but above 3:1 for non-text:** light's focused-tab accent rule, at 4.79
+  against 7.46. Left alone.
+
+**What the per-theme values do not settle, for the operator:**
+- **Dark's hint in the well falls to 3.89:1 at t 0.10**, below AA, from 4.68. Dark's
+  `text_dim` is only 4.68 on the pane itself, so any well lighter than the pane takes it under
+  4.5.
+  - The choices are: accept it for placeholder text; lighten dark's `text_dim` (a palette
+    change, held by `tests/test_theme.py`); or keep dark's well at 0.04, where it is 1.07:1
+    and close to what the operator called lost.
+  - This was not chosen here.
+- **On high_contrast the tool-block mock is 1.07:1 on the black pane,** and dark is 1.09, ghost
+  1.04. It was not asked about and was left alone. The real block will need an outline or a
+  ground off black there.
+- **The caption** now takes five lines on `final` screens and covers the composer's button
+  row. The buttons are measured in the table and drawn on `wells-light.png`.
+
+**Run:**
+- `--final` for the four themes, exit 0. Re-run for light after its well moved to 0.08.
+- `--quirks`.
+- `pytest tests/test_style_probe.py`: 212 passed.
+- ruff, mypy and black.
+
+**Looked at:** final light terminal-block, final high_contrast settings, final xterm focus.
+The other final screens were checked by exit code only.
+
+On the preview's theme findings the operator decided: "Let's keep the frame on high-contrast
+and fix the light and xterm themes for the well fills (and other quirks)". So
+`frame_border_size` stays 1 on `high_contrast` only, and every other theme is borderless,
+with a well fill that reads. The operator confirmed again: "small_button variant D".
+
+The tool block (`2026-10-15-tool-block-variants.md`): "'Stacked' tool block looks great for
+bash!" The lead's defaults, which the operator has not ruled on:
+- Stacked's layout is used for every tool, with the per-tool headers it already draws (Edit as
+  a mini diff, Read as a path and line range, WebFetch as domain and prompt).
+- A Bash block shows the *last* lines of its output, where a test or build says whether it
+  passed. A Read block shows the first.
+- Errors get stacked's red rule.
+- The near-black well comes from each theme's colours, not a fixed `#0b0b0c`, because on
+  light themes a fixed colour would draw a black slab.
+
 ## The operator's pick (2026-10-15)
 
 From the round-two sheets, in the operator's words:

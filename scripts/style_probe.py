@@ -84,6 +84,12 @@ class Variant:
     inset_tabs: bool = False
     # Round two's drawn-tab geometry; ``None`` with ``inset_tabs`` is round one's.
     tabs: TabSpec | None = None
+    # A wrapper drawn in place of every ``imgui.small_button`` in the process
+    # (``install_micro``): call-site code, not a style value, so ``apply`` leaves it.
+    micro: Micro | None = None
+    # The tool-block mock-up's ground, ink and dim ink; ``None`` is its fixed
+    # near-black and greys.
+    terminal: tuple[Mix, Mix, Mix] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,7 +292,7 @@ def draw_inset_tabs(spec: TabSpec | None = None) -> None:
     seen: set[int] = set()
     lane = imgui.get_color_u32(imgui.Col_.title_bg)
     font = imgui.get_font()
-    size = imgui.get_font_size() if spec is None else style.font_size_base * spec.scale
+    size = imgui.get_font_size() if spec is None else tab_text_px(spec.scale)
     inset = 3.0 if spec is None else spec.inset
     gap = inset if spec is None else spec.gap
     floor = 1.0 if spec is None else 0.0
@@ -337,6 +343,25 @@ def draw_inset_tabs(spec: TabSpec | None = None) -> None:
             _paint_tab(dl, font, size, a, b, state, _label(tab.window), spec.pad[0])
             dl.pop_clip_rect()
         dl.pop_clip_rect()
+
+
+def tab_text_px(scale: float) -> float:
+    """
+    The size a tab label at ``scale`` times the UI font is drawn at: the size ImGui
+    binds for ``push_font(None, font_size_base * scale)``. Needs a frame.
+
+    ImGui 1.92.900 binds a whole pixel (measured: 17.6 -> 18, 17.4 -> 17) and bakes
+    the font at it. ``ImDrawList.add_text(font, size, ...)`` with a size that is not
+    a baked one draws the nearest bake scaled to it: 17.6 draws the 18 px bitmap at
+    0.978, its glyphs on fractional pixels, which is what read as fuzzy. Drawing at
+    this size draws the bake one to one.
+    """
+    from imgui_bundle import imgui
+
+    imgui.push_font(None, imgui.get_style().font_size_base * scale)
+    px = float(imgui.get_font_size())
+    imgui.pop_font()
+    return px
 
 
 # What each state of a drawn tab is filled with and written in. ``hovered`` is
@@ -423,7 +448,7 @@ def _caption_font() -> Any:
     return None
 
 
-def draw_terminal_mockup() -> None:
+def draw_terminal_mockup(colors: tuple[Mix, Mix, Mix] | None = None) -> None:
     """
     The terminal-style tool block, drawn as a floating window over the session
     pane. A mock-up of U1/U5's look: near-black ground, grey monospace, a small
@@ -455,6 +480,8 @@ def draw_terminal_mockup() -> None:
     near_black = imgui.ImVec4(0.043, 0.043, 0.047, 1.0)
     grey = imgui.ImVec4(0.78, 0.78, 0.78, 1.0)
     dim = imgui.ImVec4(0.55, 0.55, 0.57, 1.0)
+    if colors is not None:
+        near_black, grey, dim = (color_of(mix) for mix in colors)
     style = imgui.get_style()
     for n, (said, command, output, more, failed) in enumerate(_BLOCKS):
         imgui.push_style_color(imgui.Col_.child_bg, near_black)
@@ -1462,6 +1489,41 @@ def draw_sheet(name: str, first: bool) -> None:
 # chosen between them; what that one value does to every frame is stated on the
 # image (``PICKED_SHARED``).
 
+
+@dataclass(frozen=True, slots=True)
+class Micro:
+    """
+    A hypothetical ``widgets.small_button``: ``imgui.button`` with ``pad`` and
+    ``rounding`` pushed, and its text at ``scale`` times the UI font.
+    """
+
+    name: str
+    pad: tuple[float, float]
+    rounding: float
+    scale: float = 1.0
+
+    def height(self, font_px: float) -> float:
+        """The button's height: its text and the vertical padding above and below."""
+        return font_px * self.scale + 2.0 * self.pad[1]
+
+    def label(self, font_px: float) -> str:
+        return (
+            f"{self.name}: frame_padding {self.pad[0]:g}x{self.pad[1]:g} · rounding"
+            f" {self.rounding:g} · text {self.scale:g}x ({font_px * self.scale:g} px)"
+            f" -> {self.height(font_px):g} px"
+        )
+
+
+# Two heights (20 and 22 px) at two text sizes (16 and 14 px). 14 px is 0.875 of
+# the UI font: a whole pixel, so the text is not put on half pixels.
+MICROS: tuple[Micro, ...] = (
+    Micro("A", (6.0, 2.0), 4.0, 1.0),
+    Micro("B", (8.0, 3.0), 5.0, 1.0),
+    Micro("C", (6.0, 3.0), 4.0, 0.875),
+    Micro("D", (8.0, 4.0), 5.0, 0.875),
+)
+
+
 OUT3 = ROOT / "shots" / "style-preview"
 
 # "pad 10x4 gap 4 inset 1 text 1.10x": inset 1 is between the sheet's steps 1 and 2.
@@ -1471,7 +1533,7 @@ PICKED = Variant(
     "picked",
     "the operator's pick from round two: soft's buttons with no outline, soft's fill-only"
     " wells, lines at level 1, a flat dropdown with popup rounding 4, drawn tabs"
-    " pad 10x4 gap 4 inset 1 text 1.10x",
+    " pad 10x4 gap 4 inset 1 text 1.10x, small_button drawn as wrapper D",
     # soft's values: frame_padding 9x6, frame_rounding 5, frame_border_size 0 and
     # popup_rounding 4 are all four of the picks that soft already held. The
     # dropdown's "no outline" adds the popup's own outline, which soft left at 1.
@@ -1482,6 +1544,8 @@ PICKED = Variant(
     colors=SOFT.colors + (("border", LINE_LEVELS[0]), ("separator", LINE_LEVELS[0])),
     inset_tabs=True,
     tabs=PICKED_TABS,
+    # After the preview: "Small button D looks great!"
+    micro=MICROS[3],
 )
 
 # What each value the picks share does to the app, set as a style value. One line
@@ -1494,24 +1558,323 @@ PICKED_SHARED: tuple[str, ...] = (
     " popup_border_size 0 + popup_rounding 4 is every popup: combo lists, menus, context"
     " menus",
     "frame_padding 9x6 also pads every well/combo/checkbox and sets the dock tab bar to"
-    " 28 px; small_button keeps y 0 (16 px). Not picked, kept from soft: scrollbar 16 r8,"
+    " 28 px; small_button is wrapper D (button 8x4 r5, 14 px text, 22 px), patched in for"
+    " every call. Not picked, kept from soft: scrollbar 16 r8,"
     " grab_rounding 5, item_spacing 8x6",
 )
 
 
-def picked_caption(theme_name: str, inner_x: float) -> tuple[str, ...]:
+def picked_caption(
+    theme_name: str, inner_x: float, text_px: float | None = None
+) -> tuple[str, ...]:
     """
     The lines a picked screen carries: its values, then what the shared ones do.
-    ``inner_x`` is ``item_inner_spacing.x``, which spaces a dock's tabs.
+    ``inner_x`` is ``item_inner_spacing.x``, which spaces a dock's tabs;
+    ``text_px`` the size the tab label is drawn at (``tab_text_px``), if known.
     """
     tabs = PICKED_TABS
     between, left, top = tabs.on_dock(inner_x)
+    drawn = "" if text_px is None else f" drawn at {text_px:g} px"
     head = (
         f"PREVIEW of the pick · theme {theme_name} · buttons frame_padding 9x6 rounding 5"
         f" border 0 · lines level 1 ({LINE_LEVELS[0]}) · dropdown popup border 0 rounding 4"
-        f" · tabs {tabs.label()} (dock: {between:g} px apart, {left:g} left, {top:g} top)"
+        f" · tabs {tabs.label()}{drawn} (dock: {between:g} px apart, {left:g} left,"
+        f" {top:g} top)"
     )
     return (head, *PICKED_SHARED)
+
+
+# -- after the preview: wells lighter than the pane -----------------------------------
+#
+# "Composer does get lost. Can we shade it lighter?" A dock's well is Col_.frame_bg on
+# window_bg, which is the palette's ``bg``. Each step moves the well from ``bg`` toward
+# ``text`` by ``t``: on a dark palette that is lighter, and on a light one, where
+# ``bg`` is at or near white and nothing lighter is left, it is darker. ``text`` is
+# the direction because it is the role every palette already holds furthest from
+# ``bg`` (its body text is measured against it), so the same ``t`` moves every well
+# visibly off its pane, and text in the well loses contrast smoothly and predictably
+# as ``t`` grows, rather than by however far a second surface role happens to sit.
+
+WELL_STEPS: tuple[float, ...] = (0.06, 0.10, 0.15)
+
+
+def light_wells(t: float) -> Variant:
+    """The pick with its dock wells ``t`` of the way from the pane to the text."""
+    colors = tuple(
+        (slot, Mix("bg", "text", t) if slot == "frame_bg" else mix) for slot, mix in PICKED.colors
+    )
+    return dataclasses.replace(
+        PICKED,
+        name=f"picked-wells-{t:.2f}",
+        summary=f"the pick with Col_.frame_bg = mix(bg, text, {t:g}): wells off the pane",
+        colors=colors,
+    )
+
+
+LIGHT_WELLS: tuple[Variant, ...] = tuple(light_wells(t) for t in WELL_STEPS)
+WELLS_BY_NAME = {v.name: v for v in LIGHT_WELLS}
+
+
+def delta_e(a: tuple[int, int, int], b: tuple[int, int, int]) -> float:
+    """
+    CIE76 colour difference of two 8-bit sRGB triples (D65): about 2.3 is the
+    smallest a viewer notices. Reported beside the WCAG ratio because two fills can
+    match in luminance (ratio near 1) and still differ plainly in hue.
+    """
+
+    def lab(rgb: tuple[int, int, int]) -> tuple[float, float, float]:
+        def linear(byte: int) -> float:
+            v = byte / 255.0
+            return v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4
+
+        r, g, bl = (linear(c) for c in rgb)
+        x = (0.4124 * r + 0.3576 * g + 0.1805 * bl) / 0.95047
+        y = 0.2126 * r + 0.7152 * g + 0.0722 * bl
+        z = (0.0193 * r + 0.1192 * g + 0.9505 * bl) / 1.08883
+
+        def f(v: float) -> float:
+            return v ** (1.0 / 3.0) if v > 216.0 / 24389.0 else (24389.0 / 27.0 * v + 16.0) / 116.0
+
+        fx, fy, fz = f(x), f(y), f(z)
+        return 116.0 * fy - 16.0, 500.0 * (fx - fy), 200.0 * (fy - fz)
+
+    la, lb = lab(a), lab(b)
+    return float(sum((p - q) ** 2 for p, q in zip(la, lb, strict=True)) ** 0.5)
+
+
+@dataclass(frozen=True, slots=True)
+class WellReading:
+    """What a well variant measures to on the style in force, WCAG ratios and CIE76."""
+
+    well: tuple[int, int, int]
+    pane: tuple[int, int, int]
+    well_on_pane: float
+    well_on_panel: float
+    text_in_well: float
+    hint_in_well: float
+    button_on_well: float
+    button_from_well: float
+
+    def line(self) -> str:
+        return (
+            f"well {hex8(self.well)} on pane {hex8(self.pane)} {self.well_on_pane:.2f}:1"
+            f" (on child panel {self.well_on_panel:.2f}) · text in well"
+            f" {self.text_in_well:.2f}:1 · hint {self.hint_in_well:.2f}:1 · button on well"
+            f" {self.button_on_well:.2f}:1, dE {self.button_from_well:.1f}"
+        )
+
+
+def read_well() -> WellReading:
+    """The dock well against what surrounds it, from the style in force. Needs a context."""
+    well, pane, panel = _slot("frame_bg"), _slot("window_bg"), _slot("child_bg")
+    button = _slot("button")
+    return WellReading(
+        well=well,
+        pane=pane,
+        well_on_pane=contrast(well, pane),
+        well_on_panel=contrast(well, panel),
+        text_in_well=contrast(_slot("text"), well),
+        hint_in_well=contrast(_slot("text_disabled"), well),
+        button_on_well=contrast(button, well),
+        button_from_well=delta_e(button, well),
+    )
+
+
+def wells_caption(t: float) -> str:
+    return f"WELLS t={t:g}: Col_.frame_bg = mix(bg, text, {t:g}) · {read_well().line()}"
+
+
+# -- after the preview: the per-theme values ------------------------------------------
+#
+# The operator, on the preview's findings: "Let's keep the frame on high-contrast and
+# fix the light and xterm themes for the well fills (and other quirks)". The final
+# variant is the pick with its wells at FINAL_WELL_T on every theme, and on top of that
+# the few values a theme needs of its own. Each is a ``Mix`` of the theme's palette
+# roles, so it says how it is derived as well as what it comes to.
+
+FINAL_WELL_T = 0.10
+FINAL_THEMES: tuple[str, ...] = ("dark", "light", "xterm", "high_contrast")
+
+# Where the tool-block mock-up stands on a light pane: a soft slab off the pane, below
+# the well's step so it does not read as a field, in the palette's own inks.
+_LIGHT_TERMINAL = (Mix("bg", "text", 0.06), Mix("bg", "text", 1.0), Mix("bg", "text_dim", 1.0))
+
+
+@dataclass(frozen=True, slots=True)
+class Tuning:
+    """What one theme lays over the final variant, and why, for the record and the image."""
+
+    why: str
+    scalars: tuple[tuple[str, float | tuple[float, float]], ...] = ()
+    colors: tuple[tuple[str, Mix], ...] = ()
+    terminal: tuple[Mix, Mix, Mix] | None = None
+
+
+THEME_TUNING: dict[str, Tuning] = {
+    "high_contrast": Tuning(
+        "the operator: keep the frame. frame_border_size 1 is every frame's outline,"
+        " buttons' too",
+        scalars=(("frame_border_size", 1.0),),
+    ),
+    "light": Tuning(
+        "the well at 0.08, where the hint stays at AA; buttons 1.41:1 on the pane against"
+        " dark's 1.75: the tint at 0.36, steps of 0.16 as dark's; the tool block's"
+        " near-black is 18:1 on the pane, a slab",
+        colors=(
+            # At FINAL_WELL_T the hint (text_dim) in the well is 4.38:1, under AA;
+            # 0.08 keeps it at 4.55 and the well 1.17:1 off the pane.
+            ("frame_bg", Mix("bg", "text", 0.08)),
+            ("button", Mix("panel_alt", "accent", 0.36)),
+            ("button_hovered", Mix("panel_alt", "accent", 0.52)),
+            ("button_active", Mix("panel_alt", "accent", 0.68)),
+        ),
+        terminal=_LIGHT_TERMINAL,
+    ),
+    "xterm": Tuning(
+        "the tool block's near-black is 15.7:1 on the pane, a slab; buttons (1.72) and lines"
+        " (2.37) already read as dark's do",
+        terminal=_LIGHT_TERMINAL,
+    ),
+}
+
+
+def final_for(theme_name: str) -> Variant:
+    """The final variant on ``theme_name``: the pick, wells at FINAL_WELL_T, its tuning."""
+    base = light_wells(FINAL_WELL_T)
+    tuning = THEME_TUNING.get(theme_name, Tuning("none"))
+    over = dict(tuning.colors)
+    colors = tuple((slot, over.pop(slot, mix)) for slot, mix in base.colors)
+    return dataclasses.replace(
+        base,
+        name=f"final-{theme_name}",
+        summary=f"the pick, wells at mix(bg, text, {FINAL_WELL_T:g}), {theme_name}'s tuning",
+        scalars=_with(base.scalars, **dict(tuning.scalars)),
+        colors=colors + tuple(over.items()),
+        terminal=tuning.terminal,
+    )
+
+
+def final_caption(theme_name: str) -> str:
+    tuning = THEME_TUNING.get(theme_name)
+    if tuning is None:
+        return f"FINAL · {theme_name}: no values of its own"
+    parts = [cell_label(Variant("", "", tuning.scalars, tuning.colors))]
+    if tuning.terminal is not None:
+        parts.append("tool block = " + ", ".join(str(m) for m in tuning.terminal))
+    return f"FINAL · {theme_name}, over the lines above: " + " · ".join(parts)
+
+
+# The relationships the quirks list is about: (what, the slot or mock colour drawn,
+# the one it is read against). ``terminal:n`` is the mock-up's n-th colour.
+QUIRKS: tuple[tuple[str, str, str], ...] = (
+    ("dock well on the pane", "frame_bg", "window_bg"),
+    ("text in the well", "text", "frame_bg"),
+    ("hint in the well", "text_disabled", "frame_bg"),
+    ("button on the pane", "button", "window_bg"),
+    ("button text on the button", "text", "button"),
+    ("hovered button on the pane", "button_hovered", "window_bg"),
+    ("button against the well", "button", "frame_bg"),
+    ("selected tab on the lane", "tab_selected", "title_bg"),
+    ("unselected tab text", "text_disabled", "tab"),
+    ("focused tab's accent rule", "check_mark", "tab_selected"),
+    ("scrollbar grab on its track", "scrollbar_grab", "scrollbar_bg"),
+    ("separator on the pane", "separator", "window_bg"),
+    ("tool block on the pane", "terminal:0", "window_bg"),
+    ("tool block text", "terminal:1", "terminal:0"),
+    ("tool block dim text", "terminal:2", "terminal:0"),
+)
+
+_FIXED_TERMINAL = ((11, 11, 12), (199, 199, 199), (140, 140, 145))
+
+
+def quirk_rows(variant: Variant) -> list[tuple[str, str, str, float, float]]:
+    """
+    ``(what, colour, ground, WCAG ratio, CIE76 dE)`` for every ``QUIRKS`` row with
+    ``variant`` in force over the style as it stands. Needs a context.
+    """
+
+    def colour(name: str) -> tuple[int, int, int]:
+        if name.startswith("terminal:"):
+            n = int(name.split(":")[1])
+            if variant.terminal is None:
+                return _FIXED_TERMINAL[n]
+            return rgb8(color_of(variant.terminal[n]))
+        return _slot(name)
+
+    rows = []
+    with laid_over(variant):
+        for what, ink, ground in QUIRKS:
+            a, b = colour(ink), colour(ground)
+            rows.append((what, hex8(a), hex8(b), contrast(a, b), delta_e(a, b)))
+    return rows
+
+
+def quirk_table(themes: tuple[str, ...]) -> list[str]:
+    """
+    A markdown table: each ``QUIRKS`` row on each theme, as the pick previewed it and as
+    the final variant has it. Makes its own ImGui context when there is none.
+    """
+    from imgui_bundle import imgui
+
+    from pptmstr import theme
+
+    made = imgui.get_current_context() is None
+    context = imgui.create_context() if made else None
+    try:
+        head = "| what | " + " | ".join(f"{t}: pick -> final" for t in themes) + " |"
+        lines = [head, "|---" * (len(themes) + 1) + "|"]
+        cells: dict[str, list[str]] = {what: [] for what, _, _ in QUIRKS}
+        for name in themes:
+            theme.set_theme(name)
+            theme.apply_style()
+            before = quirk_rows(PICKED)
+            after = quirk_rows(final_for(name))
+            for (what, _, _, r0, _), (_, ink, _, r1, d1) in zip(before, after, strict=True):
+                moved = "" if abs(r1 - r0) < 0.005 else f"{r0:.2f} -> "
+                cells[what].append(f"{moved}{r1:.2f} ({ink}, dE {d1:.0f})")
+        lines += [f"| {what} | " + " | ".join(row) + " |" for what, row in cells.items()]
+        return lines
+    finally:
+        theme.set_theme("dark")
+        if context is not None:
+            imgui.destroy_context(context)
+
+
+# -- the wrapper stood in for small_button --------------------------------------------
+
+# ImGui's own small_button, kept while a wrapper stands in for it.
+_REAL_SMALL_BUTTON: list[Any] = []
+
+
+def install_micro(micro: Micro) -> None:
+    """
+    Every ``imgui.small_button`` in this process drawn as ``micro``: the app's call
+    sites read the attribute off the module when they call it, so this reaches all
+    of them without touching ``pptmstr/``. ``uninstall_micro`` puts ImGui's back.
+    """
+    from imgui_bundle import imgui
+
+    if not _REAL_SMALL_BUTTON:
+        _REAL_SMALL_BUTTON.append(imgui.small_button)
+
+    def small_button(label: str) -> bool:
+        return micro_button(label, micro)
+
+    imgui.small_button = small_button
+
+
+def uninstall_micro() -> None:
+    from imgui_bundle import imgui
+
+    if _REAL_SMALL_BUTTON:
+        imgui.small_button = _REAL_SMALL_BUTTON.pop()
+
+
+def real_small_button() -> Any:
+    """ImGui's own small_button, whether or not a wrapper stands in for it."""
+    from imgui_bundle import imgui
+
+    return _REAL_SMALL_BUTTON[0] if _REAL_SMALL_BUTTON else imgui.small_button
 
 
 def before_caption(theme_name: str) -> tuple[str, ...]:
@@ -1579,40 +1942,6 @@ def draw_caption(lines: tuple[str, ...]) -> None:
 # pushed padding, rounding and font size is; these are four of it.
 
 
-@dataclass(frozen=True, slots=True)
-class Micro:
-    """
-    A hypothetical ``widgets.small_button``: ``imgui.button`` with ``pad`` and
-    ``rounding`` pushed, and its text at ``scale`` times the UI font.
-    """
-
-    name: str
-    pad: tuple[float, float]
-    rounding: float
-    scale: float = 1.0
-
-    def height(self, font_px: float) -> float:
-        """The button's height: its text and the vertical padding above and below."""
-        return font_px * self.scale + 2.0 * self.pad[1]
-
-    def label(self, font_px: float) -> str:
-        return (
-            f"{self.name}: frame_padding {self.pad[0]:g}x{self.pad[1]:g} · rounding"
-            f" {self.rounding:g} · text {self.scale:g}x ({font_px * self.scale:g} px)"
-            f" -> {self.height(font_px):g} px"
-        )
-
-
-# Two heights (20 and 22 px) at two text sizes (16 and 14 px). 14 px is 0.875 of
-# the UI font: a whole pixel, so the text is not put on half pixels.
-MICROS: tuple[Micro, ...] = (
-    Micro("A", (6.0, 2.0), 4.0, 1.0),
-    Micro("B", (8.0, 3.0), 5.0, 1.0),
-    Micro("C", (6.0, 3.0), 4.0, 0.875),
-    Micro("D", (8.0, 4.0), 5.0, 0.875),
-)
-
-
 def micro_button(label: str, micro: Micro) -> bool:
     """What the wrapper would be: ``imgui.button`` under ``micro``'s values."""
     from imgui_bundle import imgui
@@ -1640,7 +1969,7 @@ def _press_for(kind: MicroKind) -> Any:
     from imgui_bundle import imgui
 
     if kind is None:
-        return imgui.small_button
+        return real_small_button()
     if kind == "button":
         return imgui.button
     assert isinstance(kind, Micro)
@@ -1836,6 +2165,349 @@ def _micro_states_row(kind: MicroKind, n: int) -> None:
 _SHEET_DRAWERS["small-button"] = _sheet_small_button
 
 
+# -- after the preview: the tab text, drawn the preview's way and at its baked size -----
+
+OUT4 = OUT3 / "fixups"
+# The tabs each way is drawn as: the focused tab's ink is text, an unselected one's
+# text_disabled, and the fuzz showed on both.
+TAB_TEXT_SAMPLE = (("session", "focused"), ("board", "unselected"))
+ZOOM = 4
+# How far from the tab's fill toward the label's ink a pixel has to be to count as
+# inked, and to count as solid; between the two it is an edge. A label drawn one to
+# one has its stems solid and edges one pixel wide; a resampled one spreads each edge.
+INK_LO, INK_HI = 0.15, 0.85
+
+
+def _tab_text_ways() -> tuple[tuple[str, str, float], ...]:
+    """
+    ``(key, the call as written on the image, the size handed to add_text)``: the
+    preview's call, the fix, and the UI font's own size as the reference. Needs a frame.
+    """
+    from imgui_bundle import imgui
+
+    base = imgui.get_style().font_size_base
+    scale = PICKED_TABS.scale
+    fixed = tab_text_px(scale)
+    return (
+        (
+            "preview",
+            f"preview: dl.add_text(font, font_size_base x {scale:g} = {base * scale:g}, ...)",
+            base * scale,
+        ),
+        (
+            "fix",
+            f"fix: push_font(None, font_size_base x {scale:g}); size = get_font_size()"
+            f" = {fixed:g}; dl.add_text(font, size, ...)",
+            fixed,
+        ),
+        ("ui", f"reference: the UI font, {imgui.get_font_size():g} px", imgui.get_font_size()),
+    )
+
+
+@dataclass(slots=True)
+class _TabCell:
+    """One drawn tab label: where its pixels are, what it was drawn in, what it measured."""
+
+    key: str
+    state: str
+    rect: tuple[int, int, int, int]
+    ground: tuple[int, int, int]
+    ink: tuple[int, int, int]
+    pixels: list[list[tuple[int, int, int]]] = dataclasses.field(default_factory=list)
+    counts: tuple[int, int, int] = (0, 0, 0)
+
+    def line(self) -> str:
+        inked, solid, edge = self.counts
+        share = edge / inked if inked else 0.0
+        return f"{inked} inked px · {solid} solid · {edge} edge ({share:.0%})"
+
+
+class _TabText:
+    """The comparison sheet's cells, laid out on its first frame and measured after."""
+
+    cells: list[_TabCell] = []
+
+
+def read_png(path: Path) -> tuple[int, int, list[bytes]]:
+    """
+    Width, height and RGB rows of a PNG as ``screenshot.write_png`` writes one: 8-bit
+    truecolour, every row filter 0. Anything else is refused rather than misread.
+    """
+    import struct
+    import zlib
+
+    data = path.read_bytes()
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        raise ValueError(f"{path}: not a PNG")
+    at, width, height, packed = 8, 0, 0, b""
+    while at < len(data):
+        (length,) = struct.unpack(">I", data[at : at + 4])
+        tag, body = data[at + 4 : at + 8], data[at + 8 : at + 8 + length]
+        at += 12 + length
+        if tag == b"IHDR":
+            width, height, depth, kind = struct.unpack(">IIBB", body[:10])
+            if (depth, kind) != (8, 2):
+                raise ValueError(f"{path}: not 8-bit RGB")
+        elif tag == b"IDAT":
+            packed += body
+    raw = zlib.decompress(packed)
+    stride = width * 3
+    rows = []
+    for y in range(height):
+        start = y * (stride + 1)
+        if raw[start] != 0:
+            raise ValueError(f"{path}: row {y} uses filter {raw[start]}")
+        rows.append(raw[start + 1 : start + 1 + stride])
+    return width, height, rows
+
+
+def crop(rows: list[bytes], rect: tuple[int, int, int, int]) -> list[list[tuple[int, int, int]]]:
+    x0, y0, x1, y1 = rect
+    return [
+        [(row[x * 3], row[x * 3 + 1], row[x * 3 + 2]) for x in range(x0, x1)] for row in rows[y0:y1]
+    ]
+
+
+def ink_counts(
+    pixels: list[list[tuple[int, int, int]]],
+    ground: tuple[int, int, int],
+    ink: tuple[int, int, int],
+) -> tuple[int, int, int]:
+    """
+    ``(inked, solid, edge)``: pixels at least ``INK_LO`` of the way from ``ground`` to
+    ``ink``, those at least ``INK_HI``, and those between. The way is the projection
+    on the ground-to-ink line, so a pixel off that line (another colour) counts by how
+    far along it it falls.
+    """
+    span = [i - g for i, g in zip(ink, ground, strict=True)]
+    norm = sum(s * s for s in span)
+    if norm == 0:
+        raise ValueError("ink and ground are the same colour")
+    inked = solid = 0
+    for row in pixels:
+        for p in row:
+            t = sum((c - g) * s for c, g, s in zip(p, ground, span, strict=True)) / norm
+            if t >= INK_LO:
+                inked += 1
+                if t >= INK_HI:
+                    solid += 1
+    return inked, solid, inked - solid
+
+
+def zoomed(pixels: list[list[tuple[int, int, int]]], k: int) -> list[bytes]:
+    """``pixels`` scaled ``k`` times, nearest neighbour, as PNG rows."""
+    out = []
+    for row in pixels:
+        line = b"".join(bytes(p) * k for p in row)
+        out.extend([line] * k)
+    return out
+
+
+def _sheet_tab_text() -> None:
+    from imgui_bundle import imgui
+
+    style = imgui.get_style()
+    io = imgui.get_io()
+    font = imgui.get_font()
+    scale = PICKED_TABS.scale
+    asked = style.font_size_base * scale
+    has_textures = bool(io.backend_flags & imgui.BackendFlags_.renderer_has_textures)
+    imgui.text("after the preview -- the drawn tab label, the preview's way and at its baked size")
+    _caption(
+        f"ImGui 1.92 bakes a font per size it is bound at. This backend:"
+        f" renderer_has_textures {has_textures} · font_scale_main {style.font_scale_main:g}"
+        f" · font_scale_dpi {style.font_scale_dpi:g} · push_font(None, {asked:g}) binds"
+        f" {tab_text_px(scale):g} px · font.get_font_baked({asked:g}).size ="
+        f" {font.get_font_baked(asked).size:g}"
+    )
+    _caption(
+        f"add_text(font, {asked:g}) draws the nearest bake ({font.get_font_baked(asked).size:g}"
+        f" px) scaled by {asked / font.get_font_baked(asked).size:.3f}: glyph quads off whole"
+        " pixels, sampled bilinearly. Drawn at the bound size the bake is drawn one to one."
+        " Each tab sits in a 28 px lane at the pick's geometry (inset 1, pad 10x4), its text"
+        " centred as draw_inset_tabs centres it."
+    )
+    _caption(
+        f"Right: each label's pixels at {ZOOM}x, nearest neighbour, read back from the frame"
+        f" ('tab-text-raw.png'). A pixel is inked at {INK_LO:g} of the way from the tab's fill"
+        f" to the label's ink, solid at {INK_HI:g}, an edge between."
+    )
+    imgui.spacing()
+    dl = imgui.get_window_draw_list()
+    first = not _TabText.cells
+    cells = iter(_TabText.cells)
+    lane_h = 28.0
+    for key, call, size in _tab_text_ways():
+        imgui.separator()
+        top = imgui.get_cursor_screen_pos()
+        y0 = float(int(top.y + 6.0))
+        imgui.push_text_wrap_pos(imgui.get_cursor_pos_x() + 470.0)
+        imgui.text_wrapped(call)
+        imgui.pop_text_wrap_pos()
+        x = 500.0
+        zoom_x = 760.0
+        row_h = lane_h
+        for text, state in TAB_TEXT_SAMPLE:
+            imgui.push_font(None, style.font_size_base * scale)
+            text_w = float(imgui.calc_text_size(text).x)
+            imgui.pop_font()
+            dl.add_rect_filled(
+                imgui.ImVec2(x - 2.0, y0),
+                imgui.ImVec2(x + text_w + 2.0 * PICKED_TABS.pad[0] + 2.0, y0 + lane_h),
+                imgui.get_color_u32(imgui.Col_.title_bg),
+            )
+            a = imgui.ImVec2(x, y0 + PICKED_TABS.inset)
+            b = imgui.ImVec2(x + text_w + 2.0 * PICKED_TABS.pad[0], y0 + lane_h)
+            _paint_tab(dl, font, size, a, b, state, text, PICKED_TABS.pad[0])
+            fill, ink = _TAB_STATES[state]
+            rect = (int(a.x) + 4, int(a.y) + 1, int(b.x) - 4, int(b.y) - 3)
+            if first:
+                _TabText.cells.append(_TabCell(key, state, rect, _slot(fill), _slot(ink)))
+            elif (cell := next(cells)).pixels:
+                width = (rect[2] - rect[0]) * ZOOM
+                for py, line in enumerate(cell.pixels):
+                    for px, rgb in enumerate(line):
+                        lo = imgui.ImVec2(zoom_x + px * ZOOM, y0 + py * ZOOM)
+                        hi = imgui.ImVec2(lo.x + ZOOM, lo.y + ZOOM)
+                        dl.add_rect_filled(
+                            lo,
+                            hi,
+                            imgui.color_convert_float4_to_u32(
+                                imgui.ImVec4(rgb[0] / 255.0, rgb[1] / 255.0, rgb[2] / 255.0, 1.0)
+                            ),
+                        )
+                zoom_h = len(cell.pixels) * ZOOM
+                dl.add_text(
+                    font,
+                    13.0,
+                    imgui.ImVec2(zoom_x, y0 + zoom_h + 4.0),
+                    imgui.get_color_u32(imgui.Col_.text),
+                    f"{state}: {cell.line()}",
+                )
+                zoom_x += max(width, 330.0) + 20.0
+                row_h = max(row_h, zoom_h + 22.0)
+            x = b.x + 14.0
+        imgui.set_cursor_screen_pos(imgui.ImVec2(top.x, y0 + row_h + 8.0))
+        imgui.dummy(imgui.ImVec2(1.0, 1.0))
+
+
+_SHEET_DRAWERS["tab-text"] = _sheet_tab_text
+
+
+def measure_tab_text(raw: Path) -> list[str]:
+    """Read the sheet's frame back and measure every label; the lines it reports."""
+    _, _, rows = read_png(raw)
+    lines = []
+    for cell in _TabText.cells:
+        cell.pixels = crop(rows, cell.rect)
+        cell.counts = ink_counts(cell.pixels, cell.ground, cell.ink)
+        lines.append(f"{cell.key:8} {cell.state:10} {cell.line()}")
+    return lines
+
+
+def write_tab_zoom(out: Path) -> None:
+    """Every measured label at ``ZOOM``x, one under another, a grey rule between."""
+    import screenshot
+
+    widest = max(len(c.pixels[0]) for c in _TabText.cells) * ZOOM
+    rows: list[bytes] = []
+    for cell in _TabText.cells:
+        for line in zoomed(cell.pixels, ZOOM):
+            rows.append(line + b"\x80\x80\x80" * (widest - len(line) // 3))
+        rows.extend([b"\x80\x80\x80" * widest] * 2)
+    screenshot.write_png(out, widest, len(rows), rows)
+
+
+# -- after the preview: the wells sheet ------------------------------------------------
+
+WELLS_SIZE = (1600, 1720)
+
+
+def _sheet_wells() -> None:
+    from imgui_bundle import imgui
+
+    from pptmstr import theme
+
+    start = theme.current().name
+    imgui.text(
+        "after the preview -- dock wells lighter than the pane: Col_.frame_bg = mix(bg, text, t)"
+    )
+    _caption(
+        "every theme x every step, on the pick (buttons 9x6 r5, frame_border_size 0, small_button"
+        " = wrapper D). Each cell is drawn on window_bg, the pane a dock well sits on: a"
+        " composer (multiline), a filter with only its hint, an unchecked checkbox, small"
+        " button D and a button. Figures are WCAG 2.1 ratios of the 8-bit colours drawn, and"
+        " CIE76 dE of the button against the well (about 2.3 is just noticeable)."
+    )
+    _caption(
+        "first column: the pick as previewed (soft's fill, mix(bg, panel, 0.35)). Modal wells"
+        " (settings, launcher) are theme.dialog_colors' palette.well and do not move with t."
+    )
+    columns = (PICKED, *LIGHT_WELLS)
+    flags = imgui.TableFlags_.sizing_fixed_fit | imgui.TableFlags_.borders_inner_h
+    width = (WELLS_SIZE[0] - 140.0) / len(columns)
+    label = imgui.ImVec4(1.0, 0.84, 0.37, 1.0)
+    if not imgui.begin_table("##wells-light", 1 + len(columns), flags):
+        return
+    imgui.table_setup_column("theme", imgui.TableColumnFlags_.width_fixed, 100.0)
+    for variant in columns:
+        title = "the pick (soft's fill)" if variant is PICKED else variant.name
+        imgui.table_setup_column(title, imgui.TableColumnFlags_.width_fixed, width)
+    imgui.table_headers_row()
+    try:
+        for name in preview_themes():
+            theme.set_theme(name)
+            # Wrapped by ``_run_one``: today's style, then the run's variant over it.
+            theme.apply_style()
+            imgui.table_next_row()
+            imgui.table_next_column()
+            imgui.text_colored(label, name)
+            for variant in columns:
+                imgui.table_next_column()
+                with laid_over(variant):
+                    _well_cell(f"{name}-{variant.name}", width)
+    finally:
+        theme.set_theme(start)
+        theme.apply_style()
+    imgui.end_table()
+
+
+def _well_cell(key: str, width: float) -> None:
+    from imgui_bundle import imgui
+
+    style = imgui.get_style()
+    reading = read_well()
+    imgui.push_style_color(imgui.Col_.child_bg, style.color_(int(imgui.Col_.window_bg)))
+    imgui.begin_child(
+        f"##cell-{key}",
+        imgui.ImVec2(width - 16.0, 0.0),
+        imgui.ChildFlags_.always_use_window_padding | imgui.ChildFlags_.auto_resize_y,
+    )
+    imgui.push_font(None, 13.0)
+    imgui.text(
+        f"{hex8(reading.well)} on pane {reading.well_on_pane:.2f}:1"
+        f" · on panel {reading.well_on_panel:.2f}"
+    )
+    imgui.text(
+        f"text {reading.text_in_well:.2f} · hint {reading.hint_in_well:.2f} · button"
+        f" {reading.button_on_well:.2f} dE {reading.button_from_well:.0f}"
+    )
+    imgui.pop_font()
+    imgui.input_text_multiline(f"##composer-{key}", "chase a flaky test", imgui.ImVec2(-1.0, 44.0))
+    imgui.set_next_item_width(-1.0)
+    imgui.input_text_with_hint(f"##filter-{key}", "filter sessions", "")
+    imgui.checkbox(f"follow##{key}", False)
+    imgui.same_line()
+    imgui.small_button(f"copy##{key}")
+    imgui.same_line()
+    imgui.button(f"send##{key}")
+    imgui.end_child()
+    imgui.pop_style_color()
+
+
+_SHEET_DRAWERS["wells"] = _sheet_wells
+
+
 # -- the run ------------------------------------------------------------------------
 
 
@@ -1845,8 +2517,12 @@ class _Shown:
     terminal = False
     sheet: str | None = None
     sheet_first = False
-    # The preview's caption: "picked", "before", or nothing.
+    # The preview's caption: "picked", "before", a LIGHT_WELLS name, or nothing.
     caption: str | None = None
+    # Where the run writes, so a scenario can read back a frame it wrote.
+    out_dir: Path | None = None
+    # The screens a preview run keeps; ``None`` is all six.
+    only: tuple[str, ...] | None = None
 
 
 def _scenario(state: Any, fixtures: Path) -> Iterator[str | None]:
@@ -2010,7 +2686,15 @@ def _caption_lines(kind: str) -> tuple[str, ...]:
     name = theme.current().name
     if kind == "before":
         return before_caption(name)
-    return picked_caption(name, imgui.get_style().item_inner_spacing.x)
+    lines = picked_caption(
+        name, imgui.get_style().item_inner_spacing.x, tab_text_px(PICKED_TABS.scale)
+    )
+    if kind in WELLS_BY_NAME:
+        t = WELL_STEPS[LIGHT_WELLS.index(WELLS_BY_NAME[kind])]
+        lines = (*lines, wells_caption(t))
+    if kind == "final":
+        lines = (*lines, wells_caption(FINAL_WELL_T), final_caption(name))
+    return lines
 
 
 def _run_one(
@@ -2044,6 +2728,9 @@ def _run_one(
 
         settings_mod.read = read  # type: ignore[assignment]
     _Shown.caption = caption
+    _Shown.out_dir = out_dir
+    if variant.micro is not None:
+        install_micro(variant.micro)
 
     real_apply = theme.apply_style
 
@@ -2060,7 +2747,7 @@ def _run_one(
         if variant.inset_tabs:
             draw_inset_tabs(variant.tabs)
         if _Shown.terminal:
-            draw_terminal_mockup()
+            draw_terminal_mockup(variant.terminal)
         if _Shown.sheet is not None:
             draw_sheet(_Shown.sheet, _Shown.sheet_first)
             _Shown.sheet_first = False
@@ -2143,7 +2830,8 @@ def _preview_scenario(state: Any, fixtures: Path) -> Iterator[str | None]:
     """Round one's six screens, each written under the name the preview gives it."""
     prefix = "before-" if _Shown.caption == "before" else ""
     for step in _scenario(state, fixtures):
-        yield None if step is None else f"{prefix}{step}"
+        kept = step is not None and (_Shown.only is None or step in _Shown.only)
+        yield f"{prefix}{step}" if kept else None
 
 
 def _micro_scenario(state: Any, fixtures: Path) -> Iterator[str | None]:
@@ -2165,6 +2853,96 @@ def _micro_scenario(state: Any, fixtures: Path) -> Iterator[str | None]:
     yield from screenshot._frames(10)
     yield "small-button"
     _Shown.sheet = None
+
+
+def _sheet_frame(state: Any, size: tuple[int, int]) -> Iterator[str | None]:
+    """The fake fleet up and the window at ``size``, the fonts in."""
+    import screenshot
+    from imgui_bundle import hello_imgui, imgui
+
+    yield from screenshot._until(
+        "the fake fleet", lambda: state.driver is not None and state.frame_snap is not None
+    )
+    hello_imgui.change_window_size(size)
+    yield from screenshot._until(
+        f"the window at {size}",
+        lambda: tuple(int(v) for v in imgui.get_io().display_size) == size,
+    )
+    yield from screenshot._frames(30)
+
+
+def _tab_text_scenario(state: Any, fixtures: Path) -> Iterator[str | None]:
+    """
+    The tab-text sheet, read back from its own frame, measured, and drawn again with
+    the measurement and each label at ``ZOOM``x beside it.
+    """
+    import screenshot
+
+    del fixtures
+    yield from _sheet_frame(state, SHEET_SIZE)
+    _TabText.cells = []
+    _Shown.sheet, _Shown.sheet_first = "tab-text", True
+    yield from screenshot._frames(10)
+    yield "tab-text-raw"
+    yield from screenshot._frames(2)
+    assert _Shown.out_dir is not None
+    for line in measure_tab_text(_Shown.out_dir / "tab-text-raw.png"):
+        print(line, flush=True)
+    write_tab_zoom(_Shown.out_dir / "tab-text-4x.png")
+    yield from screenshot._frames(5)
+    yield "tab-text"
+    _Shown.sheet = None
+
+
+def _wells_scenario(state: Any, fixtures: Path) -> Iterator[str | None]:
+    """The wells sheet: every theme by every step, at ``WELLS_SIZE``."""
+    import screenshot
+
+    del fixtures
+    yield from _sheet_frame(state, WELLS_SIZE)
+    _Shown.sheet, _Shown.sheet_first = "wells", True
+    yield from screenshot._frames(10)
+    yield "wells-light"
+    _Shown.sheet = None
+
+
+def _run_fixups(themes: tuple[str, ...]) -> int:
+    """
+    After the preview, each on its own Xvfb: the tab-text sheet, the wells sheet, the
+    pick's six screens on dark (crisp tabs, wrapper D), and focus and settings at each
+    well step on ``themes``. The first failure ends it.
+    """
+    big = f"{WELLS_SIZE[0] + 100}x{WELLS_SIZE[1] + 100}x24"
+    runs: list[tuple[list[str], str | None, Path, tuple[str, ...]]] = [
+        (["--tab-text"], big, OUT4, ("tab-text", "tab-text-raw")),
+        (["--wells"], big, OUT4, ("wells-light",)),
+        (["--preview", "picked", "--theme", "dark"], None, OUT4 / "dark", SCREENS),
+    ]
+    for variant in LIGHT_WELLS:
+        for name in themes:
+            out = OUT4 / variant.name / name
+            runs.append(
+                (["--preview", variant.name, "--theme", name], None, out, ("focus", "settings"))
+            )
+    for args, screen, out_dir, names in runs:
+        started = time.monotonic()
+        code = _on_xvfb([*args, "--out-dir", str(out_dir)], screen)
+        print(f"{' '.join(args)}: exit {code} in {time.monotonic() - started:.0f}s", flush=True)
+        if code != 0 or _missing(out_dir, names):
+            return code or 1
+    return 0
+
+
+def _run_final(themes: tuple[str, ...]) -> int:
+    """The final variant's six screens on each of ``themes``, each on its own Xvfb."""
+    for name in themes:
+        out_dir = OUT4 / "final" / name
+        started = time.monotonic()
+        code = _on_xvfb(["--preview", "final", "--theme", name, "--out-dir", str(out_dir)])
+        print(f"final {name}: exit {code} in {time.monotonic() - started:.0f}s", flush=True)
+        if code != 0 or _missing(out_dir, SCREENS):
+            return code or 1
+    return 0
 
 
 def preview_themes() -> tuple[str, ...]:
@@ -2207,6 +2985,12 @@ def describe(variant: Variant) -> list[str]:
         lines.append(
             f"inset tabs drawn by draw_inset_tabs (lowercase, four rounded corners{shape})"
         )
+    if variant.micro is not None:
+        m = variant.micro
+        lines.append(
+            f"small_button drawn as wrapper {m.name}: imgui.button at frame_padding"
+            f" {m.pad[0]:g}x{m.pad[1]:g}, rounding {m.rounding:g}, text {m.scale:g}x"
+        )
     return lines or ["(no overrides)"]
 
 
@@ -2230,8 +3014,21 @@ def main() -> int:
     )
     which.add_argument(
         "--preview",
-        choices=("before", "picked"),
-        help="one theme's six screens, on the display there is",
+        choices=("before", "picked", "final", *WELLS_BY_NAME),
+        help="one theme's six screens (a wells step: focus and settings), on the display there is",
+    )
+    which.add_argument(
+        "--fixups",
+        action="store_true",
+        help="after the preview: tab text, wells, dark with D, each on an Xvfb",
+    )
+    which.add_argument("--tab-text", action="store_true", help="the tab-text sheet, likewise")
+    which.add_argument("--wells", action="store_true", help="the wells sheet, likewise")
+    which.add_argument(
+        "--final", action="store_true", help="the final six screens per theme, each on an Xvfb"
+    )
+    which.add_argument(
+        "--quirks", action="store_true", help="print the per-theme measurements as a table"
     )
     which.add_argument("--micro", action="store_true", help="the wrapper sheet, likewise")
     ap.add_argument("--theme", default=None, help="with --preview: the theme to run under")
@@ -2241,7 +3038,7 @@ def main() -> int:
     ap.add_argument("--out-dir", type=Path, default=None)
     args = ap.parse_args()
     if args.describe:
-        for variant in (*VARIANTS, *ROUND_TWO, *CELLS, PICKED):
+        for variant in (*VARIANTS, *ROUND_TWO, *CELLS, PICKED, *LIGHT_WELLS):
             print(f"{variant.name}: {variant.summary}")
             for line in describe(variant):
                 print(f"    {line}")
@@ -2252,9 +3049,23 @@ def main() -> int:
         return _run_round_two()
     if args.style_preview:
         return _run_preview(tuple(args.themes or preview_themes()))
+    if args.quirks:
+        print("\n".join(quirk_table(tuple(args.themes or FINAL_THEMES))))
+        return 0
+    if args.final:
+        return _run_final(tuple(args.themes or FINAL_THEMES))
+    if args.fixups:
+        return _run_fixups(tuple(args.themes or ("dark", "light", "high_contrast")))
+    if args.tab_text:
+        return _run_one(PICKED, args.out_dir or OUT4, _tab_text_scenario, "dark")
+    if args.wells:
+        return _run_one(PICKED, args.out_dir or OUT4, _wells_scenario, "dark")
     if args.preview:
         name = args.theme or "dark"
-        variant = PICKED if args.preview == "picked" else CURRENT
+        variants = {"picked": PICKED, "before": CURRENT, "final": final_for(name)}
+        variant = {**variants, **WELLS_BY_NAME}[args.preview]
+        if args.preview in WELLS_BY_NAME:
+            _Shown.only = ("focus", "settings")
         return _run_one(variant, args.out_dir or OUT3 / name, _preview_scenario, name, args.preview)
     if args.micro:
         return _run_one(PICKED, args.out_dir or OUT3, _micro_scenario, "dark")

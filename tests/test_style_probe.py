@@ -656,3 +656,296 @@ def test_the_wrapper_pops_everything_it_pushes(styled: Any) -> None:
         out.append(float(before == after))
 
     assert _measure(im, draw) == [1.0]
+
+
+# -- after the preview: the tab label at its baked size ----------------------------------
+
+
+def _glyph_ys(im: Any, size: float) -> list[float]:
+    """The y of every vertex ``_paint_tab``'s label puts on a draw list, at ``size``."""
+    dl = im.get_foreground_draw_list()
+    font = im.get_font()
+    a, b = im.ImVec2(10.0, 21.0), im.ImVec2(100.0, 48.0)
+    start = dl.vtx_buffer.size()
+    # _paint_tab draws the tab's rounded rectangle, then the label; the rectangle's
+    # vertex count is taken by drawing it again alone.
+    probe._paint_tab(dl, font, size, a, b, "unselected", "session", 10.0)
+    rect = dl.vtx_buffer.size()
+    dl.add_rect_filled(a, b, 0xFF000000, im.get_style().tab_rounding)
+    rect = dl.vtx_buffer.size() - rect
+    ys = [dl.vtx_buffer[i].pos.y for i in range(start + rect, start + rect + 4 * len("session"))]
+    return ys
+
+
+def test_a_tab_label_is_drawn_at_the_size_imgui_bakes(styled: Any) -> None:
+    im = styled
+    im.new_frame()
+    try:
+        px = probe.tab_text_px(probe.PICKED_TABS.scale)
+        asked = im.get_style().font_size_base * probe.PICKED_TABS.scale
+        # ImGui binds a whole pixel, and has a bake of exactly that size.
+        assert px == round(asked) == 18.0
+        assert im.get_font().get_font_baked(px).size == px
+        # At that size every glyph quad is on whole pixels: the bake drawn one to one.
+        assert all(float(y).is_integer() for y in _glyph_ys(im, px))
+        # At the size the preview asked for, the 18 px bake is scaled and the quads
+        # land between pixels: the fuzz the operator saw.
+        assert im.get_font().get_font_baked(asked).size == px
+        assert not all(float(y).is_integer() for y in _glyph_ys(im, asked))
+    finally:
+        im.render()
+
+
+def test_draw_inset_tabs_hands_paint_tab_the_baked_size(
+    styled: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    im = styled
+    io = im.get_io()
+    flags = io.config_flags
+    io.config_flags |= im.ConfigFlags_.docking_enable.value
+    sizes: list[float] = []
+    monkeypatch.setattr(probe, "_paint_tab", lambda dl, font, size, *rest: sizes.append(size))
+    try:
+        for frame in range(4):
+            im.new_frame()
+            dock = im.dock_space_over_viewport()
+            for name in ("SESSION", "BOARD"):
+                im.set_next_window_dock_id(dock)
+                im.begin(name)
+                im.end()
+            if frame == 3:
+                probe.draw_inset_tabs(probe.PICKED_TABS)
+            im.render()
+    finally:
+        io.config_flags = flags
+    assert sizes, "no dock tab bar was drawn over"
+    assert set(sizes) == {18.0}
+
+
+# -- after the preview: the frame read back ----------------------------------------------
+
+
+def test_read_png_reads_back_what_write_png_wrote(tmp_path: Path) -> None:
+    sys.path.insert(0, str(ROOT / "scripts"))
+    import screenshot
+
+    rows = [b"".join(bytes([x, y, 7]) for x in range(3)) for y in range(2)]
+    out = tmp_path / "a.png"
+    screenshot.write_png(out, 3, 2, rows)
+    assert probe.read_png(out) == (3, 2, rows)
+    assert probe.crop(rows, (1, 1, 3, 2)) == [[(1, 1, 7), (2, 1, 7)]]
+
+
+def test_read_png_refuses_what_it_would_misread(tmp_path: Path) -> None:
+    out = tmp_path / "a.png"
+    out.write_bytes(b"not a png")
+    with pytest.raises(ValueError, match="not a PNG"):
+        probe.read_png(out)
+
+
+def test_ink_counts_split_ink_into_solid_and_edge() -> None:
+    ground, ink = (0, 0, 0), (200, 200, 200)
+    pixels = [[(0, 0, 0), (20, 20, 20), (40, 40, 40), (100, 100, 100), (180, 180, 180), ink]]
+    # 0.0 and 0.1 are ground; 0.2 and 0.5 are edge; 0.9 and 1.0 are solid.
+    assert probe.ink_counts(pixels, ground, ink) == (4, 2, 2)
+    with pytest.raises(ValueError):
+        probe.ink_counts(pixels, ink, ink)
+
+
+def test_zoomed_repeats_each_pixel_k_by_k() -> None:
+    assert probe.zoomed([[(1, 2, 3), (4, 5, 6)]], 2) == [bytes([1, 2, 3] * 2 + [4, 5, 6] * 2)] * 2
+
+
+# -- after the preview: wells lighter than the pane --------------------------------------
+
+
+def test_the_well_steps_differ_from_the_pick_only_in_the_dock_well_fill() -> None:
+    assert len(probe.LIGHT_WELLS) == 3
+    assert list(probe.WELL_STEPS) == sorted(probe.WELL_STEPS)
+    for t, variant in zip(probe.WELL_STEPS, probe.LIGHT_WELLS, strict=True):
+        assert variant.scalars == probe.PICKED.scalars
+        assert dict(variant.scalars)["frame_border_size"] == 0.0
+        assert (variant.tabs, variant.micro, variant.inset_tabs) == (
+            probe.PICKED.tabs,
+            probe.PICKED.micro,
+            probe.PICKED.inset_tabs,
+        )
+        changed = {s: m for s, m in variant.colors if dict(probe.PICKED.colors)[s] != m}
+        assert changed == {"frame_bg": probe.Mix("bg", "text", t)}
+
+
+@pytest.mark.parametrize("variant", probe.LIGHT_WELLS, ids=lambda v: v.name)
+@pytest.mark.parametrize("name", list(theme.THEMES))
+def test_a_well_step_applies_and_reverts_exactly_on_every_theme(
+    imgui: Any, name: str, variant: Any
+) -> None:
+    theme.set_theme(name)
+    theme.apply_style()
+    try:
+        before = _whole_style(imgui)
+        saved = probe.apply(variant)
+        want = probe.color_of(dict(variant.colors)["frame_bg"])
+        held = imgui.get_style().color_(int(imgui.Col_.frame_bg))
+        assert (held.x, held.y, held.z, held.w) == pytest.approx((want.x, want.y, want.z, 1.0))
+        probe.revert(saved)
+        assert _whole_style(imgui) == before
+    finally:
+        theme.set_theme("dark")
+        theme.apply_style()
+
+
+@pytest.mark.parametrize("name", list(theme.THEMES))
+def test_each_step_moves_the_well_further_off_the_pane_and_keeps_text_readable(
+    imgui: Any, name: str
+) -> None:
+    theme.set_theme(name)
+    theme.apply_style()
+    try:
+        with probe.laid_over(probe.PICKED):
+            pick = probe.read_well()
+        readings = []
+        for variant in probe.LIGHT_WELLS:
+            with probe.laid_over(variant):
+                readings.append(probe.read_well())
+    finally:
+        theme.set_theme("dark")
+        theme.apply_style()
+    ratios = [r.well_on_pane for r in readings]
+    assert ratios == sorted(ratios) and ratios[0] > 1.0
+    # Every step is further off the pane than the fill the operator found lost, except
+    # where that fill was itself further (cde, win311, whose panel sits far off bg).
+    assert ratios[-1] > pick.well_on_pane
+    for r in readings:
+        # WCAG AA for body text, the floor the palettes' own text is held to.
+        assert r.text_in_well >= 4.5, r.line()
+        # A button is still told from a well: past CIE76's just-noticeable 2.3.
+        assert r.button_from_well > 2.3, r.line()
+
+
+def test_delta_e_is_zero_for_a_colour_and_a_hundred_for_black_on_white() -> None:
+    assert probe.delta_e((10, 20, 30), (10, 20, 30)) == 0.0
+    assert probe.delta_e((0, 0, 0), (255, 255, 255)) == pytest.approx(100.0, abs=0.01)
+
+
+def test_the_wells_caption_names_the_step_and_its_measurements(styled: Any) -> None:
+    with probe.laid_over(probe.LIGHT_WELLS[1]):
+        line = probe.wells_caption(probe.WELL_STEPS[1])
+        reading = probe.read_well()
+    assert "mix(bg, text, 0.1)" in line
+    assert f"{reading.well_on_pane:.2f}:1" in line and f"{reading.text_in_well:.2f}:1" in line
+
+
+# -- after the preview: small button D ----------------------------------------------------
+
+
+def test_the_pick_draws_small_button_as_wrapper_d() -> None:
+    d = probe.PICKED.micro
+    assert d is probe.MICROS[3] and d.name == "D"
+    assert (d.pad, d.rounding, 16.0 * d.scale, d.height(16.0)) == ((8.0, 4.0), 5.0, 14.0, 22.0)
+
+
+def test_install_micro_stands_in_for_small_button_and_uninstall_puts_imgui_back(
+    styled: Any,
+) -> None:
+    im = styled
+    real = im.small_button
+    probe.install_micro(probe.MICROS[3])
+    try:
+        assert im.small_button is not real
+        assert probe.real_small_button() is real
+        heights = _measure(
+            im, lambda out: (im.small_button("copy"), out.append(im.get_item_rect_size().y))
+        )
+        assert heights == [22.0]
+    finally:
+        probe.uninstall_micro()
+    assert im.small_button is real
+    assert probe.real_small_button() is real
+
+
+def test_the_picked_caption_says_the_size_the_tab_text_is_drawn_at() -> None:
+    head, *_ = probe.picked_caption("dark", 4.0, 18.0)
+    assert "text 1.10× drawn at 18 px" in head
+    assert "drawn at" not in probe.picked_caption("dark", 4.0)[0]
+
+
+# -- after the preview: the per-theme values -----------------------------------------------
+
+
+@pytest.mark.parametrize("name", list(theme.THEMES))
+def test_the_final_variant_applies_and_reverts_exactly_on_every_theme(
+    imgui: Any, name: str
+) -> None:
+    theme.set_theme(name)
+    theme.apply_style()
+    try:
+        variant = probe.final_for(name)
+        before = _whole_style(imgui)
+        saved = probe.apply(variant)
+        for attr, value in variant.scalars:
+            assert _whole_style(imgui)[attr] == pytest.approx(value), attr
+        probe.revert(saved)
+        assert _whole_style(imgui) == before
+    finally:
+        theme.set_theme("dark")
+        theme.apply_style()
+
+
+@pytest.mark.parametrize("name", list(theme.THEMES))
+def test_only_high_contrast_keeps_the_frame_and_every_well_steps_toward_text(name: str) -> None:
+    variant = probe.final_for(name)
+    border = dict(variant.scalars)["frame_border_size"]
+    assert border == (1.0 if name == "high_contrast" else 0.0)
+    well = dict(variant.colors)["frame_bg"]
+    assert (well.base, well.over) == ("bg", "text")
+    assert well.alpha == (0.08 if name == "light" else probe.FINAL_WELL_T)
+    # Nothing but the tuning moves the final variant off the chosen well step.
+    step = probe.light_wells(probe.FINAL_WELL_T)
+    tuning = probe.THEME_TUNING.get(name)
+    tuned = {k for k, _ in tuning.scalars} | {k for k, _ in tuning.colors} if tuning else set()
+    for key, value in variant.scalars:
+        assert key in tuned or value == dict(step.scalars)[key], key
+    for key, value in variant.colors:
+        assert key in tuned or value == dict(step.colors)[key], key
+
+
+def _quirks(im: Any, name: str, variant: Any) -> dict[str, float]:
+    theme.set_theme(name)
+    theme.apply_style()
+    try:
+        return {what: ratio for what, _, _, ratio, _ in probe.quirk_rows(variant)}
+    finally:
+        theme.set_theme("dark")
+        theme.apply_style()
+
+
+@pytest.mark.parametrize("name", ["light", "xterm"])
+def test_light_and_xterm_read_at_least_as_dark_does_where_they_were_tuned(
+    imgui: Any, name: str
+) -> None:
+    dark = _quirks(imgui, "dark", probe.final_for("dark"))
+    final = _quirks(imgui, name, probe.final_for(name))
+    picked = _quirks(imgui, name, probe.PICKED)
+    assert final["dock well on the pane"] > 1.15 > picked["dock well on the pane"]
+    assert final["text in the well"] >= 4.5 and final["hint in the well"] >= 4.5
+    assert final["button on the pane"] >= dark["button on the pane"] - 0.05
+    assert final["button text on the button"] >= 4.5
+    # The tool block is off the pane, short of the well's step so it is not taken
+    # for a field, and its inks read on it. The near-black it replaces was a slab.
+    assert picked["tool block on the pane"] > 15.0
+    assert 1.05 < final["tool block on the pane"] < final["dock well on the pane"]
+    assert final["tool block text"] >= 4.5 and final["tool block dim text"] >= 4.5
+
+
+def test_the_quirk_table_has_a_row_per_quirk_and_a_column_per_theme(imgui: Any) -> None:
+    lines = probe.quirk_table(("dark", "light"))
+    assert len(lines) == 2 + len(probe.QUIRKS)
+    assert all(line.count("|") == 4 for line in lines)
+
+
+def test_the_final_caption_names_every_tuned_value() -> None:
+    line = probe.final_caption("light")
+    assert "Col_.button = mix(panel_alt, accent, 0.36)" in line
+    assert "tool block = mix(bg, text, 0.06)" in line
+    assert "frame_border_size 1" in probe.final_caption("high_contrast")
+    assert "no values of its own" in probe.final_caption("dark")
