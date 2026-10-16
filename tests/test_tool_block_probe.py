@@ -153,6 +153,7 @@ _TEXT_CALLS = (
     "small_button",
     "text_link",
     "input_text_with_hint",
+    "set_item_tooltip",
 )
 
 
@@ -189,3 +190,222 @@ def test_every_sheet_draws_only_drawable_text(imgui: Any, drawn: list[str], shee
     assert drawn
     if sheet in probe.BY_NAME:
         assert any("caf\\udc80" in text for text in drawn)
+
+
+# -- per-tool proofs ----------------------------------------------------------------
+
+# The input fields each tool's proof may read, from the Agent SDK TypeScript
+# reference's "Tool Input Types" (code.claude.com/docs/en/agent-sdk/typescript),
+# checked against the CLI 2.1.301 bundled in .venv. A proof case built on a field
+# not listed here is a guessed shape.
+SDK_FIELDS: dict[str, set[str]] = {
+    "Bash": {"command", "timeout", "description", "run_in_background", "dangerouslyDisableSandbox"},
+    "Read": {"file_path", "offset", "limit", "pages", "allow_large"},
+    "Edit": {"file_path", "old_string", "new_string", "replace_all"},
+    "Write": {"file_path", "content"},
+    "Glob": {"pattern", "path"},
+    "Grep": {
+        "pattern",
+        "path",
+        "glob",
+        "type",
+        "output_mode",
+        "-i",
+        "-o",
+        "-n",
+        "-B",
+        "-A",
+        "-C",
+        "context",
+        "head_limit",
+        "offset",
+        "multiline",
+    },
+    "NotebookEdit": {"notebook_path", "cell_id", "new_source", "cell_type", "edit_mode"},
+    "TodoWrite": {"todos"},
+    "WebFetch": {"url", "prompt", "offset"},
+    "WebSearch": {"query", "allowed_domains", "blocked_domains"},
+    "Agent": {
+        "description",
+        "prompt",
+        "subagent_type",
+        "model",
+        "effort",
+        "run_in_background",
+        "name",
+        "team_name",
+        "mode",
+        "isolation",
+    },
+}
+REQUIRED: dict[str, set[str]] = {
+    "Bash": {"command"},
+    "Read": {"file_path"},
+    "Edit": {"file_path", "old_string", "new_string"},
+    "Write": {"file_path", "content"},
+    "Glob": {"pattern"},
+    "Grep": {"pattern"},
+    "NotebookEdit": {"notebook_path", "new_source"},
+    "TodoWrite": {"todos"},
+    "WebFetch": {"url", "prompt"},
+    "WebSearch": {"query"},
+    "Agent": {"description", "prompt"},
+}
+
+
+@pytest.fixture(scope="module")
+def proofs() -> tuple[Any, tuple[Any, ...]]:
+    built: tuple[Any, tuple[Any, ...]] = probe.build_proof_cases()
+    return built
+
+
+def test_every_proof_is_the_entry_the_transcript_holds(proofs: tuple[Any, tuple[Any, ...]]) -> None:
+    transcript, cases = proofs
+    assert {(c.tool, c.column) for c in cases} == {
+        (tool, col) for tool in probe.PROOF_TOOLS for col in probe.PROOF_COLUMNS
+    }
+    for case in cases:
+        assert isinstance(case.entry, ToolEntry)
+        assert transcript.tool_entry(case.entry.tool_use_id) is case.entry
+        start, end = case.entry.call
+        assert case.entry in transcript.tool_entries(start, end)
+
+
+def test_every_proof_input_is_the_sdk_shape(proofs: tuple[Any, tuple[Any, ...]]) -> None:
+    _, cases = proofs
+    for case in cases:
+        name, args = case.entry.name, case.entry.input
+        if name in SDK_FIELDS:
+            assert set(args) <= SDK_FIELDS[name], (name, set(args) - SDK_FIELDS[name])
+            assert REQUIRED[name] <= set(args), (name, REQUIRED[name] - set(args))
+        if name == "TodoWrite":
+            for todo in args["todos"]:
+                assert set(todo) == {"content", "status", "activeForm"}
+                assert todo["status"] in ("pending", "in_progress", "completed")
+    # MultiEdit is not a tool in this CLI; Task is Agent's old name.
+    assert "MultiEdit" not in probe.PROOF_TOOLS
+
+
+def test_each_column_is_the_state_it_is_drawn_as(proofs: tuple[Any, tuple[Any, ...]]) -> None:
+    _, cases = proofs
+    want = {"done": "done", "second": "done", "error": "error", "running": "running"}
+    for case in cases:
+        state = probe.proof(case.entry, case.live).state
+        assert state == want.get(case.column, "no result"), (case.tool, case.column, state)
+
+
+def test_every_proof_string_is_drawable(proofs: tuple[Any, tuple[Any, ...]]) -> None:
+    _, cases = proofs
+    for case in cases:
+        p = probe.proof(case.entry, case.live)
+        for text in probe.proof_strings(p):
+            assert isinstance(text, str) and not drawable.undrawable(text), (case.tool, text)
+        for row in (*p.head, *p.body):
+            for face, ink, _ in row:
+                assert face in ("mono", "prose", "caption", "tip") and ink in probe.INKS
+    bash = next(c for c in cases if (c.tool, c.column) == ("Bash", "done"))
+    assert any("caf\\udc80" in s for s in probe.proof_strings(probe.proof(bash.entry, False)))
+
+
+def _proof(cases: tuple[Any, ...], tool: str, column: str) -> Any:
+    case = next(c for c in cases if (c.tool, c.column) == (tool, column))
+    return probe.proof(case.entry, case.live)
+
+
+def test_bash_keeps_the_tail_and_the_others_the_head(proofs: tuple[Any, tuple[Any, ...]]) -> None:
+    _, cases = proofs
+    bash = _proof(cases, "Bash", "second")
+    assert bash.tail and bash.more.startswith("41 earlier lines")
+    assert "42 passed" in bash.body[-1][0][2]
+    assert bash.head[0][0][2].startswith("$ ")
+    read = _proof(cases, "Read", "second")
+    assert not read.tail and read.body[0][0][2].strip() == "1"
+
+
+def test_error_text_is_unwrapped_and_the_exit_code_read(
+    proofs: tuple[Any, tuple[Any, ...]],
+) -> None:
+    _, cases = proofs
+    for tool in probe.PROOF_TOOLS:
+        p = _proof(cases, tool, "error")
+        assert not any("tool_use_error" in s for s in probe.proof_strings(p)), tool
+        assert p.caption[-1][1] == "danger"
+    assert _proof(cases, "Bash", "error").caption[-1][2] == "exit 1"
+
+
+def test_per_tool_content(proofs: tuple[Any, tuple[Any, ...]]) -> None:
+    _, cases = proofs
+    edit = _proof(cases, "Edit", "done")
+    assert [ink for row in edit.body for _, ink, _ in row] == ["ctx", "add", "add", "ctx"]
+    assert ("caption", "add", "new file") in _proof(cases, "Write", "done").caption
+    assert ("caption", "warn", "overwrote") in _proof(cases, "Write", "second").caption
+    grep = _proof(cases, "Grep", "second")
+    assert grep.body[0][0] == ("mono", "accent", "/home/wreel/src/tle/tle/parse.py:1")
+    assert ("caption", "text", "6 results") in _proof(cases, "WebSearch", "done").caption
+    todo = _proof(cases, "TodoWrite", "done")
+    assert [row[0][2] for row in todo.body] == ["[x] ", "[x] ", "[>] ", "[ ] ", "[ ] "]
+    agent = _proof(cases, "Agent", "done")
+    assert ("caption", "dim", "9 tool uses · 41 s") in agent.caption
+    assert not any("agentId" in s for s in probe.proof_strings(agent))
+    mcp = _proof(cases, "mcp__pptmstr__read_board", "second")
+    assert mcp.head[0][0][2] == "post_concern" and mcp.head[1][0][2] == "to: "
+
+
+def test_the_well_comes_from_the_theme() -> None:
+    seen = set()
+    try:
+        for name in probe.PROOF_THEMES:
+            palette = theme.set_theme(name)
+            term = probe.terminal_for(palette)
+            seen.add(probe._hex(term.ground))
+            assert term.text is not None and probe._hex(term.text) == probe._hex(palette.text.vec4)
+            assert (term.outline is not None) == (name == "high_contrast")
+            # A step off the pane, not a slab: the fix-ups table's 1.07-1.21 band.
+            lo, hi = sorted((probe._lum(term.ground), probe._lum(palette.bg.vec4)))
+            assert 1.05 <= (hi + 0.05) / (lo + 0.05) <= 1.3, name
+    finally:
+        theme.set_theme("dark")
+    assert len(seen) == len(probe.PROOF_THEMES)
+    assert "#0b0b0c" not in seen
+
+
+@pytest.mark.parametrize("suffix", list(probe.PROOF_SHEETS))
+@pytest.mark.parametrize("name", probe.PROOF_THEMES)
+def test_every_proof_sheet_draws_only_drawable_text(
+    imgui: Any, drawn: list[str], suffix: str, name: str
+) -> None:
+    theme.set_theme(name)
+    try:
+        _frame(imgui, lambda: probe.draw_proof_sheet(suffix, True))
+    finally:
+        theme.set_theme("dark")
+    assert drawn
+    if suffix == "":
+        assert any("caf\\udc80" in text for text in drawn)
+
+
+def test_a_url_is_constructed_whole_with_its_host_kept(proofs: tuple[Any, tuple[Any, ...]]) -> None:
+    _, cases = proofs
+    short = _proof(cases, "WebFetch", "done").head[0]
+    assert [text for _, _, text in short[:3]] == [
+        "https://",
+        "celestrak.org",
+        "/columns/v04n03/#FAQ04",
+    ]
+    assert short[1][1] == "link" and short[-1] == (
+        "tip",
+        "link",
+        "https://celestrak.org/columns/v04n03/#FAQ04",
+    )
+    long = _proof(cases, "WebFetch", "second")
+    row = long.head[0]
+    assert (
+        row[1][2] == "celestrak.org" and "…" in row[2][2] and row[2][2].endswith("campaign=2026-10")
+    )
+    assert len(row[2][2]) == probe.URL_REST
+    assert row[-1][2] == probe._LONG_URL
+    # The cross-host redirect's target is in the result, said as unverified.
+    assert long.caption[-1] == ("caption", "dim", "redirect · not fetched")
+    assert long.body[1][-1][2] == probe._REDIRECTED
+    search = _proof(cases, "WebSearch", "done")
+    assert [span[0] for span in search.body[1]] == ["mono", "mono", "mono", "tip"]

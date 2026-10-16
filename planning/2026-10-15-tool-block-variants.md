@@ -231,3 +231,290 @@ Not run:
   rest only.
 - A real CLI session's tool results. The cases are hand-written in the shapes the driver
   receives.
+
+## The operator's sign-off (2026-10-16)
+
+On the variants: "'Stacked' tool block looks great for bash!" On the per-tool proofs
+(`shots/tool-block/proofs/dark.png`): "Those look really good." Mid-proof they asked: "WebFetch
+stacked tool display should construct a URL". That is built in below. Earlier: "Errors
+getting a red rule is fine and works well to my eyes" and "Theme dictates the 'terminal'
+background, yess".
+
+So the block is built as the proofs below draw it. Two things are not signed off and are the
+builder's to settle and report:
+- Terminal colours on the five themes the proofs did not render (ghost, cde, win311, kitty,
+  turbo). The proofs' rule puts cde and win311 on the light branch, where text was calculated
+  at about 2-3:1. That is not acceptable as built: text in a block reaches 4.5:1 on every
+  theme.
+- The "illustrative" result texts, which were not found word for word in the CLI.
+
+## Per-tool proofs
+
+The operator, after the variants: "Show me alternate tools and how they'll render. My thought
+is bash has a certain look like others are distinct in other ways. Stacked for them but we
+need to proof them." Also "Errors getting a red rule is fine and works well to my eyes" and
+"Theme dictates the 'terminal' background, yess".
+
+**What to look at:** `shots/tool-block/proofs/<theme>.png` holds every tool in its done
+state, plus a second case (a long output, or the tool's other input shape).
+`shots/tool-block/proofs/<theme>-states.png` holds the same tools in error, running and no
+result. There are both sheets for each of dark, light, xterm and high_contrast.
+
+**Regenerate:** `scripts/tool_block_probe.py --proofs` renders every theme, each on its own
+Xvfb, about 9 s each. `--proofs --theme dark` renders one. The sheets draw under
+preview-fixups' `style_probe.final_for(<theme>)`, imported from `scripts/style_probe.py`, so
+the dock wells, the buttons and small button D are the final ones.
+
+### The frame every tool shares (the stacked variant)
+
+- **One well per call:** rounding 5, padding 10x6, item spacing 8x2.
+- **Caption line:** proportional type at 13 px, which is 0.8 of the UI size rounded to a whole
+  pixel, because ImGui 1.92 bakes whole pixels (preview-fixups). It reads
+  `kind · details · state`. The kind word is in `accent`, except Bash, which has none and opens
+  on its description. The details are in `text_dim`. The state badge is `dim` for done,
+  `accent` for running, `warn` for "no result · turn ended", and `danger` for an error (Bash
+  shows "exit N" there).
+- **Head:** what the call asked.
+- **Body:** what came back, or the call's own content for a write.
+- **The expand affordance:** `imgui.small_button` (button D) labelled "N more …". It comes
+  before the body when the tail is kept, and after it otherwise.
+- **Error:** a 3 px `danger` rule down the left edge, the operator's pick. The CLI's
+  `<tool_use_error>…</tool_use_error>` wrapper is stripped, as the CLI strips it, and the text
+  is drawn in `danger`.
+- **Running and no result** draw the head only. A Write or Edit still shows what it asked,
+  because the content is in the input.
+
+### The theme's well
+
+The well is derived by `terminal_for(palette)`, which is the builder's rule. There is no fixed
+colour on any theme.
+
+| theme | rule | well | on the pane |
+|---|---|---|---|
+| dark (any theme with bg luminance under 0.05, not black) | `mix(bg, black, 0.60)` | #08090b | 1.10:1 |
+| light, xterm (luminance 0.05 and up) | `mix(bg, text, 0.06)`, the fix-ups table's | #e7e8ec, #dcdad0 | 1.12:1 |
+| high_contrast (black pane) | `mix(bg, text, 0.10)` plus a 1 px `border` outline | #1a1a1a | 1.21:1 |
+
+**Why dark goes deeper rather than lighter:** the terminal look is a ground darker than its
+surroundings. Dark's pick was a fixed #0b0b0c; `mix(bg, black, 0.6)` lands next to it and
+carries the theme's hue.
+
+**Why high_contrast gets the outline:** its pane is #000, so nothing is deeper. Fix-ups
+measured the old mock there at 1.07:1, and high_contrast keeps frames.
+
+**Inks** are the palette's `text` and `text_dim` on every theme, plus `diff_add`/`diff_remove`/
+`diff_context`, `accent`, `ok`, `warn` and `danger`. Measured on each well (WCAG), with the
+palette as the tree held it at render time:
+
+| ink on the well | dark | light | xterm | high_contrast |
+|---|---|---|---|---|
+| text | 12.66 | 12.85 | 12.29 | 17.40 |
+| dim (`text_dim`) | 6.10 | 4.72 | 5.48 | 9.57 |
+| line numbers (`dim` 35% toward the well) | 3.13 | 2.49 | 2.74 | 4.78 |
+| diff add / ok | 9.47 | 5.14 | 4.83 | 13.23 |
+| diff remove / danger | 5.09 | 5.44 | **4.17** | 6.27 |
+| diff context | 5.26 | 4.72 | 5.48 | 9.57 |
+| accent | 9.62 | 4.59 | 8.34 | 11.31 |
+| warn | 10.38 | 4.84 | **3.51** | 12.16 |
+
+These fall under 4.5 and are left for the operator:
+- xterm's `diff_remove`/`danger` (4.17) and `warn` (3.51) on its well. Those inks are the
+  palette's, so the fix would be a palette change.
+- The line numbers on every theme. They are deliberately faint, as an editor's gutter is. That
+  is the builder's choice, and it can be undone by drawing them in `dim`.
+
+### Each tool
+
+Field names are from the Agent SDK's TypeScript reference, "Tool Input Types"
+(https://code.claude.com/docs/en/agent-sdk/typescript, read 2026-10-15). They were checked
+against the CLI the SDK bundles: `.venv/.../claude_agent_sdk/_bundled/claude`, version
+2.1.301 (`_cli_version.py`), whose minified source holds the schemas and result texts. The
+result texts below are that CLI's `mapToolResultToToolResultBlockParam` output. Where a case's
+text was not found verbatim, the sheet says so under the block.
+
+**Bash** is the terminal, and the only tool with no kind word and no proportional type below
+the caption.
+- **Reads:** `command`, `description`, `timeout` (ms; shown as min or s), `run_in_background`
+  ("background"), and `dangerouslyDisableSandbox` ("unsandboxed", in `warn`).
+- **Order:** caption (description · limit · flags · state), then `$ command`, up to 3 lines.
+  Then the affordance "N earlier lines", then the **last 6** output lines in `dim`.
+- **Truncation:** tail, because the line that says whether a build or test passed is last
+  (builder-22's finding).
+- **Error:** the CLI's "Exit code N" first line becomes the badge "exit N" and is dropped from
+  the output.
+- **Over the 1 MiB cap:** the dropped bytes are added to the affordance's label.
+
+**Read** is a numbered excerpt.
+- **Reads:** `file_path`, `offset`, `limit` (caption "lines a–b", "from line a", "first n
+  lines" or "whole file"), and `pages`.
+- **Order:** caption (read · range · N lines · state), path in mono, then the **first 6**
+  lines with their numbers from the result's `cat -n` form, in a faint gutter. Then "N more
+  lines".
+- **Error:** "File does not exist." is in the CLI.
+
+**Edit** is a -/+ diff in the pane's own `diff_add`/`diff_remove`/`diff_context` (`theme.py`'s
+approval-gate roles).
+- **Reads:** `file_path`, `old_string`, `new_string`, `replace_all` ("every occurrence").
+- **Order:** caption (edit · `+a` in add · `−r` in remove · state), path, then the
+  `difflib.unified_diff` of old against new with **1 line of context**. The **first 8** diff
+  lines are shown, then "N more diff lines".
+- **The result is not drawn when done:** "The file X has been updated successfully." adds
+  nothing to the diff. "Here's the result of running cat -n", as builder-22's case had it, is
+  not this CLI's text.
+- **Error:** the diff stays and the CLI's message follows in `danger`, "String to replace not
+  found in file.\nString: …" (verbatim).
+
+**MultiEdit is dropped.** CLI 2.1.301 defines no tool by that name; it has constants for Edit,
+Write, NotebookEdit, Glob, Grep, WebFetch, WebSearch, TodoWrite and Agent. "MultiEdit"
+survives only in its permission-rule compatibility text, and the SDK reference lists no
+MultiEdit input type.
+
+**Write** is a preview marked as new.
+- **Reads:** `file_path`, `content`.
+- **Order:** caption (write · "new file" in add when the result is "File created successfully
+  at: …", or "overwrote" in `warn` when it is "The file … has been updated successfully." ·
+  size · lines · state). Then the path, then the **first 5** lines of `content`, each behind a
+  `+` in `diff_add`, then "N more lines in the file".
+- **Running and no result:** a running Write shows the preview without new/overwrote, since
+  only the result says which.
+- **Error:** "File has not been read yet. Read it first before writing to it." (verbatim).
+
+**Grep** and **Glob** are a pattern and a compact list with a count.
+- **Grep reads:** `pattern` (shown `/pattern/`), `path` ("in …"), `glob`, `type`,
+  `output_mode` (shown when not the default `files_with_matches`), `-i`/`-n`/`-o`/`multiline`,
+  `-A`/`-B`/`-C`/`context`, and `head_limit`.
+- **Glob reads:** `pattern` and `path`.
+- **Order:** caption (kind · scope · options · count in `text` · state), then the pattern in
+  mono, then the **first 6** entries and "N more files/matches".
+- **Grep in content mode** splits each `path:line:text` into the location in `accent` and the
+  text in `dim`.
+- **Counts:** the count is the result's own lines, not its "Found N files" header. The CLI's
+  "No files found" becomes "no matches" in `warn`.
+- **Errors:** "Path does not exist: …" (Grep; the CLI appends a cwd note and a "Did you mean"
+  that the case cuts) and "Directory does not exist: …" (Glob). Both strings are in the CLI.
+
+**WebFetch** is a constructed URL, then the prompt in prose. The operator, after the dark
+sheet: "WebFetch stacked tool display should construct a URL". Lead's reading, applied here:
+the whole URL, drawn as a link.
+- **The URL** (`url_row`):
+  - It is built from `url` with `urlsplit`. The `scheme://` is in `dim`, the host in the link
+    ink (`accent`), and the path, query and fragment in `dim`.
+  - The whole row is underlined in the link ink at 60%.
+  - `imgui.set_item_tooltip` holds the full URL, so hovering shows it. The tooltip is spied
+    for drawability in the tests; no image shows the hover.
+  - A path and query longer than 56 characters lose their middle: the first third is kept,
+    then "…", then the end. The host and the end of the query stay visible. A string with no
+    scheme or host is drawn whole, in the link ink.
+- **Reads:** `url` and `prompt` (wrapped prose in `text`). `offset` is not shown.
+- **Body:** the answer as wrapped prose in `dim`, the **first 3** paragraphs, then "N more
+  paragraphs".
+- **The cases:**
+  - Done is a short URL.
+  - Second is a 124-character URL with a query string, whose result is a cross-host
+    redirect.
+- **A redirect, and what the result can show.** From the CLI 2.1.301 source:
+  - **Same host:** the CLI follows the redirect, and the text result names no final URL.
+    There is nothing to show for it.
+  - **Cross host:** the CLI does not follow it. The result begins "REDIRECT DETECTED: …" and
+    carries "Redirect URL (from the server's Location header — server-supplied, not
+    verified): <target>". That target is drawn as a second constructed URL under "redirects
+    to (server-supplied, unverified)" in `warn`, and the badge reads "redirect · not
+    fetched".
+  - **A target the CLI withholds** (not http(s), or over its length limit) is not parsed, and
+    the block falls back to the result's prose.
+- **Error:** "Request failed with status code 404" is the HTTP client's text in the CLI.
+
+**WebSearch** is a quoted query, then titles over constructed URLs.
+- **Reads:** `query` and `allowed_domains`/`blocked_domains` ("only …"/"not …").
+- **Body:** parsed from the result's `Links: [{"title","url"}…]` line. The result's form,
+  `Web search results for query: "…"\n\nLinks: [json]…REMINDER…`, is the CLI's.
+- **Each result** is two rows: the title in prose, then its URL drawn as WebFetch's is (host
+  emphasised, middle elided, underlined, tooltip). The **first 4** are shown, then "N more
+  results", with the count in the caption.
+- **The other result form:** when the CLI sends `search_result` blocks instead (its citations
+  path), the transcript holds a repr, and this parse finds no links. That form was not drawn.
+- **Error:** illustrative. The `InputValidationError:` prefix and the wrapper are the CLI's;
+  the message is not quoted from it.
+
+**Agent** (and `Task`, its accepted old name) is a description, a collapsed prompt and a
+state.
+- **Reads:** `description` (prose, `text`), `prompt` (one line, small, `dim`, with "N lines of
+  prompt"), `subagent_type` (default "general-purpose"), `model`, `effort`, `isolation`,
+  `run_in_background`.
+- **Result:** a list of text blocks, held as a repr; the probe reads it back with
+  `ast.literal_eval`. The trailing "agentId: … <usage>subagent_tokens: N tool_uses: N
+  duration_ms: N</usage>" block becomes "N tool uses · N s" in the caption and is not drawn
+  as text.
+- **Report:** the **first 3** lines.
+- **A background launch:** "Async agent launched successfully…" becomes the badge "launched
+  · runs on", with no body.
+- **Error:** illustrative.
+
+**TodoWrite** is a checklist.
+- **Reads:** `todos[]`, each `content`, `status` (`pending` | `in_progress` | `completed`) and
+  `activeForm`.
+- **Rows:** `[x]` in `ok` with `content` in `dim` for completed. `[>]` in `accent` with
+  `activeForm` in `text` for in progress. `[ ]` with `content` for pending.
+- **Caption:** "N done · N doing · N to do". **Up to 8** items are shown.
+- **The result is never drawn:** it is the CLI's fixed "Todos have been modified
+  successfully…".
+- **Error:** the message "Content cannot be empty" is the CLI's schema text.
+
+**NotebookEdit**:
+- **Reads:** `notebook_path`, `cell_id`, `new_source` (mono, `diff_add`, **first 6** lines),
+  `cell_type`, and `edit_mode` ("replace/insert/delete cell <id>"; delete shows no source).
+- **Error:** "Cell type is required when using edit_mode=insert." (verbatim).
+
+**MCP** (pptmstr's own bus) is server · tool, then the arguments.
+- **Name:** split from `mcp__<server>__<tool>`. The caption is "mcp · <server>"; the tool name
+  heads the block in prose.
+- **Arguments:** a `key: value` list (key `dim`, value `text`, one line, 72 characters).
+- **Result:** the list-of-blocks text, **first 4** lines.
+- **Error:** "MCP error -32000: Connection closed" is in the CLI.
+- **The post_concern case's reply** ("sent to lead") is illustrative.
+
+**Unknown tool**, the fallback:
+- **Caption:** the name in `warn` and "no block of its own".
+- **Body:** the arguments as `key: value`, then the **first 4** output lines.
+- **Cases:** drawn with `Skill` (`skill`, plus `args` from this session's own Skill schema).
+  The error case is a made-up name, with the CLI's verbatim "Error: No such tool available:
+  Frobnicate".
+
+### What makes each distinct (builder's summary)
+
+- **Bash:** all code face, `$` prompt, no kind word, tail cut.
+- **Read:** numbered gutter.
+- **Edit:** red and green rows.
+- **Write:** `+` rows under "new file" or "overwrote".
+- **Grep and Glob:** a pattern line over a path list with a count; content mode puts
+  locations in accent.
+- **WebFetch:** an underlined URL with its host in accent, then a prose question and answer.
+- **WebSearch:** a quoted query and a list of titles over URLs.
+- **Agent:** a prose description and a one-line prompt, with run stats in the caption.
+- **TodoWrite:** checkboxes, no head.
+- **NotebookEdit:** a cell verb and green source.
+- **MCP:** a key: value table.
+- **Unknown:** a `warn` name.
+
+### Run, and not run
+
+**Run:**
+- `--proofs` for the four themes: exit 0, eight images.
+- `--all`: exit 0. It re-rendered the six variant sheets.
+- `pytest tests/test_tool_block_probe.py tests/test_typeset_gate.py`: 89 passed. 17 of these
+  are new: every cell is a transcript entry, every input is inside the SDK's field set with
+  its required fields, states, drawability, per-tool content, the URL's construction and the redirect target, the well's derivation, and all 8
+  sheets drawn in a bare context with text calls spied.
+- ruff, mypy and black on both files.
+- Mutations, both killed:
+  - output rows without `drawable.text`;
+  - a light theme given the dark derivation, which only the well's 1.05–1.3:1 band caught.
+
+**Not run:**
+- A live CLI session's results.
+  - The texts are taken from the bundled CLI's source or marked illustrative.
+  - The Read `cat -n` form is from this session's own Read tool, not from the bundle.
+- Hover and press of the affordance, and the URL's tooltip on hover.
+- The other five themes.
+- Blocks at the real session pane's width.
+- The `search_result`-blocks form of WebSearch.
