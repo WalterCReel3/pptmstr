@@ -672,9 +672,6 @@ class MenuState:
     # -- the fleet pane was not drawn, nothing has the cursor -- does not wait for
     # one that will.
     open_from_key: bool = False
-    # Asked for from somewhere drawn after the fleet pane (the menu bar): it
-    # becomes ``open_from_key`` at the next frame's start.
-    ask_next_frame: bool = False
     # A card's menu was drawn on this frame. Read and cleared by ``claim_keys``;
     # a flag only its drawer sets cannot be left standing by a pane that stopped
     # being drawn.
@@ -702,13 +699,10 @@ class MenuState:
         Once per frame, before anything reads a bare key. Whether this frame's
         keys belong to a card's menu -- it was on screen when the key went down
         -- and so to nobody else.
-
-        Also where a menu asked for from the menu bar becomes this frame's ask.
         """
         busy = self.shown
         self.shown = False
-        self.open_from_key = self.ask_next_frame
-        self.ask_next_frame = False
+        self.open_from_key = False
         return busy
 
     def prune(self, snap: Snapshot) -> None:

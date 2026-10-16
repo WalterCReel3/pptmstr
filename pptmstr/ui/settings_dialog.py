@@ -5,9 +5,8 @@ A modal over whichever layout is up, opened by ``Ctrl+,`` or **Text > Settingsâ€
 It exists because the choices outgrew a menu -- a face and a size for each of nine
 roles, a switch per pane -- and it is deliberately *not* a preferences wizard: a
 list of sections on the left, the selected one's rows on the right, no Apply. Every
-field of ``Settings`` is a control here, is named as read-only (``READ_ONLY``) or
-is retired (``RETIRED``), and a test holds that, so a field added later cannot be
-persisted from nowhere.
+field of ``Settings`` is a control here or is named as read-only (``READ_ONLY``),
+and a test holds that, so a field added later cannot be persisted from nowhere.
 
 A section is data: ``Model.pages`` lists each one as a ``Page`` of rows, and the
 draw renders any page by the kind of each row. A section added later is a page
@@ -134,16 +133,7 @@ SECTIONS: dict[str, tuple[str, ...]] = {
 }
 """
 Which fields of ``Settings`` each section owns: what its ``defaults`` button restores
-and what its rows edit. Every field is in exactly one section, in ``READ_ONLY`` or
-in ``RETIRED``.
-"""
-
-RETIRED: tuple[str, ...] = ("context_mode",)
-"""
-Fields still read from the file and written back, that nothing decides anything by
-and the dialog does not show: where the context log started, when it had a choice
-of rendering. Kept so a file that names one round-trips as it was; it goes with the
-RAW and RICH renderers.
+and what its rows edit. Every field is in exactly one section or in ``READ_ONLY``.
 """
 
 READ_ONLY: tuple[str, ...] = ("admitted_connectors", "board_log")

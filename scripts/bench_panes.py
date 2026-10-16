@@ -3,10 +3,7 @@
 What each text pane costs per frame, CPU-side, in a headless ImGui frame.
 
 Five panes set text, and a change of renderer under any of them is judged against
-the numbers this prints. It answers one recorded question outright
-(planning/2026-09-08-the-toolkit-was-never-the-constraint.md, section 6): whether
-``transcript_pane.draw``'s ``cache.lines[:stable]`` slice -- O(total lines), every
-frame -- is what RICH mode costs at 100k lines, or whether something else is.
+the numbers this prints.
 
 **What is timed.** ``perf_counter_ns`` around the pane's own draw function and
 nothing else: not ``new_frame``, not ``render``, not a swap. There is no window and
@@ -111,7 +108,6 @@ from pptmstr.ui import (  # noqa: E402
     detail,
     inbox,
     review,
-    rich_pane,
     settings_dialog,
     transcript_pane,
     typeset,
@@ -522,17 +518,14 @@ def bench_transcript_parts(transcript: Transcript, snap: Snapshot) -> list[Row]:
     each timed alone against a cache that is already caught up.
 
     These are the per-frame costs that depend on the length of the transcript and
-    not on what is visible, which is what the planning record asks about.
+    not on what is visible.
     """
     group = "transcript_pane parts"
-    state = TranscriptState(mode=RenderMode.RICH)
+    state = TranscriptState(mode=RenderMode.WRAP)
     cache = state.cache_for(ROOT_NODE)
     cache.sync(transcript, transcript.published_length)
-    stable = len(cache.lines) - (1 if cache.open_line else 0)
-    cache.block_cursor.feed(cache.lines[:stable])
     size = f"{len(cache.lines):,} lines"
     reps = 200 if len(cache.lines) <= 20_000 else 60
-    shown = rich_pane.windowed(cache.block_cursor.blocks)
     visible = transcript_pane._visible(state, cache)
     stream = tokens()
 
@@ -541,31 +534,6 @@ def bench_transcript_parts(transcript: Transcript, snap: Snapshot) -> list[Row]:
         cache.sync(transcript, transcript.published_length)
 
     rows = [
-        part(group, "RICH: cache.lines[:stable]", size, timed(lambda: cache.lines[:stable], reps)),
-        part(
-            group,
-            "RICH: block_cursor.feed(slice), nothing new",
-            size,
-            timed(lambda: cache.block_cursor.feed(cache.lines[:stable]), reps),
-        ),
-        part(
-            group,
-            "RICH: block_cursor.live_block",
-            size,
-            timed(lambda: cache.block_cursor.live_block(cache.lines), reps),
-        ),
-        part(
-            group,
-            "RICH: rich_pane.windowed",
-            size,
-            timed(lambda: rich_pane.windowed(cache.block_cursor.blocks), reps),
-        ),
-        part(
-            group,
-            "RICH: block_copy_text(windowed)",
-            size,
-            timed(lambda: rich_pane.block_copy_text(shown), reps),
-        ),
         part(
             group,
             "RAW/WRAP: _visible()",
@@ -704,8 +672,7 @@ def bench_watch(harness: Harness, lines: int) -> list[Row]:
         for kind, text in fake_driver._REPORT_SCRIPT
     ]
     return [
-        _watched(harness, mode, script, lines)
-        for mode in (RenderMode.WRAP, RenderMode.RICH, RenderMode.TYPESET)
+        _watched(harness, mode, script, lines) for mode in (RenderMode.WRAP, RenderMode.TYPESET)
     ]
 
 

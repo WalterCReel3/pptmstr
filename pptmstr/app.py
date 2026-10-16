@@ -3509,10 +3509,6 @@ def _apply_settings(state: AppState, new: settings_mod.Settings) -> None:
         _session_action(state, resize)
     if "fps_idle" in moved and state.runner is not None:
         state.runner.fps_idling.fps_idle = new.fps_idle
-    if "context_mode" in moved:
-        # The pane's own buttons choose for the session and would otherwise hide
-        # this change until the next launch.
-        state.transcripts.mode = None
     LOG.info("settings", _described(new, moved))
 
 
@@ -3918,7 +3914,6 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
                 state.transcripts,
                 node,
                 _closed_path(state, node),
-                start_in=transcript_pane.mode_named(state.settings.context_mode),
                 show_reasoning=state.settings.show_reasoning,
             )
 
@@ -3971,7 +3966,6 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
                 state.transcripts,
                 node,
                 _closed_path(state, node),
-                start_in=transcript_pane.mode_named(state.settings.context_mode),
                 show_reasoning=state.settings.show_reasoning,
             )
         imgui.end_child()

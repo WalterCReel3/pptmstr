@@ -147,11 +147,6 @@ class Settings:
     # Typeset text's size as a multiple of the UI font's, which it still follows.
     # The seam clamps it.
     typeset_scale: float = 1.0
-    # Retired: the context log has no choice of rendering any more (typeset, and
-    # wrapped lines where the seam is off), and nothing decides anything by this.
-    # Still read and written, so a file that names a mode loads and saves as it
-    # was; it goes with the RAW and RICH renderers (`settings_dialog.RETIRED`).
-    context_mode: str = ""
     # Whether the context log and the session pane show the model's reasoning.
     show_reasoning: bool = True
     # The MCP servers a session may reach, and the whole of them. `driver` passes

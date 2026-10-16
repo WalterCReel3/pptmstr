@@ -874,24 +874,19 @@ def test_a_setting_that_changes_is_carried_out_where_it_takes_effect(
         app._apply_settings(state, state.settings.merged(fps_idle=15.0))
         assert state.runner is not None and state.runner.fps_idling.fps_idle == 15.0
 
-        app._apply_settings(state, state.settings.merged(context_mode="typeset"))
-        assert state.transcripts.mode is None, "the pane's own pick would hide the change"
-
         app._apply_settings(state, state.settings.merged(concurrency_cap=6))
         # A round trip through the loop: the resize is queued behind nothing else.
         bridge.submit(_nothing()).result(timeout=5)
         assert pool.cap == 6
         assert pool.resized_on is not None and pool.resized_on is not threading.current_thread()
 
-        assert len(saved) == 4
-        assert saved[-1] == Settings(
-            theme="light", fps_idle=15.0, context_mode="typeset", concurrency_cap=6
-        )
+        assert len(saved) == 3
+        assert saved[-1] == Settings(theme="light", fps_idle=15.0, concurrency_cap=6)
 
         # Nothing moved: nothing written, nothing told.
         state.theme_dirty = False
         app._apply_settings(state, state.settings.merged(theme="light"))
-        assert len(saved) == 4 and not state.theme_dirty
+        assert len(saved) == 3 and not state.theme_dirty
     finally:
         bridge.stop()
         theme.set_theme("dark")

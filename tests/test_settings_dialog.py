@@ -102,7 +102,7 @@ def test_every_persisted_field_has_one_place_in_the_dialog() -> None:
     preference that can be saved from nowhere in the window.
     """
     placed = [name for owned in dialog.SECTIONS.values() for name in owned]
-    placed += [*dialog.READ_ONLY, *dialog.RETIRED]
+    placed += [*dialog.READ_ONLY]
     assert sorted(placed) == sorted(each.name for each in fields(Settings))
     assert len(placed) == len(set(placed)), "a field two sections restore"
 
@@ -419,20 +419,6 @@ def test_a_family_whose_file_did_not_load_is_shown_and_cannot_be_chosen() -> Non
         ("Droid Sans (Roboto emphasis)", False),
     ]
     assert shown(model, "family") == "Roboto", "what is in force, as the seam falls back"
-
-
-def test_the_retired_field_is_offered_by_no_row_and_restored_by_no_button() -> None:
-    """
-    ``context_mode`` named where the log started when it had a choice of
-    rendering. A file that names one keeps it, and nothing in the dialog writes it.
-    """
-    held = Settings(context_mode="rich")
-    model = build(held)
-    offered = [option.change for each in choices(model) for option in each.options]
-    offered += [each.flip for each in toggles(model)]
-    offered += [page.section.restore for page in model.pages if page.section is not None]
-    assert all(changed(held, each).context_mode == "rich" for each in offered)
-    assert changed(held, FieldSet("context_mode", "")) == held
 
 
 # -- settings this build did not write -------------------------------------------------

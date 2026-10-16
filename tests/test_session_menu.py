@@ -1437,15 +1437,6 @@ def test_an_ask_no_card_took_is_gone_on_the_next_frame(fleet: _Fleet) -> None:
     assert not cards.open_from_key
 
 
-def test_the_menu_bars_entry_opens_the_focused_cards_menu_on_the_next_frame(
-    fleet: _Fleet,
-) -> None:
-    fleet.state.cards.ask_next_frame = True
-    fleet.frame(2)
-
-    assert fleet.open
-
-
 # -- the keys while a menu is open ----------------------------------------------------
 
 

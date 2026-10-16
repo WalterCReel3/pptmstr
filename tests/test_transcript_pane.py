@@ -21,7 +21,7 @@ from pptmstr.model import NodeId, Snapshot
 from pptmstr.store import Store
 from pptmstr.theme import P
 from pptmstr.transcript import SegmentKind, Transcript
-from pptmstr.ui import rich_pane, transcript_pane, typeset
+from pptmstr.ui import transcript_pane, typeset
 from pptmstr.ui.transcript_pane import (
     NodeTranscript,
     RenderMode,
@@ -903,23 +903,6 @@ def test_the_log_is_typeset_with_the_seam_and_wrapped_lines_without(
     assert state.mode is None, "the default is derived and never written back"
 
 
-@pytest.mark.parametrize("named", ["raw", "rich", "wrap", "typeset", "", "hologram"])
-def test_a_mode_a_settings_file_names_is_not_read(
-    monkeypatch: pytest.MonkeyPatch, named: str
-) -> None:
-    """
-    ``Settings.context_mode`` is retired. What the shell still hands over from it
-    changes nothing: the log is typeset whatever an old file says.
-    """
-    monkeypatch.setattr(typeset, "enabled", lambda pane=None: True)
-    monkeypatch.setattr(transcript_pane.imgui, "text_disabled", lambda text: None)
-    state = TranscriptState()
-    transcript_pane.draw(
-        Store().snapshot(), state, None, start_in=transcript_pane.mode_named(named)
-    )
-    assert state.mode is None and state.shown_mode() is RenderMode.TYPESET
-
-
 def test_a_draw_that_names_reasoning_is_what_tells_the_pane(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -951,7 +934,7 @@ def test_a_chosen_mode_is_drawn_and_typeset_only_while_the_seam_can_draw(
     monkeypatch.setattr(typeset, "enabled", lambda pane=None: True)
     assert state.shown_mode() is RenderMode.TYPESET
     assert state.mode is RenderMode.TYPESET
-    for chosen in (RenderMode.RAW, RenderMode.WRAP, RenderMode.RICH):
+    for chosen in (RenderMode.RAW, RenderMode.WRAP):
         state.mode = chosen
         assert state.shown_mode() is chosen
         monkeypatch.setattr(typeset, "enabled", lambda pane=None: False)
@@ -2003,14 +1986,13 @@ def said_at(
 SUB_AGENT_NOTE = "sub-agent: complete messages only, not live"
 
 
-@pytest.mark.parametrize("mode", [RenderMode.RICH, RenderMode.TYPESET])
 def test_the_sub_agent_note_has_a_row_of_its_own(
-    seam: Any, monkeypatch: pytest.MonkeyPatch, mode: RenderMode
+    seam: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     transcript = Transcript()
     transcript.append(SegmentKind.OUTPUT, "A checksum, and a line without one.\n")
     snap, node = sub_agent(transcript)
-    state = TranscriptState(mode=mode)
+    state = TranscriptState(mode=RenderMode.TYPESET)
     plain = said_at(seam, monkeypatch, state, snap, node)
     assert plain[SUB_AGENT_NOTE] == min(plain.values())
 
@@ -2233,25 +2215,23 @@ def assert_set_as_prose(drawn: dict[str, Any]) -> None:
     assert len({round(top) for _, _, top in quads}) >= 4
 
 
-@pytest.mark.parametrize("mode", [RenderMode.TYPESET, RenderMode.RICH, RenderMode.WRAP])
+@pytest.mark.parametrize("mode", [RenderMode.TYPESET, RenderMode.WRAP])
 def test_a_long_prompt_is_broken_at_the_panes_width_and_every_glyph_drawn(
     seam: Any, monkeypatch: pytest.MonkeyPatch, mode: RenderMode
 ) -> None:
     """
-    The operator's words, drawn as the agent's are: TYPESET set them as one
-    unbroken code line the log scrolled sideways to, and RICH drew them on one
-    line cut off at the pane's edge.
+    The operator's words, drawn as the agent's are, and not as one unbroken code
+    line the log scrolls sideways to.
     """
     state = TranscriptState(mode=mode)
     assert_set_as_prose(drawn_narrow(seam, monkeypatch, session(prompted()), state))
     assert state.shown_mode() is mode
 
 
-@pytest.mark.parametrize("mode", [RenderMode.RICH, RenderMode.WRAP])
 def test_without_the_library_a_long_prompt_is_broken_at_the_panes_width_too(
-    imgui: Any, monkeypatch: pytest.MonkeyPatch, mode: RenderMode
+    imgui: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    state = TranscriptState(mode=mode)
+    state = TranscriptState(mode=RenderMode.WRAP)
     assert_set_as_prose(drawn_narrow(imgui, monkeypatch, session(prompted()), state))
 
 
@@ -2308,14 +2288,13 @@ Prompts a markdown reader would take structure from, and a line of only spaces.
 
 
 @pytest.mark.parametrize("sent", AS_SENT)
-def test_typeset_and_rich_set_every_character_of_a_prompt_and_the_same_ones(
+def test_typeset_sets_every_character_of_a_prompt(
     seam: Any, monkeypatch: pytest.MonkeyPatch, sent: str
 ) -> None:
     """
-    A prompt reads as it was written in every mode: TYPESET hands ImGui the
-    mark and what was sent, character for character, and RICH lays out the same
-    lines -- no heading, list, quote, code span, link or emphasis taken from
-    the operator's own text, and no space lost.
+    A prompt reads as it was written: TYPESET hands ImGui the mark and what was
+    sent, character for character -- no heading, list, quote, code span, link or
+    emphasis taken from the operator's own text, and no space lost.
     """
     logged = "> " + sent
     seen = handed(seam, monkeypatch)
@@ -2323,38 +2302,13 @@ def test_typeset_and_rich_set_every_character_of_a_prompt_and_the_same_ones(
     typeset_set = [text for text, _ in seen if text.startswith(">")]
     assert typeset_set == [logged]
 
-    rows: list[str] = []
-    real = rich_pane._draw_rows
 
-    def draw_rows(dl: Any, start: Any, laid: Any, size: float, base: int) -> float:
-        if base == P.text_dim.u32:
-            rows.extend(row.text for row in laid)
-        return float(real(dl, start, laid, size, base))
-
-    monkeypatch.setattr(rich_pane, "_draw_rows", draw_rows)
-    draw(seam, session(prompted(sent)), TranscriptState(mode=RenderMode.RICH))
-    assert [row for row in rows if row] == [line for line in logged.split("\n") if line]
-    assert "".join(rows) == "".join(typeset_set[0].split("\n"))
-
-
-def test_a_prompt_keeps_the_lines_it_was_sent_with_and_its_mark_in_rich_and_wrap(
-    imgui: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_a_prompt_keeps_its_mark_in_wrap(imgui: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     """
-    RICH lays a prompt out as its prose, without reading it: an operator's line
-    break is kept, the stars of a glob are not taken for bold, and the mark is the
-    first thing on the first line. WRAP's wrapped line starts with it too.
+    WRAP's wrapped line of a prompt starts with the mark, and the stars of a glob
+    are drawn as typed.
     """
     sent = "glob **/*.py and **/*.md\nthen stop\n\n- and say *what* you found"
-    rows: list[str] = []
-    real = rich_pane._draw_rows
-
-    def draw_rows(dl: Any, start: Any, laid: Any, size: float, base: int) -> float:
-        if base == P.text_dim.u32:
-            rows.extend(row.text for row in laid)
-        return float(real(dl, start, laid, size, base))
-
-    monkeypatch.setattr(rich_pane, "_draw_rows", draw_rows)
     wrapped: list[str] = []
     real_wrapped = imgui.text_wrapped
 
@@ -2364,11 +2318,6 @@ def test_a_prompt_keeps_the_lines_it_was_sent_with_and_its_mark_in_rich_and_wrap
 
     monkeypatch.setattr(imgui, "text_wrapped", text_wrapped)
     snap = session(prompted(sent))
-    rig.frame(
-        imgui, lambda: transcript_pane.draw(snap, TranscriptState(mode=RenderMode.RICH), ROOT)
-    )
-    assert rows == ["", "> glob **/*.py and **/*.md", "then stop", "", "- and say *what* you found"]
-
     rig.frame(
         imgui, lambda: transcript_pane.draw(snap, TranscriptState(mode=RenderMode.WRAP), ROOT)
     )
@@ -2380,8 +2329,7 @@ def test_a_long_tool_result_beside_a_prompt_is_still_one_unbroken_line(
 ) -> None:
     """
     Only the prompt became prose. A tool's output keeps its columns: one line of
-    a code block of the library's that the log scrolls sideways to, and in RICH
-    one line, cut at the edge as it was.
+    a code block of the library's that the log scrolls sideways to.
     """
     result = "Read -> " + "|".join(f"col{n:03}" for n in range(60))
     snap = session(prompted("short", (SegmentKind.TOOL_RESULT, f"{result}\n")))
@@ -2392,17 +2340,6 @@ def test_a_long_tool_result_beside_a_prompt_is_still_one_unbroken_line(
     tool = [view for view in feed.views.views(feed.generations[0].key) if is_literal(view)]
     tool += [view for view in feed.views.views(("open", 2)) if is_literal(view)]
     assert [tuple(view.texts) for view in tool] == [(result,)]
-
-    literal: list[tuple[str, ...]] = []
-    real = rich_pane._draw_literal
-
-    def draw_literal(dl: Any, start: Any, block: Any) -> float:
-        literal.append(block.lines)
-        return float(real(dl, start, block))
-
-    monkeypatch.setattr(rich_pane, "_draw_literal", draw_literal)
-    drawn_narrow(seam, monkeypatch, snap, TranscriptState(mode=RenderMode.RICH))
-    assert literal and all(lines == (result,) for lines in literal)
 
 
 def test_a_prompt_that_closes_stays_where_it_was(

@@ -239,7 +239,6 @@ def test_a_hint_is_the_name_of_the_constant_its_handler_reads() -> None:
     assert item(menu(menus, "View"), "Triage").hint == "Tab"
     assert item(menu(menus, "View"), "Focus").hint == "Enter"
     assert item(menu(menus, "Session"), "Find").hint == "Ctrl+F"
-    assert main_menu.chord_label(main_menu.FIND_CHORD) == transcript_pane.FIND_LABEL
     assert main_menu.chord_label(launcher.CHORD) == "Ctrl+N"
     assert main_menu.chord_label(settings_dialog.CHORD) == settings_dialog.CHORD_LABEL
 

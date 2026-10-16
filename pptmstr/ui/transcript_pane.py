@@ -34,19 +34,14 @@ line, no dropped trailing newline, and it round-trips into an issue.
 **Rendering.** There is no choice of renderer: the log is TYPESET while the seam
 can draw it and WRAP while it cannot (``TranscriptState.shown_mode``). RAW is the
 earlier-lines view, shown while the operator reads what the other two left out,
-and left again by the pane's ``latest`` button. ``RenderMode.RICH``
-(planning/archive/2026-08-10-transcript-markdown.md, step 5) draws markdown
-structure via ``rich_pane`` and nothing in the pane chooses it any more; it is
-drawn for a state whose ``mode`` names it, which only a script does, and goes
-when the operator has reviewed the rest of the rework.
+and left again by the pane's ``latest`` button.
 
 **Prompts.** A SYSTEM run is a prompt: ``AgentSession.send`` writes every one, the
 opening text included, as ``> `` and what was sent, and nothing else writes the
 kind. It is what an agent was given, so every mode shows every character of it
 and reads no markup out of it -- a ``#``, a ``- ``, a backtick is what was typed --
 broken at the pane's width in the prose face, in the dim ink and behind the ``>``
-that marks it as the operator's: WRAP's wrapped lines, RICH's prose layout with
-each line the operator ended kept (``rich_pane``), and in TYPESET ImGui's wrapped
+that marks it as the operator's: WRAP's wrapped lines, and in TYPESET ImGui's wrapped
 text in the library's prose face (``typeset.prompt_parts`` says why it is not the
 library's), outside any selection of the library's.
 
@@ -123,8 +118,7 @@ from imgui_bundle import imgui
 from ..model import NodeId, Snapshot
 from ..theme import P
 from ..transcript import SegmentKind, Transcript
-from . import rich_pane, typeset, widgets
-from .blocks import Block, BlockCursor
+from . import typeset, widgets
 
 # How many lines to draw when wrapping is on and the clipper cannot be used.
 # Without a bound, turning wrap on over a large transcript stalls the frame.
@@ -174,7 +168,7 @@ library's not counted).
 **What sets it is a frame at another width**, when every generation held is laid
 out again whether or not it is in sight: a frame of a splitter drag is 8 ms
 holding 400 lines, 20 at 1,000, 30 at 1,500, 40 at 2,000, 60 at 3,000 and 198 at
-10,000, against RICH's 3. 1,500 keeps that frame within two of sixty a second;
+10,000. 1,500 keeps that frame within two of sixty a second;
 the ten thousand lines of planning/2026-10-15-ui-rework.md U3 would make a drag
 five frames a second. Lines past the bound are in the earlier-lines view, which
 draws every line for 0.9 ms a frame at 10,000 (the module docstring).
@@ -207,7 +201,7 @@ at most ``_TYPESET_KEEP`` lines of one, and laid out, which is the expensive par
 dropping it with the lines would make every return to a node the first frame
 again, on each ``j``/``k`` between two agents being watched in turn. Kept, the
 return costs the line rebuild and one culled draw: 4.0 ms at 5,040 lines,
-measured (``scripts/bench_panes.py --only prune``), against RICH's 68.
+measured (``scripts/bench_panes.py --only prune``).
 """
 
 _CACHE_KEEP_S = 2.0
@@ -217,12 +211,13 @@ How long a ``NodeTranscript`` outlives the last frame its node was shown, in sec
 
 
 class RenderMode(enum.Enum):
-    """Replaces the old ``wrap: bool`` -- a third state (RICH) made a boolean
-    the wrong shape, not just a name."""
+    """
+    How the log is drawn. TYPESET and WRAP are chosen by ``shown_mode`` from the
+    seam; RAW is only the earlier-lines view.
+    """
 
     RAW = "raw"
     WRAP = "wrap"
-    RICH = "rich"
     TYPESET = "typeset"
 
 
@@ -241,46 +236,33 @@ before there was a seam. The only renderer offered: the operator chose it
 (planning/2026-10-15-ui-rework.md, U2).
 
 The rule recorded for making TYPESET the default was about cost: it streams
-within 2 ms a frame of RICH at 1,000 and at 10,000 lines **and** leaves no
-recurring frame over 30 ms in a long watch. By measurement it meets the first
-half outright and the second as RICH does (one full collection in a watch of
-52,313 frames, twice).
+within 2 ms a frame of the markdown renderer it was measured against at 1,000
+and at 10,000 lines **and** leaves no recurring frame over 30 ms in a long
+watch. By measurement it meets both (one full collection in a watch of 52,313
+frames, twice).
 
 Measured here on 2026-10-12 (``scripts/bench_panes.py --typeset on --only
 transcript watch``; headless, nothing rasterised, CPU ms inside this pane's
 draw, a pane of 900 by 700, text that does not repeat, load average 3 to 10):
 
 - **Nothing new.** TYPESET's median frame is 0.23 ms at 1,080 lines and 0.27 at
-  10,080; RICH's is 5.9 and 6.0, WRAP's 1.0 and 2.2.
+  10,080; WRAP's 1.0 and 2.2.
 - **A token a frame.** TYPESET 1.2 and 1.4 ms at the median and 2.0 and 1.6 at
-  the 95th percentile; RICH 6.2 and 6.5; WRAP 1.1 and 2.7.
+  the 95th percentile; WRAP 1.1 and 2.7.
 - **The first frame** on a session is 23 to 71 ms for TYPESET, which takes in
-  the last ``_TYPESET_WINDOW`` lines whatever the length; RICH's is 25 ms at
-  1,080 lines and 227 at 10,080; WRAP's 2.5 and 12.
+  the last ``_TYPESET_WINDOW`` lines whatever the length; WRAP's is 2.5 ms at
+  1,080 lines and 12 at 10,080.
 - **A session watched from its first line**, 20,040 lines sixteen characters a
   frame, 52,313 frames, the collector on and its pauses timed apart, twice:
   TYPESET's median frame is 1.1 to 1.3 ms and its 95th percentile 1.8 to 2.2,
-  with one full collection in each watch, 40 and 56 ms. RICH: 5.5 to 5.8 and
-  8.3 to 8.4 ms, one full collection in each, 43 and 61 ms. WRAP: 1.9 to 2.6
+  with one full collection in each watch, 40 and 56 ms. WRAP: 1.9 to 2.6
   and 4.7 to 5.4 ms, no full collection. Frames over 16.6 ms were 1 and 16
-  for TYPESET, 35 and 24 for RICH, 0 and 40 for WRAP: the 40 are in a watch
+  for TYPESET, 0 and 40 for WRAP: the 40 are in a watch
   with no collection at all, on a machine running other work, so that count
   says more about the machine than the mode. In three watches of 5,040 lines
   TYPESET had no full collection, and its longest frame was 5.6, 9.1 and
   14.0 ms.
 """
-
-
-def mode_named(name: str) -> RenderMode | None:
-    """
-    The mode a name stands for, or ``None`` for an empty name and for one this
-    build does not have. ``Settings.context_mode`` is retired and the pane reads no
-    mode from it; this is what still spells one.
-    """
-    try:
-        return RenderMode(name)
-    except ValueError:
-        return None
 
 
 _MARKDOWN_KINDS = frozenset({SegmentKind.OUTPUT, SegmentKind.REASONING})
@@ -663,10 +645,6 @@ class NodeTranscript:
     # the next chunk, is what keeps a streamed token appending to the line it
     # belongs to instead of starting a new one.
     open_line: bool = False
-    # Markdown block structure, fed lazily -- only when RenderMode.RICH is actually
-    # selected (see draw()). A node nobody is viewing in RICH mode pays nothing for
-    # this; blocks.py's own docstring is why it does not feed itself eagerly here.
-    block_cursor: BlockCursor = field(default_factory=BlockCursor)
 
     def sync(self, transcript: Transcript, limit: int) -> None:
         """Convert newly published bytes into lines, up to ``limit``."""
@@ -864,9 +842,6 @@ class TranscriptState:
     # opening it moves the hover onto the popup and would otherwise clear the target
     # out from under the item the operator just right-clicked.
     context_run: int | None = None
-    # RICH mode's own hover/context-menu latch -- see RichState's docstring for why
-    # it is a separate field rather than reusing context_run.
-    rich: rich_pane.RichState = field(default_factory=rich_pane.RichState)
     # TYPESET's context-menu latch: the run under the mouse, where there is one,
     # and the text of the block of it. Latched as context_run is, and as text
     # rather than as a place in a view: a run can close while the menu is open,
@@ -976,7 +951,6 @@ def draw(
     selected: NodeId | None,
     closed_path: str | None = None,
     *,
-    start_in: RenderMode | None = None,
     show_reasoning: bool | None = None,
 ) -> None:
     """
@@ -991,8 +965,7 @@ def draw(
     here would be a directory listing per frame. None draws the line alone.
 
     ``show_reasoning`` is ``Settings.show_reasoning``; left out, the pane keeps
-    what it was last told, which starts as shown. ``start_in`` is not read: the
-    log has no renderer to start in, and the setting that named one is retired.
+    what it was last told, which starts as shown.
     """
     if show_reasoning is not None:
         state.show_reasoning = show_reasoning
@@ -1043,18 +1016,6 @@ def draw(
         _draw_typeset(state, feed, cache, found)
         return
 
-    if mode is RenderMode.RICH:
-        stable = len(cache.lines) - (1 if cache.open_line else 0)
-        cache.block_cursor.feed(cache.lines[:stable])
-        live = cache.block_cursor.live_block(cache.lines)
-        shown = rich_pane.windowed(cache.block_cursor.blocks)
-        copy_value = rich_pane.block_copy_text(shown + ([live] if live is not None else []))
-        bar.found(0)
-        _draw_controls(state, record.node_id, lambda: copy_value)
-        imgui.separator()
-        _draw_rich(state, cache, live)
-        return
-
     visible = _visible(state, cache)
     drawn = visible if mode is RenderMode.RAW else visible[-_WRAP_WINDOW:]
     found_lines = line_matches(drawn, bar.needle) if bar.open else []
@@ -1070,9 +1031,6 @@ FIND_CHORD = int(imgui.Key.mod_ctrl) | int(imgui.Key.f)
 The chord ``_find_keys`` opens the find row on, and the one the Session menu's
 Find item shows (``main_menu``). Its exact modifiers: Ctrl+Shift+F is not it.
 """
-
-# ``FIND_CHORD`` as ``main_menu.chord_label`` spells it.
-FIND_LABEL = "Ctrl+F"
 
 
 def _find_keys(bar: FindBar) -> None:
@@ -1386,20 +1344,6 @@ def _end_log(state: TranscriptState, ident: int) -> None:
     line wider than a log that fits is reached only by the one along the bottom.
     """
     state.overflowing[ident] = imgui.get_scroll_max_y() > 0.0 or imgui.get_scroll_max_x() > 0.0
-    imgui.end_child()
-
-
-def _draw_rich(state: TranscriptState, cache: NodeTranscript, live: Block | None) -> None:
-    if not imgui.begin_child("##transcript"):
-        imgui.end_child()
-        return
-
-    if not cache.block_cursor.blocks and live is None:
-        imgui.text_disabled("(nothing yet)")
-    else:
-        rich_pane.draw(state.rich, cache.block_cursor.blocks, live)
-
-    _handle_scroll(state)
     imgui.end_child()
 
 
