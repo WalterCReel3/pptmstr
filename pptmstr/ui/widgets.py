@@ -22,7 +22,7 @@ from imgui_bundle import imgui
 
 from ..approval import Disposition, Policy, classify
 from ..model import AgentRecord, AgentState, ContextSnapshot, EndedHow, TranscriptPresence
-from ..theme import STATE_GLYPH, STATE_LABEL, Color, P, dialog_colors, faded
+from ..theme import STATE_GLYPH, STATE_LABEL, Color, LinkInks, P, dialog_colors, faded, link_inks
 
 # One representative call per class of thing an operator would ask about. The
 # dispositions are asked of the real classifier rather than written down, so a rung
@@ -227,6 +227,66 @@ def small_button_line() -> float:
     return down
 
 
+# Where a link's underline is drawn, as ``imgui.text_link`` draws it: this much of
+# the face's descent (which is negative) above the foot of the label's box.
+_LINK_UNDERLINE_DESCENT = 0.2
+
+
+def link(label: str, *, inks: LinkInks | None = None, ident: str | None = None) -> bool:
+    """
+    A text link: ``label`` underlined, in ``inks`` (``theme.link_inks``, the
+    pane's by default), true on the frame it is clicked. ``ident`` is the string
+    its id is made from where that is not ``label``, so a control that was a
+    button keeps the button's id.
+
+    ``imgui.text_link`` line for line through ``imgui.internal`` -- the box is the
+    label's size at the line's text baseline offset, ``ItemSize(size, 0)``,
+    ``ButtonBehavior``, the hand cursor, the underline and the label -- with the
+    inks its own: the library's brightens on hover and press whatever the ground,
+    which on a light one is toward it (5.15:1 to 3.32 and 2.85). On the line's
+    baseline wherever text is, so no line it ends has to be set down for it, and
+    one text line tall.
+
+    Under ``begin_disabled`` it answers false, is drawn in ``inks.disabled`` with
+    no underline and no hand cursor, and is drawn in that ink and not at the
+    style's alpha: ``text_link`` has the alpha applied twice, 0.36, and nothing
+    of it reads.
+    """
+    window = imgui.internal.get_current_window()
+    if window.skip_items:
+        return False
+    used = link_inks() if inks is None else inks
+    shown = label.split("##", 1)[0]
+    item = imgui.get_id(label if ident is None else ident)
+    dc = window.dc
+    pos = imgui.ImVec2(dc.cursor_pos.x, dc.cursor_pos.y + dc.curr_line_text_base_offset)
+    size = imgui.calc_text_size(label, None, True)
+    box = imgui.internal.ImRect(pos, imgui.ImVec2(pos.x + size.x, pos.y + size.y))
+    imgui.internal.item_size(size, 0.0)
+    if not imgui.internal.item_add(box, item):
+        return False
+    context = imgui.get_current_context()
+    disabled = bool(context.current_item_flags & imgui.ItemFlags_.disabled.value)
+    pressed, hovered, held = imgui.internal.button_behavior(box, item, False, False)
+    imgui.internal.render_nav_cursor(box, item)
+    if disabled:
+        ink = used.disabled
+    else:
+        if hovered:
+            imgui.set_mouse_cursor(imgui.MouseCursor_.hand)
+        ink = used.pressed if held else used.hovered if hovered else used.rest
+        descent = imgui.get_font_baked().descent * context.font_baked_scale
+        y = box.max.y + float(math.floor(descent * _LINK_UNDERLINE_DESCENT))
+        window.draw_list.add_line(imgui.ImVec2(box.min.x, y), imgui.ImVec2(box.max.x, y), ink.u32)
+    window.draw_list.add_text(box.min, ink.u32, shown)
+    return bool(pressed) and not disabled
+
+
+def link_width(label: str) -> float:
+    """The width ``link`` draws ``label`` at: its text's, there being no padding."""
+    return float(imgui.calc_text_size(label, None, True).x)
+
+
 # A modal's spacing, in ems of the font in force when the scope is entered, each
 # pair (x, y). The docks are set in ``theme.apply_style`` and are denser on every
 # one of these: at the 16px body face they are item spacing (8, 5), frame padding
@@ -359,7 +419,9 @@ def dialog_body_room(
     return max(floor, work_height - top - padding - footer)
 
 
-def begin_dialog_body(body_id: str, footer: float, floor: float) -> None:
+def begin_dialog_body(
+    body_id: str, footer: float, floor: float, area_height: float | None = None
+) -> None:
     """
     Begin the child a dialog's fields are drawn in: as tall as what is drawn in
     it, up to ``dialog_body_room``, and scrolling past that. The buttons are items
@@ -373,11 +435,17 @@ def begin_dialog_body(body_id: str, footer: float, floor: float) -> None:
     less the style's safe-area margin at each end (measured on Dear ImGui 1.92.8:
     694 of a 700-pixel area). Bounded to the whole area instead, the window is
     that margin short of its content and scrolls by it, buttons included.
+
+    ``area_height`` is the area's height where the dialog is held to less than the
+    work area -- the launcher leaves the status bar out of it -- and the window is
+    bounded to it: a body sized for the whole work area makes that window scroll by
+    the difference, buttons included, for the same reason.
     """
     style = imgui.get_style()
     viewport = imgui.get_main_viewport()
+    height = viewport.work_size.y if area_height is None else area_height
     room = dialog_body_room(
-        viewport.work_size.y - 2.0 * style.display_safe_area_padding.y,
+        height - 2.0 * style.display_safe_area_padding.y,
         imgui.get_cursor_pos().y,
         style.window_padding.y,
         footer or imgui.get_frame_height_with_spacing() + style.item_spacing.y,
@@ -470,7 +538,7 @@ def help_mark_width() -> float:
     The room a question mark takes on a line, the gap before it included: what a
     caller leaves when it cuts text to fit beside one.
     """
-    return small_button_width(HELP_MARK) + imgui.get_style().item_spacing.x
+    return link_width(HELP_MARK) + imgui.get_style().item_spacing.x
 
 
 def help_mark(mark: str, title: str, paragraphs: Sequence[str]) -> bool:
@@ -493,7 +561,7 @@ def help_mark(mark: str, title: str, paragraphs: Sequence[str]) -> bool:
     """
     name = f"{title}###{_HELP_TAG}{mark}"
     imgui.same_line()
-    if small_button(f"{HELP_MARK}##{mark}"):
+    if link(f"{HELP_MARK}##{mark}"):
         imgui.open_popup(name)
     if not imgui.is_popup_open(name):
         return False
@@ -571,8 +639,6 @@ def notice(said: Notice) -> None:
         _loud(said, room)
         return
     text = ellipsis(said.line, room)
-    if said.help is not None:
-        small_button_line()
     match said.tone:
         case Tone.QUIET:
             imgui.text_disabled(text)
@@ -603,10 +669,8 @@ def _loud(said: Notice, room: float) -> None:
         origin, imgui.ImVec2(origin.x + _LOUD_BAR, origin.y + height), P.danger.u32
     )
     inset = _LOUD_BAR + pad.x
-    # The text stays on the band's middle; with a mark, the line starts above it by
-    # as much as the text is set down to the mark's label.
-    down = small_button_line() if said.help is not None else 0.0
-    imgui.set_cursor_screen_pos(imgui.ImVec2(origin.x + inset, origin.y + pad.y - down))
+    # The text stays on the band's middle, and its mark on the text's baseline.
+    imgui.set_cursor_screen_pos(imgui.ImVec2(origin.x + inset, origin.y + pad.y))
     imgui.text_colored(P.danger.vec4, ellipsis(said.line, room - inset - pad.x))
     if said.help is not None:
         help_mark(said.help.mark, said.help.title, said.help.paragraphs)

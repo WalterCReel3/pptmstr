@@ -77,6 +77,9 @@ _KIND_COLOUR = {
     SegmentKind.ERROR: "danger",
     SegmentKind.SYSTEM: "text_dim",
     SegmentKind.COMPACTION: "warn",
+    # pptmstr's own message to the session (``AgentSession.wake``): never the
+    # operator's dim ink, and never behind the operator's ``>``.
+    SegmentKind.NOTICE: "focus",
 }
 
 _PROSE_KINDS = (

@@ -58,6 +58,8 @@ from .bus import (
     _QUOTE_LEGEND,
     MAX_ID_CHARS,
     MAX_PATH_CHARS,
+    WAKE_SAID,
+    WAKE_SAID_SUBAGENT,
     _age,
     _argument,
     _cost,
@@ -552,13 +554,14 @@ def _command_whole(command: Command, now: float, asker: str | None, where: str |
     if end is None:
         if run is None:
             lines.append(
-                "NOTHING HAS RUN. The operator has not acted on it. Nothing will "
-                "interrupt you when they do: carry on with other work and do not wait, "
-                f"and call {again} when you reach the work that needs it."
+                f"NOTHING HAS RUN. The operator has not acted on it. {_woken(command)} "
+                f"Carry on with other work and do not wait, and call {again} when you "
+                f"reach the work that needs it."
                 if mine
-                else f"NOTHING HAS RUN. The operator has not acted on it. Nothing tells "
-                f"you or {by} when they do, and nothing here is yours to act on: {again} "
-                f"shows where it stands if your own work comes to need that."
+                else f"NOTHING HAS RUN. The operator has not acted on it. When it ends, "
+                f"pptmstr sends this session a message naming it, and {by} is not "
+                f"woken; nothing here is yours to act on: {again} shows where it "
+                f"stands if your own work comes to need that."
             )
         else:
             stopping = (
@@ -567,12 +570,13 @@ def _command_whole(command: Command, now: float, asker: str | None, where: str |
                 else f" The operator asked for it to be stopped "
                 f"{_age(now - command.stop_asked_at)} ago."
             )
+            woken = _woken(command) if mine else _lead_woken(by or "its asker")
             lines.append(
                 f"It is RUNNING and has not ended: started {_age(now - run.started_at)} "
                 f"ago, and killed if it has not exited within {_age(run.timeout_s)}."
-                f"{stopping} Nothing will interrupt you when it ends: carry on with "
-                f"other work and do not wait, and call {again} when you reach the work "
-                f"that needs it."
+                f"{stopping} {woken} Carry on "
+                f"with other work and do not wait, and call {again} when you reach the "
+                f"work that needs it."
             )
         return lines
 
@@ -926,8 +930,7 @@ async def request_command(
         f"nothing will until the operator has read the exact string and run it "
         f"themselves. They may refuse it, and they may change it before running it.",
         "Carry on with your other work now and do not wait for this: nothing is "
-        "parked, nothing will interrupt you when it ends, and if you end your turn "
-        "to wait, its ending will not wake you.",
+        f"parked. {WAKE_SAID if node[1] is None else WAKE_SAID_SUBAGENT}",
         f'Call read_commands(command_id="{command_id}") when you reach the work that '
         f"needs it, and again before you finish: it says whether it ran, shows the "
         f"string that actually ran -- the operator's, if they changed it --, how it "
@@ -942,9 +945,8 @@ async def request_command(
     ]
     if node[1] is not None:
         said.append(
-            "How it ended is handed to YOU, the agent that asked. Your lead can read "
-            "it with read_commands and is not told when it ends, so pass it on in "
-            "your result or in a concern if your lead needs it."
+            "How it ended is handed to YOU, the agent that asked, when you call "
+            "read_commands. Your lead can read it as well."
         )
     return " ".join(said)
 
@@ -1086,8 +1088,11 @@ READ_COMMANDS = Tool(
     "still only asked, running, or ended -- and how. Give command_id for one "
     "command with everything on it: the string as asked, the string that actually "
     "ran (the operator may have changed it), how it ended, and the end of its "
-    "output. Omit it for a list, which shows no output. Nothing tells you when a "
-    "command ends, so call this when you reach the work that needs it. A sub-agent "
+    "output. Omit it for a list, which shows no output. When a command ends -- "
+    "run or refused -- pptmstr sends the session's lead a message naming it, read "
+    "as a turn of its own once any turn in progress ends; a sub-agent is not woken, "
+    "and a session that is closed or has failed is sent nothing. So call this when "
+    "you reach the work that needs it, whether or not you were woken. A sub-agent "
     "is shown only its own. The session's lead is shown every command asked in "
     "its session, each marked with who asked, and can read and not withdraw "
     "another agent's.",
@@ -1115,3 +1120,13 @@ WITHDRAW_COMMAND = Tool(
 )
 
 TOOLS: tuple[Tool, ...] = (REQUEST_COMMAND, READ_COMMANDS, WITHDRAW_COMMAND)
+
+
+def _woken(command: Command) -> str:
+    """What being woken for ``command`` means to the agent that asked for it."""
+    return WAKE_SAID if command.asker[1] is None else WAKE_SAID_SUBAGENT
+
+
+def _lead_woken(by: str) -> str:
+    """What being woken means to a lead reading what ``by``, its worker, asked for."""
+    return f"When it ends, pptmstr sends this session a message naming it, and {by} is not woken."

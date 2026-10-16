@@ -1980,6 +1980,33 @@ def test_a_preview_is_cut_when_the_turn_grows_and_not_once_a_frame(
     assert rig._shown(preview(pane)) == "First answer.\n\nAnd a second."
 
 
+def test_a_preview_is_cut_again_when_a_turn_opens_with_no_new_bytes(
+    seam: Any, said: list[str]
+) -> None:
+    """
+    A prompt sent mid-turn opens its turn where that one ends
+    (``Transcript.end_turn``), which writes nothing: the preview cut at the old
+    length is the turn before's.
+    """
+    pane = Pane()
+    transcript = pane.snap.nodes[ROOT].transcript
+    transcript.append(SegmentKind.SYSTEM, "\n> build it\n")
+    transcript.append(SegmentKind.OUTPUT, "Built.")
+    transcript.append(SegmentKind.SYSTEM, "\n> and the docs\n")
+    pane.store.apply(StateChanged(ROOT, AgentState.AWAITING_INPUT))
+    (question,) = pane.snap.needs_you
+    pane.focus.to_obligation(question)
+    pane.draw(seam)
+    assert rig._shown(preview(pane)) == "Built."
+
+    length = transcript.published_length
+    transcript.end_turn()
+    assert transcript.published_length == length
+    said.clear()
+    pane.draw(seam)
+    assert "no output on this turn" in said
+
+
 def test_a_turn_that_said_nothing_says_so_and_holds_no_view(seam: Any, said: list[str]) -> None:
     pane = asked("")
     pane.draw(seam)

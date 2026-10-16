@@ -318,6 +318,24 @@ def failed_panes(state: ReviewState) -> tuple[str, ...]:
     )
 
 
+def queue_on_screen(state: ReviewState, frame: int) -> bool:
+    """
+    Whether NEEDS YOU, the queue whose rows act, was drawn in ``frame`` or the
+    one before: what decides that DETAIL is the place to act (``detail.draw``).
+
+    **In each layout there is exactly one place to act on a parked item**
+    (planning/2026-10-15-ui-rework.md, "DETAIL acts in FOCUS only"). Read off
+    the queue's own last draw (``ReviewState.panes``, ``app._reviewing``) and
+    not off the layout's name: FOCUS docks no NEEDS YOU, so there DETAIL acts,
+    but the operator can open NEEDS YOU in FOCUS or close it in TRIAGE, and the
+    name would then say one place where there were two, or none. The frame
+    before counts because the panes draw in an order of the runner's: DETAIL
+    drawn ahead of the queue in a frame sees the queue's reading of the last.
+    """
+    drew = state.panes.get(INBOX)
+    return drew is not None and drew[0] >= frame - 1
+
+
 def withheld(state: ReviewState, pending: PendingApproval, *, unread: bool = False) -> str | None:
     """
     Why this call may not be approved yet, or ``None`` when it may. Every approve

@@ -378,3 +378,13 @@ def test_the_answer_is_resolved_so_the_checkout_side_can_be_compared(tmp_path: P
 
     assert source_tree_of(str(link / "pptmstr")) == str(checkout.resolve())
     assert str(package) != str(link / "pptmstr")
+
+
+def test_a_path_holding_a_nul_is_placed_as_it_arrived_and_never_raises() -> None:
+    """
+    pathlib raises ValueError for a NUL, which no directory can be named, and
+    ``session_base`` is total: the path comes back as the string it arrived as.
+    """
+    from pptmstr import tree
+
+    assert tree.session_base("/home/x/pro\x00ject") == "/home/x/pro\x00ject"

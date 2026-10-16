@@ -105,6 +105,7 @@ from pptmstr.transcript import SegmentKind, Transcript  # noqa: E402
 from pptmstr.ui import (  # noqa: E402
     board_pane,
     brief_pane,
+    decision_view,
     detail,
     inbox,
     review,
@@ -976,6 +977,7 @@ def bench_inbox(harness: Harness, frames: int, diff_lines: Sequence[int]) -> lis
         review_state = review.ReviewState()
         compose = ComposeState()
         bridge = Bridge()
+        decisions = decision_view.DecisionState()
 
         def draw(
             snap: Snapshot = snap,
@@ -983,8 +985,18 @@ def bench_inbox(harness: Harness, frames: int, diff_lines: Sequence[int]) -> lis
             review_state: review.ReviewState = review_state,
             compose: ComposeState = compose,
             bridge: Bridge = bridge,
+            decisions: decision_view.DecisionState = decisions,
         ) -> None:
-            inbox.draw(snap, focus, review_state, compose, bridge, actions, time.monotonic())
+            inbox.draw(
+                snap,
+                focus,
+                review_state,
+                compose,
+                bridge,
+                actions,
+                time.monotonic(),
+                decisions=decisions,
+            )
 
         unified = len((pending.diff or "").splitlines())
         row = measure(

@@ -68,6 +68,21 @@ class SegmentKind(enum.Enum):
     # discarded reasoning, so the UI can show that later output came from an agent
     # that had already lost its history (§2.4).
     COMPACTION = "compaction"
+    # A message of pptmstr's own sent to the session (``AgentSession.wake``):
+    # that something it asked for has arrived. Its own kind and not a SYSTEM
+    # line with a marker, because SYSTEM is the operator's prompt and whose
+    # words a line is must follow from what wrote it, not from what it says --
+    # an operator's prompt may begin with any marker. It begins a turn as a
+    # prompt does (``PROMPT_KINDS``).
+    NOTICE = "notice"
+
+
+PROMPT_KINDS = frozenset({SegmentKind.SYSTEM, SegmentKind.NOTICE})
+"""
+The kinds whose append is a message sent to the session, each answered by a
+turn of its own: the operator's prompt and pptmstr's notice. Each opens a turn,
+or waits behind the open one (``Transcript._prompt_locked``).
+"""
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,6 +222,10 @@ class Transcript:
         "_entries",
         "_latest",
         "_tool_spans",
+        "_turn_starts",
+        "_turn_ends",
+        "_turn_owners",
+        "_queued",
     )
 
     def __init__(self) -> None:
@@ -224,12 +243,23 @@ class Transcript:
         # (start offset, index in _entries) for every call and result line, in
         # buffer order -- appended monotonically, so a span query is a bisect.
         self._tool_spans: list[tuple[int, int]] = []
+        # Every turn a prompt opened, as where it starts and where it ended (None
+        # while it is open), in buffer order: ``turn_start`` is a bisect.
+        self._turn_starts: list[int] = []
+        self._turn_ends: list[int | None] = []
+        # For each turn, the end of the prompt line it answers, or None for a turn
+        # no prompt opened: what ``withdraw_prompt`` finds a prompt's turn by.
+        self._turn_owners: list[int | None] = []
+        # The ends of the prompt lines written while a turn was open, each still
+        # waiting for the turn it opens (``end_turn``), oldest first.
+        self._queued: list[int] = []
 
     # -- writer side (asyncio thread) -------------------------------------------
 
-    def append(self, kind: SegmentKind, text: str, meta: tuple[tuple[str, str], ...] = ()) -> None:
+    def append(self, kind: SegmentKind, text: str, meta: tuple[tuple[str, str], ...] = ()) -> int:
         """
-        Append text, extending the currently open segment when the kind matches.
+        Append text, extending the currently open segment when the kind matches,
+        and answer where it ends: what names a prompt's line to ``withdraw_prompt``.
 
         Coalescing on kind is what keeps the segment list proportional to the number
         of *blocks* rather than to the number of streamed deltas -- a token stream
@@ -238,7 +268,10 @@ class Transcript:
         """
         data = _encoded(text)
         with self._lock:
-            self._append_locked(kind, data, meta)
+            _, end = self._append_locked(kind, data, meta)
+            if kind in PROMPT_KINDS:
+                self._prompt_locked(end)
+        return end
 
     def _append_locked(
         self, kind: SegmentKind, data: bytes, meta: tuple[tuple[str, str], ...]
@@ -305,6 +338,67 @@ class Transcript:
             else:
                 self._entries[index] = replace(self._entries[index], result=result)
             self._tool_spans.append((start, index))
+
+    def _prompt_locked(self, end: int) -> None:
+        """
+        A prompt ending at ``end`` was written: it opens a turn there, or, while a
+        turn is open, waits for that turn to end.
+        """
+        if self._turn_ends and self._turn_ends[-1] is None:
+            self._queued.append(end)
+        else:
+            self._open_turn_locked(end, end)
+
+    def _open_turn_locked(self, at: int, owner: int | None) -> None:
+        self._turn_starts.append(at)
+        self._turn_ends.append(None)
+        self._turn_owners.append(owner)
+
+    def withdraw_prompt(self, end: int) -> None:
+        """
+        The prompt whose line ends at ``end`` was never taken -- its send raised --
+        so no result will answer it: undo the turn it opened or the place it held
+        in the queue. Its line stays where it was written.
+
+        A turn it opened that has prompts queued behind it hands its place to the
+        oldest of them, whose turn starts at that prompt's own line: the session
+        is answering it now, and nothing ran between.
+        """
+        with self._lock:
+            if end in self._queued:
+                self._queued.remove(end)
+                return
+            if not self._turn_owners or self._turn_owners[-1] != end:
+                return
+            if self._turn_ends[-1] is not None:
+                return
+            self._turn_starts.pop()
+            self._turn_ends.pop()
+            self._turn_owners.pop()
+            if self._queued:
+                after = self._queued.pop(0)
+                self._open_turn_locked(after, after)
+
+    def end_turn(self) -> None:
+        """
+        The open turn ended here: what the driver calls when its result arrives.
+
+        A prompt written while it ran opens the next turn here, where the turn it
+        waited behind ended, and not where its line was written. No prompt at all
+        (a transcript nothing ever sent to) is a turn from the start of the buffer,
+        and ends here as well. A turn already ended stays as it ended.
+        """
+        with self._lock:
+            at = len(self._buf)
+            if not self._turn_ends:
+                self._open_turn_locked(0, None)
+                self._turn_ends[-1] = at
+            elif self._turn_ends[-1] is None:
+                self._turn_ends[-1] = at
+            # Nothing is queued behind an ended turn: a prompt written after it
+            # opened its own.
+            if self._queued:
+                self._open_turn_locked(at, self._queued.pop(0))
 
     def close_segment(self) -> None:
         """Close the open segment so the next append starts a new one."""
@@ -377,6 +471,53 @@ class Transcript:
                 i += 1
         return tuple(seen.values())
 
+    def _turn_locked(self, cap: int) -> int:
+        """The index of the last turn that had started at ``cap``, or -1."""
+        return bisect.bisect_right(self._turn_starts, cap) - 1
+
+    def turn(self, limit: int | None = None) -> tuple[int, bool]:
+        """
+        ``turn_start`` and ``turn_open`` read under one lock: what a reader that
+        needs both takes, since ``end_turn`` can open a queued turn between two
+        reads without moving the published length.
+        """
+        with self._lock:
+            cap = self._published_len if limit is None else limit
+            return self._turn_start_locked(cap), self._turn_open_locked(cap)
+
+    def _turn_start_locked(self, cap: int) -> int:
+        index = self._turn_locked(cap)
+        return self._turn_starts[index] if index >= 0 else 0
+
+    def _turn_open_locked(self, cap: int) -> bool:
+        index = self._turn_locked(cap)
+        if index < 0:
+            return True
+        end = self._turn_ends[index]
+        return end is None or end > cap
+
+    def turn_start(self, limit: int | None = None) -> int:
+        """
+        Where the turn going on at ``limit`` (the published length by default)
+        began: the end of the prompt that opened it, or of the turn a queued prompt
+        waited behind. 0 where no prompt had opened one.
+
+        A turn ended or opened at ``limit`` is read as having been: ``end_turn``
+        writes no bytes, so a length is all a frame can pin, and the boundary at
+        it is the latest one there.
+        """
+        with self._lock:
+            return self._turn_start_locked(self._published_len if limit is None else limit)
+
+    def turn_open(self, limit: int | None = None) -> bool:
+        """
+        Whether the turn going on at ``limit`` had not ended there. A transcript no
+        turn was recorded in is one open turn: a sub-agent's, whose whole life is
+        one, or a session that has not been sent anything.
+        """
+        with self._lock:
+            return self._turn_open_locked(self._published_len if limit is None else limit)
+
     def text(self, limit: int | None = None) -> str:
         """Whole transcript up to ``limit``. For tests and export, not per-frame use."""
         cap = self._published_len if limit is None else limit
@@ -391,13 +532,15 @@ class Transcript:
         heading promising the agent's own words. This returns ``OUTPUT`` only, and
         only from the current turn.
 
-        **The turn boundary is already in the stream.** ``SegmentKind.SYSTEM`` is
-        appended by ``AgentSession.send`` and by nothing else, and every root turn
-        goes through ``send`` -- the opening task included. So the last ``SYSTEM``
-        segment is where this turn began, and no separate marker is needed. A
-        sub-agent is spawned by a tool call rather than by ``send`` and so has no
-        marker at all; its whole life is one turn, which is what makes the start of
-        the buffer the right fallback rather than an error.
+        **The turn is ``turn_start``'s.** A prompt kind (``PROMPT_KINDS``) is
+        appended by ``AgentSession.send`` and ``AgentSession.wake`` and by nothing
+        else, and every root turn goes through one of them -- the opening task
+        included. But each writes its line at once, mid-turn too, so the last
+        such segment is not where this turn began: a message sent while a turn
+        runs opens its own where that one ends (``end_turn``). A sub-agent is
+        spawned by a tool call rather than by ``send`` and so has no prompt at
+        all; its whole life is one turn, which is what makes the start of the
+        buffer the right fallback rather than an error.
 
         Unbounded, unlike ``tail``, and safe on the frame path for a different
         reason: the cost is one turn's prose, which does not grow with the length
@@ -407,16 +550,20 @@ class Transcript:
         """
         with self._lock:
             cap = self._published_len
-            start = 0
-            for segment in reversed(self._segments):
-                if segment.kind is SegmentKind.SYSTEM and segment.end <= cap:
-                    start = segment.end
-                    break
-            chunks = [
-                bytes(self._buf[max(segment.start, start) : min(segment.end, cap)])
-                for segment in self._segments
-                if segment.kind is SegmentKind.OUTPUT and segment.end > start
-            ]
+            # Every turn has started by the published length.
+            start = self._turn_starts[-1] if self._turn_starts else 0
+            chunks: list[bytes] = []
+            last = -2
+            for index, segment in enumerate(self._segments):
+                if segment.kind is not SegmentKind.OUTPUT or segment.end <= start:
+                    continue
+                # The driver appends each text block raw, so prose a tool call
+                # separates need not end on a newline: a paragraph break keeps
+                # the next block (a fence, a heading) from joining its sentence.
+                if chunks and index != last + 1:
+                    chunks.append(b"\n\n")
+                chunks.append(bytes(self._buf[max(segment.start, start) : min(segment.end, cap)]))
+                last = index
         # Decoded as one buffer rather than per segment: coalescing means a
         # multi-byte character cannot straddle two OUTPUT segments, but it can
         # straddle the published cap, and joining first keeps that the only place

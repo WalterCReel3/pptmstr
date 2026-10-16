@@ -296,21 +296,18 @@ def _measure(draw: Callable[[], Any]) -> Any:
 
 
 @pytest.mark.parametrize("expanded", [False, True], ids=["collapsed", "expanded"])
-def test_a_link_footer_is_shorter_by_the_button_less_the_line(
-    sixteen: float, expanded: bool
-) -> None:
+def test_the_probes_button_footer_is_now_the_link_footer(sixteen: float, expanded: bool) -> None:
+    """
+    The probe's link footer swaps out ``widgets.small_button``, which the block's
+    footer no longer draws, so its "today" footer is the link already and the two
+    are one height.
+    What the link saves over the button is pinned against the real block in
+    ``tests/test_link.py::test_a_blocks_footer_is_one_line_and_six_pixels_shorter``.
+    """
     faces = probe.plain_faces()
     button = _measure(lambda: probe.draw_footer(faces, as_link=False, expanded=expanded, key="a"))
     linked = _measure(lambda: probe.draw_footer(faces, as_link=True, expanded=expanded, key="b"))
-    imgui.push_font(None, 0.0)
-    line = imgui.get_text_line_height()
-    imgui.pop_font()
-    assert button - linked == SAVED_PX
-    assert SAVED_PX == 22.0 - line
-
-
-SAVED_PX = 6.0
-"""What a link footer saves at 16 px: a 22 px button less a 16 px line."""
+    assert button == linked
 
 
 def test_the_footer_label_is_the_layouts() -> None:

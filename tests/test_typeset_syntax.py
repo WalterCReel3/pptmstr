@@ -15,7 +15,7 @@ from typing import Any
 
 import pytest
 from pygments.lexers import get_lexer_by_name
-from pygments.token import Comment, Keyword, Name, Number, Operator, String
+from pygments.token import Comment, Generic, Keyword, Name, Number, Operator, String
 
 from pptmstr import theme
 from pptmstr.theme import THEMES, Palette, contrast_ratio
@@ -32,9 +32,17 @@ INKS = themes.SyntaxInks(
     function=0xFF000005,
     operator=0xFF000006,
     default=0xFF000007,
+    add=0xFF000008,
+    remove=0xFF000009,
+    heading=0xFF00000A,
 )
 BY_INK = {getattr(INKS, name): name for name, _ in syntax._CLASSES}
-TREES = dict(syntax._CLASSES)
+TREES: dict[str, tuple[Any, ...]] = {}
+for _name, _tree in syntax._CLASSES:
+    TREES[_name] = (*TREES.get(_name, ()), _tree)
+# The classes a theme borrows a role for as it is; the diff classes are each a
+# role stepped to a floor (``themes.DIFF_TOKEN_FLOOR``) and are measured apart.
+ROLE_CLASSES = ("keyword", "string", "comment", "number", "function", "operator")
 
 # Tabs and text outside ASCII before, inside and after tokens: the two places an
 # offset would drift if it were counted in bytes or after tab expansion.
@@ -109,7 +117,7 @@ def test_every_token_span_is_its_tokens_text_after_the_caption() -> None:
             if start <= index + said + 1 and index + said + 1 + len(value) <= end and value
         ]
         assert "".join(v for _, _, v in inside) == text[start:end]
-        assert all(kind in TREES[BY_INK[colour]] for _, kind, _ in inside)
+        assert all(any(kind in tree for tree in TREES[BY_INK[colour]]) for _, kind, _ in inside)
     assert {"def", "return"} <= {text[s:e] for s, e, c in coloured if c == INKS.keyword}
     assert {text[s:e] for s, e, c in coloured if c == INKS.string} >= {'"""ünïcode é"""', '"日本"'}
     assert "# cömment ✓" in {text[s:e] for s, e, c in coloured if c == INKS.comment}
@@ -207,7 +215,7 @@ def test_a_block_is_lexed_once_whatever_it_is_inked_in(monkeypatch: pytest.Monke
 @pytest.mark.parametrize("palette", THEMES.values(), ids=list(THEMES))
 def test_every_theme_has_token_inks_that_read_on_a_code_blocks_ground(palette: Palette) -> None:
     inks = themes.build_syntax_inks(palette)
-    floors = {name: 3.0 for name, _ in syntax._CLASSES} | {"default": 4.5}
+    floors = {name: 3.0 for name in ROLE_CLASSES} | {"default": 4.5}
     for name, floor in floors.items():
         packed = getattr(inks, name)
         # Every ink is one of the palette's roles, so it is a Color to measure.
@@ -230,8 +238,118 @@ def test_no_token_is_inked_as_the_caption_and_code_is_not_inked_as_its_comments(
     has, which the code role's own ink is on most palettes.
     """
     inks = themes.build_syntax_inks(palette)
-    assert palette.accent.u32 not in {getattr(inks, name) for name in TREES}
+    # Not the diff's add and remove: they are the theme's own two diff inks,
+    # which its diff view sets under a header in the accent too, and on ghost
+    # ``diff_add`` is the accent's colour.
+    assert palette.accent.u32 not in {getattr(inks, name) for name in TREES if name in ROLE_CLASSES}
+    assert palette.accent.u32 != inks.heading
     assert inks.default not in {inks.comment, palette.diff_context.u32}
+
+
+def _packed(colour: int) -> tuple[int, int, int]:
+    """
+    An ImGui packed ink (ABGR) as its red, green and blue.
+    """
+    return colour & 0xFF, (colour >> 8) & 0xFF, (colour >> 16) & 0xFF
+
+
+def _as_color(colour: int) -> Any:
+    r, g, b = _packed(colour)
+    return theme.col((r << 16) | (g << 8) | b)
+
+
+DIFF_ROLES = {"add": "diff_add", "remove": "diff_remove", "heading": "state_supervising"}
+
+
+@pytest.mark.parametrize("palette", THEMES.values(), ids=list(THEMES))
+def test_a_diffs_lines_read_at_body_texts_floor_on_every_theme(palette: Palette) -> None:
+    """
+    Where a diff fence is code, its added, removed and header lines carry the
+    change in ink alone, with no fill behind them: 4.5:1 on the code's ground,
+    and each its own colour, apart from the text between them.
+    """
+    inks = themes.build_syntax_inks(palette)
+    for name in DIFF_ROLES:
+        ratio = contrast_ratio(_as_color(getattr(inks, name)), palette.panel)
+        assert ratio >= themes.DIFF_TOKEN_FLOOR, f"{palette.name}.{name} only {ratio:.2f}:1"
+    assert len({inks.add, inks.remove, inks.heading, inks.default}) == 4
+
+
+@pytest.mark.parametrize("palette", THEMES.values(), ids=list(THEMES))
+def test_a_diff_ink_is_its_role_where_that_reads_and_the_least_step_toward_text_where_not(
+    palette: Palette,
+) -> None:
+    """
+    The role's own colour is kept wherever it already reads, so a theme's
+    diff colours are the ones its diff view uses; one under the floor is moved
+    toward ``text`` no further than the floor asks: one step less would not read.
+    """
+    inks = themes.build_syntax_inks(palette)
+    for name, role_name in DIFF_ROLES.items():
+        role = getattr(palette, role_name)
+        packed = getattr(inks, name)
+        if contrast_ratio(role, palette.panel) >= themes.DIFF_TOKEN_FLOOR:
+            assert packed == role.u32, f"{palette.name}.{name}"
+            continue
+        assert packed != role.u32
+        steps = themes._DIFF_TOKEN_STEPS
+        tried = [_step(role, palette.text, step / steps) for step in range(steps + 1)]
+        reads = [contrast_ratio(t, palette.panel) >= themes.DIFF_TOKEN_FLOOR for t in tried]
+        assert packed == tried[reads.index(True)].u32, f"{palette.name}.{name}"
+
+
+def _step(ink: Any, toward: Any, alpha: float) -> Any:
+    """
+    ``ink`` moved ``alpha`` of the way to ``toward``, opaque and in whole 8-bit channels.
+    """
+    mixed = theme.mixed(ink, toward, alpha)
+    r, g, b = (round(c * 255.0) for c in (mixed.x, mixed.y, mixed.z))
+    return theme.col((r << 16) | (g << 8) | b)
+
+
+def test_the_diff_inks_were_measured_under_their_roles_somewhere() -> None:
+    """
+    The step is not dead code: on the themes as they are, some diff role is
+    under the floor and is moved (dark's ``diff_remove`` among them, 4.30:1).
+    """
+    moved = [
+        (name, palette.name)
+        for palette in THEMES.values()
+        for name, role in DIFF_ROLES.items()
+        if getattr(themes.build_syntax_inks(palette), name) != getattr(palette, role).u32
+    ]
+    assert ("remove", "dark") in moved
+
+
+def test_a_diff_fence_that_stays_code_has_its_lines_in_add_remove_and_heading_inks() -> None:
+    """
+    What Pygments' diff lexer calls each line, in the inks of the three new
+    classes, the last line too though the library holds no line end after it.
+    """
+    code = "diff --git a/x b/x\nindex 1..2\n--- a/x\n+++ b/x\n@@ -1,2 +1,2 @@\n ctx\n-old\n+new"
+    text, said = _captioned("diff", code)
+    spans = syntax.block_spans(text, said, ACCENT, None, INKS)
+    by_text = {text[s:e]: BY_INK.get(c, c) for s, e, c in spans}
+    assert by_text["diff --git a/x b/x"] == "heading"
+    assert by_text["index 1..2"] == "heading"
+    assert by_text["@@ -1,2 +1,2 @@"] == "heading"
+    assert by_text["--- a/x"] == "remove"
+    assert by_text["+++ b/x"] == "add"
+    assert by_text["-old"] == "remove"
+    assert by_text["+new"] == "add", "the last line, with no line end after it"
+    assert spans[-1][1] == len(text), "and nothing is coloured past the text"
+
+
+def test_code_with_no_last_line_end_is_lexed_as_ending_on_one_and_nothing_past_it() -> None:
+    """
+    ``_lex`` hands the lexer the code with a line end where it has none, as
+    ``get_tokens`` would, and cuts every token back to the code.
+    """
+    lexer = get_lexer_by_name("diff")
+    tokens = list(syntax._lex(lexer, "+a\n+b"))
+    assert "".join(value for _, _, value in tokens) == "+a\n+b"
+    assert [(i, str(k), v) for i, k, v in tokens][-1] == (3, "Token.Generic.Inserted", "+b")
+    assert list(syntax._lex(lexer, "+a\n")) == list(lexer.get_tokens_unprocessed("+a\n"))
 
 
 def test_the_live_themes_token_inks_follow_a_switch() -> None:
@@ -388,12 +506,15 @@ def test_tokens_are_the_ones_the_lexer_gives() -> None:
     token is caught here and not as a block that silently stops colouring.
     """
     assert TREES == {
-        "keyword": Keyword,
-        "string": String,
-        "comment": Comment,
-        "number": Number,
-        "function": Name.Function,
-        "operator": Operator,
+        "keyword": (Keyword,),
+        "string": (String,),
+        "comment": (Comment,),
+        "number": (Number,),
+        "function": (Name.Function,),
+        "operator": (Operator,),
+        "add": (Generic.Inserted,),
+        "remove": (Generic.Deleted,),
+        "heading": (Generic.Heading, Generic.Subheading),
     }
     assert set(TREES) | {"default"} == set(themes.SyntaxInks.__dataclass_fields__)
 
@@ -1093,3 +1214,14 @@ def test_a_module_starts_with_the_frames_lexing_budget_unspent(tmp_path: Any) ->
         tmp_path,
         {"test_a_first.py": _SPENT_AT_ITS_END, "test_b_then.py": _COLOURED_ON_ITS_FIRST_FRAME},
     )
+
+
+def test_a_last_token_that_took_the_added_line_end_is_cut_back_to_the_code() -> None:
+    """
+    Shell's comment rule ends on its line end and takes it into the token
+    (``# c\\n``); the line end ``_lex`` added is cut off it, and the comment
+    on a last line is coloured to the end of the text and no further.
+    """
+    text, said = _captioned("bash", "echo x # c")
+    spans = syntax.block_spans(text, said, ACCENT, None, INKS)
+    assert (text.index("# c"), len(text), INKS.comment) == spans[-1]

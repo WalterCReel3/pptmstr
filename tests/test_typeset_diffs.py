@@ -23,7 +23,7 @@ import imscribe
 import pytest
 from imscribe import Diff, RowKind
 
-from pptmstr import approval
+from pptmstr import approval, theme
 from pptmstr.model import NodeId, PendingApproval
 from pptmstr.ui import typeset
 from pptmstr.ui.typeset import Role, diffs, gate, roles
@@ -802,6 +802,7 @@ def test_where_columns_hold_a_fenced_diff_holding_what_cannot_be_seen_says_so_ov
     assert diffs.fence_diff("diff", text) is not None
     words = "contains invisible or bidirectional control characters: U+202E"
     assert diffs.fence_headers(text) == (words, "--- a/x.py", "+++ b/x.py")
+    assert diffs.fence_warnings(text) == (words,)
     assert diffs.fence_headers("-old\n+new\x07") == ("contains control characters: U+0007",)
     cache = typeset.ViewCache()
     source = f"Before.\n\n```diff\n{text}\n```\n"
@@ -810,6 +811,95 @@ def test_where_columns_hold_a_fenced_diff_holding_what_cannot_be_seen_says_so_ov
     view = cache.view("k")
     assert list(view.hosts) == [2] and cache.unbuilt("k") == 0
     assert cache.texts("k")[1] == "\n".join([words, "--- a/x.py", "+++ b/x.py"])
+
+
+_MISCOUNTED = "--- a/x.py\n+++ b/x.py\n@@ -12,5 +12,6 @@\n ctx\n-old\n+new\n+new2"
+
+
+@pytest.mark.parametrize(
+    ("text", "words"),
+    [
+        (_MISCOUNTED, "@@ -12,5 +12,6 @@ has 2 old and 3 new"),
+        ("@@ -1,3 +1 @@\n-a\n+b", "@@ -1,3 +1 @@ has 1 old and 1 new"),
+        (
+            "@@ -1 +1 @@\n-a\n+b\n@@ -9,2 +9,2 @@ f\n-c\n+d\n@@ -20 +20,2 @@\n+e",
+            "@@ -9,2 +9,2 @@ has 1 old and 1 new; @@ -20 +20,2 @@ has 0 old and 1 new",
+        ),
+    ],
+    ids=["both-counts", "a-count-left-out-is-one", "each-wrong-hunk-in-order"],
+)
+def test_a_fence_whose_written_hunk_counts_are_not_its_lines_says_so(text: str, words: str) -> None:
+    """
+    The view writes the counts it counted, so a header the agent wrote with
+    other numbers is never on screen unless it is said: the written ``@@``
+    line and what its lines hold.
+    """
+    model = diffs.fence_diff("diff", text)
+    assert model is not None, "still a diff the view draws"
+    said = "the written hunk headers disagree with the lines: " + words
+    assert diffs.counts_warning(text, model) == said
+    assert said in diffs.fence_headers(text)
+    assert diffs.fence_headers(text, model) == diffs.fence_headers(text)
+    assert diffs.fence_warnings(text, model) == (said,), "a warning, for the warn ink"
+    assert diffs.fence_headers(text) == (said, *diffs.fence_header_rows(text))
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "--- a/x.py\n+++ b/x.py\n@@ -12,3 +12,4 @@\n ctx\n-old\n+new\n+new2\n ctx2",
+        "@@ -1 +1 @@\n-a\n+b",
+        "@@ -1,0 +1 @@\n+a",
+        "@@ -1 +1 @@\n-a\n+b\n@@ junk\n-c\n+d",
+        "-old\n+new",
+    ],
+    ids=["matching", "counts-left-out", "zero-old", "a-line-with-no-counts", "no-header"],
+)
+def test_a_fence_whose_written_hunk_counts_are_its_lines_says_nothing_of_them(text: str) -> None:
+    model = diffs.fence_diff("diff", text)
+    assert model is not None
+    assert diffs.counts_warning(text, model) is None
+    assert not any("disagree" in line for line in diffs.fence_headers(text))
+    assert diffs.fence_warnings(text, model) == ()
+    assert diffs.fence_headers(text) == diffs.fence_header_rows(text)
+
+
+def test_where_columns_hold_a_miscounted_fence_the_sentence_is_over_its_view_and_nothing_moves(
+    columns_hold: Any,
+) -> None:
+    """
+    The sentence leads the lines set above the hosted view. The view is given
+    the text as written, and its rows keep the line numbers the written starts
+    give them: only what is said above it changes.
+    """
+    text = _MISCOUNTED
+    said = "the written hunk headers disagree with the lines: @@ -12,5 +12,6 @@ has 2 old and 3 new"
+    cache = typeset.ViewCache()
+    source = f"Before.\n\n```diff\n{text}\n```\n\nAfter.\n"
+    for _ in range(2):
+        frame(columns_hold, lambda: typeset.markdown(cache, "k", source))
+    view = cache.view("k")
+    assert list(view.hosts) == [2] and cache.unbuilt("k") == 0
+    texts = cache.texts("k")
+    assert texts[1] == "\n".join([said, "--- a/x.py", "+++ b/x.py"])
+    assert view._colours[1][0] == (0, len(said), theme.P.warn.u32), "in the warn ink"
+    assert texts[3] == "After."
+    hosted = view.hosted(2)
+    assert hosted.text == text + "\n"
+    rows = [
+        (row.kind.value + row.text, row.old_no, row.new_no)
+        for file in hosted.view.diff.files
+        for hunk in file.hunks
+        for row in hunk.rows
+    ]
+    assert rows == [(" ctx", 12, 12), ("-old", 13, None), ("+new", None, 13), ("+new2", None, 14)]
+
+    honest = text.replace("-12,5 +12,6", "-12,2 +12,3")
+    cache = typeset.ViewCache()
+    source = f"Before.\n\n```diff\n{honest}\n```\n\nAfter.\n"
+    for _ in range(2):
+        frame(columns_hold, lambda: typeset.markdown(cache, "k", source))
+    assert cache.texts("k")[1] == "\n".join(["--- a/x.py", "+++ b/x.py"])
 
 
 def test_what_a_panes_rows_were_broken_at_is_still_named() -> None:
@@ -1447,7 +1537,8 @@ def test_where_columns_hold_an_honest_diff_fence_is_a_diff_view_and_every_line_i
     role's size, and the lines the view puts in header rows, which it cuts at
     its edge, are a code block above it. One that holds a line no view would
     draw is the code of its document under the word it was opened with, as it
-    is where no diff is the library's. A stream hosts none.
+    is where no diff is the library's. A stream hosts none while it is open,
+    and once it is closed hosts what the document does, as the document holds it.
     """
     seam = columns_hold
     # As the library's reader has a fence: a tab is a tab.
@@ -1500,10 +1591,13 @@ def test_where_columns_hold_an_honest_diff_fence_is_a_diff_view_and_every_line_i
 
     handle = typeset.stream(cache, "stream")
     handle.append(source)
-    handle.close()
     frame(seam, lambda: handle.draw())
     assert not handle.view.hosts
     assert cache.texts("stream")[1] == "\n".join(["diff", text])
+    handle.close()
+    frame(seam, lambda: handle.draw())
+    assert list(handle.view.hosts) == list(cache.view("markdown").hosts)
+    assert cache.texts("stream") == cache.texts("markdown")
 
 
 def test_a_fence_whose_info_string_says_more_than_diff_is_never_a_diff_view(

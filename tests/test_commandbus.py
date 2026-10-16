@@ -223,9 +223,9 @@ def test_an_accepted_request_says_nothing_has_run_and_to_carry_on() -> None:
         f"Command {second} is in front of the operator. NOTHING HAS RUN, and nothing "
         f"will until the operator has read the exact string and run it themselves. "
         f"They may refuse it, and they may change it before running it. Carry on "
-        f"with your other work now and do not wait for this: nothing is parked, "
-        f"nothing will interrupt you when it ends, and if you end your turn to wait, "
-        f'its ending will not wake you. Call read_commands(command_id="{second}") '
+        f"with your other work now and do not wait for this: nothing is parked. "
+        f"{b.WAKE_SAID_SUBAGENT} "
+        f'Call read_commands(command_id="{second}") '
         f"when you reach the work that needs it, and again before you finish: it says "
         f"whether it ran, shows the string that actually ran -- the operator's, if "
         f"they changed it --, how it ended and the end of its output. If it runs, it "
@@ -235,11 +235,11 @@ def test_an_accepted_request_says_nothing_has_run_and_to_carry_on() -> None:
         f"Asking again for the same thing does not hurry it, and spends another of "
         f"the 3 requests you may have open. withdraw_command takes this one back "
         f"while the operator has not run it. How it ended is handed to YOU, the agent "
-        f"that asked. Your lead can read it with read_commands and is not told when "
-        f"it ends, so pass it on in your result or in a concern if your lead needs it."
+        f"that asked, when you call read_commands. Your lead can read it as well."
     )
-    # A lead has no lead to pass it to.
+    # A lead has no lead to pass it to, and is the one woken.
     assert "Your lead" not in lead and lead.endswith("while the operator has not run it.")
+    assert b.WAKE_SAID in lead and b.WAKE_SAID_SUBAGENT not in lead
     # None of the agent's own text is in a reply that has no marked line.
     assert "make install" not in said and "sandbox denies" not in said
 
@@ -537,12 +537,15 @@ def test_a_command_run_as_asked_shows_the_string_that_ran_as_the_agents_own() ->
         "The operator ran it as it was asked. What was given to the shell:",
         "| make install",
         "It is RUNNING and has not ended: started N ago, and killed if it has not "
-        "exited within 10 minute(s). Nothing will interrupt you when it ends: carry "
-        f'on with other work and do not wait, and call read_commands(command_id="{made}") '
+        f"exited within 10 minute(s). {b.WAKE_SAID_SUBAGENT} Carry on with other work "
+        f'and do not wait, and call read_commands(command_id="{made}") '
         "when you reach the work that needs it.",
     ]
     assert "[running] asked by you N ago" in _calm(running)
-    assert "The operator asked for it to be stopped N ago. Nothing will" in _calm(stopping)
+    assert (
+        "The operator asked for it to be stopped N ago. When it ends, pptmstr sends "
+        "this session a message naming it, and builder is not woken." in _calm(stopping)
+    )
 
 
 def test_a_command_nobody_has_acted_on_says_nothing_has_run_and_not_to_wait() -> None:
@@ -554,15 +557,15 @@ def test_a_command_nobody_has_acted_on_says_nothing_has_run_and_not_to_wait() ->
 
     assert f"Command {made} [asked, NOT run] asked by you N ago" in _calm(mine)
     assert mine.endswith(
-        "NOTHING HAS RUN. The operator has not acted on it. Nothing will interrupt you "
-        "when they do: carry on with other work and do not wait, and call "
+        f"NOTHING HAS RUN. The operator has not acted on it. {b.WAKE_SAID_SUBAGENT} "
+        "Carry on with other work and do not wait, and call "
         f'read_commands(command_id="{made}") when you reach the work that needs it.'
     )
     assert lead.endswith(
-        "NOTHING HAS RUN. The operator has not acted on it. Nothing tells you or "
-        "builder when they do, and nothing here is yours to act on: "
-        f'read_commands(command_id="{made}") shows where it stands if your own work '
-        "comes to need that."
+        "NOTHING HAS RUN. The operator has not acted on it. When it ends, pptmstr "
+        "sends this session a message naming it, and builder is not woken; nothing "
+        f'here is yours to act on: read_commands(command_id="{made}") shows where it '
+        "stands if your own work comes to need that."
     )
 
 

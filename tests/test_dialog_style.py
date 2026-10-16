@@ -78,7 +78,9 @@ def _frame(body: Callable[[], None], *, size: float = theme._FONT_SIZE) -> None:
 # -- the scope -----------------------------------------------------------------------
 
 
-def test_inside_the_scope_items_and_frames_have_more_room_than_the_docks(context: None) -> None:
+def test_inside_the_scope_items_have_more_room_and_frames_are_as_tall_as_the_docks(
+    context: None,
+) -> None:
     """
     At the size the body face is loaded at. The window's edge is the one value held
     down: an em at most, and no taller than it is wide.
@@ -352,6 +354,21 @@ def _note_the_box(monkeypatch: pytest.MonkeyPatch, noting: _Noting) -> None:
     monkeypatch.setattr(widgets, "multiline_input", noted)
 
 
+def _note_the_links(monkeypatch: pytest.MonkeyPatch, noting: _Noting) -> None:
+    """
+    A question mark is a ``widgets.link``, drawn through ``imgui.internal`` with no
+    label a call there carries, so it is noted where it is drawn, by its label.
+    """
+    real = widgets.link
+
+    def noted(label: str, *args: Any, **kwargs: Any) -> bool:
+        answer = real(label, *args, **kwargs)
+        noting.note(label)
+        return answer
+
+    monkeypatch.setattr(widgets, "link", noted)
+
+
 def _launcher(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, policy: Policy = Policy.STRICT
 ) -> _Dialog:
@@ -361,6 +378,7 @@ def _launcher(
     # are drawn by ``widgets``.
     monkeypatch.setattr(widgets, "imgui", noting)
     _note_the_box(monkeypatch, noting)
+    _note_the_links(monkeypatch, noting)
     state = LauncherState(task="do the thing\nand why", cwd=str(tmp_path), policy=policy)
     worker = state.version_gate.request(prober=_meets)
     assert worker is not None
@@ -391,6 +409,7 @@ def _resume(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> _Dialog:
     monkeypatch.setattr(resume_form, "imgui", noting)
     monkeypatch.setattr(widgets, "imgui", noting)
     _note_the_box(monkeypatch, noting)
+    _note_the_links(monkeypatch, noting)
     work = tmp_path / "work"
     work.mkdir()
     forms = ResumeForms()
@@ -546,23 +565,6 @@ def _ruled() -> float:
     return 2.0 * _px(widgets._DIALOG_GROUP_EMS) + imgui.get_style().separator_size
 
 
-def _set_down() -> float:
-    """
-    How far a line ending in a question mark sets its text down to the mark's
-    label, at the dialogs' face: its row starts where a line's would, its text that
-    much lower.
-    """
-    down: list[float] = []
-
-    def body() -> None:
-        imgui.begin("set down")
-        down.append(widgets.small_button_line())
-        imgui.end()
-
-    _frame(body)
-    return down[0]
-
-
 def _distances() -> tuple[float, float, float, float]:
     """A caption's, an item's, a field's and a ruled group's, smallest first."""
     caption = _px(widgets._DIALOG_CAPTION_EMS)
@@ -601,7 +603,7 @@ def test_the_launcher_is_five_groups_and_each_caption_is_under_its_own_control(
     assert dialog.noting.after("team") == caption
     # The gate: one line under the dial, and what the rung still parks is not drawn.
     assert room("gate") == ruled
-    assert room(dial.adds) == caption + _set_down()
+    assert room(dial.adds) == caption
     assert dial.parks not in [name for name, _, _ in dialog.noting.items]
     assert room("sub-agents") == field
     assert room("sub-agents one session may run at once") == caption
@@ -628,13 +630,14 @@ def test_the_top_rung_adds_one_line_under_the_dial_and_no_section(
     # to the row rather than wrapped.
     assert room(launcher.LOUD_LINE[:24]) == caption + pad
     # Its foot: the band is the frame's padding under its line, and the next field
-    # a field's distance under that. The question mark on the line is held inside
-    # the band.
+    # a field's distance under that. The question mark on the line is a link, as
+    # tall as the line, and held inside the band.
     items = dialog.noting.items
     _, top, foot = items[dialog.noting._at(launcher.LOUD_LINE[:24])]
     assert items[dialog.noting._at("sub-agents")][1] - foot == pad + field
     _, mark_top, mark_foot = items[dialog.noting._at(f"{widgets.HELP_MARK}##")]
     assert top - pad <= mark_top and mark_foot <= foot + pad
+    assert mark_foot - mark_top == foot - top
     assert dialog.noting.after("sub-agents one session may run at once") == ruled
     (body,) = [
         window
@@ -672,7 +675,7 @@ def test_the_resume_form_is_four_groups_and_each_caption_is_under_its_own_contro
     assert room("sent to the session as its next message") == caption
     # The gate.
     assert room("gate") == ruled
-    assert room(dial.adds) == caption + _set_down()
+    assert room(dial.adds) == caption
     # What runs it.
     assert room("model") == ruled
     assert room("sub-agents") == item

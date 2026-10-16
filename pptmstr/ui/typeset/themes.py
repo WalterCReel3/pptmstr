@@ -394,6 +394,43 @@ class SyntaxInks:
     function: int
     operator: int
     default: int
+    add: int
+    remove: int
+    heading: int
+
+
+DIFF_TOKEN_FLOOR = 4.5
+"""
+What a diff fence's added, removed and heading lines read at on ``panel`` when
+the fence is code and not the library's diff view: WCAG AA. Those lines carry
+the whole of what changed, in text only, with no fill behind them as the diff
+view has, so they are held to body text's floor and not a token's 3:1.
+"""
+
+_DIFF_TOKEN_STEPS = 50
+_DIFF_TOKEN_INKS: dict[tuple[int, int, int], int] = {}
+
+
+def _reading(ink: Color, p: ui_theme.Palette) -> int:
+    """
+    ``ink`` packed, where it reads at ``DIFF_TOKEN_FLOOR`` on ``panel``, and
+    otherwise the smallest step of it toward ``text`` that does: the role's hue
+    is kept as far as the floor lets it. Memoised by the three colours.
+    """
+    ground, text = p.panel, p.text
+    key = (ink.u32, ground.u32, text.u32)
+    hit = _DIFF_TOKEN_INKS.get(key)
+    if hit is None:
+        hit = text.u32
+        for step in range(_DIFF_TOKEN_STEPS + 1):
+            mixed = ui_theme.mixed(ink, text, step / _DIFF_TOKEN_STEPS)
+            r, g, b = (round(channel * 255.0) for channel in (mixed.x, mixed.y, mixed.z))
+            tried = ui_theme.col((r << 16) | (g << 8) | b)
+            if ui_theme.contrast_ratio(tried, ground) >= DIFF_TOKEN_FLOOR:
+                hit = tried.u32
+                break
+        _DIFF_TOKEN_INKS[key] = hit
+    return hit
 
 
 def build_syntax_inks(p: ui_theme.Palette) -> SyntaxInks:
@@ -409,6 +446,16 @@ def build_syntax_inks(p: ui_theme.Palette) -> SyntaxInks:
 
     ``default`` is ``text`` and not the code role's own ink (``diff_context``):
     on most palettes that ink is ``text_dim``'s colour, which is the comments'.
+
+    ``add``, ``remove`` and ``heading`` are a diff fence's lines where it stays
+    code (one ``diffs.fence_diff`` refuses, a stream still arriving, a pane the
+    library's diff view is not adopted in): ``diff_add`` and ``diff_remove``,
+    the diff view's own two, and ``state_supervising`` for ``diff --git``,
+    ``index`` and ``@@`` lines, which is the keyword ink and so a colour the
+    theme already sets code in. Each is held to ``DIFF_TOKEN_FLOOR`` on
+    ``panel`` by a step toward ``text`` where the role itself is under it
+    (dark's ``diff_remove``, cde's two, win311's and kitty's ``diff_add``,
+    turbo's ``diff_remove``, measured 2026-10-16).
     """
     return SyntaxInks(
         keyword=p.state_supervising.u32,
@@ -418,6 +465,9 @@ def build_syntax_inks(p: ui_theme.Palette) -> SyntaxInks:
         function=p.state_calling_tool.u32,
         operator=p.text_strong.u32,
         default=p.text.u32,
+        add=_reading(p.diff_add, p),
+        remove=_reading(p.diff_remove, p),
+        heading=_reading(p.state_supervising, p),
     )
 
 

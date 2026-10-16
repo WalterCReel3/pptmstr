@@ -43,7 +43,10 @@ and reads no markup out of it -- a ``#``, a ``- ``, a backtick is what was typed
 broken at the pane's width in the prose face, in the dim ink and behind the ``>``
 that marks it as the operator's: WRAP's wrapped lines, and in TYPESET ImGui's wrapped
 text in the library's prose face (``typeset.prompt_parts`` says why it is not the
-library's), outside any selection of the library's.
+library's), outside any selection of the library's. **A NOTICE run is not a
+prompt**: pptmstr writes it (``AgentSession.wake``) to tell the session that
+something it waited on has arrived, and it is drawn as the literal it is, in its
+own ink and with no ``>``, so it never reads as the operator's.
 
 **Typesetting.** ``RenderMode.TYPESET`` sets the log through ``typeset`` (the seam
 over the layout library). OUTPUT and REASONING runs are read as markdown and set
@@ -698,9 +701,6 @@ class NodeTranscript:
     run_spans: list[list[int]] = field(default_factory=list)
     # The runs of tool kinds whose bytes hold an entry's line: drawn as blocks.
     hosted: set[int] = field(default_factory=set)
-    # Where the last prompt (a SYSTEM run) starts: a call before it is of a turn
-    # that has ended.
-    last_prompt: int = -1
     # Whether the last line can still be extended -- true when the bytes so far did
     # not end on a newline. Tracking this explicitly, rather than inferring it from
     # the next chunk, is what keeps a streamed token appending to the line it
@@ -741,8 +741,6 @@ class NodeTranscript:
                     if not self.lines or self.lines[-1].kind is not segment.kind:
                         self.run_starts.append(len(self.lines))
                         self.run_spans.append([start, segment.end])
-                        if segment.kind is SegmentKind.SYSTEM:
-                            self.last_prompt = start
                     self.lines.append(Line(segment.kind, piece, len(self.run_starts) - 1))
             # Every piece of a segment is in the last run: a run changes only with
             # the kind, which only a segment can change.
@@ -901,9 +899,15 @@ class TranscriptState:
     # The node the last ``draw`` was handed, once one has been; see ``switched_to``.
     node: NodeId | None = None
     drawn: bool = False
-    # Whether each pane's log overflowed last frame, by the id of its child: the
-    # context log and the session pane are two children with one state.
-    overflowing: dict[int, bool] = field(default_factory=dict)
+    # Each log's vertical bar held on, by the id of its child: the context log and
+    # the session pane are two children with one state. The value is what the log
+    # was drawn from when the bar was taken (``_end_log``).
+    bars: dict[int, Hashable] = field(default_factory=dict)
+    # Whether each log's text was taller than the log last frame, by its child's id.
+    overflowed: dict[int, bool] = field(default_factory=dict)
+    # What this frame's log is drawn from, as ``draw`` read it: a held bar is let
+    # go only once this, or the log's size, has moved (``holds_bar``).
+    log_key: Hashable = None
     frame: int = 0
     # When the frame being drawn began, on the clock ``prune`` was given.
     now: float = 0.0
@@ -1077,6 +1081,14 @@ class _Blocks:
     marked: frozenset[int] = frozenset()
     current: BlockHit | None = None
     reveal: bool = False
+    # The transcript's turn at ``pinned`` (``Transcript.turn``), read in one call
+    # so the start and the open state are of one moment: a call before its start,
+    # or of a turn that has ended, has no result coming.
+    turn_start: int = field(init=False)
+    turn_open: bool = field(init=False)
+
+    def __post_init__(self) -> None:
+        self.turn_start, self.turn_open = self.transcript.turn(self.pinned)
 
     def find(self, found: Sequence[Any], current: int) -> None:
         """
@@ -1186,8 +1198,9 @@ class _Blocks:
         """Whether a call with no result can still be running: its turn is going on."""
         return (
             self.in_turn
+            and self.turn_open
             and entry.result is None
-            and (entry.call is None or entry.call[0] >= self.cache.last_prompt)
+            and (entry.call is None or entry.call[0] >= self.turn_start)
         )
 
     def _key(self, anchor: int, entry: ToolEntry) -> tuple[Hashable, bool]:
@@ -1308,6 +1321,9 @@ _KIND_COLOUR = {
     SegmentKind.ERROR: "danger",
     SegmentKind.SYSTEM: "text_dim",
     SegmentKind.COMPACTION: "warn",
+    # pptmstr's own message to the session (``AgentSession.wake``): never the
+    # operator's dim ink, and never behind the operator's ``>``.
+    SegmentKind.NOTICE: "focus",
 }
 
 
@@ -1368,6 +1384,7 @@ def draw(
         state.feeds.clear()
 
     bar = state.find
+    text_px = typeset.body_px() if mode is RenderMode.TYPESET else imgui.get_font_size()
     blocks = _Blocks(
         state,
         selected,
@@ -1375,8 +1392,11 @@ def draw(
         cache,
         pinned,
         record.state in _IN_TURN,
-        typeset.body_px() if mode is RenderMode.TYPESET else imgui.get_font_size(),
+        text_px,
     )
+    # Everything the log's height follows but the width its bar takes.
+    state.log_key = (selected, pinned, mode, state.show_reasoning, len(state.expanded))
+    side = margin_px(text_px)
     if mode is RenderMode.TYPESET:
         feed = state.feed_for(selected)
         feed.advance(cache)
@@ -1390,7 +1410,7 @@ def draw(
         bar.found(len(found))
         # Joined when the button is pressed: unlike the line modes' value, this one
         # is not needed to draw anything.
-        _draw_controls(state, record.node_id, lambda: feed.visible_text(state.show_reasoning))
+        _draw_controls(state, record.node_id, lambda: feed.visible_text(state.show_reasoning), side)
         imgui.separator()
         _draw_typeset(state, feed, cache, found, blocks)
         blocks.prune()
@@ -1405,7 +1425,7 @@ def draw(
         found_lines = list(line_matches(drawn, bar.needle))
     bar.found(len(found_lines))
     visible_text = copy_text(visible)
-    _draw_controls(state, record.node_id, lambda: visible_text)
+    _draw_controls(state, record.node_id, lambda: visible_text, side)
     imgui.separator()
     _draw_lines(state, cache, visible, mode, found_lines, blocks)
     blocks.prune()
@@ -1471,7 +1491,23 @@ def _find_keys(bar: FindBar) -> None:
 _SUB_AGENT_NOTE = "sub-agent: complete messages only, not live"
 
 
-def _draw_controls(state: TranscriptState, node_id: NodeId, copy_value: Callable[[], str]) -> None:
+def _draw_controls(
+    state: TranscriptState, node_id: NodeId, copy_value: Callable[[], str], side: float = 0.0
+) -> None:
+    """
+    The row over the log, in from the pane's edge by ``side``, the log's margin, so
+    that it starts where the log's text does.
+    """
+    if side:
+        imgui.indent(side)
+    _draw_control_row(state, node_id, copy_value, side)
+    if side:
+        imgui.unindent(side)
+
+
+def _draw_control_row(
+    state: TranscriptState, node_id: NodeId, copy_value: Callable[[], str], side: float
+) -> None:
     if state.mode is RenderMode.RAW:
         # The earlier-lines view: the way back to the log as it is set, at its foot.
         if widgets.small_button("back to latest"):
@@ -1489,8 +1525,11 @@ def _draw_controls(state: TranscriptState, node_id: NodeId, copy_value: Callable
         _draw_find(state.find)
     if node_id[1] is not None:
         # Sub-agent output does not stream (§2.5.1). Saying so beats letting a quiet
-        # row be read as a stuck one. A row of its own, broken in a narrow dock.
-        imgui.push_text_wrap_pos(0.0)
+        # row be read as a stuck one. A row of its own, broken in a narrow dock,
+        # and short of the right edge by the margin it starts in by.
+        imgui.push_text_wrap_pos(
+            imgui.get_cursor_pos_x() + imgui.get_content_region_avail().x - side
+        )
         imgui.text_colored(P.warn.vec4, _SUB_AGENT_NOTE)
         imgui.pop_text_wrap_pos()
 
@@ -1504,7 +1543,7 @@ def _draw_find(bar: FindBar) -> None:
         imgui.set_keyboard_focus_here()
         bar.focus = False
     imgui.set_next_item_width(200.0 * imgui.get_font_size() / 16.0)
-    with hint_colour(imgui):
+    with hint_colour(imgui, dialog=False):
         entered, needle = imgui.input_text_with_hint(
             "##find", "find", bar.needle, imgui.InputTextFlags_.enter_returns_true
         )
@@ -1710,80 +1749,93 @@ def margin_px(text_px: float) -> float:
     return float(round(text_px / 2.0))
 
 
-def log_sides(text_px: float, gutter: float) -> tuple[float, float]:
+def holds_bar(
+    held: bool, shown: bool, moved: bool, content: float, room: float, slack: float
+) -> bool:
     """
-    The padding of the log's child, left and right, for text ``text_px`` tall and a
-    scrollbar gutter ``gutter`` wide.
+    Whether a log's vertical bar is held on for the next frame: once it has shown
+    for the log's own text (``shown``: ImGui drew it, and the text it drew it for,
+    last frame's, was taller than the log), it stays until what the log is drawn
+    from has moved and the text, at the width the bar leaves it, is shorter than
+    the log by ``slack``. A bar ImGui shows for a window's earlier content, which
+    this log's text never asked for, is not taken.
 
-    The gutter is always kept and is part of the right-hand margin, so the margin
-    seen either side is ``margin_px`` or the gutter, whichever is wider, and the
-    right is padded only by what the gutter leaves of it.
+    The bar takes width, so the text re-wraps when it comes and goes. For a log
+    that wraps as text does, a narrower measure is never shorter, and slack alone
+    would do. A log can lay out otherwise -- a block or a table set one way when
+    wide and another when narrow -- and then a log at its edge overflows without
+    the bar and fits with it, every frame. So letting go also waits for something
+    other than the bar to have moved (``moved``): the bytes, the mode, the size.
+    Each flip is then one change of the log's own, and never two frames' answers
+    to each other. ``slack`` keeps a log one line short of full from taking the bar
+    back with its next line.
     """
-    side = max(margin_px(text_px), gutter)
-    return side, side - gutter
-
-
-# What an overflow-less log draws its scrollbar in: nothing, over the gutter kept.
-_UNSEEN = (
-    imgui.Col_.scrollbar_bg,
-    imgui.Col_.scrollbar_grab,
-    imgui.Col_.scrollbar_grab_hovered,
-    imgui.Col_.scrollbar_grab_active,
-)
+    if not held:
+        return shown
+    return not (moved and content + slack <= room)
 
 
 def _begin_log(state: TranscriptState, text_px: float, flags: int = 0) -> int | None:
     """
-    Open the log's child: the same margin either side of the text, and a vertical
-    scrollbar that is seen only while the text overflows, down or across. Returns
-    the child's id, for ``_end_log``, or ``None`` when ImGui has it clipped.
+    Open the log's child: the margin ``margin_px`` either side of the text, and a
+    vertical scrollbar where there is something to scroll. Returns the child's id,
+    for ``_end_log``, or ``None`` when ImGui has it clipped.
 
-    The scrollbar is always *there*, so that the measure does not change, and every
-    paragraph re-break, on the frame the text first outgrows the pane: what goes is
-    its ink while there is nothing to scroll. Whether there is, is the last frame's
-    answer (``TranscriptState.overflowing``) to a question ImGui answers from the
-    frame before that, so the bar shows two frames after the text first overflows,
-    and never moves the text.
-
-    The margins are ``log_sides``: the child's own padding, which a child without a
-    border is not given by ImGui, on the right, and that and an indent on the left,
-    where there is no gutter.
+    The margin is the child's own padding, which a child without a border is not
+    given by ImGui, on both sides. ImGui puts the bar outside the padding, so with
+    the bar shown the right margin is between the text and the bar. Nothing is
+    reserved for a bar that is not there: the text is as wide as the log allows,
+    and re-wraps once when the bar comes or goes. ImGui shows the bar the frame
+    after the text outgrew the log; from then it is held (``holds_bar``).
     """
     ident = imgui.get_id("##transcript")
-    unseen = not state.overflowing.get(ident, False)
-    gutter = imgui.get_style().scrollbar_size
-    left, right = log_sides(text_px, gutter)
-    imgui.push_style_var(imgui.StyleVar_.window_padding, imgui.ImVec2(right, 0.0))
-    if unseen:
-        for colour in _UNSEEN:
-            imgui.push_style_color(colour, imgui.ImVec4(0.0, 0.0, 0.0, 0.0))
+    side = margin_px(text_px)
+    if ident in state.bars:
+        flags |= imgui.WindowFlags_.always_vertical_scrollbar.value
+    imgui.push_style_var(imgui.StyleVar_.window_padding, imgui.ImVec2(side, 0.0))
     opened = imgui.begin_child(
         "##transcript",
         imgui.ImVec2(0.0, 0.0),
         imgui.ChildFlags_.always_use_window_padding,
-        flags | imgui.WindowFlags_.always_vertical_scrollbar.value,
+        flags,
     )
-    if unseen:
-        imgui.pop_style_color(len(_UNSEEN))
     imgui.pop_style_var()
     if not opened:
         return None
-    if left > right:
-        # The child's own, and gone with its end: ImGui starts a window's indent
-        # again at every Begin.
-        imgui.indent(left - right)
     return ident
 
 
 def _end_log(state: TranscriptState, ident: int) -> None:
     """
-    Close the log's child, noting whether its text overflowed for the next frame.
-
-    Either way: the two scrollbars are drawn in the same colours, and a literal
-    line wider than a log that fits is reached only by the one along the bottom.
+    Close the log's child, noting whether its bar is held for the next frame.
     """
-    state.overflowing[ident] = imgui.get_scroll_max_y() > 0.0 or imgui.get_scroll_max_x() > 0.0
+    window = imgui.internal.get_current_window()
+    key = (state.log_key, window.size.x, window.size.y)
+    held = state.bars.get(ident, _NOT_HELD)
+    content = window.dc.cursor_max_pos.y - window.dc.cursor_start_pos.y
+    room = window.inner_rect.max.y - window.inner_rect.min.y
+    # ImGui decides the bar from the content of the frame before, so that is the
+    # frame whose text the bar is for.
+    overflowed = state.overflowed.get(ident, False)
+    state.overflowed[ident] = content > room
+    if holds_bar(
+        held is not _NOT_HELD,
+        bool(window.scrollbar_y) and overflowed,
+        key != held,
+        content,
+        room,
+        imgui.get_text_line_height_with_spacing(),
+    ):
+        if held is _NOT_HELD:
+            state.bars[ident] = key
+    else:
+        state.bars.pop(ident, None)
     imgui.end_child()
+
+
+# What ``TranscriptState.bars`` holds for a log whose bar is not held: no key a log
+# is drawn from is this.
+_NOT_HELD = object()
 
 
 def _run_key(run: int) -> tuple[str, int]:

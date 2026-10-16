@@ -342,7 +342,7 @@ def _card(card: Card | None) -> list[Row]:
     if card is None:
         return [Rule(), Note(NO_CARD)]
     node = card.record.node_id
-    title = widgets.one_line(session_menu._headline(card.record))
+    title = widgets.one_line(session_menu.card_title(card.record))
     if len(title) > _HEADING_CHARS:
         title = title[: _HEADING_CHARS - 1] + "…"
     # A heading draws its own rule, so none goes above it.

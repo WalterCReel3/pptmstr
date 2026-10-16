@@ -446,7 +446,7 @@ def verify(line: str) -> None:
 ```diff
 --- a/tle/checksum.py
 +++ b/tle/checksum.py
-@@ -12,5 +12,6 @@ def checksum(line: str) -> int:
+@@ -12,2 +12,3 @@ def checksum(line: str) -> int:
      digits = [c for c in line if c.isdigit()]
 -    return sum(int(c) for c in digits) % 10
 +    minus = line.count("-")
@@ -1355,6 +1355,9 @@ class FakeDriver:
             if self._stream_segment == len(_REPORT_STEPS):
                 self._stream_segment = 0
                 self._stream_rest = _STREAM_REST
+                # The report's turn ends with it, as the real driver's ends at its
+                # result, and the next prompt opens the next one.
+                transcript.end_turn()
 
     def _tick(self) -> None:
         """

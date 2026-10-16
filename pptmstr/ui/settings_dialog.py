@@ -906,6 +906,7 @@ def _heading(section: Section, picked: list[Change]) -> None:
     """
     A section's title, with its ``defaults`` button at the right edge of the line.
     """
+    widgets.small_button_line()
     _title(section.title.upper())
     wide = widgets.small_button_width("defaults")
     imgui.same_line()

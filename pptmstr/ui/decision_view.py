@@ -684,11 +684,30 @@ def draw_answer_box(
     imgui.pop_id()
 
 
-def draw_detail(snap: Snapshot, state: DecisionState | None, owed: DecisionOwed) -> None:
-    """DETAIL's body for the decision under the cursor: all of it, and no control."""
+def draw_detail(
+    snap: Snapshot,
+    state: DecisionState | None,
+    owed: DecisionOwed,
+    *,
+    bridge: Bridge | None = None,
+    wrap: bool = True,
+) -> None:
+    """
+    DETAIL's body for the decision under the cursor: all of it, and no control.
+
+    With ``bridge`` -- DETAIL is the place to act, the queue not being on
+    screen -- the row's own answer box under it (``draw_answer_box``), with its
+    draft and its second press, in place of the line that sends the operator
+    to the row. Whole either way: ``DETAIL_CHARS`` is more than any text of a
+    decision may be (``MAX_DECISION_TEXT_CHARS``), so nothing is answered from
+    here that was not drawn.
+    """
     draw_body(snap, owed, limit=DETAIL_CHARS, rest="copy puts the whole on the clipboard")
     imgui.spacing()
     imgui.separator()
+    if bridge is not None and state is not None:
+        draw_answer_box(snap, state, bridge, owed, wrap=wrap)
+        return
     draft = "" if state is None else state.drafts.get(owed.decision.id, "")
     if draft:
         imgui.text_colored(P.text.vec4, draft_line(draft))

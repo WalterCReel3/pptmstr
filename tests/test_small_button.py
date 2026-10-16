@@ -11,6 +11,7 @@ a context with a display size and no backend, driven by mouse events.
 from __future__ import annotations
 
 import ast
+import itertools
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
@@ -517,42 +518,117 @@ def test_a_line_begun_for_one_meets_its_label_and_stays_one_button_tall(faced: N
     assert seen["row"] == seen["tall"]
 
 
-@pytest.mark.parametrize("tone", [widgets.Tone.QUIET, widgets.Tone.LOUD], ids=["quiet", "loud"])
-def test_a_notices_question_mark_is_on_its_lines_baseline(
-    faced: None, monkeypatch: pytest.MonkeyPatch, tone: widgets.Tone
-) -> None:
-    """The (?) after a notice, on its own line or on the loud band."""
-    lines: list[float] = []
-    for name in ("text_disabled", "text_colored"):
-        real = getattr(imgui, name)
+# -- at the sites that draw one -------------------------------------------------------
 
-        def noted(*args: Any, real: Any = real) -> Any:
+
+class _Seen:
+    """One item drawn: what drew it, its baseline, and the rows it spans."""
+
+    def __init__(self, name: str, baseline: float) -> None:
+        self.name = name
+        self.baseline = baseline
+        self.top = float(imgui.get_item_rect_min().y)
+        self.bottom = float(imgui.get_item_rect_max().y)
+
+    def beside(self, other: _Seen) -> bool:
+        return self.top < other.bottom and other.top < self.bottom
+
+
+def _baselines(monkeypatch: pytest.MonkeyPatch) -> list[_Seen]:
+    """
+    Every text and button a frame draws, in order, with its baseline: text is laid
+    at its top, a button's label ``frame_padding.y`` under it, in the font and
+    padding in force as it is drawn -- for the wrapper, its own.
+    """
+    seen: list[_Seen] = []
+
+    def noted(name: str, real: Any, padded: bool) -> Callable[..., Any]:
+        def drawn(*args: Any) -> Any:
             answer = real(*args)
-            lines.append(_text_baseline())
+            pad = float(imgui.get_style().frame_padding.y) if padded else 0.0
+            seen.append(_Seen(name, float(imgui.get_item_rect_min().y) + pad + _ascent()))
             return answer
 
-        monkeypatch.setattr(imgui, name, noted)
-    # The mark's, as it is drawn: the band ends in an item of its own.
-    labels: list[float] = []
-    button_ex = imgui.internal.button_ex
+        return drawn
 
-    def marked(*args: Any) -> bool:
-        pressed = bool(button_ex(*args))
-        top = float(imgui.get_item_rect_min().y)
-        labels.append(top + widgets.SMALL_BUTTON_PADDING[1] + float(imgui.get_font_baked().ascent))
-        return pressed
+    for name in ("text", "text_disabled", "text_colored"):
+        monkeypatch.setattr(imgui, name, noted(name, getattr(imgui, name), False))
+    monkeypatch.setattr(imgui, "button", noted("button", imgui.button, True))
+    monkeypatch.setattr(
+        imgui.internal, "button_ex", noted("small_button", imgui.internal.button_ex, True)
+    )
+    return seen
 
-    monkeypatch.setattr(imgui.internal, "button_ex", marked)
-    said = widgets.Notice("nothing runs unattended", tone, widgets.Help("m", "why", ("so",)))
+
+def _detail_header() -> Callable[[], None]:
+    from pptmstr.ui import detail
+    from tests import test_detail
+
+    obligation = test_detail.spawn_approval()
+    snap = test_detail.snapshot(test_detail.record(), needs_you=(obligation,))
+    return lambda: detail._header(snap, obligation, 10.0)
+
+
+def _in_a_dialog(draw: Callable[[], None]) -> Callable[[], None]:
+    def drawn() -> None:
+        with widgets.dialog_style():
+            draw()
+
+    return drawn
+
+
+# Each line that ends in a small button, drawn by the code that draws it. Some
+# begin with plain text and are begun with ``small_button_line``; the rest follow
+# a button or a frame and are on the baseline without it. A line that ends in a
+# question mark ends in a link, and is measured in tests/test_help_mark.py.
+_SITES: dict[str, Callable[[Path], Callable[[], None]]] = {
+    "detail-header-copy": lambda _: _detail_header(),
+    "settings-heading": lambda _: _in_a_dialog(_settings_heading()),
+}
+
+
+def _settings_heading() -> Callable[[], None]:
+    from pptmstr.ui import settings_dialog
+
+    key = "appearance"
+    section = settings_dialog.Section(key, "Appearance", settings_dialog.Restored(key), False)
+    return lambda: settings_dialog._heading(section, [])
+
+
+@pytest.mark.parametrize("site", list(_SITES))
+def test_at_every_site_each_label_is_on_its_lines_baseline(
+    faced: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, site: str
+) -> None:
+    """Label baseline minus the baseline of what it follows on its line, at each one."""
+    draw = _SITES[site](tmp_path)
+    seen = _baselines(monkeypatch)
+
+    def measured() -> dict[str, float]:
+        seen.clear()
+        draw()
+        return {
+            f"{at}: after {before.name}": item.baseline - before.baseline
+            for at, (before, item) in enumerate(itertools.pairwise(seen), 1)
+            if item.name == "small_button" and item.beside(before)
+        }
+
+    apart = _lines(measured)
+    assert apart and set(apart.values()) == {0.0}, apart
+
+
+def test_a_fact_with_no_mark_is_not_set_down(faced: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only a line a button ends is begun for one: the rest stay at their line's top."""
+    from pptmstr.ui import resume_form
+
+    seen = _baselines(monkeypatch)
 
     def draw() -> dict[str, float]:
-        lines.clear()
-        labels.clear()
-        widgets.notice(said)
-        (label,) = labels
-        return {"apart": label - lines[-1]}
+        seen.clear()
+        top = float(imgui.get_cursor_screen_pos().y)
+        resume_form._fact("session", "11111111")
+        return {item.name: item.top - top for item in seen}
 
-    assert _lines(draw)["apart"] == 0.0
+    assert _lines(draw) == {"text_disabled": 0.0, "text": 0.0}
 
 
 # -- laid out for ---------------------------------------------------------------------

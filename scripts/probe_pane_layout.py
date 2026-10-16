@@ -22,14 +22,16 @@ fleet in FOCUS:
 * the launcher: opened fresh, its rect against the viewport and its work area every
   frame for a second, then the window is resized under it and it is watched again.
 
-Everything is written to shots/layout-probe/ (the PNGs and measurements.json), and the
-table the note quotes is printed. Nothing in pptmstr/ is changed: the hooks read.
+Everything is written to shots/layout-probe/ (the PNGs and measurements.json), or to
+$PROBE_PANE_OUT, a directory under the repository root, and the table the note quotes
+is printed. Nothing in pptmstr/ is changed: the hooks read.
 """
 
 from __future__ import annotations
 
 import ctypes
 import json
+import os
 import struct
 import sys
 import zlib
@@ -41,7 +43,9 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 sys.path.insert(0, str(ROOT))
 
-OUT = ROOT / "shots" / "layout-probe"
+# PROBE_PANE_OUT=shots/<dir> keeps a run from replacing an earlier one's output. It
+# has to be under the repository root: see scripts/xvfb_shot.sh's tmpfs note.
+OUT = ROOT / os.environ.get("PROBE_PANE_OUT", "shots/layout-probe")
 
 _VERT = struct.Struct("<ffffI")  # ImDrawVert: pos, uv, col
 
@@ -136,7 +140,6 @@ def _style() -> dict[str, Any]:
         "item_spacing": [s.item_spacing.x, s.item_spacing.y],
         "frame_padding": [s.frame_padding.x, s.frame_padding.y],
         "margin_px(body)": transcript_pane.margin_px(body),
-        "log_sides(body, gutter)": list(transcript_pane.log_sides(body, s.scrollbar_size)),
         "tool_block._PADDING": list(tool_block._PADDING),
     }
 
@@ -213,8 +216,8 @@ def scenario(state: Any, fixtures: Path, sizes: list[tuple[int, int]]) -> Iterat
                 "display": [io.display_size.x, io.display_size.y],
                 "style": _style(),
                 "find_open": state.transcripts.find.open,
-                # Whether the log's scrollbar is drawn in ink this frame (_begin_log).
-                "overflowing": [bool(v) for v in state.transcripts.overflowing.values()],
+                # Whether each log's text was taller than the log last frame (_end_log).
+                "overflowing": [bool(v) for v in state.transcripts.overflowed.values()],
                 "windows": _tree("SESSION"),
             }
         )
@@ -490,7 +493,7 @@ def main() -> int:
     for row in table:
         print(
             f"PANE {row['tag']}: bar ink={row['overflowing']}"
-            f" sides={row['style']['log_sides(body, gutter)']}"
+            f" margin={row['style']['margin_px(body)']}"
         )
         for part in ("text", "tool_block", "controls_row", "composer"):
             print(f"  {part:13} {row[part]}")

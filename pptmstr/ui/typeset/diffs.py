@@ -715,21 +715,81 @@ def fence_diff(info: str, text: str) -> Diff | None:
     return model
 
 
-def fence_headers(text: str) -> tuple[str, ...]:
-    """
-    The lines of an honest fenced diff that the view draws as header rows, as
-    written: a file's ``---`` and ``+++`` and a hunk's ``@@`` line that names a
-    section. They are set above the hosted view as well (``above`` has why).
+_HUNK_COUNTS = re.compile(r"(@@ -\d+(,\d+)? \+\d+(,\d+)? @@)")
 
-    **Over them, where the fence holds what cannot be seen, the sentence that
-    says so** (``hidden_warning``): such a fence is one the view draws, a
-    placeholder in each such character's cell, and the view's own word for it
-    is in a header row.
+
+def counts_warning(text: str, model: Diff) -> str | None:
+    """
+    The sentence that says which of a fence's ``@@`` lines give counts its lines
+    do not have, or ``None`` where every one agrees.
+
+    The view writes the counts it counted (``accounted`` does not compare them),
+    so ``@@ -12,5 +12,6 @@`` over two old lines and three new is drawn as
+    ``-12,2 +12,3`` and the header the agent wrote is nowhere on screen. A count
+    left out is one, as in ``diff -u``. The reader makes a hunk of every line
+    that begins ``@@``, in order, so the written lines are paired with the
+    model's hunks by position; a line with no counts to read (``@@ junk``) is
+    passed over, and where the two do not pair up nothing is compared.
+    """
+    written = [line.rstrip("\r") for line in text.split("\n") if line.startswith("@@")]
+    with _READING:
+        counted = [(h.old_count, h.new_count) for f in model.files for h in f.hunks]
+    if len(written) != len(counted):
+        return None
+    wrong = []
+    for line, (old, new) in zip(written, counted, strict=True):
+        found = _HUNK_COUNTS.match(line)
+        if found is None:
+            continue
+        said_old = int(found[2][1:]) if found[2] else 1
+        said_new = int(found[3][1:]) if found[3] else 1
+        if (said_old, said_new) != (old, new):
+            wrong.append(f"{found[1]} has {old} old and {new} new")
+    if not wrong:
+        return None
+    return "the written hunk headers disagree with the lines: " + "; ".join(wrong)
+
+
+def fence_headers(text: str, model: Diff | None = None) -> tuple[str, ...]:
+    """
+    What is set above an honest fenced diff's hosted view, a line each: its
+    warnings (``fence_warnings``), then its header rows (``fence_header_rows``).
+    """
+    return (*fence_warnings(text, model), *fence_header_rows(text))
+
+
+def fence_warnings(text: str, model: Diff | None = None) -> tuple[str, ...]:
+    """
+    The sentences that lead what is set above an honest fenced diff's hosted
+    view, each a warning, drawn in the warn ink (``views._Warned``).
+
+    **Where the fence holds what cannot be seen, the sentence that says so**
+    (``hidden_warning``): such a fence is one the view draws, a placeholder in
+    each such character's cell, and the view's own word for it is in a header
+    row. **Then, where a hunk's written counts are not its lines', the
+    sentence that says so** (``counts_warning``), from ``model``, the fence's
+    model (``fence_diff``), read here when it is not given.
     """
     out = []
     marked = hidden_warning(line.removesuffix("\r") for line in text.split("\n"))
     if marked is not None:
         out.append(marked)
+    if model is None:
+        model = fence_diff("diff", text)
+    if model is not None:
+        miscounted = counts_warning(text, model)
+        if miscounted is not None:
+            out.append(miscounted)
+    return tuple(out)
+
+
+def fence_header_rows(text: str) -> tuple[str, ...]:
+    """
+    The lines of an honest fenced diff that the view draws as header rows, as
+    written: a file's ``---`` and ``+++`` and a hunk's ``@@`` line that names a
+    section. They are set above the hosted view as well (``above`` has why).
+    """
+    out = []
     for line in text.split("\n"):
         line = line.rstrip("\r")
         if line.startswith(("--- ", "+++ ")):

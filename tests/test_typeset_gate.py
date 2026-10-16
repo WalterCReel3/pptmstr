@@ -208,8 +208,8 @@ def test_syntax_brings_in_neither_the_library_nor_imgui_when_run() -> None:
         # Through every gate to the lexer, with inks of its fields' names: the
         # path that colours is the one a run-time import would be added on.
         "from collections import namedtuple\n"
-        "fields = 'keyword string comment number function operator default'\n"
-        "inks = namedtuple('Inks', fields)(2, 3, 4, 5, 6, 7, 8)\n"
+        "fields = 'keyword string comment number function operator default add remove heading'\n"
+        "inks = namedtuple('Inks', fields)(2, 3, 4, 5, 6, 7, 8, 9, 10, 11)\n"
         "text = 'python\\nif x == 1: pass'\n"
         "assert module.needs_lex(text, 6, None, inks)\n"
         "spans = module.block_spans(text, 6, 1, None, inks)\n"

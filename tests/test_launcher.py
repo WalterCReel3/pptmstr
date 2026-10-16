@@ -2881,6 +2881,9 @@ class _RealFrames:
         # For ``button``: the rectangle it was given, top and bottom, and the name
         # of the window it was drawn in.
         self.placed: dict[str, tuple[float, float, str]] = {}
+        # Set to draw the application's chrome around the launcher each frame: a main
+        # menu bar, and a status bar as hello_imgui draws one (``_chrome``).
+        self.chrome = False
         self._monkeypatch = monkeypatch
 
     def __enter__(self) -> _RealFrames:
@@ -2935,6 +2938,8 @@ class _RealFrames:
     def frame(self, count: int = 1) -> None:
         for _ in range(count):
             self.imgui.new_frame()
+            if self.chrome:
+                self._menu_bar()
             launcher.draw(
                 self.state,
                 running=0,
@@ -2947,7 +2952,38 @@ class _RealFrames:
             )
             # Asked inside the frame, at the level ``draw`` opened it from.
             self.popup_open = bool(self.imgui.is_popup_open(launcher.TITLE))
+            if self.chrome:
+                self._status_bar()
             self.imgui.end_frame()
+
+    def _menu_bar(self) -> None:
+        imgui = self.imgui
+        if imgui.begin_main_menu_bar():
+            imgui.text("Session")
+            imgui.end_main_menu_bar()
+
+    def _status_bar(self) -> None:
+        """
+        hello_imgui's: a window named ``StatusBar``, 1.4 frame heights tall across
+        the bottom of the viewport. Drawn after the launcher, as the one a frame
+        draws last, so the launcher can only know it from the frame before.
+        """
+        imgui = self.imgui
+        viewport = imgui.get_main_viewport()
+        tall = imgui.get_frame_height() * 1.4
+        imgui.set_next_window_pos(
+            imgui.ImVec2(viewport.pos.x, viewport.pos.y + viewport.size.y - tall)
+        )
+        imgui.set_next_window_size(imgui.ImVec2(viewport.size.x, tall))
+        flags = imgui.WindowFlags_.no_decoration | imgui.WindowFlags_.no_docking
+        imgui.begin("StatusBar", None, flags)
+        imgui.text("11 agents")
+        imgui.end()
+
+    def status_bar_top(self) -> float:
+        window = self.imgui.internal.find_window_by_name("StatusBar")
+        assert window is not None
+        return float(window.pos.y)
 
     def type(self, text: str) -> None:
         self.io.add_input_characters_utf8(text)
@@ -5460,6 +5496,134 @@ def test_no_line_of_text_widens_the_modal(monkeypatch: pytest.MonkeyPatch, tmp_p
         # and in the footer the hold reason is drawn in.
         assert modal.content_size.x <= width
         assert body.content_size.x <= body.size.x <= width  # type: ignore[attr-defined]
+
+
+# -- where it opens -------------------------------------------------------------------
+
+
+def _work_area(real: _RealFrames) -> tuple[float, float, float, float]:
+    """The room the launcher is centred in: under the menu bar, over the status bar."""
+    viewport = real.imgui.get_main_viewport()
+    left, top = float(viewport.work_pos.x), float(viewport.work_pos.y)
+    return left, top, left + float(viewport.work_size.x), real.status_bar_top()
+
+
+def _open_in_a_running_app(real: _RealFrames, size: tuple[float, float]) -> None:
+    """The app as it stands when the operator asks: its chrome drawn, frames gone by."""
+    real.chrome = True
+    real.io.display_size = real.imgui.ImVec2(*size)
+    real.frame(3)
+    real.state.request_open()
+
+
+def _assert_centred(real: _RealFrames) -> None:
+    left, top, right, bottom = _work_area(real)
+    x, y, width, height, _ = _modal_rect(real)
+    assert top > 0.0 and bottom < float(real.io.display_size.y), "the chrome is not drawn"
+    assert height <= bottom - top, "the fixture's modal does not fit its work area"
+    assert abs((y + height / 2.0) - (top + bottom) / 2.0) <= 1.0, (top, y, y + height, bottom)
+    assert abs((x + width / 2.0) - (left + right) / 2.0) <= 1.0
+    assert top <= y and y + height <= bottom
+
+
+_SIZES = [(1500.0, 900.0), (1920.0, 1080.0)]
+
+
+@pytest.mark.parametrize("size", _SIZES, ids=lambda s: f"{s[0]:g}x{s[1]:g}")
+def test_the_first_open_in_a_run_is_centred_in_the_work_area(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, size: tuple[float, float]
+) -> None:
+    """
+    A fresh context, as a run's first open is: the body has never been drawn, so the
+    modal measures short on the frame it appears and grows the frames after.
+    """
+    state = LauncherState(task=A_PREMISE, cwd=str(tmp_path))
+    _settled(state)
+    with _RealFrames(monkeypatch, state) as real:
+        _open_in_a_running_app(real, size)
+        real.frame(8)
+        _assert_centred(real)
+
+
+@pytest.mark.parametrize("size", _SIZES, ids=lambda s: f"{s[0]:g}x{s[1]:g}")
+def test_a_second_open_is_centred_in_the_work_area_too(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, size: tuple[float, float]
+) -> None:
+    state = LauncherState(task=A_PREMISE, cwd=str(tmp_path))
+    _settled(state)
+    with _RealFrames(monkeypatch, state) as real:
+        _open_in_a_running_app(real, (1280.0, 800.0))
+        real.frame(8)
+        real.io.add_key_event(real.imgui.Key.escape, True)
+        real.frame()
+        real.io.add_key_event(real.imgui.Key.escape, False)
+        real.frame(2)
+        assert not state.is_open
+
+        _open_in_a_running_app(real, size)
+        real.frame(8)
+        _assert_centred(real)
+
+
+def test_a_modal_the_operator_moved_stays_where_it_was_put(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    state = LauncherState(task=A_PREMISE, cwd=str(tmp_path))
+    _settled(state)
+    with _RealFrames(monkeypatch, state) as real:
+        _open_in_a_running_app(real, (1500.0, 900.0))
+        real.frame(8)
+        _assert_centred(real)
+        window = real.imgui.internal.find_window_by_name(launcher.TITLE)
+        _, top, _, _ = _work_area(real)
+        put = real.imgui.ImVec2(40.0, top + 20.0)
+        real.imgui.internal.set_window_pos(window, put)
+        real.frame(8)
+        x, y, _, _, _ = _modal_rect(real)
+        assert (x, y) == (40.0, top + 20.0)
+
+
+def test_a_modal_held_to_its_area_is_held_over_the_status_bar(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Grown past the room under it, it is moved up to the status bar and not past it."""
+    state = LauncherState(task=A_PREMISE, cwd=str(tmp_path))
+    _settled(state)
+    with _RealFrames(monkeypatch, state) as real:
+        _open_in_a_running_app(real, (1280.0, 720.0))
+        real.frame(8)
+        real.open_list = True
+        real.frame(6)
+        _, top, _, height, _ = _modal_rect(real)
+        _, work_top, _, bottom = _work_area(real)
+        assert work_top <= top and top + height <= bottom
+
+
+@pytest.mark.parametrize("height", [480.0, 600.0, 720.0, 800.0])
+def test_a_modal_taller_than_its_area_scrolls_its_body_and_not_its_buttons(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, height: float
+) -> None:
+    """
+    The top rung with the session list open is more than the room over the status
+    bar at every one of these heights: the body scrolls, and the window, held over
+    the status bar, does not.
+    """
+    row = _row("a", cwd=str(tmp_path))
+    state = LauncherState(task=A_PREMISE, cwd=str(tmp_path), policy=Policy.AUTONOMOUS)
+    _settled(state)
+    with _RealFrames(monkeypatch, state) as real:
+        real.scanner = lambda cwd: ((row,), {})
+        real.open_list = True
+        _open_in_a_running_app(real, (1280.0, height))
+        real.frame(10)
+        _, top, _, tall, modal_scroll = _modal_rect(real)
+        _, work_top, _, bottom = _work_area(real)
+        assert real.body().scroll_max.y > 0.0  # type: ignore[attr-defined]
+        assert modal_scroll == 0.0, "the window itself scrolls, and its buttons with it"
+        assert work_top <= top and top + tall <= bottom
+        for label in ("launch", "cancel"):
+            low, high, _ = real.placed[label]
+            assert top <= low and high <= top + tall
 
 
 def test_a_reopened_modal_is_centred_and_not_put_where_the_last_one_stood(

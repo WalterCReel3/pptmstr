@@ -758,9 +758,16 @@ def test_the_affordance_opens_the_viewer_in_place_and_closes_it_again(
     assert drawn_blocks[-1][0].more == "4,994 earlier lines" and not drawn_blocks[-1][1]
 
     press = {"4,994 earlier lines##more"}
-    real = widgets.small_button
-    monkeypatch.setattr(widgets, "small_button", lambda label: real(label) or label in press)
+    real = widgets.link
+    linked: list[str] = []
+
+    def link(label: str, *, inks: Any = None, ident: str | None = None) -> bool:
+        linked.append(label)
+        return real(label, inks=inks, ident=ident) or ident in press
+
+    monkeypatch.setattr(widgets, "link", link)
     frames(im, snap, state, 1)
+    assert linked[-1] == tool_block.SHOW_ALL, "the footer's link says what it does"
     press.clear()
     rows: list[str] = []
     real_text = im.text_colored
@@ -775,6 +782,7 @@ def test_the_affordance_opens_the_viewer_in_place_and_closes_it_again(
     shown = [row for row in rows if row.startswith("row ")]
     assert 0 < len(shown) <= 2 * (tool_block.VIEWER_ROWS + 4), "the clipper drew what is in sight"
 
+    assert linked[-1] == tool_block.COLLAPSE
     press.add(f"{tool_block.COLLAPSE}##more")
     frames(im, snap, state, 1)
     press.clear()
@@ -783,13 +791,12 @@ def test_the_affordance_opens_the_viewer_in_place_and_closes_it_again(
 
 
 @pytest.mark.parametrize("typeset_on", [False, True], ids=["wrap", "typeset"])
-def test_a_block_is_as_wide_as_the_log_whether_or_not_the_log_overflows(
+def test_a_block_is_as_wide_as_the_log_less_the_bar_where_the_log_overflows(
     request: pytest.FixtureRequest, drawn_blocks: list[Any], typeset_on: bool
 ) -> None:
     """
-    The pane's property: the measure does not change when the bar appears, so a
-    block does not either. Its width is the log's, the same in a short log and a
-    long one.
+    No strip is kept for a bar that is not there (pane-margins): a block is the
+    log's measure, which in a long log is the bar's width narrower.
     """
     im = request.getfixturevalue("seam" if typeset_on else "imgui")
     mode = RenderMode.TYPESET if typeset_on else None
@@ -802,7 +809,7 @@ def test_a_block_is_as_wide_as_the_log_whether_or_not_the_log_overflows(
     long.append_tool_call("a", "Bash", {"command": "echo a"})
     long.append_tool_result("a", "Bash", "one", is_error=False)
     frames(im, session(long), TranscriptState(mode=mode), 4)
-    assert drawn_blocks[-1][2] == narrow
+    assert narrow - drawn_blocks[-1][2] == im.get_style().scrollbar_size
 
 
 def test_find_without_the_library_counts_what_blocks_hold_and_prose_in_order(
@@ -1394,20 +1401,40 @@ def test_a_last_message_ending_on_its_closing_fence_is_coloured_when_the_turn_en
 
 
 @pytest.mark.parametrize("palette", PALETTES, ids=IDS)
-def test_a_button_in_a_block_is_seen_on_its_ground_and_its_label_reads(
-    palette: theme.Palette,
-) -> None:
+def test_a_link_in_a_block_is_the_blocks_link_ink_on_its_ground(palette: theme.Palette) -> None:
+    """The footer's link is the accent as the block draws its links, on the terminal."""
+    theme.set_theme(palette.name)
+    inks = tool_block.link_inks()
     ground = palette.terminal_bg
-    rest, hovered, held = tool_block.button_inks(palette)
-    ratios = [contrast_ratio(c, ground) for c in (rest, hovered, held)]
-    assert ratios[0] >= tool_block.BUTTON_FLOOR, ratios
-    assert ratios[0] < ratios[1] < ratios[2], "under the pointer and held, further off"
-    assert contrast_ratio(palette.text, rest) >= theme.TERMINAL_FLOOR, "the label at rest"
+    assert inks.rest.u32 == theme.terminal_ink(palette.accent).u32
+    for state in (inks.rest, inks.hovered, inks.pressed, inks.disabled):
+        assert contrast_ratio(state, ground) >= theme.LINK_FLOOR
 
 
-def test_a_themes_button_that_is_seen_on_the_ground_is_kept() -> None:
-    dark = theme.DARK
-    assert tool_block.button_inks(dark) == tool_block._themes_buttons(dark)
+@pytest.mark.parametrize(
+    ("more", "said"),
+    [
+        ("41 more lines", ["41 more lines ·"]),
+        (tool_block.SHOW_ALL, []),
+        (f"{tool_block.SHOW_ALL} · 12 B past the 1 MiB cap", ["12 B past the 1 MiB cap ·"]),
+    ],
+    ids=["a-count", "show-all", "past-the-cap"],
+)
+def test_the_footer_says_what_is_left_out_then_links_show_all_on_the_buttons_id(
+    monkeypatch: pytest.MonkeyPatch, more: str, said: list[str]
+) -> None:
+    texts: list[str] = []
+    links: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(tool_block.imgui, "text_colored", lambda colour, text: texts.append(text))
+    monkeypatch.setattr(tool_block.imgui, "same_line", lambda *args: None)
+    monkeypatch.setattr(
+        widgets,
+        "link",
+        lambda label, *, inks=None, ident=None: links.append((label, ident)) or True,
+    )
+    assert tool_block._affordance(more) is True
+    assert texts == said
+    assert links == [(tool_block.SHOW_ALL, f"{more}##more")]
 
 
 def test_a_block_out_of_sight_for_a_while_is_not_laid_out_again(
@@ -1458,11 +1485,6 @@ def test_a_block_out_of_sight_for_a_while_is_not_laid_out_again(
 # -- a reply sent mid-turn does not end the turn ------------------------------------------
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason="tool-block-fix item 4: the turn's end is not in the transcript yet (Translator._result"
-    " writes nothing), so a prompt line sent mid-turn reads as the start of a new turn",
-)
 def test_a_reply_sent_while_a_call_runs_leaves_the_call_running(
     imgui: Any, drawn_blocks: list[Any]
 ) -> None:
@@ -1476,6 +1498,55 @@ def test_a_reply_sent_while_a_call_runs_leaves_the_call_running(
     transcript.append(SegmentKind.SYSTEM, "\n> and then the docs\n")
     frames(imgui, session(transcript, AgentState.RUNNING_TOOL), TranscriptState(), 1)
     assert {b.head[0][0][2]: b.state for b, _, _ in drawn_blocks} == {"$ make": State.RUNNING}
+
+
+def test_a_call_with_no_result_has_none_coming_once_its_turn_ended(
+    imgui: Any, drawn_blocks: list[Any]
+) -> None:
+    """
+    The turn ends at its result (``Transcript.end_turn``), which the driver writes
+    before it says what state the node is in: a frame between the two still reads
+    the node mid-turn, and the call is not running.
+    """
+    transcript = Transcript()
+    transcript.append(SegmentKind.SYSTEM, "\n> build it\n")
+    transcript.append_tool_call("slow", "Bash", {"command": "make"})
+    transcript.end_turn()
+    frames(imgui, session(transcript, AgentState.RUNNING_TOOL), TranscriptState(), 1)
+    assert {b.head[0][0][2]: b.state for b, _, _ in drawn_blocks} == {"$ make": State.NO_RESULT}
+
+
+def test_the_turn_a_reply_waited_for_runs_its_own_calls_and_not_the_last_ones(
+    imgui: Any, drawn_blocks: list[Any]
+) -> None:
+    transcript = Transcript()
+    transcript.append(SegmentKind.SYSTEM, "\n> build it\n")
+    transcript.append_tool_call("slow", "Bash", {"command": "make"})
+    transcript.append(SegmentKind.SYSTEM, "\n> and then the docs\n")
+    transcript.end_turn()
+    transcript.append_tool_call("docs", "Bash", {"command": "make docs"})
+    frames(imgui, session(transcript, AgentState.RUNNING_TOOL), TranscriptState(), 1)
+    states = {b.head[0][0][2]: b.state for b, _, _ in drawn_blocks}
+    assert states == {"$ make": State.NO_RESULT, "$ make docs": State.RUNNING}
+
+
+def test_a_calls_turn_is_read_at_the_frames_pinned_length() -> None:
+    """
+    A frame draws the bytes it pinned (I7). A turn that the writer ended and
+    opened past them, with bytes since, is not this frame's: the call is still
+    running in what it draws.
+    """
+    transcript = Transcript()
+    transcript.append(SegmentKind.SYSTEM, "\n> build it\n")
+    transcript.append_tool_call("slow", "Bash", {"command": "make"})
+    pinned = transcript.published_length
+    transcript.append(SegmentKind.SYSTEM, "\n> and then the docs\n")
+    transcript.end_turn()
+    entry = transcript.tool_entry("slow")
+    assert entry is not None
+    at_pin = blocks_for(transcript, synced(transcript), in_turn=True, pinned=pinned)
+    now = blocks_for(transcript, synced(transcript), in_turn=True)
+    assert (at_pin._live(entry), now._live(entry)) == (True, False)
 
 
 def test_a_wheel_over_a_viewer_that_scrolls_is_the_viewers_and_the_log_keeps_following(
@@ -1589,3 +1660,166 @@ def test_a_running_checklist_drawn_whole_needs_no_affordance() -> None:
     todos = [{"content": "Write it", "status": "in_progress", "activeForm": "Write it"}]
     held = entry("TodoWrite", {"todos": todos}, answered=False)
     assert tool_block.layout(held, live=True).more == ""
+
+
+# -- positive accounting: what the block drew, and nothing else, is drawn ------------
+
+
+@pytest.mark.parametrize(
+    ("name", "args"),
+    [
+        ("Bash", {"command": "make test", "extra": "make"}),
+        ("Bash", {"command": "echo 1", "retries": 1}),
+        ("Bash", {"command": "true", "verbose": True}),
+        ("Bash", {"command": "ls", "cwd": ""}),
+        ("Read", {"file_path": "/a", "mode": "read"}),
+    ],
+    ids=["value-elsewhere", "number-in-command", "flag-as-json", "empty-value", "caption-word"],
+)
+def test_an_argument_the_block_does_not_draw_is_behind_show_all_whatever_it_holds(
+    name: str, args: dict[str, Any]
+) -> None:
+    """
+    An argument counts as drawn only where the layout drew it, and not where its
+    text happens to occur elsewhere in the block: an empty value, a value inside
+    the command, a word the caption says.
+    """
+    output = "     1\tx" if name == "Read" else "ok"
+    assert tool_block.layout(entry(name, args, output), live=False).more == SHOW_ALL
+
+
+def test_find_says_an_undrawn_argument_is_not_shown_though_its_text_is_drawn() -> None:
+    held = entry("Bash", {"command": "make test", "extra": "make"}, "ok")
+    block = tool_block.layout(held, live=False)
+    rows = texts(tool_block.viewer_rows(held))
+    hits = [(rows[h.row].strip(), h.shown) for h in tool_block.find(held, block, "make")]
+    assert hits == [("make test", True), ("make", False)]
+
+
+def test_find_tells_a_hidden_line_from_a_drawn_one_with_the_same_text() -> None:
+    output = "error\n" + "".join(f"row {n}\n" for n in range(5)) + "error\n"
+    held = entry("Bash", {"command": "make"}, output)
+    block = tool_block.layout(held, live=False)
+    assert block.more == "1 earlier line"
+    rows = tool_block.viewer_rows(held)
+    hits = tool_block.find(held, block, "error")
+    assert [h.shown for h in hits] == [False, True], "the first is behind '1 earlier line'"
+    assert texts(rows)[hits[0].row] == texts(rows)[hits[1].row] == "error"
+
+
+@pytest.mark.parametrize(
+    ("output", "more"),
+    [("Found 2 files\na.py\nb.py", ""), ("Found 250 files\na.py\nb.py", SHOW_ALL)],
+    ids=["count-drawn", "count-not-drawn"],
+)
+def test_greps_found_line_is_said_by_the_caption_only_when_its_count_is_the_drawn_one(
+    output: str, more: str
+) -> None:
+    block = tool_block.layout(entry("Grep", {"pattern": "x"}, output), live=False)
+    assert ("caption", "text", "2 files") in block.caption
+    assert block.more == more
+
+
+@pytest.mark.parametrize(
+    ("output", "error", "answered", "live"),
+    [
+        ("The file /a has been updated successfully.", False, True, False),
+        ("String to replace not found", True, True, False),
+        (None, False, False, True),
+    ],
+    ids=["done", "error", "running"],
+)
+def test_an_edit_that_only_drops_a_trailing_newline_offers_show_all(
+    output: str | None, error: bool, answered: bool, live: bool
+) -> None:
+    args = {"file_path": "/a", "old_string": "x\n", "new_string": "y"}
+    held = entry("Edit", args, output, error=error, answered=answered)
+    assert tool_block.layout(held, live).more == SHOW_ALL
+
+
+@pytest.mark.parametrize(
+    ("ms", "said"),
+    [
+        (1234567, "timeout 1234567 ms"),
+        (1500, "timeout 1500 ms"),
+        (2000, "timeout 2 s"),
+        (120000, "timeout 2 min"),
+        (90000, "timeout 90 s"),
+        (1500.5, "timeout 1500.5 ms"),
+    ],
+)
+def test_a_bash_timeout_is_said_exactly(ms: float, said: str) -> None:
+    block = tool_block.layout(entry("Bash", {"command": "x", "timeout": ms}, "ok"), live=False)
+    assert said in caption(block)
+    assert block.more == ""
+
+
+@pytest.mark.parametrize(
+    ("name", "args", "output"),
+    [
+        ("Bash", {"command": "ls", "description": "list", "timeout": 2000}, "a\n\nb"),
+        ("Bash", {"command": "", "run_in_background": False}, ""),
+        ("Read", {"file_path": "/a", "offset": 1, "limit": 2, "pages": "1"}, numbered(2)),
+        ("Edit", {"file_path": "/a", "old_string": "x", "new_string": "y"}, None),
+        ("Edit", {"file_path": "/a", "old_string": "x\ny", "new_string": ""}, None),
+        ("Write", {"file_path": "/a", "content": "one\ntwo"}, None),
+        ("Grep", {"pattern": "p", "path": "src", "glob": "*.py", "-i": True}, "Found 1 file\na"),
+        ("Grep", {"pattern": "p", "output_mode": "content", "-C": 2}, "a:1:x\n\na:3:y"),
+        ("Glob", {"pattern": "*.zz", "path": "/"}, "No files found"),
+        ("WebFetch", {"url": "https://h/p", "prompt": "what?"}, "One.\n\nTwo."),
+        ("Agent", {"description": "d", "prompt": "p", "model": "m"}, "Done.\n\nAll."),
+        ("NotebookEdit", {"notebook_path": "/n", "cell_id": "c", "new_source": "x"}, None),
+        ("mcp__s__t", {"a": "1", "b": 2}, [{"type": "text", "text": "sent\nok"}]),
+        ("Frob", {"a": "1"}, "done"),
+    ],
+)
+def test_a_block_that_drew_every_line_of_its_entry_needs_no_affordance(
+    name: str, args: dict[str, Any], output: object
+) -> None:
+    """
+    The other side of the account: each layout records what it draws, so an
+    entry it draws all of -- a running call where the result is one the block
+    does not draw -- has no affordance.
+    """
+    held = entry(name, args, output, answered=output is not None)
+    assert tool_block.layout(held, live=output is None).more == ""
+
+
+def test_find_says_a_drawn_line_of_an_argument_is_shown_and_a_hidden_one_is_not() -> None:
+    content = "".join(f"row {n} needle\n" for n in range(7)).rstrip("\n")
+    held = entry("Write", {"file_path": "/a", "content": content}, answered=False)
+    block = tool_block.layout(held, live=True)
+    assert block.more == "2 more lines in the file"
+    assert [h.shown for h in tool_block.find(held, block, "needle")] == [True] * 5 + [False] * 2
+
+
+def test_find_says_no_line_of_an_unwrapped_error_is_shown() -> None:
+    """
+    The rows of an error the block unwrapped are not the output's lines in
+    place, so none is counted as drawn, and a find opens the viewer to them.
+    """
+    held = entry(
+        "Read", {"file_path": "/a"}, "<tool_use_error>no such file</tool_use_error>", error=True
+    )
+    block = tool_block.layout(held, live=False)
+    assert texts(block.body) == ["no such file"]
+    assert [h.shown for h in tool_block.find(held, block, "no such")] == [False]
+
+
+def test_find_says_a_line_the_block_cut_is_not_shown() -> None:
+    held = entry("Bash", {"command": "cat"}, "x" * (LINE_CUT * 2) + "needle")
+    block = tool_block.layout(held, live=False)
+    assert texts(block.body)[0].endswith("…")
+    assert [h.shown for h in tool_block.find(held, block, "needle")] == [False]
+
+
+def test_find_says_a_line_an_edits_diff_left_out_is_not_shown() -> None:
+    old = "keep 0\nkeep 1\nchange\nkeep 3\nkeep 4"
+    held = entry(
+        "Edit",
+        {"file_path": "/a", "old_string": old, "new_string": old.replace("change", "changed")},
+        answered=False,
+    )
+    block = tool_block.layout(held, live=True)
+    assert texts(block.body) == [" keep 1", "-change", "+changed", " keep 3"]
+    assert [h.shown for h in tool_block.find(held, block, "keep 0")] == [False, False]

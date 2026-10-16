@@ -12,6 +12,7 @@ import argparse
 import asyncio
 import concurrent.futures
 import dataclasses
+import functools
 import os
 import queue
 import signal
@@ -32,6 +33,7 @@ from . import (
     boardfacts,
     boardlog,
     boardsync,
+    bus,
     cli_version,
     commandfile,
     commandrun,
@@ -999,6 +1001,11 @@ class AppState:
     # session id. An entry is dropped when a later ask for the session is taken.
     # Written by ``apply_intents`` alone.
     detach_refused: dict[str, DetachRefusal] = field(default_factory=dict)
+    # Wakes the store ordered and not yet sent, by session id, in the order
+    # given, and when each session's is sent (``_hold_wake``, ``_send_wakes``).
+    # Written by ``apply_intents`` alone.
+    wakes: dict[str, list[effects.SessionWoken]] = field(default_factory=dict)
+    wake_due: dict[str, float] = field(default_factory=dict)
     # The fleet observer's last failure, so one that fails on every step is said
     # once. See ``_record_fleet``.
     fleet_observer_failed: str | None = None
@@ -1079,11 +1086,78 @@ def apply_intents(state: AppState) -> None:
         if isinstance(effect, effects.CommandToStop):
             _stop_command(state, effect.command_id)
             continue
+        if isinstance(effect, effects.SessionWoken):
+            # An order to this shell, as the two above are.
+            _hold_wake(state, effect)
+            continue
         state.bridge.settle(effect)
+    _send_wakes(state)
     if writer is not None:
         _read_board_reports(state, writer.drain())
     _read_fleet_reports(state.fleet_writer.drain())
     _read_command_reports(state)
+
+
+WAKE_WINDOW_S = 2.0
+"""
+How long a session's first wake waits for more before it is sent. Each wake
+costs the session a turn, and an operator answering three decisions in a row
+answers them seconds apart: this makes the three one message, and holds none
+of them longer than this.
+"""
+
+# A session in one of these has no turn to be woken into.
+_UNWAKEABLE = frozenset({AgentState.DONE, AgentState.CANCELLED, AgentState.FAILED})
+
+
+def _hold_wake(state: AppState, wake: effects.SessionWoken) -> None:
+    """
+    Keep ``wake`` with any others its session is owed, to be sent as one when
+    the first of them is ``WAKE_WINDOW_S`` old (``_send_wakes``).
+    """
+    held = state.wakes.setdefault(wake.session_id, [])
+    if not held:
+        state.wake_due[wake.session_id] = state.frame_now + WAKE_WINDOW_S
+    held.append(wake)
+
+
+def _send_wakes(state: AppState) -> None:
+    """
+    Send each session whose wakes are due one message of pptmstr's naming all
+    of them (``bus.wake_message``), through the pool to its live client
+    (``SessionPool.wake``).
+
+    **Only a session that is there to read it.** One whose root is gone,
+    closed (a card recalled from its file), off the fleet, or done, cancelled
+    or failed is sent nothing, and its wakes are let go of: the panes still
+    show what was answered, and a session resumed later reads it with
+    ``read_decisions`` or ``read_commands``. The pool sends nothing either to
+    a session with no connected client, and writes nothing for it.
+    """
+    due = [sid for sid, at in state.wake_due.items() if at <= state.frame_now]
+    if not due:
+        return
+    snap = state.store.snapshot()
+    for session_id in due:
+        held = state.wakes.pop(session_id, [])
+        del state.wake_due[session_id]
+        root: NodeId = (session_id, None)
+        record = snap.get(root)
+        if (
+            record is None
+            or record.recalled is not None
+            or record.state in _UNWAKEABLE
+            or snap.off_fleet(session_id)
+        ):
+            continue
+        _session_action(
+            state, functools.partial(_wake, root=root, text=bus.wake_message(snap, held))
+        )
+
+
+async def _wake(pool: SessionPool, *, root: NodeId, text: str) -> None:
+    if not await pool.wake(root, text):
+        LOG.info("agent", f"{root[0]} had no client to wake; nothing was sent")
 
 
 def _note_detach(state: AppState, effect: effects.SessionDetachSettled) -> None:
@@ -3809,6 +3883,112 @@ def _split(initial: str, new: str, direction: imgui.Dir, ratio: float) -> hello_
     return s
 
 
+FLEET_MIN_CHARS = 40
+"""
+The fleet pane's least width, in the UI font's character advance (Inconsolata
+is monospace): 320 px at 16 px. The narrowest at which a card's badges, the
+start of its title and its cost fit without overlap, measured in the running
+app (shots/fleet-dock/probe_widths.py, 2026-10-16): the first line of a card
+owing three kinds of obligation takes 233 px besides its title -- three badges
+of 50-54 px, the gaps, the throbber, the pads -- and a title start ("audi…") is
+40 px, so a card needs 273 px. The pane's window padding (8 px each side) and
+its scrollbar (16 px) make 305 px for a session's card, and a sub-agent's card,
+indented 14 px, needs 319 px.
+"""
+
+FLEET_MAX_CHARS = 64
+"""
+The fleet pane's greatest width, in the same advance: 512 px at 16 px. Past it a
+card gains nothing it is scanned for. A card is one line of title and one of
+state, and at this width the title line holds about thirty characters beside
+three badges and fifty-five beside none, and the state line a topic of fifty:
+the first line of a task as an operator types one, and a topic as a session
+writes one. Every pixel past that comes out of the queue or the conversation,
+which are the panes read at length.
+"""
+
+FLEET_NODE_FLAGS = (
+    int(imgui.DockNodeFlags_.no_undocking)
+    | int(imgui.DockNodeFlags_.no_docking_split)
+    | int(imgui.internal.DockNodeFlagsPrivate_.no_docking_over_me)
+    | int(imgui.internal.DockNodeFlagsPrivate_.no_window_menu_button)
+)
+"""
+The fleet's dock node: it cannot be undocked, no pane is docked into it as a tab
+or splits it, and it has no window menu -- the menu that offers "hide tab bar",
+which would take the pane's "fleet" header with it. Its tab bar stays: no
+``no_tab_bar``, no ``auto_hide_tab_bar``. Set on the split for a layout made
+from code and again on every frame (``_hold_fleet``), because ImGui keeps none
+of the first three in a saved layout.
+"""
+
+
+def fleet_bounds(advance: float) -> tuple[float, float]:
+    """The fleet pane's least and greatest width in pixels, for a font of ``advance``."""
+    return FLEET_MIN_CHARS * advance, FLEET_MAX_CHARS * advance
+
+
+def fleet_width(width: float, advance: float) -> float:
+    """``width`` held between ``fleet_bounds``."""
+    low, high = fleet_bounds(advance)
+    return min(max(width, low), high)
+
+
+def _hold_fleet() -> None:
+    """
+    Inside the fleet pane, every frame: its dock node keeps ``FLEET_NODE_FLAGS``,
+    and its width, whether dragged or read from a saved layout, is put back
+    between ``fleet_bounds``.
+
+    **By the node's width asked for (``size_ref``), a frame late.** ImGui gives
+    a dock splitter no greatest size, and sets the width a drag asks for on the
+    node; the next frame lays the node out from that, so a width written here
+    is the one that frame lays out. The pane is the rail beside a node holding
+    the central one, which ImGui sizes from its sibling's width asked for and
+    gives the rest. A drag past a bound shows for the frame it is made in and
+    no longer. A pane that is not docked -- a layout saved floating, before
+    the flags -- is left as it is.
+    """
+    window = imgui.internal.get_current_window()
+    node = window.dock_node
+    if node is None or node.is_floating_node():
+        return
+    if node.local_flags & FLEET_NODE_FLAGS != FLEET_NODE_FLAGS:
+        node.set_local_flags(node.local_flags | FLEET_NODE_FLAGS)
+    asked = node.size_ref.x if node.size_ref.x > 0.0 else node.size.x
+    held = fleet_width(asked, float(imgui.calc_text_size("M").x))
+    if held != asked:
+        node.size_ref = imgui.ImVec2(held, node.size_ref.y)
+
+
+def _fleet_window(fn: Callable[[], None]) -> hello_imgui.DockableWindow:
+    """
+    The fleet pane, in either layout: held in its node (``_hold_fleet``), and
+    with no close: a pane that cannot be docked again once closed is not one
+    to offer to close.
+    """
+
+    def held() -> None:
+        _hold_fleet()
+        fn()
+
+    w = _window("FLEET", "RailSpace", held)
+    w.can_be_closed = False
+    w.is_visible = True
+    # Shown whatever a saved layout says: one saved with the pane closed, from
+    # before it could not be, would otherwise hide it with no way to show it,
+    # as the View menu lists only the panes that can be closed.
+    w.remember_is_visible = False
+    return w
+
+
+def _rail_split() -> hello_imgui.DockingSplit:
+    """The rail's split, the same in both layouts, its node made with ``FLEET_NODE_FLAGS``."""
+    split = _split("MainDockSpace", "RailSpace", imgui.Dir.left, 0.21)
+    split.node_flags = FLEET_NODE_FLAGS
+    return split
+
+
 def _window(
     label: str, dock: str, fn: Callable[[], None], flags: int = 0
 ) -> hello_imgui.DockableWindow:
@@ -3858,6 +4038,36 @@ def _scrollback_height(avail: float, composer_room: float) -> float:
     return max(avail - composer_room, _SCROLLBACK_FLOOR)
 
 
+def _log_text_edges() -> compose.TextEdges | None:
+    """
+    Where the log just drawn in the current window ran its text this frame, read
+    off the log's own child window: inside its padding, which is the margin its
+    text mode chose, and inside its vertical bar where ImGui showed one. None when
+    no log was drawn here this frame (a session not loaded, a scrollback clipped).
+
+    Read and not worked out again from ``transcript_pane``'s rules, so the composer
+    under it cannot drift from what the log did: the bar comes and goes a frame
+    after the text outgrows the log, and the margin follows the text mode's size.
+    Unscrolled, so a typeset log scrolled sideways moves neither edge.
+    """
+    # Asked of the context and not of get_current_window, which asserts where there
+    # is no window: a draw that was handed no frame has no log either.
+    context = imgui.get_current_context()
+    here = None if context is None else context.current_window
+    if here is None:
+        return None
+    # The id the log's child is begun under (transcript_pane._begin_log). ImGui
+    # empties a window's child list at its first begin of each frame, so whatever
+    # is listed was drawn in this one.
+    ident = imgui.get_id("##transcript")
+    for child in here.dc.child_windows:
+        if child.child_id == ident:
+            left = child.pos.x + child.window_padding.x
+            right = child.pos.x + child.size.x - child.scrollbar_sizes.x - child.window_padding.x
+            return compose.TextEdges(left, right)
+    return None
+
+
 def _panels(state: AppState) -> dict[str, Callable[[], None]]:
     """
     Every pane's draw function, built once and shared by both layouts.
@@ -3880,6 +4090,7 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
                 _card_wiring(state),
                 hide_ended=state.settings.hide_ended_subagents,
                 now_wall=state.frame_wall,
+                new_task=lambda: _perform(state, main_menu.NewTask()),
             )
 
     def inbox_pane() -> None:
@@ -3932,6 +4143,8 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
                 state.frame_now,
                 state.decisions,
                 _command_rows(state),
+                state.bridge,
+                wrap=state.settings.wrap_inputs,
             )
 
     def board_pane_fn() -> None:
@@ -3944,9 +4157,16 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
             )
 
     def digest_pane_fn() -> None:
-        # Follows the cursor, as BOARD does: it is that session's board, read.
+        # Follows the cursor, as BOARD does: it is that session's board, read,
+        # and its history, drawn from the inbox's drafts and command state.
         if state.frame_snap is not None:
-            digest_pane.draw(state.frame_snap, state.focus, state.frame_now)
+            digest_pane.draw(
+                state.frame_snap,
+                state.focus,
+                state.frame_now,
+                state.decisions,
+                _command_rows(state),
+            )
 
     def brief_pane_fn() -> None:
         # Follows the cursor, like every other pane in this space. A brief belongs
@@ -3961,6 +4181,7 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
         node = state.focus.node(state.frame_snap)
         session = (node[0], None) if node else None
         height = _scrollback_height(imgui.get_content_region_avail().y, state.composer_room)
+        log = None
         if imgui.begin_child("##scrollback", imgui.ImVec2(0, height)):
             transcript_pane.draw(
                 state.frame_snap,
@@ -3969,6 +4190,7 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
                 _closed_path(state, node),
                 show_reasoning=state.settings.show_reasoning,
             )
+            log = _log_text_edges()
         imgui.end_child()
         below = imgui.get_content_region_avail().y
         imgui.separator()
@@ -3980,6 +4202,7 @@ def _panels(state: AppState) -> dict[str, Callable[[], None]]:
             interrupt=lambda n: _interrupt(state, n),
             close=lambda n: _close(state, n),
             wrap=state.settings.wrap_inputs,
+            log=log,
         )
         state.composer_room = below - imgui.get_content_region_avail().y
 
@@ -4109,13 +4332,13 @@ def _triage_layout(panels: dict[str, Callable[[], None]]) -> hello_imgui.Docking
     params.layout_name = TRIAGE
     d = imgui.Dir
     params.docking_splits = [
-        _split("MainDockSpace", "RailSpace", d.left, 0.21),
+        _rail_split(),
         # 0.40 starved the inbox: identity, wait and call summary all have to fit
         # between the rail and this pane, and the summary is what got cut.
         _split("MainDockSpace", "ContextSpace", d.right, 0.32),
     ]
     params.dockable_windows = [
-        _window("FLEET", "RailSpace", panels["FLEET"]),
+        _fleet_window(panels["FLEET"]),
         _window("NEEDS YOU", "MainDockSpace", panels["NEEDS YOU"]),
         # First tab in the space, and deliberately in front of CONTEXT: the pane
         # answering "what exactly am I approving" outranks the one answering "what
@@ -4159,11 +4382,11 @@ def _focus_layout(panels: dict[str, Callable[[], None]]) -> hello_imgui.DockingP
     params.layout_name = FOCUS
     d = imgui.Dir
     params.docking_splits = [
-        _split("MainDockSpace", "RailSpace", d.left, 0.21),
+        _rail_split(),
         _split("MainDockSpace", "HealthSpace", d.right, 0.26),
     ]
     params.dockable_windows = [
-        _window("FLEET", "RailSpace", panels["FLEET"]),
+        _fleet_window(panels["FLEET"]),
         _window("SESSION", "MainDockSpace", panels["SESSION"], SESSION_FLAGS),
         _window("HEALTH", "HealthSpace", panels["HEALTH"]),
         # Behind HEALTH here, in front of CONTEXT in TRIAGE. The pane is the same

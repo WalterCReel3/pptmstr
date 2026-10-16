@@ -220,11 +220,12 @@ def test_turn_prose_is_the_defect_tail_used_to_show() -> None:
     assert t.turn_prose() == question
 
 
-def test_turn_prose_starts_at_the_last_system_segment() -> None:
-    """SYSTEM is written only by AgentSession.send, so it *is* the turn boundary."""
+def test_turn_prose_starts_at_the_prompt_that_opened_the_turn() -> None:
+    """SYSTEM is written only by AgentSession.send, so a prompt after an ended turn opens one."""
     t = Transcript()
     t.append(SegmentKind.SYSTEM, "> first task\n")
     t.append(SegmentKind.OUTPUT, "done with the first thing")
+    t.end_turn()
     t.append(SegmentKind.SYSTEM, "> now do the other one\n")
     t.append(SegmentKind.OUTPUT, "and here is the second answer")
     assert t.turn_prose() == "and here is the second answer"
@@ -238,7 +239,34 @@ def test_turn_prose_joins_several_output_runs_in_the_turn() -> None:
     t.append(SegmentKind.TOOL_CALL, "Bash(pytest)\n")
     t.append(SegmentKind.TOOL_RESULT, "Bash -> 3 failed\n")
     t.append(SegmentKind.OUTPUT, "Three are failing. Fix them?")
-    assert t.turn_prose() == "I'll check the tests.\nThree are failing. Fix them?"
+    assert t.turn_prose() == "I'll check the tests.\n\n\nThree are failing. Fix them?"
+
+
+def test_turn_prose_breaks_the_paragraph_where_a_tool_call_separated_the_prose() -> None:
+    """
+    The driver appends each text block raw, so a sentence before a tool call need
+    not end on a newline. Joined bare, a fence the next block opens with would sit
+    on the sentence's line, and markdown would not open it.
+    """
+    fence = "```diff\n--- a/x.py\n+++ b/x.py\n@@ -1,1 +1,1 @@\n-b = 2\n+c = 3\n```\n"
+    t = Transcript()
+    t.append(SegmentKind.SYSTEM, "\n> go\n")
+    t.append(SegmentKind.OUTPUT, "Here is the change, done.")
+    t.append_tool_call("t1", "Bash", {"command": "true"})
+    t.append_tool_result("t1", "Bash", "ok", is_error=False)
+    t.append(SegmentKind.OUTPUT, fence)
+    assert t.turn_prose() == "Here is the change, done.\n\n" + fence
+
+
+def test_turn_prose_keeps_output_segments_nothing_separated_joined_as_written() -> None:
+    """A closed segment is a seam in storage, not in what was said."""
+    t = Transcript()
+    t.append(SegmentKind.SYSTEM, "\n> go\n")
+    t.append(SegmentKind.OUTPUT, "half a ")
+    t.close_segment()
+    t.append(SegmentKind.OUTPUT, "sentence")
+    assert len([s for s in t.segments() if s.kind is SegmentKind.OUTPUT]) == 2
+    assert t.turn_prose() == "half a sentence"
 
 
 def test_turn_prose_without_a_marker_is_the_whole_buffer() -> None:
@@ -257,6 +285,7 @@ def test_turn_prose_is_empty_when_the_turn_has_only_machinery() -> None:
     t = Transcript()
     t.append(SegmentKind.SYSTEM, "> go\n")
     t.append(SegmentKind.OUTPUT, "from the previous turn")
+    t.end_turn()
     t.append(SegmentKind.SYSTEM, "> and again\n")
     t.append(SegmentKind.TOOL_CALL, "Read(x.py)\n")
     assert t.turn_prose() == ""
@@ -276,6 +305,163 @@ def test_turn_prose_respects_the_published_length() -> None:
 
 def test_turn_prose_on_an_empty_transcript() -> None:
     assert Transcript().turn_prose() == ""
+
+
+# -- where a turn starts and ends ------------------------------------------------
+
+
+def _last_prompt_prose(t: Transcript) -> str:
+    """The rule before turns were recorded: OUTPUT after the last SYSTEM segment."""
+    segments = t.segments()
+    start = next((s.end for s in reversed(segments) if s.kind is SegmentKind.SYSTEM), 0)
+    return "".join(
+        t.read(max(s.start, start), s.end)
+        for s in segments
+        if s.kind is SegmentKind.OUTPUT and s.end > start
+    )
+
+
+def test_a_prompt_sent_mid_turn_leaves_the_turn_where_it_began() -> None:
+    """
+    ``send`` writes the prompt line at once, mid-turn too. The turn going on is
+    still the one its line came after, and what is said after the line is still
+    that turn's, until the turn ends.
+    """
+    t = Transcript()
+    t.append(SegmentKind.SYSTEM, "\n> build it\n")
+    began = t.published_length
+    t.append(SegmentKind.OUTPUT, "building. ")
+    t.append(SegmentKind.SYSTEM, "\n> and then the docs\n")
+    t.append(SegmentKind.OUTPUT, "built.")
+    assert (t.turn_start(), t.turn_open()) == (began, True)
+    assert t.turn_prose() == "building. \n\nbuilt."
+
+
+def test_the_prompt_sent_mid_turn_opens_its_turn_where_that_one_ends() -> None:
+    t = Transcript()
+    t.append(SegmentKind.SYSTEM, "\n> build it\n")
+    t.append(SegmentKind.OUTPUT, "building.")
+    t.append(SegmentKind.SYSTEM, "\n> and then the docs\n")
+    t.append(SegmentKind.OUTPUT, " built.")
+    t.end_turn()
+    ended = t.published_length
+    assert (t.turn_start(), t.turn_open(), t.turn_prose()) == (ended, True, "")
+    t.append(SegmentKind.OUTPUT, "the docs")
+    assert t.turn_prose() == "the docs"
+    t.end_turn()
+    assert (t.turn_start(), t.turn_open(), t.turn_prose()) == (ended, False, "the docs")
+
+
+def test_the_turn_ends_at_the_result_and_stays_the_last_one_until_a_prompt() -> None:
+    """
+    An ended turn is still "this turn" for DETAIL -- the question it finished on is
+    what the operator reads -- but nothing of it is going on.
+    """
+    t = Transcript()
+    t.append(SegmentKind.SYSTEM, "\n> go\n")
+    began = t.published_length
+    t.append(SegmentKind.OUTPUT, "Shall I?")
+    t.end_turn()
+    assert (t.turn_start(), t.turn_open(), t.turn_prose()) == (began, False, "Shall I?")
+    t.end_turn()
+    t.append(SegmentKind.OUTPUT, " (late)")
+    assert (t.turn_start(), t.turn_open()) == (began, False), "a second end moves nothing"
+    t.append(SegmentKind.SYSTEM, "\n> yes\n")
+    assert (t.turn_start(), t.turn_open(), t.turn_prose()) == (t.published_length, True, "")
+
+
+def test_each_prompt_sent_during_a_turn_opens_one_turn_in_the_order_sent() -> None:
+    t = Transcript()
+    t.append(SegmentKind.SYSTEM, "\n> one\n")
+    t.append(SegmentKind.SYSTEM, "\n> two\n")
+    t.append(SegmentKind.OUTPUT, "x")
+    t.append(SegmentKind.SYSTEM, "\n> three\n")
+    starts = []
+    for _ in range(3):
+        t.end_turn()
+        starts.append((t.turn_start(), t.turn_open()))
+        t.append(SegmentKind.OUTPUT, "y")
+    lengths = [s for s, _ in starts]
+    assert [o for _, o in starts] == [True, True, False]
+    assert lengths[0] < lengths[1] and lengths[2] == lengths[1], "the third end opened nothing"
+
+
+def test_the_turn_is_read_as_it_stood_at_a_pinned_length() -> None:
+    """A frame pins a length (I7); the turn it reads is the one going on there."""
+    t = Transcript()
+    t.append(SegmentKind.SYSTEM, "\n> one\n")
+    first = t.published_length
+    t.append(SegmentKind.OUTPUT, "a")
+    said = t.published_length
+    t.append(SegmentKind.SYSTEM, "\n> two\n")
+    t.end_turn()
+    # No bytes between the second prompt and the end: a length read there is
+    # already past the end, which is what the next frame will read.
+    ended = t.published_length
+    t.append(SegmentKind.OUTPUT, "b")
+    t.end_turn()
+    assert (t.turn_start(0), t.turn_open(0)) == (0, True), "before any prompt"
+    assert (t.turn_start(said), t.turn_open(said)) == (first, True)
+    assert (t.turn_start(ended), t.turn_open(ended)) == (ended, True)
+    assert (t.turn_start(), t.turn_open()) == (ended, False)
+    assert t.turn_start(10**9) == t.turn_start(), "a limit past the end is the end"
+
+
+def test_a_transcript_with_no_recorded_end_reads_its_turn_as_before() -> None:
+    """
+    A session resumed, or one whose stream died before its result, has a prompt
+    and no end. Its turn is the one after the last prompt, as it always was, and
+    the start of the buffer when nothing was ever sent (a sub-agent).
+    """
+    worker = Transcript()
+    worker.append(SegmentKind.OUTPUT, "the answer")
+    assert (worker.turn_start(), worker.turn_open()) == (0, True)
+    assert worker.turn_prose() == _last_prompt_prose(worker) == "the answer"
+
+    resumed = Transcript()
+    resumed.append(SegmentKind.TOOL_RESULT, "a result written before any prompt\n")
+    resumed.append(SegmentKind.OUTPUT, "said before")
+    resumed.append(SegmentKind.SYSTEM, "\n> carry on\n")
+    assert resumed.turn_start() == resumed.published_length, "the first prompt opens a turn"
+    resumed.append(SegmentKind.OUTPUT, "carrying on")
+    assert resumed.turn_open()
+    assert resumed.turn_prose() == _last_prompt_prose(resumed) == "carrying on"
+
+
+def test_a_turn_with_no_prompt_ends_at_the_result_too() -> None:
+    t = Transcript()
+    t.append(SegmentKind.OUTPUT, "said")
+    t.end_turn()
+    assert (t.turn_start(), t.turn_open(), t.turn_prose()) == (0, False, "said")
+
+
+def test_the_turn_is_never_read_past_what_is_published() -> None:
+    """The writer thread ends and opens turns while a reader pins lengths (I7)."""
+    t = Transcript()
+    done = threading.Event()
+    bad: list[tuple[int, int]] = []
+
+    def writer() -> None:
+        for n in range(2000):
+            t.append(SegmentKind.SYSTEM, f"\n> {n}\n")
+            t.append(SegmentKind.OUTPUT, "x" * (n % 7))
+            if n % 2:
+                t.end_turn()
+        done.set()
+
+    def reader() -> None:
+        while not done.is_set():
+            pinned = t.published_length
+            start = t.turn_start(pinned)
+            if start > pinned:
+                bad.append((start, pinned))
+
+    threads = [threading.Thread(target=writer), threading.Thread(target=reader)]
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    assert bad == []
 
 
 # -- tool entries --------------------------------------------------------------
@@ -430,3 +616,131 @@ def test_a_reader_never_sees_an_entry_whose_line_is_unpublished() -> None:
     thread.join()
     assert not bad
     assert len(t.tool_entries(0, t.published_length)) == 2000
+
+
+# -- a turn read whole --------------------------------------------------------------
+
+
+class _EndsBetweenReads(Transcript):
+    """
+    A transcript whose writer ends the open turn right after a frame's first read
+    of the turn: the interleaving of the asyncio thread with the UI thread, made
+    to happen every time. ``reads`` is the accessors read, in order.
+    """
+
+    __slots__ = ("reads",)
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reads: list[str] = []
+
+    def _read(self, name: str) -> None:
+        self.reads.append(name)
+        if len(self.reads) == 1:
+            self.end_turn()
+
+    def turn_start(self, limit: int | None = None) -> int:
+        try:
+            return super().turn_start(limit)
+        finally:
+            self._read("turn_start")
+
+    def turn_open(self, limit: int | None = None) -> bool:
+        try:
+            return super().turn_open(limit)
+        finally:
+            self._read("turn_open")
+
+    def turn(self, limit: int | None = None) -> tuple[int, bool]:
+        try:
+            return super().turn(limit)
+        finally:
+            self._read("turn")
+
+
+def test_a_frame_reads_a_turns_start_and_whether_it_is_open_at_one_moment() -> None:
+    """
+    A prompt queued behind the open turn opens its own when that one ends, and
+    ``end_turn`` writes no bytes, so the frame's pinned length does not move. The
+    frame reads the turn in one call, so whatever the writer does between two of
+    the frame's reads, its start and its open state are of one moment.
+    """
+    from pptmstr.ui import transcript_pane
+
+    t = _EndsBetweenReads()
+    t.append(SegmentKind.SYSTEM, "\n> first\n")
+    first = t.published_length
+    t.append_tool_call("a", "Bash", {"command": "sleep 9"})
+    t.append(SegmentKind.SYSTEM, "\n> second\n")
+    blocks = transcript_pane._Blocks(
+        transcript_pane.TranscriptState(),
+        ("s1", None),
+        t,
+        transcript_pane.NodeTranscript(),
+        t.published_length,
+        True,
+        16.0,
+    )
+    assert t.reads == ["turn"]
+    assert (blocks.turn_start, blocks.turn_open) == (first, True), "read before it ended"
+
+
+def test_turn_is_turn_start_and_turn_open_together() -> None:
+    t = Transcript()
+    assert t.turn() == (0, True)
+    t.append(SegmentKind.SYSTEM, "\n> go\n")
+    start = t.published_length
+    t.append(SegmentKind.OUTPUT, "said")
+    assert t.turn() == (start, True) == (t.turn_start(), t.turn_open())
+    t.end_turn()
+    assert t.turn() == (start, False) == (t.turn_start(), t.turn_open())
+    assert t.turn(start) == (start, True), "read at a length before it ended"
+
+
+def test_a_withdrawn_prompt_that_opened_a_turn_leaves_the_turns_as_they_were() -> None:
+    t = Transcript()
+    t.append(SegmentKind.SYSTEM, "\n> one\n")
+    t.end_turn()
+    before = t.turn()
+    line = t.append(SegmentKind.SYSTEM, "\n> lost\n")
+    assert t.turn() == (line, True)
+    t.withdraw_prompt(line)
+    assert t.turn() == before
+
+
+def test_a_withdrawn_prompt_queued_behind_a_turn_gives_up_its_place() -> None:
+    t = Transcript()
+    t.append(SegmentKind.SYSTEM, "\n> one\n")
+    lost = t.append(SegmentKind.SYSTEM, "\n> lost\n")
+    kept = t.append(SegmentKind.SYSTEM, "\n> kept\n")
+    t.withdraw_prompt(lost)
+    t.end_turn()
+    assert t.turn() == (t.published_length, True), "kept's turn, opened where one ended"
+    t.append(SegmentKind.OUTPUT, "for kept")
+    t.end_turn()
+    assert t.turn_prose() == "for kept" and t.turn() == (kept, False)
+
+
+def test_a_withdrawn_turn_hands_its_place_to_the_prompt_queued_behind_it() -> None:
+    """
+    The session answers the queued prompt at once, since the withdrawn one never
+    reached it: that prompt's turn starts at its own line.
+    """
+    t = Transcript()
+    lost = t.append(SegmentKind.SYSTEM, "\n> lost\n")
+    kept = t.append(SegmentKind.SYSTEM, "\n> kept\n")
+    t.withdraw_prompt(lost)
+    assert t.turn() == (kept, True)
+    t.append(SegmentKind.OUTPUT, "for kept")
+    t.end_turn()
+    assert t.turn_prose() == "for kept" and t.turn() == (kept, False)
+
+
+def test_withdrawing_a_prompt_whose_turn_has_ended_changes_nothing() -> None:
+    t = Transcript()
+    line = t.append(SegmentKind.SYSTEM, "\n> answered\n")
+    t.end_turn()
+    before = (t.turn(), list(t._turn_starts), list(t._turn_ends))
+    t.withdraw_prompt(line)
+    t.withdraw_prompt(12345)
+    assert (t.turn(), list(t._turn_starts), list(t._turn_ends)) == before

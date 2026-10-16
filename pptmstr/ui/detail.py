@@ -81,9 +81,9 @@ from typing import Any, assert_never
 
 from imgui_bundle import imgui
 
-from .. import commandfile, commandtext
 from ..approval import DiffText, command_shown, diff_line_kind
-from ..command import Command, CommandId, Refused, ran
+from ..bridge import Bridge
+from ..command import CommandId
 from ..model import (
     ApprovalNeeded,
     CommandOwed,
@@ -96,7 +96,7 @@ from ..model import (
     SessionFailed,
     Snapshot,
 )
-from ..theme import OBLIGATION_GLYPH, P
+from ..theme import OBLIGATION_GLYPH, Color, P
 from ..transcript import SegmentKind, Transcript
 from . import command_view, decision_view, inbox, review, rich_pane, typeset, widgets
 from .blocks import Block, BlockCursor
@@ -147,8 +147,8 @@ _KIND_LABEL: dict[ObligationKind, str] = {
     ObligationKind.DECISION: "wants a decision",
     ObligationKind.COMMAND: "asks you to run a command",
 }
-# Ended commands listed for one session, newest first.
-_MAX_ENDED = 20
+# A header tooltip's wrap width, in font heights.
+_TOOLTIP_EMS = 36.0
 
 _DIFF_COLOUR = {
     "add": "diff_add",
@@ -190,9 +190,11 @@ class DetailState:
     # than derived per frame -- see widgets.follow_tail for why scroll position
     # cannot answer this while the view is being pinned.
     narration_follow: bool = True
-    # (node, published_length) of the parse held in _blocks. The transcript is
-    # append-only, so a length that has not moved means bytes that have not moved.
-    _key: tuple[NodeId, int] | None = None
+    # (node, published_length, turn_start) of the parse held in _blocks. The
+    # transcript is append-only, so a length that has not moved means bytes that
+    # have not moved; the turn's start is in the key because a turn opened by a
+    # prompt sent mid-turn opens where that turn ended, and writes nothing.
+    _key: tuple[NodeId, int, int] | None = None
     _blocks: tuple[Block, ...] = ()
     # (node, text) of the parse held in _deliverable_blocks. A second memo rather
     # than a second use of the first: the two parse different strings for the same
@@ -211,8 +213,9 @@ class DetailState:
     # Whether a diff the library draws is two columns, where the pane has the
     # room to offer it.
     side_by_side: bool = False
-    # (node, published_length) of the text held in _turn_text; as _key above.
-    _turn_key: tuple[NodeId, int] | None = None
+    # (node, published_length, turn_start) of the text held in _turn_text; as
+    # _key above.
+    _turn_key: tuple[NodeId, int, int] | None = None
     _turn_text: str = ""
     # (pending id, columns, asked for whole) of the parts held in _arguments, with
     # what they leave unset. The same tuple is handed to the seam every frame,
@@ -245,7 +248,7 @@ class DetailState:
         On a settled turn the key stops moving, so this is one parse and then
         pointer comparisons for as long as the operator reads it.
         """
-        key = (node, transcript.published_length)
+        key = (node, transcript.published_length, transcript.turn_start())
         if self._key != key:
             cursor = BlockCursor()
             cursor.feed(
@@ -294,7 +297,7 @@ class DetailState:
         The same string object while nothing moved, so the seam's "has the source
         changed" is an identity check on the frames that draw a settled question.
         """
-        key = (node, transcript.published_length)
+        key = (node, transcript.published_length, transcript.turn_start())
         if self._turn_key != key:
             self._turn_key = key
             self._turn_text = transcript.turn_prose()
@@ -358,17 +361,33 @@ def draw(
     now: float,
     decisions: decision_view.DecisionState | None = None,
     commands: inbox.CommandRows | None = None,
+    bridge: Bridge | None = None,
+    *,
+    wrap: bool = True,
 ) -> None:
     """
     Render the cursor's obligation in full. Never reads the store.
 
-    ``decisions`` is the inbox's answer drafts, read here and typed nowhere in
-    this pane. None is a caller with no inbox beside it, and then no draft is
-    mentioned.
+    ``decisions`` is the inbox's answer drafts and ``commands`` what the inbox
+    draws a command's row with, the same objects, so this pane shows the body
+    the row shows and the draft the row holds. None is a caller with no inbox
+    beside it, and then no draft is mentioned.
 
-    ``commands`` is what the inbox draws a command's row with, and the same
-    object: this pane shows the body the row shows, with every control dead.
-    It never calls ``CommandViewState.attend``; the inbox does, once a frame.
+    **The place to act where the queue is not on screen** (``acts``). In each
+    layout there is exactly one place to act on a parked item: the queue's row
+    where NEEDS YOU is drawn (TRIAGE), and this pane where it is not (FOCUS),
+    as ``review.queue_on_screen`` reads it. Acting, this pane draws the row's
+    own controls, through the row's own functions -- ``inbox.approval_controls``
+    and ``inbox.editor``, ``inbox.draw_command`` enabled, ``decision_view.
+    draw_answer_box`` -- and runs the queue's once-a-frame bookkeeping
+    (``inbox.attend``), and its "from the row" lines go. Not acting, every
+    control is dead and those lines say where the controls are. ``bridge``
+    None is a caller with nothing to act through, and this pane then never
+    acts.
+
+    A session's closed decisions and ended commands are not drawn here: they
+    have left the queue and are nothing in front of the operator, so they are
+    DIGEST's (``digest_pane.draw_history``).
     """
     typeset_on = typeset.enabled(typeset.Pane.DETAIL)
     subjects = live_subjects(snap, focus)
@@ -379,9 +398,18 @@ def draw(
     elif len(pane.views):
         pane.views.clear()
 
+    acts = (
+        bridge is not None
+        and decisions is not None
+        and not review.queue_on_screen(state, int(imgui.get_frame_count()))
+    )
+    if acts:
+        assert decisions is not None
+        inbox.attend(snap, focus, state, decisions, commands)
+
     obligation = focus.obligation(snap)
     if obligation is None:
-        _nothing_selected(snap, pane, focus, decisions, now, commands)
+        _nothing_selected(snap, pane, focus)
         return
 
     _header(snap, obligation, now, frozenset() if commands is None else commands.restored)
@@ -394,26 +422,47 @@ def draw(
         imgui.push_text_wrap_pos(_visible_edge() if typeset_on else 0.0)
         match obligation:
             case ApprovalNeeded():
-                _approval(state, pane, obligation)
+                _approval(state, pane, obligation, bridge if acts else None, wrap=wrap)
             case QuestionPending():
                 _question(snap, pane, obligation)
             case SessionFailed():
                 _failure(pane, obligation)
             case DecisionOwed():
-                decision_view.draw_detail(snap, decisions, obligation)
+                decision_view.draw_detail(
+                    snap, decisions, obligation, bridge=bridge if acts else None, wrap=wrap
+                )
             case CommandOwed():
-                inbox.draw_command(snap, commands, obligation.command, enabled=False)
-                imgui.spacing()
-                imgui.text_disabled(COMMAND_FROM_ROW)
+                _command(snap, commands, obligation, acts, wrap=wrap)
             case _:
                 assert_never(obligation)
-        # Whatever kind the cursor is on: a session's answered decisions and its
-        # ended commands have no row in the queue, so this pane is where they
-        # are still read.
-        decision_view.draw_closed(snap, decisions, obligation.node[0], now)
-        draw_ended_commands(snap, commands, obligation.node[0])
         imgui.pop_text_wrap_pos()
     imgui.end_child()
+
+
+def _command(
+    snap: Snapshot,
+    commands: inbox.CommandRows | None,
+    obligation: CommandOwed,
+    acts: bool,
+    *,
+    wrap: bool,
+) -> None:
+    """
+    A command's body as the queue's row draws it (``inbox.draw_command``):
+    acting, with the row's own presses, and an ``OPEN`` press of this pane's in
+    place of the click on the row header that opens it there; not acting,
+    every control dead and the line that says where they are.
+    """
+    command = obligation.command
+    if acts and commands is not None and not commands.state.is_open(command.id):
+        # What a click on the row's header does in the queue: open it, from
+        # which the arm delay runs before a first press is taken.
+        if widgets.small_button(OPEN_COMMAND):
+            commands.state.open(command.id, float(imgui.get_time()))
+    inbox.draw_command(snap, commands, command, wrap=wrap, enabled=acts)
+    if not acts:
+        imgui.spacing()
+        imgui.text_disabled(COMMAND_FROM_ROW)
 
 
 def _visible_edge() -> float:
@@ -448,14 +497,7 @@ def _begin_body(label: str, typeset_on: bool) -> bool:
     return bool(imgui.begin_child(label, imgui.ImVec2(0.0, 0.0), 0, flags))
 
 
-def _nothing_selected(
-    snap: Snapshot,
-    pane: DetailState,
-    focus: FocusState,
-    decisions: decision_view.DecisionState | None,
-    now: float,
-    commands: inbox.CommandRows | None = None,
-) -> None:
+def _nothing_selected(snap: Snapshot, pane: DetailState, focus: FocusState) -> None:
     """
     No obligation under the cursor. Say which session it *is* on rather than going
     blank, so an empty pane is never confused with a broken one -- and then show
@@ -473,15 +515,8 @@ def _nothing_selected(
         return
     assert node is not None
 
-    imgui.push_text_wrap_pos(0.0)
     imgui.text_colored(P.text_dim.vec4, "nothing waiting on you from")
-    imgui.text_colored(P.text.vec4, widgets.author_text(record.task) or "this session")
-    imgui.pop_text_wrap_pos()
-
-    # Above what the session is saying and not below it: the narration takes
-    # whatever height is left, so anything after it is never reached.
-    decision_view.draw_closed(snap, decisions, node[0], now)
-    draw_ended_commands(snap, commands, node[0])
+    _title_line(P.text, record.task or "this session")
 
     # is_active is "mid-turn and will emit more", which is the tense this heading
     # needs. An idle or finished session keeps the section and reads in past tense
@@ -657,8 +692,8 @@ def _header(
     restored: AbstractSet[CommandId] = frozenset(),
 ) -> None:
     """
-    Whose obligation, of what kind, waiting how long -- the row's own columns, but
-    unclipped and allowed to wrap onto as many lines as the title needs.
+    Whose obligation, of what kind, waiting how long -- the row's own columns, with
+    the title on one line of its own, shortened by ``_title_line``.
 
     The spawn marker comes from ``inbox`` for the same reason ``identity`` does: the
     row and this pane must not be able to disagree about how many sub-agents a yes
@@ -669,6 +704,7 @@ def _header(
     title, qualifier = inbox.identity(snap, obligation)
     marker = inbox.spawn_marker(snap, obligation)
 
+    widgets.small_button_line()
     imgui.text_colored(colour.vec4, OBLIGATION_GLYPH[obligation.kind])
     imgui.same_line()
     imgui.text_colored(colour.vec4, _KIND_LABEL[obligation.kind])
@@ -678,22 +714,57 @@ def _header(
     if widgets.small_button("copy"):
         imgui.set_clipboard_text(plain_text(snap, obligation, restored))
 
+    _title_line(P.text_strong, title)
     imgui.push_text_wrap_pos(0.0)
-    # The title keeps its author's line breaks: this pane is where a task is read
-    # whole, and the wrap gives it the lines.
-    imgui.text_colored(P.text_strong.vec4, widgets.author_text(title))
     imgui.text_colored(P.text_dim.vec4, widgets.flat_line(qualifier))
     if marker is not None:
         imgui.text_colored(P.accent.vec4, marker)
     imgui.pop_text_wrap_pos()
 
 
+def _title_line(colour: Color, text: str) -> None:
+    """
+    A task as DETAIL heads its pane with it: on one line, cut to the room left on
+    it by ``widgets.ellipsis_by`` -- the rule under the ``widgets.ellipsis`` the
+    fleet card titles itself with, so the two shorten one task to one string at
+    one width.
+
+    One line whatever the task's length, because a session's opening task is
+    whatever was pasted into the launcher, and a header that wraps it whole pushes
+    everything the pane is for below the fold. The whole text stays reachable: in
+    this line's tooltip and in what ``copy`` puts on the clipboard. BRIEF holds it
+    only for a team launched fresh, whose first premise it is.
+    """
+    shown = widgets.ellipsis_by(
+        text, imgui.get_content_region_avail().x, lambda s: float(imgui.calc_text_size(s).x)
+    )
+    imgui.text_colored(colour.vec4, shown)
+    if shown != widgets.flat_line(text) and imgui.is_item_hovered():
+        # Wrapped at a reading width rather than the screen's: a tooltip as wide
+        # as the display is a line nobody can follow back to its start.
+        imgui.begin_tooltip()
+        imgui.push_text_wrap_pos(imgui.get_font_size() * _TOOLTIP_EMS)
+        imgui.text_colored(colour.vec4, widgets.author_text(text))
+        imgui.pop_text_wrap_pos()
+        imgui.end_tooltip()
+
+
 # -- bodies --------------------------------------------------------------------
 
 
-def _approval(state: review.ReviewState, pane: DetailState, obligation: ApprovalNeeded) -> None:
+def _approval(
+    state: review.ReviewState,
+    pane: DetailState,
+    obligation: ApprovalNeeded,
+    bridge: Bridge | None = None,
+    *,
+    wrap: bool = True,
+) -> None:
     """
-    The change first, the call that produced it second.
+    The change first, the call that produced it second, and with ``bridge`` --
+    where this pane is the place to act -- the queue row's own controls under
+    them (``inbox.approval_controls``), and the editor in place of the body
+    while ``e`` has the call open for editing (``inbox.editor``).
 
     For a Write or an Edit the diff *is* the decision; ``content`` is a whole-file
     argument that would push it a screen and a half down. Arguments stay below it
@@ -703,11 +774,20 @@ def _approval(state: review.ReviewState, pane: DetailState, obligation: Approval
     """
     pending = obligation.approval
     imgui.text_colored(P.accent.vec4, pending.tool_name)
-    # This pane has no approve button, and it can be the only one showing the
-    # call: an ``a`` that was not sent is said here as well as on the inbox row.
-    not_sent = review.refusal_for(state, pending.id)
-    if not_sent is not None:
-        imgui.text_colored(P.warn.vec4, not_sent)
+    frame = int(imgui.get_frame_count())
+    if bridge is not None and state.editing == pending.id:
+        # The draft, in ImGui's own input and all of it: nothing is unset.
+        inbox.editor(state, pending, wrap=wrap)
+        state.body_shown(review.DETAIL, pending.id, 0, frame)
+        inbox.approval_controls(state, bridge, pending, 0)
+        return
+    if bridge is None:
+        # Not acting, and this pane can be the only one showing the call: an
+        # ``a`` that was not sent is said here as well as on the inbox row.
+        # Acting, the controls say it (``inbox.approval_controls``).
+        not_sent = review.refusal_for(state, pending.id)
+        if not_sent is not None:
+            imgui.text_colored(P.warn.vec4, not_sent)
 
     # Said under either renderer: "what you approve is not what is drawn" is the
     # one line this body may not lose.
@@ -732,7 +812,9 @@ def _approval(state: review.ReviewState, pane: DetailState, obligation: Approval
     # What ``review.withheld`` holds an approve on: lines of this body the frame
     # did not put on screen. Those past the bound that have not been asked for,
     # under either renderer, and all of a text the library stopped under.
-    state.body_shown(review.DETAIL, pending.id, unset, int(imgui.get_frame_count()))
+    state.body_shown(review.DETAIL, pending.id, unset, frame)
+    if bridge is not None:
+        inbox.approval_controls(state, bridge, pending, unset)
 
 
 def _typeset_arguments(pane: DetailState, pending: PendingApproval, subject: str) -> int:
@@ -960,208 +1042,8 @@ def _failure(pane: DetailState, obligation: SessionFailed) -> None:
 # -- break-glass commands ---------------------------------------------------------
 
 COMMAND_FROM_ROW = "run, refuse or cancel from its row in the inbox: nothing here acts"
-ENDED_COPY = "copy"
-
-
-def ended_commands(snap: Snapshot, session_id: str) -> tuple[Command, ...]:
-    """Every command of a session that has ended, most recently ended first."""
-    ended = [
-        (c.end.at, c.id, c)
-        for c in snap.commands.values()
-        if c.session_id == session_id and c.end is not None
-    ]
-    return tuple(c for _, _, c in sorted(ended, key=lambda e: (e[0], e[1]), reverse=True))
-
-
-def ended_heading(count: int) -> str:
-    return f"commands ended in this session ({count})"
-
-
-def unread_command_lines(
-    snap: Snapshot, session_id: str, restored: AbstractSet[CommandId] = frozenset()
-) -> tuple[str, ...]:
-    """
-    One line for each asker that has not been handed how a command of its ended,
-    drawn above the list and outside its triangle: nothing wakes an asker for a
-    result, so this is where one that sits unread shows.
-
-    A withdrawal is not among them. Its asker made it (``command_view.delivery_line``).
-    Nor is a command in ``restored``: it came from a file, a file does not say
-    whether its asker read it, and a warning for every command of an earlier
-    run would be one the operator learns to read past. Its own body says
-    where it is from (``command_view.delivery_line``).
-    """
-    by_asker: dict[str, list[str]] = {}
-    for command in reversed(ended_commands(snap, session_id)):
-        delivery = command_view.delivery_line(command, "")
-        if delivery is None or command.first_delivered_at is not None:
-            continue
-        if command.id in restored:
-            continue
-        by_asker.setdefault(widgets.one_line(inbox.command_role(snap, command)), []).append(
-            widgets.one_line(command.id)
-        )
-    return tuple(
-        f"ended, not yet read by {role}: {', '.join(ids)}" for role, ids in by_asker.items()
-    )
-
-
-def ended_label(snap: Snapshot, command: Command, now: float) -> str:
-    """
-    The line an ended command is listed under: its id, whose it was and how it
-    ended, in this pane's words. Nothing its asker or a program wrote; a
-    refusal's reason is the operator's own, on one line.
-    """
-    role = widgets.one_line(inbox.command_role(snap, command))
-    return (
-        f"{widgets.one_line(command.id)} from {role}: {command_view.row_state(command, now).text}"
-    )
-
-
-def log_path(command: Command) -> str | None:
-    """
-    Where the whole of what a command wrote is kept, or None for one that
-    started no process and so has no log, or whose ids name no directory.
-    """
-    if command.end is None or not ran(command.end.outcome):
-        return None
-    directory = commandfile.command_dir(command.session_id, command.id)
-    return None if directory is None else str(directory / commandfile.LOG_NAME)
-
-
-def draw_ended_commands(snap: Snapshot, rows: inbox.CommandRows | None, session_id: str) -> None:
-    """
-    The session's ended commands, behind a triangle that starts closed, each
-    behind one of its own. Draws nothing for a session with none.
-
-    This is where a command is read after its row has left the queue: what
-    ran, how it ended, the end of what it wrote, where the rest is, and
-    whether its asker has read any of that. Every body is
-    ``command_view.draw_ended``'s.
-    """
-    ended = ended_commands(snap, session_id)
-    if not ended:
-        return
-    now = 0.0 if rows is None else rows.now
-    imgui.spacing()
-    for line in unread_command_lines(
-        snap, session_id, frozenset() if rows is None else rows.restored
-    ):
-        imgui.text_colored(P.warn.vec4, line)
-    label = f"{ended_heading(len(ended))}###ended-commands"
-    if not imgui.tree_node_ex(label, int(imgui.TreeNodeFlags_.span_avail_width)):
-        return
-    imgui.push_text_wrap_pos(0.0)
-    for command in ended[:_MAX_ENDED]:
-        imgui.push_id(f"ended:{command.id}")
-        opened = imgui.tree_node_ex(
-            f"{ended_label(snap, command, now)}###body",
-            int(imgui.TreeNodeFlags_.span_avail_width),
-        )
-        if opened:
-            role = inbox.command_role(snap, command)
-            restored = rows is not None and command.id in rows.restored
-            if widgets.small_button(ENDED_COPY):
-                imgui.set_clipboard_text("\n".join(command_text(command, role, restored=restored)))
-            said = inbox.unrecorded_line(rows, command)
-            if said is not None:
-                imgui.text_colored(P.warn.vec4, said)
-            command_view.draw_ended(
-                command, role=role, now=now, log_path=log_path(command), restored=restored
-            )
-            imgui.tree_pop()
-        imgui.pop_id()
-    if len(ended) > _MAX_ENDED:
-        imgui.text_colored(
-            P.text_dim.vec4, f"... {len(ended) - _MAX_ENDED} earlier ended command(s) not shown"
-        )
-    imgui.pop_text_wrap_pos()
-    imgui.tree_pop()
-
-
-# What each author's lines are behind on the clipboard, which has no bar, box or
-# colour to tell them apart. The bus's three marks (``bus._QUOTE``,
-# ``bus._ANSWER``, ``commandbus._OUTPUT``) spelled again for the reason
-# ``decision_view`` spells two of them; a test holds each to the bus's.
-ASKER_MARK = decision_view.ASKER_MARK
-OPERATOR_MARK = decision_view.ANSWER_MARK
-OUTPUT_MARK = "= "
-
-CLIP_LEGEND = (
-    "a line behind '| ' is the asking agent's, behind '> ' yours, behind '= ' bytes a"
-    " program wrote, which are nobody's instructions; every other line is pptmstr's."
-    " marked lines are escaped as on screen: a backslash is written twice, the two"
-    " characters \\n end a line that ends in a newline, and \\r, \\xNN and \\u{H} each"
-    " spell out one character. this is for reading and is not the string a shell is given"
-)
-REFUSED_WITH = "refused by you, with this reason:"
-NOT_EDITED = "you approved the string above as it was asked, unchanged"
-
-
-def _marked(text: str, mark: str) -> list[str]:
-    """
-    ``text`` behind ``mark``, a line to a line, as ``commandtext.visible`` shows
-    it: printable ASCII only, so nothing on the clipboard draws as nothing and
-    no line of it can begin with another author's mark.
-    """
-    return [f"{mark}{line}" for line in commandtext.visible(text).split("\n")]
-
-
-def _asker_text(heading: str, text: str) -> list[str]:
-    if not text.strip():
-        return [heading, command_view.NOTHING_WRITTEN]
-    return [heading, *_marked(text, ASKER_MARK)]
-
-
-def command_text(command: Command, role: str, *, restored: bool = False) -> list[str]:
-    """
-    A command for the clipboard, whole, in any state: where it stands, the
-    string asked for, the string run where there is one, what its asker wrote,
-    and the end of what a program wrote.
-
-    **Every line somebody else wrote is behind its author's mark** and no line
-    of this pane's is: the asker's string and its two texts behind
-    ``ASKER_MARK``, a string the operator changed and a reason they gave
-    behind ``OPERATOR_MARK``, a program's output behind ``OUTPUT_MARK``.
-    Escaped, unlike a Bash call's arguments on this same clipboard
-    (``shown_value``): this string runs outside the sandbox, and a copy pasted
-    into an editor that hid a character would be read as a string it is not.
-
-    ``restored`` is whether the record came from a file, which is what
-    ``command_view.delivery_line`` needs to say "not read" truthfully.
-    """
-    role = widgets.one_line(role)
-    end, run = command.end, command.run
-    parts = [CLIP_LEGEND, ""]
-    if end is not None and isinstance(end.outcome, Refused) and end.outcome.reason.strip():
-        parts += [REFUSED_WITH, *_marked(end.outcome.reason, OPERATOR_MARK)]
-    elif end is None and run is not None:
-        # Without how long: a duration on the clipboard is stale when pasted.
-        stopping = f" - {command_view.STOP_ASKED}" if command.stop_asked_at is not None else ""
-        parts.append(f"running{stopping}")
-    else:
-        # Asked or ended, and neither wording reads a clock.
-        parts.append(command_view.row_state(command, 0.0).text)
-    delivery = command_view.delivery_line(command, role, restored=restored)
-    if delivery is not None:
-        parts.append(delivery.text)
-    parts += ["", command_view.asked_heading(role), *_marked(command.asked, ASKER_MARK)]
-    if run is not None:
-        if command.edited:
-            said = command_view.edited_by_you(command_view.stage_of(command))
-            parts += ["", said, *_marked(run.text, OPERATOR_MARK)]
-        else:
-            parts += ["", NOT_EDITED]
-    parts += ["", *_asker_text(f"why {role} asks, in its words:", command.reason)]
-    parts += _asker_text(f"what {role} expects it to change, in its words:", command.expects)
-    if end is not None and ran(end.outcome):
-        parts += ["", command_view.output_heading(end.output_bytes, end.tail)]
-        if end.tail:
-            parts += _marked(end.tail, OUTPUT_MARK)
-        where = log_path(command)
-        if where is not None:
-            parts.append(f"all of it is in {widgets.one_line(where)}")
-    return parts
+# DETAIL's press that opens a command's row where the queue is not on screen.
+OPEN_COMMAND = "open"
 
 
 # -- pure helpers, testable without a GL context -------------------------------
@@ -1487,7 +1369,7 @@ def plain_text(
             parts += decision_view.plain_text(snap, obligation)
         case CommandOwed():
             command = obligation.command
-            parts += command_text(
+            parts += command_view.command_text(
                 command, inbox.command_role(snap, command), restored=command.id in restored
             )
         case _:

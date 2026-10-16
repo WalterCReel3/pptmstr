@@ -131,6 +131,14 @@ class Palette:
     # on a dark palette and darker on a light one, and it is the one thing that
     # tells a dock's field from its pane, since a frame has no outline but on
     # high_contrast. Not ``well``: a modal's fields stand on another surface.
+    #
+    # Two departures, each the least step that clears the floors
+    # (tests/test_theme.py). turbo steps 0.19: its ``panel``, where a child
+    # window's checkbox stands, is lighter than ``bg``, and every step from 0.11
+    # to 0.18 passes through it. cde and win311 step toward white, 0.10 and
+    # 0.11: their grounds are mid-tones with dark text, and a well darker than
+    # the pane leaves typed text under 6.75:1 in it, under which no hint is
+    # both 4.5:1 in the well and 1.5:1 off typed text.
     dock_well: Color
     border: Color
     selection: Color
@@ -141,14 +149,15 @@ class Palette:
     # in it at about a hundred call sites, so it is held to read apart from
     # ``text`` and not raised to a field's floor. Placeholder text is ``hint``.
     text_dim: Color
-    # The hint in an empty field: ``text_dim`` where it already reads at 4.5:1 in
-    # ``dock_well`` and ``well``, and otherwise the smallest step of it toward
-    # ``text`` that does in both (tests/test_theme.py). ImGui draws a hint in
-    # ``text_disabled``, so a field with one is drawn inside ``hint_colour()``.
-    # On cde and win311 the step is about half: their wells are mid-tones on
-    # which no ink lighter than that reaches 4.5:1, so there a hint is only
-    # 1.20 and 1.32:1 off typed text.
+    # The hint in an empty field on a dock: ``text_dim`` where it already reads at
+    # 4.5:1 in ``dock_well``, and otherwise the smallest step of it toward
+    # ``text`` that does (tests/test_theme.py). ``dialog_hint`` is the same in
+    # ``well``, a modal's field: one colour for both would be the darker well's,
+    # which on win311 put a placeholder darker than its own field's caption.
+    # ImGui draws a hint in ``text_disabled``, so a field with one is drawn
+    # inside ``hint_colour()``, told which of the two wells it stands in.
     hint: Color
+    dialog_hint: Color
     text_strong: Color
 
     # general accents. Three jobs, one colour each: accent is structure and live
@@ -331,6 +340,7 @@ DARK = Palette(
     text=col(0xC9CEDC),
     text_dim=col(0x7C8397),
     hint=col(0x888EA1),
+    dialog_hint=col(0x7D8497),
     text_strong=col(0xF0F3FA),
     accent=col(0x4FC1E9),
     focus=col(0xC77DFF),
@@ -376,6 +386,7 @@ LIGHT = Palette(
     text=col(0x1F232C),
     text_dim=col(0x5E6675),
     hint=col(0x5E6675),
+    dialog_hint=col(0x5E6675),
     text_strong=col(0x0A0D14),
     accent=col(0x0C6E9E),
     focus=col(0x7A28C4),
@@ -425,6 +436,7 @@ HIGH_CONTRAST = Palette(
     text=col(0xFFFFFF),
     text_dim=col(0xC0C0C0),
     hint=col(0xC0C0C0),
+    dialog_hint=col(0xC0C0C0),
     text_strong=col(0xFFFFFF),
     accent=col(0x00E5FF),
     focus=col(0xFF66FF),
@@ -473,6 +485,7 @@ GHOST = Palette(
     text=col(0xA8D8D0),
     text_dim=col(0x5A8079),
     hint=col(0x6A938B),
+    dialog_hint=col(0x628981),
     text_strong=col(0xE4FFFA),
     accent=col(0x22D3B8),
     focus=col(0xFF4FA3),
@@ -531,6 +544,7 @@ XTERM = Palette(
     text=col(0x1C1B18),
     text_dim=col(0x56534A),
     hint=col(0x56534A),
+    dialog_hint=col(0x56534A),
     text_strong=col(0x000000),
     accent=col(0x0000C4),
     focus=col(0x8B008B),
@@ -575,12 +589,13 @@ CDE = Palette(
     panel=col(0xAEB2C3),
     panel_alt=col(0xC2C6D4),
     well=col(0xAEB2C3),
-    dock_well=col(0x82869C),
+    dock_well=col(0x9A9FB3),
     border=col(0x4E5065),
     selection=col(0x8892AD),
     text=col(0x0B0C12),
     text_dim=col(0x33364A),
-    hint=col(0x1E1F2C),
+    hint=col(0x33364A),
+    dialog_hint=col(0x33364A),
     text_strong=col(0x000000),
     accent=col(0x1F4E8C),
     focus=col(0x5C2D91),
@@ -627,12 +642,13 @@ WIN311 = Palette(
     panel=col(0xC0C0C0),
     panel_alt=col(0xCFCFCF),
     well=col(0xFFFFFF),
-    dock_well=col(0x689090),
+    dock_well=col(0x83AAAA),
     border=col(0x808080),
     selection=col(0xA8B4D8),
     text=col(0x000000),
     text_dim=col(0x44444A),
-    hint=col(0x222226),
+    hint=col(0x39393F),
+    dialog_hint=col(0x44444A),
     text_strong=col(0x000000),
     accent=col(0x000080),
     focus=col(0x800080),
@@ -683,6 +699,7 @@ KITTY = Palette(
     text=col(0x3A2A33),
     text_dim=col(0x8A5E72),
     hint=col(0x755061),
+    dialog_hint=col(0x8A5E72),
     text_strong=col(0x1F1219),
     accent=col(0xE0407A),
     focus=col(0x9B4DCA),
@@ -727,12 +744,13 @@ TURBO = Palette(
     panel=col(0x0000A8),
     panel_alt=col(0x0000C8),
     well=col(0x0000A8),
-    dock_well=col(0x1A1A74),
+    dock_well=col(0x303071),
     border=col(0x00A8A8),
     selection=col(0x00728C),
     text=col(0xFFFF54),
     text_dim=col(0xA8A8A8),
     hint=col(0xA8A8A8),
+    dialog_hint=col(0xA8A8A8),
     text_strong=col(0xFFFFFF),
     accent=col(0x54FCFC),
     focus=col(0xFF54FF),
@@ -910,11 +928,15 @@ def apply_style() -> None:
     s(c.title_bg_active, P.panel_alt.vec4)
     s(c.title_bg_collapsed, P.panel.vec4)
     s(c.menu_bar_bg, P.panel.vec4)
-    s(c.scrollbar_bg, P.bg.vec4)
-    s(c.scrollbar_grab, mixed(P.bg, P.text_dim, 0.45))
+    track, grab = scrollbar_alphas()
+    s(c.scrollbar_bg, dim(P.text, track))
+    s(c.scrollbar_grab, dim(P.text_dim, grab))
     s(c.scrollbar_grab_hovered, dim(P.accent, 0.5))
     s(c.scrollbar_grab_active, P.accent.vec4)
     s(c.check_mark, P.accent.vec4)
+    # ``imgui.text_link``'s ink, where anything calls it; ``widgets.link`` is what
+    # pptmstr draws a link with, and takes its states from ``link_inks``.
+    s(c.text_link, link_inks().rest.vec4)
     s(c.slider_grab, P.accent.vec4)
     s(c.slider_grab_active, P.focus.vec4)
     # Opaque and tinted, so a button reads as one with no outline. The same slot
@@ -977,16 +999,21 @@ def mixed(base: Color, over: Color, alpha: float) -> imgui.ImVec4:
 
 
 @contextmanager
-def hint_colour(gui: ModuleType) -> Iterator[None]:
+def hint_colour(gui: ModuleType, *, dialog: bool) -> Iterator[None]:
     """
-    Draw what is inside with a field's hint in ``P.hint``. ImGui 1.92 has no hint
-    slot: ``input_text_with_hint`` draws its placeholder in ``Col_.text_disabled``,
+    Draw what is inside with a field's hint in ``P.hint``, or ``P.dialog_hint``
+    for a field in a modal (``dialog``). ImGui 1.92 has no hint slot:
+    ``input_text_with_hint`` draws its placeholder in ``Col_.text_disabled``,
     which is ``text_dim`` everywhere else, so only the field is drawn under this.
+
+    ``dialog`` is said at the call and not read from the style in force: a test
+    that fakes a pane's ``imgui`` has no style to read, and which well a field
+    stands in is a fact about where it is drawn, which its caller knows.
 
     ``gui`` is the caller's own ``imgui`` name, so the push goes where the field's
     draw goes, and a test that fakes a pane's ``imgui`` records it with the rest.
     """
-    gui.push_style_color(gui.Col_.text_disabled, P.hint.vec4)
+    gui.push_style_color(gui.Col_.text_disabled, (P.dialog_hint if dialog else P.hint).vec4)
     try:
         yield
     finally:
@@ -1058,6 +1085,150 @@ def terminal_ink(ink: Color, palette: Palette | None = None) -> Color:
                 hit = tried
                 break
         _TERMINAL_INKS[key] = hit
+    return hit
+
+
+SCROLLBAR_TRACK_FLOOR = 1.2
+"""
+What a scrollbar's track reads at against every surface a bar stands on: enough
+to be seen as a track of its own, where the ground's own colour (``bg``) cut into
+a child's ``panel`` read as the pane stopping short of its edge.
+"""
+
+SCROLLBAR_GRAB_FLOOR = 1.9
+"""
+What the grab reads at against the track it is drawn over on every surface, and
+against the surface itself where a modal draws no track.
+"""
+
+_SCROLLBAR_STEPS = 100
+_SCROLLBAR_ALPHAS: dict[str, tuple[float, float]] = {}
+
+
+def scrollbar_surfaces(palette: Palette) -> tuple[Color, ...]:
+    """
+    Every colour a scrollbar is drawn over: a dock's ground, a child's fill, a
+    popup's, a text box's in a dock and in a modal, and a tool block's terminal.
+    """
+    return (
+        palette.bg,
+        palette.panel,
+        palette.panel_alt,
+        palette.dock_well,
+        palette.well,
+        palette.terminal_bg,
+    )
+
+
+def scrollbar_alphas(palette: Palette | None = None) -> tuple[float, float]:
+    """
+    The alphas of ``palette``'s scrollbar track (``text`` over the surface) and grab
+    (``text_dim`` over the track, or over the surface where there is no track),
+    each the smallest step that clears its floor on every surface
+    (``scrollbar_surfaces``).
+
+    Translucent and not a colour, because the bar stands on six surfaces and no
+    one opaque track is a step off all of them: ``bg`` is the dock's ground
+    itself, and 1.07:1 off dark's ``panel``. ImGui draws the track over the
+    window's fill and the grab over the track, which is what ``mixed`` computes,
+    so what is measured here is what is drawn. Memoised by palette name.
+    """
+    used = current() if palette is None else palette
+    hit = _SCROLLBAR_ALPHAS.get(used.name)
+    if hit is None:
+
+        def least(over: Color, grounds: tuple[Color, ...], floor: float) -> float:
+            for step in range(_SCROLLBAR_STEPS + 1):
+                alpha = step / _SCROLLBAR_STEPS
+                if all(
+                    contrast_ratio(_opaque8(mixed(ground, over, alpha)), ground) >= floor
+                    for ground in grounds
+                ):
+                    return alpha
+            return 1.0
+
+        surfaces = scrollbar_surfaces(used)
+        track = least(used.text, surfaces, SCROLLBAR_TRACK_FLOOR)
+        tracks = tuple(_opaque8(mixed(ground, used.text, track)) for ground in surfaces)
+        # And over the bare surfaces: a modal draws no track (``dialog_colors``).
+        hit = (track, least(used.text_dim, tracks + surfaces, SCROLLBAR_GRAB_FLOOR))
+        _SCROLLBAR_ALPHAS[used.name] = hit
+    return hit
+
+
+LINK_FLOOR = 4.5
+"""What a link's text reads at on its surface, in every state (``link_inks``)."""
+
+_LINK_RISE = 1.15
+_LINK_STEPS = 1000
+
+
+@dataclass(frozen=True, slots=True)
+class LinkInks:
+    """
+    A link's text in each of its states (``widgets.link``). The underline is the
+    text's own ink; a disabled link has none.
+    """
+
+    rest: Color
+    hovered: Color
+    pressed: Color
+    disabled: Color
+
+
+_LINK_INKS: dict[tuple[int, ...], LinkInks] = {}
+
+
+def _toward_text(ink: Color, text: Color, grounds: tuple[Color, ...], floor: float) -> Color:
+    """``ink``, or the least step of it toward ``text`` that reads at ``floor`` on every ground."""
+    for step in range(_LINK_STEPS + 1):
+        tried = _opaque8(mixed(ink, text, step / _LINK_STEPS))
+        if min(contrast_ratio(tried, ground) for ground in grounds) >= floor:
+            return tried
+    return text
+
+
+def link_inks(
+    ink: Color | None = None,
+    grounds: tuple[Color, ...] | None = None,
+    text: Color | None = None,
+    dim: Color | None = None,
+) -> LinkInks:
+    """
+    A link's inks on ``grounds``: by default the accent on the surfaces a pane's
+    link stands on (a dock's ``bg``, a child's ``panel``, a popup's ``panel_alt``),
+    moving toward the pane's ``text``; a tool block passes its own (``tool_block``).
+
+    - **rest**: ``ink``, or the least step of it toward ``text`` that reads at
+      ``LINK_FLOOR`` on every ground;
+    - **hovered** and **pressed**: each the least further step toward ``text``
+      that is ``_LINK_RISE`` times the one before off the ground, so the state
+      moves away from the surface and never toward it, as ``imgui.text_link``'s
+      brightening did on a light one (5.15:1 to 3.32 and 2.85 on light). Where
+      ``text`` is reached first, the state is ``text``;
+    - **disabled**: ``dim``, or the least step of it toward ``text`` at the floor.
+      It is told from the others by its ink and by having no underline.
+
+    Memoised by the colours it is made from, so a theme switch needs nothing
+    cleared.
+    """
+    used = current()
+    ink = used.accent if ink is None else ink
+    grounds = (used.bg, used.panel, used.panel_alt) if grounds is None else grounds
+    text = used.text if text is None else text
+    dim = used.text_dim if dim is None else dim
+    key = (ink.u32, text.u32, dim.u32, *(ground.u32 for ground in grounds))
+    hit = _LINK_INKS.get(key)
+    if hit is None:
+
+        def off(colour: Color) -> float:
+            return min(contrast_ratio(colour, ground) for ground in grounds)
+
+        rest = _toward_text(ink, text, grounds, LINK_FLOOR)
+        hovered = _toward_text(rest, text, grounds, off(rest) * _LINK_RISE)
+        pressed = _toward_text(hovered, text, grounds, off(hovered) * _LINK_RISE)
+        disabled = _toward_text(dim, text, grounds, LINK_FLOOR)
+        hit = _LINK_INKS[key] = LinkInks(rest, hovered, pressed, disabled)
     return hit
 
 

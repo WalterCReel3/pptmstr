@@ -15,6 +15,7 @@ import random
 
 import pytest
 
+from pptmstr.effects import SessionWoken, WakeReason
 from pptmstr.intents import (
     AgentFinished,
     AgentRemoved,
@@ -593,10 +594,15 @@ def test_a_dead_askers_decision_is_still_listed_marked_and_dismissable(
 def test_an_asker_that_ended_its_turn_to_wait_is_not_shown_as_working(asker: NodeId) -> None:
     """
     The ordinary shape of "blocked on the person": raise, do what can be done,
-    end the turn. Answering does not wake it -- no intent and no effect goes to
-    the asker -- so a row that read as a working agent's would let the operator
-    answer and leave, with the answer unread for good. The fate says so before
-    they answer, and it goes back to live when the session is prompted.
+    end the turn. The row says the asker is not working, and that answering
+    wakes its session, so the operator neither waits on an agent that is idle
+    nor expects to prompt it themselves.
+
+    The answer orders exactly one wake, to the asker's session: a root wakes
+    itself, and a sub-agent's wake goes to its lead, the only one there with a
+    turn to wake into. The store orders the wake and changes no record; sending
+    it, and the turn it starts, are the shell's. The fate goes back to live when
+    the session is prompted.
     """
     store = team()
     store.apply(DecisionRaised(asker, decision()), now=5.0)
@@ -604,12 +610,15 @@ def test_an_asker_that_ended_its_turn_to_wait_is_not_shown_as_working(asker: Nod
 
     (owed,) = owed_decisions(store.snapshot())
     assert owed.asker is AskerFate.IDLE and not owed.asker.has_ended
-    assert "its asker has ended its turn and reads an answer only when woken" in owed.summary
+    assert "its asker has ended its turn, and answering wakes its session" in owed.summary
+    assert "unread" not in owed.summary and "only when" not in owed.summary
 
-    before = store.snapshot().nodes[asker]
+    before = store.snapshot().nodes
     effects = store.apply(DecisionAnswered("d-1", "go"), now=7.0)
-    assert effects == (), "nothing is sent to the asker"
-    assert store.snapshot().nodes[asker] == before, "and nothing wakes it"
+    assert effects == (
+        SessionWoken(session_id=ROOT[0], reason=WakeReason.DECISION_ANSWERED, subject_id="d-1"),
+    ), "one wake, to the asker's session, whose lead is what wakes"
+    assert store.snapshot().nodes == before, "the store orders the wake and edits no record"
 
     store.apply(DecisionRaised(asker, decision("d-2")), now=8.0)
     store.apply(StateChanged(asker, AgentState.THINKING), now=9.0)

@@ -57,10 +57,10 @@ import functools
 import sys
 from array import array
 from collections import OrderedDict
-from collections.abc import Hashable, Iterable
+from collections.abc import Hashable, Iterable, Iterator
 from typing import TYPE_CHECKING, Any, TypeAlias, cast
 
-from pygments.token import Comment, Keyword, Name, Number, Operator, String
+from pygments.token import Comment, Generic, Keyword, Name, Number, Operator, String
 
 if TYPE_CHECKING:
     from .themes import SyntaxInks
@@ -86,10 +86,23 @@ _CLASSES = (
     ("number", Number),
     ("function", Name.Function),
     ("operator", Operator),
+    ("add", Generic.Inserted),
+    ("remove", Generic.Deleted),
+    ("heading", Generic.Heading),
+    ("heading", Generic.Subheading),
 )
 """
 The coloured classes, each a field of ``SyntaxInks``, and the Pygments token
-tree each one covers.
+tree each one covers. A field may stand for more than one tree: ``heading`` is
+both of a diff's header kinds, ``diff --git`` and ``index`` lines
+(``Generic.Heading``) and ``@@`` lines (``Generic.Subheading``), which are
+sibling trees. Pygments' diff lexer gives ``---`` and ``+++`` lines as
+``Generic.Deleted`` and ``Generic.Inserted``, so they take the remove and add
+inks. Other lexers emit ``Generic`` tokens too (a markdown heading is
+``Generic.Heading``), and take the same inks there.
+
+An entry's place is the class index ``_LEXED`` keeps, so one is only ever
+added at the end.
 """
 
 _KEPT = 24 * 2**20
@@ -387,8 +400,28 @@ def _lex_classes(language: str, text: str, start: int) -> _Runs:
 def _lex(lexer: Any, code: str) -> Iterable[tuple[int, Any, str]]:
     """
     Pygments' tokens of ``code``, each with its index into ``code``.
+
+    The library holds a fence's code without its last line end, and a lexer
+    whose rules end on one (the diff lexer's rule for an added line) does not read a last
+    line as a line without it. So code that does not end on a line end is
+    lexed with one, as Pygments' own ``get_tokens`` lexes it, and the tokens
+    are cut back to ``code``: none is past its end, and the one that held the
+    added line end is shorter by it.
     """
-    return lexer.get_tokens_unprocessed(code)  # type: ignore[no-any-return]
+    if code.endswith("\n"):
+        return lexer.get_tokens_unprocessed(code)  # type: ignore[no-any-return]
+    return _within(lexer.get_tokens_unprocessed(code + "\n"), len(code))
+
+
+def _within(tokens: Iterable[tuple[int, Any, str]], length: int) -> Iterator[tuple[int, Any, str]]:
+    """
+    ``tokens`` cut at ``length``: a token that reaches past it is cut there and
+    one that starts at or past it is dropped.
+    """
+    for index, kind, value in tokens:
+        if index >= length:
+            continue
+        yield index, kind, value[: length - index]
 
 
 @functools.cache

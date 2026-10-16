@@ -670,9 +670,12 @@ class AskerFate(enum.Enum):
 
     ``LIVE`` is an agent in a turn: it reads the answer when it next asks.
     ``IDLE`` is one whose turn has ended with its session still connected
-    (``AgentState.AWAITING_INPUT``). Nothing wakes it when a decision is answered,
-    so the answer sits unread until the operator sends that session a prompt --
-    and this is the ordinary state of an agent that asked and stopped to wait.
+    (``AgentState.AWAITING_INPUT``). An answer wakes its session: where the
+    session has a live client, pptmstr sends its lead a message of its own (a
+    ``SegmentKind.NOTICE``, never the operator's prompt) naming the decision,
+    and the lead reads it as a turn of its own. A sub-agent that asked is not
+    woken itself; the message tells its lead to pass the answer on. This is the
+    ordinary state of an agent that asked and stopped to wait.
 
     ``STOPPED`` is an agent whose run ended; a sub-agent in it can still be woken,
     so an answer may yet be read. ``FAILED`` is one whose session died.

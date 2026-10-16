@@ -2340,6 +2340,8 @@ class LauncherState:
     # were drawn, or zero before the first. The body above them is bounded to what
     # that leaves of the display; see ``_modal``.
     _footer_height: float = 0.0
+    # Where the modal is put while it opens and after; see ``ModalPlacement``.
+    _placement: ModalPlacement = field(default_factory=lambda: ModalPlacement())
 
     @property
     def failure_loaded(self) -> bool:
@@ -2614,6 +2616,7 @@ class LauncherState:
         self._open_requested = False
         self.is_open = True
         self._focus_task = True
+        self._placement.begin()
         self._git_layout_for = None
         self._refusal_for = None
         self.checkout.forget()
@@ -3508,6 +3511,100 @@ def dial_text(asked: Policy, granted: Policy) -> DialText:
     )
 
 
+# hello_imgui's status bar: a window of this name across the bottom of the main
+# viewport, drawn when ``ImGuiWindowParams.show_status_bar`` is on. The viewport's work
+# area does not leave room for it, so a modal sized and kept to the work area alone
+# would cover it.
+STATUS_BAR_WINDOW = "StatusBar"
+
+# How many frames, at most, a modal is re-centred for while its size settles. It
+# settles in three on a run's first open (its body is measured a frame late), and
+# one that never stops changing is left where the last of these put it, so the
+# operator can still move it.
+_PLACING_FRAMES = 12
+
+
+def modal_area() -> tuple[tuple[float, float], tuple[float, float]]:
+    """
+    Where a modal is centred and kept, as position and size: the main viewport's
+    work area -- under the menu bar -- less the status bar, when one was drawn this
+    frame or the last. It is read from its window rather than from a height worked
+    out here: hello_imgui sizes it, and it can be switched off.
+    """
+    viewport = imgui.get_main_viewport()
+    left, top = float(viewport.work_pos.x), float(viewport.work_pos.y)
+    width = float(viewport.work_size.x)
+    bottom = top + float(viewport.work_size.y)
+    bar = imgui.internal.find_window_by_name(STATUS_BAR_WINDOW)
+    if bar is not None and (bar.active or bar.was_active):
+        bottom = min(bottom, float(bar.pos.y))
+    return (left, top), (width, max(0.0, bottom - top))
+
+
+@dataclass(slots=True)
+class ModalPlacement:
+    """
+    Where a modal is put: centred in ``modal_area`` on every frame from its open
+    until its size stops changing, and after that where the operator puts it, kept
+    inside the area (``modal_origin``). The launcher and the resume form each hold
+    one, and call ``begin`` when they open and ``before`` and ``after`` around
+    ``imgui.begin_popup_modal`` each frame.
+
+    Centred until it settles and not only on the frame it appears: on a run's first
+    open the body is measured a frame late, so the modal appears a fraction of its
+    height and grows from where that was centred.
+    """
+
+    # Whether it is still being centred, the size it had on the last frame of that,
+    # and how many frames that has taken.
+    placing: bool = False
+    placed_size: tuple[float, float] | None = None
+    frames: int = 0
+
+    def begin(self) -> None:
+        """The modal is being opened: centre it again until it settles."""
+        self.placing = True
+        self.placed_size = None
+        self.frames = 0
+
+    def before(
+        self, title: str, area_pos: tuple[float, float], area_size: tuple[float, float]
+    ) -> None:
+        """
+        Before the modal's window is begun: its position for this frame.
+
+        Once it has been placed, it is kept inside the area where the last frame
+        left it, and otherwise left where it is. Dear ImGui keeps a closed popup's
+        window under its name, so a window not drawn last frame is where the modal
+        stood the last time it was open; and one that appeared last frame was drawn
+        hidden, to be measured. Neither is moved here while it is being centred.
+        """
+        if self.placing:
+            imgui.set_next_window_pos(
+                imgui.ImVec2(area_pos[0] + area_size[0] / 2.0, area_pos[1] + area_size[1] / 2.0),
+                imgui.Cond_.always,
+                imgui.ImVec2(0.5, 0.5),
+            )
+            return
+        last = imgui.internal.find_window_by_name(title)
+        if last is not None and last.was_active and not last.appearing:
+            moved = modal_origin(
+                (last.pos.x, last.pos.y), (last.size.x, last.size.y), area_pos, area_size
+            )
+            if moved is not None:
+                imgui.set_next_window_pos(imgui.ImVec2(*moved), imgui.Cond_.always)
+
+    def after(self) -> None:
+        """Inside the modal's window, once it is open: settled when its size repeats."""
+        if not self.placing:
+            return
+        size = imgui.get_window_size()
+        seen = (float(size.x), float(size.y))
+        self.frames += 1
+        self.placing = seen != self.placed_size and self.frames < _PLACING_FRAMES
+        self.placed_size = seen
+
+
 def modal_origin(
     pos: tuple[float, float],
     size: tuple[float, float],
@@ -3921,7 +4018,7 @@ def _branch_field(state: LauncherState, *, reader: CheckoutReader) -> None:
     state.checkout.poll()
     picked = state.picker.picked is not None
     widgets.dialog_field()
-    with hint_colour(imgui):
+    with hint_colour(imgui, dialog=True):
         if picked:
             imgui.begin_disabled()
         imgui.set_next_item_width(-1)
@@ -3996,35 +4093,22 @@ def _modal(
     # Before anything is drawn: the Escape that closes an explanation is not also
     # this modal's (``widgets.help_showing``).
     explaining = widgets.help_showing()
-    viewport = imgui.get_main_viewport()
-    imgui.set_next_window_pos(viewport.get_center(), imgui.Cond_.appearing, imgui.ImVec2(0.5, 0.5))
+    area_pos, area_size = modal_area()
     # One width. Auto-resize fits the height to what is drawn; left to fit the width
     # as well, one unwrapped line widens the whole modal to its length, rightward
     # from where it stood. Every line of text below wraps to this width instead.
     #
-    # The height bound restates one auto-resize already applies -- Dear ImGui 1.92.8
-    # does not fit a window taller than the viewport's work area -- because the
-    # move below is only a way to the launch button while that holds: a window no
-    # taller than the area can be put wholly inside it.
+    # The height bound is the area's, the status bar left out of it: Dear ImGui 1.92.8
+    # fits a window no taller than the viewport's work area, which takes the status
+    # bar in, and the move below is only a way to the launch button while the window
+    # is no taller than the area it is put wholly inside.
     imgui.set_next_window_size_constraints(
-        imgui.ImVec2(_WIDTH, 0.0), imgui.ImVec2(_WIDTH, viewport.work_size.y)
+        imgui.ImVec2(_WIDTH, 0.0), imgui.ImVec2(_WIDTH, area_size[1])
     )
-    # Where the last frame left it, once it has been placed. Dear ImGui keeps a
-    # closed popup's window under its name, so a window not drawn last frame is where
-    # the modal stood the last time it was open; and one that appeared last frame
-    # was drawn hidden, to be measured, with the centring above still to be applied
-    # on this one -- a position set now would take its place.
-    last = imgui.internal.find_window_by_name(TITLE)
-    if last is not None and last.was_active and not last.appearing:
-        moved = modal_origin(
-            (last.pos.x, last.pos.y),
-            (last.size.x, last.size.y),
-            (viewport.work_pos.x, viewport.work_pos.y),
-            (viewport.work_size.x, viewport.work_size.y),
-        )
-        if moved is not None:
-            imgui.set_next_window_pos(imgui.ImVec2(*moved), imgui.Cond_.always)
+    state._placement.before(TITLE, area_pos, area_size)
     opened, _ = imgui.begin_popup_modal(TITLE, None, imgui.WindowFlags_.always_auto_resize)
+    if opened:
+        state._placement.after()
     if not opened:
         # Dismissed by something other than this function -- a click on the blocked
         # background, or ImGui's own Escape handling. Resync so the key handler
@@ -4036,7 +4120,7 @@ def _modal(
     # The body fits its content up to the room the display leaves it, and scrolls
     # past that. The footer's height is last frame's: it is drawn after the body
     # it bounds.
-    widgets.begin_dialog_body(BODY_ID, state._footer_height, _BODY_FLOOR)
+    widgets.begin_dialog_body(BODY_ID, state._footer_height, _BODY_FLOOR, area_size[1])
 
     # For every line of text in the body, which is what holds it to the one width.
     # The wrap position is the window's own, so the footer sets it again.
@@ -4100,7 +4184,7 @@ def _modal(
     # typo does not fail, it quietly files the session under a project that does
     # not exist.
     imgui.set_next_item_width(-1)
-    with hint_colour(imgui):
+    with hint_colour(imgui, dialog=True):
         _, state.cwd = imgui.input_text_with_hint(
             "##cwd", "working directory (agents run here)", state.cwd
         )
@@ -4121,7 +4205,7 @@ def _modal(
     # Empty is the common case and must stay cheap to leave empty.
     widgets.dialog_field()
     imgui.set_next_item_width(-1)
-    with hint_colour(imgui):
+    with hint_colour(imgui, dialog=True):
         _, state.brief = imgui.input_text_with_hint(
             "##brief",
             "continue an existing brief (optional) -- leave empty for a new one",

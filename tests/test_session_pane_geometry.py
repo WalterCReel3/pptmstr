@@ -95,6 +95,8 @@ class Log:
         self.im, self.store = im, store
         self.window = f"##geometry-log-{next(WINDOWS)}"
         self.state = TranscriptState()
+        self.node = ROOT
+        self.size = PANE
         self.seen: dict[str, Any] = {}
         real = transcript_pane._handle_scroll
 
@@ -110,37 +112,26 @@ class Log:
                 "scroll_max": im.get_scroll_max_y(),
                 "scroll_max_x": im.get_scroll_max_x(),
                 "scrollbar": window.scrollbar_y,
+                "scrollbar_x": window.scrollbar_x,
+                # The vertical bar's width, where it is drawn.
+                "bar": window.scrollbar_sizes.x,
             }
 
         monkeypatch.setattr(transcript_pane, "_handle_scroll", handle_scroll)
-        self.pushed: list[tuple[int, float]] = []
-        real_push = im.push_style_color
-
-        def push_style_color(colour: Any, value: Any) -> None:
-            self.pushed.append((int(colour), float(value.w)))
-            real_push(colour, value)
-
-        monkeypatch.setattr(im, "push_style_color", push_style_color)
 
     def frames(self, count: int) -> None:
         im = self.im
         for _ in range(count):
-            self.pushed.clear()
             typeset.pre_frame()
             im.new_frame()
             try:
                 im.set_next_window_pos(im.ImVec2(10.0, 10.0))
-                im.set_next_window_size(im.ImVec2(*PANE))
+                im.set_next_window_size(im.ImVec2(*self.size))
                 im.begin(self.window)
-                transcript_pane.draw(self.store.snapshot(), self.state, ROOT)
+                transcript_pane.draw(self.store.snapshot(), self.state, self.node)
                 im.end()
             finally:
                 im.render()
-
-    @property
-    def bar_unseen(self) -> bool:
-        scrollbar_bg = int(self.im.Col_.scrollbar_bg)
-        return (scrollbar_bg, 0.0) in self.pushed
 
 
 @pytest.fixture
@@ -148,53 +139,47 @@ def log(imgui: Any, monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
     yield lambda store: Log(imgui, monkeypatch, store)
 
 
-def test_with_nothing_to_scroll_the_bar_is_unseen_and_its_gutter_kept(log: Any) -> None:
+def test_with_nothing_to_scroll_there_is_no_bar_and_nothing_kept_for_one(log: Any) -> None:
     """
-    The property: the text is given the same width whether or not there is a bar
-    to see, so nothing is set again the frame the text first overflows.
+    No strip is reserved: a log that fits draws no bar, and its text is the log's
+    width less a margin either side.
     """
     short = log(session(lines(3)))
     short.frames(3)
-    assert short.seen["scroll_max"] == 0.0 and short.bar_unseen
-    assert short.seen["scrollbar"], "the gutter is still there"
-
-    long = log(session(lines(300)))
-    long.frames(3)
-    assert long.seen["scroll_max"] > 0.0 and not long.bar_unseen, "a bar to scroll by"
-    width = short.seen["text_right"] - short.seen["text_left"]
-    assert long.seen["text_right"] - long.seen["text_left"] == width
+    assert short.seen["scroll_max"] == 0.0 and not short.seen["scrollbar"]
+    assert short.seen["bar"] == 0.0
+    side = transcript_pane.margin_px(short.im.get_font_size())
+    width = short.seen["right"] - short.seen["left"]
+    assert short.seen["text_right"] - short.seen["text_left"] == width - 2 * side
 
 
-def test_the_bar_is_seen_once_the_text_overflows_and_the_width_never_moves(log: Any) -> None:
+def test_the_bar_comes_once_the_text_overflows_and_the_text_rewraps_once(log: Any) -> None:
     """
-    ImGui knows a window can scroll from the frame after its content outgrew it,
-    and the bar's ink is that answer a frame later again: two frames in all, over
-    which the text keeps its width.
+    ImGui shows a window's bar the frame after its content outgrew it, and takes
+    the bar's width from the text then: one change of width, and no more.
     """
     transcript = lines(3)
     view = log(session(transcript))
     view.frames(2)
-    assert view.bar_unseen
-    width = view.seen["text_right"] - view.seen["text_left"]
+    wide = view.seen["text_right"] - view.seen["text_left"]
     transcript.append(SegmentKind.OUTPUT, "".join(f"more {n}\n" for n in range(300)))
-    unseen = []
-    for _ in range(3):
+    widths, bars = [], []
+    for _ in range(4):
         view.frames(1)
-        unseen.append((view.bar_unseen, view.seen["scroll_max"]))
-        assert view.seen["text_right"] - view.seen["text_left"] == width
-    assert [each for each, _ in unseen] == [True, True, False]
-
-
-def test_the_sides_are_the_margin_or_the_gutter_whichever_is_wider() -> None:
-    assert transcript_pane.log_sides(16.0, 12.0) == (12.0, 0.0), "the gutter is the margin"
-    assert transcript_pane.log_sides(32.0, 12.0) == (16.0, 4.0), "padded past the gutter"
-    assert transcript_pane.log_sides(24.0, 12.0) == (12.0, 0.0)
+        widths.append(view.seen["text_right"] - view.seen["text_left"])
+        bars.append(bool(view.seen["scrollbar"]))
+    gutter = view.im.get_style().scrollbar_size
+    assert bars == [False, True, True, True]
+    assert widths == [wide] + [wide - gutter] * 3
 
 
 def margins(view: Any) -> tuple[float, float]:
-    """The margin seen either side of the text: the gutter is part of the right."""
+    """
+    The margin seen either side of the text: from the log's left edge, and from
+    the bar's left edge where there is a bar, or the log's right edge.
+    """
     seen = view.seen
-    return seen["text_left"] - seen["left"], seen["right"] - seen["text_right"]
+    return seen["text_left"] - seen["left"], seen["right"] - seen["bar"] - seen["text_right"]
 
 
 @pytest.mark.parametrize("lines_drawn", [3, 300], ids=["fits", "overflows"])
@@ -203,25 +188,129 @@ def test_the_wrapped_log_has_the_same_margin_either_side(
 ) -> None:
     view = log(session(lines(lines_drawn)))
     view.frames(3)
+    assert bool(view.seen["scrollbar"]) is (lines_drawn == 300)
     left, right = margins(view)
-    gutter = imgui.get_style().scrollbar_size
-    assert left == right == max(transcript_pane.margin_px(imgui.get_font_size()), gutter)
+    assert left == right == transcript_pane.margin_px(imgui.get_font_size()) == 8.0
 
 
-def test_the_typeset_log_has_the_margin_at_its_text_size_and_keeps_its_width(
+def ink(drawn: Any, view: Any) -> tuple[float, float]:
+    """
+    How far in from the log's left edge, and from the bar or the log's right
+    edge, the first and last ink of what ``drawn`` holds is.
+    """
+    seen = view.seen
+    low = min(rect[0] for rect in drawn)
+    high = max(rect[1] for rect in drawn)
+    return low - seen["left"], seen["right"] - seen["bar"] - high
+
+
+@pytest.fixture
+def block_rects(monkeypatch: pytest.MonkeyPatch) -> list[tuple[float, float]]:
+    """Every tool block drawn this frame, as its left and right x."""
+    from imgui_bundle import imgui
+
+    from pptmstr.ui import tool_block
+
+    seen: list[tuple[float, float]] = []
+    real = tool_block.draw
+
+    def spy(block: Any, **given: Any) -> bool:
+        pressed = real(block, **given)
+        seen.append((imgui.get_item_rect_min().x, imgui.get_item_rect_max().x))
+        return pressed
+
+    monkeypatch.setattr(tool_block, "draw", spy)
+    return seen
+
+
+@pytest.mark.parametrize("before", [0, 300], ids=["bar hidden", "bar shown"])
+def test_a_tool_block_has_the_same_margin_either_side(
+    imgui: Any, log: Any, block_rects: list[tuple[float, float]], before: int
+) -> None:
+    transcript = lines(before) if before else Transcript()
+    transcript.append_tool_call("a", "Bash", {"command": "echo a"})
+    transcript.append_tool_result("a", "Bash", "one", is_error=False)
+    view = log(session(transcript))
+    view.frames(3)
+    block_rects.clear()
+    view.frames(1)
+    assert bool(view.seen["scrollbar"]) is bool(before)
+    assert block_rects, "the block was drawn"
+    side = transcript_pane.margin_px(imgui.get_font_size())
+    assert ink(block_rects[-1:], view) == (side, side)
+
+
+def test_the_text_runs_to_the_margin_and_no_further(
+    imgui: Any, log: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Wrapped text, measured by what ImGui laid out: a line long enough to wrap
+    starts at the left margin and breaks short of the right one.
+    """
+    from imgui_bundle import imgui as im
+
+    rects: list[tuple[float, float]] = []
+    real = im.text_wrapped
+
+    def spy(text: str) -> None:
+        real(text)
+        rects.append((im.get_item_rect_min().x, im.get_item_rect_max().x))
+
+    transcript = Transcript()
+    transcript.append(SegmentKind.OUTPUT, " ".join(["word"] * 400) + "\n" * 300)
+    view = log(session(transcript))
+    view.frames(3)
+    assert view.seen["scrollbar"]
+    monkeypatch.setattr(im, "text_wrapped", spy)
+    view.frames(1)
+    side = transcript_pane.margin_px(imgui.get_font_size())
+    left, right = ink(rects, view)
+    assert left == side
+    # A line breaks at a word, so it ends within a word's width of the margin.
+    assert side <= right < side + im.calc_text_size("word ").x
+
+
+@pytest.mark.parametrize("mode", [None, RenderMode.TYPESET], ids=["wrap", "typeset"])
+def test_the_row_over_the_log_starts_where_the_logs_text_does(
+    request: pytest.FixtureRequest, log: Any, monkeypatch: pytest.MonkeyPatch, mode: Any
+) -> None:
+    from imgui_bundle import imgui as im
+
+    from pptmstr.ui import widgets
+
+    if mode is not None:
+        request.getfixturevalue("seam")
+        # Larger than the chrome, so the two margins are told apart.
+        typeset.configure(typeset=True, faces=typeset.DEFAULT_PRESET, scale=1.25, panes={})
+    starts: list[float] = []
+    real = widgets.small_button
+
+    def small_button(label: str, *args: Any, **kwargs: Any) -> bool:
+        pressed = real(label, *args, **kwargs)
+        if label == "copy":
+            starts.append(im.get_item_rect_min().x)
+        return bool(pressed)
+
+    monkeypatch.setattr(widgets, "small_button", small_button)
+    view = log(session(lines(300)))
+    view.state.mode = mode
+    view.frames(3)
+    assert starts and starts[-1] == view.seen["text_left"]
+
+
+def test_the_typeset_log_has_the_margin_at_its_text_size(
     seam: Any, log: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # Larger than the UI font, so the margin is told apart from one at the chrome's
-    # size; and a gutter narrower than either, which would otherwise be both.
+    # size.
     typeset.configure(typeset=True, faces=typeset.DEFAULT_PRESET, scale=1.25, panes={})
     assert typeset.body_px() == 20.0
-    monkeypatch.setattr(seam.get_style(), "scrollbar_size", 6.0)
     transcript = Transcript()
     transcript.append(SegmentKind.OUTPUT, "A paragraph that is set by the library.\n")
     short = log(session(transcript))
     short.state.mode = RenderMode.TYPESET
     short.frames(3)
-    assert short.bar_unseen and short.seen["scrollbar"]
+    assert not short.seen["scrollbar"]
     assert margins(short) == (transcript_pane.margin_px(20.0),) * 2 == (10.0, 10.0)
 
     long = Transcript()
@@ -229,20 +318,16 @@ def test_the_typeset_log_has_the_margin_at_its_text_size_and_keeps_its_width(
     tall = log(session(long))
     tall.state.mode = RenderMode.TYPESET
     tall.frames(3)
-    assert tall.seen["scroll_max"] > 0.0 and not tall.bar_unseen
-    assert (
-        tall.seen["text_right"] - tall.seen["text_left"]
-        == short.seen["text_right"] - short.seen["text_left"]
-    )
+    assert tall.seen["scroll_max"] > 0.0 and tall.seen["scrollbar"]
+    assert margins(tall) == (10.0, 10.0)
 
 
 def test_a_line_wider_than_a_short_typeset_log_has_a_bar_to_reach_it_by(
     seam: Any, log: Any
 ) -> None:
     """
-    Literal runs are never broken, so a short log can still be scrolled sideways.
-    The bar it is scrolled by is drawn in the colours a log with nothing to scroll
-    hides, and is seen.
+    Literal runs are never broken, so a short log can still be scrolled sideways,
+    by the bar along its foot.
     """
     transcript = Transcript()
     transcript.append(SegmentKind.OUTPUT, "A short log.\n")
@@ -251,7 +336,131 @@ def test_a_line_wider_than_a_short_typeset_log_has_a_bar_to_reach_it_by(
     wide.state.mode = RenderMode.TYPESET
     wide.frames(4)
     assert wide.seen["scroll_max"] == 0.0 and wide.seen["scroll_max_x"] > 0.0
-    assert not wide.bar_unseen
+    assert wide.seen["scrollbar_x"] and not wide.seen["scrollbar"]
+
+
+# -- the bar held: no flipping at the edge ----------------------------------------------
+
+
+def flips(bars: list[bool]) -> int:
+    """How many times the bar came or went over the frames ``bars`` records."""
+    return sum(1 for a, b in itertools.pairwise(bars) if a != b)
+
+
+def test_a_bar_is_taken_when_shown_and_let_go_only_when_the_log_moved_and_fits() -> None:
+    holds = transcript_pane.holds_bar
+    assert holds(False, True, False, 900.0, 500.0, 20.0), "shown: taken"
+    assert not holds(False, False, True, 100.0, 500.0, 20.0), "never shown: not held"
+    assert holds(True, True, False, 100.0, 500.0, 20.0), "nothing moved: kept, though it fits"
+    assert holds(True, True, True, 490.0, 500.0, 20.0), "moved, but within the slack: kept"
+    assert not holds(True, True, True, 480.0, 500.0, 20.0), "moved and a line short: let go"
+    assert holds(True, True, True, 600.0, 500.0, 20.0), "moved and still over: kept"
+
+
+def test_a_log_growing_across_the_edge_takes_the_bar_once(log: Any) -> None:
+    """
+    A line at a time across the height of the log: the bar comes once, and the
+    re-wrap it causes never sends it away again.
+    """
+    transcript = Transcript()
+    transcript.append(
+        SegmentKind.OUTPUT, "".join(f"a line that wraps a little {n}\n" for n in range(5))
+    )
+    view = log(session(transcript))
+    bars = []
+    for n in range(40):
+        transcript.append(SegmentKind.OUTPUT, f"one more line, number {n}, of some length\n")
+        view.frames(1)
+        bars.append(bool(view.seen["scrollbar"]))
+    assert bars[0] is False and bars[-1] is True and flips(bars) == 1, bars
+
+
+def test_a_log_that_overflows_only_while_wide_does_not_flip_the_bar_every_frame(
+    log: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The edge the guard is for: content that is taller at the wider measure (a
+    layout that sets itself one way when wide), sized so that without the bar it
+    overflows and with it it fits. Nothing else moves, so the bar, once taken,
+    stays: one flip, not one a frame.
+    """
+    from imgui_bundle import imgui as im
+
+    real = im.text_wrapped
+    view = log(session(lines(3)))
+    view.frames(1)
+    # The measure without a bar.
+    wide = view.seen["text_right"] - view.seen["text_left"]
+
+    def text_wrapped(text: str) -> None:
+        real(text)
+        if im.get_content_region_avail().x >= wide:
+            # Wide: a block taller than the log.
+            im.dummy(im.ImVec2(1.0, PANE[1] * 2))
+
+    monkeypatch.setattr(im, "text_wrapped", text_wrapped)
+    bars = []
+    for _ in range(20):
+        view.frames(1)
+        bars.append(bool(view.seen["scrollbar"]))
+    assert flips(bars) == 1 and bars[-1], bars
+
+    # Something of the log's own moving lets it go, once.
+    view.store.snapshot().nodes[ROOT].transcript.append(SegmentKind.OUTPUT, "more\n")
+    bars = []
+    for _ in range(20):
+        view.frames(1)
+        bars.append(bool(view.seen["scrollbar"]))
+    assert flips(bars) <= 2, bars
+
+
+def test_a_held_bar_is_let_go_when_the_pane_grows_to_fit_the_log(log: Any) -> None:
+    view = log(session(lines(30)))
+    view.frames(3)
+    assert view.seen["scrollbar"]
+    view.size = (PANE[0], PANE[1] * 2)
+    view.frames(3)
+    assert not view.seen["scrollbar"]
+
+
+def test_a_held_bar_is_let_go_when_a_short_log_is_selected(log: Any) -> None:
+    store = session(lines(300))
+    other: NodeId = ("s2", None)
+    store.apply(
+        AgentSpawned(
+            node_id=other,
+            parent=None,
+            task="a short one",
+            model="claude-sonnet-5",
+            started_at=0.0,
+            cwd="/x",
+            transcript=lines(3),
+        ),
+        now=1.0,
+    )
+    view = log(store)
+    view.frames(3)
+    assert view.seen["scrollbar"]
+    view.node = other
+    view.frames(3)
+    assert not view.seen["scrollbar"]
+
+
+def test_a_bar_shown_for_a_windows_earlier_content_is_not_held(log: Any) -> None:
+    """
+    ImGui shows a window's bar from the content it had the frame before, which a
+    pane handed a fresh state over an old window did not draw. That bar goes with
+    the frame after, as ImGui's own would, and is not held for a log that fits.
+    """
+    long = log(session(lines(300)))
+    long.frames(3)
+    assert long.seen["scrollbar"]
+    short = log(session(lines(3)))
+    short.window = long.window
+    short.frames(1)
+    assert short.seen["scrollbar"], "the window's last content, not the log's"
+    short.frames(2)
+    assert not short.seen["scrollbar"]
 
 
 # -- SESSION, as the application draws it ----------------------------------------------
@@ -322,7 +531,8 @@ def test_a_composer_that_grows_neither_scrolls_the_pane_nor_moves_the_text(
     The composer is measured a frame late, so on the frame it grows the pane holds
     more than it has room for. In one window over six frames, the composer 40 px
     taller from the third: SESSION never shows a scrollbar of its own, which would
-    take its width from the scrollback, and the log's text keeps its width.
+    take its width from the scrollback, and the log's text keeps the width its own
+    bar left it.
     """
     from pptmstr.ui import compose
 
@@ -355,7 +565,10 @@ def test_a_composer_that_grows_neither_scrolls_the_pane_nor_moves_the_text(
         rooms.append(state.composer_room)
     assert settled is not None and rooms[-1] > settled, "the growth was taken up"
     assert bars == [False] * 6, bars
-    assert len(set(widths)) == 1, widths
+    # The log's own bar comes on the second frame, and the text re-wraps once for
+    # it; the composer's growth moves it no more.
+    assert widths[0] - widths[1] == imgui.get_style().scrollbar_size
+    assert len(set(widths[1:])) == 1, widths
 
 
 @pytest.mark.parametrize("pane", ["CONTEXT", "SESSION"])

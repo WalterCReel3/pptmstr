@@ -18,6 +18,7 @@ from collections.abc import Iterator
 import pytest
 
 from pptmstr import boardlog
+from pptmstr import bus as bus_mod
 from pptmstr.bridge import Bridge
 from pptmstr.bus import _QUOTE_LEGEND, FROM_KEY, build_server
 from pptmstr.effects import BoardDelivered, ClaimSettled, InboxDelivered, TaskWriteSettled
@@ -5727,11 +5728,12 @@ def _answer_shown(text: str) -> str:
     return "\n".join(line[2:] for line in text.splitlines() if line.startswith("> "))
 
 
-def test_a_sub_agent_raises_a_decision_and_is_told_the_answer_comes_to_it_not_its_lead() -> None:
+def test_a_sub_agent_raises_a_decision_and_is_told_its_lead_is_woken_and_it_is_not() -> None:
     """
     The whole path: every argument reaches the record, the asker is the sender the
     gate stamped, the decision is in the operator's queue, and the reply says what
-    happens next -- including the thing a sub-agent's lead would assume otherwise.
+    happens next -- including that the lead is woken for it, and the sub-agent
+    that asked is not.
     """
     store = Store()
     _claimed(store, "t1")
@@ -5745,17 +5747,15 @@ def test_a_sub_agent_raises_a_decision_and_is_told_the_answer_comes_to_it_not_it
     mine, theirs = sorted(store.snapshot().decisions.values(), key=lambda d: d.asker != DEV)
     assert said == (
         f"Decision {mine.id} is in front of the operator (the operator's to take; "
-        f"reversible: yes; blocks t2, t1). Nothing is parked and nothing will interrupt "
-        f'you with the answer: keep working, and call read_decisions(decision_id="{mine.id}") '
+        f"reversible: yes; blocks t2, t1). Nothing is parked: keep working, and call "
+        f'read_decisions(decision_id="{mine.id}") '
         f"when you reach what this blocks and again before you finish. It returns the "
-        f"operator's answer every time you ask. If you end your turn to wait, the answer "
-        f"will not wake you: the operator has to send you a prompt as well. "
+        f"operator's answer every time you ask. {bus_mod.WAKE_SAID_SUBAGENT} "
         f"withdraw_decision takes the decision back if it stops mattering, and it is not "
-        f"kept across a restart of pptmstr. The answer is handed to YOU, the agent that "
-        f"asked. Your lead can read it with read_decisions and is not told when it "
-        f"arrives, so pass it on in your result or in a concern if your lead needs it."
+        f"kept across a restart of pptmstr."
     )
-    assert "Your lead" not in lead and theirs.asker == LEAD
+    assert bus_mod.WAKE_SAID in lead and bus_mod.WAKE_SAID_SUBAGENT not in lead
+    assert theirs.asker == LEAD
     # Left out, it is said back as a statement and not passed over in silence.
     assert "reversible: yes; blocks nothing on the board). " in lead and theirs.blocks == ()
     assert (mine.asker, mine.standing.value, mine.reversible) == (DEV, "operators", True)

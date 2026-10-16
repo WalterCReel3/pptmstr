@@ -68,7 +68,17 @@ from pptmstr.model import (
 from pptmstr.settings import Settings
 from pptmstr.store import Store
 from pptmstr.theme import OBLIGATION_GLYPH, STATE_GLYPH
-from pptmstr.ui import command_view, detail, fleet_view, inbox, rail, review, widgets
+from pptmstr.ui import (
+    board_pane,
+    command_view,
+    detail,
+    digest_pane,
+    fleet_view,
+    inbox,
+    rail,
+    review,
+    widgets,
+)
 from pptmstr.ui.command_view import Actions, CommandViewState, FrozenRun
 from pptmstr.ui.focus import FocusState, OnObligation, Scope
 from tests.test_inbox_rail import _collect, _row_text, _stub_imgui, _stub_row_imgui, approval
@@ -910,6 +920,9 @@ def _detail(
     fake = MagicMock()
     fake.tree_node_ex.return_value = True
     fake.small_button.return_value = False
+    # A title line is cut to the room it is given (``detail._title_line``).
+    fake.get_content_region_avail.return_value.x = 4000.0
+    fake.calc_text_size.side_effect = lambda text: MagicMock(x=8.0 * len(text))
     monkeypatch.setattr(detail, "imgui", fake)
     monkeypatch.setattr(widgets, "small_button", fake.small_button)
     monkeypatch.setattr(inbox, "imgui", fake)
@@ -941,6 +954,38 @@ def _detail(
         ),
     )
     detail.draw(snap, focus, review.ReviewState(), detail.DetailState(), 10.0, None, given)
+    reached.append(("text", [str(c.args[-1]) for c in fake.text_colored.call_args_list]))
+    reached.append(("labels", [str(c.args[0]) for c in fake.tree_node_ex.call_args_list]))
+    return reached
+
+
+def _digest(
+    monkeypatch: pytest.MonkeyPatch,
+    snap: Snapshot,
+    focus: FocusState,
+    given: inbox.CommandRows | None,
+) -> list[tuple[Any, ...]]:
+    """
+    Which ended-command bodies ``digest_pane.draw`` reached, in order, with the
+    pixels stubbed: DIGEST is where a session's ended commands are listed.
+    """
+    from tests.test_digest_pane import _fake
+
+    reached: list[tuple[Any, ...]] = []
+    fake = _fake(opened=True)
+    fake.small_button.return_value = False
+    for module in (digest_pane, board_pane, widgets):
+        monkeypatch.setattr(module, "imgui", fake)
+    monkeypatch.setattr(widgets, "small_button", fake.small_button)
+    monkeypatch.setattr(digest_pane.decision_view, "draw_closed", MagicMock())
+    monkeypatch.setattr(
+        command_view,
+        "draw_ended",
+        lambda command, **kw: reached.append(
+            ("ended", command.id, kw["role"], kw["now"], kw["log_path"])
+        ),
+    )
+    digest_pane.draw(snap, focus, 10.0, None, given)
     reached.append(("text", [str(c.args[-1]) for c in fake.text_colored.call_args_list]))
     reached.append(("labels", [str(c.args[0]) for c in fake.tree_node_ex.call_args_list]))
     return reached
@@ -989,7 +1034,7 @@ def test_a_focused_command_shows_the_rows_body_with_no_press_of_its_own(
     assert reached[0][1] is given.state
 
 
-def test_detail_lists_the_sessions_ended_commands_newest_first_through_the_command_view(
+def test_the_digest_lists_the_sessions_ended_commands_newest_first_through_the_command_view(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
     monkeypatch.setattr("pptmstr.settings.config_dir", lambda: tmp_path)
@@ -997,8 +1042,14 @@ def test_detail_lists_the_sessions_ended_commands_newest_first_through_the_comma
     snap = store.snapshot()
     (row,) = owed_commands(snap)
     log = str(commandfile.command_dir(S, cid(3)) / commandfile.LOG_NAME)  # type: ignore[operator]
+    focus = FocusState(target=OnObligation(row.key))
 
-    reached = _detail(monkeypatch, snap, FocusState(target=OnObligation(row.key)), rows())
+    # Not in DETAIL, which shows the command in front of the operator and no history.
+    shown = _detail(monkeypatch, snap, focus, rows())
+    assert not [entry for entry in shown if entry[0] == "ended"]
+    assert not any("###ended-commands" in label for label in dict(shown[-2:])["labels"])
+
+    reached = _digest(monkeypatch, snap, focus, rows())
 
     assert [entry for entry in reached if entry[0] == "ended"] == [
         ("ended", cid(4), "builder-2", WALL + 50.0, None),
@@ -1010,8 +1061,8 @@ def test_detail_lists_the_sessions_ended_commands_newest_first_through_the_comma
     assert f"ended, not yet read by builder: {cid(2)}" in text
     assert f"ended, not yet read by builder-2: {cid(3)}" in text
     assert not any(cid(4) in line for line in text)
-    assert labels[0] == "commands ended in this session (3)###ended-commands"
-    assert labels[2].startswith(f"{cid(3)} from builder-2: exit code 0")
+    assert "commands ended in this session (3)###ended-commands" in labels
+    assert any(label.startswith(f"{cid(3)} from builder-2: exit code 0") for label in labels)
     assert not any(MARK in line for line in text + labels)
 
 
@@ -1025,21 +1076,22 @@ def test_the_ended_list_is_drawn_for_the_session_under_a_cursor_that_owes_nothin
     focus = FocusState()
     focus.to_node(snap, ROOT, scope=Scope.AGENT)
 
-    reached = _detail(monkeypatch, snap, focus, rows())
+    assert not [entry for entry in _detail(monkeypatch, snap, focus, rows()) if entry[0] == "ended"]
+    reached = _digest(monkeypatch, snap, focus, rows())
 
     assert reached[0][:2] == ("ended", cid(1))
 
 
 def test_a_result_the_asker_has_read_is_no_longer_said_to_be_unread() -> None:
     store = _history()
-    assert len(detail.unread_command_lines(store.snapshot(), S)) == 2
+    assert len(digest_pane.unread_command_lines(store.snapshot(), S)) == 2
 
     store.apply(CommandsRead(CHILD, "rq", WALL + 40.0, cid(2)), now=40.0)
 
-    assert detail.unread_command_lines(store.snapshot(), S) == (
+    assert digest_pane.unread_command_lines(store.snapshot(), S) == (
         f"ended, not yet read by builder-2: {cid(3)}",
     )
-    assert detail.unread_command_lines(store.snapshot(), "another") == ()
+    assert digest_pane.unread_command_lines(store.snapshot(), "another") == ()
 
 
 def test_only_a_command_that_started_a_process_has_a_log_to_point_at(
@@ -1048,20 +1100,22 @@ def test_only_a_command_that_started_a_process_has_a_log_to_point_at(
     monkeypatch.setattr("pptmstr.settings.config_dir", lambda: tmp_path)
     snap = _history().snapshot()
 
-    assert detail.log_path(snap.commands[cid(1)]) is None
-    assert detail.log_path(snap.commands[cid(2)]) is None
-    assert detail.log_path(snap.commands[cid(3)]) == commandbus.log_path(snap.commands[cid(3)])
-    assert detail.log_path(snap.commands[cid(3)]) is not None
+    assert command_view.log_path(snap.commands[cid(1)]) is None
+    assert command_view.log_path(snap.commands[cid(2)]) is None
+    assert command_view.log_path(snap.commands[cid(3)]) == commandbus.log_path(
+        snap.commands[cid(3)]
+    )
+    assert command_view.log_path(snap.commands[cid(3)]) is not None
 
 
 # -- the clipboard ------------------------------------------------------------------------
 
 
 def test_the_clipboards_three_marks_are_the_buss() -> None:
-    assert detail.ASKER_MARK == bus._QUOTE
-    assert detail.OPERATOR_MARK == bus._ANSWER
-    assert detail.OUTPUT_MARK == commandbus._OUTPUT
-    assert len({detail.ASKER_MARK, detail.OPERATOR_MARK, detail.OUTPUT_MARK}) == 3
+    assert command_view.ASKER_MARK == bus._QUOTE
+    assert command_view.OPERATOR_MARK == bus._ANSWER
+    assert command_view.OUTPUT_MARK == commandbus._OUTPUT
+    assert len({command_view.ASKER_MARK, command_view.OPERATOR_MARK, command_view.OUTPUT_MARK}) == 3
 
 
 def _authors(lines: list[str]) -> dict[str, list[str]]:
@@ -1082,11 +1136,11 @@ def test_on_the_clipboard_every_line_is_behind_its_authors_mark_and_no_other(
     finish(store, 1, now=7.0)
     command = store.snapshot().commands[cid(1)]
 
-    by = _authors(detail.command_text(command, "builder"))
+    by = _authors(command_view.command_text(command, "builder"))
 
     # Nothing an agent or a program wrote is on a line of this pane's own.
     assert not any(MARK in line for line in by[""])
-    assert by[""][0] == detail.CLIP_LEGEND
+    assert by[""][0] == command_view.CLIP_LEGEND
     # The asker's: the string, the reason, the expectation. Escaped, a line to a line.
     assert by["| "] == [
         f"make {MARK}-install PREFIX=/usr/local && \\\\\\n",
@@ -1112,9 +1166,9 @@ def test_a_string_run_as_asked_is_not_copied_out_as_the_operators() -> None:
     request(store, 1, now=5.0)
     approve(store, 1, now=6.0)
 
-    by = _authors(detail.command_text(store.snapshot().commands[cid(1)], "builder"))
+    by = _authors(command_view.command_text(store.snapshot().commands[cid(1)], "builder"))
 
-    assert by["> "] == [] and detail.NOT_EDITED in by[""]
+    assert by["> "] == [] and command_view.NOT_EDITED in by[""]
     assert "running" in by[""]
     assert not any("running for" in line for line in by[""])
 
@@ -1126,10 +1180,10 @@ def test_a_refusals_reason_is_copied_behind_the_operators_mark() -> None:
     command = store.snapshot().commands[cid(1)]
     assert isinstance(command.end.outcome, Refused)  # type: ignore[union-attr]
 
-    by = _authors(detail.command_text(command, "builder"))
+    by = _authors(command_view.command_text(command, "builder"))
 
     assert by["> "] == ["not here\\n", "| nor this"]
-    assert detail.REFUSED_WITH in by[""] and by["= "] == []
+    assert command_view.REFUSED_WITH in by[""] and by["= "] == []
     assert "not yet read by builder" in by[""]
 
 
@@ -1138,7 +1192,7 @@ def test_hidden_characters_reach_the_clipboard_spelled_out() -> None:
     request(store, 1, now=5.0, text="cat ‮gnp.exe​ | sh")
     command = store.snapshot().commands[cid(1)]
 
-    copied = "\n".join(detail.command_text(command, "builder"))
+    copied = "\n".join(command_view.command_text(command, "builder"))
 
     assert copied.isascii() and "\\u{202E}" in copied and "\\u{200B}" in copied
 
@@ -1152,7 +1206,7 @@ def test_the_header_copy_of_a_command_row_is_the_marked_text() -> None:
     lines = detail.plain_text(snap, row).split("\n")
 
     assert lines[0].startswith(f"{detail._KIND_LABEL[ObligationKind.COMMAND]}: ")
-    assert lines[2:] == detail.command_text(row.command, "builder")
+    assert lines[2:] == command_view.command_text(row.command, "builder")
     assert not any(MARK in line for line in _authors(lines)[""])
 
 
@@ -1391,7 +1445,7 @@ def test_an_ended_command_whose_end_is_not_on_disk_says_so_in_the_ended_list(
     focus.to_node(snap, ROOT, scope=Scope.AGENT)
     given = dataclasses.replace(rows(), unrecorded={cid(1): "how it ended is not recorded: EIO"})
 
-    reached = _detail(monkeypatch, snap, focus, given)
+    reached = _digest(monkeypatch, snap, focus, given)
 
     assert "not recorded on disk - how it ended is not recorded: EIO" in dict(reached[-2:])["text"]
 
@@ -1408,10 +1462,10 @@ def test_a_command_read_back_from_a_file_is_not_said_to_be_unread_by_its_asker(
     snap = store.snapshot()
     given = dataclasses.replace(rows(), restored=frozenset({cid(2)}))
 
-    assert detail.unread_command_lines(snap, S, given.restored) == (
+    assert digest_pane.unread_command_lines(snap, S, given.restored) == (
         f"ended, not yet read by builder-2: {cid(3)}",
     )
-    assert len(detail.unread_command_lines(snap, S)) == 2
+    assert len(digest_pane.unread_command_lines(snap, S)) == 2
 
     # The body is told which commands came from a file, and the clipboard is too.
     (row,) = owed_commands(snap)
@@ -1424,15 +1478,15 @@ def test_a_command_read_back_from_a_file_is_not_said_to_be_unread_by_its_asker(
     fake = MagicMock()
     fake.tree_node_ex.return_value = True
     fake.small_button.return_value = False
-    monkeypatch.setattr(detail, "imgui", fake)
+    monkeypatch.setattr(digest_pane, "imgui", fake)
     monkeypatch.setattr(widgets, "small_button", fake.small_button)
-    detail.draw_ended_commands(snap, given, S)
+    digest_pane.draw_ended_commands(snap, given, S)
     assert told[cid(2)] is True and told[cid(3)] is False
 
-    copied = detail.command_text(snap.commands[cid(2)], "builder", restored=True)
+    copied = command_view.command_text(snap.commands[cid(2)], "builder", restored=True)
     assert any("from before pptmstr restarted" in line for line in copied)
     assert "not yet read by builder" not in copied
-    assert "not yet read by builder" in detail.command_text(snap.commands[cid(2)], "builder")
+    assert "not yet read by builder" in command_view.command_text(snap.commands[cid(2)], "builder")
     text = [str(c.args[-1]) for c in fake.text_colored.call_args_list]
     assert not any(line.startswith("ended, not yet read by builder:") for line in text)
 
@@ -1456,14 +1510,15 @@ def test_the_copy_of_a_command_left_running_does_not_say_its_asker_has_not_read_
 # -- Dear ImGui itself: the queue and DETAIL, whole -----------------------------------------
 
 
-def test_in_dear_imgui_the_queue_and_detail_draw_open_and_ended_commands_without_a_stub(
+def test_in_dear_imgui_the_queue_detail_and_digest_draw_open_and_ended_commands_without_a_stub(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Any
 ) -> None:
     """
     Every draw call this step added, made for real: a context with no backend
     raises on a call that does not exist in the binding and on an unbalanced
-    push, which a ``MagicMock`` accepts. Every triangle in DETAIL is forced
-    open, so the ended bodies are reached. Nothing is rendered.
+    push, which a ``MagicMock`` accepts. Every triangle in DETAIL and DIGEST is
+    forced open, so the ended bodies are reached -- in DIGEST, which lists them,
+    and not in DETAIL. Nothing is rendered.
     """
     from pptmstr.ui import compose, decision_view
 
@@ -1472,17 +1527,22 @@ def test_in_dear_imgui_the_queue_and_detail_draw_open_and_ended_commands_without
     request(store, 5, ROOT, now=40.0, text="cat ‮gnp.exe​ | sh # 100%s %d\n" * 5)
     snap = store.snapshot()
     opened: list[str] = []
+    in_detail: list[str] = []
 
     class Open:
+        def __init__(self, into: list[str]) -> None:
+            self.into = into
+
         def __getattr__(self, name: str) -> object:
             return getattr(real_imgui, name)
 
         def tree_node_ex(self, label: str, flags: int = 0) -> bool:
             real_imgui.set_next_item_open(True)
-            opened.append(label)
+            self.into.append(label)
             return bool(real_imgui.tree_node_ex(label, flags))
 
-    monkeypatch.setattr(detail, "imgui", Open())
+    monkeypatch.setattr(detail, "imgui", Open(in_detail))
+    monkeypatch.setattr(digest_pane, "imgui", Open(opened))
     context = real_imgui.create_context()
     try:
         io = real_imgui.get_io()
@@ -1522,12 +1582,16 @@ def test_in_dear_imgui_the_queue_and_detail_draw_open_and_ended_commands_without
                         given,
                     )
                     real_imgui.end()
+                    real_imgui.begin("digest")
+                    digest_pane.draw(snap, focus, 100.0, decision_view.DecisionState(), given)
+                    real_imgui.end()
                     real_imgui.end_frame()
     finally:
         real_imgui.destroy_context(context)
 
     assert len(owed_commands(snap)) == 2
-    assert f"{detail.ended_heading(3)}###ended-commands" in opened
+    assert f"{digest_pane.ended_heading(3)}###ended-commands" in opened
+    assert not any(label.endswith("###ended-commands") for label in in_detail)
     assert sum(1 for label in opened if label.endswith("###body")) >= 3
 
 
@@ -1797,6 +1861,7 @@ def test_what_the_operators_profile_may_read_is_said_once_behind_the_question_ma
         monkeypatch.setattr(inbox, "imgui", fake)
         monkeypatch.setattr(command_view, "imgui", fake)
         monkeypatch.setattr(widgets, "small_button", fake.small_button)
+        monkeypatch.setattr(widgets, "small_button_line", fake.small_button_line)
         fake.input_text_with_hint.side_effect = lambda label, hint, value: (False, value)
         monkeypatch.setattr(
             command_view, "help_mark", lambda key, title, paragraphs: explained.extend(paragraphs)
@@ -1832,11 +1897,11 @@ def test_what_an_end_left_is_said_in_detail_and_on_the_clipboard() -> None:
     assert "NOT CONFIRMED DEAD: its process group 99 was sent SIGKILL and" in said
     assert "\n" not in said
     # One line of pptmstr's own, behind no author's mark, on the clipboard and
-    # as the label the command is listed under in DETAIL.
-    text = detail.command_text(command, "builder")
+    # as the label the command is listed under in DIGEST.
+    text = command_view.command_text(command, "builder")
     assert said in text and not said.startswith(("| ", "> ", "= "))
     assert sum("NOT CONFIRMED DEAD" in line for line in text) == 1
-    assert detail.ended_label(store.snapshot(), command, 0.0).endswith(said)
+    assert digest_pane.ended_label(store.snapshot(), command, 0.0).endswith(said)
 
     plain = dataclasses.replace(command, end=dataclasses.replace(end, leftover=0, unconfirmed=None))
     assert "leftover" not in command_view.row_state(plain, 0.0).text
@@ -1854,7 +1919,7 @@ def _queue_drawn(
     """
     What ``inbox.draw`` put down, in order: ``("row", key)`` for a collapsed
     row, ``("open", key)`` for an expanded one, ``("text", line)`` for a line
-    of the pane's own, and ``("zero", "")`` / ``("splash", "")`` for the two
+    of the pane's own, and ``("zero", "")`` / ``("no fleet", "")`` for the two
     empty states.
     """
     from pptmstr.ui import decision_view
@@ -1869,7 +1934,7 @@ def _queue_drawn(
     monkeypatch.setattr(inbox, "_header", MagicMock())
     monkeypatch.setattr(inbox, "_batch_controls", MagicMock())
     monkeypatch.setattr(inbox, "_zero_state", lambda snap, now: drawn.append(("zero", "")))
-    monkeypatch.setattr(inbox, "_splash", lambda now: drawn.append(("splash", "")))
+    monkeypatch.setattr(inbox, "_no_fleet", lambda: drawn.append(("no fleet", "")))
     monkeypatch.setattr(
         inbox,
         "_row",
@@ -2165,7 +2230,7 @@ def test_in_dear_imgui_the_mark_of_a_departed_row_and_the_new_lines_draw_without
 ) -> None:
     """
     The calls this adds, made for real in a context with no backend: the mark
-    in a queue, in an empty queue and on the cold-start splash; the identity,
+    in a queue, in an empty queue and with no fleet; the identity,
     NEW and others-waiting lines; a reason holding a lone surrogate. Nothing
     is rendered and nobody has looked at any of it.
     """
@@ -2860,6 +2925,7 @@ def test_the_row_notes_the_sessions_directory_written_out_in_full(
     monkeypatch.setattr(inbox, "imgui", fake)
     monkeypatch.setattr(command_view, "imgui", fake)
     monkeypatch.setattr(widgets, "small_button", fake.small_button)
+    monkeypatch.setattr(widgets, "small_button_line", fake.small_button_line)
     fake.input_text_with_hint.side_effect = lambda label, hint, value: (False, value)
     explained: list[str] = []
     monkeypatch.setattr(

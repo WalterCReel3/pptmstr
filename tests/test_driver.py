@@ -342,6 +342,35 @@ def test_error_result_finishes_failed_with_the_status() -> None:
     assert "529" in finished.error and "overloaded" in finished.error
 
 
+@pytest.mark.parametrize(
+    "message",
+    [result(), result(is_error=True, errors=["overloaded"])],
+    ids=["ok", "error"],
+)
+def test_a_result_ends_the_transcripts_turn_and_opens_the_one_sent_during_it(
+    message: ResultMessage,
+) -> None:
+    """
+    The ResultMessage is the one place a turn's end is known, so the translator
+    tells the transcript there; a prompt ``send`` wrote while the turn ran opens
+    its turn at that end. An error's own line belongs to the turn it ended.
+    """
+    tr, transcript = make()
+    transcript.append(SegmentKind.SYSTEM, "\n> build it\n")
+    tr.handle(message)
+    assert not transcript.turn_open()
+    ended = transcript.published_length
+
+    transcript.append(SegmentKind.SYSTEM, "\n> again\n")
+    transcript.append(SegmentKind.OUTPUT, "working")
+    transcript.append(SegmentKind.SYSTEM, "\n> and the docs\n")
+    assert transcript.turn_open() and transcript.turn_start() < transcript.published_length
+    tr.handle(message)
+    assert transcript.turn_open()
+    assert transcript.turn_start() == transcript.published_length > ended
+    assert transcript.turn_prose() == ""
+
+
 def test_cost_is_emitted_as_a_delta() -> None:
     """
     Whether total_cost_usd is per-turn or cumulative is unconfirmed. Deltaing against
@@ -6039,3 +6068,50 @@ def test_the_operators_environment_cannot_switch_git_status_back_on(
     assert isinstance(raised.value.__cause__, _Spawned)
 
     assert seen[_GIT_SWITCH] == "1"
+
+
+class _RefusesOnce:
+    """A client whose first ``query`` raises and whose later ones are taken."""
+
+    def __init__(self) -> None:
+        self.taken: list[object] = []
+
+    async def query(self, prompt: object, session_id: str = "default") -> None:
+        if not self.taken:
+            self.taken.append(None)
+            raise BrokenPipeError("the CLI closed its stdin")
+        self.taken.append(prompt)
+
+
+@pytest.mark.parametrize("behind", [False, True], ids=["idle", "behind-a-turn"])
+def test_a_send_that_raised_opens_no_turn_and_the_next_prompt_owns_the_answer(
+    behind: bool,
+) -> None:
+    """
+    A prompt line opens a turn (or waits behind the one going on), and only the
+    result of a prompt the CLI took ends one. A send whose ``query`` raised must
+    leave the turns as they were, or every later prompt reads the turn before its
+    own. Its line stays in the log, where the operator wrote it, with the
+    failure said under it.
+    """
+    session = AgentSession(Bridge(), task="t")
+    client = _RefusesOnce()
+    session._client = client  # type: ignore[assignment]
+    t = session.transcript
+    if behind:
+        t.append(SegmentKind.SYSTEM, "\n> earlier\n")
+        t.append(SegmentKind.OUTPUT, "working")
+    turns = (list(t._turn_starts), list(t._turn_ends), list(t._queued))
+
+    with pytest.raises(BrokenPipeError):
+        asyncio.run(session.send("lost"))
+    assert (list(t._turn_starts), list(t._turn_ends), list(t._queued)) == turns
+    assert "> lost" in t.text() and "not sent" in t.text()
+
+    if behind:
+        t.end_turn()
+    assert asyncio.run(session.send("kept")) is True
+    t.append(SegmentKind.OUTPUT, "the answer")
+    t.end_turn()
+    assert t.turn_prose() == "the answer"
+    assert t.turn() == (t.text().index("the answer"), False)

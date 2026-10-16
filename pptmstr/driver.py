@@ -920,6 +920,7 @@ class Translator:
             if msg.api_error_status:
                 detail = f"HTTP {msg.api_error_status}: {detail}"
             self.transcript.append(SegmentKind.ERROR, f"\n{detail}\n")
+            self.transcript.end_turn()
             out.append(
                 AgentFinished(self.node_id, AgentState.FAILED, time.monotonic(), error=detail)
             )
@@ -929,7 +930,10 @@ class Translator:
         # ResultMessage is a turn boundary and only ``run()`` knows what that means
         # for the node -- it is the one place that has waited out the sub-agent
         # grace window and the context poll first. Deciding here means naming a
-        # state before the facts that would settle it exist.
+        # state before the facts that would settle it exist. The transcript is
+        # told, though: a ResultMessage is the only place a turn's end is known,
+        # and a prompt sent mid-turn waits for it (``Transcript.end_turn``).
+        self.transcript.end_turn()
         return out
 
     def _rate_limit(self, msg: RateLimitEvent) -> list[Intent]:
@@ -3035,15 +3039,54 @@ class AgentSession:
         CLI: it is what lets a session's file be created (``fleetsync``). Said
         ahead of the hand-over, a ``query`` that raised would leave a file for a
         run that was never given its text.
+
+        **The prompt's line is written before the hand-over**, so it is in the
+        log where the operator wrote it, ahead of anything the session says in
+        answer. A ``query`` that raised withdraws the turn the line opened or
+        queued for (``Transcript.withdraw_prompt``) and says under it that it was
+        not sent, then raises as before.
         """
         client = self._client
         if client is None:
             LOG.warn("agent", "cannot send: session is not connected")
             return False
-        self.transcript.append(SegmentKind.SYSTEM, f"\n> {text}\n")
-        await client.query(text)
+        line = self.transcript.append(SegmentKind.SYSTEM, f"\n> {text}\n")
+        try:
+            await client.query(text)
+        except BaseException as exc:
+            # The line opened a turn, or queued for one, that no result will end.
+            self.transcript.withdraw_prompt(line)
+            self.transcript.append(SegmentKind.ERROR, f"not sent: {type(exc).__name__}: {exc}\n")
+            raise
         self.bridge.emit(
             StateChanged(self.node_id, AgentState.THINKING, topic="reading your message")
+        )
+        return True
+
+    async def wake(self, text: str) -> bool:
+        """
+        Send the session a message of pptmstr's own (``bus.wake_message``): that
+        something it was waiting for has arrived. True when a connected client
+        took it, False when there was none, and then nothing is written.
+
+        **Never the operator's prompt.** The line is ``SegmentKind.NOTICE``, not
+        ``SYSTEM``, so every reader of the transcript tells the two apart by what
+        wrote the line and not by what it says, and nothing here is noted as the
+        last thing the operator sent (``fleetsync.sent`` is ``app._send``'s).
+
+        Written after the client took it and not before: a line opens a turn
+        (``Transcript._prompt_locked``), and one for a query that raised would
+        open a turn no result ever ends. ``send`` writes the operator's prompt
+        first, so it stays in the log, and withdraws its turn on a raise.
+        """
+        client = self._client
+        if client is None:
+            LOG.warn("agent", "no wake sent: session is not connected")
+            return False
+        await client.query(text)
+        self.transcript.append(SegmentKind.NOTICE, f"\n{text}\n")
+        self.bridge.emit(
+            StateChanged(self.node_id, AgentState.THINKING, topic="reading a notice from pptmstr")
         )
         return True
 

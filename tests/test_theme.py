@@ -262,12 +262,19 @@ def test_a_modals_colours_are_built_once_for_a_palette_and_not_shared_between_tw
 # dock a field is told from its pane by ``dock_well`` alone, and a button by its tint.
 # planning/2026-10-15-ui-style-probe.md, "Per-theme values", settles both.
 #
-# Every floor here is measured on the palettes as they stand, not chosen. The well's is
-# turbo's, 1.136:1, the thinnest; the operator called a dock's well at 1.02:1 lost.
+# Every floor here is measured on the palettes as they stand, not chosen. The well's was
+# turbo's 1.136:1 off its pane, then the thinnest; the operator called a dock's well at
+# 1.02:1 lost. It holds against ``panel`` too, which a child window is filled with
+# (DETAIL's "side by side", the brief pane's checkbox). The thinnest now are win311's
+# 1.140 off its pane and ghost's 1.140 on ``panel``.
 DOCK_WELL_SEPARATION = 1.13
-# The hint in an empty field is ``Palette.hint``, held to body text's 4.5:1 in a dock's
-# well and in a modal's, on every palette (the operator's "(c)": a hint colour of its own).
+# The hint in an empty field is ``Palette.hint`` in a dock's well and
+# ``Palette.dialog_hint`` in a modal's, each held to body text's 4.5:1 in its own well
+# (the operator's "(c)": a hint colour of its own).
 HINT_IN_A_WELL = 4.5
+# And an empty field reads as empty: typed text is this far from the hint, in each
+# well. The thinnest is cde's, 1.64:1 in either well: its hint is ``text_dim`` in both.
+TYPED_OFF_THE_HINT = 1.5
 # How far a hint may be from ``text_dim`` toward ``text``, in the steps it is found by.
 HINT_STEPS = 1000
 # Secondary text against body text, measured on each palette's ``text_dim``: the
@@ -296,9 +303,15 @@ BUTTON_STEP_SEEN = 1.2
 BUTTON_TEXT_HOVERED = 4.45
 BUTTON_TEXT_HELD = 3.0
 
-# How far a dock's well is from ``bg`` toward ``text``, as the record's table gives it.
-DOCK_WELL_STEP = {"light": 0.08}
-DOCK_WELL_STEP_ELSEWHERE = 0.10
+# How far a dock's well is from ``bg``, and toward what: ``text`` at the record's table's
+# step but where ``Palette.dock_well`` says why not.
+DOCK_WELL_STEP = {
+    "light": ("text", 0.08),
+    "turbo": ("text", 0.19),
+    "cde": ("white", 0.10),
+    "win311": ("white", 0.11),
+}
+DOCK_WELL_STEP_ELSEWHERE = ("text", 0.10)
 # How far a tool block's ground is from ``bg``, and toward what, by how bright the
 # pane is (``Palette.terminal_bg``); tests/test_tool_block.py holds the inks on it.
 TERMINAL_STEPS = (
@@ -321,95 +334,237 @@ def _mixed8(base: Color, over: Color, alpha: float) -> Color:
 
 
 @pytest.mark.parametrize("palette", ALL_PALETTES, ids=PALETTE_IDS)
-def test_a_docks_well_is_a_step_from_its_pane_toward_its_text(palette: Palette) -> None:
-    step = DOCK_WELL_STEP.get(palette.name, DOCK_WELL_STEP_ELSEWHERE)
-    assert palette.dock_well.u32 == _mixed8(palette.bg, palette.text, step).u32
+def test_a_docks_well_is_a_step_from_its_pane(palette: Palette) -> None:
+    toward, step = DOCK_WELL_STEP.get(palette.name, DOCK_WELL_STEP_ELSEWHERE)
+    over = {"text": palette.text, "white": theme.col(0xFFFFFF)}[toward]
+    assert palette.dock_well.u32 == _mixed8(palette.bg, over, step).u32
+
+
+@pytest.mark.parametrize("name", sorted(set(DOCK_WELL_STEP) - {"light"}))
+def test_a_departing_wells_step_is_the_least_that_clears_its_floors(name: str) -> None:
+    """
+    turbo, cde and win311 leave the record's step: each by the least step, in
+    hundredths, at which the well is seen on its pane and on ``panel`` and an empty
+    field's hint can be both 4.5:1 in it and 1.5:1 off typed text.
+    """
+    palette = THEMES[name]
+    toward, step = DOCK_WELL_STEP[name]
+    over = {"text": palette.text, "white": theme.col(0xFFFFFF)}[toward]
+
+    def clears(well: Color) -> bool:
+        return (
+            contrast_ratio(well, palette.bg) >= DOCK_WELL_SEPARATION
+            and contrast_ratio(well, palette.panel) >= DOCK_WELL_SEPARATION
+            and contrast_ratio(palette.text, well) >= HINT_IN_A_WELL * TYPED_OFF_THE_HINT
+        )
+
+    least = next(n for n in range(1, 101) if clears(_mixed8(palette.bg, over, n / 100)))
+    assert least / 100 == step
 
 
 @pytest.mark.parametrize("palette", ALL_PALETTES, ids=PALETTE_IDS)
 def test_a_docks_well_is_seen_on_its_pane_and_what_is_in_it_is_legible(palette: Palette) -> None:
     well = palette.dock_well
-    ratio = contrast_ratio(well, palette.bg)
-    assert ratio >= DOCK_WELL_SEPARATION, f"{palette.name}: the well is {ratio:.3f}:1 off the pane"
+    for pane in (palette.bg, palette.panel):
+        ratio = contrast_ratio(well, pane)
+        assert ratio >= DOCK_WELL_SEPARATION, f"{palette.name}: the well is {ratio:.3f}:1 off it"
     assert contrast_ratio(palette.text, well) >= 4.5
-    for surface in (palette.dock_well, palette.well):
-        hint = contrast_ratio(palette.hint, surface)
-        assert hint >= HINT_IN_A_WELL, f"{palette.name}: the hint is {hint:.3f}:1 in a well"
+
+
+def _hints(palette: Palette) -> dict[str, tuple[Color, Color]]:
+    """Each kind of field's hint, and the well that kind of field is filled with."""
+    return {
+        "dock": (palette.hint, palette.dock_well),
+        "dialog": (palette.dialog_hint, palette.well),
+    }
 
 
 @pytest.mark.parametrize("palette", ALL_PALETTES, ids=PALETTE_IDS)
-def test_a_hint_is_the_least_step_from_dim_text_that_reads_in_every_well(
-    palette: Palette,
+@pytest.mark.parametrize("kind", ["dock", "dialog"])
+def test_an_empty_field_reads_as_empty_in_its_own_well(palette: Palette, kind: str) -> None:
+    """Its hint is legible in the well it stands in, and is not typed text's colour."""
+    hint, well = _hints(palette)[kind]
+    seen = contrast_ratio(hint, well)
+    assert seen >= HINT_IN_A_WELL, f"{palette.name}: the {kind} hint is {seen:.3f}:1 in its well"
+    apart = contrast_ratio(palette.text, hint)
+    assert apart >= TYPED_OFF_THE_HINT, f"{palette.name}: typed text is {apart:.3f}:1 off the hint"
+
+
+@pytest.mark.parametrize("palette", ALL_PALETTES, ids=PALETTE_IDS)
+@pytest.mark.parametrize("kind", ["dock", "dialog"])
+def test_a_hint_is_the_least_step_from_dim_text_that_reads_in_its_well(
+    palette: Palette, kind: str
 ) -> None:
     """
     So a hint keeps as much of the dim grey's recession as the floor allows, and is
     ``text_dim`` itself where that already reads.
     """
-
-    def reads(colour: Color) -> bool:
-        return all(
-            contrast_ratio(colour, well) >= HINT_IN_A_WELL
-            for well in (palette.dock_well, palette.well)
-        )
-
+    hint, well = _hints(palette)[kind]
     step = next(
         n
         for n in range(HINT_STEPS + 1)
-        if reads(_mixed8(palette.text_dim, palette.text, n / HINT_STEPS))
+        if contrast_ratio(_mixed8(palette.text_dim, palette.text, n / HINT_STEPS), well)
+        >= HINT_IN_A_WELL
     )
-    assert palette.hint.u32 == _mixed8(palette.text_dim, palette.text, step / HINT_STEPS).u32
+    assert hint.u32 == _mixed8(palette.text_dim, palette.text, step / HINT_STEPS).u32
 
 
-def _calls_hint_colour(expr: object) -> bool:
-    """``hint_colour(...)`` or ``theme.hint_colour(...)``."""
+_FIELD = "input_text_with_hint"
+
+
+def _hint_colour_kind(expr: object) -> bool | None:
+    """
+    For ``hint_colour(gui, dialog=<True|False>)``, reached by any name: the kind it
+    was told. None for anything else, a ``hint_colour`` call whose kind is not a
+    literal included -- that is a kind the guard cannot check.
+    """
     import ast
 
     if not isinstance(expr, ast.Call):
-        return False
+        return None
     func = expr.func
     name = func.id if isinstance(func, ast.Name) else getattr(func, "attr", None)
-    return name == "hint_colour"
+    if name != "hint_colour":
+        return None
+    for keyword in expr.keywords:
+        if keyword.arg == "dialog" and isinstance(keyword.value, ast.Constant):
+            if isinstance(keyword.value.value, bool):
+                return keyword.value.value
+    return None
+
+
+def _draws_a_modal(tree: object) -> bool:
+    """A module that enters ``dialog_style`` draws its fields in a modal's wells."""
+    import ast
+
+    return any(
+        isinstance(node, ast.Call)
+        and (getattr(node.func, "attr", None) or getattr(node.func, "id", None)) == "dialog_style"
+        for node in ast.walk(tree)  # type: ignore[arg-type]
+    )
+
+
+def _field_calls(tree: object) -> list[object]:
+    """
+    Every call that draws ``input_text_with_hint``, however it was reached: as an
+    attribute of anything, by its own name, under an alias from an import or an
+    assignment, or looked up by its name as a string.
+    """
+    import ast
+
+    aliases = {_FIELD}
+    for node in ast.walk(tree):  # type: ignore[arg-type]
+        if isinstance(node, ast.ImportFrom):
+            aliases |= {a.asname or a.name for a in node.names if a.name == _FIELD}
+        if isinstance(node, ast.Assign) and (
+            getattr(node.value, "attr", None) == _FIELD
+            or getattr(node.value, "id", None) in aliases
+        ):
+            aliases |= {t.id for t in node.targets if isinstance(t, ast.Name)}
+    found: list[object] = []
+    for node in ast.walk(tree):  # type: ignore[arg-type]
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr == _FIELD:
+            found.append(node)
+        elif isinstance(func, ast.Name) and func.id in aliases:
+            found.append(node)
+        elif any(isinstance(a, ast.Constant) and a.value == _FIELD for a in node.args):
+            found.append(node)
+    return found
+
+
+def _hint_fields_misdrawn(source: str, where: str) -> tuple[list[str], int]:
+    """
+    Every hint field in ``source`` not inside a ``with hint_colour(..., dialog=k)``
+    whose ``k`` is the module's kind -- True where the module draws a modal -- as
+    ``where:line``, and how many hint fields there are.
+    """
+    import ast
+
+    tree = ast.parse(source)
+    modal = _draws_a_modal(tree)
+    covered: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.With) and any(
+            _hint_colour_kind(item.context_expr) is modal for item in node.items
+        ):
+            covered.update(id(inner) for inner in ast.walk(node))
+    calls = _field_calls(tree)
+    missed = [f"{where}:{c.lineno}" for c in calls if id(c) not in covered]  # type: ignore[attr-defined]
+    return missed, len(calls)
 
 
 def _hint_fields_outside_hint_colour() -> tuple[list[str], int]:
-    """
-    Every ``input_text_with_hint`` call in ``pptmstr/`` that is not inside a
-    ``with hint_colour(...)`` block, as ``file:line``, and how many calls there are.
-    """
-    import ast
     from pathlib import Path
 
     root = Path(theme.__file__).parent
     missed: list[str] = []
     calls = 0
     for path in sorted(root.rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        covered: set[int] = set()
-        for node in ast.walk(tree):
-            if isinstance(node, ast.With) and any(
-                _calls_hint_colour(item.context_expr) for item in node.items
-            ):
-                covered.update(id(inner) for inner in ast.walk(node))
-        for node in ast.walk(tree):
-            if (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Attribute)
-                and node.func.attr == "input_text_with_hint"
-            ):
-                calls += 1
-                if id(node) not in covered:
-                    missed.append(f"{path.relative_to(root)}:{node.lineno}")
+        found, count = _hint_fields_misdrawn(
+            path.read_text(encoding="utf-8"), str(path.relative_to(root))
+        )
+        missed += found
+        calls += count
     return missed, calls
 
 
-def test_every_field_with_a_hint_is_drawn_in_the_hint_colour() -> None:
+def test_every_field_with_a_hint_is_drawn_in_its_wells_hint_colour() -> None:
     """
     Outside ``hint_colour`` a hint is drawn in ``text_dim``, which is under 4.5:1 in
-    a well on five palettes. Found by reading the source, so a new field is held too.
+    a dock's well on five palettes, and a modal's field under the dock's hint is the
+    darker placeholder on win311. Found by reading the source, so a new field is
+    held too.
     """
     missed, calls = _hint_fields_outside_hint_colour()
     assert calls >= 6
     assert missed == []
+
+
+_PANE = "def draw(imgui):\n    {}\n"
+_MODAL = "def draw(imgui, widgets):\n    with widgets.dialog_style():\n        {}\n"
+_DRAWN = "imgui.input_text_with_hint()"
+
+
+def _wrapped(told: str, indent: int) -> str:
+    return f"with {told}:\n{' ' * indent}{_DRAWN}"
+
+
+@pytest.mark.parametrize(
+    ("source", "missed"),
+    [
+        (_PANE.format(_wrapped("hint_colour(imgui, dialog=False)", 8)), 0),
+        (_PANE.format(_wrapped("hint_colour(imgui, dialog=True)", 8)), 1),
+        (_PANE.format(_wrapped("hint_colour(imgui)", 8)), 1),
+        (_PANE.format(_DRAWN), 1),
+        (_MODAL.format(_wrapped("theme.hint_colour(imgui, dialog=True)", 12)), 0),
+        (_MODAL.format(_wrapped("hint_colour(imgui, dialog=False)", 12)), 1),
+        ("from imgui_bundle.imgui import input_text_with_hint as f\n" + _PANE.format("f()"), 1),
+        ("from imgui_bundle.imgui import input_text_with_hint\n" + _PANE.format(_DRAWN[6:]), 1),
+        (_PANE.format("field = imgui.input_text_with_hint\n    field()"), 1),
+        (_PANE.format("getattr(imgui, 'input_text_with_hint')()"), 1),
+    ],
+    ids=[
+        "pane-right",
+        "pane-told-dialog",
+        "pane-told-nothing",
+        "pane-bare",
+        "modal-right",
+        "modal-told-pane",
+        "imported-alias",
+        "imported-name",
+        "assigned-alias",
+        "by-string",
+    ],
+)
+def test_the_guard_finds_a_hint_field_however_it_is_reached_and_holds_its_kind(
+    source: str, missed: int
+) -> None:
+    found, calls = _hint_fields_misdrawn(source, "case")
+    assert calls == 1
+    assert len(found) == missed
 
 
 @pytest.mark.parametrize("palette", ALL_PALETTES, ids=PALETTE_IDS)
@@ -428,9 +583,16 @@ def test_a_field_drawn_in_the_hint_colour_leaves_dim_text_as_it_was(styled: obje
     theme.apply_style()
     slot = int(imgui.Col_.text_disabled)
     assert _slot(slot).u32 == theme.CDE.text_dim.u32
-    with theme.hint_colour(imgui):
+    with theme.hint_colour(imgui, dialog=False):
         assert _slot(slot).u32 == theme.CDE.hint.u32
     assert _slot(slot).u32 == theme.CDE.text_dim.u32
+    theme.set_theme("win311")
+    theme.apply_style()
+    with theme.hint_colour(imgui, dialog=True):
+        assert _slot(slot).u32 == theme.WIN311.dialog_hint.u32
+    with theme.hint_colour(imgui, dialog=False):
+        assert _slot(slot).u32 == theme.WIN311.hint.u32
+    assert _slot(slot).u32 == theme.WIN311.text_dim.u32
 
 
 @pytest.mark.parametrize("palette", ALL_PALETTES, ids=PALETTE_IDS)
@@ -514,6 +676,85 @@ def test_only_high_contrast_keeps_its_frames_and_popups_outline(
         border = _slot(int(imgui.Col_.border))
         assert contrast_ratio(border, palette.dock_well) >= 7.0
         assert contrast_ratio(border, _slot(int(imgui.Col_.popup_bg))) >= 7.0
+
+
+# -- the scrollbar ---------------------------------------------------------------
+
+
+def _bar_on(palette: Palette, surface: Color) -> tuple[Color, Color]:
+    """The track and the grab as ImGui draws them over ``surface``."""
+    track, grab = theme.scrollbar_alphas(palette)
+    drawn = _mixed8(surface, palette.text, track)
+    return drawn, _mixed8(drawn, palette.text_dim, grab)
+
+
+@pytest.mark.parametrize("palette", ALL_PALETTES, ids=PALETTE_IDS)
+def test_a_scrollbars_track_is_a_step_off_every_surface_and_its_grab_off_the_track(
+    palette: Palette,
+) -> None:
+    """
+    The track was ``bg``, the dock's own ground, so in a child filled with
+    ``panel`` it read as the pane stopping short (1.07:1 on dark), and on a dock it
+    was not there at all. Drawn over each surface a bar stands on, the track is a
+    step off it and the grab a step off the track; in a modal, which draws no
+    track, the grab is a step off the surface itself.
+    """
+    _, grab_alpha = theme.scrollbar_alphas(palette)
+    for surface in theme.scrollbar_surfaces(palette):
+        track, grab = _bar_on(palette, surface)
+        assert contrast_ratio(track, surface) >= theme.SCROLLBAR_TRACK_FLOOR == 1.2
+        assert contrast_ratio(grab, track) >= theme.SCROLLBAR_GRAB_FLOOR == 1.9
+        bare = _mixed8(surface, palette.text_dim, grab_alpha)
+        assert contrast_ratio(bare, surface) >= theme.SCROLLBAR_GRAB_FLOOR
+
+
+@pytest.mark.parametrize("palette", ALL_PALETTES, ids=PALETTE_IDS)
+def test_a_scrollbars_alphas_are_the_least_that_clear_their_floors(palette: Palette) -> None:
+    """
+    Each is the smallest step that clears its floor: one hundredth less and some
+    surface the bar stands on is under it.
+    """
+    track, grab = theme.scrollbar_alphas(palette)
+    surfaces = theme.scrollbar_surfaces(palette)
+    assert any(
+        contrast_ratio(_mixed8(s, palette.text, track - 0.01), s) < theme.SCROLLBAR_TRACK_FLOOR
+        for s in surfaces
+    )
+    grounds = [_mixed8(s, palette.text, track) for s in surfaces] + list(surfaces)
+    assert any(
+        contrast_ratio(_mixed8(g, palette.text_dim, grab - 0.01), g) < theme.SCROLLBAR_GRAB_FLOOR
+        for g in grounds
+    )
+
+
+def test_a_scrollbar_stands_on_every_surface_a_pane_draws() -> None:
+    p = theme.DARK
+    assert theme.scrollbar_surfaces(p) == (
+        p.bg,
+        p.panel,
+        p.panel_alt,
+        p.dock_well,
+        p.well,
+        p.terminal_bg,
+    )
+
+
+@pytest.mark.parametrize("palette", ALL_PALETTES, ids=PALETTE_IDS)
+def test_the_style_draws_the_track_and_grab_translucent_over_their_surface(
+    styled: object, palette: Palette
+) -> None:
+    theme.set_theme(palette.name)
+    theme.apply_style()
+    track, grab = theme.scrollbar_alphas(palette)
+    style = imgui.get_style()
+    c = imgui.Col_
+    for slot, ink, alpha in (
+        (c.scrollbar_bg, palette.text, track),
+        (c.scrollbar_grab, palette.text_dim, grab),
+    ):
+        got = style.color_(int(slot))
+        assert (got.x, got.y, got.z) == ink.rgb
+        assert got.w == pytest.approx(alpha)
 
 
 @pytest.mark.parametrize("palette", ALL_PALETTES, ids=PALETTE_IDS)
@@ -603,7 +844,7 @@ def test_an_unselected_tabs_label_stays_secondary_to_the_selected_ones(
 # where TRAIL is drawn far enough from DIM to be seen as part of the line rather than as
 # more background. splash.py cannot check that -- it emits an ordinal and imports no
 # palette by design -- so a rate constant in that file is an assertion about
-# ``inbox._ink`` and about all nine palettes here, and this is where it is held.
+# ``splash_view._ink`` and about all nine palettes here, and this is where it is held.
 #
 # The floor is measured rather than chosen. Across every palette against both surfaces
 # the shipping triple's thinnest separations are 1.227:1 (high_contrast, DIM to TRAIL,
@@ -629,7 +870,7 @@ def _as_drawn(packed: int, surface: Color) -> Color:
     """
     What the draw list actually puts on screen when it blends ``packed`` over ``surface``.
 
-    ``inbox._ink`` hands back a packed ImU32 for all three levels, and one of them comes
+    ``splash_view._ink`` hands back a packed ImU32 for all three levels, and one of them comes
     from ``theme.faded`` and so carries an alpha under 255. An alpha is not a colour
     until something has composited it, and the thing a contrast ratio has to be taken
     between is the composited result -- measuring the unblended ink would credit TRAIL
@@ -646,7 +887,7 @@ def _as_drawn(packed: int, surface: Color) -> Color:
 
 def _splash_levels(palette: Palette, surface: Color) -> dict[object, Color]:
     from pptmstr.ui import splash
-    from pptmstr.ui.inbox import _ink
+    from pptmstr.ui.splash_view import _ink
 
     theme.set_theme(palette.name)
     return {level: _as_drawn(_ink(level), surface) for level in splash.Luminance}

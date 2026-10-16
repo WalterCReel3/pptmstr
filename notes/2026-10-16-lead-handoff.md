@@ -62,5 +62,10 @@ truth; this note is the working state and the process lessons they do not hold.
 7. **Measure before fixing,** with a positive control for every "no" (the trust probe's e0 arm
    is the model). Several reviewer blockers were refuted by a run (tab hover) and several
    confirmed (locked worktree reuse, decoy filters).
-8. **The session's tool policy refuses TaskStop, SendMessage and ListAgents.** A running agent
+8. **No live CLI or adversarial probes are run from this session.** The operator: "Don't do
+   that again. Make notes of adversarial testing you wish to do and that will be done in a
+   different session with more safeguards put up." The list is in
+   `notes/2026-10-16-adversarial-probes-deferred.md`. Never board or forward a request_command
+   that starts a live CLI.
+9. **The session's tool policy refuses TaskStop, SendMessage and ListAgents.** A running agent
    can only be reached through a board concern addressed to its exact name (builder-N).

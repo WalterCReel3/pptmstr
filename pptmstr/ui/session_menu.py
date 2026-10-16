@@ -911,7 +911,7 @@ def draw_popup(
     offered = entries(rec, policy, facts)
     # Which card this is. The menu does not move the cursor, so the card it
     # belongs to need not be the highlighted one.
-    imgui.text_disabled(ellipsis(_headline(rec), _HEAD_WIDTH))
+    imgui.text_disabled(ellipsis(card_title(rec), _HEAD_WIDTH))
     imgui.separator()
 
     chosen: Item | None = None
@@ -972,11 +972,24 @@ def draw_popup(
         choose(chosen.action, rec, policy, state, wiring.actions, rung=chosen.rung, facts=facts)
 
 
-def _headline(rec: AgentRecord) -> str:
-    """The card's own title, as ``rail._title`` reads it."""
+def card_title(rec: AgentRecord) -> str:
+    """
+    The one string on a fleet card that tells two of them apart, and the headline
+    of the card's menu and of the main menu's session section: one rule, so the
+    three name a session alike. Here and not in ``rail`` because this is the lowest
+    of the three modules; ``rail`` and ``main_menu`` both import it.
+
+    A root is titled by its task -- every root record is named "session", so the name
+    cannot do it. A sub-agent is titled by its **role**, which is what the operator
+    spawned and the thing its siblings differ by. The driver happens to set ``task``
+    to the same string for a sub-agent today; reading ``agent_type`` says which fact
+    is meant rather than resting on the two staying equal. A record with neither --
+    a session file that recorded no task -- is titled by its session id, the one
+    name nothing else has.
+    """
     if rec.node_id[1] is not None:
-        return rec.agent_type or rec.task
-    return rec.task
+        return rec.agent_type or rec.task or rec.node_id[0]
+    return rec.task or rec.node_id[0]
 
 
 def draw_confirm(state: MenuState, snap: Snapshot, actions: Actions) -> None:

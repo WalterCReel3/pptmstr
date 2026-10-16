@@ -48,9 +48,9 @@ Pure (``layout``, ``viewer_rows``) and a thin draw (``draw``).
 from __future__ import annotations
 
 import ast
-import dataclasses
 import difflib
 import enum
+import functools
 import json
 import re
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -61,17 +61,8 @@ from urllib.parse import urlsplit
 from imgui_bundle import imgui
 
 from .. import drawable
-from ..theme import (
-    _BUTTON_STEP,
-    Color,
-    P,
-    Palette,
-    col,
-    contrast_ratio,
-    current,
-    mixed,
-    terminal_ink,
-)
+from ..theme import Color, LinkInks, P, terminal_ink
+from ..theme import link_inks as theme_link_inks
 from ..transcript import ToolEntry, ToolResult
 
 _T = TypeVar("_T")
@@ -90,6 +81,11 @@ class State(enum.Enum):
 # resolves against the theme in force.
 Span = tuple[str, str, str]
 Row = tuple[Span, ...]
+Where = tuple[str | None, int]
+"""
+A line of what an entry holds, as the viewer holds it: line ``n`` of an input
+key's value (split at ``\\n``), or with no key, line ``n`` of the output.
+"""
 FACES = ("mono", "prose", "caption", "tip")
 INKS = ("text", "dim", "add", "del", "ctx", "accent", "link", "ok", "warn", "danger")
 
@@ -129,7 +125,8 @@ first ones for every other tool.
 SHOW_ALL = "show all"
 """The affordance's label where nothing was left out but something was cut short."""
 
-_EXIT = re.compile(r"\AExit code (\d+)\n?")
+_EXIT = re.compile(r"Exit code (\d+)")
+_FOUND = re.compile(r"Found (\d+) ")
 _TOOL_USE_ERROR = re.compile(r"\A\s*<tool_use_error>([\s\S]*)</tool_use_error>\s*\Z")
 _REDIRECT = re.compile(r"^Redirect URL \(from the server's Location header[^)]*\): (\S+)", re.M)
 _USAGE = re.compile(r"<usage>subagent_tokens: (\d+) tool_uses: (\d+) duration_ms: (\d+)</usage>")
@@ -141,6 +138,7 @@ class Layout:
     What one block draws, every string drawable. ``more`` is the affordance's
     label, ``""`` where the block shows everything; it is drawn above the body
     when ``tail`` (the last rows are the ones kept) and under it otherwise.
+    ``shown`` is the viewer's lines its head and body draw whole (``find``).
     """
 
     tool: str
@@ -150,6 +148,7 @@ class Layout:
     body: tuple[Row, ...]
     more: str = ""
     tail: bool = False
+    shown: frozenset[Where] = frozenset()
 
 
 def state_of(entry: ToolEntry, live: bool) -> State:
@@ -178,11 +177,20 @@ def _as_text(value: object) -> str:
 
 
 def _timeout(ms: object) -> str | None:
+    """
+    A timeout in milliseconds, said exactly: in minutes or seconds where it is a
+    whole number of them, and in milliseconds otherwise, since ``1234.57 s`` is not
+    what was asked for.
+    """
     if not isinstance(ms, int | float) or isinstance(ms, bool):
         return None
-    if ms >= 60000 and ms % 60000 == 0:
-        return f"timeout {int(ms) // 60000} min"
-    return f"timeout {ms / 1000:g} s"
+    if isinstance(ms, float) and ms.is_integer():
+        ms = int(ms)
+    if isinstance(ms, int) and ms > 0 and ms % 60000 == 0:
+        return f"timeout {ms // 60000} min"
+    if isinstance(ms, int) and ms > 0 and ms % 1000 == 0:
+        return f"timeout {ms // 1000} s"
+    return f"timeout {ms!r} ms"
 
 
 def _mcp_parts(name: str) -> tuple[str, str] | None:
@@ -286,25 +294,51 @@ def _kb(n: int) -> str:
     return f"{n} B" if n < 1024 else f"{n / 1024:.1f} KB"
 
 
+def _line_count(value: object) -> int:
+    """
+    How many lines the viewer holds ``value`` in.
+    """
+    return _as_text(value).count("\n") + 1
+
+
 @dataclass
 class _Builder:
     """
-    The rows of one block, and whether anything of the entry was shortened on the
-    way: what turns the affordance on where no rows were left out.
+    The rows of one block, and the account of what of the entry they draw.
+
+    The account is positive: a row records the line it draws, whole, as it is
+    built (``drawing``), and whatever of the entry no row recorded -- an input
+    key, an output line -- turns the affordance on (``_leaves_out``). A line is
+    never counted as drawn because its text occurs somewhere in the block.
     """
 
+    args: Mapping[str, Any] = field(default_factory=dict)
+    # Whether anything of the entry was shortened on the way: what turns the
+    # affordance on where no rows were left out.
     short: bool = False
+    # How many times a line was shortened so far; a row built while it rose does
+    # not draw its line whole.
+    cuts: int = 0
     caption: list[Span] = field(default_factory=list)
+    # The lines rows drew whole.
+    drew: set[Where] = field(default_factory=set)
     # Input keys the block shows in a form of its own (a timeout in minutes, a flag
-    # as a word), and output lines it says elsewhere (an exit code in the badge):
-    # neither is looked for in what is drawn (``_leaves_out``).
+    # as a word, a description in the caption).
     took: set[str] = field(default_factory=set)
-    said: set[str] = field(default_factory=set)
+    # The output lines the layout reads, which ``drew`` and ``said`` count in, and
+    # those of them it says in a form of its own (an exit code in the badge) or
+    # that hold nothing to draw.
+    out: list[str] = field(default_factory=list)
+    said: set[int] = field(default_factory=set)
+    # Input keys whose value's lines are the lines the layout reads one row each
+    # (``value_lines``): only then is line ``n`` of the rows line ``n`` of the viewer.
+    aligned: set[str] = field(default_factory=set)
 
     def cut(self, line: str) -> str:
         """``line`` drawable, cut at ``LINE_CUT``."""
         if len(line) > LINE_CUT:
             self.short = True
+            self.cuts += 1
             line = line[: LINE_CUT - 1] + "…"
         return _d(line)
 
@@ -313,7 +347,57 @@ class _Builder:
         text = " ".join(_as_text(value).split())
         if text != _as_text(value) or len(text) > width:
             self.short = True
+            self.cuts += 1
         return _d(text if len(text) <= width else text[: width - 1] + "…")
+
+    def drawing(self, where: Where, build: Callable[[], Row]) -> Row:
+        """
+        ``build``'s row, recording that it draws ``where`` unless it shortened it.
+        """
+        cuts = self.cuts
+        row = build()
+        if self.cuts == cuts:
+            self.drew.add(where)
+        return row
+
+    def value(self, key: str, build: Callable[[], Row]) -> Row:
+        """
+        ``build``'s row, which draws the whole of ``key``'s value unless it shortened it.
+        """
+        cuts = self.cuts
+        row = build()
+        if self.cuts == cuts and key in self.args:
+            self.drew.update((key, n) for n in range(_line_count(self.args[key])))
+        return row
+
+    def value_lines(self, key: str) -> list[str]:
+        """
+        ``key``'s value as the lines a layout draws one row each. They are the
+        viewer's lines only where joining them gives the value back: a trailing
+        newline or a ``\\r`` is not a row, so such a value is never drawn whole.
+        An empty value is no rows, and drawn so.
+        """
+        text = _as_text(self.args.get(key, ""))
+        lines = text.splitlines()
+        if key in self.args and "\n".join(lines) == text:
+            self.aligned.add(key)
+            if not text:
+                self.drew.add((key, 0))
+        return lines
+
+    def value_line(self, key: str, n: int, build: Callable[[], Row]) -> Row:
+        """
+        ``build``'s row, drawing line ``n`` of ``key``'s ``value_lines``.
+        """
+        if key not in self.aligned:
+            return build()
+        return self.drawing((key, n), build)
+
+    def out_line(self, n: int, build: Callable[[], Row]) -> Row:
+        """
+        ``build``'s row, drawing output line ``n``.
+        """
+        return self.drawing((None, n), build)
 
     def flags(self, args: Mapping[str, Any], *keys: str) -> None:
         """``keys`` are flags the block says as a word when true and not at all when false."""
@@ -328,24 +412,33 @@ class _Builder:
     def mono(self, text: str, ink: str = "text") -> Row:
         return (("mono", ink, self.cut(text)),)
 
-    def out_rows(self, lines: Sequence[str], ink: str = "dim") -> list[Row]:
-        return [self.mono(line.expandtabs(8), ink) for line in lines]
+    def out_rows(self, count: int, ink: str = "dim") -> list[Row]:
+        """
+        The first ``count`` output lines, a row each.
+        """
+        return [self.out_row(ink)(n) for n in range(min(count, len(self.out)))]
 
-    def out_row(self, ink: str = "dim") -> Callable[[str], Row]:
-        """What ``out_rows`` makes of one line, for ``_cut_rows`` to build only what it keeps."""
-        return lambda line: self.mono(line.expandtabs(8), ink)
+    def out_row(self, ink: str = "dim") -> Callable[[int], Row]:
+        """
+        What ``out_rows`` makes of output line ``n``, for ``_cut_rows`` to build on demand.
+        """
+        return lambda n: self.out_line(n, lambda: self.mono(self.out[n].expandtabs(8), ink))
 
-    def kv_rows(self, args: Mapping[str, Any]) -> list[Row]:
-        rows: list[Row] = [
-            (("mono", "dim", f"{_d(key)}: "), ("mono", "text", self.one_line(value, ARG_WIDTH)))
-            for key, value in args.items()
-        ]
-        if len(rows) > ARG_ROWS:
-            self.short = True
-            rows = rows[:ARG_ROWS] + [
-                (("mono", "dim", f"… {len(rows) - ARG_ROWS} more arguments"),)
-            ]
+    def kv_rows(self) -> list[Row]:
+        """
+        The arguments a row each, ``key: value``, the value on one line.
+        """
+        rows: list[Row] = []
+        for key, value in self.args.items():
+            if len(rows) == ARG_ROWS:
+                self.short = True
+                rows.append((("mono", "dim", f"… {len(self.args) - ARG_ROWS} more arguments"),))
+                break
+            rows.append(self.value(key, functools.partial(self._kv_row, key, value)))
         return rows
+
+    def _kv_row(self, key: str, value: object) -> Row:
+        return (("mono", "dim", f"{_d(key)}: "), ("mono", "text", self.one_line(value, ARG_WIDTH)))
 
     def url_row(self, url: str) -> Row:
         """
@@ -358,6 +451,7 @@ class _Builder:
         rest = url[len(parts.scheme) + 3 + len(parts.netloc) :]
         if len(rest) > URL_REST:
             self.short = True
+            self.cuts += 1
             keep = URL_REST - 1
             rest = rest[: keep // 3] + "…" + rest[-(keep - keep // 3) :]
         return (
@@ -451,6 +545,27 @@ def _badge(state: State, word: str | None = None) -> Span:
     return ("caption", ink, text)
 
 
+def _read_out(b: _Builder, output: str) -> list[str]:
+    """
+    The lines of a result that may be a list of content blocks: their text, read
+    back. A block that is not text -- an image -- is drawn only in the viewer, so
+    the block is shortened by it.
+    """
+    blocks = _blocks(output)
+    if blocks is not None and not _all_text(blocks):
+        b.short = True
+    return _blocks_text(output).splitlines()
+
+
+def _kept(
+    lines: Sequence[str], keep: Callable[[str], bool] = lambda ln: bool(ln.strip())
+) -> list[int]:
+    """
+    The indices of the ``lines`` that ``keep`` keeps: by default, those not blank.
+    """
+    return [n for n, ln in enumerate(lines) if keep(ln)]
+
+
 def layout(entry: ToolEntry, live: bool) -> Layout:
     """
     The block for ``entry``: its tool's own caption, head and body, as the proofs
@@ -464,8 +579,8 @@ def layout(entry: ToolEntry, live: bool) -> Layout:
     failed = state is State.ERROR
     if failed:
         output = _unwrap_error(output)
-    lines = output.splitlines()
-    b = _Builder()
+    b = _Builder(args=args)
+    b.out = lines = output.splitlines()
     head: list[Row] = []
     body: list[Row] = []
     more = ""
@@ -477,6 +592,7 @@ def layout(entry: ToolEntry, live: bool) -> Layout:
         # and the last lines of the output, all in the code face.
         if "description" in args:
             b.detail(_d(args["description"]))
+            b.took.add("description")
         if (limit := _timeout(args.get("timeout"))) is not None:
             b.detail(limit)
             b.took.add("timeout")
@@ -485,17 +601,21 @@ def layout(entry: ToolEntry, live: bool) -> Layout:
         if args.get("dangerouslyDisableSandbox"):
             b.caption.append(("caption", "warn", "unsandboxed"))
         b.flags(args, "run_in_background", "dangerouslyDisableSandbox")
-        command = _as_text(args.get("command", "")).splitlines() or [""]
-        head = [b.mono(("$ " if n == 0 else "  ") + c) for n, c in enumerate(command)]
-        if len(head) > COMMAND_LINES:
+        command = b.value_lines("command") or [""]
+        head = [
+            b.value_line("command", n, functools.partial(b.mono, ("$ " if n == 0 else "  ") + c))
+            for n, c in enumerate(command[:COMMAND_LINES])
+        ]
+        if len(command) > COMMAND_LINES:
             b.short = True
-            hidden = len(head) - COMMAND_LINES
-            head = head[:COMMAND_LINES] + [(("mono", "dim", f"  … {_count(hidden, 'more line')}"),)]
-        if failed and (code := _EXIT.match(output)):
+            hidden = len(command) - COMMAND_LINES
+            head.append((("mono", "dim", f"  … {_count(hidden, 'more line')}"),))
+        start = 0
+        if failed and lines and (code := _EXIT.fullmatch(lines[0])):
             badge = f"exit {code[1]}"
-            b.said.add(code[0].rstrip("\n"))
-            lines = output[code.end() :].splitlines()
-        body, more = _cut_rows(lines, SHOWN["Bash"], b.out_row(), tail=True)
+            b.said.add(0)
+            start = 1
+        body, more = _cut_rows(range(start, len(lines)), SHOWN["Bash"], b.out_row(), tail=True)
         tail = True
     elif name == "Read":
         b.kind("read")
@@ -511,12 +631,14 @@ def layout(entry: ToolEntry, live: bool) -> Layout:
             b.detail("whole file")
         if "pages" in args:
             b.detail(f"pages {_d(args['pages'])}")
-        head = [b.mono(_as_text(args.get("file_path", "")))]
+            b.took.add("pages")
+        head = [b.value("file_path", lambda: b.mono(_as_text(args.get("file_path", ""))))]
         if failed:
-            body, more = _cut_rows(lines, SHOWN["Read"], b.out_row("danger"))
+            body, more = _cut_rows(range(len(lines)), SHOWN["Read"], b.out_row("danger"))
         else:
 
-            def numbered(line: str) -> Row:
+            def numbered(n: int) -> Row:
+                line = lines[n]
                 num, tab, text = line.partition("\t")
                 if tab and num.strip().isdigit():
                     return (
@@ -527,11 +649,13 @@ def layout(entry: ToolEntry, live: bool) -> Layout:
 
             if lines and result is not None:
                 b.detail(_count(len(lines), "line"))
-            body, more = _cut_rows(lines, SHOWN["Read"], numbered)
+            body, more = _cut_rows(
+                range(len(lines)), SHOWN["Read"], lambda n: b.out_line(n, lambda: numbered(n))
+            )
     elif name == "Edit":
         b.kind("edit")
-        old = _as_text(args.get("old_string", "")).splitlines()
-        new = _as_text(args.get("new_string", "")).splitlines()
+        old = b.value_lines("old_string")
+        new = b.value_lines("new_string")
         diff_rows, whole = _diff_rows(old, new)
         if whole:
             b.caption.append(("caption", "add", f"+{sum(1 for r in diff_rows if r[:1] == '+')}"))
@@ -544,9 +668,11 @@ def layout(entry: ToolEntry, live: bool) -> Layout:
         if args.get("replace_all"):
             b.detail("every occurrence")
         b.flags(args, "replace_all")
-        head = [b.mono(_as_text(args.get("file_path", "")))]
+        head = [b.value("file_path", lambda: b.mono(_as_text(args.get("file_path", ""))))]
         # Context is one line each side: the strings themselves are in the viewer.
-        b.short = b.short or len(diff_rows) < len(old) + len(new)
+        every = whole and len(diff_rows) == len(old) + len(new)
+        b.short = b.short or not every
+        cuts = b.cuts
         body, more = _cut_rows(
             diff_rows,
             SHOWN["Edit"],
@@ -555,13 +681,19 @@ def layout(entry: ToolEntry, live: bool) -> Layout:
             ),
             what="diff line",
         )
+        # A diff with no context rows has a row for every line of both strings;
+        # drawn with none left out or cut, it draws both whole.
+        if every and not more and b.cuts == cuts:
+            for key, held in (("old_string", old), ("new_string", new)):
+                if key in b.aligned:
+                    b.drew.update((key, n) for n in range(len(held)))
         if failed:
-            body = body + b.out_rows(lines[:2], "danger")
+            body = body + b.out_rows(2, "danger")
             b.short = b.short or len(lines) > 2
     elif name == "Write":
         b.kind("write")
         content = _as_text(args.get("content", ""))
-        content_lines = content.splitlines()
+        content_lines = b.value_lines("content")
         if result is not None and not failed:
             created = output.startswith("File created successfully")
             b.caption.append(
@@ -569,24 +701,34 @@ def layout(entry: ToolEntry, live: bool) -> Layout:
             )
         size = len(content.encode("utf-8", "surrogatepass"))
         b.detail(f"{_kb(size)} · {_count(len(content_lines), 'line')}")
-        head = [b.mono(_as_text(args.get("file_path", "")))]
-        body, more = _cut_rows(
-            content_lines,
-            SHOWN["Write"],
-            lambda row: (("mono", "add", "+ "), ("mono", "text", b.cut(row.expandtabs(8)))),
-            after=" in the file",
-        )
+        head = [b.value("file_path", lambda: b.mono(_as_text(args.get("file_path", ""))))]
         if failed:
-            b.short = b.short or bool(more)
-            body, more = b.out_rows(lines[:2], "danger"), ""
+            # The error in place of the preview: the content is in the viewer.
+            body = b.out_rows(2, "danger")
             b.short = b.short or len(lines) > 2
+        else:
+            body, more = _cut_rows(
+                range(len(content_lines)),
+                SHOWN["Write"],
+                lambda n: b.value_line(
+                    "content",
+                    n,
+                    lambda: (
+                        ("mono", "add", "+ "),
+                        ("mono", "text", b.cut(content_lines[n].expandtabs(8))),
+                    ),
+                ),
+                after=" in the file",
+            )
     elif name in ("Grep", "Glob"):
         b.kind(name.lower())
         if "path" in args:
             b.detail(f"in {_d(args['path'])}")
+            b.took.add("path")
         for key in ("glob", "type"):
             if key in args:
                 b.detail(f"{key} {_d(args[key])}")
+                b.took.add(key)
         mode = args.get("output_mode", "files_with_matches") if name == "Grep" else None
         if name == "Grep" and mode != "files_with_matches":
             b.detail(_d(str(mode)))
@@ -594,27 +736,38 @@ def layout(entry: ToolEntry, live: bool) -> Layout:
         if name == "Grep" and isinstance(mode, str):
             b.took.add("output_mode")
         flags = [k for k in ("-i", "-n", "-o", "multiline") if args.get(k)]
-        flags += [
-            f"{k} {args[k]}" for k in ("-A", "-B", "-C", "context", "head_limit") if k in args
-        ]
+        numbers = [k for k in ("-A", "-B", "-C", "context", "head_limit") if k in args]
+        flags += [f"{k} {args[k]}" for k in numbers]
+        b.took.update(numbers)
         if flags:
             b.detail(" ".join(_d(f) for f in flags))
         pattern = _as_text(args.get("pattern", ""))
-        head = [b.mono(f"/{pattern}/" if name == "Grep" else pattern)]
+        head = [b.value("pattern", lambda: b.mono(f"/{pattern}/" if name == "Grep" else pattern))]
         if failed:
-            body, more = _cut_rows(lines, SHOWN[name], b.out_row("danger"))
+            body, more = _cut_rows(range(len(lines)), SHOWN[name], b.out_row("danger"))
         elif result is not None:
-            found = [ln for ln in lines if ln and not ln.startswith(("Found ", "No files found"))]
-            # The count is the caption's; "no matches" says the last.
-            b.said.update(ln for ln in lines if ln.startswith(("Found ", "No files found")))
+            found = _kept(
+                lines, lambda ln: bool(ln) and not ln.startswith(("Found ", "No files found"))
+            )
+            # An empty line holds nothing to draw. The CLI's count is the caption's
+            # only where it is the count of the lines drawn under it; "no matches"
+            # says a "No files found" that is all there is.
+            b.said.update(n for n, ln in enumerate(lines) if not ln)
+            for n, ln in enumerate(lines):
+                count = _FOUND.match(ln)
+                if count and int(count[1]) == len(found):
+                    b.said.add(n)
             if lines and lines[0] == "No files found":
                 b.caption.append(("caption", "warn", "no matches"))
+                if not found:
+                    b.said.add(0)
             elif mode == "content":
                 b.caption.append(("caption", "text", _count(len(found), "line")))
             else:
                 b.caption.append(("caption", "text", _count(len(found), "file")))
 
-            def hit(ln: str) -> Row:
+            def hit(n: int) -> Row:
+                ln = lines[n]
                 where, sep, rest = ln.partition(":")
                 line_no, sep2, text = rest.partition(":")
                 if mode == "content" and sep and sep2 and line_no.isdigit():
@@ -625,15 +778,17 @@ def layout(entry: ToolEntry, live: bool) -> Layout:
                 return b.mono(ln, "text")
 
             unit = "match" if mode == "content" else "file"
-            body, more = _cut_rows(found, SHOWN[name], hit, what=unit)
+            body, more = _cut_rows(
+                found, SHOWN[name], lambda n: b.out_line(n, lambda: hit(n)), what=unit
+            )
     elif name == "WebFetch":
         b.kind("fetch")
         head = [
-            b.url_row(_as_text(args.get("url", ""))),
-            (("prose", "text", _d(_as_text(args.get("prompt", "")))),),
+            b.value("url", lambda: b.url_row(_as_text(args.get("url", "")))),
+            b.value("prompt", lambda: (("prose", "text", _d(_as_text(args.get("prompt", "")))),)),
         ]
         if failed:
-            body, more = _cut_rows(lines, SHOWN["WebFetch"], b.out_row("danger"))
+            body, more = _cut_rows(range(len(lines)), SHOWN["WebFetch"], b.out_row("danger"))
         elif (target := _redirect_target(output)) is not None:
             # A cross-host redirect is not fetched, and the result names its target
             # as the server gave it; a same-host one is followed and not named.
@@ -644,9 +799,14 @@ def layout(entry: ToolEntry, live: bool) -> Layout:
                 b.url_row(target),
             ]
         else:
-            prose = [ln for ln in lines if ln.strip()]
+            # A paragraph a row; the empty lines between them hold nothing to draw.
+            prose = _kept(lines)
+            b.said.update(set(range(len(lines))) - set(prose))
             body, more = _cut_rows(
-                prose, SHOWN["WebFetch"], lambda ln: (("prose", "dim", _d(ln)),), what="paragraph"
+                prose,
+                SHOWN["WebFetch"],
+                lambda n: b.out_line(n, lambda: (("prose", "dim", _d(lines[n])),)),
+                what="paragraph",
             )
     elif name == "WebSearch":
         b.kind("search")
@@ -656,9 +816,13 @@ def layout(entry: ToolEntry, live: bool) -> Layout:
             value = args.get(key)
             if isinstance(value, list) and all(isinstance(v, str) for v in value):
                 b.took.add(key)
-        head = [(("prose", "text", f"“{_d(_as_text(args.get('query', '')))}”"),)]
+        head = [
+            b.value(
+                "query", lambda: (("prose", "text", f"“{_d(_as_text(args.get('query', '')))}”"),)
+            )
+        ]
         if failed:
-            body, more = _cut_rows(lines, SHOWN["WebSearch"], b.out_row("danger"))
+            body, more = _cut_rows(range(len(lines)), SHOWN["WebSearch"], b.out_row("danger"))
         elif result is not None:
             links: list[Any] = []
             for ln in lines:
@@ -681,22 +845,30 @@ def layout(entry: ToolEntry, live: bool) -> Layout:
     elif name in ("Agent", "Task"):
         b.kind("agent")
         b.detail(_d(args.get("subagent_type", "general-purpose")))
-        for key in ("model", "effort", "isolation"):
+        for key in ("subagent_type", "model", "effort", "isolation"):
             if key in args:
-                b.detail(_d(args[key]))
+                if key != "subagent_type":
+                    b.detail(_d(args[key]))
+                b.took.add(key)
         if args.get("run_in_background"):
             b.detail("background")
         b.flags(args, "run_in_background")
         prompt = _as_text(args.get("prompt", ""))
         head = [
-            (("prose", "text", _d(_as_text(args.get("description", "")))),),
-            (
-                ("mono", "dim", "› "),
-                ("caption", "dim", b.one_line(prompt, 110)),
-                ("caption", "dim", f"  {_count(len(prompt.splitlines()), 'line')} of prompt"),
+            b.value(
+                "description",
+                lambda: (("prose", "text", _d(_as_text(args.get("description", "")))),),
+            ),
+            b.value(
+                "prompt",
+                lambda: (
+                    ("mono", "dim", "› "),
+                    ("caption", "dim", b.one_line(prompt, 110)),
+                    ("caption", "dim", f"  {_count(len(prompt.splitlines()), 'line')} of prompt"),
+                ),
             ),
         ]
-        text = _blocks_text(output)
+        text = "\n".join(_read_out(b, output))
         if text.startswith("Async agent launched"):
             badge = "launched · runs on"
             b.short = True
@@ -708,9 +880,15 @@ def layout(entry: ToolEntry, live: bool) -> Layout:
                     text = text[: text.find("agentId: ")].rstrip()
                     b.short = True
             ink = "danger" if failed else "dim"
-            report = [ln for ln in text.splitlines() if ln.strip()]
+            b.out = report = text.splitlines()
+            # A paragraph a row; the empty lines between them hold nothing to draw.
+            kept = _kept(report)
+            b.said.update(set(range(len(report))) - set(kept))
             body, more = _cut_rows(
-                report, SHOWN["Agent"], lambda ln: (("prose", ink, _d(ln)),), after=" of its report"
+                kept,
+                SHOWN["Agent"],
+                lambda n: b.out_line(n, lambda: (("prose", ink, _d(report[n])),)),
+                after=" of its report",
             )
     elif name == "TodoWrite":
         b.kind("todos")
@@ -745,42 +923,54 @@ def layout(entry: ToolEntry, live: bool) -> Layout:
 
         body, more = _cut_rows(todos, SHOWN["TodoWrite"], item, what="item")
         if failed:
-            body = body + b.out_rows(lines[:2], "danger")
+            body = body + b.out_rows(2, "danger")
             b.short = b.short or len(lines) > 2
     elif name == "NotebookEdit":
         b.kind("notebook")
         mode = _as_text(args.get("edit_mode", "replace"))
         cell = args.get("cell_id")
         b.detail(f"{_d(mode)} cell {_d(cell)}" if cell is not None else f"{_d(mode)} at the top")
+        if "edit_mode" in args:
+            b.took.add("edit_mode")
+        if cell is not None:
+            b.took.add("cell_id")
         if "cell_type" in args:
             b.detail(_d(args["cell_type"]))
-        head = [b.mono(_as_text(args.get("notebook_path", "")))]
+            b.took.add("cell_type")
+        head = [b.value("notebook_path", lambda: b.mono(_as_text(args.get("notebook_path", ""))))]
         ink = "del" if mode == "delete" else "add"
-        source = _as_text(args.get("new_source", "")).splitlines() if mode != "delete" else []
-        body, more = _cut_rows(source, SHOWN["NotebookEdit"], lambda r: b.mono(r, ink))
         if failed:
-            b.short = b.short or bool(more)
-            body, more = b.out_rows(lines[:2], "danger"), ""
+            # The error in place of the source: the source is in the viewer.
+            body = b.out_rows(2, "danger")
             b.short = b.short or len(lines) > 2
+        elif mode != "delete":
+            source = b.value_lines("new_source")
+            body, more = _cut_rows(
+                range(len(source)),
+                SHOWN["NotebookEdit"],
+                lambda n: b.value_line("new_source", n, lambda: b.mono(source[n], ink)),
+            )
     elif (parts := _mcp_parts(name)) is not None:
         server, tool = parts
         b.caption.append(("caption", "accent", f"mcp · {_d(server)}"))
-        head = [(("prose", "text", _d(tool)),), *b.kv_rows(args)]
+        head = [(("prose", "text", _d(tool)),), *b.kv_rows()]
         ink = "danger" if failed else "dim"
-        body, more = _cut_rows(_blocks_text(output).splitlines(), SHOWN["mcp"], b.out_row(ink))
+        b.out = _read_out(b, output)
+        body, more = _cut_rows(range(len(b.out)), SHOWN["mcp"], b.out_row(ink))
     else:
         b.caption.append(("caption", "warn", _d(name)))
         b.detail("no block of its own")
-        head = b.kv_rows(args) or [(("mono", "dim", "(no arguments)"),)]
+        head = b.kv_rows() or [(("mono", "dim", "(no arguments)"),)]
         ink = "danger" if failed else "dim"
-        body, more = _cut_rows(_blocks_text(output).splitlines(), SHOWN["other"], b.out_row(ink))
+        b.out = _read_out(b, output)
+        body, more = _cut_rows(range(len(b.out)), SHOWN["other"], b.out_row(ink))
 
     b.caption.append(_badge(state, badge))
     if result is not None and result.dropped_bytes:
         more = (more or SHOW_ALL) + f" · {result.dropped_bytes:,} B past the 1 MiB cap"
-    if not more and b.short:
+    if not more and (b.short or _leaves_out(entry, b)):
         more = SHOW_ALL
-    block = Layout(
+    return Layout(
         tool=_d(name),
         state=state,
         caption=tuple(b.caption),
@@ -788,57 +978,60 @@ def layout(entry: ToolEntry, live: bool) -> Layout:
         body=tuple(body),
         more=more,
         tail=tail and bool(body),
+        shown=_shown(entry, b),
     )
-    if not more and _leaves_out(entry, block, b, output):
-        block = dataclasses.replace(block, more=SHOW_ALL)
-    return block
 
 
-def _squeezed(text: str) -> str:
-    return "".join(text.split())
-
-
-def _leaves_out(entry: ToolEntry, block: Layout, b: _Builder, output: str) -> bool:
+def _leaves_out(entry: ToolEntry, b: _Builder) -> bool:
     """
-    Whether ``block`` draws less than ``entry`` holds, whatever its tool's layout
-    meant to draw: an input value, or a line of the output (``output``, the error
-    unwrapped), that is in none of its strings. Compared with the whitespace taken
-    out, since a block sets rows and columns of its own; what the layout says in a
-    form of its own (``_Builder.took``, ``.said``) is not looked for.
+    Whether the block draws less than ``entry`` holds, by the builder's account
+    of what its rows drew: an input key with a line no row drew and not said in a
+    form of its own (``_Builder.took``), or an output line likewise
+    (``_Builder.said``).
 
     The layout's own count of what it cut is not trusted for this: a tool that
     leaves out a field, or the whole of a result, without saying so is the case
-    this exists for. Run only where nothing was cut, so on a block of a few rows.
+    this exists for.
     """
-    drawn = _squeezed("\n".join(strings(block)))
     for key, value in (entry.input or {}).items():
         if key in b.took:
             continue
-        if _squeezed(_d(_as_text(value))) not in drawn:
+        if any((key, n) not in b.drew for n in range(_line_count(value))):
             return True
     if entry.result is None:
         return False
-    blocks = _blocks(output)
-    if blocks is not None and _all_text(blocks):
-        output = "\n".join(blk["text"] for blk in blocks)
-    return any(
-        _squeezed(_d(line)) not in drawn for line in output.splitlines() if line not in b.said
-    )
+    return any(n not in b.said and (None, n) not in b.drew for n in range(len(b.out)))
 
 
-def _chunks(text: str) -> Iterator[str]:
+def _shown(entry: ToolEntry, b: _Builder) -> frozenset[Where]:
+    """
+    The viewer's lines a row draws whole. An output line counts only where the
+    lines the layout read are the output's own lines, in place: an error unwrapped
+    or text read back out of content blocks is not, and none of it is counted.
+    """
+    shown = {where for where in b.drew if where[0] is not None}
+    out = {where for where in b.drew if where[0] is None}
+    if out and entry.result is not None:
+        held = entry.result.output.split("\n", len(b.out))
+        if held[: len(b.out)] == b.out:
+            shown |= out
+    return frozenset(shown)
+
+
+def _chunks(text: str) -> Iterator[tuple[int, str]]:
     """
     ``text``'s lines, each in pieces of at most ``LINE_CUT`` characters, every
-    piece drawable: what the viewer draws, so every character of ``text`` is in
-    exactly one piece and no piece is a line too long to draw.
+    piece drawable and with the number of the line it is of: what the viewer
+    draws, so every character of ``text`` is in exactly one piece and no piece is
+    a line too long to draw.
     """
-    for line in text.split("\n"):
+    for n, line in enumerate(text.split("\n")):
         line = line.expandtabs(8)
         if not line:
-            yield ""
+            yield n, ""
             continue
         for start in range(0, len(line), LINE_CUT):
-            yield _d(line[start : start + LINE_CUT])
+            yield n, _d(line[start : start + LINE_CUT])
 
 
 def viewer_rows(entry: ToolEntry) -> tuple[Row, ...]:
@@ -852,26 +1045,29 @@ def viewer_rows(entry: ToolEntry) -> tuple[Row, ...]:
     return _viewer_of(entry)[0]
 
 
-def _viewer_of(entry: ToolEntry) -> tuple[tuple[Row, ...], tuple[bool, ...]]:
-    """``viewer_rows``, and for each row whether it is the entry's own text and not a label."""
+def _viewer_of(entry: ToolEntry) -> tuple[tuple[Row, ...], tuple[Where | None, ...]]:
+    """
+    ``viewer_rows``, and for each row the line of the entry's own text it holds,
+    or ``None`` for a label.
+    """
     rows: list[Row] = []
-    held: list[bool] = []
+    held: list[Where | None] = []
 
     def label(row: Row) -> None:
         rows.append(row)
-        held.append(False)
+        held.append(None)
 
-    def content(row: Row) -> None:
+    def content(row: Row, where: Where) -> None:
         rows.append(row)
-        held.append(True)
+        held.append(where)
 
     args: Mapping[str, Any] = entry.input or {}
     if entry.input is None:
         label((("mono", "dim", "(the call is not in this transcript)"),))
     for key, value in args.items():
         label((("mono", "accent", f"{_d(key)}:"),))
-        for piece in _chunks(_as_text(value)):
-            content((("mono", "text", "  " + piece),))
+        for n, piece in _chunks(_as_text(value)):
+            content((("mono", "text", "  " + piece),), (key, n))
     result = entry.result
     if result is None:
         label((("mono", "dim", "(no result)"),))
@@ -888,8 +1084,8 @@ def _viewer_of(entry: ToolEntry) -> tuple[tuple[Row, ...], tuple[bool, ...]]:
         for n, block in enumerate(blocks):
             label((("mono", "text", f"  {n + 1}. {_d(block_summary(block))}"),))
     ink = "danger" if result.is_error else "dim"
-    for piece in _chunks(result.output):
-        content((("mono", ink, piece),))
+    for n, piece in _chunks(result.output):
+        content((("mono", ink, piece),), (None, n))
     return tuple(rows), tuple(held)
 
 
@@ -913,9 +1109,10 @@ def find(entry: ToolEntry, block: Layout, needle: str) -> list[Hit]:
 
     Searched in the viewer's rows, which hold every character of the entry once
     (``_chunks``), so a match is something the viewer can scroll to. A match is
-    ``shown`` when its row's text, whitespace aside, is in what the collapsed
-    block draws. A needle across two of a long line's ``LINE_CUT`` pieces is
-    not found. The rows are built only for an entry that holds the needle.
+    ``shown`` when the collapsed block has a row that draws its line whole
+    (``Layout.shown``); a line drawn cut, or said only in the caption, is not. A
+    needle across two of a long line's ``LINE_CUT`` pieces is not found. The rows
+    are built only for an entry that holds the needle.
     """
     if not needle:
         return []
@@ -925,18 +1122,15 @@ def find(entry: ToolEntry, block: Layout, needle: str) -> list[Hit]:
         values.append(entry.result.output)
     if not any(wanted in _d(value).casefold() for value in values):
         return []
-    drawn = _squeezed("\n".join(s for row in (*block.head, *block.body) for _, _, s in row))
-    drawn = drawn.casefold()
     rows, held = _viewer_of(entry)
     hits: list[Hit] = []
-    for number, (row, own) in enumerate(zip(rows, held, strict=True)):
-        if not own:
+    for number, (row, where) in enumerate(zip(rows, held, strict=True)):
+        if where is None:
             continue
         text = "".join(span[2] for span in row)
         count = text.casefold().count(wanted)
         if count:
-            shown = _squeezed(text).casefold() in drawn
-            hits += [Hit(number, shown)] * count
+            hits += [Hit(number, where in block.shown)] * count
     return hits
 
 
@@ -982,62 +1176,28 @@ def _ink(name: str) -> Color:
     return terminal_ink(role)
 
 
-BUTTON_FLOOR = 1.5
-"""
-The least contrast a button inside a block has against the block's ground, so
-the affordance is seen as a button on every theme's terminal and not only on the
-pane the theme's buttons were set for.
-"""
-
-_BUTTON_RISE = 1.15
-_BUTTON_INKS: dict[tuple[int, ...], tuple[Color, Color, Color]] = {}
-
-
-def _opaque(colour: imgui.ImVec4) -> Color:
-    """An opaque ``ImVec4`` as the 8-bit ``Color`` a palette literal would hold."""
-    r, g, b = (round(channel * 255.0) for channel in (colour.x, colour.y, colour.z))
-    return col((r << 16) | (g << 8) | b)
-
-
-def _themes_buttons(palette: Palette) -> tuple[Color, Color, Color]:
-    """The theme's own button fills, as ``theme.apply_style`` sets them."""
-    tint, step = palette.button_tint, _BUTTON_STEP
-    return tuple(  # type: ignore[return-value]
-        _opaque(mixed(palette.panel_alt, palette.accent, tint + k * step)) for k in range(3)
-    )
-
-
-def _toward(colour: Color, text: Color, ground: Color, floor: float) -> Color:
-    """``colour``, or the least step of it toward ``text`` that is ``floor`` off ``ground``."""
-    for step in range(1001):
-        tried = _opaque(mixed(colour, text, step / 1000.0))
-        if contrast_ratio(tried, ground) >= floor:
-            return tried
-    return text
-
-
-def button_inks(palette: Palette | None = None) -> tuple[Color, Color, Color]:
+def link_inks() -> LinkInks:
     """
-    A button's fill inside a block, at rest, under the pointer and held: the
-    theme's own where it reads at ``BUTTON_FLOOR`` on the terminal ground, and
-    otherwise the least step of it toward the block's text that does, each state
-    a further ``_BUTTON_RISE`` off the ground than the one before. Read off the
-    ground, since the theme's buttons are tinted for its pane and the ground is
-    a step off that pane (cde and win311's sat at 1.04 and 1.05 to 1).
-
-    Memoised by the colours it is made from, as ``terminal_ink`` is.
+    The inks of a link inside a block (``widgets.link``): the accent as the block
+    draws its links (``_ink("link")``), on the terminal ground, moving toward the
+    block's text, with the block's dim ink for a disabled one.
     """
-    used = current() if palette is None else palette
-    ground, text = used.terminal_bg, used.terminal_text
-    own = _themes_buttons(used)
-    key = (ground.u32, text.u32, *(c.u32 for c in own))
-    hit = _BUTTON_INKS.get(key)
-    if hit is None:
-        rest = _toward(own[0], text, ground, BUTTON_FLOOR)
-        hovered = _toward(own[1], text, ground, contrast_ratio(rest, ground) * _BUTTON_RISE)
-        held = _toward(own[2], text, ground, contrast_ratio(hovered, ground) * _BUTTON_RISE)
-        hit = _BUTTON_INKS[key] = (rest, hovered, held)
-    return hit
+    return theme_link_inks(_ink("link"), (P.terminal_bg,), P.terminal_text, P.terminal_dim)
+
+
+def _affordance(more: str) -> bool:
+    """
+    The block's footer: what is left out, in the block's dim ink, then ``show
+    all`` as a link, on the id the button it replaced had (``more`` and
+    ``##more``). One text line, on that line's baseline.
+    """
+    from . import widgets
+
+    said = more.removeprefix(SHOW_ALL).removeprefix(" · ")
+    if said:
+        imgui.text_colored(P.terminal_dim.vec4, f"{said} ·")
+        imgui.same_line()
+    return widgets.link(SHOW_ALL, inks=link_inks(), ident=f"{more}##more")
 
 
 @dataclass(frozen=True, slots=True)
@@ -1172,10 +1332,6 @@ def draw(
     # Inside the block only: the block itself is spaced from what follows it as
     # every item of the log is.
     imgui.push_style_var(imgui.StyleVar_.item_spacing, imgui.ImVec2(*_SPACING))
-    rest, hovered, held = button_inks()
-    imgui.push_style_color(imgui.Col_.button, rest.vec4)
-    imgui.push_style_color(imgui.Col_.button_hovered, hovered.vec4)
-    imgui.push_style_color(imgui.Col_.button_active, held.vec4)
     try:
         if block.state is State.ERROR:
             low = imgui.get_window_pos()
@@ -1187,17 +1343,16 @@ def draw(
         if block.body or block.more:
             imgui.dummy(imgui.ImVec2(0.0, 2.0))
         if expanded and viewer is not None:
-            pressed = widgets.small_button(f"{COLLAPSE}##more")
+            pressed = widgets.link(COLLAPSE, inks=link_inks(), ident=f"{COLLAPSE}##more")
             _viewer(faces, viewer(), mark)
         else:
             if block.more and block.tail:
-                pressed = widgets.small_button(f"{block.more}##more")
+                pressed = _affordance(block.more)
             for row in block.body:
                 _row(faces, row)
             if block.more and not block.tail:
-                pressed = widgets.small_button(f"{block.more}##more")
+                pressed = _affordance(block.more)
     finally:
-        imgui.pop_style_color(3)
         imgui.pop_style_var()
         imgui.end_child()
         imgui.pop_style_var(3)

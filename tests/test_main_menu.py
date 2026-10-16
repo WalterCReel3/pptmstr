@@ -138,7 +138,7 @@ def test_the_focused_cards_items_are_its_own_menus_items_refused_as_it_refuses_t
     assert Note(main_menu.NO_CARD) not in session.rows
     headings = [each.text for each in session.rows if isinstance(each, main_menu.Heading)]
     own_headings = [each.label for each in card.entries if isinstance(each, session_menu.Heading)]
-    assert headings == [session_menu._headline(card.record), *own_headings], "headings, not notes"
+    assert headings == [session_menu.card_title(card.record), *own_headings], "headings, not notes"
     assert not {each.text for each in session.rows if isinstance(each, Note)} & set(headings)
 
 
