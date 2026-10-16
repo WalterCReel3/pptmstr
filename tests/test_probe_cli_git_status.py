@@ -236,3 +236,116 @@ def test_the_report_prints_inconclusive_for_exit_dash(capsys: pytest.CaptureFixt
     )
     line = next(row for row in capsys.readouterr().out.splitlines() if row.startswith("e-x"))
     assert line.split()[1:5] == ["no", "-", "inconclusive", "inconclusive"]
+
+
+@pytest.fixture
+def user_plans(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    monkeypatch.setenv(VAR, "1")
+    return {plan.name: plan for plan in probe.plan_user_only_arms(tmp_path, "claude")}
+
+
+def test_each_user_only_no_arm_names_a_control_that_the_trust_arms_build(
+    user_plans: dict[str, Any], trust_plans: dict[str, Any]
+) -> None:
+    assert set(user_plans) == {
+        "u0-user-only-env-cleared",
+        "u-p1-project-env",
+        "u-p2-local-env",
+        "u-k1-sessionstart-uncontained",
+        "u-k1-sessionstart-contained",
+        "u-k1-userprompt-uncontained",
+        "u-k1-userprompt-contained",
+        "u-flag-hook-contained",
+        "u-user-tier-hook",
+    }
+    for name, plan in user_plans.items():
+        assert plan.options is not None, name
+        assert plan.options.setting_sources == ["user"], name
+        if plan.expect == "no":
+            assert plan.control in trust_plans, name
+            assert trust_plans[plan.control].expect == "no"
+    yes = {n for n, p in user_plans.items() if p.expect == "YES"}
+    assert yes == {"u0-user-only-env-cleared", "u-flag-hook-contained", "u-user-tier-hook"}
+
+
+def test_a_user_only_arm_plants_what_its_control_plants(
+    user_plans: dict[str, Any], trust_plans: dict[str, Any]
+) -> None:
+    for name, plan in user_plans.items():
+        if not plan.control or plan.control not in trust_plans:
+            continue
+        control = trust_plans[plan.control]
+        assert [p.relative_to(plan.fx.probe) for p in plan.planted] == [
+            p.relative_to(control.fx.probe) for p in control.planted
+        ], name
+        ours = json.loads(plan.planted[0].read_text())
+        theirs = json.loads(control.planted[0].read_text())
+        # The hook commands name each fixture's own markers, so compare their shape.
+        if plan.hooks:
+            assert list(ours["hooks"]) == list(theirs["hooks"]), name
+        else:
+            assert ours == theirs, name
+
+
+def test_a_user_only_arm_differs_from_its_control_by_the_source_flag_alone(
+    user_plans: dict[str, Any], trust_plans: dict[str, Any]
+) -> None:
+    for name, plan in user_plans.items():
+        if plan.control not in trust_plans:
+            continue
+        control = trust_plans[plan.control]
+        ours = [a for a in _argv(plan.options) if not a.startswith("--add-dir")]
+        theirs = [a for a in _argv(control.options) if not a.startswith("--add-dir")]
+        # cwd is the fixture's own and is not in argv; the settings string is the same
+        # containment (or none) on both sides.
+        assert [a for a in ours if a != "--setting-sources=user"] == theirs, name
+        assert ours.count("--setting-sources=user") == 1, name
+        assert plan.options.env == control.options.env == GIT_STATUS_OFF, name
+
+
+def test_u0_is_e0_under_user_only(user_plans: dict[str, Any]) -> None:
+    plan = user_plans["u0-user-only-env-cleared"]
+    assert plan.options.env == {}
+    assert plan.planted == []
+    assert not (plan.fx.probe / ".claude").exists()
+    assert "--setting-sources=user" in _argv(plan.options)
+
+
+def test_the_flag_hook_arm_keeps_the_containment_and_adds_only_a_hook(
+    user_plans: dict[str, Any],
+) -> None:
+    plan = user_plans["u-flag-hook-contained"]
+    flag = json.loads(plan.options.settings)
+    containment = json.loads(containment_settings())
+    assert {k: v for k, v in flag.items() if k != "hooks"} == containment
+    assert list(flag["hooks"]) == ["SessionStart"]
+    assert plan.planted == [] and not (plan.fx.probe / ".claude").exists()
+    (handler,) = flag["hooks"]["SessionStart"][0]["hooks"]
+    subprocess.run(["sh", "-c", handler["command"]], check=True)
+    inside, outside = probe.hook_markers(plan.fx)
+    assert inside.exists() and outside.exists()
+
+
+def test_with_flag_hook_refuses_to_overwrite_existing_hooks(tmp_path: Path) -> None:
+    fx = probe.build_fixture(tmp_path, "refuse")
+    with pytest.raises(ValueError):
+        probe.with_flag_hook(json.dumps({"hooks": {}}), fx, "SessionStart")
+    assert json.loads(probe.with_flag_hook(None, fx, "SessionStart"))["hooks"]
+
+
+def test_the_user_tier_arm_points_the_cli_at_a_throwaway_config_dir(
+    user_plans: dict[str, Any],
+) -> None:
+    plan = user_plans["u-user-tier-hook"]
+    home = probe.config_home(plan.fx)
+    assert plan.options.env == {**GIT_STATUS_OFF, "CLAUDE_CONFIG_DIR": str(home)}
+    # Inside the fixture, never the operator's own config directory.
+    assert plan.fx.top in home.parents
+    assert Path.home() / ".claude" not in [home, *home.parents]
+    assert plan.planted == [home / "settings.json"]
+    assert sorted(p.name for p in home.iterdir()) == ["settings.json"]
+    assert not (plan.fx.probe / ".claude").exists()
+    (handler,) = json.loads(plan.planted[0].read_text())["hooks"]["SessionStart"][0]["hooks"]
+    subprocess.run(["sh", "-c", handler["command"]], check=True)
+    inside, outside = probe.hook_markers(plan.fx)
+    assert inside.exists() and outside.exists()

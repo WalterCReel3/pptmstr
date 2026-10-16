@@ -83,6 +83,35 @@ loads the tree's ``.claude/settings.json`` (project tier) and
                               sandbox, which would refuse that write.
   k1-<event>-control          the same hook, the CLI started directly.
 
+With ``--user-only``, the candidate fix: the same forged-tree arms with pptmstr's
+options plus ``setting_sources=["user"]`` (argv ``--setting-sources=user``). Each "no"
+here is paired with its default-sources arm from ``--trust``, which ``--user-only``
+therefore also runs, and which answered YES when the operator ran it:
+
+  u0-user-only-env-cleared    user-only, ``env={}``, nothing planted. Expected YES: the
+                              user-only launch shape still runs git status, so a "no"
+                              in u-p1/u-p2 is the project or local tier not loading,
+                              not git never running. (Control for u-p1, u-p2.)
+  u-p1-project-env            p1-project-env under user-only. Control: p1-project-env.
+  u-p2-local-env              p2-local-env under user-only. Control: p2-local-env.
+  u-k1-<event>-uncontained    k1-<event>-uncontained under user-only.
+  u-k1-<event>-contained      k1-<event>-contained under user-only.
+  u-flag-hook-contained       user-only and contained, with a SessionStart hook added to
+                              the ``--settings`` JSON (the flag tier, which carries the
+                              containment), nothing planted in P. Expected YES: the flag
+                              tier still loads under user-only, so the containment still
+                              reaches the CLI, and hooks still fire on this shape, so a
+                              "no" in u-k1 is the project tier not loading.
+  u-user-tier-hook            user-only, ``CLAUDE_CONFIG_DIR`` pointed at a throwaway
+                              directory in the fixture whose ``settings.json`` defines a
+                              SessionStart hook. Expected YES: the user tier still
+                              applies. The operator's real ``~/.claude`` is not touched,
+                              and for that reason the CLI also finds no credentials there:
+                              unless the operator authenticates through the environment,
+                              it may stop before its first request, and the arm then
+                              reads YES only if SessionStart fired first, inconclusive
+                              otherwise.
+
 **A "no" from an arm whose CLI did not finish is not a no.** Exit ``-`` (the SDK
 session raised before a result) or a non-zero exit from a direct CLI call means the
 CLI may have stopped before it built its prompt or ran its hooks, so a missing marker
@@ -96,12 +125,14 @@ the marker appears -- proof the decoy is live. Run with no flag (the operator, o
 the sandbox) it runs all four arms.
 
 Usage:  .venv/bin/python scripts/probe_cli_git_status.py [--fixture-only] [--pptmstr]
-            [--trust] [--dry-run] [--base DIR] [--keep]
+            [--trust] [--user-only] [--dry-run] [--base DIR] [--keep]
 
     --fixture-only   build the fixture, run the self-check and the control arm, and
                      STOP before the CLI arms. This is what a sandboxed builder runs.
     --pptmstr        add arms e0 and e-h.
     --trust          add arms p1, p2 and k1 with their controls.
+    --user-only      add the u- arms (``setting_sources=["user"]``), and the --trust
+                     arms that are their controls.
     --dry-run        build every selected arm's fixture and print what each would
                      start -- argv, environment override, planted files -- and start
                      no CLI.
@@ -464,6 +495,7 @@ class Plan:
     planted: list[Path] = field(default_factory=list)
     hooks: bool = False
     caveat: str = ""
+    control: str = ""
 
 
 def _direct(cli: str, settings: str | None = None) -> list[str]:
@@ -583,6 +615,136 @@ def plan_trust_arms(base: Path, cli: str) -> list[Plan]:
     return plans
 
 
+# The candidate fix under measurement: the CLI loads the user tier and neither of the
+# tree's own tiers. Managed and flag settings are not sources this list names; the
+# 2.1.301 bundle adds "flagSettings" and "policySettings" to whatever it is given,
+# which u-flag-hook-contained measures.
+USER_ONLY = ["user"]
+
+
+def user_only(options: Any) -> Any:
+    """
+    ``options`` with ``setting_sources=["user"]`` and nothing else changed.
+    """
+    import dataclasses
+
+    return dataclasses.replace(options, setting_sources=list(USER_ONLY))
+
+
+def with_flag_hook(settings: str | None, fx: Fixture, event: str) -> str:
+    """
+    ``settings`` (the ``--settings`` JSON, or None) with ``hook_settings``'s hook
+    added as a top-level ``hooks`` key and every other key kept as it was.
+    """
+    merged: dict[str, Any] = json.loads(settings) if settings else {}
+    if "hooks" in merged:
+        raise ValueError("the flag settings already define hooks; refusing to overwrite them")
+    merged["hooks"] = hook_settings(fx, event)["hooks"]
+    return json.dumps(merged)
+
+
+def config_home(fx: Fixture) -> Path:
+    """
+    The throwaway directory ``CLAUDE_CONFIG_DIR`` names for u-user-tier-hook: the
+    user tier's ``settings.json`` lives there in place of the operator's ``~/.claude``.
+    It sits in the fixture's top directory, beside P and not inside it.
+    """
+    return fx.top / "config-home"
+
+
+def plan_user_only_arms(base: Path, cli: str) -> list[Plan]:
+    """
+    The u- arms: the forged-tree arms of ``plan_trust_arms`` with pptmstr's options
+    plus ``setting_sources=["user"]``. Each "no" names its control, the --trust arm
+    with the same fixture and the default sources. u0 and u-flag-hook-contained are
+    positive controls on the user-only shape itself, and u-user-tier-hook shows what
+    the shape keeps.
+    """
+    import dataclasses
+
+    del cli  # every u- arm is launched through the SDK from pptmstr's options
+    plans = []
+    fx = build_fixture(base, "u0")
+    plans.append(
+        Plan(
+            "u0-user-only-env-cleared",
+            "YES",
+            fx,
+            user_only(pptmstr_options(fx, contained=False, env={})),
+            control="e0-pptmstr-env-cleared",
+        )
+    )
+    for tier, short in (("project", "p1"), ("local", "p2")):
+        label = f"u-{short}-{tier}-env"
+        fx = build_fixture(base, label)
+        planted = [plant_settings(fx, tier, ENV_EMPTY)]
+        plans.append(
+            Plan(
+                label,
+                "no",
+                fx,
+                user_only(pptmstr_options(fx, contained=False)),
+                planted=planted,
+                control=f"{short}-{tier}-env",
+            )
+        )
+    for event in HOOK_EVENTS:
+        short = "sessionstart" if event == "SessionStart" else "userprompt"
+        for contained in (False, True):
+            suffix = "contained" if contained else "uncontained"
+            label = f"u-k1-{short}-{suffix}"
+            fx = build_fixture(base, label)
+            planted = [plant_settings(fx, "project", hook_settings(fx, event))]
+            plans.append(
+                Plan(
+                    label,
+                    "no",
+                    fx,
+                    user_only(pptmstr_options(fx, contained=contained)),
+                    planted=planted,
+                    hooks=True,
+                    caveat=outside_marker_caveat(fx) if contained else "",
+                    control=f"k1-{short}-{suffix}",
+                )
+            )
+    fx = build_fixture(base, "u-flag-hook")
+    contained_options = user_only(pptmstr_options(fx, contained=True))
+    options = dataclasses.replace(
+        contained_options,
+        settings=with_flag_hook(contained_options.settings, fx, "SessionStart"),
+    )
+    plans.append(
+        Plan(
+            "u-flag-hook-contained",
+            "YES",
+            fx,
+            options,
+            hooks=True,
+            caveat=outside_marker_caveat(fx),
+        )
+    )
+    fx = build_fixture(base, "u-user-tier")
+    home = config_home(fx)
+    home.mkdir()
+    user_settings = home / "settings.json"
+    user_settings.write_text(json.dumps(hook_settings(fx, "SessionStart")) + "\n")
+    base_options = user_only(pptmstr_options(fx, contained=False))
+    options = dataclasses.replace(
+        base_options, env={**base_options.env, "CLAUDE_CONFIG_DIR": str(home)}
+    )
+    plans.append(
+        Plan(
+            "u-user-tier-hook",
+            "YES",
+            fx,
+            options,
+            planted=[user_settings],
+            hooks=True,
+        )
+    )
+    return plans
+
+
 def run_plan(plan: Plan) -> ArmResult:
     """
     Start the arm's CLI, then read its markers. A direct CLI's output is captured and
@@ -642,6 +804,7 @@ def describe_plan(plan: Plan, cli: str | None) -> list[str]:
         lines.append("  via SDK from AgentSession._options()")
         lines.append(f"  argv: {shlex.join(sdk_argv(plan.options, cli))}")
         lines.append(f"  options.env: {plan.options.env!r}")
+        lines.append(f"  options.setting_sources: {plan.options.setting_sources!r}")
     else:
         assert plan.cmd is not None and plan.env is not None
         lines.append("  direct CLI")
@@ -655,6 +818,8 @@ def describe_plan(plan: Plan, cli: str | None) -> list[str]:
         lines.append(f"  hook markers: in={inside} out={outside}")
     if plan.caveat:
         lines.append(f"  caveat: {plan.caveat}")
+    if plan.control:
+        lines.append(f"  control: {plan.control}")
     return lines
 
 
@@ -724,6 +889,12 @@ def main() -> int:
         help="also run arms p1, p2 and k1: the forged tree's own settings and hooks",
     )
     parser.add_argument(
+        "--user-only",
+        action="store_true",
+        help="also run the u- arms (setting_sources=['user']) and the --trust arms "
+        "that are their controls",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="build the selected arms and print what each would start; start no CLI",
@@ -746,8 +917,10 @@ def main() -> int:
         plans: list[Plan] = []
         if args.pptmstr:
             plans += plan_pptmstr_arms(base, cli or "claude")
-        if args.trust:
+        if args.trust or args.user_only:
             plans += plan_trust_arms(base, cli or "claude")
+        if args.user_only:
+            plans += plan_user_only_arms(base, cli or "claude")
         print()
         print("--dry-run: no CLI was started. Each arm would start:")
         for plan in plans:
@@ -776,8 +949,10 @@ def main() -> int:
         plans = []
         if args.pptmstr:
             plans += plan_pptmstr_arms(base, cli)
-        if args.trust:
+        if args.trust or args.user_only:
             plans += plan_trust_arms(base, cli)
+        if args.user_only:
+            plans += plan_user_only_arms(base, cli)
         # Every arm has its own fixture and reads only that fixture's markers, so one
         # arm's hook or git run cannot be read as another's.
         for plan in plans:

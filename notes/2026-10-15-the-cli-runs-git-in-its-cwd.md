@@ -300,7 +300,144 @@ its choosing, unsandboxed, the next time pptmstr launches or resumes a session i
 directory. The git-status leak is the narrow case, and project hooks are the wide one. The
 environment-variable switch does nothing against hooks.
 
+**The operator's answer (dq-5827ae4642b7, 2026-10-16):** "This is an interesting situation. I
+think the argument for blocking the settings load wholesale overstates the conflicting nature
+of the settings. They are useful, no? I'm curious if this is just a _general_ exposure that
+exists in Claude usage regardless of tooling. Lean with 'nothing' changes and think about how
+this is different than usual usage." So nothing changes.
+
+The lead's decision text understated the fix's cost. It said CLAUDE.md was unaffected, and that
+was wrong. Per the SDK docstring and the Claude Code docs (read by builder-43, not measured), a
+user-only `setting_sources` also stops a project's CLAUDE.md, CLAUDE.local.md, .claude/rules,
+project skills, commands and agents, and .mcp.json from loading. That strengthens the
+operator's answer. What remains open is whether pptmstr lets an agent *write* those files
+without a human seeing it, which plain interactive use would show (board task
+settings-write-read).
+
 **The cause the measurement names:** the CLI loads the project and local settings tiers for a
 session whose cwd is that tree. pptmstr does not set `setting_sources`. A fix, and its cost (a
 repo's own `.claude/settings.json` stops applying), is the operator's decision. It is raised as
 one.
+
+## The candidate fix: `setting_sources=["user"]`, measured before it is built
+
+Task `setting-sources-probe`. This is a measurement of the fix the operator is deciding
+on (dq-5827ae4642b7). It proposes no change to `driver.py`. The arms are in
+`scripts/probe_cli_git_status.py` behind `--user-only`, which also runs the `--trust` arms,
+since those are its controls.
+
+### What the SDK and docs say "user" alone keeps and drops (read 2026-10-16; not measured)
+
+- **The SDK field.** `ClaudeAgentOptions.setting_sources: list[SettingSource] | None`.
+  `SettingSource = Literal["user", "project", "local"]`. In `claude_agent_sdk` 0.2.168, the
+  transport's `_build_command` appends `--setting-sources=<comma-joined>` when the list is
+  not None. `["user"]` therefore becomes `--setting-sources=user`, and the dry run shows
+  exactly that flag added to each arm's argv. The field's docstring says: "Must include
+  `"project"` to load CLAUDE.md files." `skills` is unset in pptmstr, so
+  `_apply_skills_defaults` leaves the list alone.
+- **What each source loads** (code.claude.com/docs/en/agent-sdk/claude-code-features,
+  "Control filesystem settings with settingSources"). `"user"`: "User `settings.json`;
+  user CLAUDE.md and `~/.claude/rules/*.md`; user skills, commands, and subagents".
+  `"project"`: "Project `settings.json` and hooks; project CLAUDE.md and
+  `.claude/rules/*.md`; project skills, commands, and subagents". `"local"`:
+  "CLAUDE.local.md, `.claude/settings.local.json`".
+- **What it does not control** (same page, "What settingSources does not control").
+  These are read regardless: managed policy settings; `~/.claude.json` ("Relocate with
+  `CLAUDE_CONFIG_DIR` in `env`"); auto memory under `~/.claude/projects/<project>/memory/`;
+  claude.ai MCP connectors; and the user file's `sandbox.credentials` deny and mask
+  entries.
+- **The flag tier.** No page says whether `--setting-sources` affects `--settings`, and
+  pptmstr's containment rides on `--settings`. Read from the 2.1.301 bundle (not
+  measured), the enabled-sources function adds `"flagSettings"` and `"policySettings"` to
+  whatever list it is given, so `--settings` should still load. Arm
+  `u-flag-hook-contained` measures this.
+- **The docs name this fix.** code.claude.com/docs/en/permissions, "What runs before you
+  trust a folder", read in an earlier session's fetch: "Pass `--setting-sources user`, or
+  set the SDK's `settingSources` without project settings, so Claude Code reads neither
+  the project's settings files nor its `.mcp.json`." That also answers cli-trust-probe's
+  open `.mcp.json` question, by the docs.
+- **The sandbox** (code.claude.com/docs/en/sandboxing, earlier fetch): "If you exclude a
+  source with `--setting-sources` ... Claude Code ignores its `sandbox.filesystem`
+  entries, its `Edit` permission rules, and its `Read` deny rules when building the
+  sandbox configuration."
+
+**CLAUDE.md under user-only (read, from the docs; not measured).** The user file
+`~/.claude/CLAUDE.md` and `~/.claude/rules/*.md` are still loaded. The project files are
+not: `<cwd>/CLAUDE.md`, `<cwd>/.claude/CLAUDE.md`, the CLAUDE.md files in parent
+directories, and `.claude/rules/*.md`. Neither is `CLAUDE.local.md`. The SDK docstring and
+the "CLAUDE.md load locations" table agree on this. **This is the fix's main cost.** A
+pptmstr session in a repository, this one included, would no longer see that
+repository's CLAUDE.md, project skills, commands or subagents. The probe cannot show
+whether CLAUDE.md was read without reading the model's narration, so it is left to the
+docs.
+
+### The arms
+
+Every u- arm is pptmstr's options plus `setting_sources=["user"]`. In each pair below,
+the argv differs from the control's only by `--setting-sources=user`, which is pinned by
+`test_a_user_only_arm_differs_from_its_control_by_the_source_flag_alone`. The control's
+measured result is the operator's run above.
+
+| arm | planted | expect | control (default sources, measured) |
+|---|---|---|---|
+| u0-user-only-env-cleared | nothing, `env={}` | YES (filter) | e0-pptmstr-env-cleared: YES |
+| u-p1-project-env | P/.claude/settings.json `{"env":{"…":""}}` | no (filter) | p1-project-env: YES |
+| u-p2-local-env | P/.claude/settings.local.json, same | no (filter) | p2-local-env: YES |
+| u-k1-sessionstart-uncontained | project SessionStart hook | no (hook-in, hook-out) | k1-sessionstart-uncontained: YES |
+| u-k1-sessionstart-contained | same, contained | no | k1-sessionstart-contained: YES |
+| u-k1-userprompt-uncontained | project UserPromptSubmit hook | no | k1-userprompt-uncontained: YES |
+| u-k1-userprompt-contained | same, contained | no | k1-userprompt-contained: YES |
+| u-flag-hook-contained | nothing in P; SessionStart hook added to the containment `--settings` JSON | YES (hook-in) | (positive control) |
+| u-user-tier-hook | `CLAUDE_CONFIG_DIR=<top>/config-home`, whose settings.json has a SessionStart hook | YES (hook-in) | (positive control) |
+
+**u0 is what makes u-p1 and u-p2 readable.** With the switch on, a "no" in u-p1 could
+mean either that the project env block was not loaded or that this launch shape never
+runs git. u0 clears the switch and expects YES.
+
+**u-flag-hook-contained is what makes u-k1 readable**, and it carries the fix's main
+risk. If it answers YES, hooks still fire on the user-only shape, so a "no" in u-k1 is
+the project tier not loading. It also shows that the flag tier still loads under
+user-only, and so the containment still reaches the CLI. If it answers **no** (from a
+finished CLI), `--setting-sources=user` drops `--settings`, and so contained sessions
+would lose their sandbox. The fix would then be wrong as it stands. This arm shows the
+flag file loads. It does not show the sandbox engaged, because that needs a model-run
+Bash command.
+
+**u-user-tier-hook does not touch the operator's real `~/.claude`.** `CLAUDE_CONFIG_DIR`
+points the CLI at a throwaway directory inside the fixture, which is passed through
+`options.env`. The cost is that the CLI also looks for its credentials there, and finds
+none. If the operator authenticates through the environment (`ANTHROPIC_API_KEY` or
+`CLAUDE_CODE_OAUTH_TOKEN`), the arm runs normally. Otherwise the CLI may fail before
+SessionStart fires. A present marker still reads YES whatever the exit, and a missing
+one from a failed CLI reads `inconclusive`, never "no". If it reads inconclusive, the
+user tier under user-only is unmeasured. The docs table above is then the only evidence.
+The probe will not link or copy the real credentials to get a reading.
+
+### What each outcome would mean
+
+- **u0 YES, u-p1 no, u-p2 no**: the project and local `env` blocks no longer reach the
+  CLI, and pptmstr's variable holds. **u-p1 or u-p2 YES**: user-only does not exclude
+  that tier through the SDK.
+- **u-flag-hook-contained YES, every u-k1 no (hook-in and hook-out)**: a forged tree's
+  project hooks no longer run through pptmstr's launch, contained or not, and the flag
+  tier carrying the containment still loads. **Any u-k1 YES**: that hook event still
+  runs, and user-only does not close the hook channel.
+- **u-user-tier-hook YES**: the operator's own user-tier settings and hooks still apply
+  under the fix.
+- **Any row inconclusive**: the CLI did not finish, and the row says nothing.
+
+### Results (operator-run; not yet run)
+
+`.venv/bin/python scripts/probe_cli_git_status.py --pptmstr --trust --user-only --base "$(mktemp -d /tmp/pptmstr-cli-sources.XXXXXX)"`
+
+| arm | expect | exit | filter | fsmonitor | hook-in | hook-out |
+|---|---|---|---|---|---|---|
+| u0-user-only-env-cleared | YES | not yet run | | | | |
+| u-p1-project-env | no | not yet run | | | | |
+| u-p2-local-env | no | not yet run | | | | |
+| u-k1-sessionstart-uncontained | no | not yet run | | | | |
+| u-k1-sessionstart-contained | no | not yet run | | | | |
+| u-k1-userprompt-uncontained | no | not yet run | | | | |
+| u-k1-userprompt-contained | no | not yet run | | | | |
+| u-flag-hook-contained | YES (hook-in) | not yet run | | | | |
+| u-user-tier-hook | YES (hook-in) | not yet run | | | | |
