@@ -509,3 +509,150 @@ def test_a_diagnostic_frame_comes_off_to_exactly_what_it_was_laid_over(
     with probe.laid_over(variant):
         pass
     assert _whole_style(styled) == before
+
+
+# -- the preview of the operator's pick ---------------------------------------------------
+
+
+def test_the_pick_holds_exactly_the_values_the_operator_named() -> None:
+    scalars = dict(probe.PICKED.scalars)
+    colors = dict(probe.PICKED.colors)
+    # buttons: "frame_padding 9x6 rounding 5 with no outline or frame border"
+    assert scalars["frame_padding"] == (9.0, 6.0)
+    assert scalars["frame_rounding"] == 5.0
+    assert scalars["frame_border_size"] == 0.0
+    # lines: "Level 1, Softs fill only" -- level 1 on both line slots, soft's well fill
+    assert colors["border"] == colors["separator"] == probe.LINE_LEVELS[0]
+    assert colors["frame_bg"] == dict(probe.WELL_OPTIONS[1].colors)["frame_bg"]
+    assert dict(probe.WELL_OPTIONS[1].scalars)["frame_border_size"] == 0.0
+    # dropdown: "No outline, popup rounding 4 tinted arrow"
+    assert scalars["popup_border_size"] == 0.0
+    assert scalars["popup_rounding"] == 4.0
+    assert colors["button"] == dict(probe.SOFT.colors)["button"]
+    # tabs: "pad 10x4 gap 4 inset 1 text 1.10x text 17.6 lane 26.6"
+    assert probe.PICKED.inset_tabs
+    assert probe.PICKED.tabs == probe.TabSpec(pad=(10.0, 4.0), gap=4.0, inset=1.0, scale=1.10)
+    assert probe.PICKED.tabs.lane(16.0) == pytest.approx(26.6)
+
+
+def test_the_pick_is_soft_plus_only_the_popup_outline_and_the_written_out_lines() -> None:
+    soft = dict(probe.SOFT.scalars)
+    picked = dict(probe.PICKED.scalars)
+    assert {k: v for k, v in picked.items() if k != "popup_border_size"} == soft
+    extra = [c for c in probe.PICKED.colors if c not in probe.SOFT.colors]
+    assert extra == [("border", probe.LINE_LEVELS[0]), ("separator", probe.LINE_LEVELS[0])]
+
+
+@pytest.mark.parametrize("name", list(theme.THEMES))
+def test_the_pick_applies_and_reverts_exactly_on_every_theme(imgui: Any, name: str) -> None:
+    theme.set_theme(name)
+    theme.apply_style()
+    try:
+        before = _whole_style(imgui)
+        saved = probe.apply(probe.PICKED)
+        after = _whole_style(imgui)
+        for attr, value in probe.PICKED.scalars:
+            assert after[attr] == pytest.approx(value), attr
+        for slot, mix in probe.PICKED.colors:
+            want = probe.color_of(mix)
+            idx = int(getattr(imgui.Col_, slot))
+            assert after[f"Col_{idx}"] == pytest.approx((want.x, want.y, want.z, want.w)), slot
+        probe.revert(saved)
+        assert _whole_style(imgui) == before
+    finally:
+        theme.set_theme("dark")
+        theme.apply_style()
+
+
+def test_level_one_lines_are_what_apply_style_already_sets(styled: Any) -> None:
+    for slot in ("border", "separator"):
+        held = styled.get_style().color_(int(getattr(styled.Col_, slot)))
+        assert probe.rgb8(held) == probe.rgb8(probe.color_of(probe.LINE_LEVELS[0])), slot
+
+
+def test_the_picked_caption_quotes_every_picked_value() -> None:
+    head, *shared = probe.picked_caption("light", 4.0)
+    for part in (
+        "theme light",
+        "frame_padding 9x6",
+        "rounding 5",
+        "border 0",
+        "lines level 1",
+        "popup border 0 rounding 4",
+        probe.PICKED_TABS.label(),
+        "dock: 8 px apart",
+    ):
+        assert part in head, part
+    assert shared == list(probe.PICKED_SHARED)
+    assert "frame_border_size 0 is ONE value" in shared[0]
+
+
+def test_describe_lists_the_pick() -> None:
+    lines = probe.describe(probe.PICKED)
+    assert "popup_border_size = 0.0" in lines
+    assert any(probe.PICKED_TABS.label() in line for line in lines)
+
+
+# -- the small_button wrapper sheet ---------------------------------------------------------
+
+
+def test_every_wrapper_has_vertical_padding_and_a_distinct_name() -> None:
+    assert len(probe.MICROS) == 4
+    assert len({m.name for m in probe.MICROS}) == 4
+    assert all(m.pad[1] > 0 for m in probe.MICROS)
+    # A scaled font at a whole pixel, so the text is not drawn on half pixels.
+    assert all((16.0 * m.scale).is_integer() for m in probe.MICROS)
+
+
+def _measure(im: Any, draw: Any) -> list[float]:
+    """Heights of each item ``draw`` reports, inside one frame under the pick."""
+    heights: list[float] = []
+    with probe.laid_over(probe.PICKED):
+        im.new_frame()
+        im.begin("probe")
+        draw(heights)
+        im.end()
+        im.render()
+    return heights
+
+
+@pytest.mark.parametrize("kind", probe.MICRO_ROWS, ids=lambda k: getattr(k, "name", str(k)))
+def test_a_wrapper_cells_measured_height_matches_its_label(styled: Any, kind: Any) -> None:
+    im = styled
+
+    def draw(out: list[float]) -> None:
+        probe._press_for(kind)("copy")
+        out.append(im.get_item_rect_size().y)
+        out.extend([im.get_style().font_size_base, im.get_style().frame_padding.y])
+
+    height, font_px, pad_y = _measure(im, draw)
+    assert height == pytest.approx(probe.expected_height(kind, font_px, pad_y))
+    if isinstance(kind, probe.Micro):
+        assert f"-> {height:g} px" in kind.label(font_px)
+
+
+@pytest.mark.parametrize("kind", probe.MICRO_ROWS, ids=lambda k: getattr(k, "name", str(k)))
+@pytest.mark.parametrize("context", probe.MICRO_CONTEXTS, ids=lambda c: c[0])
+def test_a_pane_row_is_as_tall_as_its_tallest_button(styled: Any, kind: Any, context: Any) -> None:
+    im = styled
+    _, _, row, _ = context
+
+    def draw(out: list[float]) -> None:
+        out.append(probe.measured_row(row, probe._press_for(kind), "k"))
+        out.extend([im.get_style().font_size_base, im.get_style().frame_padding.y])
+
+    height, font_px, pad_y = _measure(im, draw)
+    assert height == pytest.approx(max(font_px, probe.expected_height(kind, font_px, pad_y)))
+
+
+def test_the_wrapper_pops_everything_it_pushes(styled: Any) -> None:
+    im = styled
+
+    def draw(out: list[float]) -> None:
+        before = (im.get_font_size(), tuple(im.get_style().frame_padding))
+        for micro in probe.MICROS:
+            probe.micro_button(f"copy##{micro.name}", micro)
+        after = (im.get_font_size(), tuple(im.get_style().frame_padding))
+        out.append(float(before == after))
+
+    assert _measure(im, draw) == [1.0]

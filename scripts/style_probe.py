@@ -1452,6 +1452,390 @@ def draw_sheet(name: str, first: bool) -> None:
     imgui.end()
 
 
+# -- the preview: the operator's pick on every theme ----------------------------------
+#
+# The operator picked one cell per round-two sheet (planning record, "The operator's
+# pick"). ``PICKED`` is those cells laid over the base they were drawn on, as the
+# style values theme.py would set. Three of the picks are the one value
+# ``frame_border_size 0``: the buttons' "no outline", the lines' "soft's fill only"
+# and the dropdown's "no outline" on its field. They agree, so nothing had to be
+# chosen between them; what that one value does to every frame is stated on the
+# image (``PICKED_SHARED``).
+
+OUT3 = ROOT / "shots" / "style-preview"
+
+# "pad 10x4 gap 4 inset 1 text 1.10x": inset 1 is between the sheet's steps 1 and 2.
+PICKED_TABS = TabSpec(pad=(10.0, 4.0), gap=4.0, inset=1.0, scale=1.10)
+
+PICKED = Variant(
+    "picked",
+    "the operator's pick from round two: soft's buttons with no outline, soft's fill-only"
+    " wells, lines at level 1, a flat dropdown with popup rounding 4, drawn tabs"
+    " pad 10x4 gap 4 inset 1 text 1.10x",
+    # soft's values: frame_padding 9x6, frame_rounding 5, frame_border_size 0 and
+    # popup_rounding 4 are all four of the picks that soft already held. The
+    # dropdown's "no outline" adds the popup's own outline, which soft left at 1.
+    scalars=_with(SOFT.scalars, popup_border_size=0.0),
+    # soft's colours: the tinted Col_.button is the button fill and the combo arrow
+    # ("tinted arrow"), frame_bg is soft's fill. Lines at level 1 are the palette's
+    # border, written out so the image and the record can quote them.
+    colors=SOFT.colors + (("border", LINE_LEVELS[0]), ("separator", LINE_LEVELS[0])),
+    inset_tabs=True,
+    tabs=PICKED_TABS,
+)
+
+# What each value the picks share does to the app, set as a style value. One line
+# each, drawn on every picked image.
+PICKED_SHARED: tuple[str, ...] = (
+    "frame_border_size 0 is ONE value: buttons' 'no outline' = lines' 'soft's fill only'"
+    " = dropdown field 'no outline' -> no frame anywhere has an outline (wells, check/radio"
+    " boxes, combos, buttons)",
+    "Col_.button (soft's tint) is every button's fill AND the combo arrow ('tinted arrow');"
+    " popup_border_size 0 + popup_rounding 4 is every popup: combo lists, menus, context"
+    " menus",
+    "frame_padding 9x6 also pads every well/combo/checkbox and sets the dock tab bar to"
+    " 28 px; small_button keeps y 0 (16 px). Not picked, kept from soft: scrollbar 16 r8,"
+    " grab_rounding 5, item_spacing 8x6",
+)
+
+
+def picked_caption(theme_name: str, inner_x: float) -> tuple[str, ...]:
+    """
+    The lines a picked screen carries: its values, then what the shared ones do.
+    ``inner_x`` is ``item_inner_spacing.x``, which spaces a dock's tabs.
+    """
+    tabs = PICKED_TABS
+    between, left, top = tabs.on_dock(inner_x)
+    head = (
+        f"PREVIEW of the pick · theme {theme_name} · buttons frame_padding 9x6 rounding 5"
+        f" border 0 · lines level 1 ({LINE_LEVELS[0]}) · dropdown popup border 0 rounding 4"
+        f" · tabs {tabs.label()} (dock: {between:g} px apart, {left:g} left, {top:g} top)"
+    )
+    return (head, *PICKED_SHARED)
+
+
+def before_caption(theme_name: str) -> tuple[str, ...]:
+    return (
+        f"BEFORE · theme {theme_name} · today's theme.apply_style, no overrides"
+        " (frame_padding 7x4, rounding 2, frame_border_size 1, ImGui's tabs)",
+    )
+
+
+def draw_caption(lines: tuple[str, ...]) -> None:
+    """
+    ``lines`` on the foreground list, yellow on black, the first right-aligned in the menu bar
+    and the rest in the status bar, where the app draws nothing on the right. The
+    size is the largest from 13 px down to 10 that fits the width; below that a
+    line is cut by the viewport.
+    """
+    from imgui_bundle import imgui
+
+    viewport = imgui.get_main_viewport()
+    dl = imgui.get_foreground_draw_list()
+    font = imgui.get_font()
+    # Fixed, not the palette's: the caption has to read the same on every theme,
+    # and warn on win311's grey does not.
+    ink = imgui.color_convert_float4_to_u32(imgui.ImVec4(1.0, 0.84, 0.37, 1.0))
+    ground = imgui.color_convert_float4_to_u32(imgui.ImVec4(0.0, 0.0, 0.0, 1.0))
+    lo, size = viewport.pos, viewport.size
+
+    def width(text: str, px: float) -> float:
+        imgui.push_font(None, px)
+        w = float(imgui.calc_text_size(text).x)
+        imgui.pop_font()
+        return w
+
+    def fit(text: str, room: float) -> float:
+        for px in (13.0, 12.0, 11.0, 10.0):
+            if width(text, px) <= room:
+                return px
+        return 10.0
+
+    bar = imgui.get_frame_height()
+    head, *rest = lines
+    px = fit(head, size.x * 0.82)
+    w = width(head, px)
+    x = lo.x + size.x - w - 8.0
+    dl.add_rect_filled(imgui.ImVec2(x - 6.0, lo.y), imgui.ImVec2(lo.x + size.x, lo.y + bar), ground)
+    dl.add_text(font, px, imgui.ImVec2(x, lo.y + (bar - px) * 0.5), ink, head)
+    if not rest:
+        return
+    pitch = 12.0
+    px = min(fit(line, size.x * 0.62) for line in rest)
+    widest = max(width(line, px) for line in rest)
+    x = lo.x + size.x - widest - 8.0
+    y = lo.y + size.y - pitch * len(rest) - 4.0
+    dl.add_rect_filled(
+        imgui.ImVec2(x - 6.0, y - 2.0), imgui.ImVec2(lo.x + size.x, lo.y + size.y), ground
+    )
+    for n, line in enumerate(rest):
+        dl.add_text(font, min(px, pitch), imgui.ImVec2(x, y + n * pitch), ink, line)
+
+
+# -- the small_button wrapper sheet --------------------------------------------------
+#
+# ImGui's small_button forces frame_padding.y to 0, so the operator's "crowded" is
+# not answerable by a style value. A wrapper that draws imgui.button under its own
+# pushed padding, rounding and font size is; these are four of it.
+
+
+@dataclass(frozen=True, slots=True)
+class Micro:
+    """
+    A hypothetical ``widgets.small_button``: ``imgui.button`` with ``pad`` and
+    ``rounding`` pushed, and its text at ``scale`` times the UI font.
+    """
+
+    name: str
+    pad: tuple[float, float]
+    rounding: float
+    scale: float = 1.0
+
+    def height(self, font_px: float) -> float:
+        """The button's height: its text and the vertical padding above and below."""
+        return font_px * self.scale + 2.0 * self.pad[1]
+
+    def label(self, font_px: float) -> str:
+        return (
+            f"{self.name}: frame_padding {self.pad[0]:g}x{self.pad[1]:g} · rounding"
+            f" {self.rounding:g} · text {self.scale:g}x ({font_px * self.scale:g} px)"
+            f" -> {self.height(font_px):g} px"
+        )
+
+
+# Two heights (20 and 22 px) at two text sizes (16 and 14 px). 14 px is 0.875 of
+# the UI font: a whole pixel, so the text is not put on half pixels.
+MICROS: tuple[Micro, ...] = (
+    Micro("A", (6.0, 2.0), 4.0, 1.0),
+    Micro("B", (8.0, 3.0), 5.0, 1.0),
+    Micro("C", (6.0, 3.0), 4.0, 0.875),
+    Micro("D", (8.0, 4.0), 5.0, 0.875),
+)
+
+
+def micro_button(label: str, micro: Micro) -> bool:
+    """What the wrapper would be: ``imgui.button`` under ``micro``'s values."""
+    from imgui_bundle import imgui
+
+    style = imgui.get_style()
+    scaled = micro.scale != 1.0
+    if scaled:
+        imgui.push_font(None, style.font_size_base * micro.scale)
+    imgui.push_style_var(imgui.StyleVar_.frame_padding, imgui.ImVec2(*micro.pad))
+    imgui.push_style_var(imgui.StyleVar_.frame_rounding, micro.rounding)
+    pressed = bool(imgui.button(label))
+    imgui.pop_style_var(2)
+    if scaled:
+        imgui.pop_font()
+    return pressed
+
+
+# The rows each kind is drawn in. ``None`` is today's small_button under the pick,
+# ``"button"`` the 9x6 button beside it.
+MicroKind = Micro | str | None
+MICRO_ROWS: tuple[MicroKind, ...] = (None, *MICROS, "button")
+
+
+def _press_for(kind: MicroKind) -> Any:
+    from imgui_bundle import imgui
+
+    if kind is None:
+        return imgui.small_button
+    if kind == "button":
+        return imgui.button
+    assert isinstance(kind, Micro)
+    return lambda label: micro_button(label, kind)
+
+
+def expected_height(kind: MicroKind, font_px: float, pad_y: float) -> float:
+    """The height a row kind's button is labelled with, before it is measured."""
+    if kind is None:
+        return font_px
+    if kind == "button":
+        return font_px + 2.0 * pad_y
+    assert isinstance(kind, Micro)
+    return kind.height(font_px)
+
+
+def _kind_title(kind: MicroKind, font_px: float, pad: Any, rounding: float) -> str:
+    if kind is None:
+        return (
+            f"small_button today: frame_padding.x {pad.x:g} (y forced 0) · rounding"
+            f" {rounding:g} · text 1x -> {font_px:g} px"
+        )
+    if kind == "button":
+        return (
+            f"button (the pick): frame_padding {pad.x:g}x{pad.y:g} · rounding {rounding:g}"
+            f" -> {font_px + 2.0 * pad.y:g} px"
+        )
+    assert isinstance(kind, Micro)
+    return kind.label(font_px)
+
+
+# Pane rows from pptmstr/ui, each drawn with a text line above and below so the
+# pitch a taller button forces is visible: (title, draw(press, key)).
+def _row_copy(press: Any, key: str) -> None:
+    from imgui_bundle import imgui
+
+    from pptmstr import theme
+
+    imgui.text_colored(theme.P.warn.vec4, "wants approval")
+    imgui.same_line()
+    imgui.text_disabled("· 0s")
+    imgui.same_line()
+    press(f"copy##{key}")
+
+
+def _row_earlier(press: Any, key: str) -> None:
+    press(f"1,204 earlier lines##{key}")
+
+
+def _row_chips(press: Any, key: str) -> None:
+    from imgui_bundle import imgui
+
+    from pptmstr import theme
+
+    for at, chip in enumerate(("open", "held", "waiting", "done")):
+        if at:
+            imgui.same_line()
+        hidden = chip == "done"
+        if hidden:
+            imgui.push_style_color(imgui.Col_.text, theme.P.text_dim.vec4)
+            imgui.push_style_color(imgui.Col_.button, imgui.ImVec4(0.0, 0.0, 0.0, 0.0))
+        press(f"{chip}##{key}")
+        if hidden:
+            imgui.pop_style_color(2)
+
+
+def _row_card(press: Any, key: str) -> None:
+    from imgui_bundle import imgui
+
+    press(f"amend##{key}")
+    imgui.same_line()
+    press(f"close...##{key}")
+
+
+MICRO_CONTEXTS = (
+    ("detail: copy", "chase a flaky test", _row_copy, "pptmstr / code-reviewer"),
+    ("transcript: earlier lines", "> chase a flaky test", _row_earlier, "Working out where."),
+    ("board: filter chips", "show", _row_chips, "style-preview  held"),
+    ("board card: actions", "Spec (says: read):", _row_card, "result (none yet)"),
+)
+
+
+def measured_row(draw: Any, press: Any, key: str) -> float:
+    """``draw``'s row in a group, and the group's height: what the row takes."""
+    from imgui_bundle import imgui
+
+    imgui.begin_group()
+    draw(press, key)
+    imgui.end_group()
+    return float(imgui.get_item_rect_size().y)
+
+
+def _sheet_small_button() -> None:
+    from imgui_bundle import imgui
+
+    from pptmstr import theme
+
+    style = imgui.get_style()
+    font_px = style.font_size_base
+    imgui.text("style preview -- a small_button wrapper, four variants")
+    _caption(
+        f"base: the pick (theme {theme.current().name}, frame_border_size 0, buttons 9x6"
+        f" rounding 5) · UI font {font_px:g} px · text line {font_px:g} px · item_spacing.y"
+        f" {style.item_spacing.y:g}"
+    )
+    _caption(
+        "ImGui's small_button forces frame_padding.y to 0, so its height is the font's"
+        " whatever the style says. Each variant below is a hypothetical widgets.small_button"
+        " that draws imgui.button with its own frame_padding (y > 0), frame_rounding and"
+        " optionally a smaller font, pushed per call: code at 42 call sites, not a style"
+        " value. 'h' is measured from the drawn item; the label's figure is"
+        " font x scale + 2 x pad.y."
+    )
+    _caption(
+        "A row holding one of these is as tall as the button, not the text line: the row"
+        " figure is the measured height of the whole row (a group), and the pitch to the next"
+        " line adds item_spacing.y. Text before the button is top-aligned, as the app draws it"
+        " (no align_text_to_frame_padding)."
+    )
+    _warn_wrapped(
+        "hovered / active = Col_.button_hovered / _active pushed as Col_.button (the colour"
+        " ImGui picks in that state); disabled = begin_disabled"
+    )
+    flags = imgui.TableFlags_.sizing_fixed_fit | imgui.TableFlags_.borders_inner_h
+    imgui.separator_text("states")
+    if imgui.begin_table("##micro-states", 6, flags):
+        imgui.table_setup_column("variant", imgui.TableColumnFlags_.width_fixed, 560.0)
+        for head in (*BUTTON_STATES, "measured"):
+            imgui.table_setup_column(head)
+        imgui.table_headers_row()
+        for n, kind in enumerate(MICRO_ROWS):
+            _micro_states_row(kind, n)
+        imgui.end_table()
+    imgui.separator_text("in pane rows (a text line above and below each)")
+    if imgui.begin_table("##micro-rows", 1 + len(MICRO_CONTEXTS), flags):
+        imgui.table_setup_column("variant", imgui.TableColumnFlags_.width_fixed, 150.0)
+        for title, *_ in MICRO_CONTEXTS:
+            imgui.table_setup_column(title)
+        imgui.table_headers_row()
+        for n, kind in enumerate(MICRO_ROWS):
+            imgui.table_next_row()
+            imgui.table_next_column()
+            name = "small_button" if kind is None else "button" if kind == "button" else ""
+            if isinstance(kind, Micro):
+                name = f"{kind.name} -> {kind.height(font_px):g} px"
+            imgui.text(name)
+            press = _press_for(kind)
+            for title, above, draw, below in MICRO_CONTEXTS:
+                imgui.table_next_column()
+                imgui.text_disabled(above)
+                row = measured_row(draw, press, f"{title}-{n}")
+                imgui.text_disabled(below)
+                grows = row - font_px
+                more = f" (+{grows:g} over the text line)" if grows > 0 else " (= the text line)"
+                _caption(f"row {row:g} px{more} · pitch {row + style.item_spacing.y:g}")
+        imgui.end_table()
+
+
+def _micro_states_row(kind: MicroKind, n: int) -> None:
+    from imgui_bundle import imgui
+
+    style = imgui.get_style()
+    font_px = style.font_size_base
+    imgui.table_next_row()
+    imgui.table_next_column()
+    imgui.text_wrapped(_kind_title(kind, font_px, style.frame_padding, style.frame_rounding))
+    press = _press_for(kind)
+    heights = []
+    for state, label in zip(
+        BUTTON_STATES, ("copy", "1,204 earlier lines", "held", "amend"), strict=True
+    ):
+        imgui.table_next_column()
+        pushed = 0
+        if state in ("hovered", "active"):
+            slot = imgui.Col_.button_hovered if state == "hovered" else imgui.Col_.button_active
+            imgui.push_style_color(imgui.Col_.button, style.color_(int(slot)))
+            pushed = 1
+        imgui.begin_disabled(state == "disabled")
+        press(f"{label}##micro-{n}-{state}")
+        heights.append(float(imgui.get_item_rect_size().y))
+        imgui.end_disabled()
+        imgui.pop_style_color(pushed)
+    imgui.table_next_column()
+    want = expected_height(kind, font_px, style.frame_padding.y)
+    seen = sorted(set(heights))
+    shown = " / ".join(f"{h:g}" for h in seen)
+    if seen == [want]:
+        imgui.text(f"h {shown} px = label")
+    else:
+        _warn_wrapped(f"h {shown} px, label says {want:g}")
+
+
+_SHEET_DRAWERS["small-button"] = _sheet_small_button
+
+
 # -- the run ------------------------------------------------------------------------
 
 
@@ -1461,6 +1845,8 @@ class _Shown:
     terminal = False
     sheet: str | None = None
     sheet_first = False
+    # The preview's caption: "picked", "before", or nothing.
+    caption: str | None = None
 
 
 def _scenario(state: Any, fixtures: Path) -> Iterator[str | None]:
@@ -1493,8 +1879,6 @@ def _scenario(state: Any, fixtures: Path) -> Iterator[str | None]:
     yield from screenshot._frames()
     yield "board"
 
-    # Typeset is the mode the rework settles on (U2); with no library it is WRAP.
-    state.settings = dataclasses.replace(state.settings, context_mode="typeset")
     state.pending_layout = "FOCUS"
     yield from screenshot._frames(3)
     # What a click on a card with nothing waiting does: the session itself, pinned,
@@ -1618,15 +2002,48 @@ def _screens_scenario(state: Any, fixtures: Path) -> Iterator[str | None]:
     yield from screenshot._frames(2)
 
 
-def _run_one(variant: Variant, out_dir: Path, scenario: Any = None) -> int:
+def _caption_lines(kind: str) -> tuple[str, ...]:
+    from imgui_bundle import imgui
+
+    from pptmstr import theme
+
+    name = theme.current().name
+    if kind == "before":
+        return before_caption(name)
+    return picked_caption(name, imgui.get_style().item_inner_spacing.x)
+
+
+def _run_one(
+    variant: Variant,
+    out_dir: Path,
+    scenario: Any = None,
+    theme_name: str | None = None,
+    caption: str | None = None,
+) -> int:
     """
     One app run under ``variant`` with screenshot.py's machinery. Everything the
     variant changes is patched into this process before ``app.main`` runs.
+    ``theme_name`` is put in the settings the app reads at start, as if the
+    operator's file named it; ``caption`` says which preview caption to draw.
     """
     import screenshot
 
     from pptmstr import app as pptmstr_app
+    from pptmstr import settings as settings_mod
     from pptmstr import theme
+
+    if theme_name is not None:
+        real_read = settings_mod.read
+
+        @functools.wraps(real_read)
+        def read(path: Path | None = None) -> Any:
+            found = real_read(path)
+            return dataclasses.replace(
+                found, settings=dataclasses.replace(found.settings, theme=theme_name)
+            )
+
+        settings_mod.read = read  # type: ignore[assignment]
+    _Shown.caption = caption
 
     real_apply = theme.apply_style
 
@@ -1647,6 +2064,8 @@ def _run_one(variant: Variant, out_dir: Path, scenario: Any = None) -> int:
         if _Shown.sheet is not None:
             draw_sheet(_Shown.sheet, _Shown.sheet_first)
             _Shown.sheet_first = False
+        if _Shown.caption is not None:
+            draw_caption(_caption_lines(_Shown.caption))
         real_overlays(state)
 
     pptmstr_app._draw_overlays = overlays  # type: ignore[assignment]
@@ -1720,6 +2139,65 @@ def _run_round_two() -> int:
     return code or _missing(OUT2 / "screens", SCREENS)
 
 
+def _preview_scenario(state: Any, fixtures: Path) -> Iterator[str | None]:
+    """Round one's six screens, each written under the name the preview gives it."""
+    prefix = "before-" if _Shown.caption == "before" else ""
+    for step in _scenario(state, fixtures):
+        yield None if step is None else f"{prefix}{step}"
+
+
+def _micro_scenario(state: Any, fixtures: Path) -> Iterator[str | None]:
+    """The small_button wrapper sheet, at the sheets' size."""
+    import screenshot
+    from imgui_bundle import hello_imgui, imgui
+
+    del fixtures
+    yield from screenshot._until(
+        "the fake fleet", lambda: state.driver is not None and state.frame_snap is not None
+    )
+    hello_imgui.change_window_size(SHEET_SIZE)
+    yield from screenshot._until(
+        f"the window at {SHEET_SIZE}",
+        lambda: tuple(int(v) for v in imgui.get_io().display_size) == SHEET_SIZE,
+    )
+    yield from screenshot._frames(30)
+    _Shown.sheet, _Shown.sheet_first = "small-button", True
+    yield from screenshot._frames(10)
+    yield "small-button"
+    _Shown.sheet = None
+
+
+def preview_themes() -> tuple[str, ...]:
+    from pptmstr import theme
+
+    return tuple(theme.THEMES)
+
+
+def _run_preview(themes: tuple[str, ...]) -> int:
+    """
+    The wrapper sheet, then for each theme today's six screens and the pick's, each
+    run on its own Xvfb. The first failure ends it.
+    """
+    started = time.monotonic()
+    code = _on_xvfb(
+        ["--micro", "--out-dir", str(OUT3)], f"{SHEET_SIZE[0] + 100}x{SHEET_SIZE[1] + 100}x24"
+    )
+    print(f"small-button: exit {code} in {time.monotonic() - started:.0f}s", flush=True)
+    if code != 0 or _missing(OUT3, ("small-button",)):
+        return code or 1
+    for name in themes:
+        for kind, prefix in (("before", "before-"), ("picked", "")):
+            started = time.monotonic()
+            out_dir = OUT3 / name
+            code = _on_xvfb(["--preview", kind, "--theme", name, "--out-dir", str(out_dir)])
+            print(f"{name} {kind}: exit {code} in {time.monotonic() - started:.0f}s", flush=True)
+            if code != 0:
+                return code
+            if _missing(out_dir, tuple(f"{prefix}{s}" for s in SCREENS)):
+                return 1
+    return 0
+
+
 def describe(variant: Variant) -> list[str]:
     """The variant's exact values, one per line, as the planning record quotes them."""
     lines = [f"{name} = {value}" for name, value in variant.scalars]
@@ -1745,10 +2223,25 @@ def main() -> int:
     which.add_argument(
         "--screens", action="store_true", help="the middle values' screens, likewise"
     )
+    which.add_argument(
+        "--style-preview",
+        action="store_true",
+        help="the pick and today's style on every theme, and the wrapper sheet, each on an Xvfb",
+    )
+    which.add_argument(
+        "--preview",
+        choices=("before", "picked"),
+        help="one theme's six screens, on the display there is",
+    )
+    which.add_argument("--micro", action="store_true", help="the wrapper sheet, likewise")
+    ap.add_argument("--theme", default=None, help="with --preview: the theme to run under")
+    ap.add_argument(
+        "--themes", nargs="+", default=None, help="with --style-preview: these themes only"
+    )
     ap.add_argument("--out-dir", type=Path, default=None)
     args = ap.parse_args()
     if args.describe:
-        for variant in (*VARIANTS, *ROUND_TWO, *CELLS):
+        for variant in (*VARIANTS, *ROUND_TWO, *CELLS, PICKED):
             print(f"{variant.name}: {variant.summary}")
             for line in describe(variant):
                 print(f"    {line}")
@@ -1757,6 +2250,14 @@ def main() -> int:
         return _run_all([v.name for v in VARIANTS])
     if args.round_two:
         return _run_round_two()
+    if args.style_preview:
+        return _run_preview(tuple(args.themes or preview_themes()))
+    if args.preview:
+        name = args.theme or "dark"
+        variant = PICKED if args.preview == "picked" else CURRENT
+        return _run_one(variant, args.out_dir or OUT3 / name, _preview_scenario, name, args.preview)
+    if args.micro:
+        return _run_one(PICKED, args.out_dir or OUT3, _micro_scenario, "dark")
     if args.sheets:
         return _run_one(SOFT_WELLS, args.out_dir or OUT2, _sheets_scenario)
     if args.screens:

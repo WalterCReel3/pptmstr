@@ -733,3 +733,200 @@ Not run in that pass:
 - the dock's own tab width, drawn on the sheet: it is stated, not drawn, and the 20 px
   close-button room is inferred from two printed widths;
 - `make check`.
+
+## Preview of the pick (task `style-preview`)
+
+The operator's pick (top of this record), rendered on round one's six screens for every
+theme `theme.py` defines, beside today's style. A sheet of `small_button` wrapper variants
+answers "crowded".
+
+### What to look at
+
+| image | what it is |
+|---|---|
+| `shots/style-preview/<theme>/<screen>.png` | the pick (`style_probe.PICKED`) |
+| `shots/style-preview/<theme>/before-<screen>.png` | the same screen in today's style (`current`, no overrides) |
+| `shots/style-preview/small-button.png` | four wrapper variants beside today's `small_button` and the picked 9x6 `button`, in four states and four pane rows (1500×1300) |
+
+`<theme>` is each of the nine in `theme.THEMES`: `dark`, `light`, `high_contrast`, `ghost`,
+`xterm`, `cde`, `win311`, `kitty`, `turbo`. `<screen>` is one of round one's six. The
+screens are 1500×900, with 108 of them plus the sheet.
+
+Each picked image states its values in the menu bar, right-aligned, and what the
+shared values do in the status bar's right half. Each before image states "today's
+`theme.apply_style`, no overrides". The caption is yellow on black, fixed rather than
+from the palette, so it reads the same on every theme. It covers only empty bar space on
+five screens. On `launcher.png` it covers the bottom 40 px of the modal, which already
+overflows 900 px (round two).
+
+Regenerate with `.venv/bin/python scripts/style_probe.py --style-preview` (optionally
+`--themes dark light`). The theme is put into the settings the app reads at start
+(`settings.read` is wrapped in the probe's process), so the settings dialog's combo shows
+the theme that is drawn.
+
+### What `picked` is
+
+| pick (operator's words) | value applied | from |
+|---|---|---|
+| buttons: "frame_padding 9x6 rounding 5" | `frame_padding (9, 6)`, `frame_rounding 5` | soft |
+| buttons: "no outline or frame border" | `frame_border_size 0` | soft |
+| lines: "Level 1" | `Col_.border` = `Col_.separator` = `mix(bg, border, 1)`, the palette's border, which is what `apply_style` already sets | line level 1 |
+| lines: "Softs fill only" | `frame_border_size 0`, `Col_.frame_bg = mix(bg, panel, 0.35)` | well option 2 |
+| dropdown: "No outline" | `frame_border_size 0` (field), `popup_border_size 0` (popup) | flat cell |
+| dropdown: "popup rounding 4" | `popup_rounding 4` | framed cell / soft |
+| dropdown: "tinted arrow" | soft's `Col_.button = mix(panel_alt, accent, 0.2)` | soft |
+| tabs: "pad 10x4 gap 4 inset 1 text 1.10x" | drawn tabs, `TabSpec(pad 10x4, gap 4, inset 1, scale 1.10)`, lowercase; lane 26.6 px in the 28 px bar; on a dock 8 px tab to tab, 2 px from the lane's left | between round two's steps |
+
+The pick is `soft` plus `popup_border_size 0`, with the level-1 line colours written out.
+A test (`test_the_pick_is_soft_plus_only_the_popup_outline_and_the_written_out_lines`) holds
+this.
+
+Soft's other values were not picked by name: `scrollbar_size 16`, `scrollbar_rounding 8`,
+`scrollbar_padding 3`, `grab_rounding 5`, `item_spacing (8, 6)`, `tab_rounding 5` and
+`Col_.scrollbar_grab`. They are kept because every round-two sheet the operator picked
+from was drawn on them. **Decided by the builder in the unattended session.** The image
+says so.
+
+### What each shared value forced
+
+- **`frame_border_size 0` is one value for three picks.** Buttons' "no outline", the
+  lines' "soft's fill only" and the dropdown field's "no outline" all set it, and they
+  agree, so nothing was chosen between them. What it does: no frame anywhere has an
+  outline. That covers wells, the composer, check and radio boxes, combos and buttons.
+- **`Col_.button` is the tinted arrow and every button's fill.** The "tinted arrow" is
+  soft's button tint and cannot be scoped to the arrow (round two, sheet 4). The two picks
+  agree.
+- **`popup_border_size 0` and `popup_rounding 4` apply to every popup.** That means combo
+  lists, menus and context menus, not only dropdowns.
+- **`frame_padding 9x6` applies to every frame and sets the dock tab bar to 28 px.** The
+  tab pick's lane of 26.6 px fits inside it, so nothing else grew. `small_button` still
+  forces y to 0 and stays 16 px.
+- **Level-1 lines change nothing.** They are the palette's `border`. With
+  `frame_border_size 0`, `Col_.border` now draws only child outlines, popup outlines (none,
+  at 0), the pane edges and window borders.
+
+### What reads worse than the sheets suggested
+
+Measured: WCAG ratios from the 8-bit colours, computed with `style_probe.contrast` in a
+one-off run over every palette. The screens were looked at for `dark`, `light`,
+`high_contrast` and `win311`.
+
+| theme | soft's well fill on the pane | today's well fill on the pane | picked button fill on the pane |
+|---|---|---|---|
+| dark | 1.02:1 | 1.17:1 | 1.75:1 |
+| light | 1.03:1 | 1.07:1 | 1.41:1 |
+| **high_contrast** | **1.00:1** | 1.10:1 | 1.72:1 |
+| ghost | 1.02:1 | 1.19:1 | 1.83:1 |
+| xterm | 1.03:1 | 1.13:1 | 1.72:1 |
+| cde | 1.14:1 | 1.76:1 | 1.34:1 |
+| win311 | 1.18:1 | 1.85:1 | 1.21:1 |
+| kitty | 1.06:1 | 1.09:1 | 1.17:1 |
+| turbo | 1.07:1 | 1.44:1 | 1.90:1 |
+
+- **On `high_contrast` the docks' wells are gone.** `bg` and `panel` are both black, so
+  soft's fill `mix(bg, panel, 0.35)` is black on black, 1.00:1. Its border, at 21:1, was
+  the only thing drawing them, and `frame_border_size 0` removes it. In
+  `high_contrast/focus.png` the session composer is an empty black area under "this session
+  is waiting for you". Every dock input is the same. This is worse than sheet 3 suggested,
+  because sheet 3 was drawn on `dark` only.
+- **On `light` the dock composer is barely there.** It is 1.03:1 on the pane
+  (`light/focus.png`). Today it is outlined.
+- **Modal wells survive.** `theme.dialog_colors` pushes `palette.well` over `frame_bg`,
+  so inside settings and the launcher the wells are a separate fill: 1.09–1.56:1 against
+  the popup, and visible on every theme looked at. In `light/launcher.png` and
+  `high_contrast/launcher.png` the fields read as fields.
+- **On `kitty` and `win311` buttons barely separate from the pane.** Buttons are 1.17:1
+  and 1.21:1, against 1.7–1.9:1 on the dark themes. Soft's tint is 0.2 accent over
+  `panel_alt`, and on those palettes the two are close in luminance.
+- **Unchecked checkboxes and radios** are not on any of the six screens in a dock: the
+  settings screen shows the Appearance page, which has none. So this preview neither
+  confirms nor refutes the borderless-checkbox concern on `light` or `high_contrast`. By
+  the table above, a borderless box on `high_contrast` is 1.00:1, which is invisible, and
+  on `light` it is 1.03:1.
+- **The `before-*.png` screens show ImGui's own uppercase tabs**, so each pair also
+  compares those against the drawn tabs. That is intended: the drawn tabs are part of the
+  pick.
+
+The fix this points to is a value choice, not code, and it is the operator's. Options:
+
+- exempt `high_contrast` from `frame_border_size 0` (round one's recommendation);
+- or give `frame_bg` a per-theme fill that clears the pane;
+- or accept invisible dock wells on that theme.
+
+### The `small_button` wrapper (`small-button.png`)
+
+ImGui's `small_button` forces `frame_padding.y` to 0, so no style value makes it less
+crowded. Each variant is a hypothetical `widgets.small_button` that calls `imgui.button`
+with its own pushed `frame_padding`, `frame_rounding` and, optionally, font size
+(`style_probe.micro_button`). Adopting it means routing 42 call sites through it.
+
+| variant | frame_padding | rounding | text | height |
+|---|---|---|---|---|
+| today's `small_button` (the pick) | 9 x (forced 0) | 5 | 16 px | 16 px |
+| A | 6x2 | 4 | 16 px | 20 px |
+| B | 8x3 | 5 | 16 px | 22 px |
+| C | 6x3 | 4 | 14 px (0.875×) | 20 px |
+| D | 8x4 | 5 | 14 px (0.875×) | 22 px |
+| `button` (the pick) | 9x6 | 5 | 16 px | 28 px |
+
+The variants are two heights at two text sizes, so text size and padding can be judged
+apart. 14 px is a whole pixel. Heights are measured from the drawn item: each cell prints
+"h N px = label", or a warning if the measurement and the label disagree. A test measures
+every variant against its label.
+
+**Row cost.** A pane row is as tall as its tallest button, not as its 16 px text line. A
+row holding A or C is 20 px (+4, a pitch of 26). B or D is 22 px (+6, pitch 28), and the
+9x6 button is 28 px (+12, pitch 34). The sheet measures this as the height of the whole row
+in four real contexts:
+
+- detail's "wants approval · 0s [copy]";
+- the transcript's "1,204 earlier lines";
+- the board's filter chips, with `done` hidden;
+- a board card's "amend / close...".
+
+A test holds every row to max(text line, button). In the app, text before a taller
+button is top-aligned, because nothing calls `align_text_to_frame_padding`. The sheet
+shows it that way, and the text sits visibly high beside A–D.
+
+### What was run and what was not (preview)
+
+Run (builder-18, 2026-10-15, through `scripts/xvfb_shot.sh`, Xvfb + llvmpipe):
+
+- `scripts/style_probe.py --style-preview`: the sheet and 18 screen runs (9 themes ×
+  before/picked), every one exit 0, giving 109 images.
+- **Against `HEAD`'s `pptmstr/`, not the working tree.** While this ran, another task
+  (`delete-rich`) was partway through removing `context_mode`. `app.py` called a
+  `transcript_pane.mode_named` that no longer existed, and the probe's scenario still set
+  `context_mode="typeset"`, so a working-tree run failed at the CONTEXT pane. I exported
+  `HEAD` with `git archive` into a scratch directory under `shots/style-preview/`, laid this
+  probe over it, rendered there, copied the images out and deleted the scratch. After the
+  render, `_scenario`'s `context_mode="typeset"` line was dropped at `delete-rich`'s
+  request (typeset is the pane's default), so the probe no longer names that field. That
+  edit came after the images and was not re-rendered.
+- `pytest -q tests/test_style_probe.py`: 142 passed. 46 tests are new: the pick's values
+  against the operator's words, apply and revert being exact on all nine themes, level 1
+  being `apply_style`'s own colours, the caption, the wrapper heights against their labels
+  (6 kinds), and row heights (6 kinds × 4 contexts). The same tests passed against
+  `HEAD`'s tree.
+- A mutation run on the scratch copy. 10 mutations, all killed:
+  - the popup border kept;
+  - inset 2;
+  - lines at level 3;
+  - the wrapper without its padding push;
+  - the wrapper without its font;
+  - the height counting one pad;
+  - the wrapper as `small_button`;
+  - one pop short;
+  - the baseline height off by 2;
+  - the caption without its shared-value lines.
+- `make format-file`, `ruff check` and `mypy` on `scripts/style_probe.py`.
+
+Not run:
+
+- looking at every one of the 109 images: `dark`, `light`, `high_contrast` and `win311`
+  were looked at, the other five themes only by exit code and file count;
+- an unchecked checkbox or radio in a dock on any theme: none of the six screens has one;
+- real hover and press: these are drawn by pushing the state colour, as in round two;
+- any size but 1500×900 (1500×1300 for the sheet), and DPI scaling;
+- `make check` and the rest of the suite;
+- the working tree's `pptmstr/` (see above).
