@@ -44,6 +44,10 @@ the transcript can take it for the operator's words.
   concern would let agents wake agents.
 - **Who is woken:** the asking session. A sub-agent's decision or command wakes its lead, because
   sub-agents already relay through their lead.
+- **A concern to the lead also wakes the lead** (added later the same day, the lead's call).
+  Builders' questions to the lead waited 15-75 minutes unread, because nothing woke the lead
+  between operator prompts. Only a worker's concern addressed to its own session's lead wakes,
+  and concerns between workers do not, so agents cannot wake each other in a loop.
 - **No asker to wake:** if the session has no live client (closed, failed or ended), nothing is
   sent. The pane still shows the answered state, as it does today.
 - **Each wake costs a turn.** A burst of answers coalesces into one message, not one per answer.
