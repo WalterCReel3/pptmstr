@@ -163,6 +163,25 @@ deciding input; this recommendation is only a default.
   neither face;
 - mutation testing.
 
+## Built after the decisions, with the builders' and lead's calls (2026-10-16)
+
+theme-fix-2 (builder-45, run; the reasoning is also in theme.py's dock_well and hint comments):
+- **Dialogs get their own hint colour,** `Palette.dialog_hint`: the least step of text_dim that reads
+  4.5:1 in the dialog well. It is text_dim itself on seven themes. `hint_colour(gui, *, dialog=)`
+  takes the kind, and a guard test maps each field to its kind.
+- **cde and win311's dock well now steps toward white, not toward text,** by 0.10 and 0.11. On
+  those mid-tone themes no colour could be both 4.5:1 in the well and visibly lighter than typed
+  text otherwise. The lead reads this as within "wells lighter than the pane", whose darker
+  branch was for grounds at or near white. **The operator has not seen it:** on those two themes a
+  dock field and a tool block now step the same way off the pane (1.14 vs about 1.28), so a block
+  may read as a larger field. Renders: `shots/apply-theme/{cde,win311}/focus.png`.
+- **turbo's dock well is at t=0.19,** because at 0.10 it sat 1.08:1 on the child-window panel, so
+  checkboxes in DETAIL and BRIEF all but vanished.
+
+diff-parity (builder-48, run): a ```diff fence now draws in the diff view in both panes once a turn
+has ended, and diff tokens get add, remove and heading inks. The fix also made the last line of
+every fence colour; before, the lexer missed it.
+
 ## Decisions answered in the operator's pane (2026-10-16)
 
 - **Placeholder text (dq-a64871cda0f5):** the lead raised each theme's dim colour so that a hint
