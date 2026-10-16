@@ -62,6 +62,88 @@ board (about 70 tasks over two days) and `notes/2026-10-16-lead-handoff.md`.
   ranked by how much they unblock (the critical path). It removes the inference before every
   spawn.
 
+## Test scenarios, drawn from the case study
+
+Each scenario is a small board built in a test: tasks with ids, `touches` and `depends_on`,
+some claimed or completed. Each names the query it exercises and what must come back. The
+fixtures copy the shape of the ui-rework failure that motivated them. They are outlines for the
+unit tests, not the tests themselves.
+
+### A. Dry-run declare (from failure 1)
+
+- **A1, a shared source file.** `theme-fix-2` touches `launcher.py` and is pending, behind
+  `baseline-sites` (claimed). A dry run of `launcher-place` touching `launcher.py` returns the
+  added edge `launcher-place → theme-fix-2`, the chain `theme-fix-2 → baseline-sites`, and
+  claimable=false. The board is unchanged afterwards: same task count, same edges.
+- **A2, a shared test file only.** `font-raster-probe` touches `tests/test_style_probe.py`, as
+  does a pending `theme-fix`. The dry run reports the edge and marks it as caused by a test file
+  only, so the lead can narrow `touches` (the open question on softer edges).
+- **A3, a chain through a withdrawn task.** `composer-margins` touches `app.py`; `empty-bookmarks`
+  touches `app.py` and is withdrawn. A dry run shows the chain ending at the withdrawn task, and
+  says so, not merely "pending".
+- **A4, a self-overlap.** Declaring `composer-margins-2` with the same files as the superseded
+  `composer-margins`: the dry run shows the new task would wait on the one it replaces.
+- **A5, no overlap.** A probe touching only new files (`scripts/link_probe.py`) returns no edges
+  and claimable=true.
+
+### B. `why_blocked` (from failure 2)
+
+- **B1, a three-deep chain.** turn-boundary waits on theme-fix-2, which waits on baseline-sites,
+  which waits on delete-rich-pane, which is withdrawn and unheld. `why_blocked(turn-boundary)`
+  returns that path in order, each with its state and holder, and ends at the withdrawn root.
+- **B2, several roots.** `detail-actions` waits on history-to-digest, wake-asker and
+  detail-header, which each have their own blockers. The answer lists every unfinished root once
+  (a set, not a path per edge), with the shortest path to each.
+- **B3, a claimable task.** It returns "claimable", with no chain.
+- **B4, a dependency that is held, not pending.** The chain stops at the claimed task and names
+  its holder (`builder-45`), since that is the actionable fact.
+- **B5, scale.** A 70-task board answers without returning the board. The reply's size is bounded
+  by the chain, not by the board (a test on reply length).
+
+### C. Withdrawn tasks (from failure 3)
+
+- **C1, the declarer withdraws.** The lead declares, amends, then calls
+  `withdraw_task(delete-rich-pane, reason)`. It succeeds although the lead amended it, the task
+  reads withdrawn with the reason, and every task blocked only by it becomes claimable.
+- **C2, a withdrawn dependency of a gate.** A gate's dependency set includes a withdrawn task:
+  the gate is not held by it.
+- **C3, withdraw while held.** A task held by `builder-49` is withdrawn by the lead. The holder is
+  told, through a concern or the next read, and its later `complete_task` is refused or recorded
+  against the withdrawn version, which the test pins.
+- **C4, not the declarer.** A builder cannot withdraw a task it did not declare.
+
+### D. Computed dependencies (from failure 4)
+
+- **D1, a gate on every writer.** `gate-2` with `depends_on="all-writers"`, declared first. Five
+  tasks declared after it, each touching files. The gate waits on all five, and on a sixth
+  declared later, without an amend.
+- **D2, a freeze at claim** (the open question). Once the gate is claimed, a task declared
+  afterwards does not join its set. Or it does, whichever is decided, and the test pins it.
+- **D3, withdrawn tasks drop out.** A withdrawn writer is not in the gate's set (C2 again, through
+  a query).
+- **D4, amending `depends_on`, if that route is chosen.** An amend that would create a cycle
+  (`a → b`, then amend `b` to depend on `a`) is refused with the cycle named.
+
+### E. Ready view (from failure 5)
+
+- **E1, ready set.** On the ui-rework shape mid-session, `ready()` returns exactly the tasks whose
+  dependencies are all complete, and none held.
+- **E2, critical-path rank.** Among two ready tasks, the one that unblocks more pending work ranks
+  first: `theme-fix-2`, which unblocked six tasks, above `diff-parity`, which unblocked none.
+- **E3, `read_board(open_only=true)`.** Completed and withdrawn tasks are omitted, and its size is
+  bounded by the open tasks.
+
+### F. Properties across all queries
+
+- **F1, the queries are pure.** No query, dry runs included, changes the board, and each is
+  answered from one snapshot.
+- **F2, edges derived, not stored.** An edge from file overlap is a function of `touches` and
+  states. Completing one task removes its edges without a separate unblocking step (STYLE.md
+  "Derive; do not store", as `TaskState` already does).
+- **F3, ids not found.** Each query given an unknown id says it is unknown. It does not answer as
+  if the task were blocked or ready. (STYLE.md: an error that does not tell the two mistakes
+  apart.)
+
 ## Open questions
 
 - Should the automatic file-overlap edge stay the default? It prevented real conflicts, and also
