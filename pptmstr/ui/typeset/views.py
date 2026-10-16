@@ -131,6 +131,7 @@ views are then 0.9 to 1.6 ms.
 
 from __future__ import annotations
 
+import re
 import unicodedata
 from collections.abc import Callable, Collection, Hashable, Iterator, Sequence
 from contextlib import contextmanager
@@ -139,7 +140,7 @@ from typing import Any
 
 from ... import theme as ui_theme
 from ...theme import Color
-from . import gate, roles, themes
+from . import gate, roles, syntax, themes
 from .parts import Kind, Part
 from .roles import Role, Slot, Weight
 
@@ -499,9 +500,9 @@ class Stream:
         # it has been told the text ended.
         self._fed = 0
         self._ended = False
-        # The view's revision and pptmstr's theme the fences' info strings were
-        # last inked for.
-        self._inked: tuple[int, object] | None = None
+        # The view's revision, pptmstr's theme, the ink it was drawn in and
+        # how many blocks were committed when the fences were last inked.
+        self._inked: tuple[int, object, int | None, int] | None = None
         # What the library said when it set less of the text than it was fed.
         self._unset: str | None = None
 
@@ -603,32 +604,60 @@ class Stream:
                 self._source.close()
             self._ended = True
 
-    def _ink(self) -> None:
+    def _ink(self, ink: Color | None) -> None:
         """
-        Tell each fence's info string from its code by ink, as ``_ink`` does
-        for a settled view. Again whenever the blocks changed: the library
-        drops the inks of a block an edit replaced.
+        Tell each fence's info string from its code by ink, and colour the
+        code by token, as ``_ink`` does for a settled view. Again whenever the
+        blocks changed: the library drops the inks of a block an edit replaced.
+
+        A fence is coloured by token once the stream has committed it, or once
+        its closing line has arrived with no line end after it (``_shut``), and
+        until then only its caption is: the block being written is replaced at
+        every arrival, and lexing it whole each time costs a frame its length
+        allows (500 lines of Python: about 30 ms a lex, measured 2026-10-15).
+        Neither pane that streams ever closes its stream, so a message that
+        ends on its fence's closing marks would otherwise stay uncoloured for
+        as long as it is the last thing said. A stream drawn in an ink of its
+        own is not coloured by token (``syntax``).
         """
         view = self._view
         with _HANDING:
             view.sync()
             revision = view.revision
-        now = (revision, ui_theme.current())
+        with _ASKING:
+            done = len(self._source.committed)
+        # The revision moves at every append, the closing marks' last character
+        # included, though the blocks are equal (imscribe 0.2.0, measured): the
+        # frame a fence is shut in is inked again.
+        now = (revision, ui_theme.current(), None if ink is None else ink.u32, done)
         if self._inked == now:
             return
         self._inked = now
         with _ASKING:
             blocks = tuple(view.blocks)
+            texts = [str(text) for text in view.texts]
         captions = {
-            at: len(said)
+            at: _caption_length(block)
             for at, block in enumerate(blocks)
-            if (said := getattr(block, "language", ""))
+            if getattr(block, "language", "")
         }
         self._entry.segments[0].captions = captions
+        last = len(blocks) - 1
+        if last >= done and last in captions:
+            with _ASKING:
+                source = self._source.source
+                at = self._source.sources[last]
+            span = at.span
+            if span == at.top and _shut(source[span.start :]):
+                done = last + 1
         accent = ui_theme.P.accent.u32
+        inks = None if ink is not None else themes.syntax_inks()
         for block, said in captions.items():
+            spans = syntax.block_spans(
+                texts[block], said, accent, None, inks if block < done else None
+            )
             with _INKING:
-                view.set_colours(block, [(0, said, accent)])
+                view.set_colours(block, spans)
 
     def draw(self, *, width: float | None = None, ink: Color | None = None) -> float:
         """
@@ -646,7 +675,7 @@ class Stream:
         try:
             noted = gate.noted()
             self._catch_up()
-            self._ink()
+            self._ink(ink)
             _show_view(im, entry.segments[0], _width(im, width), themes.palette(ink), None)
             self._unset = _short(entry, noted) or self._unset
             entry.missing = 0
@@ -764,7 +793,7 @@ def _open(entry: _Entry, parts: tuple[Part, ...], on_link: Callable[[str], None]
             view.host_for = fences
             view.set_document(tuple(blocks))
         captions = {
-            at: len(said)
+            at: _caption_length(block)
             for at, block in enumerate(blocks)
             if (said := getattr(block, "language", "")) and said != _HOSTED_INFO
         }
@@ -965,7 +994,8 @@ def _captioned(blocks: Sequence[Any], hosting: bool = False) -> tuple[Any, ...]:
     The library keeps what follows a fence's opening marks on the block and
     draws none of it. ``python IMPORTANT also delete tests`` is text somebody
     wrote for a reader, so all of it is set. The block keeps the string where
-    the library put it as well.
+    the library put it as well. A fence too long to colour by token says so
+    after it (``syntax.too_long``), in the caption's ink.
 
     ``hosting``, a fence that is an honest diff (``diffs.fence_diff``) keeps the
     text the library read and is marked for the diff view that will draw it
@@ -987,8 +1017,42 @@ def _captioned(blocks: Sequence[Any], hosting: bool = False) -> tuple[Any, ...]:
                 out.append(replace(block, text="\n".join(headers), language=""))
             out.append(replace(block, language=_HOSTED_INFO))
         else:
-            out.append(replace(block, text=f"{said}\n{block.text}"))
+            note = syntax.TOO_LONG if syntax.too_long(said, block.text) else ""
+            out.append(replace(block, text=f"{said}{note}\n{block.text}"))
     return tuple(out)
+
+
+_OPENER = re.compile(r" {0,3}(`{3,}|~{3,})")
+"""
+A fence's opening marks, as CommonMark reads them.
+"""
+
+
+def _shut(fence: str) -> bool:
+    """
+    Whether ``fence``, a top-level fence's source from its opening line to the
+    end of the text so far, ends on a closing line that has not yet ended: up
+    to three spaces, at least as many of the opener's marks, and white space.
+
+    Read here because the library commits a fence only once that line ends,
+    and says nothing of one that has not. Asked only of a top-level fence: one
+    in a quote or a list item is coloured when it commits.
+    """
+    opener, _, rest = fence.partition("\n")
+    marks = _OPENER.match(opener)
+    if marks is None or not rest:
+        return False
+    run = marks.group(1)
+    closer = rf" {{0,3}}{re.escape(run[0])}{{{len(run)},}}[ \t]*"
+    return re.fullmatch(closer, rest.rpartition("\n")[2]) is not None
+
+
+def _caption_length(block: Any) -> int:
+    """
+    How many characters of a block ``_captioned`` captioned its caption is: its
+    first line, the info string and any note after it (``syntax.TOO_LONG``).
+    """
+    return len(block.text.partition("\n")[0])
 
 
 _HOSTED_INFO = "diff \u2063hosted"
@@ -1071,13 +1135,14 @@ def _ink(entry: _Entry) -> None:
     The library drops the inks of a block an edit replaced and keeps the rest,
     so every view is inked whole whenever its parts or the theme changed.
     """
+    accent, inks = ui_theme.P.accent.u32, themes.syntax_inks()
     for segment in entry.segments:
         view = segment.view
         if view is None:
             continue
         with _INKING:
             view.clear_colours()
-            lengths = [len(text) for text in view.texts]
+            texts = [str(text) for text in view.texts]
             hosted = set(view.hosts)
         for block, index in enumerate(segment.owner):
             if block in hosted:
@@ -1087,11 +1152,12 @@ def _ink(entry: _Entry) -> None:
             if ink is None and segment.literal:
                 # The text's own ink, as ImGui draws it, and not the code role's.
                 ink = ui_theme.P.text
-            # A fence's info string is told from its code by ink.
+            # A fence's info string is told from its code by ink, and the code
+            # coloured by token where it names its language (``syntax``).
             said = segment.captions.get(block, 0)
-            spans = [(0, said, ui_theme.P.accent.u32)] if said else []
-            if ink is not None and lengths[block] > said:
-                spans.append((said, lengths[block], ink.u32))
+            spans = syntax.block_spans(
+                texts[block], said, accent, None if ink is None else ink.u32, inks
+            )
             if spans:
                 with _INKING:
                     view.set_colours(block, spans)

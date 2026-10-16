@@ -147,7 +147,31 @@ def test_the_seam_imports_the_librarys_facade_and_one_named_module_past_it() -> 
     assert past == PAST_THE_FACADE
 
 
-@pytest.mark.parametrize("module", ["roles", "parts"])
+def test_only_the_syntax_module_imports_the_highlighter() -> None:
+    """
+    Pygments is the seam's, as the library is: one module asks it for tokens and
+    hands every other one spans of a string.
+    """
+    application = PACKAGE.parent.parent
+
+    def imports_pygments(path: Path) -> bool:
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Import):
+                if any(alias.name.split(".")[0] == "pygments" for alias in node.names):
+                    return True
+            if isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] == "pygments":
+                return True
+        return False
+
+    found = [
+        str(path.relative_to(application))
+        for path in sorted(application.rglob("*.py"))
+        if imports_pygments(path)
+    ]
+    assert found == ["ui/typeset/syntax.py"]
+
+
+@pytest.mark.parametrize("module", ["roles", "parts", "syntax"])
 def test_policy_and_parts_import_neither_the_library_nor_imgui(module: str) -> None:
     """
     What pptmstr decides before any library is asked is importable, and the same,
@@ -167,6 +191,26 @@ def test_policy_and_parts_import_neither_the_library_nor_imgui(module: str) -> N
     assert not {name for name in names if name.split(".")[0] in (LIBRARY, "imgui_bundle")}
     assert _imscribe_imports(PACKAGE / "gate.py"), "the search finds no import of the library"
     assert _imscribe_imports(PACKAGE / f"{module}.py") == []
+
+
+def test_syntax_brings_in_neither_the_library_nor_imgui_when_run() -> None:
+    """
+    The direct imports above are not the whole of it: a module of pptmstr's it
+    imports at run time can import ImGui for it. ``syntax`` is loaded from its
+    file, outside its package, so a relative import it ran would fail here.
+    """
+    script = (
+        "import importlib.util, sys\n"
+        f"spec = importlib.util.spec_from_file_location('syntax', {str(PACKAGE / 'syntax.py')!r})\n"
+        "module = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(module)\n"
+        "assert module.block_spans('python\\nx = 1', 6, 1, None, None) == ((0, 6, 1),)\n"
+        "print(sorted(name for name in sys.modules if name.split('.')[0] in "
+        f"({LIBRARY!r}, 'imgui_bundle', 'pptmstr')))\n"
+    )
+    ran = _run(script)
+    assert ran.returncode == 0, ran.stderr
+    assert ran.stdout.strip() == "[]"
 
 
 # -- without the library ---------------------------------------------------------

@@ -377,6 +377,58 @@ def build_palette(p: ui_theme.Palette) -> Any:
     return base.with_roles(roles_ink)
 
 
+@dataclass(frozen=True)
+class SyntaxInks:
+    """
+    The packed inks fenced code is coloured in by token (``syntax``), one per
+    class of token and ``default`` for the code between them.
+
+    Small on purpose: the classes every highlighter agrees on, and none a reader
+    has to learn per language.
+    """
+
+    keyword: int
+    string: int
+    comment: int
+    number: int
+    function: int
+    operator: int
+    default: int
+
+
+def build_syntax_inks(p: ui_theme.Palette) -> SyntaxInks:
+    """
+    The token inks of one pptmstr palette, each borrowed from one of its roles.
+
+    Borrowed rather than written out per theme so that every theme has them, and
+    a theme added later has them too, with no colour here that no contrast test
+    has seen: the agent-state roles are held to 3:1 on ``panel``, which a code
+    block is drawn on, and ``text`` to 4.5:1 (``tests/test_theme.py``).
+    ``accent`` is not one of them, because it already inks the fence's caption
+    above the code.
+
+    ``default`` is ``text`` and not the code role's own ink (``diff_context``):
+    on most palettes that ink is ``text_dim``'s colour, which is the comments'.
+    """
+    return SyntaxInks(
+        keyword=p.state_supervising.u32,
+        string=p.state_running.u32,
+        comment=p.text_dim.u32,
+        number=p.state_rate_limited.u32,
+        function=p.state_calling_tool.u32,
+        operator=p.text_strong.u32,
+        default=p.text.u32,
+    )
+
+
+def syntax_inks() -> SyntaxInks:
+    """
+    The token inks for the theme that is live right now. Not kept: it is seven
+    reads, asked only when a view is inked.
+    """
+    return build_syntax_inks(ui_theme.current())
+
+
 def palette(ink: Color | None = None) -> Any:
     """
     The palette for the theme that is live right now.
