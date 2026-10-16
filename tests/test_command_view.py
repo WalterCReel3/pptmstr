@@ -46,7 +46,7 @@ from pptmstr.command import (
     TimedOut,
     Withdrawn,
 )
-from pptmstr.ui import board_pane, command_view, detail, widgets
+from pptmstr.ui import board_pane, command_view, widgets
 from pptmstr.ui.command_view import (
     Actions,
     Among,
@@ -1270,6 +1270,8 @@ class Screen:
         fake.get_item_rect_max.return_value = real_imgui.ImVec2(0.0, 0.0)
         fake.set_clipboard_text.side_effect = self.clipboard.append
         monkeypatch.setattr(command_view, "imgui", fake)
+        monkeypatch.setattr(widgets, "small_button", fake.small_button)
+        monkeypatch.setattr(widgets, "small_button_line", fake.small_button_line)
         monkeypatch.setattr(board_pane, "imgui", fake)
         monkeypatch.setattr(board_pane, "author", through("author", REAL_AUTHOR))
         monkeypatch.setattr(command_view, "command_block", through("block", REAL_BLOCK))
@@ -2402,10 +2404,123 @@ def test_a_command_the_store_holds_as_its_file_had_it_reaches_no_text_call_undra
     # Where DETAIL draws a session's ended commands, and what its copy button takes.
     shown = Screen(monkeypatch)
     command_view.draw_ended(kept, role="builder", now=300.0)
-    copied = detail.command_text(kept, "builder", restored=True)
+    copied = command_view.command_text(kept, "builder", restored=True)
 
     said = [line.text for line in shown.said]
     assert not [text for text in said if bad in text]
     assert not [text for text in copied if bad in text]
     asked = commandtext.visible(kept.asked)
     assert any(asked in text for text in copied), "the command was copied, escaped"
+
+
+# -- a line ending in its question mark is a line of text --------------------------
+
+from tests import test_small_button as _buttons  # noqa: E402
+
+faced = _buttons.faced
+
+
+def test_the_warnings_first_line_is_set_where_a_line_of_text_would_be(faced: None) -> None:
+    """
+    The question mark is a link on the text's own baseline, so the line it ends
+    is not set down to a button's label: the warnings are as tall as two lines
+    of text, and the first starts where the cursor was.
+    """
+    lines = (command_view.Line("the first warning"), command_view.Line("the second"))
+
+    def draw() -> dict[str, float]:
+        top = real_imgui.get_cursor_screen_pos().y
+        real_imgui.text("a line")
+        real_imgui.text("a line")
+        plain = real_imgui.get_cursor_screen_pos().y - top
+        top = real_imgui.get_cursor_screen_pos().y
+        firsts: list[float] = []
+        real_line = command_view._line
+
+        def line(held: command_view.Line) -> None:
+            real_line(held)
+            firsts.append(real_imgui.get_item_rect_min().y)
+
+        command_view._line = line  # type: ignore[assignment]
+        try:
+            command_view._warnings(lines, "warned", ("why",))
+        finally:
+            command_view._line = real_line  # type: ignore[assignment]
+        return {
+            "set down": firsts[0] - top,
+            "taller": real_imgui.get_cursor_screen_pos().y - top - plain,
+        }
+
+    assert _buttons._lines(draw) == {"set down": 0.0, "taller": 0.0}
+
+
+# -- the panes' modules ---------------------------------------------------------------
+
+# The modules that draw one of the application's docks (``app._panels``).
+PANE_MODULES = (
+    "rail",
+    "inbox",
+    "transcript_pane",
+    "detail",
+    "board_pane",
+    "digest_pane",
+    "brief_pane",
+    "health",
+)
+
+# The imports from one pane's module of another's that are argued for: DETAIL acts
+# through the queue row's own functions in FOCUS (``inbox.approval_controls``,
+# ``editor``, ``draw_command``), and DIGEST's history draws the board's authors and
+# the queue's command rows. Anything shared by two panes otherwise lives in a module
+# that is no pane's, as a command's clipboard text lives in ``command_view``.
+PANE_IMPORTS = {
+    ("detail", "inbox"),
+    ("digest_pane", "board_pane"),
+    ("digest_pane", "inbox"),
+}
+
+
+def _ui_imports(name: str) -> set[str]:
+    """The ``pptmstr.ui`` modules ``name`` imports, at its top or inside a function."""
+    import ast
+    from pathlib import Path
+
+    import pptmstr.ui
+
+    path = Path(pptmstr.ui.__file__).parent / f"{name}.py"
+    found: set[str] = set()
+    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        if isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if node.level == 1 and not module or node.level == 0 and module == "pptmstr.ui":
+                found.update(alias.name for alias in node.names)
+            elif node.level == 1:
+                found.add(module.split(".")[0])
+            elif module.startswith("pptmstr.ui."):
+                found.add(module.split(".")[2])
+        elif isinstance(node, ast.Import):
+            found.update(
+                alias.name.split(".")[2]
+                for alias in node.names
+                if alias.name.startswith("pptmstr.ui.")
+            )
+    return found
+
+
+def test_detail_and_digest_import_neither_each_other() -> None:
+    assert "digest_pane" not in _ui_imports("detail")
+    assert "detail" not in _ui_imports("digest_pane")
+
+
+def test_a_pane_imports_another_panes_module_only_where_that_is_argued_for() -> None:
+    """
+    A ratchet: the edges between the panes' modules are the ones listed, so a new
+    one is a test to change and a reason to give, and one taken away is too.
+    """
+    edges = {
+        (pane, other)
+        for pane in PANE_MODULES
+        for other in _ui_imports(pane)
+        if other in PANE_MODULES and other != pane
+    }
+    assert edges == PANE_IMPORTS

@@ -926,8 +926,12 @@ def test_a_fork_starts_from_the_task_and_never_from_a_resumes_message() -> None:
     ``message`` is one line of the conversation a resume continues. A fork or a
     retry begins a new conversation, and a spec built from a record has no
     message to carry whatever the session was last sent.
+
+    Nor a worktree to make: a record's ``cwd`` is the worktree its launch made,
+    and a spec that asked for one again would meet that worktree already there.
     """
     assert LaunchSpec(task="t", model="m").message is None
+    worktree = "/home/op/.pptmstr/worktrees/repo/audit-the-parser"
     record = AgentRecord(
         node_id=("s1", None),
         parent=None,
@@ -936,14 +940,18 @@ def test_a_fork_starts_from_the_task_and_never_from_a_resumes_message() -> None:
         topic="",
         task="audit the parser",
         model="claude-sonnet-5",
+        cwd=worktree,
     )
-    assert LaunchSpec.from_record(record).message is None
+    spec = LaunchSpec.from_record(record)
+    assert spec.message is None
+    assert spec.worktree is None and spec.cwd == worktree
     carried = {f.name for f in dataclasses.fields(LaunchSpec)} - {
         "containment",
         "policy",
         "subagent_cap",
         "resume",
         "message",
+        "worktree",
     }
     assert carried == {
         "task",

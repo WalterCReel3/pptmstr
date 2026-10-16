@@ -28,6 +28,7 @@ import random
 import tempfile
 import time
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from . import brief
@@ -63,7 +64,7 @@ from .model import (
     Standing,
     Task,
 )
-from .transcript import SegmentKind, Transcript
+from .transcript import SegmentKind, Transcript, tool_call_line, tool_result_line
 
 _MODELS = ("claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001")
 _TOPICS = (
@@ -445,7 +446,7 @@ def verify(line: str) -> None:
 ```diff
 --- a/tle/checksum.py
 +++ b/tle/checksum.py
-@@ -12,5 +12,6 @@ def checksum(line: str) -> int:
+@@ -12,2 +12,3 @@ def checksum(line: str) -> int:
      digits = [c for c in line if c.isdigit()]
 -    return sum(int(c) for c in digits) % 10
 +    minus = line.count("-")
@@ -497,20 +498,47 @@ should that stay with its caller?
 """
 )
 
-_REPORT_SCRIPT: tuple[tuple[SegmentKind, str], ...] = (
+
+@dataclass(frozen=True)
+class _Call:
+    """A tool call in a fixture script, written as an entry the way the driver does."""
+
+    tool_use_id: str
+    name: str
+    args: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class _Result:
+    """A tool result in a fixture script."""
+
+    tool_use_id: str
+    name: str
+    output: str
+    is_error: bool = False
+
+
+_ReportStep = tuple[SegmentKind, str] | _Call | _Result
+
+# The report as the stream delivers it. Tool calls and results are entries, so a
+# probe or screenshot has a structured call to draw from; their lines are derived
+# from them by the same functions the driver uses.
+_REPORT_STEPS: tuple[_ReportStep, ...] = (
     (SegmentKind.REASONING, "The offsets are fine. The checksum is where this goes wrong.\n"),
-    (SegmentKind.TOOL_CALL, "\nRead(file_path=tle/parse.py)\n"),
-    (
-        SegmentKind.TOOL_RESULT,
-        'Read -> {"lines": 212, "symbols": ["__init__", "parse_line_1", "parse_line_2", '
+    _Call("report-read", "Read", {"file_path": "tle/parse.py"}),
+    _Result(
+        "report-read",
+        "Read",
+        '{"lines": 212, "symbols": ["__init__", "parse_line_1", "parse_line_2", '
         '"_field"], "globs": ["tle/*_offsets.py", "tests/**/test_*.py"], "imports": '
         '["dataclasses", "datetime", "tle.offsets._FIELD_OFFSETS"], "first_line": '
-        '"1 25544U 98067A   08264.51782528 -.00002182  00000-0 -11606-4 0  2927"}\n',
+        '"1 25544U 98067A   08264.51782528 -.00002182  00000-0 -11606-4 0  2927"}',
     ),
-    (SegmentKind.TOOL_CALL, "\nBash(command=tree tle tests)\n"),
-    (
-        SegmentKind.TOOL_RESULT,
-        "Bash -> tle\n"
+    _Call("report-tree", "Bash", {"command": "tree tle tests"}),
+    _Result(
+        "report-tree",
+        "Bash",
+        "tle\n"
         "\u251c\u2500\u2500 __init__.py\n"
         "\u251c\u2500\u2500 offsets.py\n"
         "\u2514\u2500\u2500 parse.py\n"
@@ -518,23 +546,55 @@ _REPORT_SCRIPT: tuple[tuple[SegmentKind, str], ...] = (
         "\u251c\u2500\u2500 data\n"
         "\u2502   \u2514\u2500\u2500 catalog.html\n"
         "\u251c\u2500\u2500 helpers.py\n"
-        "\u2514\u2500\u2500 test_parse.py\n",
+        "\u2514\u2500\u2500 test_parse.py",
     ),
-    (SegmentKind.TOOL_CALL, "\nBash(command=pytest -q tests/test_parse.py)\n"),
-    (
-        SegmentKind.ERROR,
-        "Bash -> exit 1\n"
+    _Call("report-pytest", "Bash", {"command": "pytest -q tests/test_parse.py"}),
+    _Result(
+        "report-pytest",
+        "Bash",
+        "exit 1\n"
         "FAILED tests/test_parse.py::test_checksum_counts_minus - AssertionError: 4 != 5\n"
-        "1 failed, 37 passed in 0.41s\n",
+        "1 failed, 37 passed in 0.41s",
+        is_error=True,
     ),
     (SegmentKind.OUTPUT, _REPORT_OPENING),
-    (SegmentKind.TOOL_CALL, "\nGrep(pattern=foo_bar_baz, path=tle)\n"),
-    (
-        SegmentKind.TOOL_RESULT,
-        "Grep -> tests/helpers.py:41: foo_bar_baz = Field.__new__(Field)  # *not* validated\n",
+    _Call("report-grep", "Grep", {"pattern": "foo_bar_baz", "path": "tle"}),
+    _Result(
+        "report-grep",
+        "Grep",
+        "tests/helpers.py:41: foo_bar_baz = Field.__new__(Field)  # *not* validated",
     ),
     (SegmentKind.OUTPUT, _REPORT_BODY),
 )
+
+
+def _step_text(step: _ReportStep) -> tuple[SegmentKind, str]:
+    """The segment a step appends, as ``Transcript`` writes it."""
+    match step:
+        case _Call(name=name, args=args):
+            return SegmentKind.TOOL_CALL, tool_call_line(name, args)
+        case _Result(name=name, output=output, is_error=is_error):
+            kind = SegmentKind.ERROR if is_error else SegmentKind.TOOL_RESULT
+            return kind, tool_result_line(name, output)
+        case (kind, text):
+            return kind, text
+    raise AssertionError(step)
+
+
+def _write_step(transcript: Transcript, step: _ReportStep) -> None:
+    """Append a step whole: a tool step as an entry, anything else as text."""
+    match step:
+        case _Call(tool_use_id=tool_use_id, name=name, args=args):
+            transcript.append_tool_call(tool_use_id, name, args)
+        case _Result(tool_use_id=tool_use_id, name=name, output=output, is_error=is_error):
+            transcript.append_tool_result(tool_use_id, name, output, is_error=is_error)
+        case (kind, text):
+            transcript.append(kind, text)
+
+
+# The same report as (kind, text) pairs, for the panes' tests and benchmarks that
+# read it as text.
+_REPORT_SCRIPT: tuple[tuple[SegmentKind, str], ...] = tuple(_step_text(s) for s in _REPORT_STEPS)
 
 # The kinds that arrive a few characters at a time. Tool calls, results and errors
 # reach the real transcript whole, from one message block each.
@@ -788,8 +848,8 @@ class FakeDriver:
         # The report, whole, on a session whose turn has ended with it -- so it is
         # in the context log as a settled document and in DETAIL as what the agent
         # said. The same script streams onto ``second`` from ``_stream_step``.
-        for kind, text in _REPORT_SCRIPT:
-            self.transcripts[root].append(kind, text)
+        for step in _REPORT_STEPS:
+            _write_step(self.transcripts[root], step)
         self.bridge.emit(StateChanged(root, AgentState.AWAITING_INPUT, topic=AWAITING_TOPIC))
         self.bridge.emit(
             StateChanged(second, AgentState.THINKING, topic="writing the audit report")
@@ -855,9 +915,7 @@ class FakeDriver:
         outside the working tree: an entry in the tree would dirty it on every
         launch (``brief.session_dir``).
         """
-        directory = brief.session_dir(
-            pathlib.Path(tempfile.mkdtemp(prefix="pptmstr-fake-")), "/x/orbital", "sess-fake"
-        )
+        directory = pathlib.Path(tempfile.mkdtemp(prefix="pptmstr-fake-")) / "sess-fake"
         # The seed a real launch writes: the operator's launch text, verbatim.
         brief.write_entry(
             directory,
@@ -1281,21 +1339,25 @@ class FakeDriver:
             if not self._stream_rest:
                 transcript.append(SegmentKind.SYSTEM, "\n> write it out again\n")
             return
-        kind, text = _REPORT_SCRIPT[self._stream_segment]
+        step = _REPORT_STEPS[self._stream_segment]
+        kind, text = _step_text(step)
         if kind in _STREAMED_KINDS:
             size = next(self._stream_chunks)
             piece = text[self._stream_offset : self._stream_offset + size]
             self._stream_offset += size
+            transcript.append(kind, piece)
         else:
-            piece = text
             self._stream_offset = len(text)
-        transcript.append(kind, piece)
+            _write_step(transcript, step)
         if self._stream_offset >= len(text):
             self._stream_offset = 0
             self._stream_segment += 1
-            if self._stream_segment == len(_REPORT_SCRIPT):
+            if self._stream_segment == len(_REPORT_STEPS):
                 self._stream_segment = 0
                 self._stream_rest = _STREAM_REST
+                # The report's turn ends with it, as the real driver's ends at its
+                # result, and the next prompt opens the next one.
+                transcript.end_turn()
 
     def _tick(self) -> None:
         """

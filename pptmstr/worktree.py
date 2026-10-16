@@ -6,7 +6,9 @@ listing them.
 its "Git traps to design for" table is why the shapes below are what they are. That
 pptmstr runs git itself, rather than handing the CLI ``--worktree``, is the lead's
 proposal there (R3) and the operator has not ratified it; the placement is the
-operator's decision D4. No surface calls this module.
+operator's decision D4. The launcher is the one caller: ``ui/launcher`` reads a
+checkout on a worker, and ``app._launch`` makes the worktree off the draw thread and
+the asyncio loop (``planning/2026-10-15-ui-rework.md`` W1-W7).
 
 **Constraints on whoever does call it.** These functions run git unsandboxed, as the
 operator, in the directory they are given, and git runs other programs.
@@ -60,10 +62,11 @@ So running any of this in a directory an autonomous session has written is runni
 the operator's git on that session's terms.
 
 **Blocking, and split the way ``tree.py`` and ``cli_version.py`` split.** The
-subprocess sits behind four names -- ``detect``, ``list_worktrees``, ``preflight`` and
-``create`` -- and none of them may be called from the reducer, a draw call or the
-asyncio loop. What is decided from git's answer is pure and takes text:
-``classify_checkout``, ``parse_worktree_list``, ``place``, ``collision``.
+subprocess sits behind six names -- ``detect``, ``list_worktrees``, ``uncommitted``,
+``head_commit``, ``preflight`` and ``create`` -- and none of them may be called from the
+reducer, a draw call or the asyncio loop. What is decided from git's answer is pure and
+takes text: ``classify_checkout``, ``parse_worktree_list``, ``place``, ``placed_under``,
+``collision``.
 
 **Nothing here raises, and every answer says which thing happened.** An argument no
 process can be started with -- a NUL, a lone surrogate -- is a child that could not be
@@ -171,12 +174,15 @@ __all__ = [
     "collision",
     "create",
     "detect",
+    "head_commit",
     "list_worktrees",
     "parse_worktree_list",
     "place",
+    "placed_under",
     "preflight",
     "sanitised",
     "slug_for",
+    "uncommitted",
 ]
 
 
@@ -373,7 +379,7 @@ class Unclassified:
     git would not take as a repository, and a linked worktree whose main repository
     is one of those. A caller that needs "main" or
     "linked" to place a worktree has neither here, and that is the point -- none of
-    these has a main checkout to put a sibling beside.
+    these has a main checkout to name a worktree after.
     """
 
     reason: str
@@ -759,6 +765,96 @@ def list_worktrees(
     return parse_worktree_list(ran.stdout)
 
 
+def uncommitted(directory: str, *, timeout: float = _QUERY_TIMEOUT) -> bool | GitFailed:
+    """
+    Whether the working tree ``directory`` is in has anything ``git status`` lists:
+    a change staged or not, or an untracked file that is not ignored. None of those
+    is in a worktree made from its ``HEAD``. **Blocking.**
+
+    ``--no-optional-locks`` because a plain ``status`` refreshes the index and writes
+    it back, and this is a question about the operator's checkout, not a change to it.
+
+    **Unlike** ``rev-parse`` **and** ``worktree list``, ``status`` **runs programs the
+    repository's** ``config`` **names**, and no kind of checkout makes that config
+    trusted: a linked worktree's ``.git`` can name a repository a session built (the
+    module docstring, "Which config is read"), and a main checkout can be a repository
+    a session ``git init``-ed. Measured on git 2.39.5, and pinned by
+    ``tests/test_worktree.py``: ``core.fsmonitor`` runs, which ``-c
+    core.fsmonitor=false`` stops; the ``clean`` filter of a stat-dirty file runs, in a
+    linked worktree aimed at a decoy and in a plain main checkout alike, and no switch
+    stops it -- a filter's name is the repository's choice. Nor does any question
+    short of ``status`` avoid it: ``diff-files`` hashes, and so filters, an entry the
+    index records as racily clean, which takes nothing but the index file's mtime;
+    ``ls-files --modified`` filters a stat-dirty one. ``diff-index --cached`` and
+    ``ls-files --others`` run no filter and do not answer for modified files.
+
+    ``--ignore-submodules=dirty`` because ``status`` otherwise runs ``status`` in
+    every populated submodule, under that submodule's own ``config`` -- measured: its
+    ``clean`` filter runs, and with the switch git starts no child process at all
+    (both pinned). ``dirty`` and not ``all``: a submodule's own changes go unread, and
+    a staged or moved gitlink is still listed (measured; ``all`` hides that too).
+    ``create`` does not recurse into submodules, so with the switch this reads no
+    ``config`` file that ``create`` from the same directory would not. Not the same
+    programs, though: this runs the ``clean`` filters the working tree's own
+    ``.gitattributes`` choose, an untracked one included, where ``create`` runs the
+    ``smudge`` filters the base commit's choose.
+
+    **So this is asked only once the operator has pressed launch**, with the trust
+    ``create`` already needs of ``directory`` (``ui/launcher``'s ``make_worktree``),
+    and never to describe a checkout before then.
+    """
+    ran = _git(
+        directory,
+        "-c",
+        "core.fsmonitor=false",
+        "--no-optional-locks",
+        "status",
+        "--porcelain",
+        "-z",
+        "--ignore-submodules=dirty",
+        timeout=timeout,
+    )
+    if ran.returncode != 0:
+        return GitFailed("status", ran.returncode, _words(ran))
+    return bool(ran.stdout)
+
+
+def head_commit(
+    directory: str, *, timeout: float = _QUERY_TIMEOUT
+) -> str | BaseNotACommit | GitFailed:
+    """
+    The object id the ``HEAD`` of the working tree ``directory`` is in names, or
+    ``BaseNotACommit`` when it names none -- a repository with no commits. **Blocking.**
+
+    The same question ``preflight`` asks of a base, so a commit read here is one
+    ``create`` takes as its base unchanged.
+    """
+    return _resolve_commit(directory, "HEAD", timeout=timeout)
+
+
+def _resolve_commit(
+    run_in: str, base: str, *, timeout: float = _QUERY_TIMEOUT
+) -> str | BaseNotACommit | GitFailed:
+    """``preflight``'s step 4: ``base`` as one commit's object id. **Blocking.**"""
+    resolved = _git(
+        run_in,
+        "rev-parse",
+        "--verify",
+        "--quiet",
+        "--end-of-options",
+        f"{base}^{{commit}}",
+        timeout=timeout,
+    )
+    if resolved.returncode == 1:
+        return BaseNotACommit(base)
+    if resolved.returncode != 0:
+        return GitFailed("rev-parse", resolved.returncode, _words(resolved))
+    commit = resolved.stdout.strip()
+    if not _OBJECT_ID.fullmatch(commit):
+        return BaseNotACommit(base)
+    return commit
+
+
 # ---------------------------------------------------------------------------
 # Placement
 # ---------------------------------------------------------------------------
@@ -812,22 +908,12 @@ class Placement:
     git call for this placement runs. Refs are shared by every worktree of a
     repository and ``HEAD`` is not, so a base of ``HEAD`` means the launching
     checkout's -- the same reading ``scripts/worktree.py`` gives it.
-
-    ``unsanitary`` **is a warning the caller has to show.** It lists the components of
-    ``path`` holding a character outside ``[A-Za-z0-9-]``. They come from where the
-    main checkout lives -- the slug never has one -- so no branch name avoids them.
-    D4 asks for a path with none; ``brief.session_dir`` turns only the separator into
-    ``-`` and the CLI turns every such character into one, so a session in such a path
-    keeps its briefs in a different directory from its transcripts. The worktree is
-    placed all the same, as ``scripts/worktree.py`` does, because the alternative is
-    that a repository under ``~/src/my.project`` can have none.
     """
 
     run_in: str
     main_root: str
     branch: str
     path: str
-    unsanitary: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -843,34 +929,47 @@ class NothingToName:
 Placed = Placement | NothingToName
 
 
-def place(checkout: MainCheckout | LinkedWorktree, branch: str) -> Placed:
+def place(
+    checkout: MainCheckout | LinkedWorktree, branch: str, *, home: str | None = None
+) -> Placed:
     """
-    The directory a worktree for ``branch`` goes in. Pure: no filesystem, no git.
+    The directory a worktree for ``branch`` goes in. No filesystem, no git; ``home``
+    is the user's, from the environment, when it is not given.
 
-    ``<parent of the main checkout>/<its name>-worktrees/<slug>`` -- a sibling of the
-    repository and never inside it (D4), from whichever of its worktrees the request
-    came. The answer is final as text before anything exists on disk, which is what
-    lets a launch resolve its cwd from it ahead of the directory being made.
+    ``<home>/.pptmstr/worktrees/<repository's directory name>/<slug>`` -- outside
+    every repository, under one home for all of them (D4), from whichever of its
+    worktrees the request came. The answer is final as text before anything exists
+    on disk, which is what lets a launch resolve its cwd from it ahead of the
+    directory being made.
 
     "The repository" is whatever ``checkout`` says it is. For a ``LinkedWorktree``
     that is ``main_root``, a claim made by the directory that was asked about and
-    not a defence: the sibling is a sibling of the repository the worktree's
-    ``.git`` file names, and ``Placement.main_root`` carries the same claim on.
-    Nothing here can tell that repository from the one the operator means.
+    not a defence: the name is the name of the repository the worktree's ``.git``
+    file names, and ``Placement.main_root`` carries the same claim on. Nothing here
+    can tell that repository from the one the operator means.
 
-    Whether the directory is free is not asked here; that needs the disk and the
-    worktree list, and is ``preflight``'s.
+    Two repositories with one directory name share ``<repository>``, so a branch of
+    each with one slug is one path. Whether the directory is free is not asked here;
+    that needs the disk and the worktree list, and is ``preflight``'s, which refuses
+    a path that exists.
     """
     slug = slug_for(branch)
     if not slug:
         return NothingToName(branch)
     main_root = checkout.root if isinstance(checkout, MainCheckout) else checkout.main_root
-    parent = os.path.dirname(main_root)
-    path = os.path.join(parent, f"{os.path.basename(main_root)}-worktrees", slug)
-    odd = tuple(part for part in path.split(os.sep) if _NOT_SLUG.search(part))
-    return Placement(
-        run_in=checkout.root, main_root=main_root, branch=branch, path=path, unsanitary=odd
-    )
+    path = os.path.join(placed_under(checkout, home=home), slug)
+    return Placement(run_in=checkout.root, main_root=main_root, branch=branch, path=path)
+
+
+def placed_under(checkout: MainCheckout | LinkedWorktree, *, home: str | None = None) -> str:
+    """
+    The directory every worktree ``place`` places for ``checkout`` is in, whatever
+    the branch: ``<home>/.pptmstr/worktrees/<repository's directory name>``. No
+    filesystem, no git.
+    """
+    main_root = checkout.root if isinstance(checkout, MainCheckout) else checkout.main_root
+    base = os.path.expanduser("~") if home is None else home
+    return os.path.join(base, ".pptmstr", "worktrees", os.path.basename(main_root))
 
 
 @dataclass(frozen=True, slots=True)
@@ -1111,16 +1210,9 @@ def preflight(placement: Placement, base: str) -> Cleared | Refusal | GitFailed:
     if symbolic.returncode != 1:
         return GitFailed("symbolic-ref", symbolic.returncode, _words(symbolic))
 
-    resolved = _git(
-        run_in, "rev-parse", "--verify", "--quiet", "--end-of-options", f"{base}^{{commit}}"
-    )
-    if resolved.returncode == 1:
-        return BaseNotACommit(base)
-    if resolved.returncode != 0:
-        return GitFailed("rev-parse", resolved.returncode, _words(resolved))
-    commit = resolved.stdout.strip()
-    if not _OBJECT_ID.fullmatch(commit):
-        return BaseNotACommit(base)
+    commit = _resolve_commit(run_in, base)
+    if not isinstance(commit, str):
+        return commit
 
     if os.path.lexists(os.path.join(run_in, placement.path)):
         return PathExists(placement.path)

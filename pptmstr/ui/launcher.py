@@ -26,7 +26,7 @@ import queue
 import string
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
@@ -37,11 +37,12 @@ from imgui_bundle import imgui
 from .. import brief as brief_mod
 from .. import cli_version, drawable, sandbox, sessionfile, templates, tree
 from .. import sessions as sessions_mod
+from .. import worktree as worktree_mod
 from ..approval import Disposition, Policy, classify, requires_containment
-from ..model import LaunchSpec
+from ..model import LaunchSpec, NewWorktree
 from ..model_catalog import DEFAULT_MODEL, FALLBACK_MODELS
 from ..sessions import Overlay, SessionRow
-from ..theme import P
+from ..theme import P, hint_colour
 from . import widgets
 from .widgets import Help, Notice, Tone
 
@@ -377,7 +378,7 @@ class SessionPicker:
     picked: SessionRow | None = None
     # The brief directory the picked session wrote its premises into, if it exists.
     #
-    # Recoverable, and not a guess: `brief.session_dir` is a function of cwd and
+    # Recoverable, and not a guess: `brief.session_dir` is a function of the
     # session id, and resume continues under the same id. It is the one thing about
     # the original session that does come back -- `task`, `model` and `template` do
     # not, because there is no `AgentRecord` on the far side of the CLI.
@@ -548,24 +549,22 @@ class SessionPicker:
         line naming a directory the operator did not choose.
 
         ``cwd`` is the cwd field, and it is only the answer for a row that recorded no
-        directory. The brief directory is derived from ``launch_directory`` -- the
-        directory the resumed session will run in -- and ``app._seed_brief`` builds it
-        from ``LaunchSpec.cwd``, which ``LauncherState.resumed`` and
-        ``resume_form.press`` take from the same call, so the two agree by
-        construction instead of by coincidence.
+        directory. A brief written under the legacy layout is found from
+        ``launch_directory`` -- the directory the resumed session will run in -- and
+        ``app._seed_brief`` looks from ``LaunchSpec.cwd``, which
+        ``LauncherState.resumed`` and ``resume_form.press`` take from the same call,
+        so the two agree by construction instead of by coincidence.
         """
         self.picked = None if row is None or self.is_picked(row) else row
         self.recovered_brief = None
         if self.picked is None:
             return
-        directory = brief_mod.session_dir(
-            brief_mod.default_root(),
-            launch_directory(self.picked, cwd or ".").path,
-            self.picked.session_id,
+        # Two stats at most, at the click. Offering a path to a directory that does
+        # not exist would be the same lie as pre-filling the task.
+        directory = brief_mod.existing_dir(
+            self.picked.session_id, launch_directory(self.picked, cwd or ".").path
         )
-        # One stat, at the click. Offering a path to a directory that does not exist
-        # would be the same lie as pre-filling the task.
-        if directory.is_dir():
+        if directory is not None:
             self.recovered_brief = str(directory)
 
     @property
@@ -1308,6 +1307,12 @@ RESUME_HOLD_CLI = "this CLI cannot contain the session -- choose another gate to
 # New Task's own, for a picked session. The form's sentence for the same directory
 # has no list to send the operator back to.
 _HOLD_GONE = "the picked session's directory is gone -- pick another, or launch fresh"
+# A branch is typed under the cwd field (``plan_worktree``).
+_HOLD_READING = "reading the working directory's checkout to place the worktree"
+_HOLD_NOT_A_REPO = (
+    "the working directory is not in a git repository, so no worktree can be made from "
+    "it -- clear the branch to launch there"
+)
 
 # What is drawn beside a held button: one line for each reason above, which is
 # then the explanation behind that line's question mark. Keyed by the reason and
@@ -1319,6 +1324,8 @@ HOLD_LINES: dict[str, str] = {
     _HOLD_THIN: "held: the task is one line",
     RESUME_HOLD_CLI: "held: this CLI cannot contain it",
     _HOLD_GONE: "held: its directory is gone",
+    _HOLD_READING: "held: reading the checkout",
+    _HOLD_NOT_A_REPO: "held: not a git repository",
     **{
         RESUME_HOLD_REFUSED.format(rung=rung.value): f"held: {rung.value} is refused here"
         for rung in Policy
@@ -1454,6 +1461,681 @@ def _cap_line(subagent_cap: int | None) -> str:
     return f"sub-agents are capped at {subagent_cap} -- {_CAP_REASON}."
 
 
+# ---------------------------------------------------------------------------
+# A new session in a linked worktree
+# ---------------------------------------------------------------------------
+#
+# ``planning/2026-10-15-ui-rework.md`` W1-W7, on the 2026-10-07 worktree record's D3
+# and D4. A branch typed under the cwd field asks for the session to run in a new
+# worktree of the checkout the field names, at ``worktree.place``'s path, on that
+# branch, from that checkout's ``HEAD``. Empty, nothing below is consulted and the
+# launch is the one it was before the field existed.
+#
+# Every git call is off the draw thread: the checkout is read on a worker
+# (``CheckoutReading``, the arrangement ``VersionGate`` and ``SessionPicker`` use) and
+# the worktree is made in ``app._launch``'s ``go`` (``make_worktree``). What is decided
+# from git's answers -- the hold, the path, the words for a refusal -- is pure.
+
+# What a worktree is based on (W1): the HEAD of the checkout the field names, as
+# the object id it named when the checkout was read. No fetch and no field for it.
+
+# How many hex digits of an object id the modal shows.
+_SHORT_OID = 12
+
+
+@dataclass(frozen=True, slots=True)
+class CheckoutRead:
+    """
+    What the directory a branch-filled draft names was to git, read on a worker.
+
+    ``directory`` is the cwd field as the read was asked for it, unresolved, so the
+    draw can tell whether this answers the field it is showing by a comparison
+    rather than a stat. Whether the checkout has uncommitted changes is not here:
+    it is asked after the press (``make_worktree``), and ``read_checkout`` says why.
+
+    For a checkout a worktree can be made from, the rest is everything
+    ``plan_worktree`` needs so that the draw touches no disk: ``head``, the commit
+    its ``HEAD`` named; ``entries``, the worktrees git had registered;
+    ``placed_in``, ``worktree.placed_under`` resolved, so a placed path is the
+    spelling git lists; ``shared``, the main repository's ``.git`` resolved; and
+    ``below``, the part of ``directory`` under the checkout's root when the field
+    names a subdirectory.
+    """
+
+    directory: str
+    checkout: worktree_mod.Checkout
+    head: str | worktree_mod.BaseNotACommit | worktree_mod.GitFailed | None = None
+    entries: tuple[worktree_mod.WorktreeEntry, ...] | worktree_mod.GitFailed = ()
+    placed_in: str | None = None
+    shared: str | None = None
+    below: str | None = None
+
+
+CheckoutReader = Callable[[str], CheckoutRead]
+
+
+def read_checkout(directory: str) -> CheckoutRead:
+    """
+    ``worktree.detect`` of ``directory`` and, for a checkout a worktree can be made
+    from, its ``HEAD`` as a commit and the worktrees git has registered.
+    **Blocking**; for a worker only.
+
+    **No** ``status``. This is asked as soon as a branch is typed, before any press,
+    of a directory that may be a session's: a linked worktree whose ``.git`` names a
+    repository the session built, or a repository it ``git init``-ed, which is a main
+    checkout like any other. ``status`` runs that repository's ``clean`` filters,
+    and no narrower question that sees a modified file avoids them (measured,
+    ``worktree.uncommitted``). ``rev-parse`` and ``worktree list`` were not seen to
+    run anything.
+    """
+    checkout = worktree_mod.detect(directory)
+    if not isinstance(checkout, worktree_mod.MainCheckout | worktree_mod.LinkedWorktree):
+        return CheckoutRead(directory, checkout)
+    main_root = (
+        checkout.root if isinstance(checkout, worktree_mod.MainCheckout) else checkout.main_root
+    )
+    here = os.path.realpath(directory)
+    return CheckoutRead(
+        directory,
+        checkout,
+        head=worktree_mod.head_commit(checkout.root),
+        entries=worktree_mod.list_worktrees(checkout.root),
+        placed_in=os.path.realpath(worktree_mod.placed_under(checkout)),
+        shared=os.path.realpath(os.path.join(main_root, ".git")),
+        below=None if here == checkout.root else os.path.relpath(here, checkout.root),
+    )
+
+
+@dataclass
+class CheckoutReading:
+    """
+    The last ``CheckoutRead`` of the cwd field, and the one in flight.
+
+    ``VersionGate``'s arrangement: a worker that touches only the queue, and a
+    ``poll`` from the draw that is the only writer of the fields. At most one read
+    is in flight. A field edited while one is out is read again once it lands, so
+    a burst of keystrokes costs two reads and not one per key.
+
+    ``forget`` drops the answer and whatever is in flight, as ``begin_open`` drops
+    the git layout: a worktree made or a commit taken since the last open changes
+    the answer and not the field. A read that lands after it was forgotten is
+    discarded by its generation.
+    """
+
+    read: CheckoutRead | None = None
+    asked: str | None = None
+    _generation: int = 0
+    _inbox: queue.SimpleQueue[tuple[int, CheckoutRead]] = field(
+        default_factory=queue.SimpleQueue, repr=False
+    )
+
+    def want(self, directory: str, *, reader: CheckoutReader) -> threading.Thread | None:
+        """
+        Ask for ``directory`` to be read, unless it is already answered or a read
+        is in flight. Returns the worker so a test can join it; the draw must not.
+        """
+        if self.asked is not None or (self.read is not None and self.read.directory == directory):
+            return None
+        self.asked = directory
+        generation, inbox = self._generation, self._inbox
+
+        def work() -> None:
+            try:
+                answer = reader(directory)
+            except Exception as exc:  # noqa: BLE001 - surfaced as an answer, not swallowed
+                # ``detect`` does not raise. Caught at the thread boundary anyway: an
+                # exception escaping here would leave ``asked`` set for good, which
+                # is a launch held on "reading" with nothing ever arriving.
+                answer = CheckoutRead(
+                    directory, worktree_mod.Unclassified(f"{type(exc).__name__}: {exc}")
+                )
+            inbox.put((generation, answer))
+
+        worker = threading.Thread(target=work, name="pptmstr-checkout-read", daemon=True)
+        worker.start()
+        return worker
+
+    def poll(self) -> None:
+        """Take a read that has landed. A failed queue read otherwise."""
+        while True:
+            try:
+                generation, answer = self._inbox.get_nowait()
+            except queue.Empty:
+                return
+            if generation != self._generation:
+                continue
+            self.asked = None
+            self.read = answer
+
+    def forget(self) -> None:
+        self._generation += 1
+        self.read = None
+        self.asked = None
+
+    def answer_for(self, directory: str) -> CheckoutRead | None:
+        """The read of ``directory``, or None when the last one was of another."""
+        read = self.read
+        return read if read is not None and read.directory == directory else None
+
+
+@dataclass(frozen=True, slots=True)
+class WorktreeHeld:
+    """A branch is typed and no worktree can be planned yet, and why."""
+
+    reason: str
+
+
+# Beside the button when a reason ``plan_worktree`` gives has no line of its own
+# in ``HOLD_LINES``: those name the directory or git's words, and are behind the
+# question mark whole.
+_HOLD_LINE_WORKTREE = "held: no worktree from this directory"
+
+
+def plan_worktree(
+    read: CheckoutRead | None, branch: str, unfinished: Mapping[str, str] | None = None
+) -> NewWorktree | WorktreeHeld:
+    """
+    The worktree a draft with ``branch`` typed launches into, given the read of its
+    directory, or why the launch is held. Pure: everything on disk it answers from
+    was read on the worker (``read_checkout``), and what this process left
+    unfinished is handed in (``UnfinishedWorktrees.snapshot``).
+
+    **The path is final here**, before anything is on disk, because the spec's
+    ``cwd`` and ``session_base`` are resolved from it on the draw thread and three
+    things read the cwd before a session process exists (the 2026-10-07 record,
+    "Invoke"). It is ``worktree.place``'s slug under the resolved
+    ``worktree.placed_under``, so it is the spelling git lists the worktree under.
+
+    **Nothing already there is continued in** (W3, as the lead revised it on
+    wt-fix-2). A worktree git has registered at the path, or one with the branch
+    checked out, holds the launch. Where nothing marks it unfinished, the line says
+    that it may be incomplete and how to start a session there instead -- set the
+    directory to it and leave the branch empty, which is the launch the modal made before the branch
+    field existed -- and otherwise it names the state (``_already_there``). git does not record
+    whether the add that made a worktree finished -- one stopped at its limit in
+    ``post-checkout`` is registered, unlocked and on its branch while the hook still
+    writes (measured, ``tests/test_launch_worktree.py``) -- so no reading of the
+    listing can tell a finished tree from a partial one, and a launch with a branch
+    typed only ever starts in a tree it has just made.
+
+    A linked worktree is a checkout like any other here (W7): the branch is made
+    from its ``HEAD`` and placed under the main repository's name. That name is
+    ``LinkedWorktree.main_root``, which the directory claims for itself; the
+    operator typed the directory, which is the ground for taking it.
+    """
+    if read is None:
+        return WorktreeHeld(_HOLD_READING)
+    checkout = read.checkout
+    match checkout:
+        case worktree_mod.NotARepository():
+            return WorktreeHeld(_HOLD_NOT_A_REPO)
+        case worktree_mod.Unclassified(reason=reason):
+            return WorktreeHeld(f"no worktree can be made from this directory: {reason}")
+        case worktree_mod.MainCheckout() | worktree_mod.LinkedWorktree():
+            placed = worktree_mod.place(checkout, branch)
+        case _:
+            assert_never(checkout)
+    if isinstance(placed, worktree_mod.NothingToName):
+        return WorktreeHeld(
+            f"the branch {branch!r} has no letter or digit to name a directory after"
+        )
+    head, entries = read.head, read.entries
+    if isinstance(head, worktree_mod.BaseNotACommit):
+        return WorktreeHeld(
+            "the checkout's HEAD is not a commit -- a repository with no commits reads this way"
+        )
+    if isinstance(head, worktree_mod.GitFailed):
+        return WorktreeHeld(f"the checkout's HEAD could not be read: {head.detail}")
+    if isinstance(entries, worktree_mod.GitFailed):
+        return WorktreeHeld(f"the worktrees git has registered could not be read: {entries.detail}")
+    if head is None or read.placed_in is None:
+        return WorktreeHeld(_HOLD_READING)
+    path = os.path.join(read.placed_in, os.path.basename(placed.path))
+    there = _registered(entries, path, placed.branch)
+    if there is not None:
+        return WorktreeHeld(_already_there(there, unfinished or {}))
+    return NewWorktree(
+        run_in=placed.run_in,
+        main_root=placed.main_root,
+        branch=placed.branch,
+        path=path,
+        base=head,
+    )
+
+
+def _registered(
+    entries: tuple[worktree_mod.WorktreeEntry, ...], path: str, branch: str
+) -> worktree_mod.WorktreeEntry | None:
+    """The worktree git has at ``path``, else the one with ``branch`` checked out."""
+    ref = f"refs/heads/{branch}"
+    at_path = next((entry for entry in entries if entry.path == path), None)
+    return at_path or next((entry for entry in entries if entry.branch == ref), None)
+
+
+def _continue_there(path: str) -> str:
+    """
+    The offer of a listed tree to start a session in, worded for a tree nobody here
+    can vouch for: git does not record whether the add that made it finished, and
+    this process remembers only its own adds, and only until it exits.
+
+    **It names no command to run in the tree.** A session that could write the tree
+    can aim its ``.git`` at a repository it built (``worktree``'s module docstring),
+    and then any git run there -- ``status`` included -- runs that repository's
+    programs as the operator. That is why ``read_checkout`` asks no ``status`` before
+    the press, and a hold line does not hand the same call to the operator's shell.
+    """
+    return (
+        "it may be incomplete and was not made by this launch; to continue there, set "
+        f"the directory to {path} and leave the branch empty"
+    )
+
+
+# After the " -- " of a hold that offers nothing, as ``_continue_there`` does, and
+# for its reason naming nothing to run there.
+_NOT_OFFERED = "nothing is offered there"
+
+
+def _already_there(entry: worktree_mod.WorktreeEntry, unfinished: Mapping[str, str]) -> str:
+    """
+    Why a launch is held by ``entry``, a worktree git has at the placed path or on
+    the branch, in one line that names it and, for a tree that may be complete, how
+    to start a session in it.
+
+    **No offer for a tree known not to be finished.** A locked entry is what an add
+    in flight, or one killed there, leaves (``worktree.AddTimedOut``); an entry this
+    process's own add left unfinished (``UnfinishedWorktrees``) may have a hook still
+    writing into it. Those name their state and offer nothing.
+    """
+    if entry.prunable is not None:
+        return (
+            f"git has a worktree registered at {entry.path}, whose directory is gone -- "
+            "nothing is made while it is registered"
+        )
+    on = "a detached HEAD" if entry.branch is None else entry.branch
+    here = f"git already has a worktree at {entry.path} on {on}"
+    state = unfinished.get(entry.path)
+    if state is not None:
+        return f"{here}: {state} -- {_NOT_OFFERED}"
+    if entry.locked is not None:
+        locked = f"locked {entry.locked!r}" if entry.locked else "locked"
+        return f"{here}, {locked}, and whether it is complete is not known -- {_NOT_OFFERED}"
+    return f"{here} -- {_continue_there(entry.path)}"
+
+
+# What ``UnfinishedWorktrees`` says of a path, after "git already has a worktree at
+# P on B: " or after "P: ".
+UNFINISHED_MAKING = "this window is still making it"
+UNFINISHED_STOPPED = "its creation was stopped and its state is not known"
+UNFINISHED_LEFT = "its add failed after checking it out, and it was left as it is"
+UNFINISHED_BRANCH_STOPPED = (
+    "no worktree was added there, but making its branch was stopped, so the branch "
+    "may exist now in a state not known"
+)
+UNFINISHED_RAISED = "making it ended in an error, and its state is not known"
+
+
+def unfinished_state(outcome: worktree_mod.CreateOutcome) -> str | None:
+    """
+    What ``outcome`` leaves at its path that nothing may be started in unseen, or
+    None when it leaves nothing there that is unknown: a finished tree, or none.
+    """
+    match outcome:
+        case worktree_mod.AddTimedOut():
+            return UNFINISHED_STOPPED
+        case worktree_mod.BranchTimedOut():
+            return UNFINISHED_BRANCH_STOPPED
+        case worktree_mod.AddFailedWorktreeLeft():
+            return UNFINISHED_LEFT
+        case _:
+            return None
+
+
+class Mark:
+    """One ``make_worktree`` call's hold on a path in ``UnfinishedWorktrees``."""
+
+    __slots__ = ()
+
+
+class UnfinishedWorktrees:
+    """
+    The paths whose ``create`` this process is running or ran and that it cannot
+    call finished: one in flight, or one ended by an outcome that leaves an unknown
+    (``unfinished_state``) or by an exception. Keyed by the placed path, which is
+    the spelling ``git worktree list`` gives (``plan_worktree``).
+
+    **A path is taken by one call at a time.** ``begin`` tests and sets in one step
+    and hands the caller a ``Mark``; only the call holding the mark can change or
+    drop the path's entry. A press that is refused because another one holds the
+    path therefore cannot take the other's in-flight mark with it.
+
+    **In this process only.** git keeps no such mark, so after a restart a tree
+    left this way is an unlocked entry like any other and gets the general offer,
+    which says it may be incomplete (``_continue_there``).
+
+    Written on ``make_worktree``'s worker and read by the draw, so it is locked.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._by_path: dict[str, str] = {}
+        self._held: dict[str, Mark] = {}
+
+    def begin(self, path: str) -> tuple[Mark | None, dict[str, str]]:
+        """
+        Take ``path`` as in flight, unless anything is recorded for it, and the
+        record as it stood before: ``(mark, record)``, the mark None when it was not
+        taken.
+        """
+        with self._lock:
+            before = dict(self._by_path)
+            if path in self._by_path:
+                return None, before
+            mark = Mark()
+            self._by_path[path] = UNFINISHED_MAKING
+            self._held[path] = mark
+            return mark, before
+
+    def abandoned(self, path: str, mark: Mark) -> None:
+        """``mark``'s call ended before ``create`` ran, having made nothing."""
+        self._settle(path, mark, None)
+
+    def ended(self, path: str, mark: Mark, outcome: worktree_mod.CreateOutcome) -> None:
+        self._settle(path, mark, unfinished_state(outcome))
+
+    def raised(self, path: str, mark: Mark) -> None:
+        """``create`` raised under ``mark``: what it did on disk is not known."""
+        self._settle(path, mark, UNFINISHED_RAISED)
+
+    def _settle(self, path: str, mark: Mark, state: str | None) -> None:
+        with self._lock:
+            if self._held.get(path) is not mark:
+                return
+            del self._held[path]
+            if state is None:
+                del self._by_path[path]
+            else:
+                self._by_path[path] = state
+
+    def snapshot(self) -> dict[str, str]:
+        with self._lock:
+            return dict(self._by_path)
+
+
+UNFINISHED = UnfinishedWorktrees()
+"""This process's record; ``make_worktree`` and ``LauncherState`` use it unless given another."""
+
+
+def worktree_notices(plan: NewWorktree | WorktreeHeld, read: CheckoutRead | None) -> list[Notice]:
+    """
+    What the modal says under the branch field: where the session will run, or why
+    it cannot, and -- once a press was held on them and the operator pressed again
+    -- that the checkout's uncommitted changes are not carried.
+    """
+    if isinstance(plan, WorktreeHeld):
+        tone = Tone.QUIET if plan.reason == _HOLD_READING else Tone.WARN
+        return [Notice(widgets.author_text(plan.reason), tone)]
+    where = widgets.author_text(plan.path)
+    below = read.below if read is not None else None
+    at_root = (
+        f" -- at its root, not at {widgets.author_text(below)} below it"
+        if below is not None
+        else ""
+    )
+    said = [
+        Notice(
+            f"runs in a new worktree at {where}, from {plan.base[:_SHORT_OID]}{at_root}",
+            Tone.QUIET,
+            Help(
+                "worktree",
+                "where this session runs",
+                (
+                    widgets.author_text(
+                        f"A new branch {plan.branch!r} is made at {plan.base}, the HEAD of "
+                        f"{plan.run_in} when it was read, and checked out at {plan.path}, "
+                        "before the session starts. Nothing is fetched."
+                    ),
+                    "If that HEAD has moved by the press, or anything is already there "
+                    "-- the branch elsewhere, a tree at the path -- the launch is held "
+                    "with the reason, and this draft comes back.",
+                    "Uncommitted changes in the checkout are looked for after the press, "
+                    "not before: git status runs programs the repository's config names. "
+                    "Changes hold the launch once, and pressing again launches without "
+                    "them.",
+                ),
+            ),
+        )
+    ]
+    if plan.uncommitted_accepted:
+        said.append(
+            Notice(
+                f"{widgets.author_text(plan.run_in)} has uncommitted changes -- "
+                "this launch goes ahead without them",
+                Tone.WARN,
+            )
+        )
+    return said
+
+
+def worktree_refusal(outcome: worktree_mod.CreateOutcome, branch: str, path: str) -> str | None:
+    """
+    Why a launch into a new worktree starts no session, in words, or None when the
+    worktree is there to start in. Every variant ``worktree.create`` returns is
+    named (W5), and a failure that left something on disk says what.
+    """
+    left_nothing = "nothing was left on disk"
+    match outcome:
+        case worktree_mod.Created():
+            return None
+        case worktree_mod.InvalidBranch(would_be=None):
+            return f"git will not take {branch!r} as a branch name"
+        case worktree_mod.InvalidBranch(would_be=would_be):
+            return f"git reads {branch!r} as {would_be!r}, not as a new branch name"
+        case worktree_mod.BranchExists():
+            return (
+                f"a branch named {branch!r} already exists -- name a new branch, or, to "
+                "continue on it, set the directory to a worktree that has it checked out "
+                "and leave the branch empty"
+            )
+        case worktree_mod.BaseNotACommit(base=base):
+            return (
+                f"the checkout's {base} is not a commit -- a repository with no commits "
+                "reads this way"
+            )
+        case worktree_mod.PathExists():
+            # Not a tree git lists, so there is nothing to continue in.
+            return (
+                f"{path} already exists and git does not list it as a worktree, "
+                f"{left_nothing} -- {_NOT_OFFERED}"
+            )
+        case worktree_mod.PathRegistered(missing=missing):
+            gone = ", whose directory is gone" if missing else ""
+            return f"git has another worktree registered at {path}{gone}"
+        case worktree_mod.SlugTaken(other=other) | worktree_mod.SlugUnjudged(other=other):
+            return (
+                f"the worktree at {other} would share its transcript directory with {path} "
+                "-- choose a branch name that differs in more than punctuation"
+            )
+        case worktree_mod.GitFailed(step=step, returncode=code, detail=detail):
+            return f"git {step} failed ({_exit(code)}): {detail}"
+        case worktree_mod.BranchTimedOut(seconds=seconds):
+            return (
+                f"git branch was stopped after {seconds:g}s -- the branch {branch!r} may "
+                "exist now and was not removed"
+            )
+        case worktree_mod.AddFailed(returncode=code, detail=detail):
+            return (
+                f"git worktree add failed ({_exit(code)}): {detail} -- the branch was "
+                f"removed again and {left_nothing}"
+            )
+        case worktree_mod.AddFailedWorktreeLeft(returncode=code, detail=detail):
+            return (
+                f"git worktree add failed ({_exit(code)}): {detail} -- the worktree was "
+                f"left registered at {path} with {branch!r} checked out; nothing was removed"
+            )
+        case worktree_mod.AddFailedPathHeld(
+            held_by=held_by, returncode=code, detail=detail, kept=kept
+        ):
+            theirs = "a detached HEAD" if held_by is None else held_by
+            ours = "was removed again" if kept is None else f"was left: {kept}"
+            return (
+                f"git worktree add failed ({_exit(code)}): {detail} -- another worktree, on "
+                f"{theirs}, is registered at {path} and was not touched; the branch "
+                f"{branch!r} {ours}"
+            )
+        case worktree_mod.AddFailedBranchLeft(returncode=code, detail=detail, kept=kept):
+            return (
+                f"git worktree add failed ({_exit(code)}): {detail} -- no worktree is at "
+                f"{path}, and the branch {branch!r} was left: {kept}"
+            )
+        case worktree_mod.AddTimedOut(seconds=seconds):
+            return (
+                f"git worktree add was stopped after {seconds:g}s -- the branch {branch!r} "
+                f"and whatever is at {path} were left as they are, in a state not known"
+            )
+        case _:
+            assert_never(outcome)
+
+
+def _exit(code: int | None) -> str:
+    return "no exit status" if code is None else f"exit {code}"
+
+
+# After a refusal that is about the read being out of date: ``report_failure``
+# forgets the read, and the modal reads the checkout again.
+_READ_AGAIN = "nothing was made, and the modal reads the checkout again"
+
+
+@dataclass(frozen=True, slots=True)
+class WorktreeRefused:
+    """``make_worktree`` made nothing a session may start in, and why."""
+
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class UncommittedFound:
+    """
+    ``make_worktree`` was held on the checkout's uncommitted changes and nothing
+    else, or on a ``status`` that could not say: the press that comes back accepting
+    them launches (``LauncherState.report_failure``'s ``accept_uncommitted``).
+    """
+
+    reason: str
+
+
+def make_worktree(
+    plan: NewWorktree, unfinished: UnfinishedWorktrees | None = None
+) -> WorktreeRefused | UncommittedFound | None:
+    """
+    Make the worktree ``plan`` asks for and return None, or return why no session
+    may start. **Blocking**: for ``app._launch``'s worker, never the draw thread or
+    the asyncio loop. ``unfinished`` is the process's record (``UNFINISHED``) unless
+    another is given.
+
+    **Only ever a new worktree** (W3 as revised on wt-fix-2; ``plan_worktree``
+    argues it). The listing is read again first, so that a worktree that appeared
+    at the path or on the branch since the read is refused in the modal's own words,
+    and then ``preflight``, for a branch or a path that appeared without one; both
+    before anything else is asked. ``create`` pre-flights again, and its answer is
+    the one that holds.
+
+    **Made at** ``plan.base`` **only while the checkout's** ``HEAD`` **still names
+    it**: a ``HEAD`` that moved since the read means the modal showed a base that is
+    no longer the checkout's, and the draft goes back to be read again.
+
+    **Uncommitted changes are asked here, after the press**, and nowhere before it.
+    ``git status`` runs programs the checkout's ``config`` names, and before the press
+    that config may be a session's (``worktree.uncommitted``); here the press has
+    already trusted it with ``create``'s hooks and filters. A checkout with changes,
+    or one ``status`` could not read, is held once as ``UncommittedFound``, and the
+    draft comes back accepting it (``plan.uncommitted_accepted``).
+
+    **The path is taken in** ``unfinished`` **before any check**, and a press that
+    finds it taken is refused there, so of two presses of one branch only one runs
+    the checks and ``create``, and the other cannot clear the first's mark however
+    it ends. The mark stays after an outcome that leaves the path unknown, or an
+    exception out of ``create``, so neither this press nor the modal offers it as a
+    place to continue (``_already_there``); it is dropped when the checks refuse,
+    since nothing was made.
+
+    Two presses of one branch from two processes need no shared record for the
+    session's sake: ``git branch`` exits
+    zero only for the call that created the ref, so of two creates one makes the
+    branch and the other is refused by the pre-flight or by ``git branch`` itself,
+    before any ``worktree add`` of its own. The second never starts a session in the
+    first's tree, because nothing here starts one in a tree it did not make.
+
+    Missing parents of ``~/.pptmstr/worktrees/<repo>/`` are made by ``git worktree
+    add`` itself (W4); nothing here makes a directory, and the checkout the plan
+    was read from is never made.
+    """
+    record = UNFINISHED if unfinished is None else unfinished
+    placement = worktree_mod.Placement(
+        run_in=plan.run_in, main_root=plan.main_root, branch=plan.branch, path=plan.path
+    )
+    entries = worktree_mod.list_worktrees(plan.run_in)
+    if isinstance(entries, worktree_mod.GitFailed):
+        return _refused(worktree_refusal(entries, plan.branch, plan.path))
+    mark, known = record.begin(plan.path)
+    there = _registered(entries, plan.path, plan.branch)
+    if there is not None:
+        if mark is not None:
+            record.abandoned(plan.path, mark)
+        return WorktreeRefused(_already_there(there, known))
+    if mark is None:
+        # Not listed, and not finished either: whatever is at the path is not offered.
+        return WorktreeRefused(f"{plan.path}: {known[plan.path]} -- {_NOT_OFFERED}")
+    created = False
+    outcome: worktree_mod.CreateOutcome | None = None
+    try:
+        held = _checked(plan, placement)
+        if held is not None:
+            return held
+        created = True
+        outcome = worktree_mod.create(placement, plan.base)
+    finally:
+        if outcome is not None:
+            record.ended(plan.path, mark, outcome)
+        elif created:
+            record.raised(plan.path, mark)
+        else:
+            record.abandoned(plan.path, mark)
+    return _refused(worktree_refusal(outcome, plan.branch, plan.path))
+
+
+def _checked(
+    plan: NewWorktree, placement: worktree_mod.Placement
+) -> WorktreeRefused | UncommittedFound | None:
+    """``make_worktree``'s checks before ``create``: why not to run it, or None."""
+    cleared = worktree_mod.preflight(placement, plan.base)
+    if not isinstance(cleared, worktree_mod.Cleared):
+        return _refused(worktree_refusal(cleared, plan.branch, plan.path))
+    head = worktree_mod.head_commit(plan.run_in)
+    if head != plan.base:
+        now = head[:_SHORT_OID] if isinstance(head, str) else worktree_refusal(head, "", "")
+        return WorktreeRefused(
+            f"the HEAD of {plan.run_in} is no longer {plan.base[:_SHORT_OID]}, the commit the "
+            f"modal showed (now: {now}) -- {_READ_AGAIN}"
+        )
+    if not plan.uncommitted_accepted:
+        dirty = worktree_mod.uncommitted(plan.run_in)
+        if isinstance(dirty, worktree_mod.GitFailed):
+            return UncommittedFound(
+                f"whether {plan.run_in} has uncommitted changes could not be read: "
+                f"{dirty.detail} -- nothing was made; press launch again to launch anyway"
+            )
+        if dirty:
+            return UncommittedFound(
+                f"{plan.run_in} has uncommitted changes, and the worktree will not have "
+                "them -- nothing was made; press launch again to launch without them"
+            )
+    return None
+
+
+def _refused(reason: str | None) -> WorktreeRefused | None:
+    return None if reason is None else WorktreeRefused(reason)
+
+
 @dataclass(frozen=True, slots=True)
 class Draft:
     """
@@ -1468,6 +2150,16 @@ class Draft:
     None for a new session. It travels because the press clears the pick: a failed
     resume put back without it would be its message in the task box of a draft
     that starts a new session.
+
+    ``branch`` is the worktree branch field as typed, empty for a launch into the
+    directory itself. A refused worktree comes back with it, so the retry is one
+    edit away.
+
+    ``uncommitted_accepted`` is the cwd field, as typed, of a draft whose press was
+    held because that checkout had uncommitted changes (``UncommittedFound``), or
+    None. ``report_failure`` puts it on the draft it hands back, so the next press
+    of the same draft launches; a directory edited since is not the one accepted,
+    and is asked about again.
     """
 
     task: str
@@ -1478,6 +2170,8 @@ class Draft:
     policy: Policy
     subagent_cap: int | None
     picked: SessionRow | None = None
+    branch: str = ""
+    uncommitted_accepted: str | None = None
 
 
 def left_by_launch(draft: Draft) -> Draft:
@@ -1485,13 +2179,21 @@ def left_by_launch(draft: Draft) -> Draft:
     The fields as the press that launched ``draft`` left them.
 
     ``LauncherState.launched`` is the press and this is its result as a value: the
-    task, the rung, the cap and the picked session go, and the directory, brief,
-    model and team stay. A second spelling of those clears, pinned to the first by
+    task, the rung, the cap, the picked session and the worktree branch go, and the
+    directory, brief, model and team stay. A second spelling of those clears, pinned to the first by
     ``test_what_a_launch_leaves_is_what_the_press_actually_left``. It is a value so
     that "has anything been typed since that launch" is a comparison of the fields
     against it rather than a guess from the task box alone.
     """
-    return replace(draft, task="", policy=Policy.STRICT, subagent_cap=None, picked=None)
+    return replace(
+        draft,
+        task="",
+        policy=Policy.STRICT,
+        subagent_cap=None,
+        picked=None,
+        branch="",
+        uncommitted_accepted=None,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1577,6 +2279,16 @@ class LauncherState:
     # launch rather than an override under the dangerous mode. What the mode changes is
     # only how much rests on it -- see ``_CAP_REASON``.
     subagent_cap: int | None = None
+    # A new branch to run this session on, in a new linked worktree of the checkout
+    # the cwd field names; empty for a launch into that directory, which is every
+    # launch made before the field existed. See ``plan_worktree``. Not for a picked
+    # session: a resume runs in its recorded directory.
+    branch: str = ""
+    # ``Draft.uncommitted_accepted``: the cwd field whose uncommitted changes a held
+    # press of this draft was told of, or None.
+    uncommitted_accepted: str | None = None
+    # The cwd field's directory as git reads it, for a draft with a branch typed.
+    checkout: CheckoutReading = field(default_factory=CheckoutReading)
     _open_requested: bool = False
     _focus_task: bool = False
     # The refusal computed for a launch directory, and the directory it was computed
@@ -1628,6 +2340,8 @@ class LauncherState:
     # were drawn, or zero before the first. The body above them is bounded to what
     # that leaves of the display; see ``_modal``.
     _footer_height: float = 0.0
+    # Where the modal is put while it opens and after; see ``ModalPlacement``.
+    _placement: ModalPlacement = field(default_factory=lambda: ModalPlacement())
 
     @property
     def failure_loaded(self) -> bool:
@@ -1654,13 +2368,25 @@ class LauncherState:
             policy=self.policy,
             subagent_cap=self.subagent_cap,
             picked=self.picker.picked,
+            branch=self.branch,
+            uncommitted_accepted=self.uncommitted_accepted,
         )
 
-    def report_failure(self, draft: Draft | None, reason: str, origin: str = "launch") -> None:
+    def report_failure(
+        self,
+        draft: Draft | None,
+        reason: str,
+        origin: str = "launch",
+        *,
+        accept_uncommitted: bool = False,
+    ) -> None:
         """
         A launch did not start a session. Called on the draw thread, by whoever
         learned it. ``draft`` is what the modal was pressed from, or None for a launch
-        the modal did not make.
+        the modal did not make. ``accept_uncommitted`` says the press was held on
+        the checkout's uncommitted changes and nothing else (``UncommittedFound``):
+        the draft comes back accepting them, so pressing it again is the "launch
+        anyway". Said by the caller from the outcome's type, never read off ``reason``.
 
         The modal is asked for again: it is the one surface that can put a reason in
         front of the operator, and a failure with no window open has nowhere else to
@@ -1688,8 +2414,13 @@ class LauncherState:
         on a later frame, which is pinned by
         ``test_a_launch_decided_at_once_is_still_not_reported_from_inside_the_press``.
         """
+        if accept_uncommitted and draft is not None:
+            draft = replace(draft, uncommitted_accepted=draft.cwd)
         self.failures.append(FailedLaunch(draft, reason, origin))
         self.version_gate = VersionGate()
+        # A launch into a worktree that failed may have left one, or found the
+        # checkout's HEAD moved: what the read said is not what is there.
+        self.checkout.forget()
         self.request_open()
         self._settle_failures()
 
@@ -1708,6 +2439,8 @@ class LauncherState:
         # refusal is asked again before the button goes live.
         self.policy = draft.policy
         self.subagent_cap = draft.subagent_cap
+        self.branch = draft.branch
+        self.uncommitted_accepted = draft.uncommitted_accepted
         # Cleared first: ``pick`` of the row already picked is how a pick is undone.
         self.picker.pick(None, draft.cwd)
         self.picker.pick(draft.picked, draft.cwd)
@@ -1762,12 +2495,32 @@ class LauncherState:
     def discard_failed(self) -> None:
         """
         Drop the oldest failed launch. The fields are left as they are: if its draft
-        is in them, the text is still the operator's to edit or clear.
+        is in them, the text is still the operator's to edit or clear -- all but the
+        acceptance of uncommitted changes it brought back, which was that launch's.
         """
         if not self.failures:
             return
-        del self.failures[0]
+        dropped = self.failures.pop(0).draft
+        if dropped is not None and dropped.uncommitted_accepted == self.uncommitted_accepted:
+            self.uncommitted_accepted = None
         self._settle_failures()
+
+    def closed_without_launch(self) -> None:
+        """
+        The modal was closed by a cancel, an Escape or a click outside it, and not by
+        a launch. An acceptance of a checkout's uncommitted changes goes, from the
+        fields and from every failed draft still queued: it answered the hold that
+        was on screen, and the next time the modal is opened it is asked again.
+        """
+        self.uncommitted_accepted = None
+        self.failures[:] = [
+            (
+                replace(failure, draft=replace(failure.draft, uncommitted_accepted=None))
+                if failure.draft is not None
+                else failure
+            )
+            for failure in self.failures
+        ]
 
     def _settle_failures(self) -> None:
         """
@@ -1820,6 +2573,15 @@ class LauncherState:
         # pick that outlived its launch would send the next thing typed here to the
         # same conversation, under a box the operator reads as a new task.
         self.picker.pick(None, self.cwd)
+        # Cleared with the task. The branch was made for that session, and the same
+        # name pressed again would only be held on that session's worktree.
+        self.branch = ""
+        # Cleared with the branch: the operator accepted that launch's uncommitted
+        # changes, not the next one's.
+        self.uncommitted_accepted = None
+        # The launch is about to register a worktree, so the listing read before it
+        # no longer says what git has.
+        self.checkout.forget()
         # Whatever failed behind the one just retried is next, and the fields are
         # blank for it now.
         self._settle_failures()
@@ -1854,8 +2616,10 @@ class LauncherState:
         self._open_requested = False
         self.is_open = True
         self._focus_task = True
+        self._placement.begin()
         self._git_layout_for = None
         self._refusal_for = None
+        self.checkout.forget()
         return self.picker.request_scan(self.cwd.strip() or ".", scanner=scanner)
 
     @property
@@ -1896,23 +2660,69 @@ class LauncherState:
         if recorded.subagent_cap is not None:
             self.subagent_cap = recorded.subagent_cap
 
+    @property
+    def wants_worktree(self) -> bool:
+        """
+        Whether this draft asks for a new worktree: a branch typed, nothing picked.
+        """
+        return self.picker.picked is None and bool(self.branch.strip())
+
+    def worktree_plan(self) -> NewWorktree | WorktreeHeld | None:
+        """
+        The worktree this draft launches into, why it is held, or None for a draft
+        that asks for none. Reads no disk: the checkout was read on a worker
+        (``CheckoutReading``), and this answers from that read only when it was of
+        the field as it now stands.
+
+        The branch is taken with the whitespace around it dropped, as the task is.
+        """
+        if not self.wants_worktree:
+            return None
+        read = self.checkout.answer_for(self.cwd.strip() or ".")
+        plan = plan_worktree(read, self.branch.strip(), UNFINISHED.snapshot())
+        if isinstance(plan, NewWorktree) and self.uncommitted_accepted == self.cwd:
+            return replace(plan, uncommitted_accepted=True)
+        return plan
+
     def launch_directory(self) -> LaunchDirectory:
         """
-        Where this draft launches: the picked session's recorded directory, or the
-        cwd field when nothing is picked.
+        Where this draft launches: the picked session's recorded directory, the
+        worktree a typed branch places, or the cwd field.
 
         Every launch decision on this draft that is about a directory goes through
         here, so the line under the session list, the gate's explanation and the
-        spec cannot name different places. With nothing picked it is the field's
-        variant and no disk is touched.
+        spec cannot name different places. With nothing picked and no branch it is
+        the field's variant and no disk is touched. With a branch whose worktree is
+        planned it is the worktree's path, which need not exist yet: the session
+        runs there, and the own-checkout refusal and the gate's wording are about
+        it and not about the checkout it was made from.
         """
+        return self._launch_directory(self.worktree_plan())
+
+    def _launch_directory(self, plan: NewWorktree | WorktreeHeld | None) -> LaunchDirectory:
+        if isinstance(plan, NewWorktree):
+            return FieldDirectory(plan.path)
         return launch_directory(self.picker.picked, self.cwd.strip() or ".")
 
     def git_layout(self) -> GitLayout:
         """
         ``git_layout`` of the launch directory. One read per directory per open of
         the modal, not one per frame.
+
+        A planned worktree is the layout it will be -- a worktree beside its main
+        checkout, at its root -- and not what its path reads as before it exists,
+        which is no git at all and would word the sandbox's reach as the narrow one.
         """
+        plan = self.worktree_plan()
+        if isinstance(plan, NewWorktree):
+            # Resolved on the worker; a plan is only ever made from a read that has it.
+            read = self.checkout.answer_for(self.cwd.strip() or ".")
+            shared = read.shared if read is not None else None
+            return LinkedWorktree(
+                shared=shared or os.path.join(plan.main_root, ".git"),
+                root=plan.path,
+                at_root=True,
+            )
         raw = self.launch_directory().path
         if raw != self._git_layout_for:
             self._git_layout = git_layout(raw)
@@ -2077,6 +2887,9 @@ class LauncherState:
             if isinstance(self.launch_directory(), GoneDirectory):
                 return _HOLD_GONE
             return resume_gate_hold(self.policy, self.containment_refusal(), self.version_gate)
+        plan = self.worktree_plan()
+        if isinstance(plan, WorktreeHeld):
+            return plan.reason
         if not self.dangerous_engaged:
             return None
         if self.premise_is_thin:
@@ -2111,8 +2924,14 @@ class LauncherState:
         """
         if self.picker.picked is not None:
             raise ValueError("a session is picked: this draft's spec is resumed()'s")
-        directory = self.launch_directory()
-        resolved_cwd = resolved_directory(directory)
+        plan = self.worktree_plan()
+        if isinstance(plan, WorktreeHeld):
+            raise ValueError(f"the worktree is held: {plan.reason}")
+        directory = self._launch_directory(plan)
+        # A planned worktree's path was resolved with the read, and is the cwd as it
+        # stands: resolved again here it could name another place than the one the
+        # worktree is made at, which ``LaunchSpec`` refuses.
+        resolved_cwd = plan.path if plan is not None else resolved_directory(directory)
         # Both or neither, and the pairing is the top rung. ``AUTONOMOUS`` releases
         # every reviewed tool and the containment is the only thing bounding what a
         # released ``Bash`` reaches, so a spec carrying that rung alone is an unattended
@@ -2161,6 +2980,8 @@ class LauncherState:
             # capacity and pairs with nothing, so an operator who sized this launch for
             # two sub-agents gets two whether or not they also reached the top rung.
             subagent_cap=self.subagent_cap,
+            # The path is ``cwd`` above; this is what ``app._launch`` needs to make it.
+            worktree=plan,
         )
 
     def resumed(self) -> LaunchSpec | ResumeHeld:
@@ -2228,6 +3049,8 @@ class LauncherState:
         for has nothing to agree with and starts nothing either.
         """
         if self.picker.picked is None:
+            if isinstance(self.worktree_plan(), WorktreeHeld):
+                return None
             shown = self.granted_policy
             spec = self.spec()
             return spec if spec.policy is shown else None
@@ -2363,7 +3186,7 @@ def _session_row(picker: SessionPicker, row: SessionRow, now: float, live: froze
     # list of thirty rows for their own bookmarks can act on.
     if row.bookmarked:
         imgui.push_style_color(imgui.Col_.text, P.accent.vec4)
-    if imgui.small_button("*" if row.bookmarked else "+"):
+    if widgets.small_button("*" if row.bookmarked else "+"):
         picker.toggle_bookmark(row)
     if row.bookmarked:
         imgui.pop_style_color()
@@ -2557,7 +3380,7 @@ def _session_list(
         if clicked is not None:
             state.pick_session(clicked, recorder=recorder)
 
-        if imgui.small_button("rescan") and not picker.scanning:
+        if widgets.small_button("rescan") and not picker.scanning:
             picker.request_scan(cwd, scanner=scanner)
     _picked_lines(state, cwd, live)
 
@@ -2584,7 +3407,7 @@ def _picked_lines(state: LauncherState, cwd: str, live: frozenset[str]) -> None:
     for said in (directory_notice(directory, field_resolved), live_notice(picked, live)):
         if said is not None:
             widgets.notice(said)
-    if imgui.small_button(_UNPICK):
+    if widgets.small_button(_UNPICK):
         state.picker.pick(None, cwd)
     widgets.help_mark("picked", "resuming a picked session", (_PICKED_SENDS, _PICKED_CHOSEN_HERE))
 
@@ -2686,6 +3509,100 @@ def dial_text(asked: Policy, granted: Policy) -> DialText:
         adds=f"adds {', '.join(adds)}" if adds else "nothing runs unattended",
         parks=f"still parks {only}{', '.join(parks)}" if parks else "parks nothing",
     )
+
+
+# hello_imgui's status bar: a window of this name across the bottom of the main
+# viewport, drawn when ``ImGuiWindowParams.show_status_bar`` is on. The viewport's work
+# area does not leave room for it, so a modal sized and kept to the work area alone
+# would cover it.
+STATUS_BAR_WINDOW = "StatusBar"
+
+# How many frames, at most, a modal is re-centred for while its size settles. It
+# settles in three on a run's first open (its body is measured a frame late), and
+# one that never stops changing is left where the last of these put it, so the
+# operator can still move it.
+_PLACING_FRAMES = 12
+
+
+def modal_area() -> tuple[tuple[float, float], tuple[float, float]]:
+    """
+    Where a modal is centred and kept, as position and size: the main viewport's
+    work area -- under the menu bar -- less the status bar, when one was drawn this
+    frame or the last. It is read from its window rather than from a height worked
+    out here: hello_imgui sizes it, and it can be switched off.
+    """
+    viewport = imgui.get_main_viewport()
+    left, top = float(viewport.work_pos.x), float(viewport.work_pos.y)
+    width = float(viewport.work_size.x)
+    bottom = top + float(viewport.work_size.y)
+    bar = imgui.internal.find_window_by_name(STATUS_BAR_WINDOW)
+    if bar is not None and (bar.active or bar.was_active):
+        bottom = min(bottom, float(bar.pos.y))
+    return (left, top), (width, max(0.0, bottom - top))
+
+
+@dataclass(slots=True)
+class ModalPlacement:
+    """
+    Where a modal is put: centred in ``modal_area`` on every frame from its open
+    until its size stops changing, and after that where the operator puts it, kept
+    inside the area (``modal_origin``). The launcher and the resume form each hold
+    one, and call ``begin`` when they open and ``before`` and ``after`` around
+    ``imgui.begin_popup_modal`` each frame.
+
+    Centred until it settles and not only on the frame it appears: on a run's first
+    open the body is measured a frame late, so the modal appears a fraction of its
+    height and grows from where that was centred.
+    """
+
+    # Whether it is still being centred, the size it had on the last frame of that,
+    # and how many frames that has taken.
+    placing: bool = False
+    placed_size: tuple[float, float] | None = None
+    frames: int = 0
+
+    def begin(self) -> None:
+        """The modal is being opened: centre it again until it settles."""
+        self.placing = True
+        self.placed_size = None
+        self.frames = 0
+
+    def before(
+        self, title: str, area_pos: tuple[float, float], area_size: tuple[float, float]
+    ) -> None:
+        """
+        Before the modal's window is begun: its position for this frame.
+
+        Once it has been placed, it is kept inside the area where the last frame
+        left it, and otherwise left where it is. Dear ImGui keeps a closed popup's
+        window under its name, so a window not drawn last frame is where the modal
+        stood the last time it was open; and one that appeared last frame was drawn
+        hidden, to be measured. Neither is moved here while it is being centred.
+        """
+        if self.placing:
+            imgui.set_next_window_pos(
+                imgui.ImVec2(area_pos[0] + area_size[0] / 2.0, area_pos[1] + area_size[1] / 2.0),
+                imgui.Cond_.always,
+                imgui.ImVec2(0.5, 0.5),
+            )
+            return
+        last = imgui.internal.find_window_by_name(title)
+        if last is not None and last.was_active and not last.appearing:
+            moved = modal_origin(
+                (last.pos.x, last.pos.y), (last.size.x, last.size.y), area_pos, area_size
+            )
+            if moved is not None:
+                imgui.set_next_window_pos(imgui.ImVec2(*moved), imgui.Cond_.always)
+
+    def after(self) -> None:
+        """Inside the modal's window, once it is open: settled when its size repeats."""
+        if not self.placing:
+            return
+        size = imgui.get_window_size()
+        seen = (float(size.x), float(size.y))
+        self.frames += 1
+        self.placing = seen != self.placed_size and self.frames < _PLACING_FRAMES
+        self.placed_size = seen
 
 
 def modal_origin(
@@ -2972,13 +3889,13 @@ def _failure_notice(state: LauncherState) -> None:
         loaded = state.failure_loaded
         widgets.notice(failure_notice(failure, loaded=loaded, waiting=len(state.failures) - 1))
         if failure.draft is None or loaded:
-            if imgui.small_button("dismiss this notice"):
+            if widgets.small_button("dismiss this notice"):
                 state.discard_failed()
         else:
-            if imgui.small_button("restore that draft"):
+            if widgets.small_button("restore that draft"):
                 state.restore_failed()
             imgui.same_line()
-            if imgui.small_button("discard it"):
+            if widgets.small_button("discard it"):
                 state.discard_failed()
     # Read after the buttons above, so a restore pressed on this frame shows what it
     # set aside on this frame.
@@ -2986,10 +3903,10 @@ def _failure_notice(state: LauncherState) -> None:
         widgets.notice(set_aside_notice(len(state.set_aside)))
         # Labels of their own: two buttons reading "discard it" in one window share
         # an ID, and the second would never fire.
-        if imgui.small_button("bring back what was set aside"):
+        if widgets.small_button("bring back what was set aside"):
             state.restore_set_aside()
         imgui.same_line()
-        if imgui.small_button("discard what was set aside"):
+        if widgets.small_button("discard what was set aside"):
             state.discard_set_aside()
     widgets.dialog_group()
 
@@ -3008,6 +3925,7 @@ def draw(
     models: tuple[str, ...] = FALLBACK_MODELS,
     live: frozenset[str] = frozenset(),
     recorder: Recorder = read_recorded,
+    reader: CheckoutReader = read_checkout,
 ) -> None:
     """
     Draw the modal if it has been asked for.
@@ -3039,6 +3957,9 @@ def draw(
     from inside ``launch``**: the clears run when ``launch`` returns, and a failure
     reported before them is taken for the one this press retried. See
     ``report_failure``.
+
+    ``reader`` is what reads the cwd field's checkout for a typed worktree branch,
+    on a worker (``CheckoutReading``); a parameter for the reason ``scanner`` is.
 
     ``models`` is what the model combo offers -- ``model_catalog.Catalog.models``, which
     is the list in code until the startup probe replaces it. Defaulted rather than
@@ -3078,7 +3999,46 @@ def draw(
             models=models,
             live=live,
             recorder=recorder,
+            reader=reader,
         )
+
+
+def _branch_field(state: LauncherState, *, reader: CheckoutReader) -> None:
+    """
+    The worktree branch field and the lines under it.
+
+    **The read of the checkout is asked for here and done on a worker**: ``detect``
+    and ``status`` are subprocesses, and this is the draw. What is drawn is from the
+    last read that has landed, and a field edited since is "reading" until the next
+    one does.
+
+    Disabled with a session picked: a resume runs in its recorded directory, and a
+    branch under it would be a field that does nothing.
+    """
+    state.checkout.poll()
+    picked = state.picker.picked is not None
+    widgets.dialog_field()
+    with hint_colour(imgui, dialog=True):
+        if picked:
+            imgui.begin_disabled()
+        imgui.set_next_item_width(-1)
+        _, state.branch = imgui.input_text_with_hint(
+            "##branch",
+            "new branch, to run in a new worktree (optional)"
+            " -- leave empty to run in the directory",
+            state.branch,
+        )
+        if picked:
+            imgui.end_disabled()
+    widgets.dialog_caption()
+    imgui.text_disabled("worktree branch")
+    if not state.wants_worktree:
+        return
+    state.checkout.want(state.cwd.strip() or ".", reader=reader)
+    plan = state.worktree_plan()
+    assert plan is not None
+    for said in worktree_notices(plan, state.checkout.answer_for(state.cwd.strip() or ".")):
+        widgets.notice(said)
 
 
 def body_room(work_height: float, top: float, padding: float, footer: float) -> float:
@@ -3114,6 +4074,7 @@ def _modal(
     models: tuple[str, ...],
     live: frozenset[str],
     recorder: Recorder,
+    reader: CheckoutReader,
 ) -> None:
     """
     The open modal, begun and ended here. ``draw`` documents the arguments.
@@ -3132,46 +4093,34 @@ def _modal(
     # Before anything is drawn: the Escape that closes an explanation is not also
     # this modal's (``widgets.help_showing``).
     explaining = widgets.help_showing()
-    viewport = imgui.get_main_viewport()
-    imgui.set_next_window_pos(viewport.get_center(), imgui.Cond_.appearing, imgui.ImVec2(0.5, 0.5))
+    area_pos, area_size = modal_area()
     # One width. Auto-resize fits the height to what is drawn; left to fit the width
     # as well, one unwrapped line widens the whole modal to its length, rightward
     # from where it stood. Every line of text below wraps to this width instead.
     #
-    # The height bound restates one auto-resize already applies -- Dear ImGui 1.92.8
-    # does not fit a window taller than the viewport's work area -- because the
-    # move below is only a way to the launch button while that holds: a window no
-    # taller than the area can be put wholly inside it.
+    # The height bound is the area's, the status bar left out of it: Dear ImGui 1.92.8
+    # fits a window no taller than the viewport's work area, which takes the status
+    # bar in, and the move below is only a way to the launch button while the window
+    # is no taller than the area it is put wholly inside.
     imgui.set_next_window_size_constraints(
-        imgui.ImVec2(_WIDTH, 0.0), imgui.ImVec2(_WIDTH, viewport.work_size.y)
+        imgui.ImVec2(_WIDTH, 0.0), imgui.ImVec2(_WIDTH, area_size[1])
     )
-    # Where the last frame left it, once it has been placed. Dear ImGui keeps a
-    # closed popup's window under its name, so a window not drawn last frame is where
-    # the modal stood the last time it was open; and one that appeared last frame
-    # was drawn hidden, to be measured, with the centring above still to be applied
-    # on this one -- a position set now would take its place.
-    last = imgui.internal.find_window_by_name(TITLE)
-    if last is not None and last.was_active and not last.appearing:
-        moved = modal_origin(
-            (last.pos.x, last.pos.y),
-            (last.size.x, last.size.y),
-            (viewport.work_pos.x, viewport.work_pos.y),
-            (viewport.work_size.x, viewport.work_size.y),
-        )
-        if moved is not None:
-            imgui.set_next_window_pos(imgui.ImVec2(*moved), imgui.Cond_.always)
+    state._placement.before(TITLE, area_pos, area_size)
     opened, _ = imgui.begin_popup_modal(TITLE, None, imgui.WindowFlags_.always_auto_resize)
+    if opened:
+        state._placement.after()
     if not opened:
         # Dismissed by something other than this function -- a click on the blocked
         # background, or ImGui's own Escape handling. Resync so the key handler
         # stops deferring to a modal that is gone.
         state.is_open = False
+        state.closed_without_launch()
         return
 
     # The body fits its content up to the room the display leaves it, and scrolls
     # past that. The footer's height is last frame's: it is drawn after the body
     # it bounds.
-    widgets.begin_dialog_body(BODY_ID, state._footer_height, _BODY_FLOOR)
+    widgets.begin_dialog_body(BODY_ID, state._footer_height, _BODY_FLOOR, area_size[1])
 
     # For every line of text in the body, which is what holds it to the one width.
     # The wrap position is the window's own, so the footer sets it again.
@@ -3235,11 +4184,14 @@ def _modal(
     # typo does not fail, it quietly files the session under a project that does
     # not exist.
     imgui.set_next_item_width(-1)
-    _, state.cwd = imgui.input_text_with_hint(
-        "##cwd", "working directory (agents run here)", state.cwd
-    )
+    with hint_colour(imgui, dialog=True):
+        _, state.cwd = imgui.input_text_with_hint(
+            "##cwd", "working directory (agents run here)", state.cwd
+        )
     widgets.dialog_caption()
     imgui.text_disabled("working directory")
+
+    _branch_field(state, reader=reader)
 
     # After the directory because the listing is scoped by it.
     _session_list(state, scanner=scanner, live=live, recorder=recorder)
@@ -3253,9 +4205,12 @@ def _modal(
     # Empty is the common case and must stay cheap to leave empty.
     widgets.dialog_field()
     imgui.set_next_item_width(-1)
-    _, state.brief = imgui.input_text_with_hint(
-        "##brief", "continue an existing brief (optional) -- leave empty for a new one", state.brief
-    )
+    with hint_colour(imgui, dialog=True):
+        _, state.brief = imgui.input_text_with_hint(
+            "##brief",
+            "continue an existing brief (optional) -- leave empty for a new one",
+            state.brief,
+        )
     widgets.dialog_caption()
     imgui.text_disabled("brief directory")
 
@@ -3335,6 +4290,11 @@ def _modal(
     # machine cannot grant does not.
     hold = state.launch_hold()
     enabled = state.ready and hold is None
+    held_lines = (
+        {hold: _HOLD_LINE_WORKTREE}
+        if hold is not None and isinstance(state.worktree_plan(), WorktreeHeld)
+        else None
+    )
     if not enabled:
         imgui.begin_disabled()
     clicked = imgui.button("launch", imgui.ImVec2(110.0, 0.0))
@@ -3348,7 +4308,7 @@ def _modal(
     if hold is not None:
         imgui.same_line()
         imgui.align_text_to_frame_padding()
-        widgets.notice(hold_notice(hold))
+        widgets.notice(hold_notice(hold, lines=held_lines))
     elif running >= cap:
         # Only at cap, and only as a consequence. The running/cap counter itself is
         # in the status bar, which stays visible behind the modal -- repeating it
@@ -3367,6 +4327,7 @@ def _modal(
     # closes the explanation.
     dismissed = cancelled or (not explaining and imgui.is_key_pressed(imgui.Key.escape))
     reopen = False
+    pressed = False
 
     # ``enabled`` and not ``clicked`` alone: ``begin_disabled`` greys the button and
     # does nothing to the keyboard, so Ctrl+Enter in the task box is a second way into
@@ -3379,11 +4340,14 @@ def _modal(
             launch(spec, state.draft())
             state.launched()
             dismissed = True
+            pressed = True
             reopen = state.failure_loaded
 
     if dismissed:
         state.is_open = False
         imgui.close_current_popup()
+        if not pressed:
+            state.closed_without_launch()
         if reopen:
             # The press left the fields blank and another failed launch's draft went
             # into them. The modal comes back with it rather than leaving a restored

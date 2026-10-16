@@ -62,7 +62,9 @@ from .effects import (
     Effect,
     InboxDelivered,
     SessionDetachSettled,
+    SessionWoken,
     TaskWriteSettled,
+    WakeReason,
 )
 from .intents import (
     AgentFinished,
@@ -159,6 +161,7 @@ from .model import (
     approved_write,
     closing_notice,
     closing_result,
+    is_operator,
     normalised_property,
     normalised_touches,
     restored_party,
@@ -741,6 +744,7 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
             # sender believes it sent.
             if intent.concern.id not in concerns:
                 concerns[intent.concern.id] = intent.concern
+                effects = _concern_wake(intent.concern)
 
         case BoardRead():
             # Answered from the pre-apply snapshot, which is the same view every
@@ -1135,6 +1139,11 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
             if ended is None:
                 return snap, ()
             decisions = ended
+            effects = _woken(
+                decisions[intent.decision_id].asker,
+                WakeReason.DECISION_ANSWERED,
+                intent.decision_id,
+            )
 
         case DecisionDismissed():
             ended = _ended_by_operator(
@@ -1143,6 +1152,11 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
             if ended is None:
                 return snap, ()
             decisions = ended
+            effects = _woken(
+                decisions[intent.decision_id].asker,
+                WakeReason.DECISION_DISMISSED,
+                intent.decision_id,
+            )
 
         case DecisionWithdrawn():
             kept = _withdrawal_refusal(decisions, intent)
@@ -1224,6 +1238,9 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
             if turned_down is None:
                 return snap, ()
             commands = _with_command(commands, turned_down)
+            # A refusal ends the command as surely as a run does, and its asker
+            # is waiting on it the same way.
+            effects = _woken(asked.asker, WakeReason.COMMAND_ENDED, intent.command_id)
 
         case CommandWithdrawn():
             kept_open = _command_withdrawal_refusal(commands, intent)
@@ -1281,6 +1298,10 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
             if over is None or over == running:
                 return snap, ()
             commands = _with_command(commands, over)
+            # Woken once, when the command ends. Another account of an end
+            # already given (``looked_again``) says nothing new to the asker.
+            if running.state is CommandState.RUNNING:
+                effects = _woken(running.asker, WakeReason.COMMAND_ENDED, intent.command_id)
 
         case CommandsRead():
             # Answered from the pre-apply view, then marked, as ``DecisionsRead``
@@ -2067,6 +2088,39 @@ def _raise_refusal(snap: Snapshot, intent: DecisionRaised) -> DecisionRefusal | 
     return None
 
 
+def _woken(asker: NodeId, reason: WakeReason, subject_id: str) -> tuple[Effect, ...]:
+    """
+    The order to wake ``asker``'s session about ``subject_id``. A sub-agent's
+    session is woken through its lead, the only one with a turn to wake into.
+    """
+    return (SessionWoken(session_id=asker[0], reason=reason, subject_id=subject_id),)
+
+
+def _concern_wake(concern: Concern) -> tuple[Effect, ...]:
+    """
+    The order to wake a lead for a concern one of its own workers addressed to
+    it, and nothing for any other concern.
+
+    Only worker to its own lead, so no agent can wake another into a loop: a
+    lead's concern to a worker, a worker's to a worker, and anything across
+    sessions are read with ``read_inbox`` when the recipient next looks.
+    """
+    sender, recipient = concern.sender, concern.recipient
+    if sender[1] is None or recipient[1] is not None or sender[0] != recipient[0]:
+        return ()
+    if is_operator(sender):
+        # The store's own notice on the operator's action, not a worker's.
+        return ()
+    return (
+        SessionWoken(
+            session_id=recipient[0],
+            reason=WakeReason.CONCERN_TO_LEAD,
+            subject_id=concern.id,
+            sender=sender,
+        ),
+    )
+
+
 def _ended_by_operator(
     decisions: Mapping[DecisionId, Decision],
     intent: DecisionAnswered | DecisionDismissed,
@@ -2316,7 +2370,7 @@ def _owing_commands(world: Snapshot) -> Snapshot:
 _COMMAND_STATE_TEXT = {CommandState.ASKED: "asked", CommandState.RUNNING: "running"}
 _COMMAND_FATE_TEXT: dict[AskerFate, str | None] = {
     AskerFate.LIVE: None,
-    AskerFate.IDLE: "its asker has ended its turn and reads the result only when woken",
+    AskerFate.IDLE: "its asker has ended its turn, and the result wakes its session",
     AskerFate.STOPPED: "its asker has stopped",
     AskerFate.FAILED: "its asker failed",
     AskerFate.UNANNOUNCED: "its asker has not announced itself yet",
@@ -2453,7 +2507,7 @@ _STANDING_TEXT = {
 _REVERSIBLE_TEXT = {True: "yes", False: "no", None: "not stated"}
 _FATE_TEXT: dict[AskerFate, str | None] = {
     AskerFate.LIVE: None,
-    AskerFate.IDLE: "its asker has ended its turn and reads an answer only when woken",
+    AskerFate.IDLE: "its asker has ended its turn, and answering wakes its session",
     AskerFate.STOPPED: "its asker has stopped",
     AskerFate.FAILED: "its asker failed",
     AskerFate.UNANNOUNCED: "its asker has not announced itself yet",

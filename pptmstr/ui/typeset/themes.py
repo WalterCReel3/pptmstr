@@ -377,6 +377,108 @@ def build_palette(p: ui_theme.Palette) -> Any:
     return base.with_roles(roles_ink)
 
 
+@dataclass(frozen=True)
+class SyntaxInks:
+    """
+    The packed inks fenced code is coloured in by token (``syntax``), one per
+    class of token and ``default`` for the code between them.
+
+    Small on purpose: the classes every highlighter agrees on, and none a reader
+    has to learn per language.
+    """
+
+    keyword: int
+    string: int
+    comment: int
+    number: int
+    function: int
+    operator: int
+    default: int
+    add: int
+    remove: int
+    heading: int
+
+
+DIFF_TOKEN_FLOOR = 4.5
+"""
+What a diff fence's added, removed and heading lines read at on ``panel`` when
+the fence is code and not the library's diff view: WCAG AA. Those lines carry
+the whole of what changed, in text only, with no fill behind them as the diff
+view has, so they are held to body text's floor and not a token's 3:1.
+"""
+
+_DIFF_TOKEN_STEPS = 50
+_DIFF_TOKEN_INKS: dict[tuple[int, int, int], int] = {}
+
+
+def _reading(ink: Color, p: ui_theme.Palette) -> int:
+    """
+    ``ink`` packed, where it reads at ``DIFF_TOKEN_FLOOR`` on ``panel``, and
+    otherwise the smallest step of it toward ``text`` that does: the role's hue
+    is kept as far as the floor lets it. Memoised by the three colours.
+    """
+    ground, text = p.panel, p.text
+    key = (ink.u32, ground.u32, text.u32)
+    hit = _DIFF_TOKEN_INKS.get(key)
+    if hit is None:
+        hit = text.u32
+        for step in range(_DIFF_TOKEN_STEPS + 1):
+            mixed = ui_theme.mixed(ink, text, step / _DIFF_TOKEN_STEPS)
+            r, g, b = (round(channel * 255.0) for channel in (mixed.x, mixed.y, mixed.z))
+            tried = ui_theme.col((r << 16) | (g << 8) | b)
+            if ui_theme.contrast_ratio(tried, ground) >= DIFF_TOKEN_FLOOR:
+                hit = tried.u32
+                break
+        _DIFF_TOKEN_INKS[key] = hit
+    return hit
+
+
+def build_syntax_inks(p: ui_theme.Palette) -> SyntaxInks:
+    """
+    The token inks of one pptmstr palette, each borrowed from one of its roles.
+
+    Borrowed rather than written out per theme so that every theme has them, and
+    a theme added later has them too, with no colour here that no contrast test
+    has seen: the agent-state roles are held to 3:1 on ``panel``, which a code
+    block is drawn on, and ``text`` to 4.5:1 (``tests/test_theme.py``).
+    ``accent`` is not one of them, because it already inks the fence's caption
+    above the code.
+
+    ``default`` is ``text`` and not the code role's own ink (``diff_context``):
+    on most palettes that ink is ``text_dim``'s colour, which is the comments'.
+
+    ``add``, ``remove`` and ``heading`` are a diff fence's lines where it stays
+    code (one ``diffs.fence_diff`` refuses, a stream still arriving, a pane the
+    library's diff view is not adopted in): ``diff_add`` and ``diff_remove``,
+    the diff view's own two, and ``state_supervising`` for ``diff --git``,
+    ``index`` and ``@@`` lines, which is the keyword ink and so a colour the
+    theme already sets code in. Each is held to ``DIFF_TOKEN_FLOOR`` on
+    ``panel`` by a step toward ``text`` where the role itself is under it
+    (dark's ``diff_remove``, cde's two, win311's and kitty's ``diff_add``,
+    turbo's ``diff_remove``, measured 2026-10-16).
+    """
+    return SyntaxInks(
+        keyword=p.state_supervising.u32,
+        string=p.state_running.u32,
+        comment=p.text_dim.u32,
+        number=p.state_rate_limited.u32,
+        function=p.state_calling_tool.u32,
+        operator=p.text_strong.u32,
+        default=p.text.u32,
+        add=_reading(p.diff_add, p),
+        remove=_reading(p.diff_remove, p),
+        heading=_reading(p.state_supervising, p),
+    )
+
+
+def syntax_inks() -> SyntaxInks:
+    """
+    The token inks for the theme that is live right now. Not kept: it is seven
+    reads, asked only when a view is inked.
+    """
+    return build_syntax_inks(ui_theme.current())
+
+
 def palette(ink: Color | None = None) -> Any:
     """
     The palette for the theme that is live right now.

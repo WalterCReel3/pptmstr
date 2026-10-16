@@ -53,7 +53,7 @@ import pytest
 
 from pptmstr import boardsync, brief, model_catalog, pairing, sessionfile, settings, theme, version
 from pptmstr.ui import typeset
-from pptmstr.ui.typeset import gate
+from pptmstr.ui.typeset import gate, views
 from tests.mcp_wire import versions_line
 
 BOLD = theme._ASSETS / "fonts" / "Inconsolata-Bold.ttf"
@@ -269,11 +269,23 @@ def imgui() -> Iterator[Any]:
     A frame needs a context and not a display, so nothing opens a window: the
     context has no backend and the atlas is built from the real font files.
     Destroyed afterwards, the library's context first.
+
+    **No ini file.** ImGui's default is ``imgui.ini`` in the working directory,
+    read on the first frame and written as windows move, so docking state (a
+    tab bar's order) would carry from one module and one run to the next. A
+    test that wants one sets its own path under ``tmp_path``.
+
+    **The frame's lexing budget starts unspent** (``views._LEXING``): it is
+    kept by frame number, and each module's context counts its frames from
+    zero again, so a number the module before ended on would start with that
+    frame's budget already spent.
     """
     bundle = pytest.importorskip("imgui_bundle")
     im = bundle.imgui
     context = im.create_context()
     io = im.get_io()
+    io.set_ini_filename(None)
+    views._LEXING.frame, views._LEXING.spent = -1, 0.0
     io.display_size = im.ImVec2(1200.0, 800.0)
     io.delta_time = 1.0 / 60.0
     io.backend_flags |= im.BackendFlags_.renderer_has_textures.value
@@ -375,6 +387,7 @@ def no_column(seam: Any, monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
 # Read once, when the suite is collected, so it is the home this process was started
 # with and not whatever a test has since put in its place.
 _REAL_ROOT = brief.default_root()
+_REAL_LEGACY_ROOT = brief.legacy_root()
 
 
 @pytest.fixture(autouse=True)
@@ -382,18 +395,23 @@ def _no_brief_under_the_real_home(
     monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
 ) -> None:
     """
-    ``brief.default_root()`` never answers with the operator's real
-    ``~/.claude/projects`` while a test runs.
+    Neither ``brief.default_root()`` nor ``brief.legacy_root()`` answers with the
+    operator's real directory while a test runs: the configuration directory's
+    ``briefs`` and ``~/.claude/projects``.
 
-    ``app._seed_brief`` writes a team launch's task under that root, so any test that
+    ``app._seed_brief`` writes a team launch's task under the first, so any test that
     drives ``app._launch`` with a template that has roles leaves a directory in the
     home of whoever ran the suite -- and passes. Redirecting it in each such test is
-    a thing to remember, and the test that forgot wrote there on every run.
+    a thing to remember, and the test that forgot wrote there on every run. The
+    configuration-directory fixture already redirects the first for an unmarked test;
+    this one stays for a test marked ``real_config_dir``. The second is read for a
+    resume and for a transcript, and a test reading the operator's real one passes or
+    fails by what that operator happens to have.
 
     **Only the real root is replaced.** The answer still comes from the function the
     application calls, so a test that moves the home itself (``Path.home`` patched to
     its ``tmp_path``) gets the root under the home it chose, which is what its
-    assertions were written against. A test that replaces ``default_root`` outright
+    assertions were written against. A test that replaces either function outright
     replaces this too, which is the same redirection made by hand.
 
     **Autouse, because the hazard is a test that does not know it has it.** A fixture
@@ -407,18 +425,23 @@ def _no_brief_under_the_real_home(
     The replacement directory is made on first use, so a test that never asks for the
     root costs no directory.
     """
-    answer: Callable[[], Path] = brief.default_root
-    scratch: list[Path] = []
 
-    def redirected() -> Path:
-        root = answer()
-        if root != _REAL_ROOT:
-            return root
-        if not scratch:
-            scratch.append(tmp_path_factory.mktemp("brief-root"))
-        return scratch[0]
+    def redirect(name: str, real: Path) -> None:
+        answer: Callable[[], Path] = getattr(brief, name)
+        scratch: list[Path] = []
 
-    monkeypatch.setattr(brief, "default_root", redirected)
+        def redirected() -> Path:
+            root = answer()
+            if root != real:
+                return root
+            if not scratch:
+                scratch.append(tmp_path_factory.mktemp(name.replace("_", "-")))
+            return scratch[0]
+
+        monkeypatch.setattr(brief, name, redirected)
+
+    redirect("default_root", _REAL_ROOT)
+    redirect("legacy_root", _REAL_LEGACY_ROOT)
 
 
 REAL_CONFIG_DIR = "real_config_dir"

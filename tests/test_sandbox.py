@@ -20,7 +20,7 @@ from typing import Any
 
 import pytest
 
-from pptmstr.brief import default_root
+from pptmstr.brief import default_root, legacy_root
 from pptmstr.sandbox import ALLOWED_DOMAIN, containment_settings, denied_records
 
 
@@ -105,21 +105,25 @@ def test_the_sandbox_is_actually_enabled() -> None:
     assert _sandbox()["enabled"] is True
 
 
-def test_the_brief_directory_is_not_denied_along_with_the_credential_file() -> None:
+@pytest.mark.real_config_dir
+def test_no_brief_directory_is_denied_to_a_sandboxed_read() -> None:
     """
-    The narrow deny on ``~/.claude/.credentials.json`` sits inside the directory
-    ``brief.default_root()`` writes every brief to. Widening it to ``~/.claude`` would
-    read as a tightening and would blind a session to its own premises, so the boundary
-    is pinned: no denied path may be an ancestor of the brief root.
+    A worker lists and reads its premises with a command as readily as with
+    ``Read``, so no read denial may cover the root briefs are written to, nor the
+    legacy one a resumed session is still handed. The narrow deny on
+    ``~/.claude/.credentials.json`` sits inside the second; widening it to
+    ``~/.claude`` would read as a tightening and would blind those sessions. The
+    records denial sits beside the first; widening it to the configuration
+    directory would blind every team.
     """
-    briefs = default_root()
     denied = [entry["path"] for entry in _sandbox()["credentials"]["files"]]
     assert "~/.claude/.credentials.json" in denied
 
-    for path in denied:
-        expanded = Path(posixpath.expanduser(path))
-        assert expanded != briefs
-        assert expanded not in briefs.parents
+    for briefs in (default_root(), legacy_root()):
+        for path in denied:
+            expanded = Path(posixpath.expanduser(path))
+            assert expanded != briefs
+            assert expanded not in briefs.parents
 
 
 def test_every_credential_entry_is_a_denial() -> None:
@@ -254,4 +258,5 @@ def test_no_sandboxed_command_writes_either_records_root(monkeypatch: Any, tmp_p
         assert denied == [
             str(settings.config_dir() / sessionfile._SESSIONS),
             str(settings.config_dir() / "boards"),
+            str(settings.config_dir() / "briefs"),
         ]

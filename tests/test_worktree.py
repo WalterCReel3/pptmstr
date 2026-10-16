@@ -131,6 +131,33 @@ def made_at(repo: Path) -> str:
     return git(repo, "rev-parse", "main").stdout.strip()
 
 
+@pytest.fixture(autouse=True)
+def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """
+    ``place`` puts a worktree under the home directory, and the tests below create
+    what it places: without this, one in the operator's ``~/.pptmstr``.
+    """
+    directory = tmp_path.resolve() / "home"
+    monkeypatch.setenv("HOME", str(directory))
+    return directory
+
+
+def worktrees_of(repository: str) -> Path:
+    """
+    Where ``place`` puts a worktree of the repository named ``repository``.
+    """
+    return Path(os.path.expanduser("~")) / ".pptmstr" / "worktrees" / repository
+
+
+def link_worktrees_of(repository: str, real: Path) -> None:
+    """
+    Make the directory ``place`` puts ``repository``'s worktrees in a symlink to ``real``.
+    """
+    spelled = worktrees_of(repository)
+    spelled.parent.mkdir(parents=True, exist_ok=True)
+    spelled.symlink_to(real)
+
+
 def placed(directory: Path, branch: str) -> Placement:
     checkout = detect(str(directory))
     assert isinstance(checkout, MainCheckout | LinkedWorktree), checkout
@@ -473,7 +500,7 @@ def test_a_main_checkout_inside_its_own_worktree_has_no_sibling_to_place_beside(
 
     forced = place(LinkedWorktree(root=str(linked), main_root=str(decoy)), "probe")
     assert isinstance(forced, Placement)
-    assert forced.path == str(linked / "decoy-worktrees" / "probe")
+    assert forced.path == str(worktrees_of("decoy") / "probe")
     assert isinstance(create(forced, "HEAD"), Created)
     assert "committed" in (linked / "decoy-ran").read_text()
 
@@ -497,6 +524,237 @@ def test_a_decoy_outside_the_worktree_that_names_it_back_is_still_reported_as_ma
     assert detect(str(linked)) == LinkedWorktree(root=str(linked), main_root=str(decoy))
     # The repository it was made from still lists it, and was never consulted.
     assert (repo / ".git" / "worktrees" / "linked" / "gitdir").read_text() == f"{linked / '.git'}\n"
+
+
+def _status_decoy(repo: Path, tmp_path: Path, what: str) -> tuple[Path, Path]:
+    """
+    A session's worktree aimed at a decoy outside it that names it back, with the
+    decoy's ``config`` naming a program ``status`` might run: ``core.fsmonitor``, or a
+    ``clean`` filter for a file ``.gitattributes`` in the worktree names and that is
+    stat-dirty against an index the session built. Returns the worktree and the
+    marker the program touches.
+    """
+    linked = repo.parent / "linked"
+    git(repo, "worktree", "add", "-q", "-b", "feat", str(linked), "main")
+    elsewhere = tmp_path / "writable-elsewhere"
+    decoy = _decoy(elsewhere, "decoy", linked)
+    (linked / ".git").write_text(f"gitdir: {decoy / '.git' / 'worktrees' / 'x'}\n")
+    assert detect(str(linked)) == LinkedWorktree(root=str(linked), main_root=str(decoy))
+    marker = tmp_path / f"{what}-ran"
+    program = tmp_path / f"{what}.sh"
+    if what == "fsmonitor":
+        program.write_text(f'#!/bin/sh\ntouch "{marker}"\nexit 1\n')
+        program.chmod(0o755)
+        git(decoy, "config", "core.fsmonitor", str(program))
+        # The index is the decoy admin directory's; a session can build one.
+        git(linked, "read-tree", "HEAD")
+    else:
+        program.write_text(f'#!/bin/sh\ntouch "{marker}"\ncat\n')
+        program.chmod(0o755)
+        git(decoy, "config", "filter.probe.clean", str(program))
+        (linked / ".gitattributes").write_text("*.probe filter=probe\n")
+        (linked / "a.probe").write_text("a\n")
+        git(linked, "add", ".gitattributes", "a.probe")
+        # Stat-dirty: what the index recorded is not what the file now says.
+        os.utime(linked / "a.probe", (1_000_000, 1_000_000))
+    marker.unlink(missing_ok=True)
+    return linked, marker
+
+
+@pytest.mark.parametrize("what", ["fsmonitor", "clean"])
+def test_git_status_under_a_decoys_config_runs_the_program_it_names(
+    repo: Path, tmp_path: Path, what: str
+) -> None:
+    """
+    git's own behaviour: a plain ``status`` from a session's worktree runs what the
+    decoy's ``config`` names. The reason ``uncommitted`` turns fsmonitor off, and is
+    not asked before the press.
+    """
+    linked, marker = _status_decoy(repo, tmp_path, what)
+    git(linked, "--no-optional-locks", "status", "--porcelain", "-z")
+    assert marker.exists()
+
+
+def test_uncommitted_does_not_run_a_configured_fsmonitor(repo: Path, tmp_path: Path) -> None:
+    linked, marker = _status_decoy(repo, tmp_path, "fsmonitor")
+    assert isinstance(worktree.uncommitted(str(linked)), bool)
+    assert not marker.exists()
+
+
+def test_uncommitted_still_runs_a_configured_clean_filter(repo: Path, tmp_path: Path) -> None:
+    """
+    What ``-c core.fsmonitor=false`` does not cover, pinned so nobody reads
+    ``uncommitted`` as safe in a directory whose ``config`` is a session's.
+    """
+    linked, marker = _status_decoy(repo, tmp_path, "clean")
+    worktree.uncommitted(str(linked))
+    assert marker.exists()
+
+
+def _probe_program(tmp_path: Path, name: str) -> tuple[Path, Path]:
+    """A ``clean`` filter that touches a marker and passes its input through."""
+    marker = tmp_path / f"{name}-ran"
+    program = tmp_path / f"{name}.sh"
+    program.write_text(f'#!/bin/sh\ntouch "{marker}"\ncat\n')
+    program.chmod(0o755)
+    return program, marker
+
+
+def _filtered_checkout(root: Path, program: Path, entry: str) -> None:
+    """
+    ``root``'s own ``config`` names ``program`` as the ``clean`` filter of a committed
+    file, and the index entry for it is ``entry``: ``stat-dirty`` (its mtime is not
+    the one recorded) or ``racy`` (recorded exactly, in an index no older than the
+    file -- set by the index file's mtime alone, which whoever writes the repository
+    can do).
+    """
+    git(root, "config", "filter.probe.clean", str(program))
+    (root / ".gitattributes").write_text("*.probe filter=probe\n")
+    (root / "a.probe").write_text("a\n")
+    git(root, "add", ".gitattributes", "a.probe")
+    git(root, "commit", "-q", "-m", "probe")
+    if entry == "stat-dirty":
+        os.utime(root / "a.probe", (1_000_000, 1_000_000))
+    else:
+        st = (root / "a.probe").stat()
+        os.utime(root / ".git" / "index", ns=(st.st_atime_ns, st.st_mtime_ns))
+
+
+def _nested_repository(repo: Path, tmp_path: Path, entry: str) -> tuple[Path, Path]:
+    """
+    A repository a session ``git init``-ed below its cwd, with a filter in its own
+    ``config``. To ``detect`` it is a main checkout like the operator's.
+    """
+    nested = repo / "x"
+    nested.mkdir()
+    git(nested, "init", "-q", "-b", "main")
+    program, marker = _probe_program(tmp_path, "nested")
+    _filtered_checkout(nested, program, entry)
+    assert detect(str(nested)) == MainCheckout(str(nested))
+    marker.unlink(missing_ok=True)
+    return nested, marker
+
+
+def _submodule_decoy(repo: Path, tmp_path: Path) -> Path:
+    """
+    ``repo`` with a populated submodule at ``sub`` whose git directory is outside it
+    (what ``.git/modules/<n>`` or a gitlink's ``.git`` file names) and whose
+    ``config`` names a ``clean`` filter for a stat-dirty file. The gitlink is staged
+    in ``repo``'s index, as a session that can write the index could stage it.
+    Returns the marker the filter touches.
+    """
+    sub = repo / "sub"
+    sub.mkdir()
+    (tmp_path / "elsewhere").mkdir()
+    git(sub, "init", "-q", "-b", "main", "--separate-git-dir", str(tmp_path / "elsewhere" / "s"))
+    assert (sub / ".git").is_file()
+    program, marker = _probe_program(tmp_path, "sub")
+    _filtered_checkout(sub, program, "stat-dirty")
+    head = git(sub, "rev-parse", "HEAD").stdout.strip()
+    git(repo, "update-index", "--add", "--cacheinfo", f"160000,{head},sub")
+    marker.unlink(missing_ok=True)
+    return marker
+
+
+def test_git_status_runs_a_populated_submodules_clean_filter(repo: Path, tmp_path: Path) -> None:
+    """
+    git's own behaviour, the positive control for the next test: ``status``, with
+    fsmonitor off as ``uncommitted`` has it, recurses into the submodule and runs
+    what that submodule's ``config`` names.
+    """
+    marker = _submodule_decoy(repo, tmp_path)
+    git(repo, "-c", "core.fsmonitor=false", "--no-optional-locks", "status", "--porcelain")
+    assert marker.exists()
+
+
+def test_uncommitted_runs_no_submodules_filter_and_still_lists_a_staged_gitlink(
+    repo: Path, tmp_path: Path
+) -> None:
+    marker = _submodule_decoy(repo, tmp_path)
+    assert worktree.uncommitted(str(repo)) is True
+    assert not marker.exists()
+
+
+def test_uncommitted_starts_no_process_at_all_beside_a_populated_submodule(
+    monkeypatch: pytest.MonkeyPatch, repo: Path, tmp_path: Path
+) -> None:
+    """
+    Not only no filter: with ``--ignore-submodules=dirty`` git starts no child at
+    all -- no ``git status`` in the submodule, which is what runs its filters and
+    reads its ``config`` -- while plain ``status`` starts both (measured with
+    ``GIT_TRACE2_EVENT``, 2.39.5). Watched at git itself, so a program of any kind
+    git started would be seen.
+    """
+    import json
+
+    _submodule_decoy(repo, tmp_path)
+    trace = tmp_path / "trace2.json"
+    real = worktree._child_env
+    monkeypatch.setattr(worktree, "_child_env", lambda: {**real(), "GIT_TRACE2_EVENT": str(trace)})
+
+    assert worktree.uncommitted(str(repo)) is True
+
+    events = [json.loads(line) for line in trace.read_text().splitlines()]
+    (started,) = [e["argv"] for e in events if e["event"] == "start"]
+    assert "--ignore-submodules=dirty" in started
+    assert [e.get("argv") for e in events if e["event"] == "child_start"] == []
+
+    # The control: the same trace sees the children a plain ``status`` starts.
+    trace.unlink()
+    worktree._git(str(repo), "-c", "core.fsmonitor=false", "--no-optional-locks", "status")
+    events = [json.loads(line) for line in trace.read_text().splitlines()]
+    children = [e for e in events if e["event"] == "child_start"]
+    assert [e["argv"][:2] for e in children if e.get("cd") == "sub"] == [["git", "status"]]
+
+
+def test_uncommitted_runs_a_main_checkouts_own_clean_filter(repo: Path, tmp_path: Path) -> None:
+    """
+    A main checkout's ``config`` is not the operator's for being a main checkout:
+    pinned so nobody asks ``uncommitted`` of a directory before the press.
+    """
+    nested, marker = _nested_repository(repo, tmp_path, "stat-dirty")
+    worktree.uncommitted(str(nested))
+    assert marker.exists()
+
+
+# The questions that might answer "uncommitted changes" without ``status``, as git
+# is asked them with fsmonitor off and submodules not entered, and whether each
+# ran the filter for an index entry of either kind (measured, 2.39.5). None that
+# reads the working tree for modified files is filter-free.
+_STAT_ONLY = ("-c", "core.fsmonitor=false", "--no-optional-locks")
+_QUESTIONS = {
+    "diff-index --cached": (*_STAT_ONLY, "diff-index", "--cached", "--quiet", "HEAD"),
+    "diff-files": (*_STAT_ONLY, "diff-files", "--quiet", "--ignore-submodules=all"),
+    "ls-files --modified": (*_STAT_ONLY, "ls-files", "--modified", "-z"),
+    "ls-files --others": (*_STAT_ONLY, "ls-files", "--others", "--exclude-standard", "-z"),
+}
+
+
+@pytest.mark.parametrize(
+    "question, entry, filtered",
+    [
+        ("diff-index --cached", "stat-dirty", False),
+        ("diff-index --cached", "racy", False),
+        ("diff-files", "stat-dirty", False),
+        ("diff-files", "racy", True),
+        ("ls-files --modified", "stat-dirty", True),
+        ("ls-files --modified", "racy", True),
+        ("ls-files --others", "stat-dirty", False),
+        ("ls-files --others", "racy", False),
+    ],
+)
+def test_no_working_tree_question_short_of_status_is_free_of_filters(
+    repo: Path, tmp_path: Path, question: str, entry: str, filtered: bool
+) -> None:
+    """
+    Why the dirty read is asked after the press and not answered before it by
+    something narrower: ``diff-index --cached`` and ``ls-files --others`` are
+    filter-free and do not see a modified file; the two that do, filter.
+    """
+    nested, marker = _nested_repository(repo, tmp_path, entry)
+    ran = worktree._git(str(nested), *_QUESTIONS[question])
+    assert ran.returncode in (0, 1), ran
+    assert marker.exists() is filtered
 
 
 def test_detect_separates_no_repository_from_the_other_exit_128s(
@@ -817,6 +1075,73 @@ def test_list_worktrees_reads_real_git_including_a_newline_and_a_missing_tree(
     assert list_worktrees(str(odd)) == listed
 
 
+@pytest.mark.parametrize("change", ["none", "modified", "staged", "untracked", "ignored"])
+def test_uncommitted_is_what_a_worktree_made_from_head_would_not_have(
+    repo: Path, change: str
+) -> None:
+    (repo / ".gitignore").write_text("*.ignored\n")
+    git(repo, "add", ".gitignore")
+    git(repo, "commit", "-q", "-m", "ignore")
+    if change == "modified":
+        (repo / "tracked.txt").write_text("changed\n")
+    elif change == "staged":
+        (repo / "staged.txt").write_text("s\n")
+        git(repo, "add", "staged.txt")
+    elif change == "untracked":
+        (repo / "new.txt").write_text("n\n")
+    elif change == "ignored":
+        (repo / "x.ignored").write_text("i\n")
+
+    assert worktree.uncommitted(str(repo)) is (change in ("modified", "staged", "untracked"))
+
+
+def test_uncommitted_does_not_write_the_index(repo: Path) -> None:
+    """A plain ``git status`` refreshes stale stat data in the index and writes it back."""
+    index = repo / ".git" / "index"
+    os.utime(index, (1_000_000, 1_000_000))
+    (repo / "tracked.txt").touch()
+    assert worktree.uncommitted(str(repo)) is False
+    assert index.stat().st_mtime == 1_000_000
+
+
+def test_uncommitted_outside_a_repository_is_git_failed(tmp_path: Path) -> None:
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    got = worktree.uncommitted(str(plain))
+    assert isinstance(got, GitFailed) and got.step == "status" and got.returncode == 128
+
+
+def test_head_commit_is_the_launching_trees_head_as_an_object_id(repo: Path) -> None:
+    linked = repo.parent / "linked"
+    git(repo, "worktree", "add", "-q", "-b", "side", str(linked), "main")
+    side = commit(linked, "side.txt")
+    assert worktree.head_commit(str(repo)) == made_at(repo)
+    assert worktree.head_commit(str(linked)) == side != made_at(repo)
+
+
+def test_head_commit_of_a_repository_with_no_commits_is_not_a_commit(tmp_path: Path) -> None:
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    git(empty, "init", "-q", "-b", "main")
+    assert worktree.head_commit(str(empty)) == BaseNotACommit("HEAD")
+
+
+def test_head_commit_outside_a_repository_is_git_failed(tmp_path: Path) -> None:
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    got = worktree.head_commit(str(plain))
+    assert isinstance(got, GitFailed) and got.step == "rev-parse"
+
+
+def test_every_placement_of_a_checkout_is_under_one_directory() -> None:
+    main = MainCheckout("/src/repo")
+    assert worktree.placed_under(main, home="/h") == "/h/.pptmstr/worktrees/repo"
+    for branch in ("feat", "a/b", "x.y"):
+        where = place(main, branch, home="/h")
+        assert isinstance(where, Placement)
+        assert os.path.dirname(where.path) == worktree.placed_under(main, home="/h")
+
+
 def test_git_lists_whatever_path_a_worktrees_gitdir_file_names(repo: Path, tmp_path: Path) -> None:
     """
     git's behaviour, and why the module docstring calls a listed path a claim: the
@@ -894,41 +1219,43 @@ def test_sanitised_is_the_sdks_own_transcript_slug_up_to_the_limit() -> None:
     assert theirs.startswith(sanitised(past)[: worktree._SLUG_LIMIT] + "-")
 
 
-def test_a_worktree_goes_beside_the_main_checkout_from_either_kind_of_checkout() -> None:
-    from_main = place(MainCheckout("/src/pptmstr"), "feat/x")
+def test_a_worktree_goes_under_the_home_from_either_kind_of_checkout() -> None:
+    from_main = place(MainCheckout("/src/pptmstr"), "feat/x", home="/home/w")
     assert from_main == Placement(
         run_in="/src/pptmstr",
         main_root="/src/pptmstr",
         branch="feat/x",
-        path="/src/pptmstr-worktrees/feat-x",
+        path="/home/w/.pptmstr/worktrees/pptmstr/feat-x",
     )
     from_linked = place(
-        LinkedWorktree(root="/src/pptmstr-worktrees/a", main_root="/src/pptmstr"), "feat/x"
+        LinkedWorktree(root="/home/w/.pptmstr/worktrees/pptmstr/a", main_root="/src/pptmstr"),
+        "feat/x",
+        home="/home/w",
     )
     assert isinstance(from_linked, Placement)
-    assert from_linked.path == "/src/pptmstr-worktrees/feat-x"
+    assert from_linked.path == "/home/w/.pptmstr/worktrees/pptmstr/feat-x"
     # git runs where the request came from: HEAD is per worktree.
-    assert from_linked.run_in == "/src/pptmstr-worktrees/a"
+    assert from_linked.run_in == "/home/w/.pptmstr/worktrees/pptmstr/a"
+
+
+def test_the_home_is_the_users_when_none_is_given(home: Path) -> None:
+    got = place(MainCheckout("/src/pptmstr"), "feat")
+    assert isinstance(got, Placement)
+    assert got.path == str(home / ".pptmstr" / "worktrees" / "pptmstr" / "feat")
 
 
 def test_a_branch_with_nothing_nameable_is_its_own_answer() -> None:
     assert place(MainCheckout("/src/pptmstr"), "///") == NothingToName("///")
 
 
-def test_a_dotted_or_underscored_path_is_placed_and_names_its_odd_components() -> None:
+def test_a_dotted_or_underscored_repository_is_placed_under_its_own_name() -> None:
     """
-    Not refused: a repository under such a path could otherwise have no worktree. The
-    parts are the warning.
+    A brief is keyed by session id, so no character in the path parts a session's
+    briefs from its transcripts and nothing here is a warning.
     """
-    got = place(MainCheckout("/home/w.r/my_src/pptmstr"), "feat")
+    got = place(MainCheckout("/home/w.r/my_src/my.project"), "feat", home="/home/w.r")
     assert isinstance(got, Placement)
-    assert got.path == "/home/w.r/my_src/pptmstr-worktrees/feat"
-    assert got.unsanitary == ("w.r", "my_src")
-    dotted_repo = place(MainCheckout("/src/pptmstr.git"), "feat")
-    assert isinstance(dotted_repo, Placement)
-    assert dotted_repo.unsanitary == ("pptmstr.git-worktrees",)
-    clean = place(MainCheckout("/src/pptmstr"), "feat.x")
-    assert isinstance(clean, Placement) and clean.unsanitary == ()
+    assert got.path == "/home/w.r/.pptmstr/worktrees/my.project/feat"
 
 
 def _placement(path: str) -> Placement:
@@ -1050,7 +1377,7 @@ def test_a_base_that_is_not_a_commit_is_reported_as_the_base(repo: Path, base: s
 def test_anything_at_the_path_is_path_exists(repo: Path, kind: str) -> None:
     where = placed(repo, "feat")
     target = Path(where.path)
-    target.parent.mkdir()
+    target.parent.mkdir(parents=True)
     if kind == "empty-dir":
         target.mkdir()
     elif kind == "file":
@@ -1079,7 +1406,7 @@ def test_a_registered_path_reached_through_a_symlink_is_still_registered(
     """
     real_parent = tmp_path / "elsewhere"
     real_parent.mkdir()
-    (repo.parent / "repo-worktrees").symlink_to(real_parent)
+    link_worktrees_of("repo", real_parent)
     where = placed(repo, "feat")
     git(repo, "worktree", "add", "-q", "-b", "earlier", where.path, "main")
     listed = list_worktrees(str(repo))
@@ -1096,7 +1423,7 @@ def test_a_slug_taken_through_a_symlink_names_the_path_that_was_asked_about(
 ) -> None:
     real_parent = tmp_path / "elsewhere"
     real_parent.mkdir()
-    (repo.parent / "repo-worktrees").symlink_to(real_parent)
+    link_worktrees_of("repo", real_parent)
     where = placed(repo, "feat-x")
     by_hand = str(real_parent / "feat_x")
     git(repo, "worktree", "add", "-q", "-b", "feat_x", by_hand, "main")
@@ -1220,7 +1547,7 @@ def test_create_makes_the_worktree_on_a_new_branch_at_the_base(repo: Path) -> No
     got = create(where, first)
 
     assert got == Created(where.path, "feat/x", first)
-    assert where.path == str(repo.parent / "repo-worktrees" / "feat-x")
+    assert where.path == str(worktrees_of("repo") / "feat-x")
     assert detect(where.path) == LinkedWorktree(root=where.path, main_root=str(repo))
     assert git(Path(where.path), "rev-parse", "HEAD").stdout.strip() == first
     assert git(Path(where.path), "symbolic-ref", "HEAD").stdout.strip() == "refs/heads/feat/x"
@@ -1253,8 +1580,8 @@ def test_head_as_a_base_is_the_launching_worktrees_head(repo: Path) -> None:
     got = create(placed(linked, "on-top"), "HEAD")
 
     assert isinstance(got, Created) and got.commit == ahead
-    # Beside the main checkout, not beside the worktree it was asked from.
-    assert got.path == str(repo.parent / "repo-worktrees" / "on-top")
+    # Named after the main checkout, not after the worktree it was asked from.
+    assert got.path == str(worktrees_of("repo") / "on-top")
 
 
 def test_a_refused_create_makes_nothing(repo: Path) -> None:
@@ -1320,7 +1647,7 @@ def stuck(repo: Path) -> Iterator[Placement]:
         pytest.skip("root writes through directory permissions")
     where = placed(repo, "feat")
     parent = Path(where.path).parent
-    parent.mkdir()
+    parent.mkdir(parents=True)
     parent.chmod(stat.S_IRUSR | stat.S_IXUSR)
     try:
         yield where
@@ -1568,7 +1895,7 @@ def test_a_worktree_left_behind_a_symlinked_parent_is_still_this_calls(
     """
     real_parent = tmp_path / "elsewhere"
     real_parent.mkdir()
-    (repo.parent / "repo-worktrees").symlink_to(real_parent)
+    link_worktrees_of("repo", real_parent)
     _hook(repo, "exit 3")
     where = placed(repo, "feat")
 
@@ -1736,7 +2063,7 @@ def test_git_runs_the_launching_worktrees_hook_for_the_cleanup_of_a_failed_add(
     _hooks_in(linked, log)
     where = placed(linked, "feat")
     parent = Path(where.path).parent
-    parent.mkdir()
+    parent.mkdir(parents=True)
     parent.chmod(stat.S_IRUSR | stat.S_IXUSR)
     steps = _logged_by_step(monkeypatch, log)
 

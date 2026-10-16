@@ -31,7 +31,7 @@ from pptmstr.bridge import Bridge
 from pptmstr.settings import McpConnector, RoleChoice, Settings
 from pptmstr.store import Store
 from pptmstr.ui import settings_dialog as dialog
-from pptmstr.ui import transcript_pane, typeset
+from pptmstr.ui import typeset, widgets
 from pptmstr.ui.settings_dialog import (
     Choice,
     Facts,
@@ -65,14 +65,14 @@ def saved(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[Settings]:
 
 
 def choices(model: Model) -> list[Choice]:
-    out = [model.theme, model.scale, model.family, model.context_mode, *model.caps]
+    out = [model.theme, model.scale, model.family, *model.caps]
     for row in model.roles:
         out += [row.face, row.size]
     return out
 
 
 def toggles(model: Model) -> list[Toggle]:
-    return [model.typeset, model.wrap, model.ended, *model.pane_switches]
+    return [model.typeset, model.wrap, model.ended, model.reasoning, *model.pane_switches]
 
 
 def choice(model: Model, key: str) -> Choice:
@@ -102,9 +102,70 @@ def test_every_persisted_field_has_one_place_in_the_dialog() -> None:
     preference that can be saved from nowhere in the window.
     """
     placed = [name for owned in dialog.SECTIONS.values() for name in owned]
-    placed += list(dialog.READ_ONLY)
+    placed += [*dialog.READ_ONLY]
     assert sorted(placed) == sorted(each.name for each in fields(Settings))
     assert len(placed) == len(set(placed)), "a field two sections restore"
+
+
+def controls(page: dialog.Page) -> list[Choice | Toggle]:
+    out: list[Choice | Toggle] = []
+    for row in page.rows:
+        match row:
+            case Choice() | Toggle():
+                out.append(row)
+            case dialog.Switches(toggles=switches):
+                out += switches
+            case dialog.Roles(rows=roles):
+                for each in roles:
+                    out += [each.face, each.size]
+    return out
+
+
+def labels(page: dialog.Page) -> set[str]:
+    """
+    What the rig records for each control a page draws: a combo by its id, a box
+    by its label and id, and the ``defaults`` button. A face with one slot is text.
+    """
+    out = {f"defaults##{page.section.key}"} if page.section is not None else set()
+    for each in controls(page):
+        if isinstance(each, Toggle):
+            out.add(f"{each.label}##{each.key}")
+        elif len(each.options) > 1:
+            out.add(f"##{each.key}")
+    return out
+
+
+def test_the_navigation_lists_every_section_and_each_control_is_on_exactly_one_page() -> None:
+    """
+    Drawn a page at a time, a control on no page is as unreachable as a field in no
+    section: the walk is over the pages, and must find every row the model has.
+    """
+    model = build(Settings())
+    pages = model.pages
+
+    assert [each.key for each in pages] == [*dialog.SECTIONS, dialog.READ_ONLY_PAGE]
+    assert [each.section.key for each in pages if each.section] == list(dialog.SECTIONS)
+    assert len({each.title for each in pages}) == len(pages)
+    placed = [each.key for page in pages for each in controls(page)]
+    every: list[Choice | Toggle] = [*choices(model), *toggles(model)]
+    assert sorted(placed) == sorted(each.key for each in every)
+    assert len(placed) == len(set(placed)), "a control on two pages"
+    # And the read-only fields are said on a page of their own.
+    (read_only,) = [each for each in pages if each.key == dialog.READ_ONLY_PAGE]
+    said = [row.text for row in read_only.rows if isinstance(row, dialog.Line)]
+    assert model.connectors_note in said[-2] and said[-1] == model.board_log_note
+
+
+def test_stepping_through_the_navigation_holds_at_either_end() -> None:
+    pages = build(Settings()).pages
+    keys = [each.key for each in pages]
+
+    assert dialog.stepped(pages, keys[0], -1) == keys[0]
+    assert dialog.stepped(pages, keys[0], 1) == keys[1]
+    assert dialog.stepped(pages, keys[-1], 1) == keys[-1]
+    assert dialog.stepped(pages, keys[-1], -1) == keys[-2]
+    assert dialog.page_of(pages, "no-such-page") is pages[0]
+    assert dialog.stepped(pages, "no-such-page", 1) == keys[1]
 
 
 def test_the_defaults_are_every_row_at_its_default_and_nothing_to_restore() -> None:
@@ -123,7 +184,7 @@ def test_the_defaults_are_every_row_at_its_default_and_nothing_to_restore() -> N
         "BRIEF",
     ]
     assert all(each.on and each.disabled is None for each in model.pane_switches)
-    assert shown(model, "context-mode") == f"this build's ({transcript_pane.DEFAULT_MODE.value})"
+    assert model.reasoning.on and model.reasoning.label == "show reasoning"
     assert [shown(model, each.key) for each in model.caps] == ["4", "8", "9"]
     assert model.previews
     assert all(
@@ -178,14 +239,12 @@ def test_choosing_any_entry_of_any_row_puts_that_entry_in_force() -> None:
             after = build(changed(start, option.change))
             assert choice(after, held.key).current == index, (held.key, option.label)
             walked += 1
-    # 9 themes, 4 sizes, 2 families, 5 modes, 8 + 7 + 5 caps, 9 roles of 7 sizes,
-    # and a face a slot: the walk covered the dialog and not an empty list.
+    # 9 themes, 4 sizes, 2 families, 8 + 7 + 5 caps, 9 roles of 7 sizes, and a
+    # face a slot: the walk covered the dialog and not an empty list.
     assert walked == (
         len(theme.THEMES)
         + len(typeset.SCALES)
         + len(typeset.PROPORTIONALS)
-        + len(transcript_pane.RenderMode)
-        + 1
         + 8
         + 7
         + 5
@@ -217,12 +276,12 @@ def test_a_change_is_the_setting_the_seam_and_the_file_read(tmp_path: Path) -> N
     got = pick(got, "face-prose", "monospace")
     got = pick(got, "size-prose", "+2 px")
     got = pick(got, "size-diff", "-1 px")
-    got = pick(got, "context-mode", "raw")
     got = pick(got, "concurrency_cap", "6")
     got = pick(got, "subagent_cap", "0")
     got = pick(got, "fps_idle", "15")
     got = changed(got, PaneSet("board", False))
     got = changed(got, FieldSet("wrap_inputs", False))
+    got = changed(got, build(got).reasoning.flip)
 
     assert got == Settings(
         theme="light",
@@ -230,7 +289,7 @@ def test_a_change_is_the_setting_the_seam_and_the_file_read(tmp_path: Path) -> N
         typeset_family="droid",
         typeset_roles=(RoleChoice("diff", None, -1), RoleChoice("prose", "monospace", 2)),
         typeset_panes=(("board", False),),
-        context_mode="raw",
+        show_reasoning=False,
         concurrency_cap=6,
         subagent_cap=0,
         fps_idle=15.0,
@@ -248,7 +307,7 @@ def test_a_sections_defaults_restore_that_section_and_leave_the_rest() -> None:
         .with_role("prose", slot="monospace")
         .with_pane("board", False)
     )
-    held = changed(held, FieldSet("context_mode", "raw"))
+    held = changed(held, FieldSet("show_reasoning", False))
     model = build(held)
     assert not any(
         section.at_default
@@ -269,7 +328,7 @@ def test_a_sections_defaults_restore_that_section_and_leave_the_rest() -> None:
     assert looks.typeset_roles == held.typeset_roles
 
     panes = changed(held, model.panes.restore)
-    assert panes.typeset_panes == () and panes.context_mode == ""
+    assert panes.typeset_panes == () and panes.show_reasoning
     assert panes.wrap_inputs is False
 
     rest = changed(held, model.sessions.restore)
@@ -330,10 +389,7 @@ def test_text_that_cannot_be_typeset_is_every_row_disabled_with_the_reason_and_n
     # What is not about typeset text is untouched.
     assert model.theme.disabled is None and model.wrap.disabled is None
     assert all(each.disabled is None for each in model.caps)
-    assert model.context_mode.disabled is None
-    typeset_entry = next(each for each in model.context_mode.options if each.label == "typeset")
-    assert not typeset_entry.usable
-    assert all(each.usable for each in model.context_mode.options if each.label != "typeset")
+    assert model.reasoning.disabled is None, "reasoning is shown in every renderer"
 
 
 def test_faces_still_to_load_leave_the_switch_live_and_say_what_it_costs() -> None:
@@ -363,14 +419,6 @@ def test_a_family_whose_file_did_not_load_is_shown_and_cannot_be_chosen() -> Non
         ("Droid Sans (Roboto emphasis)", False),
     ]
     assert shown(model, "family") == "Roboto", "what is in force, as the seam falls back"
-
-
-def test_the_typeset_log_is_not_offered_to_start_in_while_its_pane_is_switched_off() -> None:
-    off = build(Settings().with_pane("context", False))
-    entry = next(each for each in off.context_mode.options if each.label == "typeset")
-    assert not entry.usable
-    on = build(Settings().with_pane("board", False))
-    assert next(each for each in on.context_mode.options if each.label == "typeset").usable
 
 
 # -- settings this build did not write -------------------------------------------------
@@ -433,7 +481,6 @@ def test_a_value_the_lists_do_not_offer_is_shown_as_it_is_and_kept() -> None:
         typeset_family="comic",
         concurrency_cap=5,
         fps_idle=12.5,
-        context_mode="hologram",
         typeset_roles=(RoleChoice("prose", "cursive", 9), RoleChoice("ghost", "monospace", 1)),
         typeset_panes=(("holodeck", False),),
     )
@@ -450,7 +497,6 @@ def test_a_value_the_lists_do_not_offer_is_shown_as_it_is_and_kept() -> None:
     assert shown(model, "scale") == "110%"
     assert shown(model, "family") == "Roboto"
     assert shown(model, "concurrency_cap") == "5" and shown(model, "fps_idle") == "12.5"
-    assert shown(model, "context-mode").startswith("this build's")
     assert shown(model, "face-prose") == "proportional" and shown(model, "size-prose") == "+4 px"
     assert all(each.on for each in model.pane_switches)
     assert not model.appearance.at_default and not model.text.at_default
@@ -647,10 +693,19 @@ class Rig:
             monkeypatch.setattr(imgui, name, wrapped)
 
         noting("checkbox")
-        noting("small_button")
         noting("button")
         noting("selectable")
         noting("begin_combo", opens=True)
+
+        # A section's "defaults" is the pane-row button, drawn through ``widgets``.
+        real_small = widgets.small_button
+
+        def small_button(label: str) -> bool:
+            out = real_small(label)
+            self.rects[label] = centre()
+            return out
+
+        monkeypatch.setattr(widgets, "small_button", small_button)
 
     def apply(self, change: dialog.Change) -> None:
         self.changes.append(change)
@@ -711,10 +766,20 @@ class Rig:
         self.frames(2)
         assert self.input_active and imgui.is_any_item_active()
 
-    def open(self) -> None:
+    def open(self, page: str | None = None) -> None:
         self.dialog.request_open()
         self.frames(3)
         assert self.dialog.is_open
+        if page is not None:
+            self.show(page)
+
+    def show(self, page: str) -> None:
+        """
+        Click the navigation's entry for ``page``.
+        """
+        (entry,) = [each for each in self.rects if each.endswith(f"##nav-{page}")]
+        self.click(entry)
+        assert self.dialog.selected == page
 
     def window(self) -> Any:
         return imgui.internal.find_window_by_name(dialog.TITLE)
@@ -837,7 +902,7 @@ def test_the_chord_does_not_open_it_over_another_modal(rig: Rig) -> None:
 def test_escape_closes_the_dialog_and_keeps_what_was_changed(
     rig: Rig, saved: list[Settings]
 ) -> None:
-    rig.open()
+    rig.open(dialog.SESSIONS)
     rig.click("wrap composers##wrap")
     assert rig.state.settings.wrap_inputs is False
 
@@ -852,6 +917,64 @@ def test_the_close_button_closes_it(rig: Rig) -> None:
     rig.open()
     rig.click("close")
     assert not rig.dialog.is_open and not rig.listed
+
+
+def test_selecting_a_section_draws_its_controls_and_no_other_pages(rig: Rig) -> None:
+    rig.open()
+    pages = build(rig.state.settings).pages
+    nav = {f"{each.title}##nav-{each.key}" for each in pages}
+    assert nav <= set(rig.rects), "every section is listed"
+    assert rig.dialog.selected == dialog.APPEARANCE, "the first, on a first open"
+
+    for page in pages:
+        rig.show(page.key)
+        drawn = set(rig.rects) - nav - {"close"}
+        assert drawn == labels(page), page.key
+        assert labels(page) or page.key == dialog.READ_ONLY_PAGE
+
+
+@pytest.mark.parametrize("navigation", [True, False], ids=["keyboard-nav", "no-keyboard-nav"])
+def test_up_and_down_move_through_the_sections_while_the_list_has_the_focus(
+    rig: Rig, navigation: bool
+) -> None:
+    """
+    The list has the focus when the dialog opens, and the arrows are the dialog's
+    own: the runner may not have ImGui's keyboard navigation on.
+    """
+    io = imgui.get_io()
+    if not navigation:
+        io.config_flags &= ~imgui.ConfigFlags_.nav_enable_keyboard
+    keys = [each.key for each in build(rig.state.settings).pages]
+    rig.open()
+
+    rig.press(imgui.Key.down_arrow)
+    assert rig.dialog.selected == keys[1]
+    assert "defaults##text" in rig.rects
+    rig.press(imgui.Key.up_arrow)
+    rig.press(imgui.Key.up_arrow)
+    assert rig.dialog.selected == keys[0], "held at the top"
+    for _ in keys:
+        rig.press(imgui.Key.down_arrow)
+    assert rig.dialog.selected == keys[-1], "and at the foot"
+
+    # Focus on the page's controls: the arrows are not the list's.
+    rig.show(dialog.SESSIONS)
+    rig.click("wrap composers##wrap")
+    rig.press(imgui.Key.down_arrow)
+    assert rig.dialog.selected == dialog.SESSIONS
+    assert rig.changes == [FieldSet("wrap_inputs", False)]
+
+
+def test_the_dialog_opens_again_on_the_section_last_viewed(rig: Rig) -> None:
+    rig.open(dialog.PANES)
+    rig.press(ESCAPE)
+    rig.frame()
+    assert not rig.dialog.is_open
+
+    rig.press(CTRL, COMMA)
+    rig.frame()
+    assert rig.dialog.is_open and rig.dialog.selected == dialog.PANES
+    assert "BOARD##pane-board" in rig.rects and "##theme" not in rig.rects
 
 
 @pytest.mark.parametrize("navigation", [True, False], ids=["keyboard-nav", "no-keyboard-nav"])
@@ -885,7 +1008,7 @@ def test_escape_over_an_open_list_closes_the_list_and_not_the_dialog(
 def test_ticking_a_box_in_the_open_dialog_changes_that_setting_once(
     rig: Rig, saved: list[Settings]
 ) -> None:
-    rig.open()
+    rig.open(dialog.PANES)
 
     rig.click("BOARD##pane-board")
 
@@ -902,7 +1025,7 @@ def test_ticking_a_box_in_the_open_dialog_changes_that_setting_once(
 def test_picking_from_a_list_changes_that_setting_and_the_entry_in_force_changes_nothing(
     rig: Rig, saved: list[Settings]
 ) -> None:
-    rig.open()
+    rig.open(dialog.TEXT)
     epoch = typeset._STATE.epoch
 
     rig.click("##face-prose")
@@ -922,33 +1045,40 @@ def test_picking_from_a_list_changes_that_setting_and_the_entry_in_force_changes
 def test_a_disabled_row_takes_no_click(rig: Rig, saved: list[Settings]) -> None:
     rig.state.settings = Settings(typeset=False)
     app._configure_typeset(rig.state.settings)
-    rig.open()
-
+    rig.open(dialog.PANES)
     rig.click("BOARD##pane-board")
+    rig.show(dialog.TEXT)
     rig.click("##family")
 
     assert rig.changes == [] and saved == []
     assert "Roboto" not in rig.rects, "its list did not open"
 
 
+@pytest.mark.usefixtures("typeset_live")
 def test_an_entry_that_cannot_be_had_is_listed_and_takes_no_click(
     rig: Rig, saved: list[Settings]
 ) -> None:
     """
-    With CONTEXT switched off the log cannot start typeset. The entry stays in the
-    list, so the operator sees it exists, and a click on it is not a choice.
+    A family whose file did not load stays in the list, so the operator sees it
+    exists, and a click on it is not a choice.
     """
-    rig.state.settings = Settings().with_pane("context", False)
-    app._configure_typeset(rig.state.settings)
-    rig.open()
+    rig.known = lambda: Facts(unusable=frozenset({"droid"}))
+    rig.open(dialog.TEXT)
 
-    rig.click("##context-mode")
-    assert "typeset" in rig.rects
-    rig.click("typeset")
+    rig.click("##family")
+    assert "Droid Sans (Roboto emphasis)" in rig.rects, "listed"
+    rig.click("Droid Sans (Roboto emphasis)")
     assert rig.changes == [] and saved == []
 
-    rig.click("raw")
-    assert rig.changes == [FieldSet("context_mode", "raw")]
+
+def test_the_reasoning_switch_is_on_the_panes_page_and_saved_on_the_click(
+    rig: Rig, saved: list[Settings]
+) -> None:
+    rig.open(dialog.PANES)
+    rig.click("show reasoning##reasoning")
+
+    assert rig.changes == [FieldSet("show_reasoning", False)]
+    assert rig.state.settings.show_reasoning is False and saved == [rig.state.settings]
 
 
 def test_the_title_bars_close_box_closes_it_and_the_state_follows(rig: Rig) -> None:
@@ -973,7 +1103,7 @@ def test_the_title_bars_close_box_closes_it_and_the_state_follows(rig: Rig) -> N
 
 @pytest.mark.usefixtures("typeset_live")
 def test_the_defaults_button_is_dead_at_the_defaults_and_restores_otherwise(rig: Rig) -> None:
-    rig.open()
+    rig.open(dialog.TEXT)
     rig.click("defaults##text")
     assert rig.changes == []
 
@@ -1002,7 +1132,7 @@ def test_every_role_shows_a_sample_and_none_is_refused(
     monkeypatch.setattr(
         views, "_said", lambda im, text, ink=None: (said.append(text), real(im, text, ink))[1]
     )
-    rig.open()
+    rig.open(dialog.TEXT)
     rig.frames(3)
 
     cache = rig.dialog.previews
@@ -1048,7 +1178,7 @@ def test_the_diff_sample_is_the_librarys_diff_view_and_the_note_says_so(rig: Rig
     from pptmstr.ui.typeset import diffs
 
     assert diffs.ADOPT == "measured" and diffs.columns().holds and typeset.diff_adopted()
-    rig.open()
+    rig.open(dialog.TEXT)
     rig.frames(3)
 
     cache = rig.dialog.previews
@@ -1078,7 +1208,7 @@ def test_where_no_diff_is_the_librarys_the_diff_sample_is_its_rows_as_text(
     from pptmstr.ui.typeset import diffs
 
     monkeypatch.setattr(diffs, "ADOPT", "never")
-    rig.open()
+    rig.open(dialog.TEXT)
     rig.frames(3)
     cache = rig.dialog.previews
     key = ("sample", "diff")
@@ -1088,7 +1218,7 @@ def test_where_no_diff_is_the_librarys_the_diff_sample_is_its_rows_as_text(
 
 @pytest.mark.usefixtures("typeset_live")
 def test_a_role_made_larger_is_seen_in_its_sample_before_the_dialog_is_closed(rig: Rig) -> None:
-    rig.open()
+    rig.open(dialog.TEXT)
     rig.frames(2)
     cache = rig.dialog.previews
     key = ("sample", "prose")
@@ -1116,41 +1246,48 @@ def test_text_that_cannot_be_typeset_draws_the_whole_dialog_with_no_sample(rig: 
     rig.frames(2)
 
     assert rig.dialog.is_open
+    rig.show(dialog.TEXT)
     assert len(rig.dialog.previews) == 0
     rig.click("typeset text##typeset")
+    rig.show(dialog.PANES)
     rig.click("BOARD##pane-board")
     assert rig.changes == []
+    rig.show(dialog.SESSIONS)
     rig.click("wrap composers##wrap")
     assert rig.changes == [FieldSet("wrap_inputs", False)], "the rest of it works"
 
 
-def test_the_dialog_is_one_screen_at_the_applications_window_size(rig: Rig) -> None:
+def test_every_page_is_one_screen_at_the_applications_window_size(rig: Rig) -> None:
     """
-    No tabs and no scrolling is a promise about 1500 by 900, the size the window
-    opens at, less the menu bar and the status bar the runner keeps (``CHROME``).
-    Measured with the real faces and the application's style: a row that grows
-    breaks it here, and so does a section added without making room.
+    No scrolling is a promise about 1500 by 900, the size the window opens at, less
+    the menu bar and the status bar the runner keeps (``CHROME``), and it is made for
+    every page. Measured with the real faces and the application's style: a row that
+    grows breaks it here, and so does a page given more than it has room for.
     """
     rig.open()
     rig.frames(2)
-
     window = rig.window()
     assert window is not None
-    assert window.size.x == dialog._WIDTH
-    assert window.size.y <= DISPLAY[1] - CHROME, window.size.y
     centred = (DISPLAY[1] - window.size.y) / 2
     assert abs(window.pos.y - centred) <= 1, "a dialog that fits stays where it opened"
-    assert window.scroll_max.y == 0, "it scrolls: the last rows are out of sight"
-    assert "close" in rig.rects and rig.rects["close"][1] < window.pos.y + window.size.y
+
+    for page in build(rig.state.settings).pages:
+        rig.show(page.key)
+        rig.frames(2)
+        window = rig.window()
+        assert window.size.x == dialog._WIDTH, page.key
+        assert window.size.y <= DISPLAY[1] - CHROME, (page.key, window.size.y)
+        assert window.scroll_max.y == 0, (page.key, "it scrolls: the last rows are out of sight")
+        assert "close" in rig.rects and rig.rects["close"][1] < window.pos.y + window.size.y
 
 
 @pytest.mark.usefixtures("typeset_live")
 def test_a_dialog_that_grows_past_the_foot_of_the_screen_is_moved_back_onto_it(rig: Rig) -> None:
     """
-    Opened and centred at the defaults, then given the largest text there is: 20 px
-    running text with every role four more. Every sample is taller, the window
-    grows downward from where it was centred, and without the move its close
-    button is under the status bar.
+    Opened and centred on its shortest page, then given the largest text there is
+    -- 20 px running text with every role four more -- and turned to the Text page.
+    The window grows downward from where it was centred, and without the move its
+    close button is under the status bar.
     """
     rig.open()
     opened_at = rig.window().pos.y
@@ -1160,6 +1297,7 @@ def test_a_dialog_that_grows_past_the_foot_of_the_screen_is_moved_back_onto_it(r
         largest = largest.with_role(role.value, step=4)
     rig.state.settings = largest
     app._configure_typeset(largest)
+    rig.show(dialog.TEXT)
     rig.frames(4)
 
     window = rig.window()

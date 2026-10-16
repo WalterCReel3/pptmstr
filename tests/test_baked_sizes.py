@@ -75,6 +75,7 @@ def atlas() -> Iterator[Any]:
     context = im.create_context()
     im.set_current_context(context)
     io = im.get_io()
+    io.set_ini_filename(None)
     io.display_size = im.ImVec2(1200.0, 800.0)
     io.delta_time = 1.0 / 60.0
     io.backend_flags |= im.BackendFlags_.renderer_has_textures.value

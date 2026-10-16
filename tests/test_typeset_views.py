@@ -3168,3 +3168,242 @@ def test_a_stream_the_library_cut_reports_its_text_unset_for_as_long_as_it_is_dr
     arriving.set_text("Another turn.", closed=True)
     frame(seam, arriving.draw)
     assert arriving.unbuilt == 0
+
+
+# -- a closed stream hosts a diff fence ----------------------------------------
+
+# An honest fence with header lines (set above the diff view as code of their
+# own), prose after it, and a fence after that which is coloured by token: the
+# last block, so a count of committed blocks that left out the header block
+# would leave it plain.
+DIFF_AND_AFTER = (
+    "Before.\n\n"
+    "```diff\n--- a/x.py\n+++ b/x.py\n@@ -1,2 +1,3 @@\n a = 1\n-b = 2\n+c = 3\n+d = 4\n```\n\n"
+    "After.\n\n"
+    "```python\ndef f(x):\n    return x\n```\n"
+)
+
+
+def _stream_of(seam: Any, cache: typeset.ViewCache, source: str, *, closed: bool) -> Any:
+    handle = typeset.stream(cache, "stream")
+    handle.append(source)
+    if closed:
+        handle.close()
+    for _ in range(2):
+        frame(seam, lambda: handle.draw())
+    return handle
+
+
+def test_a_closed_stream_hosts_an_honest_diff_fence_as_its_settled_document_does(
+    columns_hold: Any,
+) -> None:
+    """
+    Once its text has ended, a stream draws an honest diff fence in the
+    library's diff view, as the settled document of the same text does: the
+    same blocks with the same texts, the same block hosted, read from the same
+    text, and the fence after it still coloured by token.
+    """
+    seam = columns_hold
+    cache = typeset.ViewCache()
+    frame(seam, lambda: typeset.markdown(cache, "settled", DIFF_AND_AFTER))
+    frame(seam, lambda: typeset.markdown(cache, "settled", DIFF_AND_AFTER))
+    settled = cache.view("settled")
+    handle = _stream_of(seam, cache, DIFF_AND_AFTER, closed=True)
+    view = handle.view
+    assert list(settled.hosts) == [2]
+    assert list(view.hosts) == list(settled.hosts)
+    assert cache.texts("stream") == cache.texts("settled")
+    assert view.hosted(2).text == settled.hosted(2).text
+    assert cache.unbuilt("stream") == 0
+    last = len(view.texts) - 1
+    keyword = themes.syntax_inks().keyword
+    assert keyword in {ink for _, _, ink in view._colours.get(last, ())}, "the fence after it"
+    assert 2 not in view._colours, "a diff view's inks are its own"
+
+
+def test_an_open_stream_hosts_no_diff_fence_even_one_that_has_arrived_whole(
+    columns_hold: Any,
+) -> None:
+    """
+    While the text may still grow, the fence stays code under its caption, as
+    it was: whether it is an honest diff can change with the next line.
+    """
+    seam = columns_hold
+    cache = typeset.ViewCache()
+    handle = _stream_of(seam, cache, DIFF_AND_AFTER, closed=False)
+    assert not handle.view.hosts
+    assert cache.texts("stream")[1].startswith("diff\n--- a/x.py")
+
+
+def test_a_stream_opened_again_after_its_close_hosts_nothing_until_it_closes_again(
+    columns_hold: Any,
+) -> None:
+    seam = columns_hold
+    cache = typeset.ViewCache()
+    handle = _stream_of(seam, cache, DIFF_AND_AFTER, closed=True)
+    assert handle.view.hosts
+    handle.set_text(DIFF_AND_AFTER + "\nMore.\n")
+    frame(seam, lambda: handle.draw())
+    assert not handle.view.hosts
+    handle.close()
+    frame(seam, lambda: handle.draw())
+    frame(seam, lambda: handle.draw())
+    assert list(handle.view.hosts) == [2]
+
+
+def test_a_closed_streams_blocks_still_name_their_own_source(columns_hold: Any) -> None:
+    """
+    The header block and the hosted fence are not the stream's blocks as it
+    read them, and have no span of the source; every block after them still
+    names its own, though it stands one later than the stream's numbering.
+    """
+    seam = columns_hold
+    cache = typeset.ViewCache()
+    view = _stream_of(seam, cache, DIFF_AND_AFTER, closed=True).view
+    spans = [view.source_of(n) for n in range(len(view.texts))]
+    assert spans[1] is None and spans[2] is None
+    after = spans[3]
+    assert after is not None
+    assert DIFF_AND_AFTER[after.span.start : after.span.end].strip() == "After."
+
+
+def test_a_closed_stream_in_a_pane_the_diff_view_is_not_adopted_in_hosts_nothing(
+    own_rows: Any,
+) -> None:
+    seam = own_rows
+    cache = typeset.ViewCache()
+    handle = _stream_of(seam, cache, DIFF_AND_AFTER, closed=True)
+    assert not handle.view.hosts
+    assert cache.texts("stream")[1].startswith("diff\n--- a/x.py")
+
+
+def test_a_closed_stream_hosting_its_diff_claims_the_height_its_settled_document_does(
+    columns_hold: Any,
+) -> None:
+    """
+    Where every line is set: the same blocks at the same baselines, the diff
+    view's height included, so nothing moves between the pane's last run and
+    the document it becomes when another kind closes it.
+    """
+    seam = columns_hold
+    cache = typeset.ViewCache()
+    for _ in range(3):
+        frame(seam, lambda: typeset.markdown(cache, "settled", DIFF_AND_AFTER))
+    handle = _stream_of(seam, cache, DIFF_AND_AFTER, closed=True)
+    frame(seam, lambda: handle.draw())
+    assert cache.height("stream") == pytest.approx(cache.height("settled"), abs=0.5)
+    settled, streamed = cache.view("settled"), handle.view
+    for block in (0, 1, 3, 4):
+        assert [line.baseline for line in streamed.set_lines(block, block + 1)] == pytest.approx(
+            [line.baseline for line in settled.set_lines(block, block + 1)], abs=0.5
+        ), block
+
+
+def test_a_closed_stream_hosts_once_the_diff_view_is_adopted_with_nothing_new_in_it(
+    columns_hold: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Whether a diff is the library's can change while a closed stream is on
+    screen (the columns are measured again at another size): the stream's
+    text has not moved, and its fence is hosted from the next draw all the same.
+    """
+    from pptmstr.ui.typeset import diffs
+
+    seam = columns_hold
+    monkeypatch.setattr(diffs, "ADOPT", "never")
+    cache = typeset.ViewCache()
+    handle = _stream_of(seam, cache, DIFF_AND_AFTER, closed=True)
+    assert not handle.view.hosts
+    monkeypatch.setattr(diffs, "ADOPT", "measured")
+    frame(seam, lambda: handle.draw())
+    assert list(handle.view.hosts) == [2]
+    monkeypatch.setattr(diffs, "ADOPT", "never")
+    frame(seam, lambda: handle.draw())
+    assert not handle.view.hosts
+    assert cache.texts("stream")[1].startswith("diff\n--- a/x.py")
+
+
+_MISCOUNTED_FENCE = "--- a/x.py\n+++ b/x.py\n@@ -12,5 +12,6 @@\n ctx\n-old\n+new\n+new2"
+_MISCOUNTED_SAID = (
+    "the written hunk headers disagree with the lines: @@ -12,5 +12,6 @@ has 2 old and 3 new"
+)
+_HIDDEN_SAID = "contains invisible or bidirectional control characters: U+202E"
+
+
+@pytest.mark.parametrize(
+    ("fence", "warnings"),
+    [
+        (_MISCOUNTED_FENCE, (_MISCOUNTED_SAID,)),
+        (_MISCOUNTED_FENCE.replace("+new2", "+new2 ‮# checked"), (_HIDDEN_SAID, _MISCOUNTED_SAID)),
+        ("--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-a = 3\n+a = 4 ‮# checked", (_HIDDEN_SAID,)),
+    ],
+    ids=["miscounted", "hidden-and-miscounted", "hidden"],
+)
+def test_a_diff_fences_warnings_are_in_the_warn_ink_wherever_it_is_hosted(
+    columns_hold: Any, fence: str, warnings: tuple[str, ...]
+) -> None:
+    """
+    The warnings that lead the lines set above a hosted diff are drawn in the
+    theme's warn ink, and nothing after them is: in a settled document (DETAIL),
+    in a closed stream (the session pane's last run), in a part with an ink of
+    its own and in a document drawn in one ink. The text is the text the
+    warnings and headers are, unchanged, and another theme is its warn ink.
+    """
+    from pptmstr.ui.typeset import diffs
+
+    seam = columns_hold
+    source = f"Before.\n\n```diff\n{fence}\n```\n\nAfter.\n"
+    length = len("\n".join(warnings))
+    cache = typeset.ViewCache()
+    handle = typeset.stream(cache, "stream")
+    handle.append(source)
+    handle.close()
+
+    def body() -> None:
+        typeset.markdown(cache, "settled", source)
+        typeset.document(cache, "coloured", (Part(source, colour="text_dim"),))
+        typeset.markdown(cache, "bare", source, ink=theme.P.text_dim)
+        handle.draw()
+
+    for palette in (theme.DARK, theme.LIGHT):
+        theme.set_theme(palette.name)
+        for _ in range(2):
+            frame(seam, body)
+        for key in ("settled", "coloured", "bare", "stream"):
+            view = cache.view(key)
+            assert list(view.hosts) == [2], key
+            header = cache.texts(key)[1]
+            assert header == "\n".join(diffs.fence_headers(fence)), key
+            assert header.startswith("\n".join(warnings) + "\n"), key
+            spans = view._colours.get(1, ())
+            assert spans[0] == (0, length, palette.warn.u32), key
+            assert all(start >= length for start, _, _ in spans[1:]), key
+            assert palette.warn.u32 not in {ink for _, _, ink in spans[1:]}, key
+
+
+def test_an_honest_diff_fences_headers_are_not_in_the_warn_ink(columns_hold: Any) -> None:
+    seam = columns_hold
+    cache = typeset.ViewCache()
+    frame(seam, lambda: typeset.markdown(cache, "settled", DIFF_AND_AFTER))
+    frame(seam, lambda: typeset.markdown(cache, "settled", DIFF_AND_AFTER))
+    handle = _stream_of(seam, cache, DIFF_AND_AFTER, closed=True)
+    for view in (cache.view("settled"), handle.view):
+        assert list(view.hosts) == [2]
+        assert theme.P.warn.u32 not in {ink for _, _, ink in view._colours.get(1, ())}
+
+
+def test_a_fence_written_with_an_empty_info_string_is_never_taken_for_warned_headers(
+    columns_hold: Any,
+) -> None:
+    """
+    The mark is a kind of string and not a word, so a block the reader made is
+    never one: an unhosted fence of the same text has no warn ink.
+    """
+    seam = columns_hold
+    source = f"```\n{_MISCOUNTED_SAID}\n--- a/x.py\n```\n"
+    cache = typeset.ViewCache()
+    frame(seam, lambda: typeset.markdown(cache, "k", source))
+    view = cache.view("k")
+    assert not view.hosts
+    assert theme.P.warn.u32 not in {ink for spans in view._colours.values() for _, _, ink in spans}
+    assert not views._warned_lengths(view.blocks)

@@ -2,7 +2,8 @@
 
 **Dated:** 2026-10-07 · **Status:** scope for work not started; eight operator decisions, the
 rest recommendation or open — nothing built except the probe script and, from 2026-10-10,
-the operator's bootstrap script (D6) · **Found by:** operator
+the operator's bootstrap script (D6), and from 2026-10-15 sequence step 2 (O1 and O4 answered
+by the 2026-10-15 UI-rework record) · **Found by:** operator
 request — "multiple sessions/agent-teams can work independently on different features that could
 normally be merged via normal git PRs" · **Sibling:**
 [`2026-10-07-a-session-can-continue-under-a-different-mode.md`](2026-10-07-a-session-can-continue-under-a-different-mode.md),
@@ -256,10 +257,16 @@ An undocumented `CLAUDE_CODE_HOST_WORKTREE` / `_FENCE` pair exists in the binary
 for this arrangement. It appears in no fetched doc and was never observed acting. A lead, not a
 finding.
 
-## D4 — Placement: a sibling directory outside the repo, named from the branch slug (D)
+## D4 — Placement: `~/.pptmstr/worktrees/<repo>/<slug>` (D)
 
-Decided: outside the repository; the directory named from the feature-branch slug; no dots
-anywhere in the path; slug restricted to `[A-Za-z0-9-]` and unique *after* that restriction.
+**Rewritten 2026-10-15.** Decided: outside the repository, under one home for every repository's
+worktrees, `<repo>` the main checkout's directory name and `<slug>` named from the feature
+branch; slug restricted to `[A-Za-z0-9-]` and unique *after* that restriction. The operator, on
+2026-10-15: "If a worktree home off of an apps config path works for Claude it should work for
+us. Full stop." This is the convention
+`notes/2026-10-07-a-linked-worktree-as-the-clone-substitute.md` proposed the same day as the
+first version of this decision, and the tree that note records,
+`~/.pptmstr/worktrees/pptmstr/adv-text-experiment`, is at it.
 
 - **Not nested.** A session launched at the repo root has the nested worktree inside its write
   region and can write into another session's tree. On the git side the task said "`git clean` in
@@ -267,28 +274,32 @@ anywhere in the path; slug restricted to `[A-Za-z0-9-]` and unique *after* that 
   repository"; only the doubled force, `git clean -ndffx`, reports "Would remove" (G 836-842, dry
   runs, n=1). What a nested worktree does do unprompted is show as untracked in the main
   checkout's `git status`, and `git add -A` there warns "adding embedded git repository"
-  (G 814-834).
-- **No dots.** `brief.session_dir` (`brief.py:129`) turns only the path separator into `-`; the
-  CLI and SDK turn every non-alphanumeric into `-` (`_sanitize_path`, S 580-590). On a dotted path
-  a session's briefs do not sit beside its transcripts —
-  [`2026-09-21-what-is-left-on-the-gate-policy-branch.md`](2026-09-21-what-is-left-on-the-gate-policy-branch.md)
-  l.115-120, unfixed. Run on 2026-10-07: for `/home/wreel/Source/pptmstr-worktrees/feat-a` the two
-  functions agree; they would also agree for a path with `_` only by accident of there being none.
+  (G 814-834). It is also refused by `launcher.refusal_for` for pptmstr's own repository, which
+  is how the CLI's `.claude/worktrees/<name>` met this on 2026-10-15: an autonomous launch into
+  one was refused (run 2026-10-15, `refusal_for` on the nested path and on both outside
+  placements: refused, allowed, allowed).
 - **Unique after restriction.** `feat-x`, `feat.x`, `feat_x` sanitise to one transcript directory
   (run 2026-10-07: `_sanitize_path` equal for all three). Uniqueness has to be checked on the
-  sanitised form, not on the branch name.
+  sanitised form, not on the branch name. `worktree.collision` and `preflight` do.
 
-**(R) The parent path: `<parent of repo>/<repo>-worktrees/<slug>`.** Proposed by the lead, not
-agreed. Nothing above depends on it beyond "sibling, dotless".
+**What the first version got wrong.** It required "no dots anywhere in the path", and that rule's
+only ground was a defect of our own: `brief.session_dir` turned only the path separator into `-`
+where the CLI turns every non-alphanumeric, so on a dotted path a session's briefs were filed
+apart from its transcripts
+([`2026-09-21-what-is-left-on-the-gate-policy-branch.md`](2026-09-21-what-is-left-on-the-gate-policy-branch.md)
+l.115-120). The record called that defect unfixed and placed around it, and its parent path,
+`<parent of repo>/<repo>-worktrees/<slug>`, was a lead proposal nothing depended on beyond
+"sibling, dotless". The defect is now gone at its cause rather than avoided:
+briefs are keyed by session id under `<config>/briefs/<id>/`
+([`archive/2026-10-15-a-brief-is-keyed-by-its-session.md`](archive/2026-10-15-a-brief-is-keyed-by-its-session.md)),
+so no path a session runs in has a character that can part its brief from anything.
 
-**A worktree already exists that this decision rules out.**
-`notes/2026-10-07-a-linked-worktree-as-the-clone-substitute.md` (staged the same day) records
-`~/.pptmstr/worktrees/pptmstr/adv-text-experiment`, created by hand on branch
-`adv-text-experiment`, and proposes `~/.pptmstr/worktrees/<repo>/<name>` as a convention.
-`git worktree list` confirms it. That path has a dot, is not a sibling, and its branch carries no
-prefix. The note calls itself undecided, so this is not a contradiction between decisions — but
-the tree is real, the brief-slug defect applies to it today, and cleanup as scoped below (filter
-on the branch prefix) will not list it.
+**Built 2026-10-15.** `worktree.place` (no caller yet) and `scripts/worktree.py`'s
+`worktree_path`; the `unsanitary` warning both carried, which existed only for the brief defect, is
+gone. **Accepted:** two repositories with one directory name share `<repo>`, so one slug in
+each is one path; `preflight` and `scripts/worktree.py create` refuse a path that exists, which is
+where that shows. **Not measured:** the sandbox with a cwd under a dotted directory in `$HOME`.
+Every D2 fixture sat under `/tmp`, and D2's arms have not been re-run at this placement.
 
 ## D5 — The rail lane is the feature-branch name, with no new "repo" fact (D)
 
@@ -342,8 +353,10 @@ own tree and linted, and `make check` passed in `enhanced-sessions` on an enviro
 built. Not run: `make run` or any window from a borrowed environment, and any session, contained
 or not, launched into one. What borrowing costs otherwise is in the script's docstring.
 
-`enhanced-sessions` is the first tree at D4's placement, `…/pptmstr-worktrees/enhanced-sessions`,
-on a branch with no prefix.
+`enhanced-sessions` was the first tree the script made, `…/pptmstr-worktrees/enhanced-sessions`,
+on a branch with no prefix. That is D4's first placement; the script has made trees at
+`~/.pptmstr/worktrees/<repo>/<slug>` since D4 was rewritten on 2026-10-15, and the tree was left
+where it is.
 
 ## D7 — Fork is left exactly as it is (D)
 
@@ -363,6 +376,11 @@ see "Clean up".
 ## Open questions
 
 ### O1 — The base ref (O)
+
+**Answered 2026-10-15** by [`2026-10-15-ui-rework.md`](2026-10-15-ui-rework.md) W1 (D): the
+`HEAD` of the cwd checkout, no fetch ever, no base field, and a warning when that checkout has
+uncommitted changes. Launched from a linked worktree, that worktree's `HEAD` (W7). The table
+below is kept as the reasoning the answer was given against.
 
 The operator asked for pros and cons and has not chosen.
 
@@ -406,6 +424,12 @@ Anything from D2's untested list. The three with the most bearing on the design 
   branch changes what "lands by an ordinary PR" asks of the operator.
 
 ### O4 — How a failed worktree requirement ends a launch (O)
+
+**Answered 2026-10-15** by [`2026-10-15-ui-rework.md`](2026-10-15-ui-rework.md) W5 (D), for a
+worktree the launch was asked to make: the launch is held through the existing
+`report_failure` path, with no session, the reason shown and the draft kept, and never a
+fall back to `STRICT`. The AUTONOMOUS requirement this question was raised for is out of scope
+by W6 and is not built.
 
 Raised while writing this record; not in the task. See "Invoke": the two existing refusals end
 differently — a refused directory downgrades to `STRICT`, a CLI below the floor holds the launch —
@@ -606,13 +630,266 @@ Per D8, operator-initiated only.
 1. **Resume launches in the session's recorded cwd and refuses visibly when it is gone; a launch
    can report failure back to the launcher with the draft kept.** Independent of everything else
    here, fixes a defect that exists today, and shared with the sibling record.
-2. Detection, the launcher control, creation and placement.
+2. Detection, the launcher control, creation and placement. **Built 2026-10-15**, on
+   W1-W7 of [`2026-10-15-ui-rework.md`](2026-10-15-ui-rework.md); see "Step 2 as built" below.
 3. The missing-paths notice.
 4. The end-of-session summary and the ref sensor.
 5. Removal.
 
 O1 has to be answered before step 2 and O4 before the AUTONOMOUS requirement in it. O3's first
 item bears on step 4.
+
+## Step 2 as built (2026-10-15)
+
+Untagged: this describes the code. A branch field under New Task's working directory. Empty, the
+launch is the one before the field (pinned field by field,
+`test_an_empty_branch_field_builds_the_spec_it_built_before_the_field`). Filled, the field's
+directory is read on a worker (`launcher.CheckoutReading`: `worktree.detect` and the new
+`worktree.uncommitted`, which runs `status` with `--no-optional-locks` so the operator's index
+is not rewritten), the path is `worktree.place`'s, resolved, and is the spec's `cwd` and
+`session_base` before anything exists; `LaunchSpec.worktree` (`model.NewWorktree`) carries the
+branch, base and checkout to `app._launch`, whose `go` makes it with `launcher.make_worktree` on
+a worker, after the containment checks and before `AgentSession` is built. Every
+`worktree.CreateOutcome` variant is put in words by `launcher.worktree_refusal` and comes back as
+a `LaunchRefused` with the draft, branch included. Not a repository, an unclassified directory,
+a branch with nothing to name, and a read not yet landed hold the button. A picked session
+disables the field. `from_record` does not carry `worktree`, so a fork, relaunch or resume
+starts in the recorded directory and makes nothing.
+
+**Choices the W-list did not make, made by the builder.** W3 reuse requires the listing's entry
+at the path to be on the branch *and* `detect` of the path to answer that worktree of the same
+main checkout, because the listing alone is not evidence (`worktree.py` docstring); a
+registered entry whose directory is gone is refused. W4 is git's own: `worktree add` makes the
+missing parents (run, git 2.39.5), and pptmstr makes no directory. Under `--fake` a worktree
+launch is refused rather than made, since `--fake` writes nothing else to disk. Under
+AUTONOMOUS the gate's wording for a planned worktree is that of a worktree beside its main
+checkout (`LauncherState.git_layout`), not of the not-yet-existing path. W7's acceptance has a
+consequence the W-list does not state: every git call runs in the launching checkout
+(`Placement.run_in`), so launched from a worktree a session has written, a relative
+`core.hooksPath` runs that tree's hooks (`worktree.py` docstring, "Hooks").
+
+**Run:** `tests/test_launch_worktree.py` and the new `uncommitted` tests in
+`tests/test_worktree.py`, against real git 2.39.5 repositories under a redirected `HOME`; the
+two files plus `tests/test_launcher.py`, `tests/test_launch_policy.py`,
+`tests/test_verbatim_drawn.py`, `tests/test_resume_form.py`; 18 mutations of the new code, each
+killed; the modal under a headless Dear ImGui context with a branch typed and a dirty
+checkout, at 900 and 480 px, with the launch and cancel buttons under the scrolling body and on
+the display. `mypy pptmstr`, `black`, `ruff` on the touched files. **Not run:** a live session
+launched into a made worktree (no CLI session was started; the pool in the tests is at cap 0);
+a rendered window or screenshot; the full suite.
+
+## Step 2 follow-ups (2026-10-15, board task wt-fix)
+
+From reviewer-3's read of step 2 (board task rv-wt-launch). Untagged prose describes the code
+or a measurement; **(R)** marks the lead's decisions on the board task, taken with nobody at the
+pane, and not ratified by the operator.
+
+**Measured, git 2.39.5, this host.**
+
+- *A locked entry was reused.* `test_a_locked_worktree_on_the_branch_is_never_reused` (finish an
+  add, write `initializing` to `.git/worktrees/<id>/locked`, call `make_worktree`) run against
+  step 2's code: `make_worktree` returned None, so a session would have started there. A real
+  add was then observed in flight, from a `smudge` filter and a `post-checkout` hook that each
+  took the listing: mid-checkout the entry is `locked initializing` **with the new tree's `HEAD`
+  already `refs/heads/<branch>`**, so `detect` agrees and the listing names the branch; by
+  `post-checkout` the lock is **already gone** while the add has not exited. The lock therefore
+  covers the checkout and not the hooks after it.
+- *`git status` runs programs a decoy's config names.* From a linked worktree whose `.git`
+  names a decoy outside it that names it back (`tests/test_worktree.py`, `_status_decoy`):
+  `status --no-optional-locks` ran the decoy's `core.fsmonitor`, and ran the `clean` filter of a
+  stat-dirty file the worktree's `.gitattributes` names. With `-c core.fsmonitor=false` the
+  fsmonitor program did not run; the clean filter still did. All four are pinned tests.
+
+**Decided and built.**
+
+- (R) A locked entry is never continued in: the modal holds with git's lock reason, and
+  `make_worktree` refuses one too. A worktree a `*Left` outcome left is not continued in
+  silently: continuing in any registered worktree needs it unlocked, on the branch, its
+  directory there, **and the modal to have said so before the press** -- "continues in the
+  existing worktree at <path> on <branch> -- it may hold an earlier session's uncommitted work".
+  `NewWorktree.reuse` carries what the modal said, and a launch that finds otherwise -- a tree
+  that appeared since the read, or one that went -- starts nothing and the read is taken again.
+- Two presses of one branch: the plan-must-match rule refuses the second when its read predates
+  the first's worktree; git itself refuses the race on `git branch`; and since the lock is gone
+  before `post-checkout`, `make_worktree` also refuses a path another call in this process is
+  still making. Another pptmstr process's add is seen only through the lock.
+- (R) `uncommitted` passes `-c core.fsmonitor=false`, and is not asked of a linked worktree at
+  all, since filters have no generic switch; the modal says in one line that a linked
+  worktree's uncommitted changes are not checked, and why. `rev-parse` and `worktree list`,
+  which the read still runs there, were not seen to run anything; that is not a proof for every
+  config key.
+- (R) The base is pinned: the read resolves the checkout's `HEAD` to an object id
+  (`worktree.head_commit`), the modal shows its first twelve digits, `NewWorktree.base` carries
+  it, and the branch is made at it. `make_worktree` refuses when `HEAD` no longer names it --
+  creation runs in `go` right after the press, ahead of the pool's queue -- and both a press
+  and a failure drop the read, so the draft comes back showing the commit `HEAD` names now.
+- The draw reads no disk for a plan: the worktrees' parent directory and the shared `.git` are
+  resolved on the worker, and the planned path is that parent plus the slug. The spec's `cwd` is
+  that path, unresolved again, and `LaunchSpec` refuses a `worktree` whose path is not its
+  `cwd`. A link put at the path after the read is something at the path, and is refused.
+- A cwd naming a subdirectory still launches at the new worktree's root, and the placed-path line
+  now says so.
+
+**Run:** `tests/test_launch_worktree.py`, `tests/test_worktree.py`, `tests/test_launcher.py`,
+`tests/test_launch_policy.py`, `tests/test_verbatim_drawn.py`, `tests/test_resume_form.py`;
+21 mutations of the new and the reviewed lines, on a copy of the tree, each killed by a test;
+`mypy pptmstr`, `black`, `ruff`. **Not run:** an add killed for real at its timeout (simulated
+by the lock); two pptmstr processes; a live session; the full suite.
+
+### Step 2 follow-ups, second round (2026-10-15, board task wt-fix-2)
+
+From reviewer-4's read of the first round (board task rv-wt-fix). **(R)** is as above. These
+**supersede** the first round's reuse rule, its in-process guard and its "main checkout only"
+dirty read. The bullets above are kept as written, and they are history now.
+
+**Measured, git 2.39.5, this host.**
+
+- *An add stopped in `post-checkout` was reused while its hook was still writing.* Setup: a
+  `post-checkout` hook of `sleep 5; touch "$PWD/hook-done"`, and `worktree.create` wrapped to
+  `timeout=1.0`, because its default is bound at definition time. Run against the first
+  round's code, reviewer-4's sequence went like this:
+  - `make_worktree` gave the AddTimedOut words;
+  - the listing showed the tree unlocked on `refs/heads/feat`;
+  - the re-read planned `reuse=True`;
+  - the second `make_worktree` returned None, which means a session started, and
+    `hook-done` was still absent.
+  The test now pinned, `test_an_add_stopped_in_post_checkout_is_held_while_its_hook_still_writes`,
+  was also run against that code, and it failed on the reuse plan.
+- *`status` recurses into submodules.* A main checkout with a staged gitlink. The submodule's
+  git directory is elsewhere, and its `config` names a `clean` filter for a stat-dirty file.
+  `status`, with `-c core.fsmonitor=false`, ran that filter. With `--ignore-submodules=all` it
+  did not, and the gitlink went unlisted. With `--ignore-submodules=dirty` it did not either,
+  and the gitlink was still listed. All of this is pinned in `tests/test_worktree.py`.
+- *A main checkout's own config runs too.* A repository a session `git init`-ed below its cwd
+  reads as a `MainCheckout`, and `uncommitted` there ran its `clean` filter (pinned).
+- *No narrower question is filter-free.* The candidates were tried in that nested repository,
+  with fsmonitor off and submodules ignored where the flag is accepted, against two kinds of
+  index entry. One was stat-dirty: its mtime moved. The other was racily clean: the index
+  file's mtime was set equal to the file's, and no other write was made.
+  - `diff-index --cached HEAD` ran no filter on either entry.
+  - `ls-files --others --exclude-standard` ran no filter on either entry.
+  - `diff-files` ran no filter on the stat-dirty entry and reported it changed. It ran the
+    filter on the racy entry.
+  - `ls-files --modified` ran the filter on both.
+  Pinning `core.checkStat`/`core.trustctime` from the command line did not stop `diff-files`
+  in a racy case the repository's own config had set up. That run was exploratory and is not
+  pinned. So no question that sees a modified file avoids filters.
+
+**Decided and built.**
+
+- (R) **No existing worktree is reused** (`2026-10-15-ui-rework.md` W3, revised). A worktree
+  git has at the placed path, or one with the branch checked out, holds the launch. The hold
+  applies in any state: finished, locked, left by `AddTimedOut` or by `AddFailedWorktreeLeft`,
+  or on another branch. It comes with one line naming the worktree: "to continue there, set
+  the directory to <path> and leave the branch empty". A registered path whose directory is
+  gone holds too, with no such offer. `make_worktree` reads the listing again at the press and
+  refuses the same way, then pre-flights. `NewWorktree.reuse`, the reuse notice and the
+  `detect` cross-check of a reused tree are gone.
+- The in-process guard (`_making`) is gone. It existed only for the reuse window. Without
+  reuse, a second `make_worktree` of one branch fails in one of three places: on the listing,
+  on the pre-flight, or on `git branch`, which exits 0 only for the call that made the ref. It
+  does this before any add of its own, and nothing starts a session in a tree it did not make.
+  This is pinned with a `post-checkout` that blocks until released.
+- (R) **The dirty read moves to after the press** (option (ii) on the task; (i) is ruled out
+  by the measurements above). `read_checkout` asks no `status` of any checkout. `make_worktree`
+  asks it after the listing, pre-flight and `HEAD` checks and before `create`, under the trust
+  `create` already needs. `uncommitted` adds `--ignore-submodules=dirty`, so it runs no config
+  that `create` would not. Uncommitted changes, or a `status` that fails, return
+  `UncommittedHeld`. That is a `str` subclass that travels through `LaunchRefused` unchanged.
+  `report_failure` recognises it by type and hands the draft back with
+  `uncommitted_accepted` set to its cwd field. The modal then says the launch goes ahead
+  without the changes, and the next press launches. Editing the directory drops the
+  acceptance, and so does a launch.
+- `uncommitted`'s docstring no longer says a main checkout's config is trusted.
+- A correction to the first round's base bullet (reviewer-4's finding 4). Creation does not
+  run "right after the press". For a contained launch it runs in `go` after the CLI version
+  check, which can take up to 10 s. A commit made in that window also refuses the launch.
+
+**Run:** `tests/test_launch_worktree.py`, `tests/test_worktree.py`, `tests/test_launcher.py`;
+mutations on a copy of the tree under `$TMPDIR` (board task wt-fix-2's result lists each);
+`mypy pptmstr`, `black`, `ruff`. **Not run:** two pptmstr processes; a live CLI session; the
+full suite; any git other than 2.39.5.
+
+### Step 2 follow-ups, third round (2026-10-15, board task wt-fix-3)
+
+From reviewer-6's read of the second round (board task rv-wt-fix-2). These **supersede** the
+second round's continuation line and its `UncommittedHeld` channel; the bullets above are kept
+as written.
+
+- **A correction to the second round.** "`uncommitted` adds `--ignore-submodules=dirty`, so it
+  runs no config that `create` would not" overstates it. Per config file it holds; per program
+  it does not: `status` runs the `clean` filters the working tree's own `.gitattributes` choose
+  (an untracked one a session wrote included), and `create` runs the `smudge` filters the base
+  commit's attributes choose. Both are programs the same config defines, which is the trust
+  argument; they are not the same programs.
+- **Measured, git 2.39.5:** with `--ignore-submodules=dirty`, `uncommitted` beside a populated
+  submodule starts **no child process at all** (`GIT_TRACE2_EVENT`: one `start`, no
+  `child_start`). Plain `status` starts `git status --porcelain=2` in the submodule, and that
+  runs the submodule's filter. Pinned with its control in `tests/test_worktree.py`
+  (`test_uncommitted_starts_no_process_at_all_beside_a_populated_submodule`).
+- (R) **The continuation is offered only for a tree nothing marks unfinished.** The hold's
+  "to continue there" line was offered for an add stopped in `post-checkout` while its hook
+  still wrote, and for an entry git lists locked (reviewer-6, spec-level). Now it is offered
+  only when git lists the entry unlocked **and** this process holds no record of an unfinished
+  add at that path (`launcher.UnfinishedWorktrees`): one in flight, or one ended `AddTimedOut`,
+  `BranchTimedOut` or `AddFailedWorktreeLeft`. Otherwise the hold names the state (locked and
+  its reason; "its creation was stopped and its state is not known"; "this window is still
+  making it"; "its add failed after checking it out") and asks for `git -C <path> status`
+  before the tree is used. The general offer is worded for a tree nobody here can vouch for:
+  "to continue there, check it is complete (git -C <path> status), then set the directory to
+  <path> and leave the branch empty". **The `git -C <path> status` advice in this bullet is
+  withdrawn by the fourth round below** — no hold names a command to run in the tree.
+- **That record is in-process and does not survive a restart.** git keeps no mark of an
+  unfinished add once its lock is gone, so after pptmstr restarts, a tree an earlier run left
+  stopped in `post-checkout` is an unlocked entry like any other and gets the general offer.
+  That offer's "check it is complete" wording exists for that case.
+- (R) **"Launch anyway" is a type, not a string.** `make_worktree` returns
+  `None | WorktreeRefused | UncommittedFound`; `app.LaunchOutcome` gains `LaunchHeldOnChanges`;
+  `app._launch_ended` returns the variant under `match`/`assert_never`, and `_reap_launches`
+  tells `report_failure(..., accept_uncommitted=True)` for that arm only. `UncommittedHeld`, the
+  `str` subclass that had to be passed on unchanged, is gone; `_why_not_started` remains as
+  the words alone, for logs and tests. Pinned: a reason rebuilt by f-string, `strip`,
+  concatenation or `join` changes nothing about what the launcher is told.
+- An acceptance of uncommitted changes is cleared when the modal is closed without a launch
+  (cancel, Escape, a click outside) — from the fields and from every queued failed draft — and
+  when the failure that brought it is discarded.
+
+### Step 2 follow-ups, fourth round (2026-10-15, board task wt-fix-4)
+
+From reviewer-8's read of the third round (board task rv-wt-fix-3). These **supersede** the
+third round's hold wording and its in-flight mark; the bullets above are kept as written.
+
+- (R) **No hold names a command to run in the tree.** The third round told the operator to run
+  `git -C <path> status` in a listed tree. A session that could write that tree can aim its
+  `.git` at a repository it built (the `worktree` module docstring), and `status` there runs
+  the `clean` filters that repository's config names — the call `read_checkout` refuses to make
+  before the press, handed to the operator's own unsandboxed shell. The general offer now reads
+  "it may be incomplete and was not made by this launch; to continue there, set the directory
+  to <path> and leave the branch empty", and nothing else; a locked or unfinished tree names its
+  state and ends "nothing is offered there". Pinned: in every hold and refusal line, nothing
+  after the " -- " that introduces what the operator is asked to do contains `git `, and no line
+  contains `git -C`, `status` or `unlock` (`test_no_hold_names_a_command_to_run_in_the_tree`).
+  git stays the subject of what a line reports ("git already has a worktree at ..."). The
+  decoy-`.git` chain was not run; each of its steps is measured separately in the tree.
+- **Measured (run, git 2.39.5): a second press that failed cleared the first's in-flight
+  mark.** Against the third round's `make_worktree`, press B checked the record, then sat in a
+  slowed `uncommitted`; press A of the same branch passed the record, made the tree and entered
+  a gated `post-checkout`; B was then refused, and the hold read while A's hook still ran made
+  the "to continue there" offer. (R) Now `UnfinishedWorktrees.begin` tests and takes the path in
+  one locked step before any check, handing the call a `Mark`; a press that finds the path taken
+  is refused at once and makes nothing, and only the mark's holder can change or drop the entry.
+  Pinned with the race itself, B holding and A arriving
+  (`test_a_press_that_fails_while_another_holds_the_path_leaves_the_others_mark`).
+- **A refusal by the checks drops the mark** (nothing was made); **an exception out of
+  `create` leaves the path "making it ended in an error, and its state is not known"**, not
+  "still making it" for good and not dropped — what `create` did on disk is unknown.
+- **A path git does not list is never offered.** `PathExists` (a directory at the placed path
+  that is not a registered worktree) now says so and offers nothing, per the third round's rule
+  that only an entry git lists unlocked is offered.
+- **A stopped `git branch` says what is true.** `BranchTimedOut` leaves no tree at the path;
+  the next press of that branch reads "no worktree was added there, but making its branch was
+  stopped, so the branch may exist now in a state not known". It is still recorded, so that
+  branch's path is held for the life of the process.
 
 ## Verification boundary
 

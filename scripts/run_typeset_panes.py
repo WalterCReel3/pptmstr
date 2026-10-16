@@ -15,7 +15,7 @@ so this counts them where they are made:
             stream and diff views), which is what "typeset" finally means
   own       the panes' own renderers for the same surfaces: DETAIL's diff and
             arguments, the inbox row's diff rows, arguments and preview, the
-            block renderer DETAIL shares with the context log, and the log's
+            block renderer DETAIL draws prose with, and the context log's
             line modes
 
 The cursor is moved down the queue with ``j`` every ``--step`` frames (the key
@@ -27,10 +27,9 @@ session mid-turn is DETAIL's stream and a finished one its deliverable. A PNG is
 written at each stop under ``--out``. **Nothing here says how any of it looks, and nobody has
 looked at the pictures unless they say so.**
 
-``--context MODE`` starts the context log in that mode, as
-``Settings.context_mode`` would, and brings its tab to the front beside DETAIL:
-``typeset`` is the log's markdown runs through the library, and with the
-library absent the pane's own wrapped lines.
+``--context`` brings the context log's tab to the front beside DETAIL. The
+log is drawn as the pane draws it: its markdown runs through the library, and
+with the library absent the pane's own wrapped lines.
 
 **Literal text** is counted by who drew each part, each frame: ``library``
 for a literal part the library set as a code block of its own, ``imgui`` for
@@ -57,7 +56,7 @@ it was, and the sentence the Text menu would show.
 Usage:
     scripts/xvfb_shot.sh -- .venv/bin/python scripts/run_typeset_panes.py --out shots/seam2-with
     scripts/xvfb_shot.sh -- .venv/bin/python scripts/run_typeset_panes.py \\
-        --context typeset --out shots/seam3-with
+        --context --out shots/seam3-with
     scripts/xvfb_shot.sh -- env IMSCRIBE_NO_TYPESET=1 \\
         .venv/bin/python scripts/run_typeset_panes.py --out shots/seam2-without
     scripts/xvfb_shot.sh -- .venv/bin/python scripts/run_typeset_panes.py \\
@@ -95,8 +94,8 @@ def _scratch_config() -> Path:
     Three things are moved, and all three before ``pptmstr.app`` is asked for
     anything: ``XDG_CONFIG_HOME``, which ``settings.config_dir`` and hello_imgui's
     ini both resolve from; ``CLAUDE_CONFIG_DIR``, which is where the SDK lists
-    transcripts; and ``brief.default_root``, which is derived from the home
-    directory and reads neither variable. A real session started through
+    transcripts; and ``brief.legacy_root``, the CLI's projects directory, which is
+    derived from the home directory and reads neither variable. A real session started through
     ``--argv`` therefore finds no credentials: this script is for the fake fleet.
 
     The directory is left behind, since the ini and whatever a run recorded are
@@ -110,10 +109,10 @@ def _scratch_config() -> Path:
     (claude / "projects").mkdir(parents=True)
     os.environ["XDG_CONFIG_HOME"] = str(config)
     os.environ["CLAUDE_CONFIG_DIR"] = str(claude)
-    brief.default_root = lambda: claude / "projects"
+    brief.legacy_root = lambda: claude / "projects"
     print(
         f"configuration for this run is under {scratch}, left in place:"
-        " XDG_CONFIG_HOME, CLAUDE_CONFIG_DIR and the brief root all point there",
+        " XDG_CONFIG_HOME, CLAUDE_CONFIG_DIR and the CLI projects root all point there",
         flush=True,
     )
     return scratch
@@ -145,9 +144,8 @@ def main() -> int:
     ap.add_argument("--step", type=int, default=45, help="frames at each stop")
     ap.add_argument(
         "--context",
-        choices=("raw", "wrap", "rich", "typeset"),
-        default=None,
-        help="the mode the context log starts in, and bring the log to the front",
+        action="store_true",
+        help="bring the context log to the front beside DETAIL",
     )
     ap.add_argument(
         "--diffs",
@@ -208,18 +206,13 @@ def main() -> int:
         (inbox, "_native_preview", "inbox._native_preview"),
         (rich_pane, "draw", "rich_pane.draw"),
         (transcript_pane, "_draw_lines", "transcript_pane._draw_lines"),
-        (transcript_pane, "_draw_rich", "transcript_pane._draw_rich"),
     ):
         counted(owner, name, own, label, False)
     shown: Counter[str] = Counter()
     real_log = transcript_pane.draw
 
-    def log_draw(
-        snap: Any, state: Any, selected: Any, closed_path: Any = None, *, start_in: Any = None
-    ) -> None:
-        if args.context is not None:
-            start_in = transcript_pane.RenderMode(args.context)
-        real_log(snap, state, selected, closed_path, start_in=start_in)
+    def log_draw(snap: Any, state: Any, selected: Any, *rest: Any, **named: Any) -> None:
+        real_log(snap, state, selected, *rest, **named)
         if selected is not None:
             feed = state.feeds.get(selected)
             held = 0 if feed is None else sum(len(feed.views.views(k)) for k in feed.views.keys())
@@ -361,7 +354,7 @@ def main() -> int:
             if counter["n"] == 2:
                 docking = hello_imgui.get_runner_params().docking_params
                 docking.focus_dockable_window("DETAIL")
-                if args.context is not None:
+                if args.context:
                     docking.focus_dockable_window("CONTEXT")
             if counter["n"] >= frames:
                 hello_imgui.get_runner_params().app_shall_exit = True

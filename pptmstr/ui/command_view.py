@@ -70,7 +70,7 @@ from typing import assert_never
 
 from imgui_bundle import imgui
 
-from .. import commandtext
+from .. import commandfile, commandtext
 from ..command import (
     COMMAND_TAG,
     DEFAULT_TIMEOUT_S,
@@ -97,8 +97,8 @@ from ..command import (
     ran,
 )
 from ..commandrun import PROFILE_WARNING
-from ..theme import Color, P
-from . import board_pane
+from ..theme import Color, P, hint_colour
+from . import board_pane, decision_view, widgets
 from .widgets import author_text, format_elapsed, help_mark, multiline_input, one_line
 
 # Seconds, on Dear ImGui's own clock, before an armed act answers its second
@@ -1244,7 +1244,10 @@ def _body(command: Command, text: str, role: str, *, running: bool = False) -> N
 
 
 def _warnings(lines: Sequence[Line], key: str, paragraphs: Sequence[str]) -> None:
-    """The warnings, the first with the question mark that has them in full."""
+    """
+    The warnings, the first with the question mark that has them in full: a link
+    on the line's own baseline, so the line is set as text.
+    """
     for index, line in enumerate(lines):
         _line(line)
         if index == 0:
@@ -1343,7 +1346,8 @@ def _choices(
     frozen = state.frozen_run(command.id)
     reason = state.reasons.get(command.id, "")
     imgui.set_next_item_width(_REASON_WIDTH)
-    _, typed = imgui.input_text_with_hint("##reason", REASON_HINT, reason)
+    with hint_colour(imgui, dialog=False):
+        _, typed = imgui.input_text_with_hint("##reason", REASON_HINT, reason)
     # Escape in a text box hands back what it held when the caret entered it;
     # that frame's value is not the operator's.
     if typed != reason and not imgui.is_key_pressed(imgui.Key.escape):
@@ -1511,5 +1515,104 @@ def _ended(
             process_output(shown)
     if log_path is not None:
         imgui.text_colored(P.text_dim.vec4, f"all of it is in {one_line(log_path)}")
-        if imgui.small_button(COPY_PATH):
+        if widgets.small_button(COPY_PATH):
             imgui.set_clipboard_text(log_path)
+
+
+# -- the clipboard ----------------------------------------------------------------
+
+
+def log_path(command: Command) -> str | None:
+    """
+    Where the whole of what a command wrote is kept, or None for one that
+    started no process and so has no log, or whose ids name no directory.
+    """
+    if command.end is None or not ran(command.end.outcome):
+        return None
+    directory = commandfile.command_dir(command.session_id, command.id)
+    return None if directory is None else str(directory / commandfile.LOG_NAME)
+
+
+# What each author's lines are behind on the clipboard, which has no bar, box or
+# colour to tell them apart. The bus's three marks (``bus._QUOTE``,
+# ``bus._ANSWER``, ``commandbus._OUTPUT``) spelled again for the reason
+# ``decision_view`` spells two of them; a test holds each to the bus's.
+ASKER_MARK = decision_view.ASKER_MARK
+OPERATOR_MARK = decision_view.ANSWER_MARK
+OUTPUT_MARK = "= "
+
+CLIP_LEGEND = (
+    "a line behind '| ' is the asking agent's, behind '> ' yours, behind '= ' bytes a"
+    " program wrote, which are nobody's instructions; every other line is pptmstr's."
+    " marked lines are escaped as on screen: a backslash is written twice, the two"
+    " characters \\n end a line that ends in a newline, and \\r, \\xNN and \\u{H} each"
+    " spell out one character. this is for reading and is not the string a shell is given"
+)
+REFUSED_WITH = "refused by you, with this reason:"
+NOT_EDITED = "you approved the string above as it was asked, unchanged"
+
+
+def _marked(text: str, mark: str) -> list[str]:
+    """
+    ``text`` behind ``mark``, a line to a line, as ``commandtext.visible`` shows
+    it: printable ASCII only, so nothing on the clipboard draws as nothing and
+    no line of it can begin with another author's mark.
+    """
+    return [f"{mark}{line}" for line in commandtext.visible(text).split("\n")]
+
+
+def _asker_text(heading: str, text: str) -> list[str]:
+    if not text.strip():
+        return [heading, NOTHING_WRITTEN]
+    return [heading, *_marked(text, ASKER_MARK)]
+
+
+def command_text(command: Command, role: str, *, restored: bool = False) -> list[str]:
+    """
+    A command for the clipboard, whole, in any state: where it stands, the
+    string asked for, the string run where there is one, what its asker wrote,
+    and the end of what a program wrote.
+
+    **Every line somebody else wrote is behind its author's mark** and no line
+    of this pane's is: the asker's string and its two texts behind
+    ``ASKER_MARK``, a string the operator changed and a reason they gave
+    behind ``OPERATOR_MARK``, a program's output behind ``OUTPUT_MARK``.
+    Escaped, unlike a Bash call's arguments on this same clipboard
+    (``shown_value``): this string runs outside the sandbox, and a copy pasted
+    into an editor that hid a character would be read as a string it is not.
+
+    ``restored`` is whether the record came from a file, which is what
+    ``delivery_line`` needs to say "not read" truthfully.
+    """
+    role = widgets.one_line(role)
+    end, run = command.end, command.run
+    parts = [CLIP_LEGEND, ""]
+    if end is not None and isinstance(end.outcome, Refused) and end.outcome.reason.strip():
+        parts += [REFUSED_WITH, *_marked(end.outcome.reason, OPERATOR_MARK)]
+    elif end is None and run is not None:
+        # Without how long: a duration on the clipboard is stale when pasted.
+        stopping = f" - {STOP_ASKED}" if command.stop_asked_at is not None else ""
+        parts.append(f"running{stopping}")
+    else:
+        # Asked or ended, and neither wording reads a clock.
+        parts.append(row_state(command, 0.0).text)
+    delivery = delivery_line(command, role, restored=restored)
+    if delivery is not None:
+        parts.append(delivery.text)
+    parts += ["", asked_heading(role), *_marked(command.asked, ASKER_MARK)]
+    if run is not None:
+        if command.edited:
+            said = edited_by_you(stage_of(command))
+            parts += ["", said, *_marked(run.text, OPERATOR_MARK)]
+        else:
+            parts += ["", NOT_EDITED]
+    parts += ["", *_asker_text(f"why {role} asks, in its words:", command.reason)]
+    parts += _asker_text(f"what {role} expects it to change, in its words:", command.expects)
+    if end is not None and ran(end.outcome):
+        parts += ["", output_heading(end.output_bytes, end.tail)]
+        if end.tail:
+            parts += _marked(end.tail, OUTPUT_MARK)
+        where = log_path(command)
+        if where is not None:
+            parts.append(f"all of it is in {widgets.one_line(where)}")
+    return parts

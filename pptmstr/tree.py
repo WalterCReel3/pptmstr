@@ -33,13 +33,15 @@ def _resolved(raw: str) -> Path | None:
     refused, which is what lets a directory the operator has not created yet still be
     placed.
 
-    None means a symlink loop, or a ``~user`` with no home: the two ways a typed path
-    leaves this with no location at all, as distinct from a location nothing is at
-    yet. Each caller decides what an unlocatable path is worth, and they do not agree.
+    None means a symlink loop, a ``~user`` with no home, or a NUL in the path: the
+    ways a typed path leaves this with no location at all, as distinct from a
+    location nothing is at yet. Each caller decides what an unlocatable path is
+    worth, and they do not agree.
     """
     try:
         return Path(raw).expanduser().resolve()
-    except (OSError, RuntimeError):
+    except (OSError, RuntimeError, ValueError):
+        # ValueError: a NUL in the path, which no directory can be named.
         return None
 
 

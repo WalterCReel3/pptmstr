@@ -22,6 +22,12 @@ bottom:
    counts them, closed until the operator opens it. Open, it is the lead's
    slots as ``rest_rows`` draws them. Its open state is ImGui's, per session,
    for the life of the window.
+4. *History*: the session's closed decisions and its ended commands, each
+   behind a triangle that starts closed, with their copy actions and a
+   withdrawn decision's draft (``draw_history``). They have left the queue, so
+   they are not DETAIL's, which draws only what is in front of the operator;
+   and they are the session's whether or not it is a team, so they are drawn
+   under the one-line refusals too.
 
 ``read_digest`` hands the lead the same ``digest.Digest`` in its own order and
 with none of this; the reorganisation is this pane's alone.
@@ -42,11 +48,13 @@ the application's own words" is one bar in both panes.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 
 from imgui_bundle import imgui
 
 from ..board import board_concerns, board_tasks, has_board
+from ..command import Command, CommandId
 from ..digest import (
     Digest,
     Reported,
@@ -62,6 +70,7 @@ from ..digest import (
 )
 from ..model import Answered, Decision, DecisionOwed, Dismissed, Snapshot
 from ..theme import P
+from . import command_view, decision_view, inbox, widgets
 from .board_pane import (
     Line,
     Tone,
@@ -71,18 +80,32 @@ from .board_pane import (
     shows_board,
     tone_colour,
 )
+from .command_view import command_text, log_path
 from .decision_view import asker_role
 from .focus import FocusState
 from .widgets import ellipsis, ellipsis_by, flat_line, format_elapsed, one_line
 
 
-def draw(snap: Snapshot, focus: FocusState, now: float) -> None:
+def draw(
+    snap: Snapshot,
+    focus: FocusState,
+    now: float,
+    decisions: decision_view.DecisionState | None = None,
+    commands: inbox.CommandRows | None = None,
+) -> None:
     """
-    Render the digest of the session under the cursor. Never reads the store.
+    Render the digest of the session under the cursor, and its history. Never
+    reads the store.
 
     The one-line refusals are the board pane's, word for word and on the same
     conditions (``board_pane.absent_line``, ``shows_board``): a tab that said
     "not a team" beside one drawing a board would be two answers to one question.
+    The history (``draw_history``) is drawn under a refusal as well: a session
+    that is not a team can still have asked for a decision or a command.
+
+    ``decisions`` and ``commands`` are the inbox's own, as DETAIL is handed
+    them: a draft is the one the inbox row holds, and a command's body is drawn
+    from the state the row draws from.
     """
     node = focus.node(snap)
     if node is None:
@@ -95,6 +118,7 @@ def draw(snap: Snapshot, focus: FocusState, now: float) -> None:
         imgui.push_text_wrap_pos(0.0)
         imgui.text_disabled(absent)
         imgui.pop_text_wrap_pos()
+        draw_history(snap, session_id, now, decisions, commands)
         return
     if not shows_board(
         has_board(snap, session_id),
@@ -102,6 +126,7 @@ def draw(snap: Snapshot, focus: FocusState, now: float) -> None:
         len(board_concerns(snap, session_id)),
     ):
         imgui.text_disabled("this session is not a team")
+        draw_history(snap, session_id, now, decisions, commands)
         return
 
     if imgui.begin_child("##digest"):
@@ -128,7 +153,149 @@ def draw(snap: Snapshot, focus: FocusState, now: float) -> None:
                     imgui.text_colored(tone_colour(row.tone).vec4, row.text)
             imgui.tree_pop()
         imgui.pop_text_wrap_pos()
+        draw_history(snap, session_id, now, decisions, commands)
     imgui.end_child()
+
+
+def draw_history(
+    snap: Snapshot,
+    session_id: str,
+    now: float,
+    decisions: decision_view.DecisionState | None,
+    commands: inbox.CommandRows | None,
+) -> None:
+    """
+    The fourth section: the session's closed decisions (``decision_view.draw_closed``)
+    and its ended commands (``draw_ended_commands``), each behind a triangle that
+    starts closed. Nothing at all for a session with neither.
+
+    Both have left the queue, so neither is in front of the operator and
+    neither is DETAIL's; this is where they are read again, copied, and where a
+    draft that outlived its decision is let go of. Under an id of the session's,
+    so each session's triangles keep their own open state, as the folded line's do.
+    """
+    if not decision_view.closed(snap, session_id) and not ended_commands(snap, session_id):
+        return
+    imgui.push_id(f"history-{session_id}")
+    imgui.spacing()
+    imgui.separator()
+    imgui.push_text_wrap_pos(0.0)
+    decision_view.draw_closed(snap, decisions, session_id, now)
+    draw_ended_commands(snap, commands, session_id)
+    imgui.pop_text_wrap_pos()
+    imgui.pop_id()
+
+
+# -- a session's ended commands ---------------------------------------------------
+
+# Ended commands listed for one session, newest first.
+_MAX_ENDED = 20
+ENDED_COPY = "copy"
+
+
+def ended_commands(snap: Snapshot, session_id: str) -> tuple[Command, ...]:
+    """Every command of a session that has ended, most recently ended first."""
+    ended = [
+        (c.end.at, c.id, c)
+        for c in snap.commands.values()
+        if c.session_id == session_id and c.end is not None
+    ]
+    return tuple(c for _, _, c in sorted(ended, key=lambda e: (e[0], e[1]), reverse=True))
+
+
+def ended_heading(count: int) -> str:
+    return f"commands ended in this session ({count})"
+
+
+def unread_command_lines(
+    snap: Snapshot, session_id: str, restored: AbstractSet[CommandId] = frozenset()
+) -> tuple[str, ...]:
+    """
+    One line for each asker that has not been handed how a command of its ended,
+    drawn above the list and outside its triangle: nothing wakes an asker for a
+    result, so this is where one that sits unread shows.
+
+    A withdrawal is not among them. Its asker made it (``command_view.delivery_line``).
+    Nor is a command in ``restored``: it came from a file, a file does not say
+    whether its asker read it, and a warning for every command of an earlier
+    run would be one the operator learns to read past. Its own body says
+    where it is from (``command_view.delivery_line``).
+    """
+    by_asker: dict[str, list[str]] = {}
+    for command in reversed(ended_commands(snap, session_id)):
+        delivery = command_view.delivery_line(command, "")
+        if delivery is None or command.first_delivered_at is not None:
+            continue
+        if command.id in restored:
+            continue
+        by_asker.setdefault(widgets.one_line(inbox.command_role(snap, command)), []).append(
+            widgets.one_line(command.id)
+        )
+    return tuple(
+        f"ended, not yet read by {role}: {', '.join(ids)}" for role, ids in by_asker.items()
+    )
+
+
+def ended_label(snap: Snapshot, command: Command, now: float) -> str:
+    """
+    The line an ended command is listed under: its id, whose it was and how it
+    ended, in this pane's words. Nothing its asker or a program wrote; a
+    refusal's reason is the operator's own, on one line.
+    """
+    role = widgets.one_line(inbox.command_role(snap, command))
+    return (
+        f"{widgets.one_line(command.id)} from {role}: {command_view.row_state(command, now).text}"
+    )
+
+
+def draw_ended_commands(snap: Snapshot, rows: inbox.CommandRows | None, session_id: str) -> None:
+    """
+    The session's ended commands, behind a triangle that starts closed, each
+    behind one of its own. Draws nothing for a session with none.
+
+    This is where a command is read after its row has left the queue: what
+    ran, how it ended, the end of what it wrote, where the rest is, and
+    whether its asker has read any of that. Every body is
+    ``command_view.draw_ended``'s.
+    """
+    ended = ended_commands(snap, session_id)
+    if not ended:
+        return
+    now = 0.0 if rows is None else rows.now
+    imgui.spacing()
+    for line in unread_command_lines(
+        snap, session_id, frozenset() if rows is None else rows.restored
+    ):
+        imgui.text_colored(P.warn.vec4, line)
+    label = f"{ended_heading(len(ended))}###ended-commands"
+    if not imgui.tree_node_ex(label, int(imgui.TreeNodeFlags_.span_avail_width)):
+        return
+    imgui.push_text_wrap_pos(0.0)
+    for command in ended[:_MAX_ENDED]:
+        imgui.push_id(f"ended:{command.id}")
+        opened = imgui.tree_node_ex(
+            f"{ended_label(snap, command, now)}###body",
+            int(imgui.TreeNodeFlags_.span_avail_width),
+        )
+        if opened:
+            role = inbox.command_role(snap, command)
+            restored = rows is not None and command.id in rows.restored
+            if widgets.small_button(ENDED_COPY):
+                imgui.set_clipboard_text("\n".join(command_text(command, role, restored=restored)))
+            said = inbox.unrecorded_line(rows, command)
+            if said is not None:
+                imgui.text_colored(P.warn.vec4, said)
+            command_view.draw_ended(
+                command, role=role, now=now, log_path=log_path(command), restored=restored
+            )
+            imgui.tree_pop()
+        imgui.pop_id()
+    if len(ended) > _MAX_ENDED:
+        imgui.text_colored(
+            P.text_dim.vec4, f"... {len(ended) - _MAX_ENDED} earlier ended command(s) not shown"
+        )
+    imgui.pop_text_wrap_pos()
+    imgui.tree_pop()
 
 
 def rest_id(session_id: str) -> str:

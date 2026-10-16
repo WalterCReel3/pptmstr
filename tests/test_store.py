@@ -55,7 +55,9 @@ from pptmstr.effects import (
     DecisionSettled,
     Effect,
     SessionDetachSettled,
+    SessionWoken,
     TaskWriteSettled,
+    WakeReason,
 )
 from pptmstr.intents import (
     AgentFinished,
@@ -6172,7 +6174,8 @@ def test_a_running_command_ends_once_as_the_first_end_says(outcome: Any) -> None
 
     over, effects = step(running, ended(1, outcome))
 
-    assert effects == ()
+    # Its asker's session is woken, once (``effects.SessionWoken``).
+    assert effects == (SessionWoken(C_ASKER[0], WakeReason.COMMAND_ENDED, cid(1)),)
     assert over.commands[cid(1)].end == End(outcome=outcome, at=300.0)
     assert over.commands[cid(1)].run == running.commands[cid(1)].run
     for again in (Exited(code=1), TimedOut(), NotStarted("x")):
@@ -6184,7 +6187,7 @@ def test_a_refusal_is_the_operators_words_or_nothing() -> None:
     asked = asked_by(command_world(), C_ASKER, 1)
 
     refused, effects = step(asked, CommandRefused(cid(1), "  not on this machine\n", 210.0))
-    assert effects == ()
+    assert effects == (SessionWoken(C_ASKER[0], WakeReason.COMMAND_ENDED, cid(1)),)
     assert refused.commands[cid(1)].end == End(Refused("  not on this machine\n"), 210.0)
     assert refused.commands[cid(1)].run is None
 

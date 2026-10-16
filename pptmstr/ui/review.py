@@ -318,6 +318,24 @@ def failed_panes(state: ReviewState) -> tuple[str, ...]:
     )
 
 
+def queue_on_screen(state: ReviewState, frame: int) -> bool:
+    """
+    Whether NEEDS YOU, the queue whose rows act, was drawn in ``frame`` or the
+    one before: what decides that DETAIL is the place to act (``detail.draw``).
+
+    **In each layout there is exactly one place to act on a parked item**
+    (planning/2026-10-15-ui-rework.md, "DETAIL acts in FOCUS only"). Read off
+    the queue's own last draw (``ReviewState.panes``, ``app._reviewing``) and
+    not off the layout's name: FOCUS docks no NEEDS YOU, so there DETAIL acts,
+    but the operator can open NEEDS YOU in FOCUS or close it in TRIAGE, and the
+    name would then say one place where there were two, or none. The frame
+    before counts because the panes draw in an order of the runner's: DETAIL
+    drawn ahead of the queue in a frame sees the queue's reading of the last.
+    """
+    drew = state.panes.get(INBOX)
+    return drew is not None and drew[0] >= frame - 1
+
+
 def withheld(state: ReviewState, pending: PendingApproval, *, unread: bool = False) -> str | None:
     """
     Why this call may not be approved yet, or ``None`` when it may. Every approve
@@ -462,7 +480,14 @@ def _parse_edit(text: str) -> dict[str, object] | None:
     return parsed if isinstance(parsed, dict) else None
 
 
-def handle_keys(snap: Snapshot, focus: FocusState, state: ReviewState, bridge: Bridge) -> None:
+def handle_keys(
+    snap: Snapshot,
+    focus: FocusState,
+    state: ReviewState,
+    bridge: Bridge,
+    *,
+    escape_spent: bool = False,
+) -> None:
     """
     Keyboard shortcuts, active only when the keys cannot be somebody's prose.
 
@@ -497,6 +522,11 @@ def handle_keys(snap: Snapshot, focus: FocusState, state: ReviewState, bridge: B
     sends it. Where the inbox failed to draw there is no field and no button, and
     a call that cannot be refused is an agent parked until its session is closed:
     there ``r`` sends the rejection itself, with whatever reason was already typed.
+
+    ``escape_spent`` is an Escape another control took (``app._handle_keys``): it
+    cancels nothing here, and an edit open under it keeps what was typed. It still
+    counts as the gesture that ends a hold: the operator pressed it, and it shows
+    they are no longer typing whichever control it was aimed at.
     """
     io = imgui.get_io()
     free = state.hold.step(text_input=bool(io.want_text_input), gesture=_stopped_typing())
@@ -507,12 +537,14 @@ def handle_keys(snap: Snapshot, focus: FocusState, state: ReviewState, bridge: B
     def letter(key: imgui.Key) -> bool:
         return not chord and imgui.is_key_pressed(key)
 
+    escape = not escape_spent and bool(imgui.is_key_pressed(imgui.Key.escape))
+
     if letter(imgui.Key.j):
         focus.move(snap, 1)
     if letter(imgui.Key.k):
         focus.move(snap, -1)
 
-    if imgui.is_key_pressed(imgui.Key.escape):
+    if escape:
         state.editing = None
         state.confirming_global = False
         state.edit_error = None
@@ -550,7 +582,7 @@ def handle_keys(snap: Snapshot, focus: FocusState, state: ReviewState, bridge: B
             approve_all_for_node(bridge, snap, state, pending.node)
         else:
             resolve(bridge, state, pending, approved=True)
-    if imgui.is_key_pressed(imgui.Key.escape):
+    if escape:
         state.edits.pop(pending.id, None)
 
 

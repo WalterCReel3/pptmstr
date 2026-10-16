@@ -15,6 +15,7 @@ Nothing is rendered, so nothing here says how it looks; the screenshots do that.
 
 from __future__ import annotations
 
+import itertools
 import threading
 from collections.abc import Callable, Iterator
 from pathlib import Path
@@ -30,6 +31,7 @@ from pptmstr.ui import launcher, resume_form, widgets
 from pptmstr.ui.launcher import LauncherState, SessionPicker
 from pptmstr.ui.resume_form import ResumeForms
 from pptmstr.ui.widgets import Help, Notice, Tone
+from tests import test_small_button as _buttons
 
 SESSION = "11111111-2222-3333-4444-555555555555"
 PREMISE = "do the thing\nand here is the reason it is worth doing"
@@ -73,6 +75,11 @@ def _row(session_id: str, cwd: str | None) -> SessionRow:
     )
 
 
+# The wrappers themselves, kept before a test puts ``_Drawn``'s in their place.
+_REAL_SMALL_BUTTON = widgets.small_button
+_REAL_LINK = widgets.link
+
+
 class _Drawn:
     """
     Dear ImGui, for ``widgets`` and for the dialog drawing through it, noting every
@@ -103,7 +110,13 @@ class _Drawn:
         imgui.text_colored(colour, text)
 
     def small_button(self, label: str) -> bool:
-        pressed = bool(imgui.small_button(label))
+        return self._noted(label, _REAL_SMALL_BUTTON(label))
+
+    def link(self, label: str, **kwargs: Any) -> bool:
+        """A question mark is a link (``widgets.link``), noted as a button is."""
+        return self._noted(label, _REAL_LINK(label, **kwargs))
+
+    def _noted(self, label: str, pressed: bool) -> bool:
         low, high = imgui.get_item_rect_min(), imgui.get_item_rect_max()
         self.buttons[label] = ((low.x + high.x) / 2.0, (low.y + high.y) / 2.0)
         if self.press == label:
@@ -138,6 +151,8 @@ class _Frames:
 
     def __init__(self, monkeypatch: pytest.MonkeyPatch, draw: Callable[[], None]) -> None:
         self.drawn = _Drawn()
+        monkeypatch.setattr(widgets, "small_button", self.drawn.small_button)
+        monkeypatch.setattr(widgets, "link", self.drawn.link)
         self._draw = draw
         for module in (widgets, launcher, resume_form):
             monkeypatch.setattr(module, "imgui", self.drawn)
@@ -357,6 +372,7 @@ def test_a_notice_is_one_row_however_long_its_line(
     line high, with its mark on the same row.
     """
     heights: list[float] = []
+    advances: list[float] = []
     tops: list[float] = []
     drawn = _Drawn()
 
@@ -364,13 +380,16 @@ def test_a_notice_is_one_row_however_long_its_line(
         imgui.set_next_window_size(imgui.ImVec2(300.0, 200.0))
         imgui.begin("w")
         imgui.push_text_wrap_pos(0.0)
+        before = imgui.get_cursor_pos_y()
         widgets.notice(Notice("word " * 60, Tone.WARN, Help("x", "t", ("p",))))
         heights.append(imgui.get_item_rect_size().y)
+        advances.append(imgui.get_cursor_pos_y() - before)
         tops.append(imgui.get_item_rect_min().y)
         imgui.pop_text_wrap_pos()
         imgui.end()
 
     monkeypatch.setattr(widgets, "imgui", drawn)
+    monkeypatch.setattr(widgets, "link", drawn.link)
     for _ in range(2):
         drawn.said.clear()
         imgui.new_frame()
@@ -379,7 +398,13 @@ def test_a_notice_is_one_row_however_long_its_line(
 
     (line,) = [text for text in drawn.said if text.startswith("word")]
     assert line.endswith("…") and "\n" not in line
-    assert heights[-1] == imgui.get_text_line_height(), "the mark's row, one line high"
+    # The mark is a link, one text line tall: the row is one line high, and the
+    # cursor moves down by that line and nothing more: shorter than the 22 px
+    # small button it was (tests/test_link.py has the 6 px at the 16 px face).
+    one = imgui.get_text_line_height()
+    assert heights[-1] == one, "the mark's row"
+    assert advances[-1] == one + imgui.get_style().item_spacing.y, "one row high"
+    assert heights[-1] < widgets.SMALL_BUTTON_TEXT_PX + 2.0 * widgets.SMALL_BUTTON_PADDING[1]
     assert f"{widgets.HELP_MARK}##x" in drawn.buttons
 
 
@@ -741,3 +766,110 @@ def test_read_recorded_reads_what_the_session_file_says_and_nothing_else() -> No
     assert launcher.read_recorded("recorded-one") == launcher.Recorded(
         "claude-opus-5", "feature", 2
     )
+
+
+# -- on the line's baseline ----------------------------------------------------------
+# The question mark is a link (``widgets.link``), which sits on the baseline of the
+# text it follows: measured at each line that ends in one, as the code that draws
+# the line draws it, at the faces tests/test_small_button.py measures its buttons at.
+
+# The fixture of that file, under its own name here: a context in the UI's face at
+# 13, 16 and 20 px, under the dock style.
+faced = _buttons.faced
+
+
+def _linked(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    """Every text, button and link a frame draws, in order, with its baseline."""
+    seen = _buttons._baselines(monkeypatch)
+    real = widgets.link
+
+    def link(label: str, **kwargs: Any) -> bool:
+        answer = real(label, **kwargs)
+        seen.append(_buttons._Seen("link", _buttons._text_baseline()))
+        return answer
+
+    monkeypatch.setattr(widgets, "link", link)
+    return seen
+
+
+@pytest.mark.parametrize("tone", [Tone.QUIET, Tone.LOUD], ids=["quiet", "loud"])
+def test_a_notices_question_mark_is_on_its_lines_baseline(
+    faced: None, monkeypatch: pytest.MonkeyPatch, tone: Tone
+) -> None:
+    """The (?) after a notice, on its own line or on the loud band."""
+    seen = _linked(monkeypatch)
+    said = Notice("nothing runs unattended", tone, Help("m", "why", ("so",)))
+
+    def draw() -> dict[str, float]:
+        seen.clear()
+        widgets.notice(said)
+        (text,) = [item for item in seen if item.name in ("text_disabled", "text_colored")]
+        (mark,) = [item for item in seen if item.name == "link"]
+        return {"apart": mark.baseline - text.baseline}
+
+    assert _buttons._lines(draw)["apart"] == 0.0
+
+
+def _command_warnings() -> Callable[[], None]:
+    from pptmstr.ui import command_view
+
+    lines = (command_view.Line("the first warning"), command_view.Line("the second"))
+    return lambda: command_view._warnings(lines, "warned", ("why",))
+
+
+def _inbox_release() -> Callable[[], None]:
+    from pptmstr.ui import inbox
+    from tests import test_command_rows
+
+    rows = test_command_rows.rows(opened="c1")
+    return lambda: inbox._release(rows, "c1", lambda _: None, True)  # type: ignore[arg-type]
+
+
+def _resume_fact() -> Callable[[], None]:
+    explained = Help("title", "this session's title", ("so",))
+    return lambda: resume_form._fact("title", "rebuild the parser", explained)
+
+
+def _resume_facts(tmp: Path) -> Callable[[], None]:
+    """The whole block: a title fact, a directory fact and the unknown team's combo."""
+    forms, _ = _resume_states(tmp)["label-and-unknown-team"]
+    form = forms.form
+    assert form is not None
+    reading = form.refresh(checkout=INSIDE_THE_CHECKOUT)
+    return lambda: resume_form._facts_block(form, reading, frozenset())
+
+
+def _launcher_picked(tmp: Path) -> Callable[[], None]:
+    state, _ = _launcher_states(tmp)["picked-here-strict"]
+    return lambda: launcher._picked_lines(state, state.cwd, frozenset())
+
+
+# Each line that ends in a question mark, drawn by the code that draws it.
+_MARKED: dict[str, Callable[[Path], Callable[[], None]]] = {
+    "command-warnings": lambda _: _command_warnings(),
+    "inbox-release": lambda _: _inbox_release(),
+    "resume-fact": lambda _: _buttons._in_a_dialog(_resume_fact()),
+    "resume-facts-block": lambda tmp: _buttons._in_a_dialog(_resume_facts(tmp)),
+    "launcher-picked": lambda tmp: _buttons._in_a_dialog(_launcher_picked(tmp)),
+}
+
+
+@pytest.mark.parametrize("site", list(_MARKED))
+def test_at_every_site_each_question_mark_is_on_its_lines_baseline(
+    faced: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, site: str
+) -> None:
+    """The mark's baseline minus the baseline of what it follows on its line, at each one."""
+    draw = _MARKED[site](tmp_path)
+    seen = _linked(monkeypatch)
+
+    def measured() -> dict[str, float]:
+        seen.clear()
+        draw()
+        return {
+            f"{at}: after {before.name}": item.baseline - before.baseline
+            for at, (before, item) in enumerate(itertools.pairwise(seen), 1)
+            if item.name == "link" and item.beside(before)
+        }
+
+    apart = _buttons._lines(measured)
+    assert apart and set(apart.values()) == {0.0}, apart

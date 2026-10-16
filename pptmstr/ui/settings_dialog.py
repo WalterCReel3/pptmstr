@@ -1,12 +1,16 @@
 """
-The settings dialog: everything the operator can persist, on one screen.
+The settings dialog: everything the operator can persist, a section at a time.
 
 A modal over whichever layout is up, opened by ``Ctrl+,`` or **Text > Settings…**.
 It exists because the choices outgrew a menu -- a face and a size for each of nine
-roles, a switch per pane -- and it is deliberately *not* a preferences wizard: one
-screen, no tabs, no Apply. Every field of ``Settings`` is either a control here or
-is named as read-only (``READ_ONLY``), and a test holds that, so a field added later
-cannot be persisted from nowhere.
+roles, a switch per pane -- and it is deliberately *not* a preferences wizard: a
+list of sections on the left, the selected one's rows on the right, no Apply. Every
+field of ``Settings`` is a control here or is named as read-only (``READ_ONLY``),
+and a test holds that, so a field added later cannot be persisted from nowhere.
+
+A section is data: ``Model.pages`` lists each one as a ``Page`` of rows, and the
+draw renders any page by the kind of each row. A section added later is a page
+and its rows, not another draw function.
 
 Three layers, and the split is what makes the dialog testable without a window:
 
@@ -16,7 +20,7 @@ Three layers, and the split is what makes the dialog testable without a window:
   loaded, which families can be drawn) into a ``Model``: every row, its options, the
   one in force, and why a row is disabled when it is. Each option *carries* the
   ``Change`` that choosing it makes, so the draw has no knowledge of any setting.
-- ``draw`` renders a ``Model`` and hands the ``Change`` of whatever was clicked to
+- ``draw`` renders a ``Model``'s selected page and hands the ``Change`` of whatever was clicked to
   the callback it was given. ``app._apply_settings`` is on the other end of it, and
   is the one place a setting is saved and its consequences carried out.
 
@@ -51,7 +55,7 @@ from .. import settings as settings_mod
 from .. import theme as theme_mod
 from ..approval import DiffText
 from ..settings import Settings
-from . import transcript_pane, typeset
+from . import typeset, widgets
 
 TITLE = "Settings"
 
@@ -60,7 +64,7 @@ TITLE = "Settings"
 CHORD = int(imgui.Key.mod_ctrl) | int(imgui.Key.comma)
 CHORD_LABEL = "Ctrl+,"
 
-_WIDTH = 900.0
+_WIDTH = 1000.0
 
 
 # ---------------------------------------------------------------------------
@@ -118,7 +122,7 @@ SESSIONS = "sessions"
 SECTIONS: dict[str, tuple[str, ...]] = {
     APPEARANCE: ("theme", "typeset_scale"),
     TEXT: ("typeset", "typeset_family", "typeset_roles"),
-    PANES: ("typeset_panes", "context_mode"),
+    PANES: ("typeset_panes", "show_reasoning"),
     SESSIONS: (
         "wrap_inputs",
         "hide_ended_subagents",
@@ -283,9 +287,71 @@ class Section:
 
 
 @dataclass(frozen=True, slots=True)
+class Fixed:
+    """
+    A row that is not a choice: what is in force, and why there is nothing to pick.
+    """
+
+    label: str
+    value: str
+    why: str
+
+
+@dataclass(frozen=True, slots=True)
+class Switches:
+    """
+    A row of toggles under one label: one per pane.
+    """
+
+    label: str
+    toggles: tuple[Toggle, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class Roles:
+    """
+    The role table: a face and a size for each role, and a sample of each where
+    the seam can set one this frame.
+    """
+
+    rows: tuple[RoleRow, ...]
+    previews: bool
+
+
+@dataclass(frozen=True, slots=True)
+class Line:
+    """
+    Read-only text; ``dim`` for what is said about it rather than the thing itself.
+    """
+
+    text: str
+    dim: bool = False
+
+
+Row = Choice | Toggle | Fixed | Switches | Roles | Line
+
+
+@dataclass(frozen=True, slots=True)
+class Page:
+    """
+    One entry of the navigation and what is drawn when it is selected. ``section``
+    is the heading and its ``defaults`` button, or ``None`` for a page nothing
+    restores.
+    """
+
+    key: str
+    title: str
+    rows: tuple[Row, ...]
+    section: Section | None = None
+
+
+READ_ONLY_PAGE = "read-only"
+
+
+@dataclass(frozen=True, slots=True)
 class Model:
     """
-    The whole dialog as values. ``draw`` renders exactly this.
+    The whole dialog as values. ``draw`` renders exactly this, a page at a time.
     """
 
     appearance: Section
@@ -300,7 +366,7 @@ class Model:
     previews: bool
     panes: Section
     pane_switches: tuple[Toggle, ...]
-    context_mode: Choice
+    reasoning: Toggle
     sessions: Section
     wrap: Toggle
     ended: Toggle
@@ -308,6 +374,49 @@ class Model:
     connectors: tuple[str, ...]
     connectors_note: str
     board_log_note: str
+
+    @property
+    def pages(self) -> tuple[Page, ...]:
+        """
+        The sections in navigation order, each as the rows it draws. Derived from
+        the fields above, so the pages and the fields cannot disagree.
+        """
+        none = "" if self.connectors else "none admitted - "
+        return (
+            Page(APPEARANCE, self.appearance.title, (self.theme, self.scale), self.appearance),
+            Page(
+                TEXT,
+                self.text.title,
+                (
+                    self.typeset,
+                    self.family,
+                    Fixed("monospace", self.monospace, MONOSPACE_NOTE),
+                    Roles(self.roles, self.previews),
+                ),
+                self.text,
+            ),
+            Page(
+                PANES,
+                self.panes.title,
+                (Switches("typeset in", self.pane_switches), self.reasoning),
+                self.panes,
+            ),
+            Page(
+                SESSIONS,
+                self.sessions.title,
+                (self.wrap, self.ended, *self.caps),
+                self.sessions,
+            ),
+            Page(
+                READ_ONLY_PAGE,
+                "Read-only",
+                (
+                    *(Line(each) for each in self.connectors),
+                    Line(f"{none}{self.connectors_note}", dim=True),
+                    Line(self.board_log_note, dim=True),
+                ),
+            ),
+        )
 
 
 TEXT_OFF = "typeset text is switched off"
@@ -491,29 +600,6 @@ def build(settings: Settings, known: Facts | None = None) -> Model:
         )
         for pane in typeset.Pane
     )
-    # TYPESET needs the seam drawing the context log; without it the pane falls
-    # back to wrapped lines, so it is not offered as where to start.
-    context_set = text_off is None and switched.get(typeset.Pane.CONTEXT, True)
-    start = transcript_pane.mode_named(settings.context_mode)
-    modes = (None, *transcript_pane.RenderMode)
-    context_mode = Choice(
-        key="context-mode",
-        label="log starts in",
-        options=tuple(
-            Option(
-                (
-                    f"this build's ({transcript_pane.DEFAULT_MODE.value})"
-                    if mode is None
-                    else mode.value
-                ),
-                FieldSet("context_mode", "" if mode is None else mode.value),
-                mode is not transcript_pane.RenderMode.TYPESET or context_set,
-            )
-            for mode in modes
-        ),
-        current=modes.index(start),
-    )
-
     caps = []
     for name, label, offered, note in _CAPS:
         rungs, where = _ladder(offered, getattr(settings, name))
@@ -531,14 +617,14 @@ def build(settings: Settings, known: Facts | None = None) -> Model:
     return Model(
         appearance=_section(
             APPEARANCE,
-            "APPEARANCE",
+            "Appearance",
             themes[theme.current] == base.theme and abs(scales[at] - base.typeset_scale) < 1e-6,
         ),
         theme=theme,
         scale=scale,
         text=_section(
             TEXT,
-            "TEXT",
+            "Text",
             settings.typeset == base.typeset
             and settings.typeset_family == base.typeset_family
             and styles == typeset.DEFAULTS,
@@ -550,12 +636,18 @@ def build(settings: Settings, known: Facts | None = None) -> Model:
         previews=text_off is None,
         panes=_section(
             PANES,
-            "PANES",
-            all(each.on for each in pane_switches) and settings.context_mode == base.context_mode,
+            "Panes",
+            all(each.on for each in pane_switches)
+            and settings.show_reasoning == base.show_reasoning,
         ),
         pane_switches=pane_switches,
-        context_mode=context_mode,
-        sessions=_section(SESSIONS, "INPUT AND SESSIONS", _plain_default(settings, SESSIONS)),
+        reasoning=Toggle(
+            key="reasoning",
+            label="show reasoning",
+            on=settings.show_reasoning,
+            flip=FieldSet("show_reasoning", not settings.show_reasoning),
+        ),
+        sessions=_section(SESSIONS, "Input and sessions", _plain_default(settings, SESSIONS)),
         wrap=Toggle(
             key="wrap",
             label="wrap composers",
@@ -579,6 +671,23 @@ def build(settings: Settings, known: Facts | None = None) -> Model:
     )
 
 
+def page_of(pages: tuple[Page, ...], selected: str) -> Page:
+    """
+    The page ``selected`` names, or the first: a key no page has any longer is not
+    a dialog with nothing in it.
+    """
+    return next((each for each in pages if each.key == selected), pages[0])
+
+
+def stepped(pages: tuple[Page, ...], selected: str, by: int) -> str:
+    """
+    The key of the page ``by`` places from ``selected``, held at either end.
+    """
+    keys = [each.key for each in pages]
+    at = keys.index(page_of(pages, selected).key)
+    return keys[min(max(at + by, 0), len(keys) - 1)]
+
+
 # ---------------------------------------------------------------------------
 # The shell: state, the chord, and the draw
 # ---------------------------------------------------------------------------
@@ -599,6 +708,11 @@ class DialogState:
     # Whether a combo's list was open over the modal when the last frame ended.
     # Escape with one open closes the list and not the dialog.
     _list_was_open: bool = False
+    # The page on the right. Kept across a close, so the dialog reopens where the
+    # operator left it for as long as the process runs; not saved.
+    selected: str = APPEARANCE
+    # How tall the page drew last frame: the navigation's border runs that far.
+    _body_height: float = 0.0
     # Where to put the window next frame so its last row is on screen, or None
     # to leave it where the operator has it. See ``_kept_in_view``.
     _lifted: tuple[float, float] | None = None
@@ -792,21 +906,21 @@ def _heading(section: Section, picked: list[Change]) -> None:
     """
     A section's title, with its ``defaults`` button at the right edge of the line.
     """
-    _title(section.title)
-    style = imgui.get_style()
-    wide = imgui.calc_text_size("defaults").x + 2 * style.frame_padding.x
+    widgets.small_button_line()
+    _title(section.title.upper())
+    wide = widgets.small_button_width("defaults")
     imgui.same_line()
     imgui.set_cursor_pos_x(imgui.get_cursor_pos_x() + imgui.get_content_region_avail().x - wide)
     if section.at_default:
         imgui.begin_disabled()
-    if imgui.small_button(f"defaults##{section.key}"):
+    if widgets.small_button(f"defaults##{section.key}"):
         picked.append(section.restore)
     if section.at_default:
         imgui.end_disabled()
     imgui.separator()
 
 
-def _roles(model: Model, cache: typeset.ViewCache, picked: list[Change]) -> None:
+def _roles(table: Roles, cache: typeset.ViewCache, picked: list[Change]) -> None:
     fixed = imgui.TableColumnFlags_.width_fixed
     if not imgui.begin_table("##roles", 4, imgui.TableFlags_.sizing_fixed_fit):
         return
@@ -818,7 +932,7 @@ def _roles(model: Model, cache: typeset.ViewCache, picked: list[Change]) -> None
     for title in ("role", "face", "size", "sample"):
         imgui.table_next_column()
         imgui.text_disabled(title)
-    for row in model.roles:
+    for row in table.rows:
         imgui.table_next_row()
         imgui.table_next_column()
         imgui.align_text_to_frame_padding()
@@ -834,7 +948,7 @@ def _roles(model: Model, cache: typeset.ViewCache, picked: list[Change]) -> None
         imgui.table_next_column()
         _choice(row.size, picked, -1.0)
         imgui.table_next_column()
-        if model.previews:
+        if table.previews:
             _preview(cache, typeset.Role(row.role))
         else:
             imgui.align_text_to_frame_padding()
@@ -842,59 +956,84 @@ def _roles(model: Model, cache: typeset.ViewCache, picked: list[Change]) -> None
     imgui.end_table()
 
 
-_GAP = 24.0
+_NAV_WIDTH = 150.0
+# Where a labelled row's control starts, so the controls of a page are one column.
+_LABEL_WIDTH = 140.0
+_CONTROL_WIDTH = 240.0
+# The least the body is tall, so a page of two rows is not a window of two rows.
+_MIN_HEIGHT = 320.0
 
 
-def _body(model: Model, cache: typeset.ViewCache, picked: list[Change]) -> None:
-    _heading(model.appearance, picked)
-    _choice(model.theme, picked, 190.0)
-    imgui.same_line(0.0, _GAP)
-    _choice(model.scale, picked, 90.0)
-    _note(model.scale.note)
-
-    imgui.spacing()
-    _heading(model.text, picked)
-    _toggle(model.typeset, picked)
-    _note(model.typeset.note)
-    _choice(model.family, picked, 270.0)
-    _note(model.family.note)
-    imgui.same_line(0.0, _GAP)
-    imgui.text_unformatted("monospace")
-    imgui.same_line()
-    imgui.text_disabled(model.monospace)
-    _why(MONOSPACE_NOTE)
-    _roles(model, cache, picked)
-
-    imgui.spacing()
-    _heading(model.panes, picked)
+def _labelled(label: str) -> None:
     imgui.align_text_to_frame_padding()
-    imgui.text_unformatted("typeset in")
-    for switch in model.pane_switches:
-        imgui.same_line()
-        _toggle(switch, picked)
-    imgui.same_line(0.0, _GAP)
-    _choice(model.context_mode, picked, 210.0)
+    imgui.text_unformatted(label)
+    imgui.same_line(_LABEL_WIDTH)
 
-    imgui.spacing()
-    _heading(model.sessions, picked)
-    _toggle(model.wrap, picked)
-    imgui.same_line(0.0, _GAP)
-    _toggle(model.ended, picked)
-    for cap in model.caps:
-        imgui.same_line(0.0, _GAP)
-        _choice(cap, picked, 70.0)
-        _why(cap.note)
 
-    imgui.spacing()
-    _title("MCP CONNECTORS AND BOARD RECORDING")
-    imgui.same_line()
-    imgui.text_disabled("read-only here")
-    imgui.separator()
-    for line in model.connectors:
-        imgui.text_unformatted(line)
-    none = "" if model.connectors else "none admitted - "
-    imgui.text_disabled(f"{none}{model.connectors_note}")
-    imgui.text_disabled(model.board_log_note)
+def _row(row: Row, cache: typeset.ViewCache, picked: list[Change]) -> None:
+    """
+    One row of a page, drawn by its kind. A kind added to ``Row`` is a type error
+    here and not a row that silently draws nothing.
+    """
+    match row:
+        case Choice():
+            _labelled(row.label)
+            _choice(replace(row, label=""), picked, _CONTROL_WIDTH)
+            _note(row.note)
+        case Toggle():
+            _toggle(row, picked)
+            _note(row.note)
+        case Fixed(label=label, value=value, why=why):
+            _labelled(label)
+            imgui.text_disabled(value)
+            _why(why)
+        case Switches(label=label, toggles=toggles):
+            _labelled(label)
+            for index, each in enumerate(toggles):
+                if index:
+                    imgui.same_line()
+                _toggle(each, picked)
+        case Roles():
+            imgui.spacing()
+            _roles(row, cache, picked)
+        case Line(text=text, dim=dim):
+            (imgui.text_disabled if dim else imgui.text_unformatted)(text)
+        case _:
+            assert_never(row)
+
+
+def _page(page: Page, cache: typeset.ViewCache, picked: list[Change]) -> None:
+    if page.section is None:
+        _title(page.title.upper())
+        imgui.separator()
+    else:
+        _heading(page.section, picked)
+    for row in page.rows:
+        _row(row, cache, picked)
+
+
+def _nav(state: DialogState, pages: tuple[Page, ...], height: float, appearing: bool) -> None:
+    """
+    The list of sections. Up and down move through it while it has the focus,
+    which it is given when the dialog opens and takes back on a click.
+
+    The arrows are read here and not left to ImGui's keyboard navigation, which
+    the runner does not switch on; where it is on, it moves its own focus among
+    the same entries and the selection follows the keys either way.
+    """
+    if appearing:
+        imgui.set_next_window_focus()
+    imgui.begin_child("##nav", imgui.ImVec2(_NAV_WIDTH, height), imgui.ChildFlags_.borders)
+    if imgui.is_window_focused():
+        if imgui.is_key_pressed(imgui.Key.up_arrow):
+            state.selected = stepped(pages, state.selected, -1)
+        elif imgui.is_key_pressed(imgui.Key.down_arrow):
+            state.selected = stepped(pages, state.selected, 1)
+    shown = page_of(pages, state.selected).key
+    for page in pages:
+        if imgui.selectable(f"{page.title}##nav-{page.key}", page.key == shown)[0]:
+            state.selected = page.key
+    imgui.end_child()
 
 
 def _kept_in_view(viewport: imgui.Viewport) -> tuple[float, float] | None:
@@ -964,7 +1103,13 @@ def draw(
 
     state._lifted = _kept_in_view(viewport)
     picked: list[Change] = []
-    _body(model, state.previews, picked)
+    pages = model.pages
+    _nav(state, pages, max(_MIN_HEIGHT, state._body_height), imgui.is_window_appearing())
+    imgui.same_line()
+    imgui.begin_group()
+    _page(page_of(pages, state.selected), state.previews, picked)
+    imgui.end_group()
+    state._body_height = imgui.get_item_rect_size().y
 
     imgui.separator()
     close = imgui.button("close", imgui.ImVec2(90.0, 0.0))

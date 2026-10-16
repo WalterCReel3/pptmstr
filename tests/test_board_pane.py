@@ -41,7 +41,7 @@ from pptmstr.model import (
     TaskState,
 )
 from pptmstr.theme import P
-from pptmstr.ui import board_pane, typeset
+from pptmstr.ui import board_pane, typeset, widgets
 from pptmstr.ui.focus import FocusState, Scope
 from pptmstr.ui.typeset import Kind, Part
 from tests import test_typeset_views as rig
@@ -147,6 +147,20 @@ def board_snapshot(
     )
 
 
+def _fake_imgui(monkeypatch: pytest.MonkeyPatch, fake: Any) -> None:
+    """
+    ``fake`` for Dear ImGui in the pane, and its ``small_button`` for the wrapper the
+    pane draws its small buttons with, so a press and a label are the fake's.
+    """
+    monkeypatch.setattr(board_pane, "imgui", fake)
+    monkeypatch.setattr(widgets, "small_button", fake.small_button)
+    monkeypatch.setattr(
+        widgets,
+        "small_button_width",
+        lambda text: float(fake.calc_text_size(text).x) + 2 * widgets.SMALL_BUTTON_PADDING[0],
+    )
+
+
 def at_root(snap: Snapshot) -> FocusState:
     focus = FocusState()
     focus.to_node(snap, ROOT, scope=Scope.SESSION)
@@ -158,7 +172,7 @@ def drawn(monkeypatch, snap: Snapshot, focus: FocusState | None = None) -> list[
     fake = MagicMock()
     # Every task row opens: what a row draws is asserted here.
     fake.tree_node_ex.return_value = True
-    monkeypatch.setattr(board_pane, "imgui", fake)
+    _fake_imgui(monkeypatch, fake)
     monkeypatch.setattr(board_pane, "section", MagicMock())
     board_pane.draw(
         snap, at_root(snap) if focus is None else focus, board_pane.BoardState(), Bridge()
@@ -172,7 +186,7 @@ def drawn(monkeypatch, snap: Snapshot, focus: FocusState | None = None) -> list[
 def headings(monkeypatch, snap: Snapshot) -> list[str]:
     """The section headings the pane emitted."""
     seen: list[str] = []
-    monkeypatch.setattr(board_pane, "imgui", MagicMock())
+    _fake_imgui(monkeypatch, MagicMock())
     monkeypatch.setattr(board_pane, "section", lambda label: seen.append(label))
     board_pane.draw(snap, at_root(snap), board_pane.BoardState(), Bridge())
     return seen
@@ -399,7 +413,7 @@ def test_waiting_mail_to_a_party_that_is_not_running_says_so_in_place_of_waiting
 def _concern_colours(monkeypatch, *, undeliverable: bool) -> dict[str, object]:
     """The colour each line of the concern log was drawn in."""
     fake = MagicMock()
-    monkeypatch.setattr(board_pane, "imgui", fake)
+    _fake_imgui(monkeypatch, fake)
     monkeypatch.setattr(board_pane, "section", MagicMock())
     row = dataclasses.replace(board_concern(), undeliverable=undeliverable)
     board_pane._concerns((row,))
@@ -517,7 +531,7 @@ def test_a_session_with_no_template_at_all_is_not_a_team(monkeypatch) -> None:
 def test_a_cursor_on_nothing_says_so_rather_than_going_blank(monkeypatch) -> None:
     """An empty snapshot has no session to scope a board to, and must not invent one."""
     fake = MagicMock()
-    monkeypatch.setattr(board_pane, "imgui", fake)
+    _fake_imgui(monkeypatch, fake)
     board_pane.draw(Snapshot.empty(), FocusState(), board_pane.BoardState(), Bridge())
     assert any("no session" in str(c.args[0]) for c in fake.text_disabled.call_args_list)
 
@@ -576,7 +590,7 @@ def test_the_summary_reaches_the_pane_before_the_rows(monkeypatch) -> None:
     fake = MagicMock()
     fake.begin_child.side_effect = lambda *_a, **_k: order.append("child") or True
     fake.text_colored.side_effect = lambda *a, **_k: order.append(str(a[1]))
-    monkeypatch.setattr(board_pane, "imgui", fake)
+    _fake_imgui(monkeypatch, fake)
     monkeypatch.setattr(board_pane, "section", MagicMock())
 
     snap = board_snapshot(Task(id="t1", title="do t1", declared_by=ROOT))
@@ -644,7 +658,7 @@ def _tree_flags(monkeypatch, snap: Snapshot) -> int:
     fake.TreeNodeFlags_.span_avail_width = 1
     fake.TreeNodeFlags_.leaf = _LEAF
     fake.TreeNodeFlags_.no_tree_push_on_open = 4
-    monkeypatch.setattr(board_pane, "imgui", fake)
+    _fake_imgui(monkeypatch, fake)
     monkeypatch.setattr(board_pane, "section", MagicMock())
     board_pane.draw(snap, at_root(snap), board_pane.BoardState(), Bridge())
 
@@ -699,7 +713,7 @@ def _amend_run(monkeypatch, snap: Snapshot, pane: board_pane.BoardState, clicks:
 
     fake = MagicMock()
     fake.small_button.side_effect = lambda label, *a, **k: label in clicks
-    monkeypatch.setattr(board_pane, "imgui", fake)
+    _fake_imgui(monkeypatch, fake)
     monkeypatch.setattr(board_pane, "section", MagicMock())
     # Each box hands back the text it was drawn with: nothing was typed this frame.
     monkeypatch.setattr(board_pane, "multiline_input", lambda label, value, *a, **k: (False, value))
@@ -809,7 +823,7 @@ def test_the_operator_reads_the_finding_the_agents_read(monkeypatch) -> None:
     snap = board_snapshot(Task(id="t1", title="do t1", declared_by=ROOT), concerns=(posted,))
 
     fake = MagicMock()
-    monkeypatch.setattr(board_pane, "imgui", fake)
+    _fake_imgui(monkeypatch, fake)
     monkeypatch.setattr(board_pane, "section", MagicMock())
     monkeypatch.setattr(board_pane, "multiline_input", lambda *a, **k: (False, ""))
     board_pane.draw(snap, at_root(snap), board_pane.BoardState(), Bridge())
@@ -1486,7 +1500,7 @@ def test_a_result_stays_on_screen_while_the_specification_is_being_amended(monke
     """
     fake = MagicMock()
     fake.small_button.return_value = False
-    monkeypatch.setattr(board_pane, "imgui", fake)
+    _fake_imgui(monkeypatch, fake)
     monkeypatch.setattr(board_pane, "section", MagicMock())
     monkeypatch.setattr(board_pane, "multiline_input", lambda *a, **k: (False, "draft"))
     snap = _finished("what was reported")
@@ -1568,7 +1582,7 @@ def test_a_property_is_drawn_under_the_title_of_a_row_nobody_opened(monkeypatch)
     )
     fake = MagicMock()
     fake.tree_node_ex.return_value = False
-    monkeypatch.setattr(board_pane, "imgui", fake)
+    _fake_imgui(monkeypatch, fake)
     monkeypatch.setattr(board_pane, "section", MagicMock())
     board_pane.draw(snap, at_root(snap), board_pane.BoardState(), Bridge())
     lines = [str(a) for call in fake.text_colored.call_args_list for a in call.args[1:]]
@@ -1587,7 +1601,7 @@ def _row_lines(monkeypatch, task: Task, *, opened: bool) -> list[str]:
     snap = board_snapshot(task)
     fake = MagicMock()
     fake.tree_node_ex.return_value = opened
-    monkeypatch.setattr(board_pane, "imgui", fake)
+    _fake_imgui(monkeypatch, fake)
     monkeypatch.setattr(board_pane, "section", MagicMock())
     board_pane.draw(snap, at_root(snap), board_pane.BoardState(), Bridge())
     return [str(a) for call in fake.text_colored.call_args_list for a in call.args[1:]]
@@ -1689,7 +1703,7 @@ def _row_colours(
     snap = board_snapshot(task, concerns=concerns)
     fake = MagicMock()
     fake.tree_node_ex.return_value = opened
-    monkeypatch.setattr(board_pane, "imgui", fake)
+    _fake_imgui(monkeypatch, fake)
     monkeypatch.setattr(board_pane, "section", MagicMock())
     board_pane.draw(snap, at_root(snap), board_pane.BoardState(), Bridge())
     return {str(call.args[1]): call.args[0] for call in fake.text_colored.call_args_list}
@@ -2064,7 +2078,7 @@ def _spoken(monkeypatch, snap: Snapshot, focus: FocusState) -> list[_Line]:
     fake.text_wrapped.side_effect = record(0)
     fake.small_button.side_effect = lambda label, *a, **k: False
     fake.tree_node_ex.side_effect = node
-    monkeypatch.setattr(board_pane, "imgui", fake)
+    _fake_imgui(monkeypatch, fake)
     monkeypatch.setattr(board_pane, "author", author)
     monkeypatch.setattr(board_pane, "section", lambda label: lines.append(_Line(label, False)))
     board_pane.draw(snap, focus, board_pane.BoardState(), Bridge())
@@ -2168,7 +2182,7 @@ def test_the_authors_bar_spans_the_rectangle_the_text_was_drawn_in(monkeypatch) 
     fake.get_font_size.return_value = 16.0
     fake.get_cursor_screen_pos.return_value = MagicMock(x=100.0, y=40.0)
     fake.get_item_rect_max.return_value = MagicMock(x=500.0, y=290.0)
-    monkeypatch.setattr(board_pane, "imgui", fake)
+    _fake_imgui(monkeypatch, fake)
 
     board_pane.author("one\ntwo " + "long " * 200)
 
@@ -2537,7 +2551,7 @@ def test_records_behind_a_break_are_counted_on_a_board_still_being_recorded() ->
 def _drawn_with(monkeypatch, snap: Snapshot, logging: board_pane.Logging | None) -> list[str]:
     fake = MagicMock()
     fake.tree_node_ex.return_value = False
-    monkeypatch.setattr(board_pane, "imgui", fake)
+    _fake_imgui(monkeypatch, fake)
     monkeypatch.setattr(board_pane, "section", MagicMock())
     board_pane.draw(snap, at_root(snap), board_pane.BoardState(), Bridge(), logging)
     return [str(a) for call in fake.text_colored.call_args_list for a in call.args[1:]] + [
@@ -2611,7 +2625,7 @@ def _close_run(monkeypatch, snap: Snapshot, pane: board_pane.BoardState, clicks:
         boxes.append(label)
         return False, value
 
-    monkeypatch.setattr(board_pane, "imgui", fake)
+    _fake_imgui(monkeypatch, fake)
     monkeypatch.setattr(board_pane, "section", MagicMock())
     monkeypatch.setattr(board_pane, "multiline_input", box)
     board_pane.draw(snap, at_root(snap), pane, _Bridge())  # type: ignore[arg-type]
@@ -2955,11 +2969,6 @@ class _CloseFrames:
             def __getattr__(self, name: str) -> object:
                 return getattr(imgui, name)
 
-            def small_button(self, label: str) -> bool:
-                pressed = imgui.small_button(label)
-                note(label)
-                return bool(pressed)
-
             def tree_node_ex(self, label: str, flags: int = 0) -> bool:
                 # Rows ship closed; every one is opened.
                 imgui.set_next_item_open(True)
@@ -2972,7 +2981,15 @@ class _CloseFrames:
             note(label)
             return result
 
+        real_small_button = widgets.small_button
+
+        def small_button(label: str) -> bool:
+            pressed = real_small_button(label)
+            note(label)
+            return pressed
+
         self._monkeypatch.setattr(board_pane, "imgui", Noting())
+        self._monkeypatch.setattr(widgets, "small_button", small_button)
         self._monkeypatch.setattr(board_pane, "multiline_input", box)
         return self
 
@@ -3324,13 +3341,13 @@ def test_a_row_says_the_same_things_and_offers_the_same_controls_under_either_re
     typeset.configure(typeset=set_by_library, mono=False)
     assert typeset.enabled(typeset.Pane.BOARD) is set_by_library
     buttons: list[str] = []
-    small_button = frames.im.small_button
+    small_button = widgets.small_button
 
     def pressed(label: str) -> bool:
         buttons.append(label)
         return bool(small_button(label))
 
-    monkeypatch.setattr(frames.im, "small_button", pressed)
+    monkeypatch.setattr(widgets, "small_button", pressed)
     snap = _a_board_with_everything_a_row_says()
     done, still = board_tasks(snap, "s1")
 
@@ -3362,3 +3379,214 @@ def test_a_row_says_the_same_things_and_offers_the_same_controls_under_either_re
     # Closing is offered on the row that is not finished, and only there.
     assert f"{board_pane.CLOSE}##close-{still.id}" in buttons
     assert f"{board_pane.CLOSE}##close-{done.id}" not in buttons
+
+
+# -- the header keeps only alarms (U8) ------------------------------------------------
+
+
+def _header_and_body(
+    monkeypatch,
+    snap: Snapshot,
+    logging: board_pane.Logging | None = None,
+    pane: board_pane.BoardState | None = None,
+    pressed: Collection[str] = (),
+) -> tuple[list[str], list[str]]:
+    """
+    What the pane drew above its scroll and what it drew inside it, split at the
+    ``##board`` child: text and tree-node labels, in order.
+    """
+    fake = MagicMock()
+    fake.tree_node_ex.return_value = False
+    fake.small_button.side_effect = lambda label, *a, **k: label in pressed
+    _fake_imgui(monkeypatch, fake)
+    monkeypatch.setattr(board_pane, "section", MagicMock())
+    board_pane.draw(
+        snap, at_root(snap), board_pane.BoardState() if pane is None else pane, Bridge(), logging
+    )
+    header: list[str] = []
+    body: list[str] = []
+    into = header
+    for name, args, _ in fake.mock_calls:
+        if name == "begin_child" and args and args[0] == "##board":
+            into = body
+        elif name == "text_colored":
+            into.append(str(args[1]))
+        elif name == "tree_node_ex":
+            into.append(str(args[0]))
+    return header, body
+
+
+def _restored(**fields: object) -> Snapshot:
+    return dataclasses.replace(
+        board_snapshot(_held()), restores=MappingProxyType({"s1": _restore(**fields)})
+    )
+
+
+def test_an_alarm_about_the_log_stays_above_the_scroll(monkeypatch) -> None:
+    """
+    The property the task must not break: a line saying the board shown is not
+    the whole board is drawn before the rows' child window begins.
+    """
+    snap = _restored(log_short=True, log_stray=1)
+    logging = board_pane.Logging(sessions={"s1": _log(unkept=2)})
+
+    header, body = _header_and_body(monkeypatch, snap, logging)
+
+    assert any("restored SHORT" in line for line in header)
+    assert any("will not be read back" in line for line in header)
+    assert not any("restored SHORT" in line or "read back" in line for line in body)
+
+
+@pytest.mark.parametrize(
+    "logging",
+    [
+        board_pane.Logging(sessions={"s1": _log()}),
+        board_pane.Logging(off="switched off: board_log in settings.json"),
+    ],
+)
+def test_a_routine_account_of_the_log_is_not_drawn_on_the_board(
+    monkeypatch, logging: board_pane.Logging
+) -> None:
+    header, body = _header_and_body(monkeypatch, _restored(), logging)
+    routine = board_pane.log_lines(_restored(), logging, "s1")
+
+    assert routine and all(line.tone is board_pane.Tone.PROSE for line in routine)
+    for line in routine:
+        assert line.text not in header + body
+
+
+def test_the_lines_about_the_log_are_one_derivation_for_both_surfaces() -> None:
+    """
+    ``log_lines`` is what the header filters and what Details reads through the same
+    two functions: each line is theirs, word for word, routine and alarm alike.
+    """
+    snap = _restored(log_short=True)
+    logging = board_pane.Logging(sessions={"s1": _log()})
+    lines = board_pane.log_lines(snap, logging, "s1")
+
+    assert lines == (
+        board_pane.restore_line(snap.restores["s1"], _log(), snap.off_fleet),
+        board_pane.recording_line(None, _log()),
+    )
+    assert [line.tone for line in lines] == [board_pane.Tone.ALARM, board_pane.Tone.PROSE]
+    assert board_pane.log_lines(board_snapshot(_held()), None, "s1") == ()
+
+
+# -- the state filter (U8) ------------------------------------------------------------
+
+
+def test_each_row_lands_in_the_kind_its_state_and_its_wait_say() -> None:
+    kind = board_pane.row_kind
+    assert kind(board_task()) is board_pane.RowKind.OPEN
+    assert kind(board_task(blocked_on=("t0",))) is board_pane.RowKind.WAITING
+    assert kind(board_task(state=TaskState.CLAIMED, owner="qa")) is board_pane.RowKind.HELD
+    assert kind(board_task(state=TaskState.COMPLETED)) is board_pane.RowKind.DONE
+
+
+def test_a_row_open_on_the_board_is_one_the_store_would_hand_out() -> None:
+    """
+    OPEN is ``Task.is_claimable`` read through the projection, not a second rule:
+    for every row of a board, the two agree.
+    """
+    snap = _filter_board()
+    for row in board_tasks(snap, "s1"):
+        claimable = snap.tasks[row.id].is_claimable(snap.tasks)
+        assert (board_pane.row_kind(row) is board_pane.RowKind.OPEN) is claimable, row.id
+
+
+def _filter_board() -> Snapshot:
+    return board_snapshot(
+        Task(id="t-open", title="open title", declared_at=1.0, declared_by=ROOT),
+        Task(
+            id="t-wait",
+            title="wait title",
+            depends_on=("t-held",),
+            declared_at=2.0,
+            declared_by=ROOT,
+        ),
+        Task(
+            id="t-held",
+            title="held title",
+            state=TaskState.CLAIMED,
+            claimed_by=ROOT,
+            declared_at=3.0,
+            declared_by=ROOT,
+        ),
+        Task(
+            id="t-done",
+            title="done title",
+            state=TaskState.COMPLETED,
+            claimed_by=ROOT,
+            declared_at=4.0,
+            declared_by=ROOT,
+        ),
+    )
+
+
+def _ids(drawn_lines: list[str]) -> set[str]:
+    return {line.split("###")[-1] for line in drawn_lines if "###" in line}
+
+
+def test_with_nothing_hidden_every_row_is_drawn_and_no_count_is_said(monkeypatch) -> None:
+    header, body = _header_and_body(monkeypatch, _filter_board())
+
+    assert _ids(body) == {"t-open", "t-wait", "t-held", "t-done"}
+    assert not any(line.startswith("showing ") for line in header)
+
+
+def test_a_hidden_kind_leaves_the_rows_and_the_summary_still_counts_them(monkeypatch) -> None:
+    snap = _filter_board()
+    pane = board_pane.BoardState(hidden={board_pane.RowKind.DONE, board_pane.RowKind.WAITING})
+
+    header, body = _header_and_body(monkeypatch, snap, pane=pane)
+
+    assert _ids(body) == {"t-open", "t-held"}
+    whole = board_pane.summary_label(board_pane.counts(board_tasks(snap, "s1")))
+    assert whole == "4 task(s) · 2 pending · 1 claimed · 1 done"
+    assert whole in header
+    assert "showing 2 of 4" in header
+
+
+def test_pressing_a_chip_hides_its_kind_from_the_next_frame(monkeypatch) -> None:
+    snap = _filter_board()
+    pane = board_pane.BoardState()
+
+    _, pressed_on = _header_and_body(monkeypatch, snap, pane=pane, pressed={"done##board-filter"})
+    assert pane.hidden == {board_pane.RowKind.DONE}
+    assert "t-done" in _ids(pressed_on), "the frame draws the rows it began with"
+
+    _, after = _header_and_body(monkeypatch, snap, pane=pane)
+    assert _ids(after) == {"t-open", "t-wait", "t-held"}
+
+    _header_and_body(monkeypatch, snap, pane=pane, pressed={"done##board-filter"})
+    assert pane.hidden == set(), "a second press shows it again"
+
+
+def test_the_filter_hides_no_concern(monkeypatch) -> None:
+    snap = board_snapshot(
+        Task(id="t1", title="x", state=TaskState.COMPLETED, declared_by=ROOT),
+        concerns=(concern("c1", subject="about the done one", task_id="t1"),),
+    )
+    pane = board_pane.BoardState(hidden=set(board_pane.RowKind))
+
+    _, body = _header_and_body(monkeypatch, snap, pane=pane)
+
+    assert _ids(body) == set()
+    assert any("->" in line for line in body)
+
+
+def test_the_typeset_board_honours_the_filter_and_counts_the_whole_board(
+    frames: Frames,
+) -> None:
+    snap = _filter_board()
+    frames.pane.hidden = {board_pane.RowKind.HELD}
+
+    strings = frames.draw(snap)
+
+    assert "held title" not in strings
+    assert {"open title", "wait title", "done title"} <= set(strings)
+    assert "4 task(s) · 2 pending · 1 claimed · 1 done" in strings
+    assert "showing 3 of 4" in strings
+
+    frames.pane.hidden = set()
+    assert "held title" in frames.draw(snap)

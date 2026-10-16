@@ -33,8 +33,11 @@ Usage:
     .venv/bin/python scripts/verify_splash.py
     .venv/bin/python scripts/verify_splash.py --capture /tmp/splash.png
 
-The capture runs the real application with an **empty fleet**, which no existing
-capture path can produce: ``Makefile``'s ``shot`` target and
+The capture runs the real application with an **empty fleet** and draws
+``splash_view`` inside NEEDS YOU, under the pane's own no-fleet line: nothing in the
+app calls the splash any more, and this is the region it used to fill and the one
+the fitting constants were written against. No existing capture path can produce
+an empty fleet: ``Makefile``'s ``shot`` target and
 ``scripts/screenshot.py``'s ``args.argv or ["--fake"]`` both install the FakeDriver,
 whose ``run()`` seeds a tree, so the no-sessions branch never renders. Captures are
 written outside the repo and are not checked in.
@@ -49,6 +52,7 @@ import argparse
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -134,10 +138,10 @@ def _scratch_config() -> Path:
     Three things are moved, and all three before ``pptmstr.app`` is asked for
     anything: ``XDG_CONFIG_HOME``, which ``settings.config_dir`` and hello_imgui's
     ini both resolve from; ``CLAUDE_CONFIG_DIR``, which is where the SDK lists
-    transcripts; and ``brief.default_root``, which is derived from the home
-    directory and reads neither variable. An ``XDG_CONFIG_HOME`` already set is
-    replaced like an unset one: nothing here can tell a disposable directory from
-    the one the operator keeps.
+    transcripts; and ``brief.legacy_root``, the CLI's projects directory, which is
+    derived from the home directory and reads neither variable. An
+    ``XDG_CONFIG_HOME`` already set is replaced like an unset one: nothing here can
+    tell a disposable directory from the one the operator keeps.
 
     The directory is left behind, since the ini and whatever a run recorded are
     the evidence of what it did.
@@ -150,10 +154,10 @@ def _scratch_config() -> Path:
     (claude / "projects").mkdir(parents=True)
     os.environ["XDG_CONFIG_HOME"] = str(config)
     os.environ["CLAUDE_CONFIG_DIR"] = str(claude)
-    brief.default_root = lambda: claude / "projects"
+    brief.legacy_root = lambda: claude / "projects"
     print(
         f"configuration for this run is under {scratch}, left in place:"
-        " XDG_CONFIG_HOME, CLAUDE_CONFIG_DIR and the brief root all point there",
+        " XDG_CONFIG_HOME, CLAUDE_CONFIG_DIR and the CLI projects root all point there",
         flush=True,
     )
     return scratch
@@ -380,7 +384,8 @@ def main() -> int:
 
 def _capture(out: Path) -> int:
     """
-    Grab the real panel, with a fleet that is actually empty.
+    Grab the real panel, with a fleet that is actually empty and the splash drawn
+    into it.
 
     ``--fake`` is deliberately not passed: FakeDriver.run seeds a tree, and a seeded
     tree is not the state this panel renders in. Without ``--task`` no session is
@@ -391,7 +396,7 @@ def _capture(out: Path) -> int:
     from imgui_bundle import hello_imgui, immapp
 
     from pptmstr import app as pptmstr_app
-    from pptmstr.ui import inbox, splash
+    from pptmstr.ui import inbox, splash, splash_view
 
     real_run = immapp.run
     frames = [0]
@@ -401,7 +406,8 @@ def _capture(out: Path) -> int:
     # ratios, which is arithmetic; this is the measurement that arithmetic is
     # standing in for, and the two are worth comparing.
     observed: dict[str, float] = {}
-    real_art = inbox._art
+    real_art = splash_view._art
+    real_no_fleet = inbox._no_fleet
 
     def measured_art(now: float) -> None:
         from imgui_bundle import imgui as _imgui
@@ -409,13 +415,19 @@ def _capture(out: Path) -> int:
         avail = _imgui.get_content_region_avail()
         observed["avail_w"] = avail.x
         observed["avail_h"] = avail.y
-        observed["size"] = splash.fit_size(avail.x, avail.y, inbox._ART_ROWS, inbox._ART_COLS)
-        width, height = splash.required_extent(observed["size"], inbox._ART_ROWS, inbox._ART_COLS)
+        rows, cols = splash_view._ART_ROWS, splash_view._ART_COLS
+        observed["size"] = splash.fit_size(avail.x, avail.y, rows, cols)
+        width, height = splash.required_extent(observed["size"], rows, cols)
         observed["art_w"], observed["art_h"] = width, height
         observed["drawn"] = float(width <= avail.x and height <= avail.y)
         real_art(now)
 
-    inbox._art = measured_art  # type: ignore[assignment]
+    def no_fleet_then_splash() -> None:
+        real_no_fleet()
+        splash_view.draw(time.monotonic())
+
+    splash_view._art = measured_art  # type: ignore[assignment]
+    inbox._no_fleet = no_fleet_then_splash  # type: ignore[assignment]
 
     def patched_run(runner: object, *rest: object) -> object:
         user_after = runner.callbacks.after_swap  # type: ignore[attr-defined]
@@ -440,7 +452,8 @@ def _capture(out: Path) -> int:
         rc = int(pptmstr_app.main(["--theme", "dark", "--layout", "TRIAGE"]))
     finally:
         immapp.run = real_run  # type: ignore[assignment]
-        inbox._art = real_art  # type: ignore[assignment]
+        splash_view._art = real_art  # type: ignore[assignment]
+        inbox._no_fleet = real_no_fleet  # type: ignore[assignment]
 
     if not observed:
         print("FAIL: the splash never drew -- the fleet was not empty, or NEEDS YOU never ran")

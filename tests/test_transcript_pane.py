@@ -10,6 +10,7 @@ the rig ``tests/test_typeset_views.py`` builds: a context, an atlas, no window.
 from __future__ import annotations
 
 import time
+from collections.abc import Iterator
 from typing import Any
 
 import pytest
@@ -20,7 +21,7 @@ from pptmstr.model import NodeId, Snapshot
 from pptmstr.store import Store
 from pptmstr.theme import P
 from pptmstr.transcript import SegmentKind, Transcript
-from pptmstr.ui import rich_pane, transcript_pane, typeset
+from pptmstr.ui import transcript_pane, typeset, widgets
 from pptmstr.ui.transcript_pane import (
     NodeTranscript,
     RenderMode,
@@ -184,21 +185,66 @@ def test_reasoning_shown_by_default() -> None:
     assert len(_visible(TranscriptState(), cache)) == 2
 
 
-def test_search_filters_case_insensitively() -> None:
-    cache = build((SegmentKind.OUTPUT, "Alpha\nbeta\nGAMMA"))
-    state = TranscriptState(search="gamma")
-    assert [ln.text for ln in _visible(state, cache)] == ["GAMMA"]
+def test_find_counts_every_match_ignoring_case_and_keeps_every_line() -> None:
+    """
+    Find marks and does not filter: every line is still drawn, and each match is
+    counted where it is, twice on a line that holds it twice.
+    """
+    cache = build((SegmentKind.OUTPUT, "Alpha\nbeta GAMMA gamma\nGAMMA"))
+    lines = _visible(TranscriptState(), cache)
+    assert len(lines) == 3
+    assert transcript_pane.line_matches(lines, "gamma") == [1, 1, 2]
+    assert transcript_pane.line_matches(lines, "") == []
+    assert transcript_pane.line_matches(lines, "delta") == []
 
 
-def test_search_and_reasoning_filter_compose() -> None:
+def test_find_reaches_only_the_lines_the_reasoning_setting_shows() -> None:
     cache = build((SegmentKind.REASONING, "match me"), (SegmentKind.OUTPUT, "match me too"))
-    state = TranscriptState(show_reasoning=False, search="match")
-    assert [ln.text for ln in _visible(state, cache)] == ["match me too"]
+    lines = _visible(TranscriptState(show_reasoning=False), cache)
+    assert [line.text for line in lines] == ["match me too"]
+    assert transcript_pane.line_matches(lines, "match") == [0]
 
 
-def test_empty_search_matches_everything() -> None:
-    cache = build((SegmentKind.OUTPUT, "a\nb\nc"))
-    assert len(_visible(TranscriptState(search=""), cache)) == 3
+def test_the_find_rows_place_wraps_and_holds_when_the_matches_change() -> None:
+    bar = transcript_pane.FindBar()
+    bar.step(1)
+    assert bar.current == 0 and not bar.reveal, "nothing to step through"
+    bar.needle = "x"
+    bar.found(3)
+    assert bar.status() == "1 of 3"
+    bar.step(-1)
+    assert bar.current == 2 and bar.reveal and bar.status() == "3 of 3"
+    bar.step(1)
+    assert bar.current == 0
+    bar.current = 2
+    bar.found(2)
+    assert bar.current == 1, "the last, where there are fewer"
+    bar.found(0)
+    assert bar.status() == "no matches" and bar.current == 0
+    bar.needle = ""
+    assert bar.status() == ""
+
+
+def test_the_escape_the_find_row_took_is_its_own_until_the_key_is_released() -> None:
+    """
+    Asked once a frame. The press is the row's on its frame, held or not, and on
+    every later frame it is still down; the first frame it is up lets it go, and a
+    press after that is not the row's however soon it comes.
+    """
+    bar = transcript_pane.FindBar()
+    assert not bar.spent_escape(1, True), "an Escape the row never took"
+    bar.show()
+    bar.escape(5)
+    assert not bar.open
+    assert bar.spent_escape(5, True)
+    assert bar.spent_escape(6, True) and bar.spent_escape(40, True), "its repeats"
+    assert not bar.spent_escape(41, False)
+    assert not bar.spent_escape(42, True), "the next press"
+
+    # A press and its release that reach one frame are the row's all the same.
+    bar.escape(50)
+    assert bar.spent_escape(50, False)
+    assert not bar.spent_escape(51, False) and not bar.spent_escape(52, True)
 
 
 # -- runs and copying ----------------------------------------------------------
@@ -248,14 +294,13 @@ def test_run_bounds_are_contiguous_and_cover_every_line() -> None:
 
 def test_run_text_ignores_the_filters() -> None:
     """
-    Copying a run yields what the agent emitted, not the subset a search is
-    showing. A paste that silently dropped the non-matching lines would be worse
-    than no copy at all -- it looks complete.
+    Copying a run yields what the agent emitted, not the subset the reasoning
+    setting is showing.
     """
-    cache = build((SegmentKind.OUTPUT, "alpha\nbeta\ngamma\n"))
-    state = TranscriptState(search="beta")
-    assert [line.text for line in _visible(state, cache)] == ["beta"]
-    assert cache.run_text(0) == "alpha\nbeta\ngamma"
+    cache = build((SegmentKind.REASONING, "pondering\n"), (SegmentKind.OUTPUT, "alpha\nbeta\n"))
+    state = TranscriptState(show_reasoning=False)
+    assert [line.text for line in _visible(state, cache)] == ["alpha", "beta"]
+    assert cache.run_text(0) == "pondering"
 
 
 def test_copy_visible_follows_the_filters() -> None:
@@ -843,64 +888,38 @@ def test_a_feed_ahead_of_its_lines_starts_again() -> None:
 # -- the mode --------------------------------------------------------------------
 
 
-def test_the_log_is_markdown_by_default_with_the_seam_and_wrapped_lines_without(
+def test_the_log_is_typeset_with_the_seam_and_wrapped_lines_without(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
-    Until the operator picks a mode the pane picks one, and with the seam off it is
-    the one the pane had before there was a seam.
+    No renderer is chosen: TYPESET where the seam draws, and the pane as it was
+    before there was a seam where it does not. Reasoning is shown to begin with.
     """
     state = TranscriptState()
-    assert state.mode is None
+    assert state.mode is None and state.show_reasoning
     assert state.shown_mode() is RenderMode.WRAP
     monkeypatch.setattr(typeset, "enabled", lambda pane=None: True)
-    assert state.shown_mode() is transcript_pane.DEFAULT_MODE
-    assert transcript_pane.DEFAULT_MODE in (RenderMode.RICH, RenderMode.TYPESET)
+    assert state.shown_mode() is RenderMode.TYPESET is transcript_pane.DEFAULT_MODE
     assert state.mode is None, "the default is derived and never written back"
 
 
-def test_the_log_starts_in_the_mode_the_settings_name_until_the_pane_is_told_another(
+def test_a_draw_that_names_reasoning_is_what_tells_the_pane(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """
-    ``Settings.context_mode`` is where the pane starts, not a lock on it: the
-    pane's own buttons still choose for the session, and a name this build does
-    not have is the build's default rather than an error.
-    """
-    assert transcript_pane.mode_named("raw") is RenderMode.RAW
-    assert transcript_pane.mode_named("") is None
-    assert transcript_pane.mode_named("hologram") is None
-
-    state = TranscriptState(start_in=RenderMode.RAW)
-    assert state.shown_mode() is RenderMode.RAW, "with the seam off too: RAW needs none"
-    monkeypatch.setattr(typeset, "enabled", lambda pane=None: True)
-    assert state.shown_mode() is RenderMode.RAW
-    state.mode = RenderMode.RICH
-    assert state.shown_mode() is RenderMode.RICH, "a pick in the pane wins for the session"
-
-    # TYPESET to start in falls back as a picked TYPESET does.
-    state = TranscriptState(start_in=RenderMode.TYPESET)
-    assert state.shown_mode() is RenderMode.TYPESET
-    monkeypatch.setattr(typeset, "enabled", lambda pane=None: False)
-    assert state.shown_mode() is RenderMode.WRAP
-
-
-def test_a_draw_is_what_tells_the_pane_where_the_settings_start_it(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """
-    The pane keeps no copy of the setting: every draw writes it, a draw that names
-    none puts the default back, and it is written before the early return for a
-    pane with nothing selected.
+    ``Settings.show_reasoning`` reaches the pane through the draw, before the early
+    return for a pane with nothing selected; a draw that names none leaves it.
     """
     state = TranscriptState()
     snap = Store().snapshot()
     monkeypatch.setattr(transcript_pane.imgui, "text_disabled", lambda text: None)
 
-    transcript_pane.draw(snap, state, None, start_in=RenderMode.RAW)
-    assert state.start_in is RenderMode.RAW and state.shown_mode() is RenderMode.RAW
+    transcript_pane.draw(snap, state, None, show_reasoning=False)
+    assert state.show_reasoning is False
     transcript_pane.draw(snap, state, None)
-    assert state.start_in is None and state.mode is None
+    assert state.show_reasoning is False
+    transcript_pane.draw(snap, state, None, show_reasoning=True)
+    assert state.show_reasoning is True
 
 
 def test_a_chosen_mode_is_drawn_and_typeset_only_while_the_seam_can_draw(
@@ -915,7 +934,7 @@ def test_a_chosen_mode_is_drawn_and_typeset_only_while_the_seam_can_draw(
     monkeypatch.setattr(typeset, "enabled", lambda pane=None: True)
     assert state.shown_mode() is RenderMode.TYPESET
     assert state.mode is RenderMode.TYPESET
-    for chosen in (RenderMode.RAW, RenderMode.WRAP, RenderMode.RICH):
+    for chosen in (RenderMode.RAW, RenderMode.WRAP):
         state.mode = chosen
         assert state.shown_mode() is chosen
         monkeypatch.setattr(typeset, "enabled", lambda pane=None: False)
@@ -1132,35 +1151,6 @@ def test_hiding_reasoning_redraws_without_it_and_shows_all_of_it_again(seam: Any
     assert block_texts(feed) == ["A closed thought.", "Said aloud.", "An open thought, finished."]
 
 
-def test_a_search_demotes_the_typeset_log_to_lines(
-    seam: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """
-    The seam has no find. A filter that changed nothing on screen would read as
-    "no matches hidden"; the line path is the one that can honour it.
-    """
-    calls: list[str] = []
-
-    def spy(name: str) -> Any:
-        real = getattr(typeset, name)
-
-        def called(*args: Any, **kwargs: Any) -> Any:
-            calls.append(name)
-            return real(*args, **kwargs)
-
-        return called
-
-    for name in ("document", "stream", "plain"):
-        monkeypatch.setattr(typeset, name, spy(name))
-    state = typeset_state(search="checksum")
-    snap = session(report())
-    draw(seam, snap, state)
-    assert calls == [] and state.feeds == {}
-    state.search = ""
-    draw(seam, snap, state)
-    assert "document" in calls and "stream" in calls
-
-
 def test_with_the_seam_off_the_pane_draws_as_it_did(
     imgui: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1266,7 +1256,7 @@ def test_a_right_click_offers_the_block_and_the_run_under_the_mouse_and_the_sele
     popup is closed: opening it moves the hover onto the popup. The run is copied
     from the lines, whole, as the line modes copy it.
     """
-    state = typeset_state(follow_tail=False)
+    state = typeset_state(follow_tail=False, held=True)
     snap = session(report())
     io = seam.get_io()
     offered: list[str] = []
@@ -1336,7 +1326,7 @@ def test_the_library_stopping_under_an_open_menu_leaves_the_menu_and_the_frame_w
     has stopped, the menu offers no selection and everything else it had, the
     popup and the child are closed, and the next frame is wrapped lines.
     """
-    state = typeset_state(follow_tail=False)
+    state = typeset_state(follow_tail=False, held=True)
     snap = session(report())
     io = seam.get_io()
     offered: list[str] = []
@@ -1406,7 +1396,7 @@ def test_the_run_under_the_mouse_is_found_whoever_draws_it_open_or_closed(
     transcript = Transcript()
     transcript.append(kind, text + "\n")
     snap = session(transcript)
-    state = typeset_state(follow_tail=False)
+    state = typeset_state(follow_tail=False, held=True)
     io = seam.get_io()
     tops: list[float] = []
     real = transcript_pane._draw_typeset
@@ -1551,7 +1541,7 @@ def test_two_identical_runs_are_both_drawn_and_each_can_be_selected(seam: Any) -
         transcript.append(SegmentKind.OUTPUT, said)
         transcript.append(SegmentKind.TOOL_CALL, "Read(file_path=same.py)\n")
     transcript.append(SegmentKind.OUTPUT, "the end")
-    state = typeset_state(follow_tail=False)
+    state = typeset_state(follow_tail=False, held=True)
     snap = session(transcript)
     for _ in range(2):
         draw(seam, snap, state)
@@ -1623,9 +1613,9 @@ def run_tops(monkeypatch: pytest.MonkeyPatch, seam: Any) -> dict[int, list[float
     tops: dict[int, list[float]] = {}
     real = transcript_pane._draw_run
 
-    def spy(views: Any, run: Any, live: Any) -> None:
+    def spy(views: Any, run: Any, live: Any, *rest: Any) -> None:
         tops.setdefault(run.run, []).append(seam.get_cursor_screen_pos().y)
-        real(views, run, live)
+        real(views, run, live, *rest)
 
     monkeypatch.setattr(transcript_pane, "_draw_run", spy)
     return tops
@@ -1645,7 +1635,7 @@ def test_a_markdown_run_that_closes_is_in_its_document_that_frame_where_it_was(
     transcript.append(SegmentKind.OUTPUT, paragraphs(40, "the long run"))
     transcript.append(SegmentKind.OUTPUT, "```py\nnever_closed = 1\n")
     # Not following: the pane stays at its top.
-    state = typeset_state(follow_tail=False)
+    state = typeset_state(follow_tail=False, held=True)
     snap = session(transcript)
     for _ in range(2):
         draw(seam, snap, state)
@@ -1676,7 +1666,7 @@ def test_a_markdown_run_under_another_does_not_move_when_it_closes(seam: Any) ->
     transcript = Transcript()
     transcript.append(SegmentKind.REASONING, "A thought, closed.\n")
     transcript.append(SegmentKind.OUTPUT, "Said aloud, still open")
-    state = typeset_state(follow_tail=False)
+    state = typeset_state(follow_tail=False, held=True)
     snap = session(transcript)
     for _ in range(2):
         draw(seam, snap, state)
@@ -1725,7 +1715,7 @@ def test_a_literal_run_that_closes_stays_where_it_was(
     transcript = Transcript()
     transcript.append(SegmentKind.OUTPUT, "Looking.\n")
     transcript.append(SegmentKind.TOOL_RESULT, rows)
-    state = typeset_state(follow_tail=False)
+    state = typeset_state(follow_tail=False, held=True)
     snap = session(transcript)
     for _ in range(2):
         draw(seam, snap, state)
@@ -1804,8 +1794,8 @@ def test_a_transcript_watched_while_it_streams_stays_bounded_and_says_what_it_dr
     monkeypatch.setattr(transcript_pane, "_GENERATION_LINES", 12)
     monkeypatch.setattr(transcript_pane, "_TYPESET_KEEP", 60)
     said: list[str] = []
-    real = seam.text_disabled
-    monkeypatch.setattr(seam, "text_disabled", lambda text: (said.append(text), real(text))[1])
+    real = widgets.small_button
+    monkeypatch.setattr(widgets, "small_button", lambda text: (said.append(text), real(text))[1])
     state = typeset_state()
     held: list[int] = []
     keys: list[int] = []
@@ -1827,7 +1817,7 @@ def test_a_transcript_watched_while_it_streams_stays_bounded_and_says_what_it_dr
     assert max(keys) <= 2 * 60 // 12 + 2 and keys[-1] == len(feed.generations) + 1
     assert feed.skipped >= 300 - 62
     assert accounted(feed) == feed.next_line == 300
-    assert said[-1] == f"{feed.skipped:,} earlier lines: switch to raw"
+    assert f"{feed.skipped:,} earlier lines##earlier" in said[-3:]
     # What is left is the end of the transcript, in order and once.
     texts = block_texts(feed)
     assert texts[-1] == "Read(file_199.py)"
@@ -1994,31 +1984,27 @@ def said_at(
 
 
 SUB_AGENT_NOTE = "sub-agent: complete messages only, not live"
-RICH_NOTE = "(rich: search falls back to raw lines)"
 
 
-@pytest.mark.parametrize("mode", [RenderMode.RICH, RenderMode.TYPESET])
-def test_with_the_seam_on_the_notes_have_rows_of_their_own(
-    seam: Any, monkeypatch: pytest.MonkeyPatch, mode: RenderMode
+def test_the_sub_agent_note_has_a_row_of_its_own(
+    seam: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """
-    The filter takes what is left of the controls' row, so a note put after it is
-    clipped at the pane's edge: the one that says a quiet sub-agent is not a stuck
-    one, and the one that says a filtered log is not the log as the mode sets it.
-    """
     transcript = Transcript()
     transcript.append(SegmentKind.OUTPUT, "A checksum, and a line without one.\n")
     snap, node = sub_agent(transcript)
-    state = TranscriptState(mode=mode)
+    state = TranscriptState(mode=RenderMode.TYPESET)
     plain = said_at(seam, monkeypatch, state, snap, node)
-    left = min(plain.values())
-    assert plain[SUB_AGENT_NOTE] == left
-    assert RICH_NOTE not in plain and not any(note.startswith("filtering") for note in plain)
+    assert plain[SUB_AGENT_NOTE] == min(plain.values())
 
-    state.search = "checksum"
-    filtered = said_at(seam, monkeypatch, state, snap, node)
-    assert filtered[f"filtering: raw lines ({mode.value} has no find)"] == left
-    assert filtered[SUB_AGENT_NOTE] == left
+
+def test_with_the_seam_off_the_note_has_a_row_of_its_own_too(
+    imgui: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    transcript = Transcript()
+    transcript.append(SegmentKind.OUTPUT, "A checksum, and a line without one.\n")
+    snap, node = sub_agent(transcript)
+    notes = said_at(imgui, monkeypatch, TranscriptState(), snap, node)
+    assert notes[SUB_AGENT_NOTE] == min(notes.values())
 
 
 def test_in_a_narrow_dock_a_note_is_broken_and_not_cut_off(
@@ -2031,15 +2017,14 @@ def test_in_a_narrow_dock_a_note_is_broken_and_not_cut_off(
     transcript = Transcript()
     transcript.append(SegmentKind.OUTPUT, "A checksum, and a line without one.\n")
     snap, node = sub_agent(transcript)
-    state = typeset_state(search="checksum")
+    state = typeset_state()
     rects: dict[str, tuple[float, float]] = {}
     edge: list[float] = []
-    disabled, coloured = seam.text_disabled, seam.text_colored
+    coloured = seam.text_colored
 
     def measured(text: str) -> None:
         rects[text] = (seam.get_item_rect_max().x, seam.get_item_rect_size().y)
 
-    monkeypatch.setattr(seam, "text_disabled", lambda text: (disabled(text), measured(text))[1])
     monkeypatch.setattr(
         seam, "text_colored", lambda ink, text: (coloured(ink, text), measured(text))[1]
     )
@@ -2052,23 +2037,9 @@ def test_in_a_narrow_dock_a_note_is_broken_and_not_cut_off(
 
     rig.frame(seam, narrow)
     line = seam.get_text_line_height()
-    for note in (SUB_AGENT_NOTE, "filtering: raw lines (typeset has no find)"):
-        right, tall = rects[note]
-        assert right <= edge[0], note
-        assert tall >= 2 * line, note
-
-
-def test_with_the_seam_off_the_notes_are_where_they_were(
-    imgui: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    transcript = Transcript()
-    transcript.append(SegmentKind.OUTPUT, "A checksum, and a line without one.\n")
-    snap, node = sub_agent(transcript)
-    state = TranscriptState(mode=RenderMode.RICH, search="checksum")
-    notes = said_at(imgui, monkeypatch, state, snap, node)
-    # After the copy button, on the controls' row, and no row about filtering.
-    assert notes[RICH_NOTE] > 300.0 and notes[SUB_AGENT_NOTE] > notes[RICH_NOTE]
-    assert not any(note.startswith("filtering") for note in notes)
+    right, tall = rects[SUB_AGENT_NOTE]
+    assert right <= edge[0]
+    assert tall >= 2 * line
 
 
 # -- a session recalled from its file has no transcript loaded -----------------------
@@ -2148,7 +2119,7 @@ def test_a_path_is_not_drawn_for_a_session_that_ran_here(monkeypatch) -> None:
     run(store)
     said, state = _drawn(monkeypatch, store.snapshot(), RAN_ROOT, closed_path="/somewhere.jsonl")
 
-    assert "(nothing yet)" in said.strings and "checkbox" in said.calls
+    assert "(nothing yet)" in said.strings and "small_button" in said.calls
     assert not said.has("closed —") and not said.has("/somewhere.jsonl")
     assert RAN_ROOT in state.caches
 
@@ -2244,25 +2215,23 @@ def assert_set_as_prose(drawn: dict[str, Any]) -> None:
     assert len({round(top) for _, _, top in quads}) >= 4
 
 
-@pytest.mark.parametrize("mode", [RenderMode.TYPESET, RenderMode.RICH, RenderMode.WRAP])
+@pytest.mark.parametrize("mode", [RenderMode.TYPESET, RenderMode.WRAP])
 def test_a_long_prompt_is_broken_at_the_panes_width_and_every_glyph_drawn(
     seam: Any, monkeypatch: pytest.MonkeyPatch, mode: RenderMode
 ) -> None:
     """
-    The operator's words, drawn as the agent's are: TYPESET set them as one
-    unbroken code line the log scrolled sideways to, and RICH drew them on one
-    line cut off at the pane's edge.
+    The operator's words, drawn as the agent's are, and not as one unbroken code
+    line the log scrolls sideways to.
     """
     state = TranscriptState(mode=mode)
     assert_set_as_prose(drawn_narrow(seam, monkeypatch, session(prompted()), state))
     assert state.shown_mode() is mode
 
 
-@pytest.mark.parametrize("mode", [RenderMode.RICH, RenderMode.WRAP])
 def test_without_the_library_a_long_prompt_is_broken_at_the_panes_width_too(
-    imgui: Any, monkeypatch: pytest.MonkeyPatch, mode: RenderMode
+    imgui: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    state = TranscriptState(mode=mode)
+    state = TranscriptState(mode=RenderMode.WRAP)
     assert_set_as_prose(drawn_narrow(imgui, monkeypatch, session(prompted()), state))
 
 
@@ -2319,14 +2288,13 @@ Prompts a markdown reader would take structure from, and a line of only spaces.
 
 
 @pytest.mark.parametrize("sent", AS_SENT)
-def test_typeset_and_rich_set_every_character_of_a_prompt_and_the_same_ones(
+def test_typeset_sets_every_character_of_a_prompt(
     seam: Any, monkeypatch: pytest.MonkeyPatch, sent: str
 ) -> None:
     """
-    A prompt reads as it was written in every mode: TYPESET hands ImGui the
-    mark and what was sent, character for character, and RICH lays out the same
-    lines -- no heading, list, quote, code span, link or emphasis taken from
-    the operator's own text, and no space lost.
+    A prompt reads as it was written: TYPESET hands ImGui the mark and what was
+    sent, character for character -- no heading, list, quote, code span, link or
+    emphasis taken from the operator's own text, and no space lost.
     """
     logged = "> " + sent
     seen = handed(seam, monkeypatch)
@@ -2334,38 +2302,13 @@ def test_typeset_and_rich_set_every_character_of_a_prompt_and_the_same_ones(
     typeset_set = [text for text, _ in seen if text.startswith(">")]
     assert typeset_set == [logged]
 
-    rows: list[str] = []
-    real = rich_pane._draw_rows
 
-    def draw_rows(dl: Any, start: Any, laid: Any, size: float, base: int) -> float:
-        if base == P.text_dim.u32:
-            rows.extend(row.text for row in laid)
-        return float(real(dl, start, laid, size, base))
-
-    monkeypatch.setattr(rich_pane, "_draw_rows", draw_rows)
-    draw(seam, session(prompted(sent)), TranscriptState(mode=RenderMode.RICH))
-    assert [row for row in rows if row] == [line for line in logged.split("\n") if line]
-    assert "".join(rows) == "".join(typeset_set[0].split("\n"))
-
-
-def test_a_prompt_keeps_the_lines_it_was_sent_with_and_its_mark_in_rich_and_wrap(
-    imgui: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_a_prompt_keeps_its_mark_in_wrap(imgui: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     """
-    RICH lays a prompt out as its prose, without reading it: an operator's line
-    break is kept, the stars of a glob are not taken for bold, and the mark is the
-    first thing on the first line. WRAP's wrapped line starts with it too.
+    WRAP's wrapped line of a prompt starts with the mark, and the stars of a glob
+    are drawn as typed.
     """
     sent = "glob **/*.py and **/*.md\nthen stop\n\n- and say *what* you found"
-    rows: list[str] = []
-    real = rich_pane._draw_rows
-
-    def draw_rows(dl: Any, start: Any, laid: Any, size: float, base: int) -> float:
-        if base == P.text_dim.u32:
-            rows.extend(row.text for row in laid)
-        return float(real(dl, start, laid, size, base))
-
-    monkeypatch.setattr(rich_pane, "_draw_rows", draw_rows)
     wrapped: list[str] = []
     real_wrapped = imgui.text_wrapped
 
@@ -2375,11 +2318,6 @@ def test_a_prompt_keeps_the_lines_it_was_sent_with_and_its_mark_in_rich_and_wrap
 
     monkeypatch.setattr(imgui, "text_wrapped", text_wrapped)
     snap = session(prompted(sent))
-    rig.frame(
-        imgui, lambda: transcript_pane.draw(snap, TranscriptState(mode=RenderMode.RICH), ROOT)
-    )
-    assert rows == ["", "> glob **/*.py and **/*.md", "then stop", "", "- and say *what* you found"]
-
     rig.frame(
         imgui, lambda: transcript_pane.draw(snap, TranscriptState(mode=RenderMode.WRAP), ROOT)
     )
@@ -2391,8 +2329,7 @@ def test_a_long_tool_result_beside_a_prompt_is_still_one_unbroken_line(
 ) -> None:
     """
     Only the prompt became prose. A tool's output keeps its columns: one line of
-    a code block of the library's that the log scrolls sideways to, and in RICH
-    one line, cut at the edge as it was.
+    a code block of the library's that the log scrolls sideways to.
     """
     result = "Read -> " + "|".join(f"col{n:03}" for n in range(60))
     snap = session(prompted("short", (SegmentKind.TOOL_RESULT, f"{result}\n")))
@@ -2403,17 +2340,6 @@ def test_a_long_tool_result_beside_a_prompt_is_still_one_unbroken_line(
     tool = [view for view in feed.views.views(feed.generations[0].key) if is_literal(view)]
     tool += [view for view in feed.views.views(("open", 2)) if is_literal(view)]
     assert [tuple(view.texts) for view in tool] == [(result,)]
-
-    literal: list[tuple[str, ...]] = []
-    real = rich_pane._draw_literal
-
-    def draw_literal(dl: Any, start: Any, block: Any) -> float:
-        literal.append(block.lines)
-        return float(real(dl, start, block))
-
-    monkeypatch.setattr(rich_pane, "_draw_literal", draw_literal)
-    drawn_narrow(seam, monkeypatch, snap, TranscriptState(mode=RenderMode.RICH))
-    assert literal and all(lines == (result,) for lines in literal)
 
 
 def test_a_prompt_that_closes_stays_where_it_was(
@@ -2426,7 +2352,7 @@ def test_a_prompt_that_closes_stays_where_it_was(
     transcript = Transcript()
     transcript.append(SegmentKind.OUTPUT, "Asked for more.\n")
     transcript.append(SegmentKind.SYSTEM, f"\n> {PROMPT}\n")
-    state = typeset_state(follow_tail=False)
+    state = typeset_state(follow_tail=False, held=True)
     snap = session(transcript)
     seen = handed(seam, monkeypatch)
     for _ in range(2):
@@ -2443,3 +2369,617 @@ def test_a_prompt_that_closes_stays_where_it_was(
     assert feed.views.texts(held.key)[-1] == HELD
     assert [drawn for drawn in seen if drawn[0] == HELD][-1] == was
     assert ("open", 1) not in feed.views
+
+
+# -- following, the earlier lines and find, in real frames ---------------------------
+#
+# The pane in a window of its own, driven by ImGui's own input: a wheel, a drag of
+# the scrollbar, a chord, typed characters. What scrolled is read inside the log's
+# child, where ``_handle_scroll`` runs.
+
+PANE = (700.0, 500.0)
+
+
+class Pane:
+    """
+    The pane drawn a frame at a time, with where each small button landed, what the
+    log's child scrolled to, and every line RAW drew.
+    """
+
+    def __init__(
+        self, im: Any, monkeypatch: pytest.MonkeyPatch, snap: Snapshot, state: TranscriptState
+    ) -> None:
+        self.im, self.snap, self.state = im, snap, state
+        self.buttons: dict[str, tuple[float, float]] = {}
+        self.scroll = (0.0, 0.0)
+        self.child = (0.0, 0.0, 0.0, 0.0)
+        self.raw: list[str] = []
+        self.focus_pane = True
+        self.composer = False
+        self.typed = ""
+        self.focus_composer = False
+        self.composer_active = False
+        self.node = ROOT
+        real_button, real_scroll, real_coloured = (
+            widgets.small_button,
+            transcript_pane._handle_scroll,
+            im.text_colored,
+        )
+
+        def small_button(label: str, *args: Any) -> bool:
+            out = real_button(label, *args)
+            low, high = im.get_item_rect_min(), im.get_item_rect_max()
+            self.buttons[label] = ((low.x + high.x) / 2, (low.y + high.y) / 2)
+            return bool(out)
+
+        def handle_scroll(state: TranscriptState) -> None:
+            real_scroll(state)
+            self.scroll = (im.get_scroll_y(), im.get_scroll_max_y())
+            pos, size = im.get_window_pos(), im.get_window_size()
+            self.child = (pos.x, pos.y, pos.x + size.x, pos.y + size.y)
+
+        def text_colored(ink: Any, text: str) -> None:
+            self.raw.append(text)
+            real_coloured(ink, text)
+
+        monkeypatch.setattr(widgets, "small_button", small_button)
+        monkeypatch.setattr(transcript_pane, "_handle_scroll", handle_scroll)
+        monkeypatch.setattr(im, "text_colored", text_colored)
+
+    def frame(self) -> None:
+        im = self.im
+        typeset.pre_frame()
+        im.new_frame()
+        self.buttons.clear()
+        self.raw.clear()
+        try:
+            im.set_next_window_pos(im.ImVec2(10.0, 10.0))
+            im.set_next_window_size(im.ImVec2(*PANE))
+            if self.focus_pane:
+                im.set_next_window_focus()
+            im.begin("##pane")
+            transcript_pane.draw(self.snap, self.state, self.node)
+            if self.composer:
+                if self.focus_composer:
+                    im.set_keyboard_focus_here()
+                    self.focus_composer = False
+                _, self.typed = im.input_text("##composer", self.typed)
+                self.composer_active = im.is_item_active()
+            im.end()
+            if not self.focus_pane:
+                im.set_next_window_pos(im.ImVec2(800.0, 10.0))
+                im.set_next_window_size(im.ImVec2(200.0, 100.0))
+                im.set_next_window_focus()
+                im.begin("##elsewhere")
+                im.end()
+        finally:
+            im.render()
+
+    def frames(self, count: int) -> None:
+        for _ in range(count):
+            self.frame()
+
+    def press(self, *keys: Any) -> None:
+        io = self.im.get_io()
+        for key in keys:
+            io.add_key_event(key, True)
+        self.frame()
+        for key in reversed(keys):
+            io.add_key_event(key, False)
+        self.frame()
+
+    def type(self, text: str) -> None:
+        """
+        ``text`` typed, and the frames for it to be found and the scroll it asked
+        for to be applied: ImGui scrolls a window at the start of the next frame.
+        """
+        self.im.get_io().add_input_characters_utf8(text)
+        self.frames(3)
+
+    def wheel(self, by: float) -> None:
+        io = self.im.get_io()
+        left, top, right, bottom = self.child
+        io.add_mouse_pos_event((left + right) / 2, (top + bottom) / 2)
+        self.frame()
+        io.add_mouse_wheel_event(0.0, by)
+        self.frames(3)
+
+    def click(self, label: str) -> None:
+        io = self.im.get_io()
+        assert label in self.buttons, (label, sorted(self.buttons))
+        io.add_mouse_pos_event(*self.buttons[label])
+        self.frame()
+        io.add_mouse_button_event(0, True)
+        self.frame()
+        io.add_mouse_button_event(0, False)
+        self.frames(2)
+
+    def at_foot(self) -> bool:
+        return self.scroll[0] >= self.scroll[1] - 1.0
+
+    def leave(self) -> None:
+        io = self.im.get_io()
+        io.add_mouse_pos_event(-1.0, -1.0)
+        io.add_mouse_button_event(0, False)
+        for key in (self.im.Key.mod_ctrl, self.im.Key.mod_shift, self.im.Key.f, self.im.Key.escape):
+            io.add_key_event(key, False)
+        self.frames(2)
+
+
+def numbered(count: int, needle: tuple[int, ...] = ()) -> Transcript:
+    """``count`` output lines, ``line N``, with "checksum" on the lines named."""
+    transcript = Transcript()
+    transcript.append(
+        SegmentKind.OUTPUT,
+        "".join(f"line {n}{' checksum' if n in needle else ''}\n" for n in range(count)),
+    )
+    return transcript
+
+
+@pytest.fixture
+def pane(imgui: Any, monkeypatch: pytest.MonkeyPatch) -> Iterator[Any]:
+    made: list[Pane] = []
+
+    def make(transcript: Transcript, state: TranscriptState | None = None) -> Pane:
+        held = Pane(imgui, monkeypatch, session(transcript), state or TranscriptState())
+        made.append(held)
+        return held
+
+    yield make
+    for each in made:
+        each.leave()
+
+
+def test_following_is_on_at_the_foot_off_on_a_wheel_up_and_on_again_at_the_foot(
+    pane: Any,
+) -> None:
+    transcript = numbered(200)
+    view = pane(transcript)
+    view.frames(4)
+    assert view.state.follow_tail and view.at_foot()
+
+    view.wheel(3.0)
+    assert not view.state.follow_tail and not view.at_foot()
+    transcript.append(SegmentKind.OUTPUT, "".join(f"more {n}\n" for n in range(50)))
+    view.frames(3)
+    assert not view.state.follow_tail and not view.at_foot(), "new lines leave the reader be"
+
+    view.wheel(-200.0)
+    assert view.state.follow_tail and view.at_foot()
+    transcript.append(SegmentKind.OUTPUT, "".join(f"last {n}\n" for n in range(50)))
+    view.frames(3)
+    assert view.at_foot(), "and it follows again"
+
+
+def test_a_drag_of_the_scrollbar_lets_go_of_the_foot(pane: Any) -> None:
+    """
+    With no checkbox, the scrollbar is the other way off the foot, and while the
+    pane follows it puts the view back at the foot every frame.
+    """
+    view = pane(numbered(200))
+    view.frames(4)
+    assert view.state.follow_tail
+    io = view.im.get_io()
+    left, top, right, bottom = view.child
+    io.add_mouse_pos_event(right - 4.0, bottom - 12.0)
+    view.frame()
+    io.add_mouse_button_event(0, True)
+    view.frame()
+    for step in range(1, 6):
+        io.add_mouse_pos_event(right - 4.0, bottom - 12.0 - 40.0 * step)
+        view.frame()
+    io.add_mouse_button_event(0, False)
+    view.frames(2)
+    assert not view.state.follow_tail and not view.at_foot()
+
+
+def test_following_holds_in_the_typeset_log(seam: Any, pane: Any) -> None:
+    transcript = Transcript()
+    transcript.append(SegmentKind.OUTPUT, paragraphs(30, "the watch"))
+    view = pane(transcript, typeset_state())
+    view.frames(5)
+    assert view.state.follow_tail and view.at_foot()
+    view.wheel(3.0)
+    assert not view.state.follow_tail and not view.at_foot()
+    view.wheel(-500.0)
+    assert view.state.follow_tail and view.at_foot()
+
+
+def test_the_earlier_lines_of_wrapped_lines_are_shown_and_left_again(pane: Any) -> None:
+    """
+    WRAP draws its last ``_WRAP_WINDOW`` lines. The rest are one click away, in
+    RAW, opened on the last line left out; ``back to latest`` returns to the foot.
+    """
+    view = pane(numbered(transcript_pane._WRAP_WINDOW + 100))
+    view.frames(3)
+    assert view.state.shown_mode() is RenderMode.WRAP
+    # The button is above the first line drawn, where the operator scrolls to.
+    view.wheel(2000.0)
+    view.click("100 earlier lines##earlier")
+    view.frames(2)
+
+    assert view.state.mode is RenderMode.RAW
+    assert "line 99" in view.raw and "line 100" in view.raw, "where WRAP began, at the foot"
+    assert f"line {transcript_pane._WRAP_WINDOW + 99}" not in view.raw
+    assert not view.state.follow_tail
+    view.wheel(-2000.0)
+    assert view.state.follow_tail, "following holds in the earlier-lines view as well"
+    view.wheel(3.0)
+
+    view.click("back to latest")
+    view.frames(2)
+    assert view.state.mode is None and view.state.shown_mode() is RenderMode.WRAP
+    assert view.state.follow_tail and view.at_foot()
+
+
+def test_the_lines_above_the_typeset_window_are_reached_and_left_again(
+    seam: Any, pane: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(transcript_pane, "_TYPESET_WINDOW", 60)
+    view = pane(numbered(200), typeset_state())
+    view.frames(3)
+    skipped = view.state.feeds[ROOT].skipped
+    assert skipped == 140
+
+    view.click(f"{skipped} earlier lines##earlier")
+    view.frames(2)
+    assert view.state.mode is RenderMode.RAW
+    assert f"line {skipped - 1}" in view.raw and "line 199" not in view.raw
+
+    view.click("back to latest")
+    view.frames(3)
+    assert view.state.shown_mode() is RenderMode.TYPESET and view.state.follow_tail
+    assert view.at_foot()
+
+
+def test_ctrl_f_opens_find_over_the_pane_and_escape_closes_it(pane: Any) -> None:
+    view = pane(numbered(20))
+    view.frames(2)
+    im = view.im
+
+    view.press(im.Key.mod_ctrl, im.Key.f)
+    assert view.state.find.open
+    assert view.state.find.active, "the field has the keyboard"
+    view.press(im.Key.escape)
+    assert not view.state.find.open
+
+
+@pytest.mark.parametrize("keys", ["f", "shift", "alt"])
+def test_f_alone_or_under_another_modifier_opens_nothing(pane: Any, keys: str) -> None:
+    view = pane(numbered(20))
+    view.frames(2)
+    im = view.im
+    chord = {
+        "f": (im.Key.f,),
+        "shift": (im.Key.mod_ctrl, im.Key.mod_shift, im.Key.f),
+        "alt": (im.Key.mod_ctrl, im.Key.mod_alt, im.Key.f),
+    }[keys]
+    view.press(*chord)
+    assert not view.state.find.open
+
+
+def test_ctrl_f_is_not_the_panes_while_another_window_has_the_focus(pane: Any) -> None:
+    view = pane(numbered(20))
+    view.focus_pane = False
+    view.frames(3)
+    view.press(view.im.Key.mod_ctrl, view.im.Key.f)
+    assert not view.state.find.open
+
+
+def test_ctrl_f_is_left_to_a_text_field_being_typed_in(pane: Any) -> None:
+    """
+    A composer in the pane's own window, as the session pane has one: the pane is
+    focused, and the field being typed in keeps the chord.
+    """
+    view = pane(numbered(20))
+    view.composer = True
+    view.focus_composer = True
+    view.frames(3)
+    assert view.composer_active
+    view.press(view.im.Key.mod_ctrl, view.im.Key.f)
+    assert not view.state.find.open and view.composer_active
+
+
+def test_find_in_wrapped_lines_counts_steps_and_scrolls_to_the_match(pane: Any) -> None:
+    """
+    Typed into the field: every match counted, the first brought into view and
+    following off; Enter is the next and Shift+Enter the one before, wrapping.
+    """
+    view = pane(numbered(300, needle=(10, 150, 151)))
+    view.frames(3)
+    assert view.at_foot()
+    im = view.im
+    view.press(im.Key.mod_ctrl, im.Key.f)
+    view.type("CHECKSUM")
+    bar = view.state.find
+    assert bar.needle == "CHECKSUM" and bar.count == 3 and bar.status() == "1 of 3"
+    assert not view.state.follow_tail and not view.at_foot()
+    first = view.scroll[0]
+
+    view.press(im.Key.enter)
+    view.frames(1)
+    assert bar.status() == "2 of 3" and view.scroll[0] > first
+    # Shift held as a hand holds it, down a frame before Enter: ImGui trickles a
+    # modifier and a key that change in one frame into separate frames.
+    io = im.get_io()
+    io.add_key_event(im.Key.mod_shift, True)
+    view.frame()
+    view.press(im.Key.enter)
+    assert bar.status() == "1 of 3"
+    # Enter gives the field up and it is given the keyboard back; an Enter in the
+    # first frame it has it again is not seen (ImGui), so a hand's pace.
+    view.frames(2)
+    view.press(im.Key.enter)
+    io.add_key_event(im.Key.mod_shift, False)
+    view.frame()
+    assert bar.status() == "3 of 3", "before the first is the last"
+    assert bar.active, "Enter left the keyboard with the field"
+    view.frames(5)
+    assert not view.state.follow_tail, "held until the operator scrolls"
+
+
+def test_find_in_the_earlier_lines_view_reaches_every_line(pane: Any) -> None:
+    view = pane(numbered(transcript_pane._WRAP_WINDOW + 100, needle=(5, 450)))
+    view.frames(2)
+    view.state.find.show()
+    view.state.find.needle = "checksum"
+    view.frames(2)
+    assert view.state.find.count == 1, "WRAP searches the lines it draws"
+    view.wheel(2000.0)
+    view.click("100 earlier lines##earlier")
+    view.frames(2)
+    assert view.state.find.count == 2
+
+
+def test_find_in_typeset_text_marks_every_match_and_scrolls_to_the_current(
+    seam: Any, pane: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The library's find: each view handed the marks of its matches, and the current
+    one brought into view by the view's own ``scroll_to``.
+    """
+    marked: list[tuple[int, int]] = []
+    scrolled: list[tuple[int, int | None]] = []
+    view_type = rig.imscribe.TypesetView
+    real_marks, real_scroll = view_type.set_marks, view_type.scroll_to
+
+    def set_marks(self: Any, marks: Any = None) -> None:
+        marked.append((id(self), len(marks or ())))
+        real_marks(self, marks)
+
+    def scroll_to(self: Any, block: int, offset: int | None = None, **given: Any) -> None:
+        scrolled.append((block, offset))
+        real_scroll(self, block, offset, **given)
+
+    monkeypatch.setattr(view_type, "set_marks", set_marks)
+    monkeypatch.setattr(view_type, "scroll_to", scroll_to)
+    transcript = Transcript()
+    transcript.append(
+        SegmentKind.OUTPUT,
+        "The first checksum is here.\n\n"
+        + paragraphs(30, "the middle")
+        + "A Checksum, and another checksum.\n",
+    )
+    view = pane(transcript, typeset_state())
+    view.frames(4)
+    assert view.at_foot()
+
+    view.press(view.im.Key.mod_ctrl, view.im.Key.f)
+    view.type("checksum")
+    view.frames(3)
+    bar = view.state.find
+    assert bar.count == 3 and bar.status() == "1 of 3"
+    assert sum(count for _, count in marked) >= 3 and bar.marked
+    assert scrolled and scrolled[-1][1] == len("The first ")
+    assert not view.state.follow_tail and not view.at_foot(), "the first match is at the top"
+
+    holding = {ident for ident, count in marked if count}
+    marked.clear()
+    view.press(view.im.Key.escape)
+    view.frames(2)
+    assert not bar.open and bar.marked == {}
+    assert holding and holding <= {
+        ident for ident, count in marked if count == 0
+    }, "the marks go with the row, from every view that had them"
+
+
+class _Described:
+    """
+    What ``typeset.find_matches`` reads of a library view: its texts and each block's role.
+    """
+
+    def __init__(self, *blocks: tuple[str, str]) -> None:
+        self.texts = [text for _, text in blocks]
+        self.roles = [role for role, _ in blocks]
+
+    def block_role(self, number: int) -> str:
+        return self.roles[number]
+
+
+class _Views:
+    def __init__(self, held: dict[str, tuple[_Described, ...]]) -> None:
+        self.held = held
+
+    def views(self, key: str) -> tuple[_Described, ...]:
+        return self.held.get(key, ())
+
+
+def test_the_seams_find_reads_code_and_tables_as_code_and_marks_the_current_match_apart(
+    seam: Any,
+) -> None:
+    """
+    A line break in prose is a space to a needle, and in a code block or a table it
+    is not. The current match's mark is the last one handed, in a colour of its own.
+    """
+    view = _Described(
+        ("CODE", "first\nsecond"),
+        ("TABLE", "first\nsecond"),
+        ("PARAGRAPH", "first\nsecond"),
+    )
+    other = _Described(("PARAGRAPH", "First second"))
+    views: Any = _Views({"a": (view,), "b": (other,)})
+
+    found = typeset.find_matches(views, ["a", "missing", "b"], "first second")
+    assert [(key, match.block) for key, _, match in found] == [("a", 2), ("b", 0)]
+    assert typeset.find_matches(views, ["a"], "") == []
+
+    matches = [match for _, _, match in typeset.find_matches(views, ["a"], "first")]
+    assert [match.block for match in matches] == [0, 1, 2]
+    marks = typeset.find_marks(matches, 1)
+    plain = typeset.find_marks(matches, None)
+    assert marks[-1].range == ((1, 0), (1, len("first")))
+    assert marks[-1].color != marks[0].color, "the current match is marked apart"
+    assert {mark.color for mark in plain} == {marks[0].color} and marks[-1] not in plain
+
+
+def test_find_in_typeset_text_reaches_what_the_library_sets_and_not_a_prompt(
+    seam: Any, pane: Any
+) -> None:
+    """
+    Closed runs and the open one, prose and the tool runs the library sets as
+    literal blocks. A prompt is ImGui's text in this mode and is not searched.
+    """
+    transcript = Transcript()
+    transcript.append(SegmentKind.OUTPUT, "closed prose checksum here.\n")
+    transcript.append(SegmentKind.TOOL_CALL, "Bash(command=checksum)\n")
+    transcript.append(SegmentKind.TOOL_RESULT, "Bash -> checksum ok\n")
+    transcript.append(SegmentKind.SYSTEM, "\n> prompt with checksum\n")
+    transcript.append(SegmentKind.OUTPUT, "open prose checksum.\n")
+    view = pane(transcript, typeset_state())
+    view.frames(3)
+    view.state.find.show()
+    view.state.find.needle = "checksum"
+    view.frames(3)
+    assert view.state.find.count == 4
+    found = transcript_pane._typeset_matches(view.state.feeds[ROOT], True, "checksum")
+    assert [key for key, _, _ in found] == [("closed", 1)] * 3 + [("open", 4)]
+
+
+# -- following a log that does not overflow, a node switch, Escape in the field -------
+
+OTHER: NodeId = ("s2", None)
+
+
+def sessions(first: Transcript, second: Transcript) -> Snapshot:
+    """Two root sessions, ``ROOT`` and ``OTHER``."""
+    store = Store()
+    for node, transcript in ((ROOT, first), (OTHER, second)):
+        store.apply(
+            AgentSpawned(
+                node_id=node,
+                parent=None,
+                task=f"the session {node[0]}",
+                model="claude-sonnet-5",
+                started_at=0.0,
+                cwd="/x",
+                transcript=transcript,
+            )
+        )
+    return store.snapshot()
+
+
+def _short_log_follows_once_it_grows(view: Any, transcript: Transcript, more: str) -> None:
+    view.frames(3)
+    assert view.scroll[1] == 0.0, "the log does not overflow"
+    view.wheel(1.0)
+    transcript.append(SegmentKind.OUTPUT, more)
+    view.frames(4)
+    assert view.scroll[1] > 0.0, "it does now"
+    assert view.state.follow_tail and view.at_foot()
+
+
+def test_a_wheel_over_a_log_that_does_not_overflow_does_not_stop_following(pane: Any) -> None:
+    """
+    There is nothing above a log that fits to read, so a wheel there is no
+    asking to leave the foot: the log is at its foot, and follows when it grows.
+    """
+    transcript = numbered(3)
+    _short_log_follows_once_it_grows(
+        pane(transcript), transcript, "".join(f"more {n}\n" for n in range(200))
+    )
+
+
+def test_a_wheel_over_a_typeset_log_that_does_not_overflow_does_not_stop_following(
+    seam: Any, pane: Any
+) -> None:
+    transcript = Transcript()
+    transcript.append(SegmentKind.OUTPUT, "One short paragraph.\n\n")
+    _short_log_follows_once_it_grows(
+        pane(transcript, typeset_state()), transcript, paragraphs(40, "the growth")
+    )
+
+
+def test_a_match_shown_on_a_short_log_is_followed_again_after_a_wheel(pane: Any) -> None:
+    """
+    A match brought into view holds following off until the operator scrolls. On
+    a log that fits, the wheel is the scroll there is, and it gives following back.
+    """
+    transcript = numbered(3, needle=(1,))
+    view = pane(transcript)
+    view.frames(2)
+    view.state.find.show()
+    view.state.find.needle = "checksum"
+    view.frames(3)
+    assert view.state.find.count == 1 and not view.state.follow_tail
+    view.wheel(-1.0)
+    transcript.append(SegmentKind.OUTPUT, "".join(f"more {n}\n" for n in range(200)))
+    view.frames(4)
+    assert view.state.follow_tail and view.at_foot()
+
+
+def test_a_node_switched_to_opens_at_its_latest_text_following(pane: Any) -> None:
+    """
+    The earlier-lines view and a scroll away from the foot are about the session
+    they were opened on. The next one starts where a session starts: at its foot.
+    """
+    count = transcript_pane._WRAP_WINDOW + 100
+    view = pane(numbered(count))
+    view.snap = sessions(numbered(count), numbered(count))
+    view.frames(3)
+    view.wheel(2000.0)
+    view.click("100 earlier lines##earlier")
+    view.frames(2)
+    assert view.state.mode is RenderMode.RAW and not view.state.follow_tail
+
+    view.node = OTHER
+    view.frames(3)
+    assert view.state.mode is None and view.state.shown_mode() is RenderMode.WRAP
+    assert view.state.follow_tail and view.at_foot()
+
+
+def test_a_match_shown_on_one_node_does_not_hold_the_next(pane: Any) -> None:
+    """
+    The row stays open and keeps its needle across a switch; the place it found
+    and the hold it put on following were the other session's.
+    """
+    view = pane(numbered(300))
+    view.snap = sessions(numbered(300, needle=(10,)), numbered(300, needle=(20, 30)))
+    view.frames(2)
+    view.state.find.show()
+    view.state.find.needle = "checksum"
+    view.frames(3)
+    assert view.state.held and not view.state.follow_tail and not view.at_foot()
+
+    view.node = OTHER
+    view.frames(3)
+    bar = view.state.find
+    assert bar.open and bar.needle == "checksum" and bar.count == 2 and bar.current == 0
+    assert view.state.follow_tail and not view.state.held and view.at_foot()
+
+
+def test_escape_in_the_find_field_keeps_what_was_typed(pane: Any) -> None:
+    """
+    ImGui's Escape in a field puts back the text it held when it took the keyboard.
+    The row's needle is kept for the next ``Ctrl+F``, and that is what was typed.
+    """
+    view = pane(numbered(20, needle=(3,)))
+    view.frames(2)
+    im = view.im
+    view.press(im.Key.mod_ctrl, im.Key.f)
+    view.type("checksum")
+    assert view.state.find.active and view.state.find.needle == "checksum"
+    view.press(im.Key.escape)
+    assert not view.state.find.open
+    assert view.state.find.needle == "checksum"
+    view.press(im.Key.mod_ctrl, im.Key.f)
+    assert view.state.find.open and view.state.find.needle == "checksum"

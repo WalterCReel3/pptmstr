@@ -670,9 +670,12 @@ class AskerFate(enum.Enum):
 
     ``LIVE`` is an agent in a turn: it reads the answer when it next asks.
     ``IDLE`` is one whose turn has ended with its session still connected
-    (``AgentState.AWAITING_INPUT``). Nothing wakes it when a decision is answered,
-    so the answer sits unread until the operator sends that session a prompt --
-    and this is the ordinary state of an agent that asked and stopped to wait.
+    (``AgentState.AWAITING_INPUT``). An answer wakes its session: where the
+    session has a live client, pptmstr sends its lead a message of its own (a
+    ``SegmentKind.NOTICE``, never the operator's prompt) naming the decision,
+    and the lead reads it as a turn of its own. A sub-agent that asked is not
+    woken itself; the message tells its lead to pass the answer on. This is the
+    ordinary state of an agent that asked and stopped to wait.
 
     ``STOPPED`` is an agent whose run ended; a sub-agent in it can still be woken,
     so an answer may yet be read. ``FAILED`` is one whose session died.
@@ -864,6 +867,30 @@ _COMMAND_REFUSAL_SENTENCES = {
 
 
 @dataclass(frozen=True, slots=True)
+class NewWorktree:
+    """
+    A linked worktree a launch makes before its session exists. Always a new one:
+    a launch never continues in a worktree already there (W3 as revised on wt-fix-2).
+
+    ``run_in`` is the checkout the launcher read, where every git call for it runs;
+    ``base`` is the object id that checkout's ``HEAD`` named when it was read and
+    the modal showed (``planning/2026-10-15-ui-rework.md`` W1), so the branch is made
+    at the commit the operator saw and not at whatever ``HEAD`` is when the worktree
+    is made. ``path`` is final text before anything is on disk, and it is the
+    launch's ``cwd``. ``uncommitted_accepted`` is True when an earlier press of this
+    draft was held because ``run_in`` had uncommitted changes, and the operator
+    pressed again: the worktree is then made without asking a second time.
+    """
+
+    run_in: str
+    main_root: str
+    branch: str
+    path: str
+    base: str
+    uncommitted_accepted: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class LaunchSpec:
     """
     Everything an operator settles before a session exists.
@@ -996,6 +1023,23 @@ class LaunchSpec:
     # relaunch has only ``task`` to open the new conversation with, and the
     # shell starts nothing from a spec that says its task is no prompt.
     task_is_label: bool = False
+    # The worktree ``cwd`` is to be, made by ``app._launch`` before the session is
+    # built, or None for a launch into a directory that already exists.
+    #
+    # Not carried by ``from_record``: a record's ``cwd`` is the worktree once it has
+    # been made, so a fork or a relaunch starts there as it would in any directory
+    # (the 2026-10-07 worktree record's D7), and a spec that asked again would meet
+    # its own branch and be refused. A resume is built from the recorded directory
+    # and never carries one either.
+    worktree: NewWorktree | None = None
+
+    def __post_init__(self) -> None:
+        # The session is started in ``cwd`` and the worktree is made at
+        # ``worktree.path``; two spellings would make one and start in the other.
+        if self.worktree is not None and self.worktree.path != self.cwd:
+            raise ValueError(
+                f"a launch into a worktree at {self.worktree.path} names {self.cwd} as its cwd"
+            )
 
     @classmethod
     def from_record(cls, record: AgentRecord) -> LaunchSpec:

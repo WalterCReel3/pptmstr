@@ -209,6 +209,7 @@ def test_a_question_shows_only_the_current_turn() -> None:
     node = record()
     node.transcript.append(SegmentKind.SYSTEM, "\n> first task\n")
     node.transcript.append(SegmentKind.OUTPUT, "answered the first one")
+    node.transcript.end_turn()
     node.transcript.append(SegmentKind.SYSTEM, "\n> now the other one\n")
     node.transcript.append(SegmentKind.OUTPUT, "and here is the second answer")
 
@@ -398,10 +399,28 @@ def spawn_approval(pid: str = "p1", *, at: float = 1.0) -> ApprovalNeeded:
     )
 
 
-def _header_text(monkeypatch, snap: Snapshot, obligation: object) -> list[str]:
-    """Every string ``_header`` drew, with the pixels stubbed out."""
-    fake = MagicMock()
+def _measuring(fake: MagicMock, *, width: float = 4000.0, hovered: bool = False) -> MagicMock:
+    """
+    ``fake`` as an imgui that lays text out: ``width`` is the room left on a line,
+    every character is 8px wide, and ``hovered`` is what an item answers.
+    """
+    fake.get_content_region_avail.return_value.x = width
+    fake.calc_text_size.side_effect = lambda s: MagicMock(x=8.0 * len(s))
+    fake.is_item_hovered.return_value = hovered
+    return fake
+
+
+def _header_text(
+    monkeypatch, snap: Snapshot, obligation: object, *, width: float = 4000.0
+) -> list[str]:
+    """
+    Every string ``_header`` drew, with the pixels stubbed out: ``width`` is the
+    room left on the title's line and every character is 8px wide.
+    """
+    fake = _measuring(MagicMock(), width=width)
     monkeypatch.setattr(detail, "imgui", fake)
+    monkeypatch.setattr(widgets, "small_button", fake.small_button)
+    monkeypatch.setattr(widgets, "small_button_line", fake.small_button_line)
     detail._header(snap, obligation, 10.0)  # type: ignore[arg-type]
     return [str(c.args[1]) for c in fake.text_colored.call_args_list if len(c.args) > 1]
 
@@ -426,22 +445,75 @@ def test_the_header_carries_the_same_count_the_row_does(monkeypatch) -> None:
     assert "17th sub-agent · 4 rng" in _header_text(monkeypatch, snap, parked)
 
 
-def test_the_header_keeps_a_tasks_lines_and_holds_the_qualifier_to_one(monkeypatch) -> None:
+def test_the_header_holds_the_title_and_the_qualifier_to_one_line_each(monkeypatch) -> None:
     """
-    This pane is where a task typed on several lines is read as typed, so the title
-    keeps its breaks. The line under it names a project and a role, and a role with
-    a break in it would read as a line of the pane's own.
+    A task typed on several lines heads the pane on one; the line under it names a
+    project and a role, and a role with a break in it would read as a line of the
+    pane's own.
     """
-    import dataclasses
-
     root = record(task="where are we?\n\nBTW also\x00 this")
     sub = dataclasses.replace(record(("s1", "a"), parent=ROOT), agent_type="build\ner\x00")
     failure = SessionFailed(node=("s1", "a"), since=1.0, summary="died", error="died")
     drawn = _header_text(monkeypatch, snapshot(root, sub, needs_you=(failure,)), failure)
 
-    assert f"where are we?\n\nBTW also{widgets.NUL_SHOWN} this" in drawn
+    assert f"where are we? BTW also{widgets.NUL_SHOWN} this" in drawn
     assert f"orbital / build er{widgets.NUL_SHOWN}" in drawn
-    assert not any("\x00" in line for line in drawn)
+    assert not any("\x00" in line or "\n" in line for line in drawn)
+
+
+_LONG_TASK = "\n\n".join(f"paragraph {n}: " + "the operator kept typing " * 12 for n in range(30))
+
+
+def test_a_long_tasks_title_is_cut_by_the_cards_rule_at_the_room_on_its_line(
+    monkeypatch,
+) -> None:
+    """
+    The shortened title is ``widgets.ellipsis_by`` over the string the card titles
+    a root with (``session_menu.card_title``), at the room left on the line: the
+    card's rule, and not a copy that agrees with it on one input.
+    """
+    from pptmstr.ui import session_menu
+
+    root = record(task=_LONG_TASK)
+    failure = SessionFailed(node=ROOT, since=1.0, summary="died", error="died")
+    snap = snapshot(root, needs_you=(failure,))
+    drawn = _header_text(monkeypatch, snap, failure, width=400.0)
+
+    card = widgets.ellipsis_by(session_menu.card_title(root), 400.0, lambda s: 8.0 * len(s))
+    assert card.endswith("…") and len(card) == 50
+    assert card in drawn
+
+    monkeypatch.setattr(widgets, "ellipsis_by", lambda text, width, measure: "CARD RULE")
+    assert "CARD RULE" in _header_text(monkeypatch, snap, failure, width=400.0)
+
+
+def test_a_cut_title_shows_the_whole_task_on_hover_and_copy_carries_it(monkeypatch) -> None:
+    root = record(task=_LONG_TASK)
+    failure = SessionFailed(node=ROOT, since=1.0, summary="died", error="died")
+    snap = snapshot(root, needs_you=(failure,))
+
+    fake = _measuring(MagicMock(), width=400.0, hovered=True)
+    monkeypatch.setattr(detail, "imgui", fake)
+    monkeypatch.setattr(widgets, "small_button", lambda label: label == "copy")
+    monkeypatch.setattr(widgets, "small_button_line", lambda: None)
+    detail._header(snap, failure, 10.0)
+
+    drawn = [str(c.args[1]) for c in fake.text_colored.call_args_list]
+    assert _LONG_TASK in drawn
+    fake.begin_tooltip.assert_called_once()
+    (copied,), _ = fake.set_clipboard_text.call_args
+    assert _LONG_TASK in copied
+
+
+def test_a_title_that_fits_has_no_tooltip(monkeypatch) -> None:
+    root = record(task="short")
+    failure = SessionFailed(node=ROOT, since=1.0, summary="died", error="died")
+    fake = _measuring(MagicMock(), width=400.0, hovered=True)
+    monkeypatch.setattr(detail, "imgui", fake)
+    monkeypatch.setattr(widgets, "small_button", lambda label: False)
+    monkeypatch.setattr(widgets, "small_button_line", lambda: None)
+    detail._header(snapshot(root, needs_you=(failure,)), failure, 10.0)
+    fake.begin_tooltip.assert_not_called()
 
 
 def test_a_non_spawn_header_says_nothing_about_sub_agents(monkeypatch) -> None:
@@ -533,6 +605,7 @@ def _drive_unselected(monkeypatch, rec: AgentRecord) -> list[str]:
 
     monkeypatch.setattr(detail, "imgui", MagicMock())
     monkeypatch.setattr(detail, "_header", MagicMock())
+    monkeypatch.setattr(detail, "_title_line", MagicMock())
     monkeypatch.setattr(detail.widgets, "section", lambda label: drawn.append(f"section:{label}"))
     monkeypatch.setattr(detail, "_narration", lambda *a, **k: drawn.append("narration"))
     monkeypatch.setattr(detail, "_deliverable", lambda *a, **k: drawn.append("deliverable"))
@@ -582,7 +655,7 @@ def test_without_the_faces_the_pane_draws_as_it_always_did(monkeypatch) -> None:
     new one with a different font. The trace of each is disjoint -- the native diff
     splits into ``ReviewState.diff_lines``, the typeset one holds a view.
     """
-    fake = MagicMock()
+    fake = _measuring(MagicMock())
     monkeypatch.setattr(detail, "imgui", fake)
     monkeypatch.setattr(detail.widgets, "imgui", MagicMock())
     obligation = approval({"file_path": "a.py", "content": "x\n"}, diff="+x\n")
@@ -973,6 +1046,7 @@ def imgui():
     im = bundle.imgui
     context = im.create_context()
     io = im.get_io()
+    io.set_ini_filename(None)
     io.display_size = im.ImVec2(1600.0, 900.0)
     io.delta_time = 1.0 / 60.0
     io.backend_flags |= im.BackendFlags_.renderer_has_textures.value
@@ -1037,11 +1111,14 @@ class Pane:
                 outer.widgets.append(label)
                 return im.checkbox(label, value)
 
-            def small_button(self, label: str) -> bool:
-                outer.widgets.append(label)
-                return bool(im.small_button(label)) or label in outer.clicks
-
         monkeypatch.setattr(detail, "imgui", Spy())
+        real_small_button = widgets.small_button
+
+        def small_button(label: str) -> bool:
+            outer.widgets.append(label)
+            return real_small_button(label) or label in outer.clicks
+
+        monkeypatch.setattr(widgets, "small_button", small_button)
         real_section = detail.widgets.section
 
         def section(label: str) -> None:
@@ -1067,6 +1144,41 @@ class Pane:
             self.clicks.clear()
             im.end()
             im.render()
+
+
+def _header_height(im, task: str, *, owed: bool) -> float:
+    """
+    How far DETAIL's header moved the cursor down, in a real frame 420px wide: the
+    obligation's header when ``owed``, the no-obligation one otherwise.
+    """
+    root = record(task=task)
+    failure = SessionFailed(node=ROOT, since=1.0, summary="died", error="died")
+    snap = snapshot(root, needs_you=(failure,) if owed else ())
+    focus_state = FocusState()
+    focus_state.to_node(snap, ROOT, scope=Scope.AGENT)
+    im.new_frame()
+    im.set_next_window_pos(im.ImVec2(10.0, 10.0))
+    im.set_next_window_size(im.ImVec2(420.0, 700.0))
+    im.begin("##detail-header-test")
+    try:
+        top = im.get_cursor_pos_y()
+        if owed:
+            detail._header(snap, failure, 10.0)
+        else:
+            im.text_colored(theme_mod.P.text_dim.vec4, "nothing waiting on you from")
+            detail._title_line(theme_mod.P.text, task)
+        return float(im.get_cursor_pos_y() - top)
+    finally:
+        im.end()
+        im.render()
+
+
+@pytest.mark.parametrize("owed", [True, False], ids=["obligation", "no-obligation"])
+def test_detail_heads_a_long_multi_line_task_in_the_height_of_a_short_one(imgui, owed) -> None:
+    long_task = "\n\n".join("the operator kept typing " * 20 for _ in range(40))
+    short = _header_height(imgui, "fix it", owed=owed)
+    assert _header_height(imgui, long_task, owed=owed) == short
+    assert short < imgui.get_text_line_height_with_spacing() * 6
 
 
 def parked(tool: str, args: dict[str, object], pid: str = "p1") -> ApprovalNeeded:
@@ -3057,13 +3169,14 @@ def _drawn_bodies(
     reached: list[tuple] = []
     monkeypatch.setattr(detail, "imgui", MagicMock())
     monkeypatch.setattr(detail, "_header", MagicMock())
+    monkeypatch.setattr(detail, "_title_line", MagicMock())
     monkeypatch.setattr(detail.widgets, "section", MagicMock())
     monkeypatch.setattr(detail, "_narration", MagicMock())
     monkeypatch.setattr(detail, "_approval", lambda *a, **k: reached.append(("approval",)))
     monkeypatch.setattr(
         decision_view,
         "draw_detail",
-        lambda snap, state, owed: reached.append(("decision", state, owed.decision.id)),
+        lambda snap, state, owed, **_: reached.append(("decision", state, owed.decision.id)),
     )
     monkeypatch.setattr(
         decision_view,
@@ -3074,10 +3187,8 @@ def _drawn_bodies(
     return reached
 
 
-def test_a_focused_decision_draws_its_body_and_then_the_sessions_closed_decisions(
-    monkeypatch,
-) -> None:
-    """The wiring: both draws are reached, with the drafts the pane was handed."""
+def test_a_focused_decision_draws_its_body_and_no_history(monkeypatch) -> None:
+    """The wiring: the body is reached with the drafts the pane was handed, and nothing else."""
     from pptmstr.ui import decision_view
 
     obligation = _decision_owed()
@@ -3087,47 +3198,52 @@ def test_a_focused_decision_draws_its_body_and_then_the_sessions_closed_decision
     # Not empty, so a fresh one substituted on the way compares unequal.
     drafts = decision_view.DecisionState(drafts={"d-1": "half an answer"})
 
-    assert _drawn_bodies(monkeypatch, snap, focus_state, drafts) == [
-        ("decision", drafts, "d-1"),
-        ("closed", drafts, "s1", 10.0),
-    ]
+    assert _drawn_bodies(monkeypatch, snap, focus_state, drafts) == [("decision", drafts, "d-1")]
 
 
-def test_closed_decisions_are_reachable_from_an_approval_and_from_no_obligation_at_all(
+def test_detail_draws_no_history_on_an_approval_or_with_no_obligation_at_all(
     monkeypatch,
 ) -> None:
     """
-    An answered decision has no row. If the list hung off the decision branch
-    alone, answering a session's last decision would be what hid its answer.
+    A closed decision and an ended command have left the queue: they are not in
+    front of the operator, and DIGEST is where they are read
+    (``digest_pane.draw_history``). Neither the cursor on an obligation nor on a
+    session that owes nothing reaches either list.
     """
+    from pptmstr.ui import digest_pane
+
+    ended = MagicMock()
+    monkeypatch.setattr(digest_pane, "draw_ended_commands", ended)
+    monkeypatch.setattr(digest_pane, "draw_history", ended)
     parked = approval({"command": "ls"})
     snap = snapshot(record(), needs_you=(parked,))
     on_approval = FocusState()
     on_approval.to_obligation(parked)
 
-    assert _drawn_bodies(monkeypatch, snap, on_approval, None) == [
-        ("approval",),
-        ("closed", None, "s1", 10.0),
-    ]
+    assert _drawn_bodies(monkeypatch, snap, on_approval, None) == [("approval",)]
 
     quiet = snapshot(record(state=AgentState.THINKING))
     on_node = FocusState()
     on_node.to_node(quiet, ROOT, scope=Scope.AGENT)
 
-    assert _drawn_bodies(monkeypatch, quiet, on_node, None) == [("closed", None, "s1", 10.0)]
+    assert _drawn_bodies(monkeypatch, quiet, on_node, None) == []
+    ended.assert_not_called()
+    assert not hasattr(detail, "draw_ended_commands")
 
 
-def test_an_answer_is_still_readable_in_detail_after_its_row_has_left_the_queue(
+def test_an_answer_whose_row_has_left_the_queue_is_read_in_the_digest_and_not_in_detail(
     monkeypatch,
 ) -> None:
     """
-    End to end through the store and both modules, against a recording imgui:
-    answer the only decision, and the pane that follows the cursor to the session
-    still draws the question and the answer, each behind the author bar.
+    End to end through the store and the modules, against a recording imgui:
+    answer the only decision of a session that is not a team, and the cursor
+    follows to the session. DETAIL draws neither the question nor the answer;
+    DIGEST, under its one line for a session that is not a team, draws both,
+    each behind the author bar.
     """
     from pptmstr.intents import AgentSpawned, DecisionAnswered, DecisionRaised, StateChanged
     from pptmstr.store import Store
-    from pptmstr.ui import board_pane, decision_view
+    from pptmstr.ui import board_pane, decision_view, digest_pane
 
     store = Store()
     store.apply(
@@ -3147,19 +3263,46 @@ def test_an_answer_is_still_readable_in_detail_after_its_row_has_left_the_queue(
     assert not snap.needs_you and focus_state.node(snap) == ROOT
 
     quoted: list[str] = []
-    fake = MagicMock()
+    fake = _measuring(MagicMock())
     fake.TreeNodeFlags_ = decision_view.imgui.TreeNodeFlags_
     # The list is opened; what each entry keeps one press further in is not.
     fake.tree_node_ex.side_effect = lambda label, *a: "###closed-decisions" in label
-    for module in (detail, decision_view, board_pane):
+    for module in (detail, decision_view, board_pane, digest_pane):
         monkeypatch.setattr(module, "imgui", fake)
+    monkeypatch.setattr(widgets, "small_button", fake.small_button)
     monkeypatch.setattr(detail.widgets, "section", MagicMock())
     monkeypatch.setattr(detail, "_narration", MagicMock())
     monkeypatch.setattr(board_pane, "author", lambda text, colour=None: quoted.append(text))
 
     detail.draw(snap, focus_state, review.ReviewState(), detail.DetailState(), 10.0)
 
+    assert quoted == []
+    own = [str(call.args[1]) for call in fake.text_colored.call_args_list if len(call.args) > 1]
+    assert not any(line.startswith("d-1 from") for line in own)
+
+    fake.text_colored.reset_mock()
+    digest_pane.draw(snap, focus_state, 10.0)
+
     assert quoted == ["Bash  git push --force  (approved)", "  no -- revoke first \n"]
     own = [str(call.args[1]) for call in fake.text_colored.call_args_list if len(call.args) > 1]
     assert "d-1 from lead: answered by you 7s ago" in own
     assert not any("push" in line or "revoke" in line for line in own)
+
+
+def test_this_turns_text_follows_a_turn_opened_with_no_new_bytes() -> None:
+    """
+    A prompt sent mid-turn opens its turn where that one ends (``end_turn``),
+    which writes nothing: the text read for the old length is not this turn's.
+    """
+    from pptmstr.transcript import Transcript
+
+    pane = detail.DetailState()
+    transcript = Transcript()
+    transcript.append(SegmentKind.SYSTEM, "\n> build it\n")
+    transcript.append(SegmentKind.OUTPUT, "built")
+    transcript.append(SegmentKind.SYSTEM, "\n> and the docs\n")
+    assert pane.turn_text(ROOT, transcript) == "built"
+    assert list(pane.prose_blocks(ROOT, transcript)) != []
+    transcript.end_turn()
+    assert pane.turn_text(ROOT, transcript) == ""
+    assert list(pane.prose_blocks(ROOT, transcript)) == []

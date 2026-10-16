@@ -30,7 +30,7 @@ from unittest.mock import MagicMock
 import pytest
 from imgui_bundle import imgui as _real_imgui
 
-from pptmstr.ui import inbox, splash
+from pptmstr.ui import splash, splash_view
 
 _ImVec2 = _real_imgui.ImVec2
 
@@ -191,7 +191,7 @@ def test_the_glitch_never_touches_a_space_and_never_draws_one() -> None:
 
     A space overwritten with ink moves a word boundary in prose someone is mid-sentence
     through. A character overwritten with a space is one fewer ``add_text`` call, which is
-    the count tests/test_inbox_rail.py holds ``_quote`` to, and it reads as a dropped
+    the count tests/test_inbox_splash.py holds ``_quote`` to, and it reads as a dropped
     glyph rather than a corrupted one. Stated as "the spaces are in the same columns",
     which covers both directions in one assertion.
     """
@@ -351,7 +351,7 @@ def test_the_glyph_a_site_shows_rerolls_faster_than_the_site_set_does() -> None:
 
 def _quote_calls(monkeypatch: pytest.MonkeyPatch, now: float) -> tuple[list[str], MagicMock]:
     """
-    ``inbox._quote`` against a fake ImGui, returning the characters it handed the draw
+    ``splash_view._quote`` against a fake ImGui, returning the characters it handed the draw
     list in order, and the fake.
     """
     fake = MagicMock()
@@ -361,9 +361,9 @@ def _quote_calls(monkeypatch: pytest.MonkeyPatch, now: float) -> tuple[list[str]
     fake.get_text_line_height_with_spacing.return_value = 18.0
     draw = MagicMock()
     fake.get_window_draw_list.return_value = draw
-    monkeypatch.setattr(inbox, "imgui", fake)
+    monkeypatch.setattr(splash_view, "imgui", fake)
 
-    inbox._quote(now)
+    splash_view._quote(now)
     return [call.args[2] for call in draw.add_text.call_args_list], fake
 
 
@@ -399,7 +399,7 @@ def test_the_pane_claims_the_same_block_whatever_the_glitch_is_doing(
     """
     The extent is measured from the prose, so it cannot move when a character corrupts.
 
-    Also the draw-call count, which is the property tests/test_inbox_rail.py states
+    Also the draw-call count, which is the property tests/test_inbox_splash.py states
     against a quiet instant: checked here at the peak of a burst, where a substitution
     that produced a space would show up as one call short.
     """

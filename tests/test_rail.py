@@ -425,6 +425,10 @@ class Frame:
         **kw: Any,
     ) -> None:
         fake, ring = _stub_imgui(monkeypatch, hovered=hovered, clicked=clicked, mouse=(0.0, 0.0))
+        # The New Task line draws a link, which needs a real context; it is drawn
+        # in one in tests/test_fleet_empty.py. Here, that it was drawn, and with what.
+        self.new_task: list[object] = []
+        monkeypatch.setattr(rail, "new_task_line", self.new_task.append)
         self.menus: list[NodeId] = []
         monkeypatch.setattr(
             rail.session_menu, "draw_popup", lambda _w, rec, **_kw: self.menus.append(rec.node_id)
@@ -608,7 +612,7 @@ def test_a_resumed_session_draws_as_a_running_one_again(monkeypatch: pytest.Monk
 
     frame = Frame(monkeypatch, store.snapshot(), now_wall=WALL)
 
-    assert "1 sessions" in frame.text
+    assert "1 session" in frame.text
     assert not any("closed" in line for line in frame.text)
     assert frame.out.rings == 1
 
@@ -646,7 +650,7 @@ def test_a_session_off_the_fleet_is_not_drawn_and_not_counted(
     store.apply(recall("old", task="port the parser"))
     store.apply(recall("older", task="rename the module"))
     before = Frame(monkeypatch, store.snapshot())
-    assert "1 sessions · 2 closed" in before.text and len(before.out.cards) == 3
+    assert "1 session · 2 closed" in before.text and len(before.out.cards) == 3
 
     store.apply(SessionDetached("old"))
     snap = store.snapshot()
@@ -656,7 +660,7 @@ def test_a_session_off_the_fleet_is_not_drawn_and_not_counted(
 
     assert "port the parser" not in frame.text
     assert "rename the module" in frame.text
-    assert "1 sessions · 1 closed" in frame.text
+    assert "1 session · 1 closed" in frame.text
     assert len(frame.out.cards) == 2
     assert OLD not in frame.menus
     # Left out of the drawing, not out of the store.
@@ -678,8 +682,14 @@ def test_a_fleet_with_every_session_removed_says_it_is_empty(
 
     frame = Frame(monkeypatch, snap)
 
-    assert frame.empty == ["no sessions", "start one from the launcher below."]
+    assert frame.empty == ["no sessions"]
+    assert frame.new_task == [], "no line where there is nothing for it to do"
     assert frame.text == [] and frame.out.cards == []
+
+    act = MagicMock()
+    offered = Frame(monkeypatch, snap, new_task=act)
+    assert offered.empty == ["no sessions"]
+    assert offered.new_task == [act], "the New Task line, in place of 'the launcher below'"
 
 
 def test_a_project_whose_sessions_were_all_removed_has_no_header(

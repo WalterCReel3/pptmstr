@@ -18,6 +18,8 @@ those answers live here once.
 - ``themes``: a role's face, size and leading as the library's theme, pptmstr's
   inks as its palette, and which text the library sets at all.
 - ``views``: ``ViewCache``, and the calls a pane's typeset branch makes.
+- ``find``: the matches of a needle in a ``ViewCache``'s views
+  (``find_matches``), and the marks a view is handed (``find_marks``).
 - ``diffs``: the diff model of a parked call, a view of it, which fences are
   honest diffs, and who draws a diff (``diff_adopted``, and of one diff
   ``diffs.unfit``).
@@ -80,6 +82,8 @@ from .diffs import adopted as diff_adopted
 from .diffs import draws as diff_draws
 from .diffs import own_rows_warning as diff_own_rows_warning
 from .diffs import renderer as diff_renderer
+from .find import marks as find_marks
+from .find import matches as find_matches
 from .gate import (
     available,
     can_draw,
@@ -191,6 +195,8 @@ __all__ = [
     "document",
     "enabled",
     "face_font",
+    "find_marks",
+    "find_matches",
     "font",
     "imfont",
     "is_diff_fence",

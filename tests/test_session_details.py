@@ -39,7 +39,7 @@ from pptmstr.model import (
 )
 from pptmstr.settings import Settings
 from pptmstr.store import Store
-from pptmstr.ui import board_pane, launcher, session_details
+from pptmstr.ui import board_pane, launcher, session_details, widgets
 from pptmstr.ui.session_details import NOT_KNOWN, Held, Looked, Row, View
 
 ROOT: NodeId = ("s1", None)
@@ -422,7 +422,7 @@ def test_the_derived_path_is_where_the_sdk_finds_the_sessions_transcript(
 
     config = tmp_path / "claude"
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config))
-    monkeypatch.setattr(brief, "default_root", lambda: config / "projects")
+    monkeypatch.setattr(brief, "legacy_root", lambda: config / "projects")
     work = tmp_path / "some work" / "tree_1"
     work.mkdir(parents=True)
     session_id = "0b5f3a0e-6a3c-4b53-9c62-0d0f4f6f8d11"
@@ -444,7 +444,7 @@ def _rec(store: Store, node: NodeId = ROOT) -> object:
 def test_the_look_reads_the_directorys_git_layout_and_whether_the_transcript_is_there(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(brief, "default_root", lambda: tmp_path / "projects")
+    monkeypatch.setattr(brief, "legacy_root", lambda: tmp_path / "projects")
     work = tmp_path / "work"
     work.mkdir()
     store = _store(cwd=str(work))
@@ -577,7 +577,7 @@ def test_the_look_finds_a_sub_agents_transcript_beside_the_one_the_cli_reported(
     Under the reported transcript when there is one: that is where the file is,
     and the derived path is only where the naming says it should be.
     """
-    monkeypatch.setattr(brief, "default_root", lambda: tmp_path / "projects")
+    monkeypatch.setattr(brief, "legacy_root", lambda: tmp_path / "projects")
     work = tmp_path / "work"
     work.mkdir()
     store = _store(cwd=str(work))
@@ -785,12 +785,6 @@ class _Modal:
                 imgui.text_colored(colour, text)  # type: ignore[arg-type]
 
             @staticmethod
-            def small_button(label: str) -> bool:
-                pressed = imgui.small_button(label)
-                at[labels[-1]] = middle()
-                return pressed
-
-            @staticmethod
             def button(label: str) -> bool:
                 pressed = imgui.button(label)
                 at[label] = middle()
@@ -802,7 +796,15 @@ class _Modal:
             def set_clipboard_text(text: str) -> None:
                 clipboard.append(text)
 
+        real_small_button = widgets.small_button
+
+        def small_button(label: str) -> bool:
+            pressed = real_small_button(label)
+            at[labels[-1]] = middle()
+            return pressed
+
         self._monkeypatch.setattr(session_details, "imgui", Noting())
+        self._monkeypatch.setattr(widgets, "small_button", small_button)
         return self
 
     def __exit__(self, *exc: object) -> None:
@@ -840,7 +842,7 @@ class _Modal:
 @pytest.fixture
 def modal(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[_Modal]:
     """Details open on a session in a real directory, with its board being recorded."""
-    monkeypatch.setattr(brief, "default_root", lambda: tmp_path / "projects")
+    monkeypatch.setattr(brief, "legacy_root", lambda: tmp_path / "projects")
     work = tmp_path / "work"
     work.mkdir()
     with _Modal(monkeypatch, _store(cwd=str(work), brief_dir=str(tmp_path / "brief"))) as real:
@@ -848,7 +850,9 @@ def modal(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[_Modal]:
         real.state.board_logs["s1"] = board_pane.LogState(directory=str(tmp_path / "logs" / "s1"))
         real.work = work  # type: ignore[attr-defined]
         real.state.cards.details.ask(ROOT)
-        real.frame(3)
+        # Four: the body is a child that fits its rows a frame after the window
+        # appears, and the window is moved onto the display the frame after that.
+        real.frame(4)
         yield real
 
 
@@ -1345,18 +1349,53 @@ def test_copy_on_each_of_the_sessions_own_paths_puts_that_path_on_the_clipboard(
     assert modal.clipboard == [str(directory), str(directory / "session.json")]
 
 
-def test_the_modal_for_a_closed_session_reads_its_files_once_and_copies_its_gate(
+def test_the_close_button_is_on_the_display_when_the_rows_are_taller_than_it(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    monkeypatch.setattr(brief, "default_root", lambda: tmp_path / "projects")
+    """
+    A closed session's rows are taller than a 900-pixel display. They scroll in
+    the body; the close button under them stays inside the window and on the
+    display, and it closes.
+    """
+    monkeypatch.setattr(brief, "legacy_root", lambda: tmp_path / "projects")
     old = boardlog.session_dir(boardsync.legacy_root(), "s1")
     assert old is not None
     _record("s1", old)
     with _Modal(monkeypatch, _closed()) as modal:
         modal.state.cards.details.ask(ROOT)
-        modal.frame(3)
+        modal.frame(4)
+        assert modal.window is not None
+        x, y, width, height = modal.window
+        assert y + height <= 900.0
+        assert y < modal.at["close"][1] < y + height
+        (body,) = [
+            window
+            for window in imgui.get_current_context().windows
+            if window.name.startswith(f"{session_details.TITLE}/{session_details.BODY_ID}")
+        ]
+        assert body.scroll_max.y > 0.0, "the rows scroll: this is the case under test"
+        modal.click("close")
+        assert not modal.open
+
+
+def test_the_modal_for_a_closed_session_reads_its_files_once_and_copies_its_gate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(brief, "legacy_root", lambda: tmp_path / "projects")
+    old = boardlog.session_dir(boardsync.legacy_root(), "s1")
+    assert old is not None
+    _record("s1", old)
+    with _Modal(monkeypatch, _closed()) as modal:
+        modal.state.cards.details.ask(ROOT)
+        modal.frame(4)
         assert modal.open
-        for label in ("gate", "legacy board log", "board log"):
+        modal.click("gate")
+        # The logs are the last rows of a body taller than the display: scrolled to,
+        # with the wheel over the body, as an operator reaches them.
+        modal.io.add_mouse_pos_event(*modal.at["gate"])
+        modal.io.add_mouse_wheel_event(0.0, -50.0)
+        modal.frame(3)
+        for label in ("legacy board log", "board log"):
             modal.click(label)
         for label in ("cost", "tokens", "context", "sub-agents", "contained"):
             assert label not in modal.at
@@ -1422,3 +1461,60 @@ def test_a_title_that_is_only_a_label_is_not_shown_as_the_sessions_task() -> Non
     for store in (_store(), _closed(dataclasses.replace(_FULL, task_recorded=True)), _closed()):
         plain = _see(store)
         assert plain.row("title") is None and _row(plain, "task").note == ""
+
+
+# -- the board's routine provenance lives here (U8) ------------------------------------
+
+
+def _restored_view(restore: object, logging: board_pane.Logging | None) -> View:
+    snap = dataclasses.replace(
+        _store().snapshot(), restores={"s1": restore}  # type: ignore[dict-item]
+    )
+    shown = session_details.view(
+        snap, ROOT, held=None, looked=None, logging=logging, now=NOW, wall_now=WALL
+    )
+    assert shown is not None
+    return shown
+
+
+@pytest.mark.parametrize("short", [False, True])
+def test_the_restore_row_is_the_board_panes_own_line_routine_or_alarm(short: bool) -> None:
+    """
+    The board header no longer draws a whole restore; this row is where it is read,
+    in the words ``restore_line`` gives it -- and an alarm, which the header still
+    draws, is here as well.
+    """
+    from pptmstr.model import Restore
+
+    restore = Restore(session_id="s1", at=5.0, tasks=2, concerns=1, log_short=short)
+    entry = board_pane.LogState(directory="/logs/s1", newest=WALL - 60.0)
+    logging = board_pane.Logging(sessions={"s1": entry})
+
+    shown = _restored_view(restore, logging)
+    line = board_pane.restore_line(restore, entry)
+
+    assert line is not None
+    assert line.tone is (board_pane.Tone.ALARM if short else board_pane.Tone.PROSE)
+    assert _row(shown, "board restore") == Row("board restore", line.text)
+    recorded = board_pane.recording_line(None, entry)
+    assert recorded is not None
+    assert _row(shown, "board recording").value == recorded.text
+
+
+def test_a_launched_session_nothing_was_restored_for_has_no_restore_row() -> None:
+    assert _see(_store()).row("board restore") is None
+
+
+def test_a_restore_still_being_applied_claims_no_answer() -> None:
+    logging = board_pane.Logging(
+        sessions={"s1": board_pane.LogState(directory="/logs/s1", recording=False, awaiting=True)}
+    )
+    row = _row(_see(_store(), logging=logging), "board restore")
+    assert (row.value, row.known) == (NOT_KNOWN, False)
+    assert "restore" in row.note
+
+
+def test_a_closed_session_does_not_say_its_board_was_never_restored() -> None:
+    row = _row(_see(_closed()), "board restore")
+    assert (row.value, row.known) == (NOT_KNOWN, False)
+    assert "resumed" in row.note

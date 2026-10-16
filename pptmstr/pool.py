@@ -317,6 +317,17 @@ class SessionPool:
             return False
         return await session.send(text)
 
+    async def wake(self, node_id: NodeId, text: str) -> bool:
+        """
+        Send a live session pptmstr's own message (``AgentSession.wake``). True
+        when a connected client took it; False, with nothing written, for a
+        session with none -- closed, failed, ended, or not yet connected.
+        """
+        session = self.session_for(node_id)
+        if session is None:
+            return False
+        return await session.wake(text)
+
     async def close(self, node_id: NodeId) -> None:
         """
         End a session and free its slot.

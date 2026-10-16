@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import dataclasses
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
@@ -92,12 +93,19 @@ def _fake(*, opened: bool = False, clicked: bool = False, width: float = 4000.0)
 
 
 def _spoken(
-    monkeypatch, snap: Snapshot, focus: FocusState | None, fake: MagicMock | None = None
+    monkeypatch,
+    snap: Snapshot,
+    focus: FocusState | None,
+    fake: MagicMock | None = None,
+    *given: object,
 ) -> tuple[list[_Line], MagicMock]:
     """
     Every string the pane handed imgui, in order, each against whether it was
     drawn behind the bar and the colour it was drawn in. ``focus`` None is a
-    cursor on nothing.
+    cursor on nothing. ``given`` is the drafts and command rows handed on.
+
+    The history section is ``fake.draw_history``, recorded and not drawn: its
+    own tests draw it (``test_the_history_*``).
     """
     lines: list[_Line] = []
     inside = [False]
@@ -129,7 +137,8 @@ def _spoken(
         monkeypatch.setattr(module, "imgui", fake)
     monkeypatch.setattr(digest_pane, "author", barred(board_pane.author))
     monkeypatch.setattr(digest_pane, "author_inline", barred(board_pane.author_inline))
-    digest_pane.draw(snap, FocusState() if focus is None else focus, NOW)
+    monkeypatch.setattr(digest_pane, "draw_history", fake.draw_history)
+    digest_pane.draw(snap, FocusState() if focus is None else focus, NOW, *given)
     return lines, fake
 
 
@@ -728,3 +737,173 @@ def test_what_a_short_run_does_not_use_goes_to_the_long_one_beside_it() -> None:
     own_room = room * (1 - digest_pane.QUOTED_SHARE)
     assert texts[1] == "you:"
     assert _seven(texts[0]) > own_room - _seven("you:") - 7.0
+
+
+# -- the history: closed decisions and ended commands ------------------------------
+#
+# DETAIL drew these until they moved here (planning/2026-10-15-ui-rework.md,
+# "Decisions and command history should be in the digest pane"). Drawn with
+# ``test_decision_view.Screen``, the recording imgui those bodies are tested under,
+# installed in this module as well.
+
+HISTORY_CMD = "cmd-20261016T120001Z-000000000001"
+
+
+def _history_store(*, withdrawn: bool = False) -> Store:
+    """
+    ``test_decision_view.team``'s session s1 with one closed decision --
+    answered, or withdrawn by its asker -- and one command the operator refused.
+    """
+    from pptmstr.command import Command
+    from pptmstr.intents import (
+        CommandRefused,
+        CommandRequested,
+        DecisionAnswered,
+        DecisionWithdrawn,
+    )
+    from tests import test_decision_view as dv
+
+    store = dv.team()
+    dv.raised(store)
+    if withdrawn:
+        store.apply(DecisionWithdrawn(dv.BUILDER, "d-1"), now=9.0)
+    else:
+        store.apply(DecisionAnswered("d-1", "keep it"), now=9.0)
+    asked = Command(
+        id=HISTORY_CMD,
+        asker=dv.BUILDER,
+        asked="make install",
+        reason="it needs /usr/local",
+        expects="a binary in /usr/local/bin",
+        asked_at=1_790_000_000.0,
+    )
+    store.apply(CommandRequested(dv.BUILDER, asked, None, 1_790_000_001.0), now=10.0)
+    store.apply(CommandRefused(HISTORY_CMD, "not here", 1_790_000_002.0), now=11.0)
+    return store
+
+
+def _screen(monkeypatch, press: frozenset[str] = frozenset()) -> Any:
+    from pptmstr.ui import command_view
+    from tests import test_decision_view as dv
+
+    screen = dv.Screen(monkeypatch, press=press, shut=dv.ASKED_SHUT)
+    monkeypatch.setattr(digest_pane, "imgui", screen.imgui)
+    monkeypatch.setattr(command_view, "draw_ended", MagicMock())
+    return screen
+
+
+def test_the_history_is_the_last_section_and_is_handed_the_inboxs_own_state(monkeypatch) -> None:
+    """
+    Inside the digest's child, after the folded line, with the drafts and the
+    command rows the pane was handed -- the inbox's, so a draft discarded here
+    is the one its row held.
+    """
+    from pptmstr.ui.decision_view import DecisionState
+
+    snap, root = board_scenario()
+    drafts, commands = DecisionState(), MagicMock()
+    _, fake = _spoken(monkeypatch, snap, _at(snap, root), _fake(), drafts, commands)
+
+    fake.draw_history.assert_called_once()
+    handed = fake.draw_history.call_args.args
+    assert handed[:3] == (snap, root[0], NOW)
+    assert handed[3] is drafts and handed[4] is commands
+    order = [name for name, *_ in fake.mock_calls]
+    assert order.index("tree_node_ex") < order.index("draw_history") < order.index("end_child")
+
+
+def test_the_history_is_drawn_under_each_refusal_but_not_for_a_cursor_on_nothing(
+    monkeypatch,
+) -> None:
+    """
+    A session that is not a team can ask for a decision and a command, so its
+    history is drawn under the line that says it is not a team; DETAIL, which
+    drew it for any session, no longer does. A cursor on nothing has no session.
+    """
+    from pptmstr.intents import DecisionAnswered
+    from tests import test_decision_view as dv
+    from tests.test_ui_text import CLOSED_ROOT, pointed_at, recalled_snapshot
+
+    store = Store()
+    solo: NodeId = ("solo", None)
+    store.apply(AgentSpawned(solo, None, task="t", model="m", started_at=0.0))
+    dv.raised(store, asker=solo, blocks=())
+    store.apply(DecisionAnswered("d-1", "yes"), now=9.0)
+    snap = store.snapshot()
+    assert not board_pane.has_board(snap, "solo") and snap.decisions["d-1"].session_id == "solo"
+
+    lines, fake = _spoken(monkeypatch, snap, _at(snap, solo))
+    assert lines == [_Line("this session is not a team", False)]
+    assert fake.draw_history.call_args.args[:3] == (snap, "solo", NOW)
+
+    _, fake = _spoken(monkeypatch, snap, None)
+    fake.draw_history.assert_not_called()
+
+    recalled = recalled_snapshot(template="feature")
+    lines, fake = _spoken(monkeypatch, recalled, pointed_at(recalled, CLOSED_ROOT))
+    assert [line.text for line in lines] == [board_pane.CLOSED_BOARD]
+    assert fake.draw_history.call_args.args[1] == CLOSED_ROOT[0]
+
+
+def test_the_history_shows_a_sessions_closed_decision_and_ended_command_and_copies_each(
+    monkeypatch,
+) -> None:
+    from pptmstr.ui import command_view, decision_view
+    from pptmstr.ui.decision_view import DecisionState
+    from tests import test_decision_view as dv
+
+    snap = _history_store().snapshot()
+    shut = _screen(monkeypatch)
+    digest_pane.draw_history(snap, "s1", 70.0, DecisionState(), None)
+    nodes = [line.text for line in shut.said if line.how == "node"]
+    assert decision_view.closed_heading(1) in nodes
+    assert digest_pane.ended_heading(1) in nodes
+    assert shut.clipboard == []
+    assert "----" in [line.text for line in shut.said if line.how == "rule"]
+
+    screen = _screen(monkeypatch, press=frozenset({decision_view.COPY}))
+    digest_pane.draw_history(snap, "s1", 70.0, DecisionState(), None)
+    (decision,) = decision_view.closed(snap, "s1")
+    (command,) = digest_pane.ended_commands(snap, "s1")
+    assert "\n".join(decision_view.closed_text(snap, decision, 70.0)) in screen.clipboard
+    assert "\n".join(command_view.command_text(command, "builder")) in screen.clipboard
+    assert dv.QUESTION in screen.quoted()
+
+
+def test_a_draft_its_decision_outlived_is_discarded_from_the_digest(monkeypatch) -> None:
+    from pptmstr.ui import decision_view
+    from pptmstr.ui.decision_view import DecisionState
+
+    snap = _history_store(withdrawn=True).snapshot()
+    state = DecisionState(drafts={"d-1": "half an answer"})
+
+    screen = _screen(monkeypatch, press=frozenset({"copy draft"}))
+    digest_pane.draw_history(snap, "s1", 70.0, state, None)
+    assert decision_view.WITHDRAWN_DRAFT in screen.own()
+    assert screen.clipboard == ["half an answer"]
+    assert state.drafts == {"d-1": "half an answer"}
+
+    _screen(monkeypatch, press=frozenset({"discard draft"}))
+    digest_pane.draw_history(snap, "s1", 70.0, state, None)
+    assert state.drafts == {}
+
+
+def test_a_session_with_no_history_gets_no_history_section(monkeypatch) -> None:
+    from pptmstr.ui.decision_view import DecisionState
+    from tests import test_decision_view as dv
+
+    snap = dv.team().snapshot()
+    screen = _screen(monkeypatch)
+    digest_pane.draw_history(snap, "s1", 70.0, DecisionState(), None)
+    assert screen.said == []
+    screen.imgui.push_id.assert_not_called()
+
+
+def test_each_sessions_history_keeps_its_own_open_state(monkeypatch) -> None:
+    """Under an id of the session's, as the folded line is (``rest_id``)."""
+    from pptmstr.ui.decision_view import DecisionState
+
+    snap = _history_store().snapshot()
+    screen = _screen(monkeypatch)
+    digest_pane.draw_history(snap, "s1", 70.0, DecisionState(), None)
+    screen.imgui.push_id.assert_any_call("history-s1")

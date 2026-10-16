@@ -64,7 +64,7 @@ from ..model import (
     Withdrawn,
 )
 from ..theme import P
-from . import board_pane
+from . import board_pane, widgets
 from .widgets import format_elapsed, multiline_input
 
 # One text of a decision as the inbox row shows it. The row is scanned; DETAIL
@@ -684,11 +684,30 @@ def draw_answer_box(
     imgui.pop_id()
 
 
-def draw_detail(snap: Snapshot, state: DecisionState | None, owed: DecisionOwed) -> None:
-    """DETAIL's body for the decision under the cursor: all of it, and no control."""
+def draw_detail(
+    snap: Snapshot,
+    state: DecisionState | None,
+    owed: DecisionOwed,
+    *,
+    bridge: Bridge | None = None,
+    wrap: bool = True,
+) -> None:
+    """
+    DETAIL's body for the decision under the cursor: all of it, and no control.
+
+    With ``bridge`` -- DETAIL is the place to act, the queue not being on
+    screen -- the row's own answer box under it (``draw_answer_box``), with its
+    draft and its second press, in place of the line that sends the operator
+    to the row. Whole either way: ``DETAIL_CHARS`` is more than any text of a
+    decision may be (``MAX_DECISION_TEXT_CHARS``), so nothing is answered from
+    here that was not drawn.
+    """
     draw_body(snap, owed, limit=DETAIL_CHARS, rest="copy puts the whole on the clipboard")
     imgui.spacing()
     imgui.separator()
+    if bridge is not None and state is not None:
+        draw_answer_box(snap, state, bridge, owed, wrap=wrap)
+        return
     draft = "" if state is None else state.drafts.get(owed.decision.id, "")
     if draft:
         imgui.text_colored(P.text.vec4, draft_line(draft))
@@ -715,7 +734,7 @@ def draw_closed(snap: Snapshot, state: DecisionState | None, session_id: str, no
     if not imgui.tree_node_ex(label, int(imgui.TreeNodeFlags_.span_avail_width)):
         return
     imgui.push_text_wrap_pos(0.0)
-    if imgui.small_button(copy_all(len(ended))):
+    if widgets.small_button(copy_all(len(ended))):
         # Every one, the ones past the bound below included: the bound is on what
         # a frame draws, and the clipboard has no frame.
         whole: list[str] = []
@@ -730,7 +749,7 @@ def draw_closed(snap: Snapshot, state: DecisionState | None, session_id: str, no
         delivery = delivery_label(decision, role, now)
         if delivery is not None:
             _line(delivery)
-        if imgui.small_button(COPY):
+        if widgets.small_button(COPY):
             imgui.set_clipboard_text("\n".join(closed_text(snap, decision, now)))
         parts = sections(decision, role)
         imgui.text_colored(P.text_dim.vec4, parts[0].heading)
@@ -772,8 +791,8 @@ def _unsent(state: DecisionState | None, decision: Decision) -> None:
         return
     imgui.text_colored(P.warn.vec4, WITHDRAWN_DRAFT)
     board_pane.author(draft)
-    if imgui.small_button("copy draft"):
+    if widgets.small_button("copy draft"):
         imgui.set_clipboard_text(draft)
     imgui.same_line()
-    if imgui.small_button("discard draft"):
+    if widgets.small_button("discard draft"):
         del state.drafts[decision.id]

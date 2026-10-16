@@ -6,12 +6,11 @@ checkout it was made from.
     scripts/worktree.py create <branch> [--base REF]
     scripts/worktree.py check
 
-**What `create` makes.** A sibling of the main checkout, `<repo>-worktrees/<slug>`,
-which is the placement `planning/2026-10-07-a-session-can-run-in-its-own-worktree.md`
-D4 decided: outside the repository, named from the branch, no character in the name
-that the CLI's transcript slug and `brief.session_dir` would sanitise differently.
-The base is the launching checkout's `HEAD` unless `--base` names another ref. Nothing
-is fetched.
+**What `create` makes.** `~/.pptmstr/worktrees/<repo>/<slug>`, which is the placement
+`planning/2026-10-07-a-session-can-run-in-its-own-worktree.md` D4 decided: outside
+the repository, under one home for every repository's worktrees, `<repo>` the main
+checkout's directory name and `<slug>` named from the branch. The base is the
+launching checkout's `HEAD` unless `--base` names another ref. Nothing is fetched.
 
 **The environment is a composite, not an install.** A fresh worktree has no `.venv`,
 and a real one is half a gigabyte and a network round trip. A branch forked from
@@ -98,19 +97,15 @@ def slug_for(branch: str) -> str:
     return slug
 
 
-def worktree_path(main_root: Path, branch: str) -> Path:
-    return main_root.parent / f"{main_root.name}-worktrees" / slug_for(branch)
-
-
-def unsanitary_parts(path: Path) -> tuple[str, ...]:
+def worktree_path(main_root: Path, branch: str, home: Path | None = None) -> Path:
     """
-    The components of `path` the CLI's slug and `brief.session_dir` disagree about.
+    `<home>/.pptmstr/worktrees/<repo>/<slug>`, `home` the user's when not given.
 
-    The CLI turns every non-alphanumeric into `-`; `brief.session_dir` turns only the
-    separator. Any other character in the path puts a session's briefs in a different
-    directory from its transcripts.
+    Two repositories with one directory name share `<repo>`; `create` refuses a
+    directory that exists, which is where that shows.
     """
-    return tuple(p for p in path.parts[1:] if re.search(r"[^A-Za-z0-9-]", p))
+    base = Path.home() if home is None else home
+    return base / ".pptmstr" / "worktrees" / main_root.name / slug_for(branch)
 
 
 def composite_paths(
@@ -268,12 +263,6 @@ def create(launching: Path, branch: str, base: str | None) -> Path:
 
     if _git(launching, "status", "--porcelain"):
         print(f"note      {source.root} has uncommitted changes; they are not in the new tree")
-    odd = unsanitary_parts(path)
-    if odd:
-        print(
-            "note      a session here keeps its briefs apart from its transcripts: "
-            f"{', '.join(odd)} in the path is sanitised differently by the CLI and by pptmstr"
-        )
     drift = dependency_drift(
         (path / "pyproject.toml").read_text(), (source.root / "pyproject.toml").read_text()
     )

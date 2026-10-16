@@ -90,15 +90,15 @@ def _scratch_config(real_session: bool = False) -> Path:
     Three things are moved, and all three before ``pptmstr.app`` is asked for
     anything: ``XDG_CONFIG_HOME``, which ``settings.config_dir`` and hello_imgui's
     ini both resolve from; ``CLAUDE_CONFIG_DIR``, which is where the SDK lists
-    transcripts; and ``brief.default_root``, which is derived from the home
-    directory and reads neither variable. An ``XDG_CONFIG_HOME`` already set is
-    replaced like an unset one: nothing here can tell a disposable directory from
-    the one the operator keeps.
+    transcripts; and ``brief.legacy_root``, the CLI's projects directory, which is
+    derived from the home directory and reads neither variable. An
+    ``XDG_CONFIG_HOME`` already set is replaced like an unset one: nothing here can
+    tell a disposable directory from the one the operator keeps.
 
     ``real_session`` leaves the last two alone, because the CLI a session spawns
-    finds its credentials under ``CLAUDE_CONFIG_DIR`` and a team is told its
-    brief's path. This application's own files -- settings, ini, session files,
-    board logs -- are moved either way.
+    finds its credentials under ``CLAUDE_CONFIG_DIR``. This application's own
+    files -- settings, ini, session files, board logs, briefs -- are moved either
+    way.
 
     The directory is left behind, since the ini and whatever a run recorded are
     the evidence of what it did.
@@ -112,18 +112,18 @@ def _scratch_config(real_session: bool = False) -> Path:
     if real_session:
         print(
             "THIS RUN STARTS A REAL SESSION (--task): the CLI's own directory is the"
-            " operator's, so its credentials are used and its transcript, and a team's"
-            f" brief, are written there. Only XDG_CONFIG_HOME is moved, to {config},"
+            " operator's, so its credentials are used and its transcript is written"
+            f" there. Only XDG_CONFIG_HOME is moved, to {config},"
             " left in place",
             flush=True,
         )
         return scratch
     (claude / "projects").mkdir(parents=True)
     os.environ["CLAUDE_CONFIG_DIR"] = str(claude)
-    brief.default_root = lambda: claude / "projects"
+    brief.legacy_root = lambda: claude / "projects"
     print(
         f"configuration for this run is under {scratch}, left in place:"
-        " XDG_CONFIG_HOME, CLAUDE_CONFIG_DIR and the brief root all point there",
+        " XDG_CONFIG_HOME, CLAUDE_CONFIG_DIR and the CLI projects root all point there",
         flush=True,
     )
     return scratch

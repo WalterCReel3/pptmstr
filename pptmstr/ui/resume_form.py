@@ -518,6 +518,8 @@ class ResumeForms:
     # How tall the buttons were on the last frame they were drawn, or zero before
     # the first. The body above them is bounded to what that leaves of the display.
     _footer_height: float = 0.0
+    # Where the form is put while it opens and after: the launcher's placement.
+    _placement: launcher.ModalPlacement = field(default_factory=launcher.ModalPlacement)
 
     def open_for(
         self,
@@ -828,7 +830,8 @@ def _fact(label: str, value: str, explained: Help | None = None) -> None:
     """
     One settled thing about the session: its name in the label column and its
     value on the rest of the row, cut to fit, with a question mark after it when
-    there is more to say.
+    there is more to say: a link on the line's own baseline, so the line is set
+    as text whether or not it ends in one.
     """
     imgui.text_disabled(label)
     imgui.same_line(_LABEL_COLUMN)
@@ -888,20 +891,20 @@ def _failure_notice(form: ResumeForm) -> None:
         loaded = form.failure_loaded
         widgets.notice(failure_notice(form.failures[0], loaded=loaded))
         if loaded:
-            if imgui.small_button("dismiss this notice"):
+            if widgets.small_button("dismiss this notice"):
                 form.discard_failed()
         else:
-            if imgui.small_button("restore that message"):
+            if widgets.small_button("restore that message"):
                 form.restore_failed()
             imgui.same_line()
-            if imgui.small_button("discard it"):
+            if widgets.small_button("discard it"):
                 form.discard_failed()
     if form.set_aside:
         widgets.notice(Notice(f"{len(form.set_aside)} message(s) set aside by a restore are kept"))
-        if imgui.small_button("bring back what was set aside"):
+        if widgets.small_button("bring back what was set aside"):
             form.restore_set_aside()
         imgui.same_line()
-        if imgui.small_button("discard what was set aside"):
+        if widgets.small_button("discard what was set aside"):
             form.discard_set_aside()
     widgets.dialog_group()
 
@@ -971,6 +974,7 @@ def draw(
         state._open_requested = False
         state.is_open = True
         state._focus = True
+        state._placement.begin()
         imgui.open_popup(TITLE)
     if not state.is_open:
         return
@@ -1013,27 +1017,19 @@ def _modal(
     # Before anything is drawn: the Escape that closes an explanation is not also
     # this form's (``widgets.help_showing``).
     explaining = widgets.help_showing()
-    viewport = imgui.get_main_viewport()
-    imgui.set_next_window_pos(viewport.get_center(), imgui.Cond_.appearing, imgui.ImVec2(0.5, 0.5))
-    # One width, and a height that fits what is drawn up to the work area's: the
-    # launcher's window, for its reasons.
+    # The launcher's area, placement and window, for its reasons: the work area less
+    # the status bar, centred until its size settles and then the operator's to move,
+    # one width and a height that fits what is drawn up to the area's.
+    area_pos, area_size = launcher.modal_area()
     imgui.set_next_window_size_constraints(
-        imgui.ImVec2(_WIDTH, 0.0), imgui.ImVec2(_WIDTH, viewport.work_size.y)
+        imgui.ImVec2(_WIDTH, 0.0), imgui.ImVec2(_WIDTH, area_size[1])
     )
-    last = imgui.internal.find_window_by_name(TITLE)
-    if last is not None and last.was_active and not last.appearing:
-        moved = launcher.modal_origin(
-            (last.pos.x, last.pos.y),
-            (last.size.x, last.size.y),
-            (viewport.work_pos.x, viewport.work_pos.y),
-            (viewport.work_size.x, viewport.work_size.y),
-        )
-        if moved is not None:
-            imgui.set_next_window_pos(imgui.ImVec2(*moved), imgui.Cond_.always)
+    state._placement.before(TITLE, area_pos, area_size)
     opened, _ = imgui.begin_popup_modal(TITLE, None, imgui.WindowFlags_.always_auto_resize)
     if not opened:
         state.is_open = False
         return
+    state._placement.after()
 
     reading = form.refresh(checkout=checkout)
     gate = state.version_gate
@@ -1041,7 +1037,7 @@ def _modal(
     # label: under the session's id each has its own, with its own edit state.
     imgui.push_id(form.facts.session_id)
 
-    widgets.begin_dialog_body(BODY_ID, state._footer_height, _BODY_FLOOR)
+    widgets.begin_dialog_body(BODY_ID, state._footer_height, _BODY_FLOOR, area_size[1])
     imgui.push_text_wrap_pos(0.0)
 
     _failure_notice(form)

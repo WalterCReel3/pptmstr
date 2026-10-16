@@ -14,6 +14,7 @@ import inspect
 import json
 import re
 from collections.abc import Callable, Iterator
+from dataclasses import fields
 from pathlib import Path
 
 import pytest
@@ -340,20 +341,32 @@ def test_hand_edited_role_choices_and_pane_switches_lose_only_what_is_malformed(
     assert load(path) == Settings()
 
 
-def test_where_the_context_log_starts_survives_a_restart(tmp_path: Path) -> None:
+def test_a_file_from_when_the_log_had_a_choice_of_renderer_still_loads(tmp_path: Path) -> None:
     """
-    Kept as a name, and empty for "this build's": a build that changes its default
-    then reaches every file that never chose. A value that is not a string is not
-    a name.
+    ``context_mode`` named where the context log started, when it had a choice of
+    rendering; there is no such choice now, and no such field. A file that names a
+    mode -- ``rich``, ``raw``, anything -- loads with the key ignored and the rest of
+    the file read, and the next save does not write it back.
     """
     path = tmp_path / "settings.json"
-    assert Settings().context_mode == ""
-    save(Settings(context_mode="typeset"), path, unread=None)
-    assert json.loads(path.read_text())["context_mode"] == "typeset"
-    assert load(path).context_mode == "typeset"
+    assert "context_mode" not in {each.name for each in fields(Settings)}
+    for named in ("rich", "raw", "typeset", 3):
+        path.write_text(json.dumps({"context_mode": named, "theme": "light"}))
+        assert load(path) == Settings(theme="light")
 
-    path.write_text(json.dumps({"context_mode": 3, "theme": "light"}))
-    assert load(path) == Settings(theme="light")
+    save(load(path), path, unread=None)
+    assert "context_mode" not in json.loads(path.read_text())
+
+
+def test_reasoning_is_shown_by_default_and_a_choice_survives_a_restart(tmp_path: Path) -> None:
+    path = tmp_path / "settings.json"
+    assert Settings().show_reasoning is True
+    save(Settings(show_reasoning=False), path, unread=None)
+    assert json.loads(path.read_text())["show_reasoning"] is False
+    assert load(path).show_reasoning is False
+
+    path.write_text(json.dumps({"show_reasoning": "no", "theme": "light"}))
+    assert load(path) == Settings(theme="light"), "not a boolean is the default"
 
 
 def test_a_text_switch_that_is_not_a_boolean_falls_back_to_its_default(tmp_path: Path) -> None:

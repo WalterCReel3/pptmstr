@@ -76,21 +76,24 @@ def denied_records() -> str:
     return posixpath.join(base, "pptmstr", "sessions")
 
 
-def denied_record_writes() -> tuple[str, str]:
+def denied_record_writes() -> tuple[str, str, str]:
     """
-    Both directories pptmstr keeps sessions' records under, as sandbox paths: the
-    sessions root and the legacy ``boards`` directory ``boardsync.migrate`` moves
-    logs out of at startup.
+    The directories only pptmstr writes, as sandbox paths: the sessions root, the
+    legacy ``boards`` directory ``boardsync.migrate`` moves logs out of at startup,
+    and ``briefs`` (``brief.default_root``).
 
     For ``filesystem.denyWrite``, because ``credentials.files`` is a read
     restriction -- upstream documents a ``deny`` entry there as "the same
     restriction that ``filesystem.denyRead`` applies" -- and the sandbox's write
     region is the session's directory. A session started in the home directory has
-    both roots inside that region, and pptmstr reads what is under them back as
-    what happened in a session.
+    all three inside that region. pptmstr reads the first two back as what happened
+    in a session, and the third is the premises a session acts on, which a session
+    reads and must not rewrite -- so briefs are denied here and not in
+    ``denied_records``.
     """
     sessions = denied_records()
-    return sessions, posixpath.join(posixpath.dirname(sessions), "boards")
+    config = posixpath.dirname(sessions)
+    return sessions, posixpath.join(config, "boards"), posixpath.join(config, "briefs")
 
 
 def containment_settings() -> str:
@@ -141,8 +144,10 @@ def containment_settings() -> str:
       design never analysed.
 
     **``credentials.files`` deliberately does not deny ``~/.claude`` wholesale.**
-    ``brief.default_root()`` puts every brief under ``~/.claude/projects/<slug>/``, so
-    denying the directory blinds a session to its own premises. The four narrow files
+    Briefs written before ``brief.default_root()`` moved to the configuration
+    directory are still under ``~/.claude/projects/<slug>/`` and still handed to a
+    resumed session (``brief.existing_dir``), so denying the directory blinds that
+    session to its own premises. The four narrow files
     are the targets. What this buys is bounded and worth stating: the CLI process runs
     outside the sandbox and is already authenticated, so denying the credential file
     stops a ``Bash`` command reading the token -- it does not make the session

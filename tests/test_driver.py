@@ -342,6 +342,35 @@ def test_error_result_finishes_failed_with_the_status() -> None:
     assert "529" in finished.error and "overloaded" in finished.error
 
 
+@pytest.mark.parametrize(
+    "message",
+    [result(), result(is_error=True, errors=["overloaded"])],
+    ids=["ok", "error"],
+)
+def test_a_result_ends_the_transcripts_turn_and_opens_the_one_sent_during_it(
+    message: ResultMessage,
+) -> None:
+    """
+    The ResultMessage is the one place a turn's end is known, so the translator
+    tells the transcript there; a prompt ``send`` wrote while the turn ran opens
+    its turn at that end. An error's own line belongs to the turn it ended.
+    """
+    tr, transcript = make()
+    transcript.append(SegmentKind.SYSTEM, "\n> build it\n")
+    tr.handle(message)
+    assert not transcript.turn_open()
+    ended = transcript.published_length
+
+    transcript.append(SegmentKind.SYSTEM, "\n> again\n")
+    transcript.append(SegmentKind.OUTPUT, "working")
+    transcript.append(SegmentKind.SYSTEM, "\n> and the docs\n")
+    assert transcript.turn_open() and transcript.turn_start() < transcript.published_length
+    tr.handle(message)
+    assert transcript.turn_open()
+    assert transcript.turn_start() == transcript.published_length > ended
+    assert transcript.turn_prose() == ""
+
+
 def test_cost_is_emitted_as_a_delta() -> None:
     """
     Whether total_cost_usd is per-turn or cumulative is unconfirmed. Deltaing against
@@ -1905,10 +1934,13 @@ def test_a_sessions_process_is_given_pptmstrs_environment_and_nothing_of_the_dri
     The SDK starts the CLI with ``os.environ`` under ``options.env``, and nothing
     in ``options.env`` can take a variable away. So what a session's process is
     given is settled where pptmstr's own environment is (``pairing.release``),
-    and holds only while the driver adds none of its own.
+    and holds only while the driver adds nothing of its own but the one switch
+    ``GIT_STATUS_OFF`` names, which carries no value of pptmstr's.
     """
+    from pptmstr.driver import GIT_STATUS_OFF
+
     options = AgentSession(Bridge(), task="t")._options()
-    assert options.env == {}
+    assert options.env == GIT_STATUS_OFF == {"CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS": "1"}
 
 
 def test_a_lone_agent_configures_no_team() -> None:
@@ -5740,3 +5772,346 @@ def test_the_prompts_and_the_tool_lists_are_built_from_the_sessions_containment(
     assert bool(set(COMMAND_TOOL_NAMES) & set(restricted)) is session.contained
     for definition in team.values():
         assert ("request_command" in definition.prompt) is session.contained
+
+
+# -- tool entries --------------------------------------------------------------
+
+# Each case: a call and its result as the SDK delivers them, and the two lines the
+# transcript held for them before tool calls became entries -- literals, computed
+# once from the formatting code the lines have always come from, so a change to the
+# derivation shows up here as a byte difference rather than agreeing with itself.
+_TOOL_LINE_CASES: dict[str, tuple[str, dict[str, Any], object, bool, str, str]] = {
+    "bash": (
+        "Bash",
+        {
+            "command": "cd /home/me/project && .venv/bin/python -m pytest -q "
+            "tests/test_transcript.py -k entries",
+            "description": "Run the transcript tests",
+            "timeout": 120000,
+        },
+        "".join(f"PASSED tests/test_transcript.py::test_{i}\n" for i in range(12)),
+        False,
+        "\nBash(command=cd /home/me/project && .venv/bin/python -m pytest -q test..., "
+        "description=Run the transcript tests, timeout=120000)\n",
+        "Bash -> PASSED tests/test_transcript.py::test_0\nPASSED tests/test_transcript.py"
+        "::test_1\nPASSED tests/test_transcript.py::test_2\nPASSED tests/test_transcript.py"
+        "::test_3\nPASSED tests/test_transcript.py::test_4\nPASSED tests/test_transcript.py"
+        "::test_5\nPASSED tests/test_transcript.py::test_6\nPASSED tests/test...\n",
+    ),
+    "edit": (
+        "Edit",
+        {
+            "file_path": "/home/me/project/pptmstr/transcript.py",
+            "old_string": "def a():\n    return 1\n" * 4,
+            "new_string": "def a():\n    return 2\n",
+            "replace_all": False,
+        },
+        "The file has been updated.",
+        False,
+        "\nEdit(file_path=/home/me/project/pptmstr/transcript.py, old_string=def a():\n"
+        "    return 1\ndef a():\n    return 1\ndef a():\n    ..., new_string=def a():\n"
+        "    return 2\n,...)\n",
+        "Edit -> The file has been updated.\n",
+    ),
+    "read": (
+        "Read",
+        {"file_path": "/a/b.py", "offset": 10, "limit": 50},
+        "".join(f"{i:>6}\tline {i}\n" for i in range(40)),
+        False,
+        "\nRead(file_path=/a/b.py, offset=10, limit=50)\n",
+        "Read ->      0\tline 0\n     1\tline 1\n     2\tline 2\n     3\tline 3\n"
+        "     4\tline 4\n     5\tline 5\n     6\tline 6\n     7\tline 7\n     8\tline 8\n"
+        "     9\tline 9\n    10\tline 10\n    11\tline 11\n    12\tline 12\n"
+        "    13\tline 13\n    14\tline 14\n    15\tline 15\n    16\tline 16\n"
+        "    17\tline 17\n    18\tline 18\n    19\tline 19\n    20\t...\n",
+    ),
+    "webfetch": (
+        "WebFetch",
+        {"url": "https://example.com/docs/a/very/long/path/that/goes/on/and/on", "prompt": "Sum"},
+        [{"type": "text", "text": "A page."}],
+        False,
+        "\nWebFetch(url=https://example.com/docs/a/very/long/path/that/goes/on/an..., "
+        "prompt=Sum)\n",
+        "WebFetch -> [{'type': 'text', 'text': 'A page.'}]\n",
+    ),
+    "error": (
+        "Bash",
+        {"command": "false"},
+        "Exit code 1",
+        True,
+        "\nBash(command=false)\n",
+        "Bash -> Exit code 1\n",
+    ),
+    "undrawable": (
+        "Bash",
+        {"command": "printf 'a\x00b\udc80'"},
+        "a\x00b\udc80 \\u0000 done",
+        False,
+        "\nBash(command=printf 'a\\u0000b\\udc80')\n",
+        "Bash -> a\\u0000b\\udc80 \\u005cu0000 done\n",
+    ),
+}
+
+
+@pytest.mark.parametrize("case", sorted(_TOOL_LINE_CASES))
+def test_a_tool_call_and_result_draw_the_lines_they_always_drew(case: str) -> None:
+    """
+    The lines are derived from the entry now, and every pane draws them: a byte of
+    difference here is a byte of difference on screen.
+    """
+    name, args, content, is_error, call_line, result_line = _TOOL_LINE_CASES[case]
+    tr, transcript = make()
+    tr.handle(AssistantMessage(content=[ToolUseBlock(id="t1", name=name, input=args)], model="m"))
+    tr.handle(
+        UserMessage(
+            content=[ToolResultBlock(tool_use_id="t1", content=content, is_error=is_error)]  # type: ignore[arg-type]
+        )
+    )
+    assert transcript.text() == call_line + result_line
+    kinds = [s.kind for s in transcript.segments()]
+    assert kinds == [
+        SegmentKind.TOOL_CALL,
+        SegmentKind.ERROR if is_error else SegmentKind.TOOL_RESULT,
+    ]
+    assert transcript.segments()[0].meta == (("tool", name), ("tool_use_id", "t1"))
+    assert transcript.segments()[1].meta == ()
+
+
+@pytest.mark.parametrize("case", sorted(_TOOL_LINE_CASES))
+def test_a_tool_entry_holds_what_the_line_was_cut_from(case: str) -> None:
+    """
+    Every argument whole, the output whole, as the SDK delivered them -- a NUL and a
+    lone surrogate included, since an output viewer copies what the tool returned.
+    """
+    name, args, content, is_error, _, _ = _TOOL_LINE_CASES[case]
+    tr, transcript = make()
+    tr.handle(AssistantMessage(content=[ToolUseBlock(id="t1", name=name, input=args)], model="m"))
+    tr.handle(
+        UserMessage(
+            content=[ToolResultBlock(tool_use_id="t1", content=content, is_error=is_error)]  # type: ignore[arg-type]
+        )
+    )
+    entry = transcript.tool_entry("t1")
+    assert entry is not None and entry.result is not None
+    assert entry.name == name
+    assert dict(entry.input or {}) == args
+    assert entry.result.output == (content if isinstance(content, str) else repr(content))
+    assert entry.result.is_error is is_error
+    assert entry.result.dropped_bytes == 0
+    call, result_seg = transcript.segments()
+    assert transcript.tool_entries(call.start, call.end) == (entry,)
+    assert transcript.tool_entries(result_seg.start, result_seg.end) == (entry,)
+
+
+def test_a_result_for_a_call_never_seen_is_kept_under_the_name_the_line_gives() -> None:
+    tr, transcript = make()
+    tr.handle(UserMessage(content=[ToolResultBlock(tool_use_id="gone", content="ok")]))
+    assert transcript.text() == "tool -> ok\n"
+    entry = transcript.tool_entry("gone")
+    assert entry is not None and entry.result is not None
+    assert (entry.name, entry.input, entry.call, entry.result.output) == ("tool", None, None, "ok")
+
+
+def test_a_result_whose_is_error_is_unset_is_a_result_not_an_error() -> None:
+    tr, transcript = make()
+    tr.handle(AssistantMessage(content=[ToolUseBlock(id="t1", name="Read", input={})], model="m"))
+    tr.handle(UserMessage(content=[ToolResultBlock(tool_use_id="t1", content="x", is_error=None)]))
+    entry = transcript.tool_entry("t1")
+    assert entry is not None and entry.result is not None and entry.result.is_error is False
+    assert transcript.segments()[-1].kind is SegmentKind.TOOL_RESULT
+
+
+# -- the CLI's git-status prompt section, switched off ------------------------------
+#
+# The CLI builds that section by running ``git status`` in its working directory, in
+# its own unsandboxed process, before the first turn
+# (notes/2026-10-15-the-cli-runs-git-in-its-cwd.md). ``driver.GIT_STATUS_OFF`` is the
+# switch. These hold that every shape of launch carries it, that it is the only thing
+# it changes, and that a value the operator's environment exports the other way does
+# not reach the CLI.
+
+_GIT_SWITCH = "CLAUDE_CODE_DISABLE_GIT_INSTRUCTIONS"
+_GIT_RESUMED = "11111111-1111-4111-8111-111111111111"
+
+# The options fields each launch set to something other than the SDK's default before
+# the switch existed, read off ``_options()`` on the tree the switch was added to. The
+# switch adds ``env`` to each and nothing else.
+_FIELDS_BEFORE_SWITCH = {
+    "hooks",
+    "include_partial_messages",
+    "max_buffer_size",
+    "mcp_servers",
+    "model",
+    "permission_mode",
+    "stderr",
+    "strict_mcp_config",
+    "thinking",
+}
+
+
+def _git_launches() -> dict[str, tuple[dict[str, Any], set[str]]]:
+    """
+    A fork is a fresh launch of a recorded spec (``app._fork`` -> ``_launch``), so it
+    is the new-session shape with a cwd; it is listed so the claim covers it by name.
+    """
+    from pptmstr.sandbox import containment_settings
+
+    before = _FIELDS_BEFORE_SWITCH
+    return {
+        "new": ({}, before | {"session_id"}),
+        "fork": ({"cwd": "/srv/tree"}, before | {"session_id", "cwd"}),
+        "resume": ({"resume": _GIT_RESUMED}, before | {"resume", "system_prompt"}),
+        "contained": ({"containment": containment_settings()}, before | {"session_id", "settings"}),
+        "contained resume": (
+            {"containment": containment_settings(), "resume": _GIT_RESUMED},
+            before | {"resume", "system_prompt", "settings"},
+        ),
+    }
+
+
+_GIT_LAUNCH_NAMES = ["new", "fork", "resume", "contained", "contained resume"]
+
+
+@pytest.mark.parametrize("launch", _GIT_LAUNCH_NAMES)
+def test_every_launch_carries_the_git_status_switch(launch: str) -> None:
+    kwargs, _ = _git_launches()[launch]
+    assert AgentSession(Bridge(), task="t", **kwargs)._options().env == {_GIT_SWITCH: "1"}
+
+
+@pytest.mark.parametrize("launch", _GIT_LAUNCH_NAMES)
+def test_the_git_status_switch_is_the_only_field_it_adds(launch: str) -> None:
+    import dataclasses
+
+    from claude_agent_sdk import ClaudeAgentOptions
+
+    kwargs, before = _git_launches()[launch]
+    options = AgentSession(Bridge(), task="t", **kwargs)._options()
+    default = ClaudeAgentOptions()
+
+    changed = {
+        f.name
+        for f in dataclasses.fields(options)
+        if getattr(options, f.name) != getattr(default, f.name)
+    }
+    assert changed == before | {"env"}
+
+
+@pytest.mark.parametrize("launch", _GIT_LAUNCH_NAMES)
+def test_the_git_status_switch_leaves_the_argv_as_it_was(launch: str) -> None:
+    """
+    The environment is the switch's whole channel. An uncontained launch in particular
+    still has no ``--settings``: the other switch would have given it one.
+    """
+    import dataclasses
+
+    from claude_agent_sdk import ClaudeAgentOptions
+    from claude_agent_sdk._internal.transport.subprocess_cli import SubprocessCLITransport
+
+    kwargs, _ = _git_launches()[launch]
+    options = AgentSession(Bridge(), task="t", **kwargs)._options()
+
+    def argv(opts: ClaudeAgentOptions) -> list[str]:
+        transport = SubprocessCLITransport("", opts)
+        transport._cli_path = "claude"
+        return transport._build_command()
+
+    assert argv(options) == argv(dataclasses.replace(options, env={}))
+    if "containment" not in kwargs:
+        assert "--settings" not in argv(options)
+
+
+def test_the_git_status_switch_the_options_carry_is_a_copy() -> None:
+    from pptmstr.driver import GIT_STATUS_OFF
+
+    AgentSession(Bridge(), task="t")._options().env[_GIT_SWITCH] = "0"
+    assert GIT_STATUS_OFF == {_GIT_SWITCH: "1"}
+    assert AgentSession(Bridge(), task="t")._options().env == {_GIT_SWITCH: "1"}
+
+
+@pytest.mark.parametrize("exported", ["0", "", "false"])
+def test_the_operators_environment_cannot_switch_git_status_back_on(
+    exported: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Through the transport's real merge rather than by reading it: ``connect`` builds
+    the spawn environment from ``os.environ`` and ``options.env``, and the CLI reads
+    the variable before ``includeGitInstructions``, so what lands here is what decides.
+    The spawn is replaced by a capture that starts nothing.
+    """
+    import dataclasses
+
+    import anyio
+    from claude_agent_sdk import CLIConnectionError
+    from claude_agent_sdk._internal.transport import subprocess_cli
+
+    monkeypatch.setenv(_GIT_SWITCH, exported)
+    monkeypatch.setenv("CLAUDE_AGENT_SDK_SKIP_VERSION_CHECK", "1")
+    seen: dict[str, str] = {}
+
+    class _Spawned(Exception):
+        pass
+
+    async def capture(*_args: Any, env: dict[str, str], **_kwargs: Any) -> Any:
+        seen.update(env)
+        raise _Spawned
+
+    # The transport calls ``anyio.open_process`` through the module, so this is it.
+    monkeypatch.setattr(anyio, "open_process", capture)
+    options = dataclasses.replace(
+        AgentSession(Bridge(), task="t")._options(), cli_path="/nonexistent/claude"
+    )
+
+    # The transport wraps whatever the spawn raised; the cause is checked so that a
+    # failure before the spawn cannot pass for one at it.
+    with pytest.raises(CLIConnectionError) as raised:
+        asyncio.run(subprocess_cli.SubprocessCLITransport("", options).connect())
+    assert isinstance(raised.value.__cause__, _Spawned)
+
+    assert seen[_GIT_SWITCH] == "1"
+
+
+class _RefusesOnce:
+    """A client whose first ``query`` raises and whose later ones are taken."""
+
+    def __init__(self) -> None:
+        self.taken: list[object] = []
+
+    async def query(self, prompt: object, session_id: str = "default") -> None:
+        if not self.taken:
+            self.taken.append(None)
+            raise BrokenPipeError("the CLI closed its stdin")
+        self.taken.append(prompt)
+
+
+@pytest.mark.parametrize("behind", [False, True], ids=["idle", "behind-a-turn"])
+def test_a_send_that_raised_opens_no_turn_and_the_next_prompt_owns_the_answer(
+    behind: bool,
+) -> None:
+    """
+    A prompt line opens a turn (or waits behind the one going on), and only the
+    result of a prompt the CLI took ends one. A send whose ``query`` raised must
+    leave the turns as they were, or every later prompt reads the turn before its
+    own. Its line stays in the log, where the operator wrote it, with the
+    failure said under it.
+    """
+    session = AgentSession(Bridge(), task="t")
+    client = _RefusesOnce()
+    session._client = client  # type: ignore[assignment]
+    t = session.transcript
+    if behind:
+        t.append(SegmentKind.SYSTEM, "\n> earlier\n")
+        t.append(SegmentKind.OUTPUT, "working")
+    turns = (list(t._turn_starts), list(t._turn_ends), list(t._queued))
+
+    with pytest.raises(BrokenPipeError):
+        asyncio.run(session.send("lost"))
+    assert (list(t._turn_starts), list(t._turn_ends), list(t._queued)) == turns
+    assert "> lost" in t.text() and "not sent" in t.text()
+
+    if behind:
+        t.end_turn()
+    assert asyncio.run(session.send("kept")) is True
+    t.append(SegmentKind.OUTPUT, "the answer")
+    t.end_turn()
+    assert t.turn_prose() == "the answer"
+    assert t.turn() == (t.text().index("the answer"), False)

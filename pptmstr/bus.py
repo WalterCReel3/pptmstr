@@ -81,6 +81,7 @@ from .board import (
     incident_marker,
     not_run_label,
     property_label,
+    role_name,
     stale_label,
     version_label,
 )
@@ -111,7 +112,9 @@ from .effects import (
     DigestDelivered,
     Effect,
     InboxDelivered,
+    SessionWoken,
     TaskWriteSettled,
+    WakeReason,
 )
 from .intents import (
     BoardRead,
@@ -146,6 +149,7 @@ from .model import (
     Dismissed,
     NodeId,
     ObligationKind,
+    Snapshot,
     Standing,
     Task,
     TaskId,
@@ -2602,13 +2606,22 @@ def _decision_whole(decision: Decision, now: float, asker: str | None) -> list[s
         )
     match decision.outcome:
         case None:
-            lines.append(
-                "The operator has not answered. Nothing will interrupt you when they "
-                "do: ask again when you reach what this blocks."
-                if mine
-                else f"The operator has not answered. Nothing tells you or {by} when "
-                f"they do: read_decisions(decision_id={_argument(named)}) again."
-            )
+            if not mine:
+                lines.append(
+                    f"The operator has not answered. When they do, pptmstr sends this "
+                    f"session a message naming it, and {by} is not woken: "
+                    f"read_decisions(decision_id={_argument(named)}) then returns it."
+                )
+            elif decision.asker[1] is None:
+                lines.append(
+                    f"The operator has not answered. {WAKE_SAID} Ask again when you "
+                    f"reach what this blocks."
+                )
+            else:
+                lines.append(
+                    f"The operator has not answered. {WAKE_SAID_SUBAGENT} Ask again "
+                    f"when you reach what this blocks."
+                )
         case Answered(text=text):
             lines.append(f"The operator's answer, {delivery}:")
             lines += _answer_lines(text) or ["(the operator answered with no text)"]
@@ -2917,7 +2930,12 @@ def build_server(session: AgentSession) -> Any:
         "post_concern",
         "Send a concern to another agent working on this task. Use the agent's "
         "role name, or 'lead' for the agent that started the work. Name task_id "
-        "when the concern is about a task on the board.",
+        "when the concern is about a task on the board. A worker's concern to its "
+        "own lead wakes the lead: pptmstr sends the lead a message of its own "
+        "naming the sender, read as a turn of its own once any turn in progress "
+        "ends. No other concern wakes anyone -- not one to a worker, nor one to "
+        "another session -- and its recipient reads it with read_inbox when it "
+        "next looks.",
         _schema(
             {
                 "to": {"type": "string"},
@@ -3013,7 +3031,9 @@ def build_server(session: AgentSession) -> Any:
     @tool(
         "read_inbox",
         "Read concerns other agents have sent you. Returns everything waiting and "
-        "marks it read.",
+        "marks it read. A lead is woken by pptmstr when one of its own workers "
+        "sends it a concern; nothing else wakes you for one, so call this when you "
+        "finish a piece of work as well.",
         {},
     )
     async def read_inbox(args: dict[str, Any]) -> dict[str, Any]:
@@ -3840,21 +3860,14 @@ def build_server(session: AgentSession) -> Any:
             f"Decision {decision_id} is in front of the operator "
             f"({_standing_said(standing, 'you')}; reversible: "
             f"{_REVERSIBLE_SAID[reversible]}; {_blocks_said(blocks)}). "
-            f"Nothing is parked and nothing will interrupt you with the answer: keep "
+            f"Nothing is parked: keep "
             f'working, and call read_decisions(decision_id="{decision_id}") when you '
             f"reach what this blocks and again before you finish. It returns the "
-            f"operator's answer every time you ask. If you end your turn to wait, "
-            f"the answer will not wake you: the operator has to send you a prompt "
-            f"as well. withdraw_decision takes the decision back if it stops "
-            f"mattering, and it is not kept across a restart of pptmstr."
+            f"operator's answer every time you ask. "
+            f"{WAKE_SAID if root else WAKE_SAID_SUBAGENT} withdraw_decision takes "
+            f"the decision back if it stops mattering, and it is not kept across a "
+            f"restart of pptmstr."
         ]
-        if not root:
-            # A sub-agent's lead is the agent most likely to assume it will hear.
-            said.append(
-                "The answer is handed to YOU, the agent that asked. Your lead can "
-                "read it with read_decisions and is not told when it arrives, so "
-                "pass it on in your result or in a concern if your lead needs it."
-            )
         if unkept:
             said.append(unkept)
         return _text(" ".join(said))
@@ -3865,11 +3878,14 @@ def build_server(session: AgentSession) -> Any:
         "dismissed by the operator, or withdrawn. Give decision_id for one decision "
         "with everything on it and the operator's answer, returned whole and in "
         "the operator's words every time you ask, not only the first. Omit it for "
-        "a list, which says which have an answer and shows none. Nothing tells you "
-        "when an answer arrives, so call this when you reach the work a decision "
-        "blocks. A sub-agent is shown only its own. The session's lead is shown "
-        "every decision raised in its session, each marked with who raised it, "
-        "and can read and not withdraw another agent's.",
+        "a list, which says which have an answer and shows none. When the operator "
+        "answers or dismisses one, pptmstr sends the session's lead a message "
+        "naming it, read as a turn of its own once any turn in progress ends; a "
+        "sub-agent is not woken, and a session that is closed or has failed is "
+        "sent nothing. So call this when you reach the work a decision blocks, "
+        "whether or not you were woken. A sub-agent is shown only its own. The "
+        "session's lead is shown every decision raised in its session, each "
+        "marked with who raised it, and can read and not withdraw another agent's.",
         _schema(
             {
                 "decision_id": {
@@ -4015,3 +4031,94 @@ def offered_tools(contained: bool) -> frozenset[str]:
     different sessions.
     """
     return BUS_TOOLS | COMMAND_TOOLS if contained else BUS_TOOLS
+
+
+# -- waking a session ----------------------------------------------------------------
+#
+# What ``AgentSession.wake`` sends a session when something it waits on arrives
+# (``effects.SessionWoken``). The session reads it as a user message, so the
+# first line says whose it is: a wake must never be taken for the operator.
+
+WAKE_HEADING = "This message is from pptmstr, not from the operator. Waiting for you:"
+
+# What a tool reply says about being woken, to the session's lead and to a
+# sub-agent. Concerns between workers wake nobody, and neither does anything
+# for a session that is closed or has failed.
+WAKE_SAID = (
+    "Nothing interrupts a turn in progress. When the operator acts on it, pptmstr "
+    "sends this session a message of its own naming it (never the operator's "
+    "words), read as a turn of its own once any turn in progress ends: if you end "
+    "your turn to wait, that message wakes you. A closed or failed session is sent "
+    "nothing."
+)
+WAKE_SAID_SUBAGENT = (
+    "Nothing interrupts you, and you are not woken: when the operator acts on it, "
+    "pptmstr sends your lead a message of its own naming it, so your lead learns "
+    "of it even if you do not pass it on."
+)
+
+
+def wake_message(snap: Snapshot, wakes: Sequence[SessionWoken]) -> str:
+    """
+    One message for every wake a session is owed at once: the heading, then a
+    line for each thing to read, in the order the store gave them, each said
+    once however many times it was woken for.
+
+    Short and factual, and each line names the call that returns what arrived,
+    so the session spends its turn reading it and not asking where it is.
+    """
+    lines = [WAKE_HEADING]
+    seen: set[tuple[WakeReason, str]] = set()
+    for wake in wakes:
+        key = (wake.reason, wake.subject_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        lines.append(f"- {wake_line(snap, wake)}")
+    return "\n".join(lines)
+
+
+def wake_line(snap: Snapshot, wake: SessionWoken) -> str:
+    """
+    The line of a wake for one thing: what happened to which id, and the call
+    that returns it. An id, and a role an agent's address names, are each one
+    line (``_one_line``).
+    """
+    said = _one_line(wake.subject_id)
+    match wake.reason:
+        case WakeReason.DECISION_ANSWERED | WakeReason.DECISION_DISMISSED:
+            how = "answered" if wake.reason is WakeReason.DECISION_ANSWERED else "dismissed"
+            decision = snap.decisions.get(wake.subject_id)
+            whose = _relayed(snap, decision.asker if decision is not None else None)
+            return (
+                f'decision {said}{whose} was {how}. read_decisions(decision_id="{said}") '
+                "returns it."
+            )
+        case WakeReason.COMMAND_ENDED:
+            command = snap.commands.get(wake.subject_id)
+            whose = _relayed(snap, command.asker if command is not None else None)
+            return (
+                f'command {said}{whose} has ended. read_commands(command_id="{said}") '
+                "returns how."
+            )
+        case WakeReason.CONCERN_TO_LEAD:
+            sender = wake.sender
+            who = "a worker" if sender is None else _one_line(_role(snap, sender))
+            return f"{who} sent you a concern. read_inbox() returns it."
+        case _:
+            assert_never(wake.reason)
+
+
+def _role(snap: Snapshot, node: NodeId) -> str:
+    return role_name(snap, node, node[0])
+
+
+def _relayed(snap: Snapshot, asker: NodeId | None) -> str:
+    """
+    For what a sub-agent asked, the words that say whose it was and that the
+    lead is the one woken: the sub-agent has no turn of its own to wake.
+    """
+    if asker is None or asker[1] is None:
+        return ""
+    role = _one_line(_role(snap, asker))
+    return f", which {role} asked (it is not woken; pass it on)"

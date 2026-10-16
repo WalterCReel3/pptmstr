@@ -24,46 +24,107 @@ def entries(directory: Path) -> tuple[brief.BriefEntry, ...]:
 # -- where a brief lives ----------------------------------------------------------
 
 
-def test_a_session_brief_sits_beside_the_transcripts_that_explain_it(tmp_path: Path) -> None:
+def test_a_brief_is_keyed_by_the_session_id_under_the_configuration_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """
-    Outside the working tree, which is where this project's durable state already
-    is. In the tree, every launch would dirty the working directory.
-
-    The directory is a resolved one the test owns rather than a fabricated absolute
-    path, because ``session_dir`` slugs the resolved form: a plausible-looking path
-    can sit under a symlink the platform supplies, and `/home` is one on macOS.
+    ``<config>/briefs/<session id>``, asked of ``settings`` at call time, so the
+    working directory the session ran in takes no part in the name.
     """
-    cwd = tmp_path.resolve() / "Source" / "orbital"
-    slug = str(cwd).replace(os.sep, "-")
+    from pptmstr import settings
 
-    path = brief.session_dir(tmp_path, str(cwd), "sess-1")
+    monkeypatch.setattr(settings, "config_dir", lambda: tmp_path / "cfg")
 
-    assert path == tmp_path / slug / "briefs" / "sess-1"
+    assert brief.default_root() == tmp_path / "cfg" / "briefs"
+    assert brief.session_dir("sess-1") == tmp_path / "cfg" / "briefs" / "sess-1"
+    assert brief.session_dir("sess-1", tmp_path) == tmp_path / "sess-1"
 
 
-def test_the_slug_is_taken_from_the_directory_the_cli_would_name(tmp_path: Path) -> None:
+@pytest.mark.parametrize("not_an_id", ["", ".", "..", "../x", "a/b", "a\0b", ".hidden"])
+def test_an_id_that_is_not_one_directory_name_has_no_brief_directory(
+    tmp_path: Path, not_an_id: str
+) -> None:
+    assert brief.session_dir(not_an_id, tmp_path) is None
+
+
+def test_two_sessions_do_not_share_a_brief(tmp_path: Path) -> None:
+    assert brief.session_dir("sess-1", tmp_path) != brief.session_dir("sess-2", tmp_path)
+
+
+def test_the_legacy_layout_is_the_cwd_slug_with_only_separators_turned(tmp_path: Path) -> None:
     """
-    The slug has to match the one the CLI derived for its transcripts or the brief
-    lands in a sibling directory with nothing in it. The CLI takes its slug from the
-    process working directory, which POSIX defines as the physical path, and the
-    launcher's brief recovery passes `cwd or "."` -- so the string arriving here is
-    not necessarily resolved and two spellings of one directory must not part.
+    Where briefs were written before the move, reproduced exactly so a resume
+    finds them: the resolved path with only ``os.sep`` turned into ``-``, so a dot
+    survives -- which is the disagreement with the CLI's own slug that the move
+    removes.
+
+    The directory is a resolved one the test owns, because the slug is taken from
+    the resolved form and ``/home`` is a symlink on macOS.
     """
+    cwd = tmp_path.resolve() / "Source" / "my.project"
+
+    path = brief.legacy_session_dir(str(cwd), "sess-1", tmp_path)
+
+    assert path == tmp_path / str(cwd).replace(os.sep, "-") / "briefs" / "sess-1"
+    assert path.parent.parent.name.endswith("my.project")
+
+
+def test_the_legacy_slug_does_not_part_two_spellings_of_one_directory(tmp_path: Path) -> None:
     real = tmp_path / "orbital"
     real.mkdir()
     link = tmp_path / "by-another-name"
     link.symlink_to(real)
 
-    assert brief.session_dir(tmp_path, str(link), "sess-1") == brief.session_dir(
-        tmp_path, str(real), "sess-1"
+    assert brief.legacy_session_dir(str(link), "s", tmp_path) == brief.legacy_session_dir(
+        str(real), "s", tmp_path
     )
 
 
-def test_two_sessions_in_one_directory_do_not_share_a_brief(tmp_path: Path) -> None:
-    a = brief.session_dir(tmp_path, "/x", "sess-1")
-    b = brief.session_dir(tmp_path, "/x", "sess-2")
+# -- finding the brief a session already has ---------------------------------------
 
-    assert a != b
+
+def test_a_session_with_no_brief_anywhere_has_none(tmp_path: Path) -> None:
+    root, legacy = tmp_path / "briefs", tmp_path / "projects"
+
+    assert brief.existing_dir("s", str(tmp_path), root=root, legacy=legacy) is None
+
+
+def test_a_brief_under_the_legacy_layout_is_found_for_a_resume(tmp_path: Path) -> None:
+    root, legacy = tmp_path / "briefs", tmp_path / "projects"
+    old = brief.legacy_session_dir(str(tmp_path), "s", legacy)
+    old.mkdir(parents=True)
+
+    assert brief.existing_dir("s", str(tmp_path), root=root, legacy=legacy) == old
+
+
+def test_the_brief_under_the_new_root_wins_over_a_legacy_one(tmp_path: Path) -> None:
+    root, legacy = tmp_path / "briefs", tmp_path / "projects"
+    brief.legacy_session_dir(str(tmp_path), "s", legacy).mkdir(parents=True)
+    new = brief.session_dir("s", root)
+    assert new is not None
+    new.mkdir(parents=True)
+
+    assert brief.existing_dir("s", str(tmp_path), root=root, legacy=legacy) == new
+
+
+def test_the_new_brief_is_found_from_any_directory(tmp_path: Path) -> None:
+    """
+    A resume runs wherever it is launched from; the id-keyed brief does not care.
+    """
+    root, legacy = tmp_path / "briefs", tmp_path / "projects"
+    new = brief.session_dir("s", root)
+    assert new is not None
+    new.mkdir(parents=True)
+
+    assert brief.existing_dir("s", "/somewhere/else", root=root, legacy=legacy) == new
+
+
+def test_a_file_where_a_brief_directory_would_be_is_not_a_brief(tmp_path: Path) -> None:
+    root, legacy = tmp_path / "briefs", tmp_path / "projects"
+    root.mkdir()
+    (root / "s").write_text("not a directory")
+
+    assert brief.existing_dir("s", str(tmp_path), root=root, legacy=legacy) is None
 
 
 # -- appending --------------------------------------------------------------------

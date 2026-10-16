@@ -45,7 +45,12 @@ What the seam imports from ``imscribe`` that is not in ``imscribe.__all__``, and
   test_typeset_views.py`` has the probe that fails when the reach stops working.
 """
 
-BEHIND_THE_FACADE = {("imscribe.ui.typeset_diff_view", "code_face_lacks")}
+BEHIND_THE_FACADE = {
+    ("imscribe.ui.typeset_diff_view", "code_face_lacks"),
+    ("imscribe.typeset_find", "marks_for"),
+    ("imscribe.description", "KIND_CODE"),
+    ("imscribe.description", "KIND_PARAGRAPH"),
+}
 """
 What the seam imports from a module of ``imscribe`` other than the facade, and why.
 
@@ -54,6 +59,16 @@ What the seam imports from a module of ``imscribe`` other than the facade, and w
   has no glyph for (pptmstr's P39, answered in 0.2.0). The facade does not
   re-export it, and the alternative is the native module's ``face_has_glyph``
   with a face index of pptmstr's own, which nothing promises.
+- ``marks_for``, in ``find.marks``: the marks of a list of matches with one
+  current. The facade's ``Finder`` makes them only for a needle over one
+  document of its own, and a pane's current match runs across all its views;
+  ``typeset_find``'s docstring says the rest of find is reached from there.
+  The alternative is building the library's mark tuples here, its colours and
+  placement constants copied.
+- ``KIND_CODE`` and ``KIND_PARAGRAPH``, in ``find._described``: the block kinds
+  ``FindIndex.of`` (facade) reads to tell code, where a line break is not a
+  space, from prose. The facade's ``BlockKind`` is the theme's enum and not a
+  description's kind.
 """
 
 
@@ -119,8 +134,8 @@ def test_the_seam_imports_the_librarys_facade_and_one_named_module_past_it() -> 
     Every import the package makes is ``from imscribe import <name>``, the name is
     on that list or is one ``PAST_THE_FACADE`` gives a reason for, and each of
     those is in fact imported -- a reason for a reach nobody makes is a stale list.
-    The one import from a module behind the facade is ``BEHIND_THE_FACADE``'s, of
-    a name that module lists as its own.
+    The imports from modules behind the facade are ``BEHIND_THE_FACADE``'s, each
+    of a name that module lists as its own.
     """
     found = [each for path in sorted(PACKAGE.glob("*.py")) for each in _imscribe_imports(path)]
     assert found, "the package no longer imports the library at all"
@@ -132,7 +147,31 @@ def test_the_seam_imports_the_librarys_facade_and_one_named_module_past_it() -> 
     assert past == PAST_THE_FACADE
 
 
-@pytest.mark.parametrize("module", ["roles", "parts"])
+def test_only_the_syntax_module_imports_the_highlighter() -> None:
+    """
+    Pygments is the seam's, as the library is: one module asks it for tokens and
+    hands every other one spans of a string.
+    """
+    application = PACKAGE.parent.parent
+
+    def imports_pygments(path: Path) -> bool:
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+            if isinstance(node, ast.Import):
+                if any(alias.name.split(".")[0] == "pygments" for alias in node.names):
+                    return True
+            if isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] == "pygments":
+                return True
+        return False
+
+    found = [
+        str(path.relative_to(application))
+        for path in sorted(application.rglob("*.py"))
+        if imports_pygments(path)
+    ]
+    assert found == ["ui/typeset/syntax.py"]
+
+
+@pytest.mark.parametrize("module", ["roles", "parts", "syntax"])
 def test_policy_and_parts_import_neither_the_library_nor_imgui(module: str) -> None:
     """
     What pptmstr decides before any library is asked is importable, and the same,
@@ -152,6 +191,36 @@ def test_policy_and_parts_import_neither_the_library_nor_imgui(module: str) -> N
     assert not {name for name in names if name.split(".")[0] in (LIBRARY, "imgui_bundle")}
     assert _imscribe_imports(PACKAGE / "gate.py"), "the search finds no import of the library"
     assert _imscribe_imports(PACKAGE / f"{module}.py") == []
+
+
+def test_syntax_brings_in_neither_the_library_nor_imgui_when_run() -> None:
+    """
+    The direct imports above are not the whole of it: a module of pptmstr's it
+    imports at run time can import ImGui for it. ``syntax`` is loaded from its
+    file, outside its package, so a relative import it ran would fail here.
+    """
+    script = (
+        "import importlib.util, sys\n"
+        f"spec = importlib.util.spec_from_file_location('syntax', {str(PACKAGE / 'syntax.py')!r})\n"
+        "module = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(module)\n"
+        "assert module.block_spans('python\\nx = 1', 6, 1, None, None) == ((0, 6, 1),)\n"
+        # Through every gate to the lexer, with inks of its fields' names: the
+        # path that colours is the one a run-time import would be added on.
+        "from collections import namedtuple\n"
+        "fields = 'keyword string comment number function operator default add remove heading'\n"
+        "inks = namedtuple('Inks', fields)(2, 3, 4, 5, 6, 7, 8, 9, 10, 11)\n"
+        "text = 'python\\nif x == 1: pass'\n"
+        "assert module.needs_lex(text, 6, None, inks)\n"
+        "spans = module.block_spans(text, 6, 1, None, inks)\n"
+        "assert (7, 9, 2) in spans and (15, 16, 5) in spans, spans\n"
+        "assert not module.needs_lex(text, 6, None, inks)\n"
+        "print(sorted(name for name in sys.modules if name.split('.')[0] in "
+        f"({LIBRARY!r}, 'imgui_bundle', 'pptmstr')))\n"
+    )
+    ran = _run(script)
+    assert ran.returncode == 0, ran.stderr
+    assert ran.stdout.strip() == "[]"
 
 
 # -- without the library ---------------------------------------------------------

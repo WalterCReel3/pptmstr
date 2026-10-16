@@ -71,9 +71,9 @@ from ..model import (
     SessionFailed,
     Snapshot,
 )
-from ..theme import OBLIGATION_GLYPH, STATE_GLYPH, Face, P, face, faded
+from ..theme import OBLIGATION_GLYPH, STATE_GLYPH, P, hint_colour
 from ..transcript import Transcript
-from . import command_view, decision_view, projects, review, splash, splash_art, typeset
+from . import command_view, decision_view, projects, review, typeset, widgets
 from .compose import ComposeState, wants_send
 from .focus import FocusState
 from .widgets import (
@@ -128,13 +128,13 @@ _BODY_LINES = 24.0
 
 # The typeset views this pane holds between frames, keyed ``(obligation.key, part)``.
 #
-# Module-level for the reason ``_ART_FRAMES`` below is: ``draw`` is handed no
-# presentation-state object of this pane's own, ``review.ReviewState`` is shared
-# with DETAIL -- which draws the same parked call in the same frame and must not
-# share a view with this pane, because a view holds one scroll position and one
-# origin -- and hanging it on either would mean editing a file this pane does not
-# own. Pruned in ``draw`` by the obligations still in the queue, the rule
-# ``ReviewState.prune`` applies to everything else remembered about an approval.
+# Module-level because ``draw`` is handed no presentation-state object of this
+# pane's own: ``review.ReviewState`` is shared with DETAIL -- which draws the same
+# parked call in the same frame and must not share a view with this pane, because a
+# view holds one scroll position and one origin -- and hanging it on either would
+# mean editing a file this pane does not own. Pruned in ``draw`` by the obligations
+# still in the queue, the rule ``ReviewState.prune`` applies to everything else
+# remembered about an approval.
 _VIEWS = typeset.ViewCache()
 _VIEW_PARTS = ("diff", "body", "arguments", "preview")
 
@@ -145,9 +145,11 @@ _VIEW_PARTS = ("diff", "body", "arguments", "preview")
 _PARTS: dict[Hashable, tuple[object, tuple[typeset.Part, ...]]] = {}
 
 # The preview last cut for a question row, beside the length of the transcript it
-# was cut from, under the view's key and pruned with it. A transcript is append-only,
-# so a length that has not moved is a turn that has not.
-_PREVIEWS: dict[Hashable, tuple[int, int, str]] = {}
+# was cut from and where its turn started, under the view's key and pruned with it.
+# A transcript is append-only, so a length that has not moved is bytes that have
+# not; a turn opened by a prompt sent mid-turn opens where that turn ended, and
+# writes nothing, so the start is read as well.
+_PREVIEWS: dict[Hashable, tuple[tuple[int, int], int, str]] = {}
 
 # The width of the widest row of a diff, beside the lines it was measured over,
 # under the view's key and pruned with it: every row of a whole-file Write is
@@ -535,7 +537,7 @@ def _clicked(label: str) -> bool:
     a command's row does (``command_view``): with keyboard navigation on, Space
     and Enter press a focused button, and no key acts on this row.
     """
-    return bool(imgui.small_button(label)) and bool(
+    return bool(widgets.small_button(label)) and bool(
         imgui.is_mouse_released(imgui.MouseButton_.left)
     )
 
@@ -658,6 +660,33 @@ def draw_command(
     )
     if not live:
         imgui.end_disabled()
+
+
+def attend(
+    snap: Snapshot,
+    focus: FocusState,
+    state: review.ReviewState,
+    decisions: decision_view.DecisionState,
+    commands: CommandRows | None,
+) -> None:
+    """
+    Once per frame, by the one pane the operator acts from -- this one, or
+    DETAIL where this one is not on screen (``review.queue_on_screen``) -- and
+    before any decision or command is drawn: what lets go of a draft's armed
+    press and closes a command's row when the cursor has left it, or when the
+    acting pane went a frame without being drawn (``CommandViewState.attend``),
+    and what opens the command under the cursor on ``OPEN_KEY``.
+    """
+    current = focus.obligation(snap)
+    decisions.attend(snap, current.decision.id if isinstance(current, DecisionOwed) else None)
+    if commands is not None:
+        commands.state.attend(
+            snap.commands,
+            current.command.id if isinstance(current, CommandOwed) else None,
+            int(imgui.get_frame_count()),
+        )
+        if isinstance(current, CommandOwed) and _open_key(state):
+            commands.state.open(current.command.id, float(imgui.get_time()))
 
 
 def among(snap: Snapshot, rows: CommandRows, command: Command) -> command_view.Among:
@@ -806,19 +835,8 @@ def draw(
         _WHOLE.intersection_update(live)
     # With the other two, ahead of every early return: the frame on which the last
     # decision is answered is one with an empty queue.
+    attend(snap, focus, state, decisions, commands)
     current = focus.obligation(snap)
-    decisions.attend(snap, current.decision.id if isinstance(current, DecisionOwed) else None)
-    if commands is not None:
-        # Once per frame and before any command is drawn, here or in DETAIL:
-        # this is what closes a row, and drops an armed press, when the cursor
-        # has left it or this pane went a frame without being drawn.
-        commands.state.attend(
-            snap.commands,
-            current.command.id if isinstance(current, CommandOwed) else None,
-            int(imgui.get_frame_count()),
-        )
-        if isinstance(current, CommandOwed) and _open_key(state):
-            commands.state.open(current.command.id, float(imgui.get_time()))
     # What left from under the cursor is said in every state the pane has,
     # ahead of the two that return early: an empty queue is where the last row
     # to leave leaves from.
@@ -838,7 +856,7 @@ def draw(
     # node table can be missing from the walk, and the lengths are therefore always
     # equal. ``nodes`` is asked anyway because it is the primary fact and ``order``
     # is a projection of it. If that recovery ever regressed, keying on the
-    # projection would put a cold-start splash over a live fleet -- silently, and
+    # projection would put the no-fleet line over a live fleet -- silently, and
     # over exactly the orphaned sub-agent that was carrying a pending approval.
     #
     # Note this is *not* the same question as ``_zero_state``'s "is anything live":
@@ -848,14 +866,14 @@ def draw(
     # "No fleet" is no session that ran in this window and is still on it
     # (``ran_here``). Closed cards recalled at startup are in the node table from
     # the first frame, and a session the operator removed stays in it, so the
-    # table alone would retire the cold start for every user with a history and
+    # table alone would retire the no-fleet state for every user with a history and
     # ``_zero_state`` would count sessions that never ran. The queue is asked as
     # well because the two are no longer the same fact by construction: whatever
     # is owed is drawn, whoever owes it.
     if not snap.needs_you and not ran_here(snap):
         if gone is not None:
             _departed(snap, gone.left, wall)
-        _splash(now)
+        _no_fleet()
         return
 
     if not snap.needs_you:
@@ -1239,7 +1257,7 @@ def _expand_approval(
 
     if state.editing == pending.id:
         # The draft, in ImGui's own input and all of it: ``unset`` stays zero.
-        _editor(state, pending, wrap=wrap)
+        editor(state, pending, wrap=wrap)
     else:
         # Both above the body under either renderer: the native one is also what is
         # drawn when the faces did not load.
@@ -1261,7 +1279,22 @@ def _expand_approval(
     # What every approve path is answered from (``review.withheld``), the keys'
     # on the next frame and this row's own button on this one.
     state.body_shown(review.INBOX, pending.id, unset, int(imgui.get_frame_count()))
+    approval_controls(state, bridge, pending, unset)
 
+
+def approval_controls(
+    state: review.ReviewState, bridge: Bridge, pending: PendingApproval, unset: int
+) -> None:
+    """
+    What a parked call is acted on with, under its body: the edit's error, an
+    approve that was not sent, the reason, and approve, reject and edit. The
+    queue's row draws it, and DETAIL where the row is not on screen, so the two
+    are one set of controls and not two (``review.queue_on_screen``).
+
+    ``unset`` is how many lines of the body the pane drawing it did not put on
+    screen this frame: approve is not pressable while any are, and
+    ``review.resolve`` asks ``review.withheld`` either way.
+    """
     imgui.spacing()
     if state.edit_error:
         imgui.text_colored(P.danger.vec4, state.edit_error)
@@ -1273,9 +1306,10 @@ def _expand_approval(
         imgui.set_keyboard_focus_here()
         state.focus_reason = False
     imgui.set_next_item_width(360.0)
-    changed, reason = imgui.input_text_with_hint(
-        "##reason", "reason (shown to the agent on reject)", state.reasons.get(pending.id, "")
-    )
+    with hint_colour(imgui, dialog=False):
+        changed, reason = imgui.input_text_with_hint(
+            "##reason", "reason (shown to the agent on reject)", state.reasons.get(pending.id, "")
+        )
     if changed:
         state.reasons[pending.id] = reason
 
@@ -1791,7 +1825,7 @@ def library_diff(state: review.ReviewState, pending: PendingApproval) -> typeset
             f"this diff is the pane's own rows: the library's view of it would match "
             f"{held.work:,} changed lines in one frame"
         )
-        if imgui.small_button("use the library's view"):
+        if widgets.small_button("use the library's view"):
             state.diff_whole.add(pending.id)
         return None
     return held
@@ -1832,7 +1866,7 @@ def _offer_whole(view: Hashable, more: int) -> None:
     _warning(
         f"… {more:,} more lines not set: all {total:,} would be read and laid out in one frame"
     )
-    if imgui.small_button(f"set all {total:,} lines"):
+    if widgets.small_button(f"set all {total:,} lines"):
         _WHOLE.add(view)
         _PARTS.pop(view, None)
 
@@ -1876,7 +1910,11 @@ def argument_rows(tool_name: str, args: Mapping[str, Any], command: str | None =
     return rows
 
 
-def _editor(state: review.ReviewState, pending: object, *, wrap: bool = True) -> None:
+def editor(state: review.ReviewState, pending: object, *, wrap: bool = True) -> None:
+    """
+    The draft of a parked call's corrected arguments, in an input of its own: what
+    `e` opens, on the queue's row or in DETAIL where the row is not on screen.
+    """
     pid = pending.id  # type: ignore[attr-defined]
     imgui.text_colored(P.focus.vec4, "editing arguments - approve runs the corrected call")
     changed, text = multiline_input(
@@ -2050,11 +2088,11 @@ def _typeset_preview(transcript: Transcript, key: str) -> None:
     approval, and nothing is decided on this text that DETAIL does not show whole.
     """
     view = (key, "preview")
-    length = transcript.published_length
+    at = (transcript.published_length, transcript.turn_start())
     held = _PREVIEWS.get(view)
-    if held is None or held[0] != length:
+    if held is None or held[0] != at:
         cut, ahead = preview_tail(transcript.turn_prose())
-        held = _PREVIEWS[view] = (length, ahead, cut)
+        held = _PREVIEWS[view] = (at, ahead, cut)
     _, dropped, tail = held
     if not tail:
         imgui.text_colored(P.text_dim.vec4, "no output on this turn")
@@ -2198,201 +2236,21 @@ def _batch_controls(
         state.confirming_global = True
 
 
-# -- the cold start ----------------------------------------------------------------
+# -- no fleet ---------------------------------------------------------------------
 #
 # Two empty states live in this pane and they are not the same emptiness.
 # ``_zero_state`` below is a fleet that exists and owes nothing -- it answers "what is
 # everyone doing". This one is a fleet that does not exist, which has no "everyone"
-# to report on and exactly one useful thing to say: how to start.
+# to report on. How to start one is the fleet pane's to say (``rail.new_task_line``),
+# so this says only that nothing is waiting.
 
-_INTRO = "pptmstr runs a fleet of Claude agents, and hands you every decision they reach."
-
-# The chord is spelled out, not merely coloured. STYLE.md's first rule is that hue is
-# never the only channel, and an operator on ``high_contrast`` -- where accent and text
-# collapse toward each other -- would otherwise have nothing marking this line as an
-# instruction. The accent makes it findable; the literal "Ctrl+N" is what makes it
-# actionable, and that survives every palette.
-#
-# Phrased as a suggestion for the same reason app.py:411 phrases its neighbour that
-# way: the pane offers the next step, it does not take it.
-_HINT_CHORD = "Ctrl+N"
-_HINT_TEXT = "- start a session"
-
-_ART_ROWS = len(splash_art.ART)
-_ART_COLS = max(len(row) for row in splash_art.ART)
-
-# Module-level, which is the one place this departs from ``splash.ArtFrames``' own
-# advice to let the pane own it. ``inbox.draw`` is handed no presentation-state object
-# to hang it on, and adding a parameter would mean editing app.py's call site, which
-# belongs to nobody on this task.
-#
-# The deviation is affordable because there is nothing here to invalidate: the key is
-# the step index, the art and the ranking are module constants, and colour is applied
-# at draw time rather than baked into the memo -- so a theme switch cannot make an
-# entry stale and a pane teardown leaks one tuple of 61 strings.
-#
-# What it buys, measured rather than estimated: ``time.perf_counter`` either side of
-# ``splash.art_frame``, once per step across one whole 81-step cycle, gives 0.55ms mean
-# and 0.99ms worst against 0.0002ms for a memo hit (2000 hits, same clock, one machine).
-# The step rate is 16/s while a window being dragged is awake at 60, so 44 of every 60
-# frames ask for a picture that has not changed -- about 24ms a second of re-derivation
-# the render thread does not do. That is roughly 4% of the frame budget, not the quarter
-# an earlier figure here claimed; still worth a module global, and worth stating at its
-# real size, because a number nobody can reproduce is the one that gets built on.
-_ART_FRAMES = splash.ArtFrames()
-
-# The three luminance levels, as named palette entries.
-#
-# The obvious triple -- text_dim, text, text_strong -- must not ship. ``text`` and
-# ``text_strong`` are the same bytes on high_contrast and on win311, so the line and the
-# row behind it would be one flat bar there; and on cde (1.08:1) and turbo (1.07:1) the
-# two separate in hue alone, which theme.py's first rule forbids as a sole channel.
-#
-# So TRAIL is RASTER's own ink at one step of ``theme.faded``, and the step is forced
-# from both sides of faded's twelve-step grid. Step 9 collapses TRAIL into DIM on
-# high_contrast -- white at 191/255 over black is #BFBFBF against text_dim's #C0C0C0,
-# 1.01:1 -- and step 11 drops TRAIL to within 1.19:1 of RASTER on dark. Step 10 is the
-# step that maximises the *smaller* of the two separations, which is the quantity that
-# matters, because either one collapsing costs the same thing: a one-row band.
-#
-# And that is why the triple is pinned next door rather than here.
-# ``splash.RASTER_ROWS_PER_SECOND`` is 16 only because the luminance band is two rows,
-# and the band is two rows only where TRAIL is seen as part of the line instead of as
-# more background. splash.py cannot check that -- it emits an ordinal and imports no
-# palette by design -- so its rate constant is an assertion about the three lines below,
-# and tests/test_theme.py holds it over all nine palettes.
-_TRAIL_ALPHA = 10.0 / 12.0
+NO_FLEET = "nothing needs you."
 
 
-def _ink(level: splash.Luminance) -> int:
-    """
-    The packed colour a row at ``level`` is drawn in.
-
-    A chain closed by ``assert_never`` rather than a table, so a new member of
-    ``splash.Luminance`` is a mypy error here rather than a KeyError at frame time or,
-    worse, a ``.get`` default that renders the new level as an ordinary dim row. That
-    totality is what the enum's own docstring asks the pane for, and a dict cannot
-    give it.
-    """
-    if level is splash.Luminance.DIM:
-        return P.text_dim.u32
-    if level is splash.Luminance.TRAIL:
-        return faded(P.text_strong, _TRAIL_ALPHA)
-    if level is splash.Luminance.RASTER:
-        return P.text_strong.u32
-    assert_never(level)
-
-
-def _splash(now: float) -> None:
-    """
-    The cold start: what this is, the quote, how to begin, and the art under it.
-
-    Ordered so the two lines an operator has to *act* on are above the fold. The art
-    is the last thing drawn and the first thing dropped, because it is the only part
-    that can fail to fit.
-    """
+def _no_fleet() -> None:
+    """The pane with no fleet: one quiet line, and nothing to act on."""
     imgui.spacing()
-    imgui.text_colored(P.text_dim.vec4, _INTRO)
-    imgui.spacing()
-    _quote(now)
-    imgui.spacing()
-    imgui.text_colored(P.accent.vec4, _HINT_CHORD)
-    imgui.same_line()
-    imgui.text_disabled(_HINT_TEXT)
-    imgui.spacing()
-    _art(now)
-
-
-def _quote(now: float) -> None:
-    """
-    The quote, one character at a time, each at its own alpha.
-
-    Draws ``frame.glyphs`` and measures ``frame.lines``, and that split is the whole of
-    what this pane has to get right about the glitch. The glyphs carry this frame's
-    corrupted characters; the prose carries the block's extent, which must not move when
-    a character is corrupted. Drawing the prose would produce a correct, still quote with
-    no glitch in it, and measuring the glyphs would tie the space claimed below to an
-    animation.
-
-    Through the draw list rather than as a chain of ``text_colored``/``same_line``
-    calls, for two reasons that both matter here. ``theme.faded`` returns the *packed*
-    colour and memoises it, so a per-character tint is a dict hit rather than the
-    per-frame colour arithmetic theme.py's header rules out of panels; and a hundred
-    characters as a hundred layout items would put a hundred entries in this window's
-    ID stack every frame to draw two lines of prose.
-
-    Positioning is by multiplying out a single advance, which is sound only because
-    the UI face is monospace -- the same property the art's column alignment rests on.
-    """
-    frame = splash.quote_frame(now)
-    draw = imgui.get_window_draw_list()
-    origin = imgui.get_cursor_screen_pos()
-    advance = imgui.calc_text_size("M").x
-    pitch = imgui.get_text_line_height_with_spacing()
-
-    for row, (line, alphas) in enumerate(zip(frame.glyphs, frame.alphas, strict=True)):
-        y = origin.y + row * pitch
-        for column, (char, alpha) in enumerate(zip(line, alphas, strict=True)):
-            if char == " ":
-                continue
-            draw.add_text(imgui.ImVec2(origin.x + column * advance, y), faded(P.text, alpha), char)
-
-    # The draw list writes pixels without advancing the cursor, so the space has to be
-    # claimed explicitly or everything below would be drawn on top of the quote.
-    imgui.dummy(imgui.ImVec2(advance * max(map(len, frame.lines)), pitch * len(frame.lines)))
-
-
-def _art(now: float) -> None:
-    """
-    The art, centred, at the largest size the remaining region allows, a colour a row.
-
-    Returns without drawing when it does not fit. ``fit_size`` clamps up to its floor
-    rather than reporting failure, so the answer still has to be checked against the
-    room -- a clipped half-silhouette reads as a rendering fault, where nothing reads
-    as deliberate.
-
-    Through the draw list, which ``_quote`` also does but for a different reason. Here
-    it is the only way to get a colour per row: the whole picture as one text item takes
-    one pushed style colour, and one ``text()`` per row would insert
-    ``style.item_spacing.y`` between rows and stand the art 60 spacings taller than
-    ``required_extent`` just promised the pane it would be. Placing the rows by hand
-    moves the pitch onto ``splash.LINE_PITCH_EM``, the constant ``fit_size`` and
-    ``required_extent`` are already written against, so the three cannot disagree about
-    where row 60 is. ImGui's own multi-line block advances by exactly that same pitch --
-    ``calc_text_size`` on the 61-row art returns 61.0000 x size at every even size in
-    the clamp range, measured in a live frame -- so this is a reimplementation of what
-    the one call was already doing, not a new geometry.
-
-    A row is one ``add_text``, not one per cell as in ``_quote``. ImGui emits no
-    vertices for a glyph with no visible rect, so the art's spaces cost nothing to pass
-    through and 61 calls draw what 4392 would. Nothing on this route is a printf path,
-    so the '%' in the art needs no guarding here.
-    """
-    avail = imgui.get_content_region_avail()
-    size = splash.fit_size(avail.x, avail.y, _ART_ROWS, _ART_COLS)
-    width, height = splash.required_extent(size, _ART_ROWS, _ART_COLS)
-    if width > avail.x or height > avail.y:
-        return
-
-    frame = _ART_FRAMES.frame(splash_art.ART, splash_art.RANK_OF, splash_art.RANKS, now)
-
-    # Centring folds into the x every row is drawn at, so the cursor moves first and the
-    # origin is read after it. That keeps the dummy below starting where the ink starts
-    # rather than claiming a block offset half a pane to the left of the picture.
-    imgui.set_cursor_pos_x(imgui.get_cursor_pos_x() + max(0.0, (avail.x - width) * 0.5))
-    draw = imgui.get_window_draw_list()
-    origin = imgui.get_cursor_screen_pos()
-    pitch = size * splash.LINE_PITCH_EM
-
-    imgui.push_font(face(Face.BODY), size)
-    for row, (line, level) in enumerate(zip(frame.lines, frame.luminance, strict=True)):
-        draw.add_text(imgui.ImVec2(origin.x, origin.y + row * pitch), _ink(level), line)
-    imgui.pop_font()
-
-    # The draw list writes pixels without advancing the cursor, so the space has to be
-    # claimed explicitly or everything below would be drawn on top of the art. Exactly
-    # ``required_extent``, which is the number already checked against the pane above.
-    imgui.dummy(imgui.ImVec2(width, height))
+    imgui.text_disabled(NO_FLEET)
 
 
 def _zero_state(snap: Snapshot, now: float) -> None:

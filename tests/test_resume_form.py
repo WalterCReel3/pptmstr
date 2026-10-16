@@ -10,6 +10,7 @@ are.
 
 from __future__ import annotations
 
+import contextlib
 import dataclasses
 import os
 import time
@@ -323,11 +324,12 @@ def test_the_top_rung_and_its_containment_travel_together(work: Path, own: str) 
 def test_a_session_with_no_recorded_brief_gets_its_canonical_one_if_it_exists(
     work: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, own: str
 ) -> None:
-    root = tmp_path / "projects"
+    root = tmp_path / "briefs"
     monkeypatch.setattr(brief_mod, "default_root", lambda: root)
     assert _open(ResumeForms(), work, brief=None).brief is None
 
-    canonical = brief_mod.session_dir(root, os.path.realpath(work), SESSION)
+    canonical = brief_mod.session_dir(SESSION)
+    assert canonical is not None and canonical.parent == root
     canonical.mkdir(parents=True)
     form = _shown(_open(ResumeForms(), work, brief=None), own)
     assert form.brief == str(canonical)
@@ -675,6 +677,11 @@ class _Frames:
         self.live: frozenset[str] = frozenset()
         self.launched: list[Launch] = []
         self.at: dict[str, tuple[float, float]] = {}
+        # For ``button``: the rectangle it was given, top and bottom.
+        self.placed: dict[str, tuple[float, float]] = {}
+        # Set to draw the application's chrome around the form each frame: a main
+        # menu bar, and a status bar as hello_imgui draws one (``_status_bar``).
+        self.chrome = False
         self._monkeypatch = monkeypatch
 
     def __enter__(self) -> _Frames:
@@ -687,6 +694,7 @@ class _Frames:
         self.io.set_ini_filename("")
         self.io.add_focus_event(True)
         at = self.at
+        placed = self.placed
 
         class Noting:
             def __getattr__(self, name: str) -> object:
@@ -696,6 +704,7 @@ class _Frames:
                 pressed = imgui.button(label, size)  # type: ignore[arg-type]
                 low, high = imgui.get_item_rect_min(), imgui.get_item_rect_max()
                 at[label] = ((low.x + high.x) / 2.0, (low.y + high.y) / 2.0)
+                placed[label] = (low.y, high.y)
                 return bool(pressed)
 
         self._monkeypatch.setattr(resume_form, "imgui", Noting())
@@ -707,6 +716,10 @@ class _Frames:
     def frame(self, count: int = 1) -> None:
         for _ in range(count):
             real_imgui.new_frame()
+            if self.chrome:
+                if real_imgui.begin_main_menu_bar():
+                    real_imgui.text("Session")
+                    real_imgui.end_main_menu_bar()
             resume_form.draw(
                 self.forms,
                 launch=self.launched.append,
@@ -716,7 +729,42 @@ class _Frames:
                 live=self.live,
                 checkout=self.own,
             )
+            if self.chrome:
+                self._status_bar()
             real_imgui.end_frame()
+
+    def _status_bar(self) -> None:
+        """
+        hello_imgui's, as ``test_launcher._RealFrames`` draws it: a window named
+        ``launcher.STATUS_BAR_WINDOW``, 1.4 frame heights across the bottom of the
+        viewport, drawn after the form, so the form knows it from the frame before.
+        ``test_launcher_status_bar`` holds the name to the real runner's.
+        """
+        imgui = real_imgui
+        viewport = imgui.get_main_viewport()
+        tall = imgui.get_frame_height() * 1.4
+        imgui.set_next_window_pos(
+            imgui.ImVec2(viewport.pos.x, viewport.pos.y + viewport.size.y - tall)
+        )
+        imgui.set_next_window_size(imgui.ImVec2(viewport.size.x, tall))
+        flags = imgui.WindowFlags_.no_decoration | imgui.WindowFlags_.no_docking
+        imgui.begin(launcher.STATUS_BAR_WINDOW, None, flags)
+        imgui.text("11 agents")
+        imgui.end()
+
+    def work_area(self) -> tuple[float, float, float, float]:
+        """Left, top, right, bottom: under the menu bar and over the status bar."""
+        viewport = real_imgui.get_main_viewport()
+        bar = real_imgui.internal.find_window_by_name(launcher.STATUS_BAR_WINDOW)
+        assert bar is not None
+        left, top = float(viewport.work_pos.x), float(viewport.work_pos.y)
+        return left, top, left + float(viewport.work_size.x), float(bar.pos.y)
+
+    def scroll(self) -> float:
+        """How far the form's window itself scrolls, buttons and all."""
+        found = real_imgui.internal.find_window_by_name(resume_form.TITLE)
+        assert found is not None
+        return float(found.scroll_max.y)
 
     def type(self, text: str) -> None:
         self.io.add_input_characters_utf8(text)
@@ -887,10 +935,140 @@ def test_in_dear_imgui_the_window_grows_with_what_it_holds_and_stays_on_screen(
 
     x, y, width, height = frames.window()
     assert height > window[3], "it grew"
-    assert frames.at["resume"][1] > before["resume"][1], "and the buttons with it"
+    # Down the window, which is measured from its top: a form that reaches the
+    # display's foot is moved up whole, so on the display the buttons may not move.
+    assert frames.at["resume"][1] - y > before["resume"][1] - window[1], "and the buttons with it"
     # Three more lines and a row of buttons, not three paragraphs.
     assert height - window[3] < 4.0 * 2.0 * real_imgui.get_text_line_height_with_spacing() + 30.0
     assert x >= 0.0 and y >= 0.0
     assert x + width <= 1280.0 and y + height <= 900.0
     assert frames.at["resume"][1] < y + height
     assert frames.at["cancel"][1] == frames.at["resume"][1]
+
+
+# -- where it opens -------------------------------------------------------------------
+
+
+@contextlib.contextmanager
+def _open_in_a_running_app(
+    monkeypatch: pytest.MonkeyPatch,
+    work: Path,
+    own: str,
+    size: tuple[float, float],
+    **over: object,
+) -> Iterator[_Frames]:
+    """
+    A fresh context, as a run's first open is -- the body has never been drawn, so
+    the form measures short on the frame it appears -- with the app's chrome drawn
+    and frames gone by before the operator asks.
+    """
+    forms = ResumeForms()
+    with _Frames(monkeypatch, forms, own) as real:
+        real.chrome = True
+        real.io.display_size = real_imgui.ImVec2(*size)
+        real.frame(3)
+        _open(forms, work, **over)
+        real.frame(10)
+        yield real
+
+
+_SIZES = [(1500.0, 900.0), (1280.0, 800.0)]
+
+
+@pytest.mark.parametrize("size", _SIZES, ids=lambda s: f"{s[0]:g}x{s[1]:g}")
+def test_the_first_open_in_a_run_is_centred_in_the_work_area(
+    monkeypatch: pytest.MonkeyPatch, work: Path, own: str, size: tuple[float, float]
+) -> None:
+    with _open_in_a_running_app(monkeypatch, work, own, size) as real:
+        left, top, right, bottom = real.work_area()
+        x, y, width, height = real.window()
+        assert top > 0.0 and bottom < size[1], "the chrome is not drawn"
+        assert height <= bottom - top, "the fixture's form does not fit its work area"
+        assert abs((y + height / 2.0) - (top + bottom) / 2.0) <= 1.0, (top, y, y + height, bottom)
+        assert abs((x + width / 2.0) - (left + right) / 2.0) <= 1.0
+        assert top <= y and y + height <= bottom
+
+
+def test_a_second_open_is_centred_in_the_work_area_too(
+    monkeypatch: pytest.MonkeyPatch, work: Path, own: str
+) -> None:
+    """Closed, the display resized, and opened again: centred in the new area."""
+    with _open_in_a_running_app(monkeypatch, work, own, (1280.0, 800.0)) as real:
+        real.click("cancel")
+        assert not real.forms.is_open
+        real.io.display_size = real_imgui.ImVec2(1500.0, 900.0)
+        real.frame(3)
+        _open(real.forms, work)
+        real.frame(10)
+        left, top, right, bottom = real.work_area()
+        x, y, width, height = real.window()
+        assert abs((y + height / 2.0) - (top + bottom) / 2.0) <= 1.0, (top, y, y + height, bottom)
+        assert abs((x + width / 2.0) - (left + right) / 2.0) <= 1.0
+
+
+def test_a_form_the_operator_moved_stays_where_it_was_put(
+    monkeypatch: pytest.MonkeyPatch, work: Path, own: str
+) -> None:
+    with _open_in_a_running_app(monkeypatch, work, own, (1500.0, 900.0)) as real:
+        _, top, _, _ = real.work_area()
+        window = real_imgui.internal.find_window_by_name(resume_form.TITLE)
+        real_imgui.internal.set_window_pos(window, real_imgui.ImVec2(40.0, top + 20.0))
+        real.frame(8)
+        x, y, _, _ = real.window()
+        assert (x, y) == (40.0, top + 20.0)
+
+
+@pytest.mark.parametrize("height", [420.0, 480.0, 600.0])
+def test_a_form_taller_than_its_area_scrolls_its_body_and_not_its_buttons(
+    monkeypatch: pytest.MonkeyPatch, work: Path, own: str, height: float
+) -> None:
+    """
+    At a small height, with the most it ever holds above the buttons -- a live
+    session's warning, the top rung, a failure notice -- the form is held over the
+    status bar, its body scrolls, and the window with the buttons in it does not.
+    """
+    with _open_in_a_running_app(monkeypatch, work, own, (1280.0, height)) as real:
+        form = real.forms.forms[SESSION]
+        real.live = frozenset({SESSION})
+        form.policy = Policy.AUTONOMOUS
+        form.failed(form.draft(), "a reason long enough to wrap " * 6)
+        real.frame(10)
+        _, top, _, bottom = real.work_area()
+        _, y, _, tall = real.window()
+        assert real.scroll() == 0.0, "the window itself scrolls, and its buttons with it"
+        assert top <= y and y + tall <= bottom, (top, y, y + tall, bottom)
+        for label in ("resume", "cancel"):
+            low, high = real.placed[label]
+            assert y <= low and high <= y + tall
+
+
+# -- a fact ending in its question mark is a line of text ---------------------------
+
+from tests import test_small_button as _buttons  # noqa: E402
+
+faced = _buttons.faced
+
+
+@pytest.mark.parametrize("explained", [True, False], ids=["marked", "plain"])
+def test_a_fact_is_one_line_of_text_whether_or_not_it_ends_in_a_mark(
+    faced: None, explained: bool
+) -> None:
+    """
+    The question mark is a link on the text's own baseline, so a fact that ends
+    in one is not set down to a button's label: its label starts where the
+    cursor was, and the row is as tall as a line of text.
+    """
+    marked = widgets.Help("title", "this session's title", ("so",)) if explained else None
+
+    def draw() -> dict[str, float]:
+        with widgets.dialog_style():
+            top = real_imgui.get_cursor_screen_pos().y
+            real_imgui.text("a line")
+            plain = real_imgui.get_cursor_screen_pos().y - top
+            top = real_imgui.get_cursor_screen_pos().y
+            resume_form._fact("title", "rebuild the parser", marked)
+            row = real_imgui.get_cursor_screen_pos().y - top
+            real_imgui.text_disabled("next")
+        return {"taller": row - plain}
+
+    assert _buttons._lines(draw) == {"taller": 0.0}

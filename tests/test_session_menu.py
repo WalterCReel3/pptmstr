@@ -1437,26 +1437,6 @@ def test_an_ask_no_card_took_is_gone_on_the_next_frame(fleet: _Fleet) -> None:
     assert not cards.open_from_key
 
 
-def test_the_menu_bars_entry_opens_the_focused_cards_menu_on_the_next_frame(
-    fleet: _Fleet,
-) -> None:
-    fleet.state.cards.ask_next_frame = True
-    fleet.frame(2)
-
-    assert fleet.open
-
-
-def test_the_menu_bar_names_the_key_the_handler_reads() -> None:
-    """A key with no menu entry is a key nobody finds, and one that names another lies."""
-    import inspect
-
-    from pptmstr import app
-
-    assert app.CARD_MENU_KEY is imgui.Key.m
-    assert '"Controls for the focused card…", "M"' in inspect.getsource(app._menus)
-    assert "cards.ask_next_frame = True" in inspect.getsource(app._menus)
-
-
 # -- the keys while a menu is open ----------------------------------------------------
 
 
@@ -2649,3 +2629,82 @@ def test_a_failed_session_with_a_process_attached_is_given_a_running_sessions_ga
             reading,
         )
         assert not [e for e in group if isinstance(e, Item) and e.action is Action.SET_GATE]
+
+
+# -- one title rule ----------------------------------------------------------------------
+
+
+def test_the_card_its_menu_and_the_main_menu_title_a_session_by_one_rule(
+    monkeypatch: pytest.MonkeyPatch, fleet: _Fleet
+) -> None:
+    """
+    ``session_menu.card_title`` is what the fleet card, the card's menu and the
+    main menu's Session section each title a session with: replaced, all three
+    draw the replacement, so none of them holds a copy that agrees on one input.
+    """
+    from pptmstr.ui import main_menu
+
+    monkeypatch.setattr(session_menu, "card_title", lambda rec: f"ONE RULE {rec.node_id[0]}")
+    drawn: list[str] = []
+    real = imgui.text_colored
+    monkeypatch.setattr(
+        imgui, "text_colored", lambda colour, text: (drawn.append(text), real(colour, text))[1]
+    )
+    fleet.frame(2)
+    assert "ONE RULE s1" in drawn and "ONE RULE s2" in drawn, "the cards"
+    assert "rotate the signing key" not in drawn
+
+    fleet.click(fleet.cards[0], button=1)
+    assert fleet.open
+    assert "ONE RULE s1" in fleet.dim, "the card's menu"
+
+    rec = fleet.store.snapshot().nodes[ROOT]
+    heading, *_ = [
+        row
+        for row in main_menu._card(main_menu.Card(rec, ()))
+        if isinstance(row, main_menu.Heading)
+    ]
+    assert heading.text == "ONE RULE s1", "the main menu"
+
+
+@pytest.mark.parametrize(
+    ("node", "agent_type", "task", "titled"),
+    [
+        (ROOT, None, "rotate the signing key", "rotate the signing key"),
+        (BUILDER, "builder", "rotate the signing key", "builder"),
+        (BUILDER, None, "rotate the signing key", "rotate the signing key"),
+        (ROOT, None, "", "s1"),
+        (BUILDER, None, "", "s1"),
+    ],
+    ids=["root-by-task", "sub-by-role", "sub-without-role", "root-without-task", "bare-sub"],
+)
+def test_a_card_is_titled_by_task_or_role_and_never_blank(
+    node: NodeId, agent_type: str | None, task: str, titled: str
+) -> None:
+    store = Store()
+    if node != ROOT:
+        store.apply(AgentSpawned(ROOT, None, task="t", model="m", started_at=0.0))
+    store.apply(
+        AgentSpawned(
+            node,
+            None if node == ROOT else ROOT,
+            task=task,
+            model="m",
+            started_at=0.0,
+            agent_type=agent_type,
+        )
+    )
+    assert session_menu.card_title(store.snapshot().nodes[node]) == titled
+
+
+def test_detail_heads_a_root_session_with_the_cards_title() -> None:
+    """
+    DETAIL heads its pane with ``inbox.identity``: for a root, the string the card
+    titles it with. (For a sub-agent it heads with the session's task and names the
+    role beside it, on purpose -- the card names the role.)
+    """
+    store = _store()
+    store.apply(_parked("p1", ROOT, 6.0), now=6.0)
+    snap = store.snapshot()
+    (owed,) = [each for each in snap.needs_you if each.node == ROOT]
+    assert inbox.identity(snap, owed)[0] == session_menu.card_title(snap.nodes[ROOT])

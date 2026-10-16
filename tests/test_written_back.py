@@ -493,7 +493,7 @@ def test_a_nul_a_command_wrote_reads_as_the_nul_wherever_its_output_is_shown(
     output is the program's bytes, so it is held as they were and spelled once:
     in the row, in DETAIL's copy and in the asker's reply.
     """
-    from pptmstr.ui import command_view, detail
+    from pptmstr.ui import command_view
 
     store = Store()
     store.apply(CommandsRestored(S, (_command("echo x", f"a{NUL}b\n"),)))
@@ -516,7 +516,7 @@ def test_a_nul_a_command_wrote_reads_as_the_nul_wherever_its_output_is_shown(
         imgui.end()
         imgui.render()
     lines, _ = commandbus._output_lines(held.end.tail)
-    copied = detail.command_text(held, "builder")
+    copied = command_view.command_text(held, "builder")
 
     for said in ("\n".join(drawn), "\n".join(lines), "\n".join(copied)):
         assert "a\\x00b" in said, said

@@ -316,6 +316,9 @@ def said_by(monkeypatch: pytest.MonkeyPatch, draw: Callable[[], None], *modules:
     fake.get_font_size.return_value = 16.0
     monkeypatch.setattr(widgets, "multiline_input", lambda label, text, *a, **k: (False, text))
     monkeypatch.setattr(widgets, "follow_tail", lambda following: following)
+    # The panes' small buttons are ``widgets.small_button``; noted as the call it
+    # stands for, so "no live controls" still counts them.
+    monkeypatch.setattr(widgets, "small_button", fake.small_button)
     for module in (*modules, widgets):
         monkeypatch.setattr(module, "imgui", fake)
         if hasattr(module, "ellipsis") and module is not widgets:
@@ -478,7 +481,7 @@ def test_the_same_panes_still_say_those_things_about_a_session_that_ran(
     assert panes["health"].has("$0.00") and panes["health"].has(" in · ")
     assert STATE_LABEL[AgentState.DONE] in panes["health"].strings
     assert panes["compose"].has("can no longer be messaged")
-    assert panes["transcript"].has("(nothing yet)") and "checkbox" in panes["transcript"].calls
+    assert panes["transcript"].has("(nothing yet)") and "small_button" in panes["transcript"].calls
     assert panes["board"].has("no tasks declared yet")
     assert panes["digest"].has("nothing taken without you")
     assert not any(s.startswith("closed — ") for said in panes.values() for s in said.strings)

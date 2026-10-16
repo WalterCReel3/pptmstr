@@ -33,6 +33,18 @@ def _load() -> ModuleType:
 
 worktree = _load()
 
+
+@pytest.fixture(autouse=True)
+def _home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """
+    `create` places under the home directory, so every test here has its own: one
+    that forgot would make a worktree in the operator's `~/.pptmstr`.
+    """
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    return home
+
+
 PYPROJECT = """
 [project]
 name = "demo"
@@ -60,18 +72,14 @@ def test_a_branch_with_nothing_nameable_is_refused() -> None:
         worktree.slug_for("///")
 
 
-def test_a_worktree_is_a_sibling_of_the_main_checkout() -> None:
-    path = worktree.worktree_path(Path("/src/pptmstr"), "feat/x")
-    assert path == Path("/src/pptmstr-worktrees/feat-x")
+def test_a_worktree_goes_under_the_one_home_for_every_repositorys() -> None:
+    path = worktree.worktree_path(Path("/src/pptmstr"), "feat/x", Path("/home/w"))
+    assert path == Path("/home/w/.pptmstr/worktrees/pptmstr/feat-x")
 
 
-def test_only_components_the_two_sanitisers_disagree_on_are_reported() -> None:
-    assert worktree.unsanitary_parts(Path("/home/w/Source/pptmstr-worktrees/a-b")) == ()
-    assert worktree.unsanitary_parts(Path("/home/w.r/.pptmstr/my_tree")) == (
-        "w.r",
-        ".pptmstr",
-        "my_tree",
-    )
+def test_the_home_is_the_users_when_none_is_given(_home: Path) -> None:
+    path = worktree.worktree_path(Path("/src/pptmstr"), "a")
+    assert path == _home / ".pptmstr" / "worktrees" / "pptmstr" / "a"
 
 
 def test_an_editable_path_follows_the_worktree_and_a_foreign_one_is_kept() -> None:
@@ -156,10 +164,12 @@ def source(tmp_path: Path) -> Path:
     return root
 
 
-def test_a_created_worktree_imports_its_own_tree_and_the_sources_packages(source: Path) -> None:
+def test_a_created_worktree_imports_its_own_tree_and_the_sources_packages(
+    source: Path, _home: Path
+) -> None:
     path = worktree.create(source, "feat/x", None)
 
-    assert path == source.parent / "repo-worktrees" / "feat-x"
+    assert path == _home / ".pptmstr" / "worktrees" / "repo" / "feat-x"
     assert _run(path, "git", "branch", "--show-current").strip() == "feat/x"
     python = str(path / ".venv" / "bin" / "python")
     # From a neutral directory, so the answer is the path file's and not cwd's.
@@ -183,7 +193,7 @@ def test_a_console_script_runs_under_the_new_interpreter_and_a_binary_is_linked(
     assert (bin_dir / "native").resolve() == source / ".venv" / "bin" / "native"
 
 
-def test_a_worktree_made_from_a_worktree_borrows_without_nesting(source: Path) -> None:
+def test_a_worktree_made_from_a_worktree_borrows_without_nesting(source: Path, _home: Path) -> None:
     """
     A stack: the second environment names the first's borrowed directories directly,
     since a `.pth` reached through another `.pth` would never be read.
@@ -191,7 +201,7 @@ def test_a_worktree_made_from_a_worktree_borrows_without_nesting(source: Path) -
     first = worktree.create(source, "a", None)
     second = worktree.create(first, "b", None)
 
-    assert second == source.parent / "repo-worktrees" / "b"
+    assert second == _home / ".pptmstr" / "worktrees" / "repo" / "b"
     python = str(second / ".venv" / "bin" / "python")
     found = _run(
         source.parent,
@@ -218,13 +228,15 @@ def test_an_existing_branch_is_attached_and_cannot_be_rebased_by_a_flag(source: 
     assert _run(path, "git", "branch", "--show-current").strip() == "kept"
 
 
-def test_a_source_without_an_environment_is_refused_before_git_is_touched(tmp_path: Path) -> None:
+def test_a_source_without_an_environment_is_refused_before_git_is_touched(
+    tmp_path: Path, _home: Path
+) -> None:
     root = tmp_path / "bare"
     root.mkdir()
     _run(root, "git", "init", "-q")
     with pytest.raises(worktree.WorktreeError, match="bootstrap"):
         worktree.create(root, "a", None)
-    assert not (tmp_path / "bare-worktrees").exists()
+    assert not (_home / ".pptmstr").exists()
 
 
 def test_check_is_silent_until_the_branch_declares_other_dependencies(source: Path) -> None:

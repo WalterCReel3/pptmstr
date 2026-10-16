@@ -35,6 +35,7 @@ Two properties come from this rather than from care:
 
 from __future__ import annotations
 
+import enum
 from dataclasses import dataclass
 
 from .board import BoardConcern, BoardTask
@@ -47,6 +48,7 @@ from .model import (
     Decision,
     DecisionRefusal,
     DetachRefusal,
+    NodeId,
     Task,
     TaskId,
     TaskRefusal,
@@ -315,6 +317,40 @@ class SessionDetachSettled:
     refusal: DetachRefusal | None = None
 
 
+class WakeReason(enum.Enum):
+    """What changed for a session that is woken (``SessionWoken``)."""
+
+    DECISION_ANSWERED = "decision answered"
+    DECISION_DISMISSED = "decision dismissed"
+    COMMAND_ENDED = "command ended"
+    CONCERN_TO_LEAD = "concern to the lead"
+
+
+@dataclass(frozen=True, slots=True)
+class SessionWoken:
+    """
+    An order to the shell: something the session ``session_id`` asked for, or a
+    worker's message to it, has arrived, and the session is to be told so with
+    a message of pptmstr's own (``bus.wake_lines``).
+
+    ``subject_id`` is what to read: the decision, command or concern id.
+    ``sender`` is the worker that posted a concern, None for the rest. The
+    session is the asker's session and its lead is what is woken, a sub-agent
+    asker included: a sub-agent has no turn of its own to be woken into, and it
+    relays through its lead already.
+
+    Not an answer to anybody, so ``request_id`` is empty, as on ``CommandToRun``.
+    Whether the session is live, and coalescing a burst into one wake, are the
+    shell's: neither is a fact of the store.
+    """
+
+    session_id: str
+    reason: WakeReason
+    subject_id: str
+    sender: NodeId | None = None
+    request_id: str = ""
+
+
 # Explicit union, for the same reason ``Intent`` is one: the app loop matches over
 # it and mypy reports an unhandled member as a type error rather than letting an
 # agent stay parked on a future nobody completes.
@@ -331,4 +367,5 @@ Effect = (
     | CommandToRun
     | CommandToStop
     | SessionDetachSettled
+    | SessionWoken
 )

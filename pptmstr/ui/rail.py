@@ -38,7 +38,7 @@ file recorded and none of what the record's own fields default to: see ``_closed
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import assert_never
 
@@ -56,8 +56,9 @@ from ..model import (
     TranscriptPresence,
 )
 from ..theme import DISCLOSURE_GLYPH, OBLIGATION_GLYPH, STATE_GLYPH, STATE_LABEL, P
-from . import decision_view, fleet_view, projects, session_menu
+from . import decision_view, fleet_view, launcher, projects, session_menu, widgets
 from .focus import FocusState, Scope, covers
+from .main_menu import chord_label
 from .widgets import (
     RAIN_WIDTH,
     activity_rain,
@@ -231,21 +232,6 @@ def _density(rec: AgentRecord, owed: list[Obligation], *, unread: int = 0) -> st
     if rec.state in (AgentState.DONE, AgentState.CANCELLED) and not owed and not unread:
         return "ended"
     return "active"
-
-
-def _title(rec: AgentRecord) -> str:
-    """
-    The one string on a card that tells two of them apart.
-
-    A root is titled by its task -- every root record is named "session", so the name
-    cannot do it. A sub-agent is titled by its **role**, which is what the operator
-    spawned and the thing its siblings differ by. The driver happens to set ``task``
-    to the same string for a sub-agent today; reading ``agent_type`` says which fact
-    is meant rather than resting on the two staying equal.
-    """
-    if rec.node_id[1] is not None:
-        return rec.agent_type or rec.task
-    return rec.task
 
 
 def _ago(seconds: float) -> str:
@@ -565,9 +551,16 @@ def draw(
     *,
     hide_ended: bool = False,
     now_wall: float | None = None,
+    new_task: Callable[[], None] | None = None,
 ) -> None:
     """
     Build the rail from one snapshot. Never reads the store.
+
+    Under the cards -- or alone, on a fleet with none -- a quiet line that
+    invites more work: "New Task", a link, and the chord New Task answers to
+    (``new_task_line``). ``new_task`` is what the link does, the menu's New Task
+    itself as the shell hands it; None draws no line, since there is nothing for
+    it to do.
 
     ``menu`` is what a card's context menu is drawn with -- its state, the actions
     it calls and the live gate reading (``session_menu.Wiring``). None draws cards
@@ -588,9 +581,10 @@ def draw(
     # Keyed on what is drawn and not on ``snap.order``: a fleet whose every session
     # was removed has records and no card, and would otherwise be a blank pane.
     if not fleet:
-        imgui.text_disabled("no sessions")
-        imgui.spacing()
-        imgui.text_disabled("start one from the launcher below.")
+        imgui.text_disabled(NO_SESSIONS)
+        if new_task is not None:
+            imgui.spacing()
+            new_task_line(new_task)
         return
 
     owed_by_session = _by_session(snap)
@@ -612,6 +606,35 @@ def draw(
                 hide_ended=hide_ended,
                 now_wall=now_wall,
             )
+    if new_task is not None:
+        imgui.spacing()
+        new_task_line(new_task)
+
+
+NO_SESSIONS = "no sessions"
+NEW_TASK = "New Task"
+
+
+def new_task_label() -> str:
+    """
+    The quiet line's words after the link: the chord the menu's New Task shows,
+    read from the binding its handler is given (``launcher.CHORD``), so the
+    line cannot name a key that does nothing.
+    """
+    return f" · {chord_label(launcher.CHORD)}"
+
+
+def new_task_line(new_task: Callable[[], None]) -> None:
+    """
+    "New Task · Ctrl+N", quiet: "New Task" a link that does what the menu's New
+    Task does (``new_task``), and the chord in the dim ink.
+    """
+    _small()
+    if widgets.link(f"{NEW_TASK}##fleet-new-task"):
+        new_task()
+    imgui.same_line(0.0, 0.0)
+    imgui.text_disabled(new_task_label())
+    _normal()
 
 
 def header_counts(snap: Snapshot, roots: Sequence[NodeId]) -> str:
@@ -623,11 +646,12 @@ def header_counts(snap: Snapshot, roots: Sequence[NodeId]) -> str:
     """
     closed = sum(1 for root in roots if snap.nodes[root].recalled is not None)
     ran = len(roots) - closed
+    sessions = f"{ran} session{'' if ran == 1 else 's'}"
     if not closed:
-        return f"{ran} sessions"
+        return sessions
     if not ran:
         return f"{closed} closed"
-    return f"{ran} sessions · {closed} closed"
+    return f"{sessions} · {closed} closed"
 
 
 def _project_header(
@@ -920,8 +944,7 @@ def _card(
             _small()
             fact_w = imgui.calc_text_size(fact).x
             _normal()
-            # A file that recorded no task still has the one name nothing else has.
-            title = _title(rec) or rec.node_id[0]
+            title = session_menu.card_title(rec)
             imgui.text_colored(
                 P.text_dim.vec4,
                 ellipsis(title, width - 54.0 - _PAD - fact_w - _subs_width(signal)),
@@ -936,7 +959,8 @@ def _card(
             # what it became and what it cost. A model that no longer runs anything is
             # history, and this is the one density with no room to spare for it.
             imgui.text_colored(
-                P.text_dim.vec4, ellipsis(_title(rec), width - 150.0 - _subs_width(signal))
+                P.text_dim.vec4,
+                ellipsis(session_menu.card_title(rec), width - 150.0 - _subs_width(signal)),
             )
             marker = _draw_subs(signal)
             _small()
@@ -967,7 +991,7 @@ def _card(
     title_room = width - (_PAD * 2 + 30.0) - (max(52.0, badges_w + 16.0) if owed else 42.0)
     if working:
         title_room -= _RAIN_GAP + RAIN_WIDTH
-    imgui.text_colored(P.text_strong.vec4, ellipsis(_title(rec), title_room))
+    imgui.text_colored(P.text_strong.vec4, ellipsis(session_menu.card_title(rec), title_room))
 
     if badges:
         bx = hi.x - _PAD - badges_w

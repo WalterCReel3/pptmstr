@@ -40,15 +40,24 @@ ImGui's until every hold on an approve is shown on this path as well
 So ``document`` is one view only where every part is markdown.
 ``ViewCache.views(key)`` has every view of a key, in order.
 
+**A part its caller draws** (``Hosted``) is drawn by the ``host`` handed to
+``document``, where it falls among the others: the log's tool blocks, which are
+ImGui widgets, scroll in one window with the runs the library sets. A host that
+does not draw one, and every one with no host, is set as the literal part it
+also is, by ImGui. Nothing of it is the library's: it is not searched or selected.
+
 **A fenced diff in a settled document is the library's diff view where a diff
 is** (``diffs.adopted``) **and the fence is an honest one** (``diffs.fence_diff``):
 hosted in its document's view by the library's diff fences (``_Fences``), at
 the diff role's size, with its header lines set above it as code because a
 header row of the view is cut at the view's edge. Everywhere else a fence is
-the code of its document under its info string. **A stream does not host
-one**: whether a fence still arriving is an honest diff changes with each line
-of it, and a block that turned from code into a diff view and back under a
-reader is worse than one that is code until its turn settles.
+the code of its document under its info string. **An open stream does not
+host one**: whether a fence still arriving is an honest diff changes with each
+line of it, and a block that turned from code into a diff view and back under a
+reader is worse than one that is code until its turn settles. **A closed
+stream does** (``Stream._ink``): its text has ended, so the session pane's last
+run, which stays a stream after its turn ends, draws a diff fence as DETAIL's
+settled document of the same text does.
 
 ## When the library stops
 
@@ -131,6 +140,7 @@ views are then 0.9 to 1.6 ms.
 
 from __future__ import annotations
 
+import time
 import unicodedata
 from collections.abc import Callable, Collection, Hashable, Iterator, Sequence
 from contextlib import contextmanager
@@ -139,7 +149,7 @@ from typing import Any
 
 from ... import theme as ui_theme
 from ...theme import Color
-from . import gate, roles, themes
+from . import gate, roles, syntax, themes
 from .parts import Kind, Part
 from .roles import Role, Slot, Weight
 
@@ -166,6 +176,29 @@ own words for that answer.
 """
 
 
+@dataclass(frozen=True, slots=True)
+class Hosted(Part):
+    """
+    A part of a ``document`` its caller draws: ``document``'s ``host`` is asked to,
+    where the part falls among the others, with the part's index and the part.
+
+    It is a ``Kind.LITERAL`` part as well, and its text is what a copy of the
+    document and ``ViewCache.texts`` give for it, and what is drawn, by ImGui,
+    where the host does not draw it. A subclass and not a ``Kind``, because the
+    seam reads nothing of it: its kind is the one its text is set as when the
+    host declines.
+    """
+
+
+Host = Callable[[int, Part], bool | None]
+"""
+What draws a ``Hosted`` part at the cursor, handed the part's index in the
+document and the part. It answers true when it drew **one item** (a group or a
+child), ``None`` when the part is to take no room at all, and false when it
+drew nothing and the part is to be set as written.
+"""
+
+
 @dataclass
 class _Segment:
     """
@@ -182,6 +215,9 @@ class _Segment:
     # For a fenced block set with its info string as its first line: how many
     # characters of the block's text that line is.
     captions: dict[int, int] = field(default_factory=dict)
+    # For a block of lines set above a hosted diff: how many characters of its
+    # text are warnings, drawn in the warn ink (``_Warned``).
+    warned: dict[int, int] = field(default_factory=dict)
     # How far right the view's text reaches from its left edge, and the view's
     # revision and the measure that was worked out for.
     reach: tuple[int, float, float] | None = None
@@ -192,6 +228,8 @@ class _Segment:
     whole: bool = True
     # Whether the view is of one literal part, set as a host's code block.
     literal: bool = False
+    # Whether the part is a ``Hosted`` one, drawn by the caller's host.
+    hosted: bool = False
 
 
 @dataclass
@@ -207,12 +245,15 @@ class _Entry:
     token: object = None
     parts: tuple[Part, ...] = ()
     segments: list[_Segment] = field(default_factory=list)
-    # A markdown part's blocks, by its text, its demotion and whether its
-    # fenced diffs were dressed for a diff view: a part that only changed its
-    # ink is not read again.
-    read: dict[tuple[str, int, bool], tuple[Any, ...]] = field(default_factory=dict)
+    # A markdown part's blocks, by its text, its demotion, whether its fenced
+    # diffs were dressed for a diff view and whether it has an ink of its own:
+    # a part that only changed its ink for another is not read again.
+    read: dict[tuple[str, int, bool, bool], tuple[Any, ...]] = field(default_factory=dict)
     # The pptmstr palette the parts' inks were resolved in.
     inked: object = None
+    # The blocks left plain when they were last inked, the frame's lexing
+    # being spent (``_Lexing``): each one's segment and its block's index.
+    pending: list[tuple[_Segment, int]] = field(default_factory=list)
     # The height claimed when it was last drawn, and the frame that was.
     height: float | None = None
     frame: int = -1
@@ -228,6 +269,9 @@ class _Entry:
     apart: bool = False
     # Whether a literal part may be set by the library (``document``).
     literal: bool = False
+    # Whether the call draws everything in one ink (``markdown``'s ``ink``): no
+    # fence is then coloured by token or told it is too long to be.
+    bare: bool = False
     # Source lines handed over that the last draw did not put on screen: all of
     # them when the library stopped inside it or set less than all of them,
     # none otherwise.
@@ -447,29 +491,79 @@ class _Captioned:
     A stream view reads its blocks from its stream, so this stands between the
     two. A block that is the object it was is answered with the object it was
     answered with, which is how the view finds the first block that changed.
+    ``plain`` is whether the stream is drawn in an ink of its own, so that its
+    fences are never coloured and are not told they are too long; the stream
+    sets it before the view reads its blocks.
+
+    ``hosting`` is whether an honest diff fence is left for the diff view, as
+    ``_open`` leaves one in a settled document; the stream sets it once it is
+    closed (``Stream._ink``). Such a fence can be two blocks here, its header
+    lines and the fence, so what the view reads beside the blocks is answered
+    for these blocks and not the stream's: ``committed`` is as many of them as
+    stand for the stream's committed ones, ``sources`` has ``None`` for each
+    block that is not the stream's own (the diff fences then read the fence
+    from its block, as in a document, which has no source map), and
+    ``revision`` changes with ``hosting`` as well, because the view reads the
+    blocks again only when it changed.
     """
 
     def __init__(self, stream: Any) -> None:
         self._stream = stream
-        self._made: dict[int, tuple[Any, Any]] = {}
+        self._made: dict[int, tuple[Any, bool, bool, tuple[Any, ...]]] = {}
+        # The blocks last answered, the index of the stream's block each stands
+        # for, and whether each has that block's source.
+        self._out: tuple[Any, ...] = ()
+        self._from: list[int] = []
+        self._own: list[bool] = []
+        self.plain = False
+        self.hosting = False
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._stream, name)
 
     @property
+    def revision(self) -> Any:
+        return (self._stream.revision, self.hosting)
+
+    @property
     def blocks(self) -> tuple[Any, ...]:
-        made: dict[int, tuple[Any, Any]] = {}
+        made: dict[int, tuple[Any, bool, bool, tuple[Any, ...]]] = {}
         out: list[Any] = []
-        for block in self._stream.blocks:
-            if getattr(block, "language", ""):
-                held = self._made.get(id(block))
-                if held is None or held[0] is not block:
-                    held = (block, _captioned((block,))[0])
-                made[id(block)] = held
-                block = held[1]
-            out.append(block)
+        came: list[int] = []
+        own: list[bool] = []
+        plain, hosting = self.plain, self.hosting
+        for at, block in enumerate(self._stream.blocks):
+            if not getattr(block, "language", ""):
+                out.append(block)
+                came.append(at)
+                own.append(True)
+                continue
+            held = self._made.get(id(block))
+            if held is None or held[0] is not block or held[1:3] != (plain, hosting):
+                held = (block, plain, hosting, _captioned((block,), hosting, plain=plain))
+            made[id(block)] = held
+            answer = held[3]
+            out += answer
+            came += [at] * len(answer)
+            mine = len(answer) == 1 and answer[0].language != _HOSTED_INFO
+            own += [mine] * len(answer)
         self._made = made
-        return tuple(out)
+        self._out, self._from, self._own = tuple(out), came, own
+        return self._out
+
+    @property
+    def committed(self) -> tuple[Any, ...]:
+        done = len(self._stream.committed)
+        count = sum(1 for at in self._from if at < done)
+        return self._out[:count]
+
+    @property
+    def sources(self) -> tuple[Any, ...]:
+        theirs = tuple(getattr(self._stream, "sources", ()))
+        return tuple(
+            theirs[at] if mine and at < len(theirs) else None
+            for at, mine in zip(self._from, self._own, strict=True)
+        )
 
 
 class Stream:
@@ -494,14 +588,16 @@ class Stream:
         self._text = ""
         self._closed = False
         self._source: Any = None
+        self._captioned: _Captioned | None = None
         self._view: Any = None
         # How much of the text the library's stream has been given, and whether
         # it has been told the text ended.
         self._fed = 0
         self._ended = False
-        # The view's revision and pptmstr's theme the fences' info strings were
-        # last inked for.
-        self._inked: tuple[int, object] | None = None
+        # The view's revision, pptmstr's theme, the ink it was drawn in and
+        # how many blocks were committed when the fences were last inked, or
+        # ``None`` when a fence was left plain for a later frame (``_Lexing``).
+        self._inked: tuple[int, object, int | None, int] | None = None
         # What the library said when it set less of the text than it was fed.
         self._unset: str | None = None
 
@@ -570,7 +666,7 @@ class Stream:
         """
         if self._view is not None:
             self._view.close()
-        self._source = self._view = None
+        self._source = self._view = self._captioned = None
         self._fed = 0
         self._ended = False
         self._inked = None
@@ -589,8 +685,9 @@ class Stream:
             theme, palette = themes.document_theme(), themes.palette()
             with _MAKING:
                 self._source = MarkdownStream(theme)
+                self._captioned = _Captioned(self._source)
                 self._view = TypesetStreamView(
-                    _Captioned(self._source), palette=palette, follow=self._follow
+                    self._captioned, palette=palette, follow=self._follow
                 )
             self._entry.segments = [_Segment((), self._view)]
         if self._fed < len(self._text):
@@ -603,32 +700,80 @@ class Stream:
                 self._source.close()
             self._ended = True
 
-    def _ink(self) -> None:
+    def _ink(self, ink: Color | None, frame: int) -> None:
         """
-        Tell each fence's info string from its code by ink, as ``_ink`` does
-        for a settled view. Again whenever the blocks changed: the library
-        drops the inks of a block an edit replaced.
+        Tell each fence's info string from its code by ink, and colour the
+        code by token, as ``_ink`` does for a settled view. Again whenever the
+        blocks changed: the library drops the inks of a block an edit replaced.
+
+        A fence is coloured by token once the stream has committed it, which
+        the library does once its closing line ends or the stream is closed,
+        and until then only its caption is: the block being written is
+        replaced at every arrival, and lexing it whole each time costs a frame
+        its length allows (500 lines of Python: about 30 ms a lex, measured
+        2026-10-15). A closing line that has not ended is not taken as one:
+        ``"```"`` inside an open fence is as often the start of
+        ``"```python"`` still arriving. So a message that ends on its fence's
+        closing marks, with no line end after them, has that fence coloured
+        once its run is over and set as a settled document, and not before.
+        A stream drawn in an ink of its own is not coloured by token
+        (``syntax``). A fence the frame's lexing budget is spent for is left
+        plain and coloured on a later frame (``_Lexing``).
+
+        **A closed stream hosts an honest diff fence** as a settled document
+        does (``_open``, ``diffs.adopted``): nothing more will arrive, so the
+        fence will not turn back into code under its reader, which is why an
+        open stream does not host one. The text a stream is closed on is the
+        text its turn settled on, so the fence is drawn as the settled
+        document of that text draws it, in this view and with no other drawn
+        in its place, its warnings in the warn ink (``_Warned``) as well.
         """
+        from . import diffs
+
         view = self._view
+        captioned = self._captioned
+        if captioned is not None:
+            captioned.plain = ink is not None
+            captioned.hosting = self._closed and diffs.adopted()
+            with _HANDING:
+                view.host_for = _fences() if captioned.hosting else None
         with _HANDING:
             view.sync()
             revision = view.revision
-        now = (revision, ui_theme.current())
+        with _ASKING:
+            done = len(self._source.committed if captioned is None else captioned.committed)
+        now = (revision, ui_theme.current(), None if ink is None else ink.u32, done)
         if self._inked == now:
             return
-        self._inked = now
         with _ASKING:
             blocks = tuple(view.blocks)
+            texts = [str(text) for text in view.texts]
+            hosted = set(view.hosts)
         captions = {
-            at: len(said)
+            at: _caption_length(block)
             for at, block in enumerate(blocks)
             if (said := getattr(block, "language", ""))
+            and said != _HOSTED_INFO
+            and at not in hosted
         }
         self._entry.segments[0].captions = captions
-        accent = ui_theme.P.accent.u32
-        for block, said in captions.items():
+        warned = self._entry.segments[0].warned = _warned_lengths(blocks)
+        for block, length in warned.items():
             with _INKING:
-                view.set_colours(block, [(0, said, accent)])
+                view.set_colours(block, _warned((), length))
+        accent = ui_theme.P.accent.u32
+        inks = None if ink is not None else themes.syntax_inks()
+        deferred = False
+        for block, said in captions.items():
+            spans = _LEXING.spans(
+                frame, texts[block], said, accent, None, inks if block < done else None
+            )
+            if spans is None:
+                deferred = True
+                spans = syntax.block_spans(texts[block], said, accent, None, None)
+            with _INKING:
+                view.set_colours(block, spans)
+        self._inked = None if deferred else now
 
     def draw(self, *, width: float | None = None, ink: Color | None = None) -> float:
         """
@@ -646,7 +791,7 @@ class Stream:
         try:
             noted = gate.noted()
             self._catch_up()
-            self._ink()
+            self._ink(ink, frame)
             _show_view(im, entry.segments[0], _width(im, width), themes.palette(ink), None)
             self._unset = _short(entry, noted) or self._unset
             entry.missing = 0
@@ -732,7 +877,7 @@ def _open(entry: _Entry, parts: tuple[Part, ...], on_link: Callable[[str], None]
         if segment.view is not None and not segment.literal
     ]
     kept_literal = [segment.view for segment in entry.segments if segment.literal]
-    read: dict[tuple[str, int, bool], tuple[Any, ...]] = {}
+    read: dict[tuple[str, int, bool, bool], tuple[Any, ...]] = {}
     segments: list[_Segment] = []
     run: list[int] = []
 
@@ -743,13 +888,14 @@ def _open(entry: _Entry, parts: tuple[Part, ...], on_link: Callable[[str], None]
         owner: list[int] = []
         for index in run:
             part = parts[index]
-            key = (part.text, part.demote, hosting)
+            plain = part.colour is not None or entry.bare
+            key = (part.text, part.demote, hosting, plain)
             made = read.get(key, entry.read.get(key))
             if made is None:
                 theme = themes.demoted(part.demote)
                 with _READING:
                     parsed = gate.read(part.text, theme).blocks
-                made = _captioned(parsed, hosting)
+                made = _captioned(parsed, hosting, plain=plain)
             read[key] = made
             blocks += made
             owner += [index] * len(made)
@@ -764,11 +910,13 @@ def _open(entry: _Entry, parts: tuple[Part, ...], on_link: Callable[[str], None]
             view.host_for = fences
             view.set_document(tuple(blocks))
         captions = {
-            at: len(said)
+            at: _caption_length(block)
             for at, block in enumerate(blocks)
             if (said := getattr(block, "language", "")) and said != _HOSTED_INFO
         }
-        segments.append(_Segment(tuple(run), view, tuple(owner), captions))
+        segment = _Segment(tuple(run), view, tuple(owner), captions)
+        segment.warned = _warned_lengths(blocks)
+        segments.append(segment)
         run.clear()
 
     for index, part in enumerate(parts):
@@ -780,7 +928,9 @@ def _open(entry: _Entry, parts: tuple[Part, ...], on_link: Callable[[str], None]
             run.append(index)
         else:
             close_run()
-            if entry.literal and literal_unfit(part) is None:
+            if isinstance(part, Hosted):
+                segments.append(_Segment((index,), hosted=True))
+            elif entry.literal and literal_unfit(part) is None:
                 segments.append(_literal_segment(index, part, kept_literal))
             else:
                 segments.append(_Segment((index,)))
@@ -789,6 +939,7 @@ def _open(entry: _Entry, parts: tuple[Part, ...], on_link: Callable[[str], None]
     entry.segments = segments
     entry.read = read
     entry.inked = None
+    entry.pending = []
     entry.natural = None
     entry.unset = None
     entry.written = ()
@@ -951,28 +1102,37 @@ def _as_written(entry: _Entry, why: str) -> None:
         for part in entry.parts
     )
     entry.segments = [
-        _Segment((index,)) for index, part in enumerate(entry.parts) if part.text.strip()
+        _Segment((index,), hosted=isinstance(part, Hosted))
+        for index, part in enumerate(entry.parts)
+        if part.text.strip()
     ]
     entry.read = {}
+    entry.pending = []
     entry.natural = None
     entry.shown = None
 
 
-def _captioned(blocks: Sequence[Any], hosting: bool = False) -> tuple[Any, ...]:
+def _captioned(
+    blocks: Sequence[Any], hosting: bool = False, *, plain: bool = False
+) -> tuple[Any, ...]:
     """
     The blocks with each fence's info string set as the first line of its code.
 
     The library keeps what follows a fence's opening marks on the block and
     draws none of it. ``python IMPORTANT also delete tests`` is text somebody
     wrote for a reader, so all of it is set. The block keeps the string where
-    the library put it as well.
+    the library put it as well. A fence too long to colour by token says so
+    after it (``syntax.too_long``), in the caption's ink, unless ``plain``:
+    its part has an ink of its own, so it is never coloured at any length.
 
     ``hosting``, a fence that is an honest diff (``diffs.fence_diff``) keeps the
     text the library read and is marked for the diff view that will draw it
     (``_HOSTED_INFO``, ``_Fences``): its info string was the one word that
     says so. The lines the view draws as header rows go above it as a code
     block of their own, which the library breaks at the measure where the view
-    would cut them at its edge.
+    would cut them at its edge, led by the fence's warnings
+    (``diffs.fence_warnings``), which that block's info string marks for the
+    warn ink (``_Warned``).
     """
     from . import diffs
 
@@ -981,14 +1141,25 @@ def _captioned(blocks: Sequence[Any], hosting: bool = False) -> tuple[Any, ...]:
         said = getattr(block, "language", "")
         if not said:
             out.append(block)
-        elif hosting and diffs.fence_diff(said, block.text) is not None:
-            headers = diffs.fence_headers(block.text)
+        elif hosting and (model := diffs.fence_diff(said, block.text)) is not None:
+            warnings = diffs.fence_warnings(block.text, model)
+            headers = (*warnings, *diffs.fence_header_rows(block.text))
             if headers:
-                out.append(replace(block, text="\n".join(headers), language=""))
+                warned = _Warned(len("\n".join(warnings)))
+                out.append(replace(block, text="\n".join(headers), language=warned))
             out.append(replace(block, language=_HOSTED_INFO))
         else:
-            out.append(replace(block, text=f"{said}\n{block.text}"))
+            note = "" if plain or not syntax.too_long(said, block.text) else syntax.TOO_LONG
+            out.append(replace(block, text=f"{said}{note}\n{block.text}"))
     return tuple(out)
+
+
+def _caption_length(block: Any) -> int:
+    """
+    How many characters of a block ``_captioned`` captioned its caption is: its
+    first line, the info string and any note after it (``syntax.TOO_LONG``).
+    """
+    return len(block.text.partition("\n")[0])
 
 
 _HOSTED_INFO = "diff \u2063hosted"
@@ -1002,6 +1173,59 @@ library's own fences accept. A fence somebody opened with this very string is
 two words to ``is_diff_fence``, so it is captioned, and then every line of it
 and its info string are on screen whichever of the two draws it.
 """
+
+
+class _Warned(str):
+    """
+    The info string ``_captioned`` gives the block of lines it sets above a
+    hosted diff: empty, as a block that names no language has, so nothing
+    captions it and the library counts it as such; and carrying ``length``,
+    how many of the block's first characters are its warnings
+    (``diffs.fence_warnings``), which are drawn in the theme's warn ink
+    (``_warned``) wherever the block is inked.
+
+    On the info string because the block is the library's frozen
+    ``MarkdownCode``, and it is the block, held as it is in a document's
+    reading and in a stream's (``_Captioned``), that both inkers are handed.
+    A subclass and not a word, as ``_HOSTED_INFO`` is: the library's reader
+    gives every fence a plain ``str``, so no fence can be written that is
+    taken for one.
+    """
+
+    length: int
+
+    def __new__(cls, length: int) -> _Warned:
+        made = super().__new__(cls, "")
+        made.length = length
+        return made
+
+
+def _warned_lengths(blocks: Sequence[Any]) -> dict[int, int]:
+    """
+    For each block ``_captioned`` led with warnings, how many characters of it
+    they are: what ``_warned`` is handed for that block.
+    """
+    return {
+        at: said.length
+        for at, block in enumerate(blocks)
+        if isinstance(said := getattr(block, "language", None), _Warned) and said.length
+    }
+
+
+def _warned(spans: Sequence[syntax.Span], length: int | None) -> tuple[syntax.Span, ...]:
+    """
+    A block's spans with its first ``length`` characters in the warn ink, over
+    whatever ink they had: the warnings that lead the lines set above a hosted
+    diff (``_Warned``). The spans as they were where ``length`` is none.
+    """
+    if not length:
+        return tuple(spans)
+    out: list[syntax.Span] = [(0, length, ui_theme.P.warn.u32)]
+    for start, end, ink in spans:
+        start = max(start, length)
+        if end > start:
+            out.append((start, end, ink))
+    return tuple(out)
 
 
 class _Fences:
@@ -1064,38 +1288,113 @@ def _fences() -> _Fences:
     return _FENCES[0]
 
 
-def _ink(entry: _Entry) -> None:
+def _ink(entry: _Entry, frame: int) -> None:
     """
     Lay each coloured part's ink over its blocks, in the theme that is live.
 
     The library drops the inks of a block an edit replaced and keeps the rest,
-    so every view is inked whole whenever its parts or the theme changed.
+    so every view is inked whole whenever its parts or the theme changed. A
+    block the frame's lexing budget is spent for is left plain and kept in
+    ``entry.pending``; a later frame inks those alone, so a document of many
+    fences is coloured over a few frames and each is lexed once. An entry drawn
+    in one ink (``_Entry.bare``) colours no token. The warnings set above a
+    hosted diff are in the warn ink whatever the part's ink (``_Warned``).
     """
-    for segment in entry.segments:
+    current = ui_theme.current()
+    accent = ui_theme.P.accent.u32
+    inks = None if entry.bare else themes.syntax_inks()
+    work: list[tuple[_Segment, set[int] | None]]
+    if entry.inked is not current:
+        work = [(segment, None) for segment in entry.segments]
+    else:
+        left: dict[int, set[int]] = {}
+        for segment, block in entry.pending:
+            left.setdefault(id(segment), set()).add(block)
+        work = [(segment, left[id(segment)]) for segment in entry.segments if id(segment) in left]
+    pending: list[tuple[_Segment, int]] = []
+    for segment, only in work:
         view = segment.view
         if view is None:
             continue
         with _INKING:
-            view.clear_colours()
-            lengths = [len(text) for text in view.texts]
+            if only is None:
+                view.clear_colours()
+            texts = [str(text) for text in view.texts]
             hosted = set(view.hosts)
         for block, index in enumerate(segment.owner):
             if block in hosted:
                 # A diff view's inks are its own.
                 continue
+            if only is not None and block not in only:
+                continue
             ink = _colour(entry.parts[index].colour)
             if ink is None and segment.literal:
                 # The text's own ink, as ImGui draws it, and not the code role's.
                 ink = ui_theme.P.text
-            # A fence's info string is told from its code by ink.
+            # A fence's info string is told from its code by ink, and the code
+            # coloured by token where it names its language (``syntax``).
             said = segment.captions.get(block, 0)
-            spans = [(0, said, ui_theme.P.accent.u32)] if said else []
-            if ink is not None and lengths[block] > said:
-                spans.append((said, lengths[block], ink.u32))
+            own = None if ink is None else ink.u32
+            spans = _LEXING.spans(frame, texts[block], said, accent, own, inks)
+            if spans is None:
+                pending.append((segment, block))
+                if only is not None:
+                    continue
+                spans = syntax.block_spans(texts[block], said, accent, own, None)
+            spans = _warned(spans, segment.warned.get(block))
             if spans:
                 with _INKING:
                     view.set_colours(block, spans)
-    entry.inked = ui_theme.current()
+    entry.pending = pending
+    entry.inked = current
+
+
+class _Lexing:
+    """
+    How long a frame has spent lexing, across every view it inks, and the
+    budget past which a block that would be lexed is left plain for a later
+    frame. A lex is not cut short: a frame spends at most the budget and the
+    one lex that crossed it, and a block is at most ``syntax.BOUND``
+    characters, some 150 ms of the slowest lexer measured. The budget is half
+    a 60 Hz frame, the most a frame can give away and still be drawn on time
+    with the rest of the window's work; a fence of a few hundred lines is
+    some 10 ms, so most frames colour one or two fences each.
+    """
+
+    BUDGET = 0.008
+
+    def __init__(self) -> None:
+        self.frame = -1
+        self.spent = 0.0
+        self.clock: Callable[[], float] = time.perf_counter
+
+    def spans(
+        self,
+        frame: int,
+        text: str,
+        said: int,
+        accent: int,
+        ink: int | None,
+        inks: themes.SyntaxInks | None,
+    ) -> tuple[syntax.Span, ...] | None:
+        """
+        ``syntax.block_spans``, or ``None`` where it would lex and this frame
+        has spent its budget.
+        """
+        if not syntax.needs_lex(text, said, ink, inks, accent=accent):
+            return syntax.block_spans(text, said, accent, ink, inks)
+        if frame != self.frame:
+            self.frame, self.spent = frame, 0.0
+        if self.spent >= self.BUDGET:
+            return None
+        began = self.clock()
+        try:
+            return syntax.block_spans(text, said, accent, ink, inks)
+        finally:
+            self.spent += self.clock() - began
+
+
+_LEXING = _Lexing()
 
 
 @contextmanager
@@ -1141,7 +1440,12 @@ def _native(im: Any, part: Part, wide: float) -> None:
 
 
 def _show(
-    im: Any, entry: _Entry, wide: float, palette: Any, on_link: Callable[[str], None] | None
+    im: Any,
+    entry: _Entry,
+    wide: float,
+    palette: Any,
+    on_link: Callable[[str], None] | None,
+    host: Host | None = None,
 ) -> float:
     """
     Draw every part at the cursor. Returns where the last of them ended, in
@@ -1153,7 +1457,14 @@ def _show(
     for segment in entry.segments:
         top = float(im.get_cursor_screen_pos().y)
         if segment.view is None:
-            _native(im, (entry.written or entry.parts)[segment.parts[0]], wide)
+            index = segment.parts[0]
+            part = (entry.written or entry.parts)[index]
+            drew = host(index, part) if segment.hosted and host is not None else False
+            if drew is None:
+                segment.band = (top, top)
+                continue
+            if not drew:
+                _native(im, part, wide)
             foot = float(im.get_item_rect_max().y)
             right = max(right, float(im.get_item_rect_max().x - at.x))
         else:
@@ -1317,6 +1628,7 @@ def _capped(
     cap: float,
     palette: Any,
     on_link: Callable[[str], None] | None,
+    host: Host | None = None,
 ) -> None:
     """
     The parts in a child as tall as they are, up to ``cap``, which scrolls past it.
@@ -1337,7 +1649,7 @@ def _capped(
     )
     try:
         top = float(im.get_cursor_screen_pos().y)
-        content = _show(im, entry, inner, palette, on_link) - top
+        content = _show(im, entry, inner, palette, on_link, host) - top
         if im.get_scroll_max_x() > 0.0:
             # A scrollbar along the bottom takes its height out of the child.
             content += style.scrollbar_size
@@ -1359,6 +1671,7 @@ def _draw(
     rests: bool = False,
     apart: bool = False,
     literal: bool = False,
+    host: Host | None = None,
 ) -> float:
     """
     Draw what is held under ``key`` for ``parts``, building what changed. The
@@ -1379,21 +1692,23 @@ def _draw(
         if rests and same and height_cap is None and _rest(im, entry, wide):
             return float(entry.height or 0.0)
         noted = gate.noted()
-        if not same:
+        bare = ink is not None
+        if not same or entry.bare is not bare:
             given = parts if isinstance(parts, tuple) else tuple(parts)
-            if given != entry.parts:
+            if given != entry.parts or entry.bare is not bare:
                 entry.apart = apart
                 entry.literal = literal
+                entry.bare = bare
                 _open(entry, given, on_link)
             entry.token = given
-        if entry.inked is not ui_theme.current():
-            _ink(entry)
+        if entry.inked is not ui_theme.current() or entry.pending:
+            _ink(entry, frame)
         if entry.unset is not None:
             _said(im, f"typeset: the library {entry.unset} - shown as written", ui_theme.P.warn)
         if height_cap is None:
-            _show(im, entry, wide, themes.palette(ink), on_link)
+            _show(im, entry, wide, themes.palette(ink), on_link, host)
         else:
-            _capped(im, key, entry, wide, height_cap, themes.palette(ink), on_link)
+            _capped(im, key, entry, wide, height_cap, themes.palette(ink), on_link, host)
         entry.missing = 0
         short = None if entry.unset is not None else _short(entry, noted)
         if short is not None:
@@ -1434,7 +1749,9 @@ def markdown(
 
     ``height_cap`` puts a document taller than it in a scrolling child of that
     height; a shorter one takes only its own. ``ink`` draws everything in one
-    colour. ``demote`` sets headings that many levels down (``Part.demote``).
+    colour: no fence's code is coloured by token or told it is too long to be,
+    and a fence's info string keeps its accent, as in a stream drawn in an ink
+    (``Stream.draw``). ``demote`` sets headings that many levels down (``Part.demote``).
     ``on_link`` is called with a link's destination on a click.
     """
     return _draw(
@@ -1460,6 +1777,7 @@ def document(
     rests: bool = False,
     apart: bool = False,
     literal: bool = False,
+    host: Host | None = None,
 ) -> float:
     """
     Several parts in sequence under one key, each read its own way and in its own
@@ -1498,6 +1816,11 @@ def document(
     and no role brings it**: an approval's arguments are literal parts of the
     same roles and do not ask (the module docstring). Taken when the parts are
     read, as ``apart`` is.
+
+    ``host`` draws each ``Hosted`` part where it falls (``Host``). It is asked
+    in every draw that is not a rest, so what it draws can change from frame to
+    frame with the parts unchanged; a resting document claims the room the
+    host's drawing took when it was last drawn.
     """
     return _draw(
         cache,
@@ -1510,6 +1833,7 @@ def document(
         rests=rests,
         apart=apart,
         literal=literal,
+        host=host,
     )
 
 

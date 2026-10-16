@@ -250,7 +250,10 @@ Each item is open. Where reading settled a sub-question it says so and leaves th
 
 The brief is recoverable only if cwd and session id are both unchanged: `brief.session_dir`
 (l.115) is `<root>/<cwd-slug>/briefs/<session-id>/`. `2026-08-22` D8 states it; `2026-08-31` D6
-relies on it.
+relies on it. **Changed 2026-10-15:** a brief is `<config>/briefs/<session-id>/`, so only the
+session id has to be unchanged; a brief written before then is still found only from the cwd it
+was written under
+([`archive/2026-10-15-a-brief-is-keyed-by-its-session.md`](archive/2026-10-15-a-brief-is-keyed-by-its-session.md)).
 
 **The picker launches with the launcher's cwd field, not the row's recorded cwd. Confirmed by
 reading.** `LauncherState.spec` resolves `self.cwd` (l.786); `SessionPicker.select` (l.309) takes
