@@ -624,16 +624,25 @@ def _session_file_rows(looked: Looked | None) -> list[Row]:
 
 
 def _board_rows(
-    session_id: str, logging: board_pane.Logging | None, looked: Looked | None
+    snap: Snapshot,
+    rec: AgentRecord,
+    logging: board_pane.Logging | None,
+    looked: Looked | None,
 ) -> list[Row]:
     """
-    Where the board log is and whether it is being written: the state the board
-    pane's own line is drawn from, through the function that words it.
+    Where the board log is, what was restored from it and whether it is being
+    written: the state the board pane's own lines are drawn from, through the
+    functions that word them (``board_pane.restore_line``, ``recording_line``).
+
+    This is where the routine account lives -- restored whole, recorded in a
+    directory, switched off by choice. The board pane draws only the lines among
+    them that are alarms, and draws those above its rows as well.
 
     The directory is the one this window opened for the session, and otherwise
     where a log for it goes (``sessionfile.board_dir``, read at the click). A
     legacy directory that still holds records of it is a row of its own.
     """
+    session_id = rec.node_id[0]
     entry = None if logging is None else logging.sessions.get(session_id)
     if entry is not None and entry.directory:
         directory = _known("board log", entry.directory)
@@ -661,6 +670,9 @@ def _board_rows(
                 ),
             )
         )
+    restored = _restore_row(snap, rec, entry)
+    if restored is not None:
+        rows.append(restored)
     if logging is None:
         rows.append(_unknown("board recording", "this window was told nothing about board logs"))
         return rows
@@ -670,6 +682,27 @@ def _board_rows(
     else:
         rows.append(_stated("board recording", line.text))
     return rows
+
+
+def _restore_row(snap: Snapshot, rec: AgentRecord, entry: board_pane.LogState | None) -> Row | None:
+    """
+    Whether this session's board came out of its log, and what came back.
+
+    None for a live session nothing was restored for, which is every session
+    that was launched rather than resumed: a row saying so on each of them is
+    height in a modal that already reaches the bottom of a laptop screen. A
+    recalled session's log is not read until it is resumed, and one whose
+    restore is still being applied has no answer yet: both are "not known".
+    """
+    session_id = rec.node_id[0]
+    line = board_pane.restore_line(snap.restores.get(session_id), entry, snap.off_fleet)
+    if line is not None:
+        return _stated("board restore", line.text)
+    if rec.recalled is not None:
+        return _unknown("board restore", "its log is read when the session is resumed")
+    if entry is not None and entry.awaiting:
+        return _unknown("board restore", "a restore of its log is still being applied")
+    return None
 
 
 def view(
@@ -777,7 +810,7 @@ def _session_view(
     else:
         files.append(_stated("brief", "none", "launched with only its task"))
     files += _session_file_rows(looked)
-    files += _board_rows(session_id, logging, looked)
+    files += _board_rows(snap, rec, logging, looked)
 
     return View(
         title=flat_line(rec.task),

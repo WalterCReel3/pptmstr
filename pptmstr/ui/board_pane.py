@@ -48,11 +48,20 @@ operator's choice for the launch and is not read back out of the session, and it
 restored claims still occupy their ids and their holders. Those are drawn, under a
 line that says why there is a board here at all.
 
-**What the board's log can and cannot vouch for is said above the rows**, one line
-each (``restore_line``, ``recording_line``): that this board came out of a log and
-what the log held that the board does not, and whether what happens to it now is
-being written down. The shell knows the second and hands it over as a ``Logging``;
-this module reads no file.
+**What the board's log cannot vouch for is said above the rows** (``restore_line``,
+``recording_line``): a log that held more than this board shows, or a board whose
+changes are not being written down. Only those -- a ``Tone.ALARM`` line -- take the
+room above the scroll. The routine account (restored whole, recorded in a
+directory, recording switched off by choice) is in the session details modal,
+worded by the same two functions, so the header says something only when it is
+something the operator must not miss. The shell knows the recording state and
+hands it over as a ``Logging``; this module reads no file.
+
+**The rows can be filtered by where each one stands** (``RowKind``): open, held,
+waiting, done. Which kinds are hidden is this pane's view state, like a row's
+disclosure triangle, and the kind is derived from the row each frame. The summary
+counts the whole board whatever is hidden, and a line says how many rows the
+filter left when it left fewer than all of them.
 
 **Tasks and concerns, and nothing that is a reading of them.** The session's
 digest is the DIGEST pane's (``digest_pane``), which is docked with this one and
@@ -117,7 +126,7 @@ from __future__ import annotations
 import dataclasses
 import enum
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TypeVar, assert_never
 
@@ -224,6 +233,22 @@ _CONCERN_STATE_LABEL: dict[ConcernState, str] = {
     ConcernState.WITHDRAWN: "withdrawn",
 }
 
+
+class RowKind(enum.Enum):
+    """
+    Where a task row stands, as the board's filter names it (``row_kind``).
+
+    Four and not ``TaskState``'s three: a pending row that waits on another task
+    and one that can be claimed now are different rows to an operator, and the
+    difference is ``Task.is_claimable``, which is derived and never stored.
+    """
+
+    OPEN = "open"
+    HELD = "held"
+    WAITING = "waiting"
+    DONE = "done"
+
+
 # Only ever a row type from .board; named so bound_rows can serve both tables and
 # the id lists without three copies of the same slice.
 _T = TypeVar("_T")
@@ -267,6 +292,8 @@ class BoardState:
     # then shown and no longer a box, so what the second press sends is what the
     # first one was looking at.
     close_confirming: bool = False
+    # The kinds of row the operator has hidden. Empty is the whole board.
+    hidden: set[RowKind] = field(default_factory=set)
 
     def stop_closing(self) -> None:
         """
@@ -396,6 +423,13 @@ def draw(
         imgui.pop_text_wrap_pos()
     _summary(counts(rows))
     _log_lines(snap, logging, session_id)
+    # Read before the chips are drawn, so a press shows from the next frame and
+    # this one draws the rows the frame began with.
+    visible = filtered(rows, pane.hidden)
+    if rows:
+        _filter_chips(pane)
+        if len(visible) < len(rows):
+            imgui.text_colored(P.text_dim.vec4, showing_label(len(visible), len(rows)))
     # Drafts for tasks that have left the board keep no value and would otherwise
     # accumulate for the life of the process.
     _prune(pane, {r.id for r in rows})
@@ -409,10 +443,10 @@ def draw(
         imgui.push_text_wrap_pos(0.0)
         pane.shown = set()
         if typeset.enabled(typeset.Pane.BOARD):
-            _typeset_tasks(session_id, rows, {c.id: c for c in concerns}, pane, bridge)
+            _typeset_tasks(session_id, visible, {c.id: c for c in concerns}, pane, bridge)
             _typeset_concerns(session_id, concerns, pane)
         else:
-            _tasks(rows, {c.id: c for c in concerns}, pane, bridge)
+            _tasks(visible, {c.id: c for c in concerns}, pane, bridge)
             _concerns(concerns)
         _release(pane, snap, session_id)
         imgui.pop_text_wrap_pos()
@@ -467,19 +501,39 @@ def _summary(c: BoardCounts) -> None:
 
 def _log_lines(snap: Snapshot, logging: Logging | None, session_id: str) -> None:
     """
-    Where this board came from and whether it is being written down, above the
-    scroll for the reason ``_summary`` is: a line that says the rows below are
-    not the whole board must not be one the rows can scroll away.
+    What this board's log cannot vouch for, above the scroll for the reason
+    ``_summary`` is: a line that says the rows below are not the whole board, or
+    that what happens to them is not being kept, must not be one the rows can
+    scroll away. The routine lines are the session details modal's.
     """
-    state = None if logging is None else logging.sessions.get(session_id)
-    lines = [restore_line(snap.restores.get(session_id), state, snap.off_fleet)]
-    if logging is not None:
-        lines.append(recording_line(logging.off, state, logging.unread))
     imgui.push_text_wrap_pos(0.0)
-    for line in lines:
-        if line is not None:
+    for line in log_lines(snap, logging, session_id):
+        if line.tone is Tone.ALARM:
             imgui.text_colored(tone_colour(line.tone).vec4, line.text)
     imgui.pop_text_wrap_pos()
+
+
+def _filter_chips(pane: BoardState) -> None:
+    """
+    One toggle per ``RowKind``, on as many lines as the pane's width needs. A
+    hidden kind is drawn dim and without its frame.
+    """
+    padding = float(imgui.get_style().frame_padding.x)
+    right = float(imgui.get_cursor_screen_pos().x) + float(imgui.get_content_region_avail().x)
+    for at, kind in enumerate(RowKind):
+        if at:
+            imgui.same_line()
+            width = float(imgui.calc_text_size(kind.value).x) + 2 * padding
+            if float(imgui.get_cursor_screen_pos().x) + width > right:
+                imgui.new_line()
+        hidden = kind in pane.hidden
+        if hidden:
+            imgui.push_style_color(imgui.Col_.text, P.text_dim.vec4)
+            imgui.push_style_color(imgui.Col_.button, imgui.ImVec4(0.0, 0.0, 0.0, 0.0))
+        if imgui.small_button(f"{kind.value}##board-filter"):
+            pane.hidden ^= {kind}
+        if hidden:
+            imgui.pop_style_color(2)
 
 
 def _tasks(
@@ -1629,6 +1683,49 @@ def recording_line(
         " happens to this board from here will survive a restart",
         Tone.ALARM,
     )
+
+
+def log_lines(snap: Snapshot, logging: Logging | None, session_id: str) -> tuple[Line, ...]:
+    """
+    Every line about one session's board log, routine and alarm alike: whether it
+    was restored (``restore_line``) and whether it is recorded (``recording_line``,
+    only when ``logging`` was handed over).
+
+    The board header draws the ``Tone.ALARM`` ones and the session details modal
+    all of them, so the two cannot word one fact two ways.
+    """
+    state = None if logging is None else logging.sessions.get(session_id)
+    lines = [restore_line(snap.restores.get(session_id), state, snap.off_fleet)]
+    if logging is not None:
+        lines.append(recording_line(logging.off, state, logging.unread))
+    return tuple(line for line in lines if line is not None)
+
+
+def row_kind(row: BoardTask) -> RowKind:
+    """
+    Where a row stands for the filter. A pending row with nothing in
+    ``blocked_on`` is ``Task.is_claimable``: ``board_tasks`` fills that field
+    from ``Task.blocked_on``, which is what ``is_claimable`` is defined by.
+    """
+    match row.state:
+        case TaskState.COMPLETED:
+            return RowKind.DONE
+        case TaskState.CLAIMED:
+            return RowKind.HELD
+        case TaskState.PENDING:
+            return RowKind.WAITING if row.blocked_on else RowKind.OPEN
+        case _:  # pragma: no cover - mypy's exhaustiveness check, not a runtime path
+            assert_never(row.state)
+
+
+def filtered(rows: Sequence[BoardTask], hidden: Collection[RowKind]) -> tuple[BoardTask, ...]:
+    """The rows whose kind is not hidden, in board order."""
+    return tuple(r for r in rows if row_kind(r) not in hidden)
+
+
+def showing_label(shown: int, total: int) -> str:
+    """What the filter left, said only when it left fewer rows than the board has."""
+    return f"showing {shown} of {total}"
 
 
 def flat_task(row: BoardTask) -> BoardTask:

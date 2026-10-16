@@ -3362,3 +3362,214 @@ def test_a_row_says_the_same_things_and_offers_the_same_controls_under_either_re
     # Closing is offered on the row that is not finished, and only there.
     assert f"{board_pane.CLOSE}##close-{still.id}" in buttons
     assert f"{board_pane.CLOSE}##close-{done.id}" not in buttons
+
+
+# -- the header keeps only alarms (U8) ------------------------------------------------
+
+
+def _header_and_body(
+    monkeypatch,
+    snap: Snapshot,
+    logging: board_pane.Logging | None = None,
+    pane: board_pane.BoardState | None = None,
+    pressed: Collection[str] = (),
+) -> tuple[list[str], list[str]]:
+    """
+    What the pane drew above its scroll and what it drew inside it, split at the
+    ``##board`` child: text and tree-node labels, in order.
+    """
+    fake = MagicMock()
+    fake.tree_node_ex.return_value = False
+    fake.small_button.side_effect = lambda label, *a, **k: label in pressed
+    monkeypatch.setattr(board_pane, "imgui", fake)
+    monkeypatch.setattr(board_pane, "section", MagicMock())
+    board_pane.draw(
+        snap, at_root(snap), board_pane.BoardState() if pane is None else pane, Bridge(), logging
+    )
+    header: list[str] = []
+    body: list[str] = []
+    into = header
+    for name, args, _ in fake.mock_calls:
+        if name == "begin_child" and args and args[0] == "##board":
+            into = body
+        elif name == "text_colored":
+            into.append(str(args[1]))
+        elif name == "tree_node_ex":
+            into.append(str(args[0]))
+    return header, body
+
+
+def _restored(**fields: object) -> Snapshot:
+    return dataclasses.replace(
+        board_snapshot(_held()), restores=MappingProxyType({"s1": _restore(**fields)})
+    )
+
+
+def test_an_alarm_about_the_log_stays_above_the_scroll(monkeypatch) -> None:
+    """
+    The property the task must not break: a line saying the board shown is not
+    the whole board is drawn before the rows' child window begins.
+    """
+    snap = _restored(log_short=True, log_stray=1)
+    logging = board_pane.Logging(sessions={"s1": _log(unkept=2)})
+
+    header, body = _header_and_body(monkeypatch, snap, logging)
+
+    assert any("restored SHORT" in line for line in header)
+    assert any("will not be read back" in line for line in header)
+    assert not any("restored SHORT" in line or "read back" in line for line in body)
+
+
+@pytest.mark.parametrize(
+    "logging",
+    [
+        board_pane.Logging(sessions={"s1": _log()}),
+        board_pane.Logging(off="switched off: board_log in settings.json"),
+    ],
+)
+def test_a_routine_account_of_the_log_is_not_drawn_on_the_board(
+    monkeypatch, logging: board_pane.Logging
+) -> None:
+    header, body = _header_and_body(monkeypatch, _restored(), logging)
+    routine = board_pane.log_lines(_restored(), logging, "s1")
+
+    assert routine and all(line.tone is board_pane.Tone.PROSE for line in routine)
+    for line in routine:
+        assert line.text not in header + body
+
+
+def test_the_lines_about_the_log_are_one_derivation_for_both_surfaces() -> None:
+    """
+    ``log_lines`` is what the header filters and what Details reads through the same
+    two functions: each line is theirs, word for word, routine and alarm alike.
+    """
+    snap = _restored(log_short=True)
+    logging = board_pane.Logging(sessions={"s1": _log()})
+    lines = board_pane.log_lines(snap, logging, "s1")
+
+    assert lines == (
+        board_pane.restore_line(snap.restores["s1"], _log(), snap.off_fleet),
+        board_pane.recording_line(None, _log()),
+    )
+    assert [line.tone for line in lines] == [board_pane.Tone.ALARM, board_pane.Tone.PROSE]
+    assert board_pane.log_lines(board_snapshot(_held()), None, "s1") == ()
+
+
+# -- the state filter (U8) ------------------------------------------------------------
+
+
+def test_each_row_lands_in_the_kind_its_state_and_its_wait_say() -> None:
+    kind = board_pane.row_kind
+    assert kind(board_task()) is board_pane.RowKind.OPEN
+    assert kind(board_task(blocked_on=("t0",))) is board_pane.RowKind.WAITING
+    assert kind(board_task(state=TaskState.CLAIMED, owner="qa")) is board_pane.RowKind.HELD
+    assert kind(board_task(state=TaskState.COMPLETED)) is board_pane.RowKind.DONE
+
+
+def test_a_row_open_on_the_board_is_one_the_store_would_hand_out() -> None:
+    """
+    OPEN is ``Task.is_claimable`` read through the projection, not a second rule:
+    for every row of a board, the two agree.
+    """
+    snap = _filter_board()
+    for row in board_tasks(snap, "s1"):
+        claimable = snap.tasks[row.id].is_claimable(snap.tasks)
+        assert (board_pane.row_kind(row) is board_pane.RowKind.OPEN) is claimable, row.id
+
+
+def _filter_board() -> Snapshot:
+    return board_snapshot(
+        Task(id="t-open", title="open title", declared_at=1.0, declared_by=ROOT),
+        Task(
+            id="t-wait",
+            title="wait title",
+            depends_on=("t-held",),
+            declared_at=2.0,
+            declared_by=ROOT,
+        ),
+        Task(
+            id="t-held",
+            title="held title",
+            state=TaskState.CLAIMED,
+            claimed_by=ROOT,
+            declared_at=3.0,
+            declared_by=ROOT,
+        ),
+        Task(
+            id="t-done",
+            title="done title",
+            state=TaskState.COMPLETED,
+            claimed_by=ROOT,
+            declared_at=4.0,
+            declared_by=ROOT,
+        ),
+    )
+
+
+def _ids(drawn_lines: list[str]) -> set[str]:
+    return {line.split("###")[-1] for line in drawn_lines if "###" in line}
+
+
+def test_with_nothing_hidden_every_row_is_drawn_and_no_count_is_said(monkeypatch) -> None:
+    header, body = _header_and_body(monkeypatch, _filter_board())
+
+    assert _ids(body) == {"t-open", "t-wait", "t-held", "t-done"}
+    assert not any(line.startswith("showing ") for line in header)
+
+
+def test_a_hidden_kind_leaves_the_rows_and_the_summary_still_counts_them(monkeypatch) -> None:
+    snap = _filter_board()
+    pane = board_pane.BoardState(hidden={board_pane.RowKind.DONE, board_pane.RowKind.WAITING})
+
+    header, body = _header_and_body(monkeypatch, snap, pane=pane)
+
+    assert _ids(body) == {"t-open", "t-held"}
+    whole = board_pane.summary_label(board_pane.counts(board_tasks(snap, "s1")))
+    assert whole == "4 task(s) · 2 pending · 1 claimed · 1 done"
+    assert whole in header
+    assert "showing 2 of 4" in header
+
+
+def test_pressing_a_chip_hides_its_kind_from_the_next_frame(monkeypatch) -> None:
+    snap = _filter_board()
+    pane = board_pane.BoardState()
+
+    _, pressed_on = _header_and_body(monkeypatch, snap, pane=pane, pressed={"done##board-filter"})
+    assert pane.hidden == {board_pane.RowKind.DONE}
+    assert "t-done" in _ids(pressed_on), "the frame draws the rows it began with"
+
+    _, after = _header_and_body(monkeypatch, snap, pane=pane)
+    assert _ids(after) == {"t-open", "t-wait", "t-held"}
+
+    _header_and_body(monkeypatch, snap, pane=pane, pressed={"done##board-filter"})
+    assert pane.hidden == set(), "a second press shows it again"
+
+
+def test_the_filter_hides_no_concern(monkeypatch) -> None:
+    snap = board_snapshot(
+        Task(id="t1", title="x", state=TaskState.COMPLETED, declared_by=ROOT),
+        concerns=(concern("c1", subject="about the done one", task_id="t1"),),
+    )
+    pane = board_pane.BoardState(hidden=set(board_pane.RowKind))
+
+    _, body = _header_and_body(monkeypatch, snap, pane=pane)
+
+    assert _ids(body) == set()
+    assert any("->" in line for line in body)
+
+
+def test_the_typeset_board_honours_the_filter_and_counts_the_whole_board(
+    frames: Frames,
+) -> None:
+    snap = _filter_board()
+    frames.pane.hidden = {board_pane.RowKind.HELD}
+
+    strings = frames.draw(snap)
+
+    assert "held title" not in strings
+    assert {"open title", "wait title", "done title"} <= set(strings)
+    assert "4 task(s) · 2 pending · 1 claimed · 1 done" in strings
+    assert "showing 3 of 4" in strings
+
+    frames.pane.hidden = set()
+    assert "held title" in frames.draw(snap)

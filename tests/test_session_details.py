@@ -1422,3 +1422,60 @@ def test_a_title_that_is_only_a_label_is_not_shown_as_the_sessions_task() -> Non
     for store in (_store(), _closed(dataclasses.replace(_FULL, task_recorded=True)), _closed()):
         plain = _see(store)
         assert plain.row("title") is None and _row(plain, "task").note == ""
+
+
+# -- the board's routine provenance lives here (U8) ------------------------------------
+
+
+def _restored_view(restore: object, logging: board_pane.Logging | None) -> View:
+    snap = dataclasses.replace(
+        _store().snapshot(), restores={"s1": restore}  # type: ignore[dict-item]
+    )
+    shown = session_details.view(
+        snap, ROOT, held=None, looked=None, logging=logging, now=NOW, wall_now=WALL
+    )
+    assert shown is not None
+    return shown
+
+
+@pytest.mark.parametrize("short", [False, True])
+def test_the_restore_row_is_the_board_panes_own_line_routine_or_alarm(short: bool) -> None:
+    """
+    The board header no longer draws a whole restore; this row is where it is read,
+    in the words ``restore_line`` gives it -- and an alarm, which the header still
+    draws, is here as well.
+    """
+    from pptmstr.model import Restore
+
+    restore = Restore(session_id="s1", at=5.0, tasks=2, concerns=1, log_short=short)
+    entry = board_pane.LogState(directory="/logs/s1", newest=WALL - 60.0)
+    logging = board_pane.Logging(sessions={"s1": entry})
+
+    shown = _restored_view(restore, logging)
+    line = board_pane.restore_line(restore, entry)
+
+    assert line is not None
+    assert line.tone is (board_pane.Tone.ALARM if short else board_pane.Tone.PROSE)
+    assert _row(shown, "board restore") == Row("board restore", line.text)
+    recorded = board_pane.recording_line(None, entry)
+    assert recorded is not None
+    assert _row(shown, "board recording").value == recorded.text
+
+
+def test_a_launched_session_nothing_was_restored_for_has_no_restore_row() -> None:
+    assert _see(_store()).row("board restore") is None
+
+
+def test_a_restore_still_being_applied_claims_no_answer() -> None:
+    logging = board_pane.Logging(
+        sessions={"s1": board_pane.LogState(directory="/logs/s1", recording=False, awaiting=True)}
+    )
+    row = _row(_see(_store(), logging=logging), "board restore")
+    assert (row.value, row.known) == (NOT_KNOWN, False)
+    assert "restore" in row.note
+
+
+def test_a_closed_session_does_not_say_its_board_was_never_restored() -> None:
+    row = _row(_see(_closed()), "board restore")
+    assert (row.value, row.known) == (NOT_KNOWN, False)
+    assert "resumed" in row.note
