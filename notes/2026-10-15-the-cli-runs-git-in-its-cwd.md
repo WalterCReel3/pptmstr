@@ -314,6 +314,22 @@ operator's answer. What remains open is whether pptmstr lets an agent *write* th
 without a human seeing it, which plain interactive use would show (board task
 settings-write-read).
 
+**How this differs from usual Claude Code use (reviewer-22, settings-write-read, read from code
+and docs; nothing run):** no rung lets a session write `<cwd>/.claude/settings.json`,
+`settings.local.json` or `.claude/hooks/*` without the operator.
+- STRICT and PERMISSIVE park every such write.
+- Under AUTONOMOUS, pptmstr's own gate *allows* a Write or Edit there (`driver.py:1894-1910, 1950-1956`).
+  Only the CLI stops it: its "don't ask" mode denies protected paths (`driver.py:2486`), and its
+  sandbox adds a protected-path list that pptmstr's `containment_settings` does not supply
+  (`sandbox.py:188-206`). That rests on the CLI's docs, plus one measurement (`settings.local.json`,
+  CLI 2.1.292). Nobody has measured `settings.json`, `hooks/*`, Edit, a symlinked route, or 2.1.301.
+- Compared with interactive Claude Code, pptmstr is tighter: interactive auto mode sends
+  protected-path writes to a classifier, and its sandbox is off by default.
+- The real differences: pptmstr never shows the trust dialog, its protection is entirely the
+  CLI's and is untested by pptmstr, and AUTONOMOUS runs unwatched.
+- Open, from the docs: `<cwd>/sub/.claude/settings.json` is not protected, which matters only if
+  a later session is launched in `sub`.
+
 **The cause the measurement names:** the CLI loads the project and local settings tiers for a
 session whose cwd is that tree. pptmstr does not set `setting_sources`. A fix, and its cost (a
 repo's own `.claude/settings.json` stops applying), is the operator's decision. It is raised as
