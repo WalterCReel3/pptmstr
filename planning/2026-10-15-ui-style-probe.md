@@ -1,8 +1,28 @@
 # The style probe: three looks on the same screens, for the operator to pick
 
-**Dated:** 2026-10-15 · **Status:** a probe; nothing here is applied to `theme.py` · **Answers:**
+**Dated:** 2026-10-15 · **Status:** a probe. The operator picked from the round-two sheets
+the same day, and nothing is applied to `theme.py` yet · **Answers:**
 U10 and the prototype half of U9 in `2026-10-15-ui-rework.md`, against the operator's notes
 under "Cohesion and UI workshopping" in that record
+
+## The operator's pick (2026-10-15)
+
+From the round-two sheets, in the operator's words:
+
+- **Buttons:** "imgui.button - frame_padding 9x6 rounding 5 with no outline or frame
+  border". For `small_button`: "none of these look good as the text is crowded". Nothing is
+  picked for it, and round two's finding stands: ImGui forces its vertical padding to 0, so
+  any taller micro button is code, not a style value.
+- **Tabs:** "pad 10x4 gap 4 inset 1 text 1.10x text 17.6 lane 26.6". Inset 1 is between
+  the sheet's steps. The lane, 26.6, fits inside the 28 px frame height, so no
+  `frame_padding.y` change is forced.
+- **Lines:** "Level 1, Softs fill only (this is the one I'm least sure of)". In the dark theme
+  that is `frame_border_size 0` with soft's well fill at 1.02:1 against the pane. Round two
+  measured that unchecked checkboxes and radios nearly vanish at that setting (sheet 3). The
+  operator chose it knowingly, and it is consistent with the buttons having no frame border,
+  because `frame_border_size` is one value for both.
+- **Dropdown:** "No outline, popup rounding 4 tinted arrow (soft + wells)". That combines the
+  flat cell's borders with the framed cell's rounding.
 
 ## What to look at
 
