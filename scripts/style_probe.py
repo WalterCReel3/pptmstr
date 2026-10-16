@@ -33,6 +33,7 @@ import argparse
 import contextlib
 import dataclasses
 import functools
+import math
 import os
 import subprocess
 import sys
@@ -2418,6 +2419,668 @@ def write_tab_zoom(out: Path) -> None:
     screenshot.write_png(out, widest, len(rows), rows)
 
 
+# -- after the fix-ups: the tab text, one dimension at a time --------------------------
+#
+# "We might need to run variants on tabs again. The text doesn't look right." The
+# operator did not say what is off, so each row of the sheet moves one property of
+# the label away from today's preview (``final_for``'s tabs, drawn as
+# ``draw_inset_tabs`` draws them) and every cell is read back from its own frame.
+
+OUT5 = OUT3 / "tabs-text"
+TABS_TEXT_SIZE = (1900, 2250)
+TABS_TEXT_THEMES: tuple[str, ...] = ("dark", "light", "high_contrast")
+# The five dock windows' labels. The focused pane's bar has ``session`` focused and
+# ``detail`` under the mouse; an unfocused pane's has ``session`` selected.
+TAB_BAR_FOCUSED = (
+    ("fleet", "unselected"),
+    ("session", "focused"),
+    ("health", "unselected"),
+    ("detail", "hovered"),
+    ("board", "unselected"),
+)
+TAB_BAR_UNFOCUSED = tuple(
+    (text, "selected" if text == "session" else "unselected") for text, _ in TAB_BAR_FOCUSED
+)
+# ImGui's dock tab width (TabItemCalcSize): the window's name at the UI font, both
+# frame paddings, and room for the close button (item_inner_spacing.x + the font
+# size). Measured on the round-two screens: FLEET 78, SESSION 94 at frame_padding 9.
+# The label drawn over it is clipped to the tab, as on a dock.
+TAB_LANE = 28.0
+# Letter-spacing for the tracked capitals. ImGui has none: no style value and no
+# ImFont field spaces glyphs, so the cell draws each glyph at its own pen position.
+TRACKING = 1.0
+PLACES = ("box", "lane", "baseline", "optical")
+PLACE_WORDS = {
+    "box": "em box centred on the tab (27 px)",
+    "lane": "em box centred on the lane (28 px)",
+    "baseline": "ascender..baseline centred on the tab",
+    "optical": "x-height..baseline centred on the tab",
+}
+
+
+@dataclass(frozen=True, slots=True)
+class TextCell:
+    """
+    One tab-text cell: the label's whole-pixel size, its face and case, the inks of
+    the selected and unselected tabs, whether the selected tab is bold, how the text
+    is placed top to bottom, and how far its glyphs are moved off the whole pixel
+    ImGui puts them on (``ImFont::RenderText`` truncates the pen position).
+    """
+
+    name: str
+    px: float = 18.0
+    face: str = "mono"  # mono | prose
+    case: str = "lower"  # lower | title | upper | tracked
+    selected_ink: str = "text"  # text | accent
+    unselected_ink: str = "text_dim"  # text_dim | text70
+    bold_selected: bool = False
+    place: str = "box"  # one of PLACES
+    shift: tuple[float, float] = (0.0, 0.0)
+
+
+TEXT_REFERENCE = TextCell("reference: today's preview (18 px, box-centred)")
+
+
+def _text_cell(name: str, **changed: Any) -> TextCell:
+    return dataclasses.replace(TEXT_REFERENCE, name=name, **changed)
+
+
+# (row title, the TextCell fields it varies, its cells). 18 px is in the size row as
+# well as the reference, because the row is asked for as 15, 16, 17 and 18.
+TEXT_ROWS: tuple[tuple[str, tuple[str, ...], tuple[TextCell, ...]], ...] = (
+    (
+        "1 size (whole pixels)",
+        ("px",),
+        tuple(_text_cell(f"size {px:g} px", px=px) for px in (15.0, 16.0, 17.0, 18.0)),
+    ),
+    ("2 face, at 18 px", ("face",), (_text_cell("prose face (the text library's)", face="prose"),)),
+    (
+        "3 case",
+        ("case",),
+        (
+            _text_cell("Title Case", case="title"),
+            _text_cell("UPPER", case="upper"),
+            _text_cell(f"UPPER, tracked {TRACKING:g} px (per glyph)", case="tracked"),
+        ),
+    ),
+    (
+        "4 weight and colour",
+        ("selected_ink", "unselected_ink", "bold_selected"),
+        (
+            _text_cell("selected in accent", selected_ink="accent"),
+            _text_cell("unselected in text at 70%", unselected_ink="text70"),
+            _text_cell("selected bold (Inconsolata Bold)", bold_selected=True),
+        ),
+    ),
+    (
+        "5 vertical placement",
+        ("place",),
+        tuple(_text_cell(f"{p}: {PLACE_WORDS[p]}", place=p) for p in PLACES[1:]),
+    ),
+    (
+        "6 pixel snapping",
+        ("shift",),
+        (
+            _text_cell("not snapped in y (+0.5: the 4.5 box-centring asks for)", shift=(0.0, 0.5)),
+            _text_cell("not snapped in x or y (+0.5, +0.5)", shift=(0.5, 0.5)),
+        ),
+    ),
+)
+TEXT_CELLS: tuple[TextCell, ...] = (TEXT_REFERENCE,) + tuple(
+    c for _, _, cells in TEXT_ROWS for c in cells
+)
+# The cells whose selected tab is shown at ZOOM x under the rows.
+TEXT_ZOOMED = (
+    TEXT_REFERENCE.name,
+    "size 15 px",
+    "size 17 px",
+    "prose face (the text library's)",
+    "selected bold (Inconsolata Bold)",
+    f"optical: {PLACE_WORDS['optical']}",
+    "not snapped in y (+0.5: the 4.5 box-centring asks for)",
+    "not snapped in x or y (+0.5, +0.5)",
+)
+
+
+def cased(text: str, case: str) -> str:
+    if case == "title":
+        return text.title()
+    if case in ("upper", "tracked"):
+        return text.upper()
+    return text
+
+
+def placed_y(
+    place: str, top: float, height: float, lane_top: float, metrics: tuple[float, ...]
+) -> float:
+    """
+    Where the label's pen goes, before ImGui truncates it: ``metrics`` is
+    ``(px, ascender top, x-height top, baseline)``, each from the pen's y, of the
+    bake drawn. ``box`` and ``lane`` centre the em box, ``baseline`` the ascender to
+    the baseline, ``optical`` the x-height to the baseline, each on the tab's box.
+    """
+    px, asc, xh, base = metrics
+    if place == "box":
+        return top + (height - px) * 0.5
+    if place == "lane":
+        return lane_top + (TAB_LANE - px) * 0.5
+    band = asc if place == "baseline" else xh
+    if place not in ("baseline", "optical"):
+        raise ValueError(place)
+    return top + (height - (base - band)) * 0.5 - band
+
+
+@dataclass(frozen=True, slots=True)
+class Gaps:
+    """A label's ink against its tab, in whole pixels: above the tallest ink, above the
+    x-height, and below the lowest ink (these labels have no descenders)."""
+
+    top: int
+    x_top: int
+    bottom: int
+
+    def line(self) -> str:
+        return (
+            f"top {self.top} px (ascender) / {self.x_top} px (x-height)"
+            f" · bottom {self.bottom} px"
+        )
+
+
+def _inked_rows(
+    pixels: list[list[tuple[int, int, int]]],
+    ground: tuple[int, int, int],
+    ink: tuple[int, int, int],
+) -> list[int]:
+    """How many pixels of each row are at least ``INK_LO`` of the way to ``ink``."""
+    span = [i - g for i, g in zip(ink, ground, strict=True)]
+    norm = sum(s * s for s in span)
+    if norm == 0:
+        raise ValueError("ink and ground are the same colour")
+    return [
+        sum(
+            1
+            for p in row
+            if sum((c - g) * s for c, g, s in zip(p, ground, span, strict=True)) / norm >= INK_LO
+        )
+        for row in pixels
+    ]
+
+
+def x_height_row(counts: list[int]) -> int:
+    """
+    The first row of a lowercase word's body: the first with at least a quarter of
+    the busiest row's ink. An ``i``'s dot or an ascender's stem is a few pixels wide;
+    the top of the body runs across every letter.
+    """
+    busiest = max(counts)
+    return next(i for i, n in enumerate(counts) if busiest and n * 4 >= busiest)
+
+
+def measure_gaps(
+    tabs: list[tuple[list[list[tuple[int, int, int]]], tuple[int, int, int], tuple[int, int, int]]],
+    body: int,
+) -> Gaps:
+    """
+    ``tabs`` is each tab's pixels (its box, top row first), fill and ink, all the
+    same height; ``body`` the index of the one whose x-height is read (``session``).
+    """
+    rows = [_inked_rows(px, ground, ink) for px, ground, ink in tabs]
+    height = len(rows[0])
+    inked = [i for counts in rows for i, n in enumerate(counts) if n]
+    if not inked:
+        raise ValueError("no ink in any tab")
+    return Gaps(min(inked), x_height_row(rows[body]), height - 1 - max(inked))
+
+
+@dataclass(slots=True)
+class _Drawn:
+    """One tab label as the first frame drew it, for the read-back."""
+
+    rect: tuple[int, int, int, int]
+    fill: tuple[int, int, int]
+    ink: tuple[int, int, int]
+
+
+@dataclass(slots=True)
+class _TextRun:
+    """A cell's bars as drawn, the values it was drawn with, and what it measured."""
+
+    cell: TextCell
+    predicted: Gaps | None = None
+    unfocused: list[_Drawn] = dataclasses.field(default_factory=list)
+    focused: list[_Drawn] = dataclasses.field(default_factory=list)
+    gaps: Gaps | None = None
+    counts: tuple[int, int, int] = (0, 0, 0)
+    pixels: list[list[tuple[int, int, int]]] = dataclasses.field(default_factory=list)
+
+
+class _TabsText:
+    """The sheet's cells, laid out on its first frame and measured after."""
+
+    runs: list[_TextRun] = []
+
+
+def _rgb_u32(rgb: tuple[int, int, int]) -> int:
+    from imgui_bundle import imgui
+
+    r, g, b = (c / 255.0 for c in rgb)
+    return int(imgui.color_convert_float4_to_u32(imgui.ImVec4(r, g, b, 1.0)))
+
+
+def _over(slot: str, under: tuple[int, int, int]) -> tuple[int, int, int]:
+    """``slot``'s colour laid over ``under`` at its own alpha, as the frame shows it."""
+    from imgui_bundle import imgui
+
+    c = imgui.get_style().color_(int(getattr(imgui.Col_, slot)))
+    top = rgb8(c)
+    a = min(1.0, max(0.0, c.w))
+    return tuple(int(t * a + u * (1.0 - a) + 0.5) for t, u in zip(top, under, strict=True))  # type: ignore[return-value]
+
+
+def tab_inks(cell: TextCell, state: str) -> tuple[str, tuple[int, int, int], tuple[int, int, int]]:
+    """``(what the ink is, ink, fill)`` of a tab in ``state`` as ``cell`` draws it."""
+    fill_slot, ink_slot = _TAB_STATES[state]
+    fill = _over(fill_slot, _slot("title_bg"))
+    if state in ("focused", "selected") and cell.selected_ink == "accent":
+        return "accent", rgb8(color_of(Mix("accent", "accent", 1.0))), fill
+    if state == "unselected" and cell.unselected_ink == "text70":
+        return (
+            "mix(fill, text, 0.7)",
+            tuple(  # type: ignore[return-value]
+                int(f + (t - f) * 0.7 + 0.5) for f, t in zip(fill, _slot("text"), strict=True)
+            ),
+            fill,
+        )
+    name = {"text": "text", "text_disabled": "text_dim"}[ink_slot]
+    return name, _slot(ink_slot), fill
+
+
+def _face_of(cell: TextCell, state: str) -> tuple[Any, str]:
+    """The ImFont a tab's label is pushed in (``None`` = the UI font), and its name."""
+    from pptmstr import theme
+
+    if cell.bold_selected and state in ("focused", "selected"):
+        bold = theme.face(theme.Face.BOLD)
+        return bold, "Inconsolata Bold" if bold is not None else "(no bold face: UI font)"
+    if cell.face == "prose":
+        from pptmstr.ui.typeset import gate
+
+        prose = gate.face_font("PROSE")
+        if prose is None:
+            return None, "(no prose face on the atlas: UI font)"
+        return prose, str(prose.get_debug_name())
+    return None, "Inconsolata Medium (UI font)"
+
+
+def _metrics(font: Any, px: float, text: str) -> tuple[float, float, float, float, float, float]:
+    """
+    ``(px, ascender top, x-height top, baseline, text's ink top, text's ink bottom)``
+    of the bake drawn, from the pen's y: the reference glyphs ``b`` and ``x`` (``B``
+    and ``X`` for capitals), and ``text``'s own glyph boxes.
+    """
+    baked = font.get_font_baked(px)
+    tall, short = ("B", "X") if text.isupper() else ("b", "x")
+    t, s = baked.find_glyph(ord(tall)), baked.find_glyph(ord(short))
+    glyphs = [baked.find_glyph(ord(c)) for c in text if not c.isspace()]
+    return (
+        px,
+        float(t.y0),
+        float(s.y0),
+        float(s.y1),
+        min(float(g.y0) for g in glyphs),
+        max(float(g.y1) for g in glyphs),
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class Label:
+    """One label as drawn: what it was pushed and drawn with, and where its pen landed."""
+
+    px: float
+    face: str
+    ink_name: str
+    ink: tuple[int, int, int]
+    fill: tuple[int, int, int]
+    pen_asked: float
+    pen_drawn: float
+    ink_top: float
+    ink_bottom: float
+    x_top: float
+    width: float
+
+
+def draw_tab_label(
+    dl: Any, cell: TextCell, a: Any, b: Any, lane_top: float, state: str, text: str
+) -> Label:
+    """
+    ``cell``'s label on one tab, pushed at its whole-pixel size. The pen y drawn is
+    what ``ImFont::RenderText`` keeps (it truncates the pen position; measured on
+    the vertices), plus the cell's ``shift`` laid on the glyph quads afterwards.
+    """
+    from imgui_bundle import imgui
+
+    from pptmstr.ui.typeset import gate
+
+    face, face_name = _face_of(cell, state)
+    ink_name, ink, fill = tab_inks(cell, state)
+    shown = cased(text, cell.case)
+    imgui.push_font(face, gate.pushed(cell.px))
+    try:
+        font, px = imgui.get_font(), float(imgui.get_font_size())
+        width = float(imgui.calc_text_size(shown).x)
+        metrics = _metrics(font, px, shown)
+        ty = placed_y(cell.place, a.y, b.y - a.y, lane_top, metrics[:4])
+        x = a.x + PICKED_TABS.pad[0]
+        start = dl.vtx_buffer.size()
+        if cell.case == "tracked":
+            baked = font.get_font_baked(px)
+            for ch in shown:
+                dl.add_text(font, px, imgui.ImVec2(x, ty), _rgb_u32(ink), ch)
+                x += float(baked.get_char_advance(ord(ch))) + TRACKING
+        else:
+            dl.add_text(font, px, imgui.ImVec2(x, ty), _rgb_u32(ink), shown)
+        dx, dy = cell.shift
+        if dx or dy:
+            for i in range(start, dl.vtx_buffer.size()):
+                v = dl.vtx_buffer[i]
+                v.pos = imgui.ImVec2(v.pos.x + dx, v.pos.y + dy)
+    finally:
+        imgui.pop_font()
+    return Label(
+        px=px,
+        face=face_name,
+        ink_name=ink_name,
+        ink=ink,
+        fill=fill,
+        pen_asked=ty,
+        pen_drawn=float(math.floor(ty)) + dy,
+        ink_top=metrics[4],
+        ink_bottom=metrics[5],
+        x_top=metrics[2],
+        width=width + (TRACKING * (len(shown) - 1) if cell.case == "tracked" else 0.0),
+    )
+
+
+def predicted_gaps(top: float, height: float, labels: list[Label], body: int) -> Gaps:
+    """
+    The gaps the glyph boxes put a bar's labels at, from the tab's ``top`` and
+    ``height``: ``body`` is the label whose x-height is read. A shifted label's
+    ink spreads over the pixel it was moved into, so it is floored as the frame is.
+    """
+    tops = [math.floor(lb.pen_drawn + lb.ink_top - top) for lb in labels]
+    bottoms = [height - math.ceil(lb.pen_drawn + lb.ink_bottom - top) for lb in labels]
+    x_top = math.floor(labels[body].pen_drawn + labels[body].x_top - top)
+    return Gaps(min(tops), x_top, int(min(bottoms)))
+
+
+def _tab_bar(
+    dl: Any, run: _TextRun, x: float, y: float, bar: tuple[tuple[str, str], ...], first: bool
+) -> list[Label]:
+    """One drawn tab bar of the five labels, its lane's top-left at ``(x, y)``."""
+    from imgui_bundle import imgui
+
+    style = imgui.get_style()
+    inner = float(style.item_inner_spacing.x)
+    close = inner + float(imgui.get_font_size())
+    gap, inset = PICKED_TABS.gap, PICKED_TABS.inset
+    widths = [
+        float(imgui.calc_text_size(t.upper()).x) + 2.0 * style.frame_padding.x + close
+        for t, _ in bar
+    ]
+    right = x + sum(widths) + inner * (len(widths) - 1)
+    dl.add_rect_filled(
+        imgui.ImVec2(x, y),
+        imgui.ImVec2(right, y + TAB_LANE),
+        imgui.get_color_u32(imgui.Col_.title_bg),
+    )
+    labels = []
+    x0 = x
+    for (text, state), w in zip(bar, widths, strict=True):
+        a = imgui.ImVec2(x0 + gap * 0.5, y + inset)
+        b = imgui.ImVec2(x0 + w - gap * 0.5, y + TAB_LANE)
+        fill_slot, _ = _TAB_STATES[state]
+        dl.add_rect_filled(
+            a, b, imgui.get_color_u32(getattr(imgui.Col_, fill_slot)), style.tab_rounding
+        )
+        if state == "focused":
+            dl.add_rect_filled(
+                imgui.ImVec2(a.x + style.tab_rounding, b.y - 2.0),
+                imgui.ImVec2(b.x - style.tab_rounding, b.y),
+                imgui.get_color_u32(imgui.Col_.check_mark),
+            )
+        dl.push_clip_rect(a, b, True)
+        label = draw_tab_label(dl, run.cell, a, b, y, state, text)
+        dl.pop_clip_rect()
+        labels.append(label)
+        if first:
+            drawn = _Drawn((int(a.x), int(a.y), int(b.x), int(b.y)), label.fill, label.ink)
+            (run.focused if bar is TAB_BAR_FOCUSED else run.unfocused).append(drawn)
+        x0 += w + inner
+    return labels
+
+
+def _contrast_line(cell: TextCell) -> str:
+    """Each state's ink on its fill, as ``cell`` draws them; focused and selected share a fill."""
+    parts = []
+    for state in ("selected", "unselected", "hovered"):
+        name, ink, fill = tab_inks(cell, state)
+        parts.append(f"{state} {name} {hex8(ink)} on {hex8(fill)} {contrast(ink, fill):.2f}:1")
+    name, ink, fill = tab_inks(cell, "focused")
+    parts.insert(0, f"focused {name} {contrast(ink, fill):.2f}:1")
+    return " · ".join(parts)
+
+
+def _values_line(run: _TextRun, labels: list[Label], top: float) -> str:
+    """The selected tab's exact values: face, bound size, case, the pen asked and drawn."""
+    lb = labels[[t for t, _ in TAB_BAR_UNFOCUSED].index("session")]
+    shift = run.cell.shift
+    moved = "" if shift == (0.0, 0.0) else f" + shift {shift[0]:g},{shift[1]:g}"
+    bold = " · selected bold" if run.cell.bold_selected else ""
+    return (
+        f"{lb.face} · {lb.px:g} px (push_font bound {lb.px:g}) · {run.cell.case}{bold}"
+        f" · 'session' {lb.width:g} px wide · place {run.cell.place}: pen"
+        f" {lb.pen_asked - top:g} -> {math.floor(lb.pen_asked) - top:g}{moved} px below the"
+        f" tab top (box {TAB_LANE - PICKED_TABS.inset:g}, lane {TAB_LANE:g})"
+    )
+
+
+def _measured_line(run: _TextRun) -> str:
+    if run.gaps is None:
+        return "measured: (read back after the first frame)"
+    inked, solid, edge = run.counts
+    share = edge / inked if inked else 0.0
+    if run.cell.shift != (0.0, 0.0):
+        agree = "glyph boxes n/a (a moved row splits its ink over two)"
+    elif run.predicted == run.gaps:
+        agree = "glyph boxes agree"
+    else:
+        agree = f"glyph boxes say {run.predicted.line() if run.predicted else '?'}"
+    return (
+        f"MEASURED (unfocused bar): {run.gaps.line()} · 'session' {solid} solid of {inked}"
+        f" inked, edge {share:.0%} · {agree}"
+    )
+
+
+def wrapped(text: str, width: int) -> list[str]:
+    """``text`` broken at its `` · `` separators into lines of at most ``width`` characters."""
+    lines: list[str] = []
+    for part in text.split(" · "):
+        if lines and len(lines[-1]) + 3 + len(part) <= width:
+            lines[-1] += " · " + part
+        else:
+            lines.append(part)
+    return lines
+
+
+CELL_W, CELL_COLS = 470.0, 4
+# Characters of the 13 px caption face (7 px advance) that fit a cell.
+CELL_CHARS = 64
+
+
+def _cell_height() -> float:
+    return 18.0 + 2.0 * TAB_LANE + 6.0 + 8.0 + 14.0 * 10 + 10.0
+
+
+def _sheet_tabs_text() -> None:
+    from imgui_bundle import imgui
+
+    from pptmstr import theme
+
+    first = not _TabsText.runs
+    if first:
+        _TabsText.runs = [_TextRun(c) for c in TEXT_CELLS]
+    runs = {r.cell.name: r for r in _TabsText.runs}
+    dl = imgui.get_window_draw_list()
+    origin = imgui.get_cursor_screen_pos()
+    x0, y = float(int(origin.x)), float(int(origin.y))
+    font = imgui.get_font()
+    text_u32 = imgui.get_color_u32(imgui.Col_.text)
+    dim_u32 = imgui.get_color_u32(imgui.Col_.text_disabled)
+    warn_u32 = _rgb_u32(rgb8(theme.P.warn.vec4))
+    cell_h = _cell_height()
+
+    def caption(x: float, yy: float, text: str, colour: int = dim_u32, size: float = 13.0) -> None:
+        dl.add_text(font, size, imgui.ImVec2(x, yy), colour, text)
+
+    caption(
+        x0,
+        y,
+        f"tab text variants -- theme {theme.current().name} · the final preview's tabs:"
+        f" {PICKED_TABS.label()}, lane {TAB_LANE:g} px (the dock's frame height), tab box"
+        f" {TAB_LANE - PICKED_TABS.inset:g} px",
+        text_u32,
+        16.0,
+    )
+    header = (
+        "Each row moves ONE property from the reference. Two bars per cell: the focused"
+        " pane's (session focused, detail hovered) and an unfocused pane's (session selected).",
+        "Tab widths are ImGui's dock widths (the UI-font name + 2 x frame_padding.x + close"
+        " room); the label is clipped to its tab, as draw_inset_tabs clips it.",
+        "Every label is pushed with push_font at a whole pixel and drawn at get_font_size()."
+        " ImFont::RenderText truncates the pen position, so a pen at 4.5 draws at 4; row 6"
+        " moves the glyph quads off the whole pixel to show the alternative.",
+        f"Gaps are read back from the frame: rows with ink at {INK_LO:g} of the way from fill"
+        " to ink, over all five labels of the unfocused bar (none has a descender); the"
+        " x-height top is 'session''s first row with a quarter of its busiest row's ink.",
+    )
+    for i, line in enumerate(header):
+        caption(x0, y + 22.0 + 15.0 * i, line)
+    y += 22.0 + 15.0 * len(header) + 10.0
+
+    def cell_at(run: _TextRun, x: float, yy: float) -> None:
+        dl.push_clip_rect(imgui.ImVec2(x, yy), imgui.ImVec2(x + CELL_W - 8.0, yy + cell_h), True)
+        caption(x, yy, run.cell.name, text_u32, 14.0)
+        bar_y = yy + 18.0
+        _tab_bar(dl, run, x, bar_y, TAB_BAR_FOCUSED, first)
+        labels = _tab_bar(dl, run, x, bar_y + TAB_LANE + 6.0, TAB_BAR_UNFOCUSED, first)
+        top = bar_y + TAB_LANE + 6.0 + PICKED_TABS.inset
+        if first:
+            body = [t for t, _ in TAB_BAR_UNFOCUSED].index("session")
+            run.predicted = predicted_gaps(top, TAB_LANE - PICKED_TABS.inset, labels, body)
+        line_y = bar_y + 2.0 * TAB_LANE + 14.0
+        for text, colour in (
+            (_values_line(run, labels, top), dim_u32),
+            (_contrast_line(run.cell), dim_u32),
+            (_measured_line(run), text_u32),
+        ):
+            for line in wrapped(text, CELL_CHARS):
+                caption(x, line_y, line, colour)
+                line_y += 14.0
+        dl.pop_clip_rect()
+
+    caption(x0, y, "reference -- today's preview", warn_u32, 15.0)
+    cell_at(runs[TEXT_REFERENCE.name], x0, y + 20.0)
+    y += 20.0 + cell_h
+    for title, varies, cells in TEXT_ROWS:
+        caption(x0, y, f"{title} -- varies {', '.join(varies)}", warn_u32, 15.0)
+        y += 20.0
+        for i, cell in enumerate(cells):
+            if i and i % CELL_COLS == 0:
+                y += cell_h
+            cell_at(runs[cell.name], x0 + (i % CELL_COLS) * CELL_W, y)
+        y += cell_h
+    # The 4x strip, once the frame has been read back.
+    zoomed_runs = [runs[n] for n in TEXT_ZOOMED if runs[n].pixels]
+    if zoomed_runs:
+        caption(
+            x0,
+            y,
+            f"the selected 'session' tab of the unfocused bar at {ZOOM}x, nearest neighbour,"
+            " read back from the frame",
+            warn_u32,
+            15.0,
+        )
+        y += 20.0
+        x = x0
+        for run in zoomed_runs:
+            w = len(run.pixels[0]) * ZOOM
+            if x + w > x0 + CELL_COLS * CELL_W:
+                x, y = x0, y + len(run.pixels) * ZOOM + 24.0
+            for py, pixel_row in enumerate(run.pixels):
+                for px_, rgb in enumerate(pixel_row):
+                    lo = imgui.ImVec2(x + px_ * ZOOM, y + py * ZOOM)
+                    dl.add_rect_filled(lo, imgui.ImVec2(lo.x + ZOOM, lo.y + ZOOM), _rgb_u32(rgb))
+            caption(x, y + len(run.pixels) * ZOOM + 3.0, run.cell.name[:52], text_u32)
+            x += w + 16.0
+
+
+_SHEET_DRAWERS["tabs-text"] = _sheet_tabs_text
+
+
+def measure_tabs_text(raw: Path) -> list[str]:
+    """Read the sheet's first frame back and measure every cell; the lines it reports."""
+    _, _, rows = read_png(raw)
+    body = [t for t, _ in TAB_BAR_UNFOCUSED].index("session")
+    lines = []
+    for run in _TabsText.runs:
+        tabs = []
+        for drawn in run.unfocused:
+            x0, y0, x1, y1 = drawn.rect
+            # Inside the rounded corners, so no lane colour is read as ink.
+            tabs.append((crop(rows, (x0 + 5, y0, x1 - 5, y1)), drawn.fill, drawn.ink))
+        run.gaps = measure_gaps(tabs, body)
+        sel = run.unfocused[body]
+        run.pixels = crop(rows, sel.rect)
+        run.counts = ink_counts(tabs[body][0], sel.fill, sel.ink)
+        verdict = "agrees" if run.predicted == run.gaps else f"glyph boxes say {run.predicted}"
+        lines.append(f"{run.cell.name[:44]:44} {verdict} · {_measured_line(run)}")
+    return lines
+
+
+def _tabs_text_scenario(state: Any, fixtures: Path) -> Iterator[str | None]:
+    """The sheet, read back from its own frame, measured, and drawn again with it."""
+    import screenshot
+
+    from pptmstr import theme
+
+    del fixtures
+    yield from _sheet_frame(state, TABS_TEXT_SIZE)
+    name = theme.current().name
+    _TabsText.runs = []
+    _Shown.sheet, _Shown.sheet_first = "tabs-text", True
+    yield from screenshot._frames(10)
+    yield f"{name}-raw"
+    yield from screenshot._frames(2)
+    assert _Shown.out_dir is not None
+    for line in measure_tabs_text(_Shown.out_dir / f"{name}-raw.png"):
+        print(line, flush=True)
+    yield from screenshot._frames(5)
+    yield name
+    _Shown.sheet = None
+
+
+def _run_tabs_text(themes: tuple[str, ...]) -> int:
+    """The sheet on each of ``themes``, each on its own Xvfb."""
+    screen = f"{TABS_TEXT_SIZE[0] + 100}x{TABS_TEXT_SIZE[1] + 100}x24"
+    for name in themes:
+        started = time.monotonic()
+        code = _on_xvfb(["--tabs-text", "--theme", name, "--out-dir", str(OUT5)], screen)
+        print(f"tabs-text {name}: exit {code} in {time.monotonic() - started:.0f}s", flush=True)
+        if code != 0 or _missing(OUT5, (name, f"{name}-raw")):
+            return code or 1
+    return 0
+
+
 # -- after the preview: the wells sheet ------------------------------------------------
 
 WELLS_SIZE = (1600, 1720)
@@ -3031,6 +3694,12 @@ def main() -> int:
         "--quirks", action="store_true", help="print the per-theme measurements as a table"
     )
     which.add_argument("--micro", action="store_true", help="the wrapper sheet, likewise")
+    which.add_argument(
+        "--tabs-text",
+        action="store_true",
+        help="the tab-text variants sheet: with --theme on the display there is, else on"
+        " dark, light and high_contrast, each on an Xvfb",
+    )
     ap.add_argument("--theme", default=None, help="with --preview: the theme to run under")
     ap.add_argument(
         "--themes", nargs="+", default=None, help="with --style-preview: these themes only"
@@ -3069,6 +3738,12 @@ def main() -> int:
         return _run_one(variant, args.out_dir or OUT3 / name, _preview_scenario, name, args.preview)
     if args.micro:
         return _run_one(PICKED, args.out_dir or OUT3, _micro_scenario, "dark")
+    if args.tabs_text:
+        if args.theme is None:
+            return _run_tabs_text(tuple(args.themes or TABS_TEXT_THEMES))
+        return _run_one(
+            final_for(args.theme), args.out_dir or OUT5, _tabs_text_scenario, args.theme
+        )
     if args.sheets:
         return _run_one(SOFT_WELLS, args.out_dir or OUT2, _sheets_scenario)
     if args.screens:

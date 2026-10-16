@@ -949,3 +949,142 @@ def test_the_final_caption_names_every_tuned_value() -> None:
     assert "tool block = mix(bg, text, 0.06)" in line
     assert "frame_border_size 1" in probe.final_caption("high_contrast")
     assert "no values of its own" in probe.final_caption("dark")
+
+
+# -- after the fix-ups: the tab text variants ---------------------------------------------
+
+
+def test_every_tab_text_cell_is_bound_at_the_whole_pixel_it_names(styled: Any) -> None:
+    from pptmstr.ui.typeset import gate
+
+    im = styled
+    im.new_frame()
+    try:
+        for cell in probe.TEXT_CELLS:
+            assert float(cell.px).is_integer(), cell.name
+            im.push_font(None, gate.pushed(cell.px))
+            bound = im.get_font_size()
+            im.pop_font()
+            assert bound == cell.px, cell.name
+    finally:
+        im.render()
+
+
+def test_each_tab_text_row_varies_only_its_named_fields() -> None:
+    fields = [f.name for f in dataclasses.fields(probe.TextCell) if f.name != "name"]
+    ref = probe.TEXT_REFERENCE
+    names = [c.name for c in probe.TEXT_CELLS]
+    assert len(names) == len(set(names))
+    assert set(probe.TEXT_ZOOMED) <= set(names)
+    for title, varies, cells in probe.TEXT_ROWS:
+        assert cells, title
+        for cell in cells:
+            moved = {f for f in fields if getattr(cell, f) != getattr(ref, f)}
+            assert moved <= set(varies), (cell.name, moved)
+            assert moved or cell.px == ref.px, cell.name
+
+
+def test_the_size_row_is_15_to_18_whole_pixels() -> None:
+    sizes = [c.px for c in probe.TEXT_ROWS[0][2]]
+    assert sizes == [15.0, 16.0, 17.0, 18.0]
+
+
+def test_placed_y_centres_each_band_on_the_tab() -> None:
+    # 18 px Inconsolata as measured: ascender top 4, x-height top 7, baseline 15.
+    metrics = (18.0, 4.0, 7.0, 15.0)
+    assert probe.placed_y("box", 100.0, 27.0, 99.0, metrics) == 104.5
+    assert probe.placed_y("lane", 100.0, 27.0, 99.0, metrics) == 104.0
+    # The ascender..baseline band is 11 px: 8 above it and 8 below in 27.
+    assert probe.placed_y("baseline", 100.0, 27.0, 99.0, metrics) == 104.0
+    # The x-height band is 8 px: 9.5 above and below.
+    assert probe.placed_y("optical", 100.0, 27.0, 99.0, metrics) == 102.5
+    with pytest.raises(ValueError):
+        probe.placed_y("nowhere", 100.0, 27.0, 99.0, metrics)
+
+
+def _tab_pixels(height: int, ink_rows: dict[int, int], width: int = 20) -> Any:
+    """A tab of ``height`` rows, row ``r`` inked over its first ``ink_rows[r]`` pixels."""
+    ground, ink = (0, 0, 0), (200, 200, 200)
+    return [
+        [ink if x < ink_rows.get(y, 0) else ground for x in range(width)] for y in range(height)
+    ]
+
+
+def test_measure_gaps_reads_ascender_x_height_and_baseline() -> None:
+    ground, ink = (0, 0, 0), (200, 200, 200)
+    # 'session': a 2 px dot at row 8, its body rows 11..18; 'board': a stem from row 7.
+    session = _tab_pixels(27, {8: 2, **{r: 16 for r in range(11, 19)}})
+    board = _tab_pixels(27, {**{r: 2 for r in range(7, 11)}, **{r: 14 for r in range(11, 19)}})
+    gaps = probe.measure_gaps([(board, ground, ink), (session, ground, ink)], 1)
+    assert gaps == probe.Gaps(top=7, x_top=11, bottom=8)
+    with pytest.raises(ValueError):
+        probe.measure_gaps([(_tab_pixels(27, {}), ground, ink)], 0)
+
+
+def test_a_cells_measured_line_quotes_exactly_its_measured_gaps() -> None:
+    run = probe._TextRun(probe.TEXT_REFERENCE)
+    assert "read back" in probe._measured_line(run)
+    run.gaps = probe.Gaps(7, 11, 8)
+    run.predicted = probe.Gaps(7, 11, 8)
+    run.counts = (270, 111, 159)
+    line = probe._measured_line(run)
+    assert run.gaps.line() in line
+    assert "top 7 px (ascender) / 11 px (x-height) · bottom 8 px" in line
+    assert "111 solid of 270" in line and "glyph boxes agree" in line
+    run.predicted = probe.Gaps(6, 11, 8)
+    assert "glyph boxes say top 6 px" in probe._measured_line(run)
+
+
+def test_wrapped_breaks_only_at_separators_and_keeps_every_part() -> None:
+    text = "alpha · beta · gamma delta · e"
+    lines = probe.wrapped(text, 15)
+    assert lines == ["alpha · beta", "gamma delta · e"]
+    assert " · ".join(lines) == text
+
+
+def _label_vertices(im: Any, cell: Any) -> tuple[Any, list[tuple[float, float]]]:
+    dl = im.get_foreground_draw_list()
+    a, b = im.ImVec2(10.0, 21.0), im.ImVec2(100.0, 48.0)
+    start = dl.vtx_buffer.size()
+    label = probe.draw_tab_label(dl, cell, a, b, 20.0, "selected", "session")
+    pos = [
+        (dl.vtx_buffer[i].pos.x, dl.vtx_buffer[i].pos.y) for i in range(start, dl.vtx_buffer.size())
+    ]
+    return label, pos
+
+
+def test_a_tab_label_is_drawn_at_its_bound_size_on_whole_pixels_unless_shifted(
+    styled: Any,
+) -> None:
+    im = styled
+    im.new_frame()
+    try:
+        for cell in probe.TEXT_CELLS:
+            if cell.face == "prose" or cell.bold_selected:
+                continue  # the bare context has neither face; the UI font stands in
+            label, pos = _label_vertices(im, cell)
+            assert label.px == cell.px
+            # ImGui truncates the pen; a shifted cell's quads are moved by exactly its shift.
+            assert label.pen_drawn == float(int(label.pen_asked)) + cell.shift[1]
+            dx, dy = cell.shift
+            assert pos, cell.name
+            assert all(
+                float(x - dx).is_integer() and float(y - dy).is_integer() for x, y in pos
+            ), cell.name
+            if cell.shift != (0.0, 0.0):
+                assert not all(float(y).is_integer() for _, y in pos)
+    finally:
+        im.render()
+
+
+def test_tracked_capitals_add_the_tracking_between_glyphs(styled: Any) -> None:
+    im = styled
+    im.new_frame()
+    try:
+        upper = next(c for c in probe.TEXT_CELLS if c.case == "upper")
+        tracked = next(c for c in probe.TEXT_CELLS if c.case == "tracked")
+        plain, _ = _label_vertices(im, upper)
+        spaced, _ = _label_vertices(im, tracked)
+        assert spaced.width - plain.width == probe.TRACKING * (len("session") - 1)
+    finally:
+        im.render()

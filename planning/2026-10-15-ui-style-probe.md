@@ -5,6 +5,164 @@ the same day, and nothing is applied to `theme.py` yet · **Answers:**
 U10 and the prototype half of U9 in `2026-10-15-ui-rework.md`, against the operator's notes
 under "Cohesion and UI workshopping" in that record
 
+## Tab text variants (task `tab-text-variants`)
+
+After the fix-ups the operator said: "We might need to run variants on tabs again. The text
+doesn't look right." They did not say what is wrong, so each row of one sheet moves one
+property of the label away from today's preview.
+
+**Images.** The sheets are gitignored, rendered with `.venv/bin/python
+scripts/style_probe.py --tabs-text`, one Xvfb per theme:
+
+- `shots/style-preview/tabs-text/dark.png`, `light.png` and `high_contrast.png` are the sheets.
+- `<theme>-raw.png` is each sheet's first frame, the one the measurements are read from.
+
+Each sheet runs under `final_for(theme)`, which is the final preview's style.
+
+**What a cell is.** A cell has two drawn tab bars of the five dock labels (`fleet session
+health detail board`):
+
+- In the focused pane's bar, `session` is focused and `detail` is hovered.
+- In an unfocused pane's bar, `session` is selected.
+
+The geometry is the pick's: pad 10x4, gap 4, inset 1. The lane is 28 px because that is the
+dock's frame height, so the tab box is 27 px. Tab widths are ImGui's dock widths: the
+UI-font name, plus 2 × `frame_padding.x`, plus close-button room
+(`item_inner_spacing.x` + the font size). Those reproduce the measured FLEET 78 and SESSION
+94. The label is clipped to its tab, as `draw_inset_tabs` clips it.
+
+Every label is pushed with `push_font(face, px)` at a whole pixel and drawn at
+`get_font_size()`. A test holds every cell to that.
+
+Each cell is labelled with:
+
+- the face, the bound size, the case and the width of `session`;
+- the pen y asked and drawn;
+- every state's ink on its fill, with contrast;
+- the measured gaps and edge share.
+
+**How the gaps are measured.** They are read from the frame:
+
+- A pixel counts as ink at 0.15 of the way from the tab's fill to its ink.
+- Rows are taken over all five labels of the unfocused bar. None of the labels has a
+  descender, so the lowest ink is the baseline.
+- The x-height top is the first row of `session` with a quarter of its busiest row's ink.
+
+The probe also predicts each gap from the bake's glyph boxes (`ImFontBaked.find_glyph`). On
+all three themes the prediction matches the measurement exactly for every snapped cell.
+
+**One thing found while building it.** `ImFont::RenderText` truncates the pen position.
+Box-centring 18 px in 27 asks for a pen 4.5 px down, and the glyph quads are drawn at 4. I
+read the vertices in a bare context: pens at y 25.0, 25.5 and 25.7 all put the glyph at the
+same whole pixel. So today's label is already pixel-snapped, and the fuzz fixed in the fix-ups
+came only from the scale. To show the alternative, row 6 moves the quads off the whole pixel
+after the draw.
+
+**The numbers.** Gaps are top to the ascender / top to the x-height / bottom, in px. Edge is
+the edge pixels' share of `session`'s ink: lower is crisper, the same measure as the
+fix-ups'. The numbers are dark's. Light and high_contrast measure the same gaps, and their
+edge shares are within 2 points of dark's.
+
+| row | cell | gaps | edge |
+|---|---|---|---|
+| reference | 18 px, Inconsolata Medium, lowercase, box-centred, snapped | 7 / 11 / 8 | 59% |
+| 1 size | 15 px | 9 / 12 / 8 | 58% |
+| | 16 px | 9 / 12 / 8 | 69% |
+| | 17 px | 7 / 11 / 8 | 67% |
+| | 18 px | 7 / 11 / 8 | 59% |
+| 2 face | prose (Roboto-Regular, `gate.face_font("PROSE")`); `session` 53 px wide against 63 | 7 / 11 / 8 | 65% |
+| 3 case | Title Case | 7 / 11 / 8 | 60% |
+| | UPPER | 8 / 8 / 8 | 64% |
+| | UPPER, tracked 1 px | 8 / 8 / 8 | 64% |
+| 4 weight, colour | selected in accent | 7 / 11 / 8 | 59% |
+| | unselected in mix(fill, text, 0.7) | 7 / 11 / 8 | 59% |
+| | selected bold (Inconsolata Bold) | 7 / 11 / 8 | 56% |
+| 5 placement | em box centred on the lane | 7 / 11 / 8 | 59% |
+| | ascender..baseline centred on the tab | 7 / 11 / 8 | 59% |
+| | x-height..baseline centred on the tab | 5 / 9 / 10 | 59% |
+| 6 snapping | y off by 0.5 (the 4.5 box-centring asks for) | 8 / 12 / 7 | 85% |
+| | x and y off by 0.5 | 8 / 12 / 7 | 99% |
+
+ImGui has no letter-spacing, neither as a style value nor as an ImFont field. The tracked
+cell draws each glyph at its own pen position. That is call-site code: a dock tab could only
+have it through `draw_inset_tabs`.
+
+**Contrast, ink on fill.** The 4.79:1 for accent on light is the one value near the AA floor.
+
+| | dark | light | high_contrast |
+|---|---|---|---|
+| selected / focused, text (today) | 9.83 | 13.43 | 19.03 |
+| selected / focused, accent | 7.46 | 4.79 | 12.37 |
+| unselected, text_dim (today) | 5.15 | 5.78 | 11.54 |
+| unselected, text at 70% | 5.91 | 5.84 | 10.02 |
+| hovered, text on the hover tint | 5.65 | 10.04 | 10.72 |
+
+**What the numbers say.**
+
+- **The label is already balanced and snapped.** The ascender sits 7 px below the tab top and
+  the baseline 8 px above the foot. Centring the ascender..baseline band instead gives the
+  same pixels, and so does centring on the lane. The operator's "bottom margin balanced with
+  the margin top" holds to within 1 px for labels with ascenders.
+- **The lowercase body does not sit centred.** It is 11 px from the top and 8 px from the foot,
+  so a word with no ascender, like `session`, sits 1.5 px low. Optical centring puts the body
+  at 9 / 10, but the ascenders then sit 5 px from the top against 10 px under the baseline.
+- **Unsnapped text is plainly worse:** 85% and 99% edge against 59%. Nothing should move the
+  pen off a whole pixel, and nothing in the app does today.
+- **The 18 px bake is heavier than 16 and 17 px,** at 59% edge against 69% and 67%. More of
+  its stems are solid pixels, so it reads darker and blockier than the 16 px UI text around
+  it. 18 px is also 2 px larger than the font ImGui sized the dock tab for. In the crowded
+  right dock of `fixups/final/dark/focus.png`, `board` is clipped to `boar`. The sheet draws
+  uncrowded bars, so it does not show that.
+
+**Recommendation (the builder's, not the operator's).** I would make these changes:
+
+- Draw tab text at **17 px**, the nearest whole pixel to 1.05×. It keeps the 7 / 11 / 8 gaps
+  of today's 18 px, and its stems weigh like the UI font's (67% against 69%). It is one pixel
+  closer to the width ImGui gave the tab, so it clips less in a crowded dock.
+- **Keep** the following as they are:
+  - Inconsolata Medium in lowercase. The prose face is narrower but changes the chrome's
+    voice, and capitals read louder in every bar.
+  - text on the selected tab. Accent falls to 4.79:1 on light.
+  - text_dim on the unselected tabs. Text at 70% gains 0.06 to 0.76 on dark and light and
+    loses 1.5 on high_contrast.
+  - the regular weight, with no bold.
+  - box centring, and ImGui's own snapping.
+- Optical centring is the one placement that changes the pixels. It trades the ascender
+  balance for the body's, and I would not take it without the operator pointing at that cell.
+
+Since "doesn't look right" was not specified, the operator's pointing at a cell is the
+deciding input; this recommendation is only a default.
+
+**Tests** (`tests/test_style_probe.py`) cover:
+
+- every cell's size is a whole pixel, and `push_font` binds exactly that size;
+- each row varies only its named fields;
+- the size row is 15 to 18;
+- the placement arithmetic;
+- the gap measurement on synthetic pixels;
+- each cell's measured line quotes exactly its measured gaps;
+- an unshifted label's quads are on whole pixels, and a shifted label's are moved by exactly
+  its shift;
+- tracking adds exactly 1 px per glyph gap.
+
+**Run:**
+
+- `--tabs-text` on dark, light and high_contrast, each exiting 0 from the working tree. I
+  looked at all three sheets.
+- `pytest tests/test_style_probe.py`: 220 passed, 1 failed. The failure is
+  `test_the_middle_dropdown_is_the_base_as_it_stands`. It comes from apply-theme's
+  uncommitted `popup_border_size = 0.0` in `theme.py`, not from this change.
+- ruff, mypy and black on both files.
+
+**Not run:**
+
+- crowded dock tab bars;
+- real hover;
+- DPI scaling;
+- the prose and bold faces in the bare-context vertex test, because the bare context has
+  neither face;
+- mutation testing.
+
 ## After the preview (2026-10-15)
 
 The operator looked at the preview on every theme: "This is looking fantastic although, I'm
