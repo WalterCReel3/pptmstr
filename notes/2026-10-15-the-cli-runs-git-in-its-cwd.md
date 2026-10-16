@@ -263,26 +263,44 @@ exit from a direct CLI. A marker that is present is YES whatever the exit.
   SessionStart and UserPromptSubmit are reported separately because the first fires
   at startup and the second needs a prompt to have been sent.
 
-### Results (operator-run; not yet run)
+### Results (operator-run 2026-10-16, cmd-20261016T032033Z-c492f25a7ae8, exit 0 in about 1 min, CLI 2.1.301)
 
-Command (handed to lead as a concern; not run by the builder):
 `.venv/bin/python scripts/probe_cli_git_status.py --pptmstr --trust --base "$(mktemp -d /tmp/pptmstr-cli-trust.XXXXXX)"`
+
+Arms a–h repeated their earlier results; e0 is new.
 
 | arm | expect | exit | filter | fsmonitor | hook-in | hook-out |
 |---|---|---|---|---|---|---|
-| e0-pptmstr-env-cleared | YES | not yet run | not yet run | not yet run | | |
-| p1-project-env | no | not yet run | not yet run | not yet run | | |
-| p1-control | YES | not yet run | not yet run | not yet run | | |
-| p1-neutral | no | not yet run | not yet run | not yet run | | |
-| p2-local-env | no | not yet run | not yet run | not yet run | | |
-| p2-control | YES | not yet run | not yet run | not yet run | | |
-| p2-neutral | no | not yet run | not yet run | not yet run | | |
-| k1-sessionstart-uncontained | no | not yet run | not yet run | not yet run | not yet run | not yet run |
-| k1-sessionstart-contained | no | not yet run | not yet run | not yet run | not yet run | not yet run |
-| k1-sessionstart-control | YES | not yet run | not yet run | not yet run | not yet run | not yet run |
-| k1-userprompt-uncontained | no | not yet run | not yet run | not yet run | not yet run | not yet run |
-| k1-userprompt-contained | no | not yet run | not yet run | not yet run | not yet run | not yet run |
-| k1-userprompt-control | YES | not yet run | not yet run | not yet run | not yet run | not yet run |
+| e0-pptmstr-env-cleared | YES | 0 | YES | no | | |
+| p1-project-env | no | 0 | **YES** | no | | |
+| p1-control | YES | 0 | YES | no | | |
+| p1-neutral | no | 0 | no | no | | |
+| p2-local-env | no | 0 | **YES** | no | | |
+| p2-control | YES | 0 | YES | no | | |
+| p2-neutral | no | 0 | no | no | | |
+| k1-sessionstart-uncontained | no | 0 | no | no | **YES** | **YES** |
+| k1-sessionstart-contained | no | 0 | no | no | **YES** | **YES** |
+| k1-sessionstart-control | YES | 0 | YES | no | YES | YES |
+| k1-userprompt-uncontained | no | 0 | no | no | **YES** | **YES** |
+| k1-userprompt-contained | no | 0 | no | no | **YES** | **YES** |
+| k1-userprompt-control | YES | 0 | YES | no | YES | YES |
 
-The same command also re-runs a–h. If any of them differs from the table above, that
-is recorded here too.
+**What it settles:**
+- **e0:** pptmstr's own launch path runs git status, so e and f's "no" is the switch working.
+- **p1 and p2:** a tree's own `.claude/settings.json` or `settings.local.json` turns the git-status
+  section back on over pptmstr's variable. The neutral arms rule out the CLI's own tracked-file
+  check.
+- **k1:** a tree's own project hooks run, both SessionStart and UserPromptSubmit, when pptmstr
+  launches the CLI, uncontained and contained. The hook wrote outside the tree in both. So the
+  contained session's sandbox does not cover its hooks, which run in the CLI's process as the
+  operator.
+
+So any session that can write `<cwd>/.claude/settings.json` makes the operator run a command of
+its choosing, unsandboxed, the next time pptmstr launches or resumes a session in that
+directory. The git-status leak is the narrow case, and project hooks are the wide one. The
+environment-variable switch does nothing against hooks.
+
+**The cause the measurement names:** the CLI loads the project and local settings tiers for a
+session whose cwd is that tree. pptmstr does not set `setting_sources`. A fix, and its cost (a
+repo's own `.claude/settings.json` stops applying), is the operator's decision. It is raised as
+one.
