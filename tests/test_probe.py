@@ -620,3 +620,73 @@ def test_bootstrap_takes_the_newest_of_a_wider_range(tmp_path: Path) -> None:
     assert "installs on (python3.14 python3.13 python3.12 python3.11)" in done.stdout
     _, log, _ = _choose(tmp_path / "narrow", [14, 13, 11], ((3, 11), (3, 11)))
     assert _staged(log) == ["python3.11"]
+
+
+def _agent_cli(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    *,
+    returncode: int,
+    stdout: str,
+) -> tuple[list[str], str]:
+    """
+    check_agent_cli against a bundled CLI that answers --version as given.
+
+    The SDK is a stand-in module whose ``_bundled`` copy is a real executable
+    file, so the resolution and the X_OK test run as they would; only the
+    subprocess is answered, because the outputs that matter -- a stripped binary's
+    above all -- are not ones this machine's install produces.
+    """
+    sdk = tmp_path / "claude_agent_sdk"
+    (sdk / "_bundled").mkdir(parents=True)
+    cli = sdk / "_bundled" / ("claude.exe" if sys.platform == "win32" else "claude")
+    cli.write_text("")
+    cli.chmod(0o755)
+    module = ModuleType("claude_agent_sdk")
+    module.__file__ = str(sdk / "__init__.py")
+    monkeypatch.setitem(sys.modules, "claude_agent_sdk", module)
+
+    def run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        assert cmd == [str(cli), "--version"]
+        return subprocess.CompletedProcess(cmd, returncode, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(probe.subprocess, "run", run)
+    r = probe.Report()
+    probe.check_agent_cli(r)
+    return r.fatal, capsys.readouterr().out
+
+
+def test_a_genuine_claude_code_cli_passes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Verbatim from the CLI bundled with claude-agent-sdk 0.2.167.
+    fatal, out = _agent_cli(
+        tmp_path, monkeypatch, capsys, returncode=0, stdout="2.1.300 (Claude Code)\n"
+    )
+    assert fatal == []
+    assert "2.1.300 (Claude Code) — bundled in claude-agent-sdk" in out
+
+
+def test_a_stripped_cli_that_is_only_bun_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """
+    `strip --strip-unneeded` on the bundled CLI leaves the Bun runtime without
+    the Claude Code it carried: --version still exits 0, and prints Bun's version.
+    """
+    fatal, out = _agent_cli(tmp_path, monkeypatch, capsys, returncode=0, stdout="1.4.3\n")
+    assert len(fatal) == 1
+    assert "is not Claude Code: --version printed '1.4.3'" in fatal[0]
+    assert "Bun runtime" in fatal[0]
+    assert "stripped binary" in fatal[0]
+    assert f"[{probe.FAIL}] claude CLI" in out
+
+
+def test_a_cli_that_exits_nonzero_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    fatal, _ = _agent_cli(
+        tmp_path, monkeypatch, capsys, returncode=1, stdout="2.1.300 (Claude Code)\n"
+    )
+    assert fatal == ["claude CLI: exit 1: 2.1.300 (Claude Code)"]

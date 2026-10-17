@@ -1002,6 +1002,11 @@ def run_post(smoke: str) -> int:
     return finish(r)
 
 
+# What `claude --version` ends with on every release this was checked against
+# (2.1.251 through 2.1.301): "2.1.300 (Claude Code)".
+CLAUDE_CODE_MARKER = "(Claude Code)"
+
+
 def check_agent_cli(r: Report) -> None:
     """Prove the Claude Code CLI the SDK will actually spawn is runnable.
 
@@ -1048,7 +1053,23 @@ def check_agent_cli(r: Report) -> None:
         r.fail("claude CLI", f"exit {proc.returncode}: {detail[0] if detail else '(no output)'}")
         return
 
-    r.ok("claude CLI", f"{proc.stdout.strip()} — {origin}")
+    # The CLI is a Bun single-file executable: the Claude Code program rides in
+    # the ELF as a payload that `strip` discards, leaving a binary that still runs
+    # and exits 0 on --version -- as the Bun runtime, printing Bun's own version.
+    # A zero exit therefore proves nothing; the "(Claude Code)" suffix does.
+    version = proc.stdout.strip()
+    if CLAUDE_CODE_MARKER not in version:
+        r.fail(
+            "claude CLI",
+            f"{cli} is not Claude Code: --version printed {version or '(nothing)'!r}, "
+            "not '<version> (Claude Code)'. A bare version like that is the Bun "
+            "runtime the CLI is built on, most likely a stripped binary that has lost "
+            "the embedded Claude Code; every agent session would fail to start",
+            "pip install --force-reinstall claude-agent-sdk",
+        )
+        return
+
+    r.ok("claude CLI", f"{version} — {origin}")
 
 
 def finish(r: Report) -> int:
