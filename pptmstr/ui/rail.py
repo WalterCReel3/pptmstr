@@ -173,8 +173,30 @@ def _normal() -> None:
     imgui.pop_font()
 
 
-def _money(usd: float) -> str:
-    return f"${usd:,.2f}"
+def _short_tokens(count: int) -> str:
+    if count >= 1_000_000:
+        return f"{count / 1_000_000:.1f}M"
+    if count >= 1_000:
+        return f"{count / 1_000:.1f}k"
+    return str(count)
+
+
+def card_spend(rec: AgentRecord) -> str:
+    """
+    The spend slot on a card: what this agent is measured to have spent, and what
+    the figure covers.
+
+    A root draws its dollars as the session's, because the CLI's figure covers the
+    whole query pipeline, sub-agents included. A sub-agent draws its own input and
+    output tokens: no message carries dollars per agent, so its record's dollar
+    field is a default and not a reading, and tokens are the spend that is
+    counted per agent. Cache reads are left out of the card because they dwarf
+    the rest and say little about work done; Details lists them.
+    """
+    usage = rec.usage
+    if rec.node_id[1] is not None:
+        return f"{_short_tokens(usage.input_tokens + usage.output_tokens)} tok"
+    return f"session ${usage.total_cost_usd:,.2f}"
 
 
 def _by_session(snap: Snapshot) -> dict[str, list[Obligation]]:
@@ -958,16 +980,27 @@ def _card(
             # One line, and no model on it: the two slots an ended card has left are
             # what it became and what it cost. A model that no longer runs anything is
             # history, and this is the one density with no room to spare for it.
+            label, spend = STATE_LABEL[rec.state], card_spend(rec)
+            _small()
+            fact_w = (
+                imgui.calc_text_size(label).x
+                + imgui.get_style().item_spacing.x
+                + imgui.calc_text_size(spend).x
+            )
+            _normal()
             imgui.text_colored(
                 P.text_dim.vec4,
-                ellipsis(session_menu.card_title(rec), width - 150.0 - _subs_width(signal)),
+                ellipsis(
+                    session_menu.card_title(rec),
+                    width - 54.0 - _PAD - fact_w - _subs_width(signal),
+                ),
             )
             marker = _draw_subs(signal)
             _small()
-            imgui.set_cursor_screen_pos(imgui.ImVec2(hi.x - 96.0, y + 2.0))
-            imgui.text_colored(P.text_dim.vec4, STATE_LABEL[rec.state])
+            imgui.set_cursor_screen_pos(imgui.ImVec2(hi.x - _PAD - fact_w, y + 2.0))
+            imgui.text_colored(P.text_dim.vec4, label)
             imgui.same_line()
-            imgui.text_colored(P.text_dim.vec4, _money(rec.usage.total_cost_usd))
+            imgui.text_colored(P.text_dim.vec4, spend)
             _normal()
         return _tail(
             snap,
@@ -1017,7 +1050,7 @@ def _card(
         _normal()
 
     topic_colour = P.danger if rec.state is AgentState.FAILED else P.text_dim
-    spend = _money(rec.usage.total_cost_usd)
+    spend = card_spend(rec)
     # Every card's own model, not its session's. A role can override it and
     # ``Role.model`` rides on ``AgentSpawned``, so on a sub-agent this is the slot
     # that says which -- and the record used to lie about it.

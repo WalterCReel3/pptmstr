@@ -515,7 +515,7 @@ def test_a_closed_card_never_reads_as_a_finished_run_that_cost_nothing(
     store.apply(launch(LEAD))
     store.apply(AgentFinished(LEAD, AgentState.DONE, ended_at=5.0))
     ran_here = Frame(monkeypatch, store.snapshot(), now_wall=WALL).text
-    assert "done" in ran_here and "$0.00" in ran_here
+    assert "done" in ran_here and "session $0.00" in ran_here
 
     store = Store()
     store.apply(recall(ended_how=EndedHow.CLOSED, last_active=WALL - 60))

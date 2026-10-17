@@ -922,11 +922,65 @@ def _click_taken(state: Any, show: Callable[[str], Steps]) -> Steps:
     yield from show("BOARD")
 
 
+def _spend(state: Any, fixtures: Path) -> Steps:
+    """
+    The fake team after a turn that cost something, banked as the real driver
+    banks it: tokens on each agent that spent them, and the result's dollars on
+    the lead alone, because the CLI reports dollars for the whole session and never
+    per agent. The fake driver itself accrues nothing, so without this every card
+    reads zero.
+
+    Shot with the team's group open and HEALTH on the lead, then Details on a
+    worker and on the lead.
+    """
+    from imgui_bundle import hello_imgui
+
+    from pptmstr.intents import UsageAccrued
+    from pptmstr.model import UsageRollup
+    from pptmstr.ui.focus import Scope
+
+    yield from _until("the fake team", lambda: _team(state) is not None)
+    root = _team(state)
+    yield from _until("the team's workers", lambda: len(state.frame_snap.subagents_of(root)) >= 3)
+    workers = [rec.node_id for rec in state.frame_snap.subagents_of(root)]
+    emit = state.bridge.emit
+    emit(UsageAccrued(root, UsageRollup(input_tokens=8_200, output_tokens=1_900)))
+    for at, worker in enumerate(workers):
+        spent = (41_000, 12_500, 0)[at % 3]
+        emit(UsageAccrued(worker, UsageRollup(input_tokens=spent, output_tokens=spent // 6)))
+    emit(UsageAccrued(root, UsageRollup(total_cost_usd=1.87)))
+    yield from _until(
+        "the lead's dollars", lambda: state.frame_snap.nodes[root].usage.total_cost_usd > 1.0
+    )
+
+    # HEALTH is resident in FOCUS only.
+    state.pending_layout = "FOCUS"
+    yield from _frames()
+    state.rail.expanded.add(root[0])
+    hello_imgui.get_runner_params().docking_params.focus_dockable_window("HEALTH")
+    state.focus.to_node(state.frame_snap, root, scope=Scope.SESSION)
+    yield from _frames()
+    yield "60-spend-fleet-and-health"
+
+    state.cards.details.ask(workers[0])
+    yield from _frames(6)
+    yield "61-spend-details-worker"
+    state.cards.details.close()
+    yield from _frames()
+
+    state.cards.details.ask(root)
+    yield from _frames(6)
+    yield "62-spend-details-lead"
+    state.cards.details.close()
+    yield from _frames()
+
+
 SCENARIOS: dict[str, Callable[[Any, Path], Steps]] = {
     "resume": _resume,
     "containment": _containment,
     "failure": _failure,
     "board": _board,
+    "spend": _spend,
 }
 
 

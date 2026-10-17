@@ -220,7 +220,7 @@ def test_a_closed_sessions_cost_is_said_with_the_caveat_details_gives_it(monkeyp
     caveat = "it may double-count across resumes"
     assert caveat in cost and "an estimate" in cost
 
-    rows = session_details._spend_rows(recalled_snapshot().nodes[CLOSED_ROOT])
+    rows = session_details._spend_rows(recalled_snapshot(), recalled_snapshot().nodes[CLOSED_ROOT])
     assert any(caveat in str(row) for row in rows), "the words are Details' words"
 
 
