@@ -5,6 +5,8 @@ __pycache__/
 .ruff_cache/
 .pytest_cache/
 dist/
+# scripts/make_dist.py stages its two exports and two builds here.
+/build/
 # hello_imgui slugifies a window title into an ini filename and writes it to the
 # working directory unless ini_folder_type says otherwise. Ignored as a backstop;
 # the fix is to set ini_folder_type at every runner construction site.

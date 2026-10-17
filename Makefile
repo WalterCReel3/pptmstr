@@ -1,4 +1,4 @@
-.PHONY: help bootstrap worktree lock lock-check lock-gate deps typeset-env probe smoke run shot shot-xvfb test lint format format-file typecheck typecheck-all verify check clean
+.PHONY: help bootstrap worktree lock lock-check lock-gate deps typeset-env probe smoke run shot shot-xvfb test lint format format-file typecheck typecheck-all verify check dist clean
 
 PY  := .venv/bin/python
 PIP := .venv/bin/python -m pip
@@ -311,6 +311,15 @@ verify: venv-check ## the full bash differential probe for the segment split
 
 check: lint typecheck lock-gate test   ## everything the CI gate would run
 
+# What .github/workflows/release.yml uploads, built here the same way: a commit and
+# not the working tree, twice, refused unless the two are the same bytes.
+# scripts/make_dist.py says what it checks; the workflow calls the script directly
+# because a runner has no ./.venv.
+DIST_DIR ?= dist
+DIST_REV ?= HEAD
+dist: venv-check   ## a wheel and an sdist of HEAD (not the working tree) into dist/, built twice, with sha256
+	$(PY) -P scripts/make_dist.py --out "$(DIST_DIR)" --rev "$(DIST_REV)" $(ARGS)
+
 clean:
-	rm -rf .mypy_cache .ruff_cache .pytest_cache dist
+	rm -rf .mypy_cache .ruff_cache .pytest_cache dist build
 	find . -name __pycache__ -type d -prune -exec rm -rf {} +

@@ -1,0 +1,367 @@
+# pptmstr's release: the wheel and the sdist of a tagged commit, to PyPI.
+#
+# WRITTEN WITHOUT BEING RUN ON GITHUB (2026-10-17). Some of its steps were run
+# on a developer's machine the same day; what, and with what, is in the result
+# of board task REL. What was never run is everything that is GitHub's or
+# PyPI's: the trigger, the environments, the OIDC exchange, the upload, and
+# the install of the built wheel from the index on a runner.
+# tests/test_release_workflow.py holds this file to the shape described here.
+# The shape is imscribe's .github/workflows/release.yml.
+#
+# WHAT LEAVES THIS REPOSITORY, AND WHEN. Two jobs, and no other, send anything
+# anywhere; each needs both the build job and the install check to have passed:
+#
+#   publish-pypi      a PUSHED TAG v<version>, and nothing else: the two files
+#                     go to PyPI as project `pptmstr`, by Trusted Publishing
+#                     (OIDC; no token is stored anywhere), in the GitHub
+#                     environment `pypi`. The name was not registered on
+#                     2026-10-17 (pypi.org/pypi/pptmstr/json answered 404): the
+#                     owner registers a PENDING trusted publisher for this
+#                     repository, this file and that environment before the
+#                     first tag, and a pending publisher does not reserve the
+#                     name.
+#   publish-testpypi  ONLY a run started by hand with the input `testpypi` set
+#                     to true (it is false unless a person sets it): the files
+#                     built from whatever ref the run was started on go to
+#                     TestPyPI in the environment `testpypi`. Until the owner
+#                     registers a trusted publisher on test.pypi.org and
+#                     creates that environment, this job fails at its upload
+#                     and nothing else is affected.
+#
+# A push to a branch does not start this workflow at all. A run started by
+# hand on a tag does not publish to PyPI either.
+#
+# BEFORE THE FIRST TAG the owner sets, in the repository's settings on GitHub:
+#
+#   - the environment `pypi`, with a required reviewer, and a deployment rule
+#     that allows tags matching `v*` and nothing else (the same for
+#     `testpypi` if it is to be used, with its own rule);
+#   - a tag ruleset on `v*` that restricts who may create, move or delete it;
+#   - the pending trusted publisher on pypi.org named above.
+#
+# This file cannot enforce any of that, and its own checks are no gate against
+# someone who can push a tag. GitHub runs the workflow file AS IT IS IN THE
+# TAGGED COMMIT: a `v*` tag pushed on a commit whose release.yml has had "The
+# tag is the version", make_dist or the install check deleted runs that
+# commit's file, whose publish-pypi job still gets an OIDC token in
+# environment `pypi`, and PyPI's trusted publisher accepts it because it names
+# only this repository, this file's path and that environment. Only settings
+# that live outside the repository -- who may create the tag, who must approve
+# the environment, which refs it accepts -- stand between write access and an
+# upload.
+#
+# THE BUILD is scripts/make_dist.py, which is what `make dist` runs: the
+# commit exported twice with `git archive`, built twice, refused unless the
+# two builds are the same bytes, the wheel holds `pptmstr/` (with the two
+# force-included .ref files) and its metadata and nothing else, and the sdist
+# holds what pyproject.toml's sdist `include` names and nothing else. It is
+# called directly and not through `make`, which wants ./.venv; the script
+# needs `build` and `hatchling` and nothing of pptmstr.
+#
+# THE TAG MUST BE THE VERSION. The version is dynamic: hatchling reads it from
+# `__version__` in pptmstr/__init__.py ([tool.hatch.version]), and that is the
+# line the step "The tag is the version" reads. A tag `v0.2.0` on a commit
+# whose __init__.py says another version would publish that other version
+# under a release named for this one; the step refuses it. A file name is
+# never accepted twice by PyPI, so a wrong upload is a version number spent:
+# fix and release the next.
+#
+# THE FILES ARE KEPT BEFORE ANYTHING THEY DEPEND ON RUNS. The build job copies
+# the two files to `upload/`, checks them against the `<file>.sha256` make_dist
+# wrote, publishes those two sha256 lines as the job's output `sha256`, runs
+# twine check, and keeps `upload/` as the artifact `dist`. It never installs
+# the wheel. Installing it means running code from the index (the newest
+# releases of every unpinned dependency, imtypeset's native library, the
+# bundled claude binary), and any of it could rewrite files on the runner it
+# runs on; it runs in the job install-check, on another runner, after the
+# artifact is already kept. Install-check and both publish jobs download the
+# artifact and refuse it unless it is exactly two files whose sha256 are the
+# build job's output.
+#
+# KNOWN AND OPEN: the build job's `pip install build hatchling twine` is
+# unpinned and unhashed, and it runs before make_dist and before the hashes are
+# taken, so a compromised release of one of those three could change what is
+# built and hashed. Pinning them by hash needs a resolved lock made with network
+# access, which was not done on 2026-10-17.
+#
+# BEFORE ANYTHING IS SENT the kept wheel is installed in install-check from the
+# index, with its dependencies, into a fresh venv, and `pip check` passes. Then
+# three questions, each red on the wrong answer:
+#
+#   `pptmstr --version` opens no window and ALWAYS exits 0 (pptmstr/version.py:
+#   a report of what is wrong is not itself a failure), so its exit says
+#   nothing. Its lines are read instead: pptmstr installed (not a checkout),
+#   each of the three pins of the unit the version that runs, and the
+#   typesetting library accepted beside the wheel.
+#
+#   `pptmstr --version` answers before `pptmstr.app` is imported, so the step
+#   after it imports `pptmstr.app`, which imports every pane: a module missing
+#   from the wheel, an undeclared dependency or a syntax error anywhere in the
+#   app is red. The import opens no window and needs no display (measured
+#   2026-10-17 with DISPLAY and WAYLAND_DISPLAY unset: it exits 0, starts no
+#   thread and creates no ImGui context).
+#
+#   The claude CLI that claude-agent-sdk bundles prints "(Claude Code)" in its
+#   --version, which is scripts/probe.py's CLAUDE_CODE_MARKER; the installed
+#   pptmstr has no probe, so the step locates `claude_agent_sdk/_bundled/claude`
+#   itself. The suffix is not documented by Anthropic: if a release stops
+#   printing it this step goes red on a good binary, never green on a bad one.
+#
+# That install needs the three exact pins on PyPI: imgui-bundle 1.92.900,
+# imscribe 0.2.0 and imtypeset 0.4.3.192900 (imscribe 0.2.0 was there on
+# 2026-10-17). It runs on CPython 3.11 only. The wheel is pure Python and the
+# same file for every interpreter; what another interpreter would test is which
+# dependency wheels PyPI has for it, which the release cannot change and the
+# requires-python cap already answers (tests/test_pypi_metadata.py).
+#
+# THE TWO FILES AND NOTHING ELSE are uploaded. `dist/` also holds
+# `<file>.sha256` and `BUILT-FROM`, which an upload of `dist/*` would stop on
+# ("Unknown distribution format", measured with twine 7.0.0 on imscribe's), so
+# the two are copied into `upload/`.
+#
+# THE SYSTEM LIBRARIES are installed before the install step: the apt column
+# of scripts/probe.py's X11_RUNTIME_LIBS, the sonames the imgui-bundle wheel's
+# vendored GLFW and extension load (tests/test_release_workflow.py holds the
+# two lists equal). `pptmstr --version` imports imgui_bundle and loads the
+# library; it creates no GL context, so the Mesa driver packages imscribe's
+# release also installs are not needed here. Whether a bare ubuntu-24.04
+# runner already has these is NOT KNOWN; the step makes it not matter.
+#
+# A RE-RUN OF A VERSION THAT IS ALREADY ON THE INDEX GOES GREEN HAVING UPLOADED
+# NOTHING. `skip-existing: true` is there so that an upload which stopped after
+# one of the two files can be finished by running the job again. Its cost: a
+# tag pushed for a version PyPI already holds (the tag moved, or pushed twice)
+# builds, passes, and publishes no file, and the run looks like a release. The
+# files on the index are then the FIRST upload's, not this run's: compare the
+# sha256 in the build job's log (`dist/BUILT-FROM`) with the index's.
+#
+# EVERY ACTION IS NAMED BY A COMMIT, not by a tag that can be moved: the
+# commits imscribe's release.yml names, copied from it on 2026-10-17, with the
+# version each was read as on the line above its `uses`. GitHub's own four:
+# checkout v7.0.1, setup-python v7.0.0, upload-artifact v7.0.2,
+# download-artifact v8.0.2. The publishing action is
+# pypa/gh-action-pypi-publish v1.14.2 (dc37677b, read by imscribe from
+# api.github.com on 2026-10-13). It runs on Linux runners only.
+
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      testpypi:
+        description: "true: build this ref and upload it to TestPyPI (needs a trusted publisher there and the environment testpypi). Never PyPI."
+        type: boolean
+        default: false
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: "release-${{ github.ref }}"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: "Build and check, and keep the two files"
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    outputs:
+      sha256: "${{ steps.files.outputs.sha256 }}"
+    steps:
+      - name: "Check out pptmstr"
+        # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: "Python 3.11"
+        # v7.0.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.11"
+
+      - name: "The tag is the version"
+        if: github.event_name == 'push'
+        env:
+          RELEASE_TAG: "${{ github.ref_name }}"
+        run: |
+          version="$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' pptmstr/__init__.py)"
+          test -n "$version"
+          echo "pptmstr/__init__.py says $version; the tag is $RELEASE_TAG"
+          test "v$version" = "$RELEASE_TAG"
+
+      - name: "The tools that build and check"
+        run: python -m pip install "build>=1.2" "hatchling>=1.27" "twine>=6.0"
+
+      - name: "Build the commit twice and compare (what make dist runs)"
+        run: python -P scripts/make_dist.py --out dist --rev HEAD
+
+      - name: "The two files, and their sha256 as make_dist wrote it"
+        id: files
+        run: |
+          mkdir upload
+          cp dist/*.whl dist/*.tar.gz upload/
+          cat dist/*.whl.sha256 dist/*.tar.gz.sha256 > sha256.txt
+          cd upload
+          sha256sum --strict -c ../sha256.txt
+          ls -l
+          cat ../dist/BUILT-FROM
+          {
+            echo "sha256<<END_OF_SHA256"
+            cat ../sha256.txt
+            echo "END_OF_SHA256"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: "Whether PyPI will render the description"
+        run: python -m twine check --strict upload/*
+
+      - name: "Keep the two files for the install check and the publishing jobs"
+        # v7.0.2
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: dist
+          path: upload
+          if-no-files-found: error
+
+  install-check:
+    name: "Install the kept wheel from the index, and ask it what runs"
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: "The two files the build job kept"
+        # v8.0.2
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: dist
+          path: upload
+
+      - name: "The two files are the bytes make_dist checked"
+        env:
+          BUILT_SHA256: "${{ needs.build.outputs.sha256 }}"
+        run: |
+          printf '%s\n' "$BUILT_SHA256" | grep . > sha256.txt
+          test "$(wc -l < sha256.txt)" = 2
+          test "$(ls -A upload | wc -l)" = 2
+          cd upload
+          sha256sum --strict -c ../sha256.txt
+
+      - name: "Python 3.11"
+        # v7.0.0
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.11"
+
+      - name: "System libraries (what imgui-bundle's extension loads; scripts/probe.py's list)"
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libx11-6 libxext6 libxcursor1 libxi6 libxinerama1 libxrandr2 libgl1 \
+            libxcb1 libxrender1 libxxf86vm1
+
+      - name: "Install the wheel with its dependencies from the index, and ask it what runs"
+        run: |
+          python -m venv installed
+          installed/bin/python -m pip install upload/*.whl
+          installed/bin/python -m pip check
+          cd installed
+          bin/pptmstr --version > version.txt
+          cat version.txt
+          grep -q '^pptmstr [^ ]* (installed at ' version.txt
+          test "$(grep -c ', the version pptmstr pins' version.txt)" = 3
+          grep -q '^typeset text: the library is accepted beside this wheel ' version.txt
+
+      - name: "The installed app imports, and every pane with it"
+        run: |
+          cd installed
+          bin/python -P -c "import pptmstr.app"
+
+      - name: "The claude CLI claude-agent-sdk bundled is Claude Code"
+        run: |
+          cd installed
+          cli="$(bin/python -P -c 'import claude_agent_sdk, os; print(os.path.join(os.path.dirname(claude_agent_sdk.__file__), "_bundled", "claude"))')"
+          said="$("$cli" --version)"
+          echo "$cli --version: $said"
+          case "$said" in *"(Claude Code)"*) ;; *) exit 1 ;; esac
+
+  publish-pypi:
+    name: "Publish to PyPI"
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs:
+      - build
+      - install-check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: pypi
+      url: https://pypi.org/project/pptmstr/
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: "The two files the build job kept"
+        # v8.0.2
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: dist
+          path: upload
+
+      - name: "The two files are the bytes make_dist checked"
+        env:
+          BUILT_SHA256: "${{ needs.build.outputs.sha256 }}"
+        run: |
+          printf '%s\n' "$BUILT_SHA256" | grep . > sha256.txt
+          test "$(wc -l < sha256.txt)" = 2
+          test "$(ls -A upload | wc -l)" = 2
+          cd upload
+          sha256sum --strict -c ../sha256.txt
+
+      # v1.14.2
+      - name: "Upload, by Trusted Publishing"
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33
+        with:
+          packages-dir: upload
+          skip-existing: true
+
+  publish-testpypi:
+    name: "Publish to TestPyPI (a rehearsal)"
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.testpypi == 'true'
+    needs:
+      - build
+      - install-check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: testpypi
+      url: https://test.pypi.org/project/pptmstr/
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: "The two files the build job kept"
+        # v8.0.2
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: dist
+          path: upload
+
+      - name: "The two files are the bytes make_dist checked"
+        env:
+          BUILT_SHA256: "${{ needs.build.outputs.sha256 }}"
+        run: |
+          printf '%s\n' "$BUILT_SHA256" | grep . > sha256.txt
+          test "$(wc -l < sha256.txt)" = 2
+          test "$(ls -A upload | wc -l)" = 2
+          cd upload
+          sha256sum --strict -c ../sha256.txt
+
+      # v1.14.2
+      - name: "Upload to TestPyPI, by Trusted Publishing"
+        uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33
+        with:
+          packages-dir: upload
+          repository-url: https://test.pypi.org/legacy/
+          skip-existing: true

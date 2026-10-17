@@ -119,6 +119,10 @@ dev = [
     # scripts/screenshot.py and scripts/mock_cards.py import this, for the
     # glReadPixels grab.
     "pyopengl>=3.1",
+    # `make dist` (scripts/make_dist.py): `python -m build --no-isolation` with
+    # the hatchling backend, from this environment and so with no network.
+    "build>=1.2",
+    "hatchling>=1.27",
 ]
 
 [project.urls]
