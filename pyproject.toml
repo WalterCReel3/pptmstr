@@ -5,10 +5,30 @@ name = "pptmstr"
 dynamic = ["version"]
 description = "Puppet Master — a multi-agent LLM orchestrator with an immediate-mode UI"
 readme = "README.md"
-requires-python = ">=3.11"
+# The Pythons the pinned imtypeset has wheels for (pptmstr/pairing.py
+# IMTYPESET_PYTHONS; tests/test_pypi_metadata.py holds the two equal). Past the
+# cap the unit has no wheels: imtypeset's marker is false and imgui-bundle has
+# only a source distribution, so an open bound lets a resolver on a newer
+# interpreter pick pptmstr and then compile imgui-bundle or fail partway,
+# instead of refusing here with the reason. Every published version carries
+# it, because a resolver that meets a cap backtracks to the newest version
+# without one.
+requires-python = ">=3.11,<3.15"
 authors = [{ name = "Walter Reel" }]
 license = "MIT"
 license-files = ["LICENSE"]
+# macOS and Linux only: the unit has no Windows wheels (see the imtypeset line
+# below). The Python versions are the cap's, and the same test holds them to it.
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: X11 Applications",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+]
 dependencies = [
     # imgui-bundle wheels ship their own GLFW3 + OpenGL3 backend, so no system
     # GLFW is required. On Linux the vendored libglfw.so is an X11-only build,
@@ -100,6 +120,10 @@ dev = [
     # glReadPixels grab.
     "pyopengl>=3.1",
 ]
+
+[project.urls]
+Homepage = "https://github.com/WalterCReel3/pptmstr"
+Repository = "https://github.com/WalterCReel3/pptmstr"
 
 [project.scripts]
 # Not `pptmstr.app:main`: the entry settles where the text library is found and
