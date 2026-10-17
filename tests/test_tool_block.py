@@ -1823,3 +1823,313 @@ def test_find_says_a_line_an_edits_diff_left_out_is_not_shown() -> None:
     block = tool_block.layout(held, live=True)
     assert texts(block.body) == [" keep 1", "-change", "+changed", " keep 3"]
     assert [h.shown for h in tool_block.find(held, block, "keep 0")] == [False, False]
+
+
+# -- a block's rows are the library's, and selectable ------------------------------------
+#
+# In TYPESET the head's and body's rows in the code face are set by the library
+# (``tool_block.draw``'s ``select``, ``typeset.views.rows``): each glyph where ImGui
+# drew it, in the ink ImGui drew it in, and the block as tall as it was. Read back
+# from the draw list's glyph quads and from the views; nobody reads a pixel.
+
+
+def _faces() -> tool_block.Faces:
+    px = typeset.body_px()
+    small = float(round(px * 0.8))
+    return tool_block.Faces(
+        mono=lambda: typeset.font(typeset.Weight.CODE, px),
+        prose=lambda: typeset.font(typeset.Weight.REGULAR, px),
+        caption=lambda: typeset.font(typeset.Weight.REGULAR, small),
+    )
+
+
+FAILED = entry(
+    "Bash",
+    {"command": "pytest -q tests/test_parse.py"},
+    "Exit code 1\n\nFAILED tests/x.py::boom - AssertionError\n\n1 failed, 37 passed in 0.41s",
+    error=True,
+)
+"""A failed run: a red rule, a blank output line, and rows in more than one ink."""
+
+
+class Drawn:
+    """
+    One block drawn alone in the test window, in the frame's own draw data: every
+    glyph quad of it as its left, top and colour, its rectangle, and where it left
+    the cursor.
+    """
+
+    def __init__(self, seam: Any, block: tool_block.Layout, select: Any) -> None:
+        self.glyphs: list[tuple[float, float, int]] = []
+        self.rect: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
+        self.after = 0.0
+
+        def body() -> None:
+            tool_block.draw(block, key="k", faces=_faces(), select=select)
+            low, high = seam.get_item_rect_min(), seam.get_item_rect_max()
+            self.rect = (low.x, low.y, high.x, high.y)
+            self.after = float(seam.get_cursor_screen_pos().y)
+
+        for _ in range(3):
+            rig.frame(seam, body)
+        white = seam.get_font_tex_uv_white_pixel()
+        lists = seam.get_draw_data().cmd_lists
+        left, top, right, bottom = self.rect
+        for n in range(lists.size()):
+            buffer = lists[n].vtx_buffer
+            for at in range(0, buffer.size() - 3, 4):
+                corners = [buffer[at + k] for k in range(4)]
+                uv = corners[0].uv
+                if uv.x == white.x and uv.y == white.y:
+                    continue
+                x = min(c.pos.x for c in corners)
+                y = min(c.pos.y for c in corners)
+                if left <= x < right and top <= y < bottom:
+                    self.glyphs.append((round(x, 2), round(y, 2), int(corners[0].col)))
+        self.glyphs.sort()
+
+
+EDIT_OLD = "keep 0\nkeep 1\nchange\nkeep 3\nkeep 4"
+SET = {
+    "failed bash": FAILED,
+    "edit": entry(
+        "Edit",
+        {
+            "file_path": "/a/b.py",
+            "old_string": EDIT_OLD,
+            "new_string": EDIT_OLD.replace("change", "changed"),
+        },
+        "ok",
+    ),
+    "read": entry("Read", {"file_path": "/a/b.py"}, numbered(9)),
+    "grep": entry("Grep", {"pattern": "x", "output_mode": "content"}, "a.py:3:x = 1\nb.py:9:y = x"),
+    "webfetch": entry("WebFetch", {"url": "https://example.com/a", "prompt": "sum"}, "A page."),
+}
+"""
+Blocks whose rows are in one ink a row (a failed run's, an edit's diff), in two
+inks a row (Read's numbers, Grep's locations), and a block with no row the
+library sets: a link with a tooltip and prose rows (WebFetch).
+"""
+
+
+@pytest.mark.parametrize("held", SET.values(), ids=SET.keys())
+def test_a_blocks_rows_set_by_the_library_are_every_glyph_and_ink_imgui_drew(
+    seam: Any, held: ToolEntry
+) -> None:
+    """
+    The same block with its rows ImGui's and with them the library's: every glyph
+    on the same pixel in the same ink, the block as tall, and the cursor left
+    where it was. So each row's inks -- the error's, the dim lines, a diff's,
+    a number's beside its line -- are as they were, and nothing under the block
+    moves. A row in the prose face or with a tooltip stays ImGui's.
+    """
+    block = tool_block.layout(held, live=False)
+    imgui_s = Drawn(seam, block, None)
+    cache = typeset.ViewCache()
+    library_s = Drawn(seam, block, (cache, "b"))
+    selectable = [row for row in (*block.head, *block.body) if tool_block._selectable(row)]
+    assert bool(cache.keys()) == bool(selectable)
+    assert all(cache.views(key) for key in cache.keys()), "every run is the library's"
+    assert library_s.rect == imgui_s.rect
+    assert library_s.after == imgui_s.after
+    assert imgui_s.glyphs and library_s.glyphs == imgui_s.glyphs
+    inks = {ink for row in selectable for _, ink, text in row if text.strip()}
+    drawn = {ink for _, _, ink in library_s.glyphs}
+    assert {tool_block._ink(name).u32 for name in inks} <= drawn
+
+
+def _point(view: Any, block: int, column: int) -> tuple[float, float]:
+    """
+    On screen, a quarter into the cell of ``column`` of row ``block`` of a view,
+    half way down its line: a caret there is before that column.
+    """
+    (line,) = view.set_lines(block, block + 1)
+    cell = typeset.face_font("CODE").get_font_baked(typeset.body_px()).get_char_advance(ord("x"))
+    left, top = view.origin
+    return (left + line.left + (column + 0.25) * cell, top + (line.top + line.bottom) / 2)
+
+
+def _drag(im: Any, draw: Callable[[], None], start: tuple[float, float], end: Any) -> None:
+    """A press at ``start``, a move to ``end`` and a release, each a frame of ImGui's input."""
+    io = im.get_io()
+    io.add_mouse_pos_event(*start)
+    draw()
+    io.add_mouse_button_event(0, True)
+    draw()
+    io.add_mouse_pos_event(*end)
+    draw()
+    io.add_mouse_button_event(0, False)
+    draw()
+
+
+@pytest.mark.parametrize(
+    ("held", "first", "last", "expected"),
+    [
+        (FAILED, (1, 7), (1, 17), "tests/x.py"),
+        (FAILED, (1, 0), (3, 1), "FAILED tests/x.py::boom - AssertionError\n\n1"),
+        (SET["read"], (1, 0), (2, 3), "   2 line 2\n   3"),
+        (SET["edit"], (1, 0), (2, 8), "-change\n+changed"),
+    ],
+    ids=["within a line", "across a blank line", "across two inks", "across a diff"],
+)
+def test_a_drag_over_a_blocks_output_selects_exactly_the_characters_drawn(
+    seam: Any, held: ToolEntry, first: tuple[int, int], last: tuple[int, int], expected: str
+) -> None:
+    """
+    A drag with ImGui's own input over the body's rows, from one row and column
+    to another: what the log's menu copies (``ViewCache.selected``) and what
+    Ctrl+C copies (the view's ``copy_as``) are the characters dragged over, a
+    blank row empty and one line break between rows.
+    """
+    block = tool_block.layout(held, live=False)
+    cache = typeset.ViewCache()
+
+    def draw() -> None:
+        rig.frame(
+            seam, lambda: tool_block.draw(block, key="k", faces=_faces(), select=(cache, "b"))
+        )
+
+    draw()
+    draw()
+    key = ("b", "body", 0)
+    (view,) = cache.views(key)
+    _drag(seam, draw, _point(view, *first), _point(view, *last))
+    assert cache.selected(key) == expected
+    assert view.copy_as(view) == expected
+
+
+def test_a_blank_row_is_set_as_a_line_and_copied_as_nothing(seam: Any) -> None:
+    """
+    The library sets an empty block as nothing: no line and no place in a copy.
+    A blank row is a line all the same, and a copy of everything has it empty.
+    """
+    block = tool_block.layout(FAILED, live=False)
+    cache = typeset.ViewCache()
+    rig.frame(seam, lambda: tool_block.draw(block, key="k", faces=_faces(), select=(cache, "b")))
+    (view,) = cache.views(("b", "body", 0))
+    assert len(view.set_lines()) == len(block.body)
+    view.select_all()
+    assert cache.selected(("b", "body", 0)) == "\n".join(texts(block.body))
+    assert texts(block.body)[0] == "", "the case is a blank row"
+
+
+def test_a_row_the_library_would_not_set_as_written_leaves_its_run_imgui_s(seam: Any) -> None:
+    held = entry("Bash", {"command": "printf"}, "zero​width\nplain")
+    block = tool_block.layout(held, live=False)
+    assert "zero​width" in texts(block.body)
+    imgui_s = Drawn(seam, block, None)
+    cache = typeset.ViewCache()
+    library_s = Drawn(seam, block, (cache, "b"))
+    assert cache.views(("b", "head", 0)), "the command is the library's"
+    assert not cache.views(("b", "body", 0)), "the output is ImGui's, every row of it"
+    assert library_s.glyphs == imgui_s.glyphs and library_s.rect == imgui_s.rect
+
+
+def test_a_block_drawn_twice_in_a_frame_is_imgui_s_the_second_time(seam: Any) -> None:
+    """The log and CONTEXT over one node: the second draw is the rows as ImGui's."""
+    block = tool_block.layout(FAILED, live=False)
+    cache = typeset.ViewCache()
+    heights: list[float] = []
+
+    def twice() -> None:
+        for pane in ("log", "context"):
+            top = seam.get_cursor_screen_pos().y
+            tool_block.draw(block, key=pane, faces=_faces(), select=(cache, "b"))
+            heights.append(seam.get_cursor_screen_pos().y - top)
+
+    rig.frame(seam, twice)
+    assert heights[0] == heights[1]
+    assert len(cache.views(("b", "body", 0))) == 1
+
+
+def test_in_typeset_a_drag_over_a_block_is_offered_and_copied_by_the_logs_menu(
+    seam: Any, block_pane: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    The pane gives its blocks the library (``_Blocks.select``) in TYPESET, and its
+    menu's "copy selection" copies a block's selection as it copies a run's.
+    """
+    view = block_pane(TranscriptState(mode=RenderMode.TYPESET))
+    view.frames(5)
+    views = view.pane.state.block_views
+    assert views.keys(), "the blocks' rows are the library's"
+    left, top, right, bottom = view.pane.child
+    seen = [
+        (key, held)
+        for key in views.keys()
+        if key[1] == "body"
+        for held in views.views(key)
+        if held.origin is not None and top < held.origin[1] < bottom - 40
+    ]
+    key, row_view = seen[-1]
+    _drag(seam, lambda: view.frames(1), _point(row_view, 1, 0), _point(row_view, 2, 7))
+    copied: list[str] = []
+    monkeypatch.setattr(view.im, "set_clipboard_text", copied.append)
+    real = view.im.menu_item_simple
+    io = view.im.get_io()
+    io.add_mouse_button_event(1, True)
+    view.frames(1)
+    # The harness focuses its window every frame, which closes a popup in the
+    # frame after it opens: the item is picked in the frame the menu opens.
+    monkeypatch.setattr(
+        view.im,
+        "menu_item_simple",
+        lambda label, *r: bool(real(label)) or label == "copy selection",
+    )
+    io.add_mouse_button_event(1, False)
+    view.frames(1)
+    rows = [str(text) for text in row_view.texts]
+    assert rows[1].startswith("out ") and len(rows[2]) == 7, rows
+    assert copied == [f"{rows[1]}\n{rows[2]}"]
+
+
+def test_a_blocks_views_go_with_its_layout_and_with_the_seam(seam: Any) -> None:
+    """
+    A block's views are kept while its layout is (``_Blocks.prune``) and no longer,
+    and all of them go when the seam is off: views nothing draws, or views of a
+    library that stopped.
+    """
+    snap = session(calls(("a", "one")))
+    state = TranscriptState(mode=RenderMode.TYPESET)
+    clock = [100.0]
+    for _ in range(3):
+        rig.frame(seam, lambda: transcript_pane.draw(snap, state, ROOT))
+    assert state.block_views.keys() and state.layouts
+    assert {key[0] for key in state.block_views.keys()} <= set(state.layouts)
+    clock[0] += 10.0 * transcript_pane._FEED_KEEP_S
+
+    def let_go() -> None:
+        state.prune(seam.get_frame_count(), now=clock[0])
+        transcript = snap.get(ROOT).transcript  # type: ignore[union-attr]
+        transcript_pane._Blocks(state, ROOT, transcript, synced(transcript), 0, False, 16.0).prune()
+
+    rig.frame(seam, let_go)
+    assert state.layouts == {} and not state.block_views.keys()
+    for _ in range(2):
+        rig.frame(seam, lambda: transcript_pane.draw(snap, state, ROOT))
+    assert state.block_views.keys()
+    typeset.configure(typeset=False)
+    rig.frame(seam, lambda: transcript_pane.draw(snap, state, ROOT))
+    assert not state.block_views.keys()
+
+
+def test_a_block_out_of_sight_while_the_log_narrows_keeps_its_height(seam: Any) -> None:
+    """
+    A view out of sight rests, claiming the measure it was last drawn at. When a
+    scrollbar takes room from the window meanwhile, that is wider than the block,
+    and a block whose extent followed the view would grow a scrollbar of its own
+    and be that much taller. Its extent is its rows' text, as ImGui's is.
+    """
+    block = tool_block.layout(entry("Bash", {"command": "tree"}, "a\n├── b\n└── c"), live=False)
+    heights: dict[bool, list[float]] = {False: [], True: []}
+
+    def body(selectable: bool, select: Any) -> None:
+        tool_block.draw(block, key=f"narrows{selectable}", faces=_faces(), select=select)
+        low, high = seam.get_item_rect_min(), seam.get_item_rect_max()
+        heights[selectable].append(high.y - low.y)
+
+    for selectable, select in ((False, None), (True, (typeset.ViewCache(), "b"))):
+        # In sight, then below the window: the lead makes the window scroll.
+        for lead in (0.0, 0.0, 900.0, 900.0, 900.0, 0.0):
+            rig.frame(seam, functools.partial(body, selectable, select), lead=lead)
+    assert heights[True] == heights[False], heights

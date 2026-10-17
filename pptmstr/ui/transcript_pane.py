@@ -87,7 +87,11 @@ What the mode costs is on ``DEFAULT_MODE``, and where it is bounded on
 
 What the split costs: a selection is inside one of the library's views, so it
 ends with its run; a literal run ImGui draws is copied whole from the context
-menu and not by dragging. A table changes its columns' widths in the
+menu and not by dragging. A tool block's rows in the code face are views of
+the library's of their own (``_Blocks.select``, ``tool_block.draw``), held in
+``TranscriptState.block_views`` while the block's layout is, so a selection in
+a block ends at the run of rows it is in, and the menu's "copy selection" copies
+it as it copies a run's. A table changes its columns' widths in the
 frame its run closes (request P19).
 
 **Find.** ``Ctrl+F`` over the pane opens a find row (``FindBar``). In typeset text
@@ -939,6 +943,9 @@ class TranscriptState:
     block_hits: dict[Hashable, tuple[str, list[tool_block.Hit]]] = field(default_factory=dict)
     # The block the find is bringing into view, by node and anchor, until it is drawn.
     block_reveal: tuple[NodeId, int] | None = None
+    # The library's views of the blocks' rows in TYPESET (``_Blocks.select``), by
+    # a block's key and the part of it; kept while the block's layout is.
+    block_views: typeset.ViewCache = field(default_factory=typeset.ViewCache)
 
     def shown_mode(self) -> RenderMode:
         """
@@ -1072,6 +1079,10 @@ class _Blocks:
     in_turn: bool
     text_px: float
     floor: int = 0
+    # Whether the blocks' rows in the code face are the library's, and so
+    # selectable: in TYPESET, where the library sets literal text at the size
+    # the blocks' code face is pushed at (``tool_block.draw``'s ``select``).
+    select: bool = False
     # The block under the pointer this frame, as the run it was drawn in and the
     # lines it covers (what "copy block" copies), or None.
     pointed: tuple[int | None, str] | None = None
@@ -1281,7 +1292,13 @@ class _Blocks:
             return rows
 
         pressed = tool_block.draw(
-            block, key=str(anchor), faces=faces, expanded=opened, viewer=viewer, mark=mark
+            block,
+            key=str(anchor),
+            faces=faces,
+            expanded=opened,
+            viewer=viewer,
+            mark=mark,
+            select=(self.state.block_views, key) if self.select else None,
         )
         if widgets.log_hovered() and imgui.is_mouse_hovering_rect(
             imgui.get_item_rect_min(), imgui.get_item_rect_max(), False
@@ -1311,6 +1328,9 @@ class _Blocks:
             del state.block_seen[key]
             state.layouts.pop(key, None)
             state.block_hits.pop(key, None)
+        views = state.block_views
+        if len(views):
+            views.prune([k for k in views.keys() if isinstance(k, tuple) and k[0] in state.layouts])
 
 
 _KIND_COLOUR = {
@@ -1376,12 +1396,13 @@ def draw(
     _find_keys(state.find)
 
     mode = state.shown_mode()
-    if state.feeds and not typeset.enabled(typeset.Pane.CONTEXT):
+    if (state.feeds or len(state.block_views)) and not typeset.enabled(typeset.Pane.CONTEXT):
         # A feed is the library's views of lines this pane still has. With the
         # seam off they are views nothing draws, and after the library stopped
         # they are views of a library that may never draw again: the lines set
-        # them again in one frame if it does.
+        # them again in one frame if it does. The blocks' views likewise.
         state.feeds.clear()
+        state.block_views.clear()
 
     bar = state.find
     text_px = typeset.body_px() if mode is RenderMode.TYPESET else imgui.get_font_size()
@@ -1393,6 +1414,7 @@ def draw(
         pinned,
         record.state in _IN_TURN,
         text_px,
+        select=mode is RenderMode.TYPESET and typeset.px(typeset.Role.LITERAL) == text_px,
     )
     # Everything the log's height follows but the width its bar takes.
     state.log_key = (selected, pinned, mode, state.show_reasoning, len(state.expanded))
@@ -2200,6 +2222,7 @@ def _typeset_run(feed: TypesetFeed, key: Hashable, part: int, show: bool) -> int
 def _draw_typeset_menu(state: TranscriptState, feed: TypesetFeed, cache: NodeTranscript) -> None:
     """
     Copy the selection, the block or the run that was right-clicked, or everything shown.
+    The selection is a view's of the runs or of a tool block's rows.
 
     The run is copied as the line modes copy it: whole and unfiltered, from the
     lines, so a run the window cut short at the top is copied from its first line.
@@ -2208,9 +2231,10 @@ def _draw_typeset_menu(state: TranscriptState, feed: TypesetFeed, cache: NodeTra
     if not widgets.begin_context_menu(_CONTEXT_ID):
         return
 
-    for key in feed.views.keys():
-        if (selected := feed.views.selected(key)) and imgui.menu_item_simple("copy selection"):
-            imgui.set_clipboard_text(selected)
+    for views in (feed.views, state.block_views):
+        for key in views.keys():
+            if (selected := views.selected(key)) and imgui.menu_item_simple("copy selection"):
+                imgui.set_clipboard_text(selected)
     if state.typeset_target is not None:
         run, block = state.typeset_target
         if block and imgui.menu_item_simple("copy block"):

@@ -6,8 +6,9 @@ pane with the keys still live. **The panes hold the views**; there is no table
 in this package keyed by approval or node.
 
 ``markdown``, ``document`` and ``plain`` draw at the cursor and return the
-height they claimed. ``stream`` answers markdown still arriving, which a pane
-appends to and draws (``Stream``). ``label`` and ``font`` are for a native
+height they claimed; ``rows`` draws literal rows in inks of the caller's.
+``stream`` answers markdown still arriving, which a pane appends to and draws
+(``Stream``). ``label`` and ``font`` are for a native
 ImGui line in a typeset face.
 
 ## Who draws what
@@ -36,6 +37,12 @@ and errors and by DETAIL's error, and **by no approval surface**: an
 approval's arguments are literal parts of the same roles, and they stay
 ImGui's until every hold on an approve is shown on this path as well
 (``tests/test_typeset_literal.py`` reads the callers).
+
+**Rows a caller inks itself** (``rows``) are a view of the same kind, a
+host code block a row: the log's tool blocks hand over the rows they draw in
+the code face, each span in its own ink, and the view stands where ImGui's
+lines of them stood, so a block looks as it did and its rows are selected and
+copied as the library's.
 
 So ``document`` is one view only where every part is markdown.
 ``ViewCache.views(key)`` has every view of a key, in order.
@@ -140,6 +147,7 @@ views are then 0.9 to 1.6 ms.
 
 from __future__ import annotations
 
+import math
 import time
 import unicodedata
 from collections.abc import Callable, Collection, Hashable, Iterator, Sequence
@@ -453,8 +461,9 @@ class ViewCache:
     def selected(self, key: Hashable) -> str:
         """
         The text selected under a key if the selection is the one in force, or
-        ``""``. A selection is inside one of the library's views: it does not
-        cross a part ImGui draws.
+        ``""``, as the view's own Ctrl+C copies it (``rows`` gives a view a copy
+        of its own). A selection is inside one of the library's views: it does
+        not cross a part ImGui draws.
 
         Reading a selection is a call into the library, made outside any draw
         (a pane asks from inside a popup). A library that has stopped is caught
@@ -465,7 +474,12 @@ class ViewCache:
         try:
             for view in self.views(key):
                 with _ASKING:
-                    text = view.selected_text() if view.owns_selection else ""
+                    if not view.owns_selection:
+                        text = ""
+                    elif view.copy_as is not None:
+                        text = view.copy_as(view)
+                    else:
+                        text = view.selected_text()
                 if text:
                     return str(text)
         except TypesetUnavailable as stopped:
@@ -1886,6 +1900,198 @@ def plain(
         height_cap=height_cap,
         literal=literal,
     )
+
+
+RowInks = tuple[tuple[int, int, Color], ...]
+"""
+The inks of one row of ``rows``: half-open character ranges of its text, each
+in its own colour. A character no range covers is in the library's code ink,
+so a caller covers every character it draws.
+"""
+
+BLANK_ROW = " "
+"""
+What an empty row is set as. The library sets a block with no text as nothing,
+with no height and no place in a copy, so an empty row is handed over as one
+space and taken back out of every copy (``_rows_copy``).
+"""
+
+
+def rows(
+    cache: ViewCache,
+    key: Hashable,
+    given: tuple[tuple[str, RowInks], ...],
+    *,
+    role: Role = Role.LITERAL,
+) -> bool:
+    """
+    Rows of literal text, each in inks of its own, as one view of the library's
+    with one selection across them: a tool block's command or output. True when
+    the library drew them, false when nothing was drawn and the caller is to
+    draw them itself.
+
+    **Drawn where ImGui would have drawn the rows** as lines of text in the code
+    face (``font(Weight.CODE)``) at the role's size, one under another with the
+    window's item spacing between: each glyph on the pixel ImGui puts it on,
+    and the cursor and the window's extent left where ImGui's lines would leave
+    them (``_stand``), so a caller can draw either and the rest of its window
+    does not move.
+
+    Each row is a host code block of its own in the role's literal style, set as
+    a literal part is (``literal_unfit``), with the room under it that makes the
+    next row one ImGui line and the item spacing lower. One block a row and not
+    one block of all of them because the library puts a line's baseline three
+    quarters of the way down it: rows 2 px apart at 16 px are 18 px lines, and
+    every baseline of an 18 px line is on a half pixel, which rounds a row a
+    pixel off where its block is low enough down the screen.
+
+    A copy is the rows' text, one line break between rows, an empty row empty
+    (``BLANK_ROW``), whether by the view's own Ctrl+C or ``ViewCache.selected``.
+
+    False, and nothing drawn, where:
+
+    - a row is one the library would not set as written (``literal_unfit``),
+      in this draw and every later one under the key;
+    - the key was drawn already this frame (two panes over one log);
+    - the library set less than it was handed in an earlier draw under the key:
+      every draw after that one is the caller's;
+    - the library stopped before it drew anything. Where it stopped after, the
+      rows were drawn and the answer is true; the next frame is ImGui's anyway.
+    """
+    from imscribe import MarkdownCode, TypesetUnavailable
+
+    im = _frame()
+    entry = cache._held(key, "rows")
+    frame = im.get_frame_count()
+    if entry.frame == frame or entry.unset is not None or not given:
+        return False
+    entry.frame = frame
+    gap = float(im.get_style().item_spacing.y)
+    token = (given, gap, role)
+    drawn = False
+    try:
+        if entry.token != token:
+            texts = tuple(text for text, _ in given)
+            unfit = (literal_unfit(Part(text, Kind.LITERAL, role=role)) for text in texts)
+            why = next((said for said in unfit if said is not None), None)
+            if why is not None:
+                entry.unset = why
+                return False
+            view = entry.view
+            if view is None:
+                with _MAKING:
+                    view = gate.literal_view(themes.document_theme())
+            style = _row_style(role, gap)
+            with _HANDING:
+                view.on_link = None
+                view.host_for = None
+                view.separator = "\n"
+                view.copy_as = _rows_copy(texts)
+                view.set_document([MarkdownCode(style, text or BLANK_ROW) for text in texts])
+            with _INKING:
+                view.clear_colours()
+                for block, (_, inks) in enumerate(given):
+                    if inks:
+                        view.set_colours(block, [(lo, hi, ink.u32) for lo, hi, ink in inks])
+            blocks = tuple(range(len(given)))
+            entry.parts = tuple(Part(text, Kind.LITERAL, role=role, tight=True) for text in texts)
+            entry.segments = [_Segment(blocks, view, blocks, literal=True)]
+            entry.token = token
+        noted = gate.noted()
+        segment = entry.segments[0]
+        window = im.internal.get_current_window()
+        start = im.get_cursor_screen_pos()
+        held = (window.dc.cursor_max_pos, window.dc.ideal_max_pos)
+        held = (im.ImVec2(held[0].x, held[0].y), im.ImVec2(held[1].x, held[1].y))
+        wide = _width(im, None)
+        im.set_cursor_screen_pos(im.ImVec2(start.x, start.y + _drop(im, role)))
+        with _DRAWING:
+            segment.whole = bool(segment.view.draw(palette=themes.palette(), width_px=wide))
+        drawn = True
+        right = start.x + _reach(segment, wide)
+        _stand(im, window, start, held, right, len(given) * (roles.px(role) + gap) - gap)
+        entry.missing = 0
+        short = _short(entry, noted)
+        if short is not None:
+            entry.missing = len(given)
+            entry.unset = short
+    except TypesetUnavailable as stopped:
+        gate.stopped(stopped)
+        entry.missing = len(given)
+    return drawn
+
+
+def _drop(im: Any, role: Role) -> float:
+    """
+    How much lower than the top of ImGui's line a ``rows`` view is drawn, for its
+    glyphs to be where ImGui puts them: ImGui puts a baseline the code face's
+    ascent below the line's top, and the library three quarters of its line
+    down, rounded half up. Measured in pptmstr on 2026-10-17, glyph tops of
+    ``xHg`` in both at every height from 12 to 24 px: 1 px at 12, 13, 14, 17
+    and 18, 2 px at the rest, which this gives at each.
+    """
+    with font(Weight.CODE, roles.px(role)):
+        ascent = float(im.get_font_baked().ascent)
+    return max(0.0, ascent - math.floor(0.75 * themes.literal_line(role) + 0.5))
+
+
+def _stand(
+    im: Any, window: Any, start: Any, held: tuple[Any, Any], right: float, tall: float
+) -> None:
+    """
+    Leave the cursor and the window's extent where ImGui's lines of a ``rows``
+    view would: ``tall`` below ``start`` and the item spacing under that, and
+    as far right as the longest row's text, ``right``.
+
+    The view's own rectangle is not where those lines are. It is lower and
+    taller by the drop and by what its line is taller than ImGui's, and as wide
+    as the measure it was drawn at; out of sight it claims the measure it was
+    last drawn at, which is wider than the window once a scrollbar takes room.
+    A window grows to what is in it, so a block whose last row is a view would
+    be taller, and one whose measure narrowed would grow a scrollbar. So the
+    extent is put back to what it was before the view (``held``: the window's
+    furthest and ideal extents), and a zero-sized item at the foot of the lines
+    takes it as far as ImGui's lines would have, with the spacing under them,
+    which is ImGui's own arithmetic.
+    """
+    dc = window.dc
+    dc.cursor_max_pos = im.ImVec2(max(held[0].x, right), held[0].y)
+    dc.ideal_max_pos = im.ImVec2(max(held[1].x, right), held[1].y)
+    im.set_cursor_screen_pos(im.ImVec2(start.x, start.y + tall))
+    im.dummy(im.ImVec2(0.0, 0.0))
+
+
+def _row_style(role: Role, gap: float) -> Any:
+    """
+    The style a row of ``rows`` is set in: the role's literal style, with the
+    room under it that puts the next row one ImGui line and ``gap`` lower.
+    """
+    from imscribe import sp_from_px
+
+    under = max(0.0, roles.px(role) + gap - themes.literal_line(role))
+    return replace(themes.literal_style(role), space_below=sp_from_px(under))
+
+
+def _rows_copy(texts: tuple[str, ...]) -> Callable[[Any], str]:
+    """
+    What a copy of a ``rows`` view gives: the selection over ``texts``, which
+    are the rows as given and not as handed over (``BLANK_ROW``).
+    """
+
+    def copy(view: Any) -> str:
+        selection = view.selection
+        if selection is None:
+            return ""
+        (first, start), (last, end) = selection
+        out = []
+        for block in range(first, last + 1):
+            text = texts[block]
+            low = min(start, len(text)) if block == first else 0
+            high = min(end, len(text)) if block == last else len(text)
+            out.append(text[low:high])
+        return "\n".join(out)
+
+    return copy
 
 
 def stream(
