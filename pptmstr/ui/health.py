@@ -202,6 +202,10 @@ def _recalled(root: AgentRecord, actions: HealthActions, now_wall: float | None)
         imgui.text_disabled(refusal)
 
 
+SESSION_SPEND = "the session's, estimated, not billing"
+SESSION_TOKENS = "all agents"
+
+
 def _fmt_tokens(count: int) -> str:
     if count >= 1_000_000:
         return f"{count / 1_000_000:.1f}M"
@@ -285,17 +289,23 @@ def draw(
             f"compacted {root.context.compactions}x - reasoning already discarded",
         )
 
-    usage = root.usage
+    # The session's dollars beside the session's tokens: the root's own tokens are
+    # only its share of the calls the dollar figure covers.
+    usage = session_details.session_usage(snap, root)
     imgui.spacing()
     imgui.text_colored(P.text.vec4, f"${usage.total_cost_usd:,.2f}")
     imgui.same_line()
     _small()
-    imgui.text_colored(P.text_dim.vec4, "estimated, not billing")
+    imgui.text_colored(P.text_dim.vec4, SESSION_SPEND)
     _normal()
     imgui.text_disabled(
         f"{_fmt_tokens(usage.input_tokens)} in · {_fmt_tokens(usage.output_tokens)} out · "
         f"{_fmt_tokens(usage.cache_read_input_tokens)} cached"
     )
+    imgui.same_line()
+    _small()
+    imgui.text_colored(P.text_dim.vec4, SESSION_TOKENS)
+    _normal()
 
     subs = snap.subagents_of(session)
     if subs:

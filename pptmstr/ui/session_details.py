@@ -49,6 +49,7 @@ from ..model import (
     Recalled,
     Snapshot,
     TranscriptPresence,
+    UsageRollup,
 )
 from ..theme import STATE_LABEL, P
 from . import board_pane, launcher, widgets
@@ -449,7 +450,41 @@ def _time_rows(
     return rows
 
 
-def _spend_rows(rec: AgentRecord) -> list[Row]:
+def session_usage(snap: Snapshot, root: AgentRecord) -> UsageRollup:
+    """
+    A session's spend with both axes counting the same calls: the root's dollars
+    and every agent's tokens in the session, summed.
+
+    The dollars are already the session's. ``ResultMessage.total_cost_usd`` is the
+    CLI's figure for the whole query pipeline, Task sub-agents included -- as the
+    CLI's own schema describes it, which has not been measured live -- and the
+    driver banks it on the root; no message carries dollars per agent, so a
+    sub-agent's record holds none. The tokens are banked per agent from each
+    assistant message, so the root's own are only its share. Summing them here
+    rather than storing a rollup keeps one copy of each count. What the sum still
+    misses is what never streamed: the CLI's internal calls (compaction) and a
+    worker whose messages were not forwarded are in the dollars and not here.
+    """
+    tokens = UsageRollup()
+    for rec in (root, *snap.subagents_of(root.node_id)):
+        tokens = tokens.plus(rec.usage)
+    return dataclasses.replace(tokens, total_cost_usd=root.usage.total_cost_usd)
+
+
+# Said wherever a sub-agent's dollars would be.
+NOT_PER_AGENT = "the CLI reports dollars per session, not per agent"
+SESSION_COST = "the session's, sub-agents included; estimated by the SDK, not billing"
+
+
+def _token_text(usage: UsageRollup) -> str:
+    return (
+        f"{_tokens(usage.input_tokens)} in, {_tokens(usage.output_tokens)} out, "
+        f"{_tokens(usage.cache_read_input_tokens)} read from cache, "
+        f"{_tokens(usage.cache_creation_input_tokens)} written to it"
+    )
+
+
+def _spend_rows(snap: Snapshot, rec: AgentRecord) -> list[Row]:
     if rec.recalled is not None:
         cost = rec.recalled.cost_usd
         return [
@@ -466,16 +501,30 @@ def _spend_rows(rec: AgentRecord) -> list[Row]:
             ),
             _unknown("tokens", _NOT_RUN),
         ]
-    usage = rec.usage
-    return [
-        _stated("cost", f"${usage.total_cost_usd:,.2f}", "estimated by the SDK, not billing"),
+    if rec.node_id[1] is not None:
+        return [
+            _unknown("cost", NOT_PER_AGENT + "; its session's Details has the session's figure"),
+            _stated(
+                "tokens",
+                _token_text(rec.usage),
+                "its own, counted from its messages as they streamed",
+            ),
+        ]
+    subs = snap.subagents_of(rec.node_id)
+    rows = [_stated("cost", f"${rec.usage.total_cost_usd:,.2f}", SESSION_COST)]
+    if not subs:
+        rows.append(_stated("tokens", _token_text(rec.usage)))
+        return rows
+    own = rec.usage
+    rows.append(
         _stated(
             "tokens",
-            f"{_tokens(usage.input_tokens)} in, {_tokens(usage.output_tokens)} out, "
-            f"{_tokens(usage.cache_read_input_tokens)} read from cache, "
-            f"{_tokens(usage.cache_creation_input_tokens)} written to it",
-        ),
-    ]
+            _token_text(session_usage(snap, rec)),
+            f"the session's, {len(subs)} sub-agents included, as their messages streamed; "
+            f"its own {_tokens(own.input_tokens)} in, {_tokens(own.output_tokens)} out",
+        )
+    )
+    return rows
 
 
 def _context_row(rec: AgentRecord) -> Row:
@@ -832,7 +881,7 @@ def _session_view(
                 "time and cost",
                 (
                     *_time_rows(rec, now, wall_now, last_active),
-                    *_spend_rows(rec),
+                    *_spend_rows(snap, rec),
                     _context_row(rec),
                 ),
             ),
@@ -891,7 +940,7 @@ def _agent_view(
             Section("the session it belongs to", tuple(belongs)),
             Section(
                 "time and cost",
-                (*_time_rows(rec, now, wall_now, last_active), *_spend_rows(rec)),
+                (*_time_rows(rec, now, wall_now, last_active), *_spend_rows(snap, rec)),
             ),
             Section("files", (transcript,)),
         ),

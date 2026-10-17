@@ -30,6 +30,13 @@ in a scrolling well of its own drawn through a clipper, so a 1 MiB result is
 never handed to one text call. What is drawn collapsed may still be wider than
 the pane; the block scrolls sideways to it, as a code block does.
 
+**A block's rows are selectable in TYPESET.** The rows of the head and the body
+that are all in the code face are set by the layout library where it will set
+them (``draw``'s ``select``, ``typeset.views.rows``), each glyph where ImGui put
+it and in the same ink, so a drag selects them and the log's menu copies them.
+The caption, the footer, a row with a tooltip or in prose, and the viewer stay
+ImGui's (notes/2026-10-17-tool-blocks-and-selection.md).
+
 **Verbatim in, drawable out.** ``ToolEntry.name``, ``.input`` and
 ``ToolResult.output`` are held as the SDK sent them (``transcript``'s
 docstring), so every string taken from them is made drawable here, by ``_d``
@@ -53,7 +60,7 @@ import enum
 import functools
 import json
 import re
-from collections.abc import Callable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Hashable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, TypeVar
 from urllib.parse import urlsplit
@@ -1245,6 +1252,69 @@ def _row(faces: Faces, row: Row) -> None:
         imgui.set_item_tooltip(tip[2])
 
 
+Select = tuple[Any, Hashable]
+"""
+Where a block's rows are set selectable: the ``typeset.ViewCache`` that holds
+their views and the block's key in it (``draw``).
+"""
+
+
+def _selectable(row: Row) -> bool:
+    """
+    Whether a row can be one of the library's: every span of it in the code face.
+    A row with a ``tip`` is a link with a tooltip, and a prose row wraps.
+    """
+    return bool(row) and all(face == "mono" for face, _, _ in row)
+
+
+def _inked(row: Row) -> tuple[str, tuple[tuple[int, int, Color], ...]]:
+    """A row as ``typeset.views.rows`` takes it: its text, and each span's ink over it."""
+    inks = []
+    at = 0
+    for _, ink, text in row:
+        if text:
+            inks.append((at, at + len(text), _ink(ink)))
+        at += len(text)
+    return "".join(text for _, _, text in row), tuple(inks)
+
+
+def _rows(faces: Faces, rows: Sequence[Row], select: Select | None, part: str) -> None:
+    """
+    ``rows`` one under another. With ``select``, each run of consecutive rows in
+    the code face is one view of the library's, selectable across its rows,
+    where the library will set it (``typeset.views.rows``); every other row, and
+    a run the library declines, is ImGui's, as without it.
+    """
+    from .typeset import views
+
+    if select is None:
+        for row in rows:
+            _row(faces, row)
+        return
+    cache, key = select
+    run: list[Row] = []
+    runs = 0
+
+    def flush() -> None:
+        nonlocal runs
+        if not run:
+            return
+        given = tuple(_inked(row) for row in run)
+        if not views.rows(cache, (key, part, runs), given):
+            for row in run:
+                _row(faces, row)
+        runs += 1
+        run.clear()
+
+    for row in rows:
+        if _selectable(row):
+            run.append(row)
+            continue
+        flush()
+        _row(faces, row)
+    flush()
+
+
 def _caption(faces: Faces, spans: Sequence[Span]) -> None:
     for n, (face, ink, text) in enumerate(spans):
         if n:
@@ -1306,12 +1376,18 @@ def draw(
     expanded: bool = False,
     viewer: Callable[[], Sequence[Row]] | None = None,
     mark: Mark | None = None,
+    select: Select | None = None,
 ) -> bool:
     """
     One block at the cursor, as one item: a child the width of the window and as
     tall as what it holds. ``expanded`` draws the viewer (``viewer()``'s rows) in
     place of the body. ``mark`` is a find's (``Mark``). Returns whether the
     affordance was pressed this frame: the caller keeps what is expanded.
+
+    ``select`` sets the head's and the body's rows in the code face as the
+    library's, so a drag selects them (``_rows``). The caller gives it only
+    where the library draws and sets the code face at the size ``faces.mono``
+    pushes. The caption, the footer, the viewer and every other row are ImGui's.
     """
     from . import widgets
 
@@ -1338,8 +1414,7 @@ def draw(
             high = imgui.ImVec2(low.x + _RULE, low.y + imgui.get_window_height())
             imgui.get_window_draw_list().add_rect_filled(low, high, P.danger.u32, _ROUNDING)
         _caption(faces, block.caption)
-        for row in block.head:
-            _row(faces, row)
+        _rows(faces, block.head, select, "head")
         if block.body or block.more:
             imgui.dummy(imgui.ImVec2(0.0, 2.0))
         if expanded and viewer is not None:
@@ -1348,8 +1423,7 @@ def draw(
         else:
             if block.more and block.tail:
                 pressed = _affordance(block.more)
-            for row in block.body:
-                _row(faces, row)
+            _rows(faces, block.body, select, "body")
             if block.more and not block.tail:
                 pressed = _affordance(block.more)
     finally:

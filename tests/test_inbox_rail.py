@@ -915,7 +915,7 @@ def test_a_sub_agent_card_carries_its_role_state_topic_model_and_spend(monkeypat
     snap, root = _expandable()
     text = _group_text(monkeypatch, snap, root, [], state=_open())
     at = text.index("scout")
-    assert text[at : at + 6] == ["scout", "1m40s", "thinking", "working", "sonnet-5", "$0.00"]
+    assert text[at : at + 6] == ["scout", "1m40s", "thinking", "working", "sonnet-5", "0 tok"]
 
 
 def test_a_sub_agent_card_is_titled_by_its_role_not_its_task(monkeypatch) -> None:
