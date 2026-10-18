@@ -1,7 +1,9 @@
 # The model list outlives the build that verified it
 
 **Dated:** 2026-09-25 ·
-**Status:** built on `main`; `make check` green (2569 passed, 3 xfailed) ·
+**Status:** built on `main`; `make check` green (2569 passed, 3 xfailed). **2026-10-17:
+the live probe is withdrawn and the list is in code again; see the addendum at the end.**
+§§1–7 below record the design as it stood on 2026-09-25 ·
 **Origin:** an operator request (2026-09-25) — *"New Opus just dropped. Can we dynamically
 probe models in the task launcher?"* ·
 **Supersedes:** `orchestrator-design.md` §7 trap 9's *"verify model ID strings at build
@@ -132,3 +134,50 @@ reaching the network to learn what was already on disk.
 `scripts/mock_cards.py` carried its own copy of the model list and **had already drifted**
 (no `claude-fable-5`, an undated haiku). It now imports `FALLBACK_MODELS`. This is the
 smell STYLE.md §3 names — unpinned duplication — caught in the wild rather than in theory.
+
+## Addendum, 2026-10-17 — the probe is withdrawn
+
+**What changed.** The probe read the `claudeAiOauth` token from
+`~/.claude/.credentials.json` and called `GET /v1/models` with it through the `anthropic`
+client. Claude Code's Legal and compliance page
+(https://code.claude.com/docs/en/legal-and-compliance, read 2026-10-17) says, under
+*Authentication and credential use*: *"developers may not collect, store, or intermediate
+Claude.ai credentials or session tokens — sign-in to a Claude account must complete
+through Anthropic's own flow."* The user decided on 2026-10-17 that pptmstr reads no
+credential and that every model request goes through the bundled CLI. The probe went
+with that decision (board task MODEL-STATIC). §3's closing paragraph argued that a host
+process reading the credential for its own call was not the §8 hazard. That argument was
+about sandboxing, and it does not answer the terms.
+
+**What is true now.** `pptmstr/model_catalog.py` holds two constants: `MODELS`, a tuple in
+code, newest first, and `DEFAULT_MODEL`, a name. `FALLBACK_MODELS` was renamed to `MODELS`
+because nothing falls back any more. The `Catalog` worker, the credential read, the expiry
+check and `AppState.catalog` are gone. `anthropic` is no longer a dependency of pptmstr,
+since nothing imports it. Ids are verified when the tuple is edited, which is trap 9's
+original rule.
+
+**§1's cost returns.** A model released after `MODELS` was last edited is not listed until
+it is edited again. It is still reachable: `--model` passes any string through, and a
+draft's pick is held by name, so a pick the list lacks is prepended rather than dropped.
+
+**Which sections still apply.**
+
+- §1: applies again, as the accepted cost above.
+- §2: a record of one measurement on 2026-09-25. Nothing consumes it now. The capability
+  findings are still the argument for what a future effort control would need, but
+  pptmstr has no way of its own to fetch them.
+- §3: no longer applies. pptmstr holds no auth.
+- §4: stands. The draft holds `model: str`, and `DEFAULT_MODEL` is a name.
+- §5: the "probe is an override" half no longer applies. Trap 9 is back to verification
+  at edit time, and the list is still offered rather than free text.
+- §6: moot except for "no capability gating". `Catalog.detail` no longer exists.
+- §7: the expiry, pre-flight and empty-probe rows were removed with the code they pinned.
+  The default-model row and both launcher rows stand.
+
+**What the tests pin now** (`tests/test_model_catalog.py`): the default is one of the
+models offered; the offered ids are distinct; the scan finds the package (a guard so the
+next two cannot pass vacuously); no module under `pptmstr/` names `.credentials.json`
+except `sandbox.py`'s deny list; and no module names `claudeAiOauth` or
+`oauth-2025-04-20`. `tests/test_launcher.py` still holds
+`test_a_pinned_model_the_offered_list_lacks_still_draws` and
+`test_a_pick_the_offered_list_does_not_contain_survives_to_the_spec`.

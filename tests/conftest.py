@@ -44,14 +44,13 @@ import json
 import os
 import subprocess
 import sys
-import threading
 from collections.abc import Callable, Iterator, Mapping
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from pptmstr import boardsync, brief, model_catalog, pairing, sessionfile, settings, theme, version
+from pptmstr import boardsync, brief, pairing, sessionfile, settings, theme, version
 from pptmstr.ui import typeset
 from pptmstr.ui.typeset import gate, views
 from tests.mcp_wire import versions_line
@@ -575,48 +574,3 @@ def _no_session_directory_under_the_real_config(
 
     monkeypatch.setattr(sessionfile, "_under", redirected_under)
     monkeypatch.setattr(boardsync, "legacy_root", redirected_legacy)
-
-
-@pytest.fixture(autouse=True)
-def _no_probe_with_the_real_credential(
-    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
-) -> Iterator[None]:
-    """
-    ``model_catalog.probe_catalog()`` never reads the operator's
-    ``~/.claude/.credentials.json`` while a test runs, so it never reaches the network.
-
-    ``app._draw_launcher`` calls ``Catalog.request()`` on every frame that has a pool,
-    and ``AppState`` builds a default ``Catalog``. A test that draws such a frame
-    therefore starts a worker that reads the real token and opens a TLS connection to
-    the API -- and passes, because the list in code is drawable without the answer. The
-    connection outlives the test, and is reported as an unclosed socket by whichever
-    later test happens to collect garbage with warnings turned into errors.
-
-    **The path is replaced, not the probe.** ``probe_catalog`` still runs and takes its
-    own no-credential branch, so a frame test sees what an install with no credential
-    file sees. A test that passes ``path=`` is untouched.
-
-    **Workers are joined before the path is put back.** ``probe_catalog`` reads the
-    module's path when the worker gets to it, which can be after the test body has
-    returned; without the join, a worker scheduled late would read the real one.
-    ``monkeypatch`` is a dependency of this fixture, so this teardown runs first.
-
-    The replacement names a file in a directory that is never made: absent is the whole
-    of what it has to be, so no test pays for it.
-    """
-    absent = tmp_path_factory.getbasetemp() / "no-credential" / ".credentials.json"
-    monkeypatch.setattr(model_catalog, "CREDENTIAL_PATH", str(absent))
-
-    request = model_catalog.Catalog.request
-    workers: list[threading.Thread] = []
-
-    def tracked(self: model_catalog.Catalog) -> threading.Thread | None:
-        worker = request(self)
-        if worker is not None:
-            workers.append(worker)
-        return worker
-
-    monkeypatch.setattr(model_catalog.Catalog, "request", tracked)
-    yield
-    for worker in workers:
-        worker.join(timeout=10)

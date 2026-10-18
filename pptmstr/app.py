@@ -883,10 +883,6 @@ class AppState:
     # Every session's resume form, and which one is up. Its own modal and not
     # the launcher's: see ``ui/resume_form``.
     resume: resume_form.ResumeForms = field(default_factory=resume_form.ResumeForms)
-    # Which models the launcher offers. Probed once on a worker at startup and the list
-    # in code until that answers, so it is readable from the first frame and there is no
-    # "not yet known" state for a caller to draw.
-    catalog: model_catalog.Catalog = field(default_factory=model_catalog.Catalog)
     rail: rail.RailState = field(default_factory=rail.RailState)
     # The card menus of the fleet pane, and the two modals they open: Details and
     # the close confirmation. One object, which is also what the frame asks
@@ -4276,11 +4272,6 @@ def _draw_overlays(state: AppState) -> None:
     pool = state.pool
     if pool is None:
         return
-    # Started here rather than before the first frame: the probe is a network call and
-    # the list in code is already drawable, so waiting on it would trade a usable
-    # launcher for a slower splash. `request` is a no-op after the first one.
-    state.catalog.request()
-    state.catalog.poll()
     launcher.draw(
         state.launcher,
         running=pool.running_count,
@@ -4294,7 +4285,7 @@ def _draw_overlays(state: AppState) -> None:
         # substitute a plausible one, so this argument is what puts the figure on
         # screen at all.
         subagent_cap=state.settings.subagent_cap,
-        models=state.catalog.models,
+        models=model_catalog.MODELS,
         # With the picked session's own run counted, so a pick that would end a
         # process the snapshot no longer calls live says so as the form does.
         live=(
@@ -4311,7 +4302,7 @@ def _draw_overlays(state: AppState) -> None:
         launch=lambda pressed: _resume_pressed(state, pressed),
         wrap=state.settings.wrap_inputs,
         subagent_cap=state.settings.subagent_cap,
-        models=state.catalog.models,
+        models=model_catalog.MODELS,
         live=_resume_ends(state, state.resume.showing) if state.resume.is_open else frozenset(),
     )
 

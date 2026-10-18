@@ -140,7 +140,11 @@ R-DEB's verdict, adopted:
   three-part unit plus pptmstr moves together (*inference*, R-PY), but it re-resolves
   the loose dependencies (`anthropic`, `mcp`, and `claude-agent-sdk>=0.2.158`, which
   is a floor in pyproject.toml, so the bundled CLI version is not pinned on this
-  channel — *read*, pyproject.toml). That is the mac doc §7's drift, accepted for this
+  channel — *read*, pyproject.toml). **2026-10-17, later:** `anthropic` is no longer one
+  of them. It was removed from pyproject.toml together with the model probe, its only
+  importer (task MODEL-STATIC; see the addendum to
+  [`2026-09-25-the-model-list-outlives-the-build-that-verified-it.md`](2026-09-25-the-model-list-outlives-the-build-that-verified-it.md)).
+  That is the mac doc §7's drift, accepted for this
   channel. `--with-requirements` as a way to apply the lock was **not read** (R-PY).
 - **Recommendation, not done: cap the published `requires-python` below 3.15.** Today
   it is `>=3.11`, open-ended. `uv tool install` takes "the first [Python] it finds"
@@ -475,6 +479,9 @@ it is not in the beta.
 
 R-DEB found, by reading, 113 function-level imports in `pptmstr/` (among them
 `anthropic`, `imscribe.typesetter`, `imgui_bundle.hello_imgui`, `claude_agent_sdk`).
+**2026-10-17, later:** the `anthropic` import is gone. It was removed with the model
+probe on 2026-10-17 (task MODEL-STATIC), and so was the dependency. The other three
+examples still stand, and the argument below does not depend on the `anthropic` import.
 An in-place replacement of the installed files under a running pptmstr therefore lets
 the old process import new modules, and the next session it launches runs the new
 claude binary, which the SDK finds by `__file__`. The unit splits inside one process

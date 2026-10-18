@@ -40,7 +40,7 @@ from .. import sessions as sessions_mod
 from .. import worktree as worktree_mod
 from ..approval import Disposition, Policy, classify, requires_containment
 from ..model import LaunchSpec, NewWorktree
-from ..model_catalog import DEFAULT_MODEL, FALLBACK_MODELS
+from ..model_catalog import DEFAULT_MODEL, MODELS
 from ..sessions import Overlay, SessionRow
 from ..theme import P, hint_colour
 from . import widgets
@@ -2236,11 +2236,10 @@ class LauncherState:
     # a brief mandatory would tax the common case for a problem it does not have.
     brief: str = ""
     # The model id itself and not an index into the offered list, for the reason
-    # ``policy`` below holds a ``Policy``: the list is probed at startup and ordered by
-    # the API, so a position means a different model between one run and the next. A
-    # name also gives a pinned id somewhere to live when the probe fails and the list
-    # falls back -- an index has no way to express a model the list does not contain,
-    # and ``--model`` has always accepted one.
+    # ``policy`` below holds a ``Policy``: a position means a different model once the
+    # list is edited. A name also gives a pinned id somewhere to live -- an index has no
+    # way to express a model the list does not contain, and ``--model`` has always
+    # accepted one.
     model: str = DEFAULT_MODEL
     # Index into templates.names(). "solo" is first and is the default, so the
     # launcher behaves exactly as it did before teams existed unless asked otherwise.
@@ -3922,7 +3921,7 @@ def draw(
     scanner: Scanner = scan_sessions,
     prober: Prober = cli_version.check_installed_cli,
     subagent_cap: int | None = None,
-    models: tuple[str, ...] = FALLBACK_MODELS,
+    models: tuple[str, ...] = MODELS,
     live: frozenset[str] = frozenset(),
     recorder: Recorder = read_recorded,
     reader: CheckoutReader = read_checkout,
@@ -3961,9 +3960,8 @@ def draw(
     ``reader`` is what reads the cwd field's checkout for a typed worktree branch,
     on a worker (``CheckoutReading``); a parameter for the reason ``scanner`` is.
 
-    ``models`` is what the model combo offers -- ``model_catalog.Catalog.models``, which
-    is the list in code until the startup probe replaces it. Defaulted rather than
-    required so a caller that has not run a probe still draws a usable combo.
+    ``models`` is what the model combo offers, ``model_catalog.MODELS`` unless a caller
+    says otherwise.
 
     ``subagent_cap`` is the operator's *setting*, which this modal both displays and
     offers to override for one launch. It is optional because a caller that does not
@@ -4217,7 +4215,7 @@ def _modal(
     widgets.dialog_group()
     imgui.set_next_item_width(widgets.DIALOG_FIELD_WIDTH)
     # A pick the offered list does not contain is kept and shown rather than corrected:
-    # it is what ``--model`` was given, or what a probe offered on an earlier run and no
+    # it is what ``--model`` was given, or what an earlier build offered and this one no
     # longer does. Dropping it would relaunch on a model the operator did not choose,
     # and silently -- the combo would simply read as something else.
     options = list(models)

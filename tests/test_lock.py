@@ -171,10 +171,12 @@ def test_a_requirement_pyproject_adds_after_the_lock_is_a_problem() -> None:
 
 
 def test_a_locked_version_below_the_floor_is_a_problem() -> None:
-    runtime = swap(GOOD_RUNTIME, "anthropic==0.69 ", "anthropic==0.68 ")
-    dev = swap(GOOD_DEV, "anthropic==0.69 ", "anthropic==0.68 ")
+    runtime = swap(GOOD_RUNTIME, "markdown-it-py==3.0 ", "markdown-it-py==2.9 ")
+    dev = swap(GOOD_DEV, "markdown-it-py==3.0 ", "markdown-it-py==2.9 ")
     said = problems(runtime, dev)
-    assert any("anthropic==0.68, which pyproject.toml's >=0.69 does not allow" in p for p in said)
+    assert any(
+        "markdown-it-py==2.9, which pyproject.toml's >=3.0 does not allow" in p for p in said
+    )
 
 
 def test_a_dev_requirement_missing_from_the_dev_lock_is_a_problem() -> None:

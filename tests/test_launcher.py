@@ -26,7 +26,7 @@ import pytest
 from pptmstr import cli_version, sandbox, templates
 from pptmstr.approval import Policy
 from pptmstr.model import LaunchSpec
-from pptmstr.model_catalog import DEFAULT_MODEL, FALLBACK_MODELS
+from pptmstr.model_catalog import DEFAULT_MODEL, MODELS
 from pptmstr.sessions import Overlay, SessionMark, SessionRow, load_overlay, overlay_path
 from pptmstr.ui import launcher, widgets
 from pptmstr.ui.launcher import LauncherState, SessionPicker, age_label
@@ -353,10 +353,10 @@ def test_spec_strips_task_and_resolves_model(tmp_path: Path) -> None:
     # the expectation stays a literal. A fabricated path would not be: `/tmp` is a
     # symlink to `/private/tmp` on macOS.
     cwd = str(tmp_path.resolve())
-    state = LauncherState(task="  audit the parser  ", cwd=cwd, model=FALLBACK_MODELS[1])
+    state = LauncherState(task="  audit the parser  ", cwd=cwd, model=MODELS[1])
     assert state.spec() == LaunchSpec(
         task="audit the parser",
-        model=FALLBACK_MODELS[1],
+        model=MODELS[1],
         cwd=cwd,
         # A directory no repository encloses is its own base, which is what makes
         # adopting the field a no-op for a scratch directory.
@@ -401,21 +401,21 @@ def test_spec_strips_cwd_whitespace() -> None:
 
 def test_an_untouched_draft_launches_on_the_named_default() -> None:
     """
-    The default is a name, not a position. The offered list is probed at startup and
-    ordered by the API, so "whatever is first" would hand the choice of default -- and
-    its price -- to whichever model shipped most recently.
+    The default is a name, not a position. The offered list is newest-first, so
+    "whatever is first" would hand the choice of default -- and its price -- to
+    whichever model shipped most recently.
     """
     assert LauncherState(task="t").spec().model == DEFAULT_MODEL
 
 
 def test_a_pick_the_offered_list_does_not_contain_survives_to_the_spec() -> None:
     """
-    A model pinned by ``--model``, or offered by a probe that has since failed, reaches
+    A model pinned by ``--model``, or offered by an earlier build and since dropped, reaches
     the session as chosen. An index could not express this: there is no position for a
     model the list does not hold, so the pick would be silently rewritten to one it does.
     """
     pinned = "claude-a-model-no-list-offers"
-    assert pinned not in FALLBACK_MODELS
+    assert pinned not in MODELS
 
     assert LauncherState(task="t", model=pinned).spec().model == pinned
 
@@ -721,7 +721,7 @@ def test_a_picked_session_is_resumed_from_new_task_with_the_box_as_its_message(
         task="  carry on\nfrom the lexer  ",
         cwd=main,
         brief=" /some/brief ",
-        model=FALLBACK_MODELS[1],
+        model=MODELS[1],
         template_index=1,
         policy=Policy.PERMISSIVE,
         subagent_cap=2,
@@ -741,7 +741,7 @@ def test_a_picked_session_is_resumed_from_new_task_with_the_box_as_its_message(
         resume="sess-42",
         cwd=worktree,
         session_base=worktree,
-        model=FALLBACK_MODELS[1],
+        model=MODELS[1],
         template=templates.names()[1],
         brief="/some/brief",
         policy=Policy.PERMISSIVE,
@@ -1027,10 +1027,10 @@ def test_picking_nothing_leaves_todays_fresh_launch_spec_untouched(tmp_path: Pat
     for byte the spec it produced before the section existed.
     """
     cwd = str(tmp_path.resolve())
-    state = LauncherState(task="  audit the parser  ", cwd=cwd, model=FALLBACK_MODELS[1])
+    state = LauncherState(task="  audit the parser  ", cwd=cwd, model=MODELS[1])
     assert state.spec() == LaunchSpec(
         task="audit the parser",
-        model=FALLBACK_MODELS[1],
+        model=MODELS[1],
         cwd=cwd,
         session_base=cwd,
         template="solo",
@@ -1567,7 +1567,7 @@ def test_nothing_about_the_rest_of_the_draft_moves_when_the_mode_is_on(
     The mode is two fields and not a different launch. Anything else it changed would
     be a second behaviour riding on a checkbox whose label says one thing.
     """
-    picked = FALLBACK_MODELS[1]
+    picked = MODELS[1]
     off = LauncherState(task=A_PREMISE, cwd=str(tmp_path), model=picked, brief=" b ").spec()
     on = LauncherState(
         task=A_PREMISE,
@@ -2499,7 +2499,7 @@ def test_the_launcher_and_the_launch_path_refuse_the_same_readings() -> None:
     assert launcher.floor_refusal(_below()) is not None
 
 
-# -- the model combo, once the list is probed rather than fixed ----------------------
+# -- the model combo, and a pick the offered list lacks --------------------------------
 
 
 def test_a_pinned_model_the_offered_list_lacks_still_draws(
@@ -2511,11 +2511,11 @@ def test_a_pinned_model_the_offered_list_lacks_still_draws(
     doing so raises ``ValueError`` out of ``list.index`` on the frame the modal opens,
     which takes the whole UI down rather than mis-selecting quietly.
 
-    Reachable today from ``--model`` and, once a probe has run, from any pick made
-    while the probed list was live and offered again after it failed.
+    Reachable today from ``--model``, and from a pick an earlier build offered that this
+    one has dropped.
     """
     pinned = "claude-a-model-no-list-offers"
-    assert pinned not in FALLBACK_MODELS
+    assert pinned not in MODELS
 
     state = LauncherState(task="t", model=pinned)
     state.request_open()
@@ -2812,7 +2812,7 @@ def _full_draft(tmp_path: Path) -> LauncherState:
         task="  fix the parser\nand say why  ",
         cwd=INSIDE_THE_CHECKOUT,
         brief="  /some/brief  ",
-        model=FALLBACK_MODELS[1],
+        model=MODELS[1],
         template_index=1,
         policy=Policy.AUTONOMOUS,
         subagent_cap=2,
@@ -3184,7 +3184,7 @@ def test_a_failure_does_not_overwrite_what_the_operator_typed_since(
     _, draft = _press_launch(monkeypatch, state)
     state.task = "a second task, half typed"
     state.cwd, state.brief = "/somewhere/else", "/a/brief/typed/since"
-    state.model, state.template_index = FALLBACK_MODELS[1], 1
+    state.model, state.template_index = MODELS[1], 1
     state.policy, state.subagent_cap = Policy.PERMISSIVE, 3
     typed = state.draft()
 
@@ -3219,7 +3219,7 @@ def test_a_failure_does_not_overwrite_what_the_operator_typed_since(
     [
         {"cwd": "/somewhere/else"},
         {"brief": "/a/brief/typed/since"},
-        {"model": FALLBACK_MODELS[1]},
+        {"model": MODELS[1]},
         {"template_index": 1},
         {"policy": Policy.PERMISSIVE},
         {"subagent_cap": 3},
@@ -4773,7 +4773,7 @@ def _typed_draft(tmp_path: Path) -> LauncherState:
         task="  a new task\nhalf typed  ",
         cwd=str(tmp_path),
         brief=" /some/brief ",
-        model=FALLBACK_MODELS[1],
+        model=MODELS[1],
         template_index=1,
         policy=Policy.PERMISSIVE,
         subagent_cap=2,

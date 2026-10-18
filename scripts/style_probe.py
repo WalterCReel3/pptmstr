@@ -1335,7 +1335,7 @@ def _sheet_dropdowns() -> None:
     imgui.table_setup_column("real combo popup (framed)")
     imgui.table_headers_row()
     themes = [palette.display_name for palette in theme.THEMES.values()]
-    models = list(model_catalog.FALLBACK_MODELS)
+    models = list(model_catalog.MODELS)
     imgui.table_next_row()
     for variant in DROPDOWNS:
         imgui.table_next_column()

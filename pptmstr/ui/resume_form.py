@@ -58,7 +58,7 @@ from imgui_bundle import imgui
 from .. import cli_version, templates
 from ..approval import Policy, requires_containment
 from ..model import LaunchSpec
-from ..model_catalog import DEFAULT_MODEL, FALLBACK_MODELS
+from ..model_catalog import DEFAULT_MODEL, MODELS
 from ..sessionfile import UnknownPolicy
 from ..sessions import SessionRow
 from . import launcher, widgets
@@ -943,7 +943,7 @@ def draw(
     wrap: bool,
     prober: launcher.Prober = cli_version.check_installed_cli,
     subagent_cap: int | None = None,
-    models: tuple[str, ...] = FALLBACK_MODELS,
+    models: tuple[str, ...] = MODELS,
     live: frozenset[str] = frozenset(),
     checkout: str = launcher.OWN_CHECKOUT,
 ) -> None:

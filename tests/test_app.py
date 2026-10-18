@@ -27,7 +27,7 @@ from typing import Any
 
 import pytest
 
-from pptmstr import cli_version
+from pptmstr import cli_version, model_catalog
 from pptmstr.approval import Policy
 from pptmstr.bridge import Bridge
 from pptmstr.cli_version import BelowFloor, FloorCheck, MeetsFloor, Unreadable
@@ -5771,7 +5771,7 @@ def test_the_frame_draws_the_resume_form_and_its_press_is_a_launch_that_knows_it
         assert handed[1]["state"] is state.resume
         assert handed[1]["subagent_cap"] == state.settings.subagent_cap
         assert handed[1]["wrap"] == state.settings.wrap_inputs
-        assert handed[1]["models"] == state.catalog.models
+        assert handed[1]["models"] == model_catalog.MODELS
 
         form = state.resume.open_for(
             session_id="s-9",
@@ -6197,7 +6197,6 @@ def test_in_dear_imgui_a_session_picked_in_new_task_is_resumed_there_and_no_form
     state = app.AppState(store=store, bridge=Bridge(), settings=Settings())
     state.pool = _IdlePool()  # type: ignore[assignment]
     state.frame_snap = store.snapshot()
-    monkeypatch.setattr(state.catalog, "request", lambda: None)
     state.launcher.cwd = str(tmp_path)
     state.launcher.task = "half a thought"
 
@@ -6457,7 +6456,6 @@ def test_in_dear_imgui_a_resume_that_started_nothing_is_told_without_closing_wha
     state = app.AppState(store=store, bridge=Bridge(), settings=Settings())
     state.pool = _IdlePool()  # type: ignore[assignment]
     state.frame_snap = store.snapshot()
-    monkeypatch.setattr(state.catalog, "request", lambda: None)
     state.launcher.cwd = str(tmp_path)
     state.launcher.task = "half a thought"
 

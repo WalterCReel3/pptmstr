@@ -904,7 +904,7 @@ def draw_omnibox() -> None:
     # Imported rather than re-spelled: this mock carried its own copy of the list and
     # had already drifted from it. A mock that shows models the launcher does not offer
     # is worse than no mock, because it is read as a picture of the real screen.
-    imgui.combo("##model", 0, list(model_catalog.FALLBACK_MODELS))
+    imgui.combo("##model", 0, list(model_catalog.MODELS))
     imgui.same_line()
     imgui.button("launch")
     imgui.same_line()
