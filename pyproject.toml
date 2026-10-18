@@ -4,7 +4,10 @@ name = "pptmstr"
 # is what `pptmstr --version` prints.
 dynamic = ["version"]
 description = "Puppet Master — a multi-agent LLM orchestrator with an immediate-mode UI"
-readme = "README.md"
+# The project's page on PyPI: short, and true of an installed pptmstr.
+# README.md is the repository's (how the tree is built, run and tested) and is
+# in neither the wheel nor the sdist.
+readme = "README-pypi.md"
 # The Pythons the pinned imtypeset has wheels for (pptmstr/pairing.py
 # IMTYPESET_PYTHONS; tests/test_pypi_metadata.py holds the two equal). Past the
 # cap the unit has no wheels: imtypeset's marker is false and imgui-bundle has
@@ -146,14 +149,29 @@ packages = ["pptmstr"]
 "imscribe.ref" = "pptmstr/imscribe.ref"
 "imtypeset.ref" = "pptmstr/imtypeset.ref"
 
+# The sdist is what BUILDS and DESCRIBES the package and nothing else, as
+# imscribe's is: the package, this file, the licence, the page PyPI shows, and
+# the two .ref files the wheel's force-include reads from the root. pip and
+# `python -m build` build the wheel FROM the unpacked sdist, so a ref missing
+# here fails that build (measured: hatchling stops with "Forced include not
+# found"). The scripts, tests, planning records and working notes are in the
+# repository, which the page links, and not in a file whose name PyPI never
+# lets anyone replace. So the suite cannot be run from an unpacked sdist.
+#
 # Listed explicitly rather than inferred: hatchling falls back to parsing
 # .gitignore when not told otherwise, which silently couples what ships to what
-# is ignored.
+# is ignored. Hatchling adds PKG-INFO, and `.gitignore` where the source has
+# one, whatever this list says. scripts/make_dist.py refuses an sdist holding
+# anything else, and tests/test_make_dist.py holds this list to that script.
 [tool.hatch.build.targets.sdist]
 include = [
-    "/pptmstr", "/scripts", "/tests", "/planning", "/LICENSE", "/README.md",
-    "/CLAUDE.md", "/orchestrator-design.md", "/Makefile", "/bootstrap.sh",
-    "/pyproject.toml", "/imscribe.ref", "/imtypeset.ref",
+    "/pptmstr",
+    "/pyproject.toml",
+    "/LICENSE",
+    # The `readme` above: the build fails without it.
+    "/README-pypi.md",
+    "/imscribe.ref",
+    "/imtypeset.ref",
 ]
 exclude = ["**/__pycache__", "**/*.pyc"]
 

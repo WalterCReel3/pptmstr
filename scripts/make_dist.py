@@ -87,29 +87,30 @@ commits its pins were published from there (`pptmstr/pairing.py`).
 
 SDIST_INCLUDE = (
     "pptmstr",
-    "scripts",
-    "tests",
-    "planning",
-    "LICENSE",
-    "README.md",
-    "CLAUDE.md",
-    "orchestrator-design.md",
-    "Makefile",
-    "bootstrap.sh",
     "pyproject.toml",
-    "imscribe.ref",
-    "imtypeset.ref",
+    "LICENSE",
+    "README-pypi.md",
+    *FORCE_INCLUDED,
 )
 """
 What the sdist may carry under its one top directory, each a file or a
 directory: `[tool.hatch.build.targets.sdist] include`, without the leading
-`/` (`tests/test_make_dist.py` holds the two equal). A member under none of
+`/` (`tests/test_make_dist.py` holds the two equal). It is what builds and
+describes the package; the repository holds the rest. A member under none of
 these is a refusal.
 """
 
-SDIST_REQUIRED = ("pyproject.toml", "LICENSE", "README.md", f"{NAME}/__init__.py", "PKG-INFO")
+SDIST_REQUIRED = (
+    "pyproject.toml",
+    "LICENSE",
+    "README-pypi.md",
+    *FORCE_INCLUDED,
+    f"{NAME}/__init__.py",
+    "PKG-INFO",
+)
 """
-What a build of the wheel from the sdist reads, and the metadata the backend writes.
+What a build of the wheel from the sdist reads (`readme`, `license-files`,
+the force-included refs, the version), and the metadata the backend writes.
 """
 
 SDIST_ADDED = ("PKG-INFO", ".gitignore")

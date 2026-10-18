@@ -78,6 +78,18 @@
 # artifact and refuse it unless it is exactly two files whose sha256 are the
 # build job's output.
 #
+# TWINE CHECK DOES NOT RENDER THE DESCRIPTION. The description is README-pypi.md,
+# so its type is text/markdown, and twine check maps that type to no renderer
+# ("Rendering cannot fail", twine 7.0.0's commands/check.py, read 2026-10-17).
+# On a Markdown description `--strict` fails only when the description or its
+# declared type is missing. Measured with twine 7.0.0 on imscribe's venv: a
+# wheel whose Markdown description has an unclosed fence, a raw <script> and a
+# half-written link passes, with readme_renderer.markdown.render replaced by a
+# function that exits if called. Installing readme_renderer[md] would change
+# nothing twine check does (CommonMark defines no invalid input in any case),
+# so it is not installed here, where it would be one more unpinned package
+# running before the hashes are taken (below).
+#
 # KNOWN AND OPEN: the build job's `pip install build hatchling twine` is
 # unpinned and unhashed, and it runs before make_dist and before the hashes are
 # taken, so a compromised release of one of those three could change what is
@@ -215,7 +227,7 @@ jobs:
             echo "END_OF_SHA256"
           } >> "$GITHUB_OUTPUT"
 
-      - name: "Whether PyPI will render the description"
+      - name: "twine check: the description is there and declares its type"
         run: python -m twine check --strict upload/*
 
       - name: "Keep the two files for the install check and the publishing jobs"

@@ -579,7 +579,13 @@ def test_the_build_is_what_make_dist_runs_on_python_3_11_and_keeps_two_files() -
     assert "cp dist/*.whl dist/*.tar.gz upload/" in files["run"]
     assert files["id"] == "files"
     assert build["outputs"] == {"sha256": "${{ steps.files.outputs.sha256 }}"}
-    assert _step(build, "Whether PyPI")["run"] == "python -m twine check --strict upload/*"
+    checked = _step(build, "twine check")
+    assert checked["run"] == "python -m twine check --strict upload/*"
+    # twine check renders no text/markdown description (release.yml's header,
+    # TWINE CHECK DOES NOT RENDER THE DESCRIPTION), so neither the step's name
+    # nor the tools it installs may say or imply that it does.
+    assert "render" not in checked["name"].lower()
+    assert "readme" not in tools["run"].lower()
     kept = _step(build, "Keep the two files")
     assert kept["uses"].startswith("actions/upload-artifact@")
     assert kept["with"] == {"name": "dist", "path": "upload", "if-no-files-found": "error"}
@@ -591,7 +597,7 @@ def test_the_build_is_what_make_dist_runs_on_python_3_11_and_keeps_two_files() -
             "The tag is the version",
             "Build the commit twice",
             "The two files",
-            "Whether PyPI",
+            "twine check",
             "Keep the two files",
         )
     ]

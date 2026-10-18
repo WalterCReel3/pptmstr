@@ -150,12 +150,14 @@ with zipfile.ZipFile(out / f"pptmstr-{version}-py3-none-any.whl", "w") as wheel:
     wheel.writestr(zipfile.ZipInfo(f"{info_dir}/licenses/LICENSE", stamp), licence)
 
 top = f"pptmstr-{version}"
-sdist_tops = ["pptmstr", "scripts", "tests", "pyproject.toml", "LICENSE", "imscribe.ref",
-              "imtypeset.ref", ".gitignore"]
+sdist_tops = ["pptmstr", "pyproject.toml", "LICENSE", "imscribe.ref", "imtypeset.ref",
+              ".gitignore"]
 if fault != "bare":
-    sdist_tops.append("README.md")
+    sdist_tops.append("README-pypi.md")
 if fault == "notes":
     sdist_tops += ["HANDOFF-advtext.md", "notes"]
+if fault == "tree":
+    sdist_tops += ["README.md", "scripts", "tests"]
 raw = io.BytesIO()
 with tarfile.open(fileobj=raw, mode="w") as sdist:
     def add(name, data):
@@ -200,6 +202,7 @@ _TREE = {
     "notes/a.md": "a note\n",
     "HANDOFF-advtext.md": "to advtext\n",
     "README.md": "readme\n",
+    "README-pypi.md": "page\n",
     "LICENSE": "MIT\n",
     "imscribe.ref": "a" * 40 + "\n",
     "imtypeset.ref": "b" * 40 + "\n",
@@ -285,15 +288,13 @@ def test_it_builds_the_commit_and_not_the_working_tree(
         ".gitignore",
         "LICENSE",
         "PKG-INFO",
-        "README.md",
+        "README-pypi.md",
         "imscribe.ref",
         "imtypeset.ref",
         "pptmstr/__init__.py",
         "pptmstr/__main__.py",
         "pptmstr/ui/view.py",
         "pyproject.toml",
-        "scripts/probe.py",
-        "tests/test_it.py",
     ]
     assert "2 path(s) of the working tree" in said and "NOT in what is built" in said
 
@@ -374,11 +375,17 @@ def test_two_builds_that_differ_are_said_and_nothing_is_installed(
             "metadata",
             "pptmstr/__init__.py states version '9.8.7.dev6' and the wheel's METADATA '9.9.9'",
         ),
-        ("bare", "the sdist has no README.md"),
+        ("bare", "the sdist has no README-pypi.md"),
         (
             "notes",
             "the sdist holds 2 member(s) that pyproject.toml's sdist include does not name: "
             "HANDOFF-advtext.md, notes/a.md",
+        ),
+        # The developer's tree: the repository's README, its scripts and its tests.
+        (
+            "tree",
+            "the sdist holds 3 member(s) that pyproject.toml's sdist include does not name: "
+            "README.md, scripts/probe.py, tests/test_it.py",
         ),
     ],
 )
@@ -393,18 +400,17 @@ def test_a_build_that_is_not_what_pyproject_describes_is_not_installed(
 
 def test_the_include_list_admits_a_directory_and_not_a_name_that_merely_begins_with_it() -> None:
     """
-    `scripts` admits `scripts/x.py`; it does not admit `scripts-old/x.py` or `scriptsx`.
+    `pptmstr` admits `pptmstr/x.py`; it does not admit `pptmstr-old/x.py` or `pptmstrx`.
     """
     script = _script()
     top = "pptmstr-1.0/"
-    base = [f"{top}{name}" for name in ("PKG-INFO", "pyproject.toml", "LICENSE", "README.md")]
-    base.append(f"{top}pptmstr/__init__.py")
-    assert script.sdist_problems([*base, f"{top}scripts/x.py"], "1.0") == []
-    for stranger in ("scripts-old/x.py", "scriptsx", "pptmstr.egg-info/PKG-INFO"):
+    base = [f"{top}{name}" for name in script.SDIST_REQUIRED]
+    assert script.sdist_problems([*base, f"{top}pptmstr/x.py"], "1.0") == []
+    for stranger in ("pptmstr-old/x.py", "pptmstrx", "pptmstr.egg-info/PKG-INFO", "scripts/x.py"):
         problems = script.sdist_problems([*base, f"{top}{stranger}"], "1.0")
         assert len(problems) == 1 and stranger in problems[0], (stranger, problems)
-    compiled = script.sdist_problems([*base, f"{top}tests/__pycache__/a.pyc"], "1.0")
-    assert compiled == ["the sdist holds compiled files: tests/__pycache__/a.pyc"]
+    compiled = script.sdist_problems([*base, f"{top}pptmstr/__pycache__/a.pyc"], "1.0")
+    assert compiled == ["the sdist holds compiled files: pptmstr/__pycache__/a.pyc"]
 
 
 @needs_git
