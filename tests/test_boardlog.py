@@ -25,9 +25,11 @@ from typing import get_args
 
 import pytest
 
-from pptmstr import boardlog
+from pptmstr import boardlog, model
 from pptmstr.boardlog import (
     Amended,
+    AnswerDelivered,
+    Answered,
     Board,
     Claimed,
     Clock,
@@ -36,21 +38,25 @@ from pptmstr.boardlog import (
     Damage,
     Declared,
     Delivered,
+    Dismissed,
     Edited,
     Handed,
     Malformed,
+    PeerPosted,
     Posted,
+    Raised,
     Reclaimed,
     Record,
     RecordingStopped,
     Released,
+    Retracted,
     Unrecognised,
     Unwritten,
     Withdrawn,
     WritesAccrued,
     Written,
 )
-from pptmstr.model import ApprovedWrites, Concern, ConcernState, Task, TaskState
+from pptmstr.model import ApprovedWrites, Concern, ConcernState, Decision, Task, TaskState
 
 # -- generated records ------------------------------------------------------------
 
@@ -74,6 +80,7 @@ _ADDRESSES = ("lead", "builder", "builder-2", "reviewer")
 _NODES: tuple[tuple[str, ...], ...] = ((), (), ("s",), ("s", "a1"), ("s", "a2"), ("z", "a1"))
 _TASK_IDS = ("t-1", "t-2", "t-3", "final-review")
 _CONCERN_IDS = ("c-1", "c-2", "c-3")
+_DECISION_IDS = ("d-1", "d-2", "d-3")
 _TIMES = (0.0, 1.5, -3.25, 1_760_000_000.123456, 1e-300, 4e18)
 # Empty is "none stated" on a declaration and "withdrawn" on an amendment.
 _PROPERTIES = ("", "a restored board is never short a fact", "café \ud800 stays put")
@@ -94,7 +101,7 @@ def _some(rng: random.Random, pool: tuple[str, ...]) -> tuple[str, ...]:
 def _future(rng: random.Random) -> Unrecognised:
     """A record of a kind a later build defines, as ``decode`` would hand it back."""
     at = rng.choice(_TIMES)
-    kind = rng.choice(("decision-raised", "decision-answered", "request-referenced"))
+    kind = rng.choice(("request-referenced", "channel-linked"))
     text = f'{{"kind": "{kind}", "at": {at!r}, "number": {rng.randrange(9)}}}'
     return Unrecognised(at=at, kind=kind, text=text)
 
@@ -111,6 +118,12 @@ _GENERATORS: dict[type, Callable[[random.Random], Record]] = {
         basis=_maybe(r, "read"),
         property=r.choice(_PROPERTIES),
         declared_by_id=r.choice(_NODES),
+        # Not kept coherent: the fold carries these as written and the store
+        # judges them, so a message or a mark with no channel is generated too.
+        channel=_maybe(r, r.choice(("brand", "café \ud800", ""))),
+        re=_maybe(r, r.choice(_CONCERN_IDS)),
+        # Text, as basis is: the three words, a word no build defines, and none.
+        inside_charter=r.choice(("yes", "no", "unstated", "probably", None)),
     ),
     Claimed: lambda r: Claimed(
         at=r.choice(_TIMES),
@@ -179,9 +192,48 @@ _GENERATORS: dict[type, Callable[[random.Random], Record]] = {
         sender_id=r.choice(_NODES),
         recipient_id=r.choice(_NODES),
     ),
+    PeerPosted: lambda r: PeerPosted(
+        at=r.choice(_TIMES),
+        concern_id=r.choice(_CONCERN_IDS),
+        sender=r.choice(_ADDRESSES),
+        recipient=r.choice(_ADDRESSES),
+        subject=_text(r),
+        body=_text(r),
+        channel=r.choice(("brand", "café \ud800", "")),
+        task_id=_maybe(r, r.choice(_TASK_IDS)),
+        basis=_maybe(r, "read"),
+        incident=r.random() < 0.5,
+        sender_id=r.choice(_NODES),
+        recipient_id=r.choice(_NODES),
+        needs_answer=r.random() < 0.5,
+        re=_maybe(r, r.choice(_CONCERN_IDS)),
+        quiet=r.random() < 0.5,
+    ),
     Edited: lambda r: Edited(at=r.choice(_TIMES), concern_id=r.choice(_CONCERN_IDS), body=_text(r)),
     Withdrawn: lambda r: Withdrawn(at=r.choice(_TIMES), concern_id=r.choice(_CONCERN_IDS)),
     Delivered: lambda r: Delivered(at=r.choice(_TIMES), concern_ids=_some(r, _CONCERN_IDS)),
+    Raised: lambda r: Raised(
+        at=r.choice(_TIMES),
+        decision_id=r.choice(_DECISION_IDS),
+        asker=r.choice(_ADDRESSES),
+        question=_text(r),
+        standing=r.choice(("operators", "taken", "a member no build has yet")),
+        blocks=_some(r, _TASK_IDS),
+        if_unanswered=_text(r),
+        evidence=_text(r),
+        recommendation=_text(r),
+        reversible=r.choice((True, False, None)),
+        asker_id=r.choice(_NODES),
+        channel=_maybe(r, r.choice(("brand", "café \ud800"))),
+    ),
+    Answered: lambda r: Answered(
+        at=r.choice(_TIMES), decision_id=r.choice(_DECISION_IDS), answer=_text(r)
+    ),
+    Dismissed: lambda r: Dismissed(at=r.choice(_TIMES), decision_id=r.choice(_DECISION_IDS)),
+    Retracted: lambda r: Retracted(at=r.choice(_TIMES), decision_id=r.choice(_DECISION_IDS)),
+    AnswerDelivered: lambda r: AnswerDelivered(
+        at=r.choice(_TIMES), decision_id=r.choice(_DECISION_IDS)
+    ),
     RecordingStopped: lambda r: RecordingStopped(at=r.choice(_TIMES), reason=_text(r)),
     Unrecognised: _future,
 }
@@ -236,8 +288,20 @@ def test_the_generator_reaches_every_value_a_stated_field_can_take() -> None:
     assert {None, "", "the cross presets"} <= not_run
     amended = {r.property for r in records if isinstance(r, Amended)}
     assert {None, *_PROPERTIES} <= amended
-    assert {r.property for r in records if isinstance(r, Declared)} == set(_PROPERTIES)
+    declared = [r for r in records if isinstance(r, Declared)]
+    assert {r.property for r in declared} == set(_PROPERTIES)
+    assert {r.inside_charter for r in declared} == {"yes", "no", "unstated", "probably", None}
+    assert {r.channel is None for r in declared} == {True, False}
+    assert {r.re is None for r in declared} == {True, False}
     assert {r.incident for r in records if isinstance(r, Posted)} == {True, False}
+    peers = [r for r in records if isinstance(r, PeerPosted)]
+    assert {(r.needs_answer, r.quiet) for r in peers} == {
+        (a, b) for a in (False, True) for b in (False, True)
+    }
+    assert {r.re is None for r in peers} == {True, False}
+    raised = [r for r in records if isinstance(r, Raised)]
+    assert {r.reversible for r in raised} == {True, False, None}
+    assert {r.channel is None for r in raised} == {True, False}
 
 
 def test_kind_names_are_distinct() -> None:
@@ -317,6 +381,7 @@ def test_a_record_written_before_a_fact_was_logged_restores_it_as_unstated() -> 
     assert task.property == ""
     assert task.released_at is None
     assert [v.property for v in task.versions] == ["", ""]
+    assert (task.channel, task.re, task.inside_charter) == (None, None, None)
     (concern,) = board.concerns
     assert concern.incident is False
 
@@ -350,7 +415,7 @@ def test_a_key_this_build_does_not_know_does_not_cost_the_record() -> None:
         '{"kind": "task-claimed", "task_id": "t-1", "by": "b"}\n',
         '{"at": 2.0, "task_id": "t-1", "by": "b"}\n',
         '{"kind": 3, "at": 2.0}\n',
-        '{"kind": "decision-raised"}\n',  # a future kind still owes a time
+        '{"kind": "request-referenced"}\n',  # a future kind still owes a time
         '{"kind": "task-writes-accrued", "at": 2.0, "task_id": "t", "lines_added": true}\n',
         '{"kind": "task-writes-accrued", "at": 2.0, "task_id": "t", "lines_added": 1.5}\n',
         '{"kind": "task-writes-accrued", "at": 2.0, "task_id": "t", "paths": "a.py"}\n',
@@ -366,6 +431,21 @@ def test_a_key_this_build_does_not_know_does_not_cost_the_record() -> None:
         '{"kind": "task-completed", "at": 2.0, "task_id": "t", "by": "b", "not_run": false}\n',
         '{"kind": "task-declared", "at": 2.0, "task_id": "t", "title": "T",'
         ' "declared_by": "lead", "property": null}\n',
+        # A charter mark is text, as a basis is, and a bool is not text.
+        '{"kind": "task-declared", "at": 2.0, "task_id": "t", "title": "T",'
+        ' "declared_by": "lead", "channel": "brand", "inside_charter": true}\n',
+        '{"kind": "task-declared", "at": 2.0, "task_id": "t", "title": "T",'
+        ' "declared_by": "lead", "channel": 3}\n',
+        # Three values and no fourth: a string, a number and a list are none of them.
+        '{"kind": "decision-raised", "at": 1.0, "decision_id": "d", "asker": "a",'
+        ' "question": "q", "standing": "taken", "reversible": "yes"}\n',
+        '{"kind": "decision-raised", "at": 1.0, "decision_id": "d", "asker": "a",'
+        ' "question": "q", "standing": "taken", "reversible": 0}\n',
+        '{"kind": "decision-raised", "at": 1.0, "decision_id": "d", "asker": "a",'
+        ' "question": "q", "standing": "taken", "reversible": [true]}\n',
+        '{"kind": "decision-raised", "at": 1.0, "decision_id": "d", "asker": "a",'
+        ' "question": "q"}\n',  # no standing
+        '{"kind": "decision-answered", "at": 1.0, "decision_id": "d"}\n',  # no answer
         '["task-claimed"]\n',
         "null\n",
         "\n",
@@ -1023,12 +1103,12 @@ def test_a_kind_this_build_does_not_define_is_carried_and_what_follows_still_app
 ) -> None:
     declared = Declared(at=1.0, task_id="t-1", title="T", declared_by="lead")
     write(tmp_path, (declared,))
-    text = '{"kind": "decision-raised", "at": 5.0, "number": 1, "question": "which root?"}'
+    text = '{"kind": "request-referenced", "at": 5.0, "number": 1, "request": "r-7"}'
     (tmp_path / "00000001.json").write_text(text + "\n")
     assert isinstance(boardlog.append(tmp_path, A), Written)
 
     log = boardlog.read(tmp_path)
-    future = Unrecognised(at=5.0, kind="decision-raised", text=text)
+    future = Unrecognised(at=5.0, kind="request-referenced", text=text)
 
     assert log == boardlog.Log(records=(declared, future, A))
     board = boardlog.restore(log.records)
@@ -1405,7 +1485,7 @@ def test_an_agents_amendment_is_one_writers_only_from_a_declarer_that_never_held
 
 @pytest.mark.parametrize("before", [(), (_W1_CLAIM,)], ids=["pending", "claimed"])
 def test_a_close_finishes_a_task_for_nobody_with_the_composed_result(
-    before: tuple[Record, ...],
+    before: tuple[Claimed, ...],
 ) -> None:
     """
     ``store._apply``'s close arm, restated: taken in any unfinished state, it
@@ -1666,7 +1746,7 @@ def test_a_reclaim_of_a_claim_the_named_holder_does_not_have_contests_the_task(
     ("records", "why"),
     [
         ((declared(), Claimed(at=1.0, task_id="ghost", by="builder")), "stray"),
-        ((declared(), Unrecognised(at=1.0, kind="decision-raised", text="{}")), "unrecognised"),
+        ((declared(), Unrecognised(at=1.0, kind="request-referenced", text="{}")), "unrecognised"),
         ((declared(), declared()), "contested"),
         ((posted(), Delivered(at=1.0, concern_ids=("c-1", "ghost"))), "stray"),
     ],
@@ -2312,22 +2392,313 @@ _CONCERN_FACTS: dict[str, tuple[str, object]] = {
     "incident": ("incident", True),
 }
 
-# Fields of ``model.Task`` and ``model.Concern`` the log deliberately does not
-# carry, each with the reason: derived from other fields, meaningful only inside
-# the process that set it, or a fact about the fleet rather than about one row.
-# A name goes here only with its reason, and a name that is here and also restored
-# is an error, since one of the two statements is then false.
+
+def test_a_peer_message_restores_with_every_field_it_was_posted_with() -> None:
+    """
+    ``model.Concern``'s peer-message fields ride ``PeerPosted`` and nothing else,
+    so ``_FULL_CONCERN``, a team concern, cannot set them. Each is set here to a
+    value its default is not, and the fields the two kinds share come back as
+    ``Posted``'s do.
+    """
+    peer = PeerPosted(
+        at=10.0,
+        concern_id="c-1",
+        sender="lead",
+        recipient="lead",
+        subject="subject",
+        body="body",
+        channel="brand",
+        task_id="t-1",
+        basis="read",
+        incident=True,
+        sender_id=("s",),
+        recipient_id=("z",),
+        needs_answer=True,
+        re="c-0",
+        quiet=True,
+    )
+    assert boardlog.decode(boardlog.encode(peer)) == peer
+
+    board = boardlog.restore((peer, Delivered(at=12.0, concern_ids=("c-1",))))
+
+    (concern,) = board.concerns
+    assert not board.short
+    assert (concern.channel, concern.needs_answer, concern.re, concern.quiet) == (
+        "brand",
+        True,
+        "c-0",
+        True,
+    )
+    assert (concern.sender, concern.recipient) == (("s", None), ("z", None))
+    assert (concern.task_id, concern.basis, concern.incident) == ("t-1", "read", True)
+    assert (concern.state, concern.delivered_at) == (ConcernState.DELIVERED, 12.0)
+    (team,) = boardlog.restore((posted(),)).concerns
+    assert (team.channel, team.needs_answer, team.re, team.quiet) == (None, False, None, False)
+
+
+def test_a_declarations_provenance_restores_with_its_task_and_outlives_amendment() -> None:
+    """
+    ``model.Task.provenance`` rides ``Declared`` as three fields, each set here
+    to a value its default is not, and an amendment -- which rewrites what is
+    asked and not who asked it -- leaves all three standing. A declaration
+    without them restores with none. The store puts them together
+    (``tests/test_provenance.py``).
+    """
+    declaration = _FULL_TASK[0]
+    assert isinstance(declaration, Declared)
+    asked = dataclasses.replace(declaration, channel="brand", re="c-7", inside_charter="no")
+    assert boardlog.decode(boardlog.encode(asked)) == asked
+
+    board = boardlog.restore((asked, *_FULL_TASK[1:]))
+
+    (task,) = board.tasks
+    assert not board.short and task.version == 2
+    assert (task.channel, task.re, task.inside_charter) == ("brand", "c-7", "no")
+    (plain,) = boardlog.restore(_FULL_TASK).tasks
+    assert (plain.channel, plain.re, plain.inside_charter) == (None, None, None)
+    assert dataclasses.replace(task, channel=None, re=None, inside_charter=None) == plain
+
+
+def _raised(decision_id: str = "d-1", **fields: object) -> Raised:
+    values: dict[str, object] = {
+        "at": 10.0,
+        "decision_id": decision_id,
+        "asker": "builder",
+        "question": "which root?",
+        "standing": "operators",
+        "asker_id": ("s", "a1"),
+    }
+    return Raised(**{**values, **fields})  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("ending", "outcome"),
+    [
+        (Answered(at=11.0, decision_id="d-1", answer=" yes \n"), model.Answered(" yes \n", 11.0)),
+        (Dismissed(at=11.0, decision_id="d-1"), model.Dismissed(11.0)),
+        (Retracted(at=11.0, decision_id="d-1"), model.Withdrawn(11.0)),
+    ],
+    ids=["answered", "dismissed", "withdrawn"],
+)
+def test_a_decision_restores_as_its_ending_left_it(
+    ending: Record, outcome: model.DecisionOutcome
+) -> None:
+    """
+    Each of the three endings is its own kind and restores as its own outcome,
+    with the time it was written at. ``outcome`` is restored here and not in the
+    field accounting below, which compares a field against the value an unwritten
+    one takes and cannot walk a union whose unwritten value is None.
+    """
+    board = boardlog.restore((_raised(), ending))
+
+    (decision,) = board.decisions
+    assert not board.short
+    assert decision.outcome == outcome
+    assert decision.asker == ("s", "a1")
+    (still_open,) = boardlog.restore((_raised(),)).decisions
+    assert still_open.outcome is None
+
+
+@pytest.mark.parametrize(
+    "late",
+    [
+        Answered(at=12.0, decision_id="d-1", answer="second"),
+        Dismissed(at=12.0, decision_id="d-1"),
+        Retracted(at=12.0, decision_id="d-1"),
+    ],
+    ids=["answered", "dismissed", "withdrawn"],
+)
+def test_a_decision_ended_twice_stands_as_the_first_ending_left_it(late: Record) -> None:
+    """
+    Nothing replaces an ending in the reducer, so a second one is two writers.
+    The first stands, the decision is contested, and what follows about it is
+    withheld beside it.
+    """
+    after = AnswerDelivered(at=13.0, decision_id="d-1")
+
+    board = boardlog.restore(
+        (_raised(), Answered(at=11.0, decision_id="d-1", answer="first"), late, after)
+    )
+
+    (decision,) = board.decisions
+    assert decision.outcome == model.Answered("first", 11.0)
+    assert decision.first_delivered_at is None
+    assert decision.contested and board.contested == (late, after) and board.short
+
+
+@pytest.mark.parametrize(
+    "before",
+    [(), (Retracted(at=11.0, decision_id="d-1"),)],
+    ids=["open", "withdrawn"],
+)
+def test_a_decision_is_handed_over_only_once_the_operator_has_ended_it(
+    before: tuple[Record, ...],
+) -> None:
+    """
+    The asker's read marks an answer or a dismissal. An open decision has
+    nothing to hand over and a withdrawn one was never the operator's.
+    """
+    handed = AnswerDelivered(at=12.0, decision_id="d-1")
+
+    board = boardlog.restore((_raised(), *before, handed))
+
+    (decision,) = board.decisions
+    assert decision.first_delivered_at is None
+    assert decision.contested and board.contested == (handed,)
+
+
+def test_a_decision_is_handed_over_once() -> None:
+    first = AnswerDelivered(at=12.0, decision_id="d-1")
+    again = AnswerDelivered(at=13.0, decision_id="d-1")
+
+    board = boardlog.restore((_raised(), Dismissed(at=11.0, decision_id="d-1"), first, again))
+
+    (decision,) = board.decisions
+    assert decision.first_delivered_at == 12.0
+    assert decision.contested and board.contested == (again,)
+
+
+def test_a_decision_raised_twice_stands_as_first_raised() -> None:
+    again = _raised(question="a different question")
+
+    board = boardlog.restore((_raised(), again))
+
+    (decision,) = board.decisions
+    assert decision.question == "which root?"
+    assert decision.contested and board.contested == (again,)
+
+
+def test_an_ending_of_a_decision_the_log_never_raised_is_stray() -> None:
+    strays: tuple[Record, ...] = (
+        Answered(at=1.0, decision_id="ghost", answer="yes"),
+        Dismissed(at=1.0, decision_id="ghost"),
+        Retracted(at=1.0, decision_id="ghost"),
+        AnswerDelivered(at=1.0, decision_id="ghost"),
+    )
+
+    board = boardlog.restore((_raised(), *strays))
+
+    assert board.stray == strays and board.short
+    assert board.decisions == boardlog.restore((_raised(),)).decisions
+
+
+def test_an_answer_holding_what_no_drawn_text_may_is_carried_byte_for_byte(
+    tmp_path: Path,
+) -> None:
+    """
+    The operator's answer is the one text a log holds verbatim. A NUL and a
+    lone surrogate are written, read and restored as they were typed.
+    """
+    answer = "yes \x00 then \ud800, and\r\n  keep the spacing  "
+    write(tmp_path, (_raised(), Answered(at=11.0, decision_id="d-1", answer=answer)))
+
+    (decision,) = boardlog.restore_log(boardlog.read(tmp_path)).decisions
+
+    assert isinstance(decision.outcome, model.Answered)
+    assert decision.outcome.text == answer
+
+
+def test_a_build_older_than_decisions_reads_them_as_unrecognised_and_short(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A pre-decision build has no entry for any of the five names. Each record is
+    carried, the board says it is short, and the task beside them still applies.
+    """
+    records: tuple[Raised | Answered | AnswerDelivered | Dismissed | Retracted, ...] = (
+        _raised(),
+        Answered(at=11.0, decision_id="d-1", answer="yes"),
+        AnswerDelivered(at=12.0, decision_id="d-1"),
+        _raised("d-2"),
+        Dismissed(at=11.0, decision_id="d-2"),
+        _raised("d-3"),
+        Retracted(at=11.0, decision_id="d-3"),
+    )
+    texts = [boardlog.encode(r) for r in records]
+    names = {
+        "decision-raised",
+        "decision-answered",
+        "decision-dismissed",
+        "decision-withdrawn",
+        "decision-delivered",
+    }
+    assert {type(r).KIND for r in records} == names, "the names are the format"
+    older = {kind: cls for kind, cls in boardlog._KINDS.items() if kind not in names}
+    assert len(older) == len(boardlog._KINDS) - len(names)
+    monkeypatch.setattr(boardlog, "_KINDS", older)
+
+    read = [boardlog.decode(text) for text in texts]
+
+    assert all(isinstance(r, Unrecognised) for r in read)
+    board = boardlog.restore((*_held(), *(r for r in read if isinstance(r, Unrecognised))))
+    assert board.short and len(board.unrecognised) == len(records)
+    assert board.decisions == ()
+    assert [(t.id, t.state) for t in board.tasks] == [("t-1", TaskState.CLAIMED)]
+    # Carried, so the newer build that reads the log again gets them back whole.
+    assert [boardlog.encode(r) for r in board.unrecognised] == texts
+
+
+# One decision raised with every text stated, answered, and handed to its asker.
+_FULL_DECISION: tuple[Record, ...] = (
+    Raised(
+        at=10.0,
+        decision_id="d-1",
+        asker="builder",
+        question="which root?",
+        standing="taken",
+        blocks=("t-1",),
+        if_unanswered="I go on with the first",
+        evidence="two roots exist",
+        recommendation="the first",
+        reversible=True,
+        asker_id=("s", "a1"),
+        channel="brand",
+    ),
+    Answered(at=11.0, decision_id="d-1", answer=" yes \n"),
+    AnswerDelivered(at=12.0, decision_id="d-1"),
+)
+
+_DECISION_FACTS: dict[str, tuple[str, object]] = {
+    "id": ("id", "d-1"),
+    "asker": ("asker", ("s", "a1")),
+    "question": ("question", "which root?"),
+    "blocks": ("blocks", ("t-1",)),
+    "if_unanswered": ("if_unanswered", "I go on with the first"),
+    "evidence": ("evidence", "two roots exist"),
+    "recommendation": ("recommendation", "the first"),
+    "standing": ("standing", "taken"),
+    "reversible": ("reversible", True),
+    "raised_at": ("raised_at", 10.0),
+    "first_delivered_at": ("first_delivered_at", 12.0),
+    "channel": ("channel", "brand"),
+}
+
+
+# Fields of ``model.Task``, ``model.Concern`` and ``model.Decision`` the log
+# deliberately does not carry, each with the reason: derived from other fields,
+# meaningful only inside the process that set it, or a fact about the fleet
+# rather than about one row. A name goes here only with its reason, and a name
+# that is here and also restored is an error, since one of the two statements is
+# then false.
 _NOT_PERSISTED: dict[type, dict[str, str]] = {
     Task: {},
     Concern: {},
+    Decision: {},
 }
 
 # Fields the log does carry that ``_FULL_TASK`` cannot set beside the others,
 # each with the test that restores it instead. A close leaves a task with no
 # holder and no claimer's statements, so no one history sets it and them.
 _RESTORED_APART: dict[type, dict[str, Callable[..., None]]] = {
-    Task: {"closed_by_operator": test_a_close_finishes_a_task_for_nobody_with_the_composed_result},
-    Concern: {},
+    Task: {
+        "closed_by_operator": test_a_close_finishes_a_task_for_nobody_with_the_composed_result,
+        "provenance": test_a_declarations_provenance_restores_with_its_task_and_outlives_amendment,
+    },
+    Concern: {
+        name: test_a_peer_message_restores_with_every_field_it_was_posted_with
+        for name in ("channel", "needs_answer", "re", "quiet")
+    },
+    Decision: {"outcome": test_a_decision_restores_as_its_ending_left_it},
 }
 
 
@@ -2336,8 +2707,9 @@ _RESTORED_APART: dict[type, dict[str, Callable[..., None]]] = {
     [
         (Task, _TASK_FACTS, _FULL_TASK, lambda board: board.tasks),
         (Concern, _CONCERN_FACTS, _FULL_CONCERN, lambda board: board.concerns),
+        (Decision, _DECISION_FACTS, _FULL_DECISION, lambda board: board.decisions),
     ],
-    ids=["Task", "Concern"],
+    ids=["Task", "Concern", "Decision"],
 )
 def test_every_field_of_a_board_record_has_a_record_that_restores_it_or_is_left_out_by_name(
     model: type,
@@ -2346,9 +2718,10 @@ def test_every_field_of_a_board_record_has_a_record_that_restores_it_or_is_left_
     pick: Callable[[Board], tuple[object, ...]],
 ) -> None:
     """
-    The pin for a field added to ``model.Task`` or ``model.Concern`` after this
-    module was written. Such a field needs no new record kind to be lost, so the
-    kind count above does not see it; this walks the model's own fields instead.
+    The pin for a field added to ``model.Task``, ``model.Concern`` or
+    ``model.Decision`` after this module was written. Such a field needs no new
+    record kind to be lost, so the kind count above does not see it; this walks
+    the model's own fields instead.
 
     Not only a list of names. Each carried field is restored from records that set
     it and compared with a value that is not what an unwritten field comes back
@@ -2391,11 +2764,12 @@ def test_every_field_of_a_board_record_has_a_record_that_restores_it_or_is_left_
                 ), f"{name}.{inner.name} is not moved off its default by any record here"
 
 
-# The least a log can say about a task and a concern: the keys that have no
-# default. The id is the one value these share with the full records.
+# The least a log can say about a task, a concern and a decision: the keys that
+# have no default. The id is the one value these share with the full records.
 _MINIMAL: dict[type, Record] = {
     Task: Declared(at=99.0, task_id="t-1", title="", declared_by=""),
     Concern: Posted(at=99.0, concern_id="c-1", sender="", recipient="", subject="", body=""),
+    Decision: Raised(at=99.0, decision_id="d-1", asker="", question="", standing="operators"),
 }
 
 
@@ -2457,8 +2831,12 @@ def test_the_fold_is_total_and_a_record_it_did_not_apply_never_changes_the_board
 
     first_seen = list(dict.fromkeys(r.task_id for r in records if isinstance(r, Declared)))
     assert [t.id for t in board.tasks] == first_seen
-    first_posted = list(dict.fromkeys(r.concern_id for r in records if isinstance(r, Posted)))
+    first_posted = list(
+        dict.fromkeys(r.concern_id for r in records if isinstance(r, Posted | PeerPosted))
+    )
     assert [c.id for c in board.concerns] == first_posted
+    first_raised = list(dict.fromkeys(r.decision_id for r in records if isinstance(r, Raised)))
+    assert [d.id for d in board.decisions] == first_raised
     assert board.unrecognised == tuple(r for r in records if isinstance(r, Unrecognised))
 
     unapplied = {id(r) for r in (*board.stray, *board.contested)}
@@ -2468,13 +2846,30 @@ def test_the_fold_is_total_and_a_record_it_did_not_apply_never_changes_the_board
     assert boardlog.restore(kept).tasks == tuple(
         dataclasses.replace(t, contested=False) for t in board.tasks
     )
+    assert boardlog.restore(kept).decisions == tuple(
+        dataclasses.replace(d, contested=False) for d in board.decisions
+    )
     assert {t.id for t in board.tasks if t.contested} == {
         r.task_id
         for r in board.contested
         if not isinstance(
-            r, Posted | Edited | Withdrawn | Delivered | RecordingStopped | Unrecognised
+            r,
+            Posted
+            | PeerPosted
+            | Edited
+            | Withdrawn
+            | Delivered
+            | RecordingStopped
+            | Unrecognised
+            | _DecisionRecords,
         )
     }
+    assert {d.id for d in board.decisions if d.contested} == {
+        r.decision_id for r in board.contested if isinstance(r, _DecisionRecords)
+    }
+
+
+_DecisionRecords = Raised | Answered | Dismissed | Retracted | AnswerDelivered
 
 
 @pytest.mark.parametrize("seed", SEEDS)
@@ -2509,6 +2904,11 @@ def test_no_sequence_restores_a_task_or_concern_one_reducer_could_not_hold(seed:
         assert (concern.delivered_at is not None) == (
             concern.state is ConcernState.DELIVERED
         ), concern
+    for decision in board.decisions:
+        # Handed over only once the operator has said something to hand over.
+        assert decision.first_delivered_at is None or isinstance(
+            decision.outcome, model.Answered | model.Dismissed
+        ), decision
 
 
 @pytest.mark.parametrize("seed", range(20))

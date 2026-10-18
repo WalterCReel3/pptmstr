@@ -178,6 +178,7 @@ def generated_round(seed: int, *, long_text: bool = False, scale: int = 1) -> St
                         posted_at=next(clock),
                         task_id=rng.choice((None, f"{session}-t0", "t-nope")),
                         incident=rng.random() < 0.5,
+                        channel=None,
                     ),
                 )
             )
@@ -353,6 +354,7 @@ def _round() -> Store:
                     body="b",
                     posted_at=at,
                     incident=True,
+                    channel=None,
                 ),
             )
         )
@@ -767,6 +769,7 @@ def test_an_incident_is_listed_with_what_became_of_it() -> None:
                     incident=True,
                     task_id=about,
                     basis=basis,
+                    channel=None,
                 ),
             )
         )

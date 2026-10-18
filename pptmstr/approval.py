@@ -23,11 +23,14 @@ import shlex
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, assert_never
+from typing import TYPE_CHECKING, Any, assert_never
 
 from . import settings
 from .commandtext import visible
 from .shellscan import _split_segments, is_read_only
+
+if TYPE_CHECKING:
+    from .model import Provenance
 
 
 class Disposition(enum.Enum):
@@ -1119,8 +1122,10 @@ def summarize(
     from the right and they are the short part. A declaration's property goes
     last for the opposite reason: it is a whole sentence that will rarely fit, and
     at the end a cut shows as the ellipsis it is, where in the middle it would
-    push the size off the row and still not be whole. The detail pane lists every
-    argument uncut.
+    push the size off the row and still not be whole. A declaration another lead
+    asked for carries its charter mark and channel beside its standing, for the
+    same reason and because they are what the operator judges it on. The detail
+    pane lists every argument uncut.
 
     **A call that reads a session's records says so ahead of everything else.**
     ``records_read`` decides it, from the ``session_id`` and ``cwd`` it is given
@@ -1188,8 +1193,17 @@ def summarize(
         # and whether it is sequenced behind anything -- because sign-off is a
         # scoping moment and those two are what the operator would otherwise open
         # the row to find.
+        #
+        # Where a peer's request came from rides inside the parentheses, beside
+        # the standing and ahead of the title: on a reviewed rung this row is
+        # where the operator judges the request against the charter, and a title
+        # of ordinary length already fills the row the driver builds. The mark
+        # leads the channel because a channel name may be as long as an id. The
+        # message id is left to DETAIL, which says the whole sentence. A
+        # declaration that gives none adds nothing here.
         title = str(tool_input.get("title") or "").strip()
-        parts = [f"declare ({standing(tool_input.get('basis'))}) {title or '(untitled)'}"]
+        said = standing(tool_input.get("basis")) + _row_provenance(tool_input)
+        parts = [f"declare ({said}) {title or '(untitled)'}"]
         touches = tool_input.get("touches") or ()
         if touches:
             parts.append(f"writes {', '.join(str(p) for p in touches)}")
@@ -1236,6 +1250,154 @@ def summarize(
         return clip(tool_name)
     key = next(iter(tool_input))
     return clip(f"{tool_name} {key}={tool_input[key]!r}")
+
+
+def _row_provenance(tool_input: Mapping[str, Any]) -> str:
+    """
+    A declaration's provenance as the queue row carries it, after its standing:
+    "; charter: yes on #brand", nothing when it gives none, and that the bus
+    refuses it when it does -- the reason is DETAIL's (``declared_provenance``).
+    """
+    # Imported here for the reason ``summarize`` gives.
+    from .model import stated_provenance
+
+    try:
+        asked = stated_provenance(
+            tool_input.get("channel"), tool_input.get("re"), tool_input.get("inside_charter")
+        )
+    except ValueError:
+        return "; provenance the bus refuses"
+    if asked is None:
+        return ""
+    return f"; charter: {asked.inside_charter.value} on #{asked.channel}"
+
+
+def states_provenance(tool_name: str) -> bool:
+    """
+    Whether a call of ``tool_name`` can state a provenance: a declaration, and
+    nothing else. Asked before anything reads the arguments, so a pane can skip
+    serialising a call that has none -- a whole-file Write, every frame.
+    """
+    return tool_name == _BUS_DECLARE
+
+
+@dataclass(frozen=True, slots=True)
+class _Refused:
+    """
+    Arguments the bus would refuse for their provenance, and the sentence it
+    would refuse them with. Apart from None, which is arguments that state no
+    provenance and are placed without one.
+    """
+
+    reason: str
+
+
+def _provenance_read(tool_input: Mapping[str, Any]) -> Provenance | None | _Refused:
+    """What a declaration's arguments state as a provenance, by the bus's rule."""
+    # Imported here for the reason ``summarize`` gives.
+    from .model import stated_provenance
+
+    try:
+        return stated_provenance(
+            tool_input.get("channel"), tool_input.get("re"), tool_input.get("inside_charter")
+        )
+    except ValueError as bad:
+        return _Refused(str(bad))
+
+
+def edited_provenance(
+    tool_name: str, original: Mapping[str, Any], draft: Mapping[str, Any]
+) -> str | None:
+    """
+    What approving the operator's ``draft`` of a declaration does to the
+    provenance the agent's ``original`` arguments state, as one warn line: None
+    when the board will keep what the original states, and for every other call.
+
+    Computed as the gate and the bus will compute it, so the line cannot say
+    something the board then contradicts. The draft is an edit when it differs
+    from the original **as a mapping** (``driver.AgentSession._park``): a draft only
+    reformatted is not stamped as edited, and nothing is dropped. What an edit
+    keeps is ``model.kept_provenance`` of what the draft states -- the bus's own
+    rule -- which drops a charter mark the draft states whoever wrote it, the
+    agent or the operator. A draft with no channel keeps no provenance at all,
+    and a draft the bus refuses puts nothing on the board. An original the bus
+    refuses is told apart from one that states nothing: a draft that drops its
+    channel is then placed with no provenance, where the original would not
+    have been placed at all, and the line says so.
+
+    ``original`` is the call as the agent made it (``PendingApproval.raw_args``,
+    or its JSON round trip), which is what the gate compares a draft with.
+    """
+    if not states_provenance(tool_name) or dict(draft) == dict(original):
+        return None
+    # Imported here for the reason ``summarize`` gives.
+    from .model import Charter, Provenance, kept_provenance
+
+    stated = _provenance_read(draft)
+    if isinstance(stated, _Refused):
+        return (
+            "approving your edit puts nothing on the board: the bus refuses its provenance: "
+            f"{stated.reason}"
+        )
+    kept = kept_provenance(stated, edited=True)
+    drawn = _provenance_read(original)
+    if kept == drawn and kept == stated:
+        return None
+    if kept is None:
+        match drawn:
+            case _Refused():
+                # DETAIL draws the original's refusal (``declared_provenance``),
+                # which would otherwise read as this call's fate.
+                return (
+                    "approving your edit places the declaration with no provenance: the "
+                    "draft names no channel, so the one the bus refuses is not sent"
+                )
+            case Provenance() | None:
+                return (
+                    "approving your edit removes the provenance: the board keeps no channel, "
+                    "message or charter mark for this task"
+                )
+            case _:
+                assert_never(drawn)
+    # The mark the operator has in view: the draft's own, or else the one drawn.
+    mark: Charter
+    if stated is not None and stated.inside_charter is not Charter.UNSTATED:
+        mark = stated.inside_charter
+    else:
+        match drawn:
+            case Provenance():
+                mark = drawn.inside_charter
+            case _Refused() | None:
+                mark = Charter.UNSTATED
+            case _:
+                assert_never(drawn)
+    if mark is not Charter.UNSTATED:
+        return (
+            f"approving your edit drops the charter mark ({mark.value}): the board keeps "
+            f"{kept.said()}"
+        )
+    return f"approving your edit changes the provenance: the board keeps {kept.said()}"
+
+
+def declared_provenance(tool_name: str, tool_input: Mapping[str, Any]) -> str | None:
+    """
+    Where a parked declaration says its request came from, as one line
+    (``model.Provenance.said``): None for any other call, and for a declaration
+    that gives no provenance, which is shown exactly as one was before
+    provenance existed.
+
+    The detail pane's line. The queue row says the same provenance shorter
+    (``summarize``), from the same reading. Arguments that cannot be read as a
+    provenance say so, with the reason the handler refuses them for
+    (``model.stated_provenance``, which both apply): approving that call puts
+    nothing on the board.
+    """
+    if not states_provenance(tool_name):
+        return None
+    asked = _provenance_read(tool_input)
+    if isinstance(asked, _Refused):
+        return f"provenance the bus refuses: {asked.reason}"
+    return None if asked is None else asked.said()
 
 
 @dataclass(frozen=True, slots=True)

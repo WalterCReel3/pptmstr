@@ -331,6 +331,7 @@ def test_what_a_session_wrote_is_drawable_wherever_the_store_keeps_it() -> None:
                 subject=f"s{LOW}",
                 body=f"b{LOW}\x00",
                 posted_at=1.0,
+                channel=None,
             ),
         )
     )

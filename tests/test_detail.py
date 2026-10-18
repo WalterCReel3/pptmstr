@@ -10,6 +10,7 @@ summary. The drawing itself needs pixels.
 from __future__ import annotations
 
 import dataclasses
+import json
 from types import MappingProxyType
 from typing import Any
 from unittest import mock
@@ -31,7 +32,7 @@ from pptmstr.model import (
     Snapshot,
 )
 from pptmstr.transcript import SegmentKind
-from pptmstr.ui import detail, inbox, review, typeset, widgets
+from pptmstr.ui import decision_view, detail, inbox, review, typeset, widgets
 from pptmstr.ui.blocks import BlockKind
 from pptmstr.ui.focus import FocusState, Scope
 from tests import test_typeset_views as views_rig
@@ -1127,7 +1128,7 @@ class Pane:
 
         monkeypatch.setattr(detail.widgets, "section", section)
 
-    def frame(self, snap: Snapshot) -> None:
+    def frame(self, snap: Snapshot, bridge: object = None) -> None:
         self.said.clear()
         self.widgets.clear()
         self.children.clear()
@@ -1139,7 +1140,17 @@ class Pane:
         im.set_next_window_size(im.ImVec2(self.width, 700.0))
         im.begin("##detail-test")
         try:
-            detail.draw(snap, self.focus, self.state, self.pane, 10.0)
+            # With a bridge, DETAIL acts: it needs a decisions state as well, and
+            # no queue row drawn this frame (``review.queue_on_screen``).
+            detail.draw(
+                snap,
+                self.focus,
+                self.state,
+                self.pane,
+                10.0,
+                decisions=None if bridge is None else decision_view.DecisionState(),
+                bridge=bridge,  # type: ignore[arg-type]
+            )
         finally:
             self.clicks.clear()
             im.end()
@@ -1368,6 +1379,170 @@ def test_the_native_body_keeps_both_warnings(imgui, monkeypatch) -> None:
     rig.frame(snap)
     assert rig.said.index(detail._EDITED_NOTICE) < heading + 1
     assert len(rig.pane.views) == 0
+
+
+_ASKED = {
+    "title": "regenerate the hero shot",
+    "channel": "brand",
+    "re": "c-0123456789ab",
+    "inside_charter": "yes",
+}
+
+
+@pytest.mark.parametrize("typeset_on", [False, True], ids=["native", "typeset"])
+def test_a_declaration_a_peer_asked_for_heads_its_body_with_where_it_came_from(
+    seam: Any, monkeypatch: pytest.MonkeyPatch, typeset_on: bool
+) -> None:
+    """
+    DETAIL is where the operator reads the whole provenance, message id and all,
+    so the line is drawn above everything that scrolls, under either renderer.
+    Under an edit, the line drawn is the agent's, and the line after it says
+    what the board keeps of the draft's. A declaration with no provenance draws
+    neither.
+    """
+    typeset.configure(typeset=typeset_on)
+    asked = parked("mcp__pptmstr__declare_task", dict(_ASKED))
+    plain = parked("mcp__pptmstr__declare_task", {"title": "x"}, pid="p2")
+    line = "requested on #brand, re c-0123456789ab, inside charter: yes"
+    snap = snapshot(record(), needs_you=(asked, plain))
+    rig = Pane(seam, monkeypatch)
+    rig.focus.move(snap, 0)
+
+    rig.frame(snap)
+
+    assert line in rig.said and not [said for said in rig.said if "approving your edit" in said]
+    assert rig.said.index(line) < min(
+        (n for n, said in enumerate(rig.said) if said.startswith("section:")), default=len(rig.said)
+    )
+
+    rig.state.edits["p1"] = json.dumps({**_ASKED, "title": "regenerate the hero shot, smaller"})
+    rig.said.clear()
+    rig.frame(snap)
+
+    dropped = (
+        "approving your edit drops the charter mark (yes): the board keeps "
+        "requested on #brand, re c-0123456789ab, inside charter: unstated"
+    )
+    assert rig.said.index(detail._EDITED_NOTICE) < rig.said.index(line)
+    assert rig.said.index(dropped) == rig.said.index(line) + 1
+
+    rig.focus.move(snap, 1)
+    rig.said.clear()
+    rig.frame(snap)
+    assert not [said for said in rig.said if "requested on" in said or "charter" in said]
+
+
+@pytest.mark.parametrize(
+    ("original", "draft", "said"),
+    [
+        (
+            _ASKED,
+            '{"title": "regenerate the hero shot"}',
+            "approving your edit removes the provenance: the board keeps no channel, "
+            "message or charter mark for this task",
+        ),
+        (
+            {"title": "x", "channel": "brand"},
+            '{"title": "x", "channel": "brand", "inside_charter": "yes"}',
+            "approving your edit drops the charter mark (yes): the board keeps "
+            "requested on #brand, inside charter: unstated",
+        ),
+        (_ASKED, json.dumps(_ASKED, indent=7), None),
+        (_ASKED, '{"title": ', None),
+    ],
+    ids=["channel-removed", "mark-added", "reformatted", "unparsed"],
+)
+def test_what_an_edit_is_said_to_do_to_a_provenance_is_what_the_bus_will_store(
+    seam: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    original: dict[str, Any],
+    draft: str,
+    said: str | None,
+) -> None:
+    """
+    Read from the draft as ``review.resolve`` parses and sends it, and compared
+    as the gate compares it. A draft without the channel keeps no provenance,
+    not a mark kept as unstated. A mark the operator adds is dropped like the
+    agent's. A reformatted draft is no edit to the gate, so the mark is kept and
+    nothing is said of it; nor of a draft that does not parse, which is not sent.
+    """
+    typeset.configure(typeset=False)
+    snap = snapshot(record(), needs_you=(parked("mcp__pptmstr__declare_task", dict(original)),))
+    rig = Pane(seam, monkeypatch)
+    rig.focus.move(snap, 0)
+    rig.state.edits["p1"] = draft
+
+    rig.frame(snap)
+
+    assert [line for line in rig.said if line.startswith("approving your edit")] == (
+        [] if said is None else [said]
+    )
+
+
+@pytest.mark.parametrize(
+    ("original", "draft", "said"),
+    [
+        (
+            _ASKED,
+            {**_ASKED, "title": "smaller"},
+            "approving your edit drops the charter mark (yes): the board keeps "
+            "requested on #brand, re c-0123456789ab, inside charter: unstated",
+        ),
+        (
+            _ASKED,
+            {"title": "smaller"},
+            "approving your edit removes the provenance: the board keeps no channel, "
+            "message or charter mark for this task",
+        ),
+        (
+            {"title": "x", "channel": "a/b"},
+            {"title": "x"},
+            "approving your edit places the declaration with no provenance: the draft "
+            "names no channel, so the one the bus refuses is not sent",
+        ),
+    ],
+    ids=["mark-dropped", "channel-removed", "refused-then-removed"],
+)
+def test_the_edit_warning_is_drawn_under_the_editor_where_detail_acts(
+    seam: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    original: dict[str, Any],
+    draft: dict[str, Any],
+    said: str,
+) -> None:
+    """
+    Where the queue row is off screen DETAIL acts, and ``e`` opens the editor in
+    place of the body, with approve under it. That is the moment the operator
+    decides, so the line saying what the board keeps is drawn there, under the
+    draft and above approve.
+    """
+    typeset.configure(typeset=False)
+    snap = snapshot(record(), needs_you=(parked("mcp__pptmstr__declare_task", dict(original)),))
+    rig = Pane(seam, monkeypatch)
+    real_warning = inbox._warning
+
+    def warning(text: str) -> None:
+        rig.said.append(text)
+        real_warning(text)
+
+    monkeypatch.setattr(inbox, "_warning", warning)
+    rig.focus.move(snap, 0)
+    rig.state.editing = "p1"
+    rig.state.edits["p1"] = json.dumps(draft)
+
+    editing: list[str] = []
+    real_editor = inbox.editor
+
+    def editor(*a: Any, **k: Any) -> None:
+        editing.append("drawn")
+        real_editor(*a, **k)
+
+    monkeypatch.setattr(inbox, "editor", editor)
+
+    rig.frame(snap, bridge=_Sent())
+
+    assert editing == ["drawn"]
+    assert [line for line in rig.said if line.startswith("approving your edit")] == [said]
 
 
 def test_the_native_body_says_may_not_apply_for_a_call_with_no_diff(imgui, monkeypatch) -> None:

@@ -580,6 +580,7 @@ def concern(cid: str, *, sender: NodeId, recipient: NodeId, at: float = 1.0) -> 
         subject=f"about {cid}",
         body="...",
         posted_at=at,
+        channel=None,
     )
 
 
@@ -759,6 +760,7 @@ def test_a_stalled_task_shows_the_reason_somebody_bothered_to_record() -> None:
                 body="holding this until the store lands",
                 posted_at=1.0,
                 task_id="t1",
+                channel=None,
             ),
         )
     )
@@ -782,6 +784,7 @@ def test_a_concern_about_nothing_in_particular_lands_on_no_row() -> None:
                 subject="a question",
                 body="which model should I use",
                 posted_at=1.0,
+                channel=None,
             ),
         )
     )
@@ -878,6 +881,7 @@ def _about(
         body="holding this until the store lands",
         posted_at=at,
         task_id=tid,
+        channel=None,
     )
 
 
@@ -972,6 +976,7 @@ def test_the_rows_carry_each_authors_basis_and_derive_none() -> None:
                     posted_at=3.0,
                     task_id="t1",
                     basis=basis,
+                    channel=None,
                 ),
             )
         )
@@ -1048,6 +1053,7 @@ def _round(store: Store) -> None:
                     body="b",
                     posted_at=20.0 + n,
                     incident=incident,
+                    channel=None,
                 ),
             )
         )
@@ -1528,7 +1534,13 @@ def test_mail_waiting_for_an_earlier_runs_agent_in_this_window_is_undeliverable(
     store = _started_again()
     for at, (cid, recipient) in enumerate((("c-old", DEV_1), ("c-new", QA_1))):
         concern = Concern(
-            id=cid, sender=LEAD_1, recipient=recipient, subject="s", body="b", posted_at=20.0 + at
+            id=cid,
+            sender=LEAD_1,
+            recipient=recipient,
+            subject="s",
+            body="b",
+            posted_at=20.0 + at,
+            channel=None,
         )
         store.apply(ConcernPosted(LEAD_1, concern))
 
@@ -1747,7 +1759,13 @@ def _mail(store: Store, concern_id: str, to: NodeId) -> None:
         ConcernPosted(
             LEAD_1,
             Concern(
-                id=concern_id, sender=LEAD_1, recipient=to, subject="s", body="b", posted_at=1.0
+                id=concern_id,
+                sender=LEAD_1,
+                recipient=to,
+                subject="s",
+                body="b",
+                posted_at=1.0,
+                channel=None,
             ),
         )
     )

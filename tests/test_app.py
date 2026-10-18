@@ -2167,6 +2167,7 @@ def _a_working_team(session: AgentSession) -> list[object]:
                 subject="least sure",
                 body="the cross presets",
                 posted_at=now,
+                channel=None,
             ),
         ),
     ]

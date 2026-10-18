@@ -2250,6 +2250,7 @@ def test_a_concern_keeps_the_basis_its_sender_gave_through_an_operators_edit() -
                 body="b",
                 posted_at=1.0,
                 basis=basis,
+                channel=None,
             ),
         )
 
@@ -2473,6 +2474,7 @@ def test_an_incident_mark_is_filed_as_given_and_survives_an_operators_edit() -> 
                 body="b",
                 posted_at=1.0,
                 incident=incident,
+                channel=None,
             ),
         )
 
@@ -2503,6 +2505,7 @@ def test_an_incident_is_delivered_exactly_as_an_ordinary_concern_is() -> None:
                 body="b",
                 posted_at=at,
                 incident=incident,
+                channel=None,
             ),
         )
 
@@ -3395,6 +3398,7 @@ def test_a_restored_board_is_in_the_store_as_tasks_and_concerns_of_its_session()
         posted_at=80.0,
         task_id="t1",
         incident=True,
+        channel=None,
     )
     report = snap.restores["sess-1"]
     assert (report.tasks, report.concerns, report.unplaced) == (1, 1, ())
@@ -3421,7 +3425,7 @@ def test_a_restored_id_another_session_already_has_is_left_out_and_never_written
     store = Store()
     store.apply(TaskDeclared(Task(id="t1", title="theirs"), OTHER))
     theirs_too = Concern(
-        id="c1", sender=OTHER, recipient=OTHER, subject="s", body="b", posted_at=1.0
+        id="c1", sender=OTHER, recipient=OTHER, subject="s", body="b", posted_at=1.0, channel=None
     )
     store.apply(ConcernPosted(OTHER, theirs_too))
     theirs, their_concern = store.snapshot().tasks["t1"], store.snapshot().concerns["c1"]
@@ -6815,3 +6819,74 @@ def test_only_another_look_replaces_the_end_of_a_command_left_running() -> None:
     assert back is gone and effects == ()
     asked = asked_by(gone, C_ASKER, 2)
     assert asked.command_approval_refusal(cid(2), "make install", 600) is None
+
+
+# -- a team concern cannot carry a peer message's fields ---------------------------
+
+
+@pytest.mark.parametrize(
+    "peer_field",
+    [{"needs_answer": True}, {"re": "c-0"}, {"quiet": True}],
+    ids=["needs_answer", "re", "quiet"],
+)
+def test_a_concern_with_no_channel_cannot_be_built_carrying_a_peer_field(
+    peer_field: dict[str, Any],
+) -> None:
+    """
+    The three ride only ``peer-posted``. Built without a channel, such a concern
+    would be filed as ``concern-posted`` and restored without the field, with
+    nothing raised anywhere, so it is refused where it is built.
+    """
+    with pytest.raises(ValueError, match="needs_answer, re and quiet"):
+        Concern(
+            id="c1",
+            sender=CHILD,
+            recipient=ROOT,
+            subject="s",
+            body="b",
+            posted_at=1.0,
+            channel=None,
+            **peer_field,
+        )
+
+
+def test_a_concern_with_a_channel_carries_every_peer_field() -> None:
+    peer = Concern(
+        id="c1",
+        sender=ROOT,
+        recipient=OTHER,
+        subject="s",
+        body="b",
+        posted_at=1.0,
+        channel="brand",
+        needs_answer=True,
+        re="c-0",
+        quiet=True,
+    )
+
+    assert (peer.needs_answer, peer.re, peer.quiet) == (True, "c-0", True)
+    # A replacement is checked too, and one that keeps the channel is allowed.
+    assert dataclasses.replace(peer, body="b2").quiet is True
+    with pytest.raises(ValueError):
+        dataclasses.replace(peer, channel=None)
+
+
+def test_a_logged_team_concern_carrying_a_peer_field_is_left_out_and_nothing_raises() -> None:
+    """
+    The reducer is total. A board is a value any caller can build, and one that
+    hands over a team concern with a peer field is reported, not raised from.
+    """
+    mail = RestoredConcern(
+        id="c1",
+        sender=CHILD,
+        recipient=ROOT,
+        subject="s",
+        body="b",
+        posted_at=_wall(5.0),
+        needs_answer=True,
+    )
+
+    snap = _placed(concerns=(mail,))
+
+    assert "c1" not in snap.concerns
+    assert snap.restores["sess-1"].unplaced == (NotPlaced("concern", "c1", Unplaced.INCOHERENT),)

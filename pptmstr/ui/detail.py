@@ -81,7 +81,12 @@ from typing import Any, assert_never
 
 from imgui_bundle import imgui
 
-from ..approval import DiffText, command_shown, diff_line_kind
+from ..approval import (
+    DiffText,
+    command_shown,
+    declared_provenance,
+    diff_line_kind,
+)
 from ..bridge import Bridge
 from ..command import CommandId
 from ..model import (
@@ -776,7 +781,8 @@ def _approval(
     imgui.text_colored(P.accent.vec4, pending.tool_name)
     frame = int(imgui.get_frame_count())
     if bridge is not None and state.editing == pending.id:
-        # The draft, in ImGui's own input and all of it: nothing is unset.
+        # The draft, in ImGui's own input and all of it: nothing is unset. The
+        # editor says under it what the draft does to a declaration's provenance.
         inbox.editor(state, pending, wrap=wrap)
         state.body_shown(review.DETAIL, pending.id, 0, frame)
         inbox.approval_controls(state, bridge, pending, 0)
@@ -791,10 +797,22 @@ def _approval(
 
     # Said under either renderer: "what you approve is not what is drawn" is the
     # one line this body may not lose.
-    if edit_differs(state, pending):
+    edited = edit_differs(state, pending)
+    if edited:
         imgui.text_colored(P.warn.vec4, _EDITED_NOTICE)
     if pending.shown_args is not None:
         imgui.text_colored(P.warn.vec4, review.ESCAPED)
+    # A declaration another lead asked for is judged on where it came from, so
+    # that line heads the body, above anything that scrolls. From the drawable
+    # twin, as every argument here is.
+    # Under an edit, the provenance drawn is the agent's and not the one the
+    # board will keep, and the line after it says what the board keeps.
+    asked = declared_provenance(pending.tool_name, pending.args)
+    if asked is not None:
+        imgui.text_colored(P.accent.vec4, asked)
+    dropped = inbox.edit_provenance(state, pending) if edited else None
+    if dropped is not None:
+        imgui.text_colored(P.warn.vec4, dropped)
     # A unified string of white space holds no row and is headed as no diff,
     # whoever would have drawn it.
     has_diff = bool(pending.diff and pending.diff.strip())

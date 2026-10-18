@@ -19,6 +19,7 @@ first on ``columns_hold`` and the second on ``own_rows``
 
 from __future__ import annotations
 
+import json
 from collections.abc import Iterator, Mapping
 from typing import Any
 
@@ -2637,3 +2638,138 @@ def test_where_columns_hold_the_row_and_detail_draw_one_call_from_one_model(
 
     pane.state.prune(set())
     assert pane.state.diffs == {} and pane.state.diff_whole == set()
+
+
+_DECLARED = {
+    "task_id": "t1",
+    "title": "regenerate the hero shot",
+    "channel": "brand",
+    "inside_charter": "yes",
+}
+
+
+def test_a_held_edit_of_a_declaration_says_what_the_board_keeps_of_its_provenance(
+    seam: Any, said: list[str]
+) -> None:
+    """
+    The row shows the agent's mark while ``a`` sends the draft. With the editor
+    on another row, the expanded row says what the bus will store of the
+    draft's provenance -- and nothing for a draft the gate does not count as
+    an edit, though its text differs.
+    """
+    call = parked(inbox._DECLARE_TASK, dict(_DECLARED))
+    elsewhere = write(5, "elsewhere")
+    pane = Pane(call, elsewhere)
+    pane.state.editing = elsewhere.id
+    pane.state.edits[call.id] = json.dumps({**_DECLARED, "title": "smaller"})
+    pane.draw(seam)
+    assert [line for line in said if line.startswith("approving your edit")] == [
+        "approving your edit drops the charter mark (yes): the board keeps "
+        "requested on #brand, inside charter: unstated"
+    ]
+
+    pane.state.edits[call.id] = json.dumps(_DECLARED, indent=7)
+    said.clear()
+    pane.draw(seam)
+    assert inbox._WITHHELD in said
+    assert not [line for line in said if line.startswith("approving your edit")]
+
+
+@pytest.mark.parametrize(
+    ("original", "draft", "line"),
+    [
+        (
+            _DECLARED,
+            {**_DECLARED, "title": "smaller"},
+            "approving your edit drops the charter mark (yes): the board keeps "
+            "requested on #brand, inside charter: unstated",
+        ),
+        (
+            {"task_id": "t1", "title": "x", "channel": "a/b"},
+            {"task_id": "t1", "title": "x"},
+            "approving your edit places the declaration with no provenance: the draft "
+            "names no channel, so the one the bus refuses is not sent",
+        ),
+    ],
+    ids=["mark-dropped", "refused-then-removed"],
+)
+def test_the_open_editor_says_what_the_board_keeps_of_the_provenance(
+    seam: Any, said: list[str], original: dict[str, Any], draft: dict[str, Any], line: str
+) -> None:
+    """
+    With the editor open on the row, the row draws the draft in place of the
+    body and approve under it. The operator decides there, so the line is
+    drawn there too.
+    """
+    call = parked(inbox._DECLARE_TASK, dict(original))
+    pane = Pane(call)
+    pane.state.editing = call.id
+    pane.state.edits[call.id] = json.dumps(draft)
+
+    pane.draw(seam)
+
+    assert [said_ for said_ in said if said_.startswith("approving your edit")] == [line]
+
+
+def test_the_edit_line_reads_no_arguments_of_a_call_that_has_no_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    The open editor asks for the line every frame, and serialising and parsing
+    a whole-file Write twice a frame for a line it can never have is waste: the
+    tool is checked first.
+    """
+    call = write(5)
+    state = review.ReviewState()
+    state.edits[call.id] = '{"file_path": "x", "content": "y"}'
+
+    def parsed(_text: str) -> None:
+        raise AssertionError("a Write's arguments were parsed for a provenance line")
+
+    monkeypatch.setattr(review, "parse_edit", parsed)
+    monkeypatch.setattr(review, "pretty_args", parsed)
+
+    assert inbox.edit_provenance(state, call) is None
+
+
+def test_a_name_the_agent_made_up_cannot_push_the_values_off_the_row(
+    seam: Any, said: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Every argument is listed, invented names included, so the column the values
+    start at is bounded by the longest name a described tool declares. A longer
+    name runs under its value, and the value is still where the row can show it.
+    """
+    columns: list[float] = []
+    wraps: list[float] = []
+    real_column, real_wrap = inbox._field_column, seam.push_text_wrap_pos
+
+    def column(names: Any) -> float:
+        columns.append(real_column(names))
+        return columns[-1]
+
+    def wrap(at: float = 0.0) -> None:
+        wraps.append(at)
+        real_wrap(at)
+
+    monkeypatch.setattr(inbox, "_field_column", column)
+    monkeypatch.setattr(seam, "push_text_wrap_pos", wrap)
+    call = parked(inbox._DECLARE_TASK, {**_DECLARED, "k" * 300: "v"})
+    Pane(call).draw(seam)
+
+    bound: list[float] = []
+    rig.frame(seam, lambda: bound.append(real_column(inbox._KNOWN_FIELDS)))
+    rig.frame(seam, lambda: bound.append(seam.calc_text_size("k" * 300).x))
+    (at,) = columns
+    assert at == bound[0] < bound[1]
+    assert "regenerate the hero shot" in said and "v" in said
+    # Zero is the default wrap other lines push; the fields push the row's edge.
+    edges = [edge for edge in wraps if edge > 0.0]
+    assert edges and all(at < edge for edge in edges)
+
+
+def test_the_column_bound_is_every_name_a_described_tool_declares() -> None:
+    assert "inside_charter" in inbox._KNOWN_FIELDS
+    assert inbox._KNOWN_FIELDS == {
+        name for prose, fields in inbox.DESCRIBED.values() for name in (prose, *fields)
+    }

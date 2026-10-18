@@ -452,7 +452,7 @@ def resolve(
             return False
     edited = None
     if approved and pending.id in state.edits:
-        parsed = _parse_edit(state.edits[pending.id])
+        parsed = parse_edit(state.edits[pending.id])
         if parsed is None:
             state.edit_error = "arguments are not valid JSON - not sent"
             return False
@@ -470,7 +470,7 @@ def resolve(
     return True
 
 
-def _parse_edit(text: str) -> dict[str, object] | None:
+def parse_edit(text: str) -> dict[str, object] | None:
     import json
 
     try:

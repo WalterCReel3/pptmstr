@@ -1042,6 +1042,7 @@ class FakeDriver:
                         # One marked row, so the marker is drawn beside two
                         # that are not.
                         incident=cid == "fake-c3",
+                        channel=None,
                     ),
                 )
             )

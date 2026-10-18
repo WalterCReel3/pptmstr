@@ -207,6 +207,7 @@ def _concern(r: random.Random, now: float) -> Concern:
         subject="subject",
         body="body",
         posted_at=now,
+        channel=None,
     )
 
 

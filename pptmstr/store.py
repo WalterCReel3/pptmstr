@@ -32,7 +32,7 @@ from typing import assert_never
 from . import drawable
 from .approval import Policy
 from .board import ROOT_NAMES, board_concerns, board_tasks, role_name
-from .boardlog import Board, Party, RestoredConcern, RestoredTask
+from .boardlog import Board, Party, RestoredConcern, RestoredDecision, RestoredTask
 from .command import (
     MAX_OPEN_PER_ASKER,
     MAX_OPEN_SUBAGENTS,
@@ -129,6 +129,7 @@ from .model import (
     ApprovedWrites,
     AskerFate,
     Basis,
+    Charter,
     ClaimRefusal,
     CommandOwed,
     CommandRefusal,
@@ -145,6 +146,7 @@ from .model import (
     NotPlaced,
     Obligation,
     PendingApproval,
+    Provenance,
     QuestionPending,
     Recalled,
     Restore,
@@ -165,6 +167,7 @@ from .model import (
     normalised_property,
     normalised_touches,
     restored_party,
+    stated_provenance,
 )
 from .transcript import Transcript
 
@@ -314,8 +317,11 @@ def _clock(now: float | None) -> float:
 #   them (``command.request_refusal``, ``Snapshot.command_approval_refusal``), which
 #   has to see a NUL or a lone surrogate to refuse it.
 #
-# A board log is not here because no field of it is: it is the store's own board,
-# written drawable and read back so (``_drawable``).
+# A board restore is not here because it never meets this table: ``_drawable``
+# leaves ``BoardRestored`` whole. The log is written from the store's board, so it
+# holds each field in the form the store holds it -- drawable, except the
+# operator's answer to a decision (``Answered.text`` above), which the log carries
+# verbatim (``boardlog.Answered``).
 _VERBATIM: drawable.Verbatim = {
     PendingApproval: frozenset({"raw_args", "shown_args"}),
     AgentSpawned: frozenset({"cwd", "session_base", "task", "template", "brief"}),
@@ -354,12 +360,15 @@ def _drawable(intent: Intent) -> Intent:
     form beside them where the two differ (``PendingApproval.args``).
 
     **A board restore is the one intent left whole.** Its board is a log the store's
-    own board was written to, so its text is drawable already, and a second pass
-    would write each backslash ``text`` wrote once more: the board would read as
-    nothing an agent wrote, and over the store that wrote it, as a different board
-    (``Unplaced.STORE_DIFFERS``), withholding the whole restore. A log that holds
-    what the store never writes is checked for where it is placed
-    (``Unplaced.UNDRAWABLE``).
+    own board was written to, so every text in it is already in the form the store
+    holds: drawable, and the operator's answer to a decision verbatim. A pass here
+    would write each backslash ``text`` wrote once more and escape every NUL and
+    lone surrogate in a restored answer: the board would read as nothing an agent
+    wrote, the answer would no longer be the one typed, and over the store that
+    wrote it the board would be a different one (``Unplaced.STORE_DIFFERS``),
+    withholding the whole restore. A log that holds what the store never writes
+    -- such a character anywhere but an answer -- is checked for where it is
+    placed (``Unplaced.UNDRAWABLE``).
     """
     if isinstance(intent, BoardRestored):
         return intent
@@ -890,17 +899,17 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
             auto: tuple[TaskId, ...] = ()
             behind: tuple[TaskId, ...] = ()
             if refused is None:
-                # Provenance comes from the intent, never from the record handed
-                # in: the intent's node_id is the sender the gate authenticated,
-                # and a declared_by a caller set on the Task is not evidence of
-                # anything. Stamping unconditionally leaves one writer for the
+                # Who declared it comes from the intent, never from the record
+                # handed in: the intent's node_id is the sender the gate
+                # authenticated, and a declared_by a caller set on the Task is not
+                # evidence of anything. Stamping unconditionally leaves one writer for the
                 # field rather than two that have to agree.
                 #
                 # Touches are normalised here for the same reason: the overlap
                 # check compares them, so a caller that could supply its own
                 # spelling could evade the check by writing `./x.py`.
                 #
-                # A result is blanked on the same grounds as the provenance is
+                # A result is blanked on the same grounds as the declarer is
                 # stamped: it is the claimer's account of finished work, a task
                 # being declared has neither, and the completion arm is its one
                 # writer. What that account left unrun goes with it.
@@ -1109,7 +1118,7 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
             placed = _restored(snap, intent)
             if placed is None:
                 return snap, ()
-            tasks, concerns, restores = placed
+            tasks, concerns, decisions, restores = placed
 
         case DecisionRaised():
             unfiled = _raise_refusal(snap, intent)
@@ -2589,17 +2598,23 @@ def blocked_tasks(
 # -- a board from its log ------------------------------------------------------------
 
 
-def _restored(
-    snap: Snapshot, intent: BoardRestored
-) -> tuple[dict[TaskId, Task], dict[ConcernId, Concern], Mapping[str, Restore]] | None:
+def _restored(snap: Snapshot, intent: BoardRestored) -> (
+    tuple[
+        dict[TaskId, Task],
+        dict[ConcernId, Concern],
+        Mapping[DecisionId, Decision],
+        Mapping[str, Restore],
+    ]
+    | None
+):
     """
-    The tasks, concerns and restore reports after ``intent``, or None when it
-    changes none of them.
+    The tasks, concerns, decisions and restore reports after ``intent``, or None
+    when it changes none of them.
 
     **Everything the board holds is placed or is named in the report with why
-    not.** A task or concern is placed when its id is free. One the store
-    already holds for this session exactly as the log has it is counted and left.
-    Each of the rest is a ``NotPlaced``.
+    not.** A task, concern or decision is placed when its id is free. One the
+    store already holds for this session exactly as the log has it is counted
+    and left. Each of the rest is a ``NotPlaced``.
 
     **An id another session's board has is never written over.** ``tasks`` is one
     map for every session and leads choose ids by hand, so a resumed session's
@@ -2609,7 +2624,7 @@ def _restored(
     reader of the map and is not made here.
 
     **A store that holds a different board for the session takes nothing.** If
-    it has a task or concern of this session that the log has differently, or
+    it has a task, concern or decision of this session that the log has differently, or
     does not have at all, the store is ahead of the log or beside it -- a
     session still running in this process, a second window on one session id --
     and laying the log's board over part of it would make a board neither
@@ -2745,6 +2760,50 @@ def _restored(
         if c.sender[0] == session_id and c.id not in filed
     ]
 
+    decisions = dict(snap.decisions)
+    new_decisions: list[Decision] = []
+    raised: set[str] = set()
+    held_decisions = 0
+    for restored_decision in board.decisions:
+        # The operator's answer is held verbatim (``_VERBATIM``) and may hold
+        # what no other logged text does; every other text is the store's
+        # drawable form.
+        if drawable.undrawable(dataclasses.replace(restored_decision, outcome=None)):
+            raised.add(restored_decision.id)
+            unplaced.append(
+                NotPlaced("decision", _said_id(restored_decision.id), Unplaced.UNDRAWABLE)
+            )
+            continue
+        if restored_decision.id in raised:
+            unplaced.append(NotPlaced("decision", restored_decision.id, Unplaced.REPEATED))
+            continue
+        raised.add(restored_decision.id)
+        decision = _restored_decision(restored_decision, session_id, node_of, at_of)
+        raised_already = snap.decisions.get(restored_decision.id)
+        if isinstance(decision, Unplaced):
+            unplaced.append(NotPlaced("decision", restored_decision.id, decision))
+        elif raised_already is None:
+            decisions[decision.id] = decision
+            new_decisions.append(decision)
+        elif raised_already.session_id != session_id:
+            unplaced.append(
+                NotPlaced(
+                    "decision",
+                    decision.id,
+                    Unplaced.OTHER_SESSION_HAS_ID,
+                    holder=raised_already.session_id,
+                )
+            )
+        elif _timeless_decision(raised_already) == _timeless_decision(decision):
+            held_decisions += 1
+        else:
+            differing.append(NotPlaced("decision", decision.id, Unplaced.STORE_DIFFERS))
+    differing += [
+        NotPlaced("decision", d.id, Unplaced.STORE_ONLY)
+        for d in snap.decisions.values()
+        if d.session_id == session_id and d.id not in raised
+    ]
+
     report = Restore(
         session_id=session_id,
         log_short=board.short,
@@ -2757,17 +2816,21 @@ def _restored(
     if differing:
         withheld = [NotPlaced("task", t.id, Unplaced.WITHHELD) for t in new_tasks]
         withheld += [NotPlaced("concern", c.id, Unplaced.WITHHELD) for c in new_concerns]
+        withheld += [NotPlaced("decision", d.id, Unplaced.WITHHELD) for d in new_decisions]
         report = dataclasses.replace(
             report,
             at=None if prior is None else prior.at,
             tasks=held[0],
             concerns=held[1],
+            decisions=held_decisions,
             unplaced=(*differing, *withheld, *unplaced),
             parties=MappingProxyType({}) if prior is None else prior.parties,
         )
-        tasks, concerns = dict(snap.tasks), dict(snap.concerns)
+        tasks, concerns, decisions = dict(snap.tasks), dict(snap.concerns), dict(snap.decisions)
     else:
-        fresh = bool(new_tasks or new_concerns) or prior is None or prior.at is None
+        fresh = (
+            bool(new_tasks or new_concerns or new_decisions) or prior is None or prior.at is None
+        )
         report = dataclasses.replace(
             report,
             # The reading the newest of what is held was converted with. A later
@@ -2777,12 +2840,18 @@ def _restored(
             at=clock.monotonic if fresh or prior is None else prior.at,
             tasks=held[0] + len(new_tasks),
             concerns=held[1] + len(new_concerns),
+            decisions=held_decisions + len(new_decisions),
             unplaced=tuple(unplaced),
             parties=MappingProxyType({**({} if prior is None else prior.parties), **parties}),
         )
     if report == prior:
         return None
-    return tasks, concerns, MappingProxyType({**snap.restores, session_id: report})
+    return (
+        tasks,
+        concerns,
+        snap.decisions if decisions == snap.decisions else MappingProxyType(decisions),
+        MappingProxyType({**snap.restores, session_id: report}),
+    )
 
 
 def _as_declared(tasks: dict[TaskId, Task], task: Task) -> Task:
@@ -2810,8 +2879,9 @@ def _as_declared(tasks: dict[TaskId, Task], task: Task) -> Task:
 
 def _said_id(logged: str) -> str:
     """
-    The id of a logged task or concern that is not placed for holding what no store
-    writes, as its report names it: drawable, since the id may be what held it.
+    The id of a logged task, concern or decision that is not placed for holding what
+    no store writes, as its report names it: drawable, since the id may be what held
+    it.
     """
     return drawable.text(logged) if drawable.undrawable(logged) else logged
 
@@ -2837,6 +2907,17 @@ def _stated(text: str | None) -> Basis | None:
         return Basis.stated(text)
     except ValueError:
         return None
+
+
+def _charter(text: str | None) -> Charter:
+    """
+    A logged charter mark as the member it names. One this build does not define,
+    or none, reads as unstated, for the reason ``_stated`` reads a basis so.
+    """
+    try:
+        return Charter.UNSTATED if text is None else Charter(text)
+    except ValueError:
+        return Charter.UNSTATED
 
 
 def _restored_task(
@@ -2867,7 +2948,11 @@ def _restored_task(
     - saying more than its state has: a holder or a handed version on a task
       nobody holds, a completion's time, result, basis or unrun list on one that
       is not finished. Placing it without them would be a board the log does
-      not describe, reported as placed whole.
+      not describe, reported as placed whole;
+    - a provenance with no channel -- a blank one, or a message answered or a
+      charter marked with none -- or with a name the bus would have refused or
+      trimmed: a channel that is not one drawable directory name, an ``re`` not
+      shaped as a concern id, an empty one included (``stated_provenance``).
 
     A task the operator closed is the one finished task with no holder
     (``TaskClosed``), and it is placed only in the shape that arm leaves.
@@ -2890,6 +2975,23 @@ def _restored_task(
         logged.holder is not None or logged.claimed_version is not None
     ):
         return Unplaced.INCOHERENT
+    provenance: Provenance | None = None
+    if (logged.channel, logged.re, logged.inside_charter) != (None, None, None):
+        # Read by the bus's own rule (``stated_provenance``), which no
+        # declaration the bus took fails and which is what the names are taken
+        # to have passed: a channel that is one drawable directory name, an re
+        # with a concern id's shape. The mark is read as an unknown basis is
+        # (``_charter``), so it is not given to the rule.
+        try:
+            checked = stated_provenance(logged.channel, logged.re, None)
+        except ValueError:
+            return Unplaced.INCOHERENT
+        # None for a blank channel, or a message answered or a charter marked on
+        # no channel; a different value for a name the bus would have trimmed,
+        # or an empty message id. The bus logs none of those.
+        if checked is None or (checked.channel, checked.re) != (logged.channel, logged.re):
+            return Unplaced.INCOHERENT
+        provenance = dataclasses.replace(checked, inside_charter=_charter(logged.inside_charter))
 
     history: list[TaskVersion] = []
     for prior, following in itertools.pairwise(logged.versions):
@@ -2921,6 +3023,7 @@ def _restored_task(
         released_at=None if logged.released_at is None else at_of(logged.released_at),
         superseded=tuple(history),
         held_by=held_by,
+        provenance=provenance,
     )
     if logged.closed_by_operator:
         # The close arm's shape and no other: finished at a time, nobody's, and
@@ -2991,6 +3094,9 @@ def _restored_concern(
     sender = node_of(logged.sender)
     if sender[0] != session_id:
         return Unplaced.NOT_THIS_SESSIONS
+    if logged.channel is None and (logged.needs_answer or logged.re is not None or logged.quiet):
+        # ``Concern`` refuses to be built so; a log's fold never produces it.
+        return Unplaced.INCOHERENT
     return Concern(
         id=logged.id,
         sender=sender,
@@ -3004,6 +3110,85 @@ def _restored_concern(
         task_id=logged.task_id,
         basis=_stated(logged.basis),
         incident=logged.incident,
+        channel=logged.channel,
+        needs_answer=logged.needs_answer,
+        re=logged.re,
+        quiet=logged.quiet,
+    )
+
+
+def _restored_decision(
+    logged: RestoredDecision,
+    session_id: str,
+    node_of: Callable[[Party], NodeId],
+    at_of: Callable[[float], float],
+) -> Decision | Unplaced:
+    """
+    ``logged`` as the decision the store holds, or why it is not this board's.
+
+    The raise arm's limits on how many may be open are not asked: they bound
+    what one agent can put in front of the operator at once, and a decision the
+    store filed was within them when it was filed. Neither is ``blocks``
+    checked against the board, since a task it names may be one this restore
+    could not place, and leaving the decision out for that would lose the
+    operator's answer over a link.
+
+    What only one arm writes is refused where no arm writes it: an answer longer
+    than ``DecisionAnswered`` takes, and a first delivery of a decision that was
+    neither answered nor dismissed. A standing this build does not define has
+    no member to restore as.
+    """
+    asker = node_of(logged.asker)
+    if asker[0] != session_id:
+        return Unplaced.NOT_THIS_SESSIONS
+    try:
+        standing = Standing(logged.standing)
+    except ValueError:
+        return Unplaced.INCOHERENT
+    outcome: DecisionOutcome | None
+    match logged.outcome:
+        case None:
+            outcome = None
+        case Answered():
+            if len(logged.outcome.text) > MAX_ANSWER_CHARS:
+                return Unplaced.INCOHERENT
+            outcome = Answered(text=logged.outcome.text, at=at_of(logged.outcome.at))
+        case Dismissed():
+            outcome = Dismissed(at=at_of(logged.outcome.at))
+        case Withdrawn():
+            outcome = Withdrawn(at=at_of(logged.outcome.at))
+        case _:
+            assert_never(logged.outcome)
+    delivered = logged.first_delivered_at
+    if delivered is not None and not isinstance(outcome, Answered | Dismissed):
+        return Unplaced.INCOHERENT
+    return Decision(
+        id=logged.id,
+        asker=asker,
+        question=logged.question,
+        blocks=logged.blocks,
+        if_unanswered=logged.if_unanswered,
+        evidence=logged.evidence,
+        recommendation=logged.recommendation,
+        standing=standing,
+        reversible=logged.reversible,
+        raised_at=at_of(logged.raised_at),
+        outcome=outcome,
+        first_delivered_at=None if delivered is None else at_of(delivered),
+        channel=logged.channel,
+    )
+
+
+def _timeless_decision(decision: Decision) -> Decision:
+    """
+    ``decision`` with every time flattened, keeping which of them it has.
+    """
+    outcome = decision.outcome
+    return dataclasses.replace(
+        decision,
+        raised_at=0.0,
+        outcome=None if outcome is None else dataclasses.replace(outcome, at=0.0),
+        first_delivered_at=None if decision.first_delivered_at is None else 0.0,
     )
 
 

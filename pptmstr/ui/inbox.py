@@ -36,7 +36,7 @@ import functools
 import math
 import os
 import re
-from collections.abc import Callable, Hashable, Mapping, Sequence
+from collections.abc import Callable, Hashable, Iterable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from typing import Any, assert_never
@@ -44,7 +44,7 @@ from typing import Any, assert_never
 from imgui_bundle import imgui
 
 from .. import approval
-from ..approval import DiffText, command_shown, diff_line_kind
+from ..approval import DiffText, command_shown, diff_line_kind, edited_provenance
 from ..board import role_name
 from ..bridge import Bridge
 from ..command import (
@@ -201,9 +201,17 @@ _DECLARE_TASK = "mcp__pptmstr__declare_task"
 #
 # ``AskUserQuestion`` is not here either: its text is a list of questions each
 # with options, not one argument, and is set as the structure it is.
+#
+# A declaration's provenance (``channel``, ``re``, ``inside_charter``) heads it
+# beside the title, when it is given: on a reviewed rung it is what the operator
+# judges a peer's request on, and the row's summary carries its mark and channel
+# (``approval.summarize``).
 DESCRIBED: dict[str, tuple[str, tuple[str, ...]]] = {
     _POST_CONCERN: ("body", ("to", "subject", "task_id")),
-    _DECLARE_TASK: ("detail", ("task_id", "title", "depends_on", "touches")),
+    _DECLARE_TASK: (
+        "detail",
+        ("task_id", "title", "channel", "re", "inside_charter", "depends_on", "touches"),
+    ),
     "Agent": ("prompt", ("subagent_type", "description")),
     "Task": ("prompt", ("subagent_type", "description")),
     "ExitPlanMode": ("plan", ("planFilePath",)),
@@ -213,10 +221,14 @@ DESCRIBED: dict[str, tuple[str, tuple[str, ...]]] = {
     "WebFetch": ("prompt", ("url",)),
 }
 assert _SPAWN_TOOLS <= DESCRIBED.keys()
+# Every argument name a described tool declares: the bound on the field column
+# (``_field_column``), taken from the tables and never from a call.
+_KNOWN_FIELDS = frozenset(name for prose, fields in DESCRIBED.values() for name in (prose, *fields))
 _LIST_FIELDS = frozenset({"depends_on", "touches"})
 
-# Where a field's value starts, from the left edge of the block. Wide enough for
-# the longest name in ``DESCRIBED`` in either prose face.
+# Where a field's value starts, from the left edge of the block, at the least. A
+# block whose longest name is wider at the size being drawn moves its values past
+# that name (``_field_column``).
 _X_FIELD_VALUE = 120.0
 
 
@@ -1263,6 +1275,11 @@ def _expand_approval(
         # drawn when the faces did not load.
         if edit_withheld(state, pending):
             _warning(_WITHHELD)
+            # The row above shows the provenance as the agent stated it, and the
+            # board keeps what the draft states, less any charter mark.
+            dropped = edit_provenance(state, pending)
+            if dropped is not None:
+                _warning(dropped)
         # The gate predicts this from its own read of the file at park time; the
         # tool is what decides, on the file as it is when the call runs.
         #
@@ -1633,6 +1650,50 @@ def _field_text(name: str, value: object) -> str:
     return value if isinstance(value, str) else repr(value)
 
 
+def _field_column(names: Iterable[str]) -> float:
+    """
+    Where a block's field values start: ``_X_FIELD_VALUE``, or past its longest
+    name by the item spacing when that name is wider in the font being drawn.
+    Measured, because the size is the frame's and the names are the table's.
+
+    **No further than the longest name a tool declares** (``_KNOWN_FIELDS``).
+    ``describe`` lists every argument, names the agent made up included, and a
+    column measured from one of those has no bound: past ``left + wide`` it puts
+    every value on the row beyond its own wrap position, off the pane. A longer
+    name runs under its value instead, and the value is still read.
+    """
+    known = max(imgui.calc_text_size(name).x for name in _KNOWN_FIELDS)
+    widest = max((imgui.calc_text_size(name).x for name in names), default=0.0)
+    return max(_X_FIELD_VALUE, min(widest, known) + imgui.get_style().item_spacing.x)
+
+
+def edit_provenance(state: review.ReviewState, pending: PendingApproval) -> str | None:
+    """
+    What approving the operator's draft does to the provenance the call states
+    (``approval.edited_provenance``), or None: with no draft, with one that does
+    not parse -- ``review.resolve`` sends nothing then -- and where the board
+    keeps what is drawn.
+
+    Both sides are read by ``review.parse_edit``, the parse ``resolve`` sends:
+    the draft, and the arguments as the editor opens on them
+    (``review.pretty_args``). That second one is ``raw_args`` -- what the gate
+    compares a draft with -- by a JSON round trip, which gives back what came
+    from JSON, without a pane reading ``raw_args`` itself. Serialises the
+    arguments, so asked only of a declaration with a draft: the tool is checked
+    before anything is parsed, because the open editor asks this every frame.
+    """
+    if not approval.states_provenance(pending.tool_name):
+        return None
+    draft = state.edits.get(pending.id)
+    parsed = None if draft is None else review.parse_edit(draft)
+    if parsed is None:
+        return None
+    sent = review.parse_edit(review.pretty_args(pending))
+    if sent is None:
+        return None
+    return edited_provenance(pending.tool_name, sent, parsed)
+
+
 def edit_withheld(state: review.ReviewState, pending: PendingApproval) -> bool:
     """
     Whether the operator holds an edit of these arguments that the row is not showing.
@@ -1763,9 +1824,10 @@ def _typeset_body(state: review.ReviewState, pending: PendingApproval, key: str)
     # and no fallback, and the proportional face has no arrow, tick or box
     # rule, so a subject set in it shows a replacement glyph where the agent
     # wrote one. These are words being approved.
+    column = _field_column(name for name, _ in described.fields)
     for name, value in described.fields:
         imgui.text_colored(P.text_dim.vec4, name)
-        imgui.same_line(left + _X_FIELD_VALUE)
+        imgui.same_line(left + column)
         # Wrapped, not ellipsized: a subject is short enough that this is one line,
         # and when it is not, the rest of it is still something being approved.
         imgui.push_text_wrap_pos(left + wide)
@@ -1910,12 +1972,17 @@ def argument_rows(tool_name: str, args: Mapping[str, Any], command: str | None =
     return rows
 
 
-def editor(state: review.ReviewState, pending: object, *, wrap: bool = True) -> None:
+def editor(state: review.ReviewState, pending: PendingApproval, *, wrap: bool = True) -> None:
     """
     The draft of a parked call's corrected arguments, in an input of its own: what
     `e` opens, on the queue's row or in DETAIL where the row is not on screen.
+
+    Under the input, what approving the draft does to the provenance the call
+    states (``edit_provenance``). Both panes draw this, and approve sits right
+    under it (``approval_controls``), so the line is in view while the operator
+    decides.
     """
-    pid = pending.id  # type: ignore[attr-defined]
+    pid = pending.id
     imgui.text_colored(P.focus.vec4, "editing arguments - approve runs the corrected call")
     changed, text = multiline_input(
         "##edit",
@@ -1927,6 +1994,9 @@ def editor(state: review.ReviewState, pending: object, *, wrap: bool = True) -> 
     if changed:
         state.edits[pid] = text
         state.edit_error = None
+    dropped = edit_provenance(state, pending)
+    if dropped is not None:
+        _warning(dropped)
 
 
 def _expand_question(

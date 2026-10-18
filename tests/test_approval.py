@@ -20,7 +20,9 @@ from pptmstr.approval import (
     Disposition,
     Policy,
     classify,
+    declared_provenance,
     diff_line_kind,
+    edited_provenance,
     render_diff,
     summarize,
 )
@@ -1265,6 +1267,262 @@ def test_a_basis_the_handler_will_refuse_is_shown_as_one_it_will_refuse() -> Non
 
     assert row == "declare (basis 'verified' is not one the bus accepts) x"
     assert "says:" not in row
+
+
+def _driver_width() -> int:
+    """
+    The width the driver builds a parked call's row at: its one ``summarize``
+    call passes none, so the default.
+    """
+    from pptmstr import driver
+
+    tree = ast.parse(Path(driver.__file__).read_text(encoding="utf-8"))
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "summarize"
+    ]
+    assert len(calls) == 1, "the driver builds a row in one place"
+    (call,) = calls
+    assert len(call.args) == 2 and all(k.arg != "width" for k in call.keywords)
+    width = inspect.signature(summarize).parameters["width"].default
+    assert isinstance(width, int)
+    return width
+
+
+_MSG = "c-0123456789ab"
+_LONG_TITLE = "regenerate the hero shot for the autumn landing page in all three crops"
+
+
+def test_a_declaration_a_peer_asked_for_keeps_its_mark_on_the_row_the_driver_builds() -> None:
+    """
+    On a reviewed rung this row is where the operator judges the request
+    against the charter, so the mark and the channel ride beside the standing,
+    ahead of a title that fills the row. At the width the driver uses, with a
+    title of the length declarations have.
+    """
+    width = _driver_width()
+    asked = {
+        "title": _LONG_TITLE,
+        "touches": ["shots/hero.png"],
+        "channel": "brand",
+        "re": _MSG,
+        "inside_charter": "yes",
+    }
+
+    row = summarize(_DECLARE, asked)
+    unmarked = summarize(_DECLARE, {"title": _LONG_TITLE, "channel": "brand"})
+
+    assert width == 90 and len(row) == width and row.endswith("...")
+    assert row.startswith("declare (basis unstated; charter: yes on #brand) regenerate the hero")
+    assert unmarked.startswith("declare (basis unstated; charter: unstated on #brand) regen")
+    assert summarize(_DECLARE, {"title": "x", "channel": "brand", "inside_charter": False}) == (
+        "declare (basis unstated; charter: no on #brand) x"
+    )
+
+
+def test_the_mark_leads_the_longest_channel() -> None:
+    from pptmstr.model import MAX_CHANNEL_CHARS
+
+    row = summarize(
+        _DECLARE, {"title": "x", "channel": "c" * MAX_CHANNEL_CHARS, "inside_charter": "no"}
+    )
+
+    assert row.startswith("declare (basis unstated; charter: no on #ccc")
+
+
+def test_detail_says_the_whole_provenance_in_one_line() -> None:
+    assert declared_provenance(
+        _DECLARE, {"channel": "brand", "re": _MSG, "inside_charter": False}
+    ) == (f"requested on #brand, re {_MSG}, inside charter: no")
+
+
+@pytest.mark.parametrize(
+    "given",
+    [{}, {"channel": "", "re": " ", "inside_charter": ""}, {"channel": None}],
+    ids=["absent", "blank", "null"],
+)
+def test_a_declaration_with_no_provenance_has_the_row_it_had_before_provenance(
+    given: dict[str, Any],
+) -> None:
+    assert summarize(_DECLARE, {"title": "x", **given}) == "declare (basis unstated) x"
+    assert declared_provenance(_DECLARE, {"title": "x", **given}) is None
+
+
+@pytest.mark.parametrize(
+    "given",
+    [
+        {"re": _MSG},
+        {"inside_charter": "yes"},
+        {"channel": "brand", "inside_charter": "maybe"},
+        {"channel": "c" * 65},
+        {"channel": "ops, inside charter: yes"},
+        {"channel": "Brand"},
+        {"channel": "bra\u200bnd"},
+        {"channel": "brand", "re": "c-7"},
+    ],
+    ids=[
+        "re-alone",
+        "mark-alone",
+        "unknown-mark",
+        "over-long-channel",
+        "spaced-channel",
+        "capital-channel",
+        "zero-width-channel",
+        "bad-re",
+    ],
+)
+def test_a_provenance_the_handler_will_refuse_is_shown_as_one_it_will_refuse(
+    given: dict[str, Any],
+) -> None:
+    """
+    The row is drawn before the handler runs. Approving one of these puts
+    nothing on the board, and the row says so, DETAIL in the handler's own
+    words, rather than showing a provenance that will never stand. Every bound
+    the handler applies is the row's too, the length of a name included.
+    """
+    from pptmstr.model import stated_provenance
+
+    said = declared_provenance(_DECLARE, given)
+
+    assert said is not None and said.startswith("provenance the bus refuses: ")
+    with pytest.raises(ValueError) as refused:
+        stated_provenance(given.get("channel"), given.get("re"), given.get("inside_charter"))
+    assert said.endswith(str(refused.value))
+    assert summarize(_DECLARE, {"title": "x", **given}) == (
+        "declare (basis unstated; provenance the bus refuses) x"
+    )
+
+
+_STATED = {"title": "x", "channel": "brand", "re": _MSG, "inside_charter": "yes"}
+_KEPT = f"requested on #brand, re {_MSG}, inside charter: unstated"
+
+
+@pytest.mark.parametrize(
+    ("original", "draft", "said"),
+    [
+        (
+            _STATED,
+            {**_STATED, "title": "y"},
+            f"approving your edit drops the charter mark (yes): the board keeps {_KEPT}",
+        ),
+        (
+            {"title": "x", "channel": "brand"},
+            {"title": "x", "channel": "brand", "inside_charter": "no"},
+            "approving your edit drops the charter mark (no): the board keeps "
+            "requested on #brand, inside charter: unstated",
+        ),
+        (
+            _STATED,
+            {"title": "x"},
+            "approving your edit removes the provenance: the board keeps no channel, "
+            "message or charter mark for this task",
+        ),
+        (
+            {"title": "x", "channel": "brand"},
+            {"title": "x", "channel": "ops"},
+            "approving your edit changes the provenance: the board keeps "
+            "requested on #ops, inside charter: unstated",
+        ),
+        (
+            {"title": "x"},
+            {"title": "x", "channel": "a/b"},
+            "approving your edit puts nothing on the board: the bus refuses its "
+            "provenance: channel is not a name a channel can have. A channel's name is "
+            "lowercase ASCII letters and digits, '.', '_' and '-', and starts with a "
+            "letter or digit.",
+        ),
+        (
+            {"title": "x", "channel": "a/b"},
+            {"title": "x"},
+            "approving your edit places the declaration with no provenance: the draft "
+            "names no channel, so the one the bus refuses is not sent",
+        ),
+        (
+            {"title": "x", "channel": "a/b", "inside_charter": "yes"},
+            {"title": "x", "channel": "ab", "inside_charter": "yes"},
+            "approving your edit drops the charter mark (yes): the board keeps "
+            "requested on #ab, inside charter: unstated",
+        ),
+        (
+            {"title": "x", "channel": "a/b"},
+            {"title": "x", "channel": "ab"},
+            "approving your edit changes the provenance: the board keeps "
+            "requested on #ab, inside charter: unstated",
+        ),
+    ],
+    ids=[
+        "kept-mark",
+        "added-mark",
+        "channel-removed",
+        "channel-changed",
+        "refused",
+        "refused-then-removed",
+        "refused-then-fixed-with-mark",
+        "refused-then-fixed",
+    ],
+)
+def test_an_edit_says_what_the_board_keeps_of_the_provenance(
+    original: dict[str, Any], draft: dict[str, Any], said: str
+) -> None:
+    """
+    The pane draws the call as the agent made it and approving sends the draft,
+    so the line says what the bus will store of the draft's provenance. A mark
+    the draft states is dropped whoever wrote it, the operator included; a draft
+    with no channel keeps no provenance, which is not a mark kept as unstated.
+    An original the bus refuses is not one that states nothing: DETAIL says the
+    agent's call is refused, and a draft that drops its channel is placed, with
+    no provenance, which the line has to say.
+    """
+    assert edited_provenance(_DECLARE, original, draft) == said
+
+
+def test_what_an_edit_is_said_to_keep_is_what_the_bus_keeps() -> None:
+    """
+    One rule (``model.kept_provenance``) for the bus and the line, so the line
+    names exactly the provenance the bus is handed to store.
+    """
+    from pptmstr.model import kept_provenance, stated_provenance
+
+    draft = {**_STATED, "title": "y"}
+    kept = kept_provenance(stated_provenance("brand", _MSG, "yes"), edited=True)
+
+    assert kept is not None and kept.said() == _KEPT
+    said = edited_provenance(_DECLARE, _STATED, draft)
+    assert said is not None and said.endswith(kept.said())
+    assert kept_provenance(stated_provenance("brand", _MSG, "yes"), edited=False) == (
+        stated_provenance("brand", _MSG, "yes")
+    )
+
+
+def test_a_draft_the_gate_would_not_call_an_edit_says_nothing() -> None:
+    """
+    The gate stamps an edit when the draft differs from the call as a mapping,
+    so a draft that only reorders or reformats keeps the mark, and so does the
+    line. Nothing is said where the board keeps what is drawn, nor for another
+    tool.
+    """
+    reordered = dict(reversed(list(_STATED.items())))
+
+    assert edited_provenance(_DECLARE, _STATED, reordered) is None
+    assert edited_provenance(_DECLARE, _STATED, dict(_STATED)) is None
+    assert edited_provenance(_DECLARE, {"title": "x"}, {"title": "y"}) is None
+    assert (
+        edited_provenance(
+            _DECLARE, {"title": "x", "channel": "brand"}, {"title": "y", "channel": "brand"}
+        )
+        is None
+    )
+    assert edited_provenance(_POST, {"to": "lead"}, {"to": "x", **_STATED}) is None
+
+
+def test_only_a_declaration_has_a_provenance_line() -> None:
+    asked = {"channel": "brand", "re": _MSG}
+
+    assert declared_provenance(_POST, {"to": "lead", **asked}) is None
+    assert declared_provenance(_AMEND, {"task_id": "t1", **asked}) is None
 
 
 _AMEND = "mcp__pptmstr__amend_task"

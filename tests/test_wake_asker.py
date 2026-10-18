@@ -121,7 +121,15 @@ FOREIGN: NodeId = ("s2", "agent-y")
 def _concern(sender: NodeId, recipient: NodeId, cid: str = "c-1") -> ConcernPosted:
     return ConcernPosted(
         sender,
-        Concern(id=cid, sender=sender, recipient=recipient, subject="s", body="b", posted_at=1.0),
+        Concern(
+            id=cid,
+            sender=sender,
+            recipient=recipient,
+            subject="s",
+            body="b",
+            posted_at=1.0,
+            channel=None,
+        ),
     )
 
 

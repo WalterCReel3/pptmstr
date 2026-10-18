@@ -149,6 +149,7 @@ from .model import (
     Dismissed,
     NodeId,
     ObligationKind,
+    Provenance,
     Snapshot,
     Standing,
     Task,
@@ -159,11 +160,17 @@ from .model import (
     closing_result,
     is_closing_notice,
     is_operator,
+    kept_provenance,
     normalised_property,
     property_overrun,
     stated_flag,
     stated_incident,
+    stated_provenance,
 )
+
+# Re-exported: a task id is bounded wherever one is written, and ``commandbus``
+# reads the bound from here.
+from .model import MAX_ID_CHARS as MAX_ID_CHARS
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle only matters to the checker
     from .driver import AgentSession
@@ -249,8 +256,9 @@ MAX_TEXT_CHARS = 24_000
 # A title or a subject: the fields laid out on one line.
 MAX_LINE_CHARS = 500
 
-# A task id, wherever one is written rather than looked up.
-MAX_ID_CHARS = 200
+# A task id, wherever one is written rather than looked up, is at most
+# ``model.MAX_ID_CHARS``: imported above, and defined there because a declaration's
+# provenance is bounded by it on the parked row as well as here.
 
 # One path in ``touches``.
 MAX_PATH_CHARS = 300
@@ -399,6 +407,32 @@ def _listed_refusal(what: str, values: Sequence[str], each: int) -> str | None:
             f"Each entry is one name, not a description."
         )
     return None
+
+
+# Said when an operator's edit drops a declarer's charter mark. Whole, and not "for
+# the same reason" as the basis sentence: that one is said only when a basis was
+# given, and this one is said alone as often.
+_CHARTER_UNKEPT = (
+    " Your inside_charter mark was not kept: the operator edited this declaration "
+    "before approving it, and the mark is your statement about the request as you "
+    "sent it. The board shows it as unstated."
+)
+
+
+def _stated_provenance(args: Mapping[str, Any]) -> Provenance | None | str:
+    """
+    The provenance a declaration gave, None when it gave none, or the sentence
+    it is refused with.
+
+    **Shapes only** (``stated_provenance``, which the parked row reads with, so
+    the two agree on every refusal): no channel is checked against a link --
+    none exists to check against yet -- and ``re`` is not looked up, for the
+    reason ``Concern.task_id`` is not.
+    """
+    try:
+        return stated_provenance(args.get("channel"), args.get("re"), args.get("inside_charter"))
+    except ValueError as bad:
+        return str(bad)
 
 
 def _kept(what: str, text: str) -> tuple[str, str]:
@@ -3000,6 +3034,7 @@ def build_server(session: AgentSession) -> Any:
             )
 
         concern = Concern(
+            # The shape ``model.is_concern_id`` reads a declaration's ``re`` by.
             id=f"c-{uuid.uuid4().hex[:12]}",
             sender=sender,
             recipient=recipient,
@@ -3020,6 +3055,8 @@ def build_server(session: AgentSession) -> Any:
             # speaking; nothing can stamp how they know.
             basis=basis,
             incident=incident,
+            # Mail inside the sender's team: ``to`` names a role, never a channel.
+            channel=None,
         )
         bridge.emit(ConcernPosted(sender, concern))
         if incident:
@@ -3319,6 +3356,29 @@ def build_server(session: AgentSession) -> Any:
                         "refused. Omit it and the task states none."
                     ),
                 },
+                "channel": {
+                    "type": "string",
+                    "description": (
+                        "Only when another lead asked for this work: the channel the "
+                        "request came on. Omit it for work your own team decided on, "
+                        "and then omit re and inside_charter too."
+                    ),
+                },
+                "re": {
+                    "type": "string",
+                    "description": (
+                        "The id of the peer message that asked for this work, as the "
+                        "bus gave it (c- and 12 hex digits)."
+                    ),
+                },
+                "inside_charter": {
+                    **_FLAG_TYPE,
+                    "description": (
+                        "yes or no (true or false is read the same): whether you judge "
+                        "the request to be inside the channel's charter. It is shown as "
+                        "your word. Omit it, or say unstated, to leave it unstated."
+                    ),
+                },
             },
             required=("title",),
         ),
@@ -3362,10 +3422,17 @@ def build_server(session: AgentSession) -> Any:
         )
         if too_long is not None:
             return _text(f"Task {task_id} is NOT on the board. {too_long}")
+        provenance = _stated_provenance(args)
+        if isinstance(provenance, str):
+            return _text(f"Task {task_id} is NOT on the board. {provenance}")
         # Stamped by the gate when the operator rewrote the call before approving
         # it. It says the arguments are not the declarer's and not which of them
         # changed, so the declarer's basis cannot be left over a specification
         # that may be the operator's words: the weaker thing to store is none.
+        # The charter mark is the declarer's statement in the same way, and goes
+        # the same way; the channel and the message stay, being what the
+        # operator approved whoever wrote them (``kept_provenance``, the rule the
+        # parked call's warning predicts this by).
         rewritten = bool(args.get(EDITED_KEY))
         unkept = (
             " The basis you gave was not kept: the operator edited this declaration "
@@ -3374,6 +3441,10 @@ def build_server(session: AgentSession) -> Any:
             if rewritten and basis is not None
             else ""
         )
+        kept = kept_provenance(provenance, rewritten)
+        if kept != provenance:
+            provenance = kept
+            unkept += _CHARTER_UNKEPT
         request_id = f"d-{uuid.uuid4().hex[:12]}"
         future = _park(bridge, request_id)
         bridge.emit(
@@ -3387,6 +3458,7 @@ def build_server(session: AgentSession) -> Any:
                     declared_at=time.monotonic(),
                     basis=None if rewritten else basis,
                     property=held_to,
+                    provenance=provenance,
                 ),
                 node_id=me,
                 request_id=request_id,

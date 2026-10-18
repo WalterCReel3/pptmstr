@@ -17,6 +17,7 @@ import builtins
 import dataclasses
 import enum
 import posixpath
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -626,7 +627,14 @@ class Decision:
     which shows no answer. A fact for the pane. Nothing reads it to decide
     whether to hand the answer over again: the asker is given it on every read.
 
-    Not in the board log. A decision does not survive a restart of pptmstr.
+    ``channel`` is the channel between leads the decision was raised on, or None
+    for one inside a team. It is stored and logged and nothing reads it yet:
+    ``Snapshot.decisions_readable_by`` does not consult it.
+
+    In the board log of its asker's session (``session_id``), which is where its
+    raise, its ending and its first delivery are filed, so it survives a restart
+    of pptmstr: resuming that session restores it. While that session is not
+    resumed, its decisions are not in the store.
     """
 
     id: DecisionId
@@ -641,6 +649,7 @@ class Decision:
     raised_at: float
     outcome: DecisionOutcome | None = None
     first_delivered_at: float | None = None
+    channel: str | None = None
 
     @property
     def session_id(self) -> str:
@@ -1566,6 +1575,48 @@ class Concern:
     # False is "not marked", which is not "nothing went wrong": most slips are
     # reported in prose by an agent that did not think to set this.
     incident: bool = False
+    # The channel between two leads this message travels on, or None for mail
+    # inside one team. A message with a channel is a peer message (``is_peer``):
+    # it is read through ``Snapshot.peer_inbox_of`` and never ``inbox_of``, and
+    # it is logged under its own record kind so a build that predates peer
+    # messages reads it as unrecognised rather than as team mail.
+    #
+    # Keyword-only with no default, so that every construction states which of
+    # the two it builds. A construction that forgot it would file a peer
+    # message as team mail with no error anywhere, which is the one mistake
+    # this field can make silently.
+    channel: str | None = field(kw_only=True)
+    # The sender asks for an answer. False claims nothing; nothing reads it on
+    # a concern without a channel.
+    needs_answer: bool = False
+    # The message this one answers, when it answers one.
+    re: ConcernId | None = None
+    # The sender asks that this message wake nobody when it arrives.
+    quiet: bool = False
+
+    def __post_init__(self) -> None:
+        """
+        Refuses a concern with no channel that sets a peer-message field.
+
+        ``needs_answer``, ``re`` and ``quiet`` ride only the ``peer-posted``
+        record, so a team concern carrying one would be filed as
+        ``concern-posted`` and restored without it, with nothing raised. Refused
+        where it is built, which is outside the reducer: nothing in
+        ``store._apply`` builds a concern from fields it was not handed whole.
+        """
+        if self.channel is None and (self.needs_answer or self.re is not None or self.quiet):
+            raise ValueError(
+                "needs_answer, re and quiet are peer-message fields: a concern with "
+                "no channel cannot carry them"
+            )
+
+    @property
+    def is_peer(self) -> bool:
+        """
+        Whether this is a message between leads: derived from ``channel`` and
+        never stored as a second flag.
+        """
+        return self.channel is not None
 
 
 class TaskState(enum.Enum):
@@ -2012,6 +2063,244 @@ def approved_write(
     return ApprovedWrites(paths=(placed,), lines_added=added, lines_removed=removed)
 
 
+class Charter(enum.Enum):
+    """
+    A declarer's answer to "is this request inside the channel's charter?".
+
+    **Three members, unstated among them.** Unlike ``Basis``, not saying is a
+    member and not ``None``: a provenance always carries an answer, and a
+    reader that tests ``if not provenance.inside_charter`` cannot read
+    unstated as no, because every member is truthy.
+
+    **The log carries the value, as text** (``boardlog.Declared``), for the
+    reason ``Declared.basis`` is text: a member a later build adds is then a
+    word this build reads as unstated, not a record it cannot read and a log
+    that ends at it.
+    """
+
+    YES = "yes"
+    NO = "no"
+    UNSTATED = "unstated"
+
+    @classmethod
+    def stated(cls, raw: object) -> Charter:
+        """
+        The member a declarer's own spelling names, and ``ValueError`` for
+        anything that is none of the three.
+
+        Not ``stated_flag``. That one reads ``"none"`` and ``"null"`` as no,
+        which for a two-valued flag claims nothing; here no is a statement (the
+        request is outside the charter) and reading an author's "none" as one
+        would put it in their mouth. So the spellings are few and an unknown one
+        is refused rather than guessed. Here rather than in ``bus.py`` for the
+        reason ``Basis.stated`` is: the parked row reads the same argument the
+        handler stores.
+
+        An unknown value is echoed only when it is short. The refusal is not a
+        place to print back an argument of any length, so a long one is named by
+        its length, as an over-long task_id is.
+        """
+        if raw is None:
+            return cls.UNSTATED
+        if isinstance(raw, bool):
+            return cls.YES if raw else cls.NO
+        word = str(raw).strip().lower()
+        if word in _CHARTER_YES:
+            return cls.YES
+        if word in _CHARTER_NO:
+            return cls.NO
+        if word in _CHARTER_UNSTATED:
+            return cls.UNSTATED
+        text = str(raw)
+        named = (
+            repr(text)
+            if len(text) <= _CHARTER_ECHOED
+            else f"(a value of {len(text)} characters, not repeated here)"
+        )
+        raise ValueError(
+            f"inside_charter {named} is not one of yes, no or unstated. Say yes or no, "
+            f"or omit it."
+        )
+
+
+# How an author spells each of the three answers to "inside the charter?".
+_CHARTER_YES = frozenset({"yes", "true", "inside"})
+_CHARTER_NO = frozenset({"no", "false", "outside"})
+_CHARTER_UNSTATED = frozenset({"", "unstated"})
+# The longest unknown charter mark a refusal repeats: room for a word or two.
+_CHARTER_ECHOED = 32
+
+# An id, wherever one is written rather than looked up; ``bus.py`` bounds every id
+# it is given by this. A channel's name has its own, shorter bound
+# (``MAX_CHANNEL_CHARS``) and a message id its fixed shape.
+MAX_ID_CHARS = 200
+
+# What the bus mints a concern's id as: ``c-`` and twelve hex digits
+# (``bus.post_concern``). A peer message is a concern, so ``re`` names one this way.
+_CONCERN_ID_HEX = 12
+_HEX_DIGITS = frozenset("0123456789abcdef")
+# What a channel may be called (``_channel_refusal``), and the longest it may be.
+MAX_CHANNEL_CHARS = 64
+_CHANNEL_NAME = re.compile(rf"[a-z0-9][a-z0-9._-]{{0,{MAX_CHANNEL_CHARS - 1}}}")
+
+
+def _channel_refusal(name: str) -> str | None:
+    """
+    Why ``name`` cannot be a channel's name, or None when it can.
+
+    **Plain:** ``^[a-z0-9][a-z0-9._-]{0,63}$`` -- lowercase ASCII letters and
+    digits, ``.``, ``_`` and ``-``, starting with a letter or a digit. The
+    operator names a channel, and the name becomes a directory once channels
+    are linked, so it is an identity two leads must both read the same way.
+    That is why nothing is allowed that draws like something else: no
+    invisible or control character (a zero-width space, an ANSI escape), no
+    letter from another script that draws as a Latin one, and no capitals, so
+    ``Brand`` and ``brand`` are not two channels on a filesystem that folds
+    case and one on another.
+
+    A name that passes is also one ``requests.address_refusal`` takes -- no
+    separator, no NUL, no leading dot, encodable, short of an entry's length --
+    and is its own drawable form (``drawable.text``), so the name checked is
+    the name the store keeps and the log writes. Both follow from the pattern
+    and are not checked again here (``requests`` imports this module); a test
+    keeps the two rules in step.
+
+    No whitespace, so a name is one word in the sentences that print it. That
+    does not stop a name from imitating the mark -- "ops.inside_charter-yes"
+    passes -- and nothing here tries to: what keeps the queue row honest is that
+    the row puts the mark before the channel (``approval.summarize``), so a
+    name can only follow it.
+    The name is not repeated: a refusal is not a place to print it back.
+    """
+    if len(name) > MAX_CHANNEL_CHARS:
+        return (
+            f"channel is {len(name)} characters and the limit is {MAX_CHANNEL_CHARS}. "
+            f"It is a name; put the rest in detail."
+        )
+    if _CHANNEL_NAME.fullmatch(name) is None:
+        return (
+            "channel is not a name a channel can have. A channel's name is lowercase "
+            "ASCII letters and digits, '.', '_' and '-', and starts with a letter or digit."
+        )
+    return None
+
+
+def is_concern_id(text: str) -> bool:
+    """Whether ``text`` has the shape of an id the bus gives a concern."""
+    return (
+        len(text) == 2 + _CONCERN_ID_HEX
+        and text.startswith("c-")
+        and all(c in _HEX_DIGITS for c in text[2:])
+    )
+
+
+def stated_provenance(channel: object, re: object, inside_charter: object) -> Provenance | None:
+    """
+    The provenance a declaration's arguments give, None when they give none, and
+    ``ValueError``, with the sentence its author is refused with, when they
+    cannot be read as one.
+
+    Absent and blank are both "not given", as for every optional argument. What
+    is refused is a name that is not text, a channel that is not a plain name
+    (``_channel_refusal``), an ``re`` that is not a concern id
+    (``is_concern_id``), a charter mark that is not yes, no or unstated
+    (``Charter.stated``), and ``re`` or a stated mark with no channel, which
+    would say a request arrived on nothing. Here for the reason
+    ``Charter.stated`` is: the parked row and the handler read one rule, the
+    bound on a name's length included.
+
+    Both names that pass are printable ASCII, so the name checked is the name
+    the store keeps and the log writes: a channel by ``_channel_refusal``, and
+    an ``re`` by its shape, which is hex.
+    """
+    named: list[str | None] = []
+    for key, raw in (("channel", channel), ("re", re)):
+        if raw is not None and not isinstance(raw, str):
+            raise ValueError(f"{key} is not text. It is a name: give it as a string, or omit it.")
+        named.append((raw or "").strip() or None)
+    on, answers = named
+    inside = Charter.stated(inside_charter)
+    if on is None:
+        if answers is not None or inside is not Charter.UNSTATED:
+            raise ValueError(
+                "re and inside_charter describe a request another lead made on a channel, "
+                "and no channel was named. Name the channel, or omit all three for work "
+                "your own team decided on."
+            )
+        return None
+    refused = _channel_refusal(on)
+    if refused is not None:
+        raise ValueError(refused)
+    if answers is not None and not is_concern_id(answers):
+        raise ValueError(
+            "re is not a message id. A peer message's id is the one the bus gave it: "
+            f"c- and {_CONCERN_ID_HEX} hex digits."
+        )
+    return Provenance(on, answers, inside)
+
+
+def kept_provenance(stated: Provenance | None, edited: bool) -> Provenance | None:
+    """
+    The provenance the board stores for a declaration that states ``stated``,
+    when the operator ``edited`` the call before approving it.
+
+    The charter mark is the declarer's statement about the request as it was
+    sent, so an edit drops it to unstated, the way an edit drops a basis; the
+    channel and the message stay, being what the operator approved whoever
+    wrote them. The bus stores this (``bus.declare_task``) and the parked call
+    predicts it from the operator's draft (``approval.edited_provenance``): one
+    rule, so what the operator is told is what is stored.
+    """
+    if stated is None or not edited or stated.inside_charter is Charter.UNSTATED:
+        return stated
+    return dataclasses.replace(stated, inside_charter=Charter.UNSTATED)
+
+
+@dataclass(frozen=True, slots=True)
+class Provenance:
+    """
+    Where a declaration came from when another lead asked for the work: the
+    channel the request arrived on, the peer message it answers, and whether the
+    declarer says the request is inside the channel's charter.
+
+    **The declarer's statement, all of it.** No link exists to check the channel
+    against yet, and nothing could check the charter mark: the charter is free
+    text. On a reviewed rung the operator judges the request at the parked row,
+    which shows this. Nothing shows it on AUTONOMOUS yet, where nothing parks.
+
+    ``channel`` is never empty: a declaration without one has no provenance, and
+    ``Task.provenance`` is None. ``re`` and ``inside_charter`` describe a request
+    on a channel, so neither can stand without one, which is why they are here
+    and not on ``Task``.
+    """
+
+    channel: str
+    # The peer message the request arrived as, when the declarer named one. Not
+    # checked against the store, for the reason ``Concern.task_id`` is not.
+    re: ConcernId | None = None
+    # The declarer's answer. Unstated is the declarer not saying, and nothing
+    # fills it in.
+    inside_charter: Charter = Charter.UNSTATED
+
+    def __post_init__(self) -> None:
+        """
+        Refuses an empty channel: that is no provenance, which is
+        ``Task.provenance`` None, and two spellings of it would let a reader
+        that asks one miss the other.
+        """
+        if not self.channel:
+            raise ValueError("a provenance names its channel: with none, there is none")
+
+    def said(self) -> str:
+        """
+        The provenance as one line, the way DETAIL shows it: "requested on
+        #<channel>, re <message>, inside charter: yes". The queue row says less
+        (``approval.summarize``).
+        """
+        re = "" if self.re is None else f", re {self.re}"
+        return f"requested on #{self.channel}{re}, inside charter: {self.inside_charter.value}"
+
+
 @dataclass(frozen=True, slots=True)
 class TaskVersion:
     """
@@ -2219,6 +2508,14 @@ class Task:
     # not be something an agent can write. Nor off "COMPLETED with no holder",
     # which a task built by hand also is. Written by one arm and never cleared.
     closed_by_operator: bool = False
+    # Where the request for this work came from, when another lead asked for it
+    # on a channel, or None for work the declarer's own team decided on. The
+    # declarer's statement, written once by the declaration and never changed:
+    # an amendment rewrites what is asked and not who asked it.
+    #
+    # Stored because nothing implies it: the peer message a request arrived as
+    # is in the store, but which declaration answers it is the declarer's word.
+    provenance: Provenance | None = None
 
     # ``builtins.property`` by its full name below: inside this class the bare name
     # is the ``property`` field above.
@@ -2477,6 +2774,7 @@ def closing_notice(task: Task, holder: NodeId, reason: str, at: float) -> Concer
         body=reason,
         posted_at=at,
         task_id=task.id,
+        channel=None,
     )
 
 
@@ -2508,22 +2806,32 @@ class Unplaced(enum.Enum):
     """
     Why something a board log holds is not in the store as the log has it.
 
-    The first six are about one task or concern, and everything else the log
+    The first six are about one task, concern or decision, and everything else the log
     held was placed around it. The last three are a restore that placed nothing:
     the store already had a board for the session and it was not the log's.
     """
 
-    # Another session's board already has a task or concern under this id. Ids
-    # are fleet-wide, and placing this one would have replaced theirs.
+    # Another session's board already has a task, concern or decision under this
+    # id. Ids are fleet-wide, and placing this one would have replaced theirs.
     OTHER_SESSION_HAS_ID = "another session already has this id"
     # The log says another session declared or sent it, so it is not this
     # session's to restore.
     NOT_THIS_SESSIONS = "the log attributes it to another session"
-    # No step of the store leaves a task like this: finished with nobody having
-    # held it, claimed by nobody or by another session's agent, amended by an
-    # agent that may not amend it, or carrying a holder or a result in a state
-    # that has neither.
-    INCOHERENT = "no step of the store produces it"
+    # No step of this build's store leaves a task like this: finished with
+    # nobody having held it, claimed by nobody or by another session's agent,
+    # amended by an agent that may not amend it, carrying a holder or a result
+    # in a state that has neither, or carrying a provenance with no channel. A
+    # decision with an answer longer than one is taken, or delivered without
+    # an answer or dismissal. A team concern carrying a peer-message field.
+    #
+    # Damage, or a newer build: a decision of a standing this build does not
+    # define is here too, and so is anything a later build's store produces
+    # that this one's does not. The text says both, because an operator who
+    # reads every case as damage would distrust a log that is only newer.
+    INCOHERENT = (
+        "no step of this build's store produces it: the log was damaged, or written "
+        "by a newer build"
+    )
     WOULD_CYCLE = "its dependencies would close a cycle"
     # It holds a NUL or a lone surrogate, which the board a log is written from
     # never does: the store writes both out. The log was edited, or written by
@@ -2541,9 +2849,12 @@ class Unplaced(enum.Enum):
 
 @dataclass(frozen=True, slots=True)
 class NotPlaced:
-    """One task or concern a restore left out, or found out of step, and why."""
+    """
+    One task, concern or decision a restore left out, or found out of step, and
+    why.
+    """
 
-    # "task" or "concern".
+    # "task", "concern" or "decision".
     what: str
     id: str
     why: Unplaced
@@ -2569,9 +2880,9 @@ class Restore:
     party's name on the board is read from it for as long as the board is shown.
 
     **States what the store holds, never what one application did**, so the same
-    board handed over twice leaves the same value: ``tasks`` and ``concerns``
-    count what is in the store as the log has it, whether this application put
-    it there or found it.
+    board handed over twice leaves the same value: ``tasks``, ``concerns`` and
+    ``decisions`` count what is in the store as the log has it, whether this
+    application put it there or found it.
 
     **Ask** ``adoptable`` **before appending behind the log**, and ``short``
     before treating the board as the whole of what was logged.
@@ -2585,8 +2896,9 @@ class Restore:
     tasks: int = 0
     concerns: int = 0
     unplaced: tuple[NotPlaced, ...] = ()
+    decisions: int = 0
     # ``boardlog.Board.short`` as the board handed over answered it: the log
-    # holds more than its tasks and concerns show. Carried as the answer and not
+    # holds more than its tasks, concerns and decisions show. Carried as the answer and not
     # worked out again from the fields below, which are some of the reasons and
     # need not be all of them.
     log_short: bool = False
@@ -2600,11 +2912,11 @@ class Restore:
     log_stopped: int = 0
     # Every sub-agent of this session the board handed over names, under the
     # address the log last had for it -- empty where it had none. Named by
-    # anything on that board, a task or concern this report lists as unplaced
-    # included: the agent existed before the restart whether or not what it
-    # touched could be placed. A restore that was refused whole adds none. A
-    # node in here with no record in the snapshot is a party from before the
-    # restart (``Snapshot.left_behind``).
+    # anything on that board, a task, concern or decision this report lists as
+    # unplaced included: the agent existed before the restart whether or not
+    # what it touched could be placed. A restore that was refused whole adds
+    # none. A node in here with no record in the snapshot is a party from before
+    # the restart (``Snapshot.left_behind``).
     parties: Mapping[NodeId, str] = field(default_factory=_empty_map)
 
     @builtins.property
@@ -2740,8 +3052,28 @@ class Snapshot:
 
     def inbox_of(self, node: NodeId) -> tuple[Concern, ...]:
         """
-        Everything posted to ``node`` and not yet delivered or withdrawn, oldest
-        first -- the order a recipient should work them in.
+        Everything inside its team posted to ``node`` and not yet delivered or
+        withdrawn, oldest first -- the order a recipient should work them in.
+
+        A peer message is not here: it is ``peer_inbox_of``'s, and the two
+        split the waiting mail on ``Concern.is_peer`` with nothing in both.
+        """
+        return tuple(c for c in self._waiting_for(node) if not c.is_peer)
+
+    def peer_inbox_of(self, node: NodeId, channel: str | None = None) -> tuple[Concern, ...]:
+        """
+        Every peer message posted to ``node`` and not yet delivered or withdrawn,
+        oldest first; only those on ``channel`` when one is named.
+        """
+        return tuple(
+            c
+            for c in self._waiting_for(node)
+            if c.is_peer and (channel is None or c.channel == channel)
+        )
+
+    def _waiting_for(self, node: NodeId) -> tuple[Concern, ...]:
+        """
+        Everything posted to ``node`` and still waiting, oldest first.
         """
         return tuple(
             sorted(

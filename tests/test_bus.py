@@ -20,7 +20,7 @@ import pytest
 from pptmstr import boardlog
 from pptmstr import bus as bus_mod
 from pptmstr.bridge import Bridge
-from pptmstr.bus import _QUOTE_LEGEND, FROM_KEY, build_server
+from pptmstr.bus import _QUOTE_LEGEND, FROM_KEY, MAX_ID_CHARS, build_server
 from pptmstr.effects import BoardDelivered, ClaimSettled, InboxDelivered, TaskWriteSettled
 from pptmstr.intents import (
     BoardRead,
@@ -39,10 +39,13 @@ from pptmstr.intents import (
 )
 from pptmstr.model import (
     BEFORE_RESTART,
+    MAX_CHANNEL_CHARS,
+    Charter,
     ClaimRefusal,
     Concern,
     ConcernState,
     NodeId,
+    Provenance,
     Task,
     TaskRefusal,
     TaskState,
@@ -79,6 +82,7 @@ def concern(
         subject="regression",
         body=body,
         posted_at=at,
+        channel=None,
     )
 
 
@@ -1995,6 +1999,7 @@ def _about(
         body=body,
         posted_at=1.0,
         task_id=tid,
+        channel=None,
     )
 
 
@@ -3981,6 +3986,7 @@ def _incident(store: Store, cid: str, *, about: str | None, token: str) -> None:
                 posted_at=5.0,
                 task_id=about,
                 incident=True,
+                channel=None,
             ),
         )
     )
@@ -6565,6 +6571,7 @@ def _noted(store: Store, cid: str, body: str, task_id: str = "t1") -> None:
                 body=body,
                 posted_at=3.0,
                 task_id=task_id,
+                channel=None,
             ),
         )
     )
@@ -7668,3 +7675,199 @@ def test_a_task_read_changes_nothing() -> None:
     # A note read off a task is not a message collected: the recipient's inbox
     # still owes it to them.
     assert after.concerns == before.concerns
+
+
+# -- where a declaration's request came from --------------------------------------
+
+
+@pytest.mark.parametrize(
+    "given",
+    [{}, {"channel": "", "re": "", "inside_charter": ""}, {"channel": "  ", "re": " "}],
+    ids=["absent", "empty", "blank"],
+)
+def test_a_declaration_with_no_provenance_lands_and_reads_as_it_did_before_provenance(
+    given: dict[str, object],
+) -> None:
+    """
+    The property this change may not break. Absent and blank are both "not
+    given", the task carries None, and the reply is the one a declaration got
+    before any of these arguments existed.
+    """
+    store = Store()
+    _team(store)
+    with _live_bus() as bus:
+        said = bus.call(
+            store, "declare_task", {"task_id": "t0", "title": "x", **given}, sender=LEAD
+        )
+
+    assert said == "Task t0 is on the board."
+    assert store.snapshot().tasks["t0"].provenance is None
+
+
+_MSG = "c-0123456789ab"
+
+
+@pytest.mark.parametrize(
+    ("given", "stored"),
+    [
+        (
+            {"channel": " brand ", "re": f" {_MSG} ", "inside_charter": "YES"},
+            Provenance("brand", _MSG, Charter.YES),
+        ),
+        ({"channel": "brand", "inside_charter": False}, Provenance("brand", None, Charter.NO)),
+        ({"channel": "brand", "inside_charter": "outside"}, Provenance("brand", None, Charter.NO)),
+        ({"channel": "brand", "re": _MSG}, Provenance("brand", _MSG, Charter.UNSTATED)),
+        (
+            {"channel": "brand", "inside_charter": "unstated"},
+            Provenance("brand", None, Charter.UNSTATED),
+        ),
+    ],
+    ids=["whole", "bool-no", "outside", "unmarked", "said-unstated"],
+)
+def test_a_declarations_provenance_is_stored_as_its_declarer_gave_it(
+    given: dict[str, object], stored: Provenance
+) -> None:
+    store = Store()
+    _team(store)
+    with _live_bus() as bus:
+        said = bus.call(
+            store, "declare_task", {"task_id": "t0", "title": "x", **given}, sender=LEAD
+        )
+
+    assert said == "Task t0 is on the board."
+    assert store.snapshot().tasks["t0"].provenance == stored
+
+
+@pytest.mark.parametrize(
+    ("given", "why"),
+    [
+        ({"re": _MSG}, "no channel was named"),
+        ({"inside_charter": "yes"}, "no channel was named"),
+        ({"channel": "brand", "inside_charter": "mostly"}, "'mostly' is not one of yes, no"),
+        ({"channel": "brand", "inside_charter": "none"}, "'none' is not one of yes, no"),
+        ({"channel": "b" * (MAX_CHANNEL_CHARS + 1)}, f"the limit is {MAX_CHANNEL_CHARS}"),
+        ({"channel": "a/b"}, "not a name a channel can have"),
+        ({"channel": "brand", "re": "c" * (MAX_ID_CHARS + 1)}, "re is not a message id"),
+        ({"channel": "brand", "re": "c-7"}, "re is not a message id"),
+    ],
+    ids=[
+        "re-alone",
+        "mark-alone",
+        "unknown-mark",
+        "none-is-not-no",
+        "long-channel",
+        "path-channel",
+        "long-re",
+        "short-re",
+    ],
+)
+def test_a_provenance_that_cannot_be_read_as_one_keeps_the_task_off_the_board(
+    given: dict[str, object], why: str
+) -> None:
+    """
+    Shapes only: nothing here is checked against a link. What is refused is a
+    provenance with nothing to have arrived on, a mark that is none of the
+    three -- "none" among them, which a two-valued flag would read as no and
+    this would then file as "outside the charter" -- a channel that is no
+    directory name or longer than 64, and an ``re`` that is not a concern
+    id. A name of the wrong type is the schema's to refuse, before this
+    handler runs.
+    """
+    store = Store()
+    _team(store)
+    with _live_bus() as bus:
+        said = bus.call(
+            store, "declare_task", {"task_id": "t0", "title": "x", **given}, sender=LEAD
+        )
+
+    assert said.startswith("Task t0 is NOT on the board.") and why in said, said
+    assert "t0" not in store.snapshot().tasks
+
+
+def test_an_unknown_charter_mark_is_not_echoed_back_whole() -> None:
+    store = Store()
+    _team(store)
+    asked: dict[str, object] = {
+        "task_id": "t0",
+        "title": "x",
+        "channel": "brand",
+        "inside_charter": "x" * 100_000,
+    }
+    with _live_bus() as bus:
+        said = bus.call(store, "declare_task", asked, sender=LEAD)
+
+    assert said == (
+        "Task t0 is NOT on the board. inside_charter (a value of 100000 characters, not "
+        "repeated here) is not one of yes, no or unstated. Say yes or no, or omit it."
+    )
+
+
+def test_a_message_the_bus_gives_an_id_is_one_a_declaration_can_answer() -> None:
+    """
+    ``re`` is read by the shape the bus mints a concern's id in, so the two are
+    pinned together here: a minted id that stopped being read as one would
+    refuse every declaration that answers a real message.
+    """
+    from pptmstr.model import is_concern_id
+
+    store = Store()
+    _team(store)
+    with _live_bus() as bus:
+        said = bus.call(
+            store, "post_concern", {"to": "lead", "subject": "s", "body": "b"}, sender=DEV
+        )
+        bus.pump(store)
+
+    (minted,) = store.snapshot().concerns
+    assert said == "Concern delivered to lead.", said
+    assert is_concern_id(minted)
+
+
+_CHARTER_UNKEPT = (
+    " Your inside_charter mark was not kept: the operator edited this declaration "
+    "before approving it, and the mark is your statement about the request as you "
+    "sent it. The board shows it as unstated."
+)
+_BASIS_UNKEPT = (
+    " The basis you gave was not kept: the operator edited this declaration before "
+    "approving it, and a basis is your statement about the text as you wrote it. The "
+    "board shows the specification as basis unstated."
+)
+
+
+@pytest.mark.parametrize("basis", [None, "read"], ids=["no-basis", "with-basis"])
+def test_a_declaration_the_operator_rewrote_keeps_its_channel_and_not_its_charter_mark(
+    basis: str | None,
+) -> None:
+    """
+    The mark is the declarer's statement, as a basis is, and the gate's stamp
+    does not say which arguments changed: so it goes as the basis goes. The
+    channel and the message are what the operator approved and stay. The reply
+    gives the reason in its own sentence whether or not a basis went with it.
+    """
+    from pptmstr.bus import EDITED_KEY
+
+    store = Store()
+    _team(store)
+    asked: dict[str, object] = {
+        "title": "x",
+        "channel": "brand",
+        "re": _MSG,
+        "inside_charter": "yes",
+    }
+    if basis is not None:
+        asked["basis"] = basis
+    with _live_bus() as bus:
+        kept = bus.call(
+            store, "declare_task", {"task_id": "t0", **asked, EDITED_KEY: False}, sender=LEAD
+        )
+        said = bus.call(
+            store, "declare_task", {"task_id": "t1", **asked, EDITED_KEY: True}, sender=LEAD
+        )
+
+    tasks = store.snapshot().tasks
+    assert tasks["t0"].provenance == Provenance("brand", _MSG, Charter.YES)
+    assert kept == "Task t0 is on the board."
+    assert tasks["t1"].provenance == Provenance("brand", _MSG, Charter.UNSTATED)
+    unkept = ("" if basis is None else _BASIS_UNKEPT) + _CHARTER_UNKEPT
+    assert said == "Task t1 is on the board." + unkept

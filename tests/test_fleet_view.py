@@ -84,7 +84,15 @@ def decision(did: str, asker: NodeId) -> Decision:
 
 
 def concern(cid: str, sender: NodeId, recipient: NodeId) -> Concern:
-    return Concern(id=cid, sender=sender, recipient=recipient, subject="s", body="b", posted_at=1.0)
+    return Concern(
+        id=cid,
+        sender=sender,
+        recipient=recipient,
+        subject="s",
+        body="b",
+        posted_at=1.0,
+        channel=None,
+    )
 
 
 def ended_pair() -> Store:
