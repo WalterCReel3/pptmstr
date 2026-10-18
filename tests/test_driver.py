@@ -2018,6 +2018,20 @@ def test_a_spawned_subagent_records_its_roles_own_model() -> None:
     assert spawned.model == "claude-opus-4-5"
 
 
+def test_a_session_given_no_model_runs_on_the_catalogs_default() -> None:
+    """
+    The driver's own fallback is the catalog's name for the default, not a second
+    spelling of it that could drift; a model it is given is kept as given.
+    """
+    from pptmstr.bridge import Bridge
+    from pptmstr.driver import AgentSession
+    from pptmstr.model_catalog import DEFAULT_MODEL
+
+    assert AgentSession(Bridge(), task="t").model == DEFAULT_MODEL
+    pinned = "claude-a-model-no-list-offers"
+    assert AgentSession(Bridge(), task="t", model=pinned).model == pinned
+
+
 def test_a_role_with_no_model_of_its_own_is_recorded_as_the_sessions() -> None:
     """
     "inherit" reaches the SDK; the record has to name what that resolved to, and

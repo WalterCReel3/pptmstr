@@ -101,6 +101,7 @@ from .model import (
     UsageRollup,
     written_path,
 )
+from .model_catalog import DEFAULT_MODEL
 from .settings import McpConnector
 from .templates import SOLO, WorkTemplate, lead_briefing, worker_prompt
 from .transcript import SegmentKind, Transcript
@@ -1107,7 +1108,7 @@ class AgentSession:
         self._tagged = False
         self._tag_task: asyncio.Task[None] | None = None
         self.transcript = Transcript()
-        self.model = model or "claude-sonnet-5"
+        self.model = model or DEFAULT_MODEL
         self.cwd = cwd
         self.session_base = session_base
         # §8's containment configuration as the JSON string ``settings`` takes -- what

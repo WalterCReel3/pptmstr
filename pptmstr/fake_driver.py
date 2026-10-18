@@ -66,7 +66,7 @@ from .model import (
 )
 from .transcript import SegmentKind, Transcript, tool_call_line, tool_result_line
 
-_MODELS = ("claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5-20251001")
+_MODELS = ("claude-opus-5-5", "claude-fable-5-1", "claude-sonnet-5-5", "claude-haiku-5-5")
 _TOPICS = (
     "reading pptmstr/store.py",
     "running pytest",

@@ -401,9 +401,9 @@ def test_spec_strips_cwd_whitespace() -> None:
 
 def test_an_untouched_draft_launches_on_the_named_default() -> None:
     """
-    The default is a name, not a position. The offered list is newest-first, so
-    "whatever is first" would hand the choice of default -- and its price -- to
-    whichever model shipped most recently.
+    The default is a name, not a position. The offered list is in the handshake's order,
+    so "whatever is first" would hand the choice of default -- and its price -- to
+    whichever order the CLI happens to report.
     """
     assert LauncherState(task="t").spec().model == DEFAULT_MODEL
 

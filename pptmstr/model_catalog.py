@@ -56,19 +56,19 @@ __all__ = [
 ]
 
 
-# Newest-first, the order an operator scanning for the model that just shipped wants.
+# The four ids the CLI's handshake listed, in its order (measured against CLI 2.1.300),
+# so that a failed probe offers what a successful one would have.
 MODELS: tuple[str, ...] = (
     "claude-opus-5-5",
-    "claude-opus-5",
-    "claude-sonnet-5",
-    "claude-fable-5",
-    "claude-haiku-4-5-20251001",
+    "claude-fable-5-1",
+    "claude-sonnet-5-5",
+    "claude-haiku-5-5",
 )
 
-# The selection a launch gets when nobody picks one. A name and not ``MODELS[0]``: see
-# the module docstring. Same reasoning as ``launcher.LauncherState.policy`` holding a
-# ``Policy`` rather than an index.
-DEFAULT_MODEL = "claude-sonnet-5"
+# The selection a launch gets when nobody picks one -- opus-5-5 by the operator's choice
+# (2026-10-18). A name and not ``MODELS[0]``: see the module docstring. Same reasoning as
+# ``launcher.LauncherState.policy`` holding a ``Policy`` rather than an index.
+DEFAULT_MODEL = "claude-opus-5-5"
 
 # Long enough for a cold connect -- measured at 6.5 s and 8.2 s against CLI 2.1.300 --
 # and short because a hung CLI holds a worker thread, and ``MODELS`` is already a usable
