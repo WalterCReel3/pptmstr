@@ -2237,9 +2237,10 @@ class LauncherState:
     brief: str = ""
     # The model id itself and not an index into the offered list, for the reason
     # ``policy`` below holds a ``Policy``: a position means a different model once the
-    # list is edited. A name also gives a pinned id somewhere to live -- an index has no
-    # way to express a model the list does not contain, and ``--model`` has always
-    # accepted one.
+    # list is edited, or once the CLI's handshake replaces it a few seconds into the
+    # run (``model_catalog.Catalog``). A name also gives a pinned id somewhere to live --
+    # an index has no way to express a model the list does not contain, and ``--model``
+    # has always accepted one.
     model: str = DEFAULT_MODEL
     # Index into templates.names(). "solo" is first and is the default, so the
     # launcher behaves exactly as it did before teams existed unless asked otherwise.
@@ -3960,8 +3961,9 @@ def draw(
     ``reader`` is what reads the cwd field's checkout for a typed worktree branch,
     on a worker (``CheckoutReading``); a parameter for the reason ``scanner`` is.
 
-    ``models`` is what the model combo offers, ``model_catalog.MODELS`` unless a caller
-    says otherwise.
+    ``models`` is what the model combo offers: ``model_catalog.Catalog.models``, which is
+    ``MODELS`` until the CLI's handshake replaces it. Defaulted rather than required so a
+    caller that has no catalog still draws a usable combo.
 
     ``subagent_cap`` is the operator's *setting*, which this modal both displays and
     offers to override for one launch. It is optional because a caller that does not
@@ -4215,8 +4217,9 @@ def _modal(
     widgets.dialog_group()
     imgui.set_next_item_width(widgets.DIALOG_FIELD_WIDTH)
     # A pick the offered list does not contain is kept and shown rather than corrected:
-    # it is what ``--model`` was given, or what an earlier build offered and this one no
-    # longer does. Dropping it would relaunch on a model the operator did not choose,
+    # it is what ``--model`` was given, what an earlier build or an earlier handshake
+    # offered and this one does not, or ``DEFAULT_MODEL`` when the handshake lists
+    # newer ids than it. Dropping it would relaunch on a model the operator did not choose,
     # and silently -- the combo would simply read as something else.
     options = list(models)
     if state.model not in options:

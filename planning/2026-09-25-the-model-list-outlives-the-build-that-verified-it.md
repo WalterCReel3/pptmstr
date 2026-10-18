@@ -2,7 +2,7 @@
 
 **Dated:** 2026-09-25 ·
 **Status:** built on `main`; `make check` green (2569 passed, 3 xfailed). **2026-10-17:
-the live probe is withdrawn and the list is in code again; see the addendum at the end.**
+the live probe is withdrawn and the list is in code again. 2026-10-18: the list comes from the bundled CLI's initialize handshake, with the list in code as the fallback; see the two addenda at the end.**
 §§1–7 below record the design as it stood on 2026-09-25 ·
 **Origin:** an operator request (2026-09-25) — *"New Opus just dropped. Can we dynamically
 probe models in the task launcher?"* ·
@@ -181,3 +181,41 @@ except `sandbox.py`'s deny list; and no module names `claudeAiOauth` or
 `oauth-2025-04-20`. `tests/test_launcher.py` still holds
 `test_a_pinned_model_the_offered_list_lacks_still_draws` and
 `test_a_pick_the_offered_list_does_not_contain_survives_to_the_spec`.
+
+## Addendum, 2026-10-18 — the list comes from the CLI's handshake
+
+**What changed.** `model_catalog.Catalog` is back, armed with `probe_handshake` by
+`app._start` (not under `--fake`) and started by the first frame with a pool
+(`_draw_overlays`), once per process. The probe builds
+`ClaudeSDKClient(ClaudeAgentOptions(strict_mcp_config=True, stderr=<drop>))`, connects with
+no prompt, reads `get_server_info()`, and disconnects, inside a 30 s `wait_for`. pptmstr
+reads no credential and imports no `anthropic`; the CLI does its own sign-in. Measured
+2026-10-18, CLI 2.1.300, signed out: connect took 6.5 s, 8.2 s and 9.3 s on three runs, and
+the handshake listed default/opus → claude-opus-5-5, fable → claude-fable-5-1, sonnet →
+claude-sonnet-5-5, haiku → claude-haiku-5-5. A SessionStart hook in project settings did
+**not** fire on that connect.
+
+**Ids, not aliases.** The launcher shows each entry's `resolvedModel`, deduplicated in
+handshake order (default and opus give one row). A draft and `--model` hold that id. An
+alias follows Anthropic's mapping: a draft saved on `opus` would resume next month on
+whatever `opus` means then, at that model's price, and the session record would not say
+which model ran. That is §4's argument against a positional default, applied to names. An
+entry with no usable `resolvedModel` is refused on its own and never falls back to `value`.
+The cost: aliases stay reachable only through `--model`.
+
+**Setting sources are the CLI's default**, as every session's are, so the list reflects
+settings that narrow or redirect models. MCP servers are not started.
+
+**Failure.** A missing CLI, a timeout, no `models` key, a non-list, or no usable entry:
+`MODELS` stays on offer and the reason goes to the log panel (`models` source, WARN). No
+on-screen marker, for §6's reason: there is nothing the operator should do.
+
+**Sections.** §1's cost is mostly retired again: a model the CLI knows is listed. §4 stands.
+§5's "override, not a dependency" applies again. §6's no-setting and no-persistence rules
+hold. `get_server_info` is documented; the `models` field inside it is not, which is why
+`MODELS` stays as the fallback.
+
+**Not measured:** whether the list differs when the CLI is signed in to a subscription
+rather than signed out or on an API key, and whether the CLI makes network calls of its
+own during initialize. Every real start now spawns one extra CLI for several seconds, off
+the path to the first frame.

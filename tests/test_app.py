@@ -5764,6 +5764,7 @@ def test_the_frame_draws_the_resume_form_and_its_press_is_a_launch_that_knows_it
         state = run.state
         state.store = _roots_and_a_worker()
         state.frame_snap = state.store.snapshot()
+        state.catalog = model_catalog.Catalog(models=("claude-from-the-handshake",))
         run.app._draw_overlays(state)
         state.resume.is_open = True
         run.app._draw_overlays(state)
@@ -5771,7 +5772,7 @@ def test_the_frame_draws_the_resume_form_and_its_press_is_a_launch_that_knows_it
         assert handed[1]["state"] is state.resume
         assert handed[1]["subagent_cap"] == state.settings.subagent_cap
         assert handed[1]["wrap"] == state.settings.wrap_inputs
-        assert handed[1]["models"] == model_catalog.MODELS
+        assert handed[1]["models"] == ("claude-from-the-handshake",)
 
         form = state.resume.open_for(
             session_id="s-9",
@@ -7211,6 +7212,61 @@ def test_under_the_fake_driver_an_approval_is_ended_at_once_as_never_started(
     assert not window.root.exists() and not window.argv_out.exists()
     assert window.state.not_done[0].startswith(f"{command_id} was approved and did not start")
     window.close()
+
+
+def test_a_real_start_arms_the_handshake_probe_and_a_fake_one_does_not() -> None:
+    """
+    Armed and not started: ``_start`` runs before the first frame, and the probe starts
+    a CLI. The fake driver promises no SDK and no cost, so its catalog has no probe.
+    """
+    from pptmstr import app
+    from pptmstr.settings import Loaded
+
+    real = app._start(_args(), Loaded(Settings(board_log=False)), list_sessions=tuple)  # type: ignore[arg-type]
+    assert real.catalog.probe is model_catalog.probe_handshake
+    assert not real.catalog.probing and not real.catalog.answered
+    fake = app._start(_args(fake=True), Loaded(Settings()))  # type: ignore[arg-type]
+    assert fake.catalog.probe is None
+
+
+def test_the_frame_starts_the_probe_once_and_offers_what_it_answered(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    The wiring of ``Catalog``: a probe nothing requests, or an answer nothing polls,
+    leaves every unit test of it passing and the combo on the list in code forever.
+    """
+    from pptmstr.ui import launcher, resume_form
+
+    offered: list[tuple[str, ...]] = []
+    monkeypatch.setattr(launcher, "handle_shortcut", lambda state: None)
+    _no_settings_dialog(monkeypatch)
+    monkeypatch.setattr(launcher, "draw", lambda state, **kw: offered.append(kw["models"]))
+    monkeypatch.setattr(resume_form, "draw", lambda state, **kw: None)
+    asked: list[int] = []
+    # Held until the first frame is drawn, so that frame cannot see the answer by luck.
+    first_frame = threading.Event()
+
+    def probe() -> model_catalog.CatalogProbe:
+        asked.append(1)
+        first_frame.wait(10)
+        return model_catalog.Probed(("claude-from-the-handshake",))
+
+    with _Launching(monkeypatch) as run:
+        state = run.state
+        state.frame_snap = state.store.snapshot()
+        state.catalog = model_catalog.Catalog(probe=probe)
+        run.app._draw_overlays(state)
+        assert offered == [model_catalog.MODELS]
+        first_frame.set()
+        for worker in threading.enumerate():
+            if worker.name == "pptmstr-model-catalog":
+                worker.join(timeout=10)
+        run.app._draw_overlays(state)
+        run.app._draw_overlays(state)
+
+    assert offered[1:] == [("claude-from-the-handshake",)] * 2
+    assert asked == [1]
 
 
 def test_a_real_start_has_a_runner_and_a_fake_one_has_none() -> None:
