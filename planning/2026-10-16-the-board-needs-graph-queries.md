@@ -144,8 +144,66 @@ unit tests, not the tests themselves.
   if the task were blocked or ready. (STYLE.md: an error that does not tell the two mistakes
   apart.)
 
+## Second case: the feat-inter-team-linking board, 2026-10-17/18
+
+The board is the inter-lead channel's research and round one, about 50 tasks. These are the
+operator's request ("add the evidence") and the lead's account of its own board. The instances
+come from board replies and worker concerns, and nothing here was measured.
+
+- **Failure 1 again: an edge on a shared test file.**
+  - B1-tests (a mechanical `channel=None` sweep) listed `tests/test_bus.py`, which B3-provenance
+    also listed.
+  - The board made B1-tests wait on B3, and B3 waited, through two other tasks, on the task whose
+    test failures B1-tests was meant to fix.
+  - So `make check` stayed red through two builds and their reviews. The edge showed up only in
+    the declare reply.
+  - Scenario A2 (an edge caused by a test file only) is this case.
+- **Failure 3 again: a replacement waited on the task it replaced.**
+  - B1-tests-a was declared to replace B1-tests without the shared file. It overlapped B1-tests,
+    so it waited on it.
+  - Neither could be withdrawn by the lead, so the operator was asked to close both.
+  - It came unstuck only when B3 finished on its own schedule. A4 and C1 are this case.
+- **Failure 4 again: a gate's real dependencies lived in its prose.**
+  - G-r1 was declared before four fix tasks it had to follow.
+  - Its specification was amended five times to add a "read_task these first and stop if any is
+    open" step, which the gate's holder enforced by hand. D1 is this case.
+- **New: a claim gave out a task for the wrong role.**
+  - `claim_task()` gives out the oldest claimable task whatever the claimant's role.
+  - A reviewer, which has no shell, was handed a gate that needs one, and released it.
+  - Two builders were each handed the other's task, and one of them released it.
+  - The lead's workaround was `claim_task(task_id=...)` in every spawn prompt, with "release and
+    report if refused".
+  - None of the five proposals above covers this.
+- **New: writes outside `touches` are invisible to the board.**
+  - Two builders ran mutation checks in place, on files another builder held at the time.
+  - One restored files from copies taken 20 seconds earlier, which could have overwritten the
+    other's saves. It didn't, as it turned out.
+  - `touches` is a declaration, and nothing enforces it.
+  - The lead's workaround is a rule in every specification: mutation and diagnostics run on a
+    scratch copy under `$TMPDIR`.
+
 ## Open questions
 
+- **A file overlap could be a lock, not an edge** (raised 2026-10-18, from the second case). The
+  first open question below lists "an edge … only when both tasks are claimed at once" as one
+  softer rule. The second case argues for it as the model rather than as a softening.
+  - Overlapping `touches` would make the board refuse a claim while another claimed task holds a
+    shared file. It would not order the tasks.
+  - `depends_on` would stay the only way to say one task must come first.
+  - B1-tests and B3 needed only not to edit `test_bus.py` at the same moment. Neither needed the
+    other's result.
+  - The cost: two tasks writing one file can land in either order, so an order that matters has
+    to be stated.
+  - It changes what an edge means, so it should be decided before dry-run and `why_blocked`
+    are built on today's edges.
+- **Role-aware claims** (raised 2026-10-18). Should `claim_task()` without an id skip tasks the
+  claimant's role can't do (a gate for a role with no shell), or should a task name the role
+  that may claim it? The same question applies to `ready()` (5).
+- **Enforcing `touches` at the gate** (raised 2026-10-18; see
+  `2026-08-21-the-board-takes-an-agents-word-for-what-it-will-touch.md`). The approval gate sees
+  `Edit`/`Write` paths, and could refuse a write to a file another claimed task lists. Writes
+  through Bash (`cp`, `sed -i`), the path of one 2026-10-18 incident, would still go unseen.
+  That makes it a partial guard, and whether a partial guard is worth having is open.
 - Should the automatic file-overlap edge stay the default? It prevented real conflicts, and also
   serialised work that only shared a test file. A softer rule, an edge only on source files, or
   only when both tasks are claimed at once, would trade safety for throughput. Not decided.
