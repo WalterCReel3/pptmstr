@@ -30,7 +30,7 @@ from types import MappingProxyType
 from typing import assert_never
 
 from . import drawable
-from .approval import Policy
+from .approval import Policy, peer_channel, summarize
 from .board import ROOT_NAMES, board_concerns, board_tasks, role_name
 from .boardlog import Board, Party, RestoredConcern, RestoredDecision, RestoredTask
 from .command import (
@@ -61,6 +61,8 @@ from .effects import (
     DigestDelivered,
     Effect,
     InboxDelivered,
+    PeerInboxDelivered,
+    PeerSettled,
     SessionDetachSettled,
     SessionWoken,
     TaskWriteSettled,
@@ -75,6 +77,9 @@ from .intents import (
     ApprovalResolved,
     BoardRead,
     BoardRestored,
+    ChannelClosed,
+    ChannelLinked,
+    ChannelsRestored,
     CommandApproved,
     CommandEnded,
     CommandRefused,
@@ -98,6 +103,8 @@ from .intents import (
     FailureAcknowledged,
     InboxRead,
     Intent,
+    PeerInboxRead,
+    PeerSent,
     SessionDetached,
     SessionRecalled,
     StateChanged,
@@ -129,6 +136,8 @@ from .model import (
     ApprovedWrites,
     AskerFate,
     Basis,
+    Channel,
+    ChannelId,
     Charter,
     ClaimRefusal,
     CommandOwed,
@@ -145,6 +154,7 @@ from .model import (
     NodeId,
     NotPlaced,
     Obligation,
+    PeerRefusal,
     PendingApproval,
     Provenance,
     QuestionPending,
@@ -163,9 +173,12 @@ from .model import (
     approved_write,
     closing_notice,
     closing_result,
+    is_channel_name,
+    is_concern_id,
     is_operator,
     normalised_property,
     normalised_touches,
+    peer_addressed,
     restored_party,
     stated_provenance,
 )
@@ -316,6 +329,9 @@ def _clock(now: float | None) -> float:
 #   themselves. A command's texts are also held to a refusal the reducer asks of
 #   them (``command.request_refusal``, ``Snapshot.command_approval_refusal``), which
 #   has to see a NUL or a lone surrogate to refuse it.
+# - A channel's charter, which is written to the channel's log from the store
+#   and read back from it (``channels.outcomes``): the operator's text, kept as
+#   typed.
 #
 # A board restore is not here because it never meets this table: ``_drawable``
 # leaves ``BoardRestored`` whole. The log is written from the store's board, so it
@@ -336,6 +352,8 @@ _VERBATIM: drawable.Verbatim = {
     Answered: frozenset({"text"}),
     CommandRefused: frozenset({"reason"}),
     Refused: frozenset({"reason"}),
+    ChannelLinked: frozenset({"charter"}),
+    Channel: frozenset({"charter"}),
 }
 
 
@@ -404,6 +422,8 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
     restores = snap.restores
     decisions = snap.decisions
     commands = snap.commands
+    channels = snap.channels
+    channel_since = snap.channel_since
     effects: tuple[Effect, ...] = ()
     reorder = False
 
@@ -573,6 +593,7 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
             )
 
         case ApprovalRequested():
+            intent = dataclasses.replace(intent, pending=_peer_row(snap, intent.pending))
             rec = nodes.get(intent.node_id)
             if rec is None:
                 # An approval must never be dropped. Every other intent for an
@@ -751,6 +772,18 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
             # addressed to a node that has not spawned yet is a real ordering, and
             # dropping it here would lose the operator's only view of a message the
             # sender believes it sent.
+            #
+            # A message between leads is filed only in the one shape a restore
+            # places: between leads of two sessions (``model.peer_addressed``),
+            # under a channel that is its link's name and with an ``re`` in the
+            # concern-id shape (``_peer_fields_hold``). The bus sends one
+            # through ``PeerSent`` and never here.
+            posted = intent.concern
+            if posted.is_peer and not (
+                peer_addressed(posted.sender, posted.recipient)
+                and _peer_fields_hold(posted.channel, posted.link, posted.re, channels)
+            ):
+                return snap, ()
             if intent.concern.id not in concerns:
                 concerns[intent.concern.id] = intent.concern
                 effects = _concern_wake(intent.concern)
@@ -785,6 +818,55 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
                 InboxDelivered(
                     request_id=intent.request_id,
                     concerns=tuple(concerns[posted.id] for posted in waiting),
+                ),
+            )
+
+        case PeerSent():
+            # Routed here, through the live link, at the instant it is filed
+            # (``intents.PeerSent``). No wake: a cross-session concern wakes
+            # nobody yet (``_concern_wake``).
+            route = snap.peer_route(intent.node_id, intent.channel)
+            if not isinstance(route, PeerRefusal):
+                if intent.concern_id in concerns:
+                    route = PeerRefusal.ID_HELD
+                else:
+                    route = snap.peer_send_refusal(route[0], intent.called_at, intent.re) or route
+            if isinstance(route, PeerRefusal):
+                return snap, (PeerSettled(request_id=intent.request_id, refusal=route),)
+            link, recipient = route
+            concerns[intent.concern_id] = Concern(
+                id=intent.concern_id,
+                sender=intent.node_id,
+                recipient=recipient,
+                subject=intent.subject,
+                body=intent.body,
+                posted_at=intent.at,
+                edited=intent.edited,
+                channel=intent.channel,
+                needs_answer=intent.needs_answer,
+                re=intent.re,
+                quiet=intent.quiet,
+                link=link.id,
+            )
+            effects = (PeerSettled(request_id=intent.request_id, recipient=recipient[0]),)
+
+        case PeerInboxRead():
+            # Read from the pre-apply view, then mark, as ``InboxRead`` does.
+            # Only what a live link hands over now is marked; the rest stays
+            # waiting, and the reply counts it as held.
+            waiting = snap.peer_inbox_named(intent.node_id, intent.channel)
+            handed = tuple(c for c in waiting if snap.peer_deliverable(c))
+            handed_ids = {c.id for c in handed}
+            for posted in handed:
+                concerns[posted.id] = dataclasses.replace(
+                    posted, state=ConcernState.DELIVERED, delivered_at=intent.at
+                )
+            effects = (
+                PeerInboxDelivered(
+                    request_id=intent.request_id,
+                    concerns=tuple(concerns[posted.id] for posted in handed),
+                    held=tuple(c for c in waiting if c.id not in handed_ids),
+                    links=snap.channels_of(intent.node_id[0]) if intent.node_id[1] is None else (),
                 ),
             )
 
@@ -1126,7 +1208,10 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
                 # Everything an arm other than this one writes is set here and
                 # not read off the record handed in, as ``TaskDeclared`` does: the
                 # asker is the node the gate authenticated, and a decision being
-                # raised has no outcome and has been delivered to nobody.
+                # raised has no outcome and has been delivered to nobody. The
+                # link is the live one the name resolves to now, which
+                # ``_raise_refusal`` has just found joins the asker's session.
+                raised_over = None if intent.channel is None else snap.live_channel(intent.channel)
                 decisions = _filed(
                     decisions,
                     dataclasses.replace(
@@ -1135,6 +1220,8 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
                         raised_at=now if intent.at is None else intent.at,
                         outcome=None,
                         first_delivered_at=None,
+                        channel=None if raised_over is None else raised_over.name,
+                        link=None if raised_over is None else raised_over.id,
                     ),
                 )
             effects = _decision_settled(intent.request_id, unfiled)
@@ -1405,6 +1492,41 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
                 state=AgentState.DONE, error=None, acknowledged=True
             )
 
+        case ChannelLinked():
+            if snap.link_refusal(intent.channel_id, intent.name, intent.members, intent.recording):
+                return snap, ()
+            channels = MappingProxyType(
+                {
+                    **channels,
+                    intent.channel_id: Channel(
+                        id=intent.channel_id,
+                        name=intent.name,
+                        members=intent.members,
+                        charter=intent.charter,
+                        created_at=intent.at,
+                    ),
+                }
+            )
+            channel_since = MappingProxyType({**channel_since, intent.channel_id: now})
+            nodes = _peer_rows(dataclasses.replace(snap, channels=channels), nodes)
+
+        case ChannelClosed():
+            open_ = channels.get(intent.channel_id)
+            if open_ is None or not open_.live:
+                return snap, ()
+            channels = MappingProxyType(
+                {**channels, open_.id: dataclasses.replace(open_, closed_at=intent.at)}
+            )
+            nodes = _peer_rows(dataclasses.replace(snap, channels=channels), nodes)
+
+        case ChannelsRestored():
+            unheld = {c.id: c for c in intent.channels if c.id not in channels}
+            if not unheld:
+                return snap, ()
+            channels = MappingProxyType({**channels, **unheld})
+            channel_since = MappingProxyType({**channel_since, **{cid: now for cid in unheld}})
+            nodes = _peer_rows(dataclasses.replace(snap, channels=channels), nodes)
+
         case _:
             # Not reachable at runtime; it is here for mypy, which reports an
             # unhandled Intent member as a type error at this line. That turns
@@ -1452,12 +1574,65 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
                         decisions=decisions,
                         commands=commands,
                         command_since=_command_since(snap, commands, now),
+                        channels=channels,
+                        channel_since=channel_since,
                     )
                 )
             )
         ),
         effects,
     )
+
+
+def _peer_row(snap: Snapshot, pending: PendingApproval) -> PendingApproval:
+    """
+    ``pending`` with its queue row naming the session it would reach now, when
+    it is a call that reaches another team's lead (``approval.peer_channel``),
+    and as it was otherwise.
+
+    The driver summarises a call before the store has seen it, and only the
+    store knows whom a channel's name reaches, so the row is finished here: when
+    the call parks, and again whenever a link changes (``_peer_rows``). The
+    session is named by its id's head, as an approval's id is, and by its task,
+    which is the title its card shows.
+
+    A link that went live after the call parked is not one the call can reach:
+    ``requested_at`` is the call's stamp (``driver._park``), and ``PeerSent`` or
+    ``DecisionRaised`` refuses it (``Snapshot.linked_after``), so the row says
+    that and names nobody. An ``re`` the send would be refused for is not said
+    here: whether the store holds the message it cites changes on a resume, and
+    the row is rewritten only when a link changes.
+    """
+    channel = peer_channel(pending.tool_name, pending.raw_args)
+    if channel is None:
+        return pending
+    route = snap.peer_route(pending.node, channel)
+    if isinstance(route, PeerRefusal):
+        reaches = "it reaches no lead now"
+    elif snap.linked_after(route[0], pending.requested_at):
+        reaches = "will be refused: the link is newer than this call"
+    else:
+        session = route[1][0]
+        lead = snap.nodes.get((session, None))
+        title = " ".join((lead.task if lead is not None else "").split())
+        reaches = f"session {session[:8]}" + (f" '{title[:40]}'" if title else "")
+    summary = summarize(pending.tool_name, pending.raw_args, reaches=reaches)
+    return pending if summary == pending.summary else dataclasses.replace(pending, summary=summary)
+
+
+def _peer_rows(snap: Snapshot, nodes: dict[NodeId, AgentRecord]) -> dict[NodeId, AgentRecord]:
+    """
+    ``nodes`` with every parked call that reaches another team's lead
+    re-summarised against ``snap``'s links (``_peer_row``). Asked on every step
+    that changes a link, so a row approved after the operator closed a name and
+    linked it again names the session it goes to -- and ``PeerSent`` refuses
+    it then if that link is newer than the call (``Snapshot.linked_after``).
+    """
+    for node_id, rec in list(nodes.items()):
+        rows = tuple(_peer_row(snap, p) for p in rec.pending)
+        if any(a is not b for a, b in zip(rows, rec.pending, strict=True)):
+            nodes[node_id] = rec.with_(pending=rows)
+    return nodes
 
 
 def _no_longer_recalled(
@@ -2062,6 +2237,11 @@ def _raise_refusal(snap: Snapshot, intent: DecisionRaised) -> DecisionRefusal | 
     An id already held is refused before anything is counted, so a retry of a
     raise that landed is told that and not that an allowance is spent.
 
+    A raise on a channel is the lead's, over a live link its session is a
+    member of (``DecisionRefusal.NOT_ON_CHANNEL``). Checked against the store
+    at the instant of filing, as ``blocks`` is: a link closed between the
+    call and this step refuses it.
+
     ``blocks`` is checked here and not only where it was typed: this is the
     instant the board is known, and a row that says "blocks t3" in the queue's
     own voice has to be naming a task that is there.
@@ -2078,6 +2258,15 @@ def _raise_refusal(snap: Snapshot, intent: DecisionRaised) -> DecisionRefusal | 
     asker = intent.node_id
     if intent.decision.id in snap.decisions:
         return DecisionRefusal.ALREADY_RAISED
+    channel = intent.channel
+    if channel is not None:
+        if asker[1] is not None:
+            return DecisionRefusal.NOT_A_LEAD
+        link = snap.live_channel(channel)
+        if link is None or not link.joins(asker[0]):
+            return DecisionRefusal.NOT_ON_CHANNEL
+        if snap.linked_after(link, intent.called_at):
+            return DecisionRefusal.LINKED_AFTER
     if blocked_tasks(snap, intent.decision, asker[0]) != tuple(
         dict.fromkeys(intent.decision.blocks)
     ):
@@ -2681,7 +2870,7 @@ def _restored(snap: Snapshot, intent: BoardRestored) -> (
     differing: list[NotPlaced] = []
     new_tasks: list[Task] = []
     new_concerns: list[Concern] = []
-    held = [0, 0]
+    held = [0, 0, 0]
 
     logged: set[str] = set()
     for restored_task in board.tasks:
@@ -2734,7 +2923,7 @@ def _restored(snap: Snapshot, intent: BoardRestored) -> (
             unplaced.append(NotPlaced("concern", restored_concern.id, Unplaced.REPEATED))
             continue
         filed.add(restored_concern.id)
-        concern = _restored_concern(restored_concern, session_id, node_of, at_of)
+        concern = _restored_concern(restored_concern, session_id, node_of, at_of, snap.channels)
         filed_already = snap.concerns.get(restored_concern.id)
         if isinstance(concern, Unplaced):
             unplaced.append(NotPlaced("concern", restored_concern.id, concern))
@@ -2751,7 +2940,7 @@ def _restored(snap: Snapshot, intent: BoardRestored) -> (
                 )
             )
         elif _timeless_concern(filed_already) == _timeless_concern(concern):
-            held[1] += 1
+            held[2 if concern.is_peer else 1] += 1
         else:
             differing.append(NotPlaced("concern", concern.id, Unplaced.STORE_DIFFERS))
     differing += [
@@ -2778,7 +2967,7 @@ def _restored(snap: Snapshot, intent: BoardRestored) -> (
             unplaced.append(NotPlaced("decision", restored_decision.id, Unplaced.REPEATED))
             continue
         raised.add(restored_decision.id)
-        decision = _restored_decision(restored_decision, session_id, node_of, at_of)
+        decision = _restored_decision(restored_decision, session_id, node_of, at_of, snap.channels)
         raised_already = snap.decisions.get(restored_decision.id)
         if isinstance(decision, Unplaced):
             unplaced.append(NotPlaced("decision", restored_decision.id, decision))
@@ -2822,6 +3011,7 @@ def _restored(snap: Snapshot, intent: BoardRestored) -> (
             at=None if prior is None else prior.at,
             tasks=held[0],
             concerns=held[1],
+            peer_messages=held[2],
             decisions=held_decisions,
             unplaced=(*differing, *withheld, *unplaced),
             parties=MappingProxyType({}) if prior is None else prior.parties,
@@ -2839,7 +3029,8 @@ def _restored(snap: Snapshot, intent: BoardRestored) -> (
             # side of "before the restore".
             at=clock.monotonic if fresh or prior is None else prior.at,
             tasks=held[0] + len(new_tasks),
-            concerns=held[1] + len(new_concerns),
+            concerns=held[1] + sum(1 for c in new_concerns if not c.is_peer),
+            peer_messages=held[2] + sum(1 for c in new_concerns if c.is_peer),
             decisions=held_decisions + len(new_decisions),
             unplaced=tuple(unplaced),
             parties=MappingProxyType({**({} if prior is None else prior.parties), **parties}),
@@ -3078,6 +3269,7 @@ def _restored_concern(
     session_id: str,
     node_of: Callable[[Party], NodeId],
     at_of: Callable[[float], float],
+    channels: Mapping[ChannelId, Channel],
 ) -> Concern | Unplaced:
     """
     ``logged`` as the concern the store files, or why it is not this board's.
@@ -3090,12 +3282,36 @@ def _restored_concern(
     holds such a concern when it is handed one: ``ConcernPosted`` does not ask
     whose the recipient is, and a restore that left it out would be a board
     short of something the reducer filed.
+
+    **A peer message's fields are asked again by the rules ``send_to_peer``
+    put them through**: a channel that is a name, an ``re`` in the concern-id
+    shape, and, where ``channels`` holds its link, the link's own name. The
+    read prints the channel inside its own words and the ``re`` beside it, so a
+    record that fails one did not come from that tool, and is not placed.
     """
     sender = node_of(logged.sender)
     if sender[0] != session_id:
         return Unplaced.NOT_THIS_SESSIONS
-    if logged.channel is None and (logged.needs_answer or logged.re is not None or logged.quiet):
+    if logged.channel is None and (
+        logged.needs_answer or logged.re is not None or logged.quiet or logged.link is not None
+    ):
         # ``Concern`` refuses to be built so; a log's fold never produces it.
+        return Unplaced.INCOHERENT
+    if logged.channel is not None and not logged.link:
+        # Nor this: ``PeerSent`` names the link it routed over, and a message
+        # without one could be handed over by no link, or by whichever link
+        # later took its name.
+        return Unplaced.INCOHERENT
+    if logged.channel is not None and (
+        isinstance(logged.recipient, str) or not peer_addressed(sender, logged.recipient)
+    ):
+        # No step files any other (``model.peer_addressed``). A recipient named
+        # by address alone would resolve inside this session -- "lead" to this
+        # session's own lead -- and hand a peer's message to the wrong team.
+        return Unplaced.INCOHERENT
+    if logged.channel is not None and not _peer_fields_hold(
+        logged.channel, logged.link, logged.re, channels
+    ):
         return Unplaced.INCOHERENT
     return Concern(
         id=logged.id,
@@ -3114,6 +3330,41 @@ def _restored_concern(
         needs_answer=logged.needs_answer,
         re=logged.re,
         quiet=logged.quiet,
+        link=logged.link,
+    )
+
+
+def _channel_as_linked(
+    channel: str, link: ChannelId | None, channels: Mapping[ChannelId, Channel]
+) -> bool:
+    """
+    Whether a logged record's ``channel`` is one a step could have written for
+    ``link``: a channel name, and the link's own name where the store holds the
+    link. A link the store does not hold yet is not asked about its name here;
+    the read asks it then (``Snapshot.peer_deliverable``,
+    ``Snapshot.channel_decision_readable``).
+    """
+    if not is_channel_name(channel):
+        return False
+    held = None if link is None else channels.get(link)
+    return held is None or held.name == channel
+
+
+def _peer_fields_hold(
+    channel: str | None,
+    link: ChannelId | None,
+    cites: ConcernId | None,
+    channels: Mapping[ChannelId, Channel],
+) -> bool:
+    """
+    Whether a peer message's own fields are ones ``send_to_peer`` could have
+    filed: its channel as ``_channel_as_linked`` reads it, and an ``re`` that
+    is absent or in the concern-id shape the tool checks.
+    """
+    return (
+        channel is not None
+        and _channel_as_linked(channel, link, channels)
+        and (cites is None or is_concern_id(cites))
     )
 
 
@@ -3122,6 +3373,7 @@ def _restored_decision(
     session_id: str,
     node_of: Callable[[Party], NodeId],
     at_of: Callable[[float], float],
+    channels: Mapping[ChannelId, Channel],
 ) -> Decision | Unplaced:
     """
     ``logged`` as the decision the store holds, or why it is not this board's.
@@ -3137,6 +3389,10 @@ def _restored_decision(
     than ``DecisionAnswered`` takes, and a first delivery of a decision that was
     neither answered nor dismissed. A standing this build does not define has
     no member to restore as.
+
+    A decision on a channel is a lead's (``DecisionRefusal.NOT_A_LEAD``), so one
+    whose asker is a sub-agent is refused, and its channel must be its link's
+    name where the store holds the link (``_channel_as_linked``).
     """
     asker = node_of(logged.asker)
     if asker[0] != session_id:
@@ -3162,6 +3418,15 @@ def _restored_decision(
     delivered = logged.first_delivered_at
     if delivered is not None and not isinstance(outcome, Answered | Dismissed):
         return Unplaced.INCOHERENT
+    # The raise arm sets a channel exactly with the link it named, and a reply
+    # draws the name inside its own words, so a record saying otherwise did not
+    # come from that arm.
+    if (not logged.link) != (logged.channel is None):
+        return Unplaced.INCOHERENT
+    if logged.channel is not None and (
+        asker[1] is not None or not _channel_as_linked(logged.channel, logged.link, channels)
+    ):
+        return Unplaced.INCOHERENT
     return Decision(
         id=logged.id,
         asker=asker,
@@ -3176,6 +3441,7 @@ def _restored_decision(
         outcome=outcome,
         first_delivered_at=None if delivered is None else at_of(delivered),
         channel=logged.channel,
+        link=logged.link,
     )
 
 

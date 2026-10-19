@@ -195,7 +195,11 @@ with or without the channel.
      `channel is not None` and never stored as a second flag. `inbox_of` and a new `peer_inbox_of`
      split `snap.concerns` on that predicate, and a test pins that the two halves are disjoint and
      cover every waiting concern. On a peer message, `task_id` names the **sender's** task.
-   - **The tools.** `send_to_peer` and `read_peer_messages`, both in `_REVIEW`. Channel names never
+   - **The tools.** `send_to_peer` is in `_REVIEW`. `read_peer_messages` is in `_BUS_AUTO`, like
+     `read_inbox` (corrected 2026-10-18 from "both in `_REVIEW`"). Gating a read approves the call
+     before its content exists, so it would show the operator nothing. By Decided 1 the sender's
+     rung governs what is sent, so a reviewed-rung reader can receive text from an AUTONOMOUS
+     sender that no operator saw. Channel names never
      appear in `post_concern`'s `to`, so roles and channels don't share a namespace.
    - **The log.** `boardfacts._filed` writes a concern with a channel as `peer-posted`. An older
      build, and every build on this machine that shares `~/.config/pptmstr` is one, reads it as
@@ -339,6 +343,21 @@ with or without the channel.
        `isolation_level=None` plus an explicit `BEGIN IMMEDIATE`, and nothing else, on the 3.11
        floor; the WAL-reset bug range for the linked library version; and no hand inspection with
        `ls`/`cat`.
+   **Revised 2026-10-18 (operator: "(a) Let's go with that direction"), after RV4's review of the
+   first build:**
+   - **One log per link, not per name:** `config_dir()/channels/<name>/<link-id>/`. A name is
+     unique only among live links.
+   - **A link whose log is short or stopped restores as not live.** If the log can't be read
+     whole, the link isn't trusted as open: fail-safe, as "unlink wins".
+   - **Why:**
+     - With one log per name, a damaged record made a later close unreadable, so the link came
+       back open after a restart (RV4 finding 1, read).
+     - Two windows closing the same link, or one failed append, left a name short for good under
+       the "short accepts only a close" rule, and nothing deletes a log (RV4 finding 2).
+   - **With one log per link,** damage affects only that one link, and re-linking a name gets a
+     fresh log.
+   - **The cost:** one failed write closes a live link at the next restart, and the operator
+     re-links it.
 10. **The wake rule fails toward delivery** (operator, 2026-10-18: "Yes", replacing the narrower
     loop rule the same day). The operator's primary concern: "messages, instructions, decisions,
     etc. that get stalled on delivery just because an agent just forgets to check, which was a

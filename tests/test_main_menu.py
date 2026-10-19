@@ -130,7 +130,7 @@ def test_the_focused_cards_items_are_its_own_menus_items_refused_as_it_refuses_t
 
     assert [each.label for each in shown] == [each.label for each in offered]
     for drawn, own in zip(shown, offered, strict=True):
-        assert drawn.act == CardChoice(node, own.action, own.rung)
+        assert drawn.act == CardChoice(node, own.action, own.rung, own.channel)
         assert (drawn.refused is None) is own.enabled
         if own.refused is not None:
             assert drawn.refused == session_menu.few_words(own.refused)

@@ -149,6 +149,7 @@ def test_adding_a_tool_to_the_review_list_releases_it_under_the_autonomous_polic
             "mcp__pptmstr__post_concern",
             "mcp__pptmstr__declare_task",
             "mcp__pptmstr__amend_task",
+            "mcp__pptmstr__send_to_peer",
         }
     )
 
@@ -388,6 +389,8 @@ _TODAY: tuple[tuple[str, Mapping[str, Any], Disposition], ...] = (
     ("ToolSearch", {"query": "select:Read"}, Disposition.AUTO_APPROVE),
     # Bus coordination that reads or reserves.
     ("mcp__pptmstr__read_inbox", {}, Disposition.AUTO_APPROVE),
+    # Another team's lead's messages, reviewed at their send on the sender's rung.
+    ("mcp__pptmstr__read_peer_messages", {}, Disposition.AUTO_APPROVE),
     ("mcp__pptmstr__read_board", {}, Disposition.AUTO_APPROVE),
     # One row of that board with nothing cut: the same reviewed text, the same scope.
     ("mcp__pptmstr__read_task", {"task_id": "t-1"}, Disposition.AUTO_APPROVE),
@@ -445,6 +448,14 @@ _TODAY: tuple[tuple[str, Mapping[str, Any], Disposition], ...] = (
     ("mcp__pptmstr__post_concern", {"to": "lead"}, Disposition.REQUIRE_APPROVAL),
     ("mcp__pptmstr__declare_task", {"title": "x"}, Disposition.REQUIRE_APPROVAL),
     ("mcp__pptmstr__amend_task", {"task_id": "t1", "detail": "x"}, Disposition.REQUIRE_APPROVAL),
+    ("mcp__pptmstr__send_to_peer", {"channel": "brand"}, Disposition.REQUIRE_APPROVAL),
+    # A decision raised on a channel: the other link's lead reads it as soon as
+    # it is filed, so it is gated as the send above is, by its argument.
+    (
+        "mcp__pptmstr__raise_decision",
+        {"question": "ship it?", "standing": "operators", "channel": "brand"},
+        Disposition.REQUIRE_APPROVAL,
+    ),
     # Egress. A preset may admit these; the default-argument path never does.
     ("WebFetch", {}, Disposition.REQUIRE_APPROVAL),
     ("WebFetch", {"url": "https://example.invalid/doc"}, Disposition.REQUIRE_APPROVAL),
@@ -682,6 +693,7 @@ def test_a_message_to_another_agent_still_parks_under_permissive() -> None:
         "mcp__pptmstr__post_concern",
         "mcp__pptmstr__declare_task",
         "mcp__pptmstr__amend_task",
+        "mcp__pptmstr__send_to_peer",
     ):
         assert classify(tool, {"to": "lead"}, Policy.PERMISSIVE) is Disposition.REQUIRE_APPROVAL
 
@@ -2515,3 +2527,94 @@ def test_the_queue_row_says_a_write_reaches_pptmstrs_own_records(tmp_path: Path)
     assert summarize("Write", {"file_path": str(tmp_path / "x")}, cwd=str(tmp_path)) == (
         f"Write {tmp_path / 'x'}"
     )
+
+
+@pytest.mark.parametrize("policy", list(Policy))
+def test_a_message_to_another_teams_lead_is_gated_by_the_senders_rung_as_a_concern_is(
+    policy: Policy,
+) -> None:
+    """
+    Decided 1: each side's own rung governs, so a send parks wherever a
+    ``post_concern`` would, and the read is never parked: it was reviewed at
+    the send. Spelled, so it does not read the names out of the module.
+    """
+    sent = classify("mcp__pptmstr__send_to_peer", {"channel": "brand"}, policy)
+    assert sent is classify("mcp__pptmstr__post_concern", {"to": "lead"}, policy)
+    read = classify("mcp__pptmstr__read_peer_messages", {}, policy)
+    assert read is Disposition.AUTO_APPROVE
+
+
+@pytest.mark.parametrize("policy", list(Policy))
+@pytest.mark.parametrize("channel", ["brand", " brand ", "no such name!", 7])
+def test_a_decision_raised_on_a_channel_is_gated_as_a_message_to_the_peer_is(
+    policy: Policy, channel: object
+) -> None:
+    """
+    RV6 1, and the lead's ruling on it: the other lead reads a channel decision
+    as soon as it is filed, so the operator's queue row reviews nothing that
+    reader sees. With a channel, ``raise_decision`` parks exactly where
+    ``send_to_peer`` parks -- a reviewed rung -- and is released where the send
+    is, on ``AUTONOMOUS``. A name the handler will refuse parks as well: the gate
+    reads the argument as the handler does, as anything but absent or blank.
+    """
+    raised = classify(
+        "mcp__pptmstr__raise_decision",
+        {"question": "q", "standing": "operators", "channel": channel},
+        policy,
+    )
+    assert raised is classify("mcp__pptmstr__send_to_peer", {"channel": "brand"}, policy)
+    if policy is Policy.AUTONOMOUS:
+        assert raised is Disposition.AUTO_APPROVE
+    else:
+        assert raised is Disposition.REQUIRE_APPROVAL
+
+
+@pytest.mark.parametrize("policy", list(Policy))
+@pytest.mark.parametrize("args", [{}, {"channel": None}, {"channel": ""}, {"channel": "  "}])
+def test_a_decision_without_a_channel_is_never_parked(
+    policy: Policy, args: dict[str, object]
+) -> None:
+    """
+    The other half: a decision the handler files with no channel reaches the
+    operator and the session's lead, and stays in ``_BUS_AUTO`` on every rung.
+    """
+    raised = classify(
+        "mcp__pptmstr__raise_decision", {"question": "q", "standing": "operators", **args}, policy
+    )
+    assert raised is Disposition.AUTO_APPROVE
+
+
+def test_a_parked_call_to_a_peer_names_the_session_it_reaches() -> None:
+    """
+    RV5 1(c): the store finishes the row with the session at the other end of
+    the link (``store._peer_row``); the channel alone does not say whom.
+    """
+    from pptmstr.approval import peer_channel, summarize
+
+    assert summarize(
+        "mcp__pptmstr__send_to_peer",
+        {"channel": "brand", "subject": "the hero image"},
+        reaches="session z 'brand work'",
+    ) == ("message the lead on #brand (session z 'brand work'): the hero image")
+    raised = {"question": "ship it?", "standing": "operators", "channel": "brand"}
+    assert summarize("mcp__pptmstr__raise_decision", raised, reaches="session z") == (
+        "decision read by the lead on #brand (session z): ship it?"
+    )
+    assert peer_channel("mcp__pptmstr__raise_decision", raised) == "brand"
+    assert peer_channel("mcp__pptmstr__raise_decision", {"question": "q"}) is None
+    assert peer_channel("mcp__pptmstr__post_concern", {"channel": "brand"}) is None
+
+
+def test_a_parked_message_to_a_peer_reads_as_a_message_on_its_channel() -> None:
+    from pptmstr.approval import summarize
+
+    assert (
+        summarize(
+            "mcp__pptmstr__send_to_peer",
+            {"channel": "brand", "subject": "the hero image", "needs_answer": True},
+        )
+        == "message the lead on #brand, needs an answer: the hero image"
+    )
+    assert summarize(
+        "mcp__pptmstr__send_to_peer", {"channel": "brand", "subject": "s", "incident": False}
+    ) == ("message the lead on #brand, carries an incident, which is refused: s")

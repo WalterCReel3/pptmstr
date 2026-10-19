@@ -108,6 +108,9 @@ from .intents import (
     ApprovalResolved,
     BoardRead,
     BoardRestored,
+    ChannelClosed,
+    ChannelLinked,
+    ChannelsRestored,
     CommandApproved,
     CommandEnded,
     CommandRefused,
@@ -131,6 +134,8 @@ from .intents import (
     FailureAcknowledged,
     InboxRead,
     Intent,
+    PeerInboxRead,
+    PeerSent,
     SessionDetached,
     SessionRecalled,
     StateChanged,
@@ -264,6 +269,8 @@ def changes(
             | AgentRemoved()
             | ConcernPosted()
             | InboxRead()
+            | PeerSent()
+            | PeerInboxRead()
             | ConcernEdited()
             | ConcernWithdrawn()
             | TaskAmended()
@@ -289,6 +296,9 @@ def changes(
             | CommandEnded()
             | CommandsRead()
             | CommandsRestored()
+            | ChannelLinked()
+            | ChannelClosed()
+            | ChannelsRestored()
         ):
             # Nothing about a run. A removal, and a decision, an approval or a
             # command that brings a session back, are read off the snapshots

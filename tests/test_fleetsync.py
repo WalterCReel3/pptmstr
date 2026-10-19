@@ -37,6 +37,9 @@ from pptmstr.intents import (
     ApprovalResolved,
     BoardRead,
     BoardRestored,
+    ChannelClosed,
+    ChannelLinked,
+    ChannelsRestored,
     CommandApproved,
     CommandEnded,
     CommandRefused,
@@ -60,6 +63,8 @@ from pptmstr.intents import (
     FailureAcknowledged,
     InboxRead,
     Intent,
+    PeerInboxRead,
+    PeerSent,
     SessionDetached,
     SessionRecalled,
     StateChanged,
@@ -76,6 +81,7 @@ from pptmstr.intents import (
     UsageAccrued,
 )
 from pptmstr.model import (
+    EVERY_CHANNEL,
     AgentState,
     Concern,
     ContextSnapshot,
@@ -251,6 +257,10 @@ _MAKERS: dict[type, Maker] = {
     AgentRemoved: lambda r, s, now: AgentRemoved(r.choice(SUBS)),
     ConcernPosted: lambda r, s, now: ConcernPosted(_who(r), _concern(r, now)),
     InboxRead: lambda r, s, now: InboxRead(_who(r), "rq", now),
+    PeerSent: lambda r, s, now: PeerSent(
+        _who(r), "rq", f"c-{r.randrange(6)}", "brand", "s", "b", now
+    ),
+    PeerInboxRead: lambda r, s, now: PeerInboxRead(_who(r), "rq", now, EVERY_CHANNEL),
     ConcernEdited: lambda r, s, now: ConcernEdited(f"c-{r.randrange(6)}", "rewritten"),
     ConcernWithdrawn: lambda r, s, now: ConcernWithdrawn(f"c-{r.randrange(6)}"),
     TaskAmended: lambda r, s, now: TaskAmended(f"t-{r.randrange(4)}", "amended"),
@@ -298,6 +308,12 @@ _MAKERS: dict[type, Maker] = {
     FailedSessionClosed: lambda r, s, now: FailedSessionClosed(
         (r.choice((A, B, C)), None), run_held=r.random() < 0.3
     ),
+    # A link is nothing about a run.
+    ChannelLinked: lambda r, s, now: ChannelLinked(
+        r.choice(("k1", "k2")), "brand", frozenset({A, B}), "charter", now, frozenset({A, B})
+    ),
+    ChannelClosed: lambda r, s, now: ChannelClosed(r.choice(("k1", "k2")), now),
+    ChannelsRestored: lambda r, s, now: ChannelsRestored(()),
 }
 
 # What a session's life is made of, drawn far more often than the rest: ends and

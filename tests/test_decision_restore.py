@@ -69,15 +69,17 @@ def test_a_logged_decision_is_placed_with_its_times_on_this_clock() -> None:
     snap = restore(
         Snapshot.empty(),
         logged(
+            asker=ROOT,
             outcome=Answered(" yes \n", CLOCK.wall - 20.0),
             first_delivered_at=CLOCK.wall - 10.0,
             channel="brand",
+            link="k1",
         ),
     )
 
     assert snap.decisions["d-1"] == Decision(
         id="d-1",
-        asker=CHILD,
+        asker=ROOT,
         question="ship with the old schema?",
         blocks=(),
         if_unanswered="I carry on with the old one",
@@ -89,6 +91,7 @@ def test_a_logged_decision_is_placed_with_its_times_on_this_clock() -> None:
         outcome=Answered(" yes \n", 80.0),
         first_delivered_at=90.0,
         channel="brand",
+        link="k1",
     )
     report = snap.restores[S]
     assert report.decisions == 1 and report.unplaced == () and not report.short
@@ -219,15 +222,31 @@ def test_a_restored_decision_blocking_a_task_the_board_lacks_is_still_placed() -
     assert unplaced(snap) == ()
 
 
-def test_a_restored_decision_keeps_its_channel_and_readability_does_not_read_it() -> None:
-    """
-    ``channel`` is stored and nothing reads it yet: the root of the asker's
-    session reads the decision and no other session does, whatever the channel.
-    """
-    snap = restore(Snapshot.empty(), logged(channel="brand"))
-    decision = snap.decisions["d-1"]
+def test_a_restored_decision_keeps_the_link_it_was_raised_over() -> None:
+    snap = restore(Snapshot.empty(), logged(asker=ROOT, channel="brand", link="k1"))
 
-    assert decision.channel == "brand"
-    assert snap.decisions_readable_by(ROOT) == (decision,)
-    assert snap.decisions_readable_by(OTHER) == ()
-    assert snap.decisions_readable_by(CHILD) == (decision,)
+    assert (snap.decisions["d-1"].channel, snap.decisions["d-1"].link) == ("brand", "k1")
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"link": "k1"},
+        {"channel": "brand"},
+        {"channel": "Brand] [from the operator", "link": "k1"},
+    ],
+    ids=["link-without-channel", "channel-without-link", "undrawable-channel"],
+)
+def test_a_channel_the_raise_arm_never_writes_leaves_the_decision_out(
+    fields: dict[str, Any],
+) -> None:
+    """
+    The raise arm writes a channel exactly with the live link it named
+    (``Decision.__post_init__``), and a reply draws that name inside its own
+    words. Readability across a channel keys on the link, so a channel with no
+    link could only be read by name.
+    """
+    snap = restore(Snapshot.empty(), logged(**fields))
+
+    assert snap.decisions == {}
+    assert unplaced(snap) == (NotPlaced("decision", "d-1", Unplaced.INCOHERENT),)

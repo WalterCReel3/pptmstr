@@ -34,6 +34,9 @@ from pptmstr.intents import (
     ApprovalResolved,
     BoardRead,
     BoardRestored,
+    ChannelClosed,
+    ChannelLinked,
+    ChannelsRestored,
     CommandApproved,
     CommandEnded,
     CommandRefused,
@@ -57,6 +60,8 @@ from pptmstr.intents import (
     FailureAcknowledged,
     InboxRead,
     Intent,
+    PeerInboxRead,
+    PeerSent,
     SessionDetached,
     SessionRecalled,
     StateChanged,
@@ -74,6 +79,7 @@ from pptmstr.intents import (
 )
 from pptmstr.model import (
     EARLIER_RUN,
+    EVERY_CHANNEL,
     AgentState,
     Answered,
     ApprovedWrites,
@@ -181,10 +187,19 @@ def _concern(r: random.Random, now: float) -> Concern:
     # ``concern-posted`` does not carry them.
     channel = r.choice((None, None, "brand"))
     peer = channel is not None
+    concern_id = f"c-{r.randrange(30)}"
+    sender, recipient = r.choice(_AGENTS), r.choice(_AGENTS)
+    if peer:
+        # Between the leads of two sessions and nowhere else
+        # (``model.peer_addressed``): the store files no other. Derived from the
+        # parties drawn rather than drawn again, so a run draws what it would
+        # draw with no peer in it.
+        sender = LEAD if sender[0] == S else Z_LEAD
+        recipient = Z_LEAD if sender == LEAD else LEAD
     return Concern(
-        id=f"c-{r.randrange(30)}",
-        sender=r.choice(_AGENTS),
-        recipient=r.choice(_AGENTS),
+        id=concern_id,
+        sender=sender,
+        recipient=recipient,
         subject="subject",
         body=r.choice(("as posted", "")),
         posted_at=now,
@@ -195,8 +210,9 @@ def _concern(r: random.Random, now: float) -> Concern:
         basis=r.choice(_BASES),
         incident=r.random() < 0.3,
         channel=channel,
+        link="k1" if peer else None,
         needs_answer=peer and r.random() < 0.5,
-        re=r.choice((None, "c-0")) if peer else None,
+        re=r.choice((None, "c-000000000000")) if peer else None,
         quiet=peer and r.random() < 0.5,
     )
 
@@ -279,7 +295,6 @@ def _decision(r: random.Random, snap: Snapshot | None = None) -> Decision:
         standing=r.choice(tuple(Standing)),
         reversible=r.choice((True, False, None)),
         raised_at=0.0,
-        channel=r.choice((None, None, "brand")),
     )
 
 
@@ -499,6 +514,19 @@ _MAKERS: dict[type, Maker] = {
     AgentRemoved: lambda r, s, now: AgentRemoved(r.choice((B2, REVIEWER, Z_BUILDER, GHOST))),
     ConcernPosted: lambda r, s, now: ConcernPosted(_who(r), _concern(r, now)),
     InboxRead: lambda r, s, now: InboxRead(_who(r), "rq", now),
+    PeerSent: lambda r, s, now: PeerSent(
+        _who(r),
+        "rq",
+        f"c-{r.randrange(30)}",
+        r.choice(("brand", "ops")),
+        "subject",
+        r.choice(("as sent", "")),
+        now,
+        needs_answer=r.random() < 0.5,
+    ),
+    PeerInboxRead: lambda r, s, now: PeerInboxRead(
+        _who(r), "rq", now, r.choice((EVERY_CHANNEL, "brand", "ops"))
+    ),
     ConcernEdited: lambda r, s, now: _edited(r, s),
     ConcernWithdrawn: lambda r, s, now: ConcernWithdrawn(_concern_id(r, s)),
     TaskAmended: _amended,
@@ -513,8 +541,17 @@ _MAKERS: dict[type, Maker] = {
     BoardRead: lambda r, s, now: BoardRead(_who(r), "rq"),
     DigestRead: lambda r, s, now: DigestRead(_who(r), "rq", now),
     BoardRestored: _restored,
+    # The channel is drawn right after the decision, where ``_decision`` drew it
+    # when it rode the record, so the draws after it are the ones every seed
+    # was measured with.
     DecisionRaised: lambda r, s, now: (
-        DecisionRaised((d := _decision(r, s)).asker, d, "rq", at=_maybe_at(r, now))
+        DecisionRaised(
+            (d := _decision(r, s)).asker,
+            d,
+            "rq",
+            channel=r.choice((None, None, "brand")),
+            at=_maybe_at(r, now),
+        )
     ),
     DecisionAnswered: lambda r, s, now: DecisionAnswered(
         ((d := _open_decision(r, s)) and d.id) or r.choice(_DECISION_IDS),
@@ -558,6 +595,12 @@ _MAKERS: dict[type, Maker] = {
     FailedSessionClosed: lambda r, s, now: FailedSessionClosed(
         (r.choice((S, Z, "s-closed")), None), run_held=r.random() < 0.3
     ),
+    # A link writes the channel's log and never a board.
+    ChannelLinked: lambda r, s, now: ChannelLinked(
+        r.choice(("k1", "k2")), "brand", frozenset({S, Z}), "charter", now, frozenset({S, Z})
+    ),
+    ChannelClosed: lambda r, s, now: ChannelClosed(r.choice(("k1", "k2")), now),
+    ChannelsRestored: lambda r, s, now: ChannelsRestored(()),
 }
 
 # The intents a board fact can come from. Drawn more often than the rest, and the
@@ -594,6 +637,21 @@ _DECISIONS: tuple[type, ...] = (
     DecisionWithdrawn,
     DecisionsRead,
 )
+# Messages between leads, and the operator's links that decide whether a
+# ``PeerSent`` files one and a ``PeerInboxRead`` hands one over: one of these
+# every ``_PEER_EVERY`` steps, drawn from a generator of their own so that the
+# rest of a run is drawn as it would be without them. A run then holds a live
+# link, a closed one, and messages a closed link holds back.
+_PEERS: tuple[type, ...] = (
+    ChannelLinked,
+    ChannelClosed,
+    PeerSent,
+    PeerSent,
+    PeerSent,
+    PeerInboxRead,
+    PeerInboxRead,
+)
+_PEER_EVERY = 5
 # Prunes a record, after which the node is one the board has no name for. Rare,
 # or every run ends with nobody on it.
 _RARE: tuple[type, ...] = (AgentRemoved,)
@@ -617,10 +675,16 @@ def steps(seed: int, length: int = LENGTH) -> Iterator[Step]:
     ``length`` generated intents applied one by one through ``store._apply``.
     """
     rng = random.Random(seed)
+    peer_rng = random.Random(-1 - seed)
     snap = started()
-    everything = [kind for kind in _MAKERS if kind not in _RARE]
+    everything = [kind for kind in _MAKERS if kind not in (*_RARE, PeerSent, PeerInboxRead)]
     for number in range(length):
         now = 1.0 + number
+        if number % _PEER_EVERY == _PEER_EVERY - 1:
+            peer = _MAKERS[peer_rng.choice(_PEERS)](peer_rng, snap, now)
+            after, _ = _apply(snap, peer, now)
+            yield Step(number, peer, after, outcomes(snap, peer, after, now))
+            snap = after
         roll = rng.random()
         if roll < 0.01:
             kind = rng.choice(_RARE)
@@ -707,6 +771,7 @@ def as_restored_concern(concern: Concern) -> RestoredConcern:
         needs_answer=concern.needs_answer,
         re=concern.re,
         quiet=concern.quiet,
+        link=concern.link,
     )
 
 
@@ -725,6 +790,7 @@ def as_restored_decision(decision: Decision) -> RestoredDecision:
         outcome=decision.outcome,
         first_delivered_at=decision.first_delivered_at,
         channel=decision.channel,
+        link=decision.link,
     )
 
 
@@ -849,6 +915,36 @@ def test_the_generator_reaches_the_cases_the_property_is_for() -> None:
         for seed in SEEDS
         for step in steps(seed)
     ), "a reclaim from a holder this process has a record of: a same-window earlier run"
+    peer_steps = [
+        step
+        for seed in SEEDS
+        for step in steps(seed)
+        if isinstance(step.intent, PeerSent | PeerInboxRead)
+    ]
+    assert any(
+        isinstance(step.intent, PeerSent)
+        and any(isinstance(f.record, boardlog.PeerPosted) for f in step.facts)
+        for step in peer_steps
+    ), "a message sent over a live link"
+    assert any(
+        isinstance(step.intent, PeerSent) and not step.facts for step in peer_steps
+    ), "a message refused: no live link, or a sender that is not a lead"
+    assert any(
+        isinstance(step.intent, PeerInboxRead)
+        and any(isinstance(f.record, boardlog.Delivered) for f in step.facts)
+        for step in peer_steps
+    ), "a message handed over"
+    assert any(
+        isinstance(step.intent, PeerInboxRead)
+        and any(
+            c.is_peer
+            and c.recipient == step.intent.node_id
+            and c.state is ConcernState.POSTED
+            and not step.after.peer_deliverable(c)
+            for c in step.after.concerns.values()
+        )
+        for step in peer_steps
+    ), "a read that a closed link left a message waiting through"
 
 
 @pytest.mark.parametrize("seed", range(20))
@@ -1439,9 +1535,11 @@ def test_a_log_restored_into_another_process_is_the_board_the_first_one_held(see
         snap = restoring(snap, session_id, board)
         report = snap.restores[session_id]
         assert report.unplaced == () and report.adoptable and not report.short
-        assert (report.tasks, report.concerns, report.decisions) == (
+        # A board's own concerns are counted apart from the peer mail its lead sent.
+        assert (report.tasks, report.concerns, report.peer_messages, report.decisions) == (
             len(board.tasks),
-            len(board.concerns),
+            sum(1 for c in board.concerns if c.channel is None),
+            sum(1 for c in board.concerns if c.channel is not None),
             len(board.decisions),
         )
         assert report.at == _READ.monotonic
@@ -1526,9 +1624,11 @@ def test_a_store_holding_some_of_a_board_exactly_is_given_the_rest(seed: int) ->
 
     report = after.restores[S]
     assert not report.refused and report.unplaced == ()
-    assert (report.tasks, report.concerns, report.decisions) == (
+    # A board's own concerns are counted apart from the peer mail its lead sent.
+    assert (report.tasks, report.concerns, report.peer_messages, report.decisions) == (
         len(board.tasks),
-        len(board.concerns),
+        sum(1 for c in board.concerns if c.channel is None),
+        sum(1 for c in board.concerns if c.channel is not None),
         len(board.decisions),
     )
     assert boards(after) == boards(restoring(Snapshot.empty(), S, board))
@@ -1555,9 +1655,11 @@ def test_a_board_the_store_reached_is_never_one_the_restore_calls_incoherent(see
             after, _ = _apply(step.after, BoardRestored(session_id, board, clock), 500.0)
             report = after.restores[session_id]
             assert report.unplaced == (), (step.number, step.intent, report.unplaced)
-            assert (report.tasks, report.concerns, report.decisions) == (
+            # A board's own concerns are counted apart from the peer mail its lead sent.
+            assert (report.tasks, report.concerns, report.peer_messages, report.decisions) == (
                 len(tasks),
-                len(concerns),
+                sum(1 for c in concerns.values() if c.channel is None),
+                sum(1 for c in concerns.values() if c.channel is not None),
                 len(decisions),
             )
             assert after.tasks == step.after.tasks and after.concerns == step.after.concerns
@@ -1566,7 +1668,7 @@ def test_a_board_the_store_reached_is_never_one_the_restore_calls_incoherent(see
 
 # -- what a case may look at -----------------------------------------------------------
 
-_BOARD_INTENTS = frozenset((*_BOARD, *_DECISIONS)) - {ApprovalRequested}
+_BOARD_INTENTS = frozenset((*_BOARD, *_DECISIONS, PeerSent, PeerInboxRead)) - {ApprovalRequested}
 
 
 class _Untouchable:
@@ -1625,9 +1727,23 @@ def _asked(asker: NodeId, decision_id: str = "d-1", **fields: Any) -> DecisionRa
     # Blocking nothing: a decision that names a task is refused unless the task
     # is on its asker's board, and this board is empty.
     decision = dataclasses.replace(
-        _decision(random.Random(0)), **{"id": decision_id, "blocks": (), "channel": None, **fields}
+        _decision(random.Random(0)), **{"id": decision_id, "blocks": (), **fields}
     )
     return DecisionRaised(asker, decision, "rq")
+
+
+def _asked_on_brand(decision_id: str = "d-1", **fields: Any) -> DecisionRaised:
+    """The lead of ``S`` raising on #brand, which ``_linked`` links to ``Z``."""
+    return dataclasses.replace(_asked(LEAD, decision_id, **fields), channel="brand")
+
+
+def _linked() -> Snapshot:
+    snap, _ = _apply(
+        started(),
+        ChannelLinked("k1", "brand", frozenset({S, Z}), "charter", 1.0, frozenset({S, Z})),
+        1.0,
+    )
+    return snap
 
 
 def test_a_decision_is_filed_in_its_askers_sessions_log_and_nowhere_else() -> None:
@@ -1638,7 +1754,7 @@ def test_a_decision_is_filed_in_its_askers_sessions_log_and_nowhere_else() -> No
     """
     snap, facts = apply(
         started(),
-        _asked(B1, "d-s", channel="brand"),
+        _asked(B1, "d-s"),
         _asked(Z_BUILDER, "d-z"),
         DecisionAnswered("d-s", "yes", at=6.0),
         DecisionsRead(LEAD, "rq", 6.5, "d-s"),
@@ -1668,7 +1784,6 @@ def test_a_decision_is_filed_in_its_askers_sessions_log_and_nowhere_else() -> No
         recommendation=asked.recommendation,
         reversible=asked.reversible,
         asker_id=(S, "a1"),
-        channel="brand",
     )
     assert facts[2].record == boardlog.Answered(at=6.0, decision_id="d-s", answer="yes")
     assert facts[3].record == boardlog.AnswerDelivered(at=7.0, decision_id="d-s")
@@ -1716,7 +1831,7 @@ def test_a_decision_raised_ended_and_restored_into_a_fresh_store_is_the_one_rais
     first store gave it and the decision compares equal whole -- the operator's
     answer byte for byte, NUL and lone surrogate included.
     """
-    raised = _asked(B1, question="which root?", reversible=None, channel="brand")
+    raised = _asked(B1, question="which root?", reversible=None)
     first, facts = apply(started(), raised, ending, DecisionsRead(B1, "rq", 7.0, "d-1"), now=5.0)
     on_disk = boardlog.restore(f.on_the_wall(_WROTE) for f in facts if f.session_id == S)
 
@@ -1738,6 +1853,29 @@ def test_a_decision_raised_ended_and_restored_into_a_fresh_store_is_the_one_rais
     # And the store answers it as it answered the first: the asker reads it, the
     # operator cannot answer it a second time.
     assert fresh.decisions_of(B1) == first.decisions_of(B1)
+
+
+def test_a_channel_decision_is_filed_with_its_link_and_restores_into_a_fresh_store_whole() -> None:
+    """
+    The channel and the link it resolved to ride ``Raised``, so a restore gives
+    back the decision the first store held, field for field.
+    """
+    first, facts = apply(
+        _linked(),
+        _asked_on_brand(question="which root?"),
+        DecisionAnswered("d-1", "yes", at=6.0),
+        DecisionsRead(LEAD, "rq", 7.0, "d-1"),
+        now=5.0,
+    )
+    raised = facts[0].record
+    assert isinstance(raised, boardlog.Raised)
+    assert (facts[0].session_id, raised.channel, raised.link) == (S, "brand", "k1")
+    on_disk = boardlog.restore(f.on_the_wall(_WROTE) for f in facts if f.session_id == S)
+
+    fresh, _ = _apply(Snapshot.empty(), BoardRestored(S, on_disk, _WROTE), _WROTE.monotonic)
+
+    assert fresh.decisions == first.decisions
+    assert (fresh.decisions["d-1"].channel, fresh.decisions["d-1"].link) == ("brand", "k1")
 
 
 def test_an_open_decision_restored_is_owed_to_the_operator_again() -> None:

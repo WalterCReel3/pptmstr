@@ -6,10 +6,11 @@ and close from HEALTH and the composers, fork from HEALTH, retry and dismiss fro
 failure row in NEEDS YOU. For those it is handed the same callables those surfaces
 are (``Actions``), so an item here and the button it stands for cannot come to do
 different things. Resume opens the resume form (``ui/resume_form``), which is reached
-from here. Three more levers are the menu's own, and no other surface has them: taking
+from here. Five more levers are the menu's own, and no other surface has them: taking
 an ended session off the fleet, moving a running session's gate to a rung other than
-the lowest, and resuming under a chosen rung. Each of those is an optional callable,
-and an item whose callable was not supplied is greyed and says so.
+the lowest, resuming under a chosen rung, linking a lead to another (which opens the
+link form, ``ui/link_form``) and closing a link it is in. Each of those is an optional
+callable, and an item whose callable was not supplied is greyed and says so.
 
 **The Gate rows are** ``gate_menu.rows``, **and nothing here decides what a rung
 does.** That table is held against a real ``AgentSession``: a row it calls a live move
@@ -44,6 +45,7 @@ readers already defers to.
 
 from __future__ import annotations
 
+import dataclasses
 import enum
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -51,10 +53,13 @@ from typing import assert_never
 
 from imgui_bundle import imgui
 
+from .. import drawable
 from ..approval import Policy
 from ..model import (
     AgentRecord,
     AgentState,
+    Channel,
+    ChannelId,
     DetachRefusal,
     LaunchSpec,
     NodeId,
@@ -108,9 +113,10 @@ class Action(enum.Enum):
     """
     Everything a card's menu can ask for.
 
-    ``SET_GATE`` and ``RESUME_AS`` are asked for once per rung, so the member alone
-    does not say which line was meant: the ``Item`` carries the rung, and
-    ``Item.key`` is what tells two of them apart.
+    ``SET_GATE`` and ``RESUME_AS`` are asked for once per rung, and
+    ``CLOSE_CHANNEL`` once per link, so the member alone does not say which line
+    was meant: the ``Item`` carries the rung or the link, and ``Item.key`` is
+    what tells two of them apart.
     """
 
     INTERRUPT = "interrupt"
@@ -127,6 +133,10 @@ class Action(enum.Enum):
     DISMISS = "dismiss"
     # Take an ended session off the fleet.
     REMOVE = "remove"
+    # Open the link form for this lead. Nothing is linked until it is submitted.
+    LINK = "link"
+    # Close the item's link, now.
+    CLOSE_CHANNEL = "close channel"
 
 
 class Kind(enum.Enum):
@@ -138,9 +148,10 @@ class Kind(enum.Enum):
 
 
 # What names one choosable line of a menu: its action, and with it the rung for
-# the two actions that are offered once per rung. The bare member for every other
-# item, so a caller that means "Fork" says ``Action.FORK``.
-Key = Action | tuple[Action, Policy]
+# the two actions that are offered once per rung, or the link's id for the one
+# offered once per link. The bare member for every other item, so a caller that
+# means "Fork" says ``Action.FORK``.
+Key = Action | tuple[Action, Policy] | tuple[Action, ChannelId]
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,7 +161,8 @@ class Item:
 
     ``refused`` is the reason it cannot act right now, and None when it can.
     ``grouped`` is whether it sits under the ``Heading`` before it. ``rung`` is
-    set on a Gate row and on nothing else. ``note`` is what choosing it does, at
+    set on a Gate row and on nothing else, and ``channel`` on a Close channel
+    row and on nothing else. ``note`` is what choosing it does, at
     length; it is not drawn. ``asks`` is whether choosing it opens a question
     instead of acting, and ``question`` and ``sentence`` are what that question
     shows: the act in words, and its one consequence.
@@ -165,6 +177,7 @@ class Item:
     asks: bool = False
     question: str = ""
     sentence: str = ""
+    channel: ChannelId | None = None
 
     @property
     def enabled(self) -> bool:
@@ -172,7 +185,11 @@ class Item:
 
     @property
     def key(self) -> Key:
-        return self.action if self.rung is None else (self.action, self.rung)
+        if self.rung is not None:
+            return (self.action, self.rung)
+        if self.channel is not None:
+            return (self.action, self.channel)
+        return self.action
 
     @property
     def text(self) -> str:
@@ -278,6 +295,20 @@ STORE_NOT_ASKED = Reason(
 RUN_ATTACHED = Reason("a process is still attached to it", "a process is still attached")
 RUN_NOT_KNOWN = Reason("not known whether a process is still attached", "process state not known")
 
+LINK_LABEL = "Link leads…"
+# Why Link leads cannot open its form: a link joins two running leads whose
+# boards are both recorded (``Snapshot.link_refusal``), and the form would
+# have nothing to offer. The two halves are the store's and the shell's, as
+# for removal.
+RECORDING_NOT_KNOWN = Reason("not known which leads' boards are recorded", "recording not known")
+LINK_NOT_RECORDED = Reason(
+    "this lead's board is not being recorded, and a link is kept in no other place",
+    "board not recorded",
+)
+NO_PEER = Reason(
+    "no other running lead has its board recorded to link to", "no other recorded lead"
+)
+
 # The rung ``Actions.revoke_policy`` narrows to. A Gate row for it is that
 # lever, which HEALTH also has, and not ``Actions.set_policy``.
 _REVOKED_TO = tuple(Policy)[0]
@@ -296,13 +327,16 @@ class Facts:
     ``contained`` is whether the running process was started with containment,
     as the driver's guard judges it (``session_details.is_contained``).
     ``wired`` is which of the menu's own levers ``Actions`` has a callable for
-    (``Actions.wired``).
+    (``Actions.wired``). ``recording`` is the sessions whose boards the shell
+    is recording (``AppState.board_logs``), which no snapshot holds: the
+    shell's half of whether a lead can be linked.
     """
 
     snap: Snapshot | None = None
     run_held: bool | None = None
     contained: bool | None = None
     wired: frozenset[Action] = frozenset()
+    recording: frozenset[str] | None = None
 
 
 # A menu nobody told anything.
@@ -387,6 +421,7 @@ def _live_root(rec: AgentRecord, policy: Policy | None, facts: Facts) -> tuple[E
         *_gate(rec, policy, facts, live=True),
         Item(Action.DETAILS, "Details"),
         Item(Action.HEALTH, "Health"),
+        *_links(rec, facts),
         Rule(),
         Item(Action.CLOSE, CLOSE_ASKS_LABEL if turn else "Close", None if held else NOT_HELD),
     )
@@ -396,8 +431,9 @@ def _ended_root(rec: AgentRecord, policy: Policy | None, facts: Facts) -> tuple[
     recalled = rec.recalled
     if recalled is not None and recalled.transcript is TranscriptPresence.GONE:
         # Nothing to resume and nothing to fork a resume from: the conversation
-        # is not there. What is left is to read about it and to take it away.
-        return (Item(Action.DETAILS, "Details"), *_removal(rec, policy, facts))
+        # is not there. What is left is to read about it, to close the links
+        # its card still draws, and to take it away.
+        return (Item(Action.DETAILS, "Details"), *_links(rec, facts), *_removal(rec, policy, facts))
     no_task = TASK_NOT_RECORDED if task_missing(rec) else None
     out: list[Entry] = [
         Item(Action.RESUME, RESUME_LABEL),
@@ -416,6 +452,7 @@ def _ended_root(rec: AgentRecord, policy: Policy | None, facts: Facts) -> tuple[
             ),
             _close_failed(facts),
         ]
+    out += _links(rec, facts)
     out += _removal(rec, policy, facts)
     return tuple(out)
 
@@ -554,17 +591,114 @@ def _removal(rec: AgentRecord, policy: Policy | None, facts: Facts) -> list[Entr
     return [Rule(), Item(Action.REMOVE, REMOVE_LABEL, removal_refused(rec, policy, facts))]
 
 
-def find(offered: tuple[Entry, ...], action: Action, rung: Policy | None = None) -> Item | None:
+def link_peers(
+    snap: Snapshot, session_id: str, recording: frozenset[str]
+) -> tuple[AgentRecord, ...]:
+    """
+    The leads ``session_id`` could be linked to: every other root that is
+    running (in the store and not final, ``Snapshot.link_refusal``'s reading)
+    and whose board is recorded. In the store's order, which is spawn order.
+    """
+    return tuple(
+        rec
+        for node, rec in snap.nodes.items()
+        if node[1] is None
+        and node[0] != session_id
+        and not rec.state.is_final
+        and node[0] in recording
+    )
+
+
+def link_refused(rec: AgentRecord, facts: Facts) -> str | None:
+    """
+    Why Link leads cannot open its form for ``rec``'s session, or None when it
+    can. Only what holds of the card: the name and the charter are the form's
+    to refuse, and a refusal that arrives after the form is submitted is the
+    form's to show.
+    """
+    if Action.LINK not in facts.wired:
+        return NOT_WIRED
+    if facts.snap is None:
+        return STORE_NOT_ASKED
+    if facts.recording is None:
+        return RECORDING_NOT_KNOWN
+    if rec.node_id[0] not in facts.recording:
+        return LINK_NOT_RECORDED
+    if not link_peers(facts.snap, rec.node_id[0], facts.recording):
+        return NO_PEER
+    return None
+
+
+def live_links(snap: Snapshot, session_id: str) -> tuple[Channel, ...]:
+    """Every live link ``session_id`` is a member of, by name."""
+    return tuple(
+        sorted(
+            (c for c in snap.channels.values() if c.live and session_id in c.members),
+            key=lambda c: (c.name, c.id),
+        )
+    )
+
+
+def _links(rec: AgentRecord, facts: Facts) -> list[Entry]:
+    """
+    The link group under a rule: "Link leads…" on a root the store would link
+    (``Snapshot.link_refusal`` takes any state that is not final, so a FAILED
+    one too, which can still answer), and a close per live link it is in.
+    Nothing, rule included, when there is neither.
+
+    A FAILED root whose transcript is gone is offered "Link leads…" as well,
+    though nothing may be left to answer: it matches what the store accepts.
+    """
+    group: list[Entry] = []
+    if not rec.state.is_final:
+        group.append(Item(Action.LINK, LINK_LABEL, link_refused(rec, facts)))
+    group += _channel_closes(rec, facts)
+    return [Rule(), *group] if group else []
+
+
+def _channel_closes(rec: AgentRecord, facts: Facts) -> list[Entry]:
+    """
+    "Close channel #name", once per live link the card's session is in, on a
+    root. A link can be closed whenever it is visible, whatever its members
+    are doing, so nothing but the wiring greys it. It does not ask first, as
+    removal does not: a close takes the link out of view and deletes nothing,
+    and the name can be linked again.
+    """
+    if facts.snap is None:
+        return []
+    refused = None if Action.CLOSE_CHANNEL in facts.wired else NOT_WIRED
+    return [
+        Item(
+            Action.CLOSE_CHANNEL,
+            f"Close channel #{drawable.text(c.name)}",
+            refused,
+            channel=c.id,
+        )
+        for c in live_links(facts.snap, rec.node_id[0])
+    ]
+
+
+def find(
+    offered: tuple[Entry, ...],
+    action: Action,
+    rung: Policy | None = None,
+    channel: ChannelId | None = None,
+) -> Item | None:
     """
     The item for ``action`` in a menu, or None when the menu does not offer it.
-    ``rung`` picks among the items of an action offered once per rung; without
-    it the first is returned.
+    ``rung`` picks among the items of an action offered once per rung, and
+    without it the first is returned. ``channel`` picks among those offered
+    once per link, and is matched exactly: without it no item of a link is
+    returned, so a choice that does not say which link closes none.
     """
     return next(
         (
             e
             for e in offered
-            if isinstance(e, Item) and e.action is action and (rung is None or e.rung is rung)
+            if isinstance(e, Item)
+            and e.action is action
+            and (rung is None or e.rung is rung)
+            and e.channel == channel
         ),
         None,
     )
@@ -604,14 +738,17 @@ class Actions:
     HEALTH to the card's session. ``close`` on a failed session with no process
     left marks it ended instead of asking the pool (``app._close``).
 
-    The last three are the menu's own levers. None is one this build has not
+    The last five are the menu's own levers. None is one this build has not
     supplied, and its items are greyed with ``NOT_WIRED``. ``detach`` takes the
     session off the fleet. ``resume_as`` opens the resume form for the record's
     session under a rung, and starts nothing; ``resume`` opens the same form
     under the lowest. ``set_policy`` moves a running
     session's gate to a rung: it is called outside every ImGui begin/end pair,
     and it is where a refusal by the driver is caught and shown --
-    ``AgentSession.set_policy`` raises, and nothing here catches.
+    ``AgentSession.set_policy`` raises, and nothing here catches. ``link``
+    opens the link form for the record's session, and links nothing.
+    ``close_channel`` closes a link by its id, and is where a close that cannot
+    be written is said.
     """
 
     interrupt: Callable[[NodeId], None]
@@ -625,6 +762,8 @@ class Actions:
     detach: Callable[[NodeId], None] | None = None
     resume_as: Callable[[AgentRecord, Policy], None] | None = None
     set_policy: Callable[[NodeId, Policy], None] | None = None
+    link: Callable[[AgentRecord], None] | None = None
+    close_channel: Callable[[ChannelId], None] | None = None
 
     @property
     def wired(self) -> frozenset[Action]:
@@ -633,6 +772,8 @@ class Actions:
             Action.REMOVE: self.detach,
             Action.RESUME_AS: self.resume_as,
             Action.SET_GATE: self.set_policy,
+            Action.LINK: self.link,
+            Action.CLOSE_CHANNEL: self.close_channel,
         }
         return frozenset(action for action, call in supplied.items() if call is not None)
 
@@ -726,11 +867,13 @@ def choose(
     actions: Actions,
     *,
     rung: Policy | None = None,
+    channel: ChannelId | None = None,
     facts: Facts = NOTHING_SAID,
 ) -> None:
     """
     Do what choosing ``action`` on ``rec``'s card does. ``rung`` says which line
-    of an action offered once per rung.
+    of an action offered once per rung, and ``channel`` which of one offered
+    once per link.
 
     Asked of the menu as it stands now, so an item the card does not offer, or
     offers refused, does nothing: the frame that drew the item and the keypress
@@ -742,8 +885,8 @@ def choose(
     beside confirms anything, so the second step is the menu's own. A Gate row
     that ``asks`` is the same: nothing moves until ``draw_confirm`` is answered.
     """
-    facts = Facts(facts.snap, facts.run_held, facts.contained, actions.wired)
-    item = find(entries(rec, policy, facts), action, rung)
+    facts = dataclasses.replace(facts, wired=actions.wired)
+    item = find(entries(rec, policy, facts), action, rung, channel)
     if item is None or not item.enabled:
         return
     node = rec.node_id
@@ -770,6 +913,12 @@ def choose(
         case Action.REMOVE:
             if actions.detach is not None:
                 actions.detach(node)
+        case Action.LINK:
+            if actions.link is not None:
+                actions.link(rec)
+        case Action.CLOSE_CHANNEL:
+            if actions.close_channel is not None and item.channel is not None:
+                actions.close_channel(item.channel)
         case Action.DETAILS:
             state.details.ask(node)
         case Action.HEALTH:
@@ -851,7 +1000,7 @@ class Wiring:
     a run under a node's session. ``contained`` is whether the session object
     behind a node was started with containment
     (``session_details.is_contained`` of its settings string), or None where no
-    session object is held.
+    session object is held. ``recording`` is ``Facts.recording``.
     """
 
     state: MenuState
@@ -860,6 +1009,7 @@ class Wiring:
     snap: Snapshot | None = None
     running: Callable[[NodeId], bool] | None = None
     contained: Callable[[NodeId], bool | None] | None = None
+    recording: frozenset[str] | None = None
 
     def facts(self, node: NodeId) -> Facts:
         return Facts(
@@ -867,6 +1017,7 @@ class Wiring:
             run_held=None if self.running is None else self.running(node),
             contained=None if self.contained is None else self.contained(node),
             wired=self.actions.wired,
+            recording=self.recording,
         )
 
 
@@ -945,8 +1096,9 @@ def draw_popup(
                 if not entry.enabled:
                     imgui.begin_disabled()
                 rung = "" if entry.rung is None else f"-{entry.rung.value}"
+                link = "" if entry.channel is None else f"-{entry.channel}"
                 clicked, _ = imgui.selectable(
-                    f"{entry.text}##{entry.action.value}{rung}",
+                    f"{entry.text}##{entry.action.value}{rung}{link}",
                     entry.enabled and state.cursor == entry.key,
                 )
                 if not entry.enabled:
@@ -969,7 +1121,16 @@ def draw_popup(
     # After the popup is closed out: a lever that raised between the begin and
     # the end would leave the frame unbalanced for the rest of its draw.
     if chosen is not None:
-        choose(chosen.action, rec, policy, state, wiring.actions, rung=chosen.rung, facts=facts)
+        choose(
+            chosen.action,
+            rec,
+            policy,
+            state,
+            wiring.actions,
+            rung=chosen.rung,
+            channel=chosen.channel,
+            facts=facts,
+        )
 
 
 def card_title(rec: AgentRecord) -> str:
@@ -990,6 +1151,16 @@ def card_title(rec: AgentRecord) -> str:
     if rec.node_id[1] is not None:
         return rec.agent_type or rec.task or rec.node_id[0]
     return rec.task or rec.node_id[0]
+
+
+def peer_label(snap: Snapshot, session_id: str) -> str:
+    """
+    What a lead is called where another lead's link names it: the link form's
+    choice and a card's channel line. Its card's title (``card_title``), or its
+    session id where the store holds no root for it.
+    """
+    rec = snap.get((session_id, None))
+    return drawable.text(session_id if rec is None else card_title(rec))
 
 
 def draw_confirm(state: MenuState, snap: Snapshot, actions: Actions) -> None:

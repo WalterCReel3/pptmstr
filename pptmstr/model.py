@@ -16,6 +16,7 @@ from __future__ import annotations
 import builtins
 import dataclasses
 import enum
+import math
 import posixpath
 import re
 from collections.abc import Iterable, Mapping
@@ -577,10 +578,22 @@ class DecisionRefusal(enum.Enum):
     ``TaskRefusal`` gives -- a mistyped id, somebody else's decision, and one
     that has already ended are three different things to do next.
 
+    ``NOT_A_LEAD`` and ``NOT_ON_CHANNEL`` turn away a raise on a channel. Only a
+    lead speaks across a link, as only a lead sends to a peer, so a worker's
+    question for the other team goes through its own lead. ``NOT_ON_CHANNEL`` is
+    one member for a name that is not live and for a live link between other
+    sessions: a lead may not learn by asking which links it is not on.
+    ``LINKED_AFTER`` is ``PeerRefusal.LINKED_AFTER``'s: the live link of that
+    name went live after the gate saw the call, so it is not the link the
+    decision was raised for.
+
     ``NOT_APPLIED`` is the member ``_apply`` never returns: the fallback for a
     request the store never saw, as on ``TaskRefusal``.
     """
 
+    NOT_A_LEAD = "not_a_lead"
+    NOT_ON_CHANNEL = "not_on_channel"
+    LINKED_AFTER = "linked_after"
     TOO_MANY_OPEN = "too_many_open"
     SESSION_FULL = "session_full"
     UNKNOWN_TASK = "unknown_task"
@@ -627,9 +640,13 @@ class Decision:
     which shows no answer. A fact for the pane. Nothing reads it to decide
     whether to hand the answer over again: the asker is given it on every read.
 
-    ``channel`` is the channel between leads the decision was raised on, or None
-    for one inside a team. It is stored and logged and nothing reads it yet:
-    ``Snapshot.decisions_readable_by`` does not consult it.
+    ``channel`` is the name of the channel between leads the decision was
+    raised on, or None for one inside a team, and ``link`` is the id of the link
+    that name resolved to when the reducer filed it (``Channel.id``). The name is
+    for display; readability keys on the link (``Snapshot.decisions_readable_by``),
+    because a name is linked again once its link is closed, and a decision raised
+    over a closed link must not be read through the new one. Each is set exactly
+    when the other is (``__post_init__``).
 
     In the board log of its asker's session (``session_id``), which is where its
     raise, its ending and its first delivery are filed, so it survives a restart
@@ -650,6 +667,19 @@ class Decision:
     outcome: DecisionOutcome | None = None
     first_delivered_at: float | None = None
     channel: str | None = None
+    link: ChannelId | None = None
+
+    def __post_init__(self) -> None:
+        """
+        Refuses a channel without its link, and a link without its channel.
+
+        A channel decision with no link would be read through no link at all, or
+        through whichever link later took its name; the reverse is a link a
+        reply has no name to draw for. Refused where it is built, as
+        ``Concern.__post_init__`` refuses a peer message without its link.
+        """
+        if (self.channel is None) != (self.link is None):
+            raise ValueError("a channel decision names the link it was raised over")
 
     @property
     def session_id(self) -> str:
@@ -1593,22 +1623,37 @@ class Concern:
     re: ConcernId | None = None
     # The sender asks that this message wake nobody when it arrives.
     quiet: bool = False
+    # The link a peer message was sent over (``Channel.id``), and None for team
+    # mail. ``channel`` is the link's name, kept for display; a name is reused
+    # once its link is closed, so what a message is handed over through, and
+    # counted against, is this. Set exactly when ``channel`` is, which
+    # ``__post_init__`` holds: a default here, and not a keyword every
+    # construction must state, because the mistake to stop is a peer message
+    # without its link and that is refused where it is built.
+    link: ChannelId | None = field(default=None, kw_only=True)
 
     def __post_init__(self) -> None:
         """
-        Refuses a concern with no channel that sets a peer-message field.
+        Refuses a concern with no channel that sets a peer-message field, and a
+        peer message that does not name its link.
 
-        ``needs_answer``, ``re`` and ``quiet`` ride only the ``peer-posted``
-        record, so a team concern carrying one would be filed as
-        ``concern-posted`` and restored without it, with nothing raised. Refused
-        where it is built, which is outside the reducer: nothing in
-        ``store._apply`` builds a concern from fields it was not handed whole.
+        ``needs_answer``, ``re``, ``quiet`` and ``link`` ride only the
+        ``peer-posted`` record, so a team concern carrying one would be filed as
+        ``concern-posted`` and restored without it, with nothing raised. A peer
+        message with no link could be handed over by no link at all, or by
+        whichever link later took its name. Refused where it is built, which is
+        outside the reducer: nothing in ``store._apply`` builds a concern from
+        fields it has not checked.
         """
-        if self.channel is None and (self.needs_answer or self.re is not None or self.quiet):
+        if self.channel is None and (
+            self.needs_answer or self.re is not None or self.quiet or self.link is not None
+        ):
             raise ValueError(
-                "needs_answer, re and quiet are peer-message fields: a concern with "
-                "no channel cannot carry them"
+                "needs_answer, re, quiet and link are peer-message fields: a concern "
+                "with no channel cannot carry them"
             )
+        if self.channel is not None and self.link is None:
+            raise ValueError("a peer message names the link it was sent over")
 
     @property
     def is_peer(self) -> bool:
@@ -2183,6 +2228,150 @@ def _channel_refusal(name: str) -> str | None:
             "ASCII letters and digits, '.', '_' and '-', and starts with a letter or digit."
         )
     return None
+
+
+def is_channel_name(name: str) -> bool:
+    """Whether ``name`` is one a channel can have (``_channel_refusal``)."""
+    return _channel_refusal(name) is None
+
+
+def channel_refusal(name: str) -> str | None:
+    """
+    The sentence a tool refuses ``name`` with when it is not one a channel can
+    have, or None when it is (``_channel_refusal``).
+    """
+    return _channel_refusal(name)
+
+
+# A channel's id: a uuid the shell mints when the operator links two leads. Not
+# the name, which can be linked again once the channel under it is closed.
+ChannelId = str
+
+# How many sessions a link joins. The record holds a set, so relaxing this is a
+# rule changed here and not a format changed in the log.
+LINK_MEMBERS = 2
+
+
+class LinkRefusal(enum.Enum):
+    """
+    Why the operator's link of two leads was not made (``Snapshot.link_refusal``).
+    """
+
+    BAD_NAME = "the name is not one a channel can have"
+    NOT_A_PAIR = "a link joins exactly two sessions"
+    ID_HELD = "a channel under that id is already held"
+    NAME_LIVE = "a live channel already has that name"
+    NOT_RUNNING = "a member is not a running session"
+    NOT_RECORDING = "a member's board is not being recorded"
+
+
+@dataclass(frozen=True, slots=True)
+class Channel:
+    """
+    A link between leads, made by the operator, under a plain name.
+
+    Lives in its own log (``channels``), never in a member's board log. Closing
+    a link sets ``closed_at`` and nothing removes it: a closed channel stays in
+    the store, and its name can be linked again under a new id.
+
+    ``members`` is a set of session ids, though linking refuses any size but
+    ``LINK_MEMBERS``: a record made as a pair and widened later would otherwise
+    be misread as a pair by an older build.
+
+    ``charter`` is the operator's text as it was typed. It is written to the log
+    from here, so the store holds it verbatim (``store._VERBATIM``) and a pane
+    draws it through a helper that takes any ``str``.
+
+    Both times are wall-clock times, minted by the shell with the intent: they
+    are written to the log and read back by another process.
+    """
+
+    id: ChannelId
+    name: str
+    members: frozenset[str]
+    charter: str
+    created_at: float
+    closed_at: float | None = None
+
+    @builtins.property
+    def live(self) -> bool:
+        """Whether the link is open: it has not been closed."""
+        return self.closed_at is None
+
+    def joins(self, *sessions: str) -> bool:
+        """Whether the link is open and every one of ``sessions`` is a member."""
+        return self.live and all(s in self.members for s in sessions)
+
+
+class EveryChannel(enum.Enum):
+    """
+    "Every channel", as a reader of peer mail asks for it
+    (``Snapshot.peer_inbox_of``).
+
+    A value of its own and not None, because on ``Concern.channel`` None means
+    team mail: a caller handing a concern's channel through as the scope would
+    otherwise ask for every channel's mail when it held a team concern. With
+    this, the type says which of the two a caller meant.
+    """
+
+    EVERY = "every channel"
+
+
+EVERY_CHANNEL = EveryChannel.EVERY
+
+# Which peer mail a lead asks to read: the links of one name, or every link.
+ChannelScope = str | EveryChannel
+
+
+class PeerRefusal(enum.Enum):
+    """
+    Why a lead's message to a peer was not sent (``Snapshot.peer_route`` and
+    ``Snapshot.peer_send_refusal``).
+
+    ``NOT_A_LEAD`` is a worker that should ask its own lead to send it.
+    ``CLOSED`` is a name whose every link this store holds is closed;
+    ``NO_SUCH_CHANNEL`` is a name no link this store holds has, most likely a
+    typo -- or a link this run did not restore. ``NOT_A_MEMBER`` is a live link
+    between two other sessions, which this sender cannot see into. Those three
+    are apart for the store's tests and the operator's reading, and the sender
+    is told one sentence for all of them (``bus._peer_refusal_text``): which it
+    is would tell a lead probing names whether a link it is not on exists.
+    ``ID_HELD`` is a message id the store already holds, which a minted id
+    never is.
+
+    The last three bind a send to the link it was written for, so a link made
+    under the same name between the call and the filing does not take it to
+    another lead. ``LINKED_AFTER`` is a link that went live in this process
+    after the gate saw the call. ``OTHER_LINK`` is an ``re`` naming a peer
+    message sent over a different link than the one the name resolves to now.
+    ``UNHELD_RE`` is an ``re`` naming a message this store does not hold, so
+    which link it came over cannot be asked: after a restart whose sender's
+    session is not resumed yet, the message an answer cites may have come over
+    a link since closed, and the name may now reach another lead.
+
+    ``NOT_APPLIED`` is the member ``_apply`` never returns: the fallback for a
+    request the store never saw, as on ``TaskRefusal``.
+    """
+
+    NOT_A_LEAD = "not_a_lead"
+    NO_SUCH_CHANNEL = "no_such_channel"
+    CLOSED = "closed"
+    NOT_A_MEMBER = "not_a_member"
+    ID_HELD = "id_held"
+    LINKED_AFTER = "linked_after"
+    OTHER_LINK = "other_link"
+    UNHELD_RE = "unheld_re"
+    NOT_APPLIED = "not_applied"
+
+
+def peer_addressed(sender: NodeId, recipient: NodeId) -> bool:
+    """
+    Whether a message between leads may run from ``sender`` to ``recipient``:
+    each is the lead of its session, and the sessions differ. Nothing else is
+    one, so the reducer files no other (``store._apply``'s ``ConcernPosted``) and
+    a restore places no other (``store._restored_concern``).
+    """
+    return sender[1] is None and recipient[1] is None and sender[0] != recipient[0]
 
 
 def is_concern_id(text: str) -> bool:
@@ -2822,7 +3011,11 @@ class Unplaced(enum.Enum):
     # amended by an agent that may not amend it, carrying a holder or a result
     # in a state that has neither, or carrying a provenance with no channel. A
     # decision with an answer longer than one is taken, or delivered without
-    # an answer or dismissal. A team concern carrying a peer-message field.
+    # an answer or dismissal. A team concern carrying a peer-message field, and
+    # a peer message to anything but the lead of another session by its id: a
+    # recipient known only by an address would resolve inside the sender's own
+    # session, and placing it there would hand a peer's message to the sender's
+    # own lead.
     #
     # Damage, or a newer build: a decision of a standing this build does not
     # define is here too, and so is anything a later build's store produces
@@ -2894,9 +3087,13 @@ class Restore:
     # from a log has entered the store for this session.
     at: float | None = None
     tasks: int = 0
+    # The board's own concerns: its team's mail. The messages its lead sent
+    # another team's lead are logged on the same board and counted apart in
+    # ``peer_messages``, so a count of "concerns" never includes another team.
     concerns: int = 0
     unplaced: tuple[NotPlaced, ...] = ()
     decisions: int = 0
+    peer_messages: int = 0
     # ``boardlog.Board.short`` as the board handed over answered it: the log
     # holds more than its tasks, concerns and decisions show. Carried as the answer and not
     # worked out again from the fields below, which are some of the reasons and
@@ -3037,6 +3234,18 @@ class Snapshot:
     # Only open commands have an entry: an ended one owes no row, and a
     # restored one is never open.
     command_since: Mapping[CommandId, float] = field(default_factory=_empty_map)
+    # Every link between leads the operator has made, closed ones included, by
+    # id: from the channel logs read at startup and from this process's acts.
+    channels: Mapping[ChannelId, Channel] = field(default_factory=_empty_map)
+    # When each link entered this store, on the reducer's clock: the ``now`` of
+    # the step that linked it or restored it. Stored for ``command_since``'s
+    # reason -- ``Channel.created_at`` is a wall-clock time -- and read against
+    # the gate's monotonic stamp of when a call was made (``linked_after``).
+    # ``now`` is the frame's instant and not the step's: a batch shares one
+    # reading by design (``Store.apply_all``). The shell takes it straight
+    # before the apply (``app.begin_frame``), so the instant is early only by
+    # the batch's own run, and ``linked_after`` counts a tie as after.
+    channel_since: Mapping[ChannelId, float] = field(default_factory=_empty_map)
 
     @staticmethod
     def empty() -> Snapshot:
@@ -3060,15 +3269,127 @@ class Snapshot:
         """
         return tuple(c for c in self._waiting_for(node) if not c.is_peer)
 
-    def peer_inbox_of(self, node: NodeId, channel: str | None = None) -> tuple[Concern, ...]:
+    def peer_inbox_of(self, node: NodeId, link: Channel | EveryChannel) -> tuple[Concern, ...]:
         """
         Every peer message posted to ``node`` and not yet delivered or withdrawn,
-        oldest first; only those on ``channel`` when one is named.
+        oldest first: on every link for ``EVERY_CHANNEL``, and only those sent
+        over ``link`` otherwise -- by its id, so a message an earlier, closed
+        link under the same name holds is not counted against this one.
+
+        Whether a link would hand one over now is not asked here
+        (``peer_deliverable``): a message held by a closed link is still
+        waiting.
         """
         return tuple(
             c
             for c in self._waiting_for(node)
-            if c.is_peer and (channel is None or c.channel == channel)
+            if c.is_peer and (link is EVERY_CHANNEL or c.link == link.id)
+        )
+
+    def peer_inbox_named(self, node: NodeId, name: str | EveryChannel) -> tuple[Concern, ...]:
+        """
+        ``peer_inbox_of`` for what a lead asks to read: the waiting peer mail
+        on any link of the name ``name`` -- the name is what the lead knows a
+        link by -- or on every link. Which of it a read hands over is
+        ``peer_deliverable``'s.
+        """
+        return tuple(
+            c
+            for c in self.peer_inbox_of(node, EVERY_CHANNEL)
+            if name is EVERY_CHANNEL or c.channel == name
+        )
+
+    def peer_deliverable(self, concern: Concern) -> bool:
+        """
+        Whether ``concern``'s own link would hand it over now: it is addressed
+        to a lead, and the link it was sent over (``Concern.link``) is live and
+        joins both the sender's session and the recipient's. Only a lead reads
+        peer mail, so one addressed to a sub-agent is handed to nobody.
+
+        Asked at the read and not only at the send, because the operator may
+        close the link between the two. A link this run does not hold live --
+        closed, or not restored at this start -- hands over nothing in this run,
+        and a link made again under the same name is a different link. Whether a
+        later run hands the message over is that run's link's to say. The
+        message's channel must be its link's name, as ``send_to_peer`` filed it:
+        a record that says otherwise is handed to nobody.
+        """
+        if concern.link is None or concern.recipient[1] is not None:
+            return False
+        link = self.channels.get(concern.link)
+        return (
+            link is not None
+            and link.name == concern.channel
+            and link.joins(concern.sender[0], concern.recipient[0])
+        )
+
+    def linked_after(self, link: Channel, called_at: float | None) -> bool:
+        """
+        Whether ``link`` entered this store after ``called_at``, the gate's
+        monotonic stamp of when an agent made the call: a link the agent could
+        not have been writing for. None is a call no gate stamped, which no
+        agent's is (``bus`` refuses to run one), and is not asked. A link with
+        no recorded instant is taken to be later, which only a snapshot the
+        reducer did not build can hold.
+
+        A call stamped at the link's own instant counts as after it: the link
+        is published only once its batch is applied, so no agent saw it then.
+        """
+        if called_at is None:
+            return False
+        return self.channel_since.get(link.id, math.inf) >= called_at
+
+    def peer_send_refusal(
+        self, link: Channel, called_at: float | None, cites: ConcernId | None
+    ) -> PeerRefusal | None:
+        """
+        Why a message ``peer_route`` sends over ``link`` is not the one its
+        sender wrote, or None when it is: the link went live after the call
+        (``LINKED_AFTER``), or ``cites`` -- the message's ``re`` -- names a
+        message this store does not hold (``UNHELD_RE``) or a peer message sent
+        over another link (``OTHER_LINK``). One naming team mail the store holds
+        is left to its shape check.
+        """
+        if self.linked_after(link, called_at):
+            return PeerRefusal.LINKED_AFTER
+        if cites is None:
+            return None
+        cited = self.concerns.get(cites)
+        if cited is None:
+            return PeerRefusal.UNHELD_RE
+        if cited.is_peer and cited.link != link.id:
+            return PeerRefusal.OTHER_LINK
+        return None
+
+    def peer_route(self, sender: NodeId, channel: str) -> tuple[Channel, NodeId] | PeerRefusal:
+        """
+        The live link a message ``sender`` sends on ``channel`` travels over, and
+        who it reaches -- the lead of the link's other member -- or why it
+        reaches nobody.
+
+        Resolved through the live link and never through a role: a role names an
+        agent inside the asker's own session, and the peer is in another. The
+        link is a pair (``LINK_MEMBERS``), so "the other member" is one session.
+        """
+        if sender[1] is not None:
+            return PeerRefusal.NOT_A_LEAD
+        link = self.live_channel(channel)
+        if link is None:
+            if any(c.name == channel for c in self.channels.values()):
+                return PeerRefusal.CLOSED
+            return PeerRefusal.NO_SUCH_CHANNEL
+        others = sorted(link.members - {sender[0]})
+        if sender[0] not in link.members or len(others) != 1:
+            return PeerRefusal.NOT_A_MEMBER
+        return link, (others[0], None)
+
+    def channels_of(self, session_id: str) -> tuple[Channel, ...]:
+        """Every live link ``session_id`` is a member of, by name."""
+        return tuple(
+            sorted(
+                (c for c in self.channels.values() if c.joins(session_id)),
+                key=lambda c: c.name,
+            )
         )
 
     def _waiting_for(self, node: NodeId) -> tuple[Concern, ...]:
@@ -3085,6 +3406,50 @@ class Snapshot:
                 key=lambda c: c.posted_at,
             )
         )
+
+    def live_channel(self, name: str) -> Channel | None:
+        """The open channel called ``name``, or None. There is at most one."""
+        return next((c for c in self.channels.values() if c.live and c.name == name), None)
+
+    def link_refusal(
+        self,
+        channel_id: ChannelId,
+        name: str,
+        members: frozenset[str],
+        recording: frozenset[str],
+    ) -> LinkRefusal | None:
+        """
+        Why the operator may not link ``members`` as ``channel_id`` under
+        ``name``, or None when they may.
+
+        **Running is the store's to see and recording is the shell's.** A
+        member is running when its root is in the store in a state that is not
+        final (``AgentState.is_final``): a closed card is DONE, and a FAILED
+        session can still answer. Whether a member's board is being recorded is
+        ``AppState.board_logs``, which the reducer cannot read, so the shell
+        says it: ``recording`` is the sessions it found recording when the act
+        was made. Within a process recording only ever stops, so a member that
+        was not recording then is not recording now, and that refusal is never
+        stale. The other direction does not hold: a member recording when the
+        shell looked may have stopped by the frame this is applied on, so a link
+        can be made with a member that no longer records. The window is that
+        one frame.
+        """
+        if not is_channel_name(name):
+            return LinkRefusal.BAD_NAME
+        if len(members) != LINK_MEMBERS:
+            return LinkRefusal.NOT_A_PAIR
+        if channel_id in self.channels:
+            return LinkRefusal.ID_HELD
+        if self.live_channel(name) is not None:
+            return LinkRefusal.NAME_LIVE
+        for member in members:
+            root = self.nodes.get((member, None))
+            if root is None or root.state.is_final:
+                return LinkRefusal.NOT_RUNNING
+        if not members <= recording:
+            return LinkRefusal.NOT_RECORDING
+        return None
 
     def claimable_tasks(self) -> tuple[Task, ...]:
         """
@@ -3129,10 +3494,12 @@ class Snapshot:
 
     def decisions_readable_by(self, node: NodeId) -> tuple[Decision, ...]:
         """
-        Every decision ``node`` may read, open or ended, oldest first: its own,
-        and for the root of a session every decision raised in that session.
+        Every decision ``node`` may read, open or ended, oldest first: its own;
+        for the root of a session every decision raised in that session; and for
+        the root as well every decision raised over a live link its session is a
+        member of (``channel_decision_readable``).
 
-        The root reads them all because an answer is a record of what the
+        The root reads its session's because an answer is a record of what the
         operator decided for the session's work, and the agent that plans that
         work is its lead. A sub-agent's answer that reached the lead only when
         the sub-agent passed it on would arrive as an agent's paraphrase. Reading
@@ -3143,9 +3510,37 @@ class Snapshot:
             return self.decisions_of(node)
         return tuple(
             sorted(
-                (d for d in self.decisions.values() if d.session_id == node[0]),
+                (
+                    d
+                    for d in self.decisions.values()
+                    if d.session_id == node[0] or self.channel_decision_readable(d, node[0])
+                ),
                 key=lambda d: d.raised_at,
             )
+        )
+
+    def channel_decision_readable(self, decision: Decision, session_id: str) -> bool:
+        """
+        Whether the lead of ``session_id`` reads ``decision`` as a member of the
+        link it was raised over (Decided 12): the link is in the store, is live,
+        and joins both that session and the asker's.
+
+        Keyed on the link and never the name, so a decision raised over a closed
+        link is not read through a later link of the same name. Once its link is
+        closed a decision is read by its own session's rule alone. Only a lead
+        reads, and only a lead's is read: a channel joins sessions, and what a
+        lead's workers see of the other team, or say to it, goes through their
+        lead. A record that says otherwise -- a sub-agent's, or one naming the
+        link under another name -- is one no step files, and is read by nobody
+        across the link.
+        """
+        if decision.link is None or decision.asker[1] is not None:
+            return False
+        link = self.channels.get(decision.link)
+        return (
+            link is not None
+            and link.name == decision.channel
+            and link.joins(session_id, decision.session_id)
         )
 
     def commands_of(self, node: NodeId) -> tuple[Command, ...]:

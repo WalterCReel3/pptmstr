@@ -36,6 +36,7 @@ from .model import (
     ConcernId,
     ConcernState,
     NodeId,
+    Provenance,
     Snapshot,
     Task,
     TaskId,
@@ -291,6 +292,9 @@ class BoardTask:
     # (``model.Task.closed_by_operator``). ``owner`` is None on such a row and
     # ``result`` is the closing words and the operator's reason.
     closed_by_operator: bool = False
+    # Where the work came from when another lead asked for it
+    # (``model.Task.provenance``): the declarer's statement, all of it.
+    provenance: Provenance | None = None
 
 
 def version_label(row: BoardTask) -> str:
@@ -713,6 +717,7 @@ def board_tasks(snap: Snapshot, session_id: str) -> tuple[BoardTask, ...]:
                 holder=owner,
                 holder_left_behind=_holder_left_behind(snap, task, session_id),
                 closed_by_operator=task.closed_by_operator,
+                provenance=task.provenance,
                 superseded=tuple(
                     BoardVersion(
                         detail=prior.detail,
@@ -773,10 +778,11 @@ def _open_concerns_by_task(snap: Snapshot, session_id: str) -> dict[TaskId, tupl
 
     Scoped by sender to match ``board_concerns``, so a row's explanation and the
     concern log below it cannot disagree about which messages are this board's.
+    A peer message is neither, for ``board_concerns``' reason.
     """
     index: dict[TaskId, list[ConcernId]] = {}
     for c in sorted(snap.concerns.values(), key=lambda c: (c.posted_at, c.id)):
-        if c.task_id is None or c.sender[0] != session_id:
+        if c.task_id is None or c.sender[0] != session_id or c.is_peer:
             continue
         if c.state is ConcernState.WITHDRAWN:
             continue
@@ -794,8 +800,13 @@ def board_concerns(snap: Snapshot, session_id: str) -> tuple[BoardConcern, ...]:
     waiting throws that away.
 
     Scoped by sender, which is authenticated by the gate. A concern to a node in
-    another session cannot arise today (roles resolve within a session) and would
-    still belong on its sender's board if it did.
+    another session cannot arise through ``post_concern`` (roles resolve within a
+    session) and would still belong on its sender's board if it did.
+
+    **A message between leads is not here.** It is filed in its sender's log
+    like a concern, but it is not mail inside the team: a worker reading the
+    board would be reading another team's words to its lead, and a team count
+    would count them. ``read_peer_messages`` is where a lead reads them.
     """
     rows = [
         BoardConcern(
@@ -813,7 +824,7 @@ def board_concerns(snap: Snapshot, session_id: str) -> tuple[BoardConcern, ...]:
             undeliverable=(c.state is ConcernState.POSTED and snap.of_earlier_run(c.recipient)),
         )
         for c in sorted(snap.concerns.values(), key=lambda c: (c.posted_at, c.id))
-        if c.sender[0] == session_id
+        if c.sender[0] == session_id and not c.is_peer
     ]
     return tuple(rows)
 

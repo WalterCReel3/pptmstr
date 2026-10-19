@@ -42,6 +42,7 @@ from .board import BoardConcern, BoardTask
 from .command import Command, CommandId, RequestRefusal
 from .digest import Digest
 from .model import (
+    Channel,
     ClaimRefusal,
     CommandRefusal,
     Concern,
@@ -49,6 +50,7 @@ from .model import (
     DecisionRefusal,
     DetachRefusal,
     NodeId,
+    PeerRefusal,
     Task,
     TaskId,
     TaskRefusal,
@@ -89,6 +91,53 @@ class InboxDelivered:
 
     request_id: str
     concerns: tuple[Concern, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class PeerSettled:
+    """
+    A lead sent a message to a linked lead, and this is what the store did.
+
+    ``refusal`` None means it was filed, addressed to the lead of the link's
+    other member. Anything else is why not, in the reducer's vocabulary, with
+    the sentence left to the shell as on ``TaskWriteSettled``. Carries no
+    message id: the caller minted it.
+
+    ``recipient`` is the session the message went to, None on a refusal. The
+    sender may name only the channel, and this is the one place it learns
+    which session that reached.
+    """
+
+    request_id: str
+    refusal: PeerRefusal | None = None
+    recipient: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PeerInboxDelivered:
+    """
+    A lead read its peer mail, and these went with the reply.
+
+    ``concerns`` are the messages handed over, as delivered, oldest first.
+    None is the answer to a request the store never saw, which is not "no
+    mail".
+
+    ``held`` are messages waiting for the reader whose own link does not hand
+    them over: the link they were sent over is not live in this run -- closed,
+    or not restored at this start (``model.Snapshot.peer_deliverable``). They
+    are held, waiting in the store and kept in their sender's log, and are
+    carried here so the reply can say they exist; their text is not the
+    reader's while their link is not live.
+
+    ``links`` are the live links the reader's session is a member of when it
+    read, so a reply can tell "nothing arrived" from "you are on no such
+    channel".
+    """
+
+    request_id: str
+    concerns: tuple[Concern, ...] | None
+    held: tuple[Concern, ...] = ()
+    links: tuple[Channel, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -357,6 +406,8 @@ class SessionWoken:
 Effect = (
     ClaimSettled
     | InboxDelivered
+    | PeerSettled
+    | PeerInboxDelivered
     | TaskWriteSettled
     | BoardDelivered
     | DigestDelivered

@@ -128,6 +128,8 @@ _BUS_SERVER = "pptmstr"
 _BUS_POST = f"mcp__{_BUS_SERVER}__post_concern"
 _BUS_DECLARE = f"mcp__{_BUS_SERVER}__declare_task"
 _BUS_AMEND = f"mcp__{_BUS_SERVER}__amend_task"
+_BUS_PEER = f"mcp__{_BUS_SERVER}__send_to_peer"
+_BUS_DECIDE = f"mcp__{_BUS_SERVER}__raise_decision"
 
 # Reads, searches and listings. Cheap, reversible, and they do not leave the box.
 # The four that name a path are admitted by name and then measured by
@@ -223,6 +225,12 @@ _REVIEW = frozenset(
         # may not then claim it, and the text it replaced is kept as a version
         # (``store._amender_refusal``, ``store._claim_refusal``).
         _BUS_AMEND,
+        # A message to another team's lead is a message between agents, reviewed
+        # for ``post_concern``'s reason, and gated by the *sender's* rung: each
+        # side's own rung governs (the 2026-10-17 plan, Decided 1), so a lead on
+        # a reviewed rung parks its send here whatever rung the other lead is on,
+        # and work it asks for parks again at the other board's ``declare_task``.
+        _BUS_PEER,
     }
 )
 
@@ -257,6 +265,14 @@ _AUTONOMOUS_AUTO = _REVIEW
 # not a hole in this set: the reads carry exactly as much review as the writes were
 # given, and wherever "approved" or "reviewed" is said below it means on a rung that
 # asks.
+#
+# `read_peer_messages` is `read_inbox` for the messages another team's lead sent:
+# reviewed at the send, on the sender's rung, which may not be the reader's. A
+# lead on a reviewed rung reading a peer on ``AUTONOMOUS`` is handed text no
+# operator saw. That is Decided 1's rule -- each side's rung governs its own
+# acts -- and the text is quoted as the peer's and never as an instruction
+# (`bus._peer_messages_text`), so it moves nothing onto the reader's board but
+# through a `declare_task` the reader's own rung parks.
 #
 # `read_task` is `read_board` for one row, with the texts a board read cuts, and
 # is here on `read_board`'s grounds exactly: it returns a specification approved
@@ -303,7 +319,16 @@ _AUTONOMOUS_AUTO = _REVIEW
 # operator in front of the operator to ask whether the operator may see it: the
 # queue row is the review. `withdraw_decision` removes the asker's own row.
 #
-# The text has a second reader, and it is an agent. The root of a session reads
+# **Except a decision raised on a channel, which this set does not admit.** With a
+# `channel` argument the lead of the session at the other end of that link reads
+# the decision whole as soon as the store files it (`model.Snapshot
+# .channel_decision_readable`), before the operator has looked at the queue row,
+# so the row reviews nothing that reader sees. That call is text from one team's
+# lead to another's, and it is gated as `send_to_peer` is: parked on the rungs
+# that park `_BUS_PEER`, released where it is released (`_reviewed_by_arguments`).
+# Without a channel it is the call this paragraph describes, on every rung.
+#
+# The text has a second reader inside the session too. The root of a session reads
 # every decision raised in it (`model.Snapshot.decisions_readable_by`), and
 # `read_decisions` hands it the question, what happens if it goes unanswered, the
 # evidence and the recommendation whole -- up to four texts of
@@ -314,8 +339,9 @@ _AUTONOMOUS_AUTO = _REVIEW
 # the same way: quoted line by line behind the asker's name, never as a line the
 # tool wrote (`bus._decision_whole`), with the operator looking at the same words
 # in the queue. No board or digest read shows a question (`bus._digest_text`), so
-# the lead is the only agent it reaches. What bounds the three is the store: an
-# agent may have `model.MAX_OPEN_DECISIONS_PER_ASKER` open, a session's sub-agents
+# without a channel the lead is the only agent it reaches; with one, the other
+# link's lead is a second, and that call parks as above. What bounds the three is
+# the store: an agent may have `model.MAX_OPEN_DECISIONS_PER_ASKER` open, a session's sub-agents
 # `model.MAX_OPEN_SUBAGENT_DECISIONS` between them, and only the operator's own
 # intent ends one with an answer.
 #
@@ -355,6 +381,7 @@ _AUTONOMOUS_AUTO = _REVIEW
 _BUS_AUTO = frozenset(
     {
         f"mcp__{_BUS_SERVER}__read_inbox",
+        f"mcp__{_BUS_SERVER}__read_peer_messages",
         f"mcp__{_BUS_SERVER}__read_board",
         f"mcp__{_BUS_SERVER}__read_task",
         f"mcp__{_BUS_SERVER}__read_digest",
@@ -879,6 +906,35 @@ def _permissive_admits(tool_name: str, tool_input: Mapping[str, Any]) -> bool:
     return isinstance(command, str) and is_read_only(command)
 
 
+def _reviewed_by_arguments(tool_name: str, tool_input: Mapping[str, Any]) -> bool:
+    """
+    Whether a call whose name is in ``_BUS_AUTO`` is reviewed anyway, for what its
+    arguments make it: a ``raise_decision`` that names a channel, which another
+    team's lead reads (see ``_BUS_AUTO``'s comment). Such a call is classified
+    as ``_BUS_PEER`` is, on every rung.
+
+    "Names a channel" is the handler's own reading of the argument
+    (``bus.raise_decision``): anything but absent, None or blank. A value the
+    handler then refuses as a name parks too, which costs a review of a call
+    that files nothing; reading it any narrower here would let a value the two
+    read differently through unparked.
+    """
+    return tool_name == _BUS_DECIDE and bool(str(tool_input.get("channel") or "").strip())
+
+
+def peer_channel(tool_name: str, tool_input: Mapping[str, Any]) -> str | None:
+    """
+    The channel a call reaches another team's lead on, or None for a call that
+    reaches none: ``send_to_peer``'s, and a ``raise_decision`` that names one
+    (``_reviewed_by_arguments``). Read as the handler reads it, stripped. The
+    store asks it of a parked call to name, on its row, the session the call
+    would reach (``summarize``'s ``reaches``).
+    """
+    if tool_name == _BUS_PEER or _reviewed_by_arguments(tool_name, tool_input):
+        return str(tool_input.get("channel") or "?").strip() or "?"
+    return None
+
+
 def _policy_admits(policy: Policy, tool_name: str, tool_input: Mapping[str, Any]) -> bool:
     """
     Whether ``policy`` widens the gate to admit a call ``STRICT`` would park.
@@ -901,7 +957,7 @@ def _policy_admits(policy: Policy, tool_name: str, tool_input: Mapping[str, Any]
         case Policy.PERMISSIVE:
             return _permissive_admits(tool_name, tool_input)
         case Policy.AUTONOMOUS:
-            return tool_name in _AUTONOMOUS_AUTO
+            return tool_name in _AUTONOMOUS_AUTO or _reviewed_by_arguments(tool_name, tool_input)
     assert_never(policy)
 
 
@@ -1046,11 +1102,12 @@ def classify(
     if reads or (tool_name == "Bash" and policy is Policy.PERMISSIVE):
         if records_read(tool_name, tool_input, session_id=session_id, cwd=cwd) is not None:
             return Disposition.REQUIRE_APPROVAL
-    if tool_name in _AUTO or tool_name in _BUS_AUTO:
+    reviewed_anyway = _reviewed_by_arguments(tool_name, tool_input)
+    if tool_name in _AUTO or (tool_name in _BUS_AUTO and not reviewed_anyway):
         return Disposition.AUTO_APPROVE
     if _policy_admits(policy, tool_name, tool_input):
         return Disposition.AUTO_APPROVE
-    if tool_name in _REVIEW:
+    if tool_name in _REVIEW or reviewed_anyway:
         return Disposition.REQUIRE_APPROVAL
     # Unknown, including every MCP tool this build has never seen.
     return Disposition.REQUIRE_APPROVAL
@@ -1094,6 +1151,7 @@ def summarize(
     *,
     session_id: str | None = None,
     cwd: str | None = None,
+    reaches: str | None = None,
 ) -> str:
     """
     One line naming what the call would do. This is the queue row.
@@ -1134,6 +1192,12 @@ def summarize(
     says why a read is waiting. "Another session's" only when the caller's own
     directory was known and this is not in it. A write into any session's
     records leads with "pptmstr's own records", from ``records_written``.
+
+    **A call that reaches another team's lead names whom** (``peer_channel``):
+    ``reaches`` is the session at the other end of the link as the store sees
+    it now, which only the store can say. The store writes it onto the row when
+    the call parks and again whenever a link changes, so a name closed and
+    linked again under the operator's eye shows the session it would go to.
     """
     # Imported here because ``model`` imports ``Policy`` from this module, so a
     # top-level import closes a cycle. Neither pulls in the SDK.
@@ -1185,6 +1249,31 @@ def summarize(
         return clip(
             f"message {to} ({standing(tool_input.get('basis'))}): "
             f"{marker}{subject or tool_input.get('body') or ''}"
+        )
+    if tool_name == _BUS_PEER:
+        # A message to another team's lead, led by the channel it travels on:
+        # the operator made the link, and which one this is is the first thing
+        # to judge it by. An argument the handler refuses is said, so approving
+        # it is not mistaken for sending it.
+        channel = str(tool_input.get("channel") or "?").strip()
+        subject = str(tool_input.get("subject") or "").strip()
+        asks = "" if reaches is None else f" ({reaches})"
+        if stated_flag(tool_input.get("needs_answer")):
+            asks += ", needs an answer"
+        if "incident" in tool_input:
+            asks += ", carries an incident, which is refused"
+        return clip(
+            f"message the lead on #{channel}{asks}: {subject or tool_input.get('body') or ''}"
+        )
+    if _reviewed_by_arguments(tool_name, tool_input):
+        # A decision the other link's lead reads. It parks only for that
+        # reader, so the row leads with the channel and whom it reaches, then
+        # the question.
+        channel = str(tool_input.get("channel") or "").strip()
+        reader = "" if reaches is None else f" ({reaches})"
+        return clip(
+            f"decision read by the lead on #{channel}{reader}: "
+            f"{tool_input.get('question') or ''}"
         )
     if tool_name == _BUS_DECLARE:
         # The question at this row is "should this work exist", so it leads with the

@@ -4884,10 +4884,13 @@ def test_the_cards_menu_is_handed_every_lever_and_the_three_things_no_record_say
                 session_menu.Action.REMOVE,
                 session_menu.Action.RESUME_AS,
                 session_menu.Action.SET_GATE,
+                session_menu.Action.LINK,
+                session_menu.Action.CLOSE_CHANNEL,
             }
         )
         assert wiring.state is run.state.cards
         facts = wiring.facts(node)
+        assert facts.recording == run.app._recording(run.state)
         assert facts.snap is run.state.frame_snap
         assert facts.run_held is True and facts.contained is False
         assert wiring.gate(node) is Policy.STRICT
@@ -8909,3 +8912,774 @@ def test_a_session_held_only_by_what_left_it_is_released_the_same_way(
         assert "released.json" in commands.files(old) and "gone.json" not in commands.files(old)
     finally:
         _end_orphan(orphan, command_mark)
+
+
+def test_a_link_and_its_close_survive_a_restart_through_the_channel_log() -> None:
+    """
+    link -> close -> restart, end to end through the shell: the operator's acts
+    are emitted as the window would emit them, applied by the frame's own
+    ``apply_intents``, written by the channel writer, and read back by the next
+    ``_start`` before anything else is queued.
+    """
+    from pptmstr import app, channels
+    from pptmstr.intents import AgentSpawned, ChannelsRestored
+    from pptmstr.settings import Loaded
+    from pptmstr.ui.board_pane import LogState
+
+    a, b = "lead-a", "lead-b"
+    first = app._start(_args(), Loaded(Settings()), list_sessions=tuple)  # type: ignore[arg-type]
+    try:
+        assert first.channel_writer is not None
+        for sid in (a, b):
+            first.bridge.emit(AgentSpawned((sid, None), None, "lead", "m", 0.0))
+            first.board_logs[sid] = LogState(directory="", recording=True)
+        app.apply_intents(first)
+
+        linked = app.link_leads(first, "brand", frozenset({a, b}), "the brand work")
+        assert not isinstance(linked, channels.Refused)
+        app.apply_intents(first)
+        assert app.close_channel(first, linked.channel_id) is None
+        app.apply_intents(first)
+        held = first.store.snapshot().channels[linked.channel_id]
+        assert held.closed_at is not None
+    finally:
+        app._close_channel_log(first)
+        app._close_board_log(first)
+
+    assert (
+        channels.FileChannels().state(channels.LinkKey("brand", linked.channel_id))
+        == channels.Whole()
+    )
+    second = app._start(_args(), Loaded(Settings()), list_sessions=tuple)  # type: ignore[arg-type]
+    try:
+        queued = second.bridge.drain()
+        assert isinstance(queued[0], ChannelsRestored)
+        second.store.apply_all(queued, now=0.0)
+        assert second.store.snapshot().channels == {held.id: held}
+    finally:
+        app._close_channel_log(second)
+        app._close_board_log(second)
+
+
+def test_a_link_the_store_refuses_is_said_and_written_nowhere() -> None:
+    from pptmstr import app, channels
+    from pptmstr.settings import Loaded
+
+    state = app._start(_args(), Loaded(Settings()), list_sessions=tuple)  # type: ignore[arg-type]
+    mark = LOG.snapshot()[1]
+    try:
+        # Neither member runs here, and neither is recorded.
+        app.link_leads(state, "brand", frozenset({"x", "y"}), "")
+        app.apply_intents(state)
+    finally:
+        app._close_channel_log(state)
+        app._close_board_log(state)
+
+    entries, revision = LOG.snapshot()
+    said = [e.text for e in entries[len(entries) - (revision - mark) :] if e.source == "channel"]
+    assert said == ["the leads were not linked: a member is not a running session"]
+    assert state.store.snapshot().channels == {}
+    assert channels.FileChannels().links() == ()
+
+
+def test_no_channel_log_is_read_or_written_where_no_board_is() -> None:
+    from pptmstr import app
+    from pptmstr.intents import ChannelsRestored
+    from pptmstr.settings import Loaded
+
+    fake = app._start(_args(fake=True), Loaded(Settings()))  # type: ignore[arg-type]
+    off = app._start(_args(), Loaded(Settings(board_log=False)), list_sessions=tuple)  # type: ignore[arg-type]
+    for state in (fake, off):
+        assert state.channel_writer is None
+        assert not any(isinstance(i, ChannelsRestored) for i in state.bridge.drain())
+
+
+def _channel_lines(mark: int) -> list[str]:
+    """What the channel source said since the log revision ``mark``."""
+    entries, revision = LOG.snapshot()
+    return [e.text for e in entries[len(entries) - (revision - mark) :] if e.source == "channel"]
+
+
+def _running_and_recorded(state: Any, *sessions: str) -> None:
+    """Each of ``sessions`` running in ``state``'s store, with its board recorded."""
+    from pptmstr import app
+    from pptmstr.intents import AgentSpawned
+    from pptmstr.ui.board_pane import LogState
+
+    for sid in sessions:
+        state.bridge.emit(AgentSpawned((sid, None), None, "lead", "m", 0.0))
+        state.board_logs[sid] = LogState(directory="", recording=True)
+    app.apply_intents(state)
+
+
+def test_a_link_whose_log_is_short_restores_not_live_and_its_name_links_afresh() -> None:
+    """
+    A link, a damaged record, then a close the damage hides: the link is said
+    and withheld, never live, and linking the name again gets a log of its own.
+    A damaged log can never restore live, so the relink appends nothing to it
+    (``channels.owes_close``): it is left byte for byte. After the next start
+    the earlier link is still not live and the new one is.
+    """
+    from pptmstr import app, channels
+    from pptmstr.intents import ChannelsRestored
+    from pptmstr.settings import Loaded
+
+    log = channels.FileChannels()
+    old = channels.LinkKey("brand", "k1")
+    created = channels.LinkCreated(
+        at=1.0, channel_id="k1", members=("lead-a", "lead-b"), charter=""
+    )
+    assert log.append(old, created) == channels.Appended()
+    (log.root / "brand" / "k1" / "00000001.json").write_text("torn\n")
+    assert log.append(old, channels.LinkClosed(at=3.0, channel_id="k1")) == channels.Appended()
+    written = log.read(old)
+    before = {f.name: f.read_bytes() for f in (log.root / "brand" / "k1").iterdir()}
+
+    mark = LOG.snapshot()[1]
+    state = app._start(_args(), Loaded(Settings()), list_sessions=tuple)  # type: ignore[arg-type]
+    try:
+        said = _channel_lines(mark)
+        assert any(
+            line.startswith("#brand (k1): restored as not live: its log is short: record 1")
+            for line in said
+        ), said
+        queued = state.bridge.drain()
+        assert isinstance(queued[0], ChannelsRestored) and queued[0].channels == ()
+        state.store.apply_all(queued, now=0.0)
+        assert state.store.snapshot().channels == {}
+
+        _running_and_recorded(state, "lead-c", "lead-d")
+        linked = app.link_leads(state, "brand", frozenset({"lead-c", "lead-d"}), "again")
+        assert not isinstance(linked, channels.Refused)
+        app.apply_intents(state)
+        assert state.store.snapshot().channels[linked.channel_id].live
+    finally:
+        app._close_channel_log(state)
+        app._close_board_log(state)
+    # The earlier log is as it was written: the relink appended nothing.
+    assert {f.name: f.read_bytes() for f in (log.root / "brand" / "k1").iterdir()} == before
+    assert log.read(old) == written
+
+    fresh = channels.LinkKey("brand", linked.channel_id)
+    assert log.links() == tuple(sorted((old, fresh)))
+    assert log.state(fresh) == channels.Whole()
+    restored = channels.restore_all(log)
+    assert not isinstance(restored, channels.Unlisted)
+    by_link = {r.link: r for r in restored}
+    assert by_link[old].withheld is not None
+    assert by_link[fresh].withheld is None
+    held = by_link[fresh].channel
+    assert held is not None and held.live and held.id == linked.channel_id
+
+
+def test_while_the_channel_logs_cannot_be_listed_no_link_is_made() -> None:
+    """
+    "Could not look" is not "no links": a live link under the name may be in
+    what startup could not see, so every link is refused for the run, and why.
+    """
+    import os
+
+    from pptmstr import app, channels
+    from pptmstr.intents import ChannelsRestored
+    from pptmstr.settings import Loaded
+
+    if os.geteuid() == 0:
+        pytest.skip("root lists any directory")
+    log = channels.FileChannels()
+    created = channels.LinkCreated(
+        at=1.0, channel_id="k1", members=("lead-a", "lead-b"), charter=""
+    )
+    assert log.append(channels.LinkKey("brand", "k1"), created) == channels.Appended()
+    mark = LOG.snapshot()[1]
+    log.root.chmod(0o300)
+    try:
+        state = app._start(_args(), Loaded(Settings()), list_sessions=tuple)  # type: ignore[arg-type]
+    finally:
+        log.root.chmod(0o700)
+    try:
+        assert state.channels_unlisted is not None and "PermissionError" in state.channels_unlisted
+        said = _channel_lines(mark)
+        assert any("could not be listed" in line for line in said), said
+        assert not any(isinstance(i, ChannelsRestored) for i in state.bridge.drain())
+
+        _running_and_recorded(state, "lead-c", "lead-d")
+        mark = LOG.snapshot()[1]
+        refused = app.link_leads(state, "ops", frozenset({"lead-c", "lead-d"}), "")
+
+        assert isinstance(refused, channels.Refused)
+        assert "could not be listed at startup" in refused.reason
+        assert list(state.bridge.drain()) == []
+        assert _channel_lines(mark) == [f"#ops: the leads were not linked: {refused.reason}"]
+    finally:
+        app._close_channel_log(state)
+        app._close_board_log(state)
+    assert log.links() == (channels.LinkKey("brand", "k1"),)
+
+
+def test_a_charter_over_the_limit_is_refused_and_says_the_limit() -> None:
+    from pptmstr import app, channels
+    from pptmstr.intents import ChannelLinked
+    from pptmstr.settings import Loaded
+
+    state = app._start(_args(), Loaded(Settings()), list_sessions=tuple)  # type: ignore[arg-type]
+    try:
+        _running_and_recorded(state, "lead-a", "lead-b")
+        pair = frozenset({"lead-a", "lead-b"})
+
+        refused = app.link_leads(state, "brand", pair, "x" * (channels.CHARTER_CHARS + 1))
+
+        assert isinstance(refused, channels.Refused)
+        assert f"over the {channels.CHARTER_CHARS}" in refused.reason
+        assert list(state.bridge.drain()) == []
+        linked = app.link_leads(state, "brand", pair, "x" * channels.CHARTER_CHARS)
+        assert isinstance(linked, ChannelLinked)
+    finally:
+        app._close_channel_log(state)
+        app._close_board_log(state)
+
+
+def test_a_close_on_a_channel_whose_recording_stopped_is_said_and_returned() -> None:
+    """
+    The link's own fact did not land, so the channel stopped being recorded;
+    the operator's close then holds for this run only, and is said to.
+    """
+    from pptmstr import app, channels
+    from pptmstr.intents import AgentSpawned
+    from pptmstr.settings import Loaded
+    from pptmstr.ui.board_pane import LogState
+
+    class Full:
+        """Every channel log there is, on a disk with no room for a fact."""
+
+        def __init__(self) -> None:
+            self.inner = channels.FileChannels()
+
+        def links(
+            self, name: str | None = None
+        ) -> tuple[channels.LinkKey, ...] | channels.Unlisted:
+            return self.inner.links(name)
+
+        def append(self, link: channels.LinkKey, fact: channels.Fact) -> channels.NotAppended:
+            return channels.NotAppended("no space left on device")
+
+        def read(self, link: channels.LinkKey) -> channels.Read:
+            return self.inner.read(link)
+
+        def state(self, link: channels.LinkKey) -> channels.ChannelState:
+            return self.inner.state(link)
+
+    a, b = "lead-a", "lead-b"
+    state = app._start(_args(), Loaded(Settings()), list_sessions=tuple)  # type: ignore[arg-type]
+    assert state.channel_writer is not None
+    state.channel_writer.close()
+    state.channel_writer = channels.ChannelWriter(Full())
+    try:
+        for sid in (a, b):
+            state.bridge.emit(AgentSpawned((sid, None), None, "lead", "m", 0.0))
+            state.board_logs[sid] = LogState(directory="", recording=True)
+        app.apply_intents(state)
+        linked = app.link_leads(state, "brand", frozenset({a, b}), "")
+        assert not isinstance(linked, channels.Refused)
+        app.apply_intents(state)
+        deadline = time.monotonic() + 5.0
+        link = channels.LinkKey("brand", linked.channel_id)
+        while state.channel_writer.refusal(link) is None:
+            assert time.monotonic() < deadline, "the failed link never stopped the channel"
+            time.sleep(0.01)
+        mark = LOG.snapshot()[1]
+
+        reason = app.close_channel(state, linked.channel_id)
+
+        assert reason is not None and "no space left on device" in reason
+        said = _channel_lines(mark)
+        assert len(said) == 1 and "closed for this run only" in said[0] and reason in said[0]
+        app.apply_intents(state)
+        assert not state.store.snapshot().channels[linked.channel_id].live
+    finally:
+        mark = LOG.snapshot()[1]
+        app._close_channel_log(state)
+        app._close_board_log(state)
+    # The writer's own report of the close it refused is said as well.
+    assert any("LinkClosed did not reach" in line for line in _channel_lines(mark))
+
+
+# -- the link form and Close channel, through the shell ------------------------------
+
+
+class _FailingCloses:
+    """Every channel log, on a disk that takes a link and refuses a close."""
+
+    def __init__(self) -> None:
+        from pptmstr import channels
+
+        self.inner = channels.FileChannels()
+
+    def links(self, name: str | None = None) -> Any:
+        return self.inner.links(name)
+
+    def append(self, link: Any, fact: Any) -> Any:
+        from pptmstr import channels
+
+        if isinstance(fact, channels.LinkClosed):
+            return channels.NotAppended("no space left on device")
+        return self.inner.append(link, fact)
+
+    def read(self, link: Any) -> Any:
+        return self.inner.read(link)
+
+    def state(self, link: Any) -> Any:
+        return self.inner.state(link)
+
+
+def _linking_state(log: Any = None) -> Any:
+    """A started app with two running, recorded leads, and ``log`` behind its writer."""
+    from pptmstr import app, channels
+    from pptmstr.settings import Loaded
+
+    state = app._start(_args(), Loaded(Settings()), list_sessions=tuple)  # type: ignore[arg-type]
+    if log is not None:
+        assert state.channel_writer is not None
+        state.channel_writer.close()
+        state.channel_writer = channels.ChannelWriter(log)
+    _running_and_recorded(state, "lead-a", "lead-b")
+    return state
+
+
+def _submit(state: Any, *, name: str = "brand", charter: str = "") -> tuple[bool, Any]:
+    """The link form for lead-a, filled in for lead-b and submitted as its button does."""
+    from pptmstr import app
+    from pptmstr.ui import link_form
+
+    state.link.open_for("lead-a")
+    form = state.link.form
+    form.peer, form.channel_name, form.charter = "lead-b", name, charter
+    linked = link_form.press(
+        form,
+        state.store.snapshot(),
+        app._recording(state),
+        lambda n, members, c: app._link_pressed(state, n, members, c),
+    )
+    return linked, form
+
+
+def _settle_channel_writer(state: Any) -> None:
+    """Until the writer has nothing queued, then one frame's apply and drain."""
+    from pptmstr import app
+
+    writer = state.channel_writer
+    deadline = time.monotonic() + 5.0
+    while True:
+        with writer._changed:
+            if not writer._pending:
+                break
+        assert time.monotonic() < deadline, "the channel writer never settled"
+        time.sleep(0.01)
+    app.apply_intents(state)
+
+
+def test_a_submitted_link_form_emits_exactly_one_link() -> None:
+    from pptmstr import app
+    from pptmstr.intents import ChannelLinked
+
+    state = _linking_state()
+    try:
+        linked, form = _submit(state, charter="the brand work")
+        queued = state.bridge.drain()
+        state.store.apply_all(queued, now=1.0)
+    finally:
+        app._close_channel_log(state)
+        app._close_board_log(state)
+
+    assert linked and form.refused is None
+    links = [i for i in queued if isinstance(i, ChannelLinked)]
+    assert len(links) == 1 and len(queued) == 1
+    assert links[0].members == frozenset({"lead-a", "lead-b"})
+    assert links[0].recording == links[0].members
+    held = state.store.snapshot().channels[links[0].channel_id]
+    assert held.live and held.name == "brand" and held.charter == "the brand work"
+
+
+def test_a_charter_over_the_cap_is_refused_in_the_form_and_nothing_is_emitted() -> None:
+    from pptmstr import app, channels
+
+    state = _linking_state()
+    try:
+        linked, form = _submit(state, charter="x" * (channels.CHARTER_CHARS + 1))
+        queued = state.bridge.drain()
+    finally:
+        app._close_channel_log(state)
+        app._close_board_log(state)
+
+    assert not linked and queued == []
+    assert form.refused is not None and str(channels.CHARTER_CHARS) in form.refused
+    assert form.charter == "x" * (channels.CHARTER_CHARS + 1)
+
+
+def test_a_link_the_store_refuses_after_the_form_closed_is_put_in_front_of_the_operator() -> None:
+    """
+    The form asked the snapshot it was submitted on; a link applied against a
+    later one -- here, the name linked by another submit in between -- is
+    refused by the store, and that is said in the notice and not only in LOG.
+    """
+    from pptmstr import app
+
+    state = _linking_state()
+    try:
+        first, _ = _submit(state)
+        second, _ = _submit(state)
+        app.apply_intents(state)
+    finally:
+        app._close_channel_log(state)
+        app._close_board_log(state)
+
+    assert first and second
+    assert state.not_done == [
+        "#brand: the leads were not linked: a live channel already has that name"
+    ]
+
+
+def test_a_card_opens_the_link_form_and_the_menu_is_told_which_boards_are_recorded() -> None:
+    from pptmstr import app
+    from pptmstr.ui import session_menu
+
+    state = _linking_state()
+    try:
+        state.frame_snap = state.store.snapshot()
+        wiring = app._card_wiring(state)
+        rec = state.frame_snap.nodes[("lead-a", None)]
+        facts = wiring.facts(rec.node_id)
+        session_menu.choose(
+            session_menu.Action.LINK, rec, None, wiring.state, wiring.actions, facts=facts
+        )
+    finally:
+        app._close_channel_log(state)
+        app._close_board_log(state)
+
+    assert facts.recording == frozenset({"lead-a", "lead-b"})
+    assert state.link.form is not None and state.link.form.session_id == "lead-a"
+    assert state.link.open_requested and state.bridge.drain() == []
+    assert app._form_up(state)
+
+
+def test_a_close_refused_at_once_is_put_in_front_of_the_operator() -> None:
+    """
+    The link's own fact failed, so the link stopped being recorded; Close
+    channel then holds for this run only, and the notice says so with why.
+    """
+    from pptmstr import app, channels
+
+    class Full(_FailingCloses):
+        def append(self, link: Any, fact: Any) -> Any:
+            return channels.NotAppended("no space left on device")
+
+    state = _linking_state(Full())
+    try:
+        linked, _ = _submit(state)
+        assert linked
+        app.apply_intents(state)
+        _settle_channel_writer(state)
+        held = next(iter(state.store.snapshot().channels.values()))
+        # The link's own failure is said first: it holds for this run only.
+        assert len(state.not_done) == 1 and "linked for this run only" in state.not_done[0]
+        state.not_done.clear()
+
+        app._card_actions(state).close_channel(held.id)  # type: ignore[misc]
+
+        assert len(state.not_done) == 1
+        said = state.not_done[0]
+        assert said.startswith("#brand: closed for this run only")
+        assert "no space left on device" in said
+        app.apply_intents(state)
+        _settle_channel_writer(state)
+        # The writer's report of the close it refused says the same sentence,
+        # and it is not said twice.
+        assert state.not_done == [said]
+        assert not state.store.snapshot().channels[held.id].live
+    finally:
+        app._close_channel_log(state)
+        app._close_board_log(state)
+
+
+def test_a_close_the_writer_fails_later_is_put_in_front_of_the_operator() -> None:
+    """
+    The close was good when it was asked -- the link is recorded -- and its
+    append failed on the writer's thread. ``close_channel`` cannot know that
+    when it returns; the frame that drains the writer's report says it.
+    """
+    from pptmstr import app
+
+    state = _linking_state(_FailingCloses())
+    try:
+        linked, _ = _submit(state)
+        assert linked
+        app.apply_intents(state)
+        _settle_channel_writer(state)
+        assert state.not_done == []
+        held = next(iter(state.store.snapshot().channels.values()))
+
+        assert app.close_channel(state, held.id) is None
+        assert state.not_done == []
+        app.apply_intents(state)
+        _settle_channel_writer(state)
+
+        assert len(state.not_done) == 1
+        said = state.not_done[0]
+        assert said.startswith("#brand: closed for this run only")
+        assert "no space left on device" in said
+        assert not state.store.snapshot().channels[held.id].live
+    finally:
+        app._close_channel_log(state)
+        app._close_board_log(state)
+
+
+def test_the_menu_bar_closes_the_link_chosen_and_not_the_first_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    The focused card's items reach the menu bar as ``main_menu.CardChoice``; a
+    card in two links has two "Close channel" items there, and each closes its
+    own link. Driven through ``app._menus``, so the card is the one app's own
+    facts build (``_menu_facts``) and the choice is carried out by ``_perform``.
+    """
+    from pptmstr import app
+    from pptmstr.ui.focus import OnNode
+
+    state = _linking_state()
+    try:
+        for name in ("alpha", "beta"):
+            linked, _ = _submit(state, name=name)
+            assert linked
+        app.apply_intents(state)
+        snap = state.store.snapshot()
+        by_name = {c.name: c.id for c in snap.channels.values()}
+        state.frame_snap = snap
+        state.focus.target = OnNode(("lead-a", None), pinned=True)
+
+        menu = _draw_menus(monkeypatch, state, "Close channel #beta")
+        app.apply_intents(state)
+        held = state.store.snapshot().channels
+    finally:
+        app._close_channel_log(state)
+        app._close_board_log(state)
+
+    assert menu.items["Close channel #alpha"] == (False, True)
+    assert menu.items["Close channel #beta"] == (False, True)
+    assert not held[by_name["beta"]].live
+    assert held[by_name["alpha"]].live
+
+
+def _close_not_written(
+    link_id: str,
+    name: str = "brand",
+    *,
+    swept: Any = None,
+    marker: Any = None,
+    reason: str = "no space left on device",
+) -> Any:
+    from pptmstr import channels
+
+    return channels.Outcome(
+        channels.LinkKey(name, link_id),
+        channels.LinkClosed(at=1.0, channel_id=link_id),
+        channels.NotAppended(reason),
+        marker,
+        swept,
+    )
+
+
+def test_a_close_not_written_is_worded_by_whose_close_it_was() -> None:
+    """
+    The writer's report says whether a close it could not write was the
+    sweep's (``Outcome.swept``), and the notice is classified on that alone,
+    whatever the store holds when it drains. Each notice is about the link it
+    names:
+
+    - the operator's close keeps its own sentence -- even of a link that is
+      live in the store, which it never is at drain but is here to show the
+      store is not asked;
+    - a sweep that could not list the name's links, reported against the link
+      just made, says the new link holds for this run and that the earlier
+      links could not be checked -- not that any exist;
+    - a sweep close of an earlier link names it by when it was made and as not
+      the one just linked, and says the next start may withhold the name when
+      its stop marker did not land either, and not when it did.
+    """
+    from pptmstr import app, channels
+
+    made = channels.LinkKey("brand", "new")
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(1_700_000_000.0))
+    state = _linking_state()
+    try:
+        _submit(state, name="brand")
+        app.apply_intents(state)
+        (live,) = state.store.snapshot().channels
+        reports = (
+            _close_not_written(live),
+            _close_not_written(
+                "new",
+                swept=channels.Swept(made),
+                reason="not tried: the links under #brand could not be listed (EIO)",
+            ),
+            _close_not_written(
+                "e1",
+                swept=channels.Swept(made, 1_700_000_000.0),
+                marker=channels.NotAppended("disk full"),
+            ),
+            _close_not_written(
+                "e2", swept=channels.Swept(made, 1_700_000_000.0), marker=channels.Appended()
+            ),
+            _close_not_written(
+                "e3", swept=channels.Swept(made), marker=channels.NotAppended("disk full")
+            ),
+        )
+        app._read_channel_reports(reports, state)
+        notices = list(state.not_done)
+    finally:
+        app._close_channel_log(state)
+        app._close_board_log(state)
+
+    own, unlisted, unmarked, marked, uncreated = notices
+    assert own.startswith("#brand: closed for this run only") and "no space left" in own
+    assert unlisted == (
+        "#brand is linked for this run; any earlier links under #brand could not be checked,"
+        " so none was closed (not tried: the links under #brand could not be listed (EIO));"
+        " until #brand is linked again, the next start may withhold it"
+    )
+    assert unmarked == (
+        f"an earlier link under #brand (made {when}, not the one just linked) could not be"
+        " closed: no space left on device; nor could it be marked as stopped, so until"
+        " #brand is linked again, the next start may withhold #brand"
+    )
+    assert marked == (
+        f"an earlier link under #brand (made {when}, not the one just linked) could not be"
+        " closed: no space left on device"
+    )
+    assert uncreated.startswith(
+        "an earlier link under #brand (its creation unreadable, not the one just linked)"
+    )
+    assert "could not be closed" not in unlisted
+
+
+class _Unlistable(_FailingCloses):
+    """A log whose name directories cannot be listed once ``gate`` is set; it waits on it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.gate = threading.Event()
+        self.gate.set()
+
+    def links(self, name: str | None = None) -> Any:
+        if name is not None:
+            assert self.gate.wait(5.0)
+            raise OSError("permission denied")
+        return self.inner.links(name)
+
+    def append(self, link: Any, fact: Any) -> Any:
+        return self.inner.append(link, fact)
+
+
+def test_a_sweep_report_drained_after_the_operator_closed_its_link_is_still_the_sweeps() -> None:
+    """
+    The sweep for #brand cannot list the name's links, and is slow to find
+    that out. The operator closes #brand meanwhile, and that close lands. By
+    the time the sweep's report drains #brand is not live in the store, which
+    is what the operator's own close looks like; the notice is still the
+    sweep's, and nothing says the operator's close failed.
+    """
+    from pptmstr import app, channels
+
+    log = _Unlistable()
+    log.gate.clear()
+    state = _linking_state(log)
+    try:
+        linked, _ = _submit(state)
+        assert linked
+        app.apply_intents(state)
+        (held,) = state.store.snapshot().channels.values()
+        assert app.close_channel(state, held.id) is None
+        app.apply_intents(state)
+        log.gate.set()
+        _settle_channel_writer(state)
+        notices = list(state.not_done)
+        facts = log.inner.read(channels.LinkKey("brand", held.id)).facts
+    finally:
+        app._close_channel_log(state)
+        app._close_board_log(state)
+
+    assert [type(f) for f in facts] == [channels.LinkCreated, channels.LinkClosed]
+    assert len(notices) == 1
+    assert notices[0].startswith("#brand is linked for this run; any earlier links under #brand")
+    assert "closed for this run only" not in notices[0]
+
+
+def test_an_earlier_link_the_sweep_cannot_close_is_named_apart_from_the_new_one() -> None:
+    """
+    #brand is linked as E, and E's close and its stop marker both fail, so
+    E's log still reads live. #brand is linked again as N; its sweep owes E a
+    close and that fails too. The notice is about E, says so by when E was
+    made, and says the next start may withhold #brand -- N included.
+    """
+    from pptmstr import app, boardlog, channels
+
+    class Unmarkable(_FailingCloses):
+        def append(self, link: Any, fact: Any) -> Any:
+            if isinstance(fact, boardlog.RecordingStopped):
+                return channels.NotAppended("read-only file system")
+            return super().append(link, fact)
+
+    state = _linking_state(Unmarkable())
+    try:
+        assert _submit(state)[0]
+        app.apply_intents(state)
+        _settle_channel_writer(state)
+        (earlier,) = state.store.snapshot().channels.values()
+        assert app.close_channel(state, earlier.id) is None
+        app.apply_intents(state)
+        _settle_channel_writer(state)
+        state.not_done.clear()
+
+        assert _submit(state)[0]
+        app.apply_intents(state)
+        _settle_channel_writer(state)
+        live = [c for c in state.store.snapshot().channels.values() if c.live]
+        notices = list(state.not_done)
+    finally:
+        app._close_channel_log(state)
+        app._close_board_log(state)
+
+    when = time.strftime("%Y-%m-%d %H:%M", time.localtime(earlier.created_at))
+    assert [c.name for c in live] == ["brand"] and live[0].id != earlier.id
+    assert notices == [
+        f"an earlier link under #brand (made {when}, not the one just linked) could not be"
+        " closed: no space left on device; nor could it be marked as stopped, so until"
+        " #brand is linked again, the next start may withhold #brand"
+    ]
+
+
+def test_a_link_whose_earlier_links_cannot_be_listed_does_not_read_as_closed() -> None:
+    """
+    Through the writer: a log that cannot list a name's links makes the sweep
+    report a close against the link just made, and the operator is told the
+    link holds and the earlier ones were not closed.
+    """
+    from pptmstr import app
+
+    state = _linking_state(_Unlistable())
+    try:
+        linked, _ = _submit(state)
+        assert linked
+        app.apply_intents(state)
+        _settle_channel_writer(state)
+        held = next(iter(state.store.snapshot().channels.values()))
+        notices = list(state.not_done)
+    finally:
+        app._close_channel_log(state)
+        app._close_board_log(state)
+
+    assert held.live
+    assert len(notices) == 1
+    assert notices[0].startswith(
+        "#brand is linked for this run; any earlier links under #brand could not be checked"
+    )
+    assert "permission denied" in notices[0]
+    assert "closed for this run only" not in notices[0]

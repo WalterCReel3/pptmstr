@@ -36,6 +36,10 @@ from .approval import Policy
 # Tool names every role gets regardless of what else it is allowed, because they
 # are how a role participates in the team at all. A worker without read_inbox
 # cannot be told anything; one without post_concern cannot answer.
+#
+# The two tools between leads of linked sessions (``bus.PEER_TOOLS``) are not
+# here: a role is a worker, a message to another team goes from its lead, and a
+# restricted worker offered them would be briefed on tools that refuse it.
 BUS_TOOL_NAMES = (
     "mcp__pptmstr__post_concern",
     "mcp__pptmstr__read_inbox",

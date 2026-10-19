@@ -44,6 +44,7 @@ from typing import assert_never
 
 from imgui_bundle import imgui
 
+from .. import drawable
 from ..model import (
     AgentRecord,
     AgentState,
@@ -254,6 +255,32 @@ def _density(rec: AgentRecord, owed: list[Obligation], *, unread: int = 0) -> st
     if rec.state in (AgentState.DONE, AgentState.CANCELLED) and not owed and not unread:
         return "ended"
     return "active"
+
+
+def channel_lines(snap: Snapshot, rec: AgentRecord) -> tuple[str, ...]:
+    """
+    One line per live link a root's session is in, by name: ``#name ↔ peer``,
+    and how many peer messages on it wait for this lead, when any do. Nothing
+    for a sub-agent, and nothing for a link that is closed: a closed link is
+    one the operator took out of view.
+
+    The name is the operator's and passed the plain-name rule, and it is still
+    drawn through ``drawable.text``, as every text that reaches a draw call
+    from the store may be. The peer is named as its card is
+    (``session_menu.peer_label``).
+    """
+    if rec.node_id[1] is not None:
+        return ()
+    me = rec.node_id[0]
+    out: list[str] = []
+    for link in session_menu.live_links(snap, me):
+        peers = ", ".join(session_menu.peer_label(snap, p) for p in sorted(link.members - {me}))
+        line = f"#{drawable.text(link.name)} ↔ {peers}"
+        waiting = len(snap.peer_inbox_of(rec.node_id, link))
+        if waiting:
+            line += f" · {waiting} unread"
+        out.append(line)
+    return tuple(out)
 
 
 def _ago(seconds: float) -> str:
@@ -562,6 +589,8 @@ class _Box:
     outer_x: float
     right: float
     height: float
+    # The card's channel lines (``channel_lines``), drawn last, at its foot.
+    links: tuple[str, ...] = ()
 
 
 def draw(
@@ -881,10 +910,13 @@ def _card(
     # speaks for its sub-agents' unread answers as it does for their parked calls.
     unread = decision_view.unread_answers(snap, lambda asker: covers(scope, rec.node_id, asker))
     density = _density(rec, owed, unread=unread)
+    # Under the density's own lines, one each: a card's height is still fixed by
+    # what it holds, and a link is something it holds.
+    links = channel_lines(snap, rec)
 
     draw = imgui.get_window_draw_list()
     line_h = imgui.get_text_line_height_with_spacing()
-    height = line_h * _LINES[density] + _PAD * 2
+    height = line_h * (_LINES[density] + len(links)) + _PAD * 2
 
     outer = imgui.get_cursor_screen_pos()
     width = max(imgui.get_content_region_avail().x - indent, 40.0)
@@ -906,7 +938,7 @@ def _card(
 
     lo = imgui.ImVec2(origin.x, origin.y)
     hi = imgui.ImVec2(origin.x + width, origin.y + height)
-    box = _Box(origin=origin, outer_x=outer.x, right=hi.x, height=height)
+    box = _Box(origin=origin, outer_x=outer.x, right=hi.x, height=height, links=links)
 
     # Focus is an outline and an edge bar, never a fill.
     #
@@ -1165,6 +1197,7 @@ def _tail(
     a button of its own, so ImGui routes its clicks and nothing here has to know it
     exists.
     """
+    _draw_links(box)
     on_marker = hovered and _on_marker(marker)
     if on_marker:
         imgui.set_mouse_cursor(imgui.MouseCursor_.hand)
@@ -1195,6 +1228,26 @@ def _tail(
     _end(box.outer_x, box.origin.y, box.height)
     imgui.pop_id()
     return box.origin.y + box.height
+
+
+def _draw_links(box: _Box) -> None:
+    """
+    The card's channel lines, at its foot in the rows its height was given for
+    them, in the small face and dim: a link is a standing fact about the card
+    and not something it owes.
+    """
+    if not box.links:
+        return
+    line_h = imgui.get_text_line_height_with_spacing()
+    x = box.origin.x + _PAD + 4.0
+    y = box.origin.y + box.height - _PAD - line_h * len(box.links)
+    room = max(box.right - _PAD - x, 20.0)
+    _small()
+    for line in box.links:
+        imgui.set_cursor_screen_pos(imgui.ImVec2(x, y + 2.0))
+        imgui.text_colored(P.text_dim.vec4, ellipsis(line, room))
+        y += line_h
+    _normal()
 
 
 def _end(outer_x: float, top: float, height: float) -> None:

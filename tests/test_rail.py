@@ -954,3 +954,148 @@ def test_which_card_the_cursor_lights_in_an_open_group() -> None:
     assert rail._lit(A, LEAD, drawn) == LEAD
     assert rail._lit(OLD, LEAD, drawn) == OLD
     assert rail._lit(("old", "agent-a"), LEAD, drawn) == ("old", "agent-a")
+
+
+# -- a lead's channel lines ---------------------------------------------------------------
+
+P1: NodeId = ("lead-p", None)
+P2: NodeId = ("lead-q", None)
+
+
+def _leads() -> Store:
+    """Three running leads with distinct titles: ``LEAD``, ``P1`` and ``P2``."""
+    from pptmstr.intents import StateChanged
+
+    store = Store()
+    store.apply(launch(LEAD))
+    for node, task in ((P1, "brand pages"), (P2, "ops runbook")):
+        store.apply(AgentSpawned(node_id=node, parent=None, task=task, model="m", started_at=1.0))
+    for node in (LEAD, P1, P2):
+        store.apply(StateChanged(node, AgentState.THINKING))
+    return store
+
+
+def _link(store: Store, channel_id: str, name: str, peer: NodeId) -> None:
+    from pptmstr.intents import ChannelLinked
+
+    pair = frozenset({LEAD[0], peer[0]})
+    store.apply(ChannelLinked(channel_id, name, pair, "", 2.0, pair))
+    assert store.snapshot().channels[channel_id].live
+
+
+def _peer_message(snap: Snapshot, to: NodeId, sender: NodeId, link: str, n: int) -> Snapshot:
+    """``snap`` with ``n`` peer messages sent over the link ``link`` waiting for ``to``."""
+    import dataclasses
+
+    from pptmstr.model import Concern
+
+    concerns = dict(snap.concerns)
+    for i in range(n):
+        cid = f"c-{len(concerns):012x}"
+        concerns[cid] = Concern(
+            id=cid,
+            sender=sender,
+            recipient=to,
+            subject=f"note {i}",
+            body="",
+            posted_at=3.0 + i,
+            channel=snap.channels[link].name,
+            link=link,
+        )
+    return dataclasses.replace(snap, concerns=concerns)
+
+
+def test_a_lead_in_no_link_has_no_channel_line() -> None:
+    snap = _leads().snapshot()
+    assert rail.channel_lines(snap, snap.nodes[LEAD]) == ()
+
+
+def test_a_lead_draws_one_line_per_live_link_by_name_and_its_peer_by_title() -> None:
+    store = _leads()
+    _link(store, "k2", "zeta", P2)
+    _link(store, "k1", "brand", P1)
+    snap = store.snapshot()
+
+    assert rail.channel_lines(snap, snap.nodes[LEAD]) == (
+        "#brand ↔ brand pages",
+        "#zeta ↔ ops runbook",
+    )
+    # And each peer the one link it is in, naming this lead.
+    assert rail.channel_lines(snap, snap.nodes[P1]) == ("#brand ↔ reconcile disagreeing TLE sets",)
+
+
+def test_a_closed_link_draws_no_line() -> None:
+    from pptmstr.intents import ChannelClosed
+
+    store = _leads()
+    _link(store, "k1", "brand", P1)
+    _link(store, "k2", "ops", P2)
+    store.apply(ChannelClosed("k1", 4.0))
+    snap = store.snapshot()
+
+    assert rail.channel_lines(snap, snap.nodes[LEAD]) == ("#ops ↔ ops runbook",)
+    assert rail.channel_lines(snap, snap.nodes[P1]) == ()
+
+
+def test_a_link_line_counts_the_peer_messages_waiting_on_it() -> None:
+    store = _leads()
+    _link(store, "k1", "brand", P1)
+    _link(store, "k2", "ops", P2)
+    snap = _peer_message(store.snapshot(), LEAD, P1, "k1", 2)
+
+    assert rail.channel_lines(snap, snap.nodes[LEAD]) == (
+        "#brand ↔ brand pages · 2 unread",
+        "#ops ↔ ops runbook",
+    )
+    # Waiting for LEAD, and not for the peer that sent them.
+    assert rail.channel_lines(snap, snap.nodes[P1]) == ("#brand ↔ reconcile disagreeing TLE sets",)
+
+
+def test_mail_waiting_on_a_closed_link_is_not_counted_on_the_live_one_of_its_name() -> None:
+    import dataclasses
+
+    from pptmstr.intents import ChannelClosed
+    from pptmstr.model import EVERY_CHANNEL
+
+    store = _leads()
+    _link(store, "k1", "brand", P1)
+    snap = _peer_message(store.snapshot(), LEAD, P1, "k1", 2)
+    store.apply(ChannelClosed("k1", 4.0))
+    _link(store, "k3", "brand", P1)
+    live = store.snapshot()
+    snap = _peer_message(dataclasses.replace(live, concerns=snap.concerns), LEAD, P1, "k3", 1)
+
+    # Both links are named "brand"; the two from k1 still wait, and only the
+    # one sent over k3 is the live line's.
+    assert len(snap.peer_inbox_of(LEAD, EVERY_CHANNEL)) == 3
+    assert rail.channel_lines(snap, snap.nodes[LEAD]) == ("#brand ↔ brand pages · 1 unread",)
+
+
+def test_a_sub_agent_draws_no_channel_line() -> None:
+    store = _leads()
+    store.apply(launch(A, LEAD, role="scout"))
+    _link(store, "k1", "brand", P1)
+    snap = store.snapshot()
+    assert rail.channel_lines(snap, snap.nodes[A]) == ()
+
+
+@pytest.mark.parametrize("links", [0, 1, 2])
+def test_a_cards_height_grows_one_line_per_live_link_and_draws_it(
+    monkeypatch: pytest.MonkeyPatch, links: int
+) -> None:
+    store = _leads()
+    peers = [("k1", "brand", P1), ("k2", "ops", P2)][:links]
+    for channel_id, name, peer in peers:
+        _link(store, channel_id, name, peer)
+    snap = store.snapshot()
+    bare = Frame(monkeypatch, _leads().snapshot())
+
+    frame = Frame(monkeypatch, snap)
+
+    lead_h = frame.out.cards[0][1]
+    assert lead_h == bare.out.cards[0][1] + 18.0 * links
+    drawn = [t for t in frame.text if t.startswith("#")]
+    # The lead's lines on its card, then each peer's one line on its own.
+    assert drawn == [f"#{name} ↔ {snap.nodes[peer].task}" for _, name, peer in peers] + [
+        f"#{name} ↔ reconcile disagreeing TLE sets" for _, name, _ in peers
+    ]

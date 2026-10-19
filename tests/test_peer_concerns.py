@@ -22,7 +22,7 @@ from pptmstr.boardfacts import outcomes
 from pptmstr.boardlog import Clock, Delivered, PeerPosted, Unrecognised
 from pptmstr.effects import InboxDelivered
 from pptmstr.intents import AgentSpawned, BoardRestored, ConcernPosted, InboxRead, Intent
-from pptmstr.model import Concern, ConcernState, NodeId, Snapshot
+from pptmstr.model import EVERY_CHANNEL, Concern, ConcernState, NodeId, Snapshot
 from pptmstr.store import _apply
 
 S, Z = "s", "z"
@@ -87,8 +87,9 @@ def peer(cid: str = "c-1", **fields: object) -> Concern:
         "body": "body",
         "posted_at": 3.0,
         "channel": "brand",
+        "link": "k1",
         "needs_answer": True,
-        "re": "c-0",
+        "re": "c-000000000000",
         "quiet": False,
         "task_id": "t-1",
         "incident": True,
@@ -164,6 +165,7 @@ def test_a_peer_message_restored_into_another_process_keeps_every_field() -> Non
         re=None,
         quiet=True,
         channel="ops",
+        link="k2",
         incident=False,
     )
     first, records = apply(started(), ConcernPosted(LEAD, waiting), ConcernPosted(LEAD, handed))
@@ -178,7 +180,9 @@ def test_a_peer_message_restored_into_another_process_keeps_every_field() -> Non
 
     assert effects == ()
     report = snap.restores[S]
-    assert report.unplaced == () and not report.short and report.concerns == 2
+    assert report.unplaced == () and not report.short
+    # Peer mail is counted apart from the board's own concerns.
+    assert (report.concerns, report.peer_messages) == (0, 2)
     for cid in ("c-1", "c-2"):
         held = first.concerns[cid]
         restored = snap.concerns[cid]
@@ -189,10 +193,22 @@ def test_a_peer_message_restored_into_another_process_keeps_every_field() -> Non
         )
     # Spelled out, so a field that both sides lost to its default cannot pass.
     one, two = snap.concerns["c-1"], snap.concerns["c-2"]
-    assert (one.channel, one.needs_answer, one.re, one.quiet) == ("brand", True, "c-0", False)
-    assert (two.channel, two.needs_answer, two.re, two.quiet) == ("ops", False, None, True)
+    assert (one.channel, one.link, one.needs_answer, one.re, one.quiet) == (
+        "brand",
+        "k1",
+        True,
+        "c-000000000000",
+        False,
+    )
+    assert (two.channel, two.link, two.needs_answer, two.re, two.quiet) == (
+        "ops",
+        "k2",
+        False,
+        None,
+        True,
+    )
     assert (one.state, two.state) == (ConcernState.POSTED, ConcernState.DELIVERED)
-    assert snap.peer_inbox_of(Z_LEAD) == (one,)
+    assert snap.peer_inbox_of(Z_LEAD, EVERY_CHANNEL) == (one,)
     assert snap.inbox_of(Z_LEAD) == ()
 
 
@@ -206,16 +222,25 @@ def _mailbag(seed: int) -> Snapshot:
     snap = started()
     for n in range(30):
         state = rng.choice((ConcernState.POSTED,) * 3 + (ConcernState.DELIVERED,))
+        channel = rng.choice((None, "brand", "ops"))
+        # A peer message runs between two sessions' leads, the only way the
+        # store files one (``model.peer_addressed``).
+        sender, recipient = (
+            rng.choice(((LEAD, Z_LEAD), (Z_LEAD, LEAD)))
+            if channel is not None
+            else (rng.choice(nodes), rng.choice(nodes))
+        )
         concern = Concern(
             f"c-{n}",
-            rng.choice(nodes),
-            rng.choice(nodes),
+            sender,
+            recipient,
             "subject",
             "body",
             posted_at=rng.uniform(0.0, 10.0),
             state=state,
             delivered_at=1.0 if state is ConcernState.DELIVERED else None,
-            channel=rng.choice((None, "brand", "ops")),
+            channel=channel,
+            link=None if channel is None else f"k-{channel}",
         )
         snap, _ = _apply(snap, ConcernPosted(concern.sender, concern), 5.0)
     return snap
@@ -227,7 +252,7 @@ def test_the_two_inboxes_split_the_waiting_mail_with_nothing_in_both(seed: int) 
 
     for node in (LEAD, BUILDER, Z_LEAD):
         mine = snap.inbox_of(node)
-        peers = snap.peer_inbox_of(node)
+        peers = snap.peer_inbox_of(node, EVERY_CHANNEL)
         waiting = {
             c.id
             for c in snap.concerns.values()
@@ -239,7 +264,7 @@ def test_the_two_inboxes_split_the_waiting_mail_with_nothing_in_both(seed: int) 
         assert all(c.channel is not None for c in peers)
         for box in (mine, peers):
             assert [c.posted_at for c in box] == sorted(c.posted_at for c in box)
-        by_channel = [c.id for name in ("brand", "ops") for c in snap.peer_inbox_of(node, name)]
+        by_channel = [c.id for name in ("brand", "ops") for c in snap.peer_inbox_named(node, name)]
         assert sorted(by_channel) == sorted(c.id for c in peers)
 
 
@@ -250,12 +275,13 @@ def test_a_team_read_hands_over_no_peer_message_and_files_no_delivery_for_one() 
     """
     snap, _ = apply(
         started(),
-        ConcernPosted(LEAD, peer("c-1", recipient=BUILDER)),
-        ConcernPosted(LEAD, team("c-2", LEAD, BUILDER, 4.0)),
+        ConcernPosted(Z_LEAD, peer("c-1", sender=Z_LEAD, recipient=LEAD)),
+        ConcernPosted(BUILDER, team("c-2", BUILDER, LEAD, 4.0)),
     )
+    assert set(snap.concerns) == {"c-1", "c-2"}
 
-    after, effects = _apply(snap, InboxRead(BUILDER, request_id="r1", at=6.0), 6.0)
-    facts = outcomes(snap, InboxRead(BUILDER, request_id="r1", at=6.0), after, 6.0)
+    after, effects = _apply(snap, InboxRead(LEAD, request_id="r1", at=6.0), 6.0)
+    facts = outcomes(snap, InboxRead(LEAD, request_id="r1", at=6.0), after, 6.0)
 
     (answer,) = effects
     assert isinstance(answer, InboxDelivered)

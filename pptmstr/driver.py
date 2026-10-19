@@ -69,7 +69,7 @@ from .approval import (
 )
 from .board import ROOT_NAMES, address_for
 from .bridge import Bridge
-from .bus import EDITED_KEY, FROM_KEY, SERVER_NAME, build_server, offered_tools
+from .bus import CALLED_AT_KEY, EDITED_KEY, FROM_KEY, SERVER_NAME, build_server, offered_tools
 from .cli_version import BelowFloor, MeetsFloor, Unreadable, VersionRead, check_floor
 from .intents import (
     AgentFinished,
@@ -2151,6 +2151,7 @@ class AgentSession:
         node: NodeId,
         *,
         edited: bool = False,
+        called_at: float | None = None,
     ) -> Mapping[str, Any] | None:
         """
         Attach the authenticated sender to a bus call, or None for anything else.
@@ -2186,6 +2187,12 @@ class AgentSession:
         # moot whether the CLI forwards an out-of-schema argument, which is
         # unmeasured.
         stamped[EDITED_KEY] = bool(edited)
+        # When the call reached this gate, on the monotonic clock: the park's
+        # ``requested_at`` for a parked call, which is before the operator
+        # approved it, and now for one let through. Overwritten for FROM_KEY's
+        # reason. The store binds a call that names a channel to a link that was
+        # live by then (``bus.CALLED_AT_KEY``).
+        stamped[CALLED_AT_KEY] = time.monotonic() if called_at is None else called_at
         return stamped
 
     async def _park(
@@ -2293,7 +2300,9 @@ class AgentSession:
                 tool_input
             )
             return _allow_with(
-                self._stamp_bus_call(tool_name, approved_args, node, edited=edited)
+                self._stamp_bus_call(
+                    tool_name, approved_args, node, edited=edited, called_at=parked_at
+                )
                 or decision.edited_args
             )
         if not decision.from_operator:

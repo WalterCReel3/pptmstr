@@ -415,6 +415,10 @@ class PeerPosted:
     subject: str
     body: str
     channel: str
+    # The id of the link it was sent over (``model.Concern.link``). Required: a
+    # peer message without its link could be handed over by no link, or by one
+    # that later took the name, and no build ever wrote one.
+    link: str
     task_id: str | None = None
     basis: str | None = None
     incident: bool = False
@@ -489,6 +493,9 @@ class Raised:
     asker_id: tuple[str, ...] = ()
     # The channel the decision was raised on, or None for one inside a team.
     channel: str | None = None
+    # The id of the link ``channel`` named when it was raised
+    # (``model.Decision.link``), or None.
+    link: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1246,6 +1253,7 @@ class RestoredConcern:
     needs_answer: bool = False
     re: str | None = None
     quiet: bool = False
+    link: str | None = None
     # As on ``RestoredTask``: the concern is as the records before the first
     # impossible one left it, and the rest are in ``Board.contested``.
     contested: bool = False
@@ -1275,6 +1283,7 @@ class RestoredDecision:
     outcome: model.DecisionOutcome | None = None
     first_delivered_at: float | None = None
     channel: str | None = None
+    link: str | None = None
     # As on ``RestoredTask``.
     contested: bool = False
 
@@ -1638,6 +1647,7 @@ def _posted(record: Posted | PeerPosted) -> RestoredConcern:
                 needs_answer=record.needs_answer,
                 re=record.re,
                 quiet=record.quiet,
+                link=record.link,
             )
         case _:
             assert_never(record)
@@ -1659,6 +1669,7 @@ def _raised(record: Raised) -> RestoredDecision:
         reversible=record.reversible,
         raised_at=record.at,
         channel=record.channel,
+        link=record.link,
     )
 
 

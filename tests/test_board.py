@@ -40,10 +40,12 @@ from pptmstr.intents import (
 )
 from pptmstr.model import (
     AgentState,
+    Charter,
     ClaimRefusal,
     Concern,
     ConcernState,
     NodeId,
+    Provenance,
     Snapshot,
     Task,
     TaskState,
@@ -1870,3 +1872,42 @@ def test_a_team_session_taken_off_the_fleet_has_no_board() -> None:
 
     assert store.snapshot().off_fleet(S1)
     assert not has_board(store.snapshot(), S1)
+
+
+def test_a_message_between_leads_is_not_on_either_teams_board() -> None:
+    """
+    It is filed in its sender's log like a concern, and it is not mail inside
+    the team: not in the concern log, not a reason on a row, not counted.
+    """
+    store = Store()
+    team(store, S1)
+    team(store, S2)
+    declare(store, "t1", by=LEAD_1)
+    store.apply(ConcernPosted(DEV_1, _about("c-team", "t1", sender=DEV_1, recipient=LEAD_1)))
+    peer = dataclasses.replace(
+        _about("c-peer", "t1", sender=LEAD_1, recipient=LEAD_2), channel="brand", link="k1"
+    )
+    store.apply(ConcernPosted(LEAD_1, peer))
+    snap = store.snapshot()
+    assert "c-peer" in snap.concerns
+
+    for session in (S1, S2):
+        assert "c-peer" not in [c.id for c in board_concerns(snap, session)]
+    assert [c.id for c in board_concerns(snap, S1)] == ["c-team"]
+    assert board_tasks(snap, S1)[0].concerns == ("c-team",)
+
+
+def test_a_rows_provenance_is_the_tasks() -> None:
+    store = Store()
+    team(store, S1)
+    asked = Provenance("brand", "c-0123456789ab", Charter.YES)
+    store.apply(
+        TaskDeclared(
+            Task(id="t1", title="asked for", declared_at=0.0, provenance=asked), node_id=LEAD_1
+        )
+    )
+    declare(store, "t2", by=LEAD_1)
+
+    rows = {row.id: row for row in board_tasks(store.snapshot(), S1)}
+    assert rows["t1"].provenance == asked
+    assert rows["t2"].provenance is None

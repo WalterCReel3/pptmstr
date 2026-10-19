@@ -200,6 +200,7 @@ _GENERATORS: dict[type, Callable[[random.Random], Record]] = {
         subject=_text(r),
         body=_text(r),
         channel=r.choice(("brand", "café \ud800", "")),
+        link=r.choice(("k1", "k2", "")),
         task_id=_maybe(r, r.choice(_TASK_IDS)),
         basis=_maybe(r, "read"),
         incident=r.random() < 0.5,
@@ -225,6 +226,7 @@ _GENERATORS: dict[type, Callable[[random.Random], Record]] = {
         reversible=r.choice((True, False, None)),
         asker_id=r.choice(_NODES),
         channel=_maybe(r, r.choice(("brand", "café \ud800"))),
+        link=_maybe(r, "k-1"),
     ),
     Answered: lambda r: Answered(
         at=r.choice(_TIMES), decision_id=r.choice(_DECISION_IDS), answer=_text(r)
@@ -302,6 +304,7 @@ def test_the_generator_reaches_every_value_a_stated_field_can_take() -> None:
     raised = [r for r in records if isinstance(r, Raised)]
     assert {r.reversible for r in raised} == {True, False, None}
     assert {r.channel is None for r in raised} == {True, False}
+    assert {r.link is None for r in raised} == {True, False}
 
 
 def test_kind_names_are_distinct() -> None:
@@ -2408,6 +2411,7 @@ def test_a_peer_message_restores_with_every_field_it_was_posted_with() -> None:
         subject="subject",
         body="body",
         channel="brand",
+        link="k1",
         task_id="t-1",
         basis="read",
         incident=True,
@@ -2423,17 +2427,24 @@ def test_a_peer_message_restores_with_every_field_it_was_posted_with() -> None:
 
     (concern,) = board.concerns
     assert not board.short
-    assert (concern.channel, concern.needs_answer, concern.re, concern.quiet) == (
+    assert (concern.channel, concern.needs_answer, concern.re, concern.quiet, concern.link) == (
         "brand",
         True,
         "c-0",
         True,
+        "k1",
     )
     assert (concern.sender, concern.recipient) == (("s", None), ("z", None))
     assert (concern.task_id, concern.basis, concern.incident) == ("t-1", "read", True)
     assert (concern.state, concern.delivered_at) == (ConcernState.DELIVERED, 12.0)
     (team,) = boardlog.restore((posted(),)).concerns
-    assert (team.channel, team.needs_answer, team.re, team.quiet) == (None, False, None, False)
+    assert (team.channel, team.needs_answer, team.re, team.quiet, team.link) == (
+        None,
+        False,
+        None,
+        False,
+        None,
+    )
 
 
 def test_a_declarations_provenance_restores_with_its_task_and_outlives_amendment() -> None:
@@ -2653,6 +2664,7 @@ _FULL_DECISION: tuple[Record, ...] = (
         reversible=True,
         asker_id=("s", "a1"),
         channel="brand",
+        link="k1",
     ),
     Answered(at=11.0, decision_id="d-1", answer=" yes \n"),
     AnswerDelivered(at=12.0, decision_id="d-1"),
@@ -2671,6 +2683,7 @@ _DECISION_FACTS: dict[str, tuple[str, object]] = {
     "raised_at": ("raised_at", 10.0),
     "first_delivered_at": ("first_delivered_at", 12.0),
     "channel": ("channel", "brand"),
+    "link": ("link", "k1"),
 }
 
 
@@ -2696,7 +2709,7 @@ _RESTORED_APART: dict[type, dict[str, Callable[..., None]]] = {
     },
     Concern: {
         name: test_a_peer_message_restores_with_every_field_it_was_posted_with
-        for name in ("channel", "needs_answer", "re", "quiet")
+        for name in ("channel", "needs_answer", "re", "quiet", "link")
     },
     Decision: {"outcome": test_a_decision_restores_as_its_ending_left_it},
 }
@@ -2959,3 +2972,19 @@ def test_a_record_stamped_in_the_future_is_not_newer_than_the_restore() -> None:
     clock = Clock(wall=1_000.0, monotonic=50.0)
 
     assert clock.monotonic_at(5_000.0) == 50.0
+
+
+def test_a_peer_message_logged_without_its_link_is_not_read_as_one() -> None:
+    """
+    ``link`` has no default on ``PeerPosted``: no build ever wrote one without
+    it, and one read without it could be handed over by any link that later
+    took the channel's name.
+    """
+    text = (
+        '{"kind": "peer-posted", "at": 10.0, "concern_id": "c-1", "sender": "lead", '
+        '"recipient": "lead", "subject": "s", "body": "b", "channel": "brand"}\n'
+    )
+
+    read = boardlog.decode(text)
+
+    assert isinstance(read, boardlog.Malformed) and "no link" in read.reason
