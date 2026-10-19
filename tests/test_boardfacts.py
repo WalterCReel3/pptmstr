@@ -74,10 +74,12 @@ from pptmstr.intents import (
     TaskDeclared,
     TaskReleased,
     TaskVersionHanded,
+    TaskWithdrawn,
     TopicChanged,
     UsageAccrued,
 )
 from pptmstr.model import (
+    ALL_WRITERS,
     EARLIER_RUN,
     EVERY_CHANNEL,
     AgentState,
@@ -306,7 +308,7 @@ def _open_decision(r: random.Random, snap: Snapshot) -> Decision | None:
     return r.choice(open_) if open_ and r.random() < _AIMED else None
 
 
-def _withdrawn(r: random.Random, snap: Snapshot) -> DecisionWithdrawn:
+def _decision_withdrawn(r: random.Random, snap: Snapshot) -> DecisionWithdrawn:
     aimed = _open_decision(r, snap)
     if aimed is None:
         return DecisionWithdrawn(_who(r), r.choice(_DECISION_IDS))
@@ -427,6 +429,21 @@ def _closed(r: random.Random, snap: Snapshot, now: float) -> TaskClosed:
     return TaskClosed(task_id, r.choice(_REASONS), at=_maybe_at(r, now))
 
 
+def _withdrawn(r: random.Random, snap: Snapshot, now: float) -> TaskWithdrawn:
+    # Mostly an unfinished task's own declarer, which is the withdrawal that
+    # lands; sometimes anybody, on anything, which is refused.
+    unfinished = [
+        t
+        for t in snap.tasks.values()
+        if t.state is not TaskState.COMPLETED and t.declared_by is not None
+    ]
+    if unfinished and r.random() < _AIMED:
+        aimed = r.choice(unfinished)
+        assert aimed.declared_by is not None
+        return TaskWithdrawn(aimed.declared_by, aimed.id, r.choice(_REASONS), at=_maybe_at(r, now))
+    return TaskWithdrawn(_who(r), _task_id(r), r.choice(_REASONS), at=_maybe_at(r, now))
+
+
 def _released(r: random.Random, snap: Snapshot, now: float) -> TaskReleased:
     # A claim whose holder is of an earlier run of the session is the one its
     # root may give back, so the root is aimed at those first.
@@ -537,6 +554,7 @@ _MAKERS: dict[type, Maker] = {
     TaskClaimRequested: lambda r, s, now: _claim(r, s),
     TaskCompleted: _completed,
     TaskClosed: _closed,
+    TaskWithdrawn: _withdrawn,
     TaskReleased: _released,
     BoardRead: lambda r, s, now: BoardRead(_who(r), "rq"),
     DigestRead: lambda r, s, now: DigestRead(_who(r), "rq", now),
@@ -562,7 +580,7 @@ _MAKERS: dict[type, Maker] = {
     DecisionDismissed: lambda r, s, now: DecisionDismissed(
         ((d := _open_decision(r, s)) and d.id) or r.choice(_DECISION_IDS), at=_maybe_at(r, now)
     ),
-    DecisionWithdrawn: lambda r, s, now: _withdrawn(r, s),
+    DecisionWithdrawn: lambda r, s, now: _decision_withdrawn(r, s),
     DecisionsRead: _decisions_read,
     CommandRequested: lambda r, s, now: CommandRequested(_who(r), _command(r), "rq", now),
     CommandApproved: lambda r, s, now: CommandApproved(
@@ -619,6 +637,7 @@ _BOARD: tuple[type, ...] = (
     TaskAmended,
     TaskVersionHanded,
     TaskClosed,
+    TaskWithdrawn,
     ConcernPosted,
     InboxRead,
     ConcernEdited,
@@ -652,6 +671,13 @@ _PEERS: tuple[type, ...] = (
     PeerInboxRead,
 )
 _PEER_EVERY = 5
+# A sub-agent starting and ending, and its session's root announced again: what
+# leaves a claim held by an agent of an earlier run, which only the root may give
+# back (``Snapshot.of_earlier_run``). One of these every ``_LIFECYCLE_EVERY``
+# steps, from a generator of their own as ``_PEERS`` are: drawn among the rest of
+# ``_MAKERS``, the sequence is reached by about one seed in a hundred.
+_LIFECYCLE: tuple[type, ...] = (AgentSpawned, AgentFinished)
+_LIFECYCLE_EVERY = 7
 # Prunes a record, after which the node is one the board has no name for. Rare,
 # or every run ends with nobody on it.
 _RARE: tuple[type, ...] = (AgentRemoved,)
@@ -676,6 +702,7 @@ def steps(seed: int, length: int = LENGTH) -> Iterator[Step]:
     """
     rng = random.Random(seed)
     peer_rng = random.Random(-1 - seed)
+    life_rng = random.Random(-1_000_000 - seed)
     snap = started()
     everything = [kind for kind in _MAKERS if kind not in (*_RARE, PeerSent, PeerInboxRead)]
     for number in range(length):
@@ -684,6 +711,11 @@ def steps(seed: int, length: int = LENGTH) -> Iterator[Step]:
             peer = _MAKERS[peer_rng.choice(_PEERS)](peer_rng, snap, now)
             after, _ = _apply(snap, peer, now)
             yield Step(number, peer, after, outcomes(snap, peer, after, now))
+            snap = after
+        if number % _LIFECYCLE_EVERY == _LIFECYCLE_EVERY - 1:
+            life = _MAKERS[life_rng.choice(_LIFECYCLE)](life_rng, snap, now)
+            after, _ = _apply(snap, life, now)
+            yield Step(number, life, after, outcomes(snap, life, after, now))
             snap = after
         roll = rng.random()
         if roll < 0.01:
@@ -750,6 +782,10 @@ def as_restored(task: Task) -> RestoredTask:
         not_run=task.not_run,
         released_at=task.released_at,
         closed_by_operator=task.closed_by_operator,
+        withdrawn=task.withdrawn,
+        withdrawn_by_lead=task.withdrawn_by_lead,
+        withdrawal_edited=task.withdrawal_edited,
+        after_all_writers=task.after_all_writers,
     )
 
 
@@ -876,7 +912,7 @@ def test_the_generator_reaches_every_record_kind_a_reducer_step_can_yield() -> N
 
 def test_the_generator_reaches_the_cases_the_property_is_for() -> None:
     records = [f.record for seed in SEEDS for f in run(seed)[1]]
-    snaps = [run(seed)[0] for seed in range(20)]
+    snaps = [run(seed)[0] for seed in SEEDS]
     tasks = [t for snap in snaps for t in snap.tasks.values()]
 
     amended = [r for r in records if isinstance(r, boardlog.Amended)]
@@ -1389,6 +1425,251 @@ def test_the_operators_notice_is_the_operators_on_the_board_before_and_after_a_r
     assert role_name(fresh, kept.sender, S) == OPERATOR
     # And it reserves no address a new agent could be refused.
     assert restored_table(fresh, S) == {"builder": "a1"}
+
+
+# A reason as it arrives, and as the store holds it once ``drawable`` has made it
+# drawable: a NUL and a lone surrogate written out as their escapes, and the
+# backslash of text that already spells an escape written out as its own. The
+# board log is written from the store's board, so it holds the second.
+_DRAWN_REASONS = [
+    pytest.param("replaced by t-9\n", "replaced by t-9\n", id="plain"),
+    pytest.param("a\x00b", "a\\u0000b", id="NUL"),
+    pytest.param("see \\u0000", "see \\u005cu0000", id="escape text"),
+    pytest.param("lone \udc80", "lone \\udc80", id="surrogate"),
+]
+
+
+def _restored_over(live: Snapshot, facts: list[Fact]) -> Snapshot:
+    """
+    ``live`` handed the log of ``facts``, as a resume over the process that wrote
+    it: one clock reading on both sides, so every time lands where it was taken
+    and only what the log holds can differ.
+    """
+    clock = Clock(wall=500.0, monotonic=500.0)
+    board = boardlog.restore(f.on_the_wall(clock) for f in facts if f.session_id == S)
+    after, _ = _apply(live, BoardRestored(S, board, clock), clock.monotonic)
+    return after
+
+
+@pytest.mark.parametrize(("reason", "held"), _DRAWN_REASONS)
+def test_a_withdrawal_is_recorded_as_the_declarers_and_restores_withdrawn_and_unblocking(
+    reason: str, held: str
+) -> None:
+    """
+    The round trip the withdrawal has to survive: recorded as the declarer's,
+    with the reason the store holds, and restored into an empty store as the same
+    withdrawn task -- one that still holds nothing up. ``after`` is the dependent
+    claimable in the store that withdrew; ``fresh`` is the same claim answered by
+    a store that only read the log.
+
+    The task was held, so the step filed the declarer's notice to the holder, and
+    the log carries that too: a restart keeps it, and a resume over the store
+    that filed it finds the same board.
+    """
+    snap, facts = apply(
+        started(),
+        declare(),
+        declare("t-2", depends_on=("t-1",)),
+        claim(B1),
+        TaskAmended("t-1", "narrower", node_id=LEAD),
+    )
+
+    after, derived = apply(snap, TaskWithdrawn(LEAD, "t-1", reason, at=8.5), now=9.0)
+
+    (notice,) = after.concerns.values()
+    assert after.tasks["t-1"].result == f"withdrawn by its declarer: {held}"
+    assert derived == [
+        Fact(
+            S,
+            boardlog.WithdrawnByDeclarer(at=8.5, task_id="t-1", by="lead", reason=held, by_id=(S,)),
+        ),
+        # What the holder was sent, in the same log and after the withdrawal.
+        Fact(
+            S,
+            boardlog.Posted(
+                at=8.5,
+                concern_id=notice.id,
+                sender="lead",
+                recipient="builder",
+                subject=notice.subject,
+                body=held,
+                task_id="t-1",
+                sender_id=(S,),
+                recipient_id=B1,
+            ),
+        ),
+    ]
+    relogged = logged([*facts, *derived], S)
+    assert not relogged.short and relogged.contested == ()
+    assert relogged.tasks[0] == as_restored(after.tasks["t-1"])
+    assert relogged.tasks[0].withdrawn and relogged.tasks[0].holder is None
+    assert relogged.concerns == (as_restored_concern(notice),)
+    assert after.tasks["t-2"].is_claimable(after.tasks)
+
+    fresh, _ = _apply(Snapshot.empty(), spawn(LEAD, None, None, 6.0), 6.0)
+    fresh = restoring(fresh, S, relogged)
+    assert fresh.restores[S].unplaced == ()
+    kept = fresh.tasks["t-1"]
+    assert kept.withdrawn and kept.state is TaskState.COMPLETED and kept.claimed_by is None
+    assert kept.result == after.tasks["t-1"].result
+    assert fresh.tasks["t-2"].blocked_on(fresh.tasks) == ()
+    assert fresh.tasks["t-2"].is_claimable(fresh.tasks)
+    (told,) = fresh.concerns.values()
+    assert (told.id, told.sender, told.subject, told.body) == (
+        notice.id,
+        notice.sender,
+        notice.subject,
+        notice.body,
+    )
+
+    over = _restored_over(after, [*facts, *derived])
+    assert over.restores[S].unplaced == () and not over.restores[S].refused
+
+    _, again = apply(after, TaskWithdrawn(LEAD, "t-1", "again"), TaskWithdrawn(B1, "t-2", "x"))
+    assert again == []
+
+
+@pytest.mark.parametrize("edited", [False, True], ids=["as sent", "edited by the operator"])
+@pytest.mark.parametrize(("reason", "held"), _DRAWN_REASONS)
+def test_the_leads_withdrawal_in_a_stopped_declarers_place_survives_the_round_trip(
+    reason: str, held: str, edited: bool
+) -> None:
+    """
+    The lead withdraws a task its stopped builder declared, the operator having
+    perhaps rewritten the reason: logged as the lead's, with the edit, and
+    restored -- into an empty store and over the live one -- as the same task,
+    still saying whose words the reason is. The holder's notice keeps the edit.
+
+    The lead holds it: a holder of this run that can still be woken is one
+    whose claim the lead may not end (``store._withdrawer_refusal``), and the
+    lead's own claim is the one this run can give it.
+    """
+    from pptmstr.model import withdrawal_label
+
+    snap, facts = apply(
+        started(),
+        declare(by=B1),
+        declare("t-2", depends_on=("t-1",)),
+        claim(LEAD),
+        AgentFinished(B1, AgentState.DONE, ended_at=4.0),
+    )
+
+    after, derived = apply(snap, TaskWithdrawn(LEAD, "t-1", reason, at=8.5, edited=edited), now=9.0)
+
+    task = after.tasks["t-1"]
+    (notice,) = after.concerns.values()
+    assert task.withdrawn_by_lead and task.withdrawal_edited is edited
+    assert task.result == f"{withdrawal_label(True, edited)}: {held}"
+    assert derived[0] == Fact(
+        S,
+        boardlog.WithdrawnByDeclarer(
+            at=8.5, task_id="t-1", by="lead", reason=held, by_id=(S,), edited=edited
+        ),
+    )
+    relogged = logged([*facts, *derived], S)
+    assert not relogged.short and relogged.contested == ()
+    assert relogged.tasks[0] == as_restored(task)
+    assert relogged.concerns == (as_restored_concern(notice),)
+
+    fresh, _ = _apply(Snapshot.empty(), spawn(LEAD, None, None, 6.0), 6.0)
+    fresh = restoring(fresh, S, relogged)
+    assert fresh.restores[S].unplaced == ()
+    kept = fresh.tasks["t-1"]
+    assert (kept.withdrawn_by_lead, kept.withdrawal_edited, kept.result) == (
+        True,
+        edited,
+        task.result,
+    )
+    assert fresh.concerns[notice.id].edited is edited
+    assert fresh.tasks["t-2"].is_claimable(fresh.tasks)
+
+    over = _restored_over(after, [*facts, *derived])
+    assert over.restores[S].unplaced == () and not over.restores[S].refused
+
+
+def test_a_withdrawal_nobody_held_the_task_for_is_one_record() -> None:
+    snap, _ = apply(started(), declare())
+
+    _, derived = apply(snap, TaskWithdrawn(LEAD, "t-1", "not wanted", at=8.5), now=9.0)
+
+    assert derived == [
+        Fact(
+            S,
+            boardlog.WithdrawnByDeclarer(
+                at=8.5, task_id="t-1", by="lead", reason="not wanted", by_id=(S,)
+            ),
+        )
+    ]
+
+
+@pytest.mark.parametrize(("reason", "held"), _DRAWN_REASONS)
+def test_a_close_logs_the_reason_the_store_holds_and_restores_over_it(
+    reason: str, held: str
+) -> None:
+    """
+    The operator's box cannot send a NUL, but the arm takes the reason the store
+    made drawable, and the log is written from the store's board: the record and
+    the notice hold the store's text, and the log restores over the store that
+    wrote it.
+    """
+    snap, facts = apply(started(), declare(), claim(B1))
+
+    after, derived = apply(snap, TaskClosed("t-1", reason, at=8.5), now=9.0)
+
+    closed, posted = derived
+    assert closed == Fact(S, boardlog.Closed(at=8.5, task_id="t-1", reason=held))
+    assert isinstance(posted.record, boardlog.Posted) and posted.record.body == held
+    relogged = logged([*facts, *derived], S)
+    assert relogged.tasks[0] == as_restored(after.tasks["t-1"])
+    fresh = restoring(Snapshot.empty(), S, relogged)
+    assert fresh.restores[S].unplaced == ()
+    assert fresh.tasks["t-1"].result == after.tasks["t-1"].result
+    over = _restored_over(after, [*facts, *derived])
+    assert over.restores[S].unplaced == () and not over.restores[S].refused
+
+
+@pytest.mark.parametrize("reason", ["", "  \n"], ids=["empty", "blank"])
+def test_a_close_with_no_reason_logs_none_and_restores_the_bare_label(reason: str) -> None:
+    """
+    A reason of whitespace is no reason (``closing_result``): the result is the
+    label alone and the log, written from it, holds no reason either.
+    """
+    snap, facts = apply(started(), declare())
+
+    after, derived = apply(snap, TaskClosed("t-1", reason, at=8.5), now=9.0)
+
+    assert derived == [Fact(S, boardlog.Closed(at=8.5, task_id="t-1", reason=""))]
+    relogged = logged([*facts, *derived], S)
+    assert relogged.tasks[0] == as_restored(after.tasks["t-1"])
+    assert after.tasks["t-1"].result == "closed by the operator"
+
+
+def test_a_gate_on_every_writer_is_recorded_as_one_and_restores_waiting_on_later_writers() -> None:
+    """
+    D1 through the log: the flag is in the record ``outcomes`` derives, the word
+    is not in its ``depends_on``, and a store that only read the log holds the
+    gate behind a writer declared after the restore.
+    """
+    snap, facts = apply(
+        started(),
+        declare("gate", depends_on=(ALL_WRITERS, "t-0")),
+        declare("t-0"),
+        declare("t-1", touches=("a.py",)),
+    )
+
+    gated, *_ = facts
+    assert isinstance(gated.record, boardlog.Declared)
+    assert gated.record.after_all_writers and gated.record.depends_on == ("t-0",)
+    relogged = logged(facts, S)
+    assert relogged.tasks[0] == as_restored(snap.tasks["gate"])
+
+    fresh, _ = _apply(Snapshot.empty(), spawn(LEAD, None, None, 6.0), 6.0)
+    fresh = restoring(fresh, S, relogged)
+    assert fresh.restores[S].unplaced == ()
+    assert fresh.tasks["gate"].after_all_writers
+    assert fresh.tasks["gate"].blocked_on(fresh.tasks) == ("t-0", "t-1")
+    later, _ = _apply(fresh, declare("t-2", touches=("b.py",)), 7.0)
+    assert later.tasks["gate"].blocked_on(later.tasks) == ("t-0", "t-1", "t-2")
 
 
 def test_a_close_nobody_held_the_task_for_is_one_record() -> None:

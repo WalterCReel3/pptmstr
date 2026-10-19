@@ -140,7 +140,7 @@ from ..board import (
     basis_label,
     board_concerns,
     board_tasks,
-    closed_label,
+    ended_label,
     foreign_wait_label,
     has_board,
     incident_marker,
@@ -666,9 +666,7 @@ def _task_row(
         # row this is what the row was opened for, and amending what was asked does
         # not hide what was reported.
         # A close has no basis to be missing, so its heading is not a warning.
-        heading_colour = (
-            P.text_dim if row.closed_by_operator else _basis_colour(row.result_basis, P.accent)
-        )
+        heading_colour = P.text_dim if row.unworked else _basis_colour(row.result_basis, P.accent)
         imgui.text_colored(heading_colour.vec4, result_heading(row))
         body, dropped = clip(row.result, _MAX_RESULT_CHARS)
         author(body)
@@ -1132,9 +1130,7 @@ def _typeset_task_row(
             # below, and one view cannot be in two places.
             _note(pane, (session_id, "reason", row.id, reason.id), reason.body)
     if row.result:
-        heading_colour = (
-            P.text_dim if row.closed_by_operator else _basis_colour(row.result_basis, P.accent)
-        )
+        heading_colour = P.text_dim if row.unworked else _basis_colour(row.result_basis, P.accent)
         imgui.text_colored(heading_colour.vec4, result_heading(row))
         _authored(pane, (session_id, "result", row.id), row.result, _MAX_RESULT_CHARS, _SPEC_LINES)
     elif row.state is TaskState.COMPLETED:
@@ -1875,10 +1871,11 @@ def result_heading(row: BoardTask) -> str:
     first person to see it.
 
     On a row the operator closed it is the operator's and reports no work, and
-    the heading says that in place of a basis nobody gave.
+    on one its declarer withdrew it is the declarer's reason and reports none
+    either: the heading says which in place of a basis nobody gave.
     """
-    if row.closed_by_operator:
-        return f"{closed_label(row)}:"
+    if row.unworked:
+        return f"{ended_label(row)}:"
     said = basis_label(row.result_basis)
     return f"result, as {row.owner} reported it ({said}):" if row.owner else f"result ({said}):"
 
@@ -1892,12 +1889,12 @@ def unrun_heading(row: BoardTask) -> str:
     result included: a finished row with no line here would read as work that was
     run, on the strength of nobody having said otherwise. A list the claimer gave
     is introduced as the claimer's and follows this line. A row the operator
-    closed has no claimer to state anything and says what it is in its result's
-    heading.
+    closed, or its declarer withdrew, has no claimer to state anything and says
+    what it is in its result's heading.
     """
     if row.not_run:
         return f"not run, as {row.owner} states it:" if row.owner else "not run:"
-    if row.state is not TaskState.COMPLETED or row.closed_by_operator:
+    if row.state is not TaskState.COMPLETED or row.unworked:
         return ""
     return not_run_label(row.not_run)
 
@@ -1915,8 +1912,10 @@ def settled(row: BoardTask) -> bool:
     one unstated -- or a list of what was not run -- and the line is a warning.
 
     A row the operator closed asks nothing more of them: it was their decision.
+    Nor does one its declarer withdrew: there is no claimer whose standing could
+    be missing, and the reason is on the row.
     """
-    if row.closed_by_operator:
+    if row.unworked:
         return True
     return bool(row.result) and row.result_basis is not None and row.not_run == ""
 
@@ -1937,9 +1936,9 @@ def standing_label(row: BoardTask) -> str:
     """
     if row.state is not TaskState.COMPLETED:
         return ""
-    if row.closed_by_operator:
+    if row.unworked:
         # In place of a claimer's two statements, neither of which exists.
-        return closed_label(row)
+        return ended_label(row)
     said = f"result {basis_label(row.result_basis)}" if row.result else NO_RESULT
     return f"{said} · {not_run_label(row.not_run)}"
 

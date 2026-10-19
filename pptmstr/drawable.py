@@ -37,6 +37,15 @@ lower-case digits is always the code unit, and no other backslash is touched. Th
 mapping is one to one (``original`` inverts it), which is what makes it safe to
 apply to an identifier as well as to prose: two different strings stay different.
 
+**A declared task id is refused rather than rewritten** (``model.stored_as_sent``,
+``TaskRefusal.ESCAPED_ID``). One to one is not enough for an id read outside
+the reducer: the graph queries and a board row are asked by the id as sent, and
+miss one stored under its rewrite; and an agent copying the stored id from
+``read_board`` into a claim or a ``depends_on`` sends it through ``text`` again,
+which is not idempotent (below), and misses too. Refused, the id is held as
+sent, so every lookup inside the reducer and outside it meets, and nothing about
+it needs drawing that was not drawable already.
+
 **Where it is applied** is where session text enters what pptmstr holds: the
 reducer (``store._apply``), ``Transcript.append``, the log ring, and the listing of
 sessions on disk (``sessions.merge_overlay``). Not at the calls that draw, which are

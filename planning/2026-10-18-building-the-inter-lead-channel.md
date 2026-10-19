@@ -7,6 +7,16 @@
   decisions and the minimal Link leads UI.
 - Rounds three and four haven't started.
 
+**Merged origin/main (graph tooling, 940da8e) on 2026-10-19.**
+- 14 conflicted files, resolved keeping both sides.
+- `make check` green: 13921 passed, 23 `[imgui-error]` lines.
+- `typecheck-all` is 1952, the new baseline. It was 1918 on this branch and 2045 on main.
+- `model.withdrawal_notice`, main's, is a fourth team-concern constructor, now passing
+  `channel=None`.
+- Untested: a dry-run `declare_task` carrying provenance, or edited by the operator. Its reply
+  omits the charter-unkept sentence, as main's dry run omits "basis not kept", and the combined
+  "DRY RUN" + provenance queue row is unpinned. That's for round three.
+
 `make shot-xvfb` can't keep an image outside the tree: its namespace tmpfs hides `$TMPDIR`. So
 a gate's shot step proves only that a frame rendered under Xvfb. **Builds:**
 [`2026-10-17-two-leads-in-one-window-share-a-channel.md`](2026-10-17-two-leads-in-one-window-share-a-channel.md),

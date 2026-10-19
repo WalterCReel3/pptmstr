@@ -98,20 +98,26 @@ from .model import (
     Standing,
     TaskId,
     TaskState,
+    withdrawal_label,
 )
 
 
 class ChangeKind(enum.Enum):
     """
-    The five things that happen to a task and leave a time behind.
+    The six things that happen to a task and leave a time behind.
 
     A claim is not one of them. It stamps nothing, and a round's news is what was
     asked for, what was asked for instead, what was finished, what was given
-    back and what the operator closed.
+    back, what the operator closed and what its declarer withdrew.
 
     ``CLOSED`` is apart from ``COMPLETED`` because it is the opposite report:
     the operator said to stop waiting for a task, and nobody finished it. Counted
     under "completed", a round's tally would credit work that was not done.
+    ``WITHDRAWN`` is apart from both for the same reason, with the agent that
+    withdrew it in the operator's place. Its value is the bare word because the
+    count is one tally of withdrawals by the declarer and by the session's lead
+    alike; which of them withdrew each is on that change's own line
+    (``model.withdrawal_label``).
     """
 
     DECLARED = "declared"
@@ -119,6 +125,7 @@ class ChangeKind(enum.Enum):
     RELEASED = "released"
     AMENDED = "specification replaced"
     CLOSED = CLOSED_BY_OPERATOR
+    WITHDRAWN = "withdrawn"
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +158,12 @@ class TaskChange:
     # given the whole session, and without this the whole of a restored board
     # reads as what its team just did.
     before_restart: bool = False
+    # Of a withdrawal: the session's root withdrew it in place of a declarer
+    # that had stopped, and the operator rewrote the reason in flight
+    # (``board.BoardTask``'s two flags). Who the reason's words are, which
+    # ``model.withdrawal_label`` says.
+    withdrawn_by_lead: bool = False
+    withdrawal_edited: bool = False
 
 
 # What goes in the *changed* slot. One member today. A request between sessions
@@ -343,8 +356,8 @@ def _changed(
     restored_at: float | None = None,
 ) -> tuple[Changed, ...]:
     """
-    Every declaration, replaced specification, completion, close and release
-    from ``since`` on, oldest first.
+    Every declaration, replaced specification, completion, close, withdrawal and
+    release from ``since`` on, oldest first.
 
     The times come from the records and the names from the board rows, so a
     change is scoped and addressed exactly as the board scopes and addresses the
@@ -385,13 +398,13 @@ def _changed(
             out.append(
                 TaskChange(
                     task.completed_at,
-                    # Decided by the row's own fact. A result that opens with the
-                    # closing words is a claimer's text and a completion.
-                    ChangeKind.CLOSED if row.closed_by_operator else ChangeKind.COMPLETED,
+                    _ended_kind(row),
                     row.id,
                     row.title,
                     holder=row.owner,
                     line=first_line(row.result),
+                    withdrawn_by_lead=row.withdrawn_by_lead,
+                    withdrawal_edited=row.withdrawal_edited,
                 )
             )
     if restored_at is not None:
@@ -400,6 +413,19 @@ def _changed(
         ]
     # Stable, so two changes with one stamp keep the board's order.
     return tuple(sorted(out, key=lambda change: change.at))
+
+
+def _ended_kind(row: BoardTask) -> ChangeKind:
+    """
+    How a completed row ended, decided by the row's own facts. A result that
+    opens with the closing or withdrawing words is a claimer's text and a
+    completion.
+    """
+    if row.closed_by_operator:
+        return ChangeKind.CLOSED
+    if row.withdrawn:
+        return ChangeKind.WITHDRAWN
+    return ChangeKind.COMPLETED
 
 
 def _waiting(snap: Snapshot, session_id: str) -> tuple[Waiting, ...]:
@@ -441,10 +467,17 @@ def _unverified(
     The result of a task the operator closed is not one of these statements, for
     the reason it is not on the ledger: it is the operator's reason for no
     longer waiting, and asserts no work a reader could go and check.
+
+    A task its declarer withdrew is not here at all, its specification included.
+    The result is the declarer's reason, which asserts no work either; and the
+    specification is the declarer's own claim, which it has taken back. A closed
+    task's specification stays, because nobody who wrote it retracted it.
     """
     unrun = {row.id for row in ledger}
     out: list[Unverified] = []
     for row in rows:
+        if row.withdrawn:
+            continue
 
         def item(doubt: Doubt, standing: str, text: str = "", row: BoardTask = row) -> Unverified:
             return Unverified(row.id, row.title, row.owner, doubt, standing, text)
@@ -515,6 +548,9 @@ def _change_label(change: Changed) -> str:
             return f"completed{who}: {change.task_id} {change.title}"
         case ChangeKind.CLOSED:
             return f"{CLOSED_BY_OPERATOR}: {change.task_id} {change.title}"
+        case ChangeKind.WITHDRAWN:
+            who = withdrawal_label(change.withdrawn_by_lead, change.withdrawal_edited)
+            return f"{who}: {change.task_id} {change.title}"
         case ChangeKind.DECLARED:
             return f"declared: {change.task_id} {change.title}"
         case ChangeKind.RELEASED:
