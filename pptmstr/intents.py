@@ -643,6 +643,62 @@ class TaskClosed:
 
 
 @dataclass(frozen=True, slots=True)
+class TaskWithdrawn:
+    """
+    A task's declarer withdrew it: the work is no longer wanted.
+
+    **Modelled on the operator's close (``TaskClosed``), not as a fourth
+    state.** The task becomes COMPLETED, so every task that depends on it stops
+    waiting by that fact alone and the files it declared stop queueing later
+    work (``store._auto_depends``) -- there is no unblocking step. What it reports
+    is written by the store: ``model.withdrawal_result``, the words "withdrawn by
+    its declarer" and then ``reason`` as sent, with ``Task.withdrawn`` set so no
+    surface reads the label out of text a claimer could have typed.
+
+    **The declarer's, and its session root's once the declarer has stopped.**
+    ``node_id`` must be ``Task.declared_by``, the node the gate stamped on the
+    declaration. An agent that amended the task is still its declarer and may
+    withdraw it. That is the case this exists for: an amender may not claim the
+    task, so before this the only way to end it was the operator's close. The
+    root of the task's session may also withdraw it once the declarer has
+    stopped -- its record is terminal, or it is of an earlier run -- so a builder
+    that declared follow-up work and returned does not leave rows only a person
+    can retire (``store._withdrawer_refusal``; ``Task.withdrawn_by_lead`` then
+    says so). A running declarer keeps the sole right. Any other agent is
+    refused with ``TaskRefusal.NOT_THE_WITHDRAWER``, and a task on another
+    session's board with ``NO_SUCH_TASK``, as an amendment of one is. The
+    operator has ``TaskClosed`` and does not come through here.
+
+    **A held task may be withdrawn, and its holder is not interrupted.** The row
+    loses its holder, as on a close: the withdrawer's reason is not the holder's
+    completion. ``Task.held_by`` still names the holder. A later ``complete_task``
+    or ``release_task`` from it is refused as ``TaskRefusal.WITHDRAWN``, and
+    nothing it sent is kept. It is mailed ``model.withdrawal_notice``, because the
+    files the task named are released while it may still be writing them.
+
+    ``edited`` is the gate's stamp that the operator rewrote ``reason`` before
+    releasing the call (``bus.EDITED_KEY``). The words are then the operator's,
+    and the task, the notice and the log say so (``Task.withdrawal_edited``).
+
+    Refused on a finished task, a closed one or one already withdrawn
+    (``WITHDRAW_FINISHED``), so the first account stands. Refused when ``reason``
+    is blank or over ``model.MAX_WITHDRAWAL_REASON_CHARS``
+    (``NO_WITHDRAWAL_REASON``): a withdrawal with nothing to say leaves the
+    holder and every reader with no account in place of a result.
+    """
+
+    node_id: NodeId
+    task_id: TaskId
+    # Stored as sent, behind the label: not stripped, not put on one line.
+    reason: str
+    request_id: str | None = None
+    # The emitter's clock, for the reason ``TaskReleased.at`` gives. None takes
+    # the frame's.
+    at: float | None = None
+    edited: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class DigestRead:
     """
     An agent asked for the digest of its session's round. The reply is a
@@ -1121,6 +1177,7 @@ Intent = (
     | TaskCompleted
     | TaskReleased
     | TaskClosed
+    | TaskWithdrawn
     | BoardRead
     | DigestRead
     | BoardRestored

@@ -125,6 +125,7 @@ _BUS_SERVER = "pptmstr"
 _BUS_POST = f"mcp__{_BUS_SERVER}__post_concern"
 _BUS_DECLARE = f"mcp__{_BUS_SERVER}__declare_task"
 _BUS_AMEND = f"mcp__{_BUS_SERVER}__amend_task"
+_BUS_WITHDRAW = f"mcp__{_BUS_SERVER}__withdraw_task"
 
 # Reads, searches and listings. Cheap, reversible, and they do not leave the box.
 # The four that name a path are admitted by name and then measured by
@@ -220,6 +221,19 @@ _REVIEW = frozenset(
         # may not then claim it, and the text it replaced is kept as a version
         # (``store._amender_refusal``, ``store._claim_refusal``).
         _BUS_AMEND,
+        # A withdrawal undoes a declaration: it ends work the operator approved
+        # when it was declared, lets go of every task waiting on it, and turns
+        # away the holder's result. So it meets what a declaration meets, and
+        # parked it is one press for the operator where the alternative before it
+        # existed was the operator finding the row and closing it by hand. What
+        # stands under ``AUTONOMOUS`` is the reducer's rule: only while it is
+        # unfinished, and only by the task's declarer, or by the root of the
+        # declarer's session once the declarer has stopped -- a sub-agent whose
+        # record is terminal, or an agent of an earlier run -- and no agent it
+        # could not take the claim back from holds it
+        # (``store._withdrawer_refusal``, ``store._has_stopped``,
+        # ``store._may_take_claim``).
+        _BUS_WITHDRAW,
     }
 )
 
@@ -349,12 +363,28 @@ _AUTONOMOUS_AUTO = _REVIEW
 # Named here for every session and offered to a contained one alone: the server
 # of a session with no containment does not have the three (`bus.build_server`),
 # so on it these names admit a call that reaches no tool.
+#
+# `why_blocked` and `ready` are `read_board` asked a narrower question, and change
+# nothing. About the caller's own board they hand back ids, titles, states and
+# holders a board read already shows. **They also say one thing a board read does
+# not, and that is accepted rather than overlooked.** Asked about any id,
+# `why_blocked` says whether a task of another session in this process holds it
+# (`bus._why_blocked_text`, `bus._hop_state`, `bus._root_needs`), so an agent can
+# test ids against other sessions' boards with no review. The reason it stays:
+# ids within one local pptmstr process are not secret -- task ids are one
+# namespace for every session in it, a declaration already learns that an id is
+# taken, and a board row already says a dependency is "held elsewhere"
+# (`board.foreign_wait_label`) -- and nothing but the id's existence is said: no
+# title, specification, holder or state of that task.
+
 _BUS_AUTO = frozenset(
     {
         f"mcp__{_BUS_SERVER}__read_inbox",
         f"mcp__{_BUS_SERVER}__read_board",
         f"mcp__{_BUS_SERVER}__read_task",
         f"mcp__{_BUS_SERVER}__read_digest",
+        f"mcp__{_BUS_SERVER}__why_blocked",
+        f"mcp__{_BUS_SERVER}__ready",
         f"mcp__{_BUS_SERVER}__claim_task",
         f"mcp__{_BUS_SERVER}__complete_task",
         f"mcp__{_BUS_SERVER}__release_task",
@@ -984,6 +1014,35 @@ def inherits_to_subagents(policy: Policy) -> bool:
     assert_never(policy)
 
 
+def _dry_run(tool_name: str, tool_input: Mapping[str, Any]) -> bool:
+    """
+    Whether a call is a ``declare_task`` dry run, which declares nothing.
+
+    ``declare_task`` is in ``_REVIEW`` because a declaration is where work comes
+    into existence. A dry run brings nothing into existence -- the handler reads
+    the board and answers, and emits no write (``bus.declare_task``) -- so it is a
+    lead thinking, which that comment calls free, and parking it would put an
+    operator press in front of every plan a lead checks.
+
+    Only a JSON ``true``. The handler also reads ``"true"`` and ``"yes"`` as a dry
+    run (``model.stated_flag``), but admitting by a second reading of the same
+    argument is how the two would come to disagree, and the cost of the narrower
+    one is only that a spelled-out flag parks: a call admitted here that the
+    handler took as a real declaration would put work on the board unreviewed. A
+    spelling that parks is shown on its row as the dry run it is (``summarize``).
+
+    **What a dry run tells its caller is more than a board read, and that is
+    accepted.** For a duplicate id it says whether the id is a task of another
+    session in this process, and names that session when the operator has taken
+    it off the fleet (``TaskWriteSettled.held_off_fleet``). A real declaration
+    says the same, but parks first under ``STRICT`` and ``PERMISSIVE``; this one
+    does not. It stays auto-approved on ``_BUS_AUTO``'s grounds for
+    ``why_blocked``: ids within one local process are not secret, and nothing of
+    the other task but its id and its session's is said.
+    """
+    return tool_name == _BUS_DECLARE and tool_input.get("dry_run") is True
+
+
 def classify(
     tool_name: str,
     tool_input: Mapping[str, Any],
@@ -1043,7 +1102,7 @@ def classify(
     if reads or (tool_name == "Bash" and policy is Policy.PERMISSIVE):
         if records_read(tool_name, tool_input, session_id=session_id, cwd=cwd) is not None:
             return Disposition.REQUIRE_APPROVAL
-    if tool_name in _AUTO or tool_name in _BUS_AUTO:
+    if tool_name in _AUTO or tool_name in _BUS_AUTO or _dry_run(tool_name, tool_input):
         return Disposition.AUTO_APPROVE
     if _policy_admits(policy, tool_name, tool_input):
         return Disposition.AUTO_APPROVE
@@ -1188,8 +1247,23 @@ def summarize(
         # and whether it is sequenced behind anything -- because sign-off is a
         # scoping moment and those two are what the operator would otherwise open
         # the row to find.
+        #
+        # A dry run that parked -- any spelling ``_dry_run`` does not admit -- leads
+        # with that, read by the handler's own rule (``stated_flag``), so a row
+        # approved as a declaration is one the handler declares. A value the
+        # handler refuses says so in the same place, as ``standing`` does.
         title = str(tool_input.get("title") or "").strip()
-        parts = [f"declare ({standing(tool_input.get('basis'))}) {title or '(untitled)'}"]
+        rehearsed = stated_flag(tool_input.get("dry_run"))
+        lead = (
+            "DRY RUN, declares nothing: "
+            if rehearsed
+            else (
+                f"dry_run {str(tool_input.get('dry_run'))!r} is not one the bus accepts: "
+                if rehearsed is None
+                else ""
+            )
+        )
+        parts = [f"{lead}declare ({standing(tool_input.get('basis'))}) {title or '(untitled)'}"]
         touches = tool_input.get("touches") or ()
         if touches:
             parts.append(f"writes {', '.join(str(p) for p in touches)}")
@@ -1232,6 +1306,13 @@ def summarize(
         elif held_to:
             parts.append(f"replaces its property -- {held_to}")
         return clip(" · ".join(parts))
+    if tool_name == _BUS_WITHDRAW:
+        # The question at this row is "may this work stop being wanted", so it
+        # leads with which task. The reason follows, since it is what the holder
+        # and every reader of the row will be given in place of a result.
+        task = str(tool_input.get("task_id") or "?").strip()
+        reason = " ".join(str(tool_input.get("reason") or "").split())
+        return clip(f"withdraw {task}: {reason or '(no reason given)'}")
     if not tool_input:
         return clip(tool_name)
     key = next(iter(tool_input))

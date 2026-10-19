@@ -2878,6 +2878,42 @@ def test_a_closed_task_reaches_the_pane_from_the_store_marked_closed(monkeypatch
     assert not any(line.startswith("[") for line in said), "no owner on a closed row"
 
 
+_WITHDRAWN = "withdrawn by its declarer -- not finished by an agent, and no work is reported"
+
+
+def test_a_row_its_declarer_withdrew_reads_as_withdrawn_and_not_as_an_unverified_result() -> None:
+    """
+    The close's rule for the declarer's withdrawal: who ended it and that no work
+    is reported, and none of a claimer's silences, since there was no claimer.
+    Not the close's words: the operator did not end it.
+    """
+    row = dataclasses.replace(
+        board_task(state=TaskState.COMPLETED, result="withdrawn by its declarer: replaced"),
+        withdrawn=True,
+    )
+
+    assert board_pane.standing_label(row) == _WITHDRAWN
+    assert board_pane.result_heading(row) == f"{_WITHDRAWN}:"
+    assert board_pane.unrun_heading(row) == ""
+    assert board_pane.settled(row)
+    assert "operator" not in board_pane.standing_label(row)
+
+
+def test_a_withdrawn_task_reaches_the_pane_from_the_store_marked_withdrawn(monkeypatch) -> None:
+    """The wiring: the reducer's withdrawal, through ``board_tasks``, to the drawn line."""
+    from pptmstr.intents import TaskWithdrawn
+    from pptmstr.store import _apply
+
+    snap, _ = _apply(_claimed_snapshot(), TaskWithdrawn(ROOT, "t1", "replaced"), 5.0)
+
+    said = drawn(monkeypatch, snap)
+
+    assert f"{_WITHDRAWN}:" in said
+    assert "withdrawn by its declarer: replaced" in said
+    assert not any("basis unstated" in line and "result" in line for line in said)
+    assert not any(line.startswith("[") for line in said), "no owner on a withdrawn row"
+
+
 def test_a_wait_on_another_sessions_id_is_named_as_that_and_says_what_ends_it(monkeypatch) -> None:
     """
     "never declared" would send the lead to declare an id that is refused. The

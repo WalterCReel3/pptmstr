@@ -48,6 +48,7 @@ from pptmstr.intents import (
     TaskCompleted,
     TaskDeclared,
     TaskReleased,
+    TaskWithdrawn,
 )
 from pptmstr.model import (
     Basis,
@@ -126,6 +127,8 @@ def generated_round(seed: int, *, long_text: bool = False, scale: int = 1) -> St
     are how a reply is pushed past its ceiling.
     """
     rng = random.Random(seed)
+    # Its own stream, so adding withdrawals left every other draw as it was.
+    withdraws = random.Random(f"withdraw-{seed}")
     pad = " lorem ipsum dolor" * 220 if long_text else ""
     store = Store()
     team(store, S1)
@@ -148,11 +151,16 @@ def generated_round(seed: int, *, long_text: bool = False, scale: int = 1) -> St
                 )
             )
             fate = rng.choice(("pending", "claimed", "released", "completed", "completed"))
+            withdrawn = withdraws.random() < 0.2
             if fate == "pending":
+                if withdrawn:
+                    store.apply(TaskWithdrawn(lead, tid, f"not wanted{pad}", at=next(clock)))
                 continue
             store.apply(TaskClaimRequested(dev, request_id=f"k-{tid}", task_id=tid))
             if fate == "released":
                 store.apply(TaskReleased(dev, tid, at=next(clock)))
+            if fate in ("claimed", "released") and withdrawn:
+                store.apply(TaskWithdrawn(lead, tid, f"not wanted{pad}", at=next(clock)))
             if fate == "completed":
                 store.apply(
                     TaskCompleted(
@@ -190,10 +198,14 @@ def unverified_oracle(snap: Snapshot, session: str) -> set[tuple[str, Doubt]]:
     """
     What the board holds unverified, read off the records with no help from the
     code under test: one entry per statement its author did not mark as run.
+    A withdrawn task holds none: its declarer took the specification back, and
+    its result is the declarer's reason, which asserts no work.
     """
     held: set[tuple[str, Doubt]] = set()
     for task in snap.tasks.values():
         if task.declared_by is None or task.declared_by[0] != session:
+            continue
+        if task.withdrawn:
             continue
         if task.detail and task.basis is not Basis.RUN:
             held.add((task.id, Doubt.SPECIFICATION))
@@ -300,6 +312,8 @@ def test_the_generated_boards_reach_every_case_the_invariants_claim_to_cover() -
         "incident naming no task": False,
         "incident naming a task that was never declared": False,
         "withdrawn incident naming a task on the board": False,
+        "withdrawn task with a specification": False,
+        "withdrawn task that was held": False,
     }
     for seed in SEEDS:
         snap = generated_round(seed).snapshot()
@@ -310,6 +324,10 @@ def test_the_generated_boards_reach_every_case_the_invariants_claim_to_cover() -
         )
         seen["foreign incident"] |= bool(incident_oracle(snap, S2))
         seen["incident a row carries"] |= bool(broadcast_oracle(snap, S1))
+        for t in snap.tasks.values():
+            if t.withdrawn and t.declared_by is not None and t.declared_by[0] == S1:
+                seen["withdrawn task with a specification"] |= bool(t.detail)
+                seen["withdrawn task that was held"] |= bool(t.held_by)
         for c in snap.concerns.values():
             if not c.incident or c.sender[0] != S1:
                 continue
@@ -564,6 +582,91 @@ def test_the_operators_closing_reason_is_not_an_unverified_statement_of_work() -
 
     assert [(u.task_id, u.doubt) for u in unverified] == [
         ("t1", Doubt.SPECIFICATION),
+        ("t2", Doubt.SPECIFICATION),
+        ("t2", Doubt.RESULT),
+        ("t2", Doubt.NOT_RUN),
+    ]
+
+
+def _withdrawn_round() -> Store:
+    """
+    t1 claimed and then withdrawn by its declarer at 30, with a specification
+    that is not marked run. t2 completed at 31 by a claimer whose result opens
+    with the withdrawal's words.
+    """
+    store = Store()
+    team(store)
+    for tid in ("t1", "t2"):
+        store.apply(
+            TaskDeclared(
+                Task(id=tid, title=f"do {tid}", detail="spec", declared_at=1.0), node_id=LEAD
+            )
+        )
+        store.apply(TaskClaimRequested(DEV, request_id=f"k-{tid}", task_id=tid))
+    store.apply(TaskWithdrawn(LEAD, "t1", "superseded\nby t9", at=30.0))
+    store.apply(TaskCompleted(DEV, "t2", at=31.0, result="withdrawn by its declarer: trust me"))
+    return store
+
+
+def test_a_task_its_declarer_withdrew_is_reported_as_withdrawn_and_never_as_completed() -> None:
+    """
+    A withdrawal finished nothing, like a close, so it has its own kind, count
+    and line with nobody named as having done it. Decided by the row's flag: a
+    claimer typing the same words has completed its task.
+    """
+    d = digest(_withdrawn_round().snapshot(), S1, since=25.0)
+
+    assert [(c.task_id, c.kind, c.holder, c.line) for c in d.changed] == [
+        ("t1", ChangeKind.WITHDRAWN, None, "withdrawn by its declarer: superseded"),
+        ("t2", ChangeKind.COMPLETED, "builder", "withdrawn by its declarer: trust me"),
+    ]
+    assert [change_label(c) for c in d.changed] == [
+        "withdrawn by its declarer: t1 do t1",
+        "completed by builder: t2 do t2",
+    ]
+    assert changed_heading(d.changed) == "CHANGED (2): 1 withdrawn, 1 completed"
+
+
+def test_a_withdrawal_by_the_lead_or_with_an_edited_reason_says_whose_words_it_is() -> None:
+    """
+    The lead withdrew t1 in place of the reviewer that declared it and stopped;
+    the operator rewrote the lead's reason for t2. Neither line says "withdrawn
+    by its declarer" over words the declarer did not write, and the tally counts
+    both under the one word.
+    """
+    from pptmstr.intents import AgentFinished
+    from pptmstr.model import REASON_EDITED, WITHDRAWN_BY_LEAD, AgentState
+
+    store = Store()
+    team(store)
+    store.apply(TaskDeclared(Task(id="t1", title="do t1", declared_at=1.0), node_id=QA))
+    store.apply(TaskDeclared(Task(id="t2", title="do t2", declared_at=1.0), node_id=LEAD))
+    store.apply(AgentFinished(QA, AgentState.DONE, ended_at=2.0))
+    store.apply(TaskWithdrawn(LEAD, "t1", "the plan changed", at=30.0))
+    store.apply(TaskWithdrawn(LEAD, "t2", "the operator's words", at=31.0, edited=True))
+
+    d = digest(store.snapshot(), S1, since=25.0)
+
+    assert [change_label(c) for c in d.changed] == [
+        f"{WITHDRAWN_BY_LEAD}: t1 do t1",
+        f"withdrawn by its declarer, {REASON_EDITED}: t2 do t2",
+    ]
+    assert [(c.withdrawn_by_lead, c.withdrawal_edited) for c in d.changed] == [
+        (True, False),
+        (False, True),
+    ]
+    assert changed_heading(d.changed) == "CHANGED (2): 2 withdrawn"
+
+
+def test_a_withdrawn_task_is_nowhere_in_the_unverified_slot() -> None:
+    """
+    Neither its reason, which asserts no work, nor its specification, which its
+    declarer has taken back -- where a claimer's result in the same words is
+    listed, and a closed task's specification still is.
+    """
+    unverified = digest(_withdrawn_round().snapshot(), S1).unverified
+
+    assert [(u.task_id, u.doubt) for u in unverified] == [
         ("t2", Doubt.SPECIFICATION),
         ("t2", Doubt.RESULT),
         ("t2", Doubt.NOT_RUN),

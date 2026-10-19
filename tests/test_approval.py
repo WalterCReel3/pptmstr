@@ -147,6 +147,7 @@ def test_adding_a_tool_to_the_review_list_releases_it_under_the_autonomous_polic
             "mcp__pptmstr__post_concern",
             "mcp__pptmstr__declare_task",
             "mcp__pptmstr__amend_task",
+            "mcp__pptmstr__withdraw_task",
         }
     )
 
@@ -392,6 +393,15 @@ _TODAY: tuple[tuple[str, Mapping[str, Any], Disposition], ...] = (
     # The same board again, summarised. What it leaves out is what keeps it here:
     # the queue rows of calls nobody has approved (see `_BUS_AUTO`'s comment).
     ("mcp__pptmstr__read_digest", {}, Disposition.AUTO_APPROVE),
+    ("mcp__pptmstr__why_blocked", {"task_id": "t-1"}, Disposition.AUTO_APPROVE),
+    ("mcp__pptmstr__ready", {}, Disposition.AUTO_APPROVE),
+    ("mcp__pptmstr__read_board", {"open_only": True}, Disposition.AUTO_APPROVE),
+    # A dry run declares nothing, so it is not the declaration ``_REVIEW`` parks.
+    (
+        "mcp__pptmstr__declare_task",
+        {"title": "x", "dry_run": True},
+        Disposition.AUTO_APPROVE,
+    ),
     ("mcp__pptmstr__claim_task", {}, Disposition.AUTO_APPROVE),
     ("mcp__pptmstr__complete_task", {"task_id": "t-1"}, Disposition.AUTO_APPROVE),
     # A completion carrying a result is the same call to the gate, which matches on
@@ -442,7 +452,14 @@ _TODAY: tuple[tuple[str, Mapping[str, Any], Disposition], ...] = (
     # Bus calls that reach another agent, or bring work into existence.
     ("mcp__pptmstr__post_concern", {"to": "lead"}, Disposition.REQUIRE_APPROVAL),
     ("mcp__pptmstr__declare_task", {"title": "x"}, Disposition.REQUIRE_APPROVAL),
+    # Only a JSON true is admitted as a dry run. The handler reads "true" as one
+    # too, and parking it costs a press; admitting a reading the handler might
+    # not share would land work unreviewed.
+    ("mcp__pptmstr__declare_task", {"title": "x", "dry_run": False}, Disposition.REQUIRE_APPROVAL),
+    ("mcp__pptmstr__declare_task", {"title": "x", "dry_run": "true"}, Disposition.REQUIRE_APPROVAL),
+    ("mcp__pptmstr__declare_task", {"title": "x", "dry_run": 1}, Disposition.REQUIRE_APPROVAL),
     ("mcp__pptmstr__amend_task", {"task_id": "t1", "detail": "x"}, Disposition.REQUIRE_APPROVAL),
+    ("mcp__pptmstr__withdraw_task", {"task_id": "t1", "reason": "x"}, Disposition.REQUIRE_APPROVAL),
     # Egress. A preset may admit these; the default-argument path never does.
     ("WebFetch", {}, Disposition.REQUIRE_APPROVAL),
     ("WebFetch", {"url": "https://example.invalid/doc"}, Disposition.REQUIRE_APPROVAL),
@@ -682,6 +699,38 @@ def test_a_message_to_another_agent_still_parks_under_permissive() -> None:
         "mcp__pptmstr__amend_task",
     ):
         assert classify(tool, {"to": "lead"}, Policy.PERMISSIVE) is Disposition.REQUIRE_APPROVAL
+
+
+@pytest.mark.parametrize("policy", list(Policy))
+def test_a_withdrawal_meets_exactly_what_a_declaration_meets_on_every_rung(
+    policy: Policy,
+) -> None:
+    """
+    A withdrawal undoes a declaration -- it ends work the operator approved and
+    lets go of everything waiting on it -- so no rung makes it easier than the
+    declaration was. Spelled, so it does not read the name out of the module.
+    """
+    withdraw = classify("mcp__pptmstr__withdraw_task", {"task_id": "t1", "reason": "x"}, policy)
+    declare = classify("mcp__pptmstr__declare_task", {"title": "x"}, policy)
+
+    assert withdraw is declare
+    assert withdraw is (
+        Disposition.AUTO_APPROVE if policy is Policy.AUTONOMOUS else Disposition.REQUIRE_APPROVAL
+    )
+
+
+def test_a_withdrawals_row_says_which_task_and_why() -> None:
+    """
+    The reason is what the holder and every reader are given in place of a
+    result, so the operator approves it from the row. Put on one line, and
+    said to be missing rather than shown as nothing.
+    """
+    tool = "mcp__pptmstr__withdraw_task"
+
+    assert summarize(tool, {"task_id": "t1", "reason": "replaced\n by t9"}) == (
+        "withdraw t1: replaced by t9"
+    )
+    assert summarize(tool, {"task_id": "t1"}) == "withdraw t1: (no reason given)"
 
 
 @pytest.mark.parametrize("policy", list(Policy))

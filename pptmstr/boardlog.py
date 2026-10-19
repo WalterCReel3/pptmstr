@@ -112,7 +112,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar, assert_never, get_args, get_type_hints
 
-from .model import ApprovedWrites, ConcernState, NodeId, TaskState, closing_result
+from .board import ROOT_NAMES
+from .model import (
+    ApprovedWrites,
+    ConcernState,
+    NodeId,
+    TaskState,
+    closing_result,
+    withdrawal_result,
+)
 
 # `00000042.json`. The name is the ordinal and nothing else: a kind in the name
 # would let two writers link two different names for one ordinal, and exclusivity
@@ -169,6 +177,10 @@ class Declared:
     # this: one string is the root of that session, two are a session and the
     # agent id of one of its sub-agents, and none is "not recorded".
     declared_by_id: tuple[str, ...] = ()
+    # The declarer named ``model.ALL_WRITERS``: the task waits on every writer on
+    # its board (``model.Task.after_all_writers``). The word itself is not in
+    # ``depends_on``. False is what a record written before the field reads as.
+    after_all_writers: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -288,6 +300,33 @@ class Closed:
     at: float
     task_id: str
     reason: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class WithdrawnByDeclarer:
+    """
+    A task was withdrawn (``intents.TaskWithdrawn``): it is finished because
+    the agent that declared it no longer wants it, or because its session's
+    root withdrew it in place of a declarer that had stopped, and no agent's
+    work is reported.
+
+    Its own kind for ``Closed``'s reasons, and not a ``Closed``: it has a party,
+    the withdrawer, which a close never has. Which of the two withdrew it is
+    read off ``by`` against the task's declarer, and is not a field of its own:
+    the party is already here. ``reason`` is the store's text for the reason;
+    the result a board shows is composed from it where the reducer composes it
+    (``model.withdrawal_result``). ``edited`` is that the operator rewrote the
+    reason in flight; a record written before the field reads as False.
+    """
+
+    KIND: ClassVar[str] = "task-withdrawn"
+
+    at: float
+    task_id: str
+    by: str
+    reason: str
+    by_id: tuple[str, ...] = ()
+    edited: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -459,6 +498,7 @@ Known = (
     | Handed
     | Completed
     | Closed
+    | WithdrawnByDeclarer
     | Amended
     | WritesAccrued
     | Posted
@@ -914,7 +954,7 @@ def _named(record: Record) -> tuple[tuple[str | None, tuple[str, ...]], ...]:
     match record:
         case Declared():
             return ((record.declared_by, record.declared_by_id),)
-        case Claimed() | Released() | Handed() | Completed() | Amended():
+        case Claimed() | Released() | Handed() | Completed() | Amended() | WithdrawnByDeclarer():
             return ((record.by, record.by_id),)
         case Reclaimed():
             return ((record.by, record.by_id), (record.holder, record.holder_id))
@@ -1005,6 +1045,17 @@ class RestoredTask:
     # The operator closed it: finished with no holder, and ``result`` is the
     # closing words and the operator's reason. ``model.Task.closed_by_operator``.
     closed_by_operator: bool = False
+    # Its declarer withdrew it: finished with no holder, and ``result`` is the
+    # withdrawal's words and the declarer's reason. ``model.Task.withdrawn``.
+    withdrawn: bool = False
+    # Of a withdrawn task: its session's root withdrew it, in place of its
+    # declarer. ``model.Task.withdrawn_by_lead``.
+    withdrawn_by_lead: bool = False
+    # Of a withdrawn task: the operator rewrote the reason in flight.
+    # ``model.Task.withdrawal_edited``.
+    withdrawal_edited: bool = False
+    # It waits on every writer on its board. ``model.Task.after_all_writers``.
+    after_all_writers: bool = False
     # The log holds a record about this task that one reducer could not have
     # appended after the ones before it. The task is as the records before that
     # one left it; that record and every later one about it are in
@@ -1228,6 +1279,7 @@ def restore(records: Iterable[Record]) -> Board:
                     ),
                     depends_on=record.depends_on,
                     touches=record.touches,
+                    after_all_writers=record.after_all_writers,
                 )
             case (
                 Claimed()
@@ -1236,6 +1288,7 @@ def restore(records: Iterable[Record]) -> Board:
                 | Handed()
                 | Completed()
                 | Closed()
+                | WithdrawnByDeclarer()
                 | Amended()
                 | WritesAccrued()
             ):
@@ -1330,7 +1383,17 @@ def restore(records: Iterable[Record]) -> Board:
     )
 
 
-_TaskRecord = Claimed | Released | Reclaimed | Handed | Completed | Closed | Amended | WritesAccrued
+_TaskRecord = (
+    Claimed
+    | Released
+    | Reclaimed
+    | Handed
+    | Completed
+    | Closed
+    | WithdrawnByDeclarer
+    | Amended
+    | WritesAccrued
+)
 
 
 def _amender(record: Amended) -> Party | None:
@@ -1355,7 +1418,9 @@ def _one_writers(task: RestoredTask, record: _TaskRecord) -> bool:
     -- and is not earlier than the one already recorded. A measured write needs
     the task held. The operator's amendment is taken in any state; an agent's
     only from the party that declared the task and has never held it. The
-    operator's close is taken in any state but finished.
+    operator's close is taken in any state but finished, and so is a
+    withdrawal, from the party that declared the task or from the root of that
+    party's session (``_withdrawer``).
     """
     match record:
         case Claimed():
@@ -1379,11 +1444,40 @@ def _one_writers(task: RestoredTask, record: _TaskRecord) -> bool:
             return task.state is TaskState.CLAIMED
         case Closed():
             return task.state is not TaskState.COMPLETED
+        case WithdrawnByDeclarer():
+            return task.state is not TaskState.COMPLETED and _withdrawer(task, record) is not None
         case Amended():
             amender = _amender(record)
             return amender is None or (amender == task.declared_by and amender not in task.held_by)
         case _:
             assert_never(record)
+
+
+def _withdrawer(task: RestoredTask, record: WithdrawnByDeclarer) -> bool | None:
+    """
+    Who a withdrawal is by, as ``store._withdrawer_refusal`` admits it: False
+    for the task's declarer, True for the root of the declarer's session
+    standing in for it, and None for anybody else.
+
+    **Half of the store's rule, and the half a log can ask.** The store also
+    asks that a root withdrawing in the declarer's place found the declarer
+    stopped (``store._has_stopped``), which is about agent records this log does
+    not hold -- as a reclaim's record cannot say its holder was of an earlier
+    run (``Reclaimed``). What it can say is who the withdrawer was, and that no
+    sub-agent withdrew another's task.
+    """
+    by = _party(record.by, record.by_id)
+    declarer = task.declared_by
+    if by == declarer:
+        return False
+    if not isinstance(by, tuple) or by[1] is not None:
+        return None
+    if isinstance(declarer, str):
+        # Named by address alone, a declarer carries no session to compare and
+        # is this log's: one log is one session's board (``session_dir``). A
+        # root's address is the root, as the store places it (``ROOT_NAMES``).
+        return declarer not in ROOT_NAMES
+    return True if declarer[0] == by[0] else None
 
 
 def _waiting(concern: RestoredConcern) -> bool:
@@ -1441,6 +1535,21 @@ def _task_after(task: RestoredTask, record: _TaskRecord) -> RestoredTask:
                 holder=None,
                 claimed_version=None,
                 closed_by_operator=True,
+            )
+        case WithdrawnByDeclarer():
+            by_lead = _withdrawer(task, record) is True
+            return dataclasses.replace(
+                task,
+                state=TaskState.COMPLETED,
+                completed_at=record.at,
+                result=withdrawal_result(record.reason, by_lead, record.edited),
+                result_basis=None,
+                not_run=None,
+                holder=None,
+                claimed_version=None,
+                withdrawn=True,
+                withdrawn_by_lead=by_lead,
+                withdrawal_edited=record.edited,
             )
         case Amended():
             held_to = task.property if record.property is None else record.property

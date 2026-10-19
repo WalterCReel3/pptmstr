@@ -30,9 +30,12 @@ Everything a handler returns to the model is text. Everything it changes goes
 through the intent queue, and **a handler never composes an outcome it did not
 wait for**. Every tool but one parks on the Bridge's third crossing and is
 answered by the store on the next frame (``effects.py``): ``read_inbox``,
-``read_board``, ``read_task``, ``read_digest``, ``read_decisions`` and
-``claim_task``, which ask questions, and the four board writes and the two
-decision writes, which assert facts the reducer is entitled to refuse.
+``read_board``, ``read_task``, ``read_digest``, ``read_decisions``,
+``why_blocked``, ``ready`` and ``claim_task``, which ask questions, and the
+board writes and the two decision writes, which assert facts the reducer is
+entitled to refuse. ``why_blocked``, ``ready`` and a dry-run ``declare_task``
+are board reads whose answer is computed here, by ``boardgraph``, from the
+snapshot the read delivered; a dry run emits no write.
 
 **The bus raises and withdraws a decision and never ends one.** An answer and a
 dismissal are the operator's, and the reducer tells them from an agent's only by
@@ -69,14 +72,15 @@ from typing import TYPE_CHECKING, Any, assert_never
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
-from . import brief
+from . import boardgraph, brief
 from .board import (
     UNDELIVERABLE,
     BoardConcern,
     BoardTask,
     BoardVersion,
+    all_writers_label,
     basis_label,
-    closed_label,
+    ended_label,
     foreign_wait_label,
     incident_marker,
     not_run_label,
@@ -84,6 +88,17 @@ from .board import (
     role_name,
     stale_label,
     version_label,
+)
+from .boardgraph import (
+    DryRun,
+    Edge,
+    Hop,
+    Ready,
+    Root,
+    RootKind,
+    Verdict,
+    WhyBlocked,
+    is_open,
 )
 from .bridge import Bridge
 from .digest import (
@@ -130,14 +145,17 @@ from .intents import (
     TaskDeclared,
     TaskReleased,
     TaskVersionHanded,
+    TaskWithdrawn,
 )
 from .model import (
+    ALL_WRITERS,
     BEFORE_RESTART,
     MAX_BLOCKED_TASKS,
     MAX_DECISION_TEXT_CHARS,
     MAX_OPEN_DECISIONS_PER_ASKER,
     MAX_OPEN_SUBAGENT_DECISIONS,
     MAX_PROPERTY_CHARS,
+    MAX_WITHDRAWAL_REASON_CHARS,
     Answered,
     Basis,
     ClaimRefusal,
@@ -159,10 +177,14 @@ from .model import (
     closing_result,
     is_closing_notice,
     is_operator,
+    is_withdrawal_notice,
     normalised_property,
     property_overrun,
     stated_flag,
     stated_incident,
+    stored_as_sent,
+    withdrawal_notice_id,
+    withdrawal_reason,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - import cycle only matters to the checker
@@ -698,18 +720,20 @@ def _board_line(
         parts.append(f"held by {row.owner}")
     if row.owner_gone:
         parts.append(f"but {_stranded(row, root)}")
-    if row.blocked_on:
-        parts.append(f"waiting on {', '.join(row.blocked_on)}")
+    if _waiting_on(row):
+        parts.append(f"waiting on {', '.join(_waiting_on(row))}")
+    if row.after_all_writers:
+        parts.append(all_writers_label(row))
     if _undeclared(row):
         parts.append(f"{_UNDECLARED}: {', '.join(_undeclared(row))}")
     if row.held_elsewhere:
         parts.append(foreign_wait_label(row))
     if row.touches:
         parts.append(f"writes {', '.join(row.touches)}")
-    if row.closed_by_operator:
+    if row.unworked:
         # On the headline, beside the state it qualifies: "completed" alone
         # reads as work done, and this outlives a cut that takes the reason.
-        parts.append(closed_label(row))
+        parts.append(ended_label(row))
     # Which specification this is and whether its holder has seen it, on the
     # headline for the reason the basis is: both outlive a cut that takes the
     # text, and a replaced specification shown without its version reads as the
@@ -853,6 +877,23 @@ _CLOSED_UNDER_YOU = (
     "with this id shows the operator's reason."
 )
 
+# What an agent is told when it tries to finish or give back a task that was
+# withdrawn (``TaskRefusal.WITHDRAWN``), and in the notice its withdrawal sends
+# the holder. The reason follows it, introduced with whose words it is, where the
+# row can be read back (``withdrawn_because``). Not ``_CLOSED_UNDER_YOU``: the
+# operator did not stop this, and an agent told so would take it up with the
+# wrong party. It does not say who withdrew it, which is the declarer or the
+# session's lead standing in for it, and is said where the reason is.
+_WITHDRAWN_UNDER_YOU = (
+    "This task was withdrawn: the work is no longer wanted. It is finished "
+    "as withdrawn, not as done, and it is nobody's: complete_task and release_task "
+    "on it are refused, and nothing sent with either is recorded -- a result "
+    "included. What waited on it has been released, the files it named with it, so "
+    "another agent may be writing them now: stop work on this task. If what you "
+    "did, or left half-done in those files, matters to whoever is next, post it to "
+    "the lead as a concern."
+)
+
 # A dependency on an id nothing in this window has, on a row. Capitals because
 # it is a blocker that never clears by waiting. An id another session's task has
 # is not said this way: a reader told "never declared" goes on to declare it
@@ -910,12 +951,47 @@ def _closing_reason(result: str) -> str:
     return result[len(closing_result("")) :].removeprefix(":").removeprefix(" ")
 
 
+def _withdrawal_reason(row: BoardTask) -> str:
+    """
+    The reason a task was withdrawn with, out of the result the store composed
+    around it (``model.withdrawal_reason``). Only for a row known to be
+    withdrawn, for ``_closing_reason``'s reason.
+    """
+    return withdrawal_reason(row.result, row.withdrawn_by_lead, row.withdrawal_edited)
+
+
+# What follows whose reason a withdrawal's is, where the operator rewrote it
+# (``model.REASON_EDITED`` on a label, which has no "reason" before it).
+_AS_EDITED = "as edited by the operator"
+
+
+def _withdrawal_heading(by_lead: bool, edited: bool) -> str:
+    """
+    Whose words a withdrawal's reason is, as the line that introduces it.
+
+    The reason stands behind the mark that quotes an agent, so this line is
+    what says which agent, and that the words are no longer that agent's where
+    the operator rewrote them: the session's lead, standing in for a declarer
+    that had stopped (``model.Task.withdrawn_by_lead``), is not the declarer.
+    """
+    if by_lead:
+        said = "its session lead's reason for withdrawing it, its declarer having stopped"
+    else:
+        said = "its declarer's reason for withdrawing it"
+    return f"{said}, {_AS_EDITED}:" if edited else f"{said}:"
+
+
 def _account(row: BoardTask) -> str:
     """
     The text a finished row lays out where a result goes: the claimer's result,
-    or the operator's reason on a row the operator closed.
+    the operator's reason on a row the operator closed, or the declarer's on a
+    row its declarer withdrew.
     """
-    return _closing_reason(row.result) if row.closed_by_operator else row.result
+    if row.closed_by_operator:
+        return _closing_reason(row.result)
+    if row.withdrawn:
+        return _withdrawal_reason(row)
+    return row.result
 
 
 def _account_mark(row: BoardTask) -> str:
@@ -941,8 +1017,15 @@ def _agent_notes(concerns: Sequence[BoardConcern]) -> dict[ConcernId, BoardConce
     agent's, behind the mark that says an agent is being quoted. Nothing is
     lost with it: its body is the reason, which the closed row it names shows
     behind the operator's mark, and its recipient reads it in its inbox.
+
+    Nor the notice to the holder of a withdrawn task
+    (``model.withdrawal_notice``), for the same reason: its subject is
+    pptmstr's sentence under the withdrawer's name, and its body is the reason
+    the withdrawn row already shows with whose words it is.
     """
-    return {c.id: c for c in concerns if not is_closing_notice(c.id)}
+    return {
+        c.id: c for c in concerns if not is_closing_notice(c.id) and not is_withdrawal_notice(c.id)
+    }
 
 
 def _operators_notice(notice: Concern) -> list[str]:
@@ -969,6 +1052,27 @@ def _operators_notice(notice: Concern) -> list[str]:
     ]
 
 
+def _withdrawal_notice_lines(notice: Concern, who: str) -> list[str]:
+    """
+    The notice to the holder of a withdrawn task (``model.withdrawal_notice``),
+    as the lines an inbox shows it on.
+
+    Not laid out as ``who``'s concern, because ``who`` wrote only the body: the
+    subject is pptmstr's sentence, which says who withdrew the task, and is
+    shown as this tool's words. The body is the withdrawer's reason, behind the
+    mark that quotes an agent, introduced as the operator's rewrite where it is
+    one.
+    """
+    about = f" {_named(notice.task_id)}" if notice.task_id else ""
+    edited = f", {_AS_EDITED}" if notice.edited else ""
+    return [
+        f"[from pptmstr, on behalf of {who}] ABOUT TASK{about}, WHICH YOU HELD. "
+        f"{_one_line(notice.subject)}. {_WITHDRAWN_UNDER_YOU}",
+        f"The reason {who} gave{edited}:",
+        *_quoted(notice.body, len(notice.body), "")[0],
+    ]
+
+
 def _result_heading(row: BoardTask) -> str:
     """
     What a result is introduced as: whose account it is.
@@ -989,6 +1093,10 @@ def _result_heading(row: BoardTask) -> str:
     """
     if row.closed_by_operator:
         return "the operator's reason for closing it:"
+    if row.withdrawn:
+        # An agent's words, behind the mark that quotes an agent: the
+        # withdrawal is an agent's act, unlike a close.
+        return _withdrawal_heading(row.withdrawn_by_lead, row.withdrawal_edited)
     said = basis_label(row.result_basis)
     if not row.not_run:
         said += f"; {not_run_label(row.not_run)}"
@@ -1205,8 +1313,21 @@ def _delimited_task(row: BoardTask) -> BoardTask:
         held_elsewhere=each(row.held_elsewhere),
         touches=each(row.touches),
         depends_on=each(row.depends_on),
+        writers=each(row.writers),
         property=_said(row.property) if row.property else "",
     )
+
+
+def _waiting_on(row: BoardTask) -> tuple[str, ...]:
+    """
+    What a row lists as "waiting on": ``blocked_on`` without the writers
+    ``all_writers_label`` names, so a gate's row lists each writer once. Those
+    lines are never cut, and a board of N writers would otherwise carry 2N ids
+    on every gate.
+    """
+    if not row.after_all_writers:
+        return row.blocked_on
+    return tuple(t for t in row.blocked_on if t not in row.writers)
 
 
 def _delimited_note(note: BoardConcern) -> BoardConcern:
@@ -1277,7 +1398,10 @@ def _laid(lines: Sequence[str]) -> str:
 
 
 def _board_text(
-    tasks: Sequence[BoardTask], by_id: Mapping[ConcernId, BoardConcern], root: bool = False
+    tasks: Sequence[BoardTask],
+    by_id: Mapping[ConcernId, BoardConcern],
+    root: bool = False,
+    finished: int | None = None,
 ) -> str:
     """
     The whole board reply, bounded.
@@ -1307,9 +1431,19 @@ def _board_text(
 
     So the bound this holds is ``max(_MAX_BOARD_CHARS, floor + notice)``, and it is
     the ceiling itself for every board whose structure fits inside it.
+
+    ``finished`` is how many finished tasks an open-only read left out, or None
+    for a read of every task; a listing short of rows says so in its first line.
     """
     closed = any(row.closed_by_operator and _account(row) for row in tasks)
-    preamble = f"{len(tasks)} task(s) on your board. {_legend(closed)}"
+    if finished is None:
+        counted = f"{len(tasks)} task(s) on your board."
+    else:
+        counted = (
+            f"{len(tasks)} open task(s) on your board; {finished} finished one(s) -- "
+            f"completed, closed or withdrawn -- are not listed, and read_board() lists them."
+        )
+    preamble = f"{counted} {_legend(closed)}"
     full = "\n".join([preamble, *(_board_line(row, by_id, root=root) for row in tasks)])
     if len(full) <= _MAX_BOARD_CHARS:
         return full
@@ -1446,11 +1580,11 @@ def _task_lines(
     lines = [f"Task {row.id} [{row.state.value}] {row.title}"]
     stated = property_label(row.property)
     lines.append(stated[:1].upper() + stated[1:] if stated else "Must not break: (none was stated)")
-    if row.closed_by_operator:
+    if row.unworked:
         # In place of a holder: the row has none, and "held by nobody" under
         # "completed" would leave a reader looking for who finished it.
-        closed = closed_label(row)
-        lines.append(closed[:1].upper() + closed[1:])
+        ended = ended_label(row)
+        lines.append(ended[:1].upper() + ended[1:])
     elif row.owner is None:
         lines.append("held by nobody")
     elif row.owner_gone:
@@ -1459,8 +1593,11 @@ def _task_lines(
         lines.append(f"held by {row.owner}")
     if row.depends_on:
         lines.append(f"depends on: {', '.join(row.depends_on)}")
-    if row.blocked_on:
-        lines.append(f"still waiting on: {', '.join(row.blocked_on)}")
+    if _waiting_on(row):
+        lines.append(f"still waiting on: {', '.join(_waiting_on(row))}")
+    if row.after_all_writers:
+        waits = all_writers_label(row)
+        lines.append(f"{waits[:1].upper()}{waits[1:]}.")
     if _undeclared(row):
         lines += [f"{_UNDECLARED}: {', '.join(_undeclared(row))}", _UNDECLARED_ACCOUNT]
     if row.held_elsewhere:
@@ -1888,8 +2025,17 @@ def _change_lines(change: TaskChange, prose: _Prose) -> list[str]:
     # A close's line is the store's label and then the operator's reason. The
     # label is on the line above already; what is left is the operator's, and
     # behind an agent's mark it would be attributed to nobody who wrote it.
+    # A withdrawal's line is the store's label and then the declarer's reason:
+    # the reason alone goes behind the agent mark, the declarer being an agent,
+    # so the store's words are not quoted as the declarer's. No legend of its
+    # own is needed, for the same reason: the agent mark already has one.
     closed = change.kind is ChangeKind.CLOSED
-    line = _closing_reason(change.line) if closed else change.line
+    if closed:
+        line = _closing_reason(change.line)
+    elif change.kind is ChangeKind.WITHDRAWN:
+        line = withdrawal_reason(change.line, change.withdrawn_by_lead, change.withdrawal_edited)
+    else:
+        line = change.line
     if line:
         shown, dropped = prose(line, _MAX_DIGEST_LINE_CHARS, _ANSWER if closed else _QUOTE)
         out += shown
@@ -2051,6 +2197,35 @@ def _bounded_digest_text(digest: Digest) -> str:
     return head + notice.format(share=share) + "\n" + rest
 
 
+# What ``model.stored_as_sent`` refuses, in the words of a refusal.
+_NOT_IN_AN_ID = (
+    "a NUL, a lone surrogate, or a backslash followed by u and 0000, 005c, or d800 "
+    "to dfff in any case of hex"
+)
+
+
+def _escaped_dependency_text(entries: Sequence[int]) -> str:
+    """
+    Why a declaration naming, in ``depends_on``, an id no task can be declared
+    under is refused (``TaskRefusal.ESCAPED_ID``).
+
+    ``entries`` are the 1-based positions in ``depends_on`` as the caller sent
+    it. They are named by position and not echoed, for the reason the id is not:
+    what such an entry holds is what cannot be shown as sent.
+    """
+    which = (
+        f"Entry {entries[0]} of its depends_on holds"
+        if len(entries) == 1
+        else f"Entries {', '.join(str(n) for n in entries)} of its depends_on hold"
+    )
+    return (
+        f"{which} a character a task id may not: {_NOT_IN_AN_ID}. Such an id cannot be "
+        "named in a declaration, and a task restored from an older board log under "
+        "such an id cannot be depended on by id. Leave the entry out, or name the "
+        "task it meant by its id, and declare it again."
+    )
+
+
 def _refusal_text(refusal: TaskRefusal) -> str:
     """
     What the agent is told, and what to do about it.
@@ -2069,9 +2244,8 @@ def _refusal_text(refusal: TaskRefusal) -> str:
             return _duplicate_id_text(None)
         case TaskRefusal.WOULD_CYCLE:
             return (
-                "Its depends_on would close a dependency cycle, which leaves every task "
-                "in the loop permanently unclaimable. Check what the tasks you named "
-                "already depend on."
+                "Declaring it would close a dependency cycle, which leaves every task "
+                "in the loop permanently unclaimable."
             )
         case TaskRefusal.NO_SUCH_TASK:
             return f"No task with that id is on your board. {_NOT_ON_BOARD}"
@@ -2104,6 +2278,42 @@ def _refusal_text(refusal: TaskRefusal) -> str:
                 "the agent that sets a specification and the agent bound by it are "
                 "different agents. Leave it for another agent to claim; if none "
                 f"will, {_OPERATOR_CLOSES}, {_CLOSED_IS_NOT_DONE}."
+            )
+        case TaskRefusal.NOT_THE_WITHDRAWER:
+            return (
+                "Only the agent that declared a task can withdraw it, or the lead of "
+                "its session once that agent has stopped, and you are neither for this "
+                "one. Nothing changed. Send its declarer a concern saying why it is no "
+                "longer wanted, or the lead if the declarer is still running."
+            )
+        case TaskRefusal.WITHDRAW_HELD_LIVE:
+            return _held_live_text(None)
+        case TaskRefusal.WITHDRAW_FINISHED:
+            return (
+                "It is already finished -- completed, closed by the operator or "
+                "withdrawn -- so nothing waits on it and there is nothing to withdraw. "
+                "Nothing changed. read_task with this id shows how it ended."
+            )
+        case TaskRefusal.NO_WITHDRAWAL_REASON:
+            return (
+                f"A withdrawal needs a reason of 1 to {MAX_WITHDRAWAL_REASON_CHARS} "
+                "characters: it is shown in place of a result, and is what its holder "
+                "reads. Nothing changed."
+            )
+        case TaskRefusal.WITHDRAWN:
+            return _WITHDRAWN_UNDER_YOU
+        case TaskRefusal.RESERVED_ID:
+            return (
+                f"The id {ALL_WRITERS!r} is reserved: in depends_on it means every task "
+                "on this board that writes a file, so no task can be named by it. "
+                "Declare it again under another id."
+            )
+        case TaskRefusal.ESCAPED_ID:
+            return (
+                f"Its id holds a character a task id may not: {_NOT_IN_AN_ID}. The "
+                "board would list the task under another id than the one you sent, "
+                "and no later call naming it would find it. Declare it again under "
+                "another id."
             )
         case TaskRefusal.NOT_APPLIED:
             return "The board never saw the request -- the application is shutting down."
@@ -2226,6 +2436,16 @@ def _claim_refusal_text(
             )
         case ClaimRefusal.COMPLETE:
             return f"{lost} It is already complete. read_task shows its result."
+        case ClaimRefusal.CLOSED:
+            return (
+                f"{lost} The operator closed it: it is finished as closed, not as done, "
+                f"and nobody did the work. read_task shows the operator's reason."
+            )
+        case ClaimRefusal.WITHDRAWN:
+            return (
+                f"{lost} It was withdrawn: the work is no longer wanted, and nobody did "
+                f"it. read_task shows who withdrew it and why."
+            )
         case ClaimRefusal.WAITING:
             return (
                 f"{lost} It still waits on an unfinished dependency, or on an id no "
@@ -2855,6 +3075,335 @@ def _already_behind_text(behind: tuple[TaskId, ...]) -> str:
     )
 
 
+def _held_live_text(holder: str | None) -> str:
+    """
+    Why the lead may not withdraw a task an agent that can still be woken
+    holds (``TaskRefusal.WITHDRAW_HELD_LIVE``), naming the holder when a read
+    after the refusal still finds it holding the task.
+    """
+    who = (
+        f"{_one_line(holder)} holds it"
+        if holder is not None
+        else "When you asked, it was held by an agent"
+    )
+    return (
+        f"{who}, which can still be woken and may be holding it across a wait, so "
+        "a withdrawal by you would take the work out of its hands. Nothing "
+        "changed. Post the holder a concern saying why the task is no longer "
+        "wanted, so it can release it, and withdraw it once nobody holds it; or "
+        "wait until the holder has finished with it."
+    )
+
+
+def _declare_refusal_text(
+    refusal: TaskRefusal,
+    held_off_fleet: str | None,
+    cycle: tuple[TaskId, ...],
+    on_my_board: bool | None,
+    named: Sequence[TaskId] = (),
+    gated: bool = False,
+) -> str:
+    """
+    Why a declaration is refused, for the real declaration and its dry run alike,
+    so the two cannot word one refusal two ways.
+
+    ``held_off_fleet`` and ``cycle`` are the store's (``TaskWriteSettled``);
+    ``on_my_board`` is ``_duplicate_id_text``'s, asked only for a duplicate id
+    that is not held off the fleet. ``named`` is the declaration's
+    ``depends_on``.
+
+    **A cycle's first step says which way it closed.** The loop runs from the
+    task being declared back to it, and its first step is either an id the
+    declaration named or, for a task declared with ``ALL_WRITERS``, a writer on
+    its board -- one that already waits on it, which is the case where the
+    declaration's own ``depends_on`` may be nothing but that word.
+
+    ``gated`` is ``_loop_has_a_gate``: whether the rule about that word is
+    given. A loop of named dependencies alone gets the loop and not the rule.
+    """
+    if refusal is TaskRefusal.DUPLICATE_ID:
+        if held_off_fleet is not None:
+            # The store said whose it is, as of the apply: a session off the
+            # fleet is not the declarer's, so no read of the board is asked.
+            return _duplicate_id_text(False, held_off_fleet)
+        return _duplicate_id_text(on_my_board)
+    why = _refusal_text(refusal)
+    if len(cycle) > 1:
+        first = _named(cycle[1])
+        if cycle[1] in named:
+            why += (
+                f" Its depends_on names {first}, which already waits on it, directly "
+                f"or through other tasks."
+            )
+        else:
+            why += (
+                f" It would wait on every writer on this board ({ALL_WRITERS!r}), and "
+                f"{first} is a writer that already waits on it, directly or through "
+                f"other tasks."
+            )
+        if gated:
+            why += (
+                f" A task declared with {ALL_WRITERS!r} waits on every unfinished task "
+                f"with touches on its board, so a task with touches cannot wait on it, "
+                f"directly or through others."
+            )
+        why += f" The loop: {' -> '.join(_named(t) for t in cycle)}."
+    return why
+
+
+def _loop_has_a_gate(
+    cycle: tuple[TaskId, ...], named: Sequence[TaskId], snap: Snapshot | None
+) -> bool:
+    """
+    Whether a task on ``cycle`` waits on every writer: the one being declared,
+    by ``named`` holding ``ALL_WRITERS``, or one already on the board.
+
+    True when ``snap`` is None, a board read the store never answered: the
+    sentence it decides is a true rule about the word, and leaving it out of a
+    loop that does run through a gate would hide the edge the declarer cannot
+    see in any ``depends_on``.
+    """
+    if ALL_WRITERS in named:
+        return True
+    if snap is None:
+        return True
+    return any(t in snap.tasks and snap.tasks[t].after_all_writers for t in cycle[1:-1])
+
+
+# -- the graph queries ----------------------------------------------------------
+#
+# Words for ``boardgraph``'s answers. Every one is computed from the one
+# ``Snapshot`` a single board read delivered (``BoardDelivered.snapshot``), so a
+# reply never mixes two moments of the board.
+
+# How many roots a why_blocked reply lists. A gate that waits on every writer
+# has most of the board as roots, and a reply that grew with the board would be
+# the board read this tool exists to replace. Nearest first, so what is cut is
+# the far end of the chain, and the reply says how many it left out.
+_MAX_ROOTS_LISTED = 20
+
+_OPEN_BOARD_READ = "read_board(open_only=true) lists every open task and what each waits on."
+
+
+def _shared_note(edge: Edge) -> str:
+    """
+    The files an edge's two tasks both touch, said beside the edge, and whether
+    they are all test files. Empty for an edge with nothing shared.
+    """
+    if not edge.shared:
+        return ""
+    paths = ", ".join(_named(p) for p in edge.shared)
+    return f", sharing {paths}{' (test files only)' if edge.test_only else ''}"
+
+
+def _hop_state(hop: Hop, snap: Snapshot) -> str:
+    """What a hop on a chain is, in the words a reader acts on."""
+    if hop.state is None:
+        if hop.id in snap.tasks:
+            return "a task of another session's board, which nothing here can finish"
+        return "never declared on any board in this window"
+    if hop.state is TaskState.CLAIMED:
+        return f"held by {_named(hop.holder or 'an agent this board cannot address')}"
+    if hop.state is TaskState.PENDING:
+        return "pending, unheld"
+    return "finished"
+
+
+def _root_needs(root: Root, snap: Snapshot) -> str:
+    """What has to happen at a root for the chain to move."""
+    match root.kind:
+        case RootKind.UNCLAIMED:
+            return "it waits on nothing unfinished, so it needs a claimer"
+        case RootKind.HELD:
+            return "it is held, so the chain waits on its holder finishing"
+        case RootKind.NOT_ON_BOARD if root.id in snap.tasks:
+            return (
+                "its id is taken by another session's task, so it can be neither "
+                "finished nor declared from here, and the task waiting on it never "
+                "becomes claimable; the operator can close that task from the board pane"
+            )
+        case RootKind.NOT_ON_BOARD:
+            return (
+                "nothing will finish it until a task under this id is declared on "
+                "your board and finished: a typo in a depends_on, or work not yet "
+                "declared"
+            )
+        case _:  # pragma: no cover - mypy's exhaustiveness check, not a runtime path
+            assert_never(root.kind)
+
+
+def _chain_lines(answer: WhyBlocked, snap: Snapshot) -> list[str]:
+    """
+    The roots of a chain, nearest first and at most ``_MAX_ROOTS_LISTED`` of
+    them, each once with the path to it: one line per wait, naming the task
+    that waits, the one it waits on, that one's state and holder, and the
+    files the two share.
+    """
+    roots = sorted(answer.roots, key=lambda r: len(r.path))
+    lines: list[str] = []
+    for root in roots[:_MAX_ROOTS_LISTED]:
+        last = root.path[-1]
+        lines.append(f"- {_named(root.id)} ({_hop_state(last, snap)}): {_root_needs(root, snap)}.")
+        for hop in root.path:
+            lines.append(
+                f"    {_named(hop.edge.waiting)} waits on {_named(hop.id)} "
+                f"({_hop_state(hop, snap)}){_shared_note(hop.edge)}"
+            )
+    unlisted = len(roots) - _MAX_ROOTS_LISTED
+    if unlisted > 0:
+        lines.append(f"... and {unlisted} more not listed. " f"{_OPEN_BOARD_READ}")
+    if answer.cycle:
+        lines.append(
+            "These tasks wait on themselves through the chain, so none of them can "
+            f"be claimed until the loop is broken: "
+            f"{', '.join(_named(t) for t in answer.cycle)}. The operator can close one "
+            f"of them from the board pane."
+        )
+    return lines
+
+
+def _why_blocked_text(answer: WhyBlocked, snap: Snapshot) -> str:
+    """
+    The reply to ``why_blocked``: what the task is, and for a task that waits,
+    every unfinished root it waits on.
+
+    **An unknown id is two mistakes, named apart** (STYLE.md section 3): an id no
+    session in the window has, which is a typo or a task not yet declared, and
+    the id of a task on another session's board, which is right and out of reach.
+    ``boardgraph`` answers both UNKNOWN, as a claim of either is refused; the
+    snapshot holds every session's tasks, so the second is told by the id
+    being in it.
+    """
+    named = _named(answer.task_id)
+    match answer.verdict:
+        case Verdict.UNKNOWN:
+            if answer.task_id in snap.tasks:
+                return (
+                    f"Task {named} is not on your board: it is a task of another "
+                    f"session in this window. Its chain cannot be read from here, and "
+                    f"nothing on your board can claim or finish it."
+                )
+            return (
+                f"No task with the id {named} is on your board, or on any board in "
+                f"this window. It is not blocked and not ready: it does not exist. "
+                f"Check the spelling; read_board lists every id on your board."
+            )
+        case Verdict.CLAIMABLE:
+            return f"Task {named} can be claimed now: it waits on nothing unfinished."
+        case Verdict.COMPLETED:
+            return f"Task {named} is finished. Nothing is left to wait for."
+        case Verdict.CLAIMED:
+            holder = _named(answer.holder or "an agent this board cannot address")
+            if not answer.roots and not answer.cycle:
+                return f"Task {named} is held by {holder}, and waits on nothing unfinished."
+            head = (
+                f"Task {named} is held by {holder}, and still waits on "
+                f"{len(answer.roots)} unfinished task(s) at the end of its chain:"
+            )
+        case Verdict.BLOCKED:
+            head = (
+                f"Task {named} cannot be claimed yet. It waits on {len(answer.roots)} "
+                f"unfinished task(s) at the end of its chain, nearest first:"
+            )
+        case _:  # pragma: no cover - mypy's exhaustiveness check, not a runtime path
+            assert_never(answer.verdict)
+    return "\n".join([head, *_chain_lines(answer, snap)])
+
+
+def _ready_text(ready: Sequence[Ready], rows: Sequence[BoardTask]) -> str:
+    """
+    The reply to ``ready``: the claimable tasks, the one the most pending tasks
+    wait on first, directly or through other tasks, each with that count. Not
+    what its completion alone would free: a task waiting on two of them waits
+    on each. Bounded by
+    ``_MAX_BOARD_CHARS`` like a board read, and says how many it left out.
+    """
+    if not rows:
+        return "Your board has no tasks on it yet."
+    if not ready:
+        still_open = sum(1 for r in rows if is_open(r))
+        if not still_open:
+            return "Nothing on your board can be claimed: every task on it is finished."
+        return (
+            f"Nothing on your board can be claimed right now: each of its {still_open} "
+            f"open task(s) is held or waits on unfinished work. why_blocked(task_id) "
+            f"says on what."
+        )
+    lines = [
+        f"{len(ready)} task(s) on your board can be claimed now, the one that "
+        f"the most pending tasks wait on first, directly or through other tasks. "
+        f"{_QUOTE_LEGEND}"
+    ]
+    used = len(lines[0])
+    for shown, r in enumerate(ready):
+        line = f"- {_named(r.task_id)} {_said(r.title)} -- {r.unblocks} pending task(s) wait on it"
+        if used + len(line) + _CUT_NOTE_ROOM > _MAX_BOARD_CHARS:
+            lines.append(
+                f"... and {len(ready) - shown} more that fewer wait on, not listed here. "
+                f"{_OPEN_BOARD_READ}"
+            )
+            break
+        lines.append(line)
+        used += len(line) + 1
+    return "\n".join(lines)
+
+
+def _dry_run_text(
+    dry: DryRun, asked: TaskId, named: Sequence[TaskId], snap: Snapshot, on_my_board: bool
+) -> str:
+    """
+    The reply to ``declare_task(dry_run=true)``: what the real declaration would
+    do, in its words, said as what would happen.
+
+    A refusal is worded by ``_declare_refusal_text``, which the real declaration
+    uses. A landing lists every edge, marked as the declarer's own or added by
+    the board; then the sentences the real reply would carry about the edges the
+    board adds -- the advice to narrow ``touches`` is in those, so it is given
+    about those edges and no others, since narrowing cannot remove an edge the
+    declarer wrote -- then whether it could be claimed at once, and its chain.
+
+    ``named`` is the declaration's ``depends_on``, the word ``ALL_WRITERS``
+    included when it was given.
+    """
+    gate = ALL_WRITERS in named
+    opening = "DRY RUN: nothing was declared, and the board is unchanged."
+    if dry.refusal is not None:
+        why = _declare_refusal_text(
+            dry.refusal,
+            dry.held_off_fleet,
+            dry.cycle,
+            on_my_board,
+            named,
+            _loop_has_a_gate(dry.cycle, named, snap),
+        )
+        return f"{opening} Declared now, task {_named(asked)} would NOT be on the board. {why}"
+    lines = [f"{opening} Declared now, task {_named(asked)} would be on the board."]
+    if dry.edges:
+        lines.append("It would wait on:")
+        for edge in dry.edges:
+            by = "added by the board" if edge.auto else "named in depends_on"
+            lines.append(f"- {_named(edge.on)}, {by}{_shared_note(edge)}")
+    elif not gate:
+        lines.append("It would wait on no task.")
+    if gate:
+        now = ", ".join(_named(w) for w in dry.writers[:_MAX_ROOTS_LISTED]) or "none unfinished"
+        more = len(dry.writers) - _MAX_ROOTS_LISTED
+        lines.append(
+            f"It would also wait on every unfinished writer on this board ({ALL_WRITERS!r}), "
+            f"declared before or after it (now: {now}"
+            f"{f', and {more} more' if more > 0 else ''})."
+        )
+    if dry.added:
+        lines.append(f"The real reply would say: {_auto_depends_text(dry.added)}")
+    if dry.already_behind:
+        lines.append(f"The real reply would say: {_already_behind_text(dry.already_behind)}")
+    lines.append(f"It could be claimed at once: {'yes' if dry.claimable else 'no'}.")
+    if dry.chain is not None and dry.chain.roots:
+        lines.append("Its chain, nearest first:")
+        lines += _chain_lines(dry.chain, snap)
+    return "\n".join(lines)
+
+
 # ``commandbus`` lays its replies out with this module's marks, helpers and
 # bounds, and imports them under the names they have here: ``_ANSWER``,
 # ``_QUOTE``, ``_QUOTE_LEGEND``, ``_MAX_BOARD_CHARS``, ``_LIST_NOTICE_ROOM``,
@@ -2912,6 +3461,41 @@ def build_server(session: AgentSession) -> Any:
             return None
         return next((t for t in answer.tasks if t.id == task_id), None)
 
+    async def withdrawn_row(
+        me: NodeId, task_id: TaskId
+    ) -> tuple[BoardTask | None, BoardConcern | None]:
+        """
+        ``task_id`` as ``me``'s board holds it now, and the notice its withdrawal
+        filed to the agent that held it (``model.withdrawal_notice_id``), or None
+        for either that is not there or when the store never answered.
+        """
+        request_id = f"v-{uuid.uuid4().hex[:12]}"
+        future = bridge.ask(request_id, BoardDelivered(request_id=request_id, tasks=()))
+        bridge.emit(BoardRead(node_id=me, request_id=request_id))
+        answer = await future
+        if not isinstance(answer, BoardDelivered):
+            return None, None
+        wanted = withdrawal_notice_id(task_id)
+        return (
+            next((t for t in answer.tasks if t.id == task_id), None),
+            next((c for c in answer.concerns if c.id == wanted), None),
+        )
+
+    async def withdrawn_because(me: NodeId, task_id: TaskId) -> str:
+        """
+        The declarer's reason for withdrawing ``task_id``, laid out to follow
+        ``_WITHDRAWN_UNDER_YOU``, or a pointer to ``read_task`` when the row
+        cannot be read back. A read of its own because the refusal is an enum and
+        the reason is on the row.
+        """
+        row = await board_row(me, task_id)
+        if row is None or not row.withdrawn:
+            return " read_task with this id shows the reason it was withdrawn with."
+        reason = _withdrawal_reason(row)
+        lines, _ = _quoted(reason, len(reason), "", None)
+        heading = _withdrawal_heading(row.withdrawn_by_lead, row.withdrawal_edited)
+        return "\n".join(["", "", _QUOTE_LEGEND, heading[0].upper() + heading[1:], *lines])
+
     async def board_ids(me: NodeId) -> frozenset[TaskId] | None:
         """
         The id of every task on ``me``'s board now, or None when the store never
@@ -2925,6 +3509,29 @@ def build_server(session: AgentSession) -> Any:
         if answer is unanswered or not isinstance(answer, BoardDelivered):
             return None
         return frozenset(t.id for t in answer.tasks)
+
+    async def board_world(me: NodeId) -> tuple[BoardDelivered, Snapshot] | None:
+        """
+        ``me``'s board and the snapshot it was projected from, in one read, or
+        None when the store never answered.
+
+        The snapshot crosses from the UI thread to this one, and the handler
+        never reaches the ``Store``. That is safe for the reason
+        ``BoardDelivered`` gives, which is narrower than "a frozen value": its
+        maps are fresh per apply and never written, and the queries read only
+        ``tasks`` and ``nodes``, frozen records, and none of the mutable things an
+        ``AgentRecord`` reaches (its ``Transcript``,
+        ``PendingApproval.raw_args``). Every graph query a reply makes is
+        asked of this one snapshot, so a reply never mixes two moments of the
+        board.
+        """
+        request_id = f"q-{uuid.uuid4().hex[:12]}"
+        future = _park(bridge, request_id)
+        bridge.emit(BoardRead(node_id=me, request_id=request_id))
+        answer = await future
+        if not isinstance(answer, BoardDelivered) or answer.snapshot is None:
+            return None
+        return answer, answer.snapshot
 
     @tool(
         "post_concern",
@@ -3055,6 +3662,9 @@ def build_server(session: AgentSession) -> Any:
                 lines += ["", *_operators_notice(c)]
                 continue
             who = _one_line(session.role_of(c.sender) or "another agent")
+            if is_withdrawal_notice(c.id):
+                lines += ["", *_withdrawal_notice_lines(c, who)]
+                continue
             lines += [
                 "",
                 f"[from {who}, {basis_label(c.basis)}{_edited_note(c.edited)}] "
@@ -3134,11 +3744,32 @@ def build_server(session: AgentSession) -> Any:
         "See every task on your team's board: what exists, who holds it, what each "
         "one is waiting for, and its full specification. Read it before declaring "
         "work or reporting a conflict, and re-read it to check the spec of a task "
-        "you hold -- the board is authoritative and your copy of it is not.",
-        {},
+        "you hold -- the board is authoritative and your copy of it is not. "
+        "open_only=true leaves out every finished task -- completed, closed or "
+        "withdrawn -- for a board whose history has outgrown the reply.",
+        _schema(
+            {
+                "open_only": {
+                    **_FLAG_TYPE,
+                    "description": (
+                        "true to list only the tasks still open: pending or held. "
+                        "Omit it for every task, finished ones included."
+                    ),
+                }
+            }
+        ),
     )
     async def read_board(args: dict[str, Any]) -> dict[str, Any]:
         me = _sender(args)
+        open_only = stated_flag(args.get("open_only"))
+        if open_only is None:
+            # Refused rather than read as either: an unreadable flag taken as
+            # false hands back the whole board to a caller that asked for less,
+            # and taken as true hides finished tasks from one that did not.
+            return _text(
+                f"The board was NOT read: open_only is {_said(str(args.get('open_only')))}, "
+                f"and it takes true or false."
+            )
         request_id = f"b-{uuid.uuid4().hex[:12]}"
         future = bridge.ask(request_id, BoardDelivered(request_id=request_id, tasks=()))
         bridge.emit(BoardRead(node_id=me, request_id=request_id))
@@ -3155,7 +3786,16 @@ def build_server(session: AgentSession) -> Any:
         # naming no task -- a second filter here would be the same rule in two
         # places, free to drift from the one the pane reads.
         by_id = _agent_notes(answer.concerns)
-        return _text(_board_text(answer.tasks, by_id, root=me[1] is None))
+        if not open_only:
+            return _text(_board_text(answer.tasks, by_id, root=me[1] is None))
+        rows = [row for row in answer.tasks if is_open(row)]
+        finished = len(answer.tasks) - len(rows)
+        if not rows:
+            return _text(
+                f"No task on your board is open: all {finished} of them are finished -- "
+                f"completed, closed or withdrawn. read_board() lists them."
+            )
+        return _text(_board_text(rows, by_id, root=me[1] is None, finished=finished))
 
     @tool(
         "read_task",
@@ -3276,13 +3916,71 @@ def build_server(session: AgentSession) -> Any:
         return _text(_bounded_digest_text(answer.digest))
 
     @tool(
+        "why_blocked",
+        "Say why one task on your board cannot be claimed: every unfinished task "
+        "at the end of the chain it waits on, each once, with the path to it, its "
+        "state and its holder, and the files each wait shares. One call in place "
+        "of reading the whole board and tracing depends_on by hand, and the "
+        "answer names who to ask: a held root's holder, an unheld root's need "
+        "for a claimer. Open to every agent on the board.",
+        _schema(
+            {
+                "task_id": {
+                    "type": "string",
+                    "description": "The id read_board lists the task under.",
+                }
+            },
+            required=("task_id",),
+        ),
+    )
+    async def why_blocked(args: dict[str, Any]) -> dict[str, Any]:
+        me = _sender(args)
+        task_id = str(args.get("task_id", "")).strip()
+        if not task_id:
+            return _text("Nothing was asked: give the task_id of a task on your board.")
+        world = await board_world(me)
+        if world is None:
+            return _text(f"The board was NOT read. {_refusal_text(TaskRefusal.NOT_APPLIED)}")
+        _, snap = world
+        return _text(_why_blocked_text(boardgraph.why_blocked(snap, me[0], task_id), snap))
+
+    @tool(
+        "ready",
+        "List the tasks on your board that can be claimed now, the one the most "
+        "pending tasks wait on (directly or through other tasks) first, each with "
+        "that count. "
+        "It is the critical path read off the board: use it to choose what to "
+        "start, or how many workers to start, instead of working it out from "
+        "read_board.",
+        {},
+    )
+    async def ready(args: dict[str, Any]) -> dict[str, Any]:
+        me = _sender(args)
+        world = await board_world(me)
+        if world is None:
+            return _text(f"The board was NOT read. {_refusal_text(TaskRefusal.NOT_APPLIED)}")
+        board, snap = world
+        return _text(_ready_text(boardgraph.ready(snap, me[0]), board.tasks))
+
+    @tool(
         "declare_task",
         "Put a unit of work on the shared board for any agent to claim. "
         "depends_on names tasks that must finish first, and touches names the files "
         "the work will write -- the board adds a dependency for you when two tasks "
-        "would write the same file.",
+        "would write the same file. With dry_run=true nothing is declared: the reply "
+        "says what the declaration would do -- the dependencies the board would add "
+        "and the files behind each, the chain it would wait on, whether it could be "
+        "claimed at once, or why it would be refused -- so touches can be narrowed or "
+        "the work split before the task exists.",
         _schema(
             {
+                "dry_run": {
+                    **_FLAG_TYPE,
+                    "description": (
+                        "true to see what this declaration would do without making "
+                        "it: nothing is put on the board. Omit it to declare."
+                    ),
+                },
                 "task_id": {
                     "type": "string",
                     "description": "Omit it and the board generates one.",
@@ -3294,7 +3992,15 @@ def build_server(session: AgentSession) -> Any:
                 },
                 "depends_on": {
                     "type": "array",
-                    "description": "Task ids that must finish first. Omit it for none.",
+                    "description": (
+                        "Task ids that must finish first. Omit it for none. Put "
+                        f"{ALL_WRITERS!r} in it and the task also waits on every "
+                        "unfinished task on this board that has touches, including "
+                        "ones declared after it, for a gate such as a final review "
+                        "or a full test run. The board works out who those are on "
+                        "every read; you never list or amend them. A task that writes "
+                        "files and would wait on such a gate is refused as a cycle."
+                    ),
                 },
                 "touches": {
                     "type": "array",
@@ -3325,6 +4031,14 @@ def build_server(session: AgentSession) -> Any:
     )
     async def declare_task(args: dict[str, Any]) -> dict[str, Any]:
         me = _sender(args)
+        dry_run = stated_flag(args.get("dry_run"))
+        if dry_run is None:
+            # Refused before anything else: read as false, a dry run the caller
+            # meant would put a task on the board.
+            return _text(
+                f"Nothing was declared: dry_run is {_said(str(args.get('dry_run')))}, and "
+                f"it takes true or false."
+            )
         task_id = str(args.get("task_id", "")).strip() or f"t-{uuid.uuid4().hex[:8]}"
         raw_deps = args.get("depends_on") or []
         deps = tuple(str(d).strip() for d in raw_deps if str(d).strip())
@@ -3340,6 +4054,17 @@ def build_server(session: AgentSession) -> Any:
                 f"and the limit is {MAX_ID_CHARS}. It is a short name other calls "
                 f"repeat; put the description in title."
             )
+        if not stored_as_sent(task_id):
+            # Before the dry run branches off, so the two answer it in one reply,
+            # and before anything is emitted. The store refuses it too, for every
+            # other emitter. Not echoed: the id is what cannot be shown as sent.
+            return _text(f"The task is NOT on the board. {_refusal_text(TaskRefusal.ESCAPED_ID)}")
+        escaped_deps = [n for n, d in enumerate(raw_deps, 1) if not stored_as_sent(str(d).strip())]
+        if escaped_deps:
+            # The same refusal for an entry of depends_on, at the same point and
+            # for the same reasons: such an entry names a task that can never
+            # be declared, so the store would accept a task that waits forever.
+            return _text(f"The task is NOT on the board. {_escaped_dependency_text(escaped_deps)}")
         try:
             basis = _stated_basis(args)
         except InvalidBasis as bad:
@@ -3374,39 +4099,51 @@ def build_server(session: AgentSession) -> Any:
             if rewritten and basis is not None
             else ""
         )
+        task = Task(
+            id=task_id,
+            title=title,
+            detail=detail,
+            depends_on=deps,
+            touches=touches,
+            declared_at=time.monotonic(),
+            basis=None if rewritten else basis,
+            property=held_to,
+        )
+        if dry_run:
+            # The same Task the real declaration would emit, applied to one
+            # snapshot through the real arm and discarded
+            # (``boardgraph.dry_run_declare``). Nothing is emitted but the read.
+            world = await board_world(me)
+            if world is None:
+                return _text(f"The dry run was NOT made. {_refusal_text(TaskRefusal.NOT_APPLIED)}")
+            board, snap = world
+            dry = boardgraph.dry_run_declare(snap, me[0], task, me, time.monotonic())
+            mine = any(row.id == task_id for row in board.tasks)
+            return _text(_dry_run_text(dry, task_id, deps, snap, mine))
         request_id = f"d-{uuid.uuid4().hex[:12]}"
         future = _park(bridge, request_id)
-        bridge.emit(
-            TaskDeclared(
-                task=Task(
-                    id=task_id,
-                    title=title,
-                    detail=detail,
-                    depends_on=deps,
-                    touches=touches,
-                    declared_at=time.monotonic(),
-                    basis=None if rewritten else basis,
-                    property=held_to,
-                ),
-                node_id=me,
-                request_id=request_id,
-            )
-        )
+        bridge.emit(TaskDeclared(task=task, node_id=me, request_id=request_id))
 
         settled = await _outcome(future)
-        if settled.refusal is TaskRefusal.DUPLICATE_ID and settled.held_off_fleet is not None:
-            # The store said whose it is, as of the apply. No second read: a
-            # session off the fleet is not the declarer's.
-            said_why = _duplicate_id_text(False, settled.held_off_fleet)
-            return _text(f"Task {task_id} is NOT on the board. {said_why}")
-        if settled.refusal is TaskRefusal.DUPLICATE_ID:
-            # A second read, on this path only: the store refuses an id any
-            # session has and does not say whether it is one this board lists.
-            on_board = await board_ids(me)
-            mine = None if on_board is None else task_id in on_board
-            return _text(f"Task {task_id} is NOT on the board. {_duplicate_id_text(mine)}")
         if settled.refusal is not None:
-            return _text(f"Task {task_id} is NOT on the board. {_refusal_text(settled.refusal)}")
+            listed: bool | None = None
+            if settled.refusal is TaskRefusal.DUPLICATE_ID and settled.held_off_fleet is None:
+                # A second read, on this path only: the store refuses an id any
+                # session has and does not say whether it is one this board lists.
+                on_board = await board_ids(me)
+                listed = None if on_board is None else task_id in on_board
+            gated = False
+            if settled.cycle:
+                # A read on this path only, as for the duplicate: the store names
+                # the loop and not which of its tasks wait on every writer.
+                # Whether a task does is fixed when it is declared, so a read
+                # after the refusal answers it as the apply saw it.
+                world = await board_world(me)
+                gated = _loop_has_a_gate(settled.cycle, deps, None if world is None else world[1])
+            why = _declare_refusal_text(
+                settled.refusal, settled.held_off_fleet, settled.cycle, listed, deps, gated
+            )
+            return _text(f"Task {task_id} is NOT on the board. {why}")
         said = [f"Task {task_id} is on the board."]
         if settled.auto_depends:
             said.append(_auto_depends_text(settled.auto_depends))
@@ -3621,6 +4358,9 @@ def build_server(session: AgentSession) -> Any:
         )
 
         settled = await _outcome(future)
+        if settled.refusal is TaskRefusal.WITHDRAWN:
+            refused = f"Task {task_id} is NOT complete. {_refusal_text(settled.refusal)}"
+            return _text(refused + await withdrawn_because(me, task_id))
         if settled.refusal is not None:
             return _text(f"Task {task_id} is NOT complete. {_refusal_text(settled.refusal)}")
         # The result lands in the arm that sets the state, so the one answer
@@ -3688,6 +4428,8 @@ def build_server(session: AgentSession) -> Any:
         if settled.refusal is None:
             return _text(f"Task {task_id} is back on the board.")
         said = f"Task {task_id} was NOT released. {_refusal_text(settled.refusal)}"
+        if settled.refusal is TaskRefusal.WITHDRAWN:
+            said += await withdrawn_because(me, task_id)
         if settled.refusal is TaskRefusal.NOT_YOURS and me[1] is None:
             # The lead has one release that is not its own, and a lead refused
             # here tried it on a holder it does not cover.
@@ -3698,6 +4440,102 @@ def build_server(session: AgentSession) -> Any:
                 f"release it, {_OPERATOR_CLOSES}, {_CLOSED_IS_NOT_DONE}."
             )
         return _text(said)
+
+    @tool(
+        "withdraw_task",
+        "Withdraw a task YOU declared that is no longer wanted. It is finished as "
+        "withdrawn, with your reason in place of a result, and every task waiting on "
+        "it stops waiting -- the files it named included. You may withdraw a task "
+        "you amended, and one somebody holds: its holder is sent a notice with your "
+        "reason saying its files are released, and its later complete_task is "
+        "refused. Only the declarer can withdraw a task, except that a session's "
+        "lead may withdraw one whose declarer has stopped and that no agent which "
+        "can still be woken holds, and the board then says the lead did. A "
+        "finished task cannot be withdrawn.",
+        _schema(
+            {
+                "task_id": {"type": "string"},
+                "reason": {
+                    "type": "string",
+                    "description": (
+                        "Why the work is no longer wanted. Required, and shown on "
+                        "the task in place of a result. "
+                        f"At most {MAX_WITHDRAWAL_REASON_CHARS} characters."
+                    ),
+                },
+            },
+            required=("task_id", "reason"),
+        ),
+    )
+    async def withdraw_task(args: dict[str, Any]) -> dict[str, Any]:
+        me = _sender(args)
+        task_id = str(args.get("task_id", "")).strip()
+        refused = f"Task {_named(task_id)} was NOT withdrawn."
+        reason = str(args.get("reason") or "")
+        if not reason.strip():
+            return _text(
+                f"{refused} You gave no reason. Say why the work is no longer wanted: "
+                f"it is what the board shows in place of a result."
+            )
+        too_long = _length_refusal(
+            "reason",
+            reason,
+            MAX_WITHDRAWAL_REASON_CHARS,
+            "Put the long form in a file and name its path in the reason.",
+        )
+        if too_long is not None:
+            return _text(f"{refused} {too_long}")
+        edited = bool(args.get(EDITED_KEY))
+        request_id = f"w-{uuid.uuid4().hex[:12]}"
+        future = _park(bridge, request_id)
+        bridge.emit(
+            TaskWithdrawn(
+                node_id=me,
+                task_id=task_id,
+                reason=reason,
+                request_id=request_id,
+                at=time.monotonic(),
+                edited=edited,
+            )
+        )
+        settled = await _outcome(future)
+        if settled.refusal is TaskRefusal.WITHDRAW_HELD_LIVE:
+            # A read of its own, because the refusal is an enum and the holder
+            # is on the row. Named only while the row still says it holds it.
+            row = await board_row(me, task_id)
+            holder = row.owner if row is not None and row.state is TaskState.CLAIMED else None
+            return _text(f"{refused} {_held_live_text(holder)}")
+        if settled.refusal is not None:
+            return _text(f"{refused} {_refusal_text(settled.refusal)}")
+        # Read after the write, and off what the write left: the withdrawal
+        # files its notice to whoever held the task as it landed, and to nobody
+        # when nobody did. A read before the write would race a claim or a
+        # release landing between the two.
+        row, notice = await withdrawn_row(me, task_id)
+        said = [f"Task {_named(task_id)} is withdrawn, with your reason in place of a result."]
+        if edited:
+            said.append(
+                "The operator edited your reason before releasing the call: the board "
+                "shows it as the operator's edit, and read_task shows the words it holds."
+            )
+        if row is not None and row.withdrawn_by_lead:
+            said.append(
+                "Its declarer has stopped, so the board shows you as the one who "
+                "withdrew it, in its place."
+            )
+        said.append("Anything waiting on it is no longer waiting on it.")
+        if notice is not None:
+            holder = _one_line(notice.recipient)
+            if holder.endswith(f", {BEFORE_RESTART}"):
+                # The board's label for an agent of an earlier run is an
+                # appositive, closed before the verb that follows it.
+                holder += ","
+            said.append(
+                f"{holder} held it, and has been sent a notice "
+                f"with your reason saying its files are released and its next "
+                f"complete_task or release_task on it is refused."
+            )
+        return _text(" ".join(said))
 
     @tool(
         "raise_decision",
@@ -3962,11 +4800,14 @@ def build_server(session: AgentSession) -> Any:
         read_board,
         read_task,
         read_digest,
+        why_blocked,
+        ready,
         claim_task,
         declare_task,
         amend_task,
         complete_task,
         release_task,
+        withdraw_task,
         raise_decision,
         read_decisions,
         withdraw_decision,
@@ -4001,11 +4842,14 @@ BUS_TOOLS = frozenset(
         "read_board",
         "read_task",
         "read_digest",
+        "why_blocked",
+        "ready",
         "claim_task",
         "declare_task",
         "amend_task",
         "complete_task",
         "release_task",
+        "withdraw_task",
         "raise_decision",
         "read_decisions",
         "withdraw_decision",

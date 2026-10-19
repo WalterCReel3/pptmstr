@@ -72,6 +72,7 @@ from pptmstr.intents import (
     TaskDeclared,
     TaskReleased,
     TaskVersionHanded,
+    TaskWithdrawn,
     TopicChanged,
     UsageAccrued,
 )
@@ -261,6 +262,7 @@ _MAKERS: dict[type, Maker] = {
     TaskCompleted: lambda r, s, now: TaskCompleted(_who(r), f"t-{r.randrange(4)}", now),
     TaskReleased: lambda r, s, now: TaskReleased(_who(r), f"t-{r.randrange(4)}"),
     TaskClosed: lambda r, s, now: TaskClosed(f"t-{r.randrange(4)}"),
+    TaskWithdrawn: lambda r, s, now: TaskWithdrawn(_who(r), f"t-{r.randrange(4)}", "gone"),
     BoardRead: lambda r, s, now: BoardRead(_who(r), "rq"),
     DigestRead: lambda r, s, now: DigestRead(_who(r), "rq", now),
     BoardRestored: lambda r, s, now: BoardRestored(
