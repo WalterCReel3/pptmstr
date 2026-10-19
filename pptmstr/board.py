@@ -26,6 +26,7 @@ Imports no imgui, so the derivation is testable without a GL context.
 
 from __future__ import annotations
 
+import builtins
 from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 
@@ -42,6 +43,7 @@ from .model import (
     TaskState,
     is_address_only,
     is_operator,
+    withdrawal_label,
 )
 from .templates import SOLO, by_name
 
@@ -291,6 +293,53 @@ class BoardTask:
     # (``model.Task.closed_by_operator``). ``owner`` is None on such a row and
     # ``result`` is the closing words and the operator's reason.
     closed_by_operator: bool = False
+    # Finished because its declarer withdrew it, and not by any agent's work
+    # (``model.Task.withdrawn``). ``owner`` is None on such a row and ``result``
+    # is the withdrawal's words and the declarer's reason.
+    withdrawn: bool = False
+    # Of a withdrawn row: its session's root withdrew it in place of a declarer
+    # that had stopped, so the reason is the root's (``model.Task.withdrawn_by_lead``).
+    withdrawn_by_lead: bool = False
+    # Of a withdrawn row: the operator rewrote the reason in flight
+    # (``model.Task.withdrawal_edited``).
+    withdrawal_edited: bool = False
+    # Its declarer named ``model.ALL_WRITERS``: it waits on every writer on this
+    # board, including writers declared after it (``model.Task.after_all_writers``).
+    after_all_writers: bool = False
+    # Who those writers are at the time of this read (``model.Task.writers``).
+    # They are also in ``blocked_on``. They are listed here as well because a
+    # reader of the row cannot tell them from declared dependencies, and the
+    # set changes with every declaration and completion.
+    writers: tuple[TaskId, ...] = ()
+
+    # ``builtins.property`` by its full name: inside this class the bare name is
+    # the ``property`` field above.
+    @builtins.property
+    def unworked(self) -> bool:
+        """
+        Finished with no agent's account of work: closed by the operator, or
+        withdrawn by its declarer. Neither has a claimer to state a basis or
+        what was run, and a surface that asked for one would report its absence
+        as a gap.
+        """
+        return self.closed_by_operator or self.withdrawn
+
+
+def all_writers_label(row: BoardTask) -> str:
+    """
+    What a row says about waiting on every writer, or nothing for a row that
+    does not.
+
+    It names who the writers are at this read, and says when there are none, so
+    the set is not taken for one stored on the task. A finished row only says
+    what was declared, because it waits on nothing any more (``model.Task.writers``).
+    """
+    if not row.after_all_writers:
+        return ""
+    if row.state is TaskState.COMPLETED:
+        return "declared to wait on every writer on this board"
+    now = ", ".join(row.writers) if row.writers else "none unfinished"
+    return f"waits on every writer on this board, declared before or after it (now: {now})"
 
 
 def version_label(row: BoardTask) -> str:
@@ -347,6 +396,29 @@ def closed_label(row: BoardTask) -> str:
     if not row.closed_by_operator:
         return ""
     return f"{CLOSED_BY_OPERATOR} -- not finished by an agent, and no work is reported"
+
+
+def withdrawn_label(row: BoardTask) -> str:
+    """
+    What a row its declarer withdrew says in place of a claimer's standing, or
+    nothing for any other row.
+
+    ``closed_label`` for a withdrawal, and for its reasons: who ended the task,
+    whose words its reason is, and that nothing is reported as built or run,
+    read off the row's own facts (``model.withdrawal_label``).
+    """
+    if not row.withdrawn:
+        return ""
+    who = withdrawal_label(row.withdrawn_by_lead, row.withdrawal_edited)
+    return f"{who} -- not finished by an agent, and no work is reported"
+
+
+def ended_label(row: BoardTask) -> str:
+    """
+    ``closed_label`` or ``withdrawn_label``, whichever the row is, or nothing
+    for a row an agent finished or that is not finished.
+    """
+    return closed_label(row) or withdrawn_label(row)
 
 
 def foreign_wait_label(row: BoardTask) -> str:
@@ -713,6 +785,11 @@ def board_tasks(snap: Snapshot, session_id: str) -> tuple[BoardTask, ...]:
                 holder=owner,
                 holder_left_behind=_holder_left_behind(snap, task, session_id),
                 closed_by_operator=task.closed_by_operator,
+                withdrawn=task.withdrawn,
+                withdrawn_by_lead=task.withdrawn_by_lead,
+                withdrawal_edited=task.withdrawal_edited,
+                after_all_writers=task.after_all_writers,
+                writers=task.writers(snap.tasks),
                 superseded=tuple(
                     BoardVersion(
                         detail=prior.detail,
@@ -837,14 +914,15 @@ def unrun_ledger(snap: Snapshot, session_id: str) -> tuple[BoardTask, ...]:
     Rows, not a count, and nothing here calls a short ledger good: a row leaves
     it on its claimer's word alone.
 
-    A task the operator closed is not on it. The ledger is of work somebody
-    reported and nobody said was run, and a closed row reports none: it says so
-    itself (``closed_label``), which is a stronger statement than "unstated".
+    A task the operator closed, or its declarer withdrew, is not on it. The
+    ledger is of work somebody reported and nobody said was run, and such a row
+    reports none: it says so itself (``ended_label``), which is a stronger
+    statement than "unstated".
     """
     return tuple(
         row
         for row in board_tasks(snap, session_id)
-        if row.state is TaskState.COMPLETED and row.not_run != "" and not row.closed_by_operator
+        if row.state is TaskState.COMPLETED and row.not_run != "" and not row.unworked
     )
 
 

@@ -1001,3 +1001,27 @@ def test_a_title_that_is_only_a_label_says_so_on_a_closed_card_and_after_its_res
     ):
         assert not record.titled_by_label
         assert LaunchSpec.from_record(record).task_is_label is False
+
+
+def test_stored_as_sent_answers_alike_of_an_id_before_and_after_the_store_rewrites_it() -> None:
+    """
+    The bus asks it of the id as sent and the declaration arm of the id
+    ``drawable.text`` already rewrote, and the two must refuse the same
+    declarations: an id is held as sent exactly when its rewrite is, too.
+    Every string over pieces that do and do not spell an escape, to length 3.
+    """
+    import itertools
+
+    from pptmstr import drawable
+    from pptmstr.model import stored_as_sent
+
+    pieces = ["a", "\\", "u", "0000", "005c", "005C", "d800", "DFFF", "\x00", "\udc80", "\\u"]
+    seen = 0
+    for n in range(1, 4):
+        for parts in itertools.product(pieces, repeat=n):
+            raw = "".join(parts)
+            assert stored_as_sent(raw) is stored_as_sent(drawable.text(raw)), raw
+            assert stored_as_sent(raw) is (drawable.text(raw) == raw), raw
+            seen += not stored_as_sent(raw)
+    # The control: the walk did reach ids that are refused, on both sides.
+    assert seen > 100

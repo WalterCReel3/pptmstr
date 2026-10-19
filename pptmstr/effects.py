@@ -49,6 +49,7 @@ from .model import (
     DecisionRefusal,
     DetachRefusal,
     NodeId,
+    Snapshot,
     Task,
     TaskId,
     TaskRefusal,
@@ -137,6 +138,12 @@ class TaskWriteSettled:
     fleet-wide, so such a board goes on refusing ids, and the declarer cannot
     read it and the operator cannot see it. Computed at the apply, as the
     refusal is, because the answer is about that instant.
+
+    ``cycle`` is set beside ``WOULD_CYCLE`` only: a shortest loop the
+    declaration would close, from the new task back to it, through declared
+    dependencies and through every-writer waits (``model.Task.writers``).
+    Computed at the apply for ``held_off_fleet``'s reason, so the declarer is
+    told which loop was refused and not one a later read finds.
     """
 
     request_id: str
@@ -144,6 +151,7 @@ class TaskWriteSettled:
     auto_depends: tuple[TaskId, ...] = ()
     already_behind: tuple[TaskId, ...] = ()
     held_off_fleet: str | None = None
+    cycle: tuple[TaskId, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -167,11 +175,26 @@ class BoardDelivered:
     This is the one effect whose intent changes nothing. It is still an effect
     rather than a store method the handler calls, because the handler is on the
     asyncio thread.
+
+    ``snapshot`` is the world the rows were projected from, for the bus's graph
+    queries (``boardgraph``: why a task is blocked, what is ready, what a
+    declaration would do), which walk ``Task`` records the rows do not carry.
+    Handed over and not read, and the handler never reaches the store. What
+    makes that safe is narrower than "a frozen value": the snapshot's maps are
+    built fresh by every apply and nothing writes them afterwards, and the
+    queries read only ``tasks`` and ``nodes`` -- ``Task`` records, frozen and
+    made of tuples, strings, numbers and other frozen records, and of an
+    ``AgentRecord`` its state and its session's standing. An ``AgentRecord``
+    also reaches what is not frozen, its ``Transcript`` (append-only and
+    synchronised on its own) and ``PendingApproval.raw_args`` (a plain dict
+    nothing writes once parked), and no query reads either. None on an answer
+    the store did not make.
     """
 
     request_id: str
     tasks: tuple[BoardTask, ...]
     concerns: tuple[BoardConcern, ...] = ()
+    snapshot: Snapshot | None = None
 
 
 @dataclass(frozen=True, slots=True)

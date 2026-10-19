@@ -31,7 +31,7 @@ from claude_agent_sdk import SDKSessionInfo
 from pptmstr import drawable, sessions, store
 from pptmstr.approval import DiffText
 from pptmstr.command import Command, End, Exited, Refused, Run
-from pptmstr.effects import CommandToRun
+from pptmstr.effects import CommandToRun, TaskWriteSettled
 from pptmstr.intents import (
     AgentFinished,
     AgentSpawned,
@@ -49,7 +49,15 @@ from pptmstr.intents import (
     TaskDeclared,
 )
 from pptmstr.log import Log
-from pptmstr.model import AgentState, Concern, NodeId, PendingApproval, Recalled, Task
+from pptmstr.model import (
+    AgentState,
+    Concern,
+    NodeId,
+    PendingApproval,
+    Recalled,
+    Task,
+    TaskRefusal,
+)
 from pptmstr.store import Store
 from pptmstr.transcript import SegmentKind, Transcript
 from pptmstr.ui import review
@@ -334,7 +342,10 @@ def test_what_a_session_wrote_is_drawable_wherever_the_store_keeps_it() -> None:
             ),
         )
     )
-    held.apply(TaskDeclared(Task(id=f"T{LOW}", title=f"t{HIGH}", touches=(f"a{LOW}.py",)), ROOT))
+    # A task id the store would rewrite is refused, not kept: the declaration
+    # lands nothing, so it adds nothing undrawable (and nothing at all) to the walk.
+    held.apply(TaskDeclared(Task(id=f"U{LOW}", title="refused"), ROOT))
+    held.apply(TaskDeclared(Task(id="T", title=f"t{HIGH}", touches=(f"a{LOW}.py",)), ROOT))
     held.apply(SubagentDelivered(CHILD, f"done{LOW}"))
     held.apply(AgentFinished(CHILD, AgentState.FAILED, 2.0, error=f"boom{LOW}"))
 
@@ -354,27 +365,37 @@ def test_what_a_session_wrote_is_drawable_wherever_the_store_keeps_it() -> None:
     assert not [text for text in found if not takes(text)]
     # The control: the walk above did read the fields that were dirty, and the
     # failure the queue draws is the drawable form of the one the record holds.
-    for written in ("builder\\ud800", "s\\udc80", "b\\udc80\\u0000", "boom\\udc80"):
+    for written in ("builder\\ud800", "s\\udc80", "b\\udc80\\u0000", "boom\\udc80", "a\\udc80.py"):
         assert written in found, written
-    assert "T\\udc80" in snap.tasks and snap.tasks["T\\udc80"].title == "t\\ud800"
+    assert list(snap.tasks) == ["T"] and snap.tasks["T"].title == "t\\ud800"
 
 
-def test_an_identifier_a_model_wrote_still_finds_what_it_named() -> None:
+def test_a_task_id_the_store_would_rewrite_is_refused_and_one_it_would_not_is_found_as_sent() -> (
+    None
+):
     """
-    A task id is written by a model twice, to declare and to claim, and both reach
-    the store by the same door: rewritten alike, they still meet.
+    A task id is written by a model to declare it and again to claim it, and
+    read back from a board row to name it. Rewritten on the way in, the stored
+    id would not be the one sent, and one copied from a row would be rewritten
+    a second time. So a declaration of such an id is refused: the code unit
+    itself, and the same six characters written out, whose backslash ``text``
+    would write again. An id ``text`` leaves alone is held as sent and found
+    by it.
     """
     held = Store()
     held.apply(spawn(ROOT))
     held.apply(spawn(CHILD, ROOT))
-    held.apply(TaskDeclared(Task(id=f"T{LOW}", title="work"), ROOT))
-    held.apply(TaskDeclared(Task(id="T\\udc80", title="spelled out"), ROOT))
+    (refused,) = held.apply(TaskDeclared(Task(id=f"T{LOW}", title="work"), ROOT, "d1"))
+    (spelled,) = held.apply(TaskDeclared(Task(id="T\\udc80", title="spelled out"), ROOT, "d2"))
     held.apply(TaskClaimRequested(CHILD, request_id="k1", task_id=f"T{LOW}"))
 
-    tasks = held.snapshot().tasks
-    assert sorted(tasks) == ["T\\u005cudc80", "T\\udc80"]
-    assert tasks["T\\udc80"].title == "work" and tasks["T\\udc80"].claimed_by == CHILD
-    assert tasks["T\\u005cudc80"].claimed_by is None
+    assert refused == TaskWriteSettled("d1", TaskRefusal.ESCAPED_ID)
+    assert spelled == TaskWriteSettled("d2", TaskRefusal.ESCAPED_ID)
+    assert held.snapshot().tasks == {}
+
+    held.apply(TaskDeclared(Task(id="T-udc80", title="plain"), ROOT, "d3"))
+    held.apply(TaskClaimRequested(CHILD, request_id="k2", task_id="T-udc80"))
+    assert held.snapshot().tasks["T-udc80"].claimed_by == CHILD
 
 
 def test_a_directory_is_kept_as_it_was_given() -> None:

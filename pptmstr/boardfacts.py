@@ -94,10 +94,12 @@ from .intents import (
     TaskDeclared,
     TaskReleased,
     TaskVersionHanded,
+    TaskWithdrawn,
     TopicChanged,
     UsageAccrued,
 )
 from .model import (
+    CLOSED_BY_OPERATOR,
     Basis,
     Concern,
     ConcernState,
@@ -106,6 +108,7 @@ from .model import (
     Task,
     TaskState,
     is_address_only,
+    withdrawal_label,
 )
 
 _T = TypeVar("_T", Task, Concern)
@@ -214,6 +217,7 @@ def outcomes(before: Snapshot, intent: Intent, after: Snapshot, now: float) -> t
                     basis=_stated(landed.basis),
                     property=landed.property,
                     declared_by_id=_node(landed.declared_by),
+                    after_all_writers=landed.after_all_writers,
                 ),
             )
 
@@ -287,7 +291,41 @@ def outcomes(before: Snapshot, intent: Intent, after: Snapshot, now: float) -> t
                 *_about(
                     closed,
                     boardlog.Closed(
-                        at=closed.completed_at, task_id=closed.id, reason=intent.reason
+                        at=closed.completed_at,
+                        task_id=closed.id,
+                        reason=_reason(closed.result, CLOSED_BY_OPERATOR),
+                    ),
+                ),
+                *notices,
+            )
+
+        case TaskWithdrawn():
+            withdrawn = _changed(before.tasks, after.tasks, intent.task_id)
+            if withdrawn is None or withdrawn.completed_at is None:
+                return ()
+            # The arm files one concern with a withdrawal under a holder, the
+            # declarer's notice to that holder, found as the close's is.
+            notices = tuple(
+                fact
+                for concern_id, told in after.concerns.items()
+                if concern_id not in before.concerns
+                for fact in _filed(after, told)
+            )
+            return (
+                *_about(
+                    withdrawn,
+                    boardlog.WithdrawnByDeclarer(
+                        at=withdrawn.completed_at,
+                        task_id=withdrawn.id,
+                        by=_address(after, intent.node_id),
+                        reason=_reason(
+                            withdrawn.result,
+                            withdrawal_label(
+                                withdrawn.withdrawn_by_lead, withdrawn.withdrawal_edited
+                            ),
+                        ),
+                        by_id=_node(intent.node_id),
+                        edited=withdrawn.withdrawal_edited,
                     ),
                 ),
                 *notices,
@@ -421,6 +459,23 @@ def _about(task: Task, record: Record) -> tuple[Fact, ...]:
     if task.declared_by is None:
         return ()
     return (Fact(task.declared_by[0], record),)
+
+
+def _reason(result: str, label: str) -> str:
+    """
+    The reason a closed or withdrawn task's result was composed from
+    (``model.closing_result``, ``model.withdrawal_result``): what follows the
+    label, or nothing when the label stands alone.
+
+    Read off the landed row, as a completion's record reads ``result``, and not
+    off the intent. The reducer made the intent drawable before it composed the
+    result (``store._drawable``), and the log is the store's board written down:
+    a reason taken from the intent as it arrived would put a NUL in the log, or
+    a backslash fewer than the store holds, and the log would restore to a board
+    the store never held.
+    """
+    lead = f"{label}: "
+    return result[len(lead) :] if result.startswith(lead) else ""
 
 
 def _filed(snap: Snapshot, concern: Concern) -> tuple[Fact, ...]:

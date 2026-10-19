@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, ClassVar
 
+from . import drawable
 from .approval import DiffText, Policy
 from .command import (
     TIMEOUT_CHOICES_S,
@@ -1620,6 +1621,43 @@ class TaskRefusal(enum.Enum):
     it sent was not kept, and the files it was writing may be another agent's now.
     "Nothing is left to do" is the wrong thing to tell it.
 
+    Five members are a declarer's withdrawal (``intents.TaskWithdrawn``), apart
+    from the amendment's and the close's for the reason the pairs above are.
+    ``NOT_THE_WITHDRAWER`` is an agent withdrawing a task it did not declare,
+    other than its session's root standing in for a declarer that has stopped
+    (``store._withdrawer_refusal``): the recovery is a concern to the declarer,
+    and it is not ``NOT_THE_DECLARER``, whose words are about replacing a
+    specification.
+    ``WITHDRAW_FINISHED`` is a withdrawal of a task already finished, closed or
+    withdrawn, where nothing is left waiting to let go of. ``NO_WITHDRAWAL_REASON``
+    is a withdrawal whose reason is blank or longer than
+    ``MAX_WITHDRAWAL_REASON_CHARS``: the reason is what the holder and every
+    reader of the row are given in place of a result. ``WITHDRAWN`` is
+    ``CLOSED_BY_OPERATOR`` for a task that was withdrawn: the holder's
+    ``complete_task`` or ``release_task`` afterwards, refused because an agent
+    called the work off and not because it was done or because the operator
+    stopped it.
+    ``WITHDRAW_HELD_LIVE`` is the root standing in for a stopped declarer, on a
+    task held by an agent the root could not take the claim back from
+    (``store._may_reclaim``): one that can still be woken, and may be holding
+    the task across a wait. It is not ``NOT_THE_WITHDRAWER``, whose recovery is
+    the declarer: here the declarer has stopped, and the recovery is the holder,
+    which can release the task, or waiting until it has.
+
+    ``RESERVED_ID`` is a declaration whose id is ``ALL_WRITERS``. That word in
+    ``depends_on`` means "every writer on this board", so a task with it as its
+    id could never be named as a dependency. The recovery is another id, not a
+    redrawn graph, which is why it is not ``DUPLICATE_ID``.
+
+    ``ESCAPED_ID`` is a declaration whose id, or an entry of whose
+    ``depends_on``, the store would not hold as sent (``stored_as_sent``): it
+    holds a NUL, a lone surrogate, or a backslash spelling the escape of one.
+    For the id the recovery is another id, as for ``RESERVED_ID``, but the
+    mistake is a different one -- which characters, not which word -- so it has
+    its own words. For an entry it is leaving the entry out or naming the task
+    by its id. No declaration can put a task under such an id, and a task
+    restored from an older board log under one cannot be depended on by id.
+
     ``NOT_APPLIED`` is the one member ``_apply`` never returns. It is the answer the
     Bridge hands back when the store never got to see the intent at all -- shutdown,
     mainly -- and it exists because the alternative fallback is reporting a success
@@ -1636,6 +1674,13 @@ class TaskRefusal(enum.Enum):
     NOT_THE_DECLARER = "not_the_declarer"
     AMENDER_HELD_IT = "amender_held_it"
     CLAIMER_AMENDED_IT = "claimer_amended_it"
+    NOT_THE_WITHDRAWER = "not_the_withdrawer"
+    WITHDRAW_FINISHED = "withdraw_finished"
+    NO_WITHDRAWAL_REASON = "no_withdrawal_reason"
+    WITHDRAWN = "withdrawn"
+    WITHDRAW_HELD_LIVE = "withdraw_held_live"
+    RESERVED_ID = "reserved_id"
+    ESCAPED_ID = "escaped_id"
     NOT_APPLIED = "not_applied"
 
 
@@ -1657,6 +1702,12 @@ class ClaimRefusal(enum.Enum):
     ``NOTHING_CLAIMABLE`` is the only answer to a claim that named no task. It is
     not a mistake: the board is empty, or what is left is blocked, held, or
     something this agent gave back or wrote the specification of.
+
+    ``COMPLETE``, ``CLOSED`` and ``WITHDRAWN`` are the three ways a named task is
+    already finished, apart because only the first means the work was done. A
+    task the operator closed (``Task.closed_by_operator``) or that was withdrawn
+    (``Task.withdrawn``) reports no work, and "it is already complete" would
+    have the claimer conclude that somebody did it.
     """
 
     NOTHING_CLAIMABLE = "nothing_claimable"
@@ -1664,6 +1715,8 @@ class ClaimRefusal(enum.Enum):
     HELD = "held"
     ALREADY_YOURS = "already_yours"
     COMPLETE = "complete"
+    CLOSED = "closed"
+    WITHDRAWN = "withdrawn"
     WAITING = "waiting"
     AMENDED_BY_YOU = "amended_by_you"
 
@@ -2219,6 +2272,34 @@ class Task:
     # not be something an agent can write. Nor off "COMPLETED with no holder",
     # which a task built by hand also is. Written by one arm and never cleared.
     closed_by_operator: bool = False
+    # Its declarer withdrew it (``intents.TaskWithdrawn``): COMPLETED so that
+    # what waits on it stops waiting, and finished by no agent's work. ``result``
+    # is ``withdrawal_result``, the declarer's reason behind a fixed label.
+    #
+    # Stored and not read off ``result`` for ``closed_by_operator``'s reason: a
+    # claimer can type the label into its own result. Written by one arm and
+    # never cleared. Never set together with ``closed_by_operator``: each arm
+    # takes only an unfinished task.
+    withdrawn: bool = False
+    # Of a withdrawn task: it was its session's root that withdrew it, standing
+    # in for a declarer that had stopped (``store._withdrawer_refusal``), so the
+    # reason is the root's words and not the declarer's. False on any task not
+    # withdrawn. Stored for ``withdrawn``'s reason, and because who withdrew it is
+    # not otherwise on the record.
+    withdrawn_by_lead: bool = False
+    # Of a withdrawn task: the operator rewrote the reason before releasing the
+    # call (``bus.EDITED_KEY``), so the words behind the label are the
+    # operator's and not the withdrawer's. False on any task not withdrawn.
+    withdrawal_edited: bool = False
+    # Its declarer named ``ALL_WRITERS`` in ``depends_on``. While the task is
+    # unfinished it waits on every unfinished task on its board that writes a
+    # file, whenever that task was declared (``writers``).
+    #
+    # The declared fact is stored. The set it names is not, because touches and
+    # states already hold it. A stored id list would go stale with every
+    # declaration after this one, and that is the list a lead used to rewrite by
+    # hand. Set by the declaration arm and never changed afterwards.
+    after_all_writers: bool = False
 
     # ``builtins.property`` by its full name below: inside this class the bare name
     # is the ``property`` field above.
@@ -2343,12 +2424,57 @@ class Task:
         none outstanding, but nothing in the store enforces that -- a task can be
         claimed and its dependency released afterwards -- and returning the honest
         graph answer is cheaper than a state guard that hides it.
+
+        An after-all-writers task (``after_all_writers``) also waits on every
+        task ``writers`` names, after its declared dependencies and without
+        repeating them. For a CLAIMED one this includes a writer declared after
+        the claim. Claimability was decided at the claim and is not taken back,
+        but the holder is told what is still unfinished.
         """
-        return tuple(
+        declared = tuple(
             d
             for d in self.depends_on
             if (dep := self.dependency(tasks, d)) is None or dep.state is not TaskState.COMPLETED
         )
+        return declared + tuple(w for w in self.writers(tasks) if w not in declared)
+
+    def writers(self, tasks: Mapping[TaskId, Task]) -> tuple[TaskId, ...]:
+        """
+        The tasks this task waits on because it is after every writer, in
+        declaration order. Empty for any other task.
+
+        A writer is a task on this task's board, other than this one, that is
+        not COMPLETED and declares ``touches``. Another after-all-writers task
+        is one too when it declares touches: it writes files, and a gate that
+        let it run unfinished would break the promise that every unfinished
+        writer is done first. One that declares none drops out with the rest of
+        the tasks that write nothing. Two gates that both declare touches would
+        each wait on the other, so the declaration arm refuses the second as a
+        cycle (``store._cycle``). A withdrawn or operator-closed task is
+        COMPLETED, so it drops out with no step of its own.
+
+        Empty once this task is COMPLETED. A finished task waits on nothing,
+        and a writer declared after it finished was never part of what it
+        waited for. Read on every call: the set is never stored.
+
+        A task with no recorded declarer is on no board, so it has no writers.
+        """
+        if (
+            not self.after_all_writers
+            or self.state is TaskState.COMPLETED
+            or self.declared_by is None
+        ):
+            return ()
+        session_id = self.declared_by[0]
+        found = [
+            t
+            for t in tasks.values()
+            if t.id != self.id
+            and t.state is not TaskState.COMPLETED
+            and t.touches
+            and t.belongs_to(session_id)
+        ]
+        return tuple(t.id for t in sorted(found, key=lambda t: (t.declared_at, t.id)))
 
     def dependency(self, tasks: Mapping[TaskId, Task], task_id: TaskId) -> Task | None:
         """
@@ -2389,6 +2515,35 @@ BEFORE_RESTART = EARLIER_RUN
 # What leads the result of a task the operator closed (``intents.TaskClosed``).
 CLOSED_BY_OPERATOR = "closed by the operator"
 
+# The word in a declaration's ``depends_on`` that means "every writer on this
+# board, declared before or after me" (``Task.after_all_writers``). The
+# declaration arm takes it out of ``depends_on`` and sets the flag, and refuses a
+# task with it as its id (``TaskRefusal.RESERVED_ID``).
+ALL_WRITERS = "all-writers"
+
+
+def stored_as_sent(task_id: str) -> bool:
+    """
+    Whether the store holds a task declared as ``task_id`` under that same id.
+
+    The reducer makes every string drawable as it enters (``store._drawable``),
+    and ``drawable.text`` rewrites a NUL, a lone surrogate and a backslash
+    spelling the escape of one. An id it rewrites is stored under another id
+    than the one sent, so every later call naming it as sent misses, and one
+    naming it as stored is rewritten again and misses too: ``text`` is not
+    idempotent. The declaration is refused instead (``TaskRefusal.ESCAPED_ID``),
+    by the bus before anything is emitted and by the declaration arm for every
+    other emitter. A declaration with an entry of ``depends_on`` that this
+    answers False for is refused the same way, so no declaration names such an
+    id in either place.
+
+    One answer whichever side asks. The arm sees the id after ``text``, the
+    bus before it, and ``text(raw) == raw`` exactly when
+    ``text(text(raw)) == text(raw)``: anything ``text`` writes begins with a
+    backslash it would write again.
+    """
+    return drawable.text(task_id) == task_id
+
 
 def closing_result(reason: str) -> str:
     """
@@ -2402,6 +2557,55 @@ def closing_result(reason: str) -> str:
     return f"{CLOSED_BY_OPERATOR}: {reason}" if reason.strip() else CLOSED_BY_OPERATOR
 
 
+# What leads the result of a task its declarer withdrew (``intents.TaskWithdrawn``).
+WITHDRAWN_BY_DECLARER = "withdrawn by its declarer"
+
+# What leads it instead when the session's root withdrew it in place of a
+# declarer that had stopped (``Task.withdrawn_by_lead``).
+WITHDRAWN_BY_LEAD = "withdrawn by its session's lead, its declarer having stopped"
+
+# What follows either when the operator rewrote the reason in flight
+# (``Task.withdrawal_edited``).
+REASON_EDITED = "reason as edited by the operator"
+
+
+def withdrawal_label(by_lead: bool = False, edited: bool = False) -> str:
+    """
+    Who withdrew a task, and whose words its reason is: ``WITHDRAWN_BY_DECLARER``
+    or ``WITHDRAWN_BY_LEAD``, then ``REASON_EDITED`` when the operator rewrote it.
+
+    One function for every surface that names a withdrawal -- the result the
+    store composes, the board's row, the digest -- so none of them can attribute
+    the reason to the declarer when the lead or the operator wrote it.
+    """
+    who = WITHDRAWN_BY_LEAD if by_lead else WITHDRAWN_BY_DECLARER
+    return f"{who}, {REASON_EDITED}" if edited else who
+
+
+def withdrawal_result(reason: str, by_lead: bool = False, edited: bool = False) -> str:
+    """
+    The result of a withdrawn task: ``withdrawal_label``, and behind it the
+    reason exactly as the store holds it.
+
+    Composed here, once, for ``closing_result``'s reason: the reducer's arm and
+    a board log reading the withdrawal back must agree to the character. A
+    withdrawal always has a reason (``TaskRefusal.NO_WITHDRAWAL_REASON``), so
+    there is no bare form.
+    """
+    return f"{withdrawal_label(by_lead, edited)}: {reason}"
+
+
+def withdrawal_reason(result: str, by_lead: bool = False, edited: bool = False) -> str:
+    """
+    The reason a withdrawn task's result was composed from, or of that result's
+    first line: the inverse of ``withdrawal_result`` for the same two flags.
+
+    **Only for a row known to be withdrawn**, with that row's flags: a claimer
+    can open a result of its own with the same words.
+    """
+    return result[len(withdrawal_result("", by_lead, edited)) :]
+
+
 # The operator's reason for closing a task. A close whose reason is longer is not
 # applied (the ``TaskClosed`` arm), and is never cut: the reason becomes the
 # task's result and the body of what its holder is told, byte for byte, and a
@@ -2410,6 +2614,10 @@ def closing_result(reason: str) -> str:
 # refusal has nobody to reply to. The size of an operator's answer to a decision,
 # which is the same kind of text.
 MAX_CLOSE_REASON_CHARS = MAX_ANSWER_CHARS
+
+# A declarer's reason for withdrawing a task. The same kind of text as the
+# operator's reason for a close, and refused over the bound for the same reason.
+MAX_WITHDRAWAL_REASON_CHARS = MAX_CLOSE_REASON_CHARS
 
 # The agent id of the node standing for the operator as the sender of a concern
 # (``operator_party``). The ``/`` is there for the reason ``_ADDRESS_ONLY`` has
@@ -2453,6 +2661,68 @@ def is_closing_notice(concern_id: ConcernId) -> bool:
     form, so the id says as much as the sender does.
     """
     return concern_id.startswith(_CLOSING_NOTICE)
+
+
+# What the id of a ``withdrawal_notice`` begins with, ahead of its task's id. The
+# bus mints every id an agent's concern gets, and none of this form.
+_WITHDRAWAL_NOTICE = "withdrawn/"
+
+
+def is_withdrawal_notice(concern_id: ConcernId) -> bool:
+    """
+    Whether a concern's id is one ``withdrawal_notice`` made.
+
+    For ``is_closing_notice``'s reader. The sender of such a notice is an
+    agent, the one that withdrew the task, so the sender alone does not say
+    that its subject is pptmstr's sentence and not that agent's.
+    """
+    return concern_id.startswith(_WITHDRAWAL_NOTICE)
+
+
+def withdrawal_notice_id(task_id: TaskId) -> ConcernId:
+    """The id of the ``withdrawal_notice`` about ``task_id``."""
+    return f"{_WITHDRAWAL_NOTICE}{task_id}"
+
+
+def withdrawal_notice(
+    task_id: TaskId,
+    withdrawer: NodeId,
+    holder: NodeId,
+    reason: str,
+    at: float,
+    by_lead: bool = False,
+    edited: bool = False,
+) -> Concern:
+    """
+    What the holder of a task is sent when it is withdrawn under them: a
+    concern from the agent that withdrew it about that task, whose body is the
+    reason as the store holds it and nothing else.
+
+    The withdrawer's, because it did it and is an agent the holder can answer.
+    So the body is the reason alone, and what a withdrawal means for the holder
+    -- its files released, its completion refused -- is the subject, which is
+    pptmstr's to write and which ``is_withdrawal_notice`` lets a reader tell
+    from the withdrawer's words. ``edited`` is the concern's own flag, set when
+    the operator rewrote the reason, so the body is not shown as the
+    withdrawer's.
+
+    The id is the task's: a task is withdrawn once, so there is one notice per
+    task and a replay cannot file a second.
+    """
+    return Concern(
+        id=withdrawal_notice_id(task_id),
+        sender=withdrawer,
+        recipient=holder,
+        subject=(
+            f"{task_id}, which you held, was {withdrawal_label(by_lead)}: the files it "
+            "named are released, so another agent may be writing them now, and your "
+            "complete_task on it will be refused"
+        ),
+        body=reason,
+        posted_at=at,
+        task_id=task_id,
+        edited=edited,
+    )
 
 
 def closing_notice(task: Task, holder: NodeId, reason: str, at: float) -> Concern:

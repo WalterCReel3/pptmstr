@@ -143,6 +143,7 @@ from .intents import (
     TaskDeclared,
     TaskReleased,
     TaskVersionHanded,
+    TaskWithdrawn,
     TopicChanged,
     UsageAccrued,
 )
@@ -273,6 +274,7 @@ def changes(
             | TaskCompleted()
             | TaskReleased()
             | TaskClosed()
+            | TaskWithdrawn()
             | BoardRead()
             | DigestRead()
             | BoardRestored()

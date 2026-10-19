@@ -98,10 +98,12 @@ from pptmstr.intents import (
     TaskDeclared,
     TaskReleased,
     TaskVersionHanded,
+    TaskWithdrawn,
     TopicChanged,
     UsageAccrued,
 )
 from pptmstr.model import (
+    ALL_WRITERS,
     AWAITING_TOPIC,
     MAX_ANSWER_CHARS,
     MAX_COMMAND_REFUSAL_CHARS,
@@ -139,6 +141,7 @@ from pptmstr.model import (
     Withdrawn,
     count_diff_lines,
     is_address_only,
+    stored_as_sent,
 )
 from pptmstr.store import Store, _apply
 from pptmstr.transcript import Transcript
@@ -3233,7 +3236,8 @@ _BUILDER: NodeId = ("sess-1", "agent-b")
 def _claimed_board() -> Store:
     """
     One of each thing a named claim can meet: free, held by another, held by the
-    asker, finished, waiting, amended by the asker, and another session's.
+    asker, finished, closed by the operator, withdrawn, waiting, amended by the
+    asker, and another session's.
     """
     store = Store()
     for task_id in ("free", "theirs", "mine", "done"):
@@ -3246,6 +3250,10 @@ def _claimed_board() -> Store:
     store.apply(TaskCompleted(_BUILDER, "done", at=1.0))
     store.apply(TaskDeclared(Task(id="own", title="own"), CHILD))
     store.apply(TaskAmended("own", "a second text", node_id=CHILD))
+    for task_id in ("shut", "dropped"):
+        store.apply(TaskDeclared(Task(id=task_id, title=task_id), ROOT))
+    store.apply(TaskClosed("shut", "not wanted"))
+    store.apply(TaskWithdrawn(ROOT, "dropped", "not wanted"))
     return store
 
 
@@ -3257,6 +3265,8 @@ def _claimed_board() -> Store:
         ("theirs", ClaimRefusal.HELD),
         ("mine", ClaimRefusal.ALREADY_YOURS),
         ("done", ClaimRefusal.COMPLETE),
+        ("shut", ClaimRefusal.CLOSED),
+        ("dropped", ClaimRefusal.WITHDRAWN),
         ("waits", ClaimRefusal.WAITING),
         ("own", ClaimRefusal.AMENDED_BY_YOU),
     ],
@@ -3798,7 +3808,7 @@ def test_a_cycle_is_looked_for_on_the_declarers_own_board() -> None:
     own = store.apply(TaskDeclared(Task(id="loop", title="l", depends_on=("loop",)), ROOT, "d2"))
 
     assert effects == (TaskWriteSettled("d1", None),)
-    assert own == (TaskWriteSettled("d2", TaskRefusal.WOULD_CYCLE),)
+    assert own == (TaskWriteSettled("d2", TaskRefusal.WOULD_CYCLE, cycle=("loop", "loop")),)
 
 
 def test_a_finished_task_keeps_a_result_under_the_completion_arms_rules() -> None:
@@ -4392,7 +4402,7 @@ def test_the_holder_of_a_task_closed_under_it_can_no_longer_finish_or_release_it
 
     assert done == TaskWriteSettled(request_id="k1", refusal=TaskRefusal.CLOSED_BY_OPERATOR)
     assert back == TaskWriteSettled(request_id="k2", refusal=TaskRefusal.CLOSED_BY_OPERATOR)
-    assert claim == ClaimSettled("k3", None, ClaimRefusal.COMPLETE)
+    assert claim == ClaimSettled("k3", None, ClaimRefusal.CLOSED)
     assert store.snapshot().tasks["t1"] is before
 
 
@@ -4594,6 +4604,1146 @@ def test_the_reducer_takes_a_restore_like_any_intent_for_no_node() -> None:
     assert effects == () == again
     assert first.seq == 1 and second is first
     assert first.tasks["t1"].state is TaskState.CLAIMED
+
+
+# -- a declarer withdraws its task ---------------------------------------------------
+#
+# Scenarios C1-C4 of planning/2026-10-16-the-board-needs-graph-queries.md, on the
+# reducer. ``_board_with`` is ``t1`` writing ``a.py`` and ``t2`` waiting on it, both
+# declared by ROOT.
+
+
+@pytest.mark.parametrize("then", [(), (_T1_CLAIMED,)], ids=["pending", "claimed"])
+def test_c1_the_declarer_withdraws_its_task_and_what_waited_on_it_is_claimable(
+    then: tuple[Intent, ...],
+) -> None:
+    """
+    After an amendment, which is the case the tool exists for: an amender may
+    not claim the task, so the operator's close was otherwise the only way out.
+    The files go with it, as on a close.
+    """
+    store = _board_with(*then, TaskAmended("t1", "narrower", node_id=ROOT))
+    assert store.snapshot().tasks["t1"].was_amended_by(ROOT)
+
+    (settled,) = store.apply(
+        TaskWithdrawn(ROOT, "t1", " replaced\nby t9 ", request_id="w1"), now=40.0
+    )
+    store.apply(TaskDeclared(Task(id="t3", title="V", touches=("a.py",), declared_at=3.0), ROOT))
+
+    snap = store.snapshot()
+    task = snap.tasks["t1"]
+    assert settled == TaskWriteSettled(request_id="w1", refusal=None)
+    assert task.state is TaskState.COMPLETED and task.withdrawn and not task.closed_by_operator
+    assert task.result == "withdrawn by its declarer:  replaced\nby t9 "
+    assert (task.result_basis, task.not_run, task.completed_at) == (None, None, 40.0)
+    assert (task.claimed_by, task.claimed_version, task.completed_version) == (None, None, None)
+    assert task.held_by == ((CHILD,) if then else ())
+    assert snap.tasks["t2"].blocked_on(snap.tasks) == ()
+    assert snap.tasks["t2"].is_claimable(snap.tasks)
+    assert "t1" not in snap.tasks["t3"].depends_on
+
+
+def test_c2_a_withdrawn_dependency_of_a_gate_holds_it_no_longer() -> None:
+    """
+    The gate waits on what is unfinished and on nothing withdrawn: with its
+    other dependency still open it is blocked on that one alone.
+    """
+    store = _board_with(
+        TaskDeclared(Task(id="t3", title="V", declared_at=2.0), ROOT),
+        TaskDeclared(Task(id="gate", title="G", depends_on=("t1", "t3"), declared_at=3.0), ROOT),
+    )
+
+    store.apply(TaskWithdrawn(ROOT, "t1", "dropped from the plan"))
+    held = store.snapshot()
+    store.apply(TaskClaimRequested(CHILD, request_id="k", task_id="t3"))
+    store.apply(TaskCompleted(CHILD, "t3", at=50.0, result="done"))
+    snap = store.snapshot()
+
+    assert held.tasks["gate"].blocked_on(held.tasks) == ("t3",)
+    assert snap.tasks["gate"].is_claimable(snap.tasks)
+
+
+def test_c3_the_holder_of_a_withdrawn_task_is_refused_and_nothing_it_sent_is_kept() -> None:
+    """
+    Not ``ALREADY_COMPLETE`` -- nobody did the work -- and not
+    ``CLOSED_BY_OPERATOR`` -- the operator did not stop it. The row stays the
+    declarer's withdrawal whatever arrives. The holder is mailed the one notice
+    the withdrawal files, and nothing it sends afterwards files another.
+    """
+    store = _board_with(_T1_CLAIMED, TaskWithdrawn(ROOT, "t1", "not wanted"))
+    before = store.snapshot().tasks["t1"]
+    told = store.snapshot().concerns
+    assert [(c.sender, c.recipient, c.body) for c in told.values()] == [(ROOT, CHILD, "not wanted")]
+
+    (done,) = store.apply(TaskCompleted(CHILD, "t1", at=30.0, request_id="k1", result="mine"))
+    (back,) = store.apply(TaskReleased(CHILD, "t1", request_id="k2"))
+    (claim,) = store.apply(TaskClaimRequested(CHILD, request_id="k3", task_id="t1"))
+
+    assert done == TaskWriteSettled(request_id="k1", refusal=TaskRefusal.WITHDRAWN)
+    assert back == TaskWriteSettled(request_id="k2", refusal=TaskRefusal.WITHDRAWN)
+    assert claim == ClaimSettled("k3", None, ClaimRefusal.WITHDRAWN)
+    assert store.snapshot().tasks["t1"] is before
+    assert store.snapshot().concerns == told
+
+
+def test_the_holder_of_a_withdrawn_task_is_told_by_its_declarer_its_files_are_released() -> None:
+    """
+    A withdrawal lets go of the files the task named while its holder may still
+    be writing them, which is what an operator's close mails the holder about.
+    The notice is the declarer's, since the declarer did it; its body is the
+    reason as the store holds it and nothing else, so the declarer's words are
+    all that is quoted as the declarer's. The store's own words, that the files
+    are released and a completion will be refused, are the subject.
+    """
+    from pptmstr.effects import InboxDelivered
+    from pptmstr.intents import InboxRead
+    from pptmstr.model import ConcernState
+
+    store = _board_with(_T1_CLAIMED)
+
+    store.apply(TaskWithdrawn(ROOT, "t1", " replaced\nby t9 ", at=40.0))
+
+    (notice,) = store.snapshot().concerns.values()
+    assert (notice.sender, notice.recipient, notice.task_id) == (ROOT, CHILD, "t1")
+    assert notice.body == " replaced\nby t9 "
+    assert notice.posted_at == 40.0 and notice.state is ConcernState.POSTED
+    assert not notice.edited and notice.basis is None and not notice.incident
+    assert "withdrawn" in notice.subject and "t1" in notice.subject
+    assert "files" in notice.subject and "released" in notice.subject
+    assert "complete_task" in notice.subject and "refused" in notice.subject
+    assert "\n" not in notice.subject
+
+    (delivered,) = store.apply(InboxRead(CHILD, request_id="r1", at=41.0))
+    assert isinstance(delivered, InboxDelivered)
+    assert [c.id for c in delivered.concerns] == [notice.id]
+
+
+@pytest.mark.parametrize(
+    "reason", ["a\x00b", "see \\u0000", "lone \udc80"], ids=["NUL", "escape text", "surrogate"]
+)
+def test_the_withdrawal_notice_carries_the_reason_the_task_holds(reason: str) -> None:
+    """
+    The body is the store's text for the reason, the one the task's result is
+    composed from, and not what arrived: the two read the same everywhere.
+    """
+    from pptmstr.model import withdrawal_result
+
+    store = _board_with(_T1_CLAIMED)
+
+    store.apply(TaskWithdrawn(ROOT, "t1", reason))
+
+    snap = store.snapshot()
+    (notice,) = snap.concerns.values()
+    assert notice.body != reason
+    assert withdrawal_result(notice.body) == snap.tasks["t1"].result
+
+
+@pytest.mark.parametrize(
+    "then",
+    [
+        (),
+        (_T1_CLAIMED, TaskReleased(CHILD, "t1")),
+    ],
+    ids=["never held", "held and given back"],
+)
+def test_a_withdrawal_with_nobody_holding_the_task_mails_nobody(then: tuple[Intent, ...]) -> None:
+    store = _board_with(*then)
+
+    store.apply(TaskWithdrawn(ROOT, "t1", "not wanted"))
+
+    assert store.snapshot().tasks["t1"].withdrawn
+    assert store.snapshot().concerns == {}
+
+
+@pytest.mark.parametrize(
+    "refused",
+    [
+        TaskWithdrawn(CHILD, "t1", "the holder's reason"),
+        TaskWithdrawn(ROOT, "t1", ""),
+        TaskWithdrawn(OTHER, "t1", "another session"),
+    ],
+    ids=["not the declarer", "no reason", "another session"],
+)
+def test_a_refused_withdrawal_mails_nobody(refused: Intent) -> None:
+    store = _board_with(_T1_CLAIMED)
+
+    store.apply(refused)
+
+    assert not store.snapshot().tasks["t1"].withdrawn
+    assert store.snapshot().concerns == {}
+
+
+@pytest.mark.parametrize(
+    ("who", "refusal"),
+    [
+        (CHILD, TaskRefusal.NOT_THE_WITHDRAWER),
+        (("sess-1", "agent-never-spawned"), TaskRefusal.NOT_THE_WITHDRAWER),
+        (OTHER, TaskRefusal.NO_SUCH_TASK),
+    ],
+    ids=["the holder", "another agent of the session", "another session's root"],
+)
+def test_c4_nobody_but_the_declarer_can_withdraw_a_task(who: NodeId, refusal: TaskRefusal) -> None:
+    """
+    The holder included: it is bound by the task and does not get to call it off.
+    Another session's agent is told the id is not on its board, as an amendment
+    of it is.
+    """
+    store = _board_with(_T1_CLAIMED)
+    before = store.snapshot().tasks["t1"]
+
+    (settled,) = store.apply(TaskWithdrawn(who, "t1", "x", request_id="w1"))
+
+    assert settled == TaskWriteSettled(request_id="w1", refusal=refusal)
+    assert store.snapshot().tasks["t1"] is before
+
+
+# -- the lead withdraws in place of a declarer that has stopped -------------------------
+#
+# The operator's ruling on dq-d757258d9488 ("The lead should have that power"):
+# the session's root may withdraw a task whose declarer is a terminal sub-agent
+# or one of an earlier run. A running declarer keeps the sole right.
+
+_BUILDER_2: NodeId = ("sess-1", "agent-b")
+
+
+def _declared_by_a_builder(*then: Intent) -> Store:
+    """``t1``, declared by the builder CHILD and claimed by _BUILDER_2, then ``then``."""
+    store = Store()
+    store.apply(spawn(ROOT, at=1.0))
+    store.apply(spawn(CHILD, ROOT, at=2.0))
+    store.apply(spawn(_BUILDER_2, ROOT, at=2.0))
+    store.apply(TaskDeclared(Task(id="t1", title="T", touches=("a.py",)), CHILD))
+    store.apply(TaskDeclared(Task(id="t2", title="U", depends_on=("t1",), declared_at=1.0), ROOT))
+    store.apply(TaskClaimRequested(_BUILDER_2, request_id="k", task_id="t1"))
+    for intent in then:
+        store.apply(intent)
+    return store
+
+
+def _held_from_an_earlier_run(*then: Intent) -> Store:
+    """
+    ``t1``, declared by the builder CHILD of this run and held by _OLD_BUILDER,
+    an agent of an earlier run whose claim the lead may take back
+    (``store._may_reclaim``); ``t2`` waits on it. Then ``then``.
+    """
+    store = Store()
+    _restore(
+        store,
+        _logged(
+            boardlog.Declared(
+                at=_wall(50.0),
+                task_id="t1",
+                title="T",
+                declared_by="builder",
+                declared_by_id=CHILD,
+                touches=("a.py",),
+            ),
+            boardlog.Claimed(at=_wall(40.0), task_id="t1", by="builder-2", by_id=_OLD_BUILDER),
+        ),
+    )
+    store.apply(spawn(ROOT, at=101.0))
+    store.apply(spawn(CHILD, ROOT, at=102.0))
+    store.apply(TaskDeclared(Task(id="t2", title="U", depends_on=("t1",), declared_at=103.0), ROOT))
+    snap = store.snapshot()
+    assert snap.of_earlier_run(_OLD_BUILDER) and not snap.of_earlier_run(CHILD)
+    for intent in then:
+        store.apply(intent)
+    return store
+
+
+@pytest.mark.parametrize(
+    "stopped",
+    [
+        AgentFinished(CHILD, AgentState.DONE, ended_at=105.0),
+        AgentFinished(CHILD, AgentState.FAILED, ended_at=105.0),
+        AgentFinished(CHILD, AgentState.CANCELLED, ended_at=105.0),
+    ],
+    ids=["finished its turn", "failed", "cancelled"],
+)
+def test_the_lead_withdraws_a_task_whose_declarer_has_stopped_and_says_it_was_the_lead(
+    stopped: Intent,
+) -> None:
+    """
+    The row, the result and the holder's notice all say the lead withdrew it
+    and that the reason is the lead's: "withdrawn by its declarer" over the
+    lead's words is the misattribution the task's property forbids.
+    """
+    from pptmstr.model import WITHDRAWN_BY_LEAD, withdrawal_notice_id
+
+    store = _held_from_an_earlier_run(stopped)
+
+    (settled,) = store.apply(TaskWithdrawn(ROOT, "t1", "the plan changed", request_id="w1"))
+
+    snap = store.snapshot()
+    task = snap.tasks["t1"]
+    assert settled == TaskWriteSettled(request_id="w1", refusal=None)
+    assert task.withdrawn and task.withdrawn_by_lead and not task.withdrawal_edited
+    assert task.result == f"{WITHDRAWN_BY_LEAD}: the plan changed"
+    assert not task.result.startswith("withdrawn by its declarer")
+    assert snap.tasks["t2"].is_claimable(snap.tasks)
+    notice = snap.concerns[withdrawal_notice_id("t1")]
+    assert (notice.sender, notice.recipient, notice.body) == (
+        ROOT,
+        _OLD_BUILDER,
+        "the plan changed",
+    )
+    assert WITHDRAWN_BY_LEAD in notice.subject and "by its declarer" not in notice.subject
+
+
+@pytest.mark.parametrize("woken", [False, True], ids=["left behind", "started again"])
+def test_the_lead_withdraws_a_task_whose_declarer_is_of_an_earlier_run(woken: bool) -> None:
+    """
+    The reclaim's rule (``Snapshot.of_earlier_run``) is one of the two ways: a
+    declarer a restored board names and this process has no record of. It has
+    no record at all, so only that rule can admit it -- and once it is started
+    again it is this run's, running, and keeps its task.
+    """
+    store = Store()
+    _restore(
+        store,
+        _logged(
+            boardlog.Declared(
+                at=_wall(50.0),
+                task_id="t1",
+                title="T",
+                declared_by="builder-2",
+                declared_by_id=_OLD_BUILDER,
+            )
+        ),
+    )
+    store.apply(spawn(ROOT, at=101.0))
+    if woken:
+        store.apply(spawn(_OLD_BUILDER, ROOT, at=102.0))
+    assert store.snapshot().of_earlier_run(_OLD_BUILDER) is not woken
+
+    (settled,) = store.apply(TaskWithdrawn(ROOT, "t1", "x", request_id="w1"))
+
+    refusal = TaskRefusal.NOT_THE_WITHDRAWER if woken else None
+    assert settled == TaskWriteSettled(request_id="w1", refusal=refusal)
+    assert store.snapshot().tasks["t1"].withdrawn_by_lead is not woken
+
+
+@pytest.mark.parametrize(
+    ("who", "then", "refusal"),
+    [
+        (ROOT, (), TaskRefusal.NOT_THE_WITHDRAWER),
+        (ROOT, (StateChanged(CHILD, AgentState.THINKING),), TaskRefusal.NOT_THE_WITHDRAWER),
+        (
+            _BUILDER_2,
+            (AgentFinished(CHILD, AgentState.DONE, ended_at=5.0),),
+            TaskRefusal.NOT_THE_WITHDRAWER,
+        ),
+        (
+            ("sess-1", "agent-c"),
+            (
+                spawn(("sess-1", "agent-c"), ROOT, at=3.0),
+                AgentFinished(CHILD, AgentState.DONE, ended_at=5.0),
+            ),
+            TaskRefusal.NOT_THE_WITHDRAWER,
+        ),
+        (OTHER, (AgentFinished(CHILD, AgentState.DONE, ended_at=5.0),), TaskRefusal.NO_SUCH_TASK),
+    ],
+    ids=[
+        "the lead, the declarer running",
+        "the lead, the declarer reported working",
+        "the holder, the declarer stopped",
+        "another builder, the declarer stopped",
+        "another session's root, the declarer stopped",
+    ],
+)
+def test_only_the_lead_and_only_once_the_declarer_has_stopped_withdraws_in_its_place(
+    who: NodeId, then: tuple[Intent, ...], refusal: TaskRefusal
+) -> None:
+    store = _declared_by_a_builder(*then)
+    before = store.snapshot().tasks["t1"]
+
+    (settled,) = store.apply(TaskWithdrawn(who, "t1", "x", request_id="w1"))
+
+    assert settled == TaskWriteSettled(request_id="w1", refusal=refusal)
+    assert store.snapshot().tasks["t1"] is before
+    assert store.snapshot().concerns == {}
+
+
+def test_a_declarer_never_announced_is_not_stopped() -> None:
+    """No record and no log naming it is an agent that has not started yet."""
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(TaskDeclared(Task(id="t1", title="T"), CHILD))
+
+    (settled,) = store.apply(TaskWithdrawn(ROOT, "t1", "x", request_id="w1"))
+
+    assert settled == TaskWriteSettled(request_id="w1", refusal=TaskRefusal.NOT_THE_WITHDRAWER)
+
+
+def test_a_stopped_declarer_withdrawing_its_own_task_is_still_its_declarer() -> None:
+    """The flag says who withdrew it, and the declarer is never "the lead"."""
+    store = _declared_by_a_builder(AgentFinished(CHILD, AgentState.DONE, ended_at=5.0))
+
+    store.apply(TaskWithdrawn(CHILD, "t1", "mine to drop"))
+
+    task = store.snapshot().tasks["t1"]
+    assert task.withdrawn and not task.withdrawn_by_lead
+    assert task.result == "withdrawn by its declarer: mine to drop"
+
+
+# -- the lead takes no claim it could not take back ------------------------------------
+
+
+def _declared_by_a_builder_then_held(holder: NodeId, *then: Intent) -> Store:
+    """``t1``, declared by the builder CHILD and claimed by ``holder``, then ``then``."""
+    store = Store()
+    store.apply(spawn(ROOT, at=1.0))
+    store.apply(spawn(CHILD, ROOT, at=2.0))
+    store.apply(spawn(_BUILDER_2, ROOT, at=2.0))
+    store.apply(TaskDeclared(Task(id="t1", title="T", touches=("a.py",)), CHILD))
+    store.apply(TaskClaimRequested(holder, request_id="k", task_id="t1"))
+    assert store.snapshot().tasks["t1"].claimed_by == holder
+    for intent in then:
+        store.apply(intent)
+    return store
+
+
+@pytest.mark.parametrize(
+    ("holder", "then"),
+    [
+        (CHILD, (AgentFinished(CHILD, AgentState.DONE, ended_at=5.0),)),
+        (_BUILDER_2, (AgentFinished(CHILD, AgentState.DONE, ended_at=5.0),)),
+        (
+            _BUILDER_2,
+            (
+                AgentFinished(CHILD, AgentState.DONE, ended_at=5.0),
+                AgentFinished(_BUILDER_2, AgentState.DONE, ended_at=6.0),
+            ),
+        ),
+    ],
+    ids=[
+        "the declarer holds it and returned to wait",
+        "another builder holds it, running",
+        "another builder holds it and returned to wait",
+    ],
+)
+def test_the_lead_withdraws_no_task_it_could_not_release_side_by_side(
+    holder: NodeId, then: tuple[Intent, ...]
+) -> None:
+    """
+    The declarer has stopped, so the lead stands in for it -- but a holder of
+    this run can be woken and may be holding the task across a wait, which is
+    why the lead's release is refused. A withdrawal ends that claim and refuses
+    the holder's completion besides, so it is refused as well.
+    """
+    withdrawing = _declared_by_a_builder_then_held(holder, *then)
+    releasing = _declared_by_a_builder_then_held(holder, *then)
+    before = withdrawing.snapshot().tasks["t1"]
+
+    (withdrawn,) = withdrawing.apply(TaskWithdrawn(ROOT, "t1", "x", request_id="w1"))
+    (released,) = releasing.apply(TaskReleased(ROOT, "t1", request_id="r1"))
+
+    assert withdrawn == TaskWriteSettled("w1", TaskRefusal.WITHDRAW_HELD_LIVE)
+    assert released == TaskWriteSettled("r1", TaskRefusal.NOT_YOURS)
+    assert withdrawing.snapshot().tasks["t1"] is before
+    assert releasing.snapshot().tasks["t1"].claimed_by == holder
+    assert withdrawing.snapshot().concerns == {}
+
+
+def test_the_lead_withdraws_an_earlier_run_declarers_task_that_declarer_holds() -> None:
+    """
+    The other side of the pair: a holder of an earlier run is one the lead may
+    release, so it is one the lead may withdraw from, and is told so.
+    """
+    from pptmstr.model import withdrawal_notice_id
+
+    records = (
+        boardlog.Declared(
+            at=_wall(50.0),
+            task_id="t1",
+            title="T",
+            declared_by="builder-2",
+            declared_by_id=_OLD_BUILDER,
+        ),
+        boardlog.Claimed(at=_wall(40.0), task_id="t1", by="builder-2", by_id=_OLD_BUILDER),
+    )
+    withdrawing, releasing = Store(), Store()
+    for store in (withdrawing, releasing):
+        _restore(store, _logged(*records))
+        store.apply(spawn(ROOT, at=101.0))
+
+    (withdrawn,) = withdrawing.apply(TaskWithdrawn(ROOT, "t1", "x", request_id="w1"))
+    (released,) = releasing.apply(TaskReleased(ROOT, "t1", request_id="r1"))
+
+    assert withdrawn == TaskWriteSettled("w1", None)
+    assert released == TaskWriteSettled("r1", None)
+    task = withdrawing.snapshot().tasks["t1"]
+    assert task.withdrawn and task.withdrawn_by_lead
+    notice = withdrawing.snapshot().concerns[withdrawal_notice_id("t1")]
+    assert notice.recipient == _OLD_BUILDER
+
+
+def test_the_lead_withdraws_a_stopped_declarers_task_that_the_lead_holds() -> None:
+    """Nobody's claim is taken: the holder is the agent withdrawing it."""
+    store = _declared_by_a_builder_then_held(
+        ROOT, AgentFinished(CHILD, AgentState.DONE, ended_at=5.0)
+    )
+
+    (settled,) = store.apply(TaskWithdrawn(ROOT, "t1", "x", request_id="w1"))
+
+    assert settled == TaskWriteSettled("w1", None)
+    assert store.snapshot().tasks["t1"].withdrawn_by_lead
+
+
+def test_a_declarer_still_withdraws_its_own_task_from_a_holder_that_can_be_woken() -> None:
+    """The rule is the lead's, standing in; the declarer's own right is unchanged."""
+    store = _declared_by_a_builder_then_held(_BUILDER_2)
+
+    (settled,) = store.apply(TaskWithdrawn(CHILD, "t1", "x", request_id="w1"))
+
+    assert settled == TaskWriteSettled("w1", None)
+    assert store.snapshot().tasks["t1"].withdrawn
+
+
+# -- a reason the operator rewrote ----------------------------------------------------
+
+
+@pytest.mark.parametrize("by_lead", [False, True], ids=["by its declarer", "by the lead"])
+def test_a_reason_the_operator_edited_is_the_operators_on_the_task_and_the_notice(
+    by_lead: bool,
+) -> None:
+    """
+    ``bus.EDITED_KEY`` reaches the store as ``edited``. The words are then the
+    operator's, and every record of them says so: the task's flag, its result's
+    label and the notice's own ``edited``.
+    """
+    from pptmstr.model import REASON_EDITED, withdrawal_label, withdrawal_notice_id
+
+    store = _held_from_an_earlier_run(AgentFinished(CHILD, AgentState.DONE, ended_at=105.0))
+    who = ROOT if by_lead else CHILD
+
+    store.apply(TaskWithdrawn(who, "t1", "the operator's words", edited=True))
+
+    snap = store.snapshot()
+    task = snap.tasks["t1"]
+    assert task.withdrawal_edited and task.withdrawn_by_lead is by_lead
+    assert task.result == f"{withdrawal_label(by_lead, True)}: the operator's words"
+    assert task.result.endswith(f"{REASON_EDITED}: the operator's words")
+    assert snap.concerns[withdrawal_notice_id("t1")].edited
+
+
+def test_withdrawal_facts_on_a_task_nobody_withdrew_are_not_placed() -> None:
+    """``withdrawn_by_lead`` and ``withdrawal_edited`` are facts about a withdrawal."""
+    for wrong in ({"withdrawn_by_lead": True}, {"withdrawal_edited": True}):
+        logged = RestoredTask(
+            id="t1",
+            title="T",
+            declared_by=ROOT,
+            versions=(boardlog.TaskVersion(_wall(50.0), "", ROOT),),
+            **wrong,
+        )
+        store = Store()
+        _restore(store, boardlog.Board(tasks=(logged,), concerns=()))
+        assert store.snapshot().tasks == {}, wrong
+        assert store.snapshot().restores["sess-1"].unplaced == (
+            NotPlaced("task", "t1", Unplaced.INCOHERENT),
+        )
+
+
+@pytest.mark.parametrize(
+    "finished",
+    [
+        TaskCompleted(CHILD, "t1", at=20.0, result="3/3 pass", basis=Basis.RUN, not_run=""),
+        TaskClosed("t1", "closed", at=20.0),
+        TaskWithdrawn(ROOT, "t1", "the first reason", at=20.0),
+    ],
+    ids=["by its claimer", "by the operator", "by an earlier withdrawal"],
+)
+def test_withdrawing_a_finished_task_is_refused_and_changes_nothing(finished: Intent) -> None:
+    store = _board_with(_T1_CLAIMED, finished)
+    before = store.snapshot().tasks
+
+    (settled,) = store.apply(TaskWithdrawn(ROOT, "t1", "a later reason", request_id="w1"))
+    (missing,) = store.apply(TaskWithdrawn(ROOT, "no-such-task", "x", request_id="w2"))
+
+    assert settled == TaskWriteSettled(request_id="w1", refusal=TaskRefusal.WITHDRAW_FINISHED)
+    assert missing == TaskWriteSettled(request_id="w2", refusal=TaskRefusal.NO_SUCH_TASK)
+    assert store.snapshot().tasks == before
+    assert store.snapshot().tasks["t1"] is before["t1"]
+
+
+@pytest.mark.parametrize("reason", ["", " \n", "r" * 4_001])
+def test_a_withdrawal_with_no_reason_or_one_over_the_bound_is_refused_and_not_cut(
+    reason: str,
+) -> None:
+    from pptmstr.model import MAX_WITHDRAWAL_REASON_CHARS
+
+    assert len("r" * 4_001) == MAX_WITHDRAWAL_REASON_CHARS + 1
+    store = _board_with()
+    before = store.snapshot().tasks["t1"]
+
+    (settled,) = store.apply(TaskWithdrawn(ROOT, "t1", reason, request_id="w1"))
+
+    assert settled == TaskWriteSettled(request_id="w1", refusal=TaskRefusal.NO_WITHDRAWAL_REASON)
+    assert store.snapshot().tasks["t1"] is before
+    store.apply(TaskWithdrawn(ROOT, "t1", "r" * MAX_WITHDRAWAL_REASON_CHARS))
+    assert store.snapshot().tasks["t1"].withdrawn
+
+
+@pytest.mark.parametrize(
+    "wrong",
+    [
+        {"holder": _OLD_BUILDER, "held_by": (_OLD_BUILDER,)},
+        {"claimed_version": 1},
+        {"completed_at": None},
+        {"state": TaskState.PENDING, "completed_at": None, "result": ""},
+        {"result_basis": "run"},
+        {"closed_by_operator": True},
+    ],
+    ids=["a holder", "a handed version", "no time", "not finished", "a basis", "closed too"],
+)
+def test_a_logged_withdrawal_in_a_shape_the_arm_does_not_leave_is_not_placed(
+    wrong: dict[str, Any],
+) -> None:
+    withdrawn = RestoredTask(
+        id="t1",
+        title="T",
+        declared_by=ROOT,
+        versions=(boardlog.TaskVersion(_wall(50.0), "", ROOT),),
+        state=TaskState.COMPLETED,
+        completed_at=_wall(60.0),
+        result="withdrawn by its declarer: x",
+        withdrawn=True,
+    )
+    whole, broken = Store(), Store()
+
+    _restore(whole, boardlog.Board(tasks=(withdrawn,), concerns=()))
+    _restore(broken, boardlog.Board(tasks=(dataclasses.replace(withdrawn, **wrong),), concerns=()))
+
+    placed = whole.snapshot().tasks["t1"]
+    assert placed.withdrawn and not placed.closed_by_operator
+    assert placed.result == "withdrawn by its declarer: x"
+    assert placed.claimed_by is None and placed.state is TaskState.COMPLETED
+    assert broken.snapshot().tasks == {}
+    assert broken.snapshot().restores["sess-1"].unplaced == (
+        NotPlaced("task", "t1", Unplaced.INCOHERENT),
+    )
+
+
+# -- a gate on every writer ----------------------------------------------------------
+#
+# Scenarios D1-D3 of planning/2026-10-16-the-board-needs-graph-queries.md, on the
+# reducer. A gate names ``ALL_WRITERS`` in ``depends_on`` and waits on every
+# unfinished task of its board that declares touches, whenever it was declared.
+
+
+def _gated(*then: Intent) -> Store:
+    """ROOT's board with a builder, ``gate`` waiting on every writer -- then ``then``."""
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(spawn(CHILD, ROOT))
+    store.apply(
+        TaskDeclared(Task(id="gate", title="G", depends_on=(ALL_WRITERS,), declared_at=1.0), ROOT)
+    )
+    for intent in then:
+        store.apply(intent)
+    return store
+
+
+def _writer(task_id: str, at: float, *, by: NodeId = ROOT, **fields: Any) -> TaskDeclared:
+    fields.setdefault("touches", (f"{task_id}.py",))
+    return TaskDeclared(Task(id=task_id, title="W", declared_at=at, **fields), by, f"d-{task_id}")
+
+
+def _waits(store: Store, task_id: str = "gate") -> tuple[str, ...]:
+    snap = store.snapshot()
+    return snap.tasks[task_id].blocked_on(snap.tasks)
+
+
+def test_d1_a_gate_declared_first_waits_on_five_writers_after_it_and_a_sixth_with_no_amend() -> (
+    None
+):
+    """
+    The word is stated as the flag and not kept as an id, so the gate is not
+    also waiting on a task called "all-writers". A task with no touches writes
+    nothing and is not waited on.
+    """
+    store = _gated(*(_writer(f"w{n}", 2.0 + n) for n in range(1, 6)))
+    store.apply(TaskDeclared(Task(id="note", title="N", declared_at=8.0), ROOT))
+    gate = store.snapshot().tasks["gate"]
+
+    assert gate.after_all_writers and gate.depends_on == ()
+    assert _waits(store) == ("w1", "w2", "w3", "w4", "w5")
+    assert not gate.is_claimable(store.snapshot().tasks)
+
+    store.apply(_writer("w6", 9.0))
+    assert _waits(store) == ("w1", "w2", "w3", "w4", "w5", "w6")
+
+    for n in range(1, 7):
+        store.apply(TaskClaimRequested(CHILD, request_id=f"k{n}", task_id=f"w{n}"))
+        store.apply(TaskCompleted(CHILD, f"w{n}", at=20.0 + n, result="done"))
+    snap = store.snapshot()
+    assert _waits(store) == ()
+    assert snap.tasks["gate"].is_claimable(snap.tasks)
+
+
+def test_d1_explicit_dependencies_sit_beside_the_word_and_come_first_without_repeats() -> None:
+    store = _gated(_writer("w1", 2.0), _writer("w2", 3.0))
+    store.apply(TaskDeclared(Task(id="spec", title="S", declared_at=4.0), ROOT))
+    store.apply(
+        TaskDeclared(
+            Task(id="gate-2", title="G", depends_on=("w2", ALL_WRITERS, "spec"), declared_at=5.0),
+            ROOT,
+        )
+    )
+
+    assert store.snapshot().tasks["gate-2"].depends_on == ("w2", "spec")
+    assert _waits(store, "gate-2") == ("w2", "spec", "w1")
+
+
+_X = _writer("x", 2.0)
+_X_HELD = TaskClaimRequested(CHILD, request_id="k", task_id="x")
+
+
+@pytest.mark.parametrize(
+    ("then", "kept"),
+    [
+        ((_X,), True),
+        ((_X, _X_HELD), True),
+        ((_writer("x", 2.0, by=OTHER),), False),
+        ((_writer("x", 2.0, touches=()),), False),
+        ((_writer("x", 2.0, depends_on=(ALL_WRITERS,)),), True),
+        ((_writer("x", 2.0, depends_on=(ALL_WRITERS,), touches=()),), False),
+        ((_X, _X_HELD, TaskCompleted(CHILD, "x", at=9.0)), False),
+        ((_X, TaskClosed("x", "not wanted")), False),
+        ((_X, TaskWithdrawn(ROOT, "x", "replaced")), False),
+    ],
+    ids=[
+        "an unfinished writer",
+        "a held writer",
+        "another session's writer",
+        "a task with no touches",
+        "another gate with touches",
+        "another gate with no touches",
+        "a finished writer",
+        "a writer the operator closed",
+        "a withdrawn writer (D3)",
+    ],
+)
+def test_who_a_gate_waits_on_is_every_unfinished_writer_of_its_own_board_and_nothing_else(
+    then: tuple[Intent, ...], kept: bool
+) -> None:
+    """The set filter, one case per clause, each about the one task ``x``."""
+    store = _gated(*then)
+    snap = store.snapshot()
+
+    assert "x" in snap.tasks
+    assert _waits(store) == (("x",) if kept else ())
+    assert snap.tasks["gate"].is_claimable(snap.tasks) is not kept
+
+
+def _gate(task_id: str, at: float, **fields: Any) -> TaskDeclared:
+    return TaskDeclared(
+        Task(id=task_id, title="G", depends_on=(ALL_WRITERS,), declared_at=at, **fields),
+        ROOT,
+        f"d-{task_id}",
+    )
+
+
+def test_a_gate_with_touches_is_not_its_own_writer() -> None:
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(_gate("gate", 1.0, touches=("tests/test_all.py",)))
+    snap = store.snapshot()
+
+    assert snap.tasks["gate"].writers(snap.tasks) == ()
+    assert snap.tasks["gate"].is_claimable(snap.tasks)
+
+
+def test_a_gate_that_writes_nothing_waits_on_a_gate_that_writes_a_file() -> None:
+    """
+    The review-fix shape: ``fix-findings`` runs after every builder and writes
+    store.py, ``final-tests`` runs after every writer and writes nothing. The
+    final run may not start while the fix is unfinished, and the fix does not
+    wait on the run.
+    """
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(spawn(CHILD, ROOT))
+    store.apply(_gate("fix-findings", 1.0, touches=("pptmstr/store.py",)))
+    (settled,) = store.apply(_gate("final-tests", 2.0))
+    snap = store.snapshot()
+
+    assert settled == TaskWriteSettled("d-final-tests", None)
+    assert snap.tasks["final-tests"].blocked_on(snap.tasks) == ("fix-findings",)
+    assert not snap.tasks["final-tests"].is_claimable(snap.tasks)
+    assert snap.tasks["fix-findings"].is_claimable(snap.tasks)
+
+    store.apply(TaskClaimRequested(CHILD, request_id="k", task_id="fix-findings"))
+    snap = store.snapshot()
+    assert _waits(store, "final-tests") == ("fix-findings",)
+    assert not snap.tasks["final-tests"].is_claimable(snap.tasks)
+
+    store.apply(TaskCompleted(CHILD, "fix-findings", at=5.0, result="fixed"))
+    snap = store.snapshot()
+    assert snap.tasks["final-tests"].is_claimable(snap.tasks)
+
+
+def test_a_second_gate_with_touches_is_refused_with_the_loop_the_two_would_close() -> None:
+    """Each would wait on the other, as a writer of the other's board."""
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(_gate("gate-1", 1.0, touches=("a.py",)))
+    before = store.snapshot().tasks
+
+    (settled,) = store.apply(_gate("gate-2", 2.0, touches=("b.py",)))
+
+    assert settled == TaskWriteSettled(
+        "d-gate-2", TaskRefusal.WOULD_CYCLE, cycle=("gate-2", "gate-1", "gate-2")
+    )
+    assert store.snapshot().tasks == before
+
+
+@pytest.mark.parametrize("touches", [(".",), (" ",), ("./",)], ids=["dot", "blank", "dot-slash"])
+def test_a_touch_that_names_no_file_is_no_write_and_closes_no_loop_through_a_gate(
+    touches: tuple[str, ...],
+) -> None:
+    """
+    The cycle check is asked of the task as it lands, whose touches are
+    normalised to none: it writes nothing, so it is no writer the gate waits on.
+    """
+    store = _gated()
+
+    (settled,) = store.apply(_writer("notes", 2.0, touches=touches, depends_on=("gate",)))
+
+    assert settled == TaskWriteSettled("d-notes", None)
+    assert store.snapshot().tasks["notes"].touches == ()
+    assert _waits(store) == ()
+
+
+@pytest.mark.parametrize("order", ["writer second", "gate second"])
+def test_a_record_handed_in_as_completed_is_checked_as_the_pending_task_it_lands_as(
+    order: str,
+) -> None:
+    """
+    The arm lands every declaration PENDING whatever the record says, so the
+    loop it would close is looked for on that task. Checked as COMPLETED, a
+    writer would be no writer and a gate would have no writers, and the two
+    would land waiting on each other for good.
+    """
+    store = Store()
+    store.apply(spawn(ROOT))
+    done: dict[str, Any] = {"state": TaskState.COMPLETED, "completed_at": 1.0}
+    if order == "writer second":
+        store.apply(_gate("gate", 1.0))
+        second = _writer("w", 2.0, depends_on=("gate",), **done)
+        loop = ("w", "gate", "w")
+    else:
+        store.apply(_writer("w", 1.0, depends_on=("gate",)))
+        second = _gate("gate", 2.0, **done)
+        loop = ("gate", "w", "gate")
+    before = store.snapshot().tasks
+
+    (settled,) = store.apply(second)
+
+    assert second.request_id is not None
+    assert settled == TaskWriteSettled(second.request_id, TaskRefusal.WOULD_CYCLE, cycle=loop)
+    assert store.snapshot().tasks == before
+
+
+@pytest.mark.parametrize(
+    "flag", ["closed_by_operator", "withdrawn", "withdrawn_by_lead", "withdrawal_edited"]
+)
+def test_a_record_handed_in_closed_or_withdrawn_lands_as_a_task_nobody_has_touched(
+    flag: str,
+) -> None:
+    """
+    The close and the withdrawal are other arms' to write, as the state is. A
+    record that says otherwise would land PENDING and be labelled closed or
+    withdrawn on every surface that reads the flag.
+    """
+    store = Store()
+    store.apply(spawn(ROOT))
+
+    (settled,) = store.apply(_writer("w", 1.0, **{flag: True}))
+
+    task = store.snapshot().tasks["w"]
+    assert settled == TaskWriteSettled("d-w", None)
+    assert task.state is TaskState.PENDING
+    assert not (
+        task.closed_by_operator
+        or task.withdrawn
+        or task.withdrawn_by_lead
+        or task.withdrawal_edited
+    )
+
+
+def test_d2_no_freeze_at_claim_the_gate_stays_held_and_a_later_writer_is_reported_outstanding() -> (
+    None
+):
+    """
+    The lead's decision: claimability is decided at the claim and not taken
+    back, and ``blocked_on`` answers honestly for the held gate.
+    """
+    store = _gated()
+    (claim,) = store.apply(TaskClaimRequested(CHILD, request_id="k", task_id="gate"))
+    assert isinstance(claim, ClaimSettled) and claim.task is not None
+
+    store.apply(_writer("late", 5.0))
+    gate = store.snapshot().tasks["gate"]
+
+    assert gate.state is TaskState.CLAIMED and gate.claimed_by == CHILD
+    assert _waits(store) == ("late",)
+    assert store.snapshot().tasks["late"].is_claimable(store.snapshot().tasks)
+
+
+def test_a_finished_gate_waits_on_nothing_and_a_writer_may_then_depend_on_it() -> None:
+    store = _gated()
+    store.apply(TaskClaimRequested(CHILD, request_id="k", task_id="gate"))
+    store.apply(TaskCompleted(CHILD, "gate", at=5.0, result="reviewed"))
+
+    (settled,) = store.apply(_writer("fix", 6.0, depends_on=("gate",)))
+
+    assert settled == TaskWriteSettled("d-fix", None)
+    assert _waits(store) == ()
+    assert store.snapshot().tasks["fix"].is_claimable(store.snapshot().tasks)
+
+
+@pytest.mark.parametrize("held", [False, True], ids=["pending gate", "claimed gate"])
+def test_a_writer_declared_after_a_gate_that_waits_on_it_is_refused_with_the_cycle(
+    held: bool,
+) -> None:
+    """
+    Directly and through a task that writes nothing. A claimed gate counts: its
+    holder can give it back, and it would then wait on the writer for good.
+    """
+    store = _gated(*((TaskClaimRequested(CHILD, request_id="k", task_id="gate"),) if held else ()))
+    store.apply(
+        TaskDeclared(Task(id="between", title="B", depends_on=("gate",), declared_at=2.0), ROOT)
+    )
+    before = store.snapshot().tasks
+
+    (direct,) = store.apply(_writer("w", 3.0, depends_on=("gate",)))
+    (through,) = store.apply(_writer("v", 4.0, depends_on=("between",)))
+
+    assert direct == TaskWriteSettled("d-w", TaskRefusal.WOULD_CYCLE, cycle=("w", "gate", "w"))
+    assert through == TaskWriteSettled(
+        "d-v", TaskRefusal.WOULD_CYCLE, cycle=("v", "between", "gate", "v")
+    )
+    assert store.snapshot().tasks == before
+
+
+def test_a_gate_declared_after_a_writer_that_already_names_it_is_refused_with_the_cycle() -> None:
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(_writer("w", 1.0, depends_on=("gate",)))
+    before = store.snapshot().tasks
+
+    (settled,) = store.apply(
+        TaskDeclared(
+            Task(id="gate", title="G", depends_on=(ALL_WRITERS,), declared_at=2.0), ROOT, "d-g"
+        )
+    )
+
+    assert settled == TaskWriteSettled("d-g", TaskRefusal.WOULD_CYCLE, cycle=("gate", "w", "gate"))
+    assert store.snapshot().tasks == before
+
+
+def test_a_writer_sharing_a_gates_file_goes_first_and_is_not_queued_behind_the_gate() -> None:
+    """
+    The overlap edge would close a loop, so ``_already_behind`` leaves it out
+    and says so, as it does for any task already waiting on the new one.
+    """
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(
+        TaskDeclared(
+            Task(
+                id="gate", title="G", depends_on=(ALL_WRITERS,), touches=("a.py",), declared_at=1.0
+            ),
+            ROOT,
+        )
+    )
+
+    (settled,) = store.apply(_writer("w", 2.0, touches=("a.py",)))
+
+    assert settled == TaskWriteSettled("d-w", None, already_behind=("gate",))
+    assert store.snapshot().tasks["w"].depends_on == ()
+    assert _waits(store) == ("w",)
+
+
+def test_the_word_all_writers_is_refused_as_a_task_id() -> None:
+    store = Store()
+    store.apply(spawn(ROOT))
+
+    (settled,) = store.apply(
+        TaskDeclared(Task(id=ALL_WRITERS, title="X", touches=("a.py",)), ROOT, "d1")
+    )
+
+    assert settled == TaskWriteSettled("d1", TaskRefusal.RESERVED_ID)
+    assert store.snapshot().tasks == {}
+
+
+_ESCAPED_IDS = pytest.mark.parametrize(
+    "task_id",
+    ["fix-\x00", "fix-\udc80", "fix-\\u005cu0000", "fix-\\u0000", "fix-\\uD800"],
+    ids=["nul", "surrogate", "printable escaped backslash", "printable nul", "upper-case hex"],
+)
+
+
+@_ESCAPED_IDS
+def test_an_id_the_store_would_not_hold_as_sent_is_refused_and_nothing_lands(task_id: str) -> None:
+    """
+    For every emitter, not only the bus: the arm refuses it after ``_drawable``
+    has rewritten it, and ``stored_as_sent`` answers alike on either side.
+    """
+    store = Store()
+    store.apply(spawn(ROOT))
+
+    (settled,) = store.apply(TaskDeclared(Task(id=task_id, title="X"), ROOT, "d1"))
+
+    assert not stored_as_sent(task_id)
+    assert settled == TaskWriteSettled("d1", TaskRefusal.ESCAPED_ID)
+    assert store.snapshot().tasks == {}
+
+
+_ESCAPED_DEPENDENCIES = pytest.mark.parametrize(
+    "dep",
+    ["base-\x00", "base-\udc80", "base-\\u005cu0000"],
+    ids=["nul", "surrogate", "printable escaped backslash"],
+)
+
+
+@_ESCAPED_DEPENDENCIES
+@pytest.mark.parametrize(
+    "others",
+    [(), ("base",), (ALL_WRITERS, "base")],
+    ids=["alone", "beside a declared task", "beside all-writers"],
+)
+def test_a_dependency_no_task_could_be_declared_under_is_refused_and_nothing_lands(
+    dep: str, others: tuple[str, ...]
+) -> None:
+    """
+    Such an entry names a task whose declaration is refused (``ESCAPED_ID``),
+    so the task naming it would wait for good. Refused in the arm, for every
+    emitter, after ``_drawable`` has rewritten the entry.
+    """
+    store = Store()
+    store.apply(spawn(ROOT))
+    store.apply(TaskDeclared(Task(id="base", title="B"), ROOT, "d0"))
+    before = store.snapshot().tasks
+
+    (settled,) = store.apply(
+        TaskDeclared(Task(id="on-it", title="X", depends_on=(*others, dep)), ROOT, "d1")
+    )
+
+    assert not stored_as_sent(dep)
+    assert settled == TaskWriteSettled("d1", TaskRefusal.ESCAPED_ID)
+    assert store.snapshot().tasks == before
+
+
+@pytest.mark.parametrize(
+    "deps",
+    [("base",), (ALL_WRITERS,), ("base-\\u1234",), ("base-\\x00",), ("base-\\",)],
+    ids=["plain", "all-writers", "backslash u1234", "backslash x00", "trailing backslash"],
+)
+def test_a_dependency_with_no_escape_in_it_is_declared_as_sent(deps: tuple[str, ...]) -> None:
+    store = Store()
+    store.apply(spawn(ROOT))
+
+    (settled,) = store.apply(TaskDeclared(Task(id="on-it", title="X", depends_on=deps), ROOT, "d1"))
+
+    assert settled == TaskWriteSettled("d1", None)
+    landed = store.snapshot().tasks["on-it"]
+    assert landed.depends_on == tuple(d for d in deps if d != ALL_WRITERS)
+    assert landed.after_all_writers is (ALL_WRITERS in deps)
+
+
+@pytest.mark.parametrize("task_id", ["fix-1", "fix-\\u1234", "fix-\\x00", "fix-\\"])
+def test_an_id_with_a_backslash_that_spells_no_escape_is_declared_as_sent(task_id: str) -> None:
+    store = Store()
+    store.apply(spawn(ROOT))
+
+    (settled,) = store.apply(TaskDeclared(Task(id=task_id, title="X"), ROOT, "d1"))
+
+    assert stored_as_sent(task_id)
+    assert settled == TaskWriteSettled("d1", None)
+    assert list(store.snapshot().tasks) == [task_id]
+
+
+def test_a_restore_still_places_an_escaped_id_an_older_board_log_holds() -> None:
+    """
+    A log written before declarations were refused for it holds the id as the
+    store held it, drawable already. The restore takes it as written and does
+    not reinterpret it, and a dependency on it still finds it.
+    """
+    stored = "fix-\\u0000"
+    logged = RestoredTask(
+        id=stored,
+        title="F",
+        declared_by=ROOT,
+        versions=(boardlog.TaskVersion(_wall(40.0), "", ROOT),),
+    )
+    waiting = RestoredTask(
+        id="after",
+        title="A",
+        declared_by=ROOT,
+        versions=(boardlog.TaskVersion(_wall(50.0), "", ROOT),),
+        depends_on=(stored,),
+    )
+    store = Store()
+
+    _restore(store, boardlog.Board(tasks=(logged, waiting), concerns=()))
+
+    snap = store.snapshot()
+    assert not stored_as_sent(stored)
+    assert snap.restores["sess-1"].unplaced == ()
+    assert sorted(snap.tasks) == ["after", stored]
+    assert _waits(store, "after") == (stored,)
+
+
+@pytest.mark.parametrize("gate", [True, False], ids=["a gate", "a task logged before the flag"])
+def test_a_restored_task_keeps_whether_it_waits_on_every_writer(gate: bool) -> None:
+    """
+    A restore does not read the word: an older log's ``depends_on`` that names a
+    task called "all-writers" stays a dependency on that task.
+    """
+    logged = RestoredTask(
+        id="g",
+        title="G",
+        declared_by=ROOT,
+        versions=(boardlog.TaskVersion(_wall(50.0), "", ROOT),),
+        depends_on=() if gate else (ALL_WRITERS,),
+        after_all_writers=gate,
+    )
+    writer = RestoredTask(
+        id="w",
+        title="W",
+        declared_by=ROOT,
+        versions=(boardlog.TaskVersion(_wall(40.0), "", ROOT),),
+        touches=("a.py",),
+    )
+    store = Store()
+
+    _restore(store, boardlog.Board(tasks=(logged, writer), concerns=()))
+
+    snap = store.snapshot()
+    assert snap.restores["sess-1"].unplaced == ()
+    assert snap.tasks["g"].after_all_writers is gate
+    assert _waits(store, "g") == (("w",) if gate else (ALL_WRITERS,))
+
+
+def test_graph_queries_pick_up_a_gate_on_every_writer_with_no_change_of_their_own() -> None:
+    """
+    ``boardgraph`` reads ``Task.blocked_on``: on a D1 board the gate is not
+    ready, and why it is blocked names the writers.
+    """
+    from pptmstr.boardgraph import ready, why_blocked
+
+    store = _gated(*(_writer(f"w{n}", 2.0 + n) for n in range(1, 4)))
+    store.apply(TaskClaimRequested(CHILD, request_id="k", task_id="w2"))
+    snap = store.snapshot()
+
+    assert {r.task_id for r in ready(snap, "sess-1")} == {"w1", "w3"}
+    answer = why_blocked(snap, "sess-1", "gate")
+    assert answer.verdict.value == "blocked"
+    assert [root.id for root in answer.roots] == ["w1", "w2", "w3"]
+    assert answer.roots[1].kind.value == "held"
 
 
 # -- decisions awaiting the operator ---------------------------------------------

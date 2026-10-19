@@ -25,6 +25,7 @@ import itertools
 import math
 import re
 import time
+from collections import deque
 from collections.abc import Callable, Iterable, Mapping
 from types import MappingProxyType
 from typing import assert_never
@@ -110,10 +111,12 @@ from .intents import (
     TaskDeclared,
     TaskReleased,
     TaskVersionHanded,
+    TaskWithdrawn,
     TopicChanged,
     UsageAccrued,
 )
 from .model import (
+    ALL_WRITERS,
     FINAL_STATES,
     INTERRUPTED_TOPIC,
     MAX_ANSWER_CHARS,
@@ -121,6 +124,7 @@ from .model import (
     MAX_COMMAND_REFUSAL_CHARS,
     MAX_OPEN_DECISIONS_PER_ASKER,
     MAX_OPEN_SUBAGENT_DECISIONS,
+    MAX_WITHDRAWAL_REASON_CHARS,
     RECALLED_TOPIC,
     AgentRecord,
     AgentState,
@@ -165,6 +169,9 @@ from .model import (
     normalised_property,
     normalised_touches,
     restored_party,
+    stored_as_sent,
+    withdrawal_notice,
+    withdrawal_result,
 )
 from .transcript import Transcript
 
@@ -348,7 +355,13 @@ def _drawable(intent: Intent) -> Intent:
     An identifier is rewritten with the rest. The mapping is one to one, every
     path by which an identifier reaches the store is this one, and the ones a
     reply is matched on outside the store -- a pending id, a request id -- are
-    made by the host from an id the API issued, not written by a model.
+    made by the host from an id the API issued, not written by a model. A task id
+    this would rewrite is refused at its declaration, as the task's id or an
+    entry of its ``depends_on`` (``TaskRefusal.ESCAPED_ID``): a task id is also
+    read outside the store --
+    the graph queries, a board row an agent copies an id from -- and there the
+    sent form and the stored one would not meet, nor would a stored one copied
+    back in, since ``text`` is not idempotent.
 
     A parked call keeps ``raw_args`` as the agent made them and gains the drawable
     form beside them where the two differ (``PendingApproval.args``).
@@ -757,6 +770,9 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
                     request_id=intent.request_id,
                     tasks=board_tasks(snap, intent.node_id[0]),
                     concerns=board_concerns(snap, intent.node_id[0]),
+                    # The world the rows were projected from, for the bus's graph
+                    # queries (``effects.BoardDelivered.snapshot``).
+                    snapshot=snap,
                 ),
             )
 
@@ -881,55 +897,62 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
                 tasks[intent.task_id] = dataclasses.replace(shown, claimed_version=intent.version)
 
         case TaskDeclared():
-            # Asked of the task as its declarer's: a cycle is looked for on the
-            # declarer's own board, and the record handed in does not say whose
-            # that is.
-            refused = _declaration_refusal(
-                tasks, dataclasses.replace(intent.task, declared_by=intent.node_id)
+            # Provenance comes from the intent, never from the record handed
+            # in: the intent's node_id is the sender the gate authenticated,
+            # and a declared_by a caller set on the Task is not evidence of
+            # anything. Stamping unconditionally leaves one writer for the
+            # field rather than two that have to agree.
+            #
+            # Touches are normalised here for the same reason: the overlap
+            # check compares them, so a caller that could supply its own
+            # spelling could evade the check by writing `./x.py`.
+            #
+            # A result is blanked on the same grounds as the provenance is
+            # stamped: it is the claimer's account of finished work, a task
+            # being declared has neither, and the completion arm is its one
+            # writer. What that account left unrun goes with it.
+            #
+            # So is everything else an arm other than this one writes: the
+            # state and the claimer, the completion stamp, who declined it and
+            # when, the writes measured against it, and whether it was closed
+            # or withdrawn and how that is attributed. A declaration is a
+            # task nobody has touched, whatever the record handed in says.
+            #
+            # The property is put on one line here so every reader is handed
+            # the same spelling whichever caller built the record.
+            #
+            # The refusal is asked of this same value. A cycle is looked for on
+            # the declarer's board, and a gate's writers are read from touches
+            # and state, so a check of the record as handed in would count a
+            # touch of "." as a write, or pass a task said to be COMPLETED that
+            # then lands PENDING inside a loop.
+            requested = _as_asked(intent.task)
+            landed = dataclasses.replace(
+                requested,
+                declared_by=intent.node_id,
+                touches=normalised_touches(requested.touches),
+                result="",
+                result_basis=None,
+                not_run=None,
+                state=TaskState.PENDING,
+                claimed_by=None,
+                completed_at=None,
+                released_by=(),
+                released_at=None,
+                writes=ApprovedWrites(),
+                property=normalised_property(requested.property),
+                superseded=(),
+                claimed_version=None,
+                held_by=(),
+                closed_by_operator=False,
+                withdrawn=False,
+                withdrawn_by_lead=False,
+                withdrawal_edited=False,
             )
+            refused, cycle = _declaration_refusal(tasks, landed)
             auto: tuple[TaskId, ...] = ()
             behind: tuple[TaskId, ...] = ()
             if refused is None:
-                # Provenance comes from the intent, never from the record handed
-                # in: the intent's node_id is the sender the gate authenticated,
-                # and a declared_by a caller set on the Task is not evidence of
-                # anything. Stamping unconditionally leaves one writer for the
-                # field rather than two that have to agree.
-                #
-                # Touches are normalised here for the same reason: the overlap
-                # check compares them, so a caller that could supply its own
-                # spelling could evade the check by writing `./x.py`.
-                #
-                # A result is blanked on the same grounds as the provenance is
-                # stamped: it is the claimer's account of finished work, a task
-                # being declared has neither, and the completion arm is its one
-                # writer. What that account left unrun goes with it.
-                #
-                # So is everything else an arm other than this one writes: the
-                # state and the claimer, the completion stamp, who declined it and
-                # when, and the writes measured against it. A declaration is a
-                # task nobody has touched, whatever the record handed in says.
-                #
-                # The property is put on one line here so every reader is handed
-                # the same spelling whichever caller built the record.
-                landed = dataclasses.replace(
-                    intent.task,
-                    declared_by=intent.node_id,
-                    touches=normalised_touches(intent.task.touches),
-                    result="",
-                    result_basis=None,
-                    not_run=None,
-                    state=TaskState.PENDING,
-                    claimed_by=None,
-                    completed_at=None,
-                    released_by=(),
-                    released_at=None,
-                    writes=ApprovedWrites(),
-                    property=normalised_property(intent.task.property),
-                    superseded=(),
-                    claimed_version=None,
-                    held_by=(),
-                )
                 # A dependency may name a task that is not declared yet, so an
                 # overlapping task can already be waiting on this one. Queueing
                 # this one behind it would leave both unclaimable for good, and
@@ -945,7 +968,7 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
                 holder = tasks[intent.task.id].declared_by
                 if holder is not None and snap.off_fleet(holder[0]):
                     held_off_fleet = holder[0]
-            effects = _settled(intent.request_id, refused, auto, behind, held_off_fleet)
+            effects = _settled(intent.request_id, refused, auto, behind, held_off_fleet, cycle)
 
         case TaskClaimRequested():
             # The claimer's own session, taken from the sender the gate
@@ -1082,6 +1105,56 @@ def _apply(snap: Snapshot, intent: Intent, now: float) -> tuple[Snapshot, tuple[
                 # shown on the board and written to the log.
                 notice = closing_notice(closing, closing.claimed_by, intent.reason, closed_at)
                 concerns.setdefault(notice.id, notice)
+
+        case TaskWithdrawn():
+            # The close's shape, under the declarer's guard instead of the
+            # operator's construction. COMPLETED is what lets go of every task
+            # waiting on this one: ``Task.blocked_on`` reads states, so there is
+            # nothing else to update.
+            #
+            # The holder is dropped from the row as a close drops it, and for the
+            # same reason: the declarer's words under a holder's name would be read
+            # as the holder's completion. Its own later completion is refused
+            # (``_ownership_refusal``), and ``held_by`` still has it.
+            withdrawing = tasks.get(intent.task_id)
+            refused = (
+                TaskRefusal.NO_SUCH_TASK
+                if withdrawing is None
+                else _withdrawer_refusal(snap, withdrawing, intent.node_id, intent.reason)
+            )
+            if withdrawing is not None and refused is None:
+                withdrawn_at = now if intent.at is None else intent.at
+                # Past the guard, a withdrawer that is not the declarer is the
+                # root standing in for one that stopped.
+                by_lead = intent.node_id != withdrawing.declared_by
+                tasks[intent.task_id] = dataclasses.replace(
+                    withdrawing,
+                    state=TaskState.COMPLETED,
+                    completed_at=withdrawn_at,
+                    result=withdrawal_result(intent.reason, by_lead, intent.edited),
+                    result_basis=None,
+                    not_run=None,
+                    claimed_by=None,
+                    claimed_version=None,
+                    withdrawn=True,
+                    withdrawn_by_lead=by_lead,
+                    withdrawal_edited=intent.edited,
+                )
+                if withdrawing.claimed_by is not None:
+                    # Told for the reason a close tells its holder: the files the
+                    # task named are released while the holder may still be
+                    # writing them, and the row no longer names it.
+                    notice = withdrawal_notice(
+                        withdrawing.id,
+                        intent.node_id,
+                        withdrawing.claimed_by,
+                        intent.reason,
+                        withdrawn_at,
+                        by_lead,
+                        intent.edited,
+                    )
+                    concerns.setdefault(notice.id, notice)
+            effects = _settled(intent.request_id, refused)
 
         case DigestRead():
             # Projected from the pre-apply snapshot and from the asker's previous
@@ -1513,6 +1586,7 @@ def _settled(
     auto_depends: tuple[TaskId, ...] = (),
     already_behind: tuple[TaskId, ...] = (),
     held_off_fleet: str | None = None,
+    cycle: tuple[TaskId, ...] = (),
 ) -> tuple[Effect, ...]:
     """
     The reply to a board write, or nothing when nobody asked.
@@ -1538,6 +1612,7 @@ def _settled(
             auto_depends=auto_depends,
             already_behind=already_behind,
             held_off_fleet=held_off_fleet,
+            cycle=cycle,
         ),
     )
 
@@ -1622,23 +1697,57 @@ def _already_behind(
     )
 
 
-def _declaration_refusal(tasks: dict[TaskId, Task], new: Task) -> TaskRefusal | None:
+def _as_asked(task: Task) -> Task:
     """
-    Why ``new`` may not go on the board, or None if it may.
+    ``task`` with ``ALL_WRITERS`` taken out of ``depends_on`` and stated as
+    ``after_all_writers``. A task that does not name it is returned unchanged.
+
+    The word names a set and not a task, so it is not kept as a dependency id:
+    left in, ``blocked_on`` would look it up and report a missing task. Done in
+    the arm, so every emitter of ``TaskDeclared`` gets the same reading, a dry
+    run included.
+    """
+    if ALL_WRITERS not in task.depends_on:
+        return task
+    return dataclasses.replace(
+        task,
+        depends_on=tuple(d for d in task.depends_on if d != ALL_WRITERS),
+        after_all_writers=True,
+    )
+
+
+def _declaration_refusal(
+    tasks: dict[TaskId, Task], new: Task
+) -> tuple[TaskRefusal | None, tuple[TaskId, ...]]:
+    """
+    Why ``new`` may not go on the board, or None if it may, and beside a
+    ``WOULD_CYCLE`` the cycle ``_cycle`` found.
 
     Re-declaring an existing id is refused rather than merged: the only way it
     happens is a retry, and overwriting would silently unclaim work somebody is
-    doing. A cycle is refused for the reason ``_would_cycle`` gives.
+    doing. A cycle is refused for the reason ``_would_cycle`` gives. The id
+    ``ALL_WRITERS`` is refused because ``depends_on`` could never name it, and
+    an id the store would not hold as sent because no later call could
+    (``model.stored_as_sent``; ``new.id`` has been through ``drawable.text``
+    already, which that predicate answers for alike). So is such an id in
+    ``depends_on``: it names a task no declaration can put on the board, so
+    ``new`` would wait on it for good.
 
-    Both were already the reducer's behaviour. What is new is that the answer is a
-    value the caller has to look at, rather than a dropped write the caller reported
-    as a success.
+    ``new`` is the task as it would land, so what is checked is what is kept.
+
+    The answer is a value the caller has to look at, rather than a dropped write
+    the caller reports as a success.
     """
+    if new.id == ALL_WRITERS:
+        return TaskRefusal.RESERVED_ID, ()
+    if not stored_as_sent(new.id) or not all(stored_as_sent(d) for d in new.depends_on):
+        return TaskRefusal.ESCAPED_ID, ()
     if new.id in tasks:
-        return TaskRefusal.DUPLICATE_ID
-    if _would_cycle(tasks, new):
-        return TaskRefusal.WOULD_CYCLE
-    return None
+        return TaskRefusal.DUPLICATE_ID, ()
+    cycle = _cycle(tasks, new)
+    if cycle:
+        return TaskRefusal.WOULD_CYCLE, cycle
+    return None, ()
 
 
 def _amender_refusal(task: Task, amender: NodeId | None) -> TaskRefusal | None:
@@ -1672,6 +1781,85 @@ def _amender_refusal(task: Task, amender: NodeId | None) -> TaskRefusal | None:
     if amender in task.held_by:
         return TaskRefusal.AMENDER_HELD_IT
     return None
+
+
+def _withdrawer_refusal(
+    snap: Snapshot, task: Task, withdrawer: NodeId, reason: str
+) -> TaskRefusal | None:
+    """
+    Why ``withdrawer`` may not withdraw ``task`` with ``reason``, or None if it may.
+
+    In the order an agent can act on the answers: is it on my board, is it mine
+    to withdraw, does somebody hold it that I may not take it from, is there
+    anything left to withdraw, did I say why.
+
+    **The second and third lines are the whole of who may.** The declarer as the gate stamped
+    it -- not "has never held it", which is the amendment's rule and would refuse
+    the declarer that amended the task and so cannot claim it, the agent this
+    exists for. Nor the operator's close, which takes no node and is a different
+    intent. And the root of the task's own session once the declarer has
+    stopped (``_root_of_its_session``, ``_has_stopped``): otherwise a builder
+    that declared follow-up work and returned leaves rows that only a person can
+    retire. A declarer that is still running keeps the sole right, and no other
+    sub-agent may ever withdraw another's task.
+
+    **The root standing in takes no claim it could not take back.** A
+    withdrawal ends the holder's claim and refuses its next ``complete_task``,
+    which is more than a release does, so the root's withdrawal is held to the
+    release's rule (``_may_take_claim``): refused while an agent it could not
+    reclaim from holds the task -- the declarer itself included, when it
+    claimed its own task and returned to wait -- unless the holder is the root.
+    The declarer's own withdrawal is not: the task was its to call off, and
+    its holder is told (``withdrawal_notice``).
+
+    A task on another session's board is answered as an id nothing has, for the
+    reason ``_amender_refusal`` gives.
+    """
+    if not task.belongs_to(withdrawer[0]):
+        return TaskRefusal.NO_SUCH_TASK
+    if task.declared_by != withdrawer and not (
+        task.declared_by is not None
+        and _root_of_its_session(task, withdrawer)
+        and _has_stopped(snap, task.declared_by)
+    ):
+        return TaskRefusal.NOT_THE_WITHDRAWER
+    if (
+        task.declared_by != withdrawer
+        and task.state is TaskState.CLAIMED
+        # The root's own claim is no one else's work taken: it is the agent
+        # acting, and the holder this protects is another one.
+        and task.claimed_by != withdrawer
+        and not _may_take_claim(snap, task, withdrawer)
+    ):
+        return TaskRefusal.WITHDRAW_HELD_LIVE
+    if task.state is TaskState.COMPLETED:
+        return TaskRefusal.WITHDRAW_FINISHED
+    if not reason.strip() or len(reason) > MAX_WITHDRAWAL_REASON_CHARS:
+        return TaskRefusal.NO_WITHDRAWAL_REASON
+    return None
+
+
+def _has_stopped(snap: Snapshot, node: NodeId) -> bool:
+    """
+    Whether ``node`` is an agent nothing will hear from again without somebody
+    starting it: of an earlier run (``Snapshot.of_earlier_run``, the reclaim's
+    rule), or a sub-agent of this run whose record is terminal.
+
+    **Wider than the reclaim's rule, and deliberately.** A sub-agent of this run
+    that finished its turn can be woken, and may be holding a task across a
+    wait: that is why ``_may_reclaim`` does not take a claim from it, since that
+    would take the work out of a live holder's hands. A declarer that holds
+    nothing gives nothing up when its task is withdrawn -- it is not bound by
+    its own task -- so for it, what stands between the root and the row is only
+    whether it is still there to do it itself. A declarer that holds its own
+    task is a holder as well, and ``_withdrawer_refusal`` asks the reclaim's
+    rule of every holder. A node with no record that no log named has not been
+    announced yet, and may be working, so it is not stopped.
+    """
+    if snap.of_earlier_run(node):
+        return True
+    record = snap.nodes.get(node)
+    return node[1] is not None and record is not None and record.state.is_terminal
 
 
 def _claim_refusal(task: Task, claimer: NodeId) -> TaskRefusal | None:
@@ -1713,6 +1901,8 @@ def _ownership_refusal(
         # was done.
         if t.closed_by_operator:
             return TaskRefusal.CLOSED_BY_OPERATOR
+        if t.withdrawn:
+            return TaskRefusal.WITHDRAWN
         return TaskRefusal.ALREADY_COMPLETE
     if t.state is not TaskState.CLAIMED:
         return TaskRefusal.NOT_CLAIMED
@@ -1810,6 +2000,11 @@ def _pick_claim(
         if t is None or not t.belongs_to(session_id):
             return None, ClaimRefusal.NOT_ON_YOUR_BOARD
         if t.state is TaskState.COMPLETED:
+            # Apart for ``_ownership_refusal``'s reason: only the first was done.
+            if t.closed_by_operator:
+                return None, ClaimRefusal.CLOSED
+            if t.withdrawn:
+                return None, ClaimRefusal.WITHDRAWN
             return None, ClaimRefusal.COMPLETE
         if t.state is TaskState.CLAIMED:
             mine = t.claimed_by == node
@@ -1833,6 +2028,15 @@ def _pick_claim(
     if not claimable:
         return None, ClaimRefusal.NOTHING_CLAIMABLE
     return min(claimable, key=lambda t: (t.declared_at, t.id)), None
+
+
+def _root_of_its_session(task: Task, asker: NodeId) -> bool:
+    """
+    Whether ``asker`` is the root of ``task``'s own session: the one agent that
+    may act on a task in place of an agent of that session that has stopped
+    (``_may_reclaim``, ``_withdrawer_refusal``).
+    """
+    return asker[1] is None and task.belongs_to(asker[0])
 
 
 def _may_reclaim(snap: Snapshot, intent: TaskReleased) -> bool:
@@ -1859,10 +2063,19 @@ def _may_reclaim(snap: Snapshot, intent: TaskReleased) -> bool:
     built as the lead recommended there.
     """
     task = snap.tasks.get(intent.task_id)
-    if task is None or task.claimed_by is None:
+    return task is not None and _may_take_claim(snap, task, intent.node_id)
+
+
+def _may_take_claim(snap: Snapshot, task: Task, asker: NodeId) -> bool:
+    """
+    Whether ``asker`` may end ``task``'s claim in its holder's place: it is the
+    root of the task's session, and the holder is of an earlier run of it.
+    ``_may_reclaim`` says why that and nothing wider; ``_withdrawer_refusal``
+    asks the same of a root's withdrawal.
+    """
+    if task.claimed_by is None:
         return False
-    asker = intent.node_id
-    return asker[1] is None and task.belongs_to(asker[0]) and snap.of_earlier_run(task.claimed_by)
+    return _root_of_its_session(task, asker) and snap.of_earlier_run(task.claimed_by)
 
 
 def _would_cycle(tasks: dict[TaskId, Task], new: Task) -> bool:
@@ -1878,21 +2091,44 @@ def _would_cycle(tasks: dict[TaskId, Task], new: Task) -> bool:
     session's task answers to is a dependency that is missing here, and what
     that stranger waits on is no path back to ``new``.
     """
-    if new.id in new.depends_on:
-        return True
-    frontier = list(new.depends_on)
-    seen: set[TaskId] = set()
-    while frontier:
-        current = frontier.pop()
-        if current == new.id:
-            return True
-        if current in seen:
+    return bool(_cycle(tasks, new))
+
+
+def _cycle(tasks: Mapping[TaskId, Task], new: Task) -> tuple[TaskId, ...]:
+    """
+    A shortest cycle through ``new`` once it is on the board, from ``new`` back
+    to ``new``, or empty when there is none.
+
+    The edges are what a task waits on: its ``depends_on``, and for an
+    after-all-writers task its ``writers``. Those are taken over the board with
+    ``new`` on it, because ``new`` may be one of a gate's writers. So a writer
+    that waits on a gate, directly or through other tasks, is a cycle, in
+    either order of declaration. A gate's writers are counted in every state
+    but COMPLETED (``Task.writers``). A claimed gate is held and its holder can
+    still give it back, and the released gate would then wait on that writer
+    for good.
+
+    Breadth first, so the cycle named is a shortest one. ``new``'s own board
+    only, as ``_would_cycle`` says.
+    """
+    pool = {**tasks, new.id: new}
+    parent: dict[TaskId, TaskId] = {}
+    queue: deque[TaskId] = deque([new.id])
+    while queue:
+        current = queue.popleft()
+        task = new if current == new.id else new.dependency(pool, current)
+        if task is None:
             continue
-        seen.add(current)
-        existing = new.dependency(tasks, current)
-        if existing is not None:
-            frontier.extend(existing.depends_on)
-    return False
+        for following in (*task.depends_on, *task.writers(pool)):
+            if following == new.id:
+                path = [current]
+                while path[-1] != new.id:
+                    path.append(parent[path[-1]])
+                return (*reversed(path), new.id)
+            if following not in parent:
+                parent[following] = current
+                queue.append(following)
+    return ()
 
 
 def _subtree(snap: Snapshot, root: NodeId) -> tuple[NodeId, ...]:
@@ -2869,8 +3105,9 @@ def _restored_task(
       is not finished. Placing it without them would be a board the log does
       not describe, reported as placed whole.
 
-    A task the operator closed is the one finished task with no holder
-    (``TaskClosed``), and it is placed only in the shape that arm leaves.
+    A task the operator closed and one its declarer withdrew are the finished
+    tasks with no holder (``TaskClosed``, ``TaskWithdrawn``), and each is placed
+    only in the shape its arm leaves.
 
     A task whose declarer is another session's is not this board's to place.
     """
@@ -2921,12 +3158,18 @@ def _restored_task(
         released_at=None if logged.released_at is None else at_of(logged.released_at),
         superseded=tuple(history),
         held_by=held_by,
+        after_all_writers=logged.after_all_writers,
     )
-    if logged.closed_by_operator:
-        # The close arm's shape and no other: finished at a time, nobody's, and
-        # with nothing a claimer states beside the result the close composed.
+    if (logged.withdrawn_by_lead or logged.withdrawal_edited) and not logged.withdrawn:
+        # Facts about a withdrawal, on a task nobody withdrew.
+        return Unplaced.INCOHERENT
+    if logged.closed_by_operator or logged.withdrawn:
+        # The close arm's shape and no other, which is the withdrawal arm's too:
+        # finished at a time, nobody's, and with nothing a claimer states beside
+        # the result the arm composed.
         if (
-            logged.state is not TaskState.COMPLETED
+            logged.closed_by_operator == logged.withdrawn
+            or logged.state is not TaskState.COMPLETED
             or logged.completed_at is None
             or logged.holder is not None
             or logged.claimed_version is not None
@@ -2938,7 +3181,10 @@ def _restored_task(
             state=TaskState.COMPLETED,
             completed_at=at_of(logged.completed_at),
             result=logged.result,
-            closed_by_operator=True,
+            closed_by_operator=logged.closed_by_operator,
+            withdrawn=logged.withdrawn,
+            withdrawn_by_lead=logged.withdrawn_by_lead,
+            withdrawal_edited=logged.withdrawal_edited,
         )
     if logged.state is TaskState.PENDING:
         return task

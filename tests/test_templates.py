@@ -867,6 +867,18 @@ The first agent in a role is addressed by the bare role name, the second as
   the launch directory and to nothing else. A dependency the board added is
   not advisory: leave it in place, and where the overlap is wrong, narrow the
   `touches` of a task rather than dropping the edge.
+- `declare_task(..., dry_run=true)` declares nothing and says what the
+  declaration would do: each dependency the board would add and the files
+  behind it, marked when they are all test files, the chain the task would
+  wait on, whether it could be claimed at once, or why it would be refused.
+  Dry-run a task whose `touches` may overlap others, and narrow them or
+  split the task while it does not exist yet.
+- `depends_on=["all-writers"]` makes a task wait on every unfinished task
+  on its board that has `touches`, declared before or after it, so a gate
+  such as a final review or a full test run never has its dependency list
+  kept by hand. Such tasks that both have `touches` of their own cannot
+  both be unfinished: each would wait on the other, so the later is refused
+  as a loop until the earlier is finished.
 - `amend_task(task_id, detail, property)` replaces the specification of a
   task you declared and have never held; leave `detail` out to change the
   property and keep the text. The text it replaces is kept as an
@@ -877,12 +889,30 @@ The first agent in a role is addressed by the bare role name, the second as
   completes first its result is recorded against the version it was handed,
   which the board shows. Post it a concern as well when it should stop and
   read now. Once you have amended a task you cannot claim it yourself.
+- `withdraw_task(task_id, reason)` ends a task you declared that is no
+  longer wanted, amended or not, held or not. It is finished as withdrawn
+  with your reason, and everything waiting on it stops waiting. Withdraw
+  rather than leave a dead task pending: a task replaced by another, or
+  dropped from the plan, otherwise holds up every task behind it and its
+  files. Its holder is sent a notice with your reason, and its
+  `complete_task` is refused with it. You may also withdraw a task whose
+  declarer has stopped — a sub-agent that has ended, or an agent of an
+  earlier run — unless an agent that can still be woken holds it: ask that
+  holder to release it first. A declarer still running withdraws its own
+  task: ask it.
 - Workers call `claim_task()` to take the oldest unblocked item, one at a
   time. Declare the work and let them claim it rather than assigning it by
   hand; another agent in the same role is how the board drains faster.
 - `read_board()` shows the board to you and to them. A worker asking what
   is on it no longer has to ask you, so route them to it rather than
   relaying the state yourself — your copy goes stale and the board does not.
+  `read_board(open_only=true)` leaves out finished tasks.
+- `why_blocked(task_id)` says why a task cannot be claimed: every
+  unfinished task at the end of its chain, with the path to it, its holder
+  and the files each wait shares. `ready()` lists the tasks that can be
+  claimed now, the task most pending tasks wait on first. Ask them rather than
+  tracing the board by hand: `ready()` before you start workers says how
+  many have work, and both are open to your workers.
 - `read_task(task_id)` returns a task: its specification, always whole,
   then its result and every note on it. `read_board()` cuts each row so the
   whole board fits in a reply, and this is where the rest is — for you
@@ -1212,6 +1242,30 @@ def test_a_lead_is_told_when_to_amend_and_that_the_holder_is_not_interrupted(
 
 
 @pytest.mark.parametrize("policy", list(Policy))
+@pytest.mark.parametrize("template", [FEATURE, RESEARCH])
+def test_a_lead_is_told_to_withdraw_a_dead_task_rather_than_leave_it_pending(
+    template: WorkTemplate, policy: Policy
+) -> None:
+    """
+    The failure the tool exists for is a lead leaving a replaced task pending
+    behind its own amendment while it held up the board, so the prose names
+    that case, what its holder is told, and the one power a lead has over a
+    task it did not declare: one whose declarer has stopped. A power the
+    prompt does not state goes unused (STYLE.md section 3).
+    """
+    briefing = _flat(lead_briefing(template, policy))
+
+    assert "`withdraw_task(task_id, reason)` ends a task you declared" in briefing
+    assert "amended or not, held or not" in briefing
+    assert "Withdraw rather than leave a dead task pending" in briefing
+    assert "Its holder is sent a notice with your reason" in briefing
+    assert "not interrupted" not in briefing and "post it a concern when" not in briefing
+    assert "You may also withdraw a task whose declarer has stopped" in briefing
+    assert "A declarer still running withdraws its own task" in briefing
+    assert "unless an agent that can still be woken holds it" in briefing
+
+
+@pytest.mark.parametrize("policy", list(Policy))
 def test_a_worker_is_told_a_replaced_specification_does_not_turn_its_completion_away(
     policy: Policy,
 ) -> None:
@@ -1461,3 +1515,29 @@ def test_a_lead_is_told_who_reads_a_commands_outcome_and_that_nobody_is_told(
         "agent that asked for it and by no other."
     ) in lead
     assert lead.index("a section below says how") < lead.index(_flat(COMMAND_HEADING))
+
+
+@pytest.mark.parametrize("policy", list(Policy))
+def test_a_lead_and_a_worker_are_told_what_the_graph_queries_are_for(policy: Policy) -> None:
+    """
+    A tool listed and not explained is a tool not used (STYLE.md section 3):
+    each prompt says what the query replaces, and the lead is told the dry run
+    and the all-writers word exist.
+    """
+    lead = _flat(lead_briefing(FEATURE, policy))
+    worker = _flat(worker_prompt(Role(name="w", description="d", prompt="p"), None, policy))
+
+    assert "`why_blocked(task_id)` says why a task cannot be claimed" in lead
+    assert "Ask them rather than tracing the board by hand" in lead
+    assert "`declare_task(..., dry_run=true)` declares nothing" in lead
+    assert '`depends_on=["all-writers"]` makes a task wait on every unfinished task' in lead
+    assert "declared before or after it" in lead
+    assert "Such tasks that both have `touches` of their own cannot both be unfinished" in lead
+    assert "the later is refused as a loop until the earlier is finished" in lead
+    assert "cannot share a board" not in lead
+    assert "`read_board(open_only=true)` leaves out finished tasks" in lead
+    assert "`why_blocked(task_id)` says why a task cannot be claimed" in worker
+    assert "ask it before you report that something is blocked" in worker
+    assert "`ready()` lists what can be claimed now" in worker
+    for name in ("why_blocked", "ready"):
+        assert f"mcp__pptmstr__{name}" in BUS_TOOL_NAMES

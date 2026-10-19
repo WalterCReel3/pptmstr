@@ -47,10 +47,20 @@ from pptmstr.boardlog import (
     Unrecognised,
     Unwritten,
     Withdrawn,
+    WithdrawnByDeclarer,
     WritesAccrued,
     Written,
 )
-from pptmstr.model import ApprovedWrites, Concern, ConcernState, Task, TaskState
+from pptmstr.model import (
+    REASON_EDITED,
+    WITHDRAWN_BY_LEAD,
+    ApprovedWrites,
+    Concern,
+    ConcernState,
+    Task,
+    TaskState,
+    withdrawal_label,
+)
 
 # -- generated records ------------------------------------------------------------
 
@@ -149,6 +159,14 @@ _GENERATORS: dict[type, Callable[[random.Random], Record]] = {
         by_id=r.choice(_NODES),
     ),
     Closed: lambda r: Closed(at=r.choice(_TIMES), task_id=r.choice(_TASK_IDS), reason=_text(r)),
+    WithdrawnByDeclarer: lambda r: WithdrawnByDeclarer(
+        at=r.choice(_TIMES),
+        task_id=r.choice(_TASK_IDS),
+        by=r.choice(_ADDRESSES),
+        reason=_text(r),
+        by_id=r.choice(_NODES),
+        edited=r.random() < 0.5,
+    ),
     Amended: lambda r: Amended(
         at=r.choice(_TIMES),
         task_id=r.choice(_TASK_IDS),
@@ -282,6 +300,22 @@ def test_no_proper_prefix_of_a_record_reads_as_a_record(seed: int) -> None:
         )
         for cut in cuts:
             assert isinstance(boardlog.decode(text[:cut]), Malformed), (record, cut)
+
+
+def test_a_gate_on_every_writer_is_logged_and_a_declaration_logged_before_the_flag_is_not_one() -> (
+    None
+):
+    gate = Declared(at=1.0, task_id="g", title="G", declared_by="lead", after_all_writers=True)
+    old = boardlog.decode(
+        '{"kind": "task-declared", "at": 1.0, "task_id": "g", "title": "G", "declared_by": "lead"}'
+        "\n"
+    )
+
+    assert boardlog.decode(boardlog.encode(gate)) == gate
+    assert old == dataclasses.replace(gate, after_all_writers=False)
+    (restored,) = boardlog.restore([gate]).tasks
+    (before,) = boardlog.restore([dataclasses.replace(gate, after_all_writers=False)]).tasks
+    assert restored.after_all_writers and not before.after_all_writers
 
 
 def test_a_field_added_later_reads_from_a_log_written_before_it() -> None:
@@ -1475,6 +1509,160 @@ def test_nothing_can_be_done_to_a_task_once_it_is_closed_but_amend_it() -> None:
     assert board.tasks[0].closed_by_operator
 
 
+@pytest.mark.parametrize("before", [(), (_W1_CLAIM,)], ids=["pending", "claimed"])
+def test_a_withdrawal_finishes_a_task_for_nobody_with_the_declarers_reason(
+    before: tuple[Record, ...],
+) -> None:
+    """
+    ``store._apply``'s withdrawal arm, restated: taken from the declarer in any
+    unfinished state, it leaves a finished task no party holds, withdrawn,
+    whose result is the withdrawal's words and the reason as sent.
+    """
+    out = WithdrawnByDeclarer(at=20.0, task_id="t-1", by="lead", reason=" replaced\n")
+
+    board = boardlog.restore((declared(), *before, out))
+
+    (task,) = board.tasks
+    assert board.contested == () and not board.short
+    assert (task.state, task.holder, task.claimed_version) == (TaskState.COMPLETED, None, None)
+    assert task.withdrawn and not task.closed_by_operator
+    assert (task.completed_at, task.result) == (20.0, "withdrawn by its declarer:  replaced\n")
+    assert (task.result_basis, task.not_run) == (None, None)
+    assert task.held_by == tuple(record.by for record in before)
+
+
+def test_a_withdrawal_by_anyone_but_the_declarer_is_not_one_writers() -> None:
+    """
+    ``store._withdrawer_refusal``: the declarer or its session's root, and
+    nobody else -- the holder included, and another session's root.
+    """
+    for by, by_id in (
+        ("builder", ()),
+        ("reviewer", ()),
+        ("builder", ("s", "a2")),
+        ("lead", ("z",)),
+        ("lead", ("z", "a1")),
+    ):
+        out = WithdrawnByDeclarer(at=20.0, task_id="t-1", by=by, reason="x", by_id=by_id)
+        board = boardlog.restore((_declared_by_a_builder(), _W1_CLAIM, out))
+        assert board.contested == (out,), by
+        assert not board.tasks[0].withdrawn
+
+
+def _declared_by_a_builder() -> Declared:
+    """``t-1``, declared by the sub-agent ``("s", "a1")`` of session ``s``."""
+    return Declared(
+        at=10.0, task_id="t-1", title="T-1", declared_by="builder", declared_by_id=("s", "a1")
+    )
+
+
+@pytest.mark.parametrize("before", [(), (_W1_CLAIM,)], ids=["pending", "claimed"])
+def test_the_root_withdraws_for_its_declarer_and_restores_as_the_lead(
+    before: tuple[Record, ...],
+) -> None:
+    """
+    The root of the declarer's session is admitted on the store's terms
+    (``store._withdrawer_refusal``), and the task restores saying it was the
+    lead: the result's label is the lead's, so the reason is not the declarer's.
+    """
+    out = WithdrawnByDeclarer(at=20.0, task_id="t-1", by="lead", reason="moved on", by_id=("s",))
+
+    board = boardlog.restore((_declared_by_a_builder(), *before, out))
+
+    (task,) = board.tasks
+    assert board.contested == ()
+    assert task.withdrawn and task.withdrawn_by_lead and not task.withdrawal_edited
+    assert task.result == f"{WITHDRAWN_BY_LEAD}: moved on"
+    assert (task.state, task.holder) == (TaskState.COMPLETED, None)
+
+
+@pytest.mark.parametrize(
+    ("declared_by", "declared_by_id", "by_lead"),
+    [("lead", (), False), ("builder", (), True)],
+    ids=["a root by address", "a sub-agent by address"],
+)
+def test_a_root_withdrawing_a_task_whose_declarer_has_only_an_address(
+    declared_by: str, declared_by_id: tuple[str, ...], by_lead: bool
+) -> None:
+    """
+    A log written before parties carried nodes names its declarer by address
+    alone. One log is one session's, so the root is that session's; and a root's
+    address is the root itself, as the store places it, and so is its declarer.
+    """
+    record = Declared(
+        at=10.0,
+        task_id="t-1",
+        title="T",
+        declared_by=declared_by,
+        declared_by_id=declared_by_id,
+    )
+    out = WithdrawnByDeclarer(at=20.0, task_id="t-1", by="lead", reason="x", by_id=("s",))
+
+    (task,) = boardlog.restore((record, out)).tasks
+
+    assert task.withdrawn and task.withdrawn_by_lead is by_lead
+
+
+def test_an_edited_withdrawal_restores_as_the_operators_words() -> None:
+    out = WithdrawnByDeclarer(at=20.0, task_id="t-1", by="lead", reason="rewritten", edited=True)
+
+    (task,) = boardlog.restore((declared(), _W1_CLAIM, out)).tasks
+
+    assert task.withdrawn and task.withdrawal_edited and not task.withdrawn_by_lead
+    assert task.result == f"{withdrawal_label(False, True)}: rewritten"
+    assert task.result.endswith(f"{REASON_EDITED}: rewritten")
+
+
+def test_a_withdrawal_written_before_the_edit_flag_reads_as_unedited() -> None:
+    """A field a record lacks takes its default, so an older log still reads."""
+    text = (
+        '{"kind": "task-withdrawn", "at": 20.0, "task_id": "t-1", "by": "lead", '
+        '"reason": "x", "by_id": []}\n'
+    )
+
+    record = boardlog.decode(text)
+
+    assert record == WithdrawnByDeclarer(at=20.0, task_id="t-1", by="lead", reason="x")
+    assert isinstance(record, WithdrawnByDeclarer) and record.edited is False
+    edited = WithdrawnByDeclarer(at=20.0, task_id="t-1", by="lead", reason="x", edited=True)
+    assert boardlog.decode(boardlog.encode(edited)) == edited
+
+
+def test_a_withdrawal_of_a_finished_task_is_not_one_writers_and_changes_nothing() -> None:
+    """A finished, closed or already withdrawn task is left as it stands."""
+    out = WithdrawnByDeclarer(at=20.0, task_id="t-1", by="lead", reason="first")
+    again = WithdrawnByDeclarer(at=21.0, task_id="t-1", by="lead", reason="second")
+    close = Closed(at=19.0, task_id="t-1", reason="closed")
+
+    finished = boardlog.restore((declared(), _W1_CLAIM, _W1_DONE, out))
+    assert finished.contested == (out,)
+    assert (finished.tasks[0].result, finished.tasks[0].withdrawn) == ("3/3 pass", False)
+
+    closed = boardlog.restore((declared(), close, out))
+    assert closed.contested == (out,)
+    assert (closed.tasks[0].closed_by_operator, closed.tasks[0].withdrawn) == (True, False)
+
+    twice = boardlog.restore((declared(), out, again))
+    assert twice.contested == (again,)
+    assert twice.tasks[0].result == "withdrawn by its declarer: first"
+
+
+def test_nothing_the_holder_does_after_a_withdrawal_is_one_writers() -> None:
+    """
+    What the reducer refuses the holder of a withdrawn task -- its completion,
+    its release -- a log cannot restore either.
+    """
+    out = WithdrawnByDeclarer(at=20.0, task_id="t-1", by="lead", reason="x")
+    for later in (
+        Completed(at=21.0, task_id="t-1", by="builder", result="done anyway"),
+        Released(at=21.0, task_id="t-1", by="builder"),
+        Claimed(at=21.0, task_id="t-1", by="reviewer"),
+    ):
+        board = boardlog.restore((declared(), _W1_CLAIM, out, later))
+        assert board.contested == (later,), later
+        assert board.tasks[0].withdrawn
+
+
 def test_a_claim_by_the_agent_that_amended_the_task_is_not_one_writers() -> None:
     """``store._claim_refusal``: the agent that wrote a version is not then bound by it."""
     amended = Amended(at=11.0, task_id="t-1", detail="new", by="lead")
@@ -2218,6 +2406,7 @@ _FULL_TASK: tuple[Record, ...] = (
         touches=("a.py",),
         basis="read",
         property="P",
+        after_all_writers=True,
     ),
     Amended(
         at=10.5,
@@ -2278,6 +2467,7 @@ _TASK_FACTS: dict[str, tuple[str, object]] = {
     ),
     "claimed_version": ("claimed_version", 2),
     "held_by": ("held_by", ("builder", "builder-2")),
+    "after_all_writers": ("after_all_writers", True),
 }
 
 # One concern marked, tied to a task, rewritten in flight and handed over.
@@ -2326,7 +2516,12 @@ _NOT_PERSISTED: dict[type, dict[str, str]] = {
 # each with the test that restores it instead. A close leaves a task with no
 # holder and no claimer's statements, so no one history sets it and them.
 _RESTORED_APART: dict[type, dict[str, Callable[..., None]]] = {
-    Task: {"closed_by_operator": test_a_close_finishes_a_task_for_nobody_with_the_composed_result},
+    Task: {
+        "closed_by_operator": test_a_close_finishes_a_task_for_nobody_with_the_composed_result,
+        "withdrawn": test_a_withdrawal_finishes_a_task_for_nobody_with_the_declarers_reason,
+        "withdrawn_by_lead": test_the_root_withdraws_for_its_declarer_and_restores_as_the_lead,
+        "withdrawal_edited": test_an_edited_withdrawal_restores_as_the_operators_words,
+    },
     Concern: {},
 }
 
@@ -2492,14 +2687,20 @@ def test_no_sequence_restores_a_task_or_concern_one_reducer_could_not_hold(seed:
 
     for task in board.tasks:
         finished = task.state is TaskState.COMPLETED
-        unheld = task.state is TaskState.PENDING or task.closed_by_operator
+        unheld = task.state is TaskState.PENDING or task.closed_by_operator or task.withdrawn
         assert not task.closed_by_operator or finished, task
+        assert not task.withdrawn or finished, task
+        assert not (task.withdrawn and task.closed_by_operator), task
         assert (task.holder is None) == unheld, task
         assert (task.completed_at is not None) == finished, task
         assert (task.completed_version is not None) == (finished and not unheld), task
         assert (task.claimed_version is None) == unheld, task
         if task.closed_by_operator:
             assert task.result.startswith("closed by the operator"), task
+            assert (task.result_basis, task.not_run) == (None, None), task
+        if task.withdrawn:
+            label = withdrawal_label(task.withdrawn_by_lead, task.withdrawal_edited)
+            assert task.result.startswith(f"{label}: "), task
             assert (task.result_basis, task.not_run) == (None, None), task
         assert task.holder is None or task.holder in task.held_by, task
         assert 1 <= (task.claimed_version or 1) <= task.version, task

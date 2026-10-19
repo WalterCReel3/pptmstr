@@ -1590,6 +1590,90 @@ def test_a_claimer_that_types_the_closing_words_has_not_closed_its_task() -> Non
     assert [r.id for r in unrun_ledger(store.snapshot(), S1)] == ["t1"]
 
 
+# -- a task its declarer withdrew ------------------------------------------------------
+
+
+def test_a_row_its_declarer_withdrew_says_so_and_is_nobodys_completion() -> None:
+    """
+    ``closed_label``'s rule for a withdrawal, under its own words, and off the
+    ledger for the same reason: it reports no result of anybody's work.
+    """
+    from pptmstr.board import closed_label, ended_label, unrun_ledger, withdrawn_label
+    from pptmstr.intents import TaskWithdrawn
+
+    store = Store()
+    team(store, S1)
+    declare(store, "t1", by=LEAD_1)
+    store.apply(TaskClaimRequested(DEV_1, request_id="k", task_id="t1"))
+    held = board_tasks(store.snapshot(), S1)[0]
+
+    store.apply(TaskWithdrawn(LEAD_1, "t1", "replaced by t9"), now=5.0)
+
+    (row,) = board_tasks(store.snapshot(), S1)
+    assert (held.withdrawn, held.unworked, withdrawn_label(held), ended_label(held)) == (
+        False,
+        False,
+        "",
+        "",
+    )
+    assert (row.state, row.owner, row.holder) == (TaskState.COMPLETED, None, None)
+    assert row.withdrawn and row.unworked and not row.closed_by_operator
+    assert row.result == "withdrawn by its declarer: replaced by t9"
+    assert closed_label(row) == ""
+    assert (
+        withdrawn_label(row)
+        == ended_label(row)
+        == ("withdrawn by its declarer -- not finished by an agent, and no work is reported")
+    )
+    assert unrun_ledger(store.snapshot(), S1) == ()
+
+
+@pytest.mark.parametrize("edited", [False, True], ids=["as sent", "edited"])
+@pytest.mark.parametrize("by_lead", [False, True], ids=["by its declarer", "by the lead"])
+def test_a_withdrawn_row_says_who_withdrew_it_and_whose_words_its_reason_is(
+    by_lead: bool, edited: bool
+) -> None:
+    """
+    The row carries the task's two facts, and its label -- which the board
+    pane draws through ``ended_label`` -- is ``model.withdrawal_label`` of them.
+    """
+    from pptmstr.board import ended_label, withdrawn_label
+    from pptmstr.intents import AgentFinished, TaskWithdrawn
+    from pptmstr.model import AgentState, withdrawal_label
+
+    declarer = DEV_1 if by_lead else LEAD_1
+    store = Store()
+    team(store, S1)
+    declare(store, "t1", by=declarer)
+    store.apply(AgentFinished(DEV_1, AgentState.DONE, ended_at=1.0))
+
+    store.apply(TaskWithdrawn(LEAD_1, "t1", "x", edited=edited), now=5.0)
+
+    (row,) = board_tasks(store.snapshot(), S1)
+    assert (row.withdrawn_by_lead, row.withdrawal_edited) == (by_lead, edited)
+    assert withdrawn_label(row) == ended_label(row)
+    assert withdrawn_label(row) == (
+        f"{withdrawal_label(by_lead, edited)} -- not finished by an agent, and no work is reported"
+    )
+    assert ("withdrawn by its declarer" in withdrawn_label(row)) is not by_lead
+    assert ("edited by the operator" in withdrawn_label(row)) is edited
+
+
+def test_a_claimer_that_types_the_withdrawal_words_has_not_withdrawn_its_task() -> None:
+    from pptmstr.board import ended_label, unrun_ledger
+
+    store = Store()
+    team(store, S1)
+    declare(store, "t1", by=LEAD_1)
+    store.apply(TaskClaimRequested(DEV_1, request_id="k", task_id="t1"))
+    store.apply(TaskCompleted(DEV_1, "t1", at=2.0, result="withdrawn by its declarer: trust me"))
+
+    (row,) = board_tasks(store.snapshot(), S1)
+
+    assert (row.withdrawn, ended_label(row), row.owner) == (False, "", "builder")
+    assert [r.id for r in unrun_ledger(store.snapshot(), S1)] == ["t1"]
+
+
 # -- a wait on an id another session holds ---------------------------------------------
 
 
@@ -1852,3 +1936,43 @@ def test_a_team_session_taken_off_the_fleet_has_no_board() -> None:
 
     assert store.snapshot().off_fleet(S1)
     assert not has_board(store.snapshot(), S1)
+
+
+# -- a gate on every writer --------------------------------------------------------------
+
+
+def test_a_gate_row_lists_its_writers_now_and_a_finished_one_only_what_was_declared() -> None:
+    """
+    The writers are on the row twice: in ``blocked_on``, which decides, and in
+    ``writers``, which says which of those came from the word rather than from
+    ``depends_on``. Neither is missing, and none is another session's.
+    """
+    from pptmstr.board import all_writers_label
+    from pptmstr.model import ALL_WRITERS
+
+    store = Store()
+    team(store, S1)
+    declare(store, "gate", by=LEAD_1, deps=(ALL_WRITERS,))
+    declare(store, "w1", by=LEAD_1, at=1.0, touches=("a.py",))
+    declare(store, "away", by=LEAD_2, at=2.0, touches=("a.py",))
+    waiting, _ = board_tasks(store.snapshot(), S1)
+
+    store.apply(TaskClaimRequested(DEV_1, request_id="k1", task_id="w1"))
+    store.apply(TaskCompleted(DEV_1, "w1", at=3.0))
+    store.apply(TaskClaimRequested(DEV_1, request_id="k2", task_id="gate"))
+    store.apply(TaskCompleted(DEV_1, "gate", at=4.0))
+    declare(store, "w2", by=LEAD_1, at=5.0, touches=("b.py",))
+    done, _, _ = board_tasks(store.snapshot(), S1)
+
+    assert (waiting.after_all_writers, waiting.writers, waiting.blocked_on) == (
+        True,
+        ("w1",),
+        ("w1",),
+    )
+    assert (waiting.depends_on, waiting.missing) == ((), ())
+    assert all_writers_label(waiting) == (
+        "waits on every writer on this board, declared before or after it (now: w1)"
+    )
+    assert (done.writers, done.blocked_on) == ((), ())
+    assert all_writers_label(done) == "declared to wait on every writer on this board"
+    assert all_writers_label(board_tasks(store.snapshot(), S1)[1]) == ""
