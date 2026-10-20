@@ -21,10 +21,10 @@ starts with an empty board and can't read this one.
   `why_blocked` and `ready` are built. Lock-vs-edge, role-aware claims and touches enforcement
   are still open.
 
-## State (HEAD 52b18c4)
+## State (HEAD f76ab50)
 
-- Commits: 3fb14fc (research), 70cad9c (round one), 3e9dbca (graph evidence), 5a2f273 (round
-  two), 52b18c4 (merge of origin/main 713af05).
+- Commits: 3fb14fc (research), 70cad9c (round one), 3e9dbca (graph evidence), 8f3a16c (round
+  two), f76ab50 (merge of origin/main 713af05).
 - `make check` green: 13921 passed, 14 skipped, 23 xfailed.
 - Baselines for the next gate:
   - **23** `[imgui-error]` lines, from tests that exercise error recovery;
