@@ -13,6 +13,7 @@ import asyncio
 import concurrent.futures
 import dataclasses
 import functools
+import math
 import os
 import queue
 import signal
@@ -78,16 +79,21 @@ from .intents import (
     CommandRefused,
     CommandsRestored,
     CommandStopAsked,
+    DecisionWakeSent,
     FailedSessionClosed,
     FailureAcknowledged,
     Intent,
+    PeerQuestionAged,
+    PeerWakeSent,
     SessionDetached,
+    SessionSettled,
 )
 from .log import LOG
 from .model import (
     MAX_COMMAND_REFUSAL_CHARS,
     AgentRecord,
     AgentState,
+    ConcernId,
     DetachRefusal,
     LaunchSpec,
     NodeId,
@@ -1022,6 +1028,13 @@ class AppState:
     # Written by ``apply_intents`` alone.
     wakes: dict[str, list[effects.SessionWoken]] = field(default_factory=dict)
     wake_due: dict[str, float] = field(default_factory=dict)
+    # One timer per question between leads that is owed an answer
+    # (``Snapshot.awaiting_answer``): when it is due, on the store's clock, or
+    # ``math.inf`` once its ``PeerQuestionAged`` is sent. ``question_seq`` is
+    # the store's ``seq`` they were last armed against. Written by
+    # ``apply_intents`` alone (``_age_questions``).
+    question_due: dict[ConcernId, float] = field(default_factory=dict)
+    question_seq: int = -1
     # The fleet observer's last failure, so one that fails on every step is said
     # once. See ``_record_fleet``.
     fleet_observer_failed: str | None = None
@@ -1108,6 +1121,7 @@ def apply_intents(state: AppState) -> None:
             continue
         state.bridge.settle(effect)
     _send_wakes(state)
+    _age_questions(state)
     if writer is not None:
         _read_board_reports(state, writer.drain())
     if state.channel_writer is not None:
@@ -1149,28 +1163,194 @@ def _send_wakes(state: AppState) -> None:
     closed (a card recalled from its file), off the fleet, or done, cancelled
     or failed is sent nothing, and its wakes are let go of: the panes still
     show what was answered, and a session resumed later reads it with
-    ``read_decisions`` or ``read_commands``. The pool sends nothing either to
-    a session with no connected client, and writes nothing for it.
+    ``read_decisions`` or ``read_commands``, and is woken for its peer mail
+    once its restore is in the store (``intents.SessionSettled``). The pool
+    sends nothing either to a session with no connected client, and writes
+    nothing for it.
+
+    **A session still starting is waited for**, its wakes kept to a later
+    frame: its client may not be connected yet, and a wake the pool drops for
+    that would leave the store holding a peer wake as pending that nobody
+    sent.
+
+    **A peer message's wake that has nothing left to read is not sent**: its
+    lead read the channel between the order and now, and a line saying "0
+    unread" would cost it a turn for nothing.
+
+    **Every peer wake let go of is said** (``intents.PeerWakeSent``), sent or
+    dropped, with the mail a sent line counted: the store keeps its session
+    pending on the link until then, and coalesces only between the order and
+    this. **The channel decisions a sent message names as answered or
+    dismissed are said** (``intents.DecisionWakeSent``), and those of a
+    dropped one are not: the store names those again at the session's next
+    resume.
+
+    **Sent means handed to the pool** (``Bridge.submit`` returned), and both
+    words are said only after that, so neither can mark as told what was never
+    handed over. With no pool the wakes are dropped. A submit the bridge
+    refuses (its loop not running) keeps them for a later frame, unsaid.
     """
     due = [sid for sid, at in state.wake_due.items() if at <= state.frame_now]
     if not due:
         return
     snap = state.store.snapshot()
     for session_id in due:
-        held = state.wakes.pop(session_id, [])
-        del state.wake_due[session_id]
         root: NodeId = (session_id, None)
         record = snap.get(root)
-        if (
-            record is None
-            or record.recalled is not None
-            or record.state in _UNWAKEABLE
-            or snap.off_fleet(session_id)
-        ):
+        if record is not None and record.state is AgentState.SPAWNING:
             continue
-        _session_action(
-            state, functools.partial(_wake, root=root, text=bus.wake_message(snap, held))
-        )
+        held = state.wakes.pop(session_id, [])
+        del state.wake_due[session_id]
+        sendable = _sendable(snap, session_id)
+        owed = [wake for wake in held if sendable and _still_to_read(snap, wake)]
+        pool = state.pool
+        if not owed or pool is None:
+            # Nothing goes, so every peer wake is said dropped and no decision
+            # is said named.
+            _say_peer_wakes_spent(state, snap, held, [])
+            continue
+        try:
+            state.bridge.submit(_wake(pool, root=root, text=bus.wake_message(snap, owed)))
+        except RuntimeError as exc:
+            # The bridge's loop is not running, so nothing was handed over: the
+            # wakes are kept for a later frame, as a starting session's are, and
+            # nothing is said of them yet.
+            LOG.warn("app", f"wake for {session_id} not handed to the pool, kept: {exc}")
+            state.wakes[session_id] = [*held, *state.wakes.get(session_id, [])]
+            state.wake_due[session_id] = state.frame_now + WAKE_WINDOW_S
+            continue
+        _say_peer_wakes_spent(state, snap, held, owed)
+        _say_decisions_named(state, snap, session_id, owed)
+
+
+def _sendable(snap: Snapshot, session_id: str) -> bool:
+    """
+    Whether ``session_id`` is there to be sent a wake: a root in the store, not
+    a card recalled from its file, not done, cancelled or failed, and on the
+    fleet.
+
+    Must agree with the store's ``store._wakeable``, which asks it to never
+    leave a peer wake pending that this would drop. Were this to refuse a
+    session the store would wake, each drop is said (``intents.PeerWakeSent``)
+    with nothing covered, the store asks a counted wake again, and the link's
+    chain climbs one a wake window until it is held, for a lead nobody could
+    wake. They agree because off the fleet implies a root in a final state
+    (``Snapshot.detach_refusal``), which the store refuses already.
+    """
+    record = snap.get((session_id, None))
+    return not (
+        record is None
+        or record.recalled is not None
+        or record.state in _UNWAKEABLE
+        or snap.off_fleet(session_id)
+    )
+
+
+def _say_peer_wakes_spent(
+    state: AppState,
+    snap: Snapshot,
+    held: list[effects.SessionWoken],
+    sent: list[effects.SessionWoken],
+) -> None:
+    """
+    Tell the store of each link whose peer wake ``held`` let go of: once per
+    link, with the mail the line counted and the decisions it named when it is
+    among ``sent``, and none when it was dropped.
+    """
+    links = {w.subject_id: w for w in held if w.reason is effects.WakeReason.PEER_MESSAGE}
+    going = {w.subject_id for w in sent if w.reason is effects.WakeReason.PEER_MESSAGE}
+    for link_id, wake in links.items():
+        link = snap.channels.get(link_id)
+        if link is None or link_id not in going:
+            state.bridge.emit(PeerWakeSent(wake.session_id, link_id))
+            continue
+        covered = frozenset(c.id for c in snap.peer_unread(wake.session_id, link))
+        told = frozenset(snap.peer_untold(wake.session_id, link))
+        state.bridge.emit(PeerWakeSent(wake.session_id, link_id, covered, told))
+
+
+def _say_decisions_named(
+    state: AppState, snap: Snapshot, session_id: str, sent: list[effects.SessionWoken]
+) -> None:
+    """
+    Tell the store which decisions raised on a channel the message ``sent``
+    to ``session_id`` names as answered or dismissed, those folded past
+    ``bus.WAKE_DECISIONS_NAMED`` included, as the folded ids of a peer line
+    count as told: the store marks them told to its lead
+    (``PeerWakes.heard``). Called only once the send is handed to the pool
+    (``_send_wakes``), so a session whose client is gone by then is taken as
+    told, as a peer wake's ``told`` is.
+    """
+    named = frozenset(
+        w.subject_id
+        for w in sent
+        if w.reason in (effects.WakeReason.DECISION_ANSWERED, effects.WakeReason.DECISION_DISMISSED)
+        and (decision := snap.decisions.get(w.subject_id)) is not None
+        and decision.link is not None
+    )
+    if named:
+        state.bridge.emit(DecisionWakeSent(session_id, named))
+
+
+def _still_to_read(snap: Snapshot, wake: effects.SessionWoken) -> bool:
+    """
+    Whether ``wake`` still names something to wake for: every wake does but a
+    peer message's, whose link may have been read, or closed, since it was
+    ordered, whose messages that are not quiet may have been withdrawn, and
+    whose decisions may have ended. Quiet mail alone wakes nobody, here as in
+    the store (``store._still_owed``).
+    """
+    if wake.reason is not effects.WakeReason.PEER_MESSAGE:
+        return True
+    link = snap.channels.get(wake.subject_id)
+    return link is not None and bool(
+        any(not c.quiet for c in snap.peer_unread(wake.session_id, link))
+        or snap.peer_untold(wake.session_id, link)
+    )
+
+
+def _age_questions(state: AppState) -> None:
+    """
+    Tell the store of each question between leads that has gone unanswered
+    for ``Settings.peer_answer_age_s`` since its lead was handed it
+    (``intents.PeerQuestionAged``, Decided 11): a one-shot timer each, so the
+    row reaches NEEDS YOU on time while every session is idle and nothing
+    else is applied.
+
+    **Armed from the store, not from an event.** A question is armed when the
+    store first shows it owed an answer: when its lead reads it, and when a
+    restore brings back one handed over in an earlier run, whose
+    ``delivered_at`` the restore put on this run's clock, so the age still
+    runs from delivery and one already past it fires at once. A timer whose
+    question is no longer owed (answered, its link closed, or already
+    surfaced) is let go of, so an answer withdrawn later arms it again.
+
+    The store is asked again only when it has moved (``Snapshot.seq``); between
+    moves, this compares the frame's clock with what is armed. The age is read
+    when a question is armed: a changed setting reaches the questions armed
+    after it.
+    """
+    snap = state.store.snapshot()
+    if snap.seq != state.question_seq:
+        state.question_seq = snap.seq
+        owed = {
+            c.id: c.delivered_at or 0.0
+            for c in snap.awaiting_answer()
+            if c.id not in snap.questions_aged
+        }
+        for gone in [cid for cid in state.question_due if cid not in owed]:
+            del state.question_due[gone]
+        for cid, delivered in owed.items():
+            # One whose word went and that is owed and not aged again was let go
+            # of and owed anew within one batch (an answer applied and withdrawn
+            # around the word): it is armed again, as one let go of across two
+            # batches would be.
+            if state.question_due.get(cid, math.inf) == math.inf:
+                state.question_due[cid] = delivered + state.settings.peer_answer_age_s
+    for cid, due in state.question_due.items():
+        if due <= state.frame_now:
+            state.bridge.emit(PeerQuestionAged(cid))
+            state.question_due[cid] = math.inf
 
 
 async def _wake(pool: SessionPool, *, root: NodeId, text: str) -> None:
@@ -2851,6 +3031,23 @@ def _launch(
             _open_board_log(state, session.session_id, logged)
         except Exception as exc:  # noqa: BLE001 - the session runs; say its board is unrecorded
             _board_log_unopened(state, session.session_id, exc)
+        # Straight behind the restore on the same queue, and so applied after it:
+        # peer mail already waiting wakes the session only once its board is in
+        # the store (``intents.SessionSettled``). Emitted whether or not a board
+        # was restored or is recorded, since mail waits in its sender's log if
+        # that session was recording its board when it was sent.
+        #
+        # And behind the session's own announce. A session the pool holds
+        # behind a run still ending under its id is not announced yet, and the
+        # root in the store is that run's: settled now, it would be woken
+        # through the held session, which has no client, or found ended and
+        # owed nothing. So it is settled when the pool announces it, which is
+        # after that run's end and after the restore emitted above.
+        settled = SessionSettled(session.session_id)
+        if session.announced:
+            state.bridge.emit(settled)
+        else:
+            session.on_announced = functools.partial(state.bridge.emit, settled)
         # Behind the pool's answer, so that the log says a launch happened only for
         # one the pool took: a refusal by the version check, by the pool, or by an
         # exception out of either has returned or raised above this line. Which of

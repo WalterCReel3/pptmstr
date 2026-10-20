@@ -600,6 +600,12 @@ def _owed_name(owed: Waiting) -> str:
             return "decision(s)"
         case ObligationKind.COMMAND:
             return f"command(s) {owed_standing(owed)}"
+        case ObligationKind.WAKE_CHAIN:
+            return "held wake(s)"
+        case ObligationKind.PEER_QUESTION:
+            return "unanswered peer question(s)"
+        case ObligationKind.PEER_HELD:
+            return "row(s) of held peer mail"
         case _:  # pragma: no cover - mypy's exhaustiveness check, not a runtime path
             assert_never(owed.kind)
 

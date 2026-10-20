@@ -126,9 +126,10 @@ class PeerInboxDelivered:
     ``held`` are messages waiting for the reader whose own link does not hand
     them over: the link they were sent over is not live in this run -- closed,
     or not restored at this start (``model.Snapshot.peer_deliverable``). They
-    are held, waiting in the store and kept in their sender's log, and are
-    carried here so the reply can say they exist; their text is not the
-    reader's while their link is not live.
+    are held, waiting in the store and kept in their sender's log if that
+    session was recording its board when they were sent, and are carried here
+    so the reply can say they exist; their text is not the reader's while
+    their link is not live.
 
     ``links`` are the live links the reader's session is a member of when it
     read, so a reply can tell "nothing arrived" from "you are on no such
@@ -396,6 +397,9 @@ class WakeReason(enum.Enum):
     DECISION_DISMISSED = "decision dismissed"
     COMMAND_ENDED = "command ended"
     CONCERN_TO_LEAD = "concern to the lead"
+    # A linked lead's message is waiting on a link (Decided 10). The subject is
+    # the link's id, and the wake carries no message text.
+    PEER_MESSAGE = "peer message"
 
 
 @dataclass(frozen=True, slots=True)
@@ -405,7 +409,8 @@ class SessionWoken:
     worker's message to it, has arrived, and the session is to be told so with
     a message of pptmstr's own (``bus.wake_lines``).
 
-    ``subject_id`` is what to read: the decision, command or concern id.
+    ``subject_id`` is what to read: the decision, command or concern id, or
+    for ``PEER_MESSAGE`` the id of the link the mail waits on.
     ``sender`` is the worker that posted a concern, None for the rest. The
     session is the asker's session and its lead is what is woken, a sub-agent
     asker included: a sub-agent has no turn of its own to be woken into, and it
@@ -413,7 +418,10 @@ class SessionWoken:
 
     Not an answer to anybody, so ``request_id`` is empty, as on ``CommandToRun``.
     Whether the session is live, and coalescing a burst into one wake, are the
-    shell's: neither is a fact of the store.
+    shell's: neither is a fact of the store. The one exception is a peer
+    message's wake, which the store itself coalesces per link and counts
+    toward the link's chain (``model.PeerWakes``), because what it holds back
+    is owed to the operator as a row.
     """
 
     session_id: str

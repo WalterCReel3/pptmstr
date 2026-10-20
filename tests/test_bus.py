@@ -8340,6 +8340,67 @@ def test_a_declaration_the_operator_rewrote_keeps_its_channel_and_not_its_charte
     assert said == "Task t1 is on the board." + unkept
 
 
+@pytest.mark.parametrize("basis", [None, "read"], ids=["no-basis", "with-basis"])
+def test_a_dry_run_the_operator_rewrote_says_what_the_declaration_would_not_keep(
+    basis: str | None,
+) -> None:
+    """
+    A dry run spelled any way but a JSON true parks, so the operator can edit
+    it as they can a declaration. Its reply then says the same sentences the
+    real reply would, as what that reply would say, and a dry run nobody
+    edited says none.
+    """
+    from pptmstr.bus import EDITED_KEY
+
+    store = Store()
+    _team(store)
+    asked: dict[str, object] = {
+        "title": "x",
+        "channel": "brand",
+        "re": _MSG,
+        "inside_charter": "yes",
+        "dry_run": "true",
+    }
+    if basis is not None:
+        asked["basis"] = basis
+    with _live_bus() as bus:
+        kept = bus.call(
+            store, "declare_task", {"task_id": "t0", **asked, EDITED_KEY: False}, sender=LEAD
+        )
+        said = bus.call(
+            store, "declare_task", {"task_id": "t1", **asked, EDITED_KEY: True}, sender=LEAD
+        )
+
+    assert store.snapshot().tasks.keys().isdisjoint({"t0", "t1"})
+    assert kept.startswith("DRY RUN: nothing was declared") and "not kept" not in kept
+    unkept = ("" if basis is None else _BASIS_UNKEPT) + _CHARTER_UNKEPT
+    assert said.startswith("DRY RUN: nothing was declared")
+    assert said.endswith("\nThe real reply would say:" + unkept)
+    assert said.count("not kept") == (2 if basis else 1)
+
+
+def test_a_parked_dry_run_carrying_provenance_shows_both_on_its_row() -> None:
+    """
+    The row an operator approves a parked dry run from leads with the dry run,
+    and still carries where the request came from beside the standing.
+    """
+    from pptmstr.approval import summarize
+
+    row = summarize(
+        "mcp__pptmstr__declare_task",
+        {
+            "title": "probe it",
+            "dry_run": "true",
+            "basis": "read",
+            "channel": "brand",
+            "re": _MSG,
+            "inside_charter": "yes",
+        },
+    )
+
+    assert row == "DRY RUN, declares nothing: declare (says: read; charter: yes on #brand) probe it"
+
+
 @pytest.mark.parametrize(
     "channel",
     ["bra\x00nd", "bra\ud800nd", "bra​nd", "\x1b[31mbrand"],

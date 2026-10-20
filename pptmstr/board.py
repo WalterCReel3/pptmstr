@@ -881,9 +881,10 @@ def board_concerns(snap: Snapshot, session_id: str) -> tuple[BoardConcern, ...]:
     session) and would still belong on its sender's board if it did.
 
     **A message between leads is not here.** It is filed in its sender's log
-    like a concern, but it is not mail inside the team: a worker reading the
-    board would be reading another team's words to its lead, and a team count
-    would count them. ``read_peer_messages`` is where a lead reads them.
+    like a concern, if that session was recording its board when it was sent,
+    but it is not mail inside the team: a worker reading the board would be
+    reading another team's words to its lead, and a team count would count
+    them. ``read_peer_messages`` is where a lead reads them.
     """
     rows = [
         BoardConcern(

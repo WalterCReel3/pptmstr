@@ -185,7 +185,7 @@ def test_the_defaults_are_every_row_at_its_default_and_nothing_to_restore() -> N
     ]
     assert all(each.on and each.disabled is None for each in model.pane_switches)
     assert model.reasoning.on and model.reasoning.label == "show reasoning"
-    assert [shown(model, each.key) for each in model.caps] == ["4", "8", "9"]
+    assert [shown(model, each.key) for each in model.caps] == ["4", "8", "9", "900"]
     assert model.previews
     assert all(
         section.at_default
@@ -239,7 +239,7 @@ def test_choosing_any_entry_of_any_row_puts_that_entry_in_force() -> None:
             after = build(changed(start, option.change))
             assert choice(after, held.key).current == index, (held.key, option.label)
             walked += 1
-    # 9 themes, 4 sizes, 2 families, 8 + 7 + 5 caps, 9 roles of 7 sizes, and a
+    # 9 themes, 4 sizes, 2 families, 8 + 7 + 5 + 5 caps, 9 roles of 7 sizes, and a
     # face a slot: the walk covered the dialog and not an empty list.
     assert walked == (
         len(theme.THEMES)
@@ -247,6 +247,7 @@ def test_choosing_any_entry_of_any_row_puts_that_entry_in_force() -> None:
         + len(typeset.PROPORTIONALS)
         + 8
         + 7
+        + 5
         + 5
         + len(typeset.Role) * len(typeset.STEPS)
         + sum(len(slots) for slots in typeset.SLOTS.values())

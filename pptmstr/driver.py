@@ -1083,6 +1083,14 @@ class AgentSession:
         # connected client: the first moment this run is known to have reached
         # the CLI. Set by whoever constructs the session, before it is started.
         self.on_started: Callable[[], None] | None = None
+        # Whether ``announce`` has put this session in the tree. A pool holds a
+        # session unannounced behind a run still ending under its id
+        # (``SessionPool.submit``), so after the pool has taken it this says
+        # which of the two it did.
+        self.announced = False
+        # Called by ``announce`` right behind the announce, on the same queue:
+        # what a held session's launcher has to say once it is in the tree.
+        self.on_announced: Callable[[], None] | None = None
         # The team shape, or None for a lone agent. Held rather than unpacked at
         # construction because resolve_role needs the role names for a role that has
         # not spawned yet -- "part of this team, not started" and "no such role" are
@@ -2265,7 +2273,9 @@ class AgentSession:
             # this coroutine out of the cancellation the loop's teardown relies on --
             # a real cost against a benefit nothing has shown exists. A park ended by
             # the host through `fail_all_pending` does reach the model, below.
-            self.bridge.emit(ApprovalResolved(node, pending.id, approved=False, reason=why))
+            self.bridge.emit(
+                ApprovalResolved(node, pending.id, approved=False, reason=why, from_operator=False)
+            )
             raise
 
         self.bridge.emit(
@@ -2275,6 +2285,7 @@ class AgentSession:
                 approved=decision.approved,
                 reason=decision.reason,
                 edited_args=decision.edited_args,
+                from_operator=decision.from_operator,
             )
         )
         if decision.approved:
@@ -2586,6 +2597,16 @@ class AgentSession:
                 task_is_label=self.task_is_label,
             )
         )
+        self.announced = True
+        told = self.on_announced
+        if told is None:
+            return
+        # Caught here: the row is in the tree, and a raise out of ``announce``
+        # is what the pool reads as a session with no row (``SessionPool._admit``).
+        try:
+            told()
+        except Exception as exc:  # noqa: BLE001 - logged; the session is announced
+            LOG.error("agent", f"on_announced raised: {type(exc).__name__}: {exc}")
 
     def _check_identity(self, message: object) -> None:
         """

@@ -287,6 +287,12 @@ OBLIGATION_GLYPH: dict[ObligationKind, str] = {
     # call the CLI will run inside the sandbox, and this is a string pptmstr
     # will run outside it.
     ObligationKind.COMMAND: fa.ICON_FA_TERMINAL,
+    # A wake pptmstr held back: the bell that did not ring.
+    ObligationKind.WAKE_CHAIN: fa.ICON_FA_BELL_SLASH,
+    # A question left standing between two teams: the hourglass of its age.
+    ObligationKind.PEER_QUESTION: fa.ICON_FA_HOURGLASS_HALF,
+    # Mail with no link to travel by.
+    ObligationKind.PEER_HELD: fa.ICON_FA_ENVELOPE,
 }
 
 # Open/closed, keyed by whether the thing is open. FontAwesome rather than the
@@ -309,6 +315,12 @@ _OBLIGATION_ROLE: dict[ObligationKind, str] = {
     # the hue of a failure on palettes that draw both alike; the glyph is what
     # tells them apart, as it is for every kind.
     ObligationKind.COMMAND: "danger",
+    # A decision's hue: nothing has failed, and nothing runs on a press.
+    ObligationKind.WAKE_CHAIN: "warn",
+    # The same for both: something to know about two teams, and nothing runs
+    # or fails on a press.
+    ObligationKind.PEER_QUESTION: "warn",
+    ObligationKind.PEER_HELD: "warn",
 }
 
 STATE_LABEL: dict[AgentState, str] = {

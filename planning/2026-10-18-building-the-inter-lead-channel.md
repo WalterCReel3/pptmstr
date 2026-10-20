@@ -5,7 +5,11 @@
 - Round two is built, reviewed and gated on 2026-10-19: `make check` green with 13586 passed, and
   `typecheck-all` at 1918. Round two is the channel log, linking, the peer tools, channel
   decisions and the minimal Link leads UI.
-- Rounds three and four haven't started.
+- Round three is built, reviewed and gated on 2026-10-20 (G-r3): `make check` green with 14569
+  passed and 23 `[imgui-error]` lines, and `typecheck-all` at 1936. Round three is wakes, the
+  backstop, decision wakes, and the unanswered-question and held-mail rows. None of it has been
+  seen on a display or run between two live sessions.
+- Round four hasn't started.
 
 **Merged origin/main (graph tooling, 940da8e) on 2026-10-19.**
 - 14 conflicted files, resolved keeping both sides.
@@ -294,7 +298,9 @@ in sequence. The order puts the format decisions first.
   sent" at `effects.py` (PeerInboxDelivered.held), `intents.py` ~390, `board.py` ~806 and
   `boardfacts.py` ~457. The tool text already says it (B5-fix2). These are comment and docstring
   changes only.
-- **Messages held on a closed link need an operator surface.**
+- **Messages held on a closed link need an operator surface.** Built in round three for links
+  withheld or not restored; deliberately not for links the operator closed (see "Decided during
+  round three").
   - A message waiting on a link that has since closed is never handed over. `read_peer_messages`
     tells the lead to ask the operator, but nothing shows the operator those messages.
   - NEEDS YOU (round three) or the DIGEST thread (round four) shows them, so "try not to drop
@@ -304,7 +310,71 @@ in sequence. The order puts the format decisions first.
   injected peer intents from a second RNG to keep it. That case needs a deterministic test of
   its own (B5, run).
 
+**Decided during round three (lead, 2026-10-20, from W1–W3 and their reviews):**
+- **The wake backstop:** K = 6, and only the operator's own acts on a link reset its count (Decided
+  10's round-three refinement). System wakes (resume, restore) are uncounted and never held. A
+  pending wake clears when the shell sends it (`PeerWakeSent`, with `covered`/`told`, guards the
+  race between the send and the apply).
+- **Channel decisions:** raising one wakes the other lead, coalesced with message wakes and
+  counted. An answer or dismissal wakes every member, uncounted. A resume or restore names open
+  and ended decisions the lead hasn't been told of this run, capped at 3 per line
+  (`bus.WAKE_DECISIONS_NAMED`) then "and N more". There's no per-reader receipt, so repeats are
+  bounded by resumes.
+- **The unanswered-question row (Decided 11):**
+  - It fires after the age measured from delivery (`Settings.peer_answer_age_s`, default 900) via
+    a one-shot timer and `PeerQuestionAged`. It fires at once if the recipient's session is dead
+    or ended (Decided 4).
+  - It clears on an answer (a non-withdrawn message from the recipient with `re` = it) or when
+    its link closes. A withdrawn answer re-arms it.
+  - After a restart that resumed only the asker, a question answered in an earlier run reads as
+    unanswered, because the reply sits in the recipient's unrestored log.
+- **A needs-answer to a recipient whose session is dead, ended or not in this run surfaces at once,
+  read or unread** (Decided 4; RV-W3 finding 1, ruled as blocking).
+- **An ended channel decision is marked told only when its wake is sent,** the same as open ones
+  (RV-W3 2). The shell's word is the record: `PeerWakes.heard` is set only by
+  `DecisionWakeSent`, which `app._send_wakes` emits once it hands the send to the pool. A wake
+  dropped before that (a failed spawn) leaves the decision untold, so the next settle names it. A
+  pool that then finds no client still counts it as told, the same as `PeerWakeSent.told` (W3d).
+- **No held-mail row for a link the operator closed.** The close was the operator's act, and that
+  mail can never be handed over, so a run-scoped dismissal would bring the row back after every
+  restart. Links withheld or not restored still raise it (RV-W3 8). So mail on an
+  operator-closed link is visible only through `read_peer_messages` (which reports it as held)
+  and in the log. `store._why_held`'s "is closed" branch no longer reaches a row; it's kept so
+  the function stays total (W3d).
+  - **Widened (lead, 2026-10-20, RV-W3d finding 1): no row for any link closed in its own
+    log,** not only those closed by `ChannelClosed`. When the operator links a name again, the
+    writer's sweep writes `LinkClosed` into earlier logs under it. That includes links withheld
+    at start and another window's link. After a restart those come back closed, and the store
+    can't tell them from the operator's close: `LinkClosed` carries only `at` and `channel_id`.
+    - **Why widen rather than tell them apart:**
+      - That mail still can never be handed over.
+      - A run-scoped dismissal would still bring the row back after every restart.
+      - The sweep was caused by the operator relinking the name.
+      - Telling them apart needs a provenance field on `LinkClosed`. That's a permanent addition
+        to the log format, made for one row.
+    - **The cost:** a needs-answer on a swept link, including another window's, leaves NEEDS YOU
+      at the next restart, with no close by anyone in that window. It stays visible through
+      `read_peer_messages` and in the log.
+    - **When to revisit:** if the cross-window case is seen to drop questions in use, the remedy is
+      provenance on `LinkClosed`, or the sweep reporting owed mail at relink time, while the
+      operator is there.
+- **Held peer mail:** a NEEDS YOU row per link that isn't live, dismissed by message id. The
+  dismissal and the "aged" mark are this run's only, not logged.
+- **Detaching:** both new kinds are excluded from `detach_refusal`'s OWES, so an ended lead with an
+  unanswered question doesn't stay on the fleet until its link closes.
+- **Measured cost:** deriving both rows takes about 0.36 ms of a 0.49 ms `_apply` at 2000 concerns
+  (scratch script, W3b). Cache the peer subset if this ever shows in profiles.
+
+**Found in round three, for later:**
+- The store's `ConcernEdited`/`ConcernWithdrawn` arms apply an agent's edit or withdrawal of a
+  posted concern with no node check; `fake_driver` emits one as a lead. This predates the
+  channel and isn't a wake rule (W3a, read).
+
 **Into round four (and a display check):**
+- A recalled card that owes something draws its badges on the one-line "ended" height,
+  right-aligned, with the file's account to their left. With two badges at the rail's width the
+  title may ellipsize to almost nothing. Only the stub-imgui strings and height are tested (W3d).
+- The held-mail row's new inbox text has no test of its own (W3d).
 - **The sweep's unlisted case is still shaped as a `LinkClosed` reported against the new link.**
   It's tagged `Outcome.swept`, and `app._read_channel_reports` tells it apart. A reader of
   `Outcome` that ignored `swept` would misreport it, so it should become a report type of its own

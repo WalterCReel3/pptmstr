@@ -81,16 +81,21 @@ from .intents import (
     DecisionDismissed,
     DecisionRaised,
     DecisionsRead,
+    DecisionWakeSent,
     DecisionWithdrawn,
     DigestRead,
     FailedSessionClosed,
     FailureAcknowledged,
+    HeldMailDismissed,
     InboxRead,
     Intent,
     PeerInboxRead,
+    PeerQuestionAged,
     PeerSent,
+    PeerWakeSent,
     SessionDetached,
     SessionRecalled,
+    SessionSettled,
     StateChanged,
     SubagentDelivered,
     SubagentProgress,
@@ -104,6 +109,7 @@ from .intents import (
     TaskWithdrawn,
     TopicChanged,
     UsageAccrued,
+    WakeChainReleased,
 )
 from .model import (
     CLOSED_BY_OPERATOR,
@@ -255,6 +261,17 @@ def outcomes(before: Snapshot, intent: Intent, after: Snapshot, now: float) -> t
         case ChannelLinked() | ChannelClosed() | ChannelsRestored():
             # A link is not a board fact. Its record is the channel's own log
             # (``channels.outcomes``), never a member's board.
+            return ()
+
+        case SessionSettled() | WakeChainReleased() | PeerWakeSent() | DecisionWakeSent():
+            # Waking is this run's alone (``model.PeerWakes``), and no log
+            # holds it.
+            return ()
+
+        case PeerQuestionAged() | HeldMailDismissed():
+            # This run's alone as well: the shell measures a question's age
+            # again from its logged delivery after a restart, and a dismissed
+            # row of held mail is raised again then.
             return ()
 
         case BoardRestored():
@@ -492,7 +509,8 @@ def outcomes(before: Snapshot, intent: Intent, after: Snapshot, now: float) -> t
 
         case PeerSent():
             # Filed by the same rule as a concern: a message with a channel is
-            # ``peer-posted``, in its sender's log.
+            # ``peer-posted``, in its sender's log if that session was recording
+            # its board when it was sent.
             sent = after.concerns.get(intent.concern_id)
             if sent is None or intent.concern_id in before.concerns:
                 return ()

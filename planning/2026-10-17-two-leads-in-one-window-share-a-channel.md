@@ -383,6 +383,23 @@ with or without the channel.
     The flows and pseudocode the operator reviewed are in the lead's message of 2026-10-18, and
     are to be carried into the build plan.
 
+    **Refined in round three** (lead, 2026-10-20, from RV-W1 findings 4 and 5, within this
+    entry's intent):
+    - ~~**The backstop's count resets only on progress that came from that link:** the operator
+      acting on that link, or a task whose provenance is that link reaching completed.~~
+      **Narrowed again (lead, 2026-10-20, RV-W12 finding 2): only the operator's own acts on
+      the link reset it** (its parked sends and channel decisions, answering or dismissing a
+      decision raised on it, the release button). A completed task with that link's
+      provenance doesn't count, because agents alone can declare, claim and complete a
+      throwaway task each turn. Unrelated board activity would also mask a loop for as long as
+      either team stays busy. The cost is that a productive exchange surfaces every K wakes
+      until the operator acts. K (6) is to be tuned from use.
+    - **Wakes the system orders itself** (at resume, on restore) don't count toward the
+      backstop.
+    - **A recipient's pending wake clears when the wake is sent, not only when it reads.** So a
+      lead that's woken and ends its turn without reading is woken again by the next message.
+      A forgotten step costs an extra turn, never a stalled message.
+
     **Superseded the same day.** The earlier rule was: wake only on a message that opens an
     obligation (`needs_answer`) or closes one, and let everything else wait for the recipient's
     next look. It stalled in exactly the operator's case: a sender forgetting the flag, or an idle

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import tempfile
 from dataclasses import asdict, dataclass, fields, replace
@@ -183,6 +184,15 @@ class Settings:
     # Read like every key but ``board_log``: a value that is not a JSON ``true`` or
     # ``false`` is the default, and nothing is refused over it.
     hide_ended_subagents: bool = True
+    # How long a lead may leave a question from the lead across a link
+    # unanswered, in seconds from when it was handed the question, before the
+    # operator is shown it in NEEDS YOU (Decided 4 and 11). Fixed, with no
+    # allowance for a lead that is busy: how often it fires is itself the
+    # signal that two teams are not coordinating. The 2026-10-17 replies took
+    # 1-3 minutes. A value that is not a positive, finite number is the
+    # default. Read when a question is handed over, or measured again after a
+    # restart, so a change reaches the questions handed over after it.
+    peer_answer_age_s: float = 900.0
 
     def merged(self, **changes: Any) -> Settings:
         return replace(self, **changes)
@@ -426,13 +436,27 @@ def read(path: Path | None = None) -> Loaded:
     return Loaded(Settings(**clean), unread)
 
 
+def _positive_seconds(value: Any) -> float | None:
+    """
+    A number of seconds that is above nothing and finite, or None. A JSON
+    ``true`` is not one, though Python counts it an int.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    if not math.isfinite(value) or value <= 0:
+        return None
+    return float(value)
+
+
 _DECODERS: dict[str, Any] = {
     "admitted_connectors": _connectors,
     "typeset_roles": _roles,
     "typeset_panes": _panes,
+    "peer_answer_age_s": _positive_seconds,
 }
 """
-The fields that are not a scalar in the file, each with what reads it back.
+The fields that are not a scalar in the file, or a scalar with a range, each
+with what reads it back.
 """
 
 

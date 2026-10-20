@@ -5,8 +5,8 @@ and the lead on the link's other end reads it while that link is live.
 
 Readability keys on the link and never the name, so a decision raised over a
 closed link is not read through a later link of the same name. Decisions with
-no channel are read exactly as before. Nothing here wakes anyone: an answer
-waking every member is round three's.
+no channel are read exactly as before. Who is woken for a raise and an answer
+is tests/test_peer_wakes.py's.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ import pytest
 from pptmstr import boardlog
 from pptmstr.boardfacts import outcomes
 from pptmstr.boardlog import Clock
-from pptmstr.effects import DecisionSettled
+from pptmstr.effects import DecisionSettled, SessionWoken, WakeReason
 from pptmstr.intents import (
     AgentSpawned,
     BoardRestored,
@@ -120,8 +120,7 @@ def raised(
     after, effects = run(
         snap, DecisionRaised(by, decision(did, asker=by), request_id="rq", at=3.0, channel=channel)
     )
-    (settled,) = effects
-    assert isinstance(settled, DecisionSettled)
+    (settled,) = [e for e in effects if isinstance(e, DecisionSettled)]
     return after, settled.refusal
 
 
@@ -142,7 +141,11 @@ def test_a_channel_decision_is_filed_with_the_link_its_name_resolved_to() -> Non
         linked(), DecisionRaised(LEAD, forged, request_id="rq", at=3.0, channel="brand")
     )
 
-    assert effects == (DecisionSettled(request_id="rq", refusal=None),)
+    # The peer's wake is test_peer_wakes'.
+    assert effects == (
+        DecisionSettled(request_id="rq", refusal=None),
+        SessionWoken(session_id=Z, reason=WakeReason.PEER_MESSAGE, subject_id="k1"),
+    )
     filed = snap.decisions["d-1"]
     assert (filed.channel, filed.link) == ("brand", "k1")
 
@@ -360,8 +363,12 @@ def test_a_channel_decision_called_before_the_name_was_linked_again_is_refused()
 
     assert refused == (DecisionSettled(request_id="rq", refusal=DecisionRefusal.LINKED_AFTER),)
     assert early.decisions == {}
-    assert filed == (DecisionSettled(request_id="rq", refusal=None),)
+    assert filed[0] == DecisionSettled(request_id="rq", refusal=None)
     assert late.decisions["d-1"].link == "k3"
+    # The refused raise woke nobody, and the filed one woke C's lead over k3.
+    assert filed[1:] == (
+        SessionWoken(session_id=C, reason=WakeReason.PEER_MESSAGE, subject_id="k3"),
+    )
 
 
 def test_a_channel_decision_refused_for_its_links_age_says_that_and_no_more() -> None:
@@ -444,7 +451,11 @@ def test_a_lead_raises_on_a_channel_and_the_peer_reads_it_through_the_tools() ->
     assert "raised on #brand" in said
     assert "1 the lead on the other end of a channel raised" in listed
     assert "raised by the lead on #brand, not by you" in whole
-    assert "the asker's session is woken and yours is not" in whole
+    assert "yours is not" not in whole
+    assert (
+        "When they do, pptmstr sends your session a message naming it, as it does the "
+        "asker's, or names it when your session is next resumed"
+    ) in whole
     assert "No decision" in stranger and "is shown to you" in stranger
     assert "raise it again" not in stranger
 

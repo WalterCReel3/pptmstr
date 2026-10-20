@@ -23,7 +23,7 @@ import threading
 import time
 import types
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -2251,6 +2251,187 @@ def test_a_resumed_session_has_its_logged_board_before_its_own_first_bus_intent(
     assert "t-3" in after["tasks"]  # type: ignore[operator]
     assert report.adoptable and not report.short
     assert log.recording and not log.awaiting and log.newest is not None
+
+
+def test_a_resumed_session_is_settled_behind_its_restore_and_ahead_of_its_first_bus_intent(
+    tmp_path: Path,
+) -> None:
+    """
+    Decided 10, at resume: the peer mail waiting for a resumed session wakes
+    it at ``SessionSettled``, which the shell emits straight behind the
+    restore, so the wake is decided with the board in the store and before
+    the session has said anything.
+    """
+    from pptmstr.intents import AgentSpawned, BoardRestored, SessionSettled, TaskDeclared
+
+    session_id, _ = _first_run(tmp_path)
+
+    with _Process(tmp_path, _one_more_task()) as second:
+        second.launch(resume=session_id)
+        second.frame()
+        applied = list(second.applied)
+
+    kinds = [type(intent) for intent in applied]
+    announce = next(
+        n
+        for n, intent in enumerate(applied)
+        if isinstance(intent, AgentSpawned) and intent.node_id == (session_id, None)
+    )
+    settled = [(n, i) for n, i in enumerate(applied) if isinstance(i, SessionSettled)]
+    assert [i.session_id for _, i in settled] == [session_id]
+    assert announce < kinds.index(BoardRestored) < settled[0][0] < kinds.index(TaskDeclared)
+
+
+def test_a_session_with_no_log_to_restore_is_settled_too(tmp_path: Path) -> None:
+    from pptmstr.intents import BoardRestored, SessionSettled
+
+    with _Process(tmp_path, _one_more_task()) as first:
+        first.launch()
+        first.frame()
+        kinds = [type(intent) for intent in first.applied]
+
+    assert BoardRestored not in kinds and kinds.count(SessionSettled) == 1
+
+
+class _Relaunching:
+    """
+    A ``_Process`` whose pool is the real ``SessionPool``, over sessions whose
+    run is a stand-in: it says the session is waiting for input, takes a wake
+    only once it has, and on its cancel unwinds only when the test lets it
+    (``unwind``), saying its end before or after that (``ends_first``). That is the window
+    in which a relaunch is held behind the run it replaces.
+
+    A peer session ``p`` is in the store, linked to whatever was launched as
+    ``#brand``.
+    """
+
+    def __init__(self, process: _Process, monkeypatch: pytest.MonkeyPatch) -> None:
+        import asyncio
+
+        from pptmstr import driver
+        from pptmstr.intents import AgentFinished, StateChanged
+        from pptmstr.model import AgentState
+        from pptmstr.pool import SessionPool
+
+        self.process = process
+        self.unwind = threading.Event()
+        # Whether a cancelled run says its end before it has unwound (the
+        # driver's ``_finish_tagging`` window) or as the last thing it does.
+        self.ends_first = False
+        # What reached a client, by the session object it reached.
+        self.woken: list[tuple[AgentSession, str]] = []
+        outer = self
+
+        async def run(session: AgentSession) -> None:
+            process.bridge.emit(StateChanged(session.node_id, AgentState.AWAITING_INPUT))
+            session._fake_client = True  # type: ignore[attr-defined]
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                session._fake_client = False  # type: ignore[attr-defined]
+                end = AgentFinished(session.node_id, AgentState.DONE, time.monotonic())
+                if outer.ends_first:
+                    process.bridge.emit(end)
+                while not outer.unwind.is_set():
+                    await asyncio.sleep(0.005)
+                if not outer.ends_first:
+                    process.bridge.emit(end)
+                raise
+
+        async def wake(session: AgentSession, text: str) -> bool:
+            if not getattr(session, "_fake_client", False):
+                return False
+            outer.woken.append((session, text))
+            return True
+
+        monkeypatch.setattr(driver.AgentSession, "run", run)
+        monkeypatch.setattr(driver.AgentSession, "wake", wake)
+        monkeypatch.setattr(process.app, "WAKE_WINDOW_S", 0.0)
+        # ``_Process.state`` is typed as its ``state`` parameter's default.
+        self.state: Any = cast(Any, process.state)
+        self.state.pool = SessionPool(process.bridge)
+
+    def frames(self, n: int = 3) -> None:
+        """A few frames, each with a trip round the loop for what it ordered."""
+        for _ in range(n):
+            self.process.frame()
+            self.process.bridge.submit(_nothing()).result(timeout=5.0)
+
+    def link_a_peer_with_mail(self, session_id: str) -> None:
+        from pptmstr.intents import AgentSpawned, ChannelLinked, PeerSent
+
+        emit = self.process.bridge.emit
+        emit(AgentSpawned(("p", None), None, "peer", "claude-sonnet-5", 0.0, cwd="/p"))
+        members = frozenset({"p", session_id})
+        emit(ChannelLinked("k1", "brand", members, "c", 1.0, members))
+        emit(PeerSent(("p", None), "rq", "c-00000000000a", "brand", "s", "b", 2.0))
+
+    def relaunch(self, session_id: str) -> None:
+        spec = LaunchSpec(
+            task="build the thing", model="claude-sonnet-5", cwd="/tmp", resume=session_id
+        )
+        self.process.app._launch(self.state, spec)
+        for entry in self.state.launches:
+            entry.future.exception(timeout=5.0)
+
+
+@pytest.mark.parametrize("closed_first", [False, True], ids=["relaunched-live", "resumed-closed"])
+def test_mail_waiting_wakes_a_session_held_behind_its_ending_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, closed_first: bool
+) -> None:
+    """
+    Decided 10, rule 5, on the path where the pool holds the successor
+    (``SessionPool.submit``'s ``_unwinding`` branch): mail already waiting
+    wakes the new run once it is announced -- not the ending run, and not the
+    held successor before it has a client.
+
+    ``relaunched-live`` relaunches a session whose run is waiting for input,
+    so the settle meets a live root. ``resumed-closed`` closes it, lets its end
+    be applied while it is still unwinding, and resumes it, so the settle meets
+    an ended root.
+    """
+    from pptmstr.intents import AgentFinished, AgentSpawned, SessionSettled
+    from pptmstr.model import AgentState
+
+    with _Process(tmp_path) as process:
+        harness = _Relaunching(process, monkeypatch)
+        process.launch()
+        [session_id] = harness.state.ran
+        root = (session_id, None)
+        harness.frames()
+        harness.link_a_peer_with_mail(session_id)
+        harness.frames()
+        [(first, _)] = harness.woken
+        if closed_first:
+            harness.ends_first = True
+            pool = harness.state.pool
+            assert pool is not None
+            process.bridge.submit(pool.close(root)).result(timeout=5.0)
+            harness.frames()
+            ended = harness.state.store.snapshot().get(root)
+            assert ended is not None and ended.state is AgentState.DONE
+
+        harness.relaunch(session_id)
+        harness.frames()
+        harness.unwind.set()
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline and len(harness.woken) < 2:
+            harness.frames(1)
+        harness.frames()
+        applied = list(process.applied)
+
+    woken_after = [s for s, _ in harness.woken[1:]]
+    assert (
+        len(woken_after) == 1 and woken_after[0] is not first
+    ), f"wakes after the relaunch: {len(woken_after)}"
+    announces = [
+        n for n, i in enumerate(applied) if isinstance(i, AgentSpawned) and i.node_id == root
+    ]
+    settles = [n for n, i in enumerate(applied) if isinstance(i, SessionSettled)]
+    ends = [n for n, i in enumerate(applied) if isinstance(i, AgentFinished) and i.node_id == root]
+    # The relaunch's settle is applied behind its own announce, and so behind
+    # the end of the run before it.
+    assert ends[-1] < announces[-1] < settles[-1]
 
 
 def test_an_await_between_the_pools_answer_and_the_restore_would_let_the_session_speak_first(

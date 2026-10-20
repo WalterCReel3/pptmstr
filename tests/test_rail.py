@@ -18,6 +18,7 @@ has been looked at.
 
 from __future__ import annotations
 
+import dataclasses
 import itertools
 from types import MappingProxyType
 from typing import Any
@@ -50,6 +51,8 @@ from pptmstr.model import (
     NodeId,
     Obligation,
     ObligationKind,
+    PeerMailHeld,
+    PeerQuestionUnanswered,
     PendingApproval,
     QuestionPending,
     Recalled,
@@ -58,6 +61,7 @@ from pptmstr.model import (
     Standing,
     Task,
     TranscriptPresence,
+    WakeChainHeld,
 )
 from pptmstr.store import Store
 from pptmstr.theme import DISCLOSURE_GLYPH, STATE_GLYPH
@@ -153,12 +157,44 @@ def failure(node: NodeId = ROOT) -> SessionFailed:
     return SessionFailed(node=node, since=3.0, summary="died")
 
 
+def held_wake(node: NodeId = ROOT) -> WakeChainHeld:
+    return WakeChainHeld(
+        node=node, since=4.0, summary="#brand: wakes held", link="k1", channel="brand"
+    )
+
+
+def peer_question(node: NodeId = ROOT) -> PeerQuestionUnanswered:
+    return PeerQuestionUnanswered(
+        node=node,
+        since=5.0,
+        summary="#brand: a question is unanswered",
+        question="c-1",
+        link="k1",
+        channel="brand",
+    )
+
+
+def peer_held(node: NodeId = ROOT) -> PeerMailHeld:
+    return PeerMailHeld(
+        node=node,
+        since=6.0,
+        summary="#brand: 1 message(s) held",
+        link="k1",
+        channel="brand",
+        messages=("c-2",),
+        why="is not open in this run",
+    )
+
+
 ONE_OF_EACH: dict[ObligationKind, Obligation] = {
     ObligationKind.APPROVAL: approval(),
     ObligationKind.QUESTION: question(),
     ObligationKind.FAILURE: failure(),
     ObligationKind.DECISION: decision(),
     ObligationKind.COMMAND: command(),
+    ObligationKind.WAKE_CHAIN: held_wake(),
+    ObligationKind.PEER_QUESTION: peer_question(),
+    ObligationKind.PEER_HELD: peer_held(),
 }
 
 
@@ -247,12 +283,20 @@ def test_commands_are_badged_per_kind_and_said_in_words() -> None:
 
 
 def _mixes() -> list[list[Obligation]]:
+    """
+    Every mix of kinds, each in three orders: as listed, reversed, and turned
+    by one. Not every permutation: with eight kinds that is 109,600 cases for
+    an order the function sorts by one table. Three orders put each kind of a
+    mix both first and last of it, which is what an order a sort missed shows.
+    """
     kinds = list(ObligationKind)
-    return [
-        [ONE_OF_EACH[kind] for kind in chosen]
-        for size in range(1, len(kinds) + 1)
-        for chosen in itertools.permutations(kinds, size)
-    ]
+    orders: list[tuple[ObligationKind, ...]] = []
+    for size in range(1, len(kinds) + 1):
+        for chosen in itertools.combinations(kinds, size):
+            for order in (chosen, chosen[::-1], chosen[1:] + chosen[:1]):
+                if order not in orders[-3:]:
+                    orders.append(order)
+    return [[ONE_OF_EACH[kind] for kind in order] for order in orders]
 
 
 @pytest.mark.parametrize("owed", _mixes(), ids=lambda owed: "+".join(o.kind.value for o in owed))
@@ -586,6 +630,27 @@ def test_a_closed_card_is_the_one_line_height_whatever_else_is_asked() -> None:
 
     assert rail._density(rec, [], unread=3) == "ended"
     assert rail._density(rec, [question(OLD)]) == "ended"
+
+
+@pytest.mark.parametrize("owed", [peer_question, peer_held], ids=["question", "held mail"])
+def test_a_closed_card_that_owes_draws_its_badge_on_the_one_line(
+    monkeypatch: pytest.MonkeyPatch, owed: Any
+) -> None:
+    """
+    A peer question to a recalled lead, or mail held for one, leaves the card
+    recalled (a wake cannot reach it) and in NEEDS YOU: the one line carries the
+    badge beside the file's account, and still no spend, state or ring.
+    """
+    store = Store()
+    store.apply(recall(ended_how=EndedHow.CLOSED, last_active=WALL - 60))
+    row = owed(OLD)
+    snap = dataclasses.replace(store.snapshot(), needs_you=(row,))
+
+    frame = Frame(monkeypatch, snap, now_wall=WALL)
+
+    assert frame.text[-3:] == ["port the parser", "closed · 1m ago", rail._badge_text(row.kind, 1)]
+    assert frame.out.rings == 0
+    assert frame.out.cards == [(300.0, 18.0 * rail._LINES["ended"] + rail._PAD * 2)]
 
 
 @pytest.mark.parametrize(

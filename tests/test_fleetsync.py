@@ -57,16 +57,21 @@ from pptmstr.intents import (
     DecisionDismissed,
     DecisionRaised,
     DecisionsRead,
+    DecisionWakeSent,
     DecisionWithdrawn,
     DigestRead,
     FailedSessionClosed,
     FailureAcknowledged,
+    HeldMailDismissed,
     InboxRead,
     Intent,
     PeerInboxRead,
+    PeerQuestionAged,
     PeerSent,
+    PeerWakeSent,
     SessionDetached,
     SessionRecalled,
+    SessionSettled,
     StateChanged,
     SubagentDelivered,
     SubagentProgress,
@@ -80,6 +85,7 @@ from pptmstr.intents import (
     TaskWithdrawn,
     TopicChanged,
     UsageAccrued,
+    WakeChainReleased,
 )
 from pptmstr.model import (
     EVERY_CHANNEL,
@@ -316,6 +322,20 @@ _MAKERS: dict[type, Maker] = {
     ),
     ChannelClosed: lambda r, s, now: ChannelClosed(r.choice(("k1", "k2")), now),
     ChannelsRestored: lambda r, s, now: ChannelsRestored(()),
+    # Waking is nothing about a run.
+    SessionSettled: lambda r, s, now: SessionSettled(r.choice((A, B, C))),
+    WakeChainReleased: lambda r, s, now: WakeChainReleased(r.choice(("k1", "k2"))),
+    PeerWakeSent: lambda r, s, now: PeerWakeSent(r.choice((A, B, C)), r.choice(("k1", "k2"))),
+    DecisionWakeSent: lambda r, s, now: DecisionWakeSent(
+        r.choice((A, B, C)), frozenset(d for d in sorted(s.decisions) if r.random() < 0.5)
+    ),
+    # Nor is what the operator is shown about two teams.
+    PeerQuestionAged: lambda r, s, now: PeerQuestionAged(
+        r.choice([c.id for c in s.awaiting_answer()] or sorted(s.concerns) or ["c-0"])
+    ),
+    HeldMailDismissed: lambda r, s, now: HeldMailDismissed(
+        frozenset(c.id for c in s.peer_held() if r.random() < 0.5)
+    ),
 }
 
 # What a session's life is made of, drawn far more often than the rest: ends and

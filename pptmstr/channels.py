@@ -144,7 +144,12 @@ class LinkCreated:
 @dataclass(frozen=True, slots=True)
 class LinkClosed:
     """
-    The operator closed the channel ``channel_id``. ``at`` is its ``closed_at``.
+    The channel ``channel_id`` is closed. ``at`` is its ``closed_at``.
+
+    Written for the operator's close (``intents.ChannelClosed``) and by the
+    writer's sweep, which closes every earlier link under a name when the
+    operator links that name again (``ChannelWriter._sweep``). The fact does
+    not say which: only the writer's ``Outcome`` report carries ``Swept``.
     """
 
     KIND: ClassVar[str] = "link-closed"

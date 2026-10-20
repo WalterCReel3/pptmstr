@@ -172,6 +172,12 @@ class ApprovalResolved:
     approved: bool
     reason: str | None = None
     edited_args: Mapping[str, object] | None = None
+    # Whether a human settled it, as on ``bridge.Decision``. False for a park
+    # nobody answered: one the CLI aborted at its hook timeout, one cancelled
+    # by its session's teardown, and one the host failed at shutdown. Those
+    # arrive as a refusal with a reason, like an operator's, and only this
+    # tells them apart (``store._moved`` counts only the operator's).
+    from_operator: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -387,8 +393,9 @@ class PeerInboxRead:
     (``Snapshot.peer_deliverable``). A message whose link is not live in this
     run -- closed since it was sent, or not restored at this start -- is not
     handed over, by that link or by a later one under the same name: it is held,
-    waiting in the store and kept in its sender's log, and the reply counts it,
-    with no text. Whether a later run hands it over is that run's link's to say.
+    waiting in the store and kept in its sender's log if that session was
+    recording its board when it was sent, and the reply counts it, with no
+    text. Whether a later run hands it over is that run's link's to say.
 
     ``channel`` is a name -- what the lead knows a link by -- or
     ``EVERY_CHANNEL``, never None, which on a concern means team mail.
@@ -1302,6 +1309,124 @@ class ChannelsRestored:
     node_id: NodeId | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class SessionSettled:
+    """
+    A session the pool has just taken is in the store with whatever board it
+    has: its log's ``BoardRestored`` has been applied, or it has none to
+    restore. The instant peer mail already waiting for it may wake it
+    (Decided 10, at resume), and not before: the root's announce is applied
+    ahead of its restore (``app._open_board_log``), so a wake decided at the
+    announce would be decided before the board was in the store.
+
+    Emitted by the shell straight behind the restore on the same queue, with
+    no await between, so it is applied after the restore and before anything
+    the session says -- or, for a session the pool holds behind a run still
+    ending under its id, straight behind its announce, which is after that
+    run's end (``app._launch``). A wake for this session left pending from an
+    earlier run is dropped first: whatever became of that wake, it did not
+    reach this run.
+    """
+
+    session_id: str
+    # No node: the shell's, as ``BoardRestored`` is.
+    node_id: NodeId | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class WakeChainReleased:
+    """
+    The operator let a link's held wakes go (``model.WakeChainHeld``): its
+    chain starts again from nothing, and each lead whose wake was held and has
+    a message on it that is not quiet is woken now. A link with nothing held
+    is left as it is.
+    """
+
+    link_id: ChannelId
+    # No node: an operator's act.
+    node_id: NodeId | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PeerWakeSent:
+    """
+    The shell let go of a peer wake it held for ``session_id`` on
+    ``link_id``: sent it, or dropped it as having nothing to read or nobody
+    to read it (``app._send_wakes``). The session is no longer pending on
+    the link, so its next message wakes it again.
+
+    ``covered`` is the mail the sent line counted, by id, and empty for a
+    wake dropped unsent. A message filed between the send and this intent's
+    apply was coalesced into a wake that did not count it, so the store asks
+    a wake for any that is not quiet and not covered.
+
+    ``told`` is the same for the decisions raised on the link that the sent
+    line named (``model.PeerWakes.untold``): each is no longer owed a wake,
+    and one raised between the send and the apply is woken for again.
+    """
+
+    session_id: str
+    link_id: ChannelId
+    covered: frozenset[ConcernId] = frozenset()
+    told: frozenset[DecisionId] = frozenset()
+    # No node: the shell's, as ``SessionSettled`` is.
+    node_id: NodeId | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DecisionWakeSent:
+    """
+    The shell sent ``session_id`` a wake naming ``decisions`` as answered or
+    dismissed (``app._send_wakes``). The store marks each one raised on a
+    channel by the lead across it as told to this lead
+    (``model.PeerWakes.heard``), so a resume does not name it again.
+
+    Said only for a wake that went: one dropped because its session failed,
+    was closed or left the fleet before the shell sent it is said nothing of,
+    so its decisions stay untold and are named at the session's next
+    ``SessionSettled``.
+    """
+
+    session_id: str
+    decisions: frozenset[DecisionId]
+    # No node: the shell's, as ``PeerWakeSent`` is.
+    node_id: NodeId | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class PeerQuestionAged:
+    """
+    The shell's word that the question between leads ``concern_id`` has gone
+    unanswered for the age the operator set (``Settings.peer_answer_age_s``),
+    measured from when its lead was handed it (Decided 11). The shell holds a
+    one-shot timer per question (``app._age_questions``) and sends this when it
+    runs out, since the reducer reads no clock and nothing else is applied
+    while every session is idle.
+
+    The store raises a ``model.PeerQuestionUnanswered`` row for it if the
+    question is still owed an answer (``Snapshot.awaiting_answer``), and does
+    nothing otherwise: an answer that crossed this on its way is not undone.
+    """
+
+    concern_id: ConcernId
+    # No node: the shell's, as ``SessionSettled`` is.
+    node_id: NodeId | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class HeldMailDismissed:
+    """
+    The operator dismissed a ``model.PeerMailHeld`` row: the mail it counted,
+    ``concerns``, raises no row again in this run. The mail is kept: this
+    ends the row, and hands nothing over and deletes nothing. Mail not among
+    ``concerns`` raises a row of its own.
+    """
+
+    concerns: frozenset[ConcernId]
+    # No node: an operator's act.
+    node_id: NodeId | None = None
+
+
 Intent = (
     AgentSpawned
     | FailureAcknowledged
@@ -1353,4 +1478,10 @@ Intent = (
     | ChannelLinked
     | ChannelClosed
     | ChannelsRestored
+    | SessionSettled
+    | WakeChainReleased
+    | PeerWakeSent
+    | DecisionWakeSent
+    | PeerQuestionAged
+    | HeldMailDismissed
 )

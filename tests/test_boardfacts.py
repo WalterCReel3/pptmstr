@@ -54,16 +54,21 @@ from pptmstr.intents import (
     DecisionDismissed,
     DecisionRaised,
     DecisionsRead,
+    DecisionWakeSent,
     DecisionWithdrawn,
     DigestRead,
     FailedSessionClosed,
     FailureAcknowledged,
+    HeldMailDismissed,
     InboxRead,
     Intent,
     PeerInboxRead,
+    PeerQuestionAged,
     PeerSent,
+    PeerWakeSent,
     SessionDetached,
     SessionRecalled,
+    SessionSettled,
     StateChanged,
     SubagentDelivered,
     SubagentProgress,
@@ -77,6 +82,7 @@ from pptmstr.intents import (
     TaskWithdrawn,
     TopicChanged,
     UsageAccrued,
+    WakeChainReleased,
 )
 from pptmstr.model import (
     ALL_WRITERS,
@@ -619,6 +625,20 @@ _MAKERS: dict[type, Maker] = {
     ),
     ChannelClosed: lambda r, s, now: ChannelClosed(r.choice(("k1", "k2")), now),
     ChannelsRestored: lambda r, s, now: ChannelsRestored(()),
+    # Waking is this run's alone and is never a board fact.
+    SessionSettled: lambda r, s, now: SessionSettled(r.choice((S, Z))),
+    WakeChainReleased: lambda r, s, now: WakeChainReleased(r.choice(("k1", "k2"))),
+    PeerWakeSent: lambda r, s, now: PeerWakeSent(r.choice((S, Z)), r.choice(("k1", "k2"))),
+    DecisionWakeSent: lambda r, s, now: DecisionWakeSent(
+        r.choice((S, Z)), frozenset(d for d in sorted(s.decisions) if r.random() < 0.5)
+    ),
+    # What the operator is shown about two teams is this run's alone too.
+    PeerQuestionAged: lambda r, s, now: PeerQuestionAged(
+        r.choice([c.id for c in s.awaiting_answer()] or sorted(s.concerns) or ["c-0"])
+    ),
+    HeldMailDismissed: lambda r, s, now: HeldMailDismissed(
+        frozenset(c.id for c in s.peer_held() if r.random() < 0.5)
+    ),
 }
 
 # The intents a board fact can come from. Drawn more often than the rest, and the
@@ -669,6 +689,9 @@ _PEERS: tuple[type, ...] = (
     PeerSent,
     PeerInboxRead,
     PeerInboxRead,
+    SessionSettled,
+    WakeChainReleased,
+    PeerWakeSent,
 )
 _PEER_EVERY = 5
 # A sub-agent starting and ending, and its session's root announced again: what
@@ -678,6 +701,13 @@ _PEER_EVERY = 5
 # ``_MAKERS``, the sequence is reached by about one seed in a hundred.
 _LIFECYCLE: tuple[type, ...] = (AgentSpawned, AgentFinished)
 _LIFECYCLE_EVERY = 7
+# The shell's word on a question's age, the operator's dismissal of held
+# mail, and the shell's word on the decisions a wake named: one every
+# ``_SURFACING_EVERY`` steps, from a generator of their own as ``_PEERS`` are.
+# None moves a task or a concern, so the rest of a run is drawn as it would be
+# without them.
+_SURFACING: tuple[type, ...] = (PeerQuestionAged, HeldMailDismissed, DecisionWakeSent)
+_SURFACING_EVERY = 11
 # Prunes a record, after which the node is one the board has no name for. Rare,
 # or every run ends with nobody on it.
 _RARE: tuple[type, ...] = (AgentRemoved,)
@@ -703,8 +733,22 @@ def steps(seed: int, length: int = LENGTH) -> Iterator[Step]:
     rng = random.Random(seed)
     peer_rng = random.Random(-1 - seed)
     life_rng = random.Random(-1_000_000 - seed)
+    surfacing_rng = random.Random(-2_000_000 - seed)
     snap = started()
-    everything = [kind for kind in _MAKERS if kind not in (*_RARE, PeerSent, PeerInboxRead)]
+    everything = [
+        kind
+        for kind in _MAKERS
+        if kind
+        not in (
+            *_RARE,
+            *_SURFACING,
+            PeerSent,
+            PeerInboxRead,
+            SessionSettled,
+            WakeChainReleased,
+            PeerWakeSent,
+        )
+    ]
     for number in range(length):
         now = 1.0 + number
         if number % _PEER_EVERY == _PEER_EVERY - 1:
@@ -716,6 +760,11 @@ def steps(seed: int, length: int = LENGTH) -> Iterator[Step]:
             life = _MAKERS[life_rng.choice(_LIFECYCLE)](life_rng, snap, now)
             after, _ = _apply(snap, life, now)
             yield Step(number, life, after, outcomes(snap, life, after, now))
+            snap = after
+        if number % _SURFACING_EVERY == _SURFACING_EVERY - 1:
+            shown = _MAKERS[surfacing_rng.choice(_SURFACING)](surfacing_rng, snap, now)
+            after, _ = _apply(snap, shown, now)
+            yield Step(number, shown, after, outcomes(snap, shown, after, now))
             snap = after
         roll = rng.random()
         if roll < 0.01:

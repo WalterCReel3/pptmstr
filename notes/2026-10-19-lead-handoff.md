@@ -21,14 +21,17 @@ starts with an empty board and can't read this one.
   `why_blocked` and `ready` are built. Lock-vs-edge, role-aware claims and touches enforcement
   are still open.
 
-## State (HEAD f76ab50)
+## State (after round three)
 
 - Commits: 3fb14fc (research), 70cad9c (round one), 3e9dbca (graph evidence), 8f3a16c (round
-  two), f76ab50 (merge of origin/main 713af05).
-- `make check` green: 13921 passed, 14 skipped, 23 xfailed.
+  two), f76ab50 (merge of origin/main 713af05), 7409e82 and 4ac737e (this note), then round
+  three.
+- `make check` green at G-r3: 14569 passed, 14 skipped, 23 xfailed (14606 collected; every test
+  file collects at least as many as before the round).
 - Baselines for the next gate:
   - **23** `[imgui-error]` lines, from tests that exercise error recovery;
-  - **1952** for `make typecheck-all` (red before this branch; don't let it rise).
+  - **1936** for `make typecheck-all` (red before this branch; don't let it rise). Only the
+    total was compared, not per file.
 - Built:
   - peer messages (H+, `peer-posted`, keyed on link id);
   - decisions in the asker's log, and channel decisions;
@@ -36,10 +39,10 @@ starts with an empty board and can't read this one.
   - the per-link channel log at `config_dir()/channels/<name>/<link-id>/`, with the relink sweep;
   - `send_to_peer` / `read_peer_messages`;
   - the minimal Session ▸ Link leads / Close channel, and the card line.
+  - round three: delivery-first wakes with the K = 6 backstop (Decided 10), the unanswered-question
+    row (Decided 11), decision wakes, and held-mail rows. See "Decided during round three" in the
+    build plan.
 - Not built:
-  - **round three:** delivery-first wakes (Decided 10), the 15-minute surfacing (Decided 11),
-    waking the peer on channel decisions, and an operator surface for messages held on a closed
-    link;
   - **round four:** the DIGEST thread, channel in NEEDS YOU/DETAIL, and the display check.
 - Never seen on a display, never run between two live sessions.
 
@@ -66,6 +69,11 @@ starts with an empty board and can't read this one.
   - mypy ignores `PYTHONPATH`.
 - **`make shot-xvfb`** can't keep an image outside the tree (its namespace tmpfs hides `$TMPDIR`),
   so a gate's shot step proves only that a frame rendered.
+- **Commit timestamps** (operator, 2026-10-20). Author and committer dates go outside work hours
+  (Mon–Fri 08:00–18:00 local) and at a sensible time: evenings 19:00–23:30, or weekend daytime.
+  Dates keep commit order. Set both `GIT_AUTHOR_DATE` and `GIT_COMMITTER_DATE` on every commit.
+  Re-dating an existing commit uses `git commit-tree` on its tree, so the trees stay identical
+  and a merge isn't re-resolved, then updates the hashes cited in notes.
 - **Never `git add -A`.** The worktree root holds 0-byte sandbox placeholder files (.bashrc,
   .gitconfig, .mcp.json, .claude/ …). Stage by path.
 - **Review cadence that worked.** Builder, then reviewer (no shell; findings by reading), then a

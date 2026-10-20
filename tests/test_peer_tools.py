@@ -20,7 +20,13 @@ import pytest
 from pptmstr import boardlog
 from pptmstr.boardfacts import Fact, outcomes
 from pptmstr.boardlog import Clock, Delivered, PeerPosted
-from pptmstr.effects import InboxDelivered, PeerInboxDelivered, PeerSettled
+from pptmstr.effects import (
+    InboxDelivered,
+    PeerInboxDelivered,
+    PeerSettled,
+    SessionWoken,
+    WakeReason,
+)
 from pptmstr.intents import (
     AgentSpawned,
     BoardRestored,
@@ -95,6 +101,11 @@ def apply(
     return after, effects, list(outcomes(snap, intent, after, now))
 
 
+def woke(session: str, link_id: str) -> SessionWoken:
+    """The wake a message that is not quiet orders for the lead it reaches (Decided 10)."""
+    return SessionWoken(session_id=session, reason=WakeReason.PEER_MESSAGE, subject_id=link_id)
+
+
 def linked() -> Snapshot:
     snap, _, _ = apply(started(), link("k1", "brand", S, Z))
     assert snap.live_channel("brand") is not None
@@ -108,7 +119,7 @@ def test_a_message_reaches_the_other_members_lead_and_is_filed_in_the_senders_lo
     held, _, _ = apply(linked(), sent("c-aaaaaaaaaaaa", by=Z_LEAD, rid="rz"))
     snap, effects, facts = apply(held, sent(needs_answer=True, re="c-aaaaaaaaaaaa"))
 
-    assert effects == (PeerSettled(request_id="rq", refusal=None, recipient=Z),)
+    assert effects == (PeerSettled(request_id="rq", refusal=None, recipient=Z), woke(Z, "k1"))
     filed = snap.concerns["c-0123456789ab"]
     assert (filed.sender, filed.recipient, filed.channel, filed.link) == (
         LEAD,
@@ -329,13 +340,23 @@ def test_a_peer_message_is_filed_only_between_two_sessions_leads() -> None:
         assert after.concerns == snap.concerns and facts == [], (sender, recipient)
 
 
-# -- no wakes yet ---------------------------------------------------------------------
+# -- the wake a message orders (Decided 10; the rule whole is test_peer_wakes.py) ----
 
 
-def test_a_peer_message_wakes_nobody_yet() -> None:
+def test_a_message_that_is_not_quiet_wakes_the_lead_it_reaches() -> None:
     _, effects, _ = apply(linked(), sent())
 
-    assert all(isinstance(e, PeerSettled) for e in effects)
+    assert effects == (PeerSettled(request_id="rq", refusal=None, recipient=Z), woke(Z, "k1"))
+
+
+def test_a_quiet_message_wakes_nobody() -> None:
+    _, effects, _ = apply(linked(), sent(quiet=True))
+
+    assert effects == (PeerSettled(request_id="rq", refusal=None, recipient=Z),)
+
+
+def test_the_team_wake_rule_is_not_what_wakes_for_a_peer_message() -> None:
+    """``_concern_wake`` stays worker-to-own-lead only, and says nothing of a peer message."""
     filed = apply(linked(), sent())[0].concerns["c-0123456789ab"]
     assert _concern_wake(filed) == ()
 
@@ -635,7 +656,7 @@ def test_a_send_called_after_the_relink_reaches_the_new_lead() -> None:
     """The other side: a call made once S-C was live is S-C's to send."""
     snap, effects, _ = apply(relinked(), sent("c-bbbbbbbbbbbb", called_at=11.0), now=12.0)
 
-    assert effects == (PeerSettled(request_id="rq", refusal=None, recipient=C),)
+    assert effects == (PeerSettled(request_id="rq", refusal=None, recipient=C), woke(C, "k3"))
     assert snap.concerns["c-bbbbbbbbbbbb"].link == "k3"
 
 
@@ -647,7 +668,7 @@ def test_an_answer_on_the_link_its_message_came_over_is_sent() -> None:
         snap, sent("c-bbbbbbbbbbbb", called_at=2.5, re="c-aaaaaaaaaaaa"), now=3.0
     )
 
-    assert effects == (PeerSettled(request_id="rq", refusal=None, recipient=Z),)
+    assert effects == (PeerSettled(request_id="rq", refusal=None, recipient=Z), woke(Z, "k1"))
     assert after.concerns["c-bbbbbbbbbbbb"].re == "c-aaaaaaaaaaaa"
 
 
@@ -662,7 +683,7 @@ def test_a_link_restored_at_startup_is_live_since_the_restore() -> None:
     _, early, _ = apply(snap, sent(called_at=3.0), now=6.0)
     _, late, _ = apply(snap, sent(called_at=5.0), now=6.0)
     assert early == (PeerSettled(request_id="rq", refusal=PeerRefusal.LINKED_AFTER),)
-    assert late == (PeerSettled(request_id="rq", refusal=None, recipient=Z),)
+    assert late == (PeerSettled(request_id="rq", refusal=None, recipient=Z), woke(Z, "k1"))
 
 
 def _pending_send(**args: object) -> Any:
@@ -738,7 +759,7 @@ def test_a_call_stamped_at_its_links_own_instant_counts_as_after_it() -> None:
     _, tied, _ = apply(snap, sent(called_at=4.0), now=5.0)
     _, later, _ = apply(snap, sent(called_at=4.001), now=5.0)
     assert tied == (PeerSettled(request_id="rq", refusal=PeerRefusal.LINKED_AFTER),)
-    assert later == (PeerSettled(request_id="rq", refusal=None, recipient=Z),)
+    assert later == (PeerSettled(request_id="rq", refusal=None, recipient=Z), woke(Z, "k1"))
 
 
 def test_an_answer_citing_a_message_this_run_does_not_hold_is_refused() -> None:
@@ -766,6 +787,9 @@ def test_an_answer_citing_a_message_this_run_does_not_hold_is_refused() -> None:
     assert "c-bbbbbbbbbbbb" not in after.concerns and facts == []
     # Without the re, the same send is the new link's to carry.
     _, plain, _ = apply(snap, sent("c-bbbbbbbbbbbb", called_at=5.0), now=6.0)
+    # No wake with it: the restore of S's log already woke C for c-ccc on k2,
+    # and C has not read since, so this one coalesces into that wake.
+    assert snap.peer_wakes["k2"].pending == {C}
     assert plain == (PeerSettled(request_id="rq", refusal=None, recipient=C),)
 
 

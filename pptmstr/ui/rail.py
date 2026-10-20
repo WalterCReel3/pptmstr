@@ -219,16 +219,30 @@ def _stopped_on(owed: Sequence[Obligation]) -> list[Obligation]:
     """
     The obligations that mean their node has stopped until the operator acts.
 
-    Every kind but a decision and a command. An approval, a question and a
-    failure are read off a node that is parked or dead; a decision and a command
-    are records their asker filed, and the asker was told to carry on and may be
-    working while either waits.
+    Every kind but a decision, a command, a held wake and the two about two
+    teams. An approval, a question and a failure are read off a node that is
+    parked or dead; a decision and a command are records their asker filed, and
+    the asker was told to carry on and may be working while either waits. A
+    held wake is a wake its lead was not given, and an unanswered peer question
+    or held peer mail is news about two teams: none says what that lead is
+    doing.
     """
     return [o for o in owed if o.kind not in _ASKER_CARRIES_ON]
 
 
-# The kinds that are a record an agent filed and not a state its node is in.
-_ASKER_CARRIES_ON = frozenset({ObligationKind.DECISION, ObligationKind.COMMAND})
+# The kinds that are not a state their node is in: a record an agent filed, a
+# wake pptmstr held back from a lead that may be busy with anything else, or
+# what the operator is told about two teams -- a question left unanswered past
+# its age, mail held on a link that is not live.
+_ASKER_CARRIES_ON = frozenset(
+    {
+        ObligationKind.DECISION,
+        ObligationKind.COMMAND,
+        ObligationKind.WAKE_CHAIN,
+        ObligationKind.PEER_QUESTION,
+        ObligationKind.PEER_HELD,
+    }
+)
 
 
 def _density(rec: AgentRecord, owed: list[Obligation], *, unread: int = 0) -> str:
@@ -246,9 +260,12 @@ def _density(rec: AgentRecord, owed: list[Obligation], *, unread: int = 0) -> st
     the case the mark is for.
     """
     if rec.recalled is not None:
-        # Nothing is owed for a recalled record -- one that comes to owe stops
-        # being recalled in the store -- and the taller classes draw a spend, a
-        # context ring and an elapsed time, none of which this process observed.
+        # The taller classes draw a spend, a context ring and an elapsed time,
+        # none of which this process observed. A recalled record can still owe:
+        # a question to its lead or mail held for it (``PeerQuestionUnanswered``,
+        # ``PeerMailHeld``) leaves it recalled, since clearing that would make
+        # the store take it for a session a wake can reach. Its badges are drawn
+        # on the one line (``_card``), beside the file's account.
         return "ended"
     if _stopped_on(owed):
         return "blocked"
@@ -370,13 +387,17 @@ def _health(rec: AgentRecord) -> None:
 # The order a card's badges are drawn in, left to right: what stops work first --
 # a parked call, then a dead session, then a turn that ended, then a decision its
 # asker may be working past, then a command, which stops nothing either and is
-# said again in words under the title (``commands_mark``).
+# said again in words under the title (``commands_mark``), then a held wake,
+# then the two that tell the operator about two teams.
 _BADGE_ORDER = (
     ObligationKind.APPROVAL,
     ObligationKind.FAILURE,
     ObligationKind.QUESTION,
     ObligationKind.DECISION,
     ObligationKind.COMMAND,
+    ObligationKind.WAKE_CHAIN,
+    ObligationKind.PEER_QUESTION,
+    ObligationKind.PEER_HELD,
 )
 
 
@@ -396,6 +417,36 @@ def _badges(owed: Sequence[Obligation]) -> tuple[tuple[ObligationKind, int], ...
 # Between two badges on one card, and between the last badge and the title.
 _BADGE_GAP = 3.0
 _BADGE_PAD = 5.0
+
+
+def _badge_row(
+    owed: Sequence[Obligation],
+) -> tuple[list[tuple[ObligationKind, str]], list[float], float]:
+    """A card's badges, each one's width, and the row's width with its gaps."""
+    badges = [(kind, _badge_text(kind, count)) for kind, count in _badges(owed)]
+    widths = [imgui.calc_text_size(text).x + _BADGE_PAD * 2 for _, text in badges]
+    return badges, widths, sum(widths) + _BADGE_GAP * max(len(badges) - 1, 0)
+
+
+def _draw_badges(
+    draw: imgui.ImDrawList,
+    badges: Sequence[tuple[ObligationKind, str]],
+    widths: Sequence[float],
+    x: float,
+    y: float,
+    line_h: float,
+) -> None:
+    """``badges`` left to right from ``x`` on the card line at ``y``."""
+    for (kind, text), badge_w in zip(badges, widths, strict=True):
+        draw.add_rect_filled(
+            imgui.ImVec2(x, y - 1.0),
+            imgui.ImVec2(x + badge_w, y + line_h - 3.0),
+            P.obligation(kind).u32,
+            2.0,
+        )
+        imgui.set_cursor_screen_pos(imgui.ImVec2(x + _BADGE_PAD, y))
+        imgui.text_colored(P.bg.vec4, text)
+        x += badge_w + _BADGE_GAP
 
 
 def _badge_text(kind: ObligationKind, count: int) -> str:
@@ -998,16 +1049,19 @@ def _card(
             _small()
             fact_w = imgui.calc_text_size(fact).x
             _normal()
+            badges, widths, badges_w = _badge_row(owed)
+            owes_w = badges_w + _BADGE_GAP if badges else 0.0
             title = session_menu.card_title(rec)
             imgui.text_colored(
                 P.text_dim.vec4,
-                ellipsis(title, width - 54.0 - _PAD - fact_w - _subs_width(signal)),
+                ellipsis(title, width - 54.0 - _PAD - fact_w - owes_w - _subs_width(signal)),
             )
             marker = _draw_subs(signal)
             _small()
-            imgui.set_cursor_screen_pos(imgui.ImVec2(hi.x - _PAD - fact_w, y + 2.0))
+            imgui.set_cursor_screen_pos(imgui.ImVec2(hi.x - _PAD - owes_w - fact_w, y + 2.0))
             imgui.text_colored((P.warn if warns else P.text_dim).vec4, fact)
             _normal()
+            _draw_badges(draw, badges, widths, hi.x - _PAD - badges_w, y, line_h)
         else:
             # One line, and no model on it: the two slots an ended card has left are
             # what it became and what it cost. A model that no longer runs anything is
@@ -1049,9 +1103,7 @@ def _card(
             focused=focused,
         )
 
-    badges = [(kind, _badge_text(kind, count)) for kind, count in _badges(owed)]
-    widths = [imgui.calc_text_size(text).x + _BADGE_PAD * 2 for _, text in badges]
-    badges_w = sum(widths) + _BADGE_GAP * max(len(badges) - 1, 0)
+    badges, widths, badges_w = _badge_row(owed)
     # What one badge took, as a floor: a card with one kind is laid out as it was.
     title_room = width - (_PAD * 2 + 30.0) - (max(52.0, badges_w + 16.0) if owed else 42.0)
     if working:
@@ -1059,17 +1111,7 @@ def _card(
     imgui.text_colored(P.text_strong.vec4, ellipsis(session_menu.card_title(rec), title_room))
 
     if badges:
-        bx = hi.x - _PAD - badges_w
-        for (kind, text), badge_w in zip(badges, widths, strict=True):
-            draw.add_rect_filled(
-                imgui.ImVec2(bx, y - 1.0),
-                imgui.ImVec2(bx + badge_w, y + line_h - 3.0),
-                P.obligation(kind).u32,
-                2.0,
-            )
-            imgui.set_cursor_screen_pos(imgui.ImVec2(bx + _BADGE_PAD, y))
-            imgui.text_colored(P.bg.vec4, text)
-            bx += badge_w + _BADGE_GAP
+        _draw_badges(draw, badges, widths, hi.x - _PAD - badges_w, y, line_h)
     else:
         elapsed = format_elapsed(
             (rec.ended_at if rec.ended_at is not None else now) - rec.started_at

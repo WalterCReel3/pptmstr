@@ -57,6 +57,7 @@ from ..command import (
     Withdrawn,
 )
 from ..commandrun import environment_changes, kill_line, look_line
+from ..intents import HeldMailDismissed, WakeChainReleased
 from ..model import (
     AgentRecord,
     AgentState,
@@ -66,10 +67,13 @@ from ..model import (
     LaunchSpec,
     NodeId,
     Obligation,
+    PeerMailHeld,
+    PeerQuestionUnanswered,
     PendingApproval,
     QuestionPending,
     SessionFailed,
     Snapshot,
+    WakeChainHeld,
 )
 from ..theme import OBLIGATION_GLYPH, STATE_GLYPH, P, hint_colour
 from ..transcript import Transcript
@@ -761,6 +765,23 @@ def departure_line(snap: Snapshot, left: Obligation, now: float = 0.0) -> str:
                 f"the decision you were on - {one_line(left.decision.id)} from {role} - is no"
                 " longer waiting: it was answered, dismissed or withdrawn"
             )
+        case WakeChainHeld():
+            return (
+                f"the held wake you were on - #{one_line(left.channel)} for {role} - is no"
+                " longer held: you released it or acted on the link, the lead read its"
+                " mail, its session ended or was resumed, or the link closed"
+            )
+        case PeerQuestionUnanswered():
+            return (
+                f"the unanswered question you were on - #{one_line(left.channel)} for {role}"
+                " - is no longer shown: it was answered, or its link closed, or its session"
+                " was resumed before the age"
+            )
+        case PeerMailHeld():
+            return (
+                f"the held mail you were on - #{one_line(left.channel)} for {role} - is no"
+                " longer held: it was handed over, or its link closed, or you dismissed it"
+            )
         case _:
             assert_never(left)
 
@@ -1022,6 +1043,15 @@ def keys_hint(current: Obligation | None) -> str:
             )
         case CommandOwed():
             return COMMAND_KEYS
+        case WakeChainHeld():
+            return "j/k move · wake them with the button: no key acts here"
+        case PeerQuestionUnanswered():
+            return (
+                "j/k move · nothing to press: an answer, the link closing, or a resume"
+                " before the age ends it"
+            )
+        case PeerMailHeld():
+            return "j/k move · dismiss with the button: no key acts here"
         case _:
             assert_never(current)
 
@@ -1240,6 +1270,12 @@ def _row(
                 decision_view.draw_row(snap, decisions, bridge, obligation, wrap=wrap)
             case CommandOwed():
                 draw_command(snap, commands, obligation.command, wrap=wrap)
+            case WakeChainHeld():
+                _expand_wake_chain(bridge, obligation)
+            case PeerQuestionUnanswered():
+                _expand_peer_question(obligation)
+            case PeerMailHeld():
+                _expand_peer_held(bridge, obligation)
             case _:
                 assert_never(obligation)
         imgui.unindent(10.0)
@@ -2255,6 +2291,119 @@ def _expand_failure(snap: Snapshot, actions: InboxActions, obligation: SessionFa
     _small()
     imgui.text_colored(
         P.text_dim.vec4, "dismiss clears it from here; the session stays in the rail"
+    )
+    _normal()
+
+
+def _expand_wake_chain(bridge: Bridge, obligation: WakeChainHeld) -> None:
+    """
+    A held wake: what was held and why, and the one act it asks for. Releasing
+    is safe to do in one press -- it wakes leads to read mail that is already
+    theirs -- so it is not armed as a decision's send is.
+    """
+    imgui.push_text_wrap_pos(imgui.get_content_region_avail().x)
+    imgui.text_colored(
+        P.text.vec4,
+        f"The leads on #{one_line(obligation.channel)} have woken each other many times in"
+        " a row with no act of yours on this link, so pptmstr stopped waking them. Their"
+        " messages are kept and wait to be read; only the wake is held.",
+    )
+    imgui.pop_text_wrap_pos()
+    imgui.spacing()
+    if imgui.button("wake them"):
+        bridge.emit(WakeChainReleased(link_id=obligation.link))
+    imgui.same_line()
+    _small()
+    imgui.text_colored(
+        P.text_dim.vec4,
+        "wakes every lead held on this link and starts its count again",
+    )
+    _normal()
+
+
+def _expand_peer_question(obligation: PeerQuestionUnanswered) -> None:
+    """
+    An unanswered question between leads: what it says about the two teams,
+    and that nothing here acts on it. The lead that asked is not told of
+    this row (Decided 11); the lead asked sees it only by pulling its
+    digest. What to do about it is the operator's, in either session.
+    """
+    imgui.push_text_wrap_pos(imgui.get_content_region_avail().x)
+    imgui.text_colored(P.text.vec4, _peer_question_body(obligation))
+    imgui.pop_text_wrap_pos()
+
+
+def _peer_question_body(obligation: PeerQuestionUnanswered) -> str:
+    """
+    What ``_expand_peer_question`` says: why the row is up -- the age passed,
+    or the lead's session is not running, which does not wait for the age,
+    whether or not it read the question first -- who can see the row, and
+    what ends it.
+    """
+    asked = (
+        f"The lead across #{one_line(obligation.channel)} asked this lead a question that"
+        " needs an answer"
+    )
+    if not obligation.delivered:
+        why = (
+            ", and its session is not running, so it has not read it and cannot answer;"
+            " this row does not wait for the age set in settings."
+        )
+        ends = (
+            "It ends when the lead answers it or the link is closed; if the session is"
+            " resumed first, its lead is woken for it, and the age runs from when it"
+            " reads it."
+        )
+    elif obligation.running:
+        why = (
+            ". It was handed over longer ago than the age set in settings, and no answer"
+            " has been sent."
+        )
+        ends = "It ends when the lead answers it or the link is closed."
+    else:
+        why = (
+            ", and its session is not running, so it cannot answer; this row does not"
+            " wait for the age set in settings."
+        )
+        ends = (
+            "It ends when the lead answers it or the link is closed; if the session is"
+            " resumed first, the question is held to the age from its delivery again."
+        )
+    # The row is in the digest of the recipient's session alone
+    # (``digest._waiting``), and only a running session can call read_digest. A
+    # resume takes a not-running row away, or makes it the running one past
+    # the age, before the lead can make a call, so only the running variant
+    # can say the digest lists it.
+    told = (
+        "The lead that asked is not told of this row, and no wake carries it; this"
+        " lead's read_digest lists it."
+        if obligation.running
+        else "The lead that asked is not told of this row, and no wake carries it."
+    )
+    return f"{asked}{why} {told} {ends}"
+
+
+def _expand_peer_held(bridge: Bridge, obligation: PeerMailHeld) -> None:
+    """
+    Peer mail no link will hand over in this run: what is held and why, and
+    the one act the row takes. Dismissing keeps the mail and drops only the
+    row, so it is safe in one press, as releasing a held wake is.
+    """
+    imgui.push_text_wrap_pos(imgui.get_content_region_avail().x)
+    imgui.text_colored(
+        P.text.vec4,
+        f"{len(obligation.messages)} message(s) from the lead across"
+        f" #{one_line(obligation.channel)} wait for this lead, and the link they were sent"
+        f" over {obligation.why}. They are kept in the store and in their sender's log.",
+    )
+    imgui.pop_text_wrap_pos()
+    imgui.spacing()
+    if imgui.button("dismiss"):
+        bridge.emit(HeldMailDismissed(concerns=frozenset(obligation.messages)))
+    imgui.same_line()
+    _small()
+    imgui.text_colored(
+        P.text_dim.vec4, "drops the row and keeps the mail; mail held later raises it again"
     )
     _normal()
 

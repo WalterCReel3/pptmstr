@@ -96,10 +96,13 @@ from ..model import (
     NodeId,
     Obligation,
     ObligationKind,
+    PeerMailHeld,
+    PeerQuestionUnanswered,
     PendingApproval,
     QuestionPending,
     SessionFailed,
     Snapshot,
+    WakeChainHeld,
 )
 from ..theme import OBLIGATION_GLYPH, Color, P
 from ..transcript import SegmentKind, Transcript
@@ -151,6 +154,9 @@ _KIND_LABEL: dict[ObligationKind, str] = {
     ObligationKind.FAILURE: "failed",
     ObligationKind.DECISION: "wants a decision",
     ObligationKind.COMMAND: "asks you to run a command",
+    ObligationKind.WAKE_CHAIN: "has a wake held",
+    ObligationKind.PEER_QUESTION: "has a peer question unanswered",
+    ObligationKind.PEER_HELD: "has peer mail held",
 }
 # A header tooltip's wrap width, in font heights.
 _TOOLTIP_EMS = 36.0
@@ -438,6 +444,19 @@ def draw(
                 )
             case CommandOwed():
                 _command(snap, commands, obligation, acts, wrap=wrap)
+            case WakeChainHeld():
+                # Released from its row in NEEDS YOU (``inbox._expand_wake_chain``).
+                widgets.section("held wake")
+                imgui.text(obligation.summary)
+            case PeerQuestionUnanswered():
+                # Nothing acts on it, here or in NEEDS YOU: an answer ends it.
+                widgets.section("unanswered peer question")
+                imgui.text(obligation.summary)
+            case PeerMailHeld():
+                # Dismissed from its row in NEEDS YOU (``inbox._expand_peer_held``).
+                # The summary counts the mail; none of its text is drawn.
+                widgets.section("held peer mail")
+                imgui.text(obligation.summary)
             case _:
                 assert_never(obligation)
         imgui.pop_text_wrap_pos()
@@ -1390,6 +1409,8 @@ def plain_text(
             parts += command_view.command_text(
                 command, inbox.command_role(snap, command), restored=command.id in restored
             )
+        case WakeChainHeld() | PeerQuestionUnanswered() | PeerMailHeld():
+            parts.append(obligation.summary)
         case _:
             assert_never(obligation)
 

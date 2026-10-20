@@ -129,6 +129,7 @@ SECTIONS: dict[str, tuple[str, ...]] = {
         "concurrency_cap",
         "subagent_cap",
         "fps_idle",
+        "peer_answer_age_s",
     ),
 }
 """
@@ -443,6 +444,13 @@ _CAPS: tuple[tuple[str, str, tuple[float, ...], str], ...] = (
         "idle fps",
         (3.0, 5.0, 9.0, 15.0, 30.0),
         "the frame rate while every agent is idle or parked on you",
+    ),
+    (
+        "peer_answer_age_s",
+        "peer answer age (s)",
+        (300.0, 600.0, 900.0, 1800.0, 3600.0),
+        "how long a lead may leave a linked lead's question unanswered before NEEDS YOU"
+        " shows it; read when a question is handed over",
     ),
 )
 """
