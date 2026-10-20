@@ -253,6 +253,29 @@ def launch_directory(row: SessionRow | None, field: str) -> LaunchDirectory:
     return RecordedDirectory(real)
 
 
+def field_directory(field: str) -> str:
+    """
+    The directory the cwd field names: the text with the whitespace around it
+    dropped, ``"."`` for none, and a leading ``~`` or ``~user`` expanded as the shell
+    would expand it.
+
+    **Every reader of the field goes through here**, because they are asked about one
+    directory. ``tree.lies_inside_checkout`` expands ``~`` and ``realpath`` does not,
+    so a field read two ways has the own-checkout refusal judge the home while the
+    session runs in a directory named ``~`` under this process's directory.
+
+    A ``~user`` with no such user is left as typed, which is what the shell does
+    too, and the top rung is refused for it as a path with no location. So is a ``~user`` with a
+    NUL in it, which ``expanduser`` raises on: the field is read on every frame, and
+    left as typed it reaches the readers that already refuse a NUL.
+    """
+    typed = field.strip() or "."
+    try:
+        return os.path.expanduser(typed)
+    except ValueError:
+        return typed
+
+
 def resolved_directory(directory: LaunchDirectory) -> str:
     """
     The directory a launch in ``directory`` is started in, as the one string the
@@ -1145,7 +1168,7 @@ def refusal_for(
     the other answer would be the mode granted for a directory nobody could name.
     """
     try:
-        refused = tree.lies_inside_checkout(cwd.strip() or ".", checkout)
+        refused = tree.lies_inside_checkout(field_directory(cwd), checkout)
     except ValueError:
         refused = True
     return _REFUSAL.format(named=named, consequence=consequence) if refused else None
@@ -2442,8 +2465,8 @@ class LauncherState:
         self.branch = draft.branch
         self.uncommitted_accepted = draft.uncommitted_accepted
         # Cleared first: ``pick`` of the row already picked is how a pick is undone.
-        self.picker.pick(None, draft.cwd)
-        self.picker.pick(draft.picked, draft.cwd)
+        self.picker.pick(None, field_directory(draft.cwd))
+        self.picker.pick(draft.picked, field_directory(draft.cwd))
         self._reload_task = True
 
     def _set_fields_aside(self, incoming: Draft) -> None:
@@ -2572,7 +2595,7 @@ class LauncherState:
         # Cleared with the task, because the message has gone to that session: a
         # pick that outlived its launch would send the next thing typed here to the
         # same conversation, under a box the operator reads as a new task.
-        self.picker.pick(None, self.cwd)
+        self.picker.pick(None, field_directory(self.cwd))
         # Cleared with the task. The branch was made for that session, and the same
         # name pressed again would only be held on that session's worktree.
         self.branch = ""
@@ -2620,7 +2643,7 @@ class LauncherState:
         self._git_layout_for = None
         self._refusal_for = None
         self.checkout.forget()
-        return self.picker.request_scan(self.cwd.strip() or ".", scanner=scanner)
+        return self.picker.request_scan(field_directory(self.cwd), scanner=scanner)
 
     @property
     def ready(self) -> bool:
@@ -2645,7 +2668,7 @@ class LauncherState:
 
         ``recorder`` is called once, here, and not at all for a click that clears.
         """
-        self.picker.pick(row, self.cwd.strip() or ".")
+        self.picker.pick(row, field_directory(self.cwd))
         picked = self.picker.picked
         if picked is None:
             return
@@ -2678,7 +2701,7 @@ class LauncherState:
         """
         if not self.wants_worktree:
             return None
-        read = self.checkout.answer_for(self.cwd.strip() or ".")
+        read = self.checkout.answer_for(field_directory(self.cwd))
         plan = plan_worktree(read, self.branch.strip(), UNFINISHED.snapshot())
         if isinstance(plan, NewWorktree) and self.uncommitted_accepted == self.cwd:
             return replace(plan, uncommitted_accepted=True)
@@ -2702,7 +2725,7 @@ class LauncherState:
     def _launch_directory(self, plan: NewWorktree | WorktreeHeld | None) -> LaunchDirectory:
         if isinstance(plan, NewWorktree):
             return FieldDirectory(plan.path)
-        return launch_directory(self.picker.picked, self.cwd.strip() or ".")
+        return launch_directory(self.picker.picked, field_directory(self.cwd))
 
     def git_layout(self) -> GitLayout:
         """
@@ -2716,7 +2739,7 @@ class LauncherState:
         plan = self.worktree_plan()
         if isinstance(plan, NewWorktree):
             # Resolved on the worker; a plan is only ever made from a read that has it.
-            read = self.checkout.answer_for(self.cwd.strip() or ".")
+            read = self.checkout.answer_for(field_directory(self.cwd))
             shared = read.shared if read is not None else None
             return LinkedWorktree(
                 shared=shared or os.path.join(plan.main_root, ".git"),
@@ -2734,11 +2757,9 @@ class LauncherState:
         Why the mode cannot be used for the directory this draft launches in, or None.
 
         **Asked of the spelling the launch is started with**, ``resolved_directory``'s,
-        which is what ``spec`` asks it of. ``tree.lies_inside_checkout`` expands ``~``
-        and ``os.path.realpath`` does not, so the raw field ``~/x`` would be measured
-        against the home directory while the session was started in a literal ``~``
-        under this process's directory; asked of the resolved spelling, the screen and
-        the press are answering about one place.
+        which is what ``spec`` asks it of, so the screen and the press are answering
+        about one place -- except a field whose ``~`` named no user, which both ask
+        about as typed (``_read_refusal``).
 
         **For the screen.** Memoised against the directory as spelled, so between one
         open of the modal and the next it can describe a disk that has since moved.
@@ -2758,17 +2779,24 @@ class LauncherState:
     def _read_refusal(self, directory: LaunchDirectory, started_in: str) -> str | None:
         """
         Ask the own-checkout question of ``started_in`` now, and leave the answer as
-        what the screen says for ``directory``.
+        what the screen says for ``directory``. A field whose ``~`` named no user is
+        asked about as typed instead, which has no location and is refused.
 
         The answer says what a refusal does to the launch, and that follows from
         whether a session is picked (``resume_gate_hold``). A pick changes the
         directory's variant, so the memo's key already tells the two apart.
         """
+        # A field whose ``~`` named no user is asked about as typed, which has no
+        # location and is refused: resolved, it is a relative path under this
+        # process's directory that the operator may never have meant.
+        unexpanded = isinstance(
+            directory, (FieldDirectory, UnrecordedDirectory)
+        ) and directory.path.startswith("~")
         # The key is written after the answer it is the key for. Written first, a
         # read that raised would leave the next frame holding this directory's key
         # over the last directory's answer.
         self._refusal = refusal_for(
-            started_in,
+            directory.path if unexpanded else started_in,
             named=_region_phrase(directory),
             consequence=REFUSAL_DOWNGRADES if self.picker.picked is None else REFUSAL_HOLDS,
         )
@@ -3348,7 +3376,7 @@ def _session_list(
     picker.poll()
 
     widgets.dialog_field()
-    cwd = state.cwd.strip() or "."
+    cwd = field_directory(state.cwd)
     heading = (
         "resume an existing session instead"
         if picker.picked is None
@@ -4034,10 +4062,10 @@ def _branch_field(state: LauncherState, *, reader: CheckoutReader) -> None:
     imgui.text_disabled("worktree branch")
     if not state.wants_worktree:
         return
-    state.checkout.want(state.cwd.strip() or ".", reader=reader)
+    state.checkout.want(field_directory(state.cwd), reader=reader)
     plan = state.worktree_plan()
     assert plan is not None
-    for said in worktree_notices(plan, state.checkout.answer_for(state.cwd.strip() or ".")):
+    for said in worktree_notices(plan, state.checkout.answer_for(field_directory(state.cwd))):
         widgets.notice(said)
 
 
