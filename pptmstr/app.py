@@ -41,6 +41,7 @@ from . import (
     effects,
     fleetsync,
     layout_ini,
+    links,
     model_catalog,
     sessionfile,
     templates,
@@ -5402,6 +5403,10 @@ def main(argv: list[str] | None = None) -> int:
         state.bridge.submit(launch_initial())
         LOG.info("app", f"{len(args.task)} task(s), cap {state.settings.concurrency_cap}")
 
+    # A click on a link in any markdown view goes through the link policy. Set
+    # before the loop because a view takes its link ink when its text is first
+    # described, and every view is made inside the loop (``typeset.follow_links``).
+    typeset.follow_links(links.follow)
     the_loop_returned = exit_on_signals(_ask_window_to_close)
     try:
         immapp.run(runner)

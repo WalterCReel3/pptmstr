@@ -47,6 +47,11 @@ copied as the library's.
 So ``document`` is one view only where every part is markdown.
 ``ViewCache.views(key)`` has every view of a key, in order.
 
+**A click on a link in a markdown view is followed** by the caller's
+``on_link`` or, where it passed none, the one the app installed
+(``follow_links``), in settled documents and streams alike. A literal view and
+a view of rows have no handler, so nothing in them is clickable.
+
 **A part its caller draws** (``Hosted``) is drawn by the ``host`` handed to
 ``document``, where it falls among the others: the log's tool blocks, which are
 ImGui widgets, scroll in one window with the runs the library sets. A host that
@@ -182,6 +187,42 @@ _NOT_ALL_SET = "could not set something in view as it was asked to"
 What is said of a draw that answered false with no note from the library: its
 own words for that answer.
 """
+
+_FOLLOW: Callable[[str], object] | None = None
+"""
+What a click on a link in a markdown view calls when its caller handed no
+``on_link``: the app's policy, installed once at start-up (``follow_links``).
+"""
+
+
+def follow_links(handler: Callable[[str], object] | None) -> None:
+    """
+    Make ``handler`` what every markdown view calls with a clicked link's
+    destination, wherever its caller passed no ``on_link`` of its own: settled
+    documents, ``markdown`` and streams alike. ``None`` makes links inert again.
+
+    One handler for the process and not an argument at each call site: whether a
+    click opens an address is the app's decision, and a pane that forgot to pass
+    one would be the one pane whose links did nothing. An explicit ``on_link``
+    still wins. A literal view never has one (``_literal_segment``, ``rows``).
+
+    **The handler runs inside the library's draw** (``_DRAWING``), so what it
+    raises is taken as the library stopping and every pane leaves typeset text.
+    It must not raise; ``links.follow`` does not.
+
+    A link is drawn in the palette's link ink only in a view that has a handler,
+    and the ink is taken when the view's text is described: install the handler
+    before the first view is made.
+    """
+    global _FOLLOW
+    _FOLLOW = handler
+
+
+def _linked(on_link: Callable[[str], object] | None) -> Callable[[str], object] | None:
+    """
+    The handler a markdown view is given: its caller's, else the process's.
+    """
+    return on_link if on_link is not None else _FOLLOW
 
 
 @dataclass(frozen=True, slots=True)
@@ -703,6 +744,9 @@ class Stream:
                 self._view = TypesetStreamView(
                     self._captioned, palette=palette, follow=self._follow
                 )
+                # Before the first text is handed over: the link ink is taken
+                # when it is described (``follow_links``).
+                self._view.on_link = _linked(None)
             self._entry.segments = [_Segment((), self._view)]
         if self._fed < len(self._text):
             arrived = self._text[self._fed :]
@@ -920,7 +964,7 @@ def _open(entry: _Entry, parts: tuple[Part, ...], on_link: Callable[[str], None]
                 view = TypesetView(theme=theme, palette=palette)
         fences = _fences() if hosting else None
         with _HANDING:
-            view.on_link = on_link
+            view.on_link = _linked(on_link)
             view.host_for = fences
             view.set_document(tuple(blocks))
         captions = {
@@ -1531,9 +1575,12 @@ def _show_view(
     """
     Draw one of the library's views at the cursor and tell the window how far
     right its text runs. Returns the view's foot, in pixels down the screen.
+
+    A markdown view follows a link through ``_linked(on_link)``; a literal one
+    is handed none, whatever its document's caller passed.
     """
     with _DRAWING:
-        segment.view.on_link = on_link
+        segment.view.on_link = None if segment.literal else _linked(on_link)
         segment.whole = bool(segment.view.draw(palette=palette, width_px=wide))
     foot = float(im.get_item_rect_max().y)
     reach = _reach(segment, wide)

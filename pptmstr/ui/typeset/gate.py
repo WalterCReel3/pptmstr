@@ -131,6 +131,7 @@ from __future__ import annotations
 
 import math
 import os
+import re
 import struct
 import traceback
 from collections.abc import Callable, Iterator
@@ -154,6 +155,7 @@ by the last, and the body's recipient gets the five characters.
 """
 
 _DESTINATIONS_RULE = "pptmstr_link_destinations"
+_BARE_ADDRESSES_RULE = "pptmstr_bare_addresses"
 _STARS_RULE = "pptmstr_written_stars"
 _AS_WRITTEN_RULE = "pptmstr_as_written"
 
@@ -551,7 +553,7 @@ def _reader() -> None:
     """
     Make the library's markdown reader show what was written, and check that it does.
 
-    Five changes to the one parser object ``read`` and the library's stream
+    Six changes to the one parser object ``read`` and the library's stream
     read with (reference definitions off, mathematics off), all made on the
     parser and not on the text:
 
@@ -559,6 +561,8 @@ def _reader() -> None:
       CommonMark's own ``html: false`` reading has it -- a tag, a comment opener, a
       generic's ``<T>`` -- ``![alt](url)`` is an exclamation mark and a link, and
       a character reference is the characters it was written with.
+    - A core rule (``_bare_addresses``) makes a bare ``http(s)://`` address in
+      text a link, before the next one runs.
     - A core rule (``_show_destinations``) writes each link's destination after
       its text.
     - An inline rule (``_written_stars``) reads the stars of a glob, a comment
@@ -587,6 +591,10 @@ def _reader() -> None:
     parser.disable(list(_HIDING_RULES))
     if _DESTINATIONS_RULE not in parser.core.ruler.get_all_rules():
         parser.core.ruler.push(_DESTINATIONS_RULE, _show_destinations)
+    if _BARE_ADDRESSES_RULE not in parser.core.ruler.get_all_rules():
+        # Before the destinations are written, so that a bare address is a link
+        # whose text is its destination and is not said twice.
+        parser.core.ruler.before(_DESTINATIONS_RULE, _BARE_ADDRESSES_RULE, _bare_addresses)
     if _STARS_RULE not in parser.inline.ruler.get_all_rules():
         parser.inline.ruler.before("emphasis", _STARS_RULE, _written_stars)
     parser.inline.ruler.at("escape", _written_escapes)
@@ -723,6 +731,146 @@ def _as_written(state: Any, silent: bool) -> bool:
         state.pending += source[at + 1]
     state.pos = at + 2
     return True
+
+
+_BARE_SCHEME = re.compile(r"https?://", re.IGNORECASE)
+_BARE_ENDS = re.compile(r"[\s<>\"]")
+_BARE_NOT_AFTER = frozenset("+-./:@")
+_BARE_TRAILING = frozenset("?!.,:*_~'")
+
+
+def _bare_addresses(state: Any) -> None:
+    """
+    Make each bare ``http://`` or ``https://`` address in text a link whose text
+    is the address as written.
+
+    Modelled on GFM's extended URL autolink
+    (https://github.github.com/gfm/#autolinks-extension-), read 2026-10-20, and
+    narrower than it on purpose: model output is read for what it says, so a
+    link the writer did not mean costs more than an address left as text.
+
+    - Only the two schemes, in any case. No ``www.``-only address and no bare
+      email, which GFM also links: ``see www.x.org`` or ``a@b.c`` in prose is
+      as often a name as a destination.
+    - It starts where nothing that could be part of a scheme (a letter, a digit,
+      ``+``, ``-``, ``.``: RFC 3986 section 3.1) and no ``/``, ``:`` or ``@`` is
+      before it, so ``xhttps://``, ``git+https://`` and an ``http://`` inside
+      another address are not one. GFM's list is narrower (line start, space,
+      ``*_~(``); this one also lets an address start after a quote or a bracket.
+    - At least one letter or digit follows the ``//``. GFM asks for a domain with
+      a dot in it; ``http://localhost:8000`` is an address agents write.
+    - It ends at white space, ``<``, ``>`` or ``"``. GFM ends at the first two;
+      the other two are not URI characters (RFC 3986), and here raw HTML is
+      text, so ``href="https://x.org/">`` is an address and its quote and bracket.
+    - Then, until none applies, GFM's trims as cmark-gfm makes them: a trailing
+      ``?!.,:*_~`` (and ``'``) goes; a trailing ``)`` goes while the address has
+      more ``)`` than ``(``, so ``(see https://x.org/a)`` and
+      ``https://en.wikipedia.org/wiki/Foo_(bar)`` are both right; a trailing
+      ``;`` goes, and the whole of an entity-like ``&hl;`` with it.
+
+    Its destination is the parser's own ``normalizeLink`` of it, with the scheme
+    lower-cased first (the reader punycodes a host only for a lower-case scheme),
+    and an address ``validateLink`` refuses stays text, as markdown-it does for
+    ``<...>``. So a lookalike host goes to its ``xn--`` destination and
+    ``_show_destinations`` says so.
+
+    Only ``text`` tokens are read, and none inside a link: a code span, a fence, a
+    code block and mathematics are never ``text``, and an autolink or a
+    ``[t](u)`` is inside a link. The text is cut, never rewritten, so what is set
+    is the characters that were written. An address an emphasis rule broke into
+    pieces (``https://x.org/*a*``) is linked up to the break, as markdown-it's
+    own linkify would.
+
+    Not ``linkify-it-py``, which markdown-it's ``linkify`` option needs: one more
+    dependency for this grammar, and its fuzzy matching links a bare
+    ``example.com`` and an email, which is the recall this rule declines.
+    """
+    for token in state.tokens:
+        if token.type != "inline" or not token.children:
+            continue
+        out: list[Any] = []
+        inside = 0
+        for child in token.children:
+            if child.type == "link_open":
+                inside += 1
+            elif child.type == "link_close":
+                inside = max(0, inside - 1)
+            elif child.type == "text" and not inside:
+                out += _linked(state.md, child)
+                continue
+            out.append(child)
+        token.children = out
+
+
+def _linked(md: Any, text: Any) -> list[Any]:
+    """
+    One text token as itself, or cut into text and links around each bare address.
+    """
+    source = str(text.content)
+    Token = type(text)
+    pieces: list[Any] = []
+    done = 0
+
+    def said(content: str) -> None:
+        if content:
+            piece = Token("text", "", 0)
+            piece.content = content
+            piece.level = text.level
+            pieces.append(piece)
+
+    for found in _BARE_SCHEME.finditer(source):
+        start = found.start()
+        if start < done:
+            continue
+        if start and (source[start - 1].isalnum() or source[start - 1] in _BARE_NOT_AFTER):
+            continue
+        host = found.end()
+        if host >= len(source) or not source[host].isalnum():
+            continue
+        ending = _BARE_ENDS.search(source, host)
+        end = _trimmed(source, start, ending.start() if ending else len(source))
+        href = md.normalizeLink(found.group().lower() + source[host:end])
+        if not md.validateLink(href):
+            continue
+        said(source[done:start])
+        opened = Token("link_open", "a", 1)
+        opened.attrs = {"href": href}
+        opened.markup = "linkify"
+        opened.info = "auto"
+        opened.level = text.level
+        pieces.append(opened)
+        said(source[start:end])
+        closed = Token("link_close", "a", -1)
+        closed.markup = "linkify"
+        closed.info = "auto"
+        closed.level = text.level
+        pieces.append(closed)
+        done = end
+    if not done:
+        return [text]
+    said(source[done:])
+    return pieces
+
+
+def _trimmed(source: str, start: int, end: int) -> int:
+    """
+    Where an address read from ``start`` to ``end`` ends once GFM's trailing
+    punctuation, unbalanced ``)`` and entity-like ``;`` are off it.
+    """
+    while end > start:
+        last = source[end - 1]
+        if last in _BARE_TRAILING:
+            end -= 1
+        elif last == ")" and source.count(")", start, end) > source.count("(", start, end):
+            end -= 1
+        elif last == ";":
+            at = end - 2
+            while at > start and source[at].isalnum():
+                at -= 1
+            end = at if at < end - 2 and source[at] == "&" else end - 1
+        else:
+            break
+    return end
 
 
 def _show_destinations(state: Any) -> None:
