@@ -76,7 +76,7 @@ def _home() -> Path:
 
 def _read(state: LauncherState, reader: launcher.CheckoutReader = launcher.read_checkout) -> None:
     """Let the read of the cwd field land, as the draw's worker and poll would."""
-    worker = state.checkout.want(state.cwd.strip() or ".", reader=reader)
+    worker = state.checkout.want(launcher.field_directory(state.cwd), reader=reader)
     if worker is not None:
         worker.join(timeout=TIMEOUT)
     state.checkout.poll()
@@ -1498,3 +1498,21 @@ def test_only_the_call_that_took_a_path_can_settle_it() -> None:
     assert record.snapshot() == {}
     record.ended(_P, mark, worktree.AddTimedOut(_P, "feat", 1.0))
     assert record.snapshot() == {}, "a settled mark settles nothing again"
+
+
+def test_a_tilde_in_the_field_is_the_checkout_a_worktree_is_made_from(
+    _hermetic: Path, tmp_path: Path
+) -> None:
+    """
+    The branch field reads the checkout the cwd field names, so a ``~`` there is read
+    as the home it is and not as a directory named ``~``.
+    """
+    root = _hermetic / "repo"
+    root.mkdir(parents=True)
+    git(root, "init", "-q", "-b", "main")
+    commit(root, "tracked.txt")
+
+    plan = _drafted(Path("~/repo"), "feat").worktree_plan()
+
+    assert isinstance(plan, NewWorktree), plan
+    assert plan.main_root == str(root)

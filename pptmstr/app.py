@@ -5377,7 +5377,7 @@ def main(argv: list[str] | None = None) -> int:
         state.bridge.submit(state.driver.run())
     if args.task:
 
-        _cli_cwd = os.path.realpath(args.cwd)
+        _cli_cwd = os.path.realpath(os.path.expanduser(args.cwd))
 
         async def launch_initial() -> None:
             # Submitting from the loop thread keeps every mutation of the pool on
