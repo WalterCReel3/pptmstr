@@ -1,10 +1,11 @@
 # A figure in a reply is a hosted block beside the diff fences, drawn from SVG that pptmstr sanitised first
 
 **Dated:** 2026-10-18 ·
-**Status:** scope for work not started; probes T1, M1, R2 and R1's hostile
-half ran on 2026-10-20 and their decisions are written in below. No figure has
-been drawn in a pptmstr window: T1 drew a texture in an imscribe `TypesetView`
-with pptmstr's theme on Xvfb, not in the app. ·
+**Status:** slice 1 (```` ```svg ```` fences, §8) is built, at commits
+`912471d`, `0a542d1` and `6a285ea`, and the operator checked it in the running app
+on Linux on 2026-10-21 (§8, slice 1). Slices 2 to 5 are not started. Probes T1,
+M1, R2 and R1's hostile half ran on 2026-10-20 and their decisions are written in
+below. Nothing has run on macOS or at a density above the operator's own ·
 **Origin:** the operator, at launch, 2026-10-18 (§1) ·
 **Evidence:** four research notes in `notes/vector-rendering/`
 (`imscribe-seams.md`, `svg-renderers.md`, `mermaid.md`, `data-graphs.md`), the
@@ -923,8 +924,26 @@ the SVG.
 ## 8. Staged order of work (not declared as tasks)
 
 Smallest useful slice first. Each slice ends with the figure visible in a real
-window, not only with passing tests, because no figure has been seen drawn
-(§2; STYLE.md §2).
+window, not only with passing tests (STYLE.md §2).
+
+**Slice 1 in the running app, 2026-10-21.** The operator ran `make run` on
+Linux x86-64 and checked it against a scripted reply (two screenshots, read by
+the lead):
+- A1–A7: a fence is code while it streams, then becomes a figure when its fence
+  closes; prose, code and an unknown named family are drawn in their faces; the
+  text below is not overprinted; the diff fence still waits for the reply to end;
+  a figure in a list item renders with its container; edges are crisp.
+- B1–B7: resize, half-scrolled clipping, copy, theme switch, font size, and
+  returning to a session.
+- C1–C4: a DOCTYPE and non-XML stay code with their reason; a hostile SVG is
+  drawn with its image, script and dangling filter gone; a 10×4000 figure draws
+  as a strip.
+- D1: no render child is left after quitting, across several runs.
+
+[operator, ran; relayed by the lead]. C5, responsiveness while figures render,
+is left to longer dogfooding. Not checked there: macOS, a second density, and
+whether the `---`/`+++` lines drawn above a hosted diff are as they were before
+the figure dispatcher.
 
 0. **Probes.** S1 (2026-10-18), T1, M1, R2 and R1's hostile half
    (2026-10-20) have run, and their decisions are in §3.3, §3.4 and §3.6.
