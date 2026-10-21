@@ -1,14 +1,21 @@
 # A figure in a reply is a hosted block beside the diff fences, drawn from SVG that pptmstr sanitised first
 
 **Dated:** 2026-10-18 ·
-**Status:** scope for work not started. Research only: nothing in `pptmstr/` or in
-imscribe changed, and no figure has been drawn in a pptmstr window. ·
+**Status:** scope for work not started; probes T1, M1, R2 and R1's hostile
+half ran on 2026-10-20 and their decisions are written in below. No figure has
+been drawn in a pptmstr window: T1 drew a texture in an imscribe `TypesetView`
+with pptmstr's theme on Xvfb, not in the app. ·
 **Origin:** the operator, at launch, 2026-10-18 (§1) ·
 **Evidence:** four research notes in `notes/vector-rendering/`
 (`imscribe-seams.md`, `svg-renderers.md`, `mermaid.md`, `data-graphs.md`), the
 results and notes of board tasks `seams`, `svg`, `mermaid`, `datagraphs`, four
-operator-run probes named where they are used, the `review` task's findings, and
-probe S1, run in pptmstr's venv during the revision (§3.6) ·
+operator-run probes named where they are used, the `review` task's findings,
+probe S1, run in pptmstr's venv during the revision (§3.6), and the probe notes
+`probe-t1.md` (task `fig-probe-t1`) and `probe-m1-r2.md` (task `fig-probe-mr`),
+cited below as **[probe T1]**, **[probe M1]**, **[probe R1-hostile]** and
+**[probe R2]**: run by builders in this worktree's `.venv`, relayed here from
+their notes and not re-run by the writer of this revision. The decisions taken
+on them are the lead's, 2026-10-20 ·
 **Engages with:** `pptmstr/ui/typeset/views.py` (the module docstring's diff-fence
 rule, `_captioned`, `_Fences`), `pptmstr/ui/typeset/gate.py` (`_HIDING_RULES`,
 `_reader`), and the three-pin comment in `pyproject.toml`.
@@ -92,9 +99,10 @@ The spot-checks behind the recommendation:
   values are `parity` (the default, which "can include `<foreignObject>` HTML
   labels"), `resvg-safe` ("Converts HTML labels, applies compatibility cleanup,
   and validates the result") and `readable`. [read,
-  github.com/Latias94/merman `docs/bindings/OPTIONS_JSON.md` on `main`] This
-  was read on `main` and was **not run against 0.9.1** [unverified for the
-  pinned version].
+  github.com/Latias94/merman `docs/bindings/OPTIONS_JSON.md` on `main`]. **Run
+  against 0.9.1: accepted exactly as spelled**, through
+  `merman.Merman().render_svg(source, options_json)`; an unknown pipeline name
+  raises `unsupported svg.pipeline` rather than falling back [probe M1].
 
 ### Where this record disagrees with the notes
 
@@ -133,7 +141,9 @@ The spot-checks behind the recommendation:
    analysis, validation, and document analysis" (no PNG), and that a missing
    capability "raises `MermanError.Binding` with `MISSING_CAPABILITY`" [read,
    pypi.org/pypi/merman/json, 2026-10-18]. The record does not rely on the PNG
-   path. M1's `runtime_catalog_json()` check is now a confirmation only.
+   path. **Confirmed:** `runtime_catalog_json()` lists output ids `ascii` and
+   `svg` only, and `render_png` raises "requires capability `png`, which is not
+   exposed by target `native`" [probe M1].
 4. **The notes disagree on whether resvg can carry Mermaid.** `mermaid.md`
    says an SVG renderer without foreignObject "draws these diagrams with no
    labels". `svg-renderers.md` resolves this by rewriting foreignObject to
@@ -198,7 +208,9 @@ fence language, chooses a *producer*:
   [relayed, `imscribe-seams.md` §2].
 - **Draw:** `Hosted.draw` issues `imgui.image(...)` or ImPlot calls at the
   cursor. It must push its own clip rect, because `_draw_hosts` pushes none
-  [read].
+  [read], and it snaps its origin to whole pixels first. Both are measured
+  host constraints, listed with the rest in §3.6 "Host constraints"
+  [probe T1].
 - **Copy and find:** a copy gives `Hosted.text`. Set it to the fence verbatim,
   info string included, so a copied reply still renders elsewhere
   [judgement]. Find does not see a hosted figure [read]. That is accepted for
@@ -235,7 +247,8 @@ Why resvg, weighed against what the operator-run probes showed:
 - **Speed is novasvg's case, and it is not yet decisive.** novasvg was 8.5×
   faster on the synthetic grid. A typical Mermaid diagram has tens of labels,
   which extrapolates to tens of ms in resvg [inferred, assuming linear cost:
-  `svg-renderers.md`]. The design below rasterises off the frame thread, so
+  `svg-renderers.md`]. Measured on merman output, it was 69–112 ms, cost
+  tracking area more than labels (the decision below). The design below rasterises off the frame thread, so
   the 446 ms worst case costs latency, not frames.
 - **foreignObject is not decisive either.** Both Mermaid routes below arrive
   as `<text>`, and the sanitiser rewrites any foreignObject that remains.
@@ -247,6 +260,24 @@ Why resvg, weighed against what the operator-run probes showed:
 
   [judgement]
 
+**Decision, 2026-10-20: resvg stays.** Neither flip condition has fired.
+- M1 keeps merman, so mmdr does not bring novasvg in (below).
+- On five merman `resvg-safe` diagrams (flowchart, sequence, class, state, ER)
+  at natural size, resvg took **69–112 ms as emitted and 36–66 ms with the
+  drop-shadow filter removed** [probe M1]. The filter is about half the cost.
+  §3.4 keeps `<filter>` out of the allow-list, so what resvg is given is the
+  36–66 ms case, under the ~100 ms line.
+
+What this does not show, so the condition stays live:
+- It is **this machine**, which ran the 1,200-label grid in 271–368 ms against
+  the operator's 446 ms; the operator's box is probably slower [probe M1].
+- It is **natural size at DPI scale 1**. The cost "tracks raster area more than
+  label count" [probe M1, inferred there]: at `width=800` the same diagrams took
+  70–282 ms as emitted. A DPI scale of 2 quadruples the area; that was not run.
+- The five diagrams were written for the probe, not the 20 real ones R1 asks
+  for, and **novasvg was not run** (not installed). R1's comparison half is
+  still open (§7).
+
 **Mermaid: merman, called directly, with `svg.pipeline = "resvg-safe"`, as a
 lazily imported optional extra.**
 - merman is the engine either way: browserless, JS-free, tracks Mermaid 12.x,
@@ -254,6 +285,24 @@ lazily imported optional extra.**
   one flowchart, and mmdr's merman backend 10.2 ms [op-run].
 - The text-safe pipeline is documented as `resvg-safe` [read, `main`] and
   targets resvg/usvg consumers by name, which is the pairing above.
+- **M1, run on 0.9.1:** `resvg-safe` is accepted as spelled and emits **0
+  `<foreignObject>`** in all five families tried, with 14/28/17/15/38 `<text>`
+  in flowchart/sequence/class/state/ER. It costs merman 4–21 ms against 2–3 ms
+  for the default pipeline. Labels are present and placed in all five
+  [probe M1]. Two things in that output need handling downstream:
+  - every family uses a `filter:url(#…)` drop shadow, which §3.4 step 8 deals
+    with;
+  - in class, state and ER, labels lose their first and last glyphs. Each
+    label is a nested `<svg style="overflow:hidden">` sized to merman's own
+    text metrics (its default face), and Roboto is wider. Rewriting the
+    overflow to `visible` gave whole labels in all three; an edge label's
+    background stays merman's narrower width [probe M1]. **Decision: a Mermaid
+    post-pass in slice 2 sets that overflow visible.** It is fidelity, not
+    safety, so it is not the sanitiser's job. The named alternative is merman's
+    host-text-measurement service, which might size labels with the face resvg
+    draws in; it was seen in `runtime_catalog_json()` and **not tried**.
+  - A sequence-diagram note drew its text but no visible box; not
+    investigated [probe M1].
 - **Its cost is the glibc floor.** merman's Linux wheel is
   `manylinux_2_35`, and pptmstr's floor is 2.28 [read]. On Linux with glibc
   2.28–2.34 the extra will not install, and a ```` ```mermaid ```` fence shows
@@ -282,9 +331,9 @@ lazily imported optional extra.**
     novasvg mmdr was not built against [read, PyPI JSON].
 
   The record takes merman and pays the glibc gap until upstream wheels or a
-  local build close it. If probe M1 shows that merman 0.9.1's Python binding
-  does not accept `resvg-safe`, use mmdr instead; whether novasvg then also
-  replaces resvg behind the seam is R1's to decide.
+  local build close it. **M1 settled the binding question for merman**: 0.9.1
+  accepts `resvg-safe`, so mmdr is not needed for it [probe M1]. mmdr remains
+  the named way to close the glibc gap, which M1 did not touch (G1).
 - **Rejected for Mermaid:**
   - mmdc, which needs Node 22 and Chromium;
   - mermaid.ink and Kroki, which send the source off the machine;
@@ -315,8 +364,14 @@ whole.
    `clip-path`, `mask`, `marker-*`, `filter`, `style`) is dropped unless every
    `url(` in it is `url(#id)`. Steps 3 and 4 as `svg-renderers.md` §D wrote
    them covered only hrefs and CSS; presentation attributes are neither.
-   Whether resvg would fetch through them is [unverified]; the rule does not
-   depend on it.
+   **Measured: resvg 0.48.1 opened no file and made no connection** for an
+   absolute-path, `file://`, `http://127.0.0.1` or relative `url()` in `fill`,
+   `clip-path`, `mask`, `filter`, `style` fill or `marker-start`; it renders as
+   if the attribute were absent [probe R1-hostile]. The watch was inotify on
+   the target directory plus a local listener (strace is not installed), so a
+   read of some other path would not have shown. **So this rule is a backstop
+   for resvg, and it is kept**: it is cheap, renderer-independent, and the only
+   protection if novasvg ever sits behind the seam, which was not tested.
 4. In CSS (`<style>` and `style=`), **drop the whole declaration** (or the
    whole `<style>` element) that contains a backslash, `@import`, or a
    `url(` that is not `url(#id)`; do not strip substrings. A CSS escape makes
@@ -330,13 +385,36 @@ whole.
    the sanitiser resolves each `<use>` to its target and sums the expanded
    size, or refuses a `<use>` whose target contains a `<use>`. A source-element
    cap alone does not bound nested `g`/`use` chains, which multiply.
+   **Measured, and needed as written:** usvg refuses at its own node limit
+   (somewhere between 64,000 and 100,000 leaves of the probe's shape, in about
+   0.3 s), but below it **a 3.7 KB input took 7.2 s and 450 MB** (fan 40,
+   depth 3) [probe R1-hostile]. resvg's limit bounds memory, not latency. The
+   largest merman diagram tried (ER) was 460 elements with no chained `<use>`,
+   so a cap in the low thousands of expanded elements admits it [probe M1].
 6. Parse with stdlib `xml.etree`, after step 1, and re-serialise.
 7. **Every `font-family` ends in a generic family.** The sanitiser appends
    `sans-serif` to a list that has none (`font-family="Arial"` is common in
-   hand-written SVG). Under `skip_system_fonts`, a named family with no
-   generic very probably draws nothing and raises nothing, as the unmapped
-   generics did [inferred from the op-run result below; unverified for named
-   families].
+   hand-written SVG). **This step decides the face, not whether text draws.**
+   Measured under `skip_system_fonts`: with the generics mapped, `Arial`,
+   `NoSuchFace` and `Courier New` all draw; resvg falls back to
+   `serif_family` for a list that matches nothing, so mapping `serif_family`
+   alone makes `Arial` draw, while mapping only `font_family` or only
+   `sans_serif_family` does not [probe R1-hostile]. The step is kept so that a
+   bare name falls to the sans face rather than to whatever `serif_family`
+   maps.
+8. **Remove every reference whose target did not survive.** As a final pass
+   over the output tree, a `url(#id)` in an attribute or CSS declaration, or an
+   `href="#id"`, whose `id` is not in the output is removed: the attribute or
+   declaration goes, the element stays. Without it, step 2 erases every
+   merman diagram's shapes: merman's `resvg-safe` output puts
+   `filter:url(#…)` drop shadows on node and participant shapes, step 2 drops
+   `<filter>`, and resvg does not draw an element whose `filter` (or `fill`)
+   points at a missing id. Every node box and participant box vanished, leaving
+   text and edges [probe M1; probe R1-hostile shows the same on a bare rect].
+   Removing the attribute renders as if it were absent, which for `fill`
+   means the default black, not nothing [inferred from R1-hostile's
+   "as-if-attribute-absent"]. Decision 2026-10-20, lead; passed to
+   `fig-sanitise`.
 
 This is mandatory and not defence in depth, for one measured reason: **both
 renderers read `<image href="/abs/path">` from disk and draw it**. resvg also
@@ -347,21 +425,25 @@ Mermaid source can itself carry links and images in labels [unverified for
 merman], which is one more reason the sanitiser sits after the engine and not
 only on ```` ```svg ```` fences.
 
-`filter` is left out of the allow-list until someone measures its cost
-[judgement; `svg-renderers.md` leaves it open].
+**`filter` stays out of the allow-list.** Its cost is now measured in one
+place: merman's drop shadow is about half of resvg's time on merman output
+(69–112 ms with it, 36–66 ms without) [probe M1]. Its safety was not
+measured. With step 8, a diagram loses the shadow and keeps the shape.
 
 **Fonts.** Pass imscribe's own font files with `skip_system_fonts=True`, **and
 map `font_family`, `sans_serif_family`, `serif_family` and `monospace_family`**.
-Without the mapping, resvg draws no text and raises nothing [op-run]. A test has
-to hold this. The test renders a `<text>` with each generic family, **and with
-a named family that is not installed (`font-family="Arial"`) after the
-sanitiser**, and asserts that each output differs from the same SVG without
-the text.
+Without the mapping, resvg draws no text and raises nothing [op-run]. Of the
+four, **`serif_family` is the load-bearing one for names that match nothing**
+(step 7) [probe R1-hostile]. A test has to hold this. The test renders a
+`<text>` with each generic family, **and with a named family that is not
+installed (`font-family="Arial"`) without step 7's append**, so that it holds
+the mapping and not the append, and asserts that each output differs from the
+same SVG without the text [the without-append form is `probe-m1-r2.md`'s
+recommendation].
 
-Not run here, because resvg_py is not in pptmstr's venv and this work installs
-nothing: the `<use>` fan-out cost, external `url()` in presentation attributes,
-and a named family under `skip_system_fonts` against resvg. They join R1's run
-(§7).
+The `<use>` fan-out, external `url()` in presentation attributes and a named
+family under `skip_system_fonts` were run against resvg_py 0.5.0 in R1's
+hostile half (steps 3, 5 and 7 above). Nothing here was run against novasvg.
 
 **No figure route fetches anything.** vl-convert, if it ever ships (§3.5), sits
 behind two layers:
@@ -502,13 +584,21 @@ What it costs, and what the builder has to get right:
 - The producer runs on a worker, never in `height_for` or `draw`. Mermaid
   layout plus rasterisation is 10 ms to several hundred ms [op-run, both
   probes].
-- The texture upload runs on the GUI thread [relayed: `TextureGpu` "must be
-  created on the GUI thread"].
+- **The rasteriser is a long-lived child process that loads the fonts once,
+  not a thread.** R2: `resvg_py` 0.5.0 holds the GIL for the whole of
+  `svg_to_bytes`. A 1 ms ticker thread got 11 ticks in 3 s with a 281 ms
+  maximum gap while renders ran, against 2,517 ticks and a 1.65 ms gap idle
+  [probe R2]. A thread would stall the frame for the whole render. Long-lived
+  rather than one process per figure, so that start-up and font loading are
+  paid once [judgement; spawn cost was not measured]. A binding that releases
+  the GIL would allow a thread again; none was looked for [probe R2].
+- The process returns pixels; the texture upload runs on the GUI thread
+  [relayed: `TextureGpu` "must be created on the GUI thread"]. Upload measured
+  0.11 ms for 800×600 and 2.12 ms for 2000×1500, median, on llvmpipe, where an
+  upload is a memcpy; a hardware driver was not tried [probe T1].
 - This is the first thing that breaks `views.py`'s "Nothing is built over more
   than one frame" stance. The figure module states that exception in its own
   docstring.
-- Whether `resvg_py` releases the GIL is [unverified] (probe R2). If it does
-  not, the worker is a process, not a thread.
 
 **Height.** The height comes from the sanitised SVG, not from the raster, and
 it does not wait for the worker:
@@ -519,9 +609,14 @@ it does not wait for the worker:
 - Mermaid's height is known only after layout, so its host answers a
   placeholder first and its height once the SVG exists: one more jump.
 - **"Natural size" needs a rule** for SVG with `width="100%"` or a `viewBox`
-  only (Mermaid emits the former by default, `style="max-width: ...px"` with
-  it [unverified for merman]): read the `max-width` if present, else take
-  `viewBox` user units as px, else refuse with a reason.
+  only: read the `max-width` if present, else take `viewBox` user units as
+  px, else refuse with a reason. **The rule holds for merman** [probe M1]:
+  every root in five families was `width="100%"`, no `height`,
+  `style="max-width:Npx"` and a `viewBox` whose width is N, so both sources
+  give the same number. The default pipeline writes `max-width: 360px` and
+  `resvg-safe` writes `max-width:360px`, so **the parser accepts `max-width:`
+  with or without a space**. The root `style` must survive the sanitiser (step
+  4 keeps it, having no `url(`), or the size is read before sanitising.
 - **The size is cached by content, outside the `Hosted`**: a module-level,
   bounded map from `(sha of sanitised SVG, DPI scale, raster width)` to the
   natural size and the texture. **A figure does not jump only once without
@@ -539,28 +634,69 @@ it does not wait for the worker:
 **Raster size.** Rasterise at the **drawn** width × DPI scale, capped by the
 output-pixel cap (§3.4 step 5), and re-rasterise when the drawn width has been
 stable for a few frames; the height does not change when the raster does,
-because it is a function of width either way. The earlier "raster once at
-natural size × DPI, then scale down" is withdrawn: GPU minification without
-mipmaps aliases rather than softens (a 3200 px texture shown at 700 px is
-about 4.6× reduction, enough to break 1 px strokes and 10 px labels), and
-whether `create_texture_gpu_from_rgba_data` makes mipmaps is [unverified];
-wide Mermaid output at natural × 2 (6000×4000 is about 100 MB RGBA) would hit
-the pixel cap anyway. Downscaled legibility at 2×, 3× and 4× is added to T1,
-which can reinstate the simpler design if it measures acceptable.
+because it is a function of width either way. **This stands after T1, and
+raster-once-and-minify is not reinstated** (decision 2026-10-20):
+- **There are no mipmaps.** Both texture paths create textures with MIN and
+  MAG filters `GL_LINEAR` and no level 1, read from GL state on the OpenGL
+  backend; other backends and hello_imgui's source were not checked
+  [probe T1].
+- **10 px labels break up at 3× and above.** One flowchart-like diagram,
+  rasterised at k× the drawn width and minified by the GPU on llvmpipe at DPI
+  1: exactly 2× matched a CPU box filter; at 3×, 4× and 4.57× the label
+  strip's error was 2.6–3.3 times the box filter's, and in
+  `shots/figure-probe/q5-labels-3x-zoom.png` "Warn" closes toward "Wam" and
+  "LRU" breaks into "I.RU" [probe T1]. They stay readable at 1:1 but look
+  like a broken font. The lead looked at that sheet and agrees.
+- The fear that 1 px strokes would break **did not hold**: no stroke pixel
+  was lost at any ratio, because the strokes are in user units and scale with
+  the raster. A non-scaling hairline was not tested [probe T1].
+- Exactly 2× is safe but is not a design, since the ratio moves with every
+  pane resize. Showing the previous texture minified while a re-raster is
+  pending is acceptable as a transient up to about 2.5× [probe T1's
+  recommendation, adopted as judgement].
+- Mipmaps through PyOpenGL (`glGenerateMipmap` plus
+  `GL_LINEAR_MIPMAP_LINEAR`) are an unmeasured alternative; PyOpenGL is a
+  `dev` extra and it does not reach a non-GL backend [probe T1].
 
-**Textures.**
-- `hello_imgui.create_texture_gpu_from_rgba_data` returns an RAII
-  `TextureGpu` that is freed when its last reference drops. It needs **numpy**
-  [relayed; numpy is not installed in the venv: `svg-renderers.md`, ran; and
-  re-checked 2026-10-18: `import numpy` raises `ModuleNotFoundError`, run].
-- The numpy-free `image_and_size_from_encoded_data` cache can only be cleared
-  whole [relayed].
-- **Decision: numpy and `TextureGpu`, held by the content cache above**, which
-  is bounded (LRU by bytes) and so frees textures nobody shows. With
-  imgui-bundle's one shared image cache, every figure in every pane would live
-  until the cache is cleared [judgement].
-- No texture path has been executed by anyone (no display was available)
-  [relayed]. Probe T1 is the first thing slice 1 does.
+Wide Mermaid output at natural × 2 (6000×4000 is about 100 MB RGBA) would hit
+the pixel cap anyway.
+
+**Textures. Decision stands (2026-10-20): `TextureGpu` held by the bounded
+content cache above.**
+- `hello_imgui.create_texture_gpu_from_rgba_data` takes an H×W×4 uint8
+  **numpy** array and returns an RAII `TextureGpu`. **Dropping the last
+  reference frees the GL texture at once** (`glIsTexture`), and 60
+  create/drop cycles at 2000×1500 left RSS flat [probe T1].
+- **resvg_py returns only PNG** (`svg_to_bytes` is its one entry point), with
+  adaptive row filters including Paeth, so this path needs a decoder [probe
+  T1]. **Decision: Pillow decodes in the render process**, which then hands
+  RGBA to the GUI thread. Rejected:
+  - a hand-written decoder: Paeth is sequential per pixel, so a numpy decoder
+    still loops per pixel in Python; its cost was not measured [judgement on
+    T1's reading];
+  - the numpy-free `image_and_size_from_encoded_data` path: it needs a
+    non-empty `cache_key` (with `""` it returns an id already deleted, and
+    drawing it is GL error 1282), and its cache is shared and clears only
+    whole, via `free_image_cache()` [probe T1].
+- The cache is bounded (LRU by bytes) and so frees textures nobody shows
+  [judgement].
+
+**Host constraints**, each measured in T1 on llvmpipe at DPI 1 [probe T1]:
+- **Snap the host origin to whole pixels.** The view hands the host a
+  fractional origin (y = 121.237). Drawn there unfloored, the 1× raster lost
+  41% of its dark ink to a sub-pixel smear (MAE 6.22), about seven times worse
+  than any minification measured.
+- **Always push its own clip rect** (`push_clip_rect(rect, True)`). Partly
+  scrolled out, the child window's clip already cuts the figure; but an image
+  drawn 60 px taller than `height_for` overprinted 34,684 px of the prose
+  below, and the host's own clip rect contained it to 0.
+- **Free textures only outside a frame** (in `pre_new_frame`, or park an
+  evicted one for a frame). Dropping a `TextureGpu` between `imgui.image` and
+  the frame's render gave `GL_INVALID_OPERATION` (1282) and a blank figure. An
+  LRU that evicts during `draw` because a new figure arrived would hit this.
+- **The spelling is `imgui.image(imgui.ImTextureRef(tex.texture_id()),
+  size)`**: on `TextureGpu`, `texture_id` is a method; on `ImageAndSize` it is
+  an attribute.
 
 **Fallback.** A failure leaves the source visible as the code block, with a
 one-line reason in the warn ink, the way `_Warned` leads a diff. Failures
@@ -610,8 +746,9 @@ put text in one column and a figure in the other [relayed].
   of rejecting it is the glibc gap, which upstream `manylinux_2_28` wheels or
   a local merman build may close (§3.3). The cost of taking it is merman
   anyway (mmdr's default backend) plus a second party's wrapper and novasvg,
-  with a vendored merman pptmstr cannot pin. This is the closest call in the
-  record, and M1 can reverse it.
+  with a vendored merman pptmstr cannot pin. This was the closest call in the
+  record. M1 did not reverse it: merman 0.9.1 accepts `resvg-safe` [probe M1].
+  G1 can still make the glibc gap the deciding cost.
 - **Plots through SVG (vl-convert as the default).** 84 MB, a JS engine, and a
   network-fetch surface to police. Kept on demand.
 - **Rendering `![](x.svg)` images.** **Declined by the operator, 2026-10-20:
@@ -628,8 +765,9 @@ imgui-bundle's own Python API, and none links against imgui-bundle's ABI
 
 | dependency | slice | Linux x86-64 (floor glibc 2.28) | macOS arm64 (14+) | size | licence | age |
 |---|---|---|---|---|---|---|
-| `resvg_py==0.5.0` (resvg 0.48.1) | 1 | `manylinux_2_17` abi3 [relayed] | `macosx_11_0_arm64` [relayed] | not measured | MIT / MIT-or-Apache [relayed] | binding: one maintainer [relayed] |
-| `numpy` | 1 | [unverified: floor of the current wheel] | [unverified] | ~15–20 MB [unverified] | BSD | mature |
+| `resvg_py==0.5.0` (resvg 0.48.1) | 1 | `manylinux_2_17` abi3 [relayed]; installed and run in the worktree `.venv` [probes] | `macosx_11_0_arm64` [relayed] | not measured | MIT / MIT-or-Apache [relayed] | binding: one maintainer [relayed] |
+| `numpy` (pin from the install; the probes ran 2.4.6) | 1 | [unverified: floor of the current wheel] | [unverified] | ~15–20 MB [unverified] | BSD | mature |
+| `Pillow` (pin from the install; not yet installed) | 1, render process only | [unverified] | [unverified] | [unverified] | [unverified: recalled as MIT-CMU (HPND)] | mature |
 | `merman==0.9.1` (optional extra) | 2 | **`manylinux_2_35` only: no wheel for glibc 2.28–2.34** [read] | `macosx_11_0_arm64` [read] | 8.3 MB wheel [relayed] | MIT-or-Apache; EPL-2.0 ELK and OFL fonts per THIRD_PARTY_NOTICES, unread [relayed] | 2026-10-18; Python bindings "experimental" [relayed] |
 | *alt:* `mmdr==0.4.0` + `novasvg` | 2 | `manylinux_2_17` + `manylinux_2_27/2_28` [read; relayed] | yes [read; relayed] | venv with merman, mmdr, mermaidx: 90 MB [op-run] | MIT | days old |
 | ImPlot | 3 | in the wheel [relayed, ran] | in the wheel [unverified on macOS] | 0 | MIT | — |
@@ -641,7 +779,13 @@ The *latest releases* of the Python Mermaid packages are days old (merman
 was first on PyPI on 2026-06-08 and mmdr on 2026-06-28 [read, PyPI JSON,
 2026-10-18]. Exact pins are mandatory, and every bump is reviewed
 like an imtypeset bump. **Nothing above has been installed or run on macOS**
-[relayed from all four notes].
+[relayed from all four notes, and from both probe notes].
+
+Slice 1's dependencies are `resvg_py`, `numpy` and `Pillow`, each pinned
+exactly to what slice 1 installs. numpy is the cost of `TextureGpu`'s array
+argument; Pillow is the cost of resvg_py returning only PNG (§3.6
+"Textures"). The previous table named numpy alone, which T1 showed was short
+by a decoder.
 
 ## 7. Open questions that need a measurement
 
@@ -650,11 +794,11 @@ measurement names it. Each probe below names what it decides.
 
 | probe | measures | decides |
 |---|---|---|
-| **T1** texture | a `Hosted` in a real pptmstr window uploads an RGBA buffer through `TextureGpu` and draws it with `imgui.image` clipped to its rectangle, and the texture is freed when the content cache evicts it; `ImTextureRef` from the id; **legibility of a figure rasterised at 2×, 3× and 4× the drawn width and minified by the GPU**, and whether the texture has mipmaps | whether §3.6's texture decision stands, and whether raster-once-and-downscale can replace raster-at-drawn-width; nothing in slice 1 is built until it runs |
+| ~~T1~~ texture | **Run 2026-10-20** (`probe-t1.md`), in an imscribe `TypesetView` with pptmstr's theme on Xvfb/llvmpipe at DPI 1, not in the app. Texture lands in the host's rectangle; freed on last reference; no mipmaps; 3× and above breaks 10 px labels; host origin is fractional; freeing mid-frame is a GL error; resvg_py needs a PNG decoder | settled (§3.6): `TextureGpu` + bounded content cache stands, raster at the drawn width stands, Pillow decodes, four host constraints. Not run: hardware GPU, macOS, DPI ≠ 1, non-scaling hairlines, mipmaps via PyOpenGL |
 | ~~S1~~ commit re-ask | **Run 2026-10-18 (§3.6).** A host that declines an open fence is never asked again; a `_Captioned` that marks the fence only once committed is asked once, at commit, in all six chunkings | settled: committed-fence through a commit-dependent mark (fix a) [ran] |
-| **M1** merman binding | merman 0.9.1: does `options_json='{"svg":{"pipeline":"resvg-safe"}}'` emit 0 foreignObject on a flowchart, a sequence diagram and a class diagram; what `runtime_catalog_json()` says about PNG | merman vs mmdr+novasvg (§3.3) |
-| **R1** real diagrams | 20 Mermaid diagrams Claude actually wrote, all families it used, through resvg and novasvg after the sanitiser, timed and looked at; plus three hostile cases against resvg: nested `g`/`use` fan-out (time and memory), external `url()` in `fill`/`clip-path`/`mask`/`marker-*`/`filter` (any read or fetch), and `font-family="Arial"` under `skip_system_fonts` with and without the appended generic | resvg vs novasvg behind the seam; whether the worker can be a plain thread; whether §3.4 steps 3, 5 and 7 are needed as written |
-| **R2** GIL | whether `resvg_py.svg_to_bytes` releases the GIL (a frame loop stalls or does not while it renders on a thread) | thread vs process worker |
+| ~~M1~~ merman binding | **Run 2026-10-20** (`probe-m1-r2.md`) on five families: `resvg-safe` accepted as spelled, 0 foreignObject, no PNG capability, roots fit the natural-size rule; drop-shadow filters on every family; labels clipped in class/state/ER | settled (§3.3): merman stays, mmdr not needed on the binding question; §3.4 step 8 added; slice 2 overflow post-pass. Not run: merman's host-text-measurement service, macOS |
+| **R1** real diagrams | 20 Mermaid diagrams Claude actually wrote, all families it used, through resvg and novasvg after the sanitiser, timed and looked at. **The hostile half ran 2026-10-20** (`probe-m1-r2.md`): fan-out 7.2 s / 450 MB from 3.7 KB below usvg's limit; no open or connect through external `url()`; an unknown family falls back to `serif_family` | hostile half settled (§3.4): steps 3 (backstop, kept), 5 (needed as written) and 7 (decides the face) stand. **Still open:** the 20 real diagrams and novasvg, i.e. resvg vs novasvg on cost (§3.3) |
+| ~~R2~~ GIL | **Run 2026-10-20:** `svg_to_bytes` holds the GIL; 281 ms tick gap against 1.65 ms idle | settled (§3.6): a long-lived child process, not a thread |
 | **F1** foreignObject rewrite | the §3.4 rewrite applied to merman `parity` output and to mermaidx output, drawn in resvg and compared with novasvg's native foreignObject | whether rewritten labels are acceptable or the text-only foreignObject subset is needed |
 | **P2** what Claude emits | about 20 "chart of…/diagram of…" prompts with and without the session's fence declaration; count fence languages [relayed design, `data-graphs.md`] | Vega-Lite subset vs CSV-with-info-string for plots; whether plots are worth slice 3 at all |
 | **P3** ImPlot in a page | `begin_plot` issued at a host's cursor mid-page: clipping, scroll, the wheel with `no_inputs` | whether slice 3's host can draw ImPlot inline or needs a child window |
@@ -670,8 +814,8 @@ Smallest useful slice first. Each slice ends with the figure visible in a real
 window, not only with passing tests, because no figure has been seen drawn
 (§2; STYLE.md §2).
 
-0. **Probe T1.** It gates the shape of everything after it. S1 has run
-   (§3.6). M1 and R2 can run in parallel.
+0. **Probes.** S1 (2026-10-18), T1, M1, R2 and R1's hostile half
+   (2026-10-20) have run, and their decisions are in §3.3, §3.4 and §3.6.
 1. **```` ```svg ```` fences.**
    - **The sanitiser** comes first, as a pure module with no ImGui import, in
      the functional style of STYLE.md §1. It takes text and returns sanitised
@@ -679,10 +823,15 @@ window, not only with passing tests, because no figure has been seen drawn
      probe becomes a named test, and each test is mutation-tested:
      absolute and relative `<image>`, `file://`, `http`, `<script>`, `on*`, a
      DOCTYPE, billion laughs, CSS `url()`, oversize, foreignObject → text.
-   - **The renderer seam** on resvg, plus the generic-family and
-     named-family font tests (§3.4). Sanitiser tests also cover `<use>`
-     fan-out, `url()` in presentation attributes, and a CSS escape
-     (`u\72l(`).
+     **The dangling-reference pass (§3.4 step 8)** has its own tests: a rect
+     with `filter="url(#gone)"`, and the same as a CSS `filter:` declaration,
+     survive with the reference removed.
+   - **The renderer seam** on resvg, in **a long-lived child process** that
+     loads the fonts once, rasterises with resvg and **decodes the PNG with
+     Pillow**, returning RGBA (§3.6). Plus the generic-family and
+     named-family font tests (§3.4), the named family without step 7's append.
+     Sanitiser tests also cover `<use>` fan-out, `url()` in presentation
+     attributes, and a CSS escape (`u\72l(`).
    - **The figure host:**
      - a figure mark in `_Captioned`, put on only once the fence has
        committed, with its own flag separate from `hosting`;
@@ -691,7 +840,11 @@ window, not only with passing tests, because no figure has been seen drawn
      - the height from the sanitised SVG in `host_for`, no placeholder;
      - a content-keyed, bounded cache of size and texture outside the
        `Hosted`;
-     - a worker, a `TextureGpu` and its own clip rect;
+     - the render process as its worker, and a `TextureGpu` uploaded on the
+       GUI thread;
+     - the host constraints of §3.6: the origin snapped to whole pixels, its
+       own clip rect always pushed, textures freed only outside a frame, and
+       `imgui.ImTextureRef(tex.texture_id())`;
      - `text` set to the fence verbatim;
      - the code-plus-reason fallback.
    - Tests:
@@ -703,9 +856,11 @@ window, not only with passing tests, because no figure has been seen drawn
      - a figure re-hosted after `Stream._forget` answers its height at once;
      - wiring: the dispatcher is what `Stream._ink` installs (STYLE.md §2,
        "Test the wiring").
-   - Dependencies: `resvg_py`, `numpy`.
-2. **```` ```mermaid ````** through merman `resvg-safe`, or mmdr + novasvg if
-   M1 says so. Into the same host, with the same sanitiser. It is an optional
+   - Dependencies: `resvg_py`, `numpy`, `Pillow`, exact pins from the install
+     (§6).
+2. **```` ```mermaid ````** through merman `resvg-safe` (M1 kept merman).
+   Into the same host, with the same sanitiser, after a Mermaid post-pass that
+   sets the nested label `<svg>`s' overflow visible (§3.3). It is an optional
    extra, lazily imported, and a missing extra is the fallback with its
    reason. Then the source/figure toggle (§4, row 2).
 3. **Plots** (only if P2 justifies it):
