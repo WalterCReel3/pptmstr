@@ -83,6 +83,30 @@ dependencies = [
     # so a ```markdown fence holding a fence was coloured at the wrong places.
     # tests/test_typeset_syntax.py holds the Markdown case.
     "pygments>=2.21",
+    # Figures beside typeset text (pptmstr/figures/,
+    # planning/2026-10-18-vector-displays-beside-typeset-text.md). Exact pins,
+    # each for its own reason, and NOT members of the three-pin unit above:
+    # none of them links against imgui-bundle, so none moves with it.
+    #
+    # Rasterises sanitised SVG, in pptmstr/figures/render.py's child process
+    # only. Exact because it is one maintainer's thin binding over resvg
+    # (0.5.0 bundles resvg 0.48.1), and every measurement the figure design
+    # rests on -- the hostile-SVG behaviour, the font fallback to serif_family,
+    # the GIL held for the whole render -- was taken on this version
+    # (notes/vector-rendering/probe-m1-r2.md). Wheels are abi3 for
+    # manylinux_2_17 x86-64 and macOS 11 arm64.
+    "resvg_py==0.5.0",
+    # The RGBA array hello_imgui.create_texture_gpu_from_rgba_data takes, on the
+    # GUI thread. Exact because it is the version probe T1 created and freed
+    # textures with (notes/vector-rendering/probe-t1.md); imgui-bundle does
+    # not require it.
+    "numpy==2.4.6",
+    # Decodes the PNG resvg_py returns (its only output) into the RGBA the
+    # texture takes, in the render child process. Exact because figures are
+    # drawn from what this version decodes; 13.0.0 has wheels for CPython 3.11
+    # to 3.14 on manylinux_2_28 x86-64 and macOS 11 arm64, inside both floors
+    # above. MIT-CMU.
+    "Pillow==13.0.0",
 ]
 
 [project.optional-dependencies]

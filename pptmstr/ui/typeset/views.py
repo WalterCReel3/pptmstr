@@ -72,6 +72,15 @@ stream does** (``Stream._ink``): its text has ended, so the session pane's last
 run, which stays a stream after its turn ends, draws a diff fence as DETAIL's
 settled document of the same text does.
 
+**A ```` ```svg ```` fence is a figure once it has settled** (``figures.host``):
+in a settled document, and in a stream once the stream has committed the fence
+or closed, open or not (``_Captioned``). Until then it is code. One the sanitiser
+refuses stays code, under a line in the warn ink saying why. Both kinds of
+hosting go through one dispatcher (``_Hosts``), which the diff rule above still
+governs for diffs. A figure's pixels arrive frames after it is first drawn,
+from a render process (``figures.render``): the one thing here built over more
+than one frame, and its height does not wait for them.
+
 ## When the library stops
 
 A view can raise ``imscribe.TypesetUnavailable`` from inside its draw, with the
@@ -160,7 +169,7 @@ import unicodedata
 from collections.abc import Callable, Collection, Hashable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ... import theme as ui_theme
 from ...log import LOG
@@ -168,6 +177,9 @@ from ...theme import Color
 from . import gate, roles, syntax, themes
 from .parts import Kind, Part
 from .roles import Role, Slot, Weight
+
+if TYPE_CHECKING:
+    from ...figures.render import Fonts
 
 _MIN_WIDTH_PX = 80.0
 """
@@ -602,11 +614,20 @@ class _Captioned:
     from its block, as in a document, which has no source map), and
     ``revision`` changes with ``hosting`` as well, because the view reads the
     blocks again only when it changed.
+
+    **A ```` ```svg ```` fence is marked as a figure once it has settled**: once
+    the stream has committed it, or ``closed`` (the stream sets it with
+    ``hosting``). Until then it is code under its caption. The mark has to change
+    the block's value at commit: the view asks its host about a block only when
+    the block is a new value, and a committed fence is the same object as its
+    last open form (probe S1, the planning record's §3.6). So whether a block has
+    settled is part of what its answer is kept by, and ``revision`` changes with
+    ``closed`` too.
     """
 
     def __init__(self, stream: Any) -> None:
         self._stream = stream
-        self._made: dict[int, tuple[Any, bool, bool, tuple[Any, ...]]] = {}
+        self._made: dict[int, tuple[Any, bool, bool, bool, tuple[Any, ...]]] = {}
         # The blocks last answered, the index of the stream's block each stands
         # for, and whether each has that block's source.
         self._out: tuple[Any, ...] = ()
@@ -614,32 +635,36 @@ class _Captioned:
         self._own: list[bool] = []
         self.plain = False
         self.hosting = False
+        self.closed = False
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._stream, name)
 
     @property
     def revision(self) -> Any:
-        return (self._stream.revision, self.hosting)
+        return (self._stream.revision, self.hosting, self.closed)
 
     @property
     def blocks(self) -> tuple[Any, ...]:
-        made: dict[int, tuple[Any, bool, bool, tuple[Any, ...]]] = {}
+        made: dict[int, tuple[Any, bool, bool, bool, tuple[Any, ...]]] = {}
         out: list[Any] = []
         came: list[int] = []
         own: list[bool] = []
         plain, hosting = self.plain, self.hosting
+        done = len(self._stream.committed)
         for at, block in enumerate(self._stream.blocks):
             if not getattr(block, "language", ""):
                 out.append(block)
                 came.append(at)
                 own.append(True)
                 continue
+            settled = self.closed or at < done
             held = self._made.get(id(block))
-            if held is None or held[0] is not block or held[1:3] != (plain, hosting):
-                held = (block, plain, hosting, _captioned((block,), hosting, plain=plain))
+            if held is None or held[0] is not block or held[1:4] != (plain, hosting, settled):
+                answer = _captioned((block,), hosting, plain=plain, figures=settled)
+                held = (block, plain, hosting, settled, answer)
             made[id(block)] = held
-            answer = held[3]
+            answer = held[4]
             out += answer
             came += [at] * len(answer)
             mine = len(answer) == 1 and answer[0].language != _HOSTED_INFO
@@ -837,8 +862,9 @@ class Stream:
         if captioned is not None:
             captioned.plain = ink is not None
             captioned.hosting = self._closed and diffs.adopted()
+            captioned.closed = self._closed
             with _HANDING:
-                view.host_for = _fences() if captioned.hosting else None
+                view.host_for = _hosts(captioned.hosting)
         with _HANDING:
             view.sync()
             revision = view.revision
@@ -997,7 +1023,7 @@ def _open(entry: _Entry, parts: tuple[Part, ...], on_link: Callable[[str], None]
                 theme = themes.demoted(part.demote)
                 with _READING:
                     parsed = gate.read(part.text, theme).blocks
-                made = _captioned(parsed, hosting, plain=plain)
+                made = _captioned(parsed, hosting, plain=plain, figures=True)
             read[key] = made
             blocks += made
             owner += [index] * len(made)
@@ -1008,7 +1034,7 @@ def _open(entry: _Entry, parts: tuple[Part, ...], on_link: Callable[[str], None]
                 # The handler in the constructor: the view makes the converter
                 # that takes the link ink there (``follow_links``).
                 view = TypesetView(theme=theme, palette=palette, on_link=_handler_for(on_link))
-        fences = _fences() if hosting else None
+        fences = _hosts(hosting)
         with _HANDING:
             view.on_link = _handler_for(on_link)
             view.host_for = fences
@@ -1217,7 +1243,7 @@ def _as_written(entry: _Entry, why: str) -> None:
 
 
 def _captioned(
-    blocks: Sequence[Any], hosting: bool = False, *, plain: bool = False
+    blocks: Sequence[Any], hosting: bool = False, *, plain: bool = False, figures: bool = False
 ) -> tuple[Any, ...]:
     """
     The blocks with each fence's info string set as the first line of its code.
@@ -1237,7 +1263,14 @@ def _captioned(
     would cut them at its edge, led by the fence's warnings
     (``diffs.fence_warnings``), which that block's info string marks for the
     warn ink (``_Warned``).
+
+    With ``figures``, a fence whose info string asks for a figure
+    (``figures.host.is_figure_fence``) and that the sanitiser passes keeps the
+    text it was written with and is marked for the figure host
+    (``figures.host.FigureMark``). One the sanitiser refuses is captioned code as
+    any other, under a block of its own saying why in the warn ink.
     """
+    from ...figures import host as figures_host
     from . import diffs
 
     out: list[Any] = []
@@ -1245,6 +1278,14 @@ def _captioned(
         said = getattr(block, "language", "")
         if not said:
             out.append(block)
+        elif figures and figures_host.is_figure_fence(said):
+            marked = figures_host.mark(said, block.text)
+            if isinstance(marked, figures_host.FigureMark):
+                out.append(replace(block, language=marked))
+                continue
+            why = figures_host.refusal_line(marked.reason)
+            out.append(replace(block, text=why, language=_Warned(len(why))))
+            out.append(replace(block, text=f"{said}\n{block.text}"))
         elif hosting and (model := diffs.fence_diff(said, block.text)) is not None:
             warnings = diffs.fence_warnings(block.text, model)
             headers = (*warnings, *diffs.fence_header_rows(block.text))
@@ -1390,6 +1431,44 @@ def _fences() -> _Fences:
     if not _FENCES:
         _FENCES.append(_Fences())
     return _FENCES[0]
+
+
+class _Hosts:
+    """
+    What a markdown view's ``host_for`` is, in a settled document and a stream
+    alike: a block ``_captioned`` marked as a figure goes to the figure host
+    (``figures.host.figure_for``), and where ``diffs`` a block it marked for a
+    diff view goes to ``_Fences``. Nothing else is hosted.
+
+    ``diffs`` is the diff rule as it was: a settled document's views where the
+    diff view is adopted, a stream's only once it is closed (``Stream._ink``).
+    A figure needs no such rule here, because no block is marked as one until it
+    has settled (``_Captioned``).
+    """
+
+    __slots__ = ("diffs",)
+
+    def __init__(self, diffs: bool) -> None:
+        self.diffs = diffs
+
+    def __call__(self, view: Any, number: int, block: Any) -> Any:
+        from ...figures import host as figures_host
+
+        if isinstance(getattr(block, "language", None), figures_host.FigureMark):
+            return figures_host.figure_for(view, number, block)
+        if self.diffs:
+            return _fences()(view, number, block)
+        return None
+
+
+_HOSTS = (_Hosts(False), _Hosts(True))
+
+
+def _hosts(diffs: bool) -> _Hosts:
+    """
+    The dispatcher a markdown view is given, with or without the diff view.
+    """
+    return _HOSTS[diffs]
 
 
 def _ink(entry: _Entry, frame: int) -> None:
@@ -2332,3 +2411,39 @@ def label(
             im.text_unformatted(text)
         else:
             im.text_colored(colour.vec4, text)
+
+
+_LIBRARY_FACES = {
+    "PROSE": ("Roboto", "Roboto-Regular.ttf"),
+    "PROSE_BOLD": ("Roboto", "Roboto-Bold.ttf"),
+    "PROSE_ITALIC": ("Roboto", "Roboto-RegularItalic.ttf"),
+    "PROSE_BOLD_ITALIC": ("Roboto", "Roboto-BoldItalic.ttf"),
+    "CODE": ("Inconsolata-Medium.ttf",),
+}
+"""
+The files the library sets each face in when nothing is registered for it, under
+the imgui-bundle wheel's fonts directory. The library's own answer is behind its
+facade (``imscribe.fontfiles.font_file``), which the seam does not reach past
+for this; ``tests/test_figure_host.py`` holds the two to one answer.
+"""
+
+
+def figure_fonts() -> Fonts:
+    """
+    The faces a figure's text is set in (``figures.render.Fonts``): the prose faces
+    and the code face, as the library sets them now, a registered file before the
+    library's own. Reads only; safe off the GUI thread.
+    """
+    from imscribe import Face, registered_fonts
+
+    from ...figures.render import Fonts
+
+    held = registered_fonts()
+    bundle = roles._bundle_fonts()
+
+    def path(name: str) -> str:
+        registered = held.get(Face[name])
+        return str(registered if registered is not None else bundle.joinpath(*_LIBRARY_FACES[name]))
+
+    files = tuple(dict.fromkeys(path(name) for name in _LIBRARY_FACES))
+    return Fonts(files=files, sans=path("PROSE"), mono=path("CODE"))

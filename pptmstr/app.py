@@ -67,6 +67,8 @@ from .command import (
 from .command import Withdrawn as CommandWithdrawnEnd
 from .driver import AgentSession, UncontainedAutonomy
 from .fake_driver import FakeDriver
+from .figures import host as figure_host
+from .figures import render as figure_render
 from .intents import (
     BoardRestored,
     CommandApproved,
@@ -4448,6 +4450,17 @@ def _log_panel() -> None:
 _SHUTDOWN_MARGIN_S = 5.0
 
 
+def _before_exit() -> None:
+    """
+    The runner's last call with the GL and ImGui contexts still current.
+
+    Figure textures are GL objects, so they go first. The text library's context
+    goes before the ImGui context its fonts are on.
+    """
+    figure_host.release_all()
+    typeset.unload()
+
+
 def _shut_down(state: AppState) -> None:
     """
     End the sessions, then the loop they run on.
@@ -4457,6 +4470,7 @@ def _shut_down(state: AppState) -> None:
     a shutdown that times out or raises is the case that needs it most.
     """
     try:
+        figure_render.shutdown()
         _close_board_log(state)
         _close_fleet(state)
         _close_commands(state)
@@ -5366,8 +5380,8 @@ def main(argv: list[str] | None = None) -> int:
     runner.callbacks.post_render_dockable_windows = guarded(
         "overlays", lambda: _draw_overlays(state)
     )
-    # The text library's context goes before the ImGui context its fonts are on.
-    runner.callbacks.before_exit = typeset.unload
+
+    runner.callbacks.before_exit = _before_exit
 
     state.bridge.start()
     # On the loop, not on the frame loop: the frame loop is one of the things being
