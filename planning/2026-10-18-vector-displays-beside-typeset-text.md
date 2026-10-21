@@ -926,6 +926,18 @@ the SVG.
 Smallest useful slice first. Each slice ends with the figure visible in a real
 window, not only with passing tests (STYLE.md §2).
 
+**Mathematics comes in as a fence, by the operator's call, 2026-10-21.** The
+operator found that nothing tells a session what renders, and that pptmstr reads
+markdown with mathematics off (`gate._reader` on `markdown_rules._parser(False,
+False)`; the lead's call in planning/2026-10-07-advtext-sets-the-text.md, "Math off
+because `$PATH=$HOME` is a shell line"). Of four options -- leave it off, a
+```` ```math ```` fence, display `$$` only, full `$…$` -- the operator chose the
+fence: "Let's go with option 2 for now." Inline `$…$` and `$$` in prose stay text.
+A ```` ```math ```` fence is the same shape as `svg` and `mermaid`, so it joins the
+same dispatcher and the same table of what renders, and the route by which imscribe
+sets it is probe `math-probe`'s to name. The table also feeds the session prompt
+(§8 slice 4), which slice 1 shipped without.
+
 **Slice 1 in the running app, 2026-10-21.** The operator ran `make run` on
 Linux x86-64 and checked it against a scripted reply (two screenshots, read by
 the lead):
