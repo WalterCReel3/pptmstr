@@ -6,8 +6,10 @@ from __future__ import annotations
 
 import random
 import re
+import signal
 import time
 import xml.etree.ElementTree as ET
+from collections.abc import Callable
 
 import pytest
 
@@ -16,6 +18,8 @@ from pptmstr.figures.sanitise import (
     MAX_DEPTH,
     MAX_ELEMENTS,
     MAX_INPUT_BYTES,
+    MAX_INPUT_ELEMENTS,
+    MAX_LAYER_CHAIN,
     SVG_NS,
     XML_NS,
     Refused,
@@ -501,6 +505,181 @@ def test_very_deep_nesting_does_not_raise() -> None:
     assert "deeper" in refused(doc(deep))
 
 
+def _mask_chain(n: int) -> str:
+    levels = "".join(
+        f'<mask id="m{i}"><rect' + (f' mask="url(#m{i + 1})"' if i + 1 < n else "") + "/></mask>"
+        for i in range(n)
+    )
+    return doc(f'<defs>{levels}</defs><rect mask="url(#m0)"/>')
+
+
+def _clip_chain(n: int) -> str:
+    levels = "".join(
+        f'<clipPath id="c{i}"'
+        + (f' clip-path="url(#c{i + 1})"' if i + 1 < n else "")
+        + "><rect/></clipPath>"
+        for i in range(n)
+    )
+    return doc(f'<defs>{levels}</defs><rect clip-path="url(#c0)"/>')
+
+
+@pytest.mark.parametrize("chain", [_mask_chain, _clip_chain])
+def test_a_reference_chain_of_layers_past_the_cap_is_refused(chain: Callable[[int], str]) -> None:
+    passed(chain(MAX_LAYER_CHAIN))
+    assert f"over {MAX_LAYER_CHAIN}" in refused(chain(MAX_LAYER_CHAIN + 1))
+
+
+def test_layers_nested_and_referenced_count_together() -> None:
+    inner = '<clipPath id="p"><rect/></clipPath>'
+    nested = (
+        "<mask>" * (MAX_LAYER_CHAIN - 1)
+        + '<rect clip-path="url(#p)"/>'
+        + "</mask>" * (MAX_LAYER_CHAIN - 1)
+    )
+    passed(doc(f"<defs>{inner}</defs>{nested}"))
+    assert "deep" in refused(doc(f"<defs>{inner}</defs><mask>{nested}</mask>"))
+
+
+def test_many_layers_side_by_side_are_not_a_chain() -> None:
+    passed(doc('<defs><mask id="m"><rect/></mask></defs>' + '<rect mask="url(#m)"/>' * 200))
+
+
+def test_a_pattern_is_dropped_and_what_it_filled_takes_its_fallback() -> None:
+    # resvg allocates a tile whole under every transform above it, and macOS has no
+    # RLIMIT_AS to catch that in the render child (probe R3).
+    out = passed(
+        doc(
+            '<defs><pattern id="p" width="10" height="10" patternUnits="userSpaceOnUse">'
+            '<rect width="10" height="10"/></pattern></defs>'
+            '<g transform="scale(1000)"><rect fill="url(#p) green" width="5"/></g>'
+        )
+    )
+    assert find_all(out, "pattern") == []
+    assert find_all(out, "rect")[0].get("fill") == "green"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '<rect filter="blur(20px)" width="5"/>',
+        '<rect FILTER="drop-shadow(1px 1px 2px red)" width="5"/>',
+        '<rect style="filter: blur(20px); opacity: 1" width="5"/>',
+    ],
+)
+def test_the_filter_property_never_survives(body: str) -> None:
+    out = passed(doc(body))
+    rect = find_all(out, "rect")[0]
+    assert {k.lower() for k in rect.attrib} <= {"width", "style"}
+    assert "filter" not in (rect.get("style") or "")
+
+
+def test_a_filter_declaration_in_a_stylesheet_is_removed() -> None:
+    out = passed(doc("<style>.a{filter:blur(9px);fill:red}</style>"))
+    assert find_all(out, "style")[0].text == ".a{;fill:red}"
+
+
+def test_input_elements_past_the_cap_are_refused_before_cleaning() -> None:
+    # Dropped elements count: what is bounded is the work, not what survives.
+    passed(doc("<x/>" * (MAX_INPUT_ELEMENTS - 1)))
+    assert f"more than {MAX_INPUT_ELEMENTS} elements" in refused(doc("<x/>" * MAX_INPUT_ELEMENTS))
+
+
+# Step 5: time on the frame thread -------------------------------------------------------
+
+# sanitise runs on the frame thread, once per fence. Measured worst here at the byte cap
+# is about 0.32 s (70,000 font declarations in one style attribute); before every
+# pattern was made linear, the whitespace runs below took 8-26 s at 100,000 spaces and
+# over five minutes at the cap. The bound leaves three times the measured worst for a
+# slower machine, and is enforced by an alarm so a regression fails here in a second
+# rather than hanging the suite.
+SANITISE_BOUND_S = 1.0
+
+
+def _at_cap(head: str, unit: str, tail: str) -> str:
+    return head + unit * ((MAX_INPUT_BYTES - len(head) - len(tail)) // len(unit)) + tail
+
+
+def _spaces(before: str, after: str) -> str:
+    return before + " " * (MAX_INPUT_BYTES - len(before) - len(after)) + after
+
+
+ROOT = '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">'
+WORST = {
+    "font-family run in style=": _spaces(ROOT + '<text style="font-family:a', 'b">x</text></svg>'),
+    "font-family run in <style>": _spaces(ROOT + "<style>text{font-family:a", "b}</style></svg>"),
+    "font run with !important": _spaces(
+        ROOT + '<text style="font:a', '! important x">x</text></svg>'
+    ),
+    "length run in the root width": _spaces(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="1', 'x" viewBox="0 0 9 9"/>'
+    ),
+    "length run in max-width": _spaces(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="100%" style="max-width:1',
+        'x" viewBox="0 0 9 9"/>',
+    ),
+    "length run in a foreignObject": _spaces(
+        ROOT + '<foreignObject width="1', 'x"><p>a</p></foreignObject></svg>'
+    ),
+    "dangling paint run": _spaces(ROOT + '<rect fill="url(#gone)', 'x"/></svg>'),
+    "url( run": _spaces(ROOT + '<rect fill="url(', '#a x"/></svg>'),
+    "viewBox run": _spaces('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 9', 'x"/>'),
+    "font declarations": _at_cap(ROOT + '<rect style="', "font-family:a;", '"/></svg>'),
+    "style declarations": _at_cap(ROOT + '<rect style="', "fill:red;", '"/></svg>'),
+    "stylesheet rules": _at_cap(ROOT + "<style>", "a{fill:red}", "</style></svg>"),
+    "css comments": _at_cap(ROOT + '<rect style="', "/**/", '"/></svg>'),
+    "unclosed quotes": _at_cap(ROOT + '<rect style="', "a:'", '"/></svg>'),
+    "attributes": ROOT + "<rect " + " ".join(f'a{i}="1"' for i in range(60_000)) + "/></svg>",
+    "dropped elements": _at_cap(ROOT, "<x/>", "</svg>"),
+    "dropped elements' tails": _at_cap(ROOT + "<text>", "<x/>a", "</text></svg>"),
+    "kept elements": _at_cap(ROOT, "<g/>", "</svg>"),
+}
+
+
+class _Late(BaseException):
+    """
+    Raised by the alarm; a BaseException so `sanitise`'s total arm does not catch it.
+    """
+
+
+@pytest.mark.parametrize("svg", WORST.values(), ids=WORST.keys())
+def test_the_worst_inputs_at_the_byte_cap_sanitise_within_the_bound(svg: str) -> None:
+    assert len(svg.encode()) <= MAX_INPUT_BYTES
+
+    def late(signum: int, frame: object) -> None:
+        raise _Late
+
+    previous = signal.signal(signal.SIGALRM, late)
+    signal.setitimer(signal.ITIMER_REAL, SANITISE_BOUND_S)
+    try:
+        sanitise(svg)
+    except _Late:
+        pytest.fail(f"sanitise took longer than {SANITISE_BOUND_S} s")
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+@pytest.mark.parametrize(
+    "value, px",
+    [
+        ("10", 10.0),
+        (" 10 px ", 10.0),
+        ("1.5e1mm", 1.5e1 * 96 / 25.4),
+        ("+.5in", 48.0),
+        ("10%", None),
+        ("10em", None),
+        ("10PX", None),
+        ("px", None),
+        ("1 x", None),
+        ("1e999", None),
+    ],
+)
+def test_a_length_is_a_number_and_an_absolute_unit(value: str, px: float | None) -> None:
+    from pptmstr.figures.sanitise import _number
+
+    assert _number(value) == px
+
+
 # Step 5: natural size -----------------------------------------------------------------
 
 SIZES = {
@@ -642,6 +821,71 @@ def test_dangling_paint_in_css_becomes_its_fallback_or_none() -> None:
     )
     assert find_all(out, "style")[0].text == ".a{fill: red}"
     assert find_all(out, "rect")[0].get("style") == "stroke: none !important; fill: none"
+
+
+def test_a_filter_reference_to_a_kept_element_is_removed() -> None:
+    # resvg erases a shape whose filter names a <rect> (measured), and no <filter>
+    # survives, so every filter reference is removed.
+    out = passed(doc('<rect id="someRect"/><rect filter="url(#someRect)" width="5"/>'))
+    assert find_all(out, "rect")[1].attrib == {"width": "5"}
+    out = passed(doc('<rect id="a"/><g style="filter:url(#a);opacity:1"><rect/></g>'))
+    assert find_all(out, "g")[0].get("style") == "opacity:1"
+
+
+WRONG_KIND = (
+    '<defs><rect id="r"/><linearGradient id="g"/><pattern id="p"/><clipPath id="c"/>'
+    '<mask id="m"/><marker id="k"/></defs>'
+)
+
+
+@pytest.mark.parametrize(
+    "attribute, right, wrong",
+    [
+        ("clip-path", "c", ["r", "m", "g"]),
+        ("mask", "m", ["r", "c"]),
+        ("marker-start", "k", ["r", "c"]),
+        ("marker-mid", "k", ["r"]),
+        ("marker-end", "k", ["r", "g"]),
+    ],
+)
+def test_a_reference_to_the_wrong_kind_of_element_is_dangling(
+    attribute: str, right: str, wrong: list[str]
+) -> None:
+    out = passed(doc(WRONG_KIND + f'<path d="M0 0" {attribute}="url(#{right})"/>'))
+    assert find_all(out, "path")[0].get(attribute) == f"url(#{right})"
+    for target in wrong:
+        out = passed(doc(WRONG_KIND + f'<path d="M0 0" {attribute}="url(#{target})"/>'))
+        assert find_all(out, "path")[0].attrib == {"d": "M0 0"}, target
+
+
+def test_paint_naming_something_other_than_a_paint_server_takes_its_fallback() -> None:
+    out = passed(
+        doc(
+            WRONG_KIND + '<rect fill="url(#r) green" stroke="url(#c)"/>'
+            '<rect fill="url(#g)" stroke="url(#p) red"/>'
+            '<rect style="fill:url(#m) blue"/>'
+        )
+    )
+    first, second, third = find_all(out, "rect")[1:]
+    assert (first.get("fill"), first.get("stroke")) == ("green", "none")
+    # <pattern> does not survive, so a stroke naming one takes its fallback.
+    assert (second.get("fill"), second.get("stroke")) == ("url(#g)", "red")
+    assert third.get("style") == "fill: blue"
+
+
+def test_an_id_on_two_kinds_of_element_resolves_only_for_a_property_both_suit() -> None:
+    out = passed(doc('<clipPath id="d"/><rect id="d"/><path clip-path="url(#d)"/>'))
+    assert "clip-path" not in find_all(out, "path")[0].attrib
+
+
+def test_a_kept_plain_href_wins_over_xlink_and_a_dropped_one_does_not() -> None:
+    # HEAD declares the xlink prefix.
+    out = passed(doc('<g id="a"/><g id="b"/><use xlink:href="#a" href="#b"/>'))
+    assert find_all(out, "use")[0].get("href") == "#b"
+    out = passed(doc('<g id="a"/><g id="b"/><use href="#b" xlink:href="#a"/>'))
+    assert find_all(out, "use")[0].get("href") == "#b"
+    out = passed(doc('<g id="a"/><use href="http://x" xlink:href="#a"/>'))
+    assert find_all(out, "use")[0].get("href") == "#a"
 
 
 def test_dangling_href_is_removed() -> None:

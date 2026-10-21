@@ -1,7 +1,7 @@
 """
 Probes M1, R1-hostile and R2 from planning/2026-10-18-vector-displays-beside-typeset-text.md §7.
 
-    .venv/bin/python scripts/figure_render_probe.py [m1|r1a|r1b|r1c|r2|all]
+    .venv/bin/python scripts/figure_render_probe.py [m1|r1a|r1b|r1c|r2|r3|all]
 
 M1   merman 0.9.1 with svg.pipeline=resvg-safe on five diagram families, then resvg.
 R1a  nested <g>/<use> fan-out against resvg_py: time and peak RSS per depth, each
@@ -10,8 +10,12 @@ R1b  url() to outside the document in fill/clip-path/mask/marker-start/filter:
      inotify on the target directory and a listening socket on 127.0.0.1.
 R1c  font-family="Arial" (not loaded) under skip_system_fonts with generics mapped.
 R2   whether svg_to_bytes releases the GIL: max gap of a 1 ms ticker thread.
+R3   shapes under the sanitiser's caps that may cost far more than their element
+     count (mask and clip chains, layers, pattern tiles, mid markers, dashes, filter
+     functions): sanitised, then rasterised at 1600 px, each in a child under
+     RLIMIT_AS and a wall-clock timeout; time and peak RSS, or the refusal.
 
-No sanitiser runs anywhere here; resvg is fed the SVG as written. Nothing is
+No sanitiser runs anywhere here but in R3; resvg is fed the SVG as written. Nothing is
 fetched from the network: every http:// target is a socket this script owns.
 PNGs go to shots/figure-probe/, which /shots/ in .gitignore covers.
 """
@@ -653,12 +657,147 @@ def probe_r2() -> None:
     )
 
 
+# --------------------------------------------------------------------------- R3
+
+R3_W, R3_H = 1600, 1200
+R3_AS_LIMIT = 8 * 1024**3
+R3_TIMEOUT_S = 60
+
+
+def r3_cases() -> dict[str, str]:
+    """
+    Shapes that stay under the sanitiser's caps and may allocate far more than their
+    element count suggests (fig-review finding 2). Each is a whole document at
+    R3_W x R3_H; each is passed through the sanitiser before it is rendered.
+    """
+    full = f'width="{R3_W}" height="{R3_H}"'
+    head = f'<svg xmlns="http://www.w3.org/2000/svg" {full} viewBox="0 0 {R3_W} {R3_H}">'
+
+    def mask_chain(n: int) -> str:
+        levels = "".join(
+            f'<mask id="m{i}"><rect {full} fill="white"'
+            + (f' mask="url(#m{i + 1})"' if i + 1 < n else "")
+            + "/></mask>"
+            for i in range(n)
+        )
+        return f'{head}<defs>{levels}</defs><rect {full} fill="red" mask="url(#m0)"/></svg>'
+
+    def clip_chain(n: int) -> str:
+        levels = "".join(
+            f'<clipPath id="c{i}"'
+            + (f' clip-path="url(#c{i + 1})"' if i + 1 < n else "")
+            + f"><rect {full}/></clipPath>"
+            for i in range(n)
+        )
+        return f'{head}<defs>{levels}</defs><rect {full} fill="red" clip-path="url(#c0)"/></svg>'
+
+    def opacity_nest(n: int) -> str:
+        return head + '<g opacity=".9">' * n + f'<rect {full} fill="red"/>' + "</g>" * n + "</svg>"
+
+    def masked_nest(n: int) -> str:
+        defs = f'<defs><mask id="m"><rect {full} fill="white"/></mask></defs>'
+        return head + defs + '<g mask="url(#m)">' * n + f"<rect {full}/>" + "</g>" * n + "</svg>"
+
+    def pattern(tile: int, transform: str = "") -> str:
+        extra = f' patternTransform="{transform}"' if transform else ""
+        return (
+            f'{head}<defs><pattern id="p" width="{tile}" height="{tile}"'
+            f' patternUnits="userSpaceOnUse"{extra}><rect width="{tile}" height="{tile}"'
+            f' fill="red"/><circle r="5"/></pattern></defs><rect {full} fill="url(#p)"/></svg>'
+        )
+
+    def marker_mid(vertices: int) -> str:
+        pts = " ".join(f"{i % R3_W} {(i * 7) % R3_H}" for i in range(vertices))
+        marker = (
+            '<marker id="k" markerWidth="40" markerHeight="40" refX="20" refY="20">'
+            '<circle cx="20" cy="20" r="18" fill="blue" opacity=".5"/></marker>'
+        )
+        return (
+            f'{head}<defs>{marker}</defs><path d="M{pts}" stroke="red" marker-mid="url(#k)"/></svg>'
+        )
+
+    def dashes(paths: int) -> str:
+        line = f'<path d="M0 0 L{R3_W} {R3_H}" stroke="red" stroke-dasharray="0.001"/>'
+        return head + line * paths + "</svg>"
+
+    def blur() -> str:
+        return head + f'<rect {full} fill="red" filter="blur(200px)"/>' * 50 + "</svg>"
+
+    return {
+        "mask chain 2,400": mask_chain(2_400),
+        "mask chain 600": mask_chain(600),
+        "clip-path chain 2,400": clip_chain(2_400),
+        "opacity nest 62": opacity_nest(62),
+        "mask on 62 nested groups": masked_nest(62),
+        "pattern tile 16384": pattern(16_384),
+        "pattern tile 100 scale(160)": pattern(100, "scale(160)"),
+        "marker-mid 60,000 vertices": marker_mid(60_000),
+        "dasharray .001 on 4,000 paths": dashes(4_000),
+        "filter blur() on 50 rects": blur(),
+    }
+
+
+def r3_child(name: str) -> None:
+    from pptmstr.figures.render import rasterise
+    from pptmstr.figures.sanitise import Sanitised, sanitise
+
+    out = sanitise(r3_cases()[name])
+    if not isinstance(out, Sanitised):
+        print(json.dumps({"status": f"refused: {out.reason}"}))
+        return
+    t = time.perf_counter()
+    try:
+        w, h, _ = rasterise(out.svg, R3_W, {})
+        status = f"ok {w}x{h}"
+    except BaseException as e:  # noqa: BLE001 -- MemoryError is a finding
+        status = f"{type(e).__name__}: {str(e)[:120]}"
+    dt = time.perf_counter() - t
+    rss = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    print(json.dumps({"s": round(dt, 2), "maxrss_mb": round(rss / 1024), "status": status}))
+
+
+def probe_r3() -> None:
+    print(
+        f"each case sanitised, then rasterised at {R3_W} px in a child:"
+        f" RLIMIT_AS={R3_AS_LIMIT >> 20} MiB, timeout {R3_TIMEOUT_S}s"
+    )
+
+    def limit() -> None:
+        resource.setrlimit(resource.RLIMIT_AS, (R3_AS_LIMIT, R3_AS_LIMIT))
+
+    for name in r3_cases():
+        t = time.perf_counter()
+        try:
+            p = subprocess.run(
+                [sys.executable, __file__, "_r3", name],
+                capture_output=True,
+                text=True,
+                timeout=R3_TIMEOUT_S,
+                preexec_fn=limit,
+            )
+            line = p.stdout.strip().splitlines()[-1] if p.stdout.strip() else ""
+            tail = p.stderr.strip().splitlines()[-1:] if p.returncode else []
+            print(f"  {name:32s} rc={p.returncode} {line} {tail}")
+        except subprocess.TimeoutExpired:
+            print(f"  {name:32s} TIMEOUT after {time.perf_counter() - t:.1f}s")
+
+
 def main(argv: list[str]) -> None:
     if argv[:1] == ["_r1a"]:
         r1a_child(int(argv[1]), int(argv[2]))
         return
+    if argv[:1] == ["_r3"]:
+        r3_child(argv[1])
+        return
     which = argv[0] if argv else "all"
-    probes = {"m1": probe_m1, "r1a": probe_r1a, "r1b": probe_r1b, "r1c": probe_r1c, "r2": probe_r2}
+    probes = {
+        "m1": probe_m1,
+        "r1a": probe_r1a,
+        "r1b": probe_r1b,
+        "r1c": probe_r1c,
+        "r2": probe_r2,
+        "r3": probe_r3,
+    }
     for name, fn in probes.items():
         if which in (name, "all"):
             print(f"\n===== {name}")

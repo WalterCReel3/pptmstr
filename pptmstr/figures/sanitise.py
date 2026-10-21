@@ -19,26 +19,39 @@ Policy, in the order it is applied:
    no DTD nothing can declare an entity, so billion laughs and XXE never reach the
    parser; expat then refuses an undefined entity reference.
 2. **Elements are an allow-list** (`ALLOWED_ELEMENTS`). Anything else is dropped with
-   its subtree, which includes `script`, `image`, `a`, `iframe`, `filter`, `feImage`
-   and the animation elements. `foreignObject` is rewritten to a centred `<text>` at
-   the same place in the tree (see `_rewrite_foreign_object`), because Mermaid hangs
-   its labels on it. `filter` stays out: its cost is unmeasured beyond merman's drop
-   shadow, which is about half of resvg's render time for a flowchart (54 ms without
-   it, 112 ms with it; notes/vector-rendering/probe-m1-r2.md).
+   its subtree, which includes `script`, `image`, `a`, `iframe`, `filter`, `feImage`,
+   `pattern` and the animation elements. `foreignObject` is rewritten to a centred
+   `<text>` at the same place in the tree (see `_rewrite_foreign_object`), because
+   Mermaid hangs its labels on it. `filter` stays out: merman's drop shadow is about
+   half of resvg's render time for a flowchart (54 ms without it, 112 ms with it;
+   notes/vector-rendering/probe-m1-r2.md). `pattern` stays out because resvg
+   allocates its tile whole at its size under every transform above it, which no
+   check here can bound: a 100-unit tile under `scale(160)` took 1 GB and under
+   `scale(1000)` asked for 40 GB (probe R3). The render child's `RLIMIT_AS` catches
+   that on Linux, but macOS does not enforce `RLIMIT_AS`, and there it would be
+   bounded only by the render timeout. Mermaid and merman emit no patterns; a fill
+   that named one takes its fallback or `none` (step 8).
 3. **Attributes.** Every `on*` attribute is dropped, compared case-insensitively.
    `href` and `xlink:href` survive only as a same-document `#id`, and come out as
    plain `href` (SVG 2, which resvg reads), so the output needs no xlink namespace.
    Any other namespaced attribute except `xml:space` is dropped. An attribute whose
    value contains a backslash, a `url(` other than `url(#id)`, or a function that
-   takes a URL as a string (`image(`, `image-set(`, `src(`) is dropped whole.
+   takes a URL as a string (`image(`, `image-set(`, `src(`) is dropped whole. The
+   `filter` property is dropped wherever it is set, attribute or CSS: with
+   `<filter>` gone it can only name the wrong thing or be a filter function, and
+   resvg draws those (`blur(200px)` on 50 full-canvas rects took 44 s at
+   1600x1200; probe R3).
 4. **CSS** in `style=` is split into declarations, and a declaration with a
    backslash, `@import`, a non-fragment `url(` or a URL-taking function is dropped
    whole. A `<style>` element with any of those, or `@font-face`, is dropped whole.
    Nothing is cut out of the middle of a value: a CSS escape makes `u\\72l(` a url
    token, so substring stripping can be evaded, and the backslash rule closes that.
-5. **Caps** (`MAX_INPUT_BYTES`, `MAX_DEPTH`, `MAX_ELEMENTS`, `MAX_SIDE`,
-   `MAX_NATURAL_PIXELS`). The element cap counts the sanitised tree *after*
-   reference expansion: see `_expanded_size`.
+5. **Caps** (`MAX_INPUT_BYTES`, `MAX_INPUT_ELEMENTS`, `MAX_DEPTH`, `MAX_ELEMENTS`,
+   `MAX_LAYER_CHAIN`, `MAX_SIDE`, `MAX_NATURAL_PIXELS`). The element cap counts the
+   sanitised tree *after* reference expansion: see `_expanded_size`. What these do
+   not bound is render time: a full-canvas layer (opacity, mask) costs about 0.1 s
+   at 1600x1200 nested or not, and marker repetition and tiny dashes cost seconds
+   from a few elements (probe R3). The render process's timeout bounds those.
 6. The text is parsed with `xml.etree` after step 1, a new tree is built from what
    passes, and that is serialised with the SVG namespace as the default. Comments
    and processing instructions are not kept (`<?xml-stylesheet?>` among them).
@@ -53,10 +66,13 @@ Policy, in the order it is applied:
    or `href="#id"` naming an id the sanitised tree does not have -- a `<filter>` this
    policy dropped, or an id that never existed -- makes resvg skip the referencing
    element (probe R1b: merman's `filter:url(#merman-drop-shadow)` erased every node
-   box). In `fill` and `stroke` the value becomes its fallback (`url(#gone) red` is
-   `red`) or `none`, which is what SVG 2 makes of a missing paint server. Anywhere
-   else (`filter`, `clip-path`, `mask`, `marker-*`, `href`, ...) the attribute or the
-   CSS declaration is removed, so the element draws without the effect.
+   box). So does a `url(#id)` naming an element of the wrong kind for its property
+   (`_TARGET_KINDS`: a clip-path naming a `<rect>`), which is treated as dangling.
+   In `fill` and `stroke` the value becomes its fallback (`url(#gone) red` is `red`)
+   or `none`, which is what SVG 2 makes of a missing paint server. Anywhere else
+   (`clip-path`, `mask`, `marker-*`, `href`, ...) the attribute or the CSS
+   declaration is removed, so the element draws without the effect. An `href` needs
+   only its target to exist.
 
 The root's `width` and `height` are rewritten to the natural size, so a renderer that
 sizes its canvas from them gets the size the host laid out for.
@@ -84,13 +100,31 @@ MAX_INPUT_BYTES = 1 << 20
 # about a second on the worker. A typical Mermaid diagram is a few hundred.
 MAX_ELEMENTS = 5_000
 
+# Elements in the parsed input, before anything is dropped. The walks that clean the tree
+# are Python and cost about 2 us an element, so this is what bounds them: a megabyte of
+# `<g/>` is 262,000 elements and took 1.4 s on the frame thread before this cap. Four
+# times MAX_ELEMENTS leaves room for what the cleaning drops (Mermaid's HTML labels are a
+# few XHTML elements inside each foreignObject; merman's output keeps all but four).
+MAX_INPUT_ELEMENTS = 4 * MAX_ELEMENTS
+
+# How many masks and clip paths may be live inside one another, through
+# nesting or through `url(#id)`. resvg holds a canvas-sized pixmap for each while it
+# draws what is inside: a mask chain 68 deep (the deepest MAX_ELEMENTS admits) took
+# 655 MB and 11.8 s at 1600x1200 (probe R3, 2026-10-20). Mermaid uses none deeper than
+# one. At the largest raster (4096x4096) a mask chain of four peaked at 692 MB of
+# address space and eight at 1.28 GB, over the render child's limit
+# (`render.MEMORY_LIMIT_BYTES`). References made from `<style>` rules are not followed
+# (see `_expanded_size`); that limit is what bounds those.
+MAX_LAYER_CHAIN = 4
+_LAYERS = frozenset({"mask", "clipPath"})
+
 # Nesting depth of the parsed input. Mermaid nests about a dozen deep. The bound is what
 # lets every walk here recurse without meeting Python's recursion limit.
 MAX_DEPTH = 64
 
-# Natural size. 16384 px is the common GL_MAX_TEXTURE_SIZE, and 4096 x 4096 is 64 MiB of
-# RGBA at 1x. The raster is made at the drawn width, never above the natural width, so
-# these bound the texture at 1x; the renderer seam applies its own cap for DPI scale.
+# Natural size. 4096 x 4096 is 64 MiB of RGBA at 1x. The raster is made at the drawn
+# width, never above the natural width, and the renderer seam holds each of its sides to
+# `render.MAX_TEXTURE_SIDE`, shrinking a longer figure to fit.
 MAX_SIDE = 16_384.0
 MAX_NATURAL_PIXELS = 4096 * 4096
 
@@ -120,7 +154,6 @@ ALLOWED_ELEMENTS: frozenset[str] = frozenset(
         "stop",
         "clipPath",
         "mask",
-        "pattern",
         # the rest
         "marker",
         "style",
@@ -154,11 +187,14 @@ _ANY_URL = re.compile(r"url\s*\(", re.IGNORECASE)
 _URL_STRING_FUNC = re.compile(r"(?:image-set|image|src)\s*\(", re.IGNORECASE)
 _IMPORT = re.compile(r"@import", re.IGNORECASE)
 _STYLE_AT_RULE = re.compile(r"@(?:import|font-face)", re.IGNORECASE)
+# Every pattern here runs on model-written text on the frame thread, so none may
+# backtrack super-linearly: no two unbounded quantifiers over overlapping classes may
+# be adjacent or nested. Where whitespace has to be split off around a token, that is
+# done with str methods (`_split_important`, `_number`), not with `\s*` either side of
+# a lazy or optional group: three such patterns took 8-26 s on a 100,000-space run.
 _NUMBER = re.compile(r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?")
-_LENGTH = re.compile(rf"\s*({_NUMBER.pattern})\s*(px|pt|pc|in|cm|mm)?\s*")
-_UNIT_PX = {"": 1.0, "px": 1.0, "pt": 4 / 3, "pc": 16.0, "in": 96.0, "cm": 96 / 2.54}
-_UNIT_PX["mm"] = 96 / 25.4
-_FONT_DECL = re.compile(r"(\s*)(font-family|font)(\s*:)(.*?)(\s*!\s*important\s*)?", re.I | re.S)
+_UNIT_PX = {"px": 1.0, "pt": 4 / 3, "pc": 16.0, "in": 96.0, "cm": 96 / 2.54, "mm": 96 / 25.4}
+_FONT_PROPS = ("font-family", "font")
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,7 +253,7 @@ def _sanitise(svg: str) -> Sanitised:
         raise _Refusal(f"not well-formed XML: {exc}") from None
     if _local(root.tag) != "svg" or _ns(root.tag) not in ("", SVG_NS):
         raise _Refusal("the root element is not <svg>")
-    _check_depth(root)
+    _check_shape(root)
     out = _clean(root)
     if out is None:
         raise _Refusal("the root element is not <svg>")
@@ -270,10 +306,14 @@ def _is_svg(tag: object) -> bool:
     return _ns(tag) in ("", SVG_NS)
 
 
-def _check_depth(root: ET.Element) -> None:
+def _check_shape(root: ET.Element) -> None:
     stack: list[tuple[ET.Element, int]] = [(root, 1)]
+    count = 0
     while stack:
         element, depth = stack.pop()
+        count += 1
+        if count > MAX_INPUT_ELEMENTS:
+            raise _Refusal(f"more than {MAX_INPUT_ELEMENTS} elements")
         if depth > MAX_DEPTH:
             raise _Refusal(f"nested deeper than {MAX_DEPTH}")
         stack.extend((child, depth + 1) for child in element)
@@ -297,22 +337,31 @@ def _clean(src: ET.Element) -> ET.Element | None:
             text = cleaned
         out.text = text or None
         return out
-    out.text = src.text
+    # A dropped element's tail is still its parent's content (text runs), so it joins
+    # the text before it. Collected and joined once: a megabyte of `<x/>a` is
+    # 200,000 tails, and appending each to a string is quadratic.
     last: ET.Element | None = None
+    runs: list[str] = [src.text] if src.text else []
     for child in src:
         kept = _clean(child)
         if kept is None:
-            # The dropped element's tail is still its parent's content (text runs).
             if child.tail:
-                if last is None:
-                    out.text = (out.text or "") + child.tail
-                else:
-                    last.tail = (last.tail or "") + child.tail
+                runs.append(child.tail)
             continue
-        kept.tail = child.tail
+        _set_run(out, last, runs)
+        runs = [child.tail] if child.tail else []
         out.append(kept)
         last = kept
+    _set_run(out, last, runs)
     return out
+
+
+def _set_run(parent: ET.Element, last: ET.Element | None, runs: list[str]) -> None:
+    text = "".join(runs) or None
+    if last is None:
+        parent.text = text
+    else:
+        last.tail = text
 
 
 def _clean_attributes(attrib: dict[str, str]) -> dict[str, str]:
@@ -321,8 +370,12 @@ def _clean_attributes(attrib: dict[str, str]) -> dict[str, str]:
         if name.startswith("{"):
             ns, _, local = name[1:].partition("}")
             if ns == XLINK_NS and local == "href":
+                # A plain href that is kept wins over this one in either order, as
+                # in SVG 2. One that is dropped (not a `#id`) does not: this one is
+                # then kept, where SVG 2 would use the plain one and draw nothing.
+                # That differs in fidelity only, since both are held to `#id`.
                 if "href" in out:
-                    continue  # a plain href beside it wins, as in SVG 2
+                    continue
                 key = "href"
             elif ns == XML_NS and local == "space":
                 key = name
@@ -343,7 +396,7 @@ def _clean_attributes(attrib: dict[str, str]) -> dict[str, str]:
             if key != "href" or not _FRAGMENT.fullmatch(fragment):
                 continue
             value = fragment
-        elif _css_unsafe(value):
+        elif _css_unsafe(value) or lowered == "filter":
             continue
         elif lowered in ("font-family", "font"):
             value = _fix_font_value(lowered, value)
@@ -405,45 +458,81 @@ def _foreign_lines(fo: ET.Element) -> list[str]:
 # Step 8 -------------------------------------------------------------------------------
 
 _PAINT = frozenset({"fill", "stroke"})
-_IMPORTANT = re.compile(r"(.*?)(\s*!\s*important\s*)?", re.IGNORECASE | re.DOTALL)
+_PAINT_SERVERS = frozenset({"linearGradient", "radialGradient"})
+_MARKERS = frozenset({"marker"})
+
+# What a `url(#id)` in each property may name. A property absent here needs only an
+# element with the id. Measured on resvg_py 0.5.0 (2026-10-20): a filter, clip-path or
+# mask naming a <rect> erases the shape, as a dangling one does; fill or stroke naming
+# one paints nothing, ignoring a fallback; a marker naming one draws no marker.
+# `filter` is not here because the property never survives step 3.
+_TARGET_KINDS: dict[str, frozenset[str]] = {
+    "fill": _PAINT_SERVERS,
+    "stroke": _PAINT_SERVERS,
+    "clip-path": frozenset({"clipPath"}),
+    "mask": frozenset({"mask"}),
+    "marker": _MARKERS,
+    "marker-start": _MARKERS,
+    "marker-mid": _MARKERS,
+    "marker-end": _MARKERS,
+}
+
+# The kinds of element that carry each id: one id may be on several elements.
+_Kinds = dict[str, set[str]]
 
 
 def _resolve_references(root: ET.Element) -> None:
-    ids = {ident for element in root.iter() if (ident := element.get("id")) is not None}
+    kinds: _Kinds = {}
+    for element in root.iter():
+        ident = element.get("id")
+        if ident is not None:
+            kinds.setdefault(ident, set()).add(_local(element.tag))
     for element in root.iter():
         for name, value in list(element.attrib.items()):
             if name == "href":
-                resolved: str | None = value if value[1:] in ids else None
+                resolved: str | None = value if value[1:] in kinds else None
             elif name == "style":
-                resolved = _resolve_declarations(value, ids, "; ") or None
+                resolved = _resolve_declarations(value, kinds, "; ") or None
             else:
-                resolved = _resolve_value(name, value, ids)
+                resolved = _resolve_value(name, value, kinds)
             if resolved is None:
                 del element.attrib[name]
             else:
                 element.set(name, resolved)
         if element.tag == "style" and element.text:
-            element.text = _resolve_declarations(element.text, ids, None)
+            element.text = _resolve_declarations(element.text, kinds, None)
 
 
-def _resolve_value(prop: str, value: str, ids: set[str]) -> str | None:
+def _resolves(prop: str, target: str, kinds: _Kinds) -> bool:
+    """
+    Whether `url(#target)` in property `prop` names an element the property can use.
+    Where the id is on several elements, every one of them must be such an element.
+    """
+    have = kinds.get(target)
+    if have is None:
+        return False
+    want = _TARGET_KINDS.get(prop)
+    return want is None or have <= want
+
+
+def _resolve_value(prop: str, value: str, kinds: _Kinds) -> str | None:
     """
     `value` with dangling fragment references resolved for property `prop`, or None
-    when the property should be removed.
+    when the property should be removed. A reference is dangling when its target is
+    missing or is not a kind of element `prop` can use (`_TARGET_KINDS`).
     """
+    prop = prop.strip().lower()
     targets = [m.group(1)[1:] for m in _LOCAL_URL_ID.finditer(value)]
-    if all(target in ids for target in targets):
+    if all(_resolves(prop, target, kinds) for target in targets):
         return value
-    if prop.strip().lower() not in _PAINT:
+    if prop not in _PAINT:
         return None
-    match = _IMPORTANT.fullmatch(value)
-    assert match is not None  # the pattern matches any text
-    body, important = match.groups()
+    body, important = _split_important(value)
     fallback = _LOCAL_URL.sub("", body).strip()
-    return f"{fallback or 'none'}{important or ''}"
+    return f"{fallback or 'none'}{important}"
 
 
-def _resolve_declarations(text: str, ids: set[str], joiner: str | None) -> str:
+def _resolve_declarations(text: str, kinds: _Kinds, joiner: str | None) -> str:
     """
     CSS with each declaration's dangling references resolved. With a `joiner`, `text`
     is a declaration list (`style=`) and the kept declarations are joined by it;
@@ -453,7 +542,7 @@ def _resolve_declarations(text: str, ids: set[str], joiner: str | None) -> str:
     for piece, delimiter in _css_split(text, ";" if joiner else ";{}"):
         prop, colon, value = piece.partition(":")
         if colon and _LOCAL_URL.search(value):
-            resolved = _resolve_value(prop, value, ids)
+            resolved = _resolve_value(prop, value, kinds)
             if resolved is None:
                 piece = ""
             elif resolved is not value:
@@ -479,6 +568,9 @@ def _css_unsafe(text: str) -> bool:
     return _ANY_URL.search(_LOCAL_URL.sub("", text)) is not None
 
 
+_CSS_SPECIAL: dict[str, re.Pattern[str]] = {}
+
+
 def _css_split(text: str, delimiters: str) -> Iterator[tuple[str, str]]:
     """
     Split CSS at top-level `delimiters`, outside strings, with comments removed (a
@@ -486,36 +578,44 @@ def _css_split(text: str, delimiters: str) -> Iterator[tuple[str, str]]:
     the last delimiter is "". A backslash is not interpreted: a piece holding one is
     dropped by the caller, so where an escaped quote ends a string does not matter.
     """
+    # It jumps from one character that matters to the next, rather than stepping a
+    # character at a time: this runs over up to a megabyte on the frame thread.
+    special = _CSS_SPECIAL.get(delimiters)
+    if special is None:
+        special = re.compile("[" + re.escape("\"'/" + delimiters) + "]")
+        _CSS_SPECIAL[delimiters] = special
     piece: list[str] = []
-    quote = ""
     i, n = 0, len(text)
-    while i < n:
-        c = text[i]
-        if quote:
-            piece.append(c)
-            if c == quote:
-                quote = ""
-        elif c in "\"'":
-            quote = c
-            piece.append(c)
-        elif text.startswith("/*", i):
-            end = text.find("*/", i + 2)
+    while (match := special.search(text, i)) is not None:
+        at = match.start()
+        c = text[at]
+        if c in "\"'":
+            end = text.find(c, at + 1)
+            if end < 0:
+                break  # an unclosed string runs to the end of the text
+            piece.append(text[i : end + 1])
+            i = end + 1
+        elif c == "/":
+            if not text.startswith("/*", at):
+                piece.append(text[i : at + 1])
+                i = at + 1
+                continue
+            piece.append(text[i:at] + " ")
+            end = text.find("*/", at + 2)
             i = n if end < 0 else end + 2
-            piece.append(" ")
-            continue
-        elif c in delimiters:
+        else:
+            piece.append(text[i:at])
             yield "".join(piece), c
             piece = []
-        else:
-            piece.append(c)
-        i += 1
+            i = at + 1
+    piece.append(text[i:])
     yield "".join(piece), ""
 
 
 def _clean_declarations(text: str) -> str:
     kept = []
     for declaration, _ in _css_split(text, ";"):
-        if _css_unsafe(declaration) or not declaration.strip():
+        if _css_unsafe(declaration) or _is_filter(declaration) or not declaration.strip():
             continue
         kept.append(_fix_font_declaration(declaration).strip())
     return "; ".join(kept)
@@ -525,20 +625,47 @@ def _clean_stylesheet(text: str) -> str | None:
     if _css_unsafe(text) or _STYLE_AT_RULE.search(text):
         return None
     return "".join(
-        _fix_font_declaration(piece) + delimiter for piece, delimiter in _css_split(text, ";{}")
+        ("" if _is_filter(piece) else _fix_font_declaration(piece)) + delimiter
+        for piece, delimiter in _css_split(text, ";{}")
     )
+
+
+def _is_filter(declaration: str) -> bool:
+    name, colon, _ = declaration.partition(":")
+    return bool(colon) and name.strip().lower() == "filter"
 
 
 # Step 7 -------------------------------------------------------------------------------
 
 
 def _fix_font_declaration(declaration: str) -> str:
-    match = _FONT_DECL.fullmatch(declaration)
-    if match is None:
+    """
+    A `font-family` or `font` declaration with its family list fixed (step 7); any
+    other declaration as it is.
+    """
+    lead = declaration[: len(declaration) - len(declaration.lstrip())]
+    name, colon, value = declaration[len(lead) :].partition(":")
+    prop = name.rstrip()
+    if not colon or prop.lower() not in _FONT_PROPS:
         return declaration
-    lead, prop, colon, value, important = match.groups()
-    fixed = _fix_font_value(prop.lower(), value)
-    return f"{lead}{prop}{colon}{fixed}{important or ''}"
+    body, important = _split_important(value)
+    fixed = _fix_font_value(prop.lower(), body)
+    return f"{lead}{name}{colon}{fixed}{important}"
+
+
+def _split_important(value: str) -> tuple[str, str]:
+    """
+    `value` split before a trailing `!important` and the whitespace around it, as
+    `(body, "!important" part)`; the second is "" when there is none.
+    """
+    rest = value.rstrip()
+    if rest[-9:].lower() != "important":
+        return value, ""
+    bang = rest[:-9].rstrip()
+    if not bang.endswith("!"):
+        return value, ""
+    end = len(bang[:-1].rstrip())
+    return value[:end], value[end:]
 
 
 def _fix_font_value(prop: str, value: str) -> str:
@@ -563,12 +690,20 @@ def _fix_font_value(prop: str, value: str) -> str:
 
 
 def _number(text: str | None) -> float | None:
+    """
+    A length in px: a number, optionally followed by an absolute unit, with
+    whitespace allowed around either. Anything else, `%` and `em` among it, is None.
+    """
     if text is None:
         return None
-    match = _LENGTH.fullmatch(text)
-    if match is None:
+    body, factor = text.strip(), 1.0
+    for unit, px in _UNIT_PX.items():
+        if body.endswith(unit):
+            body, factor = body[: -len(unit)].rstrip(), px
+            break
+    if not _NUMBER.fullmatch(body):
         return None
-    value = float(match.group(1)) * _UNIT_PX[(match.group(2) or "").lower()]
+    value = float(body) * factor
     return value if math.isfinite(value) else None
 
 
@@ -666,6 +801,9 @@ def _expanded_size(root: ET.Element) -> int:
     count by forbidding a shape. A reference cycle is refused. Where an id is defined
     twice, the larger target is counted. References made from `<style>` rules, and a
     marker's repetition per path vertex, are not counted.
+
+    The same walk refuses a chain of more than `MAX_LAYER_CHAIN` masks and clip
+    paths inside one another, by nesting or by reference.
     """
     by_id: dict[str, list[ET.Element]] = {}
     for element in root.iter():
@@ -678,6 +816,7 @@ def _expanded_size(root: ET.Element) -> int:
         return [*element, *targets]
 
     size: dict[int, int] = {}
+    layers: dict[int, int] = {}
     on_path: set[int] = set()
     stack: list[tuple[ET.Element, bool]] = [(root, False)]
     while stack:
@@ -691,6 +830,10 @@ def _expanded_size(root: ET.Element) -> int:
             if total > MAX_ELEMENTS:
                 return total
             size[key] = total
+            inner = max((layers[id(d)] for d in dependencies(element)), default=0)
+            layers[key] = inner + (_local(element.tag) in _LAYERS)
+            if layers[key] > MAX_LAYER_CHAIN:
+                raise _Refusal(f"masks or clip paths {layers[key]} deep, over {MAX_LAYER_CHAIN}")
             continue
         if key in size:
             continue

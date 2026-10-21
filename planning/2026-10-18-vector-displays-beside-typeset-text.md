@@ -15,7 +15,10 @@ probe S1, run in pptmstr's venv during the revision (§3.6), and the probe notes
 cited below as **[probe T1]**, **[probe M1]**, **[probe R1-hostile]** and
 **[probe R2]**: run by builders in this worktree's `.venv`, relayed here from
 their notes and not re-run by the writer of this revision. The decisions taken
-on them are the lead's, 2026-10-20 ·
+on them are the lead's, 2026-10-20. **[probe R3]** is
+`scripts/figure_render_probe.py r3` and the measurements beside it, run by the
+`fig-fix` builder on 2026-10-20 against slice 1's sanitiser and render child on
+Linux x86-64; nothing marked R3 ran on macOS ·
 **Engages with:** `pptmstr/ui/typeset/views.py` (the module docstring's diff-fence
 rule, `_captioned`, `_Fences`), `pptmstr/ui/typeset/gate.py` (`_HIDING_RULES`,
 `_reader`), and the three-pin comment in `pyproject.toml`.
@@ -211,10 +214,13 @@ fence language, chooses a *producer*:
   [read], and it snaps its origin to whole pixels first. Both are measured
   host constraints, listed with the rest in §3.6 "Host constraints"
   [probe T1].
-- **Copy and find:** a copy gives `Hosted.text`. Set it to the fence verbatim,
+- **Copy and find:** a copy gives `Hosted.text`: the fence as Markdown,
   info string included, so a copied reply still renders elsewhere
-  [judgement]. Find does not see a hosted figure [read]. That is accepted for
-  now.
+  [judgement]. It is reconstructed rather than verbatim (`host.fence_text`):
+  backtick marks, three or one more than the longest run of backticks in the
+  text, around the info string and the text, so it reads back as the same
+  fence whatever marks it was written with (decided at `fig-host`). Find does
+  not see a hosted figure [read]. That is accepted for now.
 - **imscribe vs pptmstr:** all of the above is pptmstr's (`pptmstr/ui/typeset/`
   plus a new figure module). Nothing in the first three slices needs an imscribe
   release. Two upstream asks are worth filing but are not preconditions:
@@ -345,7 +351,7 @@ lazily imported optional extra.**
 
 The input is model output, and an engine's output from model input is treated
 the same way. The policy is the allow-list in `svg-renderers.md` §D, adopted
-whole.
+whole except for `pattern`, which was later dropped (step 2).
 
 1. Reject any DOCTYPE. The check is case-insensitive and looks past the XML
    declaration and comments.
@@ -353,13 +359,34 @@ whole.
    - structure: `svg g defs symbol use`;
    - shapes: `path rect circle ellipse line polyline polygon`;
    - text: `text tspan textPath`;
-   - paint servers and masking: `linearGradient radialGradient stop clipPath mask pattern`;
+   - paint servers and masking: `linearGradient radialGradient stop clipPath mask`;
    - also `marker style title desc`.
+
+   **`pattern` was on this list and is dropped** (decision 2026-10-20, lead,
+   at fig-fix). resvg allocates a pattern tile whole, at its size under every
+   transform above it, including a `<g transform>` on the shape it fills, so no
+   check on the pattern alone bounds it: a 100-unit tile under `scale(160)`
+   took 1 GB, and under `scale(1000)` asked for 40 GB [probe R3]. On Linux the
+   render child's `RLIMIT_AS` catches that. **macOS does not enforce
+   `RLIMIT_AS`, and that is the deciding cost**: there nothing but the render
+   timeout would bound it. No merman output in M1 uses a pattern, and a fill
+   that named one takes its fallback or `none` through step 8.
 
    `<foreignObject>` is **rewritten to centred `<text>`**, never passed through.
    `script`, `image`, `a`, `iframe`, animation elements and `feImage` are
    dropped.
-3. Drop every `on*` attribute. `href` and `xlink:href` stay **only as `#id`**.
+3. Drop every `on*` attribute. `href` and `xlink:href` stay **only as `#id`**,
+   and `xlink:href` is written out as plain `href` (SVG 2), so the output needs
+   no xlink namespace. A kept plain `href` wins over `xlink:href` in either
+   order; where the plain one is dropped (not a `#id`), the `xlink:href` is
+   kept, where SVG 2 would draw nothing: a fidelity difference only.
+   **Measured 2026-10-20 (fig-fix):** resvg_py 0.5.0 draws the same ink for a
+   `<use>` and a gradient's `href` after the rewrite as for `xlink:href` before
+   it. **The `filter` property is dropped** wherever it is set, attribute or
+   CSS (decision 2026-10-20, fig-fix): with `<filter>` gone it can only name
+   the wrong element or be a filter function, and resvg draws those;
+   `filter="blur(200px)"` on 50 full-canvas rects took 44 s at 1600×1200
+   [probe R3, `scripts/figure_render_probe.py r3`].
    **Any other attribute whose value contains `url(`** (`fill`, `stroke`,
    `clip-path`, `mask`, `marker-*`, `filter`, `style`) is dropped unless every
    `url(` in it is `url(#id)`. Steps 3 and 4 as `svg-renderers.md` §D wrote
@@ -381,10 +408,48 @@ whole.
    recalled from CSS Syntax Level 3, not re-read; whether simplecss honours
    escapes is also unverified]
 5. Cap the input bytes, the element count and the output pixels before
-   rendering. **The element cap counts the tree after `<use>` expansion**:
-   the sanitiser resolves each `<use>` to its target and sums the expanded
-   size, or refuses a `<use>` whose target contains a `<use>`. A source-element
-   cap alone does not bound nested `g`/`use` chains, which multiply.
+   rendering. **The element cap counts the tree after `<use>` expansion**.
+   **Built (fig-sanitise):** every same-document reference, `href` and
+   `url(#id)` in any attribute, adds the expanded size of its target, once per
+   referencing element, summed over a memoised walk; a reference cycle is
+   refused; nested `<use>` is not refused, because icon sets and Mermaid's
+   markers reference definitions that reference others. A source-element cap
+   alone does not bound nested `g`/`use` chains, which multiply. Added at
+   fig-fix (2026-10-20), each from a measurement:
+   - **an input element cap** (`MAX_INPUT_ELEMENTS`, 20,000, before
+     anything is dropped), because the cleaning walks are Python on the frame
+     thread: a megabyte of `<g/>` took 1.4 s;
+   - **a layer chain cap** (`MAX_LAYER_CHAIN`, 4): masks and clip paths
+     inside one another by nesting or by `url(#id)`. resvg holds a
+     canvas-sized pixmap for each level: a mask chain 68 deep, the deepest the
+     element cap admits (a chain in `<defs>` is counted quadratically), took
+     655 MB and 11.8 s at 1600×1200; at 4096×4096 a chain of four peaked at
+     692 MB of address space and eight at 1.28 GB [probe R3];
+   - every pattern in the sanitiser is linear: three `fullmatch` patterns with
+     `\s*` either side of a lazy or optional group took 8–26 s on a
+     100,000-space run and did not finish in five minutes at the byte cap.
+     Measured worst at the cap after the change is about 0.4 s
+     (`tests/test_figure_sanitise.py`, bound 1 s).
+
+   **What the caps do not bound, and what does** [probe R3, 1600×1200]:
+   - *Render time.* A full-canvas layer costs about 0.1 s nested or not (62
+     nested opacity groups 5.6 s, 62 siblings 6.2 s, 500 siblings 50 s);
+     `marker-mid` on a 60,000-vertex path 17 s; 4,000 lines dashed at 0.001 over
+     a minute. References made from `<style>` rules and a marker's repetition
+     per vertex are not counted at all. `RENDER_TIMEOUT_S` (10 s) is the bound
+     for all of these, and a render killed for time is retried once and then
+     kept as failed (§3.6 "Fallback").
+   - *Memory.* The pattern tile, the one allocation measured to grow without
+     a bound the caps can see, is gone with `<pattern>` (step 2). What is left
+     (references from `<style>` rules, anything unforeseen) is bounded by the
+     render child's address-space limit, 1 GiB with `RLIMIT_AS`
+     (`render.MEMORY_LIMIT_BYTES`): resvg's allocation fails, the child
+     aborts, the I/O thread reports that as the render's failure and the next
+     request starts a new child [ran, `test_figure_render.py`, with an
+     unsanitised pattern]. The largest legitimate render, the 1,200-label grid
+     at 4096×3072, peaked at about 240–310 MB of address space. **macOS does
+     not enforce `RLIMIT_AS`**: there the timeout is the only bound on what is
+     left.
    **Measured, and needed as written:** usvg refuses at its own node limit
    (somewhere between 64,000 and 100,000 leaves of the probe's shape, in about
    0.3 s), but below it **a 3.7 KB input took 7.2 s and 450 MB** (fan 40,
@@ -411,10 +476,18 @@ whole.
    `<filter>`, and resvg does not draw an element whose `filter` (or `fill`)
    points at a missing id. Every node box and participant box vanished, leaving
    text and edges [probe M1; probe R1-hostile shows the same on a bare rect].
-   Removing the attribute renders as if it were absent, which for `fill`
-   means the default black, not nothing [inferred from R1-hostile's
-   "as-if-attribute-absent"]. Decision 2026-10-20, lead; passed to
-   `fig-sanitise`.
+   Decision 2026-10-20, lead; passed to `fig-sanitise`. **Built with the
+   lead's refinement:** in `fill` and `stroke` the value becomes its fallback
+   (`url(#gone) red` is `red`) or `none`, which is what SVG 2 makes of a
+   missing paint server; removing the attribute would have meant the default
+   black. Anywhere else the attribute or declaration is removed.
+   **A target of the wrong kind is dangling too** (fig-fix, 2026-10-20):
+   `fill`/`stroke` must name a gradient, `clip-path` a `clipPath`,
+   `mask` a `mask`, `marker-*` a `marker`. Measured on resvg_py 0.5.0: a
+   `filter`, `clip-path` or `mask` naming a `<rect>` erases the shape, as a
+   dangling one does; `fill` naming one paints nothing, ignoring its fallback;
+   a marker naming one draws no marker. An `href` needs only its target to
+   exist.
 
 This is mandatory and not defence in depth, for one measured reason: **both
 renderers read `<image href="/abs/path">` from disk and draw it**. resvg also
@@ -425,10 +498,12 @@ Mermaid source can itself carry links and images in labels [unverified for
 merman], which is one more reason the sanitiser sits after the engine and not
 only on ```` ```svg ```` fences.
 
-**`filter` stays out of the allow-list.** Its cost is now measured in one
-place: merman's drop shadow is about half of resvg's time on merman output
-(69–112 ms with it, 36–66 ms without) [probe M1]. Its safety was not
-measured. With step 8, a diagram loses the shadow and keeps the shape.
+**`filter` stays out of the allow-list, and so does the `filter` property.**
+Its cost is measured in two places: merman's drop shadow is about half of
+resvg's time on merman output (69–112 ms with it, 36–66 ms without) [probe
+M1], and a `blur()` filter function on a full 1600×1200 canvas is about 0.9 s
+[probe R3]. Its safety was not measured. With step 3 and step 8, a diagram
+loses the shadow and keeps the shape.
 
 **Fonts.** Pass imscribe's own font files with `skip_system_fonts=True`, **and
 map `font_family`, `sans_serif_family`, `serif_family` and `monospace_family`**.
@@ -694,6 +769,30 @@ content cache above.**
   evicted one for a frame). Dropping a `TextureGpu` between `imgui.image` and
   the frame's render gave `GL_INVALID_OPERATION` (1282) and a blank figure. An
   LRU that evicts during `draw` because a new figure arrived would hit this.
+  **Built (fig-fix, 2026-10-20):** `host.pump` runs from the app's
+  `pre_new_frame` (`app.begin_frame`), every frame whether or not a figure is
+  on screen. It takes the renderer's results, which is also where a render
+  past its time is killed, uploads them, and lets go of what the previous
+  pump parked. No figure draw pumps, so nothing is uploaded, evicted or freed
+  inside a frame, and a hostile render is stopped with nothing on screen.
+- **Snap to the nearest device pixel, clip to the block** (fig-fix,
+  2026-10-20). The origin is rounded to the nearest whole pixel of the
+  framebuffer (`display_framebuffer_scale`), not floored in ImGui units, so
+  it is a whole device pixel at a fractional scale too. The clip rect is the
+  block's own rectangle, unsnapped, so nothing is drawn above or left of it.
+  Only density 1 was looked at on screen.
+- **No raster side over 8192** (`render.MAX_TEXTURE_SIDE`, decision
+  2026-10-20, lead, at fig-fix): the raster is shrunk to hold both sides after
+  density, and the child refuses one that cannot (a figure more than 8192
+  times as long as it is wide). **A conservative constant, not read from GL.**
+  An upload over `GL_MAX_TEXTURE_SIZE` does not raise: on llvmpipe a 2×32768
+  array returned a texture and left `GL_INVALID_VALUE` (1281), so a blank
+  figure [ran, Xvfb]. The clamp is therefore the only guard, and reading the
+  limit needs PyOpenGL, a `dev` extra. llvmpipe reports 16384 [ran], as GL 4.1
+  on macOS does [unverified]; 8192 leaves room for an older or smaller GPU.
+  The pixel cap already bounds area, so this shrinks only long rasters. An
+  upload that does raise is that figure's failure in `pump`, without losing
+  the other results.
 - **The spelling is `imgui.image(imgui.ImTextureRef(tex.texture_id()),
   size)`**: on `TextureGpu`, `texture_id` is a method; on `ImageAndSize` it is
   an attribute.
@@ -703,6 +802,18 @@ one-line reason in the warn ink, the way `_Warned` leads a diff. Failures
 include a sanitiser refusal, a render error, a missing extra, an unsupported
 Mermaid family, and an out-of-subset plot spec. The source is the content, and
 it is never dropped [relayed from all three producer notes; adopted].
+**Built (fig-fix, 2026-10-20):**
+- A render failure is one of two kinds (`render.Failed.transient`). An answer
+  the child gave (resvg refused it, a pixel or side cap, the renderer could
+  not load) is kept for the content and never asked again. One the machine
+  may have caused (the child died or aborted at its memory limit, was killed
+  for time, did not start) is asked once more after `host.RETRY_AFTER_S`
+  (5 s), with the outline at the figure's height meanwhile; a second is kept.
+- The failed form is drawn on the draw list, clipped to the rectangle
+  `height_for` gave, with both heights measured once per width and font
+  size. A 1 MiB source cost 4.5 ms a frame to measure and 4.5 ms more to
+  draw as a text item [ran, headless ImGui]; the draw list's text stops at the
+  bottom of the clip.
 
 ## 4. Side by side
 
@@ -767,7 +878,7 @@ imgui-bundle's own Python API, and none links against imgui-bundle's ABI
 |---|---|---|---|---|---|---|
 | `resvg_py==0.5.0` (resvg 0.48.1) | 1 | `manylinux_2_17` abi3 [relayed]; installed and run in the worktree `.venv` [probes] | `macosx_11_0_arm64` [relayed] | not measured | MIT / MIT-or-Apache [relayed] | binding: one maintainer [relayed] |
 | `numpy` (pin from the install; the probes ran 2.4.6) | 1 | [unverified: floor of the current wheel] | [unverified] | ~15–20 MB [unverified] | BSD | mature |
-| `Pillow` (pin from the install; not yet installed) | 1, render process only | [unverified] | [unverified] | [unverified] | [unverified: recalled as MIT-CMU (HPND)] | mature |
+| `Pillow==13.0.0` | 1, render process only | wheels for cp311–cp314 on manylinux_2_28 x86-64 [relayed: PyPI, checked by the lead and reviewer-3] | macOS 11 arm64 wheels [relayed: PyPI] | 22 MB installed on Linux (`PIL` 7.3 MB + `pillow.libs` 15 MB) [ran: du] | MIT-CMU [relayed: PyPI] | mature |
 | `merman==0.9.1` (optional extra) | 2 | **`manylinux_2_35` only: no wheel for glibc 2.28–2.34** [read] | `macosx_11_0_arm64` [read] | 8.3 MB wheel [relayed] | MIT-or-Apache; EPL-2.0 ELK and OFL fonts per THIRD_PARTY_NOTICES, unread [relayed] | 2026-10-18; Python bindings "experimental" [relayed] |
 | *alt:* `mmdr==0.4.0` + `novasvg` | 2 | `manylinux_2_17` + `manylinux_2_27/2_28` [read; relayed] | yes [read; relayed] | venv with merman, mmdr, mermaidx: 90 MB [op-run] | MIT | days old |
 | ImPlot | 3 | in the wheel [relayed, ran] | in the wheel [unverified on macOS] | 0 | MIT | — |
@@ -799,6 +910,7 @@ measurement names it. Each probe below names what it decides.
 | ~~M1~~ merman binding | **Run 2026-10-20** (`probe-m1-r2.md`) on five families: `resvg-safe` accepted as spelled, 0 foreignObject, no PNG capability, roots fit the natural-size rule; drop-shadow filters on every family; labels clipped in class/state/ER | settled (§3.3): merman stays, mmdr not needed on the binding question; §3.4 step 8 added; slice 2 overflow post-pass. Not run: merman's host-text-measurement service, macOS |
 | **R1** real diagrams | 20 Mermaid diagrams Claude actually wrote, all families it used, through resvg and novasvg after the sanitiser, timed and looked at. **The hostile half ran 2026-10-20** (`probe-m1-r2.md`): fan-out 7.2 s / 450 MB from 3.7 KB below usvg's limit; no open or connect through external `url()`; an unknown family falls back to `serif_family` | hostile half settled (§3.4): steps 3 (backstop, kept), 5 (needed as written) and 7 (decides the face) stand. **Still open:** the 20 real diagrams and novasvg, i.e. resvg vs novasvg on cost (§3.3) |
 | ~~R2~~ GIL | **Run 2026-10-20:** `svg_to_bytes` holds the GIL; 281 ms tick gap against 1.65 ms idle | settled (§3.6): a long-lived child process, not a thread |
+| ~~R3~~ cost inside the caps | **Run 2026-10-20** (`figure_render_probe.py r3`, fig-fix), Linux only: mask and clip chains hold a canvas pixmap a level; a pattern tile is allocated whole under its transforms (1 GB, 40 GB asked); layers, mid markers and fine dashes cost seconds from a few elements; `blur()` 0.9 s a canvas | settled (§3.4 steps 2 and 5): `<pattern>` dropped, layer chain cap 4, input element cap, `filter` property dropped, `RLIMIT_AS` 1 GiB on Linux, the timeout for time. **Open:** what is left of memory on macOS, where `RLIMIT_AS` is not enforced |
 | **F1** foreignObject rewrite | the §3.4 rewrite applied to merman `parity` output and to mermaidx output, drawn in resvg and compared with novasvg's native foreignObject | whether rewritten labels are acceptable or the text-only foreignObject subset is needed |
 | **P2** what Claude emits | about 20 "chart of…/diagram of…" prompts with and without the session's fence declaration; count fence languages [relayed design, `data-graphs.md`] | Vega-Lite subset vs CSV-with-info-string for plots; whether plots are worth slice 3 at all |
 | **P3** ImPlot in a page | `begin_plot` issued at a host's cursor mid-page: clipping, scroll, the wheel with `no_inputs` | whether slice 3's host can draw ImPlot inline or needs a child window |
@@ -845,7 +957,7 @@ window, not only with passing tests, because no figure has been seen drawn
      - the host constraints of §3.6: the origin snapped to whole pixels, its
        own clip rect always pushed, textures freed only outside a frame, and
        `imgui.ImTextureRef(tex.texture_id())`;
-     - `text` set to the fence verbatim;
+     - `text` set to the fence as Markdown, reconstructed (§3.2);
      - the code-plus-reason fallback.
    - Tests:
      - the diff rule is unchanged (closed stream only), with the dispatcher

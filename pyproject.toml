@@ -69,9 +69,11 @@ dependencies = [
     "markdown-it-py>=3.0",
     # imscribe reads the faces it sets through fontTools at run time: a theme
     # sizes each face from its file's ascent and descent
-    # (pptmstr/ui/typeset/themes.py, through imscribe's own calls). Nothing in
-    # the pptmstr package imports it; its scripts and tests read font files
-    # with it (scripts/rank_glyphs.py, scripts/survey_fonts.py and
+    # (pptmstr/ui/typeset/themes.py, through imscribe's own calls). In the
+    # pptmstr package, only the figure render child imports it
+    # (pptmstr/figures/render.py, family_name), to read the family names the
+    # font files are mapped under; scripts and tests read font files with it
+    # too (scripts/rank_glyphs.py, scripts/survey_fonts.py and
     # tests/test_splash_art.py among them).
     "fonttools>=4.50",
     # Colours fenced code that names its language (pptmstr/ui/typeset/syntax.py,

@@ -1210,6 +1210,29 @@ def test_the_frame_loop_gives_the_seam_its_turn_between_frames(
         app.begin_frame(state)
 
 
+def test_the_frame_loop_pumps_the_figures_every_frame(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    ``figures.host.pump`` is where a figure's pixels arrive, where a render past its
+    time is stopped, and where textures are let go of. Nothing else calls it: unwired,
+    a hostile render runs on with no figure on screen and every test of the host,
+    which pumps the way the app does, still passes.
+    """
+    from pptmstr import app, theme
+    from pptmstr.ui import typeset
+
+    pumped: list[int] = []
+    monkeypatch.setattr(typeset, "pre_frame", lambda: None)
+    monkeypatch.setattr(theme, "keep_baked_sizes", lambda generation=None: 0)
+    monkeypatch.setattr(app.figure_host, "pump", lambda: pumped.append(1))
+    # The keys read ImGui's input, and there is no ImGui context here.
+    monkeypatch.setattr(app, "_handle_keys", lambda state: None)
+    state = app.AppState(store=Store(), bridge=Bridge(), settings=Settings())
+    state.theme_dirty = False
+    app.begin_frame(state)
+    app.begin_frame(state)
+    assert pumped == [1, 1]
+
+
 def test_the_frame_loop_keeps_the_baked_sizes_once_the_seam_has_had_its_turn(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1821,6 +1844,21 @@ def _quit(outcome: BaseException | None) -> tuple[_QuittingBridge, BaseException
     except BaseException as exc:  # noqa: BLE001 - the test reads what came out
         raised = exc
     return bridge, raised
+
+
+def test_quitting_ends_the_figure_render_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    ``figure_render.shutdown`` kills the render child and waits, boundedly, for it to
+    be reaped. ``_shut_down`` is its one caller, and nothing else in the suite
+    notices if that call goes.
+    """
+    from pptmstr import app
+
+    ended: list[int] = []
+    monkeypatch.setattr(app.figure_render, "shutdown", lambda: ended.append(1))
+    _, raised = _quit(None)
+    assert raised is None
+    assert ended == [1]
 
 
 def test_quitting_waits_for_the_pool_longer_than_the_pool_waits_for_its_runs() -> None:

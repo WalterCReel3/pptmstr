@@ -23,20 +23,30 @@ quiet outline of the right size stands there.
 
 **Textures are held by content** (``_Textures``): ``(sha of the sanitised SVG,
 density, raster width)`` to the ``TextureGpu``, bounded by bytes, least recently
-drawn first out. A view made again finds them. **An evicted texture is not freed
-in the frame that evicted it**: it is parked and dropped in a later frame, after
-the frame that may have drawn it was rendered. T1: a texture dropped between
-``imgui.image`` and that frame's render is a GL error and a blank figure.
+drawn first out. A view made again finds them.
+
+**Results are taken between frames** (``pump``, from the app's pre-new-frame
+callback), every frame whether or not a figure is on screen: that is also where the
+render process's timeout is enforced, so a hostile render is stopped with nothing
+drawing. Uploads and evictions happen there too, so a texture is never let go of
+inside a frame; an evicted one is parked and dropped at the next pump all the same.
+T1: a texture dropped between ``imgui.image`` and that frame's render is a GL error
+and a blank figure.
 
 **A render that fails** leaves the fence's source on screen, under the reason in
-the warn ink, drawn here by ImGui since the block is already a host's by then. The
-failure is kept for the content, so the figure is not asked for again.
+the warn ink, drawn here by ImGui since the block is already a host's by then. A
+failure the renderer says would happen again (``render.Failed.transient`` false:
+resvg refused it, a cap) is kept for the content and the figure is not asked for
+again. One the machine may have caused (the child died, ran out of time or memory,
+did not start) is asked for once more after ``RETRY_AFTER_S``, showing the outline
+meanwhile; a second such failure is kept as the first kind is.
 """
 
 from __future__ import annotations
 
 import hashlib
 import math
+import time
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -57,6 +67,13 @@ TEXTURE_BUDGET_BYTES = 256 << 20
 The RGBA held as textures for figures, across every pane: four rasters at the
 render cap (4096x4096), or about thirty 800x600 figures at a density of 2. On an
 integrated GPU this is system memory.
+"""
+
+RETRY_AFTER_S = 5.0
+"""
+How long after a transient failure a figure is asked for again: past a render
+process's restart, and long enough that a machine that killed one child for memory
+has had a moment to recover.
 """
 
 _MARKS_KEPT = 64
@@ -160,8 +177,8 @@ class _Textures:
     """
     Rasters by content, bounded by bytes, the least recently drawn evicted first.
 
-    An evicted raster is parked with the frame it was evicted in and let go of only
-    in a later frame (``release``).
+    An evicted raster is parked with the pump it was evicted in and let go of only
+    at a later one (``release``).
     """
 
     def __init__(self, budget: int) -> None:
@@ -188,23 +205,23 @@ class _Textures:
                 return raster
         return None
 
-    def put(self, key: _Key, raster: _Raster, frame: int) -> None:
+    def put(self, key: _Key, raster: _Raster, at: int) -> None:
         old = self._held.pop(key, None)
         if old is not None:
             self._bytes -= old.nbytes
-            self.parked.append((frame, old))
+            self.parked.append((at, old))
         self._held[key] = raster
         self._bytes += raster.nbytes
         while self._bytes > self.budget and len(self._held) > 1:
             _, evicted = self._held.popitem(last=False)
             self._bytes -= evicted.nbytes
-            self.parked.append((frame, evicted))
+            self.parked.append((at, evicted))
 
-    def release(self, frame: int) -> int:
+    def release(self, now: int) -> int:
         """
-        Let go of every raster parked before ``frame``. How many that was.
+        Let go of every raster parked before ``now``. How many that was.
         """
-        keep = [(at, raster) for at, raster in self.parked if at >= frame]
+        keep = [(at, raster) for at, raster in self.parked if at >= now]
         dropped = len(self.parked) - len(keep)
         self.parked = keep
         return dropped
@@ -229,42 +246,87 @@ def _upload(rgba: bytes, width: int, height: int) -> Any:
 @dataclass
 class _State:
     textures: _Textures
+    # Failures shown in place of the figure, by sha: kept for good.
     failures: OrderedDict[str, str]
     # What has been asked of the renderer and not answered: the raster width, by
     # (sha, density).
     asked: dict[tuple[str, float], int]
-    pumped: int = -1
+    # Content whose first transient failure is waiting out its back-off: when it
+    # may be asked again.
+    backoff: OrderedDict[str, float]
+    # Content asked again after a transient failure; another one is kept for good.
+    retried: OrderedDict[str, None]
+    pumps: int = 0
     upload: Callable[[bytes, int, int], Any] = _upload
     renderer: Callable[[], render.Renderer] = render.renderer
+    clock: Callable[[], float] = time.monotonic
 
 
-_STATE = _State(_Textures(TEXTURE_BUDGET_BYTES), OrderedDict(), {})
+_STATE = _State(_Textures(TEXTURE_BUDGET_BYTES), OrderedDict(), {}, OrderedDict(), OrderedDict())
 
 
-def pump(frame: int) -> None:
+def pump() -> None:
     """
-    Once a frame, from the first figure drawn in it: take what the renderer has
-    finished, upload it, and let go of what was parked in an earlier frame.
+    Once a frame, between frames (the app's pre-new-frame callback): let go of what
+    an earlier pump parked, take what the renderer has finished (which is also where
+    it stops a render past its time), and upload it.
+
+    Never raises. A result that cannot be taken, an upload that fails among them,
+    is that figure's failure and does not cost the others.
     """
     state = _STATE
-    if state.pumped == frame:
+    state.pumps += 1
+    try:
+        state.textures.release(state.pumps)
+        results = state.renderer().poll()
+    except Exception:
         return
-    state.pumped = frame
-    state.textures.release(frame)
-    for result in state.renderer().poll():
+    for result in results:
         key = result.key
         if not (isinstance(key, tuple) and len(key) == 2):
             continue
         sha, scale = key
         state.asked.pop(key, None)
-        if isinstance(result, render.Rendered):
-            texture = state.upload(result.rgba, result.width, result.height)
-            raster = _Raster(texture, result.width, result.height)
-            state.textures.put((sha, scale, result.width), raster, frame)
-        else:
-            state.failures[sha] = result.reason
-            while len(state.failures) > _FAILURES_KEPT:
-                state.failures.popitem(last=False)
+        try:
+            _take(state, sha, scale, result)
+        except Exception as exc:
+            _keep(state.failures, sha, f"texture upload failed: {render._one_line(exc)}")
+
+
+def _take(state: _State, sha: str, scale: float, result: render.Result) -> None:
+    if isinstance(result, render.Rendered):
+        texture = state.upload(result.rgba, result.width, result.height)
+        raster = _Raster(texture, result.width, result.height)
+        state.textures.put((sha, scale, result.width), raster, state.pumps)
+        state.backoff.pop(sha, None)
+    elif result.transient and sha not in state.retried:
+        _keep(state.backoff, sha, state.clock() + RETRY_AFTER_S)
+    else:
+        state.backoff.pop(sha, None)
+        _keep(state.failures, sha, result.reason)
+
+
+def _keep(held: OrderedDict[str, Any], sha: str, value: Any) -> None:
+    held[sha] = value
+    held.move_to_end(sha)
+    while len(held) > _FAILURES_KEPT:
+        held.popitem(last=False)
+
+
+def _may_ask(sha: str) -> bool:
+    """
+    Whether content may be asked of the renderer now: not while its back-off from
+    a transient failure runs. The ask that ends one is its one retry.
+    """
+    state = _STATE
+    at = state.backoff.get(sha)
+    if at is None:
+        return True
+    if state.clock() < at:
+        return False
+    del state.backoff[sha]
+    _keep(state.retried, sha, None)
+    return True
 
 
 def release_all() -> None:
@@ -275,18 +337,21 @@ def release_all() -> None:
     _STATE.textures.clear()
     _STATE.failures.clear()
     _STATE.asked.clear()
-    _STATE.pumped = -1
+    _STATE.backoff.clear()
+    _STATE.retried.clear()
+    _STATE.pumps = 0
 
 
 # The widget -------------------------------------------------------------------------
 
 
-def snapped(x: float, y: float) -> tuple[float, float]:
+def snapped(x: float, y: float, density: float = 1.0) -> tuple[float, float]:
     """
-    An origin on whole pixels. T1: a raster drawn at a fractional origin lost 41% of
-    its dark ink to the sampler's smear.
+    An origin on the nearest whole pixel of the framebuffer, ``density`` of them to a
+    unit of ImGui's. T1: a raster drawn at a fractional origin lost 41% of its dark
+    ink to the sampler's smear.
     """
-    return float(math.floor(x)), float(math.floor(y))
+    return round(x * density) / density, round(y * density) / density
 
 
 class FigureWidget:
@@ -301,6 +366,10 @@ class FigureWidget:
         # it has been wanted.
         self._wanted: tuple[float, int] | None = None
         self._since = 0
+        # The failed form's measure: (drawn width, font size, reason) to the heights
+        # of its reason and its source. Measuring the source is a pass over up to a
+        # megabyte, and height_for is asked every frame, on screen or not.
+        self._measured: tuple[tuple[float, float, str], tuple[float, float]] | None = None
 
     @property
     def mark(self) -> FigureMark:
@@ -324,24 +393,26 @@ class FigureWidget:
     def height_for(self, width_px: float) -> float:
         failure = self._failure()
         if failure is not None:
-            return _failed_height(refusal_line(failure), self._text, width_px)
+            said, source = self._failed_heights(refusal_line(failure), width_px)
+            return said + _spacing() + source
         return self.size_for(width_px)[1]
 
     def draw(self, *, palette: Any = None, width_px: float | None = None) -> object:
         from imgui_bundle import imgui as im
 
-        pump(im.get_frame_count())
         wide = float(width_px if width_px is not None else im.get_content_region_avail().x)
+        at = im.get_cursor_screen_pos()
         failure = self._failure()
         if failure is not None:
-            _draw_failed(im, refusal_line(failure), self._text, wide)
+            self._draw_failed(im, refusal_line(failure), at.x, at.y, wide)
             return True
-        at = im.get_cursor_screen_pos()
-        x, y = snapped(at.x, at.y)
         w, h = self.size_for(wide)
-        im.push_clip_rect(im.ImVec2(x, y), im.ImVec2(x + wide, y + h), True)
+        # The block's own rectangle: nothing drawn here reaches above or left of it.
+        im.push_clip_rect(im.ImVec2(at.x, at.y), im.ImVec2(at.x + wide, at.y + h), True)
         try:
-            raster = self._raster(im, w)
+            scale = _density(im)
+            x, y = snapped(at.x, at.y, scale)
+            raster = self._raster(im, w, scale)
             if raster is None:
                 from .. import theme
 
@@ -349,7 +420,6 @@ class FigureWidget:
                     im.ImVec2(x, y), im.ImVec2(x + w, y + h), theme.P.border.u32
                 )
             else:
-                scale = _density(im)
                 im.set_cursor_screen_pos(im.ImVec2(x, y))
                 exact = raster.width == round(w * scale)
                 size = (raster.width / scale, raster.height / scale) if exact else (w, h)
@@ -358,12 +428,11 @@ class FigureWidget:
             im.pop_clip_rect()
         return True
 
-    def _raster(self, im: Any, w: float) -> _Raster | None:
+    def _raster(self, im: Any, w: float, scale: float) -> _Raster | None:
         """
         The raster to draw at drawn width ``w``, asking for the right one where it is
         not held.
         """
-        scale = _density(im)
         width, _ = render.raster_size(self._mark.sanitised, w, scale)
         frame = im.get_frame_count()
         if self._wanted != (scale, width):
@@ -374,10 +443,47 @@ class FigureWidget:
             return held
         meanwhile = _STATE.textures.any_of(sha, scale)
         if meanwhile is None or frame - self._since >= STABLE_FRAMES:
-            if _STATE.asked.get((sha, scale)) != width:
+            if _STATE.asked.get((sha, scale)) != width and _may_ask(sha):
                 _STATE.asked[(sha, scale)] = width
                 _STATE.renderer().submit((sha, scale), self._mark.sanitised, w, scale)
         return meanwhile
+
+    def _failed_heights(self, reason: str, wide: float) -> tuple[float, float]:
+        """
+        How tall the reason and the source are, wrapped at ``wide`` in the current
+        font: measured once for each width, size and reason.
+        """
+        from imgui_bundle import imgui as im
+
+        key = (wide, float(im.get_font_size()), reason)
+        if self._measured is None or self._measured[0] != key:
+            said = float(im.calc_text_size(reason, None, False, wide).y)
+            source = float(im.calc_text_size(self._text, None, False, wide).y)
+            self._measured = key, (said, source)
+        return self._measured[1]
+
+    def _draw_failed(self, im: Any, reason: str, x: float, y: float, wide: float) -> None:
+        """
+        The reason in the warn ink and the fence's source under it, wrapped to the
+        rectangle ``height_for`` gave and clipped to it.
+
+        Drawn on the draw list rather than as text items: a text item measures the
+        whole of a wrapped text every frame to size itself, where the draw list's
+        text stops at the bottom of the clip.
+        """
+        from .. import theme
+
+        said, source = self._failed_heights(reason, wide)
+        bottom = y + said + _spacing() + source
+        im.push_clip_rect(im.ImVec2(x, y), im.ImVec2(x + wide, bottom), True)
+        try:
+            dl = im.get_window_draw_list()
+            font, size = im.get_font(), im.get_font_size()
+            dl.add_text(font, size, im.ImVec2(x, y), theme.P.warn.u32, reason, None, wide)
+            under = im.ImVec2(x, y + said + _spacing())
+            dl.add_text(font, size, under, theme.P.text_dim.u32, self._text, None, wide)
+        finally:
+            im.pop_clip_rect()
 
 
 def _density(im: Any) -> float:
@@ -388,32 +494,10 @@ def _density(im: Any) -> float:
     return scale if math.isfinite(scale) and scale >= 1.0 else 1.0
 
 
-def _failed_height(reason: str, text: str, wide: float) -> float:
+def _spacing() -> float:
     from imgui_bundle import imgui as im
 
-    spacing = im.get_style().item_spacing.y
-    said = im.calc_text_size(reason, None, False, wide).y
-    source = im.calc_text_size(text, None, False, wide).y
-    return float(said + spacing + source)
-
-
-def _draw_failed(im: Any, reason: str, text: str, wide: float) -> None:
-    """
-    The reason in the warn ink and the fence's source under it, wrapped to the
-    rectangle, which is ``_failed_height`` tall.
-    """
-    from .. import theme
-
-    im.push_text_wrap_pos(im.get_cursor_pos().x + wide)
-    try:
-        im.push_style_color(im.Col_.text.value, theme.P.warn.vec4)
-        im.text_unformatted(reason)
-        im.pop_style_color()
-        im.push_style_color(im.Col_.text.value, theme.P.text_dim.vec4)
-        im.text_unformatted(text)
-        im.pop_style_color()
-    finally:
-        im.pop_text_wrap_pos()
+    return float(im.get_style().item_spacing.y)
 
 
 def figure_for(view: Any, number: int, block: Any) -> FigureWidget | None:

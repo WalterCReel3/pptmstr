@@ -620,9 +620,10 @@ class _Captioned:
     ``hosting``). Until then it is code under its caption. The mark has to change
     the block's value at commit: the view asks its host about a block only when
     the block is a new value, and a committed fence is the same object as its
-    last open form (probe S1, the planning record's §3.6). So whether a block has
-    settled is part of what its answer is kept by, and ``revision`` changes with
-    ``closed`` too.
+    last open form (probe S1, the planning record's §3.6). So whether an svg
+    fence has settled is part of what its answer is kept by, and ``revision``
+    changes with ``closed`` too. Any other fence is answered with the same block
+    across its commit, so the view does not describe it again.
     """
 
     def __init__(self, stream: Any) -> None:
@@ -646,6 +647,8 @@ class _Captioned:
 
     @property
     def blocks(self) -> tuple[Any, ...]:
+        from ...figures import host as figures_host
+
         made: dict[int, tuple[Any, bool, bool, bool, tuple[Any, ...]]] = {}
         out: list[Any] = []
         came: list[int] = []
@@ -658,7 +661,8 @@ class _Captioned:
                 came.append(at)
                 own.append(True)
                 continue
-            settled = self.closed or at < done
+            figure = figures_host.is_figure_fence(block.language)
+            settled = figure and (self.closed or at < done)
             held = self._made.get(id(block))
             if held is None or held[0] is not block or held[1:4] != (plain, hosting, settled):
                 answer = _captioned((block,), hosting, plain=plain, figures=settled)

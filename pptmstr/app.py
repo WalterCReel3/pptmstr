@@ -1487,6 +1487,9 @@ def begin_frame(state: AppState) -> None:
     # ImGui's font size is the UI font's and not one a pane pushed.
     typeset.pre_frame()
     _keep_baked_sizes()
+    # Every frame, figure or none on screen: the render process's timeout is
+    # enforced here, and textures are uploaded and let go of only between frames.
+    figure_host.pump()
     if state.pending_layout is not None:
         hello_imgui.switch_layout(state.pending_layout)
         state.pending_layout = None

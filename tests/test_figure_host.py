@@ -86,7 +86,12 @@ def figures(seam: Any, monkeypatch: pytest.MonkeyPatch) -> Iterator[Renderer]:
 
 
 def frame(im: Any, body: Callable[[], object]) -> None:
+    """
+    One frame as the app runs it: the seam's turn and the figures' pump before
+    ``new_frame`` (``app.begin_frame``), then ``body`` in a window.
+    """
     typeset.pre_frame()
+    host.pump()
     im.new_frame()
     im.set_next_window_pos(im.ImVec2(10.0, 10.0))
     im.set_next_window_size(im.ImVec2(*WINDOW))
@@ -284,11 +289,20 @@ def test_a_figure_rehosted_after_forget_answers_its_height_at_once_and_reuses_it
     assert len(figures.asked) == 1, "the raster held for the content is drawn again"
 
 
-def test_the_figure_is_drawn_at_a_whole_pixel_origin_inside_its_own_clip(
-    figures: Renderer, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize(
+    "density, origin",
+    [(1.0, (40.0, 121.0)), (1.5, (61 / 1.5, 182 / 1.5)), (2.0, (40.5, 121.0))],
+)
+def test_the_figure_is_drawn_at_the_nearest_device_pixel_inside_its_blocks_clip(
+    figures: Renderer, monkeypatch: pytest.MonkeyPatch, density: float, origin: tuple[float, float]
 ) -> None:
+    """
+    The origin is the nearest whole pixel of the framebuffer, and the clip is the
+    block's own rectangle: nothing is drawn above or left of where imscribe put it.
+    """
     from imgui_bundle import imgui
 
+    monkeypatch.setattr(host, "_density", lambda im: density)
     widget = host.FigureWidget(_marked(), FIG)
     seen: list[tuple[float, float, float, float, float, float]] = []
 
@@ -311,9 +325,13 @@ def test_the_figure_is_drawn_at_a_whole_pixel_origin_inside_its_own_clip(
     figures.answer_last()
     frame(_IM[0], body)
     ((x, y, cx0, cy0, cx1, cy1),) = seen
-    assert (x, y) == (40.0, 121.0)
-    assert (cx0, cy0) == (40.0, 121.0)
-    assert (cx1, cy1) == (190.0, 121.0 + 75.0)
+    assert (x, y) == pytest.approx(origin, abs=1e-4)
+    assert (x * density, y * density) == pytest.approx(
+        (round(x * density), round(y * density)), abs=1e-3
+    )
+    # ImGui keeps clip rectangles in float: the block's corner, unsnapped.
+    assert (cx0, cy0) == pytest.approx((40.4, 121.237), abs=1e-4)
+    assert (cx1, cy1) == pytest.approx((40.4 + 150.0, 121.237 + 75.0), abs=1e-4)
 
 
 def test_a_new_width_is_asked_for_only_once_it_has_held(figures: Renderer) -> None:
@@ -331,22 +349,232 @@ def test_a_new_width_is_asked_for_only_once_it_has_held(figures: Renderer) -> No
 
 
 def test_a_render_that_fails_keeps_the_fence_source_on_screen_under_its_reason(
-    figures: Renderer,
+    figures: Renderer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """
+    In imscribe's order, ``height_for`` and then ``draw``: from the frame the failure
+    arrives in, the height asked is the failed form's, and what is drawn is clipped
+    to that rectangle, so nothing lands on the prose below.
+    """
+    from imgui_bundle import imgui
+
     widget = host.FigureWidget(_marked(), FIG)
     frame(_IM[0], lambda: widget.draw(width_px=300.0))
+    figure_height = widget.height_for(300.0)
     key = figures.asked[-1][0]
-    figures.answers.append(render.Failed(key, "render took longer than 10 s and was stopped"))
+    figures.answers.append(render.Failed(key, "resvg refused the document"))
+    clips: list[tuple[float, float, float, float]] = []
+    push = imgui.push_clip_rect
+
+    def recorded(low: Any, high: Any, intersect: bool) -> None:
+        clips.append((low.x, low.y, high.x, high.y))
+        push(low, high, intersect)
+
+    monkeypatch.setattr(imgui, "push_clip_rect", recorded)
     heights: list[float] = []
+    at: list[tuple[float, float]] = []
 
     def body() -> None:
-        widget.draw(width_px=300.0)
         heights.append(widget.height_for(300.0))
+        here = imgui.get_cursor_screen_pos()
+        at.append((here.x, here.y))
+        widget.draw(width_px=300.0)
 
     frame(_IM[0], body)
+    assert heights[0] > figure_height, "the frame the failure lands in lays out the source"
+    x, y = at[0]
+    assert clips == [(x, y, x + 300.0, y + heights[0])]
     frame(_IM[0], body)
-    assert heights[-1] > 100.0, "the source is taller than the figure would have been"
+    assert heights[1] == heights[0]
     assert widget.text.startswith("```svg\n<svg")
+
+
+def test_the_failed_forms_height_is_measured_once_for_a_width(
+    figures: Renderer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from imgui_bundle import imgui
+
+    widget = host.FigureWidget(_marked(), FIG)
+    frame(_IM[0], lambda: widget.draw(width_px=300.0))
+    figures.answers.append(render.Failed(figures.asked[-1][0], "refused"))
+    measured: list[str] = []
+    calc = imgui.calc_text_size
+
+    def counting(text: str, *rest: Any) -> Any:
+        measured.append(text)
+        return calc(text, *rest)
+
+    monkeypatch.setattr(imgui, "calc_text_size", counting)
+    for _ in range(4):
+        frame(_IM[0], lambda: (widget.height_for(300.0), widget.draw(width_px=300.0)))
+    assert measured.count(widget.text) == 1
+    frame(_IM[0], lambda: widget.height_for(250.0))
+    assert measured.count(widget.text) == 2
+
+
+class Clock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def test_a_transient_failure_is_asked_again_once_after_the_back_off(
+    figures: Renderer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock()
+    monkeypatch.setattr(host._STATE, "clock", clock)
+    widget = host.FigureWidget(_marked(), FIG)
+
+    def draw() -> None:
+        widget.draw(width_px=150.0)
+
+    frame(_IM[0], draw)
+    key = figures.asked[-1][0]
+    figures.answers.append(render.Failed(key, "render process died", transient=True))
+    for _ in range(3):
+        frame(_IM[0], draw)
+    assert len(figures.asked) == 1, "not asked again inside the back-off"
+    assert widget.height_for(150.0) == 75.0, "the figure's room, with the outline in it"
+    clock.now += host.RETRY_AFTER_S
+    frame(_IM[0], draw)
+    frame(_IM[0], draw)
+    assert len(figures.asked) == 2, "asked once more after it"
+    figures.answer_last()
+    frame(_IM[0], draw)
+    assert widget._failure() is None
+    assert len(host._STATE.textures) == 1
+
+
+def test_a_second_transient_failure_is_kept(
+    figures: Renderer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock()
+    monkeypatch.setattr(host._STATE, "clock", clock)
+    widget = host.FigureWidget(_marked(), FIG)
+
+    def draw() -> None:
+        widget.draw(width_px=150.0)
+
+    frame(_IM[0], draw)
+    key = figures.asked[-1][0]
+    figures.answers.append(render.Failed(key, "render took longer than 10 s", transient=True))
+    frame(_IM[0], draw)
+    clock.now += host.RETRY_AFTER_S
+    frame(_IM[0], draw)
+    assert len(figures.asked) == 2
+    figures.answers.append(render.Failed(key, "render took longer than 10 s", transient=True))
+    frame(_IM[0], draw)
+    assert widget._failure() == "render took longer than 10 s"
+    clock.now += 10 * host.RETRY_AFTER_S
+    for _ in range(3):
+        frame(_IM[0], draw)
+    assert len(figures.asked) == 2, "never asked again"
+
+
+def test_a_failure_that_is_not_transient_is_kept_at_once(figures: Renderer) -> None:
+    widget = host.FigureWidget(_marked(), FIG)
+    frame(_IM[0], lambda: widget.draw(width_px=150.0))
+    figures.answers.append(render.Failed(figures.asked[-1][0], "over the cap"))
+    for _ in range(3):
+        frame(_IM[0], lambda: widget.draw(width_px=150.0))
+    assert widget._failure() == "over the cap"
+    assert len(figures.asked) == 1
+
+
+def test_an_upload_that_raises_fails_its_own_figure_and_not_the_others(
+    figures: Renderer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    one, two = host.FigureWidget(_marked(), FIG), host.FigureWidget(_marked("#36c"), FIG)
+
+    def both() -> None:
+        one.draw(width_px=150.0)
+        two.draw(width_px=150.0)
+
+    frame(_IM[0], both)
+    assert len(figures.asked) == 2
+    figures.answer_last()
+    key, sanitised, px_width, scale = figures.asked[0]
+    width, height = render.raster_size(sanitised, px_width, scale)
+    figures.answers.insert(
+        0, render.Rendered(key, width, height, bytes(width * height * 4), px_width, scale)
+    )
+    uploaded: list[int] = []
+
+    def upload(rgba: bytes, w: int, h: int) -> Texture:
+        if not uploaded:
+            uploaded.append(0)
+            raise RuntimeError("GL_INVALID_VALUE")
+        uploaded.append(w)
+        return Texture(len(uploaded))
+
+    monkeypatch.setattr(host._STATE, "upload", upload)
+    frame(_IM[0], both)
+    assert one._failure() == "texture upload failed: RuntimeError: GL_INVALID_VALUE"
+    assert two._failure() is None
+    assert len(host._STATE.textures) == 1
+    assert host._STATE.asked == {}, "neither is left waiting for an answer"
+
+
+def test_the_pump_takes_results_with_no_figure_on_screen(figures: Renderer) -> None:
+    polled: list[int] = []
+    poll = figures.poll
+
+    def counted() -> list[render.Result]:
+        polled.append(1)
+        return poll()
+
+    figures.poll = counted  # type: ignore[method-assign]
+    for _ in range(3):
+        frame(_IM[0], lambda: None)
+    assert len(polled) == 3
+
+
+def test_figure_widget_draw_does_not_pump(
+    figures: Renderer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    widget = host.FigureWidget(_marked(), FIG)
+    calls: list[int] = []
+    monkeypatch.setattr(host, "pump", lambda: calls.append(1))
+    _IM[0].new_frame()
+    try:
+        widget.draw(width_px=150.0)
+    finally:
+        _IM[0].end_frame()
+    assert calls == []
+
+
+def test_only_a_figure_fence_changes_its_answer_at_commit(figures: Renderer) -> None:
+    """
+    A stream's code fence is the same block object before and after commit (S1),
+    and is answered with the same block too, so the view does not describe it
+    again; an svg fence is answered anew, as a figure.
+    """
+    from imscribe import parse_markdown
+
+    from pptmstr.ui.typeset import themes
+
+    blocks = parse_markdown(
+        f"```python\nx = 1\n```\n\n```svg\n{FIG}\n```\n", themes.document_theme()
+    ).blocks
+
+    class Library:
+        revision = 0
+        committed: tuple[Any, ...] = ()
+        sources: tuple[Any, ...] = ()
+
+        def __init__(self) -> None:
+            self.blocks = blocks
+
+    library = Library()
+    captioned = views._Captioned(library)
+    before = captioned.blocks
+    library.committed = tuple(blocks)
+    after = captioned.blocks
+    assert after[0] is before[0], "the python fence keeps its answer"
+    assert after[-1] is not before[-1]
+    assert isinstance(after[-1].language, host.FigureMark)
 
 
 # -- textures are let go of between frames ---------------------------------------------
@@ -356,9 +584,9 @@ def test_an_evicted_texture_is_parked_and_let_go_of_only_in_a_later_frame() -> N
     textures = host._Textures(budget=100 * 100 * 4)
     first = Texture(1)
     alive = weakref.ref(first)
-    textures.put(("a", 1.0, 100), host._Raster(first, 100, 100), frame=7)
+    textures.put(("a", 1.0, 100), host._Raster(first, 100, 100), at=7)
     del first
-    textures.put(("b", 1.0, 100), host._Raster(Texture(2), 100, 100), frame=7)
+    textures.put(("b", 1.0, 100), host._Raster(Texture(2), 100, 100), at=7)
     gc.collect()
     assert alive() is not None, "evicted in frame 7 and still held in it"
     assert textures.release(7) == 0

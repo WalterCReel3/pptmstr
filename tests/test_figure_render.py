@@ -12,6 +12,7 @@ import math
 import multiprocessing
 import os
 import signal
+import sys
 import time
 from collections.abc import Hashable, Iterator
 
@@ -19,7 +20,10 @@ import pytest
 
 from pptmstr.figures.render import (
     MAX_RASTER_PIXELS,
+    MAX_TEXTURE_SIDE,
+    MEMORY_LIMIT_BYTES,
     Failed,
+    Fonts,
     Rendered,
     Renderer,
     Result,
@@ -153,6 +157,41 @@ def test_a_request_is_shrunk_to_the_pixel_cap_at_the_natural_aspect() -> None:
     assert raster_size(raw("", 400, 300), float("nan"), 1.0) == (1, 1)
 
 
+@pytest.mark.parametrize(
+    "natural, px_width, scale",
+    [
+        ((2, 16384), 2.0, 1.0),
+        ((1000, 16384), 800.0, 2.0),
+        ((16384, 1), 16384.0, 2.0),
+        ((3, 16383), 3.0, 2.0),
+        ((7, 16381), 7.0, 3.0),
+        ((800, 3000), 800.0, 2.0),
+    ],
+)
+def test_a_raster_has_no_side_over_the_texture_side_at_any_density(
+    natural: tuple[int, int], px_width: float, scale: float
+) -> None:
+    w, h = raster_size(raw("", *natural), px_width, scale)
+    assert max(w, h) <= MAX_TEXTURE_SIDE
+    assert w * h <= MAX_RASTER_PIXELS
+
+
+def test_a_long_figure_at_density_two_is_shrunk_to_the_side() -> None:
+    # 1600x26215 before the side was held after density: under the pixel cap, over
+    # what llvmpipe takes (16384), and blank at upload.
+    assert raster_size(raw("", 1000, 16384), 800.0, 2.0) == (500, 8192)
+
+
+def test_a_one_by_16384_figure_at_density_two_is_refused_by_the_child() -> None:
+    # 2x32768 before the side was held. At one pixel wide it is still 16384 tall,
+    # over the side, so the child refuses it rather than make a texture that fails.
+    one = raw("", 1, 16384)
+    w, h = raster_size(one, 1.0, 2.0)
+    assert (w, h) == (1, 16384)
+    with pytest.raises(ValueError, match="side over"):
+        render_png(one.svg, w, {})
+
+
 # Through the child ------------------------------------------------------------------
 
 
@@ -218,6 +257,7 @@ def test_a_render_over_the_time_limit_is_killed_and_reported_and_the_next_succee
         result = wait_for(renderer, "slow")
         assert isinstance(result, Failed)
         assert "longer than 0.3 s" in result.reason
+        assert result.transient
         assert gone(pid)
         renderer.submit("after", sanitised('<rect width="10" height="10"/>'), 50, 1.0)
         assert isinstance(wait_for(renderer, "after"), Rendered)
@@ -247,6 +287,7 @@ def test_a_killed_child_is_replaced() -> None:
         result = wait_for(renderer, "killed-mid-render")
         assert isinstance(result, Failed)
         assert "killed by signal 9" in result.reason
+        assert result.transient
         renderer.submit("after-busy-kill", figure, 50, 1.0)
         assert isinstance(wait_for(renderer, "after-busy-kill"), Rendered)
         assert renderer.pid not in (None, idle, busy)
@@ -308,3 +349,67 @@ def test_shutdown_leaves_no_child() -> None:
     assert gone(pid, 0.5)
     assert renderer.pid is None
     assert pid not in {child.pid for child in multiprocessing.active_children()}
+
+
+def test_an_answer_the_child_gives_is_a_failure_that_is_not_transient(shared: Renderer) -> None:
+    sliver = Sanitised(
+        svg=f'<svg xmlns="{SVG_NS}" width="0.5" height="16384"/>', width=0.5, height=16384.0
+    )
+    shared.submit("sliver", sliver, 0.5, 2.0)
+    result = wait_for(shared, "sliver")
+    assert isinstance(result, Failed)
+    assert "side over" in result.reason
+    assert not result.transient
+
+
+def _pattern(extra: str) -> Sanitised:
+    """
+    A 1600x1200 figure filled from one pattern tile, which resvg allocates whole at
+    its size under every transform above it. Not sanitised: the sanitiser drops
+    ``<pattern>`` for this reason, and what is held here is the child's own limit.
+    """
+    full = 'width="1600" height="1200"'
+    return raw(
+        f'<defs><pattern id="p" width="100" height="100" patternUnits="userSpaceOnUse"{extra}>'
+        f'<rect width="100" height="100" fill="#c33"/></pattern></defs>'
+        f'<rect {full} fill="url(#p)"/>',
+        1600,
+        1200,
+    )
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="RLIMIT_AS is enforced on Linux")
+def test_a_render_over_the_memory_limit_is_a_transient_failure_and_the_child_is_replaced() -> None:
+    # A 16384-px tile, 1 GiB of RGBA: rendered without the limit (probe R3, 1088 MB).
+    assert 16384 * 16384 * 4 >= MEMORY_LIMIT_BYTES
+    renderer = Renderer()
+    try:
+        renderer.submit("small", _pattern(""), 160, 1.0)
+        assert isinstance(wait_for(renderer, "small"), Rendered)
+        pid = renderer.pid
+        renderer.submit("huge", _pattern(' patternTransform="scale(163.84)"'), 1600, 1.0)
+        result = wait_for(renderer, "huge")
+        assert isinstance(result, Failed), "rendered: the child's memory is not limited"
+        assert result.transient
+        assert "memory limit" in result.reason
+        renderer.submit("after", _pattern(""), 160, 1.0)
+        assert isinstance(wait_for(renderer, "after"), Rendered)
+        assert renderer.pid not in (None, pid)
+    finally:
+        renderer.shutdown()
+
+
+def test_a_child_that_cannot_be_started_is_reported_at_once() -> None:
+    class Unpicklable(Fonts):
+        def __reduce__(self) -> str:
+            raise TypeError("cannot be sent to a child")
+
+    renderer = Renderer(fonts=lambda: Unpicklable((), "", ""), start_timeout_s=30.0)
+    try:
+        renderer.submit("unstarted", raw(""), 100, 1.0)
+        result = wait_for(renderer, "unstarted", seconds=5.0)
+        assert isinstance(result, Failed)
+        assert "cannot be sent" in result.reason
+        assert result.transient
+    finally:
+        renderer.shutdown()

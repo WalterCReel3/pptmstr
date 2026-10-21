@@ -40,6 +40,7 @@ import math
 import queue
 import signal
 import struct
+import sys
 import threading
 import time
 import xml.etree.ElementTree as ET
@@ -51,7 +52,7 @@ from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from typing import Any
 
-from .sanitise import MAX_NATURAL_PIXELS, MAX_SIDE, Sanitised
+from .sanitise import MAX_NATURAL_PIXELS, Sanitised
 
 RENDER_TIMEOUT_S = 10.0
 """
@@ -62,9 +63,11 @@ The largest legitimate raster is ``MAX_RASTER_PIXELS``: 1,200 rects and labels a
 merman diagrams took 70-282 ms at 800 px). The operator's machine ran the same grid
 about 1.6 times slower than this one (``probe-m1-r2.md``), so about 2 s is the worst
 legitimate case, and ten seconds leaves five times that. A render past it is a hang
-or hostile input; the sanitiser's element cap bounds the latter at about half a
-second of ``<use>`` expansion (R1a, 0.11 ms per expanded leaf). The cost of a longer
-limit is that every other figure waits behind a stuck one for that long.
+or hostile input. This, and not the sanitiser, is what bounds render time: the
+sanitiser's caps bound how many elements resvg instantiates, but a few elements can
+cost seconds (probe R3, 1600x1200: 62 full-canvas opacity layers 6 s, a 60,000-vertex
+path with a mid marker 17 s, 4,000 lines dashed at 0.001 over a minute). The cost of
+a longer limit is that every other figure waits behind a stuck one for that long.
 """
 
 START_TIMEOUT_S = 20.0
@@ -82,6 +85,41 @@ The most pixels one raster may have: 4096x4096, 64 MiB of RGBA.
 The same number the sanitiser caps natural size at. ``submit`` shrinks a request to
 fit it, and the child refuses anything over it again before rendering and after,
 so a raster this large never crosses the pipe.
+"""
+
+MEMORY_LIMIT_BYTES = 1 << 30
+"""
+The address space a render child may have, on Linux, where ``RLIMIT_AS`` is enforced.
+
+What it bounds is what the sanitiser does not see: references made from ``<style>``
+rules, and anything resvg allocates that the caps did not foresee. A ``<pattern>``
+tile, allocated at its size under every transform above it, took 1 GB under
+``scale(160)`` and asked for 40 GB under ``scale(1000)`` (probe R3), and is why the
+sanitiser drops ``<pattern>``: this limit caught it here and nothing would on
+macOS. The largest
+legitimate render, the 1,200-label grid at 4096x3072, peaked at about 300 MB of
+address space, and the deepest mask chain the sanitiser admits at 692 MB at
+4096x4096; a gibibyte holds both. Past it resvg's allocation fails and the child
+aborts, which the I/O thread reports as the render's failure and the next request
+replaces the child; an allocation that fails in Python is answered as that render's
+error.
+
+macOS does not enforce ``RLIMIT_AS``, so there nothing bounds a child's memory but
+``RENDER_TIMEOUT_S``.
+"""
+
+MAX_TEXTURE_SIDE = 8192
+"""
+The longest side a raster may have: a conservative constant, not read from GL.
+
+An upload over the GPU's ``GL_MAX_TEXTURE_SIZE`` does not raise: on llvmpipe a
+2x32768 array gave a texture and ``GL_INVALID_VALUE`` (1281), so a blank figure
+(fig-fix, Xvfb). This clamp is therefore the only guard, and reading the GL limit
+needs PyOpenGL, which is a ``dev`` extra only. llvmpipe and GL 4.1 on macOS report
+16384; 8192 leaves room for an older or smaller GPU. ``MAX_RASTER_PIXELS`` already
+bounds the area, so this only shrinks a long raster: at the pixel cap, one more than
+four times as long as it is wide; and a long figure at density 2. A figure more than
+8192 times as long as it is wide cannot fit at one pixel and is refused.
 """
 
 _SHUTDOWN_WAIT_S = 2.0
@@ -109,10 +147,16 @@ class Rendered:
 class Failed:
     """
     A render of ``key`` that produced nothing, with the one-line reason a host shows.
+
+    ``transient`` is whether the same request may succeed if asked again: the child
+    died, was killed for time or did not start, which the machine's state can cause.
+    An answer the child gave (resvg refused the document, a cap was hit, the
+    renderer could not load) is not transient: it would be the same again.
     """
 
     key: Hashable
     reason: str
+    transient: bool = False
 
 
 Result = Rendered | Failed
@@ -150,13 +194,20 @@ def imscribe_fonts() -> Fonts:
 def raster_size(sanitised: Sanitised, px_width: float, scale: float) -> tuple[int, int]:
     """
     The raster ``submit`` asks for: ``px_width * scale`` wide, at the natural aspect,
-    shrunk to fit ``MAX_RASTER_PIXELS`` and ``MAX_SIDE``. At least 1x1.
+    shrunk so that it fits ``MAX_RASTER_PIXELS`` and neither side is longer than
+    ``MAX_TEXTURE_SIDE``. At least 1x1.
+
+    Only a figure more than ``MAX_TEXTURE_SIDE`` times taller than it is wide cannot
+    fit at one pixel wide; its height is then over the side, and the child refuses it.
     """
     aspect = sanitised.height / sanitised.width
     wanted = px_width * scale
-    width = max(1, min(int(MAX_SIDE), round(wanted) if math.isfinite(wanted) else 1))
+    width = round(wanted) if math.isfinite(wanted) else 1
+    width = max(1, min(width, MAX_TEXTURE_SIDE, math.floor(MAX_TEXTURE_SIDE / aspect)))
     if width * max(1, math.ceil(width * aspect)) > MAX_RASTER_PIXELS:
         width = max(1, math.floor(math.sqrt(MAX_RASTER_PIXELS / aspect)))
+    while width > 1 and math.ceil(width * aspect) > MAX_TEXTURE_SIDE:
+        width -= 1  # where floor(side / aspect) * aspect rounds up past the side
     return width, max(1, math.ceil(width * aspect))
 
 
@@ -213,8 +264,10 @@ class Renderer:
         fonts: Callable[[], Fonts] = imscribe_fonts,
         timeout_s: float = RENDER_TIMEOUT_S,
         start_timeout_s: float = START_TIMEOUT_S,
+        memory_limit_bytes: int | None = MEMORY_LIMIT_BYTES,
     ) -> None:
         self._fonts = fonts
+        self._memory_limit = memory_limit_bytes
         self._timeout_s = timeout_s
         self._start_timeout_s = start_timeout_s
         self._answers: queue.SimpleQueue[_Answer] = queue.SimpleQueue()
@@ -253,7 +306,7 @@ class Renderer:
                 self._pending[key] = _Request(self._seq, key, sanitised.svg, width, px_width, scale)
             self._dispatch()
         except Exception as exc:
-            self._failed.append(Failed(key, f"render not started: {_one_line(exc)}"))
+            self._failed.append(Failed(key, f"render not started: {_one_line(exc)}", True))
 
     def poll(self) -> list[Result]:
         """
@@ -273,7 +326,7 @@ class Renderer:
             flying, self._inflight = self._inflight, None
             self._drop_child()
             if flying is not None:
-                out.append(Failed(flying.key, f"renderer error: {_one_line(exc)}"))
+                out.append(Failed(flying.key, f"renderer error: {_one_line(exc)}", True))
         return out
 
     def shutdown(self) -> None:
@@ -311,7 +364,7 @@ class Renderer:
                 self._drop_child()
                 if flying is not None:
                     self._inflight = None
-                    out.append(Failed(flying.key, answer))
+                    out.append(Failed(flying.key, answer, True))
                 continue
             if flying is None or seq != flying.seq:
                 continue
@@ -333,7 +386,7 @@ class Renderer:
                 return
             self._inflight = None
             self._drop_child()
-            out.append(Failed(flying.key, reason))
+            out.append(Failed(flying.key, reason, True))
         elif child.proc is not None and not child.proc.is_alive():
             # Died while idle: its I/O thread is waiting for a request, not reading,
             # so nothing else would notice before the next render was lost to it.
@@ -358,7 +411,7 @@ class Renderer:
         child = _Child()
         child.thread = threading.Thread(
             target=_serve,
-            args=(child, self._fonts, self._answers),
+            args=(child, self._fonts, self._answers, self._memory_limit),
             daemon=True,
             name="figure-render-io",
         )
@@ -369,7 +422,12 @@ class Renderer:
 # The I/O thread ---------------------------------------------------------------------
 
 
-def _serve(child: _Child, fonts: Callable[[], Fonts], answers: queue.SimpleQueue[_Answer]) -> None:
+def _serve(
+    child: _Child,
+    fonts: Callable[[], Fonts],
+    answers: queue.SimpleQueue[_Answer],
+    memory_limit: int | None,
+) -> None:
     """
     Start ``child``'s process, then hand it requests and hand back what it says.
 
@@ -383,7 +441,10 @@ def _serve(child: _Child, fonts: Callable[[], Fonts], answers: queue.SimpleQueue
         ctx = get_context("spawn")
         conn, theirs = ctx.Pipe(duplex=True)
         proc = ctx.Process(
-            target=child_main, args=(theirs, fonts()), daemon=True, name="figure-render"
+            target=child_main,
+            args=(theirs, fonts(), memory_limit),
+            daemon=True,
+            name="figure-render",
         )
         proc.start()
         theirs.close()
@@ -416,12 +477,50 @@ def _serve(child: _Child, fonts: Callable[[], Fonts], answers: queue.SimpleQueue
         _kill(proc)
         if conn is not None:
             conn.close()
-        if proc is not None:
+        # A process whose start raised has no pid, and joining it raises, which would
+        # end this thread before the reason below is handed over.
+        if proc is not None and proc.pid is not None:
             proc.join()
             if reason == "render process died" and (proc.exitcode or 0) < 0:
-                reason = f"render process killed by signal {-(proc.exitcode or 0)}"
+                reason = _death(-(proc.exitcode or 0), memory_limit)
         if not child.abandoned:
             answers.put((child, None, reason))
+
+
+def _death(signum: int, memory_limit: int | None) -> str:
+    """
+    Why a child that died by ``signum`` stopped, as a host shows it.
+    """
+    if signum == signal.SIGABRT and memory_limit is not None and _limits_memory():
+        return (
+            f"render process aborted (signal {signum}), most likely at its"
+            f" {memory_limit >> 20} MiB memory limit"
+        )
+    return f"render process killed by signal {signum}"
+
+
+def _limits_memory() -> bool:
+    """
+    Whether ``RLIMIT_AS`` bounds a process here: Linux enforces it, macOS does not.
+    """
+    return sys.platform.startswith("linux")
+
+
+def _limit_memory(limit: int | None) -> None:
+    """
+    Hold this process's address space to ``limit`` bytes where that is enforced.
+    Never raises: without the limit, the render timeout is still a bound.
+    """
+    if limit is None or not _limits_memory():
+        return
+    try:
+        import resource
+
+        _, hard = resource.getrlimit(resource.RLIMIT_AS)
+        soft = limit if hard == resource.RLIM_INFINITY else min(limit, hard)
+        resource.setrlimit(resource.RLIMIT_AS, (soft, hard))
+    except (OSError, ValueError):
+        pass
 
 
 def _kill(proc: BaseProcess | None) -> None:
@@ -440,15 +539,17 @@ def _one_line(exc: BaseException) -> str:
 # The child --------------------------------------------------------------------------
 
 
-def child_main(conn: Connection, fonts: Fonts) -> None:
+def child_main(conn: Connection, fonts: Fonts, memory_limit: int | None = None) -> None:
     """
     The render process: load the fonts once, then answer requests until the pipe closes.
 
     It says ``("ready", None)`` or ``("ready", reason)`` once. A child that could not
     load what it needs answers every request with that reason rather than exiting,
     so a missing library is one failure per figure and not a restart per frame.
+    Its address space is held to ``memory_limit`` first (``MEMORY_LIMIT_BYTES``).
     """
     signal.signal(signal.SIGINT, signal.SIG_IGN)
+    _limit_memory(memory_limit)
     failure: str | None = None
     options: dict[str, Any] = {}
     try:
@@ -511,13 +612,12 @@ def resvg_options(fonts: Fonts) -> dict[str, Any]:
 def render_png(svg: str, width: int, options: dict[str, Any]) -> bytes:
     """
     resvg's PNG of ``svg`` at ``width`` px, refused before rendering when the height
-    the root implies would put it over ``MAX_RASTER_PIXELS``.
+    the root implies would put it over ``MAX_RASTER_PIXELS`` or ``MAX_TEXTURE_SIDE``.
     """
     import resvg_py
 
     height = _implied_height(svg, width)
-    if width < 1 or width * height > MAX_RASTER_PIXELS:
-        raise ValueError(f"{width}x{height} is over the {MAX_RASTER_PIXELS}-pixel cap")
+    _check_raster(width, height)
     png: bytes = resvg_py.svg_to_bytes(svg_string=svg, width=width, **options)
     return png
 
@@ -533,11 +633,17 @@ def rasterise(svg: str, width: int, options: dict[str, Any]) -> tuple[int, int, 
     if png[:8] != b"\x89PNG\r\n\x1a\n" or png[12:16] != b"IHDR":
         raise ValueError("resvg returned something that is not a PNG")
     w, h = struct.unpack(">II", png[16:24])
-    if w * h > MAX_RASTER_PIXELS:
-        raise ValueError(f"{w}x{h} is over the {MAX_RASTER_PIXELS}-pixel cap")
+    _check_raster(w, h)
     with Image.open(BytesIO(png)) as image:
         rgba = image.convert("RGBA")
         return rgba.width, rgba.height, rgba.tobytes()
+
+
+def _check_raster(width: int, height: int) -> None:
+    if width < 1 or width * height > MAX_RASTER_PIXELS:
+        raise ValueError(f"{width}x{height} is over the {MAX_RASTER_PIXELS}-pixel cap")
+    if max(width, height) > MAX_TEXTURE_SIDE:
+        raise ValueError(f"{width}x{height} has a side over {MAX_TEXTURE_SIDE} px")
 
 
 def _implied_height(svg: str, width: int) -> int:
@@ -580,6 +686,8 @@ __all__: Sequence[str] = (
     "Failed",
     "Fonts",
     "MAX_RASTER_PIXELS",
+    "MAX_TEXTURE_SIDE",
+    "MEMORY_LIMIT_BYTES",
     "RENDER_TIMEOUT_S",
     "Rendered",
     "Renderer",
