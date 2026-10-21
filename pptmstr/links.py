@@ -26,21 +26,43 @@ Policy, as it holds now:
   be able to read where a click goes, and nothing that long is read; it also sits far
   under every platform's single-argument limit (128 KiB on Linux), so the refusal is
   ours and never an opaque E2BIG from the kernel.
-- `http(s)` needs a host. A destination can never begin with `-`, because a scheme
-  begins with a letter, so it cannot be read as an option by the opener; `_spawn`
-  checks that again at the point the argv is built.
+- `http(s)` needs a host, and may not name a user before it (`https://a@b/`).
+  Userinfo has no use in a link a model writes, and it is how a destination is made
+  to begin with a name the reader trusts: `https://docs.python.org@evil.example/`
+  goes to `evil.example`.
+- A `mailto:` query may carry only RFC 6068's `to`, `cc`, `bcc`, `subject` and
+  `body` (`MAILTO_FIELDS`), each at most once, case-insensitively. Any other field
+  is refused: `attach=` and `attachment=` are honoured by some mail clients as a
+  local file to attach (CVE-2020-11879, CVE-2020-11880), and the address is model
+  output. The names are checked as written and again percent-decoded, so an
+  encoded `?`, `&` or `=` that a client decoding first would read as another field
+  is refused too.
+- A destination can never begin with `-`, because a scheme begins with a letter,
+  so it cannot be read as an option by the opener; `_spawn` checks that again at
+  the point the argv is built.
+- The opener is handed the destination with its scheme lower-cased (RFC 3986
+  section 3.1: a scheme's case is not significant). xdg-open's generic mode looks
+  its handler up as `x-scheme-handler/<scheme>` as written.
 
 Launching uses `xdg-open` on Linux and `open` on macOS through `subprocess.Popen`
 with an argv list, no shell, the standard streams on DEVNULL and a new session, and
 no wait on the frame thread. A daemon thread waits on the child so it is reaped and
 does not linger as a zombie for the life of the app.
 
+**The DEVNULL streams and the new session are what keep a handler off pptmstr's
+terminal**, and not the choice of opener. xdg-open's generic mode (read in
+xdg-open 1.1.3, 2026-10-20) also honours `$BROWSER`, and falls back to console
+browsers (`www-browser`, `links2`, `elinks`, `links`, `lynx`, `w3m`); a desktop
+entry with `Terminal=true` is run in a terminal too. A child with no controlling
+terminal and no inherited streams cannot draw on the one pptmstr runs in: it
+fails, or goes to `x-terminal-emulator`, a window of its own.
+
 `webbrowser` is not used, for http(s) either. On its first call it runs
 `xdg-settings` synchronously, which would stall the frame; with `TERM` set it
-registers console browsers (lynx, w3m) that would take over the terminal pptmstr
-runs in; it honours `$BROWSER` as a command line; on macOS it builds an AppleScript
-around the URL; and it does not handle `mailto` consistently. One opener for all
-three schemes keeps the behaviour the same whichever is clicked.
+registers console browsers (lynx, w3m) and runs them on the terminal pptmstr
+inherited, and waits for them, on the calling thread; on macOS it builds an
+AppleScript around the URL; and it does not handle `mailto` consistently. One
+opener for all three schemes keeps the behaviour the same whichever is clicked.
 """
 
 from __future__ import annotations
@@ -51,13 +73,15 @@ import sys
 import threading
 import unicodedata
 from collections.abc import Callable, Sequence
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from .log import LOG
 
 ALLOWED_SCHEMES: frozenset[str] = frozenset({"http", "https", "mailto"})
 
 MAX_LENGTH = 8 * 1024
+
+MAILTO_FIELDS: frozenset[str] = frozenset({"to", "cc", "bcc", "subject", "body"})
 
 # RFC 3986 section 3.1: a scheme is a letter followed by letters, digits, + - .
 _SCHEME = re.compile(r"([A-Za-z][A-Za-z0-9+.\-]*):")
@@ -103,6 +127,35 @@ def followable(destination: str) -> str | None:
             return f"the {scheme}: destination does not parse as a URL"
         if not host:
             return f"the {scheme}: destination names no host"
+        if urlsplit(destination).username is not None:
+            return f"the {scheme}: destination names a user before its host"
+    if scheme == "mailto":
+        return _mailto_refusal(rest)
+    return None
+
+
+def _mailto_refusal(rest: str) -> str | None:
+    """
+    Why a `mailto:` destination's text after the scheme is refused, or None.
+
+    Read twice: as written, and percent-decoded, which is what a client that decodes
+    before it splits would read. A field that has no `=` in the decoded reading is a
+    piece of a value (an encoded `&` in a subject) and is not a name.
+    """
+    address, _, query = rest.partition("?")
+    if "?" in unquote(address):
+        return "the mailto: address holds an encoded '?'"
+    for decoded in (False, True):
+        seen: set[str] = set()
+        for field in (unquote(query) if decoded else query).split("&"):
+            if not field or (decoded and "=" not in field):
+                continue
+            name = field.partition("=")[0].lower()
+            if name not in MAILTO_FIELDS:
+                return f"the mailto: field {name[:40]!r} is not followed"
+            if name in seen:
+                return f"the mailto: field {name!r} is given twice"
+            seen.add(name)
     return None
 
 
@@ -113,6 +166,9 @@ def opener_argv(destination: str, platform: str) -> list[str] | None:
     tool = _OPENERS.get(platform)
     if tool is None:
         return None
+    match = _SCHEME.match(destination)
+    if match is not None:
+        destination = match.group(1).lower() + destination[match.end() - 1 :]
     return [tool, destination]
 
 

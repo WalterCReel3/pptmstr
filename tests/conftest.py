@@ -249,6 +249,19 @@ def _typeset_does_not_leak() -> Iterator[None]:
         )
 
 
+@pytest.fixture(autouse=True)
+def _no_link_handler_is_inherited(monkeypatch: pytest.MonkeyPatch) -> None:
+    """
+    Every test starts with no link handler installed, and none it installs outlives it.
+
+    The handler is process state (``views._FOLLOW``), and ``app.main`` installs the
+    real opener; a test that runs ``main`` (``tests/test_app.py``) restores nothing,
+    and a later test that clicked a link would hand it to ``xdg-open``. Set on the
+    module and not through ``follow_links``, which would move the epoch.
+    """
+    monkeypatch.setattr(views, "_FOLLOW", None)
+
+
 def needs_the_library(reason: str | None) -> None:
     """
     Stop a test that draws through the library where the library cannot draw:

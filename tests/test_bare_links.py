@@ -68,6 +68,24 @@ def _linked(view: Any) -> list[tuple[str, str]]:
         ("# Heading https://x.org/h\n", [("https://x.org/h", "https://x.org/h")]),
         ("> quoted https://x.org/q\n", [("https://x.org/q", "https://x.org/q")]),
         ("**https://x.org/b**", [("https://x.org/b", "https://x.org/b")]),
+        ("詳細はhttps://x.org/a。次", [("https://x.org/a", "https://x.org/a")]),
+        ("「https://x.org/a」を見て", [("https://x.org/a", "https://x.org/a")]),
+        ("参照（https://x.org/a）", [("https://x.org/a", "https://x.org/a")]),
+        (
+            "https://x.org/a、https://y.org/b",
+            [
+                ("https://x.org/a", "https://x.org/a"),
+                ("https://y.org/b", "https://y.org/b"),
+            ],
+        ),
+        ("https://x.org/a！", [("https://x.org/a", "https://x.org/a")]),
+        (
+            "[https://x.org/a]",
+            [("https://x.org/a] (https://x.org/a%5D)", "https://x.org/a%5D")],
+        ),
+        ("`x`https://a.org", [("https://a.org", "https://a.org")]),
+        ("**x**https://a.org", [("https://a.org", "https://a.org")]),
+        ("https://x.org/a@b", [("https://x.org/a@b", "https://x.org/a@b")]),
     ],
 )
 def test_a_bare_address_is_a_link_to_itself(seam: Any, source: str, linked: Any) -> None:
@@ -117,6 +135,10 @@ def test_a_bare_address_in_a_table_cell_is_a_link(seam: Any) -> None:
         ("https://", []),
         ("see www.x.org and a@b.org", []),
         ("javascript:alert(1)//https://", []),
+        ("see https://docs.python.org@evil.example/3/ now", []),
+        ("see https://user:pw@x.org/ now", []),
+        ("see https://@x.org/ now", []),
+        ("see https://www.google.com\\@evil.example now", []),
     ],
 )
 def test_what_is_not_a_bare_address_is_not_linked(seam: Any, source: str, targets: Any) -> None:
@@ -145,15 +167,32 @@ def test_the_characters_set_are_the_characters_written(seam: Any, source: str) -
     assert view.links
 
 
-def test_a_backslash_in_an_address_is_set_and_its_destination_said(seam: Any) -> None:
+@pytest.mark.parametrize(
+    ("source", "said", "target"),
+    [
+        ("at https://x.org/a\\_b ok", "https://x.org/a\\_b", "https://x.org/a_b"),
+        (
+            "at https://en.wikipedia.org/wiki/Foo\\_(bar) ok",
+            "https://en.wikipedia.org/wiki/Foo\\_(bar)",
+            "https://en.wikipedia.org/wiki/Foo_(bar)",
+        ),
+        ("at https://x.org/a\\\\b ok", "https://x.org/a\\\\b", "https://x.org/a%5Cb"),
+        ("at https://x.org/a\\b ok", "https://x.org/a\\b", "https://x.org/a%5Cb"),
+    ],
+)
+def test_an_escape_in_an_address_is_set_as_written_and_goes_where_commonmark_reads_it(
+    seam: Any, source: str, said: str, target: str
+) -> None:
     """
-    The seam sets a backslash as written (``_written_escapes``); the address keeps
-    it, and the destination, where the reader percent-encodes it, is said.
+    The seam sets a backslash as written (``_written_escapes``); the link goes
+    where CommonMark reads the escape to, and since the text then differs from
+    the destination, the destination is said after it. A backslash before what
+    is not ASCII punctuation is no escape, and goes as ``%5C``.
     """
-    view = _view(seam, typeset.ViewCache(), "k", "at https://x.org/a\\_b ok")
+    view = _view(seam, typeset.ViewCache(), "k", source)
     (text,) = view.texts
-    assert text.startswith("at https://x.org/a\\_b")
-    assert [link.target for link in view.links] == ["https://x.org/a%5C_b"]
+    assert text == f"at {said} ({target}) ok"
+    assert [link.target for link in view.links] == [target]
 
 
 def test_a_lookalike_host_is_set_with_the_destination_it_goes_to(seam: Any) -> None:
@@ -205,3 +244,14 @@ def test_an_address_arriving_in_pieces_is_a_link_once_it_has_arrived(seam: Any, 
         ]
     )
     assert tuple(handle.view.texts) == tuple(settled.texts) == (source.strip(),)
+
+
+def test_an_explicit_link_with_a_user_before_its_host_says_where_it_goes(seam: Any) -> None:
+    """
+    ``_names_itself`` leaves a destination unsaid only where the text is it to the
+    character, so a user before the host is never hidden behind a link's text;
+    ``links.followable`` refuses the click as well.
+    """
+    source = "[the docs](https://docs.python.org@evil.example/3/)"
+    view = _view(seam, typeset.ViewCache(), "k", source)
+    assert tuple(view.texts) == ("the docs (https://docs.python.org@evil.example/3/)",)

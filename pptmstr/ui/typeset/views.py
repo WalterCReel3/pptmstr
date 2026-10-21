@@ -49,8 +49,9 @@ So ``document`` is one view only where every part is markdown.
 
 **A click on a link in a markdown view is followed** by the caller's
 ``on_link`` or, where it passed none, the one the app installed
-(``follow_links``), in settled documents and streams alike. A literal view and
-a view of rows have no handler, so nothing in them is clickable.
+(``follow_links``), in settled documents and streams alike; a link the app's
+policy refuses says why in a tooltip. A literal view and a view of rows have no
+handler, so nothing in them is clickable.
 
 **A part its caller draws** (``Hosted``) is drawn by the ``host`` handed to
 ``document``, where it falls among the others: the log's tool blocks, which are
@@ -83,8 +84,9 @@ renderer.
 
 **Whatever else a call into the library raises is the library stopping too**
 (``gate.into_library``): each such call is made inside one of the ``with`` blocks
-named at the top of this module, and nothing of pptmstr's own is inside one.
-What pptmstr's own code raises here is a defect and is not caught.
+named at the top of this module, and nothing of pptmstr's own is inside one but
+the link handler the library calls back from its draw, which lets nothing out
+(``_Followed``). What pptmstr's own code raises here is a defect and is not caught.
 
 ## When the library sets less than it was handed
 
@@ -161,6 +163,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from ... import theme as ui_theme
+from ...log import LOG
 from ...theme import Color
 from . import gate, roles, syntax, themes
 from .parts import Kind, Part
@@ -188,14 +191,42 @@ What is said of a draw that answered false with no note from the library: its
 own words for that answer.
 """
 
-_FOLLOW: Callable[[str], object] | None = None
+
+@dataclass(frozen=True, slots=True, eq=False)
+class _Followed:
+    """
+    The app's link handler as a view is given it: what it raises is logged here,
+    and the view's draw goes on.
+
+    The library calls ``on_link`` inside its draw, which pptmstr makes inside
+    ``_DRAWING``, so an exception that left it would be read as the library
+    stopping and would take typeset text off every pane. The handler is
+    pptmstr's own code, and its failure is not the library's.
+    """
+
+    handler: Callable[[str], object]
+    refusal: Callable[[str], str | None] | None
+
+    def __call__(self, destination: str) -> None:
+        try:
+            self.handler(destination)
+        except Exception as exc:  # noqa: BLE001 -- see the class docstring
+            said = " ".join(f"{type(exc).__name__}: {exc}".split())
+            LOG.error("link", f"the link handler raised on {destination[:200]!r}: {said}")
+
+
+_FOLLOW: _Followed | None = None
 """
 What a click on a link in a markdown view calls when its caller handed no
 ``on_link``: the app's policy, installed once at start-up (``follow_links``).
 """
 
 
-def follow_links(handler: Callable[[str], object] | None) -> None:
+def follow_links(
+    handler: Callable[[str], object] | None,
+    *,
+    refusal: Callable[[str], str | None] | None = None,
+) -> None:
     """
     Make ``handler`` what every markdown view calls with a clicked link's
     destination, wherever its caller passed no ``on_link`` of its own: settled
@@ -206,19 +237,30 @@ def follow_links(handler: Callable[[str], object] | None) -> None:
     one would be the one pane whose links did nothing. An explicit ``on_link``
     still wins. A literal view never has one (``_literal_segment``, ``rows``).
 
-    **The handler runs inside the library's draw** (``_DRAWING``), so what it
-    raises is taken as the library stopping and every pane leaves typeset text.
-    It must not raise; ``links.follow`` does not.
+    ``refusal`` answers why a destination would not be followed, or None. A link
+    under the mouse that it refuses says why in a tooltip, since the library draws
+    every link alike once a view has a handler, followable or not.
 
-    A link is drawn in the palette's link ink only in a view that has a handler,
-    and the ink is taken when the view's text is described: install the handler
-    before the first view is made.
+    **What the handler raises is logged and goes no further** (``_Followed``): it
+    runs inside the library's draw, where an exception is the library stopping.
+
+    A link is drawn in the palette's link ink only in a view that has a handler
+    when it is made: the library's view makes the converter that inks links in its
+    constructor, so a view is handed its handler there. So a change of handler
+    moves the epoch (``roles.moved``) and every view is made again at its next
+    draw, as at a change of face; installed before the loop, as the app does, that
+    is no view at all.
     """
     global _FOLLOW
-    _FOLLOW = handler
+    if _FOLLOW is None and handler is None:
+        return
+    if _FOLLOW is not None and _FOLLOW.handler is handler and _FOLLOW.refusal is refusal:
+        return
+    _FOLLOW = None if handler is None else _Followed(handler, refusal)
+    roles.moved()
 
 
-def _linked(on_link: Callable[[str], object] | None) -> Callable[[str], object] | None:
+def _handler_for(on_link: Callable[[str], None] | None) -> Callable[[str], None] | None:
     """
     The handler a markdown view is given: its caller's, else the process's.
     """
@@ -741,12 +783,14 @@ class Stream:
             with _MAKING:
                 self._source = MarkdownStream(theme)
                 self._captioned = _Captioned(self._source)
+                # The handler in the constructor: the view makes the converter
+                # that takes the link ink there (``follow_links``).
                 self._view = TypesetStreamView(
-                    self._captioned, palette=palette, follow=self._follow
+                    self._captioned,
+                    palette=palette,
+                    follow=self._follow,
+                    on_link=_handler_for(None),
                 )
-                # Before the first text is handed over: the link ink is taken
-                # when it is described (``follow_links``).
-                self._view.on_link = _linked(None)
             self._entry.segments = [_Segment((), self._view)]
         if self._fed < len(self._text):
             arrived = self._text[self._fed :]
@@ -961,10 +1005,12 @@ def _open(entry: _Entry, parts: tuple[Part, ...], on_link: Callable[[str], None]
         if view is None:
             theme, palette = themes.document_theme(), themes.palette()
             with _MAKING:
-                view = TypesetView(theme=theme, palette=palette)
+                # The handler in the constructor: the view makes the converter
+                # that takes the link ink there (``follow_links``).
+                view = TypesetView(theme=theme, palette=palette, on_link=_handler_for(on_link))
         fences = _fences() if hosting else None
         with _HANDING:
-            view.on_link = _linked(on_link)
+            view.on_link = _handler_for(on_link)
             view.host_for = fences
             view.set_document(tuple(blocks))
         captions = {
@@ -1576,13 +1622,14 @@ def _show_view(
     Draw one of the library's views at the cursor and tell the window how far
     right its text runs. Returns the view's foot, in pixels down the screen.
 
-    A markdown view follows a link through ``_linked(on_link)``; a literal one
+    A markdown view follows a link through ``_handler_for(on_link)``; a literal one
     is handed none, whatever its document's caller passed.
     """
     with _DRAWING:
-        segment.view.on_link = None if segment.literal else _linked(on_link)
+        segment.view.on_link = None if segment.literal else _handler_for(on_link)
         segment.whole = bool(segment.view.draw(palette=palette, width_px=wide))
     foot = float(im.get_item_rect_max().y)
+    _say_a_refusal(im, segment.view)
     reach = _reach(segment, wide)
     if reach > wide + 0.5:
         # Glyphs on a draw list are not items: text past the measure adds
@@ -1592,6 +1639,28 @@ def _show_view(
         im.dummy(im.ImVec2(reach, 0.0))
         im.set_cursor_pos(at)
     return foot
+
+
+def _say_a_refusal(im: Any, view: Any) -> None:
+    """
+    A tooltip with why the link under the mouse would not be followed, where the
+    view's handler is the app's and its policy refuses it.
+
+    The library draws a link in the link ink, with the hand cursor, in any view
+    that has a handler; a click on one the policy refuses would otherwise do
+    nothing anyone sees. ``hovered_link`` is the library's hit test of the last
+    draw, which it answers with or without a handler.
+    """
+    followed = view.on_link
+    if not isinstance(followed, _Followed) or followed.refusal is None:
+        return
+    with _ASKING:
+        hovered = view.hovered_link
+    if hovered is None:
+        return
+    reason = followed.refusal(hovered)
+    if reason is not None:
+        im.set_tooltip(f"not opened: {reason}")
 
 
 _WIDEST_EM = 1.5

@@ -2322,24 +2322,44 @@ def test_each_part_is_drawn_in_its_own_ink(seam: Any) -> None:
     assert theme.P.text.u32 in alone and theme.P.danger.u32 not in alone
 
 
-def test_parts_kept_across_a_theme_switch_are_inked_in_the_new_theme(seam: Any) -> None:
+@pytest.mark.parametrize("handler", [False, True], ids=["no-link-handler", "link-handler"])
+def test_parts_kept_across_a_theme_switch_are_inked_in_the_new_theme(
+    seam: Any, handler: bool
+) -> None:
     """
     A pane holds its parts and passes the same object every frame. An ink laid on a
     view is a packed colour, so it is laid again when the theme changes -- from the
-    role each part names, and with nothing laid out again.
+    role each part names, and the view is kept.
+
+    With a link handler installed, as the app always has one, the library inks links
+    and the link ink is in the runs, so the switch describes the view again (its
+    revision moves; nothing is read again). Accepted: one re-describe of each view
+    on a switch the operator made. Without one, nothing is laid out again.
     """
+    if handler:
+        typeset.follow_links(lambda destination: None)
     cache = typeset.ViewCache()
-    parts = (Part("a heading's worth\n", colour="accent"), Part("literal", Kind.LITERAL, "danger"))
+    # The link ink is the palette's accent (``themes.palette``), so no part is
+    # coloured accent here.
+    parts = (
+        Part("a heading's worth\n", colour="warn"),
+        Part("see [a link](https://x.org)\n"),
+        Part("literal", Kind.LITERAL, "danger"),
+    )
     dark = _inks(seam, lambda: typeset.document(cache, "k", parts))
     view = cache.view("k")
     revision = view.revision
-    assert {theme.DARK.accent.u32, theme.DARK.danger.u32} <= dark
+    assert {theme.DARK.warn.u32, theme.DARK.danger.u32} <= dark
+    assert (theme.DARK.accent.u32 in dark) is handler
 
     theme.set_theme("light")
     light = _inks(seam, lambda: typeset.document(cache, "k", parts))
-    assert {theme.LIGHT.accent.u32, theme.LIGHT.danger.u32} <= light
-    assert theme.DARK.accent.u32 not in light and theme.DARK.danger.u32 not in light
-    assert cache.view("k") is view and view.revision == revision
+    assert {theme.LIGHT.warn.u32, theme.LIGHT.danger.u32} <= light
+    assert theme.DARK.warn.u32 not in light and theme.DARK.danger.u32 not in light
+    assert theme.DARK.accent.u32 not in light
+    assert (theme.LIGHT.accent.u32 in light) is handler
+    assert cache.view("k") is view
+    assert (view.revision != revision) is handler
 
 
 def test_a_part_that_loses_its_colour_loses_it_on_screen(seam: Any) -> None:

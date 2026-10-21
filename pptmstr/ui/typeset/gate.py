@@ -734,7 +734,11 @@ def _as_written(state: Any, silent: bool) -> bool:
 
 
 _BARE_SCHEME = re.compile(r"https?://", re.IGNORECASE)
-_BARE_ENDS = re.compile(r"[\s<>\"]")
+# White space, <, >, ", and CJK and full-width punctuation: the CJK Symbols and
+# Punctuation block, and the full-width forms of ASCII punctuation with the
+# half-width CJK marks after them.
+_BARE_ENDS = re.compile('[\\s<>"\u3000-\u303f\uff01-\uff0f\uff1a-\uff20\uff3b-\uff40\uff5b-\uff65]')
+_BARE_ESCAPED = re.compile(r"\\([!-/:-@\[-`{-~])")
 _BARE_NOT_AFTER = frozenset("+-./:@")
 _BARE_TRAILING = frozenset("?!.,:*_~'")
 
@@ -752,27 +756,41 @@ def _bare_addresses(state: Any) -> None:
     - Only the two schemes, in any case. No ``www.``-only address and no bare
       email, which GFM also links: ``see www.x.org`` or ``a@b.c`` in prose is
       as often a name as a destination.
-    - It starts where nothing that could be part of a scheme (a letter, a digit,
-      ``+``, ``-``, ``.``: RFC 3986 section 3.1) and no ``/``, ``:`` or ``@`` is
-      before it, so ``xhttps://``, ``git+https://`` and an ``http://`` inside
+    - It starts where nothing that could be part of a scheme (an ASCII letter or
+      digit, ``+``, ``-``, ``.``: RFC 3986 section 3.1) and no ``/``, ``:`` or
+      ``@`` is before it, so ``xhttps://``, ``git+https://`` and an ``http://`` inside
       another address are not one. GFM's list is narrower (line start, space,
       ``*_~(``); this one also lets an address start after a quote or a bracket.
+      Only the address's own text token is looked at. The token before one that
+      starts a text token is a code span, a link or emphasis, which ends in the
+      source in a backtick, ``>``, ``)``, ``*``, ``_`` or ``~``; none of those
+      stops an address here, so looking back across tokens would decide nothing
+      differently. ``` `x`https://a.org ``` is linked.
     - At least one letter or digit follows the ``//``. GFM asks for a domain with
       a dot in it; ``http://localhost:8000`` is an address agents write.
     - It ends at white space, ``<``, ``>`` or ``"``. GFM ends at the first two;
       the other two are not URI characters (RFC 3986), and here raw HTML is
       text, so ``href="https://x.org/">`` is an address and its quote and bracket.
+      It also ends at CJK and full-width punctuation (``、。，！？）「」``), which
+      GFM takes into the address: prose in those scripts puts no space after one.
+    - An address whose authority holds an ``@`` is not linked. A user before the
+      host is how ``https://docs.python.org@evil.example/`` reads as one site and
+      goes to another, and ``links.followable`` refuses it anyway.
     - Then, until none applies, GFM's trims as cmark-gfm makes them: a trailing
       ``?!.,:*_~`` (and ``'``) goes; a trailing ``)`` goes while the address has
       more ``)`` than ``(``, so ``(see https://x.org/a)`` and
       ``https://en.wikipedia.org/wiki/Foo_(bar)`` are both right; a trailing
-      ``;`` goes, and the whole of an entity-like ``&hl;`` with it.
+      ``;`` goes, and the whole of an entity-like ``&hl;`` with it. A trailing
+      ``]`` stays, as it does in GFM.
 
-    Its destination is the parser's own ``normalizeLink`` of it, with the scheme
-    lower-cased first (the reader punycodes a host only for a lower-case scheme),
-    and an address ``validateLink`` refuses stays text, as markdown-it does for
-    ``<...>``. So a lookalike host goes to its ``xn--`` destination and
-    ``_show_destinations`` says so.
+    Its destination is the parser's own ``normalizeLink`` of it read as
+    CommonMark reads it -- a backslash before ASCII punctuation is an escape, so
+    ``Foo\\_(bar)`` goes to ``Foo_(bar)`` -- with the scheme lower-cased first (the
+    reader punycodes a host only for a lower-case scheme), and an address
+    ``validateLink`` refuses stays text, as markdown-it does for ``<...>``. The
+    text keeps the backslash (``_written_escapes``), so it differs from the
+    destination and ``_show_destinations`` says where the click goes; so it does
+    for a lookalike host and its ``xn--`` destination.
 
     Only ``text`` tokens are read, and none inside a link: a code span, a fence, a
     code block and mathematics are never ``text``, and an autolink or a
@@ -822,14 +840,18 @@ def _linked(md: Any, text: Any) -> list[Any]:
         start = found.start()
         if start < done:
             continue
-        if start and (source[start - 1].isalnum() or source[start - 1] in _BARE_NOT_AFTER):
+        before = source[start - 1] if start else ""
+        if (before.isascii() and before.isalnum()) or before in _BARE_NOT_AFTER:
             continue
         host = found.end()
         if host >= len(source) or not source[host].isalnum():
             continue
         ending = _BARE_ENDS.search(source, host)
         end = _trimmed(source, start, ending.start() if ending else len(source))
-        href = md.normalizeLink(found.group().lower() + source[host:end])
+        after_scheme = _BARE_ESCAPED.sub(r"\1", source[host:end])
+        if "@" in re.split(r"[/?#]", after_scheme, maxsplit=1)[0]:
+            continue
+        href = md.normalizeLink(found.group().lower() + after_scheme)
         if not md.validateLink(href):
             continue
         said(source[done:start])

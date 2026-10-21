@@ -23,7 +23,13 @@ ALLOWED = [
     "MAILTO:someone@example.com",
     "https://xn--bcher-kva.example/",
     "https://bücher.example/",
-    "https://user@example.com:8443/path",
+    "https://example.com:8443/path",
+    "https://example.com/a@b",
+    "mailto:a@example.com?to=b@example.com&cc=c@example.com&bcc=d@example.com",
+    "mailto:a@example.com?Subject=x&BODY=y",
+    "mailto:?subject=x",
+    "mailto:a@example.com?subject=Tom%20%26%20Jerry",
+    "mailto:a@example.com?subject=",
     "https://" + "a" * (MAX_LENGTH - len("https://")),
 ]
 
@@ -63,6 +69,22 @@ REFUSED = [
     "https://example.com/\udc80",
     "https://" + "a" * (MAX_LENGTH - len("https://") + 1),
     "http://[::1",
+    "https://user@example.com:8443/path",
+    "https://docs.python.org@evil.example/3/",
+    "https://@example.com/",
+    "https://:secret@example.com/",
+    "HTTPS://user:pw@example.com/",
+    "mailto:a@example.com?attach=/home/u/.ssh/id_ed25519",
+    "mailto:?attach=/etc/passwd",
+    "mailto:a@example.com?subject=x&attachment=/etc/passwd",
+    "mailto:a@example.com?ATTACH=/etc/passwd",
+    "mailto:a@example.com?%61ttach=/etc/passwd",
+    "mailto:a@example.com?subject=x%26attach%3D/etc/passwd",
+    "mailto:a@example.com%3Fattach=/etc/passwd",
+    "mailto:a@example.com?subject=x&subject=y",
+    "mailto:a@example.com?subject=x&SUBJECT=y",
+    "mailto:a@example.com?in-reply-to=x",
+    "mailto:a@example.com?attach",
 ]
 
 
@@ -80,6 +102,41 @@ def test_a_refused_destination_says_why(destination: str) -> None:
 
 def test_the_refusal_names_the_scheme_it_refused() -> None:
     assert followable("JaVaScRiPt:alert(1)") == "the javascript: scheme is not followed"
+
+
+@pytest.mark.parametrize(
+    ("destination", "reason"),
+    [
+        ("https://a@b.example/", "the https: destination names a user before its host"),
+        ("mailto:a@b?attach=/x", "the mailto: field 'attach' is not followed"),
+        ("mailto:a@b?%61ttach=/x", "the mailto: field '%61ttach' is not followed"),
+        ("mailto:a@b?subject=x&Subject=y", "the mailto: field 'subject' is given twice"),
+        ("mailto:a@b%3fattach=/x", "the mailto: address holds an encoded '?'"),
+    ],
+)
+def test_a_refusal_says_which_rule_refused_it(destination: str, reason: str) -> None:
+    assert followable(destination) == reason
+
+
+@pytest.mark.parametrize(
+    ("given", "opened"),
+    [
+        ("MAILTO:a@example.com", "mailto:a@example.com"),
+        ("HTTPS://Example.com/A?B", "https://Example.com/A?B"),
+        ("HtTp://example.com", "http://example.com"),
+        ("https://example.com/HTTPS:x", "https://example.com/HTTPS:x"),
+    ],
+)
+def test_the_opener_is_handed_the_scheme_in_lower_case_and_the_rest_as_written(
+    given: str, opened: str
+) -> None:
+    """
+    xdg-open's generic mode looks its handler up as ``x-scheme-handler/<scheme>``
+    as written, so an upper-case ``MAILTO:`` would find no mail client there.
+    """
+    launch = Recorder()
+    assert follow(given, launch=launch, platform="linux") is None
+    assert launch.calls == [["xdg-open", opened]]
 
 
 class Recorder:
