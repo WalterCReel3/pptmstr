@@ -1172,15 +1172,18 @@ the figure dispatcher.
      after the launch and the prompt is not rebuilt for that; and it says no
      other fence is a figure or a formula, rather than "any other fence shows
      as code", which an honest ```` ```diff ```` fence does not.
-   - **The cost, accepted by the lead:** 1,459 characters on every launch with
+   - **The cost, accepted by the lead:** 1,968 characters on every launch with
      every renderer installed, held under `fences.PROMPT_LIMIT` (2,000) by a
      test; and a solo launch now passes an append where it passed none, which
-     changes its argv.
+     changes its argv. The 2,000 bound stands: what grows the text next has to
+     trim the math row (the longest) or argue for a larger bound.
    - builder-25 edited `pptmstr/figures/host.py` (its own word set, a second
      table) and four tests in `tests/test_driver.py` (the old solo and resume
      prompt shapes) outside its task's writes, to make the table single; posted
      as an incident and accepted by the lead [relayed].
-   - The exact text, every renderer installed [ran, fence-fix]:
+   - The exact text, every renderer installed, after task `fence-guidance` added
+     the display, Mermaid-preference, card and precedence lines [ran, lead,
+     `fences.session_prompt()` at `fae81fe`]:
 
     ## Fences that are drawn
 
@@ -1192,6 +1195,11 @@ the figure dispatcher.
 
     $...$ and $$...$$ in prose are not rendered and show as written; put mathematics in a ```math fence.
     A fence that cannot be drawn is shown as its source under a one-line reason.
+
+    Write the fence; the pane is the display. Do not render to a file, look for a converter, or preview with other tools.
+    For nodes and edges (dependencies, flows, sequences, states, entities) use ```mermaid, which lays them out; ```svg is for what Mermaid cannot draw. Never compute a graph layout by hand.
+    Figures sit on a near-white card, scaled down to fit the pane: design for white, with literal colours, text of 11 px or more, and at most about 600 px wide.
+    These rules win over a skill's general advice.
 
 5. **On demand only:** DOT through pygraphviz; full Vega-Lite through
    vl-convert behind the URL pre-filter.
@@ -1253,3 +1261,334 @@ Upstream asks, filed when slice 1 exists, not before:
   `.claude/` and others) are sandbox masks, not work. Every builder reported
   them. They are not this record's subject, and a gate that runs
   `git status --porcelain` will see them [relayed].
+
+## 10. What the first real SVG session taught
+
+Board task `fence-lessons`, 2026-10-21. The source is operator session
+`7b792e36`, the CLI transcript
+`~/.claude/projects/-home-wreel--pptmstr-worktrees-pptmstr-feat-vector-rendering/7b792e36-238f-4764-b541-b4feae743401.jsonl`.
+It ran on Opus 5 through pptmstr's gate, before the fence prompt existed
+(§8 slice 4 was not yet built). "L*n*" below is a 1-based line of that file
+(`sed -n '<n>p'`). Everything in this section was read from the transcript by
+the writer of this section, unless it is marked [ran] or [relayed].
+
+### 10.1 What it was asked, and what it did
+
+**Asked** (L3): "[SVG Graph Display] As an exercise. Find a declared pptmstr
+board from an old sessoin and display the dependency graph with SVG."
+
+**What it did, in order.** 28 tool calls over about 8½ minutes, $1.95 (L237).
+- *The data* took the first 11 calls. It found the board logs under
+  `~/.config/pptmstr/sessions/*/board`, picked `399eb899` (`feat-graph-tooling`,
+  21 tasks, 42 `depends_on` edges) and rebuilt its tasks (L99). Its final reply
+  says "I had the board data after the second tool call" (L232). In fact it was
+  the eleventh.
+- *The dataviz skill.* Call 12 loaded the bundled `dataviz` skill (L100). The
+  skill's body (L103) is a procedure for HTML/SVG charts: pick the form, assign
+  colour by job, run `node scripts/validate_palette.js`, add a hover layer "by
+  default", and build components "in plain HTML". Call 13 read its
+  `references/palette.md` (L112), which states the palette as CSS custom
+  properties (`--surface-1`, `--series-1`, …, light and dark).
+- *The rasteriser hunt*, calls 14–16. It looked for `rsvg-convert`, `inkscape`,
+  `chromium`, `google-chrome` and ImageMagick (L118), then `cairosvg` and
+  ImageMagick's SVG delegates (L127), then `playwright`, `firefox`,
+  `wkhtmltoimage`, `cutycapt`, Pillow/matplotlib/graphviz and `dot` (L135).
+  The operator refused that third call at the gate.
+- **The operator's refusal, verbatim** (L136, the gate's refusal text and the
+  operator's reason under its rule): "No no. You should be able to support
+  codeblock svg. That's what I'm testing in this session."
+- *The hand-built layout engine*, calls 17–28. It answered "Right — inline
+  `svg` code block it is. Let me compute the layout." Then:
+  - a layering script (L144);
+  - six calls to get the dataviz skill's Node palette validator running from
+    `/tmp` (L153–L183). It passed three hues, with a contrast WARN;
+  - an edge-span census (L189);
+  - a 160-line generator with lane routing for long edges. It wrote a 21,083-
+    character SVG to `shots/board-graph-tooling.svg`, 730×756 (L195);
+  - an ImageMagick `convert` of that file to PNG, which the operator also
+    refused: "Rejected by operator, who gave no reason." (L204–L205);
+  - a geometry checker over its own layout, which reported "GEOMETRY
+    PROBLEMS: 30", mostly lanes crossing boxes (L211–L212);
+  - a second, simpler generator with barycentric ordering and straight cubic
+    edges (L221), whose 10,802-character, 744×622 output became the reply.
+- *The operator, mid-turn, twice*, verbatim:
+  - "Oh my god. Why are you veering so hard into build svg deliverable. This
+    should just be a simple inline transcript render, right?" (queued L209,
+    delivered L216);
+  - "You're writing _so much_ code for something I feel you could have just
+    infered." (queued L218, delivered L229).
+- *It apologised twice*: "You're right — I overbuilt. Dropping the router;
+  straight edges, inline." (L220), and "Fair hit — twice. … everything after
+  that was me building a layout engine for a 21-node diagram." (L232). The
+  reply then carried the ```` ```svg ```` fence, two observations about the
+  graph, a list of the SVG features it "exercises", and a pointer to the file
+  in `shots/`.
+
+**The pull of the dataviz skill, as the transcript shows it.** The session
+invoked the skill on its own, before deciding anything about the output, and
+then spent six calls satisfying its "run the script, don't reason about
+Delta E" step. The final SVG used the skill's *values* as literal hex (surface
+`#fcfcfb`, ink `#0b0b0b`, series `#2a78d6`/`#eb6834`/`#1baf7a`), not its CSS
+custom properties. **This session did not write `var()`**: neither generator
+contains it, and neither does the reply [ran: a search of L195, L221 and
+L232]. The `var()` hazard below is what the skill's convention *would* produce.
+It was measured separately and was not observed here.
+
+**What it never considered.** Mermaid is not mentioned anywhere in the
+session. merman was installed (slice 2, `0e219b2`). Nothing told the session
+that a ```` ```mermaid ```` fence renders, so the layout a 21-node dependency
+graph needed was hand-computed twice.
+
+### 10.2 The lead's measurement: `var()` renders black
+
+[relayed from the `fence-var` specification]: a `<style>` declaring
+`.viz{--c:#e8590c}` with `.a{fill:var(--c)}` passed `sanitise()` unchanged,
+and resvg 0.48 painted the rect `(0,0,0,255)`. A literal `#e8590c` beside it
+rendered correctly. This is a silent wrong rendering, not a refusal.
+
+### 10.3 Its final SVG, through the real pipeline
+
+[ran, 2026-10-21, this section's writer]. The reply's fence body (L232) was put
+through `sanitise.sanitise` and `render.render_png` with `imscribe_fonts()`:
+- `Sanitised`, 744×622, `notes` empty. The only change is serialisation
+  (attribute order, `<rect … />`), 10,802 → 10,838 characters. Sanitise
+  3.5 ms.
+- resvg: 62 ms at 744 px and 49 ms at 600 px (best of 5). The PNG at 600 px
+  is 46,429 bytes.
+- **It renders clean, and its layout is still wrong.** Sampling each of the 26
+  cubic edges at 99 interior points against the 24 positioned `<rect>`s
+  (21 nodes and 3 legend swatches, each inset 1 px) finds 9 edge-over-box
+  crossings on 6 edges. Looking at
+  the 600 px PNG confirms it: edges from `withdraw-task` and `all-writers` run
+  through `review-all-writers`, `review-bus-tools` and `withdraw-fixes` on
+  their way to `record`. The gate passed it because nothing in the gate judges
+  layout.
+- At 744 px it is wider than `fences.FIGURE_WIDTH` (600), so in the SESSION
+  pane at the smallest window it would be scaled to about 80 %, with its
+  11 px subtitle at about 9 px (from `fence-guidance`'s width reasoning, not
+  measured in the app).
+
+### 10.4 What changed because of it
+
+Both landed in `fae81fe`.
+- **`fence-guidance`** (builder-28) [relayed from its result; the text
+  re-printed by this section's writer, 1,968 characters, every renderer
+  installed]. `fences._guidance` adds four lines, built from the same table:
+  - "Write the fence; the pane is the display. Do not render to a file, look
+    for a converter, or preview with other tools." This answers the
+    rasteriser hunt.
+  - Only when both the mermaid and svg rows are present: "For nodes and edges
+    (dependencies, flows, sequences, states, entities) use ```mermaid, which
+    lays them out; ```svg is for what Mermaid cannot draw. Never compute a
+    graph layout by hand." This answers the layout engine. Without merman the
+    text does not say "Mermaid" at all.
+  - When a figure row is present: "Figures sit on a near-white card, scaled
+    down to fit the pane: design for white, with literal colours, text of
+    11 px or more, and at most about 600 px wide." The 600, not the 720 the
+    task suggested, is `FIGURE_WIDTH`. SESSION in FOCUS is 0.585 of the
+    window: 599 at the 1024 minimum, so 600 is never scaled there.
+  - "These rules win over a skill's general advice." This answers the pull of
+    dataviz.
+  - Headroom under `PROMPT_LIMIT` (2,000) is 32 characters.
+- **`fence-var`** (builder-29) [relayed; the measured case re-run by this
+  section's writer]. Sanitiser step 9 resolves `--name` declarations
+  document-wide, last wins, and substitutes `var()` everywhere. An unresolved
+  one becomes `none` in fill/stroke and is dropped elsewhere. Resolved values
+  are re-checked against the url()/escape/@import rules. It is bounded by
+  `MAX_VAR_DEPTH` 8, a byte budget and `MAX_VAR_VALUES` 5,000 (ratified by the
+  lead on its 1.1 s measurement). Failures are lines in a new
+  `Sanitised.notes`. Re-run [ran]: `.a{fill:var(--c)}` paints
+  `(232,89,12,255)`, `fill="var(--gone)"` paints nothing, and `notes` reads
+  `fill: var(--gone) is not declared; painted none`. At the lead's direction,
+  step 3's unsafe-`url()` paint drop now applies step 8's rule, so it no
+  longer paints black either.
+- **Not changed, and not tested:** whether the new text stops a session from
+  rasterising or hand-laying. No session has run with it (`fence-guidance`'s
+  not-run list). The next real drawing session is that test.
+
+### 10.5 Skills shipped with the application
+
+**The operator's requirement, 2026-10-21, verbatim:** "Ideally, any specific
+pptmstr skills, plugins, etc could be delivered as a part of the application
+and would not have to be prepped or included in any project work-up. Also it
+should co-exist with any project/users pre-existing configuration and skills
+directories."
+
+**The lead's reading** [relayed]: claude-agent-sdk 0.2.168's
+`ClaudeAgentOptions` has `plugins=[{"type": "local", "path": …}]` and
+`skills=`, and pptmstr passes neither. The idea: move the fence guidance's
+bulk (the TeX use/avoid list, the SVG design rules, when to choose Mermaid)
+into a packaged skill that loads when a session draws, and keep a short
+always-on floor.
+
+**Probe `skill-probe` has run** (builder-30; `notes/vector-rendering/probe-skills.md`;
+two live runs by the operator, `cmd-20261021T171105Z-ba3cb4bb3e64` and
+`cmd-20261021T171530Z-e3ca78309651`) [relayed from its note and result]:
+- `plugins=` lists the skill as `pptmstr:<name>`, and haiku invoked it on
+  drawing prompts (n=2). The user's synced skills and the bundled ones still
+  load beside it when `setting_sources` is left at its default.
+- `skills=[…]` *restricts* the model's listing, and any value of it makes the
+  SDK pass `--setting-sources=user,project`, which silently drops
+  `.claude/settings.local.json`. That breaks the second half of the
+  requirement, so `skills` stays unset.
+- A same-named project skill also loads, and in one run the model chose it
+  over pptmstr's. The floor must name the namespaced skill.
+- The wheel and the sdist both carry `pptmstr/plugins/pptmstr/` (including
+  `.claude-plugin/`) with no configuration change, and `importlib.resources`
+  resolves an absolute path a session loads from. The path must be absolute.
+- **`approval.classify` parks `Skill` on every rung**, so a shipped skill is
+  refused headless and under `AUTONOMOUS` until the gate admits it.
+- `AgentDefinition.skills` preloads the body into a worker. A worker with a
+  tool list and no `Skill` gets nothing. A worker that inherits its tools can
+  call it, and the hook attributes the call.
+- **The recommendation** is to ship `pptmstr/plugins/pptmstr/`, pass it via
+  `plugins=`, leave `skills` and `setting_sources` unset, admit
+  `pptmstr:`-prefixed `Skill` calls in `classify`, and keep a floor naming
+  `pptmstr:figures`. The stub's always-on cost is about 43 tokens, against
+  today's 1,968 characters.
+
+**What this section adds, and leaves open.** The packaged skill and the floor
+answer different failures from 10.1. The floor has to carry what must never
+be missed: "the pane is the display" and "prefer Mermaid for graphs". Those are
+the two that cost this session 17 tool calls, and a skill the model does not
+choose to load cannot prevent them. The design rules and the TeX list can move.
+Still open:
+- **Gate decision (operator or lead):** admit `Skill` for `pptmstr:` names on
+  every rung. This is not declared.
+- **Unrun, from the probe's not-run list:** any model but haiku; whether the
+  `PreToolUse` hook sees a skill's `` !`cmd` `` lines; whether
+  `strict_mcp_config` keeps out a plugin's own MCP servers.
+
+### 10.6 Scope, not built: a figure-preview bus tool
+
+**The idea.** A bus tool, say `preview_figure(fence)`, takes the fence's
+language and body. It runs the real sanitiser and the render child, and
+returns the PNG plus a list of what the sanitiser stripped or refused. A
+session can then see its figure through the gate before the operator does.
+In 7b792e36 that would have answered "does it render" without a rasteriser
+hunt, and shown the edge crossings the session's own geometry checker went
+looking for.
+
+It is in tension with the fence text as built: "Do not … preview with other
+tools". If the tool is built, that line has to name it as the exception, and
+`PROMPT_LIMIT` has 32 characters of headroom.
+
+Answers from the code, each marked:
+
+**Can a bus tool return an image the model sees?** It can, up to the CLI.
+- The bus is an in-process SDK server (`bus.build_server`,
+  `create_sdk_mcp_server`). Today every handler returns `bus._text`.
+- The SDK's `_convert_tool_content` passes
+  `{"type": "image", "data": <base64>, "mimeType": "image/png"}` through
+  unchanged [read, `claude_agent_sdk/__init__.py`].
+- Whether CLI 2.1.301 forwards an MCP image block to the model as an image is
+  **not verified**. That is probe **PV1** below.
+- The model can judge such an image. The writer of this section read the
+  600 px PNG of 10.3 back as an image and saw the crossings (n=1, through
+  `Read`, not through MCP).
+
+**Which approval rung?** As things stand, none admits it.
+`mcp__pptmstr__preview_figure` is in none of `_AUTO`, `_BUS_AUTO` or
+`_REVIEW`, so `classify` reaches the fail-closed arm and it parks on every
+policy [read, `approval.classify`]. Of the existing sets, it fits `_AUTO`'s
+stated test best: "Cheap, reversible, and they do not leave the box". It
+writes nothing and reaches no network: the sanitiser refuses `<image>` and
+every non-fragment `url()`, and the child is resource-limited. Its one effect
+outside the model's context is CPU in the render child. `_BUS_AUTO`'s
+rationale ("coordination that reads or reserves") does not describe it.
+**Operator decision:** auto-approve on every rung, in `_AUTO` or a set of its
+own with that reason. The alternative is parking it, which turns every
+preview into an operator click and defeats the point.
+
+**Cost.**
+- *Tokens.* An image costs ⌈w/28⌉×⌈h/28⌉ visual tokens (Anthropic vision docs,
+  "Resolution and token cost", read 2026-10-21). The 10.3 figure is 621 tokens
+  at 744×622 and 396 at 600×502 [computed]. Rendering previews at
+  `FIGURE_WIDTH` caps a typical figure at about 400–600 tokens. The image
+  stays in the history and is re-sent, cached, on every later turn. Above 20
+  images in one request the API applies a stricter per-image limit (2000 px
+  per side), which 600-wide previews stay under.
+- *Render time.* 49–62 ms for the 10.3 figure [ran]. M1's merman diagrams were
+  70–282 ms at 800 px and the worst legitimate case is about 2 s
+  (`render.RENDER_TIMEOUT_S` docstring) [read]. The ceiling is the 10 s
+  timeout. A child cold start is about a second (`START_TIMEOUT_S` docstring).
+- *Bytes.* The base64 PNG is about 62 KB at 600 px [ran].
+
+**Can it share the render child without affecting the frame loop?** Not as
+`Renderer` is written [read, `render.py`]:
+- `Renderer` is frame-thread state: `_pending`, `_inflight` and `_child`,
+  with no lock. "The frame thread calls `submit` and `poll` only".
+  `host.pump` is its one poller.
+- Bus handlers run on the `pptmstr-asyncio` thread (`bridge.py`). Calling
+  `render.renderer().submit` from there would race the frame thread.
+- The child renders one request at a time. A preview queued on it waits
+  behind the visible figures, and they wait behind it. A hostile or slow
+  preview holds every figure in the pane for up to `RENDER_TIMEOUT_S`.
+- The child returns RGBA (`rasterise`), not PNG. A preview would re-encode
+  it, or need a third request kind beside `_RASTER` and `_MERMAID`.
+
+Two designs, and which one is a decision:
+- (a) **A second `Renderer` owned by the bus side**, polled from the asyncio
+  loop, with its own child. It is fully isolated from the frame loop, so a
+  bad preview cannot stall a visible figure. It costs a second process, a
+  second ~1 s cold start, and a second `RLIMIT_AS` budget (1 GiB address
+  space on Linux; unbounded on macOS, where only the timeout holds).
+- (b) **Route through the frame thread**: the handler emits an intent, `pump`
+  submits, and a future is resolved with the result. It needs one child, but
+  it couples previews to the visible figures' queue and needs a bridge
+  path that does not exist.
+- The writer recommends (a). It keeps `render.py`'s one-poller invariant
+  intact, and the frame loop is the property that must not regress.
+  **Operator decision**, on the cost of the second process.
+
+**What "what the sanitiser stripped" can say today.** Less than the idea
+needs [read, `sanitise.py`]. `Sanitised.notes` carries only step 9
+(unresolved `var()`) and step 3's repainted unsafe paints. The sanitiser's
+docstring already names this tool as their consumer. Elements and attributes
+dropped by steps 2–5 (`<script>`, `on*`, `<image>`, `<pattern>`, filters,
+external `url()`) leave no note. A preview that shows a picture with something
+silently missing and an empty list is the failure 10.2 was. So the tool
+needs the sanitiser to record every drop, capped as `notes` is. That is a
+change to a pure function with a timing bound, and it needs its own task. The
+Mermaid route also drops notes: `render._serve` rebuilds `Laid` as
+`Sanitised(svg, w, h)`.
+
+**Can it be abused?**
+- *Reach.* It reaches no further than a fence already does. The same
+  sanitiser, the same child, the same caps, timeout and memory limit. A
+  hostile SVG that would hang the pane hangs the preview's child instead,
+  under design (a).
+- *Volume.* Each call is up to 10 s of a CPU and about 400–600 tokens of the
+  caller's own context. Nothing stops a loop of previews except the model's
+  budget. **Probe or decision:** a per-session rate or count bound. The bus
+  store's caps on open decisions and commands are the precedent.
+- *Content.* The image is a picture of text the session itself wrote, so it
+  is no new injection channel. A figure can show text, so a preview cannot
+  smuggle in anything a fence could not already show the operator.
+- *Workers.* Every session's bus carries it (`driver._mcp_servers`), so
+  workers could call it. Whether reviewer roles should have it is a role
+  decision.
+
+**How the operator sees that it was used.** Today, badly [read]:
+- The call appears as a tool line with its input, the whole fence
+  (`transcript.append_tool_call`).
+- The result goes through `transcript.cap_output`, which `repr`s non-string
+  content. An image result would be drawn as a list of dicts holding about
+  62 KB of base64, under the 1 MiB `OUTPUT_CAP`, so not cut.
+- The tool needs the transcript to recognise an image block and show a one-
+  line summary ("preview 600×502, 2 notes"), or the figure itself through the
+  existing host. That is also how an operator would see what the model saw.
+- The gate's hook sees every call by name, so a count is available if a
+  status line wants one.
+
+**Open, named; nothing is declared.**
+
+| id | kind | question | decides |
+|---|---|---|---|
+| PV1 | probe | Does CLI 2.1.301 hand an SDK-server image block to the model as an image? One live call returns a known PNG (e.g. a coloured square with a word), and the model is asked what it shows. Then the `ToolResultBlock.content` shape pptmstr receives is recorded. | whether the tool is possible at all; what the transcript must special-case |
+| PV2 | probe | Does a session with the tool, asked for a dependency graph, use it, and does it then fix crossings or swap to Mermaid? A few runs with and without it, opus and haiku. | whether the tool is worth its tokens next to the 10.4 text |
+| PV3 | task, once PV1 passes | The sanitiser records every drop as a note, capped, inside the timing bound; the Mermaid route keeps notes across the child. | whether "what was stripped" is truthful |
+| PD1 | operator decision | The rung: auto-approve on every rung (recommended, `_AUTO`'s test) or park. | `approval` sets |
+| PD2 | operator decision | A second render child for previews (recommended) or routing through the frame thread. | process count, memory budget |
+| PD3 | operator decision | A per-session bound on preview calls, and which roles are offered the tool. | abuse bound |
+| PD4 | lead decision | The fence text's "preview with other tools" line, and the 32-character headroom, if the tool lands. Ties to 10.5's floor/skill split. | `fences._guidance` |
