@@ -36,14 +36,18 @@ Policy, in the order it is applied:
    plain `href` (SVG 2, which resvg reads), so the output needs no xlink namespace.
    Any other namespaced attribute except `xml:space` is dropped. An attribute whose
    value contains a backslash, a `url(` other than `url(#id)`, or a function that
-   takes a URL as a string (`image(`, `image-set(`, `src(`) is dropped whole. The
-   `filter` property is dropped wherever it is set, attribute or CSS: with
-   `<filter>` gone it can only name the wrong thing or be a filter function, and
-   resvg draws those (`blur(200px)` on 50 full-canvas rects took 44 s at
-   1600x1200; probe R3).
+   takes a URL as a string (`image(`, `image-set(`, `src(`) is dropped whole, except
+   in `fill` and `stroke`, where a removed paint is black: there the value becomes
+   the colour after a leading `url()` (`url(http://x) red` is `red`) or `none`, as in
+   step 8, and `Sanitised.notes` says so; the same holds for those declarations in
+   `style=` (step 4). The `filter` property is dropped wherever it is set, attribute
+   or CSS: with `<filter>` gone it can only name the wrong thing or be a filter
+   function, and resvg draws those (`blur(200px)` on 50 full-canvas rects took 44 s
+   at 1600x1200; probe R3).
 4. **CSS** in `style=` is split into declarations, and a declaration with a
    backslash, `@import`, a non-fragment `url(` or a URL-taking function is dropped
-   whole. A `<style>` element with any of those, or `@font-face`, is dropped whole.
+   whole, or repainted if it sets `fill` or `stroke` (step 3). A `<style>` element
+   with any of those, or `@font-face`, is dropped whole.
    Nothing is cut out of the middle of a value: a CSS escape makes `u\\72l(` a url
    token, so substring stripping can be evaded, and the backslash rule closes that.
 5. **Caps** (`MAX_INPUT_BYTES`, `MAX_INPUT_ELEMENTS`, `MAX_DEPTH`, `MAX_ELEMENTS`,
@@ -73,6 +77,24 @@ Policy, in the order it is applied:
    (`clip-path`, `mask`, `marker-*`, `href`, ...) the attribute or the CSS
    declaration is removed, so the element draws without the effect. An `href` needs
    only its target to exist.
+9. **CSS custom properties are substituted, right after the parse and before step 2**
+   (see `_substitute_custom_properties`). resvg does not implement them: a `var()`
+   reaches it as an unknown value and `fill:var(--c)` paints black. Every
+   `--name: value` declaration, in a `<style>` rule or a `style=` attribute, goes into
+   one document-wide table, a later one replacing an earlier: selectors, inheritance
+   and the cascade are not modelled, so a property declared differently under two
+   selectors takes the last value everywhere. Each `var(--name)` and
+   `var(--name, fallback)` in an attribute, a `style=` or a `<style>` is replaced, and
+   the declarations themselves are removed. A `var()` that cannot be resolved -- not
+   declared and no fallback, a cycle, nested deeper than `MAX_VAR_DEPTH`, malformed --
+   or that resolves to text step 3 or 4 would refuse (an escape, a non-fragment
+   `url(`) fails its attribute or declaration. In `fill` and `stroke` that becomes
+   `none`, as in step 8, because a removed paint is black; anything else is removed.
+   Each failure is a line in `Sanitised.notes`. A `var()` inside a selector empties
+   that `<style>`. Text is substituted wherever `var(` appears, inside a CSS string
+   too, so none survives. The work and the output are bounded: see `_Vars` and
+   `MAX_VAR_VALUES`. A document whose substitution would pass `MAX_INPUT_BYTES` is
+   refused.
 
 The root's `width` and `height` are rewritten to the natural size, so a renderer that
 sizes its canvas from them gets the size the host laid out for.
@@ -127,6 +149,22 @@ MAX_DEPTH = 64
 # `render.MAX_TEXTURE_SIDE`, shrinking a longer figure to fit.
 MAX_SIDE = 16_384.0
 MAX_NATURAL_PIXELS = 4096 * 4096
+
+# How many `var()` may be open inside one another, through a declared value or a
+# fallback, while one value is resolved. A design-token sheet nests two or three deep (a
+# role colour naming a palette colour). The bound also caps how many times a fallback's
+# text is searched again for `var(`, once per enclosing level.
+MAX_VAR_DEPTH = 8
+
+# Distinct values holding a `var()` that one document may have resolved. Each costs
+# about 10 us of Python, so at the byte cap (50,000 of them) step 9 alone took about a
+# second on the frame thread. A chart's values repeat a palette of a few dozen, and a
+# repeat is a lookup (`_Vars.resolved`).
+MAX_VAR_VALUES = MAX_ELEMENTS
+
+# Lines of `Sanitised.notes` step 9 writes before it says only that there are more:
+# the host shows them, and a document can fail a var() in every declaration.
+MAX_NOTES = 8
 
 ALLOWED_ELEMENTS: frozenset[str] = frozenset(
     {
@@ -204,11 +242,18 @@ class Sanitised:
 
     `width` and `height` are in CSS px and are also what the root's attributes now
     say. The host's height for a drawn width `w` is `min(w, width) * height / width`.
+    `notes` says what the policy changed that the author may not expect: one line per
+    distinct `var()` that could not be resolved (step 9), then one per distinct unsafe
+    `fill` or `stroke` that was repainted (step 3), each list capped at `MAX_NOTES`.
+    Nothing displays them yet: their consumer is the figure-preview tool scoped in the
+    board task fence-lessons, which would hand them to the session that wrote the
+    figure.
     """
 
     svg: str
     width: float
     height: float
+    notes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -254,7 +299,10 @@ def _sanitise(svg: str) -> Sanitised:
     if _local(root.tag) != "svg" or _ns(root.tag) not in ("", SVG_NS):
         raise _Refusal("the root element is not <svg>")
     _check_shape(root)
-    out = _clean(root)
+    notes = _substitute_custom_properties(root, len(svg))
+    repainted: dict[str, None] = {}
+    out = _clean(root, repainted)
+    notes += _capped(repainted, "and more unsafe paint that was repainted")
     if out is None:
         raise _Refusal("the root element is not <svg>")
     _resolve_references(out)
@@ -268,7 +316,7 @@ def _sanitise(svg: str) -> Sanitised:
     # ElementTree's default_namespace option refuses unqualified attribute names.
     out.set("xmlns", SVG_NS)
     text = ET.tostring(out, encoding="unicode")
-    return Sanitised(svg=text, width=width, height=height)
+    return Sanitised(svg=text, width=width, height=height, notes=notes)
 
 
 # Step 1 -------------------------------------------------------------------------------
@@ -319,15 +367,19 @@ def _check_shape(root: ET.Element) -> None:
         stack.extend((child, depth + 1) for child in element)
 
 
-def _clean(src: ET.Element) -> ET.Element | None:
+def _clean(src: ET.Element, notes: dict[str, None]) -> ET.Element | None:
+    """
+    `src` and its subtree with steps 2 to 4 applied, or None if it is dropped. A line
+    for each repainted fill or stroke goes into `notes`.
+    """
     local = _local(src.tag)
     if not _is_svg(src.tag):
         return None
     if local == "foreignObject":
-        return _rewrite_foreign_object(src)
+        return _rewrite_foreign_object(src, notes)
     if local not in ALLOWED_ELEMENTS:
         return None
-    out = ET.Element(local, _clean_attributes(src.attrib))
+    out = ET.Element(local, _clean_attributes(src.attrib, notes))
     if local in _TEXT_ONLY:
         text = "".join(src.itertext())
         if local == "style":
@@ -343,7 +395,7 @@ def _clean(src: ET.Element) -> ET.Element | None:
     last: ET.Element | None = None
     runs: list[str] = [src.text] if src.text else []
     for child in src:
-        kept = _clean(child)
+        kept = _clean(child, notes)
         if kept is None:
             if child.tail:
                 runs.append(child.tail)
@@ -364,7 +416,7 @@ def _set_run(parent: ET.Element, last: ET.Element | None, runs: list[str]) -> No
         last.tail = text
 
 
-def _clean_attributes(attrib: dict[str, str]) -> dict[str, str]:
+def _clean_attributes(attrib: dict[str, str], notes: dict[str, None]) -> dict[str, str]:
     out: dict[str, str] = {}
     for name, value in attrib.items():
         if name.startswith("{"):
@@ -388,7 +440,7 @@ def _clean_attributes(attrib: dict[str, str]) -> dict[str, str]:
             continue
         if lowered == "style":
             # Declaration by declaration, so one bad declaration does not cost the rest.
-            value = _clean_declarations(value)
+            value = _clean_declarations(value, notes)
             if not value:
                 continue
         elif lowered == "href":
@@ -396,15 +448,19 @@ def _clean_attributes(attrib: dict[str, str]) -> dict[str, str]:
             if key != "href" or not _FRAGMENT.fullmatch(fragment):
                 continue
             value = fragment
-        elif _css_unsafe(value) or lowered == "filter":
+        elif lowered == "filter":
             continue
+        elif _css_unsafe(value):
+            if lowered not in _PAINT:
+                continue
+            value = _repaint(key, value, notes)
         elif lowered in ("font-family", "font"):
             value = _fix_font_value(lowered, value)
         out[key] = value
     return out
 
 
-def _rewrite_foreign_object(fo: ET.Element) -> ET.Element | None:
+def _rewrite_foreign_object(fo: ET.Element, notes: dict[str, None]) -> ET.Element | None:
     """
     A foreignObject becomes centred text where it stood: its XHTML's text, one line per
     block element or `<br>`, at the box's centre. Everything else inside it is gone.
@@ -418,7 +474,7 @@ def _rewrite_foreign_object(fo: ET.Element) -> ET.Element | None:
     h = _number(fo.get("height")) or 0.0
     cx, cy = _fmt(x + w / 2), _fmt(y + h / 2)
     kept = {k: v for k, v in fo.attrib.items() if k in ("class", "style", "transform")}
-    attrs = _clean_attributes(kept)
+    attrs = _clean_attributes(kept, notes)
     attrs.update({"x": cx, "y": cy, "text-anchor": "middle", "dominant-baseline": "central"})
     text = ET.Element("text", attrs)
     if len(lines) == 1:
@@ -453,6 +509,286 @@ def _foreign_lines(fo: ET.Element) -> list[str]:
     visit(fo)
     joined = (" ".join("".join(parts).split()) for parts in lines)
     return [line for line in joined if line]
+
+
+# Step 9 -------------------------------------------------------------------------------
+
+_VAR = re.compile(r"var\(", re.IGNORECASE)
+_VAR_ARGS = re.compile(r"[(),]")
+_CUSTOM_NAME = re.compile(r"--[\w-]+")
+
+
+class _Unresolved(Exception):
+    """
+    A `var()` that cannot be resolved; it fails the attribute or declaration holding it.
+    """
+
+
+@dataclass(slots=True)
+class _Vars:
+    """
+    The custom-property table and what substitution may still spend.
+
+    `budget` is the characters of declared values substitution may still scan; each
+    expansion of a name charges its declared value's length. Every character
+    substitution produces comes from text it scanned, so this bounds both the work and
+    the output, however the declarations refer to one another: ten names each naming
+    the previous one ten times would be 10^10 characters, and is refused at the budget
+    instead. `resolved` holds each distinct value's outcome, since a stylesheet repeats
+    one `var()` in every rule; a repeat is a lookup and is not charged. A fallback is
+    not charged either, because it is part of text already scanned or charged, and
+    `_Parens` locates every `var()` in a text by lookup, so a fallback is searched again
+    only once per enclosing level, which `MAX_VAR_DEPTH` bounds.
+    """
+
+    declared: dict[str, str]
+    budget: int
+    notes: dict[str, None]
+    parsed: dict[str, _Parens]
+    resolved: dict[str, str | _Unresolved]
+    splits: dict[tuple[str, str], list[tuple[str, str]]]
+
+    def note(self, line: str) -> None:
+        # Unbounded here, since MAX_VAR_VALUES bounds how many lines there can be.
+        self.notes[line] = None
+
+    def lines(self) -> tuple[str, ...]:
+        return _capped(self.notes, "and more var() that could not be resolved")
+
+
+def _capped(notes: dict[str, None], more: str) -> tuple[str, ...]:
+    """
+    The first `MAX_NOTES` of `notes`, and `more` if there were others: the host shows
+    them, and a document can fail in every declaration.
+    """
+    if len(notes) <= MAX_NOTES:
+        return tuple(notes)
+    return (*list(notes)[:MAX_NOTES], more)
+
+
+def _substitute_custom_properties(root: ET.Element, size: int) -> tuple[str, ...]:
+    """
+    Step 9 on the parsed input, in place. `size` is the input's length: the
+    substituted document may not be longer than `MAX_INPUT_BYTES`. Returns the notes.
+    """
+    env = _Vars({}, MAX_INPUT_BYTES, {}, {}, {}, {})
+    _custom_properties(root, env)
+    for element in root.iter():
+        for name, value in list(element.attrib.items()):
+            if name.lower() == "style":
+                if not _has_custom(value):
+                    continue
+                new: str | None = _substitute_css(value, env, stylesheet=False)
+            elif "var(" in value.lower():
+                new = _substitute_value(name, value, env)
+            else:
+                continue
+            size -= len(value)
+            if new is None:
+                del element.attrib[name]
+            else:
+                size += len(new)
+                element.set(name, new)
+        if _local(element.tag) == "style" and _is_svg(element.tag):
+            text = "".join(element.itertext())
+            if _has_custom(text):
+                for child in list(element):
+                    element.remove(child)
+                css = _substitute_css(text, env, stylesheet=True)
+                size += len(css or "") - len(text)
+                element.text = css
+        if size > MAX_INPUT_BYTES:
+            raise _Refusal(f"var() substitution makes it larger than {MAX_INPUT_BYTES} bytes")
+    return env.lines()
+
+
+def _has_custom(css: str) -> bool:
+    return "--" in css or "var(" in css.lower()
+
+
+def _custom_properties(root: ET.Element, env: _Vars) -> None:
+    """
+    Every `--name: value` declared in the document into `env.declared`, the last
+    declaration of a name winning, with `!important` removed. Values are kept raw:
+    they are checked once substituted, where step 3 and 4's rules apply to the whole of
+    the result. Each text split is kept in `env.splits` for the substitution pass.
+    """
+    declared = env.declared
+
+    def collect(css: str, delimiters: str) -> None:
+        for piece, delimiter in _split(css, delimiters, env):
+            if delimiter == "{":
+                continue
+            name, colon, value = piece.partition(":")
+            name = name.strip()
+            if colon and name.startswith("--"):
+                declared[name] = _split_important(value)[0].strip()
+
+    for element in root.iter():
+        for name, value in element.attrib.items():
+            if name.lower() == "style" and "--" in value:
+                collect(value, ";")
+        if _local(element.tag) == "style" and _is_svg(element.tag):
+            text = "".join(element.itertext())
+            if "--" in text:
+                collect(text, ";{}")
+
+
+def _split(css: str, delimiters: str, env: _Vars) -> list[tuple[str, str]]:
+    """
+    `_css_split` once per text: step 9 reads each text twice, to collect and to
+    substitute, and a stylesheet is up to a megabyte.
+    """
+    pieces = env.splits.get((css, delimiters))
+    if pieces is None:
+        pieces = env.splits[css, delimiters] = list(_css_split(css, delimiters))
+    return pieces
+
+
+def _substitute_css(text: str, env: _Vars, *, stylesheet: bool) -> str | None:
+    """
+    A `style=` value or a stylesheet with its custom-property declarations removed and
+    each `var()` substituted. None for a `style=` with nothing left. A stylesheet with a
+    `var()` in a selector is emptied whole, since a rule cannot lose its selector.
+    """
+    pieces: list[str] = []
+    for piece, delimiter in _split(text, ";{}" if stylesheet else ";", env):
+        if "var(" in piece.lower() and delimiter == "{":
+            env.note(f"a var() in the selector {piece.strip()[:40]!r}; the <style> is emptied")
+            return ""
+        prop, colon, value = piece.partition(":")
+        if colon and prop.strip().startswith("--"):
+            piece = ""
+        elif "var(" in piece.lower():
+            if not colon:
+                env.note(f"a var() outside a declaration: {piece.strip()[:40]!r}; dropped")
+                piece = ""
+            else:
+                resolved = _substitute_value(prop, value, env)
+                piece = "" if resolved is None else f"{prop}:{resolved}"
+        if piece or delimiter != ";":
+            pieces.append(piece + delimiter)
+    css = "".join(pieces)
+    return css if stylesheet or css.strip(" \t\r\n;") else None
+
+
+def _substitute_value(prop: str, value: str, env: _Vars) -> str | None:
+    """
+    `value` with every `var()` substituted; for a failed one, `none` in a paint
+    property and None (remove it) in any other.
+    """
+    outcome = env.resolved.get(value)
+    if outcome is None:
+        if len(env.resolved) >= MAX_VAR_VALUES:
+            raise _Refusal(f"more than {MAX_VAR_VALUES} distinct values that use var()")
+        try:
+            resolved = _substitute(_parens(value), 0, len(value), env, (), 0)
+            if not resolved.strip():
+                raise _Unresolved("resolves to nothing")
+            if _css_unsafe(resolved):
+                raise _Unresolved("resolves to an escape, a URL or an @import")
+            outcome = env.resolved[value] = resolved
+        except _Unresolved as why:
+            outcome = env.resolved[value] = why
+    if isinstance(outcome, str):
+        return outcome
+    paint = prop.strip().lower() in _PAINT
+    env.note(f"{prop.strip()}: {outcome}; {'painted none' if paint else 'removed'}")
+    return "none" if paint else None
+
+
+@dataclass(frozen=True, slots=True)
+class _Parens:
+    """
+    A text and, for each `(` in it, the index of the `)` that closes it and of the
+    first comma at its own level. Found in one pass, so a `var()` and its fallback
+    are located by lookup and the text is never rescanned for them.
+    """
+
+    text: str
+    close: dict[int, int]
+    comma: dict[int, int]
+
+
+def _parens(text: str) -> _Parens:
+    close: dict[int, int] = {}
+    comma: dict[int, int] = {}
+    if text.count("(") == 1:
+        # The common case, `fill: var(--c)`: str methods, without a Python loop.
+        at = text.find("(")
+        end = text.find(")", at)
+        if end >= 0:
+            close[at] = end
+            first = text.find(",", at, end)
+            if first >= 0:
+                comma[at] = first
+        return _Parens(text, close, comma)
+    open_: list[int] = []
+    for token in _VAR_ARGS.finditer(text):
+        at = token.start()
+        c = text[at]
+        if c == "(":
+            open_.append(at)
+        elif not open_:
+            continue
+        elif c == ")":
+            close[open_.pop()] = at
+        elif open_[-1] not in comma:
+            comma[open_[-1]] = at
+    return _Parens(text, close, comma)
+
+
+def _substitute(
+    src: _Parens, lo: int, hi: int, env: _Vars, open_: tuple[str, ...], depth: int
+) -> str:
+    """
+    `src.text[lo:hi]` with every `var()` in it replaced, recursively. `open_` holds the
+    names being expanded around this text, to find a cycle.
+    """
+    text = src.text
+    out: list[str] = []
+    i = lo
+    while (match := _VAR.search(text, i, hi)) is not None:
+        paren = match.end() - 1
+        close = src.close.get(paren)
+        if close is None or close >= hi:
+            raise _Unresolved("a var() is not closed")
+        comma = src.comma.get(paren, close)
+        name = text[match.end() : comma].strip()
+        fallback = (comma + 1, close) if comma < close else None
+        out.append(text[i : match.start()])
+        out.append(_expand(name, src, fallback, env, open_, depth + 1))
+        i = close + 1
+    out.append(text[i:hi])
+    return "".join(out)
+
+
+def _expand(
+    name: str,
+    src: _Parens,
+    fallback: tuple[int, int] | None,
+    env: _Vars,
+    open_: tuple[str, ...],
+    depth: int,
+) -> str:
+    if depth > MAX_VAR_DEPTH:
+        raise _Unresolved(f"var() nested deeper than {MAX_VAR_DEPTH}")
+    if not _CUSTOM_NAME.fullmatch(name):
+        raise _Unresolved(f"var({name[:40]}) does not name a custom property")
+    if name in open_:
+        raise _Unresolved(f"var({name}) is part of a cycle")
+    value = env.declared.get(name)
+    if value is None:
+        if fallback is None:
+            raise _Unresolved(f"var({name}) is not declared")
+        return _substitute(src, *fallback, env, open_, depth).strip()
+    env.budget -= len(value)
+    if env.budget < 0:
+        raise _Refusal(f"var() substitution scans more than {MAX_INPUT_BYTES} characters")
+    parsed = env.parsed.get(name)
+    if parsed is None:
+        parsed = env.parsed[name] = _parens(value)
+    return _substitute(parsed, 0, len(value), env, (*open_, name), depth)
 
 
 # Step 8 -------------------------------------------------------------------------------
@@ -612,13 +948,75 @@ def _css_split(text: str, delimiters: str) -> Iterator[tuple[str, str]]:
     yield "".join(piece), ""
 
 
-def _clean_declarations(text: str) -> str:
+def _clean_declarations(text: str, notes: dict[str, None]) -> str:
     kept = []
     for declaration, _ in _css_split(text, ";"):
-        if _css_unsafe(declaration) or _is_filter(declaration) or not declaration.strip():
+        if _is_filter(declaration) or not declaration.strip():
             continue
+        if _css_unsafe(declaration):
+            prop, colon, value = declaration.partition(":")
+            prop = prop.strip()
+            if not colon or prop.lower() not in _PAINT or _css_unsafe(prop):
+                continue
+            declaration = f"{prop}:{_repaint(prop, value, notes)}"
         kept.append(_fix_font_declaration(declaration).strip())
     return "; ".join(kept)
+
+
+_LEADING_URL = re.compile(r"\s*url\s*\(\s*", re.IGNORECASE)
+
+
+def _repaint(prop: str, value: str, notes: dict[str, None]) -> str:
+    """
+    What an unsafe `fill` or `stroke` value becomes in place of being removed, which
+    would paint it black: the colour after a leading `url()` when there is one and it
+    is safe, else `none`. A trailing `!important` is kept. A line goes into `notes`.
+    """
+    body, important = _split_important(value)
+    rest = _after_leading_url(body)
+    fallback = rest.strip() if rest is not None and "\\" not in body else ""
+    # A colour starts with a letter or `#`; anything else (`) red` after a URL with a
+    # `)` in it) is not one, and an invalid paint is black too.
+    if not (fallback[:1].isalpha() or fallback.startswith("#")) or _css_unsafe(fallback):
+        fallback = "none"
+    notes[f"{prop}: {_unsafe_reason(body)}; painted {fallback[:40]}"] = None
+    return f"{fallback}{important}"
+
+
+def _after_leading_url(text: str) -> str | None:
+    """
+    `text` after a `url(...)` that opens it, or None if it does not open with one that
+    closes. A quoted URL ends at its closing quote; an unquoted one at the first `)`.
+    """
+    match = _LEADING_URL.match(text)
+    if match is None:
+        return None
+    at = match.end()
+    if text[at : at + 1] in ("'", '"'):
+        end = text.find(text[at], at + 1)
+        if end < 0:
+            return None
+        close = text.find(")", end + 1)
+        if close < 0 or text[end + 1 : close].strip():
+            return None
+    else:
+        close = text.find(")", at)
+        if close < 0:
+            return None
+    return text[close + 1 :]
+
+
+def _unsafe_reason(text: str) -> str:
+    """
+    Why `_css_unsafe(text)` holds, in the words of a note.
+    """
+    if "\\" in text:
+        return "a backslash escape"
+    if _IMPORT.search(text):
+        return "an @import"
+    if _URL_STRING_FUNC.search(text):
+        return "a function that loads a URL"
+    return "a url() outside the document"
 
 
 def _clean_stylesheet(text: str) -> str | None:

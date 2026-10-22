@@ -161,6 +161,43 @@ def test_the_text_says_what_the_task_asks_and_stays_short() -> None:
     assert fences.prompt(()) == ""
 
 
+MERMAID_FIRST = "use ```mermaid, which lays them out"
+
+
+def test_the_guidance_says_the_pane_is_the_display_and_how_to_design_for_it() -> None:
+    text = fences.prompt(fences.RENDERED)
+    assert "the pane is the display" in text
+    assert "near-white card" in text and "literal colours" in text
+    assert f"at most about {fences.FIGURE_WIDTH} px wide" in text
+    assert "win over a skill's general advice" in text
+    assert MERMAID_FIRST in text and "Never compute a graph layout by hand" in text
+
+
+@pytest.mark.parametrize(
+    "words", [("svg", "math"), ("svg",), ("math",)], ids=["svg+math", "svg", "math"]
+)
+def test_without_the_mermaid_row_the_text_says_nothing_of_mermaid(words: tuple[str, ...]) -> None:
+    rows = tuple(row for row in fences.RENDERED if row.word in words)
+    text = fences.prompt(rows)
+    assert "mermaid" not in text.lower()
+    for row in rows:
+        assert f"```{row.word}" in text and row.says in text
+    assert len(text) <= fences.PROMPT_LIMIT
+    assert ("near-white card" in text) == ("svg" in words), "card advice is for figures"
+    assert "the pane is the display" in text
+
+
+def test_the_mermaid_preference_follows_the_installed_mermaid_row(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(mermaid, "_VERSION", [None])
+    assert MERMAID_FIRST not in fences.session_prompt()
+    monkeypatch.setattr(mermaid, "_VERSION", ["0.9.1"])
+    with_it = fences.session_prompt()
+    has_row = any(row.word == "mermaid" for row in fences.available())
+    assert (MERMAID_FIRST in with_it) == has_row
+
+
 # -- every launch carries it -------------------------------------------------------
 
 

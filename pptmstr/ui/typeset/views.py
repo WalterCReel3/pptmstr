@@ -113,8 +113,11 @@ and lets nothing out but ``TypesetUnavailable``: the link handler the library ca
 back from its draw (``_Followed``), the captioned stream's blocks (``_Captioned``),
 the copy (``_formula_copy``), the guard after a draw (``_formulas_refused``) and
 the formula's pre-check (``gate.formula``). Each logs the exception as pptmstr's
-defect (``gate.own_defect``) and gives a lesser answer for its own text alone. What
-pptmstr's code raises outside every such block is a defect and is not caught.
+defect (``gate.own_defect``) and gives a lesser answer for its own text alone. The
+rule is whose code raised: a call into the library made from inside such a callback
+(the copy's reads of the view, the pre-check's native calls) is wrapped in its own
+``with`` block, and a failure there stops the library. What pptmstr's code raises
+outside every such block is a defect and is not caught.
 
 ## When the library sets less than it was handed
 
@@ -1472,8 +1475,11 @@ def _formula_copy(view: Any) -> str:
     exactly as the library copies it.
 
     The library calls this from inside its draw (Ctrl+C) and ``ViewCache.selected``
-    from inside ``_ASKING``, so what it raises is caught here: logged as pptmstr's
-    defect (``gate.own_defect``), and the copy is the library's own.
+    from inside ``_ASKING``. Each read of the view and its document is a call
+    into the library (``_COPYING``): what one raises stops the library, as a
+    call into it does anywhere, and passes here as ``TypesetUnavailable``. What
+    pptmstr's own code around those reads raises is caught here: logged as
+    pptmstr's defect (``gate.own_defect``), and the copy is the library's own.
     """
     from imscribe import TypesetUnavailable
 
@@ -1483,16 +1489,22 @@ def _formula_copy(view: Any) -> str:
         raise
     except Exception as failure:
         gate.own_defect("copying a selection", failure)
+    with _COPYING:
         return str(view.selected_text())
 
 
+_COPYING = gate.into_library("copying a selection")
+
+
 def _copy_with_fences(view: Any) -> str:
-    selection = view.selection
-    if selection is None:
-        return ""
+    with _COPYING:
+        selection = view.selection
+        if selection is None:
+            return ""
+        blocks = view.blocks
+        texts = view.texts
+        separator = str(view.separator)
     (first, start), (last, end) = selection
-    blocks = view.blocks
-    texts = view.texts
     held = [
         at
         for at in range(first, min(last, len(blocks) - 1) + 1)
@@ -1501,18 +1513,26 @@ def _copy_with_fences(view: Any) -> str:
         and (at, 0) < (last, end)
     ]
     if not held:
-        return str(view.selected_text())
-    document = view.native_document
+        with _COPYING:
+            return str(view.selected_text())
     pieces: list[str] = []
     cursor = (first, start)
     for at in held:
         if cursor < (at, 0):
-            pieces.append(str(document.range_text((cursor, (at, 0)), view.separator)))
+            pieces.append(_range_text(view, cursor, (at, 0), separator))
         pieces.append(blocks[at].fence)
         cursor = (at, len(texts[at]))
     if cursor < (last, end):
-        pieces.append(str(document.range_text((cursor, (last, end)), view.separator)))
-    return str(view.separator).join(piece for piece in pieces if piece)
+        pieces.append(_range_text(view, cursor, (last, end), separator))
+    return separator.join(piece for piece in pieces if piece)
+
+
+def _range_text(view: Any, start: tuple[int, int], end: tuple[int, int], separator: str) -> str:
+    """
+    The library's own copy of a range of a view's document.
+    """
+    with _COPYING:
+        return str(view.native_document.range_text((start, end), separator))
 
 
 def _formula_block(block: Any, said: str, theme: Any) -> tuple[Any, ...]:

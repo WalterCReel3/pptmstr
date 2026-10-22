@@ -331,8 +331,29 @@ lazily imported optional extra.**
     that diagram. Whether a raised limit lets a large diagram run longer was
     not measured; the child's timeout bounds it either way.
 
-  A YAML front-matter `config:` block reaches merman the same way (a
-  `fontFamily` there was written into the SVG) and is **not** taken out.
+- **A YAML front matter keeps only its content keys** (`mermaid.without_config`,
+  decision 2026-10-21, lead, at fence-fix-2), for the same reason: `title` and
+  `displayMode`, each with the lines indented under it; every other top-level
+  key is taken out, `config` among them, and a front matter left with no key
+  goes whole, since merman refuses an empty one. Kept by name rather than
+  dropped by name, so a key written in a form merman reads and this pass does
+  not recognise is removed rather than passed on. Measured on merman 0.9.1,
+  `resvg-safe`, the same flowchart [ran, fence-fix-2]:
+  - `config: {theme: dark}` restyles the output exactly as the dark `init`
+    does, in flow or block style and with the key quoted; `config.fontFamily`
+    is written into the SVG; `title` is drawn; an unknown key and a `<<` merge
+    key change nothing;
+  - merman reads a front matter only from the first line: after a byte-order
+    mark, after a lone `\r` line end, and with the whole source indented, but
+    not after a blank line or a `%%` comment. It closes at the next `---` at
+    column 0 and not at an indented one;
+  - so the pass runs after the directives come out (a directive line before a
+    front matter would otherwise bring it to the first line unread), counts a
+    lone `\r` and the YAML 1.1 breaks as line ends, and writes the front matter
+    anew with `---` fences alone on their lines and `\n` breaks, so merman
+    closes it where the pass did or earlier, never later. Its tests are
+    `tests/test_figure_mermaid.py::test_front_matter_keeps_only_its_content_keys`
+    and the real-child `..._front_matter_config_lays_out_as_the_diagram_without_it`.
 - **One engine is kept for the child's life and dropped on any merman
   exception** (decision 2026-10-21, lead, at fence-fix): a binding that raised
   may be left in a state no later diagram recovers from, and a new
@@ -1198,6 +1219,22 @@ Upstream asks, filed when slice 1 exists, not before:
   the guard as "not a formula", which sends that entry alone to ImGui. The
   link handler (`views._Followed`) was the first of these. A new callback
   into pptmstr from inside the library follows the same rule.
+
+  **The rule is about whose code raised, not about what was being attempted**
+  (decision 2026-10-21, lead, at fence-fix-2). A call into the native module
+  or a read of a library view or document inside such a callback is still the
+  library's, so it is wrapped narrowly in `into_library` and a failure there
+  stops the library as it does everywhere else: the formula pre-check's
+  `ts.Paragraph`, `layout` and `formulas()` (`gate._laid_formula`, inside
+  `_refusal`), and the copy's reads of `selection`, `blocks`, `texts`,
+  `separator`, `selected_text()` and `native_document.range_text`
+  (`views._copy_with_fences`, `_range_text`). Only pptmstr's logic between
+  those calls is caught at pptmstr's edge (`_refusal_said`, the formula
+  indexing of the copy). The copy's fallback to `selected_text()` runs only
+  after pptmstr's own defect; after a library failure the failure propagates
+  as one and the copy is empty [ran, fence-fix-2: a raising `Paragraph` and a
+  raising `range_text` each stop the library, and each test fails against the
+  code before this change].
 
 - **pptmstr mutates imscribe's private shared parser.** `gate._reader`
   disables rules and pushes its own onto `markdown_rules._parser(False, False)`

@@ -20,6 +20,9 @@ from pptmstr.figures.sanitise import (
     MAX_INPUT_BYTES,
     MAX_INPUT_ELEMENTS,
     MAX_LAYER_CHAIN,
+    MAX_NOTES,
+    MAX_VAR_DEPTH,
+    MAX_VAR_VALUES,
     SVG_NS,
     XML_NS,
     Refused,
@@ -297,7 +300,11 @@ def test_foreign_object_attributes_carried_to_the_text_are_sanitised() -> None:
         )
     )
     text = find_all(out, "text")[0]
-    assert (text.get("class"), text.get("transform"), text.get("style")) == ("c", None, "color:red")
+    assert (text.get("class"), text.get("transform"), text.get("style")) == (
+        "c",
+        None,
+        "fill:none; color:red",
+    )
 
 
 def test_foreign_object_without_text_is_dropped() -> None:
@@ -325,8 +332,6 @@ def test_on_attribute_on_the_root_is_dropped() -> None:
 
 
 URL_ATTRIBUTES = [
-    "fill",
-    "stroke",
     "clip-path",
     "mask",
     "marker-start",
@@ -352,6 +357,14 @@ def test_url_in_a_presentation_attribute_is_dropped(attribute: str, value: str) 
     assert find_all(out, "path")[0].attrib == {"d": "M0 0"}
 
 
+# A removed fill paints black, so an unsafe paint is repainted instead (step 3).
+@pytest.mark.parametrize("value", FOREIGN_URLS)
+@pytest.mark.parametrize("attribute", ["fill", "stroke"])
+def test_url_in_a_paint_attribute_becomes_none(attribute: str, value: str) -> None:
+    out = passed(doc(f'<path d="M0 0" {attribute}="{quoted(value)}"/>'))
+    assert find_all(out, "path")[0].attrib == {"d": "M0 0", attribute: "none"}
+
+
 @pytest.mark.parametrize("value", ["url(#a)", "url('#a')", 'url( "#a" )', "URL(#a) none"])
 def test_fragment_url_in_a_presentation_attribute_is_kept(value: str) -> None:
     out = passed(doc(f'<linearGradient id="a"/><path fill="{quoted(value)}"/>'))
@@ -359,13 +372,13 @@ def test_fragment_url_in_a_presentation_attribute_is_kept(value: str) -> None:
 
 
 def test_url_taking_functions_are_dropped() -> None:
-    out = passed(doc("<rect fill=\"image-set('x.png' 1x)\" stroke=\"image('y.png')\"/>"))
-    assert find_all(out, "rect")[0].attrib == {}
+    out = passed(doc("<rect mask=\"image-set('x.png' 1x)\" stroke=\"image('y.png') red\"/>"))
+    assert find_all(out, "rect")[0].attrib == {"stroke": "none"}
 
 
 def test_backslash_in_an_attribute_drops_it() -> None:
-    out = passed(doc(r'<rect fill="u\72l(http://e/)" width="1"/>'))
-    assert find_all(out, "rect")[0].attrib == {"width": "1"}
+    out = passed(doc(r'<rect cursor="u\72l(http://e/)" fill="u\72l(http://e/) red" width="1"/>'))
+    assert find_all(out, "rect")[0].attrib == {"fill": "none", "width": "1"}
 
 
 def test_other_namespaced_attributes_are_dropped_and_xml_space_kept() -> None:
@@ -404,12 +417,12 @@ def test_css_fragment_url_in_a_style_element_is_kept() -> None:
 
 
 def test_css_url_in_a_style_attribute_drops_only_that_declaration() -> None:
-    out = passed(doc('<rect style="fill:url(file:///etc/x);stroke:red;opacity:0.5"/>'))
+    out = passed(doc('<rect style="mask:url(file:///etc/x);stroke:red;opacity:0.5"/>'))
     assert find_all(out, "rect")[0].get("style") == "stroke:red; opacity:0.5"
 
 
 def test_css_escaped_url_in_a_style_attribute_drops_that_declaration() -> None:
-    out = passed(doc(r'<rect style="stroke:blue; fill:u\72l(http://e/x)"/>'))
+    out = passed(doc(r'<rect style="stroke:blue; mask:u\72l(http://e/x)"/>'))
     assert find_all(out, "rect")[0].get("style") == "stroke:blue"
 
 
@@ -434,8 +447,101 @@ def test_css_comment_inside_url_does_not_survive_as_a_url() -> None:
 
 
 def test_style_attribute_with_nothing_left_is_dropped() -> None:
-    out = passed(doc('<rect style="fill:url(http://e/)" width="1"/>'))
+    out = passed(doc('<rect style="clip-path:url(http://e/)" width="1"/>'))
     assert find_all(out, "rect")[0].attrib == {"width": "1"}
+
+
+# An unsafe fill or stroke: removed, it would paint black (measured 2026-10-21), so it
+# keeps the colour after its url() or becomes none.
+
+OFF_DOCUMENT = "a url() outside the document"
+LOADER = "a function that loads a URL"
+UNSAFE_PAINTS = [
+    ("url(http://x)", "none", OFF_DOCUMENT),
+    ("url(http://x) red", "red", OFF_DOCUMENT),
+    ("url('http://x/a)b') #0a0", "#0a0", OFF_DOCUMENT),
+    ('URL( "file:///etc/x" ) rgb(1, 2, 3)', "rgb(1, 2, 3)", OFF_DOCUMENT),
+    ("url(http://x/a(b)) red", "none", OFF_DOCUMENT),
+    ("url(http://x) url(http://y)", "none", OFF_DOCUMENT),
+    ("url(http://x) image('y.png')", "none", LOADER),
+    ("url(http://x", "none", OFF_DOCUMENT),
+    ("red url(http://x)", "none", OFF_DOCUMENT),
+    ("image('y.png') red", "none", LOADER),
+]
+
+
+@pytest.mark.parametrize(("value", "painted", "why"), UNSAFE_PAINTS)
+@pytest.mark.parametrize("prop", ["fill", "stroke"])
+def test_an_unsafe_paint_attribute_keeps_its_fallback_or_becomes_none(
+    prop: str, value: str, painted: str, why: str
+) -> None:
+    out = passed(doc(f'<rect {prop}="{quoted(value)}"/>'))
+    assert find_all(out, "rect")[0].get(prop) == painted
+    assert out.notes == (f"{prop}: {why}; painted {painted}",)
+
+
+@pytest.mark.parametrize(("value", "painted", "why"), UNSAFE_PAINTS)
+@pytest.mark.parametrize("prop", ["fill", "stroke"])
+def test_an_unsafe_paint_declaration_keeps_its_fallback_or_becomes_none(
+    prop: str, value: str, painted: str, why: str
+) -> None:
+    out = passed(doc(f'<rect style="{quoted(f"{prop}: {value}; opacity:0.5")}"/>'))
+    assert find_all(out, "rect")[0].get("style") == f"{prop}:{painted}; opacity:0.5"
+    assert out.notes == (f"{prop}: {why}; painted {painted}",)
+
+
+def test_an_unsafe_paint_keeps_important() -> None:
+    out = passed(doc('<rect style="fill:url(http://x) red !important"/>'))
+    assert find_all(out, "rect")[0].get("style") == "fill:red !important"
+
+
+def test_an_escape_in_a_paint_makes_it_none_whatever_follows() -> None:
+    # Where an escaped URL ends cannot be known without interpreting the escape.
+    out = passed(doc(r'<rect fill="url(http://x/\29 red) blue" stroke="u\72l(x) red"/>'))
+    rect = find_all(out, "rect")[0]
+    assert (rect.get("fill"), rect.get("stroke")) == ("none", "none")
+    assert out.notes == (
+        "fill: a backslash escape; painted none",
+        "stroke: a backslash escape; painted none",
+    )
+
+
+def test_unsafe_paints_are_noted_once_each_and_capped() -> None:
+    body = "".join(f'<rect fill="url(http://x) #{n:06x}"/>' for n in range(MAX_NOTES + 3))
+    out = passed(doc(body + '<rect fill="url(http://x) #000000"/>'))
+    assert len(out.notes) == MAX_NOTES + 1
+    assert out.notes[0] == "fill: a url() outside the document; painted #000000"
+    assert out.notes[-1] == "and more unsafe paint that was repainted"
+
+
+def test_a_var_note_and_a_paint_note_are_both_kept() -> None:
+    out = passed(doc('<rect fill="var(--x)" stroke="url(http://x) red"/>'))
+    assert out.notes == (
+        "fill: var(--x) is not declared; painted none",
+        "stroke: a url() outside the document; painted red",
+    )
+
+
+@pytest.mark.parametrize(
+    ("body", "pixel"),
+    [
+        ('fill="url(http://x)"', (255, 255, 255, 255)),
+        ('fill="url(http://x) #e8590c"', (0xE8, 0x59, 0x0C, 255)),
+        ('style="fill:url(http://x)"', (255, 255, 255, 255)),
+        ('style="fill:url(http://x) #e8590c"', (0xE8, 0x59, 0x0C, 255)),
+    ],
+)
+def test_an_unsafe_fill_is_not_painted_black(body: str, pixel: tuple[int, ...]) -> None:
+    resvg_py = pytest.importorskip("resvg_py")
+    image = pytest.importorskip("PIL.Image")
+    import io
+
+    svg = doc(
+        f'<rect width="200" height="100" fill="#fff"/><rect width="200" height="100" {body}/>'
+    )
+    png = resvg_py.svg_to_bytes(svg_string=passed(svg).svg, width=200)
+    with image.open(io.BytesIO(bytes(png))) as pixels:
+        assert pixels.convert("RGBA").getpixel((100, 50)) == pixel
 
 
 # Step 5: caps -------------------------------------------------------------------------
@@ -632,6 +738,31 @@ WORST = {
     "dropped elements": _at_cap(ROOT, "<x/>", "</svg>"),
     "dropped elements' tails": _at_cap(ROOT + "<text>", "<x/>a", "</text></svg>"),
     "kept elements": _at_cap(ROOT, "<g/>", "</svg>"),
+    "var uses in style=": _at_cap(ROOT + '<rect style="--c:red;', "fill:var(--c);", '"/></svg>'),
+    "var uses in <style>": _at_cap(
+        ROOT + "<style>:root{--c:red}", "a{fill:var(--c)}", "</style></svg>"
+    ),
+    "var uses in attributes": ROOT
+    + '<g style="--c:red"><rect '
+    + " ".join(f'a{i}="var(--c)"' for i in range(40_000))
+    + "/></g></svg>",
+    "nested var fallbacks": ROOT
+    + '<rect fill="'
+    + "var(--x," * 100_000
+    + "red"
+    + ")" * 100_000
+    + '"/></svg>',
+    "distinct var failures, then repeats": _at_cap(
+        ROOT + "<style>" + "".join(f"a{{fill:var(--x{i})}}" for i in range(MAX_VAR_VALUES)),
+        "a{fill:var(--x)}",
+        "</style></svg>",
+    ),
+    "unclosed var run": _at_cap(ROOT + '<rect fill="', "var(--x,", '"/></svg>'),
+    "custom declarations": _at_cap(ROOT + '<rect style="', "--c:var(--c);", '"/></svg>'),
+    "var fan-out": ROOT
+    + '<g style="--a0:#000000000;'
+    + ";".join(f"--a{i}:" + f"var(--a{i - 1})" * 10 for i in range(1, 8))
+    + '"><rect fill="var(--a7)"/></g></svg>',
 }
 
 
@@ -915,6 +1046,215 @@ def test_references_to_kept_ids_are_untouched() -> None:
         "style": "stroke:url(#g)",
     }
     assert find_all(out, "use")[0].get("href") == "#c"
+
+
+# Step 9: custom properties ------------------------------------------------------------
+
+# The case measured on 2026-10-21: resvg paints `fill:var(--c)` black.
+DATAVIZ = doc(
+    "<style>.viz{--c:#e8590c} .a{fill:var(--c)}</style>"
+    '<g class="viz"><rect class="a" width="200" height="100"/></g>'
+)
+
+
+def test_a_custom_property_in_a_stylesheet_is_substituted_and_its_declaration_removed() -> None:
+    out = passed(DATAVIZ)
+    style = find_all(out, "style")[0].text or ""
+    assert ".a{fill:#e8590c}" in style
+    assert "var(" not in out.svg and "--c" not in out.svg
+    assert out.notes == ()
+
+
+def test_the_substituted_colour_is_what_resvg_paints() -> None:
+    resvg_py = pytest.importorskip("resvg_py")
+    image = pytest.importorskip("PIL.Image")
+    import io
+
+    png = resvg_py.svg_to_bytes(svg_string=passed(DATAVIZ).svg, width=200)
+    with image.open(io.BytesIO(bytes(png))) as pixels:
+        assert pixels.convert("RGBA").getpixel((100, 50)) == (0xE8, 0x59, 0x0C, 255)
+
+
+def test_a_var_with_a_fallback_takes_it_when_undeclared() -> None:
+    out = passed(doc('<rect fill="var(--gone, #123456)" style="stroke: var(--gone,red)"/>'))
+    rect = find_all(out, "rect")[0]
+    assert rect.attrib == {"fill": "#123456", "style": "stroke: red"}
+    assert out.notes == ()
+
+
+def test_a_declared_var_ignores_its_fallback() -> None:
+    out = passed(doc('<g style="--c:blue"><rect fill="var(--c, red)"/></g>'))
+    assert find_all(out, "rect")[0].get("fill") == "blue"
+    assert find_all(out, "g")[0].get("style") is None
+
+
+def test_nested_vars_resolve_through_declarations_and_fallbacks() -> None:
+    out = passed(
+        doc(
+            "<style>:root{--base:#0a0b0c; --role:var(--base)}</style>"
+            '<rect fill="var(--role)" stroke="var(--none, var(--base))"/>'
+        )
+    )
+    rect = find_all(out, "rect")[0]
+    assert (rect.get("fill"), rect.get("stroke")) == ("#0a0b0c", "#0a0b0c")
+
+
+def test_the_last_declaration_wins_whatever_its_selector() -> None:
+    # The cascade is not modelled: one document-wide table.
+    out = passed(doc('<style>.a{--c:red} .b{--c:blue}</style><rect class="a" fill="var(--c)"/>'))
+    assert find_all(out, "rect")[0].get("fill") == "blue"
+
+
+def test_a_var_nested_past_the_depth_bound_fails() -> None:
+    chain = (
+        "".join(f"--v{i}:var(--v{i + 1});" for i in range(MAX_VAR_DEPTH))
+        + f"--v{MAX_VAR_DEPTH}:red"
+    )
+    out = passed(doc(f'<g style="{chain}"><rect fill="var(--v1)"/><rect fill="var(--v0)"/></g>'))
+    shallow, deep = find_all(out, "rect")
+    assert shallow.get("fill") == "red"
+    assert deep.get("fill") == "none"
+    assert any(f"nested deeper than {MAX_VAR_DEPTH}" in n for n in out.notes)
+
+
+def test_a_cycle_fails_its_declaration_and_leaves_the_rest() -> None:
+    out = passed(
+        doc('<g style="--a:var(--b);--b:var(--a)"><rect style="fill:var(--a);stroke:blue"/></g>')
+    )
+    assert find_all(out, "rect")[0].get("style") == "fill:none; stroke:blue"
+    assert any("cycle" in n for n in out.notes)
+
+
+def test_a_var_naming_itself_is_a_cycle() -> None:
+    out = passed(doc('<g style="--a:var(--a)"><rect fill="var(--a)"/></g>'))
+    assert find_all(out, "rect")[0].get("fill") == "none"
+
+
+def test_an_undeclared_var_in_fill_or_stroke_becomes_none() -> None:
+    out = passed(doc('<rect fill="var(--x)" stroke="var(--y)"/>'))
+    rect = find_all(out, "rect")[0]
+    assert (rect.get("fill"), rect.get("stroke")) == ("none", "none")
+    assert out.notes == (
+        "fill: var(--x) is not declared; painted none",
+        "stroke: var(--y) is not declared; painted none",
+    )
+
+
+def test_an_undeclared_var_in_css_paint_becomes_none() -> None:
+    out = passed(doc('<style>.a{fill:var(--x);stroke-width:var(--w)}</style><rect class="a"/>'))
+    assert find_all(out, "style")[0].text == ".a{fill:none;}"
+
+
+def test_a_var_resolving_to_nothing_fails() -> None:
+    # An empty fallback is legal CSS, and an empty fill paints black.
+    out = passed(doc('<rect fill="var(--x,)" stroke="var(--x, )" opacity="var(--x,)"/>'))
+    assert find_all(out, "rect")[0].attrib == {"fill": "none", "stroke": "none"}
+
+
+def test_a_var_naming_something_other_than_a_custom_property_fails() -> None:
+    out = passed(doc('<rect fill="var(red, blue)" stroke="var(--, blue)"/>'))
+    rect = find_all(out, "rect")[0]
+    assert (rect.get("fill"), rect.get("stroke")) == ("none", "none")
+
+
+def test_an_unresolved_var_elsewhere_removes_the_attribute() -> None:
+    out = passed(
+        doc('<g style="--o:0.5"><rect width="var(--w)" opacity="var(--o" height="1"/></g>')
+    )
+    assert find_all(out, "rect")[0].attrib == {"height": "1"}
+
+
+@pytest.mark.parametrize(
+    "declared",
+    ["url(http://x)", "url('http://x')", "u\\72l(http://x)", "image('x.png')"],
+)
+def test_a_var_resolving_to_a_url_is_dropped(declared: str) -> None:
+    out = passed(
+        doc(
+            f"<style>:root{{--u:{declared}}} .a{{fill:var(--u)}}</style>"
+            f'<g style="--v:{quoted(declared)}">'
+            '<rect class="a" fill="var(--v)" mask="var(--v)"/></g>'
+        )
+    )
+    assert "//x" not in out.svg and "image(" not in out.svg and "72l" not in out.svg
+    assert find_all(out, "style")[0].text == ":root{} .a{fill:none}"
+    assert find_all(out, "rect")[0].attrib == {"class": "a", "fill": "none"}
+
+
+def test_a_url_assembled_from_two_vars_is_dropped() -> None:
+    out = passed(doc('<g style="--a:ur;--b:l(http://x)"><rect fill="var(--a)var(--b)"/></g>'))
+    assert find_all(out, "rect")[0].get("fill") == "none"
+
+
+def test_a_fragment_url_through_a_var_is_kept_and_still_resolved() -> None:
+    out = passed(
+        doc(
+            '<defs><linearGradient id="g"/></defs>'
+            '<g style="--p:url(#g);--q:url(#gone) red">'
+            '<rect fill="var(--p)"/><rect fill="var(--q)"/></g>'
+        )
+    )
+    assert [r.get("fill") for r in find_all(out, "rect")] == ["url(#g)", "red"]
+
+
+def test_a_var_in_a_selector_empties_the_stylesheet() -> None:
+    out = passed(doc("<style>.a:not(var(--x)){fill:red}</style><rect/>"))
+    assert not find_all(out, "style")[0].text
+
+
+def test_no_var_survives_in_any_value() -> None:
+    out = passed(
+        doc(
+            '<style>.a{fill:VAR(--c)} .b{font-family:"var(--c)"}</style>'
+            '<text style="font:var(--f, 9px serif)" x="var(--c)">var(--c)</text>'
+        )
+    )
+    values = [*tree(out).iter()]
+    assert all("var(" not in v.lower() for e in values for v in e.attrib.values())
+    assert "var(" not in (find_all(out, "style")[0].text or "").lower()
+    # Text content is not a value.
+    assert find_all(out, "text")[0].text == "var(--c)"
+
+
+def test_a_var_that_fans_out_past_the_byte_cap_is_refused() -> None:
+    # Each name naming the one before ten times, as deep as MAX_VAR_DEPTH allows:
+    # 10^8 characters if expanded.
+    names = [f"--a{i}:" + f"var(--a{i - 1})" * 10 for i in range(1, MAX_VAR_DEPTH)]
+    style = ";".join(["--a0:#000000000", *names])
+    reason = refused(doc(f'<g style="{style}"><rect fill="var(--a{MAX_VAR_DEPTH - 1})"/></g>'))
+    assert "var() substitution" in reason
+
+
+def test_a_var_that_grows_the_document_past_the_cap_is_refused() -> None:
+    # Within the scanning budget, but the document is already large: 600 KiB of text
+    # and 100 KiB declared once, used five times.
+    big = "#" + "0" * (100 * 1024)
+    uses = '<rect fill="var(--c)"/>' * 5
+    padding = "<desc>" + "x" * (600 * 1024) + "</desc>"
+    reason = refused(doc(f'{padding}<g style="--c:{big}">{uses}</g>'))
+    assert reason == f"var() substitution makes it larger than {MAX_INPUT_BYTES} bytes"
+
+
+def test_distinct_var_values_past_the_cap_are_refused_and_repeats_are_free() -> None:
+    def rules(n: int) -> str:
+        return "".join(f"a{{fill:var(--c,#{i:06x})}}" for i in range(n))
+
+    passed(doc(f"<style>{rules(MAX_VAR_VALUES)}{rules(1) * 10_000}</style>"))
+    reason = refused(doc(f"<style>{rules(MAX_VAR_VALUES + 1)}</style>"))
+    assert reason == f"more than {MAX_VAR_VALUES} distinct values that use var()"
+
+
+def test_notes_stop_at_the_cap_and_say_there_are_more() -> None:
+    out = passed(doc("".join(f'<rect fill="var(--x{i})"/>' for i in range(MAX_NOTES + 5))))
+    assert len(out.notes) == MAX_NOTES + 1
+    assert out.notes[0] == "fill: var(--x0) is not declared; painted none"
+    assert out.notes[-1] == "and more var() that could not be resolved"
+
+
+def test_sanitising_substituted_output_twice_changes_nothing_more() -> None:
+    once = passed(DATAVIZ)
+    again = passed(once.svg)
+    assert again.svg == once.svg
 
 
 # Round trip ---------------------------------------------------------------------------

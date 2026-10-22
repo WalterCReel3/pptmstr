@@ -19,6 +19,7 @@ from pptmstr import theme
 from pptmstr.ui import typeset
 from pptmstr.ui.typeset import Part, gate, themes, views
 
+BOLD = theme._ASSETS / "fonts" / "Inconsolata-Bold.ttf"
 WINDOW = (700.0, 600.0)
 SUM = r"\sum_{i=1}^{n} i = \frac{n(n+1)}{2}"
 ALIGNED = r"\begin{aligned} a &= b \\ c &= d \end{aligned}"
@@ -581,10 +582,10 @@ def test_a_raising_pre_check_makes_that_formula_code_and_leaves_the_library_on(
 ) -> None:
     errors = _errors(monkeypatch)
 
-    def broken(block: Any, theme_: Any) -> str | None:
+    def broken(first: Any, error: str) -> str | None:
         raise ValueError("a defect in the pre-check")
 
-    monkeypatch.setattr(gate, "_refusal", broken)
+    monkeypatch.setattr(gate, "_refusal_said", broken)
     source = f"Before.\n\n```math\n{SUM}\n```\n"
     cache = typeset.ViewCache()
     handle = typeset.stream(cache, "reply")
@@ -630,6 +631,71 @@ def test_a_raising_copy_gives_the_library_s_copy_and_leaves_the_library_on(
     assert cache.view("o") is not None
     (error,) = errors()
     assert "IndexError while copying a selection" in error and "Traceback" in error
+
+
+def _stops_the_library(doing: str) -> None:
+    """
+    The library stopped for what it raised while ``doing``: from the next frame it
+    is off, and its sentence names the call. A load of the fonts brings it back.
+    """
+    typeset.pre_frame()
+    assert not typeset.can_draw()
+    reason = typeset.unavailable_reason() or ""
+    assert f"the library raised RuntimeError while {doing}" in reason
+    assert typeset.load_fonts(BOLD), "a load is the way back"
+
+
+def test_a_raising_native_call_in_the_pre_check_stops_the_library(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    The pre-check's calls into the native module are the library's: what one of
+    them raises stops the library, as a call into it does anywhere, and is not
+    taken for pptmstr's defect.
+    """
+    errors = _errors(monkeypatch)
+    native = gate._typesetter().module()
+
+    def broken(*given: Any) -> Any:
+        raise RuntimeError("the native module failed")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(native, "Paragraph", broken)
+        frame(lambda: typeset.markdown(typeset.ViewCache(), "doc", f"```math\n{SUM}\n```\n"))
+    assert not any("pptmstr's own code" in error for error in errors())
+    _stops_the_library("asking whether a formula will be set")
+
+
+def test_a_raising_library_read_in_the_copy_stops_the_library(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    The copy's reads of the view and its document are calls into the library:
+    what one raises stops the library, the copy is empty, and the view is not
+    asked again for its plain copy.
+    """
+    errors = _errors(monkeypatch)
+    source = f"Before.\n\n```math\n{SUM}\n```\n\nAfter.\n"
+    cache = typeset.ViewCache()
+    frame(lambda: typeset.markdown(cache, "doc", source))
+    view = cache.view("doc")
+    view.select_all()
+    plain: list[int] = []
+    document = view.native_document
+
+    class Broken:
+        def range_text(self, *given: Any) -> str:
+            raise RuntimeError("the native document failed")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(type(view), "native_document", property(lambda self: Broken()))
+        real = view.selected_text
+        patched.setattr(view, "selected_text", lambda: plain.append(1) or real())
+        assert cache.selected("doc") == ""
+    assert plain == [], "a library failure does not fall back to the plain copy"
+    assert view.native_document is document
+    assert not any("pptmstr's own code" in error for error in errors())
+    _stops_the_library("copying a selection")
 
 
 def test_a_raising_guard_sends_its_entry_alone_to_imgui(monkeypatch: pytest.MonkeyPatch) -> None:

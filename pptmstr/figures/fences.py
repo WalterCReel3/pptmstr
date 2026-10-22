@@ -173,7 +173,46 @@ def prompt(rows: Iterable[Fence]) -> str:
     else:
         lines.append("$...$ and $$...$$ in prose are not rendered and show as written.")
     lines.append("A fence that cannot be drawn is shown as its source under a one-line reason.")
+    lines += ["", *_guidance({row.word for row in rows}, {row.kind for row in rows})]
     return "\n".join(lines)
+
+
+FIGURE_WIDTH = 600
+"""
+The widest a figure is told to be, in px. Figures are scaled down to the pane and
+never up (``host.FigureWidget.size_for``), and replies are drawn in SESSION and CONTEXT:
+SESSION is (1 - 0.21) * (1 - 0.26) of the window (``app._focus_layout``), 599 at
+the 1024-wide smallest window and 877 at the 1500-wide default, so 600 is drawn
+unscaled there at every supported size and 11 px text stays 11 px. CONTEXT, about
+380 at the default, scales any useful figure down regardless.
+"""
+
+
+def _guidance(words: set[str], kinds: set[Kind]) -> list[str]:
+    """
+    How to use the rows, beyond what each is: written for the failure of a session
+    that rasterised to files, hand-laid a graph Mermaid would have laid out, and
+    took a skill's HTML colour conventions into an SVG. Mermaid is named only when
+    its row is in ``rows``.
+    """
+    said = [
+        "Write the fence; the pane is the display. Do not render to a file, look for "
+        "a converter, or preview with other tools."
+    ]
+    if {"mermaid", "svg"} <= words:
+        said.append(
+            "For nodes and edges (dependencies, flows, sequences, states, entities) use "
+            "```mermaid, which lays them out; ```svg is for what Mermaid cannot draw. "
+            "Never compute a graph layout by hand."
+        )
+    if "figure" in kinds:
+        said.append(
+            "Figures sit on a near-white card, scaled down to fit the pane: design for "
+            "white, with literal colours, text of 11 px or more, and at most about "
+            f"{FIGURE_WIDTH} px wide."
+        )
+    said.append("These rules win over a skill's general advice.")
+    return said
 
 
 def session_prompt() -> str:

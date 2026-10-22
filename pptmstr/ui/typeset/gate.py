@@ -30,10 +30,13 @@ only a load of the fonts clears that.
 **So pptmstr's own code that runs inside such a call catches what it raises, at
 its own edge** (``own_defect``): a callback the library makes from inside its
 draw (the link handler, a copy, the captioned stream's blocks) or pptmstr's work
-around a call that is wrapped whole (``formula``). It logs the exception as
+around a call into the library (``formula``). It logs the exception as
 pptmstr's defect, at ERROR with its traceback, and gives a lesser answer for its
 own text: the library is not stopped for it, and no other pane notices.
-``imscribe.TypesetUnavailable`` passes such an edge as it is.
+``imscribe.TypesetUnavailable`` passes such an edge as it is. **The rule is whose
+code raised, not what was being attempted**: each call into the library that
+such code makes is wrapped narrowly in ``into_library`` of its own, so what it
+raises is still the library stopping.
 
 **A draw that set less than it was handed says so two ways, and neither is an
 exception** (``noted``). A view's ``draw`` answers false when a block in view
@@ -633,11 +636,12 @@ def formula(body: str, theme: Any) -> tuple[Any, str]:
     What a view still refuses after this said yes is kept by ``refused``, and
     answered from here from then on.
 
-    The read is a call into the library (``into_library``). What the rest raises
-    is taken as pptmstr's own defect (``own_defect``), the pre-check's calls into
-    the native module (``_refusal``) included, since that is pptmstr's use of
-    them: the answer is then ``(None, OWN_ERROR)``, not kept, so the fence is
-    code and the library is not stopped.
+    The read and the pre-check's calls into the native module (``_refusal``)
+    are calls into the library (``into_library``): what they raise stops the
+    library, as a call into it does anywhere. What pptmstr's own code around
+    them raises is pptmstr's defect (``own_defect``): the answer is then
+    ``(None, OWN_ERROR)``, not kept, so the fence is code and the library is
+    not stopped.
     """
     from imscribe import TypesetUnavailable
 
@@ -699,25 +703,55 @@ set and runs past it; it is not refused for its width.
 """
 
 
+_ASKING_FORMULA = into_library("asking whether a formula will be set")
+
+
 def _refusal(block: Any, theme: Any) -> str | None:
     """
     Why the library would not set the formula of a display-formula block in
     ``theme``, or ``None`` when it would.
+
+    The calls into the native module (``_laid_formula``) are the library's and
+    are made inside ``into_library``: what they raise stops the library. The
+    reason made of their answer is pptmstr's (``_refusal_said``).
     """
     typesetter = _typesetter()
     ts = typesetter.module()
     if ts is None:
         return f"the library is not in use: {typesetter.reason()}"
+    with _ASKING_FORMULA:
+        first, error = _laid_formula(ts, typesetter, block, theme)
+    return _refusal_said(first, error)
+
+
+def _laid_formula(
+    ts: Any, typesetter: Any, block: Any, theme: Any
+) -> tuple[tuple[bool, str] | None, str]:
+    """
+    The block laid out as a paragraph by the native module: whether its first
+    formula was refused and why (``None`` where none was found), and the
+    paragraph's error. Every call here is the library's.
+    """
     runs = [ts.Run(*run) for run in block.runs]
     with ts.Paragraph() as paragraph:
         paragraph.set_text(block.text, runs)
         paragraph.layout(_ASKED_WIDTH_PX, typesetter.base_style(theme))
         found = paragraph.formulas()
         error = paragraph.error
-    if not found:
-        return f"the library found no formula in it ({error.message or error.code})"
-    if found[0].refused:
-        return str(found[0].reason) or "the library would not set it"
+        said = str(error.message or error.code)
+    first = (bool(found[0].refused), str(found[0].reason)) if found else None
+    return first, said
+
+
+def _refusal_said(first: tuple[bool, str] | None, error: str) -> str | None:
+    """
+    The reason ``_refusal`` answers, from what the library said of the formula.
+    """
+    if first is None:
+        return f"the library found no formula in it ({error})"
+    refused, reason = first
+    if refused:
+        return reason or "the library would not set it"
     return None
 
 

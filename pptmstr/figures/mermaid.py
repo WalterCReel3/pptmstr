@@ -31,8 +31,18 @@ pixels), where the host draws every figure on a light card (``host.BACKDROP``); 
 ``fontFamily`` naming a face resvg lacks is carried into the SVG and drawn in the
 fallback face, with the same ink; ``htmlLabels: true`` is overridden by the
 pipeline (no ``<foreignObject>``); ``maxTextSize`` and ``maxEdges``, tiny or huge,
-changed nothing on a small flowchart. A YAML front-matter ``config:`` block reaches
-merman the same way and is not taken out.
+changed nothing on a small flowchart.
+
+**A YAML front matter keeps only the keys that are content** (``without_config``):
+``title`` and ``displayMode``, each with its indented lines; every other top-level
+key goes, ``config`` among them, for the same reason. Measured on the same merman
+and flowchart, 2026-10-21: ``config: {theme: dark}``, in flow or block style and
+with its key quoted, restyles the output as the ``init`` directive does;
+``config: {fontFamily: …}`` is written into the SVG; ``title`` is drawn; an
+unknown key and a ``<<`` merge key change nothing. Kept by name and not dropped
+by name, so a key spelled in a way merman reads and this does not is taken out,
+not passed on. merman reads a front matter only from the first line, and a
+directive before it would bring it there once taken out, so directives go first.
 
 **One engine is kept for the child's life and dropped on any merman exception**
 (``_engine``): a binding that raised may have been left in a state no later
@@ -89,6 +99,12 @@ _ATTRIBUTE = re.compile(r"""([^\s=/>"']+)(\s*=\s*)("[^"]*"|'[^']*'|[^\s"'>]+)"""
 _HIDDEN_PROPERTY = re.compile(r"(?<![\w-])overflow\s*:\s*hidden(?![\w-])", re.IGNORECASE)
 _DIRECTIVE_OPEN = "%%{"
 _DIRECTIVE_CLOSE = "}%%"
+_FRONT_MATTER_FENCE = "---"
+# A top-level front-matter key merman reads as content, its name bare or quoted.
+_CONTENT_KEY = re.compile(r"""(["']?)(?:title|displayMode)\1\s*:""")
+# What ends a line of a front matter: merman takes a lone `\r` as one, and the YAML
+# 1.1 breaks are counted too, so no key can start where this sees no line start.
+_LINE_BREAK = re.compile("\r\n|[\n\r\x85  ]")
 
 _VERSION: list[str | None] = []
 _ENGINE: list[Any] = []
@@ -150,7 +166,8 @@ def in_render_child() -> bool:
 
 def layout(source: str) -> Outcome:
     """
-    ``source`` without its directives (``without_directives``), laid out by merman,
+    ``source`` without its directives (``without_directives``) and without its
+    front matter's configuration (``without_config``), laid out by merman,
     its labels let overflow (``visible_labels``), and sanitised. Every merman failure
     is a ``Refused`` with its first line, and drops the engine (``_engine``).
 
@@ -167,7 +184,7 @@ def layout(source: str) -> Outcome:
         _ENGINE.clear()
         return Refused(error_line(exc))
     try:
-        svg = engine.render_svg(without_directives(source), PIPELINE_OPTIONS)
+        svg = engine.render_svg(without_config(without_directives(source)), PIPELINE_OPTIONS)
     except Exception as exc:
         _ENGINE.clear()
         return Refused(error_line(exc))
@@ -208,6 +225,57 @@ def without_directives(source: str) -> str:
             at += 1
     out.append(source[at:])
     return "".join(out)
+
+
+def without_config(source: str) -> str:
+    """
+    ``source`` with its YAML front matter, where it has one, cut to the top-level
+    keys that are content (``_CONTENT_KEY``), each with the lines indented under
+    it. The front matter opens on the first line and closes at the next line that
+    is ``---``, either with whitespace around it (and a byte-order mark before
+    the first); one with no close is left as written, and merman refuses it. A
+    top-level line is one indented by no more spaces than the first written
+    line inside, and a blank line goes with the key above it. The front matter
+    is written anew (``_content_only``), and one left with no key is taken out
+    whole: merman refuses an empty one. Linear: each character is passed once.
+    """
+    inside: list[str] = []
+    at = 0
+    for brk in _LINE_BREAK.finditer(source):
+        line = source[at : brk.start()]
+        opening = at == 0
+        at = brk.end()
+        if opening:
+            if line.lstrip("﻿").strip() != _FRONT_MATTER_FENCE:
+                return source
+        elif line.strip() == _FRONT_MATTER_FENCE:
+            return _content_only(inside) + source[at:]
+        else:
+            inside.append(line)
+    if at and source[at:].strip() == _FRONT_MATTER_FENCE:
+        return _content_only(inside)
+    return source
+
+
+def _content_only(inside: list[str]) -> str:
+    """
+    A front matter of the lines ``inside`` it, each a line without its break, cut
+    to its content keys (``without_config``), its fences ``---`` alone on a line
+    and every break ``\\n``: so merman closes it where this did, or before.
+    """
+    written = [line for line in inside if line.strip()]
+    top = len(written[0]) - len(written[0].lstrip(" ")) if written else 0
+    kept: list[str] = []
+    keeping = False
+    for line in inside:
+        indent = len(line) - len(line.lstrip(" "))
+        if line.strip() and indent <= top:
+            keeping = _CONTENT_KEY.match(line[indent:]) is not None
+        if keeping:
+            kept.append(line)
+    if not any(line.strip() for line in kept):
+        return ""
+    return "\n".join([_FRONT_MATTER_FENCE, *kept, _FRONT_MATTER_FENCE, ""])
 
 
 def visible_labels(svg: str) -> str:
@@ -268,5 +336,6 @@ __all__: Sequence[str] = (
     "missing_reason",
     "version",
     "visible_labels",
+    "without_config",
     "without_directives",
 )

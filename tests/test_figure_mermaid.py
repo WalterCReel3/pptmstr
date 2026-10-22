@@ -731,6 +731,99 @@ def test_a_dark_init_directive_lays_out_as_the_diagram_without_it(child: Rendere
     assert init.sanitised == plain.sanitised
 
 
+DARK_CONFIG = "---\nconfig: {theme: dark}\n---\n"
+TITLED = "---\ntitle: Pipeline stages\nconfig:\n  theme: dark\n  fontFamily: NoSuchFace\n---\n"
+
+
+@pytest.mark.parametrize(
+    "source, kept",
+    [
+        (DARK_CONFIG + BODY, BODY),
+        ("---\nconfig:\n  theme: dark\n---\n" + BODY, BODY),
+        ('---\n"config": {theme: dark}\n---\n' + BODY, BODY),
+        ("---\n<<: {config: {theme: dark}}\n---\n" + BODY, BODY),
+        (TITLED + BODY, "---\ntitle: Pipeline stages\n---\n" + BODY),
+        (
+            "---\nconfig: {theme: dark}\ntitle: |\n  two\n\n  lines\ndisplayMode: compact\n---\n"
+            + BODY,
+            "---\ntitle: |\n  two\n\n  lines\ndisplayMode: compact\n---\n" + BODY,
+        ),
+        # Indented whole, which merman reads; a byte-order mark; lone and paired `\r`.
+        (
+            "  ---\n  title: T\n  config: {theme: dark}\n  ---\n  " + BODY,
+            "---\n  title: T\n---\n  " + BODY,
+        ),
+        ("﻿" + DARK_CONFIG + BODY, BODY),
+        ("---\rconfig: {theme: dark}\r---\r" + BODY, BODY),
+        (
+            "---\r\ntitle: T\r\nconfig: {theme: dark}\r\n---\r\n" + BODY,
+            "---\ntitle: T\n---\n" + BODY,
+        ),
+        # A key can start on no line this does not see.
+        ("---\ntitle: T config: {theme: dark}\n---\n" + BODY, "---\ntitle: T\n---\n" + BODY),
+        # A line that is not at the top level by spaces is not a content key.
+        (
+            "---\ntitle: T\n config: {theme: dark}\n\tconfig: x\n---\n" + BODY,
+            "---\ntitle: T\n---\n" + BODY,
+        ),
+        # The first `---` closes it, indented or not, and is written where merman closes.
+        (
+            "---\ntitle: a\n  ---\nconfig: {theme: dark}\n---\n" + BODY,
+            "---\ntitle: a\n---\nconfig: {theme: dark}\n---\n" + BODY,
+        ),
+        ("---\nconfig: {theme: dark}\n---", ""),
+    ],
+)
+def test_front_matter_keeps_only_its_content_keys(source: str, kept: str) -> None:
+    assert mermaid.without_config(source) == kept
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        BODY,
+        "---\nconfig: {theme: dark}\n" + BODY,  # no close: merman refuses it
+        "\n" + DARK_CONFIG + BODY,  # not on the first line: merman refuses it
+        "flowchart LR\n---\nconfig: {theme: dark}\n---\n",
+        "",
+        "---",
+    ],
+)
+def test_a_source_with_no_front_matter_is_left_as_written(source: str) -> None:
+    assert mermaid.without_config(source) == source
+
+
+def test_taking_config_out_is_linear_on_hostile_input() -> None:
+    started = time.perf_counter()
+    mermaid.without_config("---\n" + "config: x\n" * 200_000)
+    mermaid.without_config("---\n" + "  " * 200_000 + "\n---\n")
+    assert time.perf_counter() - started < 1.0
+
+
+def test_merman_is_handed_the_front_matter_without_its_config(stand_in: type[Engine]) -> None:
+    mermaid.layout(INIT + TITLED + BODY)
+    assert stand_in.made[-1].given == ["---\ntitle: Pipeline stages\n---\n" + BODY]
+
+
+@needs_merman
+def test_a_dark_front_matter_config_lays_out_as_the_diagram_without_it(child: Renderer) -> None:
+    child.lay_out(("layout", "plain"), BODY)
+    child.lay_out(("layout", "config"), DARK_CONFIG + BODY)
+    child.lay_out(("layout", "after-init"), INIT + DARK_CONFIG + BODY)
+    child.lay_out(("layout", "titled"), TITLED + BODY)
+    plain = wait_for(child, ("layout", "plain"))
+    config = wait_for(child, ("layout", "config"))
+    after_init = wait_for(child, ("layout", "after-init"))
+    titled = wait_for(child, ("layout", "titled"))
+    assert isinstance(plain, Laid) and isinstance(config, Laid) and isinstance(after_init, Laid)
+    assert config.sanitised == plain.sanitised == after_init.sanitised
+    assert isinstance(titled, Laid)
+    assert (
+        "Pipeline stages" in titled.sanitised.svg and "Pipeline stages" not in plain.sanitised.svg
+    )
+    assert "NoSuchFace" not in titled.sanitised.svg
+
+
 @pytest.mark.parametrize(
     "system, libc, machine, unavailable",
     [
