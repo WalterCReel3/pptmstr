@@ -186,6 +186,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, TypeVar
 
 from ... import theme as ui_theme
+from ...figures import fences
 from ...log import LOG
 from ...theme import Color
 from . import gate, roles, syntax, themes
@@ -1345,32 +1346,23 @@ def _as_written(entry: _Entry, why: str) -> None:
     entry.shown = None
 
 
-_MATH_WORDS = frozenset({"math"})
-"""
-The first words of an info string whose fence is set as a display formula once
-it has settled (``_formula_block``).
-"""
-
-
-def _word(said: str) -> str:
-    words = said.split(maxsplit=1)
-    return words[0].lower() if words else ""
-
-
 def is_math_fence(said: str) -> bool:
     """
-    Whether a fence's info string asks for a formula: its first word is ``math``.
+    Whether a fence's info string asks for a formula: its first word is a formula
+    row of the table of drawn fences (``figures.fences.FORMULA_WORDS``: ``math``),
+    set by ``_formula_block``.
     """
-    return _word(said) in _MATH_WORDS
+    return fences.word(said) in fences.FORMULA_WORDS
 
 
 def settles_rendered(said: str) -> bool:
     """
     Whether a fence with this info string becomes something other than code once
     it has settled: a figure (``figures.host.is_figure_fence``) or a formula
-    (``is_math_fence``). The rule ``_Captioned`` keeps such a fence's answer by,
-    so that its answer changes at commit (probe S1), and the rule under which
-    ``_captioned(figures=True)`` turns one.
+    (``is_math_fence``), the two kinds of row in ``figures.fences.RENDERED``. The
+    rule ``_Captioned`` keeps such a fence's answer by, so that its answer changes
+    at commit (probe S1), and the rule under which ``_captioned(figures=True)``
+    turns one.
     """
     from ...figures import host as figures_host
 

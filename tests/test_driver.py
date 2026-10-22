@@ -1946,13 +1946,19 @@ def test_a_sessions_process_is_given_pptmstrs_environment_and_nothing_of_the_dri
 def test_a_lone_agent_configures_no_team() -> None:
     from pptmstr.bridge import Bridge
     from pptmstr.driver import AgentSession
+    from pptmstr.figures import fences
 
     options = AgentSession(Bridge(), task="t")._options()
 
-    # None, not an empty dict. Solo must produce exactly the options the SDK saw
+    # None, not an empty dict. Solo must produce exactly the agents the SDK saw
     # before templates existed, or every existing session changes shape at once.
+    # Its system prompt carries what the reply pane draws and nothing else.
     assert options.agents is None
-    assert options.system_prompt is None
+    drawn = fences.session_prompt()
+    if drawn:
+        assert options.system_prompt == {"type": "preset", "preset": "claude_code", "append": drawn}
+    else:
+        assert options.system_prompt is None
 
 
 def test_a_template_becomes_agent_definitions() -> None:
@@ -2122,6 +2128,7 @@ def test_a_resumed_launch_asks_for_its_own_briefing_and_not_the_recorded_one() -
     on its first request: the role text, the template and the premises path of the
     launch being resumed, with this launch's on argv and unread.
     """
+    from pptmstr.figures import fences
     from pptmstr.templates import FEATURE, lead_briefing
 
     session = AgentSession(Bridge(), task="t", template=FEATURE, resume=_RESUMED_ID)
@@ -2129,18 +2136,23 @@ def test_a_resumed_launch_asks_for_its_own_briefing_and_not_the_recorded_one() -
 
     assert isinstance(prompt, dict)
     assert prompt["type"] == "preset"
-    assert prompt["append"] == lead_briefing(FEATURE, session.policy)
+    briefing = lead_briefing(FEATURE, session.policy)
+    assert prompt["append"] == "\n\n".join(t for t in (briefing, fences.session_prompt()) if t)
     # `is False`, not falsy: the SDK forwards the key only when it is a bool, so a
     # None here is the omitted key under another spelling.
     assert prompt["snapshot"] is False
 
 
-def test_a_resumed_launch_with_no_briefing_still_drops_the_recorded_one() -> None:
+def test_a_resumed_launch_with_no_briefing_still_drops_the_recorded_one(monkeypatch) -> None:
     """
     The hazard is a session started with a team and resumed solo. This launch builds
     no append and configures no agents, and with the key omitted the model would go
-    on answering to a team briefing naming roles nothing can spawn.
+    on answering to a team briefing naming roles nothing can spawn. No append at all
+    is a solo launch where nothing installed draws a fence (``fences.session_prompt``).
     """
+    from pptmstr.figures import fences
+
+    monkeypatch.setattr(fences, "session_prompt", lambda: "")
     resumed = AgentSession(Bridge(), task="t", resume=_RESUMED_ID)._options().system_prompt
 
     assert isinstance(resumed, dict)
@@ -5954,9 +5966,11 @@ def _git_launches() -> dict[str, tuple[dict[str, Any], set[str]]]:
     A fork is a fresh launch of a recorded spec (``app._fork`` -> ``_launch``), so it
     is the new-session shape with a cwd; it is listed so the claim covers it by name.
     """
+    from pptmstr.figures import fences
     from pptmstr.sandbox import containment_settings
 
-    before = _FIELDS_BEFORE_SWITCH
+    # Every launch appends what the reply pane draws, where anything draws.
+    before = _FIELDS_BEFORE_SWITCH | ({"system_prompt"} if fences.session_prompt() else set())
     return {
         "new": ({}, before | {"session_id"}),
         "fork": ({"cwd": "/srv/tree"}, before | {"session_id", "cwd"}),

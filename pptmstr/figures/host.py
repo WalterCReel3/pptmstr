@@ -62,7 +62,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import mermaid, render
+from . import fences, mermaid, render
 from .sanitise import Refused, Sanitised, sanitise
 
 STABLE_FRAMES = 6
@@ -101,7 +101,6 @@ _FAILURES_KEPT = 256
 _LAYOUTS_KEPT = 128
 # The first element of a layout request's key; a raster's is a sha.
 _LAYOUT = "layout"
-_FENCE_WORDS = frozenset({"svg", "mermaid"})
 
 
 class FigureMark(str):
@@ -148,17 +147,15 @@ class FigureMark(str):
         return _STATE.layouts.get(self.sha)
 
 
-def _word(said: str) -> str:
-    words = said.split(maxsplit=1)
-    return words[0].lower() if words else ""
+_word = fences.word
 
 
 def is_figure_fence(said: str) -> bool:
     """
-    Whether a fence's info string asks for a figure: its first word is ``svg`` or
-    ``mermaid``.
+    Whether a fence's info string asks for a figure: its first word is a figure row
+    of the table of drawn fences (``fences.FIGURE_WORDS``: ``svg``, ``mermaid``).
     """
-    return _word(said) in _FENCE_WORDS
+    return _word(said) in fences.FIGURE_WORDS
 
 
 _MARKS: OrderedDict[tuple[str, str], FigureMark | Refused] = OrderedDict()

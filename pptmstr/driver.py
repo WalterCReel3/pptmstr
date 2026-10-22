@@ -71,6 +71,7 @@ from .board import ROOT_NAMES, address_for
 from .bridge import Bridge
 from .bus import EDITED_KEY, FROM_KEY, SERVER_NAME, build_server, offered_tools
 from .cli_version import BelowFloor, MeetsFloor, Unreadable, VersionRead, check_floor
+from .figures import fences
 from .intents import (
     AgentFinished,
     AgentResumed,
@@ -2339,7 +2340,15 @@ class AgentSession:
 
     def _system_prompt(self) -> SystemPromptPreset | SystemPromptCustom | None:
         """
-        The lead's briefing, appended to Claude Code's own system prompt.
+        The lead's briefing and what the reply pane draws, appended to Claude Code's
+        own system prompt.
+
+        **Every launch says which fences are drawn** (``fences.session_prompt``):
+        solo or team, fresh or resumed. Without it a session writes ``$...$`` that
+        shows as written and diagrams in fences nothing draws. It is read here, at
+        launch, from what is installed, so a session is not told about a renderer
+        this process lacks. It follows the briefing and is the whole append where
+        there is no briefing, so a solo launch now carries an append too.
 
         Appended rather than replacing it: the preset carries the tool conventions
         and the environment description this agent still needs, and a bare string
@@ -2361,7 +2370,8 @@ class AgentSession:
         request for the life of this process, which is the documented price; a fresh
         launch has nothing to correct and does not pay it.
 
-        A resume with no briefing asks too. Without it a session started with a
+        A resume with no append asks too (nothing installed draws a fence, and the
+        template has no briefing). Without it a session started with a
         team and resumed solo goes on answering to a briefing that names roles this
         launch configured no agents for. The empty custom prompt is the shape that
         can carry the key and still puts on argv exactly what None does
@@ -2370,17 +2380,24 @@ class AgentSession:
         A CLI below ``RESUME_BRIEFING_FLOOR`` ignores the key; ``run`` says so from
         the version in the ``init`` frame.
         """
-        briefing = lead_briefing(self.template, self.policy, self.contained)
+        append = "\n\n".join(
+            text
+            for text in (
+                lead_briefing(self.template, self.policy, self.contained),
+                fences.session_prompt(),
+            )
+            if text
+        )
         if self.resume is None:
-            if not briefing:
+            if not append:
                 return None
-            return {"type": "preset", "preset": "claude_code", "append": briefing}
-        if not briefing:
+            return {"type": "preset", "preset": "claude_code", "append": append}
+        if not append:
             return {"type": "custom", "prompt": "", "snapshot": False}
         return {
             "type": "preset",
             "preset": "claude_code",
-            "append": briefing,
+            "append": append,
             "snapshot": False,
         }
 
