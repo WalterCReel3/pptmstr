@@ -40,14 +40,19 @@ Policy, in the order it is applied:
    in `fill` and `stroke`, where a removed paint is black: there the value becomes
    the colour after a leading `url()` (`url(http://x) red` is `red`) or `none`, as in
    step 8, and `Sanitised.notes` says so; the same holds for those declarations in
-   `style=` (step 4). The `filter` property is dropped wherever it is set, attribute
-   or CSS: with `<filter>` gone it can only name the wrong thing or be a filter
+   CSS (step 4). Such a fallback is kept only if it is a colour in the grammar of
+   `_colour_or_none`, since an invalid paint is black too (`fill="foo bar"`,
+   measured). The `filter` property is dropped wherever it is set, attribute or
+   CSS: with `<filter>` gone it can only name the wrong thing or be a filter
    function, and resvg draws those (`blur(200px)` on 50 full-canvas rects took 44 s
    at 1600x1200; probe R3).
-4. **CSS** in `style=` is split into declarations, and a declaration with a
-   backslash, `@import`, a non-fragment `url(` or a URL-taking function is dropped
-   whole, or repainted if it sets `fill` or `stroke` (step 3). A `<style>` element
-   with any of those, or `@font-face`, is dropped whole.
+4. **CSS** in `style=` and in `<style>` is split into declarations, and a declaration
+   with a backslash, `@import`, a non-fragment `url(` or a URL-taking function is
+   dropped whole, or repainted if it sets `fill` or `stroke` (step 3). In a `<style>`,
+   a rule whose selector has one of those is dropped with its block. A `<style>` is
+   dropped whole only where its contents cannot be trusted to parse as rules: an
+   `@import`, or an at-rule not in `HARMLESS_AT_RULES` (`@font-face` among them).
+   Dropping it whole would paint black every shape its classes coloured.
    Nothing is cut out of the middle of a value: a CSS escape makes `u\\72l(` a url
    token, so substring stripping can be evaded, and the backslash rule closes that.
 5. **Caps** (`MAX_INPUT_BYTES`, `MAX_INPUT_ELEMENTS`, `MAX_DEPTH`, `MAX_ELEMENTS`,
@@ -73,7 +78,8 @@ Policy, in the order it is applied:
    box). So does a `url(#id)` naming an element of the wrong kind for its property
    (`_TARGET_KINDS`: a clip-path naming a `<rect>`), which is treated as dangling.
    In `fill` and `stroke` the value becomes its fallback (`url(#gone) red` is `red`)
-   or `none`, which is what SVG 2 makes of a missing paint server. Anywhere else
+   or `none`, which is what SVG 2 makes of a missing paint server; a fallback that is
+   not a colour (step 3) is `none` too. Anywhere else
    (`clip-path`, `mask`, `marker-*`, `href`, ...) the attribute or the CSS
    declaration is removed, so the element draws without the effect. An `href` needs
    only its target to exist.
@@ -224,7 +230,16 @@ _LOCAL_URL_ID = re.compile(rf"url\(\s*[\"']?({_ID})[\"']?\s*\)", re.IGNORECASE)
 _ANY_URL = re.compile(r"url\s*\(", re.IGNORECASE)
 _URL_STRING_FUNC = re.compile(r"(?:image-set|image|src)\s*\(", re.IGNORECASE)
 _IMPORT = re.compile(r"@import", re.IGNORECASE)
-_STYLE_AT_RULE = re.compile(r"@(?:import|font-face)", re.IGNORECASE)
+_AT_KEYWORD = re.compile(r"@([\w-]*)")
+
+# The at-rules a <style> may hold, lowercase. Each holds rules or declarations in the
+# grammar step 4 already cuts, and loads nothing. Any other drops the element: an at-rule
+# one does not know has a grammar of its own, so which of its parts is a declaration
+# cannot be told, and several load or name a URL (`@font-face` src, `@namespace`,
+# `@counter-style` symbols, `@document`).
+HARMLESS_AT_RULES: frozenset[str] = frozenset(
+    {"media", "supports", "keyframes", "-webkit-keyframes", "layer"}
+)
 # Every pattern here runs on model-written text on the frame thread, so none may
 # backtrack super-linearly: no two unbounded quantifiers over overlapping classes may
 # be adjacent or nested. Where whitespace has to be split off around a token, that is
@@ -383,7 +398,7 @@ def _clean(src: ET.Element, notes: dict[str, None]) -> ET.Element | None:
     if local in _TEXT_ONLY:
         text = "".join(src.itertext())
         if local == "style":
-            cleaned = _clean_stylesheet(text)
+            cleaned = _clean_stylesheet(text, notes)
             if cleaned is None:
                 return None
             text = cleaned
@@ -864,8 +879,78 @@ def _resolve_value(prop: str, value: str, kinds: _Kinds) -> str | None:
     if prop not in _PAINT:
         return None
     body, important = _split_important(value)
-    fallback = _LOCAL_URL.sub("", body).strip()
-    return f"{fallback or 'none'}{important}"
+    return f"{_colour_or_none(_LOCAL_URL.sub('', body))}{important}"
+
+
+# A paint's fallback colour ----------------------------------------------------------
+
+# The CSS named colours. Matched case-insensitively, as CSS and resvg both do.
+NAMED_COLOURS: frozenset[str] = frozenset("""
+    aliceblue antiquewhite aqua aquamarine azure beige bisque black blanchedalmond blue
+    blueviolet brown burlywood cadetblue chartreuse chocolate coral cornflowerblue cornsilk
+    crimson cyan darkblue darkcyan darkgoldenrod darkgray darkgreen darkgrey darkkhaki
+    darkmagenta darkolivegreen darkorange darkorchid darkred darksalmon darkseagreen
+    darkslateblue darkslategray darkslategrey darkturquoise darkviolet deeppink deepskyblue
+    dimgray dimgrey dodgerblue firebrick floralwhite forestgreen fuchsia gainsboro
+    ghostwhite gold goldenrod gray green greenyellow grey honeydew hotpink indianred indigo
+    ivory khaki lavender lavenderblush lawngreen lemonchiffon lightblue lightcoral lightcyan
+    lightgoldenrodyellow lightgray lightgreen lightgrey lightpink lightsalmon lightseagreen
+    lightskyblue lightslategray lightslategrey lightsteelblue lightyellow lime limegreen
+    linen magenta maroon mediumaquamarine mediumblue mediumorchid mediumpurple
+    mediumseagreen mediumslateblue mediumspringgreen mediumturquoise mediumvioletred
+    midnightblue mintcream mistyrose moccasin navajowhite navy oldlace olive olivedrab
+    orange orangered orchid palegoldenrod palegreen paleturquoise palevioletred papayawhip
+    peachpuff peru pink plum powderblue purple rebeccapurple red rosybrown royalblue
+    saddlebrown salmon sandybrown seagreen seashell sienna silver skyblue slateblue
+    slategray slategrey snow springgreen steelblue tan teal thistle tomato turquoise violet
+    wheat white whitesmoke yellow yellowgreen
+    """.split())
+
+# Names written out as their value because resvg_py 0.5.0 does not know them and paints
+# them black (measured 2026-10-21; the other 147 paint their colour).
+_COLOUR_SPELLED = {"rebeccapurple": "#663399"}
+
+_HEX_COLOUR = re.compile(r"#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})")
+_COLOUR_FUNCTION = re.compile(r"(rgba?|hsla?)\(", re.IGNORECASE)
+
+
+def _colour_or_none(text: str) -> str:
+    """
+    `text` stripped if it is a colour resvg paints as written, else `none`: an invalid
+    paint is black. Accepted: a named colour, `#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`,
+    `currentColor`, `none`, and `rgb()`/`rgba()` of three numbers or three percentages
+    and `hsl()`/`hsla()` of a number and two percentages, each with an optional numeric
+    alpha, separated by commas or by whitespace. This is narrower than CSS where resvg
+    is: it paints `NONE`, `hsl(120deg, ...)`, a percentage alpha and `rgb(1 2 3 / 0.5)`
+    black, so those are `none` here.
+    """
+    colour = text.strip()
+    lowered = colour.lower()
+    if lowered in NAMED_COLOURS:
+        return _COLOUR_SPELLED.get(lowered, colour)
+    if colour == "none" or lowered == "currentcolor" or _HEX_COLOUR.fullmatch(colour):
+        return colour
+    function = _COLOUR_FUNCTION.match(colour)
+    if function is None or not colour.endswith(")"):
+        return "none"
+    inner = colour[function.end() : -1]
+    args = [a.strip() for a in inner.split(",")] if "," in inner else inner.split()
+    if len(args) not in (3, 4):
+        return "none"
+    alpha_ok = len(args) == 3 or _is_number(args[3])
+    if function.group(1).lower().startswith("rgb"):
+        channels_ok = all(map(_is_number, args[:3])) or all(map(_is_percentage, args[:3]))
+    else:
+        channels_ok = _is_number(args[0]) and _is_percentage(args[1]) and _is_percentage(args[2])
+    return colour if alpha_ok and channels_ok else "none"
+
+
+def _is_number(text: str) -> bool:
+    return _NUMBER.fullmatch(text) is not None
+
+
+def _is_percentage(text: str) -> bool:
+    return text.endswith("%") and _is_number(text[:-1])
 
 
 def _resolve_declarations(text: str, kinds: _Kinds, joiner: str | None) -> str:
@@ -899,7 +984,11 @@ def _css_unsafe(text: str) -> bool:
     reach outside the document: an escape, `@import`, a non-fragment `url(`, or a
     function that takes a URL as a string.
     """
-    if "\\" in text or _IMPORT.search(text) or _URL_STRING_FUNC.search(text):
+    if "\\" in text:
+        return True
+    if "(" not in text and "@" not in text:
+        return False  # each pattern below needs one; step 4 asks this of every piece
+    if _IMPORT.search(text) or _URL_STRING_FUNC.search(text):
         return True
     return _ANY_URL.search(_LOCAL_URL.sub("", text)) is not None
 
@@ -970,15 +1059,12 @@ def _repaint(prop: str, value: str, notes: dict[str, None]) -> str:
     """
     What an unsafe `fill` or `stroke` value becomes in place of being removed, which
     would paint it black: the colour after a leading `url()` when there is one and it
-    is safe, else `none`. A trailing `!important` is kept. A line goes into `notes`.
+    is a colour (`_colour_or_none`), else `none`. A trailing `!important` is kept. A
+    line goes into `notes`.
     """
     body, important = _split_important(value)
     rest = _after_leading_url(body)
-    fallback = rest.strip() if rest is not None and "\\" not in body else ""
-    # A colour starts with a letter or `#`; anything else (`) red` after a URL with a
-    # `)` in it) is not one, and an invalid paint is black too.
-    if not (fallback[:1].isalpha() or fallback.startswith("#")) or _css_unsafe(fallback):
-        fallback = "none"
+    fallback = _colour_or_none(rest) if rest is not None and "\\" not in body else "none"
     notes[f"{prop}: {_unsafe_reason(body)}; painted {fallback[:40]}"] = None
     return f"{fallback}{important}"
 
@@ -1019,13 +1105,38 @@ def _unsafe_reason(text: str) -> str:
     return "a url() outside the document"
 
 
-def _clean_stylesheet(text: str) -> str | None:
-    if _css_unsafe(text) or _STYLE_AT_RULE.search(text):
+def _clean_stylesheet(text: str, notes: dict[str, None]) -> str | None:
+    """
+    A stylesheet with each unsafe declaration dropped or repainted as in `style=`, and
+    each rule whose selector is unsafe dropped with its block; None to drop the
+    element. Every at-rule must be one of `HARMLESS_AT_RULES`, found textually, so an
+    `@` in a string or an escaped at-keyword (`@\\69mport`) drops it too.
+    """
+    if _IMPORT.search(text):
         return None
-    return "".join(
-        ("" if _is_filter(piece) else _fix_font_declaration(piece)) + delimiter
-        for piece, delimiter in _css_split(text, ";{}")
-    )
+    for match in _AT_KEYWORD.finditer(text):
+        if match.group(1).lower() not in HARMLESS_AT_RULES:
+            return None
+    pieces: list[str] = []
+    skipping = 0  # open braces inside a rule being dropped
+    for piece, delimiter in _css_split(text, ";{}"):
+        if skipping:
+            skipping += (delimiter == "{") - (delimiter == "}")
+            continue
+        if delimiter == "{":
+            if _css_unsafe(piece):
+                skipping = 1
+                continue
+        elif _css_unsafe(piece) or _is_filter(piece):
+            piece = _clean_declarations(piece, notes)
+        else:
+            piece = _fix_font_declaration(piece)
+        pieces.append(piece + delimiter)
+    css = "".join(pieces)
+    # Each kept piece passed `_css_unsafe` and the delimiters between them cannot
+    # complete a token, so this holds by construction; it is checked because the
+    # consequence of being wrong is a fetch.
+    return None if _css_unsafe(css) else css
 
 
 def _is_filter(declaration: str) -> bool:

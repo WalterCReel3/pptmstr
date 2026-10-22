@@ -4,17 +4,20 @@ The SVG sanitiser: each hostile case by name, the natural-size rule, and totalit
 
 from __future__ import annotations
 
+import io
 import random
 import re
 import signal
 import time
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
+from typing import TypeVar
 
 import pytest
 
 from pptmstr.figures.sanitise import (
     ALLOWED_ELEMENTS,
+    HARMLESS_AT_RULES,
     MAX_DEPTH,
     MAX_ELEMENTS,
     MAX_INPUT_BYTES,
@@ -23,6 +26,7 @@ from pptmstr.figures.sanitise import (
     MAX_NOTES,
     MAX_VAR_DEPTH,
     MAX_VAR_VALUES,
+    NAMED_COLOURS,
     SVG_NS,
     XML_NS,
     Refused,
@@ -34,6 +38,7 @@ HEAD = (
     '<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink"'
     ' width="200" height="100">'
 )
+T = TypeVar("T")
 LOCAL_URL = re.compile(r"url\(\s*([\"']?)#[\w.:-]+\1\s*\)", re.IGNORECASE)
 
 
@@ -56,6 +61,17 @@ def refused(svg: str) -> str:
 
 def quoted(value: str) -> str:
     return value.replace("&", "&amp;").replace('"', "&quot;")
+
+
+def render_pixel(svg: str, at: tuple[int, int] = (100, 50)) -> tuple[int, ...]:
+    """
+    The RGBA resvg paints at `at` with the canvas 200 px wide; skips without resvg.
+    """
+    resvg_py = pytest.importorskip("resvg_py")
+    image = pytest.importorskip("PIL.Image")
+    png = resvg_py.svg_to_bytes(svg_string=svg, width=200)
+    with image.open(io.BytesIO(bytes(png))) as pixels:
+        return tuple(pixels.convert("RGBA").getpixel(at))
 
 
 def tree(out: Sanitised) -> ET.Element:
@@ -129,9 +145,7 @@ def test_billion_laughs_is_refused_without_expansion() -> None:
         + "]>"
         + doc("<text>&a9;</text>")
     )
-    start = time.perf_counter()
-    reason = refused(laughs)
-    assert time.perf_counter() - start < 0.5
+    reason = within_bound(lambda: refused(laughs), 0.5)
     assert "DOCTYPE" in reason
 
 
@@ -391,24 +405,89 @@ def test_other_namespaced_attributes_are_dropped_and_xml_space_kept() -> None:
 # Step 4: CSS --------------------------------------------------------------------------
 
 
-def test_css_url_in_a_style_element_drops_the_element() -> None:
-    out = passed(doc("<style>rect{fill:url(http://e/x.svg#p)}</style><rect/>"))
-    assert find_all(out, "style") == []
+def style_text(out: Sanitised) -> str | None:
+    styles = find_all(out, "style")
+    return styles[0].text if styles else None
 
 
-def test_css_escaped_url_in_a_style_element_drops_the_element() -> None:
-    out = passed(doc(r"<style>rect{fill:u\72l(http://e/x)}</style><rect/>"))
-    assert find_all(out, "style") == []
+def test_css_url_in_a_style_element_repaints_only_that_declaration() -> None:
+    out = passed(doc("<style>rect{fill:url(http://e/x.svg#p) red;stroke:blue}</style><rect/>"))
+    assert style_text(out) == "rect{fill:red;stroke:blue}"
+    assert out.notes == ("fill: a url() outside the document; painted red",)
 
 
-def test_css_import_drops_the_style_element() -> None:
-    out = passed(doc('<style>@IMPORT "http://e/x.css"; rect{fill:red}</style>'))
-    assert find_all(out, "style") == []
+def test_css_escaped_url_in_a_style_element_repaints_only_that_declaration() -> None:
+    out = passed(doc(r"<style>rect{fill:u\72l(http://e/x) red;stroke:blue}</style><rect/>"))
+    assert style_text(out) == "rect{fill:none;stroke:blue}"
 
 
-def test_css_font_face_drops_the_style_element() -> None:
-    out = passed(doc('<style>@font-face{font-family:x;src:local("y")}</style>'))
-    assert find_all(out, "style") == []
+def test_an_unsafe_declaration_in_a_style_element_is_dropped_and_its_rule_kept() -> None:
+    out = passed(doc("<style>.a{fill:#e8590c} .b{mask:url(http://x/y);opacity:.5}</style>"))
+    assert style_text(out) == ".a{fill:#e8590c} .b{;opacity:.5}"
+
+
+def test_an_unsafe_selector_drops_its_rule_and_every_block_inside_it() -> None:
+    out = passed(
+        doc(
+            "<style>.a{fill:red} .b[x='url(http://x)']{fill:blue}"
+            " @media url(http://x){.c{fill:green} .e{fill:gold}} .d{fill:#123}</style>"
+        )
+    )
+    assert style_text(out) == ".a{fill:red} .d{fill:#123}"
+
+
+@pytest.mark.parametrize(
+    "css",
+    [
+        '@IMPORT "http://e/x.css"; rect{fill:red}',
+        '@font-face{font-family:x;src:local("y")} rect{fill:red}',
+        "@namespace svg 'x'; rect{fill:red}",
+        '@charset "utf-8"; rect{fill:red}',
+        "@page{margin:0} rect{fill:red}",
+        "@counter-style c{symbols:a} rect{fill:red}",
+        r"@\69mport 'x'; rect{fill:red}",
+        "@/**/import 'x'; rect{fill:red}",
+        "rect{fill:red} .a::after{content:'@'}",
+    ],
+)
+def test_an_at_rule_not_known_to_be_harmless_drops_the_style_element(css: str) -> None:
+    assert style_text(passed(doc(f"<style>{css}</style><rect/>"))) is None
+
+
+@pytest.mark.parametrize(
+    "css",
+    [
+        "@media (min-width:1px){.a{fill:red}}",
+        "@MEDIA screen{.a{fill:red}}",
+        "@supports (fill:red){.a{fill:red}}",
+        "@keyframes k{to{opacity:1}}",
+        "@-webkit-keyframes k{to{opacity:1}}",
+        "@layer a, b; @layer a{.a{fill:red}}",
+    ],
+)
+def test_a_harmless_at_rule_keeps_the_style_element(css: str) -> None:
+    assert style_text(passed(doc(f"<style>{css}</style><rect/>"))) == css
+
+
+def test_the_harmless_at_rules_are_named() -> None:
+    assert HARMLESS_AT_RULES == {"media", "supports", "keyframes", "-webkit-keyframes", "layer"}
+
+
+@pytest.mark.parametrize(
+    "unsafe",
+    [
+        ".b{mask:url(http://x/y)}",
+        ".b{fill:url(http://x) foo}",
+        r".b{stroke:u\72l(x)}",
+        ".b[x='url(http://x)']{fill:blue}",
+    ],
+)
+def test_a_shape_coloured_by_a_class_keeps_its_colour_beside_an_unsafe_rule(unsafe: str) -> None:
+    svg = doc(
+        f"<style>.a{{fill:#e8590c}} {unsafe}</style>"
+        '<rect width="200" height="100" fill="#fff"/><rect class="a" width="200" height="100"/>'
+    )
+    assert render_pixel(passed(svg).svg) == (0xE8, 0x59, 0x0C, 255)
 
 
 def test_css_fragment_url_in_a_style_element_is_kept() -> None:
@@ -467,6 +546,10 @@ UNSAFE_PAINTS = [
     ("url(http://x", "none", OFF_DOCUMENT),
     ("red url(http://x)", "none", OFF_DOCUMENT),
     ("image('y.png') red", "none", LOADER),
+    ("url(http://x) foo", "none", OFF_DOCUMENT),
+    ("url(http://x) red blue", "none", OFF_DOCUMENT),
+    ("url(http://x) rgb(1, 2)", "none", OFF_DOCUMENT),
+    ("url(http://x) RebeccaPurple", "#663399", OFF_DOCUMENT),
 ]
 
 
@@ -571,9 +654,7 @@ def test_nested_use_fan_out_is_refused() -> None:
         uses = "".join(f'<use href="#l{i - 1}"/>' for _ in range(10))
         levels.append(f'<g id="l{i}">{uses}</g>')
     svg = doc("<defs>" + "".join(levels) + '</defs><use href="#l6"/>')
-    start = time.perf_counter()
-    assert "expansion" in refused(svg)
-    assert time.perf_counter() - start < 0.5
+    assert "expansion" in within_bound(lambda: refused(svg), 0.5)
 
 
 def test_fan_out_through_url_references_is_counted() -> None:
@@ -693,11 +774,11 @@ def test_input_elements_past_the_cap_are_refused_before_cleaning() -> None:
 # Step 5: time on the frame thread -------------------------------------------------------
 
 # sanitise runs on the frame thread, once per fence. Measured worst here at the byte cap
-# is about 0.32 s (70,000 font declarations in one style attribute); before every
+# is about 0.5 s (35,000 repainted declarations in one <style>, 2026-10-21); before every
 # pattern was made linear, the whitespace runs below took 8-26 s at 100,000 spaces and
-# over five minutes at the cap. The bound leaves three times the measured worst for a
-# slower machine, and is enforced by an alarm so a regression fails here in a second
-# rather than hanging the suite.
+# over five minutes at the cap. The bound leaves twice the measured worst for a slower
+# machine, and is enforced by an alarm so a regression fails here in seconds rather
+# than hanging the suite.
 SANITISE_BOUND_S = 1.0
 
 
@@ -759,6 +840,17 @@ WORST = {
     ),
     "unclosed var run": _at_cap(ROOT + '<rect fill="', "var(--x,", '"/></svg>'),
     "custom declarations": _at_cap(ROOT + '<rect style="', "--c:var(--c);", '"/></svg>'),
+    "unsafe declarations in <style>": _at_cap(
+        ROOT + "<style>a{", "fill:url(http://x) rgb(1,2,3);", "}</style></svg>"
+    ),
+    "unsafe selectors in <style>": _at_cap(
+        ROOT + "<style>", "a[x='url(h)']{b{fill:red}}", "</style></svg>"
+    ),
+    "harmless at-rules": _at_cap(ROOT + "<style>", "@media x{a{fill:red}}", "</style></svg>"),
+    "dangling paint fallbacks": _at_cap(
+        ROOT + '<rect style="', "fill:url(#g) rgb(1 2 3 4);", '"/></svg>'
+    ),
+    "one long colour function": _at_cap(ROOT + '<rect fill="url(#g) rgb(', "1,", ')"/></svg>'),
     "var fan-out": ROOT
     + '<g style="--a0:#000000000;'
     + ";".join(f"--a{i}:" + f"var(--a{i - 1})" * 10 for i in range(1, 8))
@@ -772,22 +864,58 @@ class _Late(BaseException):
     """
 
 
-@pytest.mark.parametrize("svg", WORST.values(), ids=WORST.keys())
-def test_the_worst_inputs_at_the_byte_cap_sanitise_within_the_bound(svg: str) -> None:
-    assert len(svg.encode()) <= MAX_INPUT_BYTES
+# Tries a timed call gets. The bound is on the best of them, because one wall-clock
+# run under a loaded machine or a full suite's collector can stall past it (seen once on
+# "var fan-out", measured at 0.08 s alone), while a real regression is slow every time.
+# The bound is not loosened, and a linearity ratio was not used: several inputs here are
+# not a size swept, and a ratio of two short runs is noisier than one bound.
+TIMING_TRIES = 3
+
+
+def within_bound(call: Callable[[], T], bound: float) -> T:
+    """
+    `call()`'s result from the first of `TIMING_TRIES` runs to finish within `bound`
+    seconds; fails the test if none does. Each run is cut off by an alarm at the bound,
+    so a hang costs `TIMING_TRIES` bounds and not the suite.
+    """
 
     def late(signum: int, frame: object) -> None:
         raise _Late
 
     previous = signal.signal(signal.SIGALRM, late)
-    signal.setitimer(signal.ITIMER_REAL, SANITISE_BOUND_S)
     try:
-        sanitise(svg)
-    except _Late:
-        pytest.fail(f"sanitise took longer than {SANITISE_BOUND_S} s")
+        for _ in range(TIMING_TRIES):
+            signal.setitimer(signal.ITIMER_REAL, bound)
+            try:
+                return call()
+            except _Late:
+                continue
+            finally:
+                signal.setitimer(signal.ITIMER_REAL, 0)
     finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, previous)
+    pytest.fail(f"no run of {TIMING_TRIES} finished within {bound} s")
+
+
+def test_within_bound_fails_what_is_slow_every_time_and_passes_one_slow_run() -> None:
+    runs: list[float] = []
+
+    def slow_once() -> str:
+        runs.append(0.0)
+        if len(runs) == 1:
+            time.sleep(0.2)
+        return "ok"
+
+    assert within_bound(slow_once, 0.1) == "ok"
+    assert len(runs) == 2
+    with pytest.raises(pytest.fail.Exception, match="no run of 3"):
+        within_bound(lambda: time.sleep(0.2), 0.05)
+
+
+@pytest.mark.parametrize("svg", WORST.values(), ids=WORST.keys())
+def test_the_worst_inputs_at_the_byte_cap_sanitise_within_the_bound(svg: str) -> None:
+    assert len(svg.encode()) <= MAX_INPUT_BYTES
+    within_bound(lambda: sanitise(svg), SANITISE_BOUND_S)
 
 
 @pytest.mark.parametrize(
@@ -941,6 +1069,128 @@ def test_dangling_fill_becomes_none() -> None:
 def test_dangling_stroke_keeps_its_fallback() -> None:
     out = passed(doc('<rect stroke="url(#gone) blue"/>'))
     assert find_all(out, "rect")[0].get("stroke") == "blue"
+
+
+@pytest.mark.parametrize(
+    ("value", "painted"),
+    [
+        ("url(#gone) foo", "none"),
+        ("url(#gone) foo bar", "none"),
+        ("url(#gone) hsl(120deg, 50%, 50%)", "none"),
+        ("url(#gone) rgb(1, 2, 3)", "rgb(1, 2, 3)"),
+        ("url(#gone) rebeccapurple", "#663399"),
+    ],
+)
+def test_a_dangling_paint_keeps_its_fallback_only_if_it_is_a_colour(
+    value: str, painted: str
+) -> None:
+    out = passed(doc(f'<rect fill="{value}" style="stroke:{value}"/>'))
+    rect = find_all(out, "rect")[0]
+    assert (rect.get("fill"), rect.get("style")) == (painted, f"stroke: {painted}")
+
+
+# What `_colour_or_none` keeps. Every one is drawn by resvg below, so the grammar is held
+# to what the renderer paints and not only to what CSS allows.
+COLOURS = [
+    "red",
+    " Red ",
+    "GREY",
+    "currentColor",
+    "currentcolor",
+    "none",
+    "#e85",
+    "#E85F",
+    "#e8590c",
+    "#e8590c80",
+    "rgb(1,2,3)",
+    "RGB( 1 , 2 , 3 )",
+    "rgb(1 2 3)",
+    "rgba(1,2,3,0.5)",
+    "rgb(1,2,3,.5)",
+    "rgb(10%,20%,30%)",
+    "rgb(+1.5,2e1,-3)",
+    "hsl(120,50%,50%)",
+    "hsla(120,50%,50%,0.5)",
+    "hsl(-120 50% 50%)",
+]
+NOT_COLOURS = [
+    "",
+    "foo",
+    "red red",
+    "red icc-color(x)",
+    "NONE",
+    "inherit",
+    "transparent",
+    "#e8590",
+    "#e8590c8",
+    "#ggg",
+    "rgb(1,2)",
+    "rgb(1,2,3,4,5)",
+    "rgb(1,2,3,)",
+    "rgb(,1,2,3)",
+    "rgb(1, 2 3)",
+    "rgb(1,2,3%)",
+    "rgba(1,2,3,50%)",
+    "rgb(1 2 3 / 0.5)",
+    "rgb (1,2,3)",
+    "rgb(1,2,3",
+    "rgb(1,2,(3))",
+    "hsl(120deg,50%,50%)",
+    "hsl(120,50,50)",
+    "hsl(120%,50%,50%)",
+    "lab(50 0 0)",
+    "url(#a)",
+]
+
+
+@pytest.mark.parametrize("colour", COLOURS)
+def test_a_colour_is_kept_as_written(colour: str) -> None:
+    from pptmstr.figures.sanitise import _colour_or_none
+
+    assert _colour_or_none(colour) == colour.strip()
+
+
+@pytest.mark.parametrize("text", NOT_COLOURS)
+def test_anything_else_is_none(text: str) -> None:
+    from pptmstr.figures.sanitise import _colour_or_none
+
+    assert _colour_or_none(text) == "none"
+
+
+def test_every_kept_colour_is_one_resvg_paints() -> None:
+    from pptmstr.figures.sanitise import _colour_or_none
+
+    # currentColor is black here because no `color` is set, which is what it means.
+    black = (0, 0, 0, 255)
+    names = sorted(NAMED_COLOURS - {"black"})
+    for colour in [*names, *(c for c in COLOURS if c.strip().lower() != "currentcolor")]:
+        kept = _colour_or_none(colour)
+        svg = doc(
+            '<rect width="200" height="100" fill="#fff"/>'
+            f'<rect width="200" height="100" fill="{kept}"/>'
+        )
+        assert render_pixel(svg) != black, (colour, kept)
+    colour_set = doc('<rect width="200" height="100" color="#e8590c" fill="currentColor"/>')
+    assert render_pixel(colour_set) == (0xE8, 0x59, 0x0C, 255)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        'fill="url(#gone) foo"',
+        'fill="url(#gone) foo bar"',
+        'fill="url(http://x) foo"',
+        'style="fill:url(#gone) foo"',
+        'style="fill:url(http://x) foo bar"',
+        'class="a"',
+    ],
+)
+def test_an_invalid_fallback_is_not_painted_black(body: str) -> None:
+    svg = doc(
+        "<style>.a{fill:url(#gone) rgba(1,2,3,50%)}</style>"
+        f'<rect width="200" height="100" fill="#fff"/><rect width="200" height="100" {body}/>'
+    )
+    assert render_pixel(passed(svg).svg) == (255, 255, 255, 255)
 
 
 def test_dangling_paint_in_css_becomes_its_fallback_or_none() -> None:
