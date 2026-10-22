@@ -711,15 +711,15 @@ def _refusal(block: Any, theme: Any) -> str | None:
     Why the library would not set the formula of a display-formula block in
     ``theme``, or ``None`` when it would.
 
-    The calls into the native module (``_laid_formula``) are the library's and
-    are made inside ``into_library``: what they raise stops the library. The
-    reason made of their answer is pptmstr's (``_refusal_said``).
+    The calls into imscribe's typesetter and the native module (``_laid_formula``)
+    are the library's and are made inside ``into_library``: what they raise stops
+    the library. The reason made of their answer is pptmstr's (``_refusal_said``).
     """
     typesetter = _typesetter()
-    ts = typesetter.module()
-    if ts is None:
-        return f"the library is not in use: {typesetter.reason()}"
     with _ASKING_FORMULA:
+        ts = typesetter.module()
+        if ts is None:
+            return f"the library is not in use: {typesetter.reason()}"
         first, error = _laid_formula(ts, typesetter, block, theme)
     return _refusal_said(first, error)
 

@@ -666,6 +666,32 @@ def test_a_raising_native_call_in_the_pre_check_stops_the_library(
     _stops_the_library("asking whether a formula will be set")
 
 
+@pytest.mark.parametrize("call", ["module", "reason"])
+def test_a_raising_typesetter_call_in_the_pre_check_stops_the_library(
+    monkeypatch: pytest.MonkeyPatch, call: str
+) -> None:
+    """
+    ``typesetter.module()`` and ``typesetter.reason()`` are imscribe's, and the
+    pre-check asks them: what they raise is the library's, not pptmstr's defect.
+    """
+    from imscribe import TypesetUnavailable
+
+    errors = _errors(monkeypatch)
+    typesetter = gate._typesetter()
+
+    def broken(*given: Any) -> Any:
+        raise RuntimeError("the typesetter failed")
+
+    with monkeypatch.context() as patched:
+        if call == "reason":
+            patched.setattr(typesetter, "module", lambda: None)
+        patched.setattr(typesetter, call, broken)
+        with pytest.raises(TypesetUnavailable):
+            gate._refusal(object(), themes.document_theme())
+    assert not any("pptmstr's own code" in error for error in errors())
+    _stops_the_library("asking whether a formula will be set")
+
+
 def test_a_raising_library_read_in_the_copy_stops_the_library(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -696,6 +722,42 @@ def test_a_raising_library_read_in_the_copy_stops_the_library(
     assert view.native_document is document
     assert not any("pptmstr's own code" in error for error in errors())
     _stops_the_library("copying a selection")
+
+
+def test_a_copy_from_a_view_with_no_document_is_the_library_s_and_leaves_it_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A view whose document was let go of (``close``) keeps its selection, and
+    ``native_document`` is then ``None``. That is pptmstr's state, not the library
+    failing: the copy is the library's own, which makes the document again, and
+    the library stays on for every pane.
+    """
+    errors = _errors(monkeypatch)
+    source = f"Before.\n\n```math\n{SUM}\n```\n\nAfter.\n"
+    cache = typeset.ViewCache()
+    frame(lambda: typeset.markdown(cache, "doc", source))
+    view = cache.view("doc")
+    view.select_all()
+    view.close()
+    assert view.native_document is None and view.selection is not None
+    assert cache.selected("doc") == view.selected_text() != ""
+    frame(lambda: typeset.markdown(cache, "other", "Other.\n"))
+    assert _library_on()
+    assert errors() == []
+
+
+def test_the_formula_check_skips_a_view_with_no_document(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    errors = _errors(monkeypatch)
+    cache = typeset.ViewCache()
+    frame(lambda: typeset.markdown(cache, "doc", f"```math\n{SUM}\n```\n"))
+    cache.view("doc").close()
+    assert views._refused_formulas(cache._entries["doc"]) is False
+    frame(lambda: typeset.markdown(cache, "other", "Other.\n"))
+    assert _library_on()
+    assert errors() == []
 
 
 def test_a_raising_guard_sends_its_entry_alone_to_imgui(monkeypatch: pytest.MonkeyPatch) -> None:

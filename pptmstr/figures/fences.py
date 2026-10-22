@@ -13,11 +13,19 @@ would draw.
 A row whose renderer is not installed is left out of the prompt
 (``available``) and stays in the dispatcher, which is what turns such a fence into
 code with a reason. Installed is read from distribution metadata, never by
-importing the library: a mermaid row asks ``mermaid.version()``, the same read
-``figures.host.mark`` refuses a fence by, so the two cannot answer differently in
-one process. That read and the others together cost about 5 ms on a cold
-interpreter (``importlib.metadata`` over seven distributions, measured
-2026-10-21); ``import merman`` alone is about 19 ms, and is not done here.
+importing the library in this process. A mermaid row asks more, because merman can
+be installed and not import (a wheel for another glibc), and a row promised then
+would send every graph to a fence that is always code: ``mermaid.import_probe``,
+a fresh interpreter importing it once per process, about 50-80 ms off the frame
+thread (measured 2026-10-21). ``figures.host.mark`` still accepts a fence by
+``mermaid.version()`` alone, since it runs on the frame thread; where merman is
+installed and does not import, the render child refuses that fence with
+``mermaid.missing_reason``, so the fence is code under a reason either way, and
+the prompt no longer asks for it. The metadata reads together cost about 5 ms on a
+cold interpreter (seven distributions, measured 2026-10-21).
+
+``available`` blocks for that probe on its first call, so it is asked at a launch,
+on the session's thread, and never from a pane.
 
 ``prompt`` itself is pure: it takes the rows to describe.
 """
@@ -122,7 +130,7 @@ def _installed(name: str) -> bool:
 def _merman() -> bool:
     from . import mermaid
 
-    return mermaid.version() is not None
+    return mermaid.import_probe()
 
 
 # A distribution whose presence is read the way its route reads it, where that is
@@ -137,8 +145,8 @@ def _present(name: str) -> bool:
 
 def available(rows: Iterable[Fence] = RENDERED) -> tuple[Fence, ...]:
     """
-    The rows whose renderer is installed, in table order. Reads metadata, imports
-    nothing it checks.
+    The rows whose renderer is installed, in table order. Reads metadata, and for
+    merman whether it imports (``_merman``); imports nothing it checks in this process.
     """
     return tuple(row for row in rows if all(_present(name) for name in (*_TYPESET, *row.needs)))
 
@@ -184,7 +192,9 @@ never up (``host.FigureWidget.size_for``), and replies are drawn in SESSION and 
 SESSION is (1 - 0.21) * (1 - 0.26) of the window (``app._focus_layout``), 599 at
 the 1024-wide smallest window and 877 at the 1500-wide default, so 600 is drawn
 unscaled there at every supported size and 11 px text stays 11 px. CONTEXT, about
-380 at the default, scales any useful figure down regardless.
+380 at the default, scales any useful figure down regardless. For a Mermaid figure
+the width is merman's and not the session's, and what it is for a graph of twenty
+nodes, and the text size once scaled to this, is unmeasured.
 """
 
 
@@ -196,8 +206,8 @@ def _guidance(words: set[str], kinds: set[Kind]) -> list[str]:
     its row is in ``rows``.
     """
     said = [
-        "Write the fence; the pane is the display. Do not render to a file, look for "
-        "a converter, or preview with other tools."
+        "Write the fence; the pane is the display. Unless asked for an export, do "
+        "not render to a file, look for a converter, or preview with other tools."
     ]
     if {"mermaid", "svg"} <= words:
         said.append(

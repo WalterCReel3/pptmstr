@@ -102,14 +102,50 @@ def test_mermaid_is_promised_by_the_read_mark_refuses_by(monkeypatch: pytest.Mon
     extra's reason. Both from ``mermaid.version()``, so they cannot disagree.
     """
     monkeypatch.setattr(mermaid, "_VERSION", [None])
+    monkeypatch.setattr(mermaid, "_IMPORTS", [])
     monkeypatch.setattr(host, "_MARKS", type(host._MARKS)())
     assert "mermaid" not in fences.session_prompt()
     refused = host.mark("mermaid", "flowchart LR\n a --> b\n")
     assert isinstance(refused, sanitise.Refused) and refused.reason == mermaid.EXTRA_REASON
 
     monkeypatch.setattr(mermaid, "_VERSION", ["0.9.1"])
+    monkeypatch.setattr(mermaid, "_IMPORTS", [True])
     others = ("imscribe", "imtypeset", *fences._RASTER)
     assert ("```mermaid" in fences.session_prompt()) == all(map(fences._installed, others))
+
+
+def test_an_installed_merman_that_does_not_import_is_not_promised(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
+) -> None:
+    """
+    Installed by its metadata and broken at import, as a wheel for another glibc
+    is: the probe asks a fresh interpreter on this process's path, finds it does not
+    import, and the prompt says nothing of Mermaid, so no graph is sent to a fence
+    that is always code.
+    """
+    broken = tmp_path / "merman"
+    broken.mkdir()
+    (broken / "__init__.py").write_text("raise ImportError('built for another glibc')\n")
+    monkeypatch.setattr(sys, "path", [str(tmp_path), *sys.path])
+    monkeypatch.setattr(mermaid, "_VERSION", ["0.9.1"])
+    monkeypatch.setattr(mermaid, "_IMPORTS", [])
+    assert mermaid.import_probe() is False
+    assert "mermaid" not in fences.session_prompt().lower()
+    assert all(row.word != "mermaid" for row in fences.available())
+
+
+def test_the_import_probe_is_asked_once_and_not_where_merman_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    asked: list[int] = []
+    monkeypatch.setattr(mermaid, "_imports_fresh", lambda: asked.append(1) or True)
+    monkeypatch.setattr(mermaid, "_VERSION", [None])
+    monkeypatch.setattr(mermaid, "_IMPORTS", [])
+    assert mermaid.import_probe() is False and asked == []
+    monkeypatch.setattr(mermaid, "_VERSION", ["0.9.1"])
+    monkeypatch.setattr(mermaid, "_IMPORTS", [])
+    assert mermaid.import_probe() is True and mermaid.import_probe() is True
+    assert asked == [1]
 
 
 def test_without_the_library_nothing_is_promised(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -132,7 +168,8 @@ def test_math_missing_drops_the_pointer_to_a_math_fence() -> None:
 def test_reading_what_is_installed_imports_no_renderer() -> None:
     """
     Run fresh, so nothing an earlier test imported is counted: ``available`` reads
-    metadata and imports neither merman nor resvg.
+    metadata, asks a separate interpreter whether merman imports, and imports
+    neither merman nor resvg here.
     """
     code = (
         "import sys\n"
@@ -167,6 +204,7 @@ MERMAID_FIRST = "use ```mermaid, which lays them out"
 def test_the_guidance_says_the_pane_is_the_display_and_how_to_design_for_it() -> None:
     text = fences.prompt(fences.RENDERED)
     assert "the pane is the display" in text
+    assert "Unless asked for an export, do not render to a file" in text
     assert "near-white card" in text and "literal colours" in text
     assert f"at most about {fences.FIGURE_WIDTH} px wide" in text
     assert "win over a skill's general advice" in text
@@ -191,8 +229,10 @@ def test_the_mermaid_preference_follows_the_installed_mermaid_row(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(mermaid, "_VERSION", [None])
+    monkeypatch.setattr(mermaid, "_IMPORTS", [])
     assert MERMAID_FIRST not in fences.session_prompt()
     monkeypatch.setattr(mermaid, "_VERSION", ["0.9.1"])
+    monkeypatch.setattr(mermaid, "_IMPORTS", [True])
     with_it = fences.session_prompt()
     has_row = any(row.word == "mermaid" for row in fences.available())
     assert (MERMAID_FIRST in with_it) == has_row

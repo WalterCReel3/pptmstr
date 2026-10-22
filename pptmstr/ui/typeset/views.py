@@ -1357,6 +1357,11 @@ def _refused_formulas(entry: _Entry) -> bool:
             continue
         with _ASKING:
             document = view.native_document
+        if document is None:
+            # No document to ask (not drawn yet, or closed): nothing it refused is
+            # known, and that is pptmstr's state, not the library failing.
+            continue
+        with _ASKING:
             errors = [(block, document.block_error(at)) for at, block in held]
         for block, error in errors:
             if error.code:
@@ -1504,6 +1509,14 @@ def _copy_with_fences(view: Any) -> str:
         blocks = view.blocks
         texts = view.texts
         separator = str(view.separator)
+        document = view.native_document
+    if document is None:
+        # A view with no document (not drawn yet, or closed) can still hold a
+        # selection. The library's own copy makes the document again; there is
+        # none here to take ranges of, which is pptmstr's state and not the
+        # library failing, so the copy is that one, without fences.
+        with _COPYING:
+            return str(view.selected_text())
     (first, start), (last, end) = selection
     held = [
         at
@@ -1519,20 +1532,20 @@ def _copy_with_fences(view: Any) -> str:
     cursor = (first, start)
     for at in held:
         if cursor < (at, 0):
-            pieces.append(_range_text(view, cursor, (at, 0), separator))
+            pieces.append(_range_text(document, cursor, (at, 0), separator))
         pieces.append(blocks[at].fence)
         cursor = (at, len(texts[at]))
     if cursor < (last, end):
-        pieces.append(_range_text(view, cursor, (last, end), separator))
+        pieces.append(_range_text(document, cursor, (last, end), separator))
     return separator.join(piece for piece in pieces if piece)
 
 
-def _range_text(view: Any, start: tuple[int, int], end: tuple[int, int], separator: str) -> str:
+def _range_text(document: Any, start: tuple[int, int], end: tuple[int, int], separator: str) -> str:
     """
     The library's own copy of a range of a view's document.
     """
     with _COPYING:
-        return str(view.native_document.range_text((start, end), separator))
+        return str(document.range_text((start, end), separator))
 
 
 def _formula_block(block: Any, said: str, theme: Any) -> tuple[Any, ...]:

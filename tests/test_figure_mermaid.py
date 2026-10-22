@@ -664,6 +664,14 @@ def test_every_directive_is_taken_out_and_nothing_else() -> None:
     assert mermaid.without_directives(BODY) == BODY
 
 
+@pytest.mark.parametrize("end", ["\n", "\r\n", "\r"])
+def test_a_directive_line_takes_its_line_end_so_a_front_matter_under_it_is_read(
+    end: str,
+) -> None:
+    source = end.join(["%%{init: {}}%%", "---", "config: {theme: dark}", "---", BODY])
+    assert mermaid.without_config(mermaid.without_directives(source)) == BODY
+
+
 def test_taking_directives_out_is_linear_on_hostile_input() -> None:
     hostile = "%%{" * 200_000
     started = time.perf_counter()

@@ -319,7 +319,10 @@ lazily imported optional extra.**
   (`mermaid.without_directives`, decision 2026-10-21, lead, at fence-fix):
   every one, wherever it stands, across lines, in a linear scan. A
   model-written `init` configures the renderer, and pptmstr configures the
-  figure. Measured on merman 0.9.1, `resvg-safe`, on a three-node flowchart,
+  renderer. What this closes is renderer configuration (theme, fonts, label
+  mode, limits), not author styling: a diagram's own `style`, `classDef` and
+  `linkStyle` lines are content and still paint what they name, dark included
+  [read, guide-review finding 11]. Measured on merman 0.9.1, `resvg-safe`, on a three-node flowchart,
   rasterised by resvg with pptmstr's fonts [ran, fence-fix]:
   - `theme: dark` changes every fill and ink: ten times the dark pixels
     (3,053 to 32,783), on the light card every figure stands on (§3.6);
@@ -353,7 +356,12 @@ lazily imported optional extra.**
     anew with `---` fences alone on their lines and `\n` breaks, so merman
     closes it where the pass did or earlier, never later. Its tests are
     `tests/test_figure_mermaid.py::test_front_matter_keeps_only_its_content_keys`
-    and the real-child `..._front_matter_config_lays_out_as_the_diagram_without_it`.
+    and the real-child `..._front_matter_config_lays_out_as_the_diagram_without_it`;
+  - a directive line takes its line end with it, `\r\n` and a lone `\r` as
+    well as `\n` (guide-fix), so a front matter under it is on the first line
+    again. Behind a blank or whitespace-only first line merman refuses the
+    whole diagram (three sources, merman 0.9.1, 2026-10-21) [ran, guide-fix],
+    so what was left there was code, not a dark figure.
 - **One engine is kept for the child's life and dropped on any merman
   exception** (decision 2026-10-21, lead, at fence-fix): a binding that raised
   may be left in a state no later diagram recovers from, and a new
@@ -1274,8 +1282,8 @@ the writer of this section, unless it is marked [ran] or [relayed].
 
 ### 10.1 What it was asked, and what it did
 
-**Asked** (L3): "[SVG Graph Display] As an exercise. Find a declared pptmstr
-board from an old sessoin and display the dependency graph with SVG."
+**Asked** (L3), paraphrased: as an exercise, find a pptmstr board declared in
+an earlier session and display its dependency graph as SVG.
 
 **What it did, in order.** 28 tool calls over about 8½ minutes, $1.95 (L237).
 - *The data* took the first 11 calls. It found the board logs under
@@ -1360,7 +1368,9 @@ Both landed in `fae81fe`.
   installed]. `fences._guidance` adds four lines, built from the same table:
   - "Write the fence; the pane is the display. Do not render to a file, look
     for a converter, or preview with other tools." This answers the
-    rasteriser hunt.
+    rasteriser hunt. guide-fix scoped it to "Unless asked for an export, do
+    not render to a file, …", because an operator who asks for a PNG or a
+    file should not be contradicted by the system text.
   - Only when both the mermaid and svg rows are present: "For nodes and edges
     (dependencies, flows, sequences, states, entities) use ```mermaid, which
     lays them out; ```svg is for what Mermaid cannot draw. Never compute a
@@ -1370,10 +1380,15 @@ Both landed in `fae81fe`.
     down to fit the pane: design for white, with literal colours, text of
     11 px or more, and at most about 600 px wide." The 600, not the 720 the
     task suggested, is `FIGURE_WIDTH`. SESSION in FOCUS is 0.585 of the
-    window: 599 at the 1024 minimum, so 600 is never scaled there.
+    window: 599 at the 1024 minimum, so 600 is never scaled there. **For
+    Mermaid output the 600 is unmeasured**: the session does not choose
+    merman's width, and nobody has rendered a 21-node dependency graph as
+    Mermaid to see its natural width, or the text size once it is scaled to
+    600. One such render answers it.
   - "These rules win over a skill's general advice." This answers the pull of
     dataviz.
-  - Headroom under `PROMPT_LIMIT` (2,000) is 32 characters.
+  - Headroom under `PROMPT_LIMIT` (2,000) was 32 characters; after guide-fix's
+    export clause it is 4 (1,996 with every row) [ran].
 - **`fence-var`** (builder-29) [relayed; the measured case re-run by this
   section's writer]. Sanitiser step 9 resolves `--name` declarations
   document-wide, last wins, and substitutes `var()` everywhere. An unresolved
@@ -1452,9 +1467,10 @@ In 7b792e36 that would have answered "does it render" without a rasteriser
 hunt, and shown the edge crossings the session's own geometry checker went
 looking for.
 
-It is in tension with the fence text as built: "Do not … preview with other
+It is in tension with the fence text as built: "do not … preview with other
 tools". If the tool is built, that line has to name it as the exception, and
-`PROMPT_LIMIT` has 32 characters of headroom.
+`PROMPT_LIMIT` has 4 characters of headroom (10.4), so something else in the
+text has to give.
 
 Answers from the code, each marked:
 
@@ -1477,7 +1493,14 @@ policy [read, `approval.classify`]. Of the existing sets, it fits `_AUTO`'s
 stated test best: "Cheap, reversible, and they do not leave the box". It
 writes nothing and reaches no network: the sanitiser refuses `<image>` and
 every non-fragment `url()`, and the child is resource-limited. Its one effect
-outside the model's context is CPU in the render child. `_BUS_AUTO`'s
+outside the model's context is CPU in the render child. **But an svg fence is
+not sanitised in the child**: `host._svg_mark` calls `sanitise()` in the GUI
+process, on the frame thread, which has no `RLIMIT_AS`. An auto-approved tool
+a session can call in a loop is only as safe there as `sanitise()` is bounded
+in time and memory on every input up to its byte cap. Until guide-fix, a
+100 KB custom property used 60,000 times in one `<style>` reached 4 GiB and
+`MemoryError` in 2.4 s [ran, guide-fix]; with every substitution charged to
+the output it is refused at 31 MB peak RSS in 0.08 s [ran, guide-fix]. `_BUS_AUTO`'s
 rationale ("coordination that reads or reserves") does not describe it.
 **Operator decision:** auto-approve on every rung, in `_AUTO` or a set of its
 own with that reason. The alternative is parking it, which turns every
@@ -1571,7 +1594,7 @@ Mermaid route also drops notes: `render._serve` rebuilds `Laid` as
 | PV1 | probe | Does CLI 2.1.301 hand an SDK-server image block to the model as an image? One live call returns a known PNG (e.g. a coloured square with a word), and the model is asked what it shows. Then the `ToolResultBlock.content` shape pptmstr receives is recorded. | whether the tool is possible at all; what the transcript must special-case |
 | PV2 | probe | Does a session with the tool, asked for a dependency graph, use it, and does it then fix crossings or swap to Mermaid? A few runs with and without it, opus and haiku. | whether the tool is worth its tokens next to the 10.4 text |
 | PV3 | task, once PV1 passes | The sanitiser records every drop as a note, capped, inside the timing bound; the Mermaid route keeps notes across the child. | whether "what was stripped" is truthful |
-| PD1 | operator decision | The rung: auto-approve on every rung (recommended, `_AUTO`'s test) or park. | `approval` sets |
+| PD1 | operator decision | The rung: auto-approve on every rung (recommended, `_AUTO`'s test) or park. **Conditional:** the recommendation holds only while `sanitise()`, which runs in the GUI process, is bounded in time and memory for every input up to the byte cap (guide-fix item 1, now fixed and tested), or once the tool sanitises in its own child. A later sanitiser change that loses that bound withdraws the recommendation. | `approval` sets |
 | PD2 | operator decision | A second render child for previews (recommended) or routing through the frame thread. | process count, memory budget |
 | PD3 | operator decision | A per-session bound on preview calls, and which roles are offered the tool. | abuse bound |
-| PD4 | lead decision | The fence text's "preview with other tools" line, and the 32-character headroom, if the tool lands. Ties to 10.5's floor/skill split. | `fences._guidance` |
+| PD4 | lead decision | The fence text's "preview with other tools" line, and the 4-character headroom, if the tool lands. Ties to 10.5's floor/skill split. | `fences._guidance` |

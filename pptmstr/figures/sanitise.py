@@ -99,17 +99,18 @@ Policy, in the order it is applied:
    the declarations themselves are removed. A `var()` that cannot be resolved -- not
    declared and no fallback, a cycle, nested deeper than `MAX_VAR_DEPTH`, malformed --
    or that resolves to text step 3 or 4 would refuse (an escape, a non-fragment
-   `url(`) fails its attribute or declaration. In `fill` and `stroke` that becomes
-   `none`, as in step 8, because a removed paint is black; anything else is removed.
-   A `fill` or `stroke` that resolves is held to a paint resvg draws, since the
-   substitution is this module's output: it stays only if it is a `url(#id)` paint,
-   `inherit`, or a colour (`_colour_or_none`), and is otherwise `none`
-   (`--c: foo; fill: var(--c)` would paint black). Each failure is a line in
-   `Sanitised.notes`. A `var()` inside a selector empties
+   `url(`), or to text that spells `var(` again -- fails its attribute or declaration.
+   In `fill` and `stroke` that becomes `none`, as in step 8, and in `stop-color`
+   `transparent`, because each of those removed is black; anything else is removed.
+   A colour-taking property (`_COLOUR_TAKING`) that resolves is held to a colour resvg
+   paints, since the substitution is this module's output: it stays only if it is a
+   colour (`_colour_or_none`), `inherit`, or in a paint a `url(#id)`, and is otherwise
+   failed as above (`--c: foo; fill: var(--c)` would paint black). Each failure is a
+   line in `Sanitised.notes`. A `var()` inside a selector empties
    that `<style>`. Text is substituted wherever `var(` appears, inside a CSS string
    too, so none survives. The work and the output are bounded: see `_Vars` and
    `MAX_VAR_VALUES`. A document whose substitution would pass `MAX_INPUT_BYTES` is
-   refused.
+   refused as soon as it would, each use of a value counted, before the text is built.
 
 The root's `width` and `height` are rewritten to the natural size, so a renderer that
 sizes its canvas from them gets the size the host laid out for.
@@ -557,27 +558,43 @@ class _Vars:
     The custom-property table and what substitution may still spend.
 
     `budget` is the characters of declared values substitution may still scan; each
-    expansion of a name charges its declared value's length. Every character
-    substitution produces comes from text it scanned, so this bounds both the work and
-    the output, however the declarations refer to one another: ten names each naming
-    the previous one ten times would be 10^10 characters, and is refused at the budget
-    instead. `resolved` holds each distinct value's outcome, since a stylesheet repeats
-    one `var()` in every rule; a repeat is a lookup and is not charged. A fallback is
-    not charged either, because it is part of text already scanned or charged, and
-    `_Parens` locates every `var()` in a text by lookup, so a fallback is searched again
-    only once per enclosing level, which `MAX_VAR_DEPTH` bounds.
+    expansion of a name charges its declared value's length. Every character one
+    resolution produces comes from text it scanned, so this bounds the work and the
+    length of each distinct resolved value, however the declarations refer to one
+    another: ten names each naming the previous one ten times would be 10^10
+    characters, and is refused at the budget instead. `resolved` holds each distinct
+    value's outcome, since a stylesheet repeats one `var()` in every rule; a repeat is
+    a lookup and is not charged to `budget`. A fallback is not charged either, because
+    it is part of text already scanned or charged, and `_Parens` locates every `var()`
+    in a text by lookup, so a fallback is searched again only once per enclosing level,
+    which `MAX_VAR_DEPTH` bounds.
+
+    `size` is the document's length as substituted so far, and bounds the output. A
+    repeat scans nothing but is copied into the output each time it is used, so every
+    substitution, repeats included, is charged to `size` (`grow`) before the text
+    holding it is built, and the document is refused the moment `size` would pass
+    `MAX_INPUT_BYTES`: a 100 KB value used 60,000 times in one `<style>` is refused
+    after about ten uses rather than copied 60,000 times. `coloured` memoises what a
+    resolved value becomes in a colour property, so a repeat is not copied to check it.
     """
 
     declared: dict[str, str]
     budget: int
+    size: int
     notes: dict[str, None]
     parsed: dict[str, _Parens]
     resolved: dict[str, str | _Unresolved]
+    coloured: dict[tuple[str, str], str | None]
     splits: dict[tuple[str, str], list[tuple[str, str]]]
 
     def note(self, line: str) -> None:
         # Unbounded here, since MAX_VAR_VALUES bounds how many lines there can be.
         self.notes[line] = None
+
+    def grow(self, by: int) -> None:
+        self.size += by
+        if self.size > MAX_INPUT_BYTES:
+            raise _Refusal(f"var() substitution makes it larger than {MAX_INPUT_BYTES} bytes")
 
     def lines(self) -> tuple[str, ...]:
         return _capped(self.notes, "and more var() that could not be resolved")
@@ -598,7 +615,7 @@ def _substitute_custom_properties(root: ET.Element, size: int) -> tuple[str, ...
     Step 9 on the parsed input, in place. `size` is the input's length: the
     substituted document may not be longer than `MAX_INPUT_BYTES`. Returns the notes.
     """
-    env = _Vars({}, MAX_INPUT_BYTES, {}, {}, {}, {})
+    env = _Vars({}, MAX_INPUT_BYTES, size, {}, {}, {}, {}, {})
     _custom_properties(root, env)
     for element in root.iter():
         for name, value in list(element.attrib.items()):
@@ -608,24 +625,19 @@ def _substitute_custom_properties(root: ET.Element, size: int) -> tuple[str, ...
                 new: str | None = _substitute_css(value, env, stylesheet=False)
             elif "var(" in value.lower():
                 new = _substitute_value(name, value, env)
+                env.grow(len(new or "") - len(value))
             else:
                 continue
-            size -= len(value)
             if new is None:
                 del element.attrib[name]
             else:
-                size += len(new)
                 element.set(name, new)
         if _local(element.tag) == "style" and _is_svg(element.tag):
             text = "".join(element.itertext())
             if _has_custom(text):
                 for child in list(element):
                     element.remove(child)
-                css = _substitute_css(text, env, stylesheet=True)
-                size += len(css or "") - len(text)
-                element.text = css
-        if size > MAX_INPUT_BYTES:
-            raise _Refusal(f"var() substitution makes it larger than {MAX_INPUT_BYTES} bytes")
+                element.text = _substitute_css(text, env, stylesheet=True)
     return env.lines()
 
 
@@ -677,32 +689,57 @@ def _substitute_css(text: str, env: _Vars, *, stylesheet: bool) -> str | None:
     A `style=` value or a stylesheet with its custom-property declarations removed and
     each `var()` substituted. None for a `style=` with nothing left. A stylesheet with a
     `var()` in a selector is emptied whole, since a rule cannot lose its selector.
+    Each piece's change in length is charged to `env.size` before the piece is built,
+    so an output past the cap is refused and never assembled.
     """
     pieces: list[str] = []
+    grown = 0
+
+    def grow(by: int) -> None:
+        nonlocal grown
+        env.grow(by)
+        grown += by
+
     for piece, delimiter in _split(text, ";{}" if stylesheet else ";", env):
         if "var(" in piece.lower() and delimiter == "{":
             env.note(f"a var() in the selector {piece.strip()[:40]!r}; the <style> is emptied")
+            env.grow(-grown - len(text))
             return ""
         prop, colon, value = piece.partition(":")
         if colon and prop.strip().startswith("--"):
+            grow(-len(piece))
             piece = ""
         elif "var(" in piece.lower():
             if not colon:
                 env.note(f"a var() outside a declaration: {piece.strip()[:40]!r}; dropped")
+                grow(-len(piece))
                 piece = ""
             else:
                 resolved = _substitute_value(prop, value, env)
-                piece = "" if resolved is None else f"{prop}:{resolved}"
+                if resolved is None:
+                    grow(-len(piece))
+                    piece = ""
+                else:
+                    grow(len(resolved) - len(value))
+                    piece = f"{prop}:{resolved}"
         if piece or delimiter != ";":
             pieces.append(piece + delimiter)
+        else:
+            grow(-len(delimiter))
     css = "".join(pieces)
-    return css if stylesheet or css.strip(" \t\r\n;") else None
+    if stylesheet or css.strip(" \t\r\n;"):
+        return css
+    env.grow(-len(css))
+    return None
 
 
 def _substitute_value(prop: str, value: str, env: _Vars) -> str | None:
     """
-    `value` with every `var()` substituted; for a failed one, `none` in a paint
-    property and None (remove it) in any other.
+    `value` with every `var()` substituted. A failed one is what `_IN_PLACE_OF` says
+    for the property: `none` in a paint, `transparent` in `stop-color`, and None
+    (remove it) in any other. A resolved text that still spells `var(` has failed: one
+    substitution can join the text around it into a new `var()` (`var(--x, va)r(--c)`
+    with `--x` undeclared is `var(--c)`), and substitution does not rescan its output.
     """
     outcome = env.resolved.get(value)
     if outcome is None:
@@ -712,38 +749,76 @@ def _substitute_value(prop: str, value: str, env: _Vars) -> str | None:
             resolved = _substitute(_parens(value), 0, len(value), env, (), 0)
             if not resolved.strip():
                 raise _Unresolved("resolves to nothing")
+            if _VAR.search(resolved):
+                raise _Unresolved("resolves to text that is itself a var()")
             if _css_unsafe(resolved):
                 raise _Unresolved("resolves to an escape, a URL or an @import")
             outcome = env.resolved[value] = resolved
         except _Unresolved as why:
             outcome = env.resolved[value] = why
+    name = prop.strip().lower()
     if isinstance(outcome, str):
-        if prop.strip().lower() in _PAINT:
-            return _substituted_paint(prop, outcome, env)
+        if name in _COLOUR_TAKING:
+            return _substituted_colour(prop, outcome, env)
         return outcome
-    paint = prop.strip().lower() in _PAINT
-    env.note(f"{prop.strip()}: {outcome}; {'painted none' if paint else 'removed'}")
-    return "none" if paint else None
+    instead = _IN_PLACE_OF.get(name)
+    env.note(f"{prop.strip()}: {outcome}; {_put_instead(name, instead)}")
+    return instead
 
 
-def _substituted_paint(prop: str, value: str, env: _Vars) -> str:
+def _put_instead(name: str, instead: str | None) -> str:
+    if instead is None:
+        return "removed"
+    return f"painted {instead}" if name in _PAINT else f"set to {instead}"
+
+
+# The properties step 9 holds to a colour, and what a failed one becomes. A removed
+# fill, stroke or stop-color is black (its initial value), so those take a value that
+# paints nothing; `stop-color: none` is black too, and `transparent` is not (measured
+# on resvg_py 0.5.0, 2026-10-21). A removed `color` inherits its parent's, which is
+# what CSS does with an invalid one. `flood-color` and `lighting-color` take effect
+# only in a filter, and step 2 drops every filter element.
+_IN_PLACE_OF: dict[str, str | None] = {
+    "fill": "none",
+    "stroke": "none",
+    "stop-color": "transparent",
+}
+_COLOUR_TAKING = frozenset(
+    {"fill", "stroke", "stop-color", "flood-color", "lighting-color", "color"}
+)
+
+
+def _substituted_colour(prop: str, value: str, env: _Vars) -> str | None:
     """
-    A resolved `fill` or `stroke` held to what resvg paints, since the substitution is
-    this module's output and a non-colour paint is black: a `url(#id)` paint (step 8
-    resolves it), `inherit` (measured to inherit), or a colour (`_colour_or_none`).
-    Anything else is `none`, with a note.
+    A resolved value of a `_COLOUR_TAKING` property held to what resvg paints, since
+    the substitution is this module's output and a non-colour paints black: a colour
+    (`_colour_or_none`), `inherit` (measured to inherit), or, in `fill` and `stroke`, a
+    `url(#id)` paint (step 8 resolves it). Anything else is `_IN_PLACE_OF` for the
+    property, with a note. Memoised in `env.coloured`, because a stylesheet repeats a
+    value and checking it copies it.
     """
+    name = prop.strip().lower()
+    key = (name, value)
+    if key in env.coloured:
+        return env.coloured[key]
     body, important = _split_important(value)
     stripped = body.strip()
-    if _LOCAL_URL.match(stripped) or stripped.lower() == "inherit":
-        return value
-    colour = _colour_or_none(stripped)
-    if colour == stripped:
-        return value
-    if colour == "none":
-        env.note(f"{prop.strip()}: var() resolves to {stripped[:40]!r}, not a colour; painted none")
-    lead = body[: len(body) - len(body.lstrip())]
-    return f"{lead}{colour}{important}"
+    out: str | None = value
+    paint_url = name in _PAINT and _LOCAL_URL.match(stripped)
+    if not (paint_url or stripped.lower() == "inherit"):
+        colour = _colour_or_none(stripped)
+        lead = body[: len(body) - len(body.lstrip())]
+        if colour == "none" and (stripped != "none" or name not in _PAINT):
+            instead = _IN_PLACE_OF.get(name)
+            env.note(
+                f"{prop.strip()}: var() resolves to {stripped[:40]!r}, not a colour;"
+                f" {_put_instead(name, instead)}"
+            )
+            out = None if instead is None else f"{lead}{instead}{important}"
+        elif colour != stripped:
+            out = f"{lead}{colour}{important}"
+    env.coloured[key] = out
+    return out
 
 
 @dataclass(frozen=True, slots=True)
@@ -992,7 +1067,11 @@ def _colour_or_none(text: str) -> str:
     and `hsl()`/`hsla()` of a number and two percentages, each with an optional numeric
     alpha, separated by commas or by whitespace. This is narrower than CSS where resvg
     is: it paints `NONE`, `hsl(120deg, ...)`, a percentage alpha and `rgb(1 2 3 / 0.5)`
-    black, so those are `none` here.
+    black, so those are `none` here. A number may be signed or have an exponent:
+    resvg paints `rgb(1e2,0,0)` as (100,0,0) and `rgb(+5,-1,300)` clamped to (5,0,255)
+    (measured 2026-10-21). `currentColor` is kept although it paints black where no
+    `color` is set, since that is CSS's own initial value and not a value this module
+    wrote.
     """
     colour = text.strip()
     lowered = colour.lower()

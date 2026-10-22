@@ -9,6 +9,7 @@ import random
 import re
 import signal
 import time
+import tracemalloc
 import xml.etree.ElementTree as ET
 from collections.abc import Callable
 from typing import TypeVar
@@ -860,6 +861,12 @@ WORST = {
         ROOT + '<rect style="--c:foo;', "fill:var(--c);", '"/></svg>'
     ),
     "one long colour function": _at_cap(ROOT + '<rect fill="url(#g) rgb(', "1,", ')"/></svg>'),
+    "repeats of a long var in one <style>": _at_cap(
+        ROOT + f"<style>:root{{--a:{'1 ' * 50_000}}}", ".c{x:var(--a)}", "</style></svg>"
+    ),
+    "repeats of a long var in one style=": _at_cap(
+        ROOT + f'<rect style="--a:{"1 " * 50_000};', "x:var(--a);", '"/></svg>'
+    ),
     "var fan-out": ROOT
     + '<g style="--a0:#000000000;'
     + ";".join(f"--a{i}:" + f"var(--a{i - 1})" * 10 for i in range(1, 8))
@@ -1624,6 +1631,107 @@ def test_distinct_var_values_past_the_cap_are_refused_and_repeats_are_free() -> 
     passed(doc(f"<style>{rules(MAX_VAR_VALUES)}{rules(1) * 10_000}</style>"))
     reason = refused(doc(f"<style>{rules(MAX_VAR_VALUES + 1)}</style>"))
     assert reason == f"more than {MAX_VAR_VALUES} distinct values that use var()"
+
+
+LONG_VALUE = " ".join(["1"] * 10_000)  # 20 KB
+
+
+@pytest.mark.parametrize(
+    "svg",
+    [
+        doc(f"<style>:root{{--a:{LONG_VALUE}}}{'.c{x:var(--a)}' * 10_000}</style>"),
+        doc(f'<rect style="--a:{LONG_VALUE};{"x:var(--a);" * 10_000}"/>'),
+    ],
+    ids=["one <style>", "one style="],
+)
+def test_each_use_of_a_repeated_value_is_charged_before_it_is_copied(svg: str) -> None:
+    # 200 MB if every use were copied, and as much again to join them. Each use is a
+    # memo hit, so only the output charge can stop it, and it must stop it at the cap.
+    tracemalloc.start()
+    try:
+        reason = refused(svg)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert reason == f"var() substitution makes it larger than {MAX_INPUT_BYTES} bytes"
+    assert peak < 16 * MAX_INPUT_BYTES
+
+
+def test_repeats_of_a_value_that_stay_under_the_cap_pass() -> None:
+    value = "1 " * 500
+    out = passed(doc(f"<style>:root{{--a:{value}}}{'.c{x:var(--a)}' * 500}</style>"))
+    assert (find_all(out, "style")[0].text or "").count(value.strip()) == 500
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '<stop stop-color="var(--x, va)r(--c)"/>',
+        '<g style="--a:v"><stop stop-color="var(--a)ar(--c)"/></g>',
+        '<stop style="stop-color:var(--x, va)r(--c)"/>',
+        "<style>stop{stop-color:var(--x, va)r(--c)}</style><stop/>",
+        '<g style="--a:va;--b:r(--c)"><text x="var(--a)var(--b)">t</text></g>',
+        '<rect style="color:var(--x, va)r(--c)"/>',
+    ],
+)
+def test_a_var_joined_from_the_text_around_a_substitution_does_not_survive(body: str) -> None:
+    out = passed(doc(body))
+    values = [v for e in tree(out).iter() for v in e.attrib.values()]
+    css = "".join(s.text or "" for s in find_all(out, "style"))
+    assert all("var(" not in v.lower() for v in [*values, css]), (values, css)
+    assert any("itself a var()" in note for note in out.notes), out.notes
+
+
+GRADIENT = (
+    '<linearGradient id="g"><stop offset="0" {stop}/><stop offset="1" {stop}/></linearGradient>'
+    f'<rect {FULL} fill="#fff"/><rect {{rect}} {FULL} fill="url(#g)"/>'
+)
+
+
+@pytest.mark.parametrize(
+    "stop, rect",
+    [
+        ('stop-color="var(--x, va)r(--c)"', ""),
+        ('stop-color="var(--gone)"', ""),
+        ('stop-color="var(--c)"', 'style="--c:foo"'),
+        ('style="stop-color:var(--c)"', 'style="--c:none"'),
+    ],
+    ids=["joined var", "undeclared", "not a colour", "none"],
+)
+def test_a_failed_var_in_stop_color_is_transparent_not_black(stop: str, rect: str) -> None:
+    # The --c on the rect does not reach the stops by inheritance (the table is
+    # document-wide), which is what this relies on.
+    out = passed(doc(GRADIENT.format(stop=stop, rect=rect)))
+    assert render_pixel(out.svg) == (255, 255, 255, 255)
+    assert any("set to transparent" in note for note in out.notes), out.notes
+
+
+def test_a_var_in_stop_color_that_is_a_colour_is_kept() -> None:
+    out = passed(doc(GRADIENT.format(stop='stop-color="var(--c)"', rect='style="--c:#e8590c"')))
+    assert render_pixel(out.svg) == (0xE8, 0x59, 0x0C, 255)
+    assert out.notes == ()
+
+
+def test_a_var_in_color_that_is_not_a_colour_is_removed_and_inherits() -> None:
+    svg = doc(
+        f'<g color="green"><rect {FULL} style="--c:foo" color="var(--c)" fill="currentColor"/></g>'
+    )
+    out = passed(svg)
+    assert find_all(out, "rect")[0].get("color") is None
+    assert render_pixel(out.svg) == (0, 128, 0, 255)
+    assert out.notes == ("color: var() resolves to 'foo', not a colour; removed",)
+
+
+@pytest.mark.parametrize(
+    "colour, pixel",
+    [("rgb(1e2,0,0)", (100, 0, 0, 255)), ("rgb(+5,-1,300)", (5, 0, 255, 255))],
+)
+def test_a_signed_or_exponent_colour_through_a_var_is_kept_and_painted(
+    colour: str, pixel: tuple[int, ...]
+) -> None:
+    out = passed(doc(f'<rect {FULL} style="--c:{colour}" fill="var(--c)"/>'))
+    assert find_all(out, "rect")[0].get("fill") == colour
+    assert render_pixel(out.svg) == pixel
 
 
 def test_notes_stop_at_the_cap_and_say_there_are_more() -> None:

@@ -11,9 +11,10 @@ drawn exactly as an svg one is (``host.FigureWidget``).
 **merman is an optional extra** (``pip install 'pptmstr[mermaid]'``). Its Linux wheel is
 ``manylinux_2_35`` and pptmstr's floor is glibc 2.28, so a required dependency would
 fail the whole install on a supported machine. The frame thread asks only whether the
-distribution is installed (``version``, a metadata read with no import), and the child
-imports it lazily on its first diagram. Where it is missing the fence stays code
-under ``EXTRA_REASON``.
+distribution is installed (``version``, a metadata read with no import), and the
+child imports it lazily on its first diagram. Where it is missing or does not import
+the fence stays code under ``missing_reason``. A launch asks a fresh interpreter to
+import it (``import_probe``) before it promises Mermaid in the session prompt.
 
 **The post-pass is fidelity, not safety** (``visible_labels``), so it lives here and
 not in the sanitiser. merman wraps each class, state and ER label in a nested
@@ -24,7 +25,9 @@ overflow visibly. An edge label's background stays merman's narrower width.
 
 **A diagram's ``%%{ ... }%%`` directives are taken out before merman reads it**
 (``without_directives``), every one, wherever it stands: a model-written ``init``
-is configuration of the renderer, and the figure is pptmstr's to configure.
+is configuration of the renderer, and the renderer is pptmstr's to configure. This
+closes renderer configuration, not author styling: a diagram's own ``style``,
+``classDef`` and ``linkStyle`` lines are content and still paint what they name.
 Measured on merman 0.9.1, resvg-safe, 2026-10-21, on a three-node flowchart:
 ``theme: dark`` changes every fill and ink of the output (ten times the dark
 pixels), where the host draws every figure on a light card (``host.BACKDROP``); a
@@ -51,9 +54,11 @@ diagram recovers from, and a new engine costs about 4 µs (measured 2026-10-21).
 
 from __future__ import annotations
 
+import json
 import multiprocessing
 import platform
 import re
+import subprocess
 import sys
 from collections.abc import Sequence
 from importlib import metadata
@@ -106,7 +111,15 @@ _CONTENT_KEY = re.compile(r"""(["']?)(?:title|displayMode)\1\s*:""")
 # 1.1 breaks are counted too, so no key can start where this sees no line start.
 _LINE_BREAK = re.compile("\r\n|[\n\r\x85  ]")
 
+IMPORT_PROBE_TIMEOUT_S = 20.0
+"""
+How long ``import_probe`` waits for a fresh interpreter to import merman. It took
+46-82 ms (measured 2026-10-21); a probe that does not answer in time counts as
+merman not importing.
+"""
+
 _VERSION: list[str | None] = []
+_IMPORTS: list[bool] = []
 _ENGINE: list[Any] = []
 
 
@@ -123,6 +136,38 @@ def version() -> str | None:
         except metadata.PackageNotFoundError:
             _VERSION.append(None)
     return _VERSION[0]
+
+
+def import_probe() -> bool:
+    """
+    Whether merman imports here, asked once per process: ``False`` without asking
+    where it is not installed (``version``), else whether a fresh interpreter of this
+    one, on this process's ``sys.path``, imports it. That is what the render child
+    does with it, and an installed merman can fail to: a wheel for another glibc, a
+    broken install. The answer is kept for the process.
+
+    **Blocks for a process start: never on the frame thread.** A launch asks it
+    (``fences.available``, from the session's own thread). Not an import in this
+    process, which would hold the GIL for its 24-65 ms (measured 2026-10-21) and
+    keep merman in the GUI process, where it never runs.
+    """
+    if not _IMPORTS:
+        _IMPORTS.append(version() is not None and _imports_fresh())
+    return _IMPORTS[0]
+
+
+def _imports_fresh() -> bool:
+    code = "import json, sys; sys.path[:] = json.loads(sys.argv[1]); import merman"
+    try:
+        done = subprocess.run(
+            [sys.executable, "-I", "-c", code, json.dumps(sys.path)],
+            capture_output=True,
+            timeout=IMPORT_PROBE_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return done.returncode == 0
 
 
 def missing_reason(
@@ -209,8 +254,14 @@ def without_directives(source: str) -> str:
     """
     ``source`` with every ``%%{ ... }%%`` directive taken out, from its opening
     ``%%{`` to the first ``}%%`` after it, across lines, with the line end after one
-    that was a line of its own. An opening with no close is left as written, and so
-    is the rest of a line a directive shared. Linear: each character is passed once.
+    that was a line of its own (``\n``, ``\r\n`` or ``\r``, each of which merman
+    ends a line at). An opening with no close is left as written, and so is the rest
+    of a line a directive shared. Linear: each character is passed once.
+
+    The line end goes so that a front matter under a directive is on the first line
+    again, where merman and ``without_config`` read one. Behind a blank or
+    whitespace-only first line merman refuses the diagram, front matter and all
+    (measured on merman 0.9.1, 2026-10-21), so such a source is code, not restyled.
     """
     out: list[str] = []
     at = 0
@@ -221,8 +272,11 @@ def without_directives(source: str) -> str:
         out.append(source[at:start])
         at = end + len(_DIRECTIVE_CLOSE)
         # A directive that was a line of its own leaves no blank line behind.
-        if (start == 0 or source[start - 1] == "\n") and source.startswith("\n", at):
-            at += 1
+        if start == 0 or source[start - 1] in "\n\r":
+            if source.startswith("\r\n", at):
+                at += 2
+            elif source.startswith(("\n", "\r"), at):
+                at += 1
     out.append(source[at:])
     return "".join(out)
 
