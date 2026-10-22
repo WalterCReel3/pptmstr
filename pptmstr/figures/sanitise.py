@@ -45,7 +45,11 @@ Policy, in the order it is applied:
    measured). The `filter` property is dropped wherever it is set, attribute or
    CSS: with `<filter>` gone it can only name the wrong thing or be a filter
    function, and resvg draws those (`blur(200px)` on 50 full-canvas rects took 44 s
-   at 1600x1200; probe R3).
+   at 1600x1200; probe R3). `rebeccapurple`, in any case, is written `#663399` in
+   every `fill`, `stroke`, `stop-color`, `flood-color` and `color`, attribute or CSS:
+   it is the one CSS named colour resvg_py 0.5.0 does not know, and it paints it black
+   (measured 2026-10-21; see `_COLOUR_SPELLED`). This is a gap in that version, and
+   the rewrite can go when the renderer knows the name.
 4. **CSS** in `style=` and in `<style>` is split into declarations, and a declaration
    with a backslash, `@import`, a non-fragment `url(` or a URL-taking function is
    dropped whole, or repainted if it sets `fill` or `stroke` (step 3). In a `<style>`,
@@ -79,7 +83,8 @@ Policy, in the order it is applied:
    (`_TARGET_KINDS`: a clip-path naming a `<rect>`), which is treated as dangling.
    In `fill` and `stroke` the value becomes its fallback (`url(#gone) red` is `red`)
    or `none`, which is what SVG 2 makes of a missing paint server; a fallback that is
-   not a colour (step 3) is `none` too. Anywhere else
+   not a colour (step 3) is `none` too. Each such repaint is a line in
+   `Sanitised.notes`, as in step 3. Anywhere else
    (`clip-path`, `mask`, `marker-*`, `href`, ...) the attribute or the CSS
    declaration is removed, so the element draws without the effect. An `href` needs
    only its target to exist.
@@ -96,7 +101,11 @@ Policy, in the order it is applied:
    or that resolves to text step 3 or 4 would refuse (an escape, a non-fragment
    `url(`) fails its attribute or declaration. In `fill` and `stroke` that becomes
    `none`, as in step 8, because a removed paint is black; anything else is removed.
-   Each failure is a line in `Sanitised.notes`. A `var()` inside a selector empties
+   A `fill` or `stroke` that resolves is held to a paint resvg draws, since the
+   substitution is this module's output: it stays only if it is a `url(#id)` paint,
+   `inherit`, or a colour (`_colour_or_none`), and is otherwise `none`
+   (`--c: foo; fill: var(--c)` would paint black). Each failure is a line in
+   `Sanitised.notes`. A `var()` inside a selector empties
    that `<style>`. Text is substituted wherever `var(` appears, inside a CSS string
    too, so none survives. The work and the output are bounded: see `_Vars` and
    `MAX_VAR_VALUES`. A document whose substitution would pass `MAX_INPUT_BYTES` is
@@ -258,8 +267,9 @@ class Sanitised:
     `width` and `height` are in CSS px and are also what the root's attributes now
     say. The host's height for a drawn width `w` is `min(w, width) * height / width`.
     `notes` says what the policy changed that the author may not expect: one line per
-    distinct `var()` that could not be resolved (step 9), then one per distinct unsafe
-    `fill` or `stroke` that was repainted (step 3), each list capped at `MAX_NOTES`.
+    distinct `var()` that could not be resolved or resolved to a paint that is not one
+    (step 9), then one per distinct unsafe or dangling `fill` or `stroke` that was
+    repainted (steps 3 and 8), each list capped at `MAX_NOTES`.
     Nothing displays them yet: their consumer is the figure-preview tool scoped in the
     board task fence-lessons, which would hand them to the session that wrote the
     figure.
@@ -317,10 +327,10 @@ def _sanitise(svg: str) -> Sanitised:
     notes = _substitute_custom_properties(root, len(svg))
     repainted: dict[str, None] = {}
     out = _clean(root, repainted)
-    notes += _capped(repainted, "and more unsafe paint that was repainted")
     if out is None:
         raise _Refusal("the root element is not <svg>")
-    _resolve_references(out)
+    _resolve_references(out, repainted)
+    notes += _capped(repainted, "and more paint that was repainted")
     width, height = _natural_size(out)
     out.set("width", _fmt(width))
     out.set("height", _fmt(height))
@@ -471,6 +481,8 @@ def _clean_attributes(attrib: dict[str, str], notes: dict[str, None]) -> dict[st
             value = _repaint(key, value, notes)
         elif lowered in ("font-family", "font"):
             value = _fix_font_value(lowered, value)
+        elif lowered in _COLOUR_PROPS:
+            value = _spell_colours(value)
         out[key] = value
     return out
 
@@ -706,10 +718,32 @@ def _substitute_value(prop: str, value: str, env: _Vars) -> str | None:
         except _Unresolved as why:
             outcome = env.resolved[value] = why
     if isinstance(outcome, str):
+        if prop.strip().lower() in _PAINT:
+            return _substituted_paint(prop, outcome, env)
         return outcome
     paint = prop.strip().lower() in _PAINT
     env.note(f"{prop.strip()}: {outcome}; {'painted none' if paint else 'removed'}")
     return "none" if paint else None
+
+
+def _substituted_paint(prop: str, value: str, env: _Vars) -> str:
+    """
+    A resolved `fill` or `stroke` held to what resvg paints, since the substitution is
+    this module's output and a non-colour paint is black: a `url(#id)` paint (step 8
+    resolves it), `inherit` (measured to inherit), or a colour (`_colour_or_none`).
+    Anything else is `none`, with a note.
+    """
+    body, important = _split_important(value)
+    stripped = body.strip()
+    if _LOCAL_URL.match(stripped) or stripped.lower() == "inherit":
+        return value
+    colour = _colour_or_none(stripped)
+    if colour == stripped:
+        return value
+    if colour == "none":
+        env.note(f"{prop.strip()}: var() resolves to {stripped[:40]!r}, not a colour; painted none")
+    lead = body[: len(body) - len(body.lstrip())]
+    return f"{lead}{colour}{important}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -832,7 +866,11 @@ _TARGET_KINDS: dict[str, frozenset[str]] = {
 _Kinds = dict[str, set[str]]
 
 
-def _resolve_references(root: ET.Element) -> None:
+def _resolve_references(root: ET.Element, notes: dict[str, None]) -> None:
+    """
+    Step 8 on the cleaned tree, in place. A line for each repainted fill or stroke goes
+    into `notes`.
+    """
     kinds: _Kinds = {}
     for element in root.iter():
         ident = element.get("id")
@@ -843,15 +881,15 @@ def _resolve_references(root: ET.Element) -> None:
             if name == "href":
                 resolved: str | None = value if value[1:] in kinds else None
             elif name == "style":
-                resolved = _resolve_declarations(value, kinds, "; ") or None
+                resolved = _resolve_declarations(value, kinds, "; ", notes) or None
             else:
-                resolved = _resolve_value(name, value, kinds)
+                resolved = _resolve_value(name, value, kinds, notes)
             if resolved is None:
                 del element.attrib[name]
             else:
                 element.set(name, resolved)
         if element.tag == "style" and element.text:
-            element.text = _resolve_declarations(element.text, kinds, None)
+            element.text = _resolve_declarations(element.text, kinds, None, notes)
 
 
 def _resolves(prop: str, target: str, kinds: _Kinds) -> bool:
@@ -866,20 +904,26 @@ def _resolves(prop: str, target: str, kinds: _Kinds) -> bool:
     return want is None or have <= want
 
 
-def _resolve_value(prop: str, value: str, kinds: _Kinds) -> str | None:
+def _resolve_value(prop: str, value: str, kinds: _Kinds, notes: dict[str, None]) -> str | None:
     """
     `value` with dangling fragment references resolved for property `prop`, or None
     when the property should be removed. A reference is dangling when its target is
-    missing or is not a kind of element `prop` can use (`_TARGET_KINDS`).
+    missing or is not a kind of element `prop` can use (`_TARGET_KINDS`). A repainted
+    fill or stroke puts a line in `notes`.
     """
-    prop = prop.strip().lower()
+    name = prop.strip()
+    prop = name.lower()
     targets = [m.group(1)[1:] for m in _LOCAL_URL_ID.finditer(value)]
-    if all(_resolves(prop, target, kinds) for target in targets):
+    dangling = next((t for t in targets if not _resolves(prop, t, kinds)), None)
+    if dangling is None:
         return value
     if prop not in _PAINT:
         return None
     body, important = _split_important(value)
-    return f"{_colour_or_none(_LOCAL_URL.sub('', body))}{important}"
+    colour = _colour_or_none(_LOCAL_URL.sub("", body))
+    why = "names nothing in the output" if dangling not in kinds else "is not a paint server"
+    notes[f"{name}: url(#{dangling[:40]}) {why}; painted {colour[:40]}"] = None
+    return f"{colour}{important}"
 
 
 # A paint's fallback colour ----------------------------------------------------------
@@ -907,8 +951,34 @@ NAMED_COLOURS: frozenset[str] = frozenset("""
     """.split())
 
 # Names written out as their value because resvg_py 0.5.0 does not know them and paints
-# them black (measured 2026-10-21; the other 147 paint their colour).
+# them black (measured 2026-10-21; the other 147 paint their colour). Spelled in every
+# value of `_COLOUR_PROPS` (`_spell_colours`), not only in a fallback this module keeps.
 _COLOUR_SPELLED = {"rebeccapurple": "#663399"}
+_SPELLED_NAME = re.compile(
+    r"(?<![\w-])(" + "|".join(_COLOUR_SPELLED) + r")(?![\w-])", re.IGNORECASE
+)
+
+# The properties whose value can hold a colour. `color` is here because it is what
+# `currentColor` paints: `color="rebeccapurple"` under `fill="currentColor"` paints black
+# too (measured 2026-10-21). `flood-color` has no effect while `filter` is dropped.
+_COLOUR_PROPS = frozenset({"fill", "stroke", "stop-color", "flood-color", "color"})
+
+
+def _spell_colours(value: str) -> str:
+    return _SPELLED_NAME.sub(lambda m: _COLOUR_SPELLED[m.group(1).lower()], value)
+
+
+def _fix_colour_declaration(declaration: str) -> str:
+    """
+    A declaration of one of `_COLOUR_PROPS` with its names spelled; any other as it is.
+    """
+    if _SPELLED_NAME.search(declaration) is None:
+        return declaration
+    name, colon, value = declaration.partition(":")
+    if not colon or name.strip().lower() not in _COLOUR_PROPS:
+        return declaration
+    return f"{name}{colon}{_spell_colours(value)}"
+
 
 _HEX_COLOUR = re.compile(r"#(?:[0-9a-fA-F]{3,4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})")
 _COLOUR_FUNCTION = re.compile(r"(rgba?|hsla?)\(", re.IGNORECASE)
@@ -953,7 +1023,9 @@ def _is_percentage(text: str) -> bool:
     return text.endswith("%") and _is_number(text[:-1])
 
 
-def _resolve_declarations(text: str, kinds: _Kinds, joiner: str | None) -> str:
+def _resolve_declarations(
+    text: str, kinds: _Kinds, joiner: str | None, notes: dict[str, None]
+) -> str:
     """
     CSS with each declaration's dangling references resolved. With a `joiner`, `text`
     is a declaration list (`style=`) and the kept declarations are joined by it;
@@ -963,7 +1035,7 @@ def _resolve_declarations(text: str, kinds: _Kinds, joiner: str | None) -> str:
     for piece, delimiter in _css_split(text, ";" if joiner else ";{}"):
         prop, colon, value = piece.partition(":")
         if colon and _LOCAL_URL.search(value):
-            resolved = _resolve_value(prop, value, kinds)
+            resolved = _resolve_value(prop, value, kinds, notes)
             if resolved is None:
                 piece = ""
             elif resolved is not value:
@@ -1048,7 +1120,7 @@ def _clean_declarations(text: str, notes: dict[str, None]) -> str:
             if not colon or prop.lower() not in _PAINT or _css_unsafe(prop):
                 continue
             declaration = f"{prop}:{_repaint(prop, value, notes)}"
-        kept.append(_fix_font_declaration(declaration).strip())
+        kept.append(_fix_colour_declaration(_fix_font_declaration(declaration)).strip())
     return "; ".join(kept)
 
 
@@ -1130,7 +1202,7 @@ def _clean_stylesheet(text: str, notes: dict[str, None]) -> str | None:
         elif _css_unsafe(piece) or _is_filter(piece):
             piece = _clean_declarations(piece, notes)
         else:
-            piece = _fix_font_declaration(piece)
+            piece = _fix_colour_declaration(_fix_font_declaration(piece))
         pieces.append(piece + delimiter)
     css = "".join(pieces)
     # Each kept piece passed `_css_unsafe` and the delimiters between them cannot

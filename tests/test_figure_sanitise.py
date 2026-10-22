@@ -594,7 +594,7 @@ def test_unsafe_paints_are_noted_once_each_and_capped() -> None:
     out = passed(doc(body + '<rect fill="url(http://x) #000000"/>'))
     assert len(out.notes) == MAX_NOTES + 1
     assert out.notes[0] == "fill: a url() outside the document; painted #000000"
-    assert out.notes[-1] == "and more unsafe paint that was repainted"
+    assert out.notes[-1] == "and more paint that was repainted"
 
 
 def test_a_var_note_and_a_paint_note_are_both_kept() -> None:
@@ -849,6 +849,15 @@ WORST = {
     "harmless at-rules": _at_cap(ROOT + "<style>", "@media x{a{fill:red}}", "</style></svg>"),
     "dangling paint fallbacks": _at_cap(
         ROOT + '<rect style="', "fill:url(#g) rgb(1 2 3 4);", '"/></svg>'
+    ),
+    "spelled colours in <style>": _at_cap(
+        ROOT + "<style>a{", "fill:rebeccapurple;", "}</style></svg>"
+    ),
+    "spelled colours in style=": _at_cap(
+        ROOT + '<rect style="', "stroke:rebeccapurple;", '"/></svg>'
+    ),
+    "var paints that are not colours": _at_cap(
+        ROOT + '<rect style="--c:foo;', "fill:var(--c);", '"/></svg>'
     ),
     "one long colour function": _at_cap(ROOT + '<rect fill="url(#g) rgb(', "1,", ')"/></svg>'),
     "var fan-out": ROOT
@@ -1204,6 +1213,81 @@ def test_dangling_paint_in_css_becomes_its_fallback_or_none() -> None:
     assert find_all(out, "rect")[0].get("style") == "stroke: none !important; fill: none"
 
 
+def test_a_repainted_dangling_paint_is_noted() -> None:
+    out = passed(
+        doc(
+            '<defs><rect id="r"/></defs>'
+            "<style>.a{fill:url(#gone) red}</style>"
+            '<rect fill="url(#gone)" stroke="url(#r) blue" clip-path="url(#gone)"'
+            ' style="Stroke:url(#gone2) foo"/>'
+        )
+    )
+    # Removing a clip-path draws the shape without it, so only repaints are noted.
+    assert out.notes == (
+        "fill: url(#gone) names nothing in the output; painted red",
+        "fill: url(#gone) names nothing in the output; painted none",
+        "stroke: url(#r) is not a paint server; painted blue",
+        "Stroke: url(#gone2) names nothing in the output; painted none",
+    )
+
+
+def test_a_paint_that_resolves_is_not_noted() -> None:
+    out = passed(doc('<linearGradient id="g"/><rect fill="url(#g) red" stroke="red"/>'))
+    assert out.notes == ()
+
+
+# rebeccapurple is the one CSS named colour resvg_py 0.5.0 paints black (measured
+# 2026-10-21), so it is spelled #663399 in every value that can hold a colour.
+REBECCA = (0x66, 0x33, 0x99, 255)
+FULL = 'width="200" height="100"'
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        f'<rect {FULL} fill="rebeccapurple"/>',
+        f'<rect {FULL} fill="RebeccaPurple"/>',
+        f'<rect {FULL} style="fill: REBECCAPURPLE !important"/>',
+        f'<style>.a{{fill:rebeccapurple}}</style><rect class="a" {FULL}/>',
+        f'<rect {FULL} fill="none" stroke="rebeccapurple" stroke-width="400"/>',
+        f'<style>.a{{stroke:rebeccapurple}}</style><rect class="a" {FULL} stroke-width="400"/>',
+        '<linearGradient id="g"><stop stop-color="rebeccapurple"/></linearGradient>'
+        f'<rect {FULL} fill="url(#g)"/>',
+        '<linearGradient id="g"><stop style="stop-color:rebeccapurple"/></linearGradient>'
+        f'<rect {FULL} fill="url(#g)"/>',
+        "<style>stop{stop-color:rebeccapurple}</style>"
+        f'<linearGradient id="g"><stop/></linearGradient><rect {FULL} fill="url(#g)"/>',
+        f'<g color="rebeccapurple"><rect {FULL} fill="currentColor"/></g>',
+        f'<rect {FULL} style="color:rebeccapurple" fill="currentColor"/>',
+        f'<g style="--c:rebeccapurple"><rect {FULL} fill="var(--c)"/></g>',
+        f'<g style="--c:rebeccapurple"><rect {FULL} style="fill:var(--c)"/></g>',
+        f'<rect {FULL} fill="url(#gone) rebeccapurple"/>',
+        f'<rect {FULL} fill="url(http://x) rebeccapurple"/>',
+    ],
+)
+def test_rebeccapurple_is_painted_in_every_colour_value(body: str) -> None:
+    svg = doc(f'<rect {FULL} fill="#fff"/>{body}')
+    assert render_pixel(passed(svg).svg) == REBECCA
+    assert "rebeccapurple" not in passed(svg).svg.lower()
+
+
+def test_rebeccapurple_is_spelled_only_as_a_whole_colour_name() -> None:
+    out = passed(
+        doc(
+            "<style>.rebeccapurple{fill:rebeccapurple2; stroke:x-rebeccapurple}</style>"
+            '<rect class="rebeccapurple" font-family="rebeccapurple, serif"'
+            ' fill="rgb(1,2,3) rebeccapurple"/>'
+        )
+    )
+    assert find_all(out, "style")[0].text == (
+        ".rebeccapurple{fill:rebeccapurple2; stroke:x-rebeccapurple}"
+    )
+    rect = find_all(out, "rect")[0]
+    assert rect.get("class") == "rebeccapurple"
+    assert rect.get("font-family") == "rebeccapurple, serif"
+    assert rect.get("fill") == "rgb(1,2,3) #663399"
+
+
 def test_a_filter_reference_to_a_kept_element_is_removed() -> None:
     # resvg erases a shape whose filter names a <rect> (measured), and no <filter>
     # survives, so every filter reference is removed.
@@ -1447,6 +1531,53 @@ def test_a_fragment_url_through_a_var_is_kept_and_still_resolved() -> None:
     assert [r.get("fill") for r in find_all(out, "rect")] == ["url(#g)", "red"]
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        f'<g style="--c: foo"><rect {FULL} style="fill: var(--c)"/></g>',
+        f'<g style="--c: foo"><rect {FULL} fill="var(--c)"/></g>',
+        f'<style>:root{{--c:1px solid}} .a{{fill:var(--c)}}</style><rect class="a" {FULL}/>',
+        f'<rect {FULL} fill="var(--gone, foo bar)"/>',
+        f'<g style="--c: NONE"><rect {FULL} fill="var(--c)"/></g>',
+        f'<g style="--c: hsl(120deg, 50%, 50%)"><rect {FULL} fill="var(--c)"/></g>',
+    ],
+)
+def test_a_var_resolving_to_a_non_colour_paint_is_not_painted_black(body: str) -> None:
+    out = passed(doc(f'<rect {FULL} fill="#fff"/>{body}'))
+    assert render_pixel(out.svg) == (255, 255, 255, 255)
+    assert len(out.notes) == 1 and "not a colour; painted none" in out.notes[0]
+
+
+def test_a_var_paint_that_is_not_a_colour_is_noted_and_keeps_important() -> None:
+    out = passed(doc('<g style="--c:foo"><rect style="stroke: var(--c) !important"/></g>'))
+    assert find_all(out, "rect")[0].get("style") == "stroke: none !important"
+    assert out.notes == ("stroke: var() resolves to 'foo', not a colour; painted none",)
+
+
+def test_a_var_paint_that_is_a_colour_inherit_or_a_url_is_kept_as_written() -> None:
+    out = passed(
+        doc(
+            '<linearGradient id="g"/>'
+            '<g style="--a: url(#g) foo; --b: inherit; --c: rgb(1 2 3)">'
+            '<rect fill="var(--a)" stroke="var(--b)" style="fill: var(--c) !important"/></g>'
+        )
+    )
+    rect = find_all(out, "rect")[0]
+    assert (rect.get("fill"), rect.get("stroke")) == ("url(#g) foo", "inherit")
+    assert rect.get("style") == "fill: rgb(1 2 3) !important"
+    assert out.notes == ()
+
+
+def test_a_var_paint_of_inherit_inherits() -> None:
+    svg = doc(f'<g fill="#e8590c" style="--c:inherit"><rect {FULL} fill="var(--c)"/></g>')
+    assert render_pixel(passed(svg).svg) == (0xE8, 0x59, 0x0C, 255)
+
+
+def test_a_var_outside_a_paint_is_not_held_to_a_colour() -> None:
+    out = passed(doc('<g style="--c:foo"><text font-family="var(--c)">x</text></g>'))
+    assert find_all(out, "text")[0].get("font-family") == "foo, sans-serif"
+
+
 def test_a_var_in_a_selector_empties_the_stylesheet() -> None:
     out = passed(doc("<style>.a:not(var(--x)){fill:red}</style><rect/>"))
     assert not find_all(out, "style")[0].text
@@ -1477,9 +1608,10 @@ def test_a_var_that_fans_out_past_the_byte_cap_is_refused() -> None:
 
 def test_a_var_that_grows_the_document_past_the_cap_is_refused() -> None:
     # Within the scanning budget, but the document is already large: 600 KiB of text
-    # and 100 KiB declared once, used five times.
+    # and 100 KiB declared once, used five times. Not in a paint, which would be `none`
+    # for not being a colour.
     big = "#" + "0" * (100 * 1024)
-    uses = '<rect fill="var(--c)"/>' * 5
+    uses = '<rect stroke-dasharray="var(--c)"/>' * 5
     padding = "<desc>" + "x" * (600 * 1024) + "</desc>"
     reason = refused(doc(f'{padding}<g style="--c:{big}">{uses}</g>'))
     assert reason == f"var() substitution makes it larger than {MAX_INPUT_BYTES} bytes"
