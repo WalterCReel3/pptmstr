@@ -1,10 +1,9 @@
 # Probe: a skill shipped inside the pptmstr package, beside the user's and project's own
 
-Board task `skill-probe`, 2026-10-21. The operator's requirement, verbatim:
-"Ideally, any specific pptmstr skills, plugins, etc could be delivered as a part
-of the application and would not have to be prepped or included in any project
-work-up. Also it should co-exist with any project/users pre-existing
-configuration and skills directories."
+Board task `skill-probe`, 2026-10-21. The operator's requirement: pptmstr's own
+skills and plugins ship as part of the application, need no preparation in any
+project, and coexist with the user's and the project's existing configuration
+and skills directories.
 
 Nothing in `pptmstr/`, `~/.claude`, this worktree's `.claude/` or the planning
 record was written. No fix is declared.

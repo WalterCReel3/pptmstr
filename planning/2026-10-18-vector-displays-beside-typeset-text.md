@@ -1028,7 +1028,7 @@ markdown with mathematics off (`gate._reader` on `markdown_rules._parser(False,
 False)`; the lead's call in planning/2026-10-07-advtext-sets-the-text.md, "Math off
 because `$PATH=$HOME` is a shell line"). Of four options -- leave it off, a
 ```` ```math ```` fence, display `$$` only, full `$…$` -- the operator chose the
-fence: "Let's go with option 2 for now." Inline `$…$` and `$$` in prose stay text.
+fence, for now. Inline `$…$` and `$$` in prose stay text.
 A ```` ```math ```` fence is the same shape as `svg` and `mermaid`, so it joins the
 same dispatcher and the same table of what renders, and the route by which imscribe
 sets it is probe `math-probe`'s to name. The table also feeds the session prompt
@@ -1294,9 +1294,9 @@ board from an old sessoin and display the dependency graph with SVG."
   ImageMagick's SVG delegates (L127), then `playwright`, `firefox`,
   `wkhtmltoimage`, `cutycapt`, Pillow/matplotlib/graphviz and `dot` (L135).
   The operator refused that third call at the gate.
-- **The operator's refusal, verbatim** (L136, the gate's refusal text and the
-  operator's reason under its rule): "No no. You should be able to support
-  codeblock svg. That's what I'm testing in this session."
+- **The operator refused the call** (L136), with a reason saying the pane
+  should draw an ```` ```svg ```` fence directly and that this was what the
+  session was testing.
 - *The hand-built layout engine*, calls 17–28. It answered "Right — inline
   `svg` code block it is. Let me compute the layout." Then:
   - a layering script (L144);
@@ -1306,17 +1306,15 @@ board from an old sessoin and display the dependency graph with SVG."
   - a 160-line generator with lane routing for long edges. It wrote a 21,083-
     character SVG to `shots/board-graph-tooling.svg`, 730×756 (L195);
   - an ImageMagick `convert` of that file to PNG, which the operator also
-    refused: "Rejected by operator, who gave no reason." (L204–L205);
+    refused, without a reason (L204–L205);
   - a geometry checker over its own layout, which reported "GEOMETRY
     PROBLEMS: 30", mostly lanes crossing boxes (L211–L212);
   - a second, simpler generator with barycentric ordering and straight cubic
     edges (L221), whose 10,802-character, 744×622 output became the reply.
-- *The operator, mid-turn, twice*, verbatim:
-  - "Oh my god. Why are you veering so hard into build svg deliverable. This
-    should just be a simple inline transcript render, right?" (queued L209,
-    delivered L216);
-  - "You're writing _so much_ code for something I feel you could have just
-    infered." (queued L218, delivered L229).
+- *The operator objected mid-turn, twice*: first that the session was building
+  an SVG deliverable where an inline render in the transcript was wanted
+  (queued L209, delivered L216); then that it was writing far more code than
+  the task needed (queued L218, delivered L229).
 - *It apologised twice*: "You're right — I overbuilt. Dropping the router;
   straight edges, inline." (L220), and "Fair hit — twice. … everything after
   that was me building a layout engine for a 21-node diagram." (L232). The
@@ -1408,11 +1406,10 @@ Both landed in `fae81fe`.
 
 ### 10.5 Skills shipped with the application
 
-**The operator's requirement, 2026-10-21, verbatim:** "Ideally, any specific
-pptmstr skills, plugins, etc could be delivered as a part of the application
-and would not have to be prepped or included in any project work-up. Also it
-should co-exist with any project/users pre-existing configuration and skills
-directories."
+**The operator's requirement, 2026-10-21:** pptmstr's own skills and plugins
+ship as part of the application, need no preparation in any project, and
+coexist with the user's and the project's existing configuration and skills
+directories.
 
 **The lead's reading** [relayed]: claude-agent-sdk 0.2.168's
 `ClaudeAgentOptions` has `plugins=[{"type": "local", "path": …}]` and
