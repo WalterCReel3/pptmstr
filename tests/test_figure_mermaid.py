@@ -14,6 +14,7 @@ from __future__ import annotations
 import sys
 import threading
 import time
+import types
 from collections import OrderedDict
 from collections.abc import Callable, Hashable, Iterator
 from pathlib import Path
@@ -23,7 +24,7 @@ import pytest
 
 from pptmstr.figures import host, mermaid, render
 from pptmstr.figures.render import Failed, Laid, Rendered, Renderer, Result
-from pptmstr.figures.sanitise import Sanitised, sanitise
+from pptmstr.figures.sanitise import Refused, Sanitised, sanitise
 from pptmstr.ui import typeset
 
 needs_merman = pytest.mark.skipif(
@@ -446,14 +447,15 @@ def test_the_placeholder_stands_until_the_layout_and_then_the_real_height(
     cache = typeset.ViewCache()
     frame(seam, lambda: typeset.markdown(cache, "doc", OPEN + "```\n\nAfter.\n"))
     (widget,) = hosted(cache.view("doc"))
-    assert widget.height_for(600.0) == host.PLACEHOLDER_HEIGHT
+    assert widget.height_for(600.0) == host.PLACEHOLDER_HEIGHT + 2 * host.FIGURE_PAD
     frame(seam, lambda: typeset.markdown(cache, "doc", OPEN + "```\n\nAfter.\n"))
     assert len(fake.layouts()) == 1, "asked once, however often its height is"
     assert not [kind for kind, *_ in fake.asked if kind == "raster"], "no raster before layout"
     fake.answer_layouts()
     frame(seam, lambda: typeset.markdown(cache, "doc", OPEN + "```\n\nAfter.\n"))
-    assert widget.height_for(600.0) == 150.0
-    assert widget.height_for(150.0) == 75.0
+    pad = host.FIGURE_PAD
+    assert widget.height_for(600.0) == 150.0 + 2 * pad
+    assert widget.height_for(150.0) == (150.0 - 2 * pad) / 2 + 2 * pad
     rasters = [args for kind, _, args in fake.asked if kind == "raster"]
     assert rasters and rasters[0][0] == LAID, "the laid-out SVG goes the svg path's way"
 
@@ -476,7 +478,7 @@ def test_a_laid_out_figure_rehosted_answers_its_height_at_once(
     frame(seam, lambda: handle.draw())
     assert handle.view is not first
     (widget,) = hosted(handle.view)
-    assert widget.height_for(500.0) == 150.0, "no placeholder: the layout is held"
+    assert widget.height_for(500.0) == 150.0 + 2 * host.FIGURE_PAD, "the layout is held"
     frame(seam, lambda: handle.draw())
     assert len(fake.asked) == asked, "neither laid out nor rasterised again"
 
@@ -552,7 +554,7 @@ def test_a_layout_that_timed_out_is_asked_once_more_after_the_back_off(
     ask()
     ask()
     assert len(fake.layouts()) == 1, "not while the back-off runs"
-    assert widget.height_for(500.0) == host.PLACEHOLDER_HEIGHT
+    assert widget.height_for(500.0) == host.PLACEHOLDER_HEIGHT + 2 * host.FIGURE_PAD
     now[0] += host.RETRY_AFTER_S + 0.1
     ask()
     assert len(fake.layouts()) == 2
@@ -587,39 +589,50 @@ class Library:
         self.committed = tuple(self.blocks)
 
 
-@pytest.mark.parametrize("name", ["blocks", "committed", "sources", "revision"])
-def test_an_attribute_error_inside_a_captioned_property_is_raised_not_forwarded(
+@pytest.mark.parametrize("name", ["blocks", "committed", "sources"])
+def test_a_defect_inside_a_captioned_property_answers_the_streams_own_and_is_logged(
     fake: FakeRenderer, monkeypatch: pytest.MonkeyPatch, name: str
 ) -> None:
     """
-    Python falls back to ``__getattr__`` when a property raises ``AttributeError``.
-    Forwarded, that answered the stream's raw blocks (no figure mark, no caption) for
-    a defect in ``_captioned``; it has to surface as an error instead.
+    The library reads these from inside ``view.sync()``, where an exception would
+    stop it in every pane. An ``AttributeError`` is the hard case: Python would fall
+    back to ``__getattr__`` with it. Caught at the property's edge instead, logged
+    as pptmstr's, and the stream's own answer from then on.
     """
-    from pptmstr.ui.typeset import views
+    from pptmstr.log import LOG, Level
+    from pptmstr.ui.typeset import gate, views
 
+    monkeypatch.setattr(gate, "_DEFECTS_SAID", set())
     library = Library()
     captioned = views._Captioned(library)
     captioned.blocks  # noqa: B018 -- fills what committed and sources read
-
-    def broken(*args: Any) -> Any:
-        raise AttributeError("a defect inside the property")
+    before = captioned.revision
 
     class Unreadable:
         def __iter__(self) -> Any:
             raise AttributeError("a defect inside the property")
 
+    def broken(*args: Any) -> Any:
+        raise AttributeError("a defect inside the property")
+
     if name == "blocks":
         monkeypatch.setattr(host, "is_figure_fence", broken)
     elif name == "committed":
-        del library.committed
-    elif name == "sources":
-        monkeypatch.setattr(captioned, "_mine", Unreadable())
+        monkeypatch.setattr(captioned, "_from", Unreadable())
     else:
-        monkeypatch.delattr(Library, "revision")
-    with pytest.raises(RuntimeError, match=f"_Captioned.{name} raised AttributeError") as err:
-        getattr(captioned, name)
-    assert isinstance(err.value.__cause__, AttributeError)
+        monkeypatch.setattr(captioned, "_mine", Unreadable())
+    assert getattr(captioned, name) == tuple(getattr(library, name))
+    assert captioned.raw and captioned.revision != before, "the view reads its blocks again"
+    assert captioned.blocks == tuple(library.blocks)
+    entries, _ = LOG.snapshot()
+    said = [e.text for e in entries[-5:] if e.level is Level.ERROR]
+    assert any(
+        text.startswith(
+            f"pptmstr's own code raised AttributeError while captioning a stream's {name}"
+        )
+        and "Traceback" in text
+        for text in said
+    ), said
 
 
 def test_the_captioned_stream_forwards_only_what_the_stream_view_reads(fake: FakeRenderer) -> None:
@@ -634,3 +647,238 @@ def test_the_captioned_stream_forwards_only_what_the_stream_view_reads(fake: Fak
         captioned.append  # noqa: B018
     (block,) = captioned.blocks
     assert isinstance(block.language, host.FigureMark), "a committed mermaid fence is marked"
+
+
+# -- directives, the engine, the platform ----------------------------------------------
+
+INIT = "%%{init: {'theme': 'dark', 'fontFamily': 'NoSuchFace'}}%%\n"
+
+
+def test_every_directive_is_taken_out_and_nothing_else() -> None:
+    source = f"{INIT}flowchart LR\n    %%{{wrap}}%% a --> b\n    %% a comment\n"
+    assert mermaid.without_directives(source) == ("flowchart LR\n     a --> b\n    %% a comment\n")
+    across = "%%{init: {\n  'theme': 'dark'\n}}%%\nflowchart LR\n  a --> b\n"
+    assert mermaid.without_directives(across) == "flowchart LR\n  a --> b\n"
+    unclosed = "flowchart LR\n  a --> b %%{init: {'theme': 'dark'\n"
+    assert mermaid.without_directives(unclosed) == unclosed
+    assert mermaid.without_directives(BODY) == BODY
+
+
+def test_taking_directives_out_is_linear_on_hostile_input() -> None:
+    hostile = "%%{" * 200_000
+    started = time.perf_counter()
+    assert mermaid.without_directives(hostile) == hostile
+    mermaid.without_directives("%%{x}%%" * 200_000)
+    assert time.perf_counter() - started < 1.0
+
+
+class Engine:
+    """
+    A stand-in for ``merman.Merman``: what it was handed, and a first engine that
+    raises on every diagram, as a binding left broken by a panic would.
+    """
+
+    made: list[Engine] = []
+
+    def __init__(self) -> None:
+        Engine.made.append(self)
+        self.broken = len(Engine.made) == 1
+        self.given: list[str] = []
+
+    def render_svg(self, source: str, options: str) -> str:
+        self.given.append(source)
+        if self.broken:
+            raise RuntimeError("the binding panicked")
+        return LAID.svg
+
+
+@pytest.fixture
+def stand_in(monkeypatch: pytest.MonkeyPatch) -> type[Engine]:
+    module = types.ModuleType("merman")
+    module.Merman = Engine  # type: ignore[attr-defined]
+    Engine.made = []
+    monkeypatch.setitem(sys.modules, "merman", module)
+    monkeypatch.setattr(mermaid, "_ENGINE", [])
+    monkeypatch.setattr(mermaid, "in_render_child", lambda: True)
+    return Engine
+
+
+def test_a_merman_exception_drops_the_engine_and_the_next_diagram_has_a_new_one(
+    stand_in: type[Engine],
+) -> None:
+    first = mermaid.layout(BODY)
+    assert isinstance(first, Refused) and "the binding panicked" in first.reason
+    assert mermaid._ENGINE == []
+    second = mermaid.layout(BODY)
+    assert isinstance(second, Sanitised)
+    assert len(stand_in.made) == 2
+    assert isinstance(mermaid.layout(BODY), Sanitised)
+    assert len(stand_in.made) == 2, "an engine that answered is kept"
+
+
+def test_merman_is_handed_the_diagram_without_its_directives(stand_in: type[Engine]) -> None:
+    mermaid.layout(BODY)
+    mermaid.layout(INIT + BODY)
+    assert stand_in.made[-1].given == [BODY]
+
+
+@needs_merman
+def test_a_dark_init_directive_lays_out_as_the_diagram_without_it(child: Renderer) -> None:
+    child.lay_out(("layout", "plain"), BODY)
+    child.lay_out(("layout", "init"), INIT + BODY)
+    plain, init = wait_for(child, ("layout", "plain")), wait_for(child, ("layout", "init"))
+    assert isinstance(plain, Laid) and isinstance(init, Laid)
+    assert init.sanitised == plain.sanitised
+
+
+@pytest.mark.parametrize(
+    "system, libc, machine, unavailable",
+    [
+        ("linux", ("glibc", "2.31"), "x86_64", True),
+        ("linux", ("glibc", "2.34"), "x86_64", True),
+        ("linux", ("glibc", "2.35"), "x86_64", False),
+        ("linux", ("glibc", "2.36"), "x86_64", False),
+        ("linux", ("glibc", "2.36"), "aarch64", True),
+        ("linux", ("", ""), "x86_64", False),
+        ("darwin", ("", ""), "arm64", False),
+    ],
+)
+def test_where_merman_has_no_wheel_the_reason_says_so_and_names_no_extra(
+    system: str, libc: tuple[str, str], machine: str, unavailable: bool
+) -> None:
+    reason = mermaid.missing_reason(system, libc, machine)
+    if unavailable:
+        assert reason.startswith("mermaid rendering is unavailable on this platform")
+        assert "extra" not in reason
+    else:
+        assert reason == mermaid.EXTRA_REASON
+
+
+def test_a_fence_without_merman_is_refused_with_the_platform_s_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(host, "_MARKS", OrderedDict())
+    monkeypatch.setattr(mermaid, "_VERSION", [None])
+    monkeypatch.setattr(mermaid.platform, "libc_ver", lambda: ("glibc", "2.31"))
+    monkeypatch.setattr(mermaid.platform, "machine", lambda: "x86_64")
+    monkeypatch.setattr(mermaid.sys, "platform", "linux")
+    refused = host.mark("mermaid", BODY)
+    assert isinstance(refused, Refused)
+    assert refused.reason == mermaid.missing_reason("linux", ("glibc", "2.31"), "x86_64")
+
+
+# -- the post-pass touches overflow only -----------------------------------------------
+
+
+def test_the_post_pass_opens_overflow_and_leaves_every_other_attribute() -> None:
+    svg = (
+        '<svg width="9"><svg data-note="overflow:hidden" aria-label=\'overflow="hidden"\' '
+        'style="text-overflow:hidden;overflow:hidden;overflow-x:hidden" '
+        'text-overflow="hidden" overflow = "hidden"><text>x</text></svg></svg>'
+    )
+    out = mermaid.visible_labels(svg)
+    nested = out.split("<svg", 2)[2].split(">", 1)[0]
+    assert 'data-note="overflow:hidden"' in nested
+    assert "aria-label='overflow=\"hidden\"'" in nested
+    assert 'style="text-overflow:hidden;overflow:visible;overflow-x:hidden"' in nested
+    assert 'text-overflow="hidden"' in nested
+    assert 'overflow = "visible"' in nested
+
+
+# -- the layouts held ------------------------------------------------------------------
+
+
+def test_more_diagrams_than_the_held_layouts_keep_their_heights(
+    fake: FakeRenderer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Every figure asks for its layout from ``height_for``, every frame, on screen or
+    not. With more of them than the held layouts can hold (bounded here at the 128
+    the bound once was, so the test does not need megabytes), none may lose its own
+    to the others, or it stands at the placeholder and asks again without end.
+    """
+    monkeypatch.setattr(host._STATE, "layouts", host._Layouts(128 * len(LAID.svg)))
+    count = 300
+    widgets = []
+    for n in range(count):
+        source = f"flowchart LR\n    a{n} --> b{n}\n"
+        mark = host.mark("mermaid", source)
+        assert isinstance(mark, host.FigureMark)
+        widgets.append(host.FigureWidget(mark, source))
+    for widget in widgets:
+        widget.height_for(600.0)
+    asked = fake.layouts()
+    assert len(asked) == count
+    # The child answers one layout at a time, so a pump takes a few, and every
+    # figure's height is asked between pumps, as each frame asks it.
+    for at in range(0, count, 25):
+        fake.answers += [Laid(key, LAID) for key, _ in asked[at : at + 25]]
+        host.pump()
+        for widget in widgets:
+            widget.height_for(600.0)
+    held = 150.0 + 2 * host.FIGURE_PAD
+    for _ in range(3):
+        assert [w.height_for(600.0) for w in widgets] == [held] * count
+        host.pump()
+    assert len(fake.layouts()) == count, "none was asked for again"
+
+
+def test_the_held_layouts_evict_the_least_recently_read() -> None:
+    one = Sanitised("<svg>" + "a" * 95 + "</svg>", 1.0, 1.0)
+    layouts = host._Layouts(budget=2 * len(one.svg))
+    layouts.put("a", one)
+    layouts.put("b", one)
+    assert layouts.get("a") is one
+    layouts.put("c", one)
+    assert "a" in layouts and "c" in layouts and "b" not in layouts
+
+
+# -- one retry for each request ---------------------------------------------------------
+
+
+def test_a_retried_layout_leaves_its_raster_its_own_retry(
+    fake: FakeRenderer, seam: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    now = [100.0]
+    monkeypatch.setattr(host._STATE, "clock", lambda: now[0])
+    mark = host.mark("mermaid", BODY)
+    assert isinstance(mark, host.FigureMark)
+    widget = host.FigureWidget(mark, BODY)
+
+    def ask() -> None:
+        frame(seam, lambda: widget.draw(width_px=500.0))
+
+    ask()
+    fake.answers.append(Failed(("layout", mark.sha), "render process died", True))
+    ask()
+    now[0] += host.RETRY_AFTER_S + 0.1
+    ask()
+    assert len(fake.layouts()) == 2, "the layout's one retry"
+    fake.answer_layouts()
+    ask()
+    rasters = [key for kind, key, _ in fake.asked if kind == "raster"]
+    assert len(rasters) == 1
+    fake.answers.append(Failed(rasters[0], "render process died", True))
+    ask()
+    assert widget._failure() is None, "the raster's first transient failure is not kept"
+    now[0] += host.RETRY_AFTER_S + 0.1
+    ask()
+    assert len([kind for kind, *_ in fake.asked if kind == "raster"]) == 2
+
+
+# -- what any figure needs is read from what imports it ----------------------------------
+
+
+def test_the_table_of_fences_needs_what_the_render_modules_import() -> None:
+    from importlib import metadata
+
+    from pptmstr.figures import fences
+
+    assert fences._RASTER is render.DISTRIBUTIONS
+    for row in fences.RENDERED:
+        if row.kind == "figure":
+            assert set(render.DISTRIBUTIONS) <= set(row.needs)
+    provides = metadata.packages_distributions()
+    for distribution, module in {**render.CHILD_MODULES, **render.UPLOAD_MODULES}.items():
+        top = module.split(".")[0]
+        assert distribution.lower() in {d.lower() for d in provides.get(top, [])}, module

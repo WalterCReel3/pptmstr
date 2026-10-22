@@ -42,6 +42,7 @@ timeout and the same failure kinds.
 
 from __future__ import annotations
 
+import importlib
 import math
 import queue
 import signal
@@ -126,6 +127,28 @@ needs PyOpenGL, which is a ``dev`` extra only. llvmpipe and GL 4.1 on macOS repo
 bounds the area, so this only shrinks a long raster: at the pixel cap, one more than
 four times as long as it is wide; and a long figure at density 2. A figure more than
 8192 times as long as it is wide cannot fit at one pixel and is refused.
+"""
+
+CHILD_MODULES: dict[str, str] = {
+    "resvg_py": "resvg_py",
+    "Pillow": "PIL.Image",
+    "fonttools": "fontTools.ttLib",
+}
+"""
+What the render child imports for any figure, by the distribution that provides
+it: the child imports these and nothing else before it says it is ready
+(``child_main``), so this table is what it needs.
+"""
+
+UPLOAD_MODULES: dict[str, str] = {"numpy": "numpy"}
+"""
+What the frame thread imports to make a texture of a raster (``host._upload``).
+"""
+
+DISTRIBUTIONS: tuple[str, ...] = (*CHILD_MODULES, *UPLOAD_MODULES)
+"""
+Every distribution a figure needs beyond the typeset library, whatever its fence:
+what the table of drawn fences asks is installed (``fences.RENDERED``).
 """
 
 _SHUTDOWN_WAIT_S = 2.0
@@ -606,8 +629,8 @@ def child_main(conn: Connection, fonts: Fonts, memory_limit: int | None = None) 
     options: dict[str, Any] = {}
     try:
         options = resvg_options(fonts)
-        import resvg_py  # noqa: F401
-        from PIL import Image  # noqa: F401
+        for module in CHILD_MODULES.values():
+            importlib.import_module(module)
     except Exception as exc:
         failure = f"renderer unavailable: {_one_line(exc)}"
     conn.send(("ready", failure))
@@ -754,6 +777,8 @@ def shutdown() -> None:
 
 
 __all__: Sequence[str] = (
+    "CHILD_MODULES",
+    "DISTRIBUTIONS",
     "Failed",
     "Fonts",
     "Laid",
@@ -761,6 +786,7 @@ __all__: Sequence[str] = (
     "MAX_TEXTURE_SIDE",
     "MEMORY_LIMIT_BYTES",
     "RENDER_TIMEOUT_S",
+    "UPLOAD_MODULES",
     "Rendered",
     "Renderer",
     "Result",

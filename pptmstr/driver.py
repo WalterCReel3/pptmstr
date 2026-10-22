@@ -2321,13 +2321,28 @@ class AgentSession:
         return {}
 
     def _team(self) -> dict[str, AgentDefinition] | None:
-        """The template's roles as SDK agent definitions, or None for a lone agent."""
+        """
+        The template's roles as SDK agent definitions, or None for a lone agent.
+
+        Each worker's prompt ends with what the reply pane draws
+        (``fences.session_prompt``), the same text the lead's append carries: a
+        worker's output is drawn in the same panes, and a sub-agent does not read
+        the lead's system prompt.
+        """
         if not self.template.roles:
             return None
+        drawn = fences.session_prompt()
         return {
             role.name: AgentDefinition(
                 description=role.description,
-                prompt=worker_prompt(role, self.brief, self.policy, self.contained),
+                prompt="\n\n".join(
+                    text
+                    for text in (
+                        worker_prompt(role, self.brief, self.policy, self.contained),
+                        drawn,
+                    )
+                    if text
+                ),
                 tools=role.tool_list(self.contained),
                 # "inherit" rather than self.model: a role that does not ask for a
                 # model should run on whatever the session was launched with, not on
@@ -2348,7 +2363,12 @@ class AgentSession:
         shows as written and diagrams in fences nothing draws. It is read here, at
         launch, from what is installed, so a session is not told about a renderer
         this process lacks. It follows the briefing and is the whole append where
-        there is no briefing, so a solo launch now carries an append too.
+        there is no briefing, so a solo launch carries an append too: about 1,460
+        characters with every renderer installed (``fences.PROMPT_LIMIT`` bounds
+        it at 2,000). It says the fences are drawn "when pptmstr typesets
+        replies", because the operator can switch typeset text off after the
+        launch and the prompt is not rebuilt for that. Every worker is told the
+        same (``_team``).
 
         Appended rather than replacing it: the preset carries the tool conventions
         and the environment description this agent still needs, and a bare string

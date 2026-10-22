@@ -34,6 +34,7 @@ def _im(seam: Any, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     stands in for the library's asking must not leave its answers to the next.
     """
     monkeypatch.setattr(gate, "_FORMULAS", OrderedDict())
+    monkeypatch.setattr(gate, "_REFUSED", OrderedDict())
     _IM[:] = [seam]
     yield
     _IM.clear()
@@ -494,9 +495,9 @@ def test_every_markdown_view_is_given_the_formula_copy() -> None:
 
 def test_a_formula_block_reads_without_language_through_captioned() -> None:
     """
-    ``_Captioned.blocks`` once read ``answer[0].language`` of every fence's answer;
-    a formula has none, and an ``AttributeError`` there would be turned into a
-    ``RuntimeError`` and stop the library. A math fence in a stream draws.
+    A formula block has no ``language``, and ``_Captioned.blocks`` reads every
+    fence's answer: a math fence in a stream is set as a formula, with no defect
+    logged and the stream not answered raw.
     """
     cache = typeset.ViewCache()
     handle = typeset.stream(cache, "reply")
@@ -504,3 +505,222 @@ def test_a_formula_block_reads_without_language_through_captioned() -> None:
     frame(lambda: handle.draw())
     assert gate.can_draw()
     assert not hasattr(formulas(handle.view)[0], "language")
+    assert handle._captioned is not None and not handle._captioned.raw
+
+
+# -- pptmstr's own code inside a call into the library --------------------------------
+
+
+def _errors(monkeypatch: pytest.MonkeyPatch) -> Callable[[], list[str]]:
+    """
+    What is logged at ERROR from here on, every defect message new to the gate.
+    """
+    from pptmstr.log import LOG, Level
+
+    monkeypatch.setattr(gate, "_DEFECTS_SAID", set())
+    _, start = LOG.snapshot()
+
+    def read() -> list[str]:
+        entries, now = LOG.snapshot()
+        fresh = entries[len(entries) - (now - start) :] if now > start else []
+        return [entry.text for entry in fresh if entry.level is Level.ERROR]
+
+    return read
+
+
+def _library_on() -> bool:
+    return gate._GATE.failure is None and gate._GATE.stopping is None and gate.can_draw()
+
+
+def test_a_raising_captioned_stream_is_its_own_reply_s_code_and_no_other_pane_s(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    The library reads a stream's blocks from inside ``view.sync()``; a defect in
+    pptmstr's captioning there was the library stopping in every pane. Now that
+    stream draws its fences as the library read them, says so, and is logged.
+    """
+    errors = _errors(monkeypatch)
+
+    def broken(self: Any) -> Any:
+        raise AttributeError("a defect in pptmstr's captioning")
+
+    said: list[str] = []
+    real_said = views._said
+
+    def recording(im: Any, text: str, ink: Any = None) -> float:
+        said.append(text)
+        return real_said(im, text, ink)
+
+    monkeypatch.setattr(views._Captioned, "_blocks", broken)
+    monkeypatch.setattr(views, "_said", recording)
+    cache = typeset.ViewCache()
+    handle = typeset.stream(cache, "reply")
+    handle.append(f"Intro.\n\n```math\n{SUM}\n```\n\nAfter.\n")
+    other = f"Another pane.\n\n```math\n{SUM}\n```\n"
+
+    def both() -> None:
+        handle.draw()
+        typeset.markdown(cache, "doc", other)
+
+    for _ in range(3):
+        frame(both)
+        assert _library_on()
+    assert len(formulas(cache.view("doc"))) == 1, "the other pane still sets its formula"
+    assert formulas(handle.view) == [] and handle.unbuilt == 0
+    assert views._RAW_STREAM in said
+    (error,) = errors()
+    assert error.startswith(
+        "pptmstr's own code raised AttributeError while captioning a stream's blocks"
+    )
+    assert "Traceback" in error
+
+
+def test_a_raising_pre_check_makes_that_formula_code_and_leaves_the_library_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    errors = _errors(monkeypatch)
+
+    def broken(block: Any, theme_: Any) -> str | None:
+        raise ValueError("a defect in the pre-check")
+
+    monkeypatch.setattr(gate, "_refusal", broken)
+    source = f"Before.\n\n```math\n{SUM}\n```\n"
+    cache = typeset.ViewCache()
+    handle = typeset.stream(cache, "reply")
+    handle.append(source)
+
+    def panes() -> None:
+        typeset.markdown(cache, "doc", source)
+        handle.draw()
+        typeset.markdown(cache, "plain", "Plain *text*.\n")
+
+    for _ in range(3):
+        frame(panes)
+        assert _library_on()
+    assert kinds(cache.view("doc")) == ["text", "warn", "code:math"]
+    assert cache.texts("doc")[1] == f"math not set: {gate.OWN_ERROR}"
+    assert kinds(handle.view) == ["text", "warn", "code:math"]
+    assert cache._entries["doc"].unset is None
+    assert cache.view("plain") is not None
+    (error,) = errors()
+    assert "ValueError while asking whether a formula will be set" in error
+    assert "Traceback" in error
+
+
+def test_a_raising_copy_gives_the_library_s_copy_and_leaves_the_library_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    errors = _errors(monkeypatch)
+    source = f"Before.\n\n```math\n{SUM}\n```\n"
+    cache = typeset.ViewCache()
+    frame(lambda: typeset.markdown(cache, "doc", source))
+    view = cache.view("doc")
+    view.select_all()
+
+    def broken(block: Any) -> bool:
+        raise IndexError("a defect in the copy")
+
+    with monkeypatch.context() as patched:
+        patched.setattr(views, "_is_formula", broken)
+        copied = cache.selected("doc")
+    assert copied == view.selected_text() != ""
+    frame(lambda: (typeset.markdown(cache, "doc", source), typeset.markdown(cache, "o", "O.\n")))
+    assert _library_on()
+    assert cache.view("o") is not None
+    (error,) = errors()
+    assert "IndexError while copying a selection" in error and "Traceback" in error
+
+
+def test_a_raising_guard_sends_its_entry_alone_to_imgui(monkeypatch: pytest.MonkeyPatch) -> None:
+    errors = _errors(monkeypatch)
+    monkeypatch.setattr(gate, "_refusal", lambda block, theme_: None)
+
+    def broken(entry: Any) -> bool:
+        raise KeyError("a defect in the guard")
+
+    monkeypatch.setattr(views, "_refused_formulas", broken)
+    cache = typeset.ViewCache()
+    for _ in range(2):
+        frame(
+            lambda: (
+                typeset.markdown(cache, "doc", f"```math\n{ALIGNED}\n```\n"),
+                typeset.markdown(cache, "other", "Other.\n"),
+            )
+        )
+    assert _library_on()
+    assert cache._entries["doc"].unset is not None
+    assert cache._entries["other"].unset is None
+    (error,) = errors()
+    assert "KeyError while reading which formulas a view refused" in error
+
+
+# -- copy: a selection touching a formula gives the whole fence -------------------------
+
+
+def test_a_selection_that_starts_inside_a_formula_copies_its_whole_fence() -> None:
+    cache = typeset.ViewCache()
+    frame(lambda: typeset.markdown(cache, "doc", f"```math\n{SUM}\n```\n\nAfter.\n"))
+    view = cache.view("doc")
+    view.select(((0, 3), (1, 5)))
+    assert cache.selected("doc") == f"```math\n{SUM}\n```\n\nAfter"
+
+
+def test_a_selection_that_ends_inside_a_formula_copies_its_whole_fence() -> None:
+    cache = typeset.ViewCache()
+    frame(lambda: typeset.markdown(cache, "doc", f"Before.\n\n```math\n{SUM}\n```\n"))
+    view = cache.view("doc")
+    view.select(((0, 2), (1, 3)))
+    assert cache.selected("doc") == f"fore.\n\n```math\n{SUM}\n```"
+
+
+def test_a_selection_inside_one_formula_copies_its_whole_fence() -> None:
+    cache = typeset.ViewCache()
+    frame(lambda: typeset.markdown(cache, "doc", f"```math\n{SUM}\n```\n"))
+    cache.view("doc").select(((0, 2), (0, 6)))
+    assert cache.selected("doc") == f"```math\n{SUM}\n```"
+
+
+# -- the guard cannot loop -------------------------------------------------------------
+
+
+def test_a_refusal_after_the_ask_outlives_any_number_of_other_formulas_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    A refusal the view made is held apart from the asking's answers, so reading
+    more formulas than those hold cannot evict it and send the fence back to the
+    view to be refused again.
+    """
+    monkeypatch.setattr(gate, "_refusal", lambda block, theme_: None)
+    source = f"```math\n{ALIGNED}\n```\n"
+    cache = typeset.ViewCache()
+    for _ in range(2):
+        frame(lambda: typeset.markdown(cache, "doc", source))
+    assert kinds(cache.view("doc")) == ["warn", "code:math"]
+    theme_ = themes.document_theme()
+    for n in range(gate._FORMULAS_KEPT + 50):
+        gate.formula(f"x_{{{n}}}", theme_)
+    block, why = gate.formula(ALIGNED, theme_)
+    assert block is None and why
+
+
+def test_a_formula_in_a_view_carries_the_theme_its_view_was_made_in() -> None:
+    """
+    ``_Formula.theme`` does not count in its equality, so a view handed an equal
+    block keeps the one it had. That cannot carry an old theme: a theme is made
+    once an epoch, and a change of epoch makes every view again.
+    """
+    cache = typeset.ViewCache()
+    source = f"```math\n{SUM}\n```\n"
+    handle = typeset.stream(cache, "reply")
+    handle.append(source)
+    frame(lambda: (typeset.markdown(cache, "doc", source), handle.draw()))
+    before = formulas(cache.view("doc"))[0].theme
+    assert before is themes.document_theme()
+    typeset.configure(typeset=True, faces=typeset.DEFAULT_PRESET, scale=1.5, panes={})
+    for _ in range(2):
+        frame(lambda: (typeset.markdown(cache, "doc", source), handle.draw()))
+    after = formulas(cache.view("doc"))[0].theme
+    assert after is themes.document_theme() and after is not before
+    assert formulas(handle.view)[0].theme is handle._source.theme

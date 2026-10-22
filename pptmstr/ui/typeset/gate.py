@@ -24,8 +24,16 @@ Left alone that leaves the pane on every frame the text is on screen. So every
 such call in ``views`` and ``diffs`` is made inside ``into_library()``, which
 logs what was raised once with its traceback, stops the library as a draw that
 raised ``TypesetUnavailable`` does (``stopped``), and raises that in its place.
-Only the calls into the library are inside it: what pptmstr's own code raises
-around them is a defect and leaves as itself.
+That stop holds for the process: ``pre_frame`` makes it the gate's failure, and
+only a load of the fonts clears that.
+
+**So pptmstr's own code that runs inside such a call catches what it raises, at
+its own edge** (``own_defect``): a callback the library makes from inside its
+draw (the link handler, a copy, the captioned stream's blocks) or pptmstr's work
+around a call that is wrapped whole (``formula``). It logs the exception as
+pptmstr's defect, at ERROR with its traceback, and gives a lesser answer for its
+own text: the library is not stopped for it, and no other pane notices.
+``imscribe.TypesetUnavailable`` passes such an edge as it is.
 
 **A draw that set less than it was handed says so two ways, and neither is an
 exception** (``noted``). A view's ``draw`` answers false when a block in view
@@ -235,6 +243,29 @@ def _imgui() -> Any:
     from imgui_bundle import imgui
 
     return imgui
+
+
+_DEFECTS_SAID: set[str] = set()
+_DEFECTS_KEPT = 256
+
+
+def own_defect(doing: str, failure: BaseException) -> None:
+    """
+    Log what pptmstr's own code raised while ``doing``, inside or around a call
+    into the library: at ERROR with its traceback, once for each message, as
+    pptmstr's defect. The caller gives a lesser answer of its own; nothing here
+    stops the library. Never raises.
+    """
+    said = f"pptmstr's own code raised {type(failure).__name__} while {doing}: {failure}"
+    if said in _DEFECTS_SAID:
+        return
+    if len(_DEFECTS_SAID) < _DEFECTS_KEPT:
+        _DEFECTS_SAID.add(said)
+    try:
+        trace = "".join(traceback.format_exception(failure))
+    except Exception:
+        trace = ""
+    LOG.error("typeset", f"{said}\n{trace}".rstrip())
 
 
 def failed(failure: BaseException) -> None:
@@ -561,7 +592,22 @@ that its identity is not another's: the seam's themes are made once an epoch
 (``themes.demoted``), so a theme of another size is another key.
 """
 
+_REFUSED: OrderedDict[tuple[str, int], tuple[Any, Any, str]] = OrderedDict()
+"""
+What a view refused after ``formula`` said it would set it (``refused``), keyed
+as ``_FORMULAS`` is and held apart from it: only another such refusal evicts one,
+so reading other formulas cannot make the view meet it again.
+"""
+
 _NOT_ONE_FORMULA = "the fence does not hold one display formula"
+
+OWN_ERROR = "pptmstr error"
+"""
+The reason a formula is code under when pptmstr's own code raised while asking
+about it (``formula``, ``own_defect``).
+"""
+
+_READING_FORMULA = into_library("reading a formula")
 
 
 def formula(body: str, theme: Any) -> tuple[Any, str]:
@@ -586,15 +632,36 @@ def formula(body: str, theme: Any) -> tuple[Any, str]:
 
     What a view still refuses after this said yes is kept by ``refused``, and
     answered from here from then on.
+
+    The read is a call into the library (``into_library``). What the rest raises
+    is taken as pptmstr's own defect (``own_defect``), the pre-check's calls into
+    the native module (``_refusal``) included, since that is pptmstr's use of
+    them: the answer is then ``(None, OWN_ERROR)``, not kept, so the fence is
+    code and the library is not stopped.
     """
+    from imscribe import TypesetUnavailable
+
+    try:
+        return _formula(body, theme)
+    except TypesetUnavailable:
+        raise
+    except Exception as failure:
+        own_defect("asking whether a formula will be set", failure)
+        return None, OWN_ERROR
+
+
+def _formula(body: str, theme: Any) -> tuple[Any, str]:
     from imscribe import MarkdownText, parse_markdown
 
     key = (body, id(theme))
-    held = _FORMULAS.get(key)
-    if held is not None and held[0] is theme:
-        _FORMULAS.move_to_end(key)
-        return held[1], held[2]
-    blocks = parse_markdown(f"$$\n{body}\n$$", theme, references=False, math=True).blocks
+    for answers in (_REFUSED, _FORMULAS):
+        held = answers.get(key)
+        if held is not None and held[0] is theme:
+            answers.move_to_end(key)
+            return held[1], held[2]
+    with _READING_FORMULA:
+        read = parse_markdown(f"$$\n{body}\n$$", theme, references=False, math=True)
+    blocks = read.blocks
     answer: tuple[Any, str] = (None, _NOT_ONE_FORMULA)
     if len(blocks) == 1 and isinstance(blocks[0], MarkdownText):
         block = blocks[0]
@@ -611,15 +678,18 @@ def refused(body: str, theme: Any, reason: str) -> None:
     Keep that a view refused the formula of ``body`` in ``theme``, which
     ``formula`` had said it would set: ``formula`` answers the refusal from now on.
     """
-    _keep_formula(body, theme, (None, reason))
+    _keep_formula(body, theme, (None, reason), _REFUSED)
 
 
-def _keep_formula(body: str, theme: Any, answer: tuple[Any, str]) -> None:
+def _keep_formula(
+    body: str, theme: Any, answer: tuple[Any, str], answers: OrderedDict[Any, Any] | None = None
+) -> None:
+    held = _FORMULAS if answers is None else answers
     key = (body, id(theme))
-    _FORMULAS[key] = (theme, *answer)
-    _FORMULAS.move_to_end(key)
-    while len(_FORMULAS) > _FORMULAS_KEPT:
-        _FORMULAS.popitem(last=False)
+    held[key] = (theme, *answer)
+    held.move_to_end(key)
+    while len(held) > _FORMULAS_KEPT:
+        held.popitem(last=False)
 
 
 _ASKED_WIDTH_PX = 100_000.0

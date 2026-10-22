@@ -29,6 +29,7 @@ FIG = (
     '<rect width="200" height="100" fill="#c33"/></svg>'
 )
 OPEN = f"Intro paragraph.\n\n```svg\n{FIG}\n"
+PAD = host.FIGURE_PAD
 
 
 class Texture:
@@ -190,8 +191,8 @@ def test_a_settled_document_hosts_its_svg_fence(figures: Renderer) -> None:
     cache = typeset.ViewCache()
     frame(_IM[0], lambda: typeset.markdown(cache, "doc", OPEN + "```\n\nAfter.\n"))
     (widget,) = figures_hosted(cache.view("doc"))
-    assert widget.height_for(600.0) == 100.0
-    assert widget.height_for(100.0) == 50.0
+    assert widget.height_for(600.0) == 100.0 + 2 * PAD
+    assert widget.height_for(100.0) == (100.0 - 2 * PAD) / 2 + 2 * PAD
 
 
 def test_a_refused_svg_stays_code_under_its_reason(figures: Renderer) -> None:
@@ -284,21 +285,22 @@ def test_a_figure_rehosted_after_forget_answers_its_height_at_once_and_reuses_it
     frame(_IM[0], lambda: handle.draw())
     assert handle.view is not first
     (widget,) = figures_hosted(handle.view)
-    assert widget.height_for(500.0) == 100.0
+    assert widget.height_for(500.0) == 100.0 + 2 * PAD
     frame(_IM[0], lambda: handle.draw())
     assert len(figures.asked) == 1, "the raster held for the content is drawn again"
 
 
 @pytest.mark.parametrize(
     "density, origin",
-    [(1.0, (40.0, 121.0)), (1.5, (61 / 1.5, 182 / 1.5)), (2.0, (40.5, 121.0))],
+    [(1.0, (46.0, 127.0)), (1.5, (70 / 1.5, 191 / 1.5)), (2.0, (46.5, 127.0))],
 )
 def test_the_figure_is_drawn_at_the_nearest_device_pixel_inside_its_blocks_clip(
     figures: Renderer, monkeypatch: pytest.MonkeyPatch, density: float, origin: tuple[float, float]
 ) -> None:
     """
-    The origin is the nearest whole pixel of the framebuffer, and the clip is the
-    block's own rectangle: nothing is drawn above or left of where imscribe put it.
+    The image's origin, inside the card's padding, is the nearest whole pixel of
+    the framebuffer, and the clip is the block's own rectangle: nothing is drawn
+    above or left of where imscribe put it.
     """
     from imgui_bundle import imgui
 
@@ -331,13 +333,102 @@ def test_the_figure_is_drawn_at_the_nearest_device_pixel_inside_its_blocks_clip(
     )
     # ImGui keeps clip rectangles in float: the block's corner, unsnapped.
     assert (cx0, cy0) == pytest.approx((40.4, 121.237), abs=1e-4)
-    assert (cx1, cy1) == pytest.approx((40.4 + 150.0, 121.237 + 75.0), abs=1e-4)
+    image_h = (150.0 - 2 * PAD) / 2
+    assert (cx1, cy1) == pytest.approx((40.4 + 150.0, 121.237 + image_h + 2 * PAD), abs=1e-4)
+
+
+class Recording:
+    """
+    The window's draw list, recording what is drawn on it with the clip in force.
+    """
+
+    def __init__(self, real: Any, drawn: list[tuple[Any, ...]]) -> None:
+        self._real = real
+        self._drawn = drawn
+
+    def _clip(self) -> tuple[float, float, float, float]:
+        low, high = self._real.get_clip_rect_min(), self._real.get_clip_rect_max()
+        return (low.x, low.y, high.x, high.y)
+
+    def add_rect_filled(self, low: Any, high: Any, colour: int, *rest: Any) -> None:
+        self._drawn.append(("card", (low.x, low.y, high.x, high.y), colour, self._clip()))
+        self._real.add_rect_filled(low, high, colour, *rest)
+
+    def add_rect(self, low: Any, high: Any, colour: int, *rest: Any) -> None:
+        self._drawn.append(("outline", (low.x, low.y, high.x, high.y), colour, self._clip()))
+        self._real.add_rect(low, high, colour, *rest)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._real, name)
+
+
+@pytest.mark.parametrize("theme_name", ["dark", "light"])
+def test_the_card_is_drawn_first_inside_the_clip_in_every_theme(
+    figures: Renderer, monkeypatch: pytest.MonkeyPatch, theme_name: str
+) -> None:
+    """
+    Before the outline that stands for a figure with no pixels yet, and before the
+    image once it has them: the card, the same light colour in every theme, the
+    image's size and its padding, inside the block's clip.
+    """
+    from imgui_bundle import imgui
+
+    theme.set_theme(theme_name)
+    drawn: list[tuple[Any, ...]] = []
+    real_list = imgui.get_window_draw_list
+
+    def image(ref: Any, size: Any, *rest: Any) -> None:
+        dl = real_list()
+        low, high = dl.get_clip_rect_min(), dl.get_clip_rect_max()
+        at = imgui.get_cursor_screen_pos()
+        drawn.append(
+            (
+                "image",
+                (at.x, at.y, at.x + size.x, at.y + size.y),
+                None,
+                (low.x, low.y, high.x, high.y),
+            )
+        )
+        imgui.dummy(size)
+
+    monkeypatch.setattr(imgui, "get_window_draw_list", lambda: Recording(real_list(), drawn))
+    monkeypatch.setattr(imgui, "image", image)
+    widget = host.FigureWidget(_marked(), FIG)
+
+    def body() -> None:
+        imgui.set_cursor_screen_pos(imgui.ImVec2(40.0, 120.0))
+        widget.draw(width_px=150.0)
+        imgui.dummy(imgui.ImVec2(1.0, 1.0))
+
+    frame(_IM[0], body)
+    figures.answer_last()
+    frame(_IM[0], body)
+    kinds = [item[0] for item in drawn]
+    assert kinds == ["card", "outline", "card", "image"]
+    w, h = 150.0 - 2 * PAD, (150.0 - 2 * PAD) / 2
+    for kind, rect, colour, clip in drawn:
+        x0, y0, x1, y1 = rect
+        assert clip == pytest.approx((40.0, 120.0, 190.0, 120.0 + h + 2 * PAD))
+        assert clip[0] <= x0 and clip[1] <= y0 and x1 <= clip[2] and y1 <= clip[3], kind
+        if kind == "card":
+            assert colour == theme.col(host.BACKDROP).u32
+            assert rect == pytest.approx((40.0, 120.0, 40.0 + w + 2 * PAD, 120.0 + h + 2 * PAD))
+        else:
+            assert rect == pytest.approx((40.0 + PAD, 120.0 + PAD, 40.0 + PAD + w, 120.0 + PAD + h))
+
+
+def test_the_card_s_padding_is_in_the_height_and_the_backdrop_is_near_white() -> None:
+    assert host.FIGURE_PAD > 0
+    widget = host.FigureWidget(_marked(), FIG)
+    assert widget.height_for(600.0) == 100.0 + 2 * host.FIGURE_PAD
+    channels = [(host.BACKDROP >> shift) & 0xFF for shift in (16, 8, 0)]
+    assert min(channels) >= 0xF0 and max(channels) - min(channels) <= 8
 
 
 def test_a_new_width_is_asked_for_only_once_it_has_held(figures: Renderer) -> None:
     widget = host.FigureWidget(_marked(), FIG)
     frame(_IM[0], lambda: widget.draw(width_px=150.0))
-    assert [a[2] for a in figures.asked] == [150.0]
+    assert [a[2] for a in figures.asked] == [150.0 - 2 * PAD]
     figures.answer_last()
     frame(_IM[0], lambda: widget.draw(width_px=150.0))
     for width in (120.0, 121.0, 122.0):
@@ -345,7 +436,7 @@ def test_a_new_width_is_asked_for_only_once_it_has_held(figures: Renderer) -> No
     assert len(figures.asked) == 1, "a width still moving is drawn from the raster held"
     for _ in range(host.STABLE_FRAMES + 1):
         frame(_IM[0], lambda: widget.draw(width_px=122.0))
-    assert [a[2] for a in figures.asked] == [150.0, 122.0]
+    assert [a[2] for a in figures.asked] == [150.0 - 2 * PAD, 122.0 - 2 * PAD]
 
 
 def test_a_render_that_fails_keeps_the_fence_source_on_screen_under_its_reason(
@@ -436,7 +527,7 @@ def test_a_transient_failure_is_asked_again_once_after_the_back_off(
     for _ in range(3):
         frame(_IM[0], draw)
     assert len(figures.asked) == 1, "not asked again inside the back-off"
-    assert widget.height_for(150.0) == 75.0, "the figure's room, with the outline in it"
+    assert widget.height_for(150.0) == (150.0 - 2 * PAD) / 2 + 2 * PAD, "the outline's room"
     clock.now += host.RETRY_AFTER_S
     frame(_IM[0], draw)
     frame(_IM[0], draw)

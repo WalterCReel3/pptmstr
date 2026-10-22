@@ -29,6 +29,8 @@ from dataclasses import dataclass
 from importlib import metadata
 from typing import Literal
 
+from . import render
+
 Kind = Literal["figure", "formula"]
 
 
@@ -52,8 +54,8 @@ class Fence:
 
 # Every fence is drawn inside a typeset view, so no row draws without these.
 _TYPESET = ("imscribe", "imtypeset")
-# What the render child imports for any figure (render.child_main, render._raster).
-_RASTER = ("resvg_py", "Pillow", "numpy", "fonttools")
+# What any figure imports, read from the module that imports it.
+_RASTER = render.DISTRIBUTIONS
 
 _SVG = (
     "```svg: one SVG image. It must be self-contained: no <script>, no event "
@@ -143,10 +145,11 @@ def available(rows: Iterable[Fence] = RENDERED) -> tuple[Fence, ...]:
 
 def prompt(rows: Iterable[Fence]) -> str:
     """
-    What a session is told about the fences in ``rows``: those are drawn, anything
-    else is code, ``$`` in prose is not mathematics, and a fence that cannot be
-    drawn shows its source and why. Empty when ``rows`` is: nothing is drawn, so
-    there is nothing to tell.
+    What a session is told about the fences in ``rows``: those are drawn when
+    pptmstr typesets replies, which the operator can switch off after the launch,
+    no other fence is a figure or a formula, ``$`` in prose is not mathematics,
+    and a fence that cannot be drawn shows its source and why. Empty when
+    ``rows`` is: nothing is drawn, so there is nothing to tell.
     """
     rows = tuple(rows)
     if not rows:
@@ -155,8 +158,9 @@ def prompt(rows: Iterable[Fence]) -> str:
     lines = [
         "## Fences that are drawn",
         "",
-        f"The pane showing your replies draws {names} fences once each is closed. "
-        "Any other fence shows as code.",
+        f"When pptmstr typesets replies, the pane showing them draws {names} fences "
+        "once each is closed; otherwise they show as written. No other fence is drawn "
+        "as a figure or a formula.",
         "",
         *(f"- {row.says}" for row in rows),
         "",

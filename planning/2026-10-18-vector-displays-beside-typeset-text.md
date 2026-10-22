@@ -3,7 +3,12 @@
 **Dated:** 2026-10-18 ·
 **Status:** slice 1 (```` ```svg ```` fences, §8) is built, at commits
 `912471d`, `0a542d1` and `6a285ea`, and the operator checked it in the running app
-on Linux on 2026-10-21 (§8, slice 1). Slices 2 to 5 are not started. Probes T1,
+on Linux on 2026-10-21 (§8, slice 1). Slice 2 (```` ```mermaid ````, `0e219b2`) is
+built except its source/figure toggle, which is not declared; the
+```` ```math ```` fence (`93345b4`) and slice 4, the session declaration
+(`36fb336`), are built; the review of those three (task `fence-review`) and
+its fixes, the figure card among them (task `fence-fix`, 2026-10-21), are in
+the tree and not committed. Slices 3 and 5 are not started. Probes T1,
 M1, R2 and R1's hostile half ran on 2026-10-20 and their decisions are written in
 below. Nothing has run on macOS or at a density above the operator's own ·
 **Origin:** the operator, at launch, 2026-10-18 (§1) ·
@@ -310,11 +315,37 @@ lazily imported optional extra.**
     draws in; it was seen in `runtime_catalog_json()` and **not tried**.
   - A sequence-diagram note drew its text but no visible box; not
     investigated [probe M1].
+- **A diagram's `%%{ … }%%` directives are taken out before merman reads it**
+  (`mermaid.without_directives`, decision 2026-10-21, lead, at fence-fix):
+  every one, wherever it stands, across lines, in a linear scan. A
+  model-written `init` configures the renderer, and pptmstr configures the
+  figure. Measured on merman 0.9.1, `resvg-safe`, on a three-node flowchart,
+  rasterised by resvg with pptmstr's fonts [ran, fence-fix]:
+  - `theme: dark` changes every fill and ink: ten times the dark pixels
+    (3,053 to 32,783), on the light card every figure stands on (§3.6);
+  - a `fontFamily` naming a face resvg lacks, in `init` or in
+    `themeVariables`, is written into the SVG and drawn in the fallback face
+    with the same ink (3,053 dark pixels either way): no label is lost;
+  - `htmlLabels: true` is overridden by the pipeline (0 `<foreignObject>`);
+  - `maxTextSize` (10 and 9×10⁸) and `maxEdges` (9×10⁸) changed nothing on
+    that diagram. Whether a raised limit lets a large diagram run longer was
+    not measured; the child's timeout bounds it either way.
+
+  A YAML front-matter `config:` block reaches merman the same way (a
+  `fontFamily` there was written into the SVG) and is **not** taken out.
+- **One engine is kept for the child's life and dropped on any merman
+  exception** (decision 2026-10-21, lead, at fence-fix): a binding that raised
+  may be left in a state no later diagram recovers from, and a new
+  `merman.Merman()` costs about 4 µs [ran]. Whether a panic does poison it was
+  not measured; a stand-in engine holds the rule.
 - **Its cost is the glibc floor.** merman's Linux wheel is
   `manylinux_2_35`, and pptmstr's floor is 2.28 [read]. On Linux with glibc
   2.28–2.34 the extra will not install, and a ```` ```mermaid ```` fence shows
   as code with a one-line reason. That is the same fallback as a render error.
-  macOS arm64 is covered [read].
+  There the reason says mermaid is unavailable on this platform, and not that
+  an extra is missing (`mermaid.missing_reason`, from `platform.libc_ver()`
+  and the machine), since no wheel exists to install; on Linux other than
+  x86-64 too. macOS arm64 is covered [read].
 - **The gap may not be real.** mmdr's `manylinux_2_17` wheel builds merman's
   engine (mmdr's PyPI description: "`merman` *(default)*"), so merman's 2.35
   floor is probably its build host and not a requirement of the code
@@ -684,6 +715,50 @@ it does not wait for the worker:
   natural_w) * h/w0`. No placeholder, so no jump beyond the one at commit.
 - Mermaid's height is known only after layout, so its host answers a
   placeholder first and its height once the SVG exists: one more jump.
+- **Built (mermaid-fence, fence-fix): two requests, a layout and then the
+  unchanged raster submit.** `Renderer.lay_out(("layout", sha), source)` asks
+  the child to run merman, the post-pass and the sanitiser and answer a
+  `Laid`: the sanitised SVG and its natural size, and no pixels. The figure
+  is then rasterised by the same `submit` an svg figure uses. Two requests
+  rather than one that returns the size with the RGBA, because the raster's
+  width is a function of the natural size (no wider than it, at the drawn
+  width times the density), which is not known until layout, and because it
+  keeps one raster path for both routes. The placeholder is
+  `host.PLACEHOLDER_HEIGHT`, 120 px of image.
+- **The held layouts are an LRU by content** (`host._Layouts`: by the mark's
+  sha of source and merman version, refreshed on every read, bounded at 64 Mi
+  characters of SVG), **and a mark keeps its own layout once it has seen it**
+  (`FigureMark.sanitised`). `height_for` asks for the layout every frame, on
+  screen or not, so with more figures than a bound and nothing pinned each
+  answer evicted another figure's and they flipped between the placeholder
+  and their height without end (`fence-review` #2; 300 diagrams in a test).
+  The bound now serves re-hosting, and a layout evicted before its figure next
+  reads it (more than the bound arriving in one pump) is asked for once more,
+  not without end.
+- **Every figure stands on a light card** (decision 2026-10-21, lead, at
+  `fig-backdrop`, built at fence-fix). `host.FigureWidget.draw` paints a
+  rounded rectangle in `host.BACKDROP` (`0xFAFAF7`, a named constant: no
+  palette entry is near-white in every theme) inside the figure's own clip,
+  before the image or the outline that stands for it, `host.FIGURE_PAD` (6 px)
+  wider than the image on each side. The padding counts in `height_for`, so
+  `height_for(w) = min(w - 2p, natural_w) * h/w0 + 2p`, and in the
+  placeholder's height. Reason: SVG and Mermaid are authored for a white
+  page, and merman's dark ink was lost on the dark pane
+  (`shots/mermaid-window/3-drawn.png`); one card fixes both routes.
+  **Rejected:** merman's `dark` theme, which fixes Mermaid alone and makes
+  a figure's pixels depend on the app's theme. **Cost:** a bright card in the
+  dark theme. A failed figure has no card, and a ```` ```math ```` formula has
+  none: it is text inked by the theme. Checked in a real window under Xvfb in
+  both themes, the light one with its ImGui style applied, with an svg fence, a
+  flowchart, a sequence diagram and a math fence
+  (`shots/fence-backdrop/check.py`, git-ignored): every label, arrow and edge
+  of both diagrams and the svg's dark strokes read clearly on the card in both
+  themes; the formula reads in the theme's ink in both [ran, fence-fix].
+- **Known flaw: an edge label's background keeps merman's narrower width.**
+  The post-pass opens the nested label boxes, not the rectangles merman draws
+  behind edge labels, which are sized by its own text metrics; a label in a
+  face wider than merman's runs past its background, as "pause()" and
+  "resume()" touch the box edges in the state diagram [probe M1; relayed].
 - **"Natural size" needs a rule** for SVG with `width="100%"` or a `viewBox`
   only: read the `max-width` if present, else take `viewBox` user units as
   px, else refuse with a reason. **The rule holds for merman** [probe M1]:
@@ -938,6 +1013,41 @@ same dispatcher and the same table of what renders, and the route by which imscr
 sets it is probe `math-probe`'s to name. The table also feeds the session prompt
 (§8 slice 4), which slice 1 shipped without.
 
+**The math fence as built** (`93345b4`, task `math-fence`, builder-23;
+[relayed] from its result unless marked):
+- **Route (b):** a settled fence's body alone is read with mathematics on, as
+  `$$` + body + `$$` (`gate.formula`), and the block is spliced into the
+  document where the fence was (`views._formula_block`). Nothing else is ever
+  read with mathematics on, so `$` in prose is text.
+- **The pre-check:** the library is asked first whether it will set the
+  formula, by laying out the block's text and runs as an imtypeset paragraph
+  in `typesetter.base_style(theme)`, the style its document is set in. A
+  refusal is answered there, and the fence stays code under
+  `math not set: <reason>`.
+- **The guard after the draw** (`views._formulas_refused`): a formula the view
+  refuses all the same is read from `Document.block_error` and kept as refused
+  (`gate.refused`), so that fence is code from the next reading and the entry
+  is not sent to ImGui. Refusals are held apart from the asking's answers
+  (`gate._REFUSED`), so reading other formulas cannot evict one and send the
+  fence back to be refused again (fence-fix; `fence-review` #7a) [ran].
+- **Copy gives the fence:** a selection touching a formula copies that
+  formula's whole fence as written, wherever in it the selection starts or
+  ends (fence-fix; `fence-review` #6) [ran]; a selection with no formula is
+  the library's copy exactly.
+- **No size-dependent refusal:** 2,336 radical, `\left…\right` and fraction
+  shapes, each asked at 59 em sizes from 6 to 64.5 px, gave the same answer at
+  every size. The size-change path is held by a stand-in refusal.
+- **A formula wider than the pane scrolls sideways**, as a long code line
+  does: `views._reach` counts formula blocks, so the window is told how far it
+  reaches. It is not clipped; `math-probe`'s "cut at the edge" was `_reach`
+  not counting it.
+- **Known limit:** a math fence inside a list item or a quote is set at the
+  left margin of its document, without the item's indent or the quote's rule.
+  The body is read alone, and the fence's code block carries an indent that
+  includes the code inset and no quote depth, so the container cannot be
+  rebuilt cleanly from it (fence-fix; `fence-review` #10) [ran: the probe of
+  `parse_markdown` that showed it].
+
 **Slice 1 in the running app, 2026-10-21.** The operator ran `make run` on
 Linux x86-64 and checked it against a scripted reply (two screenshots, read by
 the lead):
@@ -1006,6 +1116,11 @@ the figure dispatcher.
    sets the nested label `<svg>`s' overflow visible (§3.3). It is an optional
    extra, lazily imported, and a missing extra is the fallback with its
    reason. Then the source/figure toggle (§4, row 2).
+   **Built (`0e219b2`), except the toggle, which is not declared as a task.**
+   The two-request protocol, the held layouts and the card are in §3.6; the
+   directives, the engine and the platform's reason are in §3.3. The post-pass
+   touches only the `overflow` property of a nested `<svg>`'s `style` and its
+   `overflow` attribute (fence-fix; `fence-review` #9).
 3. **Plots** (only if P2 justifies it):
    - create an ImPlot context at start-up;
    - add a test that makes a context-less plot call unreachable (§3.5),
@@ -1016,6 +1131,47 @@ the figure dispatcher.
    limits. It is one table that both the prompt text and the host's dispatch
    read [relayed design, `data-graphs.md` §D]. It ships with slice 1 for `svg`
    and grows with each slice.
+   **Built (`36fb336`, task `fence-prompt`, builder-25; amended at fence-fix).**
+   - **One table:** `figures.fences.RENDERED`, rows `svg` and `mermaid`
+     (figures) and `math` (a formula). The dispatcher (`host.is_figure_fence`,
+     `views.is_math_fence`, `views.settles_rendered`) and the prompt
+     (`fences.prompt`) read it and nothing else; a test adds a word to the
+     table and finds the dispatcher settling it. A row whose renderer is not
+     installed is left out of the prompt, read from metadata without importing
+     it; the mermaid row asks `mermaid.version()`, the read `host.mark` refuses
+     by. What a figure needs is read from `render.DISTRIBUTIONS`, the table the
+     render child imports from (fence-fix; `fence-review` #12).
+   - **Who is told:** every launch, solo or team, fresh or resumed
+     (`driver.AgentSession._system_prompt`, appended after the lead's briefing;
+     a resume sets `snapshot: False`), and every worker, at the end of its
+     `AgentDefinition` prompt (`_team`), since a worker's output is drawn in the
+     same panes (fence-fix, lead decision).
+   - **It is hedged** (fence-fix, lead decision): the fences are drawn "when
+     pptmstr typesets replies", since the operator can switch typeset text off
+     after the launch and the prompt is not rebuilt for that; and it says no
+     other fence is a figure or a formula, rather than "any other fence shows
+     as code", which an honest ```` ```diff ```` fence does not.
+   - **The cost, accepted by the lead:** 1,459 characters on every launch with
+     every renderer installed, held under `fences.PROMPT_LIMIT` (2,000) by a
+     test; and a solo launch now passes an append where it passed none, which
+     changes its argv.
+   - builder-25 edited `pptmstr/figures/host.py` (its own word set, a second
+     table) and four tests in `tests/test_driver.py` (the old solo and resume
+     prompt shapes) outside its task's writes, to make the table single; posted
+     as an incident and accepted by the lead [relayed].
+   - The exact text, every renderer installed [ran, fence-fix]:
+
+    ## Fences that are drawn
+
+    When pptmstr typesets replies, the pane showing them draws ```svg, ```mermaid, ```math fences once each is closed; otherwise they show as written. No other fence is drawn as a figure or a formula.
+
+    - ```svg: one SVG image. It must be self-contained: no <script>, no event attributes, no <image>, no <foreignObject>, no filters or patterns, and no reference outside the document (url(#id) and href="#id" only). Give width and height, or a viewBox. End every font-family with serif, sans-serif or monospace.
+    - ```mermaid: one Mermaid diagram. Flowchart, sequence, class, state and ER diagrams are the kinds checked.
+    - ```math: one display formula in TeX, without $ or $$ around it. Lines are joined into one, so there is no line break or alignment. Use: _ and ^, \frac, \binom, \sqrt{x}, \sum \prod \int \lim with limits, \left( ... \right), \overline, \underline, Greek letters, the usual relations, arrows and operators, \text{}, \mathrm \mathbf \mathbb \mathcal \operatorname, \sin \cos \log \exp \max \min. Refused: \begin{...} environments (aligned, cases, matrices), \\ and &, accents (\hat \vec \bar \tilde \dot), \displaystyle \dfrac \tfrac \mathit \boldsymbol \color, \big and friends (use \left \right), \sqrt[n], \over \choose, \newcommand \def.
+
+    $...$ and $$...$$ in prose are not rendered and show as written; put mathematics in a ```math fence.
+    A fence that cannot be drawn is shown as its source under a one-line reason.
+
 5. **On demand only:** DOT through pygraphviz; full Vega-Lite through
    vl-convert behind the URL pre-filter.
 
@@ -1024,6 +1180,24 @@ Upstream asks, filed when slice 1 exists, not before:
 - imtypeset: C2.
 
 ## 9. Preconditions and risks this work inherits and does not fix
+
+- **pptmstr's code inside a library boundary catches its own exceptions**
+  (decision 2026-10-21, lead, at fence-fix, reversing the earlier "RuntimeError
+  from `_Captioned`"). `gate.into_library` takes anything raised inside it for
+  the library stopping, and the stop holds for every pane in the process until
+  a font load clears it (`pre_frame` makes it the gate's failure). Verified at
+  fence-fix [ran, against the code before the fix]: a raising
+  `_Captioned._blocks`, a raising formula pre-check and a raising copy each
+  stopped the library app-wide. So every pptmstr callback or wrapped piece of
+  pptmstr work that runs inside one catches at its own edge, lets
+  `TypesetUnavailable` through, logs the exception as pptmstr's defect at
+  ERROR with its traceback (`gate.own_defect`, once a message), and degrades
+  its own text alone: a stream's fences as the library read them, with a warn
+  line under it (`_Captioned.raw`); a formula as code under
+  `math not set: pptmstr error`; a copy as the library's `selected_text()`;
+  the guard as "not a formula", which sends that entry alone to ImGui. The
+  link handler (`views._Followed`) was the first of these. A new callback
+  into pptmstr from inside the library follows the same rule.
 
 - **pptmstr mutates imscribe's private shared parser.** `gate._reader`
   disables rules and pushes its own onto `markdown_rules._parser(False, False)`

@@ -107,9 +107,14 @@ renderer.
 
 **Whatever else a call into the library raises is the library stopping too**
 (``gate.into_library``): each such call is made inside one of the ``with`` blocks
-named at the top of this module, and nothing of pptmstr's own is inside one but
-the link handler the library calls back from its draw, which lets nothing out
-(``_Followed``). What pptmstr's own code raises here is a defect and is not caught.
+named at the top of this module, and the stop holds for every pane in the process.
+**pptmstr's own code that runs inside one catches what it raises at its own edge**
+and lets nothing out but ``TypesetUnavailable``: the link handler the library calls
+back from its draw (``_Followed``), the captioned stream's blocks (``_Captioned``),
+the copy (``_formula_copy``), the guard after a draw (``_formulas_refused``) and
+the formula's pre-check (``gate.formula``). Each logs the exception as pptmstr's
+defect (``gate.own_defect``) and gives a lesser answer for its own text alone. What
+pptmstr's code raises outside every such block is a defect and is not caught.
 
 ## When the library sets less than it was handed
 
@@ -216,6 +221,11 @@ _NOT_ALL_SET = "could not set something in view as it was asked to"
 """
 What is said of a draw that answered false with no note from the library: its
 own words for that answer.
+"""
+
+_RAW_STREAM = "typeset: pptmstr could not read this reply's fences, so they are drawn as code"
+"""
+What is said under a stream whose captioning raised (``_Captioned.raw``).
 """
 
 
@@ -646,10 +656,13 @@ class _Captioned:
     the class lacks and also when one of its own properties raises
     ``AttributeError`` inside, so forwarding every name would answer the stream's
     raw blocks, uncaptioned and unmarked, for a defect in ``blocks``, with no error.
-    Each property here turns an ``AttributeError`` inside it into a
-    ``RuntimeError`` (``_own``) rather than letting it escape as one: the library
-    reads ``committed`` and ``sources`` with ``getattr`` defaults, which would
-    swallow it as quietly.
+
+    **A defect in ``blocks``, ``committed`` or ``sources`` is caught at their edge**
+    (``_own``): the library reads them from inside ``view.sync()``, under
+    ``_HANDING``, where an exception would be the library stopping in every pane.
+    It is logged as pptmstr's (``gate.own_defect``), and from then on this stream
+    answers its own blocks as the library read them (``raw``): its fences are
+    plain code, none a figure or a formula, and ``Stream.draw`` says so under it.
     """
 
     def __init__(self, stream: Any) -> None:
@@ -663,6 +676,9 @@ class _Captioned:
         self.plain = False
         self.hosting = False
         self.closed = False
+        # Whether a defect in this class's own reading has made it answer the
+        # stream's blocks as they are (``_own``).
+        self.raw = False
 
     def __getattr__(self, name: str) -> Any:
         if name in _FORWARDED:
@@ -670,14 +686,26 @@ class _Captioned:
         raise AttributeError(f"_Captioned does not forward {name!r} to its stream")
 
     def _own(self, name: str, read: Callable[[], _T]) -> _T:
-        try:
-            return read()
-        except AttributeError as exc:
-            raise RuntimeError(f"_Captioned.{name} raised AttributeError: {exc}") from exc
+        """
+        ``read``, or, where pptmstr's code in it raised, the stream's own ``name``
+        from then on, the defect logged. The library stopping passes as it is.
+        """
+        from imscribe import TypesetUnavailable
+
+        if not self.raw:
+            try:
+                return read()
+            except TypesetUnavailable:
+                raise
+            except Exception as failure:
+                gate.own_defect(f"captioning a stream's {name}", failure)
+                self.raw = True
+        answer: _T = tuple(getattr(self._stream, name, ()))  # type: ignore[assignment]
+        return answer
 
     @property
     def revision(self) -> Any:
-        return self._own("revision", lambda: (self._stream.revision, self.hosting, self.closed))
+        return (self._stream.revision, self.hosting, self.closed, self.raw)
 
     @property
     def blocks(self) -> tuple[Any, ...]:
@@ -940,12 +968,15 @@ class Stream:
             blocks = tuple(view.blocks)
             texts = [str(text) for text in view.texts]
             hosted = set(view.hosts)
+        # A stream answered raw has no caption line over its fences (``_Captioned``).
+        raw = captioned is not None and captioned.raw
         captions = {
             at: _caption_length(block)
             for at, block in enumerate(blocks)
             if (said := getattr(block, "language", ""))
             and said != _HOSTED_INFO
             and at not in hosted
+            and not raw
         }
         self._entry.segments[0].captions = captions
         warned = self._entry.segments[0].warned = _warned_lengths(blocks)
@@ -996,6 +1027,8 @@ class Stream:
             if self._unset is not None:
                 entry.missing = self._text.count("\n") + 1
                 _said(im, f"typeset: the library {self._unset}", ui_theme.P.warn)
+            if self._captioned is not None and self._captioned.raw:
+                _said(im, _RAW_STREAM, ui_theme.P.warn)
         except TypesetUnavailable as stopped:
             gate.stopped(stopped)
             entry.missing = self._text.count("\n") + 1
@@ -1292,7 +1325,23 @@ def _formulas_refused(entry: _Entry) -> bool:
     reads as code under the reason from the next reading on, and only it does.
     A block not yet laid out has no error to read, and is caught by the draw
     that first lays it out.
+
+    What pptmstr's own part of this raises is logged as its defect
+    (``gate.own_defect``) and the answer is false: the entry then goes to ImGui
+    as written, as any draw that set less does.
     """
+    from imscribe import TypesetUnavailable
+
+    try:
+        return _refused_formulas(entry)
+    except TypesetUnavailable:
+        raise
+    except Exception as failure:
+        gate.own_defect("reading which formulas a view refused", failure)
+        return False
+
+
+def _refused_formulas(entry: _Entry) -> bool:
     found = False
     for segment in entry.segments:
         view = segment.view
@@ -1300,9 +1349,10 @@ def _formulas_refused(entry: _Entry) -> bool:
             continue
         with _ASKING:
             blocks = tuple(view.blocks)
-            held = [(at, block) for at, block in enumerate(blocks) if _is_formula(block)]
-            if not held:
-                continue
+        held = [(at, block) for at, block in enumerate(blocks) if _is_formula(block)]
+        if not held:
+            continue
+        with _ASKING:
             document = view.native_document
             errors = [(block, document.block_error(at)) for at, block in held]
         for block, error in errors:
@@ -1412,27 +1462,46 @@ def _is_formula(block: Any) -> bool:
 def _formula_copy(view: Any) -> str:
     """
     What Ctrl+C copies of a markdown view's selection: the library's copy, with
-    each formula the selection holds the first character of given as its fence
-    as written (``_formula_type``), as a figure's copy is its fence. The library
-    alone would give the formula's source with its lines joined and no fence.
+    each formula the selection touches given whole as its fence as written
+    (``_formula_type``), as a figure's copy is its fence, wherever in it the
+    selection starts or ends. The library alone would give the selected part of
+    the formula's source, with its lines joined and no fence.
 
     The pieces around a formula are the library's own copy of those ranges,
     joined by the view's separator, so a selection with no formula in it copies
     exactly as the library copies it.
+
+    The library calls this from inside its draw (Ctrl+C) and ``ViewCache.selected``
+    from inside ``_ASKING``, so what it raises is caught here: logged as pptmstr's
+    defect (``gate.own_defect``), and the copy is the library's own.
     """
+    from imscribe import TypesetUnavailable
+
+    try:
+        return _copy_with_fences(view)
+    except TypesetUnavailable:
+        raise
+    except Exception as failure:
+        gate.own_defect("copying a selection", failure)
+        return str(view.selected_text())
+
+
+def _copy_with_fences(view: Any) -> str:
     selection = view.selection
     if selection is None:
         return ""
     (first, start), (last, end) = selection
     blocks = view.blocks
+    texts = view.texts
     held = [
         at
         for at in range(first, min(last, len(blocks) - 1) + 1)
-        if _is_formula(blocks[at]) and (first, start) <= (at, 0) < (last, end)
+        if _is_formula(blocks[at])
+        and (first, start) < (at, len(texts[at]))
+        and (at, 0) < (last, end)
     ]
     if not held:
         return str(view.selected_text())
-    texts = view.texts
     document = view.native_document
     pieces: list[str] = []
     cursor = (first, start)
@@ -1450,15 +1519,24 @@ def _formula_block(block: Any, said: str, theme: Any) -> tuple[Any, ...]:
     """
     A settled ```` ```math ```` fence as the display formula it holds
     (``_Formula``), or as captioned code under a line in the warn ink saying why
-    it is not one (``gate.formula``).
+    it is not one (``gate.formula``). It is set at the left margin of its
+    document, whatever list or quote the fence stood in: the formula is read
+    alone, and a code block carries no quote depth to give it.
     """
+    from imscribe import TypesetUnavailable
+
     from ...figures import host as figures_host
 
-    with _READING:
-        made, why = gate.formula(block.text, theme)
+    made, why = gate.formula(block.text, theme)
     if made is not None:
-        fence = figures_host.fence_text(said, block.text)
-        return (_formula_type().of(made, block.text, fence, theme),)
+        try:
+            fence = figures_host.fence_text(said, block.text)
+            return (_formula_type().of(made, block.text, fence, theme),)
+        except TypesetUnavailable:
+            raise
+        except Exception as failure:
+            gate.own_defect("setting a math fence as a formula", failure)
+            why = gate.OWN_ERROR
     line = f"math not set: {why}"
     return (
         replace(block, text=line, language=_Warned(len(line))),

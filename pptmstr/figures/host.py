@@ -14,12 +14,24 @@ child (``mermaid.layout``), which hands back SVG that has passed the same saniti
 and from then on the figure is drawn exactly as an svg one. Until that arrives the
 figure stands at ``PLACEHOLDER_HEIGHT``, so it jumps once more than an svg figure
 does; the layout is then held by the fence's text and the merman version
-(``_State.layouts``), so a re-hosted figure answers its real height at once. Where
-merman is not installed the fence is refused at ``mark`` and stays code; a merman
-error arrives later and is drawn as a render failure is, below.
+(``_State.layouts``), so a re-hosted figure answers its real height at once, and
+by the mark that asked for it, so a figure on screen never loses it to the bound
+on the others. Where merman is not installed the fence is refused at ``mark`` and
+stays code; a merman error arrives later and is drawn as a render failure is, below.
+
+**Every figure stands on a light card** (``BACKDROP``): a rounded rectangle
+``FIGURE_PAD`` wider than the image on each side, painted inside the figure's own
+clip before the image or the outline that stands for it. SVG and Mermaid are
+authored for a white page: on the dark pane merman's dark ink was lost
+(``shots/mermaid-window/3-drawn.png``). One card fixes both routes and does not
+depend on the app's theme; merman's own ``dark`` theme was rejected because it
+fixes Mermaid alone and would make a figure's pixels depend on the app's theme.
+The cost is a bright card in the dark theme. A failed figure has no card: its
+source is text in the theme's ink.
 
 **The height is the sanitiser's, not the raster's.** ``height_for(w)`` is
-``min(w, natural_w) * natural_h / natural_w`` from the mark, answered at once in
+``min(w - 2p, natural_w) * natural_h / natural_w + 2p`` from the mark, ``p`` being
+``FIGURE_PAD``, answered at once in
 the first frame and after every re-hosting (``Stream._forget`` makes a new view),
 so a figure jumps only once, at commit, when the code block becomes it.
 
@@ -49,7 +61,8 @@ failure the renderer says would happen again (``render.Failed.transient`` false:
 resvg refused it, a cap) is kept for the content and the figure is not asked for
 again. One the machine may have caused (the child died, ran out of time or memory,
 did not start) is asked for once more after ``RETRY_AFTER_S``, showing the outline
-meanwhile; a second such failure is kept as the first kind is.
+meanwhile; a second such failure is kept as the first kind is. A mermaid figure's
+layout and its raster each have that one retry (``_budget``).
 """
 
 from __future__ import annotations
@@ -88,17 +101,40 @@ has had a moment to recover.
 
 PLACEHOLDER_HEIGHT = 120.0
 """
-The height a mermaid figure stands at until the render child has laid it out: its
-natural size is known only after layout, so it jumps once more, to its real height,
-when the layout arrives (planning record §3.6). A re-hosted figure whose layout is
-held answers its real height at once.
+The height of the space a mermaid figure's image stands in until the render child
+has laid it out, its card's padding not counted: its natural size is known only
+after layout, so it jumps once more, to its real height, when the layout arrives
+(planning record §3.6). A re-hosted figure whose layout is held answers its real
+height at once.
+"""
+
+FIGURE_PAD = 6.0
+"""
+The card's margin around a figure's image on each side, in ImGui units: counted
+in ``height_for`` and in the placeholder's height.
+"""
+
+BACKDROP = 0xFAFAF7
+"""
+The card every figure is drawn on, as ``0xRRGGBB``: a near-white neutral, the same
+in every theme. No palette entry is light in every theme (the dark palette has none
+this light), so it is a constant and not a theme's colour.
+"""
+
+BACKDROP_ROUNDING = 4.0
+
+LAYOUT_BUDGET_CHARS = 64 << 20
+"""
+The SVG text the held layouts may add up to, in characters, least recently read
+first out. Each is a diagram's sanitised SVG: 30-105 KB for the probe's five, and
+the sanitiser's cap is 1 MiB, so this is several hundred typical diagrams and
+sixty-four at the cap. A figure on screen keeps its own once it has read it
+(``FigureMark.sanitised``), so this bounds what a re-hosting finds; a layout
+evicted before its figure's next read is asked for once more.
 """
 
 _MARKS_KEPT = 64
 _FAILURES_KEPT = 256
-# Laid-out diagrams kept: a few hundred KB of SVG each at most, the sanitiser's cap
-# being 1 MiB; merman's output for the probe's five was 30-105 KB.
-_LAYOUTS_KEPT = 128
 # The first element of a layout request's key; a raster's is a sha.
 _LAYOUT = "layout"
 
@@ -140,11 +176,12 @@ class FigureMark(str):
     def sanitised(self) -> Sanitised | None:
         """
         The sanitised SVG the figure is drawn from, or ``None`` while a mermaid fence
-        has not been laid out.
+        has not been laid out. A layout found is kept by the mark from then on, so
+        the bound on the held layouts cannot take it from a figure on screen.
         """
-        if self._sanitised is not None:
-            return self._sanitised
-        return _STATE.layouts.get(self.sha)
+        if self._sanitised is None:
+            self._sanitised = _STATE.layouts.get(self.sha)
+        return self._sanitised
 
 
 _word = fences.word
@@ -191,7 +228,7 @@ def _svg_mark(said: str, text: str) -> FigureMark | Refused:
 def _mermaid_mark(said: str, text: str) -> FigureMark | Refused:
     version = mermaid.version()
     if version is None:
-        return Refused(mermaid.EXTRA_REASON)
+        return Refused(mermaid.missing_reason())
     keyed = f"merman {version}\0{text}".encode("utf-8", "surrogatepass")
     return FigureMark(said, None, source=text, sha=hashlib.sha256(keyed).hexdigest())
 
@@ -233,6 +270,44 @@ class _Raster:
 
 
 _Key = tuple[str, float, int]
+
+
+class _Layouts:
+    """
+    Laid-out diagrams by their mark's sha, bounded by the characters of their SVG,
+    the least recently read evicted first: a read refreshes an entry.
+    """
+
+    def __init__(self, budget: int) -> None:
+        self.budget = budget
+        self._held: OrderedDict[str, Sanitised] = OrderedDict()
+        self._chars = 0
+
+    def __len__(self) -> int:
+        return len(self._held)
+
+    def __contains__(self, sha: object) -> bool:
+        return sha in self._held
+
+    def get(self, sha: str) -> Sanitised | None:
+        laid = self._held.get(sha)
+        if laid is not None:
+            self._held.move_to_end(sha)
+        return laid
+
+    def put(self, sha: str, laid: Sanitised) -> None:
+        old = self._held.pop(sha, None)
+        if old is not None:
+            self._chars -= len(old.svg)
+        self._held[sha] = laid
+        self._chars += len(laid.svg)
+        while self._chars > self.budget and len(self._held) > 1:
+            _, evicted = self._held.popitem(last=False)
+            self._chars -= len(evicted.svg)
+
+    def clear(self) -> None:
+        self._held.clear()
+        self._chars = 0
 
 
 class _Textures:
@@ -313,14 +388,14 @@ class _State:
     # What has been asked of the renderer and not answered: the raster width, by
     # (sha, density).
     asked: dict[tuple[str, float], int]
-    # Content whose first transient failure is waiting out its back-off: when it
-    # may be asked again.
+    # Requests whose first transient failure is waiting out its back-off: when they
+    # may be asked again, by ``_budget``.
     backoff: OrderedDict[str, float]
-    # Content asked again after a transient failure; another one is kept for good.
+    # Requests asked again after a transient failure; another one is kept for good.
     retried: OrderedDict[str, None]
     # Mermaid diagrams laid out, by their mark's sha (source and merman version): the
     # natural size a re-hosted figure answers its height from at once.
-    layouts: OrderedDict[str, Sanitised] = field(default_factory=OrderedDict)
+    layouts: _Layouts = field(default_factory=lambda: _Layouts(LAYOUT_BUDGET_CHARS))
     # Mermaid diagrams asked of the render child and not yet answered, by sha.
     laying: set[str] = field(default_factory=set)
     pumps: int = 0
@@ -356,10 +431,10 @@ def pump() -> None:
             sha = key[1]
             state.laying.discard(sha)
             if isinstance(result, render.Laid):
-                _keep(state.layouts, sha, result.sanitised, _LAYOUTS_KEPT)
-                state.backoff.pop(sha, None)
+                state.layouts.put(sha, result.sanitised)
+                state.backoff.pop(_budget(sha, _LAYOUT), None)
             elif isinstance(result, render.Failed):
-                _fail(state, sha, result)
+                _fail(state, sha, result, _LAYOUT)
             continue
         sha, scale = key
         state.asked.pop(key, None)
@@ -374,20 +449,30 @@ def _take(state: _State, sha: str, scale: float, result: render.Result) -> None:
         texture = state.upload(result.rgba, result.width, result.height)
         raster = _Raster(texture, result.width, result.height)
         state.textures.put((sha, scale, result.width), raster, state.pumps)
-        state.backoff.pop(sha, None)
+        state.backoff.pop(_budget(sha), None)
     elif isinstance(result, render.Failed):
         _fail(state, sha, result)
 
 
-def _fail(state: _State, sha: str, result: render.Failed) -> None:
+def _budget(sha: str, kind: str = "") -> str:
+    """
+    What a request's one retry is kept by: the content's sha for a raster, and the
+    sha under ``kind`` for a layout, so a layout that was retried leaves its
+    raster's retry unspent.
+    """
+    return f"{kind}:{sha}" if kind else sha
+
+
+def _fail(state: _State, sha: str, result: render.Failed, kind: str = "") -> None:
     """
     A render or a layout that failed: backed off once if the machine may have caused
     it, else kept, and the figure shows its source under the reason.
     """
-    if result.transient and sha not in state.retried:
-        _keep(state.backoff, sha, state.clock() + RETRY_AFTER_S)
+    budget = _budget(sha, kind)
+    if result.transient and budget not in state.retried:
+        _keep(state.backoff, budget, state.clock() + RETRY_AFTER_S)
     else:
-        state.backoff.pop(sha, None)
+        state.backoff.pop(budget, None)
         _keep(state.failures, sha, result.reason)
 
 
@@ -398,19 +483,21 @@ def _keep(held: OrderedDict[str, Any], sha: str, value: Any, kept: int = _FAILUR
         held.popitem(last=False)
 
 
-def _may_ask(sha: str) -> bool:
+def _may_ask(sha: str, kind: str = "") -> bool:
     """
-    Whether content may be asked of the renderer now: not while its back-off from
-    a transient failure runs. The ask that ends one is its one retry.
+    Whether content may be asked of the renderer now, for a raster or under
+    ``kind``: not while that request's back-off from a transient failure runs. The
+    ask that ends one is its one retry.
     """
     state = _STATE
-    at = state.backoff.get(sha)
+    budget = _budget(sha, kind)
+    at = state.backoff.get(budget)
     if at is None:
         return True
     if state.clock() < at:
         return False
-    del state.backoff[sha]
-    _keep(state.retried, sha, None)
+    del state.backoff[budget]
+    _keep(state.retried, budget, None)
     return True
 
 
@@ -481,20 +568,22 @@ class FigureWidget:
 
     def _lay_out(self, source: str) -> None:
         sha = self._mark.sha
-        if sha in _STATE.laying or sha in _STATE.failures or not _may_ask(sha):
+        if sha in _STATE.laying or sha in _STATE.failures or not _may_ask(sha, _LAYOUT):
             return
         _STATE.laying.add(sha)
         _STATE.renderer().lay_out((_LAYOUT, sha), source)
 
     def size_for(self, width_px: float) -> tuple[float, float]:
         """
-        The drawn size at ``width_px``: no wider than the natural width, at its aspect.
-        ``PLACEHOLDER_HEIGHT`` tall at ``width_px`` while a mermaid fence is laid out.
+        The image's drawn size in a block ``width_px`` wide: no wider than the
+        natural width or the block less the card's padding, at its aspect.
+        ``PLACEHOLDER_HEIGHT`` tall while a mermaid fence is laid out.
         """
+        room = width_px - 2.0 * FIGURE_PAD
         natural = self._sanitised()
         if natural is None:
-            return max(1.0, width_px), PLACEHOLDER_HEIGHT
-        wide = max(1.0, min(width_px, natural.width))
+            return max(1.0, room), PLACEHOLDER_HEIGHT
+        wide = max(1.0, min(room, natural.width))
         return wide, wide * natural.height / natural.width
 
     def height_for(self, width_px: float) -> float:
@@ -502,7 +591,7 @@ class FigureWidget:
         if failure is not None:
             said, source = self._failed_heights(self._refusal(failure), width_px)
             return said + _spacing() + source
-        return self.size_for(width_px)[1]
+        return self.size_for(width_px)[1] + 2.0 * FIGURE_PAD
 
     def _refusal(self, reason: str) -> str:
         return refusal_line(reason, self._mark.said)
@@ -516,20 +605,26 @@ class FigureWidget:
         if failure is not None:
             self._draw_failed(im, self._refusal(failure), at.x, at.y, wide)
             return True
+        from .. import theme
+
         natural = self._sanitised()
         w, h = self.size_for(wide)
+        pad = FIGURE_PAD
         # The block's own rectangle: nothing drawn here reaches above or left of it.
-        im.push_clip_rect(im.ImVec2(at.x, at.y), im.ImVec2(at.x + wide, at.y + h), True)
+        im.push_clip_rect(im.ImVec2(at.x, at.y), im.ImVec2(at.x + wide, at.y + h + 2.0 * pad), True)
         try:
+            dl = im.get_window_draw_list()
+            dl.add_rect_filled(
+                im.ImVec2(at.x, at.y),
+                im.ImVec2(at.x + w + 2.0 * pad, at.y + h + 2.0 * pad),
+                _backdrop(),
+                BACKDROP_ROUNDING,
+            )
             scale = _density(im)
-            x, y = snapped(at.x, at.y, scale)
+            x, y = snapped(at.x + pad, at.y + pad, scale)
             raster = None if natural is None else self._raster(im, natural, w, scale)
             if raster is None:
-                from .. import theme
-
-                im.get_window_draw_list().add_rect(
-                    im.ImVec2(x, y), im.ImVec2(x + w, y + h), theme.P.border.u32
-                )
+                dl.add_rect(im.ImVec2(x, y), im.ImVec2(x + w, y + h), theme.P.border.u32)
             else:
                 im.set_cursor_screen_pos(im.ImVec2(x, y))
                 exact = raster.width == round(w * scale)
@@ -595,6 +690,21 @@ class FigureWidget:
             dl.add_text(font, size, under, theme.P.text_dim.u32, self._text, None, wide)
         finally:
             im.pop_clip_rect()
+
+
+_PACKED: dict[int, int] = {}
+
+
+def _backdrop() -> int:
+    """
+    ``BACKDROP`` packed for the draw list, once.
+    """
+    packed = _PACKED.get(BACKDROP)
+    if packed is None:
+        from .. import theme
+
+        packed = _PACKED[BACKDROP] = int(theme.col(BACKDROP).u32)
+    return packed
 
 
 def _density(im: Any) -> float:

@@ -18,7 +18,7 @@ import pytest
 from pptmstr.bridge import Bridge
 from pptmstr.driver import AgentSession
 from pptmstr.figures import fences, host, mermaid, sanitise
-from pptmstr.templates import FEATURE, lead_briefing
+from pptmstr.templates import FEATURE, lead_briefing, worker_prompt
 from pptmstr.ui.typeset import views
 
 RESUMED = "11111111-2222-3333-4444-555555555555"
@@ -150,7 +150,10 @@ def test_reading_what_is_installed_imports_no_renderer() -> None:
 def test_the_text_says_what_the_task_asks_and_stays_short() -> None:
     text = fences.prompt(fences.RENDERED)
     assert len(text) <= fences.PROMPT_LIMIT, len(text)
-    assert "Any other fence shows as code." in text
+    assert "When pptmstr typesets replies, the pane showing them draws" in text
+    assert "otherwise they show as written" in text
+    assert "No other fence is drawn as a figure or a formula." in text
+    assert "Any other fence shows as code" not in text, "an honest diff fence is a diff view"
     assert "$...$ and $$...$$ in prose are not rendered" in text
     assert "shown as its source under a one-line reason" in text
     assert "End every font-family with serif, sans-serif or monospace." in text
@@ -187,6 +190,31 @@ def test_a_team_session_carries_the_briefing_then_the_text(text: str) -> None:
     append, snapshot = _append(session)
     assert append == f"{lead_briefing(FEATURE, session.policy)}\n\n{text}"
     assert snapshot == "omitted"
+
+
+def test_every_worker_is_told_what_the_pane_draws(text: str) -> None:
+    """
+    A worker's output is drawn in the same panes, and a sub-agent does not read the
+    lead's system prompt: its own definition carries the text, after its role's.
+    """
+    session = AgentSession(Bridge(), task="t", template=FEATURE)
+    team = session._team()
+    assert team and set(team) == {role.name for role in FEATURE.roles}
+    for role in FEATURE.roles:
+        own = worker_prompt(role, session.brief, session.policy, session.contained)
+        assert team[role.name].prompt == f"{own}\n\n{text}"
+
+
+def test_a_worker_is_told_nothing_more_when_nothing_is_drawn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(fences, "session_prompt", lambda: "")
+    session = AgentSession(Bridge(), task="t", template=FEATURE)
+    team = session._team()
+    assert team
+    for role in FEATURE.roles:
+        own = worker_prompt(role, session.brief, session.policy, session.contained)
+        assert team[role.name].prompt == own
 
 
 @pytest.mark.parametrize("template", [None, FEATURE], ids=["solo", "team"])
