@@ -134,6 +134,7 @@ import os
 import re
 import struct
 import traceback
+from collections import OrderedDict
 from collections.abc import Callable, Iterator
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
@@ -547,6 +548,107 @@ def read(source: str, theme: Any) -> Any:
     from imscribe import parse_markdown
 
     return parse_markdown(source, theme, references=False)
+
+
+_FORMULAS_KEPT = 256
+_FORMULAS: OrderedDict[tuple[str, int], tuple[Any, Any, str]] = OrderedDict()
+"""
+What ``formula`` answered, by the body and the theme it was read with: the
+last few hundred, because a stream made again reads every fence again and a
+settled document is read again when its text changes. A theme is a dict-holding
+dataclass and has no hash, so it is held by identity, and kept in the answer so
+that its identity is not another's: the seam's themes are made once an epoch
+(``themes.demoted``), so a theme of another size is another key.
+"""
+
+_NOT_ONE_FORMULA = "the fence does not hold one display formula"
+
+
+def formula(body: str, theme: Any) -> tuple[Any, str]:
+    """
+    The body of a ```` ```math ```` fence as one display formula, set in
+    ``theme``: ``(block, "")``, or ``(None, reason)`` where it will not be set.
+
+    Read alone, as ``$$`` + body + ``$$`` with mathematics on: **nothing else
+    is ever read with mathematics on**, so a ``$`` in prose is text. The lines
+    of the body are joined into one formula by the reader. A body that reads as
+    anything but one closed display formula (empty, or holding a ``$$`` line of
+    its own) is refused with ``_NOT_ONE_FORMULA``.
+
+    **The library is asked first whether it will set it**, and a refusal is
+    answered here and never handed to a view: a view that meets one draws its
+    source and answers false, which takes the whole entry it is in off the
+    library (``views._short``). The block's own text and runs are laid out as a
+    paragraph in ``typesetter.base_style(theme)``, the style a document of that
+    theme is laid out in, so it is asked at the size the document sets it at;
+    a theme of another size is another key here and is asked again. The
+    library's reason is the answer's.
+
+    What a view still refuses after this said yes is kept by ``refused``, and
+    answered from here from then on.
+    """
+    from imscribe import MarkdownText, parse_markdown
+
+    key = (body, id(theme))
+    held = _FORMULAS.get(key)
+    if held is not None and held[0] is theme:
+        _FORMULAS.move_to_end(key)
+        return held[1], held[2]
+    blocks = parse_markdown(f"$$\n{body}\n$$", theme, references=False, math=True).blocks
+    answer: tuple[Any, str] = (None, _NOT_ONE_FORMULA)
+    if len(blocks) == 1 and isinstance(blocks[0], MarkdownText):
+        block = blocks[0]
+        found = block.formulas
+        if len(found) == 1 and found[0].display and found[0].state == "set":
+            why = _refusal(block, theme)
+            answer = (block, "") if why is None else (None, why)
+    _keep_formula(body, theme, answer)
+    return answer
+
+
+def refused(body: str, theme: Any, reason: str) -> None:
+    """
+    Keep that a view refused the formula of ``body`` in ``theme``, which
+    ``formula`` had said it would set: ``formula`` answers the refusal from now on.
+    """
+    _keep_formula(body, theme, (None, reason))
+
+
+def _keep_formula(body: str, theme: Any, answer: tuple[Any, str]) -> None:
+    key = (body, id(theme))
+    _FORMULAS[key] = (theme, *answer)
+    _FORMULAS.move_to_end(key)
+    while len(_FORMULAS) > _FORMULAS_KEPT:
+        _FORMULAS.popitem(last=False)
+
+
+_ASKED_WIDTH_PX = 100_000.0
+"""
+The measure a formula is asked at. A display formula wider than its measure is
+set and runs past it; it is not refused for its width.
+"""
+
+
+def _refusal(block: Any, theme: Any) -> str | None:
+    """
+    Why the library would not set the formula of a display-formula block in
+    ``theme``, or ``None`` when it would.
+    """
+    typesetter = _typesetter()
+    ts = typesetter.module()
+    if ts is None:
+        return f"the library is not in use: {typesetter.reason()}"
+    runs = [ts.Run(*run) for run in block.runs]
+    with ts.Paragraph() as paragraph:
+        paragraph.set_text(block.text, runs)
+        paragraph.layout(_ASKED_WIDTH_PX, typesetter.base_style(theme))
+        found = paragraph.formulas()
+        error = paragraph.error
+    if not found:
+        return f"the library found no formula in it ({error.message or error.code})"
+    if found[0].refused:
+        return str(found[0].reason) or "the library would not set it"
+    return None
 
 
 def _reader() -> None:
