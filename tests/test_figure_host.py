@@ -139,7 +139,7 @@ def test_an_svg_fence_is_hosted_on_commit_while_the_stream_is_open(
             assert hosted == [], f"hosted while open, after {fed[-12:]!r}"
     assert not handle.closed
     (widget,) = figures_hosted(handle.view)
-    assert widget.mark.sanitised.width == 200.0
+    assert widget.mark.sanitised is not None and widget.mark.sanitised.width == 200.0
     assert widget.text == f"```svg\n{FIG}\n```"
 
 

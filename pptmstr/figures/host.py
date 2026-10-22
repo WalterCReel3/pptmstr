@@ -1,5 +1,6 @@
 """
-A committed ```` ```svg ```` fence drawn as a figure in its block's place.
+A committed ```` ```svg ```` or ```` ```mermaid ```` fence drawn as a figure in its
+block's place.
 
 ``views._captioned`` asks ``mark`` about a fence once it may host one: settled
 documents always, a stream only for a fence it has committed or after it closed
@@ -7,6 +8,15 @@ documents always, a stream only for a fence it has committed or after it closed
 the view's host dispatcher answers it with a ``FigureWidget``; one it refuses is
 never marked and stays code, under a line in the warn ink saying why. So code stays
 code, and only SVG that passed the policy reaches a widget.
+
+**A mermaid fence is marked without being laid out**: merman runs in the render
+child (``mermaid.layout``), which hands back SVG that has passed the same sanitiser,
+and from then on the figure is drawn exactly as an svg one. Until that arrives the
+figure stands at ``PLACEHOLDER_HEIGHT``, so it jumps once more than an svg figure
+does; the layout is then held by the fence's text and the merman version
+(``_State.layouts``), so a re-hosted figure answers its real height at once. Where
+merman is not installed the fence is refused at ``mark`` and stays code; a merman
+error arrives later and is drawn as a render failure is, below.
 
 **The height is the sanitiser's, not the raster's.** ``height_for(w)`` is
 ``min(w, natural_w) * natural_h / natural_w`` from the mark, answered at once in
@@ -49,10 +59,10 @@ import math
 import time
 from collections import OrderedDict
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
-from . import render
+from . import mermaid, render
 from .sanitise import Refused, Sanitised, sanitise
 
 STABLE_FRAMES = 6
@@ -76,9 +86,22 @@ process's restart, and long enough that a machine that killed one child for memo
 has had a moment to recover.
 """
 
+PLACEHOLDER_HEIGHT = 120.0
+"""
+The height a mermaid figure stands at until the render child has laid it out: its
+natural size is known only after layout, so it jumps once more, to its real height,
+when the layout arrives (planning record §3.6). A re-hosted figure whose layout is
+held answers its real height at once.
+"""
+
 _MARKS_KEPT = 64
 _FAILURES_KEPT = 256
-_FENCE_WORDS = frozenset({"svg"})
+# Laid-out diagrams kept: a few hundred KB of SVG each at most, the sanitiser's cap
+# being 1 MiB; merman's output for the probe's five was 30-105 KB.
+_LAYOUTS_KEPT = 128
+# The first element of a layout request's key; a raster's is a sha.
+_LAYOUT = "layout"
+_FENCE_WORDS = frozenset({"svg", "mermaid"})
 
 
 class FigureMark(str):
@@ -86,30 +109,56 @@ class FigureMark(str):
     The info string ``views._captioned`` gives a fence that is drawn as a figure.
 
     Empty, as a block that names no language has, so nothing captions it or colours
-    it; it carries the info string as written and what ``sanitise`` made of the
-    fence. A subclass and not a word, as ``views._Warned`` is: the library's reader
-    gives every fence a plain ``str``, so no fence can be written that is taken for
-    one.
+    it; it carries the info string as written and what the figure is drawn from. A
+    subclass and not a word, as ``views._Warned`` is: the library's reader gives every
+    fence a plain ``str``, so no fence can be written that is taken for one.
+
+    An svg fence's mark holds what ``sanitise`` made of it, and ``sha`` is that SVG's.
+    A mermaid fence's mark holds its ``source`` instead, and ``sha`` is of the source
+    and the merman version: its SVG is made in the render child (``mermaid.layout``)
+    and held by ``sha`` (``_State.layouts``), so ``sanitised`` is ``None`` until then
+    and a mark made again for the same text finds it at once.
     """
 
     said: str
-    sanitised: Sanitised
     sha: str
+    source: str | None
+    _sanitised: Sanitised | None
 
-    def __new__(cls, said: str, sanitised: Sanitised) -> FigureMark:
+    def __new__(
+        cls, said: str, sanitised: Sanitised | None, *, source: str | None = None, sha: str = ""
+    ) -> FigureMark:
         made = super().__new__(cls, "")
         made.said = said
-        made.sanitised = sanitised
-        made.sha = hashlib.sha256(sanitised.svg.encode("utf-8", "surrogatepass")).hexdigest()
+        made._sanitised = sanitised
+        made.source = source
+        if sanitised is not None:
+            sha = hashlib.sha256(sanitised.svg.encode("utf-8", "surrogatepass")).hexdigest()
+        made.sha = sha
         return made
+
+    @property
+    def sanitised(self) -> Sanitised | None:
+        """
+        The sanitised SVG the figure is drawn from, or ``None`` while a mermaid fence
+        has not been laid out.
+        """
+        if self._sanitised is not None:
+            return self._sanitised
+        return _STATE.layouts.get(self.sha)
+
+
+def _word(said: str) -> str:
+    words = said.split(maxsplit=1)
+    return words[0].lower() if words else ""
 
 
 def is_figure_fence(said: str) -> bool:
     """
-    Whether a fence's info string asks for a figure: its first word is ``svg``.
+    Whether a fence's info string asks for a figure: its first word is ``svg`` or
+    ``mermaid``.
     """
-    words = said.split(maxsplit=1)
-    return bool(words) and words[0].lower() in _FENCE_WORDS
+    return _word(said) in _FENCE_WORDS
 
 
 _MARKS: OrderedDict[tuple[str, str], FigureMark | Refused] = OrderedDict()
@@ -118,14 +167,17 @@ _MARKS: OrderedDict[tuple[str, str], FigureMark | Refused] = OrderedDict()
 def mark(said: str, text: str) -> FigureMark | Refused:
     """
     What a fence whose info string asks for a figure becomes: marked, or refused
-    with ``sanitise``'s reason. Kept for the last few texts, because a stream made
+    with the reason it stays code. Kept for the last few texts, because a stream made
     again (``Stream._forget``) reads every fence again.
+
+    An svg fence is sanitised here. A mermaid fence is only marked: merman runs in the
+    render child, never here. It is refused here only where merman is not installed
+    (``mermaid.EXTRA_REASON``), which is read from metadata without importing it.
     """
     key = (said, text)
     held = _MARKS.get(key)
     if held is None:
-        outcome = sanitise(text)
-        held = FigureMark(said, outcome) if isinstance(outcome, Sanitised) else outcome
+        held = _mermaid_mark(said, text) if _word(said) == "mermaid" else _svg_mark(said, text)
         _MARKS[key] = held
         while len(_MARKS) > _MARKS_KEPT:
             _MARKS.popitem(last=False)
@@ -134,11 +186,24 @@ def mark(said: str, text: str) -> FigureMark | Refused:
     return held
 
 
-def refusal_line(reason: str) -> str:
+def _svg_mark(said: str, text: str) -> FigureMark | Refused:
+    outcome = sanitise(text)
+    return FigureMark(said, outcome) if isinstance(outcome, Sanitised) else outcome
+
+
+def _mermaid_mark(said: str, text: str) -> FigureMark | Refused:
+    version = mermaid.version()
+    if version is None:
+        return Refused(mermaid.EXTRA_REASON)
+    keyed = f"merman {version}\0{text}".encode("utf-8", "surrogatepass")
+    return FigureMark(said, None, source=text, sha=hashlib.sha256(keyed).hexdigest())
+
+
+def refusal_line(reason: str, said: str = "svg") -> str:
     """
     The line set above a fence that is not drawn as a figure.
     """
-    return f"svg not drawn: {reason}"
+    return f"{_word(said) or 'svg'} not drawn: {reason}"
 
 
 def fence_text(said: str, text: str) -> str:
@@ -256,6 +321,11 @@ class _State:
     backoff: OrderedDict[str, float]
     # Content asked again after a transient failure; another one is kept for good.
     retried: OrderedDict[str, None]
+    # Mermaid diagrams laid out, by their mark's sha (source and merman version): the
+    # natural size a re-hosted figure answers its height from at once.
+    layouts: OrderedDict[str, Sanitised] = field(default_factory=OrderedDict)
+    # Mermaid diagrams asked of the render child and not yet answered, by sha.
+    laying: set[str] = field(default_factory=set)
     pumps: int = 0
     upload: Callable[[bytes, int, int], Any] = _upload
     renderer: Callable[[], render.Renderer] = render.renderer
@@ -285,6 +355,15 @@ def pump() -> None:
         key = result.key
         if not (isinstance(key, tuple) and len(key) == 2):
             continue
+        if key[0] == _LAYOUT:
+            sha = key[1]
+            state.laying.discard(sha)
+            if isinstance(result, render.Laid):
+                _keep(state.layouts, sha, result.sanitised, _LAYOUTS_KEPT)
+                state.backoff.pop(sha, None)
+            elif isinstance(result, render.Failed):
+                _fail(state, sha, result)
+            continue
         sha, scale = key
         state.asked.pop(key, None)
         try:
@@ -299,17 +378,26 @@ def _take(state: _State, sha: str, scale: float, result: render.Result) -> None:
         raster = _Raster(texture, result.width, result.height)
         state.textures.put((sha, scale, result.width), raster, state.pumps)
         state.backoff.pop(sha, None)
-    elif result.transient and sha not in state.retried:
+    elif isinstance(result, render.Failed):
+        _fail(state, sha, result)
+
+
+def _fail(state: _State, sha: str, result: render.Failed) -> None:
+    """
+    A render or a layout that failed: backed off once if the machine may have caused
+    it, else kept, and the figure shows its source under the reason.
+    """
+    if result.transient and sha not in state.retried:
         _keep(state.backoff, sha, state.clock() + RETRY_AFTER_S)
     else:
         state.backoff.pop(sha, None)
         _keep(state.failures, sha, result.reason)
 
 
-def _keep(held: OrderedDict[str, Any], sha: str, value: Any) -> None:
+def _keep(held: OrderedDict[str, Any], sha: str, value: Any, kept: int = _FAILURES_KEPT) -> None:
     held[sha] = value
     held.move_to_end(sha)
-    while len(held) > _FAILURES_KEPT:
+    while len(held) > kept:
         held.popitem(last=False)
 
 
@@ -339,6 +427,8 @@ def release_all() -> None:
     _STATE.asked.clear()
     _STATE.backoff.clear()
     _STATE.retried.clear()
+    _STATE.layouts.clear()
+    _STATE.laying.clear()
     _STATE.pumps = 0
 
 
@@ -382,20 +472,43 @@ class FigureWidget:
     def _failure(self) -> str | None:
         return _STATE.failures.get(self._mark.sha)
 
+    def _sanitised(self) -> Sanitised | None:
+        """
+        What the figure is drawn from. For a mermaid fence not yet laid out, ``None``,
+        and the layout is asked of the render child if it has not been.
+        """
+        natural = self._mark.sanitised
+        if natural is None and self._mark.source is not None:
+            self._lay_out(self._mark.source)
+        return natural
+
+    def _lay_out(self, source: str) -> None:
+        sha = self._mark.sha
+        if sha in _STATE.laying or sha in _STATE.failures or not _may_ask(sha):
+            return
+        _STATE.laying.add(sha)
+        _STATE.renderer().lay_out((_LAYOUT, sha), source)
+
     def size_for(self, width_px: float) -> tuple[float, float]:
         """
         The drawn size at ``width_px``: no wider than the natural width, at its aspect.
+        ``PLACEHOLDER_HEIGHT`` tall at ``width_px`` while a mermaid fence is laid out.
         """
-        natural = self._mark.sanitised
+        natural = self._sanitised()
+        if natural is None:
+            return max(1.0, width_px), PLACEHOLDER_HEIGHT
         wide = max(1.0, min(width_px, natural.width))
         return wide, wide * natural.height / natural.width
 
     def height_for(self, width_px: float) -> float:
         failure = self._failure()
         if failure is not None:
-            said, source = self._failed_heights(refusal_line(failure), width_px)
+            said, source = self._failed_heights(self._refusal(failure), width_px)
             return said + _spacing() + source
         return self.size_for(width_px)[1]
+
+    def _refusal(self, reason: str) -> str:
+        return refusal_line(reason, self._mark.said)
 
     def draw(self, *, palette: Any = None, width_px: float | None = None) -> object:
         from imgui_bundle import imgui as im
@@ -404,15 +517,16 @@ class FigureWidget:
         at = im.get_cursor_screen_pos()
         failure = self._failure()
         if failure is not None:
-            self._draw_failed(im, refusal_line(failure), at.x, at.y, wide)
+            self._draw_failed(im, self._refusal(failure), at.x, at.y, wide)
             return True
+        natural = self._sanitised()
         w, h = self.size_for(wide)
         # The block's own rectangle: nothing drawn here reaches above or left of it.
         im.push_clip_rect(im.ImVec2(at.x, at.y), im.ImVec2(at.x + wide, at.y + h), True)
         try:
             scale = _density(im)
             x, y = snapped(at.x, at.y, scale)
-            raster = self._raster(im, w, scale)
+            raster = None if natural is None else self._raster(im, natural, w, scale)
             if raster is None:
                 from .. import theme
 
@@ -428,12 +542,12 @@ class FigureWidget:
             im.pop_clip_rect()
         return True
 
-    def _raster(self, im: Any, w: float, scale: float) -> _Raster | None:
+    def _raster(self, im: Any, natural: Sanitised, w: float, scale: float) -> _Raster | None:
         """
         The raster to draw at drawn width ``w``, asking for the right one where it is
         not held.
         """
-        width, _ = render.raster_size(self._mark.sanitised, w, scale)
+        width, _ = render.raster_size(natural, w, scale)
         frame = im.get_frame_count()
         if self._wanted != (scale, width):
             self._wanted, self._since = (scale, width), frame
@@ -445,7 +559,7 @@ class FigureWidget:
         if meanwhile is None or frame - self._since >= STABLE_FRAMES:
             if _STATE.asked.get((sha, scale)) != width and _may_ask(sha):
                 _STATE.asked[(sha, scale)] = width
-                _STATE.renderer().submit((sha, scale), self._mark.sanitised, w, scale)
+                _STATE.renderer().submit((sha, scale), natural, w, scale)
         return meanwhile
 
     def _failed_heights(self, reason: str, wide: float) -> tuple[float, float]:

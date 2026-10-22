@@ -72,10 +72,11 @@ stream does** (``Stream._ink``): its text has ended, so the session pane's last
 run, which stays a stream after its turn ends, draws a diff fence as DETAIL's
 settled document of the same text does.
 
-**A ```` ```svg ```` fence is a figure once it has settled** (``figures.host``):
-in a settled document, and in a stream once the stream has committed the fence
-or closed, open or not (``_Captioned``). Until then it is code. One the sanitiser
-refuses stays code, under a line in the warn ink saying why. Both kinds of
+**A ```` ```svg ```` or ```` ```mermaid ```` fence is a figure once it has settled**
+(``figures.host``): in a settled document, and in a stream once the stream has
+committed the fence or closed, open or not (``_Captioned``). Until then it is code.
+One the sanitiser refuses, or a mermaid fence where merman is not installed, stays
+code, under a line in the warn ink saying why. Both kinds of
 hosting go through one dispatcher (``_Hosts``), which the diff rule above still
 governs for diffs. A figure's pixels arrive frames after it is first drawn,
 from a render process (``figures.render``): the one thing here built over more
@@ -169,7 +170,7 @@ import unicodedata
 from collections.abc import Callable, Collection, Hashable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from ... import theme as ui_theme
 from ...log import LOG
@@ -615,15 +616,24 @@ class _Captioned:
     ``revision`` changes with ``hosting`` as well, because the view reads the
     blocks again only when it changed.
 
-    **A ```` ```svg ```` fence is marked as a figure once it has settled**: once
-    the stream has committed it, or ``closed`` (the stream sets it with
-    ``hosting``). Until then it is code under its caption. The mark has to change
-    the block's value at commit: the view asks its host about a block only when
-    the block is a new value, and a committed fence is the same object as its
-    last open form (probe S1, the planning record's §3.6). So whether an svg
+    **A ```` ```svg ```` or ```` ```mermaid ```` fence is marked as a figure once it
+    has settled**: once the stream has committed it, or ``closed`` (the stream sets
+    it with ``hosting``). Until then it is code under its caption. The mark has to
+    change the block's value at commit: the view asks its host about a block only
+    when the block is a new value, and a committed fence is the same object as its
+    last open form (probe S1, the planning record's §3.6). So whether a figure
     fence has settled is part of what its answer is kept by, and ``revision``
     changes with ``closed`` too. Any other fence is answered with the same block
     across its commit, so the view does not describe it again.
+
+    **Only ``_FORWARDED`` is the stream's.** Python calls ``__getattr__`` for a name
+    the class lacks and also when one of its own properties raises
+    ``AttributeError`` inside, so forwarding every name would answer the stream's
+    raw blocks, uncaptioned and unmarked, for a defect in ``blocks``, with no error.
+    Each property here turns an ``AttributeError`` inside it into a
+    ``RuntimeError`` (``_own``) rather than letting it escape as one: the library
+    reads ``committed`` and ``sources`` with ``getattr`` defaults, which would
+    swallow it as quietly.
     """
 
     def __init__(self, stream: Any) -> None:
@@ -633,20 +643,31 @@ class _Captioned:
         # for, and whether each has that block's source.
         self._out: tuple[Any, ...] = ()
         self._from: list[int] = []
-        self._own: list[bool] = []
+        self._mine: list[bool] = []
         self.plain = False
         self.hosting = False
         self.closed = False
 
     def __getattr__(self, name: str) -> Any:
-        return getattr(self._stream, name)
+        if name in _FORWARDED:
+            return getattr(self._stream, name)
+        raise AttributeError(f"_Captioned does not forward {name!r} to its stream")
+
+    def _own(self, name: str, read: Callable[[], _T]) -> _T:
+        try:
+            return read()
+        except AttributeError as exc:
+            raise RuntimeError(f"_Captioned.{name} raised AttributeError: {exc}") from exc
 
     @property
     def revision(self) -> Any:
-        return (self._stream.revision, self.hosting, self.closed)
+        return self._own("revision", lambda: (self._stream.revision, self.hosting, self.closed))
 
     @property
     def blocks(self) -> tuple[Any, ...]:
+        return self._own("blocks", self._blocks)
+
+    def _blocks(self) -> tuple[Any, ...]:
         from ...figures import host as figures_host
 
         made: dict[int, tuple[Any, bool, bool, bool, tuple[Any, ...]]] = {}
@@ -674,22 +695,40 @@ class _Captioned:
             mine = len(answer) == 1 and answer[0].language != _HOSTED_INFO
             own += [mine] * len(answer)
         self._made = made
-        self._out, self._from, self._own = tuple(out), came, own
+        self._out, self._from, self._mine = tuple(out), came, own
         return self._out
 
     @property
     def committed(self) -> tuple[Any, ...]:
+        return self._own("committed", self._committed)
+
+    def _committed(self) -> tuple[Any, ...]:
         done = len(self._stream.committed)
         count = sum(1 for at in self._from if at < done)
         return self._out[:count]
 
     @property
     def sources(self) -> tuple[Any, ...]:
+        return self._own("sources", self._sources)
+
+    def _sources(self) -> tuple[Any, ...]:
         theirs = tuple(getattr(self._stream, "sources", ()))
         return tuple(
             theirs[at] if mine and at < len(theirs) else None
-            for at, mine in zip(self._from, self._own, strict=True)
+            for at, mine in zip(self._from, self._mine, strict=True)
         )
+
+
+_T = TypeVar("_T")
+
+_FORWARDED = frozenset({"theme", "live_theme", "source"})
+"""
+What ``_Captioned`` answers with its stream's own attribute: the names the library's
+stream view reads that are not the captioned blocks' (``TypesetStreamView``:
+``theme`` when it is made, ``live_theme`` and ``source`` while it draws). Found by
+recording every name ``__getattr__`` was asked across the suite (2026-10-21): these
+three, and nothing else.
+"""
 
 
 class Stream:
@@ -1287,7 +1326,7 @@ def _captioned(
             if isinstance(marked, figures_host.FigureMark):
                 out.append(replace(block, language=marked))
                 continue
-            why = figures_host.refusal_line(marked.reason)
+            why = figures_host.refusal_line(marked.reason, said)
             out.append(replace(block, text=why, language=_Warned(len(why))))
             out.append(replace(block, text=f"{said}\n{block.text}"))
         elif hosting and (model := diffs.fence_diff(said, block.text)) is not None:

@@ -32,6 +32,12 @@ and code in. ``serif_family`` is the one that carries a name that matches nothin
 
 **Pillow decodes in the child.** resvg_py returns only PNG (probe T1), and the frame
 thread needs RGBA for a texture.
+
+**Mermaid is laid out in the same child** (``lay_out``, ``mermaid.layout``), so merman
+never runs on the frame thread either. The child answers a ``Laid``: the sanitised
+SVG and its natural size, which the host then rasterises through ``submit`` as it
+would an svg fence's. A layout is one more request in the same queue, under the same
+timeout and the same failure kinds.
 """
 
 from __future__ import annotations
@@ -159,7 +165,19 @@ class Failed:
     transient: bool = False
 
 
-Result = Rendered | Failed
+@dataclass(frozen=True, slots=True)
+class Laid:
+    """
+    A ```` ```mermaid ```` source laid out for ``key``: merman's SVG after
+    ``mermaid.visible_labels`` and ``sanitise``, with its natural size. Made in the
+    child; a refusal comes back as a ``Failed`` that is not transient.
+    """
+
+    key: Hashable
+    sanitised: Sanitised
+
+
+Result = Rendered | Laid | Failed
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,14 +229,24 @@ def raster_size(sanitised: Sanitised, px_width: float, scale: float) -> tuple[in
     return width, max(1, math.ceil(width * aspect))
 
 
+_RASTER = "raster"
+_MERMAID = "mermaid"
+
+
 @dataclass(frozen=True, slots=True)
 class _Request:
+    """
+    One request to the child. ``kind`` is ``_RASTER`` (``svg`` is sanitised SVG) or
+    ``_MERMAID`` (``svg`` is a diagram's source, and the sizes are unused).
+    """
+
     seq: int
     key: Hashable
     svg: str
     width: int
     px_width: float
     scale: float
+    kind: str = _RASTER
 
 
 @dataclass(eq=False)
@@ -299,6 +327,7 @@ class Renderer:
             if not (
                 flying is not None
                 and flying.key == key
+                and flying.kind == _RASTER
                 and flying.width == width
                 and flying.svg == sanitised.svg
             ):
@@ -307,6 +336,27 @@ class Renderer:
             self._dispatch()
         except Exception as exc:
             self._failed.append(Failed(key, f"render not started: {_one_line(exc)}", True))
+
+    def lay_out(self, key: Hashable, source: str) -> None:
+        """
+        Ask for a ```` ```mermaid ```` fence's ``source`` laid out in the child, under
+        ``key``: answered with a ``Laid``, or a ``Failed`` carrying merman's reason.
+        Queued, coalesced and timed as a raster request is; never blocks or raises.
+        """
+        try:
+            flying = self._inflight
+            self._pending.pop(key, None)
+            if not (
+                flying is not None
+                and flying.key == key
+                and flying.kind == _MERMAID
+                and flying.svg == source
+            ):
+                self._seq += 1
+                self._pending[key] = _Request(self._seq, key, source, 0, 0.0, 1.0, _MERMAID)
+            self._dispatch()
+        except Exception as exc:
+            self._failed.append(Failed(key, f"layout not started: {_one_line(exc)}", True))
 
     def poll(self) -> list[Result]:
         """
@@ -455,7 +505,7 @@ def _serve(
         child.ready = True
         while (request := child.requests.get()) is not None:
             child.busy_since = time.monotonic()
-            conn.send((request.width, request.svg))
+            conn.send((request.kind, request.width, request.svg))
             head = conn.recv()
             result: Result
             if head[0] == "ok":
@@ -463,6 +513,8 @@ def _serve(
                 result = Rendered(
                     request.key, head[1], head[2], rgba, request.px_width, request.scale
                 )
+            elif head[0] == "laid":
+                result = Laid(request.key, Sanitised(str(head[1]), float(head[2]), float(head[3])))
             else:
                 result = Failed(request.key, str(head[1]))
             child.busy_since = None
@@ -561,11 +613,14 @@ def child_main(conn: Connection, fonts: Fonts, memory_limit: int | None = None) 
     conn.send(("ready", failure))
     while True:
         try:
-            width, svg = conn.recv()
+            kind, width, svg = conn.recv()
         except EOFError:
             return
         if failure is not None:
             conn.send(("err", failure))
+            continue
+        if kind == _MERMAID:
+            conn.send(_laid(svg))
             continue
         try:
             w, h, rgba = rasterise(svg, width, options)
@@ -574,6 +629,22 @@ def child_main(conn: Connection, fonts: Fonts, memory_limit: int | None = None) 
             continue
         conn.send(("ok", w, h))
         conn.send_bytes(rgba)
+
+
+def _laid(source: str) -> tuple[Any, ...]:
+    """
+    The child's answer to a mermaid request: ``("laid", svg, width, height)`` or
+    ``("err", reason)``. merman is imported here, on the first diagram, and only here.
+    """
+    try:
+        from . import mermaid
+
+        outcome = mermaid.layout(source)
+    except Exception as exc:
+        return ("err", f"mermaid layout failed: {_one_line(exc)}")
+    if isinstance(outcome, Sanitised):
+        return ("laid", outcome.svg, outcome.width, outcome.height)
+    return ("err", outcome.reason)
 
 
 def family_name(path: str) -> str:
@@ -685,6 +756,7 @@ def shutdown() -> None:
 __all__: Sequence[str] = (
     "Failed",
     "Fonts",
+    "Laid",
     "MAX_RASTER_PIXELS",
     "MAX_TEXTURE_SIDE",
     "MEMORY_LIMIT_BYTES",

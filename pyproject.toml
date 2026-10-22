@@ -126,6 +126,30 @@ dev = [
     # glReadPixels grab.
     "pyopengl>=3.1",
 ]
+# Lays out ```mermaid fences, in pptmstr/figures/render.py's child process only
+# (pptmstr/figures/mermaid.py imports it there, lazily). Without it a mermaid fence
+# stays code under a one-line reason that names this extra.
+#
+# OPTIONAL because merman 0.9.1's Linux x86-64 wheel is manylinux_2_35, and
+# pptmstr's floor is glibc 2.28: as a dependency it would fail the whole install on
+# a supported machine between the two (planning/2026-10-18-vector-displays-beside-
+# typeset-text.md §3.3). For the same reason it is NOT in `dev`: bootstrap.sh
+# installs `.[dev]`, so it would fail there too. Ask for it with
+# `pip install -e '.[dev,mermaid]'`. scripts/lock.py locks `dev` only, so the
+# release lock does not name it either.
+#
+# Exact because every measurement the route rests on was taken on 0.9.1 (probe M1,
+# notes/vector-rendering/probe-m1-r2.md): that `{"svg":{"pipeline":"resvg-safe"}}`
+# is accepted and emits no <foreignObject>, the nested-<svg> label boxes the
+# mermaid post-pass opens, and the root's max-width the natural size is read from.
+# It is an alpha (Development Status 3) UniFFI binding, so any of those may move.
+#
+# Licence: MIT OR Apache-2.0. Its THIRD_PARTY_NOTICES.md lists, among the
+# components of its artifacts, Rust translations of Eclipse ELK under EPL-2.0 and
+# KaTeX font files under OFL-1.1; the wheel ships those licence files. Which
+# artifact scope the Python wheel is built from the notices do not say, so whether
+# the installed library contains either was not established.
+mermaid = ["merman==0.9.1"]
 
 [project.scripts]
 # Not `pptmstr.app:main`: the entry settles where the text library is found and
