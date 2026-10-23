@@ -2379,9 +2379,9 @@ class AgentSession:
         shows as written and diagrams in fences nothing draws. It is read here, at
         launch, from what is installed, so a session is not told about a renderer
         this process lacks. It follows the briefing and is the whole append where
-        there is no briefing, so a solo launch carries an append too: 903
+        there is no briefing, so a solo launch carries an append too: 855
         characters with every renderer installed (``fences.PROMPT_LIMIT`` bounds
-        it at 1,000). The rules for each fence are not in it: they are the
+        it at 950). The rules for each fence are not in it: they are the
         shipped skill the text names (``plugins``), which a session loads when it
         draws. It says the fences are drawn "when pptmstr typesets replies",
         because the operator can switch typeset text off after the launch and the

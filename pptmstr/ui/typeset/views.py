@@ -72,11 +72,12 @@ stream does** (``Stream._ink``): its text has ended, so the session pane's last
 run, which stays a stream after its turn ends, draws a diff fence as DETAIL's
 settled document of the same text does.
 
-**A ```` ```svg ```` or ```` ```mermaid ```` fence is a figure once it has settled**
+**A ```` ```mermaid ```` fence is a figure once it has settled**
 (``figures.host``): in a settled document, and in a stream once the stream has
 committed the fence or closed, open or not (``_Captioned``). Until then it is code.
-One the sanitiser refuses, or a mermaid fence where merman is not installed, stays
-code, under a line in the warn ink saying why. Both kinds of
+One where merman is not installed stays code, under a line in the warn ink saying
+why. A ```` ```svg ```` fence is code, as any language outside ``figures.fences``
+is. Both kinds of
 hosting go through one dispatcher (``_Hosts``), which the diff rule above still
 governs for diffs. A figure's pixels arrive frames after it is first drawn,
 from a render process (``figures.render``): the one thing here built over more
@@ -643,7 +644,7 @@ class _Captioned:
     ``revision`` changes with ``hosting`` as well, because the view reads the
     blocks again only when it changed.
 
-    **A ```` ```svg ```` or ```` ```mermaid ```` fence is marked as a figure, and a
+    **A ```` ```mermaid ```` fence is marked as a figure, and a
     ```` ```math ```` fence set as a formula, once it has settled**
     (``settles_rendered``): once the stream has committed it, or ``closed`` (the
     stream sets it with ``hosting``), a formula read in the stream's own theme.
@@ -1605,10 +1606,10 @@ def _captioned(
     warn ink (``_Warned``).
 
     With ``figures``, a fence whose info string asks for a figure
-    (``figures.host.is_figure_fence``) and that the sanitiser passes keeps the
-    text it was written with and is marked for the figure host
-    (``figures.host.FigureMark``). One the sanitiser refuses is captioned code as
-    any other, under a block of its own saying why in the warn ink.
+    (``figures.host.is_figure_fence``) and that ``figures.host.mark`` accepts keeps
+    the text it was written with and is marked for the figure host
+    (``figures.host.FigureMark``). One it refuses is captioned code as any other,
+    under a block of its own saying why in the warn ink.
 
     With ``figures``, a ```` ```math ```` fence (``is_math_fence``) is the display
     formula it holds, read alone in ``theme`` (the document theme when none is

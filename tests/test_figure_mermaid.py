@@ -1,7 +1,7 @@
 """
 A committed ```mermaid fence drawn as a figure: laid out by merman in the render
-child, opened by the post-pass, passed through the svg sanitiser, and hosted as an
-svg figure is.
+child, opened by the post-pass, passed through the svg sanitiser, rasterised, and
+hosted as a figure.
 
 Tests marked ``needs_merman`` run real merman in a real render child and skip where
 the optional ``mermaid`` extra is not installed. The rest hold the host and the

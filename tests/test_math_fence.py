@@ -170,7 +170,7 @@ def test_only_a_rendered_fence_changes_its_answer_at_commit() -> None:
 
 
 def test_the_rule_names_the_rendered_fences() -> None:
-    for said in ("math", "Math", "math display", "svg", "mermaid"):
+    for said in ("math", "Math", "math display", "mermaid"):
         assert views.settles_rendered(said), said
     for said in ("python", "maths", "latex", "tex", ""):
         assert not views.settles_rendered(said), said

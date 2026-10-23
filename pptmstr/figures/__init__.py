@@ -1,3 +1,3 @@
 """
-Figures drawn beside typeset text: the pure policy that model-written SVG passes first.
+Figures drawn beside typeset text: the pure policy every SVG passes before it is drawn.
 """

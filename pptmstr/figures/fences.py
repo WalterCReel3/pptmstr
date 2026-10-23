@@ -69,12 +69,6 @@ _TYPESET = ("imscribe", "imtypeset")
 # What any figure imports, read from the module that imports it.
 _RASTER = render.DISTRIBUTIONS
 
-_SVG = (
-    "```svg: one SVG image. It must be self-contained: no <script>, no event "
-    "attributes, no <image>, no <foreignObject>, no filters or patterns, and no "
-    'reference outside the document (url(#id) and href="#id" only). Give width and '
-    "height, or a viewBox. End every font-family with serif, sans-serif or monospace."
-)
 _MERMAID = (
     "```mermaid: one Mermaid diagram. Flowchart, sequence, class, state and ER "
     "diagrams are the kinds checked."
@@ -95,7 +89,6 @@ _MATH = (
 )
 
 RENDERED: tuple[Fence, ...] = (
-    Fence("svg", "figure", _RASTER, _SVG),
     Fence("mermaid", "figure", (*_RASTER, "merman"), _MERMAID),
     Fence("math", "formula", (), _MATH),
 )
@@ -207,46 +200,32 @@ def prompt(rows: Iterable[Fence], *, skill: bool = True) -> str:
     return "\n".join(lines)
 
 
-PROMPT_LIMIT = 1_000
+PROMPT_LIMIT = 950
 """
 The most characters ``prompt`` may run to with every row in it: it rides on every
 request of every session, so it is held short by a test rather than by care. The
-floor measured 903 with every row (2026-10-21), so this leaves 97 of headroom.
+floor measured 855 with every row (2026-10-22), so this leaves 95 of headroom.
 """
 
-
-FIGURE_WIDTH = 600
-"""
-The widest a figure is told to be, in px. Figures are scaled down to the pane and
-never up (``host.FigureWidget.size_for``), and replies are drawn in SESSION and CONTEXT:
-SESSION is (1 - 0.21) * (1 - 0.26) of the window (``app._focus_layout``), 599 at
-the 1024-wide smallest window and 877 at the 1500-wide default, so 600 is drawn
-unscaled there at every supported size and 11 px text stays 11 px. CONTEXT, about
-380 at the default, scales any useful figure down regardless. For a Mermaid figure
-the width is merman's and not the session's, and what it is for a graph of twenty
-nodes, and the text size once scaled to this, is unmeasured.
-"""
 
 _DISPLAY = (
     "Write the fence; the pane is the display. Unless asked for an export, do not "
     "render to a file, look for a converter, or preview with other tools."
 )
-_MERMAID_FIRST_WORDS = {"mermaid", "svg"}
+_MERMAID_FIRST_WORDS = {"mermaid"}
 _MERMAID_FIRST = (
     "For nodes and edges (dependencies, flows, sequences, states, entities) use "
-    "```mermaid, which lays them out; ```svg is for what Mermaid cannot draw. "
-    "Never compute a graph layout by hand."
+    "```mermaid, which lays them out. Never compute a graph layout by hand."
 )
 _CARD = (
-    "Figures sit on a near-white card, scaled down to fit the pane: design for "
-    "white, with literal colours, text of 11 px or more, and at most about "
-    f"{FIGURE_WIDTH} px wide."
+    "A diagram sits on a near-white card, scaled down to fit the pane: a colour it "
+    "is styled with (classDef, style) is read against white."
 )
 
 _SKILL_DESCRIPTION = (
     "Rules for drawing in a pptmstr reply. Load before writing any diagram, "
     "flowchart, dependency graph, sequence or state diagram, chart, plot or "
-    "mathematical formula, so it is written as a mermaid, svg or math fence the "
+    "mathematical formula, so it is written as a mermaid or math fence the "
     "reply pane draws."
 )
 
@@ -254,7 +233,7 @@ _SKILL_DESCRIPTION = (
 def skill_text(rows: Iterable[Fence] = RENDERED) -> str:
     """
     The packaged skill's SKILL.md (``plugins.figures_skill``): every row's rules,
-    the choice between Mermaid and SVG, the card, and the export exception.
+    Mermaid for graphs, the card, and the export exception.
 
     Every row and not the installed ones: the file ships in the package and cannot
     know what this process has, so it defers to the floor, which is built at launch

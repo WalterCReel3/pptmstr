@@ -26,7 +26,7 @@ RESUMED = "11111111-2222-3333-4444-555555555555"
 
 # Info strings the dispatcher is asked about: every row as written and shouted,
 # with an attribute after it, and words that are near a row and are not one.
-NOT_ROWS = ("", "python", "svgx", "maths", "mermaid-js", "latex", "tex", "dot", "diff")
+NOT_ROWS = ("", "python", "svg", "svgx", "maths", "mermaid-js", "latex", "tex", "dot", "diff")
 
 
 def _candidates() -> list[str]:
@@ -230,12 +230,9 @@ def test_the_floor_keeps_what_a_skill_left_unloaded_cannot_prevent() -> None:
 def test_the_skill_says_how_to_write_each_fence_and_design_for_the_pane() -> None:
     text = fences.skill_text()
     assert text.startswith("---\nname: pptmstr-figures\ndescription: ")
-    assert "End every font-family with serif, sans-serif or monospace." in text
-    assert "<script>" in text and "<image>" in text
     assert "the pane is the display" in text
     assert "Unless asked for an export, do not render to a file" in text
-    assert "near-white card" in text and "literal colours" in text
-    assert f"at most about {fences.FIGURE_WIDTH} px wide" in text
+    assert "near-white card" in text and "read against white" in text
     assert "win over a skill's general advice" in text
     assert MERMAID_FIRST in text and "Never compute a graph layout by hand" in text
 
@@ -248,20 +245,32 @@ def test_the_skills_description_triggers_on_what_is_drawn() -> None:
     assert ": " not in description, "a plain YAML scalar may not hold ': '"
 
 
-@pytest.mark.parametrize(
-    "words", [("svg", "math"), ("svg",), ("math",)], ids=["svg+math", "svg", "math"]
-)
-def test_without_the_mermaid_row_the_text_says_nothing_of_mermaid(words: tuple[str, ...]) -> None:
-    rows = tuple(row for row in fences.RENDERED if row.word in words)
+def test_without_the_mermaid_row_the_text_says_nothing_of_mermaid() -> None:
+    rows = tuple(row for row in fences.RENDERED if row.word == "math")
     text = fences.prompt(rows)
     skill = fences.skill_text(rows)
     assert "mermaid" not in text.lower()
     assert "mermaid" not in skill.split("\n---\n", 1)[1].lower(), "the body follows the rows"
-    for row in rows:
-        assert f"```{row.word}" in text and row.says in skill
+    assert "```math" in text and rows[0].says in skill
     assert len(text) <= fences.PROMPT_LIMIT
-    assert ("near-white card" in skill) == ("svg" in words), "card advice is for figures"
+    assert "near-white card" not in skill, "card advice is for figures"
     assert "the pane is the display" in text
+
+
+def test_the_drawn_fences_are_mermaid_and_math_and_svg_is_none_of_them() -> None:
+    """
+    The operator dropped the ```svg fence (planning record §8): the table, the floor,
+    the skill and the dispatcher all agree on {mermaid, math}, and none of them
+    mentions svg as something drawn.
+    """
+    assert fences.WORDS == {"mermaid", "math"}
+    assert fences.FIGURE_WORDS == {"mermaid"} and fences.FORMULA_WORDS == {"math"}
+    text = fences.prompt(fences.RENDERED)
+    skill = fences.skill_text()
+    assert "svg" not in text.lower() and "svg" not in skill.lower()
+    for said in ("svg", "SVG", "svg title=x"):
+        assert not views.settles_rendered(said)
+        assert not host.is_figure_fence(said) and not views.is_math_fence(said)
 
 
 def test_the_mermaid_preference_follows_the_installed_mermaid_row(
@@ -408,15 +417,3 @@ def test_what_the_prompt_calls_refused_is_refused(body: str, seam: Any) -> None:
 
     block, why = gate.formula(body, themes.document_theme())
     assert block is None and why
-
-
-def test_an_svg_written_as_the_prompt_asks_passes_the_sanitiser() -> None:
-    svg = (
-        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 40">'
-        '<defs><linearGradient id="g"><stop offset="0" stop-color="#36c"/></linearGradient></defs>'
-        '<rect width="120" height="40" fill="url(#g)"/>'
-        '<text x="10" y="25" font-family="Inter, sans-serif">label</text></svg>'
-    )
-    out = sanitise.sanitise(svg)
-    assert isinstance(out, sanitise.Sanitised), out
-    assert 'font-family="Inter, sans-serif"' in out.svg

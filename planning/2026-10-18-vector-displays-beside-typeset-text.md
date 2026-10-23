@@ -3,7 +3,9 @@
 **Dated:** 2026-10-18 ·
 **Status:** slice 1 (```` ```svg ```` fences, §8) is built, at commits
 `912471d`, `0a542d1` and `6a285ea`, and the operator checked it in the running app
-on Linux on 2026-10-21 (§8, slice 1). Slice 2 (```` ```mermaid ````, `0e219b2`) is
+on Linux on 2026-10-21 (§8, slice 1). The ```` ```svg ```` fence itself was dropped
+by the operator on 2026-10-22 (§8, "The svg fence is dropped"); slice 1's sanitiser,
+render child and raster path stay, because Mermaid's SVG goes through them. Slice 2 (```` ```mermaid ````, `0e219b2`) is
 built except its source/figure toggle, which is not declared; the
 ```` ```math ```` fence (`93345b4`) and slice 4, the session declaration
 (`36fb336`), are built; the review of those three (task `fence-review`) and
@@ -176,7 +178,8 @@ The spot-checks behind the recommendation:
 ### 3.1 The intermediate: SVG for diagrams, draw calls for data
 
 **SVG is the intermediate for anything that has to be laid out as a picture:**
-- an ```` ```svg ```` fence, where the SVG is the input;
+- an ```` ```svg ```` fence, where the SVG is the input (dropped as a fence on
+  2026-10-22, §8: SVG stays the intermediate, and Claude no longer writes it);
 - Mermaid, where every Python route emits SVG [op-run, `mermaid.md`];
 - later, DOT through pygraphviz and full Vega-Lite through vl-convert, both of
   which emit SVG with `<text>` labels. For vl-convert that is [op-run,
@@ -1042,6 +1045,29 @@ same dispatcher and the same table of what renders, and the route by which imscr
 sets it is probe `math-probe`'s to name. The table also feeds the session prompt
 (§8 slice 4), which slice 1 shipped without.
 
+**The svg fence is dropped, by the operator's call, 2026-10-22.** Mermaid and
+mathematics cover what sessions draw. The first real SVG session (§10) showed that
+hand-written SVG is the trap: a model laying out a picture by hand is the failure,
+whatever the fence. Mermaid through merman covers all five diagram families that
+were checked (flowchart, sequence, class, state, ER), each laid out by merman and
+bounded and isolated in the render child. A native SVG fence comes back only if
+interactive native rendering ever needs one.
+- **What changed** (task `drop-svg-fence`): the `svg` row is gone from
+  `figures.fences.RENDERED`, so the dispatcher, the session floor and the shipped
+  skill all name ```` ```mermaid ```` and ```` ```math ```` and nothing else. A
+  ```` ```svg ```` fence is ordinary code under its caption, as any unlisted
+  language is: never marked, never hosted, no reason line. `host.mark` no longer
+  sanitises a fence; every figure mark carries a Mermaid source. The floor and the
+  skill lost the SVG-only advice (the element rules, the font-family generics, the
+  600 px width, literal colours and the 11 px text size, which a Mermaid author
+  cannot set); the card line now says a diagram's styled colours are read against
+  white. The floor measured 855 characters with every row, and `PROMPT_LIMIT`
+  went from 1,000 to 950.
+- **What stays, until native Mermaid replaces them:** the sanitiser with its
+  general SVG rules (§3.4), the render child, the raster path, the held layouts and
+  the card. merman's output is SVG, and it passes the same post-pass, `sanitise()`,
+  raster and card it did before.
+
 **The math fence as built** (`93345b4`, task `math-fence`, builder-23;
 [relayed] from its result unless marked):
 - **Route (b):** a settled fence's body alone is read with mathematics on, as
@@ -1162,7 +1188,8 @@ the figure dispatcher.
    and grows with each slice.
    **Built (`36fb336`, task `fence-prompt`, builder-25; amended at fence-fix).**
    - **One table:** `figures.fences.RENDERED`, rows `svg` and `mermaid`
-     (figures) and `math` (a formula). The dispatcher (`host.is_figure_fence`,
+     (figures) and `math` (a formula); the `svg` row was removed on 2026-10-22
+     (above, "The svg fence is dropped"). The dispatcher (`host.is_figure_fence`,
      `views.is_math_fence`, `views.settles_rendered`) and the prompt
      (`fences.prompt`) read it and nothing else; a test adds a word to the
      table and finds the dispatcher settling it. A row whose renderer is not
@@ -1180,34 +1207,25 @@ the figure dispatcher.
      after the launch and the prompt is not rebuilt for that; and it says no
      other fence is a figure or a formula, rather than "any other fence shows
      as code", which an honest ```` ```diff ```` fence does not.
-   - **The cost, accepted by the lead:** 1,968 characters on every launch with
-     every renderer installed, held under `fences.PROMPT_LIMIT` (2,000) by a
-     test; and a solo launch now passes an append where it passed none, which
-     changes its argv. The 2,000 bound stands: what grows the text next has to
-     trim the math row (the longest) or argue for a larger bound.
+   - **The cost:** 855 characters on every launch with every renderer
+     installed, held under `fences.PROMPT_LIMIT` (950) by a test, since the
+     drawing rules moved into the shipped `pptmstr:pptmstr-figures` skill (§10.5)
+     and the svg fence was dropped (2026-10-22). A solo launch passes an append
+     where it once passed none, which changes its argv.
    - builder-25 edited `pptmstr/figures/host.py` (its own word set, a second
      table) and four tests in `tests/test_driver.py` (the old solo and resume
      prompt shapes) outside its task's writes, to make the table single; posted
      as an incident and accepted by the lead [relayed].
-   - The exact text, every renderer installed, after task `fence-guidance` added
-     the display, Mermaid-preference, card and precedence lines [ran, lead,
-     `fences.session_prompt()` at `fae81fe`]:
+   - The exact text, every renderer installed [ran, lead, `fences.session_prompt()`
+     after task `drop-svg-fence`]:
 
     ## Fences that are drawn
 
-    When pptmstr typesets replies, the pane showing them draws ```svg, ```mermaid, ```math fences once each is closed; otherwise they show as written. No other fence is drawn as a figure or a formula.
-
-    - ```svg: one SVG image. It must be self-contained: no <script>, no event attributes, no <image>, no <foreignObject>, no filters or patterns, and no reference outside the document (url(#id) and href="#id" only). Give width and height, or a viewBox. End every font-family with serif, sans-serif or monospace.
-    - ```mermaid: one Mermaid diagram. Flowchart, sequence, class, state and ER diagrams are the kinds checked.
-    - ```math: one display formula in TeX, without $ or $$ around it. Lines are joined into one, so there is no line break or alignment. Use: _ and ^, \frac, \binom, \sqrt{x}, \sum \prod \int \lim with limits, \left( ... \right), \overline, \underline, Greek letters, the usual relations, arrows and operators, \text{}, \mathrm \mathbf \mathbb \mathcal \operatorname, \sin \cos \log \exp \max \min. Refused: \begin{...} environments (aligned, cases, matrices), \\ and &, accents (\hat \vec \bar \tilde \dot), \displaystyle \dfrac \tfrac \mathit \boldsymbol \color, \big and friends (use \left \right), \sqrt[n], \over \choose, \newcommand \def.
-
+    When pptmstr typesets replies, the pane showing them draws ```mermaid, ```math fences once each is closed; otherwise they show as written. No other fence is drawn as a figure or a formula. A fence that cannot be drawn is shown as its source under a one-line reason.
     $...$ and $$...$$ in prose are not rendered and show as written; put mathematics in a ```math fence.
-    A fence that cannot be drawn is shown as its source under a one-line reason.
-
-    Write the fence; the pane is the display. Do not render to a file, look for a converter, or preview with other tools.
-    For nodes and edges (dependencies, flows, sequences, states, entities) use ```mermaid, which lays them out; ```svg is for what Mermaid cannot draw. Never compute a graph layout by hand.
-    Figures sit on a near-white card, scaled down to fit the pane: design for white, with literal colours, text of 11 px or more, and at most about 600 px wide.
-    These rules win over a skill's general advice.
+    Write the fence; the pane is the display. Unless asked for an export, do not render to a file, look for a converter, or preview with other tools.
+    For nodes and edges (dependencies, flows, sequences, states, entities) use ```mermaid, which lays them out. Never compute a graph layout by hand.
+    Before drawing a diagram, chart or formula, load the pptmstr:pptmstr-figures skill: it has the rules these fences must follow, and they win over a skill's general advice.
 
 5. **On demand only:** DOT through pygraphviz; full Vega-Lite through
    vl-convert behind the URL pre-filter.

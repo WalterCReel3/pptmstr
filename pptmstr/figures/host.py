@@ -1,19 +1,18 @@
 """
-A committed ```` ```svg ```` or ```` ```mermaid ```` fence drawn as a figure in its
-block's place.
+A committed ```` ```mermaid ```` fence drawn as a figure in its block's place.
 
 ``views._captioned`` asks ``mark`` about a fence once it may host one: settled
 documents always, a stream only for a fence it has committed or after it closed
-(``views._Captioned``). A fence ``sanitise`` passes is marked (``FigureMark``) and
-the view's host dispatcher answers it with a ``FigureWidget``; one it refuses is
-never marked and stays code, under a line in the warn ink saying why. So code stays
-code, and only SVG that passed the policy reaches a widget.
+(``views._Captioned``). A fence is marked (``FigureMark``) and the view's host
+dispatcher answers it with a ``FigureWidget``; one refused at ``mark`` is never
+marked and stays code, under a line in the warn ink saying why. A ```` ```svg ````
+fence is not a figure (planning record §8): it is code, as any unlisted language is.
 
 **A mermaid fence is marked without being laid out**: merman runs in the render
-child (``mermaid.layout``), which hands back SVG that has passed the same sanitiser,
-and from then on the figure is drawn exactly as an svg one. Until that arrives the
-figure stands at ``PLACEHOLDER_HEIGHT``, so it jumps once more than an svg figure
-does; the layout is then held by the fence's text and the merman version
+child (``mermaid.layout``), which hands back SVG that has passed the sanitiser, so
+only SVG that passed the policy reaches a widget. Until that arrives the figure
+stands at ``PLACEHOLDER_HEIGHT`` and jumps once more, to its real height, when the
+layout arrives; the layout is then held by the fence's text and the merman version
 (``_State.layouts``), so a re-hosted figure answers its real height at once, and
 by the mark that asked for it, so a figure on screen never loses it to the bound
 on the others. Where merman is not installed the fence is refused at ``mark`` and
@@ -21,19 +20,18 @@ stays code; a merman error arrives later and is drawn as a render failure is, be
 
 **Every figure stands on a light card** (``BACKDROP``): a rounded rectangle
 ``FIGURE_PAD`` wider than the image on each side, painted inside the figure's own
-clip before the image or the outline that stands for it. SVG and Mermaid are
-authored for a white page: on the dark pane merman's dark ink was lost
+clip before the image or the outline that stands for it. Mermaid is authored for
+a white page: on the dark pane merman's dark ink was lost
 (``shots/mermaid-window/3-drawn.png``). One card fixes both routes and does not
 depend on the app's theme; merman's own ``dark`` theme was rejected because it
-fixes Mermaid alone and would make a figure's pixels depend on the app's theme.
+would make a figure's pixels depend on the app's theme.
 The cost is a bright card in the dark theme. A failed figure has no card: its
 source is text in the theme's ink.
 
 **The height is the sanitiser's, not the raster's.** ``height_for(w)`` is
-``min(w - 2p, natural_w) * natural_h / natural_w + 2p`` from the mark, ``p`` being
-``FIGURE_PAD``, answered at once in
-the first frame and after every re-hosting (``Stream._forget`` makes a new view),
-so a figure jumps only once, at commit, when the code block becomes it.
+``min(w - 2p, natural_w) * natural_h / natural_w + 2p`` from the laid-out SVG,
+``p`` being ``FIGURE_PAD``, answered at once once the layout is held, including
+after every re-hosting (``Stream._forget`` makes a new view).
 
 **Pixels come from the render process** (``figures.render``), over frames: a
 widget submits when it has no raster at its drawn width times the display's
@@ -43,8 +41,8 @@ which T1 measured acceptable as a transient and not as a design: there are no
 mipmaps, and labels break up minified by 3x and more. With nothing to show yet, a
 quiet outline of the right size stands there.
 
-**Textures are held by content** (``_Textures``): ``(sha of the sanitised SVG,
-density, raster width)`` to the ``TextureGpu``, bounded by bytes, least recently
+**Textures are held by content** (``_Textures``): ``(the mark's sha, density,
+raster width)`` to the ``TextureGpu``, bounded by bytes, least recently
 drawn first out. A view made again finds them.
 
 **Results are taken between frames** (``pump``, from the app's pre-new-frame
@@ -76,7 +74,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import fences, mermaid, render
-from .sanitise import Refused, Sanitised, sanitise
+from .sanitise import Refused, Sanitised
 
 STABLE_FRAMES = 6
 """
@@ -148,35 +146,30 @@ class FigureMark(str):
     subclass and not a word, as ``views._Warned`` is: the library's reader gives every
     fence a plain ``str``, so no fence can be written that is taken for one.
 
-    An svg fence's mark holds what ``sanitise`` made of it, and ``sha`` is that SVG's.
-    A mermaid fence's mark holds its ``source`` instead, and ``sha`` is of the source
-    and the merman version: its SVG is made in the render child (``mermaid.layout``)
-    and held by ``sha`` (``_State.layouts``), so ``sanitised`` is ``None`` until then
-    and a mark made again for the same text finds it at once.
+    A mark holds the fence's ``source``, and ``sha`` is of the source and the merman
+    version: its SVG is made in the render child (``mermaid.layout``) and held by
+    ``sha`` (``_State.layouts``), so ``sanitised`` is ``None`` until then and a mark
+    made again for the same text finds it at once.
     """
 
     said: str
     sha: str
-    source: str | None
+    source: str
     _sanitised: Sanitised | None
 
-    def __new__(
-        cls, said: str, sanitised: Sanitised | None, *, source: str | None = None, sha: str = ""
-    ) -> FigureMark:
+    def __new__(cls, said: str, source: str, sha: str) -> FigureMark:
         made = super().__new__(cls, "")
         made.said = said
-        made._sanitised = sanitised
+        made._sanitised = None
         made.source = source
-        if sanitised is not None:
-            sha = hashlib.sha256(sanitised.svg.encode("utf-8", "surrogatepass")).hexdigest()
         made.sha = sha
         return made
 
     @property
     def sanitised(self) -> Sanitised | None:
         """
-        The sanitised SVG the figure is drawn from, or ``None`` while a mermaid fence
-        has not been laid out. A layout found is kept by the mark from then on, so
+        The sanitised SVG the figure is drawn from, or ``None`` while the fence has
+        not been laid out. A layout found is kept by the mark from then on, so
         the bound on the held layouts cannot take it from a figure on screen.
         """
         if self._sanitised is None:
@@ -190,7 +183,7 @@ _word = fences.word
 def is_figure_fence(said: str) -> bool:
     """
     Whether a fence's info string asks for a figure: its first word is a figure row
-    of the table of drawn fences (``fences.FIGURE_WORDS``: ``svg``, ``mermaid``).
+    of the table of drawn fences (``fences.FIGURE_WORDS``: ``mermaid``).
     """
     return _word(said) in fences.FIGURE_WORDS
 
@@ -204,14 +197,14 @@ def mark(said: str, text: str) -> FigureMark | Refused:
     with the reason it stays code. Kept for the last few texts, because a stream made
     again (``Stream._forget``) reads every fence again.
 
-    An svg fence is sanitised here. A mermaid fence is only marked: merman runs in the
-    render child, never here. It is refused here only where merman is not installed
-    (``mermaid.EXTRA_REASON``), which is read from metadata without importing it.
+    A fence is only marked: merman runs in the render child, never here. It is refused
+    here only where merman is not installed (``mermaid.EXTRA_REASON``), which is read
+    from metadata without importing it.
     """
     key = (said, text)
     held = _MARKS.get(key)
     if held is None:
-        held = _mermaid_mark(said, text) if _word(said) == "mermaid" else _svg_mark(said, text)
+        held = _mermaid_mark(said, text)
         _MARKS[key] = held
         while len(_MARKS) > _MARKS_KEPT:
             _MARKS.popitem(last=False)
@@ -220,24 +213,19 @@ def mark(said: str, text: str) -> FigureMark | Refused:
     return held
 
 
-def _svg_mark(said: str, text: str) -> FigureMark | Refused:
-    outcome = sanitise(text)
-    return FigureMark(said, outcome) if isinstance(outcome, Sanitised) else outcome
-
-
 def _mermaid_mark(said: str, text: str) -> FigureMark | Refused:
     version = mermaid.version()
     if version is None:
         return Refused(mermaid.missing_reason())
     keyed = f"merman {version}\0{text}".encode("utf-8", "surrogatepass")
-    return FigureMark(said, None, source=text, sha=hashlib.sha256(keyed).hexdigest())
+    return FigureMark(said, text, hashlib.sha256(keyed).hexdigest())
 
 
-def refusal_line(reason: str, said: str = "svg") -> str:
+def refusal_line(reason: str, said: str) -> str:
     """
     The line set above a fence that is not drawn as a figure.
     """
-    return f"{_word(said) or 'svg'} not drawn: {reason}"
+    return f"{_word(said) or 'figure'} not drawn: {reason}"
 
 
 def fence_text(said: str, text: str) -> str:
@@ -558,11 +546,11 @@ class FigureWidget:
 
     def _sanitised(self) -> Sanitised | None:
         """
-        What the figure is drawn from. For a mermaid fence not yet laid out, ``None``,
-        and the layout is asked of the render child if it has not been.
+        What the figure is drawn from. For a fence not yet laid out, ``None``, and the
+        layout is asked of the render child if it has not been.
         """
         natural = self._mark.sanitised
-        if natural is None and self._mark.source is not None:
+        if natural is None:
             self._lay_out(self._mark.source)
         return natural
 
