@@ -1667,3 +1667,200 @@ def test_the_golden_per_role_counts_edge_attachment_and_label_texts(
         if p.fill:
             loops = [pl for pl, _ in D.flatten_units(p.ops, p.xy, 1.0) if len(pl) > 2]
             assert len(loops) <= 1, f"{name}: a filled path with a hole the host would fill"
+
+
+# -- what a list may cost to build -------------------------------------------------------
+
+
+def _bent(n: int, x: float = 100.0, y: float = 100.0, reach: float = 3000.0) -> D.PathItem:
+    """
+    A stroked path of ``n`` cubics bent far enough that each takes the step cap.
+    """
+    xy = [x, y]
+    for _ in range(n):
+        xy += [x + reach, y - reach, x - reach, y + reach, x + 10.0, y + 10.0]
+    return D.PathItem(
+        D.EDGE, False, 0, True, 1.5, 0, 0, (), "M" + "C" * n, tuple(xy), (0.0, 0.0, 4000.0, 4000.0)
+    )
+
+
+def _costly(points: int) -> D.DisplayList:
+    per = D.path_points("M" + "C" * 40, _bent(40).xy, 1.0)
+    count = -(-points // per)
+    return D.DisplayList(4000.0, 4000.0, (0.0, 0.0), (_bent(40),) * count, (), ())
+
+
+@pytest.mark.parametrize("seed", range(40))
+def test_the_counted_points_are_never_fewer_than_the_pane_flattens(seed: int) -> None:
+    """
+    ``drawn_points`` is a bound only if no width the pane draws at flattens more:
+    random paths of every kind, at the largest scale and below it.
+    """
+    import random
+
+    r = random.Random(seed)
+    ops = "M" + "".join(r.choice("LCQZM") for _ in range(r.randrange(1, 60)))
+    xy = tuple(r.uniform(-2000, 6000) for _ in range(sum(D._OP_ARGS[op] for op in ops)))
+    counted = D.path_points(ops, xy, 1.0)
+    for scale in (1.0, 0.7, 0.31, 0.05):
+        made = sum(len(pl) for pl, _ in D.flatten_units(ops, xy, scale))
+        assert made <= counted, (scale, made, counted)
+
+
+def test_a_list_over_the_point_budget_is_refused_and_one_under_it_is_not() -> None:
+    under = _costly(D.MAX_DRAWN_POINTS - 3_000)
+    over = _costly(D.MAX_DRAWN_POINTS + 1)
+    assert D.drawn_points(under) <= D.MAX_DRAWN_POINTS < D.drawn_points(over)
+    assert D.validate(under) is None
+    assert D.validate(over) == "too costly to draw"
+
+
+def test_a_list_too_costly_to_draw_is_refused_on_receipt() -> None:
+    """
+    What a taken-over child could send: within every other bound, and refused by
+    the I/O thread before the frame thread builds anything from it.
+    """
+    from pptmstr.figures import render
+
+    over = _costly(D.MAX_DRAWN_POINTS + 1)
+    assert sum(len(i.ops) for i in over.items if isinstance(i, D.PathItem)) <= D.MAX_SEGS_TOTAL
+    got = render.received("k", D.encode(over))
+    assert got == render.Failed("k", "display list refused: too costly to draw")
+
+
+def test_a_list_drawn_narrower_than_a_unit_is_counted_at_the_scale_it_is_drawn_at() -> None:
+    """
+    The pane draws a figure at least one unit of ImGui wide, so one whose natural
+    width is under a unit is drawn larger than natural, and counted so.
+    """
+    item = _bent(4, 0.001, 0.001, 0.003)
+    tiny = D.DisplayList(0.01, 0.01, (0.0, 0.0), (item,), (), ())
+    assert D.drawn_points(tiny) == D.path_points(item.ops, item.xy, 100.0)
+    assert D.drawn_points(tiny) > D.path_points(item.ops, item.xy, 1.0)
+
+
+def _flowchart(n: int) -> str:
+    import random
+
+    r = random.Random(3)
+    lines = ["flowchart TD"]
+    for i in range(1, n):
+        lines.append(f"    n{r.randrange(i)}[Node {r.randrange(i)} label] --> n{i}[Node {i} label]")
+    for _ in range(n // 2):
+        a, b = sorted(r.sample(range(n), 2))
+        lines.append(f"    n{a} -.-> n{b}")
+    return "\n".join(lines)
+
+
+def _sequence(n: int) -> str:
+    import random
+
+    r = random.Random(5)
+    lines = ["sequenceDiagram", *(f"    participant P{i}" for i in range(12))]
+    for k in range(n):
+        a, b = r.sample(range(12), 2)
+        lines.append(f"    P{a}->>P{b}: message {k}")
+        if k % 7 == 0:
+            lines.append(f"    Note over P{a},P{b}: note {k}")
+    return "\n".join(lines)
+
+
+def _classes(n: int) -> str:
+    import random
+
+    r = random.Random(6)
+    lines = ["classDiagram"]
+    for i in range(n):
+        lines += [f"    class C{i} {{", "      +int field", "      +method() void", "    }"]
+    lines += [f"    C{r.randrange(i)} <|-- C{i}" for i in range(1, n)]
+    return "\n".join(lines)
+
+
+def _states(n: int) -> str:
+    import random
+
+    r = random.Random(7)
+    lines = ["stateDiagram-v2", "    [*] --> S0"]
+    lines += [f"    S{r.randrange(i)} --> S{i}: go {i}" for i in range(1, n)]
+    return "\n".join([*lines, f"    S{n - 1} --> [*]"])
+
+
+def _entities(n: int) -> str:
+    import random
+
+    r = random.Random(8)
+    lines = ["erDiagram"]
+    for i in range(n):
+        lines += [f"    E{i} {{", "        int id PK", "        string name", "    }"]
+    lines += [f"    E{r.randrange(i)} ||--o{{ E{i} : has" for i in range(1, n)]
+    return "\n".join(lines)
+
+
+# The largest of each family's shape here that merman 0.9.1 and the sanitiser accept,
+# found by bisection to within a few (each refused at 110, 130, 97, 160 and 43:
+# the size cap, the element cap or merman's own limits; 2026-10-22,
+# shots/native-cost/merman_max.py): what the budget was set from.
+LARGEST = {
+    "flowchart": (_flowchart, 105),
+    "sequence": (_sequence, 125),
+    "class": (_classes, 95),
+    "state": (_states, 155),
+    "er": (_entities, 42),
+}
+
+
+@needs_merman
+@pytest.mark.parametrize("family", list(LARGEST))
+def test_the_largest_diagram_merman_lays_out_in_each_family_still_draws(
+    family: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    found = mermaid.version()
+    if found != PINNED:
+        pytest.fail(RE_BASELINE.format(found=found))
+    make, n = LARGEST[family]
+    dl = _laid(make(n), monkeypatch)
+    assert D.validate(dl) is None
+    assert D.drawn_points(dl) <= D.MAX_DRAWN_POINTS // 1.5, "headroom under the budget"
+    assert sum(len(i.ops) for i in dl.items if isinstance(i, D.PathItem)) <= D.MAX_SEGS_TOTAL // 2
+    assert all(len(e.points) // 2 < D.MAX_HIT_POINTS for e in dl.edges), "no edge is thinned"
+
+
+# -- linkStyle counts edges in merman's order, chained and & syntax included --------------
+
+LINKED = {
+    "chained": ("flowchart LR\n  A-->B-->C\n", [("A", "B"), ("B", "C")]),
+    "and": ("flowchart LR\n  A & B --> C\n", [("A", "C"), ("B", "C")]),
+    "and on both sides": (
+        "flowchart LR\n  A & B --> C & D\n",
+        [("A", "C"), ("A", "D"), ("B", "C"), ("B", "D")],
+    ),
+    "mixed": (
+        "flowchart LR\n  X --> Y\n  A & B --> C --> D\n  Y --> A\n",
+        [("X", "Y"), ("A", "C"), ("B", "C"), ("C", "D"), ("Y", "A")],
+    ),
+}
+LINK_COLOURS = (0xFF0000, 0x00FF00, 0x0000FF, 0xFF00FF, 0x00FFFF)
+
+
+@needs_merman
+@pytest.mark.parametrize("name", list(LINKED))
+def test_link_style_n_paints_the_nth_edge_mermaid_counts(
+    name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Mermaid counts ``A-->B-->C`` as two edges, A-B then B-C, and ``A & B --> C & D``
+    as four, each start with each end in turn; ``linkStyle N`` paints the Nth. Each
+    edge here is styled its own colour, and each must be drawn in its number's.
+    """
+    found = mermaid.version()
+    if found != PINNED:
+        pytest.fail(RE_BASELINE.format(found=found))
+    source, ends = LINKED[name]
+    source += "".join(f"  linkStyle {i} stroke:#{LINK_COLOURS[i]:06x}\n" for i in range(len(ends)))
+    dl = _laid(source, monkeypatch)
+    drawn = [
+        (tuple(dl.nodes[k].id.split("-")[1] for k in dl.edges[i.edge].ends), i.stroke_rgb)
+        for i in dl.items
+        if isinstance(i, D.PathItem) and i.role == D.EDGE
+    ]
+    assert drawn == list(zip(ends, LINK_COLOURS[: len(ends)], strict=True))

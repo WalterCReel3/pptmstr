@@ -1,68 +1,50 @@
 """
-Sanitised SVG to RGBA pixels, in a long-lived child process, without the frame waiting.
+Mermaid source to a bounded display list, in a long-lived child process, without
+the frame waiting.
 
-**A process, not a thread.** resvg_py 0.5.0 holds the GIL for the whole of
-``svg_to_bytes``: with a render running, a 1 ms ticker thread saw a 281 ms gap
-(probe R2, ``notes/vector-rendering/probe-m1-r2.md``). A thread would stall the frame
-for every render. The child is started with the ``spawn`` context, because the GUI
-process has a GL context and threads and ``fork`` copies both. It is started lazily,
-by the first ``submit``, and lives until it hangs, dies or ``shutdown`` ends it.
+**A process, not a thread.** merman is native code, and what it and this package's
+parsers read is model-written text: a crash, a hang or a runaway allocation in
+either is the child's, which is killed and replaced, and never the GUI's. The child
+is started with the ``spawn`` context, because the GUI process has a GL context and
+threads and ``fork`` copies both. It is started lazily, by the first ``lay_out``,
+and lives until it hangs, dies or ``shutdown`` ends it.
 
 **This is where a figure is built over more than one frame**, the one exception to
-``views.py``'s stance that nothing is. A host submits, keeps drawing what it has, and
-picks up the pixels from ``poll`` in a later frame.
+``views.py``'s stance that nothing is. A host asks, keeps drawing what it has, and
+picks up the display list from ``poll`` in a later frame.
 
-**What may block, and where.** The frame thread calls ``submit`` and ``poll`` only,
-and neither waits on the child: each child has one I/O thread here that starts the
-process, writes requests and reads results, and that thread is the only one that
-blocks on the pipe. ``poll`` reads what that thread queued, and kills a child whose
-render has run past ``RENDER_TIMEOUT_S``; the next ``submit`` starts another. Neither
-raises. ``shutdown`` is for application exit and does wait, boundedly.
+**What may block, and where.** The frame thread calls ``lay_out`` and ``poll``
+only, and neither waits on the child: each child has one I/O thread here that
+starts the process, writes requests and reads results, and that thread is the only
+one that blocks on the pipe. ``poll`` reads what that thread queued, and kills a
+child whose request has run past ``RENDER_TIMEOUT_S``; the next ``lay_out`` starts
+another. Neither raises. ``shutdown`` is for application exit and does wait,
+boundedly.
 
-**One request at a time, coalesced per key.** The child renders serially, so a
-second request for a key whose first has not gone out replaces it: only the latest
-width of a figure is wanted. A result for a key that has a newer request waiting is
-dropped, not delivered.
+**One request at a time, coalesced per key.** The child works serially, so a
+second request for a key whose first has not gone out replaces it. A result for a
+key that has a newer request waiting is dropped, not delivered.
 
-**Fonts are mapped, or text is not drawn.** Under ``skip_system_fonts``, resvg draws
-no ``<text>`` whose family resolves to nothing, and raises nothing (operator-run,
-``svg-renderers.md``). Every generic family is mapped to the faces imscribe sets prose
-and code in. ``serif_family`` is the one that carries a name that matches nothing
-(R1c), so it is mapped too, to the prose face, because no serif ships.
-
-**Pillow decodes in the child.** resvg_py returns only PNG (probe T1), and the frame
-thread needs RGBA for a texture.
-
-**Mermaid is laid out in the same child** (``lay_out``, ``mermaid.layout``), so merman
-never runs on the frame thread either, and so is the SVG parsed into what the pane
-draws (``displaylist.from_mermaid``): the child answers a ``Laid``, a bounded display
-list with the diagram's natural size, and no pixels, as plain JSON: nothing the
-child sends is unpickled (``_serve``). The I/O thread reads it a record at a time
-and checks every bound of it again (``displaylist.decode``) before the frame thread
-sees it. A layout is one more request in the same queue, under the same timeout
-and the same failure kinds. It does not need the rasteriser: a child that could
-not load resvg still lays diagrams out.
-
-**The raster path stays, and Mermaid does not use it.** ``submit`` and ``rasterise``
-are what slice 1's svg fence drew through; nothing submits to them now, and a
-separate task removes them once native Mermaid has been reviewed.
+**What the child answers.** A ```` ```mermaid ```` source is laid out by merman
+(``mermaid.layout``), its SVG sanitised and parsed into what the pane draws
+(``displaylist.from_mermaid``), and the child answers a ``Laid``: a bounded display
+list with the diagram's natural size, as plain JSON. Nothing the child sends is
+unpickled (``_serve``). The I/O thread reads it a record at a time and checks every
+bound of it again (``displaylist.decode``) before the frame thread sees it. The
+pane draws the list natively (``host``); nothing is rasterised anywhere.
 """
 
 from __future__ import annotations
 
-import importlib
 import json
 import math
 import queue
 import signal
-import struct
 import sys
 import threading
 import time
-import xml.etree.ElementTree as ET
 from collections.abc import Callable, Hashable, Sequence
 from dataclasses import dataclass, field
-from io import BytesIO
 from multiprocessing import get_context
 from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
@@ -71,96 +53,60 @@ from typing import Any
 from .. import drawable
 from . import displaylist
 from .displaylist import DisplayList
-from .sanitise import MAX_NATURAL_PIXELS, Sanitised
+from .sanitise import Sanitised
 
 RENDER_TIMEOUT_S = 10.0
 """
-How long one render may take before its child is killed.
+How long one request may take before its child is killed.
 
-The largest legitimate raster is ``MAX_RASTER_PIXELS``: 1,200 rects and labels at
-4096x3072 took 1.14 s here, and 249 ms at 800 px (run 2026-10-20; the probe M1
-merman diagrams took 70-282 ms at 800 px). The operator's machine ran the same grid
-about 1.6 times slower than this one (``probe-m1-r2.md``), so about 2 s is the worst
-legitimate case, and ten seconds leaves five times that. A render past it is a hang
-or hostile input. This, and not the sanitiser, is what bounds render time: the
-sanitiser's caps bound how many elements resvg instantiates, but a few elements can
-cost seconds (probe R3, 1600x1200: 62 full-canvas opacity layers 6 s, a 60,000-vertex
-path with a mid marker 17 s, 4,000 lines dashed at 0.001 over a minute). The cost of
-a longer limit is that every other figure waits behind a stuck one for that long.
+A layout, sanitise and parse took 56-446 ms in the child here, the largest
+diagrams merman or the sanitiser's size cap still admit and the stress inputs they
+refuse alike (2026-10-22: a 100-node chain 229 ms, a 60-node, 120-edge graph 244
+ms, a 400-node chain refused by merman's own limit after 446 ms;
+``notes/vector-rendering/probe-displaylist.md`` §2 has 151-362 ms on the same
+kinds). The operator's machine ran the earlier probes about 1.6 times slower than
+this one (``probe-m1-r2.md``), so ten seconds is more than ten times the worst
+legitimate case. A request past it is a hang or hostile input. The cost of a longer
+limit is that every other figure waits behind a stuck one for that long.
 """
 
 START_TIMEOUT_S = 20.0
 """
-How long a child may take to start and load its fonts before it is killed.
+How long a child may take to start and read its face before it is killed.
 
-Spawning a fresh interpreter and importing resvg_py, fontTools and Pillow is about a
-second; a box under load, or a cold disk cache, can be several times that.
-"""
-
-MAX_RASTER_PIXELS = MAX_NATURAL_PIXELS
-"""
-The most pixels one raster may have: 4096x4096, 64 MiB of RGBA.
-
-The same number the sanitiser caps natural size at. ``submit`` shrinks a request to
-fit it, and the child refuses anything over it again before rendering and after,
-so a raster this large never crosses the pipe.
+Spawning a fresh interpreter and importing this package's figure modules is well
+under a second; a box under load, or a cold disk cache, can be several times that.
+merman is imported later, by the first diagram (``_laid``).
 """
 
 MEMORY_LIMIT_BYTES = 1 << 30
 """
 The address space a render child may have, on Linux, where ``RLIMIT_AS`` is enforced.
 
-What it bounds is what the sanitiser does not see: references made from ``<style>``
-rules, and anything resvg allocates that the caps did not foresee. A ``<pattern>``
-tile, allocated at its size under every transform above it, took 1 GB under
-``scale(160)`` and asked for 40 GB under ``scale(1000)`` (probe R3), and is why the
-sanitiser drops ``<pattern>``: this limit caught it here and nothing would on
-macOS. The largest
-legitimate render, the 1,200-label grid at 4096x3072, peaked at about 300 MB of
-address space, and the deepest mask chain the sanitiser admits at 692 MB at
-4096x4096; a gibibyte holds both. Past it resvg's allocation fails and the child
-aborts, which the I/O thread reports as the render's failure and the next request
-replaces the child; an allocation that fails in Python is answered as that render's
-error.
+What it bounds is what the other bounds do not foresee: an allocation in merman,
+which is native code, or in a parse of its output. The diagrams above peaked at
+39-42 MiB resident in the child (2026-10-22), so a gibibyte of address space is far
+past any legitimate layout and still stops a runaway one well short of the machine.
+Past it an allocation fails: in native code the child aborts, which the I/O thread
+reports as that request's failure and the next request replaces the child; in
+Python it is answered as that request's error.
 
 macOS does not enforce ``RLIMIT_AS``, so there nothing bounds a child's memory but
 ``RENDER_TIMEOUT_S``.
 """
 
-MAX_TEXTURE_SIDE = 8192
+CHILD_MODULES: dict[str, str] = {"fonttools": "fontTools.ttLib"}
 """
-The longest side a raster may have: a conservative constant, not read from GL.
-
-An upload over the GPU's ``GL_MAX_TEXTURE_SIZE`` does not raise: on llvmpipe a
-2x32768 array gave a texture and ``GL_INVALID_VALUE`` (1281), so a blank figure
-(fig-fix, Xvfb). This clamp is therefore the only guard, and reading the GL limit
-needs PyOpenGL, which is a ``dev`` extra only. llvmpipe and GL 4.1 on macOS report
-16384; 8192 leaves room for an older or smaller GPU. ``MAX_RASTER_PIXELS`` already
-bounds the area, so this only shrinks a long raster: at the pixel cap, one more than
-four times as long as it is wide; and a long figure at density 2. A figure more than
-8192 times as long as it is wide cannot fit at one pixel and is refused.
+What the render child imports for any figure beyond merman, by the distribution
+that provides it: fontTools reads the prose face's metrics (``em_ratio``). The
+child does without it, at ``DEFAULT_EM_RATIO``, so a diagram is still drawn, its
+labels sized for pptmstr's own face.
 """
 
-CHILD_MODULES: dict[str, str] = {
-    "resvg_py": "resvg_py",
-    "Pillow": "PIL.Image",
-    "fonttools": "fontTools.ttLib",
-}
+DISTRIBUTIONS: tuple[str, ...] = tuple(CHILD_MODULES)
 """
-What the render child imports for any figure, by the distribution that provides
-it: the child imports these and nothing else before it says it is ready
-(``child_main``), so this table is what it needs.
-"""
-
-UPLOAD_MODULES: dict[str, str] = {"numpy": "numpy"}
-"""
-What the frame thread imports to make a texture of a raster (``host._upload``).
-"""
-
-DISTRIBUTIONS: tuple[str, ...] = (*CHILD_MODULES, *UPLOAD_MODULES)
-"""
-Every distribution a figure needs beyond the typeset library, whatever its fence:
-what the table of drawn fences asks is installed (``fences.RENDERED``).
+Every distribution a figure needs beyond the typeset library and merman: what the
+table of drawn fences asks is installed (``fences.RENDERED``).
 """
 
 MAX_REASON_CHARS = 320
@@ -187,32 +133,14 @@ _SHUTDOWN_WAIT_S = 2.0
 
 
 @dataclass(frozen=True, slots=True)
-class Rendered:
-    """
-    A raster for ``key``: ``width`` x ``height`` straight-alpha RGBA, rows top first.
-
-    ``px_width`` and ``scale`` are the request's, so a host can tell which drawn width
-    and DPI scale this answers; ``width`` may be smaller than ``px_width * scale``
-    when the request was shrunk to ``MAX_RASTER_PIXELS``.
-    """
-
-    key: Hashable
-    width: int
-    height: int
-    rgba: bytes
-    px_width: float
-    scale: float
-
-
-@dataclass(frozen=True, slots=True)
 class Failed:
     """
     A render of ``key`` that produced nothing, with the one-line reason a host shows.
 
     ``transient`` is whether the same request may succeed if asked again: the child
     died, was killed for time or did not start, which the machine's state can cause.
-    An answer the child gave (resvg refused the document, a cap was hit, the
-    renderer could not load) is not transient: it would be the same again.
+    An answer the child gave (merman refused the diagram, a cap was hit) is not
+    transient: it would be the same again.
     """
 
     key: Hashable
@@ -234,17 +162,16 @@ class Laid:
     display: DisplayList
 
 
-Result = Rendered | Laid | Failed
+Result = Laid | Failed
 
 
 @dataclass(frozen=True, slots=True)
 class Fonts:
     """
-    The font files resvg loads, and the two whose family names the generics map to.
-
-    ``sans`` is mapped to ``font_family``, ``sans_serif_family``, ``serif_family``,
-    ``cursive_family`` and ``fantasy_family``; ``mono`` to ``monospace_family``. Both
-    are among ``files``.
+    The faces figures are set in, as the typeset seam names them
+    (``views.figure_fonts``). The child reads ``sans``'s metrics (``em_ratio``);
+    the pane sets labels in its own prose face. ``files`` and ``mono`` are what that
+    seam reports and nothing here reads them.
     """
 
     files: tuple[str, ...]
@@ -266,44 +193,18 @@ def imscribe_fonts() -> Fonts:
     return figure_fonts()
 
 
-def raster_size(sanitised: Sanitised, px_width: float, scale: float) -> tuple[int, int]:
-    """
-    The raster ``submit`` asks for: ``px_width * scale`` wide, at the natural aspect,
-    shrunk so that it fits ``MAX_RASTER_PIXELS`` and neither side is longer than
-    ``MAX_TEXTURE_SIDE``. At least 1x1.
-
-    Only a figure more than ``MAX_TEXTURE_SIDE`` times taller than it is wide cannot
-    fit at one pixel wide; its height is then over the side, and the child refuses it.
-    """
-    aspect = sanitised.height / sanitised.width
-    wanted = px_width * scale
-    width = round(wanted) if math.isfinite(wanted) else 1
-    width = max(1, min(width, MAX_TEXTURE_SIDE, math.floor(MAX_TEXTURE_SIDE / aspect)))
-    if width * max(1, math.ceil(width * aspect)) > MAX_RASTER_PIXELS:
-        width = max(1, math.floor(math.sqrt(MAX_RASTER_PIXELS / aspect)))
-    while width > 1 and math.ceil(width * aspect) > MAX_TEXTURE_SIDE:
-        width -= 1  # where floor(side / aspect) * aspect rounds up past the side
-    return width, max(1, math.ceil(width * aspect))
-
-
-_RASTER = "raster"
 _MERMAID = "mermaid"
 
 
 @dataclass(frozen=True, slots=True)
 class _Request:
     """
-    One request to the child. ``kind`` is ``_RASTER`` (``svg`` is sanitised SVG) or
-    ``_MERMAID`` (``svg`` is a diagram's source, and the sizes are unused).
+    One request to the child: ``source`` is a ```` ```mermaid ```` fence's text.
     """
 
     seq: int
     key: Hashable
-    svg: str
-    width: int
-    px_width: float
-    scale: float
-    kind: str = _RASTER
+    source: str
 
 
 @dataclass(eq=False)
@@ -337,9 +238,10 @@ _Answer = tuple[_Child, int, Result] | tuple[_Child, None, str]
 
 class Renderer:
     """
-    Submit sanitised SVG by key; poll for pixels. Neither call blocks nor raises.
+    Ask for a diagram's layout by key; poll for display lists. Neither call blocks
+    nor raises.
 
-    Construct it anywhere: nothing starts until the first ``submit``. ``fonts`` is
+    Construct it anywhere: nothing starts until the first ``lay_out``. ``fonts`` is
     called on the I/O thread when a child starts, not on the frame thread.
     """
 
@@ -372,47 +274,20 @@ class Renderer:
         child = self._child
         return None if child is None or child.proc is None else child.proc.pid
 
-    def submit(self, key: Hashable, sanitised: Sanitised, px_width: float, scale: float) -> None:
-        """
-        Ask for ``sanitised`` drawn ``px_width`` wide at DPI ``scale``, under ``key``.
-
-        Replaces any request for ``key`` that has not gone to the child. One the same
-        as what the child is rendering for ``key`` now is not asked twice.
-        """
-        try:
-            width, _ = raster_size(sanitised, px_width, scale)
-            flying = self._inflight
-            self._pending.pop(key, None)
-            if not (
-                flying is not None
-                and flying.key == key
-                and flying.kind == _RASTER
-                and flying.width == width
-                and flying.svg == sanitised.svg
-            ):
-                self._seq += 1
-                self._pending[key] = _Request(self._seq, key, sanitised.svg, width, px_width, scale)
-            self._dispatch()
-        except Exception as exc:
-            self._failed.append(Failed(key, f"render not started: {_one_line(exc)}", True))
-
     def lay_out(self, key: Hashable, source: str) -> None:
         """
         Ask for a ```` ```mermaid ```` fence's ``source`` laid out in the child, under
         ``key``: answered with a ``Laid``, or a ``Failed`` carrying merman's reason.
-        Queued, coalesced and timed as a raster request is; never blocks or raises.
+        Replaces any request for ``key`` that has not gone to the child; one the same
+        as what the child is laying out for ``key`` now is not asked twice. Never
+        blocks or raises.
         """
         try:
             flying = self._inflight
             self._pending.pop(key, None)
-            if not (
-                flying is not None
-                and flying.key == key
-                and flying.kind == _MERMAID
-                and flying.svg == source
-            ):
+            if not (flying is not None and flying.key == key and flying.source == source):
                 self._seq += 1
-                self._pending[key] = _Request(self._seq, key, source, 0, 0.0, 1.0, _MERMAID)
+                self._pending[key] = _Request(self._seq, key, source)
             self._dispatch()
         except Exception as exc:
             self._failed.append(Failed(key, f"layout not started: {_one_line(exc)}", True))
@@ -574,7 +449,7 @@ def _serve(
         child.ready = True
         while (request := child.requests.get()) is not None:
             child.busy_since = time.monotonic()
-            conn.send_bytes(json.dumps([request.kind, request.width, request.svg]).encode("ascii"))
+            conn.send_bytes(json.dumps([_MERMAID, request.source]).encode("ascii"))
             result, broken = _answer(conn, request)
             child.busy_since = None
             answers.put((child, request.seq, result))
@@ -627,27 +502,9 @@ def _answer(conn: Connection, request: _Request) -> tuple[Result, str | None]:
     said = head[0]
     if said == "err" and len(head) == 2 and isinstance(head[1], str):
         return Failed(key, reason_shown(head[1])), None
-    if said == "laid" and len(head) == 1 and request.kind == _MERMAID:
+    if said == "laid" and len(head) == 1:
         return received(key, blob, start), None
-    if (
-        said == "ok"
-        and len(head) == 3
-        and request.kind == _RASTER
-        and all(type(v) is int and 1 <= v <= MAX_TEXTURE_SIDE for v in head[1:])
-        and head[1] * head[2] <= MAX_RASTER_PIXELS
-    ):
-        w, h = head[1], head[2]
-        try:
-            rgba = conn.recv_bytes(MAX_RASTER_PIXELS * 4)
-        except OSError as exc:
-            if "bad message length" not in str(exc):
-                raise
-            why = "a raster over the pixel cap"
-            return Failed(key, f"render reply refused: {why}"), why
-        if len(rgba) != w * h * 4:
-            return Failed(key, f"render reply refused: {len(rgba)} bytes is not {w}x{h} RGBA"), None
-        return Rendered(key, w, h, rgba, request.px_width, request.scale), None
-    why = f"an unexpected reply to a {request.kind} request"
+    why = "an unexpected reply to a layout request"
     return Failed(key, f"render reply refused: {why}"), why
 
 
@@ -750,48 +607,32 @@ def _one_line(exc: BaseException) -> str:
 
 def child_main(conn: Connection, fonts: Fonts, memory_limit: int | None = None) -> None:
     """
-    The render process: load the fonts once, then answer requests until the pipe closes.
+    The render process: read the face's metrics once, then answer requests until the
+    pipe closes. Its address space is held to ``memory_limit`` first
+    (``MEMORY_LIMIT_BYTES``).
 
-    It says ``["ready", null]`` or ``["ready", reason]`` once. A child that could not
-    load what rasterising needs answers every raster request with that reason rather
-    than exiting, so a missing library is one failure per figure and not a restart
-    per frame; it still lays Mermaid out, which needs none of it. Its address space
-    is held to ``memory_limit`` first (``MEMORY_LIMIT_BYTES``).
-
-    Every reply is one ``send_bytes`` whose first line is a JSON array: ``["laid"]``
-    and the display list's lines after it (``displaylist.encode``), ``["err",
-    reason]``, or ``["ok", width, height]`` followed by a second message of RGBA.
+    It says ``["ready", null]`` once. Every reply is one ``send_bytes`` whose first
+    line is a JSON array: ``["laid"]`` and the display list's lines after it
+    (``displaylist.encode``), or ``["err", reason]``.
     """
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     _limit_memory(memory_limit)
-    failure: str | None = None
-    options: dict[str, Any] = {}
-    try:
-        options = resvg_options(fonts)
-        for module in CHILD_MODULES.values():
-            importlib.import_module(module)
-    except Exception as exc:
-        failure = f"renderer unavailable: {_one_line(exc)}"
     ratio = em_ratio(fonts.sans)
-    _say(conn, ["ready", None if failure is None else _cut(failure)])
+    _say(conn, ["ready", None])
     while True:
         try:
-            kind, width, svg = json.loads(conn.recv_bytes())
+            request = json.loads(conn.recv_bytes())
         except EOFError:
             return
-        if kind == _MERMAID:
-            _say(conn, *_laid(svg, ratio))
-            continue
-        if failure is not None:
-            _say(conn, ["err", _cut(failure)])
-            continue
-        try:
-            w, h, rgba = rasterise(svg, width, options)
-        except Exception as exc:
-            _say(conn, ["err", _cut(_one_line(exc))])
-            continue
-        _say(conn, ["ok", w, h])
-        conn.send_bytes(rgba)
+        if (
+            type(request) is list
+            and len(request) == 2
+            and request[0] == _MERMAID
+            and isinstance(request[1], str)
+        ):
+            _say(conn, *_laid(request[1], ratio))
+        else:
+            _say(conn, ["err", "not a layout request"])
 
 
 def _say(conn: Connection, head: list[Any], body: bytes = b"") -> None:
@@ -841,7 +682,7 @@ def em_ratio(path: str) -> float:
     hhea ascent less descent, and SVG's ``font-size`` is an em, so a label set at
     merman's number would come out smaller than merman laid it out for. The same
     number imscribe's ``em_size_for_pixel_height`` gives (0.853 for Roboto, measured
-    2026-10-22). Read in the child, where fontTools is loaded for resvg already.
+    2026-10-22). Read in the child, once, when it starts.
     """
     try:
         from fontTools.ttLib import TTFont
@@ -855,97 +696,13 @@ def em_ratio(path: str) -> float:
     return ratio if math.isfinite(ratio) and 0.25 <= ratio <= 4.0 else DEFAULT_EM_RATIO
 
 
-def family_name(path: str) -> str:
-    """
-    The family name resvg's font database knows a file by: the typographic family
-    (name ID 16) if the file has one, else name ID 1.
-    """
-    from fontTools.ttLib import TTFont
-
-    with TTFont(path, lazy=True) as font:
-        names = font["name"]
-        for nid in (16, 1):
-            record = names.getName(nid, 3, 1) or names.getName(nid, 1, 0)
-            if record is not None:
-                return str(record.toUnicode())
-    raise ValueError(f"{path} names no family")
-
-
-def resvg_options(fonts: Fonts) -> dict[str, Any]:
-    """
-    ``svg_to_bytes``'s font options: only ``fonts.files``, every generic mapped.
-    """
-    sans, mono = family_name(fonts.sans), family_name(fonts.mono)
-    return {
-        "font_files": list(fonts.files),
-        "skip_system_fonts": True,
-        "font_family": sans,
-        "sans_serif_family": sans,
-        "serif_family": sans,
-        "cursive_family": sans,
-        "fantasy_family": sans,
-        "monospace_family": mono,
-    }
-
-
-def render_png(svg: str, width: int, options: dict[str, Any]) -> bytes:
-    """
-    resvg's PNG of ``svg`` at ``width`` px, refused before rendering when the height
-    the root implies would put it over ``MAX_RASTER_PIXELS`` or ``MAX_TEXTURE_SIDE``.
-    """
-    import resvg_py
-
-    height = _implied_height(svg, width)
-    _check_raster(width, height)
-    png: bytes = resvg_py.svg_to_bytes(svg_string=svg, width=width, **options)
-    return png
-
-
-def rasterise(svg: str, width: int, options: dict[str, Any]) -> tuple[int, int, bytes]:
-    """
-    ``svg`` at ``width`` px as ``(width, height, rgba)``, the cap held on both sides of
-    resvg.
-    """
-    from PIL import Image
-
-    png = render_png(svg, width, options)
-    if png[:8] != b"\x89PNG\r\n\x1a\n" or png[12:16] != b"IHDR":
-        raise ValueError("resvg returned something that is not a PNG")
-    w, h = struct.unpack(">II", png[16:24])
-    _check_raster(w, h)
-    with Image.open(BytesIO(png)) as image:
-        rgba = image.convert("RGBA")
-        return rgba.width, rgba.height, rgba.tobytes()
-
-
-def _check_raster(width: int, height: int) -> None:
-    if width < 1 or width * height > MAX_RASTER_PIXELS:
-        raise ValueError(f"{width}x{height} is over the {MAX_RASTER_PIXELS}-pixel cap")
-    if max(width, height) > MAX_TEXTURE_SIDE:
-        raise ValueError(f"{width}x{height} has a side over {MAX_TEXTURE_SIDE} px")
-
-
-def _implied_height(svg: str, width: int) -> int:
-    """
-    The height resvg will give ``svg`` at ``width``, from the root's ``width`` and
-    ``height``, which the sanitiser sets to the natural size in px. A whole parse,
-    in the child: the input is at most the sanitiser's megabyte.
-    """
-    root = ET.fromstring(svg)
-    w0 = float(root.get("width", "nan"))
-    h0 = float(root.get("height", "nan"))
-    if not (math.isfinite(w0) and math.isfinite(h0) and w0 > 0 and h0 > 0):
-        raise ValueError("the root has no natural size")
-    return max(1, math.ceil(width * h0 / w0))
-
-
 _RENDERER: Renderer | None = None
 
 
 def renderer() -> Renderer:
     """
     The process's renderer, made on first use. Starting it costs nothing until a
-    figure is submitted.
+    diagram is asked for.
     """
     global _RENDERER
     if _RENDERER is None:
@@ -967,16 +724,10 @@ __all__: Sequence[str] = (
     "Failed",
     "Fonts",
     "Laid",
-    "MAX_RASTER_PIXELS",
-    "MAX_TEXTURE_SIDE",
     "MEMORY_LIMIT_BYTES",
     "RENDER_TIMEOUT_S",
-    "UPLOAD_MODULES",
-    "Rendered",
     "Renderer",
     "Result",
-    "rasterise",
     "renderer",
-    "resvg_options",
     "shutdown",
 )

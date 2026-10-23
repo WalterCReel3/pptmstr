@@ -1233,6 +1233,92 @@ def test_the_frame_loop_pumps_the_figures_every_frame(monkeypatch: pytest.Monkey
     assert pumped == [1, 1]
 
 
+def test_the_frame_loop_keeps_the_collector_settled_every_frame(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    ``_keep_gc_settled`` is where input is noted and the collector settled while the
+    pane is quiet. Unwired, gen-2 pauses come back in a long session's drags and
+    every test of the policy still passes.
+    """
+    from pptmstr import app, theme
+    from pptmstr.ui import typeset
+
+    seen: list[float] = []
+    monkeypatch.setattr(typeset, "pre_frame", lambda: None)
+    monkeypatch.setattr(theme, "keep_baked_sizes", lambda generation=None: 0)
+    monkeypatch.setattr(app.figure_host, "pump", lambda: None)
+    monkeypatch.setattr(app, "_keep_gc_settled", seen.append)
+    monkeypatch.setattr(app, "_handle_keys", lambda state: None)
+    state = app.AppState(store=Store(), bridge=Bridge(), settings=Settings())
+    state.theme_dirty = False
+    app.begin_frame(state)
+    app.begin_frame(state)
+    assert len(seen) == 2 and seen[-1] == state.frame_now
+
+
+def test_the_application_settles_the_collector_once_it_has_started() -> None:
+    """
+    Read off the source, as the other runner callbacks are: ``post_init`` settles
+    the collector and marks it settled, which is what lets the frame loop settle it
+    again; before that the frame loop never freezes anything.
+    """
+    import inspect
+
+    from pptmstr import app
+
+    source = inspect.getsource(app.main)
+    post_init = source[source.index("def post_init") : source.index("def pre_frame")]
+    assert "_settle_gc()" in post_init
+    assert "_GC.settled_at = " in post_init
+
+
+@pytest.mark.parametrize(
+    "now, input_at, settled_at, due",
+    [
+        (1_000.0, 0.0, None, False),  # not started: the application settles first
+        (1_000.0, 0.0, 600.0, True),  # quiet, and the last settling is old
+        (1_000.0, 998.0, 600.0, False),  # input under GC_QUIET_S ago
+        (1_000.0, 0.0, 900.0, False),  # settled under GC_SETTLE_EVERY_S ago
+        (1_000.0, 997.0, 700.0, True),  # both exactly at their bounds
+    ],
+)
+def test_the_collector_is_settled_only_when_quiet_and_not_too_often(
+    now: float, input_at: float, settled_at: float | None, due: bool
+) -> None:
+    from pptmstr import app
+
+    assert app.GC_QUIET_S == 3.0 and app.GC_SETTLE_EVERY_S == 300.0
+    assert app.gc_settle_due(now, input_at, settled_at) is due
+
+
+def test_settling_freezes_what_survives_and_frees_frozen_garbage_at_the_next() -> None:
+    """
+    In a process of its own, since a freeze in this one would keep every test's
+    garbage. Frozen objects are out of the collector's walk; one that has become
+    cyclic garbage since is freed by the next settling and not held for good.
+    """
+    import subprocess
+    import sys
+
+    code = (
+        "import gc, weakref\n"
+        "from pptmstr import app\n"
+        "class Node: pass\n"
+        "a = Node(); a.me = a; gone = weakref.ref(a)\n"
+        "app._settle_gc()\n"
+        "frozen = gc.get_freeze_count()\n"
+        "del a; gc.collect()\n"
+        "held = gone() is not None\n"
+        "app._settle_gc()\n"
+        "print(frozen > 1000, held, gone() is None, len(gc.get_objects()) < frozen // 10)\n"
+    )
+    done = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True, timeout=120
+    )
+    assert done.stdout.split()[-4:] == ["True", "True", "True", "True"], done.stdout
+
+
 def test_the_frame_loop_keeps_the_baked_sizes_once_the_seam_has_had_its_turn(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

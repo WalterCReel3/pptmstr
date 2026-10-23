@@ -113,7 +113,7 @@ def test_mermaid_is_promised_by_the_read_mark_refuses_by(monkeypatch: pytest.Mon
 
     monkeypatch.setattr(mermaid, "_VERSION", ["0.9.1"])
     monkeypatch.setattr(mermaid, "_IMPORTS", [True])
-    others = ("imscribe", "imtypeset", *fences._RASTER)
+    others = ("imscribe", "imtypeset", *fences._FIGURE)
     assert ("```mermaid" in fences.session_prompt()) == all(map(fences._installed, others))
 
 
@@ -172,13 +172,13 @@ def test_reading_what_is_installed_imports_no_renderer() -> None:
     """
     Run fresh, so nothing an earlier test imported is counted: ``available`` reads
     metadata, asks a separate interpreter whether merman imports, and imports
-    neither merman nor resvg here.
+    neither merman nor the typeset library here.
     """
     code = (
         "import sys\n"
         "from pptmstr.figures import fences\n"
         "fences.session_prompt()\n"
-        "names = ('merman', 'resvg_py', 'imscribe', 'imtypeset')\n"
+        "names = ('merman', 'imscribe', 'imtypeset')\n"
         "print(sorted(m for m in names if m in sys.modules))\n"
     )
     done = subprocess.run(

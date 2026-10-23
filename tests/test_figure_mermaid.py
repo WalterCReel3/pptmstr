@@ -23,7 +23,7 @@ from typing import Any
 import pytest
 
 from pptmstr.figures import displaylist, host, mermaid, render
-from pptmstr.figures.render import Failed, Laid, Rendered, Renderer, Result
+from pptmstr.figures.render import Failed, Laid, Renderer, Result
 from pptmstr.figures.sanitise import Refused, Sanitised, sanitise
 from pptmstr.ui import typeset
 
@@ -171,19 +171,6 @@ def test_a_child_where_merman_cannot_be_imported_answers_with_the_extras_reason(
     assert not failed.transient
 
 
-def test_a_layout_and_a_raster_for_the_same_figure_are_separate_requests() -> None:
-    renderer = Renderer()
-    try:
-        renderer.lay_out(("layout", "a"), "not mermaid at all")
-        renderer.submit(("a", 1.0), LAID, 300.0, 1.0)
-        first = wait_for(renderer, ("layout", "a"))
-        second = wait_for(renderer, ("a", 1.0))
-    finally:
-        renderer.shutdown()
-    assert isinstance(first, Failed)
-    assert isinstance(second, Rendered)
-
-
 # -- merman runs in the render child and nowhere else -----------------------------------
 
 
@@ -221,7 +208,7 @@ def test_the_host_never_calls_merman_on_the_frame_thread(
     frame(seam, lambda: handle.draw())
     frame(seam, lambda: handle.draw())
     assert reached == []
-    assert [kind for kind, *_ in fake.asked] == ["layout"], "and no raster"
+    assert [kind for kind, *_ in fake.asked] == ["layout"]
     assert ("merman" in sys.modules) == imported_before
 
 
@@ -262,37 +249,19 @@ def test_the_post_pass_is_linear_on_a_long_unclosed_tag() -> None:
 @pytest.mark.parametrize("family", CLIPPED)
 def test_the_post_pass_keeps_labels_inside_their_boxes(family: str) -> None:
     """
-    merman sizes each label's nested ``<svg>`` by a face narrower than the one resvg
-    draws with, and clips it there (probe M1). After the post-pass no nested box
-    clips, and the same diagram draws more ink: the glyphs that were cut off.
+    merman sizes each label's nested ``<svg>`` by its own metrics, narrower than the
+    pane's face, and clips it there (probe M1). After the post-pass no nested box
+    clips, so a label set wider than merman measured it still shows whole.
     """
     import merman  # this process is a test, not the GUI: merman may run here
 
     emitted = merman.Merman().render_svg(DIAGRAMS[family], mermaid.PIPELINE_OPTIONS)
-    import numpy as np
-
     nested = emitted.count("<svg") - 1
     assert nested > 0 and "overflow:hidden" in emitted.split(">", 1)[1]
     opened = mermaid.visible_labels(emitted)
     assert opened.count("overflow:visible") >= nested
     assert "overflow:hidden" not in opened.split(">", 1)[1]
-
-    before, after = sanitise(emitted), sanitise(opened)
-    assert isinstance(before, Sanitised) and isinstance(after, Sanitised)
-    options = render.resvg_options(render.imscribe_fonts())
-    width = round(before.width)
-
-    def text_ink(svg: str) -> int:
-        """
-        Opaque dark pixels: the labels' glyphs, not the light fills of the boxes.
-        """
-        w, h, rgba = render.rasterise(svg, width, options)
-        px = np.frombuffer(rgba, np.uint8).reshape(h, w, 4)
-        return int(((px[..., 3] > 128) & (px[..., :3].max(axis=2) < 110)).sum())
-
-    clipped, whole = text_ink(before.svg), text_ink(after.svg)
-    # Measured 2026-10-21 on these diagrams: 4-9% more (class 1148 -> 1255).
-    assert whole > clipped * 1.015, f"the opened labels drew no more ink: {clipped} -> {whole}"
+    assert isinstance(sanitise(opened), Sanitised)
 
 
 def test_a_merman_error_is_its_first_line_cut_short() -> None:
@@ -311,14 +280,6 @@ def test_a_merman_error_is_its_first_line_cut_short() -> None:
 # -- the host -----------------------------------------------------------------------------
 
 
-class Texture:
-    def __init__(self, ident: int) -> None:
-        self.ident = ident
-
-    def texture_id(self) -> int:
-        return self.ident
-
-
 class FakeRenderer:
     """
     The render process as the host sees it, layouts included: what it was asked, and
@@ -328,9 +289,6 @@ class FakeRenderer:
     def __init__(self) -> None:
         self.asked: list[tuple[str, Hashable, Any]] = []
         self.answers: list[Result] = []
-
-    def submit(self, key: Hashable, sanitised: Sanitised, px_width: float, scale: float) -> None:
-        self.asked.append(("raster", key, (sanitised, px_width, scale)))
 
     def lay_out(self, key: Hashable, source: str) -> None:
         self.asked.append(("layout", key, source))
@@ -346,28 +304,14 @@ class FakeRenderer:
         for key, _ in self.layouts():
             self.answers.append(Laid(key, laid))
 
-    def answer_rasters(self) -> None:
-        for kind, key, args in self.asked:
-            if kind == "raster":
-                sanitised, px_width, scale = args
-                w, h = render.raster_size(sanitised, px_width, scale)
-                self.answers.append(Rendered(key, w, h, bytes(w * h * 4), px_width, scale))
-
 
 @pytest.fixture
 def fake(seam: Any, monkeypatch: pytest.MonkeyPatch) -> Iterator[FakeRenderer]:
     renderer = FakeRenderer()
-    made: list[int] = []
-
-    def upload(rgba: bytes, width: int, height: int) -> Texture:
-        made.append(width)
-        return Texture(len(made))
-
     host.release_all()
     monkeypatch.setattr(host, "_MARKS", OrderedDict())
     monkeypatch.setattr(mermaid, "_VERSION", ["0.9.1"])
     monkeypatch.setattr(host._STATE, "renderer", lambda: renderer)
-    monkeypatch.setattr(host._STATE, "upload", upload)
     yield renderer
     host.release_all()
 
@@ -457,7 +401,6 @@ def test_the_placeholder_stands_until_the_layout_and_then_the_real_height(
     assert widget.height_for(600.0) == 150.0
     assert widget.height_for(150.0) == 75.0
     assert widget.drawn[1] > 0, "drawn the frame its list arrived"
-    assert not [kind for kind, *_ in fake.asked if kind == "raster"], "Mermaid is never rasterised"
 
 
 def test_a_laid_out_figure_rehosted_answers_its_height_at_once(
@@ -937,7 +880,7 @@ def test_the_held_layouts_evict_the_least_recently_read() -> None:
 # -- one retry for each request ---------------------------------------------------------
 
 
-def test_a_retried_layout_is_drawn_when_it_arrives_and_nothing_is_rasterised(
+def test_a_retried_layout_is_drawn_when_it_arrives(
     fake: FakeRenderer, seam: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     now = [100.0]
@@ -987,11 +930,32 @@ def test_the_table_of_fences_needs_what_the_render_modules_import() -> None:
 
     from pptmstr.figures import fences
 
-    assert fences._RASTER is render.DISTRIBUTIONS
+    assert fences._FIGURE is render.DISTRIBUTIONS
     for row in fences.RENDERED:
         if row.kind == "figure":
-            assert set(render.DISTRIBUTIONS) <= set(row.needs)
+            assert set(render.DISTRIBUTIONS) | {"merman"} == set(row.needs)
     provides = metadata.packages_distributions()
-    for distribution, module in {**render.CHILD_MODULES, **render.UPLOAD_MODULES}.items():
+    for distribution, module in render.CHILD_MODULES.items():
         top = module.split(".")[0]
         assert distribution.lower() in {d.lower() for d in provides.get(top, [])}, module
+
+
+def test_no_figure_module_imports_a_rasteriser_or_an_array_library() -> None:
+    """
+    Figures are drawn natively: nothing under ``pptmstr/figures`` imports resvg,
+    Pillow or numpy, at the top of a module or inside a function.
+    """
+    import ast
+
+    import pptmstr.figures as figures
+
+    folder = Path(figures.__file__).parent
+    for path in sorted(folder.glob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text())):
+            names: list[str] = []
+            if isinstance(node, ast.Import):
+                names = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                names = [node.module]
+            for name in names:
+                assert name.split(".")[0] not in ("resvg_py", "PIL", "numpy"), (path.name, name)

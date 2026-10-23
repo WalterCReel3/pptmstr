@@ -77,7 +77,16 @@ MAX_ITEMS = 10_000
 Paths plus text runs, marker instances included.
 """
 MAX_SEGS_PER_PATH = 4_096
-MAX_SEGS_TOTAL = 100_000
+MAX_SEGS_TOTAL = 16_384
+"""
+Path segments in the whole list. The largest diagrams merman 0.9.1 lays out within
+its own limits and the sanitiser's carry at most 6,488 (an entity-relationship
+diagram of 42 entities, refused at 43 by the sanitiser's element cap; the largest
+flowchart, class, state and sequence diagrams 3,550, 3,472, 4,123 and 1,104;
+2026-10-22, ``shots/native-cost/merman_max.py``), so this is two and a half times
+that. ``MAX_DRAWN_POINTS`` is what bounds a build; this bounds the wire and the
+parse.
+"""
 MAX_SUBPATHS_PER_PATH = 256
 MAX_TEXT_RUNS = 5_000
 MAX_RUN_CHARS = 512
@@ -92,6 +101,12 @@ DASH_MIN, DASH_MAX = 0.5, 4_096.0
 MAX_NODES = 2_000
 MAX_EDGES = 5_000
 MAX_HIT_POINTS = 256
+"""
+Points an edge's hit line keeps, thinned to fit. The longest a real diagram made is
+145 (a 105-node flowchart's longest edge), so this already holds it with headroom,
+and is not lowered further: a lower cap would thin real edges' lines and change
+the lists merman's diagrams make, for a saving only on the wire.
+"""
 MAX_ATTACH = 16
 MAX_ID_CHARS = 128
 MAX_USE_DEPTH = 4
@@ -120,6 +135,22 @@ MAX_POINTS_PER_ITEM = 16_384
 MAX_DASH_PIECES = 2_048
 """
 A dashed path that would split into more pieces is drawn solid.
+"""
+MAX_DRAWN_POINTS = 32_768
+"""
+The most points the pane may flatten a list's paths into at any width it draws it
+(``drawn_points``), checked by ``validate`` on the I/O thread: a list past it is
+refused as too costly to draw, before the frame thread builds anything from it.
+
+A build costs about 0.9 us a point for a stroked curve and 1.8 us for a filled
+shape (``host.build``, 2026-10-22, ``shots/native-cost/test_build_cost.py``). The
+largest diagrams merman lays out need at most 17,777 (an entity-relationship
+diagram of 42 entities; a 95-class diagram 10,592, a 155-state one 7,170, a
+105-node flowchart 6,268), so this is 1.8 times that. A frame budget of 16 ms
+would have refused that diagram, which takes 25 ms to build: the frame budget is
+not one merman's own output keeps, and a first build waits its turn, one figure a
+frame (``host._may_rebuild``). What a list at this bound costs to build, with its
+dashes and text at theirs, is in the planning record (§11.3).
 """
 
 # Roles. A role names what a primitive is, and the theme picks its colour.
@@ -372,6 +403,8 @@ def _validate(dl: object) -> str | None:
             return "owner"
     if segs > MAX_SEGS_TOTAL or runs > MAX_TEXT_RUNS or chars > MAX_TEXT_CHARS:
         return "total"
+    if drawn_points(dl) > MAX_DRAWN_POINTS:
+        return "too costly to draw"
     for n in dl.nodes:
         if not isinstance(n, HitNode) or not isinstance(n.id, str) or len(n.id) > MAX_ID_CHARS:
             return "node"
@@ -451,8 +484,8 @@ MAX_WIRE_BYTES = (
     + _RECORD_BYTES * (1 + MAX_ITEMS + MAX_NODES + MAX_EDGES)
 )
 """
-The longest a list within every bound can be on the wire (about 100 MB, nearly
-all of it the edges' hit points at ``MAX_EDGES`` x ``MAX_HIT_POINTS``): what the
+The longest a list within every bound can be on the wire (about 90 MB, most of
+it the edges' hit points at ``MAX_EDGES`` x ``MAX_HIT_POINTS``): what the
 GUI process will read of one reply (``render``), so a child cannot make it
 allocate more. A real diagram is a few tens of kilobytes.
 """
@@ -2181,6 +2214,84 @@ def ellipse_path(cx: float, cy: float, rx: float, ry: float) -> tuple[str, list[
 Point = tuple[float, float]
 
 
+def _cubic_steps(
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    x3: float,
+    y3: float,
+    tol: float,
+) -> int:
+    """
+    Wang's step count for a cubic to stay within ``tol``, at most ``MAX_CURVE_STEPS``.
+    """
+    dd = max(
+        math.hypot(x0 - 2 * x1 + x2, y0 - 2 * y1 + y2),
+        math.hypot(x1 - 2 * x2 + x3, y1 - 2 * y2 + y3),
+    )
+    return min(MAX_CURVE_STEPS, max(1, math.ceil(math.sqrt(0.75 * dd / tol))))
+
+
+def _quad_steps(
+    x0: float, y0: float, x1: float, y1: float, x2: float, y2: float, tol: float
+) -> int:
+    """
+    Wang's step count for a quadratic to stay within ``tol``, at most
+    ``MAX_CURVE_STEPS``.
+    """
+    dd = math.hypot(x0 - 2 * x1 + x2, y0 - 2 * y1 + y2)
+    return min(MAX_CURVE_STEPS, max(1, math.ceil(math.sqrt(0.25 * dd / tol))))
+
+
+def path_points(ops: str, xy: Sequence[float], scale: float, tol: float = FLATTEN_TOL_PX) -> int:
+    """
+    At least as many points as ``flatten_units`` makes of the path at ``scale``: one
+    for each move, line and close, and each curve's steps, held to the per-item cap
+    ``flatten_units`` stops at. Steps grow with the scale, so the count at the
+    largest scale a figure is drawn at bounds every smaller one.
+    """
+    n = k = 0
+    x = y = 0.0
+    sx = sy = 0.0
+    for op in ops:
+        if op in "ML":
+            x, y = xy[k] * scale, xy[k + 1] * scale
+            if op == "M":
+                sx, sy = x, y
+            k += 2
+            n += 1
+        elif op == "C":
+            x1, y1, x2, y2, x3, y3 = (v * scale for v in xy[k : k + 6])
+            k += 6
+            n += _cubic_steps(x, y, x1, y1, x2, y2, x3, y3, tol)
+            x, y = x3, y3
+        elif op == "Q":
+            x1, y1, x2, y2 = (v * scale for v in xy[k : k + 4])
+            k += 4
+            n += _quad_steps(x, y, x1, y1, x2, y2, tol)
+            x, y = x2, y2
+        elif op == "Z":
+            x, y = sx, sy
+            n += 1
+        if n > MAX_POINTS_PER_ITEM + MAX_CURVE_STEPS:
+            break
+    return min(n, MAX_POINTS_PER_ITEM + MAX_CURVE_STEPS)
+
+
+def drawn_points(dl: DisplayList) -> int:
+    """
+    At least as many points as the pane flattens ``dl``'s paths into at any width it
+    draws it: what a build's cost grows with (``host.build``). The pane draws a figure
+    no wider than its natural width, so at most one pixel a unit, or a pixel's width
+    when the natural width is under one (``host.FigureWidget.size_for``).
+    """
+    scale = max(1.0, 1.0 / dl.width)
+    return sum(path_points(it.ops, it.xy, scale) for it in dl.items if isinstance(it, PathItem))
+
+
 def flatten_units(
     ops: str, xy: Sequence[float], scale: float, tol: float = FLATTEN_TOL_PX
 ) -> list[tuple[list[Point], bool]]:
@@ -2209,11 +2320,7 @@ def flatten_units(
         elif op == "C":
             x1, y1, x2, y2, x3, y3 = (v * scale for v in xy[k : k + 6])
             k += 6
-            dd = max(
-                math.hypot(x - 2 * x1 + x2, y - 2 * y1 + y2),
-                math.hypot(x1 - 2 * x2 + x3, y1 - 2 * y2 + y3),
-            )
-            n = min(MAX_CURVE_STEPS, max(1, math.ceil(math.sqrt(0.75 * dd / tol))))
+            n = _cubic_steps(x, y, x1, y1, x2, y2, x3, y3, tol)
             for i in range(1, n + 1):
                 t = i / n
                 u = 1 - t
@@ -2227,8 +2334,7 @@ def flatten_units(
         elif op == "Q":
             x1, y1, x2, y2 = (v * scale for v in xy[k : k + 4])
             k += 4
-            dd = math.hypot(x - 2 * x1 + x2, y - 2 * y1 + y2)
-            n = min(MAX_CURVE_STEPS, max(1, math.ceil(math.sqrt(0.25 * dd / tol))))
+            n = _quad_steps(x, y, x1, y1, x2, y2, tol)
             for i in range(1, n + 1):
                 t = i / n
                 u = 1 - t
@@ -2428,6 +2534,7 @@ __all__: Sequence[str] = (
     "authored_colours",
     "contrast",
     "decode",
+    "drawn_points",
     "encode",
     "from_mermaid",
     "from_svg",

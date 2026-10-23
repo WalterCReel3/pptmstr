@@ -4,7 +4,6 @@ The SVG sanitiser: each hostile case by name, the natural-size rule, and totalit
 
 from __future__ import annotations
 
-import io
 import random
 import re
 import signal
@@ -64,15 +63,16 @@ def quoted(value: str) -> str:
     return value.replace("&", "&amp;").replace('"', "&quot;")
 
 
-def render_pixel(svg: str, at: tuple[int, int] = (100, 50)) -> tuple[int, ...]:
+def last_fill(out: Sanitised) -> str | None:
     """
-    The RGBA resvg paints at `at` with the canvas 200 px wide; skips without resvg.
+    The fill the last `<rect>` is given inline: its `style`'s, else its attribute.
     """
-    resvg_py = pytest.importorskip("resvg_py")
-    image = pytest.importorskip("PIL.Image")
-    png = resvg_py.svg_to_bytes(svg_string=svg, width=200)
-    with image.open(io.BytesIO(bytes(png))) as pixels:
-        return tuple(pixels.convert("RGBA").getpixel(at))
+    rect = find_all(out, "rect")[-1]
+    for declaration in (rect.get("style") or "").split(";"):
+        name, _, value = declaration.partition(":")
+        if name.strip() == "fill":
+            return value.strip()
+    return rect.get("fill")
 
 
 def tree(out: Sanitised) -> ET.Element:
@@ -488,7 +488,8 @@ def test_a_shape_coloured_by_a_class_keeps_its_colour_beside_an_unsafe_rule(unsa
         f"<style>.a{{fill:#e8590c}} {unsafe}</style>"
         '<rect width="200" height="100" fill="#fff"/><rect class="a" width="200" height="100"/>'
     )
-    assert render_pixel(passed(svg).svg) == (0xE8, 0x59, 0x0C, 255)
+    style = find_all(passed(svg), "style")[0].text or ""
+    assert ".a{fill:#e8590c}" in style.replace(" ", "")
 
 
 def test_css_fragment_url_in_a_style_element_is_kept() -> None:
@@ -607,25 +608,19 @@ def test_a_var_note_and_a_paint_note_are_both_kept() -> None:
 
 
 @pytest.mark.parametrize(
-    ("body", "pixel"),
+    ("body", "fill"),
     [
-        ('fill="url(http://x)"', (255, 255, 255, 255)),
-        ('fill="url(http://x) #e8590c"', (0xE8, 0x59, 0x0C, 255)),
-        ('style="fill:url(http://x)"', (255, 255, 255, 255)),
-        ('style="fill:url(http://x) #e8590c"', (0xE8, 0x59, 0x0C, 255)),
+        ('fill="url(http://x)"', "none"),
+        ('fill="url(http://x) #e8590c"', "#e8590c"),
+        ('style="fill:url(http://x)"', "none"),
+        ('style="fill:url(http://x) #e8590c"', "#e8590c"),
     ],
 )
-def test_an_unsafe_fill_is_not_painted_black(body: str, pixel: tuple[int, ...]) -> None:
-    resvg_py = pytest.importorskip("resvg_py")
-    image = pytest.importorskip("PIL.Image")
-    import io
-
+def test_an_unsafe_fill_becomes_its_fallback_or_none(body: str, fill: str) -> None:
     svg = doc(
         f'<rect width="200" height="100" fill="#fff"/><rect width="200" height="100" {body}/>'
     )
-    png = resvg_py.svg_to_bytes(svg_string=passed(svg).svg, width=200)
-    with image.open(io.BytesIO(bytes(png))) as pixels:
-        assert pixels.convert("RGBA").getpixel((100, 50)) == pixel
+    assert last_fill(passed(svg)) == fill
 
 
 # Step 5: caps -------------------------------------------------------------------------
@@ -1105,8 +1100,9 @@ def test_a_dangling_paint_keeps_its_fallback_only_if_it_is_a_colour(
     assert (rect.get("fill"), rect.get("style")) == (painted, f"stroke: {painted}")
 
 
-# What `_colour_or_none` keeps. Every one is drawn by resvg below, so the grammar is held
-# to what the renderer paints and not only to what CSS allows.
+# What `_colour_or_none` keeps. Every one is read by the display list's colour parser
+# below, so the grammar is held to what the pane can draw and not only to what CSS
+# allows.
 COLOURS = [
     "red",
     " Red ",
@@ -1173,21 +1169,15 @@ def test_anything_else_is_none(text: str) -> None:
     assert _colour_or_none(text) == "none"
 
 
-def test_every_kept_colour_is_one_resvg_paints() -> None:
+def test_every_kept_colour_is_one_the_display_list_reads() -> None:
+    from pptmstr.figures.displaylist import parse_colour
     from pptmstr.figures.sanitise import _colour_or_none
 
-    # currentColor is black here because no `color` is set, which is what it means.
-    black = (0, 0, 0, 255)
-    names = sorted(NAMED_COLOURS - {"black"})
-    for colour in [*names, *(c for c in COLOURS if c.strip().lower() != "currentcolor")]:
+    # currentColor and none name no colour of their own, which is what they mean.
+    words = {"currentcolor", "none"}
+    for colour in [*sorted(NAMED_COLOURS), *(c for c in COLOURS if c.strip().lower() not in words)]:
         kept = _colour_or_none(colour)
-        svg = doc(
-            '<rect width="200" height="100" fill="#fff"/>'
-            f'<rect width="200" height="100" fill="{kept}"/>'
-        )
-        assert render_pixel(svg) != black, (colour, kept)
-    colour_set = doc('<rect width="200" height="100" color="#e8590c" fill="currentColor"/>')
-    assert render_pixel(colour_set) == (0xE8, 0x59, 0x0C, 255)
+        assert parse_colour(kept) is not None, (colour, kept)
 
 
 @pytest.mark.parametrize(
@@ -1201,12 +1191,17 @@ def test_every_kept_colour_is_one_resvg_paints() -> None:
         'class="a"',
     ],
 )
-def test_an_invalid_fallback_is_not_painted_black(body: str) -> None:
+def test_an_invalid_fallback_becomes_none(body: str) -> None:
     svg = doc(
         "<style>.a{fill:url(#gone) rgba(1,2,3,50%)}</style>"
         f'<rect width="200" height="100" fill="#fff"/><rect width="200" height="100" {body}/>'
     )
-    assert render_pixel(passed(svg).svg) == (255, 255, 255, 255)
+    out = passed(svg)
+    assert "foo" not in out.svg and "50%" not in out.svg and "url(" not in out.svg
+    style = find_all(out, "style")[0].text or ""
+    assert last_fill(out) == "none" or (
+        body == 'class="a"' and "fill:none" in style.replace(" ", "")
+    )
 
 
 def test_dangling_paint_in_css_becomes_its_fallback_or_none() -> None:
@@ -1243,9 +1238,8 @@ def test_a_paint_that_resolves_is_not_noted() -> None:
     assert out.notes == ()
 
 
-# rebeccapurple is the one CSS named colour resvg_py 0.5.0 paints black (measured
+# rebeccapurple is the one CSS named colour resvg_py 0.5.0 painted black (measured
 # 2026-10-21), so it is spelled #663399 in every value that can hold a colour.
-REBECCA = (0x66, 0x33, 0x99, 255)
 FULL = 'width="200" height="100"'
 
 
@@ -1272,10 +1266,10 @@ FULL = 'width="200" height="100"'
         f'<rect {FULL} fill="url(http://x) rebeccapurple"/>',
     ],
 )
-def test_rebeccapurple_is_painted_in_every_colour_value(body: str) -> None:
-    svg = doc(f'<rect {FULL} fill="#fff"/>{body}')
-    assert render_pixel(passed(svg).svg) == REBECCA
-    assert "rebeccapurple" not in passed(svg).svg.lower()
+def test_rebeccapurple_is_spelled_out_in_every_colour_value(body: str) -> None:
+    out = passed(doc(f'<rect {FULL} fill="#fff"/>{body}'))
+    assert "rebeccapurple" not in out.svg.lower()
+    assert "#663399" in out.svg
 
 
 def test_rebeccapurple_is_spelled_only_as_a_whole_colour_name() -> None:
@@ -1391,7 +1385,7 @@ def test_references_to_kept_ids_are_untouched() -> None:
 
 # Step 9: custom properties ------------------------------------------------------------
 
-# The case measured on 2026-10-21: resvg paints `fill:var(--c)` black.
+# The case measured on 2026-10-21: resvg painted `fill:var(--c)` black.
 DATAVIZ = doc(
     "<style>.viz{--c:#e8590c} .a{fill:var(--c)}</style>"
     '<g class="viz"><rect class="a" width="200" height="100"/></g>'
@@ -1404,16 +1398,6 @@ def test_a_custom_property_in_a_stylesheet_is_substituted_and_its_declaration_re
     assert ".a{fill:#e8590c}" in style
     assert "var(" not in out.svg and "--c" not in out.svg
     assert out.notes == ()
-
-
-def test_the_substituted_colour_is_what_resvg_paints() -> None:
-    resvg_py = pytest.importorskip("resvg_py")
-    image = pytest.importorskip("PIL.Image")
-    import io
-
-    png = resvg_py.svg_to_bytes(svg_string=passed(DATAVIZ).svg, width=200)
-    with image.open(io.BytesIO(bytes(png))) as pixels:
-        assert pixels.convert("RGBA").getpixel((100, 50)) == (0xE8, 0x59, 0x0C, 255)
 
 
 def test_a_var_with_a_fallback_takes_it_when_undeclared() -> None:
@@ -1549,9 +1533,8 @@ def test_a_fragment_url_through_a_var_is_kept_and_still_resolved() -> None:
         f'<g style="--c: hsl(120deg, 50%, 50%)"><rect {FULL} fill="var(--c)"/></g>',
     ],
 )
-def test_a_var_resolving_to_a_non_colour_paint_is_not_painted_black(body: str) -> None:
+def test_a_var_resolving_to_a_non_colour_paint_is_painted_none(body: str) -> None:
     out = passed(doc(f'<rect {FULL} fill="#fff"/>{body}'))
-    assert render_pixel(out.svg) == (255, 255, 255, 255)
     assert len(out.notes) == 1 and "not a colour; painted none" in out.notes[0]
 
 
@@ -1577,7 +1560,7 @@ def test_a_var_paint_that_is_a_colour_inherit_or_a_url_is_kept_as_written() -> N
 
 def test_a_var_paint_of_inherit_inherits() -> None:
     svg = doc(f'<g fill="#e8590c" style="--c:inherit"><rect {FULL} fill="var(--c)"/></g>')
-    assert render_pixel(passed(svg).svg) == (0xE8, 0x59, 0x0C, 255)
+    assert last_fill(passed(svg)) == "inherit"
 
 
 def test_a_var_outside_a_paint_is_not_held_to_a_colour() -> None:
@@ -1702,13 +1685,16 @@ def test_a_failed_var_in_stop_color_is_transparent_not_black(stop: str, rect: st
     # The --c on the rect does not reach the stops by inheritance (the table is
     # document-wide), which is what this relies on.
     out = passed(doc(GRADIENT.format(stop=stop, rect=rect)))
-    assert render_pixel(out.svg) == (255, 255, 255, 255)
+    assert all(
+        "transparent" in (s.get("stop-color") or s.get("style") or "")
+        for s in find_all(out, "stop")
+    )
     assert any("set to transparent" in note for note in out.notes), out.notes
 
 
 def test_a_var_in_stop_color_that_is_a_colour_is_kept() -> None:
     out = passed(doc(GRADIENT.format(stop='stop-color="var(--c)"', rect='style="--c:#e8590c"')))
-    assert render_pixel(out.svg) == (0xE8, 0x59, 0x0C, 255)
+    assert [s.get("stop-color") for s in find_all(out, "stop")] == ["#e8590c", "#e8590c"]
     assert out.notes == ()
 
 
@@ -1718,20 +1704,19 @@ def test_a_var_in_color_that_is_not_a_colour_is_removed_and_inherits() -> None:
     )
     out = passed(svg)
     assert find_all(out, "rect")[0].get("color") is None
-    assert render_pixel(out.svg) == (0, 128, 0, 255)
     assert out.notes == ("color: var() resolves to 'foo', not a colour; removed",)
 
 
 @pytest.mark.parametrize(
-    "colour, pixel",
-    [("rgb(1e2,0,0)", (100, 0, 0, 255)), ("rgb(+5,-1,300)", (5, 0, 255, 255))],
+    "colour, rgb",
+    [("rgb(1e2,0,0)", 0x640000), ("rgb(+5,-1,300)", 0x0500FF)],
 )
-def test_a_signed_or_exponent_colour_through_a_var_is_kept_and_painted(
-    colour: str, pixel: tuple[int, ...]
-) -> None:
+def test_a_signed_or_exponent_colour_through_a_var_is_kept_and_read(colour: str, rgb: int) -> None:
+    from pptmstr.figures.displaylist import parse_colour
+
     out = passed(doc(f'<rect {FULL} style="--c:{colour}" fill="var(--c)"/>'))
     assert find_all(out, "rect")[0].get("fill") == colour
-    assert render_pixel(out.svg) == pixel
+    assert parse_colour(colour) == rgb
 
 
 def test_notes_stop_at_the_cap_and_say_there_are_more() -> None:

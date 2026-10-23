@@ -499,8 +499,8 @@ def test_the_application_unloads_the_library_before_its_context_goes(
 ) -> None:
     """
     ``unload`` is worth what its caller is. The runner's ``before_exit`` is read
-    off the source, as the idling wiring is, and what it calls is run: figure
-    textures go first, while the GL context is current, then the library.
+    off the source, as the idling wiring is, and what it calls is run: the library,
+    while the ImGui context is current.
     """
     import inspect
 
@@ -508,10 +508,9 @@ def test_the_application_unloads_the_library_before_its_context_goes(
 
     assert "runner.callbacks.before_exit = _before_exit" in inspect.getsource(app.main)
     called: list[str] = []
-    monkeypatch.setattr(app.figure_host, "release_all", lambda: called.append("textures"))
     monkeypatch.setattr(app.typeset, "unload", lambda: called.append("library"))
     app._before_exit()
-    assert called == ["textures", "library"]
+    assert called == ["library"]
 
 
 # -- with the library ------------------------------------------------------------

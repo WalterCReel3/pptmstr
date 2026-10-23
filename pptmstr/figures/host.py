@@ -62,10 +62,6 @@ merman refused it, a bound) is kept for the content and not asked for again. One
 the machine may have caused (the child died, ran out of time or memory, did not
 start) is asked for once more after ``RETRY_AFTER_S``; a second such failure is
 kept as the first kind is.
-
-**The raster path is kept and unused** (``RasterFigure``, ``_Textures``,
-``render.submit``): the figure card and the textures it drew Mermaid with before
-the display list. Nothing hosts it now; a separate task removes it after review.
 """
 
 from __future__ import annotations
@@ -81,19 +77,7 @@ from typing import Any
 from . import displaylist as dlm
 from . import fences, mermaid, render
 from .displaylist import DisplayList, PathItem, TextRun
-from .sanitise import Refused, Sanitised
-
-STABLE_FRAMES = 6
-"""
-How many frames a drawn width must hold before a raster figure that has a raster at
-another width asks for one at this width (``RasterFigure``, unused for Mermaid).
-"""
-
-TEXTURE_BUDGET_BYTES = 256 << 20
-"""
-The RGBA held as textures for raster figures, across every pane (``RasterFigure``,
-unused for Mermaid).
-"""
+from .sanitise import Refused
 
 RETRY_AFTER_S = 5.0
 """
@@ -109,20 +93,6 @@ natural size is known only after layout, so it jumps once, to its real height, w
 the layout arrives (planning record §3.6). A re-hosted figure whose layout is held
 answers its real height at once.
 """
-
-FIGURE_PAD = 6.0
-"""
-The raster card's margin around a figure's image on each side, in ImGui units
-(``RasterFigure``). A native figure has no card and no margin.
-"""
-
-BACKDROP = 0xFAFAF7
-"""
-The card a raster figure is drawn on, as ``0xRRGGBB`` (``RasterFigure``). A native
-figure stands on the pane.
-"""
-
-BACKDROP_ROUNDING = 4.0
 
 LAYOUT_BUDGET_WORDS = (64 << 20) // dlm.WORD_BYTES
 """
@@ -143,9 +113,9 @@ built geometry (``_Geometry``), about as large as its list (0.8 MiB for the
 LABEL_OVERFLOW = 1.15
 """
 How far past merman's label box a label may run before it is set smaller. merman
-measures with its own metrics, narrower than the pane's face; the raster let labels
-overflow (``mermaid.visible_labels``), and shrinking every label that ran a pixel
-over made sizes uneven from one box to the next.
+measures with its own metrics, narrower than the pane's face (``mermaid.visible_labels``),
+and shrinking every label that ran a pixel over made sizes uneven from one box to
+the next.
 """
 
 HIGHLIGHT_WIDTH = 1.5
@@ -174,7 +144,7 @@ build and 9 ms a frame to draw at 900 px wide (2026-10-22, ``shots/native-fix``)
 _MARKS_KEPT = 64
 _FAILURES_KEPT = 256
 _NOTED_KEPT = 256
-# The first element of a layout request's key; a raster's is a sha.
+# The first element of a layout request's key.
 _LAYOUT = "layout"
 
 
@@ -298,21 +268,7 @@ an operator decision not yet taken, and this is the one place it will be wired.
 """
 
 
-# Held layouts and textures ----------------------------------------------------------
-
-
-@dataclass(frozen=True, slots=True)
-class _Raster:
-    texture: Any
-    width: int
-    height: int
-
-    @property
-    def nbytes(self) -> int:
-        return self.width * self.height * 4
-
-
-_Key = tuple[str, float, int]
+# Held layouts ----------------------------------------------------------
 
 
 class _Layouts:
@@ -355,90 +311,15 @@ class _Layouts:
         self._words = 0
 
 
-class _Textures:
-    """
-    Rasters by content, bounded by bytes, the least recently drawn evicted first
-    (``RasterFigure``, unused for Mermaid).
-
-    An evicted raster is parked with the pump it was evicted in and let go of only
-    at a later one (``release``).
-    """
-
-    def __init__(self, budget: int) -> None:
-        self.budget = budget
-        self._held: OrderedDict[_Key, _Raster] = OrderedDict()
-        self._bytes = 0
-        self.parked: list[tuple[int, _Raster]] = []
-
-    def __len__(self) -> int:
-        return len(self._held)
-
-    def get(self, key: _Key) -> _Raster | None:
-        raster = self._held.get(key)
-        if raster is not None:
-            self._held.move_to_end(key)
-        return raster
-
-    def any_of(self, sha: str, scale: float) -> _Raster | None:
-        """
-        The most recently drawn raster of this content at this density, any width.
-        """
-        for (held_sha, held_scale, _), raster in reversed(self._held.items()):
-            if held_sha == sha and held_scale == scale:
-                return raster
-        return None
-
-    def put(self, key: _Key, raster: _Raster, at: int) -> None:
-        old = self._held.pop(key, None)
-        if old is not None:
-            self._bytes -= old.nbytes
-            self.parked.append((at, old))
-        self._held[key] = raster
-        self._bytes += raster.nbytes
-        while self._bytes > self.budget and len(self._held) > 1:
-            _, evicted = self._held.popitem(last=False)
-            self._bytes -= evicted.nbytes
-            self.parked.append((at, evicted))
-
-    def release(self, now: int) -> int:
-        """
-        Let go of every raster parked before ``now``. How many that was.
-        """
-        keep = [(at, raster) for at, raster in self.parked if at >= now]
-        dropped = len(self.parked) - len(keep)
-        self.parked = keep
-        return dropped
-
-    def clear(self) -> None:
-        self._held.clear()
-        self.parked.clear()
-        self._bytes = 0
-
-
-def _upload(rgba: bytes, width: int, height: int) -> Any:
-    """
-    A ``TextureGpu`` of ``rgba``. On the GUI thread, with a backend running.
-    """
-    import numpy as np
-    from imgui_bundle import hello_imgui
-
-    pixels = np.frombuffer(rgba, dtype=np.uint8).reshape(height, width, 4)
-    return hello_imgui.create_texture_gpu_from_rgba_data(pixels)
-
-
 @dataclass
 class _State:
-    textures: _Textures
     # Failures shown in place of the figure, by sha: kept for good.
-    failures: OrderedDict[str, str]
-    # What has been asked of the renderer and not answered: the raster width, by
-    # (sha, density). Raster figures only.
-    asked: dict[tuple[str, float], int]
-    # Requests whose first transient failure is waiting out its back-off: when they
-    # may be asked again, by ``_budget``.
-    backoff: OrderedDict[str, float]
-    # Requests asked again after a transient failure; another one is kept for good.
-    retried: OrderedDict[str, None]
+    failures: OrderedDict[str, str] = field(default_factory=OrderedDict)
+    # Layouts whose first transient failure is waiting out its back-off: when they
+    # may be asked again, by sha.
+    backoff: OrderedDict[str, float] = field(default_factory=OrderedDict)
+    # Layouts asked again after a transient failure; another one is kept for good.
+    retried: OrderedDict[str, None] = field(default_factory=OrderedDict)
     # Mermaid diagrams laid out, by their mark's sha (source and merman version).
     layouts: _Layouts = field(default_factory=lambda: _Layouts(LAYOUT_BUDGET_WORDS))
     # Mermaid diagrams asked of the render child and not yet answered, by sha.
@@ -449,81 +330,49 @@ class _State:
     stale: dict[int, tuple[int, int]] = field(default_factory=dict)
     # Colour adjustments already logged: (sha, palette, ground).
     noted: OrderedDict[tuple[str, str, int], None] = field(default_factory=OrderedDict)
-    pumps: int = 0
-    upload: Callable[[bytes, int, int], Any] = _upload
     renderer: Callable[[], render.Renderer] = render.renderer
     clock: Callable[[], float] = time.monotonic
 
 
-_STATE = _State(_Textures(TEXTURE_BUDGET_BYTES), OrderedDict(), {}, OrderedDict(), OrderedDict())
+_STATE = _State()
 
 
 def pump() -> None:
     """
-    Once a frame, between frames (the app's pre-new-frame callback): let go of what
-    an earlier pump parked, take what the renderer has finished (which is also where
-    it stops a request past its time), and hold it.
+    Once a frame, between frames (the app's pre-new-frame callback): take what the
+    renderer has finished (which is also where it stops a request past its time),
+    and hold it.
 
     Never raises. A result that cannot be taken is that figure's failure and does
     not cost the others.
     """
     state = _STATE
-    state.pumps += 1
     try:
-        state.textures.release(state.pumps)
         results = state.renderer().poll()
     except Exception:
         return
     for result in results:
         key = result.key
-        if not (isinstance(key, tuple) and len(key) == 2):
+        if not (isinstance(key, tuple) and len(key) == 2 and key[0] == _LAYOUT):
             continue
-        if key[0] == _LAYOUT:
-            sha = key[1]
-            state.laying.discard(sha)
-            if isinstance(result, render.Laid):
-                state.layouts.put(sha, result.display)
-                state.backoff.pop(_budget(sha, _LAYOUT), None)
-            elif isinstance(result, render.Failed):
-                _fail(state, sha, result, _LAYOUT)
-            continue
-        sha, scale = key
-        state.asked.pop(key, None)
-        try:
-            _take(state, sha, scale, result)
-        except Exception as exc:
-            _keep(state.failures, sha, f"texture upload failed: {render._one_line(exc)}")
+        sha = key[1]
+        state.laying.discard(sha)
+        if isinstance(result, render.Laid):
+            state.layouts.put(sha, result.display)
+            state.backoff.pop(sha, None)
+        elif isinstance(result, render.Failed):
+            _fail(state, sha, result)
 
 
-def _take(state: _State, sha: str, scale: float, result: render.Result) -> None:
-    if isinstance(result, render.Rendered):
-        texture = state.upload(result.rgba, result.width, result.height)
-        raster = _Raster(texture, result.width, result.height)
-        state.textures.put((sha, scale, result.width), raster, state.pumps)
-        state.backoff.pop(_budget(sha), None)
-    elif isinstance(result, render.Failed):
-        _fail(state, sha, result)
-
-
-def _budget(sha: str, kind: str = "") -> str:
+def _fail(state: _State, sha: str, result: render.Failed) -> None:
     """
-    What a request's one retry is kept by: the content's sha for a raster, and the
-    sha under ``kind`` for a layout, so a layout that was retried leaves its
-    raster's retry unspent.
+    A layout that failed: backed off once if the machine may have caused it, else
+    kept, and the figure shows its source under the reason.
     """
-    return f"{kind}:{sha}" if kind else sha
-
-
-def _fail(state: _State, sha: str, result: render.Failed, kind: str = "") -> None:
-    """
-    A render or a layout that failed: backed off once if the machine may have caused
-    it, else kept, and the figure shows its source under the reason.
-    """
-    budget = _budget(sha, kind)
-    if result.transient and budget not in state.retried:
-        _keep(state.backoff, budget, state.clock() + RETRY_AFTER_S)
+    if result.transient and sha not in state.retried:
+        _keep(state.backoff, sha, state.clock() + RETRY_AFTER_S)
     else:
-        state.backoff.pop(budget, None)
+        state.backoff.pop(sha, None)
         _keep(state.failures, sha, result.reason)
 
 
@@ -534,21 +383,19 @@ def _keep(held: OrderedDict[Any, Any], sha: Any, value: Any, kept: int = _FAILUR
         held.popitem(last=False)
 
 
-def _may_ask(sha: str, kind: str = "") -> bool:
+def _may_ask(sha: str) -> bool:
     """
-    Whether content may be asked of the renderer now, for a raster or under
-    ``kind``: not while that request's back-off from a transient failure runs. The
-    ask that ends one is its one retry.
+    Whether a layout may be asked of the renderer now: not while its back-off from
+    a transient failure runs. The ask that ends one is its one retry.
     """
     state = _STATE
-    budget = _budget(sha, kind)
-    at = state.backoff.get(budget)
+    at = state.backoff.get(sha)
     if at is None:
         return True
     if state.clock() < at:
         return False
-    del state.backoff[budget]
-    _keep(state.retried, budget, None)
+    del state.backoff[sha]
+    _keep(state.retried, sha, None)
     return True
 
 
@@ -574,12 +421,9 @@ def _may_rebuild(who: int, frame: int) -> bool:
 
 def release_all() -> None:
     """
-    Let go of every texture, layout and failure held. For application exit, while
-    the GL context is still current, and for tests.
+    Let go of every layout and failure held. For application exit, and for tests.
     """
-    _STATE.textures.clear()
     _STATE.failures.clear()
-    _STATE.asked.clear()
     _STATE.backoff.clear()
     _STATE.retried.clear()
     _STATE.layouts.clear()
@@ -587,7 +431,6 @@ def release_all() -> None:
     _STATE.stale.clear()
     _STATE.noted.clear()
     _STATE.rebuilt_at = -1
-    _STATE.pumps = 0
 
 
 # Colours ----------------------------------------------------------------------------
@@ -864,8 +707,8 @@ def on_screen_dash(dash: tuple[float, ...], scale: float) -> tuple[float, ...]:
 def snapped(x: float, y: float, density: float = 1.0) -> tuple[float, float]:
     """
     An origin on the nearest whole pixel of the framebuffer, ``density`` of them to a
-    unit of ImGui's. T1: a raster drawn at a fractional origin lost 41% of its dark
-    ink to the sampler's smear; a polyline's one-pixel line blurs across two.
+    unit of ImGui's: a polyline's one-pixel line at a fractional origin blurs across
+    two.
     """
     return round(x * density) / density, round(y * density) / density
 
@@ -917,7 +760,7 @@ class FigureWidget:
 
     def _lay_out(self, source: str) -> None:
         sha = self._mark.sha
-        if sha in _STATE.laying or sha in _STATE.failures or not _may_ask(sha, _LAYOUT):
+        if sha in _STATE.laying or sha in _STATE.failures or not _may_ask(sha):
             return
         _STATE.laying.add(sha)
         _STATE.renderer().lay_out((_LAYOUT, sha), source)
@@ -1163,115 +1006,6 @@ class FigureWidget:
             dl.add_text(font, size, under, theme.P.text_dim.u32, self._text, None, wide)
         finally:
             im.pop_clip_rect()
-
-
-class RasterFigure(FigureWidget):
-    """
-    A figure drawn from sanitised SVG as a texture on a light card: the route
-    Mermaid took before the display list, kept and unused (nothing hosts it) until a
-    separate task removes it after review.
-
-    Pixels come from the render process over frames: it submits when it has no
-    raster at its drawn width times the display's density, and once the width has
-    been still for ``STABLE_FRAMES`` when it has one at another width to show
-    meanwhile, drawn stretched. Textures are held by content (``_Textures``).
-    """
-
-    def __init__(self, figure: FigureMark, text: str, sanitised: Sanitised) -> None:
-        super().__init__(figure, text)
-        self._source = sanitised
-        # The raster width last wanted, at which density, and the frame from which
-        # it has been wanted.
-        self._wanted: tuple[float, int] | None = None
-        self._since = 0
-
-    def size_for(self, width_px: float) -> tuple[float, float]:
-        """
-        The image's drawn size in a block ``width_px`` wide: no wider than the
-        natural width or the block less the card's padding, at its aspect.
-        """
-        room = width_px - 2.0 * FIGURE_PAD
-        natural = self._source
-        wide = max(1.0, min(room, natural.width))
-        return wide, wide * natural.height / natural.width
-
-    def height_for(self, width_px: float) -> float:
-        failure = self._failure()
-        if failure is not None:
-            said, source = self._failed_heights(self._refusal(failure), width_px)
-            return said + _spacing() + source
-        return self.size_for(width_px)[1] + 2.0 * FIGURE_PAD
-
-    def draw(self, *, palette: Any = None, width_px: float | None = None) -> object:
-        from imgui_bundle import imgui as im
-
-        wide = float(width_px if width_px is not None else im.get_content_region_avail().x)
-        at = im.get_cursor_screen_pos()
-        failure = self._failure()
-        if failure is not None:
-            self._draw_failed(im, self._refusal(failure), at.x, at.y, wide)
-            return True
-        from .. import theme
-
-        w, h = self.size_for(wide)
-        pad = FIGURE_PAD
-        im.push_clip_rect(im.ImVec2(at.x, at.y), im.ImVec2(at.x + wide, at.y + h + 2.0 * pad), True)
-        try:
-            dl = im.get_window_draw_list()
-            dl.add_rect_filled(
-                im.ImVec2(at.x, at.y),
-                im.ImVec2(at.x + w + 2.0 * pad, at.y + h + 2.0 * pad),
-                _backdrop(),
-                BACKDROP_ROUNDING,
-            )
-            scale = _density(im)
-            x, y = snapped(at.x + pad, at.y + pad, scale)
-            raster = self._raster(im, self._source, w, scale)
-            if raster is None:
-                dl.add_rect(im.ImVec2(x, y), im.ImVec2(x + w, y + h), theme.P.border.u32)
-            else:
-                im.set_cursor_screen_pos(im.ImVec2(x, y))
-                exact = raster.width == round(w * scale)
-                size = (raster.width / scale, raster.height / scale) if exact else (w, h)
-                im.image(im.ImTextureRef(raster.texture.texture_id()), im.ImVec2(*size))
-        finally:
-            im.pop_clip_rect()
-        return True
-
-    def _raster(self, im: Any, natural: Sanitised, w: float, scale: float) -> _Raster | None:
-        """
-        The raster to draw at drawn width ``w``, asking for the right one where it is
-        not held.
-        """
-        width, _ = render.raster_size(natural, w, scale)
-        frame = im.get_frame_count()
-        if self._wanted != (scale, width):
-            self._wanted, self._since = (scale, width), frame
-        sha = self._mark.sha
-        held = _STATE.textures.get((sha, scale, width))
-        if held is not None:
-            return held
-        meanwhile = _STATE.textures.any_of(sha, scale)
-        if meanwhile is None or frame - self._since >= STABLE_FRAMES:
-            if _STATE.asked.get((sha, scale)) != width and _may_ask(sha):
-                _STATE.asked[(sha, scale)] = width
-                _STATE.renderer().submit((sha, scale), natural, w, scale)
-        return meanwhile
-
-
-_PACKED: dict[int, int] = {}
-
-
-def _backdrop() -> int:
-    """
-    ``BACKDROP`` packed for the draw list, once.
-    """
-    packed = _PACKED.get(BACKDROP)
-    if packed is None:
-        from .. import theme
-
-        packed = _PACKED[BACKDROP] = int(theme.col(BACKDROP).u32)
-    return packed
 
 
 def _density(im: Any) -> float:

@@ -794,6 +794,7 @@ it does not wait for the worker:
   **Superseded for Mermaid on 2026-10-22 (§11):** a diagram is drawn natively
   on the pane, in the theme's colours, with no card and no padding. The card's
   code stays, unused, in `host.RasterFigure` until a separate task removes it.
+  *(Removed, §11.2.)*
 - **Known flaw: an edge label's background keeps merman's narrower width.**
   The post-pass opens the nested label boxes, not the rectangles merman draws
   behind edge labels, which are sized by its own text metrics; a label in a
@@ -1759,7 +1760,7 @@ the author's and is not drawn.
 - **The raster path stays in the tree, unused for Mermaid** (`host.RasterFigure`,
   `_Textures`, `render.submit`, `rasterise`): a separate task removes it after
   review. The fence table's `needs` for mermaid still names the raster
-  distributions; that goes with it.
+  distributions; that goes with it. *(Removed, both, §11.2.)*
 
 **How the author's colours are told from merman's.** By the source, not the
 SVG. merman writes its own palette into the same markup, inline as well as in
@@ -1847,7 +1848,7 @@ detect change. The screenshots below are what said the drawing is right.
 - Removing the raster path, and the mermaid row's `needs`: a separate task.
   `render.em_ratio` reads font metrics with fontTools, which the raster path
   also loads. Removing fontTools with it would need another way to read the
-  prose face's em.
+  prose face's em. *(Done, fontTools kept, §11.2.)*
 - The per-frame draw loop and the rebuild remain Python, as the probe measured
   them. C++ for them is still the survey's plan.
 
@@ -1946,3 +1947,179 @@ thread saw was 8-13 ms.
     rebuild is better explained by the cyclic garbage collector: gen-2 pauses of
     29-99 ms during a drag, set off by the builds' allocations. Tuning the
     collector is app-wide and not done here.
+
+### 11.2 The raster path is removed (task `raster-removal`, 2026-10-22)
+
+Native drawing made the raster path dead code, and it is gone. **Why now and not
+kept as a fallback:** nothing hosted it after §11, it carried three exact-pinned
+dependencies (resvg_py, Pillow, numpy) into every install, and the fence table
+asked for all three before it would promise a mermaid fence, so a machine without
+them lost a fence that never used them (native-review finding 14). A fallback
+nothing exercises is a second renderer to keep correct by hand.
+
+**Removed:**
+
+- The render child rasterises nothing. `render.submit`, `raster_size`,
+  `rasterise`, `render_png`, `resvg_options`, `family_name`, `Rendered`, the
+  `["ok", w, h]` reply and its second message of RGBA, `MAX_RASTER_PIXELS`,
+  `MAX_TEXTURE_SIDE` and `UPLOAD_MODULES`. A request is `["mermaid", source]` and
+  the only answers are `["laid"]` with a display list or `["err", reason]`; a
+  request of any other shape is refused and the child goes on (tested against
+  the real `child_main`, which crashed on one before).
+- In the host: `RasterFigure`, the card (`FIGURE_PAD`, `BACKDROP`), the texture
+  cache (`_Textures`, `_Raster`, `TEXTURE_BUDGET_BYTES`), the parking of evicted
+  textures between frames, `_upload`, `STABLE_FRAMES`, and the raster half of
+  the retry bookkeeping: a layout's one retry is now kept by its sha alone.
+- `app._before_exit` no longer releases figures: they hold no GL object. The
+  render child is still ended in `_shut_down`.
+- From `pyproject.toml`: `resvg_py`, `Pillow`, `numpy`. **fontTools stays:**
+  `render.em_ratio` reads the prose face's em in the child, and imscribe needs
+  it anyway. The mermaid row now needs `fonttools` and `merman` beyond the
+  typeset library (`render.DISTRIBUTIONS`, `fences._FIGURE`). Without fontTools
+  the child still lays a diagram out, at `DEFAULT_EM_RATIO`.
+
+**Kept:**
+
+- The render child, its timeout, its memory limit, its plain-JSON pipe. Its
+  reasons were rewritten for what it now isolates: merman, which is native code,
+  and the parse of its output. Measured here in spawned children (2026-10-22):
+  layout, sanitise and parse took 56-446 ms for a 100-node chain, a 60-node
+  120-edge graph, and the stress inputs merman or the size cap refuse, at 39-42
+  MiB peak RSS. The 10 s timeout and the 1 GiB address-space limit stand; both
+  are now far above any legitimate layout [ran].
+- The sanitiser, every rule. Its caps and natural size still bound the parse and
+  refuse the largest layouts (a 200-leaf fan at 2,340x16,976 and a 20,000-
+  character label are refused there, measured above). Some rules guarded only
+  what resvg painted: the `rebeccapurple` rewrite, the black-paint fallbacks of
+  its steps 3, 8 and 9, the font-family fallback of step 7. The display list
+  takes an SVG colour only where the diagram's source authored it
+  (`displaylist._Builder._authored`) and sets every label in the pane's face, so
+  those rules are inert for it, and harmless. They are kept, not removed: their
+  removal changes a security module's output with nothing left to measure it
+  against, for no gain. The sanitiser's docstring says so.
+- Its tests that measured resvg's pixels now hold the sanitiser's output
+  instead (the fill or stop colour it writes) or, for the kept-colour grammar,
+  that every colour it keeps is one `displaylist.parse_colour` reads. The test
+  that resvg paints a substituted `var()` is gone; the one beside it holds the
+  substitution.
+- `scripts/displaylist_proto.py`'s `run` mode compared native drawing with the
+  raster widget and imported resvg_py and numpy through `scripts/figure_probe.py`.
+  It is marked historical: it says so and exits, its code kept as the record of
+  how §11's window numbers were taken. `selftest` and `dump` still run.
+  `scripts/figure_probe.py` and `scripts/figure_render_probe.py` are the probes
+  T1, M1, R1 and R2 this record cites; they import resvg_py, numpy and Pillow and
+  are left as they are, historical, rerunnable only with those installed by hand.
+
+### 11.3 What a list may cost to build, collector pauses, and `linkStyle` order (task `native-cost`, 2026-10-22)
+
+**A drawn-point budget, checked on receipt.** A list at every earlier bound took 3-4
+s to build on the frame thread (§11.1, finding 5). Nearly all of that was flattening
+curves, and only a taken-over child could send such a list. `validate` now counts
+`displaylist.drawn_points` on the I/O thread: one point for each move, line and
+close, plus each curve's Wang step count. It counts at the largest scale the pane
+draws a figure at, one pixel a unit, or more where the natural width is under a
+unit. A list over `MAX_DRAWN_POINTS` = 32,768 is refused as "too costly to draw"
+before the frame thread sees it. The count and the flattening share their step
+functions, and a property test holds the count at or above what `flatten_units`
+makes at every scale up to that one.
+
+- **What merman produces** [ran, `shots/native-cost/merman_max.py`, merman 0.9.1].
+  The table gives the largest diagram of each family's generated shape that merman
+  and the sanitiser accept, found by bisection to within a few, with the
+  diagram's drawn points and segments.
+
+  | Diagram | Points | Segments | Refused by |
+  |---|---|---|---|
+  | 42-entity ER | 17,777 | 6,488 | sanitiser's element cap |
+  | 16 wide entities | 13,252 | | |
+  | 95-class | 10,592 | 3,472 | |
+  | 170-state nested | 7,763 | 4,123 | |
+  | 155-state | 7,170 | | |
+  | 105-node flowchart | 6,268 | 3,550 | size cap |
+  | 36-node dense flowchart | 4,548 | | merman's `max_layout_work_units` |
+  | 125-message sequence | 1,296 | | size cap |
+
+  Every one is refused one or a few sizes larger. The budget is 1.8 times the
+  largest; segments peak at 6,488, and an edge's hit line at 145 points.
+- **Build cost** [ran, `shots/native-cost/test_build_cost.py`, headless ImGui
+  with the library's fonts]. About 0.9 us a point for a stroked curve and 1.8 us
+  for a filled shape. The real diagrams above take 4-26 ms to build. The 105-node
+  flowchart is the exception, at 59 ms, and its points are not why: 35 of its 83
+  profiled ms is cutting its 52 dotted edges into dashes, which
+  `host.MAX_DASHES_DRAWN` bounds separately.
+- **Why not the 16 ms frame target.** The lead asked for a build under about
+  16 ms. merman's own largest ER diagram takes 25 ms, and its largest flowchart
+  59 ms. A budget that held the frame would refuse diagrams merman makes, which
+  the task forbids. The build is already spread one figure a frame
+  (`host._may_rebuild`). The budget bounds what a hostile list can cost.
+- **What a list passing every receive check costs now** [ran,
+  `shots/native-cost/test_at_bounds.py`]. The worst case pairs filled shapes at
+  the point budget, dashed, with 5,000 text runs: 121 ms with the collector
+  settled, 166 ms without. Stroked curves at the budget with 5,000 runs take
+  about 60 ms. The stated budget is **under 200 ms for any list that passes the
+  receive checks, on this machine**, down from 3-4 s. The text runs (5,000 runs,
+  200,000 characters) are now about half of the worst case. A real diagram has
+  at most 309 runs and 2,745 characters, so lowering `MAX_TEXT_RUNS` and
+  `MAX_TEXT_CHARS` is the next lever if the budget must come down. This task did
+  not do it.
+- **Lowered:** `MAX_SEGS_TOTAL` from 100,000 to 16,384, which is 2.5 times the
+  largest real 6,488. The wire bound falls from about 100 MB to about 90 MB.
+- **Kept:** `MAX_HIT_POINTS` stays at 256. The longest real hit line is 145
+  points, so 256 already gives 1.8x headroom. A lower cap would thin real
+  edges' lines, which changes what merman's diagrams make, and would save only
+  wire bytes: the pane does not read an edge's points.
+
+**Collector pauses.** During a drag, every build allocates tens of thousands of
+`ImVec2`. That sets off gen-2 collections, each of which walks every tracked
+object in the process. Measured over a heap of 650,000 objects (a session's
+transcripts, simulated) with two of the largest diagrams rebuilt across 600
+frames [ran, `shots/native-cost/gc_drag.py`]:
+
+| Policy | Gen-2 pauses during the drag |
+|---|---|
+| Default | 19, median 106 ms, worst 127 ms; worst frame 169 ms |
+| `gc.freeze()` | 57, each under 1 ms; worst frame 52 ms |
+| Raised thresholds (50,000/50/100) | none in the window |
+
+Raised thresholds only postpone the full pause to a later frame, so they were not
+adopted. **Adopted:** `app._settle_gc`, which runs unfreeze, collect, then freeze.
+It runs once in `post_init`, after start-up. After that it runs from the frame loop
+(`_keep_gc_settled`) whenever input has been quiet for `GC_QUIET_S` (3 s) and the
+last settle is at least `GC_SETTLE_EVERY_S` (300 s) old. The full collection
+therefore lands while nobody is touching the pane, and what a session builds up
+after start-up is frozen too. Unfreezing first frees a frozen object that has
+since become cyclic garbage, so memory does not grow across settlings.
+
+**An hour of reply churn, simulated** [ran, `shots/native-cost/gc_hour.py`]. A
+frame every 0.5 s for 3,600 s, a reply with a flowchart every 2 s kept in a
+session list, the oldest views dropped, and input in bursts.
+
+| Policy | Resident memory, start to end | Settles | Worst gen-2 pause in a drag after the hour |
+|---|---|---|---|
+| Default | 124 to 131 MB | | 60 ms |
+| Freeze once | 124 to 131 MB | | 2.9 ms |
+| The adopted policy | 124 to 130 MB | 11 | 2.5 ms |
+
+Tracked objects stay at about 3,600 under the adopted policy. The growth in
+memory is the same under every policy: it is the session list itself.
+
+**Not run:**
+
+- A real window. Every number here is headless ImGui with the library's fonts, or
+  the scratch drivers above.
+- A real multi-hour session.
+- Whether a settle that lands just as the operator starts a drag shows; it costs
+  one full collection, about 0.15 ms per thousand tracked objects.
+
+**`linkStyle` on chained and `&` syntax.** I verified this against merman 0.9.1
+and found it correct. No change was needed.
+
+- merman counts `A-->B-->C` as A-B then B-C.
+- It counts `A & B --> C & D` as A-C, A-D, B-C, B-D, each start with each end in
+  turn, as Mermaid does.
+- A mix of plain, chained and `&` statements counts in written order.
+- The display list's edge order, and so `linkStyle N`, matches merman's own
+  styled SVG in every case [ran, `shots/native-cost/linkstyle.py`].
+
+These four cases are now a golden test
+(`test_link_style_n_paints_the_nth_edge_mermaid_counts`).

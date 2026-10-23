@@ -11,6 +11,18 @@ It is mandatory and not defence in depth: both renderers measured (resvg, novasv
 (notes/vector-rendering/svg-renderers.md, "Measured"). Nothing here relies on what a
 renderer happens to ignore.
 
+What reads the output now is ``displaylist.from_svg``, in the render child: nothing
+rasterises it. The policy below was measured against resvg, which drew figures
+before the display list, and is kept whole. The caps and the natural size bound the
+parse and refuse the largest layouts; the element, attribute, URL and CSS rules keep
+what the parse reads to a known subset whatever a later reader of sanitised SVG is.
+Some rules guard only what resvg would have painted -- the `rebeccapurple`
+rewrite, the black-paint fallbacks of steps 3, 8 and 9, the font-family fallback
+of step 7 -- since the display list takes an SVG colour only where the diagram's
+source authored it (`displaylist._Builder._authored`) and sets every label in the
+pane's own face. They are inert for it and harmless, and are kept rather than
+removed without a renderer to measure their removal against.
+
 Policy, in the order it is applied:
 
 1. **Markup declarations are refused before parsing.** Any `<!` that does not open a
@@ -160,9 +172,10 @@ _LAYERS = frozenset({"mask", "clipPath"})
 # lets every walk here recurse without meeting Python's recursion limit.
 MAX_DEPTH = 64
 
-# Natural size. 4096 x 4096 is 64 MiB of RGBA at 1x. The raster is made at the drawn
-# width, never above the natural width, and the renderer seam holds each of its sides to
-# `render.MAX_TEXTURE_SIDE`, shrinking a longer figure to fit.
+# Natural size. These are what refuse the longest diagrams merman lays out before
+# they are parsed into a display list (a 200-node chain at 168x17,061, a 200-leaf fan at
+# 2,340x16,976; notes/vector-rendering/probe-displaylist.md §2), and
+# `displaylist.MAX_SIDE` is the same side.
 MAX_SIDE = 16_384.0
 MAX_NATURAL_PIXELS = 4096 * 4096
 

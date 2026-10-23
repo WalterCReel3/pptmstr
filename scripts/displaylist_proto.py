@@ -4,8 +4,16 @@ display list, with no raster.
 
     .venv/bin/python -B scripts/displaylist_proto.py selftest   # pure checks, no display
     .venv/bin/python -B scripts/displaylist_proto.py dump       # child conversion, no display
-    XVFB_SHOT_SCREEN=1600x1400x24 scripts/xvfb_shot.sh -- \\
-        .venv/bin/python -B scripts/displaylist_proto.py run    # the window
+    .venv/bin/python -B scripts/displaylist_proto.py run        # historical: refuses to run
+
+**``run`` is historical.** It drew each diagram natively beside the raster
+``FigureWidget`` of the time and patched that widget's ``_raster`` to compare
+them, and it shot the window through ``scripts/figure_probe.py``, which imports
+resvg_py and numpy. The raster figure, resvg_py, Pillow and numpy are gone from
+pptmstr (task ``raster-removal``), and the native drawing it prototyped is
+``pptmstr/figures/host.py`` now, so there is nothing left to compare against: the
+mode says so and exits. Its numbers stand in the write-up. ``selftest`` and
+``dump`` still run.
 
 The write-up is ``notes/vector-rendering/probe-displaylist.md``. Nothing in
 ``pptmstr/`` is changed: the figure host's ``figure_for`` is replaced in this
@@ -1961,6 +1969,20 @@ def summary(xs: list[float]) -> dict[str, Any]:
 
 
 def run() -> int:
+    print(
+        "run is historical: it compared native drawing with the raster figure, which is "
+        "no longer in pptmstr (see this script's docstring); selftest and dump still run",
+        file=sys.stderr,
+    )
+    return 2
+
+
+def _historical_run() -> int:
+    """
+    What ``run`` did, kept as the record of how the write-up's window numbers were
+    taken. It needs the raster ``FigureWidget`` and ``scripts/figure_probe.py``'s
+    imports, and does not run against this tree.
+    """
     sys.path.insert(0, str(ROOT))
     sys.path.insert(0, str(ROOT / "scripts"))
     from figure_probe import grab, save

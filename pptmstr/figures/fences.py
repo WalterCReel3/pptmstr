@@ -25,8 +25,9 @@ thread (measured 2026-10-21). ``figures.host.mark`` still accepts a fence by
 ``mermaid.version()`` alone, since it runs on the frame thread; where merman is
 installed and does not import, the render child refuses that fence with
 ``mermaid.missing_reason``, so the fence is code under a reason either way, and
-the prompt no longer asks for it. The metadata reads together cost about 5 ms on a
-cold interpreter (seven distributions, measured 2026-10-21).
+the prompt no longer asks for it. The metadata reads cost under 5 ms on a cold
+interpreter: seven distributions took about 5 ms (measured 2026-10-21), and the
+mermaid row reads four.
 
 ``available`` blocks for that probe on its first call, so it is asked at a launch,
 on the session's thread, and never from a pane.
@@ -66,8 +67,8 @@ class Fence:
 
 # Every fence is drawn inside a typeset view, so no row draws without these.
 _TYPESET = ("imscribe", "imtypeset")
-# What any figure imports, read from the module that imports it.
-_RASTER = render.DISTRIBUTIONS
+# What the render child imports for a figure beyond merman, read from that module.
+_FIGURE = render.DISTRIBUTIONS
 
 _MERMAID = (
     "```mermaid: one Mermaid diagram. Flowchart, sequence, class, state and ER "
@@ -89,7 +90,7 @@ _MATH = (
 )
 
 RENDERED: tuple[Fence, ...] = (
-    Fence("mermaid", "figure", (*_RASTER, "merman"), _MERMAID),
+    Fence("mermaid", "figure", (*_FIGURE, "merman"), _MERMAID),
     Fence("math", "formula", (), _MATH),
 )
 """
