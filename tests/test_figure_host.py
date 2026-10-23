@@ -18,6 +18,7 @@ from __future__ import annotations
 import gc
 import weakref
 from collections.abc import Callable, Hashable, Iterator
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -748,7 +749,8 @@ NODES = (
 
 
 def _nodes() -> displaylist.DisplayList:
-    return displaylist.from_svg(NODES, displaylist.Authored(fill=frozenset({0xFF9966})))
+    painted = displaylist.Paints(fill=frozenset({0xFF9966}))
+    return displaylist.from_svg(NODES, displaylist.Authored(ids={"n-A": painted}))
 
 
 class Drawn:
@@ -947,6 +949,168 @@ def test_hover_lights_a_node_and_its_edges_and_a_click_reports_the_node(
     assert widget.hovered is None
 
 
+def _stroked(width: float, dash: tuple[float, ...] = ()) -> displaylist.DisplayList:
+    """
+    One unfilled 90x80 rectangle at x 100-190 of a 200x100 diagram, stroked ``width``.
+    """
+    rect = displaylist.PathItem(
+        displaylist.NODE,
+        False,
+        0,
+        True,
+        width,
+        0,
+        0,
+        dash,
+        "MLLLZ",
+        (100.0, 10.0, 190.0, 10.0, 190.0, 90.0, 100.0, 90.0),
+        (100.0, 10.0, 190.0, 90.0),
+    )
+    return displaylist.DisplayList(200.0, 100.0, (0.0, 0.0), (rect,), (), ())
+
+
+@pytest.mark.parametrize("k_width", [200.0, 100.0])
+def test_a_thick_stroke_whose_centre_line_is_past_the_clip_still_draws_its_near_half(
+    figures: Renderer, drawn: list[Drawn], k_width: float, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    A 20-px outline whose left edge's centre line is 8 px past the clip's right side
+    reaches 2 px into it, at the figure's own scale and while it stands in, stretched
+    to half, for a narrower one (where those 8 px are 16 of its own).
+    """
+    from imgui_bundle import imgui
+
+    widget = host.FigureWidget(_marked("#7", display=_stroked(20.0)), BODY)
+
+    def body(width: float) -> None:
+        right = 20.0 + width / 2 - 8.0
+        imgui.push_clip_rect(imgui.ImVec2(0.0, 0.0), imgui.ImVec2(right, 1000.0), True)
+        imgui.set_cursor_screen_pos(imgui.ImVec2(20.0, 20.0))
+        widget.draw(width_px=width)
+        imgui.dummy(imgui.ImVec2(1.0, 1.0))
+        imgui.pop_clip_rect()
+
+    frame(_IM[0], lambda: body(200.0))
+    if k_width != 200.0:
+        monkeypatch.setattr(host, "_may_rebuild", lambda who, frame: False)
+        frame(_IM[0], lambda: body(k_width))
+        assert widget.rebuilds == 1, "it stands in at the old scale"
+    assert widget.drawn[0] == 1, "the outline is culled though half of it is on screen"
+
+
+def test_a_label_is_guarded_against_the_fill_of_the_node_it_sits_in(
+    figures: Renderer, drawn: list[Drawn]
+) -> None:
+    """
+    The geometry says what is behind each label: the theme's fill of its node's
+    shape where the author gave none, the pane for a label in no node, and nothing
+    of the theme's where the author's fill is (``ground_rgb`` carries that).
+    """
+    dl = _nodes()  # A is filled by the author, B by the theme
+    label = next(i for i in dl.items if isinstance(i, displaylist.TextRun))
+    in_b = replace(label, node=1, ink_rgb=0x777777, ground_rgb=displaylist.NO_COLOUR)
+    loose = replace(label, node=-1, ink_rgb=0x777777, ground_rgb=displaylist.NO_COLOUR)
+    display = replace(dl, items=(*dl.items, in_b, loose))
+    widget = host.FigureWidget(_marked("#10", display=display), BODY)
+    frame(_IM[0], lambda: widget.draw(width_px=200.0))
+    geo = widget._geometry
+    assert geo is not None
+    inks = [p for p in geo.paints if p[0] == host._INK]
+    assert inks == [
+        (host._INK, displaylist.LABEL, label.ink_rgb, 0xFF9966, -1),
+        (host._INK, displaylist.LABEL, 0x777777, displaylist.NO_COLOUR, displaylist.NODE),
+        (host._INK, displaylist.LABEL, 0x777777, displaylist.NO_COLOUR, -1),
+    ]
+
+
+def test_a_dashed_stroke_is_one_op_and_never_cut_finer_than_the_period_on_screen(
+    figures: Renderer, drawn: list[Drawn]
+) -> None:
+    widget = host.FigureWidget(_marked("#8", display=_stroked(1.0, (3.0, 3.0))), BODY)
+    frame(_IM[0], lambda: widget.draw(width_px=20.0))
+    assert widget.drawn[1] == 1, "the dashes of one stroke are one op"
+    calls = sum(1 for kind, *_ in drawn[-1].calls if kind == "line")
+    perimeter = 2 * (90.0 + 80.0) * 0.1
+    assert calls <= perimeter / host.MIN_DASH_PERIOD_PX + 2
+
+
+def test_dashes_past_the_figures_budget_are_drawn_solid(
+    figures: Renderer, drawn: list[Drawn], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(host, "MAX_DASHES_DRAWN", 60)
+    one = _stroked(1.0, (3.0, 3.0)).items[0]
+    assert isinstance(one, displaylist.PathItem)
+    two = replace(one, xy=tuple(v + 1.0 for v in one.xy))
+    display = displaylist.DisplayList(200.0, 100.0, (0.0, 0.0), (one, two), (), ())
+    widget = host.FigureWidget(_marked("#9", display=display), BODY)
+    frame(_IM[0], lambda: widget.draw(width_px=200.0))
+    geo = widget._geometry
+    assert geo is not None
+    assert [len(op[3]) for op in geo.ops] == [57, 1], "the first cut, the second solid"
+
+
+def test_a_dash_pattern_is_stretched_to_the_least_period_with_its_proportions() -> None:
+    assert host.on_screen_dash((), 0.1) == ()
+    assert host.on_screen_dash((3.0, 3.0), 1.0) == (3.0, 3.0)
+    assert host.on_screen_dash((3.0, 3.0), 0.1) == pytest.approx((2.0, 2.0))
+    assert host.on_screen_dash((1.0, 3.0), 0.5) == pytest.approx((1.0, 3.0))
+    odd = host.on_screen_dash((1.0,), 0.5)  # an odd list repeats: a period of 2 x 0.5
+    assert odd == pytest.approx((2.0,))
+
+
+def test_hover_rests_on_a_nodes_shapes_and_not_on_the_column_between_them(
+    figures: Renderer, drawn: list[Drawn]
+) -> None:
+    """
+    A sequence participant is two actor boxes, top and bottom, and its extent runs
+    between them over every message and note in its column; the pointer in that
+    column, off both boxes, is not on the participant.
+    """
+    from imgui_bundle import imgui
+
+    top, bottom = (0.0, 0.0, 200.0, 20.0), (0.0, 180.0, 200.0, 200.0)
+    actor = displaylist.PathItem(
+        displaylist.NODE,
+        True,
+        0,
+        True,
+        1.0,
+        0,
+        0,
+        (),
+        "MLLLZ",
+        (0.0, 0.0, 200.0, 0.0, 200.0, 20.0, 0.0, 20.0),
+        top,
+        0,
+    )
+    display = displaylist.DisplayList(
+        200.0,
+        200.0,
+        (0.0, 0.0),
+        (
+            actor,
+            replace(actor, xy=(0.0, 180.0, 200.0, 180.0, 200.0, 200.0, 0.0, 200.0), bbox=bottom),
+        ),
+        (displaylist.HitNode("A", (0.0, 0.0, 200.0, 200.0), (top, bottom)),),
+        (),
+    )
+    widget = host.FigureWidget(_marked(display=display), BODY)
+
+    def body() -> None:
+        imgui.set_cursor_screen_pos(imgui.ImVec2(40.0, 120.0))
+        widget.draw(width_px=200.0)
+        imgui.dummy(imgui.ImVec2(1.0, 1.0))
+
+    io = imgui.get_io()
+    for (x, y), want in (((100.0, 100.0), None), ((100.0, 10.0), "A"), ((100.0, 190.0), "A")):
+        io.add_mouse_pos_event(40.0 + x, 120.0 + y)
+        frame(_IM[0], body)
+        frame(_IM[0], body)
+        assert widget.hovered == want, (x, y)
+    io.add_mouse_pos_event(-100.0, -100.0)
+    frame(_IM[0], body)
+
+
 def test_a_width_change_rebuilds_one_figure_a_frame_and_the_others_draw_meanwhile(
     figures: Renderer, drawn: list[Drawn]
 ) -> None:
@@ -958,14 +1122,36 @@ def test_a_width_change_rebuilds_one_figure_a_frame_and_the_others_draw_meanwhil
         for w in widgets:
             w.draw(width_px=width)
 
-    frame(_IM[0], lambda: at(200.0))
-    assert [w.rebuilds for w in widgets] == [1, 1, 1], "a first build is not held back"
+    for _ in widgets:
+        frame(_IM[0], lambda: at(200.0))
+    assert [w.rebuilds for w in widgets] == [1, 1, 1]
     counts = []
     for width in (150.0, 150.0, 150.0, 150.0):
         frame(_IM[0], lambda width=width: at(width))  # type: ignore[misc]
         counts.append([w.rebuilds for w in widgets])
         assert all(w.drawn[0] > 0 for w in widgets), "a figure waiting its turn still draws"
     assert counts == [[2, 1, 1], [2, 2, 1], [2, 2, 2], [2, 2, 2]]
+
+
+def test_figures_shown_at_once_are_built_one_a_frame_at_their_height_meanwhile(
+    figures: Renderer, drawn: list[Drawn]
+) -> None:
+    """
+    A view made again has every figure on it without geometry: they are built one a
+    frame, as a resize rebuilds them, and each one waiting already stands at its
+    real height, as an outline.
+    """
+    widgets = [
+        host.FigureWidget(_marked(fill, display=_nodes()), BODY) for fill in ("#1", "#2", "#3")
+    ]
+    tall = widgets[0].height_for(200.0)
+    assert tall != host.PLACEHOLDER_HEIGHT
+    counts = []
+    for _ in range(4):
+        frame(_IM[0], lambda: [w.draw(width_px=200.0) for w in widgets])
+        counts.append([w.rebuilds for w in widgets])
+        assert all(w.height_for(200.0) == tall for w in widgets)
+    assert counts == [[1, 0, 0], [1, 1, 0], [1, 1, 1], [1, 1, 1]]
 
 
 def test_a_drag_does_not_starve_the_figures_further_down(
@@ -978,7 +1164,8 @@ def test_a_drag_does_not_starve_the_figures_further_down(
     widgets = [
         host.FigureWidget(_marked(fill, display=_nodes()), BODY) for fill in ("#1", "#2", "#3")
     ]
-    frame(_IM[0], lambda: [w.draw(width_px=200.0) for w in widgets])
+    for _ in widgets:
+        frame(_IM[0], lambda: [w.draw(width_px=200.0) for w in widgets])
     for step in range(1, 7):
         frame(_IM[0], lambda step=step: [w.draw(width_px=200.0 - step) for w in widgets])  # type: ignore[misc]
     assert [w.rebuilds for w in widgets] == [3, 3, 3]

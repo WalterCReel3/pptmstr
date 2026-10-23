@@ -8,16 +8,24 @@ time out a child make their own.
 
 from __future__ import annotations
 
+import ast
+import json
 import math
 import multiprocessing
 import os
+import pickle
 import signal
 import sys
 import time
 from collections.abc import Hashable, Iterator
+from dataclasses import replace
+from pathlib import Path
+from typing import Any
 
 import pytest
 
+from pptmstr import drawable
+from pptmstr.figures import displaylist, render
 from pptmstr.figures.render import (
     MAX_RASTER_PIXELS,
     MAX_TEXTURE_SIDE,
@@ -413,3 +421,145 @@ def test_a_child_that_cannot_be_started_is_reported_at_once() -> None:
         assert result.transient
     finally:
         renderer.shutdown()
+
+
+# -- what the child sends is plain data, read without evaluating it -----------------------
+
+DRAWN_LIST = displaylist.DisplayList(
+    40.0,
+    20.0,
+    (0.0, 0.0),
+    (displaylist.TextRun("label", 1.0, 10.0, 14.0, 0, 0, displaylist.LABEL, False, 0.0),),
+    (),
+    (),
+)
+
+
+class _Opens:
+    """
+    What a pickled reply could do if the GUI process unpickled it: here, create a file.
+    """
+
+    def __init__(self, path: str) -> None:
+        self.path = path
+
+    def __reduce__(self) -> tuple[Any, ...]:
+        return (open, (self.path, "w"))
+
+
+def _hostile_reply(source: str) -> list[bytes]:
+    """
+    The messages a taken-over child sends for a request whose source is ``source``.
+    """
+    head = b'["laid"]\n'
+    good = displaylist.encode(DRAWN_LIST)
+    if source.startswith("pickle:"):
+        return [pickle.dumps(("laid", _Opens(source.removeprefix("pickle:"))))]
+    run = DRAWN_LIST.items[0]
+    assert isinstance(run, displaylist.TextRun)
+    surrogate = replace(DRAWN_LIST, items=(replace(run, text="a\udc80b"),))
+    return {
+        "good": [head + good],
+        "not json": [b"\xff\xfe\x00 not json"],
+        "head not a list": [b'{"laid": true}\n' + good],
+        "nan": [head + good.replace(b"10.0,14.0", b"NaN,14.0")],
+        "surrogate": [head + displaylist.encode(surrogate)],
+        "bool for int": [head + good.replace(b"14.0,0,0,4", b"14.0,false,0,4")],
+        "undrawable reason": [json.dumps(["err", "bad \udc80\x00 reason"]).encode()],
+        "too long": [b'["laid"]\n' + b" " * 20_000],
+        "ok to a layout": [b'["ok", 1, 1]', b"\x00\x00\x00\x00"],
+    }[source]
+
+
+def _hostile_child(conn: Any, fonts: Fonts, memory_limit: int | None = None) -> None:
+    """
+    A render child that has been taken over: it says it is ready, then answers each
+    request with what its source names (``_hostile_reply``).
+    """
+    conn.send_bytes(b'["ready", null]')
+    while True:
+        try:
+            _, _, source = json.loads(conn.recv_bytes())
+        except EOFError:
+            return
+        for message in _hostile_reply(source):
+            conn.send_bytes(message)
+
+
+def test_a_reply_that_is_not_well_formed_is_that_figures_failure_and_never_unpickled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Each malformed reply comes back from ``poll`` as a ``Failed`` for its figure and
+    not transient, and nothing raises. A reply the pipe can no longer be read past
+    (not JSON, over the length read, a head that is not one) also replaces the
+    child; one that read whole but failed its checks does not. A pickled reply
+    whose unpickling would create a file creates none.
+    """
+    monkeypatch.setattr(render, "MAX_REPLY_BYTES", 10_000)
+    marker = tmp_path / "unpickled"
+    renderer = Renderer(fonts=lambda: Fonts((), "", ""), child=_hostile_child)
+    try:
+        renderer.lay_out("good", "good")
+        assert isinstance(wait_for(renderer, "good"), render.Laid)
+        expected = {
+            "not json": ("render reply refused: a reply that is not well formed", True),
+            f"pickle:{marker}": ("render reply refused: a reply that is not well formed", True),
+            "head not a list": ("render reply refused: a reply that is not well formed", True),
+            "too long": ("render reply refused: a reply over 10000 bytes", True),
+            "ok to a layout": (
+                "render reply refused: an unexpected reply to a mermaid request",
+                True,
+            ),
+            "nan": ("display list refused: coordinate", False),
+            "surrogate": ("display list refused: text content", False),
+            "bool for int": ("display list refused: a field of the wrong type", False),
+            "undrawable reason": ("bad \\udc80\\u0000 reason", False),
+        }
+        good = _hostile_reply("good")[0]
+        assert all(_hostile_reply(source)[0] != good for source in expected)
+        for source, (reason, replaced) in expected.items():
+            pid = renderer.pid
+            renderer.lay_out(source, source)
+            got = wait_for(renderer, source)
+            assert got == Failed(source, reason), source
+            renderer.lay_out("good", "good")
+            assert isinstance(wait_for(renderer, "good"), render.Laid), source
+            assert (renderer.pid != pid) is replaced, source
+        assert not marker.exists(), "the GUI process unpickled what the child sent"
+    finally:
+        renderer.shutdown()
+
+
+def test_nothing_on_the_receiving_side_of_the_pipe_can_evaluate_what_it_reads() -> None:
+    """
+    The modules that read the child's replies import no pickle and call no
+    ``Connection.recv`` (which unpickles), and every ``loads`` they call is JSON's.
+    """
+    for module in (render, displaylist):
+        tree = ast.parse(Path(module.__file__ or "").read_text())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import | ast.ImportFrom):
+                names = [a.name for a in node.names] + [getattr(node, "module", None) or ""]
+                assert not any(
+                    n.split(".")[0] in ("pickle", "marshal", "shelve", "dill") for n in names
+                ), (module.__name__, names)
+            if isinstance(node, ast.Call):
+                fn = node.func
+                if isinstance(fn, ast.Attribute):
+                    assert fn.attr != "recv", (module.__name__, node.lineno)
+                    if fn.attr == "loads":
+                        assert isinstance(fn.value, ast.Name) and fn.value.id == "json", (
+                            module.__name__,
+                            node.lineno,
+                        )
+                if isinstance(fn, ast.Name):
+                    assert fn.id not in ("eval", "exec", "__import__"), (module.__name__, fn.id)
+
+
+def test_a_reason_the_child_gives_is_one_drawable_line_within_the_bound() -> None:
+    shown = render.reason_shown("first\nsecond \udc80 \x00" + "x" * 1000)
+    assert shown.startswith("first second \\udc80 \\u0000xx")
+    assert "\n" not in shown and shown.endswith("…")
+    assert len(shown) <= render.MAX_REASON_CHARS + len("\\udc80\\u0000") - 2
+    assert not drawable.undrawable(shown)

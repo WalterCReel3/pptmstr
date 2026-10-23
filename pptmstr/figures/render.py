@@ -36,11 +36,12 @@ thread needs RGBA for a texture.
 **Mermaid is laid out in the same child** (``lay_out``, ``mermaid.layout``), so merman
 never runs on the frame thread either, and so is the SVG parsed into what the pane
 draws (``displaylist.from_mermaid``): the child answers a ``Laid``, a bounded display
-list with the diagram's natural size, and no pixels. The I/O thread checks every
-bound of it again (``displaylist.validate``) before the frame thread sees it. A
-layout is one more request in the same queue, under the same timeout and the same
-failure kinds. It does not need the rasteriser: a child that could not load resvg
-still lays diagrams out.
+list with the diagram's natural size, and no pixels, as plain JSON: nothing the
+child sends is unpickled (``_serve``). The I/O thread reads it a record at a time
+and checks every bound of it again (``displaylist.decode``) before the frame thread
+sees it. A layout is one more request in the same queue, under the same timeout
+and the same failure kinds. It does not need the rasteriser: a child that could
+not load resvg still lays diagrams out.
 
 **The raster path stays, and Mermaid does not use it.** ``submit`` and ``rasterise``
 are what slice 1's svg fence drew through; nothing submits to them now, and a
@@ -50,6 +51,7 @@ separate task removes them once native Mermaid has been reviewed.
 from __future__ import annotations
 
 import importlib
+import json
 import math
 import queue
 import signal
@@ -66,7 +68,9 @@ from multiprocessing.connection import Connection
 from multiprocessing.process import BaseProcess
 from typing import Any
 
-from .displaylist import DisplayList, validate
+from .. import drawable
+from . import displaylist
+from .displaylist import DisplayList
 from .sanitise import MAX_NATURAL_PIXELS, Sanitised
 
 RENDER_TIMEOUT_S = 10.0
@@ -157,6 +161,26 @@ DISTRIBUTIONS: tuple[str, ...] = (*CHILD_MODULES, *UPLOAD_MODULES)
 """
 Every distribution a figure needs beyond the typeset library, whatever its fence:
 what the table of drawn fences asks is installed (``fences.RENDERED``).
+"""
+
+MAX_REASON_CHARS = 320
+"""
+The longest reason a child's failure is shown with: room for a prefix of this
+module's and ``mermaid.MAX_REASON_CHARS`` of merman's own. The child cuts to it
+before it sends, and the I/O thread cuts again on receipt.
+"""
+
+MAX_HEAD_BYTES = 12 * MAX_REASON_CHARS + 64
+"""
+The longest a reply's head line may be: a reason at ``MAX_REASON_CHARS``, each
+character at its longest ASCII-only JSON spelling (two ``\\uXXXX``).
+"""
+
+MAX_REPLY_BYTES = MAX_HEAD_BYTES + 1 + displaylist.MAX_WIRE_BYTES
+"""
+The most the I/O thread reads of one reply (``recv_bytes``' ``maxlength``): a head
+and a display list at every bound. A child that announces more is not read: the
+figure fails and the child is replaced.
 """
 
 _SHUTDOWN_WAIT_S = 2.0
@@ -326,8 +350,10 @@ class Renderer:
         timeout_s: float = RENDER_TIMEOUT_S,
         start_timeout_s: float = START_TIMEOUT_S,
         memory_limit_bytes: int | None = MEMORY_LIMIT_BYTES,
+        child: Callable[[Connection, Fonts, int | None], None] | None = None,
     ) -> None:
         self._fonts = fonts
+        self._child_main = child_main if child is None else child
         self._memory_limit = memory_limit_bytes
         self._timeout_s = timeout_s
         self._start_timeout_s = start_timeout_s
@@ -494,7 +520,7 @@ class Renderer:
         child = _Child()
         child.thread = threading.Thread(
             target=_serve,
-            args=(child, self._fonts, self._answers, self._memory_limit),
+            args=(child, self._fonts, self._answers, self._memory_limit, self._child_main),
             daemon=True,
             name="figure-render-io",
         )
@@ -510,12 +536,20 @@ def _serve(
     fonts: Callable[[], Fonts],
     answers: queue.SimpleQueue[_Answer],
     memory_limit: int | None,
+    target: Callable[[Connection, Fonts, int | None], None] | None = None,
 ) -> None:
     """
     Start ``child``'s process, then hand it requests and hand back what it says.
 
     Every way out of here puts a reason on ``answers``, unless the frame thread gave
     the child up, and leaves the process killed and reaped.
+
+    **Nothing the child sends is unpickled.** It parses untrusted text through merman
+    (native code) and this package's parsers, so a child that has been taken over is
+    in the threat model, and unpickling its reply would hand it this process. Every
+    reply is ``recv_bytes`` of plain JSON, read to at most ``MAX_REPLY_BYTES``
+    (``_answer``). Requests go the other way as JSON too, so nothing on the pipe is
+    pickled; only the child's start arguments are, by ``spawn``, from this side.
     """
     conn: Connection | None = None
     proc: BaseProcess | None = None
@@ -524,7 +558,7 @@ def _serve(
         ctx = get_context("spawn")
         conn, theirs = ctx.Pipe(duplex=True)
         proc = ctx.Process(
-            target=child_main,
+            target=child_main if target is None else target,
             args=(theirs, fonts(), memory_limit),
             daemon=True,
             name="figure-render",
@@ -534,24 +568,20 @@ def _serve(
         child.proc = proc
         if child.abandoned:
             return
-        conn.recv()
+        head, _ = _head(conn.recv_bytes(MAX_HEAD_BYTES))
+        if not head or head[0] != "ready":
+            raise ValueError("the render process did not say it was ready")
         child.ready = True
         while (request := child.requests.get()) is not None:
             child.busy_since = time.monotonic()
-            conn.send((request.kind, request.width, request.svg))
-            head = conn.recv()
-            result: Result
-            if head[0] == "ok":
-                rgba = conn.recv_bytes()
-                result = Rendered(
-                    request.key, head[1], head[2], rgba, request.px_width, request.scale
-                )
-            elif head[0] == "laid":
-                result = received(request.key, head[1])
-            else:
-                result = Failed(request.key, str(head[1]))
+            conn.send_bytes(json.dumps([request.kind, request.width, request.svg]).encode("ascii"))
+            result, broken = _answer(conn, request)
             child.busy_since = None
             answers.put((child, request.seq, result))
+            if broken is not None:
+                # What follows on the pipe can no longer be told apart: replaced.
+                reason = f"render process replaced: {broken}"
+                return
     except EOFError:
         reason = "render process died"
     except Exception as exc:
@@ -572,16 +602,98 @@ def _serve(
             answers.put((child, None, reason))
 
 
-def received(key: Hashable, sent: object) -> Laid | Failed:
+def _answer(conn: Connection, request: _Request) -> tuple[Result, str | None]:
     """
-    What the I/O thread makes of a display list the child sent for ``key``: a
-    ``Laid`` if every bound and type holds (``displaylist.validate``), else a failure
-    that is not transient, since the same diagram would be sent the same again.
+    The child's reply to ``request``, read from ``conn``: the result, and why the
+    pipe can no longer be trusted to be in step, or ``None`` when it can.
+
+    A reply that is not well formed is that figure's ``Failed``, never an exception,
+    and not transient: the same child given the same request would send the same.
+    Only the pipe's own failures (``EOFError``, an ``OSError`` other than an
+    over-long reply) leave here, as the child's death.
     """
-    problem = validate(sent)
-    if problem is None and isinstance(sent, DisplayList):
-        return Laid(key, sent)
-    return Failed(key, f"display list refused: {problem}")
+    key = request.key
+    try:
+        blob = conn.recv_bytes(MAX_REPLY_BYTES)
+    except OSError as exc:
+        if "bad message length" not in str(exc):
+            raise
+        why = f"a reply over {MAX_REPLY_BYTES} bytes"
+        return Failed(key, f"render reply refused: {why}"), why
+    head, start = _head(blob)
+    if head is None:
+        why = "a reply that is not well formed"
+        return Failed(key, f"render reply refused: {why}"), why
+    said = head[0]
+    if said == "err" and len(head) == 2 and isinstance(head[1], str):
+        return Failed(key, reason_shown(head[1])), None
+    if said == "laid" and len(head) == 1 and request.kind == _MERMAID:
+        return received(key, blob, start), None
+    if (
+        said == "ok"
+        and len(head) == 3
+        and request.kind == _RASTER
+        and all(type(v) is int and 1 <= v <= MAX_TEXTURE_SIDE for v in head[1:])
+        and head[1] * head[2] <= MAX_RASTER_PIXELS
+    ):
+        w, h = head[1], head[2]
+        try:
+            rgba = conn.recv_bytes(MAX_RASTER_PIXELS * 4)
+        except OSError as exc:
+            if "bad message length" not in str(exc):
+                raise
+            why = "a raster over the pixel cap"
+            return Failed(key, f"render reply refused: {why}"), why
+        if len(rgba) != w * h * 4:
+            return Failed(key, f"render reply refused: {len(rgba)} bytes is not {w}x{h} RGBA"), None
+        return Rendered(key, w, h, rgba, request.px_width, request.scale), None
+    why = f"an unexpected reply to a {request.kind} request"
+    return Failed(key, f"render reply refused: {why}"), why
+
+
+def _head(blob: bytes) -> tuple[list[Any] | None, int]:
+    """
+    A reply's first line as a JSON array whose first element is a string, and where
+    what follows it starts; ``None`` where it is not one, or is over
+    ``MAX_HEAD_BYTES``. Never raises.
+    """
+    end = blob.find(b"\n", 0, MAX_HEAD_BYTES + 1)
+    if end < 0:
+        end = len(blob)
+    if end > MAX_HEAD_BYTES:
+        return None, 0
+    try:
+        head = json.loads(blob[:end])
+    except Exception:
+        return None, 0
+    if type(head) is not list or not head or type(head[0]) is not str:
+        return None, 0
+    return head, end + 1
+
+
+def reason_shown(reason: str) -> str:
+    """
+    A reason the child gave, as a host may draw it: one line, at most
+    ``MAX_REASON_CHARS``, and drawable (``pptmstr.drawable``: a NUL or a lone
+    surrogate written out, never handed to ImGui).
+    """
+    line = " ".join(reason.split())
+    if len(line) > MAX_REASON_CHARS:
+        line = line[: MAX_REASON_CHARS - 1].rstrip() + "…"
+    return drawable.text(line)
+
+
+def received(key: Hashable, blob: bytes, start: int = 0) -> Laid | Failed:
+    """
+    What the I/O thread makes of a display list the child sent for ``key``, from
+    ``start`` in ``blob``: a ``Laid`` if it reads as plain data and every bound and
+    type holds (``displaylist.decode``), else a failure that is not transient, since
+    the same diagram would be sent the same again.
+    """
+    got = displaylist.decode(blob, start)
+    if isinstance(got, DisplayList):
+        return Laid(key, got)
+    return Failed(key, f"display list refused: {got}")
 
 
 def _death(signum: int, memory_limit: int | None) -> str:
@@ -640,11 +752,15 @@ def child_main(conn: Connection, fonts: Fonts, memory_limit: int | None = None) 
     """
     The render process: load the fonts once, then answer requests until the pipe closes.
 
-    It says ``("ready", None)`` or ``("ready", reason)`` once. A child that could not
+    It says ``["ready", null]`` or ``["ready", reason]`` once. A child that could not
     load what rasterising needs answers every raster request with that reason rather
     than exiting, so a missing library is one failure per figure and not a restart
     per frame; it still lays Mermaid out, which needs none of it. Its address space
     is held to ``memory_limit`` first (``MEMORY_LIMIT_BYTES``).
+
+    Every reply is one ``send_bytes`` whose first line is a JSON array: ``["laid"]``
+    and the display list's lines after it (``displaylist.encode``), ``["err",
+    reason]``, or ``["ok", width, height]`` followed by a second message of RGBA.
     """
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     _limit_memory(memory_limit)
@@ -657,48 +773,58 @@ def child_main(conn: Connection, fonts: Fonts, memory_limit: int | None = None) 
     except Exception as exc:
         failure = f"renderer unavailable: {_one_line(exc)}"
     ratio = em_ratio(fonts.sans)
-    conn.send(("ready", failure))
+    _say(conn, ["ready", None if failure is None else _cut(failure)])
     while True:
         try:
-            kind, width, svg = conn.recv()
+            kind, width, svg = json.loads(conn.recv_bytes())
         except EOFError:
             return
         if kind == _MERMAID:
-            conn.send(_laid(svg, ratio))
+            _say(conn, *_laid(svg, ratio))
             continue
         if failure is not None:
-            conn.send(("err", failure))
+            _say(conn, ["err", _cut(failure)])
             continue
         try:
             w, h, rgba = rasterise(svg, width, options)
         except Exception as exc:
-            conn.send(("err", _one_line(exc)))
+            _say(conn, ["err", _cut(_one_line(exc))])
             continue
-        conn.send(("ok", w, h))
+        _say(conn, ["ok", w, h])
         conn.send_bytes(rgba)
 
 
-def _laid(source: str, ratio: float = 1.0) -> tuple[Any, ...]:
+def _say(conn: Connection, head: list[Any], body: bytes = b"") -> None:
+    line = json.dumps(head).encode("ascii")
+    conn.send_bytes(line + b"\n" + body if body else line)
+
+
+def _cut(reason: str) -> str:
+    return reason if len(reason) <= MAX_REASON_CHARS else reason[: MAX_REASON_CHARS - 1] + "…"
+
+
+def _laid(source: str, ratio: float = 1.0) -> tuple[list[Any], bytes]:
     """
-    The child's answer to a mermaid request: ``("laid", display_list)`` or
-    ``("err", reason)``. merman is imported here, on the first diagram, and only here.
+    The child's answer to a mermaid request, as a head and a body: ``["laid"]`` and
+    the display list on the wire, or ``["err", reason]`` and nothing. merman is
+    imported here, on the first diagram, and only here.
     """
-    from .displaylist import Refusal, from_mermaid
+    from .displaylist import Refusal, encode, from_mermaid
 
     try:
         from . import mermaid
 
         outcome = mermaid.layout(source)
     except Exception as exc:
-        return ("err", f"mermaid layout failed: {_one_line(exc)}")
+        return ["err", _cut(f"mermaid layout failed: {_one_line(exc)}")], b""
     if not isinstance(outcome, Sanitised):
-        return ("err", outcome.reason)
+        return ["err", _cut(outcome.reason)], b""
     try:
-        return ("laid", from_mermaid(source, outcome.svg, ratio))
+        return ["laid"], encode(from_mermaid(source, outcome.svg, ratio))
     except Refusal as refusal:
-        return ("err", f"mermaid not drawable: {refusal}")
+        return ["err", _cut(f"mermaid not drawable: {refusal}")], b""
     except Exception as exc:
-        return ("err", f"mermaid not drawable: {_one_line(exc)}")
+        return ["err", _cut(f"mermaid not drawable: {_one_line(exc)}")], b""
 
 
 DEFAULT_EM_RATIO = 2048 / 2400

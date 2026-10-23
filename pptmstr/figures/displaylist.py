@@ -5,10 +5,11 @@ the pane draws natively (``host.FigureWidget``), with no raster.
 **Where it is made.** In the render child (``render._laid``), after merman, the
 post-pass and the sanitiser (``mermaid.layout``): ``from_mermaid`` parses the
 sanitised SVG into a ``DisplayList`` and the child sends that, not the SVG and not
-pixels. The GUI process never parses SVG or a diagram's source. It checks every
-bound again on arrival (``validate``, on the render I/O thread) because the
-receiving end does not trust the sending one. Nothing here imports ImGui, so it
-is testable on its own.
+pixels, as plain JSON a record a line (``encode``). The GUI process never parses
+SVG or a diagram's source, and never unpickles what the child sends: it reads the
+list as data and checks every bound again on arrival (``decode``, ``validate``, on
+the render I/O thread), because the receiving end does not trust the sending one.
+Nothing here imports ImGui, so it is testable on its own.
 
 **Why the SVG and not merman's layout API.** merman 0.9.1's ``layout_json`` has node
 boxes and edge points, but no shapes, text runs, markers, or sequence lifelines and
@@ -33,12 +34,16 @@ literal beside the role (``fill_rgb``, ``stroke_rgb``, ``ink_rgb``). Which colou
 are the author's is decided from the source, not the SVG (``authored_colours``):
 merman writes its own palette (the pastel participant and entity fills, the
 default ink) into the same SVG, inline and in its stylesheet, and nothing in the
-markup tells the two apart reliably. So a colour is the author's only where both
+markup tells the two apart by value. So a colour is the author's only where both
 hold: an inline ``style`` declaration on a node's, cluster's or edge's shape, or
-on a label's text, sets it, and the source's own style lines name that same
-colour for that property (fill, stroke, or ``color`` for text). merman's palette
-is never in the source, so it maps to roles, and a diagram with no style lines
-follows the theme entirely.
+on a label's text, sets it, and a statement that names that shape sets that
+colour for that property (fill, stroke, or ``color`` for text): a ``classDef``
+whose name merman wrote on the node's ``g``, a ``style`` naming the node's id, a
+``linkStyle`` naming the edge's number (``Authored``). merman's palette is never
+in the source, so it maps to roles; a statement naming one node does not claim
+the same value merman wrote on another; and a diagram with no style lines
+follows the theme entirely. A colour written translucent is the theme's
+(``opacity``).
 
 **Legibility is the pane's job, not the child's** (``legible``): the pane's
 background is the current theme's, which the child does not know. The rule and
@@ -47,11 +52,13 @@ its thresholds are with ``TEXT_CONTRAST``.
 
 from __future__ import annotations
 
+import json
 import math
 import re
 import xml.etree.ElementTree as ET
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
+from typing import Any
 
 # ----------------------------------------------------------------------------------
 # The schema and its bounds
@@ -93,6 +100,14 @@ MAX_USE_DEPTH = 4
 tree; this caps the walk.
 """
 MAX_STATS = 16
+_UNDRAWABLE = re.compile(r"[\x00-\x1f\ud800-\udfff]")
+"""
+What a run's text or an id may not hold: a lone surrogate, on which every ImGui text
+call raises, or a C0 control, NUL among them, at which ImGui stops reading (STYLE.md
+§3, ``pptmstr.drawable``). Parsed XML holds neither but tab, newline and CR, so the
+parser writes those as spaces (``_drawn``) and a list that holds one did not come
+from it.
+"""
 NO_COLOUR = -1
 """
 ``fill_rgb``, ``stroke_rgb``, ``ink_rgb`` or ``ground_rgb`` where the role decides.
@@ -203,8 +218,11 @@ class TextRun:
 class HitNode:
     """
     Something an edge can end on and the pointer can rest on: a node, a participant,
-    a subgraph or a composite state. ``box`` is what hover tests; ``attach`` are more
-    boxes an edge's end may meet (a participant's lifeline).
+    a subgraph or a composite state. ``box`` is its whole extent, shapes and labels:
+    what an edge's end is matched to, so a sequence participant's box runs from its
+    top actor to its bottom one, over the lifeline its messages end on. ``attach``
+    are its shapes' own boxes, which are what the pointer rests on (``node_at``):
+    hovering that participant's column between the two actors is not hovering it.
     """
 
     id: str
@@ -240,8 +258,9 @@ class DisplayList:
 
     def weight(self) -> int:
         """
-        About how many eight-byte words this holds: what the pane's held layouts are
-        bounded by (``host.LAYOUT_BUDGET``).
+        About how many numbers and four-character runs of text this holds: what the
+        pane's held layouts are bounded by (``host.LAYOUT_BUDGET_WORDS``). Held as
+        Python objects, a word costs ``WORD_BYTES``.
         """
         words = 8 * (len(self.items) + len(self.nodes) + len(self.edges))
         for item in self.items:
@@ -249,6 +268,15 @@ class DisplayList:
         for edge in self.edges:
             words += len(edge.points)
         return words
+
+
+WORD_BYTES = 40
+"""
+What one word of ``DisplayList.weight`` costs held, in bytes: a float in a tuple is
+a 24-byte object and an 8-byte slot, and the records around them add the rest.
+tracemalloc measured 34-43 bytes a word on the six golden diagrams, a 100-node
+flowchart and a list at every bound (2026-10-22, merman 0.9.1, CPython 3.11).
+"""
 
 
 class Refusal(Exception):
@@ -280,7 +308,14 @@ def _validate(dl: object) -> str | None:
         return "origin"
     if len(dl.items) > MAX_ITEMS or len(dl.nodes) > MAX_NODES or len(dl.edges) > MAX_EDGES:
         return "count"
-    if len(dl.stats) > MAX_STATS:
+    if len(dl.stats) > MAX_STATS or not all(
+        len(s) == 2
+        and isinstance(s[0], str)
+        and len(s[0]) <= MAX_ID_CHARS
+        and not _UNDRAWABLE.search(s[0])
+        and type(s[1]) is int
+        for s in dl.stats
+    ):
         return "stats"
     nodes, edges = len(dl.nodes), len(dl.edges)
     segs = chars = runs = 0
@@ -319,6 +354,8 @@ def _validate(dl: object) -> str | None:
             chars += len(it.text)
             if not isinstance(it.text, str) or len(it.text) > MAX_RUN_CHARS:
                 return "text"
+            if _UNDRAWABLE.search(it.text):
+                return "text content"
             if not (fin(it.size) and FONT_SIZE_MIN <= it.size <= FONT_SIZE_MAX):
                 return "text"
             if it.anchor not in (0, 1, 2) or it.baseline not in (0, 1):
@@ -342,14 +379,293 @@ def _validate(dl: object) -> str | None:
             return "node"
         if len(n.box) != 4 or not coords(n.box):
             return "node"
+        if _UNDRAWABLE.search(n.id):
+            return "node id"
     for e in dl.edges:
         if not isinstance(e, HitEdge) or not isinstance(e.id, str) or len(e.id) > MAX_ID_CHARS:
             return "edge"
+        if _UNDRAWABLE.search(e.id):
+            return "edge id"
         if len(e.points) > 2 * MAX_HIT_POINTS or len(e.points) % 2 or not coords(e.points):
             return "edge"
         if len(e.ends) != 2 or not all(isinstance(k, int) and -1 <= k < nodes for k in e.ends):
             return "edge"
     return None
+
+
+# ----------------------------------------------------------------------------------
+# The wire: how a display list crosses from the render child to the GUI process
+# ----------------------------------------------------------------------------------
+
+WIRE_VERSION = 1
+"""
+The first field of a list's header line. A list in any other version is refused.
+"""
+
+_FLOAT_BYTES = 25
+"""
+The most bytes JSON spends on one finite float and the comma after it:
+``-2.2250738585072014e-308,``.
+"""
+_SCALAR_BYTES = 12
+"""
+The most on any other scalar a record holds (an int, a bool, a role), with its comma.
+"""
+_CHAR_BYTES = 12
+"""
+The most on one character of a string: JSON written ASCII-only spells a character
+past the BMP as two ``\\uXXXX`` escapes.
+"""
+_RECORD_BYTES = 64
+"""
+A record's brackets, quotes, tag and newline, generously.
+"""
+
+MAX_LINE_BYTES = (
+    _FLOAT_BYTES * (6 * MAX_SEGS_PER_PATH + 4 + 1 + MAX_DASHES)
+    + _CHAR_BYTES * max(MAX_SEGS_PER_PATH, MAX_RUN_CHARS)
+    + _SCALAR_BYTES * 16
+    + _RECORD_BYTES
+)
+"""
+The longest one record may be: a path at ``MAX_SEGS_PER_PATH`` cubics, the longest
+record any bound allows (about 0.6 MB). ``decode`` refuses a longer line before
+parsing it, because one ``json.loads`` is one C call that holds the GIL: a whole
+list at every bound as one document is 64 MB and took 0.97 s to parse here
+(2026-10-22, ``shots/native-fix/bounds.py``), the frame stalled for all of it.
+Parsed a record at a time, the I/O thread gives the GIL back between records.
+"""
+
+MAX_WIRE_BYTES = (
+    _FLOAT_BYTES
+    * (
+        6 * MAX_SEGS_TOTAL
+        + (4 + 1 + MAX_DASHES) * MAX_ITEMS
+        + 4 * (1 + MAX_ATTACH) * MAX_NODES
+        + 2 * MAX_HIT_POINTS * MAX_EDGES
+        + 4
+    )
+    + _CHAR_BYTES
+    * (MAX_TEXT_CHARS + MAX_SEGS_TOTAL + MAX_ID_CHARS * (MAX_NODES + MAX_EDGES + MAX_STATS))
+    + _SCALAR_BYTES * (16 * MAX_ITEMS + 2 * MAX_EDGES + MAX_STATS)
+    + _RECORD_BYTES * (1 + MAX_ITEMS + MAX_NODES + MAX_EDGES)
+)
+"""
+The longest a list within every bound can be on the wire (about 100 MB, nearly
+all of it the edges' hit points at ``MAX_EDGES`` x ``MAX_HIT_POINTS``): what the
+GUI process will read of one reply (``render``), so a child cannot make it
+allocate more. A real diagram is a few tens of kilobytes.
+"""
+
+
+def encode(dl: DisplayList) -> bytes:
+    """
+    ``dl`` as the render child sends it: a header line, then one JSON array per
+    item, node and edge, a line each, in that order. Plain data only, so the
+    receiving end evaluates nothing to read it (``decode``).
+    """
+    dumps = json.JSONEncoder(separators=(",", ":"), allow_nan=False).encode
+    lines = [
+        dumps(
+            {
+                "v": WIRE_VERSION,
+                "size": [dl.width, dl.height],
+                "origin": list(dl.origin),
+                "counts": [len(dl.items), len(dl.nodes), len(dl.edges)],
+                "stats": [list(s) for s in dl.stats],
+            }
+        )
+    ]
+    for it in dl.items:
+        if isinstance(it, PathItem):
+            lines.append(
+                dumps(
+                    [
+                        "p",
+                        it.role,
+                        it.fill,
+                        it.fill_rule,
+                        it.stroke,
+                        it.width,
+                        it.join,
+                        it.cap,
+                        it.dash,
+                        it.ops,
+                        it.xy,
+                        it.bbox,
+                        it.node,
+                        it.edge,
+                        it.fill_rgb,
+                        it.stroke_rgb,
+                    ]
+                )
+            )
+        else:
+            lines.append(
+                dumps(
+                    [
+                        "t",
+                        it.text,
+                        it.x,
+                        it.y,
+                        it.size,
+                        it.anchor,
+                        it.baseline,
+                        it.role,
+                        it.bold,
+                        it.box,
+                        it.node,
+                        it.edge,
+                        it.ink_rgb,
+                        it.ground_rgb,
+                    ]
+                )
+            )
+    lines += [dumps([n.id, n.box, n.attach]) for n in dl.nodes]
+    lines += [dumps([e.id, e.points, e.ends]) for e in dl.edges]
+    return "\n".join(lines).encode("ascii")
+
+
+class _Malformed(Exception):
+    pass
+
+
+def decode(blob: bytes, start: int = 0) -> DisplayList | str:
+    """
+    What the child sent, from ``start`` in ``blob``, read as ``encode`` writes it and
+    checked (``validate``): the list, or the first thing wrong with it. Never raises.
+
+    Reading evaluates nothing: each line is JSON, and each field is taken only if it
+    is the one JSON type it may be (an int is not a bool, a float may be an int),
+    so nothing the child wrote can name a class or run code here. A line longer
+    than ``MAX_LINE_BYTES`` is refused unparsed, and so is a header whose counts are
+    past a bound, before any record is read.
+    """
+    try:
+        dl = _decode(blob, start)
+    except _Malformed as bad:
+        return str(bad)
+    except Exception as exc:  # what JSON or a wrong type raises: malformed, not a crash
+        return f"malformed ({type(exc).__name__})"
+    return validate(dl) or dl
+
+
+def _decode(blob: bytes, start: int) -> DisplayList:
+    at = start
+
+    def line() -> Any:
+        nonlocal at
+        if at > len(blob):
+            raise _Malformed("fewer records than its header counts")
+        end = blob.find(b"\n", at, at + MAX_LINE_BYTES + 1)
+        if end < 0:
+            end = len(blob)
+            if end - at > MAX_LINE_BYTES:
+                raise _Malformed("a record past the longest one may be")
+        text, at = blob[at:end], end + 1
+        return json.loads(text)
+
+    head = line()
+    if not isinstance(head, dict) or head.get("v") != WIRE_VERSION:
+        raise _Malformed("not a display list of this version")
+    width, height = _floats(head["size"], 2)
+    origin = _floats(head["origin"], 2)
+    n_items, n_nodes, n_edges = (_int(v) for v in _seq(head["counts"], 3))
+    if not (0 <= n_items <= MAX_ITEMS and 0 <= n_nodes <= MAX_NODES and 0 <= n_edges <= MAX_EDGES):
+        raise _Malformed("count")
+    stats = tuple((_str(k), _int(v)) for k, v in (_seq(s, 2) for s in _seq(head["stats"])))
+    items: list[PathItem | TextRun] = []
+    for _ in range(n_items):
+        rec = _seq(line())
+        if rec and rec[0] == "p" and len(rec) == 16:
+            items.append(
+                PathItem(
+                    _int(rec[1]),
+                    _bool(rec[2]),
+                    _int(rec[3]),
+                    _bool(rec[4]),
+                    _float(rec[5]),
+                    _int(rec[6]),
+                    _int(rec[7]),
+                    _floats(rec[8]),
+                    _str(rec[9]),
+                    _floats(rec[10]),
+                    _floats(rec[11], 4),  # type: ignore[arg-type]
+                    _int(rec[12]),
+                    _int(rec[13]),
+                    _int(rec[14]),
+                    _int(rec[15]),
+                )
+            )
+        elif rec and rec[0] == "t" and len(rec) == 14:
+            items.append(
+                TextRun(
+                    _str(rec[1]),
+                    _float(rec[2]),
+                    _float(rec[3]),
+                    _float(rec[4]),
+                    _int(rec[5]),
+                    _int(rec[6]),
+                    _int(rec[7]),
+                    _bool(rec[8]),
+                    _float(rec[9]),
+                    _int(rec[10]),
+                    _int(rec[11]),
+                    _int(rec[12]),
+                    _int(rec[13]),
+                )
+            )
+        else:
+            raise _Malformed("an item that is neither a path nor a text run")
+    nodes = []
+    for _ in range(n_nodes):
+        nid, box, attach = _seq(line(), 3)
+        boxes = tuple(_floats(b, 4) for b in _seq(attach))
+        nodes.append(HitNode(_str(nid), _floats(box, 4), boxes))  # type: ignore[arg-type]
+    edges = []
+    for _ in range(n_edges):
+        eid, points, ends = _seq(line(), 3)
+        a, b = (_int(k) for k in _seq(ends, 2))
+        edges.append(HitEdge(_str(eid), _floats(points), (a, b)))
+    if at < len(blob):
+        raise _Malformed("more records than its header counts")
+    return DisplayList(
+        width, height, (origin[0], origin[1]), tuple(items), tuple(nodes), tuple(edges), stats
+    )
+
+
+def _seq(v: object, n: int | None = None) -> list[Any]:
+    if type(v) is not list or (n is not None and len(v) != n):
+        raise _Malformed("a field of the wrong shape")
+    return v
+
+
+def _int(v: object) -> int:
+    if type(v) is not int:
+        raise _Malformed("a field of the wrong type")
+    return v
+
+
+def _bool(v: object) -> bool:
+    if type(v) is not bool:
+        raise _Malformed("a field of the wrong type")
+    return v
+
+
+def _float(v: object) -> float:
+    if type(v) is not float and type(v) is not int:
+        raise _Malformed("a field of the wrong type")
+    return float(v)
+
+
+def _floats(v: object, n: int | None = None) -> tuple[float, ...]:
+    return tuple(_float(x) for x in _seq(v, n))
+
+
+def _str(v: object) -> str:
+    if type(v) is not str:
+        raise _Malformed("a field of the wrong type")
+    return v
 
 
 # ----------------------------------------------------------------------------------
@@ -526,42 +842,120 @@ _NAMED: dict[str, int] = {
 
 
 @dataclass(frozen=True, slots=True)
-class Authored:
+class Paints:
     """
-    The colours a diagram's source sets in its ``style``, ``classDef`` and
-    ``linkStyle`` lines, by the property that sets them: ``fill``, ``stroke``, and
-    ``color``, which is a label's ink.
+    Colours by the property that sets them: ``fill``, ``stroke``, and ``color``,
+    which is a label's ink.
     """
 
     fill: frozenset[int] = frozenset()
     stroke: frozenset[int] = frozenset()
     color: frozenset[int] = frozenset()
 
+    def __or__(self, other: Paints) -> Paints:
+        return Paints(self.fill | other.fill, self.stroke | other.stroke, self.color | other.color)
+
+
+NO_PAINTS = Paints()
+
+
+@dataclass(frozen=True, slots=True)
+class Authored:
+    """
+    The colours a diagram's source sets, by what each statement names: ``classes``
+    by ``classDef`` name, ``ids`` by the id a ``style`` line names, and ``links`` by
+    the edge number a ``linkStyle`` line names (-1 for ``linkStyle default``).
+
+    A colour on a shape is the author's only where a statement that names that
+    shape set it: merman 0.9.1 writes a node's classDef names on its ``g`` (``node
+    default hot``) and its source id in the ``g``'s id (``flowchart-A-0``), and
+    draws edges in the order they are written, which is what ``linkStyle`` counts.
+    So ``classDef x color:#28253D`` paints the nodes of class ``x``, and not every
+    label merman inks in its own ``#28253D``.
+    """
+
+    classes: dict[str, Paints] = field(default_factory=dict)
+    ids: dict[str, Paints] = field(default_factory=dict)
+    links: dict[int, Paints] = field(default_factory=dict)
+
+    def for_node(self, classes: Sequence[str], source_id: str | None) -> Paints:
+        """
+        What paints a node, a subgraph or a state with ``classes`` on its ``g`` and
+        ``source_id`` in the source.
+        """
+        out = NO_PAINTS
+        for name in classes:
+            out |= self.classes.get(name, NO_PAINTS)
+        if source_id is not None:
+            out |= self.ids.get(source_id, NO_PAINTS)
+        return out
+
+    def for_edge(self, index: int) -> Paints:
+        """
+        What paints the edge written ``index``-th: its own ``linkStyle``, and
+        ``linkStyle default``.
+        """
+        return self.links.get(index, NO_PAINTS) | self.links.get(-1, NO_PAINTS)
+
 
 NOTHING_AUTHORED = Authored()
 
-# A line that styles: Mermaid's `style`, `classDef` and `linkStyle` statements, each
-# at the start of a line. `[^\n]*` runs once per line, so the scan is linear.
-_STYLE_LINE = re.compile(r"^[ \t]*(?:style|classDef|linkStyle)\b([^\n]*)", re.MULTILINE)
-# One colour declaration inside such a line. The value is a hex colour, a functional
-# colour (its parentheses hold no parenthesis), or a word.
+# A statement that styles: Mermaid's `style`, `classDef` and `linkStyle`, its target,
+# and its declarations. It starts a line or follows a `;`, which separates
+# statements as a line does (merman 0.9.1 applies `A-->B; style A fill:#f00`); its
+# declarations run to the end of the line or to the next such statement, since
+# merman also reads `style A fill:#f00;stroke:#00f` as one statement. The lazy run
+# tests one fixed lookahead per character, so the scan is linear.
+_STATEMENT = re.compile(
+    r"(?:^|;)[ \t]*(style|classDef|linkStyle)[ \t]+([^\s;]+)"
+    r"((?:(?!;[ \t]*(?:style|classDef|linkStyle)\b)[^\n])*)",
+    re.MULTILINE,
+)
+# One colour declaration inside such a statement: the property starts the
+# declaration, so `background-color` is not `color`. The value is a hex colour, a
+# functional colour (its parentheses hold no parenthesis), or a word.
 _DECLARATION = re.compile(
-    r"\b(fill|stroke|color)\s*:\s*(#[0-9A-Fa-f]{3,8}\b|(?:rgba?|hsla?)\([^()]*\)|[A-Za-z]+)"
+    r"(?<![-\w])(fill|stroke|color)\s*:\s*(#[0-9A-Fa-f]{3,8}\b|(?:rgba?|hsla?)\([^()]*\)|[A-Za-z]+)"
 )
 
 
 def authored_colours(source: str) -> Authored:
     """
-    What ``source``'s style lines paint, as ``Authored``. A colour that does not
-    parse (``parse_colour``) is not counted. Linear in the source.
+    What ``source``'s ``style``, ``classDef`` and ``linkStyle`` statements paint, by
+    what each names, as ``Authored``. A colour that does not parse
+    (``parse_colour``) is not counted; nor is a ``linkStyle`` number that is not one.
+    Linear in the source.
     """
-    found: dict[str, set[int]] = {"fill": set(), "stroke": set(), "color": set()}
-    for line in _STYLE_LINE.finditer(source):
-        for prop, value in _DECLARATION.findall(line.group(1)):
+    found: dict[str, dict[Any, dict[str, set[int]]]] = {
+        "classDef": {},
+        "style": {},
+        "linkStyle": {},
+    }
+    for statement in _STATEMENT.finditer(source):
+        kind, target, body = statement.groups()
+        paints: dict[str, set[int]] = {"fill": set(), "stroke": set(), "color": set()}
+        for prop, value in _DECLARATION.findall(body):
             rgb = parse_colour(value)
             if rgb is not None:
-                found[prop].add(rgb)
-    return Authored(frozenset(found["fill"]), frozenset(found["stroke"]), frozenset(found["color"]))
+                paints[prop].add(rgb)
+        names: list[Any] = target.split(",") if kind != "style" else [target]
+        if kind == "linkStyle":
+            names = [
+                -1 if n == "default" else int(n) for n in names if n == "default" or n.isdigit()
+            ]
+        for name in names:
+            into = found[kind].setdefault(name, {"fill": set(), "stroke": set(), "color": set()})
+            for prop, rgbs in paints.items():
+                into[prop] |= rgbs
+
+    def frozen(by: dict[Any, dict[str, set[int]]]) -> dict[Any, Paints]:
+        return {
+            k: Paints(frozenset(v["fill"]), frozenset(v["stroke"]), frozenset(v["color"]))
+            for k, v in by.items()
+            if v["fill"] or v["stroke"] or v["color"]
+        }
+
+    return Authored(frozen(found["classDef"]), frozen(found["style"]), frozen(found["linkStyle"]))
 
 
 _HEX = re.compile(r"#([0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})")
@@ -573,8 +967,8 @@ def parse_colour(text: str | None) -> int | None:
     """
     A CSS colour as ``0xRRGGBB``, or ``None`` for anything else (``none``,
     ``transparent``, ``currentColor``, a URL, a malformed value). A trailing
-    ``!important`` is ignored. Alpha is dropped: a figure's colours are drawn
-    opaque, so a half-transparent author fill is drawn at full strength.
+    ``!important`` is ignored. Alpha is not part of the answer: ``opacity`` says
+    it, and what the builder does with it is there.
     """
     if not text:
         return None
@@ -596,6 +990,8 @@ def parse_colour(text: str | None) -> int | None:
     if len(found) < 3:
         return None
     numbers = [m.group(0) for m in found]
+    if not all(math.isfinite(float(n.removesuffix("%").removesuffix("deg"))) for n in numbers[:3]):
+        return None  # 1e999 is a number to the pattern and infinite to float
     try:
         if func.group(1).startswith("rgb"):
             channels = []
@@ -611,6 +1007,42 @@ def parse_colour(text: str | None) -> int | None:
     except ValueError:
         return None
     return _hsl(hue, sat, light)
+
+
+def opacity(text: str | None) -> float:
+    """
+    The alpha a CSS colour is written with, 0 to 1: a ``#rgba`` or ``#rrggbbaa``
+    hex's last digits, or the fourth number of a functional colour; 1 for anything
+    else.
+
+    The builder takes alpha 0 as no paint, which is what it draws as, and any other
+    alpha under 1 as no colour of the author's, so the role's theme colour is drawn:
+    a translucent colour's look depends on what is behind it, which is the pane's
+    and known only when it is drawn, and the legibility guard measures against
+    opaque colours.
+    """
+    if not text:
+        return 1.0
+    value = text.strip().lower().removesuffix("!important").strip()
+    hexed = _HEX.fullmatch(value)
+    if hexed:
+        digits = hexed.group(1)
+        if len(digits) == 4:
+            return int(digits[3] * 2, 16) / 255.0
+        if len(digits) == 8:
+            return int(digits[6:], 16) / 255.0
+        return 1.0
+    func = _FUNCTION.fullmatch(value)
+    if not func:
+        return 1.0
+    found = [m.group(0) for m in _PART.finditer(func.group(2))]
+    if len(found) < 4:
+        return 1.0
+    try:
+        alpha = float(found[3].removesuffix("%")) / (100.0 if found[3].endswith("%") else 1.0)
+    except ValueError:
+        return 1.0
+    return max(0.0, min(1.0, alpha)) if math.isfinite(alpha) else 1.0
 
 
 def _hsl(hue: float, sat: float, light: float) -> int:
@@ -1022,7 +1454,9 @@ class _Sheet:
     """
 
     def __init__(self, root: ET.Element) -> None:
-        self.by_class: dict[str, float] = {}
+        # A class's width, with the place in the stylesheet of the rule that set it:
+        # two class rules are equally specific, so the later one wins.
+        self.by_class: dict[str, tuple[int, float]] = {}
         self.by_tag: dict[str, float] = {}
         rid = root.get("id")
         if not rid:
@@ -1033,7 +1467,7 @@ class _Sheet:
             if isinstance(el.tag, str) and el.tag.replace(_SVG, "") == "style"
         )
         scope = f"#{rid}"
-        for rule in css.split("}"):
+        for at, rule in enumerate(css.split("}")):
             selectors, _, body = rule.partition("{")
             width = None
             for decl in body.split(";"):
@@ -1051,14 +1485,14 @@ class _Sheet:
                     simple.startswith(".")
                     and simple[1:].replace("-", "").replace("_", "").isalnum()
                 ):
-                    self.by_class[simple[1:]] = width
+                    self.by_class[simple[1:]] = (at, width)
                 elif simple.isalpha():
                     self.by_tag[simple] = width
 
     def width(self, tag: str, classes: set[str]) -> float | None:
-        for name in classes:
-            if name in self.by_class:
-                return self.by_class[name]
+        ruled = [self.by_class[name] for name in classes if name in self.by_class]
+        if ruled:
+            return max(ruled)[1]
         return self.by_tag.get(tag)
 
 
@@ -1084,6 +1518,10 @@ class _Ctx:
     """
     The author's stroke of the edge a marker is drawn for: its arrowhead takes it.
     """
+    paints: Paints = NO_PAINTS
+    """
+    What the source's statements paint the node, subgraph or state this is inside.
+    """
 
 
 class _Builder:
@@ -1105,7 +1543,10 @@ class _Builder:
         self.node_fill: dict[int, int] = {}
         self.edges: list[tuple[str, list[float]]] = []
         self.edge_index: dict[str, int] = {}
-        self.pending_labels: list[tuple[int, str]] = []
+        # Edge labels drawn before their edge: the run, the edge's id, and the colour
+        # the label's text was given, which is the author's if that edge's
+        # ``linkStyle`` names it.
+        self.pending_labels: list[tuple[int, str, str | None]] = []
         self.segs = 0
         self.chars = 0
         self.runs = 0
@@ -1117,7 +1558,7 @@ class _Builder:
     # -- nodes and edges --
 
     def node_for(self, nid: str) -> int:
-        nid = nid[:MAX_ID_CHARS]
+        nid = _drawn(nid[:MAX_ID_CHARS])
         got = self.node_index.get(nid)
         if got is None:
             if len(self.node_index) >= MAX_NODES:
@@ -1169,6 +1610,7 @@ class _Builder:
         if tag == "g" and "node" in classes and el.get("id"):
             ctx.node = self.node_for(el.get("id", "").removeprefix("merman-"))
             ctx.role = NOTE if "statediagram-note" in classes else NODE
+            ctx.paints = self.authored.for_node(sorted(classes), _source_id(el.get("id", "")))
         elif el.get("data-et") == "participant" and el.get("data-id"):
             ctx.node = self.node_for(el.get("data-id", ""))
             ctx.role = NODE
@@ -1180,6 +1622,7 @@ class _Builder:
             # is a hit node too; hover picks the smallest box under the pointer.
             if tag == "g" and el.get("id"):
                 ctx.node = self.node_for(el.get("id", "").removeprefix("merman-"))
+                ctx.paints = self.authored.for_node(sorted(classes), _source_id(el.get("id", "")))
         if "edgeLabel" in classes:
             ctx.role = EDGE_LABEL
         if tag == "g" and "label" in classes and el.get("data-id") and ctx.role == EDGE_LABEL:
@@ -1229,7 +1672,9 @@ class _Builder:
 
     def _authored(self, value: str | None, palette: frozenset[int]) -> int:
         rgb = parse_colour(value)
-        return rgb if rgb is not None and rgb in palette else NO_COLOUR
+        if rgb is None or rgb not in palette or opacity(value) < 1.0:
+            return NO_COLOUR
+        return rgb
 
     def shape(
         self, tag: str, el: ET.Element, ctx: _Ctx, style: dict[str, str], classes: set[str]
@@ -1288,7 +1733,7 @@ class _Builder:
         # open outline that is ink only says so (`fill="none"`).
         default_fill = role in (NODE, CLUSTER, NOTE, MARKER, SOLID) or (role == FRAME and closed)
         default_fill = default_fill and tag != "line"
-        fill = default_fill if fill_v is None else _paints(fill_v)
+        fill = default_fill if fill_v is None else _paints(fill_v) and opacity(fill_v) > 0
         if ctx.in_marker and ctx.marker_fill == "none":
             fill = False
         elif ctx.in_marker and ctx.marker_fill == "hollow":
@@ -1296,7 +1741,7 @@ class _Builder:
         if role in (EDGE, LIFELINE) or tag == "line":
             fill = False
         if stroke_v is not None:
-            stroke = _paints(stroke_v)
+            stroke = _paints(stroke_v) and opacity(stroke_v) > 0
         elif role == FRAME:
             # SVG's default stroke is none; merman strokes frames by class.
             stroke = bool(classes & _CSS_PAINTED)
@@ -1327,24 +1772,26 @@ class _Builder:
         if scale != 1.0:
             dash = tuple(min(DASH_MAX, max(DASH_MIN, d * scale)) for d in dash)
         # The author's colours: only an inline declaration on a node's, cluster's or
-        # edge's shape, and only a colour the source's style lines name.
+        # edge's shape, and only a colour a statement naming that shape sets (an
+        # edge's number is the one ``add_edge`` gives it, next).
         fill_rgb = stroke_rgb = NO_COLOUR
         if ctx.in_marker:
             if ctx.marker_rgb != NO_COLOUR:
                 fill_rgb = ctx.marker_rgb if role != HOLLOW else NO_COLOUR
                 stroke_rgb = ctx.marker_rgb
         elif role in _AUTHORED_SHAPES or role == EDGE:
+            paints = self.authored.for_edge(len(self.edges)) if role == EDGE else ctx.paints
             if fill and role != EDGE:
-                fill_rgb = self._authored(style.get("fill"), self.authored.fill)
+                fill_rgb = self._authored(style.get("fill"), paints.fill)
             if stroke:
-                stroke_rgb = self._authored(style.get("stroke"), self.authored.stroke)
+                stroke_rgb = self._authored(style.get("stroke"), paints.stroke)
         txy = self.transform(xy, ctx.m)
         edge = -1
         if role == EDGE:
             eid = (el.get("data-id") or el.get("id") or f"edge{len(self.edges)}").removeprefix(
                 "merman-"
             )
-            edge = self.add_edge(eid[:MAX_ID_CHARS], ops, txy)
+            edge = self.add_edge(_drawn(eid[:MAX_ID_CHARS]), ops, txy)
         if fill and fill_rgb != NO_COLOUR and ctx.node >= 0 and not ctx.in_marker:
             self.node_fill[ctx.node] = fill_rgb
         if fill or stroke:
@@ -1519,18 +1966,22 @@ class _Builder:
             if ts.text and ts.text.strip():
                 lines.append((ts.text, x, y))
         ink = ground = NO_COLOUR
+        edge = self.edge_index.get(ctx.edge_label, -1) if ctx.edge_label else -1
+        said: str | None = None
         if role in (LABEL, EDGE_LABEL):
             for source in (el, *spans):
                 said = _style(source).get("fill") or source.get("fill")
                 if said:
-                    ink = self._authored(said, self.authored.color)
                     break
+            if role == LABEL:
+                ink = self._authored(said, ctx.paints.color)
+            elif edge >= 0:
+                ink = self._authored(said, self.authored.for_edge(edge).color)
             if role == LABEL and ctx.node >= 0:
                 ground = self.node_fill.get(ctx.node, NO_COLOUR)
-        edge = self.edge_index.get(ctx.edge_label, -1) if ctx.edge_label else -1
         size = min(FONT_SIZE_MAX, max(FONT_SIZE_MIN, ctx.size * d / self.em_ratio))
         for s, tx, ty in lines:
-            s = " ".join(s.split())
+            s = " ".join(_drawn(s).split())
             if len(s) > MAX_RUN_CHARS:
                 s = s[: MAX_RUN_CHARS - 1] + "…"
             px, py = apply(ctx.m, tx, ty)
@@ -1552,16 +2003,17 @@ class _Builder:
                 ground,
             )
             if ctx.edge_label and edge < 0:
-                self.pending_labels.append((len(self.items), ctx.edge_label))
+                self.pending_labels.append((len(self.items), ctx.edge_label, said))
             self.add(run)
 
     def finish(self, width: float, height: float, origin: tuple[float, float]) -> DisplayList:
         # Edge labels drawn before their edge was seen.
-        for i, eid in self.pending_labels:
+        for i, eid, said in self.pending_labels:
             e = self.edge_index.get(eid, -1)
             it = self.items[i]
             if e >= 0 and isinstance(it, TextRun):
-                self.items[i] = _owned(it, e)
+                ink = self._authored(said, self.authored.for_edge(e).color)
+                self.items[i] = replace(it, edge=e, ink_rgb=ink)
         nodes = []
         for k, n in enumerate(self.nodes):
             b = self.node_boxes[k]
@@ -1586,6 +2038,28 @@ class _Builder:
             tuple(edges),
             tuple(stats[:MAX_STATS]),
         )
+
+
+_FAMILY_ID = re.compile(r"(?:flowchart|classId|state|entity)-(.+)-\d+")
+
+
+def _source_id(gid: str) -> str:
+    """
+    The id the source gave what merman drew as the ``g`` with id ``gid``: merman
+    0.9.1 writes a node as ``merman-flowchart-A-0`` (``classId-``, ``state-``,
+    ``entity-``), a subgraph as ``merman-A``.
+    """
+    gid = gid.removeprefix("merman-")
+    named = _FAMILY_ID.fullmatch(gid)
+    return named.group(1) if named else gid
+
+
+def _drawn(text: str) -> str:
+    """
+    ``text`` with each character a run or an id may not hold (``_UNDRAWABLE``) as a
+    space: the tab, newline or CR an attribute's character reference can leave.
+    """
+    return _UNDRAWABLE.sub(" ", text)
 
 
 def _paints(value: str) -> bool:
@@ -1620,6 +2094,22 @@ def _end_node(nodes: list[HitNode], x: float, y: float) -> int:
 
 def area(b: Box) -> float:
     return max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+
+
+def node_at(dl: DisplayList, x: float, y: float) -> int:
+    """
+    The node under the point ``(x, y)`` in diagram units, or -1: the one with the
+    smallest shape there (a node over the cluster it sits in). A node is tested by
+    its shapes' boxes (``HitNode.attach``), not its whole extent, which for a
+    sequence participant is the column its messages and notes cross; one with no
+    shape of its own is tested by its extent.
+    """
+    hit, best = -1, math.inf
+    for n, node in enumerate(dl.nodes):
+        for b in node.attach or (node.box,):
+            if b[0] <= x <= b[2] and b[1] <= y <= b[3] and area(b) < best:
+                hit, best = n, area(b)
+    return hit
 
 
 def _direction(xy: list[float], *, from_start: bool) -> tuple[float, float]:
@@ -1832,12 +2322,21 @@ def fill_loops(pts: list[Point]) -> list[list[Point]]:
     return loops
 
 
-def dashed(pts: list[Point], closed: bool, dash: tuple[float, ...]) -> list[list[Point]] | None:
+def dashed(
+    pts: list[Point], closed: bool, dash: tuple[float, ...], most: int = MAX_DASH_PIECES
+) -> list[list[Point]] | None:
     """
-    The polyline cut by ``dash`` (pixels), or ``None`` past ``MAX_DASH_PIECES``.
+    The polyline cut by ``dash`` (pixels), or ``None`` when that would be more than
+    ``most`` pieces, at most ``MAX_DASH_PIECES``: told from the line's length before
+    anything is cut, so a refusal costs one pass over the points.
     """
     if closed:
         pts = pts + [pts[0]]
+    most = min(most, MAX_DASH_PIECES)
+    length = sum(math.hypot(b[0] - a[0], b[1] - a[1]) for a, b in zip(pts, pts[1:], strict=False))
+    period = sum(dash) * (1 if len(dash) % 2 == 0 else 2)
+    if period <= 0 or length / period * math.ceil(len(dash) / 2) > most:
+        return None
     pieces: list[list[Point]] = []
     k, left, on = 0, dash[0], True
     cur: list[Point] = [pts[0]]
@@ -1918,6 +2417,7 @@ def from_mermaid(source: str, svg: str, em_ratio: float = 1.0) -> DisplayList:
 __all__: Sequence[str] = (
     "Authored",
     "DisplayList",
+    "Paints",
     "HitEdge",
     "HitNode",
     "PathItem",
@@ -1927,9 +2427,12 @@ __all__: Sequence[str] = (
     "TextRun",
     "authored_colours",
     "contrast",
+    "decode",
+    "encode",
     "from_mermaid",
     "from_svg",
     "legible",
+    "node_at",
     "parse_colour",
     "validate",
 )

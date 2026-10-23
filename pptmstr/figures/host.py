@@ -124,14 +124,20 @@ figure stands on the pane.
 
 BACKDROP_ROUNDING = 4.0
 
-LAYOUT_BUDGET_WORDS = 8 << 20
+LAYOUT_BUDGET_WORDS = (64 << 20) // dlm.WORD_BYTES
 """
-What the held display lists may add up to, in ``DisplayList.weight`` (about eight
-bytes a word: some 64 MiB), least recently read first out. The probe's six diagrams
-weigh 4-12 thousand each, and one at every bound about 400 thousand, so this is
-several hundred typical diagrams and twenty at the bounds. A figure on screen keeps
-its own once it has read it (``FigureMark.display``), so this bounds what a
-re-hosting finds; a list evicted before its figure's next read is asked for again.
+What the held display lists may add up to, in ``DisplayList.weight``: 64 MiB as
+held (``displaylist.WORD_BYTES``), least recently read first out. The golden
+diagrams weigh 1-5 thousand words each (40-180 KiB) and a 100-node flowchart 25
+thousand (0.9 MiB), so this is several hundred typical diagrams. A list at every
+bound weighs 3.3 million (109 MiB) and is held alone, past the budget, since the
+newest list is never evicted.
+
+Outside the budget: a figure on screen keeps its own list once it has read it
+(``FigureMark.display``), so this bounds what a re-hosting finds, and a list
+evicted before its figure's next read is asked for again; and each figure's
+built geometry (``_Geometry``), about as large as its list (0.8 MiB for the
+100-node flowchart at 900 px), held by the widget and gone with it.
 """
 
 LABEL_OVERFLOW = 1.15
@@ -145,6 +151,24 @@ over made sizes uneven from one box to the next.
 HIGHLIGHT_WIDTH = 1.5
 """
 How much wider a hovered node's outline and its edges are drawn, in pixels.
+"""
+
+MAX_DASHES_DRAWN = 16_384
+"""
+The most dash pieces one figure is cut into at one scale; a dashed stroke past the
+budget is drawn solid. What bounds the build where the display list's own bounds
+do not: 3,000 long dashed paths, within them, took 12 s to cut on the frame thread
+(2026-10-22). A 100-node flowchart drawn 900 px wide needs about 4,500.
+"""
+
+MIN_DASH_PERIOD_PX = 4.0
+"""
+The shortest a dash pattern's period (one dash and one gap) is cut at on screen; a
+shorter one is stretched to it, its proportions kept. Below about two pixels each,
+an anti-aliased line one pixel wide does not show a dash and a gap but a mottled
+line, and every dash is a draw call: a 100-node flowchart's 50 dotted edges cut
+at merman's 3-unit dashes made 23,000 of them at any scale, which took 35-99 ms to
+build and 9 ms a frame to draw at 900 px wide (2026-10-22, ``shots/native-fix``).
 """
 
 _MARKS_KEPT = 64
@@ -605,9 +629,10 @@ def role_colours(palette: Any, ground: int) -> tuple[tuple[int, int], ...]:
 
 
 # A paint, as the geometry names it: (kind, role, the author's colour, the author's
-# fill behind it). Resolved to a packed colour once per palette and ground.
+# fill behind it, the role whose theme fill is behind it or -1 for the pane).
+# Resolved to a packed colour once per palette and ground.
 _FILL, _STROKE, _INK, _KNOCK = range(4)
-Paint = tuple[int, int, int, int]
+Paint = tuple[int, int, int, int, int]
 
 
 def resolve(
@@ -619,15 +644,16 @@ def resolve(
 
     An author's fill is drawn as written. An author's stroke under
     ``STROKE_CONTRAST`` against the pane, and a label whose ink or ground is an
-    author's under ``TEXT_CONTRAST`` against its ground (the author's fill, else the
-    pane), are moved to the nearest colour that reaches it (``displaylist.legible``).
+    author's under ``TEXT_CONTRAST`` against its ground (the author's fill, else
+    the theme's fill of the shape it sits on, else the pane), are moved to the
+    nearest colour that reaches it (``displaylist.legible``).
     A marker's fill is its edge's stroke colour (an arrowhead), so it is guarded as
     a stroke and lands on the same colour as its line.
     """
     roles = role_colours(palette, ground)
     out: list[int] = []
     notes: list[tuple[str, int, int, float]] = []
-    for kind, role, rgb, under in paints:
+    for kind, role, rgb, under, surface in paints:
         fill, stroke = roles[role]
         if kind == _FILL and role == dlm.MARKER and rgb != dlm.NO_COLOUR:
             kind = _STROKE
@@ -648,7 +674,10 @@ def resolve(
             out.append(stroke)
             continue
         ink = stroke if rgb == dlm.NO_COLOUR else rgb
-        behind = ground if under == dlm.NO_COLOUR else under
+        if under != dlm.NO_COLOUR:
+            behind = under
+        else:
+            behind = roles[surface][0] if surface >= 0 else ground
         drawn = dlm.legible(ink, behind, dlm.TEXT_CONTRAST)
         note = ("text", ink, drawn, dlm.contrast(ink, behind))
         if drawn != ink and note not in notes:
@@ -692,9 +721,12 @@ class _Geometry:
     """
     A display list resolved at one scale and font, in pixels from the figure's
     corner: ``ops`` in paint order, each ``(kind, box, paint, what, node, edge,
-    width, closed)``, where ``what`` is ``ImVec2`` points, a text's
-    ``(x, top, size, text, bold)``, or a knockout's rectangle. ``paints`` are what
-    the ops' ``paint`` index into.
+    width)``, where ``what`` is a fill's ``ImVec2`` points, a stroke's polylines
+    each with whether it is closed (every dash of one subpath in the one op, so the
+    cull walks items and not dashes), a text's ``(x, top, size, text, bold)``, or a
+    knockout's rectangle. ``box`` is what the op covers, strokes not counted;
+    ``pad`` is how far, in screen pixels, the widest stroke and its highlight reach
+    past any box. ``paints`` are what the ops' ``paint`` index into.
     """
 
     scale: float
@@ -702,6 +734,7 @@ class _Geometry:
     ops: list[tuple[Any, ...]]
     paints: list[Paint]
     shrunk_labels: int = 0
+    pad: float = 1.0 + HIGHLIGHT_WIDTH
     colours: dict[tuple[str, int], list[int]] = field(default_factory=dict)
     """
     ``paints`` packed for the draw list, by palette name and the pane's ground.
@@ -731,18 +764,25 @@ def build(dl: DisplayList, scale: float, font: Any, bold: Any, key: tuple[Any, .
         return got
 
     ox, oy = dl.origin
+    widest = 0.0
+    dashes = MAX_DASHES_DRAWN
+    # The role whose theme fill each node's label sits on: the node's shape filled
+    # last before it in paint order, where the author gave that shape no fill.
+    surface: dict[int, int] = {}
     for it in dl.items:
         if isinstance(it, PathItem):
             xy = [v - (ox if i % 2 == 0 else oy) for i, v in enumerate(it.xy)]
             subs = dlm.flatten_units(it.ops, xy, scale)
             b = (
-                it.bbox[0] * scale - ox * scale - 2,
-                it.bbox[1] * scale - oy * scale - 2,
-                it.bbox[2] * scale - ox * scale + 2,
-                it.bbox[3] * scale - oy * scale + 2,
+                (it.bbox[0] - ox) * scale,
+                (it.bbox[1] - oy) * scale,
+                (it.bbox[2] - ox) * scale,
+                (it.bbox[3] - oy) * scale,
             )
+            if it.fill and it.node >= 0:
+                surface[it.node] = it.role if it.fill_rgb == dlm.NO_COLOUR else -1
             if it.fill:
-                fp = paint((_FILL, it.role, it.fill_rgb, dlm.NO_COLOUR))
+                fp = paint((_FILL, it.role, it.fill_rgb, dlm.NO_COLOUR, -1))
                 for pl, _ in subs:
                     for loop in dlm.fill_loops(pl):
                         pts = dlm.clockwise(dlm.dedupe(loop, True))
@@ -751,21 +791,23 @@ def build(dl: DisplayList, scale: float, font: Any, bold: Any, key: tuple[Any, .
                         kind = _POLY_CONVEX if dlm.convex(pts) else _POLY_CONCAVE
                         ops.append((kind, b, fp, [V(x, y) for x, y in pts], it.node, it.edge))
             if it.stroke:
-                sp = paint((_STROKE, it.role, it.stroke_rgb, dlm.NO_COLOUR))
+                sp = paint((_STROKE, it.role, it.stroke_rgb, dlm.NO_COLOUR, -1))
                 w = max(1.0, it.width * scale)
-                dash = tuple(d * scale for d in it.dash)
+                widest = max(widest, w)
+                dash = on_screen_dash(it.dash, scale)
+                lines: list[tuple[list[Any], bool]] = []
                 for pl, closed in subs:
                     pts = dlm.dedupe(pl, closed)
                     if len(pts) < 2:
                         continue
-                    pieces = dlm.dashed(pts, closed, dash) if dash else None
+                    pieces = dlm.dashed(pts, closed, dash, dashes) if dash else None
                     if pieces is None:
-                        line = [V(x, y) for x, y in pts]
-                        ops.append((_LINE, b, sp, line, it.node, it.edge, w, closed))
+                        lines.append(([V(x, y) for x, y in pts], closed))
                     else:
-                        for piece in pieces:
-                            line = [V(x, y) for x, y in piece]
-                            ops.append((_LINE, b, sp, line, it.node, it.edge, w, False))
+                        dashes -= len(pieces)
+                        lines += [([V(x, y) for x, y in piece], False) for piece in pieces]
+                if lines:
+                    ops.append((_LINE, b, sp, lines, it.node, it.edge, w))
             continue
         assert isinstance(it, TextRun)
         # Whole pixels: every distinct size is a bake on the atlas, so a size that
@@ -794,12 +836,26 @@ def build(dl: DisplayList, scale: float, font: Any, bold: Any, key: tuple[Any, .
         x, top = float(round(x)), float(round(top))
         b = (x, top, x + tw, top + size)
         if it.role == dlm.EDGE_LABEL:
-            kp = paint((_KNOCK, it.role, dlm.NO_COLOUR, dlm.NO_COLOUR))
+            kp = paint((_KNOCK, it.role, dlm.NO_COLOUR, dlm.NO_COLOUR, -1))
             rect = (x - 2, top - 1, x + tw + 2, top + size + 1)
             ops.append((_KNOCKOUT, b, kp, rect, it.node, it.edge))
-        ip = paint((_INK, it.role, it.ink_rgb, it.ground_rgb))
+        under = surface.get(it.node, -1) if it.node >= 0 and it.role == dlm.LABEL else -1
+        ip = paint((_INK, it.role, it.ink_rgb, it.ground_rgb, under))
         ops.append((_TEXT, b, ip, (x, top, size, it.text, it.bold), it.node, it.edge))
-    return _Geometry(scale, key, ops, list(paints), shrunk)
+    return _Geometry(scale, key, ops, list(paints), shrunk, widest / 2 + HIGHLIGHT_WIDTH + 1.0)
+
+
+def on_screen_dash(dash: tuple[float, ...], scale: float) -> tuple[float, ...]:
+    """
+    A dash pattern in diagram units as it is cut at ``scale`` pixels a unit: scaled,
+    and stretched, proportions kept, to a period of at least ``MIN_DASH_PERIOD_PX``.
+    """
+    if not dash:
+        return dash
+    px = tuple(d * scale for d in dash)
+    period = sum(px) * (1 if len(px) % 2 == 0 else 2)
+    stretch = MIN_DASH_PERIOD_PX / period if 0 < period < MIN_DASH_PERIOD_PX else 1.0
+    return tuple(d * stretch for d in px)
 
 
 # The widget -------------------------------------------------------------------------
@@ -930,12 +986,11 @@ class FigureWidget:
         held = self._geometry
         if held is not None and held.key == key:
             return held
-        frame = im.get_frame_count()
-        if held is None:
-            # A first build has nothing to stand in for it, so it is never held
-            # back; it takes the frame's turn, so no rebuild joins it.
-            _STATE.rebuilt_at = frame
-        elif not _may_rebuild(id(self), frame):
+        # A first build waits its turn as a rebuild does: a view made again
+        # (``Stream._forget``, a tab come back to) has every figure on it without
+        # geometry, and four 100-node flowcharts built in one frame made it 287 ms.
+        # Until its turn the figure stands at its height as an outline.
+        if not _may_rebuild(id(self), im.get_frame_count()):
             return held
         self._geometry = build(display, scale, font, bold, key)
         self.rebuilds += 1
@@ -976,13 +1031,18 @@ class FigureWidget:
         scale = w / display.width
         geo = self._geometry_for(im, display, scale)
         if geo is None:
+            from .. import theme
+
+            dlist = im.get_window_draw_list()
+            dlist.add_rect(im.ImVec2(x, y), im.ImVec2(x + w, y + h), theme.P.border.u32)
+            self.hovered, self.drawn = None, (0, 0)
             return
         colours = self._paints(im, geo)
         k = scale / geo.scale  # 1, or the stand-in geometry's stretch to this width
         ox, oy = snapped(x, y, _density(im))
         dlist = im.get_window_draw_list()
-        # The node under the pointer, smallest box first (a node over its cluster),
-        # tested without an item so the pane's own selection still gets the drag.
+        # The node under the pointer (``displaylist.node_at``), tested without an
+        # item so the pane's own selection still gets the drag.
         hovered = -1
         if im.is_window_hovered() and im.is_mouse_hovering_rect(
             im.ImVec2(ox, oy), im.ImVec2(ox + w, oy + h)
@@ -990,11 +1050,7 @@ class FigureWidget:
             mp = im.get_mouse_pos()
             ux = (mp.x - ox) / scale + display.origin[0]
             uy = (mp.y - oy) / scale + display.origin[1]
-            best = math.inf
-            for n, node in enumerate(display.nodes):
-                b = node.box
-                if b[0] <= ux <= b[2] and b[1] <= uy <= b[3] and dlm.area(b) < best:
-                    hovered, best = n, dlm.area(b)
+            hovered = dlm.node_at(display, ux, uy)
             if hovered >= 0 and im.is_mouse_clicked(0):
                 try:
                     node_clicked(self._mark.sha, display.nodes[hovered].id)
@@ -1007,10 +1063,13 @@ class FigureWidget:
             else set()
         )
         focus = theme.P.focus.u32
-        # What is on screen, in the geometry's pixels.
+        # What is on screen, in the geometry's pixels, widened by how far a stroke
+        # reaches past the box it is culled by: that reach is in screen pixels at
+        # any stretch, since a line is drawn ``k`` times thinner and then stretched.
         cmin, cmax = dlist.get_clip_rect_min(), dlist.get_clip_rect_max()
-        vx0, vy0 = (max(cmin.x, ox) - ox) / k, (max(cmin.y, oy) - oy) / k
-        vx1, vy1 = (min(cmax.x, ox + w) - ox) / k, (min(cmax.y, oy + h) - oy) / k
+        reach = geo.pad / k
+        vx0, vy0 = (max(cmin.x, ox) - ox) / k - reach, (max(cmin.y, oy) - oy) / k - reach
+        vx1, vy1 = (min(cmax.x, ox + w) - ox) / k + reach, (min(cmax.y, oy + h) - oy) / k + reach
         closed_flag = im.ImDrawFlags_.closed.value
         origin = im.ImVec2(ox, oy)
         zero = im.ImVec2(0.0, 0.0)
@@ -1055,12 +1114,10 @@ class FigureWidget:
                 continue
             on = (hovered >= 0 and op[4] == hovered) or (op[5] >= 0 and op[5] in lit)
             if kind == _LINE:
-                dlist.add_polyline(
-                    op[3],
-                    focus if on else colours[op[2]],
-                    op[6] / k + (HIGHLIGHT_WIDTH / k if on else 0.0),
-                    closed_flag if op[7] else 0,
-                )
+                ink = focus if on else colours[op[2]]
+                thick = op[6] / k + (HIGHLIGHT_WIDTH / k if on else 0.0)
+                for line, closed in op[3]:
+                    dlist.add_polyline(line, ink, thick, closed_flag if closed else 0)
             elif kind == _POLY_CONVEX:
                 dlist.add_convex_poly_filled(op[3], colours[op[2]])
             else:

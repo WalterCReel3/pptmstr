@@ -966,12 +966,13 @@ def test_a_display_list_out_of_bounds_from_the_child_is_a_failure_and_not_drawn(
     The I/O thread checks what the child sent before the frame thread sees it: a
     list past a bound, or not a list at all, is the figure's failure, kept.
     """
-    assert render.received("k", LAID_LIST) == Laid("k", LAID_LIST)
+    wire = displaylist.encode(LAID_LIST)
+    assert render.received("k", wire) == Laid("k", LAID_LIST)
     flat = displaylist.DisplayList(0.0, 10.0, (0.0, 0.0), (), (), ())
     for sent, why in (
-        (flat, "size"),
-        ("<svg/>", "not a display list"),
-        (None, "not a display list"),
+        (displaylist.encode(flat), "size"),
+        (b"<svg/>", "malformed (JSONDecodeError)"),
+        (b"", "malformed (JSONDecodeError)"),
     ):
         got = render.received("k", sent)
         assert got == Failed("k", f"display list refused: {why}")

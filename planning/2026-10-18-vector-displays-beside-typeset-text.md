@@ -14,7 +14,9 @@ the tree and not committed. Slices 3 and 5 are not started. Probes T1,
 M1, R2 and R1's hostile half ran on 2026-10-20 and their decisions are written in
 below. Mermaid is now drawn natively from a bounded display list, with no raster
 and no card, and a diagram's own colours drawn under a legibility guard (§11,
-task `native-mermaid`, 2026-10-22, in the tree and not committed). Nothing has run
+task `native-mermaid`, 2026-10-22, committed `da1e0d8`), and its review's
+findings addressed (§11.1, task `native-fix`, in the tree and not committed): the
+child's reply is plain JSON, never unpickled. Nothing has run
 on macOS or at a density above the operator's own ·
 **Origin:** the operator, at launch, 2026-10-18 (§1) ·
 **Evidence:** four research notes in `notes/vector-rendering/`
@@ -1732,7 +1734,8 @@ the author's and is not drawn.
   every bound and type (`render.received`, `displaylist.validate`) before the
   frame thread sees it; a list out of bounds is a kept failure, shown as the
   fence's source under its reason. Mermaid no longer depends on the child
-  having loaded resvg.
+  having loaded resvg. *(native-fix: the list crosses as plain JSON and is read
+  without unpickling, §11.1.)*
 - `host.FigureWidget` draws the list in the existing `Hosted` block: polylines
   and convex or concave fills on the window's draw list, labels in the pane's
   prose face (`typeset.imfont`), culled against the clip. Label sizes are set
@@ -1741,7 +1744,8 @@ the author's and is not drawn.
 - **Height.** The placeholder-then-height rule and the held layouts are kept;
   the height is the list's natural aspect at the drawn width, with no card
   padding. A re-hosted figure answers its height at once.
-- **Hover and click.** The node under the pointer (smallest box wins) has its
+- **Hover and click.** The node under the pointer (smallest box wins; native-fix:
+  its shapes' boxes, not its whole extent, §11.1) has its
   outline and every edge that ends on it drawn in the focus colour. A click
   calls `host.node_clicked(sha, node_id)`, which only logs. **What a click
   does is a later operator decision.** Hover is tested without an ImGui item,
@@ -1751,7 +1755,7 @@ the author's and is not drawn.
   others draw their last geometry scaled to the new width (a vertex pass,
   still vectors). A figure drawn for the first time (scrolled into view) is
   built that frame and takes the frame's turn, because it has nothing to stand
-  in for it.
+  in for it. *(Superseded by native-fix: a first build waits its turn too, §11.1.)*
 - **The raster path stays in the tree, unused for Mermaid** (`host.RasterFigure`,
   `_Textures`, `render.submit`, `rasterise`): a separate task removes it after
   review. The fence table's `needs` for mermaid still names the raster
@@ -1764,7 +1768,8 @@ sometimes with `!important` and sometimes without (class diagrams). So a
 colour is the author's only where both hold: an inline `style` declaration
 sets it on a node's, cluster's or edge's shape, or on a label's text, and the
 source's `style`/`classDef`/`linkStyle` lines name that colour for that
-property (`fill`, `stroke`, or `color` for text). An arrowhead takes its
+property (`fill`, `stroke`, or `color` for text). *(Superseded by native-fix:
+the statement must name the shape, §11.1.)* An arrowhead takes its
 edge's colour. Tested on synthetic SVG and on merman 0.9.1's own output: no
 style lines leaves every item on roles, in all five families; `STYLED` puts
 colours on exactly the two nodes, the edge, its marker and the two labels it
@@ -1774,7 +1779,8 @@ names (`tests/test_figure_displaylist.py`).
 window's, or a child window's own background):
 
 - An author's text colour, or the theme's text over an author's fill, under
-  **4.5:1** against its ground (the author's fill, else the pane) is moved to
+  **4.5:1** against its ground (the author's fill, else the pane; native-fix:
+  else the theme's fill of the node it sits in, §11.1) is moved to
   the nearest colour that reaches it: mixed toward white or black, whichever
   needs less, by the least amount. 4.5:1 is WCAG's AA minimum for normal-size
   text. The 3:1 WCAG allows "large" text was not chosen, because diagram labels
@@ -1829,7 +1835,8 @@ detect change. The screenshots below are what said the drawing is right.
   of a figure entering view. No frame drew a figure without geometry.
   Figure time per frame had a median of 3.2 to 3.4 ms. The worst frame was one
   29.6 ms rebuild (not explained; glyph baking for a new size is the likeliest
-  cause, unconfirmed). A theme switch rebuilt nothing.
+  cause, unconfirmed; native-fix measured the garbage collector instead, §11.1).
+  A theme switch rebuilt nothing.
 
 **Not run, and open:**
 
@@ -1843,3 +1850,99 @@ detect change. The screenshots below are what said the drawing is right.
   prose face's em.
 - The per-frame draw loop and the rebuild remain Python, as the probe measured
   them. C++ for them is still the survey's plan.
+
+### 11.1 The native-Mermaid review, and what changed (task `native-fix`, 2026-10-22)
+
+The review (task `native-review`) raised sixteen findings, from reading only. Each
+was checked against the tree and against merman 0.9.1's real output, and measured
+where it needed it [ran: tests, `shots/native-fix/` drivers under Xvfb, all
+git-ignored scratch]. Two lead decisions are folded in.
+
+**The child's reply is plain data (lead decision, 2026-10-22).** The render child
+parses untrusted text through merman (native code) and pptmstr's own parsers, so a
+child that has been taken over is in the threat model, and unpickling its reply
+would hand it the GUI process. Every reply is now `recv_bytes` of JSON, read to at
+most `render.MAX_REPLY_BYTES` (a head line, then the display list a record a line,
+`displaylist.encode`/`decode`). Decoding evaluates nothing: each field is taken
+only as the one JSON type it may be, then `validate()` runs. A reply that is not
+well formed is that figure's failure, never an exception; one the pipe cannot be
+read past also replaces the child. Requests go to the child as JSON too, so
+nothing on the pipe is pickled; only the child's start arguments are, by
+`spawn`, from the trusted side. **Why a record a line and not one document:** a
+list at every bound is 64 MB of JSON, and one `json.loads` holds the GIL for the
+whole parse, 0.97 s here, the frame stalled throughout. Parsed a record at a time,
+with a record over `MAX_LINE_BYTES` refused unparsed, the worst gap a 1 ms ticker
+thread saw was 8-13 ms.
+
+**Dispositions**, the reviewer's numbering:
+
+1. *Sequence hover hit the participant's whole column.* Held, confirmed in a
+   window before the fix (the note lit API Gateway and its messages; a message
+   label lit Auth Service). Hover now tests a node's shapes' boxes
+   (`displaylist.node_at`, `HitNode.attach`); its extent stays what edges attach
+   to. After: neither lights anything; an actor still lights its participant.
+2. *Undrawable text past `validate`.* Held. `validate` refuses a lone surrogate or
+   any C0 control in a run, an id or a stat; the parser writes the controls an
+   attribute's character reference can carry as spaces. A child's failure
+   reason is one line, at most `render.MAX_REASON_CHARS`, made drawable.
+3. *The pickle plan's gaps.* Held: `recv_bytes` has a maxlength; decoding was
+   measured and is line-wise (above); JSON's `NaN` and `Infinity` are refused by
+   `validate`'s finite checks, tested.
+4. *The guard's surface.* (a) Did not hold on merman 0.9.1: `style CUSTOMER
+   fill:#003` fills every attribute row too, so a label's ground is right;
+   pinned by a test. (b) Held: an author's ink in a node the author did not fill
+   is now measured against the theme's fill of that node's shape.
+5. *Frame cost.* Held, and larger than read. Six 100-node flowcharts re-hosted
+   built four figures in one frame, 287 ms; one such figure was 23,587 ops (each
+   dash its own) and 9 ms a frame. Now a first build waits its turn (worst
+   frame 42-68 ms), a stroke's dashes are one op culled once, a dash pattern is
+   never cut finer than a 4 px period on screen, a dash that would pass its
+   budget is refused from the line's length, and a figure's dashes are capped at
+   `host.MAX_DASHES_DRAWN`: the figure is 598 ops and 1.2-1.7 ms a frame, and a
+   drag's median frame went from 50 to 11-14 ms. **Still open:** a list at every
+   bound, which only a taken-over child can send (merman refuses a flowchart past
+   about 110 nodes), takes 3-4 s to build on the frame thread, nearly all of it
+   flattening the 6.4 million points the bounds allow. Closing it means a
+   drawn-point budget checked on receipt, or lower bounds: a decision about what
+   diagrams may be refused, left to the lead.
+6. *Thick strokes culled at the clip edge.* Held. The cull now widens the view by
+   the widest stroke's reach plus the highlight, in screen pixels at any stand-in
+   stretch.
+7. *The golden misses renamed classes.* Held for dotted, thick, dashed and
+   note-edge patterns: a pinned test now asserts each edge's dash and width.
+   The silent skip does not hold as a defect: where merman is not installed a
+   mermaid fence is code, so there is nothing for the golden to protect, and
+   pytest counts the skip.
+8. *Colours matched by value.* Held, and scoped (lead decision: if merman writes
+   the names). merman 0.9.1 writes classDef names on a node's `g` (`node default
+   hot`) in flowchart, class, state and ER, the source id in its id
+   (`flowchart-A-0`, `classId-`, `state-`, `entity-`), a subgraph as its own id,
+   and edges in the order `linkStyle` counts. A colour is the author's only where
+   a statement naming that shape set it; `classDef ink color:#28253D` (merman's
+   own label ink) now paints one label, not all of them.
+9. *Alpha dropped.* Held. Alpha 0 is no paint; any other alpha under 1 is drawn
+   in the theme's role, since how it looks depends on the pane behind it and the
+   guard measures opaque colours. (merman does not apply `fill:rgba(...)` in a
+   style statement at all: it splits declarations at its commas.)
+10. *`parse_colour` raised on `1e999`.* Held; such a colour is no colour.
+11. *Author styling missed.* `A-->B; style A ...` (merman applies it) and
+    `background-color` read as `color`: held, fixed. A sequence `rect`/`box`
+    colour: holds as described, and is consistent with the operator's decision
+    (only `style`, `classDef`, `linkStyle` are the author's); merman paints them
+    first, under the messages.
+12. *Set order in `_Sheet.width`.* Held in mechanism (four families have elements
+    with two ruled classes, equal widths today); the later rule now wins, as in
+    CSS.
+13. *Fill rule and holes.* Does not occur: no filled path in any family has two
+    closed loops; the golden now fails if one does.
+14. *`fences.RENDERED` needs the raster distributions for Mermaid.* Held; left
+    to `raster-removal` (lead decision), whose specification does not name it.
+15. *Memory figures undercount.* Held: a word of `weight` costs 34-43 bytes
+    held, not 8 (tracemalloc), and a list at every bound weighs 3.3 million
+    words, not 400 thousand. `displaylist.WORD_BYTES` is 40, pinned by a test, and
+    the budget is 64 MiB as held. A 100-node figure's geometry is about 0.8 MiB.
+16. *Stand-in text bakes a size a frame.* The mechanism is real and bounded:
+    sizes are whole pixels, each baked once, 0.3 ms for 24 glyphs. The 29.6 ms
+    rebuild is better explained by the cyclic garbage collector: gen-2 pauses of
+    29-99 ms during a drag, set off by the builds' allocations. Tuning the
+    collector is app-wide and not done here.

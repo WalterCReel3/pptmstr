@@ -21,7 +21,9 @@ skip where the optional extra is not installed.
 from __future__ import annotations
 
 import collections
+import json
 import math
+import xml.etree.ElementTree as ET
 from typing import Any
 
 import pytest
@@ -105,6 +107,24 @@ def test_a_dash_pattern_cuts_a_line_into_its_pieces() -> None:
     assert [(p[0][0], p[-1][0]) for p in pieces] == [(0.0, 2.0), (5.0, 7.0)]
 
 
+def test_a_dash_cut_past_its_budget_is_refused_from_the_length_alone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    line = [(0.0, 0.0), (100.0, 0.0)]
+    assert len(D.dashed(line, False, (1.0, 1.0), most=50) or []) == 50
+    hypot = math.hypot
+    calls: list[int] = []
+
+    def counted(*a: float) -> float:
+        calls.append(1)
+        return hypot(*a)
+
+    monkeypatch.setattr(math, "hypot", counted)
+    assert D.dashed(line, False, (1.0, 1.0), most=49) is None
+    assert len(calls) == 1, "one pass over the points, nothing cut"
+    assert D.dashed(line, False, (0.01, 0.01)) is None, "past MAX_DASH_PIECES"
+
+
 def test_a_fill_that_returns_to_its_start_is_filled_as_separate_loops() -> None:
     """
     merman's cylinder: round the top ellipse back to the start, then down the body.
@@ -162,6 +182,22 @@ def test_a_runs_size_is_in_imgui_units_for_the_panes_face() -> None:
     """
     run = next(i for i in D.from_svg(MARKED, em_ratio=0.853).items if isinstance(i, D.TextRun))
     assert run.size == pytest.approx(12.0 / 0.853)
+
+
+def test_two_class_rules_on_one_element_give_the_later_rules_width_whatever_the_order() -> None:
+    """
+    Two ``#root .class`` rules are equally specific, so the later one in the sheet
+    wins, as in CSS, and not whichever class a set happens to give first.
+    """
+    names = [f"c{k}" for k in range(20)]
+    css = "".join(f"#r .{n}{{stroke-width:{k + 1}}}" for k, n in enumerate(names))
+    root = ET.fromstring(
+        f'<svg xmlns="http://www.w3.org/2000/svg" id="r"><style>{css}</style></svg>'
+    )
+    sheet = D._Sheet(root)
+    for shuffled in (names, names[::-1], names[7:] + names[:7]):
+        assert sheet.width("path", set(shuffled)) == 20.0
+    assert sheet.width("path", {"c3", "c1"}) == 4.0
 
 
 def test_a_marker_in_stroke_width_units_scales_by_the_stylesheets_width() -> None:
@@ -290,6 +326,217 @@ def test_validate_answers_rather_than_raising_on_the_wrong_types() -> None:
     assert D.validate(edge) == "edge", "an end that names no node"
 
 
+@pytest.mark.parametrize(
+    "text",
+    ["a\udc80b", "a\x00b", "tab\there", "bell\x07"],
+)
+def test_validate_refuses_text_and_ids_no_text_call_can_take(text: str) -> None:
+    """
+    A lone surrogate raises in every ImGui text call and a NUL ends the string there
+    (STYLE.md §3); no parsed SVG holds any C0 control in a run, so a list with one
+    did not come from the parser.
+    """
+    run = D.TextRun(text, 0.0, 0.0, 12.0, 0, 0, D.LABEL, False, 0.0)
+    assert D.validate(D.DisplayList(10.0, 10.0, (0.0, 0.0), (run,), (), ())) == "text content"
+    node = D.HitNode(text, (0.0, 0.0, 1.0, 1.0), ())
+    assert D.validate(D.DisplayList(10.0, 10.0, (0.0, 0.0), (), (node,), ())) == "node id"
+    edge = D.HitEdge(text, (0.0, 0.0, 1.0, 1.0), (-1, -1))
+    assert D.validate(D.DisplayList(10.0, 10.0, (0.0, 0.0), (), (), (edge,))) == "edge id"
+    stats = D.DisplayList(10.0, 10.0, (0.0, 0.0), (), (), (), ((text, 1),))
+    assert D.validate(stats) == "stats"
+
+
+def test_the_parser_writes_a_control_an_attribute_carries_as_a_space() -> None:
+    svg = (
+        SVG_HEAD + '<g class="node" id="a&#9;b&#10;c"><rect width="10" height="10"/>'
+        '<text x="1" y="5">x&#9;y</text></g></svg>'
+    )
+    dl = D.from_svg(svg)
+    assert [n.id for n in dl.nodes] == ["a b c"]
+    assert [i.text for i in dl.items if isinstance(i, D.TextRun)] == ["x y"]
+
+
+# -- the wire: what crosses from the child, read without evaluating it ------------------
+
+
+def _wire_list() -> D.DisplayList:
+    return D.DisplayList(
+        100.0,
+        50.0,
+        (1.0, 2.0),
+        (
+            _path(dash=(3.0, 3.0), fill_rgb=0x123456, node=0, edge=0),
+            D.TextRun('é 😀 "q" \\', 5.0, 6.0, 12.0, 1, 1, D.LABEL, True, 30.0, 0, -1, 1, 2),
+        ),
+        (D.HitNode("n", (0.0, 0.0, 1.0, 1.0), ((0.0, 0.0, 1.0, 1.0),)),),
+        (D.HitEdge("e", (0.0, 0.0, 1.0, 1.0), (0, -1)),),
+        (("segments", 2),),
+    )
+
+
+def test_a_display_list_crosses_the_wire_unchanged_and_as_ascii_lines() -> None:
+    dl = _wire_list()
+    wire = D.encode(dl)
+    assert wire.isascii() and wire.count(b"\n") == 1 + 2 + 1 + 1 - 1
+    assert D.decode(wire) == dl
+    assert D.decode(b"head line\n" + wire, len(b"head line\n")) == dl
+
+
+@needs_merman
+@pytest.mark.parametrize("name", ["sequence", "er", "flowchart", "class", "state", "board21"])
+def test_each_golden_diagram_crosses_the_wire_unchanged(
+    name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    dl = _laid(SOURCES[name], monkeypatch)
+    assert D.decode(D.encode(dl)) == dl
+
+
+def _lines(dl: D.DisplayList) -> list[bytes]:
+    return D.encode(dl).split(b"\n")
+
+
+@pytest.mark.parametrize(
+    "wire, why",
+    [
+        (lambda: b"\n".join(_lines(_wire_list())[:-1]), "fewer records than its header counts"),
+        (lambda: D.encode(_wire_list()) + b"\n[]", "more records than its header counts"),
+        (
+            lambda: D.encode(_wire_list()).replace(b'"v":1', b'"v":2', 1),
+            "not a display list of this version",
+        ),
+        (
+            lambda: D.encode(_wire_list()).replace(b'"counts":[2,1,1]', b'"counts":[10001,1,1]'),
+            "count",
+        ),
+        (
+            lambda: D.encode(_wire_list()).replace(b'["p",', b'["x",'),
+            "an item that is neither a path nor a text run",
+        ),
+        (lambda: D.encode(_wire_list()).replace(b'"e",[', b'["e"],['), "a field of the wrong type"),
+        (
+            lambda: D.encode(_wire_list()).replace(b"[0,-1]", b"[0.0,-1]"),
+            "a field of the wrong type",
+        ),
+        (lambda: D.encode(_wire_list()).replace(b"5.0,6.0", b"NaN,6.0"), "coordinate"),
+        (lambda: D.encode(_wire_list()).replace(b"5.0,6.0", b"1e999,6.0"), "coordinate"),
+        (
+            lambda: D.encode(_wire_list()).replace(b'"segments",2', b'"segments",true'),
+            "a field of the wrong type",
+        ),
+        (lambda: b"[" * 100_000, "malformed (RecursionError)"),
+        (lambda: b"\xff\xfe", "malformed (JSONDecodeError)"),
+    ],
+)
+def test_a_wire_that_is_not_a_display_list_is_named_and_never_raised(wire: Any, why: str) -> None:
+    assert D.decode(wire()) == why
+
+
+def test_json_s_nan_and_infinity_do_not_get_past_the_finite_checks() -> None:
+    """
+    ``json.loads`` reads ``NaN`` and ``Infinity`` as floats; ``validate``'s finite
+    checks are what refuse them, wherever they stand.
+    """
+    for field, at in ((b"100.0,50.0", "size"), (b"1.0,2.0", "origin"), (b"5.0,6.0", "coordinate")):
+        for word in (b"NaN", b"Infinity", b"-Infinity"):
+            wire = D.encode(_wire_list()).replace(field, word + field[field.index(b",") :], 1)
+            assert D.decode(wire) == at, (field, word)
+
+
+def test_a_record_past_the_longest_one_is_refused_before_it_is_parsed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parsed: list[int] = []
+    real = json.loads
+
+    def loads(b: bytes) -> Any:
+        parsed.append(len(b))
+        return real(b)
+
+    monkeypatch.setattr(json, "loads", loads)
+    head = _lines(_wire_list())[0]
+    long = b'["t","' + b"x" * D.MAX_LINE_BYTES + b'"]'
+    assert D.decode(head + b"\n" + long) == "a record past the longest one may be"
+    assert parsed == [len(head)], "only the header was parsed"
+
+
+def test_the_wire_bounds_hold_a_list_at_every_bound_written_at_its_longest() -> None:
+    """
+    ``MAX_WIRE_BYTES`` is what the GUI process reads of a reply and ``MAX_LINE_BYTES``
+    what it parses at once: a list at every count bound, every float at its longest
+    JSON spelling and every character at its longest escape, fits both.
+    """
+    big = -2.2250738585072014e-308  # in range, and the longest repr a float has
+    wide = "\U0001f600"  # one character, twelve bytes as ASCII-only JSON
+    box = (big, big, big, big)
+    paths = [
+        D.PathItem(
+            D.NODE,
+            True,
+            0,
+            True,
+            63.123456789012345,
+            0,
+            0,
+            (1234.5678901234567,) * D.MAX_DASHES,
+            "M" + "C" * (D.MAX_SEGS_PER_PATH - 1),
+            (big,) * (2 + 6 * (D.MAX_SEGS_PER_PATH - 1)),
+            box,
+            D.MAX_NODES - 1,
+            D.MAX_EDGES - 1,
+            0xFFFFFF,
+            0xFFFFFF,
+        )
+        for _ in range(D.MAX_SEGS_TOTAL // D.MAX_SEGS_PER_PATH)
+    ]
+    room = D.MAX_SEGS_TOTAL - sum(len(p.ops) for p in paths)
+    runs = [
+        D.TextRun(
+            wide * (D.MAX_TEXT_CHARS // D.MAX_TEXT_RUNS),
+            big,
+            big,
+            255.12345678901234,
+            1,
+            1,
+            D.LABEL,
+            False,
+            1234.5678901234567,
+            D.MAX_NODES - 1,
+            D.MAX_EDGES - 1,
+            0xFFFFFF,
+            0xFFFFFF,
+        )
+        for _ in range(D.MAX_TEXT_RUNS)
+    ]
+    dots = [
+        replace_path(paths[0], ops="M", xy=(big, big))
+        for _ in range(min(room, D.MAX_ITEMS - len(paths) - len(runs)))
+    ]
+    nodes = tuple(
+        D.HitNode(wide * D.MAX_ID_CHARS, box, (box,) * D.MAX_ATTACH) for _ in range(D.MAX_NODES)
+    )
+    edges = tuple(
+        D.HitEdge(
+            wide * D.MAX_ID_CHARS,
+            (big,) * (2 * D.MAX_HIT_POINTS),
+            (D.MAX_NODES - 1, D.MAX_NODES - 1),
+        )
+        for _ in range(D.MAX_EDGES)
+    )
+    stats = tuple((wide * D.MAX_ID_CHARS, 10**15) for _ in range(D.MAX_STATS))
+    dl = D.DisplayList(
+        D.MAX_SIDE, D.MAX_SIDE, (big, big), (*paths, *dots, *runs), nodes, edges, stats
+    )
+    assert D.validate(dl) is None
+    wire = D.encode(dl)
+    assert len(wire) <= D.MAX_WIRE_BYTES
+    assert max(len(line) for line in wire.split(b"\n")) <= D.MAX_LINE_BYTES
+    assert len(wire) > D.MAX_WIRE_BYTES // 2, "the bound is not far above what it bounds"
+
+
+def replace_path(item: D.PathItem, **changed: Any) -> D.PathItem:
+    return D.PathItem(**{**{f: getattr(item, f) for f in D.PathItem.__slots__}, **changed})
+
+
 # -- colours: what is the author's -------------------------------------------------------
 
 
@@ -315,10 +562,60 @@ def test_validate_answers_rather_than_raising_on_the_wrong_types() -> None:
         ("#ggg", None),
         ("rgb(1,2)", None),
         ("", None),
+        ("rgb(1e999,0,0)", None),
+        ("rgb(0,-1e999%,0)", None),
+        ("hsl(1e999,50%,50%)", None),
+        ("hsl(-1e999deg,50%,50%)", None),
+        ("hsl(0,1e999%,50%)", None),
     ],
 )
 def test_css_colours_parse_to_rgb(said: str, rgb: int | None) -> None:
     assert D.parse_colour(said) == rgb
+
+
+@pytest.mark.parametrize(
+    "said, alpha",
+    [
+        ("#fff", 1.0),
+        ("#fff0", 0.0),
+        ("#ffffff00", 0.0),
+        ("#ff000080", 128 / 255),
+        ("rgba(0,0,0,0.1)", 0.1),
+        ("rgb(0 0 0 / 50%)", 0.5),
+        ("hsla(0,0%,0%,0)", 0.0),
+        ("rgba(0,0,0,1e999)", 1.0),
+        ("red", 1.0),
+        (None, 1.0),
+    ],
+)
+def test_a_colours_alpha_is_read(said: str | None, alpha: float) -> None:
+    assert D.opacity(said) == pytest.approx(alpha)
+
+
+@needs_merman
+def test_a_transparent_author_fill_is_no_fill_and_a_translucent_one_is_the_themes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    ``classDef ghost fill:#ffffff00`` is a node with no fill, not an opaque white
+    box; ``#ff000080`` is drawn in the theme's node fill, since how it looks depends
+    on the pane behind it.
+    """
+    source = (
+        "flowchart LR\n  A[Ghost] --> B[Half]\n"
+        "  classDef ghost fill:#ffffff00,stroke:#f00\n  class A ghost\n"
+        "  classDef half fill:#ff000080\n  class B half\n"
+    )
+    dl = _laid(source, monkeypatch)
+    shapes = {
+        dl.nodes[i.node].id: (i.fill, i.fill_rgb, i.stroke_rgb)
+        for i in dl.items
+        if isinstance(i, D.PathItem) and i.role == D.NODE
+    }
+    assert shapes == {
+        "flowchart-A-0": (False, D.NO_COLOUR, 0xFF0000),
+        "flowchart-B-1": (True, D.NO_COLOUR, D.NO_COLOUR),
+    }
 
 
 def test_the_named_colours_are_the_sanitisers_and_css_values() -> None:
@@ -339,11 +636,60 @@ def test_the_authors_colours_are_read_from_style_classdef_and_linkstyle_lines() 
         "    %% style B fill:#123456 is a comment, and a comment is not a style line\n"
         "    A --> C[fill:#abcdef]\n"
     )
-    said = D.authored_colours(source)
-    assert said.fill == {0xFF9966, 0xBBBBFF}
-    assert said.stroke == {0x008000, 0xFF6666, 0xFFFF33}
-    assert said.color == {0xFFFFFF, 0xFF0000}
+    assert D.authored_colours(source) == D.Authored(
+        classes={"hot": P(fill={0xFF9966}, stroke={0x008000}, color={0xFFFFFF})},
+        ids={"A": P(fill={0xBBBBFF}, stroke={0xFF6666}, color={0xFF0000})},
+        links={0: P(stroke={0xFFFF33})},
+    )
     assert D.authored_colours("flowchart LR\n  A --> B\n") == D.NOTHING_AUTHORED
+
+
+def P(fill: Any = (), stroke: Any = (), color: Any = ()) -> D.Paints:  # noqa: N802
+    return D.Paints(frozenset(fill), frozenset(stroke), frozenset(color))
+
+
+def test_each_statement_paints_what_it_names() -> None:
+    said = D.authored_colours(
+        "flowchart LR\n"
+        "  classDef a,b fill:#abc\n"
+        "  linkStyle 0,2 stroke:#123\n"
+        "  linkStyle default stroke:#456,color:#789\n"
+        "  linkStyle x stroke:#fff\n"
+        "  style A fill:#f00;stroke:#00f\n"
+    )
+    assert said.classes == {"a": P(fill={0xAABBCC}), "b": P(fill={0xAABBCC})}
+    assert said.links == {
+        0: P(stroke={0x112233}),
+        2: P(stroke={0x112233}),
+        -1: P(stroke={0x445566}, color={0x778899}),
+    }
+    assert said.ids == {"A": P(fill={0xFF0000}, stroke={0x0000FF})}, "merman reads `;` within one"
+    assert said.for_edge(2) == P(stroke={0x112233, 0x445566}, color={0x778899})
+    assert said.for_edge(1) == said.links[-1]
+    assert said.for_node(["node", "default", "b"], "A") == P(
+        fill={0xAABBCC, 0xFF0000}, stroke={0x0000FF}
+    )
+    assert said.for_node(["node", "default"], "B") == D.NO_PAINTS
+
+
+def test_a_colour_too_large_to_be_a_number_is_no_colour_and_not_a_failed_diagram() -> None:
+    said = D.authored_colours("flowchart LR\n  A-->B\n  style A fill:rgb(1e999,0,0),stroke:#f00\n")
+    assert said == D.Authored(ids={"A": P(stroke={0xFF0000})})
+
+
+def test_a_style_statement_after_a_semicolon_is_read_and_background_color_is_not_color() -> None:
+    """
+    merman 0.9.1 applies ``A-->B; style A fill:#f00``: a ``;`` ends a statement as
+    a line does. ``background-color`` is not the label ink ``color``.
+    """
+    said = D.authored_colours(
+        "flowchart LR\n  A-->B; style A fill:#f00\n  B-->C;classDef x stroke:#0f0\n"
+        "  style C background-color:#00f,color:#123456\n"
+    )
+    assert said == D.Authored(
+        classes={"x": P(stroke={0x00FF00})},
+        ids={"A": P(fill={0xFF0000}), "C": P(color={0x123456})},
+    )
 
 
 def test_a_colour_is_the_authors_only_inline_on_a_node_and_named_in_the_source() -> None:
@@ -370,13 +716,23 @@ def test_a_colour_is_the_authors_only_inline_on_a_node_and_named_in_the_source()
 
     none = D.NO_COLOUR
     assert colours(D.NOTHING_AUTHORED) == [(none, none), none, (none, none)]
-    named = D.Authored(fill=frozenset({0xFDF4FF, 0xBBBBFF}), stroke=frozenset({0xE879F9}))
+    named = D.Authored(
+        ids={"n-A": P(fill={0xFDF4FF}, stroke={0xE879F9}), "n-B": P(fill={0xBBBBFF})}
+    )
     assert colours(named) == [
         (0xFDF4FF, 0xE879F9),
         none,
         (none, none),
     ], "a presentation attribute is not an inline declaration, and fill is not color"
-    inked = D.Authored(fill=frozenset({0xFDF4FF}), color=frozenset({0xFDF4FF}))
+    elsewhere = D.Authored(ids={"n-B": P(fill={0xFDF4FF}, stroke={0xE879F9}, color={0xFDF4FF})})
+    assert colours(elsewhere) == [(none, none), none, (none, none)], "named for B, written on A"
+    by_class = D.Authored(classes={"hot": P(fill={0xFDF4FF})})
+    assert colours(by_class) == [(none, none), none, (none, none)], "A's g has no class hot"
+    hot = D.from_svg(
+        svg.replace('class="node" id="merman-n-A"', 'class="node hot" id="merman-n-A"'), by_class
+    )
+    assert hot.items[0].fill_rgb == 0xFDF4FF  # type: ignore[union-attr]
+    inked = D.Authored(ids={"n-A": P(fill={0xFDF4FF}, color={0xFDF4FF})})
     dl = D.from_svg(svg, inked)
     run = next(i for i in dl.items if isinstance(i, D.TextRun))
     assert (run.ink_rgb, run.ground_rgb) == (0xFDF4FF, 0xFDF4FF), "its ground is its node's fill"
@@ -387,7 +743,9 @@ def test_an_edges_marker_takes_the_authors_stroke() -> None:
         'class="flowchart-link" data-id="L_A_B"',
         'class="flowchart-link" data-id="L_A_B" style="stroke:#ff3"',
     )
-    dl = D.from_svg(svg, D.Authored(stroke=frozenset({0xFFFF33})))
+    dl = D.from_svg(svg, D.Authored(links={0: P(stroke={0xFFFF33})}))
+    other = D.from_svg(svg, D.Authored(links={1: P(stroke={0xFFFF33})}))
+    assert all(i.stroke_rgb == D.NO_COLOUR for i in other.items if isinstance(i, D.PathItem))
     edge = next(i for i in dl.items if isinstance(i, D.PathItem) and i.role == D.EDGE)
     marker = next(i for i in dl.items if isinstance(i, D.PathItem) and i.role == D.MARKER)
     assert edge.stroke_rgb == marker.stroke_rgb == marker.fill_rgb == 0xFFFF33
@@ -449,13 +807,13 @@ def test_the_pane_guards_author_colours_against_its_theme_and_never_changes_a_fi
     palette = theme.THEMES[name]
     ground = host._rgb(palette.bg)
     paints = [
-        (host._FILL, D.NODE, 0x000000, D.NO_COLOUR),  # an author's fill: as written
-        (host._STROKE, D.EDGE, 0x222222, D.NO_COLOUR),  # dark on dark
-        (host._STROKE, D.EDGE, 0xFFFF33, D.NO_COLOUR),  # yellow on light
-        (host._INK, D.LABEL, D.NO_COLOUR, 0xFF9966),  # the theme's text on an orange fill
-        (host._INK, D.LABEL, 0xFFFFFF, D.NO_COLOUR),  # white text on the pane
-        (host._INK, D.LABEL, D.NO_COLOUR, D.NO_COLOUR),  # the theme's own: untouched
-        (host._STROKE, D.NODE, D.NO_COLOUR, D.NO_COLOUR),
+        (host._FILL, D.NODE, 0x000000, D.NO_COLOUR, -1),  # an author's fill: as written
+        (host._STROKE, D.EDGE, 0x222222, D.NO_COLOUR, -1),  # dark on dark
+        (host._STROKE, D.EDGE, 0xFFFF33, D.NO_COLOUR, -1),  # yellow on light
+        (host._INK, D.LABEL, D.NO_COLOUR, 0xFF9966, -1),  # the theme's text on an orange fill
+        (host._INK, D.LABEL, 0xFFFFFF, D.NO_COLOUR, -1),  # white text on the pane
+        (host._INK, D.LABEL, D.NO_COLOUR, D.NO_COLOUR, -1),  # the theme's own: untouched
+        (host._STROKE, D.NODE, D.NO_COLOUR, D.NO_COLOUR, -1),
     ]
     drawn, notes = host.resolve(paints, palette, ground)
     roles = host.role_colours(palette, ground)
@@ -471,6 +829,33 @@ def test_the_pane_guards_author_colours_against_its_theme_and_never_changes_a_fi
     assert len(notes) >= expected
 
 
+@pytest.mark.parametrize("name", ["dark", "light"])
+def test_an_authors_ink_on_a_node_the_theme_fills_is_guarded_against_that_fill(
+    name: str,
+) -> None:
+    """
+    A label the author inked, in a node the author did not fill, sits on the theme's
+    node fill and not on the pane: an ink legible on the pane but not on that fill
+    is moved.
+    """
+    palette = theme.THEMES[name]
+    ground = host._rgb(palette.bg)
+    node_fill = host.role_colours(palette, ground)[D.NODE][0]
+    inks = [
+        rgb
+        for v in range(256)
+        for rgb in ((v << 16) | (v << 8) | v, (v << 16) | 0x40, v)
+        if D.contrast(rgb, ground) >= D.TEXT_CONTRAST > D.contrast(rgb, node_fill)
+    ]
+    assert inks, "an ink legible on the pane and not on the node fill"
+    ink = inks[len(inks) // 2]
+    on_pane = (host._INK, D.LABEL, ink, D.NO_COLOUR, -1)
+    on_node = (host._INK, D.LABEL, ink, D.NO_COLOUR, D.NODE)
+    drawn, notes = host.resolve([on_pane, on_node], palette, ground)
+    assert drawn[0] == ink and len(notes) == 1
+    assert D.contrast(drawn[1], node_fill) >= D.TEXT_CONTRAST
+
+
 def test_an_arrowhead_lands_on_the_same_colour_as_its_guarded_line() -> None:
     """
     linkStyle's colour reaches an edge's marker as its fill and its stroke. The fill
@@ -479,10 +864,10 @@ def test_an_arrowhead_lands_on_the_same_colour_as_its_guarded_line() -> None:
     palette = theme.THEMES["dark"]
     ground = host._rgb(palette.bg)
     paints = [
-        (host._STROKE, D.EDGE, 0x15171D, D.NO_COLOUR),
-        (host._FILL, D.MARKER, 0x15171D, D.NO_COLOUR),
-        (host._STROKE, D.MARKER, 0x15171D, D.NO_COLOUR),
-        (host._FILL, D.NODE, 0x15171D, D.NO_COLOUR),
+        (host._STROKE, D.EDGE, 0x15171D, D.NO_COLOUR, -1),
+        (host._FILL, D.MARKER, 0x15171D, D.NO_COLOUR, -1),
+        (host._STROKE, D.MARKER, 0x15171D, D.NO_COLOUR, -1),
+        (host._FILL, D.NODE, 0x15171D, D.NO_COLOUR, -1),
     ]
     drawn, notes = host.resolve(paints, palette, ground)
     assert drawn[0] == drawn[1] == drawn[2] != 0x15171D
@@ -565,6 +950,73 @@ def test_style_classdef_and_linkstyle_reach_the_display_list_and_nothing_else_do
         "text Start": {("ink", 0xFF0000), ("ground", 0xBBBBFF)},
         "text OK": {("ink", 0xFFFFFF), ("ground", 0xFF9966)},
     }
+
+
+@needs_merman
+def test_the_pointer_on_a_sequence_note_or_message_is_on_no_participant(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    merman draws each participant twice, top and bottom, under one id, so its extent
+    runs the whole column. The points are read off merman 0.9.1's layout: the note
+    inside API Gateway's column, a message label inside Auth Service's, and each
+    participant's two actors.
+    """
+    dl = _laid(SOURCES["sequence"], monkeypatch)
+    ids = {n.id: k for k, n in enumerate(dl.nodes)}
+    assert D.node_at(dl, 380.0, 580.0) == -1, "the note over C and G"
+    assert D.node_at(dl, 530.0, 158.0) == -1, "validate(credentials), in A's column"
+    for name, x in (("C", 125.0), ("G", 387.0), ("A", 589.0), ("D", 935.0)):
+        assert D.node_at(dl, x, 47.0) == ids[name]
+        assert D.node_at(dl, x, 658.0) == ids[name]
+        assert D.node_at(dl, x, 400.0) == -1, f"{name}'s lifeline"
+    assert all(e.ends[0] >= 0 and e.ends[1] >= 0 for e in dl.edges), "messages still attach"
+
+
+@needs_merman
+def test_the_pointer_on_a_flowchart_node_is_on_it_and_not_on_its_cluster(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    dl = _laid(SOURCES["flowchart"], monkeypatch)
+    for k, n in enumerate(dl.nodes):
+        if n.id.startswith("flowchart-"):
+            b = n.attach[0]
+            assert D.node_at(dl, (b[0] + b[2]) / 2, (b[1] + b[3]) / 2) == k, n.id
+
+
+@needs_merman
+@pytest.mark.parametrize(
+    "source, owner",
+    [
+        (
+            "flowchart LR\n  A[Ink] --> B[Plain]\n  B --> C[Also plain]\n"
+            "  classDef ink color:#28253D\n  class A ink\n",
+            "flowchart-A-0",
+        ),
+        (
+            "flowchart LR\n  A[Ink] --> B[Plain]\n  B --> C[Also plain]\n  style A color:#28253D\n",
+            "flowchart-A-0",
+        ),
+        (
+            "stateDiagram-v2\n  Ink --> Plain\n  classDef ink color:#28253D\n  class Ink ink\n",
+            "state-Ink-0",
+        ),
+    ],
+)
+def test_an_author_colour_that_is_also_mermans_paints_only_what_its_statement_names(
+    source: str, owner: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    ``#28253D`` is merman 0.9.1's own label ink, written on every label. Named by a
+    statement for one node, it is the author's on that node's label alone.
+    """
+    dl = _laid(source, monkeypatch)
+    inked = {
+        dl.nodes[i.node].id if i.node >= 0 else i.text
+        for i in dl.items
+        if isinstance(i, D.TextRun) and i.ink_rgb != D.NO_COLOUR
+    }
+    assert inked == {owner}
 
 
 # -- the golden: merman 0.9.1's six diagrams ------------------------------------------------
@@ -1076,6 +1528,108 @@ GOLDEN: dict[str, dict[str, Any]] = {
 
 
 @needs_merman
+def test_an_er_entitys_authored_fill_is_on_every_row_its_text_sits_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    merman 0.9.1 paints ``style CUSTOMER fill:#003`` on the entity's box and on
+    each attribute row, so a label's ``ground_rgb`` (its node's authored fill) is
+    the surface it is drawn on. Were a row left in the theme's fill, the guard
+    would measure that row's text against the wrong colour.
+    """
+    source = (
+        "erDiagram\n  CUSTOMER ||--o{ ORDER : places\n"
+        "  CUSTOMER {\n    string name\n    string email\n  }\n"
+        "  style CUSTOMER fill:#003\n"
+    )
+    dl = _laid(source, monkeypatch)
+    customer = next(k for k, n in enumerate(dl.nodes) if "CUSTOMER" in n.id)
+    filled = [i for i in dl.items if isinstance(i, D.PathItem) and i.node == customer and i.fill]
+    labels = [i for i in dl.items if isinstance(i, D.TextRun) and i.node == customer]
+    assert len(filled) >= 3 and all(i.fill_rgb == 0x000033 for i in filled)
+    assert [i.text for i in labels] == ["CUSTOMER", "string", "name", "string", "email"]
+    assert all(i.ground_rgb == 0x000033 for i in labels)
+
+
+@needs_merman
+@pytest.mark.parametrize("name", ["sequence", "er", "flowchart", "class", "state", "board21"])
+def test_a_held_display_list_costs_about_word_bytes_a_word(
+    name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    What the held layouts' budget assumes a word of ``weight`` costs, against what
+    the list decoded on arrival takes, by tracemalloc.
+    """
+    import tracemalloc
+
+    wire = D.encode(_laid(SOURCES[name], monkeypatch))
+    tracemalloc.start()
+    try:
+        dl = D.decode(wire)
+        held = tracemalloc.get_traced_memory()[0]
+    finally:
+        tracemalloc.stop()
+    assert isinstance(dl, D.DisplayList)
+    assert 0.75 * D.WORD_BYTES <= held / dl.weight() <= 1.25 * D.WORD_BYTES
+
+
+PATTERNS: dict[str, tuple[str, list[tuple[str, tuple[float, ...], float]]]] = {
+    "flowchart": (
+        "flowchart LR\n  A -.-> B\n  B ==> C\n  C --> D\n  D -.- E\n",
+        [
+            ("L_A_B_0", (2.0, 2.0), 1.5),  # edge-pattern-dotted
+            ("L_B_C_0", (), 3.5),  # edge-thickness-thick
+            ("L_C_D_0", (), 1.5),
+            ("L_D_E_0", (2.0, 2.0), 1.5),
+        ],
+    ),
+    "class": (
+        "classDiagram\n  A ..> B\n  C ..|> D\n  E --> F\n  G .. H\n",
+        [
+            ("id_A_B_1", (3.0, 3.0), 1.5),  # edge-pattern-dashed
+            ("id_C_D_2", (3.0, 3.0), 1.5),
+            ("id_E_F_3", (), 1.5),
+            ("id_G_H_4", (3.0, 3.0), 1.5),
+        ],
+    ),
+    "er": (
+        "erDiagram\n  A ||..o{ B : soft\n  C ||--o{ D : hard\n",
+        [
+            ("id_entity-A-0_entity-B-1_0", (3.0, 3.0), 1.5),
+            ("id_entity-C-2_entity-D-3_1", (), 1.5),
+        ],
+    ),
+    "state": (
+        "stateDiagram-v2\n  A --> B\n  note right of A : n\n",
+        [("edge0", (), 1.5), ("A-A----note-1", (5.0, 5.0), 1.5)],  # note-edge over dashed
+    ),
+}
+
+
+@needs_merman
+@pytest.mark.parametrize("name", list(PATTERNS))
+def test_the_golden_dash_and_width_of_each_edge_pattern(
+    name: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """
+    Every edge pattern merman 0.9.1 marks by class (``_CLASS_DASH``, the thick
+    class), with the dash and width it is drawn at: a renamed class draws solid or
+    thin, and fails here.
+    """
+    found = mermaid.version()
+    if found != PINNED:
+        pytest.fail(RE_BASELINE.format(found=found))
+    source, want = PATTERNS[name]
+    dl = _laid(source, monkeypatch)
+    got = [
+        (dl.edges[i.edge].id, i.dash, i.width)
+        for i in dl.items
+        if isinstance(i, D.PathItem) and i.role == D.EDGE
+    ]
+    assert got == want
+
+
+@needs_merman
 def test_merman_is_the_version_the_golden_was_taken_on() -> None:
     found = mermaid.version()
     assert found == PINNED, RE_BASELINE.format(found=found)
@@ -1107,3 +1661,9 @@ def test_the_golden_per_role_counts_edge_attachment_and_label_texts(
         assert got[key] == want[key], f"{name}: {key}"
     assert all(None not in ends for ends in got["edges"]), "every edge attaches at both ends"
     assert D.validate(dl) is None
+    # The host fills each subpath on its own and ignores the fill rule (no holes):
+    # true to merman 0.9.1's output only while no filled path has two closed loops.
+    for p in paths:
+        if p.fill:
+            loops = [pl for pl, _ in D.flatten_units(p.ops, p.xy, 1.0) if len(pl) > 2]
+            assert len(loops) <= 1, f"{name}: a filled path with a hole the host would fill"
