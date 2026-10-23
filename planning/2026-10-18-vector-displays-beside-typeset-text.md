@@ -1512,7 +1512,7 @@ cannot prevent them. The design rules and the TeX list could move, and did.
 
 **Not run, or open:**
 - **The live check through pptmstr's own driver passed** [op-run,
-  `cmd-20261021T204608Z-3e9b7a20a69e`, 2026-10-22, 7.6 s].
+  `cmd-20261021T204608Z-3e9b7a20a69e`, 2026-10-21, 7.6 s].
   `scripts/verify_skill_ship_live.py` launched one haiku `AgentSession` with
   the real options (`plugins=` the absolute package path, `skills` and
   `setting_sources` unset) and a drawing prompt. The session called

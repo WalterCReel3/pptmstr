@@ -7,7 +7,7 @@ an image returned by a pptmstr bus tool never reaches the model.
 Nothing in `pptmstr/` was written. No fix is declared.
 
 **Status: PV1 ANSWERED: yes, the model sees the image** [op-run,
-`cmd-20261021T204907Z-3eddeacc39e3`, 2026-10-22, results in
+`cmd-20261021T204907Z-3eddeacc39e3`, 2026-10-21, results in
 `/tmp/probe-pv1-run3/results.json`, recorded by the lead]. Run 3 below supersedes the
 "pending" findings further down; Run 2 was inconclusive because the probe's gate
 denied `ToolSearch` (see "Run 2").
@@ -18,8 +18,8 @@ Script: `scripts/probe_pv1_image_tool.py`. The tool is built the way
 `bus.build_server` builds pptmstr's: an `@tool` handler in
 `create_sdk_mcp_server("pptmstr", "1.0.0", ...)`, passed as `mcp_servers`, with
 pptmstr's session shape (`permission_mode="dontAsk"`, `strict_mcp_config=True`, a
-`PreToolUse` gate allowing only `mcp__pptmstr__show_figure`). Model `haiku`,
-`max_turns=3`, cwd a scratch directory so no project `CLAUDE.md` inflates the counts.
+`PreToolUse` gate allowing only `mcp__pptmstr__show_figure` and `ToolSearch`).
+Model `haiku`, `max_turns=6`, cwd the output directory so no project `CLAUDE.md` inflates the counts.
 
 The image is a 64x64 RGB PNG built with the stdlib (212 bytes, 284 base64 chars):
 red background (`#dc1414`), white digit 7. Its text sibling block says only
@@ -38,15 +38,17 @@ not guess "red 7" without the image.
   `.venv/bin/python scripts/probe_pv1_image_tool.py --out "$TMPDIR/probe-pv1"`.
   Ran. Builds the PNG, calls the handler in-process, and puts its result through
   the SDK's own `_convert_tool_content`.
-- **Run 2 (operator, live):**
-  `timeout 300 .venv/bin/python scripts/probe_pv1_image_tool.py --live --out /tmp/probe-pv1`.
-  Pending. Writes `/tmp/probe-pv1/results.json`.
+- **Run 2 (operator, live, inconclusive):** `--live --out /tmp/probe-pv1`,
+  `cmd-20261021T204748Z-b5e2d0c3c473`. The gate then denied `ToolSearch`; see "Run 2".
+- **Run 3 (operator, live, the answer):**
+  `timeout 300 .venv/bin/python scripts/probe_pv1_image_tool.py --live --out /tmp/probe-pv1-run3`,
+  `cmd-20261021T204907Z-3eddeacc39e3`, exit 0. See "Run 3".
 
 claude-agent-sdk 0.2.168. The CLI version is recorded from the live `init` frame.
 
-## Findings
+## Pre-live reasoning (sections 1, 2 and 4 are answered by Run 3)
 
-### 1. Does the model receive the image? Pending (Run 2)
+### 1. Does the model receive the image? (answered: yes, Run 3)
 
 What the offline run shows: the SDK side does not drop it.
 `claude_agent_sdk._convert_tool_content` passes `{"type": "image", "data",
@@ -56,7 +58,7 @@ boundary byte-identical (`is_png_b64=True`). Whether the CLI forwards it to the 
 as an image block is what Run 2 measures. The `image` scenario must answer red and 7
 and the `control` must answer none.
 
-### 2. The `ToolResultBlock.content` shape the driver gets: pending (Run 2)
+### 2. The `ToolResultBlock.content` shape the driver gets (answered: Run 3)
 
 The SDK types it `str | list[dict[str, Any]] | None` and copies the CLI's
 `tool_result.content` verbatim (`message_parser`, `case "tool_result"`). Whether the
@@ -85,7 +87,7 @@ this. The stored entry does not. The preview tool will want `_user` (or
 `<image/png, N bytes>`. That is not declared here: Run 2 names the shape the
 replacement has to match.
 
-### 4. Token usage before and after: pending (Run 2)
+### 4. Token usage before and after (answered: Run 3)
 
 Run 2 records per-`AssistantMessage` usage (`input_tokens`,
 `cache_creation_input_tokens`, `cache_read_input_tokens`, `output_tokens`) and the
@@ -120,13 +122,7 @@ CLI `2.1.301`, model `claude-haiku-5-5`, server `pptmstr` `connected`.
 Fix: the gate allows `ToolSearch` as well, and `max_turns` is 6. Re-run as
 `cmd-20261021T204907Z-3eddeacc39e3`, output to `/tmp/probe-pv1-run3`.
 
-## To finish once Run 2 has run
-
-Read `/tmp/probe-pv1/results.json` (`summary` key) and fill in 1, 2 and 4 above. Then
-replace the status line with the outcome.
-
-
-## Run 3 (operator, 2026-10-22): PV1 answered
+## Run 3 (operator, 2026-10-21): PV1 answered
 
 Two haiku sessions through an in-process MCP tool built like `bus.build_server`,
 with the probe's gate allowing `ToolSearch` (CLI 2.1.301 defers in-process MCP tools
@@ -149,10 +145,43 @@ behind it). Both sessions called `ToolSearch` then `mcp__pptmstr__show_figure`.
    characters but `cap_output` keeps up to 1 MiB in the entry. The preview build must
    substitute a placeholder for image blocks.
 4. **Cost:** the image scenario cost $0.00105 against $0.00228 for the control (the
-   control's extra is cache creation, not the image); a 64x64 PNG is a few hundred
-   tokens at most. A 600 px preview is estimated at about 400 tokens (§10.6), not
+   control's extra is cache creation, not the image). The tool result added 76 input
+   tokens without the image and 205 with it; about 50-60 of the difference is the
+   CLI's path text, so the 64x64 image itself is roughly 70-80 tokens (builder-41's
+   split, an estimate). A 600 px preview is estimated at about 400 tokens (§10.6), not
    measured here.
 
 Not run: any model but haiku; an image at preview size; whether the file the CLI
 writes under `~/.claude` accumulates per preview (it will, once per call, unless the
 CLI prunes it -- unmeasured).
+
+### Run 3 measured detail (builder)
+
+From `/tmp/probe-pv1-run3/results.json` and the CLI's own session files:
+
+- **The file is the image, byte for byte.** The CLI wrote
+  `~/.claude/projects/-tmp-probe-pv1-run3/<session>/tool-results/mcp-pptmstr-blob-<n>-<id>.png`.
+  `cmp` against the probe's PNG: identical. The appended text block is exactly
+  `[Image: source: <that absolute path>]`. The model is therefore told a local
+  path, and a session with `Read` could re-open it outside the preview tool.
+- **The base64 is also in the session JSONL** under `~/.claude/projects/<cwd>/`
+  (grep for the PNG header matched). Every preview grows that file as well as
+  leaving a `.png`.
+- **Tokens.** Input per API call, as `cache_creation + cache_read + input` from
+  `AssistantMessage.usage`:
+
+  | call | control | image |
+  |---|---|---|
+  | 1, emits `ToolSearch` | 17,772 | 17,772 |
+  | 2, emits the tool call | 18,202 | 18,184 |
+  | 3, the answer, after the tool result | 18,278 (+76) | 18,389 (+205) |
+
+  The tool result cost about 130 more input tokens with the image than without.
+  That figure includes the CLI's ~157-char path block, perhaps 50–60 tokens, so
+  the 64x64 PNG is on the order of 70–80 tokens. The split is not measured. Call 2
+  differs by 18 tokens between scenarios whose inputs are identical up to there,
+  so differences of that size are noise. This is tighter than "a few hundred at
+  most" above, and the measurement is this table.
+- `ToolSearch`'s result is `[{"type": "tool_reference", "tool_name": ...}]`, with
+  `tool_use_result.total_deferred_tools: 15`. Every session's first preview pays a
+  `ToolSearch` round trip unless the tool is made non-deferred.

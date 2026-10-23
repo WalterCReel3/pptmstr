@@ -180,7 +180,7 @@ cumulative count, and it bears on which option is honest.
 - Whether the CLI runs parallel MCP tool calls from one message concurrently.
   The in-flight bound assumes it might.
 
-## Decided, 2026-10-22
+## Decided, 2026-10-21
 
 The operator decided PD2 and PD3:
 
