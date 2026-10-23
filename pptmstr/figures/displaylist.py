@@ -88,12 +88,27 @@ that. ``MAX_DRAWN_POINTS`` is what bounds a build; this bounds the wire and the
 parse.
 """
 MAX_SUBPATHS_PER_PATH = 256
-MAX_TEXT_RUNS = 5_000
+MAX_TEXT_RUNS = 3_072
+"""
+The most runs merman 0.9.1 makes within its own limits and the sanitiser's is 1,473:
+a pie of 1,472 slices, whose legend is a run a slice, refused at 1,536 by the
+coordinate bound. A wrapped-label flowchart reaches 1,172 and a timeline 816
+(2026-10-22, ``shots/native-cost/text_max.py``). This is twice the pie. Text costs
+the build about 2 us a run and 0.04 us a character, so at the caps runs and
+characters are each about 10 ms of the worst passing list.
+"""
 MAX_RUN_CHARS = 512
 """
 A longer run is cut, with an ellipsis: a bound on a string, not a refusal.
 """
 MAX_TEXT_CHARS = 200_000
+"""
+Not lowered toward what short labels make: characters follow label length, which
+only the sanitiser's ``MAX_INPUT_BYTES`` bounds. A pie of 384 slices with 500-
+character labels is 194,083 characters and one of 400 is refused here, so real
+diagrams already meet this cap. Halving it would save about 4 ms of the worst
+list's build (``shots/native-cost/test_text_cost.py``).
+"""
 FONT_SIZE_MIN, FONT_SIZE_MAX = 1.0, 256.0
 STROKE_MAX = 64.0
 MAX_DASHES = 8

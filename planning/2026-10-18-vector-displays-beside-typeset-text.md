@@ -2057,11 +2057,42 @@ makes at every scale up to that one.
   the point budget, dashed, with 5,000 text runs: 121 ms with the collector
   settled, 166 ms without. Stroked curves at the budget with 5,000 runs take
   about 60 ms. The stated budget is **under 200 ms for any list that passes the
-  receive checks, on this machine**, down from 3-4 s. The text runs (5,000 runs,
-  200,000 characters) are now about half of the worst case. A real diagram has
-  at most 309 runs and 2,745 characters, so lowering `MAX_TEXT_RUNS` and
-  `MAX_TEXT_CHARS` is the next lever if the budget must come down. This task did
-  not do it.
+  receive checks, on this machine**, down from 3-4 s. The figures here were
+  taken at 5,000 runs; the text caps were lowered after (task `text-caps`,
+  below).
+- **The text caps** (task `text-caps`, 2026-10-22). The 309 runs and 2,745
+  characters above come from the generators' short labels ("Node 5 label"),
+  so they bound shape counts and not text. [ran, `shots/native-cost/text_max.py`,
+  merman 0.9.1] Bisecting 15 label-heavy shapes found the maxima below, each
+  refused one or a few sizes larger.
+
+  | Diagram | Runs | Characters | Refused by |
+  |---|---|---|---|
+  | 1,472-slice pie, 60-character labels | 1,473 | 97,015 | coordinate bound |
+  | 96-node flowchart, 200-character labels | 1,172 | 18,087 | size cap |
+  | 78-event timeline | 816 | 12,447 | size cap |
+  | 48-state diagram with descriptions | 685 | 11,815 | size cap |
+  | 384-slice pie, 500-character labels | 385 | 194,083 | `MAX_TEXT_CHARS` |
+  | 74-message sequence, `<br/>` lines | 378 | 22,834 | size cap |
+
+  An ER diagram of four entities with 20 commented fields is already 4,100
+  characters. So the cap the lead proposed (1,024 runs, 8,192 characters) would
+  refuse ordinary diagrams, and it was not adopted.
+  **Lowered:** `MAX_TEXT_RUNS` from 5,000 to 3,072, twice the pie.
+  **Kept:** `MAX_TEXT_CHARS` at 200,000. Characters follow label length, which
+  only the sanitiser's 1 MiB input cap bounds, and a long-label pie already meets
+  this cap at 400 slices. Lowering it would refuse more diagrams merman makes.
+  **What it saved** [ran, `shots/native-cost/test_text_cost.py`, the two caps
+  interleaved six times in one process, collector frozen]. Text costs about 2 us
+  a run and 0.04 us a character. The worst list builds in 113 ms instead of 117
+  ms for filled shapes with dashes, and 54.5 ms instead of 59 ms for stroked
+  curves. That is 3-8 %, not the half that was estimated. That estimate compared
+  0 runs with 5,000 across separate runs, where noise between runs was ±10 ms
+  (`test_at_bounds.py` at 3,072 runs ran 110-125 ms frozen and 133-153 ms not).
+  The stated budget of under 200 ms is unchanged.
+  **Not fixed, found on the way:** Mermaid's own documentation example of a
+  `gantt` chart is refused as "a coordinate is out of range", and so is every
+  generated gantt tried. No gantt source tried here draws.
 - **Lowered:** `MAX_SEGS_TOTAL` from 100,000 to 16,384, which is 2.5 times the
   largest real 6,488. The wire bound falls from about 100 MB to about 90 MB.
 - **Kept:** `MAX_HIT_POINTS` stays at 256. The longest real hit line is 145

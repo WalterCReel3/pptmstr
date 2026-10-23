@@ -1796,16 +1796,53 @@ def _entities(n: int) -> str:
     return "\n".join(lines)
 
 
+_WORDS = "alpha beta gamma delta epsilon zeta theta kappa lambda omicron sigma omega".split()
+
+
+def _words(r: Any, chars: int) -> str:
+    out: list[str] = []
+    while sum(len(w) + 1 for w in out) < chars:
+        out.append(r.choice(_WORDS))
+    return " ".join(out)
+
+
+def _long_labels(n: int) -> str:
+    import random
+
+    r = random.Random(1)
+    lines = ["flowchart TD"]
+    lines += [f'    n{r.randrange(i)} --> n{i}["{_words(r, 200)}"]' for i in range(1, n)]
+    return "\n".join(lines)
+
+
+def _pie(label: int, seed: int) -> Any:
+    def make(n: int) -> str:
+        import random
+
+        r = random.Random(seed)
+        lines = ["pie title Shares"]
+        lines += [f'    "{_words(r, label)} {k}" : {r.randrange(1, 100)}' for k in range(n)]
+        return "\n".join(lines)
+
+    return make
+
+
 # The largest of each family's shape here that merman 0.9.1 and the sanitiser accept,
 # found by bisection to within a few (each refused at 110, 130, 97, 160 and 43:
 # the size cap, the element cap or merman's own limits; 2026-10-22,
-# shots/native-cost/merman_max.py): what the budget was set from.
+# shots/native-cost/merman_max.py): what the budget was set from. The last three are
+# the most text: a run a wrapped label line (refused at 100 by the size cap), a run a
+# pie slice (refused at 1,536 by the coordinate bound), and the most characters, which
+# MAX_TEXT_CHARS refuses at 400 slices (shots/native-cost/text_max.py).
 LARGEST = {
     "flowchart": (_flowchart, 105),
     "sequence": (_sequence, 125),
     "class": (_classes, 95),
     "state": (_states, 155),
     "er": (_entities, 42),
+    "flowchart, long labels": (_long_labels, 96),
+    "pie, most runs": (_pie(60, 9), 1_472),
+    "pie, most characters": (_pie(500, 13), 384),
 }
 
 
@@ -1823,6 +1860,34 @@ def test_the_largest_diagram_merman_lays_out_in_each_family_still_draws(
     assert D.drawn_points(dl) <= D.MAX_DRAWN_POINTS // 1.5, "headroom under the budget"
     assert sum(len(i.ops) for i in dl.items if isinstance(i, D.PathItem)) <= D.MAX_SEGS_TOTAL // 2
     assert all(len(e.points) // 2 < D.MAX_HIT_POINTS for e in dl.edges), "no edge is thinned"
+    assert sum(isinstance(i, D.TextRun) for i in dl.items) <= D.MAX_TEXT_RUNS // 2
+
+
+def _runs(count: int, chars: int) -> D.DisplayList:
+    per, extra = divmod(chars, count)
+    runs = tuple(
+        D.TextRun("w" * (per + (k < extra)), 10.0, 10.0, 12.0, 0, 0, D.LABEL, False, 0.0)
+        for k in range(count)
+    )
+    return D.DisplayList(100.0, 100.0, (0.0, 0.0), runs, (), ())
+
+
+@pytest.mark.parametrize(
+    "runs, chars",
+    [(D.MAX_TEXT_RUNS + 1, D.MAX_TEXT_RUNS + 1), (D.MAX_TEXT_RUNS, D.MAX_TEXT_CHARS + 1)],
+)
+def test_a_list_over_the_text_caps_is_refused_on_receipt(runs: int, chars: int) -> None:
+    from pptmstr.figures import render
+
+    assert D.validate(_runs(D.MAX_TEXT_RUNS, D.MAX_TEXT_CHARS)) is None
+    got = render.received("k", D.encode(_runs(runs, chars)))
+    assert got == render.Failed("k", "display list refused: total")
+
+
+def test_the_parser_refuses_more_runs_than_the_cap() -> None:
+    texts = "".join(f'<text x="1" y="{1 + k % 90}">t</text>' for k in range(D.MAX_TEXT_RUNS + 1))
+    with pytest.raises(D.Refusal, match="too much text"):
+        D.from_svg(SVG_HEAD + texts + "</svg>")
 
 
 # -- linkStyle counts edges in merman's order, chained and & syntax included --------------
