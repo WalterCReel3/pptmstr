@@ -1511,12 +1511,16 @@ cannot prevent them. The design rules and the TeX list could move, and did.
   and the skill use.
 
 **Not run, or open:**
-- **Pending: the live check through pptmstr's own driver.**
-  `scripts/verify_skill_ship_live.py` launches one haiku `AgentSession` with
-  a drawing prompt, records every gate disposition, and writes
-  `shots/skill-ship-live/result.json`. The operator was asked to run it as
-  `cmd-20261021T204608Z-3e9b7a20a69e`. In the sandbox it reaches the CLI with
-  the real options and ends "Not logged in".
+- **The live check through pptmstr's own driver passed** [op-run,
+  `cmd-20261021T204608Z-3e9b7a20a69e`, 2026-10-22, 7.6 s].
+  `scripts/verify_skill_ship_live.py` launched one haiku `AgentSession` with
+  the real options (`plugins=` the absolute package path, `skills` and
+  `setting_sources` unset) and a drawing prompt. The session called
+  `Skill(skill="pptmstr:pptmstr-figures")` before drawing, the gate's
+  disposition was `auto_approve` on STRICT, nothing parked, and the reply was a
+  ```` ```mermaid ```` flowchart (`shots/skill-ship-live/result.json`). One
+  run, one model: it shows the path works, not how reliably a model loads the
+  skill.
 - **Unrun, from the probe's not-run list:** any model but haiku; whether the
   `PreToolUse` hook sees a skill's `` !`cmd` `` lines; whether
   `strict_mcp_config` keeps out a plugin's own MCP servers. The shipped plugin
